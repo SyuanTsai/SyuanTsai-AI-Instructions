@@ -4762,6 +4762,19 @@ public sealed class C245NonCooperativeStream : Stream {
             consumptionPath = $null
             consumptionSha256 = ('0' * 64)
         }
+        $schemaSupplementalRepositoryTests = [pscustomobject][ordered]@{
+            status = 'observed-by-canonical-runner'
+            candidateId = ('0' * 64)
+            sourceRevision = ('0' * 40)
+            contentSha256 = ('0' * 64)
+            evidencePath = 'C:\validation-artifacts\supplemental-repository-tests.json'
+            evidenceSha256 = ('0' * 64)
+            events = @([pscustomobject][ordered]@{
+                    eventId = [guid]::NewGuid().ToString()
+                    outputPath = 'C:\validation-artifacts\supplemental-event.json'
+                    outputSha256 = ('0' * 64)
+                })
+        }
         $schemaEvidence = New-StandardValidationCandidateEvidence `
             -RunId $schemaRunId `
             -State 'PASS' `
@@ -4771,7 +4784,8 @@ public sealed class C245NonCooperativeStream : Stream {
             -ArtifactRoot 'unavailable' `
             -LockPath 'unavailable' `
             -DevelopmentHarness $false `
-            -LaunchBinding $schemaBinding
+            -LaunchBinding $schemaBinding `
+            -SupplementalRepositoryTests $schemaSupplementalRepositoryTests
         $schemaEvidenceSourceConformance = New-StandardValidationSourceConformanceResult `
             -Report $schemaEvidence `
             -ExpectedSourceRevision ('a' * 40) `
@@ -4779,6 +4793,7 @@ public sealed class C245NonCooperativeStream : Stream {
         $schemaEvidence | Add-Member -NotePropertyName sourceConformance -NotePropertyValue $schemaEvidenceSourceConformance -Force
         $schemaEvidence = $schemaEvidence | ConvertTo-Json -Depth 50 | ConvertFrom-Json
         Assert-Equal $schemaEvidence.launchBinding.resolutionRunId $schemaRunId.ToString() 'Evidence must serialize the authenticated launch-binding run ID in canonical UUID format.'
+        Assert-Equal $schemaEvidence.supplementalRepositoryTests.status 'observed-by-canonical-runner' 'Evidence must retain canonical runner registration for supplemental repository tests.'
         Assert-False ([string]$schemaEvidence.launchBinding.resolutionRunId -match '^[0-9a-f]{32}$') 'Evidence must not expose the internal N-format launch-binding run ID.'
         Assert-AuthoritySchemaInstance -Value $schemaEvidence -Schema $evidenceSchema -SchemaPath $script:StandardValidationEvidenceSchemaPath -Expected $true -Message 'A consistent validation evidence envelope must be schema-valid.'
         foreach ($terminal in @(

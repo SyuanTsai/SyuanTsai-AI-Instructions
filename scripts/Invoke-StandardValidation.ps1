@@ -8177,7 +8177,8 @@ function New-StandardValidationCandidateEvidence {
         [string] $ArtifactRoot,
         [string] $LockPath,
         [Parameter(Mandatory = $true)][bool] $DevelopmentHarness,
-        $LaunchBinding
+        $LaunchBinding,
+        $SupplementalRepositoryTests
     )
 
         $result = [ordered]@{
@@ -8205,6 +8206,9 @@ function New-StandardValidationCandidateEvidence {
     }
     if (-not [string]::IsNullOrWhiteSpace($FailureState)) {
         $result.failure = [ordered]@{ state = $FailureState; message = if ([string]::IsNullOrWhiteSpace($FailureMessage)) { 'Validation did not pass.' } else { $FailureMessage } }
+    }
+    if ($null -ne $SupplementalRepositoryTests) {
+        $result.supplementalRepositoryTests = $SupplementalRepositoryTests
     }
     return [pscustomobject]$result
 }
@@ -9852,6 +9856,7 @@ function Invoke-StandardValidationRun {
     $supplementalReviewEvidence = @()
     $supplementalReviewObserved = $false
     $supplementalReviewFailure = $null
+    $supplementalRepositoryTests = $null
     $authorityBinding = $null
     $launchBinding = $null
     $script:StandardValidationEvidenceArtifactLedger = New-Object 'System.Collections.Generic.List[object]'
@@ -10554,6 +10559,37 @@ function Invoke-StandardValidationRun {
                             kind = [string]$test.kind; event = $invocation.event; record = $record
                         }
                     }
+                    $supplementalEvidencePath = Join-Path $runRoot 'supplemental-repository-tests.json'
+                    $supplementalEvidence = [pscustomobject][ordered]@{
+                        schemaVersion = 1
+                        status = 'observed-by-canonical-runner'
+                        candidateId = [string]$candidateId
+                        sourceRevision = [string]$SourceRevision
+                        contentSha256 = [string]$expectedCandidateContentSha256
+                        events = @($supplementalReviewEvidence)
+                    }
+                    [void](Write-StandardValidationJsonCreate `
+                        -Path $supplementalEvidencePath `
+                        -Value $supplementalEvidence `
+                        -Context 'supplemental repository-test aggregate')
+                    $supplementalEvidenceSha256 = Get-StandardValidationFileSha256 `
+                        -Path $supplementalEvidencePath `
+                        -Context 'supplemental repository-test aggregate'
+                    $supplementalRepositoryTests = [pscustomobject][ordered]@{
+                        status = 'observed-by-canonical-runner'
+                        candidateId = [string]$candidateId
+                        sourceRevision = [string]$SourceRevision
+                        contentSha256 = [string]$expectedCandidateContentSha256
+                        evidencePath = [string]$supplementalEvidencePath
+                        evidenceSha256 = [string]$supplementalEvidenceSha256
+                        events = @($supplementalReviewEvidence | ForEach-Object {
+                                [pscustomobject][ordered]@{
+                                    eventId = [string]$_.event.eventId
+                                    outputPath = [string]$_.event.outputPath
+                                    outputSha256 = [string]$_.event.outputSha256
+                                }
+                            })
+                    }
                     $supplementalReviewObserved = $true
                 }
                 catch {
@@ -10587,7 +10623,8 @@ function Invoke-StandardValidationRun {
             -ArtifactRoot $artifactRootFull `
             -LockPath $lockPath `
             -DevelopmentHarness $DevelopmentHarness `
-            -LaunchBinding $launchBinding
+            -LaunchBinding $launchBinding `
+            -SupplementalRepositoryTests $supplementalRepositoryTests
         $sourceConformance = New-StandardValidationSourceConformanceResult `
             -Report $finalEvidence `
             -ExpectedSourceRevision $SourceRevision `
@@ -10708,7 +10745,8 @@ function Invoke-StandardValidationRun {
                     -ArtifactRoot $artifactRootFull `
                     -LockPath $lockPath `
                     -DevelopmentHarness $DevelopmentHarness `
-                    -LaunchBinding $launchBinding
+                    -LaunchBinding $launchBinding `
+                    -SupplementalRepositoryTests $supplementalRepositoryTests
                 $sourceConformance = New-StandardValidationSourceConformanceResult `
                     -Report $finalEvidence `
                     -ExpectedSourceRevision $SourceRevision `
@@ -10763,7 +10801,8 @@ function Invoke-StandardValidationRun {
                         -ArtifactRoot $artifactRootFull `
                         -LockPath $lockPath `
                         -DevelopmentHarness $DevelopmentHarness `
-                        -LaunchBinding $launchBinding
+                        -LaunchBinding $launchBinding `
+                        -SupplementalRepositoryTests $supplementalRepositoryTests
                     $sourceConformance = New-StandardValidationSourceConformanceResult `
                         -Report $finalEvidence `
                         -ExpectedSourceRevision $SourceRevision `

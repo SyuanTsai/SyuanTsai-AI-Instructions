@@ -232,7 +232,7 @@ Describe 'Internal source continuation policy' {
                 suites = @('focused', 'canonical'); events = @($testEvents)
             }
             Write-ContinuationJson -Path $testsPath -Value $tests
-            $report.supplementalRepositoryTests = [ordered]@{
+            $supplementalRegistration = [ordered]@{
                 status = 'observed-by-canonical-runner'
                 candidateId = $candidateId
                 sourceRevision = $sourceRevision
@@ -247,6 +247,15 @@ Describe 'Internal source continuation policy' {
                         }
                     })
             }
+            $report = New-StandardValidationCandidateEvidence `
+                -RunId ([guid]$report.runId) -State 'FAILED' -ExitCode 20 -ReleaseEligible $false `
+                -Candidate $report.candidate -Adapter $report.adapter -Authority $report.authority `
+                -Stages $report.stages -FailureState 'FAILED' -FailureMessage 'Static analyzer coverage is incomplete.' `
+                -ArtifactRoot $artifactRoot -LockPath (Join-Path $artifactRoot 'execution.lock') `
+                -DevelopmentHarness $false -SupplementalRepositoryTests $supplementalRegistration
+            $report | Add-Member -NotePropertyName sourceConformance -NotePropertyValue ([ordered]@{
+                    status = 'failed'; releaseEligible = $false
+                }) -Force
             $reportPath = Join-Path $artifactRoot 'canonical-report.json'
             $trustedToolRoot = Join-Path $Root 'trusted-tools'
             [void](New-Item -ItemType Directory -Path $trustedToolRoot -Force)
@@ -757,11 +766,11 @@ Describe 'Internal source continuation policy' {
                 bytes { [IO.File]::AppendAllText((Join-Path $fixture.CandidateRoot 'skills/manage-confluence-docs-as-code/SKILL.md'), 'changed') }
                 revision { $fixture.Report.candidate.sourceRevision = 'c' * 40 }
                 canonical { $fixture.Report.state = 'PASS'; $fixture.Report.exitCode = 0 }
-                'exit-missing' { [void]$fixture.Report.Remove('exitCode') }
+                'exit-missing' { $fixture.Report.PSObject.Properties.Remove('exitCode') }
                 'exit-null' { $fixture.Report.exitCode = $null }
                 'exit-string' { $fixture.Report.exitCode = '20' }
                 'exit-decimal' { $fixture.Report.exitCode = [double]20 }
-                'report-release-missing' { [void]$fixture.Report.Remove('releaseEligible') }
+                'report-release-missing' { $fixture.Report.PSObject.Properties.Remove('releaseEligible') }
                 'report-release-null' { $fixture.Report.releaseEligible = $null }
                 'report-release-numeric' { $fixture.Report.releaseEligible = 0 }
                 'source-release-missing' { [void]$fixture.Report.sourceConformance.Remove('releaseEligible') }
