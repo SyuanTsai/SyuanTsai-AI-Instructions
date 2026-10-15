@@ -26,6 +26,14 @@ Test-SkillsCatalogContract `
   -ConfigurationPath .\catalog\examples\ai-instructions-sync-v4.example.json
 ```
 
+## 內部模組 source continuation
+
+SkillSpector 的 analyzer coverage 不完整時，canonical Stage 4 仍維持 `FAILED`／exit code `20`，不得改寫成掃描完成。中央 authority 可透過 [internal-source-continuation.json](docs/standards/internal-source-continuation.json) 將特定 repository 與 Skill 登錄為內部模組；consumer 不得自行宣告或複製這份 allowlist。
+
+登錄的內部模組只有在缺口完全屬於 policy 指定的 parser limitation、raw finding 與 suppression counts 完整一致、每筆 finding 都符合中央 exact fingerprint／shape／來源位置／出現次數／evidence disposition、candidate bytes／revision／scan report／repository tests 綁定一致，而且補充測試全數通過時，才能產生 `eligible-for-protected-review` 技術結果。這個結果本身不可發布為 required check；受保護 workflow 還必須把它綁定到可信的 event repository／SHA、canonical run、scanner tool receipt、raw process evidence、authority revision、workflow revision，以及 candidate-bound Human Approved finding disposition，之後才可讓 source merge 繼續。中央登錄內容會記錄 owner、風險、理由、補償控制與期限，但不取代這次 human review。`releaseEligible` 永遠為 `false`，且不能用於 release、install、publish 或 catalog adoption。外部、第三方與未登錄模組仍由原本 fail-closed gate 阻擋。
+
+可執行技術判定由 `New-StandardValidationInternalSourceContinuationEligibility` 提供；policy 與 eligibility schema 分別位於 [internal-source-continuation-v1.schema.json](docs/standards/schemas/internal-source-continuation-v1.schema.json) 與 [internal-source-continuation-eligibility-v1.schema.json](docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json)，normative 邊界見 [Agent Skill Standard §9.3.1](docs/standards/skill-repository-standard.md#931-internal-source-continuation)。
+
 ## 同步模型
 
 只有 Codex 準備建立或更新 production code 的實作計畫時，個人 `AGENTS.md` 才會要求執行 installed bootstrap；一般問答、釐清與解釋不執行。

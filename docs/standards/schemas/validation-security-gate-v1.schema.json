@@ -160,6 +160,7 @@
       "required": [
         "scannerFailure",
         "analyzerIncomplete",
+        "internalSourceContinuation",
         "unparsableResult",
         "unknownSeverity",
         "severity",
@@ -180,6 +181,9 @@
         },
         "analyzerIncomplete": {
           "const": "BLOCK"
+        },
+        "internalSourceContinuation": {
+          "$ref": "#/$defs/internalSourceContinuation"
         },
         "unparsableResult": {
           "const": "BLOCK"
@@ -232,6 +236,23 @@
         "trustAnchors": {
           "$ref": "#/$defs/trustAnchors"
         }
+      }
+    },
+    "internalSourceContinuation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policyPath", "authorityOwnership", "consumerSelfDeclaration", "canonicalFailurePreserved", "technicalResult", "publishable", "protectedAdoptionRequired", "protectedBindings", "permittedOperationAfterProtectedAdoption", "releaseEligible"],
+      "properties": {
+        "policyPath": { "const": "docs/standards/internal-source-continuation.json" },
+        "authorityOwnership": { "const": "central-only" },
+        "consumerSelfDeclaration": { "const": false },
+        "canonicalFailurePreserved": { "const": true },
+        "technicalResult": { "const": "eligibility-only" },
+        "publishable": { "const": false },
+        "protectedAdoptionRequired": { "const": true },
+        "protectedBindings": { "const": ["eventRepository", "eventSourceRevision", "canonicalRunId", "launchBinding", "candidateAcquisition", "authorityRevision", "scannerToolReceipt", "staticRawEvent", "supplementalTestInventory", "supplementalRawEvents", "cleanup", "humanFindingDispositionReview", "centralRevision", "workflowRevision", "authorityArchiveSha256"] },
+        "permittedOperationAfterProtectedAdoption": { "const": "source-merge" },
+        "releaseEligible": { "const": false }
       }
     },
     "childProcessEnvironment": {

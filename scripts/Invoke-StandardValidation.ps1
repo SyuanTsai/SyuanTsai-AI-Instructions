@@ -5862,6 +5862,468 @@ function New-StandardValidationProtectedSourceMergeDecision {
     }
 }
 
+# This decision is separate from the canonical ten-stage result. It permits an
+# exact, centrally registered internal source candidate to continue to merge
+# review when SkillSpector is incomplete only because of one approved parser
+# limitation. It never converts Static to passed or authorizes release work.
+function New-StandardValidationInternalSourceContinuationEligibility {
+    param(
+        [Parameter(Mandatory = $true)] $Report,
+        [Parameter(Mandatory = $true)][string] $PolicyPath,
+        [Parameter(Mandatory = $true)][string] $CandidateRoot,
+        [Parameter(Mandatory = $true)][string] $ExpectedSourceRevision,
+        [Parameter(Mandatory = $true)][string] $SkillId,
+        [Parameter(Mandatory = $true)][string] $ScannerReportPath,
+        [string[]] $OtherScannerReportPaths = @(),
+        [Parameter(Mandatory = $true)][string] $RepositoryTestEvidencePath
+    )
+
+    $reasons = New-Object 'System.Collections.Generic.List[string]'
+    $policy = $null
+    $entry = $null
+    $policySha256 = $null
+    $scannerReportSha256 = $null
+    $otherScannerReportSha256 = @()
+    $repositoryTestEvidenceSha256 = $null
+    $candidateContentSha256 = $null
+    $candidate = Get-StandardValidationProperty -Object $Report -Name 'candidate'
+    $sourceRepository = [string](Get-StandardValidationProperty -Object $candidate -Name 'sourceRepository')
+    $sourceRevision = [string](Get-StandardValidationProperty -Object $candidate -Name 'sourceRevision')
+    $candidateId = [string](Get-StandardValidationProperty -Object $candidate -Name 'candidateId')
+    $declaredContentSha256 = [string](Get-StandardValidationProperty -Object $candidate -Name 'contentSha256')
+
+    $getFindingLocationKey = {
+        param($Location)
+        $file = ([string](Get-StandardValidationProperty -Object $Location -Name 'file')).Replace('\', '/')
+        $startLineValue = Get-StandardValidationProperty -Object $Location -Name 'start_line'
+        if ($null -eq $startLineValue) { $startLineValue = Get-StandardValidationProperty -Object $Location -Name 'startLine' }
+        $endLineValue = Get-StandardValidationProperty -Object $Location -Name 'end_line'
+        if ($null -eq $endLineValue) { $endLineValue = Get-StandardValidationProperty -Object $Location -Name 'endLine' }
+        $startColumnValue = Get-StandardValidationProperty -Object $Location -Name 'start_column'
+        if ($null -eq $startColumnValue) { $startColumnValue = Get-StandardValidationProperty -Object $Location -Name 'startColumn' }
+        $endLineInvalid = $null -ne $endLineValue -and
+            -not (Test-StandardValidationIntegerRange -Value $endLineValue -Minimum 1 -Maximum ([decimal][int]::MaxValue))
+        $startColumnInvalid = $null -ne $startColumnValue -and
+            -not (Test-StandardValidationIntegerRange -Value $startColumnValue -Minimum 1 -Maximum ([decimal][int]::MaxValue))
+        if ([string]::IsNullOrWhiteSpace($file) -or $file.StartsWith('/') -or $file.Contains('../') -or
+            -not (Test-StandardValidationIntegerRange -Value $startLineValue -Minimum 1 -Maximum ([decimal][int]::MaxValue)) -or
+            $endLineInvalid -or $startColumnInvalid) {
+            return $null
+        }
+        $endLine = if ($null -eq $endLineValue) { 'null' } else { [string][int]$endLineValue }
+        $startColumn = if ($null -eq $startColumnValue) { 'null' } else { [string][int]$startColumnValue }
+        return "$file|$([int]$startLineValue)|$endLine|$startColumn"
+    }
+
+    try {
+        $expectedPolicyPath = [IO.Path]::GetFullPath((Join-Path $script:StandardValidationRepositoryRoot 'docs/standards/internal-source-continuation.json'))
+        $actualPolicyPath = [IO.Path]::GetFullPath($PolicyPath)
+        if (-not [string]::Equals($actualPolicyPath, $expectedPolicyPath, [StringComparison]::OrdinalIgnoreCase)) {
+            [void]$reasons.Add('internal-continuation-policy-not-central')
+        }
+        $policySnapshot = Get-StandardValidationJsonSnapshot -Path $actualPolicyPath -Context 'internal source continuation policy'
+        $policySha256 = [string]$policySnapshot.sha256
+        $policy = $policySnapshot.value
+        if ([int](Get-StandardValidationProperty -Object $policy -Name 'schemaVersion') -ne 1 -or
+            [string](Get-StandardValidationProperty -Object $policy -Name 'policy') -cne 'internal-source-continuation-v1' -or
+            [string](Get-StandardValidationProperty -Object $policy -Name 'status') -cne 'adopted' -or
+            [string](Get-StandardValidationProperty -Object $policy -Name 'authorityOwnership') -cne 'central-only' -or
+            [bool](Get-StandardValidationProperty -Object $policy -Name 'consumerSelfDeclaration') -or
+            [string](Get-StandardValidationProperty -Object $policy -Name 'scope') -cne 'internal-source-merge-only' -or
+            [string](Get-StandardValidationProperty -Object $policy -Name 'technicalResult') -cne 'eligibility-only' -or
+            -not [bool](Get-StandardValidationProperty -Object $policy -Name 'protectedAdoptionRequired') -or
+            (@((Get-StandardValidationProperty -Object $policy -Name 'permittedOperations')) -join "`n") -cne 'source-merge' -or
+            (@((Get-StandardValidationProperty -Object $policy -Name 'forbiddenOperations')) -join "`n") -cne "release`ninstall`npublish`ncatalog-adoption") {
+            [void]$reasons.Add('internal-continuation-policy-invalid')
+        }
+        $canonicalPolicy = Get-StandardValidationProperty -Object $policy -Name 'canonicalResult'
+        if (-not [bool](Get-StandardValidationProperty -Object $canonicalPolicy -Name 'preserved') -or
+            [string](Get-StandardValidationProperty -Object $canonicalPolicy -Name 'requiredState') -cne 'FAILED' -or
+            [int](Get-StandardValidationProperty -Object $canonicalPolicy -Name 'requiredExitCode') -ne 20 -or
+            [string](Get-StandardValidationProperty -Object $canonicalPolicy -Name 'requiredStaticStageStatus') -cne 'failed' -or
+            [bool](Get-StandardValidationProperty -Object $canonicalPolicy -Name 'releaseEligible')) {
+            [void]$reasons.Add('internal-continuation-canonical-policy-invalid')
+        }
+        $policyEntries = Get-StandardValidationProperty -Object $policy -Name 'entries'
+        $matchingEntries = @($policyEntries | Where-Object {
+            [string](Get-StandardValidationProperty -Object $_ -Name 'sourceRepository') -ceq $sourceRepository -and
+            [string](Get-StandardValidationProperty -Object $_ -Name 'skillId') -ceq $SkillId
+        })
+        if ($matchingEntries.Count -ne 1) {
+            [void]$reasons.Add('internal-continuation-scope-not-registered')
+        }
+        else { $entry = $matchingEntries[0] }
+    }
+    catch { [void]$reasons.Add('internal-continuation-policy-unavailable') }
+
+    $activeSkills = Get-StandardValidationProperty -Object $candidate -Name 'activeSkills'
+    if ($sourceRevision -cnotmatch '^[0-9a-f]{40}$' -or $sourceRevision -cne $ExpectedSourceRevision -or
+        $candidateId -cnotmatch '^[0-9a-f]{64}$' -or $declaredContentSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        @($activeSkills | Where-Object { [string]$_ -ceq $SkillId }).Count -ne 1) {
+        [void]$reasons.Add('internal-continuation-candidate-identity-invalid')
+    }
+
+    $sourceConformance = Get-StandardValidationProperty -Object $Report -Name 'sourceConformance'
+    $stages = Get-StandardValidationProperty -Object $Report -Name 'stages'
+    if ([string](Get-StandardValidationProperty -Object $Report -Name 'state') -cne 'FAILED' -or
+        [int](Get-StandardValidationProperty -Object $Report -Name 'exitCode') -ne 20 -or
+        [bool](Get-StandardValidationProperty -Object $Report -Name 'releaseEligible') -or
+        [string](Get-StandardValidationProperty -Object $sourceConformance -Name 'status') -cne 'failed' -or
+        [bool](Get-StandardValidationProperty -Object $sourceConformance -Name 'releaseEligible') -or
+        $stages.Count -ne 10) {
+        [void]$reasons.Add('internal-continuation-canonical-state-invalid')
+    }
+    else {
+        $stageIds = @('controlled-acquisition', 'integrity-verification', 'package-validation', 'skillspector-static',
+            'repository-tests', 'conditional-semantic-scan', 'ai-review', 'human-approval',
+            'publish-or-install', 'post-install-verification')
+        for ($index = 0; $index -lt $stageIds.Count; $index++) {
+            $expectedStatus = if ($index -lt 3) { 'passed' } elseif ($index -eq 3) { 'failed' } else { 'not-run' }
+            if ([int](Get-StandardValidationProperty -Object $stages[$index] -Name 'order') -ne ($index + 1) -or
+                [string](Get-StandardValidationProperty -Object $stages[$index] -Name 'id') -cne $stageIds[$index] -or
+                [string](Get-StandardValidationProperty -Object $stages[$index] -Name 'status') -cne $expectedStatus) {
+                [void]$reasons.Add('internal-continuation-canonical-stage-invalid')
+                break
+            }
+        }
+    }
+
+    $skillInventory = @()
+    try {
+        $candidateInventory = Get-StandardValidationInventory -Root $CandidateRoot -Context 'internal source continuation candidate'
+        $candidateContentSha256 = Get-StandardValidationInventorySha256 -Inventory $candidateInventory
+        if ($candidateContentSha256 -cne $declaredContentSha256) {
+            [void]$reasons.Add('internal-continuation-candidate-content-drift')
+        }
+        $skillRoot = Join-Path $CandidateRoot "skills/$SkillId"
+        $skillInventory = Get-StandardValidationInventory -Root $skillRoot -Context 'internal source continuation Skill'
+        if ($skillInventory.Count -eq 0) { [void]$reasons.Add('internal-continuation-skill-inventory-empty') }
+    }
+    catch { [void]$reasons.Add('internal-continuation-candidate-unavailable') }
+
+    if ($null -ne $entry) {
+        $findingReview = Get-StandardValidationProperty -Object $entry -Name 'findingDispositionReview'
+        $reviewControls = Get-StandardValidationProperty -Object $findingReview -Name 'compensatingControls'
+        $reviewCreatedAt = [string](Get-StandardValidationProperty -Object $findingReview -Name 'createdAt')
+        $reviewExpiresAt = [string](Get-StandardValidationProperty -Object $findingReview -Name 'expiresAt')
+        if ([string](Get-StandardValidationProperty -Object $findingReview -Name 'status') -cne 'required-at-protected-adoption' -or
+            [string]::IsNullOrWhiteSpace([string](Get-StandardValidationProperty -Object $findingReview -Name 'owner')) -or
+            $reviewCreatedAt -cnotmatch '^\d{4}-\d{2}-\d{2}$' -or $reviewExpiresAt -cnotmatch '^\d{4}-\d{2}-\d{2}$' -or
+            $reviewExpiresAt -cle $reviewCreatedAt -or
+            [string](Get-StandardValidationProperty -Object $findingReview -Name 'scope') -cne 'source-merge-only' -or
+            [string]::IsNullOrWhiteSpace([string](Get-StandardValidationProperty -Object $findingReview -Name 'risk')) -or
+            [string]::IsNullOrWhiteSpace([string](Get-StandardValidationProperty -Object $findingReview -Name 'rationale')) -or
+            $reviewControls.Count -lt 1 -or
+            [string](Get-StandardValidationProperty -Object $findingReview -Name 'protectedEvidenceBinding') -cne 'humanFindingDispositionReview') {
+            [void]$reasons.Add('internal-continuation-finding-review-policy-invalid')
+        }
+        try {
+            $scannerSnapshot = Get-StandardValidationJsonSnapshot -Path $ScannerReportPath -Context 'internal source continuation scanner report'
+            $scannerReportSha256 = [string]$scannerSnapshot.sha256
+            $scanner = $scannerSnapshot.value
+            $scannerSkill = Get-StandardValidationProperty -Object $scanner -Name 'skill'
+            $scannerMetadata = Get-StandardValidationProperty -Object $scanner -Name 'metadata'
+            $completeness = Get-StandardValidationProperty -Object $scanner -Name 'analysis_completeness'
+            $components = Get-StandardValidationProperty -Object $scanner -Name 'components'
+            $componentPaths = @($components | ForEach-Object { ([string](Get-StandardValidationProperty -Object $_ -Name 'path')).Replace('\', '/') } | Sort-Object)
+            $inventoryPaths = @($skillInventory | ForEach-Object { ([string]$_.path).Replace('\', '/') } | Sort-Object)
+            $exceptions = Get-StandardValidationProperty -Object $completeness -Name 'ledger_exceptions'
+            $scopeExclusions = Get-StandardValidationProperty -Object $completeness -Name 'scope_exclusions'
+            $limitations = Get-StandardValidationProperty -Object $completeness -Name 'limitations'
+            $analyzerStatuses = Get-StandardValidationProperty -Object $completeness -Name 'analyzer_statuses'
+            $issues = Get-StandardValidationProperty -Object $scanner -Name 'issues'
+            $suppressed = Get-StandardValidationProperty -Object $scanner -Name 'suppressed'
+            $suppressedCountValue = Get-StandardValidationProperty -Object $scanner -Name 'suppressed_count'
+            $findingsBeforeValue = Get-StandardValidationProperty -Object $completeness -Name 'findings_before_filtering'
+            $findingsAfterValue = Get-StandardValidationProperty -Object $completeness -Name 'findings_after_filtering'
+            $totalComponents = [int](Get-StandardValidationProperty -Object $completeness -Name 'total_components')
+            $scannedComponents = [int](Get-StandardValidationProperty -Object $completeness -Name 'scanned_components')
+            $maximumIncomplete = [int](Get-StandardValidationProperty -Object $entry -Name 'maximumIncompleteComponents')
+            $reasonCode = [string](Get-StandardValidationProperty -Object $entry -Name 'reasonCode')
+            $analyzerId = [string](Get-StandardValidationProperty -Object $entry -Name 'analyzerId')
+            $allowedPatterns = Get-StandardValidationProperty -Object $entry -Name 'allowedComponentPatterns'
+            $allowedOtherStatuses = Get-StandardValidationProperty -Object $entry -Name 'allowedNonBlockingAnalyzerStatuses'
+            $expectedAnalyzerIdValues = Get-StandardValidationProperty -Object $entry -Name 'expectedAnalyzerIds'
+            $expectedAnalyzerIds = @($expectedAnalyzerIdValues | Sort-Object)
+
+            if ([string](Get-StandardValidationProperty -Object $scannerSkill -Name 'name') -cne $SkillId -or
+                -not [bool](Get-StandardValidationProperty -Object $scanner -Name 'execution_successful') -or
+                [string](Get-StandardValidationProperty -Object $scannerMetadata -Name 'skillspector_version') -cne
+                    [string](Get-StandardValidationProperty -Object $entry -Name 'scannerVersion')) {
+                [void]$reasons.Add('internal-continuation-scanner-identity-invalid')
+            }
+            if ([string](Get-StandardValidationProperty -Object $completeness -Name 'status') -cne 'partial' -or
+                [bool](Get-StandardValidationProperty -Object $completeness -Name 'is_complete')) {
+                [void]$reasons.Add('internal-continuation-completeness-state-invalid')
+            }
+            if ($components.Count -ne $skillInventory.Count -or
+                ($componentPaths -join "`n") -cne ($inventoryPaths -join "`n") -or
+                $totalComponents -ne $components.Count) {
+                [void]$reasons.Add('internal-continuation-component-inventory-invalid')
+            }
+            if ($scannedComponents -lt 1 -or $scannedComponents -ge $totalComponents -or
+                $exceptions.Count -ne ($totalComponents - $scannedComponents) -or
+                $exceptions.Count -gt $maximumIncomplete) {
+                [void]$reasons.Add('internal-continuation-incomplete-count-invalid')
+            }
+            if ($scopeExclusions.Count -ne 0) { [void]$reasons.Add('internal-continuation-scope-exclusion-invalid') }
+            if (-not (Test-StandardValidationIntegerRange -Value $findingsBeforeValue -Minimum 0 -Maximum ([decimal][int]::MaxValue)) -or
+                -not (Test-StandardValidationIntegerRange -Value $findingsAfterValue -Minimum 0 -Maximum ([decimal][int]::MaxValue)) -or
+                -not (Test-StandardValidationIntegerRange -Value $suppressedCountValue -Minimum 0 -Maximum 0) -or
+                [int]$findingsBeforeValue -ne $issues.Count -or [int]$findingsAfterValue -ne $issues.Count -or $suppressed.Count -ne 0) {
+                [void]$reasons.Add('internal-continuation-finding-counts-invalid')
+            }
+            foreach ($exception in $exceptions) {
+                $path = ([string](Get-StandardValidationProperty -Object $exception -Name 'path')).Replace('\', '/')
+                $exceptionAnalyzers = Get-StandardValidationProperty -Object $exception -Name 'analyzers'
+                $pathAllowed = @($allowedPatterns | Where-Object { $path -clike [string]$_ }).Count -gt 0
+                if ([string]::IsNullOrWhiteSpace($path) -or $path.StartsWith('/') -or $path.Contains('../') -or
+                    $path -cnotin $componentPaths -or -not $pathAllowed -or
+                    [string](Get-StandardValidationProperty -Object $exception -Name 'reason_code') -cne $reasonCode -or
+                    $exceptionAnalyzers.Count -ne 1 -or [string]$exceptionAnalyzers[0] -cne $analyzerId) {
+                    [void]$reasons.Add('internal-continuation-exception-scope-invalid')
+                    break
+                }
+            }
+            $exceptionPaths = @($exceptions | ForEach-Object { ([string](Get-StandardValidationProperty -Object $_ -Name 'path')).Replace('\', '/') })
+            if (@($exceptionPaths | Sort-Object -Unique).Count -ne $exceptionPaths.Count) {
+                [void]$reasons.Add('internal-continuation-exception-paths-not-unique')
+            }
+            $allowedFindings = Get-StandardValidationProperty -Object $entry -Name 'allowedFindings'
+            $allowedFingerprints = @($allowedFindings | ForEach-Object { [string](Get-StandardValidationProperty -Object $_ -Name 'matchFingerprint') })
+            if ([string](Get-StandardValidationProperty -Object $entry -Name 'findingDispositionMode') -cne 'central-exact-allowlist' -or
+                @($allowedFingerprints | Sort-Object -Unique).Count -ne $allowedFingerprints.Count) {
+                [void]$reasons.Add('internal-continuation-finding-policy-invalid')
+            }
+            foreach ($issue in $issues) {
+                $fingerprint = [string](Get-StandardValidationProperty -Object $issue -Name 'match_fingerprint')
+                $allowed = @($allowedFindings | Where-Object {
+                    [string](Get-StandardValidationProperty -Object $_ -Name 'matchFingerprint') -ceq $fingerprint
+                })
+                if ($allowed.Count -ne 1) {
+                    [void]$reasons.Add('internal-continuation-finding-not-allowed')
+                    break
+                }
+                $disposition = $allowed[0]
+                $targetPath = Get-StandardValidationProperty -Object $disposition -Name 'targetPath'
+                $issueLocation = Get-StandardValidationProperty -Object $issue -Name 'location'
+                $issueOccurrences = Get-StandardValidationProperty -Object $issue -Name 'occurrences'
+                $issueLocationKey = & $getFindingLocationKey $issueLocation
+                $occurrenceLocationKey = if ($issueOccurrences.Count -eq 1) { & $getFindingLocationKey $issueOccurrences[0] } else { $null }
+                $allowedLocationKeys = @((Get-StandardValidationProperty -Object $disposition -Name 'allowedLocations') | ForEach-Object { & $getFindingLocationKey $_ })
+                if ([string](Get-StandardValidationProperty -Object $issue -Name 'id') -cne [string](Get-StandardValidationProperty -Object $disposition -Name 'id') -or
+                    [string](Get-StandardValidationProperty -Object $issue -Name 'category') -cne [string](Get-StandardValidationProperty -Object $disposition -Name 'category') -or
+                    [string](Get-StandardValidationProperty -Object $issue -Name 'pattern') -cne [string](Get-StandardValidationProperty -Object $disposition -Name 'pattern') -or
+                    [string](Get-StandardValidationProperty -Object $issue -Name 'severity') -cne [string](Get-StandardValidationProperty -Object $disposition -Name 'severity') -or
+                    [string](Get-StandardValidationProperty -Object $issue -Name 'finding') -cne [string](Get-StandardValidationProperty -Object $disposition -Name 'finding')) {
+                    [void]$reasons.Add('internal-continuation-finding-shape-invalid')
+                    break
+                }
+                if ($null -eq $issueLocationKey -or $issueOccurrences.Count -ne 1 -or
+                    $occurrenceLocationKey -cne $issueLocationKey -or $issueLocationKey -cnotin $allowedLocationKeys) {
+                    [void]$reasons.Add('internal-continuation-finding-location-invalid')
+                    break
+                }
+                if ($null -ne $targetPath) {
+                    $issueEvidence = Get-StandardValidationProperty -Object $issue -Name 'evidence'
+                    $issueReasons = Get-StandardValidationProperty -Object $issueEvidence -Name 'reasons'
+                    if ([string](Get-StandardValidationProperty -Object $issueEvidence -Name 'target_path') -cne [string]$targetPath -or
+                        [string](Get-StandardValidationProperty -Object $issueEvidence -Name 'target_disposition') -cne 'partial' -or
+                        [string]$targetPath -cnotin $exceptionPaths -or $issueReasons.Count -ne 1) {
+                        [void]$reasons.Add('internal-continuation-derived-finding-evidence-invalid')
+                        break
+                    }
+                    foreach ($issueReason in $issueReasons) {
+                        $issueAnalyzers = Get-StandardValidationProperty -Object $issueReason -Name 'analyzers'
+                        if ([string](Get-StandardValidationProperty -Object $issueReason -Name 'reason_code') -cne $reasonCode -or
+                            [string](Get-StandardValidationProperty -Object $issueReason -Name 'message') -cne [string](Get-StandardValidationProperty -Object $disposition -Name 'evidenceReasonMessage') -or
+                            [string](Get-StandardValidationProperty -Object $issueReason -Name 'phase') -cne [string](Get-StandardValidationProperty -Object $disposition -Name 'evidencePhase') -or
+                            $issueAnalyzers.Count -ne 1 -or [string]$issueAnalyzers[0] -cne $analyzerId) {
+                            [void]$reasons.Add('internal-continuation-derived-finding-evidence-invalid')
+                            break
+                        }
+                    }
+                }
+                else {
+                    $issueEvidence = Get-StandardValidationProperty -Object $issue -Name 'evidence'
+                    if ($null -eq $issueEvidence -or @($issueEvidence.PSObject.Properties).Count -ne 0) {
+                        [void]$reasons.Add('internal-continuation-finding-evidence-invalid')
+                        break
+                    }
+                }
+            }
+            foreach ($allowedFinding in $allowedFindings) {
+                $allowedFingerprint = [string](Get-StandardValidationProperty -Object $allowedFinding -Name 'matchFingerprint')
+                $expectedOccurrences = [int](Get-StandardValidationProperty -Object $allowedFinding -Name 'expectedOccurrences')
+                $allowedLocationKeys = @((Get-StandardValidationProperty -Object $allowedFinding -Name 'allowedLocations') | ForEach-Object { & $getFindingLocationKey $_ } | Sort-Object)
+                $observedIssues = @($issues | Where-Object { [string](Get-StandardValidationProperty -Object $_ -Name 'match_fingerprint') -ceq $allowedFingerprint })
+                $observedLocationKeys = @($observedIssues | ForEach-Object { & $getFindingLocationKey (Get-StandardValidationProperty -Object $_ -Name 'location') } | Sort-Object)
+                if ($expectedOccurrences -ne $allowedLocationKeys.Count -or $observedIssues.Count -ne $expectedOccurrences -or
+                    ($observedLocationKeys -join "`n") -cne ($allowedLocationKeys -join "`n")) {
+                    [void]$reasons.Add('internal-continuation-finding-occurrence-invalid')
+                    break
+                }
+            }
+            $actualAnalyzerIds = @($analyzerStatuses | ForEach-Object { [string](Get-StandardValidationProperty -Object $_ -Name 'analyzer_id') } | Sort-Object)
+            if (($actualAnalyzerIds -join "`n") -cne ($expectedAnalyzerIds -join "`n")) {
+                [void]$reasons.Add('internal-continuation-analyzer-inventory-invalid')
+            }
+            $approvedDegradedCount = 0
+            foreach ($analyzerStatus in $analyzerStatuses) {
+                $currentId = [string](Get-StandardValidationProperty -Object $analyzerStatus -Name 'analyzer_id')
+                $currentStatus = [string](Get-StandardValidationProperty -Object $analyzerStatus -Name 'status')
+                $plannedWork = [int](Get-StandardValidationProperty -Object $analyzerStatus -Name 'planned_work')
+                $completedWork = [int](Get-StandardValidationProperty -Object $analyzerStatus -Name 'completed')
+                $partialWork = [int](Get-StandardValidationProperty -Object $analyzerStatus -Name 'partial')
+                $skippedWork = [int](Get-StandardValidationProperty -Object $analyzerStatus -Name 'skipped')
+                $failedWork = [int](Get-StandardValidationProperty -Object $analyzerStatus -Name 'failed')
+                $unaccountedWork = [int](Get-StandardValidationProperty -Object $analyzerStatus -Name 'unaccounted')
+                if ($currentId -ceq $analyzerId -and $currentStatus -ceq 'degraded') {
+                    $approvedDegradedCount++
+                    if ($plannedWork -ne $totalComponents -or $completedWork -ne $scannedComponents -or
+                        $partialWork -ne $exceptions.Count -or $skippedWork -ne 0 -or $failedWork -ne 0 -or $unaccountedWork -ne 0) {
+                        [void]$reasons.Add('internal-continuation-approved-analyzer-counts-invalid')
+                    }
+                    continue
+                }
+                $completeCountsInvalid = $currentStatus -ceq 'completed' -and
+                    ($plannedWork -ne $completedWork -or $partialWork -ne 0 -or $skippedWork -ne 0 -or $failedWork -ne 0 -or $unaccountedWork -ne 0)
+                $inactiveCountsInvalid = $currentStatus -in @('not_applicable', 'disabled') -and
+                    ($plannedWork -ne 0 -or $completedWork -ne 0 -or $partialWork -ne 0 -or $skippedWork -ne 0 -or $failedWork -ne 0 -or $unaccountedWork -ne 0)
+                if ($currentStatus -cnotin $allowedOtherStatuses -or $completeCountsInvalid -or $inactiveCountsInvalid) {
+                    [void]$reasons.Add('internal-continuation-analyzer-status-invalid')
+                    break
+                }
+            }
+            if ($approvedDegradedCount -ne 1) { [void]$reasons.Add('internal-continuation-approved-analyzer-missing') }
+            if (@($limitations | Where-Object { -not ([string]$_).Contains($analyzerId, [StringComparison]::Ordinal) }).Count -ne 0) {
+                [void]$reasons.Add('internal-continuation-limitation-invalid')
+            }
+        }
+        catch { [void]$reasons.Add('internal-continuation-scanner-report-invalid') }
+
+        $otherSkillIds = @($activeSkills | Where-Object { [string]$_ -cne $SkillId } | Sort-Object)
+        if (@($OtherScannerReportPaths).Count -ne $otherSkillIds.Count) {
+            [void]$reasons.Add('internal-continuation-other-skill-report-count-invalid')
+        }
+        else {
+            $observedOtherSkillIds = New-Object 'System.Collections.Generic.List[string]'
+            foreach ($otherScannerReportPath in @($OtherScannerReportPaths)) {
+                try {
+                    $otherSnapshot = Get-StandardValidationJsonSnapshot -Path $otherScannerReportPath -Context 'internal source continuation other Skill report'
+                    $otherScannerReportSha256 += [string]$otherSnapshot.sha256
+                    $otherReport = $otherSnapshot.value
+                    $otherSkill = Get-StandardValidationProperty -Object $otherReport -Name 'skill'
+                    $otherSkillId = [string](Get-StandardValidationProperty -Object $otherSkill -Name 'name')
+                    [void]$observedOtherSkillIds.Add($otherSkillId)
+                    $otherCompleteness = Get-StandardValidationProperty -Object $otherReport -Name 'analysis_completeness'
+                    $otherMetadata = Get-StandardValidationProperty -Object $otherReport -Name 'metadata'
+                    $otherComponents = Get-StandardValidationProperty -Object $otherReport -Name 'components'
+                    $otherIssues = Get-StandardValidationProperty -Object $otherReport -Name 'issues'
+                    $otherSuppressed = Get-StandardValidationProperty -Object $otherReport -Name 'suppressed'
+                    $otherSuppressedCount = Get-StandardValidationProperty -Object $otherReport -Name 'suppressed_count'
+                    $otherFindingsBefore = Get-StandardValidationProperty -Object $otherCompleteness -Name 'findings_before_filtering'
+                    $otherFindingsAfter = Get-StandardValidationProperty -Object $otherCompleteness -Name 'findings_after_filtering'
+                    $otherExceptions = Get-StandardValidationProperty -Object $otherCompleteness -Name 'ledger_exceptions'
+                    $otherExclusions = Get-StandardValidationProperty -Object $otherCompleteness -Name 'scope_exclusions'
+                    $otherLimitations = Get-StandardValidationProperty -Object $otherCompleteness -Name 'limitations'
+                    $otherAnalyzerStatuses = Get-StandardValidationProperty -Object $otherCompleteness -Name 'analyzer_statuses'
+                    $otherRoot = Join-Path $CandidateRoot "skills/$otherSkillId"
+                    $otherInventory = Get-StandardValidationInventory -Root $otherRoot -Context "internal source continuation $otherSkillId"
+                    $otherComponentPaths = @($otherComponents | ForEach-Object { ([string](Get-StandardValidationProperty -Object $_ -Name 'path')).Replace('\', '/') } | Sort-Object)
+                    $otherInventoryPaths = @($otherInventory | ForEach-Object { ([string]$_.path).Replace('\', '/') } | Sort-Object)
+                    $otherAnalyzerIds = @($otherAnalyzerStatuses | ForEach-Object { [string](Get-StandardValidationProperty -Object $_ -Name 'analyzer_id') } | Sort-Object)
+                    $otherAnalyzerStateInvalid = $false
+                    foreach ($otherAnalyzerStatus in $otherAnalyzerStatuses) {
+                        $otherStatus = [string](Get-StandardValidationProperty -Object $otherAnalyzerStatus -Name 'status')
+                        $otherPlanned = [int](Get-StandardValidationProperty -Object $otherAnalyzerStatus -Name 'planned_work')
+                        $otherCompleted = [int](Get-StandardValidationProperty -Object $otherAnalyzerStatus -Name 'completed')
+                        $otherPartial = [int](Get-StandardValidationProperty -Object $otherAnalyzerStatus -Name 'partial')
+                        $otherSkipped = [int](Get-StandardValidationProperty -Object $otherAnalyzerStatus -Name 'skipped')
+                        $otherFailed = [int](Get-StandardValidationProperty -Object $otherAnalyzerStatus -Name 'failed')
+                        $otherUnaccounted = [int](Get-StandardValidationProperty -Object $otherAnalyzerStatus -Name 'unaccounted')
+                        if ($otherStatus -cnotin $allowedOtherStatuses -or
+                            ($otherStatus -ceq 'completed' -and ($otherPlanned -ne $otherCompleted -or $otherPartial -ne 0 -or $otherSkipped -ne 0 -or $otherFailed -ne 0 -or $otherUnaccounted -ne 0)) -or
+                            ($otherStatus -in @('not_applicable', 'disabled') -and ($otherPlanned -ne 0 -or $otherCompleted -ne 0 -or $otherPartial -ne 0 -or $otherSkipped -ne 0 -or $otherFailed -ne 0 -or $otherUnaccounted -ne 0))) {
+                            $otherAnalyzerStateInvalid = $true
+                            break
+                        }
+                    }
+                    if ($otherSkillId -cnotin $otherSkillIds -or
+                        -not [bool](Get-StandardValidationProperty -Object $otherReport -Name 'execution_successful') -or
+                        [string](Get-StandardValidationProperty -Object $otherMetadata -Name 'skillspector_version') -cne
+                            [string](Get-StandardValidationProperty -Object $entry -Name 'scannerVersion') -or
+                        [string](Get-StandardValidationProperty -Object $otherCompleteness -Name 'status') -cne 'complete' -or
+                        -not [bool](Get-StandardValidationProperty -Object $otherCompleteness -Name 'is_complete') -or
+                        [int](Get-StandardValidationProperty -Object $otherCompleteness -Name 'total_components') -ne $otherInventory.Count -or
+                        [int](Get-StandardValidationProperty -Object $otherCompleteness -Name 'scanned_components') -ne $otherInventory.Count -or
+                        $otherComponents.Count -ne $otherInventory.Count -or
+                        ($otherComponentPaths -join "`n") -cne ($otherInventoryPaths -join "`n") -or
+                        ($otherAnalyzerIds -join "`n") -cne ($expectedAnalyzerIds -join "`n") -or $otherAnalyzerStateInvalid -or
+                        $otherIssues.Count -ne 0 -or $otherSuppressed.Count -ne 0 -or
+                        -not (Test-StandardValidationIntegerRange -Value $otherSuppressedCount -Minimum 0 -Maximum 0) -or
+                        -not (Test-StandardValidationIntegerRange -Value $otherFindingsBefore -Minimum 0 -Maximum 0) -or
+                        -not (Test-StandardValidationIntegerRange -Value $otherFindingsAfter -Minimum 0 -Maximum 0) -or
+                        $otherExceptions.Count -ne 0 -or
+                        $otherExclusions.Count -ne 0 -or $otherLimitations.Count -ne 0) {
+                        [void]$reasons.Add('internal-continuation-other-skill-report-invalid')
+                    }
+                }
+                catch { [void]$reasons.Add('internal-continuation-other-skill-report-invalid') }
+            }
+            if ((@($observedOtherSkillIds | Sort-Object -Unique) -join "`n") -cne ($otherSkillIds -join "`n")) {
+                [void]$reasons.Add('internal-continuation-other-skill-set-invalid')
+            }
+        }
+
+        try {
+            $testSnapshot = Get-StandardValidationJsonSnapshot -Path $RepositoryTestEvidencePath -Context 'internal source continuation repository tests'
+            $repositoryTestEvidenceSha256 = [string]$testSnapshot.sha256
+            $testEvidence = $testSnapshot.value
+            $testResult = Get-StandardValidationProperty -Object $testEvidence -Name 'testResult'
+            $requiredSuites = Get-StandardValidationProperty -Object (Get-StandardValidationProperty -Object $entry -Name 'supplementalTests') -Name 'requiredSuites'
+            $actualSuites = Get-StandardValidationProperty -Object $testEvidence -Name 'suites'
+            $missingSuites = @($requiredSuites | Where-Object { [string]$_ -cnotin $actualSuites })
+            $minimumPassed = [int](Get-StandardValidationProperty -Object (Get-StandardValidationProperty -Object $entry -Name 'supplementalTests') -Name 'minimumPassed')
+            $total = [int](Get-StandardValidationProperty -Object $testResult -Name 'total')
+            $passed = [int](Get-StandardValidationProperty -Object $testResult -Name 'passed')
+            $failed = [int](Get-StandardValidationProperty -Object $testResult -Name 'failed')
+            $skipped = [int](Get-StandardValidationProperty -Object $testResult -Name 'skipped')
+            if ([string](Get-StandardValidationProperty -Object $testEvidence -Name 'status') -cne 'passed' -or
+                [string](Get-StandardValidationProperty -Object $testEvidence -Name 'sourceRevision') -cne $sourceRevision -or
+                [string](Get-StandardValidationProperty -Object $testEvidence -Name 'contentSha256') -cne $declaredContentSha256 -or
+                $missingSuites.Count -ne 0 -or $passed -lt $minimumPassed -or $failed -ne 0 -or
+                $total -ne ($passed + $failed + $skipped)) {
+                [void]$reasons.Add('internal-continuation-repository-tests-invalid')
+            }
+        }
+        catch { [void]$reasons.Add('internal-continuation-repository-test-evidence-invalid') }
+    }
+
+    return [ordered]@{
+        schemaVersion = 1
+        contract = 'internal-source-continuation-eligibility-v1'
+        status = if ($reasons.Count -eq 0) { 'eligible-for-protected-review' } else { 'rejected' }
+        publishable = $false
+        protectedAdoptionRequired = $true
+        sourceRepository = $sourceRepository
+        skillId = $SkillId
+        sourceRevision = $sourceRevision
+        candidateId = $candidateId
+        contentSha256 = $candidateContentSha256
+        policySha256 = $policySha256
+        scannerReportSha256 = $scannerReportSha256
+        otherScannerReportSha256 = @($otherScannerReportSha256)
+        repositoryTestEvidenceSha256 = $repositoryTestEvidenceSha256
+        canonicalState = [string](Get-StandardValidationProperty -Object $Report -Name 'state')
+        canonicalExitCode = Get-StandardValidationProperty -Object $Report -Name 'exitCode'
+        eligibleOperationAfterProtectedAdoption = @('source-merge')
+        forbiddenOperations = @('release', 'install', 'publish', 'catalog-adoption')
+        releaseEligible = $false
+        failureReasons = @($reasons.ToArray())
+    }
+}
+
 function Test-StandardValidationCanonicalSeverity {
     param([AllowNull()] $Severity)
 

@@ -1,0 +1,74 @@
+{
+  "fixture": "syp171-skillspector-2.12.0-retained-shape-v1",
+  "sourceReport": "reference-probe-20261015-a.json",
+  "sourceReportSha256": "53baf5b800b27f8f68d1f6e949b04f568e2f4baf59ccb833a1959629b237e958",
+  "scannerVersion": "2.12.0",
+  "totalComponents": 27,
+  "scannedComponents": 16,
+  "exceptionComponents": 11,
+  "findingsBeforeFiltering": 7,
+  "findingsAfterFiltering": 7,
+  "suppressedCount": 0,
+  "analyzerIds": [
+    "artifact_integrity",
+    "behavioral_ast",
+    "behavioral_taint_tracking",
+    "bundled_execution_surface",
+    "mcp_least_privilege",
+    "mcp_rug_pull",
+    "mcp_tool_poisoning",
+    "meta_analyzer",
+    "reference_coverage",
+    "semantic_developer_intent",
+    "semantic_quality_policy",
+    "semantic_security_discovery",
+    "static_patterns_agent_snooping",
+    "static_patterns_anti_refusal",
+    "static_patterns_data_exfiltration",
+    "static_patterns_deserialization",
+    "static_patterns_excessive_agency",
+    "static_patterns_harmful_content",
+    "static_patterns_memory_poisoning",
+    "static_patterns_output_handling",
+    "static_patterns_privilege_escalation",
+    "static_patterns_prompt_injection",
+    "static_patterns_rogue_agent",
+    "static_patterns_ssrf",
+    "static_patterns_supply_chain",
+    "static_patterns_system_prompt_leakage",
+    "static_patterns_tool_misuse",
+    "static_yara"
+  ],
+  "allowedFindingFingerprints": [
+    "2a59cc83a656056da5363da63468edb3c9bcd0f4c46e2399ca7df37257ff2fca",
+    "aec5c9c20949770aece1d9959b70a0da7eaba2d318699c9ec79b6e325e9ae803",
+    "972d7f9f9191a93bacee0e6c2ff11a9bbd78fc56d6c4fb4831e8831a8b6d4816"
+  ],
+  "allowedFindingLocations": [
+    {
+      "matchFingerprint": "2a59cc83a656056da5363da63468edb3c9bcd0f4c46e2399ca7df37257ff2fca",
+      "expectedOccurrences": 3,
+      "allowedLocations": [
+        { "file": "SKILL.md", "startLine": 19, "endLine": null, "startColumn": null },
+        { "file": "SKILL.md", "startLine": 59, "endLine": null, "startColumn": null },
+        { "file": "SKILL.md", "startLine": 63, "endLine": null, "startColumn": null }
+      ]
+    },
+    {
+      "matchFingerprint": "aec5c9c20949770aece1d9959b70a0da7eaba2d318699c9ec79b6e325e9ae803",
+      "expectedOccurrences": 3,
+      "allowedLocations": [
+        { "file": "SKILL.md", "startLine": 25, "endLine": null, "startColumn": null },
+        { "file": "SKILL.md", "startLine": 44, "endLine": null, "startColumn": null },
+        { "file": "SKILL.md", "startLine": 51, "endLine": null, "startColumn": null }
+      ]
+    },
+    {
+      "matchFingerprint": "972d7f9f9191a93bacee0e6c2ff11a9bbd78fc56d6c4fb4831e8831a8b6d4816",
+      "expectedOccurrences": 1,
+      "allowedLocations": [
+        { "file": "SKILL.md", "startLine": 14, "endLine": null, "startColumn": 440 }
+      ]
+    }
+  ]
+}

@@ -15,6 +15,9 @@
 - Upstream interoperability decision record: `docs/standards/upstream-interoperability.md`
 - Canonical validation/security gate: `docs/standards/validation-security-gate.json`
 - Canonical validation/security gate schema: `docs/standards/schemas/validation-security-gate-v1.schema.json`
+- Internal source continuation policy: `docs/standards/internal-source-continuation.json`
+- Internal source continuation schema: `docs/standards/schemas/internal-source-continuation-v1.schema.json`
+- Internal source continuation eligibility schema: `docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json`
 - Validation tool resolver: `scripts/Resolve-StandardValidationTool.ps1`
 - Verified Python wheel closure helper: `scripts/Resolve-PythonWheelClosure.py`
 - Canonical authority gate: `scripts/Invoke-StandardAuthorityGate.ps1`
@@ -32,6 +35,8 @@
 - Tracking: Jira `SYP-167`
 
 普通 local consumer call 以 runner 的 v2 core adapter 為預設入口，執行 adapter 明確列出的 repository checks；v2 結果固定 `releaseEligible=false`，不表示 CI、外部安全掃描或 release admission。歷史 v1 adapter 與完整生命週期保留原契約，必須明確選用 `-CompleteLifecycle`；`-DevelopmentHarness` 僅供 legacy fixture regression，結果不可 release。v2 core 與 v1 歷史契約各用版本化 descriptor/schema 描述，不以新 core 語意改寫 v1 evidence。
+
+中央登錄的內部模組若只因核准的 SkillSpector parser limitation 使 Stage 4 不完整，可另外使用 `internal-source-continuation.json` 與 `New-StandardValidationInternalSourceContinuationEligibility` 產生不可發布的 technical eligibility。受保護 workflow 必須再綁定可信 event、canonical run、tool/process evidence、candidate-bound Human Approved finding disposition 與 central/workflow revisions，才能發布 source-merge-only 結果。這個流程保留 canonical `FAILED`／20 與 `releaseEligible=false`，不適用於外部、第三方或未登錄模組，也不能授權 release、install、publish 或 catalog adoption。
 
 ## Scope
 

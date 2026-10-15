@@ -183,6 +183,18 @@
       "requiredContexts": ["repository-contract", "skill-validator", "skill-tools"],
       "releaseEligibility": "fixed false; no install, publish, or release authorization"
     },
+    "internalSourceContinuation": {
+      "policyPath": "docs/standards/internal-source-continuation.json",
+      "policySchemaPath": "docs/standards/schemas/internal-source-continuation-v1.schema.json",
+      "eligibilitySchemaPath": "docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json",
+      "technicalStatus": "eligible-for-protected-review",
+      "technicalPublishable": false,
+      "protectedAdoptionRequired": true,
+      "protectedBindings": ["eventRepository", "eventSourceRevision", "canonicalRunId", "launchBinding", "candidateAcquisition", "authorityRevision", "scannerToolReceipt", "staticRawEvent", "supplementalTestInventory", "supplementalRawEvents", "cleanup", "humanFindingDispositionReview", "centralRevision", "workflowRevision", "authorityArchiveSha256"],
+      "scope": "central-registered-internal-source-merge-only",
+      "canonicalState": "FAILED/20, Stage 4 failed, sourceConformance failed, releaseEligible false",
+      "releaseEligibility": "fixed false; no install, publish, release, or catalog adoption authorization"
+    },
     "toolResult": "actual-process-exit-and-output-envelope",
     "coverage": "discovered-active-skill-set",
     "unknownOrMissing": "fail-closed",

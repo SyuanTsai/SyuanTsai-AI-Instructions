@@ -490,6 +490,21 @@ Validation **MUST** 檢查預期 analyzer set / capabilities 已完成，而不�
 
 因 Standard v1 預設使用 latest stable，analyzer inventory 可能隨 release 變更；adapter **MUST** 針對實際 resolved version 驗證其完整性，不能拿舊版 analyzer allowlist 假裝新版完整。
 
+### 9.3.1 Internal source continuation
+
+`analyzerIncomplete = BLOCK` 仍是 canonical Stage 4 與 release lifecycle 的固定語意。中央 authority **MAY** 另外在 `internal-source-continuation.json` 登錄由同一 authority 管理的內部 repository／Skill，對單一已知 parser limitation 產生 non-publishable technical eligibility；consumer **MUST NOT** 自行宣告 internal 身分、修改 allowlist、將 policy 複製到 consumer repository，或把一般 scanner failure／finding 解讀成 parser limitation。
+
+Internal source continuation **MUST** 同時證明：
+
+- 中央 policy 的 exact repository 與 Skill registration；
+- canonical result 仍為 `FAILED`、exit code `20`、Stage 4 `failed`、source conformance `failed` 與 `releaseEligible=false`；
+- candidate source revision、candidate ID、完整 content inventory、Skill component inventory、scanner report 與 supplemental repository-test evidence 綁定一致；
+- 每個未掃描 component 都是 policy 允許的 path，ledger exception path 唯一，且 exception 只有 policy 指定的 `reason_code` 與 analyzer；
+- scanner version 與完整 expected analyzer inventory 符合中央 pin；raw finding 與 suppression counts 必須完整一致，每筆 finding 必須符合中央 exact fingerprint／shape／來源位置／出現次數／evidence disposition allowlist；不得存在 scope exclusion、第二種 degraded／failed analyzer、缺少 analyzer、未登錄 limitation、未知 finding、移動或新增 occurrence、隱藏 finding 或 suppression；其他 active Skill 必須以相同 analyzer inventory 完整通過；
+- policy 要求的 supplemental test suites 已執行，沒有 failed test，且通過數達到中央門檻。
+
+符合上述條件時只可輸出 `eligible-for-protected-review`，且 `publishable=false`。中央 registration 必須記錄 exception owner、建立與到期日、風險、理由及補償控制；它只定義待審範圍，不構成 §14.2 的 Human Approved exception。受保護 consumer workflow 必須從受信任事件與 canonical runner evidence 取得 repository／event SHA，並驗證同一 run 的 launch binding、candidate acquisition、authority revision、scanner tool receipt、Stage 4 raw process event、supplemental test inventory／raw process event／cleanup、candidate-bound Human Approved finding disposition、central revision、workflow revision 與 archive digest；該 human disposition 必須涵蓋 exact findings、source-merge-only scope 與未到期 policy。本地 fixture、呼叫端 JSON、technical eligibility 或 caller approval 都不得發布 required check。完成這層 protected adoption 後才 **MAY** 讓 source review／merge 繼續。任何結果都 **MUST NOT** 將 Stage 4、canonical validation 或 source conformance 改成 passed，且 **MUST NOT** 授權 release、install、publish 或 catalog adoption。外部、第三方、未登錄 repository／Skill、candidate drift、未列入中央 exact disposition allowlist 的 finding、其他 analyzer incompleteness 或 supplemental test failure 都 **MUST BLOCK**。
+
 ### 9.4 Severity handling
 
 Repository **MUST** 使用 central severity semantics：
