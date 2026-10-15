@@ -5939,6 +5939,166 @@ function Test-StandardValidationInternalContinuationScannerBinding {
     catch { return $false }
 }
 
+function Assert-StandardValidationInternalContinuationRepositoryTestEvidence {
+    param(
+        [Parameter(Mandatory = $true)] $Report,
+        [Parameter(Mandatory = $true)] $Evidence,
+        [Parameter(Mandatory = $true)] $PolicyEntry,
+        [Parameter(Mandatory = $true)][string] $CandidateId,
+        [Parameter(Mandatory = $true)][string] $SourceRevision,
+        [Parameter(Mandatory = $true)][string] $ContentSha256
+    )
+
+    $supplementalPolicy = Get-StandardValidationProperty -Object $PolicyEntry -Name 'supplementalTests'
+    $requiredSuites = @((Get-StandardValidationProperty -Object $supplementalPolicy -Name 'requiredSuites') | ForEach-Object { [string]$_ } | Sort-Object)
+    $actualSuitesValue = Get-StandardValidationProperty -Object $Evidence -Name 'suites'
+    $actualSuites = @($actualSuitesValue | ForEach-Object { [string]$_ } | Sort-Object)
+    $recordsValue = Get-StandardValidationProperty -Object $Evidence -Name 'events'
+    $records = @($recordsValue)
+    if ($requiredSuites.Count -eq 0 -or @($requiredSuites | Select-Object -Unique).Count -ne $requiredSuites.Count -or
+        $actualSuitesValue -isnot [array] -or
+        $recordsValue -isnot [array] -or $records.Count -ne $requiredSuites.Count -or
+        @($actualSuites | Select-Object -Unique).Count -ne $actualSuites.Count -or
+        ($actualSuites -join "`n") -cne ($requiredSuites -join "`n") -or
+        -not (Test-StandardValidationIntegerRange -Value (Get-StandardValidationProperty -Object $Evidence -Name 'schemaVersion') -Minimum 1 -Maximum 1) -or
+        [string](Get-StandardValidationProperty -Object $Evidence -Name 'status') -cne 'passed' -or
+        [string](Get-StandardValidationProperty -Object $Evidence -Name 'decision') -cne 'PASS' -or
+        [string](Get-StandardValidationProperty -Object $Evidence -Name 'candidateId') -cne $CandidateId -or
+        [string](Get-StandardValidationProperty -Object $Evidence -Name 'sourceRevision') -cne $SourceRevision -or
+        [string](Get-StandardValidationProperty -Object $Evidence -Name 'contentSha256') -cne $ContentSha256) {
+        throw 'Supplemental repository-test evidence identity or suite inventory is invalid.'
+    }
+
+    [decimal]$aggregateTotal = 0
+    [decimal]$aggregatePassed = 0
+    [decimal]$aggregateSkipped = 0
+    [decimal]$aggregateFailed = 0
+    $eventIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $outputPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($suite in $requiredSuites) {
+        $matching = @($records | Where-Object { [string](Get-StandardValidationProperty -Object $_ -Name 'suite') -ceq $suite })
+        if ($matching.Count -ne 1) { throw "Supplemental repository-test suite '$suite' is missing or duplicated." }
+        $record = $matching[0]
+        $event = Get-StandardValidationProperty -Object $record -Name 'event'
+        $eventId = [string](Get-StandardValidationProperty -Object $event -Name 'eventId')
+        $eventOutputPath = [string](Get-StandardValidationProperty -Object $event -Name 'outputPath')
+        if ([string]::IsNullOrWhiteSpace($eventId) -or -not $eventIds.Add($eventId) -or
+            [string]::IsNullOrWhiteSpace($eventOutputPath) -or
+            -not $outputPaths.Add([IO.Path]::GetFullPath($eventOutputPath))) {
+            throw "Supplemental repository-test suite '$suite' has a missing or duplicate process identity."
+        }
+        $toolId = "internal-continuation-$suite"
+        $expectedArguments = @('--suite', $suite)
+        $recordArgumentsValue = Get-StandardValidationProperty -Object $record -Name 'arguments'
+        $recordArguments = @($recordArgumentsValue | ForEach-Object { [string]$_ })
+        $eventArgumentsValue = Get-StandardValidationProperty -Object $event -Name 'arguments'
+        $eventArguments = @($eventArgumentsValue | ForEach-Object { [string]$_ })
+        $commandSha256 = Get-StandardValidationTextSha256 -Value ("pester`n" + ($expectedArguments -join "`n"))
+        if ([string](Get-StandardValidationProperty -Object $record -Name 'toolId') -cne $toolId -or
+            [string](Get-StandardValidationProperty -Object $record -Name 'eventId') -cne $eventId -or
+            [string](Get-StandardValidationProperty -Object $record -Name 'candidateId') -cne $CandidateId -or
+            [string](Get-StandardValidationProperty -Object $record -Name 'sourceRevision') -cne $SourceRevision -or
+            [string](Get-StandardValidationProperty -Object $record -Name 'contentSha256') -cne $ContentSha256 -or
+            [string](Get-StandardValidationProperty -Object $record -Name 'command') -cne 'pester' -or
+            $recordArgumentsValue -isnot [array] -or ($recordArguments -join "`n") -cne ($expectedArguments -join "`n") -or
+            [string](Get-StandardValidationProperty -Object $record -Name 'commandSha256') -cne $commandSha256 -or
+            [string](Get-StandardValidationProperty -Object $record -Name 'outputSha256') -cne [string](Get-StandardValidationProperty -Object $event -Name 'outputSha256') -or
+            [string](Get-StandardValidationProperty -Object $event -Name 'stageId') -cne 'supplemental-repository-tests' -or
+            [string](Get-StandardValidationProperty -Object $event -Name 'toolId') -cne $toolId -or
+            $null -ne (Get-StandardValidationProperty -Object $event -Name 'skillId') -or
+            [string](Get-StandardValidationProperty -Object $event -Name 'candidateId') -cne $CandidateId -or
+            [string](Get-StandardValidationProperty -Object $event -Name 'status') -cne 'passed' -or
+            -not (Test-StandardValidationIntegerRange -Value (Get-StandardValidationProperty -Object $event -Name 'exitCode') -Minimum 0 -Maximum 0) -or
+            [string](Get-StandardValidationProperty -Object $event -Name 'command') -cne 'pester' -or
+            $eventArgumentsValue -isnot [array] -or ($eventArguments -join "`n") -cne ($expectedArguments -join "`n") -or
+            [string](Get-StandardValidationProperty -Object $event -Name 'commandSha256') -cne $commandSha256 -or
+            -not (Test-StandardValidationSourceEventOutputBinding -Event $event -Report $Report)) {
+            throw "Supplemental repository-test suite '$suite' is not bound to a successful cleaned-up process event."
+        }
+
+        $rawEvent = Get-StandardValidationJson -Path $eventOutputPath -Context "internal continuation supplemental test '$suite'"
+        $rawArgumentsValue = Get-StandardValidationProperty -Object $rawEvent -Name 'arguments'
+        $rawArguments = @($rawArgumentsValue | ForEach-Object { [string]$_ })
+        $rawProcess = Get-StandardValidationProperty -Object $rawEvent -Name 'process'
+        $rawEnvelope = ([string](Get-StandardValidationProperty -Object $rawProcess -Name 'stdout')) | ConvertFrom-Json -ErrorAction Stop
+        if ([string](Get-StandardValidationProperty -Object $rawEvent -Name 'command') -cne 'pester' -or
+            $rawArgumentsValue -isnot [array] -or ($rawArguments -join "`n") -cne ($expectedArguments -join "`n") -or
+            [string](Get-StandardValidationProperty -Object $rawEvent -Name 'commandSha256') -cne $commandSha256 -or
+            [string](Get-StandardValidationProperty -Object $rawEnvelope -Name 'candidateIdentity') -cne $CandidateId -or
+            [string](Get-StandardValidationProperty -Object $rawEnvelope -Name 'sourceRevision') -cne $SourceRevision -or
+            [string](Get-StandardValidationProperty -Object $rawEnvelope -Name 'contentSha256') -cne $ContentSha256 -or
+            [string](Get-StandardValidationProperty -Object $rawEnvelope -Name 'suite') -cne $suite) {
+            throw "Supplemental repository-test suite '$suite' raw event identity is invalid."
+        }
+
+        $recordInventory = Get-StandardValidationSourceTestInventoryIdentities -Inventory (Get-StandardValidationProperty -Object $record -Name 'testInventory') -Context "internal continuation $suite typed inventory"
+        $rawInventory = Get-StandardValidationSourceTestInventoryIdentities -Inventory (Get-StandardValidationProperty -Object $rawEnvelope -Name 'testInventory') -Context "internal continuation $suite raw inventory"
+        if ($recordInventory.Count -eq 0 -or ($recordInventory -join "`n") -cne ($rawInventory -join "`n")) {
+            throw "Supplemental repository-test suite '$suite' inventory is invalid."
+        }
+
+        $recordResult = Get-StandardValidationProperty -Object $record -Name 'testResult'
+        $rawResult = Get-StandardValidationProperty -Object $rawEnvelope -Name 'testResult'
+        foreach ($propertyName in @('status', 'decision')) {
+            if ((Get-StandardValidationProperty -Object $recordResult -Name $propertyName) -isnot [string] -or
+                (Get-StandardValidationProperty -Object $rawResult -Name $propertyName) -isnot [string]) {
+                throw "Supplemental repository-test suite '$suite' result contains an untyped status."
+            }
+        }
+        foreach ($propertyName in @('status', 'decision', 'total', 'passed', 'skipped', 'failed')) {
+            if ((Get-StandardValidationProperty -Object $recordResult -Name $propertyName) -cne
+                (Get-StandardValidationProperty -Object $rawResult -Name $propertyName)) {
+                throw "Supplemental repository-test suite '$suite' result is not bound to its raw event."
+            }
+        }
+        $total = Get-StandardValidationProperty -Object $recordResult -Name 'total'
+        $passed = Get-StandardValidationProperty -Object $recordResult -Name 'passed'
+        $skipped = Get-StandardValidationProperty -Object $recordResult -Name 'skipped'
+        $failed = Get-StandardValidationProperty -Object $recordResult -Name 'failed'
+        if ([string](Get-StandardValidationProperty -Object $recordResult -Name 'status') -cne 'passed' -or
+            [string](Get-StandardValidationProperty -Object $recordResult -Name 'decision') -cne 'PASS' -or
+            -not (Test-StandardValidationIntegerRange -Value $total -Minimum 1 -Maximum ([decimal][int]::MaxValue)) -or
+            -not (Test-StandardValidationIntegerRange -Value $passed -Minimum 1 -Maximum ([decimal][int]::MaxValue)) -or
+            -not (Test-StandardValidationIntegerRange -Value $skipped -Minimum 0 -Maximum ([decimal][int]::MaxValue)) -or
+            -not (Test-StandardValidationIntegerRange -Value $failed -Minimum 0 -Maximum 0) -or
+            -not (Test-StandardValidationIntegerRange -Value (Get-StandardValidationProperty -Object $rawResult -Name 'total') -Minimum 1 -Maximum ([decimal][int]::MaxValue)) -or
+            -not (Test-StandardValidationIntegerRange -Value (Get-StandardValidationProperty -Object $rawResult -Name 'passed') -Minimum 1 -Maximum ([decimal][int]::MaxValue)) -or
+            -not (Test-StandardValidationIntegerRange -Value (Get-StandardValidationProperty -Object $rawResult -Name 'skipped') -Minimum 0 -Maximum ([decimal][int]::MaxValue)) -or
+            -not (Test-StandardValidationIntegerRange -Value (Get-StandardValidationProperty -Object $rawResult -Name 'failed') -Minimum 0 -Maximum 0) -or
+            [decimal]$passed + [decimal]$skipped -ne [decimal]$total) {
+            throw "Supplemental repository-test suite '$suite' did not pass with valid counts."
+        }
+        $aggregateTotal += [decimal]$total
+        $aggregatePassed += [decimal]$passed
+        $aggregateSkipped += [decimal]$skipped
+        $aggregateFailed += [decimal]$failed
+    }
+
+    $aggregate = Get-StandardValidationProperty -Object $Evidence -Name 'testResult'
+    $minimumPassed = Get-StandardValidationProperty -Object $supplementalPolicy -Name 'minimumPassed'
+    $aggregateTotalValue = Get-StandardValidationProperty -Object $aggregate -Name 'total'
+    $aggregatePassedValue = Get-StandardValidationProperty -Object $aggregate -Name 'passed'
+    $aggregateSkippedValue = Get-StandardValidationProperty -Object $aggregate -Name 'skipped'
+    $aggregateFailedValue = Get-StandardValidationProperty -Object $aggregate -Name 'failed'
+    if ((Get-StandardValidationProperty -Object $aggregate -Name 'status') -isnot [string] -or
+        (Get-StandardValidationProperty -Object $aggregate -Name 'decision') -isnot [string] -or
+        [string](Get-StandardValidationProperty -Object $aggregate -Name 'status') -cne 'passed' -or
+        [string](Get-StandardValidationProperty -Object $aggregate -Name 'decision') -cne 'PASS' -or
+        -not (Test-StandardValidationIntegerRange -Value $minimumPassed -Minimum 1 -Maximum ([decimal][int]::MaxValue)) -or
+        -not (Test-StandardValidationIntegerRange -Value $aggregateTotalValue -Minimum 1 -Maximum ([decimal][int]::MaxValue)) -or
+        -not (Test-StandardValidationIntegerRange -Value $aggregatePassedValue -Minimum 1 -Maximum ([decimal][int]::MaxValue)) -or
+        -not (Test-StandardValidationIntegerRange -Value $aggregateSkippedValue -Minimum 0 -Maximum ([decimal][int]::MaxValue)) -or
+        -not (Test-StandardValidationIntegerRange -Value $aggregateFailedValue -Minimum 0 -Maximum 0) -or
+        [decimal]$aggregateTotalValue -ne $aggregateTotal -or
+        [decimal]$aggregatePassedValue -ne $aggregatePassed -or
+        [decimal]$aggregateSkippedValue -ne $aggregateSkipped -or
+        [decimal]$aggregateFailedValue -ne $aggregateFailed -or
+        $aggregateFailed -ne 0 -or $aggregatePassed -lt [decimal]$minimumPassed) {
+        throw 'Supplemental repository-test aggregate is not bound to the executed suite results.'
+    }
+    return $true
+}
+
 function New-StandardValidationInternalSourceContinuationEligibility {
     param(
         [Parameter(Mandatory = $true)] $Report,
@@ -6433,22 +6593,16 @@ function New-StandardValidationInternalSourceContinuationEligibility {
             $testSnapshot = Get-StandardValidationJsonSnapshot -Path $RepositoryTestEvidencePath -Context 'internal source continuation repository tests'
             $repositoryTestEvidenceSha256 = [string]$testSnapshot.sha256
             $testEvidence = $testSnapshot.value
-            $testResult = Get-StandardValidationProperty -Object $testEvidence -Name 'testResult'
-            $requiredSuites = Get-StandardValidationProperty -Object (Get-StandardValidationProperty -Object $entry -Name 'supplementalTests') -Name 'requiredSuites'
-            $actualSuites = Get-StandardValidationProperty -Object $testEvidence -Name 'suites'
-            $missingSuites = @($requiredSuites | Where-Object { [string]$_ -cnotin $actualSuites })
-            $minimumPassed = [int](Get-StandardValidationProperty -Object (Get-StandardValidationProperty -Object $entry -Name 'supplementalTests') -Name 'minimumPassed')
-            $total = [int](Get-StandardValidationProperty -Object $testResult -Name 'total')
-            $passed = [int](Get-StandardValidationProperty -Object $testResult -Name 'passed')
-            $failed = [int](Get-StandardValidationProperty -Object $testResult -Name 'failed')
-            $skipped = [int](Get-StandardValidationProperty -Object $testResult -Name 'skipped')
-            if ([string](Get-StandardValidationProperty -Object $testEvidence -Name 'status') -cne 'passed' -or
-                [string](Get-StandardValidationProperty -Object $testEvidence -Name 'sourceRevision') -cne $sourceRevision -or
-                [string](Get-StandardValidationProperty -Object $testEvidence -Name 'contentSha256') -cne $declaredContentSha256 -or
-                $missingSuites.Count -ne 0 -or $passed -lt $minimumPassed -or $failed -ne 0 -or
-                $total -ne ($passed + $failed + $skipped)) {
-                [void]$reasons.Add('internal-continuation-repository-tests-invalid')
+            try {
+                [void](Assert-StandardValidationInternalContinuationRepositoryTestEvidence `
+                        -Report $Report `
+                        -Evidence $testEvidence `
+                        -PolicyEntry $entry `
+                        -CandidateId $candidateId `
+                        -SourceRevision $sourceRevision `
+                        -ContentSha256 $declaredContentSha256)
             }
+            catch { [void]$reasons.Add('internal-continuation-repository-test-process-evidence-invalid') }
         }
         catch { [void]$reasons.Add('internal-continuation-repository-test-evidence-invalid') }
     }

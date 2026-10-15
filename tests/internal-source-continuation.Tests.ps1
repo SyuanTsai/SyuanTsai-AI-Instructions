@@ -177,11 +177,50 @@ Describe 'Internal source continuation policy' {
                     outputPath = $eventPath; cleanedUp = $true
                 })
             $report.artifacts = [ordered]@{ root = $artifactRoot }
+            $testEvents = @()
+            foreach ($suite in @('focused', 'canonical')) {
+                $testEventId = [guid]::NewGuid().ToString()
+                $toolId = "internal-continuation-$suite"
+                $arguments = @('--suite', $suite)
+                $commandSha256 = Get-StandardValidationTextSha256 -Value ("pester`n" + ($arguments -join "`n"))
+                $suiteTotal = if ($suite -ceq 'focused') { 30 } else { 25 }
+                $testInventory = @("${suite}:repository-tests")
+                $suiteResult = [ordered]@{ status = 'passed'; decision = 'PASS'; total = $suiteTotal; passed = $suiteTotal; failed = 0; skipped = 0 }
+                $testEnvelope = [ordered]@{
+                    candidateIdentity = $candidateId; sourceRevision = $sourceRevision; contentSha256 = $contentSha256
+                    suite = $suite; testInventory = @($testInventory); testResult = $suiteResult
+                }
+                $testStdout = $testEnvelope | ConvertTo-Json -Depth 10 -Compress
+                $testOutputPath = Join-Path $artifactRoot "$testEventId.json"
+                $testRaw = [ordered]@{
+                    schemaVersion = 1; eventId = $testEventId; stageId = 'supplemental-repository-tests'
+                    toolId = $toolId; skillId = $null; candidateId = $candidateId
+                    command = 'pester'; commandSha256 = $commandSha256; arguments = @($arguments)
+                    process = [ordered]@{ exitCode = 0; status = 'passed'; stdout = $testStdout; stderr = ''; cleanedUp = $true }
+                    stdout = $testStdout; stderr = ''
+                }
+                Write-ContinuationJson $testOutputPath $testRaw
+                $testOutputSha256 = Get-StandardValidationOutputHash -Stdout $testStdout -Stderr ''
+                $testEvent = [ordered]@{
+                    eventId = $testEventId; stageId = 'supplemental-repository-tests'; toolId = $toolId
+                    skillId = $null; candidateId = $candidateId; status = 'passed'; exitCode = 0; cleanedUp = $true
+                    command = 'pester'; commandSha256 = $commandSha256; arguments = @($arguments)
+                    outputPath = $testOutputPath; outputSha256 = $testOutputSha256
+                }
+                $testEvents += [ordered]@{
+                    suite = $suite; toolId = $toolId; eventId = $testEventId; candidateId = $candidateId
+                    sourceRevision = $sourceRevision; contentSha256 = $contentSha256
+                    command = 'pester'; commandSha256 = $commandSha256; arguments = @($arguments)
+                    outputSha256 = $testOutputSha256; testInventory = @($testInventory)
+                    testResult = $suiteResult; event = $testEvent
+                }
+            }
             $testsPath = Join-Path $Root 'repository-tests.json'
             $tests = [ordered]@{
-                status = 'passed'; sourceRevision = $sourceRevision; contentSha256 = $contentSha256
-                testResult = [ordered]@{ total = 55; passed = 55; failed = 0; skipped = 0 }
-                suites = @('focused', 'canonical')
+                schemaVersion = 1; status = 'passed'; decision = 'PASS'; candidateId = $candidateId
+                sourceRevision = $sourceRevision; contentSha256 = $contentSha256
+                testResult = [ordered]@{ status = 'passed'; decision = 'PASS'; total = 55; passed = 55; failed = 0; skipped = 0 }
+                suites = @('focused', 'canonical'); events = @($testEvents)
             }
             Write-ContinuationJson -Path $testsPath -Value $tests
             return [ordered]@{
@@ -475,6 +514,40 @@ Describe 'Internal source continuation policy' {
         Assert-Continuation ($failureReasons.Count -eq @($failureReasons | Select-Object -Unique).Count) 'Rejected eligibility emitted duplicate failure reasons.'
         $decisionSchema = Join-Path $repositoryRoot 'docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json'
         Assert-Continuation (($decision | ConvertTo-Json -Depth 20) | Test-Json -SchemaFile $decisionSchema) 'Rejected eligibility with multiple invalid other-Skill reports does not match its strict schema.'
+    }
+
+    # Scenario: supplemental test aggregates are missing or drift from their candidate-bound raw process events.
+    # Purpose: require executed test inventory, command/result binding, and cleanup proof instead of trusting caller-authored counts.
+    It 'UnitT49_rejects_unbound_or_fabricated_supplemental_test_evidence' {
+        foreach ($drift in @('missing-events', 'candidate', 'command', 'inventory', 'cleanup', 'raw-result', 'raw-count-string', 'aggregate-count-string')) {
+            $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive "test-process-$drift")
+            $record = $fixture.RepositoryTests.events[0]
+            switch ($drift) {
+                'missing-events' { $fixture.RepositoryTests.events = @() }
+                'candidate' { $record.candidateId = ('f' * 64) }
+                'command' { $record.command = 'pwsh' }
+                'inventory' { $record.testInventory = @('invented:test') }
+                'cleanup' { $record.event.cleanedUp = $false }
+                { $_ -in @('raw-result', 'raw-count-string') } {
+                    $raw = Get-Content -Raw -LiteralPath $record.event.outputPath | ConvertFrom-Json
+                    $envelope = [string]$raw.process.stdout | ConvertFrom-Json
+                    if ($drift -ceq 'raw-result') { $envelope.testResult.passed = 0 }
+                    else { $envelope.testResult.passed = [string]$envelope.testResult.passed }
+                    $changedStdout = $envelope | ConvertTo-Json -Depth 10 -Compress
+                    $raw.process.stdout = $changedStdout
+                    $raw.stdout = $changedStdout
+                    Write-ContinuationJson $record.event.outputPath $raw
+                    $changedOutputSha256 = Get-StandardValidationOutputHash -Stdout $changedStdout -Stderr ''
+                    $record.event.outputSha256 = $changedOutputSha256
+                    $record.outputSha256 = $changedOutputSha256
+                }
+                'aggregate-count-string' { $fixture.RepositoryTests.testResult.passed = '55' }
+            }
+            Write-ContinuationJson $fixture.RepositoryTestEvidencePath $fixture.RepositoryTests
+            $decision = Invoke-ContinuationFixture -Fixture $fixture
+            Assert-Continuation ($decision.status -ceq 'rejected') "Supplemental test process drift '$drift' was accepted."
+            Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-repository-test-process-evidence-invalid') "Supplemental test process drift '$drift' did not report invalid process evidence."
+        }
     }
 
     # Scenario: candidate bytes, revision, or canonical failure state changes after evidence was produced.
