@@ -5939,6 +5939,108 @@ function Test-StandardValidationInternalContinuationScannerBinding {
     catch { return $false }
 }
 
+function Assert-StandardValidationInternalContinuationRunnerEvidence {
+    param(
+        [Parameter(Mandatory = $true)] $Report,
+        [Parameter(Mandatory = $true)][string] $ReportPath,
+        [Parameter(Mandatory = $true)][string] $CandidateRoot,
+        [Parameter(Mandatory = $true)][string] $RepositoryTestEvidencePath,
+        [Parameter(Mandatory = $true)][string] $RepositoryTestEvidenceSha256
+    )
+
+    $candidate = Get-StandardValidationRequiredProperty -Object $Report -Name 'candidate' -Context 'internal continuation canonical report'
+    $adapter = Get-StandardValidationRequiredProperty -Object $Report -Name 'adapter' -Context 'internal continuation canonical report'
+    $authority = Get-StandardValidationRequiredProperty -Object $Report -Name 'authority' -Context 'internal continuation canonical report'
+    $authorityBinding = Get-StandardValidationRequiredProperty -Object $authority -Name 'binding' -Context 'internal continuation canonical report authority'
+    $artifacts = Get-StandardValidationRequiredProperty -Object $Report -Name 'artifacts' -Context 'internal continuation canonical report'
+    $launchBinding = Get-StandardValidationRequiredProperty -Object $Report -Name 'launchBinding' -Context 'internal continuation canonical report'
+    $artifactRoot = [string](Get-StandardValidationRequiredProperty -Object $artifacts -Name 'root' -Context 'internal continuation canonical report artifacts')
+    $reportFull = Get-StandardValidationFullPath -Path $ReportPath -Context 'internal continuation canonical report path'
+    $evidenceFull = Get-StandardValidationFullPath -Path $RepositoryTestEvidencePath -Context 'internal continuation repository-test evidence path'
+    if (-not (Test-StandardValidationPathWithin -Path $reportFull -Root $artifactRoot) -or
+        -not (Test-StandardValidationPathWithin -Path $evidenceFull -Root $artifactRoot)) {
+        throw 'Canonical and supplemental evidence must remain inside the authenticated artifacts root.'
+    }
+    if ((Get-StandardValidationRequiredProperty -Object $launchBinding -Name 'verified' -Context 'internal continuation launch binding') -isnot [bool] -or
+        -not [bool](Get-StandardValidationProperty -Object $launchBinding -Name 'verified') -or
+        [string](Get-StandardValidationRequiredProperty -Object $launchBinding -Name 'status' -Context 'internal continuation launch binding') -cne 'verified') {
+        throw 'Internal continuation requires a verified supervisor launch binding.'
+    }
+
+    $launchPath = [string](Get-StandardValidationRequiredProperty -Object $launchBinding -Name 'path' -Context 'internal continuation launch binding')
+    $launchSha256 = [string](Get-StandardValidationRequiredProperty -Object $launchBinding -Name 'sha256' -Context 'internal continuation launch binding')
+    Assert-StandardValidationSha256 -Value $launchSha256 -Context 'internal continuation launch-binding hash'
+    $launchSnapshot = Get-StandardValidationJsonSnapshot -Path $launchPath -Context 'internal continuation signed launch binding'
+    if ([string]$launchSnapshot.sha256 -cne $launchSha256) {
+        throw 'Internal continuation launch-binding bytes changed after authentication.'
+    }
+    $signedLaunch = $launchSnapshot.value
+    $adapterPath = [string](Get-StandardValidationRequiredProperty -Object $signedLaunch -Name 'adapterPath' -Context 'internal continuation signed launch binding')
+    $outputPath = [string](Get-StandardValidationRequiredProperty -Object $signedLaunch -Name 'outputPath' -Context 'internal continuation signed launch binding')
+    $trustedToolRoot = [string](Get-StandardValidationRequiredProperty -Object $signedLaunch -Name 'trustedToolRoot' -Context 'internal continuation signed launch binding')
+    $adapterSha256 = [string](Get-StandardValidationRequiredProperty -Object $adapter -Name 'sha256' -Context 'internal continuation canonical adapter')
+    $sourceRepository = [string](Get-StandardValidationRequiredProperty -Object $candidate -Name 'sourceRepository' -Context 'internal continuation canonical candidate')
+    $sourceRevision = [string](Get-StandardValidationRequiredProperty -Object $candidate -Name 'sourceRevision' -Context 'internal continuation canonical candidate')
+    $baseRevision = [string](Get-StandardValidationRequiredProperty -Object $candidate -Name 'baseRevision' -Context 'internal continuation canonical candidate')
+    $eventName = [string](Get-StandardValidationRequiredProperty -Object $candidate -Name 'eventName' -Context 'internal continuation canonical candidate')
+    $archiveSha256 = [string](Get-StandardValidationRequiredProperty -Object $candidate -Name 'archiveSha256' -Context 'internal continuation canonical candidate')
+    $authorityRevision = [string](Get-StandardValidationRequiredProperty -Object $authorityBinding -Name 'revision' -Context 'internal continuation canonical authority binding')
+    $trustAnchorRoot = Assert-StandardValidationCanonicalRootPath `
+        -Path (Join-Path $script:StandardValidationRepositoryRoot 'docs/standards/trust-anchors') `
+        -Context 'internal continuation immutable trust-anchor root'
+    $verifiedLaunch = Assert-StandardValidationSupervisorLaunchBinding `
+        -Path $launchPath -CandidateRoot $CandidateRoot -AdapterPath $adapterPath `
+        -AdapterSha256 $adapterSha256 -ArtifactsRoot $artifactRoot -OutputPath $reportFull `
+        -TrustedToolRoot $trustedToolRoot -SourceRepository $sourceRepository `
+        -SourceRevision $sourceRevision -BaseRevision $baseRevision -EventName $eventName `
+        -CandidateArchiveSha256 $archiveSha256 -AuthorityRevision $authorityRevision `
+        -TrustAnchorRoot $trustAnchorRoot -Context 'internal continuation signed launch binding'
+    $pathComparison = Get-StandardValidationPathComparison -Paths @($reportFull, $outputPath, $launchPath, [string]$verifiedLaunch.path)
+    if (-not [string]::Equals($reportFull, [IO.Path]::GetFullPath($outputPath), $pathComparison) -or
+        -not [string]::Equals([IO.Path]::GetFullPath($launchPath), [IO.Path]::GetFullPath([string]$verifiedLaunch.path), $pathComparison) -or
+        [string]$verifiedLaunch.sha256 -cne $launchSha256) {
+        throw 'Internal continuation report is not the output selected by the signed launch binding.'
+    }
+
+    $reportRunId = [guid]::Empty
+    $launchRunId = [guid]::Empty
+    $reportRunIdText = [string](Get-StandardValidationRequiredProperty -Object $Report -Name 'runId' -Context 'internal continuation canonical report')
+    $launchRunIdText = [string](Get-StandardValidationRequiredProperty -Object $launchBinding -Name 'resolutionRunId' -Context 'internal continuation launch binding')
+    if (-not [guid]::TryParse($reportRunIdText, [ref]$reportRunId) -or $reportRunId -eq [guid]::Empty -or
+        -not [guid]::TryParse($launchRunIdText, [ref]$launchRunId) -or $launchRunId -eq [guid]::Empty -or
+        $reportRunId -ne $launchRunId -or $launchRunId.ToString('N') -cne [string]$verifiedLaunch.resolutionRunId) {
+        throw 'Internal continuation canonical report is bound to a different supervisor run.'
+    }
+
+    $consumptionPath = [string](Get-StandardValidationRequiredProperty -Object $launchBinding -Name 'consumptionPath' -Context 'internal continuation launch binding')
+    $consumptionSha256 = [string](Get-StandardValidationRequiredProperty -Object $launchBinding -Name 'consumptionSha256' -Context 'internal continuation launch binding')
+    Assert-StandardValidationSha256 -Value $consumptionSha256 -Context 'internal continuation launch-consumption hash'
+    $consumptionSnapshot = Get-StandardValidationJsonSnapshot -Path $consumptionPath -Context 'internal continuation launch-consumption marker'
+    $consumption = $consumptionSnapshot.value
+    if ([string]$consumptionSnapshot.sha256 -cne $consumptionSha256 -or
+        -not [string]::Equals([IO.Path]::GetFullPath($consumptionPath), [IO.Path]::GetFullPath([string]$verifiedLaunch.consumptionPath), $pathComparison) -or
+        -not (Test-StandardValidationIntegerRange -Value (Get-StandardValidationRequiredProperty -Object $consumption -Name 'schemaVersion' -Context 'internal continuation launch-consumption marker') -Minimum 1 -Maximum 1) -or
+        [string](Get-StandardValidationRequiredProperty -Object $consumption -Name 'evidenceType' -Context 'internal continuation launch-consumption marker') -cne 'validation-launch-consumption' -or
+        [string](Get-StandardValidationRequiredProperty -Object $consumption -Name 'resolutionRunId' -Context 'internal continuation launch-consumption marker') -cne [string]$verifiedLaunch.resolutionRunId -or
+        [string](Get-StandardValidationRequiredProperty -Object $consumption -Name 'launchBindingSha256' -Context 'internal continuation launch-consumption marker') -cne $launchSha256) {
+        throw 'Internal continuation launch-consumption evidence is invalid.'
+    }
+
+    $registration = Get-StandardValidationRequiredProperty -Object $Report -Name 'supplementalRepositoryTests' -Context 'internal continuation canonical report'
+    $registeredEvents = Get-StandardValidationRequiredProperty -Object $registration -Name 'events' -Context 'internal continuation supplemental registration'
+    $registeredEvidencePath = [string](Get-StandardValidationRequiredProperty -Object $registration -Name 'evidencePath' -Context 'internal continuation supplemental registration')
+    if ([string](Get-StandardValidationRequiredProperty -Object $registration -Name 'status' -Context 'internal continuation supplemental registration') -cne 'observed-by-canonical-runner' -or
+        [string](Get-StandardValidationRequiredProperty -Object $registration -Name 'candidateId' -Context 'internal continuation supplemental registration') -cne [string](Get-StandardValidationRequiredProperty -Object $candidate -Name 'candidateId' -Context 'internal continuation canonical candidate') -or
+        [string](Get-StandardValidationRequiredProperty -Object $registration -Name 'sourceRevision' -Context 'internal continuation supplemental registration') -cne $sourceRevision -or
+        [string](Get-StandardValidationRequiredProperty -Object $registration -Name 'contentSha256' -Context 'internal continuation supplemental registration') -cne [string](Get-StandardValidationRequiredProperty -Object $candidate -Name 'contentSha256' -Context 'internal continuation canonical candidate') -or
+        $registeredEvents -isnot [array] -or @($registeredEvents).Count -eq 0 -or
+        -not [string]::Equals([IO.Path]::GetFullPath($registeredEvidencePath), $evidenceFull, $pathComparison) -or
+        [string](Get-StandardValidationRequiredProperty -Object $registration -Name 'evidenceSha256' -Context 'internal continuation supplemental registration') -cne $RepositoryTestEvidenceSha256) {
+        throw 'Internal continuation supplemental tests are not registered by the authenticated canonical runner.'
+    }
+    return $true
+}
+
 function Assert-StandardValidationInternalContinuationRepositoryTestEvidence {
     param(
         [Parameter(Mandatory = $true)] $Report,
@@ -5946,7 +6048,9 @@ function Assert-StandardValidationInternalContinuationRepositoryTestEvidence {
         [Parameter(Mandatory = $true)] $PolicyEntry,
         [Parameter(Mandatory = $true)][string] $CandidateId,
         [Parameter(Mandatory = $true)][string] $SourceRevision,
-        [Parameter(Mandatory = $true)][string] $ContentSha256
+        [Parameter(Mandatory = $true)][string] $ContentSha256,
+        [Parameter(Mandatory = $true)][string] $EvidencePath,
+        [Parameter(Mandatory = $true)][string] $EvidenceSha256
     )
 
     $supplementalPolicy = Get-StandardValidationProperty -Object $PolicyEntry -Name 'supplementalTests'
@@ -5955,6 +6059,10 @@ function Assert-StandardValidationInternalContinuationRepositoryTestEvidence {
     $actualSuites = @($actualSuitesValue | ForEach-Object { [string]$_ } | Sort-Object)
     $recordsValue = Get-StandardValidationProperty -Object $Evidence -Name 'events'
     $records = @($recordsValue)
+    $registration = Get-StandardValidationProperty -Object $Report -Name 'supplementalRepositoryTests'
+    $registeredEventsValue = Get-StandardValidationProperty -Object $registration -Name 'events'
+    $registeredEvents = @($registeredEventsValue)
+    $artifactRoot = [string](Get-StandardValidationProperty -Object (Get-StandardValidationProperty -Object $Report -Name 'artifacts') -Name 'root')
     if ($requiredSuites.Count -eq 0 -or @($requiredSuites | Select-Object -Unique).Count -ne $requiredSuites.Count -or
         $actualSuitesValue -isnot [array] -or
         $recordsValue -isnot [array] -or $records.Count -ne $requiredSuites.Count -or
@@ -5965,7 +6073,11 @@ function Assert-StandardValidationInternalContinuationRepositoryTestEvidence {
         [string](Get-StandardValidationProperty -Object $Evidence -Name 'decision') -cne 'PASS' -or
         [string](Get-StandardValidationProperty -Object $Evidence -Name 'candidateId') -cne $CandidateId -or
         [string](Get-StandardValidationProperty -Object $Evidence -Name 'sourceRevision') -cne $SourceRevision -or
-        [string](Get-StandardValidationProperty -Object $Evidence -Name 'contentSha256') -cne $ContentSha256) {
+        [string](Get-StandardValidationProperty -Object $Evidence -Name 'contentSha256') -cne $ContentSha256 -or
+        $registeredEventsValue -isnot [array] -or $registeredEvents.Count -ne $records.Count -or
+        [string](Get-StandardValidationProperty -Object $registration -Name 'evidenceSha256') -cne $EvidenceSha256 -or
+        -not [string]::Equals([IO.Path]::GetFullPath([string](Get-StandardValidationProperty -Object $registration -Name 'evidencePath')), [IO.Path]::GetFullPath($EvidencePath), (Get-StandardValidationPathComparison -Paths @($EvidencePath, [string](Get-StandardValidationProperty -Object $registration -Name 'evidencePath')))) -or
+        -not (Test-StandardValidationPathWithin -Path $EvidencePath -Root $artifactRoot)) {
         throw 'Supplemental repository-test evidence identity or suite inventory is invalid.'
     }
 
@@ -5986,6 +6098,12 @@ function Assert-StandardValidationInternalContinuationRepositoryTestEvidence {
             [string]::IsNullOrWhiteSpace($eventOutputPath) -or
             -not $outputPaths.Add([IO.Path]::GetFullPath($eventOutputPath))) {
             throw "Supplemental repository-test suite '$suite' has a missing or duplicate process identity."
+        }
+        $registeredMatches = @($registeredEvents | Where-Object { [string](Get-StandardValidationProperty -Object $_ -Name 'eventId') -ceq $eventId })
+        if ($registeredMatches.Count -ne 1 -or
+            [string](Get-StandardValidationProperty -Object $registeredMatches[0] -Name 'outputSha256') -cne [string](Get-StandardValidationProperty -Object $event -Name 'outputSha256') -or
+            -not [string]::Equals([IO.Path]::GetFullPath([string](Get-StandardValidationProperty -Object $registeredMatches[0] -Name 'outputPath')), [IO.Path]::GetFullPath($eventOutputPath), (Get-StandardValidationPathComparison -Paths @($eventOutputPath, [string](Get-StandardValidationProperty -Object $registeredMatches[0] -Name 'outputPath'))))) {
+            throw "Supplemental repository-test suite '$suite' is not registered in authenticated canonical runner evidence."
         }
         $toolId = "internal-continuation-$suite"
         $expectedArguments = @('--suite', $suite)
@@ -6101,7 +6219,7 @@ function Assert-StandardValidationInternalContinuationRepositoryTestEvidence {
 
 function New-StandardValidationInternalSourceContinuationEligibility {
     param(
-        [Parameter(Mandatory = $true)] $Report,
+        [Parameter(Mandatory = $true)][string] $ReportPath,
         [Parameter(Mandatory = $true)][string] $PolicyPath,
         [Parameter(Mandatory = $true)][string] $CandidateRoot,
         [Parameter(Mandatory = $true)][string] $ExpectedSourceRevision,
@@ -6121,6 +6239,15 @@ function New-StandardValidationInternalSourceContinuationEligibility {
     $repositoryTestEvidenceSha256 = $null
     $candidateContentSha256 = $null
     $scannerBindings = New-Object 'System.Collections.Generic.List[object]'
+    $Report = $null
+    try {
+        $reportSnapshot = Get-StandardValidationJsonSnapshot -Path $ReportPath -Context 'internal source continuation canonical report'
+        $Report = $reportSnapshot.value
+    }
+    catch {
+        [void]$reasons.Add('internal-continuation-canonical-runner-evidence-invalid')
+        $Report = [pscustomobject][ordered]@{}
+    }
     $candidate = Get-StandardValidationProperty -Object $Report -Name 'candidate'
     $sourceRepository = [string](Get-StandardValidationProperty -Object $candidate -Name 'sourceRepository')
     $sourceRevision = [string](Get-StandardValidationProperty -Object $candidate -Name 'sourceRevision')
@@ -6482,12 +6609,19 @@ function New-StandardValidationInternalSourceContinuationEligibility {
             foreach ($analyzerStatus in $analyzerStatuses) {
                 $currentId = [string](Get-StandardValidationProperty -Object $analyzerStatus -Name 'analyzer_id')
                 $currentStatus = [string](Get-StandardValidationProperty -Object $analyzerStatus -Name 'status')
-                $plannedWork = [int](Get-StandardValidationProperty -Object $analyzerStatus -Name 'planned_work')
-                $completedWork = [int](Get-StandardValidationProperty -Object $analyzerStatus -Name 'completed')
-                $partialWork = [int](Get-StandardValidationProperty -Object $analyzerStatus -Name 'partial')
-                $skippedWork = [int](Get-StandardValidationProperty -Object $analyzerStatus -Name 'skipped')
-                $failedWork = [int](Get-StandardValidationProperty -Object $analyzerStatus -Name 'failed')
-                $unaccountedWork = [int](Get-StandardValidationProperty -Object $analyzerStatus -Name 'unaccounted')
+                $counterValues = @('planned_work', 'completed', 'partial', 'skipped', 'failed', 'unaccounted' | ForEach-Object {
+                        Get-StandardValidationProperty -Object $analyzerStatus -Name $_
+                    })
+                if (@($counterValues | Where-Object { -not (Test-StandardValidationIntegerRange -Value $_ -Minimum 0 -Maximum ([decimal][int]::MaxValue)) }).Count -ne 0) {
+                    [void]$reasons.Add('internal-continuation-analyzer-counter-invalid')
+                    continue
+                }
+                $plannedWork = [int]$counterValues[0]
+                $completedWork = [int]$counterValues[1]
+                $partialWork = [int]$counterValues[2]
+                $skippedWork = [int]$counterValues[3]
+                $failedWork = [int]$counterValues[4]
+                $unaccountedWork = [int]$counterValues[5]
                 if ($currentId -ceq $analyzerId -and $currentStatus -ceq 'degraded') {
                     $approvedDegradedCount++
                     if ($plannedWork -ne $totalComponents -or $completedWork -ne $scannedComponents -or
@@ -6573,12 +6707,19 @@ function New-StandardValidationInternalSourceContinuationEligibility {
                     $otherAnalyzerStateInvalid = $false
                     foreach ($otherAnalyzerStatus in $otherAnalyzerStatuses) {
                         $otherStatus = [string](Get-StandardValidationProperty -Object $otherAnalyzerStatus -Name 'status')
-                        $otherPlanned = [int](Get-StandardValidationProperty -Object $otherAnalyzerStatus -Name 'planned_work')
-                        $otherCompleted = [int](Get-StandardValidationProperty -Object $otherAnalyzerStatus -Name 'completed')
-                        $otherPartial = [int](Get-StandardValidationProperty -Object $otherAnalyzerStatus -Name 'partial')
-                        $otherSkipped = [int](Get-StandardValidationProperty -Object $otherAnalyzerStatus -Name 'skipped')
-                        $otherFailed = [int](Get-StandardValidationProperty -Object $otherAnalyzerStatus -Name 'failed')
-                        $otherUnaccounted = [int](Get-StandardValidationProperty -Object $otherAnalyzerStatus -Name 'unaccounted')
+                        $otherCounterValues = @('planned_work', 'completed', 'partial', 'skipped', 'failed', 'unaccounted' | ForEach-Object {
+                                Get-StandardValidationProperty -Object $otherAnalyzerStatus -Name $_
+                            })
+                        if (@($otherCounterValues | Where-Object { -not (Test-StandardValidationIntegerRange -Value $_ -Minimum 0 -Maximum ([decimal][int]::MaxValue)) }).Count -ne 0) {
+                            $otherAnalyzerStateInvalid = $true
+                            break
+                        }
+                        $otherPlanned = [int]$otherCounterValues[0]
+                        $otherCompleted = [int]$otherCounterValues[1]
+                        $otherPartial = [int]$otherCounterValues[2]
+                        $otherSkipped = [int]$otherCounterValues[3]
+                        $otherFailed = [int]$otherCounterValues[4]
+                        $otherUnaccounted = [int]$otherCounterValues[5]
                         if ($otherStatus -cnotin $allowedOtherStatuses -or
                             ($otherStatus -ceq 'completed' -and ($otherPlanned -ne $otherInventory.Count -or $otherCompleted -ne $otherInventory.Count -or $otherPartial -ne 0 -or $otherSkipped -ne 0 -or $otherFailed -ne 0 -or $otherUnaccounted -ne 0)) -or
                             ($otherStatus -in @('not_applicable', 'disabled') -and ($otherPlanned -ne 0 -or $otherCompleted -ne 0 -or $otherPartial -ne 0 -or $otherSkipped -ne 0 -or $otherFailed -ne 0 -or $otherUnaccounted -ne 0))) {
@@ -6626,13 +6767,24 @@ function New-StandardValidationInternalSourceContinuationEligibility {
             $repositoryTestEvidenceSha256 = [string]$testSnapshot.sha256
             $testEvidence = $testSnapshot.value
             try {
+                [void](Assert-StandardValidationInternalContinuationRunnerEvidence `
+                        -Report $Report `
+                        -ReportPath $ReportPath `
+                        -CandidateRoot $CandidateRoot `
+                        -RepositoryTestEvidencePath $RepositoryTestEvidencePath `
+                        -RepositoryTestEvidenceSha256 $repositoryTestEvidenceSha256)
+            }
+            catch { [void]$reasons.Add('internal-continuation-canonical-runner-evidence-invalid') }
+            try {
                 [void](Assert-StandardValidationInternalContinuationRepositoryTestEvidence `
                         -Report $Report `
                         -Evidence $testEvidence `
                         -PolicyEntry $entry `
                         -CandidateId $candidateId `
                         -SourceRevision $sourceRevision `
-                        -ContentSha256 $declaredContentSha256)
+                        -ContentSha256 $declaredContentSha256 `
+                        -EvidencePath $RepositoryTestEvidencePath `
+                        -EvidenceSha256 $repositoryTestEvidenceSha256)
             }
             catch { [void]$reasons.Add('internal-continuation-repository-test-process-evidence-invalid') }
         }

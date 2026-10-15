@@ -82,11 +82,19 @@ Describe 'Internal source continuation policy' {
                 [ordered]@{ order = $index + 1; id = $stageIds[$index]; status = if ($index -lt 3) { 'passed' } elseif ($index -eq 3) { 'failed' } else { 'not-run' } }
             }
             $report = [ordered]@{
+                runId = ([guid]::NewGuid()).ToString()
                 state = 'FAILED'; exitCode = 20; releaseEligible = $false
                 candidate = [ordered]@{
                     sourceRepository = 'https://github.com/SyuanTsai/Skill-Atlassian-Ecosystem.git'
-                    sourceRevision = $sourceRevision; candidateId = $candidateId; contentSha256 = $contentSha256
+                    sourceRevision = $sourceRevision; baseRevision = ('c' * 40); eventName = 'pull_request'
+                    candidateId = $candidateId; contentSha256 = $contentSha256; archiveSha256 = ('d' * 64)
                     activeSkills = @($activeSkills)
+                }
+                adapter = [ordered]@{ sha256 = Get-StandardValidationFileSha256 -Path (Join-Path $repositoryRoot 'scripts/Invoke-StandardValidation.ps1') -Context 'internal continuation fixture adapter' }
+                authority = [ordered]@{ binding = [ordered]@{ revision = ('d' * 40) } }
+                launchBinding = [ordered]@{
+                    status = 'unverified'; verified = $false; path = $null; sha256 = ('0' * 64)
+                    resolutionRunId = $null; consumptionPath = $null; consumptionSha256 = ('0' * 64)
                 }
                 stages = @($stages)
                 sourceConformance = [ordered]@{ status = 'failed'; releaseEligible = $false }
@@ -215,7 +223,7 @@ Describe 'Internal source continuation policy' {
                     testResult = $suiteResult; event = $testEvent
                 }
             }
-            $testsPath = Join-Path $Root 'repository-tests.json'
+            $testsPath = Join-Path $artifactRoot 'repository-tests.json'
             $tests = [ordered]@{
                 schemaVersion = 1; status = 'passed'; decision = 'PASS'; candidateId = $candidateId
                 sourceRevision = $sourceRevision; contentSha256 = $contentSha256
@@ -223,9 +231,52 @@ Describe 'Internal source continuation policy' {
                 suites = @('focused', 'canonical'); events = @($testEvents)
             }
             Write-ContinuationJson -Path $testsPath -Value $tests
+            $report.supplementalRepositoryTests = [ordered]@{
+                status = 'observed-by-canonical-runner'
+                candidateId = $candidateId
+                sourceRevision = $sourceRevision
+                contentSha256 = $contentSha256
+                evidencePath = $testsPath
+                evidenceSha256 = Get-StandardValidationFileSha256 -Path $testsPath -Context 'internal continuation repository-test evidence'
+                events = @($testEvents | ForEach-Object {
+                        [ordered]@{
+                            eventId = $_.event.eventId
+                            outputPath = $_.event.outputPath
+                            outputSha256 = $_.event.outputSha256
+                        }
+                    })
+            }
+            $reportPath = Join-Path $artifactRoot 'canonical-report.json'
+            $trustedToolRoot = Join-Path $Root 'trusted-tools'
+            [void](New-Item -ItemType Directory -Path $trustedToolRoot -Force)
+            $launchBindingPath = Join-Path $Root 'supervisor-launch-binding.json'
+            $launchConsumptionPath = Join-Path $Root 'supervisor-launch-consumption.json'
+            $resolutionRunId = ([guid]$report.runId).ToString('N')
+            $signedLaunchBinding = [ordered]@{
+                adapterPath = Join-Path $repositoryRoot 'scripts/Invoke-StandardValidation.ps1'
+                outputPath = $reportPath
+                trustedToolRoot = $trustedToolRoot
+                consumptionPath = $launchConsumptionPath
+                resolutionRunId = $resolutionRunId
+            }
+            Write-ContinuationJson -Path $launchBindingPath -Value $signedLaunchBinding
+            $launchBindingSha256 = Get-StandardValidationFileSha256 -Path $launchBindingPath -Context 'internal continuation fixture launch binding'
+            $launchConsumption = [ordered]@{
+                schemaVersion = 1
+                evidenceType = 'validation-launch-consumption'
+                resolutionRunId = $resolutionRunId
+                launchBindingSha256 = $launchBindingSha256
+                consumedAt = [DateTime]::UtcNow.ToString('o')
+            }
+            Write-ContinuationJson -Path $launchConsumptionPath -Value $launchConsumption
+            $report.launchBinding = [ordered]@{
+                status = 'verified'; verified = $true; path = $launchBindingPath; sha256 = $launchBindingSha256
+                resolutionRunId = $resolutionRunId; consumptionPath = $launchConsumptionPath
+                consumptionSha256 = Get-StandardValidationFileSha256 -Path $launchConsumptionPath -Context 'internal continuation fixture launch consumption'
+            }
             return [ordered]@{
                 CandidateRoot = $candidateRoot; Report = $report; Scanner = $scanner; ScannerReportPath = $scannerPath
-                RepositoryTests = $tests; RepositoryTestEvidencePath = $testsPath; SourceRevision = $sourceRevision
+                ReportPath = $reportPath; RepositoryTests = $tests; RepositoryTestEvidencePath = $testsPath; SourceRevision = $sourceRevision
                 PolicyPath = $policyPath; OtherScannerReportPaths = @($otherScannerReportPaths)
                 AuthorityArtifactsRoot = (Join-Path $Root 'authority-artifacts')
             }
@@ -233,8 +284,9 @@ Describe 'Internal source continuation policy' {
 
         function Invoke-ContinuationFixture {
             param($Fixture)
+            Write-ContinuationJson -Path $Fixture.ReportPath -Value $Fixture.Report
             return New-StandardValidationInternalSourceContinuationEligibility `
-                -Report $Fixture.Report -PolicyPath $Fixture.PolicyPath -CandidateRoot $Fixture.CandidateRoot `
+                -ReportPath $Fixture.ReportPath -PolicyPath $Fixture.PolicyPath -CandidateRoot $Fixture.CandidateRoot `
                 -ExpectedSourceRevision $Fixture.SourceRevision -SkillId 'manage-confluence-docs-as-code' `
                 -ScannerReportPath $Fixture.ScannerReportPath `
                 -OtherScannerReportPaths $Fixture.OtherScannerReportPaths `
@@ -283,6 +335,19 @@ Describe 'Internal source continuation policy' {
                     })
             }
         }
+        Mock Assert-StandardValidationSupervisorLaunchBinding {
+            param($Path, $CandidateRoot, $AdapterPath, $AdapterSha256, $ArtifactsRoot, $OutputPath,
+                $TrustedToolRoot, $SourceRepository, $SourceRevision, $BaseRevision, $EventName,
+                $CandidateArchiveSha256, $AuthorityRevision, $TrustAnchorRoot, $Context)
+            $bindingSnapshot = Get-StandardValidationJsonSnapshot -Path $Path -Context 'authenticated fixture launch binding'
+            return [pscustomobject][ordered]@{
+                status = 'verified'; verified = $true; path = [IO.Path]::GetFullPath($Path)
+                sha256 = [string]$bindingSnapshot.sha256
+                resolutionRunId = [string]$bindingSnapshot.value.resolutionRunId
+                issuedAt = [DateTime]::UtcNow.ToString('o'); expiresAt = [DateTime]::UtcNow.AddMinutes(5).ToString('o')
+                consumptionPath = [string]$bindingSnapshot.value.consumptionPath; consumptionSha256 = ('0' * 64)
+            }
+        }
     }
 
     # Scenario: the central policy is the only authority that classifies an internal module.
@@ -313,6 +378,7 @@ Describe 'Internal source continuation policy' {
         Assert-Continuation (($policy.entries.sourceRepository -join ',') -ceq 'https://github.com/SyuanTsai/Skill-Atlassian-Ecosystem.git') 'Only the declared internal repository may use this policy.'
         $contract = Get-Content -Raw -LiteralPath (Join-Path $repositoryRoot 'docs/standards/standard-validation-contract-v1.json') | ConvertFrom-Json
         Assert-Continuation (-not [bool]$contract.evidence.internalSourceContinuation.technicalPublishable) 'The central contract must keep technical eligibility non-publishable.'
+        Assert-Continuation (($contract.evidence.internalSourceContinuation.technicalRunnerBindings -join ',') -ceq 'signedLaunchBinding,launchConsumptionMarker,signedOutputPath,registeredRepositoryTestEvidence,registeredSupplementalRawEvents,typedAnalyzerWorkloadCounters') 'The authenticated technical runner binding set drifted.'
         Assert-Continuation (($contract.evidence.internalSourceContinuation.protectedBindings -join ',') -ceq 'eventRepository,eventSourceRevision,canonicalRunId,launchBinding,candidateAcquisition,authorityRevision,scannerToolReceipt,staticRawEvent,supplementalTestInventory,supplementalRawEvents,cleanup,humanFindingDispositionReview,centralRevision,workflowRevision,authorityArchiveSha256') 'The protected adoption binding set drifted.'
     }
 
@@ -377,6 +443,21 @@ Describe 'Internal source continuation policy' {
         Assert-Continuation (($decision.forbiddenOperations -join ',') -ceq 'release,install,publish,catalog-adoption') 'Forbidden operation boundary drifted.'
         $decisionSchema = Join-Path $repositoryRoot 'docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json'
         Assert-Continuation (($decision | ConvertTo-Json -Depth 20) | Test-Json -SchemaFile $decisionSchema) 'Eligible decision does not match its strict schema.'
+        Assert-MockCalled Assert-StandardValidationSupervisorLaunchBinding -Scope It
+    }
+
+    # Scenario: caller-authored canonical and supplemental JSON is not backed by authenticated supervisor runner evidence.
+    # Purpose: prevent matching files under an artifacts root from impersonating an executed Pester run.
+    It 'UnitT22_rejects_supplemental_events_without_authenticated_runner_evidence' {
+        $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'unauthenticated-runner-evidence')
+        $fixture.Report.launchBinding.status = 'unverified'
+        $fixture.Report.launchBinding.verified = $false
+
+        $decision = Invoke-ContinuationFixture -Fixture $fixture
+
+        Assert-Continuation ($decision.status -ceq 'rejected') 'Caller-authored supplemental events were accepted without authenticated runner evidence.'
+        Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-canonical-runner-evidence-invalid') 'The missing authenticated runner binding was not reported.'
+        Assert-MockCalled Assert-StandardValidationSupervisorLaunchBinding -Times 0 -Exactly -Scope It
     }
 
     # Scenario: the retained SYP171 report shape contains parser-derived coverage warnings and the declared Atlassian endpoint finding.
@@ -469,6 +550,45 @@ Describe 'Internal source continuation policy' {
             if ($drift -ceq 'non-boolean-execution-success') {
                 Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-scanner-identity-invalid') 'A non-Boolean target-Skill execution success flag did not report invalid scanner identity.'
             }
+        }
+    }
+
+    # Scenario: a target or other-Skill analyzer omits a workload counter or encodes one as a numeric-looking non-integer value.
+    # Purpose: require every analyzer workload counter to be present as an integer before count comparisons can authorize continuation.
+    It 'UnitT42_rejects_missing_or_untyped_analyzer_workload_counters' {
+        $counterNames = @('planned_work', 'completed', 'partial', 'skipped', 'failed', 'unaccounted')
+        foreach ($scope in @('target', 'other')) {
+            foreach ($counterName in $counterNames) {
+                $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive "$scope-missing-$counterName") -IncludeOtherSkill:($scope -ceq 'other')
+                if ($scope -ceq 'target') {
+                    $completedAnalyzer = @($fixture.Scanner.analysis_completeness.analyzer_statuses | Where-Object { $_.status -ceq 'completed' })[0]
+                    [void]$completedAnalyzer.Remove($counterName)
+                    Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner
+                }
+                else {
+                    $otherReport = Get-Content -Raw -LiteralPath $fixture.OtherScannerReportPaths[0] | ConvertFrom-Json
+                    $otherReport.analysis_completeness.analyzer_statuses[0].PSObject.Properties.Remove($counterName)
+                    Write-ContinuationJson $fixture.OtherScannerReportPaths[0] $otherReport
+                }
+                $decision = Invoke-ContinuationFixture -Fixture $fixture
+                Assert-Continuation ($decision.status -ceq 'rejected') "$scope analyzer accepted a missing '$counterName' counter."
+            }
+        }
+        foreach ($drift in @('target-string', 'other-string')) {
+            $scope = if ($drift.StartsWith('target-')) { 'target' } else { 'other' }
+            $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive $drift) -IncludeOtherSkill:($scope -ceq 'other')
+            if ($scope -ceq 'target') {
+                $completedAnalyzer = @($fixture.Scanner.analysis_completeness.analyzer_statuses | Where-Object { $_.status -ceq 'completed' })[0]
+                $completedAnalyzer.planned_work = '4'
+                Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner
+            }
+            else {
+                $otherReport = Get-Content -Raw -LiteralPath $fixture.OtherScannerReportPaths[0] | ConvertFrom-Json
+                $otherReport.analysis_completeness.analyzer_statuses[0].planned_work = '1'
+                Write-ContinuationJson $fixture.OtherScannerReportPaths[0] $otherReport
+            }
+            $decision = Invoke-ContinuationFixture -Fixture $fixture
+            Assert-Continuation ($decision.status -ceq 'rejected') "$scope analyzer accepted a non-integer planned_work value for '$drift'."
         }
     }
 

@@ -189,6 +189,7 @@
       "eligibilitySchemaPath": "docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json",
       "technicalStatus": "eligible-for-protected-review",
       "technicalPublishable": false,
+      "technicalRunnerBindings": ["signedLaunchBinding", "launchConsumptionMarker", "signedOutputPath", "registeredRepositoryTestEvidence", "registeredSupplementalRawEvents", "typedAnalyzerWorkloadCounters"],
       "protectedAdoptionRequired": true,
       "protectedBindings": ["eventRepository", "eventSourceRevision", "canonicalRunId", "launchBinding", "candidateAcquisition", "authorityRevision", "scannerToolReceipt", "staticRawEvent", "supplementalTestInventory", "supplementalRawEvents", "cleanup", "humanFindingDispositionReview", "centralRevision", "workflowRevision", "authorityArchiveSha256"],
       "scope": "central-registered-internal-source-merge-only",
