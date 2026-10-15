@@ -186,7 +186,7 @@ Describe 'Internal source continuation policy' {
                     outputPath = $eventPath; cleanedUp = $true
                 })
             $report.artifacts = [ordered]@{ root = $artifactRoot }
-            $testEvents = @()
+            $testObservations = @()
             foreach ($suite in @('focused', 'canonical')) {
                 $testEventId = [guid]::NewGuid().ToString()
                 $toolId = "internal-continuation-$suite"
@@ -216,37 +216,23 @@ Describe 'Internal source continuation policy' {
                     command = 'pester'; commandSha256 = $commandSha256; arguments = @($arguments)
                     outputPath = $testOutputPath; outputSha256 = $testOutputSha256
                 }
-                $testEvents += [ordered]@{
-                    suite = $suite; toolId = $toolId; eventId = $testEventId; candidateId = $candidateId
-                    sourceRevision = $sourceRevision; contentSha256 = $contentSha256
-                    command = 'pester'; commandSha256 = $commandSha256; arguments = @($arguments)
-                    outputSha256 = $testOutputSha256; testInventory = @($testInventory)
-                    testResult = $suiteResult; event = $testEvent
+                $testObservations += [ordered]@{
+                    suite = $suite
+                    test = [ordered]@{
+                        id = $toolId; kind = 'pester'; command = [ordered]@{ arguments = @($arguments) }
+                    }
+                    invocation = [ordered]@{ event = $testEvent }
+                    typed = [ordered]@{
+                        testInventory = @($testInventory); testResult = $suiteResult
+                    }
                 }
             }
-            $testsPath = Join-Path $artifactRoot 'repository-tests.json'
-            $tests = [ordered]@{
-                schemaVersion = 1; status = 'passed'; decision = 'PASS'; candidateId = $candidateId
-                sourceRevision = $sourceRevision; contentSha256 = $contentSha256
-                testResult = [ordered]@{ status = 'passed'; decision = 'PASS'; total = 55; passed = 55; failed = 0; skipped = 0 }
-                suites = @('focused', 'canonical'); events = @($testEvents)
-            }
-            Write-ContinuationJson -Path $testsPath -Value $tests
-            $supplementalRegistration = [ordered]@{
-                status = 'observed-by-canonical-runner'
-                candidateId = $candidateId
-                sourceRevision = $sourceRevision
-                contentSha256 = $contentSha256
-                evidencePath = $testsPath
-                evidenceSha256 = Get-StandardValidationFileSha256 -Path $testsPath -Context 'internal continuation repository-test evidence'
-                events = @($testEvents | ForEach-Object {
-                        [ordered]@{
-                            eventId = $_.event.eventId
-                            outputPath = $_.event.outputPath
-                            outputSha256 = $_.event.outputSha256
-                        }
-                    })
-            }
+            $runnerSupplemental = New-StandardValidationInternalContinuationSupplementalEvidence `
+                -RunRoot $artifactRoot -CandidateId $candidateId -SourceRevision $sourceRevision `
+                -ContentSha256 $contentSha256 -PolicyEntry $policyEntry -Observations $testObservations
+            $testsPath = $runnerSupplemental.evidencePath
+            $tests = $runnerSupplemental.evidence
+            $supplementalRegistration = $runnerSupplemental.registration
             $report = New-StandardValidationCandidateEvidence `
                 -RunId ([guid]$report.runId) -State 'FAILED' -ExitCode 20 -ReleaseEligible $false `
                 -Candidate $report.candidate -Adapter $report.adapter -Authority $report.authority `
@@ -289,6 +275,15 @@ Describe 'Internal source continuation policy' {
                 ReportPath = $reportPath; RepositoryTests = $tests; RepositoryTestEvidencePath = $testsPath; SourceRevision = $sourceRevision
                 PolicyPath = $policyPath; OtherScannerReportPaths = @($otherScannerReportPaths)
                 AuthorityArtifactsRoot = (Join-Path $Root 'authority-artifacts')
+                PolicyEntry = $policyEntry; RunRoot = $artifactRoot
+                RunnerAdapterResult = [ordered]@{
+                    repositoryTests = @(@('focused', 'canonical') | ForEach-Object {
+                            [ordered]@{
+                                id = "internal-continuation-$_"; kind = 'pester'
+                                command = [ordered]@{ arguments = @('--suite', $_) }
+                            }
+                        })
+                }
             }
         }
 
@@ -438,6 +433,40 @@ Describe 'Internal source continuation policy' {
         finally {
             $script:StandardValidationAuthorityEvidence = $previousAuthorityEvidence
         }
+    }
+
+    # Scenario: the authenticated runner sees the exact registered incomplete Static event and executes both central suites.
+    # Purpose: prove the production builder emits the same candidate-bound aggregate that the eligibility validator consumes.
+    It 'UnitT18_builds_validator_compatible_supplemental_runner_evidence' {
+        $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'runner-supplemental-evidence')
+        $scopeMatches = Test-StandardValidationInternalContinuationReviewScope `
+            -SourceRepository $fixture.Report.candidate.sourceRepository `
+            -CandidateId $fixture.Report.candidate.candidateId `
+            -ActiveSkills @($fixture.Report.candidate.activeSkills) `
+            -FailureState 'FAILED' `
+            -FailureMessage 'Static analyzer coverage is incomplete.' `
+            -Stages $fixture.Report.stages `
+            -AdapterResult $fixture.RunnerAdapterResult `
+            -PolicyEntry $fixture.PolicyEntry `
+            -RunRoot $fixture.RunRoot
+        Assert-Continuation $scopeMatches 'The exact registered incomplete Static event did not enable the supplemental runner route.'
+        Assert-Continuation ([IO.Path]::GetFileName($fixture.RepositoryTestEvidencePath) -ceq 'internal-continuation-repository-tests.json') 'The runner did not own the canonical supplemental aggregate path.'
+        Assert-Continuation ($fixture.RepositoryTests.status -ceq 'passed' -and $fixture.RepositoryTests.decision -ceq 'PASS') 'The runner aggregate does not expose the validator-required result shape.'
+        Assert-Continuation (($fixture.RepositoryTests.suites -join ',') -ceq 'focused,canonical') 'The runner aggregate suite inventory drifted from central policy.'
+        Assert-Continuation ($fixture.Report.supplementalRepositoryTests.evidenceSha256 -ceq (Get-StandardValidationFileSha256 -Path $fixture.RepositoryTestEvidencePath -Context 'runner supplemental evidence')) 'The canonical report did not register the exact runner aggregate bytes.'
+
+        $fixture.RunnerAdapterResult.repositoryTests[0].command.arguments = @('--suite', 'different')
+        $driftedScope = Test-StandardValidationInternalContinuationReviewScope `
+            -SourceRepository $fixture.Report.candidate.sourceRepository `
+            -CandidateId $fixture.Report.candidate.candidateId `
+            -ActiveSkills @($fixture.Report.candidate.activeSkills) `
+            -FailureState 'FAILED' `
+            -FailureMessage 'Static analyzer coverage is incomplete.' `
+            -Stages $fixture.Report.stages `
+            -AdapterResult $fixture.RunnerAdapterResult `
+            -PolicyEntry $fixture.PolicyEntry `
+            -RunRoot $fixture.RunRoot
+        Assert-Continuation (-not $driftedScope) 'A drifted supplemental suite command was allowed to dispatch.'
     }
 
     # Scenario: one central-listed internal Skill is partial only because the approved parser analyzer degraded.
