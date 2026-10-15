@@ -285,6 +285,8 @@ Personal artifacts 必須保持 untracked。Bootstrap 以 `git rev-parse --show-
 
 ## 驗證
 
+修改或 Review Skill source／Web Consumer 前，請讀取 [Skill 更新與範圍維護準則](docs/skill-maintenance-guidelines.md)；該文件僅供開發維護，不屬於一般 Skill 使用或安裝前置。
+
 契約與完整回歸：
 
 ```powershell
