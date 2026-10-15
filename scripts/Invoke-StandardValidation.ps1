@@ -6403,15 +6403,21 @@ function New-StandardValidationInternalSourceContinuationEligibility {
     }
 
     $skillInventory = @()
+    $primarySkillIdSafe = $SkillId -cmatch '^[a-z0-9]+(?:-[a-z0-9]+)*$'
+    if (-not $primarySkillIdSafe) {
+        [void]$reasons.Add('internal-continuation-primary-skill-id-invalid')
+    }
     try {
         $candidateInventory = Get-StandardValidationInventory -Root $CandidateRoot -Context 'internal source continuation candidate'
         $candidateContentSha256 = Get-StandardValidationInventorySha256 -Inventory $candidateInventory
         if ($candidateContentSha256 -cne $declaredContentSha256) {
             [void]$reasons.Add('internal-continuation-candidate-content-drift')
         }
-        $skillRoot = Join-Path $CandidateRoot "skills/$SkillId"
-        $skillInventory = Get-StandardValidationInventory -Root $skillRoot -Context 'internal source continuation Skill'
-        if ($skillInventory.Count -eq 0) { [void]$reasons.Add('internal-continuation-skill-inventory-empty') }
+        if ($primarySkillIdSafe -and $null -ne $entry) {
+            $skillRoot = Join-Path $CandidateRoot "skills/$SkillId"
+            $skillInventory = Get-StandardValidationInventory -Root $skillRoot -Context 'internal source continuation Skill'
+            if ($skillInventory.Count -eq 0) { [void]$reasons.Add('internal-continuation-skill-inventory-empty') }
+        }
     }
     catch { [void]$reasons.Add('internal-continuation-candidate-unavailable') }
 
@@ -6631,7 +6637,7 @@ function New-StandardValidationInternalSourceContinuationEligibility {
                     continue
                 }
                 $completeCountsInvalid = $currentStatus -ceq 'completed' -and
-                    ($plannedWork -ne $totalComponents -or $completedWork -ne $totalComponents -or
+                    ($plannedWork -lt 1 -or $completedWork -ne $plannedWork -or
                     $partialWork -ne 0 -or $skippedWork -ne 0 -or $failedWork -ne 0 -or $unaccountedWork -ne 0)
                 $inactiveCountsInvalid = $currentStatus -in @('not_applicable', 'disabled') -and
                     ($plannedWork -ne 0 -or $completedWork -ne 0 -or $partialWork -ne 0 -or $skippedWork -ne 0 -or $failedWork -ne 0 -or $unaccountedWork -ne 0)
@@ -6721,7 +6727,7 @@ function New-StandardValidationInternalSourceContinuationEligibility {
                         $otherFailed = [int]$otherCounterValues[4]
                         $otherUnaccounted = [int]$otherCounterValues[5]
                         if ($otherStatus -cnotin $allowedOtherStatuses -or
-                            ($otherStatus -ceq 'completed' -and ($otherPlanned -ne $otherInventory.Count -or $otherCompleted -ne $otherInventory.Count -or $otherPartial -ne 0 -or $otherSkipped -ne 0 -or $otherFailed -ne 0 -or $otherUnaccounted -ne 0)) -or
+                            ($otherStatus -ceq 'completed' -and ($otherPlanned -lt 1 -or $otherCompleted -ne $otherPlanned -or $otherPartial -ne 0 -or $otherSkipped -ne 0 -or $otherFailed -ne 0 -or $otherUnaccounted -ne 0)) -or
                             ($otherStatus -in @('not_applicable', 'disabled') -and ($otherPlanned -ne 0 -or $otherCompleted -ne 0 -or $otherPartial -ne 0 -or $otherSkipped -ne 0 -or $otherFailed -ne 0 -or $otherUnaccounted -ne 0))) {
                             $otherAnalyzerStateInvalid = $true
                             break

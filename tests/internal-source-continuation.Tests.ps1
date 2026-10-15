@@ -20,7 +20,7 @@ Describe 'Internal source continuation policy' {
         }
 
         function New-ContinuationFixture {
-            param([string] $Root, [switch] $IncludeOtherSkill)
+            param([string] $Root, [switch] $IncludeOtherSkill, [switch] $UseAnalyzerSpecificPlans)
 
             $candidateRoot = Join-Path $Root 'candidate'
             $policyPath = Join-Path $repositoryRoot 'docs/standards/internal-source-continuation.json'
@@ -119,7 +119,8 @@ Describe 'Internal source continuation policy' {
                             [ordered]@{ analyzer_id = $_; status = 'degraded'; planned_work = 4; completed = 1; partial = 3; skipped = 0; failed = 0; unaccounted = 0 }
                         }
                         else {
-                            [ordered]@{ analyzer_id = $_; status = 'completed'; planned_work = 4; completed = 4; partial = 0; skipped = 0; failed = 0; unaccounted = 0 }
+                            $plannedWork = if ($UseAnalyzerSpecificPlans -and $_ -ceq 'mcp_tool_poisoning') { 1 } else { 4 }
+                            [ordered]@{ analyzer_id = $_; status = 'completed'; planned_work = $plannedWork; completed = $plannedWork; partial = 0; skipped = 0; failed = 0; unaccounted = 0 }
                         }
                     })
                 }
@@ -283,11 +284,11 @@ Describe 'Internal source continuation policy' {
         }
 
         function Invoke-ContinuationFixture {
-            param($Fixture)
+            param($Fixture, [string] $SkillId = 'manage-confluence-docs-as-code')
             Write-ContinuationJson -Path $Fixture.ReportPath -Value $Fixture.Report
             return New-StandardValidationInternalSourceContinuationEligibility `
                 -ReportPath $Fixture.ReportPath -PolicyPath $Fixture.PolicyPath -CandidateRoot $Fixture.CandidateRoot `
-                -ExpectedSourceRevision $Fixture.SourceRevision -SkillId 'manage-confluence-docs-as-code' `
+                -ExpectedSourceRevision $Fixture.SourceRevision -SkillId $SkillId `
                 -ScannerReportPath $Fixture.ScannerReportPath `
                 -OtherScannerReportPaths $Fixture.OtherScannerReportPaths `
                 -AuthorityArtifactsRoot $Fixture.AuthorityArtifactsRoot `
@@ -516,7 +517,7 @@ Describe 'Internal source continuation policy' {
     # Scenario: evidence contains a finding, another degraded analyzer, another reason, or failed supplemental tests.
     # Purpose: allow only the named parser limitation and preserve all other blocking semantics.
     It 'UnitT40_rejects_findings_unapproved_incompleteness_and_test_failures' {
-        foreach ($drift in @('finding', 'finding-location', 'finding-occurrence-count', 'endpoint-evidence', 'hidden-finding', 'suppressed-finding', 'analyzer', 'completed-undercoverage', 'non-boolean-execution-success', 'missing-analyzer', 'reason', 'duplicate-exception-path', 'missing-limitation', 'extra-limitation', 'changed-limitation', 'tests', 'unverified-active-skill')) {
+        foreach ($drift in @('finding', 'finding-location', 'finding-occurrence-count', 'endpoint-evidence', 'hidden-finding', 'suppressed-finding', 'analyzer', 'completed-work-mismatch', 'non-boolean-execution-success', 'missing-analyzer', 'reason', 'duplicate-exception-path', 'missing-limitation', 'extra-limitation', 'changed-limitation', 'tests', 'unverified-active-skill')) {
             $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive $drift)
             switch ($drift) {
                 finding { $fixture.Scanner.issues = @([ordered]@{ severity = 'HIGH'; message = 'blocked' }); Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner }
@@ -526,10 +527,10 @@ Describe 'Internal source continuation policy' {
                 'hidden-finding' { $fixture.Scanner.analysis_completeness.findings_before_filtering = 8; Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner }
                 'suppressed-finding' { $fixture.Scanner.suppressed_count = 1; $fixture.Scanner.suppressed = @([ordered]@{ id = 'hidden' }); Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner }
                 analyzer { $fixture.Scanner.analysis_completeness.analyzer_statuses += [ordered]@{ analyzer_id = 'unknown'; status = 'degraded'; planned_work = 1; completed = 0; partial = 1; skipped = 0; failed = 0; unaccounted = 0 }; Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner }
-                'completed-undercoverage' {
+                'completed-work-mismatch' {
                     $completedAnalyzer = @($fixture.Scanner.analysis_completeness.analyzer_statuses | Where-Object { $_.status -ceq 'completed' })[0]
                     $completedAnalyzer.planned_work = 1
-                    $completedAnalyzer.completed = 1
+                    $completedAnalyzer.completed = 0
                     Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner
                 }
                 'non-boolean-execution-success' { $fixture.Scanner.execution_successful = 'false'; Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner }
@@ -544,8 +545,8 @@ Describe 'Internal source continuation policy' {
             }
             $decision = Invoke-ContinuationFixture -Fixture $fixture
             Assert-Continuation ($decision.status -ceq 'rejected') "Evidence drift '$drift' was accepted."
-            if ($drift -ceq 'completed-undercoverage') {
-                Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-analyzer-status-invalid') 'Target-Skill analyzer undercoverage did not report an invalid analyzer status.'
+            if ($drift -ceq 'completed-work-mismatch') {
+                Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-analyzer-status-invalid') 'Target-Skill analyzer workload mismatch did not report an invalid analyzer status.'
             }
             if ($drift -ceq 'non-boolean-execution-success') {
                 Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-scanner-identity-invalid') 'A non-Boolean target-Skill execution success flag did not report invalid scanner identity.'
@@ -592,15 +593,15 @@ Describe 'Internal source continuation policy' {
         }
     }
 
-    # Scenario: a completed analyzer in another active Skill accounts for fewer components than that Skill contains.
-    # Purpose: require every completed analyzer to cover the full inventory, including non-target Skills.
-    It 'UnitT45_rejects_other_skill_undercoverage_and_non_boolean_success_flags' {
-        foreach ($drift in @('completed-undercoverage', 'non-boolean-execution-success', 'non-boolean-completeness')) {
+    # Scenario: a completed analyzer in another active Skill does not complete its own planned workload.
+    # Purpose: require every completed analyzer to finish its authenticated analyzer-specific plan.
+    It 'UnitT45_rejects_other_skill_workload_mismatch_and_non_boolean_success_flags' {
+        foreach ($drift in @('completed-work-mismatch', 'non-boolean-execution-success', 'non-boolean-completeness')) {
             $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive "other-$drift") -IncludeOtherSkill
             $otherReport = Get-Content -Raw -LiteralPath $fixture.OtherScannerReportPaths[0] | ConvertFrom-Json
             switch ($drift) {
-                'completed-undercoverage' {
-                    $otherReport.analysis_completeness.analyzer_statuses[0].planned_work = 0
+                'completed-work-mismatch' {
+                    $otherReport.analysis_completeness.analyzer_statuses[0].planned_work = 1
                     $otherReport.analysis_completeness.analyzer_statuses[0].completed = 0
                 }
                 'non-boolean-execution-success' { $otherReport.execution_successful = 'false' }
@@ -628,6 +629,29 @@ Describe 'Internal source continuation policy' {
         $decision = Invoke-ContinuationFixture -Fixture $fixture
         Assert-Continuation ($decision.status -ceq 'rejected') 'A traversal-like other-Skill ID was accepted.'
         Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-other-skill-id-invalid') 'The unsafe other-Skill ID did not fail before inventory traversal.'
+    }
+
+    # Scenario: the caller supplies an unsafe primary Skill ID that is not the centrally registered entry.
+    # Purpose: reject it before composing or traversing a candidate-relative Skill path.
+    It 'UnitT46b_rejects_unsafe_primary_skill_ids_before_inventory_traversal' {
+        $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'unsafe-primary-skill-id')
+        $fixture.Report.candidate.activeSkills = @('../../outside-skill')
+
+        $decision = Invoke-ContinuationFixture -Fixture $fixture -SkillId '../../outside-skill'
+
+        Assert-Continuation ($decision.status -ceq 'rejected') 'A traversal-like primary Skill ID was accepted.'
+        Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-primary-skill-id-invalid') 'The unsafe primary Skill ID did not fail before inventory traversal.'
+        Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-scope-not-registered') 'The unsafe primary Skill ID was not rejected by the central registration boundary.'
+    }
+
+    # Scenario: authenticated SkillSpector plans fewer files for an analyzer whose applicability is narrower than the Skill inventory.
+    # Purpose: accept a fully completed analyzer-specific plan without requiring that analyzer to inspect unrelated file types.
+    It 'UnitT46c_accepts_authenticated_analyzer_specific_planned_workloads' {
+        $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'analyzer-specific-workload') -IncludeOtherSkill -UseAnalyzerSpecificPlans
+
+        $decision = Invoke-ContinuationFixture -Fixture $fixture
+
+        Assert-Continuation ($decision.status -ceq 'eligible-for-protected-review') 'A completed authenticated analyzer-specific workload was rejected.'
     }
 
     # Scenario: the same invalid other-Skill report path is supplied more than once in one decision.
