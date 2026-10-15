@@ -493,6 +493,23 @@ Describe 'Internal source continuation policy' {
         }
     }
 
+    # Scenario: another scanner report names a traversal-like Skill ID that resolves outside the candidate Skill root.
+    # Purpose: reject unsafe or unexpected Skill IDs before constructing or enumerating an inventory path from them.
+    It 'UnitT46_rejects_unsafe_other_skill_ids_before_inventory_traversal' {
+        $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'unsafe-other-skill-id') -IncludeOtherSkill
+        $outsideRoot = Join-Path (Split-Path -Parent $fixture.CandidateRoot) 'outside-skill'
+        [void](New-Item -ItemType Directory -Path $outsideRoot -Force)
+        [IO.File]::WriteAllText((Join-Path $outsideRoot 'SENTINEL.md'), 'must-not-be-inventoried', [Text.UTF8Encoding]::new($false))
+        $otherReport = Get-Content -Raw -LiteralPath $fixture.OtherScannerReportPaths[0] | ConvertFrom-Json
+        $otherReport.skill.name = '../../outside-skill'
+        $otherReport.skill.source = $outsideRoot
+        Write-ContinuationJson $fixture.OtherScannerReportPaths[0] $otherReport
+
+        $decision = Invoke-ContinuationFixture -Fixture $fixture
+        Assert-Continuation ($decision.status -ceq 'rejected') 'A traversal-like other-Skill ID was accepted.'
+        Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-other-skill-id-invalid') 'The unsafe other-Skill ID did not fail before inventory traversal.'
+    }
+
     # Scenario: the same invalid other-Skill report path is supplied more than once in one decision.
     # Purpose: keep every repeated output collection unique so rejected evidence still matches its strict schema.
     It 'UnitT47_emits_unique_failure_reasons_and_report_hashes_for_repeated_invalid_other_skill_reports' {
@@ -584,11 +601,11 @@ Describe 'Internal source continuation policy' {
         }
     }
 
-    # Scenario: candidate bytes, revision, canonical state, or typed release prohibition changes after evidence was produced.
-    # Purpose: prevent stale evidence and false-like non-Boolean values from authorizing a different candidate.
+    # Scenario: candidate bytes, revision, canonical state, typed exit code, or typed release prohibition changes after evidence was produced.
+    # Purpose: reject stale or coerced canonical evidence while preserving schema-valid structured rejection output.
     It 'UnitT50_rejects_candidate_revision_and_canonical_state_drift' {
         foreach ($drift in @(
-                'bytes', 'revision', 'canonical',
+                'bytes', 'revision', 'canonical', 'exit-missing', 'exit-null', 'exit-string', 'exit-decimal',
                 'report-release-missing', 'report-release-null', 'report-release-numeric',
                 'source-release-missing', 'source-release-null', 'source-release-numeric')) {
             $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive $drift)
@@ -596,6 +613,10 @@ Describe 'Internal source continuation policy' {
                 bytes { [IO.File]::AppendAllText((Join-Path $fixture.CandidateRoot 'skills/manage-confluence-docs-as-code/SKILL.md'), 'changed') }
                 revision { $fixture.Report.candidate.sourceRevision = 'c' * 40 }
                 canonical { $fixture.Report.state = 'PASS'; $fixture.Report.exitCode = 0 }
+                'exit-missing' { [void]$fixture.Report.Remove('exitCode') }
+                'exit-null' { $fixture.Report.exitCode = $null }
+                'exit-string' { $fixture.Report.exitCode = '20' }
+                'exit-decimal' { $fixture.Report.exitCode = [double]20 }
                 'report-release-missing' { [void]$fixture.Report.Remove('releaseEligible') }
                 'report-release-null' { $fixture.Report.releaseEligible = $null }
                 'report-release-numeric' { $fixture.Report.releaseEligible = 0 }
@@ -608,6 +629,11 @@ Describe 'Internal source continuation policy' {
             if ($drift -like '*-release-*') {
                 Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-canonical-state-invalid') "Canonical release drift '$drift' did not report invalid canonical state."
             }
+            if ($drift -like 'exit-*') {
+                Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-canonical-state-invalid') "Canonical exit drift '$drift' did not report invalid canonical state."
+            }
+            $decisionSchema = Join-Path $repositoryRoot 'docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json'
+            Assert-Continuation (($decision | ConvertTo-Json -Depth 20) | Test-Json -SchemaFile $decisionSchema) "Candidate drift '$drift' did not produce schema-valid rejection evidence."
         }
     }
 }

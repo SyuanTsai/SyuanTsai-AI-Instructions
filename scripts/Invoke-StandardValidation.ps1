@@ -6248,10 +6248,12 @@ function New-StandardValidationInternalSourceContinuationEligibility {
 
     $sourceConformance = Get-StandardValidationProperty -Object $Report -Name 'sourceConformance'
     $stages = Get-StandardValidationProperty -Object $Report -Name 'stages'
+    $canonicalExitCodeValue = Get-StandardValidationProperty -Object $Report -Name 'exitCode'
+    $canonicalExitCodeValid = Test-StandardValidationIntegerRange -Value $canonicalExitCodeValue -Minimum 20 -Maximum 20
     $reportReleaseEligible = Get-StandardValidationProperty -Object $Report -Name 'releaseEligible'
     $sourceConformanceReleaseEligible = Get-StandardValidationProperty -Object $sourceConformance -Name 'releaseEligible'
     if ([string](Get-StandardValidationProperty -Object $Report -Name 'state') -cne 'FAILED' -or
-        [int](Get-StandardValidationProperty -Object $Report -Name 'exitCode') -ne 20 -or
+        -not $canonicalExitCodeValid -or
         $reportReleaseEligible -isnot [bool] -or [bool]$reportReleaseEligible -or
         [string](Get-StandardValidationProperty -Object $sourceConformance -Name 'status') -cne 'failed' -or
         $sourceConformanceReleaseEligible -isnot [bool] -or [bool]$sourceConformanceReleaseEligible -or
@@ -6527,6 +6529,10 @@ function New-StandardValidationInternalSourceContinuationEligibility {
                     $otherSkill = Get-StandardValidationProperty -Object $otherReport -Name 'skill'
                     $otherSkillId = [string](Get-StandardValidationProperty -Object $otherSkill -Name 'name')
                     [void]$observedOtherSkillIds.Add($otherSkillId)
+                    if ($otherSkillId -cnotmatch '^[a-z0-9]+(?:-[a-z0-9]+)*$' -or $otherSkillId -cnotin $otherSkillIds) {
+                        [void]$reasons.Add('internal-continuation-other-skill-id-invalid')
+                        continue
+                    }
                     $otherCompleteness = Get-StandardValidationProperty -Object $otherReport -Name 'analysis_completeness'
                     $otherMetadata = Get-StandardValidationProperty -Object $otherReport -Name 'metadata'
                     $otherComponents = Get-StandardValidationProperty -Object $otherReport -Name 'components'
@@ -6651,7 +6657,7 @@ function New-StandardValidationInternalSourceContinuationEligibility {
         otherScannerReportSha256 = @($uniqueOtherScannerReportSha256)
         repositoryTestEvidenceSha256 = $repositoryTestEvidenceSha256
         canonicalState = [string](Get-StandardValidationProperty -Object $Report -Name 'state')
-        canonicalExitCode = Get-StandardValidationProperty -Object $Report -Name 'exitCode'
+        canonicalExitCode = if ($canonicalExitCodeValid) { [int]$canonicalExitCodeValue } else { -1 }
         eligibleOperationAfterProtectedAdoption = @('source-merge')
         forbiddenOperations = @('release', 'install', 'publish', 'catalog-adoption')
         releaseEligible = $false
