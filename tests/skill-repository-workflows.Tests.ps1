@@ -49,6 +49,7 @@ Describe 'Agent Skill authority workflow contract' {
             '.github/workflows/validator-maintenance-producer.yml' = 1
         }
         $script:AuthorityTests = @(
+            'internal-source-continuation.Tests.ps1'
             'skill-repository-standard.Tests.ps1'
             'skill-repository-workflows.Tests.ps1'
             'standard-authority-entry-preflight.Tests.ps1'

@@ -4032,6 +4032,7 @@ if ($BindingOnly) {
 
 $repositoryRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $authorityTestPaths = @(
+    (Join-Path $repositoryRoot 'tests/internal-source-continuation.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/skill-repository-standard.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/skill-repository-workflows.Tests.ps1')
     (Join-Path $repositoryRoot 'tests/standard-authority-entry-preflight.Tests.ps1')

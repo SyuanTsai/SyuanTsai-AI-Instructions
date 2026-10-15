@@ -145,6 +145,7 @@ jobs:
           $authorityMatches = [regex]::Matches($authorityScript, '(?m)^\s*\(Join-Path \$repositoryRoot ''(tests/[^'']+\.Tests\.ps1)''\)')
           $authorityNames = @($authorityMatches | ForEach-Object { [string]$_.Groups[1].Value })
           $expectedAuthorityNames = @(
+            'tests/internal-source-continuation.Tests.ps1',
             'tests/skill-repository-standard.Tests.ps1',
             'tests/skill-repository-workflows.Tests.ps1',
             'tests/standard-authority-entry-preflight.Tests.ps1',

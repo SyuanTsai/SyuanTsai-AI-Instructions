@@ -494,6 +494,8 @@ Validation **MUST** 檢查預期 analyzer set / capabilities 已完成，而不�
 
 `analyzerIncomplete = BLOCK` 仍是 canonical Stage 4 與 release lifecycle 的固定語意。中央 authority **MAY** 另外在 `internal-source-continuation.json` 登錄由同一 authority 管理的內部 repository／Skill，對單一已知 parser limitation 產生 non-publishable technical eligibility；consumer **MUST NOT** 自行宣告 internal 身分、修改 allowlist、將 policy 複製到 consumer repository，或把一般 scanner failure／finding 解讀成 parser limitation。
 
+Production evaluation **MUST** 從 authenticated authority snapshot 的 exact `selectedFiles` inventory 綁定 `docs/standards/internal-source-continuation.json`、`docs/standards/schemas/internal-source-continuation-v1.schema.json` 與 `docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json`，並以已驗證的 policy digest 評估 eligibility；未綁定或 bytes 不一致的本機副本 **MUST** 被拒絕。
+
 Internal source continuation **MUST** 同時證明：
 
 - 中央 policy 的 exact repository 與 Skill registration；
@@ -639,6 +641,7 @@ Repository Tests stage **MUST** 在 Package Validation 與 SkillSpector Static �
 | Ownership | Reference implementation | Required regression paths |
 |---|---|---|
 | Candidate/authority runner、tool receipt parser、source dispatch integrity、native report reader | `scripts/Invoke-StandardValidation.ps1` | `tests/skill-repository-standard.Tests.ps1`, `tests/standard-validation-runner.Tests.ps1`, `tests/standard-core-pester-adapter.Tests.ps1` |
+| Internal source continuation policy、authenticated authority binding 與 eligibility rejection | `docs/standards/internal-source-continuation.json`, `docs/standards/schemas/internal-source-continuation-v1.schema.json`, `docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json`, `scripts/Invoke-StandardValidation.ps1` | `tests/internal-source-continuation.Tests.ps1`, `tests/skill-repository-standard.Tests.ps1`, `tests/skill-repository-workflows.Tests.ps1` |
 | Trusted validation tool acquisition, identity and per-run receipt production | `scripts/Resolve-StandardValidationTool.ps1` | `tests/standard-validation-resolver-hardening.Tests.ps1` |
 | Authority/security policy and admission ordering | `scripts/Invoke-StandardAuthorityGate.ps1`, `docs/standards/validation-security-gate.json` | `tests/skill-repository-standard.Tests.ps1`, `tests/skill-repository-workflows.Tests.ps1`, `tests/standard-validation-resolver-hardening.Tests.ps1` |
 | Required workflow wiring and ordinary non-authority Pester execution | `.github/workflows/pr8-powershell-validation.yml` | `tests/skill-repository-workflows.Tests.ps1` |

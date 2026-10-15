@@ -163,6 +163,41 @@ Describe 'Internal source continuation policy' {
         Assert-Continuation (($contract.evidence.internalSourceContinuation.protectedBindings -join ',') -ceq 'eventRepository,eventSourceRevision,canonicalRunId,launchBinding,candidateAcquisition,authorityRevision,scannerToolReceipt,staticRawEvent,supplementalTestInventory,supplementalRawEvents,cleanup,humanFindingDispositionReview,centralRevision,workflowRevision,authorityArchiveSha256') 'The protected adoption binding set drifted.'
     }
 
+    # Scenario: production authority evidence claims verification but binds different continuation-policy bytes.
+    # Purpose: prevent a local policy copy from widening the central allowlist after the authority snapshot was authenticated.
+    It 'UnitT15_rejects_policy_bytes_outside_the_authenticated_authority_snapshot' {
+        $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'authority-policy-binding')
+        $previousAuthorityEvidence = $script:StandardValidationAuthorityEvidence
+        try {
+            $script:StandardValidationAuthorityEvidence = [pscustomobject][ordered]@{
+                binding = [pscustomobject][ordered]@{
+                    verified = $true
+                    selectedFiles = @(
+                        [pscustomobject][ordered]@{ path = 'docs/standards/internal-source-continuation.json'; sha256 = ('0' * 64) }
+                        [pscustomobject][ordered]@{ path = 'docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json'; sha256 = ('1' * 64) }
+                        [pscustomobject][ordered]@{ path = 'docs/standards/schemas/internal-source-continuation-v1.schema.json'; sha256 = ('2' * 64) }
+                    )
+                }
+            }
+            $rejected = Invoke-ContinuationFixture -Fixture $fixture
+            Assert-Continuation ($rejected.status -ceq 'rejected') 'Policy bytes outside the authenticated authority snapshot were accepted.'
+            Assert-Continuation (@($rejected.failureReasons) -contains 'internal-continuation-policy-not-authority-bound') 'The authority policy binding failure was not reported.'
+
+            $script:StandardValidationAuthorityEvidence.binding.selectedFiles[0].sha256 = Get-StandardValidationFileSha256 -Path $fixture.PolicyPath -Context 'internal continuation bound policy'
+            $schemaRejected = Invoke-ContinuationFixture -Fixture $fixture
+            Assert-Continuation ($schemaRejected.status -ceq 'rejected') 'Unbound continuation schema bytes were accepted.'
+            Assert-Continuation (@($schemaRejected.failureReasons) -contains 'internal-continuation-policy-not-authority-bound') 'The authority schema binding failure was not reported.'
+
+            $script:StandardValidationAuthorityEvidence.binding.selectedFiles[1].sha256 = Get-StandardValidationFileSha256 -Path (Join-Path $repositoryRoot 'docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json') -Context 'internal continuation bound eligibility schema'
+            $script:StandardValidationAuthorityEvidence.binding.selectedFiles[2].sha256 = Get-StandardValidationFileSha256 -Path (Join-Path $repositoryRoot 'docs/standards/schemas/internal-source-continuation-v1.schema.json') -Context 'internal continuation bound policy schema'
+            $accepted = Invoke-ContinuationFixture -Fixture $fixture
+            Assert-Continuation ($accepted.status -ceq 'eligible-for-protected-review') ($accepted.failureReasons -join ',')
+        }
+        finally {
+            $script:StandardValidationAuthorityEvidence = $previousAuthorityEvidence
+        }
+    }
+
     # Scenario: one central-listed internal Skill is partial only because the approved parser analyzer degraded.
     # Purpose: let source work continue while keeping the canonical Static failure and release prohibition intact.
     It 'UnitT20_produces_only_non_publishable_internal_technical_eligibility' {

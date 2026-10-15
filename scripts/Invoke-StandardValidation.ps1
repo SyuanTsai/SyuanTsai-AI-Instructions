@@ -1883,6 +1883,9 @@ function Assert-StandardValidationAuthoritySnapshot {
     Assert-StandardValidationSha256 -Value $receipt.archiveSha256 -Context "$Context archiveSha256"
     Assert-StandardValidationSha256 -Value $receipt.snapshotInventorySha256 -Context "$Context snapshotInventorySha256"
     $expectedFiles = @(
+        'docs/standards/internal-source-continuation.json',
+        'docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json',
+        'docs/standards/schemas/internal-source-continuation-v1.schema.json',
         'docs/standards/schemas/standard-validation-adapter-v1.schema.json',
         'docs/standards/schemas/standard-validation-evidence-v1.schema.json',
         'docs/standards/schemas/standard-semantic-consent-evidence-v2.schema.json',
@@ -5924,6 +5927,41 @@ function New-StandardValidationInternalSourceContinuationEligibility {
         $policySnapshot = Get-StandardValidationJsonSnapshot -Path $actualPolicyPath -Context 'internal source continuation policy'
         $policySha256 = [string]$policySnapshot.sha256
         $policy = $policySnapshot.value
+        if ($null -ne $script:StandardValidationAuthorityEvidence) {
+            $authorityBinding = Get-StandardValidationProperty -Object $script:StandardValidationAuthorityEvidence -Name 'binding'
+            if ($null -ne $authorityBinding -and [bool](Get-StandardValidationProperty -Object $authorityBinding -Name 'verified')) {
+                $requiredContinuationAuthorityPaths = @(
+                    'docs/standards/internal-source-continuation.json',
+                    'docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json',
+                    'docs/standards/schemas/internal-source-continuation-v1.schema.json'
+                )
+                $authoritySelectedFiles = Get-StandardValidationProperty -Object $authorityBinding -Name 'selectedFiles'
+                $authorityContinuationInventoryValid = $true
+                foreach ($requiredAuthorityPath in $requiredContinuationAuthorityPaths) {
+                    $authorityEntries = @($authoritySelectedFiles | Where-Object {
+                            [string](Get-StandardValidationProperty -Object $_ -Name 'path') -ceq $requiredAuthorityPath
+                        })
+                    if ($authorityEntries.Count -ne 1) {
+                        $authorityContinuationInventoryValid = $false
+                        continue
+                    }
+                    $currentAuthoritySha256 = if ($requiredAuthorityPath -ceq $requiredContinuationAuthorityPaths[0]) {
+                        $policySha256
+                    }
+                    else {
+                        Get-StandardValidationFileSha256 `
+                            -Path (Join-Path $script:StandardValidationRepositoryRoot $requiredAuthorityPath) `
+                            -Context "internal continuation authority file $requiredAuthorityPath"
+                    }
+                    if ([string](Get-StandardValidationProperty -Object $authorityEntries[0] -Name 'sha256') -cne $currentAuthoritySha256) {
+                        $authorityContinuationInventoryValid = $false
+                    }
+                }
+                if (-not $authorityContinuationInventoryValid) {
+                    [void]$reasons.Add('internal-continuation-policy-not-authority-bound')
+                }
+            }
+        }
         if ([int](Get-StandardValidationProperty -Object $policy -Name 'schemaVersion') -ne 1 -or
             [string](Get-StandardValidationProperty -Object $policy -Name 'policy') -cne 'internal-source-continuation-v1' -or
             [string](Get-StandardValidationProperty -Object $policy -Name 'status') -cne 'adopted' -or

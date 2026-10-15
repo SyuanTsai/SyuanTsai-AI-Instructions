@@ -2689,13 +2689,14 @@ public sealed class C245NonCooperativeStream : Stream {
 
         $observedTestPaths = @([regex]::Matches($normalMain, "tests/[^']+\.Tests\.ps1") | ForEach-Object { $_.Value })
         $expectedTestPaths = @(
+            'tests/internal-source-continuation.Tests.ps1',
             'tests/skill-repository-standard.Tests.ps1',
             'tests/skill-repository-workflows.Tests.ps1',
             'tests/standard-authority-entry-preflight.Tests.ps1',
             'tests/standard-entry-point-binding.Tests.ps1',
             'tests/standard-core-pester-adapter.Tests.ps1'
         )
-        Assert-Equal ($observedTestPaths -join '|') ($expectedTestPaths -join '|') 'The ordinary gate must execute exactly the five retained TestPaths in the packet order.'
+        Assert-Equal ($observedTestPaths -join '|') ($expectedTestPaths -join '|') 'The ordinary gate must execute exactly the six retained TestPaths in the packet order.'
         Assert-NotMatch $normalMain 'GITHUB_TOKEN|GH_TOKEN' 'The ordinary gate must not receive external resolver credentials.'
         # Scenario: External validators return clean-looking reports for a different package, incomplete inventory, or downgraded findings.
         # Purpose: Bind every report to this exact fixture and interpret native report severity without PowerShell coercion.
@@ -4801,7 +4802,7 @@ public sealed class C245NonCooperativeStream : Stream {
                 $consistent.candidate.acquisition.verified = $true
                 $consistent.authority.binding.status = 'verified'
                 $consistent.authority.binding.verified = $true
-                $consistent.authority.binding.selectedFiles = @(1..13 | ForEach-Object {
+                $consistent.authority.binding.selectedFiles = @(1..16 | ForEach-Object {
                         [pscustomobject][ordered]@{ path = "authority/file-$_.json"; sha256 = ('0' * 64) }
                     })
                 $consistent.launchBinding.status = 'verified'
@@ -6081,3 +6082,49 @@ Describe 'SYP325 selected source integrity' -Tag 'SYP325' {
         }
     }
     }
+
+Describe 'SYP171 internal source continuation authority binding' {
+    # Scenario: a production consumer authenticates a central authority snapshot before evaluating internal continuation.
+    # Purpose: bind the allowlist and both decision schemas to the signed authority inventory and its fixed evidence cardinality.
+    It 'UnitT10_binds_internal_continuation_files_to_the_authenticated_authority_snapshot' {
+        $root = Split-Path -Parent $PSScriptRoot
+        $runnerPath = Join-Path $root 'scripts/Invoke-StandardValidation.ps1'
+        $tokens = $null
+        $parseErrors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($runnerPath, [ref]$tokens, [ref]$parseErrors)
+        if (@($parseErrors).Count -gt 0) { throw 'The central validation runner must remain parseable.' }
+        $snapshotFunctions = @($ast.FindAll({
+                    param($node)
+                    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -ceq 'Assert-StandardValidationAuthoritySnapshot'
+                }, $true))
+        if ($snapshotFunctions.Count -ne 1) { throw 'The authority snapshot verifier must have exactly one definition.' }
+        $snapshotFunction = $snapshotFunctions[0].Extent.Text
+        foreach ($requiredPath in @(
+                'docs/standards/internal-source-continuation.json',
+                'docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json',
+                'docs/standards/schemas/internal-source-continuation-v1.schema.json'
+            )) {
+            if ([regex]::Matches($snapshotFunction, [regex]::Escape($requiredPath)).Count -ne 1) {
+                throw "The authenticated authority inventory must contain '$requiredPath' exactly once."
+            }
+        }
+
+        $evidenceSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $root 'docs/standards/schemas/standard-validation-evidence-v1.schema.json') | ConvertFrom-Json
+        $selectedFilesSchema = $evidenceSchema.allOf[5].then.properties.authority.properties.binding.properties.selectedFiles
+        if ($selectedFilesSchema.minItems -ne 16 -or $selectedFilesSchema.maxItems -ne 16) {
+            throw 'The authority evidence schema must require the complete 16-file authenticated inventory.'
+        }
+        $verifiedBindingSchema = $evidenceSchema.'$defs'.authorityBinding.allOf[0].then.properties.selectedFiles
+        if ($verifiedBindingSchema.minItems -ne 16 -or $verifiedBindingSchema.maxItems -ne 16) {
+            throw 'Every verified authority binding must retain the complete 16-file authenticated inventory.'
+        }
+
+        $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $root 'docs/standards/skill-repository-standard.md')
+        if ($standard -notmatch 'authenticated authority snapshot' -or
+            $standard -notmatch 'internal-source-continuation-eligibility-v1\.schema\.json' -or
+            $standard -notmatch 'internal-source-continuation-v1\.schema\.json') {
+            throw 'The normative Standard must require the continuation policy and schemas to come from the authenticated authority snapshot.'
+        }
+    }
+}
