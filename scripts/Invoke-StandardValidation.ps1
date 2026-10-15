@@ -5869,6 +5869,76 @@ function New-StandardValidationProtectedSourceMergeDecision {
 # exact, centrally registered internal source candidate to continue to merge
 # review when SkillSpector is incomplete only because of one approved parser
 # limitation. It never converts Static to passed or authorizes release work.
+function Test-StandardValidationInternalContinuationScannerBinding {
+    param(
+        [Parameter(Mandatory = $true)] $Report,
+        [Parameter(Mandatory = $true)][string] $CandidateId,
+        [Parameter(Mandatory = $true)][string[]] $ActiveSkills,
+        [Parameter(Mandatory = $true)] $ScannerBindings
+    )
+
+    try {
+        $stages = Get-StandardValidationProperty -Object $Report -Name 'stages'
+        if ($stages.Count -ne 10) { return $false }
+        $stage = $stages[3]
+        $events = Get-StandardValidationProperty -Object $stage -Name 'events'
+        if ($events -isnot [array] -or @($events).Count -ne 1) { return $false }
+        $event = $events[0]
+        if ([string](Get-StandardValidationProperty -Object $event -Name 'stageId') -cne 'skillspector-static' -or
+            [string](Get-StandardValidationProperty -Object $event -Name 'toolId') -cne 'staticAnalyzer' -or
+            $null -ne (Get-StandardValidationProperty -Object $event -Name 'skillId') -or
+            [string](Get-StandardValidationProperty -Object $event -Name 'candidateId') -cne $CandidateId -or
+            [string](Get-StandardValidationProperty -Object $event -Name 'status') -cne 'failed' -or
+            -not (Test-StandardValidationIntegerRange -Value (Get-StandardValidationProperty -Object $event -Name 'exitCode') -Minimum 1 -Maximum 1) -or
+            -not (Test-StandardValidationSourceEventOutputBinding -Event $event -Report $Report)) {
+            return $false
+        }
+
+        $raw = Get-StandardValidationJson -Path ([string](Get-StandardValidationProperty -Object $event -Name 'outputPath')) -Context 'internal continuation Static raw event'
+        $stdout = Get-StandardValidationProperty -Object $raw -Name 'stdout'
+        if ($stdout -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$stdout)) { return $false }
+        $envelope = ([string]$stdout) | ConvertFrom-Json -ErrorAction Stop
+        if ([string](Get-StandardValidationProperty -Object $envelope -Name 'candidateIdentity') -cne $CandidateId -or
+            (@((Get-StandardValidationProperty -Object $envelope -Name 'activeSkills')) -join "`n") -cne (@($ActiveSkills) -join "`n")) {
+            return $false
+        }
+        $nativeReports = Get-StandardValidationProperty -Object $envelope -Name 'nativeReports'
+        if ($nativeReports -isnot [array] -or @($nativeReports).Count -ne @($ScannerBindings).Count -or
+            @($ScannerBindings).Count -ne @($ActiveSkills).Count) {
+            return $false
+        }
+        $artifactRoot = [string](Get-StandardValidationProperty -Object (Get-StandardValidationProperty -Object $Report -Name 'artifacts') -Name 'root')
+        if ([string]::IsNullOrWhiteSpace($artifactRoot)) { return $false }
+        foreach ($binding in @($ScannerBindings)) {
+            $skillId = [string](Get-StandardValidationProperty -Object $binding -Name 'skillId')
+            $reportPath = [string](Get-StandardValidationProperty -Object $binding -Name 'path')
+            $reportSha256 = [string](Get-StandardValidationProperty -Object $binding -Name 'sha256')
+            $expectedSource = [string](Get-StandardValidationProperty -Object $binding -Name 'expectedSource')
+            $reportedSource = [string](Get-StandardValidationProperty -Object $binding -Name 'reportedSource')
+            $matches = @($nativeReports | Where-Object { [string](Get-StandardValidationProperty -Object $_ -Name 'skillId') -ceq $skillId })
+            if ($matches.Count -ne 1 -or $skillId -cnotin $ActiveSkills -or
+                [string]::IsNullOrWhiteSpace($reportPath) -or [string]::IsNullOrWhiteSpace($expectedSource) -or
+                [string]::IsNullOrWhiteSpace($reportedSource)) {
+                return $false
+            }
+            $native = $matches[0]
+            $nativePath = [string](Get-StandardValidationProperty -Object $native -Name 'path')
+            $nativeSha256 = [string](Get-StandardValidationProperty -Object $native -Name 'sha256')
+            $pathComparison = Get-StandardValidationPathComparison -Paths @($reportPath, $nativePath, $expectedSource, $reportedSource)
+            if (-not [string]::Equals([IO.Path]::GetFullPath($reportPath), [IO.Path]::GetFullPath($nativePath), $pathComparison) -or
+                -not [string]::Equals([IO.Path]::GetFullPath($expectedSource), [IO.Path]::GetFullPath($reportedSource), $pathComparison) -or
+                -not (Test-StandardValidationPathWithin -Path $nativePath -Root $artifactRoot) -or
+                $reportSha256 -cnotmatch '^[0-9a-f]{64}$' -or $nativeSha256 -cne $reportSha256 -or
+                (Get-StandardValidationFileSha256 -Path $nativePath -Context "internal continuation $skillId native report") -cne $reportSha256 -or
+                -not (Test-StandardValidationIntegerRange -Value (Get-StandardValidationProperty -Object $native -Name 'exitCode') -Minimum 0 -Maximum 0)) {
+                return $false
+            }
+        }
+        return $true
+    }
+    catch { return $false }
+}
+
 function New-StandardValidationInternalSourceContinuationEligibility {
     param(
         [Parameter(Mandatory = $true)] $Report,
@@ -5878,6 +5948,7 @@ function New-StandardValidationInternalSourceContinuationEligibility {
         [Parameter(Mandatory = $true)][string] $SkillId,
         [Parameter(Mandatory = $true)][string] $ScannerReportPath,
         [string[]] $OtherScannerReportPaths = @(),
+        [Parameter(Mandatory = $true)][string] $AuthorityArtifactsRoot,
         [Parameter(Mandatory = $true)][string] $RepositoryTestEvidencePath
     )
 
@@ -5889,6 +5960,7 @@ function New-StandardValidationInternalSourceContinuationEligibility {
     $otherScannerReportSha256 = @()
     $repositoryTestEvidenceSha256 = $null
     $candidateContentSha256 = $null
+    $scannerBindings = New-Object 'System.Collections.Generic.List[object]'
     $candidate = Get-StandardValidationProperty -Object $Report -Name 'candidate'
     $sourceRepository = [string](Get-StandardValidationProperty -Object $candidate -Name 'sourceRepository')
     $sourceRevision = [string](Get-StandardValidationProperty -Object $candidate -Name 'sourceRevision')
@@ -5928,38 +6000,50 @@ function New-StandardValidationInternalSourceContinuationEligibility {
         $policySha256 = [string]$policySnapshot.sha256
         $policy = $policySnapshot.value
         $authorityContinuationInventoryValid = $false
-        if ($null -ne $script:StandardValidationAuthorityEvidence) {
-            $authorityBinding = Get-StandardValidationProperty -Object $script:StandardValidationAuthorityEvidence -Name 'binding'
-            if ($null -ne $authorityBinding -and [bool](Get-StandardValidationProperty -Object $authorityBinding -Name 'verified')) {
-                $requiredContinuationAuthorityPaths = @(
-                    'docs/standards/internal-source-continuation.json',
-                    'docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json',
-                    'docs/standards/schemas/internal-source-continuation-v1.schema.json'
-                )
-                $authoritySelectedFiles = Get-StandardValidationProperty -Object $authorityBinding -Name 'selectedFiles'
-                $authorityContinuationInventoryValid = $true
-                foreach ($requiredAuthorityPath in $requiredContinuationAuthorityPaths) {
-                    $authorityEntries = @($authoritySelectedFiles | Where-Object {
-                            [string](Get-StandardValidationProperty -Object $_ -Name 'path') -ceq $requiredAuthorityPath
-                        })
-                    if ($authorityEntries.Count -ne 1) {
-                        $authorityContinuationInventoryValid = $false
-                        continue
-                    }
-                    $currentAuthoritySha256 = if ($requiredAuthorityPath -ceq $requiredContinuationAuthorityPaths[0]) {
-                        $policySha256
-                    }
-                    else {
-                        Get-StandardValidationFileSha256 `
-                            -Path (Join-Path $script:StandardValidationRepositoryRoot $requiredAuthorityPath) `
-                            -Context "internal continuation authority file $requiredAuthorityPath"
-                    }
-                    if ([string](Get-StandardValidationProperty -Object $authorityEntries[0] -Name 'sha256') -cne $currentAuthoritySha256) {
-                        $authorityContinuationInventoryValid = $false
+        try {
+            if ($null -ne $script:StandardValidationAuthorityEvidence) {
+                $authorityBinding = Get-StandardValidationProperty -Object $script:StandardValidationAuthorityEvidence -Name 'binding'
+                if ($null -ne $authorityBinding) {
+                    $authenticatedAuthorityBinding = Assert-StandardValidationAuthoritySnapshot `
+                        -RepositoryRoot $script:StandardValidationRepositoryRoot `
+                        -AuthorityRevision ([string](Get-StandardValidationProperty -Object $authorityBinding -Name 'revision')) `
+                        -AuthorityArchivePath ([string](Get-StandardValidationProperty -Object $authorityBinding -Name 'archivePath')) `
+                        -AuthoritySnapshotEvidencePath ([string](Get-StandardValidationProperty -Object $authorityBinding -Name 'snapshotEvidencePath')) `
+                        -TrustAnchorRoot (Join-Path $script:StandardValidationRepositoryRoot 'docs/standards/trust-anchors') `
+                        -ArtifactsRoot $AuthorityArtifactsRoot `
+                        -StagingRoot (Join-Path $AuthorityArtifactsRoot ("authority-continuation-" + [guid]::NewGuid().ToString('N'))) `
+                        -Context 'internal continuation authority snapshot'
+                    $requiredContinuationAuthorityPaths = @(
+                        'docs/standards/internal-source-continuation.json',
+                        'docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json',
+                        'docs/standards/schemas/internal-source-continuation-v1.schema.json'
+                    )
+                    $authoritySelectedFiles = Get-StandardValidationProperty -Object $authenticatedAuthorityBinding -Name 'selectedFiles'
+                    $authorityContinuationInventoryValid = $true
+                    foreach ($requiredAuthorityPath in $requiredContinuationAuthorityPaths) {
+                        $authorityEntries = @($authoritySelectedFiles | Where-Object {
+                                [string](Get-StandardValidationProperty -Object $_ -Name 'path') -ceq $requiredAuthorityPath
+                            })
+                        if ($authorityEntries.Count -ne 1) {
+                            $authorityContinuationInventoryValid = $false
+                            continue
+                        }
+                        $currentAuthoritySha256 = if ($requiredAuthorityPath -ceq $requiredContinuationAuthorityPaths[0]) {
+                            $policySha256
+                        }
+                        else {
+                            Get-StandardValidationFileSha256 `
+                                -Path (Join-Path $script:StandardValidationRepositoryRoot $requiredAuthorityPath) `
+                                -Context "internal continuation authority file $requiredAuthorityPath"
+                        }
+                        if ([string](Get-StandardValidationProperty -Object $authorityEntries[0] -Name 'sha256') -cne $currentAuthoritySha256) {
+                            $authorityContinuationInventoryValid = $false
+                        }
                     }
                 }
             }
         }
+        catch { $authorityContinuationInventoryValid = $false }
         if (-not $authorityContinuationInventoryValid) {
             [void]$reasons.Add('internal-continuation-policy-not-authority-bound')
         }
@@ -6085,6 +6169,13 @@ function New-StandardValidationInternalSourceContinuationEligibility {
             $expectedAnalyzerIdValues = Get-StandardValidationProperty -Object $entry -Name 'expectedAnalyzerIds'
             $expectedAnalyzerIds = @($expectedAnalyzerIdValues | Sort-Object)
             $expectedLimitations = @((Get-StandardValidationProperty -Object $entry -Name 'expectedLimitations') | ForEach-Object { [string]$_ })
+            [void]$scannerBindings.Add([pscustomobject][ordered]@{
+                    skillId = $SkillId
+                    path = [IO.Path]::GetFullPath($ScannerReportPath)
+                    sha256 = $scannerReportSha256
+                    expectedSource = [IO.Path]::GetFullPath($skillRoot)
+                    reportedSource = [string](Get-StandardValidationProperty -Object $scannerSkill -Name 'source')
+                })
 
             if ([string](Get-StandardValidationProperty -Object $scannerSkill -Name 'name') -cne $SkillId -or
                 -not [bool](Get-StandardValidationProperty -Object $scanner -Name 'execution_successful') -or
@@ -6275,6 +6366,13 @@ function New-StandardValidationInternalSourceContinuationEligibility {
                     $otherComponentPaths = @($otherComponents | ForEach-Object { ([string](Get-StandardValidationProperty -Object $_ -Name 'path')).Replace('\', '/') } | Sort-Object)
                     $otherInventoryPaths = @($otherInventory | ForEach-Object { ([string]$_.path).Replace('\', '/') } | Sort-Object)
                     $otherAnalyzerIds = @($otherAnalyzerStatuses | ForEach-Object { [string](Get-StandardValidationProperty -Object $_ -Name 'analyzer_id') } | Sort-Object)
+                    [void]$scannerBindings.Add([pscustomobject][ordered]@{
+                            skillId = $otherSkillId
+                            path = [IO.Path]::GetFullPath($otherScannerReportPath)
+                            sha256 = [string]$otherSnapshot.sha256
+                            expectedSource = [IO.Path]::GetFullPath($otherRoot)
+                            reportedSource = [string](Get-StandardValidationProperty -Object $otherSkill -Name 'source')
+                        })
                     $otherAnalyzerStateInvalid = $false
                     foreach ($otherAnalyzerStatus in $otherAnalyzerStatuses) {
                         $otherStatus = [string](Get-StandardValidationProperty -Object $otherAnalyzerStatus -Name 'status')
@@ -6316,6 +6414,14 @@ function New-StandardValidationInternalSourceContinuationEligibility {
             if ((@($observedOtherSkillIds | Sort-Object -Unique) -join "`n") -cne ($otherSkillIds -join "`n")) {
                 [void]$reasons.Add('internal-continuation-other-skill-set-invalid')
             }
+        }
+
+        if (-not (Test-StandardValidationInternalContinuationScannerBinding `
+                -Report $Report `
+                -CandidateId $candidateId `
+                -ActiveSkills @($activeSkills) `
+                -ScannerBindings @($scannerBindings.ToArray()))) {
+            [void]$reasons.Add('internal-continuation-scanner-candidate-binding-invalid')
         }
 
         try {

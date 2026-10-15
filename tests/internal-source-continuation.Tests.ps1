@@ -20,7 +20,7 @@ Describe 'Internal source continuation policy' {
         }
 
         function New-ContinuationFixture {
-            param([string] $Root)
+            param([string] $Root, [switch] $IncludeOtherSkill)
 
             $candidateRoot = Join-Path $Root 'candidate'
             $policyPath = Join-Path $repositoryRoot 'docs/standards/internal-source-continuation.json'
@@ -31,6 +31,15 @@ Describe 'Internal source continuation policy' {
             foreach ($path in $paths) {
                 $fullPath = Join-Path $skillRoot $path
                 [IO.File]::WriteAllText($fullPath, "fixture:$path", [Text.UTF8Encoding]::new($false))
+            }
+            $activeSkills = @('manage-confluence-docs-as-code')
+            $otherSkillId = 'configure-jira-api-access'
+            $otherSkillRoot = Join-Path $candidateRoot "skills/$otherSkillId"
+            $otherPaths = @('SKILL.md')
+            if ($IncludeOtherSkill) {
+                [void](New-Item -ItemType Directory -Path $otherSkillRoot -Force)
+                [IO.File]::WriteAllText((Join-Path $otherSkillRoot 'SKILL.md'), 'fixture:other-skill', [Text.UTF8Encoding]::new($false))
+                $activeSkills += $otherSkillId
             }
             $inventory = Get-StandardValidationInventory -Root $candidateRoot -Context 'internal continuation fixture'
             $contentSha256 = Get-StandardValidationInventorySha256 -Inventory $inventory
@@ -77,7 +86,7 @@ Describe 'Internal source continuation policy' {
                 candidate = [ordered]@{
                     sourceRepository = 'https://github.com/SyuanTsai/Skill-Atlassian-Ecosystem.git'
                     sourceRevision = $sourceRevision; candidateId = $candidateId; contentSha256 = $contentSha256
-                    activeSkills = @('manage-confluence-docs-as-code')
+                    activeSkills = @($activeSkills)
                 }
                 stages = @($stages)
                 sourceConformance = [ordered]@{ status = 'failed'; releaseEligible = $false }
@@ -107,8 +116,67 @@ Describe 'Internal source continuation policy' {
                     })
                 }
             }
-            $scannerPath = Join-Path $Root 'scanner.json'
+            $artifactRoot = Join-Path $Root 'run-artifacts'
+            $nativeReportRoot = Join-Path $artifactRoot 'native-reports'
+            [void](New-Item -ItemType Directory -Path $nativeReportRoot -Force)
+            $scannerPath = Join-Path $nativeReportRoot 'manage-confluence-docs-as-code.json'
             Write-ContinuationJson -Path $scannerPath -Value $scanner
+            $otherScannerReportPaths = @()
+            if ($IncludeOtherSkill) {
+                $otherScanner = [ordered]@{
+                    skill = [ordered]@{ name = $otherSkillId; source = $otherSkillRoot }
+                    metadata = [ordered]@{ skillspector_version = '2.12.0' }
+                    execution_successful = $true
+                    components = @($otherPaths | ForEach-Object { [ordered]@{ path = $_ } })
+                    issues = @(); suppressed_count = 0; suppressed = @()
+                    analysis_completeness = [ordered]@{
+                        status = 'complete'; is_complete = $true; total_components = 1; scanned_components = 1
+                        findings_before_filtering = 0; findings_after_filtering = 0
+                        ledger_exceptions = @(); scope_exclusions = @(); limitations = @()
+                        analyzer_statuses = @($policyEntry.expectedAnalyzerIds | ForEach-Object {
+                            [ordered]@{ analyzer_id = $_; status = 'completed'; planned_work = 1; completed = 1; partial = 0; skipped = 0; failed = 0; unaccounted = 0 }
+                        })
+                    }
+                }
+                $otherScannerPath = Join-Path $nativeReportRoot "$otherSkillId.json"
+                Write-ContinuationJson -Path $otherScannerPath -Value $otherScanner
+                $otherScannerReportPaths = @($otherScannerPath)
+            }
+            $nativeReports = @(
+                [ordered]@{
+                    skillId = 'manage-confluence-docs-as-code'; path = $scannerPath
+                    sha256 = Get-StandardValidationFileSha256 -Path $scannerPath -Context 'internal continuation target native report'
+                    exitCode = 0; command = 'skillspector'; commandSha256 = ('c' * 64); arguments = @('--source', $skillRoot)
+                }
+            )
+            if ($IncludeOtherSkill) {
+                $nativeReports += [ordered]@{
+                    skillId = $otherSkillId; path = $otherScannerReportPaths[0]
+                    sha256 = Get-StandardValidationFileSha256 -Path $otherScannerReportPaths[0] -Context 'internal continuation other native report'
+                    exitCode = 0; command = 'skillspector'; commandSha256 = ('c' * 64); arguments = @('--source', $otherSkillRoot)
+                }
+            }
+            $eventId = [guid]::NewGuid().ToString()
+            $eventStdout = [string]([ordered]@{
+                    candidateIdentity = $candidateId; activeSkills = @($activeSkills)
+                    analyzerCompleteness = 'incomplete'; nativeReports = @($nativeReports)
+                } | ConvertTo-Json -Depth 20 -Compress)
+            $eventStderr = "SkillSpector did not prove complete static analysis for 'manage-confluence-docs-as-code'.`n"
+            $eventRaw = [ordered]@{
+                schemaVersion = 1; eventId = $eventId; stageId = 'skillspector-static'; toolId = 'staticAnalyzer'
+                skillId = $null; candidateId = $candidateId
+                process = [ordered]@{ exitCode = 1; status = 'failed'; cleanedUp = $true; stdout = $eventStdout; stderr = $eventStderr }
+                stdout = $eventStdout; stderr = $eventStderr
+            }
+            $eventPath = Join-Path $artifactRoot 'static-event.json'
+            Write-ContinuationJson -Path $eventPath -Value $eventRaw
+            $stages[3].events = @([ordered]@{
+                    eventId = $eventId; stageId = 'skillspector-static'; toolId = 'staticAnalyzer'; skillId = $null
+                    candidateId = $candidateId; commandSha256 = ('c' * 64); exitCode = 1; status = 'failed'
+                    outputSha256 = Get-StandardValidationOutputHash -Stdout $eventStdout -Stderr $eventStderr
+                    outputPath = $eventPath; cleanedUp = $true
+                })
+            $report.artifacts = [ordered]@{ root = $artifactRoot }
             $testsPath = Join-Path $Root 'repository-tests.json'
             $tests = [ordered]@{
                 status = 'passed'; sourceRevision = $sourceRevision; contentSha256 = $contentSha256
@@ -119,7 +187,8 @@ Describe 'Internal source continuation policy' {
             return [ordered]@{
                 CandidateRoot = $candidateRoot; Report = $report; Scanner = $scanner; ScannerReportPath = $scannerPath
                 RepositoryTests = $tests; RepositoryTestEvidencePath = $testsPath; SourceRevision = $sourceRevision
-                PolicyPath = $policyPath
+                PolicyPath = $policyPath; OtherScannerReportPaths = @($otherScannerReportPaths)
+                AuthorityArtifactsRoot = (Join-Path $Root 'authority-artifacts')
             }
         }
 
@@ -129,6 +198,8 @@ Describe 'Internal source continuation policy' {
                 -Report $Fixture.Report -PolicyPath $Fixture.PolicyPath -CandidateRoot $Fixture.CandidateRoot `
                 -ExpectedSourceRevision $Fixture.SourceRevision -SkillId 'manage-confluence-docs-as-code' `
                 -ScannerReportPath $Fixture.ScannerReportPath `
+                -OtherScannerReportPaths $Fixture.OtherScannerReportPaths `
+                -AuthorityArtifactsRoot $Fixture.AuthorityArtifactsRoot `
                 -RepositoryTestEvidencePath $Fixture.RepositoryTestEvidencePath
         }
 
@@ -140,10 +211,35 @@ Describe 'Internal source continuation policy' {
         $script:StandardValidationAuthorityEvidence = [pscustomobject][ordered]@{
             binding = [pscustomobject][ordered]@{
                 verified = $true
+                revision = ('d' * 40)
+                archivePath = 'authenticated-authority.zip'
+                snapshotEvidencePath = 'authenticated-authority-receipt.json'
                 selectedFiles = @($continuationAuthorityPaths | ForEach-Object {
                         [pscustomobject][ordered]@{
                             path = $_
                             sha256 = Get-StandardValidationFileSha256 -Path (Join-Path $repositoryRoot $_) -Context "internal continuation test authority file $_"
+                        }
+                    })
+            }
+        }
+    }
+
+    BeforeEach {
+        Mock Assert-StandardValidationAuthoritySnapshot {
+            param($RepositoryRoot, $AuthorityRevision, $AuthorityArchivePath, $AuthoritySnapshotEvidencePath,
+                $TrustAnchorRoot, $ArtifactsRoot, $StagingRoot, $Context)
+            if ($AuthorityRevision -cne ('d' * 40) -or
+                $AuthorityArchivePath -cne 'authenticated-authority.zip' -or
+                $AuthoritySnapshotEvidencePath -cne 'authenticated-authority-receipt.json') {
+                throw 'BLOCKED|Test authority snapshot is not authenticated.'
+            }
+            return [pscustomobject][ordered]@{
+                verified = $true; revision = $AuthorityRevision
+                archivePath = $AuthorityArchivePath; snapshotEvidencePath = $AuthoritySnapshotEvidencePath
+                selectedFiles = @($continuationAuthorityPaths | ForEach-Object {
+                        [pscustomobject][ordered]@{
+                            path = $_
+                            sha256 = Get-StandardValidationFileSha256 -Path (Join-Path $repositoryRoot $_) -Context "authenticated continuation authority file $_"
                         }
                     })
             }
@@ -202,25 +298,27 @@ Describe 'Internal source continuation policy' {
             $script:StandardValidationAuthorityEvidence = [pscustomobject][ordered]@{
                 binding = [pscustomobject][ordered]@{
                     verified = $true
+                    revision = ('e' * 40)
+                    archivePath = 'caller-selected-authority.zip'
+                    snapshotEvidencePath = 'caller-selected-authority-receipt.json'
                     selectedFiles = @(
-                        [pscustomobject][ordered]@{ path = 'docs/standards/internal-source-continuation.json'; sha256 = ('0' * 64) }
-                        [pscustomobject][ordered]@{ path = 'docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json'; sha256 = ('1' * 64) }
-                        [pscustomobject][ordered]@{ path = 'docs/standards/schemas/internal-source-continuation-v1.schema.json'; sha256 = ('2' * 64) }
+                        $continuationAuthorityPaths | ForEach-Object {
+                            [pscustomobject][ordered]@{
+                                path = $_
+                                sha256 = Get-StandardValidationFileSha256 -Path (Join-Path $repositoryRoot $_) -Context "self-asserted continuation authority file $_"
+                            }
+                        }
                     )
                 }
             }
             $rejected = Invoke-ContinuationFixture -Fixture $fixture
-            Assert-Continuation ($rejected.status -ceq 'rejected') 'Policy bytes outside the authenticated authority snapshot were accepted.'
-            Assert-Continuation (@($rejected.failureReasons) -contains 'internal-continuation-policy-not-authority-bound') 'The authority policy binding failure was not reported.'
-
-            $script:StandardValidationAuthorityEvidence.binding.selectedFiles[0].sha256 = $previousAuthorityEvidence.binding.selectedFiles[0].sha256
-            $schemaRejected = Invoke-ContinuationFixture -Fixture $fixture
-            Assert-Continuation ($schemaRejected.status -ceq 'rejected') 'Unbound continuation schema bytes were accepted.'
-            Assert-Continuation (@($schemaRejected.failureReasons) -contains 'internal-continuation-policy-not-authority-bound') 'The authority schema binding failure was not reported.'
+            Assert-Continuation ($rejected.status -ceq 'rejected') 'A caller-authored verified flag and local file hashes were accepted as authenticated authority.'
+            Assert-Continuation (@($rejected.failureReasons) -contains 'internal-continuation-policy-not-authority-bound') 'The forged authority binding failure was not reported.'
 
             $script:StandardValidationAuthorityEvidence = $previousAuthorityEvidence
             $accepted = Invoke-ContinuationFixture -Fixture $fixture
             Assert-Continuation ($accepted.status -ceq 'eligible-for-protected-review') ($accepted.failureReasons -join ',')
+            Assert-MockCalled Assert-StandardValidationAuthoritySnapshot -Scope It
         }
         finally {
             $script:StandardValidationAuthorityEvidence = $previousAuthorityEvidence
@@ -259,6 +357,39 @@ Describe 'Internal source continuation policy' {
             else { $fixture.Report.candidate.activeSkills = @('other-skill') }
             $decision = Invoke-ContinuationFixture -Fixture $fixture
             Assert-Continuation ($decision.status -ceq 'rejected') "Scope drift '$drift' was accepted."
+        }
+    }
+
+    # Scenario: scanner JSON is copied from another checkout or bound to a different candidate event.
+    # Purpose: require both target and other-Skill reports to be the native reports emitted by this candidate's Stage 4 process.
+    It 'UnitT35_rejects_scanner_reports_not_bound_to_the_evaluated_candidate' {
+        foreach ($drift in @('target-report-path', 'target-source', 'event-candidate', 'other-report-path', 'other-source')) {
+            $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive "candidate-binding-$drift") -IncludeOtherSkill
+            switch ($drift) {
+                'target-report-path' {
+                    $stalePath = Join-Path (Split-Path -Parent $fixture.ScannerReportPath) 'copied-target.json'
+                    Copy-Item -LiteralPath $fixture.ScannerReportPath -Destination $stalePath
+                    $fixture.ScannerReportPath = $stalePath
+                }
+                'target-source' {
+                    $fixture.Scanner.skill.source = Join-Path $TestDrive 'another-checkout/manage-confluence-docs-as-code'
+                    Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner
+                }
+                'event-candidate' { $fixture.Report.stages[3].events[0].candidateId = ('f' * 64) }
+                'other-report-path' {
+                    $stalePath = Join-Path (Split-Path -Parent $fixture.OtherScannerReportPaths[0]) 'copied-other.json'
+                    Copy-Item -LiteralPath $fixture.OtherScannerReportPaths[0] -Destination $stalePath
+                    $fixture.OtherScannerReportPaths[0] = $stalePath
+                }
+                'other-source' {
+                    $other = Get-Content -Raw -LiteralPath $fixture.OtherScannerReportPaths[0] | ConvertFrom-Json
+                    $other.skill.source = Join-Path $TestDrive 'another-checkout/configure-jira-api-access'
+                    Write-ContinuationJson $fixture.OtherScannerReportPaths[0] $other
+                }
+            }
+            $decision = Invoke-ContinuationFixture -Fixture $fixture
+            Assert-Continuation ($decision.status -ceq 'rejected') "Scanner candidate-binding drift '$drift' was accepted."
+            Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-scanner-candidate-binding-invalid') "Scanner candidate-binding drift '$drift' did not report its binding failure."
         }
     }
 

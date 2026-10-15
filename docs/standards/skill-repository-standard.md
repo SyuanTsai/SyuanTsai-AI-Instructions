@@ -494,13 +494,13 @@ Validation **MUST** 檢查預期 analyzer set / capabilities 已完成，而不�
 
 `analyzerIncomplete = BLOCK` 仍是 canonical Stage 4 與 release lifecycle 的固定語意。中央 authority **MAY** 另外在 `internal-source-continuation.json` 登錄由同一 authority 管理的內部 repository／Skill，對單一已知 parser limitation 產生 non-publishable technical eligibility；consumer **MUST NOT** 自行宣告 internal 身分、修改 allowlist、將 policy 複製到 consumer repository，或把一般 scanner failure／finding 解讀成 parser limitation。
 
-Production evaluation **MUST** 從 authenticated authority snapshot 的 exact `selectedFiles` inventory 綁定 `docs/standards/internal-source-continuation.json`、`docs/standards/schemas/internal-source-continuation-v1.schema.json` 與 `docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json`，並以已驗證的 policy digest 評估 eligibility；未綁定或 bytes 不一致的本機副本 **MUST** 被拒絕。
+Production evaluation **MUST** 在每次 eligibility 判定時重新驗證 signed authenticated authority snapshot 與固定 trust anchor，並從驗證結果的 exact `selectedFiles` inventory 綁定 `docs/standards/internal-source-continuation.json`、`docs/standards/schemas/internal-source-continuation-v1.schema.json` 與 `docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json`；呼叫端自行建立的 `verified` flag、selected-file hashes、未綁定或 bytes 不一致的本機副本 **MUST** 被拒絕。
 
 Internal source continuation **MUST** 同時證明：
 
 - 中央 policy 的 exact repository 與 Skill registration；
 - canonical result 仍為 `FAILED`、exit code `20`、Stage 4 `failed`、source conformance `failed` 與 `releaseEligible=false`；
-- candidate source revision、candidate ID、完整 content inventory、Skill component inventory、scanner report 與 supplemental repository-test evidence 綁定一致；
+- candidate source revision、candidate ID、完整 content inventory、Skill component inventory、scanner report 與 supplemental repository-test evidence 綁定一致；target 與其他 active Skill 的 scanner report path／digest／source root **MUST** 精確對應同一 candidate ID 的 Stage 4 raw process event `nativeReports`，不得重用其他 checkout 或較舊 candidate 的 report；
 - 每個未掃描 component 都是 policy 允許的 path，ledger exception path 唯一，且 exception 只有 policy 指定的 `reason_code` 與 analyzer；
 - scanner version 與完整 expected analyzer inventory 符合中央 pin；raw finding 與 suppression counts 必須完整一致，每筆 finding 必須符合中央 exact fingerprint／shape／來源位置／出現次數／evidence disposition allowlist；不得存在 scope exclusion、第二種 degraded／failed analyzer、缺少 analyzer、未登錄 limitation、未知 finding、移動或新增 occurrence、隱藏 finding 或 suppression；其他 active Skill 必須以相同 analyzer inventory 完整通過；
 - policy 要求的 supplemental test suites 已執行，沒有 failed test，且通過數達到中央門檻。
