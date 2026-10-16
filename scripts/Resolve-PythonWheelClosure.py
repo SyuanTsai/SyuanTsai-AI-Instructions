@@ -591,7 +591,20 @@ class PyPISimpleCatalog:
             # then the highest build tag, with filename as a deterministic tie-break.
             best = max(candidates, key=lambda candidate: (-candidate.tag_rank, candidate.build, candidate.filename))
             selected.append(best)
-        selected.sort(key=lambda candidate: (candidate.version, -candidate.tag_rank, candidate.build), reverse=True)
+        # Offline pip rejects an otherwise eligible prerelease while a final
+        # release satisfies the requirement. Offer final releases first so the
+        # verified pool does not spend one resolution round per newer dev/rc
+        # wheel before reaching a usable stable candidate. Keep prereleases as
+        # fallback for explicit prerelease requirements or pip's own decision.
+        selected.sort(
+            key=lambda candidate: (
+                not candidate.version.is_prerelease,
+                candidate.version,
+                -candidate.tag_rank,
+                candidate.build,
+            ),
+            reverse=True,
+        )
         self._cache[project] = selected
         return selected
 
@@ -859,13 +872,31 @@ class LazyPoolResolver:
             for requirement in requirements.values()
         )
 
+    def _satisfies_all_active_requirements(self, descriptor: Descriptor) -> bool:
+        return all(
+            not requirement.specifier
+            or requirement.specifier.contains(descriptor.version, prereleases=True)
+            for requirement in self.requirements.get(descriptor.project, {}).values()
+        )
+
     def _add_next_candidate(self, project: str, source: str = "verified requirement graph") -> bool:
         if project == self.root_project:
             return False
         attempted = self.attempted.setdefault(project, set())
-        for descriptor in self.catalog.descriptors(project):
-            if descriptor.filename in attempted or not self._eligible(descriptor):
-                continue
+        eligible = [
+            descriptor for descriptor in self.catalog.descriptors(project)
+            if descriptor.filename not in attempted and self._eligible(descriptor)
+        ]
+        # If current verified requirements have a common candidate, offer it
+        # before a wheel that satisfies only one branch. Keep the latter as a
+        # fallback so pip can still resolve after parent backtracking.
+        jointly_eligible = [
+            (descriptor, self._satisfies_all_active_requirements(descriptor))
+            for descriptor in eligible
+        ]
+        ordered = [descriptor for descriptor, satisfies_all in jointly_eligible if satisfies_all]
+        ordered.extend(descriptor for descriptor, satisfies_all in jointly_eligible if not satisfies_all)
+        for descriptor in ordered:
             if self.budget is not None:
                 self.budget.remaining("candidate acquisition")
                 if len(self.entries) >= self.budget.max_candidates:
@@ -959,12 +990,12 @@ class LazyPoolResolver:
                 for source in names
                 if source != self.root_project
             }
-            # A single unsatisfied constraint usually needs another version of
-            # this project. Multiple incompatible parent constraints instead
-            # require a parent backtrack before trying its entire version list.
-            if len(requirements) == 1 and project != self.root_project and any(
+            # Try a candidate inside the verified requirements' intersection
+            # before changing a parent. When the intersection has no wheel,
+            # continue to the established parent-backtracking path.
+            if project != self.root_project and any(
                 descriptor.filename not in self.attempted.get(project, set())
-                and self._eligible(descriptor)
+                and self._satisfies_all_active_requirements(descriptor)
                 for descriptor in self.catalog.descriptors(project)
             ):
                 return project
@@ -1754,6 +1785,42 @@ def self_test_command(arguments: argparse.Namespace) -> None:
         if not {("branch-a", "2.0"), ("branch-b", "1.0"),
                 ("branch-d", "1.0"), ("branch-e", "1.0")}.issubset(branch_selected):
             raise AssertionError("A failed first parent branch hid the valid sibling branch")
+
+        def UnitT60_compatible_shared_constraint_precedes_parent_backtrack() -> None:
+            """Scenario: two parent constraints overlap but the newest shared wheel is outside the overlap.
+
+            Purpose: offer the verified wheel inside the intersection before trying
+            an older parent whose requirements cannot improve that constraint.
+            """
+            overlap_root = make_test_wheel(
+                sources, "overlap-root", "1.0", ("overlap-a>=1", "overlap-b==1.0"),
+            )
+            overlap_candidates = [
+                make_test_wheel(sources, "overlap-a", "2.0", ("overlap-shared>=15",)),
+                make_test_wheel(sources, "overlap-a", "1.0", ("overlap-shared>=15",)),
+                make_test_wheel(sources, "overlap-b", "1.0", ("overlap-shared>=14,<17",)),
+                make_test_wheel(sources, "overlap-shared", "17.0"),
+                make_test_wheel(sources, "overlap-shared", "16.0"),
+            ]
+            overlap = LazyPoolResolver(
+                LocalCatalog([local_descriptor(path) for path in overlap_candidates]),
+                overlap_root, file_sha256(overlap_root), root / "overlap-pool", root / "overlap-plan.json",
+            )
+            overlap._seed_new_projects()
+            chosen = overlap._conflict_backtrack_project()
+            shared_was_seeded = "overlap_shared-16.0-py3-none-any.whl" in overlap.entries
+            if not shared_was_seeded and chosen != "overlap-shared":
+                raise AssertionError(f"Compatible shared candidate must precede parent backtrack: {chosen}")
+            overlap.resolve()
+            selected = validate_and_select_plan(root / "overlap-plan.json", overlap, root / "overlap-selected")
+            selected_versions = {(entry["normalizedName"], entry["version"]) for entry in selected["entries"]}
+            if ("overlap-shared", "16.0") not in selected_versions:
+                raise AssertionError("Compatible shared wheel was not selected")
+            if "overlap_a-1.0-py3-none-any.whl" in overlap.entries:
+                raise AssertionError("Older parent was fetched before a compatible shared wheel")
+
+        UnitT60_compatible_shared_constraint_precedes_parent_backtrack()
+
         hint_root = make_test_wheel(
             sources, "hint-root", "1.0", ("httpx>=0.28", "langsmith>=1"),
         )
@@ -2014,6 +2081,38 @@ def self_test_command(arguments: argparse.Namespace) -> None:
             )
         if not any("invalid yanked value" in entry["reason"] for entry in discovery_catalog.rejected_candidates()):
             raise AssertionError("Malformed yanked metadata must be recorded as candidate rejection evidence")
+
+        def UnitT70_stable_candidates_precede_prereleases() -> None:
+            """Scenario: a newer dev wheel and an older stable wheel satisfy a broad range.
+
+            Purpose: offline pip should see the stable candidate before spending rounds
+            on prereleases it would reject while a final release is available.
+            """
+            payload = {
+                "name": "fallback-project",
+                "files": [
+                    {
+                        "filename": "fallback_project-1.0.dev6-py3-none-any.whl",
+                        "yanked": False,
+                        "hashes": {"sha256": "d" * 64},
+                        "url": "https://files.pythonhosted.org/packages/fallback_project-1.0.dev6.whl",
+                    },
+                    {
+                        "filename": "fallback_project-0.28.1-py3-none-any.whl",
+                        "yanked": False,
+                        "hashes": {"sha256": "e" * 64},
+                        "url": "https://files.pythonhosted.org/packages/fallback_project-0.28.1.whl",
+                    },
+                ],
+            }
+            catalog = PyPISimpleCatalog(APPROVED_INDEX)
+            catalog._simple_opener = _SelfTestSimpleOpener(json.dumps(payload).encode("utf-8"))
+            actual = [str(item.version) for item in catalog.descriptors("fallback-project")]
+            if actual != ["0.28.1", "1.0.dev6"]:
+                raise AssertionError(f"Stable wheel should precede prerelease fallback: {actual}")
+
+        UnitT70_stable_candidates_precede_prereleases()
+
         class _SelfTestArtifactResponse:
             def __init__(self, payload: bytes, *, timeout_after_payload: bool = False,
                          final_url: Optional[str] = None) -> None:
