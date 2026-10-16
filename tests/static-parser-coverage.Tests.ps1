@@ -10,7 +10,7 @@ Describe 'Static parser coverage and finding preservation' {
         $parserTokens=$null;$parserErrors=$null
         $parserAst=[Management.Automation.Language.Parser]::ParseFile($parserWrapperPath,[ref]$parserTokens,[ref]$parserErrors)
         if($parserErrors.Count){throw 'Static wrapper does not parse.'}
-        foreach($name in @('Assert-StaticCoverageDelta','Assert-StaticPreservedFindings','Read-StaticFrozenReceipt','Assert-StaticOutputLocation')){
+        foreach($name in @('Assert-StaticCoverageDelta','Assert-StaticPreservedFindings','Read-StaticFrozenReceipt','Assert-StaticOutputLocation','Convert-StaticFindingComparisonKey')){
             $definition=$parserAst.Find({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true)
             if($null -eq $definition){throw "Required central static verifier is missing: $name"}
             . ([scriptblock]::Create($definition.Extent.Text))
@@ -22,15 +22,15 @@ Describe 'Static parser coverage and finding preservation' {
             Assert-ParserCase $rejected 'Malformed static correction evidence was accepted.'
         }
         function New-ParserCoverageFixture {
-            $issue=[pscustomobject]@{id='E1';severity='MEDIUM';finding='https://example.test/';location=@{file='SKILL.md';start_line=1}}
-            $derived=[pscustomobject]@{id='AE1';pattern='Incomplete referenced artifact analysis';severity='HIGH';evidence=@{
+            $issue=[pscustomobject]@{id='E1';finding_id=('finding-'+('a'*32));match_fingerprint=('c'*64);severity='MEDIUM';finding='https://example.test/';location=@{file='SKILL.md';start_line=1}}
+            $derived=[pscustomobject]@{id='AE1';finding_id=('finding-'+('b'*32));match_fingerprint=('d'*64);pattern='Incomplete referenced artifact analysis';severity='HIGH';evidence=@{
                 target_path='scripts/example.ps1';target_disposition='partial'
                 reasons=@(@{reason_code='static_parse_limit';phase='static';analyzers=@('static_patterns_tool_misuse')})
             }}
             $components=@(@{path='SKILL.md'},@{path='scripts/example.ps1'})
             return [pscustomobject]@{
                 original=[pscustomobject]@{components=$components;issues=@($issue,$derived);analysis_completeness=@{ledger_exceptions=@(@{path='scripts/example.ps1';reason_code='static_parse_limit';analyzers=@('static_patterns_tool_misuse');phase='static';outcome='partial';fatal=$false})}}
-                corrected=[pscustomobject]@{components=$components;issues=@($issue)}
+                corrected=[pscustomobject]@{components=$components;issues=@(($issue | ConvertTo-Json -Depth 10 | ConvertFrom-Json))}
                 execution=[pscustomobject]@{candidateInventory=@(@{path='SKILL.md'},@{path='scripts/example.ps1'});correctedComponents=@(@{candidatePaths=@('scripts/example.ps1');partialAfterActualParserRun=$false})}
             }
         }
@@ -40,6 +40,7 @@ Describe 'Static parser coverage and finding preservation' {
     # Purpose: preserve the remaining Medium finding and avoid assigning authorization to parser evidence.
     It 'UnitT10_accepts_exact_parser_delta_and_preserves_all_other_findings' {
         $fixture=New-ParserCoverageFixture
+        $fixture.corrected.issues[0].finding_id='finding-'+('f'*32)
         $before=$fixture.corrected | ConvertTo-Json -Depth 12 -Compress
         Assert-StaticCoverageDelta $fixture.original $fixture.corrected $fixture.execution
         Assert-StaticPreservedFindings $fixture.original $fixture.corrected $fixture.execution
@@ -49,10 +50,13 @@ Describe 'Static parser coverage and finding preservation' {
     # Scenario: the corrected report loses, downgrades or deduplicates an original non-derived finding.
     # Purpose: forbid arbitrary finding suppression even when component coverage is complete.
     It 'UnitT20_rejects_lost_changed_or_reduced_non_derived_findings' {
-        foreach($drift in @('missing','severity','duplicate','unknown-derived-reason')){
+        foreach($drift in @('missing','severity','duplicate','unknown-derived-reason','fingerprint','invalid-run-id','new-run-id-with-changed-evidence')){
             $fixture=New-ParserCoverageFixture
             switch($drift){
                 'missing' {$fixture.corrected.issues=@()}
+                'fingerprint' {$fixture.corrected.issues[0].match_fingerprint='e'*64}
+                'invalid-run-id' {$fixture.corrected.issues[0].finding_id='caller-identity'}
+                'new-run-id-with-changed-evidence' {$fixture.corrected.issues[0].finding_id='finding-'+('f'*32);$fixture.corrected.issues[0].finding='changed evidence'}
                 'severity' {$fixture.corrected.issues=@($fixture.corrected.issues | ConvertTo-Json -Depth 12 | ConvertFrom-Json);$fixture.corrected.issues[0].severity='LOW'}
                 'duplicate' {$fixture.original.issues=@($fixture.original.issues[0],$fixture.original.issues[0],$fixture.original.issues[1])}
                 'unknown-derived-reason' {$fixture.original.issues[1].evidence.reasons[0].reason_code='reference_missing'}

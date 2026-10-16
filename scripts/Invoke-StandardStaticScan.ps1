@@ -81,15 +81,33 @@ function Assert-StaticCoverageDelta($Original,$Corrected,$ProfileExecution) {
            $covered.Count -ne 1){throw 'A native scanner exception lacks exact actual parser coverage.'}
     }
 }
+function Convert-StaticFindingComparisonKey($Issue) {
+    # Official Finding._new_finding_id uses uuid4 for each graph run. Preserve
+    # that raw ID in both reports; compare all other fields as an exact multiset.
+    $runId=Get-StandardValidationProperty -Object $Issue -Name 'finding_id'
+    $fingerprint=Get-StandardValidationProperty -Object $Issue -Name 'match_fingerprint'
+    if($runId -isnot [string] -or $runId -cnotmatch '^finding-[0-9a-f]{32}$' -or
+       $fingerprint -isnot [string] -or [string]::IsNullOrWhiteSpace($fingerprint)){
+        throw 'Native finding lacks the supported run identity and stable fingerprint.'
+    }
+    $comparable=[ordered]@{}
+    if($Issue -is [Collections.IDictionary]){
+        foreach($name in $Issue.Keys){if([string]$name -cne 'finding_id'){$comparable[[string]$name]=$Issue[$name]}}
+    }else{
+        foreach($property in $Issue.PSObject.Properties){if($property.Name -cne 'finding_id'){$comparable[$property.Name]=$property.Value}}
+    }
+    return Convert-StandardValidationValueToCanonicalJson -Value $comparable -Context 'stable native static finding'
+}
+
 function Assert-StaticPreservedFindings($Original,$Corrected,$ProfileExecution) {
     $newIssues=Get-StandardValidationProperty -Object $Corrected -Name 'issues'
     $oldIssues=Get-StandardValidationProperty -Object $Original -Name 'issues'
     if($newIssues -isnot [array] -or $oldIssues -isnot [array]){throw 'Static finding collections are not explicit arrays.'}
-    $newKeys=@($newIssues | ForEach-Object {Convert-StandardValidationValueToCanonicalJson -Value $_ -Context 'corrected static finding'})
+    $newKeys=@($newIssues | ForEach-Object {Convert-StaticFindingComparisonKey -Issue $_})
     $newCounts=[Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal)
     foreach($newKey in $newKeys){if($newCounts.ContainsKey($newKey)){$newCounts[$newKey]++}else{$newCounts[$newKey]=1}}
     foreach($issue in $oldIssues){
-        $key=Convert-StandardValidationValueToCanonicalJson -Value $issue -Context 'original static finding'
+        $key=Convert-StaticFindingComparisonKey -Issue $issue
         if($newCounts.ContainsKey($key) -and $newCounts[$key] -gt 0){$newCounts[$key]--;continue}
         $evidence=Get-StandardValidationProperty -Object $issue -Name 'evidence'
         $target=Get-StandardValidationProperty -Object $evidence -Name 'target_path'
