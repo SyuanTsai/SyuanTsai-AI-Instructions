@@ -411,6 +411,10 @@ jobs:
         $resolverHardeningName = 'standard-validation-resolver-hardening.Tests.ps1'
         $resolverHardeningPath = Join-Path $script:RepositoryRoot ('tests/' + $resolverHardeningName)
         $resolverHardeningTests = Get-Content -Raw -Encoding UTF8 -LiteralPath $resolverHardeningPath
+        $parserCoverageName='static-parser-coverage.Tests.ps1'
+        $parserCoverage=Get-Content -Raw -LiteralPath (Join-Path $script:RepositoryRoot ('tests/'+$parserCoverageName))
+        Assert-False ($script:AuthorityTests -contains $parserCoverageName) 'Native parser tests must be discovered once by the complete Windows Core test inventory.'
+        Assert-Match $parserCoverage 'InterT10_runs_native_parser_contracts_without_skipping_or_scanner_installation' 'Windows Core must retain the real native grammar regression without installing SkillSpector.'
         Assert-Match $resolverHardeningTests 'UnitT25_rejects_python_helper_mutation_after_hash_capture' 'Windows Core must retain the helper hash-binding negative regression.'
         Assert-False ($script:AuthorityTests -contains $resolverHardeningName) 'Resolver hardening tests must remain in Windows Core full-suite discovery.'
         Assert-Match $workflows.Core 'Get-ChildItem -LiteralPath \$testRoot -Filter' 'Windows Core must discover the resolver hardening regression through its complete test-file inventory.'

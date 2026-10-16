@@ -132,6 +132,18 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/standards/schemas/static-parser-host-ownership-v1.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/schemas/static-parser-profile-execution-v1.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/static-parser-host-ownership.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "LICENSE",
       "license": "Apache-2.0"
     },
@@ -149,6 +161,26 @@
     },
     {
       "path": "README.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Get-StandardPowerShellSyntaxProof.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Invoke-StandardStaticScan.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/standard_static_powershell.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/static-parser-coverage.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/test_static_powershell_parser.py",
       "license": "Apache-2.0"
     },
     {

@@ -1,0 +1,141 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.test/standards/static-parser-host-ownership-v1.schema.json",
+  "title": "Reviewed static parser host ownership policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "policy",
+    "status",
+    "officialScannerSource",
+    "officialScannerVersion",
+    "officialAnalyzerPath",
+    "officialAnalyzerSha256",
+    "parserProfile",
+    "parserRuntimeVersion",
+    "entryPoint",
+    "pythonEntryPoint",
+    "nativeParserEntryPoint",
+    "maximumSourceBytes",
+    "maximumNativeProofBytes",
+    "maximumHostUnits",
+    "maximumCommandsPerUnit",
+    "maximumNestedViewCharacters",
+    "nativeParserTimeoutSeconds",
+    "mutatesInstalledTool",
+    "retainsOriginalSourceFindings",
+    "retainsOriginalNativeReport",
+    "completionRequiresActualScannerGraph",
+    "standaloneProofGrantsAuthorization",
+    "crossInterpreterExecution",
+    "unknownOrMalformedInput",
+    "executionBoundary"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "policy": {
+      "type": "string",
+      "const": "static-parser-host-ownership-v1"
+    },
+    "status": {
+      "type": "string",
+      "const": "adopted"
+    },
+    "officialScannerSource": {
+      "type": "string",
+      "const": "NVIDIA/SkillSpector"
+    },
+    "officialScannerVersion": {
+      "type": "string",
+      "const": "2.12.0"
+    },
+    "officialAnalyzerPath": {
+      "type": "string",
+      "const": "skillspector/nodes/analyzers/static_patterns_tool_misuse.py"
+    },
+    "officialAnalyzerSha256": {
+      "type": "string",
+      "const": "b0cecf8d9b51226713af6c2a9fc63faa626ea11f2e80e305741052b6a84c5db3"
+    },
+    "parserProfile": {
+      "type": "string",
+      "const": "powershell-native-command-ownership-v1"
+    },
+    "parserRuntimeVersion": {
+      "type": "string",
+      "const": "7.6.6"
+    },
+    "entryPoint": {
+      "type": "string",
+      "const": "scripts/Invoke-StandardStaticScan.ps1"
+    },
+    "pythonEntryPoint": {
+      "type": "string",
+      "const": "scripts/standard_static_powershell.py"
+    },
+    "nativeParserEntryPoint": {
+      "type": "string",
+      "const": "scripts/Get-StandardPowerShellSyntaxProof.ps1"
+    },
+    "maximumSourceBytes": {
+      "type": "integer",
+      "const": 1048576
+    },
+    "maximumNativeProofBytes": {
+      "type": "integer",
+      "const": 8388608
+    },
+    "maximumHostUnits": {
+      "type": "integer",
+      "const": 128
+    },
+    "maximumCommandsPerUnit": {
+      "type": "integer",
+      "const": 4096
+    },
+    "maximumNestedViewCharacters": {
+      "type": "integer",
+      "const": 4194304
+    },
+    "nativeParserTimeoutSeconds": {
+      "type": "integer",
+      "const": 15
+    },
+    "mutatesInstalledTool": {
+      "type": "boolean",
+      "const": false
+    },
+    "retainsOriginalSourceFindings": {
+      "type": "boolean",
+      "const": true
+    },
+    "retainsOriginalNativeReport": {
+      "type": "boolean",
+      "const": true
+    },
+    "completionRequiresActualScannerGraph": {
+      "type": "boolean",
+      "const": true
+    },
+    "standaloneProofGrantsAuthorization": {
+      "type": "boolean",
+      "const": false
+    },
+    "crossInterpreterExecution": {
+      "type": "string",
+      "const": "retain-partial"
+    },
+    "unknownOrMalformedInput": {
+      "type": "string",
+      "const": "fail-closed"
+    },
+    "executionBoundary": {
+      "type": "string",
+      "const": "existing-candidate-bound-source-static-child"
+    }
+  }
+}
