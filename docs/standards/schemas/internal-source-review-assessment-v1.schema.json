@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Internal source review assessment v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "contract",
+    "status",
+    "publishable",
+    "sourceRepository",
+    "skillId",
+    "sourceRevision",
+    "candidateId",
+    "contentSha256",
+    "policySha256",
+    "scannerReportSha256",
+    "otherScannerReportSha256",
+    "repositoryTestEvidenceSha256",
+    "canonicalState",
+    "canonicalExitCode",
+    "forbiddenOperations",
+    "releaseEligible",
+    "failureReasons",
+    "assessmentKind",
+    "applicabilityStatus",
+    "executionProvenanceStatus",
+    "authorizationGranted",
+    "authorizedOperations"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "contract": {
+      "const": "internal-source-review-assessment-v1"
+    },
+    "status": {
+      "enum": [
+        "consistent",
+        "inconsistent"
+      ]
+    },
+    "publishable": {
+      "const": false
+    },
+    "sourceRepository": {
+      "type": "string"
+    },
+    "skillId": {
+      "type": "string"
+    },
+    "sourceRevision": {
+      "type": "string"
+    },
+    "candidateId": {
+      "type": "string"
+    },
+    "contentSha256": {
+      "$ref": "#/$defs/nullableSha256"
+    },
+    "policySha256": {
+      "$ref": "#/$defs/nullableSha256"
+    },
+    "scannerReportSha256": {
+      "$ref": "#/$defs/nullableSha256"
+    },
+    "otherScannerReportSha256": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    },
+    "repositoryTestEvidenceSha256": {
+      "$ref": "#/$defs/nullableSha256"
+    },
+    "canonicalState": {
+      "type": "string"
+    },
+    "canonicalExitCode": {
+      "type": "integer"
+    },
+    "forbiddenOperations": {
+      "const": [
+        "source-merge",
+        "release",
+        "install",
+        "publish",
+        "catalog-adoption"
+      ]
+    },
+    "releaseEligible": {
+      "const": false
+    },
+    "failureReasons": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "assessmentKind": {
+      "const": "evidence-consistency-only"
+    },
+    "applicabilityStatus": {
+      "const": "not-verified"
+    },
+    "executionProvenanceStatus": {
+      "const": "not-verified"
+    },
+    "authorizationGranted": {
+      "const": false
+    },
+    "authorizedOperations": {
+      "const": []
+    }
+  },
+  "$defs": {
+    "nullableSha256": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "consistent"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "sourceRepository": {
+            "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\\.git$"
+          },
+          "skillId": {
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          },
+          "sourceRevision": {
+            "pattern": "^[0-9a-f]{40}$"
+          },
+          "candidateId": {
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "contentSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "policySha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "scannerReportSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "repositoryTestEvidenceSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "canonicalState": {
+            "const": "FAILED"
+          },
+          "canonicalExitCode": {
+            "const": 20
+          },
+          "failureReasons": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "inconsistent"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "failureReasons": {
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ]
+}

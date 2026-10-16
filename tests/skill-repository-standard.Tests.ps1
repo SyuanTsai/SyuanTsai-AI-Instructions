@@ -4572,7 +4572,7 @@ public sealed class C245NonCooperativeStream : Stream {
         Assert-Equal $coreContract.ordinaryCli.defaultMode 'core-v2' 'The ordinary CLI must default to the v2 core.'
         Assert-Equal (@($coreContract.ordinaryCli.eventNames) -join ',') 'local,pre-push,pull_request,push,workflow_dispatch' 'Core event values must match the v2 evidence schema.'
         Assert-False ([bool]$coreContract.releaseEligible) 'Core validation must remain release-ineligible.'
-        Assert-Match $runner 'if \(-not \$DevelopmentHarness -and -not \$CompleteLifecycle -and -not \$InternalSourceContinuationReview\)' 'The runner must route ordinary invocations through v2 while preserving the authenticated internal continuation route.'
+        Assert-Match $runner 'if \(-not \$DevelopmentHarness -and -not \$CompleteLifecycle\)' 'The runner must route the ordinary invocation through v2 before entering legacy gates.'
         Assert-Match $runner 'Ordinary core mode accepts only standard-core-adapter-v2' 'An ordinary v1 adapter must fail with a versioned mode error.'
         $coreStart = $runner.IndexOf('function Invoke-StandardCoreValidationRun', [StringComparison]::Ordinal)
         $coreEnd = if ($coreStart -ge 0) { $runner.IndexOf('function Invoke-StandardValidationRun', $coreStart, [StringComparison]::Ordinal) } else { -1 }
@@ -4762,19 +4762,6 @@ public sealed class C245NonCooperativeStream : Stream {
             consumptionPath = $null
             consumptionSha256 = ('0' * 64)
         }
-        $schemaSupplementalRepositoryTests = [pscustomobject][ordered]@{
-            status = 'observed-by-canonical-runner'
-            candidateId = ('0' * 64)
-            sourceRevision = ('0' * 40)
-            contentSha256 = ('0' * 64)
-            evidencePath = 'C:\validation-artifacts\supplemental-repository-tests.json'
-            evidenceSha256 = ('0' * 64)
-            events = @([pscustomobject][ordered]@{
-                    eventId = [guid]::NewGuid().ToString()
-                    outputPath = 'C:\validation-artifacts\supplemental-event.json'
-                    outputSha256 = ('0' * 64)
-                })
-        }
         $schemaEvidence = New-StandardValidationCandidateEvidence `
             -RunId $schemaRunId `
             -State 'PASS' `
@@ -4784,8 +4771,7 @@ public sealed class C245NonCooperativeStream : Stream {
             -ArtifactRoot 'unavailable' `
             -LockPath 'unavailable' `
             -DevelopmentHarness $false `
-            -LaunchBinding $schemaBinding `
-            -SupplementalRepositoryTests $schemaSupplementalRepositoryTests
+            -LaunchBinding $schemaBinding
         $schemaEvidenceSourceConformance = New-StandardValidationSourceConformanceResult `
             -Report $schemaEvidence `
             -ExpectedSourceRevision ('a' * 40) `
@@ -4793,7 +4779,6 @@ public sealed class C245NonCooperativeStream : Stream {
         $schemaEvidence | Add-Member -NotePropertyName sourceConformance -NotePropertyValue $schemaEvidenceSourceConformance -Force
         $schemaEvidence = $schemaEvidence | ConvertTo-Json -Depth 50 | ConvertFrom-Json
         Assert-Equal $schemaEvidence.launchBinding.resolutionRunId $schemaRunId.ToString() 'Evidence must serialize the authenticated launch-binding run ID in canonical UUID format.'
-        Assert-Equal $schemaEvidence.supplementalRepositoryTests.status 'observed-by-canonical-runner' 'Evidence must retain canonical runner registration for supplemental repository tests.'
         Assert-False ([string]$schemaEvidence.launchBinding.resolutionRunId -match '^[0-9a-f]{32}$') 'Evidence must not expose the internal N-format launch-binding run ID.'
         Assert-AuthoritySchemaInstance -Value $schemaEvidence -Schema $evidenceSchema -SchemaPath $script:StandardValidationEvidenceSchemaPath -Expected $true -Message 'A consistent validation evidence envelope must be schema-valid.'
         foreach ($terminal in @(
@@ -6117,7 +6102,7 @@ Describe 'SYP171 internal source continuation authority binding' {
         $snapshotFunction = $snapshotFunctions[0].Extent.Text
         foreach ($requiredPath in @(
                 'docs/standards/internal-source-continuation.json',
-                'docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json',
+                'docs/standards/schemas/internal-source-review-assessment-v1.schema.json',
                 'docs/standards/schemas/internal-source-continuation-v1.schema.json'
             )) {
             if ([regex]::Matches($snapshotFunction, [regex]::Escape($requiredPath)).Count -ne 1) {
@@ -6137,9 +6122,35 @@ Describe 'SYP171 internal source continuation authority binding' {
 
         $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $root 'docs/standards/skill-repository-standard.md')
         if ($standard -notmatch 'authenticated authority snapshot' -or
-            $standard -notmatch 'internal-source-continuation-eligibility-v1\.schema\.json' -or
+            $standard -notmatch 'internal-source-review-assessment-v1\.schema\.json' -or
             $standard -notmatch 'internal-source-continuation-v1\.schema\.json') {
             throw 'The normative Standard must require the continuation policy and schemas to come from the authenticated authority snapshot.'
         }
     }
+    # Scenario: the central security descriptor references the internal review assessment.
+    # Purpose: keep the active gate policy/schema consistent with zero authorization and inactive integration metadata.
+    It 'UnitT20_keeps_internal_review_descriptor_non_authorizing' {
+        $root = Split-Path -Parent $PSScriptRoot
+        $gatePath = Join-Path $root 'docs/standards/validation-security-gate.json'
+        $schema = Join-Path $root 'docs/standards/schemas/validation-security-gate-v1.schema.json'
+        $gate = Get-Content -LiteralPath $gatePath -Raw | ConvertFrom-Json
+        if (-not ((Get-Content -LiteralPath $gatePath -Raw) | Test-Json -SchemaFile $schema)) { throw 'Security descriptor schema mismatch.' }
+        $review = $gate.security.internalSourceContinuation
+        if ($review.technicalResult -cne 'evidence-consistency-only' -or $review.scope -cne 'internal-review-only' -or
+            $review.authorizationGranted -isnot [bool] -or $review.authorizationGranted -or $review.authorizedOperations.Count -ne 0 -or
+            $review.applicabilityStatus -cne 'not-verified' -or $review.executionProvenanceStatus -cne 'not-verified' -or
+            $review.deferredIntegration.status -cne 'inactive' -or $review.deferredIntegration.consumerAuthority) { throw 'Security descriptor grants authority or upgrades assurance.' }
+        foreach ($mutation in @('authorization', 'legacy', 'integration', 'integration-extra', 'integration-missing')) {
+            $changed = $gate | ConvertTo-Json -Depth 40 | ConvertFrom-Json
+            switch ($mutation) {
+                authorization { $changed.security.internalSourceContinuation.authorizedOperations = @('source-merge') }
+                legacy { $changed.security.internalSourceContinuation | Add-Member -NotePropertyName permittedOperationAfterProtectedAdoption -NotePropertyValue 'source-merge' }
+                integration { $changed.security.internalSourceContinuation.deferredIntegration.consumerAuthority = $true }
+                'integration-extra' { $changed.security.internalSourceContinuation.deferredIntegration | Add-Member -NotePropertyName authorized -NotePropertyValue $true }
+                'integration-missing' { $changed.security.internalSourceContinuation.deferredIntegration.PSObject.Properties.Remove('consumerAuthority') }
+            }
+            if (($changed | ConvertTo-Json -Depth 40) | Test-Json -SchemaFile $schema -ErrorAction SilentlyContinue) { throw "Security schema accepted $mutation." }
+        }
+    }
+
 }

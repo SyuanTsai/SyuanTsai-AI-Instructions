@@ -62,12 +62,42 @@ function Invoke-EntryTestProcess {
         [Parameter(Mandatory = $true)][string] $ScriptPath,
         [Parameter(Mandatory = $true)][string[]] $Arguments,
         [Parameter(Mandatory = $true)][string] $Label,
-        [ValidateRange(100, 180000)][int] $TimeoutMilliseconds = 180000
+        [ValidateRange(100, 180000)][int] $TimeoutMilliseconds = 180000,
+        [switch] $CaptureErrorIdentity
     )
 
-    $commandArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', (ConvertTo-EntryTestArgument $ScriptPath))
-    foreach ($argument in $Arguments) {
-        $commandArguments += ConvertTo-EntryTestArgument ([string]$argument)
+    if ($CaptureErrorIdentity) {
+        # Capture the engine's invariant binding identity instead of matching localized -File stderr.
+        $parameters = @{}
+        for ($index = 0; $index -lt $Arguments.Count; $index++) {
+            $argument = [string]$Arguments[$index]
+            if ($argument -notmatch '^-[A-Za-z][A-Za-z0-9]*$') { throw 'Error identity capture requires named fixture arguments.' }
+            $name = $argument.Substring(1)
+            if ($name -in @('AllowDevelopmentContent', 'BindingOnly')) { $parameters[$name] = $true }
+            else {
+                $index++
+                if ($index -ge $Arguments.Count) { throw 'Error identity capture requires an explicit argument value.' }
+                $parameters[$name] = [string]$Arguments[$index]
+            }
+        }
+        $payloadJson = [ordered]@{ scriptPath = $ScriptPath; parameters = $parameters } | ConvertTo-Json -Depth 5 -Compress
+        $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payloadJson))
+        $worker = @(
+            '$payload = ''__PAYLOAD__''',
+            '$data = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload)) | ConvertFrom-Json',
+            '$parameters = @{}',
+            'foreach ($property in $data.parameters.PSObject.Properties) { $parameters[$property.Name] = $property.Value }',
+            'try { & ([string]$data.scriptPath) @parameters; if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE } }',
+            'catch { [Console]::Error.WriteLine($_.FullyQualifiedErrorId); exit 1 }'
+        ) -join "`n"
+        $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($worker.Replace('__PAYLOAD__', $payload)))
+        $commandArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $encodedCommand)
+    }
+    else {
+        $commandArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', (ConvertTo-EntryTestArgument $ScriptPath))
+        foreach ($argument in $Arguments) {
+            $commandArguments += ConvertTo-EntryTestArgument ([string]$argument)
+        }
     }
 
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -479,8 +509,8 @@ Start-Sleep -Seconds 90
         Assert-EntryPreflightFailure -Result $unsafeArtifact -Marker 'STANDARD_ENTRY_INVALID\|resultArtifact.*unsafe'
 
         $unknownArguments = @(New-EntryPreflightArguments -AllowDevelopmentContent -BindingOnly -AdditionalArguments @('-RequiredChecks', 'caller-added-check'))
-        $unknownCheck = Invoke-EntryTestProcess -ScriptPath $script:GatePath -Arguments $unknownArguments -Label 'UnitT40-unknown-check-argument'
-        Assert-EntryPreflightFailure -Result $unknownCheck -Marker 'parameter cannot be found|NamedParameterNotFound'
+        $unknownCheck = Invoke-EntryTestProcess -ScriptPath $script:GatePath -Arguments $unknownArguments -Label 'UnitT40-unknown-check-argument' -CaptureErrorIdentity
+        Assert-EntryPreflightFailure -Result $unknownCheck -Marker '^\s*NamedParameterNotFound,Invoke-StandardAuthorityGate\.ps1\s*$'
     }
 
     # Scenario: A same-HEAD candidate snapshot contains one real tracked-byte mutation while development mode is omitted.

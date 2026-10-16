@@ -14,13 +14,25 @@ Describe 'Internal source continuation policy' {
             if (-not $Condition) { throw $Message }
         }
 
+        function Assert-ReviewOnly {
+            param($Assessment)
+            Assert-Continuation ($Assessment.contract -ceq 'internal-source-review-assessment-v1') 'Wrong review contract.'
+            Assert-Continuation ($Assessment.assessmentKind -ceq 'evidence-consistency-only') 'Wrong assessment kind.'
+            Assert-Continuation ($Assessment.applicabilityStatus -ceq 'not-verified') 'Applicability assurance was upgraded.'
+            Assert-Continuation ($Assessment.executionProvenanceStatus -ceq 'not-verified') 'Execution provenance assurance was upgraded.'
+            Assert-Continuation ($Assessment.authorizationGranted -is [bool] -and -not $Assessment.authorizationGranted) 'Authorization must be Boolean false.'
+            Assert-Continuation ($Assessment.authorizedOperations -is [array] -and $Assessment.authorizedOperations.Count -eq 0) 'Review cannot authorize operations.'
+            Assert-Continuation (-not $Assessment.publishable -and -not $Assessment.releaseEligible) 'Review cannot be publishable or release eligible.'
+            Assert-Continuation (($Assessment.forbiddenOperations -join ',') -ceq 'source-merge,release,install,publish,catalog-adoption') 'Forbidden operations drifted.'
+        }
+
         function Write-ContinuationJson {
             param([string] $Path, $Value)
             [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 30), [Text.UTF8Encoding]::new($false))
         }
 
         function New-ContinuationFixture {
-            param([string] $Root, [switch] $IncludeOtherSkill, [switch] $UseAnalyzerSpecificPlans)
+            param([string] $Root, [switch] $IncludeOtherSkill)
 
             $candidateRoot = Join-Path $Root 'candidate'
             $policyPath = Join-Path $repositoryRoot 'docs/standards/internal-source-continuation.json'
@@ -82,19 +94,11 @@ Describe 'Internal source continuation policy' {
                 [ordered]@{ order = $index + 1; id = $stageIds[$index]; status = if ($index -lt 3) { 'passed' } elseif ($index -eq 3) { 'failed' } else { 'not-run' } }
             }
             $report = [ordered]@{
-                runId = ([guid]::NewGuid()).ToString()
                 state = 'FAILED'; exitCode = 20; releaseEligible = $false
                 candidate = [ordered]@{
                     sourceRepository = 'https://github.com/SyuanTsai/Skill-Atlassian-Ecosystem.git'
-                    sourceRevision = $sourceRevision; baseRevision = ('c' * 40); eventName = 'pull_request'
-                    candidateId = $candidateId; contentSha256 = $contentSha256; archiveSha256 = ('d' * 64)
+                    sourceRevision = $sourceRevision; candidateId = $candidateId; contentSha256 = $contentSha256
                     activeSkills = @($activeSkills)
-                }
-                adapter = [ordered]@{ sha256 = Get-StandardValidationFileSha256 -Path (Join-Path $repositoryRoot 'scripts/Invoke-StandardValidation.ps1') -Context 'internal continuation fixture adapter' }
-                authority = [ordered]@{ binding = [ordered]@{ revision = ('d' * 40) } }
-                launchBinding = [ordered]@{
-                    status = 'unverified'; verified = $false; path = $null; sha256 = ('0' * 64)
-                    resolutionRunId = $null; consumptionPath = $null; consumptionSha256 = ('0' * 64)
                 }
                 stages = @($stages)
                 sourceConformance = [ordered]@{ status = 'failed'; releaseEligible = $false }
@@ -119,8 +123,7 @@ Describe 'Internal source continuation policy' {
                             [ordered]@{ analyzer_id = $_; status = 'degraded'; planned_work = 4; completed = 1; partial = 3; skipped = 0; failed = 0; unaccounted = 0 }
                         }
                         else {
-                            $plannedWork = if ($UseAnalyzerSpecificPlans -and $_ -ceq 'mcp_tool_poisoning') { 1 } else { 4 }
-                            [ordered]@{ analyzer_id = $_; status = 'completed'; planned_work = $plannedWork; completed = $plannedWork; partial = 0; skipped = 0; failed = 0; unaccounted = 0 }
+                            [ordered]@{ analyzer_id = $_; status = 'completed'; planned_work = 4; completed = 4; partial = 0; skipped = 0; failed = 0; unaccounted = 0 }
                         }
                     })
                 }
@@ -186,7 +189,7 @@ Describe 'Internal source continuation policy' {
                     outputPath = $eventPath; cleanedUp = $true
                 })
             $report.artifacts = [ordered]@{ root = $artifactRoot }
-            $testObservations = @()
+            $testEvents = @()
             foreach ($suite in @('focused', 'canonical')) {
                 $testEventId = [guid]::NewGuid().ToString()
                 $toolId = "internal-continuation-$suite"
@@ -216,144 +219,74 @@ Describe 'Internal source continuation policy' {
                     command = 'pester'; commandSha256 = $commandSha256; arguments = @($arguments)
                     outputPath = $testOutputPath; outputSha256 = $testOutputSha256
                 }
-                $testObservations += [ordered]@{
-                    suite = $suite
-                    test = [ordered]@{
-                        id = $toolId; kind = 'pester'; command = [ordered]@{ arguments = @($arguments) }
-                    }
-                    invocation = [ordered]@{ event = $testEvent }
-                    typed = [ordered]@{
-                        testInventory = @($testInventory); testResult = $suiteResult
-                    }
+                $testEvents += [ordered]@{
+                    suite = $suite; toolId = $toolId; eventId = $testEventId; candidateId = $candidateId
+                    sourceRevision = $sourceRevision; contentSha256 = $contentSha256
+                    command = 'pester'; commandSha256 = $commandSha256; arguments = @($arguments)
+                    outputSha256 = $testOutputSha256; testInventory = @($testInventory)
+                    testResult = $suiteResult; event = $testEvent
                 }
             }
-            $runnerSupplemental = New-StandardValidationInternalContinuationSupplementalEvidence `
-                -RunRoot $artifactRoot -CandidateId $candidateId -SourceRevision $sourceRevision `
-                -ContentSha256 $contentSha256 -PolicyEntry $policyEntry -Observations $testObservations
-            $testsPath = $runnerSupplemental.evidencePath
-            $tests = $runnerSupplemental.evidence
-            $supplementalRegistration = $runnerSupplemental.registration
-            $report = New-StandardValidationCandidateEvidence `
-                -RunId ([guid]$report.runId) -State 'FAILED' -ExitCode 20 -ReleaseEligible $false `
-                -Candidate $report.candidate -Adapter $report.adapter -Authority $report.authority `
-                -Stages $report.stages -FailureState 'FAILED' -FailureMessage 'Static analyzer coverage is incomplete.' `
-                -ArtifactRoot $artifactRoot -LockPath (Join-Path $artifactRoot 'execution.lock') `
-                -DevelopmentHarness $false -SupplementalRepositoryTests $supplementalRegistration
-            $report | Add-Member -NotePropertyName sourceConformance -NotePropertyValue ([ordered]@{
-                    status = 'failed'; releaseEligible = $false
-                }) -Force
-            $reportPath = Join-Path $artifactRoot 'canonical-report.json'
-            $trustedToolRoot = Join-Path $Root 'trusted-tools'
-            [void](New-Item -ItemType Directory -Path $trustedToolRoot -Force)
-            $launchBindingPath = Join-Path $Root 'supervisor-launch-binding.json'
-            $launchConsumptionPath = Join-Path $Root 'supervisor-launch-consumption.json'
-            $resolutionRunId = ([guid]$report.runId).ToString('N')
-            $signedLaunchBinding = [ordered]@{
-                adapterPath = Join-Path $repositoryRoot 'scripts/Invoke-StandardValidation.ps1'
-                outputPath = $reportPath
-                trustedToolRoot = $trustedToolRoot
-                consumptionPath = $launchConsumptionPath
-                resolutionRunId = $resolutionRunId
+            $testsPath = Join-Path $Root 'repository-tests.json'
+            $tests = [ordered]@{
+                schemaVersion = 1; status = 'passed'; decision = 'PASS'; candidateId = $candidateId
+                sourceRevision = $sourceRevision; contentSha256 = $contentSha256
+                testResult = [ordered]@{ status = 'passed'; decision = 'PASS'; total = 55; passed = 55; failed = 0; skipped = 0 }
+                suites = @('focused', 'canonical'); events = @($testEvents)
             }
-            Write-ContinuationJson -Path $launchBindingPath -Value $signedLaunchBinding
-            $launchBindingSha256 = Get-StandardValidationFileSha256 -Path $launchBindingPath -Context 'internal continuation fixture launch binding'
-            $launchConsumption = [ordered]@{
-                schemaVersion = 1
-                evidenceType = 'validation-launch-consumption'
-                resolutionRunId = $resolutionRunId
-                launchBindingSha256 = $launchBindingSha256
-                consumedAt = [DateTime]::UtcNow.ToString('o')
-            }
-            Write-ContinuationJson -Path $launchConsumptionPath -Value $launchConsumption
-            $report.launchBinding = [ordered]@{
-                status = 'verified'; verified = $true; path = $launchBindingPath; sha256 = $launchBindingSha256
-                resolutionRunId = $resolutionRunId; consumptionPath = $launchConsumptionPath
-                consumptionSha256 = Get-StandardValidationFileSha256 -Path $launchConsumptionPath -Context 'internal continuation fixture launch consumption'
-            }
+            Write-ContinuationJson -Path $testsPath -Value $tests
             return [ordered]@{
                 CandidateRoot = $candidateRoot; Report = $report; Scanner = $scanner; ScannerReportPath = $scannerPath
-                ReportPath = $reportPath; RepositoryTests = $tests; RepositoryTestEvidencePath = $testsPath; SourceRevision = $sourceRevision
+                RepositoryTests = $tests; RepositoryTestEvidencePath = $testsPath; SourceRevision = $sourceRevision
                 PolicyPath = $policyPath; OtherScannerReportPaths = @($otherScannerReportPaths)
                 AuthorityArtifactsRoot = (Join-Path $Root 'authority-artifacts')
-                PolicyEntry = $policyEntry; RunRoot = $artifactRoot
-                RunnerAdapterResult = [ordered]@{
-                    repositoryTests = @(@('focused', 'canonical') | ForEach-Object {
-                            [ordered]@{
-                                id = "internal-continuation-$_"; kind = 'pester'
-                                command = [ordered]@{ arguments = @('--suite', $_) }
-                            }
-                        })
-                }
             }
+        }
+
+        function Sync-ContinuationScannerBinding {
+            param($Fixture)
+            # Synthetic fixture helper: synchronize actual native-report bytes only;
+            # never update expected authority or imply execution provenance.
+            $event = $Fixture.Report.stages[3].events[0]
+            $raw = Get-Content -LiteralPath $event.outputPath -Raw | ConvertFrom-Json
+            $envelope = $raw.process.stdout | ConvertFrom-Json
+            foreach ($native in $envelope.nativeReports) {
+                $native.sha256 = Get-StandardValidationFileSha256 -Path $native.path -Context 'synthetic scanner binding'
+            }
+            $raw.stdout = $envelope | ConvertTo-Json -Depth 20 -Compress
+            $raw.process.stdout = $raw.stdout
+            Write-ContinuationJson $event.outputPath $raw
+            $event.outputSha256 = Get-StandardValidationOutputHash -Stdout $raw.stdout -Stderr $raw.stderr
         }
 
         function Invoke-ContinuationFixture {
             param($Fixture, [string] $SkillId = 'manage-confluence-docs-as-code')
-            Write-ContinuationJson -Path $Fixture.ReportPath -Value $Fixture.Report
-            return New-StandardValidationInternalSourceContinuationEligibility `
-                -ReportPath $Fixture.ReportPath -PolicyPath $Fixture.PolicyPath -CandidateRoot $Fixture.CandidateRoot `
+            $assessment = New-StandardValidationInternalSourceReviewAssessment `
+                -Report $Fixture.Report -PolicyPath $Fixture.PolicyPath -CandidateRoot $Fixture.CandidateRoot `
                 -ExpectedSourceRevision $Fixture.SourceRevision -SkillId $SkillId `
                 -ScannerReportPath $Fixture.ScannerReportPath `
                 -OtherScannerReportPaths $Fixture.OtherScannerReportPaths `
                 -AuthorityArtifactsRoot $Fixture.AuthorityArtifactsRoot `
                 -RepositoryTestEvidencePath $Fixture.RepositoryTestEvidencePath
-        }
-
-        function Sync-ContinuationScannerBinding {
-            param($Fixture)
-
-            Write-ContinuationJson -Path $Fixture.ScannerReportPath -Value $Fixture.Scanner
-            $scannerSha256 = Get-StandardValidationFileSha256 `
-                -Path $Fixture.ScannerReportPath `
-                -Context 'internal continuation pre-dispatch scanner fixture'
-            $event = $Fixture.Report.stages[3].events[0]
-            $raw = Get-Content -Raw -LiteralPath $event.outputPath | ConvertFrom-Json
-            $envelope = [string]$raw.stdout | ConvertFrom-Json
-            $nativeReport = @($envelope.nativeReports | Where-Object {
-                    [string]$_.skillId -ceq 'manage-confluence-docs-as-code'
-                })[0]
-            $nativeReport.sha256 = $scannerSha256
-            $changedStdout = $envelope | ConvertTo-Json -Depth 20 -Compress
-            $raw.stdout = $changedStdout
-            $raw.process.stdout = $changedStdout
-            Write-ContinuationJson -Path $event.outputPath -Value $raw
-            $event.outputSha256 = Get-StandardValidationOutputHash -Stdout $changedStdout -Stderr ([string]$raw.stderr)
-        }
-
-        function Invoke-ContinuationPreDispatchFixture {
-            param($Fixture)
-
-            $preDispatchReport = $Fixture.Report | ConvertTo-Json -Depth 30 | ConvertFrom-Json
-            $preDispatchReport.PSObject.Properties.Remove('supplementalRepositoryTests')
-            return New-StandardValidationInternalSourceContinuationEligibility `
-                -PolicyPath $Fixture.PolicyPath `
-                -CandidateRoot $Fixture.CandidateRoot `
-                -ExpectedSourceRevision $Fixture.SourceRevision `
-                -SkillId 'manage-confluence-docs-as-code' `
-                -ScannerReportPath $Fixture.ScannerReportPath `
-                -OtherScannerReportPaths $Fixture.OtherScannerReportPaths `
-                -AuthorityArtifactsRoot $Fixture.AuthorityArtifactsRoot `
-                -ReportObject $preDispatchReport `
-                -PreDispatch
+            Assert-ReviewOnly $assessment
+            return $assessment
         }
 
         $continuationAuthorityPaths = @(
             'docs/standards/internal-source-continuation.json',
-            'docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json',
+            'docs/standards/schemas/internal-source-review-assessment-v1.schema.json',
             'docs/standards/schemas/internal-source-continuation-v1.schema.json'
         )
+        $script:ContinuationExpectedAuthorityFiles = @($continuationAuthorityPaths | ForEach-Object {
+            [pscustomobject][ordered]@{ path = $_; sha256 = Get-StandardValidationFileSha256 -Path (Join-Path $repositoryRoot $_) -Context 'frozen synthetic authority fixture' }
+        })
         $script:StandardValidationAuthorityEvidence = [pscustomobject][ordered]@{
             binding = [pscustomobject][ordered]@{
                 verified = $true
                 revision = ('d' * 40)
                 archivePath = 'authenticated-authority.zip'
                 snapshotEvidencePath = 'authenticated-authority-receipt.json'
-                selectedFiles = @($continuationAuthorityPaths | ForEach-Object {
-                        [pscustomobject][ordered]@{
-                            path = $_
-                            sha256 = Get-StandardValidationFileSha256 -Path (Join-Path $repositoryRoot $_) -Context "internal continuation test authority file $_"
-                        }
-                    })
+                selectedFiles = @($script:ContinuationExpectedAuthorityFiles)
             }
         }
     }
@@ -370,25 +303,7 @@ Describe 'Internal source continuation policy' {
             return [pscustomobject][ordered]@{
                 verified = $true; revision = $AuthorityRevision
                 archivePath = $AuthorityArchivePath; snapshotEvidencePath = $AuthoritySnapshotEvidencePath
-                selectedFiles = @($continuationAuthorityPaths | ForEach-Object {
-                        [pscustomobject][ordered]@{
-                            path = $_
-                            sha256 = Get-StandardValidationFileSha256 -Path (Join-Path $repositoryRoot $_) -Context "authenticated continuation authority file $_"
-                        }
-                    })
-            }
-        }
-        Mock Assert-StandardValidationSupervisorLaunchBinding {
-            param($Path, $CandidateRoot, $AdapterPath, $AdapterSha256, $ArtifactsRoot, $OutputPath,
-                $TrustedToolRoot, $SourceRepository, $SourceRevision, $BaseRevision, $EventName,
-                $CandidateArchiveSha256, $AuthorityRevision, $TrustAnchorRoot, $Context)
-            $bindingSnapshot = Get-StandardValidationJsonSnapshot -Path $Path -Context 'authenticated fixture launch binding'
-            return [pscustomobject][ordered]@{
-                status = 'verified'; verified = $true; path = [IO.Path]::GetFullPath($Path)
-                sha256 = [string]$bindingSnapshot.sha256
-                resolutionRunId = [string]$bindingSnapshot.value.resolutionRunId
-                issuedAt = [DateTime]::UtcNow.ToString('o'); expiresAt = [DateTime]::UtcNow.AddMinutes(5).ToString('o')
-                consumptionPath = [string]$bindingSnapshot.value.consumptionPath; consumptionSha256 = ('0' * 64)
+                selectedFiles = @($script:ContinuationExpectedAuthorityFiles)
             }
         }
     }
@@ -405,7 +320,11 @@ Describe 'Internal source continuation policy' {
         $policy = $policyRaw | ConvertFrom-Json
         Assert-Continuation ($policy.authorityOwnership -ceq 'central-only') 'Internal classification must remain central-only.'
         Assert-Continuation (-not [bool]$policy.consumerSelfDeclaration) 'Consumers must not self-declare internal scope.'
-        Assert-Continuation ([bool]$policy.protectedAdoptionRequired) 'Technical eligibility must require a protected adoption layer.'
+        Assert-Continuation ($policy.scope -ceq 'internal-review-only' -and $policy.permittedOperations.Count -eq 0) 'Review assessment must not authorize operations.'
+        Assert-Continuation ($policy.entries[0].applicabilityAssessment.status -ceq 'not-verified') 'Missing applicability evidence must be explicit in the authority-bound policy.'
+        $unsupportedProfile = $policy | ConvertTo-Json -Depth 30 | ConvertFrom-Json
+        $unsupportedProfile.entries[0].applicabilityAssessment.status = 'verified'
+        Assert-Continuation (-not (($unsupportedProfile | ConvertTo-Json -Depth 30) | Test-Json -SchemaFile $schemaPath -ErrorAction SilentlyContinue)) 'A caller-supplied ready profile must not satisfy the policy schema.'
         $retainedShapePath = Join-Path $repositoryRoot 'tests/fixtures/internal-source-continuation/syp171-skillspector-2.12.0-shape.json'
         Assert-Continuation (Test-Path -LiteralPath $retainedShapePath) 'The retained SYP171 scanner-shape fixture is missing.'
         $retainedShape = Get-Content -Raw -LiteralPath $retainedShapePath | ConvertFrom-Json
@@ -420,27 +339,27 @@ Describe 'Internal source continuation policy' {
         Assert-Continuation ($retainedShape.findingsBeforeFiltering -eq 7 -and $retainedShape.findingsAfterFiltering -eq 7 -and $retainedShape.suppressedCount -eq 0) 'The retained raw finding counts drifted.'
         Assert-Continuation (($policy.entries.sourceRepository -join ',') -ceq 'https://github.com/SyuanTsai/Skill-Atlassian-Ecosystem.git') 'Only the declared internal repository may use this policy.'
         $contract = Get-Content -Raw -LiteralPath (Join-Path $repositoryRoot 'docs/standards/standard-validation-contract-v1.json') | ConvertFrom-Json
-        Assert-Continuation (-not [bool]$contract.evidence.internalSourceContinuation.technicalPublishable) 'The central contract must keep technical eligibility non-publishable.'
-        Assert-Continuation (($contract.evidence.internalSourceContinuation.technicalRunnerBindings -join ',') -ceq 'signedLaunchBinding,launchConsumptionMarker,signedOutputPath,registeredRepositoryTestEvidence,registeredSupplementalRawEvents,typedAnalyzerWorkloadCounters') 'The authenticated technical runner binding set drifted.'
-        Assert-Continuation (($contract.evidence.internalSourceContinuation.protectedBindings -join ',') -ceq 'eventRepository,eventSourceRevision,canonicalRunId,launchBinding,candidateAcquisition,authorityRevision,scannerToolReceipt,staticRawEvent,supplementalTestInventory,supplementalRawEvents,cleanup,humanFindingDispositionReview,centralRevision,workflowRevision,authorityArchiveSha256') 'The protected adoption binding set drifted.'
+        Assert-Continuation ($contract.evidence.internalSourceContinuation.deferredIntegration.status -ceq 'inactive' -and -not $contract.evidence.internalSourceContinuation.deferredIntegration.consumerAuthority) 'Deferred integration must have no consumer authority.'
+        Assert-Continuation (-not [bool]$contract.evidence.internalSourceContinuation.technicalPublishable) 'The central contract must keep review assessment non-publishable.'
+        Assert-Continuation (($contract.evidence.internalSourceContinuation.deferredIntegration.protectedBindings -join ',') -ceq 'eventRepository,eventSourceRevision,canonicalRunId,launchBinding,candidateAcquisition,authorityRevision,scannerToolReceipt,staticRawEvent,supplementalTestInventory,supplementalRawEvents,cleanup,humanFindingDispositionReview,centralRevision,workflowRevision,authorityArchiveSha256') 'The inactive deferred binding inventory drifted.'
     }
 
     # Scenario: production authority evidence is missing, unverified, or binds different continuation-policy bytes.
-    # Purpose: require authenticated central authority before any eligibility can be emitted and prevent local allowlist widening.
+    # Purpose: require authenticated central authority before any assessment can be consistent and prevent local allowlist widening.
     It 'UnitT15_rejects_policy_bytes_outside_the_authenticated_authority_snapshot' {
         $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'authority-policy-binding')
         $previousAuthorityEvidence = $script:StandardValidationAuthorityEvidence
         try {
             $script:StandardValidationAuthorityEvidence = $null
             $missing = Invoke-ContinuationFixture -Fixture $fixture
-            Assert-Continuation ($missing.status -ceq 'rejected') 'Eligibility was emitted without authority evidence.'
+            Assert-Continuation ($missing.status -ceq 'inconsistent') 'Eligibility was emitted without authority evidence.'
             Assert-Continuation (@($missing.failureReasons) -contains 'internal-continuation-policy-not-authority-bound') 'The missing authority binding failure was not reported.'
 
             $script:StandardValidationAuthorityEvidence = [pscustomobject][ordered]@{
                 binding = [pscustomobject][ordered]@{ verified = $false; selectedFiles = @() }
             }
             $unverified = Invoke-ContinuationFixture -Fixture $fixture
-            Assert-Continuation ($unverified.status -ceq 'rejected') 'Eligibility was emitted with unverified authority evidence.'
+            Assert-Continuation ($unverified.status -ceq 'inconsistent') 'Eligibility was emitted with unverified authority evidence.'
             Assert-Continuation (@($unverified.failureReasons) -contains 'internal-continuation-policy-not-authority-bound') 'The unverified authority binding failure was not reported.'
 
             $script:StandardValidationAuthorityEvidence = [pscustomobject][ordered]@{
@@ -460,12 +379,13 @@ Describe 'Internal source continuation policy' {
                 }
             }
             $rejected = Invoke-ContinuationFixture -Fixture $fixture
-            Assert-Continuation ($rejected.status -ceq 'rejected') 'A caller-authored verified flag and local file hashes were accepted as authenticated authority.'
+            Assert-Continuation ($rejected.status -ceq 'inconsistent') 'A caller-authored verified flag and local file hashes were accepted as authenticated authority.'
             Assert-Continuation (@($rejected.failureReasons) -contains 'internal-continuation-policy-not-authority-bound') 'The forged authority binding failure was not reported.'
 
             $script:StandardValidationAuthorityEvidence = $previousAuthorityEvidence
-            $accepted = Invoke-ContinuationFixture -Fixture $fixture
-            Assert-Continuation ($accepted.status -ceq 'eligible-for-protected-review') ($accepted.failureReasons -join ',')
+            $boundButPending = Invoke-ContinuationFixture -Fixture $fixture
+            Assert-ReviewOnly $boundButPending
+            Assert-Continuation ($boundButPending.status -ceq 'consistent' -and $boundButPending.failureReasons.Count -eq 0) ($boundButPending.failureReasons -join ',')
             Assert-MockCalled Assert-StandardValidationAuthoritySnapshot -Scope It
         }
         finally {
@@ -473,116 +393,181 @@ Describe 'Internal source continuation policy' {
         }
     }
 
-    # Scenario: the authenticated runner sees the exact registered incomplete Static event and executes both central suites.
-    # Purpose: prove the production builder emits the same candidate-bound aggregate that the eligibility validator consumes.
-    It 'UnitT18_builds_validator_compatible_supplemental_runner_evidence' {
-        $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'runner-supplemental-evidence')
-        $scopeMatches = Test-StandardValidationInternalContinuationReviewScope `
-            -SourceRepository $fixture.Report.candidate.sourceRepository `
-            -CandidateId $fixture.Report.candidate.candidateId `
-            -ActiveSkills @($fixture.Report.candidate.activeSkills) `
-            -FailureState 'FAILED' `
-            -FailureMessage 'Static analyzer coverage is incomplete.' `
-            -Stages $fixture.Report.stages `
-            -AdapterResult $fixture.RunnerAdapterResult `
-            -PolicyEntry $fixture.PolicyEntry `
-            -RunRoot $fixture.RunRoot
-        Assert-Continuation $scopeMatches 'The exact registered incomplete Static event did not enable the supplemental runner route.'
-        Assert-Continuation ([IO.Path]::GetFileName($fixture.RepositoryTestEvidencePath) -ceq 'internal-continuation-repository-tests.json') 'The runner did not own the canonical supplemental aggregate path.'
-        Assert-Continuation ($fixture.RepositoryTests.status -ceq 'passed' -and $fixture.RepositoryTests.decision -ceq 'PASS') 'The runner aggregate does not expose the validator-required result shape.'
-        Assert-Continuation (($fixture.RepositoryTests.suites -join ',') -ceq 'focused,canonical') 'The runner aggregate suite inventory drifted from central policy.'
-        Assert-Continuation ($fixture.Report.supplementalRepositoryTests.evidenceSha256 -ceq (Get-StandardValidationFileSha256 -Path $fixture.RepositoryTestEvidencePath -Context 'runner supplemental evidence')) 'The canonical report did not register the exact runner aggregate bytes.'
-        $runnerText = Get-Content -Raw -LiteralPath (Join-Path $repositoryRoot 'scripts/Invoke-StandardValidation.ps1')
-        Assert-Continuation ($runnerText -match '\[bool\]\s+\$InternalSourceContinuationReview\s*=\s*\$false') 'The callable runner does not declare the internal continuation review route.'
-        Assert-Continuation ($runnerText -match '-InternalSourceContinuationReview \(\[bool\]\$InternalSourceContinuationReview\)') 'The script entrypoint does not forward the internal continuation review route.'
-        Assert-Continuation ($runnerText -match '-not \$CompleteLifecycle -and -not \$InternalSourceContinuationReview') 'Default core routing still intercepts the internal continuation review route.'
-        $continuationBlockStart = $runnerText.IndexOf('if ($InternalSourceContinuationReview)')
-        $continuationBlockEnd = $runnerText.IndexOf('if ($SourceMergeExceptionReview)', $continuationBlockStart)
-        $continuationBlock = $runnerText.Substring($continuationBlockStart, $continuationBlockEnd - $continuationBlockStart)
-        $preDispatchOffset = $continuationBlock.IndexOf('-PreDispatch')
-        $scannerRegistrationOffset = $continuationBlock.IndexOf("-Context 'internal continuation target scanner report'")
-        $supplementalCommandOffset = $continuationBlock.IndexOf('Invoke-StandardValidationCommandAndRecord')
-        Assert-Continuation ($preDispatchOffset -ge 0 -and $scannerRegistrationOffset -gt $preDispatchOffset -and $supplementalCommandOffset -gt $scannerRegistrationOffset) 'The authenticated runner does not evaluate and freeze scanner evidence before candidate command execution.'
-
-        $fixture.RunnerAdapterResult.repositoryTests[0].command.arguments = @('--suite', 'different')
-        $driftedScope = Test-StandardValidationInternalContinuationReviewScope `
-            -SourceRepository $fixture.Report.candidate.sourceRepository `
-            -CandidateId $fixture.Report.candidate.candidateId `
-            -ActiveSkills @($fixture.Report.candidate.activeSkills) `
-            -FailureState 'FAILED' `
-            -FailureMessage 'Static analyzer coverage is incomplete.' `
-            -Stages $fixture.Report.stages `
-            -AdapterResult $fixture.RunnerAdapterResult `
-            -PolicyEntry $fixture.PolicyEntry `
-            -RunRoot $fixture.RunRoot
-        Assert-Continuation (-not $driftedScope) 'A drifted supplemental suite command was allowed to dispatch.'
+    # Scenario: the continuation evaluator consumes reports and the canonical runner retains its existing routes.
+    # Purpose: prevent execution parameters, supplemental registration, or hidden dispatch fallback from returning.
+    It 'UnitT18_exposes_only_the_report_based_evaluator_without_execution_entrypoints' {
+        Assert-Continuation ($null -eq (Get-Command 'New-StandardValidationInternalSourceContinuationEligibility' -ErrorAction SilentlyContinue)) 'Legacy eligibility API must not remain callable.'
+        $evaluator = Get-Command New-StandardValidationInternalSourceReviewAssessment
+        Assert-Continuation $evaluator.Parameters.ContainsKey('Report') 'The evaluator must consume an existing report.'
+        foreach ($removed in @('ReportPath', 'ReportObject', 'PreDispatch')) {
+            Assert-Continuation (-not $evaluator.Parameters.ContainsKey($removed)) "Removed evaluator parameter '$removed' remains callable."
+        }
+        $runner = Get-Command Invoke-StandardValidationRun
+        Assert-Continuation (-not $runner.Parameters.ContainsKey('InternalSourceContinuationReview')) 'The continuation execution route remains callable.'
+        Assert-Continuation $runner.Parameters.ContainsKey('SourceMergeExceptionReview') 'The existing PR12 route was removed.'
+        $producer = Get-Command New-StandardValidationCandidateEvidence
+        Assert-Continuation (-not $producer.Parameters.ContainsKey('SupplementalRepositoryTests')) 'Canonical supplemental registration remains callable.'
+        foreach ($removed in @('Test-StandardValidationInternalContinuationReviewScope', 'New-StandardValidationInternalContinuationSupplementalEvidence', 'Assert-StandardValidationInternalContinuationRunnerEvidence')) {
+            Assert-Continuation ($null -eq (Get-Command $removed -ErrorAction SilentlyContinue)) "Removed execution function '$removed' remains callable."
+        }
     }
 
-    # Scenario: Static is incomplete but the authenticated scanner evidence contains an unknown finding or a second degraded analyzer.
-    # Purpose: block every candidate command before dispatch unless the complete central technical policy already passes.
-    It 'UnitT19_blocks_supplemental_dispatch_before_unapproved_scanner_evidence' {
-        $validFixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'pre-dispatch-valid')
-        $validDecision = Invoke-ContinuationPreDispatchFixture -Fixture $validFixture
-        Assert-Continuation ($validDecision.status -ceq 'eligible-for-supplemental-dispatch') ($validDecision.failureReasons -join ',')
-
-        $unknownFindingFixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'pre-dispatch-unknown-finding')
-        $unknownFinding = $unknownFindingFixture.Scanner.issues[0] | ConvertTo-Json -Depth 20 | ConvertFrom-Json
-        $unknownFinding.match_fingerprint = 'sha256:unknown-pre-dispatch-finding'
-        $unknownFindingFixture.Scanner.issues = @($unknownFindingFixture.Scanner.issues) + @($unknownFinding)
-        $unknownFindingFixture.Scanner.analysis_completeness.findings_before_filtering = $unknownFindingFixture.Scanner.issues.Count
-        $unknownFindingFixture.Scanner.analysis_completeness.findings_after_filtering = $unknownFindingFixture.Scanner.issues.Count
-        Sync-ContinuationScannerBinding -Fixture $unknownFindingFixture
-        $unknownFindingDecision = Invoke-ContinuationPreDispatchFixture -Fixture $unknownFindingFixture
-        Assert-Continuation ($unknownFindingDecision.status -ceq 'rejected') 'An unknown finding reached the supplemental dispatch boundary.'
-        Assert-Continuation (@($unknownFindingDecision.failureReasons) -contains 'internal-continuation-finding-not-allowed') 'The pre-dispatch evaluator did not identify the unknown finding.'
-
-        $extraDegradedFixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'pre-dispatch-extra-degraded')
-        $additionalAnalyzer = @($extraDegradedFixture.Scanner.analysis_completeness.analyzer_statuses | Where-Object {
-                [string]$_.analyzer_id -cne 'static_patterns_tool_misuse'
-            })[0]
-        $additionalAnalyzer.status = 'degraded'
-        Sync-ContinuationScannerBinding -Fixture $extraDegradedFixture
-        $extraDegradedDecision = Invoke-ContinuationPreDispatchFixture -Fixture $extraDegradedFixture
-        Assert-Continuation ($extraDegradedDecision.status -ceq 'rejected') 'A second degraded analyzer reached the supplemental dispatch boundary.'
-        Assert-Continuation (@($extraDegradedDecision.failureReasons) -contains 'internal-continuation-analyzer-status-invalid') 'The pre-dispatch evaluator did not identify the additional degraded analyzer.'
-    }
-
-    # Scenario: one central-listed internal Skill is partial only because the approved parser analyzer degraded.
-    # Purpose: let source work continue while keeping the canonical Static failure and release prohibition intact.
-    It 'UnitT20_produces_only_non_publishable_internal_technical_eligibility' {
+    # Scenario: a synthetic summary matches all existing consistency checks but lacks independent applicability evidence.
+    # Purpose: reach consistent while preserving canonical failure, unverifiable applicability/provenance and zero authorization.
+    It 'UnitT20_returns_consistent_without_authorizing_operations_or_mutating_canonical_failure' {
         $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'eligible')
+        $beforeReport = $fixture.Report | ConvertTo-Json -Depth 30 -Compress
+        Mock Invoke-StandardValidationCommandAndRecord { throw 'Evaluator dispatched a command.' }
         $decision = Invoke-ContinuationFixture -Fixture $fixture
-        Assert-Continuation ($decision.status -ceq 'eligible-for-protected-review') ($decision.failureReasons -join ',')
-        Assert-Continuation (-not $decision.publishable -and $decision.protectedAdoptionRequired) 'Technical eligibility must not be directly publishable.'
+        Assert-Continuation ($decision.status -ceq 'consistent') ($decision.failureReasons -join ',')
+        Assert-Continuation ($decision.failureReasons.Count -eq 0) ($decision.failureReasons -join ',')
+        Assert-ReviewOnly $decision
+        Assert-Continuation (-not $decision.publishable) 'Review assessment must not be publishable.'
         Assert-Continuation ($decision.canonicalState -ceq 'FAILED' -and $decision.canonicalExitCode -eq 20) 'Canonical failure was rewritten.'
         Assert-Continuation (-not $decision.releaseEligible) 'Internal continuation must never authorize release.'
-        Assert-Continuation (($decision.eligibleOperationAfterProtectedAdoption -join ',') -ceq 'source-merge') 'The later protected adoption must remain source-merge-only.'
-        Assert-Continuation (($decision.forbiddenOperations -join ',') -ceq 'release,install,publish,catalog-adoption') 'Forbidden operation boundary drifted.'
-        $decisionSchema = Join-Path $repositoryRoot 'docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json'
-        Assert-Continuation (($decision | ConvertTo-Json -Depth 20) | Test-Json -SchemaFile $decisionSchema) 'Eligible decision does not match its strict schema.'
-        Assert-MockCalled Assert-StandardValidationSupervisorLaunchBinding -Scope It
-    }
-
-    # Scenario: caller-authored canonical and supplemental JSON is not backed by authenticated supervisor runner evidence.
-    # Purpose: prevent matching files under an artifacts root from impersonating an executed Pester run.
-    It 'UnitT22_rejects_supplemental_events_without_authenticated_runner_evidence' {
-        $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'unauthenticated-runner-evidence')
-        $fixture.Report.launchBinding.status = 'unverified'
-        $fixture.Report.launchBinding.verified = $false
-
-        $decision = Invoke-ContinuationFixture -Fixture $fixture
-
-        Assert-Continuation ($decision.status -ceq 'rejected') 'Caller-authored supplemental events were accepted without authenticated runner evidence.'
-        Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-canonical-runner-evidence-invalid') 'The missing authenticated runner binding was not reported.'
-        Assert-MockCalled Assert-StandardValidationSupervisorLaunchBinding -Times 0 -Exactly -Scope It
+        Assert-Continuation ($decision.authorizedOperations.Count -eq 0) 'Review assessment cannot authorize source merge.'
+        Assert-Continuation (($decision.forbiddenOperations -join ',') -ceq 'source-merge,release,install,publish,catalog-adoption') 'Forbidden operation boundary drifted.'
+        $decisionSchema = Join-Path $repositoryRoot 'docs/standards/schemas/internal-source-review-assessment-v1.schema.json'
+        Assert-Continuation (($decision | ConvertTo-Json -Depth 20) | Test-Json -SchemaFile $decisionSchema) 'Review assessment does not match its strict schema.'
+        Assert-Continuation (($fixture.Report | ConvertTo-Json -Depth 30 -Compress) -ceq $beforeReport) 'The evaluator rewrote the canonical report.'
+        Assert-MockCalled Invoke-StandardValidationCommandAndRecord -Times 0 -Exactly -Scope It
     }
 
     # Scenario: the retained SYP171 report shape contains parser-derived coverage warnings and the declared Atlassian endpoint finding.
-    # Purpose: accept only centrally dispositioned fingerprints while preserving the raw finding counts and evidence.
-    It 'UnitT25_accepts_only_the_centrally_dispositioned_syp171_finding_shape' {
+    # Purpose: validate the retained exact finding scope without claiming applicability verification.
+    It 'UnitT25_accepts_the_exact_synthetic_finding_scope_for_review' {
         $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'allowed-findings')
         $decision = Invoke-ContinuationFixture -Fixture $fixture
-        Assert-Continuation ($decision.status -ceq 'eligible-for-protected-review') ($decision.failureReasons -join ',')
+        Assert-Continuation ($decision.status -ceq 'consistent') ($decision.failureReasons -join ',')
+        Assert-Continuation ($decision.failureReasons.Count -eq 0) ($decision.failureReasons -join ',')
+        Assert-ReviewOnly $decision
+    }
+
+
+    # Scenario: a consistent synthetic result is changed to claim authority or an obsolete eligibility shape.
+    # Purpose: enforce strict schema boundaries for positive and negative review results.
+    It 'UnitT21_schema_rejects_authorization_legacy_contracts_and_invalid_result_shapes' {
+        $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'schema-boundary') -IncludeOtherSkill
+        $result = Invoke-ContinuationFixture -Fixture $fixture
+        Assert-Continuation ($result.status -ceq 'consistent') ($result.failureReasons -join ',')
+        $schema = Join-Path $repositoryRoot 'docs/standards/schemas/internal-source-review-assessment-v1.schema.json'
+        foreach ($field in @('authorizationGranted', 'publishable', 'releaseEligible', 'authorizedOperations', 'forbiddenOperations', 'assessmentKind', 'applicabilityStatus', 'executionProvenanceStatus')) {
+            foreach ($mutation in @('missing', 'upgrade', 'string')) {
+                $changed = $result | ConvertTo-Json -Depth 25 | ConvertFrom-Json
+                switch ($mutation) {
+                    'missing' { $changed.PSObject.Properties.Remove($field) }
+                    'string' { $changed.$field = 'false' }
+                    'upgrade' {
+                        $changed.$field = switch ($field) {
+                            { $_ -in @('authorizationGranted', 'publishable', 'releaseEligible') } { $true }
+                            'authorizedOperations' { ,@('source-merge') }
+                            'forbiddenOperations' { ,@('release') }
+                            default { 'verified' }
+                        }
+                    }
+                }
+                Assert-Continuation (-not (($changed | ConvertTo-Json -Depth 25) | Test-Json -SchemaFile $schema -ErrorAction SilentlyContinue)) "Schema accepted $field/$mutation."
+            }
+        }
+        foreach ($mutation in @('old-contract', 'old-status', 'extra-property', 'consistent-reason', 'inconsistent-empty', 'non-array-reasons', 'duplicate-reasons', 'duplicate-hashes')) {
+            $changed = $result | ConvertTo-Json -Depth 25 | ConvertFrom-Json
+            switch ($mutation) {
+                'old-contract' { $changed.contract = 'internal-source-continuation-eligibility-v1' }
+                'old-status' { $changed.status = 'eligible-for-protected-review' }
+                'extra-property' { $changed | Add-Member -NotePropertyName protectedAdoptionRequired -NotePropertyValue $true }
+                'consistent-reason' { $changed.failureReasons = @('unexpected') }
+                'inconsistent-empty' { $changed.status = 'inconsistent'; $changed.failureReasons = @() }
+                'non-array-reasons' { $changed.status = 'inconsistent'; $changed.failureReasons = 'invalid' }
+                'duplicate-reasons' { $changed.status = 'inconsistent'; $changed.failureReasons = @('invalid', 'invalid') }
+                'duplicate-hashes' { $changed.otherScannerReportSha256 = @($changed.otherScannerReportSha256[0], $changed.otherScannerReportSha256[0]) }
+            }
+            Assert-Continuation (-not (($changed | ConvertTo-Json -Depth 25) | Test-Json -SchemaFile $schema -ErrorAction SilentlyContinue)) "Schema accepted $mutation."
+        }
+    }
+
+    # Scenario: report bytes change without synchronizing the native digest.
+    # Purpose: a real binding failure must be inconsistent, read-only and unable to dispatch commands.
+    It 'UnitT22_reports_a_specific_binding_failure_without_mutating_or_dispatching' {
+        $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'negative-read-only')
+        $fixture.Scanner.metadata.claim = 'changed bytes'
+        Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner
+        $before = $fixture.Report | ConvertTo-Json -Depth 30 -Compress
+        Mock Invoke-StandardValidationCommandAndRecord { throw 'Assessment dispatched a command.' }
+        $result = Invoke-ContinuationFixture -Fixture $fixture
+        Assert-Continuation ($result.status -ceq 'inconsistent') 'Stale native digest was accepted.'
+        Assert-Continuation (@($result.failureReasons) -contains 'internal-continuation-scanner-candidate-binding-invalid') ($result.failureReasons -join ',')
+        Assert-Continuation (($fixture.Report | ConvertTo-Json -Depth 30 -Compress) -ceq $before) 'Negative assessment mutated canonical report.'
+        Assert-MockCalled Invoke-StandardValidationCommandAndRecord -Times 0 -Exactly -Scope It
+        $schema = Join-Path $repositoryRoot 'docs/standards/schemas/internal-source-review-assessment-v1.schema.json'
+        Assert-Continuation (($result | ConvertTo-Json -Depth 25) | Test-Json -SchemaFile $schema) 'Negative assessment must be schema-valid.'
+    }
+
+    # Scenario: one non-degraded analyzer declares less work than the component inventory and all bindings match.
+    # Purpose: distinguish local consistency from independent workload completeness without needing caller claims.
+    It 'UnitT26_accepts_analyzer_specific_smaller_workload_only_as_unverified_consistency' {
+        $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'smaller-workload') -IncludeOtherSkill
+        $analyzer = @($fixture.Scanner.analysis_completeness.analyzer_statuses | Where-Object { $_.analyzer_id -ceq 'mcp_tool_poisoning' })[0]
+        $analyzer.planned_work = 1; $analyzer.completed = 1
+        Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner
+        Sync-ContinuationScannerBinding $fixture
+        $result = Invoke-ContinuationFixture -Fixture $fixture
+        Assert-Continuation ($result.status -ceq 'consistent' -and $result.failureReasons.Count -eq 0) ($result.failureReasons -join ',')
+    }
+
+    # Scenario: active and inactive statuses contradict their typed counters in either Skill report.
+    # Purpose: preserve arithmetic checks even with synchronized digests and explicitly unverified applicability.
+    It 'UnitT28_rejects_counter_status_contradictions_in_target_and_other_skills' {
+        foreach ($scope in @('target', 'other')) {
+            foreach ($status in @('completed', 'disabled', 'not_applicable')) {
+                foreach ($counter in @('planned_work', 'completed', 'partial', 'skipped', 'failed', 'unaccounted')) {
+                    $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive "status-$scope-$status-$counter") -IncludeOtherSkill
+                    $report = if ($scope -ceq 'target') { $fixture.Scanner } else { Get-Content $fixture.OtherScannerReportPaths[0] -Raw | ConvertFrom-Json }
+                    $analyzer = @($report.analysis_completeness.analyzer_statuses | Where-Object { $_.analyzer_id -ceq 'mcp_tool_poisoning' })[0]
+                    $analyzer.status = $status
+                    foreach ($field in @('planned_work', 'completed', 'partial', 'skipped', 'failed', 'unaccounted')) { $analyzer.$field = 0 }
+                    if ($status -ceq 'completed') {
+                        $analyzer.planned_work = 1; $analyzer.completed = 1
+                        $analyzer.$counter = if ($counter -in @('planned_work', 'completed')) { 0 } else { 1 }
+                    }
+                    else { $analyzer.$counter = 1 }
+                    $path = if ($scope -ceq 'target') { $fixture.ScannerReportPath } else { $fixture.OtherScannerReportPaths[0] }
+                    Write-ContinuationJson $path $report
+                    Sync-ContinuationScannerBinding $fixture
+                    $result = Invoke-ContinuationFixture -Fixture $fixture
+                    $expected = if ($scope -ceq 'target') { 'internal-continuation-analyzer-status-invalid' } else { 'internal-continuation-other-skill-report-invalid' }
+                    Assert-Continuation ($result.status -ceq 'inconsistent' -and @($result.failureReasons) -contains $expected) "$scope/$status/$counter : $($result.failureReasons -join ',')"
+                }
+            }
+        }
+    }
+
+    # Scenario: a canonical report supplies a valid integer exit code other than 20.
+    # Purpose: preserve the actual diagnostic value while rejecting canonical state drift.
+    It 'UnitT29_preserves_actual_integer_exit_codes_in_inconsistent_results' {
+        $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'actual-exit')
+        $fixture.Report.exitCode = 0
+        $result = Invoke-ContinuationFixture -Fixture $fixture
+        Assert-Continuation ($result.status -ceq 'inconsistent' -and $result.canonicalExitCode -eq 0) 'Actual integer exit code was lost.'
+        Assert-Continuation (@($result.failureReasons) -contains 'internal-continuation-canonical-state-invalid') 'Wrong diagnostic.'
+    }
+
+    # Scenario: synthetic scanner, canonical and supplemental files use the frozen authority fixture boundary.
+    # Purpose: integrate actual file/digest validators and prove stale policy/schema inventory cannot be silently rebound; this is not protected trust-chain certification.
+    It 'InterT10_checks_real_file_consistency_with_the_existing_synthetic_authority_fixture' {
+        $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'integrated-synthetic') -IncludeOtherSkill
+        $result = Invoke-ContinuationFixture -Fixture $fixture
+        Assert-Continuation ($result.status -ceq 'consistent') ($result.failureReasons -join ',')
+        $savedExpected = $script:ContinuationExpectedAuthorityFiles
+        try {
+            foreach ($drift in @('policy-bytes', 'old-schema')) {
+                $script:ContinuationExpectedAuthorityFiles = $savedExpected | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+                if ($drift -ceq 'policy-bytes') { $script:ContinuationExpectedAuthorityFiles[0].sha256 = 'f' * 64 }
+                else { $script:ContinuationExpectedAuthorityFiles[1].path = 'docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json' }
+                $rejected = Invoke-ContinuationFixture -Fixture $fixture
+                Assert-Continuation ($rejected.status -ceq 'inconsistent' -and @($rejected.failureReasons) -contains 'internal-continuation-policy-not-authority-bound') "Authority drift $drift was accepted."
+            }
+        }
+        finally { $script:ContinuationExpectedAuthorityFiles = $savedExpected }
     }
 
     # Scenario: an external repository or an unlisted Skill presents otherwise identical evidence.
@@ -593,7 +578,7 @@ Describe 'Internal source continuation policy' {
             if ($drift -ceq 'external') { $fixture.Report.candidate.sourceRepository = 'https://example.com/external/skill.git' }
             else { $fixture.Report.candidate.activeSkills = @('other-skill') }
             $decision = Invoke-ContinuationFixture -Fixture $fixture
-            Assert-Continuation ($decision.status -ceq 'rejected') "Scope drift '$drift' was accepted."
+            Assert-Continuation ($decision.status -ceq 'inconsistent') "Scope drift '$drift' was accepted."
         }
     }
 
@@ -625,8 +610,30 @@ Describe 'Internal source continuation policy' {
                 }
             }
             $decision = Invoke-ContinuationFixture -Fixture $fixture
-            Assert-Continuation ($decision.status -ceq 'rejected') "Scanner candidate-binding drift '$drift' was accepted."
+            Assert-Continuation ($decision.status -ceq 'inconsistent') "Scanner candidate-binding drift '$drift' was accepted."
             Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-scanner-candidate-binding-invalid') "Scanner candidate-binding drift '$drift' did not report its binding failure."
+        }
+    }
+
+
+    # Scenario: a completed analyzer appears twice or uses an unknown ID while byte bindings match.
+    # Purpose: retain exact analyzer identity/cardinality checks separately from digest validation.
+    It 'UnitT37_rejects_duplicate_and_unknown_analyzer_ids_with_current_bindings' {
+        foreach ($scope in @('target', 'other')) {
+            foreach ($mutation in @('duplicate', 'unknown')) {
+                $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive "analyzer-id-$scope-$mutation") -IncludeOtherSkill
+                $report = if ($scope -ceq 'target') { $fixture.Scanner } else { Get-Content $fixture.OtherScannerReportPaths[0] -Raw | ConvertFrom-Json }
+                $row = @($report.analysis_completeness.analyzer_statuses | Where-Object { $_.status -ceq 'completed' })[0]
+                if ($mutation -ceq 'duplicate') { $report.analysis_completeness.analyzer_statuses += $row }
+                else { $row.analyzer_id = 'unknown_analyzer' }
+                $path = if ($scope -ceq 'target') { $fixture.ScannerReportPath } else { $fixture.OtherScannerReportPaths[0] }
+                Write-ContinuationJson $path $report
+                Sync-ContinuationScannerBinding $fixture
+                $result = Invoke-ContinuationFixture -Fixture $fixture
+                $reason = if ($scope -ceq 'target') { 'internal-continuation-analyzer-inventory-invalid' } else { 'internal-continuation-other-skill-report-invalid' }
+                Assert-Continuation ($result.status -ceq 'inconsistent' -and @($result.failureReasons) -contains $reason) "$scope/$mutation : $($result.failureReasons -join ',')"
+                Assert-Continuation (@($result.failureReasons) -notcontains 'internal-continuation-scanner-candidate-binding-invalid') 'This case must reach analyzer identity validation with consistent bindings.'
+            }
         }
     }
 
@@ -660,7 +667,7 @@ Describe 'Internal source continuation policy' {
                 'unverified-active-skill' { $fixture.Report.candidate.activeSkills += 'configure-jira-api-access' }
             }
             $decision = Invoke-ContinuationFixture -Fixture $fixture
-            Assert-Continuation ($decision.status -ceq 'rejected') "Evidence drift '$drift' was accepted."
+            Assert-Continuation ($decision.status -ceq 'inconsistent') "Evidence drift '$drift' was accepted."
             if ($drift -ceq 'completed-work-mismatch') {
                 Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-analyzer-status-invalid') 'Target-Skill analyzer workload mismatch did not report an invalid analyzer status.'
             }
@@ -670,8 +677,42 @@ Describe 'Internal source continuation policy' {
         }
     }
 
-    # Scenario: a target or other-Skill analyzer omits a workload counter or encodes one as a numeric-looking non-integer value.
-    # Purpose: require every analyzer workload counter to be present as an integer before count comparisons can authorize continuation.
+    # Scenario: existing supplemental raw envelopes match the candidate, then lose or change revision/content.
+    # Purpose: retain a real consistency positive case and reject missing or mismatched raw identity independently of applicability.
+    It 'UnitT41_checks_raw_revision_and_content_before_accepting_test_consistency' {
+        foreach ($field in @('sourceRevision', 'contentSha256')) {
+            foreach ($drift in @('missing', 'null', 'mismatch')) {
+                $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive "raw-$field-$drift")
+                $parameters = @{
+                    Report = $fixture.Report; Evidence = $fixture.RepositoryTests; PolicyEntry = (Get-Content $fixture.PolicyPath -Raw | ConvertFrom-Json).entries[0]
+                    CandidateId = $fixture.Report.candidate.candidateId; SourceRevision = $fixture.SourceRevision
+                    ContentSha256 = $fixture.Report.candidate.contentSha256
+                }
+                Assert-Continuation ([bool](Assert-StandardValidationInternalContinuationRepositoryTestEvidence @parameters)) 'Consistent raw envelopes must pass the technical consistency check.'
+                $record = $fixture.RepositoryTests.events[0]
+                $event = $record.event
+                $raw = Get-Content $event.outputPath -Raw | ConvertFrom-Json
+                $envelope = $raw.process.stdout | ConvertFrom-Json
+                switch ($drift) {
+                    'missing' { $envelope.PSObject.Properties.Remove($field) }
+                    'null' { $envelope.$field = $null }
+                    'mismatch' { $envelope.$field = if ($field -ceq 'sourceRevision') { 'f' * 40 } else { 'f' * 64 } }
+                }
+                $raw.stdout = $envelope | ConvertTo-Json -Depth 15 -Compress
+                $raw.process.stdout = $raw.stdout
+                Write-ContinuationJson $event.outputPath $raw
+                $event.outputSha256 = Get-StandardValidationOutputHash -Stdout $raw.stdout -Stderr $raw.stderr
+                $record.outputSha256 = $event.outputSha256
+                $failure = $null
+                try { [void](Assert-StandardValidationInternalContinuationRepositoryTestEvidence @parameters) }
+                catch { $failure = $_.Exception.Message }
+                Assert-Continuation ($failure -like '*raw event identity is invalid*') "Raw '$field' '$drift' did not fail its identity check: $failure"
+            }
+        }
+    }
+
+    # Scenario: each target or other-Skill counter is missing, null, coerced, non-integral, or outside its range.
+    # Purpose: retain typed-counter diagnostics independently of the typed consistency checks.
     It 'UnitT42_rejects_missing_or_untyped_analyzer_workload_counters' {
         $counterNames = @('planned_work', 'completed', 'partial', 'skipped', 'failed', 'unaccounted')
         foreach ($scope in @('target', 'other')) {
@@ -688,7 +729,33 @@ Describe 'Internal source continuation policy' {
                     Write-ContinuationJson $fixture.OtherScannerReportPaths[0] $otherReport
                 }
                 $decision = Invoke-ContinuationFixture -Fixture $fixture
-                Assert-Continuation ($decision.status -ceq 'rejected') "$scope analyzer accepted a missing '$counterName' counter."
+                Assert-Continuation ($decision.status -ceq 'inconsistent') "$scope analyzer accepted a missing '$counterName' counter."
+                $expectedReason = if ($scope -ceq 'target') { 'internal-continuation-analyzer-counter-invalid' } else { 'internal-continuation-other-skill-report-invalid' }
+                Assert-Continuation (@($decision.failureReasons) -contains $expectedReason) "Missing '$counterName' did not produce its independent counter failure."
+            }
+        }
+        foreach ($scope in @('target', 'other')) {
+            foreach ($counterName in $counterNames) {
+                foreach ($invalid in @(
+                        @{ name = 'null'; value = $null }, @{ name = 'string'; value = '1' },
+                        @{ name = 'boolean'; value = $true }, @{ name = 'fraction'; value = 0.5 },
+                        @{ name = 'integral-float'; value = [double]1 },
+                        @{ name = 'negative'; value = -1 }, @{ name = 'overflow'; value = [long]2147483648 })) {
+                    $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive "$scope-$counterName-$($invalid.name)") -IncludeOtherSkill:($scope -ceq 'other')
+                    if ($scope -ceq 'target') {
+                        $analyzer = @($fixture.Scanner.analysis_completeness.analyzer_statuses | Where-Object { $_.status -ceq 'completed' })[0]
+                        $analyzer[$counterName] = $invalid.value
+                        Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner
+                    }
+                    else {
+                        $other = Get-Content $fixture.OtherScannerReportPaths[0] -Raw | ConvertFrom-Json
+                        $other.analysis_completeness.analyzer_statuses[0].$counterName = $invalid.value
+                        Write-ContinuationJson $fixture.OtherScannerReportPaths[0] $other
+                    }
+                    $decision = Invoke-ContinuationFixture -Fixture $fixture
+                    $reason = if ($scope -ceq 'target') { 'internal-continuation-analyzer-counter-invalid' } else { 'internal-continuation-other-skill-report-invalid' }
+                    Assert-Continuation (@($decision.failureReasons) -contains $reason) "$scope '$counterName' '$($invalid.name)' was hidden by the typed consistency checks."
+                }
             }
         }
         foreach ($drift in @('target-string', 'other-string')) {
@@ -705,7 +772,68 @@ Describe 'Internal source continuation policy' {
                 Write-ContinuationJson $fixture.OtherScannerReportPaths[0] $otherReport
             }
             $decision = Invoke-ContinuationFixture -Fixture $fixture
-            Assert-Continuation ($decision.status -ceq 'rejected') "$scope analyzer accepted a non-integer planned_work value for '$drift'."
+            Assert-Continuation ($decision.status -ceq 'inconsistent') "$scope analyzer accepted a non-integer planned_work value for '$drift'."
+        }
+    }
+
+    # Scenario: the caller supplies an unsafe primary Skill ID that is not the centrally registered entry.
+    # Purpose: reject it before composing or traversing a candidate-relative Skill path.
+    It 'UnitT43_rejects_unsafe_primary_skill_ids_before_inventory_traversal' {
+        $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'unsafe-primary-skill-id')
+        $fixture.Report.candidate.activeSkills = @('../../outside-skill')
+        Mock Get-StandardValidationInventory { throw 'Unsafe primary Skill inventory traversal.' } -ParameterFilter { $Context -ceq 'internal source continuation Skill' -and $Root -like '*unsafe-primary-skill-id*' }
+
+        $decision = Invoke-ContinuationFixture -Fixture $fixture -SkillId '../../outside-skill'
+
+        Assert-Continuation ($decision.status -ceq 'inconsistent') 'A traversal-like primary Skill ID was accepted.'
+        Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-primary-skill-id-invalid') 'The unsafe primary Skill ID did not fail before inventory traversal.'
+        Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-scope-not-registered') 'The unsafe primary Skill ID was not rejected by the central registration boundary.'
+        Assert-MockCalled Get-StandardValidationInventory -Times 0 -Exactly -Scope It -ParameterFilter { $Context -ceq 'internal source continuation Skill' -and $Root -like '*unsafe-primary-skill-id*' }
+    }
+
+    # Scenario: the caller reduces a plan and recomputes every scanner and raw-event hash.
+    # Purpose: a consistent caller-controlled summary may satisfy consistency but must never upgrade applicability or grant authorization.
+    It 'UnitT44_accepts_consistent_workload_rewrites_without_upgrading_assurance' {
+        foreach ($drift in @('smaller-plan', 'disabled', 'not-applicable', 'invented-targets', 'substituted-target', 'narrowed-range', 'duplicate-terminal')) {
+            $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive "applicability-$drift") -IncludeOtherSkill
+            $analyzer = @($fixture.Scanner.analysis_completeness.analyzer_statuses | Where-Object { $_.analyzer_id -ceq 'mcp_tool_poisoning' })[0]
+            $analyzer.planned_work = 1
+            $analyzer.completed = 1
+            if ($drift -in @('disabled', 'not-applicable')) {
+                $analyzer.status = if ($drift -ceq 'disabled') { 'disabled' } else { 'not_applicable' }
+                $analyzer.planned_work = 0
+                $analyzer.completed = 0
+            }
+            # These are explicitly untrusted additions, not a producer or an accepted profile.
+            $fixture.Scanner.metadata.approved_configuration = @{ use_llm = $false }
+            $fixture.Scanner.metadata.scanner_receipt = @{ verified = $true }
+            $fixture.Scanner.metadata.applicability_profile = @{ status = 'verified'; authorizedOperations = @('source-merge') }
+            $fixture.Scanner.applicabilityStatus = 'verified'
+            $fixture.Scanner.executionProvenanceStatus = 'verified'
+            $fixture.Scanner.authorizationGranted = $true
+            $fixture.Scanner.planned_targets = @(@{ work_id = 'caller'; path = 'SKILL.md'; start_line = 1; end_line = 50 })
+            if ($drift -ceq 'substituted-target') { $fixture.Scanner.planned_targets[0].path = 'scripts/ConfluencePlan.psm1' }
+            if ($drift -ceq 'narrowed-range') { $fixture.Scanner.planned_targets[0].end_line = 1 }
+            $fixture.Scanner.terminal_events = @($fixture.Scanner.planned_targets)
+            if ($drift -ceq 'duplicate-terminal') { $fixture.Scanner.terminal_events += $fixture.Scanner.terminal_events[0] }
+            Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner
+            $event = $fixture.Report.stages[3].events[0]
+            $raw = Get-Content -Raw -LiteralPath $event.outputPath | ConvertFrom-Json
+            $envelope = $raw.process.stdout | ConvertFrom-Json
+            $envelope.nativeReports[0].sha256 = Get-StandardValidationFileSha256 -Path $fixture.ScannerReportPath -Context 'caller rewritten scanner'
+            $raw.stdout = $envelope | ConvertTo-Json -Depth 20 -Compress
+            $raw.process.stdout = $raw.stdout
+            Write-ContinuationJson $event.outputPath $raw
+            $event.outputSha256 = Get-StandardValidationOutputHash -Stdout $raw.stdout -Stderr $raw.stderr
+
+            $decision = Invoke-ContinuationFixture -Fixture $fixture
+
+            Assert-Continuation ($decision.status -ceq 'consistent') ($decision.failureReasons -join ',')
+            Assert-Continuation ($decision.failureReasons.Count -eq 0) ($decision.failureReasons -join ',')
+            Assert-ReviewOnly $decision
+            Assert-Continuation (@($decision.failureReasons) -notcontains 'internal-continuation-scanner-candidate-binding-invalid') 'This scenario must pass the byte-binding check to exercise the authority gap.'
+            $schema = Join-Path $repositoryRoot 'docs/standards/schemas/internal-source-review-assessment-v1.schema.json'
+            Assert-Continuation (($decision | ConvertTo-Json -Depth 20) | Test-Json -SchemaFile $schema) 'The assessment must remain schema-valid.'
         }
     }
 
@@ -725,7 +853,7 @@ Describe 'Internal source continuation policy' {
             }
             Write-ContinuationJson $fixture.OtherScannerReportPaths[0] $otherReport
             $decision = Invoke-ContinuationFixture -Fixture $fixture
-            Assert-Continuation ($decision.status -ceq 'rejected') "Other-Skill drift '$drift' was accepted."
+            Assert-Continuation ($decision.status -ceq 'inconsistent') "Other-Skill drift '$drift' was accepted."
             Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-other-skill-report-invalid') "Other-Skill drift '$drift' did not report an invalid scanner report."
         }
     }
@@ -742,32 +870,11 @@ Describe 'Internal source continuation policy' {
         $otherReport.skill.source = $outsideRoot
         Write-ContinuationJson $fixture.OtherScannerReportPaths[0] $otherReport
 
+        Mock Get-StandardValidationInventory { throw 'Unsafe other Skill inventory traversal.' } -ParameterFilter { $Context -eq 'internal source continuation ../../outside-skill' }
         $decision = Invoke-ContinuationFixture -Fixture $fixture
-        Assert-Continuation ($decision.status -ceq 'rejected') 'A traversal-like other-Skill ID was accepted.'
+        Assert-MockCalled Get-StandardValidationInventory -Times 0 -Exactly -Scope It -ParameterFilter { $Context -eq 'internal source continuation ../../outside-skill' }
+        Assert-Continuation ($decision.status -ceq 'inconsistent') 'A traversal-like other-Skill ID was accepted.'
         Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-other-skill-id-invalid') 'The unsafe other-Skill ID did not fail before inventory traversal.'
-    }
-
-    # Scenario: the caller supplies an unsafe primary Skill ID that is not the centrally registered entry.
-    # Purpose: reject it before composing or traversing a candidate-relative Skill path.
-    It 'UnitT46b_rejects_unsafe_primary_skill_ids_before_inventory_traversal' {
-        $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'unsafe-primary-skill-id')
-        $fixture.Report.candidate.activeSkills = @('../../outside-skill')
-
-        $decision = Invoke-ContinuationFixture -Fixture $fixture -SkillId '../../outside-skill'
-
-        Assert-Continuation ($decision.status -ceq 'rejected') 'A traversal-like primary Skill ID was accepted.'
-        Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-primary-skill-id-invalid') 'The unsafe primary Skill ID did not fail before inventory traversal.'
-        Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-scope-not-registered') 'The unsafe primary Skill ID was not rejected by the central registration boundary.'
-    }
-
-    # Scenario: authenticated SkillSpector plans fewer files for an analyzer whose applicability is narrower than the Skill inventory.
-    # Purpose: accept a fully completed analyzer-specific plan without requiring that analyzer to inspect unrelated file types.
-    It 'UnitT46c_accepts_authenticated_analyzer_specific_planned_workloads' {
-        $fixture = New-ContinuationFixture -Root (Join-Path $TestDrive 'analyzer-specific-workload') -IncludeOtherSkill -UseAnalyzerSpecificPlans
-
-        $decision = Invoke-ContinuationFixture -Fixture $fixture
-
-        Assert-Continuation ($decision.status -ceq 'eligible-for-protected-review') 'A completed authenticated analyzer-specific workload was rejected.'
     }
 
     # Scenario: the same invalid other-Skill report path is supplied more than once in one decision.
@@ -784,11 +891,11 @@ Describe 'Internal source continuation policy' {
         $decision = Invoke-ContinuationFixture -Fixture $fixture
         $failureReasons = @($decision.failureReasons)
         $otherScannerReportSha256 = @($decision.otherScannerReportSha256)
-        Assert-Continuation ($decision.status -ceq 'rejected') 'Multiple invalid other-Skill reports did not reject eligibility.'
-        Assert-Continuation ($failureReasons.Count -eq @($failureReasons | Select-Object -Unique).Count) 'Rejected eligibility emitted duplicate failure reasons.'
-        Assert-Continuation ($otherScannerReportSha256.Count -eq @($otherScannerReportSha256 | Select-Object -Unique).Count) 'Rejected eligibility emitted duplicate other-Skill report hashes.'
-        $decisionSchema = Join-Path $repositoryRoot 'docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json'
-        Assert-Continuation (($decision | ConvertTo-Json -Depth 20) | Test-Json -SchemaFile $decisionSchema) 'Rejected eligibility with multiple invalid other-Skill reports does not match its strict schema.'
+        Assert-Continuation ($decision.status -ceq 'inconsistent') 'Multiple invalid other-Skill reports did not reject consistency.'
+        Assert-Continuation ($failureReasons.Count -eq @($failureReasons | Select-Object -Unique).Count) 'Inconsistent assessment emitted duplicate failure reasons.'
+        Assert-Continuation ($otherScannerReportSha256.Count -eq @($otherScannerReportSha256 | Select-Object -Unique).Count) 'Inconsistent assessment emitted duplicate other-Skill report hashes.'
+        $decisionSchema = Join-Path $repositoryRoot 'docs/standards/schemas/internal-source-review-assessment-v1.schema.json'
+        Assert-Continuation (($decision | ConvertTo-Json -Depth 20) | Test-Json -SchemaFile $decisionSchema) 'Inconsistent assessment with multiple invalid other-Skill reports does not match its strict schema.'
     }
 
     # Scenario: a target or other-Skill scanner report omits an array-valued collection that would otherwise count as empty.
@@ -821,7 +928,7 @@ Describe 'Internal source continuation policy' {
                 Write-ContinuationJson $fixture.ScannerReportPath $fixture.Scanner
             }
             $decision = Invoke-ContinuationFixture -Fixture $fixture
-            Assert-Continuation ($decision.status -ceq 'rejected') "Scanner collection drift '$drift' was accepted."
+            Assert-Continuation ($decision.status -ceq 'inconsistent') "Scanner collection drift '$drift' was accepted."
             $expectedReason = if ($includeOther) { 'internal-continuation-other-skill-report-invalid' } else { 'internal-continuation-scanner-report-invalid' }
             Assert-Continuation (@($decision.failureReasons) -contains $expectedReason) "Scanner collection drift '$drift' did not report an invalid scanner report."
         }
@@ -856,7 +963,7 @@ Describe 'Internal source continuation policy' {
             }
             Write-ContinuationJson $fixture.RepositoryTestEvidencePath $fixture.RepositoryTests
             $decision = Invoke-ContinuationFixture -Fixture $fixture
-            Assert-Continuation ($decision.status -ceq 'rejected') "Supplemental test process drift '$drift' was accepted."
+            Assert-Continuation ($decision.status -ceq 'inconsistent') "Supplemental test process drift '$drift' was accepted."
             Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-repository-test-process-evidence-invalid') "Supplemental test process drift '$drift' did not report invalid process evidence."
         }
     }
@@ -873,11 +980,11 @@ Describe 'Internal source continuation policy' {
                 bytes { [IO.File]::AppendAllText((Join-Path $fixture.CandidateRoot 'skills/manage-confluence-docs-as-code/SKILL.md'), 'changed') }
                 revision { $fixture.Report.candidate.sourceRevision = 'c' * 40 }
                 canonical { $fixture.Report.state = 'PASS'; $fixture.Report.exitCode = 0 }
-                'exit-missing' { $fixture.Report.PSObject.Properties.Remove('exitCode') }
+                'exit-missing' { [void]$fixture.Report.Remove('exitCode') }
                 'exit-null' { $fixture.Report.exitCode = $null }
                 'exit-string' { $fixture.Report.exitCode = '20' }
                 'exit-decimal' { $fixture.Report.exitCode = [double]20 }
-                'report-release-missing' { $fixture.Report.PSObject.Properties.Remove('releaseEligible') }
+                'report-release-missing' { [void]$fixture.Report.Remove('releaseEligible') }
                 'report-release-null' { $fixture.Report.releaseEligible = $null }
                 'report-release-numeric' { $fixture.Report.releaseEligible = 0 }
                 'source-release-missing' { [void]$fixture.Report.sourceConformance.Remove('releaseEligible') }
@@ -885,14 +992,14 @@ Describe 'Internal source continuation policy' {
                 'source-release-numeric' { $fixture.Report.sourceConformance.releaseEligible = 0 }
             }
             $decision = Invoke-ContinuationFixture -Fixture $fixture
-            Assert-Continuation ($decision.status -ceq 'rejected') "Candidate drift '$drift' was accepted."
+            Assert-Continuation ($decision.status -ceq 'inconsistent') "Candidate drift '$drift' was accepted."
             if ($drift -like '*-release-*') {
                 Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-canonical-state-invalid') "Canonical release drift '$drift' did not report invalid canonical state."
             }
             if ($drift -like 'exit-*') {
                 Assert-Continuation (@($decision.failureReasons) -contains 'internal-continuation-canonical-state-invalid') "Canonical exit drift '$drift' did not report invalid canonical state."
             }
-            $decisionSchema = Join-Path $repositoryRoot 'docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json'
+            $decisionSchema = Join-Path $repositoryRoot 'docs/standards/schemas/internal-source-review-assessment-v1.schema.json'
             Assert-Continuation (($decision | ConvertTo-Json -Depth 20) | Test-Json -SchemaFile $decisionSchema) "Candidate drift '$drift' did not produce schema-valid rejection evidence."
         }
     }

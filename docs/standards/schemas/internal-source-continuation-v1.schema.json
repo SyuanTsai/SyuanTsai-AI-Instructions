@@ -1,19 +1,19 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Internal source continuation policy v1",
-  "description": "Central-only allowlist for source-merge continuation after one approved static parser limitation. It never changes canonical validation or release eligibility.",
+  "description": "Central-only internal evidence consistency review; applicability and scanner/supplemental execution provenance remain unverified. No operation is authorized.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "policy", "status", "authorityOwnership", "consumerSelfDeclaration", "scope", "technicalResult", "protectedAdoptionRequired", "canonicalResult", "permittedOperations", "forbiddenOperations", "entries"],
+  "required": ["schemaVersion", "policy", "status", "authorityOwnership", "consumerSelfDeclaration", "scope", "technicalResult", "assurance", "canonicalResult", "permittedOperations", "forbiddenOperations", "entries"],
   "properties": {
     "schemaVersion": { "const": 1 },
     "policy": { "const": "internal-source-continuation-v1" },
     "status": { "const": "adopted" },
     "authorityOwnership": { "const": "central-only" },
     "consumerSelfDeclaration": { "const": false },
-    "scope": { "const": "internal-source-merge-only" },
-    "technicalResult": { "const": "eligibility-only" },
-    "protectedAdoptionRequired": { "const": true },
+    "scope": { "const": "internal-review-only" },
+    "technicalResult": { "const": "evidence-consistency-only" },
+    "assurance": { "const": {"applicabilityStatus": "not-verified", "executionProvenanceStatus": "not-verified", "authorizationGranted": false, "authorizedOperations": []} },
     "canonicalResult": {
       "type": "object",
       "additionalProperties": false,
@@ -26,8 +26,8 @@
         "releaseEligible": { "const": false }
       }
     },
-    "permittedOperations": { "const": ["source-merge"] },
-    "forbiddenOperations": { "const": ["release", "install", "publish", "catalog-adoption"] },
+    "permittedOperations": { "const": [] },
+    "forbiddenOperations": { "const": ["source-merge", "release", "install", "publish", "catalog-adoption"] },
     "entries": {
       "type": "array",
       "minItems": 1,
@@ -39,7 +39,7 @@
     "entry": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sourceRepository", "skillId", "reasonCode", "analyzerId", "scannerSource", "scannerVersion", "expectedAnalyzerIds", "allowedComponentPatterns", "maximumIncompleteComponents", "allowedNonBlockingAnalyzerStatuses", "expectedLimitations", "findingDispositionMode", "findingDispositionReview", "allowedFindings", "supplementalTests"],
+      "required": ["sourceRepository", "skillId", "reasonCode", "analyzerId", "scannerSource", "scannerVersion", "applicabilityAssessment", "expectedAnalyzerIds", "allowedComponentPatterns", "maximumIncompleteComponents", "allowedNonBlockingAnalyzerStatuses", "expectedLimitations", "findingDispositionMode", "findingDispositionReview", "allowedFindings", "supplementalTests"],
       "properties": {
         "sourceRepository": { "type": "string", "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\\.git$" },
         "skillId": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
@@ -47,6 +47,14 @@
         "analyzerId": { "const": "static_patterns_tool_misuse" },
         "scannerSource": { "const": "NVIDIA/SkillSpector" },
         "scannerVersion": { "const": "2.12.0" },
+        "applicabilityAssessment": {
+          "description": "Scope limitation; never a workload authority or an applicability profile.",
+          "const": {
+            "status": "not-verified",
+            "upstreamRevision": "c7958a3268d9498644b22edb75d0f051bbc8cbfc",
+            "reason": "outside-review-assessment-scope"
+          }
+        },
         "expectedAnalyzerIds": {
           "type": "array",
           "minItems": 28,
@@ -129,13 +137,13 @@
     "findingDispositionReview": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["status", "owner", "createdAt", "expiresAt", "scope", "risk", "rationale", "compensatingControls", "protectedEvidenceBinding"],
+      "required": ["status", "owner", "createdAt", "expiresAt", "scope", "risk", "rationale", "compensatingControls", "authorizationGranted"],
       "properties": {
-        "status": { "const": "required-at-protected-adoption" },
+        "status": { "const": "review-context-only" },
         "owner": { "type": "string", "minLength": 1 },
         "createdAt": { "type": "string", "format": "date" },
         "expiresAt": { "type": "string", "format": "date" },
-        "scope": { "const": "source-merge-only" },
+        "scope": { "const": "internal-review-only" },
         "risk": { "type": "string", "minLength": 1 },
         "rationale": { "type": "string", "minLength": 1 },
         "compensatingControls": {
@@ -144,7 +152,7 @@
           "uniqueItems": true,
           "items": { "type": "string", "minLength": 1 }
         },
-        "protectedEvidenceBinding": { "const": "humanFindingDispositionReview" }
+        "authorizationGranted": { "const": false }
       }
     }
   }

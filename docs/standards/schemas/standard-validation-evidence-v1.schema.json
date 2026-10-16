@@ -41,7 +41,6 @@
     "failure": { "$ref": "#/$defs/failure" },
     "artifacts": { "$ref": "#/$defs/artifacts" },
     "semanticBridgeV2": { "$ref": "#/$defs/semanticBridgeV2Reference" },
-    "supplementalRepositoryTests": { "$ref": "#/$defs/supplementalRepositoryTests" },
     "sourceMergeExceptionProposal": { "$ref": "#/$defs/sourceMergeExceptionProposal" },
     "sourceMergeDecision": { "$ref": "#/$defs/sourceMergeDecision" }
   },
@@ -670,34 +669,6 @@
         "findingDispositionSha256": { "$ref": "#/$defs/sha256" },
         "issuedAt": { "type": "string", "minLength": 1 },
         "signature": { "type": "string", "minLength": 1 }
-      }
-    },
-    "supplementalRepositoryTests": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["status", "candidateId", "sourceRevision", "contentSha256", "evidencePath", "evidenceSha256", "events"],
-      "properties": {
-        "status": { "const": "observed-by-canonical-runner" },
-        "candidateId": { "$ref": "#/$defs/sha256" },
-        "sourceRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-        "contentSha256": { "$ref": "#/$defs/sha256" },
-        "evidencePath": { "type": "string", "minLength": 1 },
-        "evidenceSha256": { "$ref": "#/$defs/sha256" },
-        "events": {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["eventId", "outputPath", "outputSha256"],
-            "properties": {
-              "eventId": { "type": "string", "format": "uuid" },
-              "outputPath": { "type": "string", "minLength": 1 },
-              "outputSha256": { "$ref": "#/$defs/sha256" }
-            }
-          }
-        }
       }
     },
     "event": {

@@ -26,13 +26,12 @@ Test-SkillsCatalogContract `
   -ConfigurationPath .\catalog\examples\ai-instructions-sync-v4.example.json
 ```
 
-## 內部模組 source continuation
+## 內部模組 review assessment
 
 SkillSpector 的 analyzer coverage 不完整時，canonical Stage 4 仍維持 `FAILED`／exit code `20`，不得改寫成掃描完成。中央 authority 可透過 [internal-source-continuation.json](docs/standards/internal-source-continuation.json) 將特定 repository 與 Skill 登錄為內部模組；consumer 不得自行宣告或複製這份 allowlist。
 
-登錄的內部模組只有在缺口完全屬於 policy 指定的 parser limitation、raw finding 與 suppression counts 完整一致、每筆 finding 都符合中央 exact fingerprint／shape／來源位置／出現次數／evidence disposition、candidate bytes／revision／scan report／repository tests 綁定一致，而且補充測試全數通過時，才能產生 `eligible-for-protected-review` 技術結果。判定會重新驗證 signed authority snapshot 與 trusted-supervisor launch binding／consumption marker，只讀取 launch binding 簽定的 canonical report output path，並要求 report 登錄 exact supplemental evidence digest 與 raw event identities；所有 analyzer workload counters 也必須保留 JSON integer 型別。target 與其他 active Skill 的 scan reports 必須精確對應同一 candidate 的 Stage 4 raw event。這個結果本身不可發布為 required check；受保護 workflow 還必須把它綁定到可信的 event repository／SHA、canonical run、scanner tool receipt、raw process evidence、authority revision、workflow revision，以及 candidate-bound Human Approved finding disposition，之後才可讓 source merge 繼續。中央登錄內容會記錄 owner、風險、理由、補償控制與期限，但不取代這次 human review。`releaseEligible` 永遠為 `false`，且不能用於 release、install、publish 或 catalog adoption。外部、第三方與未登錄模組仍由原本 fail-closed gate 阻擋。
 
-可執行技術判定由 `New-StandardValidationInternalSourceContinuationEligibility` 提供；policy 與 eligibility schema 分別位於 [internal-source-continuation-v1.schema.json](docs/standards/schemas/internal-source-continuation-v1.schema.json) 與 [internal-source-continuation-eligibility-v1.schema.json](docs/standards/schemas/internal-source-continuation-eligibility-v1.schema.json)，normative 邊界見 [Agent Skill Standard §9.3.1](docs/standards/skill-repository-standard.md#931-internal-source-continuation)。
+中央登錄的內部模組可用 `New-StandardValidationInternalSourceReviewAssessment` 讀取既有 Report，產生 `consistent`／`inconsistent` 的 evidence-consistency-only 審查資料。所有結果固定 applicability 與 execution provenance `not-verified`、`authorizationGranted=false`、`authorizedOperations=[]`、`publishable=false`、`releaseEligible=false`，不授權 source-merge、release、install、publish 或 catalog adoption。Canonical `FAILED`／20 維持；typed counters、safe Skill IDs、exact findings、raw revision/content 與 authenticated authority binding 保留。介面不執行或派送命令；完整 applicability、可信執行與 protected adoption 為 deferred integration。參見 [Standard §9.3.1](docs/standards/skill-repository-standard.md#931-internal-source-continuation)。
 
 ## 同步模型
 

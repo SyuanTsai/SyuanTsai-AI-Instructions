@@ -91,12 +91,42 @@
       "authorityOwnership": "central-only",
       "consumerSelfDeclaration": false,
       "canonicalFailurePreserved": true,
-      "technicalResult": "eligibility-only",
+      "technicalResult": "evidence-consistency-only",
       "publishable": false,
-      "protectedAdoptionRequired": true,
-      "protectedBindings": ["eventRepository", "eventSourceRevision", "canonicalRunId", "launchBinding", "candidateAcquisition", "authorityRevision", "scannerToolReceipt", "staticRawEvent", "supplementalTestInventory", "supplementalRawEvents", "cleanup", "humanFindingDispositionReview", "centralRevision", "workflowRevision", "authorityArchiveSha256"],
-      "permittedOperationAfterProtectedAdoption": "source-merge",
-      "releaseEligible": false
+      "releaseEligible": false,
+      "scope": "internal-review-only",
+      "applicabilityStatus": "not-verified",
+      "executionProvenanceStatus": "not-verified",
+      "authorizationGranted": false,
+      "authorizedOperations": [],
+      "forbiddenOperations": [
+        "source-merge",
+        "release",
+        "install",
+        "publish",
+        "catalog-adoption"
+      ],
+      "deferredIntegration": {
+        "status": "inactive",
+        "consumerAuthority": false,
+        "protectedBindings": [
+          "eventRepository",
+          "eventSourceRevision",
+          "canonicalRunId",
+          "launchBinding",
+          "candidateAcquisition",
+          "authorityRevision",
+          "scannerToolReceipt",
+          "staticRawEvent",
+          "supplementalTestInventory",
+          "supplementalRawEvents",
+          "cleanup",
+          "humanFindingDispositionReview",
+          "centralRevision",
+          "workflowRevision",
+          "authorityArchiveSha256"
+        ]
+      }
     },
     "unparsableResult": "BLOCK",
     "unknownSeverity": "BLOCK",
