@@ -18,6 +18,9 @@
 - Internal source continuation policy: `docs/standards/internal-source-continuation.json`
 - Internal source continuation schema: `docs/standards/schemas/internal-source-continuation-v1.schema.json`
 - Internal source review assessment schema: `docs/standards/schemas/internal-source-review-assessment-v1.schema.json`
+- Static parser host ownership policy: `docs/standards/static-parser-host-ownership.json`
+- Static parser profile execution schema: `docs/standards/schemas/static-parser-profile-execution-v1.schema.json`
+- Static scanner bridge: `scripts/Invoke-StandardStaticScan.ps1`
 - Validation tool resolver: `scripts/Resolve-StandardValidationTool.ps1`
 - Verified Python wheel closure helper: `scripts/Resolve-PythonWheelClosure.py`
 - Canonical authority gate: `scripts/Invoke-StandardAuthorityGate.ps1`

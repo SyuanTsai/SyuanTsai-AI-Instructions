@@ -1,0 +1,463 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.test/standards/static-parser-profile-execution-v1.schema.json",
+  "title": "Unsigned execution record for actual scanner graph with reviewed host parser",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "profile",
+    "signed",
+    "authorizationGranted",
+    "sourceRevision",
+    "candidateIdentity",
+    "candidateInventory",
+    "officialScannerVersion",
+    "officialAnalyzerSha256",
+    "nativeParserRuntimePath",
+    "nativeParserRuntimeSha256",
+    "installedToolModified",
+    "originalSourceFindingAnalyzerUnchanged",
+    "scannerGraphExecuted",
+    "scannerExitCode",
+    "correctedReportSha256",
+    "actualCompleteness",
+    "correctedComponents",
+    "applicabilityStatus",
+    "executionProvenanceStatus",
+    "authorizedOperations",
+    "releaseEligible"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "profile": {
+      "type": "string",
+      "const": "powershell-native-command-ownership-v1"
+    },
+    "signed": {
+      "type": "boolean",
+      "const": false
+    },
+    "authorizationGranted": {
+      "type": "boolean",
+      "const": false
+    },
+    "sourceRevision": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "candidateIdentity": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "candidateInventory": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "sha256",
+          "length"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "length": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "officialScannerVersion": {
+      "type": "string",
+      "const": "2.12.0"
+    },
+    "officialAnalyzerSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "const": "b0cecf8d9b51226713af6c2a9fc63faa626ea11f2e80e305741052b6a84c5db3"
+    },
+    "nativeParserRuntimePath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "nativeParserRuntimeSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "installedToolModified": {
+      "type": "boolean",
+      "const": false
+    },
+    "originalSourceFindingAnalyzerUnchanged": {
+      "type": "boolean",
+      "const": true
+    },
+    "scannerGraphExecuted": {
+      "type": "boolean",
+      "const": true
+    },
+    "scannerExitCode": {
+      "type": "integer"
+    },
+    "correctedReportSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "actualCompleteness": {
+      "type": "object"
+    },
+    "correctedComponents": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "language",
+          "sourceSha256",
+          "candidatePaths",
+          "nativeProofSha256",
+          "nativeProof",
+          "nativeParserProcess",
+          "partialAfterActualParserRun",
+          "commandCount"
+        ],
+        "properties": {
+          "language": {
+            "enum": [
+              "powershell",
+              "markdown"
+            ]
+          },
+          "sourceSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "candidatePaths": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "nativeProofSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "nativeProof": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "schemaVersion",
+              "parserRuntimeVersion",
+              "sourceSha256",
+              "language",
+              "sourceLength",
+              "units"
+            ],
+            "properties": {
+              "schemaVersion": {
+                "const": 1
+              },
+              "parserRuntimeVersion": {
+                "const": "7.6.6"
+              },
+              "sourceSha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "language": {
+                "enum": [
+                  "powershell",
+                  "markdown"
+                ]
+              },
+              "sourceLength": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2097152
+              },
+              "units": {
+                "type": "array",
+                "maxItems": 128,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "start",
+                    "end",
+                    "errors",
+                    "strings",
+                    "subexpressions",
+                    "continuations",
+                    "commands",
+                    "commandCount",
+                    "unsupported"
+                  ],
+                  "properties": {
+                    "start": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "end": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "errors": {
+                      "type": "array",
+                      "maxItems": 100000,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "strings": {
+                      "type": "array",
+                      "maxItems": 16384,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "start",
+                          "end",
+                          "stringType"
+                        ],
+                        "properties": {
+                          "start": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "end": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "stringType": {
+                            "enum": [
+                              "SingleQuoted",
+                              "DoubleQuoted",
+                              "SingleQuotedHereString",
+                              "DoubleQuotedHereString",
+                              "Expandable"
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    "subexpressions": {
+                      "type": "array",
+                      "maxItems": 4096,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "start",
+                          "end"
+                        ],
+                        "properties": {
+                          "start": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "end": {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        }
+                      }
+                    },
+                    "continuations": {
+                      "type": "array",
+                      "maxItems": 100000,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "start",
+                          "end"
+                        ],
+                        "properties": {
+                          "start": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "end": {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        }
+                      }
+                    },
+                    "commands": {
+                      "type": "array",
+                      "maxItems": 4096,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "start",
+                          "end",
+                          "name",
+                          "invocation",
+                          "parameters"
+                        ],
+                        "properties": {
+                          "start": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "end": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "name": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "invocation": {
+                            "enum": [
+                              "Unknown",
+                              "Ampersand",
+                              "Dot"
+                            ]
+                          },
+                          "parameters": {
+                            "type": "array",
+                            "maxItems": 4096,
+                            "items": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "commandCount": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4096
+                    },
+                    "unsupported": {
+                      "type": "array",
+                      "maxItems": 4096,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "start",
+                          "end"
+                        ],
+                        "properties": {
+                          "start": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "end": {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "nativeParserProcess": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "command",
+              "arguments",
+              "exitCode",
+              "seconds",
+              "stdout",
+              "stderr",
+              "stdoutSha256",
+              "stderrSha256"
+            ],
+            "properties": {
+              "command": {
+                "type": "string",
+                "minLength": 1
+              },
+              "arguments": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                  "type": "string"
+                }
+              },
+              "exitCode": {
+                "type": "integer",
+                "const": 0
+              },
+              "seconds": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 30
+              },
+              "stdout": {
+                "type": "string",
+                "maxLength": 8388608
+              },
+              "stderr": {
+                "type": "string",
+                "maxLength": 8388608
+              },
+              "stdoutSha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "stderrSha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          },
+          "partialAfterActualParserRun": {
+            "type": "boolean"
+          },
+          "commandCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 524288
+          }
+        }
+      }
+    },
+    "applicabilityStatus": {
+      "type": "string",
+      "const": "not-verified"
+    },
+    "executionProvenanceStatus": {
+      "type": "string",
+      "const": "not-verified"
+    },
+    "authorizedOperations": {
+      "type": "array",
+      "maxItems": 0
+    },
+    "releaseEligible": {
+      "type": "boolean",
+      "const": false
+    }
+  }
+}

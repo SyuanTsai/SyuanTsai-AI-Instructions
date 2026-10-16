@@ -4802,7 +4802,7 @@ public sealed class C245NonCooperativeStream : Stream {
                 $consistent.candidate.acquisition.verified = $true
                 $consistent.authority.binding.status = 'verified'
                 $consistent.authority.binding.verified = $true
-                $consistent.authority.binding.selectedFiles = @(1..16 | ForEach-Object {
+                $consistent.authority.binding.selectedFiles = @(1..22 | ForEach-Object {
                         [pscustomobject][ordered]@{ path = "authority/file-$_.json"; sha256 = ('0' * 64) }
                     })
                 $consistent.launchBinding.status = 'verified'
@@ -6103,7 +6103,13 @@ Describe 'SYP171 internal source continuation authority binding' {
         foreach ($requiredPath in @(
                 'docs/standards/internal-source-continuation.json',
                 'docs/standards/schemas/internal-source-review-assessment-v1.schema.json',
-                'docs/standards/schemas/internal-source-continuation-v1.schema.json'
+                'docs/standards/schemas/internal-source-continuation-v1.schema.json',
+                'docs/standards/static-parser-host-ownership.json',
+                'docs/standards/schemas/static-parser-host-ownership-v1.schema.json',
+                'docs/standards/schemas/static-parser-profile-execution-v1.schema.json',
+                'scripts/Get-StandardPowerShellSyntaxProof.ps1',
+                'scripts/Invoke-StandardStaticScan.ps1',
+                'scripts/standard_static_powershell.py'
             )) {
             if ([regex]::Matches($snapshotFunction, [regex]::Escape($requiredPath)).Count -ne 1) {
                 throw "The authenticated authority inventory must contain '$requiredPath' exactly once."
@@ -6112,12 +6118,12 @@ Describe 'SYP171 internal source continuation authority binding' {
 
         $evidenceSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $root 'docs/standards/schemas/standard-validation-evidence-v1.schema.json') | ConvertFrom-Json
         $selectedFilesSchema = $evidenceSchema.allOf[5].then.properties.authority.properties.binding.properties.selectedFiles
-        if ($selectedFilesSchema.minItems -ne 16 -or $selectedFilesSchema.maxItems -ne 16) {
-            throw 'The authority evidence schema must require the complete 16-file authenticated inventory.'
+        if ($selectedFilesSchema.minItems -ne 22 -or $selectedFilesSchema.maxItems -ne 22) {
+            throw 'The authority evidence schema must require the complete 22-file authenticated inventory.'
         }
         $verifiedBindingSchema = $evidenceSchema.'$defs'.authorityBinding.allOf[0].then.properties.selectedFiles
-        if ($verifiedBindingSchema.minItems -ne 16 -or $verifiedBindingSchema.maxItems -ne 16) {
-            throw 'Every verified authority binding must retain the complete 16-file authenticated inventory.'
+        if ($verifiedBindingSchema.minItems -ne 22 -or $verifiedBindingSchema.maxItems -ne 22) {
+            throw 'Every verified authority binding must retain the complete 22-file authenticated inventory.'
         }
 
         $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $root 'docs/standards/skill-repository-standard.md')

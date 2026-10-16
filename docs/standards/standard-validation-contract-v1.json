@@ -183,6 +183,18 @@
       "requiredContexts": ["repository-contract", "skill-validator", "skill-tools"],
       "releaseEligibility": "fixed false; no install, publish, or release authorization"
     },
+    "staticParserHostOwnership": {
+      "policyPath": "docs/standards/static-parser-host-ownership.json",
+      "schemaPath": "docs/standards/schemas/static-parser-host-ownership-v1.schema.json",
+      "profile": "powershell-native-command-ownership-v1",
+      "entryPoint": "scripts/Invoke-StandardStaticScan.ps1",
+      "scope": "actual native host grammar and official bounded-parser reexecution; no waiver",
+      "nativeReport": "retained unchanged",
+      "correctedReport": "new actual scanner graph run with explicit central profile provenance",
+      "findings": "all original-source analyzers retained; no severity or nonderived finding suppression",
+      "authorization": "standalone proof and sidecar grant none",
+      "executionSchemaPath": "docs/standards/schemas/static-parser-profile-execution-v1.schema.json"
+    },
     "internalSourceContinuation": {
       "policyPath": "docs/standards/internal-source-continuation.json",
       "policySchemaPath": "docs/standards/schemas/internal-source-continuation-v1.schema.json",

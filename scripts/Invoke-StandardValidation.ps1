@@ -1884,21 +1884,27 @@ function Assert-StandardValidationAuthoritySnapshot {
     Assert-StandardValidationSha256 -Value $receipt.snapshotInventorySha256 -Context "$Context snapshotInventorySha256"
     $expectedFiles = @(
         'docs/standards/internal-source-continuation.json',
-        'docs/standards/schemas/internal-source-review-assessment-v1.schema.json',
         'docs/standards/schemas/internal-source-continuation-v1.schema.json',
+        'docs/standards/schemas/internal-source-review-assessment-v1.schema.json',
+        'docs/standards/schemas/standard-semantic-consent-evidence-v2.schema.json',
         'docs/standards/schemas/standard-validation-adapter-v1.schema.json',
         'docs/standards/schemas/standard-validation-evidence-v1.schema.json',
-        'docs/standards/schemas/standard-semantic-consent-evidence-v2.schema.json',
+        'docs/standards/schemas/static-parser-host-ownership-v1.schema.json',
+        'docs/standards/schemas/static-parser-profile-execution-v1.schema.json',
         'docs/standards/schemas/validation-security-gate-v1.schema.json',
         'docs/standards/standard-validation-contract-v1.json',
+        'docs/standards/static-parser-host-ownership.json',
         'docs/standards/trust-anchors/human-approval-public-key.xml',
         'docs/standards/trust-anchors/trusted-supervisor-public-key.xml',
         'docs/standards/validation-security-gate.json',
         'docs/standards/validation-toolchain.json',
+        'scripts/Get-StandardPowerShellSyntaxProof.ps1',
         'scripts/Invoke-StandardAuthorityGate.ps1',
+        'scripts/Invoke-StandardStaticScan.ps1',
         'scripts/Invoke-StandardValidation.ps1',
         'scripts/Resolve-StandardValidationTool.ps1',
-        'scripts/StandardSemanticBridge.psm1'
+        'scripts/StandardSemanticBridge.psm1',
+        'scripts/standard_static_powershell.py'
     )
     if ($receipt.selectedFiles -isnot [array] -or @($receipt.selectedFiles).Count -ne $expectedFiles.Count) { throw "BLOCKED|$Context selected file inventory is incomplete." }
     $selected = @()

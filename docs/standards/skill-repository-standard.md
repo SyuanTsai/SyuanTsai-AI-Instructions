@@ -579,6 +579,20 @@ Static-pattern rows 的共用實際 work producer 是 [run_static_patterns_with_
 
 Applicability finding：仍未解決，未提供放行能力。Review assessment 保留一致性檢查，並以 consistent/inconsistent 與固定未驗證、無授權欄位呈現；不以 applicability 缺件阻止本次實作。Supplemental consistency helper 的正例只證明 raw candidate/suite/test/command/result/cleanup 一致，不證明可信 execution。Protected producer/consumer integration、supplemental dispatch、supervisor run authentication/canonical registration、pre-dispatch gate 與真實 runner E2E 均移出本 PR，未宣稱已修復。
 
+### 9.3.1.2 Native PowerShell ownership in the static parser
+
+中央 `static-parser-host-ownership.json` 定義一個有界、可重現的 parser correction profile，限官方 SkillSpector 2.12.0 的精確 `static_patterns_tool_misuse.py` bytes 與 PowerShell 7.6.6 原生 grammar。此修正處理 PowerShell quoted strings、subexpressions、backtick continuation 及明確 PowerShell Markdown fences 被 shell tokenizer 誤判的情況；它不沿用 PR12 exception，也不讓 PR90 review assessment 授權任何操作。
+
+使用此 correction profile 的受信 source Static child **MUST** 使用中央 `Invoke-StandardStaticScan.ps1`，保留未修正官方 CLI 的原始 native report，再執行帶有中央 profile 的完整 scanner graph。官方安裝與 finding analyzer bytes **MUST NOT** 被修改；所有 finding analyzers **MUST** 仍收到完整原始來源，所有非衍生 finding 與原 severity **MUST** 保留。跨兩次 graph 的保留檢查 **MUST** 精確比較 fingerprint、severity、location、evidence、內容及其餘欄位的 multiset；唯一排除於比較 key 的欄位是官方每次執行以 uuid4 建立的 finding_id，兩份 raw report 仍各自保留原 UUID，不得改寫、降低 severity 或減少 finding 數量。原始 partial report **MUST NOT** 被改寫；修正後報告的 ledger 必須來自真正重跑的 graph/analyzer，不得在 JSON 中直接變更 status/counters 或刪除 AE1。若 referenced-artifact coverage 確實完成，graph 可自行不再產生該 coverage 缺口衍生的 AE1。
+
+Profile 以 Parser.ParseInput 驗證完整 host unit，列出所有 CommandAst（包含巢狀與函式內 command），對每個實際 command view 重跑官方 bounded parser。Hashtable data、語法 delimiters 與 comments 不得被當成獨立 shell command。Markdown 只接受固定語法的 powershell/pwsh/ps1 fences；其餘內容仍執行原 Markdown parser。官方 generic text classifier 的 `.psm1` 只能由實際 frozen candidate inventory 中無歧義的副檔名識別，不能相信 caller language flag。空 native Process/ProcessStartInfo allocation 與 typed ArgumentList 可保留原生 argv 語法；Arguments command string、shell-enabled launch 或未解析的 executable selector 仍保持 partial。此分類不驗證 executable provenance。UTF-16 offsets 必須映射到精確來源 code points，不能切開 surrogate pair。
+
+Parser error、無法驗證的 grammar/module/runtime identity、未知 proof shape、coverage 缺件、超限、cross-interpreter invocation、動態 shell command-string receiver 或 unsupported execution construction **MUST** 保持 partial 或 fail closed。固定 source/commands/nested-view/time budgets 不得由 candidate 提高。這個 profile 不宣稱驗證所有 analyzer applicability，也不取代語意分析、Medium human review 或 protected execution provenance。
+
+原始官方報告已 complete 的 Skill 可直接沿用原有 Static 路徑；只有需要這個 grammar correction 時才呼叫中央 wrapper，且完整 active Skill inventory 仍須逐一實跑。Wrapper 必須自行以同一 frozen receipt 重跑原始 graph，驗證所有原始 exception 都是 profile 可證明完成的 static/partial/static_parse_limit，任何 runtime limit、其他 analyzer/reason、fatal outcome 或未完成 coverage 都必須拒絕；wrapper 失敗後不得回退或改寫報告。所有 resolver receipt 必須 hash 與 parse 同一份 byte snapshot。
+
+中央 bridge 的入口、Python module、native parser helper、policy/schema 與同一次執行的官方 resolver receipt/runtime identity **MUST** 綁定 protected authority inventory 及既有 candidate-bound child。Consumer 升級此 authority revision 時，signed snapshot 的 selectedFiles 與 evidence schema 必須一同使用精確 22-file inventory；舊的 16-file receipt 不得沿用。Profile execution record 固定 applicabilityStatus/executionProvenanceStatus 為 not-verified、authorizationGranted/releaseEligible 為 false、authorizedOperations 為空。Proof JSON、profile sidecar 或 caller 的 verified/hash flags 單獨沒有信任或授權效力。Raw original report、corrected graph report、profile execution record、candidate/file digests 與 cleanup evidence **MUST** 可追溯到同一個執行。只有 exact component/analyzer coverage 與既有 severity 條件均成立，Static 才能通過並進入原有 Stage 5；release/install 邊界不變。
+
 ### 9.4 Severity handling
 
 Repository **MUST** 使用 central severity semantics：
