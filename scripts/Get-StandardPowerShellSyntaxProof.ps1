@@ -59,75 +59,106 @@ try {
                 $argumentCount=if($null -eq $n.Arguments){0}else{$n.Arguments.Count}
                 return $member -ine 'new' -or $argumentCount -ne 0
             }
+            if($member -ieq 'Start') {
+                # Unknown or externally supplied receivers may launch a command
+                # string. Only a unique prior allocation in an enclosing
+                # statement block supports this narrow native-argv grammar.
+                if($n.Expression -isnot [Management.Automation.Language.VariableExpressionAst] -or ($null -ne $n.Arguments -and $n.Arguments.Count -gt 0)){return $true}
+                $receiver=$n.Expression.VariablePath.UserPath
+                $allocations=@($ast.FindAll({param($a)
+                    $a -is [Management.Automation.Language.AssignmentStatementAst] -and
+                    $a.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+                    $a.Left.VariablePath.UserPath -ieq $receiver
+                },$true))
+                if($allocations.Count -ne 1){return $true}
+                $allocation=$allocations[0]
+                if($allocation.Right.Extent.Text -notmatch '^\s*\[(?:System\.)?Diagnostics\.Process\]::new\(\)\s*$' -or
+                   $allocation.Extent.EndOffset -ge $n.Extent.StartOffset){return $true}
+                $ancestor=$n.Parent
+                while($null -ne $ancestor -and -not [object]::ReferenceEquals($ancestor,$allocation.Parent)){
+                    if($ancestor -is [Management.Automation.Language.ScriptBlockAst]){$ancestor=$null;break}
+                    $ancestor=$ancestor.Parent
+                }
+                return $null -eq $ancestor
+            }
             return $type -match '(?i)(scriptblock|powershell|runspace|reflection\.assembly|system\.activator)' -or
                 $member -match '^(?i)(Invoke|InvokeReturnAsIs|BeginInvoke)$'
         },$true) | ForEach-Object { @{start=$_.Extent.StartOffset+$offset;end=$_.Extent.EndOffset+$offset} })
-        $nativeProcessObjects=@($ast.FindAll({param($n)
-            $n -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
-            $n.Expression -is [Management.Automation.Language.TypeExpressionAst] -and
-            $n.Expression.TypeName.FullName -match '(?i)diagnostics\.process'
-        },$true))
-        if($nativeProcessObjects.Count -gt 0) {
-            # A dynamic FileName is not assumed to be a non-interpreter. Accept
-            # the common Get-Command <literal> -CommandType Application binding
-            # only when it has one assignment in this parsed unit. This is
-            # grammar classification, not executable provenance or approval.
-            $safeSelectors=@{}
-            foreach($assignment in @($ast.FindAll({param($n)
-                $n -is [Management.Automation.Language.AssignmentStatementAst] -and
-                $n.Left -is [Management.Automation.Language.VariableExpressionAst]
-            },$true))){
-                $variable=$assignment.Left.VariablePath.UserPath
-                if($safeSelectors.ContainsKey($variable)){$safeSelectors[$variable]=$false;continue}
-                $safeSelectors[$variable]=$false
-                $selectorCommands=@($assignment.Right.FindAll({param($n)$n -is [Management.Automation.Language.CommandAst]},$true))
-                if($selectorCommands.Count -lt 1 -or $selectorCommands.Count -gt 2){continue}
-                $selector=$selectorCommands[0]
-                if($selector.GetCommandName() -ine 'Get-Command' -or $selector.CommandElements.Count -ne 6){continue}
-                $parts=$selector.CommandElements
-                if($parts[1] -isnot [Management.Automation.Language.StringConstantExpressionAst] -or
-                   $parts[2] -isnot [Management.Automation.Language.CommandParameterAst] -or $parts[2].ParameterName -ine 'CommandType' -or
-                   $parts[3] -isnot [Management.Automation.Language.StringConstantExpressionAst] -or $parts[3].Value -ine 'Application' -or
-                   $parts[4] -isnot [Management.Automation.Language.CommandParameterAst] -or $parts[4].ParameterName -ine 'ErrorAction' -or
-                   $parts[5] -isnot [Management.Automation.Language.StringConstantExpressionAst] -or $parts[5].Value -ine 'Stop'){continue}
-                $executable=[IO.Path]::GetFileNameWithoutExtension($parts[1].Value.Replace([char]92,[char]47))
-                if($executable -match '^(?i)(bash|sh|zsh|dash|ksh|fish|cmd|powershell|pwsh|python[0-9.]*|node|wsl|perl|ruby|php)$'){continue}
-                if($selectorCommands.Count -eq 2){
-                    $tail=$selectorCommands[1].CommandElements
-                    if($tail.Count -ne 3 -or $selectorCommands[1].GetCommandName() -ine 'Select-Object' -or
-                       $tail[1] -isnot [Management.Automation.Language.CommandParameterAst] -or $tail[1].ParameterName -ine 'First' -or
-                       $tail[2].Extent.Text -cne '1'){continue}
-                }
-                $safeSelectors[$variable]=$true
+        # Inspect process-like property operations even without a visible
+        # constructor. Selector bindings must precede their use in the
+        # same statement block; conditional/outer bindings remain partial.
+        $safeSelectors=@{}
+        foreach($assignment in @($ast.FindAll({param($n)
+            $n -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $n.Left -is [Management.Automation.Language.VariableExpressionAst]
+        },$true))){
+            $variable=$assignment.Left.VariablePath.UserPath
+            if($safeSelectors.ContainsKey($variable)){$safeSelectors[$variable]=$false;continue}
+            $safeSelectors[$variable]=$false
+            $selectorCommands=@($assignment.Right.FindAll({param($n)$n -is [Management.Automation.Language.CommandAst]},$true))
+            if($selectorCommands.Count -lt 1 -or $selectorCommands.Count -gt 2){continue}
+            $selector=$selectorCommands[0]
+            if($selector.GetCommandName() -ine 'Get-Command' -or $selector.CommandElements.Count -ne 6){continue}
+            $parts=$selector.CommandElements
+            if($parts[1] -isnot [Management.Automation.Language.StringConstantExpressionAst] -or
+               $parts[2] -isnot [Management.Automation.Language.CommandParameterAst] -or $parts[2].ParameterName -ine 'CommandType' -or
+               $parts[3] -isnot [Management.Automation.Language.StringConstantExpressionAst] -or $parts[3].Value -ine 'Application' -or
+               $parts[4] -isnot [Management.Automation.Language.CommandParameterAst] -or $parts[4].ParameterName -ine 'ErrorAction' -or
+               $parts[5] -isnot [Management.Automation.Language.StringConstantExpressionAst] -or $parts[5].Value -ine 'Stop'){continue}
+            $executable=[IO.Path]::GetFileNameWithoutExtension($parts[1].Value.Replace([char]92,[char]47))
+            if($executable -match '^(?i)(bash|sh|zsh|dash|ksh|fish|cmd|powershell|pwsh|python[0-9.]*|node|wsl|perl|ruby|php)$'){continue}
+            if($selectorCommands.Count -eq 2){
+                $tail=$selectorCommands[1].CommandElements
+                if($tail.Count -ne 3 -or $selectorCommands[1].GetCommandName() -ine 'Select-Object' -or
+                   $tail[1] -isnot [Management.Automation.Language.CommandParameterAst] -or $tail[1].ParameterName -ine 'First' -or
+                   $tail[2].Extent.Text -cne '1'){continue}
             }
-
-            $unsupported+=@($ast.FindAll({param($n)
-                if($n -isnot [Management.Automation.Language.AssignmentStatementAst] -or
-                   $n.Left -isnot [Management.Automation.Language.MemberExpressionAst]){return $false}
-                if($n.Left.Member -isnot [Management.Automation.Language.StringConstantExpressionAst]){return $true}
-                $member=[string]$n.Left.Member.Value
-                if($member -ieq 'Arguments'){return $true}
-                if($member -ieq 'UseShellExecute' -and $n.Right.Extent.Text -cne '$false'){return $true}
-                if($member -ieq 'FileName'){
-                    $right=$n.Right
-                    if($right -is [Management.Automation.Language.StatementBlockAst] -and $right.Statements.Count -eq 1){$right=$right.Statements[0]}
-                    if($right -is [Management.Automation.Language.PipelineAst] -and $right.PipelineElements.Count -eq 1 -and
-                       $right.PipelineElements[0] -is [Management.Automation.Language.CommandExpressionAst]){$right=$right.PipelineElements[0].Expression}
-                    if($right -is [Management.Automation.Language.CommandExpressionAst]){$right=$right.Expression}
-                    if($right -is [Management.Automation.Language.StringConstantExpressionAst]){
-                        $exe=[IO.Path]::GetFileNameWithoutExtension($right.Value.Replace([char]92,[char]47))
-                        return $exe -match '^(?i)(bash|sh|zsh|dash|ksh|fish|cmd|powershell|pwsh|python[0-9.]*|node|wsl|perl|ruby|php)$'
-                    }
-                    if($right -is [Management.Automation.Language.MemberExpressionAst] -and
-                       $right.Expression -is [Management.Automation.Language.VariableExpressionAst] -and $right.Member -is [Management.Automation.Language.StringConstantExpressionAst] -and $right.Member.Value -ieq 'Source'){
-                        $selectorVariable=$right.Expression.VariablePath.UserPath
-                        return -not($safeSelectors.ContainsKey($selectorVariable) -and $safeSelectors[$selectorVariable])
-                    }
-                    return $true
-                }
-                return $false
-            },$true) | ForEach-Object {@{start=$_.Extent.StartOffset+$offset;end=$_.Extent.EndOffset+$offset}})
+            $safeSelectors[$variable]=$assignment
         }
+
+        $unsupported+=@($ast.FindAll({param($n)
+            if($n -isnot [Management.Automation.Language.AssignmentStatementAst] -or
+               $n.Left -isnot [Management.Automation.Language.MemberExpressionAst]){return $false}
+            if($n.Left.Member -isnot [Management.Automation.Language.StringConstantExpressionAst]){return $true}
+            $member=[string]$n.Left.Member.Value
+            if($member -ieq 'Arguments'){return $true}
+            if($member -ieq 'UseShellExecute' -and $n.Right.Extent.Text -cne '$false'){return $true}
+            if($member -ieq 'StartInfo'){
+                $right=$n.Right.Extent.Text.Trim()
+                if($right -notmatch '^\$(?<variable>[a-zA-Z_][a-zA-Z0-9_]*)$'){return $true}
+                $infoVariable=$Matches.variable
+                $bindings=@($ast.FindAll({param($a)
+                    $a -is [Management.Automation.Language.AssignmentStatementAst] -and
+                    $a.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+                    $a.Left.VariablePath.UserPath -ieq $infoVariable
+                },$true))
+                return $bindings.Count -ne 1 -or
+                    $bindings[0].Right.Extent.Text -notmatch '^\s*\[(?:System\.)?Diagnostics\.ProcessStartInfo\]::new\(\)\s*$' -or
+                    -not [object]::ReferenceEquals($bindings[0].Parent,$n.Parent) -or
+                    $bindings[0].Extent.EndOffset -ge $n.Extent.StartOffset
+            }
+            if($member -ieq 'FileName'){
+                $right=$n.Right
+                if($right -is [Management.Automation.Language.StatementBlockAst] -and $right.Statements.Count -eq 1){$right=$right.Statements[0]}
+                if($right -is [Management.Automation.Language.PipelineAst] -and $right.PipelineElements.Count -eq 1 -and
+                   $right.PipelineElements[0] -is [Management.Automation.Language.CommandExpressionAst]){$right=$right.PipelineElements[0].Expression}
+                if($right -is [Management.Automation.Language.CommandExpressionAst]){$right=$right.Expression}
+                if($right -is [Management.Automation.Language.StringConstantExpressionAst]){
+                    $exe=[IO.Path]::GetFileNameWithoutExtension($right.Value.Replace([char]92,[char]47))
+                    return $exe -match '^(?i)(bash|sh|zsh|dash|ksh|fish|cmd|powershell|pwsh|python[0-9.]*|node|wsl|perl|ruby|php)$'
+                }
+                if($right -is [Management.Automation.Language.MemberExpressionAst] -and
+                   $right.Expression -is [Management.Automation.Language.VariableExpressionAst] -and $right.Member -is [Management.Automation.Language.StringConstantExpressionAst] -and $right.Member.Value -ieq 'Source'){
+                    $selectorVariable=$right.Expression.VariablePath.UserPath
+                    if(-not($safeSelectors.ContainsKey($selectorVariable) -and $safeSelectors[$selectorVariable])){return $true}
+                    $binding=$safeSelectors[$selectorVariable]
+                    return -not([object]::ReferenceEquals($binding.Parent,$n.Parent) -and
+                        $binding.Extent.EndOffset -lt $n.Extent.StartOffset)
+                }
+                return $true
+            }
+            return $false
+        },$true) | ForEach-Object {@{start=$_.Extent.StartOffset+$offset;end=$_.Extent.EndOffset+$offset}})
         if($commands.Count -gt 4096 -or $strings.Count -gt 16384 -or $subs.Count -gt 4096) { throw 'Native ownership budget exceeded.' }
         $units += @{
             start=[int]$range.start;end=[int]$range.end

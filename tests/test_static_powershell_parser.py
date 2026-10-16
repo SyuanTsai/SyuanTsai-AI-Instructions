@@ -65,6 +65,9 @@ class StaticPowerShellParserTests(unittest.TestCase):
         source = '$g=Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1;' + source + ';$p.FileName=$g.Source'
         proof = native_proof(source, "powershell", self.pwsh)
         self.assertFalse(check_command_views(source, "powershell", proof, lambda *a, **k: False))
+        source += ';$process=[Diagnostics.Process]::new();$process.StartInfo=$p;$process.Start()'
+        proof = native_proof(source, "powershell", self.pwsh)
+        self.assertFalse(check_command_views(source, "powershell", proof, lambda *a, **k: False))
         for source in ["[Diagnostics.Process]::Start('bash','-c payload')",
                        '$p=[Diagnostics.ProcessStartInfo]::new();$p.Arguments=$payload',
                        '$p=[Diagnostics.ProcessStartInfo]::new();$p.UseShellExecute=$true',
@@ -73,7 +76,15 @@ class StaticPowerShellParserTests(unittest.TestCase):
                        "$p=[Diagnostics.ProcessStartInfo]::new();$p.'Arguments'=$payload",
                        "$p=[Diagnostics.ProcessStartInfo]::new();$p.'FileName'='C:\\Windows\\System32\\cmd.exe'",
                        '$g=Get-Command bash -CommandType Application -ErrorAction Stop;$p=[Diagnostics.ProcessStartInfo]::new();$p.FileName=$g.Source',
-                       '$g=Get-Command git -CommandType Application -ErrorAction Stop;$g=$other;$p=[Diagnostics.ProcessStartInfo]::new();$p.FileName=$g.Source']:
+                       '$g=Get-Command git -CommandType Application -ErrorAction Stop;$g=$other;$p=[Diagnostics.ProcessStartInfo]::new();$p.FileName=$g.Source',
+                       'param($p);$p.Arguments=$payload;$p.Start()',
+                       'param($p);$p.Start()',
+                       '$p=New-Object Diagnostics.Process;$p.StartInfo.Arguments=$payload;$p.Start()',
+                       '$p=[Diagnostics.ProcessStartInfo]::new();$p.FileName=$g.Source;$g=Get-Command git -CommandType Application -ErrorAction Stop',
+                       'param($g);if($condition){$g=Get-Command git -CommandType Application -ErrorAction Stop};$p=[Diagnostics.ProcessStartInfo]::new();$p.FileName=$g.Source',
+                       'param($p);if($condition){$p=[Diagnostics.Process]::new()};$p.Start()',
+                       'param($info);$p=[Diagnostics.Process]::new();$p.StartInfo=$info;$p.Start()',
+                       '$p=[Diagnostics.Process]::new();function f {$p.Start()};f']:
             with self.subTest(source=source):
                 proof = native_proof(source, "powershell", self.pwsh)
                 self.assertTrue(check_command_views(source, "powershell", proof, lambda *a, **k: False))
