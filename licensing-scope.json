@@ -572,6 +572,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/standards/internal-source-continuation.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/standards/managed-skill-lifecycle.md",
       "license": "Apache-2.0"
     },
@@ -581,6 +585,14 @@
     },
     {
       "path": "docs/standards/pr12-source-merge-exception-proposal.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/schemas/internal-source-review-assessment-v1.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/schemas/internal-source-continuation-v1.schema.json",
       "license": "Apache-2.0"
     },
     {
@@ -976,6 +988,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "tests/fixtures/internal-source-continuation/syp171-skillspector-2.12.0-shape.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "tests/fixtures/routine-semantic-synthetic/bundle.schema.json",
       "license": "Apache-2.0"
     },
@@ -1033,6 +1049,10 @@
     },
     {
       "path": "tests/install-ai-instructions-bootstrap.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/internal-source-continuation.Tests.ps1",
       "license": "Apache-2.0"
     },
     {

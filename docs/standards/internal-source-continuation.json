@@ -1,0 +1,142 @@
+{
+  "schemaVersion": 1,
+  "policy": "internal-source-continuation-v1",
+  "status": "adopted",
+  "authorityOwnership": "central-only",
+  "consumerSelfDeclaration": false,
+  "scope": "internal-review-only",
+  "technicalResult": "evidence-consistency-only",
+  "assurance": {"applicabilityStatus": "not-verified", "executionProvenanceStatus": "not-verified", "authorizationGranted": false, "authorizedOperations": []},
+  "canonicalResult": {
+    "preserved": true,
+    "requiredState": "FAILED",
+    "requiredExitCode": 20,
+    "requiredStaticStageStatus": "failed",
+    "releaseEligible": false
+  },
+  "permittedOperations": [],
+  "forbiddenOperations": ["source-merge", "release", "install", "publish", "catalog-adoption"],
+  "entries": [
+    {
+      "sourceRepository": "https://github.com/SyuanTsai/Skill-Atlassian-Ecosystem.git",
+      "skillId": "manage-confluence-docs-as-code",
+      "reasonCode": "static_parse_limit",
+      "analyzerId": "static_patterns_tool_misuse",
+      "scannerSource": "NVIDIA/SkillSpector",
+      "scannerVersion": "2.12.0",
+      "applicabilityAssessment": {
+        "status": "not-verified",
+        "upstreamRevision": "c7958a3268d9498644b22edb75d0f051bbc8cbfc",
+        "reason": "outside-review-assessment-scope"
+      },
+      "expectedAnalyzerIds": [
+        "artifact_integrity",
+        "behavioral_ast",
+        "behavioral_taint_tracking",
+        "bundled_execution_surface",
+        "mcp_least_privilege",
+        "mcp_rug_pull",
+        "mcp_tool_poisoning",
+        "meta_analyzer",
+        "reference_coverage",
+        "semantic_developer_intent",
+        "semantic_quality_policy",
+        "semantic_security_discovery",
+        "static_patterns_agent_snooping",
+        "static_patterns_anti_refusal",
+        "static_patterns_data_exfiltration",
+        "static_patterns_deserialization",
+        "static_patterns_excessive_agency",
+        "static_patterns_harmful_content",
+        "static_patterns_memory_poisoning",
+        "static_patterns_output_handling",
+        "static_patterns_privilege_escalation",
+        "static_patterns_prompt_injection",
+        "static_patterns_rogue_agent",
+        "static_patterns_ssrf",
+        "static_patterns_supply_chain",
+        "static_patterns_system_prompt_leakage",
+        "static_patterns_tool_misuse",
+        "static_yara"
+      ],
+      "allowedComponentPatterns": ["SKILL.md", "scripts/*.ps1", "scripts/*.psm1"],
+      "maximumIncompleteComponents": 64,
+      "allowedNonBlockingAnalyzerStatuses": ["completed", "not_applicable", "disabled"],
+      "expectedLimitations": ["Analyzer static_patterns_tool_misuse status: degraded."],
+      "findingDispositionMode": "central-exact-allowlist",
+      "findingDispositionReview": {
+        "status": "review-context-only",
+        "owner": "SyuanTsai",
+        "createdAt": "2026-10-15",
+        "expiresAt": "2027-01-15",
+        "scope": "internal-review-only",
+        "risk": "SkillSpector reports HIGH parser-coverage findings and one MEDIUM declared Atlassian API endpoint finding; neither may be treated as a clean scan or release approval.",
+        "rationale": "Context for review of the exact internal candidate and findings; no operation is authorized. Candidate-bound human approval and trusted execution are deferred requirements for any future authorization.",
+        "compensatingControls": [
+          "exact finding fingerprint, shape, source location, occurrence count, and evidence consistency binding",
+          "canonical Stage 4 remains FAILED with exit code 20 and releaseEligible false",
+          "supplemental suite, inventory, command, result, and cleanup consistency checks; execution provenance is not verified"
+        ],
+        "authorizationGranted": false
+      },
+      "allowedFindings": [
+        {
+          "matchFingerprint": "2a59cc83a656056da5363da63468edb3c9bcd0f4c46e2399ca7df37257ff2fca",
+          "id": "AE1",
+          "category": "analysis-evasion",
+          "pattern": "Incomplete referenced artifact analysis",
+          "severity": "HIGH",
+          "finding": "scripts/Pull-ConfluenceDocs.ps1 (partial)",
+          "targetPath": "scripts/Pull-ConfluenceDocs.ps1",
+          "expectedOccurrences": 3,
+          "allowedLocations": [
+            { "file": "SKILL.md", "startLine": 19, "endLine": null, "startColumn": null },
+            { "file": "SKILL.md", "startLine": 59, "endLine": null, "startColumn": null },
+            { "file": "SKILL.md", "startLine": 63, "endLine": null, "startColumn": null }
+          ],
+          "evidenceReasonMessage": "A security-relevant expression exceeded a bounded static parser's span limit.",
+          "evidencePhase": "static",
+          "disposition": "derived-from-approved-parser-limitation"
+        },
+        {
+          "matchFingerprint": "aec5c9c20949770aece1d9959b70a0da7eaba2d318699c9ec79b6e325e9ae803",
+          "id": "AE1",
+          "category": "analysis-evasion",
+          "pattern": "Incomplete referenced artifact analysis",
+          "severity": "HIGH",
+          "finding": "scripts/Push-ConfluenceDocs.ps1 (partial)",
+          "targetPath": "scripts/Push-ConfluenceDocs.ps1",
+          "expectedOccurrences": 3,
+          "allowedLocations": [
+            { "file": "SKILL.md", "startLine": 25, "endLine": null, "startColumn": null },
+            { "file": "SKILL.md", "startLine": 44, "endLine": null, "startColumn": null },
+            { "file": "SKILL.md", "startLine": 51, "endLine": null, "startColumn": null }
+          ],
+          "evidenceReasonMessage": "A security-relevant expression exceeded a bounded static parser's span limit.",
+          "evidencePhase": "static",
+          "disposition": "derived-from-approved-parser-limitation"
+        },
+        {
+          "matchFingerprint": "972d7f9f9191a93bacee0e6c2ff11a9bbd78fc56d6c4fb4831e8831a8b6d4816",
+          "id": "E1",
+          "category": "Data Exfiltration",
+          "pattern": "External Transmission",
+          "severity": "MEDIUM",
+          "finding": "https://api.atlassian.com/",
+          "targetPath": null,
+          "expectedOccurrences": 1,
+          "allowedLocations": [
+            { "file": "SKILL.md", "startLine": 14, "endLine": null, "startColumn": 440 }
+          ],
+          "evidenceReasonMessage": null,
+          "evidencePhase": null,
+          "disposition": "accepted-declared-atlassian-api-endpoint"
+        }
+      ],
+      "supplementalTests": {
+        "requiredSuites": ["focused", "canonical"],
+        "minimumPassed": 55
+      }
+    }
+  ]
+}

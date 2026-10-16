@@ -160,6 +160,7 @@
       "required": [
         "scannerFailure",
         "analyzerIncomplete",
+        "internalSourceContinuation",
         "unparsableResult",
         "unknownSeverity",
         "severity",
@@ -180,6 +181,9 @@
         },
         "analyzerIncomplete": {
           "const": "BLOCK"
+        },
+        "internalSourceContinuation": {
+          "$ref": "#/$defs/internalSourceContinuation"
         },
         "unparsableResult": {
           "const": "BLOCK"
@@ -231,6 +235,109 @@
         },
         "trustAnchors": {
           "$ref": "#/$defs/trustAnchors"
+        }
+      }
+    },
+    "internalSourceContinuation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policyPath",
+        "authorityOwnership",
+        "consumerSelfDeclaration",
+        "canonicalFailurePreserved",
+        "technicalResult",
+        "publishable",
+        "releaseEligible",
+        "scope",
+        "applicabilityStatus",
+        "executionProvenanceStatus",
+        "authorizationGranted",
+        "authorizedOperations",
+        "forbiddenOperations",
+        "deferredIntegration"
+      ],
+      "properties": {
+        "policyPath": {
+          "const": "docs/standards/internal-source-continuation.json"
+        },
+        "authorityOwnership": {
+          "const": "central-only"
+        },
+        "consumerSelfDeclaration": {
+          "const": false
+        },
+        "canonicalFailurePreserved": {
+          "const": true
+        },
+        "technicalResult": {
+          "const": "evidence-consistency-only"
+        },
+        "publishable": {
+          "const": false
+        },
+        "releaseEligible": {
+          "const": false
+        },
+        "scope": {
+          "const": "internal-review-only"
+        },
+        "applicabilityStatus": {
+          "const": "not-verified"
+        },
+        "executionProvenanceStatus": {
+          "const": "not-verified"
+        },
+        "authorizationGranted": {
+          "const": false
+        },
+        "authorizedOperations": {
+          "const": []
+        },
+        "forbiddenOperations": {
+          "const": [
+            "source-merge",
+            "release",
+            "install",
+            "publish",
+            "catalog-adoption"
+          ]
+        },
+        "deferredIntegration": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "consumerAuthority",
+            "protectedBindings"
+          ],
+          "properties": {
+            "status": {
+              "const": "inactive"
+            },
+            "consumerAuthority": {
+              "const": false
+            },
+            "protectedBindings": {
+              "const": [
+                "eventRepository",
+                "eventSourceRevision",
+                "canonicalRunId",
+                "launchBinding",
+                "candidateAcquisition",
+                "authorityRevision",
+                "scannerToolReceipt",
+                "staticRawEvent",
+                "supplementalTestInventory",
+                "supplementalRawEvents",
+                "cleanup",
+                "humanFindingDispositionReview",
+                "centralRevision",
+                "workflowRevision",
+                "authorityArchiveSha256"
+              ]
+            }
+          }
         }
       }
     },

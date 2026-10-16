@@ -99,7 +99,7 @@
                 "properties": {
                   "status": { "const": "verified" },
                   "verified": { "const": true },
-                  "selectedFiles": { "type": "array", "minItems": 13, "maxItems": 13, "items": { "$ref": "#/$defs/selectedFile" } }
+                  "selectedFiles": { "type": "array", "minItems": 16, "maxItems": 16, "items": { "$ref": "#/$defs/selectedFile" } }
                 }
               }
             }
@@ -509,6 +509,12 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["status", "verified", "repository", "revision", "archivePath", "archiveUrl", "archivePrefix", "archiveSha256", "snapshotEvidencePath", "snapshotEvidenceSha256", "snapshotInventorySha256", "selectedFiles"],
+      "allOf": [
+        {
+          "if": { "properties": { "verified": { "const": true } }, "required": ["verified"] },
+          "then": { "properties": { "selectedFiles": { "minItems": 16, "maxItems": 16 } } }
+        }
+      ],
       "properties": {
         "status": { "type": "string", "minLength": 1 },
         "verified": { "type": "boolean" },

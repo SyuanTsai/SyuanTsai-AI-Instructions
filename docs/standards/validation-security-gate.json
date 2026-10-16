@@ -86,6 +86,48 @@
   "security": {
     "scannerFailure": "BLOCK",
     "analyzerIncomplete": "BLOCK",
+    "internalSourceContinuation": {
+      "policyPath": "docs/standards/internal-source-continuation.json",
+      "authorityOwnership": "central-only",
+      "consumerSelfDeclaration": false,
+      "canonicalFailurePreserved": true,
+      "technicalResult": "evidence-consistency-only",
+      "publishable": false,
+      "releaseEligible": false,
+      "scope": "internal-review-only",
+      "applicabilityStatus": "not-verified",
+      "executionProvenanceStatus": "not-verified",
+      "authorizationGranted": false,
+      "authorizedOperations": [],
+      "forbiddenOperations": [
+        "source-merge",
+        "release",
+        "install",
+        "publish",
+        "catalog-adoption"
+      ],
+      "deferredIntegration": {
+        "status": "inactive",
+        "consumerAuthority": false,
+        "protectedBindings": [
+          "eventRepository",
+          "eventSourceRevision",
+          "canonicalRunId",
+          "launchBinding",
+          "candidateAcquisition",
+          "authorityRevision",
+          "scannerToolReceipt",
+          "staticRawEvent",
+          "supplementalTestInventory",
+          "supplementalRawEvents",
+          "cleanup",
+          "humanFindingDispositionReview",
+          "centralRevision",
+          "workflowRevision",
+          "authorityArchiveSha256"
+        ]
+      }
+    },
     "unparsableResult": "BLOCK",
     "unknownSeverity": "BLOCK",
     "severity": [

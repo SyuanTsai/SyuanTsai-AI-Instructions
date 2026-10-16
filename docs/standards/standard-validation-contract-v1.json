@@ -183,6 +183,52 @@
       "requiredContexts": ["repository-contract", "skill-validator", "skill-tools"],
       "releaseEligibility": "fixed false; no install, publish, or release authorization"
     },
+    "internalSourceContinuation": {
+      "policyPath": "docs/standards/internal-source-continuation.json",
+      "policySchemaPath": "docs/standards/schemas/internal-source-continuation-v1.schema.json",
+      "technicalStatus": [
+        "consistent",
+        "inconsistent"
+      ],
+      "applicabilityStatus": "not-verified",
+      "technicalInterface": "Report-based read-only consistency evaluator; no command dispatch or canonical report registration",
+      "technicalPublishable": false,
+      "scope": "internal-review-only",
+      "canonicalState": "FAILED/20, Stage 4 failed, sourceConformance failed, releaseEligible false",
+      "releaseEligibility": "fixed false; no source-merge, release, install, publish, or catalog adoption authorization",
+      "assessmentSchemaPath": "docs/standards/schemas/internal-source-review-assessment-v1.schema.json",
+      "function": "New-StandardValidationInternalSourceReviewAssessment",
+      "assessmentKind": "evidence-consistency-only",
+      "executionProvenanceStatus": "not-verified",
+      "authorizationGranted": false,
+      "authorizedOperations": [],
+      "deferredIntegration": {
+        "status": "inactive",
+        "consumerAuthority": false,
+        "protectedBindings": [
+          "eventRepository",
+          "eventSourceRevision",
+          "canonicalRunId",
+          "launchBinding",
+          "candidateAcquisition",
+          "authorityRevision",
+          "scannerToolReceipt",
+          "staticRawEvent",
+          "supplementalTestInventory",
+          "supplementalRawEvents",
+          "cleanup",
+          "humanFindingDispositionReview",
+          "centralRevision",
+          "workflowRevision",
+          "authorityArchiveSha256"
+        ],
+        "requirements": [
+          "independent applicability authority and observations",
+          "scanner and supplemental execution provenance",
+          "protected producer/consumer adoption and candidate-bound human approval"
+        ]
+      }
+    },
     "toolResult": "actual-process-exit-and-output-envelope",
     "coverage": "discovered-active-skill-set",
     "unknownOrMissing": "fail-closed",

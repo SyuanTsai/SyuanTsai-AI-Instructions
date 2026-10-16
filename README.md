@@ -26,6 +26,13 @@ Test-SkillsCatalogContract `
   -ConfigurationPath .\catalog\examples\ai-instructions-sync-v4.example.json
 ```
 
+## 內部模組 review assessment
+
+SkillSpector 的 analyzer coverage 不完整時，canonical Stage 4 仍維持 `FAILED`／exit code `20`，不得改寫成掃描完成。中央 authority 可透過 [internal-source-continuation.json](docs/standards/internal-source-continuation.json) 將特定 repository 與 Skill 登錄為內部模組；consumer 不得自行宣告或複製這份 allowlist。
+
+
+中央登錄的內部模組可用 `New-StandardValidationInternalSourceReviewAssessment` 讀取既有 Report，產生 `consistent`／`inconsistent` 的 evidence-consistency-only 審查資料。所有結果固定 applicability 與 execution provenance `not-verified`、`authorizationGranted=false`、`authorizedOperations=[]`、`publishable=false`、`releaseEligible=false`，不授權 source-merge、release、install、publish 或 catalog adoption。Canonical `FAILED`／20 維持；typed counters、safe Skill IDs、exact findings、raw revision/content 與 authenticated authority binding 保留。介面不執行或派送命令；完整 applicability、可信執行與 protected adoption 為 deferred integration。參見 [Standard §9.3.1](docs/standards/skill-repository-standard.md#931-internal-source-continuation)。
+
 ## 同步模型
 
 只有 Codex 準備建立或更新 production code 的實作計畫時，個人 `AGENTS.md` 才會要求執行 installed bootstrap；一般問答、釐清與解釋不執行。

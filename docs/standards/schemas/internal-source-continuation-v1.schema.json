@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Internal source continuation policy v1",
+  "description": "Central-only internal evidence consistency review; applicability and scanner/supplemental execution provenance remain unverified. No operation is authorized.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "policy", "status", "authorityOwnership", "consumerSelfDeclaration", "scope", "technicalResult", "assurance", "canonicalResult", "permittedOperations", "forbiddenOperations", "entries"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "policy": { "const": "internal-source-continuation-v1" },
+    "status": { "const": "adopted" },
+    "authorityOwnership": { "const": "central-only" },
+    "consumerSelfDeclaration": { "const": false },
+    "scope": { "const": "internal-review-only" },
+    "technicalResult": { "const": "evidence-consistency-only" },
+    "assurance": { "const": {"applicabilityStatus": "not-verified", "executionProvenanceStatus": "not-verified", "authorizationGranted": false, "authorizedOperations": []} },
+    "canonicalResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preserved", "requiredState", "requiredExitCode", "requiredStaticStageStatus", "releaseEligible"],
+      "properties": {
+        "preserved": { "const": true },
+        "requiredState": { "const": "FAILED" },
+        "requiredExitCode": { "const": 20 },
+        "requiredStaticStageStatus": { "const": "failed" },
+        "releaseEligible": { "const": false }
+      }
+    },
+    "permittedOperations": { "const": [] },
+    "forbiddenOperations": { "const": ["source-merge", "release", "install", "publish", "catalog-adoption"] },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceRepository", "skillId", "reasonCode", "analyzerId", "scannerSource", "scannerVersion", "applicabilityAssessment", "expectedAnalyzerIds", "allowedComponentPatterns", "maximumIncompleteComponents", "allowedNonBlockingAnalyzerStatuses", "expectedLimitations", "findingDispositionMode", "findingDispositionReview", "allowedFindings", "supplementalTests"],
+      "properties": {
+        "sourceRepository": { "type": "string", "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\\.git$" },
+        "skillId": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+        "reasonCode": { "const": "static_parse_limit" },
+        "analyzerId": { "const": "static_patterns_tool_misuse" },
+        "scannerSource": { "const": "NVIDIA/SkillSpector" },
+        "scannerVersion": { "const": "2.12.0" },
+        "applicabilityAssessment": {
+          "description": "Scope limitation; never a workload authority or an applicability profile.",
+          "const": {
+            "status": "not-verified",
+            "upstreamRevision": "c7958a3268d9498644b22edb75d0f051bbc8cbfc",
+            "reason": "outside-review-assessment-scope"
+          }
+        },
+        "expectedAnalyzerIds": {
+          "type": "array",
+          "minItems": 28,
+          "maxItems": 28,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z0-9]+(?:_[a-z0-9]+)*$" }
+        },
+        "allowedComponentPatterns": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "maximumIncompleteComponents": { "type": "integer", "minimum": 1, "maximum": 256 },
+        "allowedNonBlockingAnalyzerStatuses": {
+          "const": ["completed", "not_applicable", "disabled"]
+        },
+        "expectedLimitations": {
+          "const": ["Analyzer static_patterns_tool_misuse status: degraded."]
+        },
+        "findingDispositionMode": { "const": "central-exact-allowlist" },
+        "findingDispositionReview": { "$ref": "#/$defs/findingDispositionReview" },
+        "allowedFindings": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/findingDisposition" }
+        },
+        "supplementalTests": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requiredSuites", "minimumPassed"],
+          "properties": {
+            "requiredSuites": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" }
+            },
+            "minimumPassed": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    },
+    "findingDisposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["matchFingerprint", "id", "category", "pattern", "severity", "finding", "targetPath", "expectedOccurrences", "allowedLocations", "evidenceReasonMessage", "evidencePhase", "disposition"],
+      "properties": {
+        "matchFingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "id": { "type": "string", "minLength": 1 },
+        "category": { "type": "string", "minLength": 1 },
+        "pattern": { "type": "string", "minLength": 1 },
+        "severity": { "enum": ["HIGH", "MEDIUM"] },
+        "finding": { "type": "string", "minLength": 1 },
+        "targetPath": { "type": ["string", "null"] },
+        "expectedOccurrences": { "type": "integer", "minimum": 1 },
+        "allowedLocations": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/findingLocation" }
+        },
+        "evidenceReasonMessage": { "type": ["string", "null"] },
+        "evidencePhase": { "type": ["string", "null"] },
+        "disposition": { "enum": ["derived-from-approved-parser-limitation", "accepted-declared-atlassian-api-endpoint"] }
+      }
+    },
+    "findingLocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "startLine", "endLine", "startColumn"],
+      "properties": {
+        "file": { "type": "string", "pattern": "^[^/\\\\].*" },
+        "startLine": { "type": "integer", "minimum": 1 },
+        "endLine": { "type": ["integer", "null"], "minimum": 1 },
+        "startColumn": { "type": ["integer", "null"], "minimum": 1 }
+      }
+    },
+    "findingDispositionReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "owner", "createdAt", "expiresAt", "scope", "risk", "rationale", "compensatingControls", "authorizationGranted"],
+      "properties": {
+        "status": { "const": "review-context-only" },
+        "owner": { "type": "string", "minLength": 1 },
+        "createdAt": { "type": "string", "format": "date" },
+        "expiresAt": { "type": "string", "format": "date" },
+        "scope": { "const": "internal-review-only" },
+        "risk": { "type": "string", "minLength": 1 },
+        "rationale": { "type": "string", "minLength": 1 },
+        "compensatingControls": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "authorizationGranted": { "const": false }
+      }
+    }
+  }
+}
