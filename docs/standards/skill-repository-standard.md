@@ -492,7 +492,7 @@ Validation **MUST** 檢查預期 analyzer set / capabilities 已完成，而不�
 
 ### 9.3.1 Internal source continuation
 
-`analyzerIncomplete = BLOCK` 維持 canonical Stage 4 與 release lifecycle 的固定語意。中央 `internal-source-continuation.json` 只登錄 exact internal repository／Skill 的人工審查範圍；`scope=internal-review-only`、`technicalResult=evidence-consistency-only`、`permittedOperations=[]`，consumer **MUST NOT** 自行宣告 internal 身分或擴大 allowlist。
+`analyzerIncomplete = BLOCK` 維持 canonical Stage 4 與 release lifecycle 的固定語意。中央 `internal-source-continuation.json` 的既有 `entries` 與 root review metadata 只登錄 exact internal repository／Skill 的人工審查範圍；`scope=internal-review-only`、`technicalResult=evidence-consistency-only`、`permittedOperations=[]`，consumer **MUST NOT** 自行宣告 internal 身分或擴大 allowlist。獨立的 `internalUseApprovals` 區段依 §9.3.3 處理，不由本 assessment 授權。
 
 `New-StandardValidationInternalSourceReviewAssessment` **MUST** 只讀取既有 `Report`，輸出 `internal-source-review-assessment-v1`（schema：`docs/standards/schemas/internal-source-review-assessment-v1.schema.json`）。每次 evaluation **MUST** 重新驗證 signed authenticated authority snapshot 與固定 trust anchor，從 exact `selectedFiles` 綁定修改後 policy bytes、`docs/standards/schemas/internal-source-continuation-v1.schema.json` 與 assessment schema；caller verified flag、自算 hashes、舊 schema inventory 或本機未綁定 bytes 均不構成 authenticated authority。
 
@@ -592,6 +592,18 @@ Parser error、無法驗證的 grammar/module/runtime identity、未知 proof sh
 原始官方報告已 complete 的 Skill 可直接沿用原有 Static 路徑；只有需要這個 grammar correction 時才呼叫中央 wrapper，且完整 active Skill inventory 仍須逐一實跑。Wrapper 必須自行以同一 frozen receipt 重跑原始 graph，驗證所有原始 exception 都是 profile 可證明完成的 static/partial/static_parse_limit，任何 runtime limit、其他 analyzer/reason、fatal outcome 或未完成 coverage 都必須拒絕；wrapper 失敗後不得回退或改寫報告。所有 resolver receipt 必須 hash 與 parse 同一份 byte snapshot。
 
 中央 bridge 的入口、Python module、native parser helper、policy/schema 與同一次執行的官方 resolver receipt/runtime identity **MUST** 綁定 protected authority inventory 及既有 candidate-bound child。Consumer 升級此 authority revision 時，signed snapshot 的 selectedFiles 與 evidence schema 必須一同使用精確 22-file inventory；舊的 16-file receipt 不得沿用。Profile execution record 固定 applicabilityStatus/executionProvenanceStatus 為 not-verified、authorizationGranted/releaseEligible 為 false、authorizedOperations 為空。Proof JSON、profile sidecar 或 caller 的 verified/hash flags 單獨沒有信任或授權效力。Raw original report、corrected graph report、profile execution record、candidate/file digests 與 cleanup evidence **MUST** 可追溯到同一個執行。只有 exact component/analyzer coverage 與既有 severity 條件均成立，Static 才能通過並進入原有 Stage 5；release/install 邊界不變。
+
+### 9.3.3 Owned internal Skill use
+
+使用者維護的內部 Skill 經該用途必要檢查與人類處置後，**MAY** 在既有中央 `internal-source-continuation.json` 的獨立 `internalUseApprovals` 登錄為可用。此區段記錄 exact repository、Skill ID、審查來源 immutable revision、完整 package per-file inventory/content digest、必要工具/minimum version、有限的內部用途、人類 reviewer/decision/evidence/expiry、原始 findings 與使用條件。`identityBinding=package-content` 以完整 Skill bytes 作版本身分；registry 的 `sourceRevision` 是審查來源證據，consumer 的當前 immutable revision 另行記錄。只改 consumer reader／其他 repository 檔案而 Skill bytes 完全不變時，不必為追逐 repository commit 再造同版登錄。它不把 §9.3.1 的 review-only `consistent` assessment 升級為授權，也不要求先完成外部第三方 Skill 的通用治理或 deferred 28-analyzer framework。
+
+本次准用用途限 `local-pr-review` 與 `prepare-review-feedback`。中央登錄和 `Resolve-StandardValidationInternalSkillUse` **MUST** 拒絕未登錄 repository/Skill/content identity、非 immutable 當前 revision、package 新增/刪除/變更 bytes、未核准用途、撤銷/過期/不完整人審、缺少或漂移的必要工具，以及缺件/重複/漂移的 authority member pins。完整 content digest 沿用既有 ordinal `path<TAB>sha256<LF>` inventory 算法，不能做文字正規化後冒稱 exact bytes。
+
+正常 consumer **MUST** 先以其受保護 reader 的固定 tuple 驗證中央 immutable archive 與成員，再從該 authority runner 呼叫此 API；`ExpectedAuthorityFiles` 必須來自該 trusted tuple，包含 runner、registry 和 policy schema 的 exact hashes，`ToolInventory` 必須是 consumer 已驗證並凍結的 `id/version/path/sha256` inventory。Reader 不接收 candidate-selected registry path、caller approval Boolean 或替代 policy；candidate 自算的 pins 不構成中央准用。缺少新區段的舊 v1 registry 對新准用要求 fail closed，舊 review-only assessment 保持原行為。304 的 consumer 接入依相同固定 authority inventory 接收，不能把本機未提交中央候選冒充正式 authority revision。
+
+回傳 `internal-skill-use-decision-v1` 的 `status=approved`、`authorizationGranted=true` 與 exact requested `authorizedOperations` 只表示該 exact package 可在該內部用途使用。Reader **MUST** 在回傳前重新核對完整 package inventory 與每個必要工具的 exact bytes，拒絕本次 evaluation 期間的漂移；consumer **MUST** 在採用／執行時保持或重新驗證相同 snapshot／工具 bytes。Consumer **MUST** 實際讀取此 decision 並在採用時比對用途與來源，不以 catalog 字串、文件或人工口頭清單代替。新用途、package、host authorization、工具需求或 authority 改變均須重評。中央記錄可由後續正常 policy change 撤銷；過期即拒絕。
+
+LP3 的人審處置和准用結果可以並存：原 report、finding ID、severity 與 historical/current candidate 關係 **MUST** 保留，不修改 canonical report 或宣稱 scanner 已無 finding。此 API 固定 `releaseEligible=false`、`hostToolPreauthorization=false`、`requiresExactTargetActionAuthorization=true`；不執行 Skill、不下載工具、不授予外部 release/install/live/Catalog/Lock 操作。Bitbucket Create/Reply/Resolve 仍由實際 host 權限與精確 target/action 的可信人類指示決定。若日後確需工具最小預授權宣告，須先核對該內部 host 的實際工具語意及適當同意，再於對應 Skill 處理，不為消除 LP3 加入無界權限。
 
 ### 9.4 Severity handling
 
@@ -728,6 +740,7 @@ Repository Tests stage **MUST** 在 Package Validation 與 SkillSpector Static �
 |---|---|---|
 | Candidate/authority runner、tool receipt parser、source dispatch integrity、native report reader | `scripts/Invoke-StandardValidation.ps1` | `tests/skill-repository-standard.Tests.ps1`, `tests/standard-validation-runner.Tests.ps1`, `tests/standard-core-pester-adapter.Tests.ps1` |
 | Internal review assessment、authenticated authority binding 與 consistent/inconsistent 無授權邊界 | `docs/standards/internal-source-continuation.json`, `docs/standards/schemas/internal-source-continuation-v1.schema.json`, `docs/standards/schemas/internal-source-review-assessment-v1.schema.json`, `scripts/Invoke-StandardValidation.ps1` | `tests/internal-source-continuation.Tests.ps1`, `tests/skill-repository-standard.Tests.ps1`, `tests/skill-repository-workflows.Tests.ps1` |
+| Owned internal Skill 准用、exact package/用途/工具與 trusted consumer pins | `docs/standards/internal-source-continuation.json`, `docs/standards/schemas/internal-source-continuation-v1.schema.json`, `scripts/Invoke-StandardValidation.ps1` | `tests/internal-skill-use.Tests.ps1`（既有 Windows Core 完整普通測試 discovery） |
 | Trusted validation tool acquisition, identity and per-run receipt production | `scripts/Resolve-StandardValidationTool.ps1` | `tests/standard-validation-resolver-hardening.Tests.ps1` |
 | Authority/security policy and admission ordering | `scripts/Invoke-StandardAuthorityGate.ps1`, `docs/standards/validation-security-gate.json` | `tests/skill-repository-standard.Tests.ps1`, `tests/skill-repository-workflows.Tests.ps1`, `tests/standard-validation-resolver-hardening.Tests.ps1` |
 | Required workflow wiring and ordinary non-authority Pester execution | `.github/workflows/pr8-powershell-validation.yml` | `tests/skill-repository-workflows.Tests.ps1` |

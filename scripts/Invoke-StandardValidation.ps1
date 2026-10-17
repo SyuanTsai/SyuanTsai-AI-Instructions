@@ -6719,6 +6719,137 @@ function New-StandardValidationInternalSourceReviewAssessment {
     }
 }
 
+function Resolve-StandardValidationInternalSkillUse {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $SkillRoot,
+        [Parameter(Mandatory = $true)][string] $SourceRepository,
+        [Parameter(Mandatory = $true)][string] $SourceRevision,
+        [Parameter(Mandatory = $true)][string] $SkillId,
+        [Parameter(Mandatory = $true)][string] $Purpose,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $ExpectedAuthorityFiles,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $ToolInventory
+    )
+
+    # Pins and frozen tool identities come from the protected consumer reader,
+    # after its normal authority acquisition. They are not candidate input or a
+    # substitute for that reader's immutable archive verification.
+    $required = @('scripts/Invoke-StandardValidation.ps1',
+        'docs/standards/internal-source-continuation.json',
+        'docs/standards/schemas/internal-source-continuation-v1.schema.json')
+    $pins = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    foreach ($file in $ExpectedAuthorityFiles) {
+        $path = [string](Get-StandardValidationRequiredProperty -Object $file -Name 'path' -Context 'internal use authority pin')
+        $hash = [string](Get-StandardValidationRequiredProperty -Object $file -Name 'sha256' -Context 'internal use authority pin')
+        Assert-StandardValidationSafeRelativePath -Value $path -Context 'internal use authority member'
+        Assert-StandardValidationSha256 -Value $hash -Context 'internal use authority hash'
+        if ($pins.ContainsKey($path)) { throw 'BLOCKED|Duplicate internal use authority member.' }
+        $pins.Add($path, $hash)
+    }
+    foreach ($path in $required) {
+        if (-not $pins.ContainsKey($path)) { throw "BLOCKED|Missing internal use authority member: $path" }
+        $full = Join-Path $script:StandardValidationRepositoryRoot $path
+        Assert-StandardValidationRegularFile -Path $full -Context 'internal use authority member'
+        if ((Get-StandardValidationFileSha256 -Path $full -Context 'internal use authority member') -cne $pins[$path]) {
+            throw "BLOCKED|Internal use authority member drifted: $path"
+        }
+    }
+    $policyPath = Join-Path $script:StandardValidationRepositoryRoot $required[1]
+    $schemaPath = Join-Path $script:StandardValidationRepositoryRoot $required[2]
+    $snapshot = Get-StandardValidationJsonSnapshot -Path $policyPath -Context 'internal use registry'
+    if ($snapshot.sha256 -cne $pins[$required[1]] -or
+        -not ([Text.Encoding]::UTF8.GetString($snapshot.bytes) | Test-Json -SchemaFile $schemaPath -ErrorAction Stop)) {
+        throw 'BLOCKED|Internal use registry is invalid or changed.'
+    }
+    $approvals = Get-StandardValidationProperty -Object $snapshot.value -Name 'internalUseApprovals'
+    if ($approvals -isnot [array]) { throw 'BLOCKED|No internal use approvals are registered.' }
+    Assert-StandardValidationRevision -Value $SourceRevision -Context 'internal use current source revision'
+    $inventory = Get-StandardValidationInventory -Root $SkillRoot -Context 'internal use Skill package'
+    $content = Get-StandardValidationInventorySha256 -Inventory $inventory
+    $keys = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($approval in $approvals) {
+        $key = "$($approval.sourceRepository)`n$($approval.skillId)`n$($approval.contentSha256)"
+        if (-not $keys.Add($key)) { throw 'BLOCKED|Duplicate internal use approval identity.' }
+    }
+    $matches = @($approvals | Where-Object {
+        $_.sourceRepository -ceq $SourceRepository -and $_.skillId -ceq $SkillId -and $_.contentSha256 -ceq $content
+    })
+    if ($matches.Count -ne 1) { throw 'BLOCKED|Exact internal Skill/content identity is not registered.' }
+    $approval = $matches[0]
+    if ($approval.status -cne 'approved' -or $approval.review.decision -cne 'approved-internal-use') {
+        throw 'BLOCKED|Internal use approval is revoked or not approved.'
+    }
+    $expires = [DateTimeOffset]::ParseExact($approval.review.expiresAt, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal)
+    $reviewed = [DateTimeOffset]::ParseExact($approval.review.reviewedAt, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal)
+    if ($reviewed -gt [DateTimeOffset]::UtcNow -or $expires -le $reviewed -or [DateTimeOffset]::UtcNow -ge $expires) {
+        throw 'BLOCKED|Internal use approval dates are invalid or expired.'
+    }
+    if ($approval.permittedUses -cnotcontains $Purpose) { throw 'BLOCKED|Requested internal use is not approved.' }
+    if ($content -cne $approval.contentSha256 -or $inventory.Count -ne $approval.files.Count -or
+        (Get-StandardValidationSelectedFilesSha256 -Files $approval.files) -cne $content) {
+        throw 'BLOCKED|Internal Skill package inventory/content drifted.'
+    }
+    $tools = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+    foreach ($tool in $ToolInventory) {
+        Assert-StandardValidationExactPropertySet -Object $tool -Expected @('id', 'version', 'path', 'sha256') -Context 'internal use frozen tool'
+        $id = [string]$tool.id
+        if ($tools.ContainsKey($id)) { throw 'BLOCKED|Duplicate internal use tool.' }
+        Assert-StandardValidationSha256 -Value ([string]$tool.sha256) -Context 'internal use tool hash'
+        Assert-StandardValidationRegularFile -Path ([string]$tool.path) -Context 'internal use tool'
+        if ((Get-StandardValidationFileSha256 -Path ([string]$tool.path) -Context 'internal use tool') -cne [string]$tool.sha256) {
+            throw 'BLOCKED|Internal use tool bytes drifted.'
+        }
+        $tools.Add($id, $tool)
+    }
+    foreach ($requirement in $approval.requiredTools) {
+        if (-not $tools.ContainsKey([string]$requirement.id)) { throw "BLOCKED|Required internal use tool is missing: $($requirement.id)" }
+        $tool = $tools[[string]$requirement.id]
+        $version = $null
+        if (-not [version]::TryParse([string]$tool.version, [ref]$version) -or $version -lt [version]$requirement.minimumVersion) {
+            throw "BLOCKED|Required internal use tool version is invalid: $($requirement.id)"
+        }
+    }
+    # Approval is a decision over these bytes. It neither executes the package
+    # nor turns an active scanner finding into a clean canonical result.
+    foreach ($path in $required) {
+        if ((Get-StandardValidationFileSha256 -Path (Join-Path $script:StandardValidationRepositoryRoot $path) -Context 'internal use final authority binding') -cne $pins[$path]) {
+            throw 'BLOCKED|Internal use authority changed during evaluation.'
+        }
+    }
+    $finalInventory = Get-StandardValidationInventory -Root $SkillRoot -Context 'internal use final Skill package'
+    if ($finalInventory.Count -ne $inventory.Count -or
+        (Get-StandardValidationInventorySha256 -Inventory $finalInventory) -cne $content) {
+        throw 'BLOCKED|Internal Skill package changed during evaluation.'
+    }
+    foreach ($requirement in $approval.requiredTools) {
+        $tool = $tools[[string]$requirement.id]
+        Assert-StandardValidationRegularFile -Path ([string]$tool.path) -Context 'internal use final tool'
+        if ((Get-StandardValidationFileSha256 -Path ([string]$tool.path) -Context 'internal use final tool') -cne [string]$tool.sha256) {
+            throw 'BLOCKED|Internal use tool changed during evaluation.'
+        }
+    }
+    return [ordered]@{
+        schemaVersion = 1
+        contract = 'internal-skill-use-decision-v1'
+        status = 'approved'
+        approvalId = [string]$approval.id
+        sourceRepository = $SourceRepository
+        sourceRevision = $SourceRevision
+        reviewedSourceRevision = [string]$approval.sourceRevision
+        skillId = $SkillId
+        contentSha256 = $content
+        policySha256 = [string]$snapshot.sha256
+        authorizationGranted = $true
+        authorizedOperations = @($Purpose)
+        requiredTools = @($approval.requiredTools)
+        retainedFindings = @($approval.retainedFindings)
+        conditions = @($approval.conditions)
+        hostToolPreauthorization = $false
+        requiresExactTargetActionAuthorization = $true
+        releaseEligible = $false
+    }
+}
+
 function Test-StandardValidationCanonicalSeverity {
     param([AllowNull()] $Severity)
 

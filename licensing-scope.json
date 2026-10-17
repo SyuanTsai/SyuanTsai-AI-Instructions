@@ -564,6 +564,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/plans/syp314-internal-skill-use.md",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/plans/syp325-central-validation.md",
       "license": "Apache-2.0"
     },
@@ -1081,6 +1085,10 @@
     },
     {
       "path": "tests/install-ai-instructions-bootstrap.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/internal-skill-use.Tests.ps1",
       "license": "Apache-2.0"
     },
     {
