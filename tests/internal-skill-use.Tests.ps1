@@ -178,6 +178,49 @@ Describe 'Internal Skill use approvals' {
         }
     }
 
+    # Scenario: Package bytes change only after the initial inventory, during final authority binding.
+    # Purpose: Reject late replacement, additions and deletion rather than return a stale approval.
+    It 'UnitT85_RejectsPackageDriftDuringApproval_<Change>' -TestCases @(
+        @{ Change = 'changed' }, @{ Change = 'added' }, @{ Change = 'removed' }
+    ) {
+        param($Change)
+        $script:InternalUseRaceFixture = New-InternalUseFixture
+        $script:InternalUseRaceChange = $Change
+        $script:InternalUseRaceTriggered = $false
+        Mock Get-StandardValidationFileSha256 {
+            param($Path, $Context)
+            if ($Context -ceq 'internal use final authority binding' -and -not $script:InternalUseRaceTriggered) {
+                $script:InternalUseRaceTriggered = $true
+                $file = Join-Path $script:InternalUseRaceFixture.skill 'SKILL.md'
+                switch ($script:InternalUseRaceChange) {
+                    changed { [IO.File]::AppendAllText($file, 'late drift') }
+                    added { [IO.File]::WriteAllText((Join-Path $script:InternalUseRaceFixture.skill 'late.txt'), 'late file') }
+                    removed { Remove-Item -LiteralPath $file }
+                }
+            }
+            (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+        { Invoke-InternalUseFixture $script:InternalUseRaceFixture } | Should -Throw
+        $script:InternalUseRaceTriggered | Should -BeTrue
+    }
+
+    # Scenario: A required tool is replaced during final authority binding after its initial hash passes.
+    # Purpose: Reject a decision over stale tool bytes before returning approval.
+    It 'UnitT87_RejectsRequiredToolDriftDuringApproval' {
+        $script:InternalUseRaceFixture = New-InternalUseFixture
+        $script:InternalUseRaceTriggered = $false
+        Mock Get-StandardValidationFileSha256 {
+            param($Path, $Context)
+            if ($Context -ceq 'internal use final authority binding' -and -not $script:InternalUseRaceTriggered) {
+                $script:InternalUseRaceTriggered = $true
+                [IO.File]::AppendAllText($script:InternalUseRaceFixture.tools[1].path, 'late drift')
+            }
+            (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+        { Invoke-InternalUseFixture $script:InternalUseRaceFixture } | Should -Throw
+        $script:InternalUseRaceTriggered | Should -BeTrue
+    }
+
     # Scenario: A previously valid review-only registry has no internal-use approval section.
     # Purpose: Preserve old assessment compatibility without silently treating it as permission to use a Skill.
     It 'UnitT90_RejectsReviewOnlyRegistryAsInternalUseApproval' {
@@ -185,5 +228,57 @@ Describe 'Internal Skill use approvals' {
         $fixture.policy.PSObject.Properties.Remove('internalUseApprovals')
         Save-InternalUsePolicy $fixture
         { Invoke-InternalUseFixture $fixture } | Should -Throw 'No internal use approvals'
+    }
+}
+
+Describe 'Committed internal Skill approval integration' {
+    # Scenario: The committed registry is read against the actual reviewed PR18 archive without replacing its inventory.
+    # Purpose: Catch mistyped production pins/digests and protect the retained historical report and drift boundary in normal CI.
+    It 'InterT10_ApprovesTheReviewedArchiveAndRejectsDriftWithTheCommittedRegistry' {
+        $root = Split-Path -Parent $PSScriptRoot
+        . (Join-Path $root 'scripts/Invoke-StandardValidation.ps1') -CandidateRoot $TestDrive -AdapterPath (Join-Path $TestDrive 'unused.json') -ArtifactsRoot $TestDrive -SourceRepository 'https://example.test/internal.git' -SourceRevision ('a' * 40) -BaseRevision ('b' * 40) -DefineFunctionsOnly
+        $archive = Join-Path $TestDrive 'reviewed-pr18.zip'
+        Invoke-WebRequest -Uri 'https://codeload.github.com/SyuanTsai/Skill-Atlassian-Ecosystem/zip/7e8228c393579d5d21ac9c0ad729c7b5d219bab6' -OutFile $archive -TimeoutSec 60
+        (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() | Should -Be '40ee538db714c83b8cf0d97de2dc83e734ef3fc393b6d06f7d86755887bb6681'
+        $skill = Join-Path $TestDrive 'reviewed-skill'
+        $files = @('SKILL.md', 'agents/openai.yaml', 'references/bitbucket-cloud-api.md', 'references/review-actions.md', 'scripts/Invoke-BitbucketReviewActions.ps1')
+        $zip = [IO.Compression.ZipFile]::OpenRead($archive)
+        try {
+            foreach ($path in $files) {
+                $entry = $zip.GetEntry('Skill-Atlassian-Ecosystem-7e8228c393579d5d21ac9c0ad729c7b5d219bab6/skills/review-bitbucket-pull-request/' + $path)
+                $entry | Should -Not -BeNullOrEmpty
+                $target = Join-Path $skill $path
+                [void][IO.Directory]::CreateDirectory((Split-Path -Parent $target))
+                $inputStream = $entry.Open()
+                try {
+                    $outputStream = [IO.File]::Create($target)
+                    try { $inputStream.CopyTo($outputStream) } finally { $outputStream.Dispose() }
+                }
+                finally { $inputStream.Dispose() }
+            }
+        }
+        finally { $zip.Dispose() }
+        $pins = @('scripts/Invoke-StandardValidation.ps1', 'docs/standards/internal-source-continuation.json', 'docs/standards/schemas/internal-source-continuation-v1.schema.json' | ForEach-Object {
+            [pscustomobject]@{ path = $_; sha256 = (Get-FileHash -LiteralPath (Join-Path $root $_) -Algorithm SHA256).Hash.ToLowerInvariant() }
+        })
+        $git = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+        $gitVersion = [regex]::Match((& $git --version), '\d+\.\d+\.\d+').Value
+        $tools = @(
+            [pscustomobject]@{ id = 'powershell'; version = $PSVersionTable.PSVersion.ToString(); path = (Join-Path $PSHOME 'pwsh.exe'); sha256 = (Get-FileHash -LiteralPath (Join-Path $PSHOME 'pwsh.exe') -Algorithm SHA256).Hash.ToLowerInvariant() },
+            [pscustomobject]@{ id = 'git'; version = $gitVersion; path = $git; sha256 = (Get-FileHash -LiteralPath $git -Algorithm SHA256).Hash.ToLowerInvariant() }
+        )
+        $parameters = @{ SkillRoot = $skill; SourceRepository = 'https://github.com/SyuanTsai/Skill-Atlassian-Ecosystem.git'; SourceRevision = '7e8228c393579d5d21ac9c0ad729c7b5d219bab6'; SkillId = 'review-bitbucket-pull-request'; Purpose = 'local-pr-review'; ExpectedAuthorityFiles = $pins; ToolInventory = $tools }
+        $before = (Get-FileHash -LiteralPath (Join-Path $root 'docs/standards/internal-source-continuation.json') -Algorithm SHA256).Hash
+        $decision = Resolve-StandardValidationInternalSkillUse @parameters
+        $decision.status | Should -Be 'approved'
+        $decision.contentSha256 | Should -Be '056b8e520460e6612b10c8c9248fd7c217c6e4708ca65f3bc6c05b98ee84dec9'
+        $decision.reviewedSourceRevision | Should -Be $parameters.SourceRevision
+        $decision.retainedFindings[0].reportSha256 | Should -Be '55c41e494fe318fcb0365c1addc1dd359162c1798ac67e12b8155caa2c7b16d0'
+        $decision.retainedFindings[0].severity | Should -Be 'MEDIUM'
+        $decision.retainedFindings[0].reportRelation | Should -Be 'historical-context'
+        $decision.releaseEligible | Should -BeFalse
+        (Get-FileHash -LiteralPath (Join-Path $root 'docs/standards/internal-source-continuation.json') -Algorithm SHA256).Hash | Should -Be $before
+        [IO.File]::AppendAllText((Join-Path $skill 'SKILL.md'), 'unreviewed drift')
+        { Resolve-StandardValidationInternalSkillUse @parameters } | Should -Throw 'not registered'
     }
 }

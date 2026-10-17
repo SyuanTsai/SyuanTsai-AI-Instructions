@@ -37,3 +37,13 @@
 ## 6. 已知限制
 
 舊 LP3 report 綁歷史 candidate；登錄會明確標示為 historical-context，不能冒充 PR18 新掃描。PR18 Stage1–5／482 tests 與人類對現行 Skill/helper 的來源處置是另外的 current-source evidence。准用不聲稱 scanner 已無 finding，也不消除 PR18 延期未修風險。工具名稱/minimum version 只是本內部用途依賴，不是 host 的預授權宣告。
+
+## 7. PR92 Review 修正候選
+
+對 `9b1fa41` 的 Code Review 指出：回傳前只重驗 authority，未偵測本次 evaluation 期間 package／工具的替換；實際 PR18 archive smoke 也只存在交付證據，未被 committed suite 保護。修正只涉及本 API 與直接測試，不改准用資料、用途或 finding。
+
+- 先加入確定性的 late-mutation 案例：在最終 authority 驗證階段才變更／新增／刪除 package 檔案，或替換必要工具 bytes；舊 reader 必須顯示 expected-throw RED，再於回傳前重建完整 inventory 並重驗必要工具，得到 GREEN。
+- committed integration case 由固定公開 PR18 commit archive URL 取得 bytes，驗證固定 archive SHA256 後只解出該 Skill 五檔；實際 registry 的 file hashes/content digest 不改寫。驗證正常用途、package drift，以及保留的 LP3 report digest／severity／historical qualification。只在 TestDrive 暫存來源，不把外部 Skill source 追蹤到中央 repo；網路／digest 失敗不能靜默 skip。
+- 直接新案例與規定的 authority regressions 重新驗證。原315結果仍只屬 `9b1fa41`；修正候選另記結果。consumer 在採用／執行時仍須保持或重新驗證該 snapshot／工具 bytes，reader 的末次核對不宣稱能消除回傳後的外部競態。
+- `9b1fa41` 的直接發布與條件式合併授權不自動擴張到改變後的候選。先完成新 diff 與必要驗證，再取得精確後續 Git 授權；兩個 review threads 在修正正式交付與複審前保持未解決，不合併舊候選。
+- 同一候選的正式 CI 已證實原始六檔漏登新增 plan／test 的 licensing inventory。依既有自行撰寫維護文件／測試分類，只在 `licensing-scope.json` 新增這兩條 Apache-2.0 entries；不改 LICENSE、既有 exclusions 或外部 Skill source 的授權。先保留 CI 的 RED，再執行既有 licensing scope／delivery tests；修正交付範圍增為五個既有檔案，另附新的完整 patch 與 hash。

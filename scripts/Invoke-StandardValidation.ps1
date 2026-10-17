@@ -6816,6 +6816,18 @@ function Resolve-StandardValidationInternalSkillUse {
             throw 'BLOCKED|Internal use authority changed during evaluation.'
         }
     }
+    $finalInventory = Get-StandardValidationInventory -Root $SkillRoot -Context 'internal use final Skill package'
+    if ($finalInventory.Count -ne $inventory.Count -or
+        (Get-StandardValidationInventorySha256 -Inventory $finalInventory) -cne $content) {
+        throw 'BLOCKED|Internal Skill package changed during evaluation.'
+    }
+    foreach ($requirement in $approval.requiredTools) {
+        $tool = $tools[[string]$requirement.id]
+        Assert-StandardValidationRegularFile -Path ([string]$tool.path) -Context 'internal use final tool'
+        if ((Get-StandardValidationFileSha256 -Path ([string]$tool.path) -Context 'internal use final tool') -cne [string]$tool.sha256) {
+            throw 'BLOCKED|Internal use tool changed during evaluation.'
+        }
+    }
     return [ordered]@{
         schemaVersion = 1
         contract = 'internal-skill-use-decision-v1'
