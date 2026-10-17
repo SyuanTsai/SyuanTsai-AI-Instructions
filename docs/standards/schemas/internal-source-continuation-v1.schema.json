@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Internal source continuation policy v1",
-  "description": "Central-only internal evidence consistency review; applicability and scanner/supplemental execution provenance remain unverified. No operation is authorized.",
+  "description": "Legacy entries provide review-only consistency assessment. The separate optional internalUseApprovals section registers exact owned Skill bytes for bounded internal use; it never authorizes release or API mutation.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "policy", "status", "authorityOwnership", "consumerSelfDeclaration", "scope", "technicalResult", "assurance", "canonicalResult", "permittedOperations", "forbiddenOperations", "entries"],
@@ -28,6 +28,12 @@
     },
     "permittedOperations": { "const": [] },
     "forbiddenOperations": { "const": ["source-merge", "release", "install", "publish", "catalog-adoption"] },
+    "internalUseApprovals": {
+      "description": "Separate central approvals for exact owned internal Skill bytes and local uses; not an upgrade of the review-only assessment.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/internalUseApproval" }
+    },
     "entries": {
       "type": "array",
       "minItems": 1,
@@ -36,6 +42,73 @@
     }
   },
   "$defs": {
+    "internalUseApproval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "identityBinding", "sourceRepository", "sourceRevision", "skillId", "contentSha256", "files", "permittedUses", "requiredTools", "review", "retainedFindings", "conditions"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+        "status": { "enum": ["approved", "revoked"] },
+        "identityBinding": { "const": "package-content" },
+        "sourceRepository": { "type": "string", "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\\.git$" },
+        "sourceRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "skillId": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+        "contentSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "files": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["path", "sha256"],
+            "properties": {
+              "path": { "type": "string", "minLength": 1 },
+              "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            }
+          }
+        },
+        "permittedUses": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": { "enum": ["local-pr-review", "prepare-review-feedback"] }
+        },
+        "requiredTools": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["id", "minimumVersion"],
+            "properties": {
+              "id": { "enum": ["powershell", "git"] },
+              "minimumVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+(?:\\.[0-9]+){0,2}$" }
+            }
+          }
+        },
+        "review": {
+          "type": "object", "additionalProperties": false,
+          "required": ["owner", "decision", "reviewedAt", "expiresAt", "evidence", "rationale"],
+          "properties": {
+            "owner": { "type": "string", "minLength": 1 },
+            "decision": { "const": "approved-internal-use" },
+            "reviewedAt": { "type": "string", "format": "date" },
+            "expiresAt": { "type": "string", "format": "date" },
+            "evidence": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+            "rationale": { "type": "string", "minLength": 1 }
+          }
+        },
+        "retainedFindings": {
+          "type": "array", "uniqueItems": true,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["ruleId", "findingId", "severity", "reportSha256", "reportRelation", "scannedSkillSha256", "disposition"],
+            "properties": {
+              "ruleId": { "const": "LP3" },
+              "findingId": { "type": "string", "minLength": 1 },
+              "severity": { "const": "MEDIUM" },
+              "reportSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "reportRelation": { "const": "historical-context" },
+              "scannedSkillSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "disposition": { "const": "accepted-host-mediated-internal-use" }
+            }
+          }
+        },
+        "conditions": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
     "entry": {
       "type": "object",
       "additionalProperties": false,

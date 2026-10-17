@@ -138,5 +138,80 @@
         "minimumPassed": 55
       }
     }
+  ],
+  "internalUseApprovals": [
+    {
+      "id": "atlassian-bitbucket-review-7e8228c",
+      "identityBinding": "package-content",
+      "status": "approved",
+      "sourceRepository": "https://github.com/SyuanTsai/Skill-Atlassian-Ecosystem.git",
+      "sourceRevision": "7e8228c393579d5d21ac9c0ad729c7b5d219bab6",
+      "skillId": "review-bitbucket-pull-request",
+      "contentSha256": "056b8e520460e6612b10c8c9248fd7c217c6e4708ca65f3bc6c05b98ee84dec9",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "c4ba49ab8db0c0f84b51b49b78db1833e8101cd1bfafe6a534cef8744e223b71"
+        },
+        {
+          "path": "agents/openai.yaml",
+          "sha256": "7e47144aaa1256f09d9ddba009633299cf7323666369852dbf4bf05151e41fb0"
+        },
+        {
+          "path": "references/bitbucket-cloud-api.md",
+          "sha256": "0a9437d3ddba5bda6f766d7328064c023fd60dbff517d90dbf1c8746ad7a1730"
+        },
+        {
+          "path": "references/review-actions.md",
+          "sha256": "af5e4d744cff938b9bf8cdfcfb481e9975edec3cb049939b18950da3d178f4f0"
+        },
+        {
+          "path": "scripts/Invoke-BitbucketReviewActions.ps1",
+          "sha256": "fe875d18375ef8872054040e6ad34b0f649b4fac22ae53ae9f75a4d3471dd301"
+        }
+      ],
+      "permittedUses": [
+        "local-pr-review",
+        "prepare-review-feedback"
+      ],
+      "requiredTools": [
+        {
+          "id": "powershell",
+          "minimumVersion": "7.0"
+        },
+        {
+          "id": "git",
+          "minimumVersion": "2.0"
+        }
+      ],
+      "review": {
+        "owner": "SyuanTsai",
+        "decision": "approved-internal-use",
+        "reviewedAt": "2026-10-17",
+        "expiresAt": "2027-01-15",
+        "evidence": [
+          "SYP314: direct human source-coordination acceptance on 2026-10-17, followed by explicit internal-use registry implementation instruction",
+          "https://github.com/SyuanTsai/Skill-Atlassian-Ecosystem/actions/runs/38923965069"
+        ],
+        "rationale": "Owned internal Skill for local PR analysis and draft preparation; preserve host permission enforcement and exact target/action authorization. No API mutation, publication, installation or deployment is granted."
+      },
+      "retainedFindings": [
+        {
+          "ruleId": "LP3",
+          "findingId": "finding-1279bfce3ac3466f888a7b9f396e67c5",
+          "severity": "MEDIUM",
+          "reportSha256": "55c41e494fe318fcb0365c1addc1dd359162c1798ac67e12b8155caa2c7b16d0",
+          "reportRelation": "historical-context",
+          "scannedSkillSha256": "e8af2093f44f9bbf71ed75169d0f4aa44412735ced7439b2e230fef0ab347895",
+          "disposition": "accepted-host-mediated-internal-use"
+        }
+      ],
+      "conditions": [
+        "Re-evaluate on package bytes, host authorization, tool requirement, purpose or authority change.",
+        "Create/Reply/Resolve require independent trusted authorization for the exact PR and action.",
+        "Original findings, severity and canonical results remain unchanged.",
+        "No external release, install, live operation or Catalog/Lock adoption is authorized."
+      ]
+    }
   ]
 }
