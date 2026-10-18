@@ -161,13 +161,22 @@ try {
     }
     $receipt=Read-StaticFrozenReceipt -Path $receiptFull -ExpectedSha256 $ExpectedToolReceiptSha256
     if($receipt.toolName -cne 'skillspector' -or $receipt.source -cne 'NVIDIA/SkillSpector' -or
-       $receipt.channel -cne 'latest-stable' -or $receipt.resolvedVersion -cne '2.12.0' -or
+       $receipt.channel -cne 'latest-stable' -or $receipt.resolvedVersion -cne '2.13.0' -or
        $receipt.frozenForRun -isnot [bool] -or -not $receipt.frozenForRun -or
        $receipt.resolutionRunId -cne $ExpectedResolutionRunId -or
        $receipt.identityKind -cne 'release-commit-asset-metadata-dependency-closure-and-executable' -or
        $receipt.offlineResolutionVerified -isnot [bool] -or -not $receipt.offlineResolutionVerified -or
        $receipt.consoleEntryPoint -cne 'skillspector.cli:app' -or
+       [string]$receipt.resolvedIdentity -cnotmatch '^github:NVIDIA/SkillSpector@v2\.13\.0#commit=091a509b3d6ba8ff5be528966e1f43c2e68cf214#asset=sha256:41e097b4127c0aa0732ad31cc909f8aee0b907d97816c866a55b8e782a6ca6dc#' -or
        $receipt.installedClosureSha256 -cnotmatch '^[0-9a-f]{64}$') {throw 'Scanner receipt has no supported frozen parser profile.'}
+    if($receipt.dependencyClosure -isnot [array]){
+        throw 'Scanner dependency closure is not an explicit frozen array.'
+    }
+    $rootDistributions=@($receipt.dependencyClosure | Where-Object {[string]$_.normalizedName -ceq 'skillspector'})
+    if($rootDistributions.Count -ne 1 -or [string]$rootDistributions[0].version -cne '2.13.0' -or
+       [string]$rootDistributions[0].sha256 -cne '41e097b4127c0aa0732ad31cc909f8aee0b907d97816c866a55b8e782a6ca6dc'){
+        throw 'Scanner dependency closure has no supported frozen parser profile.'
+    }
     $installFull=Assert-StaticPhysicalPath ([string]$receipt.installRoot)
     $scannerFull=Assert-StaticPhysicalPath ([string]$receipt.executablePath)
     $venv=Join-Path $installFull 'venv'

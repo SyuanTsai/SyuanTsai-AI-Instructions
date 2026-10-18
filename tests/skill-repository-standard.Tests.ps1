@@ -6132,6 +6132,14 @@ Describe 'SYP171 internal source continuation authority binding' {
             $standard -notmatch 'internal-source-continuation-v1\.schema\.json') {
             throw 'The normative Standard must require the continuation policy and schemas to come from the authenticated authority snapshot.'
         }
+        $profile = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $root 'docs/standards/static-parser-host-ownership.json') | ConvertFrom-Json
+        if ($profile.officialScannerVersion -cne '2.13.0' -or
+            $profile.officialScannerReleaseCommit -cne '091a509b3d6ba8ff5be528966e1f43c2e68cf214' -or
+            $profile.officialScannerReleaseAssetSha256 -cne '41e097b4127c0aa0732ad31cc909f8aee0b907d97816c866a55b8e782a6ca6dc' -or
+            $profile.officialAnalyzerSha256 -cne 'c799169f9ad716f8dbbbec5892ef76affd0f9974433709ed0c1cfc3bcd0b66a4' -or
+            $standard -notmatch 'SkillSpector 2\.13\.0') {
+            throw 'The normative Standard and parser profile must bind the reviewed SkillSpector 2.13.0 release.'
+        }
     }
     # Scenario: the central security descriptor references the internal review assessment.
     # Purpose: keep the active gate policy/schema consistent with zero authorization and inactive integration metadata.
