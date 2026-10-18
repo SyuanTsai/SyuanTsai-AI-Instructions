@@ -3866,34 +3866,10 @@ function Resolve-SkillSpector {
                     }
                 }
 
-                $planPath = Join-Path $tempRoot 'skillspector-offline-install-plan.json'
                 [void](Invoke-IsolatedPythonCommand -PythonCommand $venvPython -Arguments @(
-                    '-m', 'pip', 'install', '--disable-pip-version-check', '--no-cache-dir',
-                    '--dry-run', '--ignore-installed', '--no-index', "--find-links=$wheelhouse",
-                    '--only-binary=:all:', '--require-hashes', '--report', $planPath, '-r', $lockPath
-                ) -TimeoutSeconds (Get-RemainingAcquisitionSeconds -Stopwatch $acquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds))
-                if (-not (Test-Path -LiteralPath $planPath -PathType Leaf)) {
-                    throw 'Offline SkillSpector dependency resolution did not produce an install plan.'
-                }
-                $plan = Get-Content -Raw -Encoding UTF8 -LiteralPath $planPath | ConvertFrom-Json
-                $planned = @($plan.install)
-                if ($planned.Count -ne @($manifest.entries).Count) {
-                    throw "Offline SkillSpector dependency plan count mismatch. Expected '$(@($manifest.entries).Count)', got '$($planned.Count)'."
-                }
-                foreach ($entry in @($manifest.entries)) {
-                    $plannedMatches = @($planned | Where-Object {
-                        (Normalize-PythonPackageName -Name ([string]$_.metadata.name)) -ceq [string]$entry.normalizedName -and
-                        [string]$_.metadata.version -ceq [string]$entry.version
-                    })
-                    if ($plannedMatches.Count -ne 1) {
-                        throw "Offline SkillSpector dependency plan did not bind '$($entry.name)==$($entry.version)'."
-                    }
-                }
-
-                [void](Invoke-IsolatedPythonCommand -PythonCommand $venvPython -Arguments @(
-                    '-m', 'pip', 'install', '--disable-pip-version-check', '--no-cache-dir',
+                    '-B', '-m', 'pip', 'install', '--disable-pip-version-check', '--no-cache-dir',
                     '--no-index', "--find-links=$wheelhouse", '--require-hashes', '--no-deps', '--force-reinstall',
-                    '-r', $lockPath
+                    '--no-compile', '-r', $lockPath
                 ) -TimeoutSeconds (Get-RemainingAcquisitionSeconds -Stopwatch $acquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds))
 
                 # Verify metadata and hash the installed closure in a bounded

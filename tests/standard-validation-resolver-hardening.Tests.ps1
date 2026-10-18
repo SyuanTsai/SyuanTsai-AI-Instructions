@@ -233,6 +233,47 @@ Describe 'Standard validation resolver hardening' {
         Assert-Equal $profile.officialScannerReleaseAssetSha256 '41e097b4127c0aa0732ad31cc909f8aee0b907d97816c866a55b8e782a6ca6dc' 'Parser correction must bind the reviewed release wheel.'
     }
 
+    # Scenario: The verified closure helper already produced the authoritative offline pip selection plan.
+    # Purpose: Reuse that exact plan for hash-locked installation instead of repeating dependency backtracking.
+    It 'UnitT27_reuses_the_verified_helper_plan_for_hash_locked_install' {
+        $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+        $helperPath = Join-Path $script:RepositoryRoot 'scripts/Resolve-PythonWheelClosure.py'
+        $helper = Get-Content -Raw -Encoding UTF8 -LiteralPath $helperPath
+
+        $resolveStart = $resolver.IndexOf('function Resolve-SkillSpector')
+        $resolveEnd = $resolver.IndexOf('$policy = Get-Policy', $resolveStart)
+        Assert-True ($resolveStart -ge 0 -and $resolveEnd -gt $resolveStart) 'Resolve-SkillSpector body was not found.'
+        $body = $resolver.Substring($resolveStart, $resolveEnd - $resolveStart)
+
+        $closureStart = $resolver.IndexOf('function Resolve-PythonWheelClosureFromApprovedIndex')
+        $closureEnd = $resolver.IndexOf('function Assert-SkillSpectorWheelIdentity', $closureStart)
+        Assert-True ($closureStart -ge 0 -and $closureEnd -gt $closureStart) 'Python closure wrapper body was not found.'
+        $closureBody = $resolver.Substring($closureStart, $closureEnd - $closureStart)
+
+        Assert-Equal ([regex]::Matches($helper, '"--dry-run"').Count) 1 'The helper must retain one authoritative offline pip dry-run.'
+        Assert-Equal ([regex]::Matches($body, "'--dry-run'").Count) 0 'Resolve-SkillSpector must not repeat the helper dependency backtracking.'
+        Assert-Match $closureBody '(?s)\$HelperPath, ''verify''.*rawSelectionPlanSha256.*Get-FileSha256 -Path \$candidateFile' 'The wrapper must retain helper cross-file verification, raw-plan binding, and candidate-byte verification.'
+        Assert-Match $body '(?s)\$selectedEntries = @\(\$resolutionEvidence\.selectedEntries\).*Offline backtracking evidence did not bind' 'The verified selected entries must still bind every manifest entry.'
+        Assert-Match $body '(?s)''--no-index''.*''--require-hashes''.*''--no-deps''.*''-r'', \$lockPath' 'Installation must remain offline, hash locked, and dependency expansion disabled.'
+        Assert-NotMatch $body 'skillspector-offline-install-plan\.json' 'Resolve-SkillSpector must not create a second install plan.'
+    }
+
+    # Scenario: Installing the verified closure would compile thousands of derived dependency bytecode files.
+    # Purpose: Keep the frozen tree complete but avoid generated cache that every later closure check must rehash.
+    It 'UnitT28_disables_dependency_bytecode_for_resolution_install_and_scan' {
+        $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+        $helper = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Resolve-PythonWheelClosure.py')
+        $staticScan = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardStaticScan.ps1')
+        $resolveStart = $resolver.IndexOf('function Resolve-SkillSpector')
+        $resolveEnd = $resolver.IndexOf('$policy = Get-Policy', $resolveStart)
+        Assert-True ($resolveStart -ge 0 -and $resolveEnd -gt $resolveStart) 'Resolve-SkillSpector body was not found.'
+        $body = $resolver.Substring($resolveStart, $resolveEnd - $resolveStart)
+
+        Assert-Match $helper '(?s)sys\.executable,\s*"-I",\s*"-B",\s*"-m",\s*"pip"' 'The helper offline pip process must disable bytecode writes.'
+        Assert-Match $body "(?s)'-B',\s*'-m',\s*'pip'.*'--no-index'.*'--require-hashes'.*'--no-deps'.*'--no-compile'" 'The final hash-locked install must disable bytecode writes and compilation.'
+        Assert-Equal ([regex]::Matches($staticScan, "@\('-I','-B'").Count) 2 'Both native and corrected production scanner invocations must retain Python -B.'
+    }
+
     # Scenario: An installed wheel places executable startup code in a .pth file next to valid dist-info metadata.
     # Purpose: Verify installed identity and entry-point metadata without starting that interpreter or processing .pth code.
     It 'UnitT10_reads_installed_dist_info_without_processing_pth_startup_code' {
