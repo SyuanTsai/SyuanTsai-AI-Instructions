@@ -222,6 +222,17 @@ Describe 'Standard validation resolver hardening' {
         }
     }
 
+    # Scenario: the latest-stable resolver advances to SkillSpector 2.13.0 while the parser correction remains release-specific.
+    # Purpose: retain dynamic stable resolution but require the exact reviewed release identity before parser correction.
+    It 'UnitT26_binds_the_latest_stable_parser_profile_to_the_reviewed_2_13_release' {
+        $toolPolicy=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/validation-toolchain.json') | ConvertFrom-Json
+        $profile=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/static-parser-host-ownership.json') | ConvertFrom-Json
+        Assert-Equal $toolPolicy.tools.skillspector.channel 'latest-stable' 'Canonical tool resolution must remain latest-stable.'
+        Assert-Equal $profile.officialScannerVersion '2.13.0' 'Parser correction must bind the reviewed stable version.'
+        Assert-Equal $profile.officialScannerReleaseCommit '091a509b3d6ba8ff5be528966e1f43c2e68cf214' 'Parser correction must bind the reviewed release commit.'
+        Assert-Equal $profile.officialScannerReleaseAssetSha256 '41e097b4127c0aa0732ad31cc909f8aee0b907d97816c866a55b8e782a6ca6dc' 'Parser correction must bind the reviewed release wheel.'
+    }
+
     # Scenario: An installed wheel places executable startup code in a .pth file next to valid dist-info metadata.
     # Purpose: Verify installed identity and entry-point metadata without starting that interpreter or processing .pth code.
     It 'UnitT10_reads_installed_dist_info_without_processing_pth_startup_code' {

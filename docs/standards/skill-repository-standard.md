@@ -581,7 +581,7 @@ Applicability finding：仍未解決，未提供放行能力。Review assessment
 
 ### 9.3.1.2 Native PowerShell ownership in the static parser
 
-中央 `static-parser-host-ownership.json` 定義一個有界、可重現的 parser correction profile，限官方 SkillSpector 2.12.0 的精確 `static_patterns_tool_misuse.py` bytes 與 PowerShell 7.6.6 原生 grammar。此修正處理 PowerShell quoted strings、subexpressions、backtick continuation 及明確 PowerShell Markdown fences 被 shell tokenizer 誤判的情況；它不沿用 PR12 exception，也不讓 PR90 review assessment 授權任何操作。
+中央 `static-parser-host-ownership.json` 定義一個有界、可重現的 parser correction profile，限官方 SkillSpector 2.13.0 的精確 release commit、wheel、`static_patterns_tool_misuse.py` bytes 與 PowerShell 7.6.6 原生 grammar。此修正處理 PowerShell quoted strings、subexpressions、backtick continuation 及明確 PowerShell Markdown fences 被 shell tokenizer 誤判的情況；它不沿用 PR12 exception，也不讓 PR90 review assessment 授權任何操作。
 
 使用此 correction profile 的受信 source Static child **MUST** 使用中央 `Invoke-StandardStaticScan.ps1`，保留未修正官方 CLI 的原始 native report，再執行帶有中央 profile 的完整 scanner graph。官方安裝與 finding analyzer bytes **MUST NOT** 被修改；所有 finding analyzers **MUST** 仍收到完整原始來源，所有非衍生 finding 與原 severity **MUST** 保留。跨兩次 graph 的保留檢查 **MUST** 精確比較 fingerprint、severity、location、evidence、內容及其餘欄位的 multiset；唯一排除於比較 key 的欄位是官方每次執行以 uuid4 建立的 finding_id，兩份 raw report 仍各自保留原 UUID，不得改寫、降低 severity 或減少 finding 數量。原始 partial report **MUST NOT** 被改寫；修正後報告的 ledger 必須來自真正重跑的 graph/analyzer，不得在 JSON 中直接變更 status/counters 或刪除 AE1。若 referenced-artifact coverage 確實完成，graph 可自行不再產生該 coverage 缺口衍生的 AE1。
 

@@ -10,6 +10,8 @@
     "status",
     "officialScannerSource",
     "officialScannerVersion",
+    "officialScannerReleaseCommit",
+    "officialScannerReleaseAssetSha256",
     "officialAnalyzerPath",
     "officialAnalyzerSha256",
     "parserProfile",
@@ -51,7 +53,15 @@
     },
     "officialScannerVersion": {
       "type": "string",
-      "const": "2.12.0"
+      "const": "2.13.0"
+    },
+    "officialScannerReleaseCommit": {
+      "type": "string",
+      "const": "091a509b3d6ba8ff5be528966e1f43c2e68cf214"
+    },
+    "officialScannerReleaseAssetSha256": {
+      "type": "string",
+      "const": "41e097b4127c0aa0732ad31cc909f8aee0b907d97816c866a55b8e782a6ca6dc"
     },
     "officialAnalyzerPath": {
       "type": "string",
@@ -59,7 +69,7 @@
     },
     "officialAnalyzerSha256": {
       "type": "string",
-      "const": "b0cecf8d9b51226713af6c2a9fc63faa626ea11f2e80e305741052b6a84c5db3"
+      "const": "c799169f9ad716f8dbbbec5892ef76affd0f9974433709ed0c1cfc3bcd0b66a4"
     },
     "parserProfile": {
       "type": "string",

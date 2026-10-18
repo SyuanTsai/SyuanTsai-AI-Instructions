@@ -168,7 +168,7 @@ class StaticPowerShellParserTests(unittest.TestCase):
                                          _has_shell_command_word_exhaustion=helper)
                 with self.subTest(paths=paths), patch.object(implementation, "OFFICIAL_MODULE_SHA256", module_hash):
                     # Only the identity boundary is synthetic; the native parser is real.
-                    records = implementation.install_bridge(self.pwsh, runtime_hash, module, "2.12.0", {digest: paths})
+                    records = implementation.install_bridge(self.pwsh, runtime_hash, module, "2.13.0", {digest: paths})
                     self.assertEqual(expected, module.has_bounded_parse_exhaustion(text, lambda: None, file_type="text"))
                     self.assertIs(module.analyze, analyzer)
                     self.assertEqual(0 if expected else 1, len(records))
@@ -187,7 +187,7 @@ class StaticPowerShellParserTests(unittest.TestCase):
             file.write_text("# caller-authored\n", encoding="utf-8")
             module = SimpleNamespace(__file__=str(file))
             runtime_hash = hashlib.sha256(Path(self.pwsh).read_bytes()).hexdigest()
-            for runtime_digest, version in [("0"*64, "2.12.0"), (runtime_hash, "999.0.0"), (runtime_hash, "2.12.0")]:
+            for runtime_digest, version in [("0"*64, "2.13.0"), (runtime_hash, "999.0.0"), (runtime_hash, "2.12.0"), (runtime_hash, "2.13.0")]:
                 with self.subTest(version=version), self.assertRaises(ParserCoverageError):
                     install_bridge(self.pwsh, runtime_digest, module, version, {})
 

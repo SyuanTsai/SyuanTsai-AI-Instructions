@@ -106,6 +106,40 @@ Describe 'Static parser coverage and finding preservation' {
         }
     }
 
+    # Scenario: latest-stable resolves SkillSpector 2.13.0 after the prior 2.12.0 profile was reviewed.
+    # Purpose: bind the replacement profile to the exact release commit, wheel, analyzer module, schemas and runtime gates.
+    It 'UnitT42_binds_exact_2_13_release_identity_across_profile_surfaces' {
+        $expectedVersion='2.13.0'
+        $expectedCommit='091a509b3d6ba8ff5be528966e1f43c2e68cf214'
+        $expectedAsset='41e097b4127c0aa0732ad31cc909f8aee0b907d97816c866a55b8e782a6ca6dc'
+        $expectedAnalyzer='c799169f9ad716f8dbbbec5892ef76affd0f9974433709ed0c1cfc3bcd0b66a4'
+        $policy=Get-Content -Raw (Join-Path $parserRepositoryRoot 'docs/standards/static-parser-host-ownership.json') | ConvertFrom-Json
+        $policySchema=Get-Content -Raw (Join-Path $parserRepositoryRoot 'docs/standards/schemas/static-parser-host-ownership-v1.schema.json') | ConvertFrom-Json
+        $executionSchema=Get-Content -Raw (Join-Path $parserRepositoryRoot 'docs/standards/schemas/static-parser-profile-execution-v1.schema.json') | ConvertFrom-Json
+        $wrapper=Get-Content -Raw (Join-Path $parserRepositoryRoot 'scripts/Invoke-StandardStaticScan.ps1')
+        $bridge=Get-Content -Raw (Join-Path $parserRepositoryRoot 'scripts/standard_static_powershell.py')
+
+        Assert-ParserCase ($policy.officialScannerVersion -ceq $expectedVersion) 'Profile policy does not bind SkillSpector 2.13.0.'
+        Assert-ParserCase ($policy.officialScannerReleaseCommit -ceq $expectedCommit) 'Profile policy does not bind the reviewed release commit.'
+        Assert-ParserCase ($policy.officialScannerReleaseAssetSha256 -ceq $expectedAsset) 'Profile policy does not bind the reviewed release wheel.'
+        Assert-ParserCase ($policy.officialAnalyzerSha256 -ceq $expectedAnalyzer) 'Profile policy does not bind the reviewed analyzer bytes.'
+        Assert-ParserCase ($policySchema.properties.officialScannerVersion.const -ceq $expectedVersion -and
+            $policySchema.properties.officialScannerReleaseCommit.const -ceq $expectedCommit -and
+            $policySchema.properties.officialScannerReleaseAssetSha256.const -ceq $expectedAsset -and
+            $policySchema.properties.officialAnalyzerSha256.const -ceq $expectedAnalyzer) 'Profile policy schema has a different release identity.'
+        Assert-ParserCase ($executionSchema.properties.officialScannerVersion.const -ceq $expectedVersion -and
+            $executionSchema.properties.officialScannerReleaseCommit.const -ceq $expectedCommit -and
+            $executionSchema.properties.officialScannerReleaseAssetSha256.const -ceq $expectedAsset -and
+            $executionSchema.properties.officialAnalyzerSha256.const -ceq $expectedAnalyzer) 'Profile execution schema has a different release identity.'
+        foreach($value in @($expectedVersion,$expectedCommit,$expectedAsset)){
+            Assert-ParserCase ($wrapper.Contains($value)) "Static wrapper omits reviewed identity '$value'."
+        }
+        Assert-ParserCase ($wrapper -match '\$receipt\.dependencyClosure -isnot \[array\]') 'Static wrapper does not require an explicit frozen dependency closure array.'
+        foreach($value in @($expectedVersion,$expectedCommit,$expectedAsset,$expectedAnalyzer)){
+            Assert-ParserCase ($bridge.Contains($value)) "Python bridge omits reviewed identity '$value'."
+        }
+    }
+
     # Scenario: a scan output is outside its Skill but still inside another part of the frozen candidate.
     # Purpose: forbid writes to the entire bound source and both tooling roots while accepting a separate artifact sibling.
     It 'UnitT46_forbids_outputs_inside_any_bound_source_or_tool_root' {
@@ -121,7 +155,7 @@ Describe 'Static parser coverage and finding preservation' {
     # Purpose: authenticate the exact bytes that are parsed, rejecting hash/encoding/content drift.
     It 'UnitT45_reads_one_hash_bound_receipt_snapshot' {
         $receipt=Join-Path $TestDrive 'frozen-scanner-receipt.json'
-        [IO.File]::WriteAllText($receipt,'{"toolName":"skillspector","resolvedVersion":"2.12.0"}',[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($receipt,'{"toolName":"skillspector","resolvedVersion":"2.13.0"}',[Text.UTF8Encoding]::new($false))
         $digest=(Get-FileHash -LiteralPath $receipt -Algorithm SHA256).Hash.ToLowerInvariant()
         $snapshot=Read-StaticFrozenReceipt $receipt $digest
         Assert-ParserCase ($snapshot.toolName -ceq 'skillspector') 'Hash-bound receipt snapshot did not parse.'

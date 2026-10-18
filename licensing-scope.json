@@ -564,6 +564,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/plans/syp304-skillspector-213-parser-profile.md",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/plans/syp314-internal-skill-use.md",
       "license": "Apache-2.0"
     },

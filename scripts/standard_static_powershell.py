@@ -18,8 +18,10 @@ from typing import Callable
 MAX_SOURCE_BYTES = 1024 * 1024
 MAX_PROOF_BYTES = 8 * 1024 * 1024
 PROFILE = "powershell-native-command-ownership-v1"
-OFFICIAL_VERSION = "2.12.0"
-OFFICIAL_MODULE_SHA256 = "b0cecf8d9b51226713af6c2a9fc63faa626ea11f2e80e305741052b6a84c5db3"
+OFFICIAL_VERSION = "2.13.0"
+OFFICIAL_RELEASE_COMMIT = "091a509b3d6ba8ff5be528966e1f43c2e68cf214"
+OFFICIAL_RELEASE_ASSET_SHA256 = "41e097b4127c0aa0732ad31cc909f8aee0b907d97816c866a55b8e782a6ca6dc"
+OFFICIAL_MODULE_SHA256 = "c799169f9ad716f8dbbbec5892ef76affd0f9974433709ed0c1cfc3bcd0b66a4"
 FENCE = re.compile(r"(?m)^```(?:powershell|pwsh|ps1)[ \t]*\n(?P<body>[\s\S]*?)^```[ \t]*$")
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish", "cmd", "pwsh",
           "powershell", "wsl", "python", "python3", "node", "perl", "ruby", "php",
@@ -381,7 +383,10 @@ def main(argv=None):
              "applicabilityStatus": "not-verified", "executionProvenanceStatus": "not-verified",
              "sourceRevision": args.source_revision,
              "candidateIdentity": args.candidate_identity, "candidateInventory": manifest,
-             "officialScannerVersion": OFFICIAL_VERSION, "officialAnalyzerSha256": OFFICIAL_MODULE_SHA256,
+             "officialScannerVersion": OFFICIAL_VERSION,
+             "officialScannerReleaseCommit": OFFICIAL_RELEASE_COMMIT,
+             "officialScannerReleaseAssetSha256": OFFICIAL_RELEASE_ASSET_SHA256,
+             "officialAnalyzerSha256": OFFICIAL_MODULE_SHA256,
              "nativeParserRuntimePath": args.pwsh, "nativeParserRuntimeSha256": args.pwsh_sha256,
              "installedToolModified": False, "originalSourceFindingAnalyzerUnchanged": True,
              "scannerGraphExecuted": True, "scannerExitCode": result,
