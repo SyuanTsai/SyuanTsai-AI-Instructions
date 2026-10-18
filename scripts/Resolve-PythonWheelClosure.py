@@ -906,6 +906,7 @@ class LazyPoolResolver:
         command = [
             sys.executable,
             "-I",
+            "-B",
             "-m",
             "pip",
             "install",
