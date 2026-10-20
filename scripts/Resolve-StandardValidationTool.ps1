@@ -1001,8 +1001,50 @@ function Get-ResolverOrderedClosureEntries {
     foreach ($entry in $sorted.Values) { $entry }
 }
 
+function Get-ResolverParallelFileHashes {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $Paths)
+
+    # Only acquisition opts in. Native delegates do not execute PowerShell on
+    # pool threads, and the fixed cap cannot be changed by caller configuration.
+    if ($null -eq ('StandardResolverAcquisitionHasherV1' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Security.Cryptography;
+using System.Threading.Tasks;
+
+public static class StandardResolverAcquisitionHasherV1
+{
+    public static string[] Compute(string[] paths)
+    {
+        var hashes = new string[paths.Length];
+        Parallel.For(0, paths.Length,
+            new ParallelOptions { MaxDegreeOfParallelism = 4 },
+            index =>
+            {
+                var attributes = File.GetAttributes(paths[index]);
+                if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+                    throw new IOException("Closure hashing requires a regular non-reparse file: " + paths[index]);
+                using (var stream = new FileStream(paths[index], FileMode.Open,
+                    FileAccess.Read, FileShare.Read, 131072, FileOptions.SequentialScan))
+                using (var sha = SHA256.Create())
+                    hashes[index] = BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
+            });
+        // Parallel.For waits for all tasks and throws on any failure. Never
+        // publish an array containing partial results.
+        return hashes;
+    }
+}
+'@ -ErrorAction Stop
+    }
+    return ,([StandardResolverAcquisitionHasherV1]::Compute($Paths))
+}
+
 function Get-DirectoryClosureIdentity {
-    param([Parameter(Mandatory = $true)][string] $Path)
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [switch] $ParallelContentHash
+    )
 
     $root = [IO.Path]::GetFullPath($Path).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
     $rootItem = Get-Item -Force -LiteralPath $root -ErrorAction Stop
@@ -1014,6 +1056,8 @@ function Get-DirectoryClosureIdentity {
     $ordinalPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     $nfcPaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
     $asciiCasePaths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    $contentPaths = New-Object 'System.Collections.Generic.List[string]'
+    $contentEntries = New-Object 'System.Collections.Generic.List[object]'
     foreach ($item in @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction Stop)) {
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             # Unix tool/package layouts may expose in-root file or directory
@@ -1057,13 +1101,28 @@ function Get-DirectoryClosureIdentity {
             throw "Installed tool closure contains ASCII-case-colliding paths: '$($asciiCasePaths[$asciiCase])' and '$relative'."
         }
         $asciiCasePaths[$asciiCase] = $relative
-        [void]$entries.Add([pscustomobject][ordered]@{
+        $entry = [pscustomobject][ordered]@{
                 path = $relative
-                sha256 = Get-FileSha256 -Path $item.FullName
-            })
+                sha256 = if ($ParallelContentHash) { $null } else { Get-FileSha256 -Path $item.FullName }
+            }
+        [void]$entries.Add($entry)
+        if ($ParallelContentHash) {
+            [void]$contentPaths.Add($item.FullName)
+            [void]$contentEntries.Add($entry)
+        }
     }
     if ($entries.Count -eq 0) {
         throw "Installed tool directory is empty: $root"
+    }
+    if ($ParallelContentHash -and $contentPaths.Count -gt 0) {
+        # Complete root, reparse, path and collision checks before any regular
+        # file content is read. Keep hashes bound to their original inventory.
+        $hashes = Get-ResolverParallelFileHashes -Paths $contentPaths.ToArray()
+        if ($hashes.Count -ne $contentEntries.Count) { throw 'Installed closure hashing returned an incomplete inventory.' }
+        for ($index = 0; $index -lt $hashes.Count; $index++) {
+            if ($hashes[$index] -cnotmatch '^[0-9a-f]{64}$') { throw 'Installed closure hashing returned an invalid SHA-256.' }
+            $contentEntries[$index].sha256 = $hashes[$index]
+        }
     }
     $ordered = @(Get-ResolverOrderedClosureEntries -Entries $entries.ToArray())
     $canonical = ($ordered | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''
@@ -3654,7 +3713,7 @@ $result = [ordered]@{
     consoleEntryPoint = [string]$metadata.consoleEntryPoint
     executablePath = $executable
     executableSha256 = Get-FileSha256 -Path $executable
-    installedClosureSha256 = (Get-DirectoryClosureIdentity -Path $postInstallRoot).sha256
+    installedClosureSha256 = (Get-DirectoryClosureIdentity -Path $postInstallRoot -ParallelContentHash).sha256
 }
 Write-Output ($result | ConvertTo-Json -Compress -Depth 5)
 '@

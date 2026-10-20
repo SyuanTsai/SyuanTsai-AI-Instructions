@@ -417,6 +417,11 @@ jobs:
         Assert-Match $parserCoverage 'InterT10_runs_native_parser_contracts_without_skipping_or_scanner_installation' 'Windows Core must retain the real native grammar regression without installing SkillSpector.'
         Assert-Match $parserCoverage 'UnitT42_binds_exact_2_13_release_identity_across_profile_surfaces' 'Windows Core must retain the exact SkillSpector 2.13.0 profile identity regression.'
         Assert-Match $resolverHardeningTests 'UnitT25_rejects_python_helper_mutation_after_hash_capture' 'Windows Core must retain the helper hash-binding negative regression.'
+        Assert-Match $resolverHardeningTests 'UnitT29_keeps_joint_priority_as_backtracking_order_without_pruning' 'Windows Core must retain fallback eligibility and initial-seeding regression.'
+        Assert-Match $resolverHardeningTests 'InterT29_reuses_only_complete_same_host_https_responses' 'Windows Core must retain the behavioral HTTPS lifecycle regression.'
+        $wheelHelper = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Resolve-PythonWheelClosure.py')
+        Assert-Match $wheelHelper '(?s)def self_test_command.*self_test_candidate_priority\(\)' 'The authority-owned offline helper regression must execute the real candidate-priority fixture.'
+        Assert-Match $wheelHelper '(?s)def self_test_command.*self_test_sequential_https\(\)' 'The authority-owned offline helper regression must execute the real HTTPS response fixture.'
         Assert-False ($script:AuthorityTests -contains $resolverHardeningName) 'Resolver hardening tests must remain in Windows Core full-suite discovery.'
         Assert-Match $workflows.Core 'Get-ChildItem -LiteralPath \$testRoot -Filter' 'Windows Core must discover the resolver hardening regression through its complete test-file inventory.'
         $normalMain = $gate.Substring($gate.IndexOf('if ($BindingOnly) {'))

@@ -1701,6 +1701,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         }
     }
 
+    # Scenario: The helper exercises real offline backtracking, including joint-priority fallback, before direct-reference rejection checks.
+    # Purpose: Preserve source admission and feasible alternate closures under the optimized exploration order.
     It 'UnitT26db_rejects_direct_Python_dependency_references_before_network_resolution' {
         . $script:ResolverPath -ValidatePolicyOnly | Out-Null
 
@@ -1715,6 +1717,11 @@ Describe 'Agent Skill Repository Standard v1 contract' {
             -PythonCommand (Assert-Command -Name 'python') `
             -Arguments @($script:PythonClosureHelperPath, 'self-test')
         Assert-Match ($selfTestOutput -join "`n") 'python-wheel-closure-self-test: passed' 'Offline A/B/C backtracking and helper security regressions must pass.'
+        $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/skill-repository-standard.md')
+        Assert-Match $standard '共同約束只能影響探索順序' 'Joint constraints must be ordering hints, not pruning policy.'
+        Assert-Match $standard 'fallback.*MUST.*保留' 'Fallback exploration must remain required by the authority.'
+        Assert-Match $standard '每個 opener 最多保留一個連線，不增加 request concurrency' 'Transport reuse must remain sequential and bounded.'
+        Assert-Match $standard '重用失敗不得引入額外 retry' 'Transport reuse must retain the exact timeout-only retry policy.'
 
         $errorMessage = $null
         try {
