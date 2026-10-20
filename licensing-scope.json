@@ -564,7 +564,19 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/plans/syp304-acquisition-closure-hashing.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/plans/syp304-sequential-https-reuse.md",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/plans/syp304-skillspector-213-parser-profile.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/plans/syp304-wheel-candidate-priority.md",
       "license": "Apache-2.0"
     },
     {

@@ -274,6 +274,30 @@ Describe 'Standard validation resolver hardening' {
         Assert-Equal ([regex]::Matches($staticScan, "@\('-I','-B'").Count) 2 'Both native and corrected production scanner invocations must retain Python -B.'
     }
 
+    # Scenario: Backtracking prioritizes the current joint range while a losing parent may later disappear.
+    # Purpose: Keep the original fallback eligibility and initial seeding, preventing an optimization from pruning valid closures.
+    It 'UnitT29_keeps_joint_priority_as_backtracking_order_without_pruning' {
+        $helper = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Resolve-PythonWheelClosure.py')
+        $eligibleStart = $helper.IndexOf('    def _eligible(')
+        $eligibleEnd = $helper.IndexOf('    def _add_next_candidate(', $eligibleStart)
+        Assert-Match $helper.Substring($eligibleStart, $eligibleEnd - $eligibleStart) 'return any\(' 'Fallback eligibility must remain an over-approximation.'
+        $seedStart = $helper.IndexOf('    def _seed_new_projects(')
+        $seedEnd = $helper.IndexOf('    def _run_offline_plan(', $seedStart)
+        Assert-NotMatch $helper.Substring($seedStart, $seedEnd - $seedStart) 'prefer_joint_constraints=True' 'Initial highest-version seeding must remain unchanged.'
+        Assert-Match $helper '(?s)def self_test_command.*self_test_candidate_priority\(\)' 'The offline fixture must run in the retained authority self-test.'
+    }
+
+    # Scenario: Sequential HTTPS GETs complete, abort, change host, redirect or encounter a transport timeout.
+    # Purpose: Exercise the real response lifecycle so reuse cannot bypass TLS, deadline, destination or retry checks.
+    It 'InterT29_reuses_only_complete_same_host_https_responses' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $helper = Join-Path $script:RepositoryRoot 'scripts/Resolve-PythonWheelClosure.py'
+        $output = Invoke-IsolatedPythonCommand -PythonCommand (Assert-Command -Name 'python') -Arguments @(
+            '-B', '-c', 'import runpy,sys; h=runpy.run_path(sys.argv[1]); h["self_test_sequential_https"](); print("sequential-https-self-test: passed")', $helper
+        )
+        Assert-Match ($output -join "`n") 'sequential-https-self-test: passed' 'Sequential transport must retain all lifecycle and trust checks.'
+    }
+
     # Scenario: An installed wheel places executable startup code in a .pth file next to valid dist-info metadata.
     # Purpose: Verify installed identity and entry-point metadata without starting that interpreter or processing .pth code.
     It 'UnitT10_reads_installed_dist_info_without_processing_pth_startup_code' {
@@ -453,6 +477,59 @@ Describe 'Standard validation resolver hardening' {
         }
         catch { $errorMessage = $_.Exception.Message }
         Assert-Match $errorMessage 'without a path' 'Empty paths must remain invalid.'
+    }
+
+    # Scenario: Acquisition hashes a mixed-order tree with more files than the fixed four hashing lanes.
+    # Purpose: Preserve every raw SHA-256 and canonical digest when content hashing runs in the same process.
+    It 'UnitT47_preserves_exact_closure_bytes_with_parallel_content_hashing' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $root = Join-Path $TestDrive 'parallel-closure'
+        foreach ($relative in @('z/empty','beta.bin','Alpha.txt','nested/one','nested/two','nested/three','nested/four','last')) {
+            Write-TestUtf8File -Path (Join-Path $root $relative) -Text $relative
+        }
+        [IO.File]::WriteAllBytes((Join-Path $root 'z/empty'), [byte[]]@())
+        $serial = Get-DirectoryClosureIdentity -Path $root
+        $parallel = Get-DirectoryClosureIdentity -Path $root -ParallelContentHash
+        Assert-Equal $parallel.sha256 $serial.sha256 'Parallel closure must use identical canonical bytes.'
+        Assert-Equal ($parallel.entries | ConvertTo-Json -Compress) ($serial.entries | ConvertTo-Json -Compress) 'Every ordered path and file hash must match.'
+        [IO.File]::WriteAllText((Join-Path $root 'last'), 'changed')
+        $changed = Get-DirectoryClosureIdentity -Path $root -ParallelContentHash
+        Assert-True ($changed.sha256 -cne $serial.sha256) 'Changed installed bytes must change the digest.'
+    }
+
+    # Scenario: One file disappears or becomes exclusively locked before a batch reads it.
+    # Purpose: A parallel read failure must terminate verification instead of returning a partial closure.
+    It 'UnitT48_rejects_parallel_content_read_failures' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        Assert-True ((Get-Command Get-DirectoryClosureIdentity).Parameters.ContainsKey('ParallelContentHash')) 'The acquisition hashing mode must exist before exercising read failures.'
+        Assert-True ($null -ne (Get-Command Get-ResolverParallelFileHashes -ErrorAction SilentlyContinue)) 'The batch hasher must exist before exercising read failures.'
+        $root = Join-Path $TestDrive 'parallel-read-failure'
+        $file = Join-Path $root 'locked.bin'
+        Write-TestUtf8File -Path $file -Text 'locked bytes'
+        $lock = [IO.File]::Open($file, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        try {
+            $failure = $null
+            try { Get-DirectoryClosureIdentity -Path $root -ParallelContentHash | Out-Null }
+            catch { $failure = $_.Exception.Message }
+            Assert-True (-not [string]::IsNullOrWhiteSpace($failure)) 'A locked file must fail the complete closure.'
+        }
+        finally { $lock.Dispose() }
+        $failure = $null
+        try { Get-ResolverParallelFileHashes -Paths @($file, (Join-Path $root 'absent')) | Out-Null }
+        catch { $failure = $_.Exception.Message }
+        Assert-True (-not [string]::IsNullOrWhiteSpace($failure)) 'A missing batch member must fail the entire batch.'
+    }
+
+    # Scenario: The acquisition content hasher is selected by its sole production call site.
+    # Purpose: Keep the four-lane exception fixed and prevent it from changing other resolver or validation stages.
+    It 'UnitT49_limits_parallel_hashing_to_four_lanes_in_acquisition' {
+        $source = Get-Content -LiteralPath $script:ResolverPath -Raw
+        Assert-Match $source 'new ParallelOptions\s*\{\s*MaxDegreeOfParallelism = 4\s*\}' 'Hashing must have a fixed four-lane cap.'
+        $optIns = @([regex]::Matches($source, 'Get-DirectoryClosureIdentity -Path \$postInstallRoot -ParallelContentHash'))
+        Assert-Equal $optIns.Count 1 'Only bounded SkillSpector acquisition may enable parallel hashing.'
+        $allOptIns = @([regex]::Matches($source, '-ParallelContentHash'))
+        Assert-Equal $allOptIns.Count 1 'Other resolver call sites must remain sequential.'
+        Assert-Match $source 'Parallel\.For\(' 'Hashing must stay in the acquisition process.'
     }
 
     # Scenario: Wheel metadata contains unsafe identity text, duplicate headers or body text that resembles headers.
@@ -1406,6 +1483,7 @@ Describe 'Installed closure path identity' {
         [IO.File]::WriteAllText((Join-Path $root "e$([char]0x301).txt"), 'two')
         Assert-ClosureCondition (@(Get-ChildItem -LiteralPath $root -File).Count -eq 2) 'The Unicode fixture requires two distinct filenames.'
         Assert-ClosureFailure { Get-DirectoryClosureIdentity -Path $root } 'Unicode-normalization-colliding'
+        Assert-ClosureFailure { Get-DirectoryClosureIdentity -Path $root -ParallelContentHash } 'Unicode-normalization-colliding'
     }
 
     # Scenario: Case-varied and non-ASCII filenames have no normalization collision.
@@ -1416,6 +1494,8 @@ Describe 'Installed closure path identity' {
         $names = [string[]]@('a.txt', 'Z.txt', "$([char]0xE9).txt", "$([char]0x4E2D).txt")
         foreach ($name in $names) { [IO.File]::WriteAllText((Join-Path $root $name), $name, [Text.UTF8Encoding]::new($false)) }
         $identity = Get-DirectoryClosureIdentity -Path $root
+        $parallelIdentity = Get-DirectoryClosureIdentity -Path $root -ParallelContentHash
+        Assert-ClosureCondition ([string]::Equals($identity.sha256, $parallelIdentity.sha256, [StringComparison]::Ordinal)) 'Parallel Unicode closure digest differs.'
         [Array]::Sort($names, [StringComparer]::Ordinal)
         $expected = ($names | ForEach-Object { "$_`t$((Get-FileHash -LiteralPath (Join-Path $root $_) -Algorithm SHA256).Hash.ToLowerInvariant())`n" }) -join ''
         $actual = ($identity.entries | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join ''

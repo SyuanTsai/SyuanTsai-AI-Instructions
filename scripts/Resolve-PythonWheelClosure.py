@@ -15,6 +15,7 @@ import argparse
 import contextlib
 import email.policy
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -155,6 +156,58 @@ class ValidatedRedirectHandler(urllib.request.HTTPRedirectHandler):
         # too late because an unapproved target would already have been contacted.
         validate_https_url(new_url, self.allowed_hosts)
         return super().redirect_request(request, file_pointer, code, message, headers, new_url)
+
+
+class SequentialHTTPSHandler(urllib.request.HTTPSHandler):
+    """Keep at most one fully consumed connection for sequential approved GETs."""
+
+    def __init__(self, allowed_hosts: Iterable[str]) -> None:
+        super().__init__(context=ssl.create_default_context())
+        self.allowed_hosts = frozenset(allowed_hosts)
+        self._connection = None
+        self._response = None
+        self._host = None
+
+    def close(self) -> None:
+        if self._connection is not None:
+            self._connection.close()
+        self._connection = self._response = self._host = None
+
+    def https_open(self, request):  # type: ignore[no-untyped-def]
+        validate_https_url(request.full_url, self.allowed_hosts)
+        host = request.host
+        previous = self._response
+        if self._connection is not None and (
+            host != self._host or previous is None or previous.length != 0
+            or previous.will_close or self._connection.sock is None
+        ):
+            self.close()
+        if self._connection is None:
+            self._connection = http.client.HTTPSConnection(host, timeout=request.timeout, context=self._context)
+            self._host = host
+        connection = self._connection
+        headers = dict(request.unredirected_hdrs)
+        headers.update({key: value for key, value in request.headers.items() if key not in headers})
+        headers["Connection"] = "keep-alive"
+        headers = {key.title(): value for key, value in headers.items()}
+        try:
+            connection.timeout = request.timeout
+            if connection.sock is not None:
+                connection.sock.settimeout(request.timeout)
+            connection.request(request.get_method(), request.selector, request.data, headers,
+                               encode_chunked=request.has_header("Transfer-encoding"))
+            response = connection.getresponse()
+        except OSError as error:
+            self.close()
+            raise urllib.error.URLError(error) from error
+        except Exception:
+            self.close()
+            raise
+        self._response = response
+        # Preserve urllib's normal HTTP status and redirect processing.
+        response.url = request.full_url
+        response.msg = response.reason
+        return response
 
 
 @dataclass(frozen=True)
@@ -447,14 +500,22 @@ class PyPISimpleCatalog:
         self._rejected_candidates: List[Mapping[str, str]] = []
         self._tag_rank: Dict[Tag, int] = {tag: rank for rank, tag in enumerate(sys_tags())}
         self._python_version = Version(".".join(str(part) for part in sys.version_info[:3]))
+        self._simple_https = SequentialHTTPSHandler(("pypi.org",))
+        self._artifact_https = SequentialHTTPSHandler(APPROVED_ARTIFACT_HOSTS)
         self._simple_opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({}),
+            self._simple_https,
             ValidatedRedirectHandler(("pypi.org",)),
         )
         self._artifact_opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({}),
+            self._artifact_https,
             ValidatedRedirectHandler(APPROVED_ARTIFACT_HOSTS),
         )
+
+    def close(self) -> None:
+        self._simple_https.close()
+        self._artifact_https.close()
 
     @staticmethod
     def _validate_remote_url(url: str, allowed_hosts: Iterable[str]) -> str:
@@ -711,6 +772,9 @@ class LocalCatalog:
     def rejected_candidates(self) -> List[Mapping[str, str]]:
         return []
 
+    def close(self) -> None:
+        pass  # The offline fixture owns no network connection.
+
     def materialize(self, descriptor: Descriptor, destination: Path) -> Path:
         if descriptor.source_path is None:
             raise ClosureError("Local self-test descriptor is missing source_path")
@@ -859,11 +923,22 @@ class LazyPoolResolver:
             for requirement in requirements.values()
         )
 
-    def _add_next_candidate(self, project: str, source: str = "verified requirement graph") -> bool:
+    def _add_next_candidate(self, project: str, source: str = "verified requirement graph",
+                            *, prefer_joint_constraints: bool = False) -> bool:
         if project == self.root_project:
             return False
         attempted = self.attempted.setdefault(project, set())
-        for descriptor in self.catalog.descriptors(project):
+        descriptors = self.catalog.descriptors(project)
+        if prefer_joint_constraints:
+            requirements = tuple(self.requirements.get(project, {}).values())
+            # Stable partition only: losing parents can make the current graph
+            # too restrictive, so retain every original any-specifier fallback.
+            descriptors = sorted(descriptors, key=lambda descriptor: not all(
+                not requirement.specifier
+                or requirement.specifier.contains(descriptor.version, prereleases=True)
+                for requirement in requirements
+            ))
+        for descriptor in descriptors:
             if descriptor.filename in attempted or not self._eligible(descriptor):
                 continue
             if self.budget is not None:
@@ -1072,11 +1147,12 @@ class LazyPoolResolver:
                 conflict_source,
                 source="pip missing-project hint verified against requirement graph"
                 if hinted_source else "verified requirement graph",
+                prefer_joint_constraints=True,
             )
             if not added:
                 for parent in self.conflict_frontier:
                     if parent != conflict_source and self._add_next_candidate(
-                        parent, source="verified prior conflict parent"
+                        parent, source="verified prior conflict parent", prefer_joint_constraints=True
                     ):
                         added = True
                         break
@@ -1500,6 +1576,8 @@ def resolve_command(arguments: argparse.Namespace) -> None:
                 "rejectedCandidates": list(catalog.rejected_candidates()),
             })
         raise
+    finally:
+        catalog.close()
     write_json(Path(arguments.inventory), inventory)
     result = {
         "schemaVersion": SCHEMA_VERSION,
@@ -1567,7 +1645,151 @@ def expect_closure_error(action: object, context: str) -> None:
     raise AssertionError(f"Expected fail-closed error: {context}")
 
 
+def self_test_candidate_priority() -> None:
+    # Scenario: Root and parent agree on a low range while many newer versions
+    # satisfy only one constraint. Purpose: Avoid repeated proven conflicts
+    # without pruning candidates needed after a different parent backtracks.
+    with tempfile.TemporaryDirectory(prefix="wheel-candidate-priority-") as temporary:
+        root = Path(temporary)
+        sources = root / "sources"
+        sources.mkdir()
+        root_wheel = make_test_wheel(sources, "priority-root", "1.0", ("a-parent>=1", "z-leaf>=0.28"))
+        wheels = [make_test_wheel(sources, "a-parent", "1.0", ("z-leaf<1.0",))]
+        wheels.extend(make_test_wheel(sources, "z-leaf", version)
+                      for version in ("5.0", "4.0", "3.0", "2.0", "1.0", "0.28.1"))
+        resolver = LazyPoolResolver(
+            LocalCatalog([local_descriptor(path) for path in wheels]),
+            root_wheel, file_sha256(root_wheel), root / "pool", root / "plan.json",
+        )
+        resolver._seed_new_projects()
+        if "z_leaf-5.0-py3-none-any.whl" not in resolver.entries:
+            raise AssertionError("Initial seeding must retain the original highest compatible candidate")
+        rounds = resolver.resolve()
+        selection = validate_and_select_plan(root / "plan.json", resolver, root / "selected")
+        selected = {entry["normalizedName"]: entry["version"] for entry in selection["entries"]}
+        if selected.get("z-leaf") != "0.28.1" or rounds > 2:
+            raise AssertionError(f"Joint-constraint priority must select 0.28.1 in <=2 pip rounds; got {rounds}")
+        if not resolver._add_next_candidate("z-leaf", prefer_joint_constraints=True):
+            raise AssertionError("Non-joint fallback candidates were incorrectly pruned")
+        if "z_leaf-4.0-py3-none-any.whl" not in resolver.entries:
+            raise AssertionError("Fallback exploration must retain the original descending candidate order")
+
+
+def self_test_sequential_https() -> None:
+    # Scenario: Sequential GETs complete, abort, redirect or fail on a TLS connection.
+    # Purpose: Reuse only fully consumed same-host responses without weakening trust or retry rules.
+    import http.client
+    from unittest.mock import patch
+
+    class FakeSocket:
+        def __init__(self, wire: bytes) -> None:
+            self.wire = wire
+            self.timeout = None
+
+        def makefile(self, mode: str):
+            return io.BytesIO(self.wire)
+
+        def settimeout(self, timeout):
+            self.timeout = timeout
+
+    class Connection:
+        debuglevel = 0
+        instances = []
+        wires = []
+        failure = None
+
+        def __init__(self, host, *, timeout, context):
+            if not context.check_hostname or context.verify_mode != ssl.CERT_REQUIRED:
+                raise AssertionError("HTTPS must retain system certificate and hostname verification")
+            self.host, self.timeout = host, timeout
+            self.sock = FakeSocket(b"")
+            self.closed = False
+            self.requests = []
+            self.instances.append(self)
+
+        def request(self, method, selector, data, headers, *, encode_chunked=False):
+            self.requests.append((method, selector, headers))
+            if self.failure:
+                raise self.failure
+
+        def getresponse(self):
+            response = http.client.HTTPResponse(FakeSocket(self.wires.pop(0)))
+            response.begin()
+            return response
+
+        def close(self):
+            self.closed = True
+            self.sock = None
+
+    def request(url="https://pypi.org/simple/test/", timeout=7):
+        value = urllib.request.Request(url)
+        value.timeout = timeout
+        return value
+
+    ok = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndata"
+    with patch("http.client.HTTPSConnection", Connection):
+        handler = SequentialHTTPSHandler(APPROVED_ARTIFACT_HOSTS)
+        Connection.wires = [ok] * 7
+        with handler.https_open(request()) as response:
+            if response.read() != b"data":
+                raise AssertionError("HTTPS response content changed")
+        with handler.https_open(request(timeout=3)) as response:
+            response.read()
+        if len(Connection.instances) != 1 or Connection.instances[0].sock.timeout != 3:
+            raise AssertionError("Fully consumed same-host GET must reuse one connection and update timeout")
+        with handler.https_open(request()) as response:
+            response.read(1)
+        with handler.https_open(request()) as response:
+            response.read()
+        if len(Connection.instances) != 2 or not Connection.instances[0].closed:
+            raise AssertionError("Aborted response connection must be discarded")
+        with handler.https_open(request("https://files.pythonhosted.org/package.whl")) as response:
+            response.read()
+        if len(Connection.instances) != 3 or not Connection.instances[1].closed:
+            raise AssertionError("Changing approved host must discard the old connection")
+        Connection.failure = TimeoutError("fixture timeout")
+        try:
+            handler.https_open(request("https://files.pythonhosted.org/next.whl"))
+        except urllib.error.URLError as error:
+            if not isinstance(error.reason, TimeoutError):
+                raise AssertionError("Transport timeout classification changed")
+        else:
+            raise AssertionError("Failed connection must not be silently retried")
+        if len(Connection.instances) != 3 or not Connection.instances[-1].closed:
+            raise AssertionError("Failed connection must be closed without an implicit retry")
+        Connection.failure = None
+        Connection.wires = [b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\ndata\r\n0\r\n\r\n", ok]
+        with handler.https_open(request()) as response:
+            response.read()
+        with handler.https_open(request()) as response:
+            response.read()
+        if len(Connection.instances) != 5 or not Connection.instances[-2].closed:
+            raise AssertionError("Unknown-length response must not be reused even after reading its chunked body")
+        Connection.wires = [b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 4\r\n\r\ndata", ok]
+        with handler.https_open(request()) as response:
+            response.read()
+        with handler.https_open(request()) as response:
+            response.read()
+        if len(Connection.instances) != 6 or not Connection.instances[-2].closed:
+            raise AssertionError("Server-close response must not be reused even when fully consumed")
+        handler.close()
+        if not Connection.instances[-1].closed:
+            raise AssertionError("Catalog completion must close the retained connection")
+
+        Connection.wires = [b"HTTP/1.1 302 Found\r\nContent-Length: 0\r\nLocation: https://example.invalid/blocked\r\n\r\n"]
+        handler = SequentialHTTPSHandler(("pypi.org",))
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), handler,
+                                             ValidatedRedirectHandler(("pypi.org",)))
+        before = len(Connection.instances)
+        expect_closure_error(lambda: opener.open(request()), "redirect must be validated before connection")
+        if len(Connection.instances) != before + 1:
+            raise AssertionError("Blocked redirect contacted another destination")
+        handler.close()
+
+
 def self_test_command(arguments: argparse.Namespace) -> None:
+    self_test_candidate_priority()
+    self_test_sequential_https()
     with tempfile.TemporaryDirectory(prefix="python-wheel-closure-self-test-") as temporary:
         root = Path(temporary)
         sources = root / "sources"
