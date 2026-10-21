@@ -23,6 +23,36 @@ Describe 'SYP258 source tool identity freeze' {
     }
 }
 
+Describe 'Acquisition content hashing allocation' {
+    # Scenario: A four-lane batch hashes many small files and one buffer-boundary-sized binary file.
+    # Purpose: Bound process-wide allocations while retaining every independently computed SHA-256.
+    It 'UnitT10_bounds_small_file_batch_allocations_and_preserves_all_hashes' {
+        . (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Resolve-StandardValidationTool.ps1') -ValidatePolicyOnly | Out-Null
+        $root = Join-Path $TestDrive 'small-file-hash-allocation'
+        [void][IO.Directory]::CreateDirectory($root)
+        $paths = [string[]]@(for ($index = 0; $index -lt 128; $index++) {
+            $path = Join-Path $root ("file-{0:d3}.bin" -f $index)
+            $bytes = if ($index -eq 127) { New-Object byte[] 8193 } else { [Text.Encoding]::UTF8.GetBytes("fixture-$index") }
+            if ($index -eq 127) { (New-Object Random 17).NextBytes($bytes) }
+            [IO.File]::WriteAllBytes($path, $bytes)
+            $path
+        })
+        $expected = @($paths | ForEach-Object { (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant() })
+        # Initialize native compilation/JIT before measuring only the hashing batch.
+        [void](Get-ResolverParallelFileHashes -Paths @($paths[0]))
+        $hasProcessCounter = $null -ne [GC].GetMethod('GetTotalAllocatedBytes')
+        if (-not $hasProcessCounter) { [AppDomain]::MonitoringIsEnabled = $true }
+        $before = if ($hasProcessCounter) { [GC]::GetTotalAllocatedBytes($true) } else { [AppDomain]::CurrentDomain.MonitoringTotalAllocatedMemorySize }
+        $actual = Get-ResolverParallelFileHashes -Paths $paths
+        $after = if ($hasProcessCounter) { [GC]::GetTotalAllocatedBytes($true) } else { [AppDomain]::CurrentDomain.MonitoringTotalAllocatedMemorySize }
+        $allocated = $after - $before
+        if ($allocated -ge 8MB) { throw "Acquisition hashing allocated $allocated bytes for 128 files; the batch must remain below 8 MiB." }
+        if ($actual.Count -ne $paths.Count -or ($actual -join ',') -cne ($expected -join ',')) {
+            throw 'Allocation-bounded acquisition hashing must preserve every file SHA-256, including the buffer-boundary binary file.'
+        }
+    }
+}
+
 Describe 'Bounded offline acquisition fixtures' {
     BeforeAll {
         . (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Resolve-StandardValidationTool.ps1') -ValidatePolicyOnly | Out-Null

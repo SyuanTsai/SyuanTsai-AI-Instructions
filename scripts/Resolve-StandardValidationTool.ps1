@@ -1025,8 +1025,9 @@ public static class StandardResolverAcquisitionHasherV1
                 var attributes = File.GetAttributes(paths[index]);
                 if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
                     throw new IOException("Closure hashing requires a regular non-reparse file: " + paths[index]);
+                // Small files must not allocate a large-object buffer per stream.
                 using (var stream = new FileStream(paths[index], FileMode.Open,
-                    FileAccess.Read, FileShare.Read, 131072, FileOptions.SequentialScan))
+                    FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan))
                 using (var sha = SHA256.Create())
                     hashes[index] = BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
             });
