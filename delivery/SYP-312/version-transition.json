@@ -1,0 +1,643 @@
+{
+  "task": "SYP-312",
+  "asOf": "2026-10-22",
+  "timezone": "Asia/Taipei",
+  "integrationBase": "098e40d26de585e5565a031d9b826454e6a34720",
+  "reception": {
+    "task": "SYP-310",
+    "indexSha256": "3221568970e58159d81730bc6c59e334d419efbd6748a9181576ea349c312950",
+    "fixedInputsSha256": "7bf920d26a95b935e3b7fed79090e9358b3dcc4cf1191bb05af087aa0b75cc31",
+    "indexedFiles": 86,
+    "mismatches": 0
+  },
+  "files": [
+    {
+      "afterSha256": "1b154ca06c809d3cfae9232badb59bdd67b88e39e1c18020d959d4669a2897c5",
+      "beforeSha256": "1b154ca06c809d3cfae9232badb59bdd67b88e39e1c18020d959d4669a2897c5",
+      "path": "catalog/skills-catalog.json"
+    },
+    {
+      "afterSha256": "19054286e47d03a47a5842ceed16a70bb138ca7407175403d7bf0f0065428120",
+      "beforeSha256": "6180fe9c3dfd0fac98f380a3c42c6ee42bafaf296266184ef1b07eeda3682600",
+      "path": "catalog/skills-catalog.sources.json"
+    },
+    {
+      "afterSha256": "a581c1fc17414e511786ec7f55a004625318134c3134311502e17bd5e5a1fc5e",
+      "beforeSha256": "6d08a6d1c5bbba3d8298ad530d69d2bc07b71ee8d3a57eb53c5df30719f00126",
+      "path": "catalog/skills-catalog-lock.json"
+    }
+  ],
+  "beforeLock": {
+    "schemaVersion": 2,
+    "catalogId": "syuantsai-agent-skills",
+    "catalogSha256": "1b154ca06c809d3cfae9232badb59bdd67b88e39e1c18020d959d4669a2897c5",
+    "sources": [
+      {
+        "id": "atlassian-ecosystem",
+        "repository": "https://github.com/SyuanTsai/Skill-Atlassian-Ecosystem.git",
+        "requestedRef": "main",
+        "requestedRefType": "branch",
+        "resolvedCommit": "22cc97cbbc6c078069516b21acbd33f8cc58eb54",
+        "resolvedVersion": "main@22cc97cb",
+        "archiveSha256": "d9c08f473622df29fc83c057279aa58e0a55f6929d6a72100100dea2aae7b4f8"
+      },
+      {
+        "id": "code-collaboration",
+        "repository": "https://github.com/SyuanTsai/Skill-Code-Collaboration.git",
+        "requestedRef": "main",
+        "requestedRefType": "branch",
+        "resolvedCommit": "0b18e7f02d90e03c3b7b7b3268a5c18a206a761d",
+        "resolvedVersion": "main@0b18e7f0",
+        "archiveSha256": "8c052b4ad972e5c5abb4079ce51704a6379df5e7e37ded8723fc044155d84646"
+      },
+      {
+        "id": "general",
+        "repository": "https://github.com/SyuanTsai/Skill-General.git",
+        "requestedRef": "main",
+        "requestedRefType": "branch",
+        "resolvedCommit": "0066b8e7f93f7a3654c6232f63a06b277a0d8664",
+        "resolvedVersion": "main@0066b8e7",
+        "archiveSha256": "c7a62f77fc295162d185bfe9ec58331e528d796898548bd809efbd8f66492481"
+      },
+      {
+        "id": "knowledge-content",
+        "repository": "https://github.com/SyuanTsai/Skill-Knowledge-Content.git",
+        "requestedRef": "main",
+        "requestedRefType": "branch",
+        "resolvedCommit": "14a667abd9489635d333ab2c18a02ab8f3c274cf",
+        "resolvedVersion": "main@14a667ab",
+        "archiveSha256": "9f7299acb20e2310df19fd8b3ead86eca0674895a81976872b1516a40eb13df2"
+      }
+    ],
+    "skills": [
+      {
+        "id": "capture-private-course-knowledge",
+        "sourceId": "knowledge-content",
+        "sourcePath": "skills/capture-private-course-knowledge",
+        "contentSha256": "80c7f292cc618cdd3a6cc1ca359d8d711e643d15fc41cc37eef05f694e9e9c54",
+        "targetPath": ".agents/skills/capture-private-course-knowledge"
+      },
+      {
+        "id": "configure-bitbucket-api-access",
+        "sourceId": "atlassian-ecosystem",
+        "sourcePath": "skills/configure-bitbucket-api-access",
+        "contentSha256": "63528fce116d1738707eed4b5d72c1b5c29c9ab0f37a6e9b652382cfd93666c1",
+        "targetPath": ".agents/skills/configure-bitbucket-api-access"
+      },
+      {
+        "id": "configure-confluence-api-access",
+        "sourceId": "atlassian-ecosystem",
+        "sourcePath": "skills/configure-confluence-api-access",
+        "contentSha256": "50cedfcc6dc8630831bab479ed037377b34b2adb4e290230f9fb7edf018b3205",
+        "targetPath": ".agents/skills/configure-confluence-api-access"
+      },
+      {
+        "id": "configure-jira-api-access",
+        "sourceId": "atlassian-ecosystem",
+        "sourcePath": "skills/configure-jira-api-access",
+        "contentSha256": "c6ba896616be6c0741b57000634190ce4972fa642505844345a4800f06521c6f",
+        "targetPath": ".agents/skills/configure-jira-api-access"
+      },
+      {
+        "id": "investigate-datadog-logs",
+        "sourceId": "general",
+        "sourcePath": "skills/investigate-datadog-logs",
+        "contentSha256": "5106468246d46f3cddf7659328b231628e4f9e8a65d9dd124c251693d7a64a20",
+        "targetPath": ".agents/skills/investigate-datadog-logs"
+      },
+      {
+        "id": "manage-ai-memory",
+        "sourceId": "general",
+        "sourcePath": "skills/manage-ai-memory",
+        "contentSha256": "d74d09ba3bbfd4e14c24efd2fbb74c12e72bb264b5da0c4dcb2a2994deb57469",
+        "targetPath": ".agents/skills/manage-ai-memory"
+      },
+      {
+        "id": "manage-task-handoff",
+        "sourceId": "general",
+        "sourcePath": "skills/manage-task-handoff",
+        "contentSha256": "8eb084d0b084ba5a05942af43557bfb48a63fef4d8789e37fd1aa927125801da",
+        "targetPath": ".agents/skills/manage-task-handoff"
+      },
+      {
+        "id": "plan-production-change",
+        "sourceId": "general",
+        "sourcePath": "skills/plan-production-change",
+        "contentSha256": "4c9d68204740ccf9611264a11c12273abe2097bdd6d15fc5e5734a91113db127",
+        "targetPath": ".agents/skills/plan-production-change"
+      },
+      {
+        "id": "publish-requirements-to-confluence",
+        "sourceId": "atlassian-ecosystem",
+        "sourcePath": "skills/publish-requirements-to-confluence",
+        "contentSha256": "041b8467716870020d29b0b8a5d7248b332ce6517ddbf9a7351296fcc802db11",
+        "targetPath": ".agents/skills/publish-requirements-to-confluence"
+      },
+      {
+        "id": "review-bitbucket-pull-request",
+        "sourceId": "atlassian-ecosystem",
+        "sourcePath": "skills/review-bitbucket-pull-request",
+        "contentSha256": "438ba4a153ac366aeb23daf08ae190eeb33c228a937b239083c6ef82fb53c4e2",
+        "targetPath": ".agents/skills/review-bitbucket-pull-request"
+      },
+      {
+        "id": "verify-data-access-performance",
+        "sourceId": "general",
+        "sourcePath": "skills/verify-data-access-performance",
+        "contentSha256": "c8f98be1e36dda53ef49d0bb5da74dce6061bc51ae70c3388a27654ad7c4a84c",
+        "targetPath": ".agents/skills/verify-data-access-performance"
+      },
+      {
+        "id": "work-with-jira",
+        "sourceId": "atlassian-ecosystem",
+        "sourcePath": "skills/work-with-jira",
+        "contentSha256": "5d9351cbac9c4e8afdfa8a6513c0c5b9e9f223eb015ae8687563634fa78eff08",
+        "targetPath": ".agents/skills/work-with-jira"
+      },
+      {
+        "id": "write-copilot-implementation-prompt",
+        "sourceId": "code-collaboration",
+        "sourcePath": "skills/write-copilot-implementation-prompt",
+        "contentSha256": "ba7b5430038b4f385ac21cf527bc7f82faa54f1eeed7c3650814a9e98ed74dee",
+        "targetPath": ".agents/skills/write-copilot-implementation-prompt"
+      }
+    ]
+  },
+  "afterLock": {
+    "schemaVersion": 2,
+    "catalogId": "syuantsai-agent-skills",
+    "catalogSha256": "1b154ca06c809d3cfae9232badb59bdd67b88e39e1c18020d959d4669a2897c5",
+    "sources": [
+      {
+        "id": "atlassian-ecosystem",
+        "repository": "https://github.com/SyuanTsai/Skill-Atlassian-Ecosystem.git",
+        "requestedRef": "main",
+        "requestedRefType": "branch",
+        "resolvedCommit": "a25fd9fe97c35d2a1ee80bf832cae793784c34ce",
+        "resolvedVersion": "main@a25fd9fe",
+        "archiveSha256": "23d2fd46ef48cf91050a1e12ca9fe2beced4be5d7f8d322675f6559181ce62eb"
+      },
+      {
+        "id": "code-collaboration",
+        "repository": "https://github.com/SyuanTsai/Skill-Code-Collaboration.git",
+        "requestedRef": "main",
+        "requestedRefType": "branch",
+        "resolvedCommit": "3af2fbf562120a6098b91197ec17e2607d162896",
+        "resolvedVersion": "main@3af2fbf5",
+        "archiveSha256": "68cff08e7377e334b9a5767ddf1db92103575463387dc0ae2fc618de80b3c9ce"
+      },
+      {
+        "id": "general",
+        "repository": "https://github.com/SyuanTsai/Skill-General.git",
+        "requestedRef": "main",
+        "requestedRefType": "branch",
+        "resolvedCommit": "5f642e2ebe219cd1c74222a9f4ed88548518efbe",
+        "resolvedVersion": "main@5f642e2e",
+        "archiveSha256": "996b46489ab76d3430b704031df7588663587d22ff0ce5f4058a02c9e921845f"
+      },
+      {
+        "id": "knowledge-content",
+        "repository": "https://github.com/SyuanTsai/Skill-Knowledge-Content.git",
+        "requestedRef": "main",
+        "requestedRefType": "branch",
+        "resolvedCommit": "645390635c2cead49b79f864031f8b7ee3b6b3d2",
+        "resolvedVersion": "main@64539063",
+        "archiveSha256": "099ac746e32f5970292ab326ce3381c6ed021ffb1f143b7a3297b5287e328c00"
+      }
+    ],
+    "skills": [
+      {
+        "id": "capture-private-course-knowledge",
+        "sourceId": "knowledge-content",
+        "sourcePath": "skills/capture-private-course-knowledge",
+        "contentSha256": "d4536f51118a3a7b7deaddc5f6a27f744079bc9b817b4e0d44287c272c778d12",
+        "targetPath": ".agents/skills/capture-private-course-knowledge"
+      },
+      {
+        "id": "configure-bitbucket-api-access",
+        "sourceId": "atlassian-ecosystem",
+        "sourcePath": "skills/configure-bitbucket-api-access",
+        "contentSha256": "63528fce116d1738707eed4b5d72c1b5c29c9ab0f37a6e9b652382cfd93666c1",
+        "targetPath": ".agents/skills/configure-bitbucket-api-access"
+      },
+      {
+        "id": "configure-confluence-api-access",
+        "sourceId": "atlassian-ecosystem",
+        "sourcePath": "skills/configure-confluence-api-access",
+        "contentSha256": "673843f937fadf67bf9ca00452beafb8bcfb8dcef8827740c2d39530e3578309",
+        "targetPath": ".agents/skills/configure-confluence-api-access"
+      },
+      {
+        "id": "configure-jira-api-access",
+        "sourceId": "atlassian-ecosystem",
+        "sourcePath": "skills/configure-jira-api-access",
+        "contentSha256": "c6ba896616be6c0741b57000634190ce4972fa642505844345a4800f06521c6f",
+        "targetPath": ".agents/skills/configure-jira-api-access"
+      },
+      {
+        "id": "investigate-datadog-logs",
+        "sourceId": "general",
+        "sourcePath": "skills/investigate-datadog-logs",
+        "contentSha256": "5106468246d46f3cddf7659328b231628e4f9e8a65d9dd124c251693d7a64a20",
+        "targetPath": ".agents/skills/investigate-datadog-logs"
+      },
+      {
+        "id": "manage-ai-memory",
+        "sourceId": "general",
+        "sourcePath": "skills/manage-ai-memory",
+        "contentSha256": "d74d09ba3bbfd4e14c24efd2fbb74c12e72bb264b5da0c4dcb2a2994deb57469",
+        "targetPath": ".agents/skills/manage-ai-memory"
+      },
+      {
+        "id": "manage-task-handoff",
+        "sourceId": "general",
+        "sourcePath": "skills/manage-task-handoff",
+        "contentSha256": "8eb084d0b084ba5a05942af43557bfb48a63fef4d8789e37fd1aa927125801da",
+        "targetPath": ".agents/skills/manage-task-handoff"
+      },
+      {
+        "id": "plan-production-change",
+        "sourceId": "general",
+        "sourcePath": "skills/plan-production-change",
+        "contentSha256": "4c9d68204740ccf9611264a11c12273abe2097bdd6d15fc5e5734a91113db127",
+        "targetPath": ".agents/skills/plan-production-change"
+      },
+      {
+        "id": "publish-requirements-to-confluence",
+        "sourceId": "atlassian-ecosystem",
+        "sourcePath": "skills/publish-requirements-to-confluence",
+        "contentSha256": "041b8467716870020d29b0b8a5d7248b332ce6517ddbf9a7351296fcc802db11",
+        "targetPath": ".agents/skills/publish-requirements-to-confluence"
+      },
+      {
+        "id": "review-bitbucket-pull-request",
+        "sourceId": "atlassian-ecosystem",
+        "sourcePath": "skills/review-bitbucket-pull-request",
+        "contentSha256": "65795130cdb993d6a3d58a39ca9d21846c776849065648d1fe906780a21536f0",
+        "targetPath": ".agents/skills/review-bitbucket-pull-request"
+      },
+      {
+        "id": "verify-data-access-performance",
+        "sourceId": "general",
+        "sourcePath": "skills/verify-data-access-performance",
+        "contentSha256": "c8f98be1e36dda53ef49d0bb5da74dce6061bc51ae70c3388a27654ad7c4a84c",
+        "targetPath": ".agents/skills/verify-data-access-performance"
+      },
+      {
+        "id": "work-with-jira",
+        "sourceId": "atlassian-ecosystem",
+        "sourcePath": "skills/work-with-jira",
+        "contentSha256": "5d9351cbac9c4e8afdfa8a6513c0c5b9e9f223eb015ae8687563634fa78eff08",
+        "targetPath": ".agents/skills/work-with-jira"
+      },
+      {
+        "id": "write-copilot-implementation-prompt",
+        "sourceId": "code-collaboration",
+        "sourcePath": "skills/write-copilot-implementation-prompt",
+        "contentSha256": "139fbee6f5d6a09cc81e5dea51c6d2e025bccd0e2afc7b4b974ddbe5c02b227f",
+        "targetPath": ".agents/skills/write-copilot-implementation-prompt"
+      }
+    ]
+  },
+  "sourceTrees": [
+    {
+      "sourceId": "general",
+      "repository": "https://github.com/SyuanTsai/Skill-General.git",
+      "mergeCommit": "5f642e2ebe219cd1c74222a9f4ed88548518efbe",
+      "tree": "b81c6fa0054bc604a6b572144d93272f7644431a",
+      "resolvedVersion": "main@5f642e2e",
+      "archiveUrl": "https://codeload.github.com/SyuanTsai/Skill-General/zip/5f642e2ebe219cd1c74222a9f4ed88548518efbe",
+      "archiveSha256": "996b46489ab76d3430b704031df7588663587d22ff0ce5f4058a02c9e921845f",
+      "allSourceContentSha256": "bfecd956fe22b1348c856cf3887f02dab9633a4243942d5b89204dcb6a7dae46",
+      "sourceFiles": 87
+    },
+    {
+      "sourceId": "code-collaboration",
+      "repository": "https://github.com/SyuanTsai/Skill-Code-Collaboration.git",
+      "mergeCommit": "3af2fbf562120a6098b91197ec17e2607d162896",
+      "tree": "2a02a3f678c2abe6511da20b125a47797fdcdc12",
+      "resolvedVersion": "main@3af2fbf5",
+      "archiveUrl": "https://codeload.github.com/SyuanTsai/Skill-Code-Collaboration/zip/3af2fbf562120a6098b91197ec17e2607d162896",
+      "archiveSha256": "68cff08e7377e334b9a5767ddf1db92103575463387dc0ae2fc618de80b3c9ce",
+      "allSourceContentSha256": "05d3f6dd6efca3e1e81ca86a94d280455a2ee7dd1cfeeb87444c649e19ca6985",
+      "sourceFiles": 36
+    },
+    {
+      "sourceId": "knowledge-content",
+      "repository": "https://github.com/SyuanTsai/Skill-Knowledge-Content.git",
+      "mergeCommit": "645390635c2cead49b79f864031f8b7ee3b6b3d2",
+      "tree": "2f33ce38cd3609195079efa5883fe0690570a99a",
+      "resolvedVersion": "main@64539063",
+      "archiveUrl": "https://codeload.github.com/SyuanTsai/Skill-Knowledge-Content/zip/645390635c2cead49b79f864031f8b7ee3b6b3d2",
+      "archiveSha256": "099ac746e32f5970292ab326ce3381c6ed021ffb1f143b7a3297b5287e328c00",
+      "allSourceContentSha256": "deaa450896c15e1e63a2b86c4ef5dac92560edb5fe8dfc29a28532bce656d565",
+      "sourceFiles": 31
+    },
+    {
+      "sourceId": "atlassian-ecosystem",
+      "repository": "https://github.com/SyuanTsai/Skill-Atlassian-Ecosystem.git",
+      "mergeCommit": "a25fd9fe97c35d2a1ee80bf832cae793784c34ce",
+      "tree": "9a155d2890902a2954d00405cf75acc5286f521c",
+      "resolvedVersion": "main@a25fd9fe",
+      "archiveUrl": "https://codeload.github.com/SyuanTsai/Skill-Atlassian-Ecosystem/zip/a25fd9fe97c35d2a1ee80bf832cae793784c34ce",
+      "archiveSha256": "23d2fd46ef48cf91050a1e12ca9fe2beced4be5d7f8d322675f6559181ce62eb",
+      "allSourceContentSha256": "8803714e9c0c8eb69e18762fae9b7d75f8c90c7364de4bc0ae731cf557d0f5d4",
+      "sourceFiles": 144
+    }
+  ],
+  "validationAuthorities": [
+    {
+      "commit": "8e627baf54bd6e47862e6291b25e71cc45a2f2b7",
+      "members": 32,
+      "sourceIds": [
+        "general",
+        "code-collaboration",
+        "knowledge-content"
+      ]
+    },
+    {
+      "commit": "098e40d26de585e5565a031d9b826454e6a34720",
+      "members": 34,
+      "sourceIds": [
+        "atlassian-ecosystem"
+      ]
+    }
+  ],
+  "sourceSkillPackages": [
+    {
+      "sourceId": "general",
+      "id": "investigate-datadog-logs",
+      "sourcePath": "skills/investigate-datadog-logs",
+      "fileCount": 2,
+      "contentSha256": "5106468246d46f3cddf7659328b231628e4f9e8a65d9dd124c251693d7a64a20",
+      "inCentralLock": true
+    },
+    {
+      "sourceId": "general",
+      "id": "manage-ai-memory",
+      "sourcePath": "skills/manage-ai-memory",
+      "fileCount": 6,
+      "contentSha256": "d74d09ba3bbfd4e14c24efd2fbb74c12e72bb264b5da0c4dcb2a2994deb57469",
+      "inCentralLock": true
+    },
+    {
+      "sourceId": "general",
+      "id": "manage-task-handoff",
+      "sourcePath": "skills/manage-task-handoff",
+      "fileCount": 11,
+      "contentSha256": "8eb084d0b084ba5a05942af43557bfb48a63fef4d8789e37fd1aa927125801da",
+      "inCentralLock": true
+    },
+    {
+      "sourceId": "general",
+      "id": "operate-environment-authorized-sql",
+      "sourcePath": "skills/operate-environment-authorized-sql",
+      "fileCount": 11,
+      "contentSha256": "fc42634cb9baa7048841db48aecfe1cb7ac1c6894adf919f575ff7ab877ac703",
+      "inCentralLock": false
+    },
+    {
+      "sourceId": "general",
+      "id": "plan-production-change",
+      "sourcePath": "skills/plan-production-change",
+      "fileCount": 2,
+      "contentSha256": "4c9d68204740ccf9611264a11c12273abe2097bdd6d15fc5e5734a91113db127",
+      "inCentralLock": true
+    },
+    {
+      "sourceId": "general",
+      "id": "review-agent-skills",
+      "sourcePath": "skills/review-agent-skills",
+      "fileCount": 4,
+      "contentSha256": "7bb0d886b7aef1803a23ec629e1ac5e181a9db13ff7385a9109ba46a24848c08",
+      "inCentralLock": false
+    },
+    {
+      "sourceId": "general",
+      "id": "verify-data-access-performance",
+      "sourcePath": "skills/verify-data-access-performance",
+      "fileCount": 2,
+      "contentSha256": "c8f98be1e36dda53ef49d0bb5da74dce6061bc51ae70c3388a27654ad7c4a84c",
+      "inCentralLock": true
+    },
+    {
+      "sourceId": "code-collaboration",
+      "id": "write-copilot-implementation-prompt",
+      "sourcePath": "skills/write-copilot-implementation-prompt",
+      "fileCount": 2,
+      "contentSha256": "139fbee6f5d6a09cc81e5dea51c6d2e025bccd0e2afc7b4b974ddbe5c02b227f",
+      "inCentralLock": true
+    },
+    {
+      "sourceId": "knowledge-content",
+      "id": "capture-private-course-knowledge",
+      "sourcePath": "skills/capture-private-course-knowledge",
+      "fileCount": 7,
+      "contentSha256": "d4536f51118a3a7b7deaddc5f6a27f744079bc9b817b4e0d44287c272c778d12",
+      "inCentralLock": true
+    },
+    {
+      "sourceId": "atlassian-ecosystem",
+      "id": "configure-bitbucket-api-access",
+      "sourcePath": "skills/configure-bitbucket-api-access",
+      "fileCount": 6,
+      "contentSha256": "63528fce116d1738707eed4b5d72c1b5c29c9ab0f37a6e9b652382cfd93666c1",
+      "inCentralLock": true
+    },
+    {
+      "sourceId": "atlassian-ecosystem",
+      "id": "configure-confluence-api-access",
+      "sourcePath": "skills/configure-confluence-api-access",
+      "fileCount": 6,
+      "contentSha256": "673843f937fadf67bf9ca00452beafb8bcfb8dcef8827740c2d39530e3578309",
+      "inCentralLock": true
+    },
+    {
+      "sourceId": "atlassian-ecosystem",
+      "id": "configure-jira-api-access",
+      "sourcePath": "skills/configure-jira-api-access",
+      "fileCount": 6,
+      "contentSha256": "c6ba896616be6c0741b57000634190ce4972fa642505844345a4800f06521c6f",
+      "inCentralLock": true
+    },
+    {
+      "sourceId": "atlassian-ecosystem",
+      "id": "manage-confluence-docs-as-code",
+      "sourcePath": "skills/manage-confluence-docs-as-code",
+      "fileCount": 27,
+      "contentSha256": "a01681ef9b148c688cd70095868338bfbdb2eccdea57b71b1616510d9a3704be",
+      "inCentralLock": false
+    },
+    {
+      "sourceId": "atlassian-ecosystem",
+      "id": "publish-requirements-to-confluence",
+      "sourcePath": "skills/publish-requirements-to-confluence",
+      "fileCount": 4,
+      "contentSha256": "041b8467716870020d29b0b8a5d7248b332ce6517ddbf9a7351296fcc802db11",
+      "inCentralLock": true
+    },
+    {
+      "sourceId": "atlassian-ecosystem",
+      "id": "review-bitbucket-pull-request",
+      "sourcePath": "skills/review-bitbucket-pull-request",
+      "fileCount": 5,
+      "contentSha256": "65795130cdb993d6a3d58a39ca9d21846c776849065648d1fe906780a21536f0",
+      "inCentralLock": true
+    },
+    {
+      "sourceId": "atlassian-ecosystem",
+      "id": "work-with-jira",
+      "sourcePath": "skills/work-with-jira",
+      "fileCount": 3,
+      "contentSha256": "5d9351cbac9c4e8afdfa8a6513c0c5b9e9f223eb015ae8687563634fa78eff08",
+      "inCentralLock": true
+    }
+  ],
+  "skillDeltas": [
+    {
+      "id": "investigate-datadog-logs",
+      "sourceId": "general",
+      "before": "5106468246d46f3cddf7659328b231628e4f9e8a65d9dd124c251693d7a64a20",
+      "after": "5106468246d46f3cddf7659328b231628e4f9e8a65d9dd124c251693d7a64a20",
+      "changed": false
+    },
+    {
+      "id": "manage-ai-memory",
+      "sourceId": "general",
+      "before": "d74d09ba3bbfd4e14c24efd2fbb74c12e72bb264b5da0c4dcb2a2994deb57469",
+      "after": "d74d09ba3bbfd4e14c24efd2fbb74c12e72bb264b5da0c4dcb2a2994deb57469",
+      "changed": false
+    },
+    {
+      "id": "manage-task-handoff",
+      "sourceId": "general",
+      "before": "8eb084d0b084ba5a05942af43557bfb48a63fef4d8789e37fd1aa927125801da",
+      "after": "8eb084d0b084ba5a05942af43557bfb48a63fef4d8789e37fd1aa927125801da",
+      "changed": false
+    },
+    {
+      "id": "plan-production-change",
+      "sourceId": "general",
+      "before": "4c9d68204740ccf9611264a11c12273abe2097bdd6d15fc5e5734a91113db127",
+      "after": "4c9d68204740ccf9611264a11c12273abe2097bdd6d15fc5e5734a91113db127",
+      "changed": false
+    },
+    {
+      "id": "verify-data-access-performance",
+      "sourceId": "general",
+      "before": "c8f98be1e36dda53ef49d0bb5da74dce6061bc51ae70c3388a27654ad7c4a84c",
+      "after": "c8f98be1e36dda53ef49d0bb5da74dce6061bc51ae70c3388a27654ad7c4a84c",
+      "changed": false
+    },
+    {
+      "id": "write-copilot-implementation-prompt",
+      "sourceId": "code-collaboration",
+      "before": "ba7b5430038b4f385ac21cf527bc7f82faa54f1eeed7c3650814a9e98ed74dee",
+      "after": "139fbee6f5d6a09cc81e5dea51c6d2e025bccd0e2afc7b4b974ddbe5c02b227f",
+      "changed": true
+    },
+    {
+      "id": "capture-private-course-knowledge",
+      "sourceId": "knowledge-content",
+      "before": "80c7f292cc618cdd3a6cc1ca359d8d711e643d15fc41cc37eef05f694e9e9c54",
+      "after": "d4536f51118a3a7b7deaddc5f6a27f744079bc9b817b4e0d44287c272c778d12",
+      "changed": true
+    },
+    {
+      "id": "configure-bitbucket-api-access",
+      "sourceId": "atlassian-ecosystem",
+      "before": "63528fce116d1738707eed4b5d72c1b5c29c9ab0f37a6e9b652382cfd93666c1",
+      "after": "63528fce116d1738707eed4b5d72c1b5c29c9ab0f37a6e9b652382cfd93666c1",
+      "changed": false
+    },
+    {
+      "id": "configure-confluence-api-access",
+      "sourceId": "atlassian-ecosystem",
+      "before": "50cedfcc6dc8630831bab479ed037377b34b2adb4e290230f9fb7edf018b3205",
+      "after": "673843f937fadf67bf9ca00452beafb8bcfb8dcef8827740c2d39530e3578309",
+      "changed": true
+    },
+    {
+      "id": "configure-jira-api-access",
+      "sourceId": "atlassian-ecosystem",
+      "before": "c6ba896616be6c0741b57000634190ce4972fa642505844345a4800f06521c6f",
+      "after": "c6ba896616be6c0741b57000634190ce4972fa642505844345a4800f06521c6f",
+      "changed": false
+    },
+    {
+      "id": "publish-requirements-to-confluence",
+      "sourceId": "atlassian-ecosystem",
+      "before": "041b8467716870020d29b0b8a5d7248b332ce6517ddbf9a7351296fcc802db11",
+      "after": "041b8467716870020d29b0b8a5d7248b332ce6517ddbf9a7351296fcc802db11",
+      "changed": false
+    },
+    {
+      "id": "review-bitbucket-pull-request",
+      "sourceId": "atlassian-ecosystem",
+      "before": "438ba4a153ac366aeb23daf08ae190eeb33c228a937b239083c6ef82fb53c4e2",
+      "after": "65795130cdb993d6a3d58a39ca9d21846c776849065648d1fe906780a21536f0",
+      "changed": true
+    },
+    {
+      "id": "work-with-jira",
+      "sourceId": "atlassian-ecosystem",
+      "before": "5d9351cbac9c4e8afdfa8a6513c0c5b9e9f223eb015ae8687563634fa78eff08",
+      "after": "5d9351cbac9c4e8afdfa8a6513c0c5b9e9f223eb015ae8687563634fa78eff08",
+      "changed": false
+    }
+  ],
+  "selection": {
+    "activeBefore": 13,
+    "activeAfter": 13,
+    "catalogBytesUnchanged": true,
+    "profilesUnchanged": true,
+    "memoryRename": "existing manage-notion-ai-memory tombstone/replacement/alias retained",
+    "notAdded": [
+      "operate-environment-authorized-sql",
+      "review-agent-skills",
+      "manage-confluence-docs-as-code"
+    ],
+    "confluenceDecisionFor259": "259 historical replacement intent conflicts with final source routing, which retains one-off publish-requirements-to-confluence. Retain current selection until exact lifecycle/activation disposition is reconciled in 259; no retirement or automatic selection is performed here."
+  },
+  "validation": {
+    "canonicalArchives": 4,
+    "canonicalSkillBindings": 13,
+    "schemaAndParserDocuments": 3,
+    "catalogAndSelectionPester": {
+      "passed": 51,
+      "failed": 0,
+      "skipped": 0,
+      "total": 51,
+      "durationSeconds": 8.5210108
+    },
+    "localArchiveLockCheck": "passed",
+    "networkLockCheck": "passed; canonical codeload re-download agrees with sealed310 archives",
+    "gitDiffCheck": "passed",
+    "requiredCiAndIndependentReview": "See final SYP-312 Jira delivery and the normal PR checks/review for this commit; this versioned receipt records local validation only."
+  },
+  "rollback": {
+    "method": "Normal reviewed revert PR of this integration, or restore all three catalog documents together from integrationBase; rerun existing generator -Check and required CI. Do not reset shared main or mix tuples.",
+    "centralSnapshotCommit": "098e40d26de585e5565a031d9b826454e6a34720",
+    "catalogPaths": [
+      "catalog/skills-catalog.json",
+      "catalog/skills-catalog.sources.json",
+      "catalog/skills-catalog-lock.json"
+    ],
+    "completePreviousLockIncluded": true,
+    "executed": false,
+    "sourceRollback": "No source/authority mutation is made by312; original complete source rollback tuples remain in310 reception."
+  },
+  "limits": [
+    "All source evidence is a source-only developer harness, not independent untrusted-candidate attestation.",
+    "Atlassian Stages1-5/519 passed; Stage6 BLOCKED/10 and overall source run failure remain; PR22 producer provenance P2/Medium is unresolved in substance despite UI resolution;171 deferred findings and314LP3 remain.",
+    "General Git/LF inventory and Windows CI CRLF digests remain distinct; central332 native358role/179files is not a32/34transport tuple.",
+    "Darktide remains independent and absent from sources/catalog/lock/profile/USER/bootstrap.",
+    "USER/profile activation/retirement/discovery/install/reload/use/recovery are259 work;320/321host acceptance and323host remain unexecuted,323has accepted no-change;322N/A.",
+    "General PR84 caller/reader/cleanup and195 fixed diagram-design d1376371965f513d99cc9ec388835d255c5c88d5/279files native errors, cancelled/unexecuted scan/install/live remain259 work.",
+    "Maintenance guidance centralPR88/76cee33 is already merged; missing direct source development-entry references remain original259 follow-through, not Skill package changes.",
+    "No source baseline/tool rerun, release/install/live action, schedule resume or341changes."
+  ],
+  "releaseEligible": false,
+  "userDeploymentExecuted": false,
+  "worklogWritten": false
+}
