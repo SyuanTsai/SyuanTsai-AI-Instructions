@@ -392,6 +392,14 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "delivery/SYP-312/deployment-handoff.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "delivery/SYP-312/version-transition.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/delivery/syp-195/README.md",
       "license": "Apache-2.0"
     },
