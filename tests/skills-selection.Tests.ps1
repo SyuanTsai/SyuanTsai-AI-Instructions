@@ -350,4 +350,28 @@ function New-SelectionCatalog {
             Resolve-SkillsSelection -Catalog $catalog -Selection ([pscustomobject]@{ profiles=@('core'); includeSkills=@(); excludeSkills=@() })
         } 'not valid JSON'
     }
+
+    # Scenario: The approved Atlassian profile is resolved on Windows with its existing setup fallback.
+    # Purpose: Keep one-off publishing available when Git documentation synchronization is activated.
+    It 'InterT97_keeps_publisher_and_docs_as_code_available_together' {
+        $catalog = Get-Content -Raw -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/skills-catalog.json') | ConvertFrom-Json
+        $selection = [pscustomobject]@{ profiles=@('atlassian'); includeSkills=@(); excludeSkills=@() }
+        $resolved = @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection)
+
+        $resolved -contains 'publish-requirements-to-confluence' | Should Be $true
+        $resolved -contains 'manage-confluence-docs-as-code' | Should Be $true
+        $resolved -contains 'configure-confluence-api-access' | Should Be $true
+        $resolved -contains 'operate-environment-authorized-sql' | Should Be $false
+    }
+
+    # Scenario: An adopter excludes only Git documentation synchronization from the shared profile.
+    # Purpose: Preserve independent selection of the one-off publisher instead of treating it as a rename.
+    It 'InterT98_excludes_docs_as_code_without_retiring_the_publisher' {
+        $catalog = Get-Content -Raw -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/skills-catalog.json') | ConvertFrom-Json
+        $selection = [pscustomobject]@{ profiles=@('atlassian'); includeSkills=@(); excludeSkills=@('manage-confluence-docs-as-code') }
+        $resolved = @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection)
+
+        $resolved -contains 'publish-requirements-to-confluence' | Should Be $true
+        $resolved -contains 'manage-confluence-docs-as-code' | Should Be $false
+    }
 }

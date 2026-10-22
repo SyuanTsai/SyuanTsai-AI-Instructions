@@ -54,6 +54,8 @@ Conditional operator 的 production semantics：
 
 `configure-*` setup Skills 不應直接列入一般工作 profile；它們保持 active，只有使用者明確選取，或某個已選 Skill 的 conditional dependency 在 fallback capability 缺失時才會解析進來。否則 profile include 會先把 setup Skill 加入 resolved set，讓 conditional fallback 語意失效。
 
+`atlassian` profile 同時保留一次性發布的 `publish-requirements-to-confluence` 與 Git 文件同步的 `manage-confluence-docs-as-code`；兩者為可獨立 include／exclude 的 active Skill，不是 rename 或 replacement。Docs-as-Code 使用本機 Windows／PowerShell／Git，並包含 `configure-confluence-api-access` 的 hard dependency，使用前仍須核對實際 API 設定及精確寫入授權。
+
 ## Compatibility contract
 
 - `platforms` 至少一項；`any` 表示沒有作業系統限制。

@@ -83,7 +83,7 @@ Describe 'production Skills Catalog' {
             },
             @{
                 Profile='atlassian'
-                Expected=@('configure-confluence-api-access','configure-jira-api-access','publish-requirements-to-confluence','work-with-jira')
+                Expected=@('configure-confluence-api-access','configure-jira-api-access','manage-confluence-docs-as-code','publish-requirements-to-confluence','work-with-jira')
             }
         )
         try {
@@ -100,9 +100,9 @@ Describe 'production Skills Catalog' {
 
     # Scenario: Active migrated Skills remain routed while the retired FELO wrapper keeps only its stable-ID tombstone.
     # Purpose: Prevent the custom FELO Skill from re-entering profiles or the production lock without losing removal history.
-    It 'InterT15_maps_thirteen_active_Skills_and_keeps_the_removed_FELO_tombstone' {
+    It 'InterT15_maps_fourteen_active_Skills_and_keeps_the_removed_FELO_tombstone' {
         $activeSkills = @($script:catalog.skills | Where-Object { $_.lifecycle.status -eq 'active' })
-        $activeSkills.Count | Should Be 13
+        $activeSkills.Count | Should Be 14
 
         $expectedSourceBySkill = @{
             'plan-production-change' = 'general'
@@ -115,6 +115,7 @@ Describe 'production Skills Catalog' {
             'configure-bitbucket-api-access' = 'atlassian-ecosystem'
             'configure-confluence-api-access' = 'atlassian-ecosystem'
             'configure-jira-api-access' = 'atlassian-ecosystem'
+            'manage-confluence-docs-as-code' = 'atlassian-ecosystem'
             'publish-requirements-to-confluence' = 'atlassian-ecosystem'
             'review-bitbucket-pull-request' = 'atlassian-ecosystem'
             'work-with-jira' = 'atlassian-ecosystem'
@@ -325,7 +326,7 @@ Describe 'production Skills Catalog' {
         $script:catalog.schemaVersion | Should Be 2
         $script:lock.schemaVersion | Should Be 2
         $active = @($script:catalog.skills | Where-Object { $_.lifecycle.status -eq 'active' })
-        $active.Count | Should Be 13
+        $active.Count | Should Be 14
         foreach ($skill in $active) {
             [string]$skill.source.sourcePath | Should Be "skills/$($skill.id)"
             [string]$skill.source.targetPath | Should Be ".agents/skills/$($skill.id)"
