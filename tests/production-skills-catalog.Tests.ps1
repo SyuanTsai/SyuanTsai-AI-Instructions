@@ -100,13 +100,14 @@ Describe 'production Skills Catalog' {
 
     # Scenario: Active migrated Skills remain routed while the retired FELO wrapper keeps only its stable-ID tombstone.
     # Purpose: Prevent the custom FELO Skill from re-entering profiles or the production lock without losing removal history.
-    It 'InterT15_maps_fourteen_active_Skills_and_keeps_the_removed_FELO_tombstone' {
+    It 'InterT15_maps_fifteen_active_Skills_and_keeps_the_removed_FELO_tombstone' {
         $activeSkills = @($script:catalog.skills | Where-Object { $_.lifecycle.status -eq 'active' })
-        $activeSkills.Count | Should Be 14
+        $activeSkills.Count | Should Be 15
 
         $expectedSourceBySkill = @{
             'plan-production-change' = 'general'
             'verify-data-access-performance' = 'general'
+            'operate-environment-authorized-sql' = 'general'
             'investigate-datadog-logs' = 'general'
             'manage-ai-memory' = 'general'
             'manage-task-handoff' = 'general'
@@ -198,6 +199,33 @@ Describe 'production Skills Catalog' {
         [string]$connectorRequirement.state | Should Be 'configured'
         [string]$apiRequirement.id | Should Be ([string]$skill.dependencies[0].condition.capability)
         [string]$apiRequirement.state | Should Be 'configured'
+    }
+
+    # Scenario: Every existing profile is selected before SQL is explicitly included.
+    # Purpose: Make SQL available without widening existing selections or granting database operations.
+    It 'InterT23_keeps_SQL_explicitly_opt_in_and_respects_exclusion' {
+        $sql = @($script:catalog.skills | Where-Object id -EQ 'operate-environment-authorized-sql')[0]
+        @($sql.profiles).Count | Should Be 0
+        [string]$sql.source.sourceId | Should Be 'general'
+        Assert-StringSequence -Actual @($sql.compatibility.platforms) -Expected @('windows')
+        $previousEvidence = $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE
+        try {
+            foreach ($case in @(
+                @{ Evidence = ''; ExpectedCount = 13 },
+                @{ Evidence = '[{"kind":"connector","id":"datadog","state":"configured"}]'; ExpectedCount = 14 }
+            )) {
+                $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE = $case.Evidence
+                $selection = [pscustomobject]@{ profiles = @($script:catalog.profiles.id); includeSkills = @(); excludeSkills = @() }
+                $baseline = @(Resolve-SkillsSelection -Catalog $script:catalog -Selection $selection)
+                $baseline.Count | Should Be $case.ExpectedCount
+                ($baseline -contains 'operate-environment-authorized-sql') | Should Be $false
+                $selection.includeSkills = @('operate-environment-authorized-sql')
+                Assert-StringSequence -Actual @(Resolve-SkillsSelection -Catalog $script:catalog -Selection $selection) -Expected @(@($baseline + 'operate-environment-authorized-sql') | Sort-Object)
+                $selection.excludeSkills = @('operate-environment-authorized-sql')
+                Assert-StringSequence -Actual @(Resolve-SkillsSelection -Catalog $script:catalog -Selection $selection) -Expected $baseline
+            }
+        }
+        finally { $env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE = $previousEvidence }
     }
 
     # Scenario: Each workflow is explicitly selected with exact, weaker-state, or wrong-kind capability evidence.
@@ -326,7 +354,7 @@ Describe 'production Skills Catalog' {
         $script:catalog.schemaVersion | Should Be 2
         $script:lock.schemaVersion | Should Be 2
         $active = @($script:catalog.skills | Where-Object { $_.lifecycle.status -eq 'active' })
-        $active.Count | Should Be 14
+        $active.Count | Should Be 15
         foreach ($skill in $active) {
             [string]$skill.source.sourcePath | Should Be "skills/$($skill.id)"
             [string]$skill.source.targetPath | Should Be ".agents/skills/$($skill.id)"

@@ -19,6 +19,10 @@
 
 正式 schema 位於 [`schemas/`](schemas/)，去識別化、可通過 parser 的完整文件位於 [`examples/`](examples/)。`scripts/skills-catalog-contract.psm1` 負責 PowerShell 5.1 相容的跨文件驗證；JSON Schema 負責標準工具可讀的結構契約。
 
+## SQL 工作流程的明確選取
+
+`operate-environment-authorized-sql` 提供固定來源的套件入口，不加入任何 profile。既有 profile 選取保持不變；需使用時才在個人 `includeSkills` 明列此 ID，`excludeSkills` 仍可排除。套件安裝不提供受控 SQL runtime、環境授權或資料操作核准；這些條件由 Skill 與每次實際任務另行核對，沒有受信任 runtime 時只進行離線準備。
+
 ## Stable ID、rename 與 removal
 
 - Skill `id` 使用 lowercase kebab-case，最長 64 個字元；建立後不得改作其他 Skill，也不得因目錄搬移、profile 或版本更新而改變。
