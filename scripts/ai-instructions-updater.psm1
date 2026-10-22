@@ -493,7 +493,8 @@ function Invoke-AiInstructionsUpdateWorkflow {
             }
             $installStateLockStream.Dispose()
             $installStateLockStream = $null
-            & $InstallCandidate $installRequest
+            # The installer reports progress on stdout; keep the workflow's result stream structured.
+            & $InstallCandidate $installRequest | Out-Null
             try {
                 $installStateLockStream = [System.IO.File]::Open((Join-Path $codexHomePath 'ai-instructions-install.lock'),[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
             }
