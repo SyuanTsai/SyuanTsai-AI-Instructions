@@ -153,6 +153,31 @@ Describe 'AI instructions updater workflow' {
         $result.archiveSha256 | Should Be ('c' * 64)
     }
 
+    # Scenario: The installer writes status lines before activating an approved candidate.
+    # Purpose: Keep installer diagnostics out of the updater's single structured result.
+    It 'UnitT32_returns_only_the_installed_result_when_the_installer_writes_status' {
+        # Given
+        $codexHome = Join-Path $TestDrive 'installed-with-status'
+        New-TestUpdaterHome -Path $codexHome -Mode auto-install-approved
+        $package = [pscustomobject]@{ SourceRoot='C:\fixture'; ArchivePath='C:\fixture.zip'; ArchiveSha256=('c' * 64) }
+
+        # When
+        $results = @(Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck `
+            -ResolveCandidate { 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' } `
+            -AcquireCandidate { $package } `
+            -InstallCandidate {
+                param($request)
+                Write-Output 'Installed AI instructions bootstrap launcher.'
+                Write-Output 'Installed immutable runtime bundle.'
+                New-TestUpdaterHome -Path $request.CodexHome -Mode auto-install-approved -Commit $request.CandidateCommit
+            })
+
+        # Then
+        $results.Count | Should Be 1
+        $results[0].outcome | Should Be 'installed'
+        (Get-Content -Raw -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json') | ConvertFrom-Json).outcome | Should Be 'installed'
+    }
+
     # Scenario: An installer callback returns without activating the selected candidate runtime.
     # Purpose: Record success only after the active runtime bundle proves the candidate is actually installed.
     It 'UnitT35_rejects_an_installer_that_does_not_activate_the_candidate' {
@@ -167,6 +192,29 @@ Describe 'AI instructions updater workflow' {
 
         $result.outcome | Should Be 'failed'
         $result.message | Should Match 'active runtime|candidate'
+        (Get-Content -Raw -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json') | ConvertFrom-Json).outcome | Should Be 'failed'
+    }
+
+    # Scenario: The installer writes a status line and then fails before activating the candidate.
+    # Purpose: Return only the failed result while preserving the verified current runtime.
+    It 'UnitT37_returns_only_the_failed_result_when_the_installer_writes_status' {
+        # Given
+        $codexHome = Join-Path $TestDrive 'failed-with-status'
+        New-TestUpdaterHome -Path $codexHome -Mode auto-install-approved
+        $package = [pscustomobject]@{ SourceRoot='C:\fixture'; ArchivePath='C:\fixture.zip'; ArchiveSha256=('c' * 64) }
+
+        # When
+        $results = @(Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck `
+            -ResolveCandidate { 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' } `
+            -AcquireCandidate { $package } `
+            -InstallCandidate {
+                Write-Output 'Installer started.'
+                throw 'Fixture installation failed.'
+            })
+
+        # Then
+        $results.Count | Should Be 1
+        $results[0].outcome | Should Be 'failed'
         (Get-Content -Raw -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json') | ConvertFrom-Json).outcome | Should Be 'failed'
     }
 
