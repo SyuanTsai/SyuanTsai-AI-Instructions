@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "catalogId": "example-agent-skills",
-  "catalogSha256": "ca09c6b67c5b7b7d1518c5f787f8f0f481eca8d5617890e16b3f54997591faf7",
+  "catalogSha256": "aeda699962cf4629fd2bb9f05689ad53b1fffd4f66294ddb931cd66115fc8751",
   "sources": [
     {
       "id": "agent-skills",
@@ -49,6 +49,12 @@
       "sourceId": "agent-skills",
       "sourcePath": ".agents/skills/manage-ai-memory",
       "contentSha256": "9999999999999999999999999999999999999999999999999999999999999999"
+    },
+    {
+      "id": "manage-confluence-docs-as-code",
+      "sourceId": "agent-skills",
+      "sourcePath": ".agents/skills/manage-confluence-docs-as-code",
+      "contentSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
     },
     {
       "id": "manage-task-handoff",

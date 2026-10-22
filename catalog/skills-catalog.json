@@ -56,6 +56,7 @@
       "default": false,
       "includes": [
         "publish-requirements-to-confluence",
+        "manage-confluence-docs-as-code",
         "work-with-jira"
       ],
       "excludes": []
@@ -410,6 +411,44 @@
         "anyOfCapabilities": []
       },
       "dependencies": [],
+      "lifecycle": {
+        "status": "active",
+        "aliases": []
+      }
+    },
+    {
+      "id": "manage-confluence-docs-as-code",
+      "group": "atlassian-work-management",
+      "source": {
+        "sourceId": "atlassian-ecosystem",
+        "sourcePath": "skills/manage-confluence-docs-as-code",
+        "targetPath": ".agents/skills/manage-confluence-docs-as-code"
+      },
+      "profiles": [
+        "atlassian"
+      ],
+      "compatibility": {
+        "platforms": [
+          "windows"
+        ],
+        "shells": [
+          "pwsh>=7"
+        ],
+        "requiredCapabilities": [
+          {
+            "kind": "command",
+            "id": "git",
+            "state": "available"
+          }
+        ],
+        "anyOfCapabilities": []
+      },
+      "dependencies": [
+        {
+          "skillId": "configure-confluence-api-access",
+          "type": "hard"
+        }
+      ],
       "lifecycle": {
         "status": "active",
         "aliases": []
