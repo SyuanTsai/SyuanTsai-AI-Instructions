@@ -591,6 +591,31 @@
         "status": "active",
         "aliases": []
       }
+    },
+    {
+      "id": "operate-environment-authorized-sql",
+      "group": "core-engineering",
+      "source": {
+        "sourceId": "general",
+        "sourcePath": "skills/operate-environment-authorized-sql",
+        "targetPath": ".agents/skills/operate-environment-authorized-sql"
+      },
+      "profiles": [],
+      "compatibility": {
+        "platforms": [
+          "windows"
+        ],
+        "shells": [
+          "pwsh>=7"
+        ],
+        "requiredCapabilities": [],
+        "anyOfCapabilities": []
+      },
+      "dependencies": [],
+      "lifecycle": {
+        "status": "active",
+        "aliases": []
+      }
     }
   ]
 }
