@@ -832,6 +832,20 @@ Describe 'Platform probe cleanup evidence' {
 }
 
 Describe 'Platform P4 verified PowerShell and Pester preparation' {
+    $p4IsWindows = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)
+    $p4IsUnix =
+        [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Linux) -or
+        [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)
+    $p4MkfifoForRegistration = if ($p4IsUnix) {
+        @(Get-Command mkfifo -CommandType Application -All -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.Source } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_ -PathType Leaf) } |
+            Select-Object -First 1)
+    } else { @() }
+    $p4Pester4101ForRegistration = @(Get-Module -ListAvailable Pester |
+        Where-Object { $_.Version -eq [version]'4.10.1' } |
+        Select-Object -First 1)
+
     BeforeAll {
         $script:P4RepositoryRoot = Split-Path -Parent $PSScriptRoot
         $script:P4Manifest = Join-Path $script:P4RepositoryRoot 'scripts/platform-runtime.psd1'
@@ -841,7 +855,9 @@ Describe 'Platform P4 verified PowerShell and Pester preparation' {
         $script:P4Platform = if ($IsWindows) { 'windows' } elseif ($IsLinux) { 'linux' } elseif ($IsMacOS) { 'macos' } else { throw 'Unsupported test platform.' }
         $script:P4Architecture = [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLowerInvariant()
         $script:P4Preparation = @(Import-Module (Join-Path $script:P4RepositoryRoot 'scripts/platform/RuntimePreparation.psm1') -PassThru)[0]
-        $script:P4Pester4101 = @(Get-Module -ListAvailable Pester | Where-Object { $_.Version -eq [version]'4.10.1' }) | Select-Object -First 1
+        $script:P4Pester4101 = @(Get-Module -ListAvailable Pester |
+            Where-Object { $_.Version -eq [version]'4.10.1' } |
+            Select-Object -First 1) | Select-Object -First 1
         $script:P4Root = [IO.Path]::GetFullPath($TestDrive)
         if (-not $IsWindows) {
             # Match P2: resolve only the trusted fixture anchor (macOS /var),
@@ -867,12 +883,10 @@ Describe 'Platform P4 verified PowerShell and Pester preparation' {
             }
             return $null
         }
-        $script:P4Mkfifo=$null
-        if(-not $IsWindows) {
+        $script:P4Mkfifo = if ($IsLinux -or $IsMacOS) {
             $candidates=@(Get-Command mkfifo -CommandType Application -All -ErrorAction SilentlyContinue | ForEach-Object { $_.Source })
-            $script:P4Mkfifo=Select-P4ApplicationPath $candidates
-            if($null -eq $script:P4Mkfifo) { Write-Warning 'Skipping InterT18: no existing mkfifo application was found in PATH.' }
-        }
+            Select-P4ApplicationPath $candidates
+        } else { $null }
 
         function Test-P4KnownRuntimeLinkRejection {
             param([string]$Root=$PSHOME)
@@ -1096,7 +1110,9 @@ Describe 'Platform P4 verified PowerShell and Pester preparation' {
 
     # Scenario: A correctly named Unix cache entry is a FIFO with no writer; mkfifo must be available.
     # Purpose: Reject its native type without blocking, including the snapshot read itself.
-    It 'InterT18_rejects_fifo_cache_and_snapshot_reads_within_a_deadline' -Skip:($IsWindows -or $null -eq $script:P4Mkfifo) {
+    # Not registered on Windows, where FIFO filesystem semantics do not apply, or when no physical mkfifo tool can create the fixture.
+    if ($p4IsUnix -and $p4MkfifoForRegistration.Count -gt 0) {
+    It 'InterT18_rejects_fifo_cache_and_snapshot_reads_within_a_deadline' {
         $token=if($IsLinux){'linux'}else{'osx'}
         $name="powershell-9.9.18-$token-$script:P4Architecture.tar.gz"
         $fifo=Join-Path $script:P4Root $name
@@ -1130,6 +1146,7 @@ try {
             $stdout.GetAwaiter().GetResult().Trim() | Should Be 'fifo-rejected'
             $stderr.GetAwaiter().GetResult() | Should BeNullOrEmpty
         } finally { $process.Dispose(); [IO.File]::Delete($fifo) }
+    }
     }
 
     # Scenario: An archive contains a link, parent traversal, or absolute member.
@@ -1176,7 +1193,9 @@ try {
 
     # Scenario: An ordinary tar file has zero length and TarReader exposes no DataStream.
     # Purpose: Create the empty file, rather than rejecting or silently omitting the member.
-    It 'InterT41_extracts_zero_length_tar_members_as_physical_empty_files' -Skip:$IsWindows {
+    # Not registered on Windows because the Windows runtime asset is ZIP, not tar.gz.
+    if ($p4IsUnix) {
+    It 'InterT41_extracts_zero_length_tar_members_as_physical_empty_files' {
         $version='9.9.41'; $raw=Join-Path $TestDrive 'empty-file.fixture'; New-P4Archive $raw 'empty-file' $version
         $fixture=New-P4PowerShellPolicy $version $raw (Get-FileHash $raw -Algorithm SHA256).Hash.ToLowerInvariant()
         $lease=New-P4DestinationLease 'p4-empty-file'
@@ -1193,7 +1212,7 @@ try {
 
     # Scenario: A tarball created from '.' contains a root entry and ./-prefixed files.
     # Purpose: Normalize only leading ./ before duplicate checks, retaining traversal rejection.
-    It 'InterT42_normalizes_tar_root_prefixes_without_accepting_aliases_or_traversal' -Skip:$IsWindows {
+    It 'InterT42_normalizes_tar_root_prefixes_without_accepting_aliases_or_traversal' {
         $version='9.9.42'; $raw=Join-Path $TestDrive 'dot-prefix.fixture'; New-P4Archive $raw 'dot-prefix' $version
         $fixture=New-P4PowerShellPolicy $version $raw (Get-FileHash $raw -Algorithm SHA256).Hash.ToLowerInvariant()
         $lease=New-P4DestinationLease 'p4-dot-prefix'
@@ -1213,10 +1232,13 @@ try {
             } finally { $lease.Dispose() }
         }
     }
+    }
 
     # Scenario: Extraction creates a directory which is replaced by a junction before the next entry.
     # Purpose: Re-guard every destination component before writing, refusing an outside target.
-    It 'InterT43_rejects_a_nested_junction_inserted_during_zip_extraction' -Skip:(-not $IsWindows) {
+    # Not registered on Unix because junctions and Windows ZIP directory guards are Windows-specific.
+    if ($p4IsWindows) {
+    It 'InterT43_rejects_a_nested_junction_inserted_during_zip_extraction' {
         $raw=Join-Path $TestDrive 'junction.zip'; $archive=[IO.Compression.ZipFile]::Open($raw,[IO.Compression.ZipArchiveMode]::Create)
         try {
             [void]$archive.CreateEntry('nested/')
@@ -1256,7 +1278,7 @@ try {
 
     # Scenario: A source stream attempts to replace both nested parents while a file is being written.
     # Purpose: Keep all no-reparse directory guards alive until the output stream closes.
-    It 'InterT44_holds_all_windows_nested_directory_guards_through_file_writes' -Skip:(-not $IsWindows) {
+    It 'InterT44_holds_all_windows_nested_directory_guards_through_file_writes' {
         if($null -eq ('P4CallbackReadStream' -as [type])) {
             Add-Type -TypeDefinition @'
 public sealed class P4CallbackReadStream : System.IO.Stream {
@@ -1295,10 +1317,13 @@ public sealed class P4CallbackReadStream : System.IO.Stream {
             [IO.Directory]::Move((Join-Path $root 'nested'),(Join-Path $root 'released'))
         } finally { $stream.Dispose(); $lease.Dispose() }
     }
+    }
 
     # Scenario: An ancestor is renamed and a replacement tree occupies the cached lease path.
     # Purpose: Refuse path-based receipt reads and keep tar/Pester writes out of the replacement.
-    It 'InterT45_rejects_replaced_unix_ancestors_before_preparation' -Skip:$IsWindows {
+    # Not registered on Windows because it exercises Unix descriptor and tar preparation semantics.
+    if ($p4IsUnix) {
+    It 'InterT45_rejects_replaced_unix_ancestors_before_preparation' {
         $root=Join-Path $script:P4Root 'p4-ancestor'; New-Item -ItemType Directory -Path $root | Out-Null
         $lease=Open-PlatformDirectory -Root $root -RelativePath 'owned' -CreatePrivate
         $moved=Join-Path $script:P4Root 'p4-ancestor-moved'
@@ -1314,10 +1339,13 @@ public sealed class P4CallbackReadStream : System.IO.Stream {
             @(Get-ChildItem -LiteralPath (Join-Path $root 'owned') -Force -Recurse).Count | Should Be 0
         } finally { $lease.Dispose() }
     }
+    }
 
     # Scenario: Empty nested directories are held before any output file has been opened.
     # Purpose: Directory guards themselves must arbitrate delete sharing, not rely on a child file handle.
-    It 'InterT46_blocks_windows_directory_renames_without_a_child_file_handle' -Skip:(-not $IsWindows) {
+    # Not registered on Unix because Windows delete-sharing directory guards do not apply there.
+    if ($p4IsWindows) {
+    It 'InterT46_blocks_windows_directory_renames_without_a_child_file_handle' {
         $lease=New-P4DestinationLease 'p4-empty-directory-guards'
         try {
             & $script:P4Preparation {
@@ -1335,10 +1363,13 @@ public sealed class P4CallbackReadStream : System.IO.Stream {
             } $lease
         } finally { $lease.Dispose() }
     }
+    }
 
     # Scenario: The source stream replaces an ancestor after the destination file is opened.
     # Purpose: Prove writes use the retained descriptor and never follow the replacement pathname.
-    It 'InterT47_keeps_descriptor_writes_out_of_an_ancestor_replacement' -Skip:$IsWindows {
+    # Not registered on Windows because these cases exercise Unix descriptor-relative writes and inode ancestry.
+    if ($p4IsUnix) {
+    It 'InterT47_keeps_descriptor_writes_out_of_an_ancestor_replacement' {
         if($null -eq ('P4RenameOnReadStream' -as [type])) {
             Add-Type -TypeDefinition @'
 public sealed class P4RenameOnReadStream : System.IO.MemoryStream {
@@ -1369,7 +1400,7 @@ public sealed class P4RenameOnReadStream : System.IO.MemoryStream {
 
     # Scenario: A middle ancestor is renamed during Read, at EOF, or replaced while b/c retain their inodes.
     # Purpose: Validate every root-relative ancestor, not only the final directory and its immediate parent.
-    It 'InterT48_rejects_moved_or_replaced_intermediate_unix_ancestors' -Skip:$IsWindows {
+    It 'InterT48_rejects_moved_or_replaced_intermediate_unix_ancestors' {
         if($null -eq ('P4MoveIntermediateOnReadStream' -as [type])) {
             Add-Type -TypeDefinition @'
 public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
@@ -1409,6 +1440,7 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
                 }
             } finally { $stream.Dispose(); $lease.Dispose() }
         }
+    }
     }
 
     # Scenario: An otherwise physical runtime fixture gains a directory link, as Store layouts may contain.
@@ -1508,7 +1540,9 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
 
     # Scenario: Code invoked by the probe itself attempts to change a runtime DLL.
     # Purpose: Keep receipt guards live through execution, and release them after it returns.
-    It 'InterT54_holds_windows_runtime_guards_until_the_probe_returns' -Skip:(-not $IsWindows) {
+    # Not registered on Unix because deny-write FileShare guards are Windows-specific.
+    if ($p4IsWindows) {
+    It 'InterT54_holds_windows_runtime_guards_until_the_probe_returns' {
         $fixture=New-P4ProbeRuntime 'p4-probe-write'
         $dll=Join-Path $fixture.Root 'System.Management.Automation.dll'
         $denied=Join-Path $script:P4Root 'p4-probe-denied'
@@ -1521,6 +1555,7 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
         [IO.File]::ReadAllText($denied) | Should Be 'denied'
         [IO.File]::ReadAllText($dll) | Should Be 'approved dependency'
         [IO.File]::WriteAllText($dll,'after execution')
+    }
     }
 
     # Scenario: The host exposes a physical pwsh and at least one physical Pester manifest.
@@ -1583,7 +1618,9 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
 
     # Scenario: Local Pester 4.10.1 is staged under a physical runtime, or the host layout contains links.
     # Purpose: Preserve payload/manifest checks on physical hosts and assert fail-closed rejection on linked hosts.
-    It 'InterT60_initializes_local_pester_4_10_1_and_rejects_a_tampered_manifest' -Skip:($null -eq $script:P4Pester4101) {
+    # Not registered when Pester 4.10.1 is absent because this integration fixture validates that exact approved payload.
+    if ($p4Pester4101ForRegistration.Count -gt 0) {
+    It 'InterT60_initializes_local_pester_4_10_1_and_rejects_a_tampered_manifest' {
         if(Test-P4KnownRuntimeLinkRejection){ return }
         $pester=$script:P4Pester4101
         $hash=Get-P4PesterPayloadHash $pester.Path (Join-Path $TestDrive 'pester-hash'); $runtime=Get-P4KnownRuntimeReceipt
@@ -1595,6 +1632,7 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
         $tamperedHash=Get-P4PesterPayloadHash $manifest (Join-Path $TestDrive 'tampered-hash'); $lease=New-P4DestinationLease 'p4-pester-tampered'
         try { $caught=$null; try { Initialize-PlatformPester -Policy @{pesterPurpose='regression';pesterModulePath=$manifest;approvedPayload=@{version='4.10.1';sha256=$tamperedHash}} -RuntimeReceipt $runtime -DestinationLease $lease | Out-Null } catch { $caught=$_ }; $caught.Exception.GetType().Name | Should Be 'PlatformVerificationException' }
         finally { $lease.Dispose() }
+    }
     }
 
     # Scenario: Pester source bytes change after snapshot approval but before copying.
@@ -1631,7 +1669,9 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
 
     # Scenario: A dependency is changed during Pester preparation, after the first identity probe.
     # Purpose: Recheck the receipt immediately before the second launch (physical module import).
-    It 'InterT62_rechecks_runtime_closure_before_the_pester_import_launch' -Skip:($null -eq $script:P4Pester4101) {
+    # Not registered when Pester 4.10.1 is absent because a physical import is required to reach the second launch.
+    if ($p4Pester4101ForRegistration.Count -gt 0) {
+    It 'InterT62_rechecks_runtime_closure_before_the_pester_import_launch' {
         $fixture=New-P4ProbeRuntime 'p4-runtime-before-import'
         $pester=$script:P4Pester4101
         $hash=Get-P4PesterPayloadHash $pester.Path (Join-Path $TestDrive 'pester-preimport-hash')
@@ -1662,10 +1702,13 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
             [IO.File]::WriteAllText((Join-Path $fixture.Root 'System.Management.Automation.dll'),'released after failure')
         } finally { $lease.Dispose() }
     }
+    }
 
     # Scenario: Pester.psm1 is changed during the final runtime check, after payload validation.
     # Purpose: Windows must deny the write; Unix must revalidate Pester after the runtime check, before import.
-    It 'InterT64_protects_pester_between_payload_validation_and_import' -Skip:($null -eq $script:P4Pester4101) {
+    # Not registered when Pester 4.10.1 is absent because the late-mutation boundary uses its physical payload.
+    if ($p4Pester4101ForRegistration.Count -gt 0) {
+    It 'InterT64_protects_pester_between_payload_validation_and_import' {
         $fixture=New-P4ProbeRuntime 'p4-late-pester'; $pester=$script:P4Pester4101
         $hash=Get-P4PesterPayloadHash $pester.Path (Join-Path $TestDrive 'pester-late-hash')
         $policy=@{pesterPurpose='regression';pesterModulePath=$pester.Path;approvedPayload=@{version='4.10.1';sha256=$hash}}
@@ -1728,10 +1771,13 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
             }
         } finally { $lease.Dispose() }
     }
+    }
 
     # Scenario: A physical pwsh receives only the declared bundle closure, or the host layout contains links.
     # Purpose: Verify standalone initialization on physical hosts and typed rejection on linked hosts.
-    It 'InterT70_initializes_pester_from_only_the_declared_runtime_closure' -Skip:($null -eq $script:P4Pester4101) {
+    # Not registered when Pester 4.10.1 is absent because standalone initialization requires that approved local payload.
+    if ($p4Pester4101ForRegistration.Count -gt 0) {
+    It 'InterT70_initializes_pester_from_only_the_declared_runtime_closure' {
         if(Test-P4KnownRuntimeLinkRejection){ return }
         $bundle=Join-Path $script:P4Root 'p4-standalone-bundle'
         $manifest=Import-PowerShellDataFile -LiteralPath $script:P4Manifest
@@ -1772,5 +1818,6 @@ try {
         $receipt=[string]$output[0] | ConvertFrom-Json
         $receipt.version | Should Be '4.10.1'
         $receipt.purpose | Should Be 'regression'
+    }
     }
 }
