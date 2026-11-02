@@ -187,7 +187,7 @@ $script:SourceGateTestRoot = $PSScriptRoot
                 authority=[pscustomobject]@{ repository='https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'; revision=$fixtureAuthority; contentMode='source'; runnerSha256='3' * 64; contractSha256='4' * 64 }
                 adapter=[pscustomobject]@{ schemaVersion=2; identity='standard-core-adapter-v2'; sha256=$adapterHash }
                 artifacts=[pscustomobject]@{ runId=$runId; root=$root; outputPath=Join-Path $root 'result.json'; runRoot=$runRoot; snapshotRoot=$snapshot }
-                sourceValidation=[pscustomobject]@{ status='passed'; runId=$runId; candidateId=$candidateId; sourceRevision='a' * 40; contentSha256=$contentHash; authorityRevision=$fixtureAuthority; activeSkills=$skills; skillsRoot='skills'; toolReceipts=$receipts; frozenFiles=$sourceSpec.frozenFiles; events=$events; pesterCaseInventory=$caseBinding; adapterSnapshot=$adapterBinding }
+                sourceValidation=[pscustomobject]@{ status='passed'; runId=$runId; candidateId=$candidateId; sourceRevision='a' * 40; contentSha256=$contentHash; authorityRevision=$fixtureAuthority; activeSkills=$skills; scannerStatus='passed'; coverageComplete=$true; platformUnavailableEvidence=$null; skillsRoot='skills'; toolReceipts=$receipts; frozenFiles=$sourceSpec.frozenFiles; events=$events; pesterCaseInventory=$caseBinding; adapterSnapshot=$adapterBinding }
                 checks=$checks
             }
             if ($CentralRawTests) { $fixtureReport.sourceValidation | Add-Member -NotePropertyName testOwnership -NotePropertyValue 'central-third-party-raw-skill-v1' }
@@ -196,7 +196,9 @@ $script:SourceGateTestRoot = $PSScriptRoot
         }
         function Invoke-SourceGateFixture {
             param($Report, [int] $ExitCode=0, [string] $ExpectedAuthorityRevision=('e'*40))
-            Assert-StandardCoreSourceCheckReport -Report $Report -ExpectedSourceRevision ('a' * 40) -ExpectedBaseRevision ('b' * 40) -ExpectedAuthorityRevision $ExpectedAuthorityRevision -ExpectedEventName 'pull_request' -ArtifactsRoot $Report.artifacts.root -OutputPath $Report.artifacts.outputPath -ProcessExitCode $ExitCode
+            $securityPolicy=Get-Content -Raw -Encoding UTF8 (Join-Path (Split-Path -Parent $script:SourceGateTestRoot) 'docs/standards/validation-security-gate.json') | ConvertFrom-Json
+            $platformPolicy=@($securityPolicy.stages | Where-Object {[string]$_.id -ceq 'skillspector-static'})[0].platformUnavailableException
+            Assert-StandardCoreSourceCheckReport -Report $Report -ExpectedSourceRevision ('a' * 40) -ExpectedBaseRevision ('b' * 40) -ExpectedAuthorityRevision $ExpectedAuthorityRevision -ExpectedEventName 'pull_request' -ArtifactsRoot $Report.artifacts.root -OutputPath $Report.artifacts.outputPath -ProcessExitCode $ExitCode -ValidationSecurityPolicy $platformPolicy
         }
         function Set-SourceGateEnvelope {
             param($Report, [int] $Index, [scriptblock] $Mutate)
@@ -232,7 +234,7 @@ $script:SourceGateTestRoot = $PSScriptRoot
             $script:SourceFakeReceipts=@($Receipts)
             $script:SourceAfterChild=$AfterChild
             Mock Invoke-StandardValidationCommandAndRecord {
-                param($CommandSpec,[string]$RunRoot,[string]$ChildWorkingRoot,[string]$StageId,[string]$ToolId,[string]$CandidateId,[string]$SkillId,[string[]]$ExpectedActiveSkills)
+                param($CommandSpec,[string]$RunRoot,[string]$ChildWorkingRoot,[string]$StageId,[string]$ToolId,[string]$CandidateId,[string]$SkillId,[string[]]$ExpectedActiveSkills,[switch]$AllowPlatformUnavailable,$PlatformUnavailablePolicy,[string]$HostPlatform)
                 $script:SourceToolLaunches.Add([string]$ToolId)
                 $nativeReports=@()
                 if([string]$ToolId -cin @('skill-validator','skill-tools','static-analyzer')){
@@ -262,8 +264,11 @@ $script:SourceGateTestRoot = $PSScriptRoot
             $spec=$adapter.sourceValidation
             $skillSet=Get-StandardValidationSkillSet -CandidateRoot $Report.artifacts.snapshotRoot -SkillsRootRelative 'skills' -DeclaredSkills $adapter.activeSkills
             $trustedRoot=Split-Path -Parent ([string]$spec.packageAdapter.command)
+            $securityPolicy=Get-Content -Raw -Encoding UTF8 (Join-Path (Split-Path -Parent $script:SourceGateTestRoot) 'docs/standards/validation-security-gate.json') | ConvertFrom-Json
+            $platformPolicy=@($securityPolicy.stages | Where-Object {[string]$_.id -ceq 'skillspector-static'})[0].platformUnavailableException
             return Invoke-StandardCoreSourceTools -Spec $spec -SkillSet $skillSet -RunId $Report.runId -SourceRevision $Report.candidate.sourceRevision `
                 -AuthorityRevision $Report.authority.revision -SnapshotRoot $Report.artifacts.snapshotRoot -ContentSha256 $Report.candidate.contentSha256 `
                 -RunRoot $Report.artifacts.runRoot -AdapterPath $Report.sourceValidation.adapterSnapshot.path -AdapterSha256 $Report.sourceValidation.adapterSnapshot.sha256 `
-                -ArtifactsRoot $Report.artifacts.root -TrustedToolRoot $trustedRoot -TimeoutSeconds 5 -CancellationPath (Join-Path $Report.artifacts.root 'cancelled')
+                -ArtifactsRoot $Report.artifacts.root -TrustedToolRoot $trustedRoot -TimeoutSeconds 5 -CancellationPath (Join-Path $Report.artifacts.root 'cancelled') `
+                -ValidationSecurityPolicy $platformPolicy
         }

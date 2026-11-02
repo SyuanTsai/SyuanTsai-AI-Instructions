@@ -468,6 +468,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/delivery/syp-351/cross-platform-inventory.md",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/diagram-design-document-workflow.md",
       "license": "Apache-2.0"
     },

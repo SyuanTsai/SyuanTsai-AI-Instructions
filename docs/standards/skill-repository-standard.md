@@ -2,13 +2,15 @@
 
 Status: **Normative**
 Authority: `SyuanTsai-AI-Instructions/docs/standards/`
-Tracking: Jira `SYP-167`
+Tracking: Jira `SYP-167`, `SYP-352`
 
 ## 1. Purpose
 
 本標準定義 Agent Skill source repository 從 package、validation、security review、release 到 consumer installation 的共同 contract。Repository-specific 能力可透過 extension / adapter / config 接入，但不得另建第二套 lifecycle、Security Gate、severity policy、review policy 或 validation-tool policy。
 
-本 Repository 與使用其共用 AI-Instructions／Skills runtime 的消費 Repository，其本機 Agent 開發、安裝、執行、驗證、測試、acceptance 與 CI host 僅支援 Windows；Linux、macOS 與 WSL 為不支援的 local execution hosts。此限制涵蓋消費 Repository 的本機 Agent 與 CI hosts，但不涵蓋下游產品的 target/deployment OS，也不限制核准 connector 背後遠端 SaaS 的服務 OS。所有受本標準規範的 owned production Skills——包括 active、dormant 與 bundled Skills，以及獨立產品維護、未加入 Catalog 的 Skill-Darktide-Translate——其 source snapshot 的適用性依 Source Repository 宣告的 authority.commit 與 member hashes 判定；這些欄位將該 snapshot 採用的 exact Standard bytes 綁定為固定版本。僅當該 snapshot 的 pinned Standard bytes 包含本 Windows 支援規則時，source owner MUST 確保該 snapshot 規範的每個 owned production Skill 目前及後續 revision 的 SKILL.md description 均明示 local execution 僅支援 Windows、Linux/macOS/WSL 不支援，並保留既有 capability、trigger 與遠端 SaaS 語意。較早 immutable references 與採用未含此規則之 pinned Standard 的 snapshots 依其原 pinned Standard 判定，不追溯修改。測試 fixtures 與 examples 不屬於此描述更新範圍；此要求不將獨立產品 Skill 加入本 Catalog、profile、lock 或 bootstrap。此處定義文件與 selection metadata 的支援描述，不構成 runtime、toolchain、CI enforcement 或 acceptance gate 變更的授權；如有具體 defect 或明確 requirement，這類實際變更仍須依既有統一 contracts 另行授權。
+本 Repository 與使用其共用 AI-Instructions／Skills runtime 的消費 Repository，其本機 Agent 開發、安裝、執行、驗證、測試、acceptance 與 CI host **MUST** 支援 Windows、Linux、macOS；WSL 視同 Linux host，不另設規則。所有 Skill 與 installer **MUST** 遵守此三平台 contract；本 Repository 自身 CI 的分階段落實依第 18.1.1 節，不代表目前已通過三平台驗證；下游產品的 target/deployment OS 與核准 connector 背後遠端 SaaS 的服務 OS 不受此 host 分類限制。Claude Code、GitHub Copilot、Codex **MUST** 共用同一份 canonical Skill 與規範，依第 4 節作 host projection。
+
+所有受本標準規範的 owned production Skills——包括 active、dormant 與 bundled Skills，以及獨立產品維護、未加入 Catalog 的 Skill-Darktide-Translate——其 source snapshot 的適用性依 Source Repository 宣告的 authority.commit 與 member hashes 判定；這些欄位將該 snapshot 採用的 exact Standard bytes 綁定為固定版本。Source owner **MUST** 確保 `SKILL.md` description 與 README 不誤導支援範圍，並保留既有 capability、trigger 與遠端 SaaS 語意。若 Skill 依賴某平台才有的外部工具，**MUST** 在 `SKILL.md` 本文或 references 說明該能力的依賴與適用範圍，**MUST NOT** 在 description 開頭放置平台限定宣告。較早 immutable references 與採用舊版 pinned Standard 的 snapshots 依其原 pin 判定，不追溯修改；此要求不將獨立產品 Skill 加入本 Catalog、profile、lock 或 bootstrap。SYP-352 僅修訂規範文件，runtime、toolchain、tests 與 CI 的實作由後續 Step 處理；升級採用依第 18 節執行。
 
 ## 2. Normative terms
 
@@ -56,6 +58,8 @@ Source repositories 在宣稱 Standard v1 conformant 前 **MUST** 實作本標�
 
 `Skill-General` 在 SYP-155 完成後 **SHOULD** 作為 implementation reference。若 reference implementation 與本標準衝突，**MUST** 修正 implementation，或先修改本標準並完成 review/tests；不得以 implementation 現況覆蓋 normative policy。
 
+跨 repository 共用的平台抽象——路徑安全、程序隔離、鎖、PowerShell runtime 取得與 Pester 準備——**MUST** 由本 Repository（AI-Instructions）提供，並透過第 3.2 節的 authority pin 與完整 inventory/hash 分發。各 repository **MUST** 使用該共用模組與契約，**MUST NOT** 各自發展不相容的版本；host adapter 只綁定平台能力與參數。
+
 ### 3.5 Upstream interoperability boundary
 
 SYP-193 的上游採用與 adapter 邊界記錄於 [`upstream-interoperability.md`](upstream-interoperability.md)。Standard v1 **MUST** 採用其 pinned Agent Skills portable core；Plugin manifest、MCP/app mapping、marketplace、hooks 與上游 metadata 只能依該 decision record 作為 declared adapter/extension，**MUST NOT** 取代 central Catalog/Lock、provenance、canonical validation、security、approval 或 managed lifecycle authority。當 Plugin／marketplace／MCP adapter surface 存在時，其 deterministic package conformance **MUST** 進入 SYP-192 Gate 1，adapter **MUST** inventory 每個 declared bundled Skill 的完整 regular/non-reparse resource set，並讓 `skill-validator`／`skill-tools check` 與 SkillSpector 對同一份 inventory 執行及共同阻擋後續 gate；adapter 不得把 path、manifest、endpoint、approved marketplace repository 或 selector 檢查延後到 Pester，也不得重排 canonical gate。Marketplace `source.path` **MUST** exactly be `./`，Git repository **MUST** ordinal-match adapter 的 approved central provenance list。上游文件若沒有可重現的 immutable schema/revision，**MUST NOT** 以 mutable 文件變更靜默改寫 Standard v1。
@@ -70,8 +74,8 @@ Dedicated Skill source repository **MUST** 使用 flat stable-ID source root：
 skills/
   <skill-id>/
     SKILL.md
-    agents/
-      openai.yaml
+    agents/          # optional OpenAI/Codex adapter
+      openai.yaml    # optional; validate when present
     scripts/        # optional
     references/     # optional
     assets/         # optional
@@ -90,15 +94,17 @@ Historical `.agents/skills/<skill-id>` source repositories 可在 SYP-155～159 
 
 Source path 與 consumer/runtime path **MUST** 分離。
 
-合法 consumer projection 可包含，例如：
+合法 consumer projection **MUST** 支援下列 host locations；`.agents/skills` 不是唯一 consumer 模型：
 
-- `.agents/skills/<skill-id>`；
-- `.github/skills/<skill-id>`；
-- `.claude/skills/<skill-id>`；
-- `$HOME/.agents/skills/<skill-id>`；
-- host 定義的其他 managed Skill location。
+- 使用者層 `~/.agents/skills/<skill-id>`：Codex、GitHub Copilot；
+- 使用者層 `~/.claude/skills/<skill-id>`：Claude Code；
+- 使用者層 `~/.copilot/skills/<skill-id>`：GitHub Copilot，選用；
+- 專案層 `.agents/skills/<skill-id>`、`.claude/skills/<skill-id>`、`.github/skills/<skill-id>`；
+- host 定義的其他 managed Skill location **MAY** 作為 extension。
 
 Source repository **MUST NOT** 為不同 host fork 相同 Skill content；host adapter 僅負責 projection、installation、capability binding 或 host-specific acceptance。
+
+同一 canonical source revision 投影到各位置的完整 package bytes 與 per-file hashes **MUST** 相同，並通過相同的 post-install inventory verification；不得依 AI 改寫內容。`AGENTS.md`、`.github/copilot-instructions.md` 與 `CLAUDE.md` **MUST** 由同一來源產生，內容規範、限制與例外 **MUST** 一致。
 
 ### 4.3 Stable identity
 
@@ -115,8 +121,9 @@ Rename **MUST** 使用新 stable ID 並由 central Catalog lifecycle 處理 tomb
 
 每個 owned-source active Skill package **MUST** 包含：
 
-- `SKILL.md`；
-- `agents/openai.yaml`。
+- `SKILL.md`。
+
+`agents/openai.yaml` 是選用的 OpenAI／Codex adapter metadata；package **MAY** 包含它，存在時 **MUST** 遵守第 4.6 節的全部規則與驗證，缺少它本身不得使 package validation 失敗。
 
 未提供 source-owned inventory／interface metadata 的第三方原始 Skill，只能透過中央 [`third-party-raw-skill-sources.md`](third-party-raw-skill-sources.md) 的明確 opt-in 契約採用。此路徑以中央 descriptor 記錄 ownership、完整原始 package inventory／hash、介面資料與授權／review 狀態；不得假造上游文件或修改 raw bytes。除該契約明列的 metadata ownership 差異外，portable package、正式 SourceValidation、安全與 lifecycle 門檻全部保留。
 
@@ -136,11 +143,21 @@ Standard v1 的 frontmatter baseline 以 [`openai/skills@49f948faa9258a0c61cacea
 
 Closing frontmatter delimiter 後 **MUST** 有至少一個 non-whitespace Markdown body character；只有 frontmatter 或空 body **MUST** fail closed。Validator **MUST** 使用完整 YAML/frontmatter parser；只以 regular expression 擷取 `name` 或檢查檔案存在不足以符合本節。
 
+`SKILL.md` **MUST** 保持 AI 中立；**MUST NOT** 使用單一 AI 專屬的呼叫語法（例如 `$skill-name`），`allowed-tools` **MUST NOT** 使用只有某個 AI 能解讀的格式。上述五個 frontmatter fields 的 allowlist 與既有 required/optional 語意保留；host-specific routing **MUST** 放入對應 adapter。
+
+#### 4.5.1 Concise instructions and shared references
+
+- 失敗處理 **MUST** 只寫一處；Workflow 已涵蓋的規則 **MUST NOT** 在 `Error Handling`／`Stop Conditions` 重述，這兩節只列 Workflow 未涵蓋的情況。
+- `SKILL.md` 內文 **MUST NOT** 放 SPDX 註解；授權 **MUST** 由 repository 的 `REUSE.toml` 統一宣告且涵蓋 `SKILL.md`。Frontmatter 的 `license` 欄位與既有語意保留。
+- 完整輸出範本、相容性說明、工具免責段等長範本與低頻細節 **MUST** 放入 `references/`；`SKILL.md` 只描述何時載入。
+- Example **MUST** 用於示範輸出格式或判斷邊界；只重述步驟的「Expected workflow」型 Example **MUST NOT** 保留。
+- 多個技能相同的規則 **MUST** 只維護一份共用 reference；各技能 **MUST** 明確指定載入時機與可解析的 reference，不得複製成各自的規則。
+
 ### 4.6 `agents/openai.yaml` contract
 
 本 Standard 將 [`openai/skills@49f948faa9258a0c61caceaf225e179651397431` 的 `openai_yaml.md`](https://github.com/openai/skills/blob/49f948faa9258a0c61caceaf225e179651397431/skills/.system/skill-creator/references/openai_yaml.md) 視為 Standard v1 已 review 的最低相容性基線；內部規範可以更嚴格，但不得比該 immutable upstream contract 更寬鬆。後續 upstream change 不會因 mutable default branch 自動改寫本 Standard；採用新版 baseline **MUST** 依第 19 節更新 pinned upstream revision、semantic schema、validator 與 regression evidence。
 
-`agents/openai.yaml` **MUST** 不只存在，還必須通過內容驗證：
+`agents/openai.yaml` 是選用 adapter；僅當檔案存在時，下列內容驗證 **MUST** 全部通過：
 
 - 檔案 **MUST** 是 syntactically valid YAML；
 - root **MUST** 是 mapping/object；
@@ -149,7 +166,7 @@ Closing frontmatter delimiter 後 **MUST** 有至少一個 non-whitespace Markdo
 - `interface.display_name` **MUST** 是 non-empty quoted string；
 - `interface.short_description` **MUST** 是 25～64 characters inclusive 的 quoted string；
 - `interface.default_prompt` **MUST** 是 non-empty quoted string；
-- `interface.default_prompt` **MUST** 明確 reference exact `$<skill-id>` token，使 metadata routing identity 與 package stable ID 對得上；
+- `interface.default_prompt` **MUST** 明確 reference exact `$<skill-id>` token，使 metadata routing identity 與 package stable ID 對得上；此呼叫 token 只允許在本 adapter 內使用，不得寫入共用 `SKILL.md`；
 - `dependencies.tools[]` 若存在，`type` 在 Standard v1 **MUST** exact 為 quoted `"mcp"`；`value` / `description` / `transport` / `url` 若存在必須是 non-empty quoted string，且 `url` 必須是 absolute HTTPS URI；
 - malformed YAML、quoted key、unquoted string value、缺欄位、空白欄位、`short_description` 長度超界或錯誤 Skill identity **MUST** fail closed。
 
@@ -223,6 +240,8 @@ Source repository **MAY** 維護 derived/read-only display metadata，但 **MUST
 6. 每行為 `<path>\t<raw-file-sha256>\n`；由於第 3 點禁止 delimiter/control characters，record boundary 不得被 path 注入；
 7. 串接 UTF-8 no-BOM bytes 後計算 SHA-256。
 
+每個受支援的 checkout byte form **MUST** 有對應的完整 inventory 與 digest；Linux／macOS 均涵蓋 LF，Windows 涵蓋其受支援的 CRLF／LF forms。驗證 **MUST** 比對實際 exact bytes 與同一 form 的完整 digest 集合，不得混用不同 form 的 digest，或以 newline normalization 取代 integrity verification；相同 LF bytes 可共用相同 digest，但不得據此宣稱已完成另一平台的執行驗證。
+
 ### 6.2 Immutable runtime source
 
 Consumer/publisher **MUST NOT** 直接以 mutable `main`、branch 或 moving tag 作為 runtime content authority。Mutable ref **MAY** 作為 update-selection provenance，但內容執行、安裝與重現 **MUST** 綁定已解析的 immutable commit 與 integrity hashes。
@@ -288,7 +307,7 @@ Repository **MUST** 維持上述 ordering semantics。Extension **MAY** 在相�
 
 Release-affecting surfaces **MUST** preserve canonical failure propagation: `|| true`, `|| :`, `continue-on-error: true`, `if: always()` and equivalent suppression **MUST** be rejected whenever the surface can proceed to release, publish, deploy, or tag.
 
-Consumer 的 release-affecting entry-point inventory **MUST** 覆蓋所有 `.github/workflows/*.yml`／`*.yaml`、versioned/local hooks（`.git/hooks`、`.githooks`）與 public release command 文件（`README.md`、`RELEASING.md`、`RELEASE.md`、`docs/RELEASE.md`、`docs/RELEASING.md`）。所有 workflow、hook、pre-push／pre-commit 與 public command 若會影響 release pass/block，**MUST** route to the canonical validator；conformance **MUST** inventory these surfaces rather than maintain a fixed filename blacklist. There MUST be one canonical validation execution per event/candidate.
+Consumer 的 release-affecting entry-point inventory **MUST** 覆蓋所有 `.github/workflows/*.yml`／`*.yaml`、versioned/local hooks（`.git/hooks`、`.githooks`）與 public release command 文件（`README.md`、`RELEASING.md`、`RELEASE.md`、`docs/RELEASE.md`、`docs/RELEASING.md`）。所有 workflow、hook、pre-push／pre-commit 與 public command 若會影響 release pass/block，**MUST** route to the canonical validator；conformance **MUST** inventory these surfaces rather than maintain a fixed filename blacklist. There **MUST** be one canonical validation matrix per event/candidate, with exactly one canonical execution per platform leg; duplicated workflows or executions within a leg **MUST NOT** establish another gate.
 
 Public command Markdown **MUST** be checked only for documentation consistency within the local Markdown section that contains the command. ATX and Setext headings **MUST** delimit sections consistently; heading-looking lines inside fenced code blocks are literal code and **MUST NOT** split a section. A canonical command in an unrelated section **MUST NOT** authorize a release command. Setup and diagnostics, including optional hook commands, **MUST NOT** become release gates only because they appear near canonical validation.
 
@@ -308,19 +327,21 @@ Source setup **MUST** 使用既有 approved-source resolver，保留真實工具
 
 Source receipts 是既有 resolver 的 unsigned acquisition output；來源信任沿用 protected base driver 的明確 setup 與已核對 authority，而非任意 caller receipt／wrapper 的自宣告 hash。Runner **MUST** 驗必要 resolver identity、executable、launcher／payload／runtime 與 closure 綁定；historical advanced lifecycle 的 signed supervisor attestation **MUST NOT** 成為 source CI 前提。工具完成後若 repository check 失敗，失敗報告 **MUST** 保留已完成工具證據；只有完整 `PASS` 才要求有效完整 Pester inventory。
 
-三個 required contexts **MUST** 共用同一 event/candidate 一次完整 canonical source 結果，且僅在 exact candidate／base／authority／run、原始輸出與完整 inventory 全部有效時成功。Protected PR **MUST** 繼續由 exact protected base driver 執行；舊 Core driver 的綠燈不能代表新 source gate。Source evidence **MUST** 保持 `releaseEligible=false`，明列 source checks 的範圍；既有 historical v1 `BLOCKED` 與 explicit Semantic／lifecycle evidence **MUST NOT** 被改寫成完整 PASS。
+每個 PR 的 canonical 驗證 **MUST** 以 `ubuntu-latest`、`windows-latest`、`macos-latest` matrix 並行執行，三個 leg 皆為必要，並設定 `fail-fast: false`。三個 required contexts `repository-contract`、`skill-validator`、`skill-tools` 的名稱 **MUST** 維持不變；它們 **MUST** 共用同一 event/candidate 的完整 matrix 結果，且僅在全部 leg 都完成並通過 canonical source 驗證時成功。任一 leg 失敗、取消、缺席、未執行或 evidence 無效，context **MUST** 失敗；不得只採用其中一個平台的 PASS。每個 leg **MUST** 分別綁定 exact candidate／base／authority、自己的 frozen run/toolset、原始輸出與完整 inventory；aggregate **MUST** 核對相同 event/candidate 及完整平台集合。Protected PR **MUST** 繼續由 exact protected base driver 執行；舊 Core driver 的綠燈不能代表新 source gate。Source evidence **MUST** 保持 `releaseEligible=false`，明列 source checks 的範圍；既有 historical v1 `BLOCKED` 與 explicit Semantic／lifecycle evidence **MUST NOT** 被改寫成完整 PASS。
 
-The ordinary route **MUST** copy only the verified tracked regular files into its run-owned snapshot; it **MUST NOT** copy `.git`, ignored files, or untracked/private files. It **MUST** discover and compare `activeSkills` from that tracked-only snapshot, then execute every declared local general or Pester check against it with a bounded timeout, captured stdout/stderr digests, and verified child cleanup. A `PASS` **MUST** have exit code zero, every check `passed` with exit code zero and `cleanedUp=true`, and `releaseEligible=false`. The local process boundary does not provide filesystem read isolation from same-account children; untrusted candidates **MUST** execute only in a platform-provided no-secret, low-privilege environment, while local smoke tests **MUST** use trusted isolated fixtures. Windows child processes **MUST** use hidden windows and `CreateNoWindow` with bounded timeout and cleanup.
+The ordinary route **MUST** copy only the verified tracked regular files into its run-owned snapshot; it **MUST NOT** copy `.git`, ignored files, or untracked/private files. It **MUST** discover and compare `activeSkills` from that tracked-only snapshot, then execute every declared local general or Pester check against it with a bounded timeout, captured stdout/stderr digests, and verified child cleanup. A `PASS` **MUST** have exit code zero, every check `passed` with exit code zero and `cleanedUp=true`, and `releaseEligible=false`. The local process boundary does not provide filesystem read isolation from same-account children; untrusted candidates **MUST** execute only in a platform-provided no-secret, low-privilege environment, while local smoke tests **MUST** use trusted isolated fixtures. On Windows, child processes **MUST** use hidden windows and `CreateNoWindow` with bounded timeout and cleanup. On Linux/macOS, child processes **MUST NOT** allocate an interactive terminal and **MUST** use a separate process group, bounded timeout, and complete owned-descendant cleanup; all platforms **MUST** satisfy §8.4 process-isolation evidence.
+
+CI 的一次 canonical execution 指同一 event/candidate 的一個完整 matrix，每個平台 leg 各有自己的 setup、frozen run 與結果；local／pre-push 可在目前 host 執行一次相同 canonical entry，該結果只代表該 host，不得冒充全部三平台 required-context evidence。
 
 #### 8.1.3 Historical v1 advanced lifecycle
 
 The explicit v1 advanced route **MUST NOT** treat caller-supplied source metadata or a copied candidate directory as acquisition proof. It **MUST** require a provider-acquired immutable archive, its SHA-256, and a trusted-supervisor-signed candidate-acquisition receipt binding repository, source/base revision, event, archive URL, archive hash, and normalized content inventory; the archive **MUST** be safely extracted and compared with the candidate tree before validation. Development harnesses **MUST** emit an explicit unverified acquisition status and **MUST NOT** become release-eligible. The route **MUST** likewise require a trusted-supervisor-signed authority snapshot receipt binding this fixed authority repository to a full revision, immutable archive URL/hash, selected authority-file inventory, and the current files before executing authority-derived policy. Supervisor and human-approval public keys **MUST** come from the immutable authority trust-anchor root and their approved SHA-256 values **MUST** be pinned outside caller CLI inputs; a caller-selected tool root may provide these files only in an explicitly unreleaseable development harness. Archive, receipt, selected-file, and trust-anchor hashes **MUST** be revalidated around every child process.
 
-Protected PR、trusted push 與 `workflow_dispatch` **MAY** 使用不同 trigger adapter，但每個 adapter **MUST** 使用相同 canonical validator、candidate binding、stage ordering 與 local/pre-push/CI pass/block semantics；path/branch filter 的表面差異不得被當成 candidate disjointness proof，重疊 filter **MUST** 以 event-level canonical key 偵測並 `BLOCK`；同一 event/candidate **MUST NOT** 執行兩次 canonical validation。
+Protected PR、trusted push 與 `workflow_dispatch` **MAY** 使用不同 trigger adapter，但每個 adapter **MUST** 使用相同 canonical validator、candidate binding、stage ordering 與 local/pre-push/CI pass/block semantics；path/branch filter 的表面差異不得被當成 candidate disjointness proof，重疊 filter **MUST** 以 event/candidate/platform key 偵測並 `BLOCK`；同一 event/candidate **MUST** 只有一個 canonical matrix，每個平台 leg 只執行一次 canonical validation。
 
-The explicit v1 advanced routes (`-CompleteLifecycle` or local `-DevelopmentHarness`) use the central runner contract [`standard-validation-contract-v1.json`](standard-validation-contract-v1.json) and its adapter schema [`standard-validation-adapter-v1.schema.json`](schemas/standard-validation-adapter-v1.schema.json). That adapter may declare candidate-relative active Skill roots, the complete active Skill set, trusted tool commands, and repository-test dispatch; it **MUST NOT** declare stage order, severity, exception, approval, or a pre-Static hook. In these explicitly selected v1 modes, `scripts/Invoke-StandardValidation.ps1` **MUST** run against a read-only candidate snapshot: after Controlled Acquisition/Integrity, Package Validation (adapter, `skill-validator`, and `skill-tools` for each active Skill) **MUST** produce candidate-bound actual process/output evidence before SkillSpector Static; failed Static or incomplete analyzer coverage **MUST NOT** dispatch candidate repository tests. Evidence must match [`standard-validation-evidence-v1.schema.json`](schemas/standard-validation-evidence-v1.schema.json); incomplete semantic consent, AI review, human approval, publish/install, or post-install evidence **MUST** remain explicitly `BLOCKED`, `not-applicable`, or `not-run`. Triggered Semantic Scan evidence **MUST** include provider, purpose, scope, typed consent, analyzer identity, `complete` coverage, complete findings digest, and trusted-supervisor signed attestation; missing findings or self-asserted `PASS` is not clean evidence.
+The explicit v1 advanced routes (`-CompleteLifecycle` or local `-DevelopmentHarness`) use the central runner contract [`standard-validation-contract-v1.json`](standard-validation-contract-v1.json) and its adapter schema [`standard-validation-adapter-v1.schema.json`](schemas/standard-validation-adapter-v1.schema.json). That adapter may declare candidate-relative active Skill roots, the complete active Skill set, trusted tool commands, and repository-test dispatch; it **MUST NOT** declare stage order, severity, exception, approval, or a pre-Static hook. In these explicitly selected v1 modes, `scripts/Invoke-StandardValidation.ps1` **MUST** run against a read-only candidate snapshot: after Controlled Acquisition/Integrity, Package Validation (adapter, `skill-validator`, and `skill-tools` for each active Skill) **MUST** produce candidate-bound actual process/output evidence before SkillSpector Static; failed Static or incomplete analyzer coverage **MUST NOT** dispatch candidate repository tests. Only after the §9.1.1 runner-observed contract is implemented by SYP-353 may a verified non-Windows `platform-unavailable` result continue to Repository Tests without becoming scanner PASS or complete coverage；在 SYP-353 完成前，此狀態 **MUST BLOCK**。Evidence must match [`standard-validation-evidence-v1.schema.json`](schemas/standard-validation-evidence-v1.schema.json); incomplete semantic consent, AI review, human approval, publish/install, or post-install evidence **MUST** remain explicitly `BLOCKED`, `not-applicable`, or `not-run`. Triggered Semantic Scan evidence **MUST** include provider, purpose, scope, typed consent, analyzer identity, `complete` coverage, complete findings digest, and trusted-supervisor signed attestation; missing findings or self-asserted `PASS` is not clean evidence.
 
-V1 advanced evidence **MUST** also include `sourceConformance`, a candidate-bound projection for source stages 1–5. It **MUST** require the canonical first five stage identities, order, and `passed` statuses; validate candidate-bound process events for Package Validation, SkillSpector Static, and Repository Tests; require every checked event to report `cleanedUp=true`; constrain each `outputPath` to the report's artifact root; parse that raw event file; and bind its event/stage/tool/skill/candidate/process fields and stdout/stderr digest to the reported event. Every Repository Tests stage event **MUST** bind exactly one typed test record by event ID, tool ID, and candidate, and the typed inventory and result **MUST** match its raw event envelope; the tool role **MUST** be derived from the validated central adapter dispatch kind (general or pester), never from the child envelope or the presence of counts. Each dispatch **MUST** report a non-empty test inventory and a passed typed result. Every validated general dispatch **MUST** omit numeric counts while retaining the same event and result binding. Every validated Pester dispatch **MUST** provide complete `total`, `passed`, and `skipped` counts with `total > 0`, `passed > 0`, `skipped >= 0`, and `passed + skipped = total`; a supplied `failed` count **MUST** be zero. Unknown or conflicting dispatch kinds **MUST** fail source conformance. At least one Pester dispatch **MUST** be present; all Pester dispatches **MUST** be aggregated in stable Stage 5 order within the supported integer range. Missing or invalid required typed counts, zero executed tests, all-skipped count-bearing tests, missing/tampered raw event output, a missing report or field, failed event, or candidate mismatch **MUST** produce `sourceConformance.status=failed` without throwing over canonical finalization. When the canonical report is `BLOCKED`, source projection **MUST** retain `exitCode=10`, `conditional-semantic-scan.status=blocked`, and canonical `releaseEligible=false`; it **MUST NOT** rewrite or mask that state. `sourceConformance.releaseEligible` **MUST** always be false. A consumer may use this projection only for the current workflow's required source checks after comparing its `sourceRevision` with the event candidate SHA. Same-workflow job outputs are an information-routing mechanism for those checks; they are not a candidate-independent protected publisher, do not establish independent authorization, and **MUST NOT** authorize production, install, publishing, or release.
+V1 advanced evidence **MUST** also include `sourceConformance`, a candidate-bound projection for source stages 1–5. It **MUST** require the canonical first five stage identities and order；Stage 1～3 與 5 **MUST** 為 `passed`。在 SYP-353 完成前，Stage 4 **MUST** 為 `passed`，任何 `platform-unavailable` **MUST BLOCK** 且不得產生 passing source conformance；SYP-353 完成 runner-observed contract 後，Stage 4 才 **MAY** 使用經 §9.1.1 驗證的非 Windows `platform-unavailable`。該結果 **MUST** 保留 `scannerCoverageComplete=false` 與 platform evidence，且不得成為 release eligibility。Projection 必須 validate candidate-bound process events for Package Validation, SkillSpector Static, and Repository Tests; require every checked event to report `cleanedUp=true`; constrain each `outputPath` to the report's artifact root; parse that raw event file; and bind its event/stage/tool/skill/candidate/process fields and stdout/stderr digest to the reported event. Every Repository Tests stage event **MUST** bind exactly one typed test record by event ID, tool ID, and candidate, and the typed inventory and result **MUST** match its raw event envelope; the tool role **MUST** be derived from the validated central adapter dispatch kind (general or pester), never from the child envelope or the presence of counts. Each dispatch **MUST** report a non-empty test inventory and a passed typed result. Every validated general dispatch **MUST** omit numeric counts while retaining the same event and result binding. Every validated Pester dispatch **MUST** provide complete `total`, `passed`, and `skipped` counts with `total > 0`, `passed > 0`, `skipped >= 0`, and `passed + skipped = total`; a supplied `failed` count **MUST** be zero. Unknown or conflicting dispatch kinds **MUST** fail source conformance. At least one Pester dispatch **MUST** be present; all Pester dispatches **MUST** be aggregated in stable Stage 5 order within the supported integer range. Missing or invalid required typed counts, zero executed tests, all-skipped count-bearing tests, missing/tampered raw event output, a missing report or field, failed event, or candidate mismatch **MUST** produce `sourceConformance.status=failed` without throwing over canonical finalization. When the canonical report is `BLOCKED`, source projection **MUST** retain `exitCode=10`, `conditional-semantic-scan.status=blocked`, and canonical `releaseEligible=false`; it **MUST NOT** rewrite or mask that state. `sourceConformance.releaseEligible` **MUST** always be false. A consumer may use this projection only for the current workflow's required source checks after comparing its `sourceRevision` with the event candidate SHA. Same-workflow job outputs are an information-routing mechanism for those checks; they are not a candidate-independent protected publisher, do not establish independent authorization, and **MUST NOT** authorize production, install, publishing, or release.
 
 #### 8.1.3 Versioned execution binding and result core
 
@@ -342,11 +363,11 @@ A result **MUST** contain exactly one typed passed claim for the complete expect
 
 ### PR12 source merge exception proposal (inactive)
 
-[`pr12-source-merge-exception-proposal.json`](pr12-source-merge-exception-proposal.json) records a review candidate for one exact `Skill-General` PR12 revision and two fixed checkout byte forms: Windows CRLF inventory/module digests and Linux LF inventory/module digests. All 49 tracked files from that revision were verified byte-identical after CRLF-to-LF normalization; the proposal must match one complete inventory/module digest pair, never a mix. The six retained official SkillSpector 2.12.0 reports were produced for the prior `1adba1e5fb5885d963e1e829f7044d814665ba73` candidate; the exact proposed `66c466540480306c7f5346338d70d036bddb4930` revision updates the Pester result envelope in `scripts/Validate.ps1` and adds one repository behavior test relative to `8505829a6e985aaf4cf7bb7265e3352ae40df53e`, leaving every active `skills/` file byte-identical to the retained scanner source. The reports remain bound to their original source revision and fixed report digests: five Skills are complete, while `manage-task-handoff` reports 10 of 11 components complete and one `static_parse_limit` for `scripts/GitRefHandoffAdapter.psm1`; `static_patterns_tool_misuse` has not completed its analysis of that module. These independent reports do not alter the canonical Stage 4 failure. The proposal **MUST NOT** be interpreted as scanner completion, source conformance, an approved exception, or permission to merge. A draft `sourceMergeExceptionProposal` may report only `eligible-for-policy-review` or `rejected`; it has no approved state and **MUST NOT** satisfy a required source check.
+[`pr12-source-merge-exception-proposal.json`](pr12-source-merge-exception-proposal.json) records a review candidate for one exact `Skill-General` PR12 revision and fixed checkout byte forms. Every supported checkout byte form **MUST** have a corresponding complete inventory/module digest pair: CRLF where supported on Windows, and LF on Linux/macOS (or Windows LF checkout). All 49 tracked files from that revision were verified byte-identical after CRLF-to-LF normalization; the proposal must match one complete inventory/module digest pair, never a mix. The six retained official SkillSpector 2.12.0 reports were produced for the prior `1adba1e5fb5885d963e1e829f7044d814665ba73` candidate; the exact proposed `66c466540480306c7f5346338d70d036bddb4930` revision updates the Pester result envelope in `scripts/Validate.ps1` and adds one repository behavior test relative to `8505829a6e985aaf4cf7bb7265e3352ae40df53e`, leaving every active `skills/` file byte-identical to the retained scanner source. The reports remain bound to their original source revision and fixed report digests: five Skills are complete, while `manage-task-handoff` reports 10 of 11 components complete and one `static_parse_limit` for `scripts/GitRefHandoffAdapter.psm1`; `static_patterns_tool_misuse` has not completed its analysis of that module. These independent reports do not alter the canonical Stage 4 failure. The proposal **MUST NOT** be interpreted as scanner completion, source conformance, an approved exception, or permission to merge. A draft `sourceMergeExceptionProposal` may report only `eligible-for-policy-review` or `rejected`; it has no approved state and **MUST NOT** satisfy a required source check.
 
 Any later PR12 source merge exception **MUST** retain the unmodified official scan, canonical `FAILED`/20, Stage 4 `failed`, Stage 5 `not-run`, `sourceConformance.status=failed`, and `releaseEligible=false`. Supplemental repository tests **MUST** be identified separately and bound to the same immutable candidate, trusted tool and raw process evidence, complete positive Pester counts, and the declared general dispatch; they **MUST NOT** be inserted into canonical Stage 5. A source check **MUST NOT** accept the proposal or any caller-supplied approval string. Adoption would require a separate reviewed authority change with an explicit protected source-check bridge, exact central and consumer heads, and Human Release/Policy Review under §19 acknowledging the missing tool-misuse coverage. Such adoption would apply only to that exact source merge and **MUST NOT** authorize Stage 6–10, release, installation, publishing, Catalog/Lock pinning, or another repository.
 
-The isolated development-harness `SourceMergeExceptionReview` route may observe supplemental general and Pester dispatches only after the exact PR12 candidate has passed Package Validation and failed Static solely for incomplete analyzer coverage. It uses the resolved adapter commands and the existing candidate snapshot, frozen tool identities, contained process execution, raw event files, typed results, and cleanup checks. The six retained scanner JSON reports each have fixed Windows CRLF and Linux LF byte digests; their normalized contents were verified equal, and no other report bytes qualify. The original Windows scanner executable digest identifies the retained historical reports; a later review run binds its own platform executable bytes to the same official SkillSpector release commit and asset through the frozen resolver receipt. Its result is review evidence only; a caller-supplied observation flag or report cannot enable any protected source check. Production canonical validation and current consumer required contexts remain unchanged until a separately reviewed bridge is adopted.
+The isolated development-harness `SourceMergeExceptionReview` route may observe supplemental general and Pester dispatches only after the exact PR12 candidate has passed Package Validation and failed Static solely for incomplete analyzer coverage. It uses the resolved adapter commands and the existing candidate snapshot, frozen tool identities, contained process execution, raw event files, typed results, and cleanup checks. The six retained scanner JSON reports each **MUST** have exact digests for every supported checkout byte form, including CRLF on Windows and LF on Linux/macOS (or Windows LF checkout); their normalized contents were verified equal, and no other report bytes qualify. The original Windows scanner executable digest identifies the retained historical reports; a later review run binds its own platform executable bytes to the same official SkillSpector release commit and asset through the frozen resolver receipt. Its result is review evidence only; a caller-supplied observation flag or report cannot enable any protected source check. Production canonical validation and current consumer required contexts remain unchanged until a separately reviewed bridge is adopted.
 
 ### PR12 exact-source protected source-check adoption boundary
 
@@ -354,11 +375,11 @@ The human policy reviewer accepted the identified missing `static_patterns_tool_
 
 Only a protected consumer workflow evaluated on that exact PR test-merge, using reviewed base driver code and immutable central authority files, **MAY** publish a separate source-merge-only decision to the three required source contexts. It **MUST** distinguish that decision from canonical source conformance, preserve the original failed job and reports in the evidence, and reject a caller-supplied approval, proposal status, arbitrary development-harness PASS, another PR/source SHA, or an unreviewed workflow revision. The GitHub Actions required-check result is the publication boundary; locally invoking a helper cannot establish it. Normal source candidates still require complete canonical source conformance. This bounded source-check change **MUST NOT** satisfy scanner completeness, Stage 5, Stage 6–10, release, installation, publication, or Catalog/Lock selection. If protected CI or the reviewed source/workflow/authority identity changes, the route remains failed until the changed exact candidate is reviewed again under §19.
 
-Production adapter command spec **MUST** resolve to a directly executable, non-reparse trusted file or a resolver-attested package shim and carry a candidate-independent resolver receipt whose executable path/hash, latest-stable identity, install root, run binding, fresh resolution timestamp, complete installed dependency closure, launcher payload/runtime hashes, and trusted-supervisor signature are verified；the runner **MUST** bind each adapter slot to its fixed canonical tool role (`package-adapter`, `skill-validator`, `skill-tools`, `skillspector`, or `pester`) and reject a provenance or receipt whose `toolName` belongs to another slot. Membership in a caller-selected `TrustedToolRoot` or a caller-supplied hash alone is not provenance. Windows `skill-tools.cmd` is accepted only when the signed launcher binds the exact shim, package entry-point payload, and approved Node runtime；Unix package launcher symlinks **MAY** be accepted only when their resolved target is a non-reparse regular file or directory within the same install root and the raw/resolved target identity is included in the closure hash. External, chained, special-file, and other unsafe symlinks **MUST** fail closed. Python venv creation **MUST** use copy layout so interpreter file symlinks do not cross this boundary. Generic interpreters and unsigned script payloads are development-harness-only and **MUST NOT** be accepted in production. Before every child process, the runner **MUST** clear the inherited environment and copy only the approved OS/runtime allowlist plus the `STANDARD_VALIDATION_*` runner namespace; arbitrary inherited credentials, transport overrides, and configuration variables **MUST NOT** cross the supervisor boundary. Runner **MUST** reserve its final output path with a supervisor-owned exclusive handle before any child process, detect substitution, and fail closed rather than accept child-created evidence. It **MUST** revalidate the candidate snapshot inventory before and after every child process, and process cleanup **MUST** cover the complete owned descendant tree, using recursive termination where supported and reporting `cleanedUp=false` until every owned descendant has exited. Caller-supplied `CandidateRoot`, `ArtifactsRoot`, `TrustedToolRoot`, adapter paths, and fixed trust-anchor roots **MUST** be canonicalized by inspecting every existing path component; any symlink/reparse ancestor **MUST** be rejected before lexical containment comparisons or artifact creation. `canonicalValidatorPath` **MUST** identify the one candidate entry point covered by the central consumer entry-point inventory and invoked as the canonical gate. Human approval、publish/install 與 post-install evidence **MUST** be candidate-bound RSA attestations signed by the trusted supervisor；self-asserted approver/status/timestamp、authorization、release identity、installed inventory 或 integrity fields are insufficient。
+Production adapter command spec **MUST** resolve to a directly executable, non-reparse trusted file or a resolver-attested package shim and carry a candidate-independent resolver receipt whose executable path/hash, latest-stable identity, install root, run binding, fresh resolution timestamp, complete installed dependency closure, launcher payload/runtime hashes, and trusted-supervisor signature are verified；the runner **MUST** bind each adapter slot to its fixed canonical tool role (`package-adapter`, `skill-validator`, `skill-tools`, `skillspector`, or `pester`) and reject a provenance or receipt whose `toolName` belongs to another slot. Membership in a caller-selected `TrustedToolRoot` or a caller-supplied hash alone is not provenance. On Windows, package launchers **MUST** use a `.cmd` shim; `skill-tools.cmd` is accepted only when the signed launcher binds the exact shim, package entry-point payload, and approved Node runtime. On Linux/macOS, package launchers **MUST** be executable physical POSIX launcher files with the same launcher/payload/runtime hash binding. Managed launchers **MUST NOT** be symlinks; all paths and regular files **MUST** satisfy §8.4, including hard-link rejection. Python venv creation **MUST** use copy layout so interpreter file symlinks do not cross this boundary. Generic interpreters and unsigned script payloads are development-harness-only and **MUST NOT** be accepted in production. Before every child process, the runner **MUST** clear the inherited environment and copy only the approved OS/runtime allowlist plus the `STANDARD_VALIDATION_*` runner namespace; arbitrary inherited credentials, transport overrides, and configuration variables **MUST NOT** cross the supervisor boundary. Runner **MUST** reserve its final output path with a supervisor-owned exclusive handle before any child process, detect substitution, and fail closed rather than accept child-created evidence. It **MUST** revalidate the candidate snapshot inventory before and after every child process, and process cleanup **MUST** cover the complete owned descendant tree, using recursive termination where supported and reporting `cleanedUp=false` until every owned descendant has exited. Caller-supplied `CandidateRoot`, `ArtifactsRoot`, `TrustedToolRoot`, adapter paths, and fixed trust-anchor roots **MUST** be canonicalized by inspecting every existing path component; any symlink/reparse ancestor **MUST** be rejected before lexical containment comparisons or artifact creation. `canonicalValidatorPath` **MUST** identify the one candidate entry point covered by the central consumer entry-point inventory and invoked as the canonical gate. Human approval、publish/install 與 post-install evidence **MUST** be candidate-bound RSA attestations signed by the trusted supervisor；self-asserted approver/status/timestamp、authorization、release identity、installed inventory 或 integrity fields are insufficient。
 
 The trusted supervisor **MUST** generate a fresh validation run ID at invocation start, sign a `validation-launch-binding-v1` containing that ID and the invocation identity, and pass the same ID to the resolution orchestration **before** resolver receipt creation；the binding **MUST** also contain a signed absolute `consumptionPath` outside the candidate, artifact, and trusted-tool roots. Before authority or resolver work, the central runner **MUST** atomically create a supervisor-owned create-only consumption marker at that path and **MUST** reject an existing marker, so deletion and recreation of the caller-controlled artifact root cannot replay a still-valid binding. The central runner **MUST** receive `-SupervisorLaunchBindingPath`, read, hash, and parse one retained launch-binding byte snapshot, and retain its authenticated snapshot hash for evidence registration. It MUST read the adapter and signed resolver receipt bytes once, compute and retain their corresponding snapshot SHA-256 values, parse those same bytes, authenticate the binding and receipt provenance against their snapshots, and fail closed if any binding, adapter, or receipt path changes during the handoff before full adapter validation. It MUST authenticate that binding and the signed `package-adapter` resolver receipt against its exact ID before full adapter validation. The binding **MUST** fix the candidate, adapter, artifact/output, trusted-tool, source/archive, authority-revision, and bounded validity-window inputs；the runner **MUST** revalidate its file hash before and after every child process. Every production adapter slot **MUST** bind to the same ID. The signed handoff uses lowercase 32-character hexadecimal N-format; `evidence.launchBinding.resolutionRunId` **MUST** serialize that same GUID as canonical hyphenated UUID D-format for schema validity. A caller-supplied `-RunId` **MUST** be rejected outside the development harness so an old or caller-selected `resolutionRunId` cannot be replayed into a new validation. The runner **MUST** capture each child stdout and stderr stream with a fixed maximum of 1,048,576 characters；when either stream exceeds its quota, it **MUST** terminate the complete owned process tree, retain only the bounded stream prefix, record the overflow diagnostic separately, and fail the event；it **MUST NOT** use unbounded `ReadToEnd` capture。
 
-Runner 的 terminal state 與 local／pre-push／CI exit semantics 必須一致：`PASS=0`、`BLOCKED=10`、`FAILED=20`、`INVALID=30`、`CANCELLED=40`。每個 event/candidate 最多一個 canonical execution；artifact 必須位於 checkout 外的 run-owned root，以 atomic create-only evidence 與 execution lock 防止覆寫／重播。development harness 可以執行無害 fixture 以驗證行為，但 `releaseEligible` **MUST** 為 false；AI Review 永遠不能取代 Human Approval。Runner 不替代 protected-base 的 `Invoke-StandardAuthorityGate.ps1` authority regression，也不得自行提升 trusted base。
+Runner 的 terminal state 與 local／pre-push／CI exit semantics 必須一致：`PASS=0`、`BLOCKED=10`、`FAILED=20`、`INVALID=30`、`CANCELLED=40`。每個 event/candidate 最多一個 canonical matrix，每個平台 leg 最多一個 canonical execution；artifact 必須位於 checkout 外的 run-owned root，以 atomic create-only evidence 與 execution lock 防止覆寫／重播。development harness 可以執行無害 fixture 以驗證行為，但 `releaseEligible` **MUST** 為 false；AI Review 永遠不能取代 Human Approval。Runner 不替代 protected-base 的 `Invoke-StandardAuthorityGate.ps1` authority regression，也不得自行提升 trusted base。
 
 Canonical entry **MUST**：
 
@@ -388,7 +409,7 @@ Canonical resolver **MUST** 在解析任何工具前先驗證 machine-readable p
 
 對 Pester，resolver **MUST** 每次從核准的 PowerShell Gallery endpoint 解析 latest stable；中央 authority policy **MUST** 另記錄經審查的該版本 immutable payload SHA-256。若最新穩定版尚無相符核准 identity，validation **MUST** fail closed，不得退回較舊版本。`Save-Module` 取得 run-owned 產物後，resolver **MUST** 在任何 `Test-ModuleManifest`、`Import-Module` 或其他可能初始化下載程式碼的操作前，驗證完整 regular/non-reparse payload 路徑及 bytes 與該 approved identity 相符；canonical hash 只排除 PowerShellGet 每次產生的單一 `PSGetModuleInfo.xml`，不得忽略其他套件檔案。Manifest version、root module、export 與 initialization-hook metadata **MUST** 以 data-only 解析，並在比對前後確認完整 installed closure 未漂移；resolver host **MUST NOT** 載入下載的 Pester。Receipt **MUST** 綁定 approved payload 及 run-owned installed closure；需要實際執行 Pester 的既有 Stage 5／authority test 邊界仍須核對 frozen receipt 與其完整 closure 後按 exact path 載入。任何 payload、metadata、manifest 或 closure 不符都須拒絕並清理 run-owned 安裝根目錄。
 
-Canonical CI 使用的 reusable action **MUST** 綁定 reviewed full commit SHA，不得只使用可移動的 major tag。Checkout **MUST** 關閉 persisted repository credentials。Windows Core **MUST** 在 Windows 上使用 SHA-256 驗證的最新穩定 PowerShell 7，對 main pull request 與 push 自動執行，且不得使用 paths filter；它 **MUST** 呼叫 canonical authority gate 並執行保留的 source composition/acquisition tests。Windows Install Smoke **MUST** 保留 production lock、真實安裝與 idempotence checks。standards-conformance.yml **MUST** 僅以 workflow_dispatch 作為手動診斷 workflow，不得建立重複自動 authority 狀態或取代 Windows Core。SYP86 lock 可保留指定 branch/path 的 push 與手動診斷，validator maintenance 可保留手動診斷；兩者 **MUST NOT** 增加普通 pull-request workflow。R4 更新的是預期 Windows CI contexts，不修改遠端 ruleset；既有 retired required contexts 的調整須另行授權完成。Whitespace/diff gate **MUST** 依實際 pull-request base 或 push-before SHA 驗證，不得在 main push 上退化成空 range。
+Canonical CI 使用的 reusable action **MUST** 綁定 reviewed full commit SHA，不得只使用可移動的 major tag。Checkout **MUST** 關閉 persisted repository credentials。本 Repository 的三平台 Core／Install Smoke matrix 是目標要求，其分階段落實與過渡期間 required gate **MUST** 依第 18.1.1 節判定。目標 Core lane **MUST** 在 Windows、Linux、macOS 各有一個 leg，取得各平台對應的官方 release asset，並在執行前以 SHA-256 驗證最新穩定 PowerShell 7；對 main pull request 與 push 自動執行，且不得使用 paths filter；它 **MUST** 呼叫 canonical authority gate 並執行保留的 source composition/acquisition tests。目標 Install Smoke lane **MUST** 在三平台各有一個 leg，保留 production lock、真實安裝與 idempotence checks；Core 與 Install Smoke 的 matrix **MUST** 使用 `fail-fast: false`，目標全部 leg 都是必要驗證，過渡期間依第 18.1.1 節逐步納入。standards-conformance.yml **MUST** 僅以 workflow_dispatch 作為手動診斷 workflow，不得建立重複自動 authority 狀態或取代三平台 Core。SYP86 lock 可保留指定 branch/path 的 push 與手動診斷，validator maintenance 可保留手動診斷；兩者 **MUST NOT** 增加普通 pull-request workflow。本規範保留三個 source required-context 名稱，將 Core／Install Smoke 改為平台中立 lane，不直接修改遠端 ruleset；既有 retired required contexts 的調整須另行授權完成。Whitespace/diff gate **MUST** 依實際 pull-request base 或 push-before SHA 驗證，不得在 main push 上退化成空 range。
 
 對 `SkillSpector`，resolver **MUST**：
 
@@ -421,7 +442,7 @@ Formal consumer validation that invokes skill-validator **MUST** use the central
 
 `skill-validator` 的 module resolution 與 installation **MUST** 使用該次 resolver invocation 專用、初始為空的暫存 `GOMODCACHE` 與 `GOCACHE`，並在 invocation 結束後移除。Resolver **MUST** 在任何 `go list` / `go install` 前拒絕 inherited `GOMODCACHE`、inherited `GOCACHE`、`GOROOT`、`GOTOOLDIR`、target/build selector 與非空 `GOFLAGS`：shared module cache 可能重用 caller-controlled 的下載/解壓縮內容，shared build cache 可能重用非本次 trusted resolution 產生的 compilation output，`GOROOT` / target selectors 可替換 compiler、stdlib 或產物目標，而 `GOFLAGS` 可注入改變 build behavior 的參數。鎖定 `GOPROXY` / `GOSUMDB` 不能取代這些 build-input 與 cache isolation controls。
 
-當受驗 package 包含本 Standard 定義的 `agents/openai.yaml` 時，central adapter **MUST** 以 exact `--allow-dirs=agents` 執行 `skill-validator validate structure`，明確宣告這個 platform metadata directory；不得以接受 exit code `2`、忽略 warning 或允許任意其他目錄取代。Machine-readable report 仍 **MUST** 為 `passed = true`、`errors = 0`、`warnings = 0`，且 central gate **MUST** 另外驗證 exact fixture/package inventory 與 `agents/openai.yaml` contract。
+當受驗 package 包含本 Standard 定義的 `agents/openai.yaml` 時，central adapter **MUST** 以 exact `--allow-dirs=agents` 執行 `skill-validator validate structure`，明確宣告這個 platform metadata directory；不得以接受 exit code `2`、忽略 warning 或允許任意其他目錄取代。Machine-readable report 仍 **MUST** 為 `passed = true`、`errors = 0`、`warnings = 0`，且 central gate **MUST** 另外驗證 exact fixture/package inventory 與存在的 `agents/openai.yaml` contract；未提供此 optional adapter 的 package 不得因缺少它而失敗。
 
 Canonical workflow **MUST** 透過中央 resolver 取得 validation tool；**MUST NOT** 在 workflow 另寫一套獨立 `Install-Module`、`npm install`、`go install`、`pip install` 或其他來源選擇邏輯來繞過中央 policy。Resolver 可以使用 provider-specific package manager，但 provider、package/repository identity 與 validation semantics 由中央 resolver 決定。
 
@@ -465,6 +486,22 @@ Dedicated source repository **MUST** 以上述完整 active source inventory 作
 
 若未來某 baseline tool 改為 conditional、被替代或只作 diagnostic，該變更屬 validation-tool policy change，**MUST** 先依第 19 節在 central machine-readable policy、resolver/adapter 與 authority regression 明確建模；source repository 不得自行略過。
 
+### 8.4 Cross-platform file, lock and process safety
+
+受管路徑與安全相關路徑（包含 candidate、authority、tool、artifact、lock、trust anchor、manifest、backup 與 recovery journal）**MUST** 拒絕 symlink；在 Windows 上同時 **MUST** 拒絕 junction／reparse point。此規則適用每個既存 ancestor、目標與操作期間的路徑，不得只做 lexical containment。受管一般檔案的 hard link 數 **MUST** 為 1；Unix **MUST** 驗證 `st_nlink == 1`，Windows **MUST** 以 file handle 核對等效 link count。
+
+在 Linux／macOS 上，路徑檢查與後續操作 **MUST** 以已開啟的 parent directory 為準，使用 `lstat`／`O_NOFOLLOW` 等不跟隨連結的方式與 directory-relative operations，並核對開啟後的檔案身分與 link count，避免檢查與操作之間被替換。在 Windows 上，**MUST** 以不跟隨 reparse point 的 handle 與身分重驗提供等效保護；任何平台無法證明安全路徑、regular-file identity 或單一 hard link 時 **MUST** fail closed。
+
+需要互斥的 execution、evidence 與 transaction operations **MUST** 使用平台有效的 lock。`FileShare` 的強制性只可在 Windows 上依賴；Linux／macOS **MUST** 使用 `flock`／`fcntl` advisory lock，所有參與者 **MUST** 遵守同一協定，不得把 `FileShare` 當成等效互斥。Evidence **MUST** 記錄實際平台與 lock primitive；既有 create-only、ownership、timeout、substitution detection 與 recovery guarantees 均保留。
+
+受監督的 child process **MUST** 有 bounded timeout 與完整 owned-descendant cleanup；平台隔離能力 **MUST** 至少符合：
+
+- Windows：使用 Job Object，並維持 hidden window／`CreateNoWindow`。
+- Linux：使用獨立 process group 加 subreaper、cgroup 或 PID namespace。
+- macOS：接受獨立 process group／session，加 PID 與啟動時間的身分驗證，避免 PID reuse 導致錯誤回收。
+
+Linux／macOS child process **MUST NOT** 配置互動終端。Validation evidence **MUST** 標明實際隔離能力，例如 `windows-job-object`、`linux-process-group-subreaper`、`linux-pid-namespace`、`macos-process-group`，**MUST NOT** 只寫 `unix` 或宣稱未提供的能力。若工作要求不可逃逸的強隔離，**MUST** 使用外部 sandbox；process group／session 本身不得宣稱具備此保證。
+
 ## 9. SkillSpector Static Security Gate
 
 ### 9.1 Required stage
@@ -472,6 +509,12 @@ Dedicated source repository **MUST** 以上述完整 active source inventory 作
 所有 active Skill packages **MUST** 在 Package Validation 成功後、Repository Tests 開始前通過 SkillSpector Static Security Scan。
 
 Catalog-driven repository **MUST** 自動從 source inventory discover 所有 active Skill；新增 Skill **MUST NOT** 能因忘記修改 CI hard-coded list 而繞過 scan。
+
+#### 9.1.1 Platform availability
+
+SkillSpector 在 Windows 上 **MUST** 維持必要；Linux／macOS 上能執行時也 **MUST** 維持必要。非 Windows 例外只有在 runner 自行執行並擷取 SkillSpector 原生相容性探測，且證據綁定本次 dispatch 的 frozen command／arguments digest、已驗證的 tool／runtime receipt identity，以及同一 event 的實際 stdout／stderr／exit 或 startup failure 時，才 **MAY** 將該平台步驟列為 `platform-unavailable` 並繼續；子程序 envelope、自述文字或 caller 提供的 digest 不構成 runner 觀測。證據仍 **MUST** 記錄平台、runtime/tool identity、實測命令、原始結果與不相容原因，不能把一般掃描失敗、缺少設定、timeout 或 findings 當成平台不支援。此 runner 觀測契約由 SYP-353 實作；在 SYP-353 完成前，所有平台的 SkillSpector Static 皆為必要，`platform-unavailable` 一律 `BLOCK`。macOS 是否可執行仍由 SYP-353 的 CI 實跑確認；在實測前不得預先豁免。
+
+SYP-353 完成上述 runner-observed contract 後，此平台例外才統一適用本 Standard 中 SkillSpector 的 required-tool、stage ordering、completeness、non-waivable core 與 conformance 條文：獲准的非必要步驟 **MUST** 明列為 `platform-unavailable`，保留 evidence，**MUST NOT** 偽報 scanner PASS、完整 coverage 或已執行；Repository Tests 只可在 Package Validation 成功且 runner 綁定的原生不可執行證據通過驗證後繼續。其他 canonical checks 與三個 matrix legs 仍為必要，Windows 及其他能執行平台的 scanner failure 仍 **MUST** fail closed；不得以另一平台的豁免抵銷失敗。
 
 ### 9.2 Fail-closed requirements
 
@@ -672,7 +715,7 @@ Semantic trigger decision **MUST** be derived from typed analyzer/candidate-diff
 
 當 provider adapter 以 source file text 建立 semantic work 時，完整 immutable candidate manifest 與 raw byte cache **MUST** 涵蓋套件內所有 regular files，包括 PNG、PDF 與其他 binary assets；binary 仍綁定 candidate，但 **MUST NOT** 因此被解碼或送往 provider。受保護的 caller **MUST** 依 frozen scanner policy 另行建立並認證 deterministic provider text inventory，其路徑必須是完整 manifest 的子集合，且 raw graph 的 `llm_components` 與 `llm_file_cache` 必須完全等於該子集合。實際交給 provider 的每個文字輸入 **MUST** 等於該已驗證 source bytes 的 `strict-utf8-v1` 解碼結果；invalid UTF-8、stale cache、substituted text、遺漏或額外 provider component **MUST** BLOCK。Adapter **MUST** 以 `(skillId, path)` ordinal 排序，將每列的 `skillId`、`path`、`sourceSha256`、`sourceBytes`、`transformation=strict-utf8-v1` 與 `providerTextSha256` 編成 UTF-8、sorted-key、無多餘空白的 canonical JSON array，並將其 SHA-256 記為 `providerTextInventorySha256`。每個 planned work item **MUST** 各有一筆成功 provider call，且 `work_id`、analyzer、path 與 line interval 必須一致；不得讓未呼叫的工作項目沿用同 analyzer 其他工作的成功狀態。若未來需要其他轉換，該轉換 **MUST** 先成為本 Standard 與 `validation-security-gate.json` 的版本化 deterministic contract，並以原始位元組、轉換識別與轉換後 digest 完整綁定；adapter 不得自行採用未授權轉換。
 
-`semantic-scan-preflight-v1` 是 provider output 的 unsigned preparation artifact。Scanner JSON 在 deserialization 前 **MUST** 先解碼 property name，並以與受支援 Windows PowerShell parser 一致的 `OrdinalIgnoreCase` 規則拒絕 duplicate/case-colliding properties。它 **MUST** 綁定 `candidateId`、`inputInventorySha256`、`providerTextInventorySha256`、`scanOutputSha256`、provider/purpose/scope、完整 active Skill/analyzer declarations、完整 findings 與 `findingsSha256`；並且 **MUST** 固定記錄 `analyzerInventoryVerified=false`、`consentStatus=pending`、`signed=false`、`releaseEligible=false`。這個 preflight **MUST NOT** 滿足 canonical `semanticEvidence`，也 **MUST NOT** 授權 release/install；只有 trusted supervisor 完成 analyzer inventory verification、取得明確 consent，並簽署 exact candidate 的 `trusted-supervisor-signed-semantic-v1` evidence 後，Semantic Scan stage 才能通過。
+`semantic-scan-preflight-v1` 是 provider output 的 unsigned preparation artifact。Scanner JSON 在 deserialization 前 **MUST** 先解碼 property name，並以與三平台受支援 PowerShell parser 一致的 `OrdinalIgnoreCase` 規則拒絕 duplicate/case-colliding properties。它 **MUST** 綁定 `candidateId`、`inputInventorySha256`、`providerTextInventorySha256`、`scanOutputSha256`、provider/purpose/scope、完整 active Skill/analyzer declarations、完整 findings 與 `findingsSha256`；並且 **MUST** 固定記錄 `analyzerInventoryVerified=false`、`consentStatus=pending`、`signed=false`、`releaseEligible=false`。這個 preflight **MUST NOT** 滿足 canonical `semanticEvidence`，也 **MUST NOT** 授權 release/install；只有 trusted supervisor 完成 analyzer inventory verification、取得明確 consent，並簽署 exact candidate 的 `trusted-supervisor-signed-semantic-v1` evidence 後，Semantic Scan stage 才能通過。
 
 ### 11.1 Versioned v2 local semantic bridge boundary
 
@@ -680,7 +723,7 @@ Semantic trigger decision **MUST** be derived from typed analyzer/candidate-diff
 
 `StandardSemanticBridge.psm1` 的 provider route、provider callback、signer callback 與 public verification key **MUST** 由 caller 提供；中央 Standard **MUST NOT** 選擇 provider、account/tenant、model、endpoint 或 signer，也 **MUST NOT** 加入 backend。Caller-supplied verification key 只可用於 `development-harness`／local simulation；它不是 protected trust anchor，不能單獨建立 production authority。實際 provider/account/model/endpoint metadata 若未由受保護的 production supervisor independently authenticate，**MUST** 視為未驗證，不得宣稱已驗證的 model metadata。
 
-Provider 與 signer callback **MUST** 是 caller-trusted local code (`callbackTrust=caller-trusted-local-code`)，caller **MUST NOT** 提供 candidate-derived 或其他不可信 callback。目前 callback process boundary 只強制 execution deadline、owned descendant cleanup、清除並 allowlist 的 child environment，以及 bounded stdout/stderr capture；一般中央 validation/workflow 不要求自製 Linux namespace、cgroup 或 private-procfs 隔離作為核心前置。它**不提供 filesystem isolation** (`filesystemIsolation=false`)；callback 仍具有 invoking OS account 的 filesystem 權限，可讀取 explicit stdin payload 以外、該帳號在 host 上可讀的檔案。未來 production callback path **MUST** 採用 separately authenticated trusted-supervisor isolation 與 egress controls。
+Provider 與 signer callback **MUST** 是 caller-trusted local code (`callbackTrust=caller-trusted-local-code`)，caller **MUST NOT** 提供 candidate-derived 或其他不可信 callback。目前 callback process boundary 只強制 execution deadline、owned descendant cleanup、清除並 allowlist 的 child environment，以及 bounded stdout/stderr capture；三平台程序隔離與能力證據 **MUST** 遵守第 8.4 節；Linux **MUST** 使用 process group 加 subreaper／cgroup／PID namespace 的其中一種，而不要求同時提供所有隔離機制。它**不提供 filesystem isolation** (`filesystemIsolation=false`)；callback 仍具有 invoking OS account 的 filesystem 權限，可讀取 explicit stdin payload 以外、該帳號在 host 上可讀的檔案。未來 production callback path **MUST** 採用 separately authenticated trusted-supervisor isolation 與 egress controls。
 
 Local bridge verification **MUST** hash-bind `StandardSemanticBridge.psm1` 與其 v2 schema into the central authority evidence, and the authority snapshot inventory **MUST** contain both files. Every provider and signer callback **MUST** run behind an enforceable deadline that stops the owned callback pipeline; checking elapsed time only after a callback returns is not sufficient. The signed execution object **MUST** carry closed per-work provider-call rows so the verifier can independently recompute request, response, findings, raw-graph, and ledger digests and bind them to the exact provider-text inventory item and complete analyzer set.
 
@@ -700,7 +743,7 @@ Repository Tests stage **MUST** 在 Package Validation 與 SkillSpector Static �
 - package inventory exact match；
 - required files；
 - `SKILL.md` valid YAML frontmatter、allowed fields/types、required `name`/`description`、length/identity 與 non-empty body；
-- `agents/openai.yaml` YAML syntax、unquoted keys、quoted string values、required fields、`short_description` 25～64 character bound 與 `$<skill-id>` identity binding；
+- 存在時的 `agents/openai.yaml` YAML syntax、unquoted keys、quoted string values、required fields、`short_description` 25～64 character bound 與 `$<skill-id>` identity binding；
 - safe relative paths、non-regular entry rejection 與 normalization/case collision rejection；
 - source/inventory integrity contract；
 - repository-specific declared adapters/config；
@@ -721,7 +764,7 @@ Repository Tests stage **MUST** 在 Package Validation 與 SkillSpector Static �
 - latest-stable channel、resolved identity recording 與 central resolver trust boundary；
 - 負向 source / registry / compatibility-policy tampering fail-closed behavior；
 - stable Go release semantics，包含 prerelease / pseudo-version rejection；
-- `agents/openai.yaml` unquoted-key / quoted-string / 25～64 / identity contract；
+- `agents/openai.yaml` 缺省時可通過、存在時的 unquoted-key / quoted-string / 25～64 / identity contract；
 - `SKILL.md` parsed frontmatter、required fields、allowed fields/types、length、identity 與 non-empty body contract；
 - source inventory schema v2、authority distribution binding 與 delimiter-safe portable path contract；
 - formal tools 必須實際覆蓋完整 active package inventory，而不只是 resolution/install receipt；
@@ -736,24 +779,24 @@ Repository Tests stage **MUST** 在 Package Validation 與 SkillSpector Static �
 
 ### 12.3 Central reference implementation ownership and CI
 
-本 Repository 的中央實作依信任邊界維護，回歸測試必須直接保護其 owner；一般或手動 CI 均不得取代 required Windows gate：
+本 Repository 的中央實作依信任邊界維護，回歸測試必須直接保護其 owner；三平台 gate 是目標要求，過渡期間的 required gate 依第 18.1.1 節判定，一般或手動 CI 均不得取代當時適用的 required gate：
 
 | Ownership | Reference implementation | Required regression paths |
 |---|---|---|
 | Candidate/authority runner、tool receipt parser、source dispatch integrity、native report reader | `scripts/Invoke-StandardValidation.ps1` | `tests/skill-repository-standard.Tests.ps1`, `tests/standard-validation-runner.Tests.ps1`, `tests/standard-core-pester-adapter.Tests.ps1` |
 | Internal review assessment、authenticated authority binding 與 consistent/inconsistent 無授權邊界 | `docs/standards/internal-source-continuation.json`, `docs/standards/schemas/internal-source-continuation-v1.schema.json`, `docs/standards/schemas/internal-source-review-assessment-v1.schema.json`, `scripts/Invoke-StandardValidation.ps1` | `tests/internal-source-continuation.Tests.ps1`, `tests/skill-repository-standard.Tests.ps1`, `tests/skill-repository-workflows.Tests.ps1` |
-| Owned internal Skill 准用、exact package/用途/工具與 trusted consumer pins | `docs/standards/internal-source-continuation.json`, `docs/standards/schemas/internal-source-continuation-v1.schema.json`, `scripts/Invoke-StandardValidation.ps1` | `tests/internal-skill-use.Tests.ps1`（既有 Windows Core 完整普通測試 discovery） |
+| Owned internal Skill 准用、exact package/用途/工具與 trusted consumer pins | `docs/standards/internal-source-continuation.json`, `docs/standards/schemas/internal-source-continuation-v1.schema.json`, `scripts/Invoke-StandardValidation.ps1` | `tests/internal-skill-use.Tests.ps1`（目標為三平台 Core 完整普通測試 discovery；過渡依第 18.1.1 節） |
 | Trusted validation tool acquisition, identity and per-run receipt production | `scripts/Resolve-StandardValidationTool.ps1` | `tests/standard-validation-resolver-hardening.Tests.ps1` |
 | Authority/security policy and admission ordering | `scripts/Invoke-StandardAuthorityGate.ps1`, `docs/standards/validation-security-gate.json` | `tests/skill-repository-standard.Tests.ps1`, `tests/skill-repository-workflows.Tests.ps1`, `tests/standard-validation-resolver-hardening.Tests.ps1` |
 | Required workflow wiring and ordinary non-authority Pester execution | `.github/workflows/pr8-powershell-validation.yml` | `tests/skill-repository-workflows.Tests.ps1` |
 
-Required pull request and main-branch validation runs through the Windows Core job in `pr8-powershell-validation.yml`: it parses tracked PowerShell, checks the event diff range, invokes `Invoke-StandardAuthorityGate.ps1` once, then runs the dynamically discovered non-authority Pester suite once. The suite excludes only the five exact authority test paths named by the workflow; its existing `ExpectedSkippedCount = 5` continues to describe the intentional Windows skips and **MUST NOT** be increased to admit another skipped test. `standards-conformance.yml` remains a `workflow_dispatch` diagnostic and cannot replace the required Windows Core job.
+As the target state for this authority repository, required pull request and main-branch validation **MUST** run through the platform-neutral Core lane in `pr8-powershell-validation.yml`, subject to the phased adoption and current required-gate rules in §18.1.1, using parallel `ubuntu-latest`, `windows-latest`, and `macos-latest` legs with `fail-fast: false`. Each leg parses tracked PowerShell, checks the event diff range, invokes `Invoke-StandardAuthorityGate.ps1` once, then runs the dynamically discovered non-authority Pester suite once. The suite excludes only the five exact authority test paths named by the workflow. On Windows, the existing `ExpectedSkippedCount = 5` continues to describe intentional Windows skips and **MUST NOT** be increased to admit another skipped test; Linux/macOS **MUST** use explicitly reviewed platform-specific skip inventories and counts, not inherit the Windows count or skip required canonical checks. All legs **MUST** complete and pass. `standards-conformance.yml` remains a `workflow_dispatch` diagnostic and cannot replace the required Core matrix. The target Install Smoke lane in `syp101-production-smoke.yml` likewise **MUST** have one required leg per platform, subject to §18.1.1. These requirements do not claim that either workflow currently has or has passed all three platform legs. Windows PowerShell 5.1 compatibility remains optional and **MUST NOT** be the sole or canonical result.
 
 SourceValidation execution remains owned by the central source-validation function in `scripts/Invoke-StandardValidation.ps1` and its thin adapter. Consumers retain source-owned functional tests and thin integration contracts in the complete discovered test tree. The optional v2 `testOwnership` selector remains limited to `central-third-party-raw-skill-v1`; unknown schema or ownership values remain rejected, and existing consumers continue to use the v2 adapter and result contracts. A pin or immutable version update alone MUST NOT transfer ownership or permit source-test deletion.
 
 For the Code trial, the current governed source-reader set is `scripts/Invoke-RepositoryCheck.ps1`, `scripts/Invoke-CorePester.ps1`, `scripts/CorePesterIntegrity.psm1`, `scripts/Test-Repository.ps1`, and `tests/validate-catalog.ps1`; those readers require exact candidate==base bytes for governed reader inputs and the full discovered tests tree. This list records the Code trial's verified reader set and is not a universal file inventory for other source repositories. Each source repository MUST retain its own protected reader identities and full discovered tests tree under its approved central policy. Any change to those protected readers or their contract MUST be delivered through a normal reader PR and merged before candidate adoption may rely on it. SYP-325 changes none of the Code trial paths above.
 
-Source-copy equivalence or removal is deferred to downstream adoption. A future adoption may remove only centrally owned framework test copies that are identified item by item and demonstrably replaced by the central tests under the normal required Windows Core CI gate; candidate-owned functional and thin integration tests remain in the full discovered test tree. A pin-only update or source-copy deletion MUST NOT establish equivalence.
+Source-copy equivalence or removal is deferred to downstream adoption. A future adoption may remove only centrally owned framework test copies that are identified item by item and demonstrably replaced by the central tests under the normal required three-platform Core CI gate; candidate-owned functional and thin integration tests remain in the full discovered test tree. A pin-only update or source-copy deletion MUST NOT establish equivalence.
 
 每個 conformant Skill repository **MUST** 有：
 
@@ -855,7 +898,7 @@ Repository **MAY** 增加 extension stage/check，例如：
 - `gh skill publish --dry-run`（僅在 `gh` 已有 central extension-tool declaration 後）；
 - Jira/MCP/credential E2E；
 - state/reservation/recovery validation；
-- Windows byte-preservation tests。
+- 每個受支援 checkout byte form 的 exact-byte preservation tests 與完整 digest；Linux/macOS 均涵蓋 LF，Windows 涵蓋其受支援的 CRLF／LF forms，不得以 newline normalization 取代實際 bytes 驗證。
 
 `validation-toolchain.json` 的 baseline tool set 與 repository-specific extension tool 必須明確區分。任何會影響 canonical pass/block/release outcome 的額外 executable（例如 `gh`）**MUST** 先由 central machine-readable policy 宣告其 provider、package/repository identity、distribution endpoint、version/stability rule、resolved identity evidence 與 resolver/host-tool verification adapter。Source repository **MAY** 宣告需要哪一個已核准 extension tool 及其 stage arguments，但 **MUST NOT** 自行選擇 tool source、endpoint 或 version policy。尚無 central declaration 的 executable 只能作 non-authoritative diagnostic，**MUST NOT** 成為 required release gate。
 
@@ -868,6 +911,22 @@ Extension **MUST**：
 - 不得跳過 Package Validation、Static Security、Repository Tests 或 required Semantic Scan；
 - local/CI/pre-push 使用同一判斷；
 - 不得把 temporary evidence 寫成 uncontrolled tracked state。
+
+### 15.1 Environment separation
+
+每次存取外部系統前，Agent／Skill **MUST** 先確定私人環境或工作環境，依下列順序判斷：
+
+1. URL 或 site 網域；
+2. 任務 issue key 的前綴；
+3. repository 對應設定；
+4. 使用者明確指定；
+5. 仍無法判斷時，停止並詢問使用者。
+
+上述順序不是衝突訊號的覆寫規則；多個訊號指向不同環境時 **MUST** 停下詢問，**MUST NOT** 自行擇一。Issue key 前綴與環境 **MUST** 有明確對應；對應值 **MUST** 存放在使用者本機設定、位於受管技能目錄之外，**MUST NOT** 寫入任何 repository。需要此對應卻找不到時 **MUST** 停下詢問，不得猜測。
+
+外部系統的連線方式 **MUST** 由已確定的環境決定，**MUST NOT** 自動切換或備援到另一種連線方式；例如環境規定只用 API token 時，token 失敗必須停止，不得改用其他連線。實際存取前 **MUST** 核對 site（或等同的租戶識別）與專案均屬於該環境，不符就停止。
+
+寫入類操作的預覽 **MUST** 顯示環境與 site；除非使用者明確要求，**MUST NOT** 跨環境搬移資料。公開 repository **MUST NOT** 包含任何公司 site、租戶識別、token 或內部專案代號對應；規範與範例只使用私人環境、工作環境等抽象名稱，不得嵌入實際對應值。
 
 ## 16. Release, publish and install
 
@@ -898,14 +957,14 @@ Repository 要宣稱 Standard v1 conformant，**MUST** 證明：
 
 1. immutable authority snapshot repository/commit/bundle hash/file inventory；
 2. source/package/schema-v2 inventory contract；
-3. `SKILL.md` 與 `agents/openai.yaml` metadata contract；
+3. AI 中立的 `SKILL.md` 與存在時的 `agents/openai.yaml` metadata contract、三 AI projection/instructions 一致性；
 4. canonical lifecycle stage ordering；
 5. single validation entry contract；
 6. validation tool approved-source / approved-endpoint enforcement；
 7. latest-stable resolution / stable-release semantics / resolved identity / complete per-run toolset freeze evidence；
 8. every formal baseline tool 的 actual invocation 與完整 active package coverage；
 9. immutable workflow action pin、non-persisted checkout credentials、authority trigger coverage 與 event-aware diff evidence；
-10. SkillSpector Static Gate + analyzer completeness；
+10. SkillSpector Static Gate + analyzer completeness，僅可依第 9.1.1 節記錄非必要平台步驟；
 11. severity/fail-closed semantics；
 12. tests/regression/conformance；
 13. semantic trigger handling；
@@ -931,6 +990,22 @@ Migration 順序：
 6. production consumer migration 必須維持 transactional/fail-closed integrity guarantees。
 
 因此現行 central Catalog/Lock 仍可在 migration window pin legacy `.agents/skills/...` source path。Standard v1 定義的是 migration target，不要求 SYP-167 在尚未遷移 source repositories 時破壞 production runtime。
+
+### 18.1 Three-platform and three-AI adoption
+
+Tracking: `SYP-352`。在採用 SYP-353 CI 範本之前，已 pin 舊版 Standard 的 repository **MUST** 依其 authority commit 與 member hashes 判定，不追溯套用本次規範。升級到包含本次修訂的 authority pin 時，**MUST** 同時採用三平台 matrix 與全部 leg 聚合語意；不得只換 pin、沿用單平台 gate，或以 Core-only PASS 滿足三個 source required contexts。歷史 exact-source merge exception 不授權新 pin 略過必要 matrix leg 或其 canonical failure。
+
+採用前 **MUST** 完成受影響的 machine-readable policy／schema、共用平台模組、installer、workflow 與 regression 同步；SYP-352 的文件變更本身不宣稱這些實作或驗證已完成。Consumer projection **MUST** 依第 4.2 節涵蓋三 AI 的使用者層與專案層位置，不得繼續把 `.agents/skills` 當成唯一 consumer 模型；不同位置仍共用 canonical source、相同 hash 與 managed lifecycle guarantees。
+
+#### 18.1.1 Authority repository CI transition
+
+Tracking: `SYP-353`（三平台 CI 範本）、`SYP-354`（installer 跨平台）。本 Repository 自身的三平台 Core 與 Install Smoke matrix 是本次修訂的**目標狀態**，不是目前 workflow 已完成三平台驗證的陳述。過渡起點的 `pr8-powershell-validation.yml` 與 `syp101-production-smoke.yml` 都只有 Windows job；Windows leg **MUST** 持續為 required gate，在其他平台 leg 達成各自完成條件並加入前，Windows 是唯一 required 平台。
+
+在 SYP-353 與 SYP-354 完成前，Linux／macOS leg **MUST** 依各自平台與 lane 的完成條件逐步加入：Core 須完成該平台的 CI 範本接線與 canonical authority／完整保留測試驗證；Install Smoke 須另完成該平台的 installer 跨平台實作、production lock、真實安裝與 idempotence 驗證。每個 leg 加入後即 **MUST** 為 required，**MUST NOT** 再移除或降為非必要；尚未完成的平台不得以略過失敗測試或弱化既有安全門檻宣稱完成。
+
+過渡期間 **MUST NOT** 宣稱本 Repository 已通過三平台驗證；任何報告與 README 的支援矩陣 **MUST** 分別標示 Linux／macOS 的實際狀態、尚未完成的條件與驗證證據。Workflow regression **MUST** 核對當時實際採用的 Windows 及已加入平台 legs，不得把尚未落實的目標 matrix 當成現行 workflow 事實。
+
+過渡期僅在 SYP-353 與 SYP-354 均完成，且 Core／Install Smoke 都已具備三平台 required legs、完成並通過各自 canonical 驗證後結束；屆時 **MUST** 完整符合第 8.2 與第 12.3 節的目標 matrix。本例外只適用 authority repository 自身 CI，不改變 consumer repository 依第 18.1 節升級 pin 時必須同時採用三平台 matrix 的要求。
 
 ## 19. Standard change contract
 

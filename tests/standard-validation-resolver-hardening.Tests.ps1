@@ -1744,7 +1744,7 @@ Describe 'Third-party raw Skill tool boundary' {
             'normal reader PR and merged before candidate adoption',
             'A pin or immutable version update alone MUST NOT transfer ownership',
             'Source-copy equivalence or removal is deferred to downstream adoption',
-            'identified item by item', 'normal required Windows Core CI gate',
+            'identified item by item', 'normal required three-platform Core CI gate',
             'This list records the Code trial', 'not a universal file inventory', 'Each source repository MUST retain its own protected reader identities'
         )) { if(-not $standard.Contains($required)){throw "The reader/adoption contract is missing '$required'."} }
     }
@@ -1881,14 +1881,14 @@ Describe 'SYP280 Core candidate inventory diagnostics SourceValidation' {
                 & $global:Syp280CoreOriginalFileHash -Path $Path -Context $Context
             }
             Mock Invoke-StandardCoreSourceTools {
-                param($Spec,$SkillSet,[string]$RunId,[string]$SourceRevision,[string]$AuthorityRevision,[string]$SnapshotRoot,[string]$ContentSha256,[string]$RunRoot,[string]$AdapterPath,[string]$AdapterSha256,[string]$ArtifactsRoot,[string]$TrustedToolRoot,[int]$TimeoutSeconds,[string]$CancellationPath)
+                param($Spec,$SkillSet,[string]$RunId,[string]$SourceRevision,[string]$AuthorityRevision,[string]$SnapshotRoot,[string]$ContentSha256,[string]$RunRoot,[string]$AdapterPath,[string]$AdapterSha256,[string]$ArtifactsRoot,[string]$TrustedToolRoot,[int]$TimeoutSeconds,[string]$CancellationPath,$ValidationSecurityPolicy)
                 [void]($global:Syp280CoreSourceToolCalls++)
                 $casePath=Join-Path $RunRoot 'repository-pester-case-inventory-v1.json'
                 [IO.File]::WriteAllText($casePath,'{}',(New-Object Text.UTF8Encoding($false)))
                 return [pscustomobject][ordered]@{status='passed';runId=$RunId;sourceRevision=$SourceRevision;authorityRevision=$AuthorityRevision;contentSha256=$ContentSha256;activeSkills=@($SkillSet.ids);frozenFiles=@($Spec.frozenFiles);toolReceipts=@($Spec.toolReceipts);events=@()}
             }
             Mock Assert-StandardCoreSourceCheckReport {
-                param($Report,[string]$ExpectedSourceRevision,[string]$ExpectedBaseRevision,[string]$ExpectedAuthorityRevision,[string]$ExpectedEventName,[string]$ArtifactsRoot,[string]$OutputPath,[int]$ProcessExitCode)
+                param($Report,[string]$ExpectedSourceRevision,[string]$ExpectedBaseRevision,[string]$ExpectedAuthorityRevision,[string]$ExpectedEventName,[string]$ArtifactsRoot,[string]$OutputPath,[int]$ProcessExitCode,$ValidationSecurityPolicy)
                 [void]($global:Syp280CoreSourceGuardCalls++)
             }
 
