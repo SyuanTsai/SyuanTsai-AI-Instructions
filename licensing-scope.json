@@ -468,6 +468,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/delivery/syp-354/installer-cross-platform-design.md",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/diagram-design-document-workflow.md",
       "license": "Apache-2.0"
     },
