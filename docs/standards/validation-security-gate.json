@@ -32,7 +32,18 @@
       "name": "SkillSpector Static",
       "condition": "always",
       "failureAction": "BLOCK",
-      "evidence": ["scannerIdentity", "analyzerCompleteness", "staticReport"]
+      "evidence": ["scannerIdentity", "analyzerCompleteness", "staticReport"],
+      "platformUnavailableException": {
+        "status": "platform-unavailable",
+        "eligiblePlatforms": ["linux", "macos"],
+        "windowsRequired": true,
+        "requiredEvidence": ["platform", "runtimeIdentity", "toolIdentity", "attemptedCommand", "rawResult", "failureKind", "incompatibilityReason"],
+        "acceptedFailureKinds": ["runtime-unsupported", "tool-platform-unsupported", "executable-format-unsupported"],
+        "rejectedFailureKinds": ["scan-failure", "missing-configuration", "timeout", "findings"],
+        "scannerPassed": false,
+        "coverageComplete": false,
+        "releaseEligible": false
+      }
     },
     {
       "order": 5,

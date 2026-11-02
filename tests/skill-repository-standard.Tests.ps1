@@ -593,6 +593,43 @@ Describe 'SYP258 source validation result gate' {
         if ((Invoke-SourceGateFixture -Report $report) -ne $true) { throw 'Complete candidate-bound source evidence must pass.' }
     }
 
+    # Scenario: A report relabels passed raw output or substitutes platform exception evidence.
+    # Purpose: Reject summary/raw mismatches before any exception can skip native Static validation.
+    It 'UnitT25_rejects_SkillSpector_summary_and_raw_envelope_mismatches' {
+        Mock Get-StandardValidationHostPlatform { 'linux' }
+        foreach ($mutation in @('passed', 'different-evidence', 'matching-unproven')) {
+            $report = New-SourceGateFixture
+            $evidence = [pscustomobject]@{
+                platform='linux'; runtimeIdentity='fixture runtime'; toolIdentity='fixture tool'
+                attemptedCommand='fixture scan'; rawResult='fixture incompatibility'
+                failureKind='runtime-unsupported'; incompatibilityReason='fixture runtime incompatibility'
+                scannerPassed=$false; coverageComplete=$false; scannerExecuted=$false; releaseEligible=$false
+            }
+            $report.sourceValidation.scannerStatus = 'platform-unavailable'
+            $report.sourceValidation.coverageComplete = $false
+            $report.sourceValidation.platformUnavailableEvidence = $evidence
+            $staticIndex = @($report.sourceValidation.events).Count - 1
+            $report.sourceValidation.events[$staticIndex].status = 'platform-unavailable'
+            if ($mutation -ne 'passed') {
+                $script:RawExceptionFixture = $evidence | ConvertTo-Json | ConvertFrom-Json
+                if ($mutation -eq 'different-evidence') { $script:RawExceptionFixture.rawResult = 'substituted evidence' }
+                Set-SourceGateEnvelope -Report $report -Index $staticIndex -Mutate {
+                    param($envelope)
+                    $envelope.status = 'platform-unavailable'
+                    $envelope.decision = 'PLATFORM_UNAVAILABLE'
+                    $envelope | Add-Member -NotePropertyName platformUnavailableEvidence -NotePropertyValue $script:RawExceptionFixture
+                }
+            }
+            $failure = $null
+            try { Invoke-SourceGateFixture -Report $report | Out-Null }
+            catch { $failure = $_.Exception.Message }
+            if ($mutation -eq 'matching-unproven') {
+                if ($failure -cnotmatch '^BLOCKED\|.*runner-observed') { throw "Unproven matching evidence must BLOCK: $failure" }
+            }
+            elseif ($failure -cnotmatch '^FAILED\|SkillSpector raw envelope') { throw "Raw mismatch must FAILED: $failure" }
+        }
+    }
+
     Context 'Centrally owned raw source tests' {
     BeforeEach {
         # Unit fixtures mock only the authority Git transport. Actual test bytes and frozen hash checks remain real.
@@ -953,6 +990,12 @@ Describe 'Agent Skill Repository Standard v1 contract' {
                         return $false
                     }
                 }
+            }
+
+            $notProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'not'
+            if ($null -ne $notProperty -and
+                (Test-AuthorityJsonSchemaValue -Value $Value -Schema $notProperty.Value -RootSchema $RootSchema)) {
+                return $false
             }
 
             $ifProperty = Get-CaseSensitiveProperty -Object $Schema -Name 'if'
@@ -4407,6 +4450,30 @@ public sealed class C245NonCooperativeStream : Stream {
             Assert-Equal $stage.failureAction 'BLOCK' "Stage '$($stage.id)' must fail closed."
             Assert-ExactStringSequence $stage.evidence $expectedEvidence[$stageIndex] "Stage '$($stage.id)' must declare the exact canonical evidence sequence."
         }
+        $platformException = @($policy.stages | Where-Object { [string]$_.id -ceq 'skillspector-static' })[0].platformUnavailableException
+        Assert-ExactStringSequence $platformException.eligiblePlatforms @('linux', 'macos') 'SkillSpector platform exceptions must exclude Windows.'
+        Assert-True ([bool]$platformException.windowsRequired) 'SkillSpector must remain required on Windows.'
+        Assert-ExactStringSequence $platformException.requiredEvidence @('platform', 'runtimeIdentity', 'toolIdentity', 'attemptedCommand', 'rawResult', 'failureKind', 'incompatibilityReason') 'Platform-unavailable evidence must bind the measured platform, identities, command, raw result, kind, and reason.'
+        Assert-ExactStringSequence $platformException.rejectedFailureKinds @('scan-failure', 'missing-configuration', 'timeout', 'findings') 'Ordinary scanner failures must not become platform exceptions.'
+        Assert-False ([bool]$platformException.scannerPassed) 'A platform exception must not claim scanner PASS.'
+        Assert-False ([bool]$platformException.coverageComplete) 'A platform exception must not claim complete coverage.'
+        Assert-False ([bool]$platformException.releaseEligible) 'A platform exception must not authorize release.'
+
+        $windowsExemption = Copy-TestJsonObject -Value $policy
+        $windowsExemption.stages[3].platformUnavailableException.eligiblePlatforms = @('windows', 'linux', 'macos')
+        Assert-False (Test-AuthorityJsonSchemaValue -Value $windowsExemption -Schema $schema -RootSchema $schema) 'Policy schema must reject Windows as an exempt platform.'
+        $windowsError = $null
+        try { Assert-AuthorityValidationSecurityGate -Policy $windowsExemption | Out-Null }
+        catch { $windowsError = $_.Exception.Message }
+        Assert-Match $windowsError 'eligible platforms' 'Executable policy validation must reject Windows as an exempt platform.'
+
+        $wrongStageException = Copy-TestJsonObject -Value $policy
+        $wrongStageException.stages[0] | Add-Member -NotePropertyName platformUnavailableException -NotePropertyValue $platformException -Force
+        Assert-False (Test-AuthorityJsonSchemaValue -Value $wrongStageException -Schema $schema -RootSchema $schema) 'Only SkillSpector Static may declare platform-unavailable policy.'
+        $wrongStageError = $null
+        try { Assert-AuthorityValidationSecurityGate -Policy $wrongStageException | Out-Null }
+        catch { $wrongStageError = $_.Exception.Message }
+        Assert-Match $wrongStageError 'must not declare' 'Executable policy validation must reject platform exceptions on another stage.'
         foreach ($mutation in @(
             @{ Name='placeholder'; Mutate={ param($item) $item.stages[0].evidence=@('placeholder') } },
             @{ Name='reordered'; Mutate={ param($item) $item.stages[0].evidence=@('authoritySnapshot', 'candidateIdentity', 'sourcePin') } }
@@ -5500,20 +5567,36 @@ Describe 'SYP352 cross-platform and three-AI Standard contract' -Tag 'SYP352' {
         $safety | Should -Match '\*\*MUST NOT\*\* 只寫 `unix` 或宣稱未提供的能力'
     }
 
-    # Scenario: SkillSpector is waived on Windows or a non-Windows platform without an actual execution incompatibility.
-    # Purpose: Keep the scanner required wherever executable and make the evidence-bound non-Windows exception narrow.
+    # Scenario: SkillSpector is waived before the runner can independently prove a native platform incompatibility.
+    # Purpose: Keep every platform required until SYP-353 supplies the runner-observed evidence contract, then constrain that exception to the exact frozen execution.
     It 'UnitT52g_limits_SkillSpector_platform_exceptions_to_measured_non_Windows_unavailability' {
         $standardPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\standards\skill-repository-standard.md'
         $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardPath
+        $matrixPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\standards\skill-repository-review-matrix.md'
+        $matrix = Get-Content -Raw -Encoding UTF8 -LiteralPath $matrixPath
+        $validationContract = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\standards\standard-validation-contract-v1.json') | ConvertFrom-Json
+        $coreContract = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\standards\standard-core-validation-v2.json') | ConvertFrom-Json
         $availabilityMatch = [regex]::Match($standard, '(?ms)^#### 9\.1\.1 Platform availability\r?\n(?<body>.*?)(?=^### 9\.2)')
         $availabilityMatch.Success | Should -Be $true
         $availability = $availabilityMatch.Groups['body'].Value
+        $advancedMatch = [regex]::Match($standard, '(?ms)^#### 8\.1\.3 Historical v1 advanced lifecycle\r?\n(?<body>.*?)(?=^#### 8\.1\.3 Versioned execution binding)')
+        $advancedMatch.Success | Should -Be $true
+        $advanced = $advancedMatch.Groups['body'].Value
 
         $availability | Should -Match 'SkillSpector 在 Windows 上 \*\*MUST\*\* 維持必要'
         $availability | Should -Match 'Linux／macOS 上能執行時也 \*\*MUST\*\* 維持必要'
-        $availability | Should -Match '僅當某個非 Windows 平台已有實測證據確認 SkillSpector 無法執行時.*才列為非必要'
         $availability | Should -Match '一般掃描失敗、缺少設定、timeout 或 findings.*平台不支援'
+        $availability | Should -Match 'runner 自行執行並擷取 SkillSpector 原生相容性探測'
+        $availability | Should -Match 'frozen command／arguments digest'
+        $availability | Should -Match '已驗證的 tool／runtime receipt identity'
+        $availability | Should -Match '同一 event.*stdout／stderr／exit 或 startup failure'
+        $availability | Should -Match 'SYP-353.*完成前.*所有平台.*必要.*`platform-unavailable` 一律 `BLOCK`'
         $availability | Should -Match 'platform-unavailable.*\*\*MUST NOT\*\* 偽報 scanner PASS、完整 coverage 或已執行'
+        $advanced | Should -Match 'runner-observed contract.*SYP-353.*non-Windows `platform-unavailable`.*Repository Tests'
+        $advanced | Should -Match 'SYP-353 完成前.*Stage 4 \*\*MUST\*\* 為 `passed`.*`platform-unavailable`.*\*\*MUST BLOCK\*\*'
+        $matrix | Should -Match 'SYP-353 runner-observed native compatibility contract.*Before that contract is complete.*every platform.*SkillSpector Static required.*`platform-unavailable`.*MUST BLOCK'
+        $validationContract.evidence.skillSpectorPlatformUnavailable.authorizationState | Should -Be 'blocked-until-syp353-runner-observed-native-compatibility-contract'
+        $coreContract.sourceValidation.platformUnavailableAuthorization | Should -Be 'blocked-until-syp353-runner-observed-native-compatibility-contract'
     }
 
     # Scenario: Environment signals conflict, credentials silently fall back, or real site mappings are committed to the Standard.
@@ -5543,6 +5626,8 @@ Describe 'SYP352 cross-platform and three-AI Standard contract' -Tag 'SYP352' {
     It 'UnitT52i_binds_three_platform_adoption_and_authority_CI_transition' {
         $standardPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\standards\skill-repository-standard.md'
         $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardPath
+        $matrixPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\standards\skill-repository-review-matrix.md'
+        $matrix = Get-Content -Raw -Encoding UTF8 -LiteralPath $matrixPath
         $adoptionMatch = [regex]::Match($standard, '(?ms)^### 18\.1 Three-platform and three-AI adoption\r?\n(?<body>.*?)(?=^## 19\.)')
         $adoptionMatch.Success | Should -Be $true
         $adoption = $adoptionMatch.Groups['body'].Value
@@ -5555,6 +5640,11 @@ Describe 'SYP352 cross-platform and three-AI Standard contract' -Tag 'SYP352' {
         $adoption | Should -Match '過渡期間 \*\*MUST NOT\*\* 宣稱本 Repository 已通過三平台驗證'
         $adoption | Should -Match 'Workflow regression \*\*MUST\*\* 核對當時實際採用的 Windows 及已加入平台 legs'
         $adoption | Should -Match '過渡期僅在 SYP-353 與 SYP-354 均完成.*Core／Install Smoke 都已具備三平台 required legs'
+        $matrix | Should -Match 'Target state: the Core lane becomes the automatic authority matrix'
+        $matrix | Should -Match 'Standard §18\.1\.1 transition.*currently runs only required Windows Core.*only Windows Install Smoke'
+        $matrix | Should -Match 'transition ends only after SYP-353 and SYP-354 are both complete'
+        $matrix | Should -Match 'MUST NOT.*claim three-platform validation'
+        $matrix | Should -Not -Match 'The Core lane is the automatic authority matrix|automatic authority enforcement through all three Core matrix legs, with'
     }
 }
 
@@ -5628,7 +5718,9 @@ Describe 'SYP325 selected source integrity' -Tag 'SYP325' {
             $map=Assert-StandardCoreSourceToolReceipts -Bindings @($sourceSpec.toolReceipts) -FrozenFiles @($sourceSpec.frozenFiles) -RunId $report.runId -CandidateRoot $report.artifacts.snapshotRoot -ArtifactsRoot $report.artifacts.root -ReturnReceiptMap
             $skillSet=Get-StandardValidationSkillSet -CandidateRoot $report.artifacts.snapshotRoot -SkillsRootRelative 'skills' -DeclaredSkills $report.candidate.activeSkills
             $trustedRoot=Split-Path -Parent ([string]$sourceSpec.packageAdapter.command)
-            $states.Add([pscustomobject]@{name=$variant.name;large=[bool]$variant.large;report=$report;sourceSpec=$sourceSpec;map=$map;skillSet=$skillSet;trustedRoot=$trustedRoot})
+            $securityPolicy=Get-Content -Raw -Encoding UTF8 (Join-Path $script:StandardsRoot 'validation-security-gate.json') | ConvertFrom-Json
+            $platformPolicy=@($securityPolicy.stages | Where-Object {[string]$_.id -ceq 'skillspector-static'})[0].platformUnavailableException
+            $states.Add([pscustomobject]@{name=$variant.name;large=[bool]$variant.large;report=$report;sourceSpec=$sourceSpec;map=$map;skillSet=$skillSet;trustedRoot=$trustedRoot;platformPolicy=$platformPolicy})
         }
         $script:SourceSha256Original=(Get-Command Get-StandardValidationFileSha256 -CommandType Function).ScriptBlock
         $script:SourceSha256Reads=New-Object 'System.Collections.Generic.List[object]'
@@ -5763,7 +5855,8 @@ Describe 'SYP325 selected source integrity' -Tag 'SYP325' {
                 -SnapshotRoot $State.report.artifacts.snapshotRoot -ContentSha256 $State.report.candidate.contentSha256 `
                 -RunRoot $State.report.artifacts.runRoot -AdapterPath $State.report.sourceValidation.adapterSnapshot.path `
                 -AdapterSha256 $State.report.sourceValidation.adapterSnapshot.sha256 -ArtifactsRoot $State.report.artifacts.root `
-                -TrustedToolRoot $State.trustedRoot -TimeoutSeconds 5 -CancellationPath (Join-Path $State.report.artifacts.root 'cancelled')
+                -TrustedToolRoot $State.trustedRoot -TimeoutSeconds 5 -CancellationPath (Join-Path $State.report.artifacts.root 'cancelled') `
+                -ValidationSecurityPolicy $State.platformPolicy
             $watch.Stop()
             $rows=@($script:SourceSha256Reads.ToArray())
             $allRoots=@($State.map.groups.groups | ForEach-Object {$_.roots} | Select-Object -Unique)
@@ -5907,7 +6000,7 @@ Describe 'SYP325 selected source integrity' -Tag 'SYP325' {
         $script:SourceToolLaunches=New-Object 'System.Collections.Generic.List[string]'
         $script:SourceFakeReceipts=$receiptBindings
         Mock Invoke-StandardValidationCommandAndRecord {
-            param($CommandSpec,[string]$RunRoot,[string]$ChildWorkingRoot,[string]$StageId,[string]$ToolId,[string]$CandidateId,[string]$SkillId,[string[]]$ExpectedActiveSkills)
+            param($CommandSpec,[string]$RunRoot,[string]$ChildWorkingRoot,[string]$StageId,[string]$ToolId,[string]$CandidateId,[string]$SkillId,[string[]]$ExpectedActiveSkills,[switch]$AllowPlatformUnavailable,$PlatformUnavailablePolicy,[string]$HostPlatform)
             $script:SourceToolLaunches.Add([string]$ToolId)
             if([string]$ToolId -ceq 'package-adapter'){
                 [IO.File]::WriteAllText($script:SourceTamperFile,'changed after setup and before Skillspector dispatch',(New-Object Text.UTF8Encoding($false)))
@@ -5932,8 +6025,10 @@ Describe 'SYP325 selected source integrity' -Tag 'SYP325' {
         }
 
         $rejected=$false
+        $securityPolicy=Get-Content -Raw -Encoding UTF8 (Join-Path $script:StandardsRoot 'validation-security-gate.json') | ConvertFrom-Json
+        $platformPolicy=@($securityPolicy.stages | Where-Object {[string]$_.id -ceq 'skillspector-static'})[0].platformUnavailableException
         try {
-            Invoke-StandardCoreSourceTools -Spec $sourceSpec -SkillSet $skillSet -RunId $report.runId -SourceRevision $report.candidate.sourceRevision -AuthorityRevision $report.authority.revision -SnapshotRoot $report.artifacts.snapshotRoot -ContentSha256 $report.candidate.contentSha256 -RunRoot $report.artifacts.runRoot -AdapterPath $report.sourceValidation.adapterSnapshot.path -AdapterSha256 $report.sourceValidation.adapterSnapshot.sha256 -ArtifactsRoot $report.artifacts.root -TrustedToolRoot $trustedRoot -TimeoutSeconds 5 -CancellationPath (Join-Path $report.artifacts.root 'cancelled')
+            Invoke-StandardCoreSourceTools -Spec $sourceSpec -SkillSet $skillSet -RunId $report.runId -SourceRevision $report.candidate.sourceRevision -AuthorityRevision $report.authority.revision -SnapshotRoot $report.artifacts.snapshotRoot -ContentSha256 $report.candidate.contentSha256 -RunRoot $report.artifacts.runRoot -AdapterPath $report.sourceValidation.adapterSnapshot.path -AdapterSha256 $report.sourceValidation.adapterSnapshot.sha256 -ArtifactsRoot $report.artifacts.root -TrustedToolRoot $trustedRoot -TimeoutSeconds 5 -CancellationPath (Join-Path $report.artifacts.root 'cancelled') -ValidationSecurityPolicy $platformPolicy
         }
         catch { $rejected=$true }
         if(-not $rejected){throw 'A changed Skillspector closure must reject dispatch before its child launch.'}

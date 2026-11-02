@@ -62,6 +62,9 @@
             "type": "string",
             "minLength": 1
           }
+        },
+        "platformUnavailableException": {
+          "$ref": "#/$defs/platformUnavailableException"
         }
       },
       "allOf": [
@@ -90,9 +93,11 @@
             },
             {
               "type": "object",
+              "required": ["platformUnavailableException"],
               "properties": {
                 "id": { "const": "skillspector-static" },
-                "evidence": { "const": ["scannerIdentity", "analyzerCompleteness", "staticReport"] }
+                "evidence": { "const": ["scannerIdentity", "analyzerCompleteness", "staticReport"] },
+                "platformUnavailableException": { "$ref": "#/$defs/platformUnavailableException" }
               }
             },
             {
@@ -138,8 +143,41 @@
               }
             }
           ]
+        },
+        {
+          "if": {
+            "properties": { "id": { "not": { "const": "skillspector-static" } } },
+            "required": ["id"]
+          },
+          "then": { "not": { "required": ["platformUnavailableException"] } }
         }
       ]
+    },
+    "platformUnavailableException": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "eligiblePlatforms",
+        "windowsRequired",
+        "requiredEvidence",
+        "acceptedFailureKinds",
+        "rejectedFailureKinds",
+        "scannerPassed",
+        "coverageComplete",
+        "releaseEligible"
+      ],
+      "properties": {
+        "status": { "const": "platform-unavailable" },
+        "eligiblePlatforms": { "const": ["linux", "macos"] },
+        "windowsRequired": { "const": true },
+        "requiredEvidence": { "const": ["platform", "runtimeIdentity", "toolIdentity", "attemptedCommand", "rawResult", "failureKind", "incompatibilityReason"] },
+        "acceptedFailureKinds": { "const": ["runtime-unsupported", "tool-platform-unsupported", "executable-format-unsupported"] },
+        "rejectedFailureKinds": { "const": ["scan-failure", "missing-configuration", "timeout", "findings"] },
+        "scannerPassed": { "const": false },
+        "coverageComplete": { "const": false },
+        "releaseEligible": { "const": false }
+      }
     },
     "severity": {
       "type": "object",

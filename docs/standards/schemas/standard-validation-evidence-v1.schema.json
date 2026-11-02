@@ -254,7 +254,7 @@
     "sourceConformance": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schemaVersion", "contract", "status", "scope", "sourceRevision", "candidateId", "contentSha256", "checkedStages", "pester", "canonicalValidation", "releaseEligible", "failureReasons"],
+      "required": ["schemaVersion", "contract", "status", "scope", "sourceRevision", "candidateId", "contentSha256", "checkedStages", "scannerCoverageComplete", "platformUnavailableEvidence", "pester", "canonicalValidation", "releaseEligible", "failureReasons"],
       "properties": {
         "schemaVersion": { "const": 1 },
         "contract": { "const": "standard-source-conformance-v1" },
@@ -278,6 +278,8 @@
             }
           }
         },
+        "scannerCoverageComplete": { "type": "boolean" },
+        "platformUnavailableEvidence": { "anyOf": [{ "$ref": "#/$defs/platformUnavailableEvidence" }, { "type": "null" }] },
         "pester": {
           "type": "object",
           "additionalProperties": false,
@@ -547,7 +549,7 @@
         "order": { "type": "integer", "minimum": 1, "maximum": 10 },
         "id": { "type": "string", "minLength": 1 },
         "condition": { "type": "string", "minLength": 1 },
-        "status": { "enum": ["passed", "failed", "blocked", "cancelled", "not-run", "not-applicable"] },
+        "status": { "enum": ["passed", "failed", "blocked", "cancelled", "not-run", "not-applicable", "platform-unavailable"] },
         "startedAt": { "type": ["string", "null"] },
         "endedAt": { "type": ["string", "null"] },
         "reason": { "type": ["string", "null"] },
@@ -555,7 +557,38 @@
         "semanticEvidence": { "anyOf": [{ "$ref": "#/$defs/semanticEvidence" }, { "type": "null" }] },
         "semanticBridgeV2Evidence": { "anyOf": [{ "$ref": "#/$defs/semanticBridgeV2VerifiedEvidenceReference" }, { "type": "null" }] },
         "aiReviewEvidence": { "anyOf": [{ "$ref": "#/$defs/aiReviewEvidence" }, { "type": "null" }] },
+        "platformUnavailableEvidence": { "anyOf": [{ "$ref": "#/$defs/platformUnavailableEvidence" }, { "type": "null" }] },
         "events": { "type": "array", "items": { "$ref": "#/$defs/event" } }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "platform-unavailable" } }, "required": ["status"] },
+          "then": {
+            "properties": {
+              "id": { "const": "skillspector-static" },
+              "platformUnavailableEvidence": { "$ref": "#/$defs/platformUnavailableEvidence" }
+            },
+            "required": ["platformUnavailableEvidence"]
+          }
+        }
+      ]
+    },
+    "platformUnavailableEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform", "runtimeIdentity", "toolIdentity", "attemptedCommand", "rawResult", "failureKind", "incompatibilityReason", "scannerPassed", "coverageComplete", "scannerExecuted", "releaseEligible"],
+      "properties": {
+        "platform": { "enum": ["linux", "macos"] },
+        "runtimeIdentity": { "type": "string", "minLength": 1 },
+        "toolIdentity": { "type": "string", "minLength": 1 },
+        "attemptedCommand": { "type": "string", "minLength": 1 },
+        "rawResult": { "type": "string", "minLength": 1 },
+        "failureKind": { "enum": ["runtime-unsupported", "tool-platform-unsupported", "executable-format-unsupported"] },
+        "incompatibilityReason": { "type": "string", "minLength": 1 },
+        "scannerPassed": { "const": false },
+        "coverageComplete": { "const": false },
+        "scannerExecuted": { "const": false },
+        "releaseEligible": { "const": false }
       }
     },
     "triggerDecision": {
@@ -683,7 +716,7 @@
         "candidateId": { "$ref": "#/$defs/sha256" },
         "commandSha256": { "$ref": "#/$defs/sha256" },
         "exitCode": { "type": "integer" },
-        "status": { "enum": ["passed", "failed", "startup-failed", "timeout", "cancelled", "cleanup-failed", "invalid-output"] },
+        "status": { "enum": ["passed", "failed", "startup-failed", "timeout", "cancelled", "cleanup-failed", "invalid-output", "platform-unavailable"] },
         "outputSha256": { "$ref": "#/$defs/sha256" },
         "outputPath": { "type": "string", "minLength": 1 },
         "cleanedUp": { "type": "boolean" }
