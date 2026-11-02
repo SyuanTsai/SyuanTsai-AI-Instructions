@@ -350,6 +350,109 @@ Describe 'source conformance projection' {
         Assert-SourceProjectionEqual $persistedEarlyFailedEvidence.sourceConformance.status 'failed' 'Missing candidate evidence must fail only the source projection.'
         Assert-SourceProjectionEqual $persistedEarlyFailedEvidence.sourceConformance.releaseEligible $false 'Early FAILED output must remain release-ineligible.'
     }
+
+    # Scenario: SkillSpector cannot execute on one measured non-Windows host, or a caller tries to broaden that exception.
+    # Purpose: Preserve the complete evidence shape without claiming PASS/coverage/release, and block continuation until the runner can independently prove native incompatibility.
+    It 'InterT14_accepts_only_complete_non_Windows_SkillSpector_platform_unavailability_evidence' {
+        $policy = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:SourceProjectionRepositoryRoot 'docs/standards/validation-security-gate.json') | ConvertFrom-Json
+        $platformPolicy = @($policy.stages | Where-Object { [string]$_.id -ceq 'skillspector-static' })[0].platformUnavailableException
+        $rawEvidence = [pscustomobject][ordered]@{
+            platform = 'linux'
+            runtimeIdentity = 'PowerShell 7 test runtime'
+            toolIdentity = 'SkillSpector test identity'
+            attemptedCommand = 'skillspector scan fixture-skill'
+            rawResult = 'runtime rejected the installed SkillSpector entry point'
+            failureKind = 'runtime-unsupported'
+            incompatibilityReason = 'The measured runtime cannot execute this tool build on Linux.'
+        }
+        $accepted = ConvertTo-StandardValidationSkillSpectorPlatformUnavailableEvidence -Evidence $rawEvidence -Policy $platformPolicy -HostPlatform linux
+        if ([bool]$accepted.scannerPassed -or [bool]$accepted.coverageComplete -or [bool]$accepted.scannerExecuted -or [bool]$accepted.releaseEligible) {
+            throw 'Accepted platform-unavailable evidence must remain explicitly unexecuted, uncovered, unpassed, and release-ineligible.'
+        }
+        $toolEnvelope = [pscustomobject][ordered]@{
+            schemaVersion = 1
+            status = 'platform-unavailable'
+            decision = 'PLATFORM_UNAVAILABLE'
+            candidateIdentity = 'c' * 64
+            platformUnavailableEvidence = $rawEvidence
+        }
+        $toolError = $null
+        try { $null = Assert-StandardValidationToolEnvelope `
+            -Stdout ($toolEnvelope | ConvertTo-Json -Depth 10 -Compress) `
+            -ProcessResult ([pscustomobject]@{ status = 'passed'; exitCode = 0 }) `
+            -CandidateId ('c' * 64) `
+            -Context 'SkillSpector fixture' `
+            -AllowPlatformUnavailable `
+            -PlatformUnavailablePolicy $platformPolicy `
+            -HostPlatform linux } catch { $toolError = $_.Exception.Message }
+        if ($toolError -cnotmatch '^BLOCKED\|.*runner-observed') { throw 'A structurally complete child claim must remain blocked without runner-observed native execution evidence.' }
+        foreach ($field in @('attemptedCommand', 'rawResult', 'toolIdentity', 'runtimeIdentity')) {
+            $forged = $rawEvidence | ConvertTo-Json | ConvertFrom-Json
+            $forged.$field = 'forged value unrelated to dispatch'
+            $bindingError = $null
+            try { Assert-StandardValidationSkillSpectorPlatformUnavailableEvidence -Evidence $forged -Policy $platformPolicy -HostPlatform linux | Out-Null }
+            catch { $bindingError = $_.Exception.Message }
+            if ($bindingError -cnotmatch '^BLOCKED\|') { throw "Unbound $field must BLOCK." }
+        }
+        Assert-StandardValidationSkillSpectorRawEnvelopeBinding -Envelope $toolEnvelope -ExpectedStatus 'platform-unavailable' -Evidence $accepted -Policy $platformPolicy -HostPlatform linux
+        foreach ($mutation in @('passed', 'different-evidence')) {
+            $rawEnvelope = $toolEnvelope | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+            if ($mutation -eq 'passed') { $rawEnvelope.status = 'passed'; $rawEnvelope.decision = 'PASS' }
+            else { $rawEnvelope.platformUnavailableEvidence.rawResult = 'different raw evidence' }
+            $bindingError = $null
+            try { Assert-StandardValidationSkillSpectorRawEnvelopeBinding -Envelope $rawEnvelope -ExpectedStatus 'platform-unavailable' -Evidence $accepted -Policy $platformPolicy -HostPlatform linux }
+            catch { $bindingError = $_.Exception.Message }
+            if ($bindingError -cnotmatch '^FAILED\|') { throw "Raw envelope $mutation must fail report binding." }
+        }
+
+        $sourceInput = New-SourceProjectionInput
+        $sourceInput.report.stages[3].status = 'platform-unavailable'
+        $sourceInput.report.stages[3].events[0].status = 'platform-unavailable'
+        $sourceInput.report.stages[3] | Add-Member -NotePropertyName platformUnavailableEvidence -NotePropertyValue $accepted -Force
+        $projection = New-StandardValidationSourceConformanceResult `
+            -Report $sourceInput.report `
+            -ExpectedSourceRevision ('a' * 40) `
+            -RepositoryTestEvidence $sourceInput.tests `
+            -RepositoryTestDispatches $sourceInput.dispatches `
+            -Policy $policy `
+            -HostPlatform linux
+        Assert-SourceProjectionEqual $projection.status 'failed' 'Unproven child evidence must not permit source conformance to continue.'
+        Assert-SourceProjectionEqual $projection.checkedStages[3].status 'platform-unavailable' 'Stage 4 must remain platform-unavailable rather than passed.'
+        Assert-SourceProjectionEqual $projection.scannerCoverageComplete $false 'The source projection must not claim complete scanner coverage.'
+        if ($projection.failureReasons -notcontains 'source-stage-4-platform-unavailable-evidence-invalid') { throw 'Projection must reject an exception without runner observations.' }
+        foreach ($mutation in @('passed', 'different-evidence')) {
+            $event = $sourceInput.report.stages[3].events[0]
+            $raw = Get-Content -Raw -Encoding UTF8 $event.outputPath | ConvertFrom-Json
+            $rawEnvelope = $toolEnvelope | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+            if ($mutation -eq 'passed') { $rawEnvelope.status = 'passed'; $rawEnvelope.decision = 'PASS' }
+            else { $rawEnvelope.platformUnavailableEvidence.rawResult = 'different raw evidence' }
+            $raw.stdout = $rawEnvelope | ConvertTo-Json -Depth 10 -Compress
+            $raw.process.stdout = $raw.stdout
+            $event.outputSha256 = Get-StandardValidationOutputHash -Stdout $raw.stdout -Stderr $raw.stderr
+            [IO.File]::WriteAllText($event.outputPath, ($raw | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
+            $mismatch = New-StandardValidationSourceConformanceResult -Report $sourceInput.report -ExpectedSourceRevision ('a' * 40) -RepositoryTestEvidence $sourceInput.tests -RepositoryTestDispatches $sourceInput.dispatches -Policy $policy -HostPlatform linux
+            Assert-SourceProjectionEqual $mismatch.status 'failed' 'Raw/report mismatch must fail source projection.'
+            if ($mismatch.failureReasons -notcontains 'skillspector-static-raw-envelope-mismatch') { throw 'Projection must identify the raw envelope mismatch.' }
+        }
+        Assert-SourceProjectionEqual $projection.releaseEligible $false 'A platform exception must not authorize release.'
+        $releaseError = $null
+        try { [void](Assert-StandardValidationCanonicalLifecycleStages -Stages $sourceInput.report.stages -Context 'platform-unavailable release fixture') }
+        catch { $releaseError = [string]$_.Exception.Message }
+        if ($releaseError -cnotmatch '^BLOCKED\|') { throw 'A platform-unavailable stage must remain ineligible for lifecycle release.' }
+
+        foreach ($rejected in @(
+            [pscustomobject]@{ Name = 'Windows host'; Host = 'windows'; Evidence = $rawEvidence },
+            [pscustomobject]@{ Name = 'missing raw result'; Host = 'linux'; Evidence = ($rawEvidence | ConvertTo-Json -Depth 5 | ConvertFrom-Json) },
+            [pscustomobject]@{ Name = 'timeout'; Host = 'linux'; Evidence = ($rawEvidence | ConvertTo-Json -Depth 5 | ConvertFrom-Json) }
+        )) {
+            if ($rejected.Name -ceq 'missing raw result') { [void]$rejected.Evidence.PSObject.Properties.Remove('rawResult') }
+            if ($rejected.Name -ceq 'timeout') { $rejected.Evidence.failureKind = 'timeout' }
+            $errorMessage = $null
+            try { [void](Assert-StandardValidationSkillSpectorPlatformUnavailableEvidence -Evidence $rejected.Evidence -Policy $platformPolicy -HostPlatform $rejected.Host) }
+            catch { $errorMessage = [string]$_.Exception.Message }
+            if ($errorMessage -cnotmatch '^BLOCKED\|') { throw "$($rejected.Name) must BLOCK the SkillSpector platform exception." }
+        }
+    }
 }
 
 

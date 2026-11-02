@@ -250,7 +250,7 @@ jobs:
         Assert-Match $standard 'Invoke-StandardValidation\.ps1.*skill-repository-standard\.Tests\.ps1.*standard-validation-runner\.Tests\.ps1.*standard-core-pester-adapter\.Tests\.ps1' 'The Standard must map the runner and report owner to its regression paths.'
         Assert-Match $standard 'Resolve-StandardValidationTool\.ps1.*standard-validation-resolver-hardening\.Tests\.ps1' 'The Standard must map the tool resolver to its hardening regression.'
         Assert-Match $standard 'Invoke-StandardAuthorityGate\.ps1.*validation-security-gate\.json.*skill-repository-workflows\.Tests\.ps1' 'The Standard must map authority/security ownership to policy and workflow regressions.'
-        foreach($boundary in @('normal reader PR and merged before candidate adoption', 'A pin or immutable version update alone MUST NOT transfer ownership', 'Source-copy equivalence or removal is deferred to downstream adoption', 'normal required Windows Core CI gate', 'not a universal file inventory', 'Each source repository MUST retain its own protected reader identities')) {
+        foreach($boundary in @('normal reader PR and merged before candidate adoption', 'A pin or immutable version update alone MUST NOT transfer ownership', 'Source-copy equivalence or removal is deferred to downstream adoption', 'normal required three-platform Core CI gate', 'not a universal file inventory', 'Each source repository MUST retain its own protected reader identities')) {
             if(-not $standard.Contains($boundary)){throw "The ownership map is missing the source-reader or adoption boundary '$boundary'."}
         }
         Assert-Match $required 'ExpectedSkippedCount = 5' 'Windows Core must retain the established five intentional Windows skips.'

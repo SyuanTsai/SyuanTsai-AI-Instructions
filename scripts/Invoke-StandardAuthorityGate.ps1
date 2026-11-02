@@ -840,6 +840,31 @@ function Assert-AuthorityValidationSecurityGate {
                 -Expected ([string]$expectedEvidence[$evidenceIndex]) `
                 -Context "Validation/security gate stage $($index + 1) evidence $($evidenceIndex + 1)"
         }
+        if ([string]$stage.id -ceq 'skillspector-static') {
+            $exception = Get-AuthorityRequiredProperty -Object $stage -Name 'platformUnavailableException' -Context 'Validation/security gate SkillSpector platform exception'
+            Assert-AuthorityJsonPropertySet -Object $exception -Expected @(
+                'status', 'eligiblePlatforms', 'windowsRequired', 'requiredEvidence', 'acceptedFailureKinds',
+                'rejectedFailureKinds', 'scannerPassed', 'coverageComplete', 'releaseEligible'
+            ) -Context 'Validation/security gate SkillSpector platform exception'
+            Assert-AuthorityExactString -Value $exception.status -Expected 'platform-unavailable' -Context 'SkillSpector platform exception status'
+            Assert-AuthorityExactStringSequence -Value $exception.eligiblePlatforms -Expected @('linux', 'macos') -Context 'SkillSpector platform exception eligible platforms'
+            Assert-AuthorityExactBoolean -Value $exception.windowsRequired -Expected $true -Context 'SkillSpector Windows requirement'
+            Assert-AuthorityExactStringSequence -Value $exception.requiredEvidence -Expected @(
+                'platform', 'runtimeIdentity', 'toolIdentity', 'attemptedCommand', 'rawResult', 'failureKind', 'incompatibilityReason'
+            ) -Context 'SkillSpector platform exception required evidence'
+            Assert-AuthorityExactStringSequence -Value $exception.acceptedFailureKinds -Expected @(
+                'runtime-unsupported', 'tool-platform-unsupported', 'executable-format-unsupported'
+            ) -Context 'SkillSpector platform exception accepted failure kinds'
+            Assert-AuthorityExactStringSequence -Value $exception.rejectedFailureKinds -Expected @(
+                'scan-failure', 'missing-configuration', 'timeout', 'findings'
+            ) -Context 'SkillSpector platform exception rejected failure kinds'
+            Assert-AuthorityExactBoolean -Value $exception.scannerPassed -Expected $false -Context 'SkillSpector platform exception scanner result'
+            Assert-AuthorityExactBoolean -Value $exception.coverageComplete -Expected $false -Context 'SkillSpector platform exception coverage result'
+            Assert-AuthorityExactBoolean -Value $exception.releaseEligible -Expected $false -Context 'SkillSpector platform exception release eligibility'
+        }
+        elseif ($stage.PSObject.Properties.Name -contains 'platformUnavailableException') {
+            throw "Validation/security gate stage '$($stage.id)' must not declare the SkillSpector platform exception."
+        }
     }
 
     $security = Get-AuthorityRequiredProperty -Object $Policy -Name 'security' -Context 'Validation/security gate policy'

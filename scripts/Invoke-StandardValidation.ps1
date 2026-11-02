@@ -3023,6 +3023,7 @@ function New-StandardValidationStages {
             semanticEvidence = $null
             semanticBridgeV2Evidence = $null
             aiReviewEvidence = $null
+            platformUnavailableEvidence = $null
             events = @()
         }
     }
@@ -3042,7 +3043,7 @@ function Start-StandardValidationStage {
 function Complete-StandardValidationStage {
     param(
         [Parameter(Mandatory = $true)] $Stage,
-        [Parameter(Mandatory = $true)][ValidateSet('passed', 'failed', 'blocked', 'cancelled', 'not-run', 'not-applicable')][string] $Status,
+        [Parameter(Mandatory = $true)][ValidateSet('passed', 'failed', 'blocked', 'cancelled', 'not-run', 'not-applicable', 'platform-unavailable')][string] $Status,
         [string] $Reason
     )
     $Stage.status = $Status
@@ -4454,6 +4455,129 @@ function Get-StandardValidationOutputHash {
     return Get-StandardValidationTextSha256 -Value ([string]$Stdout + "`n---stderr---`n" + [string]$Stderr)
 }
 
+function Get-StandardValidationHostPlatform {
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { return 'windows' }
+    try {
+        if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)) { return 'macos' }
+        if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Linux)) { return 'linux' }
+    }
+    catch { }
+    return 'unknown'
+}
+
+function ConvertTo-StandardValidationSkillSpectorPlatformUnavailableEvidence {
+    param(
+        [Parameter(Mandatory = $true)] $Evidence,
+        [Parameter(Mandatory = $true)] $Policy,
+        [Parameter(Mandatory = $true)][string] $HostPlatform,
+        [string] $Context = 'SkillSpector platform-unavailable evidence'
+    )
+
+    if ($null -eq $Evidence -or $null -eq $Policy) { throw "BLOCKED|$Context is missing policy-bound evidence." }
+    $baseEvidenceFields = @('platform', 'runtimeIdentity', 'toolIdentity', 'attemptedCommand', 'rawResult', 'failureKind', 'incompatibilityReason')
+    $normalizedEvidenceFields = @($baseEvidenceFields + @('scannerPassed', 'coverageComplete', 'scannerExecuted', 'releaseEligible'))
+    $expectedPolicyFields = @(
+        'status', 'eligiblePlatforms', 'windowsRequired', 'requiredEvidence', 'acceptedFailureKinds',
+        'rejectedFailureKinds', 'scannerPassed', 'coverageComplete', 'releaseEligible'
+    )
+    $actualPolicyFields = @($Policy.PSObject.Properties.Name | Sort-Object)
+    if (($actualPolicyFields -join ',') -cne (@($expectedPolicyFields | Sort-Object) -join ',')) {
+        throw 'BLOCKED|SkillSpector platform-unavailable policy has an unexpected property set.'
+    }
+    $actualEvidenceFields = @($Evidence.PSObject.Properties.Name | Sort-Object)
+    if (($actualEvidenceFields -join ',') -cne (@($baseEvidenceFields | Sort-Object) -join ',') -and
+        ($actualEvidenceFields -join ',') -cne (@($normalizedEvidenceFields | Sort-Object) -join ',')) {
+        throw "BLOCKED|$Context has an unexpected property set."
+    }
+    if ($actualEvidenceFields.Count -eq $normalizedEvidenceFields.Count -and
+        ([bool]$Evidence.scannerPassed -or [bool]$Evidence.coverageComplete -or [bool]$Evidence.scannerExecuted -or [bool]$Evidence.releaseEligible)) {
+        throw "BLOCKED|$Context must not claim scanner PASS, execution, complete coverage, or release eligibility."
+    }
+    $windowsRequired = Get-StandardValidationProperty -Object $Policy -Name 'windowsRequired'
+    $policyScannerPassed = Get-StandardValidationProperty -Object $Policy -Name 'scannerPassed'
+    $policyCoverageComplete = Get-StandardValidationProperty -Object $Policy -Name 'coverageComplete'
+    $policyReleaseEligible = Get-StandardValidationProperty -Object $Policy -Name 'releaseEligible'
+    if ([string](Get-StandardValidationProperty -Object $Policy -Name 'status') -cne 'platform-unavailable' -or
+        $windowsRequired -isnot [bool] -or -not [bool]$windowsRequired -or
+        $policyScannerPassed -isnot [bool] -or [bool]$policyScannerPassed -or
+        $policyCoverageComplete -isnot [bool] -or [bool]$policyCoverageComplete -or
+        $policyReleaseEligible -isnot [bool] -or [bool]$policyReleaseEligible) {
+        throw 'BLOCKED|SkillSpector platform-unavailable policy is not fail closed.'
+    }
+    $eligiblePlatforms = @((Get-StandardValidationProperty -Object $Policy -Name 'eligiblePlatforms') | ForEach-Object { [string]$_ })
+    if (($eligiblePlatforms -join ',') -cne 'linux,macos' -or $eligiblePlatforms -contains 'windows') {
+        throw 'BLOCKED|SkillSpector platform-unavailable policy must exclude Windows.'
+    }
+    $requiredEvidence = @((Get-StandardValidationProperty -Object $Policy -Name 'requiredEvidence') | ForEach-Object { [string]$_ })
+    if (($requiredEvidence -join ',') -cne 'platform,runtimeIdentity,toolIdentity,attemptedCommand,rawResult,failureKind,incompatibilityReason') {
+        throw 'BLOCKED|SkillSpector platform-unavailable policy evidence fields are incomplete.'
+    }
+    $platform = [string](Get-StandardValidationProperty -Object $Evidence -Name 'platform')
+    if ($HostPlatform -ceq 'windows' -or $HostPlatform -cnotin @('linux', 'macos') -or
+        $platform -cne $HostPlatform -or $platform -cnotin $eligiblePlatforms) {
+        throw "BLOCKED|$Context is not allowed on host platform '$HostPlatform'."
+    }
+    foreach ($name in @('runtimeIdentity', 'toolIdentity', 'attemptedCommand', 'rawResult', 'incompatibilityReason')) {
+        $value = Get-StandardValidationProperty -Object $Evidence -Name $name
+        if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$value)) {
+            throw "BLOCKED|$Context is missing '$name'."
+        }
+    }
+    $failureKind = [string](Get-StandardValidationProperty -Object $Evidence -Name 'failureKind')
+    $acceptedFailureKinds = @((Get-StandardValidationProperty -Object $Policy -Name 'acceptedFailureKinds') | ForEach-Object { [string]$_ })
+    $rejectedFailureKinds = @((Get-StandardValidationProperty -Object $Policy -Name 'rejectedFailureKinds') | ForEach-Object { [string]$_ })
+    if (($acceptedFailureKinds -join ',') -cne 'runtime-unsupported,tool-platform-unsupported,executable-format-unsupported' -or
+        ($rejectedFailureKinds -join ',') -cne 'scan-failure,missing-configuration,timeout,findings' -or
+        $failureKind -cnotin $acceptedFailureKinds -or $failureKind -cin $rejectedFailureKinds) {
+        throw "BLOCKED|$Context failure kind '$failureKind' is not an execution incompatibility."
+    }
+    return [pscustomobject][ordered]@{
+        platform = $platform
+        runtimeIdentity = [string]$Evidence.runtimeIdentity
+        toolIdentity = [string]$Evidence.toolIdentity
+        attemptedCommand = [string]$Evidence.attemptedCommand
+        rawResult = [string]$Evidence.rawResult
+        failureKind = $failureKind
+        incompatibilityReason = [string]$Evidence.incompatibilityReason
+        scannerPassed = $false
+        coverageComplete = $false
+        scannerExecuted = $false
+        releaseEligible = $false
+    }
+}
+
+function Assert-StandardValidationSkillSpectorPlatformUnavailableEvidence {
+    param(
+        [Parameter(Mandatory = $true)] $Evidence,
+        [Parameter(Mandatory = $true)] $Policy,
+        [Parameter(Mandatory = $true)][string] $HostPlatform,
+        [string] $Context = 'SkillSpector platform-unavailable evidence'
+    )
+    [void](ConvertTo-StandardValidationSkillSpectorPlatformUnavailableEvidence @PSBoundParameters)
+    # The child envelope is not an independent observation. Current receipts and
+    # process capture bind the wrapper, not a runner-owned native compatibility
+    # probe. Never turn a matching child claim or digest into authorization.
+    throw "BLOCKED|$Context lacks runner-observed native execution evidence bound to the frozen command, tool/runtime receipt, and raw event output."
+}
+
+function Assert-StandardValidationSkillSpectorRawEnvelopeBinding {
+    param($Envelope, [string] $ExpectedStatus, $Evidence, $Policy, [string] $HostPlatform)
+    $rawStatus = [string](Get-StandardValidationProperty -Object $Envelope -Name 'status')
+    if ($rawStatus -cne $ExpectedStatus) { throw 'FAILED|SkillSpector raw envelope status differs from the report.' }
+    if ($ExpectedStatus -cne 'platform-unavailable') { return }
+    if ([string](Get-StandardValidationProperty -Object $Envelope -Name 'decision') -cne 'PLATFORM_UNAVAILABLE') {
+        throw 'FAILED|SkillSpector raw envelope decision differs from the report.'
+    }
+    try {
+        $rawEvidence = ConvertTo-StandardValidationSkillSpectorPlatformUnavailableEvidence -Evidence (Get-StandardValidationProperty -Object $Envelope -Name 'platformUnavailableEvidence') -Policy $Policy -HostPlatform $HostPlatform
+        $reportEvidence = ConvertTo-StandardValidationSkillSpectorPlatformUnavailableEvidence -Evidence $Evidence -Policy $Policy -HostPlatform $HostPlatform
+        if ((ConvertTo-Json -InputObject $rawEvidence -Depth 10 -Compress) -cne (ConvertTo-Json -InputObject $reportEvidence -Depth 10 -Compress)) {
+            throw 'Normalized evidence differs.'
+        }
+    }
+    catch { throw 'FAILED|SkillSpector raw envelope evidence differs from the report or is invalid.' }
+}
+
 function Assert-StandardValidationToolEnvelope {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyString()][string] $Stdout,
@@ -4462,7 +4586,10 @@ function Assert-StandardValidationToolEnvelope {
         [Parameter(Mandatory = $true)][string] $Context,
         [string] $SkillId,
         [string] $SkillInventorySha256,
-        [string[]] $ExpectedActiveSkills
+        [string[]] $ExpectedActiveSkills,
+        [switch] $AllowPlatformUnavailable,
+        $PlatformUnavailablePolicy,
+        [string] $HostPlatform = (Get-StandardValidationHostPlatform)
     )
 
     if ([string]$ProcessResult.status -ne 'passed') {
@@ -4474,8 +4601,22 @@ function Assert-StandardValidationToolEnvelope {
     try { $envelope = $Stdout.Trim() | ConvertFrom-Json }
     catch { throw "FAILED|$Context produced unparsable output: $($_.Exception.Message)" }
     if ($envelope -is [array] -or $null -eq $envelope) { throw "FAILED|$Context output envelope must be an object." }
-    if ((Get-StandardValidationProperty -Object $envelope -Name 'schemaVersion') -ne 1 -or
-        [string](Get-StandardValidationProperty -Object $envelope -Name 'status') -cne 'passed' -or
+    $envelopeStatus = [string](Get-StandardValidationProperty -Object $envelope -Name 'status')
+    if ((Get-StandardValidationProperty -Object $envelope -Name 'schemaVersion') -ne 1) {
+        throw "FAILED|$Context did not report a passed versioned result."
+    }
+    if ($envelopeStatus -ceq 'platform-unavailable') {
+        if (-not $AllowPlatformUnavailable -or
+            [string](Get-StandardValidationProperty -Object $envelope -Name 'decision') -cne 'PLATFORM_UNAVAILABLE') {
+            throw "BLOCKED|$Context reported an unauthorized platform-unavailable result."
+        }
+        [void](Assert-StandardValidationSkillSpectorPlatformUnavailableEvidence `
+            -Evidence (Get-StandardValidationProperty -Object $envelope -Name 'platformUnavailableEvidence') `
+            -Policy $PlatformUnavailablePolicy `
+            -HostPlatform $HostPlatform `
+            -Context "$Context platform-unavailable evidence")
+    }
+    elseif ($envelopeStatus -cne 'passed' -or
         [string](Get-StandardValidationProperty -Object $envelope -Name 'decision') -cne 'PASS') {
         throw "FAILED|$Context did not report a passed versioned result."
     }
@@ -4651,6 +4792,7 @@ function Test-StandardValidationSourceEventOutputBinding {
         $rawCleanedUp = Get-StandardValidationProperty -Object $rawProcess -Name 'cleanedUp'
         $rawProcessStdout = Get-StandardValidationProperty -Object $rawProcess -Name 'stdout'
         $rawProcessStderr = Get-StandardValidationProperty -Object $rawProcess -Name 'stderr'
+        $expectedRawProcessStatus = if ($eventStatus -ceq 'platform-unavailable') { 'passed' } else { $eventStatus }
         if (-not (Test-StandardValidationIntegerRange -Value $rawSchemaVersion -Minimum 1 -Maximum 1) -or
             [string](Get-StandardValidationProperty -Object $rawOutput -Name 'eventId') -cne $eventId -or
             [string](Get-StandardValidationProperty -Object $rawOutput -Name 'stageId') -cne $stageId -or
@@ -4660,7 +4802,7 @@ function Test-StandardValidationSourceEventOutputBinding {
             -not (Test-StandardValidationIntegerRange -Value $rawExitCode -Minimum 0 -Maximum ([decimal][int]::MaxValue)) -or
             -not (Test-StandardValidationIntegerRange -Value $eventExitCode -Minimum 0 -Maximum ([decimal][int]::MaxValue)) -or
             [decimal]$rawExitCode -ne [decimal]$eventExitCode -or
-            $rawProcessStatus -cne $eventStatus -or $rawCleanedUp -isnot [bool] -or -not [bool]$rawCleanedUp -or
+            $rawProcessStatus -cne $expectedRawProcessStatus -or $rawCleanedUp -isnot [bool] -or -not [bool]$rawCleanedUp -or
             $rawStdout -isnot [string] -or $rawStderr -isnot [string] -or
             $rawProcessStdout -isnot [string] -or $rawProcessStderr -isnot [string] -or
             $rawProcessStdout -cne $rawStdout -or $rawProcessStderr -cne $rawStderr) {
@@ -4679,7 +4821,9 @@ function New-StandardValidationSourceConformanceResult {
         [AllowNull()] $Report,
         [Parameter(Mandatory = $true)][string] $ExpectedSourceRevision,
         [AllowNull()] $RepositoryTestEvidence,
-        [AllowNull()] $RepositoryTestDispatches
+        [AllowNull()] $RepositoryTestDispatches,
+        [AllowNull()] $Policy,
+        [string] $HostPlatform = (Get-StandardValidationHostPlatform)
     )
 
     $reasons = New-Object 'System.Collections.Generic.List[string]'
@@ -4700,6 +4844,8 @@ function New-StandardValidationSourceConformanceResult {
     $pesterFailed = $null
     $pesterOutputSha256 = '0' * 64
     $pesterInventorySha256 = Get-StandardValidationTextSha256 -Value ''
+    $scannerCoverageComplete = $false
+    $platformUnavailableEvidence = $null
 
     if ($null -eq $Report) {
         [void]$reasons.Add('report-missing')
@@ -4742,7 +4888,22 @@ function New-StandardValidationSourceConformanceResult {
                 -not (Test-StandardValidationIntegerRange -Value $actualOrder -Minimum ($index + 1) -Maximum ($index + 1))) {
                 [void]$reasons.Add("source-stage-$($index + 1)-identity-invalid")
             }
-            if ($actualStatus -cne 'passed') { [void]$reasons.Add("source-stage-$($index + 1)-not-passed") }
+            if ($index -eq 3 -and $actualStatus -ceq 'platform-unavailable') {
+                try {
+                    $policyStage = @((Get-StandardValidationProperty -Object $Policy -Name 'stages') | Where-Object { [string]$_.id -ceq 'skillspector-static' })
+                    if ($policyStage.Count -ne 1) { throw 'SkillSpector policy stage is missing or ambiguous.' }
+                    $platformUnavailableEvidence = Assert-StandardValidationSkillSpectorPlatformUnavailableEvidence `
+                        -Evidence (Get-StandardValidationProperty -Object $stage -Name 'platformUnavailableEvidence') `
+                        -Policy (Get-StandardValidationProperty -Object $policyStage[0] -Name 'platformUnavailableException') `
+                        -HostPlatform $HostPlatform `
+                        -Context 'source conformance SkillSpector platform-unavailable evidence'
+                }
+                catch { [void]$reasons.Add('source-stage-4-platform-unavailable-evidence-invalid') }
+            }
+            elseif ($index -eq 3 -and $actualStatus -ceq 'passed') {
+                $scannerCoverageComplete = $true
+            }
+            elseif ($actualStatus -cne 'passed') { [void]$reasons.Add("source-stage-$($index + 1)-not-passed") }
         }
 
         $stageSix = if ($stages.Count -ge 6) { $stages[5] } else { $null }
@@ -4784,8 +4945,9 @@ function New-StandardValidationSourceConformanceResult {
                 $eventToolId = [string](Get-StandardValidationProperty -Object $event -Name 'toolId')
                 $commandSha256 = [string](Get-StandardValidationProperty -Object $event -Name 'commandSha256')
                 $outputSha256 = [string](Get-StandardValidationProperty -Object $event -Name 'outputSha256')
+                $expectedEventStatus = if ($stageIndex -eq 3 -and [string](Get-StandardValidationProperty -Object $stage -Name 'status') -ceq 'platform-unavailable') { 'platform-unavailable' } else { 'passed' }
                 if (-not [guid]::TryParse($eventId, [ref]$eventGuid) -or $eventStageId -cne $stageId -or
-                    $eventCandidateId -cne $candidateId -or $eventStatus -cne 'passed' -or
+                    $eventCandidateId -cne $candidateId -or $eventStatus -cne $expectedEventStatus -or
                     -not (Test-StandardValidationIntegerRange -Value $eventExitCode -Minimum 0 -Maximum 0) -or
                     [string]::IsNullOrWhiteSpace($eventToolId) -or $commandSha256 -cnotmatch '^[0-9a-f]{64}$' -or
                     $outputSha256 -cnotmatch '^[0-9a-f]{64}$') {
@@ -4793,6 +4955,16 @@ function New-StandardValidationSourceConformanceResult {
                 }
                 if (-not (Test-StandardValidationSourceEventOutputBinding -Event $event -Report $Report)) {
                     [void]$reasons.Add("$stageId-event-output-invalid")
+                }
+                elseif ($stageIndex -eq 3 -and ($eventStatus -ceq 'platform-unavailable' -or $expectedEventStatus -ceq 'platform-unavailable')) {
+                    try {
+                        $rawEvent = Get-StandardValidationJson -Path ([string](Get-StandardValidationProperty -Object $event -Name 'outputPath')) -Context 'SkillSpector source projection raw event'
+                        $rawEnvelope = ([string](Get-StandardValidationProperty -Object $rawEvent -Name 'stdout')) | ConvertFrom-Json
+                        $policyStage = @((Get-StandardValidationProperty -Object $Policy -Name 'stages') | Where-Object { [string]$_.id -ceq 'skillspector-static' })
+                        if ($policyStage.Count -ne 1) { throw 'Missing unique SkillSpector policy.' }
+                        Assert-StandardValidationSkillSpectorRawEnvelopeBinding -Envelope $rawEnvelope -ExpectedStatus $expectedEventStatus -Evidence (Get-StandardValidationProperty -Object $stage -Name 'platformUnavailableEvidence') -Policy (Get-StandardValidationProperty -Object $policyStage[0] -Name 'platformUnavailableException') -HostPlatform $HostPlatform
+                    }
+                    catch { [void]$reasons.Add('skillspector-static-raw-envelope-mismatch') }
                 }
             }
         }
@@ -5098,6 +5270,8 @@ function New-StandardValidationSourceConformanceResult {
         candidateId = $candidateId
         contentSha256 = $contentSha256
         checkedStages = $checkedStages
+        scannerCoverageComplete = $scannerCoverageComplete
+        platformUnavailableEvidence = $platformUnavailableEvidence
         pester = [ordered]@{
             eventCount = @($pesterProjectionEvents).Count
             events = @($pesterProjectionEvents)
@@ -7113,7 +7287,10 @@ function Invoke-StandardValidationCommandAndRecord {
         [string] $CancellationPath,
         [System.IO.FileStream] $OutputReservationStream,
         [string] $OutputReservationPath,
-        [string] $OutputReservationToken
+        [string] $OutputReservationToken,
+        [switch] $AllowPlatformUnavailable,
+        $PlatformUnavailablePolicy,
+        [string] $HostPlatform = (Get-StandardValidationHostPlatform)
     )
     $svPreviousStage = $script:StandardValidationTimingStage
     $script:StandardValidationTimingStage = $StageId
@@ -7295,7 +7472,13 @@ function Invoke-StandardValidationCommandAndRecord {
         -Context "$StageId/$ToolId" `
         -SkillId $SkillId `
         -SkillInventorySha256 $SkillInventorySha256 `
-        -ExpectedActiveSkills $ExpectedActiveSkills
+        -ExpectedActiveSkills $ExpectedActiveSkills `
+        -AllowPlatformUnavailable:$AllowPlatformUnavailable `
+        -PlatformUnavailablePolicy $PlatformUnavailablePolicy `
+        -HostPlatform $HostPlatform
+    if ([string](Get-StandardValidationProperty -Object $envelope -Name 'status') -ceq 'platform-unavailable') {
+        $event.status = 'platform-unavailable'
+    }
     return [pscustomobject][ordered]@{ event = $event; envelope = $envelope }
 
     }
@@ -8973,7 +9156,8 @@ function Invoke-StandardCoreSourceTools {
     param($Spec, $SkillSet, [string] $RunId, [string] $SourceRevision, [string] $AuthorityRevision,
         [string] $SnapshotRoot, [string] $ContentSha256, [string] $RunRoot,
         [string] $AdapterPath, [string] $AdapterSha256, [string] $ArtifactsRoot,
-        [string] $TrustedToolRoot, [int] $TimeoutSeconds, [string] $CancellationPath)
+        [string] $TrustedToolRoot, [int] $TimeoutSeconds, [string] $CancellationPath,
+        [Parameter(Mandatory = $true)] $ValidationSecurityPolicy)
     $specFields=@('packageAdapter','skillValidator','skillTools','staticAnalyzer','frozenFiles','toolReceipts')
     $testOwnership=Get-StandardValidationProperty -Object $Spec -Name 'testOwnership'
     if (Test-StandardValidationHasProperty -Object $Spec -Name 'testOwnership') {
@@ -9004,6 +9188,9 @@ function Invoke-StandardCoreSourceTools {
     }
     $dispatches += [pscustomobject]@{slot='staticAnalyzer';tool='static-analyzer';skill=$null;stage='skillspector-static'}
     $events = New-Object 'System.Collections.Generic.List[object]'
+    $scannerStatus = 'passed'
+    $scannerCoverageComplete = $true
+    $platformUnavailableEvidence = $null
     $children = Join-Path $RunRoot 'source-children'
     [void][IO.Directory]::CreateDirectory($children)
     $script:StandardValidationAuthorityEvidence = $null
@@ -9024,17 +9211,35 @@ function Invoke-StandardCoreSourceTools {
             TimeoutSeconds=$TimeoutSeconds; CancellationPath=$CancellationPath; ExpectedActiveSkills=$SkillSet.ids
         }
         if ($null -ne $dispatch.skill) { $parameters.SkillId=$dispatch.skill.id; $parameters.SkillInventorySha256=$dispatch.skill.inventorySha256 }
+        if ($dispatch.tool -ceq 'static-analyzer') {
+            $parameters.AllowPlatformUnavailable = $true
+            $parameters.PlatformUnavailablePolicy = $ValidationSecurityPolicy
+            $parameters.HostPlatform = Get-StandardValidationHostPlatform
+        }
         $result = Invoke-StandardValidationCommandAndRecord @parameters
         $events.Add($result.event)
+        $resultEnvelope = Get-StandardValidationProperty -Object $result -Name 'envelope'
+        $resultEnvelopeStatus = [string](Get-StandardValidationProperty -Object $resultEnvelope -Name 'status')
         $nativeSkills=if ($null -eq $dispatch.skill) {@($SkillSet.ids)} else {@([string]$dispatch.skill.id)}
         $receiptMap = Assert-StandardCoreSourceToolReceipts -Bindings @($Spec.toolReceipts) -FrozenFiles @($Spec.frozenFiles) -RunId $RunId -CandidateRoot $SnapshotRoot -ArtifactsRoot $ArtifactsRoot -RetainedReceiptMap $receiptMap -ToolNames $selectedTool -AdditionalPaths $dispatchPaths
-        Assert-StandardCoreNativeReports -Envelope $result.envelope -ToolId $dispatch.tool -Skills $nativeSkills -Receipts @($Spec.toolReceipts) -RunRoot $RunRoot -ReceiptMap $receiptMap
-        if ([bool](Assert-StandardValidationFindings -Envelope $result.envelope -Context "source $($dispatch.tool)")) { throw 'BLOCKED|Source findings require review under the existing severity policy.' }
-        if ($dispatch.tool -ceq 'static-analyzer' -and [string]$result.envelope.analyzerCompleteness -cne 'complete') { throw 'FAILED|Source Static coverage is incomplete.' }
+        if ($dispatch.tool -ceq 'static-analyzer' -and $resultEnvelopeStatus -ceq 'platform-unavailable') {
+            $scannerStatus = 'platform-unavailable'
+            $scannerCoverageComplete = $false
+            $platformUnavailableEvidence = Assert-StandardValidationSkillSpectorPlatformUnavailableEvidence `
+                -Evidence (Get-StandardValidationProperty -Object $resultEnvelope -Name 'platformUnavailableEvidence') `
+                -Policy $ValidationSecurityPolicy `
+                -HostPlatform (Get-StandardValidationHostPlatform)
+        }
+        else {
+            Assert-StandardCoreNativeReports -Envelope $resultEnvelope -ToolId $dispatch.tool -Skills $nativeSkills -Receipts @($Spec.toolReceipts) -RunRoot $RunRoot -ReceiptMap $receiptMap
+            if ([bool](Assert-StandardValidationFindings -Envelope $resultEnvelope -Context "source $($dispatch.tool)")) { throw 'BLOCKED|Source findings require review under the existing severity policy.' }
+            if ($dispatch.tool -ceq 'static-analyzer' -and [string](Get-StandardValidationProperty -Object $resultEnvelope -Name 'analyzerCompleteness') -cne 'complete') { throw 'FAILED|Source Static coverage is incomplete.' }
+        }
     }
     $sourceResult = [pscustomobject][ordered]@{
         status='passed'; runId=$RunId; candidateId=$candidateId; sourceRevision=$SourceRevision;
         contentSha256=$ContentSha256; authorityRevision=$AuthorityRevision; activeSkills=@($SkillSet.ids);
+        scannerStatus=$scannerStatus; coverageComplete=$scannerCoverageComplete; platformUnavailableEvidence=$platformUnavailableEvidence;
         skillsRoot=$SkillSet.relative; toolReceipts=@($Spec.toolReceipts); frozenFiles=@($Spec.frozenFiles); events=@($events.ToArray()); adapterSnapshot=[pscustomobject]@{path=$retainedAdapterPath;sha256=$AdapterSha256}
     }
     if ($null -ne $testOwnership) { $sourceResult | Add-Member -NotePropertyName testOwnership -NotePropertyValue $testOwnership }
@@ -9045,7 +9250,8 @@ function Invoke-StandardCoreSourceTools {
 function Assert-StandardCoreSourceCheckReport {
     param($Report, [string] $ExpectedSourceRevision, [string] $ExpectedBaseRevision,
         [string] $ExpectedAuthorityRevision, [string] $ExpectedEventName,
-        [string] $ArtifactsRoot, [string] $OutputPath, [int] $ProcessExitCode)
+        [string] $ArtifactsRoot, [string] $OutputPath, [int] $ProcessExitCode,
+        [Parameter(Mandatory = $true)] $ValidationSecurityPolicy)
     $svReportTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'source-report-binding' -Aggregate -Silent:(-not $script:StandardValidationTimingEnabled)
     $svReportState = 'failed'
     $svPreviousReadObserver = $script:StandardValidationReadObserver
@@ -9064,6 +9270,14 @@ function Assert-StandardCoreSourceCheckReport {
         [string]$source.contentSha256 -cne [string]$Report.candidate.contentSha256 -or
         (@($source.activeSkills) -join ';') -cne (@($Report.candidate.activeSkills) -join ';') -or @($source.activeSkills).Count -eq 0 -or
         @($source.activeSkills | Select-Object -Unique).Count -ne @($source.activeSkills).Count) { throw 'FAILED|Core-only or mismatched source validation cannot satisfy source checks.' }
+    $scannerPlatformUnavailable = [string]$source.scannerStatus -ceq 'platform-unavailable'
+    if ([string]$source.scannerStatus -cnotin @('passed', 'platform-unavailable') -or
+        $source.coverageComplete -isnot [bool] -or
+        ($scannerPlatformUnavailable -and [bool]$source.coverageComplete) -or
+        (-not $scannerPlatformUnavailable -and -not [bool]$source.coverageComplete)) {
+        throw 'FAILED|Source scanner status and coverage are inconsistent.'
+    }
+    if (-not $scannerPlatformUnavailable -and $null -ne (Get-StandardValidationProperty -Object $source -Name 'platformUnavailableEvidence')) { throw 'FAILED|Passed source scanner evidence must not include a platform exception.' }
     $snapshotInventory = Get-StandardValidationInventory -Root $Report.artifacts.snapshotRoot -Context 'source report candidate snapshot'
     if ((Get-StandardValidationInventorySha256 -Inventory $snapshotInventory) -cne [string]$Report.candidate.contentSha256) { throw 'FAILED|Source report candidate snapshot content differs.' }
     Assert-StandardCoreFrozenFiles -Files @($source.frozenFiles)
@@ -9098,13 +9312,15 @@ function Assert-StandardCoreSourceCheckReport {
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     for ($index=0; $index -lt $expected.Count; $index++) {
         $event = @($source.events)[$index]
+        $eventStatus = [string](Get-StandardValidationProperty -Object $event -Name 'status')
         $slot=switch ([string]$event.toolId) { 'package-adapter' {'packageAdapter'}; 'skill-validator' {'skillValidator'}; 'skill-tools' {'skillTools'}; 'static-analyzer' {'staticAnalyzer'}; default {throw 'FAILED|Source tool role is unknown.'} }
         $command=Assert-StandardValidationCommandSpec -Spec $adapter.sourceValidation.$slot -Context "source report $slot" -CandidateRoot $Report.artifacts.snapshotRoot -ArtifactsRoot $ArtifactsRoot -TrustedToolRoot (Split-Path -Parent $adapter.sourceValidation.$slot.command) -TrustAnchorRoot (Split-Path -Parent $adapter.sourceValidation.$slot.command) -ExpectedToolName $slot -DevelopmentHarness $true
         if (-not (Test-StandardValidationSourceEventOutputBinding -Event $event -Report $Report) -or
             [string]$event.commandSha256 -cne [string]$command.commandSha256 -or
             @($source.frozenFiles | Where-Object { [string]$_.path -ceq [string]$command.command -and [string]$_.sha256 -ceq [string]$event.commandSha256 }).Count -ne 1) { throw 'FAILED|Source raw event or dispatched command identity does not bind.' }
+        $expectedEventStatus = if ([string]$event.toolId -ceq 'static-analyzer' -and $scannerPlatformUnavailable) { 'platform-unavailable' } else { 'passed' }
         if ("$($event.stageId)|$($event.toolId)|$($event.skillId)" -cne $expected[$index] -or -not $seen.Add([string]$event.eventId) -or
-            [string]$event.candidateId -cne [string]$source.candidateId -or [string]$event.status -cne 'passed' -or $event.exitCode -ne 0 -or
+            [string]$event.candidateId -cne [string]$source.candidateId -or $eventStatus -cne $expectedEventStatus -or $event.exitCode -ne 0 -or
             $event.cleanedUp -isnot [bool] -or -not $event.cleanedUp -or -not (Test-StandardValidationPathWithin -Path $event.outputPath -Root $Report.artifacts.runRoot)) { throw 'FAILED|Source process event has a wrong identity, order, result, or cleanup.' }
         $rawSnapshot = Get-StandardValidationJsonSnapshot -Path $event.outputPath -Context 'source raw event'
         $raw = $rawSnapshot.value
@@ -9118,6 +9334,16 @@ function Assert-StandardCoreSourceCheckReport {
             $root = Join-Path $Report.artifacts.snapshotRoot ($source.skillsRoot + '/' + $event.skillId)
             $inventory = Get-StandardValidationInventory -Root $root -Context 'source report skill inventory'
             $arguments.SkillInventorySha256=Get-StandardValidationInventorySha256 -Inventory $inventory
+        }
+        if ([string]$event.toolId -ceq 'static-analyzer') {
+            $arguments.AllowPlatformUnavailable = $true
+            $arguments.PlatformUnavailablePolicy = $ValidationSecurityPolicy
+            $arguments.HostPlatform = Get-StandardValidationHostPlatform
+        }
+        if ([string]$event.toolId -ceq 'static-analyzer') {
+            try { $rawEnvelope = ([string](Get-StandardValidationProperty -Object $raw -Name 'stdout')) | ConvertFrom-Json }
+            catch { throw 'FAILED|SkillSpector raw envelope is not valid JSON.' }
+            Assert-StandardValidationSkillSpectorRawEnvelopeBinding -Envelope $rawEnvelope -ExpectedStatus $expectedEventStatus -Evidence (Get-StandardValidationProperty -Object $source -Name 'platformUnavailableEvidence') -Policy $ValidationSecurityPolicy -HostPlatform (Get-StandardValidationHostPlatform)
         }
         $envelope = Assert-StandardValidationToolEnvelope @arguments
         if ($index -eq 0 -and $testOwnership -ceq 'central-third-party-raw-skill-v1') {
@@ -9133,9 +9359,11 @@ function Assert-StandardCoreSourceCheckReport {
             }
         }
         $nativeSkills=if ([string]::IsNullOrWhiteSpace([string]$event.skillId)) {@($source.activeSkills)} else {@([string]$event.skillId)}
-        Assert-StandardCoreNativeReports -Envelope $envelope -ToolId $event.toolId -Skills $nativeSkills -Receipts @($source.toolReceipts) -RunRoot $Report.artifacts.runRoot -ReceiptMap $finalReceiptMap
-        if ([bool](Assert-StandardValidationFindings -Envelope $envelope -Context 'source report findings') -or
-            ($event.toolId -ceq 'static-analyzer' -and [string]$envelope.analyzerCompleteness -cne 'complete')) { throw 'FAILED|Source report findings or Static coverage did not pass.' }
+        if ($eventStatus -cne 'platform-unavailable') {
+            Assert-StandardCoreNativeReports -Envelope $envelope -ToolId $event.toolId -Skills $nativeSkills -Receipts @($source.toolReceipts) -RunRoot $Report.artifacts.runRoot -ReceiptMap $finalReceiptMap
+            if ([bool](Assert-StandardValidationFindings -Envelope $envelope -Context 'source report findings') -or
+                ($event.toolId -ceq 'static-analyzer' -and [string]$envelope.analyzerCompleteness -cne 'complete')) { throw 'FAILED|Source report findings or Static coverage did not pass.' }
+        }
     }
     if (@($Report.checks).Count -ne 2 -or $Report.checks[0].kind -cne 'general' -or $Report.checks[1].kind -cne 'pester') { throw 'FAILED|Source report requires the complete repository checks.' }
     for ($checkIndex=0; $checkIndex -lt @($Report.checks).Count; $checkIndex++) {
@@ -9409,11 +9637,18 @@ function Invoke-StandardCoreValidationRun {
         $authorityDirty = Invoke-StandardCoreGit -RepositoryRoot $authorityRoot -WorkingDirectory $runRoot -Arguments @('diff', '--no-ext-diff', '--no-textconv', '--quiet', $AuthorityRevision, '--') -AllowedExitCodes @(0, 1)
         $authorityContentMode = if ([int]$authorityDirty.exitCode -eq 0) { 'source' } else { 'development' }
         $contractPath = Join-Path $authorityRoot 'docs/standards/standard-core-validation-v2.json'
+        $validationSecurityPolicyPath = Join-Path $authorityRoot 'docs/standards/validation-security-gate.json'
         $runnerPath = Join-Path $authorityRoot 'scripts/Invoke-StandardValidation.ps1'
         Assert-StandardValidationRegularFile -Path $contractPath -Context 'core authority contract'
+        Assert-StandardValidationRegularFile -Path $validationSecurityPolicyPath -Context 'validation security policy'
         Assert-StandardValidationRegularFile -Path $runnerPath -Context 'core authority runner'
         $runnerSha256 = Get-StandardValidationFileSha256 -Path $runnerPath -Context 'core authority runner'
         $contractSha256 = Get-StandardValidationFileSha256 -Path $contractPath -Context 'core authority contract'
+        $validationSecurityPolicy = (Get-StandardValidationJsonSnapshot -Path $validationSecurityPolicyPath -Context 'validation security policy').value
+        $skillSpectorPolicyStage = @($validationSecurityPolicy.stages | Where-Object { [string]$_.id -ceq 'skillspector-static' })
+        if ($skillSpectorPolicyStage.Count -ne 1) { throw 'INVALID|Validation security policy has no unique SkillSpector stage.' }
+        $skillSpectorPlatformPolicy = Get-StandardValidationProperty -Object $skillSpectorPolicyStage[0] -Name 'platformUnavailableException'
+        if ($null -eq $skillSpectorPlatformPolicy) { throw 'INVALID|Validation security policy is missing the SkillSpector platform exception contract.' }
         $authorityEvidence = [pscustomobject][ordered]@{
             repository = $script:StandardValidationAuthorityRepository
             revision = $authorityHead
@@ -9525,7 +9760,8 @@ function Invoke-StandardCoreValidationRun {
                 -RunId $runId -SourceRevision $SourceRevision -AuthorityRevision $AuthorityRevision `
                 -SnapshotRoot $snapshotRoot -ContentSha256 $candidateSnapshot.contentSha256 -RunRoot $runRoot `
                 -AdapterPath $adapterFull -AdapterSha256 $adapterSha256 -ArtifactsRoot $artifactRootFull `
-                -TrustedToolRoot $trustedRootFull -TimeoutSeconds $TimeoutSeconds -CancellationPath $CancellationPath
+                -TrustedToolRoot $trustedRootFull -TimeoutSeconds $TimeoutSeconds -CancellationPath $CancellationPath `
+                -ValidationSecurityPolicy $skillSpectorPlatformPolicy
             $candidateAfter = Get-StandardCoreTrackedInventory -CandidateRoot $candidateRootFull -ProcessWorkingRoot $runRoot -ExpectedSourceRevision $SourceRevision -ExpectedBaseRevision $BaseRevision -SourceRepository $SourceRepository -AllowDevelopmentContent $false
             if ($candidateAfter.contentSha256 -cne $candidateSnapshot.contentSha256) { throw 'BLOCKED|Candidate changed during source tool dispatch.' }
         }
@@ -9610,7 +9846,7 @@ function Invoke-StandardCoreValidationRun {
             $casePath = Join-Path $runRoot 'repository-pester-case-inventory-v1.json'
             $sourceEvidence | Add-Member -NotePropertyName pesterCaseInventory -NotePropertyValue ([pscustomobject]@{path=$casePath;sha256=(Get-StandardValidationFileSha256 -Path $casePath -Context 'source Pester inventory')})
             $proposed = New-StandardCoreEvidence -RunId $runId -State PASS -ExitCode 0 -ContentMode $contentMode -Candidate $candidateEvidence -Authority $authorityEvidence -Adapter $adapterEvidence -Checks @($checkEvidence.ToArray()) -Artifacts $artifactEvidence -SourceEvidence $sourceEvidence
-            [void](Assert-StandardCoreSourceCheckReport -Report $proposed -ExpectedSourceRevision $SourceRevision -ExpectedBaseRevision $BaseRevision -ExpectedAuthorityRevision $AuthorityRevision -ExpectedEventName $EventName -ArtifactsRoot $artifactRootFull -OutputPath $outputFull -ProcessExitCode 0)
+            [void](Assert-StandardCoreSourceCheckReport -Report $proposed -ExpectedSourceRevision $SourceRevision -ExpectedBaseRevision $BaseRevision -ExpectedAuthorityRevision $AuthorityRevision -ExpectedEventName $EventName -ArtifactsRoot $artifactRootFull -OutputPath $outputFull -ProcessExitCode 0 -ValidationSecurityPolicy $skillSpectorPlatformPolicy)
         }
         $state = 'PASS'
         $failureMessage = ''
@@ -10015,6 +10251,9 @@ function Invoke-StandardValidationRun {
                 -Context 'authority snapshot'
         }
         $contractResult = Assert-StandardValidationContractFiles -RepositoryRoot (Split-Path -Parent $PSScriptRoot)
+        $skillSpectorPolicyStage = @($contractResult.policy.stages | Where-Object { [string]$_.id -ceq 'skillspector-static' })
+        if ($skillSpectorPolicyStage.Count -ne 1) { throw 'INVALID|Validation security policy has no unique SkillSpector stage.' }
+        $skillSpectorPlatformPolicy = Get-StandardValidationProperty -Object $skillSpectorPolicyStage[0] -Name 'platformUnavailableException'
         $authorityEvidence = $contractResult.authority
         $authorityEvidence.binding = $authorityBinding
         $script:StandardValidationAuthorityEvidence = $authorityEvidence
@@ -10251,25 +10490,39 @@ function Invoke-StandardValidationRun {
             -CancellationPath $CancellationPath `
             -OutputReservationStream $outputReservationStream `
             -OutputReservationPath $outputFull `
-            -OutputReservationToken $outputReservationToken
+            -OutputReservationToken $outputReservationToken `
+            -AllowPlatformUnavailable `
+            -PlatformUnavailablePolicy $skillSpectorPlatformPolicy `
+            -HostPlatform (Get-StandardValidationHostPlatform)
         $stage.events += $invocation.event
-        if ([string](Get-StandardValidationProperty -Object $invocation.envelope -Name 'scannerIdentity') -ne 'development-fixture-static-analyzer' -and
+        if ([string](Get-StandardValidationProperty -Object $invocation.envelope -Name 'status') -ceq 'platform-unavailable') {
+            $stage.platformUnavailableEvidence = Assert-StandardValidationSkillSpectorPlatformUnavailableEvidence `
+                -Evidence (Get-StandardValidationProperty -Object $invocation.envelope -Name 'platformUnavailableEvidence') `
+                -Policy $skillSpectorPlatformPolicy `
+                -HostPlatform (Get-StandardValidationHostPlatform)
+            Complete-StandardValidationStage -Stage $stage -Status 'platform-unavailable' -Reason 'SkillSpector could not execute on this non-Windows platform; measured incompatibility evidence was accepted without scanner PASS or complete coverage.'
+        }
+        elseif ([string](Get-StandardValidationProperty -Object $invocation.envelope -Name 'scannerIdentity') -ne 'development-fixture-static-analyzer' -and
             [string]::IsNullOrWhiteSpace([string](Get-StandardValidationProperty -Object $invocation.envelope -Name 'scannerIdentity'))) {
             throw 'FAILED|Static evidence is missing scanner identity.'
         }
-        if ([string](Get-StandardValidationProperty -Object $invocation.envelope -Name 'analyzerCompleteness') -cne 'complete') {
+        if ([string](Get-StandardValidationProperty -Object $invocation.envelope -Name 'status') -cne 'platform-unavailable' -and
+            [string](Get-StandardValidationProperty -Object $invocation.envelope -Name 'analyzerCompleteness') -cne 'complete') {
             throw 'FAILED|Static analyzer coverage is incomplete.'
         }
         $staticSkills = Get-StandardValidationProperty -Object $invocation.envelope -Name 'activeSkills'
-        if ($staticSkills -isnot [array] -or (@($staticSkills | Sort-Object) -join "`n") -cne (@($adapterResult.skills.ids | Sort-Object) -join "`n")) {
+        if ([string](Get-StandardValidationProperty -Object $invocation.envelope -Name 'status') -cne 'platform-unavailable' -and
+            ($staticSkills -isnot [array] -or (@($staticSkills | Sort-Object) -join "`n") -cne (@($adapterResult.skills.ids | Sort-Object) -join "`n"))) {
             throw 'FAILED|Static analyzer did not cover every active Skill.'
         }
-        if ([bool](Assert-StandardValidationFindings -Envelope $invocation.envelope -Context 'Static analyzer')) { $requiresHumanReview = $true }
-        if (Get-StandardValidationSemanticRequirement -Envelope $invocation.envelope -Context 'Static analyzer') {
-            $analyzerSemanticRequired = $true
-            [void]$semanticRequiredSources.Add('skillspector-static/staticAnalyzer')
+        if ([string](Get-StandardValidationProperty -Object $invocation.envelope -Name 'status') -cne 'platform-unavailable') {
+            if ([bool](Assert-StandardValidationFindings -Envelope $invocation.envelope -Context 'Static analyzer')) { $requiresHumanReview = $true }
+            if (Get-StandardValidationSemanticRequirement -Envelope $invocation.envelope -Context 'Static analyzer') {
+                $analyzerSemanticRequired = $true
+                [void]$semanticRequiredSources.Add('skillspector-static/staticAnalyzer')
+            }
+            Complete-StandardValidationStage -Stage $stage -Status passed
         }
-        Complete-StandardValidationStage -Stage $stage -Status passed
         Write-StandardValidationStageReceipt -RunRoot $runRoot -Stage $stage
 
         $stage = Get-StandardValidationStage -Stages $stages -Id 'repository-tests'
@@ -10619,7 +10872,9 @@ function Invoke-StandardValidationRun {
             -Report $finalEvidence `
             -ExpectedSourceRevision $SourceRevision `
             -RepositoryTestEvidence $repositoryTestEvidence `
-            -RepositoryTestDispatches (Get-StandardValidationProperty -Object $adapterResult -Name 'repositoryTests')
+            -RepositoryTestDispatches (Get-StandardValidationProperty -Object $adapterResult -Name 'repositoryTests') `
+            -Policy $contractResult.policy `
+            -HostPlatform (Get-StandardValidationHostPlatform)
         $finalEvidence | Add-Member -NotePropertyName sourceConformance -NotePropertyValue $sourceConformance -Force
         if ($SourceMergeExceptionReview -and $null -ne $candidateEvidence) {
             $policy = $null

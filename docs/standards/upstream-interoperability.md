@@ -68,7 +68,7 @@ The responsibility boundary is explicit:
 | --- | --- | --- |
 | `skills/<skill-id>/SKILL.md` | Portable Skill instructions and metadata | Canonical package identity, parser, content/integrity and security rules |
 | `.codex-plugin/plugin.json` and declared `skills`/hooks/MCP paths | Optional Plugin distribution adapter | Gate 1 package evidence; root/path/inventory checks; never source ownership |
-| `agents/openai.yaml` and other host metadata | Host routing and presentation extension | Required organization metadata baseline; cannot grant permission or change validation |
+| `agents/openai.yaml` and other host metadata | Host routing and presentation extension | Optional OpenAI/Codex adapter; when present, the existing metadata validation applies; cannot grant permission or change validation |
 | `.mcp.json` / `.app.json` and MCP tools | Host/server connection and controlled capabilities | Declared endpoint, transport, schema, credential and read/write boundary; contextual security review |
 | `.agents/plugins/marketplace.json` | Repo/personal install catalog | Derived install view only; source path/policy/selector checks; no provenance authority |
 | `catalog/source.json`, Catalog/Lock and consumer projection | Not defined by upstream Plugin portability | Central source inventory, immutable provenance, managed lifecycle and post-install authority |
@@ -76,7 +76,7 @@ The responsibility boundary is explicit:
 SYP-specific governance remains central and is not exported as an upstream replacement:
 
 - `catalog/source.json` schema v2, central Catalog/Lock and source ownership;
-- `agents/openai.yaml` as the required organization routing/metadata extension;
+- `agents/openai.yaml` as an optional OpenAI/Codex routing/metadata adapter, validated only when present;
 - immutable source pin, provenance, per-Skill content hash and archive integrity;
 - managed replacement, known-legacy ownership evidence, drift/collision blocking and rollback;
 - canonical validation order, SkillSpector severity semantics, AI Review and Human Release Approval;
