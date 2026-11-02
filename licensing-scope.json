@@ -920,6 +920,30 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/platform-runtime.psd1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/platform-runtime.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/platform/Linux.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/platform/MacOS.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/platform/PlatformNative.cs",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/platform/Windows.psm1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/repo-shared-skills-migration.psm1",
       "license": "Apache-2.0"
     },
@@ -1137,6 +1161,10 @@
     },
     {
       "path": "tests/licensing-scope.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/platform-runtime.Tests.ps1",
       "license": "Apache-2.0"
     },
     {
