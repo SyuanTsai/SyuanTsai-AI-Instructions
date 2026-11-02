@@ -43,12 +43,24 @@
 
 ## Scope
 
-Standard v1 適用於由 SyuanTsai 維護、可被 Agent / Codex / GitHub Copilot 等 host 安裝或執行的 Agent Skill source repositories。
+Standard v1 適用於由 SyuanTsai 維護、可被 Claude Code / GitHub Copilot / Codex 等 host 安裝或執行的 Agent Skill source repositories。
+
+Tracking: `SYP-352`。本次規範要求支援 Windows、Linux、macOS（WSL 視同 Linux），三 AI 共用 canonical source 與一致的 instructions；環境區隔依 Standard §15.1，平台路徑／鎖／程序安全依 §8.4。文件修訂不表示 runtime／tests／CI 已完成；Consumer 的舊 pin 不追溯變更，升級 pin 時必須同時採用 SYP-353 三平台 matrix 與完整 leg 聚合。本 authority repository 自身 CI 依 Standard §18.1.1 過渡，追蹤 SYP-353／SYP-354；目前兩個 workflow 都只有 Windows job，不宣稱已通過三平台驗證。SkillSpector 僅可依 §9.1.1 的實測證據將非 Windows 步驟列為非必要，不得偽報 PASS。
+
+本 authority repository 的目前 CI／支援驗證狀態如下；目標為三平台 Core／Install Smoke matrix，後續更新 **MUST** 反映實際採用與驗證證據：
+
+| 平台 | 目前 Core／Install Smoke CI | 實際驗證狀態與待完成條件 |
+|---|---|---|
+| Windows | 兩個 workflow 都已有 Windows job，為目前唯一 required 平台 | 維持既有 required gate；不以此代表其他平台已通過。 |
+| Linux | 尚未加入 | SYP-351 已記錄 Pester 失敗；installer 的非 Windows handle-bound mutation 仍 fail closed。待 SYP-353／SYP-354 的該平台條件完成。 |
+| macOS | 尚未加入 | 尚未完成該平台驗證；installer 的非 Windows handle-bound mutation 仍 fail closed。待 SYP-353／SYP-354 的該平台條件完成。 |
+
+Linux／macOS leg 依各自平台與 lane 的完成條件加入，加入後即為 required，不得再移除或降為非必要；過渡期結束條件依 Standard §18.1.1。
 
 本標準定義：
 
 - canonical source repository contract；
-- Skill package 與 `agents/openai.yaml` metadata contract；
+- 三 AI 共用 Skill package 與存在時的 optional `agents/openai.yaml` adapter metadata contract；
 - source inventory、pin、provenance 與 integrity contract；
 - managed replacement、known legacy migration、ownership evidence、rollback 與 post-install lifecycle contract；
 - immutable authority distribution/revision binding；
@@ -73,7 +85,7 @@ Production invocation MUST receive `-SupervisorLaunchBindingPath`, a trusted-sup
 
 Production adapter command specs MUST resolve to non-reparse, directly executable trusted files；known generic interpreters and script payloads are development-harness-only and MUST be rejected for production. Production acquisition MUST be backed by a provider archive plus a trusted-supervisor-signed receipt and the normalized extracted tree MUST equal the candidate tree; the same signed receipt boundary applies to the immutable authority revision/archive/file inventory. The runner MUST use the immutable authority trust-anchor root (with pinned public-key hashes) for production supervisor and human-approval signatures, clear inherited child environments to an approved OS/runtime plus `STANDARD_VALIDATION_*` allowlist, reserve the final output with an exclusive supervisor-owned handle before child processes, and fail closed on output substitution. The runner MUST revalidate the snapshot, archive, receipt, and authority-file hashes before and after every child process, and MUST report cleanup failure until the full owned descendant process tree is gone. `canonicalValidatorPath` MUST identify the one candidate entry point checked by the central consumer entry-point inventory and invoked as the canonical gate. Human approval、publish/install 與 post-install evidence MUST be candidate-bound trusted-supervisor-signed RSA attestations；self-asserted approver/status/timestamp、authorization、release identity、installed inventory 或 integrity fields are insufficient。
 
-Runner 的 terminal state 與 local／pre-push／CI exit semantics 必須一致：`PASS=0`、`BLOCKED=10`、`FAILED=20`、`INVALID=30`、`CANCELLED=40`。每個 event/candidate 最多一個 canonical execution；artifact 必須位於 checkout 外的 run-owned root，以 atomic create-only evidence 與 execution lock 防止覆寫／重播。development harness 可以執行無害 fixture 以驗證行為，但 `releaseEligible` MUST 為 false；AI Review 永遠不能取代 Human Approval。Runner 不替代 `Invoke-StandardAuthorityGate.ps1` 的 protected-base authority regression，也不得自行提升 trusted base。
+Runner 的 terminal state 與 local／pre-push／CI exit semantics 必須一致：`PASS=0`、`BLOCKED=10`、`FAILED=20`、`INVALID=30`、`CANCELLED=40`。每個 event/candidate 最多一個 canonical matrix，每個平台 leg 最多一個 canonical execution；artifact 必須位於 checkout 外的 run-owned root，以 atomic create-only evidence 與 execution lock 防止覆寫／重播。development harness 可以執行無害 fixture 以驗證行為，但 `releaseEligible` MUST 為 false；AI Review 永遠不能取代 Human Approval。Runner 不替代 `Invoke-StandardAuthorityGate.ps1` 的 protected-base authority regression，也不得自行提升 trusted base。
 
 ## Normative language
 
@@ -87,9 +99,9 @@ Runner 的 terminal state 與 local／pre-push／CI exit semantics 必須一致�
 2. `docs/standards/schemas/source-inventory-v2.schema.json` 是 canonical `catalog/source.json` semantic shape；legacy schema v1 的兩種不相容 shape 都不是 Standard v1 conformance output。
 3. `docs/standards/schemas/openai-agent-metadata.schema.json` 只驗 YAML parse 後的 semantic baseline；quoted-string/unquoted-key lexical style 與 exact Skill identity binding 仍由 YAML-aware validator 負責。
 5. `docs/standards/validation-security-gate.json` 是 canonical validation stage order、security severity mapping、local/pre-push/CI pass-block semantics 與 consumer entry-point contract 的 machine-readable authority；schema 與 executable gate 必須同時更新。
-6. Standard v1 的 consumer entry-point contract 要求每個 event/candidate 只有 one canonical validation execution，並 inventory workflows、hooks 與 public release commands；component scripts、compatibility status lanes 與本 authority repository 的四個 workflow roles 不得被誤判為 alternate gate。
+6. Standard v1 的 consumer entry-point contract 要求每個 event/candidate 只有一個 canonical matrix、每個平台 leg 只有 one canonical validation execution，並 inventory workflows、hooks 與 public release commands；component scripts、compatibility status lanes 與本 authority repository 的四個 workflow roles 不得被誤判為 alternate gate。
 7. `scripts/Resolve-StandardValidationTool.ps1` 是 tool source / endpoint trust anchor 與 provider-specific resolution authority；`scripts/Resolve-PythonWheelClosure.py` 是其 hash-bound SkillSpector approved-index candidate materializer／offline backtracking helper，workflow 不得另建第二套 acquisition logic。
-8. scripts/Invoke-StandardAuthorityGate.ps1 是共用的 executable authority adapter。pr8 workflow 的 Windows Core job 使用 SHA-256 驗證的最新穩定 PowerShell 7，對 main pull request 與 push 執行唯一自動 authority gate，且不得設 paths filter；它執行 canonical gate 與保留的 source composition／acquisition tests。syp101 workflow 的 Windows Install Smoke job承接 production lock、真實安裝與 idempotence checks。standards-conformance.yml 僅由 workflow_dispatch 手動啟動，提供相同 gate 的診斷證據，不再對相同事件建立重複自動狀態。SYP86 lock 保留 path-filtered push 與 workflow_dispatch 診斷；validator maintenance 僅保留 workflow_dispatch 手動診斷；兩者均不加入普通 PR 前置。此 gate 輸出 source-bound releaseEligible=false 結果，不執行外部 consumer tools，也不宣稱完整 consumer lifecycle。
+8. scripts/Invoke-StandardAuthorityGate.ps1 是共用的 executable authority adapter。本 Repository 的三平台 Core／Install Smoke 為目標要求，分階段落實及當前 required gate 依 Standard §18.1.1；以下不表示目前 workflow 已具備或通過全部平台。目標 pr8 workflow 的 Core lane 必須在 ubuntu-latest、windows-latest、macos-latest 各執行一個必要 leg，設定 fail-fast: false，使用各平台官方 release asset 與 SHA-256 驗證的最新穩定 PowerShell 7，對 main pull request 與 push 執行唯一自動 authority gate，且不得設 paths filter；它執行 canonical gate 與保留的 source composition／acquisition tests。目標 syp101 workflow 的 Install Smoke lane 必須在三平台各執行一個必要 leg，設定 fail-fast: false，承接 production lock、真實安裝與 idempotence checks。三個 source required contexts 名稱不變，僅全部 canonical legs 完成且通過時成功；Core-only PASS 不足以滿足它們。standards-conformance.yml 僅由 workflow_dispatch 手動啟動，提供相同 gate 的診斷證據，不再對相同事件建立重複自動狀態。SYP86 lock 保留 path-filtered push 與 workflow_dispatch 診斷；validator maintenance 僅保留 workflow_dispatch 手動診斷；兩者均不加入普通 PR 前置。此 gate 輸出 source-bound releaseEligible=false 結果，不執行外部 consumer tools，也不宣稱完整 consumer lifecycle。
 9. `scripts/Invoke-StandardValidation.ps1` 是 consumer-facing central orchestration contract 的唯一 runner；其 adapter、evidence schema 與 behavior regression 必須在同一 protected-base authority path 驗證，且 runner 的 development harness 不得成為 release approval。
 10. `tests/skill-repository-standard.Tests.ps1`、`tests/skill-repository-workflows.Tests.ps1`、`tests/standard-validation-resolver-hardening.Tests.ps1` 與 `tests/standard-validation-runner.Tests.ps1` 共同保護 Standard、merge-blocking workflow、resolver supply-chain 與 central runner contract；normative 或 executable authority change 必須在同一 PR 更新相關 regression。
 11. `Skill-General` 在 SYP-155 完成後是 reference implementation，但不得反向覆寫或私自擴充 normative policy。

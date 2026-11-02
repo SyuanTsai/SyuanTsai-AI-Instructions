@@ -1744,7 +1744,7 @@ Describe 'Third-party raw Skill tool boundary' {
             'normal reader PR and merged before candidate adoption',
             'A pin or immutable version update alone MUST NOT transfer ownership',
             'Source-copy equivalence or removal is deferred to downstream adoption',
-            'identified item by item', 'normal required Windows Core CI gate',
+            'identified item by item', 'normal required three-platform Core CI gate',
             'This list records the Code trial', 'not a universal file inventory', 'Each source repository MUST retain its own protected reader identities'
         )) { if(-not $standard.Contains($required)){throw "The reader/adoption contract is missing '$required'."} }
     }
