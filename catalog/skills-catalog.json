@@ -46,7 +46,7 @@
       "default": false,
       "includes": [
         "review-bitbucket-pull-request",
-        "write-copilot-implementation-prompt"
+        "write-implementation-prompt"
       ],
       "excludes": []
     },
@@ -215,12 +215,12 @@
       }
     },
     {
-      "id": "write-copilot-implementation-prompt",
+      "id": "write-implementation-prompt",
       "group": "code-collaboration",
       "source": {
         "sourceId": "code-collaboration",
-        "sourcePath": "skills/write-copilot-implementation-prompt",
-        "targetPath": ".agents/skills/write-copilot-implementation-prompt"
+        "sourcePath": "skills/write-implementation-prompt",
+        "targetPath": ".agents/skills/write-implementation-prompt"
       },
       "profiles": [
         "code-collaboration"

@@ -79,7 +79,7 @@ Describe 'production Skills Catalog' {
         $cases = @(
             @{
                 Profile='code-collaboration'
-                Expected=@('configure-bitbucket-api-access','review-bitbucket-pull-request','write-copilot-implementation-prompt')
+                Expected=@('configure-bitbucket-api-access','review-bitbucket-pull-request','write-implementation-prompt')
             },
             @{
                 Profile='atlassian'
@@ -110,7 +110,7 @@ Describe 'production Skills Catalog' {
             'investigate-datadog-logs' = 'general'
             'manage-ai-memory' = 'general'
             'manage-task-handoff' = 'general'
-            'write-copilot-implementation-prompt' = 'code-collaboration'
+            'write-implementation-prompt' = 'code-collaboration'
             'capture-private-course-knowledge' = 'knowledge-content'
             'configure-bitbucket-api-access' = 'atlassian-ecosystem'
             'configure-confluence-api-access' = 'atlassian-ecosystem'

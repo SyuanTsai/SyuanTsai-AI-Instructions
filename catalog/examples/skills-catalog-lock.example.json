@@ -93,9 +93,9 @@
       "contentSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     },
     {
-      "id": "write-copilot-implementation-prompt",
+      "id": "write-implementation-prompt",
       "sourceId": "agent-skills",
-      "sourcePath": ".agents/skills/write-copilot-implementation-prompt",
+      "sourcePath": ".agents/skills/write-implementation-prompt",
       "contentSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
     }
   ]
