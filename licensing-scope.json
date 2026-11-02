@@ -940,6 +940,18 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/platform/Unix.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/platform/UnixNative.cs",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/platform/WindowsNative.cs",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/platform/Windows.psm1",
       "license": "Apache-2.0"
     },
