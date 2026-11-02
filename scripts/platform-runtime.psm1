@@ -229,6 +229,29 @@ function Get-PlatformCapabilities {
     else {
         'The current runtime does not expose System.Environment process-scope assignment.'
     }
+    $powerShellExecutable = Join-Path $PSHOME $(if ($platform -ceq 'windows') { 'pwsh.exe' } else { 'pwsh' })
+    $powerShellStatus = 'unavailable'
+    $powerShellEvidence = 'The current PowerShell executable was not verified.'
+    try {
+        $powerShellItem = Get-Item -Force -LiteralPath $powerShellExecutable -ErrorAction Stop
+        if ($powerShellItem.PSIsContainer -or ($powerShellItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $null -ne $powerShellItem.LinkType) { throw 'The current pwsh is not a physical regular file.' }
+        $reportedVersion = @(& $powerShellExecutable -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>&1)
+        if ($LASTEXITCODE -ne 0 -or $reportedVersion.Count -ne 1 -or ([string]$reportedVersion[0]).Trim() -cne $PSVersionTable.PSVersion.ToString()) { throw 'The current pwsh version probe disagrees with this process.' }
+        $powerShellStatus = 'available'
+        $powerShellEvidence = "Physical pwsh identity and version probe passed: $([IO.Path]::GetFullPath($powerShellExecutable))"
+    } catch { $powerShellEvidence = $_.Exception.Message }
+    $pesterStatus = 'unavailable'
+    $pesterEvidence = 'No physical Pester module manifest was verified.'
+    try {
+        $verifiedPester = New-Object Collections.Generic.List[string]
+        foreach ($candidate in @(Get-Module -ListAvailable -Name Pester)) {
+            $item = Get-Item -Force -LiteralPath ([string]$candidate.Path) -ErrorAction Stop
+            if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $null -ne $item.LinkType) { continue }
+            $manifest = Import-PowerShellDataFile -Path $item.FullName -ErrorAction Stop
+            if ([string]$manifest.ModuleVersion -ceq $candidate.Version.ToString()) { $verifiedPester.Add("$($candidate.Version):$($item.FullName)") }
+        }
+        if ($verifiedPester.Count -gt 0) { $pesterStatus = 'available'; $pesterEvidence = [string]::Join('; ',$verifiedPester.ToArray()) }
+    } catch { $pesterEvidence = $_.Exception.Message }
     $capabilityDefinitions = [ordered]@{
         'directory-lease' = @('unverified','P2 probe pending.')
         'file-lease' = @('unverified','P2 probe pending.')
@@ -240,6 +263,8 @@ function Get-PlatformCapabilities {
         'process-isolation' = @('unverified','P3 process isolation is not implemented or probed.')
         'powershell-resolution' = @('unverified','P4 PowerShell resolution is not implemented or probed.')
         'pester-initialization' = @('unverified','P4 Pester initialization is not implemented or probed.')
+        'powershell-runtime' = @($powerShellStatus,$powerShellEvidence)
+        'pester-module' = @($pesterStatus,$pesterEvidence)
         'process-environment' = @($processEnvironmentStatus,$processEnvironmentEvidence)
     }
 
@@ -306,7 +331,7 @@ function Get-PlatformPermissions { [CmdletBinding()] param([Parameter(Mandatory 
 function Set-PlatformPermissions { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Lease, $Policy, $Snapshot) Invoke-PlatformAdapter 'Set-PlatformPermissions' $PSBoundParameters }
 function Start-PlatformOwnedProcess { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ExecutableLease, [string[]] $ArgumentList, [hashtable] $Environment, [DateTimeOffset] $Deadline, [string] $IsolationRequirement) Invoke-PlatformAdapter 'Start-PlatformOwnedProcess' $PSBoundParameters }
 function Stop-PlatformOwnedProcess { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Lease, [TimeSpan] $GracePeriod, [DateTimeOffset] $Deadline) Invoke-PlatformAdapter 'Stop-PlatformOwnedProcess' $PSBoundParameters }
-function Resolve-PlatformPowerShell { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Policy, [Parameter(Mandatory = $true)] $DestinationLease, $OfflineCache) Invoke-PlatformAdapter 'Resolve-PlatformPowerShell' $PSBoundParameters }
+function Resolve-PlatformPowerShell { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Policy, [Parameter(Mandatory = $true)] $DestinationLease, [Parameter(Mandatory = $true)] $OfflineCache, $ReleaseMetadata) Invoke-PlatformAdapter 'Resolve-PlatformPowerShell' $PSBoundParameters }
 function Initialize-PlatformPester { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Policy, [Parameter(Mandatory = $true)] $RuntimeReceipt, [Parameter(Mandatory = $true)] $DestinationLease) Invoke-PlatformAdapter 'Initialize-PlatformPester' $PSBoundParameters }
 
 function Set-PlatformProcessEnvironment {

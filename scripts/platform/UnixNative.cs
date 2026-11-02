@@ -3,6 +3,7 @@
 
 using System;
 using System.IO;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -37,10 +38,11 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         internal SafeFd Fd;
         internal SafeFd Parent;
         internal string Leaf;
+        internal string Path;
         internal bool Locked;
         public FileObservation Observation { get; internal set; }
-        internal UnixLease(SafeFd fd, SafeFd parent, string leaf, FileObservation observation)
-        { Fd = fd; Parent = parent; Leaf = leaf; Observation = observation; }
+        internal UnixLease(SafeFd fd, SafeFd parent, string leaf, string path, FileObservation observation)
+        { Fd = fd; Parent = parent; Leaf = leaf; Path = path; Observation = observation; }
         internal void Check() { if (Fd == null || Fd.IsClosed) throw new ObjectDisposedException("UnixLease"); }
         public void Dispose()
         {
@@ -131,6 +133,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             [DllImport("libc", SetLastError = true)] internal static extern int flock(SafeFd fd, int operation);
             [DllImport("libc", SetLastError = true)] internal static extern int fchmod(SafeFd fd, uint mode);
             [DllImport("libc", SetLastError = true)] internal static extern int close(int fd);
+            [DllImport("libc", SetLastError = true)] internal static extern IntPtr write(SafeFd fd, IntPtr buffer, UIntPtr count);
+            [DllImport("libc", SetLastError = true)] internal static extern IntPtr read(SafeFd fd, IntPtr buffer, UIntPtr count);
             [DllImport("libc", SetLastError = true)] internal static extern int unlinkat(SafeFd fd, string name, int flags);
             [DllImport("libc", SetLastError = true)] internal static extern int linkat(SafeFd fd, string name, SafeFd other, string link, int flags);
             [DllImport("libc", SetLastError = true)] internal static extern int symlinkat(string target, SafeFd fd, string name);
@@ -157,6 +161,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             [DllImport(Lib, SetLastError = true)] internal static extern int flock(SafeFd fd, int operation);
             [DllImport(Lib, SetLastError = true)] internal static extern int fchmod(SafeFd fd, uint mode);
             [DllImport(Lib, SetLastError = true)] internal static extern int close(int fd);
+            [DllImport(Lib, SetLastError = true)] internal static extern IntPtr write(SafeFd fd, IntPtr buffer, UIntPtr count);
+            [DllImport(Lib, SetLastError = true)] internal static extern IntPtr read(SafeFd fd, IntPtr buffer, UIntPtr count);
             [DllImport(Lib, SetLastError = true)] internal static extern int unlinkat(SafeFd fd, string name, int flags);
             [DllImport(Lib, SetLastError = true)] internal static extern int linkat(SafeFd fd, string name, SafeFd other, string link, int flags);
             [DllImport(Lib, SetLastError = true)] internal static extern int symlinkat(string target, SafeFd fd, string name);
@@ -405,7 +411,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     SafeFd next = ChildDirectory(current, part, create);
                     if (parent != null) parent.Dispose(); parent = current; current = next;
                 }
-                UnixLease result = new UnixLease(current, parent, parts[parts.Length - 1], Stat(current, null));
+                string path = Path.GetFullPath(Path.Combine(root, String.Join("/", parts)));
+                UnixLease result = new UnixLease(current, parent, parts[parts.Length - 1], path, Stat(current, null));
                 current = null; parent = null; return result;
             }
             finally { if (current != null) current.Dispose(); if (parent != null) parent.Dispose(); }
@@ -430,10 +437,64 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     FileObservation value = Stat(file, null);
                     PlatformPaths.Single(value);
                     PlatformPaths.Same(value, Stat(duplicate, leaf));
-                    UnixLease result = new UnixLease(file, duplicate, leaf, value);
+                    UnixLease result = new UnixLease(file, duplicate, leaf, Path.Combine(parent.Path, leaf), value);
                     file = null; duplicate = null; return result;
                 }
                 finally { if (file != null) file.Dispose(); if (duplicate != null) duplicate.Dispose(); }
+            }
+        }
+        private static UnixLease OpenPreparationSource(string path)
+        {
+            ValidateAbi();
+            // Read-only source anchors may include OS aliases such as /var.
+            // As in OpenFile, the leaf is opened NOFOLLOW | NONBLOCK and fstat
+            // must prove a single-link regular file BEFORE any content read.
+            string full = Path.GetFullPath(path);
+            SafeFd file = Open(null, full, NonBlock, 0);
+            try
+            {
+                FileObservation observed = Stat(file, null);
+                PlatformPaths.Single(observed);
+                return new UnixLease(file, null, null, full, observed);
+            }
+            catch { file.Dispose(); throw; }
+        }
+        public static void AssertRegularSourceFile(string path)
+        {
+            using (UnixLease file = OpenPreparationSource(path))
+                AssertIdentity(file, file.Observation, true);
+        }
+        public static byte[] ReadPreparationFileBytes(string path)
+        {
+            using (UnixLease file = OpenPreparationSource(path))
+            {
+                long size = file.Observation.Size;
+                if (size < 0 || size > Int32.MaxValue) throw new IOException("Source is too large for a private snapshot.");
+                byte[] bytes = new byte[(int)size];
+                GCHandle pinned = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+                try
+                {
+                    int offset = 0;
+                    while (offset < bytes.Length)
+                    {
+                        UIntPtr length = new UIntPtr((uint)Math.Min(65536, bytes.Length - offset));
+                        IntPtr data = IntPtr.Add(pinned.AddrOfPinnedObject(), offset);
+                        long count = (Mac ? Darwin.read(file.Fd, data, length) : Linux.read(file.Fd, data, length)).ToInt64();
+                        if (count < 0)
+                        {
+                            int error = Marshal.GetLastWin32Error();
+                            if (error == 4) continue; // EINTR
+                            throw new PlatformErrnoException("read", error);
+                        }
+                        if (count == 0) throw new EndOfStreamException("Source changed during snapshot read.");
+                        if (count > (long)length.ToUInt64()) throw new IOException("Invalid native read result.");
+                        offset += (int)count;
+                    }
+                    if (AssertIdentity(file, file.Observation, true).Size != size)
+                        throw new IOException("Source size changed during snapshot read.");
+                    return bytes;
+                }
+                finally { pinned.Free(); }
             }
         }
         public static FileObservation AssertIdentity(UnixLease lease, FileObservation expected, bool single)
@@ -445,6 +506,144 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 if (single) PlatformPaths.Single(value);
                 if (lease.Parent != null) PlatformPaths.Same(value, Stat(lease.Parent, lease.Leaf));
                 return value;
+            }
+        }
+        public static string GetVerifiedPath(UnixLease lease)
+        {
+            lock (lease.Sync)
+            {
+                AssertIdentity(lease, lease.Observation, lease.Observation.Kind == "file");
+                // The retained parent may itself have been renamed. Re-walk ALL
+                // pathname ancestors with NOFOLLOW and compare the final inode.
+                // This is read/receipt evidence only, never authority for writes.
+                string path = Path.GetFullPath(lease.Path);
+                if (lease.Observation.Kind == "directory")
+                {
+                    using (SafeFd named = WalkRoot(path)) PlatformPaths.Same(Stat(named, null), lease.Observation);
+                }
+                else
+                {
+                    using (SafeFd parent = WalkRoot(Path.GetDirectoryName(path)))
+                        PlatformPaths.Same(Stat(parent, Path.GetFileName(path)), lease.Observation);
+                }
+                return path;
+            }
+        }
+
+        // P4 writes are rooted in the P2 directory descriptor. No cached pathname
+        // is reopened for creation or writes, even if a same-account actor renames
+        // an ancestor between validation and I/O (the cooperative A1 boundary).
+        private static UnixLease OpenPreparationDirectory(UnixLease root, string relative, out FileObservation[] ancestors)
+        {
+            ancestors = null;
+            AssertIdentity(root, root.Observation, false);
+            if (root.Observation.Kind != "directory") throw new ArgumentException("A directory lease is required.");
+            SafeFd current = Open(root.Fd, ".", DirectoryFlags, 0), parent = null;
+            string leaf = root.Leaf, path = root.Path;
+            List<FileObservation> observed = new List<FileObservation>();
+            try
+            {
+                PlatformPaths.Same(Stat(current, null), root.Observation);
+                observed.Add(root.Observation);
+                if (!String.IsNullOrEmpty(relative)) foreach (string part in PlatformPaths.Segments(relative))
+                {
+                    SafeFd next = ChildDirectory(current, part, true);
+                    if (parent != null) parent.Dispose();
+                    parent = current; current = next; leaf = part; path = Path.Combine(path, part);
+                    observed.Add(Stat(current, null));
+                }
+                UnixLease result = new UnixLease(current, parent, leaf, path, Stat(current, null));
+                ancestors = observed.ToArray();
+                current = null; parent = null; return result;
+            }
+            finally { if (current != null) current.Dispose(); if (parent != null) parent.Dispose(); }
+        }
+
+        private static void AssertPreparationDirectoryPath(UnixLease root, string relative, FileObservation[] ancestors, UnixLease directory)
+        {
+            string[] parts = String.IsNullOrEmpty(relative) ? new string[0] : PlatformPaths.Segments(relative);
+            if (ancestors == null || ancestors.Length != parts.Length + 1)
+                throw new IOException("Preparation directory ancestry evidence is incomplete.");
+            GetVerifiedPath(root);
+            SafeFd current = Open(root.Fd, ".", DirectoryFlags, 0);
+            try
+            {
+                PlatformPaths.Same(Stat(current, null), ancestors[0]);
+                for (int i = 0; i < parts.Length; i++)
+                {
+                    // Reopen from the retained root with NOFOLLOW, comparing
+                    // EVERY component. Checking only the final c and parent b
+                    // misses a moved/replaced a even if b/c keep their inodes.
+                    SafeFd next = Open(current, parts[i], DirectoryFlags, 0);
+                    try { PlatformPaths.Same(Stat(next, null), ancestors[i + 1]); }
+                    catch { next.Dispose(); throw; }
+                    current.Dispose(); current = next;
+                }
+                PlatformPaths.Same(Stat(current, null), directory.Observation);
+                AssertIdentity(directory, directory.Observation, false);
+                GetVerifiedPath(root);
+            }
+            finally { current.Dispose(); }
+        }
+
+        public static void CreatePreparationDirectory(UnixLease root, string relative)
+        {
+            PlatformPaths.Segments(relative);
+            lock (root.Sync)
+            {
+                GetVerifiedPath(root);
+                FileObservation[] ancestors;
+                using (UnixLease directory = OpenPreparationDirectory(root, relative, out ancestors))
+                    AssertPreparationDirectoryPath(root, relative, ancestors, directory);
+            }
+        }
+
+        public static void WritePreparationFile(UnixLease root, string relative, Stream source)
+        {
+            string[] parts = PlatformPaths.Segments(relative);
+            if (source == null || !source.CanRead) throw new ArgumentException("A readable payload stream is required.");
+            string parentPath = String.Join("/", parts, 0, parts.Length - 1);
+            lock (root.Sync)
+            {
+                GetVerifiedPath(root);
+                FileObservation[] ancestors;
+                using (UnixLease directory = OpenPreparationDirectory(root, parentPath, out ancestors))
+                {
+                    AssertPreparationDirectoryPath(root, parentPath, ancestors, directory);
+                    using (UnixLease file = OpenFile(directory, parts[parts.Length - 1], "Write", "CreateNew"))
+                    {
+                        byte[] buffer = new byte[65536];
+                        GCHandle pinned = GCHandle.Alloc(buffer, GCHandleType.Pinned);
+                        try
+                        {
+                            int count;
+                            while ((count = source.Read(buffer, 0, buffer.Length)) != 0)
+                            {
+                                int offset = 0;
+                                while (offset < count)
+                                {
+                                    AssertPreparationDirectoryPath(root, parentPath, ancestors, directory);
+                                    AssertIdentity(file, file.Observation, true);
+                                    IntPtr data = IntPtr.Add(pinned.AddrOfPinnedObject(), offset);
+                                    UIntPtr length = new UIntPtr((uint)(count - offset));
+                                    long written = (Mac ? Darwin.write(file.Fd, data, length) : Linux.write(file.Fd, data, length)).ToInt64();
+                                    if (written < 0)
+                                    {
+                                        int error = Marshal.GetLastWin32Error();
+                                        if (error == 4) continue; // EINTR, no bytes written.
+                                        throw new PlatformErrnoException("write", error);
+                                    }
+                                    if (written == 0 || written > count - offset) throw new IOException("Invalid native write result.");
+                                    offset += (int)written;
+                                }
+                            }
+                            // Read may rename a directory even when it returns EOF.
+                            AssertPreparationDirectoryPath(root, parentPath, ancestors, directory);
+                            AssertIdentity(file, file.Observation, true);
+                        }
+                        finally { pinned.Free(); }
+                    }
+                }
             }
         }
         private static int Flock(SafeFd fd, int operation)

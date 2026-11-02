@@ -3,6 +3,12 @@
 
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'Unix.psm1') -Scope Local -ErrorAction Stop
+$script:RuntimePreparationModulePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'RuntimePreparation.psm1'))
+$loadedRuntimePreparationModules = @(Import-Module -Name $script:RuntimePreparationModulePath -PassThru -Scope Local -ErrorAction Stop)
+if ($loadedRuntimePreparationModules.Count -ne 1 -or -not [StringComparer]::Ordinal.Equals([IO.Path]::GetFullPath([string]$loadedRuntimePreparationModules[0].Path),$script:RuntimePreparationModulePath)) { throw [IO.InvalidDataException]::new('The verified runtime preparation dependency did not load from its bound path.') }
+$script:RuntimePreparationModule = $loadedRuntimePreparationModules[0]
+
+function Invoke-MacOSRuntimePreparationCommand { param([string]$Name,[Collections.IDictionary]$Arguments) $command=$script:RuntimePreparationModule.ExportedCommands[$Name]; if($null -eq $command){throw [IO.InvalidDataException]::new("The verified runtime preparation dependency does not export '$Name'.")}; & $command @Arguments }
 
 function New-MacOSPlatformNotImplementedError {
     param([Parameter(Mandatory = $true)][string] $Capability, [Parameter(Mandatory = $true)][string] $Step)
@@ -19,7 +25,7 @@ function Get-MacOSPlatformPermissions { param([Parameter(Mandatory = $true)] $Le
 function Set-MacOSPlatformPermissions { param([Parameter(Mandatory = $true)] $Lease, $Policy, $Snapshot) Set-UnixPlatformPermissions @PSBoundParameters }
 function Start-MacOSPlatformOwnedProcess { param([Parameter(Mandatory = $true)] $ExecutableLease, [string[]] $ArgumentList, [hashtable] $Environment, [DateTimeOffset] $Deadline, [string] $IsolationRequirement) throw (New-MacOSPlatformNotImplementedError 'process-isolation' 'P3') }
 function Stop-MacOSPlatformOwnedProcess { param([Parameter(Mandatory = $true)] $Lease, [TimeSpan] $GracePeriod, [DateTimeOffset] $Deadline) throw (New-MacOSPlatformNotImplementedError 'process-isolation' 'P3') }
-function Resolve-MacOSPlatformPowerShell { param([Parameter(Mandatory = $true)] $Policy, [Parameter(Mandatory = $true)] $DestinationLease, $OfflineCache) throw (New-MacOSPlatformNotImplementedError 'powershell-resolution' 'P4') }
-function Initialize-MacOSPlatformPester { param([Parameter(Mandatory = $true)] $Policy, [Parameter(Mandatory = $true)] $RuntimeReceipt, [Parameter(Mandatory = $true)] $DestinationLease) throw (New-MacOSPlatformNotImplementedError 'pester-initialization' 'P4') }
+function Resolve-MacOSPlatformPowerShell { param([Parameter(Mandatory = $true)] $Policy, [Parameter(Mandatory = $true)] $DestinationLease, [Parameter(Mandatory = $true)] $OfflineCache, $ReleaseMetadata) Invoke-MacOSRuntimePreparationCommand 'Resolve-VerifiedPlatformPowerShell' @{ Policy=$Policy; DestinationLease=$DestinationLease; OfflineCache=$OfflineCache; ReleaseMetadata=$ReleaseMetadata; Platform='macos' } }
+function Initialize-MacOSPlatformPester { param([Parameter(Mandatory = $true)] $Policy, [Parameter(Mandatory = $true)] $RuntimeReceipt, [Parameter(Mandatory = $true)] $DestinationLease) Invoke-MacOSRuntimePreparationCommand 'Initialize-VerifiedPlatformPester' @{ Policy=$Policy; RuntimeReceipt=$RuntimeReceipt; DestinationLease=$DestinationLease; Platform='macos'; ResolverPath=(Join-Path (Split-Path -Parent $PSScriptRoot) 'Resolve-StandardValidationTool.ps1') } }
 
 Export-ModuleMember -Function *-MacOSPlatform*
