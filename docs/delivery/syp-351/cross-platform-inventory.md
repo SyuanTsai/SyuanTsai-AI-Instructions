@@ -25,9 +25,9 @@
 
 | 範圍 | 檔案數 | 僅 Windows | 三平台行為不同 | 已跨平台 | 靜態估計工時 |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| AI-Instructions | 51 | 3 | 28 | 20 | 219.5h |
+| AI-Instructions | 51 | 4 | 28 | 19 | 229.5h |
 | 5 個 Skill repo | 79 | 6 | 27 | 46 | 262h |
-| 合計 | 130 | 9 | 55 | 66 | 481.5h |
+| 合計 | 130 | 10 | 55 | 65 | 491.5h |
 
 4. **最大風險（S4）**：installer 的 handle-bound mutation（`installer-safe-mutation.psm1`、`bootstrap-ai-instructions.ps1`、`repo-shared-skills-migration.psm1`）在非 Windows 上明確 fail closed；`FileShare` 型的鎖在 Unix 上只是 advisory。需要以 `openat`／`O_NOFOLLOW`／`lstat`／`st_nlink`／`flock` 重新設計等效保護。
 5. **新發現的風險**：Standard 工具鏈的程序隔離 Unix 分支其實是 Linux 專用（`prctl`、`/proc`、`unshare --pid`），macOS 沒有對應實作，會影響 S2 條文與 S3 的 macOS matrix leg。
@@ -138,7 +138,6 @@
 | `Skill-Knowledge-Content/scripts/Validate.ps1` | 已跨平台 | 診斷文字預期不符 | 非明確產品平台失敗；測試對跨行訊息處理不穩定。 |
 | `Skill-Knowledge-Content/tests/StandardV1Conformance.Tests.ps1` | 靜態表標示產品檔已跨平台 | `pwsh.exe` command not found | 測試 fixture 硬編 Windows 執行檔名稱，非產品程式跨平台能力本身。 |
 | `Skill-Atlassian-Ecosystem` Capture／Preview 測試 fixture | 相關產品檔多為已跨平台 | 10 項 junction fixture 失敗 | log 指向 fixture 建立／存取 junction 失敗，不能據此判定產品路徑處理失敗。 |
-| `SyuanTsai-AI-Instructions/scripts/Invoke-PesterShardProcess.ps1` | 靜態指出含 Unix fallback | 5 項直接要求 Windows PowerShell 7 | 實測顯示 Pester adapter contract 仍有明確平台閘門。 |
 
 ### 對工作量估算的影響
 
@@ -179,12 +178,12 @@
 | --- | --- | ---: | --- | --- |
 | S2 Standard 改版 | 19 處條文；§19 要求同一 PR 更新 `skill-repository-standard.Tests.ps1`、`skill-repository-workflows.Tests.ps1`、`standard-validation-resolver-hardening.Tests.ps1` 與 machine-readable policy；三 AI 規範、環境區隔、精簡規範成文 | 40–60h | 中 | D2、D3 未決時條文無法定稿；`validation-security-gate.json` 的 role 仍為 Windows 專屬 |
 | S3 CI 範本（試行 Code-Collaboration） | 三平台 matrix、Windows `.exe` 與 verified runtime 契約改為平台感知、Pester runtime 共用化、macOS 實跑與 SkillSpector | 50–70h | 中高 | Code-Collaboration 29 項失敗集中於 runtime 契約；macOS 程序隔離無實作；D6 pin 不一致需一併處理 |
-| S4 Installer 跨平台與 Claude 輸出 | handle-bound mutation、鎖、symlink／hard-link 保護的 Unix 等效設計；`~/.claude/skills` 與 `CLAUDE.md` 輸出 | 260–340h | 高 | 351-A：18 檔建議「替換」、219.5h；Linux 實測 333 個失敗（其中 241 個需重跑取得錯誤明細）；設計需先經使用者核准 |
+| S4 Installer 跨平台與 Claude 輸出 | handle-bound mutation、鎖、symlink／hard-link 保護的 Unix 等效設計；`~/.claude/skills` 與 `CLAUDE.md` 輸出 | 270–350h | 高 | 351-A：18 檔建議「替換」、14 檔建議「改寫」、229.5h；Linux 實測 333 個失敗（其中 241 個需重跑取得錯誤明細）；設計需先經使用者核准 |
 | S5 Skill-General | 7 個 SKILL.md 中立化與精簡；`manage-task-handoff`、`operate-environment-authorized-sql` 腳本；Core Pester runtime | 35–50h | 中 | 351-B 24h；43 個失敗中 32 個為 runtime 身分（共用模組可一次解除） |
 | S6 Skill-Atlassian-Ecosystem | 34 支腳本中 13 支需改寫／替換；環境區隔（私人 MCP、工作 token）；`configure-*` 共用 reference；Unix 環境變數持久化 | 120–150h | 中高 | 351-B 107h；Linux 只有 12 個失敗且多為 junction fixture，但 `Validate.ps1`、`Invoke-StandardValidation.ps1`、`Invoke-SourceConformance.ps1` 有直接 Windows 閘門；D4 未決 |
 | S7 Code-Collaboration 與 Knowledge-Content | SKILL.md 中立化與精簡；KC 6 支腳本；CC 驗證腳本移植若已在 S3 完成則只確認 | 25–40h | 低 | 351-B：CC 18.5h、KC 17h；KC 只有 2 個測試失敗 |
 | S8 Skill-Darktide-Translate | `Validate.ps1` Windows 閘門；`PathSafety.psm1` 在 Unix 無實體身分判斷；`SharedCoordinationLock.psm1`；Windows PowerShell 安裝器 | 100–130h | 中高 | 351-B 95.5h、3 支建議「替換」；Linux 12 個失敗含直接閘門與 native path 契約 |
-| **合計** | | **630–840h** | | |
+| **合計** | | **640–850h** | | |
 
 關鍵路徑上的主要不確定性：S4 的 Unix 等效保護設計（需 D3），以及 S3 在 macOS 的實跑結果（程序隔離與 SkillSpector）。
 
@@ -411,17 +410,17 @@ run 位於各 repository 的 Actions 頁面（`https://github.com/SyuanTsai/<Rep
 - 測試範圍檔：**46 個**，依要求僅彙總。
 - 主分類：
 
-  - **僅 Windows：3 個**
+  - **僅 Windows：4 個**
   - **三平台行為不同：28 個**
-  - **已跨平台：20 個**
+  - **已跨平台：19 個**
 
 - 處理建議：
 
-  - **保留：20 個**
-  - **改寫：13 個**
+  - **保留：19 個**
+  - **改寫：14 個**
   - **替換：18 個**
 
-- 總估計修改與測試成本：**219.5 小時**。此數字是本次技術盤點要求的成本估算，不是 SYP 工時或 worklog。
+- 總估計修改與測試成本：**229.5 小時**。此數字是本次技術盤點要求的成本估算，不是 SYP 工時或 worklog。
 - 主要不確定性集中於 Unix 檔案鎖、symlink/hard-link 防護、macOS 程序樹收斂與原子發布安全邊界。
 
 最大風險前 5 名：
@@ -455,7 +454,7 @@ run 位於各 repository 的 Actions 頁面（`https://github.com/SyuanTsai/<Rep
 | `scripts/installer-safe-mutation.psm1` | 僅 Windows | `kernel32` P/Invoke：142–182；C# 路徑 `TrimEnd('\\')`：191；非 Windows 明確拋錯：737–739；路徑轉成反斜線：744 | 替換 | 16 | 高 | `Set-InstallerSafeFileBytes` 一進入即拋出「requires Windows」。 |
 | `scripts/invoke-ai-instructions-rollout.ps1` | 已跨平台 | 純 wrapper，參數與 module 路徑透過 `Join-Path`；無平台 API | 保留 | 0.5 | 低 | 本檔本身無直接失敗；rollout module 的路徑假設會在下游暴露。 |
 | `scripts/Invoke-FocusedLinuxContainment.ps1` | 已跨平台 | 路徑均以 `Join-Path`：6–12；install-root prefix 使用 `DirectorySeparatorChar`：50 | 保留 | 1 | 中 | 本檔可啟動；非 Linux 平台最可能由被測 capability 回報不適用或不可用。 |
-| `scripts/Invoke-PesterShardProcess.ps1` | 已跨平台 | Win32 P/Invoke 僅在 Windows 載入：59–60、107–124；平台分支：441、457、510；Unix 使用 identity-checked fallback：550–552 | 保留 | 2 | 中 | 最可能是 Unix fallback 無法完整收斂已脫離父程序的後代程序，而不是載入 `kernel32` 失敗。 |
+| `scripts/Invoke-PesterShardProcess.ps1` | 僅 Windows | 第 25–29 行在非 Windows、非 Core 或非 PowerShell 7 時無條件拋出；原列的 Unix identity-checked fallback：550–552 因此前置閘門不可達 | 改寫 | 12 | 高 | Linux/macOS 在入口即失敗；移除閘門後，需以各平台可達的程序樹枚舉與回收機制處理已脫離父程序的後代程序。 |
 | `scripts/Invoke-RoutineSemanticScan.ps1` | 三平台行為不同 | key 檔拒絕 `ReparsePoint`：107；輸出使用 `FileShare.None`：132 | 改寫 | 2 | 中 | 輸出檔在 Unix 沒有 Windows 等級的排他分享保證，可能被並行讀取或開啟。 |
 | `scripts/Invoke-StandardAuthorityGate.ps1` | 三平台行為不同 | 平台 comparer：61–62、216–217；Linux `/proc`：1518；Linux `stat/chmod`：1654、1684；`unshare`：1779 | 替換 | 10 | 高 | macOS 被視為 Unix，但沒有 `/proc`、Linux cgroup 與 `unshare --pid`，containment gate 會 fail closed。 |
 | `scripts/Invoke-StandardStaticScan.ps1` | 三平台行為不同 | `ReparsePoint`：26；路徑 containment 固定忽略大小寫：51–52、149、186、201；輸出 `FileShare.None`：260 | 改寫 | 3 | 中 | case-sensitive volume 上可能把不同路徑錯認為 scanner、working directory 或 candidate 內路徑。 |
@@ -560,7 +559,7 @@ run 位於各 repository 的 Actions 頁面（`https://github.com/SyuanTsai/<Rep
 主要受影響：
 
 - agent environment、bootstrap、cleanup、source acquisition、third-party source、validator、adapter、ZIP extraction 等檔案。
-- `Invoke-PesterShardProcess.ps1` 與 `Invoke-StandardValidation.ps1` 已另外檢查 `LinkType`，但 Unix 上的 provider 資訊仍不足以構成原子安全邊界。
+- `Invoke-PesterShardProcess.ps1` 的 `LinkType` 檢查位於目前不可達的 Unix 後續路徑；移除第 25–29 行平台閘門後，仍須驗證其 Unix provider 資訊是否足以構成原子安全邊界。`Invoke-StandardValidation.ps1` 也有相同的 Unix provider 資訊限制。
 
 方向：
 
@@ -599,6 +598,7 @@ run 位於各 repository 的 Actions 頁面（`https://github.com/SyuanTsai/<Rep
 
 方向：
 
+- `Invoke-PesterShardProcess.ps1` 先移除第 25–29 行平台閘門，讓 Unix backend 可達；再以平台適用的程序樹枚舉與回收機制證明後代程序已收斂。
 - Windows：Job Object。
 - Linux：process group、subreaper、cgroup 或 PID namespace。
 - macOS：process group/session 加上保守的 PID/start-time identity 驗證；若需求是不可逃逸的強隔離，應改由外部 sandbox/container，而非把 Linux `/proc` 設計直接套到 macOS。
