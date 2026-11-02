@@ -115,9 +115,12 @@ Describe 'Platform runtime contract' {
         }
     }
 
+    # Scenario: The current host is Windows and can load the Windows-only adapter and identity primitives.
+    # Purpose: Register these tests only where Windows reparse, lease, and module semantics apply; Unix hosts must not report them as skips.
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
     # Scenario: The Windows adapter wraps the retained safe directory guard.
     # Purpose: Preserve verified installer delegation while extending ancestor protection.
-    It 'UnitT40_delegates_windows_directory_arguments_to_the_existing_installer_function' -Skip:($script:ExpectedOs -ne 'windows') {
+    It 'UnitT40_delegates_windows_directory_arguments_to_the_existing_installer_function' {
         $root = Join-Path $TestDrive 'delegation-root'
         New-Item -ItemType Directory -Path (Join-Path $root 'child/path') -Force | Out-Null
         Import-Module (Join-Path $script:RepositoryRoot 'scripts/platform/Windows.psm1') -Force
@@ -131,7 +134,7 @@ Describe 'Platform runtime contract' {
 
     # Scenario: The caller session defines a malicious command with the same name as a verified dependency export.
     # Purpose: Bind delegation to the full-path module object instead of ambient PowerShell name resolution.
-    It 'UnitT42_ignores_an_ambient_same_name_installer_function' -Skip:($script:ExpectedOs -ne 'windows') {
+    It 'UnitT42_ignores_an_ambient_same_name_installer_function' {
         $root = Join-Path $TestDrive 'ambient-shadow-root'
         New-Item -ItemType Directory -Path (Join-Path $root 'child') -Force | Out-Null
         $global:Syp353AmbientGuardCalled = $false
@@ -157,7 +160,7 @@ Describe 'Platform runtime contract' {
 
     # Scenario: A caller supplies a pathname instead of a live lease.
     # Purpose: A serialized or path-only value cannot authorize a handle-bound identity assertion.
-    It 'InterT45_rejects_a_path_instead_of_a_live_lease' -Skip:($script:ExpectedOs -ne 'windows') {
+    It 'InterT45_rejects_a_path_instead_of_a_live_lease' {
         $path = Join-Path $TestDrive 'identity-target.txt'
         Set-Content -LiteralPath $path -Value 'original' -Encoding UTF8
         $expected = [pscustomobject]@{ volumeSerial = 1; fileIndex = 1 }
@@ -172,6 +175,7 @@ Describe 'Platform runtime contract' {
         # A pathname is not a lease and must never authorize an identity assertion.
         $caught | Should Not BeNullOrEmpty
         Remove-Module Windows -Force
+    }
     }
 
     # Scenario: A distributed module closure gains a file or a declared file changes after review.
@@ -286,12 +290,6 @@ try {
             ($actualDescriptor.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected) |
                 Should Be ($expectedDescriptor.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected)
         }
-        # Explicit per-platform skip inventory; capability failures are failures, never skips.
-        if ($IsWindows) {
-            Write-Host 'P2 skip inventory: InterT52, InterT53, InterT54, InterT70, InterT72, InterT74, InterT76, InterT78, InterT80, InterT82, InterT84, InterT86, InterT88, InterT89 (Unix symlink/fd/mode/ABI semantics unavailable on Windows).'
-        } else {
-            Write-Host 'Skip inventory: contract UnitT40, UnitT42, InterT45; P2 InterT90, InterT92, InterT94 (Windows reparse/FileShare/DACL semantics unavailable on Unix).'
-        }
     }
 
     # Scenario: A caller creates a directory and a file using only relative child names.
@@ -383,11 +381,17 @@ try {
         } finally { $parent.Dispose() }
     }
 
+    # Scenario: The current host provides Unix ownership, mode, and flock semantics.
+    # Purpose: Register Unix lock-initialization tests only on Linux and macOS; Windows must not report them as skips.
+    if (
+        [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Linux) -or
+        [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)
+    ) {
     # Scenario: Two non-root processes first acquire a missing lock while its creator
     # deliberately holds the real 0000 -> 0600 initialization window open.
     # Purpose: Deterministically reproduce EEXIST/EACCES and require both public lock
     # callers to succeed on the same inode without weakening no-follow/single-link checks.
-    It 'InterT52_retries_unix_simultaneous_first_lock_initialization_across_processes' -Skip:(-not ($IsLinux -or $IsMacOS)) {
+    It 'InterT52_retries_unix_simultaneous_first_lock_initialization_across_processes' {
         $relative = 'first-lock-race'
         $path = Join-Path $script:P2Root $relative
         $parent = Open-PlatformDirectory -Root $script:P2Root -RelativePath $relative -CreatePrivate
@@ -498,7 +502,7 @@ try {
 
     # Scenario: An existing single-link lock is read-only, not an initializing inode.
     # Purpose: Ordinary EACCES remains an immediate native failure, not a timeout/retry.
-    It 'InterT53_does_not_retry_unix_permission_denial_outside_initialization' -Skip:(-not ($IsLinux -or $IsMacOS)) {
+    It 'InterT53_does_not_retry_unix_permission_denial_outside_initialization' {
         $parent = Open-PlatformDirectory -Root $script:P2Root -RelativePath 'lock-denied' -CreatePrivate
         try {
             $parent.Observation.Uid | Should Not Be 0
@@ -516,7 +520,7 @@ try {
 
     # Scenario: An owned 0000 lock never finishes initialization.
     # Purpose: Initialization waits consume the caller's deadline and cannot spin forever.
-    It 'InterT54_bounds_unix_lock_initialization_wait_by_the_deadline' -Skip:(-not ($IsLinux -or $IsMacOS)) {
+    It 'InterT54_bounds_unix_lock_initialization_wait_by_the_deadline' {
         $parent = Open-PlatformDirectory -Root $script:P2Root -RelativePath 'lock-initialization-timeout' -CreatePrivate
         try {
             $parent.Observation.Uid | Should Not Be 0
@@ -531,6 +535,7 @@ try {
             $timer.Elapsed.TotalSeconds | Should BeLessThan 5
             [int][IO.File]::GetUnixFileMode((Join-Path $script:P2Root 'lock-initialization-timeout/lock')) | Should Be 0
         } finally { $parent.Dispose() }
+    }
     }
 
     # Scenario: A lock is released and reacquired.
@@ -570,9 +575,15 @@ try {
         finally { $file.Dispose() }
     }
 
+    # Scenario: The current host provides Unix symlink, descriptor, mode, and ABI semantics.
+    # Purpose: Register Unix filesystem tests only on Linux and macOS; Windows must not report them as skips.
+    if (
+        [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Linux) -or
+        [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)
+    ) {
     # Scenario: A Unix file leaf is a symlink to an ordinary file.
     # Purpose: O_NOFOLLOW rejects the link for file and lock acquisition.
-    It 'InterT70_rejects_unix_symlink_leaves' -Skip:(-not ($IsLinux -or $IsMacOS)) {
+    It 'InterT70_rejects_unix_symlink_leaves' {
         $parent = Open-PlatformDirectory -Root $script:P2Root -RelativePath 'symlink-leaf' -CreatePrivate
         try {
             $path = Join-Path $script:P2Root 'symlink-leaf'
@@ -585,7 +596,7 @@ try {
 
     # Scenario: A symlink occurs inside RelativePath or inside Root itself.
     # Purpose: Validate every ancestor from the physical filesystem anchor.
-    It 'InterT72_rejects_unix_symlink_ancestors_including_root' -Skip:(-not ($IsLinux -or $IsMacOS)) {
+    It 'InterT72_rejects_unix_symlink_ancestors_including_root' {
         $target = Join-Path $script:P2Root 'ancestor-target'
         [IO.Directory]::CreateDirectory((Join-Path $target 'child')) | Out-Null
         $alias = Join-Path $script:P2Root 'ancestor-alias'
@@ -596,7 +607,7 @@ try {
 
     # Scenario: A dangling link is encountered during private directory or file creation.
     # Purpose: Missing targets must not turn no-follow checks into path-following creation.
-    It 'InterT74_rejects_unix_dangling_links' -Skip:(-not ($IsLinux -or $IsMacOS)) {
+    It 'InterT74_rejects_unix_dangling_links' {
         $parent = Open-PlatformDirectory -Root $script:P2Root -RelativePath 'dangling' -CreatePrivate
         try {
             [IO.File]::CreateSymbolicLink((Join-Path $script:P2Root 'dangling/link'),'absent') | Out-Null
@@ -609,7 +620,7 @@ try {
 
     # Scenario: A second hard link is introduced after opening a single-link file.
     # Purpose: fstat observes nlink=2 and both new opens and ownership assertions refuse it.
-    It 'InterT76_rejects_unix_multiple_hard_links' -Skip:(-not ($IsLinux -or $IsMacOS)) {
+    It 'InterT76_rejects_unix_multiple_hard_links' {
         $parent = Open-PlatformDirectory -Root $script:P2Root -RelativePath 'unix-hardlink' -CreatePrivate
         try {
             $file = Open-PlatformFile -ParentLease $parent -Leaf 'data' -Access ReadWrite -CreateMode CreateNew
@@ -625,7 +636,7 @@ try {
 
     # Scenario: CreateNew must return a usable 0600 file even on Darwin arm64's varargs ABI.
     # Purpose: Inspect mode before any permission setter can mask a broken openat creation mode.
-    It 'InterT78_verifies_unix_creation_mode_before_reopening' -Skip:(-not ($IsLinux -or $IsMacOS)) {
+    It 'InterT78_verifies_unix_creation_mode_before_reopening' {
         $parent = Open-PlatformDirectory -Root $script:P2Root -RelativePath 'creation-mode' -CreatePrivate
         try {
             $file = Open-PlatformFile -ParentLease $parent -Leaf 'data' -Access ReadWrite -CreateMode CreateNew
@@ -640,7 +651,7 @@ try {
 
     # Scenario: CreatePrivate creates multiple nested Unix directories.
     # Purpose: Every new segment has exactly 0700, independently checked through .NET.
-    It 'InterT80_creates_unix_private_directories_with_mode_0700' -Skip:(-not ($IsLinux -or $IsMacOS)) {
+    It 'InterT80_creates_unix_private_directories_with_mode_0700' {
         $parent = Open-PlatformDirectory -Root $script:P2Root -RelativePath 'private/nested' -CreatePrivate
         try {
             foreach ($relative in @('private','private/nested')) {
@@ -651,7 +662,7 @@ try {
 
     # Scenario: A caller applies mode bits and then requests ACL support.
     # Purpose: fchmod readback is exact; unsupported ACL policies produce a typed failure.
-    It 'InterT82_applies_unix_fchmod_and_refuses_acl_policy' -Skip:(-not ($IsLinux -or $IsMacOS)) {
+    It 'InterT82_applies_unix_fchmod_and_refuses_acl_policy' {
         $parent = Open-PlatformDirectory -Root $script:P2Root -RelativePath 'chmod' -CreatePrivate
         try {
             $file = Open-PlatformFile -ParentLease $parent -Leaf 'data' -Access ReadWrite -CreateMode CreateNew
@@ -668,7 +679,7 @@ try {
 
     # Scenario: The active libc/stat ABI is validated before native primitives run.
     # Purpose: Require independent size/mode and nlink checks instead of an assumed layout.
-    It 'InterT84_passes_unix_abi_runtime_self_check' -Skip:(-not ($IsLinux -or $IsMacOS)) {
+    It 'InterT84_passes_unix_abi_runtime_self_check' {
         $abi = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::ValidateAbi()
         $abi | Should Match 'stat/fstatat size, type, mode, uid, gid, inode and nlink self-test passed'
         $abi | Should Match 'create mode 0000 -> 0600 verified'
@@ -678,7 +689,7 @@ try {
 
     # Scenario: A still-open file is renamed and a replacement occupies its original name.
     # Purpose: fstatat must detect replacement even when fstat and Expected still match.
-    It 'InterT86_rejects_unix_name_replacement_while_file_is_open' -Skip:(-not ($IsLinux -or $IsMacOS)) {
+    It 'InterT86_rejects_unix_name_replacement_while_file_is_open' {
         $parent = Open-PlatformDirectory -Root $script:P2Root -RelativePath 'live-replacement' -CreatePrivate
         try {
             $file = Open-PlatformFile -ParentLease $parent -Leaf 'data' -Access ReadWrite -CreateMode CreateNew
@@ -692,7 +703,7 @@ try {
 
     # Scenario: A noncooperating Unix writer replaces a held lock's pathname.
     # Purpose: Expose the A1 limit, detect identity loss, and never unlink the replacement on release.
-    It 'InterT88_detects_unix_lock_substitution_without_unlinking' -Skip:(-not ($IsLinux -or $IsMacOS)) {
+    It 'InterT88_detects_unix_lock_substitution_without_unlinking' {
         $parent = Open-PlatformDirectory -Root $script:P2Root -RelativePath 'lock-substitution' -CreatePrivate
         try {
             $lease = Enter-PlatformLock -ParentLease $parent -Leaf 'lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
@@ -707,7 +718,7 @@ try {
 
     # Scenario: The probe directory is renamed and an unrelated empty directory replaces it.
     # Purpose: Failed identity validation must preserve the replacement and expose cleanup evidence.
-    It 'InterT89_preserves_replaced_unix_probe_directory_and_cleanup_evidence' -Skip:(-not ($IsLinux -or $IsMacOS)) {
+    It 'InterT89_preserves_replaced_unix_probe_directory_and_cleanup_evidence' {
         $result = & (Get-Module platform-runtime) {
             param($FixtureRoot)
             $name = 'cleanup-replacement'
@@ -728,10 +739,14 @@ try {
         $result.originalExists | Should Be $true
         $result.cleanupFailure | Should Not BeNullOrEmpty
     }
+    }
 
+    # Scenario: The current host provides Windows junction, hard-link, FileShare, and DACL semantics.
+    # Purpose: Register Windows filesystem tests only on Windows; Linux and macOS must not report them as skips.
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
     # Scenario: A Windows junction appears in the child path or Root ancestors.
     # Purpose: Preserve no-reparse guards and cover the root-ancestor gap in the old helper.
-    It 'InterT90_rejects_windows_junctions_including_root_ancestors' -Skip:(-not $IsWindows) {
+    It 'InterT90_rejects_windows_junctions_including_root_ancestors' {
         $target = Join-Path $script:P2Root 'junction-target'
         [IO.Directory]::CreateDirectory((Join-Path $target 'child')) | Out-Null
         $alias = Join-Path $script:P2Root 'junction-alias'
@@ -747,7 +762,7 @@ try {
 
     # Scenario: A Windows regular file has two directory entries.
     # Purpose: NumberOfLinks rejects aliases for file and lock leases.
-    It 'InterT92_rejects_windows_multiple_hard_links' -Skip:(-not $IsWindows) {
+    It 'InterT92_rejects_windows_multiple_hard_links' {
         $parent = Open-PlatformDirectory -Root $script:P2Root -RelativePath 'windows-hardlink' -CreatePrivate
         try {
             [IO.File]::WriteAllText((Join-Path $script:P2Root 'windows-hardlink/data'),'data')
@@ -759,7 +774,7 @@ try {
 
     # Scenario: A Windows lease changes read-only attributes and restores its DACL.
     # Purpose: Permissions stay handle-bound; sharing still denies outside write and rename.
-    It 'InterT94_preserves_windows_dacl_readonly_and_share_guards' -Skip:(-not $IsWindows) {
+    It 'InterT94_preserves_windows_dacl_readonly_and_share_guards' {
         $parent = Open-PlatformDirectory -Root $script:P2Root -RelativePath 'windows-permissions' -CreatePrivate
         try {
             $file = Open-PlatformFile -ParentLease $parent -Leaf 'data' -Access ReadWrite -CreateMode CreateNew
@@ -777,6 +792,7 @@ try {
                 { [IO.File]::Move((Join-Path $script:P2Root 'windows-permissions/data'),(Join-Path $script:P2Root 'windows-permissions/moved')) } | Should Throw
             } finally { $file.Dispose() }
         } finally { $parent.Dispose() }
+    }
     }
 }
 
