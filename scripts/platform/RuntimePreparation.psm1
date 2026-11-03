@@ -592,7 +592,13 @@ function Start-PlatformVerifiedProcess {
     $startInfo.RedirectStandardError=$true
     $startInfo.EnvironmentVariables.Clear()
     foreach($name in $Environment.Names) { $startInfo.EnvironmentVariables[[string]$name]=[string]$Environment.Values[$name] }
-    foreach($argument in @('-NoLogo','-NoProfile','-NonInteractive','-Command',$command)) { [void]$startInfo.ArgumentList.Add($argument) }
+    $arguments=[Collections.Generic.List[string]]::new()
+    foreach($argument in @('-NoLogo','-NoProfile','-NonInteractive')){[void]$arguments.Add($argument)}
+    if($Platform -ceq 'windows'){
+        [void]$arguments.Add('-ExecutionPolicy');[void]$arguments.Add('Bypass')
+    }
+    [void]$arguments.Add('-Command');[void]$arguments.Add($command)
+    foreach($argument in $arguments) { [void]$startInfo.ArgumentList.Add($argument) }
     $process=[Diagnostics.Process]::new(); $process.StartInfo=$startInfo
     $profileRoot=[IO.Path]::GetFullPath([IO.Path]::Combine([IO.Path]::GetTempPath(),('platform-verified-profile-'+[guid]::NewGuid().ToString('N'))))
     $profileCreated=$false;$profileGuard=$null

@@ -1915,6 +1915,34 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
     }
     }
 
+    # Scenario: A Windows host policy is Restricted and the parent overrides it with process-scoped Bypass.
+    # Purpose: Give the closure-verified child the same process-scoped Bypass so its verified Pester scripts can load.
+    if ($p4IsWindows -and $p4Pester4101ForRegistration.Count -gt 0) {
+    It 'InterT63_imports_pester_with_child_process_execution_policy_bypass' {
+        if(Test-P4KnownRuntimeLinkRejection){ return }
+        $pester=$script:P4Pester4101
+        $runtime=Get-P4KnownRuntimeReceipt
+        $pesterClosure=& $script:P4Preparation {param($root) Get-PlatformRuntimeClosure $root 'windows'} $pester.ModuleBase
+        $escapedManifest=$pester.Path.Replace("'","''")
+        $probe="`$module=Import-Module -Name '$escapedManifest' -Force -PassThru -ErrorAction Stop;[pscustomobject]@{policy=(Get-ExecutionPolicy -Scope Process).ToString();version=`$module.Version.ToString()}|ConvertTo-Json -Compress"
+        $previousPolicy=Get-ExecutionPolicy -Scope Process
+        try {
+            Set-ExecutionPolicy -Scope Process -ExecutionPolicy Restricted -Force
+            (Get-ExecutionPolicy -Scope Process) | Should Be 'Restricted'
+            Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+            (Get-ExecutionPolicy -Scope Process) | Should Be 'Bypass'
+            $output=& $script:P4Preparation {
+                param($runtime,$probe,$pesterClosure)
+                Invoke-PlatformVerifiedProcess $runtime.executablePath $runtime.runtimeClosure 'windows' $probe $pesterClosure
+            } $runtime $probe $pesterClosure
+            $evidence=$output | ConvertFrom-Json
+            $evidence.policy | Should Be 'Bypass'
+            $evidence.version | Should Be '4.10.1'
+            (Get-ExecutionPolicy -Scope Process) | Should Be 'Bypass'
+        } finally { Set-ExecutionPolicy -Scope Process -ExecutionPolicy $previousPolicy -Force }
+    }
+    }
+
     # Scenario: Pester.psm1 is changed during the final runtime check, after payload validation.
     # Purpose: Windows must deny the write; Unix must revalidate Pester after the runtime check, before import.
     # Not registered when Pester 4.10.1 is absent because the late-mutation boundary uses its physical payload.
