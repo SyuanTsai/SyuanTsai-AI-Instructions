@@ -68,6 +68,9 @@ function Import-PesterShardRuntime {
     if ($null -ne ('SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative' -as [type])) {
         throw [IO.InvalidDataException]::new('INVALID|Preloaded native runtime has no entry-point provenance; use a fresh shard supervisor.')
     }
+    # A1 boundary: Add-Type reopens these verified paths. A same-account concurrent
+    # malicious writer can replace source between hashing and this read; external
+    # isolation is required. The later P2 recheck does not close that interval.
     Add-Type -LiteralPath @($entries | Where-Object { $_.Path.EndsWith('.cs') } | ForEach-Object { Join-Path $Root $_.Path }) -ErrorAction Stop
     $platform = [SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetOperatingSystem()
     foreach ($entry in $entries) {
@@ -196,6 +199,9 @@ function Invoke-PesterShardProcess {
         $executable = Open-PesterShardInput $ChildPowerShell $guards
         foreach ($path in @($Paths)+@($ModulePath)) { Open-PesterShardInput $path $guards | Out-Null }
         $arguments = @('-NoLogo','-NoProfile','-NonInteractive')
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            $arguments += @('-ExecutionPolicy','Bypass')
+        }
         if (-not [string]::IsNullOrEmpty($ChildScriptPath)) {
             Open-PesterShardInput $ChildScriptPath $guards | Out-Null
             $arguments += @('-File',$ChildScriptPath)

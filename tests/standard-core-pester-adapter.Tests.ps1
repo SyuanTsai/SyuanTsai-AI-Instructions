@@ -574,6 +574,65 @@ catch {
             }
         }
 
+        if ($IsWindows) {
+            # Scenario: An unsigned child script is blocked by a real process-scoped Restricted policy.
+            # Purpose: Require the Windows launcher to explicitly override policy without changing registry policy.
+            It 'InterT09_windows_child_explicitly_bypasses_restricted_policy' {
+                $fixture=New-P02AFixture
+                $invocation=New-P02AAdapterInvocation $fixture -SelectedNames @('selected.Tests.ps1')
+                $probe=@'
+param([string]$ConfigPath)
+$ErrorActionPreference='Stop'
+try {
+    $config=Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+    $tokens=$null; $errors=$null
+    $ast=[Management.Automation.Language.Parser]::ParseFile($config.ExecutorPath,[ref]$tokens,[ref]$errors)
+    if ($errors.Count) { throw 'Executor parse failed.' }
+    foreach ($statement in $ast.EndBlock.Statements) {
+        if ($statement -is [Management.Automation.Language.FunctionDefinitionAst]) { . ([scriptblock]::Create($statement.Extent.Text)) }
+    }
+    $guards=[Collections.Generic.List[IDisposable]]::new()
+    $baseline=$null
+    try {
+        Import-PesterShardRuntime (Split-Path -Parent $config.ExecutorPath) $guards
+        $script:PesterShardChildOutputQuotaCharacters=1048576
+        $script:PesterShardCapabilities=$null
+        $root=Split-Path -Parent $ConfigPath
+        $result=Join-Path $root 'policy-result.json'
+        $child=Join-Path $root 'unsigned-child.ps1'
+        $body="[IO.File]::WriteAllText('"+$result.Replace("'","''")+"', ('{`"policy`":`"'+(Get-ExecutionPolicy)+'`"}'))"
+        [IO.File]::WriteAllText($child,$body,[Text.UTF8Encoding]::new($false))
+        $environment=Get-PesterShardChildEnvironment
+        $environment['PSExecutionPolicyPreference']='Restricted'
+        $directory=Open-PesterShardDirectory $root; $guards.Add($directory)
+        $executable=Open-PesterShardInput ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) $guards
+        # EncodedCommand can run under Restricted; invoking the unsigned file must fail.
+        $command="`$ErrorActionPreference='Stop'; if ((Get-ExecutionPolicy) -cne 'Restricted') { exit 98 }; try { & '"+$child.Replace("'","''")+"'; exit 99 } catch { if (`$_.Exception -is [Management.Automation.PSSecurityException]) { exit 17 }; throw }"
+        $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+        $baseline=Start-PlatformOwnedProcess -ExecutableLease $executable -WorkingDirectoryLease $directory -Environment $environment -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',$encoded) -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(30)) -StdoutPath (Join-Path $root 'baseline.out') -StderrPath (Join-Path $root 'baseline.err') -OutputLimitCharacters 1048576
+        [void]$baseline.WaitForExit([TimeSpan]::FromSeconds(30))
+        $cleanup=Stop-PlatformOwnedProcess -Lease $baseline -ExpectedStartIdentity $baseline.StartIdentity -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(5))
+        if (-not $cleanup.CleanedUp -or $baseline.ExitCode -ne 17 -or (Test-Path -LiteralPath $result)) { throw 'Restricted baseline did not block the unsigned script with confirmed cleanup.' }
+        $baseline.Dispose(); $baseline=$null
+        $receipt=Invoke-PesterShardProcess -Paths @($child) -ModulePath $config.PesterModulePath -Version $config.PesterVersion -ChildPowerShell ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) -ChildScriptPath $child -ResultPath $result -ProcessEvidencePath (Join-Path $root 'policy.process.json') -StdoutPath (Join-Path $root 'policy.out') -StderrPath (Join-Path $root 'policy.err') -TimeoutSeconds 30 -WorkingDirectory $root -Environment $environment
+        if ($receipt.status -cne 'completed' -or $receipt.exitCode -ne 0 -or -not $receipt.cleanedUp) { throw 'Explicit Windows policy launch did not complete.' }
+        if ((Get-Content -LiteralPath $result -Raw | ConvertFrom-Json).policy -cne 'Bypass') { throw 'Child did not receive explicit Bypass policy.' }
+    } finally {
+        if ($null -ne $baseline) {
+            Stop-PlatformOwnedProcess -Lease $baseline -ExpectedStartIdentity $baseline.StartIdentity -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(5)) | Out-Null
+            $baseline.Dispose()
+        }
+        for ($i=$guards.Count-1;$i -ge 0;$i--) { $guards[$i].Dispose() }
+    }
+    exit 0
+} catch { [Console]::Error.WriteLine($_.Exception.ToString()); exit 1 }
+'@
+                Write-P02AText $invocation.WrapperPath $probe
+                $run=Invoke-P02AHiddenAdapter $invocation $fixture
+                Assert-P02AExpectedWithChildDiagnostics $run.ExitCode 0 $fixture 'Restricted baseline and explicit Bypass child must pass.'
+            }
+        }
+
         # Scenario: One selected file passes while an unselected file would create a witness and fail.
         # Purpose: Prove the real executor runs only the requested file and writes truthful typed completion evidence.
         It 'InterT10_executes_only_selected_files_and_writes_typed_summary' {
@@ -859,7 +918,8 @@ Describe 'default beta P02A fixture' {
         It 'InterT49_excludes_inherited_secrets_and_runtime_injection' {
             $fixture=New-P02AFixture
             $names=@('SYP154_PESTER_SECRET_TOKEN','PRIVATE_SENTINEL','DOTNET_STARTUP_HOOKS','DOTNET_ADDITIONAL_DEPS','DOTNET_SHARED_STORE','LD_PRELOAD','DYLD_INSERT_LIBRARIES','PSExecutionPolicyPreference')
-            $body="Describe 'environment' { It 'does not inherit injection' { foreach (`$name in @('"+($names -join "','")+"')) { [Environment]::GetEnvironmentVariable(`$name) | Should BeNullOrEmpty } } }"
+            # Windows CLI sets this variable to the explicit policy; it must never retain the inherited sentinel.
+            $body="Describe 'environment' { It 'does not inherit injection' { foreach (`$name in @('"+($names -join "','")+"')) { if (`$IsWindows -and `$name -ceq 'PSExecutionPolicyPreference') { [Environment]::GetEnvironmentVariable(`$name) | Should Be 'Bypass' } else { [Environment]::GetEnvironmentVariable(`$name) | Should BeNullOrEmpty } } } }"
             Write-P02AText (Join-Path $fixture.TestRoot 'environment.Tests.ps1') $body
             $invocation=New-P02AAdapterInvocation $fixture -SelectedNames @('environment.Tests.ps1')
             $config=Get-Content -LiteralPath $invocation.ConfigPath -Raw | ConvertFrom-Json
