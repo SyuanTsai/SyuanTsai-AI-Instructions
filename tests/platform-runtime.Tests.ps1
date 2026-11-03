@@ -1158,6 +1158,9 @@ public class StartupHook {
             $receipt.runtimeClosure.files.Count | Should Be 2
             $receipt.runtimeClosure.files.path | Should Contain 'System.Management.Automation.dll'
             $receipt.runtimeClosure.sha256 | Should Match '^[a-f0-9]{64}$'
+            $receipt.warningCount | Should Be 0
+            $receipt.warnings -is [array] | Should Be $true
+            @($receipt.warnings).Count | Should Be 0
             $receipt.environmentAllowlist | Should Contain 'PATH'
             $receipt.environmentAllowlist | Should Contain 'PSModulePath'
             @($receipt.environmentAllowlist | Where-Object { $_ -cmatch '^(LD_|DYLD_|DOTNET_|COREHOST_)' }).Count | Should Be 0
@@ -1603,6 +1606,9 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
                 $result.Denied | Should Be $true; $result.Probed | Should Be $true
                 $result.Error | Should BeNullOrEmpty
                 $result.Receipt.protectionBoundary | Should Match 'deny-write-delete.*process exit'
+                $result.Receipt.warningCount | Should Be 0
+                $result.Receipt.warnings -is [array] | Should Be $true
+                @($result.Receipt.warnings).Count | Should Be 0
                 # Guards are scoped to preparation/execution, not leaked into receipts.
                 [IO.File]::WriteAllText((Join-Path $script:P4Root 'p4-guarded-output/System.Management.Automation.dll'),'after release')
             } else {
@@ -1644,6 +1650,9 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
             $output=& $script:P4Preparation.ExportedCommands['Start-PlatformVerifiedProcess'] $executable $probe $environment $script:P4Platform
             $evidence=$output | ConvertFrom-Json
             $evidence.version | Should Be $PSVersionTable.PSVersion.ToString()
+            $evidence.warnings.count | Should Be 0
+            $evidence.warnings.summaries -is [array] | Should Be $true
+            @($evidence.warnings.summaries).Count | Should Be 0
             $evidence.auto | Should Be 'None'
             $evidence.modules | Should Be (Join-Path $PSHOME 'Modules')
             ([IO.Path]::GetFullPath($evidence.utility).StartsWith(([IO.Path]::GetFullPath($PSHOME)+[IO.Path]::DirectorySeparatorChar),$(if($IsWindows){[StringComparison]::OrdinalIgnoreCase}else{[StringComparison]::Ordinal}))) | Should Be $true
@@ -1657,6 +1666,15 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
             $profiles+=$evidence.home
         }
         $profiles[0] | Should Not Be $profiles[1]
+        $warningPath=Join-Path $PSHOME 'private-warning-detail.txt'
+        $warningProbe="Write-Warning 'fixture warning $($warningPath.Replace("'","''"))';[pscustomobject]@{ok=`$true}|ConvertTo-Json -Compress"
+        $warningOutput=& $script:P4Preparation.ExportedCommands['Start-PlatformVerifiedProcess'] $executable $warningProbe $environment $script:P4Platform
+        @($warningOutput).Count | Should Be 1
+        $warningEvidence=$warningOutput | ConvertFrom-Json
+        $warningEvidence.ok | Should Be $true
+        $warningEvidence.warnings.count | Should Be 1
+        ($warningEvidence.warnings.summaries -join ' ') | Should Match 'fixture warning.*\[path:private-warning-detail\.txt\]'
+        ($warningEvidence.warnings.summaries -join ' ') | Should Not Match ([regex]::Escape([IO.Path]::GetDirectoryName($warningPath)))
         $profileEvidence=Join-Path $TestDrive 'failed-process-profile.txt'
         foreach($badProbe in @('$null',"'one';'two'","throw 'fixture failure'")) {
             $probe="[IO.File]::WriteAllText('$($profileEvidence.Replace("'","''"))',`$env:HOME);"+$badProbe
@@ -1665,7 +1683,7 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
             $caught.Exception.GetType().Name | Should Be 'PlatformVerificationException'
             $caught.Exception.Capability | Should Be 'powershell-runtime'
             if($badProbe -like 'throw*'){$caught.Exception.Message | Should Match 'stderr:.*fixture failure'}
-            if($badProbe -eq "'one';'two'"){$caught.Exception.Message | Should Match 'stdout: one \| two'}
+            if($badProbe -eq "'one';'two'"){$caught.Exception.Message | Should Match 'exactly one JSON value'}
             Test-Path -LiteralPath ([IO.File]::ReadAllText($profileEvidence)) | Should Be $false
         }
         $diagnosticPath=Join-Path $PSHOME 'sensitive-diagnostic.txt'
@@ -1836,6 +1854,8 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
                 $receipt=Initialize-PlatformPester -Policy @{pesterPurpose='regression';pesterModulePath=$pester.Path;approvedPayload=@{version='4.10.1';sha256=$hash}} -RuntimeReceipt $runtime -DestinationLease $lease
                 $receipt.version | Should Be '4.10.1'
                 $receipt.purpose | Should Be 'regression'
+                $receipt.warningCount | Should BeGreaterThan -1
+                $receipt.warnings -is [array] | Should Be $true
                 $receipt.environmentAllowlist | Should Contain 'PSModulePath'
                 @($receipt.environmentAllowlist | Where-Object { $_ -cmatch '^(LD_|DYLD_|DOTNET_|COREHOST_)' }).Count | Should Be 0
                 Test-Path -LiteralPath $startupHook.Marker | Should Be $false
@@ -1935,7 +1955,7 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
         $runtime=Get-P4KnownRuntimeReceipt
         $pesterClosure=& $script:P4Preparation {param($root) Get-PlatformRuntimeClosure $root 'windows'} $pester.ModuleBase
         $escapedManifest=$pester.Path.Replace("'","''")
-        $probe="`$module=@(Import-Module -Name '$escapedManifest' -Force -PassThru -ErrorAction Stop -WarningAction SilentlyContinue);if(`$module.Count-ne 1){throw 'Pester import count differs'};[pscustomobject]@{policy=`$env:PSExecutionPolicyPreference;version=`$module[0].Version.ToString()}|ConvertTo-Json -Compress"
+        $probe="`$module=@(Import-Module -Name '$escapedManifest' -Force -PassThru -ErrorAction Stop);if(`$module.Count-ne 1){throw 'Pester import count differs'};[pscustomobject]@{policy=`$env:PSExecutionPolicyPreference;version=`$module[0].Version.ToString()}|ConvertTo-Json -Compress"
         $previousPolicy=Get-ExecutionPolicy -Scope Process
         try {
             Set-ExecutionPolicy -Scope Process -ExecutionPolicy Restricted -Force | Out-Null
@@ -1949,6 +1969,7 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
             $evidence=$output | ConvertFrom-Json
             $evidence.policy | Should Be 'Bypass'
             $evidence.version | Should Be '4.10.1'
+            $evidence.warnings.count | Should BeGreaterThan -1
             (Get-ExecutionPolicy -Scope Process) | Should Be 'Bypass'
         } finally { Set-ExecutionPolicy -Scope Process -ExecutionPolicy $previousPolicy -Force | Out-Null }
     }
@@ -2018,6 +2039,9 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
                 $result.Denied | Should Be $true; $result.Error | Should BeNullOrEmpty
                 $result.Receipt.version | Should Be '4.10.1'
                 $result.Receipt.moduleClosure.files.Count | Should BeGreaterThan 0
+                $result.Receipt.warningCount | Should Be 0
+                $result.Receipt.warnings -is [array] | Should Be $true
+                @($result.Receipt.warnings).Count | Should Be 0
                 $result.Receipt.protectionBoundary | Should Match 'deny-write-delete.*process exit'
                 @([IO.File]::ReadAllLines($fixture.Marker)).Count | Should Be 2
                 [IO.File]::WriteAllText($rootModule,'released after import')

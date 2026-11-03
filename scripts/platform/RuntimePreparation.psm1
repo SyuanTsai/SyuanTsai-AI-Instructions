@@ -376,11 +376,12 @@ function Resolve-VerifiedPlatformPowerShell {
         # bytes in the approved archive snapshot, NEVER the post-extraction disk.
         $runtimeClosure = New-PlatformExpectedClosure $destination $session.Files
         Assert-PlatformRuntimeClosure $executable $runtimeClosure $Platform
-        [void](Test-PlatformPowerShellIdentity $executable $asset.Version $Platform $architecture $runtimeClosure)
+        $identity=Test-PlatformPowerShellIdentity $executable $asset.Version $Platform $architecture $runtimeClosure
         [void](Get-VerifiedPlatformLeasePath $DestinationLease $Platform)
         $executableHash=[string](@($runtimeClosure.files | Where-Object path -CEQ ([IO.Path]::GetFileName($executable)))[0].sha256)
         $environment=New-PlatformVerifiedProcessEnvironment $executable $null $Platform
-        return [pscustomobject][ordered]@{ apiVersion='1.0'; version=$asset.Version; assetName=$asset.Name; archiveSha256=$actualHash; executablePath=[IO.Path]::GetFullPath($executable); executableSha256=$executableHash; runtimeClosure=$runtimeClosure; environmentAllowlist=$environment.Names; protectionBoundary=(Get-PlatformProtectionBoundary $Platform); os=$Platform; architecture=$architecture }
+        $warningEvidence=Get-PlatformVerifiedWarningEvidence $identity
+        return [pscustomobject][ordered]@{ apiVersion='1.0'; version=$asset.Version; assetName=$asset.Name; archiveSha256=$actualHash; executablePath=[IO.Path]::GetFullPath($executable); executableSha256=$executableHash; runtimeClosure=$runtimeClosure; environmentAllowlist=$environment.Names; warningCount=$warningEvidence.count; warnings=@($warningEvidence.summaries); protectionBoundary=(Get-PlatformProtectionBoundary $Platform); os=$Platform; architecture=$architecture }
     }
     catch {
         if ($_.Exception -is [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]) { throw }
@@ -603,19 +604,62 @@ function Get-PlatformProcessStdoutSummary {
     return Get-PlatformProcessOutputSummary $Task '[stdout incomplete]'
 }
 
+function Get-PlatformVerifiedWarningEvidence {
+    param($Evidence)
+    if($null -eq $Evidence){return [pscustomobject][ordered]@{count=0;summaries=@()}}
+    $warnings=Get-PlatformPreparationProperty $Evidence 'warnings'
+    if($null -eq $warnings){return [pscustomobject][ordered]@{count=0;summaries=@()}}
+    $count=Get-PlatformPreparationProperty $warnings 'count'
+    $summaryValue=Get-PlatformPreparationProperty $warnings 'summaries'
+    $summaries=if($null -eq $summaryValue){@()}else{@($summaryValue)}
+    if($null -eq $count){$count=0}
+    return [pscustomobject][ordered]@{count=[int]$count;summaries=@($summaries | ForEach-Object {[string]$_})}
+}
+
 function Start-PlatformVerifiedProcess {
     param([string]$Executable,[string]$Probe,$Environment,[string]$Platform,
         [ValidateRange(1,300000)][int]$TimeoutMilliseconds=30000)
     # PowerShell adds default module paths during startup. Reset them inside the
     # child before resolving any non-Core command; never rely on env alone.
     $modulePath=([string]$Environment.Values['PSModulePath']).Replace("'","''")
-    $command="`$PSModuleAutoLoadingPreference='None';`$env:PSModulePath='$modulePath';`$ErrorActionPreference='Stop';"
+    $command="`$PSModuleAutoLoadingPreference='None';`$env:PSModulePath='$modulePath';`$ErrorActionPreference='Stop';`$__bootstrapWarnings=@();"
     $runtimeRoot=[IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Executable))
     foreach($module in @('Microsoft.PowerShell.Utility','Microsoft.PowerShell.Management')) {
         $manifest=[IO.Path]::Combine($runtimeRoot,'Modules',$module,($module+'.psd1')).Replace("'","''")
-        $command+="Microsoft.PowerShell.Core\Import-Module -Name '$manifest' -ErrorAction Stop;"
+        $command+="Microsoft.PowerShell.Core\Import-Module -Name '$manifest' -ErrorAction Stop -WarningAction SilentlyContinue -WarningVariable +__bootstrapWarnings;"
     }
-    $command+=$Probe
+    # Capture the warning stream as data before the host can render it to native
+    # stdout. The verified probe must still produce exactly one JSON value; the
+    # wrapper attaches bounded, redacted warning evidence and emits one JSON line.
+    $escapedProbe=$Probe.Replace("'","''")
+    $wrapper=@'
+$__probe=[scriptblock]::Create('__PROBE__')
+$__records=@(& $__probe 3>&1)
+$__payload=@()
+$__warnings=@($__bootstrapWarnings)
+foreach($__record in $__records){if($__record -is [Management.Automation.WarningRecord]){$__warnings+=$__record}else{$__payload+=$__record}}
+if($__payload.Count-ne 1){throw 'Verified probe must produce exactly one JSON value.'}
+$__evidence=$__payload[0]|ConvertFrom-Json -ErrorAction Stop
+if($null-eq $__evidence -or $null-ne $__evidence.PSObject.Properties['warnings']){throw 'Verified probe returned an invalid or reserved JSON value.'}
+$__summaries=@()
+foreach($__warning in $__warnings){
+    if($__summaries.Count-ge 16){break}
+    $__text=[string]$__warning.Message
+    $__text=[regex]::Replace($__text,'\x1b\[[0-?]*[ -/]*[@-~]','')
+    $__text=[regex]::Replace($__text,'(?i)(?<path>(?:[a-z]:[\\/]|\\\\|/)[^"''\r\n,;}\]]+)',{
+        param($m)
+        $__path=$m.Groups['path'].Value.Trim().TrimEnd('/','\')
+        $__leaf=[IO.Path]::GetFileName($__path)
+        if([string]::IsNullOrWhiteSpace($__leaf)){'[path]'}else{'[path:'+$__leaf+']'}
+    })
+    $__text=[regex]::Replace($__text,'[\x00-\x20\x7f]+',' ').Trim()
+    if($__text.Length-gt 512){$__text=$__text.Substring(0,512)+' [truncated]'}
+    $__summaries+=$__text
+}
+$__evidence|Add-Member -NotePropertyName warnings -NotePropertyValue ([pscustomobject][ordered]@{count=$__warnings.Count;summaries=@($__summaries)}) -ErrorAction Stop
+$__evidence|ConvertTo-Json -Compress -Depth 16
+'@
+    $command+=$wrapper.Replace('__PROBE__',$escapedProbe)
     $startInfo=[Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName=[IO.Path]::GetFullPath($Executable)
     $startInfo.UseShellExecute=$false
@@ -766,7 +810,7 @@ function Initialize-VerifiedPlatformPester {
         if ((Get-PlatformSha256 ([string]$RuntimeReceipt.executablePath)) -cne [string]$RuntimeReceipt.executableSha256) { throw (New-PlatformPreparationFailure 'pester-module' $Platform 'Runtime executable changed after its receipt was issued.') }
         $runtimeClosure = Get-PlatformPreparationProperty $RuntimeReceipt 'runtimeClosure'
         $runtimeGuards=Open-PlatformClosureGuards $runtimeClosure $Platform
-        [void](Test-PlatformPowerShellIdentity ([string]$RuntimeReceipt.executablePath) ([string]$RuntimeReceipt.version) $Platform ([string]$RuntimeReceipt.architecture) $runtimeClosure)
+        $runtimeIdentity=Test-PlatformPowerShellIdentity ([string]$RuntimeReceipt.executablePath) ([string]$RuntimeReceipt.version) $Platform ([string]$RuntimeReceipt.architecture) $runtimeClosure
         $purpose = [string](Get-PlatformPreparationProperty $Policy 'pesterPurpose')
         $modulePath = [string](Get-PlatformPreparationProperty $Policy 'pesterModulePath')
         if ($purpose -ceq 'formal-gate') {
@@ -810,7 +854,7 @@ function Initialize-VerifiedPlatformPester {
         } finally { Remove-Module $resolver -Force -ErrorAction SilentlyContinue }
         $escaped = $targetManifest.Replace("'","''")
         [void](Get-VerifiedPlatformLeasePath $DestinationLease $Platform)
-        $probe = "`$WarningPreference='SilentlyContinue';`$ProgressPreference='SilentlyContinue';`$m=Import-Module -Name '$escaped' -Force -PassThru -ErrorAction Stop -WarningAction SilentlyContinue;if(@(`$m).Count-ne 1){throw 'count'};[pscustomobject]@{version=`$m.Version.ToString();path=[IO.Path]::GetFullPath(`$m.Path);moduleBase=[IO.Path]::GetFullPath(`$m.ModuleBase)}|ConvertTo-Json -Compress"
+        $probe = "`$ProgressPreference='SilentlyContinue';`$m=Import-Module -Name '$escaped' -Force -PassThru -ErrorAction Stop;if(@(`$m).Count-ne 1){throw 'count'};[pscustomobject]@{version=`$m.Version.ToString();path=[IO.Path]::GetFullPath(`$m.Path);moduleBase=[IO.Path]::GetFullPath(`$m.ModuleBase)}|ConvertTo-Json -Compress"
         $output = Invoke-PlatformVerifiedProcess ([string]$RuntimeReceipt.executablePath) $runtimeClosure $Platform $probe $expectedPayload
         $import = [string]$output | ConvertFrom-Json -ErrorAction Stop
         $targetRootModule = Join-Path $targetVersionRoot 'Pester.psm1'
@@ -818,7 +862,10 @@ function Initialize-VerifiedPlatformPester {
         Assert-PlatformPesterImportIdentity $import $version $targetVersionRoot $Platform
         [void](Get-VerifiedPlatformLeasePath $DestinationLease $Platform)
         $environment=New-PlatformVerifiedProcessEnvironment ([string]$RuntimeReceipt.executablePath) $expectedPayload $Platform
-        return [pscustomobject][ordered]@{ apiVersion='1.0'; purpose=$purpose; version=$version; modulePath=[IO.Path]::GetFullPath($targetManifest); approvedPayloadSha256=$payloadHash; dependencyClosureSha256=[string]$closure.sha256; moduleClosure=$expectedPayload; environmentAllowlist=$environment.Names; protectionBoundary=(Get-PlatformProtectionBoundary $Platform); runtimePath=[string]$RuntimeReceipt.executablePath; os=$Platform; architecture=[string]$RuntimeReceipt.architecture }
+        $runtimeWarningEvidence=Get-PlatformVerifiedWarningEvidence $runtimeIdentity
+        $importWarningEvidence=Get-PlatformVerifiedWarningEvidence $import
+        $warningSummaries=@($runtimeWarningEvidence.summaries)+@($importWarningEvidence.summaries)
+        return [pscustomobject][ordered]@{ apiVersion='1.0'; purpose=$purpose; version=$version; modulePath=[IO.Path]::GetFullPath($targetManifest); approvedPayloadSha256=$payloadHash; dependencyClosureSha256=[string]$closure.sha256; moduleClosure=$expectedPayload; environmentAllowlist=$environment.Names; warningCount=([int]$runtimeWarningEvidence.count+[int]$importWarningEvidence.count); warnings=@($warningSummaries); protectionBoundary=(Get-PlatformProtectionBoundary $Platform); runtimePath=[string]$RuntimeReceipt.executablePath; os=$Platform; architecture=[string]$RuntimeReceipt.architecture }
     }
     catch {
         if ($_.Exception -is [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]) { throw }
