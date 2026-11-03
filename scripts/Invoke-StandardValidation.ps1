@@ -3025,6 +3025,29 @@ function Test-StandardValidationCleanupReceipt {
         ($null -eq $uncertainty -or ($uncertainty -is [string] -and $uncertainty.Length -eq 0)))
 }
 
+function Get-StandardValidationStartupCleanupEvidence {
+    param([Parameter(Mandatory = $true)][Exception]$Exception)
+    $cleanup = $null
+    $cleanedUp = $true
+    $messages = [Collections.Generic.List[string]]::new()
+    $cause = $Exception
+    while ($null -ne $cause) {
+        $messages.Add($cause.Message)
+        if ($cause.Data.Contains('StartupCleanupReceipt')) {
+            $cleanup = $cause.Data['StartupCleanupReceipt']
+            if (-not (Test-StandardValidationCleanupReceipt $cleanup)) { $cleanedUp = $false }
+        }
+        foreach ($key in @('StartupCaptureCleanupUncertainty','StartupCleanupUncertainty')) {
+            if ($cause.Data.Contains($key)) { $cleanedUp = $false }
+        }
+        foreach ($key in @('StartupRootExitConfirmed','StartupCleanupConfirmed')) {
+            if ($cause.Data.Contains($key) -and $cause.Data[$key] -ne $true) { $cleanedUp = $false }
+        }
+        $cause = $cause.InnerException
+    }
+    [pscustomobject][ordered]@{ cleanup=$cleanup; cleanedUp=$cleanedUp; messages=$messages.ToArray() }
+}
+
 function Stop-StandardValidationOwnedProcess {
     param([Parameter(Mandatory = $true)]$Lease, [Parameter(Mandatory = $true)][string]$ExpectedStartIdentity, [switch]$CancellationRequested)
     $timing = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'child-cleanup' -Silent:(-not $script:StandardValidationTimingEnabled)
@@ -3159,15 +3182,10 @@ function Invoke-StandardValidationProcess {
             $naturalExit = $lease.HasExited -and [string]::IsNullOrEmpty($lease.TerminationReason) -and -not $cancelled
         }
     } catch {
-        $cause = $_.Exception
-        $messages = [Collections.Generic.List[string]]::new()
-        while ($null -ne $cause) {
-            $messages.Add($cause.Message)
-            if ($cause.Data.Contains('StartupCleanupReceipt')) { $cleanup = $cause.Data['StartupCleanupReceipt']; $cleanedUp = Test-StandardValidationCleanupReceipt $cleanup }
-            if ($cause.Data.Contains('StartupCaptureCleanupUncertainty')) { $cleanedUp = $false }
-            $cause = $cause.InnerException
-        }
-        $stderr = $phase + ': ' + ($messages -join ' -> ')
+        $startupEvidence = Get-StandardValidationStartupCleanupEvidence -Exception $_.Exception
+        $cleanup = $startupEvidence.cleanup
+        $cleanedUp = $startupEvidence.cleanedUp
+        $stderr = $phase + ': ' + ($startupEvidence.messages -join ' -> ')
         if (-not $cleanedUp) { $status = 'cleanup-failed' }
     } finally {
         if ($null -ne $lease) {

@@ -106,6 +106,28 @@ exit 0
             (Get-Process -Id $result.processId -ErrorAction SilentlyContinue) | Should -BeNullOrEmpty
         }
     }
+    if ($IsWindows) {
+        Context 'Windows startup cleanup uncertainty' {
+            # Scenario: Windows creates a process, then a later startup operation fails and root termination cannot be confirmed.
+            # Purpose: Startup cleanup uncertainty must override the default startup-failed result and fail closed.
+            It 'InterT62_returns_cleanup_failed_when_windows_startup_exit_is_unconfirmed' {
+                Mock Start-PlatformOwnedProcess {
+                    param($ExecutableLease,$ArgumentZero,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$StdoutPath,$StderrPath,$OutputLimitCharacters)
+                    $failure = New-Object InvalidOperationException('fixture-windows-startup-setting-failure')
+                    $failure.Data['StartupRootExitConfirmed'] = $false
+                    $failure.Data['StartupCleanupUncertainty'] = 'fixture-root-termination-unconfirmed'
+                    throw $failure
+                }
+                $result = Invoke-StandardValidationProcess -Command $script:ValidatorTestHost -Arguments @('-NoProfile','-NonInteractive','-Command','exit 0') -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 10
+                Assert-MockCalled Start-PlatformOwnedProcess -Times 1 -Exactly -Scope It
+                $result.status | Should Be 'cleanup-failed'
+                $result.cleanedUp | Should Be $false
+                $result.processId | Should BeNullOrEmpty
+                $result.processOwnership.cleanup | Should BeNullOrEmpty
+                $result.stderr | Should Match 'fixture-windows-startup-setting-failure'
+            }
+        }
+    }
     # Scenario: Several stages start after a rejected cleanup request has been disposed.
     # Purpose: Release the Unix admission guard before the next start and isolate Pester 4 mocks by context.
     It 'InterT65_disposes_each_owner_before_the_next_stage' {
@@ -192,13 +214,12 @@ param([string]$NativeHost)
             $root = Join-Path $TestDrive 'linked-command'
             $physicalDirectory = Join-Path $root 'physical'
             [void][IO.Directory]::CreateDirectory($physicalDirectory)
-            $physicalCommand = Join-Path $physicalDirectory 'native-echo'
+            $physicalCommand = Join-Path $physicalDirectory 'echo'
             [IO.File]::Copy('/bin/echo',$physicalCommand)
             [IO.File]::SetUnixFileMode($physicalCommand,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserExecute)
-            [void](New-Item -ItemType SymbolicLink -Path (Join-Path $physicalDirectory 'target') -Target 'native-echo')
-            # Keep the utility's invocation name: multicall coreutils dispatches by argv0.
-            [void](New-Item -ItemType SymbolicLink -Path (Join-Path $physicalDirectory 'echo') -Target 'target')
-            [void](New-Item -ItemType SymbolicLink -Path (Join-Path $root 'bin') -Target 'physical')
+            $binDirectory = Join-Path $root 'bin'
+            [void][IO.Directory]::CreateDirectory($binDirectory)
+            [void](New-Item -ItemType SymbolicLink -Path (Join-Path $binDirectory 'echo') -Target '../physical/echo')
             $command = Join-Path $root 'bin/echo'
             $result = Invoke-StandardValidationProcess -Command $command -Arguments @('linked-host') -WorkingDirectory $root -Environment @{} -TimeoutSeconds 10
             if ($result.status -ne 'passed') { throw ('Symlink command failed: ' + ($result | ConvertTo-Json -Depth 12 -Compress)) }
@@ -362,6 +383,30 @@ Describe 'Pester shard plan contract' {
         $receipt.Uncertainty=$null; $receipt.RemainingPids=@(123)
         ConvertTo-PesterShardProcessState $receipt 0 '' $false $true $false | Should Be 'cleanup-failed'
         ConvertTo-PesterShardProcessState $null 0 '' $false $true $false | Should Be 'cleanup-failed'
+    }
+
+    # Scenario: Windows reports an unconfirmed root exit without a startup cleanup receipt.
+    # Purpose: The shard catch path must recognize the actual Windows Data keys and fail closed.
+    It 'UnitT07_rejects_windows_startup_cleanup_uncertainty_without_a_receipt' {
+        $path = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-PesterShardProcess.ps1'
+        $tokens=$null; $errors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors)
+        $definition=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Get-PesterShardStartupCleanupEvidence'},$true)
+        if ($null -eq $definition) { throw 'The shard executor must expose startup cleanup evidence handling.' }
+        Invoke-Expression $definition.Extent.Text
+        foreach ($data in @(
+            @{StartupRootExitConfirmed=$false;StartupCleanupUncertainty='fixture-root-termination-unconfirmed'},
+            @{StartupRootExitConfirmed=$false},
+            @{StartupCleanupUncertainty='fixture-root-termination-unconfirmed'},
+            @{StartupCleanupConfirmed=$false},
+            @{StartupCaptureCleanupUncertainty='fixture-capture-cleanup-unconfirmed'}
+        )) {
+            $failure = New-Object InvalidOperationException('fixture-windows-startup-setting-failure')
+            foreach ($entry in $data.GetEnumerator()) { $failure.Data[$entry.Key] = $entry.Value }
+            $evidence = Get-PesterShardStartupCleanupEvidence -Exception $failure
+            $evidence.cleanupFailed | Should Be $true
+            $evidence.cleanup | Should BeNullOrEmpty
+        }
     }
 
     # Scenario: The complete repository suite contains many non-isolated test files and one file can terminate its hosted PowerShell process.

@@ -195,6 +195,27 @@ function ConvertTo-PesterShardProcessState {
     return 'completed'
 }
 
+function Get-PesterShardStartupCleanupEvidence {
+    param([Parameter(Mandatory = $true)][Exception]$Exception)
+    $cleanup = $null
+    $cleanupFailed = $false
+    $cause = $Exception
+    while ($null -ne $cause) {
+        if ($cause.Data.Contains('StartupCleanupReceipt')) {
+            $cleanup = $cause.Data['StartupCleanupReceipt']
+            if ($null -eq $cleanup -or -not $cleanup.CleanedUp) { $cleanupFailed = $true }
+        }
+        foreach ($key in @('StartupCaptureCleanupUncertainty','StartupCleanupUncertainty')) {
+            if ($cause.Data.Contains($key)) { $cleanupFailed = $true }
+        }
+        foreach ($key in @('StartupRootExitConfirmed','StartupCleanupConfirmed')) {
+            if ($cause.Data.Contains($key) -and $cause.Data[$key] -ne $true) { $cleanupFailed = $true }
+        }
+        $cause = $cause.InnerException
+    }
+    [pscustomobject][ordered]@{ cleanup=$cleanup; cleanupFailed=$cleanupFailed }
+}
+
 function Format-PesterShardException {
     param([Parameter(Mandatory = $true)][Exception]$Exception)
     $parts = [Collections.Generic.List[string]]::new()
@@ -259,13 +280,9 @@ function Invoke-PesterShardProcess {
         }
     } catch {
         $status='start-failed'; $failure=$phase + ': ' + (Format-PesterShardException $_.Exception)
-        $cause=$_.Exception
-        while ($null -ne $cause) {
-            if ($cause.Data.Contains('StartupCleanupReceipt')) { $cleanup=$cause.Data['StartupCleanupReceipt'] }
-            if ($cause.Data.Contains('StartupCaptureCleanupUncertainty')) { $status='cleanup-failed' }
-            $cause=$cause.InnerException
-        }
-        if ($null -ne $cleanup -and -not $cleanup.CleanedUp) { $status='cleanup-failed' }
+        $startupEvidence=Get-PesterShardStartupCleanupEvidence -Exception $_.Exception
+        $cleanup=$startupEvidence.cleanup
+        if ($startupEvidence.cleanupFailed) { $status='cleanup-failed' }
     } finally {
         if ($null -ne $lease) {
             try {
