@@ -62,7 +62,7 @@
                 @{ Path = 'platform/RuntimePreparation.psm1'; Sha256 = 'a916fceea0f178a2bb19aefb9c5db3817c453bd7b2835eef9dd0e171329d9a2b' },
                 @{ Path = 'platform-runtime.psm1'; Sha256 = '3bf3a8873021a84c79eec6071693165ad0b78b88115227982756c54888f08e2c' },
                 @{ Path = 'installer-safe-mutation.psm1'; Sha256 = 'ac1e73ffb1b8ea1b95fdc3a177449442281d3d485f62ec42e464f6f5f38ba359' },
-                @{ Path = 'platform/PlatformNative.cs'; Sha256 = '086c9685b3f969e219bafb2e8c939fffdc1f0f9e0c2c546fb5eb1c9c5280257f' },
+                @{ Path = 'platform/PlatformNative.cs'; Sha256 = '906dbdaf00098be8dc8a4e5f3666f774f5096340872eaf2df4ee2fe45ca8fe3f' },
                 @{ Path = 'platform/Windows.psm1'; Sha256 = 'd6b84b3d3df4b799811d82bf5963c72320a61608fdebd32871bccc7d73b40289' },
                 @{ Path = 'platform/Linux.psm1'; Sha256 = '75554397511f4727d361f784c59222130f3e282acf84a19aec81b651e6c67674' },
                 @{ Path = 'platform/MacOS.psm1'; Sha256 = '4beb55532b18673e8fe1732effdd9354a38bb3f828b2c224ecf3c1d0e21abe76' },

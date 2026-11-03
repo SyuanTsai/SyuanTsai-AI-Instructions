@@ -15,9 +15,10 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             using (var borrowed = new Microsoft.Win32.SafeHandles.SafeFileHandle(handle.DangerousGetHandle(), false))
             using (var stream = new System.IO.FileStream(borrowed, System.IO.FileAccess.Read))
             {
-                if (stream.Length > maximumBytes) throw new System.IO.IOException("File exceeds the bounded read limit.");
+                long length = stream.Length;
+                if (length > maximumBytes) throw new System.IO.IOException("File exceeds the bounded read limit.");
                 stream.Position = 0;
-                byte[] bytes = new byte[checked((int)stream.Length)];
+                byte[] bytes = new byte[checked((int)length)];
                 int offset = 0;
                 while (offset < bytes.Length)
                 {

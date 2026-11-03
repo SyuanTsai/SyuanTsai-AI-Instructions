@@ -183,6 +183,11 @@ try {
         if ($config.PSObject.Properties.Name -contains 'InjectedEnvironment') {
             foreach ($property in $config.InjectedEnvironment.PSObject.Properties) { [Environment]::SetEnvironmentVariable($property.Name,[string]$property.Value,'Process') }
         }
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            # Injected markers must not revoke the explicit supervisor launch policy
+            # before the copied executor can build its own child allowlist.
+            [Environment]::SetEnvironmentVariable('PSExecutionPolicyPreference','Bypass','Process')
+        }
         if ($config.CancelAfterMilliseconds -gt 0) { $cancellation.CancelAfter([int]$config.CancelAfterMilliseconds) }
         $parameters.CancellationToken = $cancellation.Token
         & ([string]$config.ExecutorPath) @parameters
@@ -283,7 +288,11 @@ catch {
             $exitCode = $null
             $timedOut = $false
             try {
-                $rawArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $Invocation.WrapperPath, '-ConfigPath', $Invocation.ConfigPath)
+                $rawArguments = @('-NoLogo', '-NoProfile', '-NonInteractive')
+                if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+                    $rawArguments += @('-ExecutionPolicy', 'Bypass')
+                }
+                $rawArguments += @('-File', $Invocation.WrapperPath, '-ConfigPath', $Invocation.ConfigPath)
                 $argumentLine = [string]::Join(' ', @($rawArguments | ForEach-Object { Quote-P02AProcessArgument -Value ([string]$_) }))
                 $startParameters = @{
                     FilePath = $Invocation.Runtime.HostExe
