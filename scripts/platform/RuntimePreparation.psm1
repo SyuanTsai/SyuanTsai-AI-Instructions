@@ -572,15 +572,35 @@ function Assert-PlatformPesterSnapshotInventory {
 # Build the child from an empty environment, then add only the fixed allowlist.
 # In particular no caller-controlled loader, host, or module-search setting is
 # copied into the verified runtime process.
-function Get-PlatformProcessStderrSummary {
-    param($Task)
-    if($null -eq $Task -or $Task.Status -ne [Threading.Tasks.TaskStatus]::RanToCompletion){return '[stderr incomplete]'}
+function Get-PlatformProcessOutputSummary {
+    param($Task,[string]$Incomplete='[incomplete]')
+    if($null -eq $Task -or $Task.Status -ne [Threading.Tasks.TaskStatus]::RanToCompletion){return $Incomplete}
     $text=[string]$Task.GetAwaiter().GetResult()
     $text=[regex]::Replace($text,'\x1b\[[0-?]*[ -/]*[@-~]','')
+    # Probe output is controlled, but failure diagnostics may include local
+    # absolute paths. Retain only the leaf so CI can expose the unexpected line.
+    $text=[regex]::Replace($text,'(?i)(?<path>(?:[a-z]:[\\/]|\\\\|/)[^"''\r\n,;}\]]+)',{
+        param($match)
+        $path=$match.Groups['path'].Value.Trim().TrimEnd('/','\')
+        $leaf=[IO.Path]::GetFileName($path)
+        if([string]::IsNullOrWhiteSpace($leaf)){return '[path]'}
+        return '[path:'+$leaf+']'
+    })
+    $text=[regex]::Replace($text,'\r?\n',' | ')
     $text=[regex]::Replace($text,'[\x00-\x20\x7f]+',' ').Trim()
     if($text.Length -eq 0){return '[empty]'}
     if($text.Length -gt 2048){return $text.Substring(0,2048)+' [truncated]'}
     return $text
+}
+
+function Get-PlatformProcessStderrSummary {
+    param($Task)
+    return Get-PlatformProcessOutputSummary $Task '[stderr incomplete]'
+}
+
+function Get-PlatformProcessStdoutSummary {
+    param($Task)
+    return Get-PlatformProcessOutputSummary $Task '[stdout incomplete]'
 }
 
 function Start-PlatformVerifiedProcess {
@@ -637,17 +657,17 @@ function Start-PlatformVerifiedProcess {
         # may retain a pipe even after the direct child exits.
         $remaining=[Math]::Max(0,$TimeoutMilliseconds-[int]$timer.ElapsedMilliseconds)
         if(-not $process.WaitForExit($remaining)){
-            throw "Verified runtime execution deadline exceeded ($TimeoutMilliseconds ms); stderr: $(Get-PlatformProcessStderrSummary $stderrTask)"
+            throw "Verified runtime execution deadline exceeded ($TimeoutMilliseconds ms); stdout: $(Get-PlatformProcessStdoutSummary $stdoutTask); stderr: $(Get-PlatformProcessStderrSummary $stderrTask)"
         }
         $remaining=[Math]::Max(0,$TimeoutMilliseconds-[int]$timer.ElapsedMilliseconds)
         $reads=[Threading.Tasks.Task]::WhenAll([Threading.Tasks.Task[]]@($stdoutTask,$stderrTask))
         if(-not $reads.Wait($remaining)){
-            throw "Verified runtime output deadline exceeded ($TimeoutMilliseconds ms); stderr: $(Get-PlatformProcessStderrSummary $stderrTask)"
+            throw "Verified runtime output deadline exceeded ($TimeoutMilliseconds ms); stdout: $(Get-PlatformProcessStdoutSummary $stdoutTask); stderr: $(Get-PlatformProcessStderrSummary $stderrTask)"
         }
         $stdout=$stdoutTask.GetAwaiter().GetResult().TrimEnd("`r","`n")
         $stderr=$stderrTask.GetAwaiter().GetResult()
         $output=@(if($stdout.Length -gt 0){$stdout -split "`r?`n"})
-        if($process.ExitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace($stderr) -or $output.Count -ne 1){throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform "Verified runtime process failed (exit code $($process.ExitCode), stdout lines $($output.Count)); stderr: $(Get-PlatformProcessStderrSummary $stderrTask)")}
+        if($process.ExitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace($stderr) -or $output.Count -ne 1){throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform "Verified runtime process failed (exit code $($process.ExitCode), stdout lines $($output.Count)); stdout: $(Get-PlatformProcessStdoutSummary $stdoutTask); stderr: $(Get-PlatformProcessStderrSummary $stderrTask)")}
         return $output[0]
     } catch {
         $failure=$_

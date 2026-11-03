@@ -1665,8 +1665,16 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
             $caught.Exception.GetType().Name | Should Be 'PlatformVerificationException'
             $caught.Exception.Capability | Should Be 'powershell-runtime'
             if($badProbe -like 'throw*'){$caught.Exception.Message | Should Match 'stderr:.*fixture failure'}
+            if($badProbe -eq "'one';'two'"){$caught.Exception.Message | Should Match 'stdout: one \| two'}
             Test-Path -LiteralPath ([IO.File]::ReadAllText($profileEvidence)) | Should Be $false
         }
+        $diagnosticPath=Join-Path $PSHOME 'sensitive-diagnostic.txt'
+        $summary=& $script:P4Preparation {
+            param($text)
+            Get-PlatformProcessStdoutSummary ([Threading.Tasks.Task]::FromResult([string]$text))
+        } ($diagnosticPath+"`nsecond line")
+        $summary | Should Match '\[path:sensitive-diagnostic\.txt\] \| second line'
+        $summary | Should Not Match ([regex]::Escape([IO.Path]::GetDirectoryName($diagnosticPath)))
     }
 
     # Scenario: A caller's user module path contains a marker-writing Utility shadow.
@@ -1927,13 +1935,12 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
         $runtime=Get-P4KnownRuntimeReceipt
         $pesterClosure=& $script:P4Preparation {param($root) Get-PlatformRuntimeClosure $root 'windows'} $pester.ModuleBase
         $escapedManifest=$pester.Path.Replace("'","''")
-        $securityManifest=(Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1').Replace("'","''")
-        $probe="Import-Module -Name '$securityManifest' -ErrorAction Stop;`$module=Import-Module -Name '$escapedManifest' -Force -PassThru -ErrorAction Stop -WarningAction SilentlyContinue;[pscustomobject]@{policy=(Get-ExecutionPolicy -Scope Process).ToString();version=`$module.Version.ToString()}|ConvertTo-Json -Compress"
+        $probe="`$module=@(Import-Module -Name '$escapedManifest' -Force -PassThru -ErrorAction Stop -WarningAction SilentlyContinue);if(`$module.Count-ne 1){throw 'Pester import count differs'};[pscustomobject]@{policy=`$env:PSExecutionPolicyPreference;version=`$module[0].Version.ToString()}|ConvertTo-Json -Compress"
         $previousPolicy=Get-ExecutionPolicy -Scope Process
         try {
-            Set-ExecutionPolicy -Scope Process -ExecutionPolicy Restricted -Force
+            Set-ExecutionPolicy -Scope Process -ExecutionPolicy Restricted -Force | Out-Null
             (Get-ExecutionPolicy -Scope Process) | Should Be 'Restricted'
-            Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+            Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force | Out-Null
             (Get-ExecutionPolicy -Scope Process) | Should Be 'Bypass'
             $output=& $script:P4Preparation {
                 param($runtime,$probe,$pesterClosure)
@@ -1943,7 +1950,7 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
             $evidence.policy | Should Be 'Bypass'
             $evidence.version | Should Be '4.10.1'
             (Get-ExecutionPolicy -Scope Process) | Should Be 'Bypass'
-        } finally { Set-ExecutionPolicy -Scope Process -ExecutionPolicy $previousPolicy -Force }
+        } finally { Set-ExecutionPolicy -Scope Process -ExecutionPolicy $previousPolicy -Force | Out-Null }
     }
     }
 
