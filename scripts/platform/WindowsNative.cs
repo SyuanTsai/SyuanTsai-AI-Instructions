@@ -123,6 +123,53 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         }
         public static WindowsLease OpenFile(WindowsLease parent, string leaf, string access, string createMode)
         { return OpenFileCore(parent, leaf, access, createMode, 1); }
+        // Reacquire a complete no-reparse chain for a receipt's existing runtime.
+        // Never create missing directories while validating an existing closure.
+        public static WindowsLease OpenPreparationRoot(string path)
+        {
+            string full = Path.GetFullPath(path);
+            if (full.Length < 3 || full[1] != ':' || full[2] != '\\') throw new ArgumentException("A local absolute drive path is required.");
+            string root = Path.GetPathRoot(full);
+            SafeFileHandle handle = Open(root, 0x80020080, 1, 3);
+            WindowsLease current;
+            try { current = new WindowsLease(handle, root, null, null, Stat(handle)); }
+            catch { handle.Dispose(); throw; }
+            try
+            {
+                string tail = full.Substring(root.Length).TrimEnd('\\');
+                if (tail.Length != 0) foreach (string part in PlatformPaths.Segments(tail))
+                {
+                    WindowsLease next = OpenPreparationDirectory(current, part);
+                    current.Dispose(); current = next;
+                }
+                WindowsLease result = current; current = null; return result;
+            }
+            finally { if (current != null) current.Dispose(); }
+        }
+        // Preparation extends the P2 lease chain one component at a time. Deny
+        // both write and delete sharing: a held child cannot be renamed/replaced
+        // or have a reparse tag installed while a descendant is being written.
+        public static WindowsLease OpenPreparationDirectory(WindowsLease parent, string leaf)
+        {
+            PlatformPaths.Leaf(leaf);
+            lock (parent.Sync)
+            {
+                parent.Check(); AssertIdentity(parent, parent.Observation, false);
+                if (parent.Observation.Kind != "directory") throw new ArgumentException("A directory lease is required.");
+                string path = Path.Combine(parent.Path, leaf);
+                // Include directory data/list access: metadata-only handles do
+                // not participate in Windows data/delete sharing arbitration.
+                SafeFileHandle handle = Open(path, 0x80020080, 1, 3);
+                try
+                {
+                    FileObservation value = Stat(handle);
+                    if (value.Kind != "directory") throw new IOException("Not a directory.");
+                    using (SafeFileHandle named = Open(path, 0, 7, 3)) PlatformPaths.Same(value, Stat(named));
+                    return new WindowsLease(handle, path, null, parent, value);
+                }
+                catch { handle.Dispose(); throw; }
+            }
+        }
         private static WindowsLease OpenFileCore(WindowsLease parent, string leaf, string access, string createMode, uint share)
         {
             PlatformPaths.Leaf(leaf);
@@ -154,6 +201,11 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 using (SafeFileHandle named = Open(lease.Path, 0, 7, 3)) PlatformPaths.Same(value, Stat(named));
                 return value;
             }
+        }
+        public static string GetVerifiedPath(WindowsLease lease)
+        {
+            AssertIdentity(lease, lease.Observation, lease.Observation.Kind == "file");
+            return Path.GetFullPath(lease.Path);
         }
         public static WindowsLease EnterLock(WindowsLease parent, string leaf, string mode, TimeSpan timeout)
         {

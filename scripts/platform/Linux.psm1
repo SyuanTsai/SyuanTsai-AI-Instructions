@@ -3,6 +3,12 @@
 
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'Unix.psm1') -Scope Local -ErrorAction Stop
+$script:RuntimePreparationModulePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'RuntimePreparation.psm1'))
+$loadedRuntimePreparationModules = @(Import-Module -Name $script:RuntimePreparationModulePath -PassThru -Scope Local -ErrorAction Stop)
+if ($loadedRuntimePreparationModules.Count -ne 1 -or -not [StringComparer]::Ordinal.Equals([IO.Path]::GetFullPath([string]$loadedRuntimePreparationModules[0].Path),$script:RuntimePreparationModulePath)) { throw [IO.InvalidDataException]::new('The verified runtime preparation dependency did not load from its bound path.') }
+$script:RuntimePreparationModule = $loadedRuntimePreparationModules[0]
+
+function Invoke-LinuxRuntimePreparationCommand { param([string]$Name,[Collections.IDictionary]$Arguments) $command=$script:RuntimePreparationModule.ExportedCommands[$Name]; if($null -eq $command){throw [IO.InvalidDataException]::new("The verified runtime preparation dependency does not export '$Name'.")}; & $command @Arguments }
 
 function New-LinuxPlatformNotImplementedError {
     param([Parameter(Mandatory = $true)][string] $Capability, [Parameter(Mandatory = $true)][string] $Step)
@@ -19,7 +25,7 @@ function Get-LinuxPlatformPermissions { param([Parameter(Mandatory = $true)] $Le
 function Set-LinuxPlatformPermissions { param([Parameter(Mandatory = $true)] $Lease, $Policy, $Snapshot) Set-UnixPlatformPermissions @PSBoundParameters }
 function Start-LinuxPlatformOwnedProcess { param([Parameter(Mandatory = $true)] $ExecutableLease, [string[]] $ArgumentList, [hashtable] $Environment, [DateTimeOffset] $Deadline, [string] $IsolationRequirement) throw (New-LinuxPlatformNotImplementedError 'process-isolation' 'P3') }
 function Stop-LinuxPlatformOwnedProcess { param([Parameter(Mandatory = $true)] $Lease, [TimeSpan] $GracePeriod, [DateTimeOffset] $Deadline) throw (New-LinuxPlatformNotImplementedError 'process-isolation' 'P3') }
-function Resolve-LinuxPlatformPowerShell { param([Parameter(Mandatory = $true)] $Policy, [Parameter(Mandatory = $true)] $DestinationLease, $OfflineCache) throw (New-LinuxPlatformNotImplementedError 'powershell-resolution' 'P4') }
-function Initialize-LinuxPlatformPester { param([Parameter(Mandatory = $true)] $Policy, [Parameter(Mandatory = $true)] $RuntimeReceipt, [Parameter(Mandatory = $true)] $DestinationLease) throw (New-LinuxPlatformNotImplementedError 'pester-initialization' 'P4') }
+function Resolve-LinuxPlatformPowerShell { param([Parameter(Mandatory = $true)] $Policy, [Parameter(Mandatory = $true)] $DestinationLease, [Parameter(Mandatory = $true)] $OfflineCache, $ReleaseMetadata) Invoke-LinuxRuntimePreparationCommand 'Resolve-VerifiedPlatformPowerShell' @{ Policy=$Policy; DestinationLease=$DestinationLease; OfflineCache=$OfflineCache; ReleaseMetadata=$ReleaseMetadata; Platform='linux' } }
+function Initialize-LinuxPlatformPester { param([Parameter(Mandatory = $true)] $Policy, [Parameter(Mandatory = $true)] $RuntimeReceipt, [Parameter(Mandatory = $true)] $DestinationLease) Invoke-LinuxRuntimePreparationCommand 'Initialize-VerifiedPlatformPester' @{ Policy=$Policy; RuntimeReceipt=$RuntimeReceipt; DestinationLease=$DestinationLease; Platform='linux'; ResolverPath=(Join-Path (Split-Path -Parent $PSScriptRoot) 'Resolve-StandardValidationTool.ps1') } }
 
 Export-ModuleMember -Function *-LinuxPlatform*

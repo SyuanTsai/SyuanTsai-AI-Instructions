@@ -77,6 +77,19 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         }
     }
 
+    public sealed class PlatformVerificationException : System.IO.IOException
+    {
+        public string Capability { get; private set; }
+        public string Platform { get; private set; }
+
+        public PlatformVerificationException(string capability, string platform, string message)
+            : base(String.Format("Platform verification for '{0}' failed on '{1}': {2}", capability, platform, message))
+        {
+            Capability = capability;
+            Platform = platform;
+        }
+    }
+
     public sealed class PlatformWin32Exception : InvalidOperationException
     {
         public int Win32Error { get; private set; }

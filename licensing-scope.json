@@ -940,6 +940,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/platform/RuntimePreparation.psm1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/platform/Unix.psm1",
       "license": "Apache-2.0"
     },
