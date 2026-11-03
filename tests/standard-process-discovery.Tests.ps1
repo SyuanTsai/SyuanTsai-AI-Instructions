@@ -1,5 +1,6 @@
 Describe 'Shared owned-process discovery' {
     BeforeAll {
+        $TestDrive = if ($TestDrive -is [IO.DirectoryInfo]) { $TestDrive.FullName } else { [string]$TestDrive }
         if ($IsMacOS -and $TestDrive.StartsWith('/var/')) { $TestDrive = '/private' + $TestDrive }
         . (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-StandardValidation.ps1') -CandidateRoot $TestDrive -AdapterPath unused -ArtifactsRoot $TestDrive -SourceRepository 'https://example.test/discovery.git' -SourceRevision ('a'*40) -BaseRevision ('b'*40) -DefineFunctionsOnly
     }

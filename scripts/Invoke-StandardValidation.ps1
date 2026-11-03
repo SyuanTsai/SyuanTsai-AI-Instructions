@@ -6146,6 +6146,24 @@ function Assert-StandardValidationAiReviewEvidence {
             -Context $Context)
 }
 
+function Get-StandardValidationProcessLaunchSpec {
+    param([Parameter(Mandatory = $true)] $CommandSpec)
+
+    # The caller has validated the command hash and complete tool receipt. npm's
+    # Unix shim may be a symlink, so launch the receipt-bound interpreter and
+    # payload instead of presenting that link to P2 as a native executable.
+    # Keep CommandSpec unchanged: the before/after checks and evidence still
+    # bind the original shim, runtime, payload and installed closure.
+    if ($null -ne $CommandSpec.toolReceipt -and
+        [string]$CommandSpec.toolReceipt.launcher.kind -ceq 'unix-node-shim') {
+        return [pscustomobject]@{
+            command = [string]$CommandSpec.toolReceipt.launcher.runtimePath
+            arguments = @([string]$CommandSpec.toolReceipt.launcher.payloadPath) + @($CommandSpec.arguments)
+        }
+    }
+    return [pscustomobject]@{ command = [string]$CommandSpec.command; arguments = @($CommandSpec.arguments) }
+}
+
 function Invoke-StandardValidationCommandAndRecord {
     param(
         [Parameter(Mandatory = $true)] $CommandSpec,
@@ -6233,9 +6251,10 @@ function Invoke-StandardValidationCommandAndRecord {
         STANDARD_VALIDATION_EVENT_ID = $eventId
         STANDARD_VALIDATION_OUTPUT_PATH = if ([string]::IsNullOrWhiteSpace($OutputReservationPath)) { '' } else { $OutputReservationPath }
     }
+    $launchSpec = Get-StandardValidationProcessLaunchSpec -CommandSpec $CommandSpec
     $processResult = Invoke-StandardValidationProcess `
-        -Command ([string]$CommandSpec.command) `
-        -Arguments @($CommandSpec.arguments) `
+        -Command ([string]$launchSpec.command) `
+        -Arguments @($launchSpec.arguments) `
         -WorkingDirectory $childWorkingDirectory `
         -Environment $environment `
         -TimeoutSeconds $TimeoutSeconds `

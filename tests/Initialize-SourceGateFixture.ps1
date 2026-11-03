@@ -2,12 +2,13 @@
 $script:SourceGateTestRoot = $PSScriptRoot
 # P2 rejects ancestor symlinks. Darwin's temporary directory commonly uses the
 # /var alias; fixtures choose its physical /private/var spelling before creation.
-if ($PSVersionTable.PSEdition -ceq 'Core' -and $IsMacOS -and $TestDrive.StartsWith('/var/')) {
-    $TestDrive = '/private' + $TestDrive
+$script:SourceGateFixtureRoot = if ($TestDrive -is [IO.DirectoryInfo]) { $TestDrive.FullName } else { [string]$TestDrive }
+if ($PSVersionTable.PSEdition -ceq 'Core' -and $IsMacOS -and $script:SourceGateFixtureRoot.StartsWith('/var/')) {
+    $script:SourceGateFixtureRoot = '/private' + $script:SourceGateFixtureRoot
 }
 
         $script:SourceGateRunnerPath = Join-Path (Split-Path -Parent $script:SourceGateTestRoot) 'scripts/Invoke-StandardValidation.ps1'
-        . $script:SourceGateRunnerPath -CandidateRoot $TestDrive -AdapterPath (Join-Path $TestDrive 'adapter.json') -ArtifactsRoot (Join-Path $TestDrive 'artifacts') -SourceRepository 'https://example.com/example/skills.git' -SourceRevision ('a' * 40) -BaseRevision ('b' * 40) -DefineFunctionsOnly
+        . $script:SourceGateRunnerPath -CandidateRoot $script:SourceGateFixtureRoot -AdapterPath (Join-Path $script:SourceGateFixtureRoot 'adapter.json') -ArtifactsRoot (Join-Path $script:SourceGateFixtureRoot 'artifacts') -SourceRepository 'https://example.com/example/skills.git' -SourceRevision ('a' * 40) -BaseRevision ('b' * 40) -DefineFunctionsOnly
 
         function Write-SourceGateFixtureJson {
             param([string] $Path, $Value)
@@ -25,7 +26,7 @@ if ($PSVersionTable.PSEdition -ceq 'Core' -and $IsMacOS -and $TestDrive.StartsWi
         function New-SourceGateFixture {
             param([switch] $CentralRawTests, [switch] $LargeSkillToolsClosure, [switch] $OutsideArtifactCommand, [switch] $UnownedSharedControl)
             $fixtureWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
-            $root = Join-Path $TestDrive ([guid]::NewGuid().ToString('N').Substring(0, 8))
+            $root = Join-Path $script:SourceGateFixtureRoot ([guid]::NewGuid().ToString('N').Substring(0, 8))
             $runId = 'c' * 32
             $runRoot = Join-Path $root ('runs/' + $runId)
             $snapshot = Join-Path $runRoot 'candidate'
@@ -44,7 +45,7 @@ if ($PSVersionTable.PSEdition -ceq 'Core' -and $IsMacOS -and $TestDrive.StartsWi
             $contentHash = Get-StandardValidationInventorySha256 -Inventory $inventory
             $caseSnapshotRows=@($inventory | Sort-Object -Property path -CaseSensitive | ForEach-Object { [pscustomobject]@{ path=$_.path; sha256=$_.sha256 } })
             $caseSnapshotSha256=Get-StandardValidationTextSha256 -Value (ConvertTo-Json -InputObject $caseSnapshotRows -Depth 3 -Compress)
-            $fixtureToolsRoot=Join-Path $TestDrive ([IO.Path]::GetFileName($root) + '-tools')
+            $fixtureToolsRoot=Join-Path $script:SourceGateFixtureRoot ([IO.Path]::GetFileName($root) + '-tools')
             [void][IO.Directory]::CreateDirectory($fixtureToolsRoot)
             $toolPath = if($OutsideArtifactCommand){Join-Path $fixtureToolsRoot $(if ($fixtureWindows) { 'source-wrapper.cmd' } else { 'source-wrapper.sh' })}else{Join-Path $root $(if ($fixtureWindows) { 'fixture-tool.cmd' } else { 'fixture-tool.sh' })}
             Write-SourceGateExecutableFixture $toolPath

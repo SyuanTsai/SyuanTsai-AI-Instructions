@@ -6214,17 +6214,24 @@ Describe 'SYP325 selected source integrity' -Tag 'SYP325' {
                 $completed=(Stop-StandardValidationOwnedProcess -Lease $first -ExpectedStartIdentity $first.StartIdentity).CleanedUp
                 if(-not $completed){throw 'A live owned child should clean up successfully with no required namespace proof.'}
                 if($sentinel.HasExited){throw 'Cleanup must not terminate a process outside the owned root tree.'}
+                $first.Dispose();[void]$owned.Remove($first)
             }
 
             $second=& $startSleeper;$owned.Add($second);Start-Sleep -Milliseconds 100
             $failed=(Stop-StandardValidationOwnedProcess -Lease $second -ExpectedStartIdentity 'stale-start-identity').CleanedUp
             if($failed){throw 'A mismatched owned start identity must preserve the false cleanup result.'}
             if($sentinel.HasExited){throw 'A failed owned cleanup probe must not terminate the unrelated sentinel process.'}
+            # The deliberately rejected identity leaves the child alive. Reclaim it
+            # without another measured wrapper call, then release Unix admission.
+            $reclaimed=Stop-PlatformOwnedProcess -Lease $second -ExpectedStartIdentity $second.StartIdentity
+            if(-not $reclaimed.CleanedUp){throw 'The stale-identity sample must be reclaimed before the next sample.'}
+            $second.Dispose();[void]$owned.Remove($second)
 
             $third=& $startSleeper;$owned.Add($third);Start-Sleep -Milliseconds 100
             $cancelled=(Stop-StandardValidationOwnedProcess -Lease $third -ExpectedStartIdentity $third.StartIdentity -CancellationRequested).CleanedUp
             if(-not $cancelled){throw 'Successful cancellation cleanup must preserve the true cleanup result.'}
             if($sentinel.HasExited){throw 'Cancellation cleanup must not terminate the unrelated sentinel process.'}
+            $third.Dispose();[void]$owned.Remove($third)
 
             $cleanupRows=@($writer.ToString() -split "`r?`n" | Where-Object {$_ -match '^\[StandardValidation timing\] ' -and $_ -match '"phase":"child-cleanup"' } | ForEach-Object { ($_ -replace '^\[StandardValidation timing\] ','') | ConvertFrom-Json })
             $terminal=@($cleanupRows | Where-Object {$_.state -cin @('completed','failed','cancelled')})

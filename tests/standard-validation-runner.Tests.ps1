@@ -2,6 +2,7 @@
 
 Describe 'Validator shared process evidence' {
     BeforeAll {
+        $TestDrive = if ($TestDrive -is [IO.DirectoryInfo]) { $TestDrive.FullName } else { [string]$TestDrive }
         if ($IsMacOS -and $TestDrive.StartsWith('/var/')) { $TestDrive = '/private' + $TestDrive }
         . (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-StandardValidation.ps1') -CandidateRoot $TestDrive -AdapterPath 'unused' -ArtifactsRoot $TestDrive -SourceRepository 'https://example.test/fixture.git' -SourceRevision ('a'*40) -BaseRevision ('b'*40) -DefineFunctionsOnly
         $script:ValidatorTestHost = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
@@ -85,23 +86,38 @@ exit 0
     }
     # Scenario: Cleanup receives the wrong start identity for a real live child.
     # Purpose: PID reuse protection sends no signal, and an uncertain receipt cannot pass.
-    It 'InterT60_rejects_stale_identity_and_fails_closed_on_cleanup' {
-        $script:ValidatorStaleIdentityObserved = $false
-        Mock Stop-StandardValidationOwnedProcess {
-            param($Lease, $ExpectedStartIdentity, $CancellationRequested)
-            $receipt = Stop-PlatformOwnedProcess -Lease $Lease -ExpectedStartIdentity 'stale-start-identity'
-            $script:ValidatorStaleIdentityObserved = $receipt.SignalsSent -eq 0 -and -not $receipt.CleanedUp
-            return $receipt
+    Context 'Stale identity fault injection' {
+        It 'InterT60_rejects_stale_identity_and_fails_closed_on_cleanup' {
+            $script:ValidatorStaleIdentityObserved = $false
+            Mock Stop-StandardValidationOwnedProcess {
+                param($Lease, $ExpectedStartIdentity, $CancellationRequested)
+                $receipt = Stop-PlatformOwnedProcess -Lease $Lease -ExpectedStartIdentity 'stale-start-identity'
+                $script:ValidatorStaleIdentityObserved = $receipt.SignalsSent -eq 0 -and -not $receipt.CleanedUp
+                return $receipt
+            }
+            # Child creates its cancellation barrier, keeping it live until cleanup.
+            $cancel = Join-Path $TestDrive 'cancel-stale'
+            $result = Invoke-ValidatorProcessFixture 'param([string]$CancelPath) [IO.File]::WriteAllText($CancelPath,"cancel"); Start-Sleep -Seconds 30' -Cancel $cancel
+            $script:ValidatorStaleIdentityObserved | Should -BeTrue
+            $result.status | Should -Be 'cleanup-failed'
+            $result.cleanedUp | Should -BeFalse
+            $result.processOwnership.cleanup.Uncertainty | Should -Be 'process-start-identity-mismatch'
+            # Dispose still performs a valid cleanup after the rejected request.
+            (Get-Process -Id $result.processId -ErrorAction SilentlyContinue) | Should -BeNullOrEmpty
         }
-        # Child creates its cancellation barrier, keeping it live until cleanup.
-        $cancel = Join-Path $TestDrive 'cancel-stale'
-        $result = Invoke-ValidatorProcessFixture 'param([string]$CancelPath) [IO.File]::WriteAllText($CancelPath,"cancel"); Start-Sleep -Seconds 30' -Cancel $cancel
-        $script:ValidatorStaleIdentityObserved | Should -BeTrue
-        $result.status | Should -Be 'cleanup-failed'
-        $result.cleanedUp | Should -BeFalse
-        $result.processOwnership.cleanup.Uncertainty | Should -Be 'process-start-identity-mismatch'
-        # Dispose still performs a valid cleanup after the rejected request.
-        (Get-Process -Id $result.processId -ErrorAction SilentlyContinue) | Should -BeNullOrEmpty
+    }
+    # Scenario: Several stages start after a rejected cleanup request has been disposed.
+    # Purpose: Release the Unix admission guard before the next start and isolate Pester 4 mocks by context.
+    It 'InterT65_disposes_each_owner_before_the_next_stage' {
+        foreach ($sample in 1..3) {
+            $result = Invoke-ValidatorProcessFixture 'param([string]$Value) [Console]::Write($Value); exit 0' -ChildArguments @('-Value',[string]$sample)
+            $result.status | Should -Be 'passed'
+            $result.stdout | Should -Be ([string]$sample)
+            $result.cleanedUp | Should -BeTrue
+            $result.processOwnership.cleanup.CaptureReadersStopped | Should -BeTrue
+            $result.processOwnership.cleanup.CaptureResourcesClosed | Should -BeTrue
+            $result.processOwnership.cleanup.RemainingPids.Count | Should -Be 0
+        }
     }
     # Scenario: Output is reserved once and the session location differs from the native current directory.
     # Purpose: P2 identity, create-only publication and PowerShell-relative path semantics remain intact.
@@ -140,6 +156,63 @@ exit 0
             $result.status | Should -Be 'passed'
             $result.stdout.Trim() | Should -Be 'fixture-shim'
             $result.processOwnership.isolation | Should -Be 'windows-job-object'
+        }
+    }
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        # Scenario: An npm launcher is a symlink, while its receipt binds a runtime and payload.
+        # Purpose: Execute the bound payload through P3 without opening the symlink as a native executable.
+        It 'InterT100_dispatches_unix_symlink_using_receipt_runtime_and_payload' {
+            $root = Join-Path $TestDrive 'unix-launcher'
+            $install = Join-Path $root 'install'
+            $snapshot = Join-Path $root 'snapshot'
+            foreach ($directory in @($install,$snapshot)) { [void][IO.Directory]::CreateDirectory($directory) }
+            $payload = Join-Path $install 'payload.ps1'
+            [IO.File]::WriteAllText($payload,@'
+param([string]$Value)
+if ($Value -cne 'literal & space') { exit 7 }
+[Console]::Write('{"schemaVersion":1,"status":"passed","decision":"PASS","candidateIdentity":"fixture"}')
+'@,[Text.UTF8Encoding]::new($false))
+            $shim = Join-Path $install 'skill-tools'
+            [void](New-Item -ItemType SymbolicLink -Path $shim -Target $payload)
+            $adapter = Join-Path $root 'adapter.json'
+            $receiptPath = Join-Path $root 'receipt.json'
+            foreach ($file in @($adapter,$receiptPath,(Join-Path $snapshot 'SKILL.md'))) { [IO.File]::WriteAllText($file,'{}') }
+            $commandHash = Get-StandardValidationFileSha256 $shim 'fixture'
+            # Use the post-resolution receipt representation and a real interpreter
+            # double for Node. The actual boundary rechecks all bound file hashes.
+            $receipt = [pscustomobject]@{
+                path = $receiptPath; sha256 = (Get-StandardValidationFileSha256 $receiptPath 'fixture')
+                installRoot = $install; executableSha256 = $commandHash
+                installedClosureSha256 = (Get-StandardValidationDirectoryClosureSha256 $install 'fixture')
+                launcher = [pscustomobject]@{
+                    kind = 'unix-node-shim'; shimPath = $shim; shimSha256 = $commandHash
+                    runtimePath = $script:ValidatorTestHost; runtimeSha256 = (Get-StandardValidationFileSha256 $script:ValidatorTestHost 'fixture')
+                    payloadPath = $payload; payloadSha256 = $commandHash
+                }
+            }
+            $spec = [pscustomobject]@{
+                command = $shim; arguments = @('literal & space'); commandSha256 = $commandHash; toolReceipt = $receipt
+            }
+            $snapshotHash = Get-StandardValidationInventorySha256 (Get-StandardValidationInventory $snapshot 'fixture')
+            $boundary = @{
+                CommandSpec = $spec; RunRoot = (Join-Path $root 'run'); ChildWorkingRoot = (Join-Path $root 'children')
+                StageId = 'package-validation'; ToolId = 'fixture'; CandidateId = 'fixture'
+                SnapshotRoot = $snapshot; ExpectedSnapshotContentSha256 = $snapshotHash
+                SkillsRoot = $snapshot; ActiveSkillsText = 'fixture'; OriginalCandidateRoot = $snapshot
+                ExpectedCandidateContentSha256 = $snapshotHash; AdapterPath = $adapter
+                ExpectedAdapterSha256 = (Get-StandardValidationFileSha256 $adapter 'fixture'); TimeoutSeconds = 10
+            }
+            $result = Invoke-StandardValidationCommandAndRecord @boundary
+            $result.event.status | Should -Be 'passed'
+            $result.event.cleanedUp | Should -BeTrue
+            $result.envelope.decision | Should -Be 'PASS'
+            $result.event.commandSha256 | Should -Be $commandHash
+            # Evidence still binds the original shim command; transport selection must not mutate it.
+            $spec.command | Should -Be $shim
+            $spec.arguments.Count | Should -Be 1
+            [IO.File]::AppendAllText($payload,"`n# changed after receipt binding")
+            { Invoke-StandardValidationCommandAndRecord @boundary } | Should -Throw
+            $script:StandardValidationLastEvent | Should -BeNullOrEmpty
         }
     }
 }
@@ -774,6 +847,7 @@ Describe 'S1B3 ordinary v2 retained refusal boundaries' {
                 [ValidateSet('general', 'pester')]
                 [string] $Kind = 'general'
             )
+            if ($IsMacOS -and $Root.StartsWith('/var/')) { $Root = '/private' + $Root }
             [void](New-Item -ItemType Directory -Path $Root -Force)
             $candidate = Join-Path $Root 'candidate'
             $skills = Join-Path $candidate 'skills/alpha'
@@ -949,7 +1023,7 @@ Describe 'S1B3 ordinary v2 retained refusal boundaries' {
         try {
             $wrongCandidate = New-CoreBoundaryFixture -Root (Join-Path $root 'wrong-candidate')
             $candidateMismatch = Invoke-CoreBoundaryCli -Fixture $wrongCandidate -CaseName 'candidate-mismatch' -SourceRevision ('0' * 40)
-            Assert-Equal $candidateMismatch.ExitCode 10 'A mismatched full candidate revision must return BLOCKED=10.'
+            Assert-Equal $candidateMismatch.ExitCode 10 "A mismatched full candidate revision must return BLOCKED=10. stdout=$($candidateMismatch.Stdout) stderr=$($candidateMismatch.Stderr)"
             Assert-Equal $candidateMismatch.Evidence.state 'BLOCKED' 'A mismatched full candidate revision must not pass.'
             Assert-Equal @($candidateMismatch.Evidence.checks).Count 0 'A candidate revision mismatch must be rejected before child dispatch.'
 
@@ -1034,7 +1108,7 @@ Describe 'S1B3 ordinary v2 retained refusal boundaries' {
         try {
             $pesterFixture = New-CoreBoundaryFixture -Root (Join-Path $root 'pester') -Behavior 'slow-pester' -Kind 'pester'
             $pesterRun = Invoke-CoreBoundaryCli -Fixture $pesterFixture -CaseName 'live-pester' -ObserveLiveStderr
-            Assert-True $pesterRun.LiveStderrBeforeExit 'The Core Pester supervisor heartbeat must arrive before the check exits.'
+            Assert-True $pesterRun.LiveStderrBeforeExit "The Core Pester supervisor heartbeat must arrive before the check exits. exit=$($pesterRun.ExitCode) stdout=$($pesterRun.Stdout) stderr=$($pesterRun.Stderr)"
             Assert-Match $pesterRun.Stderr '^Core Pester supervisor utc=.+ elapsedSeconds=\d+ remainingSeconds=\d+ state=running' 'The trusted Core Pester dispatcher must opt into fixed live progress.'
             Assert-Equal $pesterRun.ExitCode 0 'The valid typed Pester check must pass.'
             Assert-Equal $pesterRun.Evidence.state 'PASS' 'A valid Core Pester check must retain PASS evidence.'
