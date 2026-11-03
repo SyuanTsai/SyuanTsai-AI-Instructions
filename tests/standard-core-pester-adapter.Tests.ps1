@@ -631,6 +631,26 @@ public static class P02AEnvironmentContract {
         }
     }
 
+    Context 'Quota diagnostics' {
+        # Scenario: Quota termination leaves a full-size capture containing untrusted output.
+        # Purpose: Return a bounded owner diagnostic promptly while preserving the raw evidence bytes.
+        It 'UnitT10_reports_quota_without_reprocessing_full_captures' {
+            foreach ($name in @('Get-PesterShardFailureSummary','Read-PesterShardOutputPrefix','Read-PesterShardOutputTail','ConvertFrom-PesterShardCliXmlDiagnostic','ConvertTo-PesterShardSanitizedDiagnosticText','Remove-PesterShardTerminalControlSequences')) {
+                . (Get-P02AExecutorFunction $name)
+            }
+            $fixture=New-P02AFixture
+            $path=Join-Path $fixture.EvidenceRoot 'quota.log'
+            $payload='secret=quota-diagnostic-sentinel' + ('x' * 1048544)
+            Write-P02AText $path $payload
+            $clock=[Diagnostics.Stopwatch]::StartNew()
+            $summary=Get-PesterShardFailureSummary -Paths @($path) -OutputQuotaExceeded
+            $clock.Stop()
+            $summary | Should Be 'Pester shard output exceeded the per-stream character limit; raw captures retained.'
+            $clock.Elapsed.TotalSeconds | Should BeLessThan 5
+            [IO.File]::ReadAllText($path) | Should Be $payload
+        }
+    }
+
     Context 'Actual Pester adapter' {
         # Scenario: A copied executor has a missing dependency or a self-rehashed candidate module.
         # Purpose: Reject incomplete closure and candidate self-authorization before importing or starting tests.
@@ -1064,21 +1084,46 @@ Describe 'default beta P02A fixture' {
             }
         }
 
-        # Scenario: Either child output stream exceeds the owner's independent quota.
-        # Purpose: A nominally successful test cannot authorize completion after capture overflow.
+        # Scenario: Either child output stream exceeds the owner's independent quota before a 30-second sleep.
+        # Purpose: Require cleanup and adapter completion within 25 seconds of the flood, without a completed summary.
         It 'InterT48_rejects_stdout_and_stderr_quota_overflow' {
             foreach ($stream in @('Out','Error')) {
                 $fixture=New-P02AFixture
-                Write-P02AText (Join-Path $fixture.TestRoot 'quota.Tests.ps1') ("Describe 'quota' { It 'floods' { [Console]::"+$stream+".Write(('x' * 1100000)); Start-Sleep 30 } }")
+                $body=if ($stream -ceq 'Out') {
+@'
+Describe 'quota' { It 'floods stdout' {
+    [IO.File]::WriteAllText($env:SYP154_PESTER_P02A_SELECTED_WITNESS,[DateTimeOffset]::UtcNow.ToString('o'))
+    [Console]::Out.Write(('x' * 1100000))
+    Start-Sleep 30
+} }
+'@
+                } else {
+@'
+Describe 'quota' { It 'floods stderr' {
+    [IO.File]::WriteAllText($env:SYP154_PESTER_P02A_SELECTED_WITNESS,[DateTimeOffset]::UtcNow.ToString('o'))
+    [Console]::Error.Write(('x' * 1100000))
+    Start-Sleep 30
+} }
+'@
+                }
+                Write-P02AText (Join-Path $fixture.TestRoot 'quota.Tests.ps1') $body
                 $invocation=New-P02AAdapterInvocation $fixture -SelectedNames @('quota.Tests.ps1')
                 $run=Invoke-P02AHiddenAdapter $invocation $fixture
+                $finishedAt=[DateTimeOffset]::UtcNow
                 $run.TimedOut | Should Be $false
                 $run.ExitCode | Should Not Be 0
+                $floodStarted=[DateTimeOffset]::Parse([IO.File]::ReadAllText($fixture.SelectedWitness))
+                ($finishedAt-$floodStarted).TotalSeconds | Should BeLessThan 25
                 Test-Path -LiteralPath $run.SummaryPath | Should Be $false
                 $evidence=Get-Content -LiteralPath (@(Get-P02AProcessEvidenceFiles $fixture)[0].FullName) -Raw | ConvertFrom-Json
                 $evidence.status | Should Be 'output-quota-exceeded'
                 $evidence.outputQuotaExceeded | Should Be $true
                 $evidence.cleanup.cleanedUp | Should Be $true
+                $evidence.cleanup.CaptureReadersStopped | Should Be $true
+                $evidence.cleanup.CaptureResourcesClosed | Should Be $true
+                @($evidence.cleanup.RemainingPids).Count | Should Be 0
+                $evidence.failureSummary | Should Be 'Pester shard output exceeded the per-stream character limit; raw captures retained.'
+                $run.StdoutText.Length | Should BeLessThan 8192
             }
         }
 

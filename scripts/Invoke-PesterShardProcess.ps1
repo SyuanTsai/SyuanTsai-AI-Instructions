@@ -288,15 +288,21 @@ function Invoke-PesterShardProcess {
             schemaVersion=1; status=$status; exitCode=$exitCode; resultPath=$ResultPath; stdoutPath=$StdoutPath; stderrPath=$StderrPath
             processStarted=($null -ne $processId); rootProcessId=$processId; startIdentity=$identity
             outputQuotaExceeded=$quota; terminationReason=$reason; cleanup=$cleanup
-            failureSummary=Get-PesterShardFailureSummary -Paths @($StderrPath,$StdoutPath); error=$failure
+            failureSummary=Get-PesterShardFailureSummary -Paths @($StderrPath,$StdoutPath) -OutputQuotaExceeded:$quota; error=$failure
             platformReceipt=$script:PesterShardCapabilities; artifactsRetained=$true
             caseDiagnosticsPath=($ResultPath+'.cases.json'); childScriptPath=$ChildScriptPath
         }
         Write-PesterShardJson $ProcessEvidencePath $diagnostic
     }
-    foreach ($path in @($StdoutPath,$StderrPath)) {
-        $text=Read-PesterShardOutputPrefix $path $script:PesterShardChildOutputQuotaCharacters
-        if (-not [string]::IsNullOrEmpty($text)) { Write-Host (ConvertTo-PesterShardSanitizedDiagnosticText (ConvertFrom-PesterShardCliXmlDiagnostic $text)) }
+    if ($quota) {
+        # Report promptly after the owner's cleanup attempt. The raw captures
+        # remain available without sanitizing/replaying a full quota of output.
+        Write-Host $diagnostic.failureSummary
+    } else {
+        foreach ($path in @($StdoutPath,$StderrPath)) {
+            $text=Read-PesterShardOutputPrefix $path $script:PesterShardChildOutputQuotaCharacters
+            if (-not [string]::IsNullOrEmpty($text)) { Write-Host (ConvertTo-PesterShardSanitizedDiagnosticText (ConvertFrom-PesterShardCliXmlDiagnostic $text)) }
+        }
     }
     if ($status -cnotin @('completed','failed') -or $null -eq $cleanup -or -not $cleanup.CleanedUp) { throw "Pester shard process ended with status '$status'; evidence='$ProcessEvidencePath'. $failure" }
     if (-not (Test-Path -LiteralPath $ResultPath -PathType Leaf)) { throw "Pester shard exited without a result file; evidence='$ProcessEvidencePath'." }
@@ -734,8 +740,15 @@ function Get-PesterShardFailureSummary {
         [Parameter(Mandatory = $true)][string[]] $Paths,
         [int] $MaxLines = 8,
         [int] $MaxLineLength = 512,
-        [int] $MaxTotalLength = 4096
+        [int] $MaxTotalLength = 4096,
+        [switch] $OutputQuotaExceeded
     )
+
+    if ($OutputQuotaExceeded) {
+        # Quota is supervisor-owned state. Preserve capture files as evidence;
+        # summarizing their contents cannot change the already-failed outcome.
+        return 'Pester shard output exceeded the per-stream character limit; raw captures retained.'
+    }
 
     $deferredCliXml = New-Object 'System.Collections.Generic.List[string]'
     foreach ($path in $Paths) {

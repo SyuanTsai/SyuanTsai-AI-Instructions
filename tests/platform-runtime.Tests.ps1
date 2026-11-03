@@ -20,7 +20,7 @@ Describe 'Platform owned processes P3' {
             if ($null -ne $Lease) { $Lease.Dispose() }
             $Fixture.Directory.Dispose()
             # Only fixture-owned, explicitly named files; never recursive cleanup.
-            foreach ($leaf in @('out','err','child','ready','executable')) { $path = Join-Path $Fixture.Path $leaf; if ([IO.File]::Exists($path)) { [IO.File]::Delete($path) } }
+            foreach ($leaf in @('out','err','child','ready','executable','quota.ps1')) { $path = Join-Path $Fixture.Path $leaf; if ([IO.File]::Exists($path)) { [IO.File]::Delete($path) } }
             [IO.Directory]::Delete($Fixture.Path)
         }
         function Assert-P3Exited($Lease) {
@@ -132,6 +132,54 @@ Describe 'Platform owned processes P3' {
             Assert-P3Cleaned $p.Cleanup
             (Get-Item (Join-Path $f.Path 'err')).Length | Should BeLessThan 4097
         } finally { Remove-P3Fixture $f $p }
+    }
+
+    # Scenario: A root with a sleeping descendant exceeds either stream's full quota, then sleeps for 30 seconds.
+    # Purpose: Require autonomous owner cleanup in under 25 seconds, without a caller Stop or natural exit.
+    It 'InterT67_terminates_the_tree_promptly_after_either_stream_exceeds_quota' {
+        foreach ($stream in @('Out','Error')) {
+            $f=New-P3Fixture; $p=$null
+            try {
+                $scriptPath=Join-Path $f.Path 'quota.ps1'
+                $code=@'
+param([string]$Stream,[switch]$Descendant)
+if ($Descendant) { Start-Sleep 90; exit 0 }
+$start=[Diagnostics.ProcessStartInfo]::new()
+$start.FileName=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+$start.UseShellExecute=$false; $start.CreateNoWindow=$true
+foreach ($argument in @('-NoLogo','-NoProfile','-NonInteractive')) { $start.ArgumentList.Add($argument) }
+if ($IsWindows) { $start.ArgumentList.Add('-ExecutionPolicy'); $start.ArgumentList.Add('Bypass') }
+foreach ($argument in @('-File',$PSCommandPath,'-Descendant')) { $start.ArgumentList.Add($argument) }
+$child=[Diagnostics.Process]::Start($start)
+try {
+    [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'ready'),([pscustomobject]@{pid=$child.Id;start=$child.StartTime.ToUniversalTime().ToString('o')} | ConvertTo-Json))
+} finally { $child.Dispose() }
+$writer=if ($Stream -ceq 'Out') { [Console]::Out } else { [Console]::Error }
+$writer.Write(('x' * 1100000))
+Start-Sleep 30
+'@
+                [IO.File]::WriteAllText($scriptPath,$code,[Text.UTF8Encoding]::new($false))
+                $arguments=@('-NoLogo','-NoProfile','-NonInteractive')
+                if ($IsWindows) { $arguments+=@('-ExecutionPolicy','Bypass') }
+                $arguments+=@('-File',$scriptPath,'-Stream',$stream)
+                $environment=@{}; if ($IsWindows) { $environment.SystemRoot=$env:SystemRoot }
+                $clock=[Diagnostics.Stopwatch]::StartNew()
+                $p=Start-PlatformOwnedProcess -ExecutablePath $script:P3Shell -ArgumentList $arguments -Environment $environment -WorkingDirectoryLease $f.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(60)) -StdoutPath (Join-Path $f.Path 'out') -StderrPath (Join-Path $f.Path 'err') -OutputLimitCharacters 1048576
+                $p.WaitForCleanup([TimeSpan]::FromSeconds(24)) | Should Be $true
+                $clock.Stop()
+                $clock.Elapsed.TotalSeconds | Should BeLessThan 25
+                $p.OutputLimitExceeded | Should Be $true
+                $p.TerminationReason | Should Be 'output-limit'
+                Assert-P3Cleaned $p.Cleanup
+                @($p.Cleanup.RemainingPids).Count | Should Be 0
+                $identity=Get-Content -LiteralPath (Join-Path $f.Path 'ready') -Raw | ConvertFrom-Json
+                $child=Get-Process -Id $identity.pid -ErrorAction SilentlyContinue
+                if ($null -ne $child) {
+                    try { ($child.StartTime.ToUniversalTime().ToString('o') -ceq $identity.start -and -not $child.HasExited) | Should Be $false }
+                    finally { $child.Dispose() }
+                }
+            } finally { Remove-P3Fixture $f $p }
+        }
     }
 
     # Scenario: Each stream emits its full allowed quota, including multibyte UTF-8 characters.
