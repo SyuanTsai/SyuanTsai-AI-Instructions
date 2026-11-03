@@ -264,6 +264,10 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     long written = 0; // independent quota for this reader/stream
                     while (!captureCancelled.IsSet)
                     {
+                        // A reader also has a deadline when no supervisor was
+                        // started, or an idle writer holds a partial UTF-8 sequence.
+                        if (DateTimeOffset.UtcNow >= deadline)
+                        { lock (outputGate) { if (captureFailure == null) captureFailure = "capture-deadline"; } return; }
                         int count = ReadAvailable(source, buffer);
                         if (count < 0) { captureCancelled.Wait(10); continue; }
                         // Preserve decoder state across pipe chunks. Count UTF-16
@@ -309,7 +313,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                         if (disposed || cleaned.IsSet) return;
                         control.Poll(); if (control.Exited) exited.Set();
                         stop = outputExceeded || captureFailure != null || DateTimeOffset.UtcNow >= deadline;
-                        if (stop) reason = outputExceeded ? "output-limit" : captureFailure != null ? "capture-failure" : "deadline";
+                        if (stop) reason = outputExceeded ? "output-limit" : DateTimeOffset.UtcNow >= deadline ? "deadline" : "capture-failure";
                     }
                     if (stop) { Stop(TimeSpan.FromMilliseconds(200), DateTimeOffset.UtcNow.AddSeconds(5), null); return; }
                     Thread.Sleep(20);
@@ -392,7 +396,9 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 }
                 if (!CancelCaptureReaders(until)) captureFailure = "capture-reader-cancellation-incomplete";
                 try { CloseCapture(); } catch (Exception ex) { captureFailure = ex.Message; }
-                string uncertainty = failure ?? captureFailure ?? control.Uncertainty;
+                // Reaching the workload deadline triggers termination; it is not
+                // itself evidence that termination or capture cancellation failed.
+                string uncertainty = failure ?? (captureFailure == "capture-deadline" ? null : captureFailure) ?? control.Uncertainty;
                 cleanup = Receipt(remaining.Length == 0 && uncertainty == null && CaptureReadersStopped && captureClosed, signals, remaining, uncertainty);
                 cleaned.Set();
                 return cleanup;

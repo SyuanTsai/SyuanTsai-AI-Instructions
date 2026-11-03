@@ -67,8 +67,8 @@
                 @{ Path = 'platform/Linux.psm1'; Sha256 = '75554397511f4727d361f784c59222130f3e282acf84a19aec81b651e6c67674' },
                 @{ Path = 'platform/MacOS.psm1'; Sha256 = '4beb55532b18673e8fe1732effdd9354a38bb3f828b2c224ecf3c1d0e21abe76' },
                 @{ Path = 'Resolve-StandardValidationTool.ps1'; Sha256 = 'fbbc258b12ed24f257bc068399b76f9e58de4a02bd9d12301c01842a77c960c1' },
-                @{ Path = 'platform/OwnedProcess.cs'; Sha256 = '3592f71bb71b2da162b1ca60140ec60765b9ccdb148eb0cfa02976c0b42a47fc' },
-                @{ Path = 'platform/UnixProcess.cs'; Sha256 = '10abc7337f71bb8e38c379789bc42969eebab76bd133ed028bf7438ead45a1c3' },
+                @{ Path = 'platform/OwnedProcess.cs'; Sha256 = 'f4c1ba2ff46980cbc9d25702a48d7c2ecd2f7acd7655549874609582205f7c9a' },
+                @{ Path = 'platform/UnixProcess.cs'; Sha256 = '86ef67deb0b5aca22841f0a9eee341efadcf2645c1bb1aaaac272f96dee26113' },
                 @{ Path = 'platform/WindowsProcess.cs'; Sha256 = 'd647029894a37e0599e7b053da8265bb4e04cbfa4a8148efbbb33d5cede8e6f0' }
             )
         }

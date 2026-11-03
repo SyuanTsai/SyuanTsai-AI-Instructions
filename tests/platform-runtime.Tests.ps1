@@ -517,6 +517,22 @@ public static class UnixObservationFixture
         }
     }
 
+    BeforeEach {
+        $flags=[Reflection.BindingFlags]'Static,NonPublic'
+        $script:SavedUnixPending=$script:UnixControlType.GetField('pendingFailedStart',$flags).GetValue($null)
+        $script:SavedUnixActive=$script:UnixControlType.GetField('active',$flags).GetValue($null)
+    }
+    AfterEach {
+        # These syscall fixtures own fake PIDs/fds. A deliberately poisoned test
+        # must not poison later real probes or erase an existing runtime owner.
+        $flags=[Reflection.BindingFlags]'Static,NonPublic'
+        $pendingField=$script:UnixControlType.GetField('pendingFailedStart',$flags)
+        $pending=$pendingField.GetValue($null)
+        if($null -ne $pending -and -not [object]::ReferenceEquals($pending,$script:SavedUnixPending)) { Invoke-UnixTestMethod $pending ClosePidfds }
+        $pendingField.SetValue($null,$script:SavedUnixPending)
+        $script:UnixControlType.GetField('active',$flags).SetValue($null,$script:SavedUnixActive)
+    }
+
     # Scenario: A foreign PID denies inspection, while the owned root is readable.
     # Purpose: Unrelated permissions must not invalidate workload capability or cleanup.
     It 'UnitT10_ignores_foreign_permission_denials_but_preserves_owned_failures' {
@@ -1313,7 +1329,7 @@ public static class UnixObservationFixture
                 $failure.Data['UnixRuntimePoisoned'] | Should Be $true
                 [object]::ReferenceEquals($pending.GetValue($null),$f.Control) | Should Be $true
                 $state.ClosedPidfds.Count | Should Be 0
-                { $guard.Invoke($null,@()) } | Should Throw 'previous startup cleanup is incomplete'
+                { $guard.Invoke($null,@()) } | Should Throw 'previous process cleanup is incomplete'
                 $active.GetValue($null) | Should Be $true
                 $state.Table[200]=New-UnixTestStat 200 100 200 $(if ($darwin) { '10' } else { 'root' }) 'Z'
                 $state.ExitEvent=0; $state.GroupErrno=3
@@ -1327,6 +1343,47 @@ public static class UnixObservationFixture
         } finally {
             $pending.SetValue($null,$savedPending); $active.SetValue($null,$savedActive)
         }
+    }
+
+    # Scenario: Dispose cannot reap a reserved root, with either a live descendant or failed inventory.
+    # Purpose: Keep native bindings and admission poisoned even though the public lease is disposed.
+    It 'UnitT288_retains_unresolved_disposal_in_pending_cleanup' {
+        $staticFlags=[Reflection.BindingFlags]'Static,NonPublic'
+        $pending=$script:UnixControlType.GetField('pendingFailedStart',$staticFlags)
+        $active=$script:UnixControlType.GetField('active',$staticFlags)
+        $savedPending=$pending.GetValue($null); $savedActive=$active.GetValue($null)
+        try {
+            foreach($darwin in @($false,$true)) { foreach($mode in @('live','inventory-error')) {
+                $f=New-UnixObservationFixture; $state=$f.State
+                if($darwin){Set-DarwinObservationFixture $f}
+                Invoke-UnixTestMethod $f.Control Poll
+                $state.Table[200]=New-UnixTestStat 200 100 200 $(if($darwin){'10'}else{'root'}) 'Z'
+                $state.ExitEvent=0
+                Invoke-UnixTestMethod $f.Control Poll
+                Set-UnixTestField $f.Control waitForChild ([Func[int,Tuple[int,int,int]]]{param($id) return [Tuple]::Create(0,0,0)})
+                if($mode -eq 'inventory-error') {
+                    if($darwin){Set-UnixTestField $f.Control listDarwinPids ([Func[uint32,uint32,int[]]]{param($kind,$value) throw [IO.IOException]::new('dispose-census-error')})}
+                    else {Set-UnixTestField $f.Control listLinuxPids ([Func[int[]]]{throw [IO.IOException]::new('dispose-census-error')})}
+                }
+                $timer=[Diagnostics.Stopwatch]::StartNew()
+                $f.Control.Dispose(); $f.Control.Dispose()
+                $timer.Elapsed.TotalSeconds | Should BeLessThan 2
+                [object]::ReferenceEquals($pending.GetValue($null),$f.Control) | Should Be $true
+                $active.GetValue($null) | Should Be $true
+                $state.ClosedPidfds.Count | Should Be 0
+                { $script:UnixControlType.GetMethod('EnsureStartAvailable',$staticFlags).Invoke($null,@()) } | Should Throw 'cleanup is incomplete'
+                if($mode -eq 'live') {
+                    $state.GroupErrno=3
+                    Set-UnixTestField $f.Control waitForChild ([Func[int,Tuple[int,int,int]]]{param($id) $state.Table.Remove($id); return [Tuple]::Create([int]$id,0,0)}.GetNewClosure())
+                    $script:UnixControlType.GetMethod('EnsureStartAvailable',$staticFlags).Invoke($null,@())
+                    $pending.GetValue($null) | Should BeNullOrEmpty
+                    $active.GetValue($null) | Should Be $false
+                }
+                # Fake syscalls own no real process/descriptor; release fixture bookkeeping only.
+                Invoke-UnixTestMethod $f.Control ClosePidfds
+                $pending.SetValue($null,$savedPending); $active.SetValue($null,$savedActive)
+            } }
+        } finally { $pending.SetValue($null,$savedPending); $active.SetValue($null,$savedActive) }
     }
 
     # Scenario: Root exits before its cooperative child; Darwin omits the zombie from libproc.
@@ -1649,11 +1706,62 @@ Describe 'Platform capture startup failure regressions' {
 }
 
 Describe 'Platform capture character quotas' {
-    BeforeAll { Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force }
+    BeforeAll {
+        Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
+        function Invoke-CaptureQuotaChild([string]$CaseName,[int]$TimeoutMilliseconds=15000) {
+            # A parent watchdog bounds constructor, Write, Flush and Dispose too;
+            # a timed Join cannot protect code which never reaches that Join.
+            $testPath=Join-Path $PSScriptRoot 'platform-runtime.Tests.ps1'
+            $code=@'
+$ErrorActionPreference='Stop'
+$ProgressPreference='SilentlyContinue'
+Import-Module Microsoft.PowerShell.Utility
+Import-Module $env:CAPTURE_QUOTA_PESTER -Force
+$tokens=$null; $errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:CAPTURE_QUOTA_TEST_FILE,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'Fixture parse failed'}
+$describe=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Describe' -and $n.CommandElements[1].Value -eq 'Platform capture character quotas'},$true))[0]
+$PSScriptRoot=[IO.Path]::GetDirectoryName($env:CAPTURE_QUOTA_TEST_FILE)
+$before=@($describe.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'BeforeAll'},$true))[0].CommandElements[-1].ScriptBlock.Extent.Text
+$before=$before.Replace('$PSScriptRoot',("'"+$PSScriptRoot.Replace("'","''")+"'"))
+if($PSVersionTable.PSVersion.Major -lt 7){$before=$before.Replace('platform-runtime.psd1','platform-runtime.psm1')}
+. ([scriptblock]::Create($before.Substring(1,$before.Length-2)))
+$test=@($describe.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'It' -and $n.CommandElements[1].Value -eq $env:CAPTURE_QUOTA_CHILD},$true))[0].CommandElements[-1].ScriptBlock.Extent.Text
+. ([scriptblock]::Create($test.Substring(1,$test.Length-2)))
+'quota-child-passed'
+'@
+            $start=[Diagnostics.ProcessStartInfo]::new()
+            $start.FileName=(Get-Process -Id $PID).Path
+            $start.Arguments='-NoLogo -NoProfile -NonInteractive -EncodedCommand '+[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code))
+            $start.UseShellExecute=$false; $start.CreateNoWindow=$true
+            $start.RedirectStandardOutput=$true; $start.RedirectStandardError=$true
+            $start.EnvironmentVariables['CAPTURE_QUOTA_TEST_FILE']=$testPath
+            $start.EnvironmentVariables['CAPTURE_QUOTA_CHILD']=$CaseName
+            $start.EnvironmentVariables['CAPTURE_QUOTA_PESTER']=(Get-Module Pester | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1).Path
+            $child=[Diagnostics.Process]::new(); $child.StartInfo=$start; $started=$false
+            try {
+                $started=$child.Start()
+                $output=$child.StandardOutput.ReadToEndAsync(); $errorOutput=$child.StandardError.ReadToEndAsync()
+                if(-not $child.WaitForExit($TimeoutMilliseconds)){
+                    $child.Kill()
+                    if(-not $child.WaitForExit(2000)){throw 'Capture fixture termination timed out'}
+                    $diagnostics=if($output.Wait(1000)){$output.Result}else{'diagnostics unavailable'}
+                    throw ('Capture fixture exceeded its deadline: '+$diagnostics)
+                }
+                if(-not $output.Wait(1000) -or -not $errorOutput.Wait(1000)){throw 'Capture fixture diagnostics timed out'}
+                if($child.ExitCode -ne 0){throw ($errorOutput.Result+$output.Result)}
+                $output.Result | Should Match 'quota-child-passed'
+            } finally {
+                if($started -and -not $child.HasExited){$child.Kill(); if(-not $child.WaitForExit(2000)){throw 'Capture fixture termination timed out'}}
+                $child.Dispose()
+            }
+        }
+    }
 
     # Scenario: Two streams write split UTF-8 sequences, at or above their separate limits.
     # Purpose: Preserve whole decoded prefixes and stop on either stream's overflow without sharing counters.
     It 'UnitT10_enforces_independent_character_limits_across_utf8_chunks' {
+        if($env:CAPTURE_QUOTA_CHILD -ne 'UnitT10_enforces_independent_character_limits_across_utf8_chunks') { Invoke-CaptureQuotaChild 'UnitT10_enforces_independent_character_limits_across_utf8_chunks'; return }
         $type=[SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]
         $flags=[Reflection.BindingFlags]'Instance,NonPublic'
         foreach ($mode in @('exact','stdout-over','stderr-over')) {
@@ -1661,19 +1769,26 @@ Describe 'Platform capture character quotas' {
             $paths=@(); $pipes=@(); $files=@(); $readers=@()
             try {
                 foreach ($stream in @('stdout','stderr')) {
+                    [Console]::WriteLine("quota: $mode $stream create")
                     $path=Join-Path ([IO.Path]::GetTempPath()) ('quota-'+[guid]::NewGuid().ToString('N')); $paths+=$path
                     $file=[IO.File]::Open($path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read); $files+=$file
                     $pipe=[IO.Pipes.AnonymousPipeServerStream]::new([IO.Pipes.PipeDirection]::In,[IO.HandleInheritability]::Inheritable); $pipes+=$pipe
                     $readers+=$type.GetMethod('Reader',$flags).Invoke($lease,[object[]]@($pipe,$file))
-                    $handle=[Microsoft.Win32.SafeHandles.SafePipeHandle]::new($pipe.ClientSafePipeHandle.DangerousGetHandle(),$false)
-                    $writer=[IO.Pipes.AnonymousPipeClientStream]::new([IO.Pipes.PipeDirection]::Out,$handle)
+                    # Avoid the managed AnonymousPipeClientStream path implicated
+                    # by the Unix hang. The fixture writes at most 15 bytes into a
+                    # fresh pipe; the separate-process watchdog bounds library I/O.
+                    [Console]::WriteLine("quota: $mode $stream writer")
+                    $handle=[Microsoft.Win32.SafeHandles.SafeFileHandle]::new($pipe.ClientSafePipeHandle.DangerousGetHandle(),$false)
+                    $writer=[IO.FileStream]::new($handle,[IO.FileAccess]::Write,1,$false)
                     try {
                         $length=if ($mode -eq ($stream+'-over')) { 5 } else { 4 }
                         $bytes=[Text.Encoding]::UTF8.GetBytes((([string][char]0x754c)*$length))
+                        [Console]::WriteLine("quota: $mode $stream write")
                         $writer.Write($bytes,0,1); $writer.Flush(); [Threading.Thread]::Sleep(20)
                         $writer.Write($bytes,1,$bytes.Length-1); $writer.Flush()
-                    } finally { $writer.Dispose(); $pipe.ClientSafePipeHandle.Dispose() }
+                    } finally { [Console]::WriteLine("quota: $mode $stream close-writer"); $writer.Dispose(); $pipe.ClientSafePipeHandle.Dispose() }
                 }
+                [Console]::WriteLine("quota: $mode join")
                 foreach ($reader in $readers) { $reader.Join(2000) | Should Be $true }
                 $lease.OutputLimitExceeded | Should Be ($mode -ne 'exact')
                 foreach ($file in $files) { $file.Dispose() }
@@ -1681,10 +1796,34 @@ Describe 'Platform capture character quotas' {
             } finally {
                 $type.GetField('captureCancelled',$flags).GetValue($lease).Set()
                 foreach ($pipe in $pipes) { $pipe.ClientSafePipeHandle.Dispose() }
-                foreach ($reader in $readers) { [void]$reader.Join(2000) }
+                foreach ($reader in $readers) { if(-not $reader.Join(2000)){throw 'Capture reader cancellation exceeded its deadline'} }
                 foreach ($file in $files) { $file.Dispose() }; foreach ($pipe in $pipes) { $pipe.Dispose() }
                 foreach ($path in $paths) { [IO.File]::Delete($path) }
             }
+        }
+    }
+
+    # Scenario: A writer leaves an incomplete UTF-8 character and keeps its pipe open.
+    # Purpose: A standalone reader must honor its lease deadline without a supervisor or EOF.
+    It 'UnitT15_bounds_incomplete_utf8_capture_by_the_lease_deadline' {
+        if($env:CAPTURE_QUOTA_CHILD -ne 'UnitT15_bounds_incomplete_utf8_capture_by_the_lease_deadline') { Invoke-CaptureQuotaChild 'UnitT15_bounds_incomplete_utf8_capture_by_the_lease_deadline'; return }
+        $type=[SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]; $flags=[Reflection.BindingFlags]'Instance,NonPublic'
+        $lease=[Activator]::CreateInstance($type,$flags,$null,[object[]]@([DateTimeOffset]::UtcNow.AddMilliseconds(300),[long]4),$null)
+        $path=Join-Path ([IO.Path]::GetTempPath()) ('quota-'+[guid]::NewGuid().ToString('N'))
+        $pipe=[IO.Pipes.AnonymousPipeServerStream]::new([IO.Pipes.PipeDirection]::In,[IO.HandleInheritability]::Inheritable)
+        $file=[IO.File]::Open($path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+        $reader=$null; $writer=$null
+        try {
+            $reader=$type.GetMethod('Reader',$flags).Invoke($lease,[object[]]@($pipe,$file))
+            $writer=[IO.FileStream]::new([Microsoft.Win32.SafeHandles.SafeFileHandle]::new($pipe.ClientSafePipeHandle.DangerousGetHandle(),$false),[IO.FileAccess]::Write,1,$false)
+            $writer.WriteByte(0xe7); $writer.Flush()
+            $reader.Join(1500) | Should Be $true
+            $type.GetField('captureFailure',$flags).GetValue($lease) | Should Be 'capture-deadline'
+            $lease.OutputLimitExceeded | Should Be $false
+        } finally {
+            $type.GetField('captureCancelled',$flags).GetValue($lease).Set()
+            if($null -ne $reader -and -not $reader.Join(2000)){throw 'Partial-character capture cancellation timed out'}
+            if($null -ne $writer){$writer.Dispose()}; $pipe.ClientSafePipeHandle.Dispose(); $pipe.Dispose(); $file.Dispose(); [IO.File]::Delete($path)
         }
     }
 
@@ -1698,6 +1837,15 @@ Describe 'Platform capture character quotas' {
         $range.MaxRange | Should Be 1048576
         $node=@($command.ScriptBlock.Ast.FindAll({param($n) $n -is [Management.Automation.Language.ParameterAst] -and $n.Name.VariablePath.UserPath -eq 'OutputLimitCharacters'},$true))[0]
         $node.DefaultValue.SafeGetValue() | Should Be 1048576
+    }
+
+    # Scenario: Fixture code stops making progress before its reader Join.
+    # Purpose: The parent watchdog kills the isolated fixture instead of hanging CI.
+    It 'UnitT25_bounds_a_stalled_capture_fixture' {
+        if($env:CAPTURE_QUOTA_CHILD -eq 'UnitT25_bounds_a_stalled_capture_fixture'){Start-Sleep -Seconds 30; return}
+        $timer=[Diagnostics.Stopwatch]::StartNew()
+        { Invoke-CaptureQuotaChild 'UnitT25_bounds_a_stalled_capture_fixture' 2000 } | Should Throw 'exceeded its deadline'
+        $timer.Elapsed.TotalSeconds | Should BeLessThan 10
     }
 }
 

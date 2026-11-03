@@ -111,8 +111,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
 
         private static readonly object spawnGate = new object();
         private static bool active;
-        // A failed spawn still owns its descendants. Keep its bindings rooted in
-        // the runtime, and poison admission until a later cleanup retry succeeds.
+        // Failed startup OR unresolved Dispose still owns its descendants. Keep
+        // bindings rooted in the runtime until a later cleanup retry succeeds.
         private static UnixProcessControl pendingFailedStart;
         private readonly bool mac = PlatformNative.GetOperatingSystem() == "macos";
         private readonly int supervisor = Process.GetCurrentProcess().Id;
@@ -521,7 +521,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         {
             if (pendingFailedStart != null)
             {
-                var failure = new PlatformCapabilityUnavailableException("owned-process: previous startup cleanup is incomplete", PlatformNative.GetOperatingSystem());
+                var failure = new PlatformCapabilityUnavailableException("owned-process: previous process cleanup is incomplete", PlatformNative.GetOperatingSystem());
                 // Allow a post-exit census before deciding whether the retained
                 // zombie can be reaped. One zero-duration poll cannot prove that.
                 pendingFailedStart.FinishFailedStart(failure, TimeSpan.FromMilliseconds(100));
@@ -656,6 +656,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 pendingFailedStart = this; active = true;
                 CleanupFailedStart(timeout);
                 AttachStartupCleanupReceipt(failure);
+                failure.Data["PendingCleanupReceipt"] = failure.Data["StartupCleanupReceipt"];
                 bool complete = ((ProcessCleanupReceipt)failure.Data["StartupCleanupReceipt"]).CleanedUp;
                 failure.Data["UnixRuntimePoisoned"] = !complete;
                 if (complete)
@@ -1097,16 +1098,13 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 if (released) return;
                 try
                 {
-                    // Final bound-only attempt even if the owner could not poll or
-                    // observe completion. Never manufacture a successful receipt.
-                    if (owned.Count != 0)
-                    {
-                        Signal(true);
-                        if (!mac) ReapBoundAfterInventoryFailure();
-                        else { try { Poll(); } catch (Exception ex) { Unknown("dispose-inventory-incomplete: " + ex.Message); } }
-                    }
+                    // The public lease may now be permanently disposed. Transfer
+                    // unresolved ownership to the same admission guard as failed
+                    // startup, keeping pidfds/kqueue and any zombie reservation.
+                    // This bounded attempt never frees bindings on an unknown result.
+                    FinishFailedStart(new IOException("dispose-cleanup-incomplete"), TimeSpan.FromMilliseconds(100));
                 }
-                finally { released = true; if (exitQueue != null) exitQueue.Dispose(); ClosePidfds(); active = false; }
+                finally { released = true; }
             }
         }
     }
