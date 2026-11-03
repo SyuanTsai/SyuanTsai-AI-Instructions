@@ -91,16 +91,25 @@ function Import-PesterShardRuntime {
     Import-Module -Name $manifestPath -Force -Global -ErrorAction Stop
 }
 
+function Resolve-PesterShardFileSystemPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $provider = $null; $drive = $null
+    $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path,[ref]$provider,[ref]$drive)
+    if ($provider.Name -cne 'FileSystem') { throw 'INVALID|Pester shard inputs require filesystem paths.' }
+    return $full
+}
+
 function Open-PesterShardDirectory {
     param([string]$Path,[switch]$Create)
-    $full = [IO.Path]::GetFullPath($Path).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    $full = (Resolve-PesterShardFileSystemPath $Path).TrimEnd([IO.Path]::DirectorySeparatorChar)
     $anchor = [IO.Path]::GetPathRoot($full)
     Open-PlatformDirectory -Root $anchor -RelativePath $full.Substring($anchor.Length) -CreatePrivate:$Create
 }
 
 function Open-PesterShardInput {
     param([string]$Path, [Collections.Generic.List[IDisposable]]$Guards)
-    $parent = Open-PesterShardDirectory ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Path)))
+    $Path = Resolve-PesterShardFileSystemPath $Path
+    $parent = Open-PesterShardDirectory ([IO.Path]::GetDirectoryName($Path))
     $Guards.Add($parent)
     $file = Open-PlatformFile -ParentLease $parent -Leaf ([IO.Path]::GetFileName($Path)) -Access Read -CreateMode OpenExisting
     $Guards.Add($file)
@@ -110,6 +119,7 @@ function Open-PesterShardInput {
 
 function Assert-PesterShardModuleManifest {
     param([string]$Path,[string]$Version)
+    $Path = Resolve-PesterShardFileSystemPath $Path
     $manifest = Import-PowerShellDataFile -LiteralPath $Path
     if ([string]$manifest.ModuleVersion -cne $Version) { throw 'INVALID|Pester module version mismatch.' }
     if (@($manifest['RequiredModules']).Count -gt 0 -and $null -ne $manifest['RequiredModules']) { throw 'INVALID|Ambient Pester module dependencies are not allowed.' }
@@ -135,6 +145,7 @@ function Write-PesterShardJson {
 
 function Write-PesterShardBytes {
     param([string]$Path,[byte[]]$Bytes)
+    $Path = Resolve-PesterShardFileSystemPath $Path
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and [IO.Path]::GetFullPath($Path).Length -ge 240) {
         throw 'INVALID|Windows shard artifact paths must be fewer than 240 characters.'
     }
@@ -156,7 +167,11 @@ function Read-PesterShardJson {
 
 function Get-PesterShardChildEnvironment {
     # Explicit allowlist: no prefix wildcards, runtime injection, or inherited PSModulePath.
-    $values = @{}
+    # Cmdlet output (Join-Path/ConvertTo-Json) can retain a PSObject wrapper in a
+    # hashtable. P3's native IDictionary contract requires actual CLR strings,
+    # including values the supervisor adds after this function returns.
+    $comparer = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [StringComparer]::OrdinalIgnoreCase } else { [StringComparer]::Ordinal }
+    $values = [Collections.Generic.Dictionary[string,string]]::new($comparer)
     foreach ($name in @('PATH','PATHEXT','COMSPEC','SYSTEMROOT','WINDIR','TEMP','TMP','TMPDIR','HOME','USERPROFILE','APPDATA','LOCALAPPDATA','LANG','LC_ALL','NUMBER_OF_PROCESSORS',
         'SYP154_PESTER_P02A_SELECTED_WITNESS','SYP154_PESTER_P02A_UNSELECTED_WITNESS','SYP154_PESTER_P02A_ALPHA_WITNESS','SYP154_PESTER_P02A_BETA_WITNESS','SYP154_PESTER_P02A_RUNTIME_PATH','SYP154_PESTER_P02A_EVIDENCE_ROOT')) {
         $value = [Environment]::GetEnvironmentVariable($name,'Process')
@@ -180,6 +195,24 @@ function ConvertTo-PesterShardProcessState {
     return 'completed'
 }
 
+function Format-PesterShardException {
+    param([Parameter(Mandatory = $true)][Exception]$Exception)
+    $parts = [Collections.Generic.List[string]]::new()
+    $cause = $Exception
+    while ($null -ne $cause -and $parts.Count -lt 8) {
+        $message = [string]$cause.Message
+        if ($message.Length -gt 8192) { $message = $message.Substring(0,8192) }
+        $message = ConvertTo-PesterShardSanitizedDiagnosticText $message
+        $part = $cause.GetType().FullName + ': ' + $message
+        # Reserve room for inner causes even if an outer exception repeats a large message.
+        if ($part.Length -gt 480) { $part = $part.Substring(0,480) + '...' }
+        $parts.Add($part)
+        $cause = $cause.InnerException
+    }
+    $text = $parts.ToArray() -join ' -> '
+    return $text.Substring(0,[Math]::Min(4096,$text.Length))
+}
+
 function Invoke-PesterShardProcess {
     [CmdletBinding()]
     param([string[]]$Paths,[string]$ModulePath,[string]$Version,[string]$ChildPowerShell,[string]$EncodedChildScript,[string]$ChildScriptPath,
@@ -190,24 +223,30 @@ function Invoke-PesterShardProcess {
     $guards = [Collections.Generic.List[IDisposable]]::new()
     $lease = $null; $cleanup = $null; $status = 'not-started'; $exitCode = $null
     $naturalExit = $false; $cancelled = $false; $quota = $false; $reason = ''; $failure = ''; $processId = $null; $identity = $null
+    $phase = 'validate-inputs'
     try {
         if ($TimeoutSeconds -le 0) { throw 'INVALID|Shard deadline must be positive.' }
         foreach ($path in @($Paths)+@($ModulePath,$ChildPowerShell,$ResultPath,$ProcessEvidencePath,$StdoutPath,$StderrPath,$WorkingDirectory)) {
             if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and $path.Length -ge 240) { throw 'INVALID|Windows shard paths must be fewer than 240 characters.' }
         }
+        $phase = 'open-working-directory'
         $directory = Open-PesterShardDirectory $WorkingDirectory; $guards.Add($directory)
+        $phase = 'open-executable'
         $executable = Open-PesterShardInput $ChildPowerShell $guards
+        $phase = 'open-test-and-module-inputs'
         foreach ($path in @($Paths)+@($ModulePath)) { Open-PesterShardInput $path $guards | Out-Null }
         $arguments = @('-NoLogo','-NoProfile','-NonInteractive')
         if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
             $arguments += @('-ExecutionPolicy','Bypass')
         }
         if (-not [string]::IsNullOrEmpty($ChildScriptPath)) {
+            $phase = 'open-child-script'
             Open-PesterShardInput $ChildScriptPath $guards | Out-Null
             $arguments += @('-File',$ChildScriptPath)
         } else { $arguments += @('-EncodedCommand',$EncodedChildScript) }
         if ($CancellationToken.IsCancellationRequested) { $cancelled=$true; $status='cancelled' }
         else {
+            $phase = 'start-owned-process'
             $lease = Start-PlatformOwnedProcess -ExecutableLease $executable -ArgumentList $arguments `
                 -Environment $Environment -WorkingDirectoryLease $directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)) `
                 -IsolationRequirement $IsolationRequirement -StdoutPath $StdoutPath -StderrPath $StderrPath -OutputLimitCharacters $script:PesterShardChildOutputQuotaCharacters
@@ -219,7 +258,7 @@ function Invoke-PesterShardProcess {
             $naturalExit = $lease.HasExited -and [string]::IsNullOrEmpty($lease.TerminationReason) -and -not $cancelled
         }
     } catch {
-        $status='start-failed'; $failure=ConvertTo-PesterShardSanitizedDiagnosticText ([string]$_.Exception.Message)
+        $status='start-failed'; $failure=$phase + ': ' + (Format-PesterShardException $_.Exception)
         $cause=$_.Exception
         while ($null -ne $cause) {
             if ($cause.Data.Contains('StartupCleanupReceipt')) { $cleanup=$cause.Data['StartupCleanupReceipt'] }
@@ -233,10 +272,17 @@ function Invoke-PesterShardProcess {
                 $cleanup=Stop-PlatformOwnedProcess -Lease $lease -ExpectedStartIdentity $identity -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(5))
                 $exitCode=$lease.ExitCode; $quota=$lease.OutputLimitExceeded; $reason=[string]$lease.TerminationReason
                 $status=ConvertTo-PesterShardProcessState $cleanup $exitCode $reason $quota $naturalExit $cancelled
-            } catch { $status='cleanup-failed'; $failure=ConvertTo-PesterShardSanitizedDiagnosticText ([string]$_.Exception.Message) }
-            try { $lease.Dispose() } catch { $status='cleanup-failed'; $failure='Process lease disposal failed.' }
+            } catch { $status='cleanup-failed'; $failure += ' stop-owned-process: ' + (Format-PesterShardException $_.Exception) }
+            try { $lease.Dispose() } catch { $status='cleanup-failed'; $failure += ' dispose-process-lease: ' + (Format-PesterShardException $_.Exception) }
         }
-        for ($i=$guards.Count-1;$i -ge 0;$i--) { $guards[$i].Dispose() }
+        for ($i=$guards.Count-1;$i -ge 0;$i--) {
+            try { $guards[$i].Dispose() }
+            catch { $status='cleanup-failed'; $failure += ' dispose-input-lease: ' + (Format-PesterShardException $_.Exception) }
+        }
+        if ($status -ceq 'cleanup-failed' -and [string]::IsNullOrWhiteSpace($failure)) {
+            $failure = 'Process cleanup unconfirmed: ' + (ConvertTo-PesterShardSanitizedDiagnosticText ([string]$cleanup.Uncertainty))
+            $failure += '; cleanedUp=' + $cleanup.CleanedUp + '; captureReadersStopped=' + $cleanup.CaptureReadersStopped + '; captureResourcesClosed=' + $cleanup.CaptureResourcesClosed
+        }
         if ($failure.Length -gt 4096) { $failure=$failure.Substring(0,4096) }
         $diagnostic = [ordered]@{
             schemaVersion=1; status=$status; exitCode=$exitCode; resultPath=$ResultPath; stdoutPath=$StdoutPath; stderrPath=$StderrPath
@@ -283,7 +329,7 @@ function Assert-PesterShardPathAncestorsNoReparse {
         [Parameter(Mandatory = $true)][string] $Context
     )
 
-    $fullPath = [IO.Path]::GetFullPath($Path)
+    $fullPath = Resolve-PesterShardFileSystemPath $Path
     $existingPath = $fullPath
     while (-not (Test-Path -LiteralPath $existingPath)) {
         $parent = [IO.Path]::GetDirectoryName($existingPath)
@@ -947,9 +993,9 @@ function Resolve-PesterShardSummaryOutputPath {
             }
         }
 
-        $summaryFullPath = [IO.Path]::GetFullPath($SummaryOutputPath)
-        $evidenceFullPath = [IO.Path]::GetFullPath($EvidenceRoot)
-        $testFullPath = [IO.Path]::GetFullPath($TestRoot)
+        $summaryFullPath = Resolve-PesterShardFileSystemPath $SummaryOutputPath
+        $evidenceFullPath = Resolve-PesterShardFileSystemPath $EvidenceRoot
+        $testFullPath = Resolve-PesterShardFileSystemPath $TestRoot
         if (-not [string]::Equals([IO.Path]::GetExtension($summaryFullPath), '.json', [StringComparison]::OrdinalIgnoreCase)) {
             throw 'summary destination must use the .json extension.'
         }
@@ -1051,15 +1097,15 @@ try {
 Import-PesterShardRuntime $PSScriptRoot $runtimeGuards
 Open-PesterShardInput $PSCommandPath $runtimeGuards | Out-Null
 $script:PesterShardCapabilities = Get-PlatformCapabilities -Required @('directory-lease','file-lease','file-identity','owned-process','process-cleanup','process-environment')
-$repositoryRoot = (Get-Location).Path
-$resolvedTestRoot = [IO.Path]::GetFullPath($TestRoot)
+$repositoryRoot = Resolve-PesterShardFileSystemPath '.'
+$resolvedTestRoot = Resolve-PesterShardFileSystemPath $TestRoot
 if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) { $EvidenceRoot = $env:RUNNER_TEMP }
 if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) { $EvidenceRoot = Join-Path $repositoryRoot '.syp154-pester-evidence' }
-$EvidenceRoot = [IO.Path]::GetFullPath($EvidenceRoot)
+$EvidenceRoot = Resolve-PesterShardFileSystemPath $EvidenceRoot
 $runtimeGuards.Add((Open-PesterShardDirectory $repositoryRoot))
 $runtimeGuards.Add((Open-PesterShardDirectory $resolvedTestRoot))
 $runtimeGuards.Add((Open-PesterShardDirectory $EvidenceRoot -Create))
-$PesterModulePath = [IO.Path]::GetFullPath($PesterModulePath)
+$PesterModulePath = Resolve-PesterShardFileSystemPath $PesterModulePath
 $moduleRoot = [IO.Path]::GetDirectoryName($PesterModulePath)
 $runtimeGuards.Add((Open-PesterShardDirectory $moduleRoot))
 # The caller supplies trusted Pester fixtures. Protect the complete physical module
@@ -1108,7 +1154,7 @@ Write-Host "Pester shard plan: full=$($shards.Count) partition=$ShardPartitionIn
 $childPowerShell = [IO.Path]::GetFullPath([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)
 $childScript = @(
     '$ErrorActionPreference = ''Stop'''
-    $(foreach ($name in @('Get-PesterShardCanonicalHash','Import-PesterShardRuntime','Test-PesterShardReparseItem','Assert-PesterShardPathAncestorsNoReparse','Open-PesterShardDirectory','Open-PesterShardInput','Write-PesterShardJson','Write-PesterShardBytes','ConvertTo-PesterShardSanitizedDiagnosticText')) { 'function '+$name+' {'; (Get-Command $name -CommandType Function).Definition; '}' })
+    $(foreach ($name in @('Get-PesterShardCanonicalHash','Import-PesterShardRuntime','Resolve-PesterShardFileSystemPath','Test-PesterShardReparseItem','Assert-PesterShardPathAncestorsNoReparse','Open-PesterShardDirectory','Open-PesterShardInput','Write-PesterShardJson','Write-PesterShardBytes','ConvertTo-PesterShardSanitizedDiagnosticText')) { 'function '+$name+' {'; (Get-Command $name -CommandType Function).Definition; '}' })
     '$childGuards = [Collections.Generic.List[IDisposable]]::new()'
     'Import-PesterShardRuntime $env:SYP154_PESTER_RUNTIME_ROOT $childGuards'
     'function Remove-PesterShardTerminalControlSequences {'

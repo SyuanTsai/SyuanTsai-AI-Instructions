@@ -377,8 +377,10 @@ catch {
         }
         function Get-P02AChildProcessDiagnostics {
             param([Parameter(Mandatory = $true)] $Fixture)
+            foreach ($name in @('Remove-PesterShardTerminalControlSequences','ConvertTo-PesterShardSanitizedDiagnosticText')) {
+                . (Get-P02AExecutorFunction $name)
+            }
             $files = @(Get-P02AProcessEvidenceFiles -Fixture $Fixture | Sort-Object Name | Select-Object -First 4)
-            if ($files.Count -eq 0) { return '<no child process evidence>' }
             $details = @()
             foreach ($file in $files) {
                 try {
@@ -395,15 +397,22 @@ catch {
                         cleanedUp = if ($evidence.PSObject.Properties.Name -contains 'cleanedUp') { $evidence.cleanedUp } else { $null }
                         outputQuotaExceeded = if ($evidence.PSObject.Properties.Name -contains 'outputQuotaExceeded') { $evidence.outputQuotaExceeded } else { $null }
                         failureSummary = $failureSummary
+                        error = ConvertTo-PesterShardSanitizedDiagnosticText ([string]$evidence.error)
                         stdoutPath = $stdoutPath
                         stderrPath = $stderrPath
-                        stdout = Get-P02AFilePreview -Path $stdoutPath
-                        stderr = Get-P02AFilePreview -Path $stderrPath
+                        stdout = ConvertTo-PesterShardSanitizedDiagnosticText (Get-P02AFilePreview -Path $stdoutPath)
+                        stderr = ConvertTo-PesterShardSanitizedDiagnosticText (Get-P02AFilePreview -Path $stderrPath)
                     }
                 }
                 catch {
                     $details += [pscustomobject][ordered]@{ evidencePath = $file.FullName; readError = $_.Exception.Message }
                 }
+            }
+            $details += [pscustomobject][ordered]@{
+                source = 'supervisor'
+                message = if ($files.Count -eq 0) { '<no child process evidence>' } else { 'outer adapter streams' }
+                stdout = ConvertTo-PesterShardSanitizedDiagnosticText (Get-P02AFilePreview (Join-Path $Fixture.Root 'outer.stdout.bin'))
+                stderr = ConvertTo-PesterShardSanitizedDiagnosticText (Get-P02AFilePreview (Join-Path $Fixture.Root 'outer.stderr.bin'))
             }
             $json = ConvertTo-Json -InputObject $details -Depth 8 -Compress
             if ($json.Length -gt 14000) { return $json.Substring(0, 14000) + '<truncated>' }
@@ -415,7 +424,7 @@ catch {
                 $actualText = if ($null -eq $Actual) { '<null>' } else { [string]$Actual }
                 $expectedText = if ($null -eq $Expected) { '<null>' } else { [string]$Expected }
                 $diagnostics = Get-P02AChildProcessDiagnostics -Fixture $Fixture
-                throw "$Message Expected='$expectedText' Actual='$actualText'. Child status, exit, cleanup and raw stream previews: $diagnostics"
+                throw "$Message Expected='$expectedText' Actual='$actualText'. Child status, error, cleanup and sanitized stream previews: $diagnostics"
             }
         }
         function Assert-P02ARejectedBeforeChild {
@@ -488,12 +497,40 @@ catch {
                 if (-not $threw) { throw "Case '$($case.Name)' must be rejected." }
             }
         }
+
+        # Scenario: PowerShell cmdlets add path/JSON values to the allowlisted child environment.
+        # Purpose: Match P3's CLR IDictionary boundary, which rejects PSObject-wrapped strings.
+        It 'UnitT25_environment_values_are_native_strings_at_the_P3_boundary' {
+            . (Get-P02AExecutorFunction 'Get-PesterShardChildEnvironment')
+            if ($null -eq ('P02AEnvironmentContract' -as [type])) {
+                Add-Type -TypeDefinition @'
+using System;
+using System.Collections;
+public static class P02AEnvironmentContract {
+    public static string InvalidEntry(IDictionary environment) {
+        foreach (DictionaryEntry entry in environment) {
+            if (!(entry.Key is string) || !(entry.Value is string))
+                return entry.Key + ": expected CLR string";
+        }
+        return "";
+    }
+}
+'@
+            }
+            $environment=Get-PesterShardChildEnvironment
+            [P02AEnvironmentContract]::InvalidEntry($environment) | Should Be ''
+            $environment['SYP154_PESTER_SHARD_PATHS']=ConvertTo-Json -InputObject @('selected.Tests.ps1') -Compress
+            $environment['SYP154_PESTER_RESULT_PATH']=Join-Path $script:ReportRunRoot 'result.json'
+            [P02AEnvironmentContract]::InvalidEntry($environment) | Should Be ''
+            $environment['SYP154_PESTER_SHARD_PATHS'] | Should Be '["selected.Tests.ps1"]'
+        }
     }
 
     Context 'Path ancestor validation' {
         # Scenario: A real existing test file is reached through a platform-native directory link.
         # Purpose: Reject its reparse parent while accepting an ordinary file and a missing target below a safe directory.
         It 'UnitT30_rejects_reparse_parent_of_existing_file_and_preserves_safe_paths' {
+            . (Get-P02AExecutorFunction 'Resolve-PesterShardFileSystemPath')
             $reparseCheckScript = Get-P02AExecutorFunction -Name 'Test-PesterShardReparseItem'
             . $reparseCheckScript
             $pathGuardScript = Get-P02AExecutorFunction -Name 'Assert-PesterShardPathAncestorsNoReparse'
@@ -537,6 +574,52 @@ catch {
                 }
             }
         }
+
+        # Scenario: PowerShell's current location differs from the process working directory.
+        # Purpose: Resolve relative inputs and summary containment against the caller's filesystem location.
+        It 'UnitT35_resolves_relative_inputs_from_PowerShell_location' {
+            foreach ($name in @('Resolve-PesterShardFileSystemPath','Test-PesterShardReparseItem','Assert-PesterShardPathAncestorsNoReparse','Resolve-PesterShardSummaryOutputPath')) {
+                . (Get-P02AExecutorFunction $name)
+            }
+            $fixture=New-P02AFixture
+            $processDirectory=[Environment]::CurrentDirectory
+            Push-Location -LiteralPath $fixture.Root
+            try {
+                [Environment]::CurrentDirectory | Should Be $processDirectory
+                Resolve-PesterShardFileSystemPath './tests' | Should Be $fixture.TestRoot
+                Resolve-PesterShardSummaryOutputPath './e/summary.json' './e' './tests' | Should Be $fixture.SummaryPath
+                { Resolve-PesterShardFileSystemPath 'Env:PATH' } | Should Throw 'filesystem'
+            } finally { Pop-Location }
+        }
+
+        # Scenario: A startup exception wraps another exception containing sensitive diagnostic data.
+        # Purpose: Preserve exception types and inner causes while bounding and sanitizing output.
+        It 'UnitT37_formats_bounded_sanitized_exception_chains' {
+            foreach ($name in @('Remove-PesterShardTerminalControlSequences','ConvertTo-PesterShardSanitizedDiagnosticText','Format-PesterShardException')) {
+                . (Get-P02AExecutorFunction $name)
+            }
+            $inner=[IO.IOException]::new("missing-working-directory`nsecret=diagnostic-sentinel")
+            $failure=[InvalidOperationException]::new('start rejected',$inner)
+            $text=Format-PesterShardException $failure
+            $text | Should Match 'System.InvalidOperationException: start rejected'
+            $text | Should Match 'System.IO.IOException: missing-working-directory'
+            $text | Should Not Match 'diagnostic-sentinel'
+            $text.Length | Should BeLessThan 4097
+            (Format-PesterShardException ([Exception]::new(('x' * 10000)))).Length | Should BeLessThan 4097
+            Format-PesterShardException ([Exception]::new(('x' * 10000),$inner)) | Should Match 'System.IO.IOException: missing-working-directory'
+        }
+
+        # Scenario: A probe fails before it can write a process receipt, but supervisor stderr has a cause.
+        # Purpose: Keep early failures diagnosable without exposing sensitive stderr content.
+        It 'UnitT39_reports_supervisor_failure_without_child_evidence' {
+            $fixture=New-P02AFixture
+            Write-P02AText (Join-Path $fixture.Root 'outer.stderr.bin') "Environment must contain explicit string values.`nsecret=diagnostic-sentinel"
+            $text=Get-P02AChildProcessDiagnostics $fixture
+            $diagnostics=$text | ConvertFrom-Json
+            $diagnostics[0].message | Should Be '<no child process evidence>'
+            $diagnostics[0].stderr | Should Match 'Environment must contain explicit string values'
+            $text | Should Not Match 'diagnostic-sentinel'
+        }
     }
 
     Context 'Actual Pester adapter' {
@@ -572,6 +655,50 @@ catch {
                 $run=Invoke-P02AHiddenAdapter $invocation $fixture
                 Assert-P02ARejectedBeforeChild $run $fixture -ExpectedErrorPattern 'INVALID\|Pester selection'
             }
+        }
+
+        # Scenario: A real P2 directory open fails before the child can start.
+        # Purpose: Retain a sanitized cause in process evidence, the thrown error, and adapter diagnostics.
+        It 'InterT08_reports_start_failure_before_child_launch' {
+            $fixture=New-P02AFixture
+            $invocation=New-P02AAdapterInvocation $fixture -SelectedNames @('selected.Tests.ps1')
+            $probe=@'
+param([string]$ConfigPath)
+$ErrorActionPreference='Stop'
+try {
+    $config=Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+    $tokens=$null; $errors=$null
+    $ast=[Management.Automation.Language.Parser]::ParseFile($config.ExecutorPath,[ref]$tokens,[ref]$errors)
+    if ($errors.Count) { throw 'Executor parse failed.' }
+    foreach ($statement in $ast.EndBlock.Statements) {
+        if ($statement -is [Management.Automation.Language.FunctionDefinitionAst]) { . ([scriptblock]::Create($statement.Extent.Text)) }
+    }
+    $guards=[Collections.Generic.List[IDisposable]]::new()
+    try {
+        Import-PesterShardRuntime (Split-Path -Parent $config.ExecutorPath) $guards
+        $script:PesterShardChildOutputQuotaCharacters=1048576
+        $script:PesterShardCapabilities=$null
+        Invoke-PesterShardProcess -Paths @() -ModulePath $config.PesterModulePath -Version $config.PesterVersion -ChildPowerShell ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) -EncodedChildScript '' -ResultPath (Join-Path $config.EvidenceRoot 'result.json') -ProcessEvidencePath (Join-Path $config.EvidenceRoot 'pester-shard-start-failure.process.json') -StdoutPath (Join-Path $config.EvidenceRoot 'out') -StderrPath (Join-Path $config.EvidenceRoot 'err') -TimeoutSeconds 30 -WorkingDirectory (Join-Path $config.EvidenceRoot 'missing-working-directory') -Environment (Get-PesterShardChildEnvironment)
+    } finally { for ($i=$guards.Count-1;$i -ge 0;$i--) { $guards[$i].Dispose() } }
+    exit 0
+} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
+'@
+            Write-P02AText $invocation.WrapperPath $probe
+            $run=Invoke-P02AHiddenAdapter $invocation $fixture
+            $run.TimedOut | Should Be $false
+            $run.ExitCode | Should Not Be 0
+            $files=@(Get-P02AProcessEvidenceFiles $fixture)
+            $files.Count | Should Be 1
+            $evidence=Get-Content -LiteralPath $files[0].FullName -Raw | ConvertFrom-Json
+            $evidence.status | Should Be 'start-failed'
+            $evidence.processStarted | Should Be $false
+            $evidence.error | Should Not BeNullOrEmpty
+            $evidence.error | Should Match 'open-working-directory.*Exception'
+            $evidence.error.Length | Should BeLessThan 4097
+            $run.StderrText | Should Match ([regex]::Escape($evidence.error))
+            $diagnostics=Get-P02AChildProcessDiagnostics $fixture | ConvertFrom-Json
+            $diagnostics[0].error | Should Be $evidence.error
+            Test-Path -LiteralPath $fixture.SummaryPath | Should Be $false
         }
 
         if ($IsWindows) {
@@ -614,7 +741,7 @@ try {
         $cleanup=Stop-PlatformOwnedProcess -Lease $baseline -ExpectedStartIdentity $baseline.StartIdentity -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(5))
         if (-not $cleanup.CleanedUp -or $baseline.ExitCode -ne 17 -or (Test-Path -LiteralPath $result)) { throw 'Restricted baseline did not block the unsigned script with confirmed cleanup.' }
         $baseline.Dispose(); $baseline=$null
-        $receipt=Invoke-PesterShardProcess -Paths @($child) -ModulePath $config.PesterModulePath -Version $config.PesterVersion -ChildPowerShell ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) -ChildScriptPath $child -ResultPath $result -ProcessEvidencePath (Join-Path $root 'policy.process.json') -StdoutPath (Join-Path $root 'policy.out') -StderrPath (Join-Path $root 'policy.err') -TimeoutSeconds 30 -WorkingDirectory $root -Environment $environment
+        $receipt=Invoke-PesterShardProcess -Paths @($child) -ModulePath $config.PesterModulePath -Version $config.PesterVersion -ChildPowerShell ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) -ChildScriptPath $child -ResultPath $result -ProcessEvidencePath (Join-Path $config.EvidenceRoot 'pester-shard-policy.process.json') -StdoutPath (Join-Path $root 'policy.out') -StderrPath (Join-Path $root 'policy.err') -TimeoutSeconds 30 -WorkingDirectory $root -Environment $environment
         if ($receipt.status -cne 'completed' -or $receipt.exitCode -ne 0 -or -not $receipt.cleanedUp) { throw 'Explicit Windows policy launch did not complete.' }
         if ((Get-Content -LiteralPath $result -Raw | ConvertFrom-Json).policy -cne 'Bypass') { throw 'Child did not receive explicit Bypass policy.' }
     } finally {
@@ -700,6 +827,39 @@ try {
             Assert-P02ATrue ($processEvidence.cleanup.cleanedUp -is [bool] -and $processEvidence.cleanup.cleanedUp) 'Process evidence must confirm owned process cleanup.'
             Assert-P02AEqual $processEvidence.outputQuotaExceeded $false 'Process evidence must confirm no output quota overrun.'
             Assert-P02ATrue ($run.StdoutText -match 'Aggregate - Total: 1 Passed: 1 Failed: 0') 'The adapter must preserve the existing aggregate stdout.'
+        }
+
+        # Scenario: The adapter is invoked after Push-Location with default ./tests and relative evidence/module inputs.
+        # Purpose: Resolve all caller paths at the PowerShell location rather than the unchanged process cwd.
+        It 'InterT12_resolves_default_tests_and_relative_inputs_after_location_change' {
+            $fixture=New-P02AFixture; Write-P02ASelectedFixture $fixture
+            $invocation=New-P02AAdapterInvocation $fixture -SelectedNames @('selected.Tests.ps1')
+            $moduleRoot=Join-Path $fixture.Root 'Pester'
+            Copy-Item -LiteralPath (Split-Path -Parent $invocation.Runtime.Manifest) -Destination $moduleRoot -Recurse -Force
+            $config=Get-Content -LiteralPath $invocation.ConfigPath -Raw | ConvertFrom-Json
+            $config.PesterModulePath='./Pester/Pester.psd1'
+            $config.EvidenceRoot='./e'
+            $config.SummaryOutputPath='./e/summary.json'
+            Write-P02AText $invocation.ConfigPath ($config | ConvertTo-Json -Depth 8)
+            $wrapper=[IO.File]::ReadAllText($invocation.WrapperPath)
+            $invoke='& ([string]$config.ExecutorPath) @parameters'
+            $replacement=@'
+$parameters.Remove('TestRoot')
+$processDirectory=[Environment]::CurrentDirectory
+Push-Location -LiteralPath (Split-Path -Parent $ConfigPath)
+try {
+    if ([Environment]::CurrentDirectory -cne $processDirectory) { throw 'Fixture unexpectedly changed process cwd.' }
+    & ([string]$config.ExecutorPath) @parameters
+} finally { Pop-Location }
+'@
+            Write-P02AText $invocation.WrapperPath ($wrapper.Replace($invoke,$replacement))
+            $run=Invoke-P02AHiddenAdapter $invocation $fixture
+            Assert-P02AExpectedWithChildDiagnostics $run.ExitCode 0 $fixture 'Relative inputs must resolve at the caller location.'
+            $summary=Get-Content -LiteralPath $fixture.SummaryPath -Raw | ConvertFrom-Json
+            $summary.testFiles[0] | Should Be (Join-Path $fixture.TestRoot 'selected.Tests.ps1')
+            $summary.counts.PassedCount | Should Be 1
+            Test-Path -LiteralPath $fixture.SelectedWitness | Should Be $true
+            Test-Path -LiteralPath $fixture.UnselectedWitness | Should Be $false
         }
 
         # Scenario: A real selected test fails or a discovered file contains no test cases.
