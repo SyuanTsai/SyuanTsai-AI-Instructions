@@ -1162,7 +1162,7 @@ public class StartupHook {
             $receipt.environmentAllowlist | Should Contain 'PSModulePath'
             @($receipt.environmentAllowlist | Where-Object { $_ -cmatch '^(LD_|DYLD_|DOTNET_|COREHOST_)' }).Count | Should Be 0
             $expectedAllowlist='PATH,PSModulePath,HOME,USERPROFILE,XDG_CONFIG_HOME,XDG_DATA_HOME,XDG_CACHE_HOME,XDG_STATE_HOME,XDG_RUNTIME_DIR,TMP,TEMP'
-            $expectedAllowlist+=if($IsWindows){',SystemRoot,APPDATA,LOCALAPPDATA'}elseif($IsMacOS){',TMPDIR,LANG'}else{',LANG'}
+            $expectedAllowlist+=if($IsWindows){',SystemRoot,APPDATA,LOCALAPPDATA'}else{',TMPDIR,LANG'}
             (@($receipt.environmentAllowlist) -join ',') | Should Be $expectedAllowlist
             (Get-FileHash $fixture.Path -Algorithm SHA256).Hash.ToLowerInvariant() | Should Not Be $approvedHash
             Test-Path -LiteralPath ($fixture.Path+'.original') | Should Be $true
@@ -1638,7 +1638,7 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
     It 'InterT51_preserves_full_process_output_and_isolates_each_profile' {
         $executable=Join-Path $PSHOME $(if($IsWindows){'pwsh.exe'}else{'pwsh'})
         $environment=& $script:P4Preparation.ExportedCommands['New-PlatformVerifiedProcessEnvironment'] $executable $null $script:P4Platform
-        $probe='[pscustomobject]@{version=$PSVersionTable.PSVersion.ToString();auto=[string]$PSModuleAutoLoadingPreference;modules=$env:PSModulePath;utility=(Get-Module Microsoft.PowerShell.Utility).Path;home=$env:HOME;user=$env:USERPROFILE;config=$env:XDG_CONFIG_HOME;data=$env:XDG_DATA_HOME;cache=$env:XDG_CACHE_HOME;state=$env:XDG_STATE_HOME;run=$env:XDG_RUNTIME_DIR;temp=$env:TEMP;exists=[IO.Directory]::Exists($env:HOME);mode=if($IsWindows){0}else{[int][IO.File]::GetUnixFileMode($env:HOME)}}|ConvertTo-Json -Compress'
+        $probe='$temporaryFile=[IO.Path]::GetTempFileName();[pscustomobject]@{version=$PSVersionTable.PSVersion.ToString();auto=[string]$PSModuleAutoLoadingPreference;modules=$env:PSModulePath;utility=(Get-Module Microsoft.PowerShell.Utility).Path;home=$env:HOME;user=$env:USERPROFILE;config=$env:XDG_CONFIG_HOME;data=$env:XDG_DATA_HOME;cache=$env:XDG_CACHE_HOME;state=$env:XDG_STATE_HOME;run=$env:XDG_RUNTIME_DIR;temp=[IO.Path]::GetTempPath().TrimEnd([IO.Path]::DirectorySeparatorChar);temporaryFile=$temporaryFile;exists=[IO.Directory]::Exists($env:HOME);mode=if($IsWindows){0}else{[int][IO.File]::GetUnixFileMode($env:HOME)}}|ConvertTo-Json -Compress'
         $profiles=@()
         foreach($attempt in 1..2) {
             $output=& $script:P4Preparation.ExportedCommands['Start-PlatformVerifiedProcess'] $executable $probe $environment $script:P4Platform
@@ -1651,6 +1651,8 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
             if(-not $IsWindows){$evidence.mode | Should Be 448}
             $evidence.home | Should Not Be ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile))
             foreach($property in @('user','config','data','cache','state','run','temp')){$evidence.$property | Should Be $evidence.home}
+            [IO.Path]::GetDirectoryName($evidence.temporaryFile) | Should Be $evidence.home
+            Test-Path -LiteralPath $evidence.temporaryFile | Should Be $false
             Test-Path -LiteralPath $evidence.home | Should Be $false
             $profiles+=$evidence.home
         }
@@ -1662,6 +1664,7 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
             try { & $script:P4Preparation.ExportedCommands['Start-PlatformVerifiedProcess'] $executable $probe $environment $script:P4Platform | Out-Null } catch { $caught=$_ }
             $caught.Exception.GetType().Name | Should Be 'PlatformVerificationException'
             $caught.Exception.Capability | Should Be 'powershell-runtime'
+            if($badProbe -like 'throw*'){$caught.Exception.Message | Should Match 'stderr:.*fixture failure'}
             Test-Path -LiteralPath ([IO.File]::ReadAllText($profileEvidence)) | Should Be $false
         }
     }
@@ -1915,7 +1918,7 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
     }
     }
 
-    # Scenario: A Windows host policy is Restricted and the parent overrides it with process-scoped Bypass.
+    # Scenario: A Windows parent switches from Restricted to process-scoped Bypass before launching the child.
     # Purpose: Give the closure-verified child the same process-scoped Bypass so its verified Pester scripts can load.
     if ($p4IsWindows -and $p4Pester4101ForRegistration.Count -gt 0) {
     It 'InterT63_imports_pester_with_child_process_execution_policy_bypass' {
@@ -1924,7 +1927,8 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
         $runtime=Get-P4KnownRuntimeReceipt
         $pesterClosure=& $script:P4Preparation {param($root) Get-PlatformRuntimeClosure $root 'windows'} $pester.ModuleBase
         $escapedManifest=$pester.Path.Replace("'","''")
-        $probe="`$module=Import-Module -Name '$escapedManifest' -Force -PassThru -ErrorAction Stop;[pscustomobject]@{policy=(Get-ExecutionPolicy -Scope Process).ToString();version=`$module.Version.ToString()}|ConvertTo-Json -Compress"
+        $securityManifest=(Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1').Replace("'","''")
+        $probe="Import-Module -Name '$securityManifest' -ErrorAction Stop;`$module=Import-Module -Name '$escapedManifest' -Force -PassThru -ErrorAction Stop -WarningAction SilentlyContinue;[pscustomobject]@{policy=(Get-ExecutionPolicy -Scope Process).ToString();version=`$module.Version.ToString()}|ConvertTo-Json -Compress"
         $previousPolicy=Get-ExecutionPolicy -Scope Process
         try {
             Set-ExecutionPolicy -Scope Process -ExecutionPolicy Restricted -Force
@@ -2017,6 +2021,62 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
                 @([IO.File]::ReadAllLines($fixture.Marker)).Count | Should Be 1
             }
         } finally { $lease.Dispose() }
+    }
+    }
+
+    # Scenario: A launched probe hangs after recording its PID and private profile.
+    # Purpose: Bound runtime preparation, kill the owned process and reclaim its private files on timeout.
+    It 'InterT65_bounds_execution_and_terminates_the_owned_probe' {
+        $executable=Join-Path $PSHOME $(if($IsWindows){'pwsh.exe'}else{'pwsh'})
+        $environment=& $script:P4Preparation.ExportedCommands['New-PlatformVerifiedProcessEnvironment'] $executable $null $script:P4Platform
+        $marker=Join-Path $TestDrive 'hung-probe.txt'
+        $probe="[IO.File]::WriteAllText('$($marker.Replace("'","''"))',([string]`$PID+[Environment]::NewLine+`$env:HOME));[Threading.Thread]::Sleep(60000)"
+        $timer=[Diagnostics.Stopwatch]::StartNew();$caught=$null
+        try { & $script:P4Preparation.ExportedCommands['Start-PlatformVerifiedProcess'] $executable $probe $environment $script:P4Platform -TimeoutMilliseconds 5000 | Out-Null } catch {$caught=$_}
+        $timer.Elapsed.TotalSeconds | Should BeLessThan 15
+        $caught.Exception.GetType().Name | Should Be 'PlatformVerificationException'
+        $caught.Exception.Capability | Should Be 'powershell-runtime'
+        $caught.Exception.Message | Should Match 'execution deadline exceeded'
+        $evidence=[IO.File]::ReadAllLines($marker)
+        $owned=Get-Process -Id ([int]$evidence[0]) -ErrorAction SilentlyContinue
+        try { ($null -eq $owned -or $owned.HasExited) | Should Be $true } finally {if($null -ne $owned){$owned.Dispose()}}
+        Test-Path -LiteralPath $evidence[1] | Should Be $false
+    }
+
+    # Scenario: A Unix probe exits while its own descendant retains stdout/stderr pipes.
+    # Purpose: Apply the same deadline to output draining instead of waiting indefinitely for EOF.
+    if ($p4IsUnix) {
+    It 'InterT66_bounds_output_when_a_descendant_retains_the_pipes' {
+        $executable=Join-Path $PSHOME 'pwsh'
+        $environment=& $script:P4Preparation.ExportedCommands['New-PlatformVerifiedProcessEnvironment'] $executable $null $script:P4Platform
+        $marker=Join-Path $TestDrive 'pipe-descendant.txt'
+        $probe=@'
+$start=[Diagnostics.ProcessStartInfo]::new('/bin/sleep')
+$start.UseShellExecute=$false
+$start.ArgumentList.Add('60')
+$child=[Diagnostics.Process]::Start($start)
+[IO.File]::WriteAllText('__MARKER__',([string]$child.Id+[Environment]::NewLine+$env:HOME))
+$child.Dispose()
+'complete'
+'@
+        $probe=$probe.Replace('__MARKER__',$marker.Replace("'","''"))
+        $timer=[Diagnostics.Stopwatch]::StartNew();$caught=$null
+        try {
+            try { & $script:P4Preparation.ExportedCommands['Start-PlatformVerifiedProcess'] $executable $probe $environment $script:P4Platform -TimeoutMilliseconds 5000 | Out-Null } catch {$caught=$_}
+            $timer.Elapsed.TotalSeconds | Should BeLessThan 15
+            $caught.Exception.GetType().Name | Should Be 'PlatformVerificationException'
+            $caught.Exception.Capability | Should Be 'powershell-runtime'
+            $caught.Exception.Message | Should Match 'output deadline exceeded'
+            $evidence=[IO.File]::ReadAllLines($marker)
+            Test-Path -LiteralPath $evidence[1] | Should Be $false
+        } finally {
+            # The direct child has exited; clean up the exact descendant created
+            # by this fixture (P3 process-group ownership is outside this boundary).
+            if([IO.File]::Exists($marker)){
+                $descendant=Get-Process -Id ([int][IO.File]::ReadAllLines($marker)[0]) -ErrorAction SilentlyContinue
+                if($null -ne $descendant){try{if(-not $descendant.HasExited){$descendant.Kill();[void]$descendant.WaitForExit(2000)}}finally{$descendant.Dispose()}}
+            }
+        }
     }
     }
 

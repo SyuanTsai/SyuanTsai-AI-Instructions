@@ -40,7 +40,7 @@ function New-PlatformVerifiedProcessEnvironment {
         $profileNames+=@('APPDATA','LOCALAPPDATA')
         $values['APPDATA']='';$values['LOCALAPPDATA']=''
     } else {
-        if($Platform -ceq 'macos') { $profileNames+=@('TMPDIR');$values['TMPDIR']='' }
+        $profileNames+=@('TMPDIR');$values['TMPDIR']=''
         $values['LANG']=$(if($Platform -ceq 'macos'){'en_US.UTF-8'}else{'C.UTF-8'})
     }
     return [pscustomobject]@{Values=$values;Names=@($values.Keys);ProfileNames=$profileNames}
@@ -572,8 +572,20 @@ function Assert-PlatformPesterSnapshotInventory {
 # Build the child from an empty environment, then add only the fixed allowlist.
 # In particular no caller-controlled loader, host, or module-search setting is
 # copied into the verified runtime process.
+function Get-PlatformProcessStderrSummary {
+    param($Task)
+    if($null -eq $Task -or $Task.Status -ne [Threading.Tasks.TaskStatus]::RanToCompletion){return '[stderr incomplete]'}
+    $text=[string]$Task.GetAwaiter().GetResult()
+    $text=[regex]::Replace($text,'\x1b\[[0-?]*[ -/]*[@-~]','')
+    $text=[regex]::Replace($text,'[\x00-\x20\x7f]+',' ').Trim()
+    if($text.Length -eq 0){return '[empty]'}
+    if($text.Length -gt 2048){return $text.Substring(0,2048)+' [truncated]'}
+    return $text
+}
+
 function Start-PlatformVerifiedProcess {
-    param([string]$Executable,[string]$Probe,$Environment,[string]$Platform)
+    param([string]$Executable,[string]$Probe,$Environment,[string]$Platform,
+        [ValidateRange(1,300000)][int]$TimeoutMilliseconds=30000)
     # PowerShell adds default module paths during startup. Reset them inside the
     # child before resolving any non-Core command; never rely on env alone.
     $modulePath=([string]$Environment.Values['PSModulePath']).Replace("'","''")
@@ -601,7 +613,9 @@ function Start-PlatformVerifiedProcess {
     foreach($argument in $arguments) { [void]$startInfo.ArgumentList.Add($argument) }
     $process=[Diagnostics.Process]::new(); $process.StartInfo=$startInfo
     $profileRoot=[IO.Path]::GetFullPath([IO.Path]::Combine([IO.Path]::GetTempPath(),('platform-verified-profile-'+[guid]::NewGuid().ToString('N'))))
-    $profileCreated=$false;$profileGuard=$null
+    $profileCreated=$false;$profileGuard=$null;$started=$false;$failure=$null
+    $stdoutTask=$null;$stderrTask=$null
+    $timer=[Diagnostics.Stopwatch]::StartNew()
     try {
         if([IO.Directory]::Exists($profileRoot) -or [IO.File]::Exists($profileRoot)){throw 'Private process profile already exists.'}
         if($Platform -ceq 'windows') {
@@ -617,22 +631,49 @@ function Start-PlatformVerifiedProcess {
         foreach($name in $Environment.ProfileNames){$startInfo.EnvironmentVariables[[string]$name]=$profileRoot}
         $startInfo.WorkingDirectory=$profileRoot
         if(-not $process.Start()){throw 'The verified runtime process did not start.'}
+        $started=$true
         $stdoutTask=$process.StandardOutput.ReadToEndAsync(); $stderrTask=$process.StandardError.ReadToEndAsync()
-        $process.WaitForExit()
+        # Execution and pipe draining share one monotonic deadline. A descendant
+        # may retain a pipe even after the direct child exits.
+        $remaining=[Math]::Max(0,$TimeoutMilliseconds-[int]$timer.ElapsedMilliseconds)
+        if(-not $process.WaitForExit($remaining)){
+            throw "Verified runtime execution deadline exceeded ($TimeoutMilliseconds ms); stderr: $(Get-PlatformProcessStderrSummary $stderrTask)"
+        }
+        $remaining=[Math]::Max(0,$TimeoutMilliseconds-[int]$timer.ElapsedMilliseconds)
+        $reads=[Threading.Tasks.Task]::WhenAll([Threading.Tasks.Task[]]@($stdoutTask,$stderrTask))
+        if(-not $reads.Wait($remaining)){
+            throw "Verified runtime output deadline exceeded ($TimeoutMilliseconds ms); stderr: $(Get-PlatformProcessStderrSummary $stderrTask)"
+        }
         $stdout=$stdoutTask.GetAwaiter().GetResult().TrimEnd("`r","`n")
         $stderr=$stderrTask.GetAwaiter().GetResult()
         $output=@(if($stdout.Length -gt 0){$stdout -split "`r?`n"})
-        if($process.ExitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace($stderr) -or $output.Count -ne 1){throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform 'Verified runtime process failed.')}
+        if($process.ExitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace($stderr) -or $output.Count -ne 1){throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform "Verified runtime process failed (exit code $($process.ExitCode), stdout lines $($output.Count)); stderr: $(Get-PlatformProcessStderrSummary $stderrTask)")}
         return $output[0]
     } catch {
+        $failure=$_
         if($_.Exception -is [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]){throw}
         throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform $_.Exception.Message)
     } finally {
+        $shutdownError=$null
+        if($started){
+            try {
+                if(-not $process.HasExited){$process.Kill($true);[void]$process.WaitForExit(2000)}
+            } catch {$shutdownError=$_.Exception.Message}
+            try {
+                # Do not await incomplete reader tasks after the deadline.
+                $process.StandardOutput.BaseStream.Dispose()
+                $process.StandardError.BaseStream.Dispose()
+            } catch {$shutdownError=$_.Exception.Message}
+        }
         $process.Dispose()
         if($null -ne $profileGuard){$profileGuard.Dispose()}
         # Only the exact fresh profile owned by this launch is removed. .NET
         # recursive deletion unlinks reparse points rather than following them.
-        if($profileCreated){[IO.Directory]::Delete($profileRoot,$true)}
+        if($profileCreated){
+            try{[IO.Directory]::Delete($profileRoot,$true)}
+            catch{if($null -eq $failure){throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform ('Private profile cleanup failed: '+$_.Exception.Message))}}
+        }
+        if($null -eq $failure -and $null -ne $shutdownError){throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform ('Process cleanup failed: '+$shutdownError))}
     }
 }
 
