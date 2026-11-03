@@ -23,6 +23,32 @@ function Get-PlatformProtectionBoundary {
     return 'A1: archive/payload snapshot hashes and pre-execution revalidation; same-account uncooperative writers cannot be excluded between verification and use'
 }
 
+function New-PlatformVerifiedProcessEnvironment {
+    param([string]$Executable,$PesterClosure,[string]$Platform)
+    $runtimeRoot=[IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Executable))
+    $moduleRoots=[Collections.Generic.List[string]]::new()
+    $moduleRoots.Add([IO.Path]::GetFullPath((Join-Path $runtimeRoot 'Modules')))
+    if($null -ne $PesterClosure){$moduleRoots.Add([IO.Path]::GetFullPath([string]$PesterClosure.rootPath))}
+    $modulePath=$moduleRoots -join [IO.Path]::PathSeparator
+    $userProfile=[Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    $temporaryPath=[IO.Path]::GetTempPath().TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)
+    $values=[ordered]@{PATH=$runtimeRoot;PSModulePath=$modulePath}
+    if($Platform -ceq 'windows') {
+        $values['SystemRoot']=[Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
+        $values['USERPROFILE']=$userProfile
+        $values['HOME']=$userProfile
+        $values['TMP']=$temporaryPath
+        $values['TEMP']=$temporaryPath
+    } else {
+        $values['HOME']=$userProfile
+        $values['TMP']=$temporaryPath
+        $values['TEMP']=$temporaryPath
+        if($Platform -ceq 'macos') { $values['TMPDIR']=$temporaryPath }
+        $values['LANG']=$(if($Platform -ceq 'macos'){'en_US.UTF-8'}else{'C.UTF-8'})
+    }
+    return [pscustomobject]@{Values=$values;Names=@($values.Keys)}
+}
+
 function New-PlatformExpectedClosure {
     param([string]$Root,$Files)
     $ordered=[Collections.Generic.SortedDictionary[string,object]]::new([StringComparer]::Ordinal)
@@ -356,7 +382,8 @@ function Resolve-VerifiedPlatformPowerShell {
         [void](Test-PlatformPowerShellIdentity $executable $asset.Version $Platform $architecture $runtimeClosure)
         [void](Get-VerifiedPlatformLeasePath $DestinationLease $Platform)
         $executableHash=[string](@($runtimeClosure.files | Where-Object path -CEQ ([IO.Path]::GetFileName($executable)))[0].sha256)
-        return [pscustomobject][ordered]@{ apiVersion='1.0'; version=$asset.Version; assetName=$asset.Name; archiveSha256=$actualHash; executablePath=[IO.Path]::GetFullPath($executable); executableSha256=$executableHash; runtimeClosure=$runtimeClosure; protectionBoundary=(Get-PlatformProtectionBoundary $Platform); os=$Platform; architecture=$architecture }
+        $environment=New-PlatformVerifiedProcessEnvironment $executable $null $Platform
+        return [pscustomobject][ordered]@{ apiVersion='1.0'; version=$asset.Version; assetName=$asset.Name; archiveSha256=$actualHash; executablePath=[IO.Path]::GetFullPath($executable); executableSha256=$executableHash; runtimeClosure=$runtimeClosure; environmentAllowlist=$environment.Names; protectionBoundary=(Get-PlatformProtectionBoundary $Platform); os=$Platform; architecture=$architecture }
     }
     catch {
         if ($_.Exception -is [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]) { throw }
@@ -545,6 +572,33 @@ function Assert-PlatformPesterSnapshotInventory {
     } $Entries
 }
 
+# Build the child from an empty environment, then add only the fixed allowlist.
+# In particular no caller-controlled loader, host, or module-search setting is
+# copied into the verified runtime process.
+function Start-PlatformVerifiedProcess {
+    param([string]$Executable,[string]$Probe,$Environment,[string]$Platform)
+    $startInfo=[Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName=[IO.Path]::GetFullPath($Executable)
+    $startInfo.UseShellExecute=$false
+    $startInfo.CreateNoWindow=$true
+    $startInfo.RedirectStandardOutput=$true
+    $startInfo.RedirectStandardError=$true
+    $startInfo.EnvironmentVariables.Clear()
+    foreach($name in $Environment.Names) { $startInfo.EnvironmentVariables[[string]$name]=[string]$Environment.Values[$name] }
+    foreach($argument in @('-NoLogo','-NoProfile','-NonInteractive','-Command',$Probe)) { [void]$startInfo.ArgumentList.Add($argument) }
+    $process=[Diagnostics.Process]::new(); $process.StartInfo=$startInfo
+    try {
+        if(-not $process.Start()){throw 'The verified runtime process did not start.'}
+        $stdoutTask=$process.StandardOutput.ReadToEndAsync(); $stderrTask=$process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $stdout=$stdoutTask.GetAwaiter().GetResult().TrimEnd("`r","`n")
+        $stderr=$stderrTask.GetAwaiter().GetResult()
+        $output=if($stdout.Length -eq 0){@()}else{@($stdout -split "`r?`n")}
+        if($process.ExitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace($stderr) -or $output.Count -ne 1){throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform 'Verified runtime process failed.')}
+        return $output[0]
+    } finally { $process.Dispose() }
+}
+
 # All launches use this boundary. Windows callers already hold preparation guards
 # and this independently reacquires receipt guards for subsequent uses. On Unix,
 # checking both closures immediately before launch detects changes, not a hostile
@@ -560,11 +614,11 @@ function Invoke-PlatformVerifiedProcess {
         }
         Assert-PlatformRuntimeClosure $Executable $RuntimeClosure $Platform
         if ($null -ne $PesterClosure) { Assert-PlatformPesterClosure $PesterClosure.rootPath $PesterClosure $Platform }
-        $output=@(& $Executable -NoLogo -NoProfile -Command $Probe 2>&1)
-        if ($LASTEXITCODE -ne 0 -or $output.Count -ne 1) { throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform 'Verified runtime process failed.') }
+        $environment=New-PlatformVerifiedProcessEnvironment $Executable $PesterClosure $Platform
+        $output=Start-PlatformVerifiedProcess $Executable $Probe $environment $Platform
         Assert-PlatformRuntimeClosure $Executable $RuntimeClosure $Platform
         if ($null -ne $PesterClosure) { Assert-PlatformPesterClosure $PesterClosure.rootPath $PesterClosure $Platform }
-        return $output[0]
+        return $output
     } finally { Close-PlatformPreparationSession $moduleGuards; Close-PlatformPreparationSession $guards }
 }
 
@@ -665,7 +719,8 @@ function Initialize-VerifiedPlatformPester {
         [void](Test-PhysicalPlatformFile $targetRootModule $Platform 'pester-module')
         Assert-PlatformPesterImportIdentity $import $version $targetVersionRoot $Platform
         [void](Get-VerifiedPlatformLeasePath $DestinationLease $Platform)
-        return [pscustomobject][ordered]@{ apiVersion='1.0'; purpose=$purpose; version=$version; modulePath=[IO.Path]::GetFullPath($targetManifest); approvedPayloadSha256=$payloadHash; dependencyClosureSha256=[string]$closure.sha256; moduleClosure=$expectedPayload; protectionBoundary=(Get-PlatformProtectionBoundary $Platform); runtimePath=[string]$RuntimeReceipt.executablePath; os=$Platform; architecture=[string]$RuntimeReceipt.architecture }
+        $environment=New-PlatformVerifiedProcessEnvironment ([string]$RuntimeReceipt.executablePath) $expectedPayload $Platform
+        return [pscustomobject][ordered]@{ apiVersion='1.0'; purpose=$purpose; version=$version; modulePath=[IO.Path]::GetFullPath($targetManifest); approvedPayloadSha256=$payloadHash; dependencyClosureSha256=[string]$closure.sha256; moduleClosure=$expectedPayload; environmentAllowlist=$environment.Names; protectionBoundary=(Get-PlatformProtectionBoundary $Platform); runtimePath=[string]$RuntimeReceipt.executablePath; os=$Platform; architecture=[string]$RuntimeReceipt.architecture }
     }
     catch {
         if ($_.Exception -is [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]) { throw }

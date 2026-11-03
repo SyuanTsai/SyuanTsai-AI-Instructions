@@ -845,6 +845,12 @@ Describe 'Platform P4 verified PowerShell and Pester preparation' {
     $p4Pester4101ForRegistration = @(Get-Module -ListAvailable Pester |
         Where-Object { $_.Version -eq [version]'4.10.1' } |
         Select-Object -First 1)
+    $p4NativeCompilerForRegistration = if ($p4IsUnix) {
+        @(Get-Command clang,cc -CommandType Application -All -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.Source } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_ -PathType Leaf) } |
+            Select-Object -First 1)
+    } else { @() }
 
     BeforeAll {
         $script:P4RepositoryRoot = Split-Path -Parent $PSScriptRoot
@@ -917,6 +923,43 @@ Describe 'Platform P4 verified PowerShell and Pester preparation' {
             $path=Join-Path $PSHOME $(if($IsWindows){'pwsh.exe'}else{'pwsh'})
             $closure=& $script:P4Preparation { param($root,$platform) Get-PlatformRuntimeClosure $root $platform } $PSHOME $script:P4Platform
             return [pscustomobject]@{version=$PSVersionTable.PSVersion.ToString();os=$script:P4Platform;architecture=$script:P4Architecture;executablePath=$path;executableSha256=(Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant();runtimeClosure=$closure}
+        }
+
+        function Get-P4StartupHookFixture {
+            $marker=Join-Path $TestDrive 'dotnet-startup-hook.marker'
+            $hook=Join-Path $TestDrive 'P4.StartupHook.dll'
+            if(-not (Test-Path -LiteralPath $hook -PathType Leaf)) {
+                $encodedMarker=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($marker))
+                $source=@"
+using System;
+using System.IO;
+using System.Text;
+public class StartupHook {
+    public static void Initialize() {
+        File.WriteAllText(Encoding.UTF8.GetString(Convert.FromBase64String("$encodedMarker")), "loaded");
+    }
+}
+"@
+                Add-Type -TypeDefinition $source -Language CSharp -OutputAssembly $hook -OutputType Library -ErrorAction Stop
+            }
+            return [pscustomobject]@{Hook=$hook;Marker=$marker}
+        }
+
+        function Invoke-P4FixturePowerShellIdentity {
+            param($Runtime)
+            return & $script:P4Preparation {
+                param($Runtime)
+                $original=(Get-Command Start-PlatformVerifiedProcess -CommandType Function).ScriptBlock
+                try {
+                    Set-Item Function:script:Start-PlatformVerifiedProcess -Value {
+                        param([string]$Executable,[string]$Probe,$Environment,[string]$Platform)
+                        $output=@(& $Executable -NoLogo -NoProfile -NonInteractive -Command $Probe 2>&1)
+                        if($LASTEXITCODE -ne 0 -or $output.Count -ne 1){throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform 'Fixture runtime process failed.')}
+                        return $output[0]
+                    }
+                    Test-PlatformPowerShellIdentity $Runtime.executablePath $Runtime.version $Runtime.os $Runtime.architecture $Runtime.runtimeClosure
+                } finally { Set-Item Function:script:Start-PlatformVerifiedProcess -Value $original }
+            } $Runtime
         }
 
         function New-P4ProbeRuntime {
@@ -1089,6 +1132,11 @@ Describe 'Platform P4 verified PowerShell and Pester preparation' {
             $receipt.runtimeClosure.files.Count | Should Be 2
             $receipt.runtimeClosure.files.path | Should Contain 'System.Management.Automation.dll'
             $receipt.runtimeClosure.sha256 | Should Match '^[a-f0-9]{64}$'
+            $receipt.environmentAllowlist | Should Contain 'PATH'
+            $receipt.environmentAllowlist | Should Contain 'PSModulePath'
+            @($receipt.environmentAllowlist | Where-Object { $_ -cmatch '^(LD_|DYLD_|DOTNET_|COREHOST_)' }).Count | Should Be 0
+            $expectedAllowlist=if($IsWindows){'PATH,PSModulePath,SystemRoot,USERPROFILE,HOME,TMP,TEMP'}elseif($IsMacOS){'PATH,PSModulePath,HOME,TMP,TEMP,TMPDIR,LANG'}else{'PATH,PSModulePath,HOME,TMP,TEMP,LANG'}
+            (@($receipt.environmentAllowlist) -join ',') | Should Be $expectedAllowlist
             (Get-FileHash $fixture.Path -Algorithm SHA256).Hash.ToLowerInvariant() | Should Not Be $approvedHash
             Test-Path -LiteralPath ($fixture.Path+'.original') | Should Be $true
             $receipt.executableSha256 | Should Be (Get-FileHash $receipt.executablePath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -1471,7 +1519,7 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
     It 'InterT52_refuses_changed_runtime_dependencies_before_launch' {
         foreach($change in @('changed','removed','added','missing-receipt')) {
             $fixture=New-P4ProbeRuntime ('p4-runtime-'+$change); $runtime=$fixture.Receipt
-            $identity=& $script:P4Preparation.ExportedCommands['Test-PlatformPowerShellIdentity'] $runtime.executablePath $runtime.version $runtime.os $runtime.architecture $runtime.runtimeClosure
+            $identity=Invoke-P4FixturePowerShellIdentity $runtime
             $identity.version | Should Be $runtime.version
             [IO.File]::Delete($fixture.Marker)
             switch($change) {
@@ -1550,7 +1598,7 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
         $path=$fixture.Receipt.executablePath
         [IO.File]::WriteAllText($path,($prefix+[IO.File]::ReadAllText($path)))
         $closure=& $script:P4Preparation {param($root) Get-PlatformRuntimeClosure $root 'windows'} $fixture.Root
-        $identity=& $script:P4Preparation.ExportedCommands['Test-PlatformPowerShellIdentity'] $path $fixture.Receipt.version 'windows' $script:P4Architecture $closure
+        $identity=Invoke-P4FixturePowerShellIdentity ([pscustomobject]@{executablePath=$path;version=$fixture.Receipt.version;os='windows';architecture=$script:P4Architecture;runtimeClosure=$closure})
         $identity.version | Should Be $fixture.Receipt.version
         [IO.File]::ReadAllText($denied) | Should Be 'denied'
         [IO.File]::ReadAllText($dll) | Should Be 'approved dependency'
@@ -1564,6 +1612,59 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
         $receipt=Get-PlatformCapabilities -Required @('powershell-runtime','pester-module')
         ($receipt.capabilities | Where-Object name -eq 'powershell-runtime').status | Should Be 'available'
         ($receipt.capabilities | Where-Object name -eq 'pester-module').status | Should Be 'available'
+    }
+
+    # Scenario: A caller poisons .NET startup before a verified PowerShell identity probe.
+    # Purpose: Start from an empty environment so startup hooks cannot execute outside the verified closure.
+    It 'InterT56_excludes_dotnet_startup_hooks_from_verified_runtime_launches' {
+        if(Test-P4KnownRuntimeLinkRejection){ return }
+        $runtime=Get-P4KnownRuntimeReceipt
+        $fixture=Get-P4StartupHookFixture
+        $marker=$fixture.Marker; $hook=$fixture.Hook
+        Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
+        $previous=[Environment]::GetEnvironmentVariable('DOTNET_STARTUP_HOOKS')
+        try {
+            [Environment]::SetEnvironmentVariable('DOTNET_STARTUP_HOOKS',$hook)
+            $control=@(& $runtime.executablePath -NoLogo -NoProfile -NonInteractive -Command '$null' 2>&1)
+            $LASTEXITCODE | Should Be 0
+            Test-Path -LiteralPath $marker | Should Be $true
+            Remove-Item -LiteralPath $marker -Force
+            $identity=& $script:P4Preparation.ExportedCommands['Test-PlatformPowerShellIdentity'] $runtime.executablePath $runtime.version $runtime.os $runtime.architecture $runtime.runtimeClosure
+            $identity.version | Should Be $runtime.version
+            Test-Path -LiteralPath $marker | Should Be $false
+        } finally { [Environment]::SetEnvironmentVariable('DOTNET_STARTUP_HOOKS',$previous) }
+    }
+
+    # Scenario: A Unix caller supplies a native loader injection library before a verified probe.
+    # Purpose: Conditionally register the platform loader regression while retaining zero skipped tests.
+    if ($p4NativeCompilerForRegistration.Count -gt 0) {
+    It 'InterT57_excludes_unix_loader_injection_from_verified_runtime_launches' {
+        if(Test-P4KnownRuntimeLinkRejection){ return }
+        $runtime=Get-P4KnownRuntimeReceipt
+        $marker=Join-Path $TestDrive 'native-loader-hook.marker'
+        $sourcePath=Join-Path $TestDrive 'native-loader-hook.c'
+        $libraryPath=Join-Path $TestDrive $(if($IsMacOS){'native-loader-hook.dylib'}else{'native-loader-hook.so'})
+        $escapedMarker=$marker.Replace('\','\\').Replace('"','\"')
+        [IO.File]::WriteAllText($sourcePath,"#include <stdio.h>`n__attribute__((constructor)) static void initialize(void) { FILE *f=fopen(`"$escapedMarker`",`"w`"); if(f){fputs(`"loaded`",f);fclose(f);} }`n",[Text.UTF8Encoding]::new($false))
+        $compiler=$p4NativeCompilerForRegistration[0]
+        $compilerArguments=if($IsMacOS){@('-dynamiclib','-o',$libraryPath,$sourcePath)}else{@('-shared','-fPIC','-o',$libraryPath,$sourcePath)}
+        $compilerOutput=@(& $compiler @compilerArguments 2>&1)
+        $LASTEXITCODE | Should Be 0
+        Test-Path -LiteralPath $libraryPath | Should Be $true
+        $name=if($IsMacOS){'DYLD_INSERT_LIBRARIES'}else{'LD_PRELOAD'}
+        $previous=[Environment]::GetEnvironmentVariable($name)
+        try {
+            Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
+            [Environment]::SetEnvironmentVariable($name,$libraryPath)
+            $control=@(& $runtime.executablePath -NoLogo -NoProfile -NonInteractive -Command '$null' 2>&1)
+            $LASTEXITCODE | Should Be 0
+            Test-Path -LiteralPath $marker | Should Be $true
+            Remove-Item -LiteralPath $marker -Force
+            $identity=& $script:P4Preparation.ExportedCommands['Test-PlatformPowerShellIdentity'] $runtime.executablePath $runtime.version $runtime.os $runtime.architecture $runtime.runtimeClosure
+            $identity.version | Should Be $runtime.version
+            Test-Path -LiteralPath $marker | Should Be $false
+        } finally { [Environment]::SetEnvironmentVariable($name,$previous) }
+    }
     }
 
     # Scenario: A regression manifest uses the legacy root-module key, or adds initialization hooks.
@@ -1625,8 +1726,19 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
         $pester=$script:P4Pester4101
         $hash=Get-P4PesterPayloadHash $pester.Path (Join-Path $TestDrive 'pester-hash'); $runtime=Get-P4KnownRuntimeReceipt
         $lease=New-P4DestinationLease 'p4-pester-good'
-        try { $receipt=Initialize-PlatformPester -Policy @{pesterPurpose='regression';pesterModulePath=$pester.Path;approvedPayload=@{version='4.10.1';sha256=$hash}} -RuntimeReceipt $runtime -DestinationLease $lease; $receipt.version | Should Be '4.10.1'; $receipt.purpose | Should Be 'regression' }
-        finally { $lease.Dispose() }
+        $startupHook=Get-P4StartupHookFixture
+        Remove-Item -LiteralPath $startupHook.Marker -Force -ErrorAction SilentlyContinue
+        $previousStartupHook=[Environment]::GetEnvironmentVariable('DOTNET_STARTUP_HOOKS')
+        try {
+            [Environment]::SetEnvironmentVariable('DOTNET_STARTUP_HOOKS',$startupHook.Hook)
+            $receipt=Initialize-PlatformPester -Policy @{pesterPurpose='regression';pesterModulePath=$pester.Path;approvedPayload=@{version='4.10.1';sha256=$hash}} -RuntimeReceipt $runtime -DestinationLease $lease
+            $receipt.version | Should Be '4.10.1'
+            $receipt.purpose | Should Be 'regression'
+            $receipt.environmentAllowlist | Should Contain 'PSModulePath'
+            @($receipt.environmentAllowlist | Where-Object { $_ -cmatch '^(LD_|DYLD_|DOTNET_|COREHOST_)' }).Count | Should Be 0
+            Test-Path -LiteralPath $startupHook.Marker | Should Be $false
+        }
+        finally { [Environment]::SetEnvironmentVariable('DOTNET_STARTUP_HOOKS',$previousStartupHook); $lease.Dispose() }
         $tamperedRoot=Join-Path $TestDrive 'tampered-pester/4.10.1'; New-Item -ItemType Directory -Path (Split-Path -Parent $tamperedRoot) -Force | Out-Null; Copy-Item -LiteralPath $pester.ModuleBase -Destination $tamperedRoot -Recurse
         $manifest=Join-Path $tamperedRoot 'Pester.psd1'; (Get-Content $manifest -Raw).Replace("ModuleVersion     = '4.10.1'","ModuleVersion     = '4.10.2'") | Set-Content $manifest -Encoding UTF8
         $tamperedHash=Get-P4PesterPayloadHash $manifest (Join-Path $TestDrive 'tampered-hash'); $lease=New-P4DestinationLease 'p4-pester-tampered'
@@ -1681,7 +1793,14 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
             $caught=& $script:P4Preparation {
                 param($policy,$runtime,$owned,$platform,$resolverPath,$dependency)
                 $original=(Get-Command Copy-PhysicalPesterPayload -CommandType Function).ScriptBlock
+                $originalStart=(Get-Command Start-PlatformVerifiedProcess -CommandType Function).ScriptBlock
                 try {
+                    Set-Item Function:script:Start-PlatformVerifiedProcess -Value {
+                        param([string]$Executable,[string]$Probe,$Environment,[string]$Platform)
+                        $output=@(& $Executable -NoLogo -NoProfile -NonInteractive -Command $Probe 2>&1)
+                        if($LASTEXITCODE -ne 0 -or $output.Count -ne 1){throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform 'Fixture runtime process failed.')}
+                        return $output[0]
+                    }
                     Set-Item Function:script:Copy-PhysicalPesterPayload -Value {
                         param($SourceVersionRoot,$DestinationLease,$VersionRelativePath,$Platform,$Snapshot,$Session)
                         & $original $SourceVersionRoot $DestinationLease $VersionRelativePath $Platform $Snapshot $Session
@@ -1694,7 +1813,7 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
                         [IO.File]::WriteAllText($dependency,'changed after the first probe')
                     }
                     try { Initialize-VerifiedPlatformPester $policy $runtime $owned $platform $resolverPath | Out-Null; return $null } catch { return $_ }
-                } finally { Set-Item Function:script:Copy-PhysicalPesterPayload -Value $original }
+                } finally { Set-Item Function:script:Copy-PhysicalPesterPayload -Value $original; Set-Item Function:script:Start-PlatformVerifiedProcess -Value $originalStart }
             } $policy $fixture.Receipt $lease $script:P4Platform (Join-Path $script:P4RepositoryRoot 'scripts/Resolve-StandardValidationTool.ps1') (Join-Path $fixture.Root 'System.Management.Automation.dll')
             $caught.Exception.GetType().Name | Should Be 'PlatformVerificationException'
             $caught.Exception.Message | Should Match 'runtime closure'
@@ -1732,8 +1851,15 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
                 param($policy,$runtime,$owned,$platform,$resolverPath,$rootModule)
                 $originalCopy=(Get-Command Copy-PhysicalPesterPayload -CommandType Function).ScriptBlock
                 $originalAssert=(Get-Command Assert-PlatformRuntimeClosure -CommandType Function).ScriptBlock
+                $originalStart=(Get-Command Start-PlatformVerifiedProcess -CommandType Function).ScriptBlock
                 $script:P4Copied=$false; $script:P4Attempted=$false; $script:P4Denied=$false
                 try {
+                    Set-Item Function:script:Start-PlatformVerifiedProcess -Value {
+                        param([string]$Executable,[string]$Probe,$Environment,[string]$Platform)
+                        $output=@(& $Executable -NoLogo -NoProfile -NonInteractive -Command $Probe 2>&1)
+                        if($LASTEXITCODE -ne 0 -or $output.Count -ne 1){throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform 'Fixture runtime process failed.')}
+                        return $output[0]
+                    }
                     Set-Item Function:script:Copy-PhysicalPesterPayload -Value {
                         param($SourceVersionRoot,$DestinationLease,$VersionRelativePath,$Platform,$Snapshot,$Session)
                         & $originalCopy $SourceVersionRoot $DestinationLease $VersionRelativePath $Platform $Snapshot $Session
@@ -1753,6 +1879,7 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
                 } finally {
                     Set-Item Function:script:Copy-PhysicalPesterPayload -Value $originalCopy
                     Set-Item Function:script:Assert-PlatformRuntimeClosure -Value $originalAssert
+                    Set-Item Function:script:Start-PlatformVerifiedProcess -Value $originalStart
                 }
             } $policy $fixture.Receipt $lease $script:P4Platform (Join-Path $script:P4RepositoryRoot 'scripts/Resolve-StandardValidationTool.ps1') $rootModule
             $result.Attempted | Should Be $true
