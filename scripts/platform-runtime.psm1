@@ -101,11 +101,12 @@ Assert-PlatformRuntimeInventory | Out-Null
 
 $nativeSourcePath = Join-Path $PSScriptRoot 'platform/PlatformNative.cs'
 if ($null -eq ('SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative' -as [type])) {
-    Add-Type -LiteralPath @($nativeSourcePath, (Join-Path $PSScriptRoot 'platform/UnixNative.cs'), (Join-Path $PSScriptRoot 'platform/WindowsNative.cs')) -ErrorAction Stop
+    Add-Type -LiteralPath @($nativeSourcePath, (Join-Path $PSScriptRoot 'platform/UnixNative.cs'), (Join-Path $PSScriptRoot 'platform/WindowsNative.cs'), (Join-Path $PSScriptRoot 'platform/OwnedProcess.cs'), (Join-Path $PSScriptRoot 'platform/UnixProcess.cs'), (Join-Path $PSScriptRoot 'platform/WindowsProcess.cs')) -ErrorAction Stop
 }
 elseif ($null -eq ('SyuanTsai.AIInstructions.PlatformRuntime.UnixNative' -as [type]) -or
-        $null -eq ('SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative' -as [type])) {
-    throw [IO.InvalidDataException]::new('A pre-P2 native assembly is already loaded. Import this verified runtime in a fresh PowerShell process.')
+        $null -eq ('SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative' -as [type]) -or
+        $null -eq ('SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease' -as [type])) {
+    throw [IO.InvalidDataException]::new('A pre-P3 native assembly is already loaded. Import this verified runtime in a fresh PowerShell process.')
 }
 
 Import-Module (Join-Path $PSScriptRoot 'platform/Windows.psm1') -Scope Local -ErrorAction Stop
@@ -222,6 +223,7 @@ function Get-PlatformCapabilities {
 
     $platform = Get-CurrentPlatformName
     $primitiveProbe = Test-PlatformPrimitives
+    $processProbe = Test-PlatformOwnedProcess
     $processEnvironmentMethod = @(
         [Environment].GetMethods([Reflection.BindingFlags]'Public,Static') | Where-Object {
             $_.Name -ceq 'SetEnvironmentVariable' -and
@@ -274,7 +276,9 @@ function Get-PlatformCapabilities {
         'publication' = @('unverified','P7 publication primitive is not implemented or probed.')
         'owned-file-removal' = @('unverified','P7 owned-file removal is not implemented or probed.')
         'permissions' = @('unverified','P2 probe pending.')
-        'process-isolation' = @('unverified','P3 process isolation is not implemented or probed.')
+        'process-isolation' = @('unverified','P3 probe pending.')
+        'owned-process' = @('unverified','P3 probe pending.')
+        'process-cleanup' = @('unverified','P3 probe pending.')
         'powershell-resolution' = @('unverified','P4 PowerShell resolution is not implemented or probed.')
         'pester-initialization' = @('unverified','P4 Pester initialization is not implemented or probed.')
         'powershell-runtime' = @($powerShellStatus,$powerShellEvidence)
@@ -295,6 +299,10 @@ function Get-PlatformCapabilities {
         if ($capability.name -cin @('directory-lease','file-lease','file-identity','lock','permissions')) {
             $capability.status = $primitiveProbe.status
             $capability.evidence = [object[]]@($primitiveProbe.evidence)
+        }
+        if ($capability.name -cin @('owned-process','process-cleanup','process-isolation')) {
+            $capability.status = $processProbe.status
+            $capability.evidence = [object[]]@($processProbe.evidence)
         }
     }
     foreach ($name in @($Required)) {
@@ -343,8 +351,159 @@ function Publish-PlatformFile { [CmdletBinding()] param([Parameter(Mandatory = $
 function Remove-PlatformOwnedFile { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)] $ExpectedState, $Journal) Invoke-PlatformAdapter 'Remove-PlatformOwnedFile' $PSBoundParameters }
 function Get-PlatformPermissions { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Lease) Invoke-PlatformAdapter 'Get-PlatformPermissions' $PSBoundParameters }
 function Set-PlatformPermissions { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Lease, $Policy, $Snapshot) Invoke-PlatformAdapter 'Set-PlatformPermissions' $PSBoundParameters }
-function Start-PlatformOwnedProcess { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ExecutableLease, [string[]] $ArgumentList, [hashtable] $Environment, [DateTimeOffset] $Deadline, [string] $IsolationRequirement) Invoke-PlatformAdapter 'Start-PlatformOwnedProcess' $PSBoundParameters }
-function Stop-PlatformOwnedProcess { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Lease, [TimeSpan] $GracePeriod, [DateTimeOffset] $Deadline) Invoke-PlatformAdapter 'Stop-PlatformOwnedProcess' $PSBoundParameters }
+function Start-PlatformOwnedProcess {
+    [CmdletBinding(DefaultParameterSetName='Path')]
+    param(
+        [Parameter(Mandatory=$true,ParameterSetName='Lease')] $ExecutableLease,
+        [Parameter(Mandatory=$true,ParameterSetName='Path')][ValidateNotNullOrEmpty()][string] $ExecutablePath,
+        [string[]] $ArgumentList = @(),
+        [Parameter(Mandatory=$true)][AllowEmptyCollection()][System.Collections.IDictionary] $Environment,
+        [Parameter(Mandatory=$true)] $WorkingDirectoryLease,
+        [Parameter(Mandatory=$true)][DateTimeOffset] $Deadline,
+        [ValidateSet('cooperative','strong')][string] $IsolationRequirement = 'cooperative',
+        [Parameter(Mandatory=$true)][string] $StdoutPath,
+        [Parameter(Mandatory=$true)][string] $StderrPath,
+        # Legacy spelling remains an alias; quotas are UTF-8 decoded characters per stream.
+        [Alias('OutputLimitBytes')][ValidateRange(1,1048576)][long] $OutputLimitCharacters = 1048576
+    )
+    $platform = Get-CurrentPlatformName
+    if ($IsolationRequirement -eq 'strong' -and $platform -ne 'windows') {
+        throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]::new('strong-process-isolation: external sandbox required',$platform)
+    }
+    if ($Deadline -le [DateTimeOffset]::UtcNow) { throw [ArgumentException]::new('Deadline must be in the future.') }
+    # Output files are create-only P2 leases, including validation of every ancestor.
+    # Linux executable leases execute through /proc/self/fd. Darwin uses F_GETPATH
+    # with identity checks before/after suspended spawn (cooperative, not atomic fd
+    # execution). Neither mode supplies a hostile-UID sandbox.
+    $outLease = $null; $errLease = $null
+    try {
+        foreach ($path in @($StdoutPath,$StderrPath)) {
+            if (-not [IO.Path]::IsPathRooted($path)) { throw [ArgumentException]::new('Capture paths must be absolute.') }
+            $anchor = [IO.Path]::GetPathRoot($path)
+            [void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Segments($path.Substring($anchor.Length))
+        }
+        foreach ($pair in @(@('out',$StdoutPath),@('err',$StderrPath))) {
+            $parentPath = [IO.Path]::GetDirectoryName($pair[1])
+            $anchor = [IO.Path]::GetPathRoot($parentPath)
+            $relative = $parentPath.Substring($anchor.Length)
+            if ([string]::IsNullOrEmpty($relative)) { throw [ArgumentException]::new('Capture files require a directory below the filesystem root.') }
+            $parent = Open-PlatformDirectory -Root $anchor -RelativePath $relative
+            try {
+                $file = Open-PlatformFile -ParentLease $parent -Leaf ([IO.Path]::GetFileName($pair[1])) -Access Write -CreateMode CreateNew
+                if ($pair[0] -eq 'out') { $outLease = $file } else { $errLease = $file }
+            } finally { $parent.Dispose() }
+        }
+        $lease = Start-PlatformCapturedProcess -ExecutablePath $ExecutablePath -ExecutableLease $ExecutableLease -ArgumentList $ArgumentList -Environment $Environment -WorkingDirectoryLease $WorkingDirectoryLease -Deadline $Deadline -IsolationRequirement $IsolationRequirement -StdoutLease $outLease -StderrLease $errLease -OutputLimitBytes $OutputLimitCharacters
+        $outLease = $null; $errLease = $null
+        return $lease
+    } finally {
+        if ($null -ne $outLease) { $outLease.Dispose() }
+        if ($null -ne $errLease) { $errLease.Dispose() }
+    }
+}
+function Start-PlatformCapturedProcess {
+    # Internal boundary shared by caller-owned capture files and temporary probes.
+    param($ExecutablePath,$ExecutableLease,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$IsolationRequirement,$StdoutLease,$StderrLease,$OutputLimitBytes)
+    [SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]::Start($ExecutablePath,$ExecutableLease,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$IsolationRequirement,$StdoutLease,$StderrLease,$OutputLimitBytes)
+}
+
+function Start-PlatformProbeProcess {
+    param($Directory,[string]$StdoutLeaf,[string]$StderrLeaf,$Executable,$Arguments,$Environment,
+        [Collections.Generic.List[object]]$Entries)
+    $outLease = $null; $errLease = $null
+    try {
+        # Record each create-only lease before the next creation or native start
+        # can fail. Never infer ownership later by reopening a known pathname.
+        $outLease = Open-PlatformFile -ParentLease $Directory -Leaf $StdoutLeaf -Access Write -CreateMode CreateNew
+        $Entries.Add(@($StdoutLeaf,$outLease.Observation))
+        $errLease = Open-PlatformFile -ParentLease $Directory -Leaf $StderrLeaf -Access Write -CreateMode CreateNew
+        $Entries.Add(@($StderrLeaf,$errLease.Observation))
+        $lease = Start-PlatformCapturedProcess -ExecutablePath $Executable -ArgumentList $Arguments -Environment $Environment -WorkingDirectoryLease $Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(10)) -IsolationRequirement cooperative -StdoutLease $outLease -StderrLease $errLease -OutputLimitBytes 4096
+        $outLease = $null; $errLease = $null
+        return $lease
+    } finally {
+        if ($null -ne $outLease) { $outLease.Dispose() }
+        if ($null -ne $errLease) { $errLease.Dispose() }
+    }
+}
+
+function Stop-PlatformOwnedProcess {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease] $Lease,
+        [TimeSpan] $GracePeriod = [TimeSpan]::FromMilliseconds(250),
+        [DateTimeOffset] $Deadline = [DateTimeOffset]::UtcNow.AddSeconds(5),
+        [ValidateNotNullOrEmpty()][string] $ExpectedStartIdentity
+    )
+    $expected = if ($PSBoundParameters.ContainsKey('ExpectedStartIdentity')) { $ExpectedStartIdentity } else { $null }
+    $Lease.Stop($GracePeriod,$Deadline,$expected)
+}
+
+function Test-PlatformOwnedProcess {
+    $platform = Get-CurrentPlatformName
+    $root = if ($platform -eq 'windows') { [IO.Path]::GetTempPath().TrimEnd('\','/') } elseif ($platform -eq 'macos') { '/private/tmp' } else { '/tmp' }
+    $name = 'process-probe-' + [guid]::NewGuid().ToString('N')
+    $path = Join-Path $root $name
+    $directory = $null; $lease = $null; $status = 'unavailable'
+    $entries = [Collections.Generic.List[object]]::new()
+    $evidence = [ordered]@{
+        isolation = $(switch ($platform) { windows { 'windows-job-object' }; linux { 'linux-process-group-subreaper' }; macos { 'macos-process-group' } })
+        scope = 'Measured cooperative child execution and cleanup on this host; no filesystem isolation.'
+        strong = ($platform -eq 'windows')
+        limitations = @(
+            if ($platform -eq 'macos') { 'macos-process-group-cannot-detect-setsid-escape' }
+            if ($platform -eq 'macos' -or $platform -eq 'linux') { 'group-signal-external-reaper-race' }
+        )
+        # This probe exercises pathname execution only. ExecutableLease binding
+        # must not be advertised without a separate successful lease probe.
+        boundary = 'Unix process groups allow setsid escape; polling cannot prove containment of hostile code. Strong Unix isolation requires an external sandbox. Subreaper remains enabled for the supervisor lifetime; Unix leases are serialized.'
+    }
+    try {
+        $directory = Open-PlatformDirectory -Root $root -RelativePath $name -CreatePrivate
+        $environment = @{}
+        if ($platform -eq 'windows') {
+            $executable = (Get-Process -Id $PID).Path
+            $environment['SystemRoot'] = [Environment]::GetEnvironmentVariable('SystemRoot')
+            $arguments = @('-NoLogo','-NoProfile','-NonInteractive','-Command','[Console]::Out.Write("probe-out"); [Console]::Error.Write("probe-err"); exit 7')
+        } else { $executable = '/bin/sh'; $arguments = @('-c','printf probe-out; printf probe-err >&2; exit 7') }
+        $lease = Start-PlatformProbeProcess -Directory $directory -StdoutLeaf out -StderrLeaf err -Executable $executable -Arguments $arguments -Environment $environment -Entries $entries
+        if (-not $lease.WaitForExit([TimeSpan]::FromSeconds(10))) { throw [TimeoutException]::new('Process capability probe timed out.') }
+        $receipt = Stop-PlatformOwnedProcess -Lease $lease
+        $evidence['cleanup'] = $receipt
+        if (-not $receipt.CleanedUp -or $lease.ExitCode -ne 7) { throw [IO.IOException]::new('Process capability probe did not exit and clean up as expected.') }
+        foreach ($leaf in @('out','err')) {
+            $file = Open-PlatformFile -ParentLease $directory -Leaf $leaf -Access Read -CreateMode OpenExisting
+            try {
+                $created = $entries | Where-Object { $_[0] -ceq $leaf }
+                Assert-PlatformFileIdentity -Lease $file -Expected $created[1] -SingleLink | Out-Null
+                if ([IO.File]::ReadAllText((Join-Path $path $leaf)) -cne ('probe-' + $leaf)) { throw [IO.IOException]::new('Process capture probe mismatch.') }
+            } finally { $file.Dispose() }
+        }
+        $evidence['exitCode'] = $lease.ExitCode
+        $lease.Dispose(); $lease = $null
+        $arguments = if ($platform -eq 'windows') { @('-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep 30') } else { @('-c','exec /bin/sleep 30') }
+        $lease = Start-PlatformProbeProcess -Directory $directory -StdoutLeaf stop-out -StderrLeaf stop-err -Executable $executable -Arguments $arguments -Environment $environment -Entries $entries
+        $receipt = Stop-PlatformOwnedProcess -Lease $lease
+        $evidence['terminationCleanup'] = $receipt
+        if (-not $receipt.CleanedUp -or $receipt.SignalsSent -lt 1) { throw [IO.IOException]::new('Process termination probe did not confirm cleanup.') }
+        $status = 'available'
+    } catch {
+        $evidence['failure'] = $_.Exception.Message
+        if ($null -ne $lease) { $evidence['unixObservation'] = $lease.UnixObservation }
+    }
+    finally {
+        try {
+            if ($null -ne $lease) { $lease.Dispose() }
+        } catch {
+            $evidence['processDisposeFailure'] = $_.Exception.Message
+            $status = 'unavailable'
+        } finally {
+            if ($null -ne $directory) { Clear-PlatformProbe -Directory $directory -Path $path -Entries $entries.ToArray() -Evidence $evidence }
+        }
+    }
+    if ($evidence.Contains('cleanupFailure')) { $status = 'unavailable' }
+    [pscustomobject]@{ status=$status; evidence=[pscustomobject]$evidence }
+}
 function Resolve-PlatformPowerShell { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Policy, [Parameter(Mandatory = $true)] $DestinationLease, [Parameter(Mandatory = $true)] $OfflineCache, $ReleaseMetadata) Invoke-PlatformAdapter 'Resolve-PlatformPowerShell' $PSBoundParameters }
 function Initialize-PlatformPester { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Policy, [Parameter(Mandatory = $true)] $RuntimeReceipt, [Parameter(Mandatory = $true)] $DestinationLease) Invoke-PlatformAdapter 'Initialize-PlatformPester' $PSBoundParameters }
 

@@ -936,6 +936,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/platform/OwnedProcess.cs",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/platform/PlatformNative.cs",
       "license": "Apache-2.0"
     },
@@ -952,7 +956,15 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/platform/UnixProcess.cs",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/platform/WindowsNative.cs",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/platform/WindowsProcess.cs",
       "license": "Apache-2.0"
     },
     {

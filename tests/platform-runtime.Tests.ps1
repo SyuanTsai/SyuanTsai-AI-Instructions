@@ -1,6 +1,1869 @@
 # SPDX-FileCopyrightText: 2026 SyuanTsai
 # SPDX-License-Identifier: Apache-2.0
 
+Describe 'Platform owned processes P3' {
+    BeforeAll {
+        Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
+        $script:P3Root = if ($IsMacOS) { '/private/tmp' } else { [IO.Path]::GetTempPath().TrimEnd('\','/') }
+        $script:P3Shell = (Get-Process -Id $PID).Path
+        function New-P3Fixture {
+            $name = 'p3-' + [guid]::NewGuid().ToString('N')
+            $directory = Open-PlatformDirectory -Root $script:P3Root -RelativePath $name -CreatePrivate
+            @{ Directory=$directory; Path=(Join-Path $script:P3Root $name) }
+        }
+        function Start-P3Fixture($Fixture,[string]$Code,[int]$Seconds=20,[long]$Limit=1048576) {
+            $envMap = @{}
+            if ($IsWindows) { $envMap.SystemRoot = $env:SystemRoot }
+            Start-PlatformOwnedProcess -ExecutablePath $script:P3Shell -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Code))) -Environment $envMap -WorkingDirectoryLease $Fixture.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds($Seconds)) -IsolationRequirement cooperative -StdoutPath (Join-Path $Fixture.Path 'out') -StderrPath (Join-Path $Fixture.Path 'err') -OutputLimitBytes $Limit
+        }
+        function Remove-P3Fixture($Fixture,$Lease) {
+            if ($null -ne $Lease) { $Lease.Dispose() }
+            $Fixture.Directory.Dispose()
+            # Only fixture-owned, explicitly named files; never recursive cleanup.
+            foreach ($leaf in @('out','err','child','ready','executable')) { $path = Join-Path $Fixture.Path $leaf; if ([IO.File]::Exists($path)) { [IO.File]::Delete($path) } }
+            [IO.Directory]::Delete($Fixture.Path)
+        }
+        function Assert-P3Exited($Lease) {
+            if (-not $Lease.WaitForExit([TimeSpan]::FromSeconds(15))) {
+                throw ('Root did not exit: ' + $Lease.TerminationReason + '; observation=' + ($Lease.UnixObservation | ConvertTo-Json -Compress) + '; cleanup=' + ($Lease.Cleanup | ConvertTo-Json -Depth 5 -Compress))
+            }
+        }
+        function Assert-P3Cleaned($Receipt) {
+            if (-not $Receipt.CleanedUp) { throw ('Cleanup failed: ' + ($Receipt | ConvertTo-Json -Depth 5 -Compress)) }
+            $Receipt.CaptureReadersStopped | Should Be $true
+            $Receipt.CaptureResourcesClosed | Should Be $true
+        }
+    }
+
+    # Scenario: A child exits with distinct output streams and a nonzero status.
+    # Purpose: Preserve argv, explicit environment, byte capture and exit code.
+    It 'InterT10_captures_exit_code_and_both_streams' {
+        $f = New-P3Fixture; $p = $null
+        try {
+            $p = Start-P3Fixture $f '[Console]::Out.Write("hello"); [Console]::Error.Write("problem"); exit 23'
+            Assert-P3Exited $p
+            $r = Stop-PlatformOwnedProcess -Lease $p
+            Assert-P3Cleaned $r
+            $p.ExitCode | Should Be 23
+            if ($IsMacOS) { Write-Host ('Darwin natural-exit evidence: ' + ($p.UnixObservation | ConvertTo-Json -Compress)) }
+            [IO.File]::ReadAllText((Join-Path $f.Path 'out')) | Should Be 'hello'
+            [IO.File]::ReadAllText((Join-Path $f.Path 'err')) | Should Be 'problem'
+        } finally { Remove-P3Fixture $f $p }
+    }
+
+    # Scenario: Another waiter reaps the Darwin root while our supervisor is paused.
+    # Purpose: The pre-registered kqueue event preserves status despite waitpid ECHILD and absent libproc identity.
+    # Register only on the native host; keep this file's Core CI skip count at zero.
+    if ($IsMacOS) {
+        It 'InterT15_preserves_darwin_exit_status_after_external_reaping' {
+            $f = New-P3Fixture; $p = $null
+            try {
+                $p = Start-P3Fixture $f 'Start-Sleep -Milliseconds 500; exit 23'
+                $flags = [Reflection.BindingFlags]'Instance,NonPublic'
+                $gate = $p.GetType().GetField('gate',$flags).GetValue($p)
+                $control = $p.GetType().GetField('control',$flags).GetValue($p)
+                $waiter = $control.GetType().GetField('waitForChild',$flags).GetValue($control)
+                [Threading.Monitor]::Enter($gate)
+                try {
+                    $until = [DateTimeOffset]::UtcNow.AddSeconds(10)
+                    do {
+                        $wait = $waiter.Invoke($p.Pid)
+                        if ($wait.Item1 -ne 0) { break }
+                        [Threading.Thread]::Sleep(10)
+                    } while ([DateTimeOffset]::UtcNow -lt $until)
+                    $wait.Item1 | Should Be $p.Pid
+                    $wait.Item2 | Should Be (23 * 256)
+                } finally { [Threading.Monitor]::Exit($gate) }
+                Assert-P3Exited $p
+                Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $p)
+                $p.ExitCode | Should Be 23
+                $p.UnixObservation.WaitIdErrno | Should Be 10
+                $p.UnixObservation.KqueueExitStatus | Should Be (23 * 256)
+                Write-Host ('Darwin external-reap evidence: ' + ($p.UnixObservation | ConvertTo-Json -Compress))
+            } finally { Remove-P3Fixture $f $p }
+        }
+    }
+
+    # Scenario: No caller polls or stops a sleeping process before its deadline.
+    # Purpose: Enforce the execution deadline from a managed background supervisor.
+    It 'InterT20_enforces_deadline_without_caller_polling' {
+        $f = New-P3Fixture; $p = $null
+        try {
+            $p = Start-P3Fixture $f 'Start-Sleep 90' 2
+            $p.WaitForCleanup([TimeSpan]::FromSeconds(15)) | Should Be $true
+            Assert-P3Cleaned $p.Cleanup
+            $p.TerminationReason | Should Be 'deadline'
+        } finally { Remove-P3Fixture $f $p }
+    }
+
+    # Scenario: The caller cancels a live lease, then disposes it twice.
+    # Purpose: Stop is bounded and resource release is idempotent.
+    It 'InterT30_cancels_and_disposes_idempotently' {
+        $f = New-P3Fixture; $p = $null
+        try {
+            $p = Start-P3Fixture $f 'Start-Sleep 90'
+            Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $p -GracePeriod ([TimeSpan]::FromMilliseconds(100)) -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(10)))
+            $p.Dispose(); $p.Dispose()
+        } finally { Remove-P3Fixture $f $p }
+    }
+
+    # Scenario: A secret sentinel exists only in the parent's environment.
+    # Purpose: Child creation never implicitly inherits the parent's environment block.
+    It 'InterT40_does_not_inherit_unlisted_environment' {
+        $f = New-P3Fixture; $p = $null; $old = $env:P3_PARENT_SENTINEL
+        try {
+            $env:P3_PARENT_SENTINEL = 'must-not-inherit'
+            $p = Start-P3Fixture $f '[Console]::Write([Environment]::GetEnvironmentVariable("P3_PARENT_SENTINEL"))'
+            Assert-P3Exited $p
+            Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $p)
+            [IO.File]::ReadAllText((Join-Path $f.Path 'out')) | Should Be ''
+        } finally { $env:P3_PARENT_SENTINEL = $old; Remove-P3Fixture $f $p }
+    }
+
+    # Scenario: stderr produces unlimited bytes.
+    # Purpose: Bound persisted output and terminate instead of filling the filesystem.
+    It 'InterT50_terminates_on_stderr_character_limit' {
+        $f = New-P3Fixture; $p = $null
+        try {
+            $p = Start-P3Fixture $f 'while ($true) { [Console]::Error.Write(("x" * 8192)) }' 20 4096
+            $p.WaitForCleanup([TimeSpan]::FromSeconds(15)) | Should Be $true
+            $p.TerminationReason | Should Be 'output-limit'
+            $p.OutputLimitExceeded | Should Be $true
+            Assert-P3Cleaned $p.Cleanup
+            (Get-Item (Join-Path $f.Path 'err')).Length | Should BeLessThan 4097
+        } finally { Remove-P3Fixture $f $p }
+    }
+
+    # Scenario: Each stream emits its full allowed quota, including multibyte UTF-8 characters.
+    # Purpose: Quotas are per stream and count decoded characters, not aggregate bytes.
+    It 'InterT55_preserves_independent_utf8_stream_quotas' {
+        $f = New-P3Fixture; $p = $null
+        try {
+            $p = Start-P3Fixture $f '[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $s=([string][char]0x754c)*4096; [Console]::Write($s); [Console]::Error.Write($s)' 20 4096
+            Assert-P3Exited $p
+            Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $p)
+            $p.OutputLimitExceeded | Should Be $false
+            foreach ($leaf in @('out','err')) { [IO.File]::ReadAllText((Join-Path $f.Path $leaf)) | Should Be (([string][char]0x754c)*4096) }
+        } finally { Remove-P3Fixture $f $p }
+    }
+
+    # Scenario: A caller requires containment from a process-group-only host.
+    # Purpose: Fail with a typed capability error before creating files or processes.
+    # Register only on the native host; keep this file's Core CI skip count at zero.
+    if ($IsLinux -or $IsMacOS) {
+        It 'InterT60_refuses_strong_isolation_on_unix' {
+            $f = New-P3Fixture
+            try {
+                $caught = $null
+                try { Start-PlatformOwnedProcess -ExecutablePath $script:P3Shell -Environment @{} -WorkingDirectoryLease $f.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(10)) -IsolationRequirement strong -StdoutPath (Join-Path $f.Path 'out') -StderrPath (Join-Path $f.Path 'err') } catch { $caught = $_.Exception }
+                while ($null -ne $caught.InnerException) { $caught = $caught.InnerException }
+                $caught.GetType().Name | Should Be 'PlatformCapabilityUnavailableException'
+                Test-Path (Join-Path $f.Path 'out') | Should Be $false
+            } finally { Remove-P3Fixture $f $null }
+        }
+    }
+
+    # Scenario: A caller supplies a stale PID/start identity to Stop.
+    # Purpose: An identity mismatch authorizes no signal, even against a live root.
+    # Register only on the native host; keep this file's Core CI skip count at zero.
+    if ($IsLinux -or $IsMacOS) {
+        It 'InterT70_refuses_stale_process_identity_without_signalling' {
+            $f = New-P3Fixture; $p = $null
+            try {
+                $p = Start-P3Fixture $f 'Start-Sleep 90'
+                $r = Stop-PlatformOwnedProcess -Lease $p -ExpectedStartIdentity 'incorrect-start-time'
+                $r.CleanedUp | Should Be $false
+                $r.SignalsSent | Should Be 0
+                $p.HasExited | Should Be $false
+                Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $p)
+            } finally { Remove-P3Fixture $f $p }
+        }
+    }
+
+    # Scenario: A child launches a grandchild and immediately exits.
+    # Purpose: Root exit cannot hide live job/group descendants or adopted zombies.
+    It 'InterT80_reclaims_grandchildren_after_parent_exit' {
+        $f = New-P3Fixture; $p = $null
+        try {
+            $escapedShell = $script:P3Shell.Replace("'","''")
+            $code = '$s = [Diagnostics.ProcessStartInfo]::new(); $s.FileName = ''' + $escapedShell + '''; $s.UseShellExecute = $false; $s.ArgumentList.Add(''-NoProfile''); $s.ArgumentList.Add(''-NonInteractive''); $s.ArgumentList.Add(''-Command''); $s.ArgumentList.Add(''Start-Sleep 90''); $c = [Diagnostics.Process]::Start($s); [IO.File]::WriteAllText(''child'',[string]$c.Id)'
+            $p = Start-P3Fixture $f $code
+            Assert-P3Exited $p
+            $childId = [int][IO.File]::ReadAllText((Join-Path $f.Path 'child'))
+            Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $p)
+            @(Get-Process -Id $childId -ErrorAction SilentlyContinue).Count | Should Be 0
+        } finally { Remove-P3Fixture $f $p }
+    }
+
+    # Register Unix-only fixtures conditionally: this file contributes no platform skips to Core CI.
+    if ($IsLinux -or $IsMacOS) {
+    # Scenario: The native root exits while an in-group child keeps both capture pipes open.
+    # Purpose: Retain the zombie and use a group signal to terminate cooperative descendants on both Unix hosts.
+    It 'InterT82_uses_the_retained_zombie_to_terminate_the_remaining_group' {
+        $f = New-P3Fixture; $p = $null
+        try {
+            $p = Start-PlatformOwnedProcess -ExecutablePath '/bin/sh' -ArgumentList @('-c','/bin/sleep 90 & echo $! > child; exit 0') -Environment @{} -WorkingDirectoryLease $f.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(20)) -StdoutPath (Join-Path $f.Path 'out') -StderrPath (Join-Path $f.Path 'err')
+            Assert-P3Exited $p
+            $p.UnixObservation.RootReserved | Should Be $true
+            $p.UnixObservation.WaitPidResult | Should BeNullOrEmpty
+            $childId = [int][IO.File]::ReadAllText((Join-Path $f.Path 'child'))
+            $receipt = Stop-PlatformOwnedProcess -Lease $p
+            Assert-P3Cleaned $receipt
+            $receipt.UnixObservation.GroupSignalsSent | Should BeGreaterThan 0
+            $receipt.UnixObservation.WaitPidResult | Should Be $p.Pid
+            @(Get-Process -Id $childId -ErrorAction SilentlyContinue).Count | Should Be 0
+        } finally { Remove-P3Fixture $f $p }
+    }
+    }
+
+    # Scenario: Two shell generations exit before a long-lived leaf exits.
+    # Purpose: Linux subreaper reaps adopted group descendants, including double-fork orphans.
+    # Register only on the native host; keep this file's Core CI skip count at zero.
+    if ($IsLinux) {
+        It 'InterT85_reaps_linux_double_fork_orphans' {
+            $f = New-P3Fixture; $p = $null
+            try {
+                $p = Start-PlatformOwnedProcess -ExecutablePath '/bin/sh' -ArgumentList @('-c','( ( /bin/sleep 90 & echo $! > child ) & wait )') -Environment @{} -WorkingDirectoryLease $f.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(20)) -StdoutPath (Join-Path $f.Path 'out') -StderrPath (Join-Path $f.Path 'err')
+                if (-not $p.WaitForExit([TimeSpan]::FromSeconds(10))) { throw ('Double-fork root did not exit: ' + $p.TerminationReason + '; ' + ($p.Cleanup | ConvertTo-Json -Compress)) }
+                $childId = [int][IO.File]::ReadAllText((Join-Path $f.Path 'child'))
+                $receipt = Stop-PlatformOwnedProcess -Lease $p
+                if (-not $receipt.CleanedUp) { throw ('Double-fork cleanup failed: ' + ($receipt | ConvertTo-Json -Compress)) }
+                Test-Path ('/proc/' + $childId) | Should Be $false
+            } finally { Remove-P3Fixture $f $p }
+        }
+    }
+
+    # Scenario: A TERM handler starts a new group member and exits during cleanup.
+    # Purpose: A post-exit census must find and stop the late child before reaping the root anchor.
+    # Register only on the native host; keep this file's Core CI skip count at zero.
+    if ($IsLinux -or $IsMacOS) {
+        It 'InterT87_reclaims_descendants_forked_by_a_term_handler' {
+            $f = New-P3Fixture; $p = $null
+            try {
+                $command = 'trap ''/bin/sleep 90 & echo $! > child; exit 0'' TERM; echo ready > ready; while :; do /bin/sleep 1; done'
+                $p = Start-PlatformOwnedProcess -ExecutablePath '/bin/sh' -ArgumentList @('-c',$command) -Environment @{} -WorkingDirectoryLease $f.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(20)) -StdoutPath (Join-Path $f.Path 'out') -StderrPath (Join-Path $f.Path 'err')
+                $until = [DateTimeOffset]::UtcNow.AddSeconds(10)
+                while (-not [IO.File]::Exists((Join-Path $f.Path 'ready')) -and [DateTimeOffset]::UtcNow -lt $until) { Start-Sleep -Milliseconds 20 }
+                [IO.File]::Exists((Join-Path $f.Path 'ready')) | Should Be $true
+                $receipt = Stop-PlatformOwnedProcess -Lease $p -GracePeriod ([TimeSpan]::FromSeconds(2)) -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(10))
+                Assert-P3Cleaned $receipt
+                $childId = [int][IO.File]::ReadAllText((Join-Path $f.Path 'child'))
+                @(Get-Process -Id $childId -ErrorAction SilentlyContinue).Count | Should Be 0
+            } finally { Remove-P3Fixture $f $p }
+        }
+    }
+
+    # Scenario: Failed-start cleanup begins before a real child has been recorded as owned.
+    # Purpose: Exercise the native cleanup loop and prove that the late-discovered child no longer lives.
+    # Register only on Unix hosts; Windows uses its bound Job Object cleanup path.
+    if ($IsLinux -or $IsMacOS) {
+        It 'InterT88_failed_start_cleanup_reclaims_unrecorded_native_descendants' {
+            $f=New-P3Fixture; $p=$null
+            try {
+                $p=Start-PlatformOwnedProcess -ExecutablePath '/bin/sh' -ArgumentList @('-c','/bin/sleep 90 & echo $! > child; wait') -Environment @{} -WorkingDirectoryLease $f.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(20)) -StdoutPath (Join-Path $f.Path 'out') -StderrPath (Join-Path $f.Path 'err')
+                $until=[DateTimeOffset]::UtcNow.AddSeconds(10)
+                while (-not [IO.File]::Exists((Join-Path $f.Path 'child')) -and [DateTimeOffset]::UtcNow -lt $until) { Start-Sleep -Milliseconds 20 }
+                [IO.File]::Exists((Join-Path $f.Path 'child')) | Should Be $true
+                # File creation precedes its small write; wait for a complete PID.
+                $childId=0
+                while (-not [int]::TryParse([IO.File]::ReadAllText((Join-Path $f.Path 'child')),[ref]$childId) -and [DateTimeOffset]::UtcNow -lt $until) { Start-Sleep -Milliseconds 10 }
+                $childId | Should BeGreaterThan 0
+                $flags=[Reflection.BindingFlags]'Instance,NonPublic'
+                $gate=$p.GetType().GetField('gate',$flags).GetValue($p)
+                $control=$p.GetType().GetField('control',$flags).GetValue($p)
+                [Threading.Monitor]::Enter($gate)
+                try {
+                    # Reproduce the pre-census startup state without a global fault hook.
+                    $control.GetType().GetMethod('ForgetOwned',$flags).Invoke($control,[object[]]@($childId))
+                    $control.GetType().GetMethod('CleanupFailedStart',$flags).Invoke($control,[object[]]@([TimeSpan]::FromSeconds(5)))
+                    @($control.GetType().GetMethod('Remaining',[Reflection.BindingFlags]'Instance,Public').Invoke($control,@())).Count | Should Be 0
+                    @(Get-Process -Id $childId -ErrorAction SilentlyContinue).Count | Should Be 0
+                } finally { [Threading.Monitor]::Exit($gate) }
+                Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $p)
+            } finally { Remove-P3Fixture $f $p }
+        }
+    }
+
+    # Scenario: A native child creates a new session, escaping its original group.
+    # Purpose: Linux subreaper can observe adoption; macOS must report uncertainty.
+    # Register only on the native host; keep this file's Core CI skip count at zero.
+    if ($IsLinux -or $IsMacOS) {
+        It 'InterT90_reports_or_reclaims_setsid_escape' {
+            $f = New-P3Fixture; $p = $null; $childId = 0; $child = $null
+            try {
+                $code = 'Add-Type -TypeDefinition ''using System.Runtime.InteropServices; public class P3Escape { [DllImport("libc")] public static extern int setsid(); }''; if ([P3Escape]::setsid() -lt 0) { throw ''setsid fixture failed'' }; [IO.File]::WriteAllText(''child'',[string]$PID); Start-Sleep 90'
+                $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code))
+                $escapedShell = $script:P3Shell.Replace("'","''")
+                $parent = '$s = [Diagnostics.ProcessStartInfo]::new(); $s.FileName = ''' + $escapedShell + '''; $s.UseShellExecute = $false; foreach ($a in @(''-NoProfile'',''-NonInteractive'',''-EncodedCommand'',''' + $encoded + ''')) { $s.ArgumentList.Add($a) }; [Diagnostics.Process]::Start($s) | Out-Null; Start-Sleep 3'
+                $p = Start-P3Fixture $f $parent
+                $until = [DateTime]::UtcNow.AddSeconds(15)
+                while (-not [IO.File]::Exists((Join-Path $f.Path 'child')) -and [DateTime]::UtcNow -lt $until) { Start-Sleep -Milliseconds 50 }
+                $childId = [int][IO.File]::ReadAllText((Join-Path $f.Path 'child'))
+                $child = Get-Process -Id $childId -ErrorAction Stop
+                $childStart = $child.StartTime
+                Assert-P3Exited $p
+                $r = Stop-PlatformOwnedProcess -Lease $p
+                if ($IsMacOS) {
+                    $r.Limitations | Should Contain 'macos-process-group-cannot-detect-setsid-escape'
+                    # An unobserved escape is outside this capability's cleanup scope.
+                    # An observed escape must either exit or keep cleanup incomplete.
+                    if (-not $r.CleanedUp) { $r.Uncertainty | Should Not BeNullOrEmpty }
+                }
+                elseif ($r.CleanedUp) { @(Get-Process -Id $childId -ErrorAction SilentlyContinue).Count | Should Be 0 }
+                else { $r.Uncertainty | Should Not BeNullOrEmpty }
+                $r.CaptureReadersStopped | Should Be $true
+                $r.CaptureResourcesClosed | Should Be $true
+            } finally {
+                if ($null -ne $p) { $p.Dispose() }
+                # Fixture fallback only: kill by a retained Process object/start time, never guessed PID.
+                if ($null -ne $child) {
+                    $current = Get-Process -Id $childId -ErrorAction SilentlyContinue
+                    if ($null -ne $current) { try { if ($current.StartTime -eq $childStart) { $current.Kill(); $current.WaitForExit(5000) | Out-Null } } finally { $current.Dispose() } }
+                    $child.Dispose()
+                }
+                Remove-P3Fixture $f $null
+            }
+        }
+    }
+
+    # Scenario: Output paths already name a caller-owned file.
+    # Purpose: Capture creation cannot truncate or overwrite existing content.
+    It 'InterT100_refuses_existing_output_files' {
+        $f = New-P3Fixture
+        try {
+            [IO.File]::WriteAllText((Join-Path $f.Path 'out'),'sentinel')
+            { Start-P3Fixture $f 'exit 0' } | Should Throw
+            [IO.File]::ReadAllText((Join-Path $f.Path 'out')) | Should Be 'sentinel'
+        } finally { Remove-P3Fixture $f $null }
+    }
+
+    # Scenario: Capabilities are requested before using the process API.
+    # Purpose: Available means a real child ran and cleanup completed on this host.
+    It 'InterT110_probes_actual_process_isolation_and_cleanup' {
+        $r = Get-PlatformCapabilities -Required @('owned-process','process-cleanup')
+        $expected = if ($IsWindows) { 'windows-job-object' } elseif ($IsLinux) { 'linux-process-group-subreaper' } else { 'macos-process-group' }
+        foreach ($name in @('owned-process','process-cleanup','process-isolation')) {
+            $c = $r.capabilities | Where-Object name -eq $name
+            $c.status | Should Be 'available'
+            $c.evidence.isolation | Should Be $expected
+            if ($IsMacOS) { $c.evidence[0].limitations | Should Contain 'macos-process-group-cannot-detect-setsid-escape' }
+            if ($IsLinux -or $IsMacOS) { $c.evidence[0].limitations | Should Contain 'group-signal-external-reaper-race' }
+            else { @($c.evidence[0].limitations).Count | Should Be 0 }
+        }
+    }
+
+    # Scenario: An executable is supplied as a P2 lease rather than a pathname.
+    # Purpose: Preserve descriptor/handle identity and bind the child's working directory.
+    It 'InterT120_starts_from_executable_and_directory_leases' {
+        $f = New-P3Fixture; $p = $null; $executable = $null; $parent = $null
+        try {
+            $exePath = $script:P3Shell
+            $parentPath = [IO.Path]::GetDirectoryName($exePath); $anchor = [IO.Path]::GetPathRoot($parentPath)
+            $parent = Open-PlatformDirectory -Root $anchor -RelativePath $parentPath.Substring($anchor.Length)
+            $executable = Open-PlatformFile -ParentLease $parent -Leaf ([IO.Path]::GetFileName($exePath)) -Access Read -CreateMode OpenExisting
+            $argsList = @('-NoProfile','-NonInteractive','-Command','[Console]::Write([Environment]::CurrentDirectory); if ([Console]::Read() -ne -1) { exit 9 }')
+            $envMap = @{}; if ($IsWindows) { $envMap.SystemRoot = $env:SystemRoot }
+            $p = Start-PlatformOwnedProcess -ExecutableLease $executable -ArgumentList $argsList -Environment $envMap -WorkingDirectoryLease $f.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(20)) -StdoutPath (Join-Path $f.Path 'out') -StderrPath (Join-Path $f.Path 'err')
+            $executable.Dispose(); $parent.Dispose()
+            Assert-P3Exited $p
+            Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $p)
+            $p.ExitCode | Should Be 0
+            [IO.File]::ReadAllText((Join-Path $f.Path 'out')).Trim() | Should Be $f.Path
+        } finally { if ($null -ne $executable) { $executable.Dispose() }; if ($null -ne $parent) { $parent.Dispose() }; Remove-P3Fixture $f $p }
+    }
+
+    # Scenario: An ordinary newly created P2 file is supplied as an executable lease.
+    # Purpose: Refuse mode 0600 with a typed error; never silently add executable permissions.
+    # Register only on the native host; keep this file's Core CI skip count at zero.
+    if ($IsLinux -or $IsMacOS) {
+        It 'InterT125_refuses_an_executable_lease_without_execute_permission' {
+            $f = New-P3Fixture; $file = $null
+            try {
+                $file = Open-PlatformFile -ParentLease $f.Directory -Leaf 'executable' -Access Read -CreateMode CreateNew
+                [IO.File]::WriteAllText((Join-Path $f.Path 'executable'),"#!/bin/sh`nexit 0`n",[Text.UTF8Encoding]::new($false))
+                $caught = $null
+                try { Start-PlatformOwnedProcess -ExecutableLease $file -Environment @{} -WorkingDirectoryLease $f.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(10)) -StdoutPath (Join-Path $f.Path 'out') -StderrPath (Join-Path $f.Path 'err') | Out-Null } catch { $caught = $_.Exception }
+                $caught | Should Not BeNullOrEmpty
+                while ($null -ne $caught.InnerException) { $caught = $caught.InnerException }
+                $caught.GetType().Name | Should Be 'PlatformErrnoException'
+                $caught.Operation | Should Be 'executable-lease-permission'
+                $caught.Errno | Should Be 13
+                ((Get-PlatformPermissions -Lease $file).Mode -band 4095) | Should Be 384
+            } finally { if ($null -ne $file) { $file.Dispose() }; Remove-P3Fixture $f $null }
+        }
+    }
+
+    # Scenario: The caller explicitly makes a P2-created script executable using fchmod.
+    # Purpose: Exercise Darwin's validated pathname and Linux's descriptor execution with mode 0700.
+    # Register only on the native host; keep this file's Core CI skip count at zero.
+    if ($IsLinux -or $IsMacOS) {
+        It 'InterT130_starts_a_lease_with_explicit_execute_permission' {
+            $f = New-P3Fixture; $file = $null; $p = $null
+            try {
+                $file = Open-PlatformFile -ParentLease $f.Directory -Leaf 'executable' -Access Read -CreateMode CreateNew
+                [IO.File]::WriteAllText((Join-Path $f.Path 'executable'),"#!/bin/sh`nprintf lease-ok`nexit 17`n",[Text.UTF8Encoding]::new($false))
+                ((Set-PlatformPermissions -Lease $file -Policy @{ Mode=448 }).Mode -band 4095) | Should Be 448
+                $p = Start-PlatformOwnedProcess -ExecutableLease $file -Environment @{} -WorkingDirectoryLease $f.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(10)) -StdoutPath (Join-Path $f.Path 'out') -StderrPath (Join-Path $f.Path 'err')
+                Assert-P3Exited $p
+                Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $p)
+                $p.ExitCode | Should Be 17
+                [IO.File]::ReadAllText((Join-Path $f.Path 'out')) | Should Be 'lease-ok'
+            } finally { if ($null -ne $file) { $file.Dispose() }; Remove-P3Fixture $f $p }
+        }
+    }
+}
+
+Describe 'Unix process observation regressions' {
+    BeforeAll {
+        Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
+        $script:UnixControlType = [SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative].Assembly.GetType('SyuanTsai.AIInstructions.PlatformRuntime.UnixProcessControl')
+        if ($null -eq ('UnixObservationFixture' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Collections;
+using System.Collections.Generic;
+public static class UnixObservationFixture
+{
+    public static Func<int, string> Read(Hashtable state)
+    {
+        return pid => {
+            var table = (IDictionary)state["Table"];
+            if (!table.Contains(pid)) throw new System.IO.FileNotFoundException();
+            var error = table[pid] as Exception;
+            if (error != null) throw error;
+            return (string)table[pid];
+        };
+    }
+    public static Func<int, byte[]> BsdInfo(Hashtable state)
+    {
+        var read = Read(state);
+        return pid => {
+            string stat;
+            try { stat = read(pid); } catch (System.IO.FileNotFoundException) { return null; }
+            var fields = stat.Substring(stat.LastIndexOf(')') + 2).Split(' ');
+            var data = new byte[136];
+            Array.Copy(BitConverter.GetBytes(fields[0] == "Z" ? 5 : 2), 0, data, 4, 4);
+            Array.Copy(BitConverter.GetBytes(pid), 0, data, 12, 4);
+            Array.Copy(BitConverter.GetBytes(Int32.Parse(fields[1])), 0, data, 16, 4);
+            Array.Copy(BitConverter.GetBytes(Int32.Parse(fields[2])), 0, data, 100, 4);
+            Array.Copy(BitConverter.GetBytes(UInt64.Parse(fields[19])), 0, data, 120, 8);
+            return data;
+        };
+    }
+}
+'@
+        }
+        function Set-UnixTestField($Control,[string]$Name,$Value) { $script:UnixControlType.GetField($Name,[Reflection.BindingFlags]'Instance,NonPublic').SetValue($Control,$Value) }
+        function Invoke-UnixTestMethod($Control,[string]$Name,[object[]]$Arguments=@()) { $script:UnixControlType.GetMethod($Name,[Reflection.BindingFlags]'Instance,NonPublic,Public').Invoke($Control,$Arguments) }
+        function New-UnixTestStat([int]$Id,[int]$Parent,[int]$Group,[string]$Start,[string]$State='S') {
+            $fields = @($State,[string]$Parent,[string]$Group) + @('0') * 16 + @($Start)
+            "$Id (fixture) " + ($fields -join ' ')
+        }
+        function New-UnixObservationFixture {
+            $state = @{ Pids=[int[]]@(100,200); Table=@{}; Waited=[Collections.Generic.List[int]]::new(); Signals=[Collections.Generic.List[string]]::new(); Peek=$null; WaitStatus=0; ExitEvent=$null; WaitError=0; GroupErrno=0 }
+            $state.Table[100] = New-UnixTestStat 100 1 100 'supervisor'
+            $state.Table[200] = New-UnixTestStat 200 100 200 'root'
+            $control = [Activator]::CreateInstance($script:UnixControlType,$true)
+            Set-UnixTestField $control mac $false
+            Set-UnixTestField $control supervisor 100
+            Set-UnixTestField $control '<Pid>k__BackingField' 200
+            Set-UnixTestField $control '<StartIdentity>k__BackingField' 'root'
+            Set-UnixTestField $control listLinuxPids ([Func[int[]]]{ return ,$state.Pids }.GetNewClosure())
+            Set-UnixTestField $control readStat ([UnixObservationFixture]::Read($state))
+            $state.Pidfds = @{}; $state.PidfdStarts = @{}; $state.ClosedPidfds = [Collections.Generic.List[int]]::new()
+            $state.PidfdSignals = [Collections.Generic.List[string]]::new()
+            Set-UnixTestField $control openPidfd ([Func[int,Tuple[int,int]]]{ param($id) $state.Pidfds[$id + 1000] = $id; $state.PidfdStarts[$id + 1000] = ($state.Table[$id] -split ' ')[-1]; return [Tuple]::Create(($id + 1000),0) }.GetNewClosure())
+            Set-UnixTestField $control sendPidfdSignal ([Func[int,int,int]]{
+                param($fd,$signal)
+                $state.PidfdSignals.Add("${fd}:$signal"); $id=$state.Pidfds[$fd]
+                if (-not $state.Table.ContainsKey($id)) { return 3 }
+                if ($state.Table[$id] -is [string] -and ($state.Table[$id] -split ' ')[-1] -ne $state.PidfdStarts[$fd]) { return 3 }
+                $state.Signals.Add("${id}:$signal"); return 0
+            }.GetNewClosure())
+            Set-UnixTestField $control closePidfd ([Action[int]]{ param($fd) $state.ClosedPidfds.Add($fd) }.GetNewClosure())
+            Set-UnixTestField $control waitPidfd ([Func[int,int,bool,Tuple[int,int,int]]]{ param($id,$fd,$peek) return [Tuple]::Create(-1,0,10) })
+            Set-UnixTestField $control sendSignal ([Func[int,int,int]]{ param($id,$signal) $state.Signals.Add("${id}:$signal"); if ($id -eq -200 -and $signal -eq 0) { return [int]$state.GroupErrno }; return 0 }.GetNewClosure())
+            Set-UnixTestField $control peekChild ([Func[int,Tuple[int,int,int]]]{
+                param($id)
+                if ($null -ne $state.Peek) { return $state.Peek }
+                if ($state.Table.ContainsKey($id) -and $state.Table[$id] -is [string] -and $state.Table[$id] -match '\) Z ') { return [Tuple]::Create([int]$id,[int]$state.WaitStatus,0) }
+                return [Tuple]::Create(0,0,0)
+            }.GetNewClosure())
+            Set-UnixTestField $control readExitEvent ([Func[Nullable[int]]]{ return $state.ExitEvent }.GetNewClosure())
+            Set-UnixTestField $control waitForChild ([Func[int,Tuple[int,int,int]]]{ param($id) $state.Waited.Add($id); if ($state.WaitError) { return [Tuple]::Create(-1,0,[int]$state.WaitError) }; $state.Table.Remove($id); return [Tuple]::Create([int]$id,[int]$state.WaitStatus,0) }.GetNewClosure())
+            $root = Invoke-UnixTestMethod $control Read @([int]200)
+            $owned = $script:UnixControlType.GetField('owned',[Reflection.BindingFlags]'Instance,NonPublic').GetValue($control)
+            $owned.Add(200,$root)
+            @{ Control=$control; State=$state; Owned=$owned }
+        }
+        function Set-DarwinObservationFixture($Fixture) {
+            $state = $Fixture.State
+            $state.Table[100] = New-UnixTestStat 100 1 100 '1'
+            $state.Table[200] = New-UnixTestStat 200 100 200 '10'
+            Set-UnixTestField $Fixture.Control mac $true
+            Set-UnixTestField $Fixture.Control '<StartIdentity>k__BackingField' '10:0'
+            Set-UnixTestField $Fixture.Control effectiveUid ([Func[uint32]]{ return 501 })
+            Set-UnixTestField $Fixture.Control readBsdInfo ([UnixObservationFixture]::BsdInfo($state))
+            Set-UnixTestField $Fixture.Control listDarwinPids ([Func[uint32,uint32,int[]]]{ param($kind,$value) if ($kind -eq 4) { return ,$state.Pids }; return ,([int[]]@()) }.GetNewClosure())
+            Set-UnixTestField $Fixture.Control peekChild ([Func[int,Tuple[int,int,int]]]{
+                param($id)
+                if ($null -ne $state.Peek) { return $state.Peek }
+                if ($state.WaitError) { return [Tuple]::Create(-1,0,[int]$state.WaitError) }
+                if ($null -ne $state.ExitEvent) { return [Tuple]::Create([int]$id,0,0) }
+                return [Tuple]::Create(0,0,0)
+            }.GetNewClosure())
+            [void]$script:UnixControlType.GetField('baseline',[Reflection.BindingFlags]'Instance,NonPublic').GetValue($Fixture.Control).Add('100:1:0')
+            $Fixture.Owned.Clear(); $Fixture.Owned.Add(200,(Invoke-UnixTestMethod $Fixture.Control Read @([int]200)))
+        }
+    }
+
+    BeforeEach {
+        $flags=[Reflection.BindingFlags]'Static,NonPublic'
+        $script:SavedUnixPending=$script:UnixControlType.GetField('pendingFailedStart',$flags).GetValue($null)
+        $script:SavedUnixActive=$script:UnixControlType.GetField('active',$flags).GetValue($null)
+    }
+    AfterEach {
+        # These syscall fixtures own fake PIDs/fds. A deliberately poisoned test
+        # must not poison later real probes or erase an existing runtime owner.
+        $flags=[Reflection.BindingFlags]'Static,NonPublic'
+        $pendingField=$script:UnixControlType.GetField('pendingFailedStart',$flags)
+        $pending=$pendingField.GetValue($null)
+        if($null -ne $pending -and -not [object]::ReferenceEquals($pending,$script:SavedUnixPending)) { Invoke-UnixTestMethod $pending ClosePidfds }
+        $pendingField.SetValue($null,$script:SavedUnixPending)
+        $script:UnixControlType.GetField('active',$flags).SetValue($null,$script:SavedUnixActive)
+    }
+
+    # Scenario: A foreign PID denies inspection, while the owned root is readable.
+    # Purpose: Unrelated permissions must not invalidate workload capability or cleanup.
+    It 'UnitT10_ignores_foreign_permission_denials_but_preserves_owned_failures' {
+        $f = New-UnixObservationFixture
+        $f.State.Pids = [int[]]@(100,200,999)
+        $f.State.Table[999] = [SyuanTsai.AIInstructions.PlatformRuntime.PlatformErrnoException]::new('proc_pidinfo',1)
+        Invoke-UnixTestMethod $f.Control Poll
+        $f.Control.Uncertainty | Should BeNullOrEmpty
+        $f.State.Table[200] = [SyuanTsai.AIInstructions.PlatformRuntime.PlatformErrnoException]::new('proc_pidinfo',13)
+        Invoke-UnixTestMethod $f.Control Poll
+        $f.Control.Uncertainty | Should Match 'owned-process-inventory-permission-denied'
+        $f.Owned.ContainsKey(200) | Should Be $true
+    }
+
+    # Scenario: Darwin's UID census omits a newly born descendant and rejects a foreign PID.
+    # Purpose: Scope discovery by UID, then follow group/PPID queries; denied owned descendants remain unknown.
+    It 'UnitT15_scopes_darwin_census_and_follows_owned_descendants' {
+        $f = New-UnixObservationFixture; $state = $f.State
+        $state.Table[100] = New-UnixTestStat 100 1 100 '1'
+        $state.Table[200] = New-UnixTestStat 200 100 200 '10'
+        $state.Table[300] = New-UnixTestStat 300 200 200 '11'
+        $state.Table[301] = New-UnixTestStat 301 300 200 '12'
+        $state.Table[999] = [SyuanTsai.AIInstructions.PlatformRuntime.PlatformErrnoException]::new('proc_pidinfo',1)
+        $state.Calls = [Collections.Generic.List[string]]::new()
+        $state.Lists = @{ '4:501'=[int[]]@(100,200,300,999); '2:200'=[int[]]@(200,300); '6:200'=[int[]]@(300); '6:300'=[int[]]@(301) }
+        Set-UnixTestField $f.Control mac $true
+        Set-UnixTestField $f.Control '<StartIdentity>k__BackingField' '10:0'
+        Set-UnixTestField $f.Control effectiveUid ([Func[uint32]]{ return 501 })
+        Set-UnixTestField $f.Control readBsdInfo ([UnixObservationFixture]::BsdInfo($state))
+        [void]$script:UnixControlType.GetField('baseline',[Reflection.BindingFlags]'Instance,NonPublic').GetValue($f.Control).Add('100:1:0')
+        Set-UnixTestField $f.Control listDarwinPids ([Func[uint32,uint32,int[]]]{
+            param($kind,$value)
+            $key = "${kind}:$value"; $state.Calls.Add($key)
+            if ($state.Lists.ContainsKey($key)) { return ,$state.Lists[$key] }
+            return ,([int[]]@())
+        }.GetNewClosure())
+        $f.Owned.Clear(); $f.Owned.Add(200,(Invoke-UnixTestMethod $f.Control Read @([int]200)))
+        Invoke-UnixTestMethod $f.Control Poll
+        $f.Control.Uncertainty | Should BeNullOrEmpty
+        $f.Owned.ContainsKey(301) | Should Be $true
+        $state.Calls | Should Contain '4:501'
+        $state.Calls | Should Contain '6:300'
+        $state.Calls | Should Not Contain '1:0'
+        $state.Table[301] = [SyuanTsai.AIInstructions.PlatformRuntime.PlatformErrnoException]::new('proc_pidinfo',1)
+        Invoke-UnixTestMethod $f.Control Poll
+        $f.Control.Uncertainty | Should Match 'owned-process-inventory-permission-denied'
+        $f.Owned.ContainsKey(301) | Should Be $true
+        Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null
+        $state.Signals | Should Not Contain '200:9'
+        $state.Signals | Should Not Contain '301:9'
+    }
+
+    # Scenario: A known child is omitted from a UID-filtered census after credentials change.
+    # Purpose: Explicitly query owned identities; a missing census entry does not prove exit.
+    It 'UnitT20_queries_owned_pids_even_when_missing_from_the_census' {
+        $f = New-UnixObservationFixture
+        $f.State.Pids = [int[]]@(100)
+        $f.State.Table[200] = [UnauthorizedAccessException]::new('fixture')
+        Invoke-UnixTestMethod $f.Control Poll
+        $f.Control.Uncertainty | Should Match 'owned-process-inventory-permission-denied'
+        $f.Owned.ContainsKey(200) | Should Be $true
+    }
+
+    # Scenario: /proc stat opens successfully but its process disappears before read.
+    # Purpose: ESRCH/ENOENT mean gone; EIO and other failures must not be swallowed.
+    It 'UnitT30_treats_proc_disappearance_as_gone_but_preserves_other_io_errors' {
+        $f = New-UnixObservationFixture
+        $f.State.Pids = [int[]]@(100,200,999)
+        foreach ($errno in @(2,3,-2147024894,-2147024893)) {
+            $f.State.Table[999] = [IO.IOException]::new('fixture',$errno)
+            Invoke-UnixTestMethod $f.Control Read @([int]999) | Should BeNullOrEmpty
+            Invoke-UnixTestMethod $f.Control Poll
+            $f.Control.Uncertainty | Should BeNullOrEmpty
+        }
+        $f.State.Table[999] = [IO.IOException]::new('fixture',5)
+        { Invoke-UnixTestMethod $f.Control Read @([int]999) } | Should Throw
+        { Invoke-UnixTestMethod $f.Control Poll } | Should Throw
+    }
+
+    # Scenario: A grandchild is absent from the first census, which already sees a zombie root.
+    # Purpose: Do not reap the last group anchor before Stop can discover orphan descendants.
+    It 'UnitT40_keeps_the_root_anchor_until_cleanup_discovers_late_orphans' {
+        $f = New-UnixObservationFixture
+        $f.State.Table[200] = New-UnixTestStat 200 100 200 'root' 'Z'
+        Invoke-UnixTestMethod $f.Control Poll
+        $f.Control.Exited | Should Be $true
+        $f.State.Waited.Count | Should Be 0
+        $f.State.Pids = [int[]]@(100,200,300)
+        $f.State.Table[300] = New-UnixTestStat 300 100 200 'orphan'
+        Invoke-UnixTestMethod $f.Control Poll
+        $f.Owned.ContainsKey(300) | Should Be $true
+        $f.Control.Uncertainty | Should BeNullOrEmpty
+        Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null
+        $f.State.Table[300] = New-UnixTestStat 300 100 200 'orphan' 'Z'
+        Invoke-UnixTestMethod $f.Control Poll
+        Invoke-UnixTestMethod $f.Control Poll
+        $f.State.Waited | Should Contain 300
+        $f.State.Waited | Should Contain 200
+        $f.Owned.Count | Should Be 0
+    }
+
+    # Scenario: TERM forks a child after enumeration, then the root becomes a zombie before stat.
+    # Purpose: Cleanup must take a census after observing exit before releasing the last group anchor.
+    It 'UnitT45_refreshes_census_after_exit_even_when_cleanup_has_started' {
+        $f = New-UnixObservationFixture
+        Invoke-UnixTestMethod $f.Control Poll
+        Invoke-UnixTestMethod $f.Control Signal @($false) | Out-Null
+        $f.State.Table[200] = New-UnixTestStat 200 100 200 'root' 'Z'
+        Invoke-UnixTestMethod $f.Control Poll
+        $f.Control.Exited | Should Be $true
+        $f.State.Waited | Should Not Contain 200
+        $f.State.Pids = [int[]]@(100,200,300)
+        $f.State.Table[300] = New-UnixTestStat 300 100 200 'term-orphan'
+        Invoke-UnixTestMethod $f.Control Poll
+        $f.Owned.ContainsKey(300) | Should Be $true
+        $f.State.Waited | Should Not Contain 200
+        Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null
+        $f.State.PidfdSignals | Should Contain '1300:9'
+        $f.State.Table[300] = New-UnixTestStat 300 100 200 'term-orphan' 'Z'
+        Invoke-UnixTestMethod $f.Control Poll
+        Invoke-UnixTestMethod $f.Control Poll
+        $f.State.Waited | Should Contain 300
+        $f.State.Waited | Should Contain 200
+        $f.Control.Uncertainty | Should BeNullOrEmpty
+    }
+
+    # Scenario: A reaped child's PID is immediately assigned to another workload.
+    # Purpose: Retire the old identity so root cancellation continues without signalling the replacement.
+    It 'UnitT50_retires_reaped_identities_before_pid_reuse' {
+        $f = New-UnixObservationFixture
+        $f.State.Pids = [int[]]@(100,200,300)
+        $f.State.Table[300] = New-UnixTestStat 300 100 200 'old-child' 'Z'
+        Invoke-UnixTestMethod $f.Control Poll
+        $f.Owned.ContainsKey(300) | Should Be $false
+        $f.State.Table[300] = New-UnixTestStat 300 1 900 'replacement'
+        Invoke-UnixTestMethod $f.Control Poll
+        Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null
+        $f.State.PidfdSignals | Should Contain '1200:9'
+        $f.State.Signals | Should Not Contain '300:9'
+        $f.Control.Uncertainty | Should BeNullOrEmpty
+    }
+
+    # Scenario: An unreaped observed child is replaced while the root remains alive.
+    # Purpose: Refuse the replacement without globally disabling cleanup of verified processes.
+    It 'UnitT60_keeps_signalling_verified_processes_after_one_identity_mismatch' {
+        $f = New-UnixObservationFixture
+        $f.State.Pids = [int[]]@(100,200,300)
+        $f.State.Table[300] = New-UnixTestStat 300 200 200 'old-child'
+        Invoke-UnixTestMethod $f.Control Poll
+        $f.State.Table[300] = New-UnixTestStat 300 1 200 'replacement'
+        Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null
+        Invoke-UnixTestMethod $f.Control Poll
+        Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null
+        $f.State.Signals | Should Contain '200:9'
+        $f.State.Signals | Should Not Contain '300:9'
+        $f.State.Signals | Should Not Contain '-200:9'
+        $f.Control.Uncertainty | Should Match 'process-start-identity-mismatch'
+    }
+
+    # Scenario: libproc omits a dead root for which kqueue reports NOTE_EXIT.
+    # Purpose: Detect exit/status independently of the census and retain the group anchor until a later census.
+    It 'UnitT70_observes_darwin_exit_when_libproc_omits_the_zombie' {
+        $f = New-UnixObservationFixture; Set-DarwinObservationFixture $f
+        $f.State.Table.Remove(200)
+        $f.State.WaitStatus = 23 * 256
+        $f.State.ExitEvent = 23 * 256
+        Invoke-UnixTestMethod $f.Control Signal @($false) | Out-Null
+        Invoke-UnixTestMethod $f.Control Poll
+        $f.Control.Exited | Should Be $true
+        $f.Control.ExitCode | Should Be 23
+        $f.State.Waited.Count | Should Be 0
+        $f.Owned.ContainsKey(200) | Should Be $true
+        $f.State.GroupErrno = 3
+        Invoke-UnixTestMethod $f.Control Poll
+        $f.State.Waited | Should Contain 200
+        $f.Control.Uncertainty | Should BeNullOrEmpty
+    }
+
+    # Scenario: A post-exit Darwin census finds a previously unseen orphan in the root's group.
+    # Purpose: WNOWAIT reserves the absent zombie for discovery and signalling; ECHILD revokes authority.
+    It 'UnitT75_requires_a_waitable_darwin_root_to_adopt_unanchored_group_members' {
+        foreach ($waitError in @(0,10)) {
+            $f = New-UnixObservationFixture; Set-DarwinObservationFixture $f
+            $f.State.Table.Remove(200); $f.State.ExitEvent = 0; $f.State.WaitError = $waitError
+            Invoke-UnixTestMethod $f.Control Poll
+            Invoke-UnixTestMethod $f.Control Signal @($false) | Out-Null
+            $f.State.Pids = [int[]]@(100,300)
+            $f.State.Table[300] = New-UnixTestStat 300 1 200 '11'
+            Invoke-UnixTestMethod $f.Control Poll
+            $f.State.Waited | Should Not Contain 200
+            Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null
+            if ($waitError -eq 0) {
+                $f.Owned.ContainsKey(300) | Should Be $true
+                $f.State.Signals | Should Contain '-200:9'
+                $f.Control.Uncertainty | Should BeNullOrEmpty
+            } else {
+                $f.Owned.ContainsKey(300) | Should Be $false
+                $f.State.Signals.Count | Should Be 0
+                @(Invoke-UnixTestMethod $f.Control Remaining) | Should Contain 300
+                $f.Control.Uncertainty | Should Match 'root-anchor-lost'
+            }
+        }
+    }
+
+    # Scenario: Another reaper consumes the native root's status before our waitid/waitpid.
+    # Purpose: ECHILD requires identity absence; Darwin's pre-registered event preserves exit status.
+    It 'UnitT80_confirms_absence_after_echild_and_preserves_darwin_exit_event' {
+        foreach ($darwin in @($false,$true)) {
+            $f = New-UnixObservationFixture
+            if ($darwin) { Set-DarwinObservationFixture $f; $f.State.ExitEvent = 23 * 256; $f.State.WaitError = 10 }
+            $f.State.Table.Remove(200)
+            $f.State.Peek = [Tuple]::Create(-1,0,10)
+            if ($darwin) { Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null }
+            Invoke-UnixTestMethod $f.Control Poll
+            if ($darwin) { Invoke-UnixTestMethod $f.Control Poll }
+            $f.Control.Exited | Should Be $true
+            $f.Owned.ContainsKey(200) | Should Be $false
+            $f.Control.Uncertainty | Should BeNullOrEmpty
+            if ($darwin) { $f.Control.ExitCode | Should Be 23 }
+            else { $f.Control.ExitCode | Should BeNullOrEmpty }
+            Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null
+            $f.State.Signals.Count | Should Be 0
+        }
+    }
+
+    # Scenario: A reaper wins between our WNOWAIT exit observation and destructive waitpid.
+    # Purpose: Confirm disappearance again on ECHILD; permission failure and a live identity stay unresolved.
+    It 'UnitT85_revalidates_identity_when_waitpid_loses_the_reaping_race' {
+        foreach ($outcome in @('gone','present','denied','replacement')) {
+            $f = New-UnixObservationFixture; $state = $f.State
+            $state.Table[200] = New-UnixTestStat 200 100 200 'root' 'Z'
+            $state.WaitStatus = 23 * 256
+            $state.Outcome = $outcome
+            $state.ReplacementStat = New-UnixTestStat 200 100 200 'replacement'
+            Set-UnixTestField $f.Control waitForChild ([Func[int,Tuple[int,int,int]]]{
+                param($id)
+                $state.Waited.Add($id)
+                if ($state.Outcome -eq 'gone') { $state.Table.Remove($id); $state.GroupErrno = 3 }
+                if ($state.Outcome -eq 'denied') { $state.Table[$id] = [UnauthorizedAccessException]::new('fixture') }
+                if ($state.Outcome -eq 'replacement') { $state.Table[$id] = $state.ReplacementStat }
+                return [Tuple]::Create(-1,0,10)
+            }.GetNewClosure())
+            Invoke-UnixTestMethod $f.Control Signal @($false) | Out-Null
+            Invoke-UnixTestMethod $f.Control Poll
+            Invoke-UnixTestMethod $f.Control Poll
+            $state.Waited | Should Contain 200
+            $f.Control.ExitCode | Should Be 23
+            if ($outcome -eq 'gone') {
+                $f.Owned.ContainsKey(200) | Should Be $false
+                @(Invoke-UnixTestMethod $f.Control Remaining).Count | Should Be 0
+                $f.Control.Uncertainty | Should BeNullOrEmpty
+            } else {
+                @(Invoke-UnixTestMethod $f.Control Remaining) | Should Contain 200
+                if ($outcome -ne 'present') { $f.Control.Uncertainty | Should Not BeNullOrEmpty }
+            }
+        }
+    }
+
+    # Scenario: ECHILD is returned for a still-visible, denied or reused root PID.
+    # Purpose: ECHILD alone cannot authorize cleanup or signalling a replacement identity.
+    It 'UnitT90_does_not_treat_echild_as_proof_of_identity_exit' {
+        foreach ($kind in @('present','denied','replacement')) {
+            $f = New-UnixObservationFixture
+            $f.State.Peek = [Tuple]::Create(-1,0,10)
+            if ($kind -eq 'denied') { $f.State.Table[200] = [UnauthorizedAccessException]::new('fixture') }
+            if ($kind -eq 'replacement') { $f.State.Table[200] = New-UnixTestStat 200 100 200 'replacement' }
+            Invoke-UnixTestMethod $f.Control Poll
+            if ($kind -ne 'replacement') {
+                $f.Control.Exited | Should Be $false
+                $f.Owned.ContainsKey(200) | Should Be $true
+                @(Invoke-UnixTestMethod $f.Control Remaining) | Should Contain 200
+            }
+            if ($kind -ne 'present') {
+                $f.Control.Uncertainty | Should Not BeNullOrEmpty
+                Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null
+                $f.State.Signals | Should Not Contain '200:9'
+                $f.State.Signals | Should Not Contain '-200:9'
+            }
+        }
+    }
+
+    # Scenario: A root becomes unqueryable just before its exit is reported, or waitid is interrupted.
+    # Purpose: Retry incomplete observations without losing ownership or claiming cleanup.
+    It 'UnitT100_retries_incomplete_root_observation_and_preserves_wait_errors' {
+        foreach ($errno in @(0,4,5)) {
+            $f = New-UnixObservationFixture
+            $f.State.Table.Remove(200)
+            $f.State.Peek = if ($errno) { [Tuple]::Create(-1,0,[int]$errno) } else { [Tuple]::Create(0,0,0) }
+            Invoke-UnixTestMethod $f.Control Poll
+            $f.Control.Exited | Should Be $false
+            $f.Owned.ContainsKey(200) | Should Be $true
+            @(Invoke-UnixTestMethod $f.Control Remaining) | Should Contain 200
+            if ($errno -eq 5) { $f.Control.Uncertainty | Should Match 'root-waitid-failed: 5' }
+        }
+    }
+
+    # Scenario: Darwin no longer lists an owned zombie, but its group persists until launchd reaps it.
+    # Purpose: Positive kill(0) must keep cleanup pending, and subsequent ESRCH may confirm completion.
+    It 'UnitT110_keeps_unlisted_groups_pending_until_they_disappear' {
+        $f = New-UnixObservationFixture; Set-DarwinObservationFixture $f
+        $f.State.Table.Remove(200)
+        $f.State.Peek = [Tuple]::Create(-1,0,10)
+        $f.State.ExitEvent = 0; $f.State.WaitError = 10
+        Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null
+        Invoke-UnixTestMethod $f.Control Poll
+        Invoke-UnixTestMethod $f.Control Poll
+        @(Invoke-UnixTestMethod $f.Control Remaining) | Should Contain 200
+        $f.State.GroupErrno = 3
+        @(Invoke-UnixTestMethod $f.Control Remaining).Count | Should Be 0
+        $f.Control.Uncertainty | Should BeNullOrEmpty
+    }
+
+    # Scenario: Post-spawn validation fails after the original PID disappears, is denied, or is reused.
+    # Purpose: Neither rootReaped=false nor a matching numeric PGID authorizes a startup kill.
+    It 'UnitT120_revalidates_startup_identity_before_any_failure_signal' {
+        foreach ($kind in @('gone','denied','replacement','unknown-start','owned')) {
+            $f = New-UnixObservationFixture
+            if ($kind -eq 'gone') { $f.State.Table.Remove(200) }
+            if ($kind -eq 'denied') { $f.State.Table[200] = [UnauthorizedAccessException]::new('fixture') }
+            if ($kind -eq 'replacement') { $f.State.Table[200] = New-UnixTestStat 200 100 200 'replacement' }
+            if ($kind -eq 'unknown-start') { Set-UnixTestField $f.Control '<StartIdentity>k__BackingField' $null }
+            Invoke-UnixTestMethod $f.Control CleanupFailedStart @([TimeSpan]::Zero)
+            if ($kind -eq 'owned') { $f.State.PidfdSignals | Should Contain '1200:9' }
+            else { $f.State.Signals.Count | Should Be 0; $f.State.Waited.Count | Should Be 0 }
+        }
+    }
+
+    # Scenario: Another waiter reaps the root after pidfd binding and the numeric PID is reused.
+    # Purpose: Startup cleanup must neither signal nor reap the replacement by its numeric PID.
+    It 'UnitT130_keeps_startup_cleanup_bound_after_pid_reuse' {
+        $f = New-UnixObservationFixture; $state = $f.State
+        Invoke-UnixTestMethod $f.Control RecordSpawnIdentity @([int]200)
+        $state.ReplacementStat = New-UnixTestStat 200 100 200 'replacement'
+        Set-UnixTestField $f.Control sendPidfdSignal ([Func[int,int,int]]{
+            param($fd,$signal)
+            $state.PidfdSignals.Add("${fd}:$signal")
+            $state.Table[200] = $state.ReplacementStat
+            return 3
+        }.GetNewClosure())
+        Set-UnixTestField $f.Control waitForChild ([Func[int,Tuple[int,int,int]]]{ param($id) return [Tuple]::Create(-1,0,10) })
+        Invoke-UnixTestMethod $f.Control CleanupFailedStart @([TimeSpan]::Zero)
+        $state.Signals | Should Not Contain '-200:9'
+        $state.Signals | Should Not Contain '200:9'
+        $state.PidfdSignals | Should Contain '1200:9'
+        $state.Table[200] | Should Be $state.ReplacementStat
+        $state.Waited.Count | Should Be 0
+    }
+
+    # Scenario: An unrelated same-UID service appears under launchd during cleanup.
+    # Purpose: The macOS group contract excludes never-owned processes outside the group.
+    It 'UnitT140_ignores_unowned_launchd_children_outside_the_group' {
+        $f = New-UnixObservationFixture; Set-DarwinObservationFixture $f
+        $f.State.Table.Remove(200); $f.State.ExitEvent = 0; $f.State.WaitError = 10
+        $f.State.Table[300] = New-UnixTestStat 300 1 300 '11'
+        $f.State.Pids = [int[]]@(100,300); $f.State.GroupErrno = 3
+        Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null
+        Invoke-UnixTestMethod $f.Control Poll
+        Invoke-UnixTestMethod $f.Control Poll
+        @(Invoke-UnixTestMethod $f.Control Remaining).Count | Should Be 0
+        $f.Control.Uncertainty | Should BeNullOrEmpty
+        $f.Owned.ContainsKey(300) | Should Be $false
+    }
+
+    # Scenario: kill(group,0) reports EPERM, success, ESRCH, or an unexpected error.
+    # Purpose: Existing groups remain pending without poisoning a later confirmed absence.
+    It 'UnitT150_classifies_group_probe_errors_and_reports_the_actual_errno' {
+        foreach ($errno in @(0,1,3,22)) {
+            $f = New-UnixObservationFixture; Set-DarwinObservationFixture $f
+            $f.Owned.Clear(); Set-UnixTestField $f.Control rootReaped $true
+            $f.State.GroupErrno = $errno
+            $remaining = @(Invoke-UnixTestMethod $f.Control Remaining)
+            if ($errno -eq 0 -or $errno -eq 1) { $remaining | Should Contain 200 }
+            if ($errno -eq 22) { $f.Control.Uncertainty | Should Match 'group-existence-unknown: 22' }
+            else {
+                $f.Control.Uncertainty | Should BeNullOrEmpty
+                $f.State.GroupErrno = 3
+                @(Invoke-UnixTestMethod $f.Control Remaining).Count | Should Be 0
+            }
+            $observation = $script:UnixControlType.GetProperty('Observation',[Reflection.BindingFlags]'Instance,NonPublic').GetValue($f.Control)
+            $observation.GroupProbeErrno | Should Be $(if ($errno -eq 22) { 22 } else { 3 })
+        }
+    }
+
+    # Scenario: A previously observed Darwin child leaves the group, then exits independently.
+    # Purpose: Refuse unbound PID signals, retain the live identity, and resolve uncertainty on exit.
+    It 'UnitT160_tracks_observed_darwin_escapees_without_numeric_pid_signals' {
+        $f = New-UnixObservationFixture; Set-DarwinObservationFixture $f
+        $f.State.Pids = [int[]]@(100,200,300)
+        $f.State.Table[300] = New-UnixTestStat 300 200 200 '11'
+        Invoke-UnixTestMethod $f.Control Poll
+        $f.Owned.ContainsKey(300) | Should Be $true
+        $f.State.Table[300] = New-UnixTestStat 300 1 300 '11'
+        $f.State.Table.Remove(200); $f.State.ExitEvent = 0; $f.State.WaitError = 10
+        Invoke-UnixTestMethod $f.Control Poll
+        Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null
+        Invoke-UnixTestMethod $f.Control Poll
+        $f.State.GroupErrno = 3
+        @(Invoke-UnixTestMethod $f.Control Remaining) | Should Contain 300
+        $f.Control.Uncertainty | Should Match 'macos-unbound-pid-signal-refused'
+        $f.State.Signals | Should Not Contain '300:9'
+        $f.State.PidfdSignals.Count | Should Be 0
+        $f.State.Table.Remove(300)
+        Invoke-UnixTestMethod $f.Control Poll
+        @(Invoke-UnixTestMethod $f.Control Remaining).Count | Should Be 0
+        $f.Control.Uncertainty | Should BeNullOrEmpty
+    }
+
+    # Scenario: The new Linux child changes its group before post-spawn validation.
+    # Purpose: Preserve its start identity for failure cleanup, without signalling its new group.
+    It 'UnitT170_preserves_start_identity_before_rejecting_a_changed_spawn_group' {
+        $f = New-UnixObservationFixture
+        $f.Owned.Clear(); Set-UnixTestField $f.Control '<StartIdentity>k__BackingField' $null
+        $f.State.Table[200] = New-UnixTestStat 200 100 900 'root'
+        { Invoke-UnixTestMethod $f.Control RecordSpawnIdentity @([int]200) } | Should Throw
+        $f.Control.StartIdentity | Should Be 'root'
+        $f.Owned.ContainsKey(200) | Should Be $true
+        Invoke-UnixTestMethod $f.Control CleanupFailedStart @([TimeSpan]::Zero)
+        $f.State.PidfdSignals | Should Contain '1200:9'
+        $f.State.ClosedPidfds | Should Contain 1200
+        $f.State.Signals | Should Not Contain '-900:9'
+        $f.State.Signals | Should Not Contain '-200:9'
+    }
+
+    # Scenario: A PID is replaced before pidfd identity verification or immediately before signalling.
+    # Purpose: Reject a replacement-bound descriptor; a verified descriptor targets only the original process.
+    It 'UnitT180_binds_individual_signals_to_verified_pidfds_and_closes_them' {
+        foreach ($race in @('open','send','error')) {
+            $f = New-UnixObservationFixture; $state = $f.State
+            Invoke-UnixTestMethod $f.Control Poll
+            $state.Pids = [int[]]@(100,200,300)
+            $state.Table[300] = New-UnixTestStat 300 200 200 'child'
+            $state.ReplacementStat = New-UnixTestStat 300 1 300 'replacement'
+            $state.Race = $race; $state.BoundIdentity = $null
+            Set-UnixTestField $f.Control openPidfd ([Func[int,Tuple[int,int]]]{
+                param($id)
+                if ($state.Race -eq 'open') { $state.Table[$id] = $state.ReplacementStat }
+                $state.BoundIdentity = $state.Table[$id]
+                return [Tuple]::Create(1300,0)
+            }.GetNewClosure())
+            Set-UnixTestField $f.Control sendPidfdSignal ([Func[int,int,int]]{
+                param($fd,$signal)
+                if ($fd -eq 1300 -and $signal -eq 9) { $state.Table[300] = $state.ReplacementStat }
+                $state.PidfdSignals.Add("${fd}:$signal")
+                if ($state.Race -eq 'error' -and $fd -eq 1300 -and $signal -eq 9) { return 1 }; return 0
+            }.GetNewClosure())
+            Invoke-UnixTestMethod $f.Control Poll
+            Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null
+            $state.Signals | Should Not Contain '300:9'
+            $f.Control.Dispose()
+            $state.ClosedPidfds | Should Contain 1300
+            if ($race -eq 'open') { $state.PidfdSignals | Should Not Contain '1300:9' }
+            else { $state.PidfdSignals | Should Contain '1300:9'; $state.BoundIdentity | Should Match ' child$' }
+            if ($race -eq 'error') { $f.Control.Uncertainty | Should Match 'pidfd-send-signal-failed: 1' }
+        }
+    }
+
+    # Scenario: The kernel refuses pidfd_open for an observed escaped Linux child.
+    # Purpose: Missing pidfd support must never fall back to a racy numeric PID signal.
+    It 'UnitT190_fails_closed_when_pidfd_open_is_unavailable' {
+        $f = New-UnixObservationFixture
+        $f.State.Table[200] = New-UnixTestStat 200 100 900 'root'
+        Set-UnixTestField $f.Control openPidfd ([Func[int,Tuple[int,int]]]{ param($id) return [Tuple]::Create(-1,38) })
+        Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null
+        $f.State.Signals.Count | Should Be 0
+        $f.State.ClosedPidfds.Count | Should Be 0
+        $f.Control.Uncertainty | Should Match 'pidfd-open-failed: 38'
+    }
+
+    # Scenario: Capability probing encounters a missing pidfd entry point or a refused syscall.
+    # Purpose: Reject unavailable Linux signalling support before spawn and always release probe descriptors.
+    It 'UnitT195_probes_pidfd_support_without_leaking_descriptors' {
+        foreach ($kind in @('available','open-error','signal-error','entrypoint')) {
+            $f = New-UnixObservationFixture
+            if ($kind -eq 'open-error') { Set-UnixTestField $f.Control openPidfd ([Func[int,Tuple[int,int]]]{ param($id) return [Tuple]::Create(-1,38) }) }
+            if ($kind -eq 'signal-error') { Set-UnixTestField $f.Control sendPidfdSignal ([Func[int,int,int]]{ param($fd,$signal) return 1 }) }
+            if ($kind -eq 'entrypoint') { Set-UnixTestField $f.Control sendPidfdSignal ([Func[int,int,int]]{ param($fd,$signal) throw [EntryPointNotFoundException]::new('fixture') }) }
+            if ($kind -eq 'available') {
+                Invoke-UnixTestMethod $f.Control ProbePidfd
+                $f.State.PidfdSignals | Should Contain '1100:0'
+            } else { { Invoke-UnixTestMethod $f.Control ProbePidfd } | Should Throw }
+            if ($kind -eq 'open-error') { $f.State.ClosedPidfds.Count | Should Be 0 }
+            else { $f.State.ClosedPidfds | Should Contain 1100 }
+        }
+    }
+
+    # Scenario: Unix cleanup succeeds or rejects a mismatched caller identity.
+    # Purpose: Both receipt outcomes disclose the group/reaper race and Darwin's escape limitation.
+    It 'UnitT200_discloses_macos_limits_in_success_and_rejected_cleanup_receipts' {
+        foreach ($darwin in @($false,$true)) {
+        $f = New-UnixObservationFixture
+        if ($darwin) { Set-DarwinObservationFixture $f }
+        $f.State.Peek = [Tuple]::Create(-1,0,10)
+        $f.State.Table.Remove(200); $f.State.ExitEvent = 0; $f.State.WaitError = 10; $f.State.GroupErrno = 3
+        $type = [SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]
+        $flags = [Reflection.BindingFlags]'Instance,NonPublic'
+        $lease = [Activator]::CreateInstance($type,$flags,$null,[object[]]@([DateTimeOffset]::UtcNow.AddSeconds(10),[long]4096),$null)
+        $type.GetField('control',$flags).SetValue($lease,$f.Control)
+        $type.GetField('captureClosed',$flags).SetValue($lease,$true) # No capture resources in this fixture.
+        try {
+            $rejected = $lease.Stop([TimeSpan]::Zero,[DateTimeOffset]::UtcNow.AddSeconds(1),'incorrect')
+            $rejected.CleanedUp | Should Be $false
+            $rejected.Limitations | Should Contain 'group-signal-external-reaper-race'
+            if ($darwin) { $rejected.Limitations | Should Contain 'macos-process-group-cannot-detect-setsid-escape' }
+            $cleaned = $lease.Stop([TimeSpan]::Zero,[DateTimeOffset]::UtcNow.AddSeconds(1),$null)
+            $cleaned.CleanedUp | Should Be $true
+            $cleaned.Limitations | Should Contain 'group-signal-external-reaper-race'
+            $lease.Limitations | Should Contain 'group-signal-external-reaper-race'
+            if ($darwin) { $cleaned.Limitations | Should Contain 'macos-process-group-cannot-detect-setsid-escape' }
+        } finally { $lease.Dispose() }
+        }
+    }
+
+    # Scenario: The root was reaped and the last observed descendant can exit before signalling.
+    # Purpose: A census identity is not a lifetime reservation for a numeric process group.
+    It 'UnitT210_uses_pidfds_when_the_root_group_anchor_has_been_reaped' {
+        $f = New-UnixObservationFixture
+        $f.State.Pids = [int[]]@(100,200,300)
+        $f.State.Table[300] = New-UnixTestStat 300 200 200 'child'
+        Invoke-UnixTestMethod $f.Control Poll
+        Set-UnixTestField $f.Control rootReaped $true
+        $f.Owned.Remove(200) | Out-Null
+        $f.State.Table.Remove(200)
+        Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null
+        $f.State.Signals | Should Not Contain '-200:9'
+        $f.State.PidfdSignals | Should Contain '1300:9'
+    }
+
+    # Scenario: Only a Darwin descendant remains after the direct root was reaped.
+    # Purpose: A transient descendant observation must not authorize a numeric group signal.
+    It 'UnitT215_refuses_darwin_group_signals_without_the_direct_root_anchor' {
+        $f=New-UnixObservationFixture; Set-DarwinObservationFixture $f
+        $f.State.Pids=[int[]]@(100,200,300)
+        $f.State.Table[300]=New-UnixTestStat 300 200 200 '11'
+        Invoke-UnixTestMethod $f.Control Poll
+        Set-UnixTestField $f.Control rootReaped $true
+        $f.Owned.Remove(200) | Out-Null; $f.State.Table.Remove(200)
+        Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null
+        $f.State.Signals | Should Not Contain '-200:9'
+        $f.State.Signals | Should Not Contain '300:9'
+        $f.Control.Uncertainty | Should Match 'macos-unbound-pid-signal-refused'
+        @(Invoke-UnixTestMethod $f.Control Remaining) | Should Contain 300
+    }
+
+    # Scenario: Both census and stat become unreadable after verified identities were recorded.
+    # Purpose: Retained pidfds must allow TERM and KILL without another filesystem read.
+    It 'UnitT220_keeps_bound_termination_available_after_inventory_failure' {
+        $f = New-UnixObservationFixture
+        Invoke-UnixTestMethod $f.Control Poll
+        Set-UnixTestField $f.Control listLinuxPids ([Func[int[]]]{ throw [IO.IOException]::new('fixture-census-io-error') })
+        $f.State.Table[200] = [IO.IOException]::new('fixture-stat-io-error',5)
+        { Invoke-UnixTestMethod $f.Control Poll } | Should Throw
+        Invoke-UnixTestMethod $f.Control Signal @($false) | Out-Null
+        Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null
+        $f.State.PidfdSignals | Should Contain '1200:15'
+        $f.State.PidfdSignals | Should Contain '1200:9'
+        $f.State.Signals | Should Not Contain '-200:9'
+    }
+
+    # Scenario: Startup validation fails and subsequent stat reads also fail.
+    # Purpose: Failure cleanup must retain and use the already verified kernel process binding.
+    It 'UnitT230_uses_a_retained_pidfd_during_failed_start_cleanup' {
+        $f = New-UnixObservationFixture
+        Invoke-UnixTestMethod $f.Control RecordSpawnIdentity @([int]200)
+        $f.State.Table[200] = [IO.IOException]::new('fixture-stat-io-error',5)
+        Invoke-UnixTestMethod $f.Control CleanupFailedStart @([TimeSpan]::Zero)
+        $f.State.PidfdSignals | Should Contain '1200:9'
+        $f.State.Signals | Should Not Contain '-200:9'
+    }
+
+    # Scenario: A numeric PID is reused before consuming an owned child's exit status.
+    # Purpose: The wait operation must receive the retained pidfd, never an unbound P_PID request.
+    It 'UnitT240_binds_waits_to_the_original_pidfd_after_pid_reuse' {
+        $f = New-UnixObservationFixture; $state = $f.State
+        Invoke-UnixTestMethod $f.Control RecordSpawnIdentity @([int]200)
+        $state.Table[200] = New-UnixTestStat 200 100 200 'replacement'
+        $state.BoundWaits = [Collections.Generic.List[string]]::new()
+        Set-UnixTestField $f.Control waitPidfd ([Func[int,int,bool,Tuple[int,int,int]]]{
+            param($id,$fd,$peek)
+            $state.BoundWaits.Add("${id}:${fd}:$peek")
+            return [Tuple]::Create(-1,0,10)
+        }.GetNewClosure())
+        $result = Invoke-UnixTestMethod $f.Control WaitOwnedLinuxChild @([int]200,$false)
+        $result.Item3 | Should Be 10
+        $state.BoundWaits | Should Contain '200:1200:False'
+        $state.Table[200] | Should Match ' replacement$'
+        $state.Waited.Count | Should Be 0
+        $f.Control.Dispose()
+        $state.ClosedPidfds | Should Contain 1200
+    }
+
+    # Scenario: Census fails permanently during cancellation, deadline handling, or disposal.
+    # Purpose: Every entry point must still attempt TERM and KILL and return incomplete-inventory evidence.
+    It 'UnitT250_terminates_bound_processes_despite_poll_failure_on_every_cleanup_entry' {
+        foreach ($entry in @('cancel','deadline','supervisor','dispose','expired-deadline','long-grace')) {
+            $f = New-UnixObservationFixture; $state = $f.State
+            Invoke-UnixTestMethod $f.Control Poll
+            $state.CensusCalls=0; $state.Entry=$entry
+            Set-UnixTestField $f.Control listLinuxPids ([Func[int[]]]{
+                $state.CensusCalls++
+                if ($state.Entry -eq 'deadline' -and $state.CensusCalls -eq 1) { return ,$state.Pids }
+                throw [IO.IOException]::new('fixture-persistent-inventory-failure')
+            }.GetNewClosure())
+            Set-UnixTestField $f.Control sendPidfdSignal ([Func[int,int,int]]{
+                param($fd,$signal)
+                $state.PidfdSignals.Add("${fd}:$signal")
+                if ($signal -eq 9) { $state.GroupErrno=3 }
+                return 0
+            }.GetNewClosure())
+            $type=[SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]
+            $flags=[Reflection.BindingFlags]'Instance,NonPublic'
+            $lease=[Activator]::CreateInstance($type,$flags,$null,[object[]]@([DateTimeOffset]::UtcNow.AddSeconds(-1),[long]4096),$null)
+            $type.GetField('control',$flags).SetValue($lease,$f.Control)
+            $type.GetField('captureClosed',$flags).SetValue($lease,$true)
+            try {
+                if ($entry -in @('cancel','expired-deadline','long-grace')) {
+                    $until=if ($entry -eq 'expired-deadline') { [DateTimeOffset]::MinValue } else { [DateTimeOffset]::UtcNow.AddMilliseconds(400) }
+                    $grace=if ($entry -eq 'long-grace') { [TimeSpan]::MaxValue } else { [TimeSpan]::Zero }
+                    $receipt=$lease.Stop($grace,$until,$null)
+                }
+                elseif ($entry -eq 'dispose') { $lease.Dispose(); $receipt=$lease.Cleanup }
+                else { $type.GetMethod('Supervise',$flags).Invoke($lease,@()); $receipt=$lease.Cleanup }
+                $state.PidfdSignals | Should Contain '1200:15'
+                $state.PidfdSignals | Should Contain '1200:9'
+                $receipt.CleanedUp | Should Be $false
+                $receipt.Uncertainty | Should Match 'inventory-incomplete'
+                $receipt.UnixObservation.InventoryComplete | Should Be $false
+                $receipt.CaptureReadersStopped | Should Be $true
+                $receipt.CaptureResourcesClosed | Should Be $true
+                $state.Waited | Should Contain 200
+                if ($entry -eq 'deadline') { $lease.TerminationReason | Should Be 'deadline' }
+            } finally { $lease.Dispose() }
+            $state.ClosedPidfds | Should Contain 1200
+        }
+    }
+
+    # Scenario: A candidate group member is read before another waiter releases the original root PID.
+    # Purpose: A reused PGID must not let census discovery authorize signalling an unrelated process.
+    It 'UnitT260_rejects_group_attribution_when_the_original_root_binding_is_gone' {
+        $f=New-UnixObservationFixture; $state=$f.State
+        Invoke-UnixTestMethod $f.Control Poll
+        $state.Pids=[int[]]@(100,200,300)
+        $state.Table[300]=New-UnixTestStat 300 100 200 'candidate'
+        Set-UnixTestField $f.Control sendPidfdSignal ([Func[int,int,int]]{
+            param($fd,$signal)
+            $state.PidfdSignals.Add("${fd}:$signal")
+            if ($fd -eq 1200) { return 3 }; return 0
+        }.GetNewClosure())
+        Invoke-UnixTestMethod $f.Control Poll
+        $f.Owned.ContainsKey(300) | Should Be $false
+        Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null
+        $state.PidfdSignals | Should Not Contain '1300:9'
+        $state.ClosedPidfds | Should Contain 1300
+        $f.Control.Uncertainty | Should Match 'owned-attribution-lost'
+    }
+
+    # Scenario: Signalling one bound process throws while another owned descendant remains live.
+    # Purpose: A per-process error must not prevent termination attempts on the other bindings.
+    It 'UnitT270_continues_bound_signalling_after_one_target_fails' {
+        $f=New-UnixObservationFixture; $state=$f.State
+        $state.Pids=[int[]]@(100,200,300)
+        $state.Table[300]=New-UnixTestStat 300 200 200 'child'
+        Invoke-UnixTestMethod $f.Control Poll
+        Set-UnixTestField $f.Control sendPidfdSignal ([Func[int,int,int]]{
+            param($fd,$signal)
+            if ($fd -eq 1200) { throw [IO.IOException]::new('fixture-one-target-failed') }
+            $state.PidfdSignals.Add("${fd}:$signal"); return 0
+        }.GetNewClosure())
+        Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null
+        $state.PidfdSignals | Should Contain '1300:9'
+        $f.Control.Uncertainty | Should Match 'owned-signal-failed'
+    }
+
+    # Scenario: Startup polling recorded a descendant before failing, after root was already reaped.
+    # Purpose: Failed-start cleanup must handle every recorded binding even when root cleanup is done.
+    It 'UnitT280_cleans_recorded_descendants_after_root_reaping_on_failed_start' {
+        $f=New-UnixObservationFixture; $state=$f.State
+        $state.Pids=[int[]]@(100,200,300)
+        $state.Table[300]=New-UnixTestStat 300 200 200 'child'
+        Invoke-UnixTestMethod $f.Control Poll
+        Invoke-UnixTestMethod $f.Control ForgetOwned @([int]200)
+        Set-UnixTestField $f.Control rootReaped $true
+        $state.Table.Remove(200)
+        Invoke-UnixTestMethod $f.Control CleanupFailedStart @([TimeSpan]::Zero)
+        $state.PidfdSignals | Should Contain '1300:9'
+        $state.Waited | Should Contain 300
+        $state.ClosedPidfds | Should Contain 1300
+        $f.Owned.Count | Should Be 0
+    }
+
+    # Scenario: Startup cleanup first sees only root; a later census discovers its still-running child.
+    # Purpose: Repeated cleanup must signal new bindings/group members before attempting their nonblocking wait.
+    It 'UnitT285_terminates_descendants_discovered_during_failed_start_cleanup' {
+        foreach ($darwin in @($false,$true)) {
+            $f=New-UnixObservationFixture; $state=$f.State
+            if ($darwin) { Set-DarwinObservationFixture $f }
+            $state.Darwin=$darwin; $state.Kills=0
+            $state.RootZombie=New-UnixTestStat 200 100 200 $(if ($darwin) { '10' } else { 'root' }) 'Z'
+            $state.ChildZombie=New-UnixTestStat 300 100 200 '11' 'Z'
+            $state.Table[300]=New-UnixTestStat 300 200 200 '11'
+            Set-UnixTestField $f.Control sendPidfdSignal ([Func[int,int,int]]{
+                param($fd,$signal) $state.PidfdSignals.Add("${fd}:$signal")
+                if ($signal -eq 9 -and $fd -eq 1200) { $state.Table[200]=$state.RootZombie; $state.Pids=[int[]]@(100,200,300) }
+                if ($signal -eq 9 -and $fd -eq 1300) { $state.Table[300]=$state.ChildZombie }
+                return 0
+            }.GetNewClosure())
+            Set-UnixTestField $f.Control sendSignal ([Func[int,int,int]]{
+                param($id,$signal) $state.Signals.Add("${id}:$signal")
+                if ($signal -eq 0) { return [int]$state.GroupErrno }
+                if ($state.Darwin -and $signal -eq 9) {
+                    $state.Kills++; $state.Table[200]=$state.RootZombie; $state.ExitEvent=0
+                    $state.Pids=[int[]]@(100,200,300)
+                    if ($state.Kills -ge 2) { $state.Table.Remove(300); $state.GroupErrno=3 }
+                }
+                return 0
+            }.GetNewClosure())
+            Set-UnixTestField $f.Control waitForChild ([Func[int,Tuple[int,int,int]]]{
+                param($id) $state.Waited.Add($id)
+                if ($state.Table.ContainsKey($id) -and $state.Table[$id] -match '\) Z ') {
+                    $state.Table.Remove($id)
+                    if (-not $state.Table.ContainsKey(200) -and -not $state.Table.ContainsKey(300)) { $state.GroupErrno=3 }
+                    return [Tuple]::Create([int]$id,0,0)
+                }
+                return [Tuple]::Create(0,0,0)
+            }.GetNewClosure())
+            Invoke-UnixTestMethod $f.Control CleanupFailedStart @([TimeSpan]::FromMilliseconds(150))
+            $state.Table.ContainsKey(300) | Should Be $false
+            $f.Owned.Count | Should Be 0
+            if ($darwin) { $state.Kills | Should BeGreaterThan 1 }
+            else { $state.PidfdSignals | Should Contain '1300:9' }
+            @(Invoke-UnixTestMethod $f.Control Remaining).Count | Should Be 0
+            $failure=[IO.IOException]::new('fixture-startup-failure')
+            Invoke-UnixTestMethod $f.Control AttachStartupCleanupReceipt @($failure)
+            $failure.Data['StartupCleanupReceipt'].CleanedUp | Should Be $true
+            $failure.Data['StartupCleanupReceipt'].SignalsSent | Should BeGreaterThan 0
+        }
+    }
+
+    # Scenario: Startup cleanup reaches its deadline with a live identity or persistent inventory failure.
+    # Purpose: The original exception carries a full false receipt, including completed capture cleanup and limits.
+    It 'UnitT286_attaches_complete_receipts_to_unconfirmed_startup_failures' {
+        foreach ($darwin in @($false,$true)) {
+            foreach ($mode in @('live','inventory-error')) {
+                $f=New-UnixObservationFixture
+                if ($darwin) { Set-DarwinObservationFixture $f }
+                Invoke-UnixTestMethod $f.Control Poll
+                Set-UnixTestField $f.Control waitForChild ([Func[int,Tuple[int,int,int]]]{ param($id) return [Tuple]::Create(0,0,0) })
+                if ($mode -eq 'inventory-error') {
+                    if ($darwin) { Set-UnixTestField $f.Control listDarwinPids ([Func[uint32,uint32,int[]]]{ param($kind,$value) throw [IO.IOException]::new('fixture-census-error') }) }
+                    else { Set-UnixTestField $f.Control listLinuxPids ([Func[int[]]]{ throw [IO.IOException]::new('fixture-census-error') }) }
+                }
+                Invoke-UnixTestMethod $f.Control CleanupFailedStart @([TimeSpan]::Zero)
+                $failure=[IO.IOException]::new('original-startup-failure')
+                Invoke-UnixTestMethod $f.Control AttachStartupCleanupReceipt @($failure)
+                $type=[SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]
+                $flags=[Reflection.BindingFlags]'Instance,NonPublic'
+                $owner=[Activator]::CreateInstance($type,$flags,$null,[object[]]@([DateTimeOffset]::UtcNow.AddSeconds(10),[long]4096),$null)
+                # Native startup threw before assigning control or starting readers.
+                $type.GetMethod('CompleteFailedStart',$flags).Invoke($owner,[object[]]@($failure))
+                $receipt=$failure.Data['StartupCleanupReceipt']
+                $failure.Message | Should Be 'original-startup-failure'
+                $receipt.CleanedUp | Should Be $false
+                $receipt.RemainingPids | Should Contain 200
+                $receipt.SignalsSent | Should BeGreaterThan 0
+                $receipt.Isolation | Should Be $f.Control.Isolation
+                $receipt.Limitations | Should Contain 'group-signal-external-reaper-race'
+                $receipt.Uncertainty | Should Not BeNullOrEmpty
+                $receipt.CaptureReadersStopped | Should Be $true
+                $receipt.CaptureResourcesClosed | Should Be $true
+                $receipt.UnixObservation | Should Not BeNullOrEmpty
+                if ($mode -eq 'inventory-error') { $receipt.UnixObservation.InventoryComplete | Should Be $false }
+                $failure.Data['StartupCleanupConfirmed'] | Should Be $false
+            }
+        }
+    }
+
+    # Scenario: Startup cleanup times out while its root remains alive, then a later retry observes exit.
+    # Purpose: Retain bindings and reject a second spawn until cleanup is positively confirmed.
+    It 'UnitT287_retains_failed_start_control_until_cleanup_is_confirmed' {
+        $staticFlags=[Reflection.BindingFlags]'Static,NonPublic'
+        $pending=$script:UnixControlType.GetField('pendingFailedStart',$staticFlags)
+        $active=$script:UnixControlType.GetField('active',$staticFlags)
+        $guard=$script:UnixControlType.GetMethod('EnsureStartAvailable',$staticFlags)
+        $pending | Should Not BeNullOrEmpty
+        $savedPending=$pending.GetValue($null); $savedActive=$active.GetValue($null)
+        try {
+            foreach ($darwin in @($false,$true)) {
+                $f=New-UnixObservationFixture; $state=$f.State
+                if ($darwin) { Set-DarwinObservationFixture $f }
+                Invoke-UnixTestMethod $f.Control Poll
+                Set-UnixTestField $f.Control waitForChild ([Func[int,Tuple[int,int,int]]]{ param($id) return [Tuple]::Create(0,0,0) })
+                $failure=[IO.IOException]::new('fixture-post-spawn-failure')
+                Invoke-UnixTestMethod $f.Control FinishFailedStart @($failure,[TimeSpan]::Zero)
+                $failure.Data['StartupCleanupReceipt'].CleanedUp | Should Be $false
+                $failure.Data['UnixRuntimePoisoned'] | Should Be $true
+                [object]::ReferenceEquals($pending.GetValue($null),$f.Control) | Should Be $true
+                $state.ClosedPidfds.Count | Should Be 0
+                { $guard.Invoke($null,@()) } | Should Throw 'previous process cleanup is incomplete'
+                $active.GetValue($null) | Should Be $true
+                $state.Table[200]=New-UnixTestStat 200 100 200 $(if ($darwin) { '10' } else { 'root' }) 'Z'
+                $state.ExitEvent=0; $state.GroupErrno=3
+                Set-UnixTestField $f.Control waitForChild ([Func[int,Tuple[int,int,int]]]{ param($id) $state.Table.Remove($id); return [Tuple]::Create([int]$id,0,0) }.GetNewClosure())
+                $guard.Invoke($null,@())
+                $pending.GetValue($null) | Should BeNullOrEmpty
+                $active.GetValue($null) | Should Be $false
+                $f.Owned.Count | Should Be 0
+                if (-not $darwin) { $state.ClosedPidfds | Should Contain 1200 }
+            }
+        } finally {
+            $pending.SetValue($null,$savedPending); $active.SetValue($null,$savedActive)
+        }
+    }
+
+    # Scenario: Dispose cannot reap a reserved root, with either a live descendant or failed inventory.
+    # Purpose: Keep native bindings and admission poisoned even though the public lease is disposed.
+    It 'UnitT288_retains_unresolved_disposal_in_pending_cleanup' {
+        $staticFlags=[Reflection.BindingFlags]'Static,NonPublic'
+        $pending=$script:UnixControlType.GetField('pendingFailedStart',$staticFlags)
+        $active=$script:UnixControlType.GetField('active',$staticFlags)
+        $savedPending=$pending.GetValue($null); $savedActive=$active.GetValue($null)
+        try {
+            foreach($darwin in @($false,$true)) { foreach($mode in @('live','inventory-error')) {
+                $f=New-UnixObservationFixture; $state=$f.State
+                if($darwin){Set-DarwinObservationFixture $f}
+                Invoke-UnixTestMethod $f.Control Poll
+                $state.Table[200]=New-UnixTestStat 200 100 200 $(if($darwin){'10'}else{'root'}) 'Z'
+                $state.ExitEvent=0
+                Invoke-UnixTestMethod $f.Control Poll
+                Set-UnixTestField $f.Control waitForChild ([Func[int,Tuple[int,int,int]]]{param($id) return [Tuple]::Create(0,0,0)})
+                if($mode -eq 'inventory-error') {
+                    if($darwin){Set-UnixTestField $f.Control listDarwinPids ([Func[uint32,uint32,int[]]]{param($kind,$value) throw [IO.IOException]::new('dispose-census-error')})}
+                    else {Set-UnixTestField $f.Control listLinuxPids ([Func[int[]]]{throw [IO.IOException]::new('dispose-census-error')})}
+                }
+                $timer=[Diagnostics.Stopwatch]::StartNew()
+                $f.Control.Dispose(); $f.Control.Dispose()
+                $timer.Elapsed.TotalSeconds | Should BeLessThan 2
+                [object]::ReferenceEquals($pending.GetValue($null),$f.Control) | Should Be $true
+                $active.GetValue($null) | Should Be $true
+                $state.ClosedPidfds.Count | Should Be 0
+                { $script:UnixControlType.GetMethod('EnsureStartAvailable',$staticFlags).Invoke($null,@()) } | Should Throw 'cleanup is incomplete'
+                if($mode -eq 'live') {
+                    $state.GroupErrno=3
+                    Set-UnixTestField $f.Control waitForChild ([Func[int,Tuple[int,int,int]]]{param($id) $state.Table.Remove($id); return [Tuple]::Create([int]$id,0,0)}.GetNewClosure())
+                    $script:UnixControlType.GetMethod('EnsureStartAvailable',$staticFlags).Invoke($null,@())
+                    $pending.GetValue($null) | Should BeNullOrEmpty
+                    $active.GetValue($null) | Should Be $false
+                }
+                # Fake syscalls own no real process/descriptor; release fixture bookkeeping only.
+                Invoke-UnixTestMethod $f.Control ClosePidfds
+                $pending.SetValue($null,$savedPending); $active.SetValue($null,$savedActive)
+            } }
+        } finally { $pending.SetValue($null,$savedPending); $active.SetValue($null,$savedActive) }
+    }
+
+    # Scenario: Root exits before its cooperative child; Darwin omits the zombie from libproc.
+    # Purpose: Keep the root waitable through TERM/KILL, then reap only after descendants and group exit.
+    It 'UnitT290_retains_the_zombie_root_until_group_descendants_exit' {
+        foreach ($darwin in @($false,$true)) {
+            $f = New-UnixObservationFixture; $state = $f.State
+            if ($darwin) { Set-DarwinObservationFixture $f }
+            $state.Pids = [int[]]@(100,200,300)
+            $state.Table[300] = New-UnixTestStat 300 200 200 '11'
+            Invoke-UnixTestMethod $f.Control Poll
+            if ($darwin) { $state.Table.Remove(200); $state.ExitEvent = 0 }
+            else { $state.Table[200] = New-UnixTestStat 200 100 200 'root' 'Z' }
+            $state.Peek = [Tuple]::Create(200,0,0)
+            Invoke-UnixTestMethod $f.Control Poll
+            Invoke-UnixTestMethod $f.Control Signal @($false) | Out-Null
+            Invoke-UnixTestMethod $f.Control Poll
+            Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null
+            $state.Waited | Should Not Contain 200
+            $state.Signals | Should Contain '-200:15'
+            $state.Signals | Should Contain '-200:9'
+            $f.Owned.ContainsKey(300) | Should Be $true
+            $state.Table.Remove(300); $state.GroupErrno = 3
+            Invoke-UnixTestMethod $f.Control Poll
+            $state.Waited | Should Contain 200
+            @(Invoke-UnixTestMethod $f.Control Remaining).Count | Should Be 0
+            $f.Control.Uncertainty | Should BeNullOrEmpty
+        }
+    }
+
+    # Scenario: An external waiter consumes the retained root before the next group signal.
+    # Purpose: Revoke PGID authority; Linux may use recorded pidfds, Darwin must report uncertainty.
+    It 'UnitT300_revokes_group_authority_after_external_reaping' {
+        foreach ($darwin in @($false,$true)) {
+            $f = New-UnixObservationFixture; $state = $f.State
+            if ($darwin) { Set-DarwinObservationFixture $f }
+            $state.Pids = [int[]]@(100,200,300)
+            $state.Table[300] = New-UnixTestStat 300 200 200 '11'
+            Invoke-UnixTestMethod $f.Control Poll
+            $state.Peek = [Tuple]::Create(200,0,0)
+            if ($darwin) { $state.ExitEvent = 0; $state.Table.Remove(200) }
+            else { $state.Table[200] = New-UnixTestStat 200 100 200 'root' 'Z' }
+            Invoke-UnixTestMethod $f.Control Poll
+            $state.Table.Remove(200); $state.Peek = [Tuple]::Create(-1,0,10)
+            Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null
+            $state.Signals | Should Not Contain '-200:9'
+            $state.Waited | Should Not Contain 200
+            if ($darwin) { $f.Control.Uncertainty | Should Not BeNullOrEmpty }
+            else { $state.PidfdSignals | Should Contain '1300:9' }
+        }
+    }
+
+    # Scenario: Census and pathname reads fail after a zombie root was reserved.
+    # Purpose: Termination still uses the retained root, without authorizing signals from descendants.
+    It 'UnitT310_terminates_a_reserved_group_when_inventory_fails' {
+        foreach ($darwin in @($false,$true)) {
+            $f = New-UnixObservationFixture; $state = $f.State
+            if ($darwin) { Set-DarwinObservationFixture $f; $state.ExitEvent = 0; $state.Table.Remove(200) }
+            else { $state.Table[200] = New-UnixTestStat 200 100 200 'root' 'Z' }
+            $state.Peek = [Tuple]::Create(200,0,0)
+            Invoke-UnixTestMethod $f.Control Poll
+            $state.Table[200] = [IO.IOException]::new('fixture-persistent-inventory-error')
+            { Invoke-UnixTestMethod $f.Control Poll } | Should Throw
+            Invoke-UnixTestMethod $f.Control Signal @($false) | Out-Null
+            Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null
+            $state.Signals | Should Contain '-200:15'
+            $state.Signals | Should Contain '-200:9'
+            $f.Control.Uncertainty | Should Match 'inventory-incomplete'
+        }
+    }
+
+    # Scenario: A bound child remains waitable/running while recovery cannot inventory the group.
+    # Purpose: Recovery must not consume the root first and lose the PGID reservation.
+    It 'UnitT320_keeps_the_root_when_bound_recovery_cannot_confirm_descendant_exit' {
+        $f = New-UnixObservationFixture; $state = $f.State
+        $state.Pids = [int[]]@(100,200,300)
+        $state.Table[300] = New-UnixTestStat 300 200 200 'child'
+        Invoke-UnixTestMethod $f.Control Poll
+        Set-UnixTestField $f.Control waitForChild ([Func[int,Tuple[int,int,int]]]{
+            param($id) $state.Waited.Add($id); return [Tuple]::Create(0,0,0)
+        }.GetNewClosure())
+        Invoke-UnixTestMethod $f.Control ReapBoundAfterInventoryFailure
+        $state.Waited | Should Contain 300
+        $state.Waited | Should Not Contain 200
+        $f.Owned.ContainsKey(200) | Should Be $true
+    }
+
+    # Scenario: Darwin startup failed after observing a child and the root's exit event.
+    # Purpose: Failed-start cleanup uses group signalling without consuming the remaining group's root.
+    It 'UnitT330_retains_the_darwin_group_anchor_during_failed_start_cleanup' {
+        $f = New-UnixObservationFixture; Set-DarwinObservationFixture $f; $state = $f.State
+        $state.Pids = [int[]]@(100,200,300)
+        $state.Table[300] = New-UnixTestStat 300 200 200 '11'
+        Invoke-UnixTestMethod $f.Control Poll
+        $state.Table.Remove(200); $state.ExitEvent = 0
+        Invoke-UnixTestMethod $f.Control CleanupFailedStart @([TimeSpan]::Zero)
+        $state.Waited | Should Not Contain 200
+        $state.Signals | Should Contain '-200:9'
+        $state.Table.Remove(300); $state.GroupErrno = 3
+        Invoke-UnixTestMethod $f.Control CleanupFailedStart @([TimeSpan]::Zero)
+        $state.Waited | Should Contain 200
+        $f.Owned.Count | Should Be 0
+    }
+
+    # Scenario: Darwin's waitid record and option values differ from Linux on both supported architectures.
+    # Purpose: Request a non-consuming observation and reject Linux SIGCHLD/layout assumptions.
+    It 'UnitT340_uses_darwin_nonconsuming_wait_options_and_siginfo_prefix' {
+        $f = New-UnixObservationFixture; $state = $f.State
+        $state.WaitCalls = [Collections.Generic.List[string]]::new()
+        $state.NativeErrno = 0; $state.NativeSigno = 20
+        Set-UnixTestField $f.Control waitDarwin ([Func[int,uint32,IntPtr,int,Tuple[int,int]]]{
+            param($kind,$id,$info,$options)
+            $state.WaitCalls.Add("${kind}:${id}:${options}")
+            if ($state.NativeErrno) { return [Tuple]::Create(-1,[int]$state.NativeErrno) }
+            [Runtime.InteropServices.Marshal]::WriteInt32($info,0,[int]$state.NativeSigno)
+            [Runtime.InteropServices.Marshal]::WriteInt32($info,12,[int]$id)
+            [Runtime.InteropServices.Marshal]::WriteInt32($info,16,999) # Darwin si_uid, NOT Linux si_pid
+            [Runtime.InteropServices.Marshal]::WriteInt32($info,20,77) # status is deliberately not decoded here
+            return [Tuple]::Create(0,0)
+        }.GetNewClosure())
+        $wait = Invoke-UnixTestMethod $f.Control PeekDarwinChild @([int]200)
+        $wait.Item1 | Should Be 200
+        $wait.Item2 | Should Be 0
+        $state.WaitCalls | Should Contain '1:200:37' # P_PID, WNOHANG|WEXITED|WNOWAIT (0x25)
+        $state.NativeSigno = 17
+        { Invoke-UnixTestMethod $f.Control PeekDarwinChild @([int]200) } | Should Throw
+        $state.NativeErrno = 10
+        $wait = Invoke-UnixTestMethod $f.Control PeekDarwinChild @([int]200)
+        $wait.Item1 | Should Be -1
+        $wait.Item3 | Should Be 10
+        $state.Waited.Count | Should Be 0
+    }
+
+    # Scenario: Darwin returns EPERM for TERM/KILL and kill(0) when only the retained zombie remains.
+    # Purpose: A fresh group census distinguishes zombie-only completion from live or unreadable members.
+    It 'UnitT345_classifies_darwin_zombie_only_group_eperm_without_hiding_live_members' {
+        foreach ($outcome in @('zombie-only','live','denied','inventory-error')) {
+            $f = New-UnixObservationFixture; Set-DarwinObservationFixture $f; $state = $f.State
+            $state.Table.Remove(200); $state.ExitEvent = 0; $state.GroupErrno = 1
+            Invoke-UnixTestMethod $f.Control Poll
+            $state.Outcome = $outcome
+            if ($outcome -eq 'live') { $state.Table[300] = New-UnixTestStat 300 1 200 '11' }
+            if ($outcome -eq 'denied') { $state.Table[300] = [UnauthorizedAccessException]::new('fixture-group-denied') }
+            Set-UnixTestField $f.Control listDarwinPids ([Func[uint32,uint32,int[]]]{
+                param($kind,$value)
+                if ($kind -eq 2) {
+                    if ($state.Outcome -eq 'inventory-error') { throw [IO.IOException]::new('fixture-group-census-failed') }
+                    if ($state.Outcome -ne 'zombie-only') { return ,([int[]]@(300)) }
+                    return ,([int[]]@())
+                }
+                if ($kind -eq 4) { return ,$state.Pids }
+                return ,([int[]]@())
+            }.GetNewClosure())
+            Set-UnixTestField $f.Control sendSignal ([Func[int,int,int]]{
+                param($id,$signal) $state.Signals.Add("${id}:$signal"); return 1
+            }.GetNewClosure())
+            if ($outcome -eq 'zombie-only') {
+                $type = [SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]
+                $flags = [Reflection.BindingFlags]'Instance,NonPublic'
+                $lease = [Activator]::CreateInstance($type,$flags,$null,[object[]]@([DateTimeOffset]::UtcNow.AddSeconds(10),[long]4096),$null)
+                $type.GetField('control',$flags).SetValue($lease,$f.Control)
+                $type.GetField('captureClosed',$flags).SetValue($lease,$true)
+                try {
+                    $receipt = $lease.Stop([TimeSpan]::Zero,[DateTimeOffset]::UtcNow.AddMilliseconds(300),$null)
+                    $receipt.CleanedUp | Should Be $true
+                    $receipt.Uncertainty | Should BeNullOrEmpty
+                    $receipt.RemainingPids.Count | Should Be 0
+                    $receipt.UnixObservation.GroupProbeErrno | Should Be 1
+                    $state.Waited | Should Contain 200
+                } finally { $lease.Dispose() }
+            } else {
+                Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null
+                if ($outcome -eq 'live') { $f.Control.Uncertainty | Should Match 'group-signal-failed: 1' }
+                else { $f.Control.Uncertainty | Should Match 'group-inventory-incomplete' }
+                @(Invoke-UnixTestMethod $f.Control Remaining) | Should Contain 200
+                $state.Waited | Should Not Contain 200
+            }
+        }
+    }
+
+    # Scenario: Linux reports EPERM while the root is waitable and its group is still present.
+    # Purpose: The Darwin zombie-only exception must not change Linux signalling or existence semantics.
+    It 'UnitT346_preserves_linux_eperm_failure_and_pending_group' {
+        $f = New-UnixObservationFixture; $state = $f.State
+        $state.Table[200] = New-UnixTestStat 200 100 200 'root' 'Z'
+        Invoke-UnixTestMethod $f.Control Poll
+        Set-UnixTestField $f.Control sendSignal ([Func[int,int,int]]{ param($id,$signal) return 1 })
+        Invoke-UnixTestMethod $f.Control Signal @($true) | Out-Null
+        Invoke-UnixTestMethod $f.Control Poll
+        $f.Control.Uncertainty | Should Match 'group-signal-failed: 1'
+        @(Invoke-UnixTestMethod $f.Control Remaining) | Should Contain 200
+        $state.Waited | Should Not Contain 200
+    }
+
+    # Scenario: A recorded Darwin group member is also a direct child of the host and becomes a zombie.
+    # Purpose: Do not steal/reap an unbound numeric descendant PID; Linux retains its pidfd wait path.
+    It 'UnitT350_refuses_unbound_darwin_descendant_waits' {
+        foreach ($darwin in @($false,$true)) {
+            $f = New-UnixObservationFixture; $state = $f.State
+            if ($darwin) { Set-DarwinObservationFixture $f }
+            $state.Pids = [int[]]@(100,200,300)
+            $state.Table[300] = New-UnixTestStat 300 100 200 '11' 'Z'
+            Invoke-UnixTestMethod $f.Control Poll
+            if ($darwin) {
+                $state.Waited | Should Not Contain 300
+                @(Invoke-UnixTestMethod $f.Control Remaining) | Should Contain 300
+                $f.Control.Uncertainty | Should Match 'macos-unbound-child-wait-refused'
+            } else { $state.Waited | Should Contain 300 }
+        }
+    }
+
+
+}
+
+Describe 'Windows owned process termination regressions' {
+    BeforeAll {
+        Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
+    }
+
+    # Scenario: QueryInformationJobObject cannot report the active process count.
+    # Purpose: The retained Job handle must still authorize TerminateJobObject independently.
+    # Register only on the native host; keep this file's Core CI skip count at zero.
+    if ($IsWindows) {
+        It 'InterT10_terminates_the_bound_job_when_accounting_fails' {
+            $type=[SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative].Assembly.GetType('SyuanTsai.AIInstructions.PlatformRuntime.WindowsProcessControl')
+            $flags=[Reflection.BindingFlags]'Instance,NonPublic'
+            $control=[Activator]::CreateInstance($type,$true)
+            $job=$type.GetMethod('CreateJobObjectW',[Reflection.BindingFlags]'Static,NonPublic').Invoke($null,[object[]]@([IntPtr]::Zero,$null))
+            try {
+                $job.IsInvalid | Should Be $false
+                $type.GetField('job',$flags).SetValue($control,$job)
+                $type.GetField('countProcesses',$flags).SetValue($control,[Func[uint32]]{ throw [IO.IOException]::new('fixture-job-accounting-failure') })
+                { $control.Remaining() } | Should Throw
+                $control.Signal($true) | Should Be 1
+            } finally { $control.Dispose(); $job.Dispose() }
+            $job.IsClosed | Should Be $true
+        }
+    }
+}
+
+Describe 'Platform capture cancellation regressions' {
+    BeforeAll {
+        Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
+    }
+
+    # Scenario: Both pipe writers stay open and never send a byte or EOF.
+    # Purpose: Cancelling capture must join readers and release their pipe/file handles without writer cooperation.
+    It 'InterT10_cancels_idle_capture_readers_and_releases_owned_handles' {
+        $flags = [Reflection.BindingFlags]'Instance,NonPublic'
+        $type = [SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]
+        $directory = Join-Path ([IO.Path]::GetTempPath()) ('p3-capture-' + [guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($directory)
+        try {
+            foreach ($iteration in 1..3) {
+                $lease = [Activator]::CreateInstance($type,$flags,$null,[object[]]@([DateTimeOffset]::UtcNow.AddSeconds(10),[long]4096),$null)
+                $pipes = @(); $files = @(); $readers = @(); $readHandles = @(); $writeHandles = @(); $fileHandles = @()
+                try {
+                    foreach ($stream in @('out','err')) {
+                        $pipe = [IO.Pipes.AnonymousPipeServerStream]::new([IO.Pipes.PipeDirection]::In,[IO.HandleInheritability]::Inheritable)
+                        $file = [IO.File]::Open((Join-Path $directory ("$iteration-$stream")),[IO.FileMode]::CreateNew,[IO.FileAccess]::Write)
+                        $pipes += $pipe; $files += $file
+                        $readHandles += $pipe.SafePipeHandle; $writeHandles += $pipe.ClientSafePipeHandle; $fileHandles += $file.SafeFileHandle
+                        $type.GetField($(if ($stream -eq 'out') { 'stdout' } else { 'stderr' }),$flags).SetValue($lease,$pipe)
+                        $type.GetField(($stream+'File'),$flags).SetValue($lease,$file)
+                        $reader = $type.GetMethod('Reader',$flags).Invoke($lease,[object[]]@($pipe,$file))
+                        $readers += $reader
+                        $type.GetField(($stream+'Reader'),$flags).SetValue($lease,$reader)
+                    }
+                    [Threading.Thread]::Sleep(50)
+                    $lease.CaptureReadersStopped | Should Be $false
+                    foreach ($pipe in $pipes) { $pipe.ClientSafePipeHandle.IsClosed | Should Be $false }
+                    $until = [DateTimeOffset]::UtcNow.AddSeconds(2)
+                    $type.GetMethod('CancelCaptureReaders',$flags).Invoke($lease,[object[]]@($until)) | Should Be $true
+                    $type.GetMethod('CloseCapture',$flags).Invoke($lease,@())
+                    $lease.CaptureReadersStopped | Should Be $true
+                    $lease.CaptureResourcesClosed | Should Be $true
+                    foreach ($handle in $readHandles + $fileHandles) { $handle.IsClosed | Should Be $true }
+                    # These writer handles belong to the fixture, not the lease;
+                    # they remain open throughout cancellation, like escaped writers.
+                    foreach ($handle in $writeHandles) { $handle.IsClosed | Should Be $false }
+                } finally {
+                    # Release fixture writers even against a regressed blocking reader.
+                    foreach ($handle in $writeHandles) { $handle.Dispose() }
+                    $type.GetMethod('CancelCaptureReaders',$flags).Invoke($lease,[object[]]@([DateTimeOffset]::UtcNow.AddSeconds(2))) | Out-Null
+                    $type.GetMethod('CloseCapture',$flags).Invoke($lease,@())
+                }
+            }
+        } finally {
+            foreach ($iteration in 1..3) { foreach ($stream in @('out','err')) { $path = Join-Path $directory ("$iteration-$stream"); if ([IO.File]::Exists($path)) { [IO.File]::Delete($path) } } }
+            [IO.Directory]::Delete($directory)
+        }
+    }
+}
+
+Describe 'Platform capture startup failure regressions' {
+    BeforeAll {
+        Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
+    }
+
+    # Scenario: Spawn fails after pipes are created but before local client copies are released.
+    # Purpose: Closing a failed lease releases both ends; disposing the server stream alone is insufficient.
+    It 'InterT10_releases_local_client_copies_when_startup_fails' {
+        $type = [SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]
+        $flags = [Reflection.BindingFlags]'Instance,NonPublic'
+        $lease = [Activator]::CreateInstance($type,$flags,$null,[object[]]@([DateTimeOffset]::UtcNow.AddSeconds(10),[long]4096),$null)
+        $handles = @()
+        try {
+            foreach ($name in @('stdout','stderr')) {
+                $pipe = [IO.Pipes.AnonymousPipeServerStream]::new([IO.Pipes.PipeDirection]::In,[IO.HandleInheritability]::Inheritable)
+                $handles += $pipe.SafePipeHandle; $handles += $pipe.ClientSafePipeHandle
+                $type.GetField($name,$flags).SetValue($lease,$pipe)
+                $type.GetField(($name+'Client'),$flags).SetValue($lease,$pipe.ClientSafePipeHandle)
+            }
+            $type.GetMethod('CloseCapture',$flags).Invoke($lease,@())
+            $lease.CaptureReadersStopped | Should Be $true
+            $lease.CaptureResourcesClosed | Should Be $true
+            foreach ($handle in $handles) { $handle.IsClosed | Should Be $true }
+        } finally { foreach ($handle in $handles) { $handle.Dispose() } }
+    }
+}
+
+Describe 'Platform capture character quotas' {
+    BeforeAll {
+        Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
+        function Invoke-CaptureQuotaChild([string]$CaseName,[int]$TimeoutMilliseconds=15000) {
+            # A parent watchdog bounds constructor, Write, Flush and Dispose too;
+            # a timed Join cannot protect code which never reaches that Join.
+            $testPath=Join-Path $PSScriptRoot 'platform-runtime.Tests.ps1'
+            $code=@'
+$ErrorActionPreference='Stop'
+$ProgressPreference='SilentlyContinue'
+Import-Module Microsoft.PowerShell.Utility
+Import-Module $env:CAPTURE_QUOTA_PESTER -Force
+$tokens=$null; $errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:CAPTURE_QUOTA_TEST_FILE,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'Fixture parse failed'}
+$describe=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Describe' -and $n.CommandElements[1].Value -eq 'Platform capture character quotas'},$true))[0]
+$PSScriptRoot=[IO.Path]::GetDirectoryName($env:CAPTURE_QUOTA_TEST_FILE)
+$before=@($describe.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'BeforeAll'},$true))[0].CommandElements[-1].ScriptBlock.Extent.Text
+$before=$before.Replace('$PSScriptRoot',("'"+$PSScriptRoot.Replace("'","''")+"'"))
+if($PSVersionTable.PSVersion.Major -lt 7){$before=$before.Replace('platform-runtime.psd1','platform-runtime.psm1')}
+. ([scriptblock]::Create($before.Substring(1,$before.Length-2)))
+$test=@($describe.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'It' -and $n.CommandElements[1].Value -eq $env:CAPTURE_QUOTA_CHILD},$true))[0].CommandElements[-1].ScriptBlock.Extent.Text
+. ([scriptblock]::Create($test.Substring(1,$test.Length-2)))
+'quota-child-passed'
+'@
+            $start=[Diagnostics.ProcessStartInfo]::new()
+            $start.FileName=(Get-Process -Id $PID).Path
+            $start.Arguments='-NoLogo -NoProfile -NonInteractive -EncodedCommand '+[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code))
+            $start.UseShellExecute=$false; $start.CreateNoWindow=$true
+            $start.RedirectStandardOutput=$true; $start.RedirectStandardError=$true
+            $start.EnvironmentVariables['CAPTURE_QUOTA_TEST_FILE']=$testPath
+            $start.EnvironmentVariables['CAPTURE_QUOTA_CHILD']=$CaseName
+            $start.EnvironmentVariables['CAPTURE_QUOTA_PESTER']=(Get-Module Pester | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1).Path
+            $child=[Diagnostics.Process]::new(); $child.StartInfo=$start; $started=$false
+            try {
+                $started=$child.Start()
+                $output=$child.StandardOutput.ReadToEndAsync(); $errorOutput=$child.StandardError.ReadToEndAsync()
+                if(-not $child.WaitForExit($TimeoutMilliseconds)){
+                    $child.Kill()
+                    if(-not $child.WaitForExit(2000)){throw 'Capture fixture termination timed out'}
+                    $diagnostics=if($output.Wait(1000)){$output.Result}else{'diagnostics unavailable'}
+                    throw ('Capture fixture exceeded its deadline: '+$diagnostics)
+                }
+                if(-not $output.Wait(1000) -or -not $errorOutput.Wait(1000)){throw 'Capture fixture diagnostics timed out'}
+                if($child.ExitCode -ne 0){throw ($errorOutput.Result+$output.Result)}
+                $output.Result | Should Match 'quota-child-passed'
+            } finally {
+                if($started -and -not $child.HasExited){$child.Kill(); if(-not $child.WaitForExit(2000)){throw 'Capture fixture termination timed out'}}
+                $child.Dispose()
+            }
+        }
+    }
+
+    # Scenario: Two streams write split UTF-8 sequences, at or above their separate limits.
+    # Purpose: Preserve whole decoded prefixes and stop on either stream's overflow without sharing counters.
+    It 'UnitT10_enforces_independent_character_limits_across_utf8_chunks' {
+        if($env:CAPTURE_QUOTA_CHILD -ne 'UnitT10_enforces_independent_character_limits_across_utf8_chunks') { Invoke-CaptureQuotaChild 'UnitT10_enforces_independent_character_limits_across_utf8_chunks'; return }
+        $type=[SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]
+        $flags=[Reflection.BindingFlags]'Instance,NonPublic'
+        foreach ($mode in @('exact','stdout-over','stderr-over')) {
+            $lease=[Activator]::CreateInstance($type,$flags,$null,[object[]]@([DateTimeOffset]::UtcNow.AddSeconds(10),[long]4),$null)
+            $paths=@(); $pipes=@(); $files=@(); $readers=@()
+            try {
+                foreach ($stream in @('stdout','stderr')) {
+                    [Console]::WriteLine("quota: $mode $stream create")
+                    $path=Join-Path ([IO.Path]::GetTempPath()) ('quota-'+[guid]::NewGuid().ToString('N')); $paths+=$path
+                    $file=[IO.File]::Open($path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read); $files+=$file
+                    $pipe=[IO.Pipes.AnonymousPipeServerStream]::new([IO.Pipes.PipeDirection]::In,[IO.HandleInheritability]::Inheritable); $pipes+=$pipe
+                    $readers+=$type.GetMethod('Reader',$flags).Invoke($lease,[object[]]@($pipe,$file))
+                    # Avoid the managed AnonymousPipeClientStream path implicated
+                    # by the Unix hang. The fixture writes at most 15 bytes into a
+                    # fresh pipe; the separate-process watchdog bounds library I/O.
+                    [Console]::WriteLine("quota: $mode $stream writer")
+                    $handle=[Microsoft.Win32.SafeHandles.SafeFileHandle]::new($pipe.ClientSafePipeHandle.DangerousGetHandle(),$false)
+                    $writer=[IO.FileStream]::new($handle,[IO.FileAccess]::Write,1,$false)
+                    try {
+                        $length=if ($mode -eq ($stream+'-over')) { 5 } else { 4 }
+                        $bytes=[Text.Encoding]::UTF8.GetBytes((([string][char]0x754c)*$length))
+                        [Console]::WriteLine("quota: $mode $stream write")
+                        $writer.Write($bytes,0,1); $writer.Flush(); [Threading.Thread]::Sleep(20)
+                        $writer.Write($bytes,1,$bytes.Length-1); $writer.Flush()
+                    } finally { [Console]::WriteLine("quota: $mode $stream close-writer"); $writer.Dispose(); $pipe.ClientSafePipeHandle.Dispose() }
+                }
+                [Console]::WriteLine("quota: $mode join")
+                foreach ($reader in $readers) { $reader.Join(2000) | Should Be $true }
+                $lease.OutputLimitExceeded | Should Be ($mode -ne 'exact')
+                foreach ($file in $files) { $file.Dispose() }
+                foreach ($path in $paths) { [IO.File]::ReadAllText($path) | Should Be (([string][char]0x754c)*4) }
+            } finally {
+                $type.GetField('captureCancelled',$flags).GetValue($lease).Set()
+                foreach ($pipe in $pipes) { $pipe.ClientSafePipeHandle.Dispose() }
+                foreach ($reader in $readers) { if(-not $reader.Join(2000)){throw 'Capture reader cancellation exceeded its deadline'} }
+                foreach ($file in $files) { $file.Dispose() }; foreach ($pipe in $pipes) { $pipe.Dispose() }
+                foreach ($path in $paths) { [IO.File]::Delete($path) }
+            }
+        }
+    }
+
+    # Scenario: A writer leaves an incomplete UTF-8 character and keeps its pipe open.
+    # Purpose: A standalone reader must honor its lease deadline without a supervisor or EOF.
+    It 'UnitT15_bounds_incomplete_utf8_capture_by_the_lease_deadline' {
+        if($env:CAPTURE_QUOTA_CHILD -ne 'UnitT15_bounds_incomplete_utf8_capture_by_the_lease_deadline') { Invoke-CaptureQuotaChild 'UnitT15_bounds_incomplete_utf8_capture_by_the_lease_deadline'; return }
+        $type=[SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]; $flags=[Reflection.BindingFlags]'Instance,NonPublic'
+        $lease=[Activator]::CreateInstance($type,$flags,$null,[object[]]@([DateTimeOffset]::UtcNow.AddMilliseconds(300),[long]4),$null)
+        $path=Join-Path ([IO.Path]::GetTempPath()) ('quota-'+[guid]::NewGuid().ToString('N'))
+        $pipe=[IO.Pipes.AnonymousPipeServerStream]::new([IO.Pipes.PipeDirection]::In,[IO.HandleInheritability]::Inheritable)
+        $file=[IO.File]::Open($path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+        $reader=$null; $writer=$null
+        try {
+            $reader=$type.GetMethod('Reader',$flags).Invoke($lease,[object[]]@($pipe,$file))
+            $writer=[IO.FileStream]::new([Microsoft.Win32.SafeHandles.SafeFileHandle]::new($pipe.ClientSafePipeHandle.DangerousGetHandle(),$false),[IO.FileAccess]::Write,1,$false)
+            $writer.WriteByte(0xe7); $writer.Flush()
+            $reader.Join(1500) | Should Be $true
+            $type.GetField('captureFailure',$flags).GetValue($lease) | Should Be 'capture-deadline'
+            $lease.OutputLimitExceeded | Should Be $false
+        } finally {
+            $type.GetField('captureCancelled',$flags).GetValue($lease).Set()
+            if($null -ne $reader -and -not $reader.Join(2000)){throw 'Partial-character capture cancellation timed out'}
+            if($null -ne $writer){$writer.Dispose()}; $pipe.ClientSafePipeHandle.Dispose(); $pipe.Dispose(); $file.Dispose(); [IO.File]::Delete($path)
+        }
+    }
+
+    # Scenario: No quota override is supplied, or a caller requests more than the standard permits.
+    # Purpose: The public default and maximum are 1,048,576 characters per stream.
+    It 'UnitT20_defaults_to_and_caps_the_standard_character_limit' {
+        $command=Get-Command Start-PlatformOwnedProcess
+        $parameter=$command.Parameters['OutputLimitCharacters']
+        $parameter | Should Not BeNullOrEmpty
+        $range=@($parameter.Attributes | Where-Object { $_ -is [Management.Automation.ValidateRangeAttribute] })[0]
+        $range.MaxRange | Should Be 1048576
+        $node=@($command.ScriptBlock.Ast.FindAll({param($n) $n -is [Management.Automation.Language.ParameterAst] -and $n.Name.VariablePath.UserPath -eq 'OutputLimitCharacters'},$true))[0]
+        $node.DefaultValue.SafeGetValue() | Should Be 1048576
+    }
+
+    # Scenario: Fixture code stops making progress before its reader Join.
+    # Purpose: The parent watchdog kills the isolated fixture instead of hanging CI.
+    It 'UnitT25_bounds_a_stalled_capture_fixture' {
+        if($env:CAPTURE_QUOTA_CHILD -eq 'UnitT25_bounds_a_stalled_capture_fixture'){Start-Sleep -Seconds 30; return}
+        $timer=[Diagnostics.Stopwatch]::StartNew()
+        { Invoke-CaptureQuotaChild 'UnitT25_bounds_a_stalled_capture_fixture' 2000 } | Should Throw 'exceeded its deadline'
+        $timer.Elapsed.TotalSeconds | Should BeLessThan 10
+    }
+}
+
+# Native directory handles are only available on Unix; conditional registration keeps zero skips.
+if ($IsLinux -or $IsMacOS) {
+    Describe 'Unix executable parent directories' {
+        BeforeAll { Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force }
+        # Scenario: A Darwin executable path has / as its immediate parent.
+        # Purpose: Open the root directory itself without passing an empty relative path to P2.
+        It 'InterT10_opens_root_parent_for_a_root_level_executable' {
+            $type=[SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease].Assembly.GetType('SyuanTsai.AIInstructions.PlatformRuntime.UnixProcessControl')
+            $parent=$type.GetMethod('OpenExecutableParent',[Reflection.BindingFlags]'Static,NonPublic').Invoke($null,@('/fixture-executable'))
+            try { $parent.Observation.Kind | Should Be 'directory'; $type.Assembly.GetType('SyuanTsai.AIInstructions.PlatformRuntime.UnixLease').GetField('Path',[Reflection.BindingFlags]'Instance,NonPublic').GetValue($parent) | Should Be '/' }
+            finally { $parent.Dispose() }
+        }
+    }
+}
+
 Describe 'Platform runtime contract' {
     BeforeAll {
         $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
@@ -2158,4 +4021,112 @@ try {
         $receipt.purpose | Should Be 'regression'
     }
     }
+}
+
+Describe 'Platform owned process probe failure cleanup' {
+    BeforeAll {
+        Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
+        function Invoke-P3ProbeFailureFixture([string]$Mode,[int]$FailPass=1) {
+            & (Get-Module platform-runtime) {
+                param($Mode,$FailPass)
+                # Only process execution is substituted. Creation, identity checks,
+                # finally cleanup and non-recursive directory removal are real P2 APIs.
+                $state = @{ Mode=$Mode; FailPass=$FailPass; Pass=0; Path=$null; Created=[Collections.Generic.List[object]]::new(); Disposed=0 }
+                $originalDirectory = ${function:Open-PlatformDirectory}
+                $originalFile = ${function:Open-PlatformFile}
+                function Open-PlatformDirectory {
+                    param($Root,$RelativePath,[switch]$CreatePrivate)
+                    if ($CreatePrivate) { $state.Path = Join-Path $Root $RelativePath }
+                    & $originalDirectory @PSBoundParameters
+                }
+                function Open-PlatformFile {
+                    param($ParentLease,$Leaf,$Access,$CreateMode)
+                    if ($CreateMode -eq 'CreateNew' -and $Leaf -eq 'err' -and $state.Mode -eq 'partial-create') { throw 'fixture-second-capture-failure' }
+                    $file = & $originalFile @PSBoundParameters
+                    if ($CreateMode -eq 'CreateNew') { $state.Created.Add(@($Leaf,$file.Observation)) }
+                    return $file
+                }
+                function Start-PlatformCapturedProcess {
+                    param($ExecutablePath,$ExecutableLease,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$IsolationRequirement,$StdoutLease,$StderrLease,$OutputLimitBytes)
+                    $state.Pass++
+                    if ($state.Mode -eq 'start' -and $state.Pass -eq $state.FailPass) { throw 'fixture-native-start-failure' }
+                    # This fake process has finished writing and closed its capture handles.
+                    $StdoutLease.Dispose(); $StderrLease.Dispose()
+                    if ($state.Pass -eq 1) {
+                        [IO.File]::WriteAllText((Join-Path $state.Path 'out'),'probe-out')
+                        [IO.File]::WriteAllText((Join-Path $state.Path 'err'),'probe-err')
+                    }
+                    $process = [pscustomobject]@{
+                        ExitCode=7; UnixObservation=$null; State=$state
+                        TimedOut=($state.Mode -eq 'timeout' -and $state.Pass -eq $state.FailPass)
+                        CleanedUp= -not ($state.Mode -eq 'cleanup' -and $state.Pass -eq $state.FailPass)
+                    }
+                    $process | Add-Member ScriptMethod WaitForExit { param($Timeout) return -not $this.TimedOut }
+                    $process | Add-Member ScriptMethod Dispose {
+                        $this.State.Disposed++
+                        if ($this.State.Mode -eq 'dispose') { throw 'fixture-process-dispose-failure' }
+                    }
+                    return $process
+                }
+                function Stop-PlatformOwnedProcess {
+                    param($Lease)
+                    [pscustomobject]@{ CleanedUp=$Lease.CleanedUp; SignalsSent=1 }
+                }
+                try {
+                    $receipt = Test-PlatformOwnedProcess
+                    $receipt.status | Should Be $(if ($state.Mode -eq 'success') { 'available' } else { 'unavailable' })
+                    $state.Path | Should Not BeNullOrEmpty
+                    $expectedCount = if ($state.Mode -eq 'success') { 4 } elseif ($state.Mode -eq 'partial-create') { 1 } else { 2 * $state.FailPass }
+                    $state.Created.Count | Should Be $expectedCount
+                    # Assert before fixture fallback: production must have removed
+                    # all files and the directory even when no process lease returned.
+                    [IO.Directory]::Exists($state.Path) | Should Be $false
+                    @($receipt.evidence.PSObject.Properties.Name) | Should Not Contain 'cleanupFailure'
+                    if ($state.Mode -eq 'success') { @($receipt.evidence.PSObject.Properties.Name) | Should Not Contain 'executableLeaseBinding' }
+                    elseif ($state.Mode -eq 'dispose') { $receipt.evidence.processDisposeFailure | Should Match 'fixture-process-dispose-failure' }
+                    elseif ($state.Mode -eq 'start') { $receipt.evidence.failure | Should Match 'fixture-native-start-failure' }
+                    elseif ($state.Mode -eq 'timeout') { $receipt.evidence.failure | Should Match 'timed out' }
+                    elseif ($state.Mode -eq 'partial-create') { $receipt.evidence.failure | Should Match 'fixture-second-capture-failure' }
+                    else { $receipt.evidence.failure | Should Match 'cleanup|clean up' }
+                } finally {
+                    # Exact fixture-owned observations only; never recursively delete.
+                    if ($null -ne $state.Path -and [IO.Directory]::Exists($state.Path)) {
+                        $root = [IO.Path]::GetDirectoryName($state.Path)
+                        $directory = & $originalDirectory -Root $root -RelativePath ([IO.Path]::GetFileName($state.Path))
+                        $fallback = [ordered]@{}
+                        Clear-PlatformProbe -Directory $directory -Path $state.Path -Entries $state.Created.ToArray() -Evidence $fallback
+                    }
+                }
+            } $Mode $FailPass
+        }
+    }
+
+    # Scenario: Native start fails after capture creation, in either probe phase.
+    # Purpose: Ownership must be recorded before a process lease can be returned.
+    It 'UnitT10_removes_probe_captures_after_start_failure' {
+        foreach ($pass in @(1,2)) { Invoke-P3ProbeFailureFixture start $pass }
+    }
+
+    # Scenario: The first probe cannot observe process exit before its deadline.
+    # Purpose: Timeout must still release the process lease and all probe files.
+    It 'UnitT20_removes_probe_captures_after_timeout' { Invoke-P3ProbeFailureFixture timeout }
+
+    # Scenario: Either normal-exit or termination cleanup reports incomplete cleanup.
+    # Purpose: Failure receipts must not skip capture ownership registration or removal.
+    It 'UnitT30_removes_probe_captures_after_cleanup_failure' {
+        foreach ($pass in @(1,2)) { Invoke-P3ProbeFailureFixture cleanup $pass }
+    }
+
+    # Scenario: Opening stderr fails after stdout has already been created.
+    # Purpose: Capture ownership is journaled individually, not after the pair succeeds.
+    It 'UnitT40_removes_the_first_capture_when_the_second_creation_fails' { Invoke-P3ProbeFailureFixture partial-create }
+
+    # Scenario: Process lease disposal itself throws during the failure path.
+    # Purpose: Preserve disposal evidence and execute file cleanup regardless.
+    It 'UnitT50_cleans_probe_files_even_when_process_disposal_throws' { Invoke-P3ProbeFailureFixture dispose }
+
+    # Scenario: Path execution succeeds; executable-lease execution has not been measured.
+    # Purpose: An available path probe must not claim lease binding capability.
+    It 'UnitT60_does_not_claim_unmeasured_executable_lease_binding' { Invoke-P3ProbeFailureFixture success }
+
 }
