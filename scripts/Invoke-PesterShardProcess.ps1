@@ -17,213 +17,296 @@ param(
     [string] $TestRoot = './tests',
     [string] $EvidenceRoot,
     [AllowEmptyCollection()][string[]] $SelectedTestFileNames = @(),
-    [string] $SummaryOutputPath = ''
+    [string] $SummaryOutputPath = '',
+    [Threading.CancellationToken] $CancellationToken = [Threading.CancellationToken]::None,
+    [ValidateSet('cooperative','strong')][string] $IsolationRequirement = 'cooperative'
 )
 
 $ErrorActionPreference = 'Stop'
-
-if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or
-    $PSVersionTable.PSEdition -cne 'Core' -or
-    $PSVersionTable.PSVersion.Major -ne 7) {
-    throw 'INVALID|Pester shard executor requires Windows PowerShell 7.'
+if ($PSVersionTable.PSEdition -cne 'Core' -or $PSVersionTable.PSVersion.Major -ne 7) {
+    throw [PlatformNotSupportedException]::new('INVALID|Pester shard executor requires PowerShell 7 Core on Windows, Linux or macOS.')
 }
-
-function Get-PesterShardFileSha256 {
-    [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string] $Path)
-
-    $algorithm = [Security.Cryptography.SHA256]::Create()
-    $stream = $null
-    try {
-        $stream = [IO.File]::OpenRead($Path)
-        $hashBytes = $algorithm.ComputeHash($stream)
-        return ([BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
-    }
-    finally {
-        if ($null -ne $stream) { $stream.Dispose() }
-        $algorithm.Dispose()
-    }
+if ([Environment]::Version.Major -lt 8) {
+    throw [PlatformNotSupportedException]::new('INVALID|The shared platform runtime requires .NET 8 or newer.')
 }
-
 if (-not [string]::IsNullOrWhiteSpace($CancellationPath)) {
-    throw 'INVALID|Pester shard executor does not accept a caller-visible CancellationPath; use the supervisor-only cancellation channel.'
+    throw 'INVALID|Pester shard executor does not accept a caller-visible CancellationPath; use the supervisor-only cancellation token.'
 }
-
-# The shard boundary is deliberately self-contained. It cannot rely on the
-# central runner being dot-sourced. Keep kernel containment and bounded-capture
-# primitives local to this Windows PowerShell 7 entry point.
 $script:PesterShardChildOutputQuotaCharacters = 1048576
-$script:PesterShardRunId = [guid]::NewGuid().ToString('N')
-$script:PesterShardExecutorSha256 = Get-PesterShardFileSha256 -Path $PSCommandPath
 
-if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
-    $null -eq ('PesterShardProcessControlNative' -as [type])) {
-    Add-Type -TypeDefinition @'
-using System;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
+function Get-PesterShardCanonicalHash {
+    param([byte[]]$Bytes)
+    if ($Bytes.Length -ge 3 -and $Bytes[0] -eq 239 -and $Bytes[1] -eq 187 -and $Bytes[2] -eq 191) { throw 'INVALID|Runtime closure must be UTF-8 without BOM.' }
+    $utf8 = [Text.UTF8Encoding]::new($false,$true)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash($utf8.GetBytes($utf8.GetString($Bytes).Replace("`r`n","`n"))))).Replace('-','').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
 
-public static class PesterShardProcessControlNative
-{
-    private const uint JobObjectLimitKillOnJobClose = 0x00002000;
-    private const int JobObjectExtendedLimitInformationClass = 9;
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct JobObjectBasicLimitInformation
-    {
-        public long PerProcessUserTimeLimit;
-        public long PerJobUserTimeLimit;
-        public uint LimitFlags;
-        public UIntPtr MinimumWorkingSetSize;
-        public UIntPtr MaximumWorkingSetSize;
-        public uint ActiveProcessLimit;
-        public UIntPtr Affinity;
-        public uint PriorityClass;
-        public uint SchedulingClass;
+function Import-PesterShardRuntime {
+    param([string]$Root, [Collections.Generic.List[IDisposable]]$Guards)
+    # Trust anchor belongs to this reviewed entry point, never to a candidate manifest.
+    $manifestSha256 = '805f398cbdb93ca52a80d0c7d5abce2b75d6448eecbddbb7462ddfcf8e8e8976'
+    $manifestPath = Join-Path $Root 'platform-runtime.psd1'
+    Assert-PesterShardPathAncestorsNoReparse $manifestPath 'runtime manifest'
+    if ((Get-PesterShardCanonicalHash ([IO.File]::ReadAllBytes($manifestPath))) -cne $manifestSha256) { throw 'INVALID|Untrusted platform runtime manifest.' }
+    $manifest = Import-PowerShellDataFile -LiteralPath $manifestPath
+    $entries = @([pscustomobject]@{Path='platform-runtime.psd1';Sha256=$manifestSha256}) + @($manifest.PrivateData.PlatformRuntime.Inventory)
+    $declared = [string[]]@($entries | ForEach-Object Path)
+    foreach ($item in @(Get-ChildItem -LiteralPath (Join-Path $Root 'platform') -Recurse -Force)) {
+        Assert-PesterShardPathAncestorsNoReparse $item.FullName 'runtime closure'
     }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct IoCounters
-    {
-        public ulong ReadOperationCount;
-        public ulong WriteOperationCount;
-        public ulong OtherOperationCount;
-        public ulong ReadTransferCount;
-        public ulong WriteTransferCount;
-        public ulong OtherTransferCount;
+    $actual = [string[]]@(Get-ChildItem -LiteralPath (Join-Path $Root 'platform') -Recurse -File -Force | ForEach-Object { 'platform/' + $_.FullName.Substring((Join-Path $Root 'platform').Length+1).Replace('\','/') })
+    if ((@($actual | Sort-Object) -join '|') -cne (@($declared | Where-Object { $_.StartsWith('platform/') } | Sort-Object) -join '|')) { throw 'INVALID|Platform closure inventory differs.' }
+    foreach ($entry in $entries) {
+        $filePath = Join-Path $Root $entry.Path
+        Assert-PesterShardPathAncestorsNoReparse $filePath 'runtime closure'
+        if ((Get-PesterShardCanonicalHash ([IO.File]::ReadAllBytes($filePath))) -cne $entry.Sha256) { throw "INVALID|Platform closure hash mismatch: $($entry.Path)" }
     }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct JobObjectExtendedLimitInformation
-    {
-        public JobObjectBasicLimitInformation BasicLimitInformation;
-        public IoCounters IoInfo;
-        public UIntPtr ProcessMemoryLimit;
-        public UIntPtr PeakProcessMemoryUsed;
-        public UIntPtr JobMemoryLimit;
-        public UIntPtr PeakJobMemoryUsed;
+    # Compile only the now verified native closure. P2 protects and rehashes every
+    # file before importing executable PowerShell; no ambient module lookup.
+    if ($null -ne ('SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative' -as [type])) {
+        throw [IO.InvalidDataException]::new('INVALID|Preloaded native runtime has no entry-point provenance; use a fresh shard supervisor.')
     }
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr CreateJobObject(IntPtr jobAttributes, string name);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetInformationJobObject(
-        IntPtr job,
-        int informationClass,
-        ref JobObjectExtendedLimitInformation information,
-        uint informationLength);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool CloseHandle(IntPtr handle);
-
-    public static IntPtr CreateKillOnCloseJob()
-    {
-        IntPtr job = CreateJobObject(IntPtr.Zero, null);
-        if (job == IntPtr.Zero)
-        {
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateJobObject failed.");
+    # A1 boundary: Add-Type reopens these verified paths. A same-account concurrent
+    # malicious writer can replace source between hashing and this read; external
+    # isolation is required. The later P2 recheck does not close that interval.
+    Add-Type -LiteralPath @($entries | Where-Object { $_.Path.EndsWith('.cs') } | ForEach-Object { Join-Path $Root $_.Path }) -ErrorAction Stop
+    $platform = [SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetOperatingSystem()
+    foreach ($entry in $entries) {
+        $filePath = [IO.Path]::GetFullPath((Join-Path $Root $entry.Path))
+        $parentPath = [IO.Path]::GetDirectoryName($filePath)
+        if ($platform -ceq 'windows') {
+            $parent = [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenPreparationRoot($parentPath)
+            $Guards.Add($parent)
+            $file = [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenFile($parent,[IO.Path]::GetFileName($filePath),'Read','OpenExisting')
+        } else {
+            $parent = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::OpenDirectory('/', $parentPath.TrimStart('/'), $false)
+            $Guards.Add($parent)
+            $file = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::OpenFile($parent,[IO.Path]::GetFileName($filePath),'Read','OpenExisting')
         }
-        JobObjectExtendedLimitInformation information = new JobObjectExtendedLimitInformation();
-        information.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
-        if (!SetInformationJobObject(
-            job,
-            JobObjectExtendedLimitInformationClass,
-            ref information,
-            (uint)Marshal.SizeOf(typeof(JobObjectExtendedLimitInformation))))
-        {
-            int error = Marshal.GetLastWin32Error();
-            CloseHandle(job);
-            throw new Win32Exception(error, "SetInformationJobObject failed.");
+        $Guards.Add($file)
+        if ((Get-PesterShardCanonicalHash ($file.ReadAllBytes(16777216))) -cne $entry.Sha256) { throw 'INVALID|Platform closure changed before import.' }
+    }
+    Import-Module -Name $manifestPath -Force -Global -ErrorAction Stop
+}
+
+function Resolve-PesterShardFileSystemPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $provider = $null; $drive = $null
+    $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path,[ref]$provider,[ref]$drive)
+    if ($provider.Name -cne 'FileSystem') { throw 'INVALID|Pester shard inputs require filesystem paths.' }
+    return $full
+}
+
+function Open-PesterShardDirectory {
+    param([string]$Path,[switch]$Create)
+    $full = (Resolve-PesterShardFileSystemPath $Path).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    $anchor = [IO.Path]::GetPathRoot($full)
+    Open-PlatformDirectory -Root $anchor -RelativePath $full.Substring($anchor.Length) -CreatePrivate:$Create
+}
+
+function Open-PesterShardInput {
+    param([string]$Path, [Collections.Generic.List[IDisposable]]$Guards)
+    $Path = Resolve-PesterShardFileSystemPath $Path
+    $parent = Open-PesterShardDirectory ([IO.Path]::GetDirectoryName($Path))
+    $Guards.Add($parent)
+    $file = Open-PlatformFile -ParentLease $parent -Leaf ([IO.Path]::GetFileName($Path)) -Access Read -CreateMode OpenExisting
+    $Guards.Add($file)
+    Assert-PlatformFileIdentity -Lease $file -Expected $file.Observation -SingleLink | Out-Null
+    return $file
+}
+
+function Assert-PesterShardModuleManifest {
+    param([string]$Path,[string]$Version)
+    $Path = Resolve-PesterShardFileSystemPath $Path
+    $manifest = Import-PowerShellDataFile -LiteralPath $Path
+    if ([string]$manifest.ModuleVersion -cne $Version) { throw 'INVALID|Pester module version mismatch.' }
+    if (@($manifest['RequiredModules']).Count -gt 0 -and $null -ne $manifest['RequiredModules']) { throw 'INVALID|Ambient Pester module dependencies are not allowed.' }
+    $root = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Path))
+    $comparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    $entryPoints = @($manifest['RootModule'],$manifest['ModuleToProcess']) | Where-Object { -not [string]::IsNullOrEmpty($_) }
+    if (@($entryPoints).Count -ne 1) { throw 'INVALID|Pester manifest must declare one local entry point.' }
+    foreach ($field in @('RootModule','ModuleToProcess','NestedModules','RequiredAssemblies','ScriptsToProcess','TypesToProcess','FormatsToProcess')) {
+        foreach ($relative in @($manifest[$field])) {
+            if ($null -eq $relative -or $relative -ceq '') { continue }
+            if ($relative -isnot [string] -or [IO.Path]::IsPathRooted($relative) -or $relative -match '[*?]') { throw 'INVALID|Pester dependencies must be explicit local files.' }
+            $full = [IO.Path]::GetFullPath((Join-Path $root $relative.Replace('\',[IO.Path]::DirectorySeparatorChar)))
+            if (-not $full.StartsWith($root+[IO.Path]::DirectorySeparatorChar,$comparison) -or -not [IO.File]::Exists($full)) { throw 'INVALID|Pester dependency escapes or is missing from the protected closure.' }
         }
-        return job;
     }
-
-    public static bool TryAssignProcessToJobObject(IntPtr job, IntPtr process)
-    {
-        return AssignProcessToJobObject(job, process);
-    }
-
-    public static bool TryTerminateJobObject(IntPtr job, uint exitCode)
-    {
-        return TerminateJobObject(job, exitCode);
-    }
-
-    public static bool TryCloseHandle(IntPtr handle)
-    {
-        return CloseHandle(handle);
-    }
-}
-'@
+    return $manifest
 }
 
-if ($null -eq ('PesterShardBoundedCapture' -as [type])) {
-    Add-Type -TypeDefinition @'
-using System;
-using System.IO;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
-
-public sealed class PesterShardBoundedCaptureResult
-{
-    public string Text { get; private set; }
-    public bool Exceeded { get; private set; }
-    public int CharacterCount { get; private set; }
-
-    public PesterShardBoundedCaptureResult(string text, bool exceeded, int characterCount)
-    {
-        Text = text;
-        Exceeded = exceeded;
-        CharacterCount = characterCount;
-    }
+function Write-PesterShardJson {
+    param([string]$Path,$Value)
+    Write-PesterShardBytes $Path ([Text.UTF8Encoding]::new($false).GetBytes(($Value | ConvertTo-Json -Depth 16 -Compress)))
 }
 
-public static class PesterShardBoundedCapture
-{
-    public static Task<PesterShardBoundedCaptureResult> Start(StreamReader reader, int quota)
-    {
-        if (reader == null) throw new ArgumentNullException("reader");
-        if (quota < 1) throw new ArgumentOutOfRangeException("quota");
-        return Task.Factory.StartNew(
-            () => Read(reader, quota),
-            CancellationToken.None,
-            TaskCreationOptions.LongRunning,
-            TaskScheduler.Default);
+function Write-PesterShardBytes {
+    param([string]$Path,[byte[]]$Bytes)
+    $Path = Resolve-PesterShardFileSystemPath $Path
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and [IO.Path]::GetFullPath($Path).Length -ge 240) {
+        throw 'INVALID|Windows shard artifact paths must be fewer than 240 characters.'
     }
+    $parent = Open-PesterShardDirectory ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Path)))
+    try {
+        $file = Open-PlatformFile -ParentLease $parent -Leaf ([IO.Path]::GetFileName($Path)) -Access ReadWrite -CreateMode CreateNew
+        try { $file.WriteNewBytes($Bytes) }
+        finally { $file.Dispose() }
+    } finally { $parent.Dispose() }
+    # Partial files are retained on failure. P7 publication/removal is not used.
+}
 
-    private static PesterShardBoundedCaptureResult Read(StreamReader reader, int quota)
-    {
-        var builder = new StringBuilder(Math.Min(quota, 4096));
-        var buffer = new char[4096];
-        var count = 0;
-        while (true)
-        {
-            var read = reader.Read(buffer, 0, buffer.Length);
-            if (read == 0) return new PesterShardBoundedCaptureResult(builder.ToString(), false, count);
-            var remaining = quota - count;
-            if (read > remaining)
-            {
-                if (remaining > 0) builder.Append(buffer, 0, remaining);
-                return new PesterShardBoundedCaptureResult(builder.ToString(), true, quota);
+function Read-PesterShardJson {
+    param([string]$Path)
+    $guards = [Collections.Generic.List[IDisposable]]::new()
+    try { $file = Open-PesterShardInput $Path $guards; return [Text.UTF8Encoding]::new($false,$true).GetString($file.ReadAllBytes(1048576)) | ConvertFrom-Json }
+    finally { for ($i=$guards.Count-1;$i -ge 0;$i--) { $guards[$i].Dispose() } }
+}
+
+function Get-PesterShardChildEnvironment {
+    # Explicit allowlist: no prefix wildcards, runtime injection, or inherited PSModulePath.
+    # Cmdlet output (Join-Path/ConvertTo-Json) can retain a PSObject wrapper in a
+    # hashtable. P3's native IDictionary contract requires actual CLR strings,
+    # including values the supervisor adds after this function returns.
+    $comparer = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [StringComparer]::OrdinalIgnoreCase } else { [StringComparer]::Ordinal }
+    $values = [Collections.Generic.Dictionary[string,string]]::new($comparer)
+    foreach ($name in @('PATH','PATHEXT','COMSPEC','SYSTEMROOT','WINDIR','TEMP','TMP','TMPDIR','HOME','USERPROFILE','APPDATA','LOCALAPPDATA','LANG','LC_ALL','NUMBER_OF_PROCESSORS',
+        'SYP154_PESTER_P02A_SELECTED_WITNESS','SYP154_PESTER_P02A_UNSELECTED_WITNESS','SYP154_PESTER_P02A_ALPHA_WITNESS','SYP154_PESTER_P02A_BETA_WITNESS','SYP154_PESTER_P02A_RUNTIME_PATH','SYP154_PESTER_P02A_EVIDENCE_ROOT')) {
+        $value = [Environment]::GetEnvironmentVariable($name,'Process')
+        if ($null -ne $value) { $values[$name] = $value }
+    }
+    $values['PSModulePath'] = Join-Path $PSHOME 'Modules'
+    return $values
+}
+
+function ConvertTo-PesterShardProcessState {
+    param($Cleanup,[AllowNull()]$ExitCode,[string]$TerminationReason,[bool]$OutputLimitExceeded,[bool]$NaturalExit,[bool]$SupervisorCancelled)
+    if ($null -eq $Cleanup -or -not $Cleanup.CleanedUp -or -not $Cleanup.CaptureReadersStopped -or -not $Cleanup.CaptureResourcesClosed -or
+        -not [string]::IsNullOrEmpty($Cleanup.Uncertainty) -or @($Cleanup.RemainingPids).Count -ne 0) { return 'cleanup-failed' }
+    if ($OutputLimitExceeded -or $TerminationReason -ceq 'output-limit') { return 'output-quota-exceeded' }
+    if ($TerminationReason -ceq 'deadline') { return 'timed-out' }
+    if ($SupervisorCancelled -or ($TerminationReason -ceq 'cancelled' -and -not $NaturalExit)) { return 'cancelled' }
+    if ($TerminationReason -cin @('capture-failure','supervisor-failure')) { return $TerminationReason }
+    if ($TerminationReason -cnotin @('','cancelled')) { return 'supervisor-failure' }
+    if (-not $NaturalExit -or $null -eq $ExitCode) { return 'failed' }
+    if ($ExitCode -ne 0) { return 'failed' }
+    return 'completed'
+}
+
+function Format-PesterShardException {
+    param([Parameter(Mandatory = $true)][Exception]$Exception)
+    $parts = [Collections.Generic.List[string]]::new()
+    $cause = $Exception
+    while ($null -ne $cause -and $parts.Count -lt 8) {
+        $message = [string]$cause.Message
+        if ($message.Length -gt 8192) { $message = $message.Substring(0,8192) }
+        $message = ConvertTo-PesterShardSanitizedDiagnosticText $message
+        $part = $cause.GetType().FullName + ': ' + $message
+        # Reserve room for inner causes even if an outer exception repeats a large message.
+        if ($part.Length -gt 480) { $part = $part.Substring(0,480) + '...' }
+        $parts.Add($part)
+        $cause = $cause.InnerException
+    }
+    $text = $parts.ToArray() -join ' -> '
+    return $text.Substring(0,[Math]::Min(4096,$text.Length))
+}
+
+function Invoke-PesterShardProcess {
+    [CmdletBinding()]
+    param([string[]]$Paths,[string]$ModulePath,[string]$Version,[string]$ChildPowerShell,[string]$EncodedChildScript,[string]$ChildScriptPath,
+        [string]$ResultPath,[string]$ProcessEvidencePath,[string]$StdoutPath,[string]$StderrPath,[int]$TimeoutSeconds,
+        [string]$WorkingDirectory,[Collections.IDictionary]$Environment,
+        [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None,
+        [ValidateSet('cooperative','strong')][string]$IsolationRequirement = 'cooperative')
+    $guards = [Collections.Generic.List[IDisposable]]::new()
+    $lease = $null; $cleanup = $null; $status = 'not-started'; $exitCode = $null
+    $naturalExit = $false; $cancelled = $false; $quota = $false; $reason = ''; $failure = ''; $processId = $null; $identity = $null
+    $phase = 'validate-inputs'
+    try {
+        if ($TimeoutSeconds -le 0) { throw 'INVALID|Shard deadline must be positive.' }
+        foreach ($path in @($Paths)+@($ModulePath,$ChildPowerShell,$ResultPath,$ProcessEvidencePath,$StdoutPath,$StderrPath,$WorkingDirectory)) {
+            if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and $path.Length -ge 240) { throw 'INVALID|Windows shard paths must be fewer than 240 characters.' }
+        }
+        $phase = 'open-working-directory'
+        $directory = Open-PesterShardDirectory $WorkingDirectory; $guards.Add($directory)
+        $phase = 'open-executable'
+        $executable = Open-PesterShardInput $ChildPowerShell $guards
+        $phase = 'open-test-and-module-inputs'
+        foreach ($path in @($Paths)+@($ModulePath)) { Open-PesterShardInput $path $guards | Out-Null }
+        $arguments = @('-NoLogo','-NoProfile','-NonInteractive')
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            $arguments += @('-ExecutionPolicy','Bypass')
+        }
+        if (-not [string]::IsNullOrEmpty($ChildScriptPath)) {
+            $phase = 'open-child-script'
+            Open-PesterShardInput $ChildScriptPath $guards | Out-Null
+            $arguments += @('-File',$ChildScriptPath)
+        } else { $arguments += @('-EncodedCommand',$EncodedChildScript) }
+        if ($CancellationToken.IsCancellationRequested) { $cancelled=$true; $status='cancelled' }
+        else {
+            $phase = 'start-owned-process'
+            $lease = Start-PlatformOwnedProcess -ExecutableLease $executable -ArgumentList $arguments `
+                -Environment $Environment -WorkingDirectoryLease $directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)) `
+                -IsolationRequirement $IsolationRequirement -StdoutPath $StdoutPath -StderrPath $StderrPath -OutputLimitCharacters $script:PesterShardChildOutputQuotaCharacters
+            $processId=$lease.Pid; $identity=$lease.StartIdentity
+            while (-not $lease.HasExited -and $null -eq $lease.Cleanup) {
+                if ($CancellationToken.IsCancellationRequested) { $cancelled=$true; break }
+                [void]$lease.WaitForExit([TimeSpan]::FromMilliseconds(50))
             }
-            builder.Append(buffer, 0, read);
-            count += read;
+            $naturalExit = $lease.HasExited -and [string]::IsNullOrEmpty($lease.TerminationReason) -and -not $cancelled
+        }
+    } catch {
+        $status='start-failed'; $failure=$phase + ': ' + (Format-PesterShardException $_.Exception)
+        $cause=$_.Exception
+        while ($null -ne $cause) {
+            if ($cause.Data.Contains('StartupCleanupReceipt')) { $cleanup=$cause.Data['StartupCleanupReceipt'] }
+            if ($cause.Data.Contains('StartupCaptureCleanupUncertainty')) { $status='cleanup-failed' }
+            $cause=$cause.InnerException
+        }
+        if ($null -ne $cleanup -and -not $cleanup.CleanedUp) { $status='cleanup-failed' }
+    } finally {
+        if ($null -ne $lease) {
+            try {
+                $cleanup=Stop-PlatformOwnedProcess -Lease $lease -ExpectedStartIdentity $identity -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(5))
+                $exitCode=$lease.ExitCode; $quota=$lease.OutputLimitExceeded; $reason=[string]$lease.TerminationReason
+                $status=ConvertTo-PesterShardProcessState $cleanup $exitCode $reason $quota $naturalExit $cancelled
+            } catch { $status='cleanup-failed'; $failure += ' stop-owned-process: ' + (Format-PesterShardException $_.Exception) }
+            try { $lease.Dispose() } catch { $status='cleanup-failed'; $failure += ' dispose-process-lease: ' + (Format-PesterShardException $_.Exception) }
+        }
+        for ($i=$guards.Count-1;$i -ge 0;$i--) {
+            try { $guards[$i].Dispose() }
+            catch { $status='cleanup-failed'; $failure += ' dispose-input-lease: ' + (Format-PesterShardException $_.Exception) }
+        }
+        if ($status -ceq 'cleanup-failed' -and [string]::IsNullOrWhiteSpace($failure)) {
+            $failure = 'Process cleanup unconfirmed: ' + (ConvertTo-PesterShardSanitizedDiagnosticText ([string]$cleanup.Uncertainty))
+            $failure += '; cleanedUp=' + $cleanup.CleanedUp + '; captureReadersStopped=' + $cleanup.CaptureReadersStopped + '; captureResourcesClosed=' + $cleanup.CaptureResourcesClosed
+        }
+        if ($failure.Length -gt 4096) { $failure=$failure.Substring(0,4096) }
+        $diagnostic = [ordered]@{
+            schemaVersion=1; status=$status; exitCode=$exitCode; resultPath=$ResultPath; stdoutPath=$StdoutPath; stderrPath=$StderrPath
+            processStarted=($null -ne $processId); rootProcessId=$processId; startIdentity=$identity
+            outputQuotaExceeded=$quota; terminationReason=$reason; cleanup=$cleanup
+            failureSummary=Get-PesterShardFailureSummary -Paths @($StderrPath,$StdoutPath) -OutputQuotaExceeded:$quota; error=$failure
+            platformReceipt=$script:PesterShardCapabilities; artifactsRetained=$true
+            caseDiagnosticsPath=($ResultPath+'.cases.json'); childScriptPath=$ChildScriptPath
+        }
+        Write-PesterShardJson $ProcessEvidencePath $diagnostic
+    }
+    if ($quota) {
+        # Report promptly after the owner's cleanup attempt. The raw captures
+        # remain available without sanitizing/replaying a full quota of output.
+        Write-Host $diagnostic.failureSummary
+    } else {
+        foreach ($path in @($StdoutPath,$StderrPath)) {
+            $text=Read-PesterShardOutputPrefix $path $script:PesterShardChildOutputQuotaCharacters
+            if (-not [string]::IsNullOrEmpty($text)) { Write-Host (ConvertTo-PesterShardSanitizedDiagnosticText (ConvertFrom-PesterShardCliXmlDiagnostic $text)) }
         }
     }
-}
-'@
-}
-
-if ($OuterTimeoutSeconds -le 0) { throw 'OuterTimeoutSeconds must be positive.' }
-if (-not (Test-Path -LiteralPath $PesterModulePath -PathType Leaf)) {
-    throw "Pester module path does not identify a file: $PesterModulePath"
+    if ($status -cnotin @('completed','failed') -or $null -eq $cleanup -or -not $cleanup.CleanedUp) { throw "Pester shard process ended with status '$status'; evidence='$ProcessEvidencePath'. $failure" }
+    if (-not (Test-Path -LiteralPath $ResultPath -PathType Leaf)) { throw "Pester shard exited without a result file; evidence='$ProcessEvidencePath'." }
+    [pscustomobject]@{ resultPath=$ResultPath; processEvidencePath=$ProcessEvidencePath; status=$status; exitCode=$exitCode; cleanedUp=$cleanup.CleanedUp; outputQuotaExceeded=$quota }
 }
 
 function Test-PesterShardReparseItem {
@@ -232,9 +315,8 @@ function Test-PesterShardReparseItem {
     $isReparse = (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
     $isHardLink = ($Item.PSObject.Properties.Name -contains 'LinkType' -and
         [string]$Item.LinkType -match '(?i)^HardLink$')
-    # A regular executable can be a hardlink on Windows. Hardlink identity is
-    # not a symlink/reparse traversal and must not invalidate the controlled
-    # child-host path; symbolic links and junctions remain fail-closed.
+    # Hard links are not reparse traversal. The P2 file lease separately rejects
+    # multiple links before an executable, module, test or evidence file is used.
     if (-not $isReparse -and -not $isHardLink -and $Item.PSObject.Properties.Name -contains 'LinkType' -and
         -not [string]::IsNullOrWhiteSpace([string]$Item.LinkType) -and
         [string]$Item.LinkType -notmatch '(?i)^HardLink$') {
@@ -253,7 +335,7 @@ function Assert-PesterShardPathAncestorsNoReparse {
         [Parameter(Mandatory = $true)][string] $Context
     )
 
-    $fullPath = [IO.Path]::GetFullPath($Path)
+    $fullPath = Resolve-PesterShardFileSystemPath $Path
     $existingPath = $fullPath
     while (-not (Test-Path -LiteralPath $existingPath)) {
         $parent = [IO.Path]::GetDirectoryName($existingPath)
@@ -275,310 +357,23 @@ function Assert-PesterShardPathAncestorsNoReparse {
     }
 }
 
-$repositoryRoot = (Get-Location).Path
-$resolvedTestRoot = (Resolve-Path -LiteralPath $TestRoot -ErrorAction Stop).Path
-if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) { $EvidenceRoot = $env:RUNNER_TEMP }
-if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) { $EvidenceRoot = Join-Path $repositoryRoot '.syp154-pester-evidence' }
-Assert-PesterShardPathAncestorsNoReparse -Path $EvidenceRoot -Context 'evidence root'
-New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
-function Test-PesterShardProcessAlive {
-    param([Parameter(Mandatory = $true)][int] $ProcessId)
+function Get-PesterShardFileSha256 {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string] $Path)
 
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    $stream = $null
     try {
-        $process = Get-Process -Id $ProcessId -ErrorAction Stop
-        return (-not [bool]$process.HasExited)
-    }
-    catch {
-        return $false
-    }
-}
-
-function Get-PesterShardChildEnvironment {
-    $safeInheritedNames = @(
-        'PATH', 'Path', 'PATHEXT', 'COMSPEC', 'SYSTEMROOT', 'WINDIR', 'OS',
-        'TEMP', 'TMP', 'TMPDIR', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE',
-        'PROCESSOR_IDENTIFIER', 'PROGRAMDATA', 'PROGRAMFILES', 'PROGRAMFILES(X86)',
-        'PROGRAMW6432', 'COMMONPROGRAMFILES', 'COMMONPROGRAMFILES(X86)',
-        'COMMONPROGRAMW6432', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'HOME',
-        'APPDATA', 'LOCALAPPDATA', 'LANG', 'LC_ALL', 'LC_CTYPE', 'DOTNET_ROOT',
-        'DOTNET_ROOT_X64', 'XDG_RUNTIME_DIR', 'PSExecutionPolicyPreference'
-    )
-    $childEnvironment = [ordered]@{}
-    foreach ($name in $safeInheritedNames) {
-        $value = [Environment]::GetEnvironmentVariable($name, 'Process')
-        if ($null -ne $value) { $childEnvironment[$name] = [string]$value }
-    }
-    foreach ($item in @(Get-ChildItem Env:)) {
-        $name = [string]$item.Name
-        if ($name -match '^SYP154_PESTER_[A-Za-z0-9_]+$') {
-            $childEnvironment[$name] = [string]$item.Value
-        }
-    }
-    return $childEnvironment
-}
-
-function Get-PesterShardProcessBootstrapCode {
-    return @'
-$ErrorActionPreference = 'Stop'
-$targetCommand = [string]$env:SYP154_PESTER_BOOTSTRAP_COMMAND
-$argumentJson = [string]$env:SYP154_PESTER_BOOTSTRAP_ARGUMENTS
-$releasePath = [string]$env:SYP154_PESTER_BOOTSTRAP_RELEASE_PATH
-if ([string]::IsNullOrWhiteSpace($targetCommand) -or [string]::IsNullOrWhiteSpace($releasePath)) {
-    throw 'Owned Pester shard bootstrap received incomplete target metadata.'
-}
-$targetArguments = @()
-if (-not [string]::IsNullOrWhiteSpace($argumentJson)) {
-    $parsedArguments = ConvertFrom-Json -InputObject $argumentJson
-    if ($null -ne $parsedArguments) {
-        foreach ($item in @($parsedArguments)) {
-            if ($item -isnot [string]) { throw 'Owned Pester shard bootstrap arguments must be strings.' }
-            $targetArguments += [string]$item
-        }
-    }
-}
-while (-not [IO.File]::Exists($releasePath)) { Start-Sleep -Milliseconds 10 }
-# The release metadata is supervisor-only. Do not make it visible to the
-# actual Pester child even though that child is launched by this bootstrap.
-foreach ($name in @(
-    'SYP154_PESTER_BOOTSTRAP_COMMAND',
-    'SYP154_PESTER_BOOTSTRAP_ARGUMENTS',
-    'SYP154_PESTER_BOOTSTRAP_RELEASE_PATH'
-)) {
-    [Environment]::SetEnvironmentVariable($name, $null, 'Process')
-}
-& $targetCommand @targetArguments
-if ($null -eq $LASTEXITCODE) { exit 0 }
-exit ([int]$LASTEXITCODE)
-'@
-}
-
-function Get-PesterShardProcessIdentity {
-    param([Parameter(Mandatory = $true)][int] $ProcessId)
-
-    $process = $null
-    try {
-        $process = [System.Diagnostics.Process]::GetProcessById($ProcessId)
-        $startTimeUtc = $null
-        try { $startTimeUtc = $process.StartTime.ToUniversalTime().ToString('o') } catch { }
-        return [pscustomobject][ordered]@{
-            processId = $ProcessId
-            processName = [string]$process.ProcessName
-            startTimeUtc = $startTimeUtc
-            identityAvailable = (-not [string]::IsNullOrWhiteSpace([string]$startTimeUtc))
-        }
-    }
-    catch {
-        return $null
+        $stream = [IO.File]::OpenRead($Path)
+        $hashBytes = $algorithm.ComputeHash($stream)
+        return ([BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
     }
     finally {
-        if ($null -ne $process) { $process.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
+        $algorithm.Dispose()
     }
 }
 
-function Add-PesterShardProcessIdentity {
-    param(
-        [Parameter(Mandatory = $true)][int] $ProcessId,
-        [Parameter(Mandatory = $true)][hashtable] $IdentityMap,
-        [System.Diagnostics.Process] $Process
-    )
-
-    if ($ProcessId -le 0 -or $IdentityMap.ContainsKey($ProcessId)) { return }
-    $identity = $null
-    if ($null -ne $Process) {
-        try {
-            if ([int]$Process.Id -eq $ProcessId -and -not $Process.HasExited) {
-                $startTimeUtc = $Process.StartTime.ToUniversalTime().ToString('o')
-                $identity = [pscustomobject][ordered]@{
-                    processId = $ProcessId
-                    processName = [string]$Process.ProcessName
-                    startTimeUtc = $startTimeUtc
-                    identityAvailable = (-not [string]::IsNullOrWhiteSpace($startTimeUtc))
-                }
-            }
-        }
-        catch { }
-    }
-    if ($null -eq $identity) { $identity = Get-PesterShardProcessIdentity -ProcessId $ProcessId }
-    if ($null -eq $identity) {
-        $identity = [pscustomobject][ordered]@{
-            processId = $ProcessId
-            processName = $null
-            startTimeUtc = $null
-            identityAvailable = $false
-        }
-    }
-
-    $IdentityMap[$ProcessId] = $identity
-}
-
-function Write-PesterShardBoundedOutput {
-    param(
-        [Parameter(Mandatory = $true)][string] $Path,
-        [AllowEmptyString()][string] $Text
-    )
-
-    $parent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Path))
-    if (-not [string]::IsNullOrWhiteSpace($parent)) {
-        [void](New-Item -ItemType Directory -Path $parent -Force)
-    }
-    [IO.File]::WriteAllText($Path, [string]$Text, (New-Object Text.UTF8Encoding($false)))
-}
-
-function Get-PesterShardPreflight {
-    param(
-        [Parameter(Mandatory = $true)][string] $PesterModulePath,
-        [Parameter(Mandatory = $true)][string] $PesterVersion,
-        [Parameter(Mandatory = $true)][string] $ChildPowerShell,
-        [Parameter(Mandatory = $true)][string] $WorkingDirectory,
-        [Parameter(Mandatory = $true)][string] $ResultPath,
-        [Parameter(Mandatory = $true)][string] $ProcessEvidencePath,
-        [Parameter(Mandatory = $true)][string] $StdoutPath,
-        [Parameter(Mandatory = $true)][string] $StderrPath,
-        [Parameter(Mandatory = $true)][string] $CancelPath,
-        [string] $BootstrapSignalPath
-    )
-
-    $isWindowsPlatform = ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)
-    $paths = [ordered]@{
-        workingDirectory = [IO.Path]::GetFullPath($WorkingDirectory)
-        childPowerShell = [IO.Path]::GetFullPath($ChildPowerShell)
-        pesterModule = [IO.Path]::GetFullPath($PesterModulePath)
-        result = [IO.Path]::GetFullPath($ResultPath)
-        processEvidence = [IO.Path]::GetFullPath($ProcessEvidencePath)
-        stdout = [IO.Path]::GetFullPath($StdoutPath)
-        stderr = [IO.Path]::GetFullPath($StderrPath)
-        cancellation = [IO.Path]::GetFullPath($CancelPath)
-        bootstrapSignal = if ([string]::IsNullOrWhiteSpace($BootstrapSignalPath)) { $null } else { [IO.Path]::GetFullPath($BootstrapSignalPath) }
-    }
-    $pathLengths = [ordered]@{}
-    foreach ($entry in $paths.GetEnumerator()) {
-        $pathLengths[$entry.Key] = if ($null -eq $entry.Value) { $null } else { ([string]$entry.Value).Length }
-    }
-    if ($isWindowsPlatform) {
-        foreach ($entry in $pathLengths.GetEnumerator()) {
-            if ($null -ne $entry.Value -and [int]$entry.Value -ge 240) {
-                throw "Preflight path '$($entry.Key)' is $($entry.Value) characters; the controlled Windows shard boundary requires fewer than 240 characters."
-            }
-        }
-    }
-
-    foreach ($entry in $paths.GetEnumerator()) {
-        if ($null -ne $entry.Value) {
-            Assert-PesterShardPathAncestorsNoReparse -Path ([string]$entry.Value) -Context ([string]$entry.Key)
-        }
-    }
-
-    foreach ($filePath in @($paths.childPowerShell, $paths.pesterModule)) {
-        if (-not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
-            throw "Preflight file does not exist: $filePath"
-        }
-        $item = Get-Item -Force -LiteralPath $filePath -ErrorAction Stop
-        if ($item.PSIsContainer -or (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
-            throw "Preflight file is not a direct regular file: $filePath"
-        }
-    }
-    foreach ($directoryPath in @($paths.workingDirectory, [IO.Path]::GetDirectoryName($paths.result), [IO.Path]::GetDirectoryName($paths.processEvidence))) {
-        if ([string]::IsNullOrWhiteSpace($directoryPath) -or -not (Test-Path -LiteralPath $directoryPath -PathType Container)) {
-            throw "Preflight directory does not exist: $directoryPath"
-        }
-        $item = Get-Item -Force -LiteralPath $directoryPath -ErrorAction Stop
-        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "Preflight directory is a reparse point: $directoryPath"
-        }
-    }
-
-    $permissionResults = New-Object 'System.Collections.Generic.List[object]'
-    foreach ($directoryPath in @($paths.workingDirectory, [IO.Path]::GetDirectoryName($paths.processEvidence) | Select-Object -Unique)) {
-        $probePath = Join-Path $directoryPath (".syp154-pester-preflight-{0}.tmp" -f ([guid]::NewGuid().ToString('N')))
-        $probeCreated = $false
-        try {
-            $probeStream = [IO.File]::Open($probePath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-            try { $probeStream.Flush() } finally { $probeStream.Dispose() }
-            $probeCreated = $true
-            $permissionResults.Add([pscustomobject][ordered]@{ directory = $directoryPath; writeCreateDelete = 'passed' })
-        }
-        catch {
-            $permissionResults.Add([pscustomobject][ordered]@{ directory = $directoryPath; writeCreateDelete = 'failed'; error = $_.Exception.Message })
-            throw "Preflight could not create a temporary file in '$directoryPath': $($_.Exception.Message)"
-        }
-        finally {
-            if ($probeCreated -and [IO.File]::Exists($probePath)) { [IO.File]::Delete($probePath) }
-        }
-    }
-
-    $jobObjectProbe = 'not-applicable'
-    if ($isWindowsPlatform) {
-        $probeJobHandle = [IntPtr]::Zero
-        try {
-            $probeJobHandle = [PesterShardProcessControlNative]::CreateKillOnCloseJob()
-            if (-not [PesterShardProcessControlNative]::TryCloseHandle($probeJobHandle)) {
-                throw 'The preflight Job Object handle could not be closed.'
-            }
-            $probeJobHandle = [IntPtr]::Zero
-            $jobObjectProbe = 'create-close-passed'
-        }
-        finally {
-            if ($probeJobHandle -ne [IntPtr]::Zero) {
-                try { [void][PesterShardProcessControlNative]::TryCloseHandle($probeJobHandle) } catch { }
-            }
-        }
-    }
-    $childEnvironment = Get-PesterShardChildEnvironment
-    $childEnvironmentNames = @($childEnvironment.Keys | Sort-Object)
-    $excludedSensitiveNames = @($childEnvironmentNames | Where-Object { $_ -match '(?i)secret|password|token|authorization|credentials?|(?:api|private|access)[-_ ]?key|bearer|cookie|session' })
-    if ($excludedSensitiveNames.Count -gt 0) {
-        throw "Preflight child environment unexpectedly contains sensitive names: $($excludedSensitiveNames -join ', ')"
-    }
-    $loadedPester = @(Get-Module -Name Pester | Where-Object { $_.Version -eq [version]$PesterVersion } | Select-Object -First 1)[0]
-    return [ordered]@{
-        schemaVersion = 1
-        osPlatform = [string][Environment]::OSVersion.Platform
-        powershellVersion = [string]$PSVersionTable.PSVersion
-        powershellEdition = [string]$PSVersionTable.PSEdition
-        pesterVersion = $PesterVersion
-        loadedPesterVersion = if ($null -eq $loadedPester) { $null } else { [string]$loadedPester.Version }
-        loadedPesterPath = if ($null -eq $loadedPester) { $null } else { [string]$loadedPester.Path }
-        childPowerShell = [string]$paths.childPowerShell
-        workingDirectory = [string]$paths.workingDirectory
-        paths = $paths
-        pathLengths = $pathLengths
-        childEnvironmentNames = $childEnvironmentNames
-        excludedSensitiveNames = @($excludedSensitiveNames)
-        permissions = @($permissionResults.ToArray())
-        isolation = [ordered]@{
-            jobObject = $jobObjectProbe
-            bootstrapSignal = if ($isWindowsPlatform) { 'private-supervisor-path' } else { 'not-applicable' }
-            cancellationPathExposedToChild = $false
-            candidateProcessContainment = if ($isWindowsPlatform) { 'kill-on-close-job-object' } else { 'identity-checked-fallback' }
-        }
-    }
-}
-
-function Get-PesterShardDescendantProcessIds {
-    param([Parameter(Mandatory = $true)][int] $RootProcessId, [Parameter(Mandatory = $true)][hashtable] $ObservedProcessIdentities)
-    if ($RootProcessId -le 0) { throw 'RootProcessId must be positive.' }
-
-    $processes = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | Select-Object -Property ProcessId, ParentProcessId, CreationDate)
-    $births = @{}
-    foreach ($entry in $processes) {
-        if ($entry.CreationDate -is [DateTime]) { $births[[int]$entry.ProcessId] = $entry.CreationDate.ToUniversalTime() }
-    }
-    $frontier = @($RootProcessId)
-    $descendants = New-Object 'System.Collections.Generic.List[int]'
-    while ($frontier.Count -gt 0) {
-        $next = New-Object 'System.Collections.Generic.List[int]'
-        foreach ($process in $processes) {
-            $processId = [int]$process.ProcessId
-            $parentId = [int]$process.ParentProcessId
-            if (($frontier -contains $parentId) -and $births.ContainsKey($parentId) -and $births.ContainsKey($processId) -and $births[$processId] -ge $births[$parentId] -and $processId -ne $RootProcessId -and -not $descendants.Contains($processId)) {
-                $descendants.Add($processId)
-                $next.Add($processId)
-            }
-        }
-        $frontier = @($next.ToArray())
-    }
-    return @($descendants.ToArray())
-}
 function Read-PesterShardOutputPrefix {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
@@ -945,8 +740,15 @@ function Get-PesterShardFailureSummary {
         [Parameter(Mandatory = $true)][string[]] $Paths,
         [int] $MaxLines = 8,
         [int] $MaxLineLength = 512,
-        [int] $MaxTotalLength = 4096
+        [int] $MaxTotalLength = 4096,
+        [switch] $OutputQuotaExceeded
     )
+
+    if ($OutputQuotaExceeded) {
+        # Quota is supervisor-owned state. Preserve capture files as evidence;
+        # summarizing their contents cannot change the already-failed outcome.
+        return 'Pester shard output exceeded the per-stream character limit; raw captures retained.'
+    }
 
     $deferredCliXml = New-Object 'System.Collections.Generic.List[string]'
     foreach ($path in $Paths) {
@@ -1054,978 +856,6 @@ function Get-PesterShardFailureSummary {
         return 'No allowlisted Pester diagnostic was found in the bounded output tail.'
     }
     return ''
-}
-
-function Stop-PesterShardOwnedProcessTree {
-    param(
-        [Parameter(Mandatory = $true)][int] $RootProcessId,
-        [System.Diagnostics.Process] $RootProcess,
-        [IntPtr] $JobHandle = [IntPtr]::Zero,
-        [int[]] $ObservedDescendantProcessIds = @(),
-        [hashtable] $ObservedProcessIdentities = @{},
-        [int] $CleanupTimeoutSeconds = 15
-    )
-
-    if ($CleanupTimeoutSeconds -le 0) { throw 'CleanupTimeoutSeconds must be positive.' }
-    $errors = New-Object 'System.Collections.Generic.List[string]'
-    $warnings = New-Object 'System.Collections.Generic.List[string]'
-    $knownIds = New-Object 'System.Collections.Generic.List[int]'
-    $processKillResults = New-Object 'System.Collections.Generic.List[object]'
-    $lastKillErrors = New-Object 'System.Collections.Generic.Dictionary[int,string]'
-    $jobObjectAvailable = ($JobHandle -ne [IntPtr]::Zero)
-    $jobObjectTerminationAttempted = $false
-    $jobObjectTerminationSucceeded = $false
-    $rootTerminationAttempted = $false
-    foreach ($processId in @($RootProcessId) + @($ObservedDescendantProcessIds)) {
-        if ($processId -gt 0 -and -not $knownIds.Contains([int]$processId)) {
-            $knownIds.Add([int]$processId)
-        }
-    }
-
-    $initialDescendants = @()
-    try {
-        $initialDescendants = @(Get-PesterShardDescendantProcessIds -RootProcessId $RootProcessId -ObservedProcessIdentities $ObservedProcessIdentities)
-        foreach ($processId in $initialDescendants) {
-            if ($processId -gt 0 -and -not $knownIds.Contains([int]$processId)) {
-                $knownIds.Add([int]$processId)
-            }
-            Add-PesterShardProcessIdentity -ProcessId ([int]$processId) -IdentityMap $ObservedProcessIdentities
-        }
-    }
-    catch {
-        $warnings.Add("initial descendant enumeration failed: $($_.Exception.Message)")
-    }
-
-    $cleanupDeadline = [DateTime]::UtcNow.AddSeconds($CleanupTimeoutSeconds)
-    $cleanupTimedOut = $false
-    while ([DateTime]::UtcNow -lt $cleanupDeadline) {
-        $currentDescendants = @()
-        try {
-            $currentDescendants = @(Get-PesterShardDescendantProcessIds -RootProcessId $RootProcessId -ObservedProcessIdentities $ObservedProcessIdentities)
-            foreach ($processId in $currentDescendants) {
-                if ($processId -gt 0 -and -not $knownIds.Contains([int]$processId)) {
-                    $knownIds.Add([int]$processId)
-                }
-                Add-PesterShardProcessIdentity -ProcessId ([int]$processId) -IdentityMap $ObservedProcessIdentities
-            }
-        }
-        catch {
-            $warnings.Add("descendant enumeration after cleanup failed: $($_.Exception.Message)")
-        }
-
-        $rootAlive = $false
-        if ($null -ne $RootProcess) { try { $rootAlive = -not $RootProcess.HasExited } catch { $rootAlive = $true } }
-        $liveCurrentDescendants = @($currentDescendants | Where-Object {
-            Test-PesterShardProcessAlive -ProcessId ([int]$_)
-        })
-        $liveKnownIds = if ($jobObjectAvailable) {
-            @($liveCurrentDescendants)
-        }
-        else {
-            @($knownIds.ToArray() | Where-Object {
-                Test-PesterShardProcessAlive -ProcessId ([int]$_)
-            })
-        }
-        $noLiveOwnedProcessObserved = (-not $rootAlive -and $liveKnownIds.Count -eq 0 -and $liveCurrentDescendants.Count -eq 0)
-        if ($noLiveOwnedProcessObserved -and (-not $jobObjectAvailable -or $jobObjectTerminationAttempted)) { break }
-
-        if ($jobObjectAvailable) {
-            # The Job Object is the authoritative containment boundary. Parent
-            # enumeration is retained for diagnostics only and is never used
-            # to discover the complete owned process set.
-            if (-not $jobObjectTerminationAttempted -and ($rootAlive -or $liveCurrentDescendants.Count -gt 0 -or $noLiveOwnedProcessObserved)) {
-                # Terminate the Job Object before draining inherited output pipes.
-                # A short-lived intermediary can hide a live grandchild from the
-                # parent tree even though the kernel-owned Job Object still owns it.
-                $jobObjectTerminationAttempted = $true
-                try {
-                    $jobObjectTerminationSucceeded = [PesterShardProcessControlNative]::TryTerminateJobObject($JobHandle, 1)
-                    $processKillResults.Add([pscustomobject][ordered]@{
-                            processId = $RootProcessId
-                            method = 'PesterShardProcessControlNative.TryTerminateJobObject'
-                            identityValidated = $true
-                            error = if ($jobObjectTerminationSucceeded) { $null } else { 'TerminateJobObject returned false.' }
-                            stillAlive = $false
-                        })
-                    if (-not $jobObjectTerminationSucceeded) {
-                        $errors.Add('The owned Windows Job Object could not terminate the shard process group.')
-                    }
-                }
-                catch {
-                    $processKillResults.Add([pscustomobject][ordered]@{
-                            processId = $RootProcessId
-                            method = 'PesterShardProcessControlNative.TryTerminateJobObject'
-                            identityValidated = $true
-                            error = $_.Exception.ToString()
-                            stillAlive = $true
-                        })
-                    $errors.Add("owned Windows Job Object termination failed: $($_.Exception.Message)")
-                }
-            }
-            if ($rootAlive -and -not $rootTerminationAttempted) {
-                $rootTerminationAttempted = $true
-                if ($null -eq $RootProcess) {
-                    $errors.Add('The owned shard root process handle was unavailable; PID-only root termination was refused.')
-                }
-                else {
-                    try {
-                        if (-not $RootProcess.HasExited) {
-                            $RootProcess.Kill()
-                            [void]$RootProcess.WaitForExit(500)
-                        }
-                        $processKillResults.Add([pscustomobject][ordered]@{
-                                processId = $RootProcessId
-                                method = 'System.Diagnostics.Process.Kill(root-handle)'
-                                identityValidated = $true
-                                error = $null
-                                stillAlive = (-not $RootProcess.HasExited)
-                            })
-                    }
-                    catch {
-                        $errors.Add("direct root process termination failed: $($_.Exception.Message)")
-                    }
-                }
-            }
-        }
-        else {
-            # PID-only cleanup is a fallback for non-Job-Object hosts. Every
-            # retained PID must match the immutable start-time/name identity
-            # captured while it was owned; otherwise it is never terminated.
-            $killOrder = New-Object 'System.Collections.Generic.List[int]'
-            $killOrderSeen = New-Object 'System.Collections.Generic.HashSet[int]'
-            for ($index = $currentDescendants.Count - 1; $index -ge 0; $index--) {
-                $processId = [int]$currentDescendants[$index]
-                if ($processId -gt 0 -and $killOrderSeen.Add($processId)) { $killOrder.Add($processId) }
-            }
-            $knownSnapshot = @($knownIds.ToArray())
-            for ($index = $knownSnapshot.Count - 1; $index -ge 0; $index--) {
-                $processId = [int]$knownSnapshot[$index]
-                if ($processId -ne $RootProcessId -and $processId -gt 0 -and $killOrderSeen.Add($processId)) {
-                    $killOrder.Add($processId)
-                }
-            }
-            foreach ($processId in @($killOrder.ToArray())) {
-                if (-not (Test-PesterShardProcessAlive -ProcessId ([int]$processId))) { continue }
-                $method = 'none'
-                $errorText = $null
-                $identityValidated = $false
-                $target = $null
-                try {
-                    $expected = $ObservedProcessIdentities[[int]$processId]
-                    if ($null -eq $expected -or -not [bool]$expected.identityAvailable) {
-                        $method = 'identity-unavailable-refused'
-                        $errorText = 'No immutable process identity was captured for this retained PID.'
-                    }
-                    else {
-                        # Keep the Process handle obtained for the identity
-                        # check and terminate that same handle; do not look up
-                        # the PID again after validation.
-                        $target = [System.Diagnostics.Process]::GetProcessById([int]$processId)
-                        $actualStartTime = $target.StartTime.ToUniversalTime().ToString('o')
-                        $actualName = [string]$target.ProcessName
-                        if ($actualStartTime -cne [string]$expected.startTimeUtc -or
-                            $actualName -cne [string]$expected.processName) {
-                            $method = 'identity-mismatch-refused'
-                            $errorText = 'Current process identity did not match the retained start-time/name identity.'
-                        }
-                        elseif (-not $target.HasExited) {
-                            $identityValidated = $true
-                            $target.Kill()
-                            $method = 'System.Diagnostics.Process.Kill(identity-validated)'
-                            [void]$target.WaitForExit(500)
-                        }
-                        else {
-                            $method = 'already-exited'
-                        }
-                    }
-                }
-                catch [ArgumentException] { $method = 'already-exited' }
-                catch { $errorText = $_.Exception.ToString() }
-                finally {
-                    if ($null -ne $target) { $target.Dispose() }
-                }
-                $stillAlive = Test-PesterShardProcessAlive -ProcessId ([int]$processId)
-                $processKillResults.Add([pscustomobject][ordered]@{
-                        processId = [int]$processId
-                        method = $method
-                        identityValidated = $identityValidated
-                        error = $errorText
-                        stillAlive = $stillAlive
-                    })
-                if ($stillAlive) {
-                    $lastKillErrors[[int]$processId] = if ($null -eq $errorText) { 'process remained alive after identity-validated termination.' } else { $errorText }
-                }
-                elseif ($lastKillErrors.ContainsKey([int]$processId)) {
-                    [void]$lastKillErrors.Remove([int]$processId)
-                }
-            }
-            if ($rootAlive -and -not $rootTerminationAttempted) {
-                $rootTerminationAttempted = $true
-                if ($null -eq $RootProcess) {
-                    $errors.Add('The owned shard root process handle was unavailable; PID-only root termination was refused.')
-                }
-                else {
-                    try {
-                        if (-not $RootProcess.HasExited) {
-                            $RootProcess.Kill()
-                            [void]$RootProcess.WaitForExit(500)
-                        }
-                        $processKillResults.Add([pscustomobject][ordered]@{
-                                processId = $RootProcessId
-                                method = 'System.Diagnostics.Process.Kill(root-handle)'
-                                identityValidated = $true
-                                error = $null
-                                stillAlive = (-not $RootProcess.HasExited)
-                            })
-                    }
-                    catch { $errors.Add("direct root process termination failed: $($_.Exception.Message)") }
-                }
-            }
-        }
-
-        Start-Sleep -Milliseconds 100
-    }
-
-    $rootAlive = $false
-    if ($null -ne $RootProcess) { try { $rootAlive = -not $RootProcess.HasExited } catch { $rootAlive = $true } }
-    $finalDescendants = @()
-    $finalEnumerationFailed = $false
-    try {
-        $finalDescendants = @(Get-PesterShardDescendantProcessIds -RootProcessId $RootProcessId -ObservedProcessIdentities $ObservedProcessIdentities |
-            Where-Object { Test-PesterShardProcessAlive -ProcessId ([int]$_) })
-        foreach ($processId in $finalDescendants) {
-            Add-PesterShardProcessIdentity -ProcessId ([int]$processId) -IdentityMap $ObservedProcessIdentities
-        }
-    }
-    catch {
-        $finalEnumerationFailed = $true
-        $warnings.Add("final descendant enumeration failed: $($_.Exception.Message)")
-    }
-    $remainingIds = if ($jobObjectAvailable) {
-        @(
-            @($finalDescendants | Where-Object { Test-PesterShardProcessAlive -ProcessId ([int]$_) })
-            if ($rootAlive) { $RootProcessId }
-        ) | Sort-Object -Unique
-    }
-    else {
-        @($knownIds.ToArray() | Where-Object {
-            Test-PesterShardProcessAlive -ProcessId ([int]$_)
-        })
-    }
-    if (($remainingIds.Count -gt 0 -or $finalDescendants.Count -gt 0) -and [DateTime]::UtcNow -ge $cleanupDeadline) {
-        $cleanupTimedOut = $true
-        $errors.Add("owned process cleanup deadline exceeded after $CleanupTimeoutSeconds seconds.")
-    }
-    foreach ($entry in @($lastKillErrors.GetEnumerator())) {
-        if ($remainingIds -contains [int]$entry.Key) {
-            $errors.Add("direct process termination failed for owned process $($entry.Key): $($entry.Value)")
-        }
-    }
-    if (-not $jobObjectAvailable -and $finalEnumerationFailed) {
-        $errors.Add('PID-only cleanup could not verify the final owned process set.')
-    }
-    if ($jobObjectAvailable -and $jobObjectTerminationAttempted -and -not $jobObjectTerminationSucceeded) {
-        $errors.Add('The authoritative Job Object termination did not succeed.')
-    }
-    $cleanedUp = ($errors.Count -eq 0 -and $remainingIds.Count -eq 0 -and
-        (($jobObjectAvailable -and ($jobObjectTerminationSucceeded -or (-not $jobObjectTerminationAttempted))) -or
-         (-not $jobObjectAvailable -and $finalDescendants.Count -eq 0 -and -not $finalEnumerationFailed)))
-    return [pscustomobject][ordered]@{
-        rootProcessId = $RootProcessId
-        initialDescendantProcessIds = @($initialDescendants)
-        observedProcessIds = @($knownIds.ToArray())
-        observedProcessIdentities = @($ObservedProcessIdentities.Values | Sort-Object processId)
-        remainingProcessIds = @($remainingIds)
-        finalDescendantProcessIds = @($finalDescendants)
-        cleanupTimeoutSeconds = $CleanupTimeoutSeconds
-        cleanupTimedOut = $cleanupTimedOut
-        jobObject = [ordered]@{
-            available = $jobObjectAvailable
-            terminationAttempted = $jobObjectTerminationAttempted
-            terminationSucceeded = $jobObjectTerminationSucceeded
-            authoritative = $jobObjectAvailable
-        }
-        processKillResults = @($processKillResults.ToArray())
-        warnings = @($warnings.ToArray())
-        errors = @($errors.ToArray())
-        cleanedUp = $cleanedUp
-    }
-}
-
-function Get-PesterShardLiveCaptureState {
-    param(
-        [Parameter(Mandatory = $true)][string] $Name,
-        [Parameter()] $Task
-    )
-
-    if ($null -eq $Task -or -not [bool]$Task.IsCompleted) {
-        return [pscustomobject][ordered]@{
-            isCompleted = $false
-            faulted = $false
-            exceeded = $false
-            error = $null
-        }
-    }
-    try {
-        $captureResult = $Task.GetAwaiter().GetResult()
-        return [pscustomobject][ordered]@{
-            isCompleted = $true
-            faulted = $false
-            exceeded = [bool]$captureResult.Exceeded
-            error = $null
-        }
-    }
-    catch {
-        return [pscustomobject][ordered]@{
-            isCompleted = $true
-            faulted = $true
-            exceeded = $false
-            error = "$Name bounded output capture failed: $($_.Exception.Message)"
-        }
-    }
-}
-
-function Resolve-PesterShardOutputFailure {
-    param(
-        [Parameter(Mandatory = $true)] $Cleanup,
-        [string[]] $Errors,
-        [Parameter(Mandatory = $true)][string] $Status,
-        [AllowNull()][string] $ExceptionText
-    )
-
-    $outputErrors = @($Errors | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
-    if ($outputErrors.Count -eq 0) {
-        return [pscustomobject][ordered]@{
-            cleanup = $Cleanup
-            status = $Status
-            exceptionText = $ExceptionText
-        }
-    }
-
-    $existingCleanupErrors = if ($Cleanup.PSObject.Properties.Name -contains 'errors') { @($Cleanup.errors) } else { @() }
-    $resolvedCleanupErrors = $existingCleanupErrors + $outputErrors
-    if ($Cleanup.PSObject.Properties.Name -contains 'errors') {
-        $Cleanup.errors = $resolvedCleanupErrors
-    }
-    else {
-        $Cleanup | Add-Member -MemberType NoteProperty -Name errors -Value $resolvedCleanupErrors
-    }
-    $Cleanup.cleanedUp = $false
-    $captureMessage = $outputErrors -join ' | '
-    $resolvedException = if ([string]::IsNullOrWhiteSpace($ExceptionText)) {
-        $captureMessage
-    }
-    else {
-        "$ExceptionText | $captureMessage"
-    }
-    return [pscustomobject][ordered]@{
-        cleanup = $Cleanup
-        status = 'cleanup-failed'
-        exceptionText = $resolvedException
-    }
-}
-
-function New-PesterShardNotStartedCleanup {
-    return [pscustomobject][ordered]@{
-        rootProcessId = $null
-        initialDescendantProcessIds = @()
-        observedProcessIds = @()
-        observedProcessIdentities = @()
-        remainingProcessIds = @()
-        finalDescendantProcessIds = @()
-        cleanupTimeoutSeconds = 15
-        cleanupTimedOut = $false
-        jobObject = [ordered]@{
-            available = $false
-            terminationAttempted = $false
-            terminationSucceeded = $false
-            authoritative = $false
-        }
-        processKillResults = @()
-        warnings = @()
-        errors = @()
-        cleanedUp = $true
-        reason = 'process-not-started'
-    }
-}
-
-function Get-PesterShardCleanupTarget {
-    param(
-        [Parameter()][AllowNull()] $Process,
-        [Parameter(Mandatory = $true)][bool] $ProcessStarted,
-        [Parameter()][AllowNull()] $RootProcessId
-    )
-
-    if (-not $ProcessStarted -or $null -eq $Process -or $null -eq $RootProcessId) { return $null }
-    return [pscustomobject][ordered]@{
-        rootProcessId = [int]$RootProcessId
-        process = $Process
-    }
-}
-
-function Write-PesterShardProgress {
-    param(
-        [Parameter(Mandatory = $true)][string] $Path,
-        [Parameter(Mandatory = $true)][hashtable] $State,
-        [Parameter(Mandatory = $true)][ValidateSet('preflight', 'running', 'heartbeat', 'error', 'cleanup', 'terminal')][string] $Phase,
-        [Parameter(Mandatory = $true)][string[]] $Paths,
-        [AllowNull()][object] $Deadline,
-        [AllowNull()][object] $RootProcessId,
-        [System.Diagnostics.Process] $Process,
-        [bool] $JobAssigned,
-        [string] $ErrorText,
-        [AllowNull()][object] $ExitCode
-    )
-    # Reserve space for error/cleanup/terminal; diagnostic failure must not
-    # bypass the authoritative process cleanup in the caller.
-    if ($State.count -ge 128 -or ($Phase -eq 'heartbeat' -and $State.count -ge 120)) { return }
-    if ([string]::IsNullOrWhiteSpace([string]$State.firstError) -and -not [string]::IsNullOrWhiteSpace($ErrorText)) {
-        $boundedError = $ErrorText.Substring(0, [Math]::Min(4096, $ErrorText.Length))
-        $State.firstError = ConvertTo-PesterShardSanitizedDiagnosticText -Text $boundedError
-    }
-    $resources = [ordered]@{ workingSetBytes = $null; cpuSeconds = $null; handles = $null }
-    if ($null -ne $Process) {
-        try {
-            $Process.Refresh()
-            $resources.workingSetBytes = $Process.WorkingSet64
-            $resources.cpuSeconds = $Process.TotalProcessorTime.TotalSeconds
-            $resources.handles = $Process.HandleCount
-        } catch { }
-    }
-    $now = [DateTime]::UtcNow
-    $record = [ordered]@{
-        schemaVersion = 1; kind = 'diagnostic-only'; phase = $Phase; utc = $now.ToString('o')
-        sourceRevision = if ($env:GITHUB_SHA -match '^[0-9a-f]{40}$') { $env:GITHUB_SHA } else { $null }
-        sourceSha256 = $State.sourceSha256; runId = $State.runId; shardId = $State.shardId
-        powershellVersion = [string]$PSVersionTable.PSVersion; supervisorProcessId = $PID
-        rootProcessId = $RootProcessId; paths = @($Paths); jobAssignedBeforeRelease = $JobAssigned
-        remainingSeconds = if ($null -eq $Deadline) { $null } else { [Math]::Max(0, [Math]::Round(($Deadline - $now).TotalSeconds, 3)) }
-        resources = $resources; firstError = [string]$State.firstError
-        exitCode = if ($Phase -eq 'terminal' -and $ExitCode -is [int]) { $ExitCode } else { $null }
-    }
-    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes(($record | ConvertTo-Json -Depth 6 -Compress) + [Environment]::NewLine)
-    $stream = [IO.File]::Open($Path, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::Read)
-    try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
-    $State.count++
-    Write-Host "PESTER_SHARD_PROGRESS phase=$Phase root=$RootProcessId remaining=$($record.remainingSeconds) utc=$($record.utc)"
-}
-
-function Invoke-PesterShardProcess {
-    param(
-        [Parameter(Mandatory = $true)][string[]] $Paths,
-        [Parameter(Mandatory = $true)][string] $ModulePath,
-        [Parameter(Mandatory = $true)][string] $Version,
-        [Parameter(Mandatory = $true)][string] $ChildPowerShell,
-        [Parameter(Mandatory = $true)][string] $EncodedChildScript,
-        [Parameter(Mandatory = $true)][string] $ResultPath,
-        [Parameter(Mandatory = $true)][string] $ProcessEvidencePath,
-        [Parameter(Mandatory = $true)][string] $StdoutPath,
-        [Parameter(Mandatory = $true)][string] $StderrPath,
-        [Parameter(Mandatory = $true)][int] $TimeoutSeconds,
-        [Parameter(Mandatory = $true)][string] $CancelPath,
-        [Parameter(Mandatory = $true)][string] $WorkingDirectory
-    )
-
-    $process = $null
-    $processDisposed = $false
-    $processStarted = $false
-    $rootProcessId = $null
-    $status = 'not-started'
-    $exitCode = $null
-    $startedAt = $null
-    $finishedAt = $null
-    $exceptionText = $null
-    $observedDescendantProcessIds = New-Object 'System.Collections.Generic.List[int]'
-    $observedProcessIdentities = @{}
-    $observationErrors = New-Object 'System.Collections.Generic.List[string]'
-    $captureErrors = New-Object 'System.Collections.Generic.List[string]'
-    $cleanup = New-PesterShardNotStartedCleanup
-    $evidenceWriteError = $null
-    $outputWriteError = $null
-    $outputCaptureTimedOut = $false
-    $outputQuotaExceeded = $false
-    $outputQuotaStreams = New-Object 'System.Collections.Generic.List[string]'
-    $stdout = ''
-    $stderr = ''
-    $stdoutTask = $null
-    $stderrTask = $null
-    $jobHandle = [IntPtr]::Zero
-    $jobClosed = $true
-    $jobObjectCreated = $false
-    $jobObjectAssigned = $false
-    $windowsBootstrapReleasePath = $null
-    $preflight = $null
-    $deadline = $null
-    $progressState = @{ count = 0; firstError = ''; runId = $script:PesterShardRunId; shardId = [IO.Path]::GetFileNameWithoutExtension($ProcessEvidencePath); sourceSha256 = $script:PesterShardExecutorSha256 }
-    $progressPath = $ProcessEvidencePath + '.progress.jsonl'
-    $nextProgressAt = [DateTime]::UtcNow
-    $progressWriteErrors = New-Object 'System.Collections.Generic.List[string]'
-    # This local wrapper makes progress best-effort while retaining its first
-    # write failure in terminal evidence; containment remains fail-closed.
-    $writeProgress = {
-        param([string] $Phase)
-        try {
-            Write-PesterShardProgress -Path $progressPath -State $progressState -Phase $Phase -Paths $Paths `
-                -Deadline $deadline -RootProcessId $rootProcessId -Process $process -JobAssigned $jobObjectAssigned -ErrorText $exceptionText -ExitCode $exitCode
-        } catch {
-            if ($progressWriteErrors.Count -lt 4) { $progressWriteErrors.Add($_.Exception.Message) }
-        }
-    }
-
-    try {
-        if (Test-Path -LiteralPath $CancelPath -PathType Leaf) {
-            $status = 'cancelled'
-            $exceptionText = "Cancellation marker already exists: $CancelPath"
-        }
-        else {
-            $startedAt = [DateTime]::UtcNow.ToString('o')
-            $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-            & $writeProgress 'preflight'
-            $launchCommand = $ChildPowerShell
-            $launchArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $EncodedChildScript)
-            $launchEnvironment = Get-PesterShardChildEnvironment
-            $windowsBootstrapReleasePath = Join-Path $WorkingDirectory ("pester-shard-bootstrap-{0}.signal" -f ([guid]::NewGuid().ToString('N')))
-            if (Test-Path -LiteralPath $windowsBootstrapReleasePath) {
-                throw 'The owned Pester shard bootstrap signal path already exists.'
-            }
-            $launchEnvironment.SYP154_PESTER_BOOTSTRAP_COMMAND = $ChildPowerShell
-            $launchEnvironment.SYP154_PESTER_BOOTSTRAP_ARGUMENTS = ConvertTo-Json -InputObject ([string[]]$launchArguments) -Compress
-            $launchEnvironment.SYP154_PESTER_BOOTSTRAP_RELEASE_PATH = $windowsBootstrapReleasePath
-            $preflight = Get-PesterShardPreflight `
-                -PesterModulePath $ModulePath `
-                -PesterVersion $Version `
-                -ChildPowerShell $ChildPowerShell `
-                -WorkingDirectory $WorkingDirectory `
-                -ResultPath $ResultPath `
-                -ProcessEvidencePath $ProcessEvidencePath `
-                -StdoutPath $StdoutPath `
-                -StderrPath $StderrPath `
-                -CancelPath $CancelPath `
-                -BootstrapSignalPath $windowsBootstrapReleasePath
-            $jobHandle = [PesterShardProcessControlNative]::CreateKillOnCloseJob()
-            $jobClosed = $false
-            $jobObjectCreated = $true
-            $bootstrapCode = Get-PesterShardProcessBootstrapCode
-            $encodedBootstrapCode = [Convert]::ToBase64String(([Text.Encoding]::Unicode).GetBytes($bootstrapCode))
-            $launchArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedBootstrapCode)
-            if ([DateTime]::UtcNow -ge $deadline) {
-                $status = 'timeout'
-                $exceptionText = "Outer shard deadline exceeded before process start after $TimeoutSeconds seconds."
-                throw $exceptionText
-            }
-
-            $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-            $startInfo.FileName = $launchCommand
-            $startInfo.Arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' + $launchArguments[$launchArguments.Count - 1]
-            $startInfo.WorkingDirectory = $WorkingDirectory
-            $startInfo.UseShellExecute = $false
-            $startInfo.CreateNoWindow = $true
-            $startInfo.RedirectStandardOutput = $true
-            $startInfo.RedirectStandardError = $true
-            $startInfo.EnvironmentVariables.Clear()
-            foreach ($entry in $launchEnvironment.GetEnumerator()) {
-                $startInfo.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
-            }
-            $process = New-Object System.Diagnostics.Process
-            $process.StartInfo = $startInfo
-            if (-not $process.Start()) { throw 'Process.Start returned false.' }
-            $processStarted = $true
-            $rootProcessId = [int]$process.Id
-            Add-PesterShardProcessIdentity -ProcessId $rootProcessId -IdentityMap $observedProcessIdentities -Process $process
-
-            if ($jobObjectCreated) {
-                if (-not [PesterShardProcessControlNative]::TryAssignProcessToJobObject($jobHandle, $process.Handle)) {
-                    throw 'AssignProcessToJobObject returned false.'
-                }
-                $jobObjectAssigned = $true
-                # The bootstrap is held in the Job Object before this release.
-                # Every candidate descendant is therefore kernel-contained even
-                # if it is created and reparented between observations.
-                if (Test-Path -LiteralPath $CancelPath -PathType Leaf) {
-                    $status = 'cancelled'
-                    $exceptionText = "Cancellation marker observed before bootstrap release: $CancelPath"
-                    throw $exceptionText
-                }
-                $releaseBytes = (New-Object Text.UTF8Encoding($false)).GetBytes('release' + [Environment]::NewLine)
-                $releaseStream = [IO.File]::Open(
-                    $windowsBootstrapReleasePath,
-                    [IO.FileMode]::CreateNew,
-                    [IO.FileAccess]::Write,
-                    [IO.FileShare]::None
-                )
-                try {
-                    $releaseStream.Write($releaseBytes, 0, $releaseBytes.Length)
-                    $releaseStream.Flush()
-                }
-                finally { $releaseStream.Dispose() }
-            }
-
-            $stdoutTask = [PesterShardBoundedCapture]::Start(
-                $process.StandardOutput,
-                $script:PesterShardChildOutputQuotaCharacters
-            )
-            $stderrTask = [PesterShardBoundedCapture]::Start(
-                $process.StandardError,
-                $script:PesterShardChildOutputQuotaCharacters
-            )
-            $status = 'running'
-            & $writeProgress 'running'
-            $nextProgressAt = [DateTime]::UtcNow.AddSeconds(30)
-            try {
-                foreach ($processId in @(Get-PesterShardDescendantProcessIds -RootProcessId $rootProcessId -ObservedProcessIdentities $observedProcessIdentities)) {
-                    if ($processId -gt 0 -and -not $observedDescendantProcessIds.Contains([int]$processId)) {
-                        $observedDescendantProcessIds.Add([int]$processId)
-                    }
-                    Add-PesterShardProcessIdentity -ProcessId ([int]$processId) -IdentityMap $observedProcessIdentities
-                }
-            }
-            catch {
-                if ($observationErrors.Count -lt 32) { $observationErrors.Add("initial live descendant observation failed: $($_.Exception.Message)") }
-            }
-            $captureFaultDetected = $false
-            while (-not $process.HasExited) {
-                if ([DateTime]::UtcNow -ge $nextProgressAt) {
-                    & $writeProgress 'heartbeat'
-                    $nextProgressAt = [DateTime]::UtcNow.AddSeconds(30)
-                }
-                try {
-                    foreach ($processId in @(Get-PesterShardDescendantProcessIds -RootProcessId $rootProcessId -ObservedProcessIdentities $observedProcessIdentities)) {
-                        if ($processId -gt 0 -and -not $observedDescendantProcessIds.Contains([int]$processId)) {
-                            $observedDescendantProcessIds.Add([int]$processId)
-                        }
-                        Add-PesterShardProcessIdentity -ProcessId ([int]$processId) -IdentityMap $observedProcessIdentities
-                    }
-                }
-                catch {
-                    if ($observationErrors.Count -lt 32) { $observationErrors.Add("live descendant observation failed: $($_.Exception.Message)") }
-                }
-                $quotaStream = $null
-                foreach ($captureSpec in @(
-                    [pscustomobject]@{ Name = 'stdout'; Task = $stdoutTask },
-                    [pscustomobject]@{ Name = 'stderr'; Task = $stderrTask }
-                )) {
-                    $captureState = Get-PesterShardLiveCaptureState -Name ([string]$captureSpec.Name) -Task $captureSpec.Task
-                    if ([bool]$captureState.faulted) {
-                        $captureError = [string]$captureState.error
-                        if (-not $captureErrors.Contains($captureError)) { $captureErrors.Add($captureError) }
-                        $status = 'failed'
-                        $exceptionText = $captureError
-                        $captureFaultDetected = $true
-                        break
-                    }
-                    if ([bool]$captureState.exceeded) { $quotaStream = [string]$captureSpec.Name }
-                    if ($null -ne $quotaStream) { break }
-                }
-                if ($captureFaultDetected) { break }
-                if ($null -ne $quotaStream) {
-                    $status = 'failed'
-                    $outputQuotaExceeded = $true
-                    if (-not $outputQuotaStreams.Contains([string]$quotaStream)) { $outputQuotaStreams.Add([string]$quotaStream) }
-                    $exceptionText = "Owned Pester shard output capture quota exceeded for $quotaStream (limit=$($script:PesterShardChildOutputQuotaCharacters) characters per stream)."
-                    break
-                }
-                if (Test-Path -LiteralPath $CancelPath -PathType Leaf) {
-                    $status = 'cancelled'
-                    $exceptionText = "Cancellation marker observed: $CancelPath"
-                    break
-                }
-                if ([DateTime]::UtcNow -ge $deadline) {
-                    $status = 'timeout'
-                    $exceptionText = "Outer shard deadline exceeded after $TimeoutSeconds seconds."
-                    break
-                }
-                [void]$process.WaitForExit(100)
-            }
-            if ($process.HasExited -and $status -notin @('cancelled', 'timeout', 'failed')) {
-                [void]$process.WaitForExit()
-                $exitCode = [int]$process.ExitCode
-                $status = if ($exitCode -eq 0) { 'completed' } else { 'failed' }
-            }
-        }
-    }
-    catch {
-        if ([string]::IsNullOrWhiteSpace($exceptionText)) { $exceptionText = $_.Exception.ToString() }
-        if (-not $processStarted) {
-            if ($status -notin @('cancelled', 'timeout')) { $status = 'startup-failed' }
-        }
-        elseif ($status -notin @('cancelled', 'timeout', 'failed')) { $status = 'failed' }
-    }
-    finally {
-        if (-not [string]::IsNullOrWhiteSpace($exceptionText)) { & $writeProgress 'error' }
-        & $writeProgress 'cleanup'
-        $cleanupTarget = Get-PesterShardCleanupTarget `
-            -Process $process `
-            -ProcessStarted $processStarted `
-            -RootProcessId $rootProcessId
-        if ($null -ne $cleanupTarget) {
-            try {
-                $cleanup = Stop-PesterShardOwnedProcessTree `
-                    -RootProcessId ([int]$cleanupTarget.rootProcessId) `
-                    -RootProcess $cleanupTarget.process `
-                    -JobHandle $jobHandle `
-                    -ObservedDescendantProcessIds @($observedDescendantProcessIds.ToArray()) `
-                    -ObservedProcessIdentities $observedProcessIdentities
-                if ($observationErrors.Count -gt 0) {
-                    $cleanup.warnings = @($cleanup.warnings) + @($observationErrors.ToArray())
-                    if (-not [bool]$cleanup.jobObject.authoritative) { $cleanup.cleanedUp = $false }
-                }
-            }
-            catch {
-                $cleanup = [pscustomobject][ordered]@{
-                    rootProcessId = [int]$cleanupTarget.rootProcessId
-                    initialDescendantProcessIds = @()
-                    observedProcessIds = @([int]$cleanupTarget.rootProcessId)
-                    observedProcessIdentities = @($observedProcessIdentities.Values | Sort-Object processId)
-                    remainingProcessIds = @()
-                    finalDescendantProcessIds = @()
-                    cleanupTimeoutSeconds = 15
-                    cleanupTimedOut = $true
-                    jobObject = [ordered]@{
-                        available = ($jobHandle -ne [IntPtr]::Zero)
-                        terminationAttempted = $false
-                        terminationSucceeded = $false
-                        authoritative = ($jobHandle -ne [IntPtr]::Zero)
-                    }
-                    processKillResults = @()
-                    warnings = @($observationErrors.ToArray())
-                    errors = @("cleanup executor exception: $($_.Exception.ToString())")
-                    cleanedUp = $false
-                }
-            }
-            if ($outputCaptureTimedOut) {
-                $cleanup.errors = @($cleanup.errors) + @('bounded shard output capture did not finish within its drain deadline.')
-                $cleanup.cleanedUp = $false
-            }
-            if (-not $cleanup.cleanedUp) { $status = 'cleanup-failed' }
-            if ($cleanupTarget.process.HasExited -and $null -eq $exitCode -and
-                $status -notin @('cancelled', 'timeout', 'cleanup-failed')) {
-                $exitCode = [int]$cleanupTarget.process.ExitCode
-            }
-        }
-        $captureDeadline = [DateTime]::UtcNow.AddSeconds(5)
-        foreach ($captureSpec in @(
-            [pscustomobject]@{ Name = 'stdout'; Task = $stdoutTask },
-            [pscustomobject]@{ Name = 'stderr'; Task = $stderrTask }
-        )) {
-            if ($null -eq $captureSpec.Task) { continue }
-            try {
-                $remainingMilliseconds = [Math]::Max(0, [int](([DateTime]::UtcNow - $captureDeadline).TotalMilliseconds * -1))
-                if (-not $captureSpec.Task.Wait($remainingMilliseconds)) {
-                    $outputCaptureTimedOut = $true
-                    $captureErrors.Add("$($captureSpec.Name) bounded output capture did not finish before the drain deadline.")
-                    continue
-                }
-                $captureResult = $captureSpec.Task.GetAwaiter().GetResult()
-                if ($captureSpec.Name -ceq 'stdout') { $stdout = [string]$captureResult.Text }
-                else { $stderr = [string]$captureResult.Text }
-                if ([bool]$captureResult.Exceeded) {
-                    $outputQuotaExceeded = $true
-                    if (-not $outputQuotaStreams.Contains([string]$captureSpec.Name)) { $outputQuotaStreams.Add([string]$captureSpec.Name) }
-                }
-            }
-            catch {
-                $captureError = "$($captureSpec.Name) bounded output capture failed: $($_.Exception.Message)"
-                if (-not $captureErrors.Contains($captureError)) { $captureErrors.Add($captureError) }
-            }
-        }
-        $captureFailure = Resolve-PesterShardOutputFailure `
-            -Cleanup $cleanup `
-            -Errors @($captureErrors.ToArray()) `
-            -Status $status `
-            -ExceptionText $exceptionText
-        $cleanup = $captureFailure.cleanup
-        $status = [string]$captureFailure.status
-        $exceptionText = [string]$captureFailure.exceptionText
-        if ($outputQuotaExceeded -and $status -notin @('cancelled', 'timeout', 'cleanup-failed')) {
-            $status = 'failed'
-            if ([string]::IsNullOrWhiteSpace($exceptionText)) {
-                $exceptionText = "Owned Pester shard output capture quota exceeded for $($outputQuotaStreams -join ' and ') (limit=$($script:PesterShardChildOutputQuotaCharacters) characters per stream)."
-            }
-        }
-        try { Write-PesterShardBoundedOutput -Path $StdoutPath -Text $stdout }
-        catch { $outputWriteError = "stdout evidence write failed: $($_.Exception.ToString())" }
-        try { Write-PesterShardBoundedOutput -Path $StderrPath -Text $stderr }
-        catch {
-            $outputWriteError = if ($null -eq $outputWriteError) { "stderr evidence write failed: $($_.Exception.ToString())" } else { "$outputWriteError | stderr evidence write failed: $($_.Exception.ToString())" }
-        }
-        $outputWriteFailure = Resolve-PesterShardOutputFailure `
-            -Cleanup $cleanup `
-            -Errors @($outputWriteError) `
-            -Status $status `
-            -ExceptionText $exceptionText
-        $cleanup = $outputWriteFailure.cleanup
-        $status = [string]$outputWriteFailure.status
-        $exceptionText = [string]$outputWriteFailure.exceptionText
-        if ($null -ne $process -and -not $processDisposed) {
-            try {
-                if ($process.HasExited -and $null -eq $exitCode -and
-                    $status -notin @('cancelled', 'timeout', 'cleanup-failed')) {
-                    $exitCode = [int]$process.ExitCode
-                }
-            }
-            catch { }
-            try { $process.Dispose() } catch { }
-            $processDisposed = $true
-        }
-        if ($jobHandle -ne [IntPtr]::Zero) {
-            try {
-                if (-not $jobClosed -and -not $cleanup.cleanedUp) {
-                    try { [void][PesterShardProcessControlNative]::TryTerminateJobObject($jobHandle, 1) } catch { }
-                }
-                $jobClosed = [bool][PesterShardProcessControlNative]::TryCloseHandle($jobHandle)
-                if (-not $jobClosed) {
-                    $jobCloseFailure = Resolve-PesterShardOutputFailure `
-                        -Cleanup $cleanup `
-                        -Errors @('The owned Windows Job Object handle could not be closed safely.') `
-                        -Status $status `
-                        -ExceptionText $exceptionText
-                    $cleanup = $jobCloseFailure.cleanup
-                    $status = [string]$jobCloseFailure.status
-                    $exceptionText = [string]$jobCloseFailure.exceptionText
-                }
-            }
-            catch {
-                $jobClosed = $false
-                $jobCloseFailure = Resolve-PesterShardOutputFailure `
-                    -Cleanup $cleanup `
-                    -Errors @("The owned Windows Job Object handle could not be closed safely: $($_.Exception.Message)") `
-                    -Status $status `
-                    -ExceptionText $exceptionText
-                $cleanup = $jobCloseFailure.cleanup
-                $status = [string]$jobCloseFailure.status
-                $exceptionText = [string]$jobCloseFailure.exceptionText
-            }
-            $jobHandle = [IntPtr]::Zero
-        }
-        if (-not [string]::IsNullOrWhiteSpace([string]$windowsBootstrapReleasePath) -and
-            [IO.File]::Exists($windowsBootstrapReleasePath)) {
-            try { [IO.File]::Delete($windowsBootstrapReleasePath) }
-            catch {
-                $bootstrapCleanupFailure = Resolve-PesterShardOutputFailure `
-                    -Cleanup $cleanup `
-                    -Errors @("The owned Pester shard bootstrap signal could not be removed: $($_.Exception.Message)") `
-                    -Status $status `
-                    -ExceptionText $exceptionText
-                $cleanup = $bootstrapCleanupFailure.cleanup
-                $status = [string]$bootstrapCleanupFailure.status
-                $exceptionText = [string]$bootstrapCleanupFailure.exceptionText
-            }
-        }
-        $finishedAt = [DateTime]::UtcNow.ToString('o')
-        & $writeProgress 'terminal'
-        $resultExists = Test-Path -LiteralPath $ResultPath -PathType Leaf
-        $diagnostic = [ordered]@{
-            schemaVersion = 1
-            kind = 'syp154-pester-shard-process'
-            status = $status
-            progressPath = $progressPath
-            progressRecords = $progressState.count
-            progressWriteErrors = @($progressWriteErrors.ToArray())
-            pesterVersion = $Version
-            powershellVersion = [string]$PSVersionTable.PSVersion
-            powershellEdition = [string]$PSVersionTable.PSEdition
-            workingDirectory = $WorkingDirectory
-            paths = @($Paths)
-            modulePath = $ModulePath
-            childPowerShell = $ChildPowerShell
-            timeoutSeconds = $TimeoutSeconds
-            preflight = $preflight
-            outputQuotaCharacters = $script:PesterShardChildOutputQuotaCharacters
-            outputQuotaExceeded = [bool]$outputQuotaExceeded
-            outputQuotaStreams = @($outputQuotaStreams.ToArray())
-            outputCaptureTimedOut = [bool]$outputCaptureTimedOut
-            cancellationPath = $CancelPath
-            cancellationPathOwnership = if ($ownsCancellationPath) { 'runner-owned' } else { 'caller-owned' }
-            environmentNames = @(
-                'SYP154_PESTER_SHARD_PATHS',
-                'SYP154_PESTER_MODULE_PATH',
-                'SYP154_PESTER_RESULT_PATH'
-            )
-            supervisorOnlyEnvironmentNames = @(
-                'SYP154_PESTER_BOOTSTRAP_COMMAND',
-                'SYP154_PESTER_BOOTSTRAP_ARGUMENTS',
-                'SYP154_PESTER_BOOTSTRAP_RELEASE_PATH'
-            )
-            startedAt = $startedAt
-            finishedAt = $finishedAt
-            processId = if ($null -eq $rootProcessId) { $null } else { [int]$rootProcessId }
-            exitCode = $exitCode
-            resultPath = $ResultPath
-            resultExists = $resultExists
-            stdoutPath = $StdoutPath
-            stderrPath = $StderrPath
-            pathLengths = [ordered]@{
-                result = $ResultPath.Length
-                stdout = $StdoutPath.Length
-                stderr = $StderrPath.Length
-                cancellation = $CancelPath.Length
-            }
-            jobObject = [ordered]@{
-                created = [bool]$jobObjectCreated
-                assignedBeforeBootstrapRelease = [bool]($jobObjectCreated -and $jobObjectAssigned)
-                closed = [bool]$jobClosed
-                bootstrapReleasePath = $windowsBootstrapReleasePath
-            }
-            cleanup = $cleanup
-            exception = $exceptionText
-            outputWriteError = $outputWriteError
-            observedProcessIdentities = @($observedProcessIdentities.Values | Sort-Object processId)
-            failureSummary = Get-PesterShardFailureSummary -Paths @($StderrPath, $StdoutPath)
-            stdoutPrefix = Read-PesterShardOutputPrefix -Path $StdoutPath
-            stderrPrefix = Read-PesterShardOutputPrefix -Path $StderrPath
-            stdoutTail = Read-PesterShardOutputTail -Path $StdoutPath
-            stderrTail = Read-PesterShardOutputTail -Path $StderrPath
-        }
-        try {
-            [IO.File]::WriteAllText(
-                $ProcessEvidencePath,
-                ($diagnostic | ConvertTo-Json -Depth 12),
-                (New-Object Text.UTF8Encoding($false))
-            )
-        }
-        catch {
-            $evidenceWriteError = $_.Exception.ToString()
-        }
-    }
-
-    if ($null -ne $evidenceWriteError) {
-        throw "Could not save Pester shard process evidence '$ProcessEvidencePath': $evidenceWriteError"
-    }
-    if ($status -notin @('completed', 'failed') -or -not $resultExists -or -not $cleanup.cleanedUp) {
-        Write-Host ("Pester shard process evidence summary: status={0}; exitCode={1}; resultExists={2}; cleanedUp={3}; remainingProcessIds={4}; pathLengths=result:{5},stdout:{6},stderr:{7},cancel:{8}; evidence={9}" -f `
-            $status, $exitCode, $resultExists, $cleanup.cleanedUp,
-            (@($cleanup.remainingProcessIds) -join ','), $ResultPath.Length, $StdoutPath.Length,
-            $StderrPath.Length, $CancelPath.Length, $ProcessEvidencePath)
-        if (@($cleanup.errors).Count -gt 0) {
-            Write-Host ("Pester shard cleanup errors: {0}" -f (@($cleanup.errors) -join ' | '))
-        }
-    }
-    $firstFailureContext = if ([string]::IsNullOrWhiteSpace([string]$diagnostic.failureSummary)) {
-        ''
-    }
-    else {
-        " firstFailure=$($diagnostic.failureSummary)"
-    }
-    if ($status -notin @('completed', 'failed')) {
-        throw "Pester shard process ended with status '$status'; evidence='$ProcessEvidencePath'.$firstFailureContext $exceptionText"
-    }
-    if (-not (Test-Path -LiteralPath $ResultPath -PathType Leaf)) {
-        throw "Pester shard process '$status' exited without a result file; evidence='$ProcessEvidencePath'; exit='$exitCode'.$firstFailureContext"
-    }
-    if (-not $cleanup.cleanedUp) {
-        throw "Pester shard process cleanup failed; evidence='$ProcessEvidencePath'."
-    }
-    return [pscustomobject][ordered]@{
-        resultPath = $ResultPath
-        processEvidencePath = $ProcessEvidencePath
-        stdoutPath = $StdoutPath
-        stderrPath = $StderrPath
-        status = $status
-        exitCode = $exitCode
-        cleanedUp = [bool]$cleanup.cleanedUp
-        processStarted = [bool]$processStarted
-        outputQuotaExceeded = [bool]$outputQuotaExceeded
-    }
 }
 
 function New-PesterShardPlan {
@@ -2176,9 +1006,9 @@ function Resolve-PesterShardSummaryOutputPath {
             }
         }
 
-        $summaryFullPath = [IO.Path]::GetFullPath($SummaryOutputPath)
-        $evidenceFullPath = [IO.Path]::GetFullPath($EvidenceRoot)
-        $testFullPath = [IO.Path]::GetFullPath($TestRoot)
+        $summaryFullPath = Resolve-PesterShardFileSystemPath $SummaryOutputPath
+        $evidenceFullPath = Resolve-PesterShardFileSystemPath $EvidenceRoot
+        $testFullPath = Resolve-PesterShardFileSystemPath $TestRoot
         if (-not [string]::Equals([IO.Path]::GetExtension($summaryFullPath), '.json', [StringComparison]::OrdinalIgnoreCase)) {
             throw 'summary destination must use the .json extension.'
         }
@@ -2208,10 +1038,8 @@ function Resolve-PesterShardSummaryOutputPath {
             }
         }
 
-        $temporaryName = '.' + [IO.Path]::GetFileName($summaryFullPath) + '.tmp-' + [guid]::NewGuid().ToString('N')
-        $temporaryPath = Join-Path ([IO.Path]::GetDirectoryName($summaryFullPath)) $temporaryName
         if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
-            ($summaryFullPath.Length -ge 240 -or $temporaryPath.Length -ge 240)) {
+            $summaryFullPath.Length -ge 240) {
             throw 'summary destination exceeds the controlled Windows path-length limit.'
         }
 
@@ -2225,7 +1053,7 @@ function Resolve-PesterShardSummaryOutputPath {
             throw 'summary destination has no parent directory.'
         }
         if (-not (Test-Path -LiteralPath $summaryParent -PathType Container)) {
-            [void](New-Item -ItemType Directory -Path $summaryParent -Force)
+            $createdParent = Open-PesterShardDirectory $summaryParent -Create; $createdParent.Dispose()
         }
         Assert-PesterShardPathAncestorsNoReparse -Path $summaryFullPath -Context 'summary output path'
         if (Test-Path -LiteralPath $summaryFullPath) {
@@ -2241,46 +1069,8 @@ function Resolve-PesterShardSummaryOutputPath {
 }
 
 function Write-PesterShardExecutionSummary {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)][string] $SummaryPath,
-        [Parameter(Mandatory = $true)][object] $SummaryObject
-    )
-
-    $summaryParent = [IO.Path]::GetDirectoryName($SummaryPath)
-    $temporaryPath = Join-Path $summaryParent ('.' + [IO.Path]::GetFileName($SummaryPath) + '.tmp-' + [guid]::NewGuid().ToString('N'))
-    $stream = $null
-    $ownsTemporaryFile = $false
-    try {
-        $stream = [IO.File]::Open($temporaryPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-        $ownsTemporaryFile = $true
-        $json = ConvertTo-Json -InputObject $SummaryObject -Depth 12 -Compress
-        $encoding = New-Object Text.UTF8Encoding($false)
-        $bytes = $encoding.GetBytes($json)
-        $stream.Write($bytes, 0, $bytes.Length)
-        $stream.Flush()
-        $stream.Dispose()
-        $stream = $null
-        [IO.File]::Move($temporaryPath, $SummaryPath)
-        $ownsTemporaryFile = $false
-    }
-    catch {
-        if ($null -ne $stream) {
-            $stream.Dispose()
-            $stream = $null
-        }
-        $cleanupMessage = ''
-        if ($ownsTemporaryFile -and (Test-Path -LiteralPath $temporaryPath -PathType Leaf)) {
-            try { [IO.File]::Delete($temporaryPath) }
-            catch { $cleanupMessage = ' Temporary-file cleanup also failed.' }
-        }
-        $message = [string]$_.Exception.Message
-        if (-not [string]::IsNullOrWhiteSpace($cleanupMessage)) { $message += $cleanupMessage }
-        throw "INVALID|Pester summary could not be created atomically: $message"
-    }
-    finally {
-        if ($null -ne $stream) { $stream.Dispose() }
-    }
+    param([string]$SummaryPath,$SummaryObject)
+    Write-PesterShardJson $SummaryPath $SummaryObject
 }
 
 function Assert-PesterShardResultCounts {
@@ -2315,28 +1105,43 @@ function Assert-PesterShardResultCounts {
     if ($Context -ceq 'aggregate' -and $passedCount -le 0) { throw 'Pester aggregate must contain at least one passed test.' }
 }
 
-Assert-PesterShardPathAncestorsNoReparse -Path $PesterModulePath -Context 'Pester module path'
-Import-Module $PesterModulePath -Force -ErrorAction Stop
-$loadedPester = Get-Module -Name Pester |
-    Where-Object { $_.Version -eq [version]$PesterVersion } |
-    Select-Object -First 1
-if ($null -eq $loadedPester) {
-    throw "Pester module version mismatch. Expected $PesterVersion at '$PesterModulePath'."
+$runtimeGuards = [Collections.Generic.List[IDisposable]]::new()
+try {
+Import-PesterShardRuntime $PSScriptRoot $runtimeGuards
+Open-PesterShardInput $PSCommandPath $runtimeGuards | Out-Null
+$script:PesterShardCapabilities = Get-PlatformCapabilities -Required @('directory-lease','file-lease','file-identity','owned-process','process-cleanup','process-environment')
+$repositoryRoot = Resolve-PesterShardFileSystemPath '.'
+$resolvedTestRoot = Resolve-PesterShardFileSystemPath $TestRoot
+if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) { $EvidenceRoot = $env:RUNNER_TEMP }
+if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) { $EvidenceRoot = Join-Path $repositoryRoot '.syp154-pester-evidence' }
+$EvidenceRoot = Resolve-PesterShardFileSystemPath $EvidenceRoot
+$runtimeGuards.Add((Open-PesterShardDirectory $repositoryRoot))
+$runtimeGuards.Add((Open-PesterShardDirectory $resolvedTestRoot))
+$runtimeGuards.Add((Open-PesterShardDirectory $EvidenceRoot -Create))
+$PesterModulePath = Resolve-PesterShardFileSystemPath $PesterModulePath
+$moduleRoot = [IO.Path]::GetDirectoryName($PesterModulePath)
+$runtimeGuards.Add((Open-PesterShardDirectory $moduleRoot))
+# The caller supplies trusted Pester fixtures. Protect the complete physical module
+# tree before parsing/importing its entry point; P4 acquisition policy remains separate.
+foreach ($item in @(Get-ChildItem -LiteralPath $moduleRoot -Recurse -Force)) {
+    Assert-PesterShardPathAncestorsNoReparse $item.FullName 'Pester closure'
+    if (-not $item.PSIsContainer) { Open-PesterShardInput $item.FullName $runtimeGuards | Out-Null }
 }
-$invokePester = Get-Command Invoke-Pester -ErrorAction Stop |
-    Where-Object { $_.Module.Version -eq [version]$PesterVersion } |
-    Select-Object -First 1
-if ($null -eq $invokePester) { throw "Invoke-Pester $PesterVersion could not be resolved." }
+$pesterData = Assert-PesterShardModuleManifest $PesterModulePath $PesterVersion
+$loadedPester = [pscustomobject]@{Version=[version]$pesterData.ModuleVersion}
 
 $allTestPaths = @(
-    Get-ChildItem -LiteralPath $resolvedTestRoot -Filter '*.Tests.ps1' -File |
+    Get-ChildItem -LiteralPath $resolvedTestRoot -Filter '*.Tests.ps1' -File -Recurse |
         ForEach-Object { [string]$_.FullName }
 )
 $selectedTestPaths = Select-PesterShardTestPaths -AllTestPaths $allTestPaths -SelectedTestFileNames $SelectedTestFileNames
 foreach ($selectedTestPath in $selectedTestPaths) {
-    Assert-PesterShardPathAncestorsNoReparse -Path $selectedTestPath -Context 'selected Pester test file'
+    Open-PesterShardInput $selectedTestPath $runtimeGuards | Out-Null
 }
 $resolvedSummaryOutputPath = Resolve-PesterShardSummaryOutputPath -SummaryOutputPath $SummaryOutputPath -EvidenceRoot $EvidenceRoot -TestRoot $resolvedTestRoot
+if (-not [string]::IsNullOrEmpty($resolvedSummaryOutputPath)) {
+    $runtimeGuards.Add((Open-PesterShardDirectory ([IO.Path]::GetDirectoryName($resolvedSummaryOutputPath))))
+}
 $shards = New-Object 'System.Collections.Generic.List[object]'
 foreach ($shard in @(New-PesterShardPlan `
         -AllTestPaths $selectedTestPaths `
@@ -2360,12 +1165,35 @@ if ($selectedShards.Count -eq 0) { throw 'Pester shard partition is empty.' }
 Write-Host "Pester shard plan: full=$($shards.Count) partition=$ShardPartitionIndex/$ShardPartitionCount selected=$($selectedShards.Count)"
 
 $childPowerShell = [IO.Path]::GetFullPath([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)
-$selectedPowerShell = [IO.Path]::GetFullPath((Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source)
-if (-not [string]::Equals($childPowerShell, $selectedPowerShell, [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'The bounded Pester child must use the same Windows PowerShell 7 executable as the verified runner process.'
-}
 $childScript = @(
     '$ErrorActionPreference = ''Stop'''
+    $(foreach ($name in @('Get-PesterShardCanonicalHash','Import-PesterShardRuntime','Resolve-PesterShardFileSystemPath','Test-PesterShardReparseItem','Assert-PesterShardPathAncestorsNoReparse','Open-PesterShardDirectory','Open-PesterShardInput','Write-PesterShardJson','Write-PesterShardBytes','ConvertTo-PesterShardSanitizedDiagnosticText')) { 'function '+$name+' {'; (Get-Command $name -CommandType Function).Definition; '}' })
+    '$childGuards = [Collections.Generic.List[IDisposable]]::new()'
+    'Import-PesterShardRuntime $env:SYP154_PESTER_RUNTIME_ROOT $childGuards'
+    '# Keep independently invocable references to the verified P2 commands. A test may remove the module from the session, but it must not disable supervisor evidence writes.'
+    '$script:PesterShardEvidenceOpenPlatformDirectory = Get-Command Open-PlatformDirectory -CommandType Function -ErrorAction Stop'
+    '$script:PesterShardEvidenceOpenPlatformFile = Get-Command Open-PlatformFile -CommandType Function -ErrorAction Stop'
+    'function Write-PesterShardChildEvidenceBytes {'
+    '    param([string]$Path,[byte[]]$Bytes)'
+    '    $Path = Resolve-PesterShardFileSystemPath $Path'
+    '    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and [IO.Path]::GetFullPath($Path).Length -ge 240) {'
+    '        throw ''INVALID|Windows shard artifact paths must be fewer than 240 characters.'''
+    '    }'
+    '    $full = [IO.Path]::GetFullPath($Path)'
+    '    $parentPath = [IO.Path]::GetDirectoryName($full).TrimEnd([IO.Path]::DirectorySeparatorChar)'
+    '    $anchor = [IO.Path]::GetPathRoot($parentPath)'
+    '    $parent = & $script:PesterShardEvidenceOpenPlatformDirectory -Root $anchor -RelativePath $parentPath.Substring($anchor.Length)'
+    '    try {'
+    '        $file = & $script:PesterShardEvidenceOpenPlatformFile -ParentLease $parent -Leaf ([IO.Path]::GetFileName($full)) -Access ReadWrite -CreateMode CreateNew'
+    '        try { $file.WriteNewBytes($Bytes) }'
+    '        finally { $file.Dispose() }'
+    '    } finally { $parent.Dispose() }'
+    '    # Partial files are retained on failure. P7 publication/removal is not used.'
+    '}'
+    'function Write-PesterShardChildEvidenceJson {'
+    '    param([string]$Path,$Value)'
+    '    Write-PesterShardChildEvidenceBytes $Path ([Text.UTF8Encoding]::new($false).GetBytes(($Value | ConvertTo-Json -Depth 16 -Compress)))'
+    '}'
     'function Remove-PesterShardTerminalControlSequences {'
     (Get-Command Remove-PesterShardTerminalControlSequences -CommandType Function -ErrorAction Stop).Definition
     '}'
@@ -2439,15 +1267,26 @@ $childScript = @(
     '    }'
     '    if ($null -eq $result) { throw ''Pester shard did not return a result object.'' }'
     '    $childFailurePhase = ''summary'''
+    '    $cases = [Collections.Generic.List[object]]::new()'
+    '    foreach ($case in @($result.TestResult | Sort-Object { if ($_.Result -in @(''Passed'',''Skipped'')) { 1 } else { 0 } })) {'
+    '        if ($cases.Count -ge 256) { break }'
+    '        $fields = [ordered]@{}'
+    '        foreach ($pair in @(@(''name'',[string]$case.Name),@(''result'',[string]$case.Result),@(''errorRecord'',[string]$case.ErrorRecord),@(''errorId'',[string]$case.ErrorRecord.FullyQualifiedErrorId),@(''stack'',([string]$case.StackTrace+"`n"+[string]$case.ErrorRecord.ScriptStackTrace)))) {'
+    '            $value = ConvertTo-PesterShardSanitizedDiagnosticText $pair[1]'
+    '            $fields[$pair[0]] = $value.Substring(0,[Math]::Min(1024,$value.Length))'
+    '        }'
+    '        $cases.Add([pscustomobject]$fields)'
+    '    }'
+    '    Write-PesterShardChildEvidenceJson ($env:SYP154_PESTER_RESULT_PATH + ''.cases.json'') ([ordered]@{schemaVersion=1;type=''pester-case-diagnostics'';truncated=(@($result.TestResult).Count -gt 256);cases=$cases.ToArray()})'
     '    $summary = [ordered]@{'
     '        schemaVersion = 1'
     '        status = ''completed'''
-    '        TotalCount = [int]$result.TotalCount'
-    '        PassedCount = [int]$result.PassedCount'
-    '        FailedCount = [int]$result.FailedCount'
-    '        SkippedCount = [int]$result.SkippedCount'
-    '        PendingCount = [int]$result.PendingCount'
-    '        InconclusiveCount = [int]$result.InconclusiveCount'
+    '        TotalCount = $result.TotalCount'
+    '        PassedCount = $result.PassedCount'
+    '        FailedCount = $result.FailedCount'
+    '        SkippedCount = $result.SkippedCount'
+    '        PendingCount = $result.PendingCount'
+    '        InconclusiveCount = $result.InconclusiveCount'
     '    }'
     '}'
     'catch {'
@@ -2469,7 +1308,7 @@ $childScript = @(
     '    }'
     '}'
     'try {'
-    '    [IO.File]::WriteAllText($env:SYP154_PESTER_RESULT_PATH, ($summary | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))'
+    '    Write-PesterShardChildEvidenceJson $env:SYP154_PESTER_RESULT_PATH $summary'
     '}'
     'catch {'
     '    $childExitCode = 4'
@@ -2480,7 +1319,6 @@ $childScript = @(
     'if ($summary.FailedCount -gt 0 -or $summary.PendingCount -gt 0 -or $summary.InconclusiveCount -gt 0) { exit 2 }'
     'exit 0'
 ) -join [Environment]::NewLine
-$encodedChildScript = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
 
 [long]$total = 0
 [long]$passed = 0
@@ -2491,63 +1329,31 @@ $encodedChildScript = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetByte
 $failedShardProcess = $false
 $completedShardSummaries = New-Object 'System.Collections.Generic.List[object]'
 foreach ($shard in @($selectedShards.ToArray())) {
+    foreach ($guard in $runtimeGuards) {
+        Assert-PlatformFileIdentity -Lease $guard -Expected $guard.Observation -SingleLink:($guard.Observation.Kind -ceq 'file') | Out-Null
+    }
     Write-Host "Starting Pester shard $($shard.Name)"
     $runToken = [guid]::NewGuid().ToString('N')
     $safeName = ($shard.Name -replace '[^A-Za-z0-9_.-]', '-')
-    $CancellationPath = $null
-    $ownsCancellationPath = $false
-    if ([string]::IsNullOrWhiteSpace($CancellationPath)) {
-        do {
-            # The normal CI path is supervisor-owned and unique to this shard
-            # run. External cancellation uses the supervisor-only control
-            # channel; no caller-visible marker is accepted by this wrapper.
-            $CancellationPath = Join-Path $EvidenceRoot ("syp154-pester-shard-{0}-{1}-{2}.cancel" -f $safeName, $runToken, ([guid]::NewGuid().ToString('N')))
-        } while (Test-Path -LiteralPath $CancellationPath)
-        $ownsCancellationPath = $true
-    }
     $resultPath = Join-Path $EvidenceRoot ("pester-shard-{0}-{1}.json" -f $safeName, $runToken)
     $processEvidencePath = Join-Path $EvidenceRoot ("pester-shard-{0}-{1}.process.json" -f $safeName, $runToken)
     $stdoutPath = Join-Path $EvidenceRoot ("pester-shard-{0}-{1}.stdout.log" -f $safeName, $runToken)
     $stderrPath = Join-Path $EvidenceRoot ("pester-shard-{0}-{1}.stderr.log" -f $safeName, $runToken)
-    $previous = @{}
-    $environment = @{
-        SYP154_PESTER_SHARD_PATHS = ConvertTo-Json -InputObject ([string[]]$shard.Paths) -Compress
-        SYP154_PESTER_MODULE_PATH = [string]$PesterModulePath
-        SYP154_PESTER_RESULT_PATH = $resultPath
-    }
-    try {
-        foreach ($entry in $environment.GetEnumerator()) {
-            $previous[$entry.Key] = [Environment]::GetEnvironmentVariable($entry.Key, 'Process')
-            [Environment]::SetEnvironmentVariable($entry.Key, [string]$entry.Value, 'Process')
-        }
-        $shardParameters = @{
-            Paths = $shard.Paths
-            ModulePath = $PesterModulePath
-            Version = $PesterVersion
-            ChildPowerShell = $childPowerShell
-            EncodedChildScript = $encodedChildScript
-            ResultPath = $resultPath
-            ProcessEvidencePath = $processEvidencePath
-            StdoutPath = $stdoutPath
-            StderrPath = $stderrPath
-            TimeoutSeconds = $OuterTimeoutSeconds
-            CancelPath = $CancellationPath
-            WorkingDirectory = $repositoryRoot
-        }
-        $shardRun = Invoke-PesterShardProcess @shardParameters
-    }
-    finally {
-        foreach ($entry in $environment.GetEnumerator()) {
-            [Environment]::SetEnvironmentVariable($entry.Key, $previous[$entry.Key], 'Process')
-        }
-        if ($ownsCancellationPath -and (Test-Path -LiteralPath $CancellationPath -PathType Leaf)) {
-            Remove-Item -LiteralPath $CancellationPath -Force -ErrorAction SilentlyContinue
-        }
-    }
-
+    $childScriptPath = Join-Path $EvidenceRoot ("pester-shard-{0}-{1}.child.ps1" -f $safeName, $runToken)
+    Write-PesterShardBytes $childScriptPath ([Text.UTF8Encoding]::new($false).GetBytes($childScript))
+    $environment = Get-PesterShardChildEnvironment
+    $environment['SYP154_PESTER_SHARD_PATHS'] = ConvertTo-Json -InputObject ([string[]]$shard.Paths) -Compress
+    $environment['SYP154_PESTER_MODULE_PATH'] = $PesterModulePath
+    $environment['SYP154_PESTER_RESULT_PATH'] = $resultPath
+    $environment['SYP154_PESTER_RUNTIME_ROOT'] = $PSScriptRoot
+    $shardRun = Invoke-PesterShardProcess -Paths $shard.Paths -ModulePath $PesterModulePath -Version $PesterVersion `
+        -ChildPowerShell $childPowerShell -ChildScriptPath $childScriptPath -ResultPath $resultPath `
+        -ProcessEvidencePath $processEvidencePath -StdoutPath $stdoutPath -StderrPath $stderrPath `
+        -TimeoutSeconds $OuterTimeoutSeconds -WorkingDirectory $repositoryRoot -Environment $environment `
+        -CancellationToken $CancellationToken -IsolationRequirement $IsolationRequirement
     $resultPath = [string]$shardRun.resultPath
-    $summary = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    $processEvidence = Get-Content -LiteralPath ([string]$shardRun.processEvidencePath) -Raw -Encoding UTF8 | ConvertFrom-Json
+    $summary = Read-PesterShardJson $resultPath
+    $processEvidence = Read-PesterShardJson ([string]$shardRun.processEvidencePath)
     $shardOutputQuotaExceeded = $false
     if ($shardRun.PSObject.Properties.Name -contains 'outputQuotaExceeded') {
         $shardOutputQuotaExceeded = [bool]$shardRun.outputQuotaExceeded
@@ -2567,6 +1373,7 @@ foreach ($shard in @($selectedShards.ToArray())) {
             Write-Host "Pester shard first failure (sanitized): $($processEvidence.failureSummary)"
         }
     }
+    if (-not $shardRun.cleanedUp -or -not $processEvidence.cleanup.cleanedUp) { throw 'Pester shard cleanup is unconfirmed.' }
     Assert-PesterShardResultCounts -Summary $summary -Context 'shard'
     $completedShardSummaries.Add([pscustomobject][ordered]@{
         name = [string]$shard.Name
@@ -2602,6 +1409,9 @@ if ($ExpectedTotalCount -ge 0 -and $total -ne $ExpectedTotalCount) { throw "Pest
 if ($ExpectedSkippedCount -ge 0 -and $skipped -ne $ExpectedSkippedCount) { throw "Pester expected exactly $ExpectedSkippedCount platform/version skips; got $skipped." }
 Write-Host "Aggregate - Total: $total Passed: $passed Failed: $failed Skipped: $skipped Pending: $pending Inconclusive: $inconclusive"
 if (-not [string]::IsNullOrWhiteSpace($resolvedSummaryOutputPath)) {
+    foreach ($guard in $runtimeGuards) {
+        Assert-PlatformFileIdentity -Lease $guard -Expected $guard.Observation -SingleLink:($guard.Observation.Kind -ceq 'file') | Out-Null
+    }
     $executedTestPaths = [string[]]@(
         $completedShardSummaries.ToArray() | ForEach-Object { $_.paths }
     )
@@ -2625,3 +1435,5 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedSummaryOutputPath)) {
     }
     Write-PesterShardExecutionSummary -SummaryPath $resolvedSummaryOutputPath -SummaryObject $executionSummary
 }
+
+} finally { for ($i=$runtimeGuards.Count-1;$i -ge 0;$i--) { $runtimeGuards[$i].Dispose() } }

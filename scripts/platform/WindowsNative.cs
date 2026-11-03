@@ -27,6 +27,26 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private int references = 1;
         private bool disposed;
         public FileObservation Observation { get; internal set; }
+        internal bool NewWritable;
+        public byte[] ReadAllBytes(int maximumBytes)
+        {
+            lock (Sync)
+            {
+                Check(); WindowsNative.AssertIdentity(this, Observation, true);
+                byte[] bytes = LeaseBytes.Read(Handle, maximumBytes);
+                WindowsNative.AssertIdentity(this, Observation, true); return bytes;
+            }
+        }
+        public void WriteNewBytes(byte[] bytes)
+        {
+            lock (Sync)
+            {
+                Check(); WindowsNative.AssertIdentity(this, Observation, true);
+                if (!NewWritable) throw new InvalidOperationException("A fresh create-only writable lease is required.");
+                NewWritable = false; LeaseBytes.Write(Handle, bytes);
+                WindowsNative.AssertIdentity(this, Observation, true);
+            }
+        }
         internal WindowsLease(SafeFileHandle handle, string path, List<IDisposable> guards, WindowsLease parent, FileObservation observation)
         {
             Handle = handle; Path = path; this.guards = guards; this.parent = parent; Observation = observation;
@@ -187,7 +207,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 {
                     FileObservation value = Stat(handle); PlatformPaths.Single(value);
                     using (SafeFileHandle named = Open(path, 0, 7, 3)) PlatformPaths.Same(value, Stat(named));
-                    return new WindowsLease(handle, path, null, parent, value);
+                    return new WindowsLease(handle, path, null, parent, value) { NewWritable = createMode == "CreateNew" && access != "Read" };
                 }
                 catch { handle.Dispose(); throw; }
             }

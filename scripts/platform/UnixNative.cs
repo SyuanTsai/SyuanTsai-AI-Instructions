@@ -41,6 +41,26 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         internal string Path;
         internal bool Locked;
         public FileObservation Observation { get; internal set; }
+        internal bool NewWritable;
+        public byte[] ReadAllBytes(int maximumBytes)
+        {
+            lock (Sync)
+            {
+                Check(); UnixNative.AssertIdentity(this, Observation, true);
+                byte[] bytes = LeaseBytes.Read(Fd, maximumBytes);
+                UnixNative.AssertIdentity(this, Observation, true); return bytes;
+            }
+        }
+        public void WriteNewBytes(byte[] bytes)
+        {
+            lock (Sync)
+            {
+                Check(); UnixNative.AssertIdentity(this, Observation, true);
+                if (!NewWritable) throw new InvalidOperationException("A fresh create-only writable lease is required.");
+                NewWritable = false; LeaseBytes.Write(Fd, bytes);
+                UnixNative.AssertIdentity(this, Observation, true);
+            }
+        }
         internal UnixLease(SafeFd fd, SafeFd parent, string leaf, string path, FileObservation observation)
         { Fd = fd; Parent = parent; Leaf = leaf; Path = path; Observation = observation; }
         internal void Check() { if (Fd == null || Fd.IsClosed) throw new ObjectDisposedException("UnixLease"); }
@@ -448,6 +468,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     PlatformPaths.Single(value);
                     PlatformPaths.Same(value, Stat(duplicate, leaf));
                     UnixLease result = new UnixLease(file, duplicate, leaf, Path.Combine(parent.Path, leaf), value);
+                    result.NewWritable = createMode == "CreateNew" && access != "Read";
                     file = null; duplicate = null; return result;
                 }
                 finally { if (file != null) file.Dispose(); if (duplicate != null) duplicate.Dispose(); }
