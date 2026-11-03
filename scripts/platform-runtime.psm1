@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 $script:PlatformRuntimeApiVersion = '1.0'
 $script:PlatformRuntimeManifestPath = Join-Path $PSScriptRoot 'platform-runtime.psd1'
 
@@ -100,7 +101,11 @@ Assert-PlatformRuntimeInventory | Out-Null
 
 $nativeSourcePath = Join-Path $PSScriptRoot 'platform/PlatformNative.cs'
 if ($null -eq ('SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative' -as [type])) {
-    Add-Type -LiteralPath $nativeSourcePath -ErrorAction Stop
+    Add-Type -LiteralPath @($nativeSourcePath, (Join-Path $PSScriptRoot 'platform/UnixNative.cs'), (Join-Path $PSScriptRoot 'platform/WindowsNative.cs')) -ErrorAction Stop
+}
+elseif ($null -eq ('SyuanTsai.AIInstructions.PlatformRuntime.UnixNative' -as [type]) -or
+        $null -eq ('SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative' -as [type])) {
+    throw [IO.InvalidDataException]::new('A pre-P2 native assembly is already loaded. Import this verified runtime in a fresh PowerShell process.')
 }
 
 Import-Module (Join-Path $PSScriptRoot 'platform/Windows.psm1') -Scope Local -ErrorAction Stop
@@ -111,11 +116,105 @@ function Get-CurrentPlatformName {
     return [SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetOperatingSystem()
 }
 
+function Clear-PlatformProbe {
+    param(
+        [Parameter(Mandatory = $true)] $Directory,
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Entries,
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary] $Evidence
+    )
+    $verified = $false
+    try {
+        # Check the directory BEFORE using its pathname for file cleanup. A renamed
+        # lease still owns the old inode, not a replacement at the original path.
+        Assert-PlatformFileIdentity -Lease $Directory -Expected $Directory.Observation | Out-Null
+        foreach ($entry in $Entries) {
+            if ($null -ne $entry[1]) {
+                $cleanup = Open-PlatformFile -ParentLease $Directory -Leaf $entry[0] -Access Read -CreateMode OpenExisting
+                try { Assert-PlatformFileIdentity -Lease $cleanup -Expected $entry[1] -SingleLink | Out-Null } finally { $cleanup.Dispose() }
+                Assert-PlatformFileIdentity -Lease $Directory -Expected $Directory.Observation | Out-Null
+                [IO.File]::Delete((Join-Path $Path $entry[0]))
+            }
+        }
+        Assert-PlatformFileIdentity -Lease $Directory -Expected $Directory.Observation | Out-Null
+        $verified = $true
+    } catch { $Evidence['cleanupFailure'] = $_.Exception.Message } finally { $Directory.Dispose() }
+    # A1 still applies to the final check-to-delete interval on Unix. A detected
+    # mismatch, however, must NEVER authorize deletion of the replacement.
+    if ($verified) {
+        try { [IO.Directory]::Delete($Path,$false) } catch { $Evidence['cleanupFailure'] = $_.Exception.Message }
+    }
+}
+
+function Test-PlatformPrimitives {
+    # Receipt describes this local probe filesystem, not every mounted filesystem.
+    $platform = Get-CurrentPlatformName
+    $root = if ($platform -eq 'windows') { [IO.Path]::GetTempPath().TrimEnd('\','/') } elseif ($platform -eq 'macos') { '/private/tmp' } else { '/tmp' }
+    $name = 'platform-probe-' + [Guid]::NewGuid().ToString('N')
+    $path = Join-Path $root $name
+    $directory = $null; $file = $null; $first = $null; $second = $null
+    $fileIdentity = $null; $lockIdentity = $null
+    $status = 'unavailable'
+    $evidence = [ordered]@{
+        lockPrimitive = $(if ($platform -eq 'windows') { 'windows-fileshare' } else { 'flock' })
+        scope = 'Fresh local temporary-directory probe; other filesystems require their own validation.'
+        guarantee = $(if ($platform -eq 'windows') { 'Handle sharing denies conflicting open/write/delete.' } else { 'Cooperative advisory flock only; same-account nonparticipants can mutate names/content. Revalidation is not mandatory exclusion (A1).' })
+        abi = 'Win32 handle information'
+    }
+    try {
+        if ($platform -ne 'windows') { $evidence.abi = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::ValidateAbi() }
+        $directory = Open-PlatformDirectory -Root $root -RelativePath $name -CreatePrivate
+        $file = Open-PlatformFile -ParentLease $directory -Leaf 'data' -Access ReadWrite -CreateMode CreateNew
+        $fileIdentity = Assert-PlatformFileIdentity -Lease $file -Expected $file.Observation -SingleLink
+        $permissions = Get-PlatformPermissions -Lease $file
+        if ($platform -eq 'windows') {
+            Set-PlatformPermissions -Lease $file -Policy @{ Sddl=$permissions.Sddl; ReadOnly=$permissions.ReadOnly } | Out-Null
+        } else {
+            Set-PlatformPermissions -Lease $file -Policy @{ Mode=384 } | Out-Null
+        }
+        $file.Dispose(); $file = $null
+        $first = Enter-PlatformLock -ParentLease $directory -Leaf 'lock' -Mode Shared -Timeout ([TimeSpan]::Zero)
+        $lockIdentity = $first.Observation
+        $second = Enter-PlatformLock -ParentLease $directory -Leaf 'lock' -Mode Shared -Timeout ([TimeSpan]::Zero)
+        $conflicted = $false
+        try {
+            $unexpected = Enter-PlatformLock -ParentLease $directory -Leaf 'lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
+            $unexpected.Dispose()
+        } catch {
+            $cause = $_.Exception
+            while ($null -ne $cause.InnerException) { $cause = $cause.InnerException }
+            if ($cause -isnot [TimeoutException]) { throw }
+            $conflicted = $true
+        }
+        if (-not $conflicted) { throw [IO.IOException]::new('Lock probe did not exclude an exclusive participant.') }
+        $second.Dispose(); $second = $null; $first.Dispose(); $first = $null
+        $first = Enter-PlatformLock -ParentLease $directory -Leaf 'lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
+        Assert-PlatformFileIdentity -Lease $first -Expected $lockIdentity -SingleLink | Out-Null
+        $status = 'available'
+    }
+    catch {
+        $evidence['failure'] = $_.Exception.Message
+    }
+    finally {
+        if ($null -ne $second) { $second.Dispose() }
+        if ($null -ne $first) { $first.Dispose() }
+        if ($null -ne $file) { $file.Dispose() }
+        # Only our two known probe names are cleaned; no recursive deletion.
+        if ($null -ne $directory) {
+            Clear-PlatformProbe -Directory $directory -Path $path -Entries @(@('data',$fileIdentity),@('lock',$lockIdentity)) -Evidence $evidence
+        }
+    }
+    # Construct the receipt AFTER finally so cleanup failures are not lost in a
+    # PSCustomObject copy made before cleanup ran.
+    return [pscustomobject]@{ status=$status; evidence=[pscustomobject]$evidence }
+}
+
 function Get-PlatformCapabilities {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $Required)
 
     $platform = Get-CurrentPlatformName
+    $primitiveProbe = Test-PlatformPrimitives
     $processEnvironmentMethod = @(
         [Environment].GetMethods([Reflection.BindingFlags]'Public,Static') | Where-Object {
             $_.Name -ceq 'SetEnvironmentVariable' -and
@@ -131,13 +230,13 @@ function Get-PlatformCapabilities {
         'The current runtime does not expose System.Environment process-scope assignment.'
     }
     $capabilityDefinitions = [ordered]@{
-        'directory-lease' = @('unverified','P2 directory primitive is not implemented or probed.')
-        'file-lease' = @('unverified','P2 file primitive is not implemented or probed.')
-        'file-identity' = @('unverified','P2 identity primitive is not implemented or probed.')
-        'lock' = @('unverified','P2 lock primitive is not implemented or probed.')
-        'publication' = @('unverified','P2 publication primitive is not implemented or probed.')
-        'owned-file-removal' = @('unverified','P2 owned-file removal is not implemented or probed.')
-        'permissions' = @('unverified','P2 permission primitives are not implemented or probed.')
+        'directory-lease' = @('unverified','P2 probe pending.')
+        'file-lease' = @('unverified','P2 probe pending.')
+        'file-identity' = @('unverified','P2 probe pending.')
+        'lock' = @('unverified','P2 probe pending.')
+        'publication' = @('unverified','P7 publication primitive is not implemented or probed.')
+        'owned-file-removal' = @('unverified','P7 owned-file removal is not implemented or probed.')
+        'permissions' = @('unverified','P2 probe pending.')
         'process-isolation' = @('unverified','P3 process isolation is not implemented or probed.')
         'powershell-resolution' = @('unverified','P4 PowerShell resolution is not implemented or probed.')
         'pester-initialization' = @('unverified','P4 Pester initialization is not implemented or probed.')
@@ -152,6 +251,12 @@ function Get-PlatformCapabilities {
             status = [string]$definition[0]
             evidence = [object[]]@([string]$definition[1])
         })
+    }
+    foreach ($capability in $capabilities) {
+        if ($capability.name -cin @('directory-lease','file-lease','file-identity','lock','permissions')) {
+            $capability.status = $primitiveProbe.status
+            $capability.evidence = [object[]]@($primitiveProbe.evidence)
+        }
     }
     foreach ($name in @($Required)) {
         if ([string]::IsNullOrWhiteSpace($name)) {
@@ -194,7 +299,7 @@ function Invoke-PlatformAdapter {
 function Open-PlatformDirectory { [CmdletBinding()] param([Parameter(Mandatory = $true)][string] $Root, [Parameter(Mandatory = $true)][string] $RelativePath, [switch] $CreatePrivate) Invoke-PlatformAdapter 'Open-PlatformDirectory' @{ Root=$Root; RelativePath=$RelativePath; CreatePrivate=$CreatePrivate } }
 function Open-PlatformFile { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)][string] $Access, [Parameter(Mandatory = $true)][string] $CreateMode) Invoke-PlatformAdapter 'Open-PlatformFile' @{ ParentLease=$ParentLease; Leaf=$Leaf; Access=$Access; CreateMode=$CreateMode } }
 function Assert-PlatformFileIdentity { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Lease, [Parameter(Mandatory = $true)] $Expected, [switch] $SingleLink) Invoke-PlatformAdapter 'Assert-PlatformFileIdentity' @{ Lease=$Lease; Expected=$Expected; SingleLink=$SingleLink } }
-function Enter-PlatformLock { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [ValidateSet('Shared','Exclusive')][string] $Mode, [TimeSpan] $Timeout) Invoke-PlatformAdapter 'Enter-PlatformLock' $PSBoundParameters }
+function Enter-PlatformLock { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)][ValidateSet('Shared','Exclusive')][string] $Mode, [Parameter(Mandatory = $true)][TimeSpan] $Timeout) Invoke-PlatformAdapter 'Enter-PlatformLock' $PSBoundParameters }
 function Publish-PlatformFile { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)] $StageLease, [Parameter(Mandatory = $true)] $ExpectedState, [switch] $NoReplace, $Journal) Invoke-PlatformAdapter 'Publish-PlatformFile' $PSBoundParameters }
 function Remove-PlatformOwnedFile { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)] $ExpectedState, $Journal) Invoke-PlatformAdapter 'Remove-PlatformOwnedFile' $PSBoundParameters }
 function Get-PlatformPermissions { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Lease) Invoke-PlatformAdapter 'Get-PlatformPermissions' $PSBoundParameters }
