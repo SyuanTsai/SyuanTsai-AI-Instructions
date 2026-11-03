@@ -146,6 +146,33 @@ exit 0
         $result.status | Should -Be 'passed'
         $result.stdout | Should -Be 'space and & literal'
     }
+    # Scenario: A script invokes a failing native command, then returns without exit.
+    # Purpose: Preserve the bootstrap's native exit code instead of reporting a successful pwsh -File invocation.
+    It 'InterT82_propagates_script_native_failure_without_explicit_exit' {
+        $child = Join-Path $TestDrive 'native-failure.ps1'
+        [IO.File]::WriteAllText($child,@'
+param([string]$NativeHost)
+& $NativeHost -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command 'exit 23'
+[Console]::Write('returned-after-native')
+'@,[Text.UTF8Encoding]::new($false))
+        $result = Invoke-StandardValidationProcess -Command $child -Arguments @($script:ValidatorTestHost) -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 10
+        $result.status | Should -Be 'failed'
+        $result.exitCode | Should -Be 23
+        $result.stdout | Should -Be 'returned-after-native'
+        $result.cleanedUp | Should -BeTrue
+    }
+    # Scenario: A script writes an ordinary non-terminating PowerShell error.
+    # Purpose: The owned interpreter must inherit stop-on-error semantics from the trusted bootstrap.
+    It 'InterT84_fails_script_on_nonterminating_error' {
+        $child = Join-Path $TestDrive 'powershell-error.ps1'
+        [IO.File]::WriteAllText($child,"Write-Error 'fixture-script-error'; [Console]::Write('must-not-continue')",[Text.UTF8Encoding]::new($false))
+        $result = Invoke-StandardValidationProcess -Command $child -Arguments @() -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 10
+        $result.status | Should -Be 'failed'
+        $result.exitCode | Should -Not -Be 0
+        $result.stdout | Should -Be ''
+        $result.stderr | Should -Match 'fixture-script-error'
+        $result.cleanedUp | Should -BeTrue
+    }
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
         # Scenario: A Windows command shim requires an interpreter.
         # Purpose: Preserve command-shim support inside the P3 Job boundary.
@@ -159,6 +186,55 @@ exit 0
         }
     }
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        # Scenario: PATH names a relative executable symlink below a symlinked directory.
+        # Purpose: Resolve both path components and bind the final regular file through P2/P3.
+        It 'InterT95_runs_symlink_executable_and_records_physical_command' {
+            $root = Join-Path $TestDrive 'linked-command'
+            $physicalDirectory = Join-Path $root 'physical'
+            [void][IO.Directory]::CreateDirectory($physicalDirectory)
+            $physicalCommand = Join-Path $physicalDirectory 'native-echo'
+            [IO.File]::Copy('/bin/echo',$physicalCommand)
+            [IO.File]::SetUnixFileMode($physicalCommand,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserExecute)
+            [void](New-Item -ItemType SymbolicLink -Path (Join-Path $physicalDirectory 'target') -Target 'native-echo')
+            [void](New-Item -ItemType SymbolicLink -Path (Join-Path $physicalDirectory 'host') -Target 'target')
+            [void](New-Item -ItemType SymbolicLink -Path (Join-Path $root 'bin') -Target 'physical')
+            $command = Join-Path $root 'bin/host'
+            $result = Invoke-StandardValidationProcess -Command $command -Arguments @('linked-host') -WorkingDirectory $root -Environment @{} -TimeoutSeconds 10
+            $result.status | Should -Be 'passed'
+            $result.stdout | Should -Be ('linked-host' + [Environment]::NewLine)
+            $result.cleanedUp | Should -BeTrue
+            $result.processOwnership.commandPath | Should -Be $command
+            $result.processOwnership.resolvedCommandPath | Should -Be $physicalCommand
+        }
+        Context 'Executable replacement after leasing' {
+            # Scenario: The resolved executable is replaced after the validator opens its lease.
+            # Purpose: P3 must reject the stale file identity before executing any replacement bytes.
+            It 'InterT97_rejects_replaced_symlink_target_after_lease' {
+                Initialize-StandardValidationPlatformRuntime
+                $script:ValidatorRealStart = Get-Command Start-PlatformOwnedProcess
+                $root = Join-Path $TestDrive 'replaced-command'
+                [void][IO.Directory]::CreateDirectory($root)
+                $script:ValidatorReplacementTarget = Join-Path $root 'target'
+                [IO.File]::Copy('/bin/echo',$script:ValidatorReplacementTarget)
+                [IO.File]::SetUnixFileMode($script:ValidatorReplacementTarget,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite -bor [IO.UnixFileMode]::UserExecute)
+                $command = Join-Path $root 'command'
+                [void](New-Item -ItemType SymbolicLink -Path $command -Target 'target')
+                Mock Start-PlatformOwnedProcess {
+                    param($ExecutableLease,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$StdoutPath,$StderrPath,$OutputLimitCharacters)
+                    [IO.File]::Move($script:ValidatorReplacementTarget,($script:ValidatorReplacementTarget + '.old'))
+                    [IO.File]::Copy('/bin/echo',$script:ValidatorReplacementTarget)
+                    [IO.File]::SetUnixFileMode($script:ValidatorReplacementTarget,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserExecute)
+                    & $script:ValidatorRealStart -ExecutableLease $ExecutableLease -ArgumentList $ArgumentList -Environment $Environment -WorkingDirectoryLease $WorkingDirectoryLease -Deadline $Deadline -StdoutPath $StdoutPath -StderrPath $StderrPath -OutputLimitCharacters $OutputLimitCharacters
+                }
+                $result = Invoke-StandardValidationProcess -Command $command -Arguments @('must-not-run') -WorkingDirectory $root -Environment @{} -TimeoutSeconds 10
+                Assert-MockCalled Start-PlatformOwnedProcess -Times 1 -Exactly -Scope It
+                $result.status | Should -Be 'startup-failed'
+                $result.processId | Should -BeNullOrEmpty
+                $result.stdout | Should -Be ''
+                $result.stderr | Should -Match 'identity'
+                $result.processOwnership.resolvedCommandPath | Should -Be $script:ValidatorReplacementTarget
+            }
+        }
         # Scenario: An npm launcher is a symlink, while its receipt binds a runtime and payload.
         # Purpose: Execute the bound payload through P3 without opening the symlink as a native executable.
         It 'InterT100_dispatches_unix_symlink_using_receipt_runtime_and_payload' {

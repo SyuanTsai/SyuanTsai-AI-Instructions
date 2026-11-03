@@ -1950,6 +1950,7 @@ Describe 'Validator platform evidence hardening' {
         $report = New-SourceGateFixture
         $event = $report.sourceValidation.events[0]
         $ownership = [pscustomobject]@{
+            commandPath='/example/bin/tool'; resolvedCommandPath='/example/lib/tool'
             processId=123; startIdentity='fixture-start'; isolation='macos-process-group'; isolationLevel='cooperative'
             limitations=@('same-account-adversarial-writer-out-of-scope','no-filesystem-isolation','macos-process-group-cannot-detect-setsid-escape','group-signal-external-reaper-race')
             terminationReason='cancelled'
@@ -1961,6 +1962,15 @@ Describe 'Validator platform evidence hardening' {
         $raw.process | Add-Member -NotePropertyName processOwnership -NotePropertyValue $ownership
         Write-SourceGateFixtureJson $event.outputPath $raw
         (Test-StandardValidationSourceEventOutputBinding -Event $event -Report $report) | Should -BeTrue
+        foreach ($name in @('commandPath','resolvedCommandPath')) {
+            $savedPath = $ownership.$name
+            $ownership.$name = ''
+            { Assert-StandardValidationProcessOwnership -Ownership $ownership -Passed } | Should -Throw
+            (Test-StandardValidationSourceEventOutputBinding -Event $event -Report $report) | Should -BeFalse
+            $ownership.$name = '/example/changed-tool'
+            (Test-StandardValidationSourceEventOutputBinding -Event $event -Report $report) | Should -BeFalse
+            $ownership.$name = $savedPath
+        }
         $ownership.isolationLevel='strong'
         (Test-StandardValidationSourceEventOutputBinding -Event $event -Report $report) | Should -BeFalse
         $ownership.isolationLevel='cooperative'; $ownership.cleanup.CaptureResourcesClosed=$false

@@ -1211,6 +1211,11 @@ Describe 'Validator platform authority routing' {
         foreach ($primitive in @('Open-PlatformDirectory','Open-PlatformFile','Assert-PlatformFileIdentity','Enter-PlatformLock','Start-PlatformOwnedProcess','Stop-PlatformOwnedProcess')) {
             $policy.processOwnership.primitives | Should -Contain $primitive
         }
+        $policy.processOwnership.executableResolution | Should -Be 'resolve-links-then-no-follow-lease-and-revalidate-identity'
+        $policy.processOwnership.scriptFailurePolicy | Should -Be 'stop-on-error-and-propagate-last-native-exit-code'
+        foreach ($name in @('commandPath','resolvedCommandPath')) {
+            $policy.processOwnership.commandBinding | Should -Contain $name
+        }
         $workflow = Get-Content -Raw (Join-Path $root '.github/workflows/standards-conformance.yml')
         $workflow.Contains('Invoke-StandardAuthorityGate.ps1') | Should -BeTrue
         $composition = Get-Content -Raw (Join-Path $root '.github/workflows/pr8-powershell-validation.yml')

@@ -6428,6 +6428,10 @@ Describe 'Validator platform ownership authority contract' {
         $policy.processOwnership.isolationLevels.'windows-job-object' | Should -Be 'strong'
         $policy.processOwnership.isolationLevels.'linux-process-group-subreaper' | Should -Be 'cooperative'
         $policy.processOwnership.isolationLevels.'macos-process-group' | Should -Be 'cooperative'
+        foreach ($name in @('commandPath','resolvedCommandPath')) {
+            $policy.processOwnership.commandBinding | Should -Contain $name
+            $core.'$defs'.processOwnership.required | Should -Contain $name
+        }
         foreach ($name in $policy.processOwnership.runtimeBinding) {
             $core.'$defs'.processOwnership.properties.runtime.required | Should -Contain $name
         }
@@ -6437,6 +6441,12 @@ Describe 'Validator platform ownership authority contract' {
         $ownershipSchema = $core.'$defs'.processOwnership | ConvertTo-Json -Depth 30
         foreach ($example in $core.'$defs'.processOwnership.examples) {
             Test-Json -Json ($example | ConvertTo-Json -Depth 30) -Schema $ownershipSchema | Should -BeTrue
+            foreach ($name in @('commandPath','resolvedCommandPath')) {
+                $savedPath = $example.$name
+                $example.$name = $null
+                Test-Json -Json ($example | ConvertTo-Json -Depth 30) -Schema $ownershipSchema -ErrorAction SilentlyContinue | Should -BeFalse
+                $example.$name = $savedPath
+            }
         }
         $macExample = $core.'$defs'.processOwnership.examples[2]
         $macExample.isolationLevel = 'strong'

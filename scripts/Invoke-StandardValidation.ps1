@@ -2981,6 +2981,37 @@ function Open-StandardValidationDirectory {
     Open-PlatformDirectory -Root $anchor -RelativePath $full.Substring($anchor.Length) -CreatePrivate:$Create
 }
 
+function Resolve-StandardValidationPhysicalCommandPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $full = Get-StandardValidationFullPath -Path $Path -Context 'command path'
+    # Resolve trusted command lookup results, including package-manager directory
+    # links. P2 still opens every resulting component with no-follow semantics.
+    # Restart after each link so ancestors in an absolute/relative target are
+    # resolved as well; a cycle or excessive indirection fails before leasing.
+    for ($hop = 0; $hop -lt 40; $hop++) {
+        $anchor = [IO.Path]::GetPathRoot($full)
+        $parts = $full.Substring($anchor.Length).Split(
+            [char[]]@([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar),
+            [StringSplitOptions]::RemoveEmptyEntries)
+        $current = $anchor
+        $redirected = $false
+        for ($index = 0; $index -lt $parts.Length; $index++) {
+            $current = Join-Path $current $parts[$index]
+            $item = if ($index -eq $parts.Length - 1) { [IO.FileInfo]::new($current) } else { [IO.DirectoryInfo]::new($current) }
+            if ([string]::IsNullOrEmpty($item.LinkTarget)) { continue }
+            $target = $item.ResolveLinkTarget($true)
+            if ($null -eq $target) { throw 'The command link target could not be resolved.' }
+            $full = $target.FullName
+            for ($tail = $index + 1; $tail -lt $parts.Length; $tail++) { $full = Join-Path $full $parts[$tail] }
+            $redirected = $true
+            break
+        }
+        if (-not $redirected) { return $full }
+    }
+    throw 'The command link chain exceeds the resolution limit.'
+}
+
 function Test-StandardValidationCleanupReceipt {
     param($Receipt)
     if ($null -eq $Receipt) { return $false }
@@ -3007,7 +3038,10 @@ function Stop-StandardValidationOwnedProcess {
 
 function Assert-StandardValidationProcessOwnership {
     param([Parameter(Mandatory = $true)]$Ownership, [switch]$Passed)
-    Assert-StandardValidationExactPropertySet -Object $Ownership -Expected @('processId','startIdentity','isolation','isolationLevel','limitations','terminationReason','cleanup','runtime') -Context 'process ownership'
+    Assert-StandardValidationExactPropertySet -Object $Ownership -Expected @('commandPath','resolvedCommandPath','processId','startIdentity','isolation','isolationLevel','limitations','terminationReason','cleanup','runtime') -Context 'process ownership'
+    foreach ($name in @('commandPath','resolvedCommandPath')) {
+        if ($Ownership.$name -isnot [string] -or [string]::IsNullOrWhiteSpace($Ownership.$name)) { throw 'FAILED|Process command path binding is invalid.' }
+    }
     if (-not (Test-StandardValidationIntegerRange -Value $Ownership.processId -Minimum 1 -Maximum ([int]::MaxValue))) { throw 'FAILED|Process PID is invalid.' }
     $expectedLevel = switch ($Ownership.isolation) {
         'windows-job-object' { 'strong' }
@@ -3045,10 +3079,12 @@ function Invoke-StandardValidationProcess {
     $lease = $null; $cleanup = $null; $identity = $null; $processId = $null
     $isolation = $null; $reason = $null; $quota = $false; $cancelled = $false; $naturalExit = $false
     $cleanedUp = $true; $captureRoot = $null; $captureDirectory = $null; $binding = $null
+    $originalCommandPath = $null; $resolvedCommandPath = $null
     $limits = @('same-account-adversarial-writer-out-of-scope','no-filesystem-isolation')
     $guards = [Collections.Generic.List[IDisposable]]::new()
     $phase = 'preflight'
     try {
+        $originalCommandPath = Get-StandardValidationFullPath -Path $Command -Context 'Command'
         if ($TimeoutSeconds -le 0) { throw 'A positive timeout is required.' }
         if (-not [string]::IsNullOrWhiteSpace($CancellationPath)) {
             $CancellationPath = Get-StandardValidationFullPath -Path $CancellationPath -Context 'CancellationPath'
@@ -3061,10 +3097,13 @@ function Invoke-StandardValidationProcess {
             $phase = 'open-working-directory'
             $directory = Open-StandardValidationDirectory $WorkingDirectory; $guards.Add($directory)
             $phase = 'open-executable'
-            $commandPath = Get-StandardValidationFullPath -Path $Command -Context 'Command'
+            $resolvedCommandPath = Resolve-StandardValidationPhysicalCommandPath -Path $originalCommandPath
+            $commandPath = $resolvedCommandPath
             $parent = Open-StandardValidationDirectory ([IO.Path]::GetDirectoryName($commandPath)); $guards.Add($parent)
             $executable = Open-PlatformFile -ParentLease $parent -Leaf ([IO.Path]::GetFileName($commandPath)) -Access Read -CreateMode OpenExisting
             $guards.Add($executable)
+            $commandLease = $executable
+            $executableRequestedPath = $originalCommandPath
             $phase = 'reserve-capture'
             $tempRoot = if ($IsMacOS) { '/private/tmp' } else { [IO.Path]::GetTempPath() }
             $captureRoot = Join-Path $tempRoot ('standard-process-' + [guid]::NewGuid().ToString('N'))
@@ -3076,24 +3115,29 @@ function Invoke-StandardValidationProcess {
             if ($extension -eq '.ps1' -or ($IsWindows -and $extension -in @('.cmd','.bat'))) {
                 # Preserve script/shim invocation without reimplementing process
                 # ownership: the interpreter and every descendant belong to P3.
-                $hostPath = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
-                $hostParent = Open-StandardValidationDirectory $PSHOME; $guards.Add($hostParent)
+                $executableRequestedPath = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
+                $hostPath = Resolve-StandardValidationPhysicalCommandPath -Path $executableRequestedPath
+                $hostParent = Open-StandardValidationDirectory ([IO.Path]::GetDirectoryName($hostPath)); $guards.Add($hostParent)
                 $hostLease = Open-PlatformFile -ParentLease $hostParent -Leaf ([IO.Path]::GetFileName($hostPath)) -Access Read -CreateMode OpenExisting
                 $guards.Add($hostLease)
                 $executable = $hostLease
-                if ($extension -eq '.ps1') {
-                    $launchArguments = @('-NoProfile','-NonInteractive','-File',$commandPath) + $launchArguments
-                } else {
-                    $childEnvironment['STANDARD_VALIDATION_WRAPPER_COMMAND'] = [string]$commandPath
-                    $childEnvironment['STANDARD_VALIDATION_WRAPPER_ARGUMENTS'] = [string](ConvertTo-Json -InputObject ([string[]]$Arguments) -Compress)
-                    $dispatch = '$ErrorActionPreference="Stop"; $items=@(ConvertFrom-Json -InputObject $env:STANDARD_VALIDATION_WRAPPER_ARGUMENTS); & $env:STANDARD_VALIDATION_WRAPPER_COMMAND @items; if($null -ne $LASTEXITCODE){exit $LASTEXITCODE}'
-                    $launchArguments = @('-NoProfile','-NonInteractive','-Command',$dispatch)
-                }
+                $childEnvironment['STANDARD_VALIDATION_WRAPPER_COMMAND'] = [string]$commandPath
+                $childEnvironment['STANDARD_VALIDATION_WRAPPER_ARGUMENTS'] = [string](ConvertTo-Json -InputObject ([string[]]$Arguments) -Compress)
+                # Fixed code, arguments passed as data. Restore the previous
+                # bootstrap's Stop preference and explicit native exit status.
+                $dispatch = '$ErrorActionPreference="Stop"; $items=@(ConvertFrom-Json -InputObject $env:STANDARD_VALIDATION_WRAPPER_ARGUMENTS); & $env:STANDARD_VALIDATION_WRAPPER_COMMAND @items; if($null -ne $LASTEXITCODE){exit ([int]$LASTEXITCODE)}; exit 0'
+                $launchArguments = @('-NoProfile','-NonInteractive','-Command',$dispatch)
                 $commandPath = $hostPath
             }
             if ($IsWindows -and [IO.Path]::GetFileName($commandPath) -in @('pwsh.exe','powershell.exe')) {
                 $launchArguments = @('-ExecutionPolicy','Bypass') + $launchArguments
             }
+            $phase = 'verify-executable-binding'
+            if ((Resolve-StandardValidationPhysicalCommandPath -Path $originalCommandPath) -cne $resolvedCommandPath -or
+                (Resolve-StandardValidationPhysicalCommandPath -Path $executableRequestedPath) -cne $commandPath) {
+                throw 'The command path binding changed after leasing.'
+            }
+            Assert-PlatformFileIdentity -Lease $commandLease -Expected $commandLease.Observation -SingleLink | Out-Null
             $phase = 'start-owned-process'
             $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
             $lease = Start-PlatformOwnedProcess -ExecutableLease $executable -ArgumentList $launchArguments -Environment $childEnvironment `
@@ -3173,6 +3217,7 @@ function Invoke-StandardValidationProcess {
         outputQuotaExceeded = $quota
         outputQuotaDiagnostic = $(if ($quota) { "Owned validator output capture quota exceeded (limit=$($script:StandardValidationChildOutputQuotaCharacters) characters per stream)." } else { $null })
         processOwnership = [pscustomobject][ordered]@{
+            commandPath = $originalCommandPath; resolvedCommandPath = $resolvedCommandPath
             processId = $processId; startIdentity = $identity; isolation = $isolation
             isolationLevel = $(if ($null -eq $isolation) { $null } elseif ($isolation -ceq 'windows-job-object') { 'strong' } else { 'cooperative' })
             limitations = $limits; terminationReason = $reason; cleanup = $cleanup; runtime = $binding

@@ -34,6 +34,9 @@
       "Stop-PlatformOwnedProcess"
     ],
     "receipt": "processOwnership",
+    "commandBinding": ["commandPath", "resolvedCommandPath"],
+    "executableResolution": "resolve-links-then-no-follow-lease-and-revalidate-identity",
+    "scriptFailurePolicy": "stop-on-error-and-propagate-last-native-exit-code",
     "runtimeBinding": [
       "apiVersion",
       "manifestSha256",
