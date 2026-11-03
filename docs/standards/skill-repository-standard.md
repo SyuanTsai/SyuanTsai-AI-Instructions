@@ -502,6 +502,8 @@ Dedicated source repository **MUST** 以上述完整 active source inventory 作
 
 Linux／macOS child process **MUST NOT** 配置互動終端。Validation evidence **MUST** 標明實際隔離能力，例如 `windows-job-object`、`linux-process-group-subreaper`、`linux-pid-namespace`、`macos-process-group`，**MUST NOT** 只寫 `unix` 或宣稱未提供的能力。若工作要求不可逃逸的強隔離，**MUST** 使用外部 sandbox；process group／session 本身不得宣稱具備此保證。
 
+中央 validator 的 Core 與完整 lifecycle **MUST** 共用 P2 file／lock lease 與 P3 owned-process primitives。每次實際 dispatch 的 `processOwnership` **MUST** 記錄 PID start identity、實際 `isolation`、`isolationLevel`、`limitations`、`terminationReason`、完整 cleanup receipt 與 runtime binding（API version、經 entry point trust pin 驗證的 manifest SHA-256、host PowerShell version）。Windows Job 為 `strong`；目前 Linux process-group/subreaper 與 macOS process-group 為 `cooperative`，不得由 OS 名稱推論更強能力。尚未啟動時 identity／isolation／cleanup 可為 null，不能偽造成功的 process receipt。Cleanup 必須同時確認 owned processes 已終止、capture readers 已停止、capture resources 已關閉、無 remaining PID 與 uncertainty；任一項不確定皆 **MUST** fail closed。A1 的同帳號惡意並行寫入者不在防護範圍內，以及不提供 filesystem isolation，**MUST** 列於 limitations。舊 evidence 可供歷史閱讀；只有具有上述 binding 的新 dispatch 才能聲稱使用共用平台 runtime。
+
 ## 9. SkillSpector Static Security Gate
 
 ### 9.1 Required stage

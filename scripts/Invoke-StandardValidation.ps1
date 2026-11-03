@@ -101,7 +101,6 @@ $script:StandardValidationLastEvent = $null
 $script:StandardValidationAuthorityEvidence = $null
 $script:StandardValidationLaunchBinding = $null
 $script:StandardValidationEvidenceArtifactLedger = New-Object 'System.Collections.Generic.List[object]'
-$script:StandardValidationUnixPidNamespaceCapability = $null
 $script:StandardValidationMaxReceiptAgeMinutes = 15
 $script:StandardValidationChildOutputQuotaCharacters = 1048576
 $script:StandardValidationRepositoryRoot = Split-Path -Parent $PSScriptRoot
@@ -124,235 +123,6 @@ $script:StandardValidationToolRoleByAdapterSlot = [ordered]@{
     skillTools = 'skill-tools'
     staticAnalyzer = 'skillspector'
     repositoryTests = 'pester'
-}
-
-if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-    if ($null -eq ('StandardValidationProcessControlNative' -as [type])) {
-        Add-Type -TypeDefinition @'
-using System;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
-
-public static class StandardValidationProcessControlNative
-{
-    private const uint JobObjectLimitKillOnJobClose = 0x00002000;
-    private const int JobObjectExtendedLimitInformationClass = 9;
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct JobObjectBasicLimitInformation
-    {
-        public long PerProcessUserTimeLimit;
-        public long PerJobUserTimeLimit;
-        public uint LimitFlags;
-        public UIntPtr MinimumWorkingSetSize;
-        public UIntPtr MaximumWorkingSetSize;
-        public uint ActiveProcessLimit;
-        public UIntPtr Affinity;
-        public uint PriorityClass;
-        public uint SchedulingClass;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct IoCounters
-    {
-        public ulong ReadOperationCount;
-        public ulong WriteOperationCount;
-        public ulong OtherOperationCount;
-        public ulong ReadTransferCount;
-        public ulong WriteTransferCount;
-        public ulong OtherTransferCount;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct JobObjectExtendedLimitInformation
-    {
-        public JobObjectBasicLimitInformation BasicLimitInformation;
-        public IoCounters IoInfo;
-        public UIntPtr ProcessMemoryLimit;
-        public UIntPtr PeakProcessMemoryUsed;
-        public UIntPtr JobMemoryLimit;
-        public UIntPtr PeakJobMemoryUsed;
-    }
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr CreateJobObject(IntPtr jobAttributes, string name);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetInformationJobObject(
-        IntPtr job,
-        int informationClass,
-        ref JobObjectExtendedLimitInformation information,
-        uint informationLength);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool CloseHandle(IntPtr handle);
-
-    [DllImport("libc", SetLastError = true)]
-    private static extern int kill(int processId, int signal);
-
-    [DllImport("libc", SetLastError = true)]
-    private static extern int getpgid(int processId);
-
-    public static IntPtr CreateKillOnCloseJob()
-    {
-        IntPtr job = CreateJobObject(IntPtr.Zero, null);
-        if (job == IntPtr.Zero)
-        {
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateJobObject failed.");
-        }
-        JobObjectExtendedLimitInformation information = new JobObjectExtendedLimitInformation();
-        information.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
-        if (!SetInformationJobObject(
-            job,
-            JobObjectExtendedLimitInformationClass,
-            ref information,
-            (uint)Marshal.SizeOf(typeof(JobObjectExtendedLimitInformation))))
-        {
-            int error = Marshal.GetLastWin32Error();
-            CloseHandle(job);
-            throw new Win32Exception(error, "SetInformationJobObject failed.");
-        }
-        return job;
-    }
-
-    public static bool TryAssignProcessToJobObject(IntPtr job, IntPtr process)
-    {
-        return AssignProcessToJobObject(job, process);
-    }
-
-    public static bool TryTerminateJobObject(IntPtr job, uint exitCode)
-    {
-        return TerminateJobObject(job, exitCode);
-    }
-
-    public static bool TryCloseHandle(IntPtr handle)
-    {
-        return CloseHandle(handle);
-    }
-
-    public static int GetProcessGroupId(int processId)
-    {
-        return getpgid(processId);
-    }
-
-    public static bool TryKillProcessGroup(int processGroupId, int signal)
-    {
-        return kill(-processGroupId, signal) == 0;
-    }
-
-    public static bool IsProcessGroupAlive(int processGroupId)
-    {
-        int result = kill(-processGroupId, 0);
-        if (result == 0) return true;
-        return Marshal.GetLastWin32Error() != 3; // ESRCH means the group is gone.
-    }
-}
-'@
-    }
-}
-elseif ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
-    if ($null -eq ('StandardValidationUnixProcessControlNative' -as [type])) {
-        Add-Type -TypeDefinition @'
-using System;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
-
-public static class StandardValidationUnixProcessControlNative
-{
-    private const int PrSetChildSubreaper = 36;
-    private const int WaitNoHang = 1;
-
-    [DllImport("libc", SetLastError = true)]
-    private static extern int prctl(int option, ulong arg2, ulong arg3, ulong arg4, ulong arg5);
-
-    [DllImport("libc", SetLastError = true)]
-    private static extern int waitpid(int processId, out int status, int options);
-
-    public static void SetChildSubreaper()
-    {
-        if (prctl(PrSetChildSubreaper, 1, 0, 0, 0) != 0)
-        {
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "prctl(PR_SET_CHILD_SUBREAPER) failed.");
-        }
-    }
-
-    public static bool TryReapProcess(int processId)
-    {
-        int status;
-        int result = waitpid(processId, out status, WaitNoHang);
-        if (result == processId) return true;
-        if (result == 0) return false;
-        int error = Marshal.GetLastWin32Error();
-        if (error == 3 || error == 10) return false; // ESRCH/ECHILD: no owned child remains.
-        throw new Win32Exception(error, "waitpid failed while reaping an owned Unix child.");
-    }
-}
-'@
-    }
-}
-
-if ($null -eq ('StandardValidationBoundedCapture' -as [type])) {
-    Add-Type -TypeDefinition @'
-using System;
-using System.IO;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
-
-public sealed class StandardValidationBoundedCaptureResult
-{
-    public string Text { get; private set; }
-    public bool Exceeded { get; private set; }
-    public int CharacterCount { get; private set; }
-
-    public StandardValidationBoundedCaptureResult(string text, bool exceeded, int characterCount)
-    {
-        Text = text;
-        Exceeded = exceeded;
-        CharacterCount = characterCount;
-    }
-}
-
-public static class StandardValidationBoundedCapture
-{
-    public static Task<StandardValidationBoundedCaptureResult> Start(StreamReader reader, int quota)
-    {
-        if (reader == null) throw new ArgumentNullException("reader");
-        if (quota < 1) throw new ArgumentOutOfRangeException("quota");
-        return Task.Factory.StartNew(
-            () => Read(reader, quota),
-            CancellationToken.None,
-            TaskCreationOptions.LongRunning,
-            TaskScheduler.Default);
-    }
-
-    private static StandardValidationBoundedCaptureResult Read(StreamReader reader, int quota)
-    {
-        var builder = new StringBuilder(Math.Min(quota, 4096));
-        var buffer = new char[4096];
-        var count = 0;
-        while (true)
-        {
-            var read = reader.Read(buffer, 0, buffer.Length);
-            if (read == 0) return new StandardValidationBoundedCaptureResult(builder.ToString(), false, count);
-            var remaining = quota - count;
-            if (read > remaining)
-            {
-                if (remaining > 0) builder.Append(buffer, 0, remaining);
-                return new StandardValidationBoundedCaptureResult(builder.ToString(), true, quota);
-            }
-            builder.Append(buffer, 0, read);
-            count += read;
-        }
-    }
-}
-'@
 }
 
 function Get-StandardValidationProperty {
@@ -551,7 +321,12 @@ function Assert-StandardValidationSourceRepository {
 function Get-StandardValidationFullPath {
     param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Context)
 
-    try { return [System.IO.Path]::GetFullPath($Path) }
+    try {
+        $provider = $null; $drive = $null
+        $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path,[ref]$provider,[ref]$drive)
+        if ($provider.Name -cne 'FileSystem') { throw 'A filesystem path is required.' }
+        return $full
+    }
     catch { throw "INVALID|$Context is not a valid path: $($_.Exception.Message)" }
 }
 
@@ -3051,22 +2826,8 @@ function Complete-StandardValidationStage {
     $Stage.endedAt = (Get-Date).ToUniversalTime().ToString('o')
 }
 
-function ConvertTo-StandardValidationProcessArguments {
-    param([Parameter(Mandatory = $true)][string[]] $Arguments)
-
-    $quoted = @()
-    foreach ($argument in $Arguments) {
-        if ($argument -notmatch '[\s"]' -and $argument.Length -gt 0) {
-            $quoted += $argument
-            continue
-        }
-        $escaped = $argument -replace '(\\*)"', '$1$1\"'
-        $escaped = $escaped -replace '(\\+)$', '$1$1'
-        $quoted += ('"' + $escaped + '"')
-    }
-    return ($quoted -join ' ')
-}
-
+# Retained read-only Windows diagnostic for existing birth-graph consumers.
+# Runtime ownership and termination never use this snapshot; P3 owns both.
 function Get-StandardValidationDescendantProcessIds {
     param([Parameter(Mandatory = $true)][int] $RootProcessId)
 
@@ -3089,19 +2850,6 @@ function Get-StandardValidationDescendantProcessIds {
                 })
         }
         catch { $relations = @() }
-    }
-    elseif (Test-Path -LiteralPath '/proc' -PathType Container) {
-        foreach ($directory in @(Get-ChildItem -LiteralPath '/proc' -Directory -ErrorAction SilentlyContinue)) {
-            if ($directory.Name -notmatch '^[0-9]+$') { continue }
-            $statPath = Join-Path $directory.FullName 'stat'
-            try {
-                $stat = [IO.File]::ReadAllText($statPath)
-                if ($stat -match '^\s*(?<pid>[0-9]+)\s+\(.*\)\s+\S\s+(?<ppid>[0-9]+)\s+') {
-                    $relations += [pscustomobject]@{ ProcessId = [int]$Matches.pid; ParentProcessId = [int]$Matches.ppid }
-                }
-            }
-            catch { }
-        }
     }
     $childrenByParent = @{}
     $windowsBirths = @{}
@@ -3134,484 +2882,6 @@ function Get-StandardValidationDescendantProcessIds {
     return @($result.ToArray())
 }
 
-function Get-StandardValidationUnixKillCommand {
-    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) { return $null }
-    foreach ($candidate in @('/usr/bin/kill', '/bin/kill')) {
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-            $item = Get-Item -Force -LiteralPath $candidate -ErrorAction Stop
-            if (-not $item.PSIsContainer -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
-                return [string]$item.FullName
-            }
-        }
-    }
-    return $null
-}
-
-function Get-StandardValidationUnixProcessGroupId {
-    param([Parameter(Mandatory = $true)][int] $ProcessId)
-
-    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) { return 0 }
-    $statPath = Join-Path '/proc' (Join-Path ([string]$ProcessId) 'stat')
-    if (-not [IO.File]::Exists($statPath)) { return -1 }
-    try {
-        $stat = [IO.File]::ReadAllText($statPath)
-        # /proc/[pid]/stat fields are: pid, comm, state, ppid, pgrp, ... .
-        # The comm field may contain spaces and closing parentheses, so the
-        # greedy match intentionally ends at the final closing parenthesis.
-        if ($stat -match '^\s*[0-9]+\s+\(.*\)\s+\S\s+[0-9]+\s+(?<pgrp>[0-9]+)\s+') {
-            return [int]$Matches.pgrp
-        }
-    }
-    catch { }
-    return -1
-}
-
-function Test-StandardValidationUnixProcessGroupAlive {
-    param([Parameter(Mandatory = $true)][int] $ProcessGroupId)
-
-    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) { return $false }
-    if ($ProcessGroupId -le 0) { return $false }
-    if (-not (Test-Path -LiteralPath '/proc' -PathType Container)) {
-        throw 'The Unix /proc process table is unavailable for owned process-group cleanup.'
-    }
-    foreach ($directory in @(Get-ChildItem -LiteralPath '/proc' -Directory -ErrorAction Stop)) {
-        if ($directory.Name -notmatch '^[0-9]+$') { continue }
-        try {
-            if ((Get-StandardValidationUnixProcessGroupId -ProcessId ([int]$directory.Name)) -eq $ProcessGroupId) {
-                return $true
-            }
-        }
-        catch { }
-    }
-    return $false
-}
-
-function Invoke-StandardValidationUnixProcessGroupSignal {
-    param(
-        [Parameter(Mandatory = $true)][int] $ProcessGroupId,
-        [Parameter(Mandatory = $true)][int] $Signal
-    )
-
-    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix) { return $false }
-    $killCommand = Get-StandardValidationUnixKillCommand
-    if ([string]::IsNullOrWhiteSpace([string]$killCommand)) {
-        throw 'No trusted kill launcher is available for an owned Unix process group.'
-    }
-    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $startInfo.FileName = $killCommand
-    $startInfo.Arguments = ConvertTo-StandardValidationProcessArguments -Arguments @(
-        "-$Signal", '--', "-$ProcessGroupId"
-    )
-    $startInfo.WorkingDirectory = '/'
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-    $startInfo.EnvironmentVariables.Clear()
-    $signalProcess = New-Object System.Diagnostics.Process
-    $signalProcess.StartInfo = $startInfo
-    try {
-        if (-not $signalProcess.Start()) { return $false }
-        [void]$signalProcess.WaitForExit(1000)
-        if (-not $signalProcess.HasExited) {
-            try { [void]$signalProcess.Kill() } catch { }
-            return $false
-        }
-        return ([int]$signalProcess.ExitCode -eq 0)
-    }
-    finally { $signalProcess.Dispose() }
-}
-
-function Stop-StandardValidationProcessTree {
-    param(
-        [Parameter(Mandatory = $true)][int] $RootProcessId,
-        [System.Diagnostics.Process] $RootProcess,
-        [int[]] $KnownProcessIds = @(),
-        [int] $ProcessGroupId = 0,
-        [IntPtr] $JobHandle = [IntPtr]::Zero,
-        [Parameter(Mandatory = $true)][int] $WaitMilliseconds,
-        [string] $PidNamespaceId,
-        [bool] $PidNamespaceRequired = $false,
-        [int] $SubreaperProcessId = 0,
-        [bool] $SubreaperRequired = $false,
-        [bool] $CancellationRequested = $false
-    )
-
-    $svCleanupTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'child-cleanup' -Aggregate -Silent:(-not $script:StandardValidationTimingEnabled)
-    $svCleanupTiming.calls = 1
-    $svCleanupState = 'failed'
-    try {
-    $known = New-Object 'System.Collections.Generic.HashSet[int]'
-    [void]$known.Add($RootProcessId)
-    foreach ($processId in @($KnownProcessIds)) { [void]$known.Add([int]$processId) }
-    foreach ($processId in @(Get-StandardValidationDescendantProcessIds -RootProcessId $RootProcessId)) { [void]$known.Add([int]$processId) }
-    $cleanupAttempted = $false
-    $windowsJobTerminationSucceeded = ($JobHandle -eq [IntPtr]::Zero)
-    $pidNamespaceLookupFailed = $false
-    $pidNamespaceProcessIds = @()
-    if ($PidNamespaceRequired -and [string]::IsNullOrWhiteSpace($PidNamespaceId)) {
-        $pidNamespaceLookupFailed = $true
-    }
-    elseif (-not [string]::IsNullOrWhiteSpace($PidNamespaceId)) {
-        try { $pidNamespaceProcessIds = @(Get-StandardValidationUnixPidNamespaceProcessIds -NamespaceId $PidNamespaceId) }
-        catch { $pidNamespaceLookupFailed = $true }
-    }
-    foreach ($processId in @($pidNamespaceProcessIds | Where-Object { $_ -ne $RootProcessId })) {
-        try {
-            $child = [System.Diagnostics.Process]::GetProcessById([int]$processId)
-            try { $child.Kill(); $cleanupAttempted = $true } finally { $child.Dispose() }
-        }
-        catch { }
-    }
-    $subreaperLookupFailed = $false
-    $subreaperProcessIds = @()
-    if ($SubreaperRequired -and $SubreaperProcessId -le 0) {
-        $subreaperLookupFailed = $true
-    }
-    elseif ($SubreaperProcessId -gt 0) {
-        try {
-            if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix -and
-                -not (Test-Path -LiteralPath '/proc' -PathType Container)) {
-                throw 'The Unix /proc process table is unavailable for subreaper cleanup.'
-            }
-            $subreaperProcessIds = @(Get-StandardValidationDescendantProcessIds -RootProcessId $SubreaperProcessId)
-        }
-        catch { $subreaperLookupFailed = $true }
-    }
-    foreach ($processId in @($subreaperProcessIds | Where-Object { $_ -ne $RootProcessId -and $_ -ne $SubreaperProcessId })) {
-        try {
-            $child = [System.Diagnostics.Process]::GetProcessById([int]$processId)
-            try { $child.Kill(); $cleanupAttempted = $true } finally { $child.Dispose() }
-        }
-        catch { }
-        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
-            try { [StandardValidationUnixProcessControlNative]::TryReapProcess([int]$processId) } catch { }
-        }
-    }
-    if ($JobHandle -ne [IntPtr]::Zero) {
-        try {
-            if ([StandardValidationProcessControlNative]::TryTerminateJobObject($JobHandle, 1)) {
-                $cleanupAttempted = $true
-                $windowsJobTerminationSucceeded = $true
-            }
-        }
-        catch { }
-    }
-    if ($ProcessGroupId -gt 0) {
-        try {
-            $groupSignalSent = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
-                Invoke-StandardValidationUnixProcessGroupSignal -ProcessGroupId $ProcessGroupId -Signal 9
-            }
-            else {
-                [StandardValidationProcessControlNative]::TryKillProcessGroup($ProcessGroupId, 9)
-            }
-            if ($groupSignalSent) {
-                $cleanupAttempted = $true
-            }
-        }
-        catch { }
-    }
-    try {
-        if ($null -ne $RootProcess) {
-            try {
-                if (-not $RootProcess.HasExited) {
-                    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $RootProcess.Kill() }
-                    else { $RootProcess.Kill($true) }
-                    $cleanupAttempted = $true
-                }
-            }
-            catch {
-                try { if (-not $RootProcess.HasExited) { $RootProcess.Kill(); $cleanupAttempted = $true } } catch { }
-            }
-        }
-    }
-    catch { }
-    # A Windows Job Object owns descendants even after reparenting. Retained
-    # numeric PIDs are diagnostic only and may have been reused outside it.
-    foreach ($processId in @($known | Where-Object { $_ -ne $RootProcessId -and $JobHandle -eq [IntPtr]::Zero } | Sort-Object -Descending)) {
-        try {
-            $child = [System.Diagnostics.Process]::GetProcessById([int]$processId)
-            try { $child.Kill(); $cleanupAttempted = $true } finally { $child.Dispose() }
-        }
-        catch { }
-    }
-    if ($null -ne $RootProcess) { try { [void]$RootProcess.WaitForExit([Math]::Max(0, $WaitMilliseconds)) } catch { } }
-    $deadline = (Get-Date).AddMilliseconds([Math]::Max(0, $WaitMilliseconds))
-    do {
-        $remaining = @(Get-StandardValidationDescendantProcessIds -RootProcessId $RootProcessId)
-        foreach ($processId in @($remaining | Where-Object { $JobHandle -eq [IntPtr]::Zero })) {
-            try {
-                $child = [System.Diagnostics.Process]::GetProcessById([int]$processId)
-                try { $child.Kill(); $cleanupAttempted = $true } finally { $child.Dispose() }
-            }
-            catch { }
-        }
-        if ($PidNamespaceRequired -or -not [string]::IsNullOrWhiteSpace($PidNamespaceId)) {
-            try { $pidNamespaceProcessIds = @(Get-StandardValidationUnixPidNamespaceProcessIds -NamespaceId $PidNamespaceId) }
-            catch { $pidNamespaceLookupFailed = $true; $pidNamespaceProcessIds = @() }
-            foreach ($processId in @($pidNamespaceProcessIds | Where-Object { $_ -ne $RootProcessId })) {
-                try {
-                    $child = [System.Diagnostics.Process]::GetProcessById([int]$processId)
-                    try { $child.Kill(); $cleanupAttempted = $true } finally { $child.Dispose() }
-                }
-                catch { }
-            }
-        }
-        if ($SubreaperRequired -or $SubreaperProcessId -gt 0) {
-            try {
-                if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix -and
-                    -not (Test-Path -LiteralPath '/proc' -PathType Container)) {
-                    throw 'The Unix /proc process table is unavailable for subreaper cleanup.'
-                }
-                $subreaperProcessIds = @(Get-StandardValidationDescendantProcessIds -RootProcessId $SubreaperProcessId)
-            }
-            catch { $subreaperLookupFailed = $true; $subreaperProcessIds = @() }
-            foreach ($processId in @($subreaperProcessIds | Where-Object { $_ -ne $RootProcessId -and $_ -ne $SubreaperProcessId })) {
-                try {
-                    $child = [System.Diagnostics.Process]::GetProcessById([int]$processId)
-                    try { $child.Kill(); $cleanupAttempted = $true } finally { $child.Dispose() }
-                }
-                catch { }
-                if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
-                    try { [StandardValidationUnixProcessControlNative]::TryReapProcess([int]$processId) } catch { }
-                }
-            }
-        }
-        $rootAlive = $false
-        if ($null -ne $RootProcess) { try { $rootAlive = -not $RootProcess.HasExited } catch { } }
-        $processGroupAlive = $false
-        if ($ProcessGroupId -gt 0) {
-            try {
-                $processGroupAlive = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
-                    Test-StandardValidationUnixProcessGroupAlive -ProcessGroupId $ProcessGroupId
-                }
-                else {
-                    [StandardValidationProcessControlNative]::IsProcessGroupAlive($ProcessGroupId)
-                }
-            }
-            catch { $processGroupAlive = $true }
-        }
-        if ($windowsJobTerminationSucceeded -and -not $rootAlive -and $remaining.Count -eq 0 -and -not $processGroupAlive -and
-            -not $pidNamespaceLookupFailed -and $pidNamespaceProcessIds.Count -eq 0 -and
-            -not $subreaperLookupFailed -and $subreaperProcessIds.Count -eq 0) {
-            $svCleanupState = if ($CancellationRequested) { 'cancelled' } else { 'completed' }
-            return $true
-        }
-        if ((Get-Date) -ge $deadline) { break }
-        Start-Sleep -Milliseconds 50
-    } while ($true)
-    $remaining = @(Get-StandardValidationDescendantProcessIds -RootProcessId $RootProcessId)
-    $rootAlive = $false
-    if ($null -ne $RootProcess) { try { $rootAlive = -not $RootProcess.HasExited } catch { } }
-    $processGroupAlive = $false
-    if ($ProcessGroupId -gt 0) {
-        try {
-            $processGroupAlive = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
-                Test-StandardValidationUnixProcessGroupAlive -ProcessGroupId $ProcessGroupId
-            }
-            else {
-                [StandardValidationProcessControlNative]::IsProcessGroupAlive($ProcessGroupId)
-            }
-        }
-        catch { $processGroupAlive = $true }
-    }
-    if ($PidNamespaceRequired -or -not [string]::IsNullOrWhiteSpace($PidNamespaceId)) {
-        try { $pidNamespaceProcessIds = @(Get-StandardValidationUnixPidNamespaceProcessIds -NamespaceId $PidNamespaceId) }
-        catch { $pidNamespaceLookupFailed = $true; $pidNamespaceProcessIds = @() }
-    }
-    if ($SubreaperRequired -or $SubreaperProcessId -gt 0) {
-        try {
-            if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix -and
-                -not (Test-Path -LiteralPath '/proc' -PathType Container)) {
-                throw 'The Unix /proc process table is unavailable for subreaper cleanup.'
-            }
-            $subreaperProcessIds = @(Get-StandardValidationDescendantProcessIds -RootProcessId $SubreaperProcessId)
-        }
-        catch { $subreaperLookupFailed = $true; $subreaperProcessIds = @() }
-        foreach ($processId in @($subreaperProcessIds | Where-Object { $_ -ne $RootProcessId -and $_ -ne $SubreaperProcessId })) {
-            try {
-                $child = [System.Diagnostics.Process]::GetProcessById([int]$processId)
-                try { $child.Kill(); $cleanupAttempted = $true } finally { $child.Dispose() }
-            }
-            catch { }
-            if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
-                try { [StandardValidationUnixProcessControlNative]::TryReapProcess([int]$processId) } catch { }
-            }
-        }
-    }
-    $svCleanupSucceeded = ($windowsJobTerminationSucceeded -and -not $rootAlive -and $remaining.Count -eq 0 -and -not $processGroupAlive -and
-        -not $pidNamespaceLookupFailed -and $pidNamespaceProcessIds.Count -eq 0 -and
-        -not $subreaperLookupFailed -and $subreaperProcessIds.Count -eq 0)
-    if ($svCleanupSucceeded) { $svCleanupState = if ($CancellationRequested) { 'cancelled' } else { 'completed' } }
-    return $svCleanupSucceeded
-    }
-    catch {
-        $svCleanupState = 'failed'
-        throw
-    }
-    finally {
-        $svCleanupTiming.ticks += $svCleanupTiming.watch.ElapsedTicks
-        Complete-StandardValidationPhase -Timing $svCleanupTiming -State $svCleanupState
-    }
-}
-
-function Get-StandardValidationUnixProcessGroupLauncher {
-    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { return $null }
-    foreach ($candidate in @('/usr/bin/setsid', '/bin/setsid')) {
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-            $item = Get-Item -Force -LiteralPath $candidate -ErrorAction Stop
-            if (-not $item.PSIsContainer -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
-                return [string]$item.FullName
-            }
-        }
-    }
-    return $null
-}
-
-function Get-StandardValidationUnixPidNamespaceLauncher {
-    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { return $null }
-    foreach ($candidate in @('/usr/bin/unshare', '/bin/unshare')) {
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-            $item = Get-Item -Force -LiteralPath $candidate -ErrorAction Stop
-            if (-not $item.PSIsContainer -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
-                return [string]$item.FullName
-            }
-        }
-    }
-    return $null
-}
-
-function Get-StandardValidationUnixTrueLauncher {
-    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { return $null }
-    foreach ($candidate in @('/usr/bin/true', '/bin/true')) {
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-            $item = Get-Item -Force -LiteralPath $candidate -ErrorAction Stop
-            if (-not $item.PSIsContainer -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
-                return [string]$item.FullName
-            }
-        }
-    }
-    return $null
-}
-
-function Test-StandardValidationUnixPidNamespaceCapability {
-    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { return $false }
-    if ($null -ne $script:StandardValidationUnixPidNamespaceCapability) {
-        return [bool]$script:StandardValidationUnixPidNamespaceCapability
-    }
-    $script:StandardValidationUnixPidNamespaceCapability = $false
-    try {
-        $unshare = Get-StandardValidationUnixPidNamespaceLauncher
-        $trueCommand = Get-StandardValidationUnixTrueLauncher
-        if ([string]::IsNullOrWhiteSpace([string]$unshare) -or [string]::IsNullOrWhiteSpace([string]$trueCommand)) {
-            return $false
-        }
-        $probeInfo = New-Object System.Diagnostics.ProcessStartInfo
-        $probeInfo.FileName = $unshare
-        $probeInfo.Arguments = ConvertTo-StandardValidationProcessArguments -Arguments @(
-            '--user', '--map-root-user', '--pid', '--fork', '--kill-child=SIGKILL', '--', $trueCommand
-        )
-        $probeInfo.WorkingDirectory = '/'
-        $probeInfo.UseShellExecute = $false
-        $probeInfo.CreateNoWindow = $true
-        $probeInfo.RedirectStandardOutput = $true
-        $probeInfo.RedirectStandardError = $true
-        $probeInfo.EnvironmentVariables.Clear()
-        $probe = New-Object System.Diagnostics.Process
-        $probe.StartInfo = $probeInfo
-        try {
-            if (-not $probe.Start()) { return $false }
-            [void]$probe.WaitForExit(3000)
-            if (-not $probe.HasExited) {
-                try { [void]$probe.Kill($true) } catch { try { [void]$probe.Kill() } catch { } }
-                return $false
-            }
-            $script:StandardValidationUnixPidNamespaceCapability = [int]$probe.ExitCode -eq 0
-        }
-        finally { $probe.Dispose() }
-    }
-    catch { $script:StandardValidationUnixPidNamespaceCapability = $false }
-    return [bool]$script:StandardValidationUnixPidNamespaceCapability
-}
-
-function Get-StandardValidationUnixPidNamespaceIdentity {
-    param([Parameter(Mandatory = $true)][int] $ProcessId)
-
-    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { return $null }
-    $namespacePath = Join-Path '/proc' (Join-Path ([string]$ProcessId) 'ns/pid')
-    try {
-        $item = Get-Item -Force -LiteralPath $namespacePath -ErrorAction Stop
-        $target = Get-StandardValidationSymlinkTarget -Item $item -Context "Unix PID namespace for process $ProcessId"
-        if ($target -match '^pid:\[(?<id>[0-9]+)\]$') { return [string]$Matches.id }
-    }
-    catch { }
-    return $null
-}
-
-function Get-StandardValidationUnixPidNamespaceProcessIds {
-    param([Parameter(Mandatory = $true)][string] $NamespaceId)
-
-    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { return @() }
-    if ([string]::IsNullOrWhiteSpace($NamespaceId)) { throw 'A Unix PID namespace identity is required for process containment.' }
-    if (-not (Test-Path -LiteralPath '/proc' -PathType Container)) {
-        throw 'The Unix /proc process table is unavailable for PID namespace cleanup.'
-    }
-    $result = New-Object 'System.Collections.Generic.List[int]'
-    foreach ($directory in @(Get-ChildItem -LiteralPath '/proc' -Directory -ErrorAction Stop)) {
-        if ($directory.Name -notmatch '^[0-9]+$') { continue }
-        $identity = Get-StandardValidationUnixPidNamespaceIdentity -ProcessId ([int]$directory.Name)
-        if ([string]$identity -ceq $NamespaceId) { [void]$result.Add([int]$directory.Name) }
-    }
-    return @($result.ToArray())
-}
-
-function Get-StandardValidationWindowsBootstrapHost {
-    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return $null }
-    $hostName = if ([string]$PSVersionTable.PSEdition -ceq 'Desktop') { 'powershell.exe' } else { 'pwsh.exe' }
-    if ([string]::IsNullOrWhiteSpace([string]$PSHOME)) {
-        throw 'The current PowerShell host path is unavailable for owned Windows process bootstrap.'
-    }
-    $hostPath = Get-StandardValidationFullPath -Path (Join-Path $PSHOME $hostName) -Context 'Windows process bootstrap host'
-    Assert-StandardValidationRegularFile -Path $hostPath -Context 'Windows process bootstrap host'
-    return $hostPath
-}
-
-function Get-StandardValidationUnixBootstrapHost {
-    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { return $null }
-    if ([string]::IsNullOrWhiteSpace([string]$PSHOME)) {
-        throw 'The current PowerShell host path is unavailable for owned Unix process bootstrap.'
-    }
-    $hostPath = Get-StandardValidationFullPath -Path (Join-Path $PSHOME 'pwsh') -Context 'Unix process bootstrap host'
-    Assert-StandardValidationRegularFile -Path $hostPath -Context 'Unix process bootstrap host'
-    return $hostPath
-}
-
-function Get-StandardValidationProcessBootstrapCode {
-    return @'
-$ErrorActionPreference = 'Stop'
-$targetCommand = [string]$env:STANDARD_VALIDATION_BOOTSTRAP_COMMAND
-$argumentJson = [string]$env:STANDARD_VALIDATION_BOOTSTRAP_ARGUMENTS
-$releasePath = [string]$env:STANDARD_VALIDATION_BOOTSTRAP_RELEASE_PATH
-if ([string]::IsNullOrWhiteSpace($targetCommand) -or [string]::IsNullOrWhiteSpace($releasePath)) {
-    throw 'Owned validation process bootstrap received incomplete target metadata.'
-}
-$targetArguments = @()
-if (-not [string]::IsNullOrWhiteSpace($argumentJson)) {
-    $parsedArguments = ConvertFrom-Json -InputObject $argumentJson
-    if ($null -ne $parsedArguments) {
-        foreach ($item in @($parsedArguments)) {
-            if ($item -isnot [string]) { throw 'Owned validation process bootstrap arguments must be strings.' }
-            $targetArguments += [string]$item
-        }
-    }
-}
-while (-not [IO.File]::Exists($releasePath)) { Start-Sleep -Milliseconds 10 }
-& $targetCommand @targetArguments
-if ($null -eq $LASTEXITCODE) { exit 0 }
-exit ([int]$LASTEXITCODE)
-'@
-}
-
 function Get-StandardValidationChildEnvironment {
     param([Parameter(Mandatory = $true)][hashtable] $Environment)
 
@@ -3629,7 +2899,8 @@ function Get-StandardValidationChildEnvironment {
         'APPDATA', 'LOCALAPPDATA', 'LANG', 'LC_ALL', 'LC_CTYPE', 'DOTNET_ROOT',
         'DOTNET_ROOT_X64', 'XDG_RUNTIME_DIR', 'PSExecutionPolicyPreference'
     )
-    $childEnvironment = [ordered]@{}
+    $comparer = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [StringComparer]::OrdinalIgnoreCase } else { [StringComparer]::Ordinal }
+    $childEnvironment = [Collections.Generic.Dictionary[string,string]]::new($comparer)
     foreach ($name in $safeInheritedNames) {
         $value = [Environment]::GetEnvironmentVariable($name, 'Process')
         if ($null -ne $value) { $childEnvironment[$name] = [string]$value }
@@ -3671,10 +2942,94 @@ function Merge-StandardValidationProcessStderr {
     return $existingPrefix + $separator + $capturedText.Substring(0, $capturedLength)
 }
 
+function Initialize-StandardValidationPlatformRuntime {
+    if ($null -ne (Get-Variable StandardValidationPlatformBinding -Scope Script -ErrorAction SilentlyContinue)) { return }
+    $manifestPath = Join-Path $PSScriptRoot 'platform-runtime.psd1'
+    $pin = '805f398cbdb93ca52a80d0c7d5abce2b75d6448eecbddbb7462ddfcf8e8e8976'
+    $canonicalHash = {
+        param([string]$Path)
+        $bytes = [IO.File]::ReadAllBytes($Path)
+        if ($bytes.Length -ge 3 -and $bytes[0] -eq 239 -and $bytes[1] -eq 187 -and $bytes[2] -eq 191) { throw 'INVALID|Runtime files must not have a BOM.' }
+        $utf8 = [Text.UTF8Encoding]::new($false,$true)
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { ([BitConverter]::ToString($sha.ComputeHash($utf8.GetBytes($utf8.GetString($bytes).Replace("`r`n","`n"))))).Replace('-','').ToLowerInvariant() }
+        finally { $sha.Dispose() }
+    }
+    # The reviewed runner owns this pin. Verify before importing executable code;
+    # same-account concurrent writers are the documented A1 limitation.
+    Assert-StandardValidationCanonicalRootPath -Path $manifestPath -Context 'platform runtime manifest' | Out-Null
+    if ((& $canonicalHash $manifestPath) -cne $pin) { throw 'INVALID|Untrusted platform runtime manifest.' }
+    $manifest = Import-PowerShellDataFile -LiteralPath $manifestPath
+    foreach ($entry in $manifest.PrivateData.PlatformRuntime.Inventory) {
+        $path = Join-Path $PSScriptRoot $entry.Path
+        Assert-StandardValidationCanonicalRootPath -Path $path -Context 'platform runtime inventory' | Out-Null
+        if ((& $canonicalHash $path) -cne $entry.Sha256) { throw "INVALID|Platform runtime inventory mismatch: $($entry.Path)" }
+    }
+    Import-Module -Name $manifestPath -Global -ErrorAction Stop
+    $script:StandardValidationPlatformBinding = [pscustomobject]@{
+        apiVersion = [string]$manifest.PrivateData.PlatformRuntime.ApiVersion
+        manifestSha256 = $pin
+        powerShellVersion = $PSVersionTable.PSVersion.ToString()
+    }
+}
+
+function Open-StandardValidationDirectory {
+    param([string]$Path, [switch]$Create)
+    Initialize-StandardValidationPlatformRuntime
+    $full = (Get-StandardValidationFullPath -Path $Path -Context 'platform directory').TrimEnd([IO.Path]::DirectorySeparatorChar)
+    $anchor = [IO.Path]::GetPathRoot($full)
+    Open-PlatformDirectory -Root $anchor -RelativePath $full.Substring($anchor.Length) -CreatePrivate:$Create
+}
+
+function Test-StandardValidationCleanupReceipt {
+    param($Receipt)
+    if ($null -eq $Receipt) { return $false }
+    foreach ($field in @('CleanedUp','CaptureReadersStopped','CaptureResourcesClosed')) {
+        $value = Get-StandardValidationProperty -Object $Receipt -Name $field
+        if ($value -isnot [bool] -or -not $value) { return $false }
+    }
+    $remaining = Get-StandardValidationProperty -Object $Receipt -Name 'RemainingPids'
+    $uncertainty = Get-StandardValidationProperty -Object $Receipt -Name 'Uncertainty'
+    return ($remaining -is [array] -and $remaining.Count -eq 0 -and
+        ($null -eq $uncertainty -or ($uncertainty -is [string] -and $uncertainty.Length -eq 0)))
+}
+
+function Stop-StandardValidationOwnedProcess {
+    param([Parameter(Mandatory = $true)]$Lease, [Parameter(Mandatory = $true)][string]$ExpectedStartIdentity, [switch]$CancellationRequested)
+    $timing = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'child-cleanup' -Silent:(-not $script:StandardValidationTimingEnabled)
+    $timing.calls = 1; $state = 'failed'
+    try {
+        $receipt = Stop-PlatformOwnedProcess -Lease $Lease -ExpectedStartIdentity $ExpectedStartIdentity -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(5))
+        if (Test-StandardValidationCleanupReceipt $receipt) { $state = if ($CancellationRequested) { 'cancelled' } else { 'completed' } }
+        return $receipt
+    } finally { Complete-StandardValidationPhase -Timing $timing -State $state }
+}
+
+function Assert-StandardValidationProcessOwnership {
+    param([Parameter(Mandatory = $true)]$Ownership, [switch]$Passed)
+    Assert-StandardValidationExactPropertySet -Object $Ownership -Expected @('processId','startIdentity','isolation','isolationLevel','limitations','terminationReason','cleanup','runtime') -Context 'process ownership'
+    if (-not (Test-StandardValidationIntegerRange -Value $Ownership.processId -Minimum 1 -Maximum ([int]::MaxValue))) { throw 'FAILED|Process PID is invalid.' }
+    $expectedLevel = switch ($Ownership.isolation) {
+        'windows-job-object' { 'strong' }
+        'linux-process-group-subreaper' { 'cooperative' }
+        'macos-process-group' { 'cooperative' }
+        default { throw 'FAILED|Unknown process isolation capability.' }
+    }
+    if ($Ownership.isolationLevel -cne $expectedLevel -or [string]::IsNullOrWhiteSpace([string]$Ownership.startIdentity)) { throw 'FAILED|Process identity or isolation level is invalid.' }
+    foreach ($limitation in @('same-account-adversarial-writer-out-of-scope','no-filesystem-isolation')) {
+        if (@($Ownership.limitations) -cnotcontains $limitation) { throw 'FAILED|Process limitations are incomplete.' }
+    }
+    if ($Ownership.isolation -ceq 'macos-process-group' -and @($Ownership.limitations) -cnotcontains 'macos-process-group-cannot-detect-setsid-escape') { throw 'FAILED|macOS escape limitation is missing.' }
+    Assert-StandardValidationExactPropertySet -Object $Ownership.runtime -Expected @('apiVersion','manifestSha256','powerShellVersion') -Context 'process runtime'
+    if ($Ownership.runtime.apiVersion -cne '1.0' -or [string]::IsNullOrEmpty([string]$Ownership.runtime.powerShellVersion)) { throw 'FAILED|Process runtime binding is invalid.' }
+    Assert-StandardValidationSha256 -Value $Ownership.runtime.manifestSha256 -Context 'process runtime manifest'
+    if ($Passed -and (-not (Test-StandardValidationCleanupReceipt $Ownership.cleanup) -or $Ownership.cleanup.Isolation -cne $Ownership.isolation)) { throw 'FAILED|Process cleanup does not support PASS.' }
+}
+
 function Invoke-StandardValidationProcess {
     param(
         [Parameter(Mandatory = $true)][string] $Command,
-        [Parameter(Mandatory = $true)][string[]] $Arguments,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $Arguments,
         [Parameter(Mandatory = $true)][string] $WorkingDirectory,
         [Parameter(Mandatory = $true)][hashtable] $Environment,
         [Parameter(Mandatory = $true)][int] $TimeoutSeconds,
@@ -3683,669 +3038,189 @@ function Invoke-StandardValidationProcess {
         [switch] $EmitSupervisorProgress,
         [ValidateRange(1, 30)][int] $SupervisorProgressIntervalSeconds = 30
     )
-    $svPhaseTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'child-process' -Silent:(-not $script:StandardValidationTimingEnabled)
-    $svPhaseTiming.calls = 1
-    $svPhaseState = 'completed'
-
+    $timing = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'child-process' -Silent:(-not $script:StandardValidationTimingEnabled)
+    $timing.calls = 1
+    $startedAt = [DateTimeOffset]::UtcNow.ToString('o')
+    $status = 'startup-failed'; $exitCode = -1; $stdout = ''; $stderr = ''
+    $lease = $null; $cleanup = $null; $identity = $null; $processId = $null
+    $isolation = $null; $reason = $null; $quota = $false; $cancelled = $false; $naturalExit = $false
+    $cleanedUp = $true; $captureRoot = $null; $captureDirectory = $null; $binding = $null
+    $limits = @('same-account-adversarial-writer-out-of-scope','no-filesystem-isolation')
+    $guards = [Collections.Generic.List[IDisposable]]::new()
+    $phase = 'preflight'
     try {
-
-
-    $startedAt = (Get-Date).ToUniversalTime().ToString('o')
-    $status = 'failed'
-    $exitCode = -1
-    $stdout = ''
-    $stderr = ''
-    $outputQuotaExceeded = $false
-    $outputQuotaDiagnostic = $null
-    $cleanedUp = $true
-    $process = $null
-    $rootProcessId = $null
-    $jobHandle = [IntPtr]::Zero
-    $jobClosed = $true
-    $windowsJobAssigned = $false
-    $processGroupId = 0
-    $processGroupLaunch = $false
-    $pidNamespaceLaunch = $false
-    $pidNamespaceId = $null
-    $subreaperLaunch = $false
-    $subreaperProcessId = 0
-    $windowsBootstrapLaunch = $false
-    $windowsBootstrapReleasePath = $null
-    $unixBootstrapLaunch = $false
-    $unixBootstrapReleasePath = $null
-    $observedProcessIds = New-Object 'System.Collections.Generic.HashSet[int]'
-    try {
-        if (-not [string]::IsNullOrWhiteSpace($CancellationPath) -and (Test-Path -LiteralPath $CancellationPath -PathType Leaf)) {
-            $status = 'cancelled'
-            return [pscustomobject][ordered]@{
-                startedAt = $startedAt; endedAt = (Get-Date).ToUniversalTime().ToString('o'); processId = $null; exitCode = -1
-                status = 'cancelled'; stdout = ''; stderr = 'Cancellation requested before process start.'; cleanedUp = $true
-            }
+        if ($TimeoutSeconds -le 0) { throw 'A positive timeout is required.' }
+        if (-not [string]::IsNullOrWhiteSpace($CancellationPath)) {
+            $CancellationPath = Get-StandardValidationFullPath -Path $CancellationPath -Context 'CancellationPath'
         }
-        $launchCommand = $Command
-        $launchArguments = @($Arguments)
-        $launchEnvironment = @{}
-        foreach ($entry in $Environment.GetEnumerator()) { $launchEnvironment[[string]$entry.Key] = [string]$entry.Value }
-        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        if (-not [string]::IsNullOrEmpty($CancellationPath) -and [IO.File]::Exists($CancellationPath)) {
+            $cancelled = $true; $status = 'cancelled'
+        } else {
+            Initialize-StandardValidationPlatformRuntime
+            $binding = $script:StandardValidationPlatformBinding
+            $phase = 'open-working-directory'
+            $directory = Open-StandardValidationDirectory $WorkingDirectory; $guards.Add($directory)
+            $phase = 'open-executable'
+            $commandPath = Get-StandardValidationFullPath -Path $Command -Context 'Command'
+            $parent = Open-StandardValidationDirectory ([IO.Path]::GetDirectoryName($commandPath)); $guards.Add($parent)
+            $executable = Open-PlatformFile -ParentLease $parent -Leaf ([IO.Path]::GetFileName($commandPath)) -Access Read -CreateMode OpenExisting
+            $guards.Add($executable)
+            $phase = 'reserve-capture'
+            $tempRoot = if ($IsMacOS) { '/private/tmp' } else { [IO.Path]::GetTempPath() }
+            $captureRoot = Join-Path $tempRoot ('standard-process-' + [guid]::NewGuid().ToString('N'))
+            $captureDirectory = Open-StandardValidationDirectory $captureRoot -Create
+            $stdoutPath = Join-Path $captureRoot 'stdout.txt'; $stderrPath = Join-Path $captureRoot 'stderr.txt'
+            $launchArguments = @($Arguments)
+            $childEnvironment = Get-StandardValidationChildEnvironment -Environment $Environment
+            $extension = [IO.Path]::GetExtension($commandPath).ToLowerInvariant()
+            if ($extension -eq '.ps1' -or ($IsWindows -and $extension -in @('.cmd','.bat'))) {
+                # Preserve script/shim invocation without reimplementing process
+                # ownership: the interpreter and every descendant belong to P3.
+                $hostPath = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
+                $hostParent = Open-StandardValidationDirectory $PSHOME; $guards.Add($hostParent)
+                $hostLease = Open-PlatformFile -ParentLease $hostParent -Leaf ([IO.Path]::GetFileName($hostPath)) -Access Read -CreateMode OpenExisting
+                $guards.Add($hostLease)
+                $executable = $hostLease
+                if ($extension -eq '.ps1') {
+                    $launchArguments = @('-NoProfile','-NonInteractive','-File',$commandPath) + $launchArguments
+                } else {
+                    $childEnvironment['STANDARD_VALIDATION_WRAPPER_COMMAND'] = [string]$commandPath
+                    $childEnvironment['STANDARD_VALIDATION_WRAPPER_ARGUMENTS'] = [string](ConvertTo-Json -InputObject ([string[]]$Arguments) -Compress)
+                    $dispatch = '$ErrorActionPreference="Stop"; $items=@(ConvertFrom-Json -InputObject $env:STANDARD_VALIDATION_WRAPPER_ARGUMENTS); & $env:STANDARD_VALIDATION_WRAPPER_COMMAND @items; if($null -ne $LASTEXITCODE){exit $LASTEXITCODE}'
+                    $launchArguments = @('-NoProfile','-NonInteractive','-Command',$dispatch)
+                }
+                $commandPath = $hostPath
+            }
+            if ($IsWindows -and [IO.Path]::GetFileName($commandPath) -in @('pwsh.exe','powershell.exe')) {
+                $launchArguments = @('-ExecutionPolicy','Bypass') + $launchArguments
+            }
+            $phase = 'start-owned-process'
+            $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+            $lease = Start-PlatformOwnedProcess -ExecutableLease $executable -ArgumentList $launchArguments -Environment $childEnvironment `
+                -WorkingDirectoryLease $directory -Deadline $deadline -StdoutPath $stdoutPath -StderrPath $stderrPath `
+                -OutputLimitCharacters $script:StandardValidationChildOutputQuotaCharacters
+            $processId = $lease.Pid; $identity = $lease.StartIdentity; $isolation = $lease.Isolation
+            $limits += @($lease.Limitations)
+            $timer = [Diagnostics.Stopwatch]::StartNew(); $nextProgress = 0
+            while (-not $lease.HasExited -and $null -eq $lease.Cleanup) {
+                if (-not [string]::IsNullOrEmpty($CancellationPath) -and [IO.File]::Exists($CancellationPath)) { $cancelled = $true; break }
+                if ($EmitSupervisorProgress -and $timer.Elapsed.TotalSeconds -ge $nextProgress) {
+                    $elapsed = [int][Math]::Floor($timer.Elapsed.TotalSeconds)
+                    $remaining = [int][Math]::Max(0,[Math]::Ceiling(($deadline - [DateTimeOffset]::UtcNow).TotalSeconds))
+                    [Console]::Error.WriteLine("Core Pester supervisor utc=$([DateTimeOffset]::UtcNow.ToString('o')) elapsedSeconds=$elapsed remainingSeconds=$remaining state=running")
+                    $nextProgress = $timer.Elapsed.TotalSeconds + $SupervisorProgressIntervalSeconds
+                }
+                [void]$lease.WaitForExit([TimeSpan]::FromMilliseconds(50))
+            }
+            $naturalExit = $lease.HasExited -and [string]::IsNullOrEmpty($lease.TerminationReason) -and -not $cancelled
+        }
+    } catch {
+        $cause = $_.Exception
+        $messages = [Collections.Generic.List[string]]::new()
+        while ($null -ne $cause) {
+            $messages.Add($cause.Message)
+            if ($cause.Data.Contains('StartupCleanupReceipt')) { $cleanup = $cause.Data['StartupCleanupReceipt']; $cleanedUp = Test-StandardValidationCleanupReceipt $cleanup }
+            if ($cause.Data.Contains('StartupCaptureCleanupUncertainty')) { $cleanedUp = $false }
+            $cause = $cause.InnerException
+        }
+        $stderr = $phase + ': ' + ($messages -join ' -> ')
+        if (-not $cleanedUp) { $status = 'cleanup-failed' }
+    } finally {
+        if ($null -ne $lease) {
             try {
-                $jobHandle = [StandardValidationProcessControlNative]::CreateKillOnCloseJob()
-                $jobClosed = $false
-                $bootstrapHost = Get-StandardValidationWindowsBootstrapHost
-                # Windows PowerShell 5.1/.NET Framework still observes the
-                # legacy MAX_PATH limit.  Keep the supervisor-only release
-                # marker short because the working root already carries the
-                # candidate/run identity and may live under a long temp path.
-                $windowsBootstrapReleasePath = Join-Path $WorkingDirectory ("b-{0}.sig" -f ([guid]::NewGuid().ToString('N')))
-                if (Test-Path -LiteralPath $windowsBootstrapReleasePath) {
-                    throw 'The owned Windows process bootstrap signal path already exists.'
-                }
-                $launchEnvironment.STANDARD_VALIDATION_BOOTSTRAP_COMMAND = $Command
-                $launchEnvironment.STANDARD_VALIDATION_BOOTSTRAP_ARGUMENTS = if (@($Arguments).Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject ([string[]]$Arguments) -Compress }
-                $launchEnvironment.STANDARD_VALIDATION_BOOTSTRAP_RELEASE_PATH = $windowsBootstrapReleasePath
-                $bootstrapCode = Get-StandardValidationProcessBootstrapCode
-                $encodedBootstrapCode = [Convert]::ToBase64String(([Text.Encoding]::Unicode).GetBytes($bootstrapCode))
-                $launchCommand = $bootstrapHost
-                $launchArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedBootstrapCode)
-                $windowsBootstrapLaunch = $true
-            }
-            catch {
-                return [pscustomobject][ordered]@{
-                    startedAt = $startedAt; endedAt = (Get-Date).ToUniversalTime().ToString('o'); processId = $null; exitCode = -1
-                    status = 'startup-failed'; stdout = ''; stderr = "Could not create an owned Windows job object: $($_.Exception.Message)"; cleanedUp = $true
-                }
+                $cleanup = Stop-StandardValidationOwnedProcess -Lease $lease -ExpectedStartIdentity $identity -CancellationRequested:$cancelled
+                $cleanedUp = Test-StandardValidationCleanupReceipt $cleanup
+                $reason = [string]$lease.TerminationReason; $quota = $lease.OutputLimitExceeded
+                if ($null -ne $lease.ExitCode) { $exitCode = [int]$lease.ExitCode }
+                if (-not $cleanedUp -or $reason -in @('capture-failure','supervisor-failure')) { $status = 'cleanup-failed'; $cleanedUp = $false }
+                elseif ($quota) { $status = 'failed' }
+                elseif ($cancelled) { $status = 'cancelled' }
+                elseif ($reason -ceq 'deadline') { $status = 'timeout' }
+                elseif ($naturalExit -and $exitCode -eq 0) { $status = 'passed' }
+                else { $status = 'failed' }
+            } catch { $status = 'cleanup-failed'; $cleanedUp = $false; $stderr += ' stop-owned-process: ' + $_.Exception.ToString() }
+            finally {
+                try { $lease.Dispose() } catch { $status = 'cleanup-failed'; $cleanedUp = $false; $stderr += ' dispose-process: ' + $_.Exception.Message }
             }
         }
-        elseif ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
+        if ($null -ne $captureDirectory) {
             try {
-                $unixLauncher = Get-StandardValidationUnixProcessGroupLauncher
-                if ($CoreLifecycleOnly) {
-                    if ([string]::IsNullOrWhiteSpace([string]$unixLauncher)) {
-                        throw 'No trusted setsid launcher is available for a bounded core process group.'
-                    }
-                    $launchCommand = [string]$unixLauncher
-                    $launchArguments = @('--wait', $Command) + @($Arguments)
-                    $processGroupLaunch = $true
-                }
-                else {
-                $unixNamespaceLauncher = Get-StandardValidationUnixPidNamespaceLauncher
-                if ([string]::IsNullOrWhiteSpace([string]$unixLauncher)) {
-                    throw 'No trusted setsid launcher is available for an owned Unix process group.'
-                }
-                $bootstrapHost = Get-StandardValidationUnixBootstrapHost
-                $unixBootstrapReleasePath = Join-Path $WorkingDirectory ("b-{0}.sig" -f ([guid]::NewGuid().ToString('N')))
-                if (Test-Path -LiteralPath $unixBootstrapReleasePath) {
-                    throw 'The owned Unix process bootstrap signal path already exists.'
-                }
-                $bootstrapCode = Get-StandardValidationProcessBootstrapCode
-                $encodedBootstrapCode = [Convert]::ToBase64String(([Text.Encoding]::Unicode).GetBytes($bootstrapCode))
-                if (Test-StandardValidationUnixPidNamespaceCapability) {
-                    if ([string]::IsNullOrWhiteSpace([string]$unixNamespaceLauncher)) {
-                        throw 'The Unix PID namespace capability probe passed without a trusted unshare launcher.'
-                    }
-                    $launchEnvironment.STANDARD_VALIDATION_BOOTSTRAP_COMMAND = [string]$unixLauncher
-                    $launchEnvironment.STANDARD_VALIDATION_BOOTSTRAP_ARGUMENTS = ConvertTo-Json -InputObject ([string[]](@('--wait', $Command) + @($Arguments))) -Compress
-                    $launchEnvironment.STANDARD_VALIDATION_BOOTSTRAP_RELEASE_PATH = $unixBootstrapReleasePath
-                    $launchCommand = [string]$unixNamespaceLauncher
-                    # A user+PID namespace makes every candidate descendant belong
-                    # to a kernel-owned lifetime boundary. unshare --kill-child
-                    # also kills the namespace init if the supervisor is killed.
-                    $launchArguments = @(
-                        '--user', '--map-root-user', '--pid', '--fork', '--kill-child=SIGKILL', '--',
-                        $bootstrapHost, '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-                        '-EncodedCommand', $encodedBootstrapCode
-                    )
-                    $pidNamespaceLaunch = $true
-                }
-                else {
-                    if (-not (Test-Path -LiteralPath '/proc' -PathType Container)) {
-                        throw 'No kernel process containment boundary is available on this Unix host.'
-                    }
-                    # Some hosted Linux runners expose /proc but deny unshare's
-                    # user/PID namespace operation. PR_SET_CHILD_SUBREAPER keeps
-                    # daemonized descendants attached to this supervisor so the
-                    # cleanup pass can terminate and verify every owned process.
-                    [StandardValidationUnixProcessControlNative]::SetChildSubreaper()
-                    $subreaperProcessId = [int]$PID
-                    $preexistingChildren = @(Get-StandardValidationDescendantProcessIds -RootProcessId $subreaperProcessId)
-                    if ($preexistingChildren.Count -gt 0) {
-                        throw 'The Unix subreaper boundary has pre-existing child processes.'
-                    }
-                    $launchEnvironment.STANDARD_VALIDATION_BOOTSTRAP_COMMAND = [string]$Command
-                    $launchEnvironment.STANDARD_VALIDATION_BOOTSTRAP_ARGUMENTS = if (@($Arguments).Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject ([string[]]$Arguments) -Compress }
-                    $launchEnvironment.STANDARD_VALIDATION_BOOTSTRAP_RELEASE_PATH = $unixBootstrapReleasePath
-                    $launchCommand = [string]$unixLauncher
-                    $launchArguments = @(
-                        '--wait', $bootstrapHost, '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-                        '-EncodedCommand', $encodedBootstrapCode
-                    )
-                    $subreaperLaunch = $true
-                }
-                $processGroupLaunch = $true
-                $unixBootstrapLaunch = $true
-                }
-            }
-            catch {
-                return [pscustomobject][ordered]@{
-                    startedAt = $startedAt; endedAt = (Get-Date).ToUniversalTime().ToString('o'); processId = $null; exitCode = -1
-                    status = 'startup-failed'; stdout = ''; stderr = "Could not create an owned Unix process boundary: $($_.Exception.Message)"; cleanedUp = $true
-                }
-            }
-        }
-        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-        $startInfo.FileName = $launchCommand
-        $startInfo.Arguments = ConvertTo-StandardValidationProcessArguments -Arguments $launchArguments
-        $startInfo.WorkingDirectory = $WorkingDirectory
-        $startInfo.UseShellExecute = $false
-        $startInfo.CreateNoWindow = $true
-        $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-        $startInfo.RedirectStandardOutput = $true
-        $startInfo.RedirectStandardError = $true
-        $startInfo.EnvironmentVariables.Clear()
-        foreach ($entry in (Get-StandardValidationChildEnvironment -Environment $launchEnvironment).GetEnumerator()) {
-            $startInfo.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
-        }
-        $process = New-Object System.Diagnostics.Process
-        $process.StartInfo = $startInfo
-        try {
-            if (-not $process.Start()) {
-                return [pscustomobject][ordered]@{
-                    startedAt = $startedAt; endedAt = (Get-Date).ToUniversalTime().ToString('o'); processId = $null; exitCode = -1
-                    status = 'startup-failed'; stdout = ''; stderr = 'Process.Start returned false.'; cleanedUp = $true
-                }
-            }
-        }
-        catch {
-            return [pscustomobject][ordered]@{
-                startedAt = $startedAt; endedAt = (Get-Date).ToUniversalTime().ToString('o'); processId = $null; exitCode = -1
-                status = 'startup-failed'; stdout = ''; stderr = $_.Exception.Message; cleanedUp = $true
-            }
-        }
-        $rootProcessId = [int]$process.Id
-        $protectionSetupFailed = $false
-        $terminationStatus = $null
-        if ($pidNamespaceLaunch) {
-            try {
-                $supervisorNamespaceId = Get-StandardValidationUnixPidNamespaceIdentity `
-                    -ProcessId $PID
-                if ([string]::IsNullOrWhiteSpace([string]$supervisorNamespaceId)) {
-                    throw 'The supervisor PID namespace identity could not be established.'
-                }
-                $namespaceDeadline = (Get-Date).AddMilliseconds(1000)
-                do {
-                    foreach ($childPid in @(Get-StandardValidationDescendantProcessIds -RootProcessId $rootProcessId)) {
-                        $candidateNamespaceId = Get-StandardValidationUnixPidNamespaceIdentity -ProcessId ([int]$childPid)
-                        if (-not [string]::IsNullOrWhiteSpace([string]$candidateNamespaceId) -and
-                            [string]$candidateNamespaceId -cne [string]$supervisorNamespaceId) {
-                            $pidNamespaceId = [string]$candidateNamespaceId
-                            break
-                        }
-                    }
-                    if (-not [string]::IsNullOrWhiteSpace([string]$pidNamespaceId) -or
-                        $process.HasExited -or (Get-Date) -ge $namespaceDeadline) { break }
-                    Start-Sleep -Milliseconds 10
-                } while ($true)
-                if ([string]::IsNullOrWhiteSpace([string]$pidNamespaceId)) {
-                    throw "unshare did not create an owned PID namespace for root PID $rootProcessId."
-                }
-            }
-            catch {
-                $protectionSetupFailed = $true
-                $terminationStatus = 'startup-failed'
-                $stderr = Merge-StandardValidationProcessStderr `
-                    -Existing $stderr `
-                    -Captured "Could not establish the owned Unix PID namespace: $($_.Exception.Message)" `
-                    -Quota $script:StandardValidationChildOutputQuotaCharacters
-                $cleanedUp = Stop-StandardValidationProcessTree `
-                    -RootProcessId $rootProcessId `
-                    -RootProcess $process `
-                    -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) `
-                    -PidNamespaceId $pidNamespaceId `
-                    -PidNamespaceRequired $true `
-                    -SubreaperProcessId $subreaperProcessId `
-                    -SubreaperRequired $subreaperLaunch `
-                    -WaitMilliseconds 5000
-            }
-        }
-        if (-not $protectionSetupFailed -and $jobHandle -ne [IntPtr]::Zero) {
-            try {
-                if (-not [StandardValidationProcessControlNative]::TryAssignProcessToJobObject($jobHandle, $process.Handle)) {
-                    throw 'AssignProcessToJobObject returned false.'
-                }
-                $windowsJobAssigned = $true
-            }
-            catch {
-                $protectionSetupFailed = $true
-                $terminationStatus = 'startup-failed'
-                $stderr = Merge-StandardValidationProcessStderr `
-                    -Existing $stderr `
-                    -Captured "Could not assign the validator to the owned Windows job object: $($_.Exception.Message)" `
-                    -Quota $script:StandardValidationChildOutputQuotaCharacters
-                $cleanedUp = Stop-StandardValidationProcessTree `
-                    -RootProcessId $rootProcessId `
-                    -RootProcess $process `
-                    -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) `
-                    -JobHandle $jobHandle `
-                    -WaitMilliseconds 5000
-            }
-            if (-not $protectionSetupFailed -and $windowsBootstrapLaunch) {
-                try {
-                    $releaseBytes = (New-Object Text.UTF8Encoding($false)).GetBytes('release' + [Environment]::NewLine)
-                    $releaseStream = [IO.File]::Open(
-                        $windowsBootstrapReleasePath,
-                        [IO.FileMode]::CreateNew,
-                        [IO.FileAccess]::Write,
-                        [IO.FileShare]::None
-                    )
+                foreach ($name in @('stdout','stderr')) {
+                    $path = Join-Path $captureRoot ($name + '.txt')
+                    if (-not [IO.File]::Exists($path)) { continue }
+                    $file = Open-PlatformFile -ParentLease $captureDirectory -Leaf ($name + '.txt') -Access Read -CreateMode OpenExisting
                     try {
-                        $releaseStream.Write($releaseBytes, 0, $releaseBytes.Length)
-                        $releaseStream.Flush()
-                    }
-                    finally { $releaseStream.Dispose() }
+                        $text = [Text.Encoding]::UTF8.GetString($file.ReadAllBytes(4 * $script:StandardValidationChildOutputQuotaCharacters))
+                        if ($name -eq 'stdout') { $stdout = $text } else { $stderr = Merge-StandardValidationProcessStderr -Existing $stderr -Captured $text -Quota $script:StandardValidationChildOutputQuotaCharacters }
+                    } finally { $file.Dispose() }
+                    # P7 owns the shared removal primitive; A1 permits this exact-name
+                    # deletion after P2 identity verification and lease closure.
+                    [IO.File]::Delete($path)
                 }
-                catch {
-                    $protectionSetupFailed = $true
-                    $terminationStatus = 'startup-failed'
-                    $stderr = Merge-StandardValidationProcessStderr `
-                        -Existing $stderr `
-                        -Captured "Could not release the owned Windows process bootstrap: $($_.Exception.Message)" `
-                        -Quota $script:StandardValidationChildOutputQuotaCharacters
-                    $cleanedUp = Stop-StandardValidationProcessTree `
-                        -RootProcessId $rootProcessId `
-                        -RootProcess $process `
-                        -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) `
-                        -JobHandle $jobHandle `
-                        -WaitMilliseconds 5000
-                }
-            }
+            } catch { $status = 'cleanup-failed'; $cleanedUp = $false; $stderr += ' capture-finalization: ' + $_.Exception.Message }
+            finally { $captureDirectory.Dispose() }
+            try { [IO.Directory]::Delete($captureRoot) } catch { $status = 'cleanup-failed'; $cleanedUp = $false; $stderr += ' capture-directory: ' + $_.Exception.Message }
         }
-        elseif (-not $protectionSetupFailed -and $processGroupLaunch) {
-            try {
-                if ($unixBootstrapLaunch) {
-                    $releaseBytes = (New-Object Text.UTF8Encoding($false)).GetBytes('release' + [Environment]::NewLine)
-                    $releaseStream = [IO.File]::Open(
-                        $unixBootstrapReleasePath,
-                        [IO.FileMode]::CreateNew,
-                        [IO.FileAccess]::Write,
-                        [IO.FileShare]::None
-                    )
-                    try {
-                        $releaseStream.Write($releaseBytes, 0, $releaseBytes.Length)
-                        $releaseStream.Flush()
-                    }
-                    finally { $releaseStream.Dispose() }
-                }
-                $groupDeadline = (Get-Date).AddMilliseconds(1000)
-                $groupEstablished = $false
-                do {
-                    $candidateGroupId = -1
-                    try {
-                        $candidateGroupId = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
-                            Get-StandardValidationUnixProcessGroupId -ProcessId $rootProcessId
-                        }
-                        else {
-                            [StandardValidationProcessControlNative]::GetProcessGroupId($rootProcessId)
-                        }
-                    }
-                    catch { }
-                    if ($candidateGroupId -eq $rootProcessId) {
-                        $processGroupId = $candidateGroupId
-                        $groupEstablished = $true
-                    }
-                    if (-not $groupEstablished) {
-                        foreach ($childPid in @(Get-StandardValidationDescendantProcessIds -RootProcessId $rootProcessId)) {
-                            try {
-                                $candidateGroupId = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
-                                    Get-StandardValidationUnixProcessGroupId -ProcessId ([int]$childPid)
-                                }
-                                else {
-                                    [StandardValidationProcessControlNative]::GetProcessGroupId([int]$childPid)
-                                }
-                            }
-                            catch { $candidateGroupId = -1 }
-                            if ($candidateGroupId -eq [int]$childPid) {
-                                $processGroupId = $candidateGroupId
-                                $groupEstablished = $true
-                                break
-                            }
-                        }
-                    }
-                    if ($groupEstablished -or $process.HasExited -or (Get-Date) -ge $groupDeadline) { break }
-                    Start-Sleep -Milliseconds 10
-                } while ($true)
-                if (-not $groupEstablished) {
-                    throw "setsid did not create an owned process group for root PID $rootProcessId."
-                }
-            }
-            catch {
-                $alreadyExited = $false
-                try { $alreadyExited = [bool]$process.HasExited } catch { }
-                if (-not $alreadyExited) {
-                    $protectionSetupFailed = $true
-                    $terminationStatus = 'startup-failed'
-                    $stderr = Merge-StandardValidationProcessStderr `
-                        -Existing $stderr `
-                        -Captured "Could not establish the owned Unix process group: $($_.Exception.Message)" `
-                        -Quota $script:StandardValidationChildOutputQuotaCharacters
-                    $cleanedUp = Stop-StandardValidationProcessTree `
-                        -RootProcessId $rootProcessId `
-                        -RootProcess $process `
-                        -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) `
-                        -ProcessGroupId $processGroupId `
-                        -PidNamespaceId $pidNamespaceId `
-                        -PidNamespaceRequired $pidNamespaceLaunch `
-                        -SubreaperProcessId $subreaperProcessId `
-                        -SubreaperRequired $subreaperLaunch `
-                        -WaitMilliseconds 5000
-                }
-                else {
-                    $processGroupId = 0
-                }
-            }
+        for ($i = $guards.Count - 1; $i -ge 0; $i--) {
+            try { $guards[$i].Dispose() } catch { $status = 'cleanup-failed'; $cleanedUp = $false; $stderr += ' input-lease: ' + $_.Exception.Message }
         }
-        $stdoutTask = [StandardValidationBoundedCapture]::Start(
-            $process.StandardOutput,
-            $script:StandardValidationChildOutputQuotaCharacters
-        )
-        $stderrTask = [StandardValidationBoundedCapture]::Start(
-            $process.StandardError,
-            $script:StandardValidationChildOutputQuotaCharacters
-        )
-        $deadline = (Get-Date).AddSeconds([Math]::Max(1, $TimeoutSeconds))
-        $supervisorProgressClock = [Diagnostics.Stopwatch]::StartNew()
-        $nextSupervisorProgressSeconds = 0
-        $supervisorProgressLines = 0
-        while (-not $protectionSetupFailed -and -not $process.HasExited) {
-            Update-StandardValidationPhase -Timing $svPhaseTiming -Calls 0
-            if ($EmitSupervisorProgress -and $supervisorProgressLines -lt 240) {
-                $elapsedSeconds = [Math]::Max(0, [int][Math]::Floor($supervisorProgressClock.Elapsed.TotalSeconds))
-                if ($elapsedSeconds -ge $nextSupervisorProgressSeconds) {
-                    $progressNow = [DateTimeOffset]::UtcNow
-                    $remainingSeconds = [Math]::Max(0, [int][Math]::Ceiling(($deadline.ToUniversalTime() - $progressNow.UtcDateTime).TotalSeconds))
-                    [Console]::Error.WriteLine("Core Pester supervisor utc=$($progressNow.ToString('o')) elapsedSeconds=$elapsedSeconds remainingSeconds=$remainingSeconds state=running")
-                    $supervisorProgressLines++
-                    $nextSupervisorProgressSeconds += $SupervisorProgressIntervalSeconds
-                    if ($supervisorProgressLines -eq 240) {
-                        [Console]::Error.WriteLine('Core Pester supervisor progress cap reached (240 heartbeat lines).')
-                    }
-                }
-            }
-            # A successfully assigned Windows Job Object owns every descendant and provides the
-            # termination boundary. Avoid repeatedly enumerating the full Win32 process table
-            # while it runs; retain descendant discovery for paths without that boundary and
-            # keep the existing cleanup verification after process completion/termination.
-            if (-not $windowsJobAssigned) {
-                foreach ($childPid in @(Get-StandardValidationDescendantProcessIds -RootProcessId $rootProcessId)) { [void]$observedProcessIds.Add([int]$childPid) }
-            }
-            $quotaStream = $null
-            if ($stdoutTask.IsCompleted) {
-                try { if ([bool]$stdoutTask.GetAwaiter().GetResult().Exceeded) { $quotaStream = 'stdout' } } catch { }
-            }
-            if ($null -eq $quotaStream -and $stderrTask.IsCompleted) {
-                try { if ([bool]$stderrTask.GetAwaiter().GetResult().Exceeded) { $quotaStream = 'stderr' } } catch { }
-            }
-            if ($null -ne $quotaStream) {
-                $terminationStatus = 'failed'
-                [void](Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -WaitMilliseconds 5000)
-                break
-            }
-            if (-not [string]::IsNullOrWhiteSpace($CancellationPath) -and (Test-Path -LiteralPath $CancellationPath -PathType Leaf)) {
-                $terminationStatus = 'cancelled'
-                [void](Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -CancellationRequested $true -WaitMilliseconds 5000)
-                break
-            }
-            if ((Get-Date) -gt $deadline) {
-                $terminationStatus = 'timeout'
-                [void](Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -WaitMilliseconds 5000)
-                break
-            }
-            Start-Sleep -Milliseconds 50
-        }
-        if ($protectionSetupFailed) {
-            # The failed protection setup was already terminated above; keep a
-            # second cleanup pass to catch descendants spawned during startup.
-            $cleanedUp = $cleanedUp -and (Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -WaitMilliseconds 5000)
-        }
-        elseif ($null -ne $terminationStatus) {
-            $cleanedUp = Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -CancellationRequested ($terminationStatus -ceq 'cancelled') -WaitMilliseconds 5000
-        }
-        else {
-            $process.WaitForExit()
-            $cleanedUp = Stop-StandardValidationProcessTree -RootProcessId $rootProcessId -RootProcess $process -KnownProcessIds @($observedProcessIds | ForEach-Object { [int]$_ }) -ProcessGroupId $processGroupId -JobHandle $jobHandle -PidNamespaceId $pidNamespaceId -PidNamespaceRequired $pidNamespaceLaunch -SubreaperProcessId $subreaperProcessId -SubreaperRequired $subreaperLaunch -WaitMilliseconds 1000
-        }
-        $stdoutCaptureResult = $null
-        $stderrCaptureResult = $null
-        try {
-            $stdoutCaptureResult = $stdoutTask.GetAwaiter().GetResult()
-            $stdout = [string]$stdoutCaptureResult.Text
-        }
-        catch { $stdout = '' }
-        try {
-            $stderrCaptureResult = $stderrTask.GetAwaiter().GetResult()
-            $stderr = Merge-StandardValidationProcessStderr `
-                -Existing $stderr `
-                -Captured ([string]$stderrCaptureResult.Text) `
-                -Quota $script:StandardValidationChildOutputQuotaCharacters
-        }
-        catch { }
-        # The bounded reader is the primary memory guard. Normalize the values
-        # once more before evidence serialization so platform-specific stream
-        # decoding can never make a retained prefix exceed the contract quota.
-        $streamQuota = [int]$script:StandardValidationChildOutputQuotaCharacters
-        if ($stdout.Length -gt $streamQuota) { $stdout = $stdout.Substring(0, $streamQuota) }
-        if ($stderr.Length -gt $streamQuota) { $stderr = $stderr.Substring(0, $streamQuota) }
-        $quotaStreams = @()
-        if ($null -ne $stdoutCaptureResult -and [bool]$stdoutCaptureResult.Exceeded) { $quotaStreams += 'stdout' }
-        if ($null -ne $stderrCaptureResult -and [bool]$stderrCaptureResult.Exceeded) { $quotaStreams += 'stderr' }
-        if ($quotaStreams.Count -gt 0) {
-            $outputQuotaExceeded = $true
-            if ($null -eq $terminationStatus) { $terminationStatus = 'failed' }
-            $outputQuotaDiagnostic = "Owned validator output capture quota exceeded for $($quotaStreams -join ' and ') (limit=$($script:StandardValidationChildOutputQuotaCharacters) characters per stream)."
-        }
-        if ($process.HasExited) { $exitCode = $process.ExitCode }
-        if (-not $cleanedUp) {
-            $status = 'cleanup-failed'
-            if ([string]::IsNullOrWhiteSpace($stderr)) { $stderr = 'The owned validator process group or descendant process tree did not fully terminate.' }
-        }
-        elseif ($protectionSetupFailed) { $status = 'startup-failed' }
-        elseif ($null -ne $terminationStatus) { $status = $terminationStatus }
-        elseif ($exitCode -eq 0) { $status = 'passed' }
-        else { $status = 'failed' }
+        if ($stderr.Length -gt $script:StandardValidationChildOutputQuotaCharacters) { $stderr = $stderr.Substring(0,$script:StandardValidationChildOutputQuotaCharacters) }
+        Complete-StandardValidationPhase -Timing $timing -State $(if ($status -eq 'passed') { 'completed' } elseif ($status -eq 'cancelled') { 'cancelled' } else { 'failed' })
     }
-    finally {
-        $jobHandleBeforeClose = $jobHandle
-        if ($jobHandle -ne [IntPtr]::Zero) {
-            try {
-                $jobCloseResult = [StandardValidationProcessControlNative]::TryCloseHandle($jobHandle)
-                $jobClosed = [bool]$jobCloseResult
-                if (-not $jobClosed) {
-                    $stderr = Merge-StandardValidationProcessStderr `
-                        -Existing "The owned Windows job object could not be closed safely (handle=$($jobHandle.ToInt64()))." `
-                        -Captured $stderr `
-                        -Quota $script:StandardValidationChildOutputQuotaCharacters
-                }
-            }
-            catch {
-                $jobClosed = $false
-                $stderr = Merge-StandardValidationProcessStderr `
-                    -Existing "The owned Windows job object could not be closed safely: $($_.Exception.Message)" `
-                    -Captured $stderr `
-                    -Quota $script:StandardValidationChildOutputQuotaCharacters
-            }
-            $jobHandle = [IntPtr]::Zero
+    [pscustomobject][ordered]@{
+        startedAt = $startedAt; endedAt = [DateTimeOffset]::UtcNow.ToString('o'); processId = $processId
+        exitCode = $exitCode; status = $status; stdout = $stdout; stderr = $stderr; cleanedUp = $cleanedUp
+        outputQuotaExceeded = $quota
+        outputQuotaDiagnostic = $(if ($quota) { "Owned validator output capture quota exceeded (limit=$($script:StandardValidationChildOutputQuotaCharacters) characters per stream)." } else { $null })
+        processOwnership = [pscustomobject][ordered]@{
+            processId = $processId; startIdentity = $identity; isolation = $isolation
+            isolationLevel = $(if ($null -eq $isolation) { $null } elseif ($isolation -ceq 'windows-job-object') { 'strong' } else { 'cooperative' })
+            limitations = $limits; terminationReason = $reason; cleanup = $cleanup; runtime = $binding
         }
-        if ($null -ne $process) { $process.Dispose() }
-        if (-not [string]::IsNullOrWhiteSpace([string]$windowsBootstrapReleasePath) -and
-            [IO.File]::Exists($windowsBootstrapReleasePath)) {
-            try { [IO.File]::Delete($windowsBootstrapReleasePath) }
-            catch {
-                $cleanedUp = $false
-                $status = 'cleanup-failed'
-                if ([string]::IsNullOrWhiteSpace($stderr)) { $stderr = "The owned Windows process bootstrap signal could not be removed: $($_.Exception.Message)" }
-            }
-        }
-        if (-not [string]::IsNullOrWhiteSpace([string]$unixBootstrapReleasePath) -and
-            [IO.File]::Exists($unixBootstrapReleasePath)) {
-            try { [IO.File]::Delete($unixBootstrapReleasePath) }
-            catch {
-                $cleanedUp = $false
-                $status = 'cleanup-failed'
-                if ([string]::IsNullOrWhiteSpace($stderr)) { $stderr = "The owned Unix process bootstrap signal could not be removed: $($_.Exception.Message)" }
-            }
-        }
-        if (-not $jobClosed) {
-            $cleanedUp = $false
-            $status = 'cleanup-failed'
-            if ([string]::IsNullOrWhiteSpace($stderr)) { $stderr = "The owned Windows job object could not be closed safely (handle=$($jobHandleBeforeClose.ToInt64()))." }
-        }
-    }
-    return [pscustomobject][ordered]@{
-        startedAt = $startedAt
-        endedAt = (Get-Date).ToUniversalTime().ToString('o')
-        processId = if ($null -eq $rootProcessId) { $null } else { [int]$rootProcessId }
-        exitCode = [int]$exitCode
-        status = [string]$status
-        stdout = [string]$stdout
-        stderr = [string]$stderr
-        outputQuotaExceeded = [bool]$outputQuotaExceeded
-        outputQuotaDiagnostic = if ($null -eq $outputQuotaDiagnostic) { $null } else { [string]$outputQuotaDiagnostic }
-        cleanedUp = [bool]$cleanedUp
-    }
-
-    }
-    catch {
-        $svPhaseState = if ($_.Exception.Message.StartsWith('CANCELLED|',[StringComparison]::Ordinal)) { 'cancelled' } else { 'failed' }
-        throw
-    }
-    finally {
-        if ($status -eq 'cancelled') { $svPhaseState = 'cancelled' }
-        elseif ($status -ne 'passed') { $svPhaseState = 'failed' }
-        Complete-StandardValidationPhase -Timing $svPhaseTiming -State $svPhaseState
     }
 }
 
 function New-StandardValidationOutputReservation {
     param([Parameter(Mandatory = $true)][string] $Path)
-
     $fullPath = Get-StandardValidationFullPath -Path $Path -Context 'OutputPath'
-    $parent = [System.IO.Path]::GetDirectoryName($fullPath)
-    if (-not [string]::IsNullOrWhiteSpace($parent)) { [void](New-Item -ItemType Directory -Path $parent -Force) }
-    $token = 'standard-validation-output-reservation-v1:' + [guid]::NewGuid().ToString('N')
-    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($token + [Environment]::NewLine)
+    $parent = Open-StandardValidationDirectory ([IO.Path]::GetDirectoryName($fullPath)) -Create
     try {
-        # CreateNew is the reservation primitive on every platform. Unix-like
-        # systems use advisory sharing, so permit the supervisor's path-level
-        # revalidation reads while retaining exclusive create semantics.
-        $fileShare = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) {
-            [System.IO.FileShare]::ReadWrite
-        }
-        else {
-            [System.IO.FileShare]::None
-        }
-        $stream = [System.IO.File]::Open($fullPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::ReadWrite, $fileShare)
-        try {
-            $stream.Write($bytes, 0, $bytes.Length)
-            $stream.Flush()
-        }
-        catch {
-            $stream.Dispose()
-            throw
-        }
-        return [pscustomobject][ordered]@{ path = $fullPath; token = $token; stream = $stream }
-    }
-    catch [System.IO.IOException] {
-        throw 'INVALID|OutputPath could not be reserved exclusively; it already exists or was substituted concurrently.'
-    }
+        $lease = Open-PlatformFile -ParentLease $parent -Leaf ([IO.Path]::GetFileName($fullPath)) -Access ReadWrite -CreateMode CreateNew
+        # Empty create-only lease: its sole write publishes final evidence.
+        $token = [guid]::NewGuid().ToString('N')
+        $lease | Add-Member -NotePropertyName ReservationPath -NotePropertyValue $fullPath
+        $lease | Add-Member -NotePropertyName ReservationToken -NotePropertyValue $token
+        return [pscustomobject]@{ path=$fullPath; token=$token; stream=$lease }
+    } catch { throw "INVALID|OutputPath could not be reserved exclusively: $($_.Exception.Message)" }
+    finally { $parent.Dispose() }
 }
 
 function Assert-StandardValidationOutputReservation {
-    param(
-        [Parameter(Mandatory = $true)][string] $Path,
-        [Parameter(Mandatory = $true)][System.IO.FileStream] $Stream,
-        [Parameter(Mandatory = $true)][string] $Token,
-        [Parameter(Mandatory = $true)][string] $Context
-    )
-
-    if ($Stream.SafeFileHandle.IsClosed -or -not $Stream.CanRead -or -not $Stream.CanWrite) {
-        throw "FAILED|$Context output reservation handle is no longer valid."
-    }
-    $tokenBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($Token + [Environment]::NewLine)
-    if ($Stream.Length -ne $tokenBytes.Length) {
-        throw "FAILED|$Context output reservation was modified before finalization."
-    }
-    $position = $Stream.Position
+    param([Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Stream,
+        [Parameter(Mandatory = $true)][string]$Token,
+        [Parameter(Mandatory = $true)][string]$Context)
     try {
-        $Stream.Position = 0
-        $actualBytes = New-Object byte[] $tokenBytes.Length
-        $read = $Stream.Read($actualBytes, 0, $actualBytes.Length)
-        if ($read -ne $tokenBytes.Length -or
-            [Convert]::ToBase64String($actualBytes) -cne [Convert]::ToBase64String($tokenBytes)) {
-            throw "FAILED|$Context output reservation contents were substituted."
-        }
-    }
-    finally { $Stream.Position = $position }
-
-    Assert-StandardValidationRegularFile -Path $Path -Context "$Context output reservation"
-    $pathItem = Get-Item -Force -LiteralPath $Path -ErrorAction Stop
-    if ([int64]$pathItem.Length -ne [int64]$tokenBytes.Length) {
-        throw "FAILED|$Context output reservation path was modified before finalization."
-    }
-    # Windows denies a second open while FileShare.None is held. Unix-like
-    # systems use advisory sharing, so also compare the path bytes there to
-    # detect unlink/replace or an in-place tamper by a child process.
-    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
-        try {
-            $pathBytes = [System.IO.File]::ReadAllBytes($Path)
-            if ([Convert]::ToBase64String($pathBytes) -cne [Convert]::ToBase64String($tokenBytes)) {
-                throw "FAILED|$Context output reservation path was substituted."
-            }
-        }
-        catch [System.IO.IOException] {
-            throw "FAILED|$Context output reservation path could not be revalidated."
-        }
-    }
+        if ($Stream.ReservationToken -cne $Token -or $Stream.ReservationPath -cne (Get-StandardValidationFullPath -Path $Path -Context $Context)) { throw 'The reservation does not belong to this output path and token.' }
+        $observed = Assert-PlatformFileIdentity -Lease $Stream -Expected $Stream.Observation -SingleLink
+        if ($observed.Size -ne 0) { throw 'The reserved output was modified before publication.' }
+    } catch { throw "FAILED|$Context output reservation is invalid: $($_.Exception.Message)" }
 }
 
 function Write-StandardValidationJsonReserved {
-    param(
-        [Parameter(Mandatory = $true)][string] $Path,
-        [Parameter(Mandatory = $true)][System.IO.FileStream] $Stream,
-        [Parameter(Mandatory = $true)][string] $Token,
-        [Parameter(Mandatory = $true)] $Value
-    )
-    $svPhaseTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'report-write' -Silent:(-not $script:StandardValidationTimingEnabled)
-    $svPhaseTiming.calls = 1
-    $svPhaseState = 'completed'
-
+    param([Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Stream,
+        [Parameter(Mandatory = $true)][string]$Token,
+        [Parameter(Mandatory = $true)]$Value)
+    $timing = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'report-write' -Silent:(-not $script:StandardValidationTimingEnabled)
+    $timing.calls = 1; $state = 'completed'
     try {
-
-
-    Assert-StandardValidationOutputReservation -Path $Path -Stream $Stream -Token $Token -Context 'Final evidence'
-    $json = $Value | ConvertTo-Json -Depth 100
-    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($json + [Environment]::NewLine)
-    $Stream.SetLength(0)
-    $Stream.Position = 0
-    $Stream.Write($bytes, 0, $bytes.Length)
-    $Stream.Flush()
-    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
-        try {
-            $pathBytes = [System.IO.File]::ReadAllBytes($Path)
-            if ([Convert]::ToBase64String($pathBytes) -cne [Convert]::ToBase64String($bytes)) {
-                throw 'FAILED|Final evidence output path was substituted while writing.'
-            }
-        }
-        catch [System.IO.IOException] {
-            throw 'FAILED|Final evidence output path could not be revalidated after writing.'
-        }
-    }
-
-    }
-    catch {
-        $svPhaseState = if ($_.Exception.Message.StartsWith('CANCELLED|',[StringComparison]::Ordinal)) { 'cancelled' } else { 'failed' }
-        throw
-    }
-    finally {
-        Complete-StandardValidationPhase -Timing $svPhaseTiming -State $svPhaseState
-    }
+        Assert-StandardValidationOutputReservation -Path $Path -Stream $Stream -Token $Token -Context 'Final evidence'
+        $bytes = [Text.UTF8Encoding]::new($false).GetBytes(($Value | ConvertTo-Json -Depth 100) + [Environment]::NewLine)
+        $Stream.WriteNewBytes($bytes)
+        Assert-PlatformFileIdentity -Lease $Stream -Expected $Stream.Observation -SingleLink | Out-Null
+    } catch { $state = 'failed'; throw }
+    finally { Complete-StandardValidationPhase -Timing $timing -State $state }
 }
 
 function Register-StandardValidationEvidenceArtifact {
@@ -4423,9 +3298,12 @@ function Write-StandardValidationJsonCreate {
     if (-not [string]::IsNullOrWhiteSpace($parent)) { [void](New-Item -ItemType Directory -Path $parent -Force) }
     $json = $Value | ConvertTo-Json -Depth 100
     $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($json + [Environment]::NewLine)
-    $stream = [System.IO.File]::Open($fullPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-    try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush() }
-    finally { $stream.Dispose() }
+    $directory = Open-StandardValidationDirectory $parent -Create
+    try {
+        $file = Open-PlatformFile -ParentLease $directory -Leaf ([IO.Path]::GetFileName($fullPath)) -Access Write -CreateMode CreateNew
+        try { $file.WriteNewBytes($bytes) }
+        finally { $file.Dispose() }
+    } finally { $directory.Dispose() }
     Register-StandardValidationEvidenceArtifact -Path $fullPath -Context $Context
     return $fullPath
 
@@ -4777,6 +3655,14 @@ function Test-StandardValidationSourceEventOutputBinding {
         Assert-StandardValidationNoReparsePoints -Root $fullOutputPath -Context 'source-stage event output'
         $rawOutput = Get-StandardValidationJson -Path $fullOutputPath -Context 'source-stage event output'
         $rawProcess = Get-StandardValidationProperty -Object $rawOutput -Name 'process'
+        $eventOwnership = Get-StandardValidationProperty -Object $Event -Name 'processOwnership'
+        $rawOwnership = Get-StandardValidationProperty -Object $rawProcess -Name 'processOwnership'
+        if ($null -ne $eventOwnership -or $null -ne $rawOwnership) {
+            if ($null -eq $eventOwnership -or $null -eq $rawOwnership) { return $false }
+            Assert-StandardValidationProcessOwnership -Ownership $eventOwnership -Passed
+            Assert-StandardValidationProcessOwnership -Ownership $rawOwnership -Passed
+            if ((Convert-StandardValidationValueToCanonicalJson $eventOwnership -Context 'event process ownership') -cne (Convert-StandardValidationValueToCanonicalJson $rawOwnership -Context 'raw process ownership')) { return $false }
+        }
         $rawSchemaVersion = Get-StandardValidationProperty -Object $rawOutput -Name 'schemaVersion'
         $rawStdout = Get-StandardValidationProperty -Object $rawOutput -Name 'stdout'
         $rawStderr = Get-StandardValidationProperty -Object $rawOutput -Name 'stderr'
@@ -7285,7 +6171,7 @@ function Invoke-StandardValidationCommandAndRecord {
         [Parameter(Mandatory = $true)][string] $ExpectedAdapterSha256,
         [Parameter(Mandatory = $true)][int] $TimeoutSeconds,
         [string] $CancellationPath,
-        [System.IO.FileStream] $OutputReservationStream,
+        $OutputReservationStream,
         [string] $OutputReservationPath,
         [string] $OutputReservationToken,
         [switch] $AllowPlatformUnavailable,
@@ -7385,6 +6271,7 @@ function Invoke-StandardValidationCommandAndRecord {
         stdout = $eventStdout
         stderr = $eventStderr
         cleanedUp = [bool]$processResult.cleanedUp
+        processOwnership = Get-StandardValidationProperty -Object $processResult -Name 'processOwnership'
     }
     if ($processResult.PSObject.Properties.Name -contains 'outputQuotaExceeded') {
         $boundedProcessResult.outputQuotaExceeded = $eventOutputQuotaExceeded
@@ -7454,6 +6341,7 @@ function Invoke-StandardValidationCommandAndRecord {
         outputSha256 = Get-StandardValidationOutputHash -Stdout ([string]$processResult.stdout) -Stderr ([string]$processResult.stderr)
         outputPath = $rawOutputPath
         cleanedUp = [bool]$processResult.cleanedUp
+        processOwnership = Get-StandardValidationProperty -Object $processResult -Name 'processOwnership'
     }
     $script:StandardValidationLastEvent = $event
     if (-not [bool]$processResult.cleanedUp) { throw 'FAILED|Validation child process cleanup failed.' }
@@ -8738,9 +7626,13 @@ function Write-StandardCoreCapturedText {
     param([Parameter(Mandatory = $true)][string] $Path, [AllowEmptyString()][string] $Value)
 
     $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes([string]$Value)
-    $stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-    try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush() }
-    finally { $stream.Dispose() }
+    $fullPath = Get-StandardValidationFullPath -Path $Path -Context 'captured child stream'
+    $directory = Open-StandardValidationDirectory ([IO.Path]::GetDirectoryName($fullPath))
+    try {
+        $file = Open-PlatformFile -ParentLease $directory -Leaf ([IO.Path]::GetFileName($fullPath)) -Access Write -CreateMode CreateNew
+        try { $file.WriteNewBytes($bytes) }
+        finally { $file.Dispose() }
+    } finally { $directory.Dispose() }
     return Get-StandardValidationFileSha256 -Path $Path -Context 'core captured child stream'
 }
 
@@ -9373,6 +8265,11 @@ function Assert-StandardCoreSourceCheckReport {
             [string]$check.executableSha256 -cne [string]$declared.executableSha256 -or
             [string]$check.argumentsSha256 -cne (Get-StandardValidationTextSha256 -Value (ConvertTo-Json -InputObject ([string[]]$declared.arguments) -Compress))) { throw 'FAILED|Source repository dispatch differs from the retained adapter.' }
         if ($check.status -cne 'passed' -or $check.exitCode -ne 0 -or $check.cleanedUp -isnot [bool] -or -not $check.cleanedUp) { throw 'FAILED|Source repository check did not pass cleanly.' }
+        $ownership = Get-StandardValidationProperty -Object $check -Name 'processOwnership'
+        if ($null -ne $ownership) {
+            Assert-StandardValidationProcessOwnership -Ownership $ownership -Passed
+            if ($ownership.processId -ne $check.processId) { throw 'FAILED|Source repository process identity differs from its receipt.' }
+        }
         foreach ($stream in @('stdout','stderr')) {
             $path=[string]$check.($stream+'Path')
             if (-not (Test-StandardValidationPathWithin -Path $path -Root $Report.artifacts.runRoot)) { throw 'FAILED|Source repository output changed.' }
@@ -9530,6 +8427,7 @@ function Invoke-StandardCoreValidationRun {
     $snapshotRoot = $null
     $lockPath = $null
     $lockStream = $null
+    $lockParent = $null; $lockGate = $null
     $lockOwned = $false
     $lockToken = $null
     $lockBytes = $null
@@ -9574,8 +8472,12 @@ function Invoke-StandardCoreValidationRun {
         Assert-StandardValidationCanonicalRootPath -Path $outputFull -Context 'OutputPath' | Out-Null
 
         $lockPath = Join-Path $artifactRootFull '.standard-core-validation.lock'
-        try { $lockStream = [IO.File]::Open($lockPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
-        catch [IO.IOException] { throw 'BLOCKED|Another standard core validation run owns ArtifactsRoot, or its create-only lock already exists.' }
+        try {
+            $lockParent = Open-StandardValidationDirectory $artifactRootFull
+            $lockGate = Enter-PlatformLock -ParentLease $lockParent -Leaf '.standard-core-validation.guard' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
+            $lockStream = Open-PlatformFile -ParentLease $lockParent -Leaf ([IO.Path]::GetFileName($lockPath)) -Access ReadWrite -CreateMode CreateNew
+        }
+        catch { throw 'BLOCKED|Another standard core validation run owns ArtifactsRoot, or its create-only lock already exists.' }
         $lockOwned = $true
         $lockToken = [guid]::NewGuid().ToString('N')
         $lockValue = [ordered]@{
@@ -9586,8 +8488,7 @@ function Invoke-StandardCoreValidationRun {
         }
         $lockText = ($lockValue | ConvertTo-Json -Compress) + [Environment]::NewLine
         $lockBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($lockText)
-        $lockStream.Write($lockBytes, 0, $lockBytes.Length)
-        $lockStream.Flush()
+        $lockStream.WriteNewBytes($lockBytes)
         $outputReservation = New-StandardValidationOutputReservation -Path $outputFull
         $outputReservationStream = $outputReservation.stream
         $outputReservationToken = [string]$outputReservation.token
@@ -9818,6 +8719,7 @@ function Invoke-StandardCoreValidationRun {
                 exitCode = [int]$processResult.exitCode
                 status = $checkStatus
                 cleanedUp = [bool]$processResult.cleanedUp
+                processOwnership = Get-StandardValidationProperty -Object $processResult -Name 'processOwnership'
                 stdoutPath = [string]$stdoutPath
                 stdoutSha256 = [string]$stdoutSha256
                 stderrPath = [string]$stderrPath
@@ -9865,26 +8767,10 @@ function Invoke-StandardCoreValidationRun {
     finally {
         if ($lockOwned) {
             try {
-                if ($null -eq $lockStream -or $lockStream.SafeFileHandle.IsClosed) { throw 'The core artifact lock handle is no longer valid.' }
-                $expectedLockBytes = $lockBytes
-                if ($lockStream.Length -ne $expectedLockBytes.Length) { throw 'The core artifact lock ownership token changed.' }
-                $lockPosition = $lockStream.Position
-                try {
-                    $lockStream.Position = 0
-                    $observedLockBytes = New-Object byte[] $expectedLockBytes.Length
-                    $lockRead = $lockStream.Read($observedLockBytes, 0, $observedLockBytes.Length)
-                    if ($lockRead -ne $expectedLockBytes.Length -or
-                        [Convert]::ToBase64String($observedLockBytes) -cne [Convert]::ToBase64String($expectedLockBytes)) {
-                        throw 'The core artifact lock ownership token changed.'
-                    }
-                }
-                finally { $lockStream.Position = $lockPosition }
-                if (-not [IO.File]::Exists($lockPath)) { throw 'The core artifact lock path disappeared before final evidence publication.' }
-                if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
-                    $pathLockBytes = [IO.File]::ReadAllBytes($lockPath)
-                    if ([Convert]::ToBase64String($pathLockBytes) -cne [Convert]::ToBase64String($expectedLockBytes)) {
-                        throw 'The core artifact lock path was substituted before final evidence publication.'
-                    }
+                Assert-PlatformFileIdentity -Lease $lockStream -Expected $lockStream.Observation -SingleLink | Out-Null
+                $observedLockBytes = $lockStream.ReadAllBytes($lockBytes.Length)
+                if ([Convert]::ToBase64String($observedLockBytes) -cne [Convert]::ToBase64String($lockBytes)) {
+                    throw 'The core artifact lock ownership token changed.'
                 }
             }
             catch {
@@ -9946,6 +8832,8 @@ function Invoke-StandardCoreValidationRun {
             try { $lockStream.Dispose() } catch { }
             $lockStream = $null
         }
+        if ($null -ne $lockGate) { $lockGate.Dispose() }
+        if ($null -ne $lockParent) { $lockParent.Dispose() }
     }
     if ($state -ne [string]$finalEvidence.state) {
         $finalEvidence = New-StandardCoreEvidence -RunId $runId -State $state -ExitCode ([int]$script:StandardValidationExitCodes[$state]) -ContentMode $contentMode -Candidate $candidateEvidence -Authority $authorityEvidence -Adapter $adapterEvidence -Checks @($checkEvidence.ToArray()) -Artifacts $artifactEvidence -SourceEvidence $sourceEvidence -FailureMessage $failureMessage
@@ -10350,15 +9238,17 @@ function Invoke-StandardValidationRun {
         [void](New-Item -ItemType Directory -Path $lockDirectory -Force)
         $lockPath = Join-Path $lockDirectory "$executionKey.lock"
         try {
-            $lockStream = [System.IO.File]::Open($lockPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            $lockParent = Open-StandardValidationDirectory $lockDirectory
+            try { $lockStream = Open-PlatformFile -ParentLease $lockParent -Leaf ([IO.Path]::GetFileName($lockPath)) -Access ReadWrite -CreateMode CreateNew }
+            finally { $lockParent.Dispose() }
             try {
                 $lockBytes = (New-Object Text.UTF8Encoding($false)).GetBytes(([ordered]@{ runId = $runId.ToString(); candidateId = $candidateId; eventName = $EventName } | ConvertTo-Json -Compress) + [Environment]::NewLine)
-                $lockStream.Write($lockBytes, 0, $lockBytes.Length); $lockStream.Flush()
+                $lockStream.WriteNewBytes($lockBytes)
             }
             finally { $lockStream.Dispose() }
             $lockCreated = $true
         }
-        catch [System.IO.IOException] { throw 'INVALID|A canonical execution already exists for this event and candidate.' }
+        catch { throw 'INVALID|A canonical execution already exists for this event and candidate.' }
         $runRoot = Join-Path (Join-Path $artifactRootFull 'runs') $executionKey
         [void](New-Item -ItemType Directory -Path $runRoot -Force)
         # Keep the process-boundary path compact for Windows PowerShell 5.1.

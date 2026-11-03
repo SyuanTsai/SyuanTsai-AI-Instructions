@@ -1201,3 +1201,19 @@ Describe 'Third-party raw Skill authority routing' {
         if (-not $gate.Contains('skill-repository-standard.Tests.ps1')) {throw 'The same authority gate must execute the raw ownership regression.'}
     }
 }
+
+Describe 'Validator platform authority routing' {
+    # Scenario: The platform receipt contract changes while authority preparation stays in P5.3.
+    # Purpose: Keep both existing authority workflows routed through the same gate and retain shared primitives in policy.
+    It 'UnitT10_preserves_authority_gate_and_shared_primitive_policy' {
+        $root = Split-Path -Parent $PSScriptRoot
+        $policy = Get-Content -Raw (Join-Path $root 'docs/standards/standard-core-validation-v2.json') | ConvertFrom-Json
+        foreach ($primitive in @('Open-PlatformDirectory','Open-PlatformFile','Assert-PlatformFileIdentity','Enter-PlatformLock','Start-PlatformOwnedProcess','Stop-PlatformOwnedProcess')) {
+            $policy.processOwnership.primitives | Should -Contain $primitive
+        }
+        $workflow = Get-Content -Raw (Join-Path $root '.github/workflows/standards-conformance.yml')
+        $workflow.Contains('Invoke-StandardAuthorityGate.ps1') | Should -BeTrue
+        $composition = Get-Content -Raw (Join-Path $root '.github/workflows/pr8-powershell-validation.yml')
+        $composition.Contains('Invoke-StandardAuthorityGate.ps1') | Should -BeTrue
+    }
+}

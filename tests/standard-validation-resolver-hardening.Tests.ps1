@@ -1941,3 +1941,48 @@ Describe 'SYP280 Core candidate inventory diagnostics SourceValidation' {
     }
     }
 }
+
+Describe 'Validator platform evidence hardening' {
+    BeforeAll { . (Join-Path $PSScriptRoot 'Initialize-SourceGateFixture.ps1') }
+    # Scenario: A cooperative macOS event is projected and then claims strong isolation or changes its runtime binding.
+    # Purpose: Reject overstated capability, uncertain cleanup and raw/projected ownership disagreement.
+    It 'UnitT10_rejects_false_isolation_and_unbound_process_receipts' {
+        $report = New-SourceGateFixture
+        $event = $report.sourceValidation.events[0]
+        $ownership = [pscustomobject]@{
+            processId=123; startIdentity='fixture-start'; isolation='macos-process-group'; isolationLevel='cooperative'
+            limitations=@('same-account-adversarial-writer-out-of-scope','no-filesystem-isolation','macos-process-group-cannot-detect-setsid-escape','group-signal-external-reaper-race')
+            terminationReason='cancelled'
+            cleanup=[pscustomobject]@{CleanedUp=$true;Isolation='macos-process-group';Limitations=@('macos-process-group-cannot-detect-setsid-escape','group-signal-external-reaper-race');Uncertainty=$null;SignalsSent=1;RemainingPids=@();UnixObservation=$null;CaptureReadersStopped=$true;CaptureResourcesClosed=$true}
+            runtime=[pscustomobject]@{apiVersion='1.0';manifestSha256=('a'*64);powerShellVersion='7.6.6'}
+        }
+        $event | Add-Member -NotePropertyName processOwnership -NotePropertyValue $ownership
+        $raw = Get-Content -Raw $event.outputPath | ConvertFrom-Json
+        $raw.process | Add-Member -NotePropertyName processOwnership -NotePropertyValue $ownership
+        Write-SourceGateFixtureJson $event.outputPath $raw
+        (Test-StandardValidationSourceEventOutputBinding -Event $event -Report $report) | Should -BeTrue
+        $ownership.isolationLevel='strong'
+        (Test-StandardValidationSourceEventOutputBinding -Event $event -Report $report) | Should -BeFalse
+        $ownership.isolationLevel='cooperative'; $ownership.cleanup.CaptureResourcesClosed=$false
+        (Test-StandardValidationSourceEventOutputBinding -Event $event -Report $report) | Should -BeFalse
+        $ownership.cleanup.CaptureResourcesClosed=$true; $ownership.runtime.manifestSha256='b'*64
+        (Test-StandardValidationSourceEventOutputBinding -Event $event -Report $report) | Should -BeFalse
+    }
+    # Scenario: The common source fixture constructs a package launcher for this host.
+    # Purpose: Unix source validation must not inherit Windows shim metadata or non-executable fixtures.
+    It 'InterT20_builds_host_native_executable_fixture' {
+        $report = New-SourceGateFixture
+        $binding = @($report.sourceValidation.toolReceipts | Where-Object { [IO.Path]::GetFileName($_.path) -ceq 'skill-tools.json' })[0]
+        $receipt = Get-Content -Raw $binding.path | ConvertFrom-Json
+        $receipt.launcher.kind | Should -Be $(if ($IsWindows) { 'windows-cmd-shim' } else { 'unix-node-shim' })
+        if (-not $IsWindows) {
+            ([IO.File]::GetUnixFileMode($receipt.nodePath) -band [IO.UnixFileMode]::UserExecute) | Should -Not -Be 0
+            & $receipt.nodePath
+            $LASTEXITCODE | Should -Be 0
+        } else {
+            & $receipt.executablePath
+            $LASTEXITCODE | Should -Be 0
+        }
+        (Invoke-SourceGateFixture -Report $report) | Should -BeTrue
+    }
+}

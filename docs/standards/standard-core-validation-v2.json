@@ -23,6 +23,40 @@
     "optionalInput": "AllowDevelopmentContent",
     "eventNames": ["local", "pre-push", "pull_request", "push", "workflow_dispatch"]
   },
+  "processOwnership": {
+    "contract": "platform-owned-process-v1",
+    "primitives": [
+      "Open-PlatformDirectory",
+      "Open-PlatformFile",
+      "Assert-PlatformFileIdentity",
+      "Enter-PlatformLock",
+      "Start-PlatformOwnedProcess",
+      "Stop-PlatformOwnedProcess"
+    ],
+    "receipt": "processOwnership",
+    "runtimeBinding": [
+      "apiVersion",
+      "manifestSha256",
+      "powerShellVersion"
+    ],
+    "isolationLevels": {
+      "windows-job-object": "strong",
+      "linux-process-group-subreaper": "cooperative",
+      "macos-process-group": "cooperative"
+    },
+    "requiredLimitations": [
+      "same-account-adversarial-writer-out-of-scope",
+      "no-filesystem-isolation"
+    ],
+    "cleanupPassRequires": [
+      "CleanedUp",
+      "CaptureReadersStopped",
+      "CaptureResourcesClosed",
+      "no-remaining-pids",
+      "no-uncertainty"
+    ],
+    "historicalEvidence": "Missing processOwnership is historical-only and never attests shared-runtime execution."
+  },
   "core": {
     "identity": "full candidate and authority Git commit revisions",
     "sourceBinding": "canonical HTTPS SourceRepository and equivalent single local origin URL",

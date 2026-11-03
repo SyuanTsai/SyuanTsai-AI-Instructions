@@ -2,13 +2,14 @@ Describe 'Standard Core supervisor progress' {
     BeforeAll {
         $script:CoreProgressRoot = Split-Path -Parent $PSScriptRoot
         $script:CoreProgressRunner = Join-Path $script:CoreProgressRoot 'scripts/Invoke-StandardValidation.ps1'
-        $script:CoreProgressPwsh = Join-Path $PSHOME 'pwsh.exe'
+        $script:CoreProgressPwsh = Join-Path $PSHOME $(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'pwsh.exe' } else { 'pwsh' })
         if (-not (Test-Path -LiteralPath $script:CoreProgressPwsh -PathType Leaf)) {
-            throw 'This Windows Core regression requires the installed pwsh.exe.'
+            throw 'This regression requires the current PowerShell Core executable.'
         }
 
         function New-CoreProgressFixture {
             param([string] $Root, [string] $Kind, [int] $TimeoutSeconds, [int] $SleepSeconds, [int] $ProgressIntervalSeconds = 30)
+            if ($IsMacOS -and $Root.StartsWith('/var/')) { $Root = '/private' + $Root }
             [void](New-Item -ItemType Directory -Path $Root -Force)
             $childPath = Join-Path $Root 'child.ps1'
             $launcherPath = Join-Path $Root 'launcher.ps1'
@@ -20,9 +21,9 @@ $boundedFixtureTimeoutSeconds = $TimeoutSeconds
 . $Runner -CandidateRoot $PSScriptRoot -AdapterPath $Child -ArtifactsRoot $PSScriptRoot `
     -SourceRepository 'https://example.test/core-progress.git' `
     -SourceRevision ('a' * 40) -BaseRevision ('b' * 40) -DefineFunctionsOnly
-$pwsh = Join-Path $PSHOME 'pwsh.exe'
+$pwsh = Join-Path $PSHOME $(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'pwsh.exe' } else { 'pwsh' })
 $result = Invoke-StandardValidationProcess -Command $pwsh `
-    -Arguments @('-NoProfile','-NonInteractive','-File',$Child) `
+    -Arguments @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$Child) `
     -WorkingDirectory $PSScriptRoot `
     -Environment @{ STANDARD_VALIDATION_STAGE_ID = 'repository-tests'; STANDARD_VALIDATION_TOOL_ID = 'repository-test-pester' } `
     -TimeoutSeconds $boundedFixtureTimeoutSeconds -CoreLifecycleOnly -EmitSupervisorProgress:($Kind -ceq 'pester') `
@@ -41,7 +42,7 @@ $result = Invoke-StandardValidationProcess -Command $pwsh `
             $info.CreateNoWindow = $true
             $info.RedirectStandardOutput = $true
             $info.RedirectStandardError = $true
-            foreach ($arg in @('-NoProfile','-NonInteractive','-File',[string]$Fixture.Launcher,'-Runner',$script:CoreProgressRunner,'-Child',[string]$Fixture.Child,'-Kind',[string]$Fixture.Kind,'-TimeoutSeconds',[string]$Fixture.TimeoutSeconds,'-ProgressIntervalSeconds',[string]$Fixture.ProgressIntervalSeconds)) {
+            foreach ($arg in @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',[string]$Fixture.Launcher,'-Runner',$script:CoreProgressRunner,'-Child',[string]$Fixture.Child,'-Kind',[string]$Fixture.Kind,'-TimeoutSeconds',[string]$Fixture.TimeoutSeconds,'-ProgressIntervalSeconds',[string]$Fixture.ProgressIntervalSeconds)) {
                 [void]$info.ArgumentList.Add($arg)
             }
             $process = [Diagnostics.Process]::new()

@@ -1,5 +1,149 @@
 
 
+Describe 'Validator shared process evidence' {
+    BeforeAll {
+        if ($IsMacOS -and $TestDrive.StartsWith('/var/')) { $TestDrive = '/private' + $TestDrive }
+        . (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-StandardValidation.ps1') -CandidateRoot $TestDrive -AdapterPath 'unused' -ArtifactsRoot $TestDrive -SourceRepository 'https://example.test/fixture.git' -SourceRevision ('a'*40) -BaseRevision ('b'*40) -DefineFunctionsOnly
+        $script:ValidatorTestHost = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
+        function Invoke-ValidatorProcessFixture {
+            param([string]$Text, [int]$Timeout = 10, [string]$Cancel, [string[]]$ChildArguments = @())
+            $root = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($root)
+            $child = Join-Path $root 'child.ps1'
+            [IO.File]::WriteAllText($child,$Text,[Text.UTF8Encoding]::new($false))
+            $arguments = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$child) + $ChildArguments
+            if (-not [string]::IsNullOrEmpty($Cancel)) { $arguments += @('-CancelPath',$Cancel) }
+            Invoke-StandardValidationProcess -Command $script:ValidatorTestHost -Arguments $arguments -WorkingDirectory $root -Environment @{} -TimeoutSeconds $Timeout -CancellationPath $Cancel
+        }
+    }
+    # Scenario: A real child completes with two bounded streams.
+    # Purpose: Bind the actual P3 isolation, cleanup and runtime to the validator result.
+    It 'InterT10_records_actual_platform_owner_and_runtime' {
+        $result = Invoke-ValidatorProcessFixture "[Console]::Out.Write('ok'); [Console]::Error.Write('diagnostic'); exit 0"
+        $result.status | Should -Be 'passed'
+        $result.stdout | Should -Be 'ok'
+        $result.stderr | Should -Be 'diagnostic'
+        $result.processOwnership.startIdentity | Should -Not -BeNullOrEmpty
+        $result.processOwnership.isolationLevel | Should -Be $(if ($IsWindows) { 'strong' } else { 'cooperative' })
+        $result.processOwnership.cleanup.CleanedUp | Should -Be $true
+        $result.processOwnership.runtime.manifestSha256 | Should -Match '^[a-f0-9]{64}$'
+        $result.processOwnership.limitations | Should -Contain 'same-account-adversarial-writer-out-of-scope'
+        $schemaPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/schemas/standard-core-evidence-v2.schema.json'
+        $schema = Get-Content -Raw $schemaPath | ConvertFrom-Json
+        Test-Json -Json ($result.processOwnership | ConvertTo-Json -Depth 30) -Schema ($schema.'$defs'.processOwnership | ConvertTo-Json -Depth 30) | Should -BeTrue
+    }
+    # Scenario: A real child exceeds its deadline.
+    # Purpose: Preserve timeout and verified cleanup across the shared boundary.
+    It 'InterT20_bounds_timeout' {
+        $result = Invoke-ValidatorProcessFixture 'Start-Sleep -Seconds 30' -Timeout 1
+        $result.status | Should -Be 'timeout'
+        $result.cleanedUp | Should -Be $true
+        $result.processOwnership.terminationReason | Should -Be 'deadline'
+    }
+    # Scenario: The real child writes the cancellation marker while it is running.
+    # Purpose: Exercise cancellation after owned start, not only the pre-start branch.
+    It 'InterT30_cancels_running_child' {
+        $cancel = Join-Path $TestDrive 'cancel-running'
+        $result = Invoke-ValidatorProcessFixture 'param([string]$CancelPath) [IO.File]::WriteAllText($CancelPath,"cancel"); Start-Sleep -Seconds 30' -Cancel $cancel
+        $result.status | Should -Be 'cancelled'
+        $result.cleanedUp | Should -Be $true
+    }
+    # Scenario: Each real stream independently exceeds a small capture budget.
+    # Purpose: Keep per-stream bounded prefixes and fail the command on overflow.
+    It 'InterT40_enforces_each_stream_quota' {
+        $previous = $script:StandardValidationChildOutputQuotaCharacters
+        try {
+            $script:StandardValidationChildOutputQuotaCharacters = 128
+            foreach ($stream in @('Out','Error')) {
+                $result = Invoke-ValidatorProcessFixture 'param([string]$Stream) if ($Stream -eq "Out") { [Console]::Out.Write(("x"*4096)) } else { [Console]::Error.Write(("x"*4096)) }; Start-Sleep -Seconds 30' -ChildArguments @('-Stream',$stream)
+                $result.status | Should -Be 'failed'
+                $result.outputQuotaExceeded | Should -Be $true
+                $result.stdout.Length | Should -BeLessThan 129
+                $result.stderr.Length | Should -BeLessThan 129
+                $result.cleanedUp | Should -Be $true
+            }
+        } finally { $script:StandardValidationChildOutputQuotaCharacters = $previous }
+    }
+    # Scenario: The child starts a grandchild and exits without waiting for it.
+    # Purpose: A successful root exit must still reclaim the owned descendant.
+    It 'InterT50_reclaims_descendants_after_parent_exit' {
+        $result = Invoke-ValidatorProcessFixture @'
+$info = [Diagnostics.ProcessStartInfo]::new()
+$info.FileName = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
+$info.UseShellExecute = $false
+$info.CreateNoWindow = $true
+foreach ($arg in @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-Command','Start-Sleep -Seconds 30')) { [void]$info.ArgumentList.Add($arg) }
+$child = [Diagnostics.Process]::Start($info)
+[Console]::WriteLine($child.Id)
+exit 0
+'@
+        $result.status | Should -Be 'passed'
+        $result.cleanedUp | Should -Be $true
+        $descendant = Get-Process -Id ([int]$result.stdout.Trim()) -ErrorAction SilentlyContinue
+        $descendant | Should -BeNullOrEmpty
+        $result.processOwnership.cleanup.RemainingPids.Count | Should -Be 0
+    }
+    # Scenario: Cleanup receives the wrong start identity for a real live child.
+    # Purpose: PID reuse protection sends no signal, and an uncertain receipt cannot pass.
+    It 'InterT60_rejects_stale_identity_and_fails_closed_on_cleanup' {
+        $script:ValidatorStaleIdentityObserved = $false
+        Mock Stop-StandardValidationOwnedProcess {
+            param($Lease, $ExpectedStartIdentity, $CancellationRequested)
+            $receipt = Stop-PlatformOwnedProcess -Lease $Lease -ExpectedStartIdentity 'stale-start-identity'
+            $script:ValidatorStaleIdentityObserved = $receipt.SignalsSent -eq 0 -and -not $receipt.CleanedUp
+            return $receipt
+        }
+        # Child creates its cancellation barrier, keeping it live until cleanup.
+        $cancel = Join-Path $TestDrive 'cancel-stale'
+        $result = Invoke-ValidatorProcessFixture 'param([string]$CancelPath) [IO.File]::WriteAllText($CancelPath,"cancel"); Start-Sleep -Seconds 30' -Cancel $cancel
+        $script:ValidatorStaleIdentityObserved | Should -BeTrue
+        $result.status | Should -Be 'cleanup-failed'
+        $result.cleanedUp | Should -BeFalse
+        $result.processOwnership.cleanup.Uncertainty | Should -Be 'process-start-identity-mismatch'
+        # Dispose still performs a valid cleanup after the rejected request.
+        (Get-Process -Id $result.processId -ErrorAction SilentlyContinue) | Should -BeNullOrEmpty
+    }
+    # Scenario: Output is reserved once and the session location differs from the native current directory.
+    # Purpose: P2 identity, create-only publication and PowerShell-relative path semantics remain intact.
+    It 'InterT70_publishes_only_the_reserved_output_once' {
+        $root = Join-Path $TestDrive 'reservation'
+        [void][IO.Directory]::CreateDirectory($root)
+        Push-Location $root
+        try {
+            (Get-StandardValidationFullPath -Path 'evidence.json' -Context 'fixture') | Should -Be (Join-Path $root 'evidence.json')
+            $reservation = New-StandardValidationOutputReservation -Path 'evidence.json'
+            try {
+                { New-StandardValidationOutputReservation -Path 'evidence.json' } | Should -Throw
+                { Assert-StandardValidationOutputReservation -Path 'other.json' -Stream $reservation.stream -Token $reservation.token -Context 'fixture' } | Should -Throw
+                Write-StandardValidationJsonReserved -Path 'evidence.json' -Stream $reservation.stream -Token $reservation.token -Value @{state='PASS'}
+                { Write-StandardValidationJsonReserved -Path 'evidence.json' -Stream $reservation.stream -Token $reservation.token -Value @{state='FAILED'} } | Should -Throw
+            } finally { $reservation.stream.Dispose() }
+            (Get-Content -Raw 'evidence.json' | ConvertFrom-Json).state | Should -Be 'PASS'
+        } finally { Pop-Location }
+    }
+    # Scenario: The command is a script rather than a native executable.
+    # Purpose: The shared owner still supports interpreter dispatch and preserves argument boundaries.
+    It 'InterT80_runs_script_command_with_literal_arguments' {
+        $child = Join-Path $TestDrive 'literal.ps1'
+        [IO.File]::WriteAllText($child,'param([string]$Value) [Console]::Write($Value); exit 0',[Text.UTF8Encoding]::new($false))
+        $result = Invoke-StandardValidationProcess -Command $child -Arguments @('space and & literal') -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 10
+        $result.status | Should -Be 'passed'
+        $result.stdout | Should -Be 'space and & literal'
+    }
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        # Scenario: A Windows command shim requires an interpreter.
+        # Purpose: Preserve command-shim support inside the P3 Job boundary.
+        It 'InterT90_runs_windows_command_shim' {
+            $child = Join-Path $TestDrive 'literal.cmd'
+            [IO.File]::WriteAllText($child,"@echo off`r`necho fixture-shim`r`nexit /b 0`r`n",[Text.UTF8Encoding]::new($false))
+            $result = Invoke-StandardValidationProcess -Command $child -Arguments @() -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 10
+            $result.status | Should -Be 'passed'
+            $result.stdout.Trim() | Should -Be 'fixture-shim'
+            $result.processOwnership.isolation | Should -Be 'windows-job-object'
+        }
+    }
+}
+
 Describe 'Pester shard plan contract' {
     # Scenario: P3 returns completion, timeout, cancellation, quota and uncertain cleanup observations.
     # Purpose: Only a confirmed owner receipt can authorize completed; child result fields are irrelevant.
@@ -500,7 +644,7 @@ Describe 'S1B3 ordinary default adapter version' {
         [IO.File]::WriteAllText($adapter, '{"schemaVersion":1}', (New-Object Text.UTF8Encoding($false)))
         $repoRoot = Split-Path -Parent $PSScriptRoot
         $runnerPath = Join-Path $repoRoot 'scripts/Invoke-StandardValidation.ps1'
-        $runtime = if ($PSVersionTable.PSEdition -eq 'Desktop') { Join-Path $PSHOME 'powershell.exe' } else { Join-Path $PSHOME 'pwsh.exe' }
+        $runtime = if ($PSVersionTable.PSEdition -eq 'Desktop') { Join-Path $PSHOME 'powershell.exe' } else { Join-Path $PSHOME $(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'pwsh.exe' } else { 'pwsh' }) }
         $scriptText = @"
 `$ErrorActionPreference = 'Stop'
 & '$runnerPath' -CandidateRoot '$candidate' -AdapterPath '$adapter' -ArtifactsRoot '$artifacts' -OutputPath '$artifacts/evidence.json' -SourceRepository 'https://example.com/example/skills.git' -SourceRevision ('a' * 40) -BaseRevision ('b' * 40) -EventName local -TrustedToolRoot '$PSHOME'
@@ -561,8 +705,8 @@ Describe 'S1B3 ordinary v2 retained refusal boundaries' {
         $authorityRevisionOutput = & git -c $authoritySafeDirectory -C $script:CoreBoundaryRepositoryRoot rev-parse HEAD
         if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the authority fixture revision.' }
         $script:CoreBoundaryAuthorityRevision = ([string]$authorityRevisionOutput).Trim()
-        $script:CoreBoundaryPowerShellPath = if (Test-Path -LiteralPath (Join-Path $PSHOME 'pwsh.exe') -PathType Leaf) {
-            Join-Path $PSHOME 'pwsh.exe'
+        $script:CoreBoundaryPowerShellPath = if (Test-Path -LiteralPath (Join-Path $PSHOME $(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'pwsh.exe' } else { 'pwsh' })) -PathType Leaf) {
+            Join-Path $PSHOME $(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'pwsh.exe' } else { 'pwsh' })
         }
         else { Join-Path $PSHOME 'powershell.exe' }
 

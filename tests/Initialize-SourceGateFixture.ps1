@@ -1,5 +1,10 @@
 # Shared fixtures for source validation contract tests.
 $script:SourceGateTestRoot = $PSScriptRoot
+# P2 rejects ancestor symlinks. Darwin's temporary directory commonly uses the
+# /var alias; fixtures choose its physical /private/var spelling before creation.
+if ($PSVersionTable.PSEdition -ceq 'Core' -and $IsMacOS -and $TestDrive.StartsWith('/var/')) {
+    $TestDrive = '/private' + $TestDrive
+}
 
         $script:SourceGateRunnerPath = Join-Path (Split-Path -Parent $script:SourceGateTestRoot) 'scripts/Invoke-StandardValidation.ps1'
         . $script:SourceGateRunnerPath -CandidateRoot $TestDrive -AdapterPath (Join-Path $TestDrive 'adapter.json') -ArtifactsRoot (Join-Path $TestDrive 'artifacts') -SourceRepository 'https://example.com/example/skills.git' -SourceRevision ('a' * 40) -BaseRevision ('b' * 40) -DefineFunctionsOnly
@@ -8,8 +13,18 @@ $script:SourceGateTestRoot = $PSScriptRoot
             param([string] $Path, $Value)
             [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 100), (New-Object Text.UTF8Encoding($false)))
         }
+        function Write-SourceGateExecutableFixture {
+            param([string]$Path)
+            $windows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+            $text = if ($windows) { "@echo off`r`nexit /b 0`r`n" } else { "#!/bin/sh`nexit 0`n" }
+            [IO.File]::WriteAllText($Path,$text,[Text.UTF8Encoding]::new($false))
+            if (-not $windows) {
+                [IO.File]::SetUnixFileMode($Path, [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite -bor [IO.UnixFileMode]::UserExecute)
+            }
+        }
         function New-SourceGateFixture {
             param([switch] $CentralRawTests, [switch] $LargeSkillToolsClosure, [switch] $OutsideArtifactCommand, [switch] $UnownedSharedControl)
+            $fixtureWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
             $root = Join-Path $TestDrive ([guid]::NewGuid().ToString('N').Substring(0, 8))
             $runId = 'c' * 32
             $runRoot = Join-Path $root ('runs/' + $runId)
@@ -31,8 +46,8 @@ $script:SourceGateTestRoot = $PSScriptRoot
             $caseSnapshotSha256=Get-StandardValidationTextSha256 -Value (ConvertTo-Json -InputObject $caseSnapshotRows -Depth 3 -Compress)
             $fixtureToolsRoot=Join-Path $TestDrive ([IO.Path]::GetFileName($root) + '-tools')
             [void][IO.Directory]::CreateDirectory($fixtureToolsRoot)
-            $toolPath = if($OutsideArtifactCommand){Join-Path $fixtureToolsRoot 'source-wrapper.bin'}else{Join-Path $root 'fixture-tool.bin'}
-            [IO.File]::WriteAllText($toolPath, 'fixture tool', (New-Object Text.UTF8Encoding($false)))
+            $toolPath = if($OutsideArtifactCommand){Join-Path $fixtureToolsRoot $(if ($fixtureWindows) { 'source-wrapper.cmd' } else { 'source-wrapper.sh' })}else{Join-Path $root $(if ($fixtureWindows) { 'fixture-tool.cmd' } else { 'fixture-tool.sh' })}
+            Write-SourceGateExecutableFixture $toolPath
             $frozen = @([pscustomobject]@{ path = $toolPath; sha256 = Get-StandardValidationFileSha256 -Path $toolPath -Context 'fixture tool' })
             $receipts = @()
             $receiptValues = @{}
@@ -46,10 +61,10 @@ $script:SourceGateTestRoot = $PSScriptRoot
                 $identityKind=switch($name) {'skill-validator' {'go-module-version-build-info-and-binary-hash'}; 'skill-tools' {'registry-integrity-and-locked-dependency-closure'}; 'skillspector' {'release-commit-asset-metadata-dependency-closure-and-executable'}}
                 $receiptValue=[pscustomobject]@{ schemaVersion=1; toolName=$name; resolutionRunId=$runId; resolvedAtUtc=[DateTime]::UtcNow.ToString('o'); executionContext='local'; frozenForRun=$true; channel='latest-stable'; source=$policy.tools.$name.source; resolvedVersion='1.0.0'; resolvedIdentity='fixture identity'; identityKind=$identityKind; executablePath=$toolPath; executableSha256=$frozen[0].sha256; installRoot=$installRoot; installedClosureSha256=$null; dependencyClosureSha256=$null; dependencyClosure=@(); launcher=$launcher;launcherDigestSha256=$null }
                 if ($name -ceq 'skill-tools') {
-                    $shim=Join-Path $installRoot 'skill-tools.cmd';$payload=Join-Path $installRoot 'index.js';$node=Join-Path $fixtureToolsRoot 'node.exe'
-                    [IO.File]::WriteAllText($shim, '@echo off', (New-Object Text.UTF8Encoding($false)))
+                    $shim=Join-Path $installRoot $(if ($fixtureWindows) { 'skill-tools.cmd' } else { 'skill-tools' });$payload=Join-Path $installRoot 'index.js';$node=Join-Path $fixtureToolsRoot $(if ($fixtureWindows) { 'node.exe' } else { 'node' })
+                    Write-SourceGateExecutableFixture $shim
                     [IO.File]::WriteAllText($payload, '// fixture package payload', (New-Object Text.UTF8Encoding($false)))
-                    [IO.File]::WriteAllText($node, 'fixture Node runtime', (New-Object Text.UTF8Encoding($false)))
+                    Write-SourceGateExecutableFixture $node
                     foreach ($filePath in @($shim,$payload,$node)) { $frozen += [pscustomobject]@{path=$filePath;sha256=Get-StandardValidationFileSha256 -Path $filePath -Context 'fixture package launcher'} }
                     $receiptValue.executablePath=$shim;$receiptValue.executableSha256=Get-StandardValidationFileSha256 -Path $shim -Context 'fixture shim'
                     $receiptValue | Add-Member -NotePropertyName entryPointPath -NotePropertyValue $payload
@@ -57,11 +72,11 @@ $script:SourceGateTestRoot = $PSScriptRoot
                     $receiptValue | Add-Member -NotePropertyName nodePath -NotePropertyValue $node
                     $receiptValue | Add-Member -NotePropertyName nodeSha256 -NotePropertyValue (Get-StandardValidationFileSha256 -Path $node -Context 'fixture runtime')
                     $receiptValue | Add-Member -NotePropertyName executableVerified -NotePropertyValue $true
-                    $launcher.kind='windows-cmd-shim';$launcher.shimPath=$shim;$launcher.shimSha256=$receiptValue.executableSha256;$launcher.payloadPath=$payload;$launcher.payloadSha256=$receiptValue.entryPointSha256;$launcher.runtimePath=$node;$launcher.runtimeSha256=$receiptValue.nodeSha256
+                    $launcher.kind=$(if ($fixtureWindows) { 'windows-cmd-shim' } else { 'unix-node-shim' });$launcher.shimPath=$shim;$launcher.shimSha256=$receiptValue.executableSha256;$launcher.payloadPath=$payload;$launcher.payloadSha256=$receiptValue.entryPointSha256;$launcher.runtimePath=$node;$launcher.runtimeSha256=$receiptValue.nodeSha256
                 }
                 else {
-                    $installedExecutable=Join-Path $installRoot ($name + '.exe')
-                    [IO.File]::WriteAllText($installedExecutable, ('fixture executable ' + $name), (New-Object Text.UTF8Encoding($false)))
+                    $installedExecutable=Join-Path $installRoot $(if ($fixtureWindows) { $name + '.cmd' } else { $name })
+                    Write-SourceGateExecutableFixture $installedExecutable
                     $receiptValue.executablePath=$installedExecutable;$receiptValue.executableSha256=Get-StandardValidationFileSha256 -Path $installedExecutable -Context 'fixture installed executable'
                     $frozen += [pscustomobject]@{path=$installedExecutable;sha256=$receiptValue.executableSha256}
                 }

@@ -6181,44 +6181,48 @@ Describe 'SYP325 selected source integrity' -Tag 'SYP325' {
         if(-not $rejected){throw 'The final full reader must reject an earlier tool closure contaminated by a later child.'}
     }
 
-    # Scenario: The process-tree cleanup boundary completes, fails a required namespace proof, or completes because of cancellation.
+    # Scenario: The process-tree cleanup boundary completes, rejects a stale start identity, or completes because of cancellation.
     # Purpose: Measure actual owned-child cleanup spans and preserve the bool result and terminal timing state.
-    It 'UnitT67_times_real_owned_process_cleanup_and_preserves_results' {
+    It 'InterT67_times_real_owned_process_cleanup_and_preserves_results' {
         $oldTimingEnabled=$script:StandardValidationTimingEnabled
         $oldConsoleError=[Console]::Error
         $writer=New-Object IO.StringWriter
         $script:StandardValidationTimingEnabled=$true
         [Console]::SetError($writer)
         $sentinelStart=New-Object Diagnostics.ProcessStartInfo
-        $sentinelStart.FileName=Join-Path $PSHOME 'pwsh.exe'
-        foreach($argument in @('-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 60')){[void]$sentinelStart.ArgumentList.Add($argument)}
+        $sentinelStart.FileName=Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
+        foreach($argument in @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-Command','Start-Sleep -Seconds 60')){[void]$sentinelStart.ArgumentList.Add($argument)}
         $sentinelStart.UseShellExecute=$false;$sentinelStart.CreateNoWindow=$true;$sentinelStart.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
         $sentinel=$null
-        $owned=New-Object 'System.Collections.Generic.List[Diagnostics.Process]'
+        $owned=New-Object 'System.Collections.Generic.List[object]'
+        Initialize-StandardValidationPlatformRuntime
         $startSleeper={
-            $start=New-Object Diagnostics.ProcessStartInfo
-            $start.FileName=Join-Path $PSHOME 'pwsh.exe'
-            foreach($argument in @('-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 60')){[void]$start.ArgumentList.Add($argument)}
-            $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
-            return [Diagnostics.Process]::Start($start)
+            $root=Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+            $directory=Open-StandardValidationDirectory $root -Create
+            try {
+                Start-PlatformOwnedProcess -ExecutablePath (Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })) `
+                    -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-Command','Start-Sleep -Seconds 60') `
+                    -Environment (Get-StandardValidationChildEnvironment @{}) -WorkingDirectoryLease $directory `
+                    -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(60)) -StdoutPath (Join-Path $root 'out') -StderrPath (Join-Path $root 'err')
+            } finally { $directory.Dispose() }
         }
         try {
             $sentinel=[Diagnostics.Process]::Start($sentinelStart)
             Start-Sleep -Milliseconds 100
             for($sample=0;$sample -lt 3;$sample++){
                 $first=& $startSleeper;$owned.Add($first);Start-Sleep -Milliseconds 100
-                $completed=Stop-StandardValidationProcessTree -RootProcessId $first.Id -RootProcess $first -WaitMilliseconds 1000
+                $completed=(Stop-StandardValidationOwnedProcess -Lease $first -ExpectedStartIdentity $first.StartIdentity).CleanedUp
                 if(-not $completed){throw 'A live owned child should clean up successfully with no required namespace proof.'}
                 if($sentinel.HasExited){throw 'Cleanup must not terminate a process outside the owned root tree.'}
             }
 
             $second=& $startSleeper;$owned.Add($second);Start-Sleep -Milliseconds 100
-            $failed=Stop-StandardValidationProcessTree -RootProcessId $second.Id -RootProcess $second -PidNamespaceRequired $true -WaitMilliseconds 1000
-            if($failed){throw 'A missing required PID namespace must preserve the false cleanup result.'}
+            $failed=(Stop-StandardValidationOwnedProcess -Lease $second -ExpectedStartIdentity 'stale-start-identity').CleanedUp
+            if($failed){throw 'A mismatched owned start identity must preserve the false cleanup result.'}
             if($sentinel.HasExited){throw 'A failed owned cleanup probe must not terminate the unrelated sentinel process.'}
 
             $third=& $startSleeper;$owned.Add($third);Start-Sleep -Milliseconds 100
-            $cancelled=Stop-StandardValidationProcessTree -RootProcessId $third.Id -RootProcess $third -CancellationRequested $true -WaitMilliseconds 1000
+            $cancelled=(Stop-StandardValidationOwnedProcess -Lease $third -ExpectedStartIdentity $third.StartIdentity -CancellationRequested).CleanedUp
             if(-not $cancelled){throw 'Successful cancellation cleanup must preserve the true cleanup result.'}
             if($sentinel.HasExited){throw 'Cancellation cleanup must not terminate the unrelated sentinel process.'}
 
@@ -6234,7 +6238,7 @@ Describe 'SYP325 selected source integrity' -Tag 'SYP325' {
         }
         finally {
             foreach($process in $owned){
-                try {if(-not $process.HasExited){$process.Kill();[void]$process.WaitForExit(2000)}} catch {}
+                try { Stop-PlatformOwnedProcess -Lease $process -ExpectedStartIdentity $process.StartIdentity | Out-Null } catch {}
                 try {$process.Dispose()} catch {}
             }
             if($null -ne $sentinel){try {if(-not $sentinel.HasExited){$sentinel.Kill();[void]$sentinel.WaitForExit(2000)}} catch {};try {$sentinel.Dispose()} catch {}}
@@ -6400,4 +6404,35 @@ Describe 'SYP171 internal source continuation authority binding' {
         }
     }
 
+}
+
+Describe 'Validator platform ownership authority contract' {
+    # Scenario: Both evidence versions expose the shared process receipt.
+    # Purpose: Keep the normative isolation levels and runtime binding identical across readers.
+    It 'UnitT10_keeps_shared_receipt_schema_and_policy_consistent' {
+        $root = Split-Path -Parent $PSScriptRoot
+        $core = Get-Content -Raw (Join-Path $root 'docs/standards/schemas/standard-core-evidence-v2.schema.json') | ConvertFrom-Json
+        $full = Get-Content -Raw (Join-Path $root 'docs/standards/schemas/standard-validation-evidence-v1.schema.json') | ConvertFrom-Json
+        $policy = Get-Content -Raw (Join-Path $root 'docs/standards/standard-core-validation-v2.json') | ConvertFrom-Json
+        ($core.'$defs'.processOwnership | ConvertTo-Json -Depth 30 -Compress) | Should -Be ($full.'$defs'.processOwnership | ConvertTo-Json -Depth 30 -Compress)
+        $core.'$defs'.check.properties.processOwnership.'$ref' | Should -Be '#/$defs/processOwnership'
+        $core.'$defs'.sourceEvent.properties.processOwnership.'$ref' | Should -Be '#/$defs/processOwnership'
+        $full.'$defs'.event.properties.processOwnership.'$ref' | Should -Be '#/$defs/processOwnership'
+        $policy.processOwnership.isolationLevels.'windows-job-object' | Should -Be 'strong'
+        $policy.processOwnership.isolationLevels.'linux-process-group-subreaper' | Should -Be 'cooperative'
+        $policy.processOwnership.isolationLevels.'macos-process-group' | Should -Be 'cooperative'
+        foreach ($name in $policy.processOwnership.runtimeBinding) {
+            $core.'$defs'.processOwnership.properties.runtime.required | Should -Contain $name
+        }
+        foreach ($name in @('CleanedUp','CaptureReadersStopped','CaptureResourcesClosed','RemainingPids','Uncertainty')) {
+            $core.'$defs'.processOwnership.properties.cleanup.required | Should -Contain $name
+        }
+        $ownershipSchema = $core.'$defs'.processOwnership | ConvertTo-Json -Depth 30
+        foreach ($example in $core.'$defs'.processOwnership.examples) {
+            Test-Json -Json ($example | ConvertTo-Json -Depth 30) -Schema $ownershipSchema | Should -BeTrue
+        }
+        $macExample = $core.'$defs'.processOwnership.examples[2]
+        $macExample.isolationLevel = 'strong'
+        Test-Json -Json ($macExample | ConvertTo-Json -Depth 30) -Schema $ownershipSchema -ErrorAction SilentlyContinue | Should -BeFalse
+    }
 }
