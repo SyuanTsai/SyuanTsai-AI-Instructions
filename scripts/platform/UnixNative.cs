@@ -399,6 +399,16 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             }
         }
 
+        // Internal absolute-directory anchor, including /. Public relative paths
+        // still require ordinary nonempty components; no traversal exception.
+        internal static UnixLease OpenDirectoryRoot(string root)
+        {
+            ValidateAbi();
+            SafeFd directory = WalkRoot(root);
+            try { return new UnixLease(directory, null, null, Path.GetFullPath(root), Stat(directory, null)); }
+            catch { directory.Dispose(); throw; }
+        }
+
         public static UnixLease OpenDirectory(string root, string relative, bool create)
         {
             string[] parts = PlatformPaths.Segments(relative);

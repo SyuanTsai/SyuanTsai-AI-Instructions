@@ -111,6 +111,9 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
 
         private static readonly object spawnGate = new object();
         private static bool active;
+        // A failed spawn still owns its descendants. Keep its bindings rooted in
+        // the runtime, and poison admission until a later cleanup retry succeeds.
+        private static UnixProcessControl pendingFailedStart;
         private readonly bool mac = PlatformNative.GetOperatingSystem() == "macos";
         private readonly int supervisor = Process.GetCurrentProcess().Id;
         private readonly Dictionary<int, Identity> owned = new Dictionary<int, Identity>();
@@ -369,7 +372,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 int end = Array.IndexOf(bytes, (byte)0);
                 if (end <= 0) throw new IOException("Executable path unavailable.");
                 string path = new UTF8Encoding(false, true).GetString(bytes, 0, end);
-                using (UnixLease parent = UnixNative.OpenDirectory("/", Path.GetDirectoryName(path).TrimStart('/'), false))
+                using (UnixLease parent = OpenExecutableParent(path))
                 using (UnixLease file = UnixNative.OpenFile(parent, Path.GetFileName(path), "Read", "OpenExisting"))
                     PlatformPaths.Same(file.Observation, executable.Observation);
                 return path;
@@ -508,6 +511,25 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             return result;
         }
 
+        private static UnixLease OpenExecutableParent(string path)
+        {
+            string parent = Path.GetDirectoryName(path);
+            return parent == "/" ? UnixNative.OpenDirectoryRoot("/") : UnixNative.OpenDirectory("/", parent.TrimStart('/'), false);
+        }
+
+        private static void EnsureStartAvailable()
+        {
+            if (pendingFailedStart != null)
+            {
+                var failure = new PlatformCapabilityUnavailableException("owned-process: previous startup cleanup is incomplete", PlatformNative.GetOperatingSystem());
+                // Allow a post-exit census before deciding whether the retained
+                // zombie can be reaped. One zero-duration poll cannot prove that.
+                pendingFailedStart.FinishFailedStart(failure, TimeSpan.FromMilliseconds(100));
+                if (pendingFailedStart != null) throw failure;
+            }
+            if (active) throw new PlatformCapabilityUnavailableException("owned-process: another Unix lease is active", PlatformNative.GetOperatingSystem());
+        }
+
         internal static UnixProcessControl Start(string path, UnixLease executable, string[] args, string[] env, UnixLease cwd, int input, int output, int error)
         {
             lock (spawnGate)
@@ -515,7 +537,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 // Subreaper is process-wide. Serialize leases rather than attributing
                 // another lease's adopted children to this one. External host children
                 // still make cleanup uncertain; never kill/reap an unowned PID.
-                if (active) throw new PlatformCapabilityUnavailableException("owned-process: another Unix lease is active", PlatformNative.GetOperatingSystem());
+                EnsureStartAvailable();
                 var result = new UnixProcessControl();
                 UnixNative.ValidateAbi();
                 if (IntPtr.Size != 8) throw new PlatformCapabilityUnavailableException("unix-process-abi", PlatformNative.GetOperatingSystem());
@@ -607,16 +629,42 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 catch (Exception ex) { startupFailure = ex; throw; }
                 finally
                 {
-                    if (!success && result.Pid > 0)
-                    {
-                        result.CleanupFailedStart(TimeSpan.FromSeconds(5));
-                        if (startupFailure != null) result.AttachStartupCleanupReceipt(startupFailure);
-                    }
                     if (actionsReady) posix_spawn_file_actions_destroy(actions);
                     if (attrReady) posix_spawnattr_destroy(attributes);
                     Marshal.FreeHGlobal(actions); Marshal.FreeHGlobal(attributes);
-                    if (!success) { if (result.exitQueue != null) result.exitQueue.Dispose(); result.ClosePidfds(); }
+                    if (!success)
+                    {
+                        if (result.Pid > 0) result.FinishFailedStart(startupFailure, TimeSpan.FromSeconds(5));
+                        else result.ReleaseStartupBindings();
+                    }
                 }
+            }
+        }
+
+        private void ReleaseStartupBindings()
+        {
+            if (exitQueue != null) { exitQueue.Dispose(); exitQueue = null; }
+            ClosePidfds();
+        }
+
+        private void FinishFailedStart(Exception failure, TimeSpan timeout)
+        {
+            lock (spawnGate)
+            {
+                // Publish the guard BEFORE cleanup: even unexpected cleanup errors
+                // must not drop the only owner or permit a new spawn baseline.
+                pendingFailedStart = this; active = true;
+                CleanupFailedStart(timeout);
+                AttachStartupCleanupReceipt(failure);
+                bool complete = ((ProcessCleanupReceipt)failure.Data["StartupCleanupReceipt"]).CleanedUp;
+                failure.Data["UnixRuntimePoisoned"] = !complete;
+                if (complete)
+                {
+                    ReleaseStartupBindings();
+                    pendingFailedStart = null; active = false;
+                }
+                // Otherwise retain pidfds/kqueue and the census. Subsequent Start
+                // retries cleanup under spawnGate and refuses admission if unknown.
             }
         }
 

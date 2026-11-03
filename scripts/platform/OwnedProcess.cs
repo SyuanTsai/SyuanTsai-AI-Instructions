@@ -8,6 +8,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using Microsoft.Win32.SafeHandles;
 
@@ -58,7 +59,6 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private int readersRunning;
         private readonly DateTimeOffset deadline;
         private readonly long limit;
-        private long written;
         private volatile bool outputExceeded, disposed, captureClosed;
         private string captureFailure;
         private ProcessCleanupReceipt cleanup;
@@ -93,14 +93,14 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         public static OwnedProcessLease Start(string executablePath, object executableLease,
             string[] arguments, IDictionary environment, object workingDirectory,
             DateTimeOffset deadline, string isolationRequirement, object stdoutLease,
-            object stderrLease, long outputLimitBytes)
+            object stderrLease, long outputLimitCharacters)
         {
             string os = PlatformNative.GetOperatingSystem();
             if (isolationRequirement != "cooperative" && isolationRequirement != "strong")
                 throw new ArgumentException("IsolationRequirement must be cooperative or strong.");
             if (os != "windows" && isolationRequirement == "strong")
                 throw new PlatformCapabilityUnavailableException("strong-process-isolation: external sandbox required", os);
-            if (deadline <= DateTimeOffset.UtcNow || outputLimitBytes < 1)
+            if (deadline <= DateTimeOffset.UtcNow || outputLimitCharacters < 1 || outputLimitCharacters > 1048576)
                 throw new ArgumentException("A future deadline and a positive output limit are required.");
             if (environment == null) throw new ArgumentNullException("environment");
             var env = new List<string>();
@@ -116,7 +116,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             if (arguments == null) arguments = new string[0];
             foreach (string argument in arguments)
                 if (argument == null || argument.IndexOf('\0') >= 0) throw new ArgumentException("Arguments cannot contain nulls.");
-            var lease = new OwnedProcessLease(deadline, outputLimitBytes);
+            var lease = new OwnedProcessLease(deadline, outputLimitCharacters);
             try
             {
                 lease.outLease = (IDisposable)stdoutLease; lease.errLease = (IDisposable)stderrLease;
@@ -257,18 +257,32 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 try
                 {
                     byte[] buffer = new byte[8192];
+                    var encoding = new UTF8Encoding(false);
+                    Decoder decoder = encoding.GetDecoder();
+                    char[] characters = new char[encoding.GetMaxCharCount(buffer.Length)];
+                    byte[] encoded = new byte[encoding.GetMaxByteCount(characters.Length)];
+                    long written = 0; // independent quota for this reader/stream
                     while (!captureCancelled.IsSet)
                     {
                         int count = ReadAvailable(source, buffer);
-                        if (count == 0) return;
                         if (count < 0) { captureCancelled.Wait(10); continue; }
+                        // Preserve decoder state across pipe chunks. Count UTF-16
+                        // characters, as bounded .NET text readers do, not UTF-8 bytes.
+                        int decoded = decoder.GetChars(buffer, 0, count, characters, 0, count == 0);
                         lock (outputGate)
                         {
                             if (captureClosed) return;
-                            int accepted = (int)Math.Min(count, limit - written);
-                            if (accepted > 0) { destination.Write(buffer, 0, accepted); destination.Flush(); written += accepted; }
-                            if (accepted < count) { outputExceeded = true; return; }
+                            int accepted = (int)Math.Min(decoded, limit - written);
+                            // Keep a valid text prefix if the quota bisects a pair.
+                            if (accepted > 0 && Char.IsHighSurrogate(characters[accepted - 1])) accepted--;
+                            if (accepted > 0)
+                            {
+                                int bytes = encoding.GetBytes(characters, 0, accepted, encoded, 0);
+                                destination.Write(encoded, 0, bytes); destination.Flush(); written += accepted;
+                            }
+                            if (accepted < decoded) { outputExceeded = true; return; }
                         }
+                        if (count == 0) return;
                     }
                 }
                 catch (Exception ex) { lock (outputGate) { if (!captureClosed) captureFailure = ex.Message; } }

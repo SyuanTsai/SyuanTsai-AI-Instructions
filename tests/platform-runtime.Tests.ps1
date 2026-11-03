@@ -122,7 +122,7 @@ Describe 'Platform owned processes P3' {
 
     # Scenario: stderr produces unlimited bytes.
     # Purpose: Bound persisted output and terminate instead of filling the filesystem.
-    It 'InterT50_terminates_on_aggregate_output_limit' {
+    It 'InterT50_terminates_on_stderr_character_limit' {
         $f = New-P3Fixture; $p = $null
         try {
             $p = Start-P3Fixture $f 'while ($true) { [Console]::Error.Write(("x" * 8192)) }' 20 4096
@@ -131,6 +131,19 @@ Describe 'Platform owned processes P3' {
             $p.OutputLimitExceeded | Should Be $true
             Assert-P3Cleaned $p.Cleanup
             (Get-Item (Join-Path $f.Path 'err')).Length | Should BeLessThan 4097
+        } finally { Remove-P3Fixture $f $p }
+    }
+
+    # Scenario: Each stream emits its full allowed quota, including multibyte UTF-8 characters.
+    # Purpose: Quotas are per stream and count decoded characters, not aggregate bytes.
+    It 'InterT55_preserves_independent_utf8_stream_quotas' {
+        $f = New-P3Fixture; $p = $null
+        try {
+            $p = Start-P3Fixture $f '[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $s=([string][char]0x754c)*4096; [Console]::Write($s); [Console]::Error.Write($s)' 20 4096
+            Assert-P3Exited $p
+            Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $p)
+            $p.OutputLimitExceeded | Should Be $false
+            foreach ($leaf in @('out','err')) { [IO.File]::ReadAllText((Join-Path $f.Path $leaf)) | Should Be (([string][char]0x754c)*4096) }
         } finally { Remove-P3Fixture $f $p }
     }
 
@@ -1279,6 +1292,43 @@ public static class UnixObservationFixture
         }
     }
 
+    # Scenario: Startup cleanup times out while its root remains alive, then a later retry observes exit.
+    # Purpose: Retain bindings and reject a second spawn until cleanup is positively confirmed.
+    It 'UnitT287_retains_failed_start_control_until_cleanup_is_confirmed' {
+        $staticFlags=[Reflection.BindingFlags]'Static,NonPublic'
+        $pending=$script:UnixControlType.GetField('pendingFailedStart',$staticFlags)
+        $active=$script:UnixControlType.GetField('active',$staticFlags)
+        $guard=$script:UnixControlType.GetMethod('EnsureStartAvailable',$staticFlags)
+        $pending | Should Not BeNullOrEmpty
+        $savedPending=$pending.GetValue($null); $savedActive=$active.GetValue($null)
+        try {
+            foreach ($darwin in @($false,$true)) {
+                $f=New-UnixObservationFixture; $state=$f.State
+                if ($darwin) { Set-DarwinObservationFixture $f }
+                Invoke-UnixTestMethod $f.Control Poll
+                Set-UnixTestField $f.Control waitForChild ([Func[int,Tuple[int,int,int]]]{ param($id) return [Tuple]::Create(0,0,0) })
+                $failure=[IO.IOException]::new('fixture-post-spawn-failure')
+                Invoke-UnixTestMethod $f.Control FinishFailedStart @($failure,[TimeSpan]::Zero)
+                $failure.Data['StartupCleanupReceipt'].CleanedUp | Should Be $false
+                $failure.Data['UnixRuntimePoisoned'] | Should Be $true
+                [object]::ReferenceEquals($pending.GetValue($null),$f.Control) | Should Be $true
+                $state.ClosedPidfds.Count | Should Be 0
+                { $guard.Invoke($null,@()) } | Should Throw 'previous startup cleanup is incomplete'
+                $active.GetValue($null) | Should Be $true
+                $state.Table[200]=New-UnixTestStat 200 100 200 $(if ($darwin) { '10' } else { 'root' }) 'Z'
+                $state.ExitEvent=0; $state.GroupErrno=3
+                Set-UnixTestField $f.Control waitForChild ([Func[int,Tuple[int,int,int]]]{ param($id) $state.Table.Remove($id); return [Tuple]::Create([int]$id,0,0) }.GetNewClosure())
+                $guard.Invoke($null,@())
+                $pending.GetValue($null) | Should BeNullOrEmpty
+                $active.GetValue($null) | Should Be $false
+                $f.Owned.Count | Should Be 0
+                if (-not $darwin) { $state.ClosedPidfds | Should Contain 1200 }
+            }
+        } finally {
+            $pending.SetValue($null,$savedPending); $active.SetValue($null,$savedActive)
+        }
+    }
+
     # Scenario: Root exits before its cooperative child; Darwin omits the zombie from libproc.
     # Purpose: Keep the root waitable through TERM/KILL, then reap only after descendants and group exit.
     It 'UnitT290_retains_the_zombie_root_until_group_descendants_exit' {
@@ -1595,6 +1645,74 @@ Describe 'Platform capture startup failure regressions' {
             $lease.CaptureResourcesClosed | Should Be $true
             foreach ($handle in $handles) { $handle.IsClosed | Should Be $true }
         } finally { foreach ($handle in $handles) { $handle.Dispose() } }
+    }
+}
+
+Describe 'Platform capture character quotas' {
+    BeforeAll { Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force }
+
+    # Scenario: Two streams write split UTF-8 sequences, at or above their separate limits.
+    # Purpose: Preserve whole decoded prefixes and stop on either stream's overflow without sharing counters.
+    It 'UnitT10_enforces_independent_character_limits_across_utf8_chunks' {
+        $type=[SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]
+        $flags=[Reflection.BindingFlags]'Instance,NonPublic'
+        foreach ($mode in @('exact','stdout-over','stderr-over')) {
+            $lease=[Activator]::CreateInstance($type,$flags,$null,[object[]]@([DateTimeOffset]::UtcNow.AddSeconds(10),[long]4),$null)
+            $paths=@(); $pipes=@(); $files=@(); $readers=@()
+            try {
+                foreach ($stream in @('stdout','stderr')) {
+                    $path=Join-Path ([IO.Path]::GetTempPath()) ('quota-'+[guid]::NewGuid().ToString('N')); $paths+=$path
+                    $file=[IO.File]::Open($path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read); $files+=$file
+                    $pipe=[IO.Pipes.AnonymousPipeServerStream]::new([IO.Pipes.PipeDirection]::In,[IO.HandleInheritability]::Inheritable); $pipes+=$pipe
+                    $readers+=$type.GetMethod('Reader',$flags).Invoke($lease,[object[]]@($pipe,$file))
+                    $handle=[Microsoft.Win32.SafeHandles.SafePipeHandle]::new($pipe.ClientSafePipeHandle.DangerousGetHandle(),$false)
+                    $writer=[IO.Pipes.AnonymousPipeClientStream]::new([IO.Pipes.PipeDirection]::Out,$handle)
+                    try {
+                        $length=if ($mode -eq ($stream+'-over')) { 5 } else { 4 }
+                        $bytes=[Text.Encoding]::UTF8.GetBytes((([string][char]0x754c)*$length))
+                        $writer.Write($bytes,0,1); $writer.Flush(); [Threading.Thread]::Sleep(20)
+                        $writer.Write($bytes,1,$bytes.Length-1); $writer.Flush()
+                    } finally { $writer.Dispose(); $pipe.ClientSafePipeHandle.Dispose() }
+                }
+                foreach ($reader in $readers) { $reader.Join(2000) | Should Be $true }
+                $lease.OutputLimitExceeded | Should Be ($mode -ne 'exact')
+                foreach ($file in $files) { $file.Dispose() }
+                foreach ($path in $paths) { [IO.File]::ReadAllText($path) | Should Be (([string][char]0x754c)*4) }
+            } finally {
+                $type.GetField('captureCancelled',$flags).GetValue($lease).Set()
+                foreach ($pipe in $pipes) { $pipe.ClientSafePipeHandle.Dispose() }
+                foreach ($reader in $readers) { [void]$reader.Join(2000) }
+                foreach ($file in $files) { $file.Dispose() }; foreach ($pipe in $pipes) { $pipe.Dispose() }
+                foreach ($path in $paths) { [IO.File]::Delete($path) }
+            }
+        }
+    }
+
+    # Scenario: No quota override is supplied, or a caller requests more than the standard permits.
+    # Purpose: The public default and maximum are 1,048,576 characters per stream.
+    It 'UnitT20_defaults_to_and_caps_the_standard_character_limit' {
+        $command=Get-Command Start-PlatformOwnedProcess
+        $parameter=$command.Parameters['OutputLimitCharacters']
+        $parameter | Should Not BeNullOrEmpty
+        $range=@($parameter.Attributes | Where-Object { $_ -is [Management.Automation.ValidateRangeAttribute] })[0]
+        $range.MaxRange | Should Be 1048576
+        $node=@($command.ScriptBlock.Ast.FindAll({param($n) $n -is [Management.Automation.Language.ParameterAst] -and $n.Name.VariablePath.UserPath -eq 'OutputLimitCharacters'},$true))[0]
+        $node.DefaultValue.SafeGetValue() | Should Be 1048576
+    }
+}
+
+# Native directory handles are only available on Unix; conditional registration keeps zero skips.
+if ($IsLinux -or $IsMacOS) {
+    Describe 'Unix executable parent directories' {
+        BeforeAll { Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force }
+        # Scenario: A Darwin executable path has / as its immediate parent.
+        # Purpose: Open the root directory itself without passing an empty relative path to P2.
+        It 'InterT10_opens_root_parent_for_a_root_level_executable' {
+            $type=[SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease].Assembly.GetType('SyuanTsai.AIInstructions.PlatformRuntime.UnixProcessControl')
+            $parent=$type.GetMethod('OpenExecutableParent',[Reflection.BindingFlags]'Static,NonPublic').Invoke($null,@('/fixture-executable'))
+            try { $parent.Observation.Kind | Should Be 'directory'; $type.Assembly.GetType('SyuanTsai.AIInstructions.PlatformRuntime.UnixLease').GetField('Path',[Reflection.BindingFlags]'Instance,NonPublic').GetValue($parent) | Should Be '/' }
+            finally { $parent.Dispose() }
+        }
     }
 }
 
@@ -3808,15 +3926,16 @@ Describe 'Platform owned process probe failure cleanup' {
                 }
                 try {
                     $receipt = Test-PlatformOwnedProcess
-                    $receipt.status | Should Be 'unavailable'
+                    $receipt.status | Should Be $(if ($state.Mode -eq 'success') { 'available' } else { 'unavailable' })
                     $state.Path | Should Not BeNullOrEmpty
-                    $expectedCount = if ($state.Mode -eq 'partial-create') { 1 } else { 2 * $state.FailPass }
+                    $expectedCount = if ($state.Mode -eq 'success') { 4 } elseif ($state.Mode -eq 'partial-create') { 1 } else { 2 * $state.FailPass }
                     $state.Created.Count | Should Be $expectedCount
                     # Assert before fixture fallback: production must have removed
                     # all files and the directory even when no process lease returned.
                     [IO.Directory]::Exists($state.Path) | Should Be $false
                     @($receipt.evidence.PSObject.Properties.Name) | Should Not Contain 'cleanupFailure'
-                    if ($state.Mode -eq 'dispose') { $receipt.evidence.processDisposeFailure | Should Match 'fixture-process-dispose-failure' }
+                    if ($state.Mode -eq 'success') { @($receipt.evidence.PSObject.Properties.Name) | Should Not Contain 'executableLeaseBinding' }
+                    elseif ($state.Mode -eq 'dispose') { $receipt.evidence.processDisposeFailure | Should Match 'fixture-process-dispose-failure' }
                     elseif ($state.Mode -eq 'start') { $receipt.evidence.failure | Should Match 'fixture-native-start-failure' }
                     elseif ($state.Mode -eq 'timeout') { $receipt.evidence.failure | Should Match 'timed out' }
                     elseif ($state.Mode -eq 'partial-create') { $receipt.evidence.failure | Should Match 'fixture-second-capture-failure' }
@@ -3857,5 +3976,9 @@ Describe 'Platform owned process probe failure cleanup' {
     # Scenario: Process lease disposal itself throws during the failure path.
     # Purpose: Preserve disposal evidence and execute file cleanup regardless.
     It 'UnitT50_cleans_probe_files_even_when_process_disposal_throws' { Invoke-P3ProbeFailureFixture dispose }
+
+    # Scenario: Path execution succeeds; executable-lease execution has not been measured.
+    # Purpose: An available path probe must not claim lease binding capability.
+    It 'UnitT60_does_not_claim_unmeasured_executable_lease_binding' { Invoke-P3ProbeFailureFixture success }
 
 }

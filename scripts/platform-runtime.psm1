@@ -363,7 +363,8 @@ function Start-PlatformOwnedProcess {
         [ValidateSet('cooperative','strong')][string] $IsolationRequirement = 'cooperative',
         [Parameter(Mandatory=$true)][string] $StdoutPath,
         [Parameter(Mandatory=$true)][string] $StderrPath,
-        [ValidateRange(1,[long]::MaxValue)][long] $OutputLimitBytes = 16777216
+        # Legacy spelling remains an alias; quotas are UTF-8 decoded characters per stream.
+        [Alias('OutputLimitBytes')][ValidateRange(1,1048576)][long] $OutputLimitCharacters = 1048576
     )
     $platform = Get-CurrentPlatformName
     if ($IsolationRequirement -eq 'strong' -and $platform -ne 'windows') {
@@ -392,7 +393,7 @@ function Start-PlatformOwnedProcess {
                 if ($pair[0] -eq 'out') { $outLease = $file } else { $errLease = $file }
             } finally { $parent.Dispose() }
         }
-        $lease = Start-PlatformCapturedProcess -ExecutablePath $ExecutablePath -ExecutableLease $ExecutableLease -ArgumentList $ArgumentList -Environment $Environment -WorkingDirectoryLease $WorkingDirectoryLease -Deadline $Deadline -IsolationRequirement $IsolationRequirement -StdoutLease $outLease -StderrLease $errLease -OutputLimitBytes $OutputLimitBytes
+        $lease = Start-PlatformCapturedProcess -ExecutablePath $ExecutablePath -ExecutableLease $ExecutableLease -ArgumentList $ArgumentList -Environment $Environment -WorkingDirectoryLease $WorkingDirectoryLease -Deadline $Deadline -IsolationRequirement $IsolationRequirement -StdoutLease $outLease -StderrLease $errLease -OutputLimitBytes $OutputLimitCharacters
         $outLease = $null; $errLease = $null
         return $lease
     } finally {
@@ -453,7 +454,8 @@ function Test-PlatformOwnedProcess {
             if ($platform -eq 'macos') { 'macos-process-group-cannot-detect-setsid-escape' }
             if ($platform -eq 'macos' -or $platform -eq 'linux') { 'group-signal-external-reaper-race' }
         )
-        executableLeaseBinding = $(switch ($platform) { windows { 'held-file-handle-and-path-check' }; linux { 'proc-self-fd' }; macos { 'verified-path-before-after-suspended-spawn; not atomic fd execution' } })
+        # This probe exercises pathname execution only. ExecutableLease binding
+        # must not be advertised without a separate successful lease probe.
         boundary = 'Unix process groups allow setsid escape; polling cannot prove containment of hostile code. Strong Unix isolation requires an external sandbox. Subreaper remains enabled for the supervisor lifetime; Unix leases are serialized.'
     }
     try {
