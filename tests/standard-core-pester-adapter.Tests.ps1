@@ -762,13 +762,36 @@ try {
         $environment['PSExecutionPolicyPreference']='Restricted'
         $directory=Open-PesterShardDirectory $root; $guards.Add($directory)
         $executable=Open-PesterShardInput ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) $guards
-        # EncodedCommand can run under Restricted; invoking the unsigned file must fail.
-        $command="`$ErrorActionPreference='Stop'; if ((Get-ExecutionPolicy) -cne 'Restricted') { exit 98 }; try { & '"+$child.Replace("'","''")+"'; exit 99 } catch { if (`$_.Exception -is [Management.Automation.PSSecurityException]) { exit 17 }; throw }"
+        # EncodedCommand can run under Restricted; set the process policy explicitly so an outer Bypass or portable-host configuration cannot define this baseline.
+        # Invoking the unsigned file must still fail.
+        $command="`$ErrorActionPreference='Stop'; `$policy=Get-ExecutionPolicy; [Console]::Out.WriteLine(('effectivePolicy='+`$policy)); if (`$policy -cne 'Restricted') { exit 98 }; try { & '"+$child.Replace("'","''")+"'; exit 99 } catch { if (`$_.Exception -is [Management.Automation.PSSecurityException]) { exit 17 }; throw }"
         $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
-        $baseline=Start-PlatformOwnedProcess -ExecutableLease $executable -WorkingDirectoryLease $directory -Environment $environment -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',$encoded) -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(30)) -StdoutPath (Join-Path $root 'baseline.out') -StderrPath (Join-Path $root 'baseline.err') -OutputLimitCharacters 1048576
-        [void]$baseline.WaitForExit([TimeSpan]::FromSeconds(30))
-        $cleanup=Stop-PlatformOwnedProcess -Lease $baseline -ExpectedStartIdentity $baseline.StartIdentity -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(5))
-        if (-not $cleanup.CleanedUp -or $baseline.ExitCode -ne 17 -or (Test-Path -LiteralPath $result)) { throw 'Restricted baseline did not block the unsigned script with confirmed cleanup.' }
+        $baselineOut=Join-Path $root 'baseline.out'
+        $baselineErr=Join-Path $root 'baseline.err'
+        $cleanup=$null
+        $baselineError=''
+        try {
+            $baseline=Start-PlatformOwnedProcess -ExecutableLease $executable -WorkingDirectoryLease $directory -Environment $environment -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Restricted','-EncodedCommand',$encoded) -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(30)) -StdoutPath $baselineOut -StderrPath $baselineErr -OutputLimitCharacters 1048576
+            [void]$baseline.WaitForExit([TimeSpan]::FromSeconds(30))
+            $cleanup=Stop-PlatformOwnedProcess -Lease $baseline -ExpectedStartIdentity $baseline.StartIdentity -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(5))
+        } catch {
+            $baselineError=Format-PesterShardException $_.Exception
+        }
+        $resultExists=Test-Path -LiteralPath $result
+        $cleanedUp=$null -ne $cleanup -and [bool]$cleanup.CleanedUp
+        $baselineExitCode=if ($null -eq $baseline -or $null -eq $baseline.ExitCode) { $null } else { $baseline.ExitCode }
+        if (-not [string]::IsNullOrEmpty($baselineError) -or -not $cleanedUp -or $baselineExitCode -ne 17 -or $resultExists) {
+            $stdoutPrefix=ConvertTo-PesterShardSanitizedDiagnosticText (ConvertFrom-PesterShardCliXmlDiagnostic (Read-PesterShardOutputPrefix -Path $baselineOut -MaxChars 1024))
+            $stderrPrefix=ConvertTo-PesterShardSanitizedDiagnosticText (ConvertFrom-PesterShardCliXmlDiagnostic (Read-PesterShardOutputPrefix -Path $baselineErr -MaxChars 1024))
+            if ($stdoutPrefix.Length -gt 1024) { $stdoutPrefix=$stdoutPrefix.Substring(0,1024) }
+            if ($stderrPrefix.Length -gt 1024) { $stderrPrefix=$stderrPrefix.Substring(0,1024) }
+            $stdoutPrefix=if ([string]::IsNullOrWhiteSpace($stdoutPrefix)) { '<empty>' } else { $stdoutPrefix.Replace("`r",' ').Replace("`n",' | ') }
+            $stderrPrefix=if ([string]::IsNullOrWhiteSpace($stderrPrefix)) { '<empty>' } else { $stderrPrefix.Replace("`r",' ').Replace("`n",' | ') }
+            $exitCodeText=if ($null -eq $baselineExitCode) { '<null>' } else { [string]$baselineExitCode }
+            $cleanedUpText=if ($null -eq $cleanup) { '<null>' } else { [string]$cleanup.CleanedUp }
+            $errorText=if ([string]::IsNullOrEmpty($baselineError)) { '<none>' } else { $baselineError }
+            throw "Restricted baseline did not block the unsigned script with confirmed cleanup. error=$errorText; exitCode=$exitCodeText; cleanup.cleanedUp=$cleanedUpText; resultExists=$resultExists; baseline.out.prefix=$stdoutPrefix; baseline.err.prefix=$stderrPrefix"
+        }
         $baseline.Dispose(); $baseline=$null
         $receipt=Invoke-PesterShardProcess -Paths @($child) -ModulePath $config.PesterModulePath -Version $config.PesterVersion -ChildPowerShell ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) -ChildScriptPath $child -ResultPath $result -ProcessEvidencePath (Join-Path $config.EvidenceRoot 'pester-shard-policy.process.json') -StdoutPath (Join-Path $root 'policy.out') -StderrPath (Join-Path $root 'policy.err') -TimeoutSeconds 30 -WorkingDirectory $root -Environment $environment
         if ($receipt.status -cne 'completed' -or $receipt.exitCode -ne 0 -or -not $receipt.cleanedUp) { throw 'Explicit Windows policy launch did not complete.' }
