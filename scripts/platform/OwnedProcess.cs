@@ -95,7 +95,19 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             DateTimeOffset deadline, string isolationRequirement, object stdoutLease,
             object stderrLease, long outputLimitCharacters)
         {
+            return Start(executablePath, executableLease, arguments, environment, workingDirectory,
+                deadline, isolationRequirement, stdoutLease, stderrLease, outputLimitCharacters, null);
+        }
+
+        public static OwnedProcessLease Start(string executablePath, object executableLease,
+            string[] arguments, IDictionary environment, object workingDirectory,
+            DateTimeOffset deadline, string isolationRequirement, object stdoutLease,
+            object stderrLease, long outputLimitCharacters, string argumentZero)
+        {
             string os = PlatformNative.GetOperatingSystem();
+            if (String.IsNullOrEmpty(argumentZero)) argumentZero = null;
+            else if (argumentZero.IndexOf('\0') >= 0 || !Path.IsPathFullyQualified(argumentZero))
+                throw new ArgumentException("ArgumentZero must be an absolute path without NUL.");
             if (isolationRequirement != "cooperative" && isolationRequirement != "strong")
                 throw new ArgumentException("IsolationRequirement must be cooperative or strong.");
             if (os != "windows" && isolationRequirement == "strong")
@@ -135,7 +147,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                         if (os == "windows")
                             lease.control = WindowsProcessControl.Start(executablePath, executableLease as WindowsLease, arguments, env.ToArray(), (WindowsLease)workingDirectory, input, output, error);
                         else
-                            lease.control = UnixProcessControl.Start(executablePath, executableLease as UnixLease, arguments, env.ToArray(), (UnixLease)workingDirectory, input.ToInt32(), output.ToInt32(), error.ToInt32());
+                            lease.control = UnixProcessControl.Start(executablePath, executableLease as UnixLease, arguments, env.ToArray(), (UnixLease)workingDirectory, input.ToInt32(), output.ToInt32(), error.ToInt32(), argumentZero);
                     }
                     finally { stdin.DisposeLocalCopyOfClientHandle(); }
                 } // child stdin observes EOF; no inherited terminal

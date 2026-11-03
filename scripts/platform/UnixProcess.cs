@@ -530,8 +530,11 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             if (active) throw new PlatformCapabilityUnavailableException("owned-process: another Unix lease is active", PlatformNative.GetOperatingSystem());
         }
 
-        internal static UnixProcessControl Start(string path, UnixLease executable, string[] args, string[] env, UnixLease cwd, int input, int output, int error)
+        internal static UnixProcessControl Start(string path, UnixLease executable, string[] args, string[] env, UnixLease cwd, int input, int output, int error, string argumentZero = null)
         {
+            if (String.IsNullOrEmpty(argumentZero)) argumentZero = null;
+            else if (argumentZero.IndexOf('\0') >= 0 || !Path.IsPathFullyQualified(argumentZero))
+                throw new ArgumentException("ArgumentZero must be an absolute path without NUL.");
             lock (spawnGate)
             {
                 // Subreaper is process-wide. Serialize leases rather than attributing
@@ -590,13 +593,18 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                                 if (result.mac) path = MacExecutablePath(executable);
                                 else
                                 {
+                                    // spawn dup2 clears FD_CLOEXEC on fd 3, including
+                                    // when source == target. Keep it below closefrom(4)
+                                    // so a shebang interpreter can reopen the script.
                                     Check(posix_spawn_file_actions_adddup2(actions, executable.Fd.DangerousGetHandle().ToInt32(), 3), "spawn-executable-fd");
                                     path = "/proc/self/fd/3";
                                 }
                             }
                             if (String.IsNullOrEmpty(path) || !Path.IsPathRooted(path) || path.IndexOf('\0') >= 0) throw new ArgumentException("ExecutablePath must be absolute.");
                             if (!result.mac) Check(posix_spawn_file_actions_addclosefrom_np(actions, executable == null ? 3 : 4), "spawn-closefrom");
-                            string[] argv = new string[args.Length + 1]; argv[0] = path; Array.Copy(args, 0, argv, 1, args.Length);
+                            // Invocation identity is independent of the exec target:
+                            // e.g. Python locates pyvenv.cfg beside the original alias.
+                            string[] argv = new string[args.Length + 1]; argv[0] = argumentZero ?? path; Array.Copy(args, 0, argv, 1, args.Length);
                             using (var arguments = new Vector(argv)) using (var environment = new Vector(env))
                             {
                                 int pid;

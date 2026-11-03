@@ -506,6 +506,8 @@ Linux／macOS child process **MUST NOT** 配置互動終端。Validation evidenc
 
 每次 dispatch 的 `processOwnership.commandPath` **MUST** 記錄傳入 process boundary 的絕對 command 路徑，`resolvedCommandPath` **MUST** 記錄解析 symlink（含相對 target 與 ancestor link）後的實體路徑；解析尚未完成時後者可為 null，成功啟動的 receipt 兩者皆不可為 null。已由 resolver／receipt 綁定的 runtime 與 payload **MUST** 優先使用並保留原有 hash／closure 重驗。中央 runner **MUST** 先在可信邊界解析路徑，再以 P2 no-follow lease 開啟實體檔，啟動前重驗 command 路徑綁定與 file identity，並把 executable lease 交給 P3；不得以允許跟隨 symlink 的 open 取代 identity 驗證。`.ps1` 的 `resolvedCommandPath` 為 script payload；其 interpreter 亦 **MUST** 經同一解析與 lease 邊界。`.ps1` wrapper **MUST** 設定 `ErrorActionPreference=Stop`，並在 script 返回後傳遞非 null 的 `$LASTEXITCODE`，使未明寫 `exit` 的 native failure 與預設 non-terminating PowerShell error 都不能被記錄為 passed。缺少 command path binding 的舊 receipt 僅供歷史閱讀，不證明符合此 dispatch 契約。
 
+Native executable 的 invocation path 與 exec target **MUST** 分開：validator **MUST** 以原始 `commandPath` 傳入 P3 `ArgumentZero`，讓 Python venv 等 runtime 保留原始位置語意；wrapper 則使用 interpreter 的原始路徑。P3 **MUST** 驗證指定值為無 NUL 的絕對路徑；Linux／macOS 將其作為 `argv[0]`，Windows 驗證後維持原啟動語意。Linux **MUST** 保留 descriptor exec 與可供 shebang interpreter 重讀的 fd，不得為修正 runtime lookup 而改用未租用的 pathname exec；shebang 的 script path 仍由 kernel 決定，不能聲稱 override 改寫 script `$0`。`commandPath`／`resolvedCommandPath` evidence 語意維持不變。
+
 ## 9. SkillSpector Static Security Gate
 
 ### 9.1 Required stage

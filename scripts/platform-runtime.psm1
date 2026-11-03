@@ -364,9 +364,18 @@ function Start-PlatformOwnedProcess {
         [Parameter(Mandatory=$true)][string] $StdoutPath,
         [Parameter(Mandatory=$true)][string] $StderrPath,
         # Legacy spelling remains an alias; quotas are UTF-8 decoded characters per stream.
-        [Alias('OutputLimitBytes')][ValidateRange(1,1048576)][long] $OutputLimitCharacters = 1048576
+        [Alias('OutputLimitBytes')][ValidateRange(1,1048576)][long] $OutputLimitCharacters = 1048576,
+        # Unix invocation name only; Windows validates it but keeps its launch semantics.
+        [string] $ArgumentZero
     )
     $platform = Get-CurrentPlatformName
+    $argumentZeroValue = $null
+    if ($PSBoundParameters.ContainsKey('ArgumentZero')) {
+        if ($ArgumentZero.IndexOf([char]0) -ge 0 -or -not [IO.Path]::IsPathFullyQualified($ArgumentZero)) {
+            throw [ArgumentException]::new('ArgumentZero must be an absolute path without NUL.')
+        }
+        $argumentZeroValue = $ArgumentZero
+    }
     if ($IsolationRequirement -eq 'strong' -and $platform -ne 'windows') {
         throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]::new('strong-process-isolation: external sandbox required',$platform)
     }
@@ -393,7 +402,14 @@ function Start-PlatformOwnedProcess {
                 if ($pair[0] -eq 'out') { $outLease = $file } else { $errLease = $file }
             } finally { $parent.Dispose() }
         }
-        $lease = Start-PlatformCapturedProcess -ExecutablePath $ExecutablePath -ExecutableLease $ExecutableLease -ArgumentList $ArgumentList -Environment $Environment -WorkingDirectoryLease $WorkingDirectoryLease -Deadline $Deadline -IsolationRequirement $IsolationRequirement -StdoutLease $outLease -StderrLease $errLease -OutputLimitBytes $OutputLimitCharacters
+        $startParameters = @{
+            ExecutablePath = $ExecutablePath; ExecutableLease = $ExecutableLease; ArgumentList = $ArgumentList
+            Environment = $Environment; WorkingDirectoryLease = $WorkingDirectoryLease; Deadline = $Deadline
+            IsolationRequirement = $IsolationRequirement; StdoutLease = $outLease; StderrLease = $errLease
+            OutputLimitBytes = $OutputLimitCharacters
+        }
+        if ($PSBoundParameters.ContainsKey('ArgumentZero')) { $startParameters.ArgumentZero = $argumentZeroValue }
+        $lease = Start-PlatformCapturedProcess @startParameters
         $outLease = $null; $errLease = $null
         return $lease
     } finally {
@@ -403,7 +419,10 @@ function Start-PlatformOwnedProcess {
 }
 function Start-PlatformCapturedProcess {
     # Internal boundary shared by caller-owned capture files and temporary probes.
-    param($ExecutablePath,$ExecutableLease,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$IsolationRequirement,$StdoutLease,$StderrLease,$OutputLimitBytes)
+    param($ExecutablePath,$ExecutableLease,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$IsolationRequirement,$StdoutLease,$StderrLease,$OutputLimitBytes,$ArgumentZero=$null)
+    if ($PSBoundParameters.ContainsKey('ArgumentZero') -and $null -ne $ArgumentZero) {
+        return [SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]::Start($ExecutablePath,$ExecutableLease,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$IsolationRequirement,$StdoutLease,$StderrLease,$OutputLimitBytes,[string]$ArgumentZero)
+    }
     [SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]::Start($ExecutablePath,$ExecutableLease,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$IsolationRequirement,$StdoutLease,$StderrLease,$OutputLimitBytes)
 }
 

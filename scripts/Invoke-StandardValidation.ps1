@@ -2945,7 +2945,7 @@ function Merge-StandardValidationProcessStderr {
 function Initialize-StandardValidationPlatformRuntime {
     if ($null -ne (Get-Variable StandardValidationPlatformBinding -Scope Script -ErrorAction SilentlyContinue)) { return }
     $manifestPath = Join-Path $PSScriptRoot 'platform-runtime.psd1'
-    $pin = '805f398cbdb93ca52a80d0c7d5abce2b75d6448eecbddbb7462ddfcf8e8e8976'
+    $pin = 'e803fcc156e6273df1508f114e661e58ca0686833fa6abe22f9974b8f972ecef'
     $canonicalHash = {
         param([string]$Path)
         $bytes = [IO.File]::ReadAllBytes($Path)
@@ -3140,7 +3140,7 @@ function Invoke-StandardValidationProcess {
             Assert-PlatformFileIdentity -Lease $commandLease -Expected $commandLease.Observation -SingleLink | Out-Null
             $phase = 'start-owned-process'
             $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
-            $lease = Start-PlatformOwnedProcess -ExecutableLease $executable -ArgumentList $launchArguments -Environment $childEnvironment `
+            $lease = Start-PlatformOwnedProcess -ExecutableLease $executable -ArgumentZero $executableRequestedPath -ArgumentList $launchArguments -Environment $childEnvironment `
                 -WorkingDirectoryLease $directory -Deadline $deadline -StdoutPath $stdoutPath -StderrPath $stderrPath `
                 -OutputLimitCharacters $script:StandardValidationChildOutputQuotaCharacters
             $processId = $lease.Pid; $identity = $lease.StartIdentity; $isolation = $lease.Isolation

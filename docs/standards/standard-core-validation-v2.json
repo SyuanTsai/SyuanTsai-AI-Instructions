@@ -36,6 +36,14 @@
     "receipt": "processOwnership",
     "commandBinding": ["commandPath", "resolvedCommandPath"],
     "executableResolution": "resolve-links-then-no-follow-lease-and-revalidate-identity",
+    "argumentZero": {
+      "nativeCommand": "original-command-path",
+      "wrapper": "original-interpreter-path",
+      "validation": "absolute-path-without-nul",
+      "unix": "override-argv0-preserving-leased-exec",
+      "windows": "validated-but-ignored",
+      "linuxShebang": "kernel-script-path-with-readable-executable-fd"
+    },
     "scriptFailurePolicy": "stop-on-error-and-propagate-last-native-exit-code",
     "runtimeBinding": [
       "apiVersion",

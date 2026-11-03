@@ -6428,6 +6428,10 @@ Describe 'Validator platform ownership authority contract' {
         $policy.processOwnership.isolationLevels.'windows-job-object' | Should -Be 'strong'
         $policy.processOwnership.isolationLevels.'linux-process-group-subreaper' | Should -Be 'cooperative'
         $policy.processOwnership.isolationLevels.'macos-process-group' | Should -Be 'cooperative'
+        $policy.processOwnership.argumentZero.validation | Should -Be 'absolute-path-without-nul'
+        $policy.processOwnership.argumentZero.unix | Should -Be 'override-argv0-preserving-leased-exec'
+        $policy.processOwnership.argumentZero.windows | Should -Be 'validated-but-ignored'
+        $policy.processOwnership.argumentZero.linuxShebang | Should -Be 'kernel-script-path-with-readable-executable-fd'
         foreach ($name in @('commandPath','resolvedCommandPath')) {
             $policy.processOwnership.commandBinding | Should -Contain $name
             $core.'$defs'.processOwnership.required | Should -Contain $name

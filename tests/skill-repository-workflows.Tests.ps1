@@ -1212,6 +1212,8 @@ Describe 'Validator platform authority routing' {
             $policy.processOwnership.primitives | Should -Contain $primitive
         }
         $policy.processOwnership.executableResolution | Should -Be 'resolve-links-then-no-follow-lease-and-revalidate-identity'
+        $policy.processOwnership.argumentZero.nativeCommand | Should -Be 'original-command-path'
+        $policy.processOwnership.argumentZero.wrapper | Should -Be 'original-interpreter-path'
         $policy.processOwnership.scriptFailurePolicy | Should -Be 'stop-on-error-and-propagate-last-native-exit-code'
         foreach ($name in @('commandPath','resolvedCommandPath')) {
             $policy.processOwnership.commandBinding | Should -Contain $name

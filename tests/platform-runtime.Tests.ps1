@@ -420,6 +420,60 @@ Start-Sleep 30
         } finally { if ($null -ne $executable) { $executable.Dispose() }; if ($null -ne $parent) { $parent.Dispose() }; Remove-P3Fixture $f $p }
     }
 
+    # Scenario: A caller supplies a relative, empty or NUL-containing invocation path.
+    # Purpose: Reject invalid argv0 before reserving capture files or starting a process.
+    It 'InterT121_rejects_invalid_argument_zero_before_capture' {
+        $f = New-P3Fixture
+        try {
+            foreach ($invalid in @('relative-host', '', ($script:P3Shell + [char]0 + 'suffix'))) {
+                { Start-PlatformOwnedProcess -ExecutablePath $script:P3Shell -ArgumentZero $invalid -Environment @{} -WorkingDirectoryLease $f.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(10)) -StdoutPath (Join-Path $f.Path 'out') -StderrPath (Join-Path $f.Path 'err') } | Should Throw 'ArgumentZero must be an absolute path without NUL.'
+                [IO.File]::Exists((Join-Path $f.Path 'out')) | Should -BeFalse
+                [IO.File]::Exists((Join-Path $f.Path 'err')) | Should -BeFalse
+            }
+        } finally { Remove-P3Fixture $f $null }
+    }
+
+    if ($IsWindows) {
+        # Scenario: A Windows caller passes a valid Unix-only argv0 override.
+        # Purpose: Keep Windows executable selection and Job ownership unchanged.
+        It 'InterT122_preserves_windows_launch_with_argument_zero' {
+            $f = New-P3Fixture; $p = $null
+            try {
+                $environment = [Collections.Generic.Dictionary[string,string]]::new()
+                $environment['SystemRoot'] = [string]$env:SystemRoot
+                $p = Start-PlatformOwnedProcess -ExecutablePath $script:P3Shell -ArgumentZero (Join-Path $f.Path 'alias.exe') -ArgumentList @('-NoProfile','-NonInteractive','-Command',"[Console]::Write('windows-unchanged')") -Environment $environment -WorkingDirectoryLease $f.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(10)) -StdoutPath (Join-Path $f.Path 'out') -StderrPath (Join-Path $f.Path 'err')
+                Assert-P3Exited $p
+                (Stop-PlatformOwnedProcess -Lease $p).CleanedUp | Should -BeTrue
+                $p.ExitCode | Should -Be 0
+                [IO.File]::ReadAllText((Join-Path $f.Path 'out')) | Should -Be 'windows-unchanged'
+            } finally { Remove-P3Fixture $f $p }
+        }
+    }
+    if ($IsLinux -or $IsMacOS) {
+        # Scenario: A leased shell is executed with a different absolute invocation name.
+        # Purpose: argv0 is caller-controlled data while the executable remains lease-bound.
+        It 'InterT123_preserves_argument_zero_with_executable_lease' {
+          foreach ($override in @($false,$true)) {
+            $f = New-P3Fixture; $file = $null; $p = $null
+            try {
+                [IO.File]::Copy('/bin/sh',(Join-Path $f.Path 'executable'))
+                $file = Open-PlatformFile -ParentLease $f.Directory -Leaf 'executable' -Access Read -CreateMode OpenExisting
+                Set-PlatformPermissions -Lease $file -Policy @{ Mode=448 } | Out-Null
+                $invocation = Join-Path $f.Path 'venv/bin/sh'
+                $options = @{}
+                if ($override) { $options.ArgumentZero = $invocation }
+                $environment = [Collections.Generic.Dictionary[string,string]]::new()
+                $p = Start-PlatformOwnedProcess -ExecutableLease $file @options -ArgumentList @('-c','printf "%s" "$0"') -Environment $environment -WorkingDirectoryLease $f.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(10)) -StdoutPath (Join-Path $f.Path 'out') -StderrPath (Join-Path $f.Path 'err')
+                Assert-P3Exited $p
+                (Stop-PlatformOwnedProcess -Lease $p).CleanedUp | Should -BeTrue
+                $p.ExitCode | Should -Be 0
+                $expected = if ($override) { $invocation } elseif ($IsLinux) { '/proc/self/fd/3' } else { Join-Path $f.Path 'executable' }
+                [IO.File]::ReadAllText((Join-Path $f.Path 'out')) | Should -Be $expected
+            } finally { if ($null -ne $file) { $file.Dispose() }; Remove-P3Fixture $f $p }
+          }
+        }
+    }
+
     # Scenario: An ordinary newly created P2 file is supplied as an executable lease.
     # Purpose: Refuse mode 0600 with a typed error; never silently add executable permissions.
     # Register only on the native host; keep this file's Core CI skip count at zero.
@@ -438,6 +492,31 @@ Start-Sleep 30
                 $caught.Errno | Should Be 13
                 ((Get-PlatformPermissions -Lease $file).Mode -band 4095) | Should Be 384
             } finally { if ($null -ne $file) { $file.Dispose() }; Remove-P3Fixture $f $null }
+        }
+    }
+
+    if ($IsLinux) {
+        # Scenario: A shebang interpreter must reopen the leased script through fd 3.
+        # Purpose: The child descriptor survives exec and the parent's lease disposal.
+        It 'InterT128_keeps_leased_script_descriptor_readable_after_exec' {
+            $f = New-P3Fixture; $file = $null; $p = $null
+            try {
+                $file = Open-PlatformFile -ParentLease $f.Directory -Leaf 'executable' -Access Read -CreateMode CreateNew
+                [IO.File]::WriteAllText((Join-Path $f.Path 'executable'),@'
+#!/bin/sh
+IFS= read -r first < /proc/self/fd/3 || exit 91
+[ "$first" = '#!/bin/sh' ] || exit 92
+printf '%s' "$0"
+'@,[Text.UTF8Encoding]::new($false))
+                Set-PlatformPermissions -Lease $file -Policy @{ Mode=448 } | Out-Null
+                $environment = [Collections.Generic.Dictionary[string,string]]::new()
+                $p = Start-PlatformOwnedProcess -ExecutableLease $file -ArgumentZero (Join-Path $f.Path 'invocation') -Environment $environment -WorkingDirectoryLease $f.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(10)) -StdoutPath (Join-Path $f.Path 'out') -StderrPath (Join-Path $f.Path 'err')
+                $file.Dispose(); $file = $null
+                Assert-P3Exited $p
+                (Stop-PlatformOwnedProcess -Lease $p).CleanedUp | Should -BeTrue
+                $p.ExitCode | Should -Be 0
+                [IO.File]::ReadAllText((Join-Path $f.Path 'out')) | Should -Be '/proc/self/fd/3'
+            } finally { if ($null -ne $file) { $file.Dispose() }; Remove-P3Fixture $f $p }
         }
     }
 

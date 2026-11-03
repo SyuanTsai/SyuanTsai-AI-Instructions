@@ -196,15 +196,56 @@ param([string]$NativeHost)
             [IO.File]::Copy('/bin/echo',$physicalCommand)
             [IO.File]::SetUnixFileMode($physicalCommand,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserExecute)
             [void](New-Item -ItemType SymbolicLink -Path (Join-Path $physicalDirectory 'target') -Target 'native-echo')
-            [void](New-Item -ItemType SymbolicLink -Path (Join-Path $physicalDirectory 'host') -Target 'target')
+            # Keep the utility's invocation name: multicall coreutils dispatches by argv0.
+            [void](New-Item -ItemType SymbolicLink -Path (Join-Path $physicalDirectory 'echo') -Target 'target')
             [void](New-Item -ItemType SymbolicLink -Path (Join-Path $root 'bin') -Target 'physical')
-            $command = Join-Path $root 'bin/host'
+            $command = Join-Path $root 'bin/echo'
             $result = Invoke-StandardValidationProcess -Command $command -Arguments @('linked-host') -WorkingDirectory $root -Environment @{} -TimeoutSeconds 10
+            if ($result.status -ne 'passed') { throw ('Symlink command failed: ' + ($result | ConvertTo-Json -Depth 12 -Compress)) }
             $result.status | Should -Be 'passed'
             $result.stdout | Should -Be ('linked-host' + [Environment]::NewLine)
             $result.cleanedUp | Should -BeTrue
             $result.processOwnership.commandPath | Should -Be $command
             $result.processOwnership.resolvedCommandPath | Should -Be $physicalCommand
+        }
+        if ($IsLinux) {
+            $python = Get-Command python3 -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($null -ne $python) {
+                & $python.Source -I -c 'import venv' 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    # Scenario: A copied venv calls a system Python binary through its own symlink.
+                    # Purpose: Descriptor exec must retain sys.executable and the venv-only import location.
+                    It 'InterT96_preserves_copied_python_venv_through_symlink' {
+                        $pythonHost = (Get-Command python3 -CommandType Application | Select-Object -First 1).Source
+                        $root = Join-Path $TestDrive 'python-venv'
+                        [void][IO.Directory]::CreateDirectory($root)
+                        $source = Join-Path $root 'source'
+                        $copied = Join-Path $root 'copied'
+                        & $pythonHost -I -m venv --without-pip --symlinks $source
+                        $LASTEXITCODE | Should -Be 0
+                        & $pythonHost -I -c 'import shutil, sys; shutil.copytree(sys.argv[1], sys.argv[2], symlinks=True)' $source $copied
+                        $LASTEXITCODE | Should -Be 0
+                        $command = Join-Path $copied 'bin/python'
+                        ([IO.FileInfo]::new($command)).LinkTarget | Should -Not -BeNullOrEmpty
+                        $site = & $command -I -c 'import sysconfig; print(sysconfig.get_path("purelib"))'
+                        $LASTEXITCODE | Should -Be 0
+                        $site.StartsWith($copied + '/') | Should -BeTrue
+                        [IO.File]::WriteAllText((Join-Path $site 'fixture_venv_only.py'),"marker = 'copied-venv-only'`n",[Text.UTF8Encoding]::new($false))
+                        $code = 'import json, sys, fixture_venv_only; print(json.dumps({"executable":sys.executable,"prefix":sys.prefix,"module":fixture_venv_only.__file__,"marker":fixture_venv_only.marker}))'
+                        $result = Invoke-StandardValidationProcess -Command $command -Arguments @('-I','-c',$code) -WorkingDirectory $root -Environment @{} -TimeoutSeconds 15
+                        if ($result.status -ne 'passed') { throw ('Copied venv command failed: ' + ($result | ConvertTo-Json -Depth 12 -Compress)) }
+                        $result.status | Should -Be 'passed'
+                        $result.cleanedUp | Should -BeTrue
+                        $observed = $result.stdout | ConvertFrom-Json
+                        $observed.executable | Should -Be $command
+                        $observed.prefix | Should -Be $copied
+                        $observed.module | Should -Be (Join-Path $site 'fixture_venv_only.py')
+                        $observed.marker | Should -Be 'copied-venv-only'
+                        $result.processOwnership.commandPath | Should -Be $command
+                        $result.processOwnership.resolvedCommandPath | Should -Not -Be $command
+                    }
+                }
+            }
         }
         Context 'Executable replacement after leasing' {
             # Scenario: The resolved executable is replaced after the validator opens its lease.
@@ -220,11 +261,11 @@ param([string]$NativeHost)
                 $command = Join-Path $root 'command'
                 [void](New-Item -ItemType SymbolicLink -Path $command -Target 'target')
                 Mock Start-PlatformOwnedProcess {
-                    param($ExecutableLease,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$StdoutPath,$StderrPath,$OutputLimitCharacters)
+                    param($ExecutableLease,$ArgumentZero,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$StdoutPath,$StderrPath,$OutputLimitCharacters)
                     [IO.File]::Move($script:ValidatorReplacementTarget,($script:ValidatorReplacementTarget + '.old'))
                     [IO.File]::Copy('/bin/echo',$script:ValidatorReplacementTarget)
                     [IO.File]::SetUnixFileMode($script:ValidatorReplacementTarget,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserExecute)
-                    & $script:ValidatorRealStart -ExecutableLease $ExecutableLease -ArgumentList $ArgumentList -Environment $Environment -WorkingDirectoryLease $WorkingDirectoryLease -Deadline $Deadline -StdoutPath $StdoutPath -StderrPath $StderrPath -OutputLimitCharacters $OutputLimitCharacters
+                    & $script:ValidatorRealStart -ExecutableLease $ExecutableLease -ArgumentZero $ArgumentZero -ArgumentList $ArgumentList -Environment $Environment -WorkingDirectoryLease $WorkingDirectoryLease -Deadline $Deadline -StdoutPath $StdoutPath -StderrPath $StderrPath -OutputLimitCharacters $OutputLimitCharacters
                 }
                 $result = Invoke-StandardValidationProcess -Command $command -Arguments @('must-not-run') -WorkingDirectory $root -Environment @{} -TimeoutSeconds 10
                 Assert-MockCalled Start-PlatformOwnedProcess -Times 1 -Exactly -Scope It
