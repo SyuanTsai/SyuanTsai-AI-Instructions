@@ -914,6 +914,48 @@ try {
             Test-Path -LiteralPath $fixture.UnselectedWitness | Should Be $false
         }
 
+        # Scenario: A selected fixture removes platform-runtime during Pester teardown.
+        # Purpose: Evidence writes retain verified P2 command ownership independently of the test session module table.
+        It 'InterT14_writes_result_and_case_evidence_after_the_fixture_removes_platform_runtime' {
+            $fixture=New-P02AFixture
+            $body=@'
+Describe 'platform runtime removal fixture' {
+    It 'passes before removing the runtime module' {
+        1 | Should Be 1
+    }
+    AfterAll {
+        Remove-Module platform-runtime -Force -ErrorAction Stop
+        if ($null -ne (Get-Command Open-PlatformDirectory -CommandType Function -ErrorAction SilentlyContinue)) {
+            throw 'Fixture did not remove the global platform runtime command.'
+        }
+    }
+}
+'@
+            Write-P02AText (Join-Path $fixture.TestRoot 'remove-runtime.Tests.ps1') $body
+            $invocation=New-P02AAdapterInvocation $fixture -SelectedNames @('remove-runtime.Tests.ps1')
+            $run=Invoke-P02AHiddenAdapter $invocation $fixture
+            $run.TimedOut | Should Be $false
+            Assert-P02AExpectedWithChildDiagnostics $run.ExitCode 0 $fixture 'Removing the runtime module in a fixture must not disable shard evidence writes.'
+            Test-Path -LiteralPath $run.SummaryPath -PathType Leaf | Should Be $true
+            $summary=Get-Content -LiteralPath $run.SummaryPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $summary.status | Should Be 'completed'
+            $summary.counts.TotalCount | Should Be 1
+            $summary.counts.PassedCount | Should Be 1
+            $shard=@($summary.shards)[0]
+            $shard.status | Should Be 'completed'
+            Test-Path -LiteralPath $shard.resultPath -PathType Leaf | Should Be $true
+            $result=Get-Content -LiteralPath $shard.resultPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $result.status | Should Be 'completed'
+            $result.TotalCount | Should Be 1
+            $result.PassedCount | Should Be 1
+            $casePath=$shard.resultPath+'.cases.json'
+            Test-Path -LiteralPath $casePath -PathType Leaf | Should Be $true
+            $caseEvidence=Get-Content -LiteralPath $casePath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $caseEvidence.type | Should Be 'pester-case-diagnostics'
+            @($caseEvidence.cases).Count | Should Be 1
+            $caseEvidence.cases[0].result | Should Be 'Passed'
+        }
+
         # Scenario: A real selected test fails or a discovered file contains no test cases.
         # Purpose: Keep true process failures and empty inventories from producing a completed machine summary.
         It 'InterT20_rejects_failed_and_empty_runs_without_completed_summary' {
