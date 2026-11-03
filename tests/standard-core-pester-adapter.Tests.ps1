@@ -763,8 +763,8 @@ try {
         $directory=Open-PesterShardDirectory $root; $guards.Add($directory)
         $executable=Open-PesterShardInput ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) $guards
         # EncodedCommand can run under Restricted; set the process policy explicitly so an outer Bypass or portable-host configuration cannot define this baseline.
-        # Invoking the unsigned file must still fail.
-        $command="`$ErrorActionPreference='Stop'; `$policy=Get-ExecutionPolicy; [Console]::Out.WriteLine(('effectivePolicy='+`$policy)); if (`$policy -cne 'Restricted') { exit 98 }; try { & '"+$child.Replace("'","''")+"'; exit 99 } catch { if (`$_.Exception -is [Management.Automation.PSSecurityException]) { exit 17 }; throw }"
+        # Do not load Security cmdlets here: Restricted can reject their module type data before the unsigned child is invoked.
+        $command="`$ErrorActionPreference='Stop'; [Console]::Out.WriteLine(('processPolicy='+`$env:PSExecutionPolicyPreference)); try { & '"+$child.Replace("'","''")+"'; exit 99 } catch { if (`$_.Exception -is [Management.Automation.PSSecurityException]) { exit 17 }; throw }"
         $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
         $baselineOut=Join-Path $root 'baseline.out'
         $baselineErr=Join-Path $root 'baseline.err'
