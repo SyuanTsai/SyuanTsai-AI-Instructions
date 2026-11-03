@@ -215,6 +215,30 @@
       }
     },
     {
+      "id": "write-copilot-implementation-prompt",
+      "group": "code-collaboration",
+      "source": {
+        "sourceId": "code-collaboration",
+        "sourcePath": "skills/write-copilot-implementation-prompt",
+        "targetPath": ".agents/skills/write-copilot-implementation-prompt"
+      },
+      "profiles": [],
+      "compatibility": {
+        "platforms": [
+          "any"
+        ],
+        "shells": [],
+        "requiredCapabilities": [],
+        "anyOfCapabilities": []
+      },
+      "dependencies": [],
+      "lifecycle": {
+        "status": "removed",
+        "aliases": [],
+        "replacementId": "write-implementation-prompt"
+      }
+    },
+    {
       "id": "write-implementation-prompt",
       "group": "code-collaboration",
       "source": {
@@ -236,7 +260,9 @@
       "dependencies": [],
       "lifecycle": {
         "status": "active",
-        "aliases": []
+        "aliases": [
+          "write-copilot-implementation-prompt"
+        ]
       }
     },
     {
