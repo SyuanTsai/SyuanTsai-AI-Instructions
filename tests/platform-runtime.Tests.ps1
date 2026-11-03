@@ -2184,6 +2184,46 @@ try {
         } finally { $parent.Dispose() }
     }
 
+    # Scenario: An evidence producer writes a new file through its lease and reads it with a bound.
+    # Purpose: Keep bytes attached to the verified identity without reopening a pathname or invoking P7.
+    It 'InterT15_reads_and_writes_create_only_evidence_through_the_lease' {
+        $parent = Open-PlatformDirectory -Root $script:P2Root -RelativePath 'lease-io' -CreatePrivate
+        try {
+            $file = Open-PlatformFile -ParentLease $parent -Leaf 'evidence' -Access ReadWrite -CreateMode CreateNew
+            try {
+                $file.WriteNewBytes([byte[]]@(1,2,3))
+                [Convert]::ToBase64String($file.ReadAllBytes(3)) | Should Be 'AQID'
+                { $file.ReadAllBytes(2) } | Should Throw
+                { $file.WriteNewBytes([byte[]]@(4)) } | Should Throw
+            } finally { $file.Dispose() }
+            $file = Open-PlatformFile -ParentLease $parent -Leaf 'evidence' -Access ReadWrite -CreateMode OpenExisting
+            try {
+                { $file.WriteNewBytes([byte[]]@(4)) } | Should Throw
+                [Convert]::ToBase64String($file.ReadAllBytes(3)) | Should Be 'AQID'
+            } finally { $file.Dispose() }
+            { $file.ReadAllBytes(3) } | Should Throw
+        } finally { $parent.Dispose() }
+    }
+
+    if ($IsLinux -or $IsMacOS) {
+        # Scenario: A lease's pathname is replaced between creation and data I/O on a Unix host.
+        # Purpose: Revalidate identity before read/write and preserve the replacement's sentinel bytes.
+        It 'InterT17_rejects_lease_io_after_unix_identity_substitution' {
+            $parent = Open-PlatformDirectory -Root $script:P2Root -RelativePath 'lease-io-substitution' -CreatePrivate
+            try {
+                $file = Open-PlatformFile -ParentLease $parent -Leaf 'data' -Access ReadWrite -CreateMode CreateNew
+                try {
+                    $path = Join-Path $script:P2Root 'lease-io-substitution/data'
+                    [IO.File]::Move($path,($path+'.retained'))
+                    [IO.File]::WriteAllText($path,'outside-sentinel')
+                    { $file.WriteNewBytes([byte[]]@(1,2,3)) } | Should Throw
+                    { $file.ReadAllBytes(100) } | Should Throw
+                    [IO.File]::ReadAllText($path) | Should Be 'outside-sentinel'
+                } finally { $file.Dispose() }
+            } finally { $parent.Dispose() }
+        }
+    }
+
     # Scenario: Untrusted child paths contain traversal, empty, or absolute components.
     # Purpose: Reject lexical escapes before any create operation.
     It 'InterT20_rejects_unsafe_relative_paths' {

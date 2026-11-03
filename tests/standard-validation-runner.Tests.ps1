@@ -1,6 +1,35 @@
 
 
 Describe 'Pester shard plan contract' {
+    # Scenario: P3 returns completion, timeout, cancellation, quota and uncertain cleanup observations.
+    # Purpose: Only a confirmed owner receipt can authorize completed; child result fields are irrelevant.
+    It 'UnitT05_maps_owner_state_without_trusting_child_completion' {
+        $path = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-PesterShardProcess.ps1'
+        $tokens=$null; $errors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors)
+        $definition=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'ConvertTo-PesterShardProcessState'},$true)
+        Invoke-Expression $definition.Extent.Text
+        $receipt=[pscustomobject]@{CleanedUp=$true;CaptureReadersStopped=$true;CaptureResourcesClosed=$true;Uncertainty=$null;RemainingPids=@()}
+        ConvertTo-PesterShardProcessState $receipt 0 'cancelled' $false $true $false | Should Be 'completed'
+        ConvertTo-PesterShardProcessState $receipt 2 'cancelled' $false $true $false | Should Be 'failed'
+        ConvertTo-PesterShardProcessState $receipt 0 'deadline' $false $true $false | Should Be 'timed-out'
+        ConvertTo-PesterShardProcessState $receipt 0 'cancelled' $false $false $true | Should Be 'cancelled'
+        ConvertTo-PesterShardProcessState $receipt 0 'cancelled' $true $true $false | Should Be 'output-quota-exceeded'
+        foreach ($reason in @('capture-failure','supervisor-failure')) {
+            ConvertTo-PesterShardProcessState $receipt 0 $reason $false $true $false | Should Be $reason
+        }
+        foreach ($field in @('CleanedUp','CaptureReadersStopped','CaptureResourcesClosed')) {
+            $receipt.$field=$false
+            ConvertTo-PesterShardProcessState $receipt 0 '' $false $true $false | Should Be 'cleanup-failed'
+            $receipt.$field=$true
+        }
+        $receipt.Uncertainty='identity-unknown'
+        ConvertTo-PesterShardProcessState $receipt 0 '' $false $true $false | Should Be 'cleanup-failed'
+        $receipt.Uncertainty=$null; $receipt.RemainingPids=@(123)
+        ConvertTo-PesterShardProcessState $receipt 0 '' $false $true $false | Should Be 'cleanup-failed'
+        ConvertTo-PesterShardProcessState $null 0 '' $false $true $false | Should Be 'cleanup-failed'
+    }
+
     # Scenario: The complete repository suite contains many non-isolated test files and one file can terminate its hosted PowerShell process.
     # Purpose: Give every bulk test file an independent owned process by default while retaining an exact, configurable partition for bounded diagnostics.
     It 'UnitT10_partitions_bulk_tests_into_independent_owned_processes_by_default' {

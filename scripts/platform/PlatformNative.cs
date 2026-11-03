@@ -6,6 +6,41 @@ using System.Runtime.InteropServices;
 
 namespace SyuanTsai.AIInstructions.PlatformRuntime
 {
+    // Bounded data I/O on a borrowed P2 handle; no public native handle or path reopen.
+    internal static class LeaseBytes
+    {
+        internal static byte[] Read(SafeHandle handle, int maximumBytes)
+        {
+            if (maximumBytes < 0) throw new ArgumentOutOfRangeException("maximumBytes");
+            using (var borrowed = new Microsoft.Win32.SafeHandles.SafeFileHandle(handle.DangerousGetHandle(), false))
+            using (var stream = new System.IO.FileStream(borrowed, System.IO.FileAccess.Read))
+            {
+                if (stream.Length > maximumBytes) throw new System.IO.IOException("File exceeds the bounded read limit.");
+                stream.Position = 0;
+                byte[] bytes = new byte[checked((int)stream.Length)];
+                int offset = 0;
+                while (offset < bytes.Length)
+                {
+                    int count = stream.Read(bytes, offset, bytes.Length - offset);
+                    if (count == 0) throw new System.IO.EndOfStreamException();
+                    offset += count;
+                }
+                if (stream.ReadByte() != -1) throw new System.IO.IOException("File grew during the bounded read.");
+                return bytes;
+            }
+        }
+        internal static void Write(SafeHandle handle, byte[] bytes)
+        {
+            if (bytes == null) throw new ArgumentNullException("bytes");
+            using (var borrowed = new Microsoft.Win32.SafeHandles.SafeFileHandle(handle.DangerousGetHandle(), false))
+            using (var stream = new System.IO.FileStream(borrowed, System.IO.FileAccess.Write))
+            {
+                if (stream.Length != 0) throw new System.IO.IOException("New evidence file is no longer empty.");
+                stream.Position = 0; stream.Write(bytes, 0, bytes.Length); stream.Flush(true);
+            }
+        }
+    }
+
     public static class PlatformNative
     {
         public static string GetOperatingSystem()

@@ -4,10 +4,11 @@ Describe 'Standard core Pester adapter inventory and execution evidence' {
         $script:ExecutorPath = Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'
         $script:ReportRunRoot = [Environment]::GetEnvironmentVariable('SYP154_PESTER_P02A_EVIDENCE_ROOT', 'Process')
         if ([string]::IsNullOrWhiteSpace($script:ReportRunRoot)) {
-            $script:ReportRunRoot = Join-Path ([IO.Path]::GetTempPath()) ('SYP226-P02A-' + [guid]::NewGuid().ToString('N'))
+            $anchor = if ($IsMacOS) { '/private/tmp' } else { [IO.Path]::GetTempPath() }
+            $script:ReportRunRoot = Join-Path $anchor ('SYP226-P02A-' + [guid]::NewGuid().ToString('N'))
         }
         $reportRunFull = [IO.Path]::GetFullPath($script:ReportRunRoot)
-        if ($reportRunFull.Length -ge 200) { throw 'The P02A report directory is too long for guarded Windows child paths.' }
+        if ($IsWindows -and $reportRunFull.Length -ge 200) { throw 'The P02A report directory is too long for guarded Windows child paths.' }
         if (-not (Test-Path -LiteralPath $reportRunFull -PathType Container)) { [void](New-Item -ItemType Directory -Path $reportRunFull -Force) }
         $script:ReportRunRoot = $reportRunFull
 
@@ -69,7 +70,7 @@ Describe 'Standard core Pester adapter inventory and execution evidence' {
         function New-P02AChildDirectory {
             $path = Join-Path $script:ReportRunRoot ('f' + [guid]::NewGuid().ToString('N'))
             [void](New-Item -ItemType Directory -Path $path -Force)
-            if ($path.Length -ge 200) { throw 'A P02A fixture directory exceeds the short-path budget.' }
+            if ($IsWindows -and $path.Length -ge 200) { throw 'A P02A fixture directory exceeds the short-path budget.' }
             return $path
         }
         function New-P02AFixture {
@@ -118,10 +119,9 @@ Describe 'unselected P02A fixture' {
                 $manifest = Join-Path $pesterModule.ModuleBase 'Pester.psd1'
             }
             $version = $pesterModule.Version.ToString()
-            if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or
-                $PSVersionTable.PSEdition -cne 'Core' -or
+            if ($PSVersionTable.PSEdition -cne 'Core' -or
                 $PSVersionTable.PSVersion.Major -ne 7) {
-                throw 'Pester adapter contract tests require Windows PowerShell 7.'
+                throw 'Pester adapter contract tests require PowerShell 7 Core.'
             }
             $hostExe = [IO.Path]::GetFullPath([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)
             if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { throw "The approved Pester manifest is missing: $manifest" }
@@ -136,7 +136,10 @@ Describe 'unselected P02A fixture' {
                 [string] $SummaryOutputPath,
                 [bool] $IncludeSummary = $true,
                 [int] $ShardPartitionCount = 1,
-                [int] $ShardPartitionIndex = 0
+                [int] $ShardPartitionIndex = 0,
+                [int] $OuterTimeoutSeconds = 60,
+                [int] $CancelAfterMilliseconds = 0,
+                [string] $IsolationRequirement = 'cooperative'
             )
             $runtime = Get-P02ARuntimeConfiguration
             $wrapperPath = Join-Path $Fixture.Root 'invoke-adapter.ps1'
@@ -166,7 +169,8 @@ try {
         BulkShardSize = [int]1
         ShardPartitionCount = [int]$config.ShardPartitionCount
         ShardPartitionIndex = [int]$config.ShardPartitionIndex
-        OuterTimeoutSeconds = [int]60
+        OuterTimeoutSeconds = [int]$config.OuterTimeoutSeconds
+        IsolationRequirement = [string]$config.IsolationRequirement
     }
     if ($config.PSObject.Properties.Name -contains 'SelectedTestFileNames') {
         $parameters.SelectedTestFileNames = [string[]]@($config.SelectedTestFileNames)
@@ -174,7 +178,15 @@ try {
     if ($config.PSObject.Properties.Name -contains 'SummaryOutputPath') {
         $parameters.SummaryOutputPath = [string]$config.SummaryOutputPath
     }
-    & ([string]$config.ExecutorPath) @parameters
+    $cancellation = [Threading.CancellationTokenSource]::new()
+    try {
+        if ($config.PSObject.Properties.Name -contains 'InjectedEnvironment') {
+            foreach ($property in $config.InjectedEnvironment.PSObject.Properties) { [Environment]::SetEnvironmentVariable($property.Name,[string]$property.Value,'Process') }
+        }
+        if ($config.CancelAfterMilliseconds -gt 0) { $cancellation.CancelAfter([int]$config.CancelAfterMilliseconds) }
+        $parameters.CancellationToken = $cancellation.Token
+        & ([string]$config.ExecutorPath) @parameters
+    } finally { $cancellation.Dispose() }
     exit 0
 }
 catch {
@@ -183,8 +195,18 @@ catch {
 }
 '@
             Write-P02AText -Path $wrapperPath -Text $wrapperText
+            # Copied entry points carry exactly their bound closure; no ambient repository fallback.
+            $scripts = Join-Path $Fixture.Root 's'
+            [void](New-Item -ItemType Directory -Path $scripts)
+            $sourceScripts = Split-Path -Parent $script:ExecutorPath
+            $manifest = Import-PowerShellDataFile -LiteralPath (Join-Path $sourceScripts 'platform-runtime.psd1')
+            foreach ($relative in @('Invoke-PesterShardProcess.ps1') + @($manifest.FileList)) {
+                $target = Join-Path $scripts $relative
+                [void](New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force)
+                Copy-Item -LiteralPath (Join-Path $sourceScripts $relative) -Destination $target
+            }
             $config = [ordered]@{
-                ExecutorPath = $script:ExecutorPath
+                ExecutorPath = Join-Path $scripts 'Invoke-PesterShardProcess.ps1'
                 PesterModulePath = $runtime.Manifest
                 PesterVersion = $runtime.Version
                 TestRoot = $Fixture.TestRoot
@@ -192,6 +214,9 @@ catch {
                 IsolatedTestFileNames = [string[]]@()
                 ShardPartitionCount = [int]$ShardPartitionCount
                 ShardPartitionIndex = [int]$ShardPartitionIndex
+                OuterTimeoutSeconds = $OuterTimeoutSeconds
+                CancelAfterMilliseconds = $CancelAfterMilliseconds
+                IsolationRequirement = $IsolationRequirement
                 RuntimeEvidencePath = $runtimePath
             }
             if ($IncludeSelection) {
@@ -394,10 +419,10 @@ catch {
             }
         }
         function Assert-P02ARejectedBeforeChild {
-            param([Parameter(Mandatory = $true)] $Run, [Parameter(Mandatory = $true)] $Fixture)
+            param([Parameter(Mandatory = $true)] $Run, [Parameter(Mandatory = $true)] $Fixture, [string]$ExpectedErrorPattern='INVALID\|Pester summary')
             Assert-P02ATrue ($null -ne $Run.ExitCode -and $Run.ExitCode -ne 0) 'Unsafe summary path must return a true nonzero outer exit.'
             $combined = $Run.StdoutText + [Environment]::NewLine + $Run.StderrText
-            Assert-P02ATrue ($combined -match 'INVALID\|Pester summary') 'Unsafe summary path must emit the stable ASCII summary error.'
+            Assert-P02ATrue ($combined -match $ExpectedErrorPattern) "Preflight must emit the expected error: $ExpectedErrorPattern"
             Assert-P02ATrue (-not (Test-Path -LiteralPath $Fixture.SelectedWitness -PathType Leaf)) 'Summary path rejection must happen before the selected test executes.'
             $processEvidenceFiles = @(Get-P02AProcessEvidenceFiles -Fixture $Fixture)
             Assert-P02AEqual $processEvidenceFiles.Count 0 'Summary path rejection must happen before a shard process starts.'
@@ -515,6 +540,40 @@ catch {
     }
 
     Context 'Actual Pester adapter' {
+        # Scenario: A copied executor has a missing dependency or a self-rehashed candidate module.
+        # Purpose: Reject incomplete closure and candidate self-authorization before importing or starting tests.
+        It 'InterT05_rejects_missing_and_self_authorized_runtime_closures' {
+            foreach ($mode in @('missing','self-authorized')) {
+                $fixture=New-P02AFixture; Write-P02ASelectedFixture $fixture
+                $invocation=New-P02AAdapterInvocation $fixture -SelectedNames @('selected.Tests.ps1')
+                $scripts=Join-Path $fixture.Root 's'
+                if ($mode -eq 'missing') { Remove-Item -LiteralPath (Join-Path $scripts 'platform/UnixProcess.cs') }
+                else {
+                    $module=Join-Path $scripts 'platform-runtime.psm1'
+                    Write-P02AText $module "throw 'candidate module executed'"
+                    $hash=(Get-FileHash -LiteralPath $module -Algorithm SHA256).Hash.ToLowerInvariant()
+                    $manifest=Join-Path $scripts 'platform-runtime.psd1'
+                    $text=[IO.File]::ReadAllText($manifest)
+                    $text=[regex]::Replace($text,"(Path = 'platform-runtime.psm1'; Sha256 = ')[a-f0-9]{64}",('${1}'+$hash))
+                    Write-P02AText $manifest $text
+                }
+                $run=Invoke-P02AHiddenAdapter $invocation $fixture
+                Assert-P02ARejectedBeforeChild $run $fixture -ExpectedErrorPattern 'INVALID\|'
+                ($run.StderrText -match 'candidate module executed') | Should Be $false
+            }
+        }
+
+        # Scenario: The caller selects a duplicate, missing or unsafe name in a real invocation.
+        # Purpose: Confirm selection rejection precedes launch, with no selected-test witness.
+        It 'InterT07_rejects_invalid_selection_before_launch' {
+            foreach ($names in @(@('selected.Tests.ps1','selected.Tests.ps1'),@('missing.Tests.ps1'),@('../selected.Tests.ps1'))) {
+                $fixture=New-P02AFixture; Write-P02ASelectedFixture $fixture
+                $invocation=New-P02AAdapterInvocation $fixture -SelectedNames $names
+                $run=Invoke-P02AHiddenAdapter $invocation $fixture
+                Assert-P02ARejectedBeforeChild $run $fixture -ExpectedErrorPattern 'INVALID\|Pester selection'
+            }
+        }
+
         # Scenario: One selected file passes while an unselected file would create a witness and fail.
         # Purpose: Prove the real executor runs only the requested file and writes truthful typed completion evidence.
         It 'InterT10_executes_only_selected_files_and_writes_typed_summary' {
@@ -709,6 +768,182 @@ Describe 'default beta P02A fixture' {
             Assert-P02AEqual $summary.counts.TotalCount 2 'Default discovery must preserve its actual aggregate total.'
             Assert-P02AEqual $summary.counts.PassedCount 2 'Both default fixture tests must pass.'
             Assert-P02ATrue ($run.StdoutText -match 'Aggregate - Total: 2 Passed: 2 Failed: 0') 'Default discovery must preserve aggregate stdout.'
+        }
+
+        # Scenario: Real pending/inconclusive tests or an invalid count envelope reach the adapter.
+        # Purpose: Preserve failure diagnostics while refusing a completed summary for non-pass outcomes.
+        It 'InterT42_rejects_pending_inconclusive_and_malformed_counts' {
+            foreach ($mode in @('pending','inconclusive','counts')) {
+                $fixture=New-P02AFixture
+                $body = if ($mode -eq 'pending') { "Describe 'pending' { It 'pending' -Pending { } }" }
+                    elseif ($mode -eq 'inconclusive') { "Describe 'inconclusive' { It 'inconclusive' { Set-TestInconclusive 'fixture' } }" }
+                    else { "Describe 'unused' { It 'unused' { 1 | Should Be 1 } }" }
+                Write-P02AText (Join-Path $fixture.TestRoot 'result.Tests.ps1') $body
+                $invocation=New-P02AAdapterInvocation $fixture -SelectedNames @('result.Tests.ps1')
+                if ($mode -eq 'counts') {
+                    $moduleRoot=Join-Path $fixture.Root 'Pester'
+                    Write-P02AText (Join-Path $moduleRoot 'Pester.psd1') "@{RootModule='Pester.psm1';ModuleVersion='4.10.1';FunctionsToExport=@('Invoke-Pester')}"
+                    Write-P02AText (Join-Path $moduleRoot 'Pester.psm1') 'function Invoke-Pester { param($Script,[switch]$PassThru); [pscustomobject]@{TotalCount="1";PassedCount=1;FailedCount=0;SkippedCount=0;PendingCount=0;InconclusiveCount=0;TestResult=@()} }; Export-ModuleMember Invoke-Pester'
+                    $config=Get-Content -LiteralPath $invocation.ConfigPath -Raw | ConvertFrom-Json
+                    $config.PesterModulePath=Join-Path $moduleRoot 'Pester.psd1'
+                    Write-P02AText $invocation.ConfigPath ($config | ConvertTo-Json -Depth 8)
+                }
+                $run=Invoke-P02AHiddenAdapter $invocation $fixture
+                $run.TimedOut | Should Be $false
+                $run.ExitCode | Should Not Be 0
+                Test-Path -LiteralPath $run.SummaryPath | Should Be $false
+                @(Get-ChildItem -LiteralPath $fixture.EvidenceRoot -Filter '*.cases.json').Count | Should Be 1
+                if ($mode -eq 'counts') { $run.StderrText | Should Match 'non-integer TotalCount' }
+            }
+        }
+
+        # Scenario: Recursive workflow discovery includes a nested test with a unique basename.
+        # Purpose: Ensure the shard selection cannot silently omit a workflow-discovered file.
+        It 'InterT44_selects_nested_discovery_and_rejects_duplicate_basenames' {
+            $fixture=New-P02AFixture
+            Write-P02AText (Join-Path $fixture.TestRoot 'nested/deep.Tests.ps1') "Describe 'deep' { It 'passes' { 1 | Should Be 1 } }"
+            $invocation=New-P02AAdapterInvocation $fixture -SelectedNames @('deep.Tests.ps1')
+            $run=Invoke-P02AHiddenAdapter $invocation $fixture
+            Assert-P02AExpectedWithChildDiagnostics $run.ExitCode 0 $fixture 'Nested fixture must execute.'
+            $summary=Get-Content -LiteralPath $run.SummaryPath -Raw | ConvertFrom-Json
+            $summary.testFiles[0] | Should Be (Join-Path $fixture.TestRoot 'nested/deep.Tests.ps1')
+            $duplicate=New-P02AFixture
+            foreach ($relative in @('a/deep.Tests.ps1','b/deep.Tests.ps1')) { Write-P02AText (Join-Path $duplicate.TestRoot $relative) "throw 'must not execute'" }
+            $invocation=New-P02AAdapterInvocation $duplicate -SelectedNames @('deep.Tests.ps1')
+            $run=Invoke-P02AHiddenAdapter $invocation $duplicate
+            Assert-P02ARejectedBeforeChild $run $duplicate -ExpectedErrorPattern 'INVALID\|Pester selection'
+        }
+
+        # Scenario: A live test overruns its deadline or the supervisor cancels its token.
+        # Purpose: Exercise real P3 termination rather than child-controlled cancellation markers.
+        It 'InterT46_bounds_timeout_and_supervisor_cancellation' {
+            foreach ($mode in @('deadline','cancelled')) {
+                $fixture=New-P02AFixture
+                Write-P02AText (Join-Path $fixture.TestRoot 'wait.Tests.ps1') "Describe 'wait' { It 'waits' { Start-Sleep -Seconds 90 } }"
+                $timeout=if ($mode -eq 'deadline') { 10 } else { 60 }
+                $cancel=if ($mode -eq 'cancelled') { 30000 } else { 0 }
+                $invocation=New-P02AAdapterInvocation $fixture -SelectedNames @('wait.Tests.ps1') -OuterTimeoutSeconds $timeout -CancelAfterMilliseconds $cancel
+                $run=Invoke-P02AHiddenAdapter $invocation $fixture
+                $run.TimedOut | Should Be $false
+                $run.ExitCode | Should Not Be 0
+                Test-Path -LiteralPath $run.SummaryPath | Should Be $false
+                $evidence=Get-Content -LiteralPath (@(Get-P02AProcessEvidenceFiles $fixture)[0].FullName) -Raw | ConvertFrom-Json
+                $evidence.status | Should Be $(if ($mode -eq 'deadline') {'timed-out'} else {'cancelled'})
+                $evidence.processStarted | Should Be $true
+                $evidence.cleanup.cleanedUp | Should Be $true
+                $evidence.cleanup.CaptureReadersStopped | Should Be $true
+                $evidence.cleanup.CaptureResourcesClosed | Should Be $true
+            }
+        }
+
+        # Scenario: Either child output stream exceeds the owner's independent quota.
+        # Purpose: A nominally successful test cannot authorize completion after capture overflow.
+        It 'InterT48_rejects_stdout_and_stderr_quota_overflow' {
+            foreach ($stream in @('Out','Error')) {
+                $fixture=New-P02AFixture
+                Write-P02AText (Join-Path $fixture.TestRoot 'quota.Tests.ps1') ("Describe 'quota' { It 'floods' { [Console]::"+$stream+".Write(('x' * 1100000)); Start-Sleep 30 } }")
+                $invocation=New-P02AAdapterInvocation $fixture -SelectedNames @('quota.Tests.ps1')
+                $run=Invoke-P02AHiddenAdapter $invocation $fixture
+                $run.TimedOut | Should Be $false
+                $run.ExitCode | Should Not Be 0
+                Test-Path -LiteralPath $run.SummaryPath | Should Be $false
+                $evidence=Get-Content -LiteralPath (@(Get-P02AProcessEvidenceFiles $fixture)[0].FullName) -Raw | ConvertFrom-Json
+                $evidence.status | Should Be 'output-quota-exceeded'
+                $evidence.outputQuotaExceeded | Should Be $true
+                $evidence.cleanup.cleanedUp | Should Be $true
+            }
+        }
+
+        # Scenario: The supervisor inherits secret-like sentinels and runtime injection variables.
+        # Purpose: Verify an actual child receives only the explicit environment allowlist.
+        It 'InterT49_excludes_inherited_secrets_and_runtime_injection' {
+            $fixture=New-P02AFixture
+            $names=@('SYP154_PESTER_SECRET_TOKEN','PRIVATE_SENTINEL','DOTNET_STARTUP_HOOKS','DOTNET_ADDITIONAL_DEPS','DOTNET_SHARED_STORE','LD_PRELOAD','DYLD_INSERT_LIBRARIES','PSExecutionPolicyPreference')
+            $body="Describe 'environment' { It 'does not inherit injection' { foreach (`$name in @('"+($names -join "','")+"')) { [Environment]::GetEnvironmentVariable(`$name) | Should BeNullOrEmpty } } }"
+            Write-P02AText (Join-Path $fixture.TestRoot 'environment.Tests.ps1') $body
+            $invocation=New-P02AAdapterInvocation $fixture -SelectedNames @('environment.Tests.ps1')
+            $config=Get-Content -LiteralPath $invocation.ConfigPath -Raw | ConvertFrom-Json
+            $injection=@{}; foreach ($name in $names) { $injection[$name]='p51-sentinel-must-not-reach-child' }
+            $config | Add-Member NoteProperty InjectedEnvironment ([pscustomobject]$injection)
+            Write-P02AText $invocation.ConfigPath ($config | ConvertTo-Json -Depth 8)
+            $run=Invoke-P02AHiddenAdapter $invocation $fixture
+            Assert-P02AExpectedWithChildDiagnostics $run.ExitCode 0 $fixture 'Environment allowlist fixture must pass.'
+        }
+
+        # Scenario: Test or evidence ancestry uses a native link, or a selected file has a second hard link.
+        # Purpose: Exercise P2 on the host and preserve an outside sentinel before any test executes.
+        It 'InterT60_rejects_linked_inputs_and_evidence_ancestors' {
+            foreach ($mode in @('test-parent','evidence-parent','hard-link')) {
+                $fixture=New-P02AFixture; Write-P02ASelectedFixture $fixture
+                $invocation=New-P02AAdapterInvocation $fixture -SelectedNames @('selected.Tests.ps1')
+                $sentinel=Join-Path $fixture.Root 'outside.txt'; Write-P02AText $sentinel 'outside-preserved'
+                $config=Get-Content -LiteralPath $invocation.ConfigPath -Raw | ConvertFrom-Json
+                if ($mode -eq 'hard-link') {
+                    Remove-Item -LiteralPath (Join-Path $fixture.TestRoot 'selected.Tests.ps1')
+                    New-Item -ItemType HardLink -Path (Join-Path $fixture.TestRoot 'selected.Tests.ps1') -Target $sentinel | Out-Null
+                } else {
+                    $link=Join-Path $fixture.Root 'linked'
+                    $target=if ($mode -eq 'test-parent') { $fixture.TestRoot } else { $fixture.EvidenceRoot }
+                    $kind=if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }
+                    New-Item -ItemType $kind -Path $link -Target $target | Out-Null
+                    if ($mode -eq 'test-parent') { $config.TestRoot=$link }
+                    else { $config.EvidenceRoot=$link; $config.SummaryOutputPath=Join-Path $link 'summary.json' }
+                    Write-P02AText $invocation.ConfigPath ($config | ConvertTo-Json -Depth 8)
+                }
+                $run=Invoke-P02AHiddenAdapter $invocation $fixture
+                Assert-P02ARejectedBeforeChild $run $fixture -ExpectedErrorPattern 'exactly one link|reparse|symlink|errno (20|40|62)'
+                [IO.File]::ReadAllText($sentinel) | Should Be 'outside-preserved'
+            }
+        }
+
+        # Scenario: The Pester root exits after creating a grandchild that retains inherited output handles.
+        # Purpose: Require owner cleanup of descendants rather than treating root HasExited as cleanup.
+        It 'InterT70_cleans_grandchildren_after_root_exit' {
+            $fixture=New-P02AFixture
+            $body=@'
+Describe 'grandchild' {
+    It 'leaves a live descendant for the owner' {
+        $start=[Diagnostics.ProcessStartInfo]::new()
+        $start.FileName=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $start.UseShellExecute=$false; $start.CreateNoWindow=$true
+        foreach ($argument in @('-NoProfile','-NonInteractive','-Command','Start-Sleep 90')) { $start.ArgumentList.Add($argument) }
+        $child=[Diagnostics.Process]::Start($start)
+        try { [IO.File]::WriteAllText($env:SYP154_PESTER_P02A_SELECTED_WITNESS,([pscustomobject]@{pid=$child.Id;start=$child.StartTime.ToUniversalTime().ToString('o')} | ConvertTo-Json)) }
+        finally { $child.Dispose() }
+        1 | Should Be 1
+    }
+}
+'@
+            Write-P02AText (Join-Path $fixture.TestRoot 'grandchild.Tests.ps1') $body
+            $invocation=New-P02AAdapterInvocation $fixture -SelectedNames @('grandchild.Tests.ps1')
+            $run=Invoke-P02AHiddenAdapter $invocation $fixture
+            Assert-P02AExpectedWithChildDiagnostics $run.ExitCode 0 $fixture 'Owner must stop the grandchild and complete capture.'
+            $evidence=Get-Content -LiteralPath (@(Get-P02AProcessEvidenceFiles $fixture)[0].FullName) -Raw | ConvertFrom-Json
+            $evidence.cleanup.cleanedUp | Should Be $true
+            @($evidence.cleanup.RemainingPids).Count | Should Be 0
+            $identity=Get-Content -LiteralPath $fixture.SelectedWitness -Raw | ConvertFrom-Json
+            $child=Get-Process -Id $identity.pid -ErrorAction SilentlyContinue
+            if ($null -ne $child) {
+                try { ($child.StartTime.ToUniversalTime().ToString('o') -ceq $identity.start -and -not $child.HasExited) | Should Be $false }
+                finally { $child.Dispose() }
+            }
+            if ($IsMacOS) { @($evidence.cleanup.Limitations) | Should Contain 'macos-process-group-cannot-detect-setsid-escape' }
+        }
+
+        if ($IsLinux -or $IsMacOS) {
+            # Scenario: A caller requires stronger isolation than the native Unix cooperative boundary.
+            # Purpose: Fail before the Pester child starts and retain the actual platform limitation.
+            It 'InterT80_refuses_unsatisfied_strong_unix_isolation' {
+                $fixture=New-P02AFixture; Write-P02ASelectedFixture $fixture
+                $invocation=New-P02AAdapterInvocation $fixture -SelectedNames @('selected.Tests.ps1') -IsolationRequirement strong
+                $run=Invoke-P02AHiddenAdapter $invocation $fixture
+                $run.ExitCode | Should Not Be 0
+                Test-Path -LiteralPath $fixture.SelectedWitness | Should Be $false
+                Test-Path -LiteralPath $run.SummaryPath | Should Be $false
+                $evidence=Get-Content -LiteralPath (@(Get-P02AProcessEvidenceFiles $fixture)[0].FullName) -Raw | ConvertFrom-Json
+                $evidence.processStarted | Should Be $false
+                $evidence.error | Should Match 'strong-process-isolation'
+            }
         }
 
         # Scenario: Two passing files are partitioned into two bulk shards and only partition 1 executes.
