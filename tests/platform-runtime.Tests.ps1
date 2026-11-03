@@ -845,12 +845,12 @@ Describe 'Platform P4 verified PowerShell and Pester preparation' {
     $p4Pester4101ForRegistration = @(Get-Module -ListAvailable Pester |
         Where-Object { $_.Version -eq [version]'4.10.1' } |
         Select-Object -First 1)
-    $p4NativeCompilerForRegistration = if ($p4IsUnix) {
+    $p4NativeCompilerForRegistration = @(if ($p4IsUnix) {
         @(Get-Command clang,cc -CommandType Application -All -ErrorAction SilentlyContinue |
             ForEach-Object { $_.Source } |
             Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_ -PathType Leaf) } |
             Select-Object -First 1)
-    } else { @() }
+    } else { @() })
 
     BeforeAll {
         $script:P4RepositoryRoot = Split-Path -Parent $PSScriptRoot
@@ -923,6 +923,32 @@ Describe 'Platform P4 verified PowerShell and Pester preparation' {
             $path=Join-Path $PSHOME $(if($IsWindows){'pwsh.exe'}else{'pwsh'})
             $closure=& $script:P4Preparation { param($root,$platform) Get-PlatformRuntimeClosure $root $platform } $PSHOME $script:P4Platform
             return [pscustomobject]@{version=$PSVersionTable.PSVersion.ToString();os=$script:P4Platform;architecture=$script:P4Architecture;executablePath=$path;executableSha256=(Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant();runtimeClosure=$closure}
+        }
+
+        function Invoke-P4WithShadowUserModule {
+            param([string]$Name,[scriptblock]$Action)
+            # Model a caller's user module directory entirely inside TestDrive.
+            $profile=Join-Path $TestDrive $Name
+            $data=Join-Path $profile '.local/share'
+            $moduleRoot=if($IsWindows){Join-Path $profile 'Documents/PowerShell/Modules'}else{Join-Path $data 'powershell/Modules'}
+            $shadow=Join-Path $moduleRoot 'Microsoft.PowerShell.Utility'
+            [void][IO.Directory]::CreateDirectory($shadow)
+            $marker=Join-Path $profile 'shadow.marker'
+            [IO.File]::WriteAllText((Join-Path $shadow 'Microsoft.PowerShell.Utility.psd1'),"@{RootModule='Microsoft.PowerShell.Utility.psm1';ModuleVersion='99.0.0';FunctionsToExport=@('ConvertTo-Json')}")
+            [IO.File]::WriteAllText((Join-Path $shadow 'Microsoft.PowerShell.Utility.psm1'),("[IO.File]::WriteAllText('"+$marker.Replace("'","''")+"','loaded');function ConvertTo-Json { 'shadow' };Export-ModuleMember -Function ConvertTo-Json"))
+            $values=@{HOME=$profile;USERPROFILE=$profile;XDG_CONFIG_HOME=(Join-Path $profile '.config');XDG_DATA_HOME=$data;XDG_CACHE_HOME=(Join-Path $profile '.cache');XDG_STATE_HOME=(Join-Path $profile '.local/state');XDG_RUNTIME_DIR=(Join-Path $profile 'run');APPDATA=(Join-Path $profile 'AppData/Roaming');LOCALAPPDATA=(Join-Path $profile 'AppData/Local');PSModulePath=($moduleRoot+[IO.Path]::PathSeparator+$env:PSModulePath)}
+            $previous=@{}
+            foreach($name in $values.Keys){$previous[$name]=[Environment]::GetEnvironmentVariable($name)}
+            try {
+                foreach($name in $values.Keys){[Environment]::SetEnvironmentVariable($name,$values[$name])}
+                $executable=Join-Path $PSHOME $(if($IsWindows){'pwsh.exe'}else{'pwsh'})
+                $control=@(& $executable -NoLogo -NoProfile -NonInteractive -Command 'ConvertTo-Json -InputObject 1' 2>&1)
+                $LASTEXITCODE | Should Be 0
+                Test-Path -LiteralPath $marker | Should Be $true
+                Remove-Item -LiteralPath $marker -Force
+                & $Action ([pscustomobject]@{Profile=$profile;Marker=$marker})
+                Test-Path -LiteralPath $marker | Should Be $false
+            } finally { foreach($name in $previous.Keys){[Environment]::SetEnvironmentVariable($name,$previous[$name])} }
         }
 
         function Get-P4StartupHookFixture {
@@ -1135,7 +1161,8 @@ public class StartupHook {
             $receipt.environmentAllowlist | Should Contain 'PATH'
             $receipt.environmentAllowlist | Should Contain 'PSModulePath'
             @($receipt.environmentAllowlist | Where-Object { $_ -cmatch '^(LD_|DYLD_|DOTNET_|COREHOST_)' }).Count | Should Be 0
-            $expectedAllowlist=if($IsWindows){'PATH,PSModulePath,SystemRoot,USERPROFILE,HOME,TMP,TEMP'}elseif($IsMacOS){'PATH,PSModulePath,HOME,TMP,TEMP,TMPDIR,LANG'}else{'PATH,PSModulePath,HOME,TMP,TEMP,LANG'}
+            $expectedAllowlist='PATH,PSModulePath,HOME,USERPROFILE,XDG_CONFIG_HOME,XDG_DATA_HOME,XDG_CACHE_HOME,XDG_STATE_HOME,XDG_RUNTIME_DIR,TMP,TEMP'
+            $expectedAllowlist+=if($IsWindows){',SystemRoot,APPDATA,LOCALAPPDATA'}elseif($IsMacOS){',TMPDIR,LANG'}else{',LANG'}
             (@($receipt.environmentAllowlist) -join ',') | Should Be $expectedAllowlist
             (Get-FileHash $fixture.Path -Algorithm SHA256).Hash.ToLowerInvariant() | Should Not Be $approvedHash
             Test-Path -LiteralPath ($fixture.Path+'.original') | Should Be $true
@@ -1606,6 +1633,54 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
     }
     }
 
+    # Scenario: The process boundary receives one JSON line, empty output, or multiple lines.
+    # Purpose: Preserve the complete line and private profile while rejecting invalid output with typed failures.
+    It 'InterT51_preserves_full_process_output_and_isolates_each_profile' {
+        $executable=Join-Path $PSHOME $(if($IsWindows){'pwsh.exe'}else{'pwsh'})
+        $environment=& $script:P4Preparation.ExportedCommands['New-PlatformVerifiedProcessEnvironment'] $executable $null $script:P4Platform
+        $probe='[pscustomobject]@{version=$PSVersionTable.PSVersion.ToString();auto=[string]$PSModuleAutoLoadingPreference;modules=$env:PSModulePath;utility=(Get-Module Microsoft.PowerShell.Utility).Path;home=$env:HOME;user=$env:USERPROFILE;config=$env:XDG_CONFIG_HOME;data=$env:XDG_DATA_HOME;cache=$env:XDG_CACHE_HOME;state=$env:XDG_STATE_HOME;run=$env:XDG_RUNTIME_DIR;temp=$env:TEMP;exists=[IO.Directory]::Exists($env:HOME);mode=if($IsWindows){0}else{[int][IO.File]::GetUnixFileMode($env:HOME)}}|ConvertTo-Json -Compress'
+        $profiles=@()
+        foreach($attempt in 1..2) {
+            $output=& $script:P4Preparation.ExportedCommands['Start-PlatformVerifiedProcess'] $executable $probe $environment $script:P4Platform
+            $evidence=$output | ConvertFrom-Json
+            $evidence.version | Should Be $PSVersionTable.PSVersion.ToString()
+            $evidence.auto | Should Be 'None'
+            $evidence.modules | Should Be (Join-Path $PSHOME 'Modules')
+            ([IO.Path]::GetFullPath($evidence.utility).StartsWith(([IO.Path]::GetFullPath($PSHOME)+[IO.Path]::DirectorySeparatorChar),$(if($IsWindows){[StringComparison]::OrdinalIgnoreCase}else{[StringComparison]::Ordinal}))) | Should Be $true
+            $evidence.exists | Should Be $true
+            if(-not $IsWindows){$evidence.mode | Should Be 448}
+            $evidence.home | Should Not Be ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile))
+            foreach($property in @('user','config','data','cache','state','run','temp')){$evidence.$property | Should Be $evidence.home}
+            Test-Path -LiteralPath $evidence.home | Should Be $false
+            $profiles+=$evidence.home
+        }
+        $profiles[0] | Should Not Be $profiles[1]
+        $profileEvidence=Join-Path $TestDrive 'failed-process-profile.txt'
+        foreach($badProbe in @('$null',"'one';'two'","throw 'fixture failure'")) {
+            $probe="[IO.File]::WriteAllText('$($profileEvidence.Replace("'","''"))',`$env:HOME);"+$badProbe
+            $caught=$null
+            try { & $script:P4Preparation.ExportedCommands['Start-PlatformVerifiedProcess'] $executable $probe $environment $script:P4Platform | Out-Null } catch { $caught=$_ }
+            $caught.Exception.GetType().Name | Should Be 'PlatformVerificationException'
+            $caught.Exception.Capability | Should Be 'powershell-runtime'
+            Test-Path -LiteralPath ([IO.File]::ReadAllText($profileEvidence)) | Should Be $false
+        }
+    }
+
+    # Scenario: A caller's user module path contains a marker-writing Utility shadow.
+    # Purpose: Prove the fixture can auto-load, but neither identity nor capability probing loads it.
+    It 'InterT59_excludes_shadow_user_modules_from_identity_and_capability_probes' {
+        if(Test-P4KnownRuntimeLinkRejection){ return }
+        $runtime=Get-P4KnownRuntimeReceipt
+        Invoke-P4WithShadowUserModule 'identity-shadow-user' {
+            param($shadow)
+            $identity=& $script:P4Preparation.ExportedCommands['Test-PlatformPowerShellIdentity'] $runtime.executablePath $runtime.version $runtime.os $runtime.architecture $runtime.runtimeClosure
+            $identity.version | Should Be $runtime.version
+            Test-Path -LiteralPath $shadow.Marker | Should Be $false
+            $receipt=Get-PlatformCapabilities -Required @('powershell-runtime')
+            ($receipt.capabilities | Where-Object name -eq 'powershell-runtime').status | Should Be 'available'
+        }
+    }
+
     # Scenario: The host exposes a physical pwsh or a linked/Store runtime layout, plus a physical Pester manifest.
     # Purpose: Report live capabilities while preserving fail-closed runtime rejection for non-physical layouts.
     It 'InterT55_reports_measured_powershell_runtime_and_pester_module_capabilities' {
@@ -1731,8 +1806,8 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
         { & $invoke @{version='4.10.1';path=(Join-Path $TestDrive 'other/Pester.psm1');moduleBase=$base} } | Should Throw
     }
 
-    # Scenario: Local Pester 4.10.1 is staged under a physical runtime, or the host layout contains links.
-    # Purpose: Preserve payload/manifest checks on physical hosts and assert fail-closed rejection on linked hosts.
+    # Scenario: Local Pester 4.10.1 is staged with hostile user modules/startup hooks, or the host layout contains links.
+    # Purpose: Preserve initialization and tamper checks without loading the proven user-module shadow or startup hook.
     # Not registered when Pester 4.10.1 is absent because this integration fixture validates that exact approved payload.
     if ($p4Pester4101ForRegistration.Count -gt 0) {
     It 'InterT60_initializes_local_pester_4_10_1_and_rejects_a_tampered_manifest' {
@@ -1744,13 +1819,16 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
         Remove-Item -LiteralPath $startupHook.Marker -Force -ErrorAction SilentlyContinue
         $previousStartupHook=[Environment]::GetEnvironmentVariable('DOTNET_STARTUP_HOOKS')
         try {
-            [Environment]::SetEnvironmentVariable('DOTNET_STARTUP_HOOKS',$startupHook.Hook)
-            $receipt=Initialize-PlatformPester -Policy @{pesterPurpose='regression';pesterModulePath=$pester.Path;approvedPayload=@{version='4.10.1';sha256=$hash}} -RuntimeReceipt $runtime -DestinationLease $lease
-            $receipt.version | Should Be '4.10.1'
-            $receipt.purpose | Should Be 'regression'
-            $receipt.environmentAllowlist | Should Contain 'PSModulePath'
-            @($receipt.environmentAllowlist | Where-Object { $_ -cmatch '^(LD_|DYLD_|DOTNET_|COREHOST_)' }).Count | Should Be 0
-            Test-Path -LiteralPath $startupHook.Marker | Should Be $false
+            Invoke-P4WithShadowUserModule 'pester-shadow-user' {
+                param($shadow)
+                [Environment]::SetEnvironmentVariable('DOTNET_STARTUP_HOOKS',$startupHook.Hook)
+                $receipt=Initialize-PlatformPester -Policy @{pesterPurpose='regression';pesterModulePath=$pester.Path;approvedPayload=@{version='4.10.1';sha256=$hash}} -RuntimeReceipt $runtime -DestinationLease $lease
+                $receipt.version | Should Be '4.10.1'
+                $receipt.purpose | Should Be 'regression'
+                $receipt.environmentAllowlist | Should Contain 'PSModulePath'
+                @($receipt.environmentAllowlist | Where-Object { $_ -cmatch '^(LD_|DYLD_|DOTNET_|COREHOST_)' }).Count | Should Be 0
+                Test-Path -LiteralPath $startupHook.Marker | Should Be $false
+            }
         }
         finally { [Environment]::SetEnvironmentVariable('DOTNET_STARTUP_HOOKS',$previousStartupHook); $lease.Dispose() }
         $tamperedRoot=Join-Path $TestDrive 'tampered-pester/4.10.1'; New-Item -ItemType Directory -Path (Split-Path -Parent $tamperedRoot) -Force | Out-Null; Copy-Item -LiteralPath $pester.ModuleBase -Destination $tamperedRoot -Recurse

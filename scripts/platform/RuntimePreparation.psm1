@@ -30,23 +30,20 @@ function New-PlatformVerifiedProcessEnvironment {
     $moduleRoots.Add([IO.Path]::GetFullPath((Join-Path $runtimeRoot 'Modules')))
     if($null -ne $PesterClosure){$moduleRoots.Add([IO.Path]::GetFullPath([string]$PesterClosure.rootPath))}
     $modulePath=$moduleRoots -join [IO.Path]::PathSeparator
-    $userProfile=[Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
-    $temporaryPath=[IO.Path]::GetTempPath().TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)
     $values=[ordered]@{PATH=$runtimeRoot;PSModulePath=$modulePath}
+    # These placeholders are filled with a fresh private directory by the launch
+    # owner. Building receipt metadata must not allocate or expose a real profile.
+    $profileNames=@('HOME','USERPROFILE','XDG_CONFIG_HOME','XDG_DATA_HOME','XDG_CACHE_HOME','XDG_STATE_HOME','XDG_RUNTIME_DIR','TMP','TEMP')
+    foreach($name in $profileNames){$values[$name]=''}
     if($Platform -ceq 'windows') {
         $values['SystemRoot']=[Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
-        $values['USERPROFILE']=$userProfile
-        $values['HOME']=$userProfile
-        $values['TMP']=$temporaryPath
-        $values['TEMP']=$temporaryPath
+        $profileNames+=@('APPDATA','LOCALAPPDATA')
+        $values['APPDATA']='';$values['LOCALAPPDATA']=''
     } else {
-        $values['HOME']=$userProfile
-        $values['TMP']=$temporaryPath
-        $values['TEMP']=$temporaryPath
-        if($Platform -ceq 'macos') { $values['TMPDIR']=$temporaryPath }
+        if($Platform -ceq 'macos') { $profileNames+=@('TMPDIR');$values['TMPDIR']='' }
         $values['LANG']=$(if($Platform -ceq 'macos'){'en_US.UTF-8'}else{'C.UTF-8'})
     }
-    return [pscustomobject]@{Values=$values;Names=@($values.Keys)}
+    return [pscustomobject]@{Values=$values;Names=@($values.Keys);ProfileNames=$profileNames}
 }
 
 function New-PlatformExpectedClosure {
@@ -577,6 +574,16 @@ function Assert-PlatformPesterSnapshotInventory {
 # copied into the verified runtime process.
 function Start-PlatformVerifiedProcess {
     param([string]$Executable,[string]$Probe,$Environment,[string]$Platform)
+    # PowerShell adds default module paths during startup. Reset them inside the
+    # child before resolving any non-Core command; never rely on env alone.
+    $modulePath=([string]$Environment.Values['PSModulePath']).Replace("'","''")
+    $command="`$PSModuleAutoLoadingPreference='None';`$env:PSModulePath='$modulePath';`$ErrorActionPreference='Stop';"
+    $runtimeRoot=[IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Executable))
+    foreach($module in @('Microsoft.PowerShell.Utility','Microsoft.PowerShell.Management')) {
+        $manifest=[IO.Path]::Combine($runtimeRoot,'Modules',$module,($module+'.psd1')).Replace("'","''")
+        $command+="Microsoft.PowerShell.Core\Import-Module -Name '$manifest' -ErrorAction Stop;"
+    }
+    $command+=$Probe
     $startInfo=[Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName=[IO.Path]::GetFullPath($Executable)
     $startInfo.UseShellExecute=$false
@@ -585,18 +592,42 @@ function Start-PlatformVerifiedProcess {
     $startInfo.RedirectStandardError=$true
     $startInfo.EnvironmentVariables.Clear()
     foreach($name in $Environment.Names) { $startInfo.EnvironmentVariables[[string]$name]=[string]$Environment.Values[$name] }
-    foreach($argument in @('-NoLogo','-NoProfile','-NonInteractive','-Command',$Probe)) { [void]$startInfo.ArgumentList.Add($argument) }
+    foreach($argument in @('-NoLogo','-NoProfile','-NonInteractive','-Command',$command)) { [void]$startInfo.ArgumentList.Add($argument) }
     $process=[Diagnostics.Process]::new(); $process.StartInfo=$startInfo
+    $profileRoot=[IO.Path]::GetFullPath([IO.Path]::Combine([IO.Path]::GetTempPath(),('platform-verified-profile-'+[guid]::NewGuid().ToString('N'))))
+    $profileCreated=$false;$profileGuard=$null
     try {
+        if([IO.Directory]::Exists($profileRoot) -or [IO.File]::Exists($profileRoot)){throw 'Private process profile already exists.'}
+        if($Platform -ceq 'windows') {
+            $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+            try{$sddl='D:P(A;OICI;FA;;;'+$identity.User.Value+')'}finally{$identity.Dispose()}
+            [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::CreatePrivateDirectory($profileRoot,$sddl)
+            $profileCreated=$true
+            $profileGuard=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenPreparationRoot($profileRoot)
+        } else {
+            [void][IO.Directory]::CreateDirectory($profileRoot,[IO.UnixFileMode]448)
+            $profileCreated=$true
+        }
+        foreach($name in $Environment.ProfileNames){$startInfo.EnvironmentVariables[[string]$name]=$profileRoot}
+        $startInfo.WorkingDirectory=$profileRoot
         if(-not $process.Start()){throw 'The verified runtime process did not start.'}
         $stdoutTask=$process.StandardOutput.ReadToEndAsync(); $stderrTask=$process.StandardError.ReadToEndAsync()
         $process.WaitForExit()
         $stdout=$stdoutTask.GetAwaiter().GetResult().TrimEnd("`r","`n")
         $stderr=$stderrTask.GetAwaiter().GetResult()
-        $output=if($stdout.Length -eq 0){@()}else{@($stdout -split "`r?`n")}
-        if($process.ExitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace($stderr) -or @($output).Count -ne 1){throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform 'Verified runtime process failed.')}
+        $output=@(if($stdout.Length -gt 0){$stdout -split "`r?`n"})
+        if($process.ExitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace($stderr) -or $output.Count -ne 1){throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform 'Verified runtime process failed.')}
         return $output[0]
-    } finally { $process.Dispose() }
+    } catch {
+        if($_.Exception -is [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]){throw}
+        throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform $_.Exception.Message)
+    } finally {
+        $process.Dispose()
+        if($null -ne $profileGuard){$profileGuard.Dispose()}
+        # Only the exact fresh profile owned by this launch is removed. .NET
+        # recursive deletion unlinks reparse points rather than following them.
+        if($profileCreated){[IO.Directory]::Delete($profileRoot,$true)}
+    }
 }
 
 # All launches use this boundary. Windows callers already hold preparation guards
