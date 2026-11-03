@@ -594,7 +594,7 @@ function Start-PlatformVerifiedProcess {
         $stdout=$stdoutTask.GetAwaiter().GetResult().TrimEnd("`r","`n")
         $stderr=$stderrTask.GetAwaiter().GetResult()
         $output=if($stdout.Length -eq 0){@()}else{@($stdout -split "`r?`n")}
-        if($process.ExitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace($stderr) -or $output.Count -ne 1){throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform 'Verified runtime process failed.')}
+        if($process.ExitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace($stderr) -or @($output).Count -ne 1){throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform 'Verified runtime process failed.')}
         return $output[0]
     } finally { $process.Dispose() }
 }
@@ -729,4 +729,4 @@ function Initialize-VerifiedPlatformPester {
     finally { Close-PlatformPesterSnapshot $payloadSnapshot; Close-PlatformPreparationSession $session; Close-PlatformPreparationSession $runtimeGuards }
 }
 
-Export-ModuleMember -Function Resolve-VerifiedPlatformPowerShell,Initialize-VerifiedPlatformPester,Test-PlatformPowerShellIdentity
+Export-ModuleMember -Function Resolve-VerifiedPlatformPowerShell,Initialize-VerifiedPlatformPester,Test-PlatformPowerShellIdentity,New-PlatformVerifiedProcessEnvironment,Start-PlatformVerifiedProcess

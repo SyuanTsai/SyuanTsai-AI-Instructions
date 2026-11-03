@@ -111,6 +111,13 @@ elseif ($null -eq ('SyuanTsai.AIInstructions.PlatformRuntime.UnixNative' -as [ty
 Import-Module (Join-Path $PSScriptRoot 'platform/Windows.psm1') -Scope Local -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'platform/Linux.psm1') -Scope Local -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'platform/MacOS.psm1') -Scope Local -ErrorAction Stop
+$script:PlatformRuntimePreparationPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'platform/RuntimePreparation.psm1'))
+$loadedRuntimePreparationModules = @(Import-Module -Name $script:PlatformRuntimePreparationPath -PassThru -Scope Local -ErrorAction Stop)
+$runtimePreparationPathComparison = if ([SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetOperatingSystem() -ceq 'windows') { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+if ($loadedRuntimePreparationModules.Count -ne 1 -or -not [string]::Equals([IO.Path]::GetFullPath([string]$loadedRuntimePreparationModules[0].Path),$script:PlatformRuntimePreparationPath,$runtimePreparationPathComparison)) {
+    throw [IO.InvalidDataException]::new('The allowlisted process-launch dependency did not load from its inventory-bound path.')
+}
+$script:PlatformRuntimePreparationModule = $loadedRuntimePreparationModules[0]
 
 function Get-CurrentPlatformName {
     return [SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetOperatingSystem()
@@ -235,8 +242,15 @@ function Get-PlatformCapabilities {
     try {
         $powerShellItem = Get-Item -Force -LiteralPath $powerShellExecutable -ErrorAction Stop
         if ($powerShellItem.PSIsContainer -or ($powerShellItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $null -ne $powerShellItem.LinkType) { throw 'The current pwsh is not a physical regular file.' }
-        $reportedVersion = @(& $powerShellExecutable -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>&1)
-        if ($LASTEXITCODE -ne 0 -or $reportedVersion.Count -ne 1 -or ([string]$reportedVersion[0]).Trim() -cne $PSVersionTable.PSVersion.ToString()) { throw 'The current pwsh version probe disagrees with this process.' }
+        $identityCommand = $script:PlatformRuntimePreparationModule.ExportedCommands['Test-PlatformPowerShellIdentity']
+        if ($null -eq $identityCommand) { throw 'The verified runtime identity dependency is incomplete.' }
+        $runtimeClosure = & $script:PlatformRuntimePreparationModule {
+            param([string]$Root,[string]$Platform)
+            Get-PlatformRuntimeClosure $Root $Platform
+        } $PSHOME $platform
+        $expectedArchitecture = [SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetArchitecture()
+        $identity = & $identityCommand $powerShellExecutable $PSVersionTable.PSVersion.ToString() $platform $expectedArchitecture $runtimeClosure
+        if ([string]$identity.version -cne $PSVersionTable.PSVersion.ToString()) { throw 'The current pwsh version probe disagrees with this process.' }
         $powerShellStatus = 'available'
         $powerShellEvidence = "Physical pwsh identity and version probe passed: $([IO.Path]::GetFullPath($powerShellExecutable))"
     } catch { $powerShellEvidence = $_.Exception.Message }

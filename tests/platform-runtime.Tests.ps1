@@ -1606,12 +1606,20 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
     }
     }
 
-    # Scenario: The host exposes a physical pwsh and at least one physical Pester manifest.
-    # Purpose: Ensure P4 capability names are backed by live probes rather than static declarations.
+    # Scenario: The host exposes a physical pwsh or a linked/Store runtime layout, plus a physical Pester manifest.
+    # Purpose: Report live capabilities while preserving fail-closed runtime rejection for non-physical layouts.
     It 'InterT55_reports_measured_powershell_runtime_and_pester_module_capabilities' {
-        $receipt=Get-PlatformCapabilities -Required @('powershell-runtime','pester-module')
-        ($receipt.capabilities | Where-Object name -eq 'powershell-runtime').status | Should Be 'available'
-        ($receipt.capabilities | Where-Object name -eq 'pester-module').status | Should Be 'available'
+        $hasKnownRuntimeLink=Test-P4KnownRuntimeLinkRejection
+        $receipt=Get-PlatformCapabilities -Required @('pester-module')
+        $powerShellCapability=$receipt.capabilities | Where-Object name -eq 'powershell-runtime'
+        $pesterCapability=$receipt.capabilities | Where-Object name -eq 'pester-module'
+        if($hasKnownRuntimeLink) {
+            $powerShellCapability.status | Should Be 'unavailable'
+            [string]::Join('; ',[string[]]$powerShellCapability.evidence) | Should Match '(not a physical regular file|Runtime closure (contains a link|requires physical directories))'
+        } else {
+            $powerShellCapability.status | Should Be 'available'
+        }
+        $pesterCapability.status | Should Be 'available'
     }
 
     # Scenario: A caller poisons .NET startup before a verified PowerShell identity probe.
@@ -1629,6 +1637,9 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
             $LASTEXITCODE | Should Be 0
             Test-Path -LiteralPath $marker | Should Be $true
             Remove-Item -LiteralPath $marker -Force
+            $capabilities=Get-PlatformCapabilities -Required @('file-identity')
+            ($capabilities.capabilities | Where-Object name -eq 'powershell-runtime').status | Should Be 'available'
+            Test-Path -LiteralPath $marker | Should Be $false
             $identity=& $script:P4Preparation.ExportedCommands['Test-PlatformPowerShellIdentity'] $runtime.executablePath $runtime.version $runtime.os $runtime.architecture $runtime.runtimeClosure
             $identity.version | Should Be $runtime.version
             Test-Path -LiteralPath $marker | Should Be $false
@@ -1660,6 +1671,9 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
             $LASTEXITCODE | Should Be 0
             Test-Path -LiteralPath $marker | Should Be $true
             Remove-Item -LiteralPath $marker -Force
+            $capabilities=Get-PlatformCapabilities -Required @('file-identity')
+            ($capabilities.capabilities | Where-Object name -eq 'powershell-runtime').status | Should Be 'available'
+            Test-Path -LiteralPath $marker | Should Be $false
             $identity=& $script:P4Preparation.ExportedCommands['Test-PlatformPowerShellIdentity'] $runtime.executablePath $runtime.version $runtime.os $runtime.architecture $runtime.runtimeClosure
             $identity.version | Should Be $runtime.version
             Test-Path -LiteralPath $marker | Should Be $false
