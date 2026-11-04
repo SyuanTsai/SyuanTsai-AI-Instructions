@@ -3767,6 +3767,22 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
     }
     }
 
+    # Scenario: A caller spells the runtime executable with a different filename case.
+    # Purpose: Windows binding follows filesystem case rules while inventory bytes and Unix binding remain ordinal.
+    It 'UnitT48_binds_executable_case_using_platform_path_rules' {
+        $root=Join-Path $script:P4Root 'p4-executable-case'
+        [void][IO.Directory]::CreateDirectory($root)
+        [IO.File]::WriteAllText((Join-Path $root 'PwSh.ExE'),'fixture bytes')
+        $closure=& $script:P4Preparation {param($r,$p) Get-PlatformRuntimeClosure $r $p} $root $script:P4Platform
+        $closure.files[0].path | Should BeExactly 'PwSh.ExE'
+        $command=Join-Path $root 'pwsh.exe'
+        if($IsWindows){
+            & $script:P4Preparation {param($c,$e,$p) Assert-PlatformRuntimeClosure $c $e $p} $command $closure $script:P4Platform
+        } else {
+            {& $script:P4Preparation {param($c,$e,$p) Assert-PlatformRuntimeClosure $c $e $p} $command $closure $script:P4Platform} | Should Throw 'does not bind the executable'
+        }
+    }
+
     # Scenario: An otherwise physical runtime fixture gains a directory link, as Store layouts may contain.
     # Purpose: Exercise both layout branches while keeping the production typed link rejection unchanged.
     It 'InterT49_classifies_linked_layouts_and_asserts_the_typed_rejection' {

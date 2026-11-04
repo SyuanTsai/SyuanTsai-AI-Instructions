@@ -41,6 +41,13 @@ function ConvertTo-EntryTestArgument {
     return '"' + $Value.Replace('"', '\"') + '"'
 }
 
+function ConvertTo-EntryTestPlainText {
+    param([string]$Text)
+    $plain=[regex]::Replace($Text,'\x1b\[[0-?]*[ -/]*[@-~]','')
+    $plain=[regex]::Replace($plain,'\r?\n\s*\|\s*',' ')
+    return [regex]::Replace($plain,'\s+',' ').Trim()
+}
+
 function Get-EntryTestFileSha256 {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -94,21 +101,23 @@ function Invoke-EntryTestProcess {
         $commandArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $encodedCommand)
     }
     else {
-        $commandArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', (ConvertTo-EntryTestArgument $ScriptPath))
+        $commandArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $ScriptPath)
         foreach ($argument in $Arguments) {
-            $commandArguments += ConvertTo-EntryTestArgument ([string]$argument)
+            $commandArguments += [string]$argument
         }
     }
 
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = $script:PowerShellExecutable
-    $startInfo.Arguments = $commandArguments -join ' '
+    $startInfo.Arguments = @($commandArguments|ForEach-Object {ConvertTo-EntryTestArgument $_}) -join ' '
     $startInfo.WorkingDirectory = $script:RepositoryRoot
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
     $startInfo.EnvironmentVariables['GITHUB_SHA'] = 'ffffffffffffffffffffffffffffffffffffffff'
+    $startInfo.EnvironmentVariables['NO_COLOR'] = '1'
+    $startInfo.EnvironmentVariables['TERM'] = 'dumb'
     [void]$startInfo.EnvironmentVariables.Remove('STANDARD_GO_RUNTIME_VERSION')
     [void]$startInfo.EnvironmentVariables.Remove('STANDARD_GO_COMMAND_PATH')
 
@@ -127,135 +136,162 @@ function Invoke-EntryTestProcess {
     $treeKillExitCode = $null
     $treeKillStdOut = ''
     $treeKillStdErr = ''
+    $processOwnership=$null
     try {
-        if (-not $process.Start()) {
-            throw "Could not start PowerShell child for $Label."
-        }
-        $processId = $process.Id
-        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-        $stderrTask = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit($TimeoutMilliseconds)) {
-            $timedOut = $true
-            if ($PSVersionTable.PSEdition -ceq 'Core') {
-                try {
-                    $process.Kill($true)
-                    $terminationMethod = 'Process.Kill(entireProcessTree)'
-                }
-                catch {
-                    $cleanupConfirmed = $false
-                    $cleanupError = 'process-tree kill failed: ' + $_.Exception.Message
-                }
+        if($PSVersionTable.PSEdition -ceq 'Core'){
+            $environment=[Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+            foreach($name in $startInfo.EnvironmentVariables.Keys){$environment[[string]$name]=[string]$startInfo.EnvironmentVariables[$name]}
+            $captureRoot=New-PlatformPrivateRoot -Parent $script:ProcessEvidenceRoot -Leaf ('owned-'+[guid]::NewGuid().ToString('N'))
+            $outPath=Join-Path $captureRoot 'stdout';$errPath=Join-Path $captureRoot 'stderr'
+            $cwdLease=Open-PlatformDirectory -Root $script:RepositoryRoot -RootOnly
+            $owned=$null
+            try {
+                $deadline=[DateTimeOffset]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+                $owned=Start-PlatformOwnedProcess -ExecutablePath (Resolve-PlatformPhysicalPath $script:PowerShellExecutable) -ArgumentList $commandArguments -Environment $environment -WorkingDirectoryLease $cwdLease -Deadline $deadline -StdoutPath $outPath -StderrPath $errPath
+                $processId=$owned.Pid
+                while(-not ($owned.HasExited -and $owned.CaptureCompletedNaturally) -and $null -eq $owned.Cleanup -and [DateTimeOffset]::UtcNow -lt $deadline){Start-Sleep -Milliseconds 10}
+                $timedOut=[DateTimeOffset]::UtcNow -ge $deadline -or $owned.TerminationReason -ceq 'deadline'
+                $cleanup=Stop-PlatformOwnedProcess -Lease $owned
+                $cleanupConfirmed=$cleanup.CleanedUp
+                $cleanupError=$cleanup.Uncertainty
+                $terminationMethod='platform-runtime-p3'
+                $exitCode=$owned.ExitCode
+                $stdout=[IO.File]::ReadAllText($outPath);$stderr=[IO.File]::ReadAllText($errPath)
+                $processOwnership=[pscustomobject]@{pid=$owned.Pid;startIdentity=$owned.StartIdentity;isolation=$owned.Isolation;cleanup=$cleanup}
+            } finally {
+                if($null -ne $owned){$owned.Dispose()}
+                $cwdLease.Dispose()
             }
-            else {
-                $taskkillPath = Join-Path $env:SystemRoot 'System32/taskkill.exe'
-                if (-not (Test-Path -LiteralPath $taskkillPath -PathType Leaf)) {
-                    $cleanupConfirmed = $false
-                    $cleanupError = "Windows taskkill.exe is unavailable for owned PID $processId."
-                }
-                else {
-                    $killStartInfo = New-Object System.Diagnostics.ProcessStartInfo
-                    $killStartInfo.FileName = $taskkillPath
-                    $killStartInfo.Arguments = "/PID $processId /T /F"
-                    $killStartInfo.WorkingDirectory = $script:RepositoryRoot
-                    $killStartInfo.UseShellExecute = $false
-                    $killStartInfo.CreateNoWindow = $true
-                    $killStartInfo.RedirectStandardOutput = $true
-                    $killStartInfo.RedirectStandardError = $true
-                    $treeKiller = New-Object System.Diagnostics.Process
-                    $treeKiller.StartInfo = $killStartInfo
+        } else {
+            if (-not $process.Start()) {
+                throw "Could not start PowerShell child for $Label."
+            }
+            $processId = $process.Id
+            $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+            $stderrTask = $process.StandardError.ReadToEndAsync()
+            if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+                $timedOut = $true
+                if ($PSVersionTable.PSEdition -ceq 'Core') {
                     try {
-                        if (-not $treeKiller.Start()) {
-                            $cleanupConfirmed = $false
-                            $cleanupError = "Could not start taskkill for owned PID $processId."
-                        }
-                        else {
-                            $treeKillProcessId = $treeKiller.Id
-                            $treeKillStdOutTask = $treeKiller.StandardOutput.ReadToEndAsync()
-                            $treeKillStdErrTask = $treeKiller.StandardError.ReadToEndAsync()
-                            if (-not $treeKiller.WaitForExit(30000)) {
-                                $cleanupConfirmed = $false
-                                $cleanupError = 'taskkill did not exit within the bounded wait.'
-                                try { $treeKiller.Kill() }
-                                catch { $cleanupError += ' taskkill stop failed: ' + $_.Exception.Message }
-                                if (-not $treeKiller.WaitForExit(10000)) {
-                                    $cleanupError += ' taskkill remained alive after its bounded stop wait.'
-                                }
-                            }
-                            if ($treeKiller.HasExited) {
-                                $treeKillExitCode = $treeKiller.ExitCode
-                                $terminationMethod = 'taskkill.exe /PID /T /F'
-                            }
-                            else {
-                                $cleanupConfirmed = $false
-                            }
-                            if ($treeKillStdOutTask.Wait(10000) -and $treeKillStdOutTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) {
-                                $treeKillStdOut = $treeKillStdOutTask.Result
-                            }
-                            else {
-                                $cleanupConfirmed = $false
-                                if ($null -eq $cleanupError) { $cleanupError = 'taskkill stdout did not drain within the bounded wait.' }
-                                $treeKillStdOut = '<taskkill stdout drain incomplete>'
-                            }
-                            if ($treeKillStdErrTask.Wait(10000) -and $treeKillStdErrTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) {
-                                $treeKillStdErr = $treeKillStdErrTask.Result
-                            }
-                            else {
-                                $cleanupConfirmed = $false
-                                if ($null -eq $cleanupError) { $cleanupError = 'taskkill stderr did not drain within the bounded wait.' }
-                                $treeKillStdErr = '<taskkill stderr drain incomplete>'
-                            }
-                            if ($null -ne $treeKillExitCode -and $treeKillExitCode -ne 0) {
-                                $cleanupConfirmed = $false
-                                $cleanupError = "taskkill returned exit $treeKillExitCode for owned PID $processId. " + $treeKillStdOut + $treeKillStdErr
-                            }
-                        }
+                        $process.Kill($true)
+                        $terminationMethod = 'Process.Kill(entireProcessTree)'
                     }
                     catch {
                         $cleanupConfirmed = $false
-                        $cleanupError = 'owned process-tree cleanup failed: ' + $_.Exception.Message
-                    }
-                    finally {
-                        $treeKiller.Dispose()
+                        $cleanupError = 'process-tree kill failed: ' + $_.Exception.Message
                     }
                 }
+                else {
+                    $taskkillPath = Join-Path $env:SystemRoot 'System32/taskkill.exe'
+                    if (-not (Test-Path -LiteralPath $taskkillPath -PathType Leaf)) {
+                        $cleanupConfirmed = $false
+                        $cleanupError = "Windows taskkill.exe is unavailable for owned PID $processId."
+                    }
+                    else {
+                        $killStartInfo = New-Object System.Diagnostics.ProcessStartInfo
+                        $killStartInfo.FileName = $taskkillPath
+                        $killStartInfo.Arguments = "/PID $processId /T /F"
+                        $killStartInfo.WorkingDirectory = $script:RepositoryRoot
+                        $killStartInfo.UseShellExecute = $false
+                        $killStartInfo.CreateNoWindow = $true
+                        $killStartInfo.RedirectStandardOutput = $true
+                        $killStartInfo.RedirectStandardError = $true
+                        $treeKiller = New-Object System.Diagnostics.Process
+                        $treeKiller.StartInfo = $killStartInfo
+                        try {
+                            if (-not $treeKiller.Start()) {
+                                $cleanupConfirmed = $false
+                                $cleanupError = "Could not start taskkill for owned PID $processId."
+                            }
+                            else {
+                                $treeKillProcessId = $treeKiller.Id
+                                $treeKillStdOutTask = $treeKiller.StandardOutput.ReadToEndAsync()
+                                $treeKillStdErrTask = $treeKiller.StandardError.ReadToEndAsync()
+                                if (-not $treeKiller.WaitForExit(30000)) {
+                                    $cleanupConfirmed = $false
+                                    $cleanupError = 'taskkill did not exit within the bounded wait.'
+                                    try { $treeKiller.Kill() }
+                                    catch { $cleanupError += ' taskkill stop failed: ' + $_.Exception.Message }
+                                    if (-not $treeKiller.WaitForExit(10000)) {
+                                        $cleanupError += ' taskkill remained alive after its bounded stop wait.'
+                                    }
+                                }
+                                if ($treeKiller.HasExited) {
+                                    $treeKillExitCode = $treeKiller.ExitCode
+                                    $terminationMethod = 'taskkill.exe /PID /T /F'
+                                }
+                                else {
+                                    $cleanupConfirmed = $false
+                                }
+                                if ($treeKillStdOutTask.Wait(10000) -and $treeKillStdOutTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) {
+                                    $treeKillStdOut = $treeKillStdOutTask.Result
+                                }
+                                else {
+                                    $cleanupConfirmed = $false
+                                    if ($null -eq $cleanupError) { $cleanupError = 'taskkill stdout did not drain within the bounded wait.' }
+                                    $treeKillStdOut = '<taskkill stdout drain incomplete>'
+                                }
+                                if ($treeKillStdErrTask.Wait(10000) -and $treeKillStdErrTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) {
+                                    $treeKillStdErr = $treeKillStdErrTask.Result
+                                }
+                                else {
+                                    $cleanupConfirmed = $false
+                                    if ($null -eq $cleanupError) { $cleanupError = 'taskkill stderr did not drain within the bounded wait.' }
+                                    $treeKillStdErr = '<taskkill stderr drain incomplete>'
+                                }
+                                if ($null -ne $treeKillExitCode -and $treeKillExitCode -ne 0) {
+                                    $cleanupConfirmed = $false
+                                    $cleanupError = "taskkill returned exit $treeKillExitCode for owned PID $processId. " + $treeKillStdOut + $treeKillStdErr
+                                }
+                            }
+                        }
+                        catch {
+                            $cleanupConfirmed = $false
+                            $cleanupError = 'owned process-tree cleanup failed: ' + $_.Exception.Message
+                        }
+                        finally {
+                            $treeKiller.Dispose()
+                        }
+                    }
+                }
+                if (-not $process.WaitForExit(30000)) {
+                    $cleanupConfirmed = $false
+                    if ($null -eq $cleanupError) { $cleanupError = 'process did not exit within the bounded cleanup wait.' }
+                }
             }
-            if (-not $process.WaitForExit(30000)) {
+            $stdoutDrained = $false
+            $stderrDrained = $false
+            try { $stdoutDrained = $stdoutTask.Wait(30000) }
+            catch {
                 $cleanupConfirmed = $false
-                if ($null -eq $cleanupError) { $cleanupError = 'process did not exit within the bounded cleanup wait.' }
+                $cleanupError = 'stdout drain failed: ' + $_.Exception.Message
             }
-        }
-        $stdoutDrained = $false
-        $stderrDrained = $false
-        try { $stdoutDrained = $stdoutTask.Wait(30000) }
-        catch {
-            $cleanupConfirmed = $false
-            $cleanupError = 'stdout drain failed: ' + $_.Exception.Message
-        }
-        try { $stderrDrained = $stderrTask.Wait(30000) }
-        catch {
-            $cleanupConfirmed = $false
-            $cleanupError = 'stderr drain failed: ' + $_.Exception.Message
-        }
-        if ($stdoutDrained -and $stdoutTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) {
-            $stdout = $stdoutTask.Result
-        }
-        else {
-            $cleanupConfirmed = $false
-            if ($null -eq $cleanupError) { $cleanupError = 'stdout did not drain within the bounded wait.' }
-            $stdout = '<stdout drain incomplete>'
-        }
-        if ($stderrDrained -and $stderrTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) {
-            $stderr = $stderrTask.Result
-        }
-        else {
-            $cleanupConfirmed = $false
-            if ($null -eq $cleanupError) { $cleanupError = 'stderr did not drain within the bounded wait.' }
-            $stderr = '<stderr drain incomplete>'
-        }
-        if ($process.HasExited) { $exitCode = $process.ExitCode }
-        else {
-            $cleanupConfirmed = $false
-            if ($null -eq $cleanupError) { $cleanupError = 'process is still running after bounded wait.' }
+            try { $stderrDrained = $stderrTask.Wait(30000) }
+            catch {
+                $cleanupConfirmed = $false
+                $cleanupError = 'stderr drain failed: ' + $_.Exception.Message
+            }
+            if ($stdoutDrained -and $stdoutTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) {
+                $stdout = $stdoutTask.Result
+            }
+            else {
+                $cleanupConfirmed = $false
+                if ($null -eq $cleanupError) { $cleanupError = 'stdout did not drain within the bounded wait.' }
+                $stdout = '<stdout drain incomplete>'
+            }
+            if ($stderrDrained -and $stderrTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) {
+                $stderr = $stderrTask.Result
+            }
+            else {
+                $cleanupConfirmed = $false
+                if ($null -eq $cleanupError) { $cleanupError = 'stderr did not drain within the bounded wait.' }
+                $stderr = '<stderr drain incomplete>'
+            }
+            if ($process.HasExited) { $exitCode = $process.ExitCode }
+            else {
+                $cleanupConfirmed = $false
+                if ($null -eq $cleanupError) { $cleanupError = 'process is still running after bounded wait.' }
+            }
         }
     }
     finally {
@@ -281,6 +317,7 @@ function Invoke-EntryTestProcess {
         treeKillStderr = $treeKillStdErr
         stdout = $stdout
         stderr = $stderr
+        processOwnership = $processOwnership
     }
     if (-not [string]::IsNullOrWhiteSpace($script:ProcessEvidenceRoot)) {
         $evidencePath = Join-Path $script:ProcessEvidenceRoot ($Label + '-' + [Guid]::NewGuid().ToString('N') + '.json')
@@ -307,6 +344,8 @@ function Invoke-EntryTestProcess {
         StdOut = $stdout
         StdErr = $stderr
         Raw = $rawOutput
+        PlainText = ConvertTo-EntryTestPlainText $rawOutput
+        ProcessOwnership = $processOwnership
         Command = $record.command
     }
 }
@@ -346,8 +385,18 @@ function Assert-EntryPreflightFailure {
 
     $Result.TimedOut | Should Be $false
     $Result.ExitCode | Should Not Be 0
-    $Result.Raw | Should Match $Marker
-    $Result.Raw | Should Not Match 'run-resolved Go executable|STANDARD_GO_RUNTIME_VERSION|setup-go runtime'
+    $Result.PlainText | Should Match $Marker
+    $Result.PlainText | Should Not Match 'run-resolved Go executable|STANDARD_GO_RUNTIME_VERSION|setup-go runtime'
+}
+
+Describe 'Standard authority entry diagnostic rendering' {
+    # Scenario: The engine wraps an invariant marker in ANSI colors and a continuation line.
+    # Purpose: Match semantic diagnostics without changing raw stream evidence or error wording.
+    It 'UnitT10_preserves_the_marker_across_color_and_line_wrapping' {
+        $raw=([string][char]27)+'[31mSTANDARD_ENTRY_BLOCKED|immutable content mode rejects modified or untracked'+"`n    | input files"+([string][char]27)+'[0m'
+        ConvertTo-EntryTestPlainText $raw | Should Be 'STANDARD_ENTRY_BLOCKED|immutable content mode rejects modified or untracked input files'
+        $raw.Contains([string][char]27) | Should Be $true
+    }
 }
 
 Describe 'Standard authority entry preflight actual CLI' {
@@ -358,6 +407,13 @@ Describe 'Standard authority entry preflight actual CLI' {
         }
         if (-not (Test-Path -LiteralPath $configuredWorkRoot -PathType Container)) {
             [void](New-Item -ItemType Directory -Path $configuredWorkRoot -Force)
+        }
+        if($PSVersionTable.PSEdition -ceq 'Core'){
+            Import-Module (Join-Path $script:RepositoryRoot 'scripts/platform-runtime.psd1') -Force
+            $configuredWorkRoot=Resolve-PlatformPhysicalPath $configuredWorkRoot
+            $script:RepositoryRoot=Resolve-PlatformPhysicalPath $script:RepositoryRoot
+            $script:GatePath=Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardAuthorityGate.ps1'
+            $script:ResultCliPath=Join-Path $script:RepositoryRoot 'scripts/Test-StandardEntryPointResult.ps1'
         }
 
         $script:RunRoot = Join-Path $configuredWorkRoot ('run-' + [Guid]::NewGuid().ToString('N'))
@@ -427,7 +483,9 @@ Start-Sleep -Seconds 90
         $result.TerminationMethod | Should Not BeNullOrEmpty
         $result.StdOut | Should Match 'owned-tree-grandchild=\d+'
         if ($PSVersionTable.PSEdition -ceq 'Core') {
-            $result.TerminationMethod | Should Be 'Process.Kill(entireProcessTree)'
+            $result.TerminationMethod | Should Be 'platform-runtime-p3'
+            $result.ProcessOwnership.cleanup.CleanedUp | Should Be $true
+            $result.ProcessOwnership.cleanup.RemainingPids.Count | Should Be 0
         }
         else {
             $result.TerminationMethod | Should Be 'taskkill.exe /PID /T /F'
@@ -436,7 +494,13 @@ Start-Sleep -Seconds 90
         }
 
         $grandchildPid = [int](Get-Content -LiteralPath $pidEvidencePath -Raw)
-        $grandchild = Get-Process -Id $grandchildPid -ErrorAction SilentlyContinue
+        $observationDeadline=[DateTimeOffset]::UtcNow.AddSeconds(3)
+        do {
+            $grandchild = Get-Process -Id $grandchildPid -ErrorAction SilentlyContinue
+            if($null -eq $grandchild){break}
+            $grandchild.Dispose()
+            Start-Sleep -Milliseconds 20
+        } while([DateTimeOffset]::UtcNow -lt $observationDeadline)
         $grandchildWasRunningAfterTreeKill = $null -ne $grandchild
         if ($grandchildWasRunningAfterTreeKill) {
             $ownedGrandchild = [System.Diagnostics.Process]::GetProcessById($grandchildPid)

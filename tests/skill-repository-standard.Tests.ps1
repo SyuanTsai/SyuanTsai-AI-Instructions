@@ -2348,7 +2348,10 @@ public sealed class C245SlowTrickleStream : Stream {
 
     # Scenario: Acquisition succeeds, then temporary cleanup exhausts the budget.
     # Purpose: Preserve completed diagnostics and reclaim the install through the same failure path.
-    It 'UnitT26v_retains_evidence_and_reclaims_install_after_a_tail_deadline' {
+    $tailCleanupCases=@(@{Layout='physical';AliasedParent=$false})
+    if([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT){$tailCleanupCases+=@{Layout='symlink-parent';AliasedParent=$true}}
+    It 'UnitT26v_retains_evidence_and_reclaims_install_after_a_tail_deadline_<Layout>' -TestCases $tailCleanupCases {
+        param([string]$Layout,[bool]$AliasedParent)
         Set-StrictMode -Version Latest
         . $script:ResolverPath -PolicyPath $script:ToolchainPath -ValidatePolicyOnly | Out-Null
         $script:tailCleanup = (Get-Item Function:Remove-BoundedRunOwnedDirectory).ScriptBlock
@@ -2365,6 +2368,13 @@ public sealed class C245SlowTrickleStream : Stream {
         try { $script:tailHash = ([BitConverter]::ToString($hasher.ComputeHash($script:tailBytes))).Replace('-', '').ToLowerInvariant() }
         finally { $hasher.Dispose() }
         $script:tailRoot = Join-Path $fixtureRoot 'tail-install'
+        if($AliasedParent){
+            $physicalParent=Join-Path $fixtureRoot 'physical-parent'
+            [void][IO.Directory]::CreateDirectory($physicalParent)
+            $aliasParent=Join-Path $fixtureRoot 'aliased-parent'
+            New-Item -ItemType SymbolicLink -Path $aliasParent -Target $physicalParent -ErrorAction Stop|Out-Null
+            $script:tailRoot=Join-Path $aliasParent 'tail-install'
+        }
         $sibling = Join-Path $script:tailRoot 'adjacent-root'
         [void](New-Item -ItemType Directory -Path $sibling -Force)
         $script:tailPython=(Get-Command python -CommandType Application -ErrorAction Stop|Select-Object -First 1).Path
@@ -4412,25 +4422,14 @@ public sealed class C245NonCooperativeStream : Stream {
             [void](New-Item -ItemType Directory -Path (Join-Path $collisionRoot 'skills/fixture-skill/assets') -Force)
             Write-TestUtf8File -Path (Join-Path $collisionRoot 'skills/fixture-skill/assets/A.txt') -Text 'upper'
             Write-TestUtf8File -Path (Join-Path $collisionRoot 'skills/fixture-skill/assets/a.txt') -Text 'lower'
-            # Case-insensitive macOS volumes cannot materialize both names.
-            # Supply the same two-entry enumeration at that filesystem boundary;
-            # the real adapter must still reject it before component hashing.
-            if (@(Get-ChildItem -LiteralPath (Join-Path $collisionRoot 'skills/fixture-skill/assets') -File).Count -ne 2) {
-                $script:collisionResourceDirectory=Join-Path $collisionRoot 'skills/fixture-skill/assets'
-                Mock Get-ChildItem {
-                    foreach($name in @('A.txt','a.txt')) {
-                        $entry=[IO.FileInfo]::new((Join-Path $script:collisionResourceDirectory $name))
-                        # Match the provider surface while preserving the two
-                        # distinct names that this volume cannot materialize.
-                        $entry | Add-Member -NotePropertyName PSIsContainer -NotePropertyValue $false -Force
-                        $entry
-                    }
-                } -ParameterFilter {$LiteralPath -eq $script:collisionResourceDirectory}
+            # Retain real executable coverage where the volume can represent
+            # both names. UnitT82 covers the inventory rule on every platform.
+            if (@(Get-ChildItem -LiteralPath (Join-Path $collisionRoot 'skills/fixture-skill/assets') -File).Count -eq 2) {
+                $collisionError = $null
+                try { & $script:UpstreamAdapterValidatorPath -PackageRoot $collisionRoot -PolicyPath $script:UpstreamAdapterPolicyPath -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' -SourceRevision ('a' * 40) -ArchiveSha256 ('b' * 64) | Out-Null }
+                catch { $collisionError = $_.Exception.Message }
+                Assert-Match $collisionError 'collision' 'Case-colliding nested Skill resources must be blocked before inventory hashing.'
             }
-            $collisionError = $null
-            try { & $script:UpstreamAdapterValidatorPath -PackageRoot $collisionRoot -PolicyPath $script:UpstreamAdapterPolicyPath -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' -SourceRevision ('a' * 40) -ArchiveSha256 ('b' * 64) | Out-Null }
-            catch { $collisionError = $_.Exception.Message }
-            Assert-Match $collisionError 'collision' 'Case-colliding nested Skill resources must be blocked before inventory hashing.'
 
             $deviceAliasRoot = Join-Path $TestDrive 'upstream-adapter-device-alias-resource'
             Copy-Item -LiteralPath $fixtureRoot -Destination $deviceAliasRoot -Recurse -Force
@@ -4452,6 +4451,19 @@ public sealed class C245NonCooperativeStream : Stream {
             catch { $skillRootCollisionError = $_.Exception.Message }
             Assert-Match $skillRootCollisionError 'collision' 'Declared Skill roots that collide under portable case rules must be blocked.'
         }
+    }
+
+    # Scenario: Two resource inventory entries differ only by ASCII case, even on a case-insensitive volume.
+    # Purpose: Exercise the adapter's real portable collision check without depending on physical filename coexistence or script-scope mocks.
+    It 'UnitT82_rejects_case_colliding_resource_inventory_on_every_filesystem' {
+        $empty=Join-Path $TestDrive 'adapter-inventory-functions'
+        [void][IO.Directory]::CreateDirectory($empty)
+        . $script:UpstreamAdapterValidatorPath -PackageRoot $empty -PolicyPath $script:UpstreamAdapterPolicyPath|Out-Null
+        $nfc=[Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+        $fold=[Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+        $casings=[Collections.Generic.Dictionary[string,string]]::new([StringComparer]::OrdinalIgnoreCase)
+        Assert-AdapterPortableInventoryPath -RelativePath 'skills/fixture-skill/assets/A.txt' -NfcPaths $nfc -AsciiFoldPaths $fold -TargetPathCasings $casings -Context 'Fixture resource'
+        {Assert-AdapterPortableInventoryPath -RelativePath 'skills/fixture-skill/assets/a.txt' -NfcPaths $nfc -AsciiFoldPaths $fold -TargetPathCasings $casings -Context 'Fixture resource'} | Should Throw 'collision'
     }
 
     # Scenario: Validation and security policy semantics are weakened, or the ordinary authority gate claims the retired lifecycle chain.

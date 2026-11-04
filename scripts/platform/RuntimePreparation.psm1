@@ -309,7 +309,9 @@ function Assert-PlatformRuntimeClosure {
             if ($actual.files[$i].path -cne [string]$expectedFiles[$i].path -or $actual.files[$i].sha256 -cne [string]$expectedFiles[$i].sha256) { throw 'Runtime closure inventory differs from its receipt.' }
         }
         $leaf = [IO.Path]::GetFileName($ExecutablePath)
-        if (@($actual.files | Where-Object { $_.path -ceq $leaf }).Count -ne 1) { throw 'Runtime closure does not bind the executable.' }
+        # Inventory bytes and ordering stay ordinal. Binding a caller's spelling
+        # follows the platform path comparison, and still requires one match.
+        if (@($actual.files | Where-Object { [string]::Equals([string]$_.path,$leaf,$comparison) }).Count -ne 1) { throw 'Runtime closure does not bind the executable.' }
     } catch { throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform ("Runtime closure verification failed: " + $_.Exception.Message)) }
 }
 

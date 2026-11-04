@@ -540,10 +540,9 @@ function Invoke-CheckedCommand {
     return @($result.stdout -split "`r?`n" | Where-Object {$_ -ne ''})
 }
 
-function New-RunOwnedInstallDirectory {
+function Initialize-RunOwnedInstallRoot {
     param(
-        [string] $Root,
-        [Parameter(Mandatory = $true)][string] $ToolName
+        [string] $Root
     )
 
     if ([string]::IsNullOrWhiteSpace($Root)) {
@@ -561,6 +560,13 @@ function New-RunOwnedInstallDirectory {
     if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "Run-owned install root must be a regular directory: '$fullRoot'."
     }
+    $runtime=Import-ResolverPlatformRuntime
+    return & $runtime.ExportedCommands['Resolve-PlatformPhysicalPath'] -Path $fullRoot
+}
+
+function New-RunOwnedInstallDirectory {
+    param([string]$Root,[Parameter(Mandatory=$true)][string]$ToolName)
+    $fullRoot=Initialize-RunOwnedInstallRoot -Root $Root
     $prefix = if ($ToolName -ceq 'skillspector') { 'ss' } else { $ToolName }
     for ($attempt = 0; $attempt -lt 8; $attempt++) {
         $identifier = [guid]::NewGuid().ToString('N')
@@ -3520,10 +3526,17 @@ function Resolve-SkillSpector {
     )
 
     $acquisitionStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $failureRoot=$null
     $diagnosticInstallRoot = if ([string]::IsNullOrWhiteSpace($RequestedInstallRoot)) {
         $base = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { [IO.Path]::GetTempPath() } else { $env:RUNNER_TEMP }
         Join-Path $base 'standard-validation-tools'
     } else { $RequestedInstallRoot }
+    if($ShouldInstall){
+        # Resolve the parent once for allocation, diagnostics and failed-run
+        # reclamation; OS aliases must not produce different containment roots.
+        $diagnosticInstallRoot=Initialize-RunOwnedInstallRoot -Root $diagnosticInstallRoot
+        $RequestedInstallRoot=$diagnosticInstallRoot
+    }
     $failureRoot = if ($ShouldInstall) {
         Join-Path ([IO.Path]::GetFullPath($diagnosticInstallRoot)) ("skillspector-failure-{0}" -f $script:ResolverRunId)
     } else { $null }
