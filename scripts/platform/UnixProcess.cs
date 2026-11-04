@@ -9,6 +9,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Threading;
+using Microsoft.Win32.SafeHandles;
 
 namespace SyuanTsai.AIInstructions.PlatformRuntime
 {
@@ -33,6 +34,48 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
 
     internal sealed class UnixProcessControl : IOwnedProcessControl
     {
+        [DllImport("libc", EntryPoint = "fcntl", SetLastError = true)] private static extern int InputFlags(SafePipeHandle fd, int command);
+        [DllImport("libc", EntryPoint = "fcntl", SetLastError = true)] private static extern int InputSetFlags(SafePipeHandle fd, int command, int flags);
+        [DllImport("libc", EntryPoint = "fcntl", SetLastError = true)] private static extern int InputSetFlagsArm64(SafePipeHandle fd, int command, IntPtr x2, IntPtr x3, IntPtr x4, IntPtr x5, IntPtr x6, IntPtr x7, IntPtr flags);
+        [DllImport("libc", EntryPoint = "write", SetLastError = true)] private static extern IntPtr WriteInputChunk(SafePipeHandle fd, byte[] buffer, UIntPtr count);
+        private static void SetInputFlags(SafePipeHandle fd, int command, int flags)
+        {
+            int result = PlatformNative.GetOperatingSystem() == "macos" && RuntimeInformation.ProcessArchitecture == Architecture.Arm64
+                ? InputSetFlagsArm64(fd, command, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, new IntPtr(flags))
+                : InputSetFlags(fd, command, flags);
+            if (result < 0) throw new PlatformErrnoException("stdin-fcntl", Marshal.GetLastWin32Error());
+        }
+        internal static void PrepareInputWriter(SafePipeHandle writer)
+        {
+            // The read end alone is dup2'd to fd 0. Protect the writer even from
+            // unrelated execs in this host; spawn also uses closefrom/CLOEXEC_DEFAULT.
+            int flags = InputFlags(writer, 1); // F_GETFD
+            if (flags < 0) throw new PlatformErrnoException("stdin-F_GETFD", Marshal.GetLastWin32Error());
+            SetInputFlags(writer, 2, flags | 1); // F_SETFD / FD_CLOEXEC
+            int actual = InputFlags(writer, 1);
+            if (actual < 0 || (actual & 1) == 0) throw new IOException("stdin FD_CLOEXEC readback failed.");
+        }
+        internal static void WriteInput(SafePipeHandle writer, byte[] bytes, DateTimeOffset deadline)
+        {
+            int flags = InputFlags(writer, 3), nonblocking = PlatformNative.GetOperatingSystem() == "macos" ? 4 : 0x800;
+            if (flags < 0) throw new PlatformErrnoException("stdin-F_GETFL", Marshal.GetLastWin32Error());
+            SetInputFlags(writer, 4, flags | nonblocking);
+            int actual = InputFlags(writer, 3);
+            if (actual < 0 || (actual & nonblocking) == 0) throw new IOException("stdin O_NONBLOCK readback failed.");
+            var buffer = new byte[4096];
+            int offset = 0;
+            while (offset < bytes.Length)
+            {
+                if (DateTimeOffset.UtcNow >= deadline) throw new TimeoutException("stdin delivery deadline was exceeded.");
+                int count = Math.Min(buffer.Length, bytes.Length - offset);
+                Array.Copy(bytes, offset, buffer, 0, count);
+                long written = WriteInputChunk(writer, buffer, new UIntPtr((uint)count)).ToInt64();
+                if (written > 0) { offset += checked((int)written); continue; }
+                int errno = Marshal.GetLastWin32Error();
+                if (written < 0 && (errno == 4 || errno == 11 || errno == 35)) { Thread.Sleep(10); continue; }
+                throw new PlatformErrnoException("stdin-write", errno);
+            }
+        }
         // Darwin SIGCONT is 19; 18 is SIGTSTP (Linux SIGCONT is 18).
         private const int DarwinSigCont = 19;
         // libc resolves to libSystem on Darwin. All spawn APIs are fixed-arity.

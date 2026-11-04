@@ -4,6 +4,7 @@
 using System;
 using System.Text;
 using System.IO;
+using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
@@ -67,6 +68,30 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         public string Uncertainty { get { return null; } }
         private static void Check(bool result, string operation)
         { if (!result) throw new PlatformWin32Exception(operation, Marshal.GetLastWin32Error()); }
+
+        [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetHandleInformation(SafePipeHandle handle, uint mask, uint flags);
+        [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetHandleInformation(SafePipeHandle handle, out uint flags);
+        internal static void PrepareInputWriter(SafePipeHandle writer)
+        {
+            // Only the read end appears in CreateProcess's explicit handle list.
+            Check(SetHandleInformation(writer, 1, 0), "stdin-writer-no-inherit");
+            uint flags;
+            Check(GetHandleInformation(writer, out flags), "stdin-writer-inherit-readback");
+            if ((flags & 1) != 0) throw new IOException("stdin writer remained inheritable.");
+        }
+
+        internal static void WriteInput(AnonymousPipeServerStream writer, byte[] bytes, DateTimeOffset deadline)
+        {
+            // Only the owned Job can retain the read end. Its deadline supervisor
+            // terminates every reader, releasing a blocked synchronous Write.
+            for (int offset = 0; offset < bytes.Length;)
+            {
+                if (DateTimeOffset.UtcNow >= deadline) throw new TimeoutException("stdin delivery deadline was exceeded.");
+                int count = Math.Min(4096, bytes.Length - offset);
+                writer.Write(bytes, offset, count);
+                offset += count;
+            }
+        }
 
         private static string Quote(string argument)
         {

@@ -453,3 +453,177 @@ namespace Syp212 {
         }
     }
 }
+
+# Core registers these process-boundary regressions on Windows, Linux and macOS.
+if ($PSVersionTable.PSEdition -eq 'Core') {
+    Describe 'SYP353 P3 semantic callback isolation' {
+        BeforeAll {
+            $script:P55Bridge = Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/StandardSemanticBridge.psm1') -Force -PassThru
+        }
+        # Scenario: The real bootstrap receives UTF-8 on a host whose console may use an OEM code page.
+        # Purpose: Verify the wire codec independently of the P2/P3 filesystem and ownership tests below.
+        It 'InterT05_bootstrap_decodes_utf8_payload' {
+            $bootstrap = & $script:P55Bridge {
+                $function = Get-Item Function:\Invoke-StandardSemanticBridgeCallbackWithTimeout
+                $function.ScriptBlock.Ast.Find({ param($node)
+                    $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
+                    $node.StringConstantType -eq [Management.Automation.Language.StringConstantType]::SingleQuotedHereString
+                }, $true).Value
+            }
+            $payload = [pscustomobject]@{
+                callbackText = 'param($request,$context); $request + $context.suffix'
+                argumentXml = [Management.Automation.PSSerializer]::Serialize([string][char]0x754c)
+                contextXml = [Management.Automation.PSSerializer]::Serialize(@{suffix=[string][char]0x6e2c})
+                consentExpiresAtUtc = $null
+            }
+            $start=[Diagnostics.ProcessStartInfo]::new()
+            $start.FileName=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+            $start.UseShellExecute=$false; $start.CreateNoWindow=$true
+            $start.RedirectStandardInput=$true; $start.RedirectStandardOutput=$true; $start.RedirectStandardError=$true
+            $start.StandardOutputEncoding=[Text.Encoding]::UTF8
+            $start.Arguments='-NoProfile -NonInteractive -EncodedCommand '+[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrap))
+            $child=[Diagnostics.Process]::new(); $child.StartInfo=$start; $started=$false
+            try {
+                $started=$child.Start()
+                $stdout=$child.StandardOutput.ReadToEndAsync(); $stderr=$child.StandardError.ReadToEndAsync()
+                $bytes=[Text.Encoding]::UTF8.GetBytes([Management.Automation.PSSerializer]::Serialize($payload,100))
+                $child.StandardInput.BaseStream.Write($bytes,0,$bytes.Length); $child.StandardInput.Close()
+                $child.WaitForExit(10000) | Should Be $true
+                $stdout.Wait(1000) | Should Be $true
+                $stderr.Wait(1000) | Should Be $true
+                $child.ExitCode | Should Be 0
+                $envelope=[Management.Automation.PSSerializer]::Deserialize($stdout.Result)
+                $envelope.succeeded | Should Be $true
+                @($envelope.output)[0] | Should Be (([string][char]0x754c)+[char]0x6e2c)
+            } finally {
+                if($started -and -not $child.HasExited){$child.Kill(); [void]$child.WaitForExit(5000)}
+                $child.Dispose()
+            }
+        }
+        # Scenario: A signer-like context contains a unique secret and Unicode input.
+        # Purpose: Deliver through stdin only; private capture and temp files must not contain the payload.
+        It 'InterT10_keeps_context_off_disk_and_roundtrips_unicode' {
+            $secret = 'private-key-fragment-' + [Guid]::NewGuid().ToString('N')
+            $result = & $script:P55Bridge {
+                param($secret)
+                $existingTempFiles = @([IO.Directory]::GetFiles([IO.Path]::GetTempPath()))
+                $callback = {
+                    param($request, $context)
+                    $leaks = @()
+                    $roots = @([Environment]::CurrentDirectory, [IO.Path]::GetTempPath())
+                    foreach ($root in $roots) {
+                        foreach ($file in @(Get-ChildItem -LiteralPath $root -File -Force)) {
+                            if ($context.existingTempFiles -contains $file.FullName) { continue }
+                            try {
+                                if ([IO.File]::ReadAllText($file.FullName).Contains($context.privateKeyXml)) { $leaks += $file.Name }
+                            } catch [IO.IOException], [UnauthorizedAccessException] { }
+                        }
+                    }
+                    [pscustomobject]@{ value = $request; leaks = $leaks.Count; received = $context.privateKeyXml.Length; captureRoot = [Environment]::CurrentDirectory }
+                }
+                Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback $callback -Argument ([string][char]0x754c) -CallbackContext @{privateKeyXml=$secret;existingTempFiles=$existingTempFiles} -TimeoutMilliseconds 15000
+            } $secret
+            $result.value | Should Be ([string][char]0x754c)
+            $result.received | Should Be $secret.Length
+            $result.leaks | Should Be 0
+            [IO.Directory]::Exists($result.captureRoot) | Should Be $false
+        }
+        # Scenario: A callback is blocked in native sleep past its deadline.
+        # Purpose: Preserve TimeoutException and complete P3 cleanup, without a namespace capability.
+        It 'InterT20_bounds_noncooperative_callback_and_releases_lease' {
+            & $script:P55Bridge {
+                $caught = $null
+                try { Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback { [Threading.Thread]::Sleep(30000) } -TimeoutMilliseconds 2000 } catch { $caught=$_.Exception }
+                ($caught -is [TimeoutException]) | Should Be $true
+                (Test-StandardSemanticBridgeCallbackCleanupFailureException $caught) | Should Be $false
+                @(Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback { 'next' } -TimeoutMilliseconds 15000)[0] | Should Be 'next'
+            }
+        }
+        # Scenario: Either stream exceeds its original bridge quota.
+        # Purpose: Keep asymmetric bounded capture and its error category through P3.
+        It 'InterT30_preserves_stdout_and_stderr_quota_classification' {
+            & $script:P55Bridge {
+                foreach ($stream in @('stdout','stderr')) {
+                    $caught = $null
+                    try {
+                        Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback {
+                            param($stream)
+                            if ($stream -eq 'stderr') { [Console]::Error.Write(('x' * 16385)) }
+                            else { [Console]::Out.Write(('x' * 16777217)) }
+                        } -Argument $stream -TimeoutMilliseconds 20000
+                    } catch { $caught = $_.Exception }
+                    $caught.Message | Should Match ('exceeded its isolated ' + $stream + ' quota')
+                    (Test-StandardSemanticBridgeCallbackCleanupFailureException $caught) | Should Be $false
+                }
+            }
+        }
+        # Scenario: The callback root returns while its descendant is about to write a marker.
+        # Purpose: Cleanup must cover the owned tree even after normal root exit.
+        It 'InterT40_terminates_descendant_after_root_exit' {
+            $marker = Join-Path ([IO.Path]::GetTempPath()) ('p55-descendant-' + [Guid]::NewGuid().ToString('N'))
+            try {
+                & $script:P55Bridge {
+                    param($marker)
+                    Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback {
+                        param($marker)
+                        $code = '[Threading.Thread]::Sleep(4000); [IO.File]::WriteAllText(' + "'" + $marker.Replace("'","''") + "','late')"
+                        $start = [Diagnostics.ProcessStartInfo]::new()
+                        $start.FileName = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+                        $start.UseShellExecute = $false
+                        $start.Arguments = '-NoProfile -NonInteractive -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code))
+                        $child = [Diagnostics.Process]::Start($start); $child.Dispose()
+                        'complete'
+                    } -Argument $marker -TimeoutMilliseconds 15000
+                } $marker | Should Be 'complete'
+                Start-Sleep -Seconds 5
+                [IO.File]::Exists($marker) | Should Be $false
+            } finally { if ([IO.File]::Exists($marker)) { [IO.File]::Delete($marker) } }
+        }
+        # Scenario: A child invokes the consent-expiry envelope category.
+        # Purpose: Untrusted child-reported expiry must retain its distinct marker.
+        It 'InterT50_preserves_child_reported_expiry_classification' {
+            & $script:P55Bridge {
+                $caught = $null
+                try {
+                    Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback {
+                        $envelope = [pscustomobject]@{succeeded=$false; failureKind='consent-expired-before-callback-invocation'; error='expired'}
+                        [Console]::Out.Write([Management.Automation.PSSerializer]::Serialize($envelope))
+                        [Environment]::Exit(0)
+                    } -TimeoutMilliseconds 15000
+                } catch { $caught=$_.Exception }
+                (Test-StandardSemanticBridgeChildReportedExpiryException $caught) | Should Be $true
+            }
+        }
+        # Scenario: Caller-trusted code leaves an extra file in its private directory.
+        # Purpose: Uncertain cleanup must retain its marker, including alongside a primary failure.
+        It 'InterT60_marks_cleanup_failure_without_losing_primary_failure' {
+            foreach ($failCallback in @($false,$true)) {
+                $leaf='p55-owned-' + [Guid]::NewGuid().ToString('N')
+                try {
+                    & $script:P55Bridge {
+                        param($leaf,$failCallback)
+                        $caught=$null
+                        try {
+                            Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback {
+                                param($request)
+                                [IO.File]::WriteAllText((Join-Path ([Environment]::CurrentDirectory) $request.leaf),'fixture')
+                                if ($request.fail) { throw 'primary-callback-failure' }
+                                'complete'
+                            } -Argument @{leaf=$leaf;fail=$failCallback} -TimeoutMilliseconds 15000
+                        } catch { $caught=$_.Exception }
+                        (Test-StandardSemanticBridgeCallbackCleanupFailureException $caught) | Should Be $true
+                        if ($failCallback) { $caught.Message | Should Match 'primary-callback-failure' }
+                        else { $caught.Message | Should Match 'cleanup failed' }
+                    } $leaf $failCallback
+                } finally {
+                    # Delete only this test's unique sentinel and its empty private root.
+                    foreach ($root in @(Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Directory -Filter 'standard-semantic-bridge-capture-*')) {
+                        if (($root.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+                        $sentinel=Join-Path $root.FullName $leaf
+                        if ([IO.File]::Exists($sentinel)) { [IO.File]::Delete($sentinel); [IO.Directory]::Delete($root.FullName,$false) }
+                    }
+                }
+            }
+        }
+    }
+}
