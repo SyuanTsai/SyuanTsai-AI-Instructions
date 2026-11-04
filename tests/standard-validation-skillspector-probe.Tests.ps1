@@ -189,7 +189,7 @@ Describe 'Runner observed SkillSpector native compatibility' {
                 runId = [guid]::NewGuid().ToString('N')
                 candidate = [pscustomobject]@{ candidateId = 'a' * 64 }
                 artifacts = [pscustomobject]@{ root = $TestDrive }
-                adapter = [pscustomobject]@{ sha256 = (Get-StandardValidationJsonSnapshot -Path $adapterPath -Context 'fixture adapter').sha256 }
+                adapter = [pscustomobject]@{ mode = 'production'; sha256 = (Get-StandardValidationJsonSnapshot -Path $adapterPath -Context 'fixture adapter').sha256 }
             }
             $event = [pscustomobject]@{
                 candidateId = $report.candidate.candidateId
@@ -201,16 +201,35 @@ Describe 'Runner observed SkillSpector native compatibility' {
             }
             Mock Assert-StandardValidationToolReceipt { [pscustomobject]@{ path = $receiptPath; executableSha256 = 'c' * 64 } }
             Mock New-StandardValidationNativeProbeContext { [pscustomobject]@{ eventId = $EventId } }
+            $expectedTrustAnchorRoot = Join-Path $script:StandardValidationRepositoryRoot 'docs/standards/trust-anchors'
 
             $result = Get-StandardValidationAdvancedProbeContext -Report $report -Event $event
 
             $result.eventId | Should Be $event.eventId
             Assert-MockCalled Assert-StandardValidationToolReceipt -Times 1 -Exactly -Scope It -ParameterFilter {
-                $FreshnessReferenceTime.UtcTicks -eq $eventTime.UtcTicks
+                $FreshnessReferenceTime.UtcTicks -eq $eventTime.UtcTicks -and
+                [string]$TrustAnchorRoot -ceq $expectedTrustAnchorRoot
             }
         }
 
-        It 'UnitT39_rejects_a_retained_event_without_its_process_start_time' {
+        It 'UnitT39_blocks_development_harness_retained_readback' {
+            $candidateId = 'a' * 64
+            $report = [pscustomobject]@{
+                candidate = [pscustomobject]@{ candidateId = $candidateId }
+                artifacts = [pscustomobject]@{ root = $TestDrive }
+                adapter = [pscustomobject]@{ mode = 'development-harness' }
+            }
+            $event = [pscustomobject]@{
+                candidateId = $candidateId
+                stageId = 'skillspector-static'
+                toolId = 'staticAnalyzer'
+                outputPath = (Join-Path $TestDrive 'development-harness/events/static.json')
+            }
+
+            { Get-StandardValidationAdvancedProbeContext -Report $report -Event $event } | Should Throw 'BLOCKED|Native probe retained readback requires the immutable trust-anchor root.'
+        }
+
+        It 'UnitT41_rejects_a_retained_event_without_its_process_start_time' {
             $runRoot = Join-Path $TestDrive 'missing-event-timestamp'
             $eventRoot = Join-Path $runRoot 'events'
             $eventPath = Join-Path $eventRoot 'static.json'
