@@ -612,6 +612,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/standards/core-test-skip-inventory.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/standards/evidence/pr12-1adba1e/PR12-1adba1e-archive-official-investigate-datadog-logs.json",
       "license": "Apache-2.0"
     },
@@ -653,6 +657,10 @@
     },
     {
       "path": "docs/standards/pr12-source-merge-exception-proposal.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "docs/standards/schemas/core-test-skip-inventory-v1.schema.json",
       "license": "Apache-2.0"
     },
     {

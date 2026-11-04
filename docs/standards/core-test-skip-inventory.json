@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "platforms": {
+    "windows": {
+      "expectedSkippedTests": [
+        "skills-source-acquisition.Tests.ps1::UnitT09_rejects_case_insensitive_file_collisions_before_hashing",
+        "skills-source-acquisition.Tests.ps1::UnitT09d_rejects_Unicode_NFC_path_collisions_before_hashing",
+        "skills-source-acquisition.Tests.ps1::UnitT09e_rejects_a_case_variant_sibling_as_the_repository_skill_root",
+        "skills-source-acquisition.Tests.ps1::UnitT09a_rejects_descendant_reparse_points_before_hashing",
+        "skills-source-acquisition.Tests.ps1::UnitT09b_rejects_non_regular_files_before_hashing"
+      ],
+      "reason": "Windows file systems used by Core do not preserve distinct case-variant fixture names, and Windows does not provide the Unix symbolic-link and FIFO file types required by these source-acquisition fixtures."
+    },
+    "macos": {
+      "expectedSkippedTests": [
+        "skills-source-acquisition.Tests.ps1::UnitT09_rejects_case_insensitive_file_collisions_before_hashing",
+        "skills-source-acquisition.Tests.ps1::UnitT09d_rejects_Unicode_NFC_path_collisions_before_hashing"
+      ],
+      "reason": "The reviewed default macOS APFS runner file system is case-insensitive and normalizes Unicode file names, so it cannot materialize the distinct case-collision or NFC/NFD fixture paths required by UnitT09 and UnitT09d."
+    },
+    "linux": {
+      "expectedSkippedTests": [],
+      "reason": "The reviewed Linux runner file system preserves distinct case variants and Unicode normalization forms and supports the Unix file types required by all source-acquisition fixtures."
+    }
+  }
+}

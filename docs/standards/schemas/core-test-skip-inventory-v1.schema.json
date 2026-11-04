@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Core platform-specific Pester skip inventory v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "platforms"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "platforms": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["windows", "macos", "linux"],
+      "properties": {
+        "windows": { "$ref": "#/$defs/platformInventory" },
+        "macos": { "$ref": "#/$defs/platformInventory" },
+        "linux": { "$ref": "#/$defs/platformInventory" }
+      }
+    }
+  },
+  "$defs": {
+    "platformInventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expectedSkippedTests", "reason"],
+      "properties": {
+        "expectedSkippedTests": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[^:/\\\\]+\\.Tests\\.ps1::\\S.+$"
+          }
+        },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
