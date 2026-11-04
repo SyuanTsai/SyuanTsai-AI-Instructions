@@ -650,7 +650,7 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
             }
             else {
                 $caught | Should Not BeNullOrEmpty
-                (Test-StandardSemanticBridgeCallbackCleanupFailureException $caught) | Should Be $true
+                (& $script:P55Bridge { param($exception) Test-StandardSemanticBridgeCallbackCleanupFailureException $exception } $caught) | Should Be $true
                 $caught.Message | Should Match 'capture root identity changed'
             }
         }
