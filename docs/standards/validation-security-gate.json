@@ -53,9 +53,10 @@
         "status": "platform-unavailable",
         "eligiblePlatforms": ["linux", "macos"],
         "windowsRequired": true,
-        "requiredEvidence": ["platform", "runtimeIdentity", "toolIdentity", "attemptedCommand", "rawResult", "failureKind", "incompatibilityReason"],
+        "nativeProbeContract": "runner-native-skillspector-probe-v1",
+        "requiredEvidence": ["platform", "runtimeIdentity", "toolIdentity", "attemptedCommand", "rawResult", "failureKind", "incompatibilityReason", "nativeProbe"],
         "acceptedFailureKinds": ["runtime-unsupported", "tool-platform-unsupported", "executable-format-unsupported"],
-        "rejectedFailureKinds": ["scan-failure", "missing-configuration", "timeout", "findings"],
+        "rejectedFailureKinds": ["scan-failure", "missing-configuration", "timeout", "findings", "missing-package", "download-failure", "cancelled", "output-truncated", "output-quota", "cleanup-uncertain", "unclassified-exit"],
         "scannerPassed": false,
         "coverageComplete": false,
         "releaseEligible": false

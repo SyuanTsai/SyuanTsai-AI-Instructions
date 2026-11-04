@@ -1,4 +1,20 @@
 Describe 'SYP258 explicit source validation contract' {
+    # Scenario: Native probing is introduced without changing ordinary authority or workflow platform inventory.
+    # Purpose: Keep probe execution behind the shared runner boundary and preserve the six-suite ordinary gate.
+    It 'UnitT05_routes_native_probes_through_the_shared_owned_process_boundary' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $tokens=$null; $errors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'scripts/Invoke-StandardValidation.ps1'),[ref]$tokens,[ref]$errors)
+        @($errors).Count | Should Be 0
+        foreach ($pair in @(@('Invoke-StandardValidationNativeProbe','Invoke-StandardValidationProcess'),@('Invoke-StandardValidationCommandAndRecord','Invoke-StandardValidationNativeProbe'),@('Assert-StandardCoreSourceCheckReport','New-StandardValidationNativeProbeContext'),@('New-StandardValidationSourceConformanceResult','Get-StandardValidationAdvancedProbeContext'))) {
+            $function=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $pair[0]},$true))[0]
+            @($function.Body.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq $pair[1]},$true)).Count | Should BeGreaterThan 0
+        }
+        $policy=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/validation-security-gate.json') | ConvertFrom-Json
+        @($policy.ordinaryAuthority.testPaths).Count | Should Be 6
+        $policy.ordinaryAuthority.skippedCount | Should Be 0
+    }
+
     # Scenario: A source repository explicitly opts into package tools and Static using the ordinary v2 runner.
     # Purpose: V4/V6 keeps the additional source contract optional and ordinary Core free of implicit tools.
     It 'UnitT10_declares_an_optional_source_slot_and_explicit_runner_switch' {

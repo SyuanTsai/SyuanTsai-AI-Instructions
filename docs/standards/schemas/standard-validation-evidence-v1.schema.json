@@ -593,24 +593,9 @@
         }
       ]
     },
-    "platformUnavailableEvidence": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["platform", "runtimeIdentity", "toolIdentity", "attemptedCommand", "rawResult", "failureKind", "incompatibilityReason", "scannerPassed", "coverageComplete", "scannerExecuted", "releaseEligible"],
-      "properties": {
-        "platform": { "enum": ["linux", "macos"] },
-        "runtimeIdentity": { "type": "string", "minLength": 1 },
-        "toolIdentity": { "type": "string", "minLength": 1 },
-        "attemptedCommand": { "type": "string", "minLength": 1 },
-        "rawResult": { "type": "string", "minLength": 1 },
-        "failureKind": { "enum": ["runtime-unsupported", "tool-platform-unsupported", "executable-format-unsupported"] },
-        "incompatibilityReason": { "type": "string", "minLength": 1 },
-        "scannerPassed": { "const": false },
-        "coverageComplete": { "const": false },
-        "scannerExecuted": { "const": false },
-        "releaseEligible": { "const": false }
-      }
-    },
+    "nativeProbeBinding": {"type": "object", "additionalProperties": false, "required": ["schemaVersion", "runId", "candidateId", "eventId", "dispatchCommandSha256", "dispatchArgumentsSha256", "commandSha256", "argumentsSha256", "toolReceiptSha256", "runtimeReceiptSha256", "installedClosureSha256", "commandPath", "receiptPath", "installRoot", "outputPath", "arguments"], "properties": {"schemaVersion": {"const": 1}, "runId": {"type": "string", "pattern": "^[a-f0-9]{32}$"}, "candidateId": {"$ref": "#/$defs/sha256"}, "eventId": {"type": "string", "format": "uuid"}, "dispatchCommandSha256": {"$ref": "#/$defs/sha256"}, "dispatchArgumentsSha256": {"$ref": "#/$defs/sha256"}, "commandSha256": {"$ref": "#/$defs/sha256"}, "argumentsSha256": {"$ref": "#/$defs/sha256"}, "toolReceiptSha256": {"$ref": "#/$defs/sha256"}, "runtimeReceiptSha256": {"$ref": "#/$defs/sha256"}, "installedClosureSha256": {"$ref": "#/$defs/sha256"}, "commandPath": {"type": "string", "minLength": 1}, "receiptPath": {"type": "string", "minLength": 1}, "installRoot": {"type": "string", "minLength": 1}, "outputPath": {"type": "string", "minLength": 1}, "arguments": {"const": ["-I", "-B", "-c", "from skillspector.cli import app; app()", "--help"]}}},
+    "nativeProbe": {"type": "object", "additionalProperties": false, "required": ["probeExecuted", "binding", "outputSha256"], "properties": {"probeExecuted": {"const": true}, "binding": {"$ref": "#/$defs/nativeProbeBinding"}, "outputSha256": {"$ref": "#/$defs/sha256"}}, "description": "Illustrative binding only; fixture values do not establish host compatibility.", "examples": [{"probeExecuted": true, "binding": {"schemaVersion": 1, "runId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "candidateId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "eventId": "11111111-1111-4111-8111-111111111111", "dispatchCommandSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "dispatchArgumentsSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "commandPath": "/example/tool/venv/bin/python", "commandSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "arguments": ["-I", "-B", "-c", "from skillspector.cli import app; app()", "--help"], "argumentsSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "toolReceiptSha256": "1111111111111111111111111111111111111111111111111111111111111111", "runtimeReceiptSha256": "2222222222222222222222222222222222222222222222222222222222222222", "receiptPath": "/example/receipts/skillspector.json", "installRoot": "/example/tool", "installedClosureSha256": "3333333333333333333333333333333333333333333333333333333333333333", "outputPath": "/example/run/events/probe-11111111-1111-4111-8111-111111111111.json"}, "outputSha256": "4444444444444444444444444444444444444444444444444444444444444444"}]},
+    "platformUnavailableEvidence": {"type": "object", "additionalProperties": false, "required": ["platform", "runtimeIdentity", "toolIdentity", "attemptedCommand", "rawResult", "failureKind", "incompatibilityReason", "scannerPassed", "coverageComplete", "scannerExecuted", "releaseEligible", "nativeProbe"], "properties": {"platform": {"enum": ["linux", "macos"]}, "runtimeIdentity": {"type": "string", "minLength": 1}, "toolIdentity": {"type": "string", "minLength": 1}, "attemptedCommand": {"type": "string", "minLength": 1}, "rawResult": {"type": "string", "minLength": 1}, "failureKind": {"enum": ["runtime-unsupported", "tool-platform-unsupported", "executable-format-unsupported"]}, "incompatibilityReason": {"type": "string", "minLength": 1}, "scannerPassed": {"const": false}, "coverageComplete": {"const": false}, "scannerExecuted": {"const": false}, "releaseEligible": {"const": false}, "nativeProbe": {"$ref": "#/$defs/nativeProbe"}}},
     "triggerDecision": {
       "type": "object",
       "additionalProperties": false,

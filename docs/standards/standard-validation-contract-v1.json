@@ -157,7 +157,7 @@
     "sourceConformance": {
       "contract": "standard-source-conformance-v1",
       "scope": "source-stages-1-5",
-      "binding": ["candidate.sourceRevision", "candidate.candidateId", "candidate.contentSha256", "stage[1..5].identity-order-status", "stage[4].status=passed until SYP-353 implements the runner-observed native compatibility contract; platform-unavailable remains BLOCKED", "future stage[4].platformUnavailableEvidence must bind the frozen command/arguments digest, verified tool/runtime receipt identity, same-event stdout/stderr/exit or startup failure, accepted incompatibility kind, scannerPassed=false, coverageComplete=false, scannerExecuted=false, releaseEligible=false", "stage[3..5].candidate-bound-process-events", "stage[3..5].event.cleanedUp=true", "stage[3..5].event.outputPath-within-artifacts.root", "stage[3..5].event.raw-output-file-event-process-outputSha256-binding", "repositoryTests typed record eventId+toolId bound to exactly one Stage 5 event", "repositoryTests typed record role derived from validated central adapter dispatch kind and never trusted from child envelope", "repositoryTests event output, inventory, and typed result bound to raw event envelope", "repositoryTests dispatch IDs may be any adapter-safe ID"],
+      "binding": ["candidate.sourceRevision", "candidate.candidateId", "candidate.contentSha256", "stage[1..5].identity-order-status", "stage[4].status=passed or runner-observed nativeProbe under runner-native-skillspector-probe-v1; unbound platform-unavailable remains BLOCKED", "stage[4].platformUnavailableEvidence must bind the frozen command/arguments digest, verified tool/runtime receipt identity, same-event stdout/stderr/exit or startup failure, accepted incompatibility kind, scannerPassed=false, coverageComplete=false, scannerExecuted=false, releaseEligible=false", "stage[3..5].candidate-bound-process-events", "stage[3..5].event.cleanedUp=true", "stage[3..5].event.outputPath-within-artifacts.root", "stage[3..5].event.raw-output-file-event-process-outputSha256-binding", "repositoryTests typed record eventId+toolId bound to exactly one Stage 5 event", "repositoryTests typed record role derived from validated central adapter dispatch kind and never trusted from child envelope", "repositoryTests event output, inventory, and typed result bound to raw event envelope", "repositoryTests dispatch IDs may be any adapter-safe ID"],
       "pesterCounts": "validated central adapter dispatch kind is general or pester; general dispatches omit all numeric counts; every pester dispatch requires complete total/passed/skipped counts with total>0; passed>0; skipped>=0; passed+skipped=total; if failed is present it must equal zero; aggregate all pester dispatches in stable Stage 5 order; each aggregate must fit Int32 so emitted JSON counts remain typed integers",
       "terminalStates": "canonical PASS requires exitCode=0 and conditional-semantic-scan status=passed or not-applicable; canonical BLOCKED requires exitCode=10, conditional-semantic-scan status=blocked, and releaseEligible=false; source projection never converts a BLOCKED canonical state into PASS",
       "requiredCheckUse": "current workflow required source checks only; downstream mirrors may consume this result only after binding sourceRevision to the event candidate SHA; same-workflow output is not a protected publisher",
@@ -247,11 +247,11 @@
     "skillSpectorPlatformUnavailable": {
       "policyPath": "docs/standards/validation-security-gate.json",
       "status": "platform-unavailable",
-      "authorizationState": "blocked-until-syp353-runner-observed-native-compatibility-contract",
+      "authorizationState": "runner-native-skillspector-probe-v1",
       "eligiblePlatforms": ["linux", "macos"],
       "windowsRequired": true,
       "acceptedFailureKinds": ["runtime-unsupported", "tool-platform-unsupported", "executable-format-unsupported"],
-      "rejectedFailureKinds": ["scan-failure", "missing-configuration", "timeout", "findings"],
+      "rejectedFailureKinds": ["scan-failure", "missing-configuration", "timeout", "findings", "missing-package", "download-failure", "cancelled", "output-truncated", "output-quota", "cleanup-uncertain", "unclassified-exit"],
       "scannerPassed": false,
       "coverageComplete": false,
       "scannerExecuted": false,

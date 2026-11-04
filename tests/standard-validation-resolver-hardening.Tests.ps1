@@ -4,6 +4,22 @@ Describe 'SYP258 source tool identity freeze' {
         . $runner -CandidateRoot $TestDrive -AdapterPath (Join-Path $TestDrive 'adapter.json') -ArtifactsRoot (Join-Path $TestDrive 'artifacts') -SourceRepository 'https://example.com/example/skills.git' -SourceRevision ('a' * 40) -BaseRevision ('b' * 40) -DefineFunctionsOnly
     }
 
+    # Scenario: A verified Python launcher is changed to another executable or another tool role.
+    # Purpose: Only the receipt-bound installed SkillSpector runtime may supply native probe identity.
+    It 'UnitT05_binds_the_native_Python_launcher_without_authorizing_a_platform_exception' {
+        $root=Join-Path $TestDrive 'probe-launcher'; [void][IO.Directory]::CreateDirectory($root)
+        $command=Join-Path $root 'skillspector'; [IO.File]::WriteAllText($command,'entry-point fixture')
+        $runtime=Join-Path $root $(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {'python.exe'} else {'python'})
+        [IO.File]::WriteAllText($runtime,'runtime identity fixture')
+        $hash=Get-StandardValidationFileSha256 $command 'fixture'
+        $launcher=[pscustomobject]@{kind='skillspector-python';shimPath=$command;shimSha256=$hash;payloadPath=$command;payloadSha256=$hash;runtimePath=$runtime;runtimeSha256=Get-StandardValidationFileSha256 $runtime 'fixture'}
+        $digest=Assert-StandardValidationLauncherIntegrity -Launcher $launcher -ToolName skillspector -CommandPath $command -InstallRoot $root -CandidateRoot (Join-Path $TestDrive 'candidate') -ArtifactsRoot (Join-Path $TestDrive 'artifacts') -Context fixture
+        $digest | Should Be (Get-StandardValidationLauncherDigest $launcher fixture)
+        { Assert-StandardValidationLauncherIntegrity -Launcher $launcher -ToolName skill-tools -CommandPath $command -InstallRoot $root -CandidateRoot $TestDrive -ArtifactsRoot $TestDrive -Context fixture } | Should Throw 'not bound'
+        [IO.File]::WriteAllText($runtime,'tampered runtime')
+        { Assert-StandardValidationLauncherIntegrity -Launcher $launcher -ToolName skillspector -CommandPath $command -InstallRoot $root -CandidateRoot $TestDrive -ArtifactsRoot $TestDrive -Context fixture } | Should Throw 'bytes differ'
+    }
+
     # Scenario: A source tool file changes after the explicit setup step freezes its byte identity.
     # Purpose: V2/V6 rejects identity replacement without downloading or resolving a different tool.
     It 'UnitT10_accepts_the_frozen_file_and_rejects_changed_or_missing_bytes' {
