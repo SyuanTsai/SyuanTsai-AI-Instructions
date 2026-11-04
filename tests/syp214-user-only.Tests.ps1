@@ -962,7 +962,7 @@ function Get-Syp214RunIdentity {
         testScriptSha256=(Get-FileHash -LiteralPath $testPath -Algorithm SHA256).Hash.ToLowerInvariant()
         bootstrapScriptSha256=(Get-FileHash -LiteralPath $bootstrapPath -Algorithm SHA256).Hash.ToLowerInvariant()
         powershellVersion=$PSVersionTable.PSVersion.ToString()
-        powershellExecutable=[IO.Path]::GetFullPath((Join-Path $PSHOME 'pwsh.exe'))
+        powershellExecutable=[IO.Path]::GetFullPath((Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })))
         pesterVersion=[string]$env:SYP214_PESTER_VERSION
     }
 }

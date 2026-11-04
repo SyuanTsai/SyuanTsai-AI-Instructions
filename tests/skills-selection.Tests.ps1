@@ -351,16 +351,34 @@ function New-SelectionCatalog {
         } 'not valid JSON'
     }
 
-    # Scenario: The approved Atlassian profile is resolved on Windows with its existing setup fallback.
-    # Purpose: Keep one-off publishing available when Git documentation synchronization is activated.
+    # Scenario: The approved Atlassian profile resolves its existing setup fallback on Windows and filters platform-specific Skills elsewhere.
+    # Purpose: Keep one-off publishing available when Git documentation synchronization is activated on supported platforms.
     It 'InterT97_keeps_publisher_and_docs_as_code_available_together' {
         $catalog = Get-Content -Raw -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/skills-catalog.json') | ConvertFrom-Json
         $selection = [pscustomobject]@{ profiles=@('atlassian'); includeSkills=@(); excludeSkills=@() }
         $resolved = @(Resolve-SkillsSelection -Catalog $catalog -Selection $selection)
 
-        $resolved -contains 'publish-requirements-to-confluence' | Should Be $true
-        $resolved -contains 'manage-confluence-docs-as-code' | Should Be $true
-        $resolved -contains 'configure-confluence-api-access' | Should Be $true
+        if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+            $resolved -contains 'publish-requirements-to-confluence' | Should Be $true
+            $resolved -contains 'manage-confluence-docs-as-code' | Should Be $true
+            $resolved -contains 'configure-confluence-api-access' | Should Be $true
+        }
+        else {
+            $currentPlatform = if ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::OSX)) {
+                'macos'
+            }
+            elseif ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Linux)) {
+                'linux'
+            }
+            else {
+                'unix'
+            }
+            foreach ($skillId in @('publish-requirements-to-confluence','manage-confluence-docs-as-code','configure-confluence-api-access')) {
+                $skill = @($catalog.skills | Where-Object { [string]$_.id -ceq $skillId })[0]
+                $isSupported = (@($skill.compatibility.platforms) -contains 'any') -or (@($skill.compatibility.platforms) -contains $currentPlatform)
+                $resolved -contains $skillId | Should Be $isSupported
+            }
+        }
         $resolved -contains 'operate-environment-authorized-sql' | Should Be $false
     }
 

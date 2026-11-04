@@ -268,8 +268,9 @@ Describe 'Committed internal Skill approval integration' {
         })
         $git = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
         $gitVersion = [regex]::Match((& $git --version), '\d+\.\d+\.\d+').Value
+        $powerShellExecutable = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
         $tools = @(
-            [pscustomobject]@{ id = 'powershell'; version = $PSVersionTable.PSVersion.ToString(); path = (Join-Path $PSHOME 'pwsh.exe'); sha256 = (Get-FileHash -LiteralPath (Join-Path $PSHOME 'pwsh.exe') -Algorithm SHA256).Hash.ToLowerInvariant() },
+            [pscustomobject]@{ id = 'powershell'; version = $PSVersionTable.PSVersion.ToString(); path = $powerShellExecutable; sha256 = (Get-FileHash -LiteralPath $powerShellExecutable -Algorithm SHA256).Hash.ToLowerInvariant() },
             [pscustomobject]@{ id = 'git'; version = $gitVersion; path = $git; sha256 = (Get-FileHash -LiteralPath $git -Algorithm SHA256).Hash.ToLowerInvariant() }
         )
         $parameters = @{ SkillRoot = $skill; SourceRepository = 'https://github.com/SyuanTsai/Skill-Atlassian-Ecosystem.git'; SourceRevision = 'f2a12c6338e9a76dc807c84329ffaae1aaf5bef4'; SkillId = 'review-bitbucket-pull-request'; Purpose = 'local-pr-review'; ExpectedAuthorityFiles = $pins; ToolInventory = $tools }

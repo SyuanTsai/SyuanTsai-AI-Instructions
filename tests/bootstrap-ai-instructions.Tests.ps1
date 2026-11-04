@@ -1,7 +1,7 @@
 $script:BootstrapScript = Join-Path $PSScriptRoot '..\scripts\bootstrap-ai-instructions.ps1'
 $script:ManifestPath = '.codex\ai-instructions.manifest.json'
 $script:TestRepositoryUrl = 'git@example.com:team/bootstrap-test.git'
-$script:TestPowerShellExecutable = Join-Path $PSHOME $(if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell.exe' } else { 'pwsh.exe' })
+$script:TestPowerShellExecutable = Join-Path $PSHOME $(if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell.exe' } else { if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' } })
 
 function Invoke-TestGit {
     param(
@@ -2290,6 +2290,7 @@ exit /b %errorlevel%
 
     # Scenario: A caller supplies an explicit Git executable while relying on automatic target discovery.
     # Purpose: Route target discovery, safety probes, mutation, and finalization through one consistent executable.
+    if ($IsWindows) {
     It 'InterT90_routes_every_git_call_through_the_configured_executable' {
         # Given
         New-TestConfiguration -Path $configurationPath
@@ -2329,6 +2330,7 @@ exit /b %errorlevel%
         $invocations | Should Match 'stash store'
         $invocations | Should Not Match 'stash push|stash apply'
     }
+    }
 
     # Scenario: A repository has a failing pre-commit hook and unrelated staged/unstaged work.
     # Purpose: Prove bootstrap never invokes commit and therefore never depends on repository commit policy.
@@ -2365,6 +2367,7 @@ exit /b %errorlevel%
 
     # Scenario: A target repository cannot store recovery evidence after an external actor marks a newly created target read-only.
     # Purpose: Restore read-only transaction-created bytes and exclusions without changing the product index.
+    if ($IsWindows) {
     It 'InterT92_rolls_back_target_when_personal_agent_stash_store_fails' {
         # Given
         New-TestConfiguration -Path $configurationPath
@@ -2504,6 +2507,7 @@ exit /b %errorlevel%
             verified = $true
         }
         [Console]::WriteLine('SYP214 readonly rollback witness ' + (ConvertTo-Json -InputObject $witness -Depth 8 -Compress))
+    }
     }
 
     # Scenario: Git reports stash store success but an external process replaces the managed manifest afterward.
