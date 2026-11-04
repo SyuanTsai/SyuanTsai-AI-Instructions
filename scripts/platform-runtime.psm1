@@ -457,7 +457,8 @@ function Start-PlatformOwnedProcess {
             if ([string]::IsNullOrEmpty($relative)) { throw [ArgumentException]::new('Capture files require a directory below the filesystem root.') }
             $parent = Open-PlatformDirectory -Root $anchor -RelativePath $relative
             try {
-                $file = Open-PlatformFile -ParentLease $parent -Leaf ([IO.Path]::GetFileName($pair[1])) -Access ReadWrite -CreateMode CreateNew
+                $captureAccess = if ($CaptureProfile -eq 'semantic-bridge') { 'ReadWrite' } else { 'Write' }
+                $file = Open-PlatformFile -ParentLease $parent -Leaf ([IO.Path]::GetFileName($pair[1])) -Access $captureAccess -CreateMode CreateNew
                 if ($pair[0] -eq 'out') { $outLease = $file } else { $errLease = $file }
             } finally { $parent.Dispose() }
         }

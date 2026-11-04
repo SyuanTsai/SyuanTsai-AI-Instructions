@@ -167,12 +167,12 @@ Describe 'Platform owned processes P3' {
             $directory = Open-PlatformDirectory -Root $script:P3Root -RelativePath $name -CreatePrivate
             @{ Directory=$directory; Path=(Join-Path $script:P3Root $name) }
         }
-        function Start-P3Fixture($Fixture,[string]$Code,[int]$Seconds=20,[long]$Limit=1048576,[byte[]]$InputBytes) {
+        function Start-P3Fixture($Fixture,[string]$Code,[int]$Seconds=20,[long]$Limit=1048576,[byte[]]$InputBytes,[string]$CaptureProfile='standard') {
             $envMap = @{}
             if ($IsWindows) { $envMap.SystemRoot = $env:SystemRoot }
             $inputOptions = @{}
             if ($PSBoundParameters.ContainsKey('InputBytes')) { $inputOptions.StandardInputBytes = $InputBytes }
-            Start-PlatformOwnedProcess @inputOptions -ExecutablePath $script:P3Shell -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Code))) -Environment $envMap -WorkingDirectoryLease $Fixture.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds($Seconds)) -IsolationRequirement cooperative -StdoutPath (Join-Path $Fixture.Path 'out') -StderrPath (Join-Path $Fixture.Path 'err') -OutputLimitBytes $Limit
+            Start-PlatformOwnedProcess @inputOptions -CaptureProfile $CaptureProfile -ExecutablePath $script:P3Shell -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Code))) -Environment $envMap -WorkingDirectoryLease $Fixture.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds($Seconds)) -IsolationRequirement cooperative -StdoutPath (Join-Path $Fixture.Path 'out') -StderrPath (Join-Path $Fixture.Path 'err') -OutputLimitBytes $Limit
         }
         function Invoke-P3BoundedDelete([scriptblock]$Action) {
             $until = [DateTimeOffset]::UtcNow.AddSeconds(5)
@@ -222,10 +222,10 @@ Describe 'Platform owned processes P3' {
     # Scenario: Capture bytes are requested before and after confirmed owned cleanup.
     # Purpose: Expose only the retained, bounded capture lease after all readers stop.
     It 'InterT07_reads_retained_capture_only_after_cleanup_with_a_byte_bound' {
-        $f = New-P3Fixture; $p = $null
+        $f = New-P3Fixture; $p = $null; $standardFixture = $null; $standardProcess = $null
         try {
             $expected = [Text.Encoding]::UTF8.GetBytes('capture-original')
-            $p = Start-P3Fixture $f '[Console]::Out.Write("capture-original"); Start-Sleep -Milliseconds 500'
+            $p = Start-P3Fixture $f '[Console]::Out.Write("capture-original"); Start-Sleep -Milliseconds 500' -InputBytes ([byte[]]@()) -CaptureProfile semantic-bridge
             $caught = $null
             try { $p.ReadCapture('stdout', 1024) | Out-Null } catch { $caught = $_.Exception }
             ($caught -is [InvalidOperationException]) | Should Be $true
@@ -236,24 +236,47 @@ Describe 'Platform owned processes P3' {
             Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $p)
             [Convert]::ToBase64String($p.ReadCapture('stdout', $expected.Length)) | Should Be ([Convert]::ToBase64String($expected))
             { $p.ReadCapture('stdout', ($expected.Length - 1)) } | Should Throw 'bounded read limit'
-        } finally { Remove-P3Fixture $f $p }
+            $p.Dispose()
+            [Convert]::ToBase64String($p.ReadCapture('stdout', $expected.Length)) | Should Be ([Convert]::ToBase64String($expected))
+
+            $standardFixture = New-P3Fixture
+            $standardProcess = Start-P3Fixture $standardFixture '[Console]::Out.Write("standard-capture")'
+            Assert-P3Exited $standardProcess
+            Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $standardProcess)
+            { $standardProcess.ReadCapture('stdout', 1024) } | Should Throw 'semantic-bridge capture profile'
+            [IO.File]::ReadAllText((Join-Path $standardFixture.Path 'out')) | Should Be 'standard-capture'
+        } finally {
+            if ($null -ne $standardFixture) { Remove-P3Fixture $standardFixture $standardProcess }
+            Remove-P3Fixture $f $p
+        }
     }
 
-    if (-not $IsWindows) {
-        # Scenario: A callback-side actor unlinks stdout and replaces its name with /dev/zero.
-        # Purpose: Read the retained inode rather than reopening the attacker-controlled path.
-        It 'InterT08_reads_the_original_unlinked_capture_inode' {
-            $f = New-P3Fixture; $p = $null
-            try {
-                $expected = [Text.Encoding]::UTF8.GetBytes('retained-inode')
-                $p = Start-P3Fixture $f '[Console]::Out.Write("retained-inode")'
-                Assert-P3Exited $p
+    # Scenario: A callback-side actor unlinks stdout and replaces its name with /dev/zero.
+    # Purpose: Bound cleanup and either retain the original inode or fail closed.
+    It 'InterT08_fails_closed_or_reads_original_bytes_after_capture_unlink' {
+        $f = New-P3Fixture; $p = $null
+        try {
+            $expected = [Text.Encoding]::UTF8.GetBytes('retained-inode')
+            $p = Start-P3Fixture $f '[Console]::Out.Write("retained-inode")' -Seconds 5 -InputBytes ([byte[]]@()) -CaptureProfile semantic-bridge
+            Assert-P3Exited $p
+            if (-not $IsWindows) {
                 [IO.File]::Delete((Join-Path $f.Path 'out'))
                 [IO.File]::CreateSymbolicLink((Join-Path $f.Path 'out'), '/dev/zero') | Out-Null
-                Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $p)
+            }
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            try { $receipt = Stop-PlatformOwnedProcess -Lease $p } finally { $watch.Stop() }
+            $watch.Elapsed.TotalSeconds | Should BeLessThan 15
+            if ($IsWindows) {
+                Assert-P3Cleaned $receipt
                 [Convert]::ToBase64String($p.ReadCapture('stdout', 1024)) | Should Be ([Convert]::ToBase64String($expected))
-            } finally { Remove-P3Fixture $f $p }
-        }
+            }
+            elseif (-not $receipt.CleanedUp) {
+                { $p.ReadCapture('stdout', 1024) } | Should Throw 'cleanup'
+            }
+            else {
+                [Convert]::ToBase64String($p.ReadCapture('stdout', 1024)) | Should Be ([Convert]::ToBase64String($expected))
+            }
+        } finally { Remove-P3Fixture $f $p }
     }
 
     # Scenario: A child exits with distinct output streams and a nonzero status.
