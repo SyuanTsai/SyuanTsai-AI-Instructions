@@ -232,20 +232,19 @@ Describe 'Internal Skill use approvals' {
 }
 
 Describe 'Committed internal Skill approval integration' {
-    # Scenario: The committed registry is read against the actual reviewed PR18 archive without replacing its inventory.
+    # Scenario: The committed registry is read against the actual renewed SYP-362 archive without replacing its inventory.
     # Purpose: Catch mistyped production pins/digests and protect the retained historical report and drift boundary in normal CI.
     It 'InterT10_ApprovesTheReviewedArchiveAndRejectsDriftWithTheCommittedRegistry' {
         $root = Split-Path -Parent $PSScriptRoot
         . (Join-Path $root 'scripts/Invoke-StandardValidation.ps1') -CandidateRoot $TestDrive -AdapterPath (Join-Path $TestDrive 'unused.json') -ArtifactsRoot $TestDrive -SourceRepository 'https://example.test/internal.git' -SourceRevision ('a' * 40) -BaseRevision ('b' * 40) -DefineFunctionsOnly
-        $archive = Join-Path $TestDrive 'reviewed-pr18.zip'
-        Invoke-WebRequest -Uri 'https://codeload.github.com/SyuanTsai/Skill-Atlassian-Ecosystem/zip/7e8228c393579d5d21ac9c0ad729c7b5d219bab6' -OutFile $archive -TimeoutSec 60
-        (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() | Should -Be '40ee538db714c83b8cf0d97de2dc83e734ef3fc393b6d06f7d86755887bb6681'
+        $archive = Join-Path $TestDrive 'reviewed-syp362.zip'
+        Invoke-WebRequest -Uri 'https://codeload.github.com/SyuanTsai/Skill-Atlassian-Ecosystem/zip/f2a12c6338e9a76dc807c84329ffaae1aaf5bef4' -OutFile $archive -TimeoutSec 60
         $skill = Join-Path $TestDrive 'reviewed-skill'
         $files = @('SKILL.md', 'agents/openai.yaml', 'references/bitbucket-cloud-api.md', 'references/review-actions.md', 'scripts/Invoke-BitbucketReviewActions.ps1')
         $zip = [IO.Compression.ZipFile]::OpenRead($archive)
         try {
             foreach ($path in $files) {
-                $entry = $zip.GetEntry('Skill-Atlassian-Ecosystem-7e8228c393579d5d21ac9c0ad729c7b5d219bab6/skills/review-bitbucket-pull-request/' + $path)
+                $entry = $zip.GetEntry('Skill-Atlassian-Ecosystem-f2a12c6338e9a76dc807c84329ffaae1aaf5bef4/skills/review-bitbucket-pull-request/' + $path)
                 $entry | Should -Not -BeNullOrEmpty
                 $target = Join-Path $skill $path
                 [void][IO.Directory]::CreateDirectory((Split-Path -Parent $target))
@@ -258,6 +257,12 @@ Describe 'Committed internal Skill approval integration' {
             }
         }
         finally { $zip.Dispose() }
+        $approval = (Get-Content -Raw -LiteralPath (Join-Path $root 'docs/standards/internal-source-continuation.json') | ConvertFrom-Json -Depth 100).internalUseApprovals |
+            Where-Object { $_.id -ceq 'atlassian-bitbucket-review-f2a12c6' }
+        $approval | Should -Not -BeNullOrEmpty
+        foreach ($file in $approval.files) {
+            (Get-FileHash -LiteralPath (Join-Path $skill $file.path) -Algorithm SHA256).Hash.ToLowerInvariant() | Should -Be $file.sha256
+        }
         $pins = @('scripts/Invoke-StandardValidation.ps1', 'docs/standards/internal-source-continuation.json', 'docs/standards/schemas/internal-source-continuation-v1.schema.json' | ForEach-Object {
             [pscustomobject]@{ path = $_; sha256 = (Get-FileHash -LiteralPath (Join-Path $root $_) -Algorithm SHA256).Hash.ToLowerInvariant() }
         })
@@ -267,11 +272,12 @@ Describe 'Committed internal Skill approval integration' {
             [pscustomobject]@{ id = 'powershell'; version = $PSVersionTable.PSVersion.ToString(); path = (Join-Path $PSHOME 'pwsh.exe'); sha256 = (Get-FileHash -LiteralPath (Join-Path $PSHOME 'pwsh.exe') -Algorithm SHA256).Hash.ToLowerInvariant() },
             [pscustomobject]@{ id = 'git'; version = $gitVersion; path = $git; sha256 = (Get-FileHash -LiteralPath $git -Algorithm SHA256).Hash.ToLowerInvariant() }
         )
-        $parameters = @{ SkillRoot = $skill; SourceRepository = 'https://github.com/SyuanTsai/Skill-Atlassian-Ecosystem.git'; SourceRevision = '7e8228c393579d5d21ac9c0ad729c7b5d219bab6'; SkillId = 'review-bitbucket-pull-request'; Purpose = 'local-pr-review'; ExpectedAuthorityFiles = $pins; ToolInventory = $tools }
+        $parameters = @{ SkillRoot = $skill; SourceRepository = 'https://github.com/SyuanTsai/Skill-Atlassian-Ecosystem.git'; SourceRevision = 'f2a12c6338e9a76dc807c84329ffaae1aaf5bef4'; SkillId = 'review-bitbucket-pull-request'; Purpose = 'local-pr-review'; ExpectedAuthorityFiles = $pins; ToolInventory = $tools }
         $before = (Get-FileHash -LiteralPath (Join-Path $root 'docs/standards/internal-source-continuation.json') -Algorithm SHA256).Hash
         $decision = Resolve-StandardValidationInternalSkillUse @parameters
         $decision.status | Should -Be 'approved'
-        $decision.contentSha256 | Should -Be '056b8e520460e6612b10c8c9248fd7c217c6e4708ca65f3bc6c05b98ee84dec9'
+        $decision.approvalId | Should -Be 'atlassian-bitbucket-review-f2a12c6'
+        $decision.contentSha256 | Should -Be 'b373f844d8c0a268f39fc1e613704cb22d3ce05136109d55c52096a9b6322e5c'
         $decision.reviewedSourceRevision | Should -Be $parameters.SourceRevision
         $decision.retainedFindings[0].reportSha256 | Should -Be '55c41e494fe318fcb0365c1addc1dd359162c1798ac67e12b8155caa2c7b16d0'
         $decision.retainedFindings[0].severity | Should -Be 'MEDIUM'
