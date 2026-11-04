@@ -170,9 +170,10 @@ Describe 'Platform owned processes P3' {
         function Start-P3Fixture($Fixture,[string]$Code,[int]$Seconds=20,[long]$Limit=1048576,[byte[]]$InputBytes,[string]$CaptureProfile='standard') {
             $envMap = @{}
             if ($IsWindows) { $envMap.SystemRoot = $env:SystemRoot }
-            $inputOptions = @{}
-            if ($PSBoundParameters.ContainsKey('InputBytes')) { $inputOptions.StandardInputBytes = $InputBytes }
-            Start-PlatformOwnedProcess @inputOptions -CaptureProfile $CaptureProfile -ExecutablePath $script:P3Shell -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Code))) -Environment $envMap -WorkingDirectoryLease $Fixture.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds($Seconds)) -IsolationRequirement cooperative -StdoutPath (Join-Path $Fixture.Path 'out') -StderrPath (Join-Path $Fixture.Path 'err') -OutputLimitBytes $Limit
+            $processOptions = @{ CaptureProfile = $CaptureProfile }
+            if ($PSBoundParameters.ContainsKey('InputBytes')) { $processOptions.StandardInputBytes = $InputBytes }
+            if ($CaptureProfile -ceq 'standard') { $processOptions.OutputLimitBytes = $Limit }
+            Start-PlatformOwnedProcess @processOptions -ExecutablePath $script:P3Shell -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Code))) -Environment $envMap -WorkingDirectoryLease $Fixture.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds($Seconds)) -IsolationRequirement cooperative -StdoutPath (Join-Path $Fixture.Path 'out') -StderrPath (Join-Path $Fixture.Path 'err')
         }
         function Invoke-P3BoundedDelete([scriptblock]$Action) {
             $until = [DateTimeOffset]::UtcNow.AddSeconds(5)

@@ -89,7 +89,7 @@ function Get-PesterShardCanonicalHash {
 function Import-PesterShardRuntime {
     param([string]$Root, [Collections.Generic.List[IDisposable]]$Guards)
     # Trust anchor belongs to this reviewed entry point, never to a candidate manifest.
-    $manifestSha256 = '970e1d959418796270d6ee33fa561fe9ae0b8a6acc89e6b5ba4deb7577ef49c9'
+    $manifestSha256 = '8a8b9f4c5f41410659a8307ff3bcf53de7ecf3590e2e6237a8a2cb203f2d1fb3'
     $manifestPath = Join-Path $Root 'platform-runtime.psd1'
     Assert-PesterShardPathAncestorsNoReparse $manifestPath 'runtime manifest'
     if ((Get-PesterShardCanonicalHash ([IO.File]::ReadAllBytes($manifestPath))) -cne $manifestSha256) { throw 'INVALID|Untrusted platform runtime manifest.' }
@@ -115,6 +115,9 @@ function Import-PesterShardRuntime {
     # malicious writer can replace source between hashing and this read; external
     # isolation is required. The later P2 recheck does not close that interval.
     Add-Type -LiteralPath @($entries | Where-Object { $_.Path.EndsWith('.cs') } | ForEach-Object { Join-Path $Root $_.Path }) -ErrorAction Stop
+    $runtimeRoot = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($manifestPath))
+    [SyuanTsai.AIInstructions.PlatformRuntime.PlatformRuntimeBuild]::Seal(
+        [SyuanTsai.AIInstructions.PlatformRuntime.PlatformRuntimeBuild]::ComputeSourceFingerprint($runtimeRoot))
     $platform = [SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetOperatingSystem()
     foreach ($entry in $entries) {
         $filePath = [IO.Path]::GetFullPath((Join-Path $Root $entry.Path))

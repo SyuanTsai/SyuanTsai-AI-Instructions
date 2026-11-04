@@ -108,42 +108,22 @@ $nativeSourcePaths = @(
     'platform/WindowsProcess.cs'
 )
 $nativeSourceFullPaths = @($nativeSourcePaths | ForEach-Object { Join-Path $PSScriptRoot $_ })
-$fingerprintStream = [IO.MemoryStream]::new()
-$fingerprintUtf8 = [Text.UTF8Encoding]::new($false, $true)
-try {
-    foreach ($index in 0..($nativeSourcePaths.Count - 1)) {
-        [byte[]]$sourceBytes = [IO.File]::ReadAllBytes($nativeSourceFullPaths[$index])
-        if ($sourceBytes.Length -ge 3 -and $sourceBytes[0] -eq 0xef -and $sourceBytes[1] -eq 0xbb -and $sourceBytes[2] -eq 0xbf) {
-            throw [IO.InvalidDataException]::new('Platform runtime source files must be UTF-8 without BOM.')
-        }
-        [byte[]]$canonicalBytes = $fingerprintUtf8.GetBytes($fingerprintUtf8.GetString($sourceBytes).Replace("`r`n", "`n"))
-        [byte[]]$prefixBytes = $fingerprintUtf8.GetBytes($nativeSourcePaths[$index] + "`n" + $canonicalBytes.Length.ToString([Globalization.CultureInfo]::InvariantCulture) + "`n")
-        $fingerprintStream.Write($prefixBytes, 0, $prefixBytes.Length)
-        $fingerprintStream.Write($canonicalBytes, 0, $canonicalBytes.Length)
-    }
-    $fingerprintSha256 = [Security.Cryptography.SHA256]::Create()
-    try {
-        $platformRuntimeSourceFingerprint = ([BitConverter]::ToString($fingerprintSha256.ComputeHash($fingerprintStream.ToArray()))).Replace('-','').ToLowerInvariant()
-    }
-    finally { $fingerprintSha256.Dispose() }
-}
-finally { $fingerprintStream.Dispose() }
 
 if ($null -eq ('SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative' -as [type])) {
     Add-Type -LiteralPath $nativeSourceFullPaths -ErrorAction Stop
-    [SyuanTsai.AIInstructions.PlatformRuntime.PlatformRuntimeBuild]::Seal($platformRuntimeSourceFingerprint)
-}
-elseif ($null -eq ('SyuanTsai.AIInstructions.PlatformRuntime.UnixNative' -as [type]) -or
-        $null -eq ('SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative' -as [type]) -or
-        $null -eq ('SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease' -as [type])) {
-    throw [IO.InvalidDataException]::new('A pre-P3 native assembly is already loaded. Import this verified runtime in a fresh PowerShell process.')
+    [SyuanTsai.AIInstructions.PlatformRuntime.PlatformRuntimeBuild]::Seal(
+        [SyuanTsai.AIInstructions.PlatformRuntime.PlatformRuntimeBuild]::ComputeSourceFingerprint($PSScriptRoot))
 }
 else {
     $loadedBuildType = 'SyuanTsai.AIInstructions.PlatformRuntime.PlatformRuntimeBuild' -as [type]
-    $loadedFingerprint = if ($null -eq $loadedBuildType) { $null } else { [string]$loadedBuildType.GetProperty('Fingerprint').GetValue($null) }
+    $loadedFingerprintProperty = if ($null -eq $loadedBuildType) { $null } else { $loadedBuildType.GetProperty('Fingerprint') }
+    $loadedFingerprint = if ($null -eq $loadedFingerprintProperty) { $null } else { [string]$loadedFingerprintProperty.GetValue($null) }
     if ($null -eq $loadedBuildType -or
-        [string]::IsNullOrEmpty($loadedFingerprint) -or
-        $loadedFingerprint -cne $platformRuntimeSourceFingerprint) {
+        [string]::IsNullOrEmpty($loadedFingerprint)) {
+        throw [InvalidOperationException]::new('INVALID|A different platform runtime build is already loaded in this process; start a new PowerShell process.')
+    }
+    $platformRuntimeSourceFingerprint = [SyuanTsai.AIInstructions.PlatformRuntime.PlatformRuntimeBuild]::ComputeSourceFingerprint($PSScriptRoot)
+    if ($loadedFingerprint -cne $platformRuntimeSourceFingerprint) {
         throw [InvalidOperationException]::new('INVALID|A different platform runtime build is already loaded in this process; start a new PowerShell process.')
     }
 }
