@@ -4530,11 +4530,21 @@ public sealed class C245NonCooperativeStream : Stream {
         $platformException = @($policy.stages | Where-Object { [string]$_.id -ceq 'skillspector-static' })[0].platformUnavailableException
         Assert-ExactStringSequence $platformException.eligiblePlatforms @('linux', 'macos') 'SkillSpector platform exceptions must exclude Windows.'
         Assert-True ([bool]$platformException.windowsRequired) 'SkillSpector must remain required on Windows.'
-        Assert-ExactStringSequence $platformException.requiredEvidence @('platform', 'runtimeIdentity', 'toolIdentity', 'attemptedCommand', 'rawResult', 'failureKind', 'incompatibilityReason') 'Platform-unavailable evidence must bind the measured platform, identities, command, raw result, kind, and reason.'
-        Assert-ExactStringSequence $platformException.rejectedFailureKinds @('scan-failure', 'missing-configuration', 'timeout', 'findings') 'Ordinary scanner failures must not become platform exceptions.'
+        Assert-Equal $platformException.nativeProbeContract 'runner-native-skillspector-probe-v1' 'Native probe authorization must use the versioned runner contract.'
+        Assert-ExactStringSequence $platformException.requiredEvidence @('platform', 'runtimeIdentity', 'toolIdentity', 'attemptedCommand', 'rawResult', 'failureKind', 'incompatibilityReason', 'nativeProbe') 'Platform-unavailable evidence must bind the measured platform, identities, command, raw result, kind, and reason.'
+        Assert-ExactStringSequence $platformException.rejectedFailureKinds @('scan-failure', 'missing-configuration', 'timeout', 'findings', 'missing-package', 'download-failure', 'cancelled', 'output-truncated', 'output-quota', 'cleanup-uncertain', 'unclassified-exit') 'Ordinary scanner failures must not become platform exceptions.'
         Assert-False ([bool]$platformException.scannerPassed) 'A platform exception must not claim scanner PASS.'
         Assert-False ([bool]$platformException.coverageComplete) 'A platform exception must not claim complete coverage.'
         Assert-False ([bool]$platformException.releaseEligible) 'A platform exception must not authorize release.'
+        foreach ($schemaName in @('standard-validation-evidence-v1.schema.json','standard-core-evidence-v2.schema.json')) {
+            $probeSchema=Get-Content -Raw -Encoding UTF8 (Join-Path (Split-Path -Parent $PSScriptRoot) ('docs/standards/schemas/'+$schemaName)) | ConvertFrom-Json
+            @($probeSchema.'$defs'.platformUnavailableEvidence.required) -contains 'nativeProbe' | Should Be $true
+            foreach ($example in @($probeSchema.'$defs'.nativeProbe.examples)) {
+                Test-AuthorityJsonSchemaValue -Value $example -Schema $probeSchema.'$defs'.nativeProbe -RootSchema $probeSchema | Should Be $true
+                $example.probeExecuted=$false
+                Test-AuthorityJsonSchemaValue -Value $example -Schema $probeSchema.'$defs'.nativeProbe -RootSchema $probeSchema | Should Be $false
+            }
+        }
 
         $windowsExemption = Copy-TestJsonObject -Value $policy
         $windowsExemption.stages[3].platformUnavailableException.eligiblePlatforms = @('windows', 'linux', 'macos')
@@ -5645,8 +5655,8 @@ Describe 'SYP352 cross-platform and three-AI Standard contract' -Tag 'SYP352' {
         $safety | Should -Match '\*\*MUST NOT\*\* 只寫 `unix` 或宣稱未提供的能力'
     }
 
-    # Scenario: SkillSpector is waived before the runner can independently prove a native platform incompatibility.
-    # Purpose: Keep every platform required until SYP-353 supplies the runner-observed evidence contract, then constrain that exception to the exact frozen execution.
+    # Scenario: SkillSpector exceptions require an independent native observation and matching retained evidence.
+    # Purpose: Constrain the exception to the frozen native execution and keep Windows and successful probes mandatory.
     It 'UnitT52g_limits_SkillSpector_platform_exceptions_to_measured_non_Windows_unavailability' {
         $standardPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'docs\standards\skill-repository-standard.md'
         $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $standardPath
@@ -5668,13 +5678,18 @@ Describe 'SYP352 cross-platform and three-AI Standard contract' -Tag 'SYP352' {
         $availability | Should -Match 'frozen command／arguments digest'
         $availability | Should -Match '已驗證的 tool／runtime receipt identity'
         $availability | Should -Match '同一 event.*stdout／stderr／exit 或 startup failure'
-        $availability | Should -Match 'SYP-353.*完成前.*所有平台.*必要.*`platform-unavailable` 一律 `BLOCK`'
+        $availability | Should -Match 'SYP-353 P5.4.*runner-native-skillspector-probe-v1'
+        $availability | Should -Match 'cleanup 不確定.*未知 signature.*MUST BLOCK'
+        $availability | Should -Match 'classifier fixture 不構成平台支援或不支援的證據'
+        $availability | Should -Match 'nativeProbe.probeExecuted=true'
+        $availability | Should -Match 'Probe 成功.*MUST.*正常 Static'
         $availability | Should -Match 'platform-unavailable.*\*\*MUST NOT\*\* 偽報 scanner PASS、完整 coverage 或已執行'
-        $advanced | Should -Match 'runner-observed contract.*SYP-353.*non-Windows `platform-unavailable`.*Repository Tests'
-        $advanced | Should -Match 'SYP-353 完成前.*Stage 4 \*\*MUST\*\* 為 `passed`.*`platform-unavailable`.*\*\*MUST BLOCK\*\*'
-        $matrix | Should -Match 'SYP-353 runner-observed native compatibility contract.*Before that contract is complete.*every platform.*SkillSpector Static required.*`platform-unavailable`.*MUST BLOCK'
-        $validationContract.evidence.skillSpectorPlatformUnavailable.authorizationState | Should -Be 'blocked-until-syp353-runner-observed-native-compatibility-contract'
-        $coreContract.sourceValidation.platformUnavailableAuthorization | Should -Be 'blocked-until-syp353-runner-observed-native-compatibility-contract'
+        $advanced | Should -Match 'runner-observed contract.*SYP-353 P5.4.*non-Windows `platform-unavailable`.*Repository Tests'
+        $advanced | Should -Match 'Stage 4 \*\*MUST\*\* be `passed` or a runner-observed.*`platform-unavailable`.*unbound exceptions \*\*MUST BLOCK\*\*'
+        $matrix | Should -Match 'SYP-353 P5.4 runner-observed native compatibility contract.*Without those runner observations every `platform-unavailable` result MUST BLOCK.*Windows never qualifies'
+        $validationContract.evidence.skillSpectorPlatformUnavailable.authorizationState | Should -Be 'runner-native-skillspector-probe-v1'
+        $coreContract.sourceValidation.platformUnavailableAuthorization | Should -Be 'runner-native-skillspector-probe-v1'
+
     }
 
     # Scenario: Environment signals conflict, credentials silently fall back, or real site mappings are committed to the Standard.

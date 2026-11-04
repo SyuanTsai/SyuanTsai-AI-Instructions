@@ -3898,6 +3898,17 @@ else {
         $launcher.runtimePath = $resolved.nodePath
         $launcher.runtimeSha256 = $resolved.nodeSha256
     }
+    if ($ToolName -ceq 'skillspector' -and $Install -and $resolved.consoleEntryPoint -ceq 'skillspector.cli:app') {
+        # Identity only: the runner owns execution, classification and exception
+        # authorization. This launcher digest is covered by the tool receipt.
+        $launcher.kind = 'skillspector-python'
+        $launcher.shimPath = $resolved.executablePath
+        $launcher.shimSha256 = $resolved.executableSha256
+        $launcher.payloadPath = $resolved.executablePath
+        $launcher.payloadSha256 = $resolved.executableSha256
+        $launcher.runtimePath = Join-Path ([IO.Path]::GetDirectoryName($resolved.executablePath)) $(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'python.exe' } else { 'python' })
+        $launcher.runtimeSha256 = Get-FileSha256 -Path $launcher.runtimePath
+    }
     $result = [ordered]@{
         schemaVersion = 1
         resolutionRunId = $script:ResolverRunId

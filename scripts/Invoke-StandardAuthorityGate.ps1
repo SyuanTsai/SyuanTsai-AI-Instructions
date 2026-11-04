@@ -976,19 +976,20 @@ function Assert-AuthorityValidationSecurityGate {
             $exception = Get-AuthorityRequiredProperty -Object $stage -Name 'platformUnavailableException' -Context 'Validation/security gate SkillSpector platform exception'
             Assert-AuthorityJsonPropertySet -Object $exception -Expected @(
                 'status', 'eligiblePlatforms', 'windowsRequired', 'requiredEvidence', 'acceptedFailureKinds',
-                'rejectedFailureKinds', 'scannerPassed', 'coverageComplete', 'releaseEligible'
+                'rejectedFailureKinds', 'scannerPassed', 'coverageComplete', 'releaseEligible', 'nativeProbeContract'
             ) -Context 'Validation/security gate SkillSpector platform exception'
+            Assert-AuthorityExactString -Value $exception.nativeProbeContract -Expected 'runner-native-skillspector-probe-v1' -Context 'SkillSpector native probe contract'
             Assert-AuthorityExactString -Value $exception.status -Expected 'platform-unavailable' -Context 'SkillSpector platform exception status'
             Assert-AuthorityExactStringSequence -Value $exception.eligiblePlatforms -Expected @('linux', 'macos') -Context 'SkillSpector platform exception eligible platforms'
             Assert-AuthorityExactBoolean -Value $exception.windowsRequired -Expected $true -Context 'SkillSpector Windows requirement'
             Assert-AuthorityExactStringSequence -Value $exception.requiredEvidence -Expected @(
-                'platform', 'runtimeIdentity', 'toolIdentity', 'attemptedCommand', 'rawResult', 'failureKind', 'incompatibilityReason'
+                'platform', 'runtimeIdentity', 'toolIdentity', 'attemptedCommand', 'rawResult', 'failureKind', 'incompatibilityReason', 'nativeProbe'
             ) -Context 'SkillSpector platform exception required evidence'
             Assert-AuthorityExactStringSequence -Value $exception.acceptedFailureKinds -Expected @(
                 'runtime-unsupported', 'tool-platform-unsupported', 'executable-format-unsupported'
             ) -Context 'SkillSpector platform exception accepted failure kinds'
             Assert-AuthorityExactStringSequence -Value $exception.rejectedFailureKinds -Expected @(
-                'scan-failure', 'missing-configuration', 'timeout', 'findings'
+                'scan-failure', 'missing-configuration', 'timeout', 'findings', 'missing-package', 'download-failure', 'cancelled', 'output-truncated', 'output-quota', 'cleanup-uncertain', 'unclassified-exit'
             ) -Context 'SkillSpector platform exception rejected failure kinds'
             Assert-AuthorityExactBoolean -Value $exception.scannerPassed -Expected $false -Context 'SkillSpector platform exception scanner result'
             Assert-AuthorityExactBoolean -Value $exception.coverageComplete -Expected $false -Context 'SkillSpector platform exception coverage result'
@@ -3165,7 +3166,7 @@ function Assert-AuthorityLauncherReceipt {
     $expectedNames = @('kind', 'shimPath', 'shimSha256', 'payloadPath', 'payloadSha256', 'runtimePath', 'runtimeSha256')
     Assert-AuthorityJsonPropertySet -Object $launcher -Expected $expectedNames -Context "$Context launcher"
     $kind = Get-AuthorityRequiredProperty -Object $launcher -Name 'kind' -Context "$Context launcher"
-    if ($kind -isnot [string] -or [string]$kind -notin @('direct-executable', 'windows-cmd-shim', 'unix-node-shim')) {
+    if ($kind -isnot [string] -or [string]$kind -notin @('direct-executable', 'windows-cmd-shim', 'unix-node-shim', 'skillspector-python')) {
         throw "$Context launcher kind is not approved."
     }
     if ($kind -ceq 'direct-executable') {
@@ -3176,9 +3177,9 @@ function Assert-AuthorityLauncherReceipt {
         }
         return
     }
-    if ($ToolName -cne 'skill-tools') { throw "$Context package shim is only approved for skill-tools." }
+    if ($ToolName -cne 'skill-tools' -and -not ($ToolName -ceq 'skillspector' -and $kind -ceq 'skillspector-python')) { throw "$Context package shim is only approved for skill-tools." }
     $windowsShim = $kind -ceq 'windows-cmd-shim'
-    if ($windowsShim -ne ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)) {
+    if ($kind -cne 'skillspector-python' -and $windowsShim -ne ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)) {
         throw "$Context launcher kind does not match the execution platform."
     }
     $shimPath = Assert-AuthorityLauncherFileIdentity `
@@ -3201,6 +3202,14 @@ function Assert-AuthorityLauncherReceipt {
     }
     Assert-AuthorityPathWithinRoot -Path $shimPath -Root $InstallRoot -Context "$Context launcher shim"
     Assert-AuthorityPathWithinRoot -Path $payloadPath -Root $InstallRoot -Context "$Context launcher payload"
+    if ($kind -ceq 'skillspector-python') {
+        $expectedRuntime = Join-Path ([IO.Path]::GetDirectoryName($ExecutablePath)) $(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'python.exe' } else { 'python' })
+        if ($payloadPath -cne $shimPath -or $runtimePath -cne $expectedRuntime -or
+            [string]$launcher.payloadSha256 -cne [string]$launcher.shimSha256 -or
+            [string]$Receipt.consoleEntryPoint -cne 'skillspector.cli:app') { throw 'SkillSpector native launcher does not bind the approved installed entry point and runtime.' }
+        Assert-AuthorityPathWithinRoot -Path $runtimePath -Root $InstallRoot -Context 'SkillSpector runtime'
+        return
+    }
     if ([IO.Path]::GetFileName($runtimePath).ToLowerInvariant() -notin @('node', 'node.exe', 'nodejs', 'nodejs.exe')) {
         throw "$Context launcher runtime is not the approved Node runtime."
     }
