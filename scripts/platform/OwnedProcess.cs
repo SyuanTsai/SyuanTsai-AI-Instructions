@@ -123,6 +123,9 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private OwnedProcessLease(DateTimeOffset until, long maximum, string profile)
         { deadline = until; limit = maximum; stderrLimit = maximum; captureProfile = profile; }
 
+        private OwnedProcessLease(DateTimeOffset until, long maximum)
+            : this(until, maximum, "standard") { }
+
         public static OwnedProcessLease Start(string executablePath, object executableLease,
             string[] arguments, IDictionary environment, object workingDirectory,
             DateTimeOffset deadline, string isolationRequirement, object stdoutLease,
