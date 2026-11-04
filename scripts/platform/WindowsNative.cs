@@ -128,6 +128,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             catch { handle.Dispose(); throw; }
         }
         public static void CreatePrivateDirectory(string path, string sddl)
+        { CreatePrivateDirectory(path, sddl, false); }
+        public static void CreatePrivateDirectory(string path, string sddl, bool createOnly)
         {
             IntPtr descriptor; uint size; Check(ParseDescriptor(sddl, 1, out descriptor, out size), "ParseSecurityDescriptor");
             try
@@ -136,7 +138,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 if (!CreateDirectory(path, ref attributes))
                 {
                     int error = Marshal.GetLastWin32Error();
-                    if (error != 183) throw new PlatformWin32Exception("CreateDirectoryW", error);
+                    if (createOnly || error != 183) throw new PlatformWin32Exception("CreateDirectoryW", error);
                 }
             }
             finally { LocalFree(descriptor); }

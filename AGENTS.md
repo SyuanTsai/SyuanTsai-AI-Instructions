@@ -107,7 +107,7 @@ bootstrap 對受管理檔案的判斷以 manifest 與內容 hash 為準。目標
 5. 確認各版本的規則、例外與載入條件一致；同步更新 `ai-instructions-contract.json` 與同一行的 `ai-route`／`ai-invariant` marker，並執行 `tests/ai-instructions-contract.Tests.ps1`。
 6. 依「安全範例與個人設定」檢查 working tree、staged diff 與可達歷史。
 7. 修改 Catalog 契約時，同步檢查 schemas、examples、parser、README 與 `tests/skills-catalog-contract.Tests.ps1`，並執行該 Pester test file。
-8. 修改 Standard normative authority、validation tool policy／resolver 或 authority workflow 時，執行 `tests/skill-repository-standard.Tests.ps1`、`tests/skill-repository-workflows.Tests.ps1` 與 `tests/standard-validation-resolver-hardening.Tests.ps1`，並確認 `.github/workflows/standards-conformance.yml` 與 Ruleset-required Composition context 都呼叫同一個 authority gate。
+8. 修改 Standard normative authority、validation tool policy／resolver 或 authority workflow 時，執行 `docs/standards/validation-security-gate.json` 的 `ordinaryAuthority.testPaths` 六檔（與 ordinary gate、workflow exclusions 一致），另依 owner 執行 runner／platform-runtime regression；以下三檔是必須同步維護並執行的 authority regression，不是 ordinary gate 的完整 inventory： `tests/skill-repository-standard.Tests.ps1`、`tests/skill-repository-workflows.Tests.ps1` 與 `tests/standard-validation-resolver-hardening.Tests.ps1`，並確認 `.github/workflows/standards-conformance.yml` 與 Ruleset-required Composition context 都呼叫同一個 authority gate。
 9. 執行 `git diff --check` 並檢查差異，避免遺漏同步或意外變更。
 10. 回報修改檔案、同步範圍與驗證方式；若刻意不同步，必須說明原因。
 

@@ -141,9 +141,9 @@ jobs:
           Remove-Module Pester -Force -ErrorAction SilentlyContinue
           $pester = Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
           if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in the test step.' }
-          $authorityScript = Get-Content -LiteralPath './scripts/Invoke-StandardAuthorityGate.ps1' -Raw
-          $authorityMatches = [regex]::Matches($authorityScript, '(?m)^\s*\(Join-Path \$repositoryRoot ''(tests/[^'']+\.Tests\.ps1)''\)')
-          $authorityNames = @($authorityMatches | ForEach-Object { [string]$_.Groups[1].Value })
+          . ./scripts/Invoke-StandardAuthorityGate.ps1 -DefineFunctionsOnly
+          $inventoryRoot = [IO.Path]::GetFullPath((Get-Location).Path)
+          $authorityNames = @(Get-AuthorityTestPaths -Root $inventoryRoot | ForEach-Object { [IO.Path]::GetRelativePath($inventoryRoot, $_).Replace('\', '/') })
           $expectedAuthorityNames = @(
             'tests/internal-source-continuation.Tests.ps1',
             'tests/skill-repository-standard.Tests.ps1',

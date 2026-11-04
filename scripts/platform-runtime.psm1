@@ -533,6 +533,30 @@ function Test-PlatformOwnedProcess {
     [pscustomobject]@{ status=$status; evidence=[pscustomobject]$evidence }
 }
 function Resolve-PlatformPowerShell { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Policy, [Parameter(Mandatory = $true)] $DestinationLease, [Parameter(Mandatory = $true)] $OfflineCache, $ReleaseMetadata) Invoke-PlatformAdapter 'Resolve-PlatformPowerShell' $PSBoundParameters }
+function Resolve-PlatformPhysicalPath {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    & $script:PlatformRuntimePreparationModule.ExportedCommands['Resolve-PlatformPhysicalPath'] @PSBoundParameters
+}
+function Initialize-PlatformAuthorityPester {
+    param([Parameter(Mandatory=$true)][string]$ModulePath,[Parameter(Mandatory=$true)][string]$Executable)
+    & $script:PlatformRuntimePreparationModule.ExportedCommands['Initialize-PlatformAuthorityPester'] @PSBoundParameters
+}
+function Assert-PlatformAuthorityPester {
+    param([Parameter(Mandatory=$true)]$Receipt)
+    & $script:PlatformRuntimePreparationModule.ExportedCommands['Assert-PlatformAuthorityPester'] @PSBoundParameters
+}
+function New-PlatformPrivateRoot {
+    param([Parameter(Mandatory=$true)][string]$Parent,[Parameter(Mandatory=$true)][string]$Leaf)
+    & $script:PlatformRuntimePreparationModule.ExportedCommands['New-PlatformPrivateRoot'] @PSBoundParameters
+}
+function Invoke-PlatformPreparationCommand {
+    param([Parameter(Mandatory=$true)][string]$Command,[AllowEmptyCollection()][string[]]$Arguments=@(),
+        [Parameter(Mandatory=$true)][Collections.IDictionary]$Environment,
+        [Parameter(Mandatory=$true)][string]$WorkingDirectory,
+        [ValidateRange(1,3600000)][int]$TimeoutMilliseconds=900000,
+        $PreparationReceipt)
+    & $script:PlatformRuntimePreparationModule.ExportedCommands['Invoke-PlatformPreparationCommand'] @PSBoundParameters
+}
 function Initialize-PlatformPester { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Policy, [Parameter(Mandatory = $true)] $RuntimeReceipt, [Parameter(Mandatory = $true)] $DestinationLease) Invoke-PlatformAdapter 'Initialize-PlatformPester' $PSBoundParameters }
 
 function Set-PlatformProcessEnvironment {
@@ -560,6 +584,11 @@ Export-ModuleMember -Function @(
     'Start-PlatformOwnedProcess',
     'Stop-PlatformOwnedProcess',
     'Resolve-PlatformPowerShell',
+    'Resolve-PlatformPhysicalPath',
+    'Initialize-PlatformAuthorityPester',
+    'Assert-PlatformAuthorityPester',
+    'New-PlatformPrivateRoot',
+    'Invoke-PlatformPreparationCommand',
     'Initialize-PlatformPester',
     'Set-PlatformProcessEnvironment'
 )

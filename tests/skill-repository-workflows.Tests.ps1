@@ -33,6 +33,74 @@ Describe 'SYP258 explicit source validation contract' {
     }
 }
 
+Describe 'SYP353 policy and workflow authority inventory parity' {
+    # Scenario: Core executes its actual non-authority workflow step against six authority files and one ordinary file.
+    # Purpose: Exercise inventory acquisition and exclusion before the bounded-runner handoff; source-text resemblance cannot satisfy this regression.
+    It 'InterT20_executes_core_workflow_inventory_and_excludes_exactly_the_gate_paths' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $fixture=Join-Path $TestDrive 'core-inventory'
+        foreach($directory in @('scripts','tests','docs/standards')){[void][IO.Directory]::CreateDirectory((Join-Path $fixture $directory))}
+        Copy-Item -LiteralPath (Join-Path $root 'scripts/Invoke-StandardAuthorityGate.ps1') -Destination (Join-Path $fixture 'scripts/Invoke-StandardAuthorityGate.ps1')
+        Copy-Item -LiteralPath (Join-Path $root 'docs/standards/validation-security-gate.json') -Destination (Join-Path $fixture 'docs/standards/validation-security-gate.json')
+        . (Join-Path $root 'scripts/Invoke-StandardAuthorityGate.ps1') -DefineFunctionsOnly
+        $expected=@(Get-AuthorityTestPaths -Root $fixture)
+        $expected.Count | Should Be 6
+        foreach($path in $expected){[IO.File]::WriteAllText($path,'# discovery fixture')}
+        [IO.File]::WriteAllText((Join-Path $fixture 'tests/ordinary.Tests.ps1'),'# ordinary discovery fixture')
+        $stub=@'
+param($PesterModulePath,$PesterVersion,$ExpectedSkippedCount,$ShardPartitionCount,$ShardPartitionIndex,$OuterTimeoutSeconds,$TestRoot,$EvidenceRoot,[string[]]$SelectedTestFileNames,$SummaryOutputPath)
+$value=@{selected=@($SelectedTestFileNames);skipped=$ExpectedSkippedCount;authority=@(Get-AuthorityTestPaths -Root (Get-Location).Path)}
+[IO.File]::WriteAllText($SummaryOutputPath,($value|ConvertTo-Json -Depth 5))
+'@
+        [IO.File]::WriteAllText((Join-Path $fixture 'scripts/Invoke-PesterShardProcess.ps1'),$stub)
+        # Copy the reviewed YAML literal block verbatim to a child script. Do
+        # not evaluate reconstructed source or unload Pester in this process.
+        $lines=[IO.File]::ReadAllLines((Join-Path $root '.github/workflows/pr8-powershell-validation.yml'))
+        $step=@(0..($lines.Length-1)|Where-Object {$lines[$_] -ceq '      - name: Run the non-authority Pester suite once'})
+        $step.Count | Should Be 1
+        $index=$step[0]+1
+        while($index -lt $lines.Length -and $lines[$index] -cne '        run: |'){$index++}
+        ($index -lt $lines.Length) | Should Be $true
+        $body=[Collections.Generic.List[string]]::new()
+        for($index++;$index -lt $lines.Length;$index++){
+            if($lines[$index].StartsWith('          ')){$body.Add($lines[$index].Substring(10))}
+            elseif([string]::IsNullOrWhiteSpace($lines[$index])){$body.Add('')}
+            else {break}
+        }
+        $body.Count | Should BeGreaterThan 0
+        $stepPath=Join-Path $fixture 'workflow-step.ps1'
+        [IO.File]::WriteAllLines($stepPath,$body,[Text.UTF8Encoding]::new($false))
+        $executable=if($PSVersionTable.PSEdition -ceq 'Core'){[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName}else{(Get-Command pwsh.exe -CommandType Application -ErrorAction Stop).Source}
+        $previousTemp=$env:RUNNER_TEMP
+        Push-Location $fixture
+        try {
+            $env:RUNNER_TEMP=$fixture
+            & $executable -NoLogo -NoProfile -NonInteractive -File $stepPath
+            $LASTEXITCODE | Should Be 0
+        } finally {$env:RUNNER_TEMP=$previousTemp;Pop-Location}
+        $summary=Get-Content -Raw -Encoding UTF8 (Join-Path $fixture 'windows-core-pester-summary.json')|ConvertFrom-Json
+        @($summary.selected).Count | Should Be 1
+        $summary.selected[0] | Should Be 'ordinary.Tests.ps1'
+        $summary.skipped | Should Be 5
+        @($summary.authority).Count | Should Be 6
+        (@($summary.authority) -join '|') | Should Be ($expected -join '|')
+    }
+
+    # Scenario: The gate, normative policy and Core exclusions name their retained tests.
+    # Purpose: Prevent the prior five/six drift without adding a second authority execution.
+    It 'UnitT10_matches_the_six_policy_paths_to_core_exclusions' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $policy=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/validation-security-gate.json')|ConvertFrom-Json
+        $workflow=Get-Content -Raw -Encoding UTF8 (Join-Path $root '.github/workflows/pr8-powershell-validation.yml')
+        . (Join-Path $root 'scripts/Invoke-StandardAuthorityGate.ps1') -DefineFunctionsOnly
+        $actual=@(Get-AuthorityTestPaths -Root $root -Policy $policy)
+        $actual.Count | Should Be 6
+        foreach($path in $policy.ordinaryAuthority.testPaths){$workflow.Contains("'$path'") | Should Be $true}
+        $policy.ordinaryAuthority.testPaths=@($policy.ordinaryAuthority.testPaths[1],$policy.ordinaryAuthority.testPaths[0]) + @($policy.ordinaryAuthority.testPaths|Select-Object -Skip 2)
+        {Get-AuthorityTestPaths -Root $root -Policy $policy} | Should Throw 'exact ordered sequence'
+    }
+}
+
 Describe 'Agent Skill authority workflow contract' {
     BeforeAll {
         $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
@@ -431,7 +499,7 @@ jobs:
         Assert-Match $workflows.Core 'Get-ChildItem -LiteralPath \$testRoot -Filter' 'Windows Core must discover the resolver hardening regression through its complete test-file inventory.'
         $normalMain = $gate.Substring($gate.IndexOf('if ($BindingOnly) {'))
         Assert-NotMatch $normalMain 'ExpectedGoRuntimeVersion|GoCommandPath|STANDARD_GO_|Resolve-StandardValidationTool|Resolve-PythonWheelClosure|New-AuthorityRunOwnedToolRoot|Invoke-AuthorityExternalCommand|skill-validator|skill-tools|SkillSpector|STANDARD_AUTHORITY_PYTHON|tenStageCompletionClaim' 'Normal authority gate must not require retired external dependencies.'
-        Assert-Match $normalMain 'Invoke-Pester -Script \$authorityTestPaths -Strict -PassThru' 'Normal authority gate must execute the exact retained Pester paths.'
+        Assert-Match $normalMain 'Invoke-AuthorityPesterTests -Runtime' 'Normal authority gate must execute the exact retained Pester paths.'
         Assert-Match $normalMain 'Get-AuthorityEntryPreflight @bindingParameters' 'Normal authority gate must rebind actual source hashes after execution.'
     }
 
@@ -534,7 +602,8 @@ jobs:
         }
         Assert-Match $upstream 'SYP-192 Gate 1' 'The upstream decision must bind Plugin conformance to Gate 1.'
         $normalMain = $gate.Substring($gate.IndexOf('if ($BindingOnly) {'))
-        Assert-Match $normalMain 'tests/skill-repository-standard\.Tests\.ps1' 'The ordinary authority gate must retain upstream interoperability source regressions.'
+        . (Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardAuthorityGate.ps1') -DefineFunctionsOnly
+        @(Get-AuthorityTestPaths -Root $script:RepositoryRoot) | Should Contain (Join-Path $script:RepositoryRoot 'tests/skill-repository-standard.Tests.ps1')
         Assert-NotMatch $normalMain 'Validate-UpstreamAdapter\.ps1|upstream-adapter\.json' 'The ordinary authority gate must not invoke the external adapter validator or load its policy.'
     }
 

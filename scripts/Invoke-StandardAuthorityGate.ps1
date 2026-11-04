@@ -27,6 +27,136 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Import-AuthorityPlatformRuntime {
+    $module=Import-Module -Name (Join-Path $PSScriptRoot 'platform-runtime.psd1') -PassThru -ErrorAction Stop
+    if (@($module).Count -ne 1 -or [IO.Path]::GetFullPath($module.ModuleBase) -cne [IO.Path]::GetFullPath($PSScriptRoot)) {
+        throw 'Authority platform runtime did not load from its bound source root.'
+    }
+    & $module.ExportedCommands['Assert-PlatformRuntimeInventory'] | Out-Null
+    return $module
+}
+
+function Get-AuthorityTestPaths {
+    param([Parameter(Mandatory=$true)][string]$Root,$Policy)
+    if($null -eq $Policy){$Policy=Read-AuthorityJson -Path (Join-Path $Root 'docs/standards/validation-security-gate.json') -Context 'Ordinary authority policy'}
+    $expected=@(
+        'tests/internal-source-continuation.Tests.ps1',
+        'tests/skill-repository-standard.Tests.ps1',
+        'tests/skill-repository-workflows.Tests.ps1',
+        'tests/standard-authority-entry-preflight.Tests.ps1',
+        'tests/standard-entry-point-binding.Tests.ps1',
+        'tests/standard-core-pester-adapter.Tests.ps1'
+    )
+    $ordinary=Get-AuthorityRequiredProperty -Object $Policy -Name 'ordinaryAuthority' -Context 'Authority policy'
+    Assert-AuthorityJsonPropertySet -Object $ordinary -Expected @('pesterVersion','testPaths','skippedCount','externalToolAcquisition','processBoundary','unixIsolation','limitations') -Context 'Ordinary authority policy'
+    Assert-AuthorityExactStringSequence -Value $ordinary.testPaths -Expected $expected -Context 'Ordinary authority test inventory'
+    Assert-AuthorityExactString -Value $ordinary.pesterVersion -Expected '4.10.1' -Context 'Ordinary authority Pester'
+    Assert-AuthorityNonNegativeInteger -Value $ordinary.skippedCount -Context 'Ordinary authority skips'
+    if($ordinary.skippedCount -ne 0){throw 'Ordinary authority skips must equal zero.'}
+    Assert-AuthorityExactBoolean -Value $ordinary.externalToolAcquisition -Expected $false -Context 'Ordinary authority external acquisition'
+    Assert-AuthorityExactString -Value $ordinary.processBoundary -Expected 'platform-runtime-p3' -Context 'Ordinary authority process boundary'
+    Assert-AuthorityExactString -Value $ordinary.unixIsolation -Expected 'cooperative' -Context 'Ordinary authority Unix isolation'
+    Assert-AuthorityExactStringSequence -Value $ordinary.limitations -Expected @('A1: same-account malicious concurrent writers are outside the protection boundary') -Context 'Ordinary authority limitations'
+    return @($ordinary.testPaths | ForEach-Object {Join-Path $Root $_})
+}
+
+function Invoke-AuthorityPesterTests {
+    param($Runtime,$Preparation,[string[]]$TestPaths,[string]$RepositoryRoot)
+    $work=& $Runtime.ExportedCommands['New-PlatformPrivateRoot'] -Parent ([IO.Path]::GetTempPath()) -Leaf ('authority-tests-'+[guid]::NewGuid().ToString('N'))
+    try {
+        $scriptPath=Join-Path $work 'tests.ps1'
+        $resultPath=Join-Path $work 'result.json'
+        $child=@'
+$ErrorActionPreference='Stop'
+. $env:STANDARD_AUTHORITY_GATE -DefineFunctionsOnly
+$pesterManifestPath=$env:STANDARD_AUTHORITY_PESTER_MANIFEST
+$authorityTestPaths=@($env:STANDARD_AUTHORITY_TEST_PATHS|ConvertFrom-Json)
+$pesterManifestItem = Get-Item -Force -LiteralPath $pesterManifestPath -ErrorAction Stop
+if ($pesterManifestItem.PSIsContainer -or ($pesterManifestItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Pester 4.10.1 manifest must be a regular non-reparse file: $pesterManifestPath"
+}
+$pesterManifest = Import-PowerShellDataFile -LiteralPath $pesterManifestPath -ErrorAction Stop
+if ([version]$pesterManifest.ModuleVersion -ne [version]'4.10.1') {
+    throw "Pester manifest version must be exactly 4.10.1: $pesterManifestPath"
+}
+$pesterRootModuleName = ''
+if ($pesterManifest.ContainsKey('RootModule')) {
+    $pesterRootModuleName = [string]$pesterManifest['RootModule']
+}
+if ([string]::IsNullOrWhiteSpace($pesterRootModuleName) -and $pesterManifest.ContainsKey('ModuleToProcess')) {
+    $pesterRootModuleName = [string]$pesterManifest['ModuleToProcess']
+}
+if ([string]::IsNullOrWhiteSpace($pesterRootModuleName) -or [IO.Path]::IsPathRooted($pesterRootModuleName)) {
+    throw "Pester 4.10.1 manifest must declare a relative root module: $pesterManifestPath"
+}
+$pesterModuleBasePath = [IO.Path]::GetDirectoryName($pesterManifestPath)
+$pesterRootModulePath = [IO.Path]::GetFullPath((Join-Path $pesterModuleBasePath $pesterRootModuleName))
+$pesterPathComparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    [StringComparison]::OrdinalIgnoreCase
+}
+else {
+    [StringComparison]::Ordinal
+}
+$pesterModuleBaseItem = Get-Item -Force -LiteralPath $pesterModuleBasePath -ErrorAction Stop
+$pesterModuleBasePrefix = $pesterModuleBasePath.TrimEnd([char[]]@('\', '/')) + [IO.Path]::DirectorySeparatorChar
+if (-not $pesterModuleBaseItem.PSIsContainer -or ($pesterModuleBaseItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+    -not $pesterRootModulePath.StartsWith($pesterModuleBasePrefix, $pesterPathComparison)) {
+    throw "Pester root module must stay under its regular verified module directory: $pesterRootModulePath"
+}
+$pesterRootModuleItem = Get-Item -Force -LiteralPath $pesterRootModulePath -ErrorAction Stop
+if ($pesterRootModuleItem.PSIsContainer -or ($pesterRootModuleItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Pester root module must be a regular non-reparse file: $pesterRootModulePath"
+}
+$pesterManifestSha256 = (Get-FileHash -LiteralPath $pesterManifestPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+$pesterRootModuleSha256 = (Get-FileHash -LiteralPath $pesterRootModulePath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+$loadedPesterModules = @(Import-Module -Name $pesterManifestPath -Force -PassThru -ErrorAction Stop)
+if ($loadedPesterModules.Count -ne 1) {
+    throw "Importing the verified Pester manifest must load exactly one root module; found $($loadedPesterModules.Count)."
+}
+$loadedPester = $loadedPesterModules[0]
+$loadedPesterRootModuleSha256 = (Get-FileHash -LiteralPath $pesterRootModulePath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+$loadedPesterManifestSha256 = (Get-FileHash -LiteralPath $pesterManifestPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+if ($loadedPester.Name -cne 'Pester' -or $loadedPester.Version -ne [version]'4.10.1' -or
+    -not (Test-AuthorityPathEqual -Left ([string]$loadedPester.Path) -Right $pesterRootModulePath) -or
+    -not (Test-AuthorityPathEqual -Left ([string]$loadedPester.ModuleBase) -Right $pesterModuleBasePath) -or
+    $loadedPesterRootModuleSha256 -cne $pesterRootModuleSha256 -or $loadedPesterManifestSha256 -cne $pesterManifestSha256) {
+    throw 'The loaded authority test engine must match the verified Pester 4.10.1 manifest, module base, root-module path, and file hashes.'
+}
+$pesterResult = Invoke-Pester -Script $authorityTestPaths -Strict -PassThru
+$counts=[ordered]@{}
+foreach($name in @('TotalCount','PassedCount','FailedCount','SkippedCount','PendingCount','InconclusiveCount')){
+    $counts[$name]=$pesterResult.$name
+}
+if($null -ne $pesterResult.PSObject.Properties['Errors']){$counts['Errors']=@($pesterResult.Errors)}
+$bytes=[Text.UTF8Encoding]::new($false).GetBytes(($counts|ConvertTo-Json -Depth 10))
+$stream=[IO.File]::Open($env:STANDARD_AUTHORITY_PESTER_RESULT,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
+'@
+        [IO.File]::WriteAllText($scriptPath,$child,[Text.UTF8Encoding]::new($false))
+        $environment=[Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+        foreach($entry in [Environment]::GetEnvironmentVariables().GetEnumerator()){$environment[[string]$entry.Key]=[string]$entry.Value}
+        $environment['STANDARD_AUTHORITY_GATE']=Join-Path $PSScriptRoot 'Invoke-StandardAuthorityGate.ps1'
+        $environment['STANDARD_AUTHORITY_PESTER_MANIFEST']=$Preparation.modulePath
+        $environment['STANDARD_AUTHORITY_TEST_PATHS']=ConvertTo-Json -InputObject $TestPaths -Compress
+        $environment['STANDARD_AUTHORITY_PESTER_RESULT']=$resultPath
+        # Pester fixtures retain the caller's tool environment; the engine and
+        # launcher identities are explicit and verified independently by P4/P2.
+        $arguments=@('-NoLogo','-NoProfile','-NonInteractive')
+        if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT){$arguments+=@('-ExecutionPolicy','Bypass')}
+        $arguments+=@('-File',$scriptPath)
+        & $Runtime.ExportedCommands['Assert-PlatformAuthorityPester'] -Receipt $Preparation
+        $run=& $Runtime.ExportedCommands['Invoke-PlatformPreparationCommand'] -Command $Preparation.executablePath -Arguments $arguments -Environment $environment -WorkingDirectory $RepositoryRoot -TimeoutMilliseconds 3600000 -PreparationReceipt $Preparation
+        if(-not [string]::IsNullOrWhiteSpace($run.stdout)){Write-Host $run.stdout}
+        if($run.exitCode -ne 0){throw "Authority Pester child failed (exit $($run.exitCode)): $($run.stderr)"}
+        if(-not [string]::IsNullOrWhiteSpace($run.stderr)){Write-Verbose $run.stderr}
+        & $Runtime.ExportedCommands['Assert-PlatformAuthorityPester'] -Receipt $Preparation
+        return [pscustomobject]@{result=(Read-AuthorityJson -Path $resultPath -Context 'Owned authority Pester result');processOwnership=$run.processOwnership}
+    } finally {
+        # P3 has closed the child and its loaded DLLs before reclaiming files.
+        [IO.Directory]::Delete($work,$true)
+    }
+}
+
 function Get-AuthorityEntryPreflight {
     [CmdletBinding()]
     param(
@@ -214,6 +344,11 @@ function New-AuthorityRunOwnedToolRoot {
     # Bound the deepest Spector venv path, not only this run-owned parent.
     # A short parent can still leave pip's site-packages probe beyond MAX_PATH.
     $isWindowsHost = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
+    $runtime=Import-AuthorityPlatformRuntime
+    if(-not $isWindowsHost) {
+        # Unix has no Windows venv/MAX_PATH budget or LocalAppData fallback.
+        return & $runtime.ExportedCommands['New-PlatformPrivateRoot'] -Parent ([IO.Path]::GetTempPath()) -Leaf ("svt-tools-{0}" -f $RunId)
+    }
     $pathComparer = if ($isWindowsHost) { [System.StringComparer]::OrdinalIgnoreCase } else { [System.StringComparer]::Ordinal }
     $candidateErrors = [System.Collections.Generic.List[string]]::new()
     $availableCandidates = [System.Collections.Generic.List[object]]::new()
@@ -325,14 +460,10 @@ function New-AuthorityRunOwnedToolRoot {
                 continue
             }
         }
-        elseif ($candidate.ToolRoot.Length -ge 128) {
-            $candidateErrors.Add("$($candidate.Name) exceeds the existing 128-character tool-root budget: $($candidate.ToolRoot)")
-            continue
-        }
         $eligibleCandidateCount++
 
         try {
-            [void](New-Item -ItemType Directory -Path $candidate.ToolRoot -ErrorAction Stop)
+            $createdRoot=& $runtime.ExportedCommands['New-PlatformPrivateRoot'] -Parent $candidate.BasePath -Leaf ([IO.Path]::GetFileName($candidate.ToolRoot))
         }
         catch {
             $rootAfterFailure = $null
@@ -354,19 +485,19 @@ function New-AuthorityRunOwnedToolRoot {
             ($toolRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "Authority tool root must be a new non-reparse directory: $($candidate.ToolRoot)"
         }
-        return $candidate.ToolRoot
+        return $createdRoot
     }
 
     if ($eligibleCandidateCount -eq 0) {
         if ($isWindowsHost) {
             throw "No authority tool temp candidate satisfies the Windows Python venv probe-path budget (<248 characters). $($candidateErrors -join ' | ')"
         }
-        throw "No authority tool temp candidate satisfies the tool-root budget (<128 characters). $($candidateErrors -join ' | ')"
+
     }
     if ($isWindowsHost) {
         throw "No authority tool temp candidate could create a run-owned root within the Windows Python venv probe-path budget (<248 characters). $($candidateErrors -join ' | ')"
     }
-    throw "No authority tool temp candidate could create a run-owned root within the tool-root budget (<128 characters). $($candidateErrors -join ' | ')"
+
 }
 
 function Assert-AuthorityUpstreamAdapterReport {
@@ -784,6 +915,7 @@ function Read-AuthorityJson {
 
 function Assert-AuthorityValidationSecurityGate {
     param([Parameter(Mandatory = $true)] $Policy)
+    [void](Get-AuthorityTestPaths -Root (Split-Path -Parent $PSScriptRoot) -Policy $Policy)
 
     Assert-AuthorityNonNegativeInteger `
         -Value (Get-AuthorityRequiredProperty -Object $Policy -Name 'schemaVersion' -Context 'Validation/security gate policy') `
@@ -2994,25 +3126,12 @@ function Invoke-AuthorityExternalCommand {
     if (-not (Test-Path -LiteralPath $Command -PathType Leaf)) {
         throw "$Context executable is missing: $Command"
     }
-    $stderrPath = Join-Path $DiagnosticRoot ("stderr-{0}.txt" -f [guid]::NewGuid().ToString('N'))
-    try {
-        $stdout = & $Command @Arguments 2> $stderrPath
-        $exitCode = $LASTEXITCODE
-        $stdoutText = @($stdout | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
-        $stderrText = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
-            Get-Content -Raw -Encoding UTF8 -LiteralPath $stderrPath
-        }
-        else { '' }
-        if ($exitCode -ne 0) {
-            throw "$Context exited with code $exitCode.`nSTDOUT:`n$stdoutText`nSTDERR:`n$stderrText"
-        }
-        return $stdoutText
-    }
-    finally {
-        if (Test-Path -LiteralPath $stderrPath) {
-            Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
-        }
-    }
+    $runtime=Import-AuthorityPlatformRuntime
+    $environment=[Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+    foreach($entry in [Environment]::GetEnvironmentVariables().GetEnumerator()){$environment[[string]$entry.Key]=[string]$entry.Value}
+    $result=& $runtime.ExportedCommands['Invoke-PlatformPreparationCommand'] -Command $Command -Arguments $Arguments -Environment $environment -WorkingDirectory $DiagnosticRoot -TimeoutMilliseconds 900000
+    if($result.exitCode -ne 0){throw "$Context exited with code $($result.exitCode).`nSTDOUT:`n$($result.stdout)`nSTDERR:`n$($result.stderr)"}
+    return $result.stdout.TrimEnd("`r","`n")
 }
 
 function Get-AuthorityLauncherDigest {
@@ -4056,14 +4175,7 @@ if ($BindingOnly) {
 }
 
 $repositoryRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
-$authorityTestPaths = @(
-    (Join-Path $repositoryRoot 'tests/internal-source-continuation.Tests.ps1')
-    (Join-Path $repositoryRoot 'tests/skill-repository-standard.Tests.ps1')
-    (Join-Path $repositoryRoot 'tests/skill-repository-workflows.Tests.ps1')
-    (Join-Path $repositoryRoot 'tests/standard-authority-entry-preflight.Tests.ps1')
-    (Join-Path $repositoryRoot 'tests/standard-entry-point-binding.Tests.ps1')
-    (Join-Path $repositoryRoot 'tests/standard-core-pester-adapter.Tests.ps1')
-)
+$authorityTestPaths = @(Get-AuthorityTestPaths -Root $repositoryRoot)
 foreach ($testPath in $authorityTestPaths) {
     $testItem = Get-Item -Force -LiteralPath $testPath -ErrorAction Stop
     if ($testItem.PSIsContainer -or ($testItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -4076,57 +4188,10 @@ if ($pesterModules.Count -ne 1) {
     throw "The authority gate requires exactly one installed Pester 4.10.1 module; found $($pesterModules.Count)."
 }
 $pesterManifestPath = [IO.Path]::GetFullPath((Join-Path ([string]$pesterModules[0].ModuleBase) 'Pester.psd1'))
-$pesterManifestItem = Get-Item -Force -LiteralPath $pesterManifestPath -ErrorAction Stop
-if ($pesterManifestItem.PSIsContainer -or ($pesterManifestItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-    throw "Pester 4.10.1 manifest must be a regular non-reparse file: $pesterManifestPath"
-}
-$pesterManifest = Import-PowerShellDataFile -LiteralPath $pesterManifestPath -ErrorAction Stop
-if ([version]$pesterManifest.ModuleVersion -ne [version]'4.10.1') {
-    throw "Pester manifest version must be exactly 4.10.1: $pesterManifestPath"
-}
-$pesterRootModuleName = ''
-if ($pesterManifest.ContainsKey('RootModule')) {
-    $pesterRootModuleName = [string]$pesterManifest['RootModule']
-}
-if ([string]::IsNullOrWhiteSpace($pesterRootModuleName) -and $pesterManifest.ContainsKey('ModuleToProcess')) {
-    $pesterRootModuleName = [string]$pesterManifest['ModuleToProcess']
-}
-if ([string]::IsNullOrWhiteSpace($pesterRootModuleName) -or [IO.Path]::IsPathRooted($pesterRootModuleName)) {
-    throw "Pester 4.10.1 manifest must declare a relative root module: $pesterManifestPath"
-}
-$pesterModuleBasePath = [IO.Path]::GetFullPath([string]$pesterModules[0].ModuleBase)
-$pesterRootModulePath = [IO.Path]::GetFullPath((Join-Path $pesterModuleBasePath $pesterRootModuleName))
-$pesterPathComparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-    [StringComparison]::OrdinalIgnoreCase
-}
-else {
-    [StringComparison]::Ordinal
-}
-$pesterModuleBaseItem = Get-Item -Force -LiteralPath $pesterModuleBasePath -ErrorAction Stop
-$pesterModuleBasePrefix = $pesterModuleBasePath.TrimEnd([char[]]@('\', '/')) + [IO.Path]::DirectorySeparatorChar
-if (-not $pesterModuleBaseItem.PSIsContainer -or ($pesterModuleBaseItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-    -not $pesterRootModulePath.StartsWith($pesterModuleBasePrefix, $pesterPathComparison)) {
-    throw "Pester root module must stay under its regular verified module directory: $pesterRootModulePath"
-}
-$pesterRootModuleItem = Get-Item -Force -LiteralPath $pesterRootModulePath -ErrorAction Stop
-if ($pesterRootModuleItem.PSIsContainer -or ($pesterRootModuleItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-    throw "Pester root module must be a regular non-reparse file: $pesterRootModulePath"
-}
-$pesterManifestSha256 = (Get-FileHash -LiteralPath $pesterManifestPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
-$pesterRootModuleSha256 = (Get-FileHash -LiteralPath $pesterRootModulePath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
-$loadedPesterModules = @(Import-Module -Name $pesterManifestPath -Force -PassThru -ErrorAction Stop)
-if ($loadedPesterModules.Count -ne 1) {
-    throw "Importing the verified Pester manifest must load exactly one root module; found $($loadedPesterModules.Count)."
-}
-$loadedPester = $loadedPesterModules[0]
-$loadedPesterRootModuleSha256 = (Get-FileHash -LiteralPath $pesterRootModulePath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
-$loadedPesterManifestSha256 = (Get-FileHash -LiteralPath $pesterManifestPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
-if ($loadedPester.Name -cne 'Pester' -or $loadedPester.Version -ne [version]'4.10.1' -or
-    -not (Test-AuthorityPathEqual -Left ([string]$loadedPester.Path) -Right $pesterRootModulePath) -or
-    -not (Test-AuthorityPathEqual -Left ([string]$loadedPester.ModuleBase) -Right $pesterModuleBasePath) -or
-    $loadedPesterRootModuleSha256 -cne $pesterRootModuleSha256 -or $loadedPesterManifestSha256 -cne $pesterManifestSha256) {
-    throw 'The loaded authority test engine must match the verified Pester 4.10.1 manifest, module base, root-module path, and file hashes.'
-}
+$authorityRuntime=Import-AuthorityPlatformRuntime
+$pesterPreparation=& $authorityRuntime.ExportedCommands['Initialize-PlatformAuthorityPester'] -ModulePath $pesterManifestPath -Executable ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)
+$pesterManifestPath=$pesterPreparation.modulePath
+try {
 
 $candidateRootPath = [IO.Path]::GetFullPath($CandidateRoot)
 $authorityRootPath = [IO.Path]::GetFullPath($AuthorityRoot)
@@ -4169,8 +4234,10 @@ if (Test-Path -LiteralPath $resultPath) {
 
 # Invoke only the retained, ordinary authority checks. External resolvers, receipts,
 # package tools, scanners, fixtures, and stage summaries are outside this gate.
-$pesterResult = Invoke-Pester -Script $authorityTestPaths -Strict -PassThru
+$pesterRun=Invoke-AuthorityPesterTests -Runtime $authorityRuntime -Preparation $pesterPreparation -TestPaths $authorityTestPaths -RepositoryRoot $repositoryRoot
+$pesterResult=$pesterRun.result
 Assert-AuthorityPesterResult -Result $pesterResult -PesterMajorVersion 4
+& $authorityRuntime.ExportedCommands['Assert-PlatformAuthorityPester'] -Receipt $pesterPreparation
 
 $bindingParameters = @{
     RunningScriptPath = $PSCommandPath
@@ -4259,7 +4326,9 @@ $summary = [ordered]@{
     candidateRevision = $CandidateRevision
     authorityRevision = $AuthorityRevision
     eventName = $EventName
-    pesterVersion = $loadedPester.Version.ToString()
+    pesterVersion = '4.10.1'
+    processOwnership = $pesterRun.processOwnership
+    preparation = $pesterPreparation
     pesterTestPaths = @($authorityTestPaths | ForEach-Object { [IO.Path]::GetRelativePath($repositoryRoot, $_).Replace('\', '/') })
     totalCount = [int]$pesterResult.TotalCount
     passedCount = [int]$pesterResult.PassedCount
@@ -4268,3 +4337,6 @@ $summary = [ordered]@{
 $summaryJson = ConvertTo-Json -InputObject $summary -Depth 20
 Write-Host "Standard authority gate passed. Result: $resultPath"
 $summaryJson
+} finally {
+    [IO.Directory]::Delete($pesterPreparation.rootPath,$true)
+}

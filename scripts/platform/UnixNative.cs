@@ -429,6 +429,22 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             catch { directory.Dispose(); throw; }
         }
 
+        // Preparation roots are create-only: never adopt an existing directory,
+        // including a concurrent mkdir winner with the same run identifier.
+        public static UnixLease CreatePrivateDirectory(string root, string leaf)
+        {
+            PlatformPaths.Leaf(leaf); ValidateAbi();
+            SafeFd parent = WalkRoot(root), child = null;
+            try
+            {
+                Check(Mac ? Darwin.mkdirat(parent, leaf, 448) : Linux.mkdirat(parent, leaf, 448), "mkdirat create-only");
+                child = ChildDirectory(parent, leaf, false);
+                UnixLease result = new UnixLease(child, parent, leaf, Path.GetFullPath(Path.Combine(root, leaf)), Stat(child, null));
+                child = null; parent = null; return result;
+            }
+            finally { if (child != null) child.Dispose(); if (parent != null) parent.Dispose(); }
+        }
+
         public static UnixLease OpenDirectory(string root, string relative, bool create)
         {
             string[] parts = PlatformPaths.Segments(relative);

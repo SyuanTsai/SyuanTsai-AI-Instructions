@@ -624,9 +624,9 @@ Version: this line also belongs to the description body
 
         $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
         Assert-Match $resolver 'Get-Command -Name \$Name -CommandType Application' 'Native prerequisite lookup must exclude functions, aliases, cmdlets and external scripts.'
-        Assert-Match $resolver '\$output = & \$commandPath' 'Native execution must use the resolved absolute application path.'
+        Assert-Match $resolver 'Invoke-PlatformPreparationCommand''\] -Command \$commandPath' 'P3 must execute the resolved native application path.'
         Assert-NotMatch $resolver '\$output\s*=\s*&\s*\$Command(?![A-Za-z0-9_])' 'Native execution must not re-resolve the caller-supplied command name.'
-        Assert-Match $resolver '(?s)\$global:LASTEXITCODE\s*=\s*\$null\s*\r?\n\s*\$output\s*=\s*&\s*\$commandPath.*?\$exitCode\s*=\s*\$global:LASTEXITCODE.*?\$null -eq \$exitCode' 'Native launch failure must not inherit a stale successful exit code.'
+        Assert-NotMatch $resolver '\$global:LASTEXITCODE' 'P3 exit evidence must not depend on an ambient native exit code.'
 
         # Unknown extensions can open Windows' application picker. Use an invalid
         # executable and suppress error UI only on this test's thread, restoring
@@ -1267,7 +1267,13 @@ catch {
 
                 $deadline = [DateTime]::UtcNow.AddSeconds(15)
                 while (@(Get-ChildItem -LiteralPath $syncRoot -Filter 'ready-*' -File -ErrorAction SilentlyContinue).Count -lt 2) {
-                    if ([DateTime]::UtcNow -gt $deadline) { throw "Atomic $mode writers did not reach the deterministic barrier." }
+                    if ([DateTime]::UtcNow -gt $deadline) {
+                        $diagnostics=@($children | ForEach-Object {
+                            if($_.Process.HasExited -and $_.Stderr.IsCompleted){"exit=$($_.Process.ExitCode): $($_.Stderr.Result)"}
+                            else {'writer still running'}
+                        }) -join '; '
+                        throw "Atomic $mode writers did not reach the deterministic barrier. $diagnostics"
+                    }
                     [System.Threading.Thread]::Yield() | Out-Null
                 }
                 $releaseStream = [System.IO.File]::Open(
@@ -1504,16 +1510,34 @@ Describe 'Installed closure path identity' {
         Assert-ClosureCondition (@(Get-ResolverOrderedClosureEntries -Entries @()).Count -eq 0) 'Empty input must yield no closure entries.'
     }
 
-    # Scenario: Two real filenames are ordinally different but normalize to the same Unicode NFC path.
+    # Scenario: Enumeration supplies two names that normalize to the same Unicode NFC path.
     # Purpose: Enforce the existing collision contract independently of PowerShell culture comparisons.
-    It 'InterT10_RejectsDistinctUnicodeNormalizedFilenames' {
+    It 'UnitT45_RejectsUnicodeNormalizedInventoryOnEveryFilesystem' {
         $root = Join-Path $TestDrive 'unicode-collision'
         [void](New-Item -ItemType Directory -Path $root)
-        [IO.File]::WriteAllText((Join-Path $root "$([char]0xE9).txt"), 'one')
-        [IO.File]::WriteAllText((Join-Path $root "e$([char]0x301).txt"), 'two')
+        $script:unicodeFixtureRoot=$root
+        [IO.File]::WriteAllText((Join-Path $root "$([char]0xE9).txt"),'one')
+        [IO.File]::WriteAllText((Join-Path $root "e$([char]0x301).txt"),'two')
+        Mock Get-ChildItem {
+            [IO.FileInfo]::new((Join-Path $script:unicodeFixtureRoot "$([char]0xE9).txt"))
+            [IO.FileInfo]::new((Join-Path $script:unicodeFixtureRoot "e$([char]0x301).txt"))
+        } -ParameterFilter { $LiteralPath -eq $script:unicodeFixtureRoot }
+        Assert-ClosureFailure { Get-DirectoryClosureIdentity -Path $root } 'Unicode-normalization-colliding'
+        Assert-ClosureFailure { Get-DirectoryClosureIdentity -Path $root -ParallelContentHash } 'Unicode-normalization-colliding'
+    }
+
+    if(-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)) {
+    # Scenario: A filesystem supports two physically distinct NFC-equivalent names.
+    # Purpose: Retain the real enumeration integration in addition to the portable unit case.
+    It 'InterT10_RejectsDistinctUnicodeNormalizedFilenames' {
+        $root=Join-Path $TestDrive 'unicode-collision-real'
+        [void][IO.Directory]::CreateDirectory($root)
+        [IO.File]::WriteAllText((Join-Path $root "$([char]0xE9).txt"),'one')
+        [IO.File]::WriteAllText((Join-Path $root "e$([char]0x301).txt"),'two')
         Assert-ClosureCondition (@(Get-ChildItem -LiteralPath $root -File).Count -eq 2) 'The Unicode fixture requires two distinct filenames.'
         Assert-ClosureFailure { Get-DirectoryClosureIdentity -Path $root } 'Unicode-normalization-colliding'
         Assert-ClosureFailure { Get-DirectoryClosureIdentity -Path $root -ParallelContentHash } 'Unicode-normalization-colliding'
+    }
     }
 
     # Scenario: Case-varied and non-ASCII filenames have no normalization collision.
@@ -1792,7 +1816,7 @@ Describe 'SYP280 Core candidate inventory diagnostics SourceValidation' {
         $sourceRevision=(& git -C $candidateRoot rev-parse HEAD).Trim()
         if($LASTEXITCODE -ne 0 -or $sourceRevision -cnotmatch '^[a-f0-9]{40}$'){throw 'Temporary candidate fixture has no immutable revision.'}
 
-        $checkExecutable=Join-Path $PSHOME 'pwsh.exe'
+        $checkExecutable=Join-Path $PSHOME $(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {'pwsh.exe'} else {'pwsh'})
         if(-not (Test-Path -LiteralPath $checkExecutable -PathType Leaf)){throw "The trusted PowerShell executable is missing: $checkExecutable"}
         $checkHash=Get-StandardValidationFileSha256 -Path $checkExecutable -Context 'P2 fixture check executable'
         $frozen=@([pscustomobject][ordered]@{path=$checkExecutable;sha256=$checkHash})

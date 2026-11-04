@@ -23,6 +23,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$script:ResolverProcessReceipts = [Collections.Generic.List[object]]::new()
 
 $script:ResolverRunId = if ([string]::IsNullOrWhiteSpace($RunId)) {
     [guid]::NewGuid().ToString('N')
@@ -501,77 +502,14 @@ function Assert-NpmCommand {
     return Assert-Command -Name $name
 }
 
-function Stop-RunOwnedDirectDescendants {
-    param(
-        [Parameter(Mandatory = $true)][System.Diagnostics.Process] $ParentProcess,
-        [Parameter(Mandatory = $true)][DateTime] $ParentStartedUtc,
-        [Parameter(Mandatory = $true)][DateTime] $ParentExitObservedUtc
-    )
-    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return }
-    try {
-        $children = @(Get-CimInstance -ClassName Win32_Process `
-            -Filter ("ParentProcessId = {0}" -f $ParentProcess.Id) `
-            -OperationTimeoutSec 2 -ErrorAction Stop)
+function Import-ResolverPlatformRuntime {
+    $path=Join-Path $PSScriptRoot 'platform-runtime.psd1'
+    $module=Import-Module -Name $path -PassThru -ErrorAction Stop
+    if (@($module).Count -ne 1 -or [IO.Path]::GetFullPath($module.ModuleBase) -cne [IO.Path]::GetFullPath($PSScriptRoot)) {
+        throw 'Resolver platform runtime did not load from the authority bundle.'
     }
-    catch { return }
-    foreach ($child in $children) {
-        $ownedProcess = $null
-        try {
-            $createdUtc = ([DateTime]$child.CreationDate).ToUniversalTime()
-            if ($createdUtc -lt $ParentStartedUtc.AddSeconds(-1) -or
-                $createdUtc -gt $ParentExitObservedUtc) { continue }
-            $ownedProcess = [System.Diagnostics.Process]::GetProcessById([int]$child.ProcessId)
-            if ([Math]::Abs(($ownedProcess.StartTime.ToUniversalTime() - $createdUtc).TotalSeconds) -gt 2) { continue }
-            if (-not $ownedProcess.HasExited) { $ownedProcess.Kill() }
-        }
-        catch { }
-        finally { if ($null -ne $ownedProcess) { $ownedProcess.Dispose() } }
-    }
-}
-
-function Get-ResolverUnixProcessGroupId {
-    param([Parameter(Mandatory = $true)][int] $ProcessId)
-    $statPath = "/proc/$ProcessId/stat"
-    if (-not [IO.File]::Exists($statPath)) { return -1 }
-    try {
-        $stat = [IO.File]::ReadAllText($statPath)
-        if ($stat -match '^\s*[0-9]+\s+\(.*\)\s+\S\s+[0-9]+\s+(?<pgrp>[0-9]+)\s+') {
-            return [int]$Matches.pgrp
-        }
-    }
-    catch { }
-    return -1
-}
-
-function Stop-RunOwnedUnixProcessGroup {
-    param([Parameter(Mandatory = $true)][int] $ProcessGroupId)
-    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Unix -or $ProcessGroupId -le 0) { return }
-    $killPath = @('/usr/bin/kill', '/bin/kill') | Where-Object {
-        Test-Path -LiteralPath $_ -PathType Leaf
-    } | Select-Object -First 1
-    if ([string]::IsNullOrWhiteSpace([string]$killPath)) {
-        throw 'No Unix kill executable is available for run-owned process-group cleanup.'
-    }
-    $members = @(Get-ChildItem -LiteralPath '/proc' -Directory -ErrorAction Stop | Where-Object {
-        $_.Name -match '^[0-9]+$' -and
-        (Get-ResolverUnixProcessGroupId -ProcessId ([int]$_.Name)) -eq $ProcessGroupId
-    })
-    if ($members.Count -eq 0) { return }
-    $signalInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $signalInfo.FileName = [string]$killPath
-    $signalInfo.UseShellExecute = $false
-    $signalInfo.CreateNoWindow = $true
-    $signalInfo.ArgumentList.Add('-KILL')
-    $signalInfo.ArgumentList.Add('--')
-    $signalInfo.ArgumentList.Add("-$ProcessGroupId")
-    $signal = New-Object System.Diagnostics.Process
-    $signal.StartInfo = $signalInfo
-    try {
-        if ($signal.Start()) {
-            if (-not $signal.WaitForExit(1000)) { $signal.Kill() }
-        }
-    }
-    finally { $signal.Dispose() }
+    & $module.ExportedCommands['Assert-PlatformRuntimeInventory'] | Out-Null
+    return $module
 }
 
 function Invoke-CheckedCommand {
@@ -580,193 +518,31 @@ function Invoke-CheckedCommand {
         [Parameter(Mandatory = $true)][string[]] $Arguments,
         [int] $TimeoutSeconds = 0
     )
-
-    $commandPath = if ([IO.Path]::IsPathRooted($Command)) {
-        $resolved = [IO.Path]::GetFullPath($Command)
-        if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
-            throw "Required native command does not exist at '$resolved'."
-        }
-        $resolved
+    $runtime=Import-ResolverPlatformRuntime
+    $commandPath=if([IO.Path]::IsPathRooted($Command)){[IO.Path]::GetFullPath($Command)}else{Assert-Command -Name $Command}
+    # npm's Windows command file dispatches to its adjacent Node CLI payload.
+    if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and [IO.Path]::GetExtension($commandPath) -ieq '.cmd') {
+        if([IO.Path]::GetFileName($commandPath) -ine 'npm.cmd'){throw 'Only the approved npm command shim is supported.'}
+        $nodeRoot=[IO.Path]::GetDirectoryName($commandPath)
+        $cli=Join-Path $nodeRoot 'node_modules/npm/bin/npm-cli.js'
+        if(-not [IO.File]::Exists($cli)){throw 'The npm command shim has no adjacent CLI payload.'}
+        $commandPath=Assert-Command -Name 'node'
+        $Arguments=@($cli)+$Arguments
     }
-    else {
-        Assert-Command -Name $Command
-    }
-
-    if ($TimeoutSeconds -gt 0) {
-        $unixOwnedGroup = [Environment]::OSVersion.Platform -eq [PlatformID]::Unix
-        $launchArguments = @($Arguments)
-        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-        if ($unixOwnedGroup) {
-            $setsidPath = @('/usr/bin/setsid', '/bin/setsid') | Where-Object {
-                Test-Path -LiteralPath $_ -PathType Leaf
-            } | Select-Object -First 1
-            if ([string]::IsNullOrWhiteSpace([string]$setsidPath) -or
-                -not (Test-Path -LiteralPath '/bin/sh' -PathType Leaf) -or
-                -not (Test-Path -LiteralPath '/proc' -PathType Container) -or
-                $null -eq $startInfo.GetType().GetProperty('ArgumentList')) {
-                throw 'Owned Unix process-group containment is unavailable for a bounded acquisition command.'
-            }
-            $startInfo.FileName = [string]$setsidPath
-            $startInfo.RedirectStandardInput = $true
-            # The shell cannot execute the requested command until the parent
-            # has verified a new, exclusive process group for this run.
-            $launchArguments = @('/bin/sh', '-c', 'IFS= read -r token || exit 125; exec "$@"', 'resolver-owned', $commandPath) + @($Arguments)
-        }
-        else {
-            $startInfo.FileName = $commandPath
-        }
-        $startInfo.UseShellExecute = $false
-        $startInfo.CreateNoWindow = $true
-        $startInfo.RedirectStandardOutput = $true
-        $startInfo.RedirectStandardError = $true
-        if ($null -ne $startInfo.GetType().GetProperty('ArgumentList')) {
-            foreach ($argument in $launchArguments) { [void]$startInfo.ArgumentList.Add($argument) }
-        }
-        else {
-            $quoted = foreach ($argument in $launchArguments) {
-                if ($argument.Contains('"') -or $argument.EndsWith('\')) {
-                    throw 'Bounded command contains an argument that cannot be safely quoted on this PowerShell runtime.'
-                }
-                '"' + $argument + '"'
-            }
-            $startInfo.Arguments = $quoted -join ' '
-        }
-        $process = New-Object System.Diagnostics.Process
-        $process.StartInfo = $startInfo
-        try {
-            $childWatch = [System.Diagnostics.Stopwatch]::StartNew()
-            if (-not $process.Start()) { throw "$commandPath could not be started." }
-            $parentStartedUtc = $process.StartTime.ToUniversalTime()
-            $ownedUnixGroupId = 0
-            if ($unixOwnedGroup) {
-                $groupProbe = [Diagnostics.Stopwatch]::StartNew()
-                while (-not $process.HasExited -and $groupProbe.ElapsedMilliseconds -lt 1000 -and
-                    $childWatch.ElapsedMilliseconds -lt ($TimeoutSeconds * 1000)) {
-                    $observedGroupId = Get-ResolverUnixProcessGroupId -ProcessId $process.Id
-                    if ($observedGroupId -eq $process.Id) {
-                        $ownedUnixGroupId = $observedGroupId
-                        break
-                    }
-                    Start-Sleep -Milliseconds 10
-                }
-                if ($ownedUnixGroupId -le 0) {
-                    $process.StandardInput.Close()
-                    if (-not $process.HasExited) { $process.Kill() }
-                    if ($childWatch.ElapsedMilliseconds -ge ($TimeoutSeconds * 1000)) {
-                        throw "$commandPath exceeded the acquisition deadline ($TimeoutSeconds seconds)."
-                    }
-                    throw 'Could not establish an exclusive Unix process group for a bounded acquisition command.'
-                }
-                $process.StandardInput.WriteLine('start')
-                $process.StandardInput.Close()
-            }
-            $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-            $stderrTask = $process.StandardError.ReadToEndAsync()
-            $drainTask = [System.Threading.Tasks.Task]::WhenAll([System.Threading.Tasks.Task[]]@($stdoutTask, $stderrTask))
-            $lastProgressSeconds = 0
-            while (-not ($process.HasExited -and $drainTask.IsCompleted)) {
-                $remainingMilliseconds = ($TimeoutSeconds * 1000) - $childWatch.ElapsedMilliseconds
-                if ($remainingMilliseconds -le 0) { break }
-                $waitMilliseconds = [int][Math]::Min(30000, $remainingMilliseconds)
-                if ($process.HasExited) {
-                    [void]([IAsyncResult]$drainTask).AsyncWaitHandle.WaitOne($waitMilliseconds)
-                }
-                else {
-                    [void]$process.WaitForExit($waitMilliseconds)
-                }
-                if ($childWatch.Elapsed.TotalSeconds - $lastProgressSeconds -ge 30) {
-                    Write-Host ("Acquisition child still running: {0}; elapsed={1:n1}s; deadline={2}s" -f
-                        [IO.Path]::GetFileName($commandPath), $childWatch.Elapsed.TotalSeconds, $TimeoutSeconds)
-                    $lastProgressSeconds = $childWatch.Elapsed.TotalSeconds
-                }
-            }
-            if (-not ($process.HasExited -and $drainTask.IsCompleted)) {
-                if ($unixOwnedGroup -and $ownedUnixGroupId -gt 0) {
-                    Stop-RunOwnedUnixProcessGroup -ProcessGroupId $ownedUnixGroupId
-                }
-                if (-not $process.HasExited) {
-                    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-                        $killerInfo = New-Object System.Diagnostics.ProcessStartInfo
-                        $killerInfo.FileName = 'taskkill.exe'
-                        $killerInfo.Arguments = "/PID $($process.Id) /T /F"
-                        $killerInfo.UseShellExecute = $false
-                        $killerInfo.CreateNoWindow = $true
-                        $killer = New-Object System.Diagnostics.Process
-                        $killer.StartInfo = $killerInfo
-                        try {
-                            if ($killer.Start() -and -not $killer.WaitForExit(2000)) { $killer.Kill() }
-                        }
-                        catch { }
-                        finally { $killer.Dispose() }
-                    }
-                    if (-not $process.HasExited) { $process.Kill() }
-                }
-                else {
-                    if ($null -ne (Get-Command Stop-RunOwnedDirectDescendants -ErrorAction SilentlyContinue)) {
-                        Stop-RunOwnedDirectDescendants -ParentProcess $process `
-                            -ParentStartedUtc $parentStartedUtc -ParentExitObservedUtc ([DateTime]::UtcNow)
-                    }
-                }
-                # An already-exited direct child may leave owned descendants
-                # holding the pipes open. Close our pipe ends without waiting
-                # for those descendants or touching unrelated processes.
-                $process.StandardOutput.Close()
-                $process.StandardError.Close()
-                [void]([IAsyncResult]$drainTask).AsyncWaitHandle.WaitOne(1000)
-                throw "$commandPath exceeded the acquisition deadline ($TimeoutSeconds seconds)."
-            }
-            $stdout = $stdoutTask.GetAwaiter().GetResult()
-            $stderr = $stderrTask.GetAwaiter().GetResult()
-            if ($process.ExitCode -ne 0) {
-                throw "$commandPath failed with exit code $($process.ExitCode): $stderr"
-            }
-            if (-not [string]::IsNullOrWhiteSpace($stderr)) { Write-Verbose $stderr }
-            return @($stdout -split "`r?`n" | Where-Object { $_ -ne '' })
-        }
-        finally { $process.Dispose() }
-    }
-
-    $stderrPath = Join-Path ([IO.Path]::GetTempPath()) ("standard-command-stderr-{0}.txt" -f [guid]::NewGuid().ToString('N'))
-    try {
-        $previousErrorActionPreference = $ErrorActionPreference
-        try {
-            # Windows PowerShell 5.1 promotes native stderr to NativeCommandError when
-            # the caller uses Stop. The native exit code remains authoritative here.
-            $ErrorActionPreference = 'Continue'
-            $global:LASTEXITCODE = $null
-            $output = & $commandPath @Arguments 2> $stderrPath
-            $exitCode = $global:LASTEXITCODE
-        }
-        finally {
-            $ErrorActionPreference = $previousErrorActionPreference
-        }
-        $stderr = @(
-            if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
-                Get-Content -LiteralPath $stderrPath -ErrorAction SilentlyContinue | ForEach-Object { [string]$_ }
-            }
-        )
-        if ($null -eq $exitCode) {
-            throw "$commandPath could not be started: $($stderr -join [Environment]::NewLine)"
-        }
-        if ($exitCode -ne 0) {
-            throw "$commandPath $($Arguments -join ' ') failed: $($stderr -join [Environment]::NewLine)"
-        }
-        if ($stderr.Count -gt 0) {
-            Write-Verbose ($stderr -join [Environment]::NewLine)
-        }
-        return @($output | ForEach-Object { [string]$_ })
-    }
-    finally {
-        if (Test-Path -LiteralPath $stderrPath) {
-            Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
-        }
-    }
+    $environment=[Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+    foreach($entry in [Environment]::GetEnvironmentVariables().GetEnumerator()){$environment[[string]$entry.Key]=[string]$entry.Value}
+    $limit=if($TimeoutSeconds -gt 0){$TimeoutSeconds}else{$AcquisitionTimeoutSeconds}
+    if($limit -le 0){$limit=900}
+    $result=& $runtime.ExportedCommands['Invoke-PlatformPreparationCommand'] -Command $commandPath -Arguments $Arguments -Environment $environment -WorkingDirectory $ExecutionContext.SessionState.Path.CurrentFileSystemLocation.Path -TimeoutMilliseconds ($limit*1000)
+    $script:ResolverProcessReceipts.Add($result.processOwnership)
+    if($result.exitCode -ne 0){throw "$commandPath failed with exit code $($result.exitCode): $($result.stderr)"}
+    if(-not [string]::IsNullOrWhiteSpace($result.stderr)){Write-Verbose $result.stderr}
+    return @($result.stdout -split "`r?`n" | Where-Object {$_ -ne ''})
 }
 
-function New-RunOwnedInstallDirectory {
+function Initialize-RunOwnedInstallRoot {
     param(
-        [string] $Root,
-        [Parameter(Mandatory = $true)][string] $ToolName
+        [string] $Root
     )
 
     if ([string]::IsNullOrWhiteSpace($Root)) {
@@ -784,14 +560,21 @@ function New-RunOwnedInstallDirectory {
     if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "Run-owned install root must be a regular directory: '$fullRoot'."
     }
+    $runtime=Import-ResolverPlatformRuntime
+    return & $runtime.ExportedCommands['Resolve-PlatformPhysicalPath'] -Path $fullRoot
+}
+
+function New-RunOwnedInstallDirectory {
+    param([string]$Root,[Parameter(Mandatory=$true)][string]$ToolName)
+    $fullRoot=Initialize-RunOwnedInstallRoot -Root $Root
     $prefix = if ($ToolName -ceq 'skillspector') { 'ss' } else { $ToolName }
     for ($attempt = 0; $attempt -lt 8; $attempt++) {
         $identifier = [guid]::NewGuid().ToString('N')
         if ($ToolName -ceq 'skillspector') { $identifier = $identifier.Substring(0, 12) }
         $toolRoot = Join-Path $fullRoot ("{0}-{1}" -f $prefix, $identifier)
         if (-not (Test-Path -LiteralPath $toolRoot)) {
-            [void](New-Item -ItemType Directory -Path $toolRoot -ErrorAction Stop)
-            return [IO.Path]::GetFullPath($toolRoot)
+            $runtime=Import-ResolverPlatformRuntime
+            return & $runtime.ExportedCommands['New-PlatformPrivateRoot'] -Parent $fullRoot -Leaf ([IO.Path]::GetFileName($toolRoot))
         }
     }
     throw "Unable to allocate a unique run-owned install directory under '$fullRoot'."
@@ -1082,7 +865,9 @@ function Get-DirectoryClosureIdentity {
             [void]$entries.Add($symlinkEntry)
             continue
         }
-        if ($item.PSIsContainer) { continue }
+        # FileSystemInfo from a native inventory need not have the provider's
+        # PSIsContainer extended property. Classify the actual filesystem type.
+        if ($item -is [IO.DirectoryInfo]) { continue }
         if ($item -isnot [IO.FileInfo]) {
             throw "Installed tool closure contains a non-regular filesystem entry: $($item.FullName)"
         }
@@ -3741,10 +3526,17 @@ function Resolve-SkillSpector {
     )
 
     $acquisitionStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $failureRoot=$null
     $diagnosticInstallRoot = if ([string]::IsNullOrWhiteSpace($RequestedInstallRoot)) {
         $base = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { [IO.Path]::GetTempPath() } else { $env:RUNNER_TEMP }
         Join-Path $base 'standard-validation-tools'
     } else { $RequestedInstallRoot }
+    if($ShouldInstall){
+        # Resolve the parent once for allocation, diagnostics and failed-run
+        # reclamation; OS aliases must not produce different containment roots.
+        $diagnosticInstallRoot=Initialize-RunOwnedInstallRoot -Root $diagnosticInstallRoot
+        $RequestedInstallRoot=$diagnosticInstallRoot
+    }
     $failureRoot = if ($ShouldInstall) {
         Join-Path ([IO.Path]::GetFullPath($diagnosticInstallRoot)) ("skillspector-failure-{0}" -f $script:ResolverRunId)
     } else { $null }
@@ -4045,6 +3837,7 @@ if ($ValidatePolicyOnly) {
         resolutionRunId = $script:ResolverRunId
         resolvedAtUtc = $script:ResolverResolvedAtUtc
         executionContext = $script:ResolverExecutionContext
+        processOwnership = @($script:ResolverProcessReceipts.ToArray())
         policy = [string]$policy.policy
         sourceTrust = [ordered]@{
             enforcement = [string]$policy.sourceTrust.enforcement
@@ -4110,6 +3903,7 @@ else {
         resolutionRunId = $script:ResolverRunId
         resolvedAtUtc = $script:ResolverResolvedAtUtc
         executionContext = $script:ResolverExecutionContext
+        processOwnership = @($script:ResolverProcessReceipts.ToArray())
         toolName = $ToolName
         source = [string]$toolPolicy.source
         channel = [string]$toolPolicy.channel

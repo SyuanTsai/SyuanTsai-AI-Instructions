@@ -1,6 +1,110 @@
 # SPDX-FileCopyrightText: 2026 SyuanTsai
 # SPDX-License-Identifier: Apache-2.0
 
+Describe 'SYP353 preparation process and private-root delegation' {
+    BeforeAll {
+        Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
+        function Copy-P53PhysicalRuntimeFixture {
+            param([string]$Source,[string]$Destination)
+            # The installed host may have Store hardlinks or directory aliases.
+            # Materialize its trusted bytes solely as test input. Production
+            # still rejects that linked installation; no link exception is added.
+            $pending=[Collections.Generic.Queue[object]]::new()
+            $pending.Enqueue(@{source=$Source;relative='';ancestors=@()})
+            $links=[Collections.Generic.List[string]]::new()
+            while($pending.Count -gt 0){
+                $entry=$pending.Dequeue()
+                $physical=Resolve-PlatformPhysicalPath $entry.source
+                if($entry.ancestors -ccontains $physical){throw 'Runtime fixture source has a directory-link cycle.'}
+                $target=if($entry.relative -eq ''){$Destination}else{Join-Path $Destination $entry.relative}
+                [void][IO.Directory]::CreateDirectory($target)
+                foreach($child in @(Get-ChildItem -LiteralPath $physical -Force)){
+                    $relative=if($entry.relative -eq ''){$child.Name}else{$entry.relative+'/'+$child.Name}
+                    if(($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or -not [string]::IsNullOrEmpty([string]$child.LinkType)){$links.Add($relative)}
+                    $sourcePath=Resolve-PlatformPhysicalPath $child.FullName
+                    $sourceItem=Get-Item -LiteralPath $sourcePath -Force
+                    if($sourceItem -is [IO.DirectoryInfo]){
+                        $pending.Enqueue(@{source=$sourcePath;relative=$relative;ancestors=@($entry.ancestors)+@($physical)})
+                    } elseif($sourceItem -is [IO.FileInfo]){
+                        [IO.File]::Copy($sourcePath,(Join-Path $Destination $relative),$false)
+                    } else {throw 'Runtime fixture source contains an unsupported entry.'}
+                }
+            }
+            return $links.ToArray()
+        }
+    }
+    # Scenario: The same private child is requested twice and contains caller data.
+    # Purpose: Preserve create-only ownership without adopting or modifying the winner.
+    It 'InterT10_private_root_creation_rejects_existing_directory' {
+        $root=New-PlatformPrivateRoot -Parent $TestDrive -Leaf 'owned'
+        [IO.File]::WriteAllText((Join-Path $root 'sentinel'),'keep')
+        {New-PlatformPrivateRoot -Parent $TestDrive -Leaf 'owned'} | Should Throw
+        [IO.File]::ReadAllText((Join-Path $root 'sentinel')) | Should Be 'keep'
+    }
+    # Scenario: A prepared command receives arguments and explicit environment, then exits nonzero.
+    # Purpose: Bind physical launcher identity and require complete owned cleanup on every host.
+    It 'InterT20_preparation_preserves_streams_exit_and_ownership_receipt' {
+        $environment=[Collections.Generic.Dictionary[string,string]]::new()
+        if($IsWindows){$environment['SystemRoot']=$env:SystemRoot}
+        $environment['P53_VALUE']='literal value'
+        $command=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $result=Invoke-PlatformPreparationCommand -Command $command -Arguments @('-NoProfile','-NonInteractive','-Command','[Console]::Out.Write($env:P53_VALUE);[Console]::Error.Write("diagnostic");exit 23') -Environment $environment -WorkingDirectory $TestDrive -TimeoutMilliseconds 15000
+        $result.exitCode | Should Be 23
+        $result.stdout | Should Be 'literal value'
+        $result.stderr | Should Be 'diagnostic'
+        $result.processOwnership.cleanup.CleanedUp | Should Be $true
+        $result.processOwnership.cleanup.CaptureReadersStopped | Should Be $true
+        $result.processOwnership.commandPath | Should Be $command
+        $result.processOwnership.resolvedCommandPath | Should Be (Resolve-PlatformPhysicalPath $command)
+        $result.processOwnership.isolationCapability | Should Be $(if($IsWindows){'strong'}else{'cooperative'})
+        if(-not $IsWindows){@($result.processOwnership.limitations).Count | Should BeGreaterThan 0}
+        $schema=Get-Content -Raw -Encoding UTF8 (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/schemas/validation-security-gate-v1.schema.json')|ConvertFrom-Json
+        $receiptSchema=$schema.'$defs'.preparationProcessOwnership|ConvertTo-Json -Depth 30
+        Test-Json -Json ($result.processOwnership|ConvertTo-Json -Depth 20) -Schema $receiptSchema | Should Be $true
+        $tampered=$result.processOwnership|ConvertTo-Json -Depth 20|ConvertFrom-Json
+        $tampered.cleanup.CleanedUp=$false
+        Test-Json -Json ($tampered|ConvertTo-Json -Depth 20) -Schema $receiptSchema -ErrorAction SilentlyContinue | Should Be $false
+    }
+    # Scenario: A physical copy of the host runtime captures Pester, runs it, then its snapshot changes.
+    # Purpose: Verify real P4 preparation and P2/P3 execution; mutation must block before the next child starts.
+    It 'InterT30_authority_preparation_rechecks_the_physical_pester_snapshot' {
+        $pester=@(Get-Module -ListAvailable Pester | Where-Object Version -EQ ([version]'4.10.1'))
+        $pester.Count | Should Be 1
+        $hostCommand=Resolve-PlatformPhysicalPath ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)
+        $runtimeRoot=Join-Path $TestDrive 'authority-runtime'
+        $hostLinks=@(Copy-P53PhysicalRuntimeFixture -Source ([IO.Path]::GetDirectoryName($hostCommand)) -Destination $runtimeRoot)
+        if($hostLinks.Count -gt 0){
+            Write-Host ('Host runtime links (relative paths): '+($hostLinks -join ', '))
+            $failure=$null
+            try {Initialize-PlatformAuthorityPester -ModulePath $pester[0].Path -Executable $hostCommand|Out-Null} catch {$failure=$_}
+            $failure.Exception.GetType().Name | Should Be 'PlatformVerificationException'
+            $failure.Exception.Message | Should Match 'Runtime closure contains a link:'
+        }
+        $command=Join-Path $runtimeRoot ([IO.Path]::GetFileName($hostCommand))
+        $receipt=Initialize-PlatformAuthorityPester -ModulePath $pester[0].Path -Executable $command
+        try {
+            $receipt.processOwnership.Count | Should Be 2
+            $receipt.moduleClosure.files.Count | Should BeGreaterThan 0
+            $environment=[Collections.Generic.Dictionary[string,string]]::new()
+            foreach($entry in [Environment]::GetEnvironmentVariables().GetEnumerator()){$environment[[string]$entry.Key]=[string]$entry.Value}
+            $probe="`$m=Import-Module -Name '$($receipt.modulePath.Replace("'","''"))' -PassThru;[Console]::Out.Write(`$m.Version.ToString())"
+            $arguments=@('-NoProfile','-NonInteractive')
+            if($IsWindows){$arguments+=@('-ExecutionPolicy','Bypass')}
+            $arguments+=@('-Command',$probe)
+            $run=Invoke-PlatformPreparationCommand -Command $command -Arguments $arguments -Environment $environment -WorkingDirectory $TestDrive -PreparationReceipt $receipt
+            $run.exitCode | Should Be 0
+            $run.stdout | Should Be '4.10.1'
+            $run.processOwnership.cleanup.CleanedUp | Should Be $true
+            [IO.File]::AppendAllText($receipt.modulePath,"`n# changed snapshot")
+            {Assert-PlatformAuthorityPester -Receipt $receipt} | Should Throw 'closure'
+            $marker=Join-Path $TestDrive 'must-not-launch'
+            $arguments=@('-NoProfile','-Command',"[IO.File]::WriteAllText('$($marker.Replace("'","''"))','launched')")
+            {Invoke-PlatformPreparationCommand -Command $command -Arguments $arguments -Environment $environment -WorkingDirectory $TestDrive -PreparationReceipt $receipt} | Should Throw 'closure'
+            Test-Path -LiteralPath $marker | Should Be $false
+        } finally {[IO.Directory]::Delete($receipt.rootPath,$true)}
+    }
+}
+
 Describe 'Platform owned processes P3' {
     BeforeAll {
         Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
@@ -44,6 +148,7 @@ Describe 'Platform owned processes P3' {
             Assert-P3Exited $p
             $r = Stop-PlatformOwnedProcess -Lease $p
             Assert-P3Cleaned $r
+            $p.CaptureCompletedNaturally | Should Be $true
             $p.ExitCode | Should Be 23
             if ($IsMacOS) { Write-Host ('Darwin natural-exit evidence: ' + ($p.UnixObservation | ConvertTo-Json -Compress)) }
             [IO.File]::ReadAllText((Join-Path $f.Path 'out')) | Should Be 'hello'
@@ -94,6 +199,24 @@ Describe 'Platform owned processes P3' {
             Assert-P3Cleaned $p.Cleanup
             $p.TerminationReason | Should Be 'deadline'
         } finally { Remove-P3Fixture $f $p }
+    }
+
+    # Scenario: Readers reach their deadline while the supervisor cannot acquire its gate.
+    # Purpose: Reader termination must never stand in for successful EOF observation.
+    It 'InterT25_distinguishes_reader_deadline_from_natural_eof' {
+        $f=New-P3Fixture; $p=$null
+        try {
+            $p=Start-P3Fixture $f 'Start-Sleep 90' 2
+            $gate=$p.GetType().GetField('gate',[Reflection.BindingFlags]'Instance,NonPublic').GetValue($p)
+            [Threading.Monitor]::Enter($gate)
+            try {
+                $until=[DateTimeOffset]::UtcNow.AddSeconds(10)
+                while(-not $p.CaptureReadersStopped -and [DateTimeOffset]::UtcNow -lt $until){[Threading.Thread]::Sleep(10)}
+                $p.CaptureReadersStopped | Should Be $true
+                $p.CaptureCompletedNaturally | Should Be $false
+            } finally {[Threading.Monitor]::Exit($gate)}
+            Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $p)
+        } finally {Remove-P3Fixture $f $p}
     }
 
     # Scenario: The caller cancels a live lease, then disposes it twice.
@@ -3644,6 +3767,22 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
     }
     }
 
+    # Scenario: A caller spells the runtime executable with a different filename case.
+    # Purpose: Windows binding follows filesystem case rules while inventory bytes and Unix binding remain ordinal.
+    It 'UnitT48_binds_executable_case_using_platform_path_rules' {
+        $root=Join-Path $script:P4Root 'p4-executable-case'
+        [void][IO.Directory]::CreateDirectory($root)
+        [IO.File]::WriteAllText((Join-Path $root 'PwSh.ExE'),'fixture bytes')
+        $closure=& $script:P4Preparation {param($r,$p) Get-PlatformRuntimeClosure $r $p} $root $script:P4Platform
+        $closure.files[0].path | Should BeExactly 'PwSh.ExE'
+        $command=Join-Path $root 'pwsh.exe'
+        if($IsWindows){
+            & $script:P4Preparation {param($c,$e,$p) Assert-PlatformRuntimeClosure $c $e $p} $command $closure $script:P4Platform
+        } else {
+            {& $script:P4Preparation {param($c,$e,$p) Assert-PlatformRuntimeClosure $c $e $p} $command $closure $script:P4Platform} | Should Throw 'does not bind the executable'
+        }
+    }
+
     # Scenario: An otherwise physical runtime fixture gains a directory link, as Store layouts may contain.
     # Purpose: Exercise both layout branches while keeping the production typed link rejection unchanged.
     It 'InterT49_classifies_linked_layouts_and_asserts_the_typed_rejection' {
@@ -3655,6 +3794,11 @@ public sealed class P4MoveIntermediateOnReadStream : System.IO.MemoryStream {
         try {
             New-Item -ItemType $(if($IsWindows){'Junction'}else{'SymbolicLink'}) -Path $link -Target $outside -ErrorAction Stop | Out-Null
             Test-P4KnownRuntimeLinkRejection $root | Should Be $true
+            $failure=$null
+            try {& $script:P4Preparation {param($r,$p) Get-PlatformRuntimeClosure $r $p} $root $script:P4Platform|Out-Null} catch {$failure=$_.Exception.Message}
+            $failure | Should Match "contains a link: 'alias'"
+            $failure.Contains($root) | Should Be $false
+            $failure.Contains($outside) | Should Be $false
         } finally { if(Test-Path -LiteralPath $link){[IO.Directory]::Delete($link)} }
     }
 
@@ -4221,6 +4365,7 @@ $child.Dispose()
             $caught.Exception.GetType().Name | Should Be 'PlatformVerificationException'
             $caught.Exception.Capability | Should Be 'powershell-runtime'
             $caught.Exception.Message | Should Match 'output deadline exceeded'
+            $caught.Exception.Message | Should Match 'ConvertFrom-Json'
             $evidence=[IO.File]::ReadAllLines($marker)
             Test-Path -LiteralPath $evidence[1] | Should Be $false
         } finally {
@@ -4232,6 +4377,18 @@ $child.Dispose()
             }
         }
     }
+    }
+
+    # Scenario: A probe emits invalid JSON and both streams close normally.
+    # Purpose: Payload failures remain diagnostic errors when no output deadline expires.
+    It 'InterT67_preserves_json_failure_without_an_inherited_pipe' {
+        $executable=Join-Path $PSHOME $(if($IsWindows){'pwsh.exe'}else{'pwsh'})
+        $environment=& $script:P4Preparation.ExportedCommands['New-PlatformVerifiedProcessEnvironment'] $executable $null $script:P4Platform
+        $failure=$null
+        try {& $script:P4Preparation.ExportedCommands['Start-PlatformVerifiedProcess'] $executable "'complete'" $environment $script:P4Platform -TimeoutMilliseconds 15000|Out-Null} catch {$failure=$_}
+        $failure.Exception.GetType().Name | Should Be 'PlatformVerificationException'
+        $failure.Exception.Message | Should Match 'ConvertFrom-Json'
+        $failure.Exception.Message | Should Not Match 'deadline exceeded'
     }
 
     # Scenario: A physical pwsh receives only the declared bundle closure, or the host layout contains links.
