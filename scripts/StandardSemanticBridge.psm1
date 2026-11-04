@@ -1260,6 +1260,7 @@ function Invoke-StandardSemanticBridgePlatformCallback {
     Initialize-StandardSemanticBridgePlatformRuntime
     $until = [DateTimeOffset]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
     $captureRoot = $null; $directory = $null; $process = $null; $primaryException = $null
+    $captureRootIdentityChanged = $false
     $cleanupErrors = New-Object 'System.Collections.Generic.List[string]'
     try {
         $captureRoot = New-PlatformPrivateRoot -Parent ([IO.Path]::GetTempPath()) -Leaf ('standard-semantic-bridge-capture-' + [Guid]::NewGuid().ToString('N'))
@@ -1336,10 +1337,32 @@ function Invoke-StandardSemanticBridgePlatformCallback {
             } catch { $cleanupErrors.Add('Callback process cleanup failed: ' + $_.Exception.Message) }
             try { $process.Dispose() } catch { $cleanupErrors.Add('Callback process disposal failed: ' + $_.Exception.Message) }
         }
+        if ($null -ne $captureRoot -and $null -ne $directory) {
+            $captureRootLease = $null
+            try {
+                $captureRootAnchor = [IO.Path]::GetPathRoot($captureRoot)
+                $captureRootRelative = $captureRoot.Substring($captureRootAnchor.Length)
+                $captureRootLease = Open-PlatformDirectory -Root $captureRootAnchor -RelativePath $captureRootRelative
+                $sameCaptureRoot =
+                    $captureRootLease.Observation.Device -eq $directory.Observation.Device -and
+                    $captureRootLease.Observation.Inode -eq $directory.Observation.Inode -and
+                    $captureRootLease.Observation.Kind -ceq $directory.Observation.Kind
+                if (-not $sameCaptureRoot) { $captureRootIdentityChanged = $true }
+            }
+            catch { $captureRootIdentityChanged = $true }
+            finally {
+                if ($null -ne $captureRootLease) {
+                    try { $captureRootLease.Dispose() } catch { $captureRootIdentityChanged = $true }
+                }
+            }
+            if ($captureRootIdentityChanged) {
+                $cleanupErrors.Add('Callback capture root identity changed; capture artifacts were not removed.')
+            }
+        }
         if ($null -ne $directory) {
             try { $directory.Dispose() } catch { $cleanupErrors.Add('Callback directory disposal failed: ' + $_.Exception.Message) }
         }
-        if ($null -ne $captureRoot) {
+        if ($null -ne $captureRoot -and -not $captureRootIdentityChanged) {
             try {
                 foreach ($leaf in @('stdout','stderr')) {
                     $path = Join-Path $captureRoot $leaf

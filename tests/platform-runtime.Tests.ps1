@@ -228,10 +228,10 @@ Describe 'Platform owned processes P3' {
             $expected = [Text.Encoding]::UTF8.GetBytes('capture-original')
             $p = Start-P3Fixture $f '[Console]::Out.Write("capture-original"); Start-Sleep -Milliseconds 500' -InputBytes ([byte[]]@()) -CaptureProfile semantic-bridge
             $caught = $null
-            try { $p.ReadCapture('stdout', 1024) | Out-Null } catch { $caught = $_.Exception }
+            try { $p.ReadCapture('stdout', 1024) | Out-Null } catch { $caught = $_.Exception.GetBaseException() }
             ($caught -is [InvalidOperationException]) | Should Be $true
             $caught = $null
-            try { $p.ReadCapture('invalid', 1024) | Out-Null } catch { $caught = $_.Exception }
+            try { $p.ReadCapture('invalid', 1024) | Out-Null } catch { $caught = $_.Exception.GetBaseException() }
             ($caught -is [ArgumentException]) | Should Be $true
             Assert-P3Exited $p
             Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $p)
