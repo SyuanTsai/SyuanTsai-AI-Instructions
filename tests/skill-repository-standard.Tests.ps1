@@ -1,3 +1,48 @@
+Describe 'SYP353 ordinary authority inventory and private roots' {
+    BeforeAll {
+        $script:P53Repository=Split-Path -Parent $PSScriptRoot
+        . (Join-Path $script:P53Repository 'scripts/Invoke-StandardAuthorityGate.ps1') -DefineFunctionsOnly
+    }
+    # Scenario: Policy supplies the complete retained gate inventory, then drops a path.
+    # Purpose: Bind discovery to six ordered paths and fail before executing a partial gate.
+    It 'UnitT10_binds_all_six_authority_paths_and_rejects_a_partial_inventory' {
+        $policy=Get-Content -Raw -Encoding UTF8 (Join-Path $script:P53Repository 'docs/standards/validation-security-gate.json')|ConvertFrom-Json
+        $paths=@(Get-AuthorityTestPaths -Root $script:P53Repository -Policy $policy)
+        $paths.Count | Should Be 6
+        foreach($path in $paths){Test-Path -LiteralPath $path -PathType Leaf | Should Be $true}
+        $policy.ordinaryAuthority.testPaths=@($policy.ordinaryAuthority.testPaths|Select-Object -Skip 1)
+        {Get-AuthorityTestPaths -Root $script:P53Repository -Policy $policy} | Should Throw 'exact ordered sequence'
+    }
+    # Scenario: A policy keeps discovery but permits skips or external acquisition.
+    # Purpose: Ordinary authority remains a zero-skip, scanner-free contract.
+    It 'UnitT20_rejects_skip_and_external_tool_policy_downgrades' {
+        foreach($field in @('skippedCount','externalToolAcquisition')){
+            $policy=Get-Content -Raw -Encoding UTF8 (Join-Path $script:P53Repository 'docs/standards/validation-security-gate.json')|ConvertFrom-Json
+            if($field -eq 'skippedCount'){$policy.ordinaryAuthority.skippedCount=1}else{$policy.ordinaryAuthority.externalToolAcquisition=$true}
+            {Get-AuthorityTestPaths -Root $script:P53Repository -Policy $policy} | Should Throw
+        }
+    }
+    if([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT){
+    # Scenario: Unix selects a long physical TMPDIR and repeats the same run ID.
+    # Purpose: No Windows path budget or fallback applies; same-run roots are create-only.
+    It 'InterT30_uses_unix_temp_without_windows_budget_and_rejects_collision' {
+        $runtime=Import-AuthorityPlatformRuntime
+        $fixture=Join-Path $TestDrive ('unix-temp-'+('x'*140))
+        [void][IO.Directory]::CreateDirectory($fixture)
+        $physical=& $runtime.ExportedCommands['Resolve-PlatformPhysicalPath'] -Path $fixture
+        $previous=[Environment]::GetEnvironmentVariable('TMPDIR')
+        try {
+            [Environment]::SetEnvironmentVariable('TMPDIR',$physical)
+            $runId=[guid]::NewGuid().ToString('N')
+            $path=New-AuthorityRunOwnedToolRoot -RunId $runId
+            $path | Should Be (Join-Path $physical ('svt-tools-'+$runId))
+            {New-AuthorityRunOwnedToolRoot -RunId $runId} | Should Throw
+            Test-Path -LiteralPath $path -PathType Container | Should Be $true
+        } finally {[Environment]::SetEnvironmentVariable('TMPDIR',$previous)}
+    }
+    }
+}
+
 Describe 'SYP280 runner inventory performance and compatibility' -Tag 'SYP280' {
     BeforeAll {
         $script:Syp280Runner = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-StandardValidation.ps1'
@@ -2322,7 +2367,8 @@ public sealed class C245SlowTrickleStream : Stream {
         $script:tailRoot = Join-Path $fixtureRoot 'tail-install'
         $sibling = Join-Path $script:tailRoot 'adjacent-root'
         [void](New-Item -ItemType Directory -Path $sibling -Force)
-        Mock Assert-Command { 'python' }
+        $script:tailPython=(Get-Command python -CommandType Application -ErrorAction Stop|Select-Object -First 1).Path
+        Mock Assert-Command { $script:tailPython }
         Mock Assert-NoConflictingPipEnvironment { }
         Mock Assert-NoConflictingPythonEnvironment { }
         Mock Get-GitHubHeaders { @{} }
@@ -2507,6 +2553,7 @@ public sealed class C245NonCooperativeStream : Stream {
 
     # Scenario: The validator is invoked from normal/deep repository locations and normal/nested-long owned TEMP roots.
     # Purpose: Keep test-fixture allocation independent of caller path geometry while exercising the real 84-character authority fallback boundary.
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
     It 'UnitT26h_allocates_authority_tool_root_with_windows_path_length_headroom_<RepositoryGeometry>_<TempGeometry>' -TestCases @(
         @{ RepositoryGeometry='normal-repository'; TempGeometry='normal-temp' },
         @{ RepositoryGeometry='normal-repository'; TempGeometry='long-temp' },
@@ -2697,6 +2744,8 @@ public sealed class C245NonCooperativeStream : Stream {
         }
     }
 
+    }
+
     It 'UnitT27_requires_ordinary_gate_to_execute_retained_checks_without_external_tooling' {
         $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:WorkflowPath
         $requiredWorkflow = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:RequiredPowerShellWorkflowPath
@@ -2723,15 +2772,16 @@ public sealed class C245NonCooperativeStream : Stream {
 
         $normalMain = $gate.Substring($bindingOnlyIndex)
         Assert-NotMatch $normalMain 'ExpectedGoRuntimeVersion|GoCommandPath|STANDARD_GO_|Resolve-StandardValidationTool|Resolve-PythonWheelClosure|New-AuthorityRunOwnedToolRoot|Invoke-AuthorityExternalCommand|skill-validator|skill-tools|SkillSpector|STANDARD_AUTHORITY_PYTHON|validation-security-gate\.json|upstream-adapter\.json|tenStageCompletionClaim' 'Ordinary gate main must not depend on Go, resolvers, providers, fixtures, scanners, or the ten-stage runner.'
-        Assert-Match $normalMain 'Invoke-Pester -Script \$authorityTestPaths -Strict -PassThru' 'The normal main must really execute the retained TestPaths with strict Pester 4 results.'
-        Assert-Match $normalMain 'Import-PowerShellDataFile -LiteralPath \$pesterManifestPath' 'The ordinary gate must inspect the exact pinned Pester manifest before importing it.'
-        Assert-Match $normalMain '\$pesterManifest\.ContainsKey\(''RootModule''\)' 'The ordinary gate must check whether the Pester manifest declares RootModule before reading it.'
-        Assert-Match $normalMain '\$pesterManifest\[''RootModule''\]' 'The ordinary gate must select RootModule through the verified manifest hashtable indexer.'
-        Assert-Match $normalMain '\$pesterManifest\.ContainsKey\(''ModuleToProcess''\)' 'The ordinary gate must check whether the Pester manifest declares ModuleToProcess before reading it.'
-        Assert-Match $normalMain '\$pesterManifest\[''ModuleToProcess''\]' 'The ordinary gate must select ModuleToProcess through the verified manifest hashtable indexer.'
-        Assert-Match $normalMain '\$loadedPester\.Path' 'The loaded Pester path must be checked against its declared root module.'
-        Assert-Match $normalMain '\$loadedPester\.ModuleBase' 'The loaded Pester module base must be checked against the selected installation.'
-        Assert-Match $normalMain 'pesterRootModuleSha256|pesterManifestSha256' 'The imported Pester files must retain their verified file hashes.'
+        Assert-Match $normalMain 'Invoke-AuthorityPesterTests -Runtime' 'The normal gate must execute its Pester engine in an owned child.'
+        Assert-Match $gate 'Invoke-Pester -Script \$authorityTestPaths -Strict -PassThru' 'The normal main must really execute the retained TestPaths with strict Pester 4 results.'
+        Assert-Match $gate 'Import-PowerShellDataFile -LiteralPath \$pesterManifestPath' 'The ordinary gate must inspect the exact pinned Pester manifest before importing it.'
+        Assert-Match $gate '\$pesterManifest\.ContainsKey\(''RootModule''\)' 'The ordinary gate must check whether the Pester manifest declares RootModule before reading it.'
+        Assert-Match $gate '\$pesterManifest\[''RootModule''\]' 'The ordinary gate must select RootModule through the verified manifest hashtable indexer.'
+        Assert-Match $gate '\$pesterManifest\.ContainsKey\(''ModuleToProcess''\)' 'The ordinary gate must check whether the Pester manifest declares ModuleToProcess before reading it.'
+        Assert-Match $gate '\$pesterManifest\[''ModuleToProcess''\]' 'The ordinary gate must select ModuleToProcess through the verified manifest hashtable indexer.'
+        Assert-Match $gate '\$loadedPester\.Path' 'The loaded Pester path must be checked against its declared root module.'
+        Assert-Match $gate '\$loadedPester\.ModuleBase' 'The loaded Pester module base must be checked against the selected installation.'
+        Assert-Match $gate 'pesterRootModuleSha256|pesterManifestSha256' 'The imported Pester files must retain their verified file hashes.'
         Assert-Match $normalMain 'Assert-AuthorityPesterResult -Result \$pesterResult -PesterMajorVersion 4' 'The normal main must reject zero, failed, skipped, pending, or incomplete Pester results.'
         Assert-Match $normalMain 'Get-AuthorityEntryPreflight @bindingParameters' 'The normal main must rebind current source identity after the retained tests run.'
         Assert-Match $normalMain 'Assert-StandardEntryPointResult' 'The normal main must validate the executed result against the candidate binding.'
@@ -2739,7 +2789,7 @@ public sealed class C245NonCooperativeStream : Stream {
         Assert-Match $normalMain '\[IO\.File\]::Move\(\$temporaryResultPath, \$resultPath, \$false\)' 'The result writer must publish with a no-overwrite move.'
         Assert-NotMatch $normalMain '\bMinimumTotalCount\b' 'The gate must not impose a fixed test-count prerequisite.'
 
-        $observedTestPaths = @([regex]::Matches($normalMain, "tests/[^']+\.Tests\.ps1") | ForEach-Object { $_.Value })
+        $observedTestPaths = @(Get-AuthorityTestPaths -Root $script:RepositoryRoot | ForEach-Object { [IO.Path]::GetRelativePath($script:RepositoryRoot,$_).Replace('\','/') })
         $expectedTestPaths = @(
             'tests/internal-source-continuation.Tests.ps1',
             'tests/skill-repository-standard.Tests.ps1',
@@ -4362,8 +4412,18 @@ public sealed class C245NonCooperativeStream : Stream {
             [void](New-Item -ItemType Directory -Path (Join-Path $collisionRoot 'skills/fixture-skill/assets') -Force)
             Write-TestUtf8File -Path (Join-Path $collisionRoot 'skills/fixture-skill/assets/A.txt') -Text 'upper'
             Write-TestUtf8File -Path (Join-Path $collisionRoot 'skills/fixture-skill/assets/a.txt') -Text 'lower'
+            # Case-insensitive macOS volumes cannot materialize both names.
+            # Supply the same two-entry enumeration at that filesystem boundary;
+            # the real adapter must still reject it before component hashing.
+            if (@(Get-ChildItem -LiteralPath (Join-Path $collisionRoot 'skills/fixture-skill/assets') -File).Count -ne 2) {
+                $script:collisionResourceDirectory=Join-Path $collisionRoot 'skills/fixture-skill/assets'
+                Mock Get-ChildItem {
+                    [IO.FileInfo]::new((Join-Path $script:collisionResourceDirectory 'A.txt'))
+                    [IO.FileInfo]::new((Join-Path $script:collisionResourceDirectory 'a.txt'))
+                } -ParameterFilter {$LiteralPath -eq $script:collisionResourceDirectory}
+            }
             $collisionError = $null
-            try { & $script:UpstreamAdapterValidatorPath -PackageRoot $collisionRoot -PolicyPath $script:UpstreamAdapterPolicyPath | Out-Null }
+            try { & $script:UpstreamAdapterValidatorPath -PackageRoot $collisionRoot -PolicyPath $script:UpstreamAdapterPolicyPath -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' -SourceRevision ('a' * 40) -ArchiveSha256 ('b' * 64) | Out-Null }
             catch { $collisionError = $_.Exception.Message }
             Assert-Match $collisionError 'collision' 'Case-colliding nested Skill resources must be blocked before inventory hashing.'
 
@@ -4558,7 +4618,8 @@ public sealed class C245NonCooperativeStream : Stream {
         Assert-Match $gate 'Assert-AuthorityValidationSecurityGate' 'The canonical policy validator must remain available to the retained policy regression checks.'
         $normalMain = $gate.Substring($gate.IndexOf('if ($BindingOnly) {'))
         Assert-NotMatch $normalMain 'validation-security-gate\.json|Assert-AuthorityValidationSecurityGate|Context ''upstream adapter validation''|Context ''skill-validator package validation''|Context ''skill-tools package validation''|Context ''SkillSpector static scan''|tenStageCompletionClaim' 'The ordinary gate must not run policy-controlled providers, package validators, scanners, or the ten-stage lifecycle.'
-        Assert-Match $normalMain 'Invoke-Pester -Script \$authorityTestPaths -Strict -PassThru' 'The ordinary gate must execute its retained Pester checks with strict result handling.'
+        Assert-Match $normalMain 'Invoke-AuthorityPesterTests .* -TestPaths \$authorityTestPaths' 'The ordinary gate must delegate its retained checks to the owned Pester child.'
+        Assert-Match $gate 'Invoke-Pester -Script \$authorityTestPaths -Strict -PassThru' 'The authority child must execute the retained Pester checks with strict result handling.'
         Assert-Match $normalMain "name = 'Standard v1 authority gate'" 'The ordinary result must claim only the retained Standard v1 authority gate check.'
     }
 

@@ -33,6 +33,22 @@ Describe 'SYP258 explicit source validation contract' {
     }
 }
 
+Describe 'SYP353 policy and workflow authority inventory parity' {
+    # Scenario: The gate, normative policy and Core exclusions name their retained tests.
+    # Purpose: Prevent the prior five/six drift without adding a second authority execution.
+    It 'UnitT10_matches_the_six_policy_paths_to_core_exclusions' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $policy=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/validation-security-gate.json')|ConvertFrom-Json
+        $workflow=Get-Content -Raw -Encoding UTF8 (Join-Path $root '.github/workflows/pr8-powershell-validation.yml')
+        . (Join-Path $root 'scripts/Invoke-StandardAuthorityGate.ps1') -DefineFunctionsOnly
+        $actual=@(Get-AuthorityTestPaths -Root $root -Policy $policy)
+        $actual.Count | Should Be 6
+        foreach($path in $policy.ordinaryAuthority.testPaths){$workflow.Contains("'$path'") | Should Be $true}
+        $policy.ordinaryAuthority.testPaths=@($policy.ordinaryAuthority.testPaths[1],$policy.ordinaryAuthority.testPaths[0]) + @($policy.ordinaryAuthority.testPaths|Select-Object -Skip 2)
+        {Get-AuthorityTestPaths -Root $root -Policy $policy} | Should Throw 'exact ordered sequence'
+    }
+}
+
 Describe 'Agent Skill authority workflow contract' {
     BeforeAll {
         $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
@@ -431,7 +447,7 @@ jobs:
         Assert-Match $workflows.Core 'Get-ChildItem -LiteralPath \$testRoot -Filter' 'Windows Core must discover the resolver hardening regression through its complete test-file inventory.'
         $normalMain = $gate.Substring($gate.IndexOf('if ($BindingOnly) {'))
         Assert-NotMatch $normalMain 'ExpectedGoRuntimeVersion|GoCommandPath|STANDARD_GO_|Resolve-StandardValidationTool|Resolve-PythonWheelClosure|New-AuthorityRunOwnedToolRoot|Invoke-AuthorityExternalCommand|skill-validator|skill-tools|SkillSpector|STANDARD_AUTHORITY_PYTHON|tenStageCompletionClaim' 'Normal authority gate must not require retired external dependencies.'
-        Assert-Match $normalMain 'Invoke-Pester -Script \$authorityTestPaths -Strict -PassThru' 'Normal authority gate must execute the exact retained Pester paths.'
+        Assert-Match $normalMain 'Invoke-AuthorityPesterTests -Runtime' 'Normal authority gate must execute the exact retained Pester paths.'
         Assert-Match $normalMain 'Get-AuthorityEntryPreflight @bindingParameters' 'Normal authority gate must rebind actual source hashes after execution.'
     }
 
@@ -534,7 +550,8 @@ jobs:
         }
         Assert-Match $upstream 'SYP-192 Gate 1' 'The upstream decision must bind Plugin conformance to Gate 1.'
         $normalMain = $gate.Substring($gate.IndexOf('if ($BindingOnly) {'))
-        Assert-Match $normalMain 'tests/skill-repository-standard\.Tests\.ps1' 'The ordinary authority gate must retain upstream interoperability source regressions.'
+        . (Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardAuthorityGate.ps1') -DefineFunctionsOnly
+        @(Get-AuthorityTestPaths -Root $script:RepositoryRoot) | Should Contain (Join-Path $script:RepositoryRoot 'tests/skill-repository-standard.Tests.ps1')
         Assert-NotMatch $normalMain 'Validate-UpstreamAdapter\.ps1|upstream-adapter\.json' 'The ordinary authority gate must not invoke the external adapter validator or load its policy.'
     }
 

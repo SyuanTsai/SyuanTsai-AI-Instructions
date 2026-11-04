@@ -4,8 +4,53 @@
   "description": "Strict machine-readable stage order and fail-closed security semantics for Standard v1.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "policy", "stages", "security", "entryPointContract"],
+  "required": ["schemaVersion", "policy", "stages", "security", "entryPointContract", "ordinaryAuthority"],
   "properties": {
+    "ordinaryAuthority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pesterVersion",
+        "testPaths",
+        "skippedCount",
+        "externalToolAcquisition",
+        "processBoundary",
+        "unixIsolation",
+        "limitations"
+      ],
+      "properties": {
+        "pesterVersion": {
+          "const": "4.10.1"
+        },
+        "testPaths": {
+          "const": [
+            "tests/internal-source-continuation.Tests.ps1",
+            "tests/skill-repository-standard.Tests.ps1",
+            "tests/skill-repository-workflows.Tests.ps1",
+            "tests/standard-authority-entry-preflight.Tests.ps1",
+            "tests/standard-entry-point-binding.Tests.ps1",
+            "tests/standard-core-pester-adapter.Tests.ps1"
+          ]
+        },
+        "skippedCount": {
+          "const": 0
+        },
+        "externalToolAcquisition": {
+          "const": false
+        },
+        "processBoundary": {
+          "const": "platform-runtime-p3"
+        },
+        "unixIsolation": {
+          "const": "cooperative"
+        },
+        "limitations": {
+          "const": [
+            "A1: same-account malicious concurrent writers are outside the protection boundary"
+          ]
+        }
+      }
+    },
     "schemaVersion": {
       "const": 1
     },
@@ -29,6 +74,239 @@
     }
   },
   "$defs": {
+    "preparationProcessOwnership": {
+      "description": "Supplemental preparation diagnostics; not a release attestation. Paths bind the selected launcher and leased physical executable. Success requires complete owned cleanup.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "commandPath",
+        "resolvedCommandPath",
+        "pid",
+        "startIdentity",
+        "isolation",
+        "isolationCapability",
+        "limitations",
+        "cleanup"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "commandPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "resolvedCommandPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "startIdentity": {
+          "type": "string",
+          "minLength": 1
+        },
+        "isolation": {
+          "enum": [
+            "windows-job-object",
+            "linux-process-group-subreaper",
+            "macos-process-group"
+          ]
+        },
+        "isolationCapability": {
+          "enum": [
+            "strong",
+            "cooperative"
+          ]
+        },
+        "limitations": {
+          "type": "array",
+          "minItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "cleanup": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "CleanedUp",
+            "Isolation",
+            "Limitations",
+            "Uncertainty",
+            "SignalsSent",
+            "RemainingPids",
+            "UnixObservation",
+            "CaptureReadersStopped",
+            "CaptureResourcesClosed"
+          ],
+          "properties": {
+            "CleanedUp": {
+              "const": true
+            },
+            "Isolation": {
+              "type": "string"
+            },
+            "Limitations": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "Uncertainty": {
+              "type": "null"
+            },
+            "SignalsSent": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "RemainingPids": {
+              "const": []
+            },
+            "UnixObservation": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "RootInventory",
+                    "ExitInventory",
+                    "WaitBinding",
+                    "ExitCodeSource",
+                    "WaitIdResult",
+                    "WaitIdPid",
+                    "WaitIdErrno",
+                    "WaitPidResult",
+                    "WaitPidErrno",
+                    "KqueueExitStatus",
+                    "GroupProbeErrno",
+                    "RootReserved",
+                    "InventoryComplete",
+                    "GroupSignalsSent"
+                  ],
+                  "properties": {
+                    "RootInventory": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "ExitInventory": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "WaitBinding": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "ExitCodeSource": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "WaitIdResult": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "WaitIdPid": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "WaitIdErrno": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "WaitPidResult": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "WaitPidErrno": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "KqueueExitStatus": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "GroupProbeErrno": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "RootReserved": {
+                      "type": "boolean"
+                    },
+                    "InventoryComplete": {
+                      "type": "boolean"
+                    },
+                    "GroupSignalsSent": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              ]
+            },
+            "CaptureReadersStopped": {
+              "const": true
+            },
+            "CaptureResourcesClosed": {
+              "const": true
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "isolation": {
+                "const": "windows-job-object"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "isolationCapability": {
+                "const": "strong"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "isolationCapability": {
+                "const": "cooperative"
+              }
+            }
+          }
+        }
+      ]
+    },
     "stage": {
       "type": "object",
       "additionalProperties": false,

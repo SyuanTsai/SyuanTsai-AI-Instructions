@@ -1,6 +1,22 @@
 {
   "schemaVersion": 1,
   "policy": "canonical-validation-security-gate-v1",
+  "ordinaryAuthority": {
+    "pesterVersion": "4.10.1",
+    "testPaths": [
+      "tests/internal-source-continuation.Tests.ps1",
+      "tests/skill-repository-standard.Tests.ps1",
+      "tests/skill-repository-workflows.Tests.ps1",
+      "tests/standard-authority-entry-preflight.Tests.ps1",
+      "tests/standard-entry-point-binding.Tests.ps1",
+      "tests/standard-core-pester-adapter.Tests.ps1"
+    ],
+    "skippedCount": 0,
+    "externalToolAcquisition": false,
+    "processBoundary": "platform-runtime-p3",
+    "unixIsolation": "cooperative",
+    "limitations": ["A1: same-account malicious concurrent writers are outside the protection boundary"]
+  },
   "stages": [
     {
       "order": 1,

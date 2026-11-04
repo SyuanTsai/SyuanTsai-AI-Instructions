@@ -12,6 +12,126 @@ function New-PlatformPreparationSession {
     return [pscustomobject]@{ Guards=[Collections.Generic.List[IDisposable]]::new(); Files=[Collections.Generic.List[object]]::new() }
 }
 
+# Resolve only caller-selected entry paths. P2 subsequently walks the physical
+# path without following links; payload inventories keep their stricter rules.
+function Resolve-PlatformPhysicalPath {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    $full=[IO.Path]::GetFullPath($Path)
+    $current=[IO.Path]::GetPathRoot($full)
+    foreach($part in $full.Substring($current.Length).Split([char[]]@('/','\'),[StringSplitOptions]::RemoveEmptyEntries)) {
+        $item=Get-Item -Force -LiteralPath (Join-Path $current $part) -ErrorAction Stop
+        if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            $item=$item.ResolveLinkTarget($true)
+            if($null -eq $item){throw 'Selected path has an unresolved link.'}
+        }
+        $current=$item.FullName
+    }
+    return $current
+}
+
+function Open-PlatformPreparationRoot {
+    param([string]$Path,[string]$Platform)
+    if($Platform -ceq 'windows') { return [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenPreparationRoot($Path) }
+    return [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::OpenDirectoryRoot($Path)
+}
+
+function New-PlatformPrivateRoot {
+    param([Parameter(Mandatory=$true)][string]$Parent,[Parameter(Mandatory=$true)][string]$Leaf)
+    [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($Leaf)
+    $platform=[SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetOperatingSystem()
+    $physical=Resolve-PlatformPhysicalPath $Parent
+    $root=Open-PlatformPreparationRoot $physical $platform
+    $child=$null
+    try {
+        $path=Join-Path $physical $Leaf
+        if($platform -ceq 'windows') {
+            $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+            try {$sddl='D:P(A;OICI;FA;;;'+$identity.User.Value+')'} finally {$identity.Dispose()}
+            [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::CreatePrivateDirectory($path,$sddl,$true)
+            $child=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenPreparationDirectory($root,$Leaf)
+        } else {
+            $child=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::CreatePrivateDirectory($physical,$Leaf)
+        }
+        return Get-VerifiedPlatformLeasePath $child $platform
+    } finally {if($null -ne $child){$child.Dispose()};$root.Dispose()}
+}
+
+# Shared bounded launch for resolver acquisition, authority helpers and P4 probes.
+# Environment policy belongs to each caller; the native API receives only strings.
+function Invoke-PlatformPreparationCommand {
+    param([Parameter(Mandatory=$true)][string]$Command,
+        [AllowEmptyCollection()][string[]]$Arguments=@(),
+        [Parameter(Mandatory=$true)][Collections.IDictionary]$Environment,
+        [Parameter(Mandatory=$true)][string]$WorkingDirectory,
+        [ValidateRange(1,3600000)][int]$TimeoutMilliseconds=900000,
+        $PreparationReceipt)
+    $platform=[SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetOperatingSystem()
+    $physical=Resolve-PlatformPhysicalPath $Command
+    $cwd=Resolve-PlatformPhysicalPath $WorkingDirectory
+    $capture=New-PlatformPrivateRoot -Parent ([IO.Path]::GetTempPath()) -Leaf ('platform-command-'+[guid]::NewGuid().ToString('N'))
+    $guards=New-PlatformPreparationSession
+    $process=$null;$out=$null;$err=$null;$runtimeGuards=$null;$moduleGuards=$null
+    $outPath=Join-Path $capture 'stdout';$errPath=Join-Path $capture 'stderr'
+    try {
+        if($null -ne $PreparationReceipt){
+            if($physical -cne (Resolve-PlatformPhysicalPath $PreparationReceipt.executablePath)){throw 'Prepared runtime does not match the selected command.'}
+            $runtimeGuards=Open-PlatformClosureGuards $PreparationReceipt.runtimeClosure $platform
+            $moduleGuards=Open-PlatformClosureGuards $PreparationReceipt.moduleClosure $platform
+            Assert-PlatformAuthorityPester $PreparationReceipt
+        }
+        $directory=Open-PlatformPreparationRoot $cwd $platform;$guards.Guards.Add($directory)
+        $captureRoot=Open-PlatformPreparationRoot $capture $platform;$guards.Guards.Add($captureRoot)
+        $parent=Open-PlatformPreparationRoot ([IO.Path]::GetDirectoryName($physical)) $platform;$guards.Guards.Add($parent)
+        if($platform -ceq 'windows') {
+            $exe=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenFile($parent,[IO.Path]::GetFileName($physical),'Read','OpenExisting')
+            $guards.Guards.Add($exe)
+            [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::AssertIdentity($exe,$exe.Observation,$true)
+            [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::GetVerifiedPath($exe)
+            $out=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenFile($captureRoot,'stdout','Write','CreateNew')
+            $err=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenFile($captureRoot,'stderr','Write','CreateNew')
+        } else {
+            $exe=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::OpenFile($parent,[IO.Path]::GetFileName($physical),'Read','OpenExisting')
+            $guards.Guards.Add($exe)
+            [void][SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::AssertIdentity($exe,$exe.Observation,$true)
+            [void][SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetVerifiedPath($exe)
+            $out=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::OpenFile($captureRoot,'stdout','Write','CreateNew')
+            $err=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::OpenFile($captureRoot,'stderr','Write','CreateNew')
+        }
+        $values=[Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+        foreach($key in $Environment.Keys){$values.Add([string]$key,[string]$Environment[$key])}
+        $deadline=[DateTimeOffset]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+        $process=[SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]::Start($null,$exe,$Arguments,$values,$directory,$deadline,'cooperative',$out,$err,1048576,[IO.Path]::GetFullPath($Command))
+        $out=$null;$err=$null
+        $directExitObserved=$false
+        while(-not ($process.HasExited -and $process.CaptureReadersStopped) -and $null -eq $process.Cleanup -and [DateTimeOffset]::UtcNow -lt $deadline){
+            $directExitObserved=$process.HasExited
+            Start-Sleep -Milliseconds 10
+        }
+        $timedOut= -not ($process.HasExited -and $process.CaptureReadersStopped) -or $process.TerminationReason -ceq 'deadline'
+        $timeoutPhase=if($directExitObserved){'output'}else{'execution'}
+        $reason=$process.TerminationReason
+        $cleanup=$process.Stop([TimeSpan]::FromMilliseconds(100),[DateTimeOffset]::UtcNow.AddSeconds(2),$process.StartIdentity)
+        $receipt=[pscustomobject]@{schemaVersion=1;commandPath=$Command;resolvedCommandPath=$physical;pid=$process.Pid;startIdentity=$process.StartIdentity;isolation=$process.Isolation;isolationCapability=$(if($platform -ceq 'windows'){'strong'}else{'cooperative'});limitations=@('same-account-adversarial-writer-out-of-scope','no-filesystem-isolation')+@($process.Limitations);cleanup=$cleanup}
+        if(-not $cleanup.CleanedUp){throw ('Owned process cleanup is unconfirmed: '+$cleanup.Uncertainty)}
+        if($timedOut){
+            throw "Command exceeded the acquisition deadline ($TimeoutMilliseconds ms); $timeoutPhase deadline exceeded."
+        }
+        if($process.OutputLimitExceeded -or $reason -notin @($null,'')){throw ('Owned command capture failed: '+$reason)}
+        if($null -ne $PreparationReceipt){Assert-PlatformAuthorityPester $PreparationReceipt}
+        return [pscustomobject]@{exitCode=$process.ExitCode;stdout=[IO.File]::ReadAllText($outPath);stderr=[IO.File]::ReadAllText($errPath);processOwnership=$receipt}
+    } finally {
+        if($null -ne $process){$process.Dispose()}
+        if($null -ne $out){$out.Dispose()};if($null -ne $err){$err.Dispose()}
+        Close-PlatformPreparationSession $guards
+        Close-PlatformPreparationSession $moduleGuards
+        Close-PlatformPreparationSession $runtimeGuards
+        # Only these create-only captures can exist; a substituted/nonempty root
+        # fails cleanup instead of recursively removing unknown content.
+        foreach($file in @($outPath,$errPath)){if([IO.File]::Exists($file)){[IO.File]::Delete($file)}}
+        [IO.Directory]::Delete($capture)
+    }
+}
+
 function Close-PlatformPreparationSession {
     param($Session)
     if ($null -ne $Session) { for ($i=$Session.Guards.Count-1; $i -ge 0; $i--) { $Session.Guards[$i].Dispose() }; $Session.Guards.Clear() }
@@ -574,9 +694,11 @@ function Assert-PlatformPesterSnapshotInventory {
 # In particular no caller-controlled loader, host, or module-search setting is
 # copied into the verified runtime process.
 function Get-PlatformProcessOutputSummary {
-    param($Task,[string]$Incomplete='[incomplete]')
-    if($null -eq $Task -or $Task.Status -ne [Threading.Tasks.TaskStatus]::RanToCompletion){return $Incomplete}
-    $text=[string]$Task.GetAwaiter().GetResult()
+    param($Task,[string]$Incomplete='[incomplete]',[AllowEmptyString()][string]$Text)
+    if(-not $PSBoundParameters.ContainsKey('Text')) {
+        if($null -eq $Task -or $Task.Status -ne [Threading.Tasks.TaskStatus]::RanToCompletion){return $Incomplete}
+        $Text=[string]$Task.GetAwaiter().GetResult()
+    }
     $text=[regex]::Replace($text,'\x1b\[[0-?]*[ -/]*[@-~]','')
     # Probe output is controlled, but failure diagnostics may include local
     # absolute paths. Retain only the leaf so CI can expose the unexpected line.
@@ -660,84 +782,47 @@ $__evidence|Add-Member -NotePropertyName warnings -NotePropertyValue ([pscustomo
 $__evidence|ConvertTo-Json -Compress -Depth 16
 '@
     $command+=$wrapper.Replace('__PROBE__',$escapedProbe)
-    $startInfo=[Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName=[IO.Path]::GetFullPath($Executable)
-    $startInfo.UseShellExecute=$false
-    $startInfo.CreateNoWindow=$true
-    $startInfo.RedirectStandardOutput=$true
-    $startInfo.RedirectStandardError=$true
-    $startInfo.EnvironmentVariables.Clear()
-    foreach($name in $Environment.Names) { $startInfo.EnvironmentVariables[[string]$name]=[string]$Environment.Values[$name] }
-    $arguments=[Collections.Generic.List[string]]::new()
-    foreach($argument in @('-NoLogo','-NoProfile','-NonInteractive')){[void]$arguments.Add($argument)}
-    if($Platform -ceq 'windows'){
-        [void]$arguments.Add('-ExecutionPolicy');[void]$arguments.Add('Bypass')
-    }
-    [void]$arguments.Add('-Command');[void]$arguments.Add($command)
-    foreach($argument in $arguments) { [void]$startInfo.ArgumentList.Add($argument) }
-    $process=[Diagnostics.Process]::new(); $process.StartInfo=$startInfo
-    $profileRoot=[IO.Path]::GetFullPath([IO.Path]::Combine([IO.Path]::GetTempPath(),('platform-verified-profile-'+[guid]::NewGuid().ToString('N'))))
-    $profileCreated=$false;$profileGuard=$null;$started=$false;$failure=$null
-    $stdoutTask=$null;$stderrTask=$null
-    $timer=[Diagnostics.Stopwatch]::StartNew()
+    $arguments=@('-NoLogo','-NoProfile','-NonInteractive')
+    if($Platform -ceq 'windows'){$arguments+=@('-ExecutionPolicy','Bypass')}
+    $arguments+=@('-Command',$command)
+    $profileRoot=$null;$primaryFailure=$null
     try {
-        if([IO.Directory]::Exists($profileRoot) -or [IO.File]::Exists($profileRoot)){throw 'Private process profile already exists.'}
-        if($Platform -ceq 'windows') {
-            $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
-            try{$sddl='D:P(A;OICI;FA;;;'+$identity.User.Value+')'}finally{$identity.Dispose()}
-            [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::CreatePrivateDirectory($profileRoot,$sddl)
-            $profileCreated=$true
-            $profileGuard=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenPreparationRoot($profileRoot)
-        } else {
-            [void][IO.Directory]::CreateDirectory($profileRoot,[IO.UnixFileMode]448)
-            $profileCreated=$true
+        $profileRoot=New-PlatformPrivateRoot -Parent ([IO.Path]::GetTempPath()) -Leaf ('platform-verified-profile-'+[guid]::NewGuid().ToString('N'))
+        $values=[Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+        foreach($name in $Environment.Names){$values[[string]$name]=[string]$Environment.Values[$name]}
+        foreach($name in $Environment.ProfileNames){$values[[string]$name]=$profileRoot}
+        try {$result=Invoke-PlatformPreparationCommand -Command $Executable -Arguments $arguments -Environment $values -WorkingDirectory $profileRoot -TimeoutMilliseconds $TimeoutMilliseconds}
+        catch {
+            if($_.Exception.Message -match 'acquisition deadline'){throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform ('Verified runtime '+$_.Exception.Message))}
+            throw
         }
-        foreach($name in $Environment.ProfileNames){$startInfo.EnvironmentVariables[[string]$name]=$profileRoot}
-        $startInfo.WorkingDirectory=$profileRoot
-        if(-not $process.Start()){throw 'The verified runtime process did not start.'}
-        $started=$true
-        $stdoutTask=$process.StandardOutput.ReadToEndAsync(); $stderrTask=$process.StandardError.ReadToEndAsync()
-        # Execution and pipe draining share one monotonic deadline. A descendant
-        # may retain a pipe even after the direct child exits.
-        $remaining=[Math]::Max(0,$TimeoutMilliseconds-[int]$timer.ElapsedMilliseconds)
-        if(-not $process.WaitForExit($remaining)){
-            throw "Verified runtime execution deadline exceeded ($TimeoutMilliseconds ms); stdout: $(Get-PlatformProcessStdoutSummary $stdoutTask); stderr: $(Get-PlatformProcessStderrSummary $stderrTask)"
+        $output=@($result.stdout.TrimEnd("`r","`n") -split "`r?`n")
+        if($result.exitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace($result.stderr) -or $output.Count -ne 1){
+            throw "Verified runtime process failed (exit code $($result.exitCode), stdout lines $($output.Count)); stdout: $(Get-PlatformProcessOutputSummary -Text $result.stdout); stderr: $(Get-PlatformProcessOutputSummary -Text $result.stderr)"
         }
-        $remaining=[Math]::Max(0,$TimeoutMilliseconds-[int]$timer.ElapsedMilliseconds)
-        $reads=[Threading.Tasks.Task]::WhenAll([Threading.Tasks.Task[]]@($stdoutTask,$stderrTask))
-        if(-not $reads.Wait($remaining)){
-            throw "Verified runtime output deadline exceeded ($TimeoutMilliseconds ms); stdout: $(Get-PlatformProcessStdoutSummary $stdoutTask); stderr: $(Get-PlatformProcessStderrSummary $stderrTask)"
-        }
-        $stdout=$stdoutTask.GetAwaiter().GetResult().TrimEnd("`r","`n")
-        $stderr=$stderrTask.GetAwaiter().GetResult()
-        $output=@(if($stdout.Length -gt 0){$stdout -split "`r?`n"})
-        if($process.ExitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace($stderr) -or $output.Count -ne 1){throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform "Verified runtime process failed (exit code $($process.ExitCode), stdout lines $($output.Count)); stdout: $(Get-PlatformProcessStdoutSummary $stdoutTask); stderr: $(Get-PlatformProcessStderrSummary $stderrTask)")}
-        return $output[0]
+        $payload=$output[0]|ConvertFrom-Json -ErrorAction Stop
+        $payload|Add-Member -NotePropertyName processOwnership -NotePropertyValue $result.processOwnership -ErrorAction Stop
+        return $payload|ConvertTo-Json -Depth 16 -Compress
     } catch {
-        $failure=$_
-        if($_.Exception -is [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]){throw}
-        throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform $_.Exception.Message)
+        $primaryFailure=$_.Exception
+        if($primaryFailure -is [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]){throw}
+        throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform $primaryFailure.Message)
     } finally {
-        $shutdownError=$null
-        if($started){
-            try {
-                if(-not $process.HasExited){$process.Kill($true);[void]$process.WaitForExit(2000)}
-            } catch {$shutdownError=$_.Exception.Message}
-            try {
-                # Do not await incomplete reader tasks after the deadline.
-                $process.StandardOutput.BaseStream.Dispose()
-                $process.StandardError.BaseStream.Dispose()
-            } catch {$shutdownError=$_.Exception.Message}
+        # Only the exact fresh private profile owned by this invocation is removed.
+        # Kernel-confirmed process exit can precede the final filesystem release.
+        # Bound that retry and retain the workload failure if reclamation fails.
+        if($null -ne $profileRoot){
+            $cleanupDeadline=[DateTimeOffset]::UtcNow.AddSeconds(1)
+            while($true){
+                try {[IO.Directory]::Delete($profileRoot,$true);break}
+                catch {
+                    if($_.Exception.InnerException -is [IO.IOException] -and [DateTimeOffset]::UtcNow -lt $cleanupDeadline){Start-Sleep -Milliseconds 50;continue}
+                    $message='Private profile cleanup failed: '+$_.Exception.Message
+                    if($null -ne $primaryFailure){$message=$primaryFailure.Message+'; '+$message}
+                    throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform $message)
+                }
+            }
         }
-        $process.Dispose()
-        if($null -ne $profileGuard){$profileGuard.Dispose()}
-        # Only the exact fresh profile owned by this launch is removed. .NET
-        # recursive deletion unlinks reparse points rather than following them.
-        if($profileCreated){
-            try{[IO.Directory]::Delete($profileRoot,$true)}
-            catch{if($null -eq $failure){throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform ('Private profile cleanup failed: '+$_.Exception.Message))}}
-        }
-        if($null -eq $failure -and $null -ne $shutdownError){throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform ('Process cleanup failed: '+$shutdownError))}
     }
 }
 
@@ -799,6 +884,50 @@ function Assert-PlatformPesterImportIdentity {
         -not [string]::Equals([IO.Path]::GetFullPath([string]$Import.moduleBase),[IO.Path]::GetFullPath($ModuleBase),$comparison)) {
         throw (New-PlatformPreparationFailure 'pester-module' $Platform 'Imported Pester identity differs from the verified physical root module or module base.')
     }
+}
+
+# Ordinary authority already trusts the provisioned 4.10.1 installation. Capture
+# that local baseline through P4; this is not a Gallery download or a new pin.
+function Initialize-PlatformAuthorityPester {
+    param([Parameter(Mandatory=$true)][string]$ModulePath,[Parameter(Mandatory=$true)][string]$Executable)
+    $platform=[SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetOperatingSystem()
+    $Executable=Resolve-PlatformPhysicalPath $Executable
+    # The provisioned source is captured as bytes, never executed in place.
+    # P4 rejects links in that payload and verifies the physical destination.
+    $ModulePath=[IO.Path]::GetFullPath($ModulePath)
+    Assert-RegressionPesterManifest $ModulePath
+    $runtimeClosure=Get-PlatformRuntimeClosure ([IO.Path]::GetDirectoryName($Executable)) $platform
+    $identity=Test-PlatformPowerShellIdentity $Executable $PSVersionTable.PSVersion.ToString() $platform ([SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetArchitecture()) $runtimeClosure
+    $root=New-PlatformPrivateRoot -Parent ([IO.Path]::GetTempPath()) -Leaf ('authority-pester-'+[guid]::NewGuid().ToString('N'))
+    $lease=$null;$snapshot=$null;$session=New-PlatformPreparationSession
+    try {
+        $lease=Open-PlatformPreparationRoot $root $platform
+        $snapshot=New-PlatformPesterSnapshot ([IO.Path]::GetDirectoryName($ModulePath)) 'Pester/4.10.1' $root $platform
+        Copy-PhysicalPesterPayload ([IO.Path]::GetDirectoryName($ModulePath)) $lease 'Pester/4.10.1' $platform $snapshot $session
+        Assert-PlatformPesterClosure $root $snapshot.Closure $platform
+        $manifest=Join-Path $root 'Pester/4.10.1/Pester.psd1'
+        Assert-RegressionPesterManifest $manifest
+        $probe="`$m=Import-Module -Name '$($manifest.Replace("'","''"))' -Force -PassThru -ErrorAction Stop;[pscustomobject]@{version=`$m.Version.ToString();path=[IO.Path]::GetFullPath(`$m.Path);moduleBase=[IO.Path]::GetFullPath(`$m.ModuleBase)}|ConvertTo-Json -Compress"
+        $import=(Invoke-PlatformVerifiedProcess $Executable $runtimeClosure $platform $probe $snapshot.Closure)|ConvertFrom-Json
+        Assert-PlatformPesterImportIdentity $import '4.10.1' ([IO.Path]::GetDirectoryName($manifest)) $platform
+        return [pscustomobject]@{modulePath=$manifest;rootPath=$root;moduleClosure=$snapshot.Closure;runtimeClosure=$runtimeClosure;executablePath=$Executable;processOwnership=@($identity.processOwnership,$import.processOwnership);protectionBoundary=(Get-PlatformProtectionBoundary $platform)}
+    } catch {
+        Close-PlatformPreparationSession $session
+        if($null -ne $lease){$lease.Dispose();$lease=$null}
+        [IO.Directory]::Delete($root,$true)
+        throw
+    } finally {
+        Close-PlatformPesterSnapshot $snapshot
+        Close-PlatformPreparationSession $session
+        if($null -ne $lease){$lease.Dispose()}
+    }
+}
+
+function Assert-PlatformAuthorityPester {
+    param([Parameter(Mandatory=$true)]$Receipt)
+    $platform=[SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetOperatingSystem()
+    Assert-PlatformRuntimeClosure $Receipt.executablePath $Receipt.runtimeClosure $platform
+    Assert-PlatformPesterClosure $Receipt.rootPath $Receipt.moduleClosure $platform
 }
 
 function Initialize-VerifiedPlatformPester {
@@ -874,4 +1003,4 @@ function Initialize-VerifiedPlatformPester {
     finally { Close-PlatformPesterSnapshot $payloadSnapshot; Close-PlatformPreparationSession $session; Close-PlatformPreparationSession $runtimeGuards }
 }
 
-Export-ModuleMember -Function Resolve-VerifiedPlatformPowerShell,Initialize-VerifiedPlatformPester,Test-PlatformPowerShellIdentity,New-PlatformVerifiedProcessEnvironment,Start-PlatformVerifiedProcess
+Export-ModuleMember -Function Resolve-VerifiedPlatformPowerShell,Initialize-VerifiedPlatformPester,Test-PlatformPowerShellIdentity,New-PlatformVerifiedProcessEnvironment,Start-PlatformVerifiedProcess,Resolve-PlatformPhysicalPath,New-PlatformPrivateRoot,Invoke-PlatformPreparationCommand,Initialize-PlatformAuthorityPester,Assert-PlatformAuthorityPester

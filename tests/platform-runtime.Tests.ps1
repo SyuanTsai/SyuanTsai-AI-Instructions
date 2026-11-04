@@ -1,6 +1,72 @@
 # SPDX-FileCopyrightText: 2026 SyuanTsai
 # SPDX-License-Identifier: Apache-2.0
 
+Describe 'SYP353 preparation process and private-root delegation' {
+    BeforeAll {
+        Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
+    }
+    # Scenario: The same private child is requested twice and contains caller data.
+    # Purpose: Preserve create-only ownership without adopting or modifying the winner.
+    It 'InterT10_private_root_creation_rejects_existing_directory' {
+        $root=New-PlatformPrivateRoot -Parent $TestDrive -Leaf 'owned'
+        [IO.File]::WriteAllText((Join-Path $root 'sentinel'),'keep')
+        {New-PlatformPrivateRoot -Parent $TestDrive -Leaf 'owned'} | Should Throw
+        [IO.File]::ReadAllText((Join-Path $root 'sentinel')) | Should Be 'keep'
+    }
+    # Scenario: A prepared command receives arguments and explicit environment, then exits nonzero.
+    # Purpose: Bind physical launcher identity and require complete owned cleanup on every host.
+    It 'InterT20_preparation_preserves_streams_exit_and_ownership_receipt' {
+        $environment=[Collections.Generic.Dictionary[string,string]]::new()
+        if($IsWindows){$environment['SystemRoot']=$env:SystemRoot}
+        $environment['P53_VALUE']='literal value'
+        $command=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $result=Invoke-PlatformPreparationCommand -Command $command -Arguments @('-NoProfile','-NonInteractive','-Command','[Console]::Out.Write($env:P53_VALUE);[Console]::Error.Write("diagnostic");exit 23') -Environment $environment -WorkingDirectory $TestDrive -TimeoutMilliseconds 15000
+        $result.exitCode | Should Be 23
+        $result.stdout | Should Be 'literal value'
+        $result.stderr | Should Be 'diagnostic'
+        $result.processOwnership.cleanup.CleanedUp | Should Be $true
+        $result.processOwnership.cleanup.CaptureReadersStopped | Should Be $true
+        $result.processOwnership.commandPath | Should Be $command
+        $result.processOwnership.resolvedCommandPath | Should Be (Resolve-PlatformPhysicalPath $command)
+        $result.processOwnership.isolationCapability | Should Be $(if($IsWindows){'strong'}else{'cooperative'})
+        if(-not $IsWindows){@($result.processOwnership.limitations).Count | Should BeGreaterThan 0}
+        $schema=Get-Content -Raw -Encoding UTF8 (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/schemas/validation-security-gate-v1.schema.json')|ConvertFrom-Json
+        $receiptSchema=$schema.'$defs'.preparationProcessOwnership|ConvertTo-Json -Depth 30
+        Test-Json -Json ($result.processOwnership|ConvertTo-Json -Depth 20) -Schema $receiptSchema | Should Be $true
+        $tampered=$result.processOwnership|ConvertTo-Json -Depth 20|ConvertFrom-Json
+        $tampered.cleanup.CleanedUp=$false
+        Test-Json -Json ($tampered|ConvertTo-Json -Depth 20) -Schema $receiptSchema -ErrorAction SilentlyContinue | Should Be $false
+    }
+    # Scenario: Ordinary authority captures its provisioned Pester, runs it, then its snapshot changes.
+    # Purpose: Verify real P4 preparation and P2/P3 execution; mutation must block before the next child starts.
+    It 'InterT30_authority_preparation_rechecks_the_physical_pester_snapshot' {
+        $pester=@(Get-Module -ListAvailable Pester | Where-Object Version -EQ ([version]'4.10.1'))
+        $pester.Count | Should Be 1
+        $command=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $receipt=Initialize-PlatformAuthorityPester -ModulePath $pester[0].Path -Executable $command
+        try {
+            $receipt.processOwnership.Count | Should Be 2
+            $receipt.moduleClosure.files.Count | Should BeGreaterThan 0
+            $environment=[Collections.Generic.Dictionary[string,string]]::new()
+            foreach($entry in [Environment]::GetEnvironmentVariables().GetEnumerator()){$environment[[string]$entry.Key]=[string]$entry.Value}
+            $probe="`$m=Import-Module -Name '$($receipt.modulePath.Replace("'","''"))' -PassThru;[Console]::Out.Write(`$m.Version.ToString())"
+            $arguments=@('-NoProfile','-NonInteractive')
+            if($IsWindows){$arguments+=@('-ExecutionPolicy','Bypass')}
+            $arguments+=@('-Command',$probe)
+            $run=Invoke-PlatformPreparationCommand -Command $command -Arguments $arguments -Environment $environment -WorkingDirectory $TestDrive -PreparationReceipt $receipt
+            $run.exitCode | Should Be 0
+            $run.stdout | Should Be '4.10.1'
+            $run.processOwnership.cleanup.CleanedUp | Should Be $true
+            [IO.File]::AppendAllText($receipt.modulePath,"`n# changed snapshot")
+            {Assert-PlatformAuthorityPester -Receipt $receipt} | Should Throw 'closure'
+            $marker=Join-Path $TestDrive 'must-not-launch'
+            $arguments=@('-NoProfile','-Command',"[IO.File]::WriteAllText('$($marker.Replace("'","''"))','launched')")
+            {Invoke-PlatformPreparationCommand -Command $command -Arguments $arguments -Environment $environment -WorkingDirectory $TestDrive -PreparationReceipt $receipt} | Should Throw 'closure'
+            Test-Path -LiteralPath $marker | Should Be $false
+        } finally {[IO.Directory]::Delete($receipt.rootPath,$true)}
+    }
+}
+
 Describe 'Platform owned processes P3' {
     BeforeAll {
         Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
