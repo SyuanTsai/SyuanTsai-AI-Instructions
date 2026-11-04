@@ -90,6 +90,22 @@ Describe 'Runner observed SkillSpector native compatibility' {
         { Assert-StandardValidationToolEnvelope -Stdout ($envelope | ConvertTo-Json -Compress) -ProcessResult $result -CandidateId ('a'*64) -Context 'probe-success-scan-failure' -ProbeContext ([pscustomobject]@{eventId='fixture'}) } | Should Throw "process status was 'failed'"
     }
 
+    # Scenario: The native compatibility probe is cancelled before it can establish a platform result.
+    # Purpose: Propagate cancellation without classifying it as an incompatibility or blocker.
+    Context 'Cancelled native probe' {
+        It 'UnitT62_propagates_cancellation_without_classifying_the_probe_failure' {
+            $context=[pscustomobject]@{commandPath='fixture';arguments=@();outputPath=(Join-Path $TestDrive 'cancelled-probe.json')}
+            Mock Assert-StandardValidationNativeProbeContextUnchanged {}
+            Mock Invoke-StandardValidationProcess { [pscustomobject]@{status='cancelled';exitCode=1} }
+            Mock Write-StandardValidationJsonCreate {}
+            Mock Get-StandardValidationFileSha256 { 'a'*64 }
+            Mock Register-StandardValidationEvidenceArtifact {}
+            Mock Get-StandardValidationNativeProbeFailureKind { throw 'The cancellation must not be classified.' }
+            { Invoke-StandardValidationNativeProbe -ProbeContext $context -WorkingDirectory $TestDrive -TimeoutSeconds 10 -CancellationPath (Join-Path $TestDrive 'cancel') -HostPlatform linux -Policy ([pscustomobject]@{}) } | Should Throw 'CANCELLED|'
+            Assert-MockCalled Get-StandardValidationNativeProbeFailureKind -Times 0 -Exactly -Scope It
+        }
+    }
+
     # Scenario: The native compatibility step returns success and normal Static then fails.
     # Purpose: Exercise dispatch sequencing; a successful probe cannot replace or waive the scan.
     # Pester 4 keeps mocks until Context/Describe exit, not It exit.

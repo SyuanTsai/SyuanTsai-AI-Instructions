@@ -3570,6 +3570,7 @@ function Invoke-StandardValidationNativeProbe {
     [void](Write-StandardValidationJsonCreate -Path $ProbeContext.outputPath -Value $raw -Context 'native probe raw output')
     $hash = Get-StandardValidationFileSha256 -Path $ProbeContext.outputPath -Context 'native probe raw output'
     Register-StandardValidationEvidenceArtifact -Path $ProbeContext.outputPath -ExpectedSha256 $hash -Context 'native probe raw output'
+    if ([string]$process.status -ceq 'cancelled') { throw 'CANCELLED|The SkillSpector native probe was cancelled.' }
     if ([string]$process.status -ceq 'passed' -and [int]$process.exitCode -eq 0 -and
         $process.cleanedUp -eq $true -and -not $process.outputQuotaExceeded -and -not $process.outputTruncated) { return $null }
     $kind = Get-StandardValidationNativeProbeFailureKind -Process $process -Platform $HostPlatform
