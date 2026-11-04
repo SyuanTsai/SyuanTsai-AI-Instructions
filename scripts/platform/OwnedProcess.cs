@@ -57,7 +57,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private readonly ManualResetEventSlim cleaned = new ManualResetEventSlim(false);
         private readonly ManualResetEventSlim captureCancelled = new ManualResetEventSlim(false);
         private long captureStopDeadlineTicks = Int64.MaxValue;
-        private int readersRunning;
+        private int readersRunning, readersAtEof;
         private readonly DateTimeOffset deadline;
         private readonly long limit;
         private volatile bool outputExceeded, disposed, captureClosed;
@@ -83,6 +83,9 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         public string TerminationReason { get { lock (gate) return reason; } }
         public ProcessCleanupReceipt Cleanup { get { lock (gate) return cleanup; } }
         public bool CaptureReadersStopped { get { return (outReader == null || !outReader.IsAlive) && (errReader == null || !errReader.IsAlive); } }
+        // Stopped readers may have hit their deadline or been cancelled. Only
+        // two observed EOFs prove that descendants released both inherited pipes.
+        public bool CaptureCompletedNaturally { get { return Volatile.Read(ref readersAtEof) == 2 && CaptureReadersStopped; } }
         public bool CaptureResourcesClosed { get { return captureClosed; } }
         public UnixProcessObservation UnixObservation { get { lock (gate) { var unix = control as UnixProcessControl; return unix == null ? null : unix.Observation; } } }
         public bool WaitForExit(TimeSpan timeout) { return exited.Wait(timeout); }
@@ -309,7 +312,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                             }
                             if (accepted < decoded) { outputExceeded = true; return; }
                         }
-                        if (count == 0) return;
+                        if (count == 0) { Interlocked.Increment(ref readersAtEof); return; }
                     }
                 }
                 catch (Exception ex) { lock (outputGate) { if (!captureClosed) captureFailure = ex.Message; } }

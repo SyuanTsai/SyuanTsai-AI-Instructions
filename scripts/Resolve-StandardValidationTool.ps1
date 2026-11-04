@@ -859,7 +859,9 @@ function Get-DirectoryClosureIdentity {
             [void]$entries.Add($symlinkEntry)
             continue
         }
-        if ($item.PSIsContainer) { continue }
+        # FileSystemInfo from a native inventory need not have the provider's
+        # PSIsContainer extended property. Classify the actual filesystem type.
+        if ($item -is [IO.DirectoryInfo]) { continue }
         if ($item -isnot [IO.FileInfo]) {
             throw "Installed tool closure contains a non-regular filesystem entry: $($item.FullName)"
         }

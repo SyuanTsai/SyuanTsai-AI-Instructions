@@ -4418,8 +4418,13 @@ public sealed class C245NonCooperativeStream : Stream {
             if (@(Get-ChildItem -LiteralPath (Join-Path $collisionRoot 'skills/fixture-skill/assets') -File).Count -ne 2) {
                 $script:collisionResourceDirectory=Join-Path $collisionRoot 'skills/fixture-skill/assets'
                 Mock Get-ChildItem {
-                    [IO.FileInfo]::new((Join-Path $script:collisionResourceDirectory 'A.txt'))
-                    [IO.FileInfo]::new((Join-Path $script:collisionResourceDirectory 'a.txt'))
+                    foreach($name in @('A.txt','a.txt')) {
+                        $entry=[IO.FileInfo]::new((Join-Path $script:collisionResourceDirectory $name))
+                        # Match the provider surface while preserving the two
+                        # distinct names that this volume cannot materialize.
+                        $entry | Add-Member -NotePropertyName PSIsContainer -NotePropertyValue $false -Force
+                        $entry
+                    }
                 } -ParameterFilter {$LiteralPath -eq $script:collisionResourceDirectory}
             }
             $collisionError = $null
@@ -4443,7 +4448,7 @@ public sealed class C245NonCooperativeStream : Stream {
             Write-TestUtf8File -Path (Join-Path $skillRootCollisionRoot 'skills/Fixture-Skill/SKILL.md') -Text "---`nname: fixture-skill`ndescription: A second case-colliding Skill root.`n---`n`n# Fixture`n"
             Write-TestUtf8File -Path (Join-Path $skillRootCollisionRoot '.codex-plugin/plugin.json') -Text '{"name":"fixture-plugin","skills":["./skills/fixture-skill","./skills/Fixture-Skill"]}'
             $skillRootCollisionError = $null
-            try { & $script:UpstreamAdapterValidatorPath -PackageRoot $skillRootCollisionRoot -PolicyPath $script:UpstreamAdapterPolicyPath | Out-Null }
+            try { & $script:UpstreamAdapterValidatorPath -PackageRoot $skillRootCollisionRoot -PolicyPath $script:UpstreamAdapterPolicyPath -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' -SourceRevision ('a' * 40) -ArchiveSha256 ('b' * 64) | Out-Null }
             catch { $skillRootCollisionError = $_.Exception.Message }
             Assert-Match $skillRootCollisionError 'collision' 'Declared Skill roots that collide under portable case rules must be blocked.'
         }

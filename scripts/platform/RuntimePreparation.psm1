@@ -103,18 +103,21 @@ function Invoke-PlatformPreparationCommand {
         $process=[SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]::Start($null,$exe,$Arguments,$values,$directory,$deadline,'cooperative',$out,$err,1048576,[IO.Path]::GetFullPath($Command))
         $out=$null;$err=$null
         $directExitObserved=$false
-        while(-not ($process.HasExited -and $process.CaptureReadersStopped) -and $null -eq $process.Cleanup -and [DateTimeOffset]::UtcNow -lt $deadline){
+        while(-not ($process.HasExited -and $process.CaptureCompletedNaturally) -and $null -eq $process.Cleanup -and [DateTimeOffset]::UtcNow -lt $deadline){
             $directExitObserved=$process.HasExited
             Start-Sleep -Milliseconds 10
         }
-        $timedOut= -not ($process.HasExited -and $process.CaptureReadersStopped) -or $process.TerminationReason -ceq 'deadline'
+        $timedOut= [DateTimeOffset]::UtcNow -ge $deadline -or $process.TerminationReason -ceq 'deadline'
         $timeoutPhase=if($directExitObserved){'output'}else{'execution'}
         $reason=$process.TerminationReason
         $cleanup=$process.Stop([TimeSpan]::FromMilliseconds(100),[DateTimeOffset]::UtcNow.AddSeconds(2),$process.StartIdentity)
         $receipt=[pscustomobject]@{schemaVersion=1;commandPath=$Command;resolvedCommandPath=$physical;pid=$process.Pid;startIdentity=$process.StartIdentity;isolation=$process.Isolation;isolationCapability=$(if($platform -ceq 'windows'){'strong'}else{'cooperative'});limitations=@('same-account-adversarial-writer-out-of-scope','no-filesystem-isolation')+@($process.Limitations);cleanup=$cleanup}
         if(-not $cleanup.CleanedUp){throw ('Owned process cleanup is unconfirmed: '+$cleanup.Uncertainty)}
         if($timedOut){
-            throw "Command exceeded the acquisition deadline ($TimeoutMilliseconds ms); $timeoutPhase deadline exceeded."
+            # Deadline/cleanup takes precedence over interpreting probe payloads.
+            # Keep bounded stderr as well, including a child's JSON parse failure.
+            $diagnostic=Get-PlatformProcessOutputSummary -Text ([IO.File]::ReadAllText($errPath))
+            throw "Command exceeded the acquisition deadline ($TimeoutMilliseconds ms); $timeoutPhase deadline exceeded. stderr: $diagnostic"
         }
         if($process.OutputLimitExceeded -or $reason -notin @($null,'')){throw ('Owned command capture failed: '+$reason)}
         if($null -ne $PreparationReceipt){Assert-PlatformAuthorityPester $PreparationReceipt}
@@ -268,17 +271,18 @@ function Get-PlatformRuntimeClosure {
     while ($pending.Count -gt 0) {
         $directory = $pending.Dequeue()
         $item = Get-Item -LiteralPath $directory -Force -ErrorAction Stop
+        $directoryRelative=[IO.Path]::GetRelativePath($rootPath,$directory).Replace('\','/')
         if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $null -ne $item.LinkType) {
-            throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform 'Runtime closure requires physical directories.')
+            throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform "Runtime closure requires physical directories: '$directoryRelative'.")
         }
         # Do not recurse through an unchecked directory or junction.
         foreach ($child in @(Get-ChildItem -LiteralPath $directory -Force -ErrorAction Stop)) {
+            $relative = $child.FullName.Substring($rootPath.Length+1).Replace([IO.Path]::DirectorySeparatorChar,'/')
             if (($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $null -ne $child.LinkType) {
-                throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform 'Runtime closure contains a link.')
+                throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform "Runtime closure contains a link: '$relative' (LinkType='$($child.LinkType)').")
             }
             if ($child.PSIsContainer) { $pending.Enqueue($child.FullName); continue }
             [void](Test-PhysicalPlatformFile $child.FullName $Platform 'powershell-runtime')
-            $relative = $child.FullName.Substring($rootPath.Length+1).Replace([IO.Path]::DirectorySeparatorChar,'/')
             [void](Assert-SafePlatformArchivePath $relative $Platform)
             $files.Add($relative,[pscustomobject]@{path=$relative;sha256=(Get-PlatformSha256 $child.FullName)})
         }
