@@ -343,9 +343,18 @@ function Invoke-PlatformAdapter {
     return & $commandName @Arguments
 }
 
-function Open-PlatformDirectory { [CmdletBinding()] param([Parameter(Mandatory = $true)][string] $Root, [Parameter(Mandatory = $true)][string] $RelativePath, [switch] $CreatePrivate) Invoke-PlatformAdapter 'Open-PlatformDirectory' @{ Root=$Root; RelativePath=$RelativePath; CreatePrivate=$CreatePrivate } }
+function Open-PlatformDirectory {
+    [CmdletBinding(DefaultParameterSetName='Child')]
+    param(
+        [Parameter(Mandatory=$true)][string] $Root,
+        [Parameter(Mandatory=$true,ParameterSetName='Child')][string] $RelativePath,
+        [Parameter(ParameterSetName='Child')][switch] $CreatePrivate,
+        [Parameter(Mandatory=$true,ParameterSetName='Root')][switch] $RootOnly
+    )
+    Invoke-PlatformAdapter 'Open-PlatformDirectory' $PSBoundParameters
+}
 function Open-PlatformFile { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)][string] $Access, [Parameter(Mandatory = $true)][string] $CreateMode) Invoke-PlatformAdapter 'Open-PlatformFile' @{ ParentLease=$ParentLease; Leaf=$Leaf; Access=$Access; CreateMode=$CreateMode } }
-function Assert-PlatformFileIdentity { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Lease, [Parameter(Mandatory = $true)] $Expected, [switch] $SingleLink) Invoke-PlatformAdapter 'Assert-PlatformFileIdentity' @{ Lease=$Lease; Expected=$Expected; SingleLink=$SingleLink } }
+function Assert-PlatformFileIdentity { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Lease, [Parameter(Mandatory = $true)] $Expected, [switch] $SingleLink, [switch] $VerifyPath) Invoke-PlatformAdapter 'Assert-PlatformFileIdentity' $PSBoundParameters }
 function Enter-PlatformLock { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)][ValidateSet('Shared','Exclusive')][string] $Mode, [Parameter(Mandatory = $true)][TimeSpan] $Timeout) Invoke-PlatformAdapter 'Enter-PlatformLock' $PSBoundParameters }
 function Publish-PlatformFile { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)] $StageLease, [Parameter(Mandatory = $true)] $ExpectedState, [switch] $NoReplace, $Journal) Invoke-PlatformAdapter 'Publish-PlatformFile' $PSBoundParameters }
 function Remove-PlatformOwnedFile { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)] $ExpectedState, $Journal) Invoke-PlatformAdapter 'Remove-PlatformOwnedFile' $PSBoundParameters }

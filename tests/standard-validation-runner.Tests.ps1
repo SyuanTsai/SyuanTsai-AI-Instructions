@@ -1,5 +1,119 @@
 
 
+Describe 'Validator reservation name binding' {
+    BeforeAll {
+        $script:ReservationFixtureRoot = if ($TestDrive -is [IO.DirectoryInfo]) { $TestDrive.FullName } else { [string]$TestDrive }
+        if ($IsMacOS -and $script:ReservationFixtureRoot.StartsWith('/var/')) { $script:ReservationFixtureRoot = '/private' + $script:ReservationFixtureRoot }
+        . (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-StandardValidation.ps1') -CandidateRoot $script:ReservationFixtureRoot -AdapterPath 'unused' -ArtifactsRoot $script:ReservationFixtureRoot -SourceRepository 'https://example.test/fixture.git' -SourceRevision ('a'*40) -BaseRevision ('b'*40) -DefineFunctionsOnly
+        $script:ReservationOriginalAssert = Get-Command Assert-StandardValidationOutputReservation
+        function Invoke-ReservationNameMutation {
+            param([string]$Target, [string]$Replacement)
+            $child = Join-Path $script:ReservationFixtureRoot ('mutate-' + [guid]::NewGuid().ToString('N') + '.ps1')
+            [IO.File]::WriteAllText($child,@'
+param([string]$Target, [string]$Replacement)
+$ErrorActionPreference = 'Stop'
+try { [IO.Directory]::Move($Target, $Target + '.moved') }
+catch [IO.IOException] { [Console]::Write('rename-denied'); exit 0 }
+if ($Replacement -eq 'directory') { [void][IO.Directory]::CreateDirectory($Target) }
+else { [void][IO.Directory]::CreateSymbolicLink($Target, $Target + '.moved') }
+[Console]::Write('renamed')
+'@,[Text.UTF8Encoding]::new($false))
+            $hostPath = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
+            Invoke-StandardValidationProcess -Command $hostPath -Arguments @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$child,$Target,$Replacement) -WorkingDirectory $script:ReservationFixtureRoot -Environment @{} -TimeoutSeconds 15
+        }
+    }
+    # Scenario: A root path and an ordinary child are decomposed without touching the filesystem.
+    # Purpose: Preserve the root separator and never pass an empty relative component to P2.
+    if ($IsWindows) {
+        It 'UnitT10_preserves_windows_root_and_child_components' {
+            foreach ($path in @('C:\', [IO.Path]::GetDirectoryName('D:\x.exe'))) {
+                $binding = Get-StandardValidationDirectoryBinding -FullPath $path
+                $binding.Root | Should Be $path
+                $binding.RootOnly | Should Be $true
+            }
+            $binding = Get-StandardValidationDirectoryBinding -FullPath 'D:\child\'
+            $binding.Root | Should Be 'D:\'
+            $binding.RelativePath | Should Be 'child'
+            $binding.RootOnly | Should Be $false
+        }
+    } else {
+        It 'UnitT10_preserves_unix_root_and_child_components' {
+            $binding = Get-StandardValidationDirectoryBinding -FullPath '/'
+            $binding.Root | Should Be '/'
+            $binding.RootOnly | Should Be $true
+            $binding = Get-StandardValidationDirectoryBinding -FullPath '/usr'
+            $binding.Root | Should Be '/'
+            $binding.RelativePath | Should Be 'usr'
+            $binding.RootOnly | Should Be $false
+        }
+    }
+    # Scenario: The validator opens the current filesystem root without creating anything.
+    # Purpose: Exercise the root-only P2 route through the production helper.
+    It 'InterT20_opens_the_filesystem_root_read_only' {
+        $lease = Open-StandardValidationDirectory -Path ([IO.Path]::GetPathRoot($script:ReservationFixtureRoot))
+        try { $lease.Observation.Kind | Should Be 'directory' } finally { $lease.Dispose() }
+    }
+    if (-not $IsWindows) {
+        # Scenario: A real child renames either the parent or an ancestor, then substitutes a directory or symlink.
+        # Purpose: Reject publication at a moved reservation even when a symlink still reaches the same inode.
+        It 'InterT30_rejects_child_output_ancestor_substitution_<Ancestor>_<Replacement>' -TestCases @(
+            @{ Ancestor=$false; Replacement='directory' }, @{ Ancestor=$true; Replacement='directory' },
+            @{ Ancestor=$false; Replacement='symlink' }, @{ Ancestor=$true; Replacement='symlink' }
+        ) {
+            param($Ancestor,$Replacement)
+            $root = Join-Path $script:ReservationFixtureRoot ([guid]::NewGuid().ToString('N'))
+            $parent = Join-Path $root 'output'
+            $reservation = New-StandardValidationOutputReservation -Path (Join-Path $parent 'result.json')
+            try {
+                $target = if ($Ancestor) { $root } else { $parent }
+                $child = Invoke-ReservationNameMutation -Target $target -Replacement $Replacement
+                $child.status | Should Be 'passed'
+                $child.stdout | Should Be 'renamed'
+                { Write-StandardValidationJsonReserved -Value @{ state='PASS' } -Path $reservation.path -Stream $reservation.stream -Token $reservation.token } | Should Throw
+                (Assert-PlatformFileIdentity -Lease $reservation.stream -Expected $reservation.stream.Observation -SingleLink).Size | Should Be 0
+            } finally { $reservation.stream.Dispose() }
+        }
+        Context 'Child mutation between publication checks' {
+            # Scenario: A real child replaces an ancestor after the pre-write validation succeeds.
+            # Purpose: Require the post-write name check as well as the pre-write check.
+            It 'InterT40_rejects_name_substitution_after_prepublication_check' {
+                $script:ReservationMutationTarget = Join-Path $script:ReservationFixtureRoot ([guid]::NewGuid().ToString('N'))
+                $reservation = New-StandardValidationOutputReservation -Path (Join-Path $script:ReservationMutationTarget 'nested/result.json')
+                Mock Assert-StandardValidationOutputReservation {
+                    param($Path,$Stream,$Token,$Context)
+                    & $script:ReservationOriginalAssert -Path $Path -Stream $Stream -Token $Token -Context $Context
+                    $child = Invoke-ReservationNameMutation -Target $script:ReservationMutationTarget -Replacement 'symlink'
+                    $child.status | Should Be 'passed'
+                    $child.stdout | Should Be 'renamed'
+                }
+                try {
+                    { Write-StandardValidationJsonReserved -Value @{ state='PASS' } -Path $reservation.path -Stream $reservation.stream -Token $reservation.token } | Should Throw
+                    Assert-MockCalled Assert-StandardValidationOutputReservation -Times 1 -Exactly -Scope It
+                    (Assert-PlatformFileIdentity -Lease $reservation.stream -Expected $reservation.stream.Observation -SingleLink).Size | Should BeGreaterThan 0
+                } finally { $reservation.stream.Dispose() }
+            }
+        }
+    } else {
+        # Scenario: A real child tries to rename an output parent or ancestor held by Windows directory guards.
+        # Purpose: Prove the rename is denied and publication still reaches the requested name.
+        It 'InterT30_windows_guards_deny_child_ancestor_rename_<Ancestor>' -TestCases @(@{Ancestor=$false},@{Ancestor=$true}) {
+            param($Ancestor)
+            $root = Join-Path $script:ReservationFixtureRoot ([guid]::NewGuid().ToString('N'))
+            $parent = Join-Path $root 'output'
+            $reservation = New-StandardValidationOutputReservation -Path (Join-Path $parent 'result.json')
+            try {
+                $target = if ($Ancestor) { $root } else { $parent }
+                $child = Invoke-ReservationNameMutation -Target $target -Replacement 'directory'
+                $child.status | Should Be 'passed'
+                $child.stdout | Should Be 'rename-denied'
+                Write-StandardValidationJsonReserved -Value @{ state='PASS' } -Path $reservation.path -Stream $reservation.stream -Token $reservation.token
+                ([Text.Encoding]::UTF8.GetString($reservation.stream.ReadAllBytes(4096)) | ConvertFrom-Json).state | Should Be 'PASS'
+                (Test-Path -LiteralPath $reservation.path -PathType Leaf) | Should Be $true
+            } finally { $reservation.stream.Dispose() }
+        }
+    }
+}
+
 Describe 'Validator shared process evidence' {
     BeforeAll {
         $TestDrive = if ($TestDrive -is [IO.DirectoryInfo]) { $TestDrive.FullName } else { [string]$TestDrive }

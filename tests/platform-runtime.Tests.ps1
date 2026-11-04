@@ -2220,6 +2220,29 @@ Describe 'Platform runtime contract' {
     }
 }
 
+Describe 'Platform P2 root directory leases' {
+    BeforeAll {
+        Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
+    }
+    # Scenario: Open an existing filesystem root twice, without creating or changing anything beneath it.
+    # Purpose: Root-only leases preserve no-follow identity checks without permitting empty relative paths.
+    It 'InterT10_opens_and_verifies_existing_filesystem_root' {
+        $root = [IO.Path]::GetPathRoot($PSHOME)
+        $first = Open-PlatformDirectory -Root $root -RootOnly
+        try {
+            $second = Open-PlatformDirectory -Root $root -RootOnly
+            try {
+                $observed = Assert-PlatformFileIdentity -Lease $second -Expected $first.Observation -VerifyPath
+                $observed.Kind | Should Be 'directory'
+                $observed.Inode | Should Be $first.Observation.Inode
+                { $first.WriteNewBytes([byte[]]@(1)) } | Should Throw
+                { Open-PlatformDirectory -Root $root -RelativePath '' } | Should Throw
+                { Open-PlatformDirectory -Root $root -RootOnly -CreatePrivate } | Should Throw
+            } finally { $second.Dispose() }
+        } finally { $first.Dispose() }
+    }
+}
+
 Describe 'Platform P2 primitives' {
     BeforeAll {
         $script:P2Manifest = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1'
@@ -2644,6 +2667,7 @@ try {
         [IO.Directory]::CreateSymbolicLink($alias,$target) | Out-Null
         { Open-PlatformDirectory -Root $script:P2Root -RelativePath 'ancestor-alias/child' } | Should Throw
         { Open-PlatformDirectory -Root $alias -RelativePath 'child' } | Should Throw
+        { Open-PlatformDirectory -Root $alias -RootOnly } | Should Throw
     }
 
     # Scenario: A dangling link is encountered during private directory or file creation.
@@ -2795,6 +2819,7 @@ try {
         try {
             { Open-PlatformDirectory -Root $script:P2Root -RelativePath 'junction-alias/child' } | Should Throw
             { Open-PlatformDirectory -Root $alias -RelativePath 'child' } | Should Throw
+            { Open-PlatformDirectory -Root $alias -RootOnly } | Should Throw
             $parent = Open-PlatformDirectory -Root $script:P2Root -RelativePath 'junction-target'
             try { { Open-PlatformFile -ParentLease $parent -Leaf 'child' -Access Read -CreateMode OpenExisting } | Should Throw }
             finally { $parent.Dispose() }

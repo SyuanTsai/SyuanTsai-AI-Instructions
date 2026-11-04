@@ -419,9 +419,9 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             }
         }
 
-        // Internal absolute-directory anchor, including /. Public relative paths
+        // Explicit existing absolute-directory anchor, including /. Relative paths
         // still require ordinary nonempty components; no traversal exception.
-        internal static UnixLease OpenDirectoryRoot(string root)
+        public static UnixLease OpenDirectoryRoot(string root)
         {
             ValidateAbi();
             SafeFd directory = WalkRoot(root);

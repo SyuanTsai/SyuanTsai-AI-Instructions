@@ -46,8 +46,8 @@ function New-WindowsPlatformNotImplementedError {
 }
 
 function Open-WindowsPlatformDirectory {
-    param([Parameter(Mandatory = $true)][string] $Root, [Parameter(Mandatory = $true)][string] $RelativePath, [switch] $CreatePrivate)
-    $parts = [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Segments($RelativePath)
+    param([Parameter(Mandatory = $true)][string] $Root, [string] $RelativePath, [switch] $CreatePrivate, [switch] $RootOnly)
+    $parts = if ($RootOnly) { @() } else { [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Segments($RelativePath) }
     # Restrict anchors to absolute local drive roots. UNC/device paths need a separate probe.
     if ($Root -notmatch '^[A-Za-z]:[\\/]') {
         throw [ArgumentException]::new('An absolute local drive root is required.')
@@ -102,8 +102,10 @@ function Open-WindowsPlatformDirectory {
 }
 
 function Assert-WindowsPlatformFileIdentity {
-    param([Parameter(Mandatory = $true)] $Lease, [Parameter(Mandatory = $true)] $Expected, [switch] $SingleLink)
-    [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::AssertIdentity($Lease,$Expected,[bool]$SingleLink)
+    param([Parameter(Mandatory = $true)] $Lease, [Parameter(Mandatory = $true)] $Expected, [switch] $SingleLink, [switch] $VerifyPath)
+    $observed = [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::AssertIdentity($Lease,$Expected,[bool]$SingleLink)
+    if ($VerifyPath) { [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::GetVerifiedPath($Lease) }
+    return $observed
 }
 
 function Open-WindowsPlatformFile { param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)][string] $Access, [Parameter(Mandatory = $true)][string] $CreateMode) [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenFile($ParentLease,$Leaf,$Access,$CreateMode) }

@@ -2945,7 +2945,7 @@ function Merge-StandardValidationProcessStderr {
 function Initialize-StandardValidationPlatformRuntime {
     if ($null -ne (Get-Variable StandardValidationPlatformBinding -Scope Script -ErrorAction SilentlyContinue)) { return }
     $manifestPath = Join-Path $PSScriptRoot 'platform-runtime.psd1'
-    $pin = 'e803fcc156e6273df1508f114e661e58ca0686833fa6abe22f9974b8f972ecef'
+    $pin = 'd70a72d14b50ea79b48a217b01167111413397cdca015b38634a1b955be90225'
     $canonicalHash = {
         param([string]$Path)
         $bytes = [IO.File]::ReadAllBytes($Path)
@@ -2973,12 +2973,20 @@ function Initialize-StandardValidationPlatformRuntime {
     }
 }
 
+function Get-StandardValidationDirectoryBinding {
+    param([Parameter(Mandatory=$true)][string]$FullPath)
+    if (-not [IO.Path]::IsPathFullyQualified($FullPath)) { throw 'An absolute directory path is required.' }
+    $anchor = [IO.Path]::GetPathRoot($FullPath)
+    $relative = $FullPath.Substring($anchor.Length).TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)
+    [pscustomobject]@{ Root=$anchor; RelativePath=$relative; RootOnly=($relative.Length -eq 0) }
+}
+
 function Open-StandardValidationDirectory {
     param([string]$Path, [switch]$Create)
     Initialize-StandardValidationPlatformRuntime
-    $full = (Get-StandardValidationFullPath -Path $Path -Context 'platform directory').TrimEnd([IO.Path]::DirectorySeparatorChar)
-    $anchor = [IO.Path]::GetPathRoot($full)
-    Open-PlatformDirectory -Root $anchor -RelativePath $full.Substring($anchor.Length) -CreatePrivate:$Create
+    $binding = Get-StandardValidationDirectoryBinding -FullPath (Get-StandardValidationFullPath -Path $Path -Context 'platform directory')
+    if ($binding.RootOnly) { Open-PlatformDirectory -Root $binding.Root -RootOnly }
+    else { Open-PlatformDirectory -Root $binding.Root -RelativePath $binding.RelativePath -CreatePrivate:$Create }
 }
 
 function Resolve-StandardValidationPhysicalCommandPath {
@@ -3265,7 +3273,8 @@ function Assert-StandardValidationOutputReservation {
         [Parameter(Mandatory = $true)][string]$Context)
     try {
         if ($Stream.ReservationToken -cne $Token -or $Stream.ReservationPath -cne (Get-StandardValidationFullPath -Path $Path -Context $Context)) { throw 'The reservation does not belong to this output path and token.' }
-        $observed = Assert-PlatformFileIdentity -Lease $Stream -Expected $Stream.Observation -SingleLink
+        # Retained Unix descriptors alone do not bind the requested ancestor names.
+        $observed = Assert-PlatformFileIdentity -Lease $Stream -Expected $Stream.Observation -SingleLink -VerifyPath
         if ($observed.Size -ne 0) { throw 'The reserved output was modified before publication.' }
     } catch { throw "FAILED|$Context output reservation is invalid: $($_.Exception.Message)" }
 }
@@ -3281,7 +3290,7 @@ function Write-StandardValidationJsonReserved {
         Assert-StandardValidationOutputReservation -Path $Path -Stream $Stream -Token $Token -Context 'Final evidence'
         $bytes = [Text.UTF8Encoding]::new($false).GetBytes(($Value | ConvertTo-Json -Depth 100) + [Environment]::NewLine)
         $Stream.WriteNewBytes($bytes)
-        Assert-PlatformFileIdentity -Lease $Stream -Expected $Stream.Observation -SingleLink | Out-Null
+        Assert-PlatformFileIdentity -Lease $Stream -Expected $Stream.Observation -SingleLink -VerifyPath | Out-Null
     } catch { $state = 'failed'; throw }
     finally { Complete-StandardValidationPhase -Timing $timing -State $state }
 }
