@@ -141,17 +141,17 @@
   ],
   "internalUseApprovals": [
     {
-      "id": "atlassian-bitbucket-review-7e8228c",
+      "id": "atlassian-bitbucket-review-f2a12c6",
       "identityBinding": "package-content",
       "status": "approved",
       "sourceRepository": "https://github.com/SyuanTsai/Skill-Atlassian-Ecosystem.git",
-      "sourceRevision": "7e8228c393579d5d21ac9c0ad729c7b5d219bab6",
+      "sourceRevision": "f2a12c6338e9a76dc807c84329ffaae1aaf5bef4",
       "skillId": "review-bitbucket-pull-request",
-      "contentSha256": "056b8e520460e6612b10c8c9248fd7c217c6e4708ca65f3bc6c05b98ee84dec9",
+      "contentSha256": "b373f844d8c0a268f39fc1e613704cb22d3ce05136109d55c52096a9b6322e5c",
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "c4ba49ab8db0c0f84b51b49b78db1833e8101cd1bfafe6a534cef8744e223b71"
+          "sha256": "4c04e978525da05658b4f3d5832c93c247e67e84c2386de852a6cd633be3f131"
         },
         {
           "path": "agents/openai.yaml",
@@ -159,15 +159,15 @@
         },
         {
           "path": "references/bitbucket-cloud-api.md",
-          "sha256": "0a9437d3ddba5bda6f766d7328064c023fd60dbff517d90dbf1c8746ad7a1730"
+          "sha256": "b2f0de462e3bcc7ccfc13ccc7bf293441d808254bbc61a4eaab44cd38fee6f4d"
         },
         {
           "path": "references/review-actions.md",
-          "sha256": "af5e4d744cff938b9bf8cdfcfb481e9975edec3cb049939b18950da3d178f4f0"
+          "sha256": "6719f2b1991221c8eab71dbd919ff99a082afdd4b05c7dd882e7a391af8b5363"
         },
         {
           "path": "scripts/Invoke-BitbucketReviewActions.ps1",
-          "sha256": "fe875d18375ef8872054040e6ad34b0f649b4fac22ae53ae9f75a4d3471dd301"
+          "sha256": "6f2ef0ff6522e1736c8ca960ee7d01e2bb952ba36dd0a247dc31f7bd65b411ee"
         }
       ],
       "permittedUses": [
@@ -187,13 +187,14 @@
       "review": {
         "owner": "SyuanTsai",
         "decision": "approved-internal-use",
-        "reviewedAt": "2026-10-17",
+        "reviewedAt": "2026-11-04",
         "expiresAt": "2027-01-15",
         "evidence": [
           "SYP314: direct human source-coordination acceptance on 2026-10-17, followed by explicit internal-use registry implementation instruction",
+          "SYP-362: direct user approval in conversation on 2026-11-04 to renew internal use for the abbreviated-commit-hash fix",
           "https://github.com/SyuanTsai/Skill-Atlassian-Ecosystem/actions/runs/38923965069"
         ],
-        "rationale": "Owned internal Skill for local PR analysis and draft preparation; preserve host permission enforcement and exact target/action authorization. No API mutation, publication, installation or deployment is granted."
+        "rationale": "Owned internal Skill for local PR analysis and draft preparation; preserve host permission enforcement and exact target/action authorization. No API mutation, publication, installation or deployment is granted. This renewal only allows stale-review checks to resolve abbreviated commit hashes when uniqueness is provable; any uncertainty fails closed, and no write, publication or installation authority is added."
       },
       "retainedFindings": [
         {
