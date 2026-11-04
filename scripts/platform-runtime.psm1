@@ -375,9 +375,20 @@ function Start-PlatformOwnedProcess {
         # Legacy spelling remains an alias; quotas are UTF-8 decoded characters per stream.
         [Alias('OutputLimitBytes')][ValidateRange(1,1048576)][long] $OutputLimitCharacters = 1048576,
         # Unix invocation name only; Windows validates it but keeps its launch semantics.
-        [string] $ArgumentZero
+        [string] $ArgumentZero,
+        [ValidateNotNull()][AllowEmptyCollection()][byte[]] $StandardInputBytes,
+        # Preserve the bridge's existing asymmetric quotas without changing the
+        # standard capture parameter's default or maximum.
+        [ValidateSet('standard','semantic-bridge')][string] $CaptureProfile = 'standard'
     )
     $platform = Get-CurrentPlatformName
+    if ($PSBoundParameters.ContainsKey('StandardInputBytes') -and $StandardInputBytes.Length -gt 16777216) {
+        throw [ArgumentException]::new('StandardInputBytes exceeds the 16 MiB limit.')
+    }
+    if ($CaptureProfile -eq 'semantic-bridge') {
+        if (-not $PSBoundParameters.ContainsKey('StandardInputBytes')) { throw [ArgumentException]::new('The semantic-bridge capture profile requires explicit StandardInputBytes.') }
+        if ($PSBoundParameters.ContainsKey('OutputLimitCharacters')) { throw [ArgumentException]::new('The semantic-bridge capture profile fixes both stream quotas; OutputLimitCharacters cannot override it.') }
+    }
     $argumentZeroValue = $null
     if ($PSBoundParameters.ContainsKey('ArgumentZero')) {
         if ($ArgumentZero.IndexOf([char]0) -ge 0 -or -not [IO.Path]::IsPathFullyQualified($ArgumentZero)) {
@@ -416,8 +427,10 @@ function Start-PlatformOwnedProcess {
             Environment = $Environment; WorkingDirectoryLease = $WorkingDirectoryLease; Deadline = $Deadline
             IsolationRequirement = $IsolationRequirement; StdoutLease = $outLease; StderrLease = $errLease
             OutputLimitBytes = $OutputLimitCharacters
+            CaptureProfile = $CaptureProfile
         }
         if ($PSBoundParameters.ContainsKey('ArgumentZero')) { $startParameters.ArgumentZero = $argumentZeroValue }
+        if ($PSBoundParameters.ContainsKey('StandardInputBytes')) { $startParameters.StandardInputBytes = $StandardInputBytes }
         $lease = Start-PlatformCapturedProcess @startParameters
         $outLease = $null; $errLease = $null
         return $lease
@@ -428,7 +441,11 @@ function Start-PlatformOwnedProcess {
 }
 function Start-PlatformCapturedProcess {
     # Internal boundary shared by caller-owned capture files and temporary probes.
-    param($ExecutablePath,$ExecutableLease,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$IsolationRequirement,$StdoutLease,$StderrLease,$OutputLimitBytes,$ArgumentZero=$null)
+    param($ExecutablePath,$ExecutableLease,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$IsolationRequirement,$StdoutLease,$StderrLease,$OutputLimitBytes,$ArgumentZero=$null,[byte[]]$StandardInputBytes,$CaptureProfile='standard')
+    if ($PSBoundParameters.ContainsKey('StandardInputBytes')) {
+        return [SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]::Start($ExecutablePath,$ExecutableLease,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$IsolationRequirement,$StdoutLease,$StderrLease,$OutputLimitBytes,$ArgumentZero,$StandardInputBytes,$CaptureProfile)
+    }
+    if ($CaptureProfile -ne 'standard') { throw [ArgumentException]::new('The semantic-bridge capture profile requires explicit StandardInputBytes.') }
     if ($PSBoundParameters.ContainsKey('ArgumentZero') -and $null -ne $ArgumentZero) {
         return [SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]::Start($ExecutablePath,$ExecutableLease,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$IsolationRequirement,$StdoutLease,$StderrLease,$OutputLimitBytes,[string]$ArgumentZero)
     }
