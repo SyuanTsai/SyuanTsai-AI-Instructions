@@ -175,6 +175,58 @@ class StaticPowerShellParserTests(unittest.TestCase):
                     if records:
                         self.assertEqual(0, records[0]["nativeParserProcess"]["exitCode"])
 
+    # Scenario: the 2.13.3 static runner passes Python import callbacks to a public hook that delegates to a private parser.
+    # Purpose: forward the callbacks and route native quote ownership through the delegated parser instead of bypassing it.
+    def test_UnitT97_delegated_hook_receives_callbacks_and_native_quote_closers(self):
+        import hashlib
+        import importlib.util
+        import tempfile
+        from unittest.mock import patch
+        import standard_static_powershell as implementation
+        source = '''
+calls = []
+forwarded = []
+def _has_shell_command_word_exhaustion(text, check_runtime, **kwargs):
+    calls.append(sorted(kwargs))
+    return "structural_quote_closers" not in kwargs
+def _has_bounded_parse_exhaustion(content, check_runtime, *, file_type, complete_context=True,
+                                  python_import_check=None, python_stdlib_check=None, word_apostrophes=False):
+    forwarded.append((python_import_check, python_stdlib_check))
+    return _has_shell_command_word_exhaustion(content, check_runtime)
+def has_bounded_parse_exhaustion(content, check_runtime, *, file_type="shell", complete_context=True,
+                                 python_import_check=None, python_stdlib_check=None):
+    return _has_bounded_parse_exhaustion(content, check_runtime, file_type=file_type,
+                                         complete_context=complete_context,
+                                         python_import_check=python_import_check,
+                                         python_stdlib_check=python_stdlib_check)
+def analyze(*args, **kwargs):
+    return []
+'''
+        text = "Write-Output 'value'\n"
+        digest = hashlib.sha256(text.encode()).hexdigest()
+        runtime_hash = hashlib.sha256(Path(self.pwsh).read_bytes()).hexdigest()
+        import_check = lambda check: True
+        stdlib_check = lambda name, check: True
+        with tempfile.TemporaryDirectory() as scratch:
+            module_path = Path(scratch) / "delegating_analyzer.py"
+            module_path.write_text(source, encoding="utf-8")
+            spec = importlib.util.spec_from_file_location("delegating_analyzer", module_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            module_hash = hashlib.sha256(module_path.read_bytes()).hexdigest()
+            with patch.object(implementation, "OFFICIAL_MODULE_SHA256", module_hash):
+                records = implementation.install_bridge(self.pwsh, runtime_hash, module, implementation.OFFICIAL_VERSION,
+                                                        {digest: ["scripts/example.ps1"]})
+                partial = module.has_bounded_parse_exhaustion(text, lambda: None, file_type="powershell",
+                                                              complete_context=True,
+                                                              python_import_check=import_check,
+                                                              python_stdlib_check=stdlib_check)
+        self.assertFalse(partial)
+        self.assertEqual(1, len(records))
+        self.assertTrue(module.forwarded)
+        self.assertTrue(all(pair == (import_check, stdlib_check) for pair in module.forwarded))
+        self.assertTrue(any("structural_quote_closers" in kwargs for kwargs in module.calls))
+
     # Scenario: a caller claims a different runtime, scanner version or official module.
     # Purpose: reject drift before installing the in-memory hook or launching a parser.
     def test_UnitT96_unreviewed_runtime_version_and_module_are_rejected(self):

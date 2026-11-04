@@ -246,9 +246,30 @@ def install_bridge(pwsh: str, pwsh_sha256: str, module, installed_version: str, 
     records = []
     cache = {}
 
-    def corrected(content, check_runtime, *, file_type="shell", complete_context=True):
+    # 2.13.3 delegates the public hook to a private parser. Rebind that
+    # delegate too, or the injected helper never reaches the scanner.
+    delegate = original.__globals__.get("_has_bounded_parse_exhaustion")
+    if delegate is not None and (not isinstance(delegate, types.FunctionType)
+                                 or delegate.__globals__ is not original.__globals__):
+        raise ParserCoverageError("the reviewed delegated parser changed")
+
+    def clone(function, namespace):
+        copy = types.FunctionType(function.__code__, namespace, function.__name__, function.__defaults__)
+        copy.__kwdefaults__ = function.__kwdefaults__
+        return copy
+
+    def corrected(content, check_runtime, *, file_type="shell", complete_context=True,
+                  python_import_check=None, python_stdlib_check=None):
         check_runtime()
-        original_partial = original(content, check_runtime, file_type=file_type, complete_context=complete_context)
+        # The official static runner supplies these optional import-bound
+        # callbacks; forward them unchanged to every official parser call.
+        hook_kwargs = {}
+        if python_import_check is not None:
+            hook_kwargs["python_import_check"] = python_import_check
+        if python_stdlib_check is not None:
+            hook_kwargs["python_stdlib_check"] = python_stdlib_check
+        original_partial = original(content, check_runtime, file_type=file_type,
+                                    complete_context=complete_context, **hook_kwargs)
         if not original_partial or not complete_context:
             return original_partial
         normalized = normalize_source(content)
@@ -262,7 +283,7 @@ def install_bridge(pwsh: str, pwsh_sha256: str, module, installed_version: str, 
             file_type = "powershell"
         if not paths:
             raise ParserCoverageError("scanner input is not in the frozen candidate inventory")
-        key = (file_type, digest)
+        key = (file_type, digest, python_import_check is not None, python_stdlib_check is not None)
         if key in cache:
             return cache[key]
         if hashlib.sha256(runtime.read_bytes()).hexdigest() != pwsh_sha256:
@@ -283,9 +304,10 @@ def install_bridge(pwsh: str, pwsh_sha256: str, module, installed_version: str, 
                 return original_helper(text, runtime_check, **kwargs)
             namespace = dict(original.__globals__)
             namespace["_has_shell_command_word_exhaustion"] = aware
-            scanner = types.FunctionType(original.__code__, namespace, original.__name__, original.__defaults__)
-            scanner.__kwdefaults__ = original.__kwdefaults__
-            return scanner(view, check_runtime, file_type=file_type, complete_context=True)
+            if delegate is not None:
+                namespace["_has_bounded_parse_exhaustion"] = clone(delegate, namespace)
+            scanner = clone(original, namespace)
+            return scanner(view, check_runtime, file_type=file_type, complete_context=True, **hook_kwargs)
 
         partial = check_command_views(normalized, file_type, proof, bounded, check_runtime)
         if module.analyze is not finding_analyzer:
