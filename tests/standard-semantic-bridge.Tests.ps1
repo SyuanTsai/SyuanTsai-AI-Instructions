@@ -568,6 +568,23 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
             $result.leaks | Should Be 0
             [IO.Directory]::Exists($result.captureRoot) | Should Be $false
         }
+        # Scenario: Callback code replaces the stdout directory entry with /dev/zero where unlink is supported.
+        # Purpose: The bridge must consume its retained capture handle without reopening or blocking on that path.
+        It 'InterT15_ignores_callback_stdout_path_replacement' {
+            $result = & $script:P55Bridge {
+                Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback {
+                    try {
+                        [IO.File]::Delete((Join-Path ([Environment]::CurrentDirectory) 'stdout'))
+                        if (-not $IsWindows) {
+                            [IO.File]::CreateSymbolicLink((Join-Path ([Environment]::CurrentDirectory) 'stdout'), '/dev/zero') | Out-Null
+                        }
+                    }
+                    catch [IO.IOException], [UnauthorizedAccessException] { }
+                    'retained-capture-value'
+                } -TimeoutMilliseconds 15000
+            }
+            @($result)[0] | Should Be 'retained-capture-value'
+        }
         # Scenario: A callback is blocked in native sleep past its deadline.
         # Purpose: Preserve TimeoutException and complete P3 cleanup, without a namespace capability.
         It 'InterT20_bounds_noncooperative_callback_and_releases_lease' {

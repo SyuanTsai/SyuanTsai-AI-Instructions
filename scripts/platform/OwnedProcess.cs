@@ -63,6 +63,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private long stderrLimit;
         private string outputLimitStream;
         private volatile bool outputExceeded, disposed, captureClosed;
+        private volatile bool disposeStorageWhenReadersStop;
         private string captureFailure;
         private ProcessCleanupReceipt cleanup;
         private string reason;
@@ -93,6 +94,27 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         public UnixProcessObservation UnixObservation { get { lock (gate) { var unix = control as UnixProcessControl; return unix == null ? null : unix.Observation; } } }
         public bool WaitForExit(TimeSpan timeout) { return exited.Wait(timeout); }
         public bool WaitForCleanup(TimeSpan timeout) { return cleaned.Wait(timeout); }
+
+        public byte[] ReadCapture(string stream, int maximumBytes)
+        {
+            if (stream != "stdout" && stream != "stderr") throw new ArgumentException("Stream must be stdout or stderr.", "stream");
+            if (maximumBytes < 0) throw new ArgumentOutOfRangeException("maximumBytes");
+            lock (gate)
+            {
+                if (disposed) throw new ObjectDisposedException("OwnedProcessLease");
+                if (cleanup == null || !cleanup.CleanedUp || !CaptureReadersStopped)
+                    throw new InvalidOperationException("Capture can be read only after owned process cleanup and capture reader shutdown are complete.");
+                lock (outputGate)
+                {
+                    if (disposed) throw new ObjectDisposedException("OwnedProcessLease");
+                    FileStream file = stream == "stdout" ? outFile : errFile;
+                    IDisposable lease = stream == "stdout" ? outLease : errLease;
+                    file.Flush();
+                    var windows = lease as WindowsLease;
+                    return windows != null ? windows.ReadAllBytes(maximumBytes) : ((UnixLease)lease).ReadRetainedBytes(maximumBytes);
+                }
+            }
+        }
 
         private OwnedProcessLease(DateTimeOffset until, long maximum)
         { deadline = until; limit = maximum; stderrLimit = maximum; }
@@ -227,6 +249,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
 
         private void CompleteFailedStart(Exception failure)
         {
+            disposeStorageWhenReadersStop = true;
             var receipt = failure.Data["StartupCleanupReceipt"] as ProcessCleanupReceipt;
             if (control != null)
             {
@@ -236,6 +259,12 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 catch (Exception ex) { receipt.CleanedUp = false; receipt.Uncertainty = "startup-dispose-failed: " + ex.Message; }
             }
             try { CloseCapture(); }
+            catch (Exception ex)
+            {
+                failure.Data["StartupCaptureCleanupUncertainty"] = ex.Message;
+                if (receipt != null) { receipt.CleanedUp = false; receipt.Uncertainty = "startup-capture-cleanup-failed: " + ex.Message; }
+            }
+            try { DisposeCaptureStorage(); }
             catch (Exception ex)
             {
                 failure.Data["StartupCaptureCleanupUncertainty"] = ex.Message;
@@ -376,7 +405,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 finally
                 {
                     if (Interlocked.Decrement(ref readersRunning) == 0 && captureCancelled.IsSet)
-                        try { CloseCapture(); } catch (Exception ex) { captureFailure = ex.Message; }
+                        try { CloseCapture(); if (disposeStorageWhenReadersStop) DisposeCaptureStorage(); } catch (Exception ex) { captureFailure = ex.Message; }
                 }
             }) { IsBackground = true, Name = "platform-bounded-capture" };
             Interlocked.Increment(ref readersRunning);
@@ -522,10 +551,22 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 // AnonymousPipeServerStream.Dispose does not release its local
                 // client copy. Retain/dispose those handles even if spawn failed
                 // before DisposeLocalCopyOfClientHandle was reached.
-                foreach (IDisposable resource in new IDisposable[] { stdoutClient, stderrClient, stdout, stderr, outFile, errFile, outLease, errLease })
+                foreach (IDisposable resource in new IDisposable[] { stdoutClient, stderrClient, stdout, stderr })
                 { if (resource != null) { try { resource.Dispose(); } catch (Exception ex) { if (failure == null) failure = ex; } } }
                 captureClosed = true;
                 if (failure != null) throw new IOException("Capture resources could not all be released.", failure);
+            }
+        }
+        private void DisposeCaptureStorage()
+        {
+            if (Volatile.Read(ref readersRunning) != 0) return;
+            lock (outputGate)
+            {
+                Exception failure = null;
+                foreach (IDisposable resource in new IDisposable[] { outFile, errFile, outLease, errLease })
+                { if (resource != null) { try { resource.Dispose(); } catch (Exception ex) { if (failure == null) failure = ex; } } }
+                outFile = null; errFile = null; outLease = null; errLease = null;
+                if (failure != null) throw new IOException("Capture storage resources could not all be released.", failure);
             }
         }
         public void Dispose()
@@ -533,8 +574,17 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             lock (gate)
             {
                 if (disposed) return;
+                disposeStorageWhenReadersStop = true;
                 try { Stop(TimeSpan.FromMilliseconds(100), DateTimeOffset.UtcNow.AddSeconds(5), null); }
-                finally { control.Dispose(); CloseCapture(); disposed = true; }
+                finally
+                {
+                    try { control.Dispose(); }
+                    finally
+                    {
+                        try { CloseCapture(); }
+                        finally { try { DisposeCaptureStorage(); } finally { disposed = true; } }
+                    }
+                }
             }
         }
     }

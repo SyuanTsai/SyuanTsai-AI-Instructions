@@ -6,6 +6,32 @@ using System.Runtime.InteropServices;
 
 namespace SyuanTsai.AIInstructions.PlatformRuntime
 {
+    public static class PlatformRuntimeBuild
+    {
+        private static readonly object Sync = new object();
+        private static string sealedFingerprint;
+
+        public static string Fingerprint
+        {
+            get { lock (Sync) { return sealedFingerprint; } }
+        }
+
+        public static void Seal(string fingerprint)
+        {
+            if (fingerprint == null || fingerprint.Length != 64)
+                throw new ArgumentException("The platform runtime fingerprint must contain 64 lowercase hexadecimal characters.", "fingerprint");
+            for (int i = 0; i < fingerprint.Length; i++)
+                if ((fingerprint[i] < '0' || fingerprint[i] > '9') && (fingerprint[i] < 'a' || fingerprint[i] > 'f'))
+                    throw new ArgumentException("The platform runtime fingerprint must contain 64 lowercase hexadecimal characters.", "fingerprint");
+            lock (Sync)
+            {
+                if (sealedFingerprint == null) { sealedFingerprint = fingerprint; return; }
+                if (!String.Equals(sealedFingerprint, fingerprint, StringComparison.Ordinal))
+                    throw new InvalidOperationException("The platform runtime build is already sealed with a different fingerprint.");
+            }
+        }
+    }
+
     // Bounded data I/O on a borrowed P2 handle; no public native handle or path reopen.
     internal static class LeaseBytes
     {

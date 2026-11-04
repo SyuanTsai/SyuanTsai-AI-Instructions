@@ -99,14 +99,53 @@ function Assert-PlatformRuntimeInventory {
 
 Assert-PlatformRuntimeInventory | Out-Null
 
-$nativeSourcePath = Join-Path $PSScriptRoot 'platform/PlatformNative.cs'
+$nativeSourcePaths = @(
+    'platform/PlatformNative.cs',
+    'platform/UnixNative.cs',
+    'platform/WindowsNative.cs',
+    'platform/OwnedProcess.cs',
+    'platform/UnixProcess.cs',
+    'platform/WindowsProcess.cs'
+)
+$nativeSourceFullPaths = @($nativeSourcePaths | ForEach-Object { Join-Path $PSScriptRoot $_ })
+$fingerprintStream = [IO.MemoryStream]::new()
+$fingerprintUtf8 = [Text.UTF8Encoding]::new($false, $true)
+try {
+    foreach ($index in 0..($nativeSourcePaths.Count - 1)) {
+        [byte[]]$sourceBytes = [IO.File]::ReadAllBytes($nativeSourceFullPaths[$index])
+        if ($sourceBytes.Length -ge 3 -and $sourceBytes[0] -eq 0xef -and $sourceBytes[1] -eq 0xbb -and $sourceBytes[2] -eq 0xbf) {
+            throw [IO.InvalidDataException]::new('Platform runtime source files must be UTF-8 without BOM.')
+        }
+        [byte[]]$canonicalBytes = $fingerprintUtf8.GetBytes($fingerprintUtf8.GetString($sourceBytes).Replace("`r`n", "`n"))
+        [byte[]]$prefixBytes = $fingerprintUtf8.GetBytes($nativeSourcePaths[$index] + "`n" + $canonicalBytes.Length.ToString([Globalization.CultureInfo]::InvariantCulture) + "`n")
+        $fingerprintStream.Write($prefixBytes, 0, $prefixBytes.Length)
+        $fingerprintStream.Write($canonicalBytes, 0, $canonicalBytes.Length)
+    }
+    $fingerprintSha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $platformRuntimeSourceFingerprint = ([BitConverter]::ToString($fingerprintSha256.ComputeHash($fingerprintStream.ToArray()))).Replace('-','').ToLowerInvariant()
+    }
+    finally { $fingerprintSha256.Dispose() }
+}
+finally { $fingerprintStream.Dispose() }
+
 if ($null -eq ('SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative' -as [type])) {
-    Add-Type -LiteralPath @($nativeSourcePath, (Join-Path $PSScriptRoot 'platform/UnixNative.cs'), (Join-Path $PSScriptRoot 'platform/WindowsNative.cs'), (Join-Path $PSScriptRoot 'platform/OwnedProcess.cs'), (Join-Path $PSScriptRoot 'platform/UnixProcess.cs'), (Join-Path $PSScriptRoot 'platform/WindowsProcess.cs')) -ErrorAction Stop
+    Add-Type -LiteralPath $nativeSourceFullPaths -ErrorAction Stop
+    [SyuanTsai.AIInstructions.PlatformRuntime.PlatformRuntimeBuild]::Seal($platformRuntimeSourceFingerprint)
 }
 elseif ($null -eq ('SyuanTsai.AIInstructions.PlatformRuntime.UnixNative' -as [type]) -or
         $null -eq ('SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative' -as [type]) -or
         $null -eq ('SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease' -as [type])) {
     throw [IO.InvalidDataException]::new('A pre-P3 native assembly is already loaded. Import this verified runtime in a fresh PowerShell process.')
+}
+else {
+    $loadedBuildType = 'SyuanTsai.AIInstructions.PlatformRuntime.PlatformRuntimeBuild' -as [type]
+    $loadedFingerprint = if ($null -eq $loadedBuildType) { $null } else { [string]$loadedBuildType.GetProperty('Fingerprint').GetValue($null) }
+    if ($null -eq $loadedBuildType -or
+        [string]::IsNullOrEmpty($loadedFingerprint) -or
+        $loadedFingerprint -cne $platformRuntimeSourceFingerprint) {
+        throw [InvalidOperationException]::new('INVALID|A different platform runtime build is already loaded in this process; start a new PowerShell process.')
+    }
 }
 
 Import-Module (Join-Path $PSScriptRoot 'platform/Windows.psm1') -Scope Local -ErrorAction Stop
@@ -418,7 +457,7 @@ function Start-PlatformOwnedProcess {
             if ([string]::IsNullOrEmpty($relative)) { throw [ArgumentException]::new('Capture files require a directory below the filesystem root.') }
             $parent = Open-PlatformDirectory -Root $anchor -RelativePath $relative
             try {
-                $file = Open-PlatformFile -ParentLease $parent -Leaf ([IO.Path]::GetFileName($pair[1])) -Access Write -CreateMode CreateNew
+                $file = Open-PlatformFile -ParentLease $parent -Leaf ([IO.Path]::GetFileName($pair[1])) -Access ReadWrite -CreateMode CreateNew
                 if ($pair[0] -eq 'out') { $outLease = $file } else { $errLease = $file }
             } finally { $parent.Dispose() }
         }
