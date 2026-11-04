@@ -84,20 +84,20 @@
     },
     "officialScannerVersion": {
       "type": "string",
-      "const": "2.13.0"
+      "const": "2.13.3"
     },
     "officialScannerReleaseCommit": {
       "type": "string",
-      "const": "091a509b3d6ba8ff5be528966e1f43c2e68cf214"
+      "const": "38a1dfe93325d2f8bfcd4f8d0241eed706334915"
     },
     "officialScannerReleaseAssetSha256": {
       "type": "string",
-      "const": "41e097b4127c0aa0732ad31cc909f8aee0b907d97816c866a55b8e782a6ca6dc"
+      "const": "a421dffba5e0f966bf1baf8acd77f4750a8ece0afc5520ecf49252b4004a8577"
     },
     "officialAnalyzerSha256": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$",
-      "const": "c799169f9ad716f8dbbbec5892ef76affd0f9974433709ed0c1cfc3bcd0b66a4"
+      "const": "e40e8c07e8294462b313b276b0e021e25c774f06505bf802eb0d8e96294df560"
     },
     "nativeParserRuntimePath": {
       "type": "string",
