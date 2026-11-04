@@ -1,7 +1,7 @@
 $script:RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $script:CleanupScript = Join-Path $script:RepositoryRoot 'scripts\cleanup-ai-instructions-pollution.ps1'
 $script:ManifestRelativePath = '.codex/ai-instructions.manifest.json'
-$script:TestPowerShellExecutable = Join-Path $PSHOME $(if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell.exe' } else { 'pwsh.exe' })
+$script:TestPowerShellExecutable = Join-Path $PSHOME $(if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell.exe' } else { if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' } })
 
 function Invoke-CleanupTestGit {
     param([Parameter(Mandatory = $true)][string] $Repository,[Parameter(Mandatory = $true)][string[]] $Arguments)
