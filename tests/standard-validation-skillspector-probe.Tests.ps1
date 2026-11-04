@@ -4,7 +4,7 @@ Describe 'Runner observed SkillSpector native compatibility' {
     BeforeAll {
         . (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-StandardValidation.ps1') -CandidateRoot $TestDrive -AdapterPath 'unused' -ArtifactsRoot $TestDrive -SourceRepository 'https://example.test/skills.git' -SourceRevision ('a'*40) -BaseRevision ('b'*40) -DefineFunctionsOnly
         function New-ProbeClassifierFixture {
-            [pscustomobject]@{ status='failed'; exitCode=1; stdout=''; stderr='ImportError: /fixture/native.so: wrong ELF class: ELFCLASS32'; cleanedUp=$true; outputQuotaExceeded=$false; outputTruncated=$false; startupFailure=$null; processOwnership=[pscustomobject]@{terminationReason=$null} }
+            [pscustomobject]@{ status='failed'; naturalExit=$true; exitCode=1; stdout=''; stderr='ImportError: /fixture/native.so: wrong ELF class: ELFCLASS32'; cleanedUp=$true; outputQuotaExceeded=$false; outputTruncated=$false; startupFailure=$null; processOwnership=[pscustomobject]@{terminationReason='cancelled'} }
         }
     }
     # Scenario: Captured native loader diagnostics are classified without claiming a real host probe.
@@ -33,6 +33,22 @@ Describe 'Runner observed SkillSpector native compatibility' {
         }
         $p=New-ProbeClassifierFixture; $p.cleanedUp=$false
         Get-StandardValidationNativeProbeFailureKind -Process $p -Platform linux | Should BeNullOrEmpty
+        $p=New-ProbeClassifierFixture; $p.naturalExit=$false
+        Get-StandardValidationNativeProbeFailureKind -Process $p -Platform linux | Should BeNullOrEmpty
+    }
+
+    # Scenario: An owned PowerShell child naturally emits an approved loader diagnostic and exits nonzero.
+    # Purpose: Preserve the pre-cleanup natural-exit fact even when lease cleanup records cancellation.
+    Context 'Natural process exit classifier' {
+        It 'InterT25_classifies_an_approved_loader_error_from_a_real_naturally_exited_process' {
+            $powerShellPath=(Get-Process -Id $PID).Path
+            $arguments=@('-NoProfile','-NonInteractive','-Command','[Console]::Error.WriteLine("ImportError: /tmp/x/_native.so: wrong ELF class: ELFCLASS32"); exit 1')
+            $process=Invoke-StandardValidationProcess -Command $powerShellPath -Arguments $arguments -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 30
+
+            $process.naturalExit | Should Be $true
+            $process.status | Should Be 'failed'
+            Get-StandardValidationNativeProbeFailureKind -Process $process -Platform linux | Should Be 'executable-format-unsupported'
+        }
     }
 
     # Scenario: Only an OS failure at the owned-process launch boundary identifies executable incompatibility.
@@ -40,6 +56,7 @@ Describe 'Runner observed SkillSpector native compatibility' {
     It 'UnitT30_accepts_only_native_startup_codes_at_the_launch_boundary' {
         foreach ($platform in @('linux','macos')) {
             $p=New-ProbeClassifierFixture; $p.status='startup-failed'; $p.exitCode=-1
+            $p.PSObject.Properties.Remove('naturalExit')
             $p.startupFailure=[pscustomobject]@{phase='start-owned-process';operation='posix_spawn';nativeErrorCode=8}
             Get-StandardValidationNativeProbeFailureKind -Process $p -Platform $platform | Should Be 'executable-format-unsupported'
             foreach ($code in @(2,5,13,126,127)) {

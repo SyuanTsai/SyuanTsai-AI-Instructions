@@ -3256,7 +3256,9 @@ function Invoke-StandardValidationProcess {
     }
     [pscustomobject][ordered]@{
         startedAt = $startedAt; endedAt = [DateTimeOffset]::UtcNow.ToString('o'); processId = $processId
-        exitCode = $exitCode; status = $status; stdout = $stdout; stderr = $stderr; cleanedUp = $cleanedUp
+        exitCode = $exitCode; status = $status
+        naturalExit = [bool]$naturalExit
+        stdout = $stdout; stderr = $stderr; cleanedUp = $cleanedUp
         outputQuotaExceeded = $quota
         outputTruncated = $outputTruncated
         startupFailure = $nativeStartupFailure
@@ -3456,8 +3458,7 @@ function Get-StandardValidationNativeProbeFailureKind {
         if ($value -isnot [bool] -or $value -ne ($flag -ceq 'cleanedUp')) { return $null }
     }
     if ([string]$Process.status -cnotin @('failed','startup-failed') -or
-        [int]$Process.exitCode -eq 0 -or
-        -not [string]::IsNullOrEmpty([string](Get-StandardValidationProperty (Get-StandardValidationProperty $Process 'processOwnership') 'terminationReason'))) { return $null }
+        [int]$Process.exitCode -eq 0) { return $null }
     $startup = Get-StandardValidationProperty $Process 'startupFailure'
     if ([string]$Process.status -ceq 'startup-failed') {
         if ($null -ne $startup -and [string]$startup.phase -ceq 'start-owned-process' -and
@@ -3467,6 +3468,8 @@ function Get-StandardValidationNativeProbeFailureKind {
         }
         return $null
     }
+    $naturalExit = Get-StandardValidationProperty $Process 'naturalExit'
+    if ($naturalExit -isnot [bool] -or -not $naturalExit) { return $null }
     $stderr = ([string]$Process.stderr -replace '\x1b\[[0-9;]*[A-Za-z]', '') -replace '\r\n', "`n"
     if ($Platform -ceq 'linux' -and $stderr -cmatch '(?m)^ImportError: [^\n]+: wrong ELF class: ELFCLASS(?:32|64)\s*$') { return 'executable-format-unsupported' }
     if ($Platform -ceq 'macos' -and $stderr -cmatch '(?m)^ImportError: dlopen\([^\n]+incompatible architecture \(have [^\n]+, need [^\n]+\)') { return 'executable-format-unsupported' }
