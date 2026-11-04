@@ -601,10 +601,15 @@ param(
         $lockPath = Join-Path $codexHome 'ai-instructions-install.lock'
         $lockStream = [System.IO.File]::Open($lockPath,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
         try {
-            $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass `
-                -File (Join-Path $script:RepositoryRoot 'scripts\update-ai-instructions.ps1') `
-                -CodexHome $codexHome `
-                -ForceCheck 2>&1
+            $powerShellHost = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+            $arguments = @('-NoProfile')
+            if ($IsWindows) { $arguments += @('-ExecutionPolicy', 'Bypass') }
+            $arguments += @(
+                '-File', (Join-Path $script:RepositoryRoot 'scripts\update-ai-instructions.ps1'),
+                '-CodexHome', $codexHome,
+                '-ForceCheck'
+            )
+            $output = & $powerShellHost @arguments 2>&1
             $exitCode = $LASTEXITCODE
         }
         finally {
