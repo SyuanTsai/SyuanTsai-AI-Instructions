@@ -2,10 +2,79 @@
 // SPDX-License-Identifier: Apache-2.0
 
 using System;
+using System.Globalization;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace SyuanTsai.AIInstructions.PlatformRuntime
 {
+    public static class PlatformRuntimeBuild
+    {
+        private static readonly string[] RuntimeSourcePaths = new string[]
+        {
+            "platform/PlatformNative.cs",
+            "platform/UnixNative.cs",
+            "platform/WindowsNative.cs",
+            "platform/OwnedProcess.cs",
+            "platform/UnixProcess.cs",
+            "platform/WindowsProcess.cs"
+        };
+        private static readonly object Sync = new object();
+        private static string sealedFingerprint;
+
+        public static string Fingerprint
+        {
+            get { lock (Sync) { return sealedFingerprint; } }
+        }
+
+        public static void Seal(string fingerprint)
+        {
+            if (fingerprint == null || fingerprint.Length != 64)
+                throw new ArgumentException("The platform runtime fingerprint must contain 64 lowercase hexadecimal characters.", "fingerprint");
+            for (int i = 0; i < fingerprint.Length; i++)
+                if ((fingerprint[i] < '0' || fingerprint[i] > '9') && (fingerprint[i] < 'a' || fingerprint[i] > 'f'))
+                    throw new ArgumentException("The platform runtime fingerprint must contain 64 lowercase hexadecimal characters.", "fingerprint");
+            lock (Sync)
+            {
+                if (sealedFingerprint == null) { sealedFingerprint = fingerprint; return; }
+                if (!String.Equals(sealedFingerprint, fingerprint, StringComparison.Ordinal))
+                    throw new InvalidOperationException("The platform runtime build is already sealed with a different fingerprint.");
+            }
+        }
+
+        public static string ComputeSourceFingerprint(string runtimeRoot)
+        {
+            if (String.IsNullOrEmpty(runtimeRoot) || !Path.IsPathFullyQualified(runtimeRoot))
+                throw new ArgumentException("The platform runtime root must be an absolute path.", "runtimeRoot");
+
+            string root = Path.GetFullPath(runtimeRoot);
+            var utf8 = new UTF8Encoding(false, true);
+            using (var fingerprint = new MemoryStream())
+            {
+                foreach (string relativePath in RuntimeSourcePaths)
+                {
+                    string sourcePath = Path.Combine(root, relativePath);
+                    FileAttributes attributes = File.GetAttributes(sourcePath);
+                    if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+                        throw new IOException("Platform runtime source files must be regular non-reparse files.");
+
+                    byte[] sourceBytes = File.ReadAllBytes(sourcePath);
+                    if (sourceBytes.Length >= 3 && sourceBytes[0] == 0xef && sourceBytes[1] == 0xbb && sourceBytes[2] == 0xbf)
+                        throw new InvalidDataException("Platform runtime source files must be UTF-8 without BOM.");
+                    byte[] canonicalBytes = utf8.GetBytes(utf8.GetString(sourceBytes).Replace("\r\n", "\n"));
+                    byte[] prefixBytes = utf8.GetBytes(relativePath + "\n" + canonicalBytes.Length.ToString(CultureInfo.InvariantCulture) + "\n");
+                    fingerprint.Write(prefixBytes, 0, prefixBytes.Length);
+                    fingerprint.Write(canonicalBytes, 0, canonicalBytes.Length);
+                }
+
+                using (var sha256 = SHA256.Create())
+                    return BitConverter.ToString(sha256.ComputeHash(fingerprint.ToArray())).Replace("-", "").ToLowerInvariant();
+            }
+        }
+    }
+
     // Bounded data I/O on a borrowed P2 handle; no public native handle or path reopen.
     internal static class LeaseBytes
     {

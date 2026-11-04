@@ -60,7 +60,12 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private int readersRunning, readersAtEof;
         private readonly DateTimeOffset deadline;
         private readonly long limit;
+        private long stderrLimit;
+        private string outputLimitStream;
         private volatile bool outputExceeded, disposed, captureClosed;
+        private readonly string captureProfile;
+        private byte[] stdoutSnapshot, stderrSnapshot;
+        private string stdoutSnapshotFailure, stderrSnapshotFailure;
         private string captureFailure;
         private ProcessCleanupReceipt cleanup;
         private string reason;
@@ -80,6 +85,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         public bool HasExited { get { return exited.IsSet; } }
         public int? ExitCode { get { lock (gate) return control.ExitCode; } }
         public bool OutputLimitExceeded { get { return outputExceeded; } }
+        public string OutputLimitStream { get { return outputLimitStream; } }
         public string TerminationReason { get { lock (gate) return reason; } }
         public ProcessCleanupReceipt Cleanup { get { lock (gate) return cleanup; } }
         public bool CaptureReadersStopped { get { return (outReader == null || !outReader.IsAlive) && (errReader == null || !errReader.IsAlive); } }
@@ -91,8 +97,34 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         public bool WaitForExit(TimeSpan timeout) { return exited.Wait(timeout); }
         public bool WaitForCleanup(TimeSpan timeout) { return cleaned.Wait(timeout); }
 
+        public byte[] ReadCapture(string stream, int maximumBytes)
+        {
+            if (stream != "stdout" && stream != "stderr") throw new ArgumentException("Stream must be stdout or stderr.", "stream");
+            if (maximumBytes < 0) throw new ArgumentOutOfRangeException("maximumBytes");
+            if (captureProfile != "semantic-bridge")
+                throw new InvalidOperationException("Only the semantic-bridge capture profile retains an in-memory capture snapshot.");
+            lock (gate)
+            {
+                if (cleanup == null || !cleanup.CleanedUp || !captureClosed)
+                    throw new InvalidOperationException("Capture can be read only after owned process cleanup and capture resource shutdown are complete.");
+                lock (outputGate)
+                {
+                    byte[] snapshot = stream == "stdout" ? stdoutSnapshot : stderrSnapshot;
+                    string failure = stream == "stdout" ? stdoutSnapshotFailure : stderrSnapshotFailure;
+                    if (snapshot == null)
+                        throw new InvalidOperationException("The " + stream + " capture snapshot is unavailable: " + (failure ?? "no snapshot was retained."));
+                    if (snapshot.Length > maximumBytes)
+                        throw new IOException("The " + stream + " capture snapshot exceeds the bounded read limit.");
+                    return (byte[])snapshot.Clone();
+                }
+            }
+        }
+
+        private OwnedProcessLease(DateTimeOffset until, long maximum, string profile)
+        { deadline = until; limit = maximum; stderrLimit = maximum; captureProfile = profile; }
+
         private OwnedProcessLease(DateTimeOffset until, long maximum)
-        { deadline = until; limit = maximum; }
+            : this(until, maximum, "standard") { }
 
         public static OwnedProcessLease Start(string executablePath, object executableLease,
             string[] arguments, IDictionary environment, object workingDirectory,
@@ -108,6 +140,28 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             DateTimeOffset deadline, string isolationRequirement, object stdoutLease,
             object stderrLease, long outputLimitCharacters, string argumentZero)
         {
+            return Start(executablePath, executableLease, arguments, environment, workingDirectory,
+                deadline, isolationRequirement, stdoutLease, stderrLease, outputLimitCharacters, argumentZero, null);
+        }
+
+        public static OwnedProcessLease Start(string executablePath, object executableLease,
+            string[] arguments, IDictionary environment, object workingDirectory,
+            DateTimeOffset deadline, string isolationRequirement, object stdoutLease,
+            object stderrLease, long outputLimitCharacters, string argumentZero, byte[] standardInputBytes)
+        {
+            return Start(executablePath, executableLease, arguments, environment, workingDirectory,
+                deadline, isolationRequirement, stdoutLease, stderrLease, outputLimitCharacters, argumentZero, standardInputBytes, "standard");
+        }
+
+        public static OwnedProcessLease Start(string executablePath, object executableLease,
+            string[] arguments, IDictionary environment, object workingDirectory,
+            DateTimeOffset deadline, string isolationRequirement, object stdoutLease,
+            object stderrLease, long outputLimitCharacters, string argumentZero, byte[] standardInputBytes, string captureProfile)
+        {
+            if (captureProfile != "standard" && captureProfile != "semantic-bridge") throw new ArgumentException("Unknown capture profile.");
+            if (captureProfile == "semantic-bridge" && standardInputBytes == null) throw new ArgumentException("The semantic-bridge capture profile requires explicit StandardInputBytes.");
+            if (standardInputBytes != null && standardInputBytes.Length > 16777216)
+                throw new ArgumentException("StandardInputBytes exceeds the 16 MiB limit.");
             string os = PlatformNative.GetOperatingSystem();
             if (String.IsNullOrEmpty(argumentZero)) argumentZero = null;
             else if (argumentZero.IndexOf('\0') >= 0 || !Path.IsPathFullyQualified(argumentZero))
@@ -132,7 +186,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             if (arguments == null) arguments = new string[0];
             foreach (string argument in arguments)
                 if (argument == null || argument.IndexOf('\0') >= 0) throw new ArgumentException("Arguments cannot contain nulls.");
-            var lease = new OwnedProcessLease(deadline, outputLimitCharacters);
+            var lease = new OwnedProcessLease(deadline, captureProfile == "semantic-bridge" ? 16777216 : outputLimitCharacters, captureProfile);
+            if (captureProfile == "semantic-bridge") lease.stderrLimit = 16384;
             try
             {
                 lease.outLease = (IDisposable)stdoutLease; lease.errLease = (IDisposable)stderrLease;
@@ -149,17 +204,39 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                         IntPtr output = lease.stdout.ClientSafePipeHandle.DangerousGetHandle();
                         IntPtr error = lease.stderr.ClientSafePipeHandle.DangerousGetHandle();
                         if (os == "windows")
+                        {
+                            if (standardInputBytes != null) WindowsProcessControl.PrepareInputWriter(stdin.SafePipeHandle);
                             lease.control = WindowsProcessControl.Start(executablePath, executableLease as WindowsLease, arguments, env.ToArray(), (WindowsLease)workingDirectory, input, output, error);
+                        }
                         else
+                        {
+                            if (standardInputBytes != null) UnixProcessControl.PrepareInputWriter(stdin.SafePipeHandle);
                             lease.control = UnixProcessControl.Start(executablePath, executableLease as UnixLease, arguments, env.ToArray(), (UnixLease)workingDirectory, input.ToInt32(), output.ToInt32(), error.ToInt32(), argumentZero);
+                        }
                     }
                     finally { stdin.DisposeLocalCopyOfClientHandle(); }
+                    // Start returned only after Job assignment / spawn identity and
+                    // group registration. Drain output while sending input, and keep
+                    // deadline supervision active even when the child never reads.
+                    if (standardInputBytes != null)
+                    {
+                        lease.StartCapture();
+                        try
+                        {
+                            if (os == "windows") WindowsProcessControl.WriteInput(stdin, standardInputBytes, deadline);
+                            else UnixProcessControl.WriteInput(stdin.SafePipeHandle, standardInputBytes, deadline);
+                        }
+                        catch (Exception ex)
+                        {
+                            var failure = new IOException("StandardInputBytes delivery failed after process ownership was established.", ex);
+                            failure.Data["StartupStage"] = "stdin-write";
+                            failure.Data["StartupTerminationReason"] = lease.TerminationReason;
+                            throw failure;
+                        }
+                    }
                 } // child stdin observes EOF; no inherited terminal
-                lease.stdout.DisposeLocalCopyOfClientHandle(); lease.stderr.DisposeLocalCopyOfClientHandle();
-                lease.outReader = lease.Reader(lease.stdout, lease.outFile);
-                lease.errReader = lease.Reader(lease.stderr, lease.errFile);
-                lease.supervisor = new Thread(lease.Supervise) { IsBackground = true, Name = "platform-process-supervisor" };
-                lease.supervisor.Start();
+                // Preserve the original no-input ordering: close stdin first.
+                if (standardInputBytes == null) lease.StartCapture();
                 return lease;
             }
             catch (Exception failure)
@@ -167,6 +244,14 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 lease.CompleteFailedStart(failure);
                 throw;
             }
+        }
+
+        private void StartCapture()
+        {
+            stdout.DisposeLocalCopyOfClientHandle(); stderr.DisposeLocalCopyOfClientHandle();
+            outReader = Reader(stdout, outFile); errReader = Reader(stderr, errFile);
+            supervisor = new Thread(Supervise) { IsBackground = true, Name = "platform-process-supervisor" };
+            supervisor.Start();
         }
 
         private void CompleteFailedStart(Exception failure)
@@ -268,6 +353,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private Thread Reader(PipeStream source, FileStream destination)
         {
             PrepareCapture(source);
+            long streamLimit = Object.ReferenceEquals(source, stderr) ? stderrLimit : limit;
             var thread = new Thread(() =>
             {
                 try
@@ -302,7 +388,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                         lock (outputGate)
                         {
                             if (captureClosed) return;
-                            int accepted = (int)Math.Min(decoded, limit - written);
+                            int accepted = (int)Math.Min(decoded, streamLimit - written);
                             // Keep a valid text prefix if the quota bisects a pair.
                             if (accepted > 0 && Char.IsHighSurrogate(characters[accepted - 1])) accepted--;
                             if (accepted > 0)
@@ -310,7 +396,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                                 int bytes = encoding.GetBytes(characters, 0, accepted, encoded, 0);
                                 destination.Write(encoded, 0, bytes); destination.Flush(); written += accepted;
                             }
-                            if (accepted < decoded) { outputExceeded = true; return; }
+                            if (accepted < decoded) { outputLimitStream = Object.ReferenceEquals(source, stderr) ? "stderr" : "stdout"; outputExceeded = true; return; }
                         }
                         if (count == 0) { Interlocked.Increment(ref readersAtEof); return; }
                     }
@@ -462,6 +548,25 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             {
                 if (captureClosed) return;
                 Exception failure = null;
+                if (captureProfile == "semantic-bridge")
+                {
+                    try
+                    {
+                        outFile.Flush();
+                        int maximum = checked((int)Math.Min(limit * 3, Int32.MaxValue));
+                        var windows = outLease as WindowsLease;
+                        stdoutSnapshot = windows != null ? windows.ReadAllBytes(maximum) : ((UnixLease)outLease).ReadRetainedBytes(maximum);
+                    }
+                    catch (Exception ex) { stdoutSnapshotFailure = ex.Message; }
+                    try
+                    {
+                        errFile.Flush();
+                        int maximum = checked((int)Math.Min(stderrLimit * 3, Int32.MaxValue));
+                        var windows = errLease as WindowsLease;
+                        stderrSnapshot = windows != null ? windows.ReadAllBytes(maximum) : ((UnixLease)errLease).ReadRetainedBytes(maximum);
+                    }
+                    catch (Exception ex) { stderrSnapshotFailure = ex.Message; }
+                }
                 // AnonymousPipeServerStream.Dispose does not release its local
                 // client copy. Retain/dispose those handles even if spawn failed
                 // before DisposeLocalCopyOfClientHandle was reached.

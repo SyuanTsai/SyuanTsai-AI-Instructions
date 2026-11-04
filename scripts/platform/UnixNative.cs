@@ -51,6 +51,15 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 UnixNative.AssertIdentity(this, Observation, true); return bytes;
             }
         }
+        internal byte[] ReadRetainedBytes(int maximumBytes)
+        {
+            lock (Sync)
+            {
+                Check(); UnixNative.AssertRetainedIdentity(this, Observation);
+                byte[] bytes = LeaseBytes.Read(Fd, maximumBytes);
+                UnixNative.AssertRetainedIdentity(this, Observation); return bytes;
+            }
+        }
         public void WriteNewBytes(byte[] bytes)
         {
             lock (Sync)
@@ -552,6 +561,16 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 PlatformPaths.Same(value, expected);
                 if (single) PlatformPaths.Single(value);
                 if (lease.Parent != null) PlatformPaths.Same(value, Stat(lease.Parent, lease.Leaf));
+                return value;
+            }
+        }
+        internal static FileObservation AssertRetainedIdentity(UnixLease lease, FileObservation expected)
+        {
+            lock (lease.Sync)
+            {
+                lease.Check(); FileObservation value = Stat(lease.Fd, null);
+                PlatformPaths.Same(value, expected);
+                if (value.Kind != "file") throw new IOException("A retained regular file is required.");
                 return value;
             }
         }

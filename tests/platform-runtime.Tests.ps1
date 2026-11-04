@@ -105,6 +105,58 @@ Describe 'SYP353 preparation process and private-root delegation' {
     }
 }
 
+Describe 'Platform stdin transport primitives' {
+    BeforeAll {
+        Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
+        $nativeName = if ($IsWindows) { 'WindowsProcessControl' } else { 'UnixProcessControl' }
+        $script:InputNative = [SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease].Assembly.GetType('SyuanTsai.AIInstructions.PlatformRuntime.' + $nativeName)
+        $script:InputFlags = [Reflection.BindingFlags]'Static,NonPublic'
+    }
+    # Scenario: A native stdin writer sends arbitrary bytes through its anonymous pipe.
+    # Purpose: Verify binary transport and EOF independently from filesystem lease permissions.
+    It 'InterT10_native_pipe_preserves_all_byte_values_and_eof' {
+        $pipe=[IO.Pipes.AnonymousPipeServerStream]::new([IO.Pipes.PipeDirection]::Out,[IO.HandleInheritability]::Inheritable)
+        $client=$pipe.ClientSafePipeHandle; $reader=$null
+        try {
+            $reader=[IO.FileStream]::new([Microsoft.Win32.SafeHandles.SafeFileHandle]::new($client.DangerousGetHandle(),$false),[IO.FileAccess]::Read,1,$false)
+            $script:InputNative.GetMethod('PrepareInputWriter',$script:InputFlags).Invoke($null,@($pipe.SafePipeHandle))
+            $bytes=[byte[]](0..255)
+            $writer=if($IsWindows){$pipe}else{$pipe.SafePipeHandle}
+            $script:InputNative.GetMethod('WriteInput',$script:InputFlags).Invoke($null,@($writer,$bytes,[DateTimeOffset]::UtcNow.AddSeconds(5)))
+            $pipe.Dispose()
+            $received=[IO.MemoryStream]::new()
+            try {
+                $reader.CopyTo($received)
+                [Convert]::ToBase64String($received.ToArray()) | Should Be ([Convert]::ToBase64String($bytes))
+                $reader.ReadByte() | Should Be -1
+            } finally { $received.Dispose() }
+        } finally { if($null -ne $reader){$reader.Dispose()}; $client.Dispose(); $pipe.Dispose() }
+    }
+    # Scenario: No read end survives when the native writer sends bytes.
+    # Purpose: Report a broken pipe instead of silently losing payload bytes.
+    It 'InterT20_native_pipe_reports_reader_close' {
+        $pipe=[IO.Pipes.AnonymousPipeServerStream]::new([IO.Pipes.PipeDirection]::Out,[IO.HandleInheritability]::Inheritable)
+        try {
+            $script:InputNative.GetMethod('PrepareInputWriter',$script:InputFlags).Invoke($null,@($pipe.SafePipeHandle))
+            $pipe.DisposeLocalCopyOfClientHandle()
+            $writer=if($IsWindows){$pipe}else{$pipe.SafePipeHandle}
+            { $script:InputNative.GetMethod('WriteInput',$script:InputFlags).Invoke($null,@($writer,[byte[]]@(1),[DateTimeOffset]::UtcNow.AddSeconds(5))) } | Should Throw
+        } finally { $pipe.Dispose() }
+    }
+    if (-not $IsWindows) {
+        # Scenario: An unconsumed Unix pipe becomes full.
+        # Purpose: Nonblocking writes retain the deadline even if a reader has escaped the group.
+        It 'InterT30_native_unix_pipe_bounds_a_stalled_reader' {
+            $pipe=[IO.Pipes.AnonymousPipeServerStream]::new([IO.Pipes.PipeDirection]::Out,[IO.HandleInheritability]::Inheritable)
+            $client=$pipe.ClientSafePipeHandle
+            try {
+                $script:InputNative.GetMethod('PrepareInputWriter',$script:InputFlags).Invoke($null,@($pipe.SafePipeHandle))
+                { $script:InputNative.GetMethod('WriteInput',$script:InputFlags).Invoke($null,@($pipe.SafePipeHandle,[byte[]]::new(16777216),[DateTimeOffset]::UtcNow.AddMilliseconds(200))) } | Should Throw 'deadline'
+            } finally { $client.Dispose(); $pipe.Dispose() }
+        }
+    }
+}
+
 Describe 'Platform owned processes P3' {
     BeforeAll {
         Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
@@ -115,10 +167,13 @@ Describe 'Platform owned processes P3' {
             $directory = Open-PlatformDirectory -Root $script:P3Root -RelativePath $name -CreatePrivate
             @{ Directory=$directory; Path=(Join-Path $script:P3Root $name) }
         }
-        function Start-P3Fixture($Fixture,[string]$Code,[int]$Seconds=20,[long]$Limit=1048576) {
+        function Start-P3Fixture($Fixture,[string]$Code,[int]$Seconds=20,[long]$Limit=1048576,[byte[]]$InputBytes,[string]$CaptureProfile='standard') {
             $envMap = @{}
             if ($IsWindows) { $envMap.SystemRoot = $env:SystemRoot }
-            Start-PlatformOwnedProcess -ExecutablePath $script:P3Shell -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Code))) -Environment $envMap -WorkingDirectoryLease $Fixture.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds($Seconds)) -IsolationRequirement cooperative -StdoutPath (Join-Path $Fixture.Path 'out') -StderrPath (Join-Path $Fixture.Path 'err') -OutputLimitBytes $Limit
+            $processOptions = @{ CaptureProfile = $CaptureProfile }
+            if ($PSBoundParameters.ContainsKey('InputBytes')) { $processOptions.StandardInputBytes = $InputBytes }
+            if ($CaptureProfile -ceq 'standard') { $processOptions.OutputLimitBytes = $Limit }
+            Start-PlatformOwnedProcess @processOptions -ExecutablePath $script:P3Shell -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Code))) -Environment $envMap -WorkingDirectoryLease $Fixture.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds($Seconds)) -IsolationRequirement cooperative -StdoutPath (Join-Path $Fixture.Path 'out') -StderrPath (Join-Path $Fixture.Path 'err')
         }
         function Invoke-P3BoundedDelete([scriptblock]$Action) {
             $until = [DateTimeOffset]::UtcNow.AddSeconds(5)
@@ -149,6 +204,82 @@ Describe 'Platform owned processes P3' {
         }
     }
 
+    # Scenario: A caller supplies bytes without using a filesystem payload.
+    # Purpose: The public entry point must expose a byte-array input contract.
+    It 'UnitT05_exposes_optional_stdin_bytes' {
+        (Get-Command Start-PlatformOwnedProcess).Parameters['StandardInputBytes'].ParameterType | Should Be ([byte[]])
+    }
+    # Scenario: The native overload receives oversized input with no launch resources.
+    # Purpose: Validate the bound before touching ownership, captures or the OS.
+    It 'UnitT06_native_stdin_bound_precedes_spawn' {
+        $caught=$null
+        try {
+            [SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]::Start($null,$null,@(),@{},$null,[DateTimeOffset]::UtcNow.AddSeconds(10),'cooperative',$null,$null,1048576,$null,[byte[]]::new(16777217))
+        } catch { $caught=$_.Exception.GetBaseException() }
+        ($caught -is [ArgumentException]) | Should Be $true
+        $caught.Message | Should Match 'StandardInputBytes'
+    }
+
+    # Scenario: Capture bytes are requested before and after confirmed owned cleanup.
+    # Purpose: Expose only the retained, bounded capture lease after all readers stop.
+    It 'InterT07_reads_retained_capture_only_after_cleanup_with_a_byte_bound' {
+        $f = New-P3Fixture; $p = $null; $standardFixture = $null; $standardProcess = $null
+        try {
+            $expected = [Text.Encoding]::UTF8.GetBytes('capture-original')
+            $p = Start-P3Fixture $f '[Console]::Out.Write("capture-original"); Start-Sleep -Milliseconds 500' -InputBytes ([byte[]]@()) -CaptureProfile semantic-bridge
+            $caught = $null
+            try { $p.ReadCapture('stdout', 1024) | Out-Null } catch { $caught = $_.Exception.GetBaseException() }
+            ($caught -is [InvalidOperationException]) | Should Be $true
+            $caught = $null
+            try { $p.ReadCapture('invalid', 1024) | Out-Null } catch { $caught = $_.Exception.GetBaseException() }
+            ($caught -is [ArgumentException]) | Should Be $true
+            Assert-P3Exited $p
+            Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $p)
+            [Convert]::ToBase64String($p.ReadCapture('stdout', $expected.Length)) | Should Be ([Convert]::ToBase64String($expected))
+            { $p.ReadCapture('stdout', ($expected.Length - 1)) } | Should Throw 'bounded read limit'
+            $p.Dispose()
+            [Convert]::ToBase64String($p.ReadCapture('stdout', $expected.Length)) | Should Be ([Convert]::ToBase64String($expected))
+
+            $standardFixture = New-P3Fixture
+            $standardProcess = Start-P3Fixture $standardFixture '[Console]::Out.Write("standard-capture")'
+            Assert-P3Exited $standardProcess
+            Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $standardProcess)
+            { $standardProcess.ReadCapture('stdout', 1024) } | Should Throw 'semantic-bridge capture profile'
+            [IO.File]::ReadAllText((Join-Path $standardFixture.Path 'out')) | Should Be 'standard-capture'
+        } finally {
+            if ($null -ne $standardFixture) { Remove-P3Fixture $standardFixture $standardProcess }
+            Remove-P3Fixture $f $p
+        }
+    }
+
+    # Scenario: A callback-side actor unlinks stdout and replaces its name with /dev/zero.
+    # Purpose: Bound cleanup and either retain the original inode or fail closed.
+    It 'InterT08_fails_closed_or_reads_original_bytes_after_capture_unlink' {
+        $f = New-P3Fixture; $p = $null
+        try {
+            $expected = [Text.Encoding]::UTF8.GetBytes('retained-inode')
+            $p = Start-P3Fixture $f '[Console]::Out.Write("retained-inode")' -Seconds 5 -InputBytes ([byte[]]@()) -CaptureProfile semantic-bridge
+            Assert-P3Exited $p
+            if (-not $IsWindows) {
+                [IO.File]::Delete((Join-Path $f.Path 'out'))
+                [IO.File]::CreateSymbolicLink((Join-Path $f.Path 'out'), '/dev/zero') | Out-Null
+            }
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            try { $receipt = Stop-PlatformOwnedProcess -Lease $p } finally { $watch.Stop() }
+            $watch.Elapsed.TotalSeconds | Should BeLessThan 15
+            if ($IsWindows) {
+                Assert-P3Cleaned $receipt
+                [Convert]::ToBase64String($p.ReadCapture('stdout', 1024)) | Should Be ([Convert]::ToBase64String($expected))
+            }
+            elseif (-not $receipt.CleanedUp) {
+                { $p.ReadCapture('stdout', 1024) } | Should Throw 'cleanup'
+            }
+            else {
+                [Convert]::ToBase64String($p.ReadCapture('stdout', 1024)) | Should Be ([Convert]::ToBase64String($expected))
+            }
+        } finally { Remove-P3Fixture $f $p }
+    }
+
     # Scenario: A child exits with distinct output streams and a nonzero status.
     # Purpose: Preserve argv, explicit environment, byte capture and exit code.
     It 'InterT10_captures_exit_code_and_both_streams' {
@@ -163,6 +294,56 @@ Describe 'Platform owned processes P3' {
             if ($IsMacOS) { Write-Host ('Darwin natural-exit evidence: ' + ($p.UnixObservation | ConvertTo-Json -Compress)) }
             [IO.File]::ReadAllText((Join-Path $f.Path 'out')) | Should Be 'hello'
             [IO.File]::ReadAllText((Join-Path $f.Path 'err')) | Should Be 'problem'
+        } finally { Remove-P3Fixture $f $p }
+    }
+
+    # Scenario: Input exceeds a pipe buffer and contains NUL and multibyte UTF-8.
+    # Purpose: Send every byte after ownership, concurrently draining output, and close stdin.
+    It 'InterT11_roundtrips_stdin_bytes_and_eof' {
+        $f = New-P3Fixture; $p = $null
+        try {
+            $bytes = [Text.Encoding]::UTF8.GetBytes((("input`0" + [char]0x754c + "`r`n") * 20000))
+            $p = Start-P3Fixture $f '[Console]::OpenStandardInput().CopyTo([Console]::OpenStandardOutput())' -InputBytes $bytes
+            Assert-P3Exited $p
+            Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $p)
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $f.Path 'out'))) | Should Be ([Convert]::ToBase64String($bytes))
+        } finally { Remove-P3Fixture $f $p }
+    }
+    # Scenario: No input argument or an explicitly empty array is supplied.
+    # Purpose: Preserve immediate EOF in both overloads.
+    It 'InterT12_omitted_and_empty_stdin_observe_eof' {
+        foreach ($explicit in @($false,$true)) {
+            $f = New-P3Fixture; $p = $null
+            try {
+                $options = @{}
+                if ($explicit) { $options.InputBytes = [byte[]]@() }
+                $p = Start-P3Fixture $f '[Console]::Write([Console]::OpenStandardInput().ReadByte())' @options
+                Assert-P3Exited $p
+                Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $p)
+                [IO.File]::ReadAllText((Join-Path $f.Path 'out')) | Should Be '-1'
+            } finally { Remove-P3Fixture $f $p }
+        }
+    }
+    # Scenario: Input exceeds the 16 MiB bound before spawn.
+    # Purpose: Reject without executing the child or creating capture files.
+    It 'InterT13_rejects_oversize_stdin_before_start' {
+        $f = New-P3Fixture
+        try {
+            { Start-P3Fixture $f '[IO.File]::WriteAllText("ready","started")' -InputBytes ([byte[]]::new(16777217)) } | Should Throw 'StandardInputBytes'
+            [IO.File]::Exists((Join-Path $f.Path 'ready')) | Should Be $false
+            [IO.File]::Exists((Join-Path $f.Path 'out')) | Should Be $false
+        } finally { Remove-P3Fixture $f $null }
+    }
+    # Scenario: The root delegates inherited stdin to a grandchild before reading it.
+    # Purpose: A leaked write end must not keep the grandchild waiting for EOF.
+    It 'InterT14_descendant_stdin_reaches_eof' {
+        $f = New-P3Fixture; $p = $null
+        try {
+            $code = '$s=[Diagnostics.ProcessStartInfo]::new(); $s.FileName=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName; $s.UseShellExecute=$false; $s.Arguments=''-NoProfile -NonInteractive -Command "[Console]::Write([Console]::In.ReadToEnd())"''; $c=[Diagnostics.Process]::Start($s); $c.WaitForExit(); $c.Dispose()'
+            $p = Start-P3Fixture $f $code -InputBytes ([Text.Encoding]::UTF8.GetBytes('descendant-input'))
+            Assert-P3Exited $p
+            Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $p)
+            [IO.File]::ReadAllText((Join-Path $f.Path 'out')) | Should Be 'descendant-input'
         } finally { Remove-P3Fixture $f $p }
     }
 
@@ -197,6 +378,44 @@ Describe 'Platform owned processes P3' {
                 Write-Host ('Darwin external-reap evidence: ' + ($p.UnixObservation | ConvertTo-Json -Compress))
             } finally { Remove-P3Fixture $f $p }
         }
+    }
+
+    # Scenario: A child exits before consuming a payload larger than the pipe buffer.
+    # Purpose: Broken-pipe failure must carry stage and confirmed cleanup evidence.
+    It 'InterT16_fails_closed_when_stdin_reader_exits' {
+        $f = New-P3Fixture; $caught = $null
+        try {
+            try { Start-P3Fixture $f '[Environment]::Exit(0)' -InputBytes ([byte[]]::new(16777216)) | Out-Null } catch { $caught=$_.Exception }
+            while ($null -ne $caught -and -not $caught.Data.Contains('StartupStage')) { $caught=$caught.InnerException }
+            $caught | Should Not BeNullOrEmpty
+            $caught.Data['StartupStage'] | Should Be 'stdin-write'
+            $caught.Data['StartupCleanupConfirmed'] | Should Be $true
+        } finally { Remove-P3Fixture $f $null }
+    }
+    # Scenario: A child never reads stdin and stays alive past the workload deadline.
+    # Purpose: Input delivery cannot hang the caller, and the failed start releases ownership.
+    It 'InterT17_bounds_stalled_stdin_delivery' {
+        $f = New-P3Fixture; $caught = $null; $timer=[Diagnostics.Stopwatch]::StartNew()
+        try {
+            try { Start-P3Fixture $f '[Threading.Thread]::Sleep(30000)' -Seconds 2 -InputBytes ([byte[]]::new(16777216)) | Out-Null } catch { $caught=$_.Exception }
+            $timer.Elapsed.TotalSeconds | Should BeLessThan 12
+            while ($null -ne $caught -and -not $caught.Data.Contains('StartupStage')) { $caught=$caught.InnerException }
+            $caught | Should Not BeNullOrEmpty
+            $caught.Data['StartupStage'] | Should Be 'stdin-write'
+            $caught.Data['StartupCleanupConfirmed'] | Should Be $true
+        } finally { Remove-P3Fixture $f $null }
+    }
+    # Scenario: All possible byte values cross stdin, including invalid UTF-8.
+    # Purpose: Input transport is binary even though the existing capture contract is text.
+    It 'InterT18_delivers_arbitrary_binary_stdin' {
+        $f = New-P3Fixture; $p = $null
+        try {
+            $bytes = [byte[]](0..255)
+            $p = Start-P3Fixture $f '$m=[IO.MemoryStream]::new(); [Console]::OpenStandardInput().CopyTo($m); [Console]::Write([Convert]::ToBase64String($m.ToArray())); $m.Dispose()' -InputBytes $bytes
+            Assert-P3Exited $p
+            Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $p)
+            [IO.File]::ReadAllText((Join-Path $f.Path 'out')) | Should Be ([Convert]::ToBase64String($bytes))
+        } finally { Remove-P3Fixture $f $p }
     }
 
     # Scenario: No caller polls or stops a sleeping process before its deadline.
@@ -2314,6 +2533,105 @@ Describe 'Platform runtime contract' {
             $caught.Exception.GetType().Name | Should Be 'PlatformNotImplementedException'
             $caught.Exception.ImplementationStep | Should Be 'P7'
             Remove-Module $adapter -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    # Scenario: Every reviewed entry point carries its own platform-runtime manifest trust anchor.
+    # Purpose: Keep all independent pins synchronized with the canonical manifest before executable code is imported.
+    It 'UnitT35_keeps_platform_runtime_entry_pins_synchronized' {
+        $utf8 = [Text.UTF8Encoding]::new($false, $true)
+        $manifestBytes = [IO.File]::ReadAllBytes($script:ModuleManifest)
+        if ($manifestBytes.Length -ge 3 -and $manifestBytes[0] -eq 239 -and $manifestBytes[1] -eq 187 -and $manifestBytes[2] -eq 191) {
+            throw 'The platform runtime manifest must not have a BOM.'
+        }
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            $expected = ([BitConverter]::ToString($sha.ComputeHash($utf8.GetBytes($utf8.GetString($manifestBytes).Replace("`r`n", "`n"))))).Replace('-', '').ToLowerInvariant()
+        }
+        finally { $sha.Dispose() }
+
+        $entryPoints = @(
+            @{ Path = 'scripts/Invoke-PesterShardProcess.ps1'; Function = 'Import-PesterShardRuntime'; Variable = 'manifestSha256' },
+            @{ Path = 'scripts/Invoke-StandardValidation.ps1'; Function = 'Initialize-StandardValidationPlatformRuntime'; Variable = 'pin' },
+            @{ Path = 'scripts/StandardSemanticBridge.psm1'; Function = 'Initialize-StandardSemanticBridgePlatformRuntime'; Variable = 'pin' }
+        )
+        foreach ($entryPoint in $entryPoints) {
+            $tokens = $null
+            $errors = $null
+            $path = Join-Path $script:RepositoryRoot $entryPoint.Path
+            $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+            @($errors).Count | Should Be 0
+            $scope = $ast
+            if ($null -ne $entryPoint.Function) {
+                $scope = $ast.Find({ param($node)
+                    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $entryPoint.Function
+                }, $true)
+            }
+            $assignment = $scope.Find({ param($node)
+                $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+                $node.Left.VariablePath.UserPath -ceq $entryPoint.Variable
+            }, $true)
+            $assignment | Should Not BeNullOrEmpty
+            $pin = $assignment.Right.Find({ param($node)
+                $node -is [Management.Automation.Language.StringConstantExpressionAst]
+            }, $true)
+            $pin | Should Not BeNullOrEmpty
+            $pin.Value | Should Be $expected
+        }
+    }
+
+    # Scenario: One child process imports the same runtime twice, then a source-modified copy.
+    # Purpose: Reuse an identical sealed build and reject a different verified source build already loaded in-process.
+    It 'InterT36_rejects_a_different_loaded_runtime_build' {
+        $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('platform-runtime-build-' + [Guid]::NewGuid().ToString('N'))
+        $copyRoot = Join-Path $tempRoot 'copy'
+        $childScript = Join-Path $tempRoot 'verify-runtime-build.ps1'
+        try {
+            [void][IO.Directory]::CreateDirectory($copyRoot)
+            $sourceRoot = Join-Path $script:RepositoryRoot 'scripts'
+            $manifest = Import-PowerShellDataFile -LiteralPath $script:ModuleManifest
+            foreach ($relative in @($manifest.FileList)) {
+                $destination = Join-Path $copyRoot $relative
+                [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destination))
+                [IO.File]::Copy((Join-Path $sourceRoot $relative), $destination, $false)
+            }
+            $changedSource = Join-Path $copyRoot 'platform/PlatformNative.cs'
+            [IO.File]::AppendAllText($changedSource, "`n// runtime fingerprint regression", [Text.UTF8Encoding]::new($false))
+            $utf8 = [Text.UTF8Encoding]::new($false, $true)
+            $changedBytes = [IO.File]::ReadAllBytes($changedSource)
+            $sha = [Security.Cryptography.SHA256]::Create()
+            try {
+                $changedHash = ([BitConverter]::ToString($sha.ComputeHash($utf8.GetBytes($utf8.GetString($changedBytes).Replace("`r`n", "`n"))))).Replace('-', '').ToLowerInvariant()
+            }
+            finally { $sha.Dispose() }
+            $oldHash = [string](@($manifest.PrivateData.PlatformRuntime.Inventory | Where-Object Path -ceq 'platform/PlatformNative.cs')[0].Sha256)
+            $copyManifest = Join-Path $copyRoot 'platform-runtime.psd1'
+            $manifestText = [IO.File]::ReadAllText($copyManifest)
+            if (-not $manifestText.Contains($oldHash)) { throw 'Fixture manifest did not contain the expected source hash.' }
+            [IO.File]::WriteAllText($copyManifest, $manifestText.Replace($oldHash, $changedHash), [Text.UTF8Encoding]::new($false))
+            $childText = @'
+param([string]$OriginalManifest,[string]$OriginalModule,[string]$ChangedModule)
+$ErrorActionPreference = 'Stop'
+Import-Module -Name $OriginalManifest -Force -ErrorAction Stop
+Import-Module -Name $OriginalModule -Force -ErrorAction Stop
+try {
+    Import-Module -Name $ChangedModule -Force -ErrorAction Stop
+    throw 'A different runtime build was accepted.'
+}
+catch {
+    if (-not $_.Exception.Message.Contains('different platform runtime build is already loaded')) { throw }
+}
+'same-source-reimported-and-different-source-rejected'
+'@
+            [IO.File]::WriteAllText($childScript, $childText, [Text.UTF8Encoding]::new($false))
+            $shell = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
+            $output = @(& $shell -NoLogo -NoProfile -NonInteractive -File $childScript $script:ModuleManifest (Join-Path $sourceRoot 'platform-runtime.psm1') (Join-Path $copyRoot 'platform-runtime.psm1'))
+            $LASTEXITCODE | Should Be 0
+            $output[-1] | Should Be 'same-source-reimported-and-different-source-rejected'
+        }
+        finally {
+            if ([IO.Directory]::Exists($tempRoot)) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
         }
     }
 
