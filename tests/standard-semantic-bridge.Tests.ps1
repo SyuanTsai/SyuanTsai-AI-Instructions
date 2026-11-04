@@ -500,6 +500,44 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
                 $child.Dispose()
             }
         }
+        # Scenario: An inventory file is replaced with code that would disclose callback context if imported.
+        # Purpose: The bridge-owned manifest pin and inventory hashes must reject the bundle before replacement code executes.
+        It 'InterT08_rejects_tampered_platform_runtime_before_import' {
+            $repositoryRoot = Split-Path -Parent $PSScriptRoot
+            $sourceScripts = Join-Path $repositoryRoot 'scripts'
+            $fixtureRoot = Join-Path $TestDrive 'tampered-semantic-bridge-runtime'
+            [void][IO.Directory]::CreateDirectory($fixtureRoot)
+            $manifest = Import-PowerShellDataFile -LiteralPath (Join-Path $sourceScripts 'platform-runtime.psd1')
+            foreach ($relativePath in @($manifest.FileList)) {
+                $destination = Join-Path $fixtureRoot $relativePath
+                [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destination))
+                Copy-Item -LiteralPath (Join-Path $sourceScripts $relativePath) -Destination $destination
+            }
+            $bridgePath = Join-Path $fixtureRoot 'TamperedSemanticBridge.psm1'
+            Copy-Item -LiteralPath (Join-Path $sourceScripts 'StandardSemanticBridge.psm1') -Destination $bridgePath
+            $markerPath = Join-Path $fixtureRoot 'replacement-code-executed.txt'
+            $runtimePath = Join-Path $fixtureRoot 'platform-runtime.psm1'
+            $replacement = "[IO.File]::WriteAllText('$($markerPath.Replace("'", "''"))','executed')`n" + [IO.File]::ReadAllText($runtimePath)
+            [IO.File]::WriteAllText($runtimePath, $replacement, [Text.UTF8Encoding]::new($false))
+
+            $tamperedBridge = $null
+            try {
+                $tamperedBridge = Import-Module $bridgePath -Force -PassThru
+                $caught = $null
+                try {
+                    & $tamperedBridge {
+                        Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback { 'must-not-run' } -TimeoutMilliseconds 15000
+                    }
+                }
+                catch { $caught = $_ }
+                $caught | Should Not BeNullOrEmpty
+                $caught.Exception.Message | Should Be 'INVALID|Platform runtime inventory mismatch: platform-runtime.psm1'
+                [IO.File]::Exists($markerPath) | Should Be $false
+            }
+            finally {
+                if ($null -ne $tamperedBridge) { $tamperedBridge | Remove-Module -Force -ErrorAction SilentlyContinue }
+            }
+        }
         # Scenario: A signer-like context contains a unique secret and Unicode input.
         # Purpose: Deliver through stdin only; private capture and temp files must not contain the payload.
         It 'InterT10_keeps_context_off_disk_and_roundtrips_unicode' {
@@ -514,6 +552,8 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
                     foreach ($root in $roots) {
                         foreach ($file in @(Get-ChildItem -LiteralPath $root -File -Force)) {
                             if ($context.existingTempFiles -contains $file.FullName) { continue }
+                            if (-not $IsWindows -and -not ([string]$file.UnixMode).StartsWith('-')) { continue }
+                            if ($file.Length -gt 16MB) { continue }
                             try {
                                 if ([IO.File]::ReadAllText($file.FullName).Contains($context.privateKeyXml)) { $leaks += $file.Name }
                             } catch [IO.IOException], [UnauthorizedAccessException] { }

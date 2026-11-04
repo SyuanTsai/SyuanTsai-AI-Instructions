@@ -1167,6 +1167,65 @@ function Test-StandardSemanticBridgeCallbackCleanupFailureException {
     return -not [string]::IsNullOrWhiteSpace([string]$Exception.Data[$dataKey])
 }
 
+function Get-StandardSemanticBridgePlatformRuntimeCanonicalHash {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 239 -and $bytes[1] -eq 187 -and $bytes[2] -eq 191) {
+        throw 'INVALID|Runtime files must not have a BOM.'
+    }
+    $utf8 = [Text.UTF8Encoding]::new($false, $true)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($sha.ComputeHash($utf8.GetBytes($utf8.GetString($bytes).Replace("`r`n", "`n"))))).Replace('-', '').ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
+}
+
+function Assert-StandardSemanticBridgePlatformRuntimeFile {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $item = Get-Item -Force -LiteralPath $fullPath -ErrorAction Stop
+    if ($item -isnot [IO.FileInfo] -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        -not [string]::IsNullOrEmpty([string]$item.LinkType)) {
+        throw "INVALID|$Context must be a regular non-reparse file."
+    }
+    return $fullPath
+}
+
+function Initialize-StandardSemanticBridgePlatformRuntime {
+    if ($null -ne (Get-Variable StandardSemanticBridgePlatformRuntimeBinding -Scope Script -ErrorAction SilentlyContinue)) { return }
+
+    $pin = 'c29511e7edaa12cc4e9b5b7206802faeaae5d6cd9ea2db114225a4d84f58e7b7'
+    $manifestPath = Assert-StandardSemanticBridgePlatformRuntimeFile `
+        -Path (Join-Path $PSScriptRoot 'platform-runtime.psd1') -Context 'Platform runtime manifest'
+    if ((Get-StandardSemanticBridgePlatformRuntimeCanonicalHash -Path $manifestPath) -cne $pin) {
+        throw 'INVALID|Untrusted platform runtime manifest.'
+    }
+
+    $manifest = Import-PowerShellDataFile -LiteralPath $manifestPath
+    foreach ($entry in @($manifest.PrivateData.PlatformRuntime.Inventory)) {
+        $relativePath = Assert-StandardSemanticBridgeSafePath -Value $entry.Path -Context 'platform runtime inventory path'
+        $inventoryPath = Assert-StandardSemanticBridgePlatformRuntimeFile `
+            -Path (Join-Path $PSScriptRoot $relativePath) -Context "Platform runtime inventory '$relativePath'"
+        if ((Get-StandardSemanticBridgePlatformRuntimeCanonicalHash -Path $inventoryPath) -cne [string]$entry.Sha256) {
+            throw "INVALID|Platform runtime inventory mismatch: $relativePath"
+        }
+    }
+
+    Import-Module -Name $manifestPath -ErrorAction Stop
+    $script:StandardSemanticBridgePlatformRuntimeBinding = [pscustomobject]@{
+        apiVersion = [string]$manifest.PrivateData.PlatformRuntime.ApiVersion
+        manifestSha256 = $pin
+        powerShellVersion = $PSVersionTable.PSVersion.ToString()
+    }
+}
+
 function ConvertFrom-StandardSemanticBridgeCallbackEnvelope {
     param([string] $Stdout, [string] $Stderr, [int] $ExitCode, [string] $Context)
     if ($ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($stdout)) {
@@ -1191,7 +1250,7 @@ function Invoke-StandardSemanticBridgePlatformCallback {
     param([string] $HostExecutable, [string] $EncodedBootstrap, [string] $PayloadXml,
         [int] $TimeoutMilliseconds, $ConsentExpiresAtUtc, [string] $Context)
 
-    Import-Module (Join-Path $PSScriptRoot 'platform-runtime.psd1') -ErrorAction Stop
+    Initialize-StandardSemanticBridgePlatformRuntime
     $until = [DateTimeOffset]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
     $captureRoot = $null; $directory = $null; $process = $null; $primaryException = $null
     $cleanupErrors = New-Object 'System.Collections.Generic.List[string]'
