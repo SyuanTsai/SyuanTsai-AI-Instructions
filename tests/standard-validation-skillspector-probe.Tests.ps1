@@ -68,6 +68,19 @@ Describe 'Runner observed SkillSpector native compatibility' {
         }
     }
 
+    # Scenario: Native probe raw output contains a fractional ISO-8601 timestamp.
+    # Purpose: P2 readback preserves the exact timestamp representation for binding.
+    It 'UnitT32_preserves_native_probe_timestamp_strings' {
+        $path = Join-Path $TestDrive 'native-probe-timestamp.json'
+        $startedAt = '2026-11-04T01:02:03.4567890+00:00'
+        [IO.File]::WriteAllText($path, ('{"startedAt":"' + $startedAt + '"}'), [Text.UTF8Encoding]::new($false))
+
+        $snapshot = Get-StandardValidationNativeProbeSnapshot -Path $path
+
+        $snapshot.value.startedAt | Should BeOfType ([string])
+        $snapshot.value.startedAt | Should Be $startedAt
+    }
+
     # Scenario: P3 wraps a posix_spawn errno in an invocation exception.
     # Purpose: Preserve the actual native error without interpreting diagnostic text or unrelated P2 errors.
     It 'UnitT35_reads_typed_P3_errno_and_rejects_forged_error_text' {

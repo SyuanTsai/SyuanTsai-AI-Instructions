@@ -570,6 +570,26 @@ function Get-StandardValidationJson {
     catch { throw "INVALID|$Context is not parseable JSON: $($_.Exception.Message)" }
 }
 
+function ConvertFrom-StandardValidationJsonPreservingDates {
+    param(
+        [Parameter(Mandatory = $true)][string] $Text,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $convertFromJsonCommand = Get-Command -Name ConvertFrom-Json -ErrorAction Stop
+    if ($convertFromJsonCommand.Parameters.ContainsKey('DateKind')) {
+        $value = ConvertFrom-Json -InputObject $Text -DateKind String
+    }
+    elseif ($PSVersionTable.PSEdition -eq 'Core') {
+        throw "INVALID|$Context timestamp strings cannot be preserved by this PowerShell runtime."
+    }
+    else {
+        # Windows PowerShell 5.1 leaves ISO timestamp JSON values as strings by default.
+        $value = ConvertFrom-Json -InputObject $Text
+    }
+    return ,$value
+}
+
 function Get-StandardValidationJsonSnapshot {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
@@ -592,17 +612,7 @@ function Get-StandardValidationJsonSnapshot {
             $text = $text.Substring(1)
         }
         if ($PreserveDateStrings) {
-            $convertFromJsonCommand = Get-Command -Name ConvertFrom-Json -ErrorAction Stop
-            if ($convertFromJsonCommand.Parameters.ContainsKey('DateKind')) {
-                $value = ConvertFrom-Json -InputObject $text -DateKind String
-            }
-            elseif ($PSVersionTable.PSEdition -eq 'Core') {
-                throw "INVALID|$Context timestamp strings cannot be preserved by this PowerShell runtime."
-            }
-            else {
-                # Windows PowerShell 5.1 leaves ISO timestamp JSON values as strings by default.
-                $value = ConvertFrom-Json -InputObject $text
-            }
+            $value = ConvertFrom-StandardValidationJsonPreservingDates -Text $text -Context $Context
         }
         else {
             $value = ConvertFrom-Json -InputObject $text
@@ -3556,9 +3566,8 @@ function Get-StandardValidationNativeProbeSnapshot {
         } finally { $file.Dispose() }
     } finally { $directory.Dispose() }
     $text=[Text.UTF8Encoding]::new($false,$true).GetString($bytes)
-    $parameters=@{InputObject=$text}
-    if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')) { $parameters.DateKind='String' }
-    return [pscustomobject]@{sha256=Get-StandardValidationBytesSha256 $bytes;value=ConvertFrom-Json @parameters}
+    $value = ConvertFrom-StandardValidationJsonPreservingDates -Text $text -Context 'native probe raw output'
+    return [pscustomobject]@{sha256=Get-StandardValidationBytesSha256 $bytes;value=$value}
 }
 
 function Invoke-StandardValidationNativeProbe {
