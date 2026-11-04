@@ -166,10 +166,26 @@ jobs:
           $selectedTestNames = @($allTestFiles | Where-Object { $authorityFullPaths -notcontains $_.FullName } | ForEach-Object { $_.Name })
           if ($selectedTestNames.Count -ne @($selectedTestNames | Select-Object -Unique).Count) { throw 'Core Pester selection has duplicate leaf names and cannot be passed safely to the bounded runner.' }
           if ($selectedTestNames.Count -ne ($allTestFiles.Count - $expectedAuthorityNames.Count)) { throw 'Core Pester selection does not equal all discovered tests minus the unique authority test paths.' }
+          $skipInventoryPath = [IO.Path]::GetFullPath('./docs/standards/core-test-skip-inventory.json')
+          if (-not (Test-Path -LiteralPath $skipInventoryPath -PathType Leaf)) { throw 'The Core platform skip inventory is missing.' }
+          $skipInventory = Get-Content -Raw -Encoding UTF8 -LiteralPath $skipInventoryPath | ConvertFrom-Json
+          $platformKey = switch ($env:RUNNER_OS) {
+            'Windows' { 'windows' }
+            'macOS' { 'macos' }
+            'Linux' { 'linux' }
+            default { throw "The Core platform skip inventory has no runner mapping for '$env:RUNNER_OS'." }
+          }
+          $platformInventoryProperty = $skipInventory.platforms.PSObject.Properties[$platformKey]
+          if ($null -eq $platformInventoryProperty) { throw "The Core platform skip inventory has no '$platformKey' entry." }
+          $expectedSkippedTestsProperty = $platformInventoryProperty.Value.PSObject.Properties['expectedSkippedTests']
+          if ($null -eq $expectedSkippedTestsProperty) { throw "The Core platform skip inventory '$platformKey' entry has no expectedSkippedTests list." }
+          $expectedSkippedTests = [string[]]@($expectedSkippedTestsProperty.Value)
+          if ($platformKey -ceq 'windows' -and $expectedSkippedTests.Count -ne 5) { throw 'Windows Core must retain exactly five reviewed skipped tests.' }
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '4.10.1'
-            ExpectedSkippedCount = 5
+            ExpectedSkippedCount = $expectedSkippedTests.Count
+            ExpectedSkippedTests = $expectedSkippedTests
             ShardPartitionCount = 1
             ShardPartitionIndex = 0
             OuterTimeoutSeconds = 2400

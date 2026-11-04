@@ -58,14 +58,15 @@ Describe 'SYP353 policy and workflow authority inventory parity' {
         foreach($directory in @('scripts','tests','docs/standards')){[void][IO.Directory]::CreateDirectory((Join-Path $fixture $directory))}
         Copy-Item -LiteralPath (Join-Path $root 'scripts/Invoke-StandardAuthorityGate.ps1') -Destination (Join-Path $fixture 'scripts/Invoke-StandardAuthorityGate.ps1')
         Copy-Item -LiteralPath (Join-Path $root 'docs/standards/validation-security-gate.json') -Destination (Join-Path $fixture 'docs/standards/validation-security-gate.json')
+        Copy-Item -LiteralPath (Join-Path $root 'docs/standards/core-test-skip-inventory.json') -Destination (Join-Path $fixture 'docs/standards/core-test-skip-inventory.json')
         . (Join-Path $root 'scripts/Invoke-StandardAuthorityGate.ps1') -DefineFunctionsOnly
         $expected=@(Get-AuthorityTestPaths -Root $fixture)
         $expected.Count | Should Be 6
         foreach($path in $expected){[IO.File]::WriteAllText($path,'# discovery fixture')}
         [IO.File]::WriteAllText((Join-Path $fixture 'tests/ordinary.Tests.ps1'),'# ordinary discovery fixture')
         $stub=@'
-param($PesterModulePath,$PesterVersion,$ExpectedSkippedCount,$ShardPartitionCount,$ShardPartitionIndex,$OuterTimeoutSeconds,$TestRoot,$EvidenceRoot,[string[]]$SelectedTestFileNames,$SummaryOutputPath)
-$value=@{selected=@($SelectedTestFileNames);skipped=$ExpectedSkippedCount;authority=@(Get-AuthorityTestPaths -Root (Get-Location).Path)}
+param($PesterModulePath,$PesterVersion,$ExpectedSkippedCount,[string[]]$ExpectedSkippedTests,$ShardPartitionCount,$ShardPartitionIndex,$OuterTimeoutSeconds,$TestRoot,$EvidenceRoot,[string[]]$SelectedTestFileNames,$SummaryOutputPath)
+$value=@{selected=@($SelectedTestFileNames);skipped=$ExpectedSkippedCount;skippedTests=@($ExpectedSkippedTests);authority=@(Get-AuthorityTestPaths -Root (Get-Location).Path)}
 [IO.File]::WriteAllText($SummaryOutputPath,($value|ConvertTo-Json -Depth 5))
 '@
         [IO.File]::WriteAllText((Join-Path $fixture 'scripts/Invoke-PesterShardProcess.ps1'),$stub)
@@ -88,16 +89,21 @@ $value=@{selected=@($SelectedTestFileNames);skipped=$ExpectedSkippedCount;author
         [IO.File]::WriteAllLines($stepPath,$body,[Text.UTF8Encoding]::new($false))
         $executable=if($PSVersionTable.PSEdition -ceq 'Core'){[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName}else{(Get-Command pwsh.exe -CommandType Application -ErrorAction Stop).Source}
         $previousTemp=$env:RUNNER_TEMP
+        $previousRunnerOs=$env:RUNNER_OS
         Push-Location $fixture
         try {
             $env:RUNNER_TEMP=$fixture
+            $env:RUNNER_OS='Windows'
             & $executable -NoLogo -NoProfile -NonInteractive -File $stepPath
             $LASTEXITCODE | Should Be 0
-        } finally {$env:RUNNER_TEMP=$previousTemp;Pop-Location}
+        } finally {$env:RUNNER_TEMP=$previousTemp;$env:RUNNER_OS=$previousRunnerOs;Pop-Location}
         $summary=Get-Content -Raw -Encoding UTF8 (Join-Path $fixture 'windows-core-pester-summary.json')|ConvertFrom-Json
         @($summary.selected).Count | Should Be 1
         $summary.selected[0] | Should Be 'ordinary.Tests.ps1'
         $summary.skipped | Should Be 5
+        @($summary.skippedTests).Count | Should Be 5
+        $reviewedSkipInventory=Get-Content -Raw -Encoding UTF8 (Join-Path $fixture 'docs/standards/core-test-skip-inventory.json')|ConvertFrom-Json
+        (@($summary.skippedTests) -join '|') | Should Be (@($reviewedSkipInventory.platforms.windows.expectedSkippedTests) -join '|')
         @($summary.authority).Count | Should Be 6
         (@($summary.authority) -join '|') | Should Be ($expected -join '|')
     }
@@ -114,6 +120,30 @@ $value=@{selected=@($SelectedTestFileNames);skipped=$ExpectedSkippedCount;author
         foreach($path in $policy.ordinaryAuthority.testPaths){$workflow.Contains("'$path'") | Should Be $true}
         $policy.ordinaryAuthority.testPaths=@($policy.ordinaryAuthority.testPaths[1],$policy.ordinaryAuthority.testPaths[0]) + @($policy.ordinaryAuthority.testPaths|Select-Object -Skip 2)
         {Get-AuthorityTestPaths -Root $root -Policy $policy} | Should Throw 'exact ordered sequence'
+    }
+
+    # Scenario: Case evidence has a missing, unexpected, or duplicate skipped test identifier.
+    # Purpose: Make the bounded runner enforce the reviewed per-case inventory instead of accepting a matching count alone.
+    It 'UnitT11_rejects_skip_inventory_missing_unexpected_and_duplicate_cases' {
+        $tokens=$null
+        $parseErrors=$null
+        $executorPath=Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-PesterShardProcess.ps1'
+        $executorAst=[Management.Automation.Language.Parser]::ParseInput((Get-Content -Raw -Encoding UTF8 -LiteralPath $executorPath),[ref]$tokens,[ref]$parseErrors)
+        @($parseErrors).Count | Should Be 0
+        $definition=@($executorAst.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Assert-PesterShardExpectedSkippedTests'},$true))
+        $definition.Count | Should Be 1
+        . ([scriptblock]::Create($definition[0].Extent.Text))
+        $first='skills-source-acquisition.Tests.ps1::UnitT09_rejects_case_insensitive_file_collisions_before_hashing'
+        $second='skills-source-acquisition.Tests.ps1::UnitT09d_rejects_Unicode_NFC_path_collisions_before_hashing'
+        $valid=[pscustomobject]@{cases=@(
+            [pscustomobject]@{path='C:/repo/tests/skills-source-acquisition.Tests.ps1';name=($first -split '::',2)[1];result='Skipped'},
+            [pscustomobject]@{path='C:/repo/tests/skills-source-acquisition.Tests.ps1';name=($second -split '::',2)[1];result='Skipped'}
+        )}
+        {Assert-PesterShardExpectedSkippedTests -Expected @($first,$second) -CaseEvidence @($valid)} | Should Not Throw
+        {Assert-PesterShardExpectedSkippedTests -Expected @($first,$second) -CaseEvidence @([pscustomobject]@{cases=@($valid.cases[0])})} | Should Throw ("Missing: " + $second)
+        {Assert-PesterShardExpectedSkippedTests -Expected @($first) -CaseEvidence @($valid)} | Should Throw ("Unexpected: " + $second)
+        $duplicate=[pscustomobject]@{cases=@($valid.cases[0],$valid.cases[0])}
+        {Assert-PesterShardExpectedSkippedTests -Expected @($first) -CaseEvidence @($duplicate)} | Should Throw 'duplicate skipped test'
     }
 }
 
@@ -308,7 +338,9 @@ jobs:
         Assert-Equal ([regex]::Matches($required, '(?m)^\s*& \./scripts/Invoke-StandardAuthorityGate\.ps1')).Count 1 'Windows Core must execute the authority gate exactly once.'
         Assert-Match $required 'SelectedTestFileNames = \$selectedTestNames' 'Core must pass the dynamically discovered non-authority difference to the bounded executor.'
         Assert-Match $required 'ShardPartitionCount = 1' 'Core must execute the retained difference as one bounded schedule.'
-        Assert-Match $required 'ExpectedSkippedCount = 5' 'Core must bind the five intentional Windows skips from the Unix-only source acquisition fixtures to the real Pester summary.'
+        Assert-Match $required 'core-test-skip-inventory\.json' 'Core must load the reviewed machine-readable platform skip inventory.'
+        Assert-Match $required 'ExpectedSkippedCount = \$expectedSkippedTests\.Count' 'Core must derive the skip count from the reviewed platform inventory.'
+        Assert-Match $required 'ExpectedSkippedTests = \$expectedSkippedTests' 'Core must pass the reviewed per-case skip inventory to the bounded executor.'
         Assert-Match $executor "ValidateSet\('4\.10\.1'\)" 'The bounded executor must retire the Pester 3.4/Windows PowerShell 5.1 lane.'
         Assert-Match $executor 'requires PowerShell 7 Core on Windows, Linux or macOS' 'The bounded executor must require a supported Core host.'
         Assert-Match $executor 'Start-PlatformOwnedProcess -ExecutableLease' 'P3 must own launch and executable identity.'
@@ -342,7 +374,7 @@ jobs:
         foreach($boundary in @('normal reader PR and merged before candidate adoption', 'A pin or immutable version update alone MUST NOT transfer ownership', 'Source-copy equivalence or removal is deferred to downstream adoption', 'normal required three-platform Core CI gate', 'not a universal file inventory', 'Each source repository MUST retain its own protected reader identities')) {
             if(-not $standard.Contains($boundary)){throw "The ownership map is missing the source-reader or adoption boundary '$boundary'."}
         }
-        Assert-Match $required 'ExpectedSkippedCount = 5' 'Windows Core must retain the established five intentional Windows skips.'
+        Assert-Match $required "platformKey -ceq 'windows'.*expectedSkippedTests\.Count -ne 5" 'Windows Core must fail closed unless the reviewed inventory retains exactly five skips.'
         Assert-Match $required 'Invoke-StandardAuthorityGate\.ps1' 'Windows Core must run the required authority gate.'
         Assert-Match $required '\$\{\{ runner\.temp \}\}/syp325-source-scope-\*/\*\*/\*\.json' 'Windows Core must upload task-run-owned SYP325 measurement evidence from runner.temp.'
         Assert-Match $required '\$\{\{ runner\.temp \}\}/windows-core/authority-result\.json' 'Windows Core must upload the normal authority gate result.'

@@ -833,6 +833,8 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         $script:StandardsRoot = Join-Path $script:RepositoryRoot 'docs\standards'
         $script:IndexPath = Join-Path $script:StandardsRoot 'README.md'
         $script:StandardPath = Join-Path $script:StandardsRoot 'skill-repository-standard.md'
+        $script:CoreTestSkipInventoryPath = Join-Path $script:StandardsRoot 'core-test-skip-inventory.json'
+        $script:CoreTestSkipInventorySchemaPath = Join-Path $script:StandardsRoot 'schemas\core-test-skip-inventory-v1.schema.json'
         $script:MatrixPath = Join-Path $script:StandardsRoot 'skill-repository-review-matrix.md'
         $script:ToolchainPath = Join-Path $script:StandardsRoot 'validation-toolchain.json'
         $script:SourceInventorySchemaPath = Join-Path $script:StandardsRoot 'schemas\source-inventory-v2.schema.json'
@@ -3910,7 +3912,7 @@ public sealed class C245NonCooperativeStream : Stream {
             'docs/standards/validation-security-gate.json',
             '.github/workflows/pr8-powershell-validation.yml',
             'tests/skill-repository-workflows.Tests.ps1',
-            'platform-neutral Core lane', 'ExpectedSkippedCount = 5', 'standards-conformance.yml',
+            'platform-neutral Core lane', 'ExpectedSkippedCount = 5', 'core-test-skip-inventory.json', 'exactly equal', 'standards-conformance.yml',
             'schema v2', 'testOwnership', 'unknown schema or ownership values',
             'SourceValidation execution remains owned by the central source-validation function',
             'scripts/Invoke-RepositoryCheck.ps1', 'scripts/Invoke-CorePester.ps1',
@@ -3922,6 +3924,29 @@ public sealed class C245NonCooperativeStream : Stream {
             'This list records the Code trial', 'not a universal file inventory', 'Each source repository MUST retain its own protected reader identities'
         )) { if(-not $standard.Contains($required)){throw "Central validation ownership contract is missing '$required'."} }
     }
+    }
+
+    # Scenario: A platform skip list drifts from its reviewed schema or the retained Windows bound.
+    # Purpose: Bind the normative per-case inventory to three explicit platforms and the five established Windows cases.
+    It 'UnitT111_validates_the_platform_specific_core_skip_inventory' {
+        $inventoryJson=Get-Content -Raw -Encoding UTF8 -LiteralPath $script:CoreTestSkipInventoryPath
+        $inventory=$inventoryJson|ConvertFrom-Json
+        $schema=Get-Content -Raw -Encoding UTF8 -LiteralPath $script:CoreTestSkipInventorySchemaPath|ConvertFrom-Json
+        Assert-AuthoritySchemaInstance -Value $inventory -Schema $schema -SchemaPath $script:CoreTestSkipInventorySchemaPath -Expected $true -Message 'Core skip inventory must validate against its v1 schema.'
+        Assert-Equal $inventory.schemaVersion 1 'Core skip inventory schema version changed.'
+        Assert-ExactPropertySet $inventory.platforms @('windows','macos','linux') 'Core skip inventory must enumerate exactly the reviewed platforms.'
+        Assert-ExactStringSequence $inventory.platforms.windows.expectedSkippedTests @(
+            'skills-source-acquisition.Tests.ps1::UnitT09_rejects_case_insensitive_file_collisions_before_hashing',
+            'skills-source-acquisition.Tests.ps1::UnitT09d_rejects_Unicode_NFC_path_collisions_before_hashing',
+            'skills-source-acquisition.Tests.ps1::UnitT09e_rejects_a_case_variant_sibling_as_the_repository_skill_root',
+            'skills-source-acquisition.Tests.ps1::UnitT09a_rejects_descendant_reparse_points_before_hashing',
+            'skills-source-acquisition.Tests.ps1::UnitT09b_rejects_non_regular_files_before_hashing'
+        ) 'Windows must retain exactly the five reviewed skips.'
+        Assert-ExactStringSequence $inventory.platforms.macos.expectedSkippedTests @(
+            'skills-source-acquisition.Tests.ps1::UnitT09_rejects_case_insensitive_file_collisions_before_hashing',
+            'skills-source-acquisition.Tests.ps1::UnitT09d_rejects_Unicode_NFC_path_collisions_before_hashing'
+        ) 'Default macOS APFS must skip the case-collision and Unicode-form fixtures.'
+        Assert-Equal @($inventory.platforms.linux.expectedSkippedTests).Count 0 'Linux must retain no reviewed Core skips.'
     }
 
     # Scenario: The managed lifecycle contract or its machine-readable evidence schema is removed or detached from the central authority.

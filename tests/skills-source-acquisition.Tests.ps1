@@ -2,6 +2,42 @@ $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
 $script:AcquisitionModule = Join-Path $script:RepositoryRoot 'scripts\skills-source-acquisition.psm1'
 $script:IsWindowsPlatform = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
 
+function Test-FileSystemDistinctNames {
+    param(
+        [Parameter(Mandatory = $true)][string] $Directory,
+        [Parameter(Mandatory = $true)][string] $FirstName,
+        [Parameter(Mandatory = $true)][string] $SecondName
+    )
+
+    [void][System.IO.Directory]::CreateDirectory($Directory)
+    $firstPath = Join-Path $Directory $FirstName
+    $secondPath = Join-Path $Directory $SecondName
+    try {
+        [System.IO.File]::WriteAllText($firstPath, 'first')
+        $stream = [System.IO.File]::Open($secondPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes('second')
+            $stream.Write($bytes, 0, $bytes.Length)
+        }
+        finally { $stream.Dispose() }
+
+        return ((Test-Path -LiteralPath $firstPath -PathType Leaf) -and
+            (Test-Path -LiteralPath $secondPath -PathType Leaf) -and
+            [System.IO.File]::ReadAllText($firstPath) -ceq 'first' -and
+            [System.IO.File]::ReadAllText($secondPath) -ceq 'second')
+    }
+    catch { return $false }
+}
+
+$fileSystemProbeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('syp353-file-system-probe-' + [guid]::NewGuid().ToString('N'))
+try {
+    $script:FileSystemIsCaseSensitive = Test-FileSystemDistinctNames -Directory (Join-Path $fileSystemProbeRoot 'case') -FirstName 'probe' -SecondName 'PROBE'
+    $script:FileSystemPreservesUnicodeForms = Test-FileSystemDistinctNames -Directory (Join-Path $fileSystemProbeRoot 'unicode') -FirstName (([string][char]0x00E9) + '.probe') -SecondName ('e' + [string][char]0x0301 + '.probe')
+}
+finally {
+    Remove-Item -LiteralPath $fileSystemProbeRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 Import-Module $script:AcquisitionModule -Force
 
 function Assert-ThrowsMessage {
@@ -191,7 +227,7 @@ Describe 'Skills source archive acquisition' {
 
     # Scenario: A case-sensitive source tree contains two otherwise valid files whose paths collide on Windows.
     # Purpose: Make the exported inventory hasher enforce the same portable identity on every host.
-    It 'UnitT09_rejects_case_insensitive_file_collisions_before_hashing' -Skip:$script:IsWindowsPlatform {
+    It 'UnitT09_rejects_case_insensitive_file_collisions_before_hashing' -Skip:($script:IsWindowsPlatform -or -not $script:FileSystemIsCaseSensitive) {
         $repositoryRoot = Join-Path $TestDrive 'case-collision-repository'
         $skillRoot = Join-Path $repositoryRoot '.agents/skills/example'
         New-Item -ItemType Directory -Force -Path $skillRoot | Out-Null
@@ -203,7 +239,7 @@ Describe 'Skills source archive acquisition' {
 
     # Scenario: Linux can store canonically equivalent composed and decomposed Unicode names as distinct source paths.
     # Purpose: Enforce the Standard's NFC ordinal identity before hashing either ambiguous inventory.
-    It 'UnitT09d_rejects_Unicode_NFC_path_collisions_before_hashing' -Skip:$script:IsWindowsPlatform {
+    It 'UnitT09d_rejects_Unicode_NFC_path_collisions_before_hashing' -Skip:($script:IsWindowsPlatform -or -not $script:FileSystemPreservesUnicodeForms) {
         $repositoryRoot = Join-Path $TestDrive 'nfc-collision-repository'
         $skillRoot = Join-Path $repositoryRoot '.agents/skills/example'
         New-Item -ItemType Directory -Force -Path $skillRoot | Out-Null
