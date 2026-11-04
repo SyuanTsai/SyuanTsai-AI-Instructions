@@ -1201,7 +1201,7 @@ function Assert-StandardSemanticBridgePlatformRuntimeFile {
 function Initialize-StandardSemanticBridgePlatformRuntime {
     if ($null -ne (Get-Variable StandardSemanticBridgePlatformRuntimeBinding -Scope Script -ErrorAction SilentlyContinue)) { return }
 
-    $pin = '552b8c9cc66f15053d3128c5f38715fdd492f5cf7ace811c7bd235b20f0b3351'
+    $pin = '970e1d959418796270d6ee33fa561fe9ae0b8a6acc89e6b5ba4deb7577ef49c9'
     $manifestPath = Assert-StandardSemanticBridgePlatformRuntimeFile `
         -Path (Join-Path $PSScriptRoot 'platform-runtime.psd1') -Context 'Platform runtime manifest'
     if ((Get-StandardSemanticBridgePlatformRuntimeCanonicalHash -Path $manifestPath) -cne $pin) {
@@ -1218,7 +1218,14 @@ function Initialize-StandardSemanticBridgePlatformRuntime {
         }
     }
 
-    Import-Module -Name $manifestPath -ErrorAction Stop
+    $module = Import-Module -Name $manifestPath -Force -PassThru -ErrorAction Stop
+    $expectedModulePath = Join-Path $PSScriptRoot 'platform-runtime.psm1'
+    $pathMatches = if ($IsWindows) { $module.Path -ieq $expectedModulePath } else { $module.Path -ceq $expectedModulePath }
+    if ($module.Name -cne 'platform-runtime' -or
+        -not $pathMatches -or
+        [string]::IsNullOrEmpty([SyuanTsai.AIInstructions.PlatformRuntime.PlatformRuntimeBuild]::Fingerprint)) {
+        throw 'INVALID|Loaded platform runtime does not match the verified manifest.'
+    }
     $script:StandardSemanticBridgePlatformRuntimeBinding = [pscustomobject]@{
         apiVersion = [string]$manifest.PrivateData.PlatformRuntime.ApiVersion
         manifestSha256 = $pin

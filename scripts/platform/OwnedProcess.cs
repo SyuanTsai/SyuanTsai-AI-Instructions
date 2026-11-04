@@ -63,7 +63,9 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private long stderrLimit;
         private string outputLimitStream;
         private volatile bool outputExceeded, disposed, captureClosed;
-        private volatile bool disposeStorageWhenReadersStop;
+        private readonly string captureProfile;
+        private byte[] stdoutSnapshot, stderrSnapshot;
+        private string stdoutSnapshotFailure, stderrSnapshotFailure;
         private string captureFailure;
         private ProcessCleanupReceipt cleanup;
         private string reason;
@@ -99,25 +101,27 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         {
             if (stream != "stdout" && stream != "stderr") throw new ArgumentException("Stream must be stdout or stderr.", "stream");
             if (maximumBytes < 0) throw new ArgumentOutOfRangeException("maximumBytes");
+            if (captureProfile != "semantic-bridge")
+                throw new InvalidOperationException("Only the semantic-bridge capture profile retains an in-memory capture snapshot.");
             lock (gate)
             {
-                if (disposed) throw new ObjectDisposedException("OwnedProcessLease");
-                if (cleanup == null || !cleanup.CleanedUp || !CaptureReadersStopped)
-                    throw new InvalidOperationException("Capture can be read only after owned process cleanup and capture reader shutdown are complete.");
+                if (cleanup == null || !cleanup.CleanedUp || !captureClosed)
+                    throw new InvalidOperationException("Capture can be read only after owned process cleanup and capture resource shutdown are complete.");
                 lock (outputGate)
                 {
-                    if (disposed) throw new ObjectDisposedException("OwnedProcessLease");
-                    FileStream file = stream == "stdout" ? outFile : errFile;
-                    IDisposable lease = stream == "stdout" ? outLease : errLease;
-                    file.Flush();
-                    var windows = lease as WindowsLease;
-                    return windows != null ? windows.ReadAllBytes(maximumBytes) : ((UnixLease)lease).ReadRetainedBytes(maximumBytes);
+                    byte[] snapshot = stream == "stdout" ? stdoutSnapshot : stderrSnapshot;
+                    string failure = stream == "stdout" ? stdoutSnapshotFailure : stderrSnapshotFailure;
+                    if (snapshot == null)
+                        throw new InvalidOperationException("The " + stream + " capture snapshot is unavailable: " + (failure ?? "no snapshot was retained."));
+                    if (snapshot.Length > maximumBytes)
+                        throw new IOException("The " + stream + " capture snapshot exceeds the bounded read limit.");
+                    return (byte[])snapshot.Clone();
                 }
             }
         }
 
-        private OwnedProcessLease(DateTimeOffset until, long maximum)
-        { deadline = until; limit = maximum; stderrLimit = maximum; }
+        private OwnedProcessLease(DateTimeOffset until, long maximum, string profile)
+        { deadline = until; limit = maximum; stderrLimit = maximum; captureProfile = profile; }
 
         public static OwnedProcessLease Start(string executablePath, object executableLease,
             string[] arguments, IDictionary environment, object workingDirectory,
@@ -179,7 +183,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             if (arguments == null) arguments = new string[0];
             foreach (string argument in arguments)
                 if (argument == null || argument.IndexOf('\0') >= 0) throw new ArgumentException("Arguments cannot contain nulls.");
-            var lease = new OwnedProcessLease(deadline, captureProfile == "semantic-bridge" ? 16777216 : outputLimitCharacters);
+            var lease = new OwnedProcessLease(deadline, captureProfile == "semantic-bridge" ? 16777216 : outputLimitCharacters, captureProfile);
             if (captureProfile == "semantic-bridge") lease.stderrLimit = 16384;
             try
             {
@@ -249,7 +253,6 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
 
         private void CompleteFailedStart(Exception failure)
         {
-            disposeStorageWhenReadersStop = true;
             var receipt = failure.Data["StartupCleanupReceipt"] as ProcessCleanupReceipt;
             if (control != null)
             {
@@ -259,12 +262,6 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 catch (Exception ex) { receipt.CleanedUp = false; receipt.Uncertainty = "startup-dispose-failed: " + ex.Message; }
             }
             try { CloseCapture(); }
-            catch (Exception ex)
-            {
-                failure.Data["StartupCaptureCleanupUncertainty"] = ex.Message;
-                if (receipt != null) { receipt.CleanedUp = false; receipt.Uncertainty = "startup-capture-cleanup-failed: " + ex.Message; }
-            }
-            try { DisposeCaptureStorage(); }
             catch (Exception ex)
             {
                 failure.Data["StartupCaptureCleanupUncertainty"] = ex.Message;
@@ -405,7 +402,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 finally
                 {
                     if (Interlocked.Decrement(ref readersRunning) == 0 && captureCancelled.IsSet)
-                        try { CloseCapture(); if (disposeStorageWhenReadersStop) DisposeCaptureStorage(); } catch (Exception ex) { captureFailure = ex.Message; }
+                        try { CloseCapture(); } catch (Exception ex) { captureFailure = ex.Message; }
                 }
             }) { IsBackground = true, Name = "platform-bounded-capture" };
             Interlocked.Increment(ref readersRunning);
@@ -548,25 +545,32 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             {
                 if (captureClosed) return;
                 Exception failure = null;
+                if (captureProfile == "semantic-bridge")
+                {
+                    try
+                    {
+                        outFile.Flush();
+                        int maximum = checked((int)Math.Min(limit * 3, Int32.MaxValue));
+                        var windows = outLease as WindowsLease;
+                        stdoutSnapshot = windows != null ? windows.ReadAllBytes(maximum) : ((UnixLease)outLease).ReadRetainedBytes(maximum);
+                    }
+                    catch (Exception ex) { stdoutSnapshotFailure = ex.Message; }
+                    try
+                    {
+                        errFile.Flush();
+                        int maximum = checked((int)Math.Min(stderrLimit * 3, Int32.MaxValue));
+                        var windows = errLease as WindowsLease;
+                        stderrSnapshot = windows != null ? windows.ReadAllBytes(maximum) : ((UnixLease)errLease).ReadRetainedBytes(maximum);
+                    }
+                    catch (Exception ex) { stderrSnapshotFailure = ex.Message; }
+                }
                 // AnonymousPipeServerStream.Dispose does not release its local
                 // client copy. Retain/dispose those handles even if spawn failed
                 // before DisposeLocalCopyOfClientHandle was reached.
-                foreach (IDisposable resource in new IDisposable[] { stdoutClient, stderrClient, stdout, stderr })
+                foreach (IDisposable resource in new IDisposable[] { stdoutClient, stderrClient, stdout, stderr, outFile, errFile, outLease, errLease })
                 { if (resource != null) { try { resource.Dispose(); } catch (Exception ex) { if (failure == null) failure = ex; } } }
                 captureClosed = true;
                 if (failure != null) throw new IOException("Capture resources could not all be released.", failure);
-            }
-        }
-        private void DisposeCaptureStorage()
-        {
-            if (Volatile.Read(ref readersRunning) != 0) return;
-            lock (outputGate)
-            {
-                Exception failure = null;
-                foreach (IDisposable resource in new IDisposable[] { outFile, errFile, outLease, errLease })
-                { if (resource != null) { try { resource.Dispose(); } catch (Exception ex) { if (failure == null) failure = ex; } } }
-                outFile = null; errFile = null; outLease = null; errLease = null;
-                if (failure != null) throw new IOException("Capture storage resources could not all be released.", failure);
             }
         }
         public void Dispose()
@@ -574,17 +578,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             lock (gate)
             {
                 if (disposed) return;
-                disposeStorageWhenReadersStop = true;
                 try { Stop(TimeSpan.FromMilliseconds(100), DateTimeOffset.UtcNow.AddSeconds(5), null); }
-                finally
-                {
-                    try { control.Dispose(); }
-                    finally
-                    {
-                        try { CloseCapture(); }
-                        finally { try { DisposeCaptureStorage(); } finally { disposed = true; } }
-                    }
-                }
+                finally { control.Dispose(); CloseCapture(); disposed = true; }
             }
         }
     }

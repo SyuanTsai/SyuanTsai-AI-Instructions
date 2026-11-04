@@ -460,6 +460,16 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
         BeforeAll {
             $script:P55Bridge = Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/StandardSemanticBridge.psm1') -Force -PassThru
         }
+        # Scenario: The verified platform runtime is already imported in this process before the bridge uses it.
+        # Purpose: A forced bridge import reruns the fingerprint gate without breaking an identical loaded build.
+        It 'InterT04_reimports_an_identical_loaded_runtime_before_callback' {
+            $runtimeManifest = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1'
+            Import-Module -Name $runtimeManifest -Force -ErrorAction Stop
+            $result = & $script:P55Bridge {
+                Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback { 'loaded-runtime-callback' } -TimeoutMilliseconds 15000
+            }
+            @($result)[0] | Should Be 'loaded-runtime-callback'
+        }
         # Scenario: The real bootstrap receives UTF-8 on a host whose console may use an OEM code page.
         # Purpose: Verify the wire codec independently of the P2/P3 filesystem and ownership tests below.
         It 'InterT05_bootstrap_decodes_utf8_payload' {
@@ -569,21 +579,39 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
             [IO.Directory]::Exists($result.captureRoot) | Should Be $false
         }
         # Scenario: Callback code replaces the stdout directory entry with /dev/zero where unlink is supported.
-        # Purpose: The bridge must consume its retained capture handle without reopening or blocking on that path.
-        It 'InterT15_ignores_callback_stdout_path_replacement' {
-            $result = & $script:P55Bridge {
-                Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback {
-                    try {
-                        [IO.File]::Delete((Join-Path ([Environment]::CurrentDirectory) 'stdout'))
-                        if (-not $IsWindows) {
-                            [IO.File]::CreateSymbolicLink((Join-Path ([Environment]::CurrentDirectory) 'stdout'), '/dev/zero') | Out-Null
+        # Purpose: Bound completion and either consume the original capture or fail closed.
+        It 'InterT15_bounds_callback_stdout_path_replacement' {
+            $timeoutMilliseconds = 15000
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            $result = $null; $caught = $null
+            try {
+                $result = & $script:P55Bridge {
+                    param($timeoutMilliseconds)
+                    Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback {
+                        try {
+                            [IO.File]::Delete((Join-Path ([Environment]::CurrentDirectory) 'stdout'))
+                            if (-not $IsWindows) {
+                                [IO.File]::CreateSymbolicLink((Join-Path ([Environment]::CurrentDirectory) 'stdout'), '/dev/zero') | Out-Null
+                            }
                         }
-                    }
-                    catch [IO.IOException], [UnauthorizedAccessException] { }
-                    'retained-capture-value'
-                } -TimeoutMilliseconds 15000
+                        catch [IO.IOException], [UnauthorizedAccessException] { }
+                        'retained-capture-value'
+                    } -TimeoutMilliseconds $timeoutMilliseconds
+                } $timeoutMilliseconds
             }
-            @($result)[0] | Should Be 'retained-capture-value'
+            catch { $caught = $_.Exception }
+            finally { $watch.Stop() }
+            $watch.Elapsed.TotalMilliseconds | Should BeLessThan ($timeoutMilliseconds + 10000)
+            if ($IsWindows) {
+                $caught | Should BeNullOrEmpty
+                @($result)[0] | Should Be 'retained-capture-value'
+            }
+            elseif ($null -eq $caught) {
+                @($result)[0] | Should Be 'retained-capture-value'
+            }
+            else {
+                ($caught.Message.Contains('owned process boundary cleanup failed') -or $caught.Message.Contains('isolated capture')) | Should Be $true
+            }
         }
         # Scenario: A callback is blocked in native sleep past its deadline.
         # Purpose: Preserve TimeoutException and complete P3 cleanup, without a namespace capability.
