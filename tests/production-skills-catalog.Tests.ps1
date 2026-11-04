@@ -86,13 +86,34 @@ Describe 'production Skills Catalog' {
                 Expected=@('configure-confluence-api-access','configure-jira-api-access','manage-confluence-docs-as-code','publish-requirements-to-confluence','work-with-jira')
             }
         )
+        $currentPlatform = if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+            'windows'
+        }
+        elseif ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::OSX)) {
+            'macos'
+        }
+        elseif ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Linux)) {
+            'linux'
+        }
+        else {
+            'unix'
+        }
         try {
             Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE -ErrorAction SilentlyContinue
             foreach ($case in $cases) {
                 $selection = [pscustomobject]@{ profiles=@([string]$case.Profile); includeSkills=@(); excludeSkills=@() }
+                $expected = @(
+                    foreach ($skillId in @($case.Expected)) {
+                        $skill = @($script:catalog.skills | Where-Object { [string]$_.id -ceq $skillId })[0]
+                        $platforms = @($skill.compatibility.platforms)
+                        if (($platforms -contains 'any') -or ($platforms -contains $currentPlatform)) {
+                            $skillId
+                        }
+                    }
+                )
                 Assert-StringSequence `
                     -Actual @(Resolve-SkillsSelection -Catalog $script:catalog -Selection $selection) `
-                    -Expected @($case.Expected)
+                    -Expected $expected
             }
         }
         finally { Remove-Item Env:AI_INSTRUCTIONS_CAPABILITY_EVIDENCE -ErrorAction SilentlyContinue }

@@ -442,13 +442,18 @@ Describe 'AI instructions runtime contracts' {
         $junction = Join-Path $parent 'runtime-junction'
         $wrongFilePath = Join-Path $parent 'receipt.json'
         New-Item -ItemType Directory -Force -Path $parent,$outside,$wrongFilePath | Out-Null
-        New-Item -ItemType Junction -Path $junction -Target $outside | Out-Null
+        if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+            New-Item -ItemType Junction -Path $junction -Target $outside | Out-Null
+        }
+        else {
+            New-Item -ItemType SymbolicLink -Path $junction -Target $outside | Out-Null
+        }
 
         (Get-RuntimeContractError {
             Assert-AiInstructionsMutationPath -Path $wrongFilePath -ExpectedType File -Context 'receipt'
         }) | Should Match 'non-reparse file'
         (Get-RuntimeContractError {
             Get-AiInstructionsRuntimeInventory -RuntimeRoot $junction
-        }) | Should Match 'non-reparse directory|reparse point'
+        }) | Should Match "^AI instructions runtime root '.+' must be a non-reparse directory\.$"
     }
 }
