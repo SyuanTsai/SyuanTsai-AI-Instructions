@@ -1,0 +1,31 @@
+name: probe-SYP-353-p55
+on:
+  push:
+    branches: [probe/SYP-353-p55]
+permissions:
+  contents: read
+jobs:
+  detail:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Run selected files with full output (Pester 4.10.1)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          Install-Module Pester -RequiredVersion 4.10.1 -Force -SkipPublisherCheck -Scope CurrentUser
+          Import-Module Pester -RequiredVersion 4.10.1 -Force
+          $r = Invoke-Pester -Script @('./tests/standard-semantic-bridge.Tests.ps1','./tests/static-parser-coverage.Tests.ps1') -PassThru
+          foreach ($t in @($r.TestResult | Where-Object { $_.Result -ne 'Passed' })) {
+            "FULLFAIL ===== $($t.Name)"
+            [string]$t.FailureMessage
+            [string]$t.StackTrace
+          }
