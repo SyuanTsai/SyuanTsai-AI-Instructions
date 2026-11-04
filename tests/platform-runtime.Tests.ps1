@@ -420,6 +420,60 @@ Start-Sleep 30
         } finally { if ($null -ne $executable) { $executable.Dispose() }; if ($null -ne $parent) { $parent.Dispose() }; Remove-P3Fixture $f $p }
     }
 
+    # Scenario: A caller supplies a relative, empty or NUL-containing invocation path.
+    # Purpose: Reject invalid argv0 before reserving capture files or starting a process.
+    It 'InterT121_rejects_invalid_argument_zero_before_capture' {
+        $f = New-P3Fixture
+        try {
+            foreach ($invalid in @('relative-host', '', ($script:P3Shell + [char]0 + 'suffix'))) {
+                { Start-PlatformOwnedProcess -ExecutablePath $script:P3Shell -ArgumentZero $invalid -Environment @{} -WorkingDirectoryLease $f.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(10)) -StdoutPath (Join-Path $f.Path 'out') -StderrPath (Join-Path $f.Path 'err') } | Should Throw 'ArgumentZero must be an absolute path without NUL.'
+                [IO.File]::Exists((Join-Path $f.Path 'out')) | Should -BeFalse
+                [IO.File]::Exists((Join-Path $f.Path 'err')) | Should -BeFalse
+            }
+        } finally { Remove-P3Fixture $f $null }
+    }
+
+    if ($IsWindows) {
+        # Scenario: A Windows caller passes a valid Unix-only argv0 override.
+        # Purpose: Keep Windows executable selection and Job ownership unchanged.
+        It 'InterT122_preserves_windows_launch_with_argument_zero' {
+            $f = New-P3Fixture; $p = $null
+            try {
+                $environment = [Collections.Generic.Dictionary[string,string]]::new()
+                $environment['SystemRoot'] = [string]$env:SystemRoot
+                $p = Start-PlatformOwnedProcess -ExecutablePath $script:P3Shell -ArgumentZero (Join-Path $f.Path 'alias.exe') -ArgumentList @('-NoProfile','-NonInteractive','-Command',"[Console]::Write('windows-unchanged')") -Environment $environment -WorkingDirectoryLease $f.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(10)) -StdoutPath (Join-Path $f.Path 'out') -StderrPath (Join-Path $f.Path 'err')
+                Assert-P3Exited $p
+                (Stop-PlatformOwnedProcess -Lease $p).CleanedUp | Should -BeTrue
+                $p.ExitCode | Should -Be 0
+                [IO.File]::ReadAllText((Join-Path $f.Path 'out')) | Should -Be 'windows-unchanged'
+            } finally { Remove-P3Fixture $f $p }
+        }
+    }
+    if ($IsLinux -or $IsMacOS) {
+        # Scenario: A leased shell is executed with a different absolute invocation name.
+        # Purpose: argv0 is caller-controlled data while the executable remains lease-bound.
+        It 'InterT123_preserves_argument_zero_with_executable_lease' {
+          foreach ($override in @($false,$true)) {
+            $f = New-P3Fixture; $file = $null; $p = $null
+            try {
+                [IO.File]::Copy('/bin/sh',(Join-Path $f.Path 'executable'))
+                $file = Open-PlatformFile -ParentLease $f.Directory -Leaf 'executable' -Access Read -CreateMode OpenExisting
+                Set-PlatformPermissions -Lease $file -Policy @{ Mode=448 } | Out-Null
+                $invocation = Join-Path $f.Path 'venv/bin/sh'
+                $options = @{}
+                if ($override) { $options.ArgumentZero = $invocation }
+                $environment = [Collections.Generic.Dictionary[string,string]]::new()
+                $p = Start-PlatformOwnedProcess -ExecutableLease $file @options -ArgumentList @('-c','printf "%s" "$0"') -Environment $environment -WorkingDirectoryLease $f.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(10)) -StdoutPath (Join-Path $f.Path 'out') -StderrPath (Join-Path $f.Path 'err')
+                Assert-P3Exited $p
+                (Stop-PlatformOwnedProcess -Lease $p).CleanedUp | Should -BeTrue
+                $p.ExitCode | Should -Be 0
+                $expected = if ($override) { $invocation } elseif ($IsLinux) { '/proc/self/fd/3' } else { Join-Path $f.Path 'executable' }
+                [IO.File]::ReadAllText((Join-Path $f.Path 'out')) | Should -Be $expected
+            } finally { if ($null -ne $file) { $file.Dispose() }; Remove-P3Fixture $f $p }
+          }
+        }
+    }
+
     # Scenario: An ordinary newly created P2 file is supplied as an executable lease.
     # Purpose: Refuse mode 0600 with a typed error; never silently add executable permissions.
     # Register only on the native host; keep this file's Core CI skip count at zero.
@@ -438,6 +492,31 @@ Start-Sleep 30
                 $caught.Errno | Should Be 13
                 ((Get-PlatformPermissions -Lease $file).Mode -band 4095) | Should Be 384
             } finally { if ($null -ne $file) { $file.Dispose() }; Remove-P3Fixture $f $null }
+        }
+    }
+
+    if ($IsLinux) {
+        # Scenario: A shebang interpreter must reopen the leased script through fd 3.
+        # Purpose: The child descriptor survives exec and the parent's lease disposal.
+        It 'InterT128_keeps_leased_script_descriptor_readable_after_exec' {
+            $f = New-P3Fixture; $file = $null; $p = $null
+            try {
+                $file = Open-PlatformFile -ParentLease $f.Directory -Leaf 'executable' -Access Read -CreateMode CreateNew
+                [IO.File]::WriteAllText((Join-Path $f.Path 'executable'),@'
+#!/bin/sh
+IFS= read -r first < /proc/self/fd/3 || exit 91
+[ "$first" = '#!/bin/sh' ] || exit 92
+printf '%s' "$0"
+'@,[Text.UTF8Encoding]::new($false))
+                Set-PlatformPermissions -Lease $file -Policy @{ Mode=448 } | Out-Null
+                $environment = [Collections.Generic.Dictionary[string,string]]::new()
+                $p = Start-PlatformOwnedProcess -ExecutableLease $file -ArgumentZero (Join-Path $f.Path 'invocation') -Environment $environment -WorkingDirectoryLease $f.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(10)) -StdoutPath (Join-Path $f.Path 'out') -StderrPath (Join-Path $f.Path 'err')
+                $file.Dispose(); $file = $null
+                Assert-P3Exited $p
+                (Stop-PlatformOwnedProcess -Lease $p).CleanedUp | Should -BeTrue
+                $p.ExitCode | Should -Be 0
+                [IO.File]::ReadAllText((Join-Path $f.Path 'out')) | Should -Be '/proc/self/fd/3'
+            } finally { if ($null -ne $file) { $file.Dispose() }; Remove-P3Fixture $f $p }
         }
     }
 
@@ -1090,6 +1169,74 @@ public static class UnixObservationFixture
             $lease.Limitations | Should Contain 'group-signal-external-reaper-race'
             if ($darwin) { $cleaned.Limitations | Should Contain 'macos-process-group-cannot-detect-setsid-escape' }
         } finally { $lease.Dispose() }
+        }
+    }
+
+    # Scenario: A Darwin cleanup census outlasts its deadline while escaped writers retain both pipes.
+    # Purpose: Capture must cancel independently of process observation and still report incomplete cleanup.
+    It 'InterT205_stops_capture_during_a_slow_macos_cleanup_census' {
+        $fixture = New-UnixObservationFixture
+        Set-DarwinObservationFixture $fixture
+        $fixture.State.Peek = [Tuple]::Create(-1,0,10)
+        $fixture.State.Table.Remove(200); $fixture.State.ExitEvent = 0; $fixture.State.WaitError = 10; $fixture.State.GroupErrno = 3
+        $type = [SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]
+        $flags = [Reflection.BindingFlags]'Instance,NonPublic'
+        $lease = [Activator]::CreateInstance($type,$flags,$null,[object[]]@([DateTimeOffset]::UtcNow.AddSeconds(30),[long]4096),$null)
+        $type.GetField('control',$flags).SetValue($lease,$fixture.Control)
+        $captureRoot = if ($IsMacOS) { '/private/tmp' } else { [IO.Path]::GetTempPath().TrimEnd('\','/') }
+        $name = 'p3-slow-census-' + [guid]::NewGuid().ToString('N')
+        $directory = Open-PlatformDirectory -Root $captureRoot -RelativePath $name -CreatePrivate
+        $writers = @(); $readHandles = @(); $fileHandles = @()
+        $observation = @{ Entered=$false; ReadersStopped=$false; ResourcesClosed=$false; StopDeadline=$null }
+        try {
+            foreach ($stream in @('out','err')) {
+                $pipe = [IO.Pipes.AnonymousPipeServerStream]::new([IO.Pipes.PipeDirection]::In,[IO.HandleInheritability]::Inheritable)
+                $writers += $pipe.ClientSafePipeHandle; $readHandles += $pipe.SafePipeHandle
+                $type.GetField($(if ($stream -eq 'out') { 'stdout' } else { 'stderr' }),$flags).SetValue($lease,$pipe)
+                $fileLease = Open-PlatformFile -ParentLease $directory -Leaf $stream -Access ReadWrite -CreateMode CreateNew
+                $type.GetField(($stream+'Lease'),$flags).SetValue($lease,$fileLease)
+                $file = $type.GetMethod('CaptureFile',[Reflection.BindingFlags]'Static,NonPublic').Invoke($null,[object[]]@($fileLease))
+                $type.GetField(($stream+'File'),$flags).SetValue($lease,$file)
+                $fileHandles += $file.SafeFileHandle
+                $reader = $type.GetMethod('Reader',$flags).Invoke($lease,[object[]]@($pipe,$file))
+                $type.GetField(($stream+'Reader'),$flags).SetValue($lease,$reader)
+            }
+            $lease.CaptureReadersStopped | Should Be $false
+            # This census never signals the pipe writers. It waits for capture's
+            # independent stop budget, simulating a slow native process inventory.
+            Set-UnixTestField $fixture.Control listDarwinPids ([Func[uint32,uint32,int[]]]{
+                param($kind,$value)
+                if (-not $observation.Entered) {
+                    $observation.Entered = $true
+                    $until = [DateTimeOffset]::UtcNow.AddSeconds(2)
+                    while (-not $lease.CaptureReadersStopped -and [DateTimeOffset]::UtcNow -lt $until) { [Threading.Thread]::Sleep(10) }
+                    $observation.ReadersStopped = $lease.CaptureReadersStopped
+                    $observation.ResourcesClosed = $lease.CaptureResourcesClosed
+                    # Keep the census in flight past Stop's deadline even when
+                    # readers cancel promptly; the later Join has no budget left.
+                    while ([DateTimeOffset]::UtcNow -lt $observation.StopDeadline.AddMilliseconds(100)) { [Threading.Thread]::Sleep(10) }
+                }
+                return ,[int[]]@()
+            }.GetNewClosure())
+            $observation.StopDeadline = [DateTimeOffset]::UtcNow.AddMilliseconds(250)
+            $receipt = $lease.Stop([TimeSpan]::Zero,$observation.StopDeadline,$null)
+            $observation.Entered | Should Be $true
+            $observation.ReadersStopped | Should Be $true
+            $observation.ResourcesClosed | Should Be $true
+            $receipt.CaptureReadersStopped | Should Be $true
+            $receipt.CaptureResourcesClosed | Should Be $true
+            $receipt.CleanedUp | Should Be $false
+            $receipt.Uncertainty | Should Match 'capture-pipe-still-open'
+            $receipt.Limitations | Should Contain 'macos-process-group-cannot-detect-setsid-escape'
+            foreach ($handle in $readHandles + $fileHandles) { $handle.IsClosed | Should Be $true }
+            foreach ($handle in $writers) { $handle.IsClosed | Should Be $false }
+        } finally {
+            foreach ($handle in $writers) { $handle.Dispose() }
+            $type.GetMethod('CancelCaptureReaders',$flags).Invoke($lease,[object[]]@([DateTimeOffset]::UtcNow.AddSeconds(2))) | Out-Null
+            $type.GetMethod('CloseCapture',$flags).Invoke($lease,@())
+            $lease.Dispose(); $directory.Dispose()
+            foreach ($stream in @('out','err')) { $path = Join-Path (Join-Path $captureRoot $name) $stream; if ([IO.File]::Exists($path)) { [IO.File]::Delete($path) } }
+            [IO.Directory]::Delete((Join-Path $captureRoot $name))
         }
     }
 
@@ -2141,6 +2288,29 @@ Describe 'Platform runtime contract' {
     }
 }
 
+Describe 'Platform P2 root directory leases' {
+    BeforeAll {
+        Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
+    }
+    # Scenario: Open an existing filesystem root twice, without creating or changing anything beneath it.
+    # Purpose: Root-only leases preserve no-follow identity checks without permitting empty relative paths.
+    It 'InterT10_opens_and_verifies_existing_filesystem_root' {
+        $root = [IO.Path]::GetPathRoot($PSHOME)
+        $first = Open-PlatformDirectory -Root $root -RootOnly
+        try {
+            $second = Open-PlatformDirectory -Root $root -RootOnly
+            try {
+                $observed = Assert-PlatformFileIdentity -Lease $second -Expected $first.Observation -VerifyPath
+                $observed.Kind | Should Be 'directory'
+                $observed.Inode | Should Be $first.Observation.Inode
+                { $first.WriteNewBytes([byte[]]@(1)) } | Should Throw
+                { Open-PlatformDirectory -Root $root -RelativePath '' } | Should Throw
+                { Open-PlatformDirectory -Root $root -RootOnly -CreatePrivate } | Should Throw
+            } finally { $second.Dispose() }
+        } finally { $first.Dispose() }
+    }
+}
+
 Describe 'Platform P2 primitives' {
     BeforeAll {
         $script:P2Manifest = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1'
@@ -2565,6 +2735,7 @@ try {
         [IO.Directory]::CreateSymbolicLink($alias,$target) | Out-Null
         { Open-PlatformDirectory -Root $script:P2Root -RelativePath 'ancestor-alias/child' } | Should Throw
         { Open-PlatformDirectory -Root $alias -RelativePath 'child' } | Should Throw
+        { Open-PlatformDirectory -Root $alias -RootOnly } | Should Throw
     }
 
     # Scenario: A dangling link is encountered during private directory or file creation.
@@ -2716,6 +2887,7 @@ try {
         try {
             { Open-PlatformDirectory -Root $script:P2Root -RelativePath 'junction-alias/child' } | Should Throw
             { Open-PlatformDirectory -Root $alias -RelativePath 'child' } | Should Throw
+            { Open-PlatformDirectory -Root $alias -RootOnly } | Should Throw
             $parent = Open-PlatformDirectory -Root $script:P2Root -RelativePath 'junction-target'
             try { { Open-PlatformFile -ParentLease $parent -Leaf 'child' -Access Read -CreateMode OpenExisting } | Should Throw }
             finally { $parent.Dispose() }

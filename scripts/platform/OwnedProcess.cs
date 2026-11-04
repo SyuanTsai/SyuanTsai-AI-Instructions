@@ -56,6 +56,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private readonly ManualResetEventSlim exited = new ManualResetEventSlim(false);
         private readonly ManualResetEventSlim cleaned = new ManualResetEventSlim(false);
         private readonly ManualResetEventSlim captureCancelled = new ManualResetEventSlim(false);
+        private long captureStopDeadlineTicks = Int64.MaxValue;
         private int readersRunning;
         private readonly DateTimeOffset deadline;
         private readonly long limit;
@@ -95,7 +96,19 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             DateTimeOffset deadline, string isolationRequirement, object stdoutLease,
             object stderrLease, long outputLimitCharacters)
         {
+            return Start(executablePath, executableLease, arguments, environment, workingDirectory,
+                deadline, isolationRequirement, stdoutLease, stderrLease, outputLimitCharacters, null);
+        }
+
+        public static OwnedProcessLease Start(string executablePath, object executableLease,
+            string[] arguments, IDictionary environment, object workingDirectory,
+            DateTimeOffset deadline, string isolationRequirement, object stdoutLease,
+            object stderrLease, long outputLimitCharacters, string argumentZero)
+        {
             string os = PlatformNative.GetOperatingSystem();
+            if (String.IsNullOrEmpty(argumentZero)) argumentZero = null;
+            else if (argumentZero.IndexOf('\0') >= 0 || !Path.IsPathFullyQualified(argumentZero))
+                throw new ArgumentException("ArgumentZero must be an absolute path without NUL.");
             if (isolationRequirement != "cooperative" && isolationRequirement != "strong")
                 throw new ArgumentException("IsolationRequirement must be cooperative or strong.");
             if (os != "windows" && isolationRequirement == "strong")
@@ -135,7 +148,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                         if (os == "windows")
                             lease.control = WindowsProcessControl.Start(executablePath, executableLease as WindowsLease, arguments, env.ToArray(), (WindowsLease)workingDirectory, input, output, error);
                         else
-                            lease.control = UnixProcessControl.Start(executablePath, executableLease as UnixLease, arguments, env.ToArray(), (UnixLease)workingDirectory, input.ToInt32(), output.ToInt32(), error.ToInt32());
+                            lease.control = UnixProcessControl.Start(executablePath, executableLease as UnixLease, arguments, env.ToArray(), (UnixLease)workingDirectory, input.ToInt32(), output.ToInt32(), error.ToInt32(), argumentZero);
                     }
                     finally { stdin.DisposeLocalCopyOfClientHandle(); }
                 } // child stdin observes EOF; no inherited terminal
@@ -264,9 +277,19 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     long written = 0; // independent quota for this reader/stream
                     while (!captureCancelled.IsSet)
                     {
+                        DateTimeOffset now = DateTimeOffset.UtcNow;
+                        // Cleanup inventory can itself exceed the reserved drain
+                        // budget. Do not wait for Stop to return from native census
+                        // before cancelling an idle pipe with an escaped writer.
+                        if (now.UtcTicks >= Interlocked.Read(ref captureStopDeadlineTicks))
+                        {
+                            lock (outputGate) { if (captureFailure == null) captureFailure = "capture-pipe-still-open"; }
+                            captureCancelled.Set();
+                            return;
+                        }
                         // A reader also has a deadline when no supervisor was
                         // started, or an idle writer holds a partial UTF-8 sequence.
-                        if (DateTimeOffset.UtcNow >= deadline)
+                        if (now >= deadline)
                         { lock (outputGate) { if (captureFailure == null) captureFailure = "capture-deadline"; } return; }
                         int count = ReadAvailable(source, buffer);
                         if (count < 0) { captureCancelled.Wait(10); continue; }
@@ -366,6 +389,9 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 // Reserve time to cancel and join capture readers even when an
                 // escaped process keeps its inherited write ends open indefinitely.
                 DateTimeOffset processUntil = until <= DateTimeOffset.MinValue.AddMilliseconds(100) ? DateTimeOffset.MinValue : until.AddMilliseconds(-100);
+                // Readers enforce this cutoff independently of the gate held by
+                // process cleanup; a slow final Poll/Remaining cannot starve joins.
+                Interlocked.Exchange(ref captureStopDeadlineTicks, processUntil.UtcTicks);
                 PollCleanup(ref failure);
                 signals += SignalCleanup(false, ref failure);
                 DateTimeOffset now = DateTimeOffset.UtcNow;

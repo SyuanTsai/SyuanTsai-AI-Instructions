@@ -1,5 +1,474 @@
 
 
+Describe 'Validator reservation name binding' {
+    BeforeAll {
+        $script:ReservationFixtureRoot = if ($TestDrive -is [IO.DirectoryInfo]) { $TestDrive.FullName } else { [string]$TestDrive }
+        if ($IsMacOS -and $script:ReservationFixtureRoot.StartsWith('/var/')) { $script:ReservationFixtureRoot = '/private' + $script:ReservationFixtureRoot }
+        . (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-StandardValidation.ps1') -CandidateRoot $script:ReservationFixtureRoot -AdapterPath 'unused' -ArtifactsRoot $script:ReservationFixtureRoot -SourceRepository 'https://example.test/fixture.git' -SourceRevision ('a'*40) -BaseRevision ('b'*40) -DefineFunctionsOnly
+        $script:ReservationOriginalAssert = Get-Command Assert-StandardValidationOutputReservation
+        function Invoke-ReservationNameMutation {
+            param([string]$Target, [string]$Replacement)
+            $child = Join-Path $script:ReservationFixtureRoot ('mutate-' + [guid]::NewGuid().ToString('N') + '.ps1')
+            [IO.File]::WriteAllText($child,@'
+param([string]$Target, [string]$Replacement)
+$ErrorActionPreference = 'Stop'
+try { [IO.Directory]::Move($Target, $Target + '.moved') }
+catch [IO.IOException] { [Console]::Write('rename-denied'); exit 0 }
+if ($Replacement -eq 'directory') { [void][IO.Directory]::CreateDirectory($Target) }
+else { [void][IO.Directory]::CreateSymbolicLink($Target, $Target + '.moved') }
+[Console]::Write('renamed')
+'@,[Text.UTF8Encoding]::new($false))
+            $hostPath = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
+            Invoke-StandardValidationProcess -Command $hostPath -Arguments @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$child,$Target,$Replacement) -WorkingDirectory $script:ReservationFixtureRoot -Environment @{} -TimeoutSeconds 15
+        }
+    }
+    # Scenario: A root path and an ordinary child are decomposed without touching the filesystem.
+    # Purpose: Preserve the root separator and never pass an empty relative component to P2.
+    if ($IsWindows) {
+        It 'UnitT10_preserves_windows_root_and_child_components' {
+            foreach ($path in @('C:\', [IO.Path]::GetDirectoryName('D:\x.exe'))) {
+                $binding = Get-StandardValidationDirectoryBinding -FullPath $path
+                $binding.Root | Should Be $path
+                $binding.RootOnly | Should Be $true
+            }
+            $binding = Get-StandardValidationDirectoryBinding -FullPath 'D:\child\'
+            $binding.Root | Should Be 'D:\'
+            $binding.RelativePath | Should Be 'child'
+            $binding.RootOnly | Should Be $false
+        }
+    } else {
+        It 'UnitT10_preserves_unix_root_and_child_components' {
+            $binding = Get-StandardValidationDirectoryBinding -FullPath '/'
+            $binding.Root | Should Be '/'
+            $binding.RootOnly | Should Be $true
+            $binding = Get-StandardValidationDirectoryBinding -FullPath '/usr'
+            $binding.Root | Should Be '/'
+            $binding.RelativePath | Should Be 'usr'
+            $binding.RootOnly | Should Be $false
+        }
+    }
+    # Scenario: The validator opens the current filesystem root without creating anything.
+    # Purpose: Exercise the root-only P2 route through the production helper.
+    It 'InterT20_opens_the_filesystem_root_read_only' {
+        $lease = Open-StandardValidationDirectory -Path ([IO.Path]::GetPathRoot($script:ReservationFixtureRoot))
+        try { $lease.Observation.Kind | Should Be 'directory' } finally { $lease.Dispose() }
+    }
+    if (-not $IsWindows) {
+        # Scenario: A real child renames either the parent or an ancestor, then substitutes a directory or symlink.
+        # Purpose: Reject publication at a moved reservation even when a symlink still reaches the same inode.
+        It 'InterT30_rejects_child_output_ancestor_substitution_<Ancestor>_<Replacement>' -TestCases @(
+            @{ Ancestor=$false; Replacement='directory' }, @{ Ancestor=$true; Replacement='directory' },
+            @{ Ancestor=$false; Replacement='symlink' }, @{ Ancestor=$true; Replacement='symlink' }
+        ) {
+            param($Ancestor,$Replacement)
+            $root = Join-Path $script:ReservationFixtureRoot ([guid]::NewGuid().ToString('N'))
+            $parent = Join-Path $root 'output'
+            $reservation = New-StandardValidationOutputReservation -Path (Join-Path $parent 'result.json')
+            try {
+                $target = if ($Ancestor) { $root } else { $parent }
+                $child = Invoke-ReservationNameMutation -Target $target -Replacement $Replacement
+                $child.status | Should Be 'passed'
+                $child.stdout | Should Be 'renamed'
+                { Write-StandardValidationJsonReserved -Value @{ state='PASS' } -Path $reservation.path -Stream $reservation.stream -Token $reservation.token } | Should Throw
+                (Assert-PlatformFileIdentity -Lease $reservation.stream -Expected $reservation.stream.Observation -SingleLink).Size | Should Be 0
+            } finally { $reservation.stream.Dispose() }
+        }
+        Context 'Child mutation between publication checks' {
+            # Scenario: A real child replaces an ancestor after the pre-write validation succeeds.
+            # Purpose: Require the post-write name check as well as the pre-write check.
+            It 'InterT40_rejects_name_substitution_after_prepublication_check' {
+                $script:ReservationMutationTarget = Join-Path $script:ReservationFixtureRoot ([guid]::NewGuid().ToString('N'))
+                $reservation = New-StandardValidationOutputReservation -Path (Join-Path $script:ReservationMutationTarget 'nested/result.json')
+                Mock Assert-StandardValidationOutputReservation {
+                    param($Path,$Stream,$Token,$Context)
+                    & $script:ReservationOriginalAssert -Path $Path -Stream $Stream -Token $Token -Context $Context
+                    $child = Invoke-ReservationNameMutation -Target $script:ReservationMutationTarget -Replacement 'symlink'
+                    $child.status | Should Be 'passed'
+                    $child.stdout | Should Be 'renamed'
+                }
+                try {
+                    { Write-StandardValidationJsonReserved -Value @{ state='PASS' } -Path $reservation.path -Stream $reservation.stream -Token $reservation.token } | Should Throw
+                    Assert-MockCalled Assert-StandardValidationOutputReservation -Times 1 -Exactly -Scope It
+                    (Assert-PlatformFileIdentity -Lease $reservation.stream -Expected $reservation.stream.Observation -SingleLink).Size | Should BeGreaterThan 0
+                } finally { $reservation.stream.Dispose() }
+            }
+        }
+    } else {
+        # Scenario: A real child tries to rename an output parent or ancestor held by Windows directory guards.
+        # Purpose: Prove the rename is denied and publication still reaches the requested name.
+        It 'InterT30_windows_guards_deny_child_ancestor_rename_<Ancestor>' -TestCases @(@{Ancestor=$false},@{Ancestor=$true}) {
+            param($Ancestor)
+            $root = Join-Path $script:ReservationFixtureRoot ([guid]::NewGuid().ToString('N'))
+            $parent = Join-Path $root 'output'
+            $reservation = New-StandardValidationOutputReservation -Path (Join-Path $parent 'result.json')
+            try {
+                $target = if ($Ancestor) { $root } else { $parent }
+                $child = Invoke-ReservationNameMutation -Target $target -Replacement 'directory'
+                $child.status | Should Be 'passed'
+                $child.stdout | Should Be 'rename-denied'
+                Write-StandardValidationJsonReserved -Value @{ state='PASS' } -Path $reservation.path -Stream $reservation.stream -Token $reservation.token
+                ([Text.Encoding]::UTF8.GetString($reservation.stream.ReadAllBytes(4096)) | ConvertFrom-Json).state | Should Be 'PASS'
+                (Test-Path -LiteralPath $reservation.path -PathType Leaf) | Should Be $true
+            } finally { $reservation.stream.Dispose() }
+        }
+    }
+}
+
+Describe 'Validator shared process evidence' {
+    BeforeAll {
+        $TestDrive = if ($TestDrive -is [IO.DirectoryInfo]) { $TestDrive.FullName } else { [string]$TestDrive }
+        if ($IsMacOS -and $TestDrive.StartsWith('/var/')) { $TestDrive = '/private' + $TestDrive }
+        . (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-StandardValidation.ps1') -CandidateRoot $TestDrive -AdapterPath 'unused' -ArtifactsRoot $TestDrive -SourceRepository 'https://example.test/fixture.git' -SourceRevision ('a'*40) -BaseRevision ('b'*40) -DefineFunctionsOnly
+        $script:ValidatorTestHost = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
+        function Invoke-ValidatorProcessFixture {
+            param([string]$Text, [int]$Timeout = 10, [string]$Cancel, [string[]]$ChildArguments = @())
+            $root = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($root)
+            $child = Join-Path $root 'child.ps1'
+            [IO.File]::WriteAllText($child,$Text,[Text.UTF8Encoding]::new($false))
+            $arguments = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$child) + $ChildArguments
+            if (-not [string]::IsNullOrEmpty($Cancel)) { $arguments += @('-CancelPath',$Cancel) }
+            Invoke-StandardValidationProcess -Command $script:ValidatorTestHost -Arguments $arguments -WorkingDirectory $root -Environment @{} -TimeoutSeconds $Timeout -CancellationPath $Cancel
+        }
+    }
+    # Scenario: A real child completes with two bounded streams.
+    # Purpose: Bind the actual P3 isolation, cleanup and runtime to the validator result.
+    It 'InterT10_records_actual_platform_owner_and_runtime' {
+        $result = Invoke-ValidatorProcessFixture "[Console]::Out.Write('ok'); [Console]::Error.Write('diagnostic'); exit 0"
+        $result.status | Should -Be 'passed'
+        $result.stdout | Should -Be 'ok'
+        $result.stderr | Should -Be 'diagnostic'
+        $result.processOwnership.startIdentity | Should -Not -BeNullOrEmpty
+        $result.processOwnership.isolationLevel | Should -Be $(if ($IsWindows) { 'strong' } else { 'cooperative' })
+        $result.processOwnership.cleanup.CleanedUp | Should -Be $true
+        $result.processOwnership.runtime.manifestSha256 | Should -Match '^[a-f0-9]{64}$'
+        $result.processOwnership.limitations | Should -Contain 'same-account-adversarial-writer-out-of-scope'
+        $schemaPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/schemas/standard-core-evidence-v2.schema.json'
+        $schema = Get-Content -Raw $schemaPath | ConvertFrom-Json
+        Test-Json -Json ($result.processOwnership | ConvertTo-Json -Depth 30) -Schema ($schema.'$defs'.processOwnership | ConvertTo-Json -Depth 30) | Should -BeTrue
+    }
+    # Scenario: A real child exceeds its deadline.
+    # Purpose: Preserve timeout and verified cleanup across the shared boundary.
+    It 'InterT20_bounds_timeout' {
+        $result = Invoke-ValidatorProcessFixture 'Start-Sleep -Seconds 30' -Timeout 1
+        $result.status | Should -Be 'timeout'
+        $result.cleanedUp | Should -Be $true
+        $result.processOwnership.terminationReason | Should -Be 'deadline'
+    }
+    # Scenario: The real child writes the cancellation marker while it is running.
+    # Purpose: Exercise cancellation after owned start, not only the pre-start branch.
+    It 'InterT30_cancels_running_child' {
+        $cancel = Join-Path $TestDrive 'cancel-running'
+        $result = Invoke-ValidatorProcessFixture 'param([string]$CancelPath) [IO.File]::WriteAllText($CancelPath,"cancel"); Start-Sleep -Seconds 30' -Cancel $cancel
+        $result.status | Should -Be 'cancelled'
+        $result.cleanedUp | Should -Be $true
+    }
+    # Scenario: Each real stream independently exceeds a small capture budget.
+    # Purpose: Keep per-stream bounded prefixes and fail the command on overflow.
+    It 'InterT40_enforces_each_stream_quota' {
+        $previous = $script:StandardValidationChildOutputQuotaCharacters
+        try {
+            $script:StandardValidationChildOutputQuotaCharacters = 128
+            foreach ($stream in @('Out','Error')) {
+                $result = Invoke-ValidatorProcessFixture 'param([string]$Stream) if ($Stream -eq "Out") { [Console]::Out.Write(("x"*4096)) } else { [Console]::Error.Write(("x"*4096)) }; Start-Sleep -Seconds 30' -ChildArguments @('-Stream',$stream)
+                $result.status | Should -Be 'failed'
+                $result.outputQuotaExceeded | Should -Be $true
+                $result.stdout.Length | Should -BeLessThan 129
+                $result.stderr.Length | Should -BeLessThan 129
+                $result.cleanedUp | Should -Be $true
+            }
+        } finally { $script:StandardValidationChildOutputQuotaCharacters = $previous }
+    }
+    # Scenario: The child starts a grandchild and exits without waiting for it.
+    # Purpose: A successful root exit must still reclaim the owned descendant.
+    It 'InterT50_reclaims_descendants_after_parent_exit' {
+        $result = Invoke-ValidatorProcessFixture @'
+$info = [Diagnostics.ProcessStartInfo]::new()
+$info.FileName = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
+$info.UseShellExecute = $false
+$info.CreateNoWindow = $true
+foreach ($arg in @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-Command','Start-Sleep -Seconds 30')) { [void]$info.ArgumentList.Add($arg) }
+$child = [Diagnostics.Process]::Start($info)
+[Console]::WriteLine($child.Id)
+exit 0
+'@
+        $result.status | Should -Be 'passed'
+        $result.cleanedUp | Should -Be $true
+        $descendant = Get-Process -Id ([int]$result.stdout.Trim()) -ErrorAction SilentlyContinue
+        $descendant | Should -BeNullOrEmpty
+        $result.processOwnership.cleanup.RemainingPids.Count | Should -Be 0
+    }
+    # Scenario: Cleanup receives the wrong start identity for a real live child.
+    # Purpose: PID reuse protection sends no signal, and an uncertain receipt cannot pass.
+    Context 'Stale identity fault injection' {
+        It 'InterT60_rejects_stale_identity_and_fails_closed_on_cleanup' {
+            $script:ValidatorStaleIdentityObserved = $false
+            Mock Stop-StandardValidationOwnedProcess {
+                param($Lease, $ExpectedStartIdentity, $CancellationRequested)
+                $receipt = Stop-PlatformOwnedProcess -Lease $Lease -ExpectedStartIdentity 'stale-start-identity'
+                $script:ValidatorStaleIdentityObserved = $receipt.SignalsSent -eq 0 -and -not $receipt.CleanedUp
+                return $receipt
+            }
+            # Child creates its cancellation barrier, keeping it live until cleanup.
+            $cancel = Join-Path $TestDrive 'cancel-stale'
+            $result = Invoke-ValidatorProcessFixture 'param([string]$CancelPath) [IO.File]::WriteAllText($CancelPath,"cancel"); Start-Sleep -Seconds 30' -Cancel $cancel
+            $script:ValidatorStaleIdentityObserved | Should -BeTrue
+            $result.status | Should -Be 'cleanup-failed'
+            $result.cleanedUp | Should -BeFalse
+            $result.processOwnership.cleanup.Uncertainty | Should -Be 'process-start-identity-mismatch'
+            # Dispose still performs a valid cleanup after the rejected request.
+            (Get-Process -Id $result.processId -ErrorAction SilentlyContinue) | Should -BeNullOrEmpty
+        }
+    }
+    if ($IsWindows) {
+        Context 'Windows startup cleanup uncertainty' {
+            # Scenario: Windows creates a process, then a later startup operation fails and root termination cannot be confirmed.
+            # Purpose: Startup cleanup uncertainty must override the default startup-failed result and fail closed.
+            It 'InterT62_returns_cleanup_failed_when_windows_startup_exit_is_unconfirmed' {
+                Mock Start-PlatformOwnedProcess {
+                    param($ExecutableLease,$ArgumentZero,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$StdoutPath,$StderrPath,$OutputLimitCharacters)
+                    $failure = New-Object InvalidOperationException('fixture-windows-startup-setting-failure')
+                    $failure.Data['StartupRootExitConfirmed'] = $false
+                    $failure.Data['StartupCleanupUncertainty'] = 'fixture-root-termination-unconfirmed'
+                    throw $failure
+                }
+                $result = Invoke-StandardValidationProcess -Command $script:ValidatorTestHost -Arguments @('-NoProfile','-NonInteractive','-Command','exit 0') -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 10
+                Assert-MockCalled Start-PlatformOwnedProcess -Times 1 -Exactly -Scope It
+                $result.status | Should Be 'cleanup-failed'
+                $result.cleanedUp | Should Be $false
+                $result.processId | Should BeNullOrEmpty
+                $result.processOwnership.cleanup | Should BeNullOrEmpty
+                $result.stderr | Should Match 'fixture-windows-startup-setting-failure'
+            }
+        }
+    }
+    # Scenario: Several stages start after a rejected cleanup request has been disposed.
+    # Purpose: Release the Unix admission guard before the next start and isolate Pester 4 mocks by context.
+    It 'InterT65_disposes_each_owner_before_the_next_stage' {
+        foreach ($sample in 1..3) {
+            $result = Invoke-ValidatorProcessFixture 'param([string]$Value) [Console]::Write($Value); exit 0' -ChildArguments @('-Value',[string]$sample)
+            $result.status | Should -Be 'passed'
+            $result.stdout | Should -Be ([string]$sample)
+            $result.cleanedUp | Should -BeTrue
+            $result.processOwnership.cleanup.CaptureReadersStopped | Should -BeTrue
+            $result.processOwnership.cleanup.CaptureResourcesClosed | Should -BeTrue
+            $result.processOwnership.cleanup.RemainingPids.Count | Should -Be 0
+        }
+    }
+    # Scenario: Output is reserved once and the session location differs from the native current directory.
+    # Purpose: P2 identity, create-only publication and PowerShell-relative path semantics remain intact.
+    It 'InterT70_publishes_only_the_reserved_output_once' {
+        $root = Join-Path $TestDrive 'reservation'
+        [void][IO.Directory]::CreateDirectory($root)
+        Push-Location $root
+        try {
+            (Get-StandardValidationFullPath -Path 'evidence.json' -Context 'fixture') | Should -Be (Join-Path $root 'evidence.json')
+            $reservation = New-StandardValidationOutputReservation -Path 'evidence.json'
+            try {
+                { New-StandardValidationOutputReservation -Path 'evidence.json' } | Should -Throw
+                { Assert-StandardValidationOutputReservation -Path 'other.json' -Stream $reservation.stream -Token $reservation.token -Context 'fixture' } | Should -Throw
+                Write-StandardValidationJsonReserved -Path 'evidence.json' -Stream $reservation.stream -Token $reservation.token -Value @{state='PASS'}
+                { Write-StandardValidationJsonReserved -Path 'evidence.json' -Stream $reservation.stream -Token $reservation.token -Value @{state='FAILED'} } | Should -Throw
+            } finally { $reservation.stream.Dispose() }
+            (Get-Content -Raw 'evidence.json' | ConvertFrom-Json).state | Should -Be 'PASS'
+        } finally { Pop-Location }
+    }
+    # Scenario: The command is a script rather than a native executable.
+    # Purpose: The shared owner still supports interpreter dispatch and preserves argument boundaries.
+    It 'InterT80_runs_script_command_with_literal_arguments' {
+        $child = Join-Path $TestDrive 'literal.ps1'
+        [IO.File]::WriteAllText($child,'param([string]$Value) [Console]::Write($Value); exit 0',[Text.UTF8Encoding]::new($false))
+        $result = Invoke-StandardValidationProcess -Command $child -Arguments @('space and & literal') -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 10
+        $result.status | Should -Be 'passed'
+        $result.stdout | Should -Be 'space and & literal'
+    }
+    # Scenario: A script invokes a failing native command, then returns without exit.
+    # Purpose: Preserve the bootstrap's native exit code instead of reporting a successful pwsh -File invocation.
+    It 'InterT82_propagates_script_native_failure_without_explicit_exit' {
+        $child = Join-Path $TestDrive 'native-failure.ps1'
+        [IO.File]::WriteAllText($child,@'
+param([string]$NativeHost)
+& $NativeHost -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command 'exit 23'
+[Console]::Write('returned-after-native')
+'@,[Text.UTF8Encoding]::new($false))
+        $result = Invoke-StandardValidationProcess -Command $child -Arguments @($script:ValidatorTestHost) -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 10
+        $result.status | Should -Be 'failed'
+        $result.exitCode | Should -Be 23
+        $result.stdout | Should -Be 'returned-after-native'
+        $result.cleanedUp | Should -BeTrue
+    }
+    # Scenario: A script writes an ordinary non-terminating PowerShell error.
+    # Purpose: The owned interpreter must inherit stop-on-error semantics from the trusted bootstrap.
+    It 'InterT84_fails_script_on_nonterminating_error' {
+        $child = Join-Path $TestDrive 'powershell-error.ps1'
+        [IO.File]::WriteAllText($child,"Write-Error 'fixture-script-error'; [Console]::Write('must-not-continue')",[Text.UTF8Encoding]::new($false))
+        $result = Invoke-StandardValidationProcess -Command $child -Arguments @() -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 10
+        $result.status | Should -Be 'failed'
+        $result.exitCode | Should -Not -Be 0
+        $result.stdout | Should -Be ''
+        $result.stderr | Should -Match 'fixture-script-error'
+        $result.cleanedUp | Should -BeTrue
+    }
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        # Scenario: A Windows command shim requires an interpreter.
+        # Purpose: Preserve command-shim support inside the P3 Job boundary.
+        It 'InterT90_runs_windows_command_shim' {
+            $child = Join-Path $TestDrive 'literal.cmd'
+            [IO.File]::WriteAllText($child,"@echo off`r`necho fixture-shim`r`nexit /b 0`r`n",[Text.UTF8Encoding]::new($false))
+            $result = Invoke-StandardValidationProcess -Command $child -Arguments @() -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 10
+            $result.status | Should -Be 'passed'
+            $result.stdout.Trim() | Should -Be 'fixture-shim'
+            $result.processOwnership.isolation | Should -Be 'windows-job-object'
+        }
+    }
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        # Scenario: PATH names a relative executable symlink below a symlinked directory.
+        # Purpose: Resolve both path components and bind the final regular file through P2/P3.
+        It 'InterT95_runs_symlink_executable_and_records_physical_command' {
+            $root = Join-Path $TestDrive 'linked-command'
+            $physicalDirectory = Join-Path $root 'physical'
+            [void][IO.Directory]::CreateDirectory($physicalDirectory)
+            $physicalCommand = Join-Path $physicalDirectory 'echo'
+            [IO.File]::Copy('/bin/echo',$physicalCommand)
+            [IO.File]::SetUnixFileMode($physicalCommand,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserExecute)
+            $binDirectory = Join-Path $root 'bin'
+            [void][IO.Directory]::CreateDirectory($binDirectory)
+            [void](New-Item -ItemType SymbolicLink -Path (Join-Path $binDirectory 'echo') -Target '../physical/echo')
+            $command = Join-Path $root 'bin/echo'
+            $result = Invoke-StandardValidationProcess -Command $command -Arguments @('linked-host') -WorkingDirectory $root -Environment @{} -TimeoutSeconds 10
+            if ($result.status -ne 'passed') { throw ('Symlink command failed: ' + ($result | ConvertTo-Json -Depth 12 -Compress)) }
+            $result.status | Should -Be 'passed'
+            $result.stdout | Should -Be ('linked-host' + [Environment]::NewLine)
+            $result.cleanedUp | Should -BeTrue
+            $result.processOwnership.commandPath | Should -Be $command
+            $result.processOwnership.resolvedCommandPath | Should -Be $physicalCommand
+        }
+        if ($IsLinux) {
+            $python = Get-Command python3 -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($null -ne $python) {
+                & $python.Source -I -c 'import venv' 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    # Scenario: A copied venv calls a system Python binary through its own symlink.
+                    # Purpose: Descriptor exec must retain sys.executable and the venv-only import location.
+                    It 'InterT96_preserves_copied_python_venv_through_symlink' {
+                        $pythonHost = (Get-Command python3 -CommandType Application | Select-Object -First 1).Source
+                        $root = Join-Path $TestDrive 'python-venv'
+                        [void][IO.Directory]::CreateDirectory($root)
+                        $source = Join-Path $root 'source'
+                        $copied = Join-Path $root 'copied'
+                        & $pythonHost -I -m venv --without-pip --symlinks $source
+                        $LASTEXITCODE | Should -Be 0
+                        & $pythonHost -I -c 'import shutil, sys; shutil.copytree(sys.argv[1], sys.argv[2], symlinks=True)' $source $copied
+                        $LASTEXITCODE | Should -Be 0
+                        $command = Join-Path $copied 'bin/python'
+                        ([IO.FileInfo]::new($command)).LinkTarget | Should -Not -BeNullOrEmpty
+                        $site = & $command -I -c 'import sysconfig; print(sysconfig.get_path("purelib"))'
+                        $LASTEXITCODE | Should -Be 0
+                        $site.StartsWith($copied + '/') | Should -BeTrue
+                        [IO.File]::WriteAllText((Join-Path $site 'fixture_venv_only.py'),"marker = 'copied-venv-only'`n",[Text.UTF8Encoding]::new($false))
+                        $code = 'import json, sys, fixture_venv_only; print(json.dumps({"executable":sys.executable,"prefix":sys.prefix,"module":fixture_venv_only.__file__,"marker":fixture_venv_only.marker}))'
+                        $result = Invoke-StandardValidationProcess -Command $command -Arguments @('-I','-c',$code) -WorkingDirectory $root -Environment @{} -TimeoutSeconds 15
+                        if ($result.status -ne 'passed') { throw ('Copied venv command failed: ' + ($result | ConvertTo-Json -Depth 12 -Compress)) }
+                        $result.status | Should -Be 'passed'
+                        $result.cleanedUp | Should -BeTrue
+                        $observed = $result.stdout | ConvertFrom-Json
+                        $observed.executable | Should -Be $command
+                        $observed.prefix | Should -Be $copied
+                        $observed.module | Should -Be (Join-Path $site 'fixture_venv_only.py')
+                        $observed.marker | Should -Be 'copied-venv-only'
+                        $result.processOwnership.commandPath | Should -Be $command
+                        $result.processOwnership.resolvedCommandPath | Should -Not -Be $command
+                    }
+                }
+            }
+        }
+        Context 'Executable replacement after leasing' {
+            # Scenario: The resolved executable is replaced after the validator opens its lease.
+            # Purpose: P3 must reject the stale file identity before executing any replacement bytes.
+            It 'InterT97_rejects_replaced_symlink_target_after_lease' {
+                Initialize-StandardValidationPlatformRuntime
+                $script:ValidatorRealStart = Get-Command Start-PlatformOwnedProcess
+                $root = Join-Path $TestDrive 'replaced-command'
+                [void][IO.Directory]::CreateDirectory($root)
+                $script:ValidatorReplacementTarget = Join-Path $root 'target'
+                [IO.File]::Copy('/bin/echo',$script:ValidatorReplacementTarget)
+                [IO.File]::SetUnixFileMode($script:ValidatorReplacementTarget,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite -bor [IO.UnixFileMode]::UserExecute)
+                $command = Join-Path $root 'command'
+                [void](New-Item -ItemType SymbolicLink -Path $command -Target 'target')
+                Mock Start-PlatformOwnedProcess {
+                    param($ExecutableLease,$ArgumentZero,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$StdoutPath,$StderrPath,$OutputLimitCharacters)
+                    [IO.File]::Move($script:ValidatorReplacementTarget,($script:ValidatorReplacementTarget + '.old'))
+                    [IO.File]::Copy('/bin/echo',$script:ValidatorReplacementTarget)
+                    [IO.File]::SetUnixFileMode($script:ValidatorReplacementTarget,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserExecute)
+                    & $script:ValidatorRealStart -ExecutableLease $ExecutableLease -ArgumentZero $ArgumentZero -ArgumentList $ArgumentList -Environment $Environment -WorkingDirectoryLease $WorkingDirectoryLease -Deadline $Deadline -StdoutPath $StdoutPath -StderrPath $StderrPath -OutputLimitCharacters $OutputLimitCharacters
+                }
+                $result = Invoke-StandardValidationProcess -Command $command -Arguments @('must-not-run') -WorkingDirectory $root -Environment @{} -TimeoutSeconds 10
+                Assert-MockCalled Start-PlatformOwnedProcess -Times 1 -Exactly -Scope It
+                $result.status | Should -Be 'startup-failed'
+                $result.processId | Should -BeNullOrEmpty
+                $result.stdout | Should -Be ''
+                $result.stderr | Should -Match 'identity'
+                $result.processOwnership.resolvedCommandPath | Should -Be $script:ValidatorReplacementTarget
+            }
+        }
+        # Scenario: An npm launcher is a symlink, while its receipt binds a runtime and payload.
+        # Purpose: Execute the bound payload through P3 without opening the symlink as a native executable.
+        It 'InterT100_dispatches_unix_symlink_using_receipt_runtime_and_payload' {
+            $root = Join-Path $TestDrive 'unix-launcher'
+            $install = Join-Path $root 'install'
+            $snapshot = Join-Path $root 'snapshot'
+            foreach ($directory in @($install,$snapshot)) { [void][IO.Directory]::CreateDirectory($directory) }
+            $payload = Join-Path $install 'payload.ps1'
+            [IO.File]::WriteAllText($payload,@'
+param([string]$Value)
+if ($Value -cne 'literal & space') { exit 7 }
+[Console]::Write('{"schemaVersion":1,"status":"passed","decision":"PASS","candidateIdentity":"fixture"}')
+'@,[Text.UTF8Encoding]::new($false))
+            $shim = Join-Path $install 'skill-tools'
+            [void](New-Item -ItemType SymbolicLink -Path $shim -Target $payload)
+            $adapter = Join-Path $root 'adapter.json'
+            $receiptPath = Join-Path $root 'receipt.json'
+            foreach ($file in @($adapter,$receiptPath,(Join-Path $snapshot 'SKILL.md'))) { [IO.File]::WriteAllText($file,'{}') }
+            $commandHash = Get-StandardValidationFileSha256 $shim 'fixture'
+            # Use the post-resolution receipt representation and a real interpreter
+            # double for Node. The actual boundary rechecks all bound file hashes.
+            $receipt = [pscustomobject]@{
+                path = $receiptPath; sha256 = (Get-StandardValidationFileSha256 $receiptPath 'fixture')
+                installRoot = $install; executableSha256 = $commandHash
+                installedClosureSha256 = (Get-StandardValidationDirectoryClosureSha256 $install 'fixture')
+                launcher = [pscustomobject]@{
+                    kind = 'unix-node-shim'; shimPath = $shim; shimSha256 = $commandHash
+                    runtimePath = $script:ValidatorTestHost; runtimeSha256 = (Get-StandardValidationFileSha256 $script:ValidatorTestHost 'fixture')
+                    payloadPath = $payload; payloadSha256 = $commandHash
+                }
+            }
+            $spec = [pscustomobject]@{
+                command = $shim; arguments = @('literal & space'); commandSha256 = $commandHash; toolReceipt = $receipt
+            }
+            $snapshotHash = Get-StandardValidationInventorySha256 (Get-StandardValidationInventory $snapshot 'fixture')
+            $boundary = @{
+                CommandSpec = $spec; RunRoot = (Join-Path $root 'run'); ChildWorkingRoot = (Join-Path $root 'children')
+                StageId = 'package-validation'; ToolId = 'fixture'; CandidateId = 'fixture'
+                SnapshotRoot = $snapshot; ExpectedSnapshotContentSha256 = $snapshotHash
+                SkillsRoot = $snapshot; ActiveSkillsText = 'fixture'; OriginalCandidateRoot = $snapshot
+                ExpectedCandidateContentSha256 = $snapshotHash; AdapterPath = $adapter
+                ExpectedAdapterSha256 = (Get-StandardValidationFileSha256 $adapter 'fixture'); TimeoutSeconds = 10
+            }
+            $result = Invoke-StandardValidationCommandAndRecord @boundary
+            $result.event.status | Should -Be 'passed'
+            $result.event.cleanedUp | Should -BeTrue
+            $result.envelope.decision | Should -Be 'PASS'
+            $result.event.commandSha256 | Should -Be $commandHash
+            # Evidence still binds the original shim command; transport selection must not mutate it.
+            $spec.command | Should -Be $shim
+            $spec.arguments.Count | Should -Be 1
+            [IO.File]::AppendAllText($payload,"`n# changed after receipt binding")
+            { Invoke-StandardValidationCommandAndRecord @boundary } | Should -Throw
+            $script:StandardValidationLastEvent | Should -BeNullOrEmpty
+        }
+    }
+}
+
 Describe 'Pester shard plan contract' {
     # Scenario: P3 returns completion, timeout, cancellation, quota and uncertain cleanup observations.
     # Purpose: Only a confirmed owner receipt can authorize completed; child result fields are irrelevant.
@@ -28,6 +497,30 @@ Describe 'Pester shard plan contract' {
         $receipt.Uncertainty=$null; $receipt.RemainingPids=@(123)
         ConvertTo-PesterShardProcessState $receipt 0 '' $false $true $false | Should Be 'cleanup-failed'
         ConvertTo-PesterShardProcessState $null 0 '' $false $true $false | Should Be 'cleanup-failed'
+    }
+
+    # Scenario: Windows reports an unconfirmed root exit without a startup cleanup receipt.
+    # Purpose: The shard catch path must recognize the actual Windows Data keys and fail closed.
+    It 'UnitT07_rejects_windows_startup_cleanup_uncertainty_without_a_receipt' {
+        $path = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-PesterShardProcess.ps1'
+        $tokens=$null; $errors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors)
+        $definition=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Get-PesterShardStartupCleanupEvidence'},$true)
+        if ($null -eq $definition) { throw 'The shard executor must expose startup cleanup evidence handling.' }
+        Invoke-Expression $definition.Extent.Text
+        foreach ($data in @(
+            @{StartupRootExitConfirmed=$false;StartupCleanupUncertainty='fixture-root-termination-unconfirmed'},
+            @{StartupRootExitConfirmed=$false},
+            @{StartupCleanupUncertainty='fixture-root-termination-unconfirmed'},
+            @{StartupCleanupConfirmed=$false},
+            @{StartupCaptureCleanupUncertainty='fixture-capture-cleanup-unconfirmed'}
+        )) {
+            $failure = New-Object InvalidOperationException('fixture-windows-startup-setting-failure')
+            foreach ($entry in $data.GetEnumerator()) { $failure.Data[$entry.Key] = $entry.Value }
+            $evidence = Get-PesterShardStartupCleanupEvidence -Exception $failure
+            $evidence.cleanupFailed | Should Be $true
+            $evidence.cleanup | Should BeNullOrEmpty
+        }
     }
 
     # Scenario: The complete repository suite contains many non-isolated test files and one file can terminate its hosted PowerShell process.
@@ -500,7 +993,7 @@ Describe 'S1B3 ordinary default adapter version' {
         [IO.File]::WriteAllText($adapter, '{"schemaVersion":1}', (New-Object Text.UTF8Encoding($false)))
         $repoRoot = Split-Path -Parent $PSScriptRoot
         $runnerPath = Join-Path $repoRoot 'scripts/Invoke-StandardValidation.ps1'
-        $runtime = if ($PSVersionTable.PSEdition -eq 'Desktop') { Join-Path $PSHOME 'powershell.exe' } else { Join-Path $PSHOME 'pwsh.exe' }
+        $runtime = if ($PSVersionTable.PSEdition -eq 'Desktop') { Join-Path $PSHOME 'powershell.exe' } else { Join-Path $PSHOME $(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'pwsh.exe' } else { 'pwsh' }) }
         $scriptText = @"
 `$ErrorActionPreference = 'Stop'
 & '$runnerPath' -CandidateRoot '$candidate' -AdapterPath '$adapter' -ArtifactsRoot '$artifacts' -OutputPath '$artifacts/evidence.json' -SourceRepository 'https://example.com/example/skills.git' -SourceRevision ('a' * 40) -BaseRevision ('b' * 40) -EventName local -TrustedToolRoot '$PSHOME'
@@ -561,8 +1054,8 @@ Describe 'S1B3 ordinary v2 retained refusal boundaries' {
         $authorityRevisionOutput = & git -c $authoritySafeDirectory -C $script:CoreBoundaryRepositoryRoot rev-parse HEAD
         if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the authority fixture revision.' }
         $script:CoreBoundaryAuthorityRevision = ([string]$authorityRevisionOutput).Trim()
-        $script:CoreBoundaryPowerShellPath = if (Test-Path -LiteralPath (Join-Path $PSHOME 'pwsh.exe') -PathType Leaf) {
-            Join-Path $PSHOME 'pwsh.exe'
+        $script:CoreBoundaryPowerShellPath = if (Test-Path -LiteralPath (Join-Path $PSHOME $(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'pwsh.exe' } else { 'pwsh' })) -PathType Leaf) {
+            Join-Path $PSHOME $(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'pwsh.exe' } else { 'pwsh' })
         }
         else { Join-Path $PSHOME 'powershell.exe' }
 
@@ -630,6 +1123,7 @@ Describe 'S1B3 ordinary v2 retained refusal boundaries' {
                 [ValidateSet('general', 'pester')]
                 [string] $Kind = 'general'
             )
+            if ($IsMacOS -and $Root.StartsWith('/var/')) { $Root = '/private' + $Root }
             [void](New-Item -ItemType Directory -Path $Root -Force)
             $candidate = Join-Path $Root 'candidate'
             $skills = Join-Path $candidate 'skills/alpha'
@@ -805,7 +1299,7 @@ Describe 'S1B3 ordinary v2 retained refusal boundaries' {
         try {
             $wrongCandidate = New-CoreBoundaryFixture -Root (Join-Path $root 'wrong-candidate')
             $candidateMismatch = Invoke-CoreBoundaryCli -Fixture $wrongCandidate -CaseName 'candidate-mismatch' -SourceRevision ('0' * 40)
-            Assert-Equal $candidateMismatch.ExitCode 10 'A mismatched full candidate revision must return BLOCKED=10.'
+            Assert-Equal $candidateMismatch.ExitCode 10 "A mismatched full candidate revision must return BLOCKED=10. stdout=$($candidateMismatch.Stdout) stderr=$($candidateMismatch.Stderr)"
             Assert-Equal $candidateMismatch.Evidence.state 'BLOCKED' 'A mismatched full candidate revision must not pass.'
             Assert-Equal @($candidateMismatch.Evidence.checks).Count 0 'A candidate revision mismatch must be rejected before child dispatch.'
 
@@ -890,7 +1384,7 @@ Describe 'S1B3 ordinary v2 retained refusal boundaries' {
         try {
             $pesterFixture = New-CoreBoundaryFixture -Root (Join-Path $root 'pester') -Behavior 'slow-pester' -Kind 'pester'
             $pesterRun = Invoke-CoreBoundaryCli -Fixture $pesterFixture -CaseName 'live-pester' -ObserveLiveStderr
-            Assert-True $pesterRun.LiveStderrBeforeExit 'The Core Pester supervisor heartbeat must arrive before the check exits.'
+            Assert-True $pesterRun.LiveStderrBeforeExit "The Core Pester supervisor heartbeat must arrive before the check exits. exit=$($pesterRun.ExitCode) stdout=$($pesterRun.Stdout) stderr=$($pesterRun.Stderr)"
             Assert-Match $pesterRun.Stderr '^Core Pester supervisor utc=.+ elapsedSeconds=\d+ remainingSeconds=\d+ state=running' 'The trusted Core Pester dispatcher must opt into fixed live progress.'
             Assert-Equal $pesterRun.ExitCode 0 'The valid typed Pester check must pass.'
             Assert-Equal $pesterRun.Evidence.state 'PASS' 'A valid Core Pester check must retain PASS evidence.'

@@ -343,9 +343,18 @@ function Invoke-PlatformAdapter {
     return & $commandName @Arguments
 }
 
-function Open-PlatformDirectory { [CmdletBinding()] param([Parameter(Mandatory = $true)][string] $Root, [Parameter(Mandatory = $true)][string] $RelativePath, [switch] $CreatePrivate) Invoke-PlatformAdapter 'Open-PlatformDirectory' @{ Root=$Root; RelativePath=$RelativePath; CreatePrivate=$CreatePrivate } }
+function Open-PlatformDirectory {
+    [CmdletBinding(DefaultParameterSetName='Child')]
+    param(
+        [Parameter(Mandatory=$true)][string] $Root,
+        [Parameter(Mandatory=$true,ParameterSetName='Child')][string] $RelativePath,
+        [Parameter(ParameterSetName='Child')][switch] $CreatePrivate,
+        [Parameter(Mandatory=$true,ParameterSetName='Root')][switch] $RootOnly
+    )
+    Invoke-PlatformAdapter 'Open-PlatformDirectory' $PSBoundParameters
+}
 function Open-PlatformFile { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)][string] $Access, [Parameter(Mandatory = $true)][string] $CreateMode) Invoke-PlatformAdapter 'Open-PlatformFile' @{ ParentLease=$ParentLease; Leaf=$Leaf; Access=$Access; CreateMode=$CreateMode } }
-function Assert-PlatformFileIdentity { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Lease, [Parameter(Mandatory = $true)] $Expected, [switch] $SingleLink) Invoke-PlatformAdapter 'Assert-PlatformFileIdentity' @{ Lease=$Lease; Expected=$Expected; SingleLink=$SingleLink } }
+function Assert-PlatformFileIdentity { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Lease, [Parameter(Mandatory = $true)] $Expected, [switch] $SingleLink, [switch] $VerifyPath) Invoke-PlatformAdapter 'Assert-PlatformFileIdentity' $PSBoundParameters }
 function Enter-PlatformLock { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)][ValidateSet('Shared','Exclusive')][string] $Mode, [Parameter(Mandatory = $true)][TimeSpan] $Timeout) Invoke-PlatformAdapter 'Enter-PlatformLock' $PSBoundParameters }
 function Publish-PlatformFile { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)] $StageLease, [Parameter(Mandatory = $true)] $ExpectedState, [switch] $NoReplace, $Journal) Invoke-PlatformAdapter 'Publish-PlatformFile' $PSBoundParameters }
 function Remove-PlatformOwnedFile { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)] $ExpectedState, $Journal) Invoke-PlatformAdapter 'Remove-PlatformOwnedFile' $PSBoundParameters }
@@ -364,9 +373,18 @@ function Start-PlatformOwnedProcess {
         [Parameter(Mandatory=$true)][string] $StdoutPath,
         [Parameter(Mandatory=$true)][string] $StderrPath,
         # Legacy spelling remains an alias; quotas are UTF-8 decoded characters per stream.
-        [Alias('OutputLimitBytes')][ValidateRange(1,1048576)][long] $OutputLimitCharacters = 1048576
+        [Alias('OutputLimitBytes')][ValidateRange(1,1048576)][long] $OutputLimitCharacters = 1048576,
+        # Unix invocation name only; Windows validates it but keeps its launch semantics.
+        [string] $ArgumentZero
     )
     $platform = Get-CurrentPlatformName
+    $argumentZeroValue = $null
+    if ($PSBoundParameters.ContainsKey('ArgumentZero')) {
+        if ($ArgumentZero.IndexOf([char]0) -ge 0 -or -not [IO.Path]::IsPathFullyQualified($ArgumentZero)) {
+            throw [ArgumentException]::new('ArgumentZero must be an absolute path without NUL.')
+        }
+        $argumentZeroValue = $ArgumentZero
+    }
     if ($IsolationRequirement -eq 'strong' -and $platform -ne 'windows') {
         throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]::new('strong-process-isolation: external sandbox required',$platform)
     }
@@ -393,7 +411,14 @@ function Start-PlatformOwnedProcess {
                 if ($pair[0] -eq 'out') { $outLease = $file } else { $errLease = $file }
             } finally { $parent.Dispose() }
         }
-        $lease = Start-PlatformCapturedProcess -ExecutablePath $ExecutablePath -ExecutableLease $ExecutableLease -ArgumentList $ArgumentList -Environment $Environment -WorkingDirectoryLease $WorkingDirectoryLease -Deadline $Deadline -IsolationRequirement $IsolationRequirement -StdoutLease $outLease -StderrLease $errLease -OutputLimitBytes $OutputLimitCharacters
+        $startParameters = @{
+            ExecutablePath = $ExecutablePath; ExecutableLease = $ExecutableLease; ArgumentList = $ArgumentList
+            Environment = $Environment; WorkingDirectoryLease = $WorkingDirectoryLease; Deadline = $Deadline
+            IsolationRequirement = $IsolationRequirement; StdoutLease = $outLease; StderrLease = $errLease
+            OutputLimitBytes = $OutputLimitCharacters
+        }
+        if ($PSBoundParameters.ContainsKey('ArgumentZero')) { $startParameters.ArgumentZero = $argumentZeroValue }
+        $lease = Start-PlatformCapturedProcess @startParameters
         $outLease = $null; $errLease = $null
         return $lease
     } finally {
@@ -403,7 +428,10 @@ function Start-PlatformOwnedProcess {
 }
 function Start-PlatformCapturedProcess {
     # Internal boundary shared by caller-owned capture files and temporary probes.
-    param($ExecutablePath,$ExecutableLease,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$IsolationRequirement,$StdoutLease,$StderrLease,$OutputLimitBytes)
+    param($ExecutablePath,$ExecutableLease,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$IsolationRequirement,$StdoutLease,$StderrLease,$OutputLimitBytes,$ArgumentZero=$null)
+    if ($PSBoundParameters.ContainsKey('ArgumentZero') -and $null -ne $ArgumentZero) {
+        return [SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]::Start($ExecutablePath,$ExecutableLease,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$IsolationRequirement,$StdoutLease,$StderrLease,$OutputLimitBytes,[string]$ArgumentZero)
+    }
     [SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]::Start($ExecutablePath,$ExecutableLease,$ArgumentList,$Environment,$WorkingDirectoryLease,$Deadline,$IsolationRequirement,$StdoutLease,$StderrLease,$OutputLimitBytes)
 }
 

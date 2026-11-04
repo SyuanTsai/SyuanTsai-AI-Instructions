@@ -1,16 +1,27 @@
+Describe 'Shared owned-process discovery' {
+    BeforeAll {
+        $TestDrive = if ($TestDrive -is [IO.DirectoryInfo]) { $TestDrive.FullName } else { [string]$TestDrive }
+        if ($IsMacOS -and $TestDrive.StartsWith('/var/')) { $TestDrive = '/private' + $TestDrive }
+        . (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-StandardValidation.ps1') -CandidateRoot $TestDrive -AdapterPath unused -ArtifactsRoot $TestDrive -SourceRepository 'https://example.test/discovery.git' -SourceRevision ('a'*40) -BaseRevision ('b'*40) -DefineFunctionsOnly
+    }
+    # Scenario: A real root completes before the final owner cleanup observation.
+    # Purpose: A completed root retains its start identity and an empty owned process set.
+    It 'InterT10_retains_completed_root_identity_without_unrelated_processes' {
+        $hostPath = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
+        $result = Invoke-StandardValidationProcess -Command $hostPath -Arguments @('-NoProfile','-NonInteractive','-Command','exit 0') -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 10
+        $result.status | Should -Be 'passed'
+        $result.processOwnership.startIdentity | Should -Not -BeNullOrEmpty
+        $result.processOwnership.cleanup.RemainingPids.Count | Should -Be 0
+        $result.processOwnership.cleanup.CleanedUp | Should -BeTrue
+        (Get-Process -Id $PID).HasExited | Should -BeFalse
+    }
+}
+
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
 Describe 'Windows owned descendant discovery' {
     BeforeAll {
         $source = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-StandardValidation.ps1'
-        $tokens = $null
-        $errors = $null
-        $ast = [Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$errors)
-        if (@($errors).Count -ne 0) { throw 'The process runner must parse before discovery tests.' }
-        $definition = $ast.Find({ param($node)
-            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -ceq 'Get-StandardValidationDescendantProcessIds'
-        }, $true)
-        if ($null -eq $definition) { throw 'The descendant discovery function is required.' }
-        Invoke-Expression $definition.Extent.Text
+        . $source -CandidateRoot $TestDrive -AdapterPath unused -ArtifactsRoot $TestDrive -SourceRepository 'https://example.test/discovery.git' -SourceRevision ('a'*40) -BaseRevision ('b'*40) -DefineFunctionsOnly
     }
 
     # Scenario: An owned short-lived Windows root has completed and its PID is absent.
@@ -26,9 +37,10 @@ Describe 'Windows owned descendant discovery' {
             if (-not $process.Start()) { throw 'The owned fixture did not start.' }
             $ownedPid = $process.Id
             if (-not $process.WaitForExit(5000)) { throw 'The owned fixture did not exit within its bound.' }
-            Mock Get-CimInstance { throw 'A completed root must not enumerate the process table.' }
+            $script:DiscoverySnapshotCalls = 0
+            Mock Get-CimInstance { $script:DiscoverySnapshotCalls++; throw 'A completed root must not enumerate the process table.' }
             @(Get-StandardValidationDescendantProcessIds -RootProcessId $ownedPid).Count | Should -Be 0
-            Assert-MockCalled Get-CimInstance -Times 0 -Exactly -Scope It
+            $script:DiscoverySnapshotCalls | Should -Be 0
         }
         finally {
             if (-not $process.HasExited) { $process.Kill($true); [void]$process.WaitForExit(5000) }
@@ -41,7 +53,9 @@ Describe 'Windows owned descendant discovery' {
     It 'UnitT20_retains_live_root_birth_verified_graph' {
         $script:DiscoveryRoot = $PID
         $script:DiscoveryBirth = [DateTime]::UtcNow
+        $script:DiscoverySnapshotCalls = 0
         Mock Get-CimInstance {
+            $script:DiscoverySnapshotCalls++
             @(
                 [pscustomobject]@{ ProcessId=$script:DiscoveryRoot; ParentProcessId=0; CreationDate=$script:DiscoveryBirth }
                 [pscustomobject]@{ ProcessId=101; ParentProcessId=$script:DiscoveryRoot; CreationDate=$script:DiscoveryBirth.AddSeconds(1) }
@@ -53,7 +67,7 @@ Describe 'Windows owned descendant discovery' {
         }
         $descendants = @(Get-StandardValidationDescendantProcessIds -RootProcessId $PID)
         ($descendants -join ',') | Should -Be '101,102'
-        Assert-MockCalled Get-CimInstance -Times 1 -Exactly -Scope It
+        $script:DiscoverySnapshotCalls | Should -Be 1
     }
 
     # Scenario: A live PID has been reused after an older process's children were born.
@@ -61,7 +75,9 @@ Describe 'Windows owned descendant discovery' {
     It 'UnitT30_rejects_children_older_than_reused_parent_pid' {
         $script:DiscoveryRoot = $PID
         $script:DiscoveryBirth = [DateTime]::UtcNow
+        $script:DiscoverySnapshotCalls = 0
         Mock Get-CimInstance {
+            $script:DiscoverySnapshotCalls++
             @(
                 [pscustomobject]@{ ProcessId=$script:DiscoveryRoot; ParentProcessId=0; CreationDate=$script:DiscoveryBirth }
                 [pscustomobject]@{ ProcessId=201; ParentProcessId=$script:DiscoveryRoot; CreationDate=$script:DiscoveryBirth.AddSeconds(-10) }
@@ -69,6 +85,8 @@ Describe 'Windows owned descendant discovery' {
             )
         }
         @(Get-StandardValidationDescendantProcessIds -RootProcessId $PID).Count | Should -Be 0
-        Assert-MockCalled Get-CimInstance -Times 1 -Exactly -Scope It
+        $script:DiscoverySnapshotCalls | Should -Be 1
     }
+}
+
 }

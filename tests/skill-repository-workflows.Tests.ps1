@@ -1201,3 +1201,26 @@ Describe 'Third-party raw Skill authority routing' {
         if (-not $gate.Contains('skill-repository-standard.Tests.ps1')) {throw 'The same authority gate must execute the raw ownership regression.'}
     }
 }
+
+Describe 'Validator platform authority routing' {
+    # Scenario: The platform receipt contract changes while authority preparation stays in P5.3.
+    # Purpose: Keep both existing authority workflows routed through the same gate and retain shared primitives in policy.
+    It 'UnitT10_preserves_authority_gate_and_shared_primitive_policy' {
+        $root = Split-Path -Parent $PSScriptRoot
+        $policy = Get-Content -Raw (Join-Path $root 'docs/standards/standard-core-validation-v2.json') | ConvertFrom-Json
+        foreach ($primitive in @('Open-PlatformDirectory','Open-PlatformFile','Assert-PlatformFileIdentity','Enter-PlatformLock','Start-PlatformOwnedProcess','Stop-PlatformOwnedProcess')) {
+            $policy.processOwnership.primitives | Should -Contain $primitive
+        }
+        $policy.processOwnership.executableResolution | Should -Be 'resolve-links-then-no-follow-lease-and-revalidate-identity'
+        $policy.processOwnership.argumentZero.nativeCommand | Should -Be 'original-command-path'
+        $policy.processOwnership.argumentZero.wrapper | Should -Be 'original-interpreter-path'
+        $policy.processOwnership.scriptFailurePolicy | Should -Be 'stop-on-error-and-propagate-last-native-exit-code'
+        foreach ($name in @('commandPath','resolvedCommandPath')) {
+            $policy.processOwnership.commandBinding | Should -Contain $name
+        }
+        $workflow = Get-Content -Raw (Join-Path $root '.github/workflows/standards-conformance.yml')
+        $workflow.Contains('Invoke-StandardAuthorityGate.ps1') | Should -BeTrue
+        $composition = Get-Content -Raw (Join-Path $root '.github/workflows/pr8-powershell-validation.yml')
+        $composition.Contains('Invoke-StandardAuthorityGate.ps1') | Should -BeTrue
+    }
+}
