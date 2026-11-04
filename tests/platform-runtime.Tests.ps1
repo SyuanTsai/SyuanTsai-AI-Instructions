@@ -120,12 +120,22 @@ Describe 'Platform owned processes P3' {
             if ($IsWindows) { $envMap.SystemRoot = $env:SystemRoot }
             Start-PlatformOwnedProcess -ExecutablePath $script:P3Shell -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Code))) -Environment $envMap -WorkingDirectoryLease $Fixture.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds($Seconds)) -IsolationRequirement cooperative -StdoutPath (Join-Path $Fixture.Path 'out') -StderrPath (Join-Path $Fixture.Path 'err') -OutputLimitBytes $Limit
         }
+        function Invoke-P3BoundedDelete([scriptblock]$Action) {
+            $until = [DateTimeOffset]::UtcNow.AddSeconds(5)
+            while ($true) {
+                try { & $Action; return }
+                catch [IO.IOException], [UnauthorizedAccessException] {
+                    if ([DateTimeOffset]::UtcNow -ge $until) { throw }
+                    [Threading.Thread]::Sleep(100)
+                }
+            }
+        }
         function Remove-P3Fixture($Fixture,$Lease) {
             if ($null -ne $Lease) { $Lease.Dispose() }
             $Fixture.Directory.Dispose()
             # Only fixture-owned, explicitly named files; never recursive cleanup.
-            foreach ($leaf in @('out','err','child','ready','executable','quota.ps1')) { $path = Join-Path $Fixture.Path $leaf; if ([IO.File]::Exists($path)) { [IO.File]::Delete($path) } }
-            [IO.Directory]::Delete($Fixture.Path)
+            foreach ($leaf in @('out','err','child','ready','executable','quota.ps1')) { $path = Join-Path $Fixture.Path $leaf; if ([IO.File]::Exists($path)) { Invoke-P3BoundedDelete { [IO.File]::Delete($path) } } }
+            Invoke-P3BoundedDelete { [IO.Directory]::Delete($Fixture.Path) }
         }
         function Assert-P3Exited($Lease) {
             if (-not $Lease.WaitForExit([TimeSpan]::FromSeconds(15))) {
