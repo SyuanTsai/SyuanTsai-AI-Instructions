@@ -310,7 +310,7 @@ Production smoke 會用目前 clean pinned commit 安裝 temporary Codex Home，
 
 既有 runbook 的 `.\scripts\test-production-cutover.ps1` 仍保留為相容入口，並轉交同一份 SYP-101 smoke。
 
-CI 僅在 Windows 最新穩定 PowerShell 7 執行 regression、production lock 與 production smoke；一般 pull request 只執行 Windows Core 與 Windows Install Smoke。
+Required CI 仍只在 Windows 最新穩定 PowerShell 7 執行 regression、production lock 與 production smoke；一般 pull request 只執行 Windows Core 與 Windows Install Smoke，另有 workflow_dispatch 手動三平台診斷 workflow，且其結果不代表三平台 required 驗證。
 
 ## 授權
 

@@ -3900,6 +3900,7 @@ public sealed class C245NonCooperativeStream : Stream {
     # Purpose: Keep the implementation-to-test map explicit while preserving the existing adapter/result and testOwnership schemas.
     It 'UnitT110_documents_central_validation_owners_tests_and_platform_gate' {
         $standard=Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
+        $matrix=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/skill-repository-review-matrix.md')
         foreach($required in @(
             '12.3 Central reference implementation ownership and CI',
             'scripts/Invoke-StandardValidation.ps1',
@@ -3923,6 +3924,12 @@ public sealed class C245NonCooperativeStream : Stream {
             'identified item by item', 'normal required three-platform Core CI gate', 'SYP-325 changes none of the Code trial paths above',
             'This list records the Code trial', 'not a universal file inventory', 'Each source repository MUST retain its own protected reader identities'
         )) { if(-not $standard.Contains($required)){throw "Central validation ownership contract is missing '$required'."} }
+        foreach($required in @('Windows、Linux、macOS 各一個 leg', '缺少 receipt', 'MUST NOT** 被宣稱為三平台 required 驗證')) {
+            if(-not $standard.Contains($required)){throw "Standard diagnostic contract is missing '$required'."}
+        }
+        foreach($required in @('three-platform diagnostic', 'missing or inconsistent receipt', 'MUST NOT** be claimed as three-platform required validation')) {
+            if(-not $matrix.Contains($required)){throw "Review matrix diagnostic contract is missing '$required'."}
+        }
     }
     }
 
