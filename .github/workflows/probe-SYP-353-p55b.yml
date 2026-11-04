@@ -1,0 +1,30 @@
+name: probe-SYP-353-p55b
+on:
+  push:
+    branches: [probe/SYP-353-p55b]
+permissions:
+  contents: read
+jobs:
+  platform-runtime:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Run platform-runtime tests (Pester 4.10.1)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "PowerShell $($PSVersionTable.PSVersion) on $([System.Runtime.InteropServices.RuntimeInformation]::OSDescription) $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"
+          Install-Module Pester -RequiredVersion 4.10.1 -Force -SkipPublisherCheck -Scope CurrentUser
+          Import-Module Pester -RequiredVersion 4.10.1 -Force
+          $r = Invoke-Pester -Script @('./tests/skills-source-acquisition.Tests.ps1','./tests/skill-repository-workflows.Tests.ps1','./tests/skill-repository-standard.Tests.ps1','./tests/standard-core-pester-adapter.Tests.ps1') -PassThru
+          "SUMMARY passed=$($r.PassedCount) failed=$($r.FailedCount) skipped=$($r.SkippedCount) pending=$($r.PendingCount) total=$($r.TotalCount)"
+          foreach ($t in @($r.TestResult | Where-Object { $_.Result -ne 'Passed' })) { "NONPASS [$($t.Result)] $($t.Name) :: $($t.FailureMessage)" }
+          if ($r.FailedCount -gt 0 -or $r.TotalCount -eq 0) { exit 1 }
