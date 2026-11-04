@@ -62,7 +62,7 @@ function Assert-PesterShardExpectedSkippedTests {
             if ([string]::IsNullOrWhiteSpace($fileName) -or [string]::IsNullOrWhiteSpace($testName)) {
                 throw 'INVALID|Skipped Pester case evidence must include both path and name.'
             }
-            $identifier = "$fileName::$testName"
+            $identifier = "${fileName}::$testName"
             if (-not $actualSeen.Add($identifier)) { throw "INVALID|Pester case evidence contains a duplicate skipped test: '$identifier'." }
             $actualValues.Add($identifier)
         }
