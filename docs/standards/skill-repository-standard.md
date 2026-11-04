@@ -413,6 +413,8 @@ Canonical resolver **MUST** 在解析任何工具前先驗證 machine-readable p
 
 Canonical CI 使用的 reusable action **MUST** 綁定 reviewed full commit SHA，不得只使用可移動的 major tag。Checkout **MUST** 關閉 persisted repository credentials。本 Repository 的三平台 Core／Install Smoke matrix 是目標要求，其分階段落實與過渡期間 required gate **MUST** 依第 18.1.1 節判定。目標 Core lane **MUST** 在 Windows、Linux、macOS 各有一個 leg，取得各平台對應的官方 release asset，並在執行前以 SHA-256 驗證最新穩定 PowerShell 7；對 main pull request 與 push 自動執行，且不得使用 paths filter；它 **MUST** 呼叫 canonical authority gate 並執行保留的 source composition/acquisition tests。目標 Install Smoke lane **MUST** 在三平台各有一個 leg，保留 production lock、真實安裝與 idempotence checks；Core 與 Install Smoke 的 matrix **MUST** 使用 `fail-fast: false`，目標全部 leg 都是必要驗證，過渡期間依第 18.1.1 節逐步納入。standards-conformance.yml **MUST** 僅以 workflow_dispatch 作為手動診斷 workflow，不得建立重複自動 authority 狀態或取代三平台 Core。SYP86 lock 可保留指定 branch/path 的 push 與手動診斷，validator maintenance 可保留手動診斷；兩者 **MUST NOT** 增加普通 pull-request workflow。本規範保留三個 source required-context 名稱，將 Core／Install Smoke 改為平台中立 lane，不直接修改遠端 ruleset；既有 retired required contexts 的調整須另行授權完成。Whitespace/diff gate **MUST** 依實際 pull-request base 或 push-before SHA 驗證，不得在 main push 上退化成空 range。
 
+standards-conformance 手動診斷 **MUST** 以 Windows、Linux、macOS 各一個 leg 執行同一個 canonical authority gate、一次完整 non-authority suite、SYP-214 fixture evidence 與 offline fixtures。每個 leg 的失敗 **MUST** 保持失敗；彙總 job 在任一平台缺少 receipt、receipt 不一致或任一 leg 未通過時 **MUST** 失敗。診斷結果 **MUST NOT** 被宣稱為三平台 required 驗證，也不改變第 18.1 節的 required 平台狀態。
+
 對 `SkillSpector`，resolver **MUST**：
 
 - 只接受 `NVIDIA/SkillSpector` GitHub latest release 中符合 `v<release-semver>` 的非 draft、非 prerelease 版本；

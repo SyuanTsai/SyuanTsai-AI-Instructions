@@ -306,6 +306,13 @@ jobs:
             Assert-Match $workflow 'MainModule\.FileName' "Workflow '$relativePath' must verify the actual shell process executable."
             Assert-Match $workflow '\$PSHOME' "Workflow '$relativePath' must verify the active PowerShell home."
             Assert-Match $workflow '\$PSVersionTable\.PSVersion' "Workflow '$relativePath' must verify the active runtime version."
+            if ($relativePath -cne '.github/workflows/standards-conformance.yml') {
+                Assert-NotMatch $workflow '(?m)^\s+matrix:\s*$' "Ordinary workflow '$relativePath' must not add a platform matrix during the P5.6 diagnostic phase."
+                Assert-NotMatch $workflow 'runs-on:\s*\$\{\{' "Ordinary workflow '$relativePath' must retain a fixed Windows runner during the P5.6 diagnostic phase."
+                $runnerValues = @([regex]::Matches($workflow, '(?m)^\s+runs-on:\s*([^\r\n]+)\s*$') | ForEach-Object { $_.Groups[1].Value.Trim() })
+                Assert-Equal $runnerValues.Count 1 "Ordinary workflow '$relativePath' must retain exactly one Windows job."
+                Assert-Equal (@($runnerValues | Where-Object { $_ -cne 'windows-latest' }).Count) 0 "Ordinary workflow '$relativePath' may use only windows-latest."
+            }
         }
         Assert-Equal $pullRequestWorkflows.Count 2 'Exactly the Core and Install Smoke workflows may run for ordinary pull requests.'
         $expectedPullRequestWorkflows = @(
@@ -359,6 +366,31 @@ jobs:
         Assert-Match $required 'Exact offline fixture count changed' 'Core must keep its fixture coverage count assertion.'
         Assert-Match $smoke 'update-skills-catalog-lock\.ps1 -Check' 'Install Smoke must absorb production lock validation.'
         Assert-Match $smoke 'test-syp101-production-smoke\.ps1' 'Install Smoke must keep the real pinned-archive installation and idempotence exercise.'
+
+        $diagnostic = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/standards-conformance.yml')
+        Assert-Equal ([regex]::Matches($diagnostic, '(?m)^\s+matrix:\s*$')).Count 1 'Standards Conformance must define exactly one matrix.'
+        Assert-Equal ([regex]::Matches($diagnostic, '(?m)^\s+- platform:\s*(windows|linux|macos)\s*$')).Count 3 'Standards Conformance must define exactly three reviewed platform rows.'
+        foreach ($matrixRow in @(
+            "- platform: windows`n            os: windows-latest`n            asset: PowerShell-7.6.6-win-x64.zip`n            sha256: 02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860",
+            "- platform: linux`n            os: ubuntu-latest`n            asset: powershell-7.6.6-linux-x64.tar.gz`n            sha256: DDBC4A2D113BBD46D283CFEDCBCD117A70CAEFD7673F41F2B4E0000BADF103BC",
+            "- platform: macos`n            os: macos-latest`n            asset: powershell-7.6.6-osx-arm64.tar.gz`n            sha256: 6DF833D094EBAC1C1A74340D7B3437F4AAF5E03CE640484A1C4359F3CE8B3DB1"
+        )) { Assert-True $diagnostic.Replace("`r`n", "`n").Contains($matrixRow) "Standards Conformance is missing reviewed matrix row '$($matrixRow.Split("`n")[0])'." }
+    }
+
+    # Scenario: A diagnostic leg is softened or the summary accepts incomplete evidence.
+    # Purpose: Keep all three manual platform legs fail-closed without changing required-platform claims.
+    It 'UnitT16_standards_conformance_runs_three_platform_diagnostic_legs_and_fails_closed' {
+        $diagnostic = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/standards-conformance.yml')
+        Assert-Match $diagnostic 'fail-fast:\s*false' 'The diagnostic matrix must allow every platform leg to finish.'
+        Assert-NotMatch $diagnostic 'continue-on-error|\|\|\s*(true|:)|if:\s*always\(\)' 'Diagnostic failures must not be softened.'
+        Assert-Match $diagnostic '(?ms)^  diagnostic-summary:\s*.*?^    needs:\s*diagnostic\s*$.*?^    if:\s*\$\{\{ !cancelled\(\) \}\}\s*$' 'The summary must depend on the diagnostic matrix and run unless cancelled.'
+        foreach ($summaryToken in @('windows', 'linux', 'macos', 'GITHUB_RUN_ATTEMPT', 'needs.diagnostic.result', 'legStatus')) {
+            Assert-Match $diagnostic ([regex]::Escape($summaryToken)) "The diagnostic summary must inspect '$summaryToken'."
+        }
+        foreach ($stepId in @('install', 'runtime', 'pester', 'parse', 'whitespace', 'authority', 'core', 'syp214', 'offline')) {
+            Assert-Match $diagnostic ([regex]::Escape("steps.$stepId.outcome")) "The receipt must capture the '$stepId' outcome."
+        }
+        Assert-Match $diagnostic 'actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333\s+# v8\.0\.2' 'The diagnostic summary must use the reviewed immutable download-artifact action.'
     }
     Context 'SYP325 central validation CI ownership' {
     # Scenario: The written ownership map drifts from the normal authority gate or the manual diagnostic workflow.

@@ -7,12 +7,31 @@ permissions:
   contents: read
 
 jobs:
-  authority-gate:
-    name: Standard v1 authority gate (manual)
-    runs-on: windows-latest
-    timeout-minutes: 90
+  diagnostic:
+    name: Standard v1 diagnostic (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            os: windows-latest
+            asset: PowerShell-7.6.6-win-x64.zip
+            sha256: 02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860
+            executable: pwsh.exe
+          - platform: linux
+            os: ubuntu-latest
+            asset: powershell-7.6.6-linux-x64.tar.gz
+            sha256: DDBC4A2D113BBD46D283CFEDCBCD117A70CAEFD7673F41F2B4E0000BADF103BC
+            executable: pwsh
+          - platform: macos
+            os: macos-latest
+            asset: powershell-7.6.6-osx-arm64.tar.gz
+            sha256: 6DF833D094EBAC1C1A74340D7B3437F4AAF5E03CE640484A1C4359F3CE8B3DB1
+            executable: pwsh
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -21,43 +40,76 @@ jobs:
           persist-credentials: false
 
       - name: Install verified latest stable PowerShell
+        id: install
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $version = '7.6.6'
-          $expectedSha256 = '02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860'
-          $archivePath = Join-Path $env:RUNNER_TEMP 'PowerShell-7.6.6-win-x64.zip'
+          $expectedSha256 = '${{ matrix.sha256 }}'
+          $archivePath = Join-Path $env:RUNNER_TEMP '${{ matrix.asset }}'
           $installDirectory = Join-Path $env:RUNNER_TEMP 'pwsh-7.6.6'
+          $downloadUri = 'https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/${{ matrix.asset }}'
           if ((Test-Path -LiteralPath $archivePath) -or (Test-Path -LiteralPath $installDirectory)) { throw 'PowerShell setup paths must be new within this job.' }
-          Invoke-WebRequest -Uri 'https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/PowerShell-7.6.6-win-x64.zip' -OutFile $archivePath
+          Invoke-WebRequest -Uri $downloadUri -OutFile $archivePath
           $actualSha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToUpperInvariant()
           if ($actualSha256 -cne $expectedSha256) { throw "PowerShell archive SHA256 mismatch: expected $expectedSha256, got $actualSha256." }
-          Expand-Archive -LiteralPath $archivePath -DestinationPath $installDirectory
-          $powerShellExe = Join-Path $installDirectory 'pwsh.exe'
-          if (-not (Test-Path -LiteralPath $powerShellExe -PathType Leaf)) { throw 'Verified PowerShell archive did not contain pwsh.exe.' }
+          if ($IsWindows) {
+            Expand-Archive -LiteralPath $archivePath -DestinationPath $installDirectory
+          } else {
+            New-Item -ItemType Directory -Path $installDirectory | Out-Null
+            & tar -xzf $archivePath -C $installDirectory
+            if ($LASTEXITCODE -ne 0) { throw 'PowerShell archive extraction failed.' }
+            & chmod +x (Join-Path $installDirectory 'pwsh')
+            if ($LASTEXITCODE -ne 0) { throw 'Could not mark the portable PowerShell executable as executable.' }
+          }
+          $powerShellExe = Join-Path $installDirectory '${{ matrix.executable }}'
+          if (-not (Test-Path -LiteralPath $powerShellExe -PathType Leaf)) { throw 'Verified PowerShell archive did not contain the expected executable.' }
           $archiveRuntimeVersion = (& $powerShellExe -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')
           if ($LASTEXITCODE -ne 0 -or ([string]$archiveRuntimeVersion).Trim() -cne $version) { throw "Verified archive launched unexpected PowerShell version '$archiveRuntimeVersion'." }
           [IO.File]::AppendAllText($env:GITHUB_PATH, $installDirectory + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
           $githubEnvironment = 'SYP_REQUIRED_PWSH_VERSION=' + $version + [Environment]::NewLine + 'SYP_REQUIRED_PWSH_SHA256=' + $expectedSha256 + [Environment]::NewLine
           [IO.File]::AppendAllText($env:GITHUB_ENV, $githubEnvironment, [Text.UTF8Encoding]::new($false))
+          Write-Host "Downloaded PowerShell $version; archive SHA256: $actualSha256; portable path: $powerShellExe"
 
       - name: Verify the selected PowerShell runtime
+        id: runtime
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $expectedExecutable = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'pwsh-7.6.6/pwsh.exe'))
-          $selectedExecutable = [IO.Path]::GetFullPath((Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source)
-          $processExecutable = [IO.Path]::GetFullPath([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)
-          $homeExecutable = [IO.Path]::GetFullPath((Join-Path $PSHOME 'pwsh.exe'))
-          if (-not [string]::Equals($processExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase) -or
-              -not [string]::Equals($homeExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase)) {
+          $expectedExecutable = Join-Path $env:RUNNER_TEMP 'pwsh-7.6.6/${{ matrix.executable }}'
+          $selectedExecutable = (Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+          $processExecutable = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+          $homeExecutable = Join-Path $PSHOME '${{ matrix.executable }}'
+          if ($IsWindows) {
+            $expectedExecutable = [IO.Path]::GetFullPath($expectedExecutable)
+            $selectedExecutable = [IO.Path]::GetFullPath($selectedExecutable)
+            $processExecutable = [IO.Path]::GetFullPath($processExecutable)
+            $homeExecutable = [IO.Path]::GetFullPath($homeExecutable)
+            $comparison = [StringComparison]::OrdinalIgnoreCase
+          } else {
+            $resolvedPaths = @()
+            foreach ($path in @($expectedExecutable, $selectedExecutable, $processExecutable, $homeExecutable)) {
+              $resolved = (& realpath $path)
+              if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$resolved)) { throw "Could not resolve executable path '$path'." }
+              $resolvedPaths += ([string]$resolved).Trim()
+            }
+            $expectedExecutable, $selectedExecutable, $processExecutable, $homeExecutable = $resolvedPaths
+            $comparison = [StringComparison]::Ordinal
+          }
+          if (-not [string]::Equals($processExecutable, $expectedExecutable, $comparison) -or
+              -not [string]::Equals($homeExecutable, $expectedExecutable, $comparison)) {
             throw "The actual GitHub step shell is not the verified portable PowerShell: process=$processExecutable PSHOME=$PSHOME"
           }
-          if (-not [string]::Equals($selectedExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase)) { throw "The job shell did not select the verified portable runtime: $selectedExecutable" }
+          if (-not [string]::Equals($selectedExecutable, $expectedExecutable, $comparison)) { throw "The job shell did not select the verified portable runtime: $selectedExecutable" }
           if ($PSVersionTable.PSVersion.ToString() -cne $env:SYP_REQUIRED_PWSH_VERSION) { throw "Expected PowerShell $env:SYP_REQUIRED_PWSH_VERSION, running $($PSVersionTable.PSVersion)." }
-          if ($env:SYP_REQUIRED_PWSH_SHA256 -cne '02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860') { throw 'The verified PowerShell download hash binding changed.' }
+          if ($env:SYP_REQUIRED_PWSH_SHA256 -cne '${{ matrix.sha256 }}') { throw 'The verified PowerShell download hash binding changed.' }
+          $expectedArchitecture = if ('${{ matrix.platform }}' -ceq 'macos') { 'Arm64' } else { 'X64' }
+          $actualArchitecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+          if ($actualArchitecture -cne $expectedArchitecture) { throw "Expected OS architecture $expectedArchitecture, got $actualArchitecture." }
+          Write-Host "PowerShell runtime verified: $($PSVersionTable.PSVersion) at $selectedExecutable on $actualArchitecture"
 
       - name: Ensure Pester 4.10.1
+        id: pester
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -73,17 +125,29 @@ jobs:
           $manifest = Import-PowerShellDataFile -LiteralPath $manifestPath -ErrorAction Stop
           if ([version]$manifest.ModuleVersion -ne [version]'4.10.1') { throw 'Installed Pester manifest is not version 4.10.1.' }
 
-      - name: Run canonical Standard v1 authority gate
+      - name: Parse all PowerShell files
+        id: parse
+        if: ${{ !cancelled() && steps.runtime.outcome == 'success' && steps.pester.outcome == 'success' }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $candidateRoot = [IO.Path]::GetFullPath((Get-Location).Path)
-          $revision = (& git rev-parse --verify 'HEAD^{commit}').Trim()
-          if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') { throw 'Could not resolve the full checked-out HEAD revision.' }
-          & ./scripts/Invoke-StandardAuthorityGate.ps1 -ArtifactsRoot $env:RUNNER_TEMP -CandidateRoot $candidateRoot -AuthorityRoot $candidateRoot -CandidateRevision $revision -AuthorityRevision $revision -EventName $env:GITHUB_EVENT_NAME -ResultArtifact 'standards-conformance/authority-result.json'
-          if (-not $?) { throw 'Standard v1 authority gate failed.' }
+          $files = @(git ls-files '*.ps1' '*.psm1')
+          if ($LASTEXITCODE -ne 0 -or $files.Count -eq 0) { throw 'Could not enumerate tracked PowerShell files.' }
+          $failed = $false
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors)
+            foreach ($parseError in @($errors)) {
+              $failed = $true
+              Write-Host ("PARSE ERROR {0}:{1}:{2}: {3} [{4}]" -f $file, $parseError.Extent.StartLineNumber, $parseError.Extent.StartColumnNumber, $parseError.Message, $parseError.Extent.Text)
+            }
+          }
+          if ($failed) { throw 'Tracked PowerShell files contain parse errors under the required PowerShell 7 runtime.' }
 
       - name: Check whitespace for the manual run commit
+        id: whitespace
+        if: ${{ !cancelled() && steps.runtime.outcome == 'success' && steps.pester.outcome == 'success' }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -91,3 +155,407 @@ jobs:
           if ($LASTEXITCODE -eq 0 -and [string]$parent -match '^[0-9a-f]{40}$') { git diff --check 'HEAD^..HEAD' }
           else { git diff-tree --check --root -r HEAD }
           if ($LASTEXITCODE -ne 0) { throw 'Whitespace check failed for the manual run commit.' }
+
+      - name: Run canonical Standard v1 authority gate
+        id: authority
+        if: ${{ !cancelled() && steps.runtime.outcome == 'success' && steps.pester.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $candidateRoot = [IO.Path]::GetFullPath((Get-Location).Path)
+          $revision = (& git rev-parse --verify 'HEAD^{commit}').Trim()
+          if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') { throw 'Could not resolve the full checked-out HEAD revision.' }
+          & ./scripts/Invoke-StandardAuthorityGate.ps1 -ArtifactsRoot $env:RUNNER_TEMP -CandidateRoot $candidateRoot -AuthorityRoot $candidateRoot -CandidateRevision $revision -AuthorityRevision $revision -EventName $env:GITHUB_EVENT_NAME -ResultArtifact 'standards-conformance/${{ matrix.platform }}-authority-result.json'
+          if (-not $?) { throw 'Standard v1 authority gate failed.' }
+
+      - name: Run the non-authority Pester suite once
+        id: core
+        if: ${{ !cancelled() && steps.runtime.outcome == 'success' && steps.pester.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Remove-Module Pester -Force -ErrorAction SilentlyContinue
+          $pester = Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
+          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in the test step.' }
+          . ./scripts/Invoke-StandardAuthorityGate.ps1 -DefineFunctionsOnly
+          $inventoryRoot = [IO.Path]::GetFullPath((Get-Location).Path)
+          $authorityNames = @(Get-AuthorityTestPaths -Root $inventoryRoot | ForEach-Object { [IO.Path]::GetRelativePath($inventoryRoot, $_).Replace('\', '/') })
+          $expectedAuthorityNames = @(
+            'tests/internal-source-continuation.Tests.ps1',
+            'tests/skill-repository-standard.Tests.ps1',
+            'tests/skill-repository-workflows.Tests.ps1',
+            'tests/standard-authority-entry-preflight.Tests.ps1',
+            'tests/standard-entry-point-binding.Tests.ps1',
+            'tests/standard-core-pester-adapter.Tests.ps1'
+          )
+          if ($authorityNames.Count -ne $expectedAuthorityNames.Count -or
+              (($authorityNames | Sort-Object) -join [Environment]::NewLine) -cne (($expectedAuthorityNames | Sort-Object) -join [Environment]::NewLine)) {
+            throw 'The Core Pester exclusion list no longer matches the exact authority gate test paths.'
+          }
+          $testRoot = [IO.Path]::GetFullPath('./tests')
+          $allTestFiles = @(Get-ChildItem -LiteralPath $testRoot -Filter '*.Tests.ps1' -File -Recurse)
+          if ($allTestFiles.Count -eq 0) { throw 'Core Pester discovery found no test files.' }
+          $authorityFullPaths = @($expectedAuthorityNames | ForEach-Object { [IO.Path]::GetFullPath((Join-Path (Get-Location) $_)) })
+          foreach ($authorityPath in $authorityFullPaths) {
+            if (@($allTestFiles | Where-Object { [string]::Equals($_.FullName, $authorityPath, [StringComparison]::OrdinalIgnoreCase) }).Count -ne 1) { throw "Authority test path must be discovered exactly once: $authorityPath" }
+          }
+          $selectedTestNames = @($allTestFiles | Where-Object { $authorityFullPaths -notcontains $_.FullName } | ForEach-Object { $_.Name })
+          if ($selectedTestNames.Count -ne @($selectedTestNames | Select-Object -Unique).Count) { throw 'Core Pester selection has duplicate leaf names and cannot be passed safely to the bounded runner.' }
+          if ($selectedTestNames.Count -ne ($allTestFiles.Count - $expectedAuthorityNames.Count)) { throw 'Core Pester selection does not equal all discovered tests minus the unique authority test paths.' }
+          $skipInventoryPath = [IO.Path]::GetFullPath('./docs/standards/core-test-skip-inventory.json')
+          if (-not (Test-Path -LiteralPath $skipInventoryPath -PathType Leaf)) { throw 'The Core platform skip inventory is missing.' }
+          $skipInventory = Get-Content -Raw -Encoding UTF8 -LiteralPath $skipInventoryPath | ConvertFrom-Json
+          $platformKey = switch ($env:RUNNER_OS) {
+            'Windows' { 'windows' }
+            'macOS' { 'macos' }
+            'Linux' { 'linux' }
+            default { throw "The Core platform skip inventory has no runner mapping for '$env:RUNNER_OS'." }
+          }
+          $platformInventoryProperty = $skipInventory.platforms.PSObject.Properties[$platformKey]
+          if ($null -eq $platformInventoryProperty) { throw "The Core platform skip inventory has no '$platformKey' entry." }
+          $expectedSkippedTestsProperty = $platformInventoryProperty.Value.PSObject.Properties['expectedSkippedTests']
+          if ($null -eq $expectedSkippedTestsProperty) { throw "The Core platform skip inventory '$platformKey' entry has no expectedSkippedTests list." }
+          $expectedSkippedTests = [string[]]@($expectedSkippedTestsProperty.Value)
+          if ($platformKey -ceq 'windows' -and $expectedSkippedTests.Count -ne 5) { throw 'Windows Core must retain exactly five reviewed skipped tests.' }
+          $executorArguments = @{
+            PesterModulePath = [string]$pester.Path
+            PesterVersion = '4.10.1'
+            ExpectedSkippedCount = $expectedSkippedTests.Count
+            ExpectedSkippedTests = $expectedSkippedTests
+            ShardPartitionCount = 1
+            ShardPartitionIndex = 0
+            OuterTimeoutSeconds = 2400
+            TestRoot = './tests'
+            EvidenceRoot = $env:RUNNER_TEMP
+            SelectedTestFileNames = $selectedTestNames
+            SummaryOutputPath = (Join-Path $env:RUNNER_TEMP 'standards-conformance-${{ matrix.platform }}-pester-summary.json')
+          }
+          Write-Host "Core Pester inventory: $($selectedTestNames.Count) files; authority files excluded once: $($expectedAuthorityNames.Count); runtime: $($PSVersionTable.PSVersion); Pester: $($pester.Version)"
+          & ./scripts/Invoke-PesterShardProcess.ps1 @executorArguments
+          if (-not $?) { throw 'The bounded non-authority Pester suite failed.' }
+
+      - name: Run isolated SYP-214 fixture evidence child
+        id: syp214
+        if: ${{ !cancelled() && steps.runtime.outcome == 'success' && steps.pester.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $pwshPath = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'pwsh-7.6.6/${{ matrix.executable }}'))
+          if (-not (Test-Path -LiteralPath $pwshPath -PathType Leaf)) { throw 'Verified portable PowerShell is unavailable for the fixture child.' }
+          $pwshVersion = (& $pwshPath -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')
+          if ($LASTEXITCODE -ne 0 -or ([string]$pwshVersion).Trim() -cne $env:SYP_REQUIRED_PWSH_VERSION) { throw 'Fixture child PowerShell identity does not match the verified runtime.' }
+          $pester = Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
+          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable for the fixture child.' }
+          $artifactRoot = Join-Path $env:RUNNER_TEMP 'syp214-fixture-evidence'
+          $evidenceRoot = Join-Path $artifactRoot 'reports'
+          New-Item -ItemType Directory -Force -Path $evidenceRoot | Out-Null
+          $stdoutPath = Join-Path $artifactRoot 'child.stdout.log'
+          $stderrPath = Join-Path $artifactRoot 'child.stderr.log'
+          $summaryPath = Join-Path $artifactRoot 'pester-summary.json'
+          $processResultPath = Join-Path $artifactRoot 'process-result.json'
+          $childScriptPath = Join-Path $artifactRoot 'invoke-fixtures.ps1'
+          $checkoutHead = (& git rev-parse --verify 'HEAD^{commit}').Trim()
+          if ($LASTEXITCODE -ne 0 -or $checkoutHead -notmatch '^[0-9a-f]{40}$') { throw 'Could not resolve checked-out fixture commit.' }
+          $checkoutTree = (& git rev-parse --verify 'HEAD^{tree}').Trim()
+          if ($LASTEXITCODE -ne 0 -or $checkoutTree -notmatch '^[0-9a-f]{40}$') { throw 'Could not resolve checked-out fixture tree.' }
+          $sourceHead = $env:GITHUB_SHA
+          $testPath = [IO.Path]::GetFullPath('./tests/syp214-user-only.Tests.ps1')
+          $bootstrapPath = [IO.Path]::GetFullPath('./scripts/bootstrap-ai-instructions.ps1')
+          $testHash = (Get-FileHash -LiteralPath $testPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $bootstrapHash = (Get-FileHash -LiteralPath $bootstrapPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $env:SYP214_FIXTURE_EVIDENCE_ROOT = $evidenceRoot
+          $env:SYP214_SOURCE_HEAD_SHA = $sourceHead
+          $env:SYP214_CHECKOUT_HEAD_SHA = $checkoutHead
+          $env:SYP214_CHECKOUT_TREE_SHA = $checkoutTree
+          $env:SYP214_TEST_SCRIPT_SHA256 = $testHash
+          $env:SYP214_BOOTSTRAP_SCRIPT_SHA256 = $bootstrapHash
+          $env:SYP214_PESTER_VERSION = '4.10.1'
+          $childScript = @'
+          $ErrorActionPreference = 'Stop'
+          $expectedCases = @(
+            'migration.json', 'failure-rollback.json', 'recovery-exact.json',
+            'recovery-later-edit.json', 'recovery-corrupt-backup.json', 'recovery-pending-intent.json'
+          )
+          $summary = [ordered]@{
+            schemaVersion = 1; status = 'starting'; runId = [string]$env:GITHUB_RUN_ID
+            runAttempt = [string]$env:GITHUB_RUN_ATTEMPT; sourceHeadCommit = [string]$env:SYP214_SOURCE_HEAD_SHA
+            checkoutHeadCommit = [string]$env:SYP214_CHECKOUT_HEAD_SHA; checkoutTree = [string]$env:SYP214_CHECKOUT_TREE_SHA
+            testScriptSha256 = [string]$env:SYP214_TEST_SCRIPT_SHA256; bootstrapScriptSha256 = [string]$env:SYP214_BOOTSTRAP_SCRIPT_SHA256
+            pwshVersion = $PSVersionTable.PSVersion.ToString(); pwshExecutable = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+            pesterVersion = $null; total = $null; passed = $null; failed = $null; skipped = $null
+            pending = $null; inconclusive = $null; observedCaseNames = @(); expectedEvidenceFiles = $expectedCases
+            observedCases = @(); observedEvidenceFiles = @(); missingEvidenceFiles = @(); startedAtUtc = [DateTime]::UtcNow.ToString('o')
+            completedAtUtc = $null; error = $null
+          }
+          try {
+            $pester = @(Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' })
+            if ($pester.Count -ne 1) { throw "Expected one Pester 4.10.1 module in child; found $($pester.Count)." }
+            Import-Module $pester[0].Path -Force
+            $summary.pesterVersion = (Get-Module Pester | Select-Object -First 1).Version.ToString()
+            $run = Invoke-Pester -Script $env:SYP214_TEST_SCRIPT_PATH -Tag 'Syp214FixtureEvidence' -PassThru -Show Summary
+            if ($null -eq $run) { throw 'Pester returned no result object for the isolated fixture run.' }
+            $summary.total = [int]$run.TotalCount
+            $summary.passed = [int]$run.PassedCount
+            $summary.failed = [int]$run.FailedCount
+            $summary.skipped = [int]$run.SkippedCount
+            $summary.pending = [int]$run.PendingCount
+            $summary.inconclusive = [int]$run.InconclusiveCount
+            $summary.observedCases = @($run.TestResult | ForEach-Object {
+              [ordered]@{ name = [string]$_.Name; result = [string]$_.Result; duration = [string]$_.Time; failureMessage = [string]$_.FailureMessage }
+            })
+            $summary.observedCaseNames = @($summary.observedCases | ForEach-Object { [string]$_.name })
+            $reports = @(Get-ChildItem -LiteralPath $env:SYP214_FIXTURE_EVIDENCE_ROOT -File -Filter '*.json' | Sort-Object Name)
+            $summary.observedEvidenceFiles = @($reports | ForEach-Object {
+              [ordered]@{ name = $_.Name; length = [long]$_.Length; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+            })
+            $actualNames = @($reports | ForEach-Object { $_.Name } | Sort-Object -CaseSensitive)
+            $expectedNames = @($expectedCases | Sort-Object -CaseSensitive)
+            $summary.missingEvidenceFiles = @($expectedCases | Where-Object { $actualNames -cnotcontains $_ })
+            $caseInventoryValid = ($summary.total -eq 6 -and $summary.observedCaseNames.Count -eq 6 -and
+              @($summary.observedCaseNames | Select-Object -Unique).Count -eq 6 -and
+              @($summary.observedCaseNames | Where-Object { $_ -match '^InterT40_' }).Count -eq 1 -and
+              @($summary.observedCaseNames | Where-Object { $_ -match '^InterT50_' }).Count -eq 1 -and
+              @($summary.observedCaseNames | Where-Object { $_ -match '^InterT60_durable_recovery_' }).Count -eq 4)
+            $reportInventoryValid = (($actualNames -join "`n") -ceq ($expectedNames -join "`n"))
+            $allPassed = ($summary.passed -eq 6 -and $summary.failed -eq 0 -and $summary.skipped -eq 0 -and
+              $summary.pending -eq 0 -and $summary.inconclusive -eq 0)
+            if (-not $caseInventoryValid) { throw 'Observed Pester case names or counts differ from the six tagged SYP-214 fixtures.' }
+            if (-not $reportInventoryValid) { throw 'Observed fixture JSON files do not equal the six expected evidence reports.' }
+            if (-not $allPassed) { throw 'The isolated SYP-214 Pester fixture run did not pass all six cases.' }
+            $summary.status = 'passed'
+          }
+          catch {
+            $summary.status = 'failed'
+            $summary.error = $_.Exception.Message
+          }
+          finally {
+            $summary.completedAtUtc = [DateTime]::UtcNow.ToString('o')
+            [IO.File]::WriteAllText($env:SYP214_PESTER_SUMMARY_PATH, ($summary | ConvertTo-Json -Depth 10) + "`n", [Text.UTF8Encoding]::new($false))
+          }
+          if ($summary.status -cne 'passed') { throw [string]$summary.error }
+          '@
+          [IO.File]::WriteAllText($childScriptPath, $childScript, [Text.UTF8Encoding]::new($false))
+          $childScriptHash = (Get-FileHash -LiteralPath $childScriptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $env:SYP214_TEST_SCRIPT_PATH = $testPath
+          $env:SYP214_PESTER_SUMMARY_PATH = $summaryPath
+          $startedAt = [DateTime]::UtcNow.ToString('o')
+          $childExitCode = $null
+          $completionState = 'launch-failed'
+          $launchError = $null
+          try {
+            & $pwshPath -NoLogo -NoProfile -File $childScriptPath 1> $stdoutPath 2> $stderrPath
+            $childExitCode = $LASTEXITCODE
+            $completionState = 'exited'
+          }
+          catch {
+            $launchError = $_.Exception.Message
+          }
+          $completedAt = [DateTime]::UtcNow.ToString('o')
+          $summaryExists = Test-Path -LiteralPath $summaryPath -PathType Leaf
+          $processResult = [ordered]@{
+            schemaVersion = 1; runId = [string]$env:GITHUB_RUN_ID; runAttempt = [string]$env:GITHUB_RUN_ATTEMPT
+            workflow = [string]$env:GITHUB_WORKFLOW; event = [string]$env:GITHUB_EVENT_NAME; ref = [string]$env:GITHUB_REF
+            sourceHeadCommit = $sourceHead; checkoutHeadCommit = $checkoutHead; checkoutTree = $checkoutTree
+            command = @($pwshPath, '-NoLogo', '-NoProfile', '-File', $childScriptPath)
+            childScriptSha256 = $childScriptHash; testScriptSha256 = $testHash; bootstrapScriptSha256 = $bootstrapHash
+            pwshVersion = ([string]$pwshVersion).Trim(); pwshExecutable = $pwshPath
+            verifiedPwshArchiveSha256 = [string]$env:SYP_REQUIRED_PWSH_SHA256; pesterVersion = '4.10.1'
+            testScriptPath = $testPath; pesterTag = 'Syp214FixtureEvidence'
+            startedAtUtc = $startedAt; completedAtUtc = $completedAt; completionState = $completionState
+            childExitCode = $childExitCode; childExitStatus = $(if ($null -eq $childExitCode) { 'unknown' } elseif ($childExitCode -eq 0) { 'passed' } else { 'failed' })
+            launchError = $launchError; summaryExists = $summaryExists
+            summarySha256 = $(if ($summaryExists) { (Get-FileHash -LiteralPath $summaryPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null })
+            stdoutPath = $stdoutPath; stdoutLength = $(if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { [long](Get-Item -LiteralPath $stdoutPath).Length } else { $null })
+            stdoutSha256 = $(if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { (Get-FileHash -LiteralPath $stdoutPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null })
+            stderrPath = $stderrPath; stderrLength = $(if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { [long](Get-Item -LiteralPath $stderrPath).Length } else { $null })
+            stderrSha256 = $(if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { (Get-FileHash -LiteralPath $stderrPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null })
+            pesterSummaryPath = $summaryPath; evidenceRoot = $evidenceRoot
+          }
+          [IO.File]::WriteAllText($processResultPath, ($processResult | ConvertTo-Json -Depth 8) + "`n", [Text.UTF8Encoding]::new($false))
+          if ($completionState -cne 'exited' -or $null -eq $childExitCode -or $childExitCode -ne 0 -or -not $summaryExists) { throw 'Isolated SYP-214 fixture evidence child failed or omitted its result summary.' }
+
+      - name: Run offline routine semantic fixtures once
+        id: offline
+        if: ${{ !cancelled() && steps.runtime.outcome == 'success' && steps.pester.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = if ($IsWindows) { 'python' } else { 'python3' }
+          & $python -B -c "import sys; print(sys.version); raise SystemExit(0 if sys.version_info >= (3, 10) else 1)"
+          if ($LASTEXITCODE -ne 0) { throw 'Offline fixtures require Python 3.10 or newer.' }
+          & $python -B -c "import unittest; suite=unittest.defaultTestLoader.discover('tests', pattern='test_routine_semantic_*.py'); unittest.TestCase().assertEqual(suite.countTestCases(), 61, 'Exact offline fixture count changed'); result=unittest.TextTestRunner(verbosity=2).run(suite); raise SystemExit(0 if result.wasSuccessful() and len(result.skipped) == 0 else 1)"
+          if ($LASTEXITCODE -ne 0) { throw 'Offline routine semantic fixtures failed or skipped.' }
+
+      - name: Write diagnostic leg receipt
+        id: receipt
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        env:
+          STEP_INSTALL: ${{ steps.install.outcome }}
+          STEP_RUNTIME: ${{ steps.runtime.outcome }}
+          STEP_PESTER: ${{ steps.pester.outcome }}
+          STEP_PARSE: ${{ steps.parse.outcome }}
+          STEP_WHITESPACE: ${{ steps.whitespace.outcome }}
+          STEP_AUTHORITY: ${{ steps.authority.outcome }}
+          STEP_CORE: ${{ steps.core.outcome }}
+          STEP_SYP214: ${{ steps.syp214.outcome }}
+          STEP_OFFLINE: ${{ steps.offline.outcome }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $steps = [ordered]@{
+            install = [string]$env:STEP_INSTALL
+            runtime = [string]$env:STEP_RUNTIME
+            pester = [string]$env:STEP_PESTER
+            parse = [string]$env:STEP_PARSE
+            whitespace = [string]$env:STEP_WHITESPACE
+            authority = [string]$env:STEP_AUTHORITY
+            core = [string]$env:STEP_CORE
+            syp214 = [string]$env:STEP_SYP214
+            offline = [string]$env:STEP_OFFLINE
+          }
+          $evidenceFor = {
+            param([string]$Path)
+            if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+            $item = Get-Item -LiteralPath $Path
+            return [ordered]@{
+              path = $Path
+              sha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+              length = [long]$item.Length
+            }
+          }
+          $authorityPath = Join-Path $env:RUNNER_TEMP 'standards-conformance/${{ matrix.platform }}-authority-result.json'
+          $pesterPath = Join-Path $env:RUNNER_TEMP 'standards-conformance-${{ matrix.platform }}-pester-summary.json'
+          $allSucceeded = @($steps.Values | Where-Object { $_ -cne 'success' }).Count -eq 0
+          $receipt = [ordered]@{
+            schemaVersion = 1
+            platform = '${{ matrix.platform }}'
+            runnerOs = [string]$env:RUNNER_OS
+            runnerArch = [string]$env:RUNNER_ARCH
+            osArchitecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+            runId = [string]$env:GITHUB_RUN_ID
+            runAttempt = [string]$env:GITHUB_RUN_ATTEMPT
+            headSha = [string]$env:GITHUB_SHA
+            workflow = [string]$env:GITHUB_WORKFLOW
+            event = [string]$env:GITHUB_EVENT_NAME
+            powerShell = [ordered]@{
+              version = $PSVersionTable.PSVersion.ToString()
+              archiveSha256 = [string]$env:SYP_REQUIRED_PWSH_SHA256
+              executable = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+            }
+            steps = $steps
+            evidence = [ordered]@{
+              authorityResult = (& $evidenceFor $authorityPath)
+              pesterSummary = (& $evidenceFor $pesterPath)
+            }
+            legStatus = $(if ($allSucceeded) { 'passed' } else { 'failed' })
+          }
+          $receiptPath = Join-Path $env:RUNNER_TEMP 'standards-conformance-receipt-${{ matrix.platform }}.json'
+          [IO.File]::WriteAllText($receiptPath, ($receipt | ConvertTo-Json -Depth 8) + "`n", [Text.UTF8Encoding]::new($false))
+
+      - name: Upload diagnostic leg evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: standards-conformance-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/standards-conformance-receipt-${{ matrix.platform }}.json
+            ${{ runner.temp }}/standards-conformance/${{ matrix.platform }}-authority-result.json
+            ${{ runner.temp }}/standards-conformance-${{ matrix.platform }}-pester-summary.json
+            ${{ runner.temp }}/pester-shard-*.json
+            ${{ runner.temp }}/pester-shard-*.process.json
+            ${{ runner.temp }}/pester-shard-*.stdout.log
+            ${{ runner.temp }}/pester-shard-*.stderr.log
+            ${{ runner.temp }}/syp214-fixture-evidence/pester-summary.json
+            ${{ runner.temp }}/syp214-fixture-evidence/process-result.json
+            ${{ runner.temp }}/syp214-fixture-evidence/child.stdout.log
+            ${{ runner.temp }}/syp214-fixture-evidence/child.stderr.log
+            ${{ runner.temp }}/syp214-fixture-evidence/reports/*.json
+            ${{ runner.temp }}/syp325-source-scope-*/**/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  diagnostic-summary:
+    name: Standard v1 diagnostic summary
+    needs: diagnostic
+    if: ${{ !cancelled() }}
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Download diagnostic leg evidence
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: standards-conformance-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/diagnostic
+          merge-multiple: false
+
+      - name: Verify every platform leg receipt
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        env:
+          NEEDS_DIAGNOSTIC_RESULT: ${{ needs.diagnostic.result }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $diagnosticRoot = Join-Path $env:RUNNER_TEMP 'diagnostic'
+          $platforms = @('windows', 'linux', 'macos')
+          $failures = New-Object 'System.Collections.Generic.List[string]'
+          $summaryLines = New-Object 'System.Collections.Generic.List[string]'
+          $summaryLines.Add('| Platform | Step | Outcome |')
+          $summaryLines.Add('|---|---|---|')
+          foreach ($platform in $platforms) {
+            $artifactDirectory = Join-Path $diagnosticRoot "standards-conformance-$platform-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+            $receipts = @(Get-ChildItem -LiteralPath $artifactDirectory -Filter "standards-conformance-receipt-$platform.json" -File -Recurse -ErrorAction SilentlyContinue)
+            if ($receipts.Count -ne 1) {
+              $failures.Add("$platform must have exactly one receipt; found $($receipts.Count).")
+              $summaryLines.Add("| $platform | receipt | missing or duplicate |")
+              continue
+            }
+            try {
+              $receipt = Get-Content -Raw -Encoding UTF8 -LiteralPath $receipts[0].FullName | ConvertFrom-Json
+              if ([int]$receipt.schemaVersion -ne 1) { $failures.Add("$platform receipt schemaVersion is not 1.") }
+              if ([string]$receipt.platform -cne $platform) { $failures.Add("$platform receipt platform does not match.") }
+              if ([string]$receipt.runId -cne [string]$env:GITHUB_RUN_ID) { $failures.Add("$platform receipt runId does not match.") }
+              if ([string]$receipt.runAttempt -cne [string]$env:GITHUB_RUN_ATTEMPT) { $failures.Add("$platform receipt runAttempt does not match.") }
+              if ([string]$receipt.headSha -cne [string]$env:GITHUB_SHA) { $failures.Add("$platform receipt headSha does not match.") }
+              foreach ($stepProperty in $receipt.steps.PSObject.Properties) {
+                $line = "| $platform | $($stepProperty.Name) | $($stepProperty.Value) |"
+                Write-Host $line
+                $summaryLines.Add($line)
+              }
+              foreach ($evidenceProperty in $receipt.evidence.PSObject.Properties) {
+                if ($null -eq $evidenceProperty.Value -or [string]::IsNullOrWhiteSpace([string]$evidenceProperty.Value.sha256)) { continue }
+                $declaredPath = [string]$evidenceProperty.Value.path
+                $downloadedPath = if ([IO.Path]::IsPathRooted($declaredPath)) {
+                  Join-Path $artifactDirectory ([IO.Path]::GetFileName($declaredPath))
+                } else {
+                  Join-Path $artifactDirectory $declaredPath
+                }
+                if (-not (Test-Path -LiteralPath $downloadedPath -PathType Leaf)) {
+                  $matches = @(Get-ChildItem -LiteralPath $artifactDirectory -Recurse -File -Filter ([IO.Path]::GetFileName($declaredPath)))
+                  if ($matches.Count -eq 1) { $downloadedPath = $matches[0].FullName }
+                }
+                if (-not (Test-Path -LiteralPath $downloadedPath -PathType Leaf)) {
+                  $failures.Add("$platform evidence '$($evidenceProperty.Name)' is missing.")
+                  continue
+                }
+                $actualHash = (Get-FileHash -LiteralPath $downloadedPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ($actualHash -cne ([string]$evidenceProperty.Value.sha256).ToLowerInvariant()) {
+                  $failures.Add("$platform evidence '$($evidenceProperty.Name)' SHA256 does not match.")
+                }
+              }
+              if ([string]$receipt.legStatus -cne 'passed') { $failures.Add("$platform legStatus is not passed.") }
+            }
+            catch {
+              $failures.Add("$platform receipt could not be validated: $($_.Exception.Message)")
+              $summaryLines.Add("| $platform | receipt | invalid |")
+            }
+          }
+          $summaryLines | ForEach-Object { Write-Host $_ }
+          [IO.File]::AppendAllLines($env:GITHUB_STEP_SUMMARY, $summaryLines, [Text.UTF8Encoding]::new($false))
+          if ($env:NEEDS_DIAGNOSTIC_RESULT -cne 'success') { $failures.Add("needs.diagnostic.result is '$env:NEEDS_DIAGNOSTIC_RESULT'.") }
+          if ($failures.Count -gt 0) {
+            $failures | ForEach-Object { Write-Error $_ }
+            throw 'One or more diagnostic platform legs failed receipt verification.'
+          }
