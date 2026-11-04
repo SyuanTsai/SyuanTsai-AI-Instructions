@@ -101,33 +101,105 @@ Describe 'Runner observed SkillSpector native compatibility' {
         }
     }
 
+    Context 'Resolver receipt attestation freshness' {
+        It 'UnitT37_uses_the_same_reference_time_for_the_receipt_and_attestation' {
+            $resolvedAt = [DateTimeOffset]::UtcNow.AddMinutes(-60)
+            $referenceTime = $resolvedAt.AddMinutes(5)
+            $resolvedAtText = $resolvedAt.ToString('o')
+            $runId = [guid]::NewGuid()
+            $receiptPath = Join-Path $TestDrive 'resolver-receipt.json'
+            $installRoot = Join-Path $TestDrive 'tool-install'
+            $commandPath = Join-Path $installRoot 'skillspector.exe'
+            $receipt = [pscustomobject]@{
+                schemaVersion = 1
+                evidenceType = 'validation-tool-resolution'
+                status = 'verified'
+                toolName = 'skillspector'
+                source = 'fixture'
+                channel = 'latest-stable'
+                resolvedVersion = '1.0.0'
+                resolvedIdentity = 'fixture-identity'
+                installRoot = $installRoot
+                executablePath = $commandPath
+                executableSha256 = 'c' * 64
+                installedClosureSha256 = 'd' * 64
+                launcher = [pscustomobject]@{}
+                launcherDigestSha256 = 'e' * 64
+                resolutionRunId = $runId.ToString('N')
+                resolvedAtUtc = $resolvedAtText
+                attestation = [pscustomobject]@{
+                    schemaVersion = 1
+                    attestationType = 'trusted-supervisor-validation-tool-v1'
+                    toolName = 'skillspector'
+                    source = 'fixture'
+                    channel = 'latest-stable'
+                    status = 'verified'
+                    resolvedVersion = '1.0.0'
+                    resolvedIdentity = 'fixture-identity'
+                    installRoot = $installRoot
+                    executablePath = $commandPath
+                    executableSha256 = 'c' * 64
+                    installedClosureSha256 = 'd' * 64
+                    launcherDigestSha256 = 'e' * 64
+                    resolutionRunId = $runId.ToString('N')
+                    resolvedAtUtc = $resolvedAtText
+                    issuedAt = $resolvedAtText
+                    signature = 'fixture'
+                }
+            }
+            Mock New-StandardValidationPhase { [pscustomobject]@{ calls = 0 } }
+            Mock Complete-StandardValidationPhase {}
+            Mock Assert-StandardValidationExactPropertySet {}
+            Mock Assert-StandardValidationSha256 {}
+            Mock Assert-StandardValidationOutsideRoot {}
+            Mock Assert-StandardValidationRegularFile {}
+            Mock Get-StandardValidationJsonSnapshot { [pscustomobject]@{ sha256 = 'a' * 64; value = $receipt } }
+            Mock Get-StandardValidationFullPath { $Path }
+            Mock Test-Path { $true }
+            Mock Test-StandardValidationPathWithin { $true }
+            Mock Get-StandardValidationFileSha256 { 'c' * 64 }
+            Mock Get-StandardValidationDirectoryClosureSha256 { 'd' * 64 }
+            Mock Assert-StandardValidationLauncherIntegrity { 'e' * 64 }
+            Mock Assert-StandardValidationLifecycleTimestamp { [string]$Value }
+            Mock Assert-StandardValidationSignedReceipt {}
+            Mock Assert-StandardValidationFreshTimestamp { [string]$Value }
+
+            $provenance = [pscustomobject]@{ toolName = 'skillspector'; receiptPath = $receiptPath; receiptSha256 = 'a' * 64 }
+            { Assert-StandardValidationToolReceipt -Provenance $provenance -CommandPath $commandPath -CandidateRoot $TestDrive -ArtifactsRoot $TestDrive -TrustAnchorRoot $TestDrive -RunId $runId -ExpectedToolName 'skillspector' -Context 'fixture' -FreshnessReferenceTime $referenceTime } | Should Not Throw
+
+            Assert-MockCalled Assert-StandardValidationFreshTimestamp -Times 2 -Exactly -Scope It -ParameterFilter {
+                $ReferenceTime.UtcTicks -eq $referenceTime.UtcTicks
+            }
+        }
+    }
+
     Context 'Retained native probe receipt readback' {
-        It 'UnitT38_uses_the_static_event_start_time_for_receipt_freshness' {
+        It 'UnitT38_uses_the_retained_event_process_start_time_for_receipt_freshness' {
             $runRoot = Join-Path $TestDrive 'retained-probe'
             $eventTime = [DateTimeOffset]::Parse('2026-11-04T01:02:03.4567890+00:00', [Globalization.CultureInfo]::InvariantCulture)
+            $eventRoot = Join-Path $runRoot 'events'
+            $eventPath = Join-Path $eventRoot 'static.json'
+            $adapterPath = Join-Path $runRoot 'probe-adapter.json'
+            $receiptPath = Join-Path $runRoot 'receipt.json'
+            [void](New-Item -ItemType Directory -Path $eventRoot -Force)
+            [IO.File]::WriteAllText($eventPath, ('{"process":{"startedAt":"' + $eventTime.ToString('o') + '"}}'), [Text.UTF8Encoding]::new($false))
+            [IO.File]::WriteAllText($adapterPath, '{"staticAnalyzer":{"provenance":{},"command":"fixture","arguments":[]}}', [Text.UTF8Encoding]::new($false))
+            [IO.File]::WriteAllText($receiptPath, '{}', [Text.UTF8Encoding]::new($false))
             $report = [pscustomobject]@{
                 runId = [guid]::NewGuid().ToString('N')
                 candidate = [pscustomobject]@{ candidateId = 'a' * 64 }
                 artifacts = [pscustomobject]@{ root = $TestDrive }
-                adapter = [pscustomobject]@{ sha256 = 'b' * 64 }
+                adapter = [pscustomobject]@{ sha256 = (Get-StandardValidationJsonSnapshot -Path $adapterPath -Context 'fixture adapter').sha256 }
             }
             $event = [pscustomobject]@{
                 candidateId = $report.candidate.candidateId
                 stageId = 'skillspector-static'
                 toolId = 'staticAnalyzer'
-                outputPath = Join-Path (Join-Path $runRoot 'events') 'static.json'
+                outputPath = $eventPath
                 commandSha256 = 'c' * 64
                 eventId = [guid]::NewGuid().ToString()
-                startedAt = $eventTime.ToString('o')
             }
-            Mock Test-StandardValidationPathWithin { $true }
-            Mock Get-StandardValidationJsonSnapshot {
-                if ($Context -ceq 'native probe retained adapter') {
-                    return [pscustomobject]@{ sha256 = 'b' * 64; value = [pscustomobject]@{ staticAnalyzer = [pscustomobject]@{ provenance = [pscustomobject]@{}; command = 'fixture'; arguments = @() } } }
-                }
-                return [pscustomobject]@{ value = [pscustomobject]@{} }
-            }
-            Mock Assert-StandardValidationToolReceipt { [pscustomobject]@{ path = 'fixture-receipt'; executableSha256 = 'c' * 64 } }
+            Mock Assert-StandardValidationToolReceipt { [pscustomobject]@{ path = $receiptPath; executableSha256 = 'c' * 64 } }
             Mock New-StandardValidationNativeProbeContext { [pscustomobject]@{ eventId = $EventId } }
 
             $result = Get-StandardValidationAdvancedProbeContext -Report $report -Event $event
@@ -138,10 +210,18 @@ Describe 'Runner observed SkillSpector native compatibility' {
             }
         }
 
-        It 'UnitT39_rejects_a_static_event_without_its_start_time' {
+        It 'UnitT39_rejects_a_retained_event_without_its_process_start_time' {
+            $runRoot = Join-Path $TestDrive 'missing-event-timestamp'
+            $eventRoot = Join-Path $runRoot 'events'
+            $eventPath = Join-Path $eventRoot 'static.json'
+            [void](New-Item -ItemType Directory -Path $eventRoot -Force)
+            [IO.File]::WriteAllText($eventPath, '{"process":{}}', [Text.UTF8Encoding]::new($false))
             $candidateId = 'a' * 64
-            $report = [pscustomobject]@{ candidate = [pscustomobject]@{ candidateId = $candidateId } }
-            $event = [pscustomobject]@{ candidateId = $candidateId; stageId = 'skillspector-static'; toolId = 'staticAnalyzer' }
+            $report = [pscustomobject]@{
+                candidate = [pscustomobject]@{ candidateId = $candidateId }
+                artifacts = [pscustomobject]@{ root = $TestDrive }
+            }
+            $event = [pscustomobject]@{ candidateId = $candidateId; stageId = 'skillspector-static'; toolId = 'staticAnalyzer'; outputPath = $eventPath }
 
             { Get-StandardValidationAdvancedProbeContext -Report $report -Event $event } | Should Throw 'BLOCKED|Native probe event timestamp is missing.'
         }

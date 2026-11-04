@@ -1308,7 +1308,8 @@ function Assert-StandardValidationToolReceipt {
     $attestationResolvedAtUtc = Assert-StandardValidationFreshTimestamp `
         -Value (Get-StandardValidationRequiredProperty -Object $attestation -Name 'resolvedAtUtc' -Context "$Context resolver attestation") `
         -Context "$Context resolver attestation" `
-        -MaxAgeMinutes $script:StandardValidationMaxReceiptAgeMinutes
+        -MaxAgeMinutes $script:StandardValidationMaxReceiptAgeMinutes `
+        -ReferenceTime $FreshnessReferenceTime
     if ([DateTimeOffset]::Parse($attestationResolvedAtUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None) -ne
         [DateTimeOffset]::Parse($resolvedAtUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None)) {
         throw "BLOCKED|$Context resolver attestation resolvedAtUtc does not match the verified tool result."
@@ -3632,18 +3633,20 @@ function Get-StandardValidationAdvancedProbeContext {
     param($Report, $Event)
     if ($null -eq $Event -or [string]$Event.candidateId -cne [string]$Report.candidate.candidateId -or
         [string]$Event.stageId -cne 'skillspector-static' -or [string]$Event.toolId -cne 'staticAnalyzer') { throw 'BLOCKED|Native probe static event is missing.' }
-    $eventTimestampProperty = $Event.PSObject.Properties['startedAt']
-    if ($null -eq $eventTimestampProperty -or [string]::IsNullOrWhiteSpace([string]$eventTimestampProperty.Value)) {
+    $runRoot = Split-Path -Parent (Split-Path -Parent ([string]$Event.outputPath))
+    if (-not (Test-StandardValidationPathWithin -Path $runRoot -Root $Report.artifacts.root)) { throw 'BLOCKED|Native probe event is outside report artifacts.' }
+    $rawEvent = (Get-StandardValidationJsonSnapshot -Path ([string]$Event.outputPath) -Context 'native probe retained event' -PreserveDateStrings).value
+    $eventProcess = Get-StandardValidationProperty -Object $rawEvent -Name 'process'
+    $eventStartedAt = Get-StandardValidationProperty -Object $eventProcess -Name 'startedAt'
+    if ($null -eq $eventStartedAt -or [string]::IsNullOrWhiteSpace([string]$eventStartedAt)) {
         throw 'BLOCKED|Native probe event timestamp is missing.'
     }
     try {
-        $freshnessReferenceTime = [DateTimeOffset]::Parse([string]$eventTimestampProperty.Value, [Globalization.CultureInfo]::InvariantCulture)
+        $freshnessReferenceTime = [DateTimeOffset]::Parse([string]$eventStartedAt, [Globalization.CultureInfo]::InvariantCulture)
     }
     catch {
         throw 'BLOCKED|Native probe event timestamp is missing.'
     }
-    $runRoot = Split-Path -Parent (Split-Path -Parent ([string]$Event.outputPath))
-    if (-not (Test-StandardValidationPathWithin -Path $runRoot -Root $Report.artifacts.root)) { throw 'BLOCKED|Native probe event is outside report artifacts.' }
     $snapshot = Get-StandardValidationJsonSnapshot -Path (Join-Path $runRoot 'probe-adapter.json') -Context 'native probe retained adapter'
     if ([string]$snapshot.sha256 -cne [string]$Report.adapter.sha256) { throw 'BLOCKED|Native probe retained adapter differs.' }
     $spec = $snapshot.value.staticAnalyzer
