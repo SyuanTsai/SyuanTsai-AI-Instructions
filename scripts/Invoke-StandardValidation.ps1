@@ -1168,7 +1168,8 @@ function Assert-StandardValidationToolReceipt {
         [Parameter(Mandatory = $true)][string] $TrustAnchorRoot,
         [Nullable[guid]] $RunId,
         [Parameter(Mandatory = $true)][string] $ExpectedToolName,
-        [Parameter(Mandatory = $true)][string] $Context
+        [Parameter(Mandatory = $true)][string] $Context,
+        [Nullable[DateTimeOffset]] $FreshnessReferenceTime
     )
     $svPhaseTiming = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'receipt-parsing' -Silent:(-not $script:StandardValidationTimingEnabled)
     $svPhaseTiming.calls = 1
@@ -1234,7 +1235,8 @@ function Assert-StandardValidationToolReceipt {
     $resolvedAtUtc = Assert-StandardValidationFreshTimestamp `
         -Value (Get-StandardValidationRequiredProperty -Object $receipt -Name 'resolvedAtUtc' -Context "$Context resolver receipt") `
         -Context "$Context resolver receipt" `
-        -MaxAgeMinutes $script:StandardValidationMaxReceiptAgeMinutes
+        -MaxAgeMinutes $script:StandardValidationMaxReceiptAgeMinutes `
+        -ReferenceTime $FreshnessReferenceTime
     $installRootValue = Get-StandardValidationRequiredProperty -Object $receipt -Name 'installRoot' -Context "$Context resolver receipt"
     $executablePathValue = Get-StandardValidationRequiredProperty -Object $receipt -Name 'executablePath' -Context "$Context resolver receipt"
     if ($installRootValue -isnot [string] -or $executablePathValue -isnot [string] -or
@@ -3630,12 +3632,22 @@ function Get-StandardValidationAdvancedProbeContext {
     param($Report, $Event)
     if ($null -eq $Event -or [string]$Event.candidateId -cne [string]$Report.candidate.candidateId -or
         [string]$Event.stageId -cne 'skillspector-static' -or [string]$Event.toolId -cne 'staticAnalyzer') { throw 'BLOCKED|Native probe static event is missing.' }
+    $eventTimestampProperty = $Event.PSObject.Properties['startedAt']
+    if ($null -eq $eventTimestampProperty -or [string]::IsNullOrWhiteSpace([string]$eventTimestampProperty.Value)) {
+        throw 'BLOCKED|Native probe event timestamp is missing.'
+    }
+    try {
+        $freshnessReferenceTime = [DateTimeOffset]::Parse([string]$eventTimestampProperty.Value, [Globalization.CultureInfo]::InvariantCulture)
+    }
+    catch {
+        throw 'BLOCKED|Native probe event timestamp is missing.'
+    }
     $runRoot = Split-Path -Parent (Split-Path -Parent ([string]$Event.outputPath))
     if (-not (Test-StandardValidationPathWithin -Path $runRoot -Root $Report.artifacts.root)) { throw 'BLOCKED|Native probe event is outside report artifacts.' }
     $snapshot = Get-StandardValidationJsonSnapshot -Path (Join-Path $runRoot 'probe-adapter.json') -Context 'native probe retained adapter'
     if ([string]$snapshot.sha256 -cne [string]$Report.adapter.sha256) { throw 'BLOCKED|Native probe retained adapter differs.' }
     $spec = $snapshot.value.staticAnalyzer
-    $tool = Assert-StandardValidationToolReceipt -Provenance $spec.provenance -CommandPath $spec.command -CandidateRoot (Join-Path $runRoot 'candidate-snapshot') -ArtifactsRoot $Report.artifacts.root -TrustAnchorRoot $script:StandardValidationRepositoryRoot -RunId ([guid]$Report.runId) -ExpectedToolName skillspector -Context 'retained native probe'
+    $tool = Assert-StandardValidationToolReceipt -Provenance $spec.provenance -CommandPath $spec.command -CandidateRoot (Join-Path $runRoot 'candidate-snapshot') -ArtifactsRoot $Report.artifacts.root -TrustAnchorRoot $script:StandardValidationRepositoryRoot -RunId ([guid]$Report.runId) -ExpectedToolName skillspector -Context 'retained native probe' -FreshnessReferenceTime $freshnessReferenceTime
     $receipt = (Get-StandardValidationJsonSnapshot -Path $tool.path -Context 'retained native probe receipt').value
     $command = [pscustomobject]@{command=$spec.command; commandSha256=$tool.executableSha256; arguments=@($spec.arguments)}
     if ([string]$Event.commandSha256 -cne $command.commandSha256) { throw 'BLOCKED|Native probe dispatch command differs.' }
@@ -6936,7 +6948,8 @@ function Assert-StandardValidationFreshTimestamp {
     param(
         [Parameter(Mandatory = $true)] $Value,
         [Parameter(Mandatory = $true)][string] $Context,
-        [Parameter(Mandatory = $true)][int] $MaxAgeMinutes
+        [Parameter(Mandatory = $true)][int] $MaxAgeMinutes,
+        [Nullable[DateTimeOffset]] $ReferenceTime
     )
 
     $timestamp = Assert-StandardValidationLifecycleTimestamp -Value $Value -Context $Context
@@ -6948,7 +6961,8 @@ function Assert-StandardValidationFreshTimestamp {
             [ref]$parsedTimestamp)) {
         throw "BLOCKED|$Context is not a valid UTC timestamp."
     }
-    if ($parsedTimestamp -lt [DateTimeOffset]::UtcNow.AddMinutes(-$MaxAgeMinutes)) {
+    $freshnessReferenceTime = if ($null -eq $ReferenceTime) { [DateTimeOffset]::UtcNow } else { [DateTimeOffset]$ReferenceTime }
+    if ($parsedTimestamp -lt $freshnessReferenceTime.AddMinutes(-$MaxAgeMinutes)) {
         throw "BLOCKED|$Context is older than the allowed $MaxAgeMinutes-minute validation window."
     }
     return $timestamp

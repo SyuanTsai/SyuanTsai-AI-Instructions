@@ -81,6 +81,72 @@ Describe 'Runner observed SkillSpector native compatibility' {
         $snapshot.value.startedAt | Should Be $startedAt
     }
 
+    Context 'Receipt freshness reference time' {
+        It 'UnitT33_accepts_a_receipt_five_minutes_old_at_the_reference_time' {
+            $timestamp = [DateTimeOffset]::UtcNow.AddMinutes(-60)
+
+            { Assert-StandardValidationFreshTimestamp -Value $timestamp.ToString('o') -Context 'fixture receipt' -MaxAgeMinutes 15 -ReferenceTime $timestamp.AddMinutes(5) } | Should Not Throw
+        }
+
+        It 'UnitT34_rejects_a_receipt_twenty_minutes_old_at_the_reference_time' {
+            $timestamp = [DateTimeOffset]::UtcNow.AddMinutes(-60)
+
+            { Assert-StandardValidationFreshTimestamp -Value $timestamp.ToString('o') -Context 'fixture receipt' -MaxAgeMinutes 15 -ReferenceTime $timestamp.AddMinutes(20) } | Should Throw 'older than the allowed'
+        }
+
+        It 'UnitT36_preserves_current_time_freshness_when_no_reference_is_supplied' {
+            $timestamp = [DateTimeOffset]::UtcNow.AddMinutes(-60)
+
+            { Assert-StandardValidationFreshTimestamp -Value $timestamp.ToString('o') -Context 'fixture receipt' -MaxAgeMinutes 15 } | Should Throw 'older than the allowed'
+        }
+    }
+
+    Context 'Retained native probe receipt readback' {
+        It 'UnitT38_uses_the_static_event_start_time_for_receipt_freshness' {
+            $runRoot = Join-Path $TestDrive 'retained-probe'
+            $eventTime = [DateTimeOffset]::Parse('2026-11-04T01:02:03.4567890+00:00', [Globalization.CultureInfo]::InvariantCulture)
+            $report = [pscustomobject]@{
+                runId = [guid]::NewGuid().ToString('N')
+                candidate = [pscustomobject]@{ candidateId = 'a' * 64 }
+                artifacts = [pscustomobject]@{ root = $TestDrive }
+                adapter = [pscustomobject]@{ sha256 = 'b' * 64 }
+            }
+            $event = [pscustomobject]@{
+                candidateId = $report.candidate.candidateId
+                stageId = 'skillspector-static'
+                toolId = 'staticAnalyzer'
+                outputPath = Join-Path (Join-Path $runRoot 'events') 'static.json'
+                commandSha256 = 'c' * 64
+                eventId = [guid]::NewGuid().ToString()
+                startedAt = $eventTime.ToString('o')
+            }
+            Mock Test-StandardValidationPathWithin { $true }
+            Mock Get-StandardValidationJsonSnapshot {
+                if ($Context -ceq 'native probe retained adapter') {
+                    return [pscustomobject]@{ sha256 = 'b' * 64; value = [pscustomobject]@{ staticAnalyzer = [pscustomobject]@{ provenance = [pscustomobject]@{}; command = 'fixture'; arguments = @() } } }
+                }
+                return [pscustomobject]@{ value = [pscustomobject]@{} }
+            }
+            Mock Assert-StandardValidationToolReceipt { [pscustomobject]@{ path = 'fixture-receipt'; executableSha256 = 'c' * 64 } }
+            Mock New-StandardValidationNativeProbeContext { [pscustomobject]@{ eventId = $EventId } }
+
+            $result = Get-StandardValidationAdvancedProbeContext -Report $report -Event $event
+
+            $result.eventId | Should Be $event.eventId
+            Assert-MockCalled Assert-StandardValidationToolReceipt -Times 1 -Exactly -Scope It -ParameterFilter {
+                $FreshnessReferenceTime.UtcTicks -eq $eventTime.UtcTicks
+            }
+        }
+
+        It 'UnitT39_rejects_a_static_event_without_its_start_time' {
+            $candidateId = 'a' * 64
+            $report = [pscustomobject]@{ candidate = [pscustomobject]@{ candidateId = $candidateId } }
+            $event = [pscustomobject]@{ candidateId = $candidateId; stageId = 'skillspector-static'; toolId = 'staticAnalyzer' }
+
+            { Get-StandardValidationAdvancedProbeContext -Report $report -Event $event } | Should Throw 'BLOCKED|Native probe event timestamp is missing.'
+        }
+    }
+
     # Scenario: P3 wraps a posix_spawn errno in an invocation exception.
     # Purpose: Preserve the actual native error without interpreting diagnostic text or unrelated P2 errors.
     It 'UnitT35_reads_typed_P3_errno_and_rejects_forged_error_text' {
