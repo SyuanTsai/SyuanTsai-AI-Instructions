@@ -475,6 +475,14 @@ function Get-UserSkillsDesiredState {
     $catalogPath = Join-Path $RuntimeRoot 'catalog/skills-catalog.json'
     $lockPath = Join-Path $RuntimeRoot 'catalog/skills-catalog-lock.json'
     $catalog = Test-SkillsCatalogDocument -CatalogPath $catalogPath
+    if ([int64]$catalog.schemaVersion -eq 3) { throw 'Skills catalog schema version 3 requires a projection-aware installer.' }
+    $lockDocument = Import-SkillsCatalogJson -Path $lockPath -DocumentName 'Skills Catalog lock'
+    $lockVersionProperty = $lockDocument.PSObject.Properties['schemaVersion']
+    if ($null -ne $lockVersionProperty -and
+        ($lockVersionProperty.Value -is [int] -or $lockVersionProperty.Value -is [long]) -and
+        [int64]$lockVersionProperty.Value -eq 3) {
+        throw 'Skills catalog schema version 3 requires a projection-aware installer.'
+    }
     $lock = Test-SkillsCatalogLockDocument -CatalogPath $catalogPath -LockPath $lockPath
     $skillIds = @(Resolve-SkillsSelection -Catalog $catalog -Selection $Configuration.catalog)
     $plan = Resolve-SkillsSourcePlan -Catalog $catalog -Lock $lock -SkillIds $skillIds

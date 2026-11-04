@@ -595,6 +595,15 @@ function Expand-ValidatedSkillsSourceArchives {
         [Parameter(Mandatory = $true)][string] $WorkingRoot
     )
 
+    foreach ($skill in @($Plan.Skills)) {
+        $layoutVersionProperty = $skill.PSObject.Properties['sourceLayoutVersion']
+        if ($null -ne $layoutVersionProperty -and
+            ($layoutVersionProperty.Value -is [int] -or $layoutVersionProperty.Value -is [long]) -and
+            [int64]$layoutVersionProperty.Value -eq 3) {
+            throw 'Skills catalog schema version 3 requires a projection-aware installer.'
+        }
+    }
+
     $workingRootPath = [System.IO.Path]::GetFullPath($WorkingRoot)
     if (Test-Path -LiteralPath $workingRootPath) {
         if (-not (Test-Path -LiteralPath $workingRootPath -PathType Container)) {
@@ -683,6 +692,7 @@ function Expand-ValidatedSkillsSourceArchives {
             throw "Selected Skill '$skillId' source layout version must be an integer."
         }
         $sourceLayoutVersion = if ($null -ne $layoutVersionProperty) { [int64]$layoutVersionProperty.Value } else { 1 }
+        if ($sourceLayoutVersion -eq 3) { throw 'Skills catalog schema version 3 requires a projection-aware installer.' }
         if ($sourceLayoutVersion -notin @(1,2)) {
             throw "Unsupported source layout version '$sourceLayoutVersion' for selected Skill '$skillId'."
         }

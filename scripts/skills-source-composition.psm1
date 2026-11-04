@@ -111,6 +111,15 @@ function New-ComposedBootstrapSource {
         [switch] $InstructionsOnly
     )
 
+    foreach ($skill in @($ResolvedSkills)) {
+        $layoutVersionProperty = $skill.PSObject.Properties['sourceLayoutVersion']
+        if ($null -ne $layoutVersionProperty -and
+            ($layoutVersionProperty.Value -is [int] -or $layoutVersionProperty.Value -is [long]) -and
+            [int64]$layoutVersionProperty.Value -eq 3) {
+            throw 'Skills catalog schema version 3 requires a projection-aware installer.'
+        }
+    }
+
     $instructionRoot = [System.IO.Path]::GetFullPath($InstructionSourceRoot)
     if (-not (Test-Path -LiteralPath $instructionRoot -PathType Container)) {
         throw "Instruction source root does not exist: $instructionRoot"

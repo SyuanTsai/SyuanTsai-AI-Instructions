@@ -50,6 +50,15 @@ function New-MultiSourceFixture {
 }
 
 Describe 'Skills source routing plan' {
+    # Scenario: Catalog or Lock schema v3 reaches the legacy source router.
+    # Purpose: Refuse to infer the historical .agents/skills projection.
+    It 'UnitT05_rejects_v3_with_the_projection_aware_installer_message' {
+        $fixture = New-MultiSourceFixture
+        $fixture.Catalog | Add-Member -NotePropertyName schemaVersion -NotePropertyValue 3
+        $fixture.Lock | Add-Member -NotePropertyName schemaVersion -NotePropertyValue 3
+        Assert-ThrowsMessage { Resolve-SkillsSourcePlan -Catalog $fixture.Catalog -Lock $fixture.Lock -SkillIds @('skill-alpha') } '^Skills catalog schema version 3 requires a projection-aware installer\.$'
+    }
+
     # Scenario: Selected Skills belong to two independent Catalog sources.
     # Purpose: Produce one deterministic plan containing both routed Skills and both required sources.
     It 'UnitT10_routes_selected_skills_to_two_independent_sources' {

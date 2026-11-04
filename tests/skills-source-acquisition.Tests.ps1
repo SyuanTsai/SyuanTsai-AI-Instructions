@@ -346,8 +346,18 @@ Describe 'Skills source archive acquisition' {
         $resolvedSkill.sourceLayoutVersion | Should Be 2
         Test-Path -LiteralPath $resolvedSkill.skillRootPath -PathType Container | Should Be $true
 
-        $plan.Skills[0].sourceLayoutVersion = 3
-        Assert-ThrowsMessage { Expand-ValidatedSkillsSourceArchives -Plan $plan -SourceArchivePaths @{ 'source-a'=$canonical.ArchivePath } -WorkingRoot (Join-Path $TestDrive 'unsupported-layout-staging') } 'Unsupported source layout version'
+    }
+
+    # Scenario: A projection-aware v3 plan reaches the legacy acquisition consumer.
+    # Purpose: Fail closed with the migration message before creating a staging directory.
+    It 'UnitT12_rejects_v3_before_acquisition_mutation' {
+        $workingRoot = Join-Path $TestDrive 'v3-acquisition-staging'
+        $plan = [pscustomobject]@{
+            Sources = @()
+            Skills = @([pscustomobject]@{ id='skill-a'; sourceLayoutVersion=3 })
+        }
+        Assert-ThrowsMessage { Expand-ValidatedSkillsSourceArchives -Plan $plan -SourceArchivePaths @{} -WorkingRoot $workingRoot } '^Skills catalog schema version 3 requires a projection-aware installer\.$'
+        Test-Path -LiteralPath $workingRoot | Should Be $false
     }
 
     # Scenario: A required source archive's bytes do not match its locked archiveSha256.

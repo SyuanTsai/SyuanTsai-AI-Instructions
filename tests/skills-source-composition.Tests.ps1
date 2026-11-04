@@ -19,6 +19,17 @@ function New-TestSkill {
 }
 
 Describe 'Skills source composition' {
+    # Scenario: A resolved v3 Skill reaches the legacy flat-path composition consumer.
+    # Purpose: Fail closed before creating or copying into the composition destination.
+    It 'UnitT00_rejects_v3_before_composition_mutation' {
+        $instructionRoot = Join-Path $TestDrive 'v3-instructions'
+        New-Item -ItemType Directory -Path $instructionRoot | Out-Null
+        $destination = Join-Path $TestDrive 'v3-composition'
+        $skill = [pscustomobject]@{ id='one'; sourceLayoutVersion=3 }
+        Assert-ThrowsMessage { New-ComposedBootstrapSource -InstructionSourceRoot $instructionRoot -ResolvedSkills @($skill) -DestinationRoot $destination } '^Skills catalog schema version 3 requires a projection-aware installer\.$'
+        Test-Path -LiteralPath $destination | Should Be $false
+    }
+
     # Scenario: A consumer requests Instructions-only composition with a licensed, resource-rich Skill selected.
     # Purpose: Preserve verified USER inventory evidence while excluding every shared Skill payload from the archive.
     It 'UnitT01_instruction_only_retains_full_USER_inventory_without_REPO_payload' {
