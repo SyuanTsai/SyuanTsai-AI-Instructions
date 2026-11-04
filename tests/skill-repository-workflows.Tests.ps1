@@ -392,6 +392,8 @@ jobs:
         }
         Assert-True $diagnostic.Contains("@('authorityResult', 'pesterSummary')") 'The diagnostic summary must require both evidence records.'
         Assert-True $diagnostic.Contains('is missing.') 'The diagnostic summary must report missing required evidence.'
+        Assert-True $diagnostic.Contains('Write-Host "::error::$_"') 'The diagnostic summary must emit every failure as a GitHub annotation.'
+        Assert-True (-not $diagnostic.Contains('ForEach-Object { Write-Error $_ }')) 'The diagnostic summary must not stop after the first Write-Error.'
         Assert-False $diagnostic.Contains('IsNullOrWhiteSpace([string]$evidenceProperty.Value.sha256)) { continue }') 'The diagnostic summary must not skip evidence records with missing SHA256 values.'
         Assert-True $diagnostic.Contains("@('install', 'runtime', 'pester', 'parse', 'whitespace', 'authority', 'core', 'syp214', 'offline')") 'The diagnostic summary must require every diagnostic step outcome.'
         Assert-True $diagnostic.Contains('outcome is') 'The diagnostic summary must report unsuccessful or missing required step outcomes.'

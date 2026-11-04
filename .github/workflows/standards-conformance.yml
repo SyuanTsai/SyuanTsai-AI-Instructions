@@ -575,6 +575,6 @@ jobs:
           [IO.File]::AppendAllLines($env:GITHUB_STEP_SUMMARY, $summaryLines, [Text.UTF8Encoding]::new($false))
           if ($env:NEEDS_DIAGNOSTIC_RESULT -cne 'success') { $failures.Add("needs.diagnostic.result is '$env:NEEDS_DIAGNOSTIC_RESULT'.") }
           if ($failures.Count -gt 0) {
-            $failures | ForEach-Object { Write-Error $_ }
+            $failures | ForEach-Object { Write-Host "::error::$_" }
             throw 'One or more diagnostic platform legs failed receipt verification.'
           }
