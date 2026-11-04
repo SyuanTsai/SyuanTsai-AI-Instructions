@@ -219,6 +219,43 @@ Describe 'Platform owned processes P3' {
         $caught.Message | Should Match 'StandardInputBytes'
     }
 
+    # Scenario: Capture bytes are requested before and after confirmed owned cleanup.
+    # Purpose: Expose only the retained, bounded capture lease after all readers stop.
+    It 'InterT07_reads_retained_capture_only_after_cleanup_with_a_byte_bound' {
+        $f = New-P3Fixture; $p = $null
+        try {
+            $expected = [Text.Encoding]::UTF8.GetBytes('capture-original')
+            $p = Start-P3Fixture $f '[Console]::Out.Write("capture-original"); Start-Sleep -Milliseconds 500'
+            $caught = $null
+            try { $p.ReadCapture('stdout', 1024) | Out-Null } catch { $caught = $_.Exception }
+            ($caught -is [InvalidOperationException]) | Should Be $true
+            $caught = $null
+            try { $p.ReadCapture('invalid', 1024) | Out-Null } catch { $caught = $_.Exception }
+            ($caught -is [ArgumentException]) | Should Be $true
+            Assert-P3Exited $p
+            Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $p)
+            [Convert]::ToBase64String($p.ReadCapture('stdout', $expected.Length)) | Should Be ([Convert]::ToBase64String($expected))
+            { $p.ReadCapture('stdout', ($expected.Length - 1)) } | Should Throw 'bounded read limit'
+        } finally { Remove-P3Fixture $f $p }
+    }
+
+    if (-not $IsWindows) {
+        # Scenario: A callback-side actor unlinks stdout and replaces its name with /dev/zero.
+        # Purpose: Read the retained inode rather than reopening the attacker-controlled path.
+        It 'InterT08_reads_the_original_unlinked_capture_inode' {
+            $f = New-P3Fixture; $p = $null
+            try {
+                $expected = [Text.Encoding]::UTF8.GetBytes('retained-inode')
+                $p = Start-P3Fixture $f '[Console]::Out.Write("retained-inode")'
+                Assert-P3Exited $p
+                [IO.File]::Delete((Join-Path $f.Path 'out'))
+                [IO.File]::CreateSymbolicLink((Join-Path $f.Path 'out'), '/dev/zero') | Out-Null
+                Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $p)
+                [Convert]::ToBase64String($p.ReadCapture('stdout', 1024)) | Should Be ([Convert]::ToBase64String($expected))
+            } finally { Remove-P3Fixture $f $p }
+        }
+    }
+
     # Scenario: A child exits with distinct output streams and a nonzero status.
     # Purpose: Preserve argv, explicit environment, byte capture and exit code.
     It 'InterT10_captures_exit_code_and_both_streams' {
@@ -2517,6 +2554,60 @@ Describe 'Platform runtime contract' {
             }, $true)
             $pin | Should Not BeNullOrEmpty
             $pin.Value | Should Be $expected
+        }
+    }
+
+    # Scenario: One child process imports the same runtime twice, then a source-modified copy.
+    # Purpose: Reuse an identical sealed build and reject a different verified source build already loaded in-process.
+    It 'InterT36_rejects_a_different_loaded_runtime_build' {
+        $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('platform-runtime-build-' + [Guid]::NewGuid().ToString('N'))
+        $copyRoot = Join-Path $tempRoot 'copy'
+        $childScript = Join-Path $tempRoot 'verify-runtime-build.ps1'
+        try {
+            [void][IO.Directory]::CreateDirectory($copyRoot)
+            $sourceRoot = Join-Path $script:RepositoryRoot 'scripts'
+            $manifest = Import-PowerShellDataFile -LiteralPath $script:ModuleManifest
+            foreach ($relative in @($manifest.FileList)) {
+                $destination = Join-Path $copyRoot $relative
+                [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destination))
+                [IO.File]::Copy((Join-Path $sourceRoot $relative), $destination, $false)
+            }
+            $changedSource = Join-Path $copyRoot 'platform/PlatformNative.cs'
+            [IO.File]::AppendAllText($changedSource, "`n// runtime fingerprint regression", [Text.UTF8Encoding]::new($false))
+            $utf8 = [Text.UTF8Encoding]::new($false, $true)
+            $changedBytes = [IO.File]::ReadAllBytes($changedSource)
+            $sha = [Security.Cryptography.SHA256]::Create()
+            try {
+                $changedHash = ([BitConverter]::ToString($sha.ComputeHash($utf8.GetBytes($utf8.GetString($changedBytes).Replace("`r`n", "`n"))))).Replace('-', '').ToLowerInvariant()
+            }
+            finally { $sha.Dispose() }
+            $oldHash = [string](@($manifest.PrivateData.PlatformRuntime.Inventory | Where-Object Path -ceq 'platform/PlatformNative.cs')[0].Sha256)
+            $copyManifest = Join-Path $copyRoot 'platform-runtime.psd1'
+            $manifestText = [IO.File]::ReadAllText($copyManifest)
+            if (-not $manifestText.Contains($oldHash)) { throw 'Fixture manifest did not contain the expected source hash.' }
+            [IO.File]::WriteAllText($copyManifest, $manifestText.Replace($oldHash, $changedHash), [Text.UTF8Encoding]::new($false))
+            $childText = @'
+param([string]$OriginalManifest,[string]$OriginalModule,[string]$ChangedModule)
+$ErrorActionPreference = 'Stop'
+Import-Module -Name $OriginalManifest -Force -ErrorAction Stop
+Import-Module -Name $OriginalModule -Force -ErrorAction Stop
+try {
+    Import-Module -Name $ChangedModule -Force -ErrorAction Stop
+    throw 'A different runtime build was accepted.'
+}
+catch {
+    if (-not $_.Exception.Message.Contains('different platform runtime build is already loaded')) { throw }
+}
+'same-source-reimported-and-different-source-rejected'
+'@
+            [IO.File]::WriteAllText($childScript, $childText, [Text.UTF8Encoding]::new($false))
+            $shell = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
+            $output = @(& $shell -NoLogo -NoProfile -NonInteractive -File $childScript $script:ModuleManifest (Join-Path $sourceRoot 'platform-runtime.psm1') (Join-Path $copyRoot 'platform-runtime.psm1'))
+            $LASTEXITCODE | Should Be 0
+            $output[-1] | Should Be 'same-source-reimported-and-different-source-rejected'
+        }
+        finally {
+            if ([IO.Directory]::Exists($tempRoot)) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
         }
     }
 

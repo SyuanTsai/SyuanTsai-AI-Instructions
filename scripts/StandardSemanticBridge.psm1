@@ -1201,7 +1201,7 @@ function Assert-StandardSemanticBridgePlatformRuntimeFile {
 function Initialize-StandardSemanticBridgePlatformRuntime {
     if ($null -ne (Get-Variable StandardSemanticBridgePlatformRuntimeBinding -Scope Script -ErrorAction SilentlyContinue)) { return }
 
-    $pin = 'c29511e7edaa12cc4e9b5b7206802faeaae5d6cd9ea2db114225a4d84f58e7b7'
+    $pin = '552b8c9cc66f15053d3128c5f38715fdd492f5cf7ace811c7bd235b20f0b3351'
     $manifestPath = Assert-StandardSemanticBridgePlatformRuntimeFile `
         -Path (Join-Path $PSScriptRoot 'platform-runtime.psd1') -Context 'Platform runtime manifest'
     if ((Get-StandardSemanticBridgePlatformRuntimeCanonicalHash -Path $manifestPath) -cne $pin) {
@@ -1291,8 +1291,14 @@ function Invoke-StandardSemanticBridgePlatformCallback {
         if ($process.TerminationReason -notin @($null, '', 'cancelled')) {
             throw [InvalidOperationException]::new("$Context isolated capture failed: $($process.TerminationReason)")
         }
-        $stdout = [IO.File]::ReadAllText((Join-Path $captureRoot 'stdout'), [Text.Encoding]::UTF8)
-        $stderr = [IO.File]::ReadAllText((Join-Path $captureRoot 'stderr'), [Text.Encoding]::UTF8)
+        try {
+            $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+            $stdout = $strictUtf8.GetString($process.ReadCapture('stdout', 50331648))
+            $stderr = $strictUtf8.GetString($process.ReadCapture('stderr', 49152))
+        }
+        catch {
+            throw [InvalidOperationException]::new("$Context failed to read its isolated capture.", $_.Exception)
+        }
         return @(ConvertFrom-StandardSemanticBridgeCallbackEnvelope -Stdout $stdout -Stderr $stderr -ExitCode $process.ExitCode -Context $Context)
     }
     catch {
