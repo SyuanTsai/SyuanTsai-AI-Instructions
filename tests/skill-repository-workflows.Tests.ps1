@@ -390,6 +390,11 @@ jobs:
         foreach ($stepId in @('install', 'runtime', 'pester', 'parse', 'whitespace', 'authority', 'core', 'syp214', 'offline')) {
             Assert-Match $diagnostic ([regex]::Escape("steps.$stepId.outcome")) "The receipt must capture the '$stepId' outcome."
         }
+        Assert-True $diagnostic.Contains("@('authorityResult', 'pesterSummary')") 'The diagnostic summary must require both evidence records.'
+        Assert-True $diagnostic.Contains('is missing.') 'The diagnostic summary must report missing required evidence.'
+        Assert-False $diagnostic.Contains('IsNullOrWhiteSpace([string]$evidenceProperty.Value.sha256)) { continue }') 'The diagnostic summary must not skip evidence records with missing SHA256 values.'
+        Assert-True $diagnostic.Contains("@('install', 'runtime', 'pester', 'parse', 'whitespace', 'authority', 'core', 'syp214', 'offline')") 'The diagnostic summary must require every diagnostic step outcome.'
+        Assert-True $diagnostic.Contains('outcome is') 'The diagnostic summary must report unsuccessful or missing required step outcomes.'
         Assert-Match $diagnostic 'actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333\s+# v8\.0\.2' 'The diagnostic summary must use the reviewed immutable download-artifact action.'
     }
     Context 'SYP325 central validation CI ownership' {

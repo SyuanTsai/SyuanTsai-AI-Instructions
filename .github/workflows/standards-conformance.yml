@@ -427,6 +427,13 @@ jobs:
           $authorityPath = Join-Path $env:RUNNER_TEMP 'standards-conformance/${{ matrix.platform }}-authority-result.json'
           $pesterPath = Join-Path $env:RUNNER_TEMP 'standards-conformance-${{ matrix.platform }}-pester-summary.json'
           $allSucceeded = @($steps.Values | Where-Object { $_ -cne 'success' }).Count -eq 0
+          $evidence = [ordered]@{
+            authorityResult = (& $evidenceFor $authorityPath)
+            pesterSummary = (& $evidenceFor $pesterPath)
+          }
+          $requiredEvidencePresent = @($evidence.Values | Where-Object {
+            $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.sha256)
+          }).Count -eq 2
           $receipt = [ordered]@{
             schemaVersion = 1
             platform = '${{ matrix.platform }}'
@@ -444,11 +451,8 @@ jobs:
               executable = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
             }
             steps = $steps
-            evidence = [ordered]@{
-              authorityResult = (& $evidenceFor $authorityPath)
-              pesterSummary = (& $evidenceFor $pesterPath)
-            }
-            legStatus = $(if ($allSucceeded) { 'passed' } else { 'failed' })
+            evidence = $evidence
+            legStatus = $(if ($allSucceeded -and $requiredEvidencePresent) { 'passed' } else { 'failed' })
           }
           $receiptPath = Join-Path $env:RUNNER_TEMP 'standards-conformance-receipt-${{ matrix.platform }}.json'
           [IO.File]::WriteAllText($receiptPath, ($receipt | ConvertTo-Json -Depth 8) + "`n", [Text.UTF8Encoding]::new($false))
@@ -500,6 +504,8 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $diagnosticRoot = Join-Path $env:RUNNER_TEMP 'diagnostic'
           $platforms = @('windows', 'linux', 'macos')
+          $requiredEvidence = @('authorityResult', 'pesterSummary')
+          $requiredSteps = @('install', 'runtime', 'pester', 'parse', 'whitespace', 'authority', 'core', 'syp214', 'offline')
           $failures = New-Object 'System.Collections.Generic.List[string]'
           $summaryLines = New-Object 'System.Collections.Generic.List[string]'
           $summaryLines.Add('| Platform | Step | Outcome |')
@@ -524,9 +530,22 @@ jobs:
                 Write-Host $line
                 $summaryLines.Add($line)
               }
-              foreach ($evidenceProperty in $receipt.evidence.PSObject.Properties) {
-                if ($null -eq $evidenceProperty.Value -or [string]::IsNullOrWhiteSpace([string]$evidenceProperty.Value.sha256)) { continue }
-                $declaredPath = [string]$evidenceProperty.Value.path
+              foreach ($stepName in $requiredSteps) {
+                $stepProperty = @($receipt.steps.PSObject.Properties | Where-Object { $_.Name -ceq $stepName })
+                $stepOutcome = if ($stepProperty.Count -eq 1) { [string]$stepProperty[0].Value } else { 'missing' }
+                if ($stepOutcome -cne 'success') {
+                  $failures.Add("$platform step '$stepName' outcome is '$stepOutcome'.")
+                }
+              }
+              foreach ($evidenceName in $requiredEvidence) {
+                $evidenceProperty = @($receipt.evidence.PSObject.Properties | Where-Object { $_.Name -ceq $evidenceName })
+                if ($evidenceProperty.Count -ne 1 -or $null -eq $evidenceProperty[0].Value -or [string]::IsNullOrWhiteSpace([string]$evidenceProperty[0].Value.sha256)) {
+                  $failures.Add("$platform evidence '$evidenceName' is missing.")
+                  $summaryLines.Add("| $platform | evidence:$evidenceName | missing |")
+                  continue
+                }
+                $evidenceValue = $evidenceProperty[0].Value
+                $declaredPath = [string]$evidenceValue.path
                 $downloadedPath = if ([IO.Path]::IsPathRooted($declaredPath)) {
                   Join-Path $artifactDirectory ([IO.Path]::GetFileName($declaredPath))
                 } else {
@@ -537,12 +556,12 @@ jobs:
                   if ($matches.Count -eq 1) { $downloadedPath = $matches[0].FullName }
                 }
                 if (-not (Test-Path -LiteralPath $downloadedPath -PathType Leaf)) {
-                  $failures.Add("$platform evidence '$($evidenceProperty.Name)' is missing.")
+                  $failures.Add("$platform evidence '$evidenceName' is missing.")
                   continue
                 }
                 $actualHash = (Get-FileHash -LiteralPath $downloadedPath -Algorithm SHA256).Hash.ToLowerInvariant()
-                if ($actualHash -cne ([string]$evidenceProperty.Value.sha256).ToLowerInvariant()) {
-                  $failures.Add("$platform evidence '$($evidenceProperty.Name)' SHA256 does not match.")
+                if ($actualHash -cne ([string]$evidenceValue.sha256).ToLowerInvariant()) {
+                  $failures.Add("$platform evidence '$evidenceName' SHA256 does not match.")
                 }
               }
               if ([string]$receipt.legStatus -cne 'passed') { $failures.Add("$platform legStatus is not passed.") }
