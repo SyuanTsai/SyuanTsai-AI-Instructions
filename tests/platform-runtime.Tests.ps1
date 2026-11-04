@@ -2475,6 +2475,51 @@ Describe 'Platform runtime contract' {
         }
     }
 
+    # Scenario: Every reviewed entry point carries its own platform-runtime manifest trust anchor.
+    # Purpose: Keep all independent pins synchronized with the canonical manifest before executable code is imported.
+    It 'UnitT35_keeps_platform_runtime_entry_pins_synchronized' {
+        $utf8 = [Text.UTF8Encoding]::new($false, $true)
+        $manifestBytes = [IO.File]::ReadAllBytes($script:ModuleManifest)
+        if ($manifestBytes.Length -ge 3 -and $manifestBytes[0] -eq 239 -and $manifestBytes[1] -eq 187 -and $manifestBytes[2] -eq 191) {
+            throw 'The platform runtime manifest must not have a BOM.'
+        }
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            $expected = ([BitConverter]::ToString($sha.ComputeHash($utf8.GetBytes($utf8.GetString($manifestBytes).Replace("`r`n", "`n"))))).Replace('-', '').ToLowerInvariant()
+        }
+        finally { $sha.Dispose() }
+
+        $entryPoints = @(
+            @{ Path = 'scripts/Invoke-PesterShardProcess.ps1'; Function = 'Import-PesterShardRuntime'; Variable = 'manifestSha256' },
+            @{ Path = 'scripts/Invoke-StandardValidation.ps1'; Function = 'Initialize-StandardValidationPlatformRuntime'; Variable = 'pin' },
+            @{ Path = 'scripts/StandardSemanticBridge.psm1'; Function = 'Initialize-StandardSemanticBridgePlatformRuntime'; Variable = 'pin' }
+        )
+        foreach ($entryPoint in $entryPoints) {
+            $tokens = $null
+            $errors = $null
+            $path = Join-Path $script:RepositoryRoot $entryPoint.Path
+            $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+            @($errors).Count | Should Be 0
+            $scope = $ast
+            if ($null -ne $entryPoint.Function) {
+                $scope = $ast.Find({ param($node)
+                    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $entryPoint.Function
+                }, $true)
+            }
+            $assignment = $scope.Find({ param($node)
+                $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+                $node.Left.VariablePath.UserPath -ceq $entryPoint.Variable
+            }, $true)
+            $assignment | Should Not BeNullOrEmpty
+            $pin = $assignment.Right.Find({ param($node)
+                $node -is [Management.Automation.Language.StringConstantExpressionAst]
+            }, $true)
+            $pin | Should Not BeNullOrEmpty
+            $pin.Value | Should Be $expected
+        }
+    }
+
     # Scenario: The current host is Windows and can load the Windows-only adapter and identity primitives.
     # Purpose: Register these tests only where Windows reparse, lease, and module semantics apply; Unix hosts must not report them as skips.
     if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
