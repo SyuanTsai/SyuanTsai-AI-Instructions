@@ -1172,6 +1172,74 @@ public static class UnixObservationFixture
         }
     }
 
+    # Scenario: A Darwin cleanup census outlasts its deadline while escaped writers retain both pipes.
+    # Purpose: Capture must cancel independently of process observation and still report incomplete cleanup.
+    It 'InterT205_stops_capture_during_a_slow_macos_cleanup_census' {
+        $fixture = New-UnixObservationFixture
+        Set-DarwinObservationFixture $fixture
+        $fixture.State.Peek = [Tuple]::Create(-1,0,10)
+        $fixture.State.Table.Remove(200); $fixture.State.ExitEvent = 0; $fixture.State.WaitError = 10; $fixture.State.GroupErrno = 3
+        $type = [SyuanTsai.AIInstructions.PlatformRuntime.OwnedProcessLease]
+        $flags = [Reflection.BindingFlags]'Instance,NonPublic'
+        $lease = [Activator]::CreateInstance($type,$flags,$null,[object[]]@([DateTimeOffset]::UtcNow.AddSeconds(30),[long]4096),$null)
+        $type.GetField('control',$flags).SetValue($lease,$fixture.Control)
+        $captureRoot = if ($IsMacOS) { '/private/tmp' } else { [IO.Path]::GetTempPath().TrimEnd('\','/') }
+        $name = 'p3-slow-census-' + [guid]::NewGuid().ToString('N')
+        $directory = Open-PlatformDirectory -Root $captureRoot -RelativePath $name -CreatePrivate
+        $writers = @(); $readHandles = @(); $fileHandles = @()
+        $observation = @{ Entered=$false; ReadersStopped=$false; ResourcesClosed=$false; StopDeadline=$null }
+        try {
+            foreach ($stream in @('out','err')) {
+                $pipe = [IO.Pipes.AnonymousPipeServerStream]::new([IO.Pipes.PipeDirection]::In,[IO.HandleInheritability]::Inheritable)
+                $writers += $pipe.ClientSafePipeHandle; $readHandles += $pipe.SafePipeHandle
+                $type.GetField($(if ($stream -eq 'out') { 'stdout' } else { 'stderr' }),$flags).SetValue($lease,$pipe)
+                $fileLease = Open-PlatformFile -ParentLease $directory -Leaf $stream -Access ReadWrite -CreateMode CreateNew
+                $type.GetField(($stream+'Lease'),$flags).SetValue($lease,$fileLease)
+                $file = $type.GetMethod('CaptureFile',[Reflection.BindingFlags]'Static,NonPublic').Invoke($null,[object[]]@($fileLease))
+                $type.GetField(($stream+'File'),$flags).SetValue($lease,$file)
+                $fileHandles += $file.SafeFileHandle
+                $reader = $type.GetMethod('Reader',$flags).Invoke($lease,[object[]]@($pipe,$file))
+                $type.GetField(($stream+'Reader'),$flags).SetValue($lease,$reader)
+            }
+            $lease.CaptureReadersStopped | Should Be $false
+            # This census never signals the pipe writers. It waits for capture's
+            # independent stop budget, simulating a slow native process inventory.
+            Set-UnixTestField $fixture.Control listDarwinPids ([Func[uint32,uint32,int[]]]{
+                param($kind,$value)
+                if (-not $observation.Entered) {
+                    $observation.Entered = $true
+                    $until = [DateTimeOffset]::UtcNow.AddSeconds(2)
+                    while (-not $lease.CaptureReadersStopped -and [DateTimeOffset]::UtcNow -lt $until) { [Threading.Thread]::Sleep(10) }
+                    $observation.ReadersStopped = $lease.CaptureReadersStopped
+                    $observation.ResourcesClosed = $lease.CaptureResourcesClosed
+                    # Keep the census in flight past Stop's deadline even when
+                    # readers cancel promptly; the later Join has no budget left.
+                    while ([DateTimeOffset]::UtcNow -lt $observation.StopDeadline.AddMilliseconds(100)) { [Threading.Thread]::Sleep(10) }
+                }
+                return ,[int[]]@()
+            }.GetNewClosure())
+            $observation.StopDeadline = [DateTimeOffset]::UtcNow.AddMilliseconds(250)
+            $receipt = $lease.Stop([TimeSpan]::Zero,$observation.StopDeadline,$null)
+            $observation.Entered | Should Be $true
+            $observation.ReadersStopped | Should Be $true
+            $observation.ResourcesClosed | Should Be $true
+            $receipt.CaptureReadersStopped | Should Be $true
+            $receipt.CaptureResourcesClosed | Should Be $true
+            $receipt.CleanedUp | Should Be $false
+            $receipt.Uncertainty | Should Match 'capture-pipe-still-open'
+            $receipt.Limitations | Should Contain 'macos-process-group-cannot-detect-setsid-escape'
+            foreach ($handle in $readHandles + $fileHandles) { $handle.IsClosed | Should Be $true }
+            foreach ($handle in $writers) { $handle.IsClosed | Should Be $false }
+        } finally {
+            foreach ($handle in $writers) { $handle.Dispose() }
+            $type.GetMethod('CancelCaptureReaders',$flags).Invoke($lease,[object[]]@([DateTimeOffset]::UtcNow.AddSeconds(2))) | Out-Null
+            $type.GetMethod('CloseCapture',$flags).Invoke($lease,@())
+            $lease.Dispose(); $directory.Dispose()
+            foreach ($stream in @('out','err')) { $path = Join-Path (Join-Path $captureRoot $name) $stream; if ([IO.File]::Exists($path)) { [IO.File]::Delete($path) } }
+            [IO.Directory]::Delete((Join-Path $captureRoot $name))
+        }
+    }
+
     # Scenario: The root was reaped and the last observed descendant can exit before signalling.
     # Purpose: A census identity is not a lifetime reservation for a numeric process group.
     It 'UnitT210_uses_pidfds_when_the_root_group_anchor_has_been_reaped' {
