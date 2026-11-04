@@ -613,6 +613,47 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
                 ($caught.Message.Contains('owned process boundary cleanup failed') -or $caught.Message.Contains('isolated capture')) | Should Be $true
             }
         }
+        # Scenario: A callback replaces its capture-root directory entry before it exits.
+        # Purpose: Cleanup must preserve the moved capture root and report identity loss.
+        It 'InterT16_reports_cleanup_failure_when_callback_replaces_its_capture_root' {
+            $captureParent = [IO.Path]::GetTempPath()
+            $existingCaptureRoots = @(
+                Get-ChildItem -LiteralPath $captureParent -Directory -Filter 'standard-semantic-bridge-capture-*' |
+                    ForEach-Object { $_.FullName }
+            )
+            $caught = $null; $result = $null
+            try {
+                $result = & $script:P55Bridge {
+                    Invoke-StandardSemanticBridgeCallbackWithTimeout -Callback {
+                        $root = (Get-Location).ProviderPath
+                        try {
+                            [IO.Directory]::Move($root, "$root-moved")
+                            [void][IO.Directory]::CreateDirectory($root)
+                        }
+                        catch [IO.IOException], [UnauthorizedAccessException] { }
+                        'moved-root-value'
+                    } -TimeoutMilliseconds 15000
+                }
+                if (-not $IsWindows) { throw 'Replacing the callback capture root unexpectedly succeeded.' }
+            }
+            catch { $caught = $_.Exception }
+            finally {
+                foreach ($root in @(Get-ChildItem -LiteralPath $captureParent -Directory -Filter 'standard-semantic-bridge-capture-*')) {
+                    if ($existingCaptureRoots -contains $root.FullName) { continue }
+                    if (($root.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+                    [IO.Directory]::Delete($root.FullName, $true)
+                }
+            }
+            if ($IsWindows) {
+                $caught | Should BeNullOrEmpty
+                @($result)[0] | Should Be 'moved-root-value'
+            }
+            else {
+                $caught | Should Not BeNullOrEmpty
+                (Test-StandardSemanticBridgeCallbackCleanupFailureException $caught) | Should Be $true
+                $caught.Message | Should Match 'capture root identity changed'
+            }
+        }
         # Scenario: A callback is blocked in native sleep past its deadline.
         # Purpose: Preserve TimeoutException and complete P3 cleanup, without a namespace capability.
         It 'InterT20_bounds_noncooperative_callback_and_releases_lease' {
