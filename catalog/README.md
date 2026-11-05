@@ -12,6 +12,8 @@ Runtime bundle v2 的 inventory digest 依執行環境的語系排序，只適�
 
 ### Install transaction journal v1
 
+Commit cleanup writes the journal phase as `committed` first, then deletes tombstones and stage objects, and finally deletes the journal. Therefore a committed `remove-file` whose target is absent remains an applied terminal state after its tombstone has been cleaned up.
+
 Schema 的空白判斷與 reader 的 `[string]::IsNullOrWhiteSpace` 對齊，明確涵蓋 U+0009–U+000D、U+0020、U+0085、U+00A0、U+1680、U+2000–U+200A、U+2028、U+2029、U+202F、U+205F、U+3000。
 
 `ai-instructions-install-journal-v1.schema.json` 定義 installer、updater 或 launcher recovery 一次 transaction 的 durable intent 與步驟狀態。`generation` 綁定前一個與候選 bundle，`operations` 以連續的 `sequence` 記錄 publication `method`、original/applied state（各自包含當時的 file identity）、stage/backup leaf 與 permissions；journal 不序列化開啟中的 handle。`swap-directory` 的 `sha256` 是 inventory digest，`length` 是檔案數。存在的 original 一定要有 identity 與 non-null permissions snapshot，讓 rollback 能證明內容及原存取政策皆可還原；`create-file` 沒有 original，permissions 可為 null。存在的 applied 只有在 operation 仍為 `pending` 時可暫時沒有 identity，進入 `staged` 後即必須記錄。identity kind 必須符合 journal platform。Windows journal 的 lock primitive 固定為 platform-runtime 回報的 `windows-fileshare`，非 Windows 固定為 `flock`；non-null permissions 在 Windows 固定為 `windows-sddl`，在 Linux／macOS 固定為 `unix-mode`，確保 recovery adapter 可還原。

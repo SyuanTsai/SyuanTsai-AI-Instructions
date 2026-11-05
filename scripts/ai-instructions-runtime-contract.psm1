@@ -1309,7 +1309,8 @@ function Assert-AiInstructionsInstallJournalLeaf {
         [string]$Value -match '[/\\\x00-\x1f\x7f]') {
         throw "$Context must be a safe single filename."
     }
-    if ($PortableName -and ([string]$Value -match '[:*?"<>|]' -or [string]$Value -match '[. ]$')) {
+    if ($PortableName -and ([string]$Value -match '[:*?"<>|]' -or
+            [string]$Value -match '\.$' -or [char]::IsWhiteSpace(([string]$Value)[([string]$Value).Length - 1]))) {
         throw "$Context must be a portable single filename."
     }
     if ($PortableName) {
@@ -1425,10 +1426,19 @@ function Assert-AiInstructionsInstallJournalV1 {
         if ($operation.state -isnot [string] -or [string]$operation.state -cnotin @('pending','staged','applied','rolled-back')) { throw "$context.state is invalid." }
         if ([string]$operation.kind -ceq 'remove-file' -and [string]$operation.method -cne 'tombstone-rename') { throw "$context.method must be tombstone-rename for remove-file." }
         if ([string]$operation.kind -cne 'remove-file' -and [string]$operation.method -cne 'stage-rename') { throw "$context.method must be stage-rename for $($operation.kind)." }
+        $targetPathEndsWithInvalidCharacter = $false
+        if ($operation.targetRelativePath -is [string] -and -not [string]::IsNullOrEmpty([string]$operation.targetRelativePath)) {
+            foreach ($targetSegment in ([string]$operation.targetRelativePath).Split('/')) {
+                if ($targetSegment.Length -gt 0 -and ($targetSegment -match '\.$' -or [char]::IsWhiteSpace($targetSegment[$targetSegment.Length - 1]))) {
+                    $targetPathEndsWithInvalidCharacter = $true
+                    break
+                }
+            }
+        }
         if ($operation.targetRelativePath -isnot [string] -or [string]::IsNullOrEmpty([string]$operation.targetRelativePath) -or
             ([string]$operation.targetRelativePath).Length -gt 512 -or [string]$operation.targetRelativePath -match '[\\\x00-\x1f\x7f:*?"<>|]' -or
             [string]$operation.targetRelativePath -match '^/' -or [string]$operation.targetRelativePath -match '/$' -or [string]$operation.targetRelativePath -match '^[A-Za-z]:' -or
-            [string]$operation.targetRelativePath -match '(^|/)(?:\.|\.\.)(?:/|$)' -or [string]$operation.targetRelativePath -match '(^|/)[^/]*[. ](?:/|$)' -or
+            [string]$operation.targetRelativePath -match '(^|/)(?:\.|\.\.)(?:/|$)' -or $targetPathEndsWithInvalidCharacter -or
             [string]$operation.targetRelativePath -match '//') {
             throw "$context.targetRelativePath is not a safe transaction-relative path."
         }
@@ -1725,7 +1735,12 @@ function Get-AiInstructionsInstallRecoveryDecision {
         $matchesOriginal[$sequence] = Test-AiInstructionsInstallJournalStateMatch -Observation $bySequence[$sequence] -State $operation.original -AlternativeIdentity $operation.backupIdentity
         $backupMatchesOriginal[$sequence] = Test-AiInstructionsInstallJournalBackupMatch -Backup $bySequence[$sequence].backup -Original $operation.original -BackupIdentity $operation.backupIdentity
         if ([string]$operation.kind -ceq 'remove-file' -and -not [bool]$bySequence[$sequence].exists) {
-            $matchesApplied[$sequence] = $backupMatchesOriginal[$sequence]
+            if ([string]$Journal.phase -ceq 'committed') {
+                $matchesApplied[$sequence] = $true
+            }
+            else {
+                $matchesApplied[$sequence] = $backupMatchesOriginal[$sequence]
+            }
         }
         $permissionsMatchOriginal[$sequence] = $true
         if ([string]$Journal.phase -cne 'committed' -and $matchesOriginal[$sequence] -and [bool]$operation.original.exists -and $null -ne $operation.permissions) {

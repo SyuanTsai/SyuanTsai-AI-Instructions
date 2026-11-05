@@ -1912,6 +1912,28 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $decision.operations[0].action | Should Be 'keep'
     }
 
+    # Scenario: A committed remove-file has already cleaned up its tombstone, while an applied transaction has not committed yet.
+    # Purpose: Treat committed target absence as terminal completion, but keep requiring tombstone proof during recovery.
+    It 'UnitT161_distinguishes_committed_remove_cleanup_from_uncommitted_recovery' {
+        $committedJournal = Get-TestPendingRemoveInstallJournalV1
+        $committedJournal.phase = 'committed'
+        $committedJournal.operations[0].state = 'applied'
+        $committedObservation = New-TestInstallObservation -Operation $committedJournal.operations[0] -State $committedJournal.operations[0].applied -Backup $null
+
+        $committedDecision = Get-AiInstructionsInstallRecoveryDecision -Journal $committedJournal -Observations @{ 1 = $committedObservation }
+
+        $committedDecision.action | Should Be 'none'
+
+        $appliedJournal = Get-TestPendingRemoveInstallJournalV1
+        $appliedJournal.phase = 'applied'
+        $appliedJournal.operations[0].state = 'applied'
+        $appliedObservation = New-TestInstallObservation -Operation $appliedJournal.operations[0] -State $appliedJournal.operations[0].applied -Backup $null
+
+        $appliedDecision = Get-AiInstructionsInstallRecoveryDecision -Journal $appliedJournal -Observations @{ 1 = $appliedObservation }
+
+        $appliedDecision.action | Should Be 'refuse'
+    }
+
     # Scenario: A pending remove-file target is absent and its same-identity tombstone matches the original bytes.
     # Purpose: Use the tombstone as durable proof that the remove was applied and can be rolled back safely.
     It 'UnitT155_restores_pending_remove_when_the_tombstone_is_available' {
@@ -2002,14 +2024,16 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         (Test-Json -Json $stringJson -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
     }
 
-    # Scenario: A journal uses only Unicode whitespace for a lock leaf or one target path segment.
+    # Scenario: A journal uses Unicode whitespace at the end of a lock leaf or target path, plus whitespace-only values.
     # Purpose: Keep the reader and schema aligned with PlatformPaths.Leaf whitespace rejection.
     It 'UnitT160_rejects_unicode_whitespace_only_leaf_and_target_segment' {
         if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'UnitT160 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.' }
         $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
         $cases = @(
             @{ Change={ param($j) $j.lock.leaf=[string][char]0x00A0 }; Pattern='lock.leaf' },
-            @{ Change={ param($j) $j.operations[0].targetRelativePath="runtime/$([char]0x3000)" }; Pattern='targetRelativePath' }
+            @{ Change={ param($j) $j.operations[0].targetRelativePath="runtime/$([char]0x3000)" }; Pattern='targetRelativePath' },
+            @{ Change={ param($j) $j.lock.leaf="lock$([char]0x00A0)" }; Pattern='lock.leaf' },
+            @{ Change={ param($j) $j.operations[0].targetRelativePath="runtime$([char]0x3000)" }; Pattern='targetRelativePath' }
         )
         foreach ($case in $cases) {
             $journal = Get-TestInstallJournalV1
