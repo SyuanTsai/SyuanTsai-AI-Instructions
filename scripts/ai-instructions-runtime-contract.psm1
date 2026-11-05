@@ -2,6 +2,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $script:CanonicalRepository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
+$script:SkillsCatalogContractModule = Import-Module (Join-Path $PSScriptRoot 'skills-catalog-contract.psm1') -PassThru -Scope Local -ErrorAction Stop
 
 function Test-AiInstructionsObjectHasProperty {
     param([AllowNull()][object] $Object,[Parameter(Mandatory = $true)][string] $Name)
@@ -630,6 +631,75 @@ function Get-AiInstructionsPlatformRuntimeClosurePaths {
     return @($paths)
 }
 
+function Assert-AiInstructionsPlatformRuntimeManifestInventory {
+    param(
+        [Parameter(Mandatory = $true)][object] $Manifest,
+        [Parameter(Mandatory = $true)][string] $RuntimeRoot,
+        [Parameter(Mandatory = $true)][string] $BundleApiVersion
+    )
+
+    $privateData = Get-AiInstructionsDataValue -Object $Manifest -Name 'PrivateData'
+    $platformRuntime = Get-AiInstructionsDataValue -Object $privateData -Name 'PlatformRuntime'
+    $manifestApiVersion = Get-AiInstructionsDataValue -Object $platformRuntime -Name 'ApiVersion'
+    $hashMode = Get-AiInstructionsDataValue -Object $platformRuntime -Name 'HashMode'
+    $inventory = Get-AiInstructionsDataValue -Object $platformRuntime -Name 'Inventory'
+    if ($manifestApiVersion -isnot [string] -or [string]$manifestApiVersion -cne $BundleApiVersion) {
+        throw 'Platform runtime manifest ApiVersion does not match runtime bundle platformRuntime.apiVersion.'
+    }
+    if ($hashMode -isnot [string] -or [string]$hashMode -cne 'sha256-utf8-lf' -or $null -eq $inventory) {
+        throw 'Platform runtime manifest has no bound sha256-utf8-lf inventory.'
+    }
+
+    $declaredPaths = New-Object System.Collections.Generic.List[string]
+    foreach ($entry in @($inventory)) {
+        $relativePath = ([string](Get-AiInstructionsDataValue -Object $entry -Name 'Path')).Replace('\','/')
+        $expectedHash = Get-AiInstructionsDataValue -Object $entry -Name 'Sha256'
+        if ([string]::IsNullOrWhiteSpace($relativePath) -or
+            [IO.Path]::IsPathRooted($relativePath) -or
+            @($relativePath.Split('/') | Where-Object { $_ -ceq '..' }).Count -gt 0 -or
+            $expectedHash -isnot [string] -or [string]$expectedHash -cnotmatch '^[a-f0-9]{64}$') {
+            throw 'Platform runtime manifest inventory contains an invalid entry.'
+        }
+        $declaredPaths.Add($relativePath)
+    }
+
+    $expectedFileList = @('platform-runtime.psd1') + @($declaredPaths.ToArray())
+    $manifestFileList = @(
+        @(Get-AiInstructionsDataValue -Object $Manifest -Name 'FileList') | ForEach-Object {
+            ([string]$_).Replace('\','/')
+        }
+    )
+    $expectedFileListText = (@($expectedFileList | Sort-Object) -join "`n")
+    $manifestFileListText = (@($manifestFileList | Sort-Object) -join "`n")
+    if ($expectedFileListText -cne $manifestFileListText -or
+        @($expectedFileList | Select-Object -Unique).Count -ne $expectedFileList.Count) {
+        throw 'Platform runtime manifest FileList differs from its bound inventory.'
+    }
+
+    $platformRoot = Join-Path (Get-AiInstructionsFullDirectoryPath -Path $RuntimeRoot) 'platform'
+    if (-not (Test-Path -LiteralPath $platformRoot -PathType Container)) {
+        throw 'Platform runtime implementation directory is missing.'
+    }
+    $actualPlatformPaths = @(
+        Get-ChildItem -LiteralPath $platformRoot -File -Recurse | ForEach-Object {
+            ('platform/' + $_.FullName.Substring($platformRoot.Length).TrimStart('\','/')).Replace('\','/')
+        }
+    )
+    $declaredPlatformPaths = @($declaredPaths | Where-Object { $_.StartsWith('platform/',[StringComparison]::Ordinal) })
+    if ((@($actualPlatformPaths | Sort-Object) -join "`n") -cne (@($declaredPlatformPaths | Sort-Object) -join "`n")) {
+        throw 'Platform runtime implementation directory contains missing or extra files.'
+    }
+
+    foreach ($entry in @($inventory)) {
+        $relativePath = ([string](Get-AiInstructionsDataValue -Object $entry -Name 'Path')).Replace('\','/')
+        $fullPath = Resolve-AiInstructionsRuntimeFilePath -RuntimeRoot $RuntimeRoot -RelativePath $relativePath -Context 'Platform runtime manifest inventory'
+        $actualHash = Get-AiInstructionsCanonicalTextSha256 -Path $fullPath
+        if ($actualHash -cne [string](Get-AiInstructionsDataValue -Object $entry -Name 'Sha256')) {
+            throw "Platform runtime manifest inventory hash mismatch: $relativePath"
+        }
+    }
+}
+
 function Get-AiInstructionsProjectionContractSha256 {
     param([Parameter(Mandatory = $true)][object] $Projections)
     if ($Projections -isnot [System.Array]) { throw 'Installed Skills Catalog v3 projections must be an array.' }
@@ -900,13 +970,19 @@ function Assert-AiInstructionsRuntimeBundleV3 {
     $inventoryByPath = @{}
     foreach ($entry in @($Bundle.inventory)) { $inventoryByPath[[string]$entry.path] = $entry }
     $manifestPaths = @($inventoryByPath.Keys | Where-Object { [string]$_ -ceq 'platform-runtime.psd1' -or [string]$_ -clike '*/platform-runtime.psd1' })
-    if ($manifestPaths.Count -ne 1) { throw "Runtime bundle inventory must include exactly one 'platform-runtime.psd1'." }
-    $manifestRelativePath = [string]$manifestPaths[0]
+    if ($manifestPaths.Count -ne 1 -or [string]$manifestPaths[0] -cne 'platform-runtime.psd1') {
+        throw "Runtime bundle inventory must include exactly one 'platform-runtime.psd1' at the runtime root."
+    }
+    $manifestRelativePath = 'platform-runtime.psd1'
     $manifestFullPath = Resolve-AiInstructionsRuntimeFilePath -RuntimeRoot $RuntimeRoot -RelativePath $manifestRelativePath -Context 'Platform runtime manifest'
     $actualManifestSha256 = Get-AiInstructionsCanonicalTextSha256 -Path $manifestFullPath
     if ($actualManifestSha256 -cne [string]$Bundle.platformRuntime.manifestSha256) { throw 'Runtime bundle platformRuntime.manifestSha256 does not match the installed platform runtime manifest.' }
     try { $manifest = Import-PowerShellDataFile -LiteralPath $manifestFullPath }
     catch { throw 'Installed platform runtime manifest is not a valid PowerShell data file.' }
+    Assert-AiInstructionsPlatformRuntimeManifestInventory `
+        -Manifest $manifest `
+        -RuntimeRoot $RuntimeRoot `
+        -BundleApiVersion ([string]$Bundle.platformRuntime.apiVersion)
     foreach ($closurePath in @(Get-AiInstructionsPlatformRuntimeClosurePaths -Manifest $manifest -ManifestPath $manifestRelativePath)) {
         if (-not $inventoryByPath.ContainsKey($closurePath)) { throw "Runtime bundle inventory is missing platform runtime closure file '$closurePath'." }
         $closureFullPath = Resolve-AiInstructionsRuntimeFilePath -RuntimeRoot $RuntimeRoot -RelativePath $closurePath -Context 'Platform runtime closure'
@@ -917,12 +993,14 @@ function Assert-AiInstructionsRuntimeBundleV3 {
     }
     $catalogPaths = @($inventoryByPath.Keys | Where-Object { [string]$_ -ceq 'catalog/skills-catalog.json' -or [string]$_ -clike '*/catalog/skills-catalog.json' })
     if ($catalogPaths.Count -ne 1) { throw "Runtime bundle inventory must include exactly one 'catalog/skills-catalog.json'." }
-    $catalog = Read-AiInstructionsRuntimeJsonFile -RuntimeRoot $RuntimeRoot -RelativePath ([string]$catalogPaths[0]) -Context 'Installed Skills Catalog'
+    $catalogRelativePath = [string]$catalogPaths[0]
+    $catalog = Read-AiInstructionsRuntimeJsonFile -RuntimeRoot $RuntimeRoot -RelativePath $catalogRelativePath -Context 'Installed Skills Catalog'
     if (-not (Test-AiInstructionsObjectHasProperty -Object $catalog -Name 'schemaVersion') -or
         ($catalog.schemaVersion -isnot [int] -and $catalog.schemaVersion -isnot [long]) -or [int64]$catalog.schemaVersion -ne 3) {
         throw 'Installed Skills Catalog must use schemaVersion 3.'
     }
-    if (-not (Test-AiInstructionsObjectHasProperty -Object $catalog -Name 'projections')) { throw 'Installed Skills Catalog v3 is missing projections.' }
+    $catalogPath = Resolve-AiInstructionsRuntimeFilePath -RuntimeRoot $RuntimeRoot -RelativePath $catalogRelativePath -Context 'Installed Skills Catalog'
+    $catalog = & $script:SkillsCatalogContractModule.ExportedCommands['Test-SkillsCatalogDocument'] -CatalogPath $catalogPath
     $actualProjectionContractSha256 = Get-AiInstructionsProjectionContractSha256 -Projections $catalog.projections
     if ($actualProjectionContractSha256 -cne [string]$Bundle.projectionContractSha256) {
         throw 'Runtime bundle projectionContractSha256 does not match the installed Skills Catalog projections.'
