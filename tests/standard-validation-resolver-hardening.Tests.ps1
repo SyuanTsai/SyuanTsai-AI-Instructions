@@ -386,6 +386,27 @@ Describe 'Standard validation resolver hardening' {
         }
     }
 
+    # Scenario: The platform runtime verifier extracts Pester validators from the resolver AST.
+    # Purpose: Credential cleanup must not move any verifier-required function out of script scope.
+    It 'UnitT24_keeps_verifier_required_functions_defined_once_at_script_scope' {
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($script:ResolverPath, [ref]$tokens, [ref]$errors)
+        Assert-True (@($errors).Count -eq 0) 'The resolver must parse without errors.'
+        $required = @(
+            'Get-FileSha256', 'Get-ResolverAsciiCaseFold', 'Assert-ResolverSafeRelativePath',
+            'Get-ResolverSymlinkTarget', 'Get-ResolverSymlinkIdentitySha256', 'Get-ResolverSafeUnixSymlinkEntry',
+            'Get-ResolverOrderedClosureEntries', 'Get-ResolverParallelFileHashes', 'Get-DirectoryClosureIdentity',
+            'Get-ApprovedPesterPayloadSha256', 'Assert-ApprovedPesterManifest'
+        )
+        foreach ($name in $required) {
+            $definitions = @($ast.EndBlock.Statements | Where-Object { $_ -is [Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -ceq $name })
+            Assert-True ($definitions.Count -eq 1) "The resolver must define '$name' exactly once at script scope."
+        }
+        $topLevelTry = @($ast.EndBlock.Statements | Where-Object { $_ -is [Management.Automation.Language.TryStatementAst] })
+        Assert-True ($topLevelTry.Count -eq 0) 'The resolver must not wrap its script body in a top-level try statement.'
+    }
+
     # Scenario: Dot-sourced resolver setup rejects an invalid run identifier after capturing a token.
     # Purpose: Every early exit clears the in-scope credential as well as every process token alias.
     It 'UnitT23_clears_the_captured_GitHub_token_when_dot_sourced_setup_fails_early' {

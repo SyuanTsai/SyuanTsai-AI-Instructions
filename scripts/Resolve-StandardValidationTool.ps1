@@ -45,7 +45,15 @@ $script:ResolverGitHubApiToken = Initialize-ResolverGitHubApiCredential
 $ErrorActionPreference = 'Stop'
 $script:ResolverProcessReceipts = [Collections.Generic.List[object]]::new()
 
-try {
+# Clear the captured credential on every terminating failure, including early
+# validation failures of a dot-sourced invocation. A top-level trap keeps every
+# function definition at script scope, where the platform runtime verifier
+# extracts the Pester validators verbatim.
+trap {
+    $script:ResolverGitHubApiToken = $null
+    break
+}
+
 $script:ResolverRunId = if ([string]::IsNullOrWhiteSpace($RunId)) {
     [guid]::NewGuid().ToString('N')
 }
@@ -4116,8 +4124,5 @@ if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
     Write-ResolverJsonOutput -Path $OutputPath -Json $json
 }
 
-    $json
-}
-finally {
-    $script:ResolverGitHubApiToken = $null
-}
+$script:ResolverGitHubApiToken = $null
+$json
