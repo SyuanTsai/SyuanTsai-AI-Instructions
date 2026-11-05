@@ -1022,6 +1022,8 @@ function Assert-AiInstructionsRuntimeBundleV2 {
     return $Bundle
 }
 
+# requiredCapabilities is a bundle-declared requirement; this validator checks syntax and known names only.
+# Projection-aware installers and launchers must verify it on the target host before enabling the runtime.
 function Assert-AiInstructionsRuntimeBundleV3 {
     [CmdletBinding()]
     param(
