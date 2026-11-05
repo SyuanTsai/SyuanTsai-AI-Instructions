@@ -2172,6 +2172,85 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $decision.action | Should Be 'none'
     }
 
+    # Scenario: Rollback restored every target but left a write-file backup with different bytes.
+    # Purpose: Require valid residual backup evidence before accepting the rolled-back terminal state.
+    It 'UnitT168_refuses_rolled_back_state_with_a_mismatched_residual_backup' {
+        $journal = Get-TestInstallJournalV1
+        $journal.phase = 'rolled-back'
+        foreach ($operation in $journal.operations) { $operation.state = 'rolled-back' }
+        $journal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20)
+        $observations = @{}
+        foreach ($operation in $journal.operations) {
+            $observations[[int64]$operation.sequence] = New-TestInstallObservation -Operation $operation -State $operation.original
+        }
+        $observations[[int64]1].backup.sha256 = '9' * 64
+
+        $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
+
+        $decision.action | Should Be 'refuse'
+        ($decision.reasons -join ' ') | Should Match 'sequence 1.*backup'
+        @($decision.reasons).Count | Should BeGreaterThan 0
+    }
+
+    # Scenario: Rollback restored every target and all transaction backups were already cleaned up.
+    # Purpose: Keep the fully completed rolled-back terminal state an empty-reason no-op.
+    It 'UnitT169_accepts_rolled_back_state_with_null_backups' {
+        $journal = Get-TestInstallJournalV1
+        $journal.phase = 'rolled-back'
+        foreach ($operation in $journal.operations) { $operation.state = 'rolled-back' }
+        $journal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20)
+        $observations = @{}
+        foreach ($operation in $journal.operations) {
+            $observations[[int64]$operation.sequence] = New-TestInstallObservation -Operation $operation -State $operation.original -Backup $null
+        }
+
+        $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
+
+        $decision.action | Should Be 'none'
+        @($decision.reasons).Count | Should Be 0
+    }
+
+    # Scenario: A create-file journal records a backup leaf even though no original object exists.
+    # Purpose: Keep the strict reader and JSON Schema aligned on the absence of create backups.
+    It 'UnitT170_rejects_create_file_with_a_backup_leaf' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'UnitT170 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.' }
+        $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
+        $journal = Get-TestInstallJournalV1
+        $journal.operations[1].backupLeaf = 'created.backup'
+        $json = $journal | ConvertTo-Json -Depth 20
+
+        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'sequence 2.backupLeaf.*create-file'
+        (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
+    }
+
+    # Scenario: Recovery observes a backup object for create-file despite the journal having no original.
+    # Purpose: Refuse the inconsistent backup evidence instead of accepting or removing the created target.
+    It 'UnitT171_refuses_create_file_with_a_nonnull_observed_backup' {
+        $journal = Get-TestInstallJournalV1
+        $journal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20)
+        $observations = @{}
+        foreach ($operation in $journal.operations) {
+            $observations[[int64]$operation.sequence] = New-TestInstallObservation -Operation $operation -State $operation.original
+        }
+        $backup = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].original
+        $observations[[int64]2].backup = [pscustomobject]@{
+            exists = $backup.exists
+            sha256 = $backup.sha256
+            length = $backup.length
+            identity = [pscustomobject]@{
+                kind = $backup.identity.kind
+                device = $backup.identity.device
+                fileId = $backup.identity.fileId
+            }
+        }
+
+        $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
+
+        $decision.action | Should Be 'refuse'
+        ($decision.reasons -join ' ') | Should Match 'sequence 2.*backup'
+        @($decision.reasons).Count | Should BeGreaterThan 0
+    }
+
     # Scenario: A journal uses Unicode whitespace at the end of a lock leaf or target path, plus whitespace-only values.
     # Purpose: Keep the reader and schema aligned with PlatformPaths.Leaf whitespace rejection.
     It 'UnitT160_rejects_unicode_whitespace_only_leaf_and_target_segment' {

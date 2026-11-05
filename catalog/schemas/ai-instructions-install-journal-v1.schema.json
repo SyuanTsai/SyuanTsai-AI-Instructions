@@ -299,6 +299,7 @@
           "if": { "properties": { "kind": { "const": "create-file" } } },
           "then": {
             "properties": {
+              "backupLeaf": { "type": "null" },
               "original": { "properties": { "exists": { "const": false } } },
               "applied": { "properties": { "exists": { "const": true } } }
             }

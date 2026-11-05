@@ -1476,6 +1476,9 @@ function Assert-AiInstructionsInstallJournalV1 {
             throw "$context.method tombstone-rename does not allow state staged."
         }
         Assert-AiInstructionsInstallJournalLeaf -Value $operation.backupLeaf -Context "$context.backupLeaf" -AllowNull -PortableName
+        if ([string]$operation.kind -ceq 'create-file' -and $null -ne $operation.backupLeaf) {
+            throw "$context.backupLeaf must be null for create-file."
+        }
         foreach ($leaf in @($operation.stageLeaf,$operation.backupLeaf)) {
             if ($null -ne $leaf) {
                 $leafKey = Get-AiInstructionsInstallJournalPortableNameKey -Value ([string]$leaf)
@@ -1686,6 +1689,16 @@ function Test-AiInstructionsInstallJournalBackupMatch {
         (Test-AiInstructionsInstallJournalIdentityMatch -Observed $Backup.identity -Expected $BackupIdentity)
 }
 
+function Test-AiInstructionsInstallJournalBackupEvidenceValid {
+    param(
+        [Parameter(Mandatory = $true)][object] $Operation,
+        [Parameter(Mandatory = $true)][object] $Observation
+    )
+    if ([string]$Operation.kind -ceq 'create-file') { return $null -eq $Observation.backup }
+    if ($null -eq $Observation.backup) { return $true }
+    return Test-AiInstructionsInstallJournalBackupMatch -Backup $Observation.backup -Original $Operation.original -BackupIdentity $Operation.backupIdentity
+}
+
 function Get-AiInstructionsInstallRecoveryDecision {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][object] $Journal,[Parameter(Mandatory = $true)][object] $Observations)
@@ -1748,7 +1761,7 @@ function Get-AiInstructionsInstallRecoveryDecision {
         $matchesApplied[$sequence] = Test-AiInstructionsInstallJournalStateMatch -Observation $bySequence[$sequence] -State $operation.applied
         $matchesOriginal[$sequence] = Test-AiInstructionsInstallJournalStateMatch -Observation $bySequence[$sequence] -State $operation.original -AlternativeIdentity $operation.backupIdentity
         $backupMatchesOriginal[$sequence] = Test-AiInstructionsInstallJournalBackupMatch -Backup $bySequence[$sequence].backup -Original $operation.original -BackupIdentity $operation.backupIdentity
-        $backupEvidenceValid[$sequence] = -not [bool]$operation.original.exists -or $null -eq $bySequence[$sequence].backup -or $backupMatchesOriginal[$sequence]
+        $backupEvidenceValid[$sequence] = Test-AiInstructionsInstallJournalBackupEvidenceValid -Operation $operation -Observation $bySequence[$sequence]
         if ([string]$operation.kind -ceq 'remove-file' -and -not [bool]$bySequence[$sequence].exists) {
             if ([string]$Journal.phase -ceq 'committed') {
                 $matchesApplied[$sequence] = ($null -eq $bySequence[$sequence].backup -or $backupMatchesOriginal[$sequence])
@@ -1767,7 +1780,7 @@ function Get-AiInstructionsInstallRecoveryDecision {
     $allBackupEvidenceValid = @($Journal.operations | Where-Object { -not $backupEvidenceValid[[int64]$_.sequence] }).Count -eq 0
     if ([string]$Journal.phase -in @('committed','rolled-back')) {
         $allOriginalPermissions = @($Journal.operations | Where-Object { -not $permissionsMatchOriginal[[int64]$_.sequence] }).Count -eq 0
-        $matchesTerminal = if ([string]$Journal.phase -ceq 'committed') { $allApplied -and $allBackupEvidenceValid } else { $allOriginal -and $allOriginalPermissions }
+        $matchesTerminal = if ([string]$Journal.phase -ceq 'committed') { $allApplied -and $allBackupEvidenceValid } else { $allOriginal -and $allOriginalPermissions -and $allBackupEvidenceValid }
         $terminalAction = if ($matchesTerminal) { 'none' } else { 'refuse' }
         $reasons = New-Object System.Collections.Generic.List[string]
         if (-not $matchesTerminal) { $reasons.Add("phase $($Journal.phase) observations do not match the expected terminal state") }
@@ -1810,7 +1823,12 @@ function Get-AiInstructionsInstallRecoveryDecision {
     foreach ($operation in @($Journal.operations)) {
         $sequence = [int64]$operation.sequence
         $action = 'none'
-        if ($matchesOriginal[$sequence]) {
+        if ([string]$operation.kind -ceq 'create-file' -and -not $backupEvidenceValid[$sequence]) {
+            $mustRefuse = $true
+            $action = 'keep'
+            $reasons.Add("sequence $sequence backup must be null for create-file")
+        }
+        elseif ($matchesOriginal[$sequence]) {
             $action = if ($permissionsMatchOriginal[$sequence]) { 'none' } else { 'restore-permissions' }
         }
         elseif ($matchesApplied[$sequence]) {
