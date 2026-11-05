@@ -107,6 +107,44 @@ function Get-TestManagedManifestV4 {
 
     }
 
+    # Scenario: Git worktree porcelain uses SHA-256 object IDs in a SHA-256 repository.
+    # Purpose: Accept both SHA-1 and SHA-256 HEAD records while retaining strict parsing.
+    It 'UnitT_worktree_parser_accepts_sha256_oid_porcelain_records' {
+        $mainPath = 'C:/repo/main'
+        $linkedPath = 'C:/repo/linked'
+        $sha256Oid = 'a' * 64
+        $porcelain = "worktree $mainPath`0HEAD $sha256Oid`0branch refs/heads/main`0`0worktree $linkedPath`0HEAD $sha256Oid`0branch refs/heads/linked`0`0"
+
+        $parsed = @(ConvertFrom-GitWorktreePorcelainZ -Output $porcelain -Strict)
+
+        $parsed.Count | Should Be 2
+        $parsed[0].Path | Should Be $mainPath
+        $parsed[0].Prunable | Should Be $false
+        $parsed[1].Path | Should Be $linkedPath
+        $parsed[1].Prunable | Should Be $false
+    }
+
+    # Scenario: The installed Git supports SHA-256 repositories and linked worktrees.
+    # Purpose: Exercise strict parsing against real `git worktree list --porcelain -z` output.
+    It 'UnitT_worktree_parser_strictly_accepts_a_sha256_repository_when_supported' {
+        $repositoryPath = Join-Path $TestDrive 'sha256-worktree-repository'
+        New-Item -ItemType Directory -Path $repositoryPath -Force | Out-Null
+        $initOutput = @(& git -C $repositoryPath init --object-format=sha256 2>&1)
+        $initExitCode = $LASTEXITCODE
+        if ($initExitCode -ne 0) { return }
+
+        git -C $repositoryPath config user.email test@example.test
+        git -C $repositoryPath config user.name Test
+        [System.IO.File]::WriteAllText((Join-Path $repositoryPath 'README.md'), 'sha256')
+        git -C $repositoryPath add README.md
+        git -C $repositoryPath commit --quiet -m initial
+        $linkedPath = Join-Path $TestDrive 'sha256-linked-worktree'
+        git -C $repositoryPath worktree add --quiet -b linked $linkedPath HEAD
+
+        $porcelain = @(& git -C $repositoryPath worktree list --porcelain -z)
+        { ConvertFrom-GitWorktreePorcelainZ -Output $porcelain -Strict | Out-Null } | Should Not Throw
+    }
+
     # Scenario: Every checked-in JSON Schema document is loaded by the repository's oldest supported PowerShell runtime.
     # Purpose: Detect malformed schema artifacts before downstream tools depend on them.
     It 'UnitT05_parses_every_checked_in_json_schema_document' {

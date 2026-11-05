@@ -834,11 +834,11 @@ function ConvertFrom-GitWorktreePorcelainZ {
         $prunable = $false
         for ($index = 1; $index -lt $fields.Count; $index++) {
             $field = [string]$fields[$index]
-            if ($field -cnotmatch '^(?:HEAD [0-9a-f]{40}|branch .+|detached|bare|locked(?: .*)?|prunable(?: .*)?)$') {
+            if ($field -cnotmatch '^(?:HEAD (?:[0-9a-f]{40}|[0-9a-f]{64})|branch .+|detached|bare|locked(?: .*)?|prunable(?: .*)?)$') {
                 if ($Strict) { throw 'Invalid git worktree porcelain output.' }
                 continue
             }
-            if ($field -cmatch '^(?:HEAD [0-9a-f]{40}|bare)$') { $recordHasState = $true }
+            if ($field -cmatch '^(?:HEAD (?:[0-9a-f]{40}|[0-9a-f]{64})|bare)$') { $recordHasState = $true }
             if ($field -cmatch '^prunable(?: .*)?$') { $prunable = $true }
         }
         if ($Strict -and -not $recordHasState) { throw 'Invalid git worktree porcelain output.' }
