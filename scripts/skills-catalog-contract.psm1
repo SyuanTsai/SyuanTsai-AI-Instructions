@@ -963,13 +963,24 @@ function Assert-UserSkillsManagedManifestBinding {
         [Parameter(Mandatory = $true)][object] $Manifest,
         [Parameter(Mandatory = $true)][object] $Catalog,
         [Parameter(Mandatory = $true)][object] $Lock,
-        [Parameter(Mandatory = $true)][string] $LockSha256
+        [Parameter(Mandatory = $true)][string] $LockSha256,
+        [Parameter(Mandatory = $true)][string] $ExpectedCatalogRepository,
+        [Parameter(Mandatory = $true)][string] $ExpectedCatalogCommit
     )
 
     Assert-UserSkillsManagedManifestV3 -Manifest $Manifest
     Assert-SkillsCatalogV3 -Catalog $Catalog
     Assert-SkillsCatalogLockV3 -Lock $Lock -Catalog $Catalog
     Assert-Sha256 -Value $LockSha256 -Context 'user Skills managed manifest binding lockSha256'
+    Assert-HttpsRepositoryUrl -Value $ExpectedCatalogRepository -Context 'user Skills managed manifest binding expected catalog repository'
+    Assert-FullCommitSha -Value $ExpectedCatalogCommit -Context 'user Skills managed manifest binding expected catalog commit'
+
+    if ([string]$Manifest.catalogRepository -cne $ExpectedCatalogRepository) {
+        throw 'user Skills managed manifest catalog repository does not match the trusted catalog repository.'
+    }
+    if ([string]$Manifest.catalogCommit -cne $ExpectedCatalogCommit) {
+        throw 'user Skills managed manifest catalog commit does not match the trusted catalog commit.'
+    }
 
     $expectedProjectionContractSha256 = Get-SkillsCatalogProjectionContractSha256 -Projections $Catalog.projections
     if ([string]$Manifest.projectionContractSha256 -cne $expectedProjectionContractSha256 -or [string]$Manifest.projectionContractSha256 -cne [string]$Lock.projectionContractSha256) {

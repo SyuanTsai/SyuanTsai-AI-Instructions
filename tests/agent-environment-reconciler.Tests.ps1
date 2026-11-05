@@ -260,6 +260,46 @@ Describe 'user-scoped Agent Skills reconciliation' {
         Test-Path -LiteralPath (Join-Path $userHome '.agents\skills\beta\SKILL.md') | Should Be $false
     }
 
+    # Scenario: A projection-aware installer replaces the legacy manifest while recovery waits for the global lock.
+    # Purpose: Ensure recovery rereads manifest ownership under the lock before it interprets a journal or restores files.
+    It 'InterT57a_rejects_a_v3_manifest_replaced_while_acquiring_the_recovery_lock_without_mutation' {
+        $userHome = Join-Path $TestDrive 'recovery-v3-lock-race'
+        $desired = New-TestDesiredState -Root (Join-Path $TestDrive 'recovery-v3-lock-race-staging') -SkillIds @('alpha')
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome | Should Be 'applied'
+        $agentsRoot = Join-Path $userHome '.agents'
+        $target = Join-Path $agentsRoot 'skills\alpha\SKILL.md'
+        $backupRoot = Join-Path $agentsRoot 'backups\recovery-v3-lock-race'
+        $backup = Join-Path $backupRoot '.agents\skills\alpha\SKILL.md'
+        $journalPath = Join-Path $agentsRoot 'update-agent-environment.recovery.json'
+        $manifestPath = Join-Path $agentsRoot 'catalog-skills.manifest.json'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $backup) | Out-Null
+        [System.IO.File]::WriteAllText($target,'applied bytes')
+        [System.IO.File]::WriteAllText($backup,'original bytes')
+        $originalSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $backup).Hash.ToLowerInvariant()
+        $appliedSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash.ToLowerInvariant()
+        $journal = New-TestRecoveryJournal -UserHome $userHome -BackupRoot $backupRoot -States @([pscustomobject][ordered]@{
+            relativePath='.agents/skills/alpha/SKILL.md'; existed=$true; backupPath=$backup
+            originalSha256=$originalSha256; backupSha256=$originalSha256; appliedSha256=$appliedSha256
+        })
+        $journal | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $journalPath -Encoding UTF8
+        $journalBytes = [System.IO.File]::ReadAllBytes($journalPath)
+        $v3Bytes = [System.IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v3.example.json'))
+        $errorMessage = $null
+
+        try {
+            Invoke-UserSkillsRecovery -UserHome $userHome -BeforeLockAcquisitionAction {
+                [System.IO.File]::WriteAllBytes($manifestPath,$v3Bytes)
+            } | Out-Null
+        }
+        catch { $errorMessage = $_.Exception.Message }
+
+        if ([string]::IsNullOrWhiteSpace($errorMessage)) { throw 'Expected the lock-protected recovery manifest reread to reject schema version 3.' }
+        $errorMessage.Contains('USER managed manifest schema version 3 requires a projection-aware installer.') | Should Be $true
+        [System.IO.File]::ReadAllText($target) | Should Be 'applied bytes'
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($journalPath)) | Should Be ([Convert]::ToBase64String($journalBytes))
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($manifestPath)) | Should Be ([Convert]::ToBase64String($v3Bytes))
+    }
+
     It 'preserves an unmanaged personal Skill outside the Catalog' {
         $personal = Join-Path $userHome '.agents\skills\personal\SKILL.md'
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $personal) | Out-Null

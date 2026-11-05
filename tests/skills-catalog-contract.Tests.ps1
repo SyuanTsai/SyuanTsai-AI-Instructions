@@ -83,7 +83,7 @@ function Assert-UserManifestBindingFailure {
     )
 
     $message = $null
-    try { Assert-UserSkillsManagedManifestBinding -Manifest $Manifest -Catalog $Catalog -Lock $Lock -LockSha256 $LockSha256 }
+    try { Assert-UserSkillsManagedManifestBinding -Manifest $Manifest -Catalog $Catalog -Lock $Lock -LockSha256 $LockSha256 -ExpectedCatalogRepository ([string]$Manifest.catalogRepository) -ExpectedCatalogCommit ([string]$Manifest.catalogCommit) }
     catch { $message = $_.Exception.Message }
     if ([string]::IsNullOrWhiteSpace($message)) { throw 'Expected the user Skills managed manifest binding to fail.' }
     $message.Contains($ExpectedMessage) | Should Be $true
@@ -127,6 +127,7 @@ function Assert-UserManifestBindingFailure {
             @{ Example = 'skills-catalog.example.json'; Schema = 'skills-catalog.schema.json'; SchemaVersion = 1 }
             @{ Example = 'user-skills-managed-manifest-v1.example.json'; Schema = 'user-skills-managed-manifest-v1.schema.json'; SchemaVersion = 1 }
             @{ Example = 'user-skills-managed-manifest-v2.example.json'; Schema = 'user-skills-managed-manifest-v2.schema.json'; SchemaVersion = 2 }
+            @{ Example = 'user-skills-managed-manifest-v3.example.json'; Schema = 'user-skills-managed-manifest-v3.schema.json'; SchemaVersion = 3 }
         )
 
         $exampleRoot = Join-Path $script:RepositoryRoot 'catalog\examples'
@@ -374,18 +375,30 @@ function Assert-UserManifestBindingFailure {
         $lock = Import-SkillsCatalogJson -Path $script:LockV3Example -DocumentName 'Skills Catalog lock v3'
         $lockSha256 = Get-TestRawSha256 -Path $script:LockV3Example
 
-        { Assert-UserSkillsManagedManifestBinding -Manifest $manifest -Catalog $catalog -Lock $lock -LockSha256 $lockSha256 } | Should Not Throw
+        { Assert-UserSkillsManagedManifestBinding -Manifest $manifest -Catalog $catalog -Lock $lock -LockSha256 $lockSha256 -ExpectedCatalogRepository ([string]$manifest.catalogRepository) -ExpectedCatalogCommit ([string]$manifest.catalogCommit) } | Should Not Throw
+
+        $repositoryMismatchMessage = $null
+        try { Assert-UserSkillsManagedManifestBinding -Manifest $manifest -Catalog $catalog -Lock $lock -LockSha256 $lockSha256 -ExpectedCatalogRepository 'https://github.com/example/other-catalog.git' -ExpectedCatalogCommit ([string]$manifest.catalogCommit) }
+        catch { $repositoryMismatchMessage = $_.Exception.Message }
+        if ([string]::IsNullOrWhiteSpace($repositoryMismatchMessage)) { throw 'Expected the catalog repository binding mismatch to fail.' }
+        $repositoryMismatchMessage.Contains('catalog repository does not match') | Should Be $true
+
+        $commitMismatchMessage = $null
+        try { Assert-UserSkillsManagedManifestBinding -Manifest $manifest -Catalog $catalog -Lock $lock -LockSha256 $lockSha256 -ExpectedCatalogRepository ([string]$manifest.catalogRepository) -ExpectedCatalogCommit ('f' * 40) }
+        catch { $commitMismatchMessage = $_.Exception.Message }
+        if ([string]::IsNullOrWhiteSpace($commitMismatchMessage)) { throw 'Expected the catalog commit binding mismatch to fail.' }
+        $commitMismatchMessage.Contains('catalog commit does not match') | Should Be $true
 
         $projectionDigestMismatch = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
         $projectionDigestMismatch.projectionContractSha256 = '0' * 64
-        { Assert-UserSkillsManagedManifestBinding -Manifest $projectionDigestMismatch -Catalog $catalog -Lock $lock -LockSha256 $lockSha256 } | Should Throw
+        { Assert-UserSkillsManagedManifestBinding -Manifest $projectionDigestMismatch -Catalog $catalog -Lock $lock -LockSha256 $lockSha256 -ExpectedCatalogRepository ([string]$manifest.catalogRepository) -ExpectedCatalogCommit ([string]$manifest.catalogCommit) } | Should Throw
 
         $lockDigestMismatch = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
-        { Assert-UserSkillsManagedManifestBinding -Manifest $lockDigestMismatch -Catalog $catalog -Lock $lock -LockSha256 ('0' * 64) } | Should Throw
+        { Assert-UserSkillsManagedManifestBinding -Manifest $lockDigestMismatch -Catalog $catalog -Lock $lock -LockSha256 ('0' * 64) -ExpectedCatalogRepository ([string]$manifest.catalogRepository) -ExpectedCatalogCommit ([string]$manifest.catalogCommit) } | Should Throw
 
         $unknownProjection = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
         $unknownProjection.projections[1] = 'user-copilot'
-        { Assert-UserSkillsManagedManifestBinding -Manifest $unknownProjection -Catalog $catalog -Lock $lock -LockSha256 $lockSha256 } | Should Throw
+        { Assert-UserSkillsManagedManifestBinding -Manifest $unknownProjection -Catalog $catalog -Lock $lock -LockSha256 $lockSha256 -ExpectedCatalogRepository ([string]$manifest.catalogRepository) -ExpectedCatalogCommit ([string]$manifest.catalogCommit) } | Should Throw
 
         $unknownSkill = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
         foreach ($file in @($unknownSkill.files | Where-Object { $_.skillId -ceq 'manage-task-handoff' })) {
@@ -393,11 +406,11 @@ function Assert-UserManifestBindingFailure {
             $file.sourcePath = 'skills/unknown-skill/SKILL.md'
             $file.targetPath = ([string]$file.targetPath).Replace('manage-task-handoff','unknown-skill')
         }
-        { Assert-UserSkillsManagedManifestBinding -Manifest $unknownSkill -Catalog $catalog -Lock $lock -LockSha256 $lockSha256 } | Should Throw
+        { Assert-UserSkillsManagedManifestBinding -Manifest $unknownSkill -Catalog $catalog -Lock $lock -LockSha256 $lockSha256 -ExpectedCatalogRepository ([string]$manifest.catalogRepository) -ExpectedCatalogCommit ([string]$manifest.catalogCommit) } | Should Throw
 
         $sourceIdMismatch = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
         foreach ($file in @($sourceIdMismatch.files | Where-Object { $_.skillId -ceq 'work-with-jira' })) { $file.sourceId = 'other-source' }
-        { Assert-UserSkillsManagedManifestBinding -Manifest $sourceIdMismatch -Catalog $catalog -Lock $lock -LockSha256 $lockSha256 } | Should Throw
+        { Assert-UserSkillsManagedManifestBinding -Manifest $sourceIdMismatch -Catalog $catalog -Lock $lock -LockSha256 $lockSha256 -ExpectedCatalogRepository ([string]$manifest.catalogRepository) -ExpectedCatalogCommit ([string]$manifest.catalogCommit) } | Should Throw
     }
 
     # Scenario: The binding digest uses exactly the same inventory bytes as source acquisition.
@@ -433,7 +446,7 @@ function Assert-UserManifestBindingFailure {
         }
         @($lock.skills | Where-Object { $_.id -ceq 'work-with-jira' })[0].contentSha256 = $acquisitionHash
 
-        { Assert-UserSkillsManagedManifestBinding -Manifest $manifest -Catalog $catalog -Lock $lock -LockSha256 (Get-TestRawSha256 -Path $script:LockV3Example) } | Should Not Throw
+        { Assert-UserSkillsManagedManifestBinding -Manifest $manifest -Catalog $catalog -Lock $lock -LockSha256 (Get-TestRawSha256 -Path $script:LockV3Example) -ExpectedCatalogRepository ([string]$manifest.catalogRepository) -ExpectedCatalogCommit ([string]$manifest.catalogCommit) } | Should Not Throw
     }
 
     # Scenario: Projection parity alone is insufficient if matching payload hashes are forged.

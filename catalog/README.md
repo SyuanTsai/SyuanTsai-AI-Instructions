@@ -105,6 +105,8 @@ Production acquisition adapter 只為組合前所需的 `SKILL.md` identity、de
 
 User Skills manifest v2 的一般 Skill payload 必須使用 `skills/<skillId>/...` source 對應到 `.agents/skills/<skillId>/...` target，且兩端去除各自 Skill root 後的相對路徑必須 ordinal 完全相同；v3 reader 另接受 `user-agents`、`user-claude`、`user-copilot` 固定 USER projection，要求每個 Skill 在所有宣告 projection 具有相同的相對路徑與內容 hash，並以 `projectionContractSha256` 綁定 projection 契約。`Assert-UserSkillsManagedManifest` 只驗證 manifest 文件本身；任何 writer 或 installer 使用 v3 manifest 前，MUST 先以 Catalog、Lock 與 Lock 原始檔 SHA-256 呼叫 `Assert-UserSkillsManagedManifestBinding`。v2/v3 同一個 Skill 的 `<projection-root>/<skillId>/.ai-instructions-licenses/source/**` delivery entries 可保留實際來源 Repository 的 `LICENSE`、`NOTICE`、`THIRD_PARTY_LICENSES.md`、`LICENSES/**` 等 license provenance，`delivery.json` 則必須使用 `.ai-instructions-generated/delivery.json` synthetic source path。這些例外只適用於明確的 license delivery target，validator 仍會拒絕把根目錄 license source 套用到一般 Skill payload。現行 reconciler writer 仍只產生 v1/v2；既有 v3 manifest 必須交由 projection-aware installer，P8 前不得由 legacy reconciler mutation 或 recovery。
 
+呼叫 `Assert-UserSkillsManagedManifestBinding` 時，呼叫端必須同時提供來自 runtime receipt 或已驗證 catalog archive 的可信 `ExpectedCatalogRepository` 與 `ExpectedCatalogCommit`；函式會將它們與 manifest 的 catalog 身分進行 ordinal 比對。
+
 ## 個人設定 schema v4、runtime v2、安裝與升級
 
 Installer 將 schema v1／v2／v3／v4 idempotent 正規化為 v4：
