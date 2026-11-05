@@ -958,6 +958,8 @@ function Assert-UserSkillsManagedManifest {
 }
 
 function Assert-UserSkillsManagedManifestBinding {
+    # Binds ordinary Skill payload hashes, per-file provenance, and catalog/lock identity to the Lock.
+    # License delivery entries are out of scope and require source-archive regeneration and comparison by a projection-aware installer.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][object] $Manifest,
