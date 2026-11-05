@@ -27,7 +27,7 @@
       "kind": "write-file",
       "method": "stage-rename",
       "targetRelativePath": "runtime/runtime-bundle.json",
-      "stageLeaf": "runtime-bundle.stage",
+      "stageLeaf": "runtime-bundle.json",
       "backupLeaf": "runtime-bundle.backup",
       "original": {
         "exists": true,

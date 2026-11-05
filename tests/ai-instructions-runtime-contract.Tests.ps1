@@ -1934,6 +1934,80 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $appliedDecision.action | Should Be 'refuse'
     }
 
+    # Scenario: Transaction objects use a private namespace, while targets try both spellings of its reserved first segment.
+    # Purpose: Permit a stage leaf equal to a target basename only because structural isolation prevents aliasing.
+    It 'UnitT162_reserves_the_transaction_directory_and_accepts_an_isolated_matching_stage_leaf' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'UnitT162 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.' }
+        $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
+        foreach ($reservedTarget in @('.ai-instructions-txn/x','.AI-Instructions-TXN/x')) {
+            $journal = Get-TestInstallJournalV1
+            $journal.operations[0].targetRelativePath = $reservedTarget
+            $json = $journal | ConvertTo-Json -Depth 20
+
+            (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'targetRelativePath.*reserved .ai-instructions-txn'
+            (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
+        }
+
+        $journal = Get-TestInstallJournalV1
+        $journal.operations[0].targetRelativePath = 'runtime/runtime-bundle.json'
+        $journal.operations[0].stageLeaf = 'runtime-bundle.json'
+        $json = $journal | ConvertTo-Json -Depth 20
+
+        { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json | Out-Null } | Should Not Throw
+        (Test-Json -Json $json -SchemaFile $schemaPath) | Should Be $true
+    }
+
+    # Scenario: Commit finished, the remove target is absent, and its tombstone still has the recorded bytes and identity.
+    # Purpose: Permit idempotent cleanup only while the residual tombstone remains the original transaction object.
+    It 'UnitT163_accepts_a_matching_committed_remove_tombstone' {
+        $journal = Get-TestPendingRemoveInstallJournalV1
+        $journal.phase = 'committed'
+        $journal.operations[0].state = 'applied'
+        $journal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20)
+        $observation = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].applied
+
+        $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{ 1 = $observation }
+
+        $decision.action | Should Be 'none'
+        @($decision.reasons).Count | Should Be 0
+    }
+
+    # Scenario: Commit finished, the remove target is absent, but the remaining tombstone bytes were replaced.
+    # Purpose: Preserve the foreign tombstone instead of authorizing commit cleanup by target absence alone.
+    It 'UnitT164_refuses_a_committed_remove_tombstone_with_a_different_hash' {
+        $journal = Get-TestPendingRemoveInstallJournalV1
+        $journal.phase = 'committed'
+        $journal.operations[0].state = 'applied'
+        $journal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20)
+        $observation = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].applied
+        $observation.backup.sha256 = '9' * 64
+
+        $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{ 1 = $observation }
+
+        $decision.action | Should Be 'refuse'
+        ($decision.reasons -join ' ') | Should Match 'sequence 1 tombstone'
+    }
+
+    # Scenario: Commit finished, the remove target is absent, but the remaining tombstone has a new file identity.
+    # Purpose: Refuse cleanup of independently recreated bytes even when their hash and length match the original.
+    It 'UnitT165_refuses_a_committed_remove_tombstone_with_a_different_identity' {
+        $journal = Get-TestPendingRemoveInstallJournalV1
+        $journal.phase = 'committed'
+        $journal.operations[0].state = 'applied'
+        $journal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20)
+        $observation = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].applied
+        $observation.backup.identity = [pscustomobject]@{
+            kind = 'windows-file-id'
+            device = '0x1A2B'
+            fileId = '0000ABCD:99999999'
+        }
+
+        $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{ 1 = $observation }
+
+        $decision.action | Should Be 'refuse'
+        ($decision.reasons -join ' ') | Should Match 'sequence 1 tombstone'
+    }
+
     # Scenario: A pending remove-file target is absent and its same-identity tombstone matches the original bytes.
     # Purpose: Use the tombstone as durable proof that the remove was applied and can be rolled back safely.
     It 'UnitT155_restores_pending_remove_when_the_tombstone_is_available' {

@@ -1450,6 +1450,10 @@ function Assert-AiInstructionsInstallJournalV1 {
                 throw "$context.targetRelativePath contains a Windows reserved device name."
             }
         }
+        $firstTargetSegment = ([string]$operation.targetRelativePath).Split('/')[0]
+        if ((Get-AiInstructionsInstallJournalPortableNameKey -Value $firstTargetSegment) -ceq '.AI-INSTRUCTIONS-TXN') {
+            throw "$context.targetRelativePath must not use the reserved .ai-instructions-txn first segment."
+        }
         $pathKey = Get-AiInstructionsInstallJournalPortableNameKey -Value ([string]$operation.targetRelativePath)
         if (-not $paths.Add($pathKey)) { throw "$context.targetRelativePath duplicates another target path after Unicode NFC and invariant case normalization." }
         Assert-AiInstructionsInstallJournalLeaf -Value $operation.stageLeaf -Context "$context.stageLeaf" -AllowNull -PortableName
@@ -1736,7 +1740,7 @@ function Get-AiInstructionsInstallRecoveryDecision {
         $backupMatchesOriginal[$sequence] = Test-AiInstructionsInstallJournalBackupMatch -Backup $bySequence[$sequence].backup -Original $operation.original -BackupIdentity $operation.backupIdentity
         if ([string]$operation.kind -ceq 'remove-file' -and -not [bool]$bySequence[$sequence].exists) {
             if ([string]$Journal.phase -ceq 'committed') {
-                $matchesApplied[$sequence] = $true
+                $matchesApplied[$sequence] = ($null -eq $bySequence[$sequence].backup -or $backupMatchesOriginal[$sequence])
             }
             else {
                 $matchesApplied[$sequence] = $backupMatchesOriginal[$sequence]
@@ -1755,6 +1759,15 @@ function Get-AiInstructionsInstallRecoveryDecision {
         $terminalAction = if ($matchesTerminal) { 'none' } else { 'refuse' }
         $reasons = New-Object System.Collections.Generic.List[string]
         if (-not $matchesTerminal) { $reasons.Add("phase $($Journal.phase) observations do not match the expected terminal state") }
+        if ([string]$Journal.phase -ceq 'committed') {
+            foreach ($operation in @($Journal.operations)) {
+                $sequence = [int64]$operation.sequence
+                if ([string]$operation.kind -ceq 'remove-file' -and -not [bool]$bySequence[$sequence].exists -and
+                    $null -ne $bySequence[$sequence].backup -and -not $backupMatchesOriginal[$sequence]) {
+                    $reasons.Add("sequence $sequence tombstone does not match original")
+                }
+            }
+        }
         if ([string]$Journal.phase -ceq 'rolled-back') {
             foreach ($operation in @($Journal.operations)) {
                 $sequence = [int64]$operation.sequence
