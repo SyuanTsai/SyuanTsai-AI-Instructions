@@ -124,6 +124,20 @@ function Get-TestManagedManifestV4 {
         $parsed[1].Prunable | Should Be $false
     }
 
+    # Scenario: A linked worktree is locked with a reason that spans multiple lines.
+    # Purpose: Accept Git's NUL-delimited reason field while retaining the worktree for scans.
+    It 'UnitT03a_worktree_parser_accepts_a_multiline_lock_reason' {
+        $lockedPath = 'C:/repo/locked'
+        $sha1Oid = 'a' * 40
+        $porcelain = "worktree $lockedPath`0HEAD $sha1Oid`0locked line1`nline2`0`0"
+
+        $parsed = @(ConvertFrom-GitWorktreePorcelainZ -Output $porcelain -Strict)
+
+        $parsed.Count | Should Be 1
+        $parsed[0].Path | Should Be $lockedPath
+        $parsed[0].Prunable | Should Be $false
+    }
+
     # Scenario: The installed Git supports SHA-256 repositories and linked worktrees.
     # Purpose: Exercise strict parsing against real `git worktree list --porcelain -z` output.
     It 'UnitT04_worktree_parser_strictly_accepts_a_sha256_repository_when_supported' {

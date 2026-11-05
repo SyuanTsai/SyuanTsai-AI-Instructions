@@ -484,7 +484,7 @@ Describe 'tracked AI instructions pollution cleanup' {
             $result.ExitCode | Should Be 0
             $excludePath = (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
             if (-not [IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
-            (Get-Content -Raw -LiteralPath $excludePath) | Should Not Match [regex]::Escape('stale-prunable-cleanup-only.md')
+            (Get-Content -Raw -LiteralPath $excludePath) | Should Not Match ([regex]::Escape('stale-prunable-cleanup-only.md'))
         }
         finally {
             Remove-Item -LiteralPath $linkedRoot -Recurse -Force -ErrorAction SilentlyContinue

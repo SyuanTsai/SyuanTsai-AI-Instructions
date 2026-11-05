@@ -1083,7 +1083,9 @@ if errorlevel 1 exit /b 92
             $indexBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath))
             $excludeBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
             $manifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath))
-            $agentBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md')))
+            $agentPath = Join-Path $targetRoot 'AGENTS.md'
+            $agentExistedBefore = Test-Path -LiteralPath $agentPath -PathType Leaf
+            $agentBefore = if ($agentExistedBefore) { [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentPath)) } else { $null }
             $linkedManifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath))
             $headBefore = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim()
 
@@ -1099,7 +1101,8 @@ if errorlevel 1 exit /b 92
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath)) | Should Be $indexBefore
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath)) | Should Be $manifestBefore
-            [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md'))) | Should Be $agentBefore
+            (Test-Path -LiteralPath $agentPath -PathType Leaf) | Should Be $agentExistedBefore
+            if ($agentExistedBefore) { [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentPath)) | Should Be $agentBefore }
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath)) | Should Be $linkedManifestBefore
             (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim() | Should Be $headBefore
             @(Invoke-TestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
@@ -1129,7 +1132,7 @@ if errorlevel 1 exit /b 92
             $output | Should Not BeNullOrEmpty
             $excludePath = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
             if (-not [IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
-            (Get-Content -Raw -LiteralPath $excludePath) | Should Not Match [regex]::Escape('stale-prunable-bootstrap-only.md')
+            (Get-Content -Raw -LiteralPath $excludePath) | Should Not Match ([regex]::Escape('stale-prunable-bootstrap-only.md'))
         }
         finally {
             Remove-Item -LiteralPath $linkedRoot -Recurse -Force -ErrorAction SilentlyContinue
