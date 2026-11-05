@@ -1129,6 +1129,23 @@ function Assert-StandardValidationLauncherIntegrity {
         -not (Test-StandardValidationPathWithin -Path $payloadPath -Root $InstallRoot -IncludeRoot)) {
         throw "BLOCKED|$Context launcher shim and payload must remain inside the signed install root."
     }
+    if ($kind -ceq 'unix-node-shim') {
+        $shimItem = Get-Item -Force -LiteralPath $shimPath -ErrorAction Stop
+        if (($shimItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+            throw "BLOCKED|$Context Unix package launcher must be a symbolic link to its payload."
+        }
+        [void](Get-StandardValidationSafeUnixSymlinkEntry -Item $shimItem -Root $InstallRoot -Context "$Context launcher shim")
+        $shimTarget = Get-StandardValidationSymlinkTarget -Item $shimItem -Context "$Context launcher shim"
+        $resolvedShimTarget = if ([IO.Path]::IsPathRooted($shimTarget)) {
+            [IO.Path]::GetFullPath($shimTarget)
+        }
+        else {
+            [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetDirectoryName($shimPath)) $shimTarget))
+        }
+        if (-not [string]::Equals($resolvedShimTarget, $payloadPath, (Get-StandardValidationPathComparison -Paths @($resolvedShimTarget,$payloadPath)))) {
+            throw "BLOCKED|$Context Unix package launcher does not target its bound payload."
+        }
+    }
     Assert-StandardValidationOutsideRoot -Path $runtimePath -Root $CandidateRoot -Context "$Context launcher runtime"
     Assert-StandardValidationOutsideRoot -Path $runtimePath -Root $ArtifactsRoot -Context "$Context launcher runtime"
     $runtimeName = [IO.Path]::GetFileName($runtimePath).ToLowerInvariant()
@@ -8374,9 +8391,15 @@ function Assert-StandardCoreSourceToolReceipts {
         $launcherDigest = Assert-StandardValidationLauncherIntegrity -Launcher $receipt.launcher -ToolName $name -CommandPath $receipt.executablePath -InstallRoot $receipt.installRoot -CandidateRoot $CandidateRoot -ArtifactsRoot $ArtifactsRoot -Context 'source resolver receipt'
         Assert-StandardValidationSha256 -Value ([string]$receipt.launcherDigestSha256) -Context 'source launcher digest'
         if ($launcherDigest -cne [string]$receipt.launcherDigestSha256) { throw 'BLOCKED|Source resolver launcher digest differs.' }
-        foreach ($pair in @(@('executablePath','executableSha256'),@('entryPointPath','entryPointSha256'),@('nodePath','nodeSha256'))) {
+        $frozenReceiptPairs = if ($name -ceq 'skill-tools') {
+            @(@('entryPointPath','entryPointSha256'),@('nodePath','nodeSha256'))
+        }
+        else {
+            @(@('executablePath','executableSha256'),@('entryPointPath','entryPointSha256'),@('nodePath','nodeSha256'))
+        }
+        foreach ($pair in $frozenReceiptPairs) {
             if (Test-StandardValidationHasProperty -Object $receipt -Name $pair[0]) {
-                if (@($FrozenFiles | Where-Object { [string]$_.path -ceq [string]$receipt.($pair[0]) -and [string]$_.sha256 -ceq [string]$receipt.($pair[1]) }).Count -ne 1) { throw 'INVALID|Source resolver executable or payload is not frozen.' }
+                if (@($FrozenFiles | Where-Object { [string]$_.path -ceq [string]$receipt.($pair[0]) -and [string]$_.sha256 -ceq [string]$receipt.($pair[1]) }).Count -ne 1) { throw 'INVALID|Source resolver executed file or required payload is not frozen.' }
             }
         }
         if ([string]::IsNullOrWhiteSpace([string]$receipt.installRoot)) { throw 'INVALID|Source tool installed closure is required.' }

@@ -63,10 +63,11 @@ if ($PSVersionTable.PSEdition -ceq 'Core' -and $IsMacOS -and $script:SourceGateF
                 $receiptValue=[pscustomobject]@{ schemaVersion=1; toolName=$name; resolutionRunId=$runId; resolvedAtUtc=[DateTime]::UtcNow.ToString('o'); executionContext='local'; frozenForRun=$true; channel='latest-stable'; source=$policy.tools.$name.source; resolvedVersion='1.0.0'; resolvedIdentity='fixture identity'; identityKind=$identityKind; executablePath=$toolPath; executableSha256=$frozen[0].sha256; installRoot=$installRoot; installedClosureSha256=$null; dependencyClosureSha256=$null; dependencyClosure=@(); launcher=$launcher;launcherDigestSha256=$null }
                 if ($name -ceq 'skill-tools') {
                     $shim=Join-Path $installRoot $(if ($fixtureWindows) { 'skill-tools.cmd' } else { 'skill-tools' });$payload=Join-Path $installRoot 'index.js';$node=Join-Path $fixtureToolsRoot $(if ($fixtureWindows) { 'node.exe' } else { 'node' })
-                    Write-SourceGateExecutableFixture $shim
                     [IO.File]::WriteAllText($payload, '// fixture package payload', (New-Object Text.UTF8Encoding($false)))
+                    if ($fixtureWindows) { Write-SourceGateExecutableFixture $shim }
+                    else { [void](New-Item -ItemType SymbolicLink -Path $shim -Target $payload) }
                     Write-SourceGateExecutableFixture $node
-                    foreach ($filePath in @($shim,$payload,$node)) { $frozen += [pscustomobject]@{path=$filePath;sha256=Get-StandardValidationFileSha256 -Path $filePath -Context 'fixture package launcher'} }
+                    foreach ($filePath in @($payload,$node)) { $frozen += [pscustomobject]@{path=$filePath;sha256=Get-StandardValidationFileSha256 -Path $filePath -Context 'fixture package execution file'} }
                     $receiptValue.executablePath=$shim;$receiptValue.executableSha256=Get-StandardValidationFileSha256 -Path $shim -Context 'fixture shim'
                     $receiptValue | Add-Member -NotePropertyName entryPointPath -NotePropertyValue $payload
                     $receiptValue | Add-Member -NotePropertyName entryPointSha256 -NotePropertyValue (Get-StandardValidationFileSha256 -Path $payload -Context 'fixture payload')

@@ -37,6 +37,45 @@ Describe 'SYP258 source tool identity freeze' {
         try { Assert-StandardCoreFrozenFiles -Files $files | Out-Null } catch { $rejected = $true }
         if (-not $rejected) { throw 'Removing frozen tool bytes must be rejected.' }
     }
+
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        # Scenario: A Unix npm launcher symlink stays inside the install root but targets another file, or escapes the root.
+        # Purpose: Launcher integrity must bind the link target itself to the receipt payload, not merely equal target bytes.
+        It 'UnitT15_rejects_unix_skill_tools_shims_not_targeting_the_bound_payload' {
+            . (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-StandardAuthorityGate.ps1') -DefineFunctionsOnly
+            $root = Join-Path $TestDrive 'skill-tools-unix-launcher'
+            [void][IO.Directory]::CreateDirectory($root)
+            $payload = Join-Path $root 'entry.js'
+            $substitute = Join-Path $root 'same-bytes.js'
+            $outside = Join-Path $TestDrive 'outside-entry.js'
+            foreach ($path in @($payload,$substitute,$outside)) { [IO.File]::WriteAllText($path,'// identical payload',[Text.UTF8Encoding]::new($false)) }
+            $runtime = Join-Path $root 'node'
+            [IO.File]::WriteAllText($runtime,'node runtime',[Text.UTF8Encoding]::new($false))
+            $shim = Join-Path $root 'skill-tools'
+            $payloadHash = Get-StandardValidationFileSha256 $payload 'fixture payload'
+            $runtimeHash = Get-StandardValidationFileSha256 $runtime 'fixture runtime'
+            [void](New-Item -ItemType SymbolicLink -Path $shim -Target $payload)
+            $validLauncher = [pscustomobject]@{
+                kind='unix-node-shim';shimPath=$shim;shimSha256=$payloadHash
+                payloadPath=$payload;payloadSha256=$payloadHash
+                runtimePath=$runtime;runtimeSha256=$runtimeHash
+            }
+            Assert-StandardValidationLauncherIntegrity -Launcher $validLauncher -ToolName skill-tools -CommandPath $shim -InstallRoot $root -CandidateRoot (Join-Path $TestDrive 'candidate') -ArtifactsRoot (Join-Path $TestDrive 'artifacts') -Context fixture | Out-Null
+            Assert-AuthorityLauncherReceipt -Receipt ([pscustomobject]@{launcher=$validLauncher}) -ToolName skill-tools -InstallRoot $root -ExecutablePath $shim -Context fixture
+
+            foreach ($target in @($substitute,$outside)) {
+                if (Test-Path -LiteralPath $shim) { Remove-Item -LiteralPath $shim -Force }
+                [void](New-Item -ItemType SymbolicLink -Path $shim -Target $target)
+                $launcher = [pscustomobject]@{
+                    kind='unix-node-shim';shimPath=$shim;shimSha256=$payloadHash
+                    payloadPath=$payload;payloadSha256=$payloadHash
+                    runtimePath=$runtime;runtimeSha256=$runtimeHash
+                }
+                { Assert-StandardValidationLauncherIntegrity -Launcher $launcher -ToolName skill-tools -CommandPath $shim -InstallRoot $root -CandidateRoot (Join-Path $TestDrive 'candidate') -ArtifactsRoot (Join-Path $TestDrive 'artifacts') -Context fixture } | Should Throw
+                { Assert-AuthorityLauncherReceipt -Receipt ([pscustomobject]@{launcher=$launcher}) -ToolName skill-tools -InstallRoot $root -ExecutablePath $shim -Context fixture } | Should Throw
+            }
+        }
+    }
 }
 
 Describe 'Acquisition content hashing allocation' {
@@ -268,6 +307,104 @@ Describe 'Standard validation resolver hardening' {
         }
     }
 
+    # Scenario: The runner namespace and ambient GitHub token are both present when resolver setup starts.
+    # Purpose: Prefer the runner namespace once, clear every process alias immediately, and authenticate only GitHub API requests.
+    It 'UnitT21_captures_the_namespaced_GitHub_token_and_filters_request_headers' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $names = @('STANDARD_VALIDATION_GITHUB_API_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN')
+        $previous = @{}
+        foreach ($name in $names) { $previous[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
+        try {
+            [Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN', 'namespace-token', 'Process')
+            [Environment]::SetEnvironmentVariable('GITHUB_TOKEN', 'fallback-token', 'Process')
+            [Environment]::SetEnvironmentVariable('GH_TOKEN', 'gh-token', 'Process')
+            $captured = Initialize-ResolverGitHubApiCredential
+            Assert-Equal $captured 'namespace-token' 'The runner namespace token must take precedence.'
+            foreach ($name in $names) {
+                Assert-True ($null -eq [Environment]::GetEnvironmentVariable($name, 'Process')) "Resolver startup must clear '$name'."
+            }
+
+            $script:ResolverGitHubApiToken = $captured
+            $headers = Get-GitHubHeaders
+            Assert-Equal $headers.Authorization 'Bearer namespace-token' 'A captured token must produce one Authorization header.'
+            $apiHeaders = Get-BoundedGitHubRequestHeaders -Headers $headers -Uri ([Uri]'https://api.github.com/repos/NVIDIA/SkillSpector/releases/latest')
+            $assetHeaders = Get-BoundedGitHubRequestHeaders -Headers $headers -Uri ([Uri]'https://github.com/NVIDIA/SkillSpector/releases/download/v1.0.0/skillspector-1.0.0-py3-none-any.whl')
+            $redirectHeaders = Get-BoundedGitHubRequestHeaders -Headers $headers -Uri ([Uri]'https://release-assets.githubusercontent.com/example/asset')
+            Assert-Equal $apiHeaders.Authorization 'Bearer namespace-token' 'Only the approved GitHub API host may receive Authorization.'
+            Assert-False ($assetHeaders.ContainsKey('Authorization')) 'The exact GitHub release request must not receive Authorization.'
+            Assert-False ($redirectHeaders.ContainsKey('Authorization')) 'A release-asset redirect must not receive Authorization.'
+
+            [Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN', ' ', 'Process')
+            [Environment]::SetEnvironmentVariable('GITHUB_TOKEN', 'fallback-token', 'Process')
+            Assert-Equal (Initialize-ResolverGitHubApiCredential) 'fallback-token' 'GITHUB_TOKEN must remain the non-empty fallback.'
+            $script:ResolverGitHubApiToken = $null
+            Assert-False ((Get-GitHubHeaders).ContainsKey('Authorization')) 'Anonymous resolution must omit Authorization.'
+        }
+        finally {
+            $script:ResolverGitHubApiToken = $null
+            foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name, $previous[$name], 'Process') }
+        }
+    }
+
+    # Scenario: Policy-only setup receives all token aliases and writes its ordinary resolver receipt.
+    # Purpose: Prove startup clearing precedes policy output and no credential value enters stdout or the receipt.
+    It 'UnitT22_clears_tokens_before_policy_output_without_recording_them' {
+        $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+        $captureIndex = $resolver.IndexOf('$script:ResolverGitHubApiToken = Initialize-ResolverGitHubApiCredential')
+        $preferenceIndex = $resolver.IndexOf("GetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN'")
+        $clearIndex = $resolver.IndexOf("foreach (`$name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN'))")
+        $policyIndex = $resolver.LastIndexOf('$policy = Get-Policy -Path $PolicyPath')
+        Assert-True ($preferenceIndex -ge 0 -and $clearIndex -gt $preferenceIndex -and $captureIndex -gt $clearIndex -and $policyIndex -gt $captureIndex) 'Token capture and clearing must occur at script start before policy validation.'
+
+        $values = @{
+            STANDARD_VALIDATION_GITHUB_API_TOKEN = 'namespace-receipt-secret'
+            GITHUB_TOKEN = 'fallback-receipt-secret'
+            GH_TOKEN = 'gh-receipt-secret'
+        }
+        $previous = @{}
+        foreach ($entry in $values.GetEnumerator()) {
+            $previous[$entry.Key] = [Environment]::GetEnvironmentVariable([string]$entry.Key, 'Process')
+            [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
+        }
+        $outputPath = Join-Path $TestDrive 'token-free-policy-receipt.json'
+        try {
+            $stdout = (& $script:ResolverPath -ValidatePolicyOnly -OutputPath $outputPath | Out-String)
+            $receipt = Get-Content -Raw -Encoding UTF8 -LiteralPath $outputPath
+            foreach ($entry in $values.GetEnumerator()) {
+                Assert-True ($null -eq [Environment]::GetEnvironmentVariable([string]$entry.Key, 'Process')) "Resolver execution must clear '$($entry.Key)'."
+                Assert-NotMatch ($stdout + $receipt) ([regex]::Escape([string]$entry.Value)) "Resolver output must not record '$($entry.Key)'."
+            }
+        }
+        finally {
+            foreach ($entry in $values.GetEnumerator()) { [Environment]::SetEnvironmentVariable([string]$entry.Key, $previous[$entry.Key], 'Process') }
+        }
+    }
+
+    # Scenario: A mocked GitHub acquisition failure includes the exact credential in its exception text.
+    # Purpose: Ensure the diagnostic writer redacts the captured value and clears the script credential on failure.
+    It 'UnitT23_redacts_the_token_from_SkillSpector_failure_diagnostics' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $token = 'fixture-diagnostic-secret-value'
+        $script:TokenDiagnosticFixtureToken = $token
+        $script:ResolverGitHubApiToken = $token
+        Mock Assert-Command { 'fixture-python' }
+        Mock Assert-NoConflictingPipEnvironment { }
+        Mock Assert-NoConflictingPythonEnvironment { }
+        Mock Invoke-BoundedGitHubGet { throw "mocked acquisition exposed $script:TokenDiagnosticFixtureToken" }
+        $root = Join-Path $TestDrive 'token-diagnostic-install'
+        $policy = Get-Policy -Path $script:ToolchainPath
+        try {
+            try { Resolve-SkillSpector -ShouldInstall $true -ToolPolicy $policy.tools.skillspector -RequestedInstallRoot $root -AcquisitionLimitSeconds 30 | Out-Null } catch { }
+            $failurePath = Join-Path (Join-Path $root ("skillspector-failure-{0}" -f $script:ResolverRunId)) 'failure.json'
+            Assert-True (Test-Path -LiteralPath $failurePath -PathType Leaf) 'A mocked acquisition failure must write diagnostic-only evidence.'
+            $diagnostic = Get-Content -Raw -Encoding UTF8 -LiteralPath $failurePath
+            Assert-NotMatch $diagnostic ([regex]::Escape($token)) 'Failure diagnostics must not persist the GitHub token.'
+            Assert-Match $diagnostic '<redacted-credential>' 'Failure diagnostics must retain an explicit redaction marker.'
+            Assert-True ($null -eq $script:ResolverGitHubApiToken) 'The script-scoped token must be cleared after failed GitHub acquisition.'
+        }
+        finally { Remove-Variable -Name TokenDiagnosticFixtureToken -Scope Script -ErrorAction SilentlyContinue }
+    }
+
     # Scenario: the latest-stable resolver advances to SkillSpector 2.13.0 while the parser correction remains release-specific.
     # Purpose: retain dynamic stable resolution but require the exact reviewed release identity before parser correction.
     It 'UnitT26_binds_the_latest_stable_parser_profile_to_the_reviewed_2_13_release' {
@@ -413,11 +550,15 @@ Describe 'Standard validation resolver hardening' {
         Assert-True ($resolveStart -ge 0 -and $resolveEnd -gt $resolveStart) 'Resolve-SkillSpector body was not found.'
         $body = $resolver.Substring($resolveStart, $resolveEnd - $resolveStart)
 
-        $clearIndex = $body.IndexOf("Remove-Item -LiteralPath 'Env:GITHUB_TOKEN'")
+        $clearIndex = $body.IndexOf("Remove-Item -LiteralPath 'Env:STANDARD_VALIDATION_GITHUB_API_TOKEN'")
+        $githubClearIndex = $body.IndexOf("Remove-Item -LiteralPath 'Env:GITHUB_TOKEN'")
+        $ghClearIndex = $body.IndexOf("Remove-Item -LiteralPath 'Env:GH_TOKEN'")
+        $scriptClearIndex = $body.IndexOf('$script:ResolverGitHubApiToken = $null')
         $venvIndex = $body.IndexOf("'-S', '-m', 'venv'")
         $helperIndex = $body.IndexOf('Resolve-PythonWheelClosureFromApprovedIndex')
         $restoreIndex = $body.IndexOf("SetEnvironmentVariable('GITHUB_TOKEN'")
-        Assert-True ($clearIndex -ge 0) 'GitHub token clearing was not found.'
+        Assert-True ($clearIndex -ge 0 -and $githubClearIndex -gt $clearIndex -and $ghClearIndex -gt $githubClearIndex) 'All GitHub token aliases must be cleared before third-party code.'
+        Assert-True ($scriptClearIndex -ge 0 -and $scriptClearIndex -lt $venvIndex) 'The captured token must be cleared after GitHub acquisition and before Python.'
         Assert-True ($venvIndex -gt $clearIndex) 'System Python must not start before GitHub token clearing.'
         Assert-True ($helperIndex -gt $clearIndex) 'Approved-index candidate resolution must not start before GitHub token clearing.'
         Assert-True ($restoreIndex -lt 0) 'The resolver must not restore GitHub credentials after third-party code becomes reachable.'
@@ -1007,6 +1148,14 @@ public sealed class StandardV1PermissiveCertificatePolicy : ICertificatePolicy
     It 'UnitT70_binds_the_SkillSpector_asset_to_the_exact_GitHub_release_path' {
         . $script:ResolverPath -ValidatePolicyOnly | Out-Null
 
+        $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+        $boundedStart = $resolver.IndexOf('function Invoke-BoundedGitHubGet')
+        $boundedEnd = $resolver.IndexOf('function Get-GitHubHeaders', $boundedStart)
+        $boundedBody = $resolver.Substring($boundedStart, $boundedEnd - $boundedStart)
+        Assert-Match $boundedBody 'AllowAutoRedirect\s*=\s*\$false' 'GitHub redirects must be followed explicitly so Authorization can be filtered per hop.'
+        Assert-Match $boundedBody 'Get-BoundedGitHubRequestHeaders' 'Every GitHub request hop must rebuild its bounded headers.'
+        Assert-Match $boundedBody "Host -ceq 'api\.github\.com'" 'Metadata redirects must remain on api.github.com.'
+
         $tag = 'v2.11.0'
         $file = 'skillspector-2.11.0-py3-none-any.whl'
         $expected = "https://github.com/NVIDIA/SkillSpector/releases/download/$tag/$file"
@@ -1029,6 +1178,18 @@ public sealed class StandardV1PermissiveCertificatePolicy : ICertificatePolicy
                 $errorMessage = $_.Exception.Message
             }
             Assert-Match $errorMessage 'Untrusted SkillSpector release asset URI' "Untrusted release asset URI '$value' must fail closed."
+        }
+
+        foreach ($request in @(
+            @{ Uri='https://api.github.com/repos/example/other/releases/latest'; OutFile=$null },
+            @{ Uri='https://github.com/NVIDIA/SkillSpector/releases/download/v2.11.0/other.whl'; OutFile=(Join-Path $TestDrive 'unapproved.whl') }
+        )) {
+            $errorMessage = $null
+            try {
+                Invoke-BoundedGitHubGet -Uri $request.Uri -Headers @{ Authorization='Bearer fixture' } -Stopwatch ([Diagnostics.Stopwatch]::StartNew()) -LimitSeconds 10 -OutFile $request.OutFile | Out-Null
+            }
+            catch { $errorMessage = $_.Exception.Message }
+            Assert-Match $errorMessage 'Untrusted SkillSpector GitHub request URI' "Unapproved GitHub request '$($request.Uri)' must fail before transport."
         }
     }
 

@@ -617,6 +617,19 @@ Describe 'SYP280 P2 inventory diagnostics real loops' {
 Describe 'SYP258 source validation result gate' {
     BeforeAll { . (Join-Path $PSScriptRoot 'Initialize-SourceGateFixture.ps1') }
 
+    # Scenario: Source validation freezes skill-tools' executed runtime and payload without treating its npm launcher as an executed frozen file.
+    # Purpose: Keep Unix npm symlinks out of the canonical frozen-file gate while retaining exact execution identity.
+    It 'UnitT05_binds_the_normative_skill_tools_runtime_and_payload_freeze' {
+        $root = Split-Path -Parent $PSScriptRoot
+        $standard = Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/skill-repository-standard.md')
+        $contract = Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/standard-core-validation-v2.json') | ConvertFrom-Json
+        $standard | Should -Match 'source frozen files \*\*MUST\*\*.*Node runtime.*entry-point payload'
+        $standard | Should -Match 'npm launcher shim.*\*\*MUST NOT\*\*.*frozen-file membership'
+        $standard | Should -Match 'sole non-executed exception.*resolved target is exactly the regular entry-point payload.*execute the bound Node runtime and payload instead of the shim'
+        $contract.sourceValidation.skillToolsFreeze | Should -Match 'Node runtime and entry-point payload'
+        $contract.sourceValidation.skillToolsFreeze | Should -Match 'launcher-shim membership in frozenFiles is not required'
+    }
+
     # Scenario: Ordinary Core returns PASS without package-tool or complete Static evidence.
     # Purpose: V2 prevents repository-only success from satisfying the three source required contexts.
     It 'UnitT10_rejects_Core_only_PASS_as_source_validation_success' {
@@ -804,6 +817,49 @@ Describe 'SYP258 source validation result gate' {
         $rejected=$false
         try { Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $report.sourceValidation.frozenFiles -RunId $report.runId } catch {$rejected=$true}
         if(-not $rejected){throw "Unsigned resolver receipt '$Name' was accepted."}
+    }
+
+    # Scenario: skill-tools' npm shim is omitted from frozenFiles while its receipt, Node runtime and entry point remain frozen.
+    # Purpose: Permit the Unix symlink launcher layout without weakening either executed file or native-tool executable identity.
+    It 'UnitT42_freezes_skill_tools_execution_files_but_not_its_npm_shim' {
+        $report = New-SourceGateFixture
+        $binding = @($report.sourceValidation.toolReceipts | Where-Object { [IO.Path]::GetFileName([string]$_.path) -ceq 'skill-tools.json' })[0]
+        $receipt = Get-Content -Raw -Encoding UTF8 $binding.path | ConvertFrom-Json
+        $withoutShim = @($report.sourceValidation.frozenFiles | Where-Object { [string]$_.path -cne [string]$receipt.executablePath })
+        Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $withoutShim -RunId $report.runId
+
+        foreach ($property in @('entryPointPath','nodePath')) {
+            $missing = @($withoutShim | Where-Object { [string]$_.path -cne [string]$receipt.$property })
+            $rejected = $false
+            try { Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $missing -RunId $report.runId }
+            catch { $rejected = $true }
+            if (-not $rejected) { throw "skill-tools $property must remain frozen." }
+
+            $wrongHash = @($withoutShim | ForEach-Object {
+                if ([string]$_.path -ceq [string]$receipt.$property) { [pscustomobject]@{path=[string]$_.path;sha256=('0' * 64)} }
+                else { $_ }
+            })
+            $rejected = $false
+            try { Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $wrongHash -RunId $report.runId }
+            catch { $rejected = $true }
+            if (-not $rejected) { throw "skill-tools $property must match its exact frozen hash." }
+        }
+    }
+
+    # Scenario: A native validator or scanner executable is removed from frozenFiles.
+    # Purpose: Limit the npm-shim exception to skill-tools without weakening direct executable tools.
+    It 'UnitT43_keeps_<ToolName>_executable_frozen' -TestCases @(
+        @{ToolName='skill-validator'}, @{ToolName='skillspector'}
+    ) {
+        param([string]$ToolName)
+        $report = New-SourceGateFixture
+        $binding = @($report.sourceValidation.toolReceipts | Where-Object { [IO.Path]::GetFileName([string]$_.path) -ceq "$ToolName.json" })[0]
+        $receipt = Get-Content -Raw -Encoding UTF8 $binding.path | ConvertFrom-Json
+        $withoutExecutable = @($report.sourceValidation.frozenFiles | Where-Object { [string]$_.path -cne [string]$receipt.executablePath })
+        $rejected = $false
+        try { Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $withoutExecutable -RunId $report.runId }
+        catch { $rejected = $true }
+        if (-not $rejected) { throw "$ToolName executable must remain frozen." }
     }
 
     # Scenario: Source tools complete, then the general or Pester repository check fails before it can publish a case sidecar.
@@ -1382,6 +1438,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
     # Purpose: Protect the complete latest-stable source, endpoint, and cache-isolation trust contract.
     It 'UnitT20_requires_latest_stable_tools_trusted_sources_and_resolved_identity_evidence' {
         $toolchain = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ToolchainPath | ConvertFrom-Json
+        $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
 
         Assert-Equal $toolchain.schemaVersion 1 'Unexpected toolchain schemaVersion.'
         Assert-Equal $toolchain.policy 'latest-stable-per-validation-run' 'Canonical validation must default to latest stable.'
@@ -1427,6 +1484,7 @@ Describe 'Agent Skill Repository Standard v1 contract' {
         Assert-Equal $toolchain.tools.skillspector.pythonDistribution.installEnvironment 'isolated-venv' 'SkillSpector must install in an isolated virtual environment.'
         Assert-Equal $toolchain.tools.skillspector.pythonDistribution.interpreterIsolation 'python-isolated-mode' 'Every resolver-managed SkillSpector Python subprocess must ignore inherited interpreter controls.'
         Assert-Equal $toolchain.tools.skillspector.pythonDistribution.credentialIsolation 'github-token-cleared-before-python' 'Resolver-managed Python must start only after GitHub credentials are removed.'
+        Assert-Match $standard 'Consumer source setup \*\*MAY\*\* only pass a GitHub API token.*`STANDARD_VALIDATION_GITHUB_API_TOKEN`.*clear it and all GitHub token aliases before any subprocess.*\*\*MUST NOT\*\* log, persist, or record it in receipts／evidence／diagnostics' 'The Standard must bind the resolver token namespace, subprocess isolation, and no-recording rule.'
         Assert-Equal $toolchain.tools.skillspector.pythonDistribution.installedMetadataVerification 'static-dist-info-metadata' 'Installed identity must be verified without starting installed Python.'
         Assert-True ([bool]$toolchain.tools.skillspector.pythonDistribution.verifyOfflineResolution) 'The completed wheelhouse must pass a fully offline dependency resolution.'
         Assert-True ([bool]$toolchain.tools.skillspector.pythonDistribution.installNoIndex) 'SkillSpector install must be no-index.'
