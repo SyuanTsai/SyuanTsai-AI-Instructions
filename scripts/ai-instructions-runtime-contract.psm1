@@ -3,6 +3,30 @@ $ErrorActionPreference = 'Stop'
 
 $script:CanonicalRepository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
 $script:SkillsCatalogContractModule = Import-Module (Join-Path $PSScriptRoot 'skills-catalog-contract.psm1') -PassThru -Scope Local -ErrorAction Stop
+$script:ExpectedPlatformRuntimeRootModule = 'platform-runtime.psm1'
+$script:ExpectedPlatformRuntimeFunctionsToExport = @(
+    'Assert-PlatformRuntimeInventory',
+    'Get-PlatformCapabilities',
+    'Open-PlatformDirectory',
+    'Open-PlatformFile',
+    'Assert-PlatformFileIdentity',
+    'Enter-PlatformLock',
+    'Publish-PlatformFile',
+    'Remove-PlatformOwnedFile',
+    'Get-PlatformPermissions',
+    'Set-PlatformPermissions',
+    'Start-PlatformOwnedProcess',
+    'Stop-PlatformOwnedProcess',
+    'Resolve-PlatformPowerShell',
+    'Resolve-PlatformPhysicalPath',
+    'Initialize-PlatformAuthorityPester',
+    'Assert-PlatformAuthorityPester',
+    'New-PlatformPrivateRoot',
+    'Invoke-PlatformPreparationCommand',
+    'Initialize-PlatformPester',
+    'Set-PlatformProcessEnvironment'
+)
+$script:ExpectedPlatformRuntimeEmptyExports = @('CmdletsToExport','VariablesToExport','AliasesToExport')
 
 function Test-AiInstructionsObjectHasProperty {
     param([AllowNull()][object] $Object,[Parameter(Mandatory = $true)][string] $Name)
@@ -646,6 +670,35 @@ function Assert-AiInstructionsPlatformRuntimeManifestLoadFields {
     }
 }
 
+function Assert-AiInstructionsPlatformRuntimeManifestApi {
+    param([Parameter(Mandatory = $true)][object] $Manifest)
+
+    $rootModule = Get-AiInstructionsDataValue -Object $Manifest -Name 'RootModule'
+    if ($rootModule -isnot [string] -or [string]$rootModule -cne $script:ExpectedPlatformRuntimeRootModule) {
+        throw "Platform runtime manifest RootModule must be '$($script:ExpectedPlatformRuntimeRootModule)'."
+    }
+
+    $actualFunctions = @(Get-AiInstructionsDataValue -Object $Manifest -Name 'FunctionsToExport')
+    $actualFunctionSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($functionName in $actualFunctions) {
+        if ($functionName -isnot [string] -or -not $actualFunctionSet.Add([string]$functionName)) {
+            throw 'Platform runtime manifest FunctionsToExport must exactly match the expected API.'
+        }
+    }
+    $expectedFunctionSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($functionName in $script:ExpectedPlatformRuntimeFunctionsToExport) { [void]$expectedFunctionSet.Add($functionName) }
+    if ($actualFunctionSet.Count -ne $expectedFunctionSet.Count -or -not $actualFunctionSet.SetEquals($expectedFunctionSet)) {
+        throw 'Platform runtime manifest FunctionsToExport must exactly match the expected API.'
+    }
+
+    foreach ($field in $script:ExpectedPlatformRuntimeEmptyExports) {
+        $value = Get-AiInstructionsDataValue -Object $Manifest -Name $field
+        if ($null -ne $value -and @($value).Count -ne 0) {
+            throw "Platform runtime manifest $field must be empty."
+        }
+    }
+}
+
 function Assert-AiInstructionsPlatformRuntimeManifestInventory {
     param(
         [Parameter(Mandatory = $true)][object] $Manifest,
@@ -654,6 +707,7 @@ function Assert-AiInstructionsPlatformRuntimeManifestInventory {
     )
 
     Assert-AiInstructionsPlatformRuntimeManifestLoadFields -Manifest $Manifest
+    Assert-AiInstructionsPlatformRuntimeManifestApi -Manifest $Manifest
     $privateData = Get-AiInstructionsDataValue -Object $Manifest -Name 'PrivateData'
     $platformRuntime = Get-AiInstructionsDataValue -Object $privateData -Name 'PlatformRuntime'
     $manifestApiVersion = Get-AiInstructionsDataValue -Object $platformRuntime -Name 'ApiVersion'
@@ -1079,6 +1133,17 @@ function Assert-AiInstructionsRuntimeBundleV3 {
     }
     $catalogPath = Resolve-AiInstructionsRuntimeFilePath -RuntimeRoot $RuntimeRoot -RelativePath $catalogRelativePath -Context 'Installed Skills Catalog'
     $catalog = & $script:SkillsCatalogContractModule.ExportedCommands['Test-SkillsCatalogDocument'] -CatalogPath $catalogPath
+    if ([int64]$Configuration.schemaVersion -eq 5) {
+        $installedProjectionIds = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+        foreach ($projection in @($catalog.projections)) { [void]$installedProjectionIds.Add([string]$projection.id) }
+        foreach ($scope in @('user','project')) {
+            foreach ($projectionId in @($Configuration.projections.$scope)) {
+                if (-not $installedProjectionIds.Contains([string]$projectionId)) {
+                    throw "Runtime bundle projection '$projectionId' is not declared by the installed catalog."
+                }
+            }
+        }
+    }
     $actualProjectionContractSha256 = Get-AiInstructionsProjectionContractSha256 -Projections $catalog.projections
     if ($actualProjectionContractSha256 -cne [string]$Bundle.projectionContractSha256) {
         throw 'Runtime bundle projectionContractSha256 does not match the installed Skills Catalog projections.'

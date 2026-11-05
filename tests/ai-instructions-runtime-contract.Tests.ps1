@@ -144,6 +144,14 @@ function Update-TestRuntimeV3Inventory {
     $Fixture.Bundle.inventorySha256 = Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $Fixture.Bundle.inventory
 }
 
+function Update-TestRuntimeV3ProjectionContract {
+    param([Parameter(Mandatory = $true)][object] $Fixture)
+    $catalogPath = Join-Path $Fixture.Root 'catalog\skills-catalog.json'
+    $catalog = Get-Content -Raw -Encoding UTF8 -LiteralPath $catalogPath | ConvertFrom-Json
+    $catalogModule = Import-Module (Join-Path $script:RepositoryRoot 'scripts\skills-catalog-contract.psm1') -PassThru -Scope Local
+    $Fixture.Bundle.projectionContractSha256 = & $catalogModule.ExportedCommands['Get-SkillsCatalogProjectionContractSha256'] -Projections $catalog.projections
+}
+
 function Invoke-TestRuntimeV3OrdinalChild {
     param(
         [Parameter(Mandatory = $true)][string] $Executable,
@@ -627,6 +635,16 @@ Describe 'AI instructions runtime contracts' {
         { Assert-AiInstructionsRuntimeBundleV3 -Bundle $fixture.Bundle -Configuration $configurationV5 -RuntimeRoot $fixture.Root } | Should Not Throw
     }
 
+    # Scenario: The runtime-contract module has a fixed expected platform runtime API surface.
+    # Purpose: Keep the runtime bundle validator's API allowlist synchronized with the checked-in manifest.
+    It 'UnitT103_keeps_expected_platform_runtime_exports_in_sync_with_the_manifest' {
+        $contractModule = Import-Module -Name $script:RuntimeContractModule -PassThru -Force
+        $expectedFunctions = & $contractModule { @($script:ExpectedPlatformRuntimeFunctionsToExport) }
+        $manifest = Import-PowerShellDataFile -LiteralPath (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psd1')
+
+        @($expectedFunctions) | Should Be @($manifest.FunctionsToExport)
+    }
+
     # Scenario: Platform metadata, capability declarations, and required runtime inventory are malformed.
     # Purpose: Fail closed on every v3-only contract boundary.
     It 'UnitT86_rejects_invalid_runtime_bundle_v3_fields' {
@@ -830,11 +848,13 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
     It 'UnitT101_rejects_runtime_bundle_v3_inventory_control_characters' {
         $fixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-control-character')
         $configuration = New-TestConfigurationDocument -SchemaVersion 4
+        $configuration.catalog.ref = $fixture.Bundle.commit
         $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\runtime-bundle-v3.schema.json'
 
         foreach ($controlCharacter in @("`t","`n","`r")) {
             $bundle = $fixture.Bundle | ConvertTo-Json -Depth 20 | ConvertFrom-Json
             $bundle.inventory[0].path = 'control' + $controlCharacter + 'path'
+            $bundle.inventorySha256 = Get-TestOrdinalRuntimeInventorySha256 -Inventory $bundle.inventory
 
             (Get-RuntimeContractError { Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $bundle.inventory }) |
                 Should Match 'control character'
@@ -855,6 +875,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         )
         foreach ($case in $cases) {
             $fixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive ('runtime-v3-load-field-' + $case.Field))
+            $configuration.catalog.ref = $fixture.Bundle.commit
             $manifestPath = Join-Path $fixture.Root 'platform-runtime.psd1'
             $manifestText = [IO.File]::ReadAllText($manifestPath)
             $closingIndex = $manifestText.LastIndexOf("`n}",[StringComparison]::Ordinal)
@@ -868,5 +889,45 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
                 Assert-AiInstructionsRuntimeBundleV3 -Bundle $fixture.Bundle -Configuration $configuration -RuntimeRoot $fixture.Root
             }) | Should Match 'loading field'
         }
+    }
+
+    # Scenario: A platform runtime manifest changes its declared module API surface.
+    # Purpose: Bind the authenticated manifest to the exact runtime entry point and exported functions.
+    It 'UnitT104_rejects_platform_runtime_manifest_api_drift' {
+        $cases = @(
+            @{ Name = 'root-module'; OldValue = "RootModule = 'platform-runtime.psm1'"; NewValue = "RootModule = 'renamed-runtime.psm1'"; Pattern = 'RootModule' },
+            @{ Name = 'function-export'; OldValue = "        'Set-PlatformProcessEnvironment'`n"; NewValue = ''; Pattern = 'FunctionsToExport' }
+        )
+        foreach ($case in $cases) {
+            $fixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive ('runtime-v3-api-' + $case.Name))
+            $configuration = New-TestConfigurationDocument -SchemaVersion 4
+            $configuration.catalog.ref = $fixture.Bundle.commit
+            $manifestPath = Join-Path $fixture.Root 'platform-runtime.psd1'
+            Set-TestTextOccurrence -Path $manifestPath -OldValue $case.OldValue -NewValue $case.NewValue
+            Update-TestRuntimeV3Inventory -Fixture $fixture
+            $fixture.Bundle.platformRuntime.manifestSha256 = Get-TestCanonicalTextSha256 -Path $manifestPath
+
+            (Get-RuntimeContractError {
+                Assert-AiInstructionsRuntimeBundleV3 -Bundle $fixture.Bundle -Configuration $configuration -RuntimeRoot $fixture.Root
+            }) | Should Match $case.Pattern
+        }
+    }
+
+    # Scenario: A v5 selection names a known projection absent from the installed Catalog.
+    # Purpose: Prevent projection-aware installation from accepting a selection its authenticated Catalog cannot provide.
+    It 'UnitT105_rejects_v5_projection_not_declared_by_the_installed_catalog' {
+        $fixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-v5-undeclared-projection')
+        $configuration = New-TestConfigurationDocument -SchemaVersion 5
+        $configuration.catalog.ref = $fixture.Bundle.commit
+        $catalogPath = Join-Path $fixture.Root 'catalog\skills-catalog.json'
+        $catalog = Get-Content -Raw -Encoding UTF8 -LiteralPath $catalogPath | ConvertFrom-Json
+        $catalog.projections = @($catalog.projections | Where-Object { $_.id -ceq 'user-agents' })
+        [IO.File]::WriteAllText($catalogPath,($catalog | ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false))
+        Update-TestRuntimeV3Inventory -Fixture $fixture
+        Update-TestRuntimeV3ProjectionContract -Fixture $fixture
+
+        (Get-RuntimeContractError {
+            Assert-AiInstructionsRuntimeBundleV3 -Bundle $fixture.Bundle -Configuration $configuration -RuntimeRoot $fixture.Root
+        }) | Should Match "user-claude.*not declared by the installed catalog"
     }
 }
