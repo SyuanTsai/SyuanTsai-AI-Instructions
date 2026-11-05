@@ -1562,21 +1562,58 @@ function Assert-ManagedPathDoesNotCrossReparsePoint {
 }
 
 function Get-ManagedWorktreeRoots {
-    param([Parameter(Mandatory = $true)][string] $Repository)
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [switch] $Strict
+    )
 
-    foreach ($line in @(Invoke-Git -Repository $Repository -Arguments @('worktree','list','--porcelain'))) {
-        $text = [string]$line
-        if ($text.StartsWith('worktree ',[System.StringComparison]::Ordinal)) {
-            $text.Substring('worktree '.Length)
+    $lines = @(Invoke-Git -Repository $Repository -Arguments @('worktree','list','--porcelain'))
+    if (-not $Strict) {
+        foreach ($line in $lines) {
+            $text = [string]$line
+            if ($text.StartsWith('worktree ',[System.StringComparison]::Ordinal)) { $text.Substring('worktree '.Length) }
         }
+        return
     }
+    $expectWorktree = $true
+    $worktreeCount = 0
+    $recordHasState = $false
+    foreach ($line in $lines) {
+        $text = [string]$line
+        if ([string]::IsNullOrEmpty($text)) {
+            if (-not $expectWorktree -and -not $recordHasState) { throw 'Invalid git worktree porcelain output.' }
+            $expectWorktree = $true
+            continue
+        }
+        if ($expectWorktree) {
+            if (-not $text.StartsWith('worktree ',[System.StringComparison]::Ordinal) -or $text.Length -eq 'worktree '.Length) {
+                throw 'Invalid git worktree porcelain output.'
+            }
+            $worktreeCount++
+            $expectWorktree = $false
+            $recordHasState = $false
+            $text.Substring('worktree '.Length)
+            continue
+        }
+        if ($text -cnotmatch '^(?:HEAD [0-9a-f]{40}|branch .+|detached|bare|locked(?: .*)?|prunable(?: .*)?)$') {
+            throw 'Invalid git worktree porcelain output.'
+        }
+        if ($text -cmatch '^(?:HEAD [0-9a-f]{40}|bare)$') { $recordHasState = $true }
+    }
+    if ($worktreeCount -eq 0 -or (-not $expectWorktree -and -not $recordHasState)) { throw 'Invalid git worktree porcelain output.' }
 }
 
 function Assert-NoRepoManagedManifestV4 {
-    param([Parameter(Mandatory = $true)][string] $Repository)
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [switch] $Strict
+    )
 
-    try { $worktreeRoots = @(Get-ManagedWorktreeRoots -Repository $Repository) }
-    catch { return }
+    try { $worktreeRoots = @(Get-ManagedWorktreeRoots -Repository $Repository -Strict:$Strict) }
+    catch {
+        if ($Strict) { throw 'Cannot determine linked worktree manifests before mutation.' }
+        return
+    }
     foreach ($worktreeRoot in $worktreeRoots) {
         $isSchemaV4 = $false
         try {
@@ -4122,6 +4159,7 @@ try {
     Assert-NoRepoManagedManifestV4 -Repository $targetRootPath
     if (-not $WhatIf) {
         $repositoryOperationLock = Open-RepositoryOperationLock -Repository $targetRootPath
+        Assert-NoRepoManagedManifestV4 -Repository $targetRootPath -Strict
         $remediationTransaction = Invoke-AgentArtifactRemediation -Repository $targetRootPath -GitExecutable $GitExecutable
     }
     if ($null -ne $remediationTransaction) {

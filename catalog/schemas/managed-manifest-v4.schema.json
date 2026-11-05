@@ -95,7 +95,27 @@
           "allOf": [
             { "if": { "properties": { "projectionId": { "const": "project-agents" } } }, "then": { "properties": { "targetPath": { "type": "string", "pattern": "^\\.agents/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/.+$" } } } },
             { "if": { "properties": { "projectionId": { "const": "project-claude" } } }, "then": { "properties": { "targetPath": { "type": "string", "pattern": "^\\.claude/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/.+$" } } } },
-            { "if": { "properties": { "projectionId": { "const": "project-github" } } }, "then": { "properties": { "targetPath": { "type": "string", "pattern": "^\\.github/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/.+$" } } } }
+            { "if": { "properties": { "projectionId": { "const": "project-github" } } }, "then": { "properties": { "targetPath": { "type": "string", "pattern": "^\\.github/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/.+$" } } } },
+            {
+              "if": { "properties": { "targetPath": { "pattern": "^\\.(?:agents|claude|github)/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/\\.ai-instructions-licenses/" } }, "required": ["targetPath"] },
+              "then": {
+                "oneOf": [
+                  {
+                    "properties": {
+                      "sourcePath": { "pattern": "^(?:(?:[^/]+/)*LICENSES/.+|(?:[^/]+/)*(?:LICENSE|LICENCE|COPYING|NOTICE|THIRD_PARTY_NOTICES|THIRD_PARTY_LICENSES|PROVENANCE)(?:[-_][^/.]+)?(?:\\.(?:md|txt|rst|html))?|(?:[^/]+/)*licensing-scope\\.json)$" },
+                      "targetPath": { "pattern": "^\\.(?:agents|claude|github)/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/\\.ai-instructions-licenses/source/.+" }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "sourcePath": { "const": ".ai-instructions-generated/delivery.json" },
+                      "targetPath": { "pattern": "^\\.(?:agents|claude|github)/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/\\.ai-instructions-licenses/delivery\\.json$" }
+                    }
+                  }
+                ]
+              },
+              "else": { "properties": { "sourcePath": { "pattern": "^skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/" } } }
+            }
           ]
         }
       ]

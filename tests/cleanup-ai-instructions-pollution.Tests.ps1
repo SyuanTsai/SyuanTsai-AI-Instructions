@@ -463,6 +463,105 @@ Describe 'tracked AI instructions pollution cleanup' {
         }
     }
 
+    # Scenario: The optimistic worktree inventory succeeds, but the strict inventory under the cleanup lock fails.
+    # Purpose: Fail closed before cleanup changes the index, shared exclusions, or managed bytes.
+    It 'InterT69a_fails_closed_when_the_locked_worktree_inventory_fails' {
+        $targetRoot = Join-Path $TestDrive 'locked-worktree-list-failure'
+        New-PollutedTestRepository -Path $targetRoot
+        $wrapperRoot = Join-Path $TestDrive 'cleanup-locked-worktree-list-failure-wrapper'
+        New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
+        $realGit = (Get-Command git.exe).Source
+        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $firstListMarker = Join-Path $wrapperRoot 'first-list.marker'
+        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+        $gitWrapper = @"
+@echo off
+echo %* | "$findString" /C:"worktree list --porcelain" >nul
+if errorlevel 1 goto forward
+if exist "$firstListMarker" exit /b 91
+type nul > "$firstListMarker"
+:forward
+"$realGit" %*
+"@
+        Set-CleanupTestText -Path $gitWrapperPath -Value $gitWrapper
+        $indexPath = (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','index') | Select-Object -First 1).Trim()
+        if (-not [IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $targetRoot $indexPath }
+        $excludePath = (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
+        if (-not [IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+        $manifestPath = Join-Path $targetRoot $script:ManifestRelativePath
+        $indexBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath))
+        $excludeBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+        $manifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath))
+        $agentBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md')))
+
+        $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize -GitExecutable $gitWrapperPath
+
+        $result.ExitCode | Should Not Be 0
+        $result.Output | Should Match 'Cannot determine linked worktree manifests before mutation\.'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath)) | Should Be $indexBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath)) | Should Be $manifestBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md'))) | Should Be $agentBefore
+        @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
+    }
+
+    # Scenario: A linked worktree publishes v4 after cleanup's optimistic scan and before its locked scan.
+    # Purpose: Recheck projection ownership under the repository lock before staging remediation.
+    It 'InterT69b_detects_linked_v4_published_before_the_locked_scan' {
+        $targetRoot = Join-Path $TestDrive 'linked-v4-race-cleanup'
+        New-PollutedTestRepository -Path $targetRoot
+        $linkedRoot = Join-Path $TestDrive 'linked-v4-race-cleanup-worktree'
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','cleanup-linked-v4-race-fixture',$linkedRoot) | Out-Null
+        try {
+            $linkedManifestPath = Join-Path $linkedRoot $script:ManifestRelativePath
+            $v4ManifestPath = Join-Path $TestDrive 'cleanup-linked-v4-race.json'
+            $v4Manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $linkedManifestPath | ConvertFrom-Json
+            $v4Manifest.schemaVersion = 4
+            Set-CleanupTestText -Path $v4ManifestPath -Value (($v4Manifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+            $wrapperRoot = Join-Path $TestDrive 'cleanup-locked-v4-publication-wrapper'
+            New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
+            $realGit = (Get-Command git.exe).Source
+            $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+            $firstListMarker = Join-Path $wrapperRoot 'first-list.marker'
+            $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+            $gitWrapper = @"
+@echo off
+echo %* | "$findString" /C:"worktree list --porcelain" >nul
+if errorlevel 1 goto forward
+if not exist "$firstListMarker" (
+  type nul > "$firstListMarker"
+  goto forward
+)
+copy /y "$v4ManifestPath" "$linkedManifestPath" >nul
+if errorlevel 1 exit /b 92
+:forward
+"$realGit" %*
+"@
+            Set-CleanupTestText -Path $gitWrapperPath -Value $gitWrapper
+            $indexPath = (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','index') | Select-Object -First 1).Trim()
+            if (-not [IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $targetRoot $indexPath }
+            $excludePath = (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
+            if (-not [IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+            $indexBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath))
+            $excludeBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+            $agentBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md')))
+            $headBefore = (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim()
+
+            $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize -GitExecutable $gitWrapperPath
+
+            $result.ExitCode | Should Not Be 0
+            $result.Output | Should Match 'REPO managed manifest schema version 4 requires a projection-aware bootstrap\.'
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath)) | Should Be $indexBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md'))) | Should Be $agentBefore
+            (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim() | Should Be $headBefore
+            @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
+        }
+        finally {
+            Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
+        }
+    }
+
     # Scenario: Bootstrap or another cleanup process holds the shared repository runtime lock.
     # Purpose: Prevent cleanup index changes from interleaving with stash, manifest, or exclude transactions.
     It 'InterT70_refuses_cleanup_while_the_repository_runtime_lock_is_held' {

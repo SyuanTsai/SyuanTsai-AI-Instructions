@@ -340,6 +340,28 @@ function Get-TestManagedManifestV4 {
         { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw 'source and target paths must match.'
     }
 
+    # Scenario: A v4 Skill delivery receipt claims an ordinary payload source, then uses the synthetic receipt source.
+    # Purpose: Keep the portable schema and executable parser aligned for projection-root license delivery.
+    It 'UnitT11v8a_aligns_v4_skill_delivery_receipt_schema_and_parser_validation' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) {
+            throw 'UnitT11v8a requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.'
+        }
+        $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\managed-manifest-v4.schema.json'
+        $manifest = Get-TestManagedManifestV4
+        $skillEntry = @($manifest.files | Where-Object artifactType -eq 'skill')[0]
+        $skillEntry.sourcePath = 'skills/work-with-jira/receipt.json'
+        $skillEntry.targetPath = '.agents/skills/work-with-jira/.ai-instructions-licenses/delivery.json'
+        $invalidJson = $manifest | ConvertTo-Json -Depth 100
+
+        (Test-Json -Json $invalidJson -SchemaFile $schemaPath) | Should Be $false
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw 'delivery receipt must use the synthetic source path'
+
+        $skillEntry.sourcePath = '.ai-instructions-generated/delivery.json'
+        $validJson = $manifest | ConvertTo-Json -Depth 100
+        (Test-Json -Json $validJson -SchemaFile $schemaPath) | Should Be $true
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Not Throw
+    }
+
     # Scenario: A v4 file source path contains traversal.
     # Purpose: Reject traversal before projection or provenance comparisons.
     It 'UnitT11v9_rejects_a_v4_traversal_path' {
