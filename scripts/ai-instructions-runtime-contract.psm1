@@ -631,6 +631,21 @@ function Get-AiInstructionsPlatformRuntimeClosurePaths {
     return @($paths)
 }
 
+function Assert-AiInstructionsPlatformRuntimeManifestLoadFields {
+    param([Parameter(Mandatory = $true)][object] $Manifest)
+
+    # This runtime deliberately uses only RootModule and FileList.  Any other
+    # manifest import hook could load code or metadata outside the authenticated
+    # closure, so it must remain absent or explicitly empty.
+    foreach ($field in @('ModuleToProcess','NestedModules','RequiredModules','ScriptsToProcess','RequiredAssemblies','TypesToProcess','FormatsToProcess')) {
+        $value = Get-AiInstructionsDataValue -Object $Manifest -Name $field
+        if ($null -eq $value) { continue }
+        if ($value -is [string] -and $value.Length -eq 0) { continue }
+        if ($value -isnot [string] -and @($value).Count -eq 0) { continue }
+        throw "Platform runtime manifest loading field '$field' must be absent or empty."
+    }
+}
+
 function Assert-AiInstructionsPlatformRuntimeManifestInventory {
     param(
         [Parameter(Mandatory = $true)][object] $Manifest,
@@ -638,6 +653,7 @@ function Assert-AiInstructionsPlatformRuntimeManifestInventory {
         [Parameter(Mandatory = $true)][string] $BundleApiVersion
     )
 
+    Assert-AiInstructionsPlatformRuntimeManifestLoadFields -Manifest $Manifest
     $privateData = Get-AiInstructionsDataValue -Object $Manifest -Name 'PrivateData'
     $platformRuntime = Get-AiInstructionsDataValue -Object $privateData -Name 'PlatformRuntime'
     $manifestApiVersion = Get-AiInstructionsDataValue -Object $platformRuntime -Name 'ApiVersion'
@@ -821,6 +837,7 @@ function Get-AiInstructionsRuntimeInventorySha256V3 {
     foreach ($entry in @($Inventory)) {
         $path = [string]$entry.path
         $hash = [string]$entry.sha256
+        if ($path -match '[\x00-\x1f\x7f]') { throw "Runtime inventory path contains a control character: $path" }
         if ([string]::IsNullOrWhiteSpace($path) -or $path.Contains('\') -or $path.StartsWith('/') -or $path -match '(^|/)\.\.(/|$)') { throw "Unsafe runtime inventory path: $path" }
         if ($hash -cnotmatch '^[0-9a-f]{64}$') { throw "Invalid runtime inventory hash for '$path'." }
         if ($hashesByPath.ContainsKey($path)) { throw "Duplicate runtime inventory path '$path'." }

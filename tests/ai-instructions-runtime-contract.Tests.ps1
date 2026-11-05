@@ -824,4 +824,49 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         }
         foreach ($digest in $comparisonDigests) { [string]$digest | Should Be $actual }
     }
+
+    # Scenario: A v3 inventory path contains a digest record delimiter control character.
+    # Purpose: Keep JSON Schema and executable validation from accepting ambiguous digest input.
+    It 'UnitT101_rejects_runtime_bundle_v3_inventory_control_characters' {
+        $fixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-control-character')
+        $configuration = New-TestConfigurationDocument -SchemaVersion 4
+        $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\runtime-bundle-v3.schema.json'
+
+        foreach ($controlCharacter in @("`t","`n","`r")) {
+            $bundle = $fixture.Bundle | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+            $bundle.inventory[0].path = 'control' + $controlCharacter + 'path'
+
+            (Get-RuntimeContractError { Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $bundle.inventory }) |
+                Should Match 'control character'
+            (Test-Json -Json ($bundle | ConvertTo-Json -Depth 20) -SchemaFile $schemaPath) | Should Be $false
+            (Get-RuntimeContractError {
+                Assert-AiInstructionsRuntimeBundleV3 -Bundle $bundle -Configuration $configuration -RuntimeRoot $fixture.Root
+            }) | Should Match 'control character'
+        }
+    }
+
+    # Scenario: A platform runtime manifest adds an unused import-time load hook.
+    # Purpose: Reject paths that Import-Module could otherwise load outside the authenticated closure.
+    It 'UnitT102_rejects_platform_runtime_manifest_loading_fields' {
+        $configuration = New-TestConfigurationDocument -SchemaVersion 4
+        $cases = @(
+            @{ Field = 'ScriptsToProcess'; Value = "@('../evil.ps1')" },
+            @{ Field = 'RequiredAssemblies'; Value = "@('C:\x.dll')" }
+        )
+        foreach ($case in $cases) {
+            $fixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive ('runtime-v3-load-field-' + $case.Field))
+            $manifestPath = Join-Path $fixture.Root 'platform-runtime.psd1'
+            $manifestText = [IO.File]::ReadAllText($manifestPath)
+            $closingIndex = $manifestText.LastIndexOf("`n}",[StringComparison]::Ordinal)
+            if ($closingIndex -lt 0) { throw 'Test fixture manifest has no closing hashtable delimiter.' }
+            $manifestText = $manifestText.Insert($closingIndex,"`n    " + $case.Field + ' = ' + $case.Value)
+            [IO.File]::WriteAllText($manifestPath,$manifestText,[Text.UTF8Encoding]::new($false))
+            Update-TestRuntimeV3Inventory -Fixture $fixture
+            $fixture.Bundle.platformRuntime.manifestSha256 = Get-TestCanonicalTextSha256 -Path $manifestPath
+
+            (Get-RuntimeContractError {
+                Assert-AiInstructionsRuntimeBundleV3 -Bundle $fixture.Bundle -Configuration $configuration -RuntimeRoot $fixture.Root
+            }) | Should Match 'loading field'
+        }
+    }
 }
