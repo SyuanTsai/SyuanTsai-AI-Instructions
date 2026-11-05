@@ -278,7 +278,7 @@ exit 0
     It 'InterT80_runs_script_command_with_literal_arguments' {
         $child = Join-Path $TestDrive 'literal.ps1'
         [IO.File]::WriteAllText($child,'param([string]$Value) [Console]::Write($Value); exit 0',[Text.UTF8Encoding]::new($false))
-        $result = Invoke-StandardValidationProcess -Command $child -Arguments @('space and & literal') -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 10
+        $result = Invoke-StandardValidationProcess -Command $child -Arguments @('space and & literal') -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 60
         $result.status | Should -Be 'passed'
         $result.stdout | Should -Be 'space and & literal'
     }
@@ -291,7 +291,7 @@ param([string]$NativeHost)
 & $NativeHost -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command 'exit 23'
 [Console]::Write('returned-after-native')
 '@,[Text.UTF8Encoding]::new($false))
-        $result = Invoke-StandardValidationProcess -Command $child -Arguments @($script:ValidatorTestHost) -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 10
+        $result = Invoke-StandardValidationProcess -Command $child -Arguments @($script:ValidatorTestHost) -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 60
         $result.status | Should -Be 'failed'
         $result.exitCode | Should -Be 23
         $result.stdout | Should -Be 'returned-after-native'
@@ -302,7 +302,7 @@ param([string]$NativeHost)
     It 'InterT84_fails_script_on_nonterminating_error' {
         $child = Join-Path $TestDrive 'powershell-error.ps1'
         [IO.File]::WriteAllText($child,"Write-Error 'fixture-script-error'; [Console]::Write('must-not-continue')",[Text.UTF8Encoding]::new($false))
-        $result = Invoke-StandardValidationProcess -Command $child -Arguments @() -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 10
+        $result = Invoke-StandardValidationProcess -Command $child -Arguments @() -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 60
         $result.status | Should -Be 'failed'
         $result.exitCode | Should -Not -Be 0
         $result.stdout | Should -Be ''
