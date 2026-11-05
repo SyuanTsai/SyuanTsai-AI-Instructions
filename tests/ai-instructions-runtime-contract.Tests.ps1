@@ -185,6 +185,7 @@ function Get-TestLinuxInstallJournalV1 {
         foreach ($state in @($operation.original,$operation.applied)) {
             if ($null -ne $state.identity) { $state.identity.kind = 'unix-device-inode' }
         }
+        if ($null -ne $operation.backupIdentity) { $operation.backupIdentity.kind = 'unix-device-inode' }
     }
     $journal.operations[0].permissions = [pscustomobject]@{ kind='unix-mode'; mode='0644'; uid=1000; gid=1000 }
     return (ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20))
@@ -199,7 +200,7 @@ function New-TestInstallObservation {
     )
     if ([bool]$State.exists -and $null -eq $Permissions) {
         $Permissions = if ([string]$State.identity.kind -ceq 'windows-file-id') {
-            [pscustomobject]@{ kind='windows-sddl'; sddl='O:SYG:SYD:PAI(A;;FA;;;SY)'; readOnly=$false }
+            [pscustomobject]@{ kind='windows-sddl'; sddl='D:PAI(A;;FA;;;SY)'; readOnly=$false }
         }
         else { [pscustomobject]@{ kind='unix-mode'; mode='0644'; uid=1000; gid=1000 } }
     }
@@ -1164,6 +1165,8 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
             -Operations $source.operations
         $journal.transactionId | Should Match '^[0-9a-f]{32}$'
         $journal.generation.previousBundleSha256 | Should Be $null
+        $journal.operations[0].backupIdentity.fileId | Should Be '0000ABCD:00001235'
+        $journal.operations[1].backupIdentity | Should Be $null
         (@($journal.PSObject.Properties.Name) -join ',') | Should Be 'schemaVersion,kind,transactionId,createdAtUtc,owner,platform,lock,generation,phase,operations'
     }
 
@@ -1331,7 +1334,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $windowsJournal = Get-TestInstallJournalV1
         $windowsJournal.operations[0].permissions = [pscustomobject]@{ kind='unix-mode'; mode='0644'; uid=1000; gid=1000 }
         $linuxJournal = Get-TestLinuxInstallJournalV1
-        $linuxJournal.operations[0].permissions = [pscustomobject]@{ kind='windows-sddl'; sddl='O:SYG:SYD:PAI(A;;FA;;;SY)'; readOnly=$false }
+        $linuxJournal.operations[0].permissions = [pscustomobject]@{ kind='windows-sddl'; sddl='D:PAI(A;;FA;;;SY)'; readOnly=$false }
         $cases = @(
             @{ Journal=$windowsJournal; Expected='windows-sddl' },
             @{ Journal=$linuxJournal; Expected='unix-mode' }
@@ -1750,11 +1753,113 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
     # Purpose: Keep the low-level matcher fail-closed and null-safe under strict mode.
     It 'UnitT149_returns_false_when_permission_comparison_has_a_null_side' {
         $runtimeModule = Get-Module | Where-Object { $_.Path -eq $script:RuntimeContractModule } | Select-Object -First 1
-        $permissions = [pscustomobject]@{ kind='windows-sddl'; sddl='O:SYG:SYD:PAI(A;;FA;;;SY)'; readOnly=$false }
+        $permissions = [pscustomobject]@{ kind='windows-sddl'; sddl='D:PAI(A;;FA;;;SY)'; readOnly=$false }
         $observation = [pscustomobject]@{ permissions=$permissions }
 
         (& $runtimeModule { param($Value) Test-AiInstructionsInstallJournalPermissionsMatch -Observation $null -Permissions $Value } $permissions) | Should Be $false
         (& $runtimeModule { param($Value) Test-AiInstructionsInstallJournalPermissionsMatch -Observation $Value -Permissions $null } $observation) | Should Be $false
         (& $runtimeModule { param($Value,$Expected) Test-AiInstructionsInstallJournalPermissionsMatch -Observation $Value -Permissions $Expected } ([pscustomobject]@{ permissions=$null }) $permissions) | Should Be $false
+    }
+
+    # Scenario: A remove-file rollback renamed its independent backup into place, changing the restored target identity.
+    # Purpose: Treat the recorded backup identity as an original-state identity after rollback without weakening byte or permission checks.
+    It 'UnitT150_accepts_restored_remove_file_with_backup_identity' {
+        $journal = Get-TestInstallJournalV1
+        $journal.operations = @($journal.operations[0])
+        $journal.operations[0].kind = 'remove-file'
+        $journal.operations[0].method = 'unlink'
+        $journal.operations[0].stageLeaf = $null
+        $journal.operations[0].state = 'rolled-back'
+        $journal.operations[0].applied.exists = $false
+        $journal.operations[0].applied.sha256 = $null
+        $journal.operations[0].applied.length = $null
+        $journal.operations[0].applied.identity = $null
+        $journal.phase = 'rolled-back'
+        $journal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20)
+        $observations = @{
+            1 = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].original
+        }
+        $observations[1].identity = $journal.operations[0].backupIdentity
+
+        $terminalDecision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
+        $terminalDecision.action | Should Be 'none'
+        $terminalDecision.operations[0].action | Should Be 'keep'
+
+        $journal.phase = 'rolling-back'
+        $rollingDecision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
+        $rollingDecision.action | Should Be 'roll-back'
+        $rollingDecision.operations[0].action | Should Be 'none'
+    }
+
+    # Scenario: Restored bytes match the original, but the live identity matches neither the original nor its independent backup.
+    # Purpose: Preserve external-change refusal while permitting only the two explicitly recorded identities.
+    It 'UnitT151_refuses_restored_bytes_with_an_unrecorded_identity' {
+        $journal = Get-TestInstallJournalV1
+        $journal.operations = @($journal.operations[0])
+        $journal.operations[0].kind = 'remove-file'
+        $journal.operations[0].method = 'unlink'
+        $journal.operations[0].stageLeaf = $null
+        $journal.operations[0].state = 'rolled-back'
+        $journal.operations[0].applied.exists = $false
+        $journal.operations[0].applied.sha256 = $null
+        $journal.operations[0].applied.length = $null
+        $journal.operations[0].applied.identity = $null
+        $journal.phase = 'rolled-back'
+        $journal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20)
+        $observations = @{
+            1 = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].original
+        }
+        $observations[1].identity = [pscustomobject]@{
+            kind = 'windows-file-id'
+            device = '0x1A2B'
+            fileId = '0000ABCD:99999999'
+        }
+
+        $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
+        $decision.action | Should Be 'refuse'
+        ($decision.reasons -join ' ') | Should Match 'expected terminal state'
+    }
+
+    # Scenario: An applied operation claims an original backup exists but omits the identity recorded when that backup was created.
+    # Purpose: Refuse incomplete durable ownership evidence in the strict JSON reader.
+    It 'UnitT152_rejects_applied_operation_without_backup_identity' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'UnitT152 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.' }
+        $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
+        $journal = Get-TestInstallJournalV1
+        $journal.operations[0].backupIdentity = $null
+        $json = $journal | ConvertTo-Json -Depth 20
+
+        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'sequence 1.backupIdentity.*must not be null'
+        (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
+
+        $journal.operations[0].state = 'pending'
+        $json = $journal | ConvertTo-Json -Depth 20
+        { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json | Out-Null } | Should Not Throw
+        (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $true
+    }
+
+    # Scenario: A Windows journal supplies owner, group, or SACL sections that the platform permission setter cannot restore.
+    # Purpose: Keep the strict reader and schema limited to the same DACL-only SDDL accepted by the Windows runtime.
+    It 'UnitT153_rejects_non_dacl_windows_sddl_and_accepts_dacl_only' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'UnitT153 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.' }
+        $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
+        $invalidSddl = @(
+            'D:PAI(A;;FA;;;SY)O:SY'
+            'D:PAI(A;;FA;;;SY)G:SY'
+            'D:PAI(A;;FA;;;SY)S:PAI(AU;SA;FA;;;SY)'
+        )
+        foreach ($sddl in $invalidSddl) {
+            $journal = Get-TestInstallJournalV1
+            $journal.operations[0].permissions.sddl = $sddl
+            $json = $journal | ConvertTo-Json -Depth 20
+            (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'permissions.sddl.*only a DACL'
+            (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
+        }
+
+        $journal = Get-TestInstallJournalV1
+        $journal.operations[0].permissions.sddl = 'D:PAI(A;;FA;;;SY)'
+        $json = $journal | ConvertTo-Json -Depth 20
+        { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json | Out-Null } | Should Not Throw
+        (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $true
     }
 }

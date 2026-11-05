@@ -1396,7 +1396,7 @@ function Assert-AiInstructionsInstallJournalV1 {
     $expectedSequence = 1
     foreach ($operation in @($Journal.operations)) {
         $context = "AI instructions install journal operation sequence $expectedSequence"
-        Assert-AiInstructionsInstallJournalExactProperties -Object $operation -Names @('sequence','kind','method','targetRelativePath','stageLeaf','backupLeaf','original','applied','permissions','state') -Context $context
+        Assert-AiInstructionsInstallJournalExactProperties -Object $operation -Names @('sequence','kind','method','targetRelativePath','stageLeaf','backupLeaf','original','backupIdentity','applied','permissions','state') -Context $context
         Assert-AiInstructionsInstallJournalInteger -Value $operation.sequence -Context "$context.sequence" -Minimum 1
         if ([int64]$operation.sequence -ne $expectedSequence) { throw "$context.sequence must be $expectedSequence for a continuous sequence." }
         $sequence = [int64]$operation.sequence
@@ -1448,13 +1448,19 @@ function Assert-AiInstructionsInstallJournalV1 {
         if ($operation.original.exists -and $null -eq $operation.backupLeaf) { throw "$context.backupLeaf must not be null when original.exists is true." }
         Assert-AiInstructionsInstallJournalIdentity -Identity $operation.original.identity -Context "$context.original.identity" -ExpectedKind $expectedIdentityKind -AllowNull:(-not [bool]$operation.original.exists)
         if (-not $operation.original.exists -and $null -ne $operation.original.identity) { throw "$context.original.identity must be null when exists is false." }
+        $backupIdentityMayBeNull = -not [bool]$operation.original.exists -or [string]$operation.state -ceq 'pending'
+        Assert-AiInstructionsInstallJournalIdentity -Identity $operation.backupIdentity -Context "$context.backupIdentity" -ExpectedKind $expectedIdentityKind -AllowNull:$backupIdentityMayBeNull
+        if (-not $operation.original.exists -and $null -ne $operation.backupIdentity) { throw "$context.backupIdentity must be null when original.exists is false." }
         if ($operation.original.exists -and $null -eq $operation.permissions) { throw "$context.permissions must not be null when original.exists is true." }
         if ($null -ne $operation.permissions) {
             if ($operation.permissions.kind -isnot [string]) { throw "$context.permissions.kind is invalid." }
             if ([string]$operation.permissions.kind -ceq 'windows-sddl') {
                 Assert-AiInstructionsInstallJournalExactProperties -Object $operation.permissions -Names @('kind','sddl','readOnly') -Context "$context.permissions"
                 if ($operation.permissions.sddl -isnot [string] -or [string]::IsNullOrEmpty([string]$operation.permissions.sddl) -or
-                    ([string]$operation.permissions.sddl).Length -gt 4096 -or [string]$operation.permissions.sddl -match '[\x00-\x1f\x7f]') { throw "$context.permissions.sddl is invalid." }
+                    ([string]$operation.permissions.sddl).Length -gt 4096 -or [string]$operation.permissions.sddl -match '[\x00-\x1f\x7f]' -or
+                    [string]$operation.permissions.sddl -notmatch '^D:' -or [string]$operation.permissions.sddl -match '[OGS]:') {
+                    throw "$context.permissions.sddl must contain only a DACL SDDL policy."
+                }
                 if ($operation.permissions.readOnly -isnot [bool]) { throw "$context.permissions.readOnly must be a boolean." }
             }
             elseif ([string]$operation.permissions.kind -ceq 'unix-mode') {
@@ -1577,15 +1583,26 @@ function New-AiInstructionsInstallJournalV1 {
     return (Assert-AiInstructionsInstallJournalV1 -Journal $journal)
 }
 
+function Test-AiInstructionsInstallJournalIdentityMatch {
+    param([Parameter(Mandatory = $true)][object] $Observed,[Parameter(Mandatory = $true)][object] $Expected)
+    return [string]$Observed.kind -ceq [string]$Expected.kind -and
+        ([string]$Observed.device).ToLowerInvariant() -ceq ([string]$Expected.device).ToLowerInvariant() -and
+        ([string]$Observed.fileId).ToLowerInvariant() -ceq ([string]$Expected.fileId).ToLowerInvariant()
+}
+
 function Test-AiInstructionsInstallJournalStateMatch {
-    param([Parameter(Mandatory = $true)][object] $Observation,[Parameter(Mandatory = $true)][object] $State)
+    param(
+        [Parameter(Mandatory = $true)][object] $Observation,
+        [Parameter(Mandatory = $true)][object] $State,
+        [AllowNull()][object] $AlternativeIdentity = $null
+    )
     if ([bool]$Observation.exists -ne [bool]$State.exists) { return $false }
     if (-not [bool]$State.exists) { return $true }
     if ($null -eq $State.identity) { return $false }
-    return [string]$Observation.sha256 -ceq [string]$State.sha256 -and [int64]$Observation.length -eq [int64]$State.length -and
-        [string]$Observation.identity.kind -ceq [string]$State.identity.kind -and
-        ([string]$Observation.identity.device).ToLowerInvariant() -ceq ([string]$State.identity.device).ToLowerInvariant() -and
-        ([string]$Observation.identity.fileId).ToLowerInvariant() -ceq ([string]$State.identity.fileId).ToLowerInvariant()
+    if ([string]$Observation.sha256 -cne [string]$State.sha256 -or [int64]$Observation.length -ne [int64]$State.length) { return $false }
+    if (Test-AiInstructionsInstallJournalIdentityMatch -Observed $Observation.identity -Expected $State.identity) { return $true }
+    return $null -ne $AlternativeIdentity -and
+        (Test-AiInstructionsInstallJournalIdentityMatch -Observed $Observation.identity -Expected $AlternativeIdentity)
 }
 
 function Test-AiInstructionsInstallJournalPermissionsMatch {
@@ -1635,7 +1652,10 @@ function Get-AiInstructionsInstallRecoveryDecision {
             if ($expectedPermissionsKind -ceq 'windows-sddl') {
                 Assert-AiInstructionsInstallJournalExactProperties -Object $value.permissions -Names @('kind','sddl','readOnly') -Context "AI instructions install recovery observation sequence $sequence.permissions"
                 if ($value.permissions.sddl -isnot [string] -or [string]::IsNullOrEmpty([string]$value.permissions.sddl) -or
-                    ([string]$value.permissions.sddl).Length -gt 4096 -or [string]$value.permissions.sddl -match '[\x00-\x1f\x7f]') { throw "AI instructions install recovery observation sequence $sequence.permissions.sddl is invalid." }
+                    ([string]$value.permissions.sddl).Length -gt 4096 -or [string]$value.permissions.sddl -match '[\x00-\x1f\x7f]' -or
+                    [string]$value.permissions.sddl -notmatch '^D:' -or [string]$value.permissions.sddl -match '[OGS]:') {
+                    throw "AI instructions install recovery observation sequence $sequence.permissions.sddl must contain only a DACL SDDL policy."
+                }
                 if ($value.permissions.readOnly -isnot [bool]) { throw "AI instructions install recovery observation sequence $sequence.permissions.readOnly must be a boolean." }
             }
             else {
@@ -1658,7 +1678,7 @@ function Get-AiInstructionsInstallRecoveryDecision {
     foreach ($operation in @($Journal.operations)) {
         $sequence = [int64]$operation.sequence
         $matchesApplied[$sequence] = Test-AiInstructionsInstallJournalStateMatch -Observation $bySequence[$sequence] -State $operation.applied
-        $matchesOriginal[$sequence] = Test-AiInstructionsInstallJournalStateMatch -Observation $bySequence[$sequence] -State $operation.original
+        $matchesOriginal[$sequence] = Test-AiInstructionsInstallJournalStateMatch -Observation $bySequence[$sequence] -State $operation.original -AlternativeIdentity $operation.backupIdentity
         $permissionsMatchOriginal[$sequence] = $true
         if ([string]$Journal.phase -cne 'committed' -and $matchesOriginal[$sequence] -and [bool]$operation.original.exists -and $null -ne $operation.permissions) {
             $permissionsMatchOriginal[$sequence] = Test-AiInstructionsInstallJournalPermissionsMatch -Observation $bySequence[$sequence] -Permissions $operation.permissions

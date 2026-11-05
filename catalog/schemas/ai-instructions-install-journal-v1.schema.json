@@ -115,6 +115,7 @@
             "items": {
               "properties": {
                 "original": { "properties": { "identity": { "$ref": "#/$defs/windowsIdentityOrNull" } } },
+                "backupIdentity": { "$ref": "#/$defs/windowsIdentityOrNull" },
                 "applied": { "properties": { "identity": { "$ref": "#/$defs/windowsIdentityOrNull" } } },
                 "permissions": { "properties": { "kind": { "const": "windows-sddl" } } }
               }
@@ -129,6 +130,7 @@
             "items": {
               "properties": {
                 "original": { "properties": { "identity": { "$ref": "#/$defs/unixIdentityOrNull" } } },
+                "backupIdentity": { "$ref": "#/$defs/unixIdentityOrNull" },
                 "applied": { "properties": { "identity": { "$ref": "#/$defs/unixIdentityOrNull" } } },
                 "permissions": { "properties": { "kind": { "const": "unix-mode" } } }
               }
@@ -231,7 +233,7 @@
           "required": ["kind", "sddl", "readOnly"],
           "properties": {
             "kind": { "const": "windows-sddl" },
-            "sddl": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000-\\u001F\\u007F]+$" },
+            "sddl": { "type": "string", "minLength": 2, "maxLength": 4096, "pattern": "^(?!.*[OoGgSs]:)[Dd]:[^\\u0000-\\u001F\\u007F]*$" },
             "readOnly": { "type": "boolean" }
           }
         },
@@ -259,6 +261,7 @@
         "stageLeaf",
         "backupLeaf",
         "original",
+        "backupIdentity",
         "applied",
         "permissions",
         "state"
@@ -286,6 +289,7 @@
           ]
         },
         "original": { "$ref": "#/$defs/fileState" },
+        "backupIdentity": { "$ref": "#/$defs/identity" },
         "applied": { "$ref": "#/$defs/fileState" },
         "permissions": { "$ref": "#/$defs/permissions" },
         "state": { "enum": ["pending", "staged", "applied", "rolled-back"] }
@@ -334,6 +338,24 @@
               "backupLeaf": { "$ref": "#/$defs/portableLeaf" },
               "original": { "properties": { "identity": { "$ref": "#/$defs/identityObject" } } },
               "permissions": { "not": { "type": "null" } }
+            }
+          },
+          "else": {
+            "properties": {
+              "backupIdentity": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "original": { "properties": { "exists": { "const": true } } },
+              "state": { "enum": ["staged", "applied", "rolled-back"] }
+            }
+          },
+          "then": {
+            "properties": {
+              "backupIdentity": { "$ref": "#/$defs/identityObject" }
             }
           }
         },

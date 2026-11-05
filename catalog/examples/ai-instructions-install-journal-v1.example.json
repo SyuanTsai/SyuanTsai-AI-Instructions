@@ -39,6 +39,11 @@
           "fileId": "0000ABCD:00001233"
         }
       },
+      "backupIdentity": {
+        "kind": "windows-file-id",
+        "device": "0x1A2B",
+        "fileId": "0000ABCD:00001235"
+      },
       "applied": {
         "exists": true,
         "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
@@ -51,7 +56,7 @@
       },
       "permissions": {
         "kind": "windows-sddl",
-        "sddl": "O:SYG:SYD:PAI(A;;FA;;;SY)",
+        "sddl": "D:PAI(A;;FA;;;SY)",
         "readOnly": false
       },
       "state": "applied"
@@ -69,6 +74,7 @@
         "length": null,
         "identity": null
       },
+      "backupIdentity": null,
       "applied": {
         "exists": true,
         "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
