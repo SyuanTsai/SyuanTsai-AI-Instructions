@@ -783,9 +783,9 @@ function Assert-ManagedManifestV3 {
 }
 
 function Test-IsManagedManifestV4InstructionLicensePath {
-    param([Parameter(Mandatory = $true)][string] $Host,[object] $Value)
+    param([Parameter(Mandatory = $true)][string] $InstructionHost,[object] $Value)
     if (-not (Test-IsSafeRepositoryPath -Value $Value)) { return $false }
-    $namespace = switch ($Host) {
+    $namespace = switch ($InstructionHost) {
         'codex' { '.codex' }
         'copilot' { '.github' }
         default { return $false }
@@ -794,9 +794,9 @@ function Test-IsManagedManifestV4InstructionLicensePath {
 }
 
 function Test-IsManagedManifestV4InstructionTarget {
-    param([Parameter(Mandatory = $true)][string] $Host,[Parameter(Mandatory = $true)][string] $TargetPath)
-    if (Test-IsManagedManifestV4InstructionLicensePath -Host $Host -Value $TargetPath) { return $true }
-    switch ($Host) {
+    param([Parameter(Mandatory = $true)][string] $InstructionHost,[Parameter(Mandatory = $true)][string] $TargetPath)
+    if (Test-IsManagedManifestV4InstructionLicensePath -InstructionHost $InstructionHost -Value $TargetPath) { return $true }
+    switch ($InstructionHost) {
         'codex' { return $TargetPath -ceq 'AGENTS.md' -or $TargetPath -cmatch '^\.codex/AI-Rules/[^/\\]+\.en\.md$' }
         'copilot' { return $TargetPath -ceq '.github/copilot-instructions.md' -or $TargetPath -cmatch '^\.github/AI-Rules/[^/\\]+\.en\.md$' }
         'claude' { return $TargetPath -ceq 'CLAUDE.md' -or $TargetPath -cmatch '^\.claude/AI-Rules/[^/\\]+\.en\.md$' }
@@ -968,13 +968,13 @@ function Assert-ManagedManifestV4 {
         Assert-Sha256 -Value (Get-RequiredProperty -Object $entry -Name 'sha256' -Context "managed manifest file '$artifactId'") -Context "managed manifest file '$artifactId' sha256"
 
         if ([string]$artifactType -ceq 'instruction') {
-            $host = Get-RequiredProperty -Object $entry -Name 'host' -Context "managed manifest instruction '$artifactId'"
-            Assert-NonEmptyString -Value $host -Context "managed manifest instruction '$artifactId' host"
-            if (@('codex','copilot','claude') -cnotcontains [string]$host) { throw "Unknown managed manifest instruction host '$host'." }
+            $instructionHost = Get-RequiredProperty -Object $entry -Name 'host' -Context "managed manifest instruction '$artifactId'"
+            Assert-NonEmptyString -Value $instructionHost -Context "managed manifest instruction '$artifactId' host"
+            if (@('codex','copilot','claude') -cnotcontains [string]$instructionHost) { throw "Unknown managed manifest instruction host '$instructionHost'." }
             Assert-StableId -Value (Get-RequiredProperty -Object $entry -Name 'rendererId' -Context "managed manifest instruction '$artifactId'") -Context "managed manifest instruction '$artifactId' rendererId"
             Assert-Sha256 -Value (Get-RequiredProperty -Object $entry -Name 'rendererSha256' -Context "managed manifest instruction '$artifactId'") -Context "managed manifest instruction '$artifactId' rendererSha256"
-            if (-not (Test-IsManagedManifestV4InstructionTarget -Host ([string]$host) -TargetPath ([string]$targetPath))) {
-                throw "Managed instruction '$artifactId' target path is not allowed for host '$host': $targetPath"
+            if (-not (Test-IsManagedManifestV4InstructionTarget -InstructionHost ([string]$instructionHost) -TargetPath ([string]$targetPath))) {
+                throw "Managed instruction '$artifactId' target path is not allowed for host '$instructionHost': $targetPath"
             }
         }
         else {

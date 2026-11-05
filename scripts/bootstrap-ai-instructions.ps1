@@ -1106,13 +1106,16 @@ function Invoke-Git {
     )
 
     $previousErrorActionPreference = $ErrorActionPreference
+    $previousConsoleOutputEncoding = [Console]::OutputEncoding
     try {
         $ErrorActionPreference = 'Continue'
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
         $output = & $GitExecutable -C $Repository @Arguments 2>&1
         $exitCode = $LASTEXITCODE
     }
     finally {
         $ErrorActionPreference = $previousErrorActionPreference
+        [Console]::OutputEncoding = $previousConsoleOutputEncoding
     }
 
     if ($exitCode -ne 0) {
@@ -1571,12 +1574,7 @@ function Get-ManagedWorktreeRoots {
         [switch] $Strict
     )
 
-    $previousConsoleOutputEncoding = [Console]::OutputEncoding
-    try {
-        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-        $output = @(Invoke-Git -Repository $Repository -Arguments @('worktree','list','--porcelain','-z'))
-    }
-    finally { [Console]::OutputEncoding = $previousConsoleOutputEncoding }
+    $output = @(Invoke-Git -Repository $Repository -Arguments @('worktree','list','--porcelain','-z'))
     foreach ($record in @(ConvertFrom-GitWorktreePorcelainZ -Output $output -Strict:$Strict)) {
         if ([bool]$record.Prunable) { continue }
         [string]$record.Path
@@ -4035,14 +4033,12 @@ function Restore-SkillMigrationJournal {
 $script:SkillMigrationJournalContext = $null
 $syncStartPath = Get-FullPathWithoutTrailingSeparator -Path (Get-Location).Path
 if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
-    $previousErrorActionPreference = $ErrorActionPreference
     try {
-        $ErrorActionPreference = 'Continue'
-        $resolvedRoot = & $GitExecutable -C (Get-Location).Path rev-parse --show-toplevel 2>$null
-        $resolveExitCode = $LASTEXITCODE
+        $resolvedRoot = @(Invoke-Git -Repository (Get-Location).Path -Arguments @('rev-parse','--show-toplevel'))
+        $resolveExitCode = 0
     }
-    finally {
-        $ErrorActionPreference = $previousErrorActionPreference
+    catch {
+        $resolveExitCode = 1
     }
 
     if ($resolveExitCode -ne 0) {

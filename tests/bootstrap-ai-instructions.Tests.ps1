@@ -979,6 +979,62 @@ if errorlevel 1 exit /b 92
         }
     }
 
+    # Scenario: The child PowerShell process decodes native Git output using a non-UTF-8 console encoding.
+    # Purpose: Worktree enumeration must preserve a non-ASCII path exactly and restore the caller's encoding.
+    It 'InterT68i_decodes_non_ascii_worktree_paths_as_utf8_and_restores_console_output_encoding' {
+        $unicodeWorktreeName = ([string][char]0x5DE5) + ([string][char]0x4F5C) + ([string][char]0x6A39) + '-' + ([string][char]0x00FC) + '-encoding'
+        $linkedRoot = Join-Path $TestDrive $unicodeWorktreeName
+        Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','linked-unicode-encoding-fixture',$linkedRoot) | Out-Null
+        try {
+            $bootstrapBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script:BootstrapScript))
+            $linkedRootBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($linkedRoot))
+            $childScript = @'
+$bootstrapScript = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__BOOTSTRAP_SCRIPT__'))
+$expectedRoot = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__LINKED_ROOT__'))
+Import-Module (Join-Path (Split-Path -Parent $bootstrapScript) 'skills-catalog-contract.psm1') -Force
+$tokens = $null
+$parseErrors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile($bootstrapScript,[ref]$tokens,[ref]$parseErrors)
+if ($parseErrors.Count -ne 0) { throw 'Bootstrap script did not parse.' }
+foreach ($functionName in @('Invoke-Git','Get-ManagedWorktreeRoots')) {
+    $definition = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $functionName },$true))[0]
+    if ($null -eq $definition) { throw "Missing bootstrap helper: $functionName" }
+    . ([scriptblock]::Create($definition.Extent.Text))
+}
+$GitExecutable = (Get-Command git -CommandType Application | Select-Object -First 1).Source
+$originalEncoding = [Console]::OutputEncoding
+try {
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $nonUtf8Encoding = [Text.Encoding]::GetEncoding('windows-1252')
+    }
+    else {
+        $nonUtf8Encoding = [Text.Encoding]::GetEncoding('ISO-8859-1')
+    }
+    [Console]::OutputEncoding = $nonUtf8Encoding
+    $expectedEncodingCodePage = [Console]::OutputEncoding.CodePage
+    $roots = @(Get-ManagedWorktreeRoots -Repository $expectedRoot -Strict)
+    $found = $false
+    foreach ($root in $roots) {
+        if ([string]::Equals([string]$root,$expectedRoot,[StringComparison]::Ordinal)) { $found = $true; break }
+    }
+    if (-not $found) { throw 'The UTF-8-decoded worktree list did not contain the exact linked worktree path.' }
+    if ([Console]::OutputEncoding.CodePage -ne $expectedEncodingCodePage) { throw 'Invoke-Git did not restore Console.OutputEncoding.' }
+}
+finally {
+    [Console]::OutputEncoding = $originalEncoding
+}
+'@.Replace('__BOOTSTRAP_SCRIPT__',$bootstrapBase64).Replace('__LINKED_ROOT__',$linkedRootBase64)
+            $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
+            $output = & $script:TestPowerShellExecutable -NoProfile -NonInteractive -EncodedCommand $encodedCommand 2>&1
+
+            $LASTEXITCODE | Should Be 0
+            (ConvertTo-TestDiagnosticText -Output $output) | Should BeNullOrEmpty
+        }
+        finally {
+            Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
+        }
+    }
+
     # Scenario: Strict linked-manifest inspection reaches an existing manifest but its path safety check fails with I/O.
     # Purpose: Propagate non-reparse inspection errors instead of treating the manifest as absent.
     It 'InterT68h_fails_closed_when_strict_manifest_path_safety_throws_io' {

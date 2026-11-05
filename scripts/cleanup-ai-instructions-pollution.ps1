@@ -71,12 +71,17 @@ Import-Module (Join-Path (Split-Path -Parent $runtimeContractPath) 'license-deli
 function Invoke-CleanupGit {
     param([Parameter(Mandatory = $true)][string] $Repository,[Parameter(Mandatory = $true)][string[]] $Arguments)
     $previousPreference = $ErrorActionPreference
+    $previousConsoleOutputEncoding = [Console]::OutputEncoding
     try {
         $ErrorActionPreference = 'Continue'
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
         $output = & $GitExecutable -C $Repository @Arguments 2>&1
         $exitCode = $LASTEXITCODE
     }
-    finally { $ErrorActionPreference = $previousPreference }
+    finally {
+        $ErrorActionPreference = $previousPreference
+        [Console]::OutputEncoding = $previousConsoleOutputEncoding
+    }
     if ($exitCode -ne 0) { throw "git $($Arguments -join ' ') failed: $($output -join [Environment]::NewLine)" }
     return $output
 }
@@ -650,12 +655,7 @@ function Get-CleanupWorktreeRoots {
         [switch] $Strict
     )
 
-    $previousConsoleOutputEncoding = [Console]::OutputEncoding
-    try {
-        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-        $output = @(Invoke-CleanupGit -Repository $Repository -Arguments @('worktree','list','--porcelain','-z'))
-    }
-    finally { [Console]::OutputEncoding = $previousConsoleOutputEncoding }
+    $output = @(Invoke-CleanupGit -Repository $Repository -Arguments @('worktree','list','--porcelain','-z'))
     foreach ($record in @(ConvertFrom-GitWorktreePorcelainZ -Output $output -Strict:$Strict)) {
         if ([bool]$record.Prunable) { continue }
         [string]$record.Path
