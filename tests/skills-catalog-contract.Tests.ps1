@@ -109,7 +109,7 @@ function Get-TestManagedManifestV4 {
 
     # Scenario: Git worktree porcelain uses SHA-256 object IDs in a SHA-256 repository.
     # Purpose: Accept both SHA-1 and SHA-256 HEAD records while retaining strict parsing.
-    It 'UnitT_worktree_parser_accepts_sha256_oid_porcelain_records' {
+    It 'UnitT03_worktree_parser_accepts_sha256_oid_porcelain_records' {
         $mainPath = 'C:/repo/main'
         $linkedPath = 'C:/repo/linked'
         $sha256Oid = 'a' * 64
@@ -126,7 +126,7 @@ function Get-TestManagedManifestV4 {
 
     # Scenario: The installed Git supports SHA-256 repositories and linked worktrees.
     # Purpose: Exercise strict parsing against real `git worktree list --porcelain -z` output.
-    It 'UnitT_worktree_parser_strictly_accepts_a_sha256_repository_when_supported' {
+    It 'UnitT04_worktree_parser_strictly_accepts_a_sha256_repository_when_supported' {
         $repositoryPath = Join-Path $TestDrive 'sha256-worktree-repository'
         New-Item -ItemType Directory -Path $repositoryPath -Force | Out-Null
         $initOutput = @(& git -C $repositoryPath init --object-format=sha256 2>&1)

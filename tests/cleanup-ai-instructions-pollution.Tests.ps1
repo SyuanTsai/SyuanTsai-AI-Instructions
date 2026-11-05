@@ -463,6 +463,35 @@ Describe 'tracked AI instructions pollution cleanup' {
         }
     }
 
+    # Scenario: Git retains a prunable linked worktree record whose local manifest is schema-v4.
+    # Purpose: Ignore stale records consistently during optimistic, locked, and shared-exclude cleanup scans.
+    It 'InterT69f_ignores_a_prunable_linked_worktree_v4_manifest_in_all_cleanup_scans' {
+        $targetRoot = Join-Path $TestDrive 'prunable-v4-cleanup'
+        New-PollutedTestRepository -Path $targetRoot
+        $linkedRoot = Join-Path $TestDrive 'prunable-v4-cleanup-worktree'
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','prunable-v4-cleanup-fixture',$linkedRoot) | Out-Null
+        try {
+            $linkedManifestPath = Join-Path $linkedRoot $script:ManifestRelativePath
+            $linkedManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $linkedManifestPath | ConvertFrom-Json
+            $linkedManifest.schemaVersion = 4
+            $linkedManifest.files[0].targetPath = 'stale-prunable-cleanup-only.md'
+            Set-CleanupTestText -Path $linkedManifestPath -Value (($linkedManifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+            Remove-Item -LiteralPath (Join-Path $linkedRoot '.git') -Force
+
+            (@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('worktree','list','--porcelain')) -join "`n") | Should Match 'prunable'
+            $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+
+            $result.ExitCode | Should Be 0
+            $excludePath = (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
+            if (-not [IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+            (Get-Content -Raw -LiteralPath $excludePath) | Should Not Match [regex]::Escape('stale-prunable-cleanup-only.md')
+        }
+        finally {
+            Remove-Item -LiteralPath $linkedRoot -Recurse -Force -ErrorAction SilentlyContinue
+            Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('worktree','prune') | Out-Null
+        }
+    }
+
     # Scenario: The optimistic worktree inventory succeeds, but the strict inventory under the cleanup lock fails.
     # Purpose: Fail closed before cleanup changes the index, shared exclusions, or managed bytes.
     It 'InterT69a_fails_closed_when_the_locked_worktree_inventory_fails' {

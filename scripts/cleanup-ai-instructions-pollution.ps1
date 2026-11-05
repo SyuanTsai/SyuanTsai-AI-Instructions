@@ -657,7 +657,7 @@ function Get-CleanupWorktreeRoots {
     }
     finally { [Console]::OutputEncoding = $previousConsoleOutputEncoding }
     foreach ($record in @(ConvertFrom-GitWorktreePorcelainZ -Output $output -Strict:$Strict)) {
-        if ($Strict -and [bool]$record.Prunable) { continue }
+        if ([bool]$record.Prunable) { continue }
         [string]$record.Path
     }
 }

@@ -1055,7 +1055,9 @@ if errorlevel 1 exit /b 92
             $linkedManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $linkedManifestPath | ConvertFrom-Json
             $linkedManifest.schemaVersion = 4
             $sentinel = 'reparse-backed-linked-v4-manifest-must-not-be-read'
-            $linkedManifest.sourceRef = $sentinel
+            $sourceRefEntry = @($linkedManifest.files | Where-Object { $null -ne $_.PSObject.Properties['sourceRef'] } | Select-Object -First 1)
+            $sourceRefEntry.Count | Should Be 1
+            $sourceRefEntry[0].sourceRef = $sentinel
             Set-TestText -Path $linkedManifestPath -Value (($linkedManifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
             $linkedCodexPath = Join-Path $linkedRoot '.codex'
             $externalCodexPath = Join-Path $TestDrive 'linked-reparse-v4-content'
@@ -1104,6 +1106,34 @@ if errorlevel 1 exit /b 92
         }
         finally {
             Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
+        }
+    }
+
+    # Scenario: Git retains a prunable linked worktree record whose local manifest is schema-v4.
+    # Purpose: Ignore stale records consistently during optimistic, locked, and shared-exclude scans.
+    It 'InterT68h_ignores_a_prunable_linked_worktree_v4_manifest_in_all_bootstrap_scans' {
+        $linkedRoot = Join-Path $TestDrive 'prunable-v4-bootstrap-worktree'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','prunable-v4-bootstrap-fixture',$linkedRoot) | Out-Null
+        try {
+            Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $linkedRoot | Out-Null
+            $linkedManifestPath = Join-Path $linkedRoot $script:ManifestPath
+            $linkedManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $linkedManifestPath | ConvertFrom-Json
+            $linkedManifest.schemaVersion = 4
+            $linkedManifest.files[0].targetPath = 'stale-prunable-bootstrap-only.md'
+            Set-TestText -Path $linkedManifestPath -Value (($linkedManifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+            Remove-Item -LiteralPath (Join-Path $linkedRoot '.git') -Force
+
+            (@(Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','list','--porcelain')) -join "`n") | Should Match 'prunable'
+            $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+            $output | Should Not BeNullOrEmpty
+            $excludePath = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
+            if (-not [IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+            (Get-Content -Raw -LiteralPath $excludePath) | Should Not Match [regex]::Escape('stale-prunable-bootstrap-only.md')
+        }
+        finally {
+            Remove-Item -LiteralPath $linkedRoot -Recurse -Force -ErrorAction SilentlyContinue
+            Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','prune') | Out-Null
         }
     }
 
