@@ -248,6 +248,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "catalog/examples/user-skills-managed-manifest-v3.example.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "catalog/schemas/ai-instructions-sync-v4.schema.json",
       "license": "Apache-2.0"
     },
@@ -301,6 +305,10 @@
     },
     {
       "path": "catalog/schemas/user-skills-managed-manifest-v2.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/schemas/user-skills-managed-manifest-v3.schema.json",
       "license": "Apache-2.0"
     },
     {

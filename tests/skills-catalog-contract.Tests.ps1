@@ -15,6 +15,7 @@ $script:CatalogV3Example = Join-Path $script:RepositoryRoot 'catalog\examples\sk
 $script:LockV3Example = Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog-lock-v3.example.json'
 $script:ManifestV3Example = Join-Path $script:RepositoryRoot 'catalog\examples\managed-manifest-v3.example.json'
 $script:UserManifestV2Example = Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v2.example.json'
+$script:UserManifestV3Example = Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v3.example.json'
 $script:ConfigurationExample = Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v4.example.json'
 $script:FixtureRoot = Join-Path $PSScriptRoot 'fixtures\skills-catalog-contract'
 
@@ -80,7 +81,7 @@ function Get-TestRawSha256 {
         $schemaRoot = Join-Path $script:RepositoryRoot 'catalog\schemas'
         $schemaFiles = @(Get-ChildItem -LiteralPath $schemaRoot -File -Filter '*.schema.json')
 
-        $schemaFiles.Count | Should Be 14
+        $schemaFiles.Count | Should Be 15
         foreach ($schemaFile in $schemaFiles) {
             $schema = Import-SkillsCatalogJson -Path $schemaFile.FullName -DocumentName $schemaFile.Name
             $schema.'$schema' | Should Be 'https://json-schema.org/draft/2020-12/schema'
@@ -335,6 +336,124 @@ function Get-TestRawSha256 {
         $catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'
         $catalog | Add-Member -NotePropertyName targetRoot -NotePropertyValue '.agents/skills'
         { Assert-SkillsCatalogV3 -Catalog $catalog } | Should Throw "Skills Catalog contains unsupported property 'targetRoot'."
+    }
+
+    # Scenario: The reader receives the checked-in multi-projection USER manifest.
+    # Purpose: Establish v3 reader support without changing the v1/v2 reconciler writer.
+    It 'UnitT11l_accepts_the_user_manifest_v3_example' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        $catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'
+        { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Not Throw
+        @($manifest.projections).Count | Should Be 2
+        [string]$manifest.catalogId | Should Be ([string]$catalog.catalogId)
+        [string]$manifest.lockSha256 | Should Be (Get-TestRawSha256 -Path $script:LockV3Example)
+        [string]$manifest.projectionContractSha256 | Should Be (Get-SkillsCatalogProjectionContractSha256 -Projections $catalog.projections)
+    }
+
+    # Scenario: A USER manifest projection ID is not in the fixed projection table.
+    # Purpose: Reject invented USER destination namespaces.
+    It 'UnitT11m_rejects_an_unknown_user_manifest_projection' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        $manifest.projections[1] = 'user-unknown'
+        { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Throw
+    }
+
+    # Scenario: A USER manifest selects a known project-scoped projection.
+    # Purpose: Keep USER ownership separate from project projection roots.
+    It 'UnitT11n_rejects_a_non_user_manifest_projection' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        $manifest.projections[1] = 'project-agents'
+        { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Throw
+    }
+
+    # Scenario: A USER manifest lists a projection twice.
+    # Purpose: Keep projection parity comparison unambiguous.
+    It 'UnitT11o_rejects_duplicate_user_manifest_projections' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        $manifest.projections = @('user-agents','user-agents')
+        { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Throw
+    }
+
+    # Scenario: A file names a valid USER projection omitted from the manifest projection set.
+    # Purpose: Bind every owned path to an explicitly selected projection.
+    It 'UnitT11p_rejects_a_file_projection_not_listed_by_the_manifest' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        $manifest.projections = @('user-agents')
+        { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Throw
+    }
+
+    # Scenario: A file target uses another projection's root.
+    # Purpose: Bind projectionId to its fixed target root and Skill namespace.
+    It 'UnitT11q_rejects_a_target_outside_its_projection_root' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        @($manifest.files | Where-Object { $_.projectionId -ceq 'user-claude' })[0].targetPath = '.agents/skills/work-with-jira/SKILL.md'
+        { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Throw
+    }
+
+    # Scenario: Two entries claim target paths that differ only by case.
+    # Purpose: Preserve the v2 duplicate-path protection for Windows USER roots.
+    It 'UnitT11r_rejects_duplicate_user_manifest_target_paths' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        $duplicate = $manifest.files[0].PSObject.Copy()
+        $duplicate.targetPath = '.agents/skills/work-with-jira/skill.md'
+        $manifest.files += $duplicate
+        { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Throw
+    }
+
+    # Scenario: One projection omits a relative payload file present in the baseline projection.
+    # Purpose: Require complete per-Skill projection parity.
+    It 'UnitT11s_rejects_projection_parity_with_a_missing_file' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        $manifest.files = @($manifest.files | Where-Object { $_.targetPath -cne '.claude/skills/work-with-jira/.ai-instructions-licenses/source/THIRD_PARTY_LICENSES.md' })
+        { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Throw
+    }
+
+    # Scenario: Corresponding projection files contain different content hashes.
+    # Purpose: Prevent projection destinations from silently diverging.
+    It 'UnitT11t_rejects_projection_parity_with_a_different_hash' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        @($manifest.files | Where-Object { $_.targetPath -ceq '.claude/skills/work-with-jira/SKILL.md' })[0].sha256 = '9' * 64
+        { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Throw
+    }
+
+    # Scenario: A Skill appears in only one selected projection.
+    # Purpose: Require every selected projection to contain every managed Skill.
+    It 'UnitT11u_rejects_a_skill_missing_from_one_projection' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        $manifest.files = @($manifest.files | Where-Object { -not ($_.skillId -ceq 'manage-task-handoff' -and $_.projectionId -ceq 'user-claude') })
+        { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Throw
+    }
+
+    # Scenario: Corresponding files for one Skill disagree on immutable source provenance.
+    # Purpose: Prevent projections from claiming different source identities for the same Skill.
+    It 'UnitT11v_rejects_inconsistent_source_fields_for_one_skill' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        @($manifest.files | Where-Object { $_.targetPath -ceq '.claude/skills/work-with-jira/SKILL.md' })[0].sourceRef = 'v2.0.0'
+        { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Throw
+    }
+
+    # Scenario: A license delivery entry is placed under another projection root.
+    # Purpose: Keep license ownership inside the file's declared projection namespace.
+    It 'UnitT11w_rejects_a_license_path_outside_its_projection_root' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        @($manifest.files | Where-Object { $_.targetPath -cmatch '^\.claude/.+THIRD_PARTY_LICENSES' })[0].targetPath = '.agents/skills/work-with-jira/.ai-instructions-licenses/source/THIRD_PARTY_LICENSES.md'
+        { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Throw
+    }
+
+    # Scenario: A USER manifest uses generation zero.
+    # Purpose: Reserve positive generations for persisted projection state.
+    It 'UnitT11x_rejects_generation_zero' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        $manifest.generation = 0
+        { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Throw
+    }
+
+    # Scenario: A USER manifest carries an undeclared top-level property.
+    # Purpose: Keep parser behavior aligned with additionalProperties=false.
+    It 'UnitT11y_rejects_an_unknown_user_manifest_top_level_property' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        $manifest | Add-Member -NotePropertyName targetRoot -NotePropertyValue '.agents/skills'
+        { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Throw
     }
 
     # Scenario: A user Skills v2 manifest carries source-root licensing documents and its generated delivery receipt.
@@ -779,8 +898,13 @@ function Get-TestRawSha256 {
         $userSchema = Import-SkillsCatalogJson `
             -Path (Join-Path $script:RepositoryRoot 'catalog\schemas\user-skills-managed-manifest-v1.schema.json') `
             -DocumentName 'user Skills managed manifest schema'
+        $userV3Schema = Import-SkillsCatalogJson `
+            -Path (Join-Path $script:RepositoryRoot 'catalog\schemas\user-skills-managed-manifest-v3.schema.json') `
+            -DocumentName 'user Skills managed manifest v3 schema'
         $managedPattern = [string]$managedSchema.'$defs'.repositoryPath.pattern
         $userPattern = [string]$userSchema.'$defs'.repositoryPath.pattern
+        $userV3Pattern = [string]$userV3Schema.'$defs'.repositoryPath.pattern
+        $userV3Pattern | Should Be $userPattern
         $catalogV3Schema = Import-SkillsCatalogJson `
             -Path (Join-Path $script:RepositoryRoot 'catalog\schemas\skills-catalog-v3.schema.json') `
             -DocumentName 'Skills Catalog v3 schema'

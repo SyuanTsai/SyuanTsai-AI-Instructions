@@ -148,6 +148,49 @@ Describe 'user-scoped Agent Skills reconciliation' {
         Test-Path -LiteralPath $workingRoot | Should Be $false
     }
 
+    # Scenario: Apply encounters an existing projection-aware USER manifest.
+    # Purpose: Fail closed before creating locks, journals, backups, or changing managed bytes.
+    It 'UnitT00a_rejects_an_existing_v3_manifest_before_apply_mutation' {
+        $userHome = Join-Path $TestDrive 'existing-v3-apply'
+        $agentsRoot = Join-Path $userHome '.agents'
+        $target = Join-Path $agentsRoot 'skills\work-with-jira\SKILL.md'
+        $manifestPath = Join-Path $agentsRoot 'catalog-skills.manifest.json'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+        $originalBytes = [byte[]]@(0,10,13,128,255)
+        [System.IO.File]::WriteAllBytes($target,$originalBytes)
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v3.example.json') -Destination $manifestPath
+        $desired = New-TestDesiredState -Root (Join-Path $TestDrive 'existing-v3-apply-staging')
+
+        { Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply } |
+            Should Throw 'USER managed manifest schema version 3 requires a projection-aware installer.'
+
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($target)) | Should Be ([Convert]::ToBase64String($originalBytes))
+        Test-Path -LiteralPath (Join-Path $agentsRoot 'update-agent-environment.lock') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $agentsRoot 'update-agent-environment.recovery.json') | Should Be $false
+    }
+
+    # Scenario: Recovery encounters an existing projection-aware USER manifest and a retained journal.
+    # Purpose: Fail closed before interpreting the journal or restoring any USER file.
+    It 'UnitT00b_rejects_an_existing_v3_manifest_before_recovery_mutation' {
+        $userHome = Join-Path $TestDrive 'existing-v3-recovery'
+        $agentsRoot = Join-Path $userHome '.agents'
+        $target = Join-Path $agentsRoot 'skills\work-with-jira\SKILL.md'
+        $manifestPath = Join-Path $agentsRoot 'catalog-skills.manifest.json'
+        $journalPath = Join-Path $agentsRoot 'update-agent-environment.recovery.json'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+        $originalBytes = [byte[]]@(255,128,13,10,0)
+        [System.IO.File]::WriteAllBytes($target,$originalBytes)
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v3.example.json') -Destination $manifestPath
+        [System.IO.File]::WriteAllText($journalPath,'preserve-invalid-journal')
+
+        { Invoke-UserSkillsRecovery -UserHome $userHome } |
+            Should Throw 'USER managed manifest schema version 3 requires a projection-aware installer.'
+
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($target)) | Should Be ([Convert]::ToBase64String($originalBytes))
+        [System.IO.File]::ReadAllText($journalPath) | Should Be 'preserve-invalid-journal'
+        Test-Path -LiteralPath (Join-Path $agentsRoot 'update-agent-environment.lock') | Should Be $false
+    }
+
     # Scenario: USER receives nested scripts, references and binary assets and then an updated resource inventory.
     # Purpose: Verify raw bytes, resource update/prune, complete ownership and a stable second apply in USER.
     It 'InterT01_reconciles_recursive_resources_and_binary_bytes_only_in_USER' {

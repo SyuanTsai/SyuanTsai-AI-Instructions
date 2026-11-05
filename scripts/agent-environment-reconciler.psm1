@@ -563,6 +563,11 @@ function Get-AgentEnvironmentManifest {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
     try { $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $Path | ConvertFrom-Json }
     catch { throw "User Skills managed manifest is not valid JSON: $($_.Exception.Message)" }
+    if ($null -ne $manifest.PSObject.Properties['schemaVersion'] -and
+        ($manifest.schemaVersion -is [int] -or $manifest.schemaVersion -is [long]) -and
+        [int64]$manifest.schemaVersion -eq 3) {
+        throw 'USER managed manifest schema version 3 requires a projection-aware installer.'
+    }
     Assert-UserSkillsManagedManifest -Manifest $manifest
     return $manifest
 }
@@ -684,6 +689,7 @@ function Invoke-UserSkillsReconciliation {
     $journalRelative = '.agents/update-agent-environment.recovery.json'
     $manifestRelative = '.agents/catalog-skills.manifest.json'
     $manifestPath = Get-AgentEnvironmentFullPath -Root $home -RelativePath $manifestRelative
+    $existingManifest = Get-AgentEnvironmentManifest -Path $manifestPath
     if (Test-Path -LiteralPath $journalPath) {
         Assert-AgentEnvironmentPathSafe -Root $home -RelativePath $journalRelative | Out-Null
         if (-not (Test-Path -LiteralPath $journalPath -PathType Leaf)) { throw 'Agent environment recovery journal path must be a file.' }
@@ -757,7 +763,7 @@ function Invoke-UserSkillsReconciliation {
             if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw 'User Skills managed manifest path must be a file.' }
         }
         $manifestObservation = Get-AgentEnvironmentObservedState -Root $home -RelativePath $manifestRelative
-        $existing = Get-AgentEnvironmentManifest -Path $manifestPath
+        $existing = $existingManifest
         $oldByPath = @{}
         if ($null -ne $existing) { foreach ($file in @($existing.files)) { $oldByPath[[string]$file.targetPath] = $file } }
         $desiredByPath = @{}
@@ -1094,9 +1100,11 @@ function Invoke-UserSkillsRecovery {
     $agentsRoot = Join-Path $home '.agents'
     $journalPath = Join-Path $agentsRoot 'update-agent-environment.recovery.json'
     $lockPath = Join-Path $agentsRoot 'update-agent-environment.lock'
+    $manifestPath = Join-Path $agentsRoot 'catalog-skills.manifest.json'
     $journalRelative = '.agents/update-agent-environment.recovery.json'
     $lockStream = $null
     $recoveryBackupPath = $null
+    Get-AgentEnvironmentManifest -Path $manifestPath | Out-Null
     try {
         if (-not (Test-Path -LiteralPath $journalPath)) { return [pscustomobject][ordered]@{ schemaVersion=1; outcome='nothing-to-recover'; exitCode=0; rollbackState='not-needed' } }
         Assert-AgentEnvironmentPathSafe -Root $home -RelativePath $journalRelative | Out-Null

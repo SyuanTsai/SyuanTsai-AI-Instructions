@@ -764,20 +764,21 @@ function Assert-UserSkillsManagedManifestV1 {
     }
 }
 
-function Assert-UserSkillsManagedManifestV2 {
-    param([object] $Manifest)
-    Assert-OnlyProperties -Object $Manifest -Allowed @('schemaVersion','catalogRepository','catalogCommit','catalogId','lockSha256','files') -Context 'user Skills managed manifest'
-    Assert-SchemaVersion -Document $Manifest -Expected 2 -DocumentName 'user Skills managed manifest'
-    Assert-HttpsRepositoryUrl -Value (Get-RequiredProperty -Object $Manifest -Name 'catalogRepository' -Context 'user Skills managed manifest') -Context 'user Skills managed manifest catalogRepository'
-    $catalogCommit = Get-RequiredProperty -Object $Manifest -Name 'catalogCommit' -Context 'user Skills managed manifest'
-    if ($catalogCommit -isnot [string] -or [string]$catalogCommit -cnotmatch '^[0-9a-f]{40}$') { throw 'user Skills managed manifest catalogCommit must be a full 40-character commit SHA.' }
-    Assert-StableId -Value (Get-RequiredProperty -Object $Manifest -Name 'catalogId' -Context 'user Skills managed manifest') -Context 'user Skills managed manifest catalogId'
-    Assert-Sha256 -Value (Get-RequiredProperty -Object $Manifest -Name 'lockSha256' -Context 'user Skills managed manifest') -Context 'user Skills managed manifest lockSha256'
-    $files = Get-RequiredProperty -Object $Manifest -Name 'files' -Context 'user Skills managed manifest'
-    Assert-Array -Value $files -Context 'user Skills managed manifest files' -AllowEmpty
+function Assert-UserSkillsManagedManifestFiles {
+    param(
+        [Parameter(Mandatory = $true)][object] $Files,
+        [Parameter(Mandatory = $true)][string] $ProjectionRoot,
+        [switch] $HasProjectionId,
+        [hashtable] $ProjectionIds,
+        [hashtable] $ProjectionRoots
+    )
+    Assert-Array -Value $Files -Context 'user Skills managed manifest files' -AllowEmpty
     $targetPaths = @{}
-    foreach ($entry in @($files)) {
-        Assert-OnlyProperties -Object $entry -Allowed @('skillId','sourceId','sourceRepository','sourceRef','sourceCommit','sourceVersion','sourcePath','targetPath','sha256') -Context 'user Skills managed manifest file'
+    $validated = New-Object System.Collections.Generic.List[object]
+    foreach ($entry in @($Files)) {
+        $allowed = @('skillId','sourceId','sourceRepository','sourceRef','sourceCommit','sourceVersion','sourcePath','targetPath','sha256')
+        if ($HasProjectionId) { $allowed += 'projectionId' }
+        Assert-OnlyProperties -Object $entry -Allowed $allowed -Context 'user Skills managed manifest file'
         $skillId = Get-RequiredProperty -Object $entry -Name 'skillId' -Context 'user Skills managed manifest file'
         Assert-StableId -Value $skillId -Context 'user Skills managed manifest file skillId'
         Assert-StableId -Value (Get-RequiredProperty -Object $entry -Name 'sourceId' -Context "user Skills managed manifest file '$skillId'") -Context "user Skills managed manifest file '$skillId' sourceId"
@@ -788,10 +789,18 @@ function Assert-UserSkillsManagedManifestV2 {
         Assert-NonEmptyString -Value (Get-RequiredProperty -Object $entry -Name 'sourceVersion' -Context "user Skills managed manifest file '$skillId'") -Context "user Skills managed manifest file '$skillId' sourceVersion"
         $sourcePath = Get-RequiredProperty -Object $entry -Name 'sourcePath' -Context "user Skills managed manifest file '$skillId'"
         $targetPath = Get-RequiredProperty -Object $entry -Name 'targetPath' -Context "user Skills managed manifest file '$skillId'"
-        if (-not (Test-IsSafeRepositoryPath -Value $targetPath) -or -not ([string]$targetPath).StartsWith(".agents/skills/$skillId/",[System.StringComparison]::Ordinal)) {
-            throw "User-managed Skill '$skillId' must preserve the flat .agents/skills target path."
+        $projectionId = $null
+        $root = $ProjectionRoot
+        if ($HasProjectionId) {
+            $projectionId = Get-RequiredProperty -Object $entry -Name 'projectionId' -Context "user Skills managed manifest file '$skillId'"
+            Assert-StableId -Value $projectionId -Context "user Skills managed manifest file '$skillId' projectionId"
+            if (-not $ProjectionIds.ContainsKey([string]$projectionId)) { throw "User-managed Skill '$skillId' projection '$projectionId' is not listed in projections." }
+            $root = [string]$ProjectionRoots[[string]$projectionId]
         }
-        $targetPrefix = ".agents/skills/$skillId/"
+        if (-not (Test-IsSafeRepositoryPath -Value $targetPath) -or -not ([string]$targetPath).StartsWith("$root/$skillId/",[System.StringComparison]::Ordinal)) {
+            throw "User-managed Skill '$skillId' target path must be inside projection root '$root'."
+        }
+        $targetPrefix = "$root/$skillId/"
         $licenseNamespacePrefix = "$targetPrefix.ai-instructions-licenses/"
         $licenseTargetPattern = '^' + [regex]::Escape($licenseNamespacePrefix) + '(?:source/.+|delivery\.json)$'
         if ([string]$targetPath -ceq ($licenseNamespacePrefix + 'delivery.json')) {
@@ -812,7 +821,80 @@ function Assert-UserSkillsManagedManifestV2 {
         }
         if ($targetPaths.ContainsKey([string]$targetPath)) { throw "Duplicate target path in user Skills managed manifest: $targetPath" }
         $targetPaths[[string]$targetPath] = $true
-        Assert-Sha256 -Value (Get-RequiredProperty -Object $entry -Name 'sha256' -Context "user Skills managed manifest file '$skillId'") -Context "user Skills managed manifest file '$skillId' sha256"
+        $sha256 = Get-RequiredProperty -Object $entry -Name 'sha256' -Context "user Skills managed manifest file '$skillId'"
+        Assert-Sha256 -Value $sha256 -Context "user Skills managed manifest file '$skillId' sha256"
+        $validated.Add([pscustomobject][ordered]@{
+            Entry=$entry; SkillId=[string]$skillId; ProjectionId=[string]$projectionId; Root=$root
+            RelativePath=([string]$targetPath).Substring($targetPrefix.Length); Sha256=[string]$sha256
+        })
+    }
+    return [object[]]$validated.ToArray()
+}
+
+function Assert-UserSkillsManagedManifestV2 {
+    param([object] $Manifest)
+    Assert-OnlyProperties -Object $Manifest -Allowed @('schemaVersion','catalogRepository','catalogCommit','catalogId','lockSha256','files') -Context 'user Skills managed manifest'
+    Assert-SchemaVersion -Document $Manifest -Expected 2 -DocumentName 'user Skills managed manifest'
+    Assert-HttpsRepositoryUrl -Value (Get-RequiredProperty -Object $Manifest -Name 'catalogRepository' -Context 'user Skills managed manifest') -Context 'user Skills managed manifest catalogRepository'
+    Assert-FullCommitSha -Value (Get-RequiredProperty -Object $Manifest -Name 'catalogCommit' -Context 'user Skills managed manifest') -Context 'user Skills managed manifest catalogCommit'
+    Assert-StableId -Value (Get-RequiredProperty -Object $Manifest -Name 'catalogId' -Context 'user Skills managed manifest') -Context 'user Skills managed manifest catalogId'
+    Assert-Sha256 -Value (Get-RequiredProperty -Object $Manifest -Name 'lockSha256' -Context 'user Skills managed manifest') -Context 'user Skills managed manifest lockSha256'
+    Assert-UserSkillsManagedManifestFiles -Files (Get-RequiredProperty -Object $Manifest -Name 'files' -Context 'user Skills managed manifest') -ProjectionRoot '.agents/skills' | Out-Null
+}
+
+function Assert-UserSkillsManagedManifestV3 {
+    param([object] $Manifest)
+    Assert-OnlyProperties -Object $Manifest -Allowed @('schemaVersion','catalogRepository','catalogCommit','catalogId','lockSha256','projectionContractSha256','generation','projections','files') -Context 'user Skills managed manifest'
+    Assert-SchemaVersion -Document $Manifest -Expected 3 -DocumentName 'user Skills managed manifest'
+    Assert-HttpsRepositoryUrl -Value (Get-RequiredProperty -Object $Manifest -Name 'catalogRepository' -Context 'user Skills managed manifest') -Context 'user Skills managed manifest catalogRepository'
+    Assert-FullCommitSha -Value (Get-RequiredProperty -Object $Manifest -Name 'catalogCommit' -Context 'user Skills managed manifest') -Context 'user Skills managed manifest catalogCommit'
+    Assert-StableId -Value (Get-RequiredProperty -Object $Manifest -Name 'catalogId' -Context 'user Skills managed manifest') -Context 'user Skills managed manifest catalogId'
+    Assert-Sha256 -Value (Get-RequiredProperty -Object $Manifest -Name 'lockSha256' -Context 'user Skills managed manifest') -Context 'user Skills managed manifest lockSha256'
+    Assert-Sha256 -Value (Get-RequiredProperty -Object $Manifest -Name 'projectionContractSha256' -Context 'user Skills managed manifest') -Context 'user Skills managed manifest projectionContractSha256'
+    $generation = Get-RequiredProperty -Object $Manifest -Name 'generation' -Context 'user Skills managed manifest'
+    if (($generation -isnot [int] -and $generation -isnot [long]) -or [int64]$generation -lt 1) { throw 'user Skills managed manifest generation must be an integer greater than or equal to 1.' }
+
+    $projections = Get-RequiredProperty -Object $Manifest -Name 'projections' -Context 'user Skills managed manifest'
+    Assert-StableIdArray -Value $projections -Context 'user Skills managed manifest projections'
+    $projectionMap = Get-SkillsCatalogProjectionMap
+    $projectionIds = @{}
+    $projectionRoots = @{}
+    foreach ($projectionId in @($projections)) {
+        if (-not $projectionMap.ContainsKey([string]$projectionId) -or [string]$projectionMap[[string]$projectionId][0] -cne 'user') {
+            throw "Unsupported USER managed manifest projection '$projectionId'."
+        }
+        $projectionIds[[string]$projectionId] = $true
+        $projectionRoots[[string]$projectionId] = [string]$projectionMap[[string]$projectionId][1]
+    }
+    $validated = @(Assert-UserSkillsManagedManifestFiles -Files (Get-RequiredProperty -Object $Manifest -Name 'files' -Context 'user Skills managed manifest') -ProjectionRoot '.agents/skills' -HasProjectionId -ProjectionIds $projectionIds -ProjectionRoots $projectionRoots)
+    $skillIds = @($validated | ForEach-Object { $_.SkillId } | Sort-Object -Unique)
+    foreach ($skillId in $skillIds) {
+        $skillFiles = @($validated | Where-Object { $_.SkillId -ceq $skillId })
+        $identity = $null
+        $sourcePathsByRelativePath = @{}
+        foreach ($file in $skillFiles) {
+            $entry = $file.Entry
+            $currentIdentity = @([string]$entry.sourceId,[string]$entry.sourceRepository,[string]$entry.sourceRef,[string]$entry.sourceCommit,[string]$entry.sourceVersion) -join "`n"
+            if ($null -eq $identity) { $identity = $currentIdentity }
+            elseif ($currentIdentity -cne $identity) { throw "User-managed Skill '$skillId' has inconsistent source identity across projections." }
+            if (-not $sourcePathsByRelativePath.ContainsKey([string]$file.RelativePath)) { $sourcePathsByRelativePath[[string]$file.RelativePath] = [string]$entry.sourcePath }
+            elseif ([string]$sourcePathsByRelativePath[[string]$file.RelativePath] -cne [string]$entry.sourcePath) { throw "User-managed Skill '$skillId' has inconsistent sourcePath for '$($file.RelativePath)' across projections." }
+        }
+        $baseline = $null
+        $baselineProjection = $null
+        foreach ($projectionId in @($projections)) {
+            $projectionFiles = @($skillFiles | Where-Object { $_.ProjectionId -ceq [string]$projectionId })
+            if ($projectionFiles.Count -eq 0) { throw "User-managed Skill '$skillId' is missing projection '$projectionId'." }
+            $relativeHashes = @{}
+            foreach ($file in $projectionFiles) { $relativeHashes[[string]$file.RelativePath] = [string]$file.Sha256 }
+            if ($null -eq $baseline) { $baseline = $relativeHashes; $baselineProjection = [string]$projectionId; continue }
+            $allPaths = @(@($baseline.Keys) + @($relativeHashes.Keys) | Sort-Object -Unique)
+            foreach ($relativePath in $allPaths) {
+                if (-not $baseline.ContainsKey($relativePath) -or -not $relativeHashes.ContainsKey($relativePath) -or [string]$baseline[$relativePath] -cne [string]$relativeHashes[$relativePath]) {
+                    throw "User-managed Skill '$skillId' projection parity differs between '$baselineProjection' and '$projectionId' at '$relativePath'."
+                }
+            }
+        }
     }
 }
 
@@ -823,7 +905,8 @@ function Assert-UserSkillsManagedManifest {
     switch ([int64]$version) {
         1 { Assert-UserSkillsManagedManifestV1 -Manifest $Manifest; return }
         2 { Assert-UserSkillsManagedManifestV2 -Manifest $Manifest; return }
-        default { throw "Unsupported user Skills managed manifest schemaVersion '$version'; supported versions are 1 and 2." }
+        3 { Assert-UserSkillsManagedManifestV3 -Manifest $Manifest; return }
+        default { throw "Unsupported user Skills managed manifest schemaVersion '$version'; supported versions are 1, 2 and 3." }
     }
 }
 
@@ -883,4 +966,4 @@ function Test-SkillsCatalogContract {
     return [pscustomobject]@{CatalogId=[string]$catalog.catalogId;SourceCount=@($catalog.sources).Count;SkillCount=@($catalog.skills).Count;ProfileCount=@($catalog.profiles).Count;ManifestFileCount=@($manifest.files).Count}
 }
 
-Export-ModuleMember -Function Assert-LegacyManagedManifestV1, Assert-ManagedManifest, Assert-ManagedManifestV2, Assert-ManagedManifestV3, Assert-SkillsCatalogV2, Assert-SkillsCatalogV3, Assert-SkillsCatalogLockV2, Assert-SkillsCatalogLockV3, Assert-UserSkillsManagedManifest, Assert-UserSkillsManagedManifestV1, Assert-UserSkillsManagedManifestV2, Get-SkillsCatalogProjectionContractSha256, Get-SkillsCatalogProjectionTargetPath, Import-SkillsCatalogJson, Test-SkillsCatalogContract, Test-SkillsCatalogDocument, Test-SkillsCatalogSourcePinsDocument, Test-SkillsCatalogLockDocument
+Export-ModuleMember -Function Assert-LegacyManagedManifestV1, Assert-ManagedManifest, Assert-ManagedManifestV2, Assert-ManagedManifestV3, Assert-SkillsCatalogV2, Assert-SkillsCatalogV3, Assert-SkillsCatalogLockV2, Assert-SkillsCatalogLockV3, Assert-UserSkillsManagedManifest, Assert-UserSkillsManagedManifestV1, Assert-UserSkillsManagedManifestV2, Assert-UserSkillsManagedManifestV3, Get-SkillsCatalogProjectionContractSha256, Get-SkillsCatalogProjectionTargetPath, Import-SkillsCatalogJson, Test-SkillsCatalogContract, Test-SkillsCatalogDocument, Test-SkillsCatalogSourcePinsDocument, Test-SkillsCatalogLockDocument
