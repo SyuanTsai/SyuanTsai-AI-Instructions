@@ -825,6 +825,13 @@ function Assert-UserSkillsManagedManifestFiles {
         elseif (-not ([string]$sourcePath).StartsWith("skills/$skillId/",[System.StringComparison]::Ordinal)) {
             throw "User-managed Skill '$skillId' must preserve the canonical skills source path."
         }
+        else {
+            $sourceRelativePath = ([string]$sourcePath).Substring(("skills/$skillId/").Length)
+            $targetRelativePath = ([string]$targetPath).Substring($targetPrefix.Length)
+            if ($sourceRelativePath -cne $targetRelativePath) {
+                throw "User-managed Skill '$skillId' source and target paths must match."
+            }
+        }
         if ($targetPaths.ContainsKey([string]$targetPath)) { throw "Duplicate target path in user Skills managed manifest: $targetPath" }
         $targetPaths[[string]$targetPath] = $true
         $sha256 = Get-RequiredProperty -Object $entry -Name 'sha256' -Context "user Skills managed manifest file '$skillId'"
@@ -877,7 +884,7 @@ function Assert-UserSkillsManagedManifestV3 {
     foreach ($skillId in $skillIds) {
         $skillFiles = @($validated | Where-Object { $_.SkillId -ceq $skillId })
         $identity = $null
-        $sourcePathsByRelativePath = @{}
+        $sourcePathsByRelativePath = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::Ordinal)
         foreach ($file in $skillFiles) {
             $entry = $file.Entry
             $currentIdentity = @([string]$entry.sourceId,[string]$entry.sourceRepository,[string]$entry.sourceRef,[string]$entry.sourceCommit,[string]$entry.sourceVersion) -join "`n"
@@ -891,11 +898,15 @@ function Assert-UserSkillsManagedManifestV3 {
         foreach ($projectionId in @($projections)) {
             $projectionFiles = @($skillFiles | Where-Object { $_.ProjectionId -ceq [string]$projectionId })
             if ($projectionFiles.Count -eq 0) { throw "User-managed Skill '$skillId' is missing projection '$projectionId'." }
-            $relativeHashes = @{}
+            $relativeHashes = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::Ordinal)
             foreach ($file in $projectionFiles) { $relativeHashes[[string]$file.RelativePath] = [string]$file.Sha256 }
             if ($null -eq $baseline) { $baseline = $relativeHashes; $baselineProjection = [string]$projectionId; continue }
-            $allPaths = @(@($baseline.Keys) + @($relativeHashes.Keys) | Sort-Object -Unique)
-            foreach ($relativePath in $allPaths) {
+            $allPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+            foreach ($relativePath in $baseline.Keys) { [void]$allPaths.Add([string]$relativePath) }
+            foreach ($relativePath in $relativeHashes.Keys) { [void]$allPaths.Add([string]$relativePath) }
+            [string[]]$sortedPaths = @($allPaths)
+            [System.Array]::Sort($sortedPaths,[System.StringComparer]::Ordinal)
+            foreach ($relativePath in $sortedPaths) {
                 if (-not $baseline.ContainsKey($relativePath) -or -not $relativeHashes.ContainsKey($relativePath) -or [string]$baseline[$relativePath] -cne [string]$relativeHashes[$relativePath]) {
                     throw "User-managed Skill '$skillId' projection parity differs between '$baselineProjection' and '$projectionId' at '$relativePath'."
                 }
@@ -913,6 +924,54 @@ function Assert-UserSkillsManagedManifest {
         2 { Assert-UserSkillsManagedManifestV2 -Manifest $Manifest; return }
         3 { Assert-UserSkillsManagedManifestV3 -Manifest $Manifest; return }
         default { throw "Unsupported user Skills managed manifest schemaVersion '$version'; supported versions are 1, 2 and 3." }
+    }
+}
+
+function Assert-UserSkillsManagedManifestBinding {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object] $Manifest,
+        [Parameter(Mandatory = $true)][object] $Catalog,
+        [Parameter(Mandatory = $true)][object] $Lock,
+        [Parameter(Mandatory = $true)][string] $LockSha256
+    )
+
+    Assert-UserSkillsManagedManifestV3 -Manifest $Manifest
+    Assert-SkillsCatalogV3 -Catalog $Catalog
+    Assert-SkillsCatalogLockV3 -Lock $Lock -Catalog $Catalog
+    Assert-Sha256 -Value $LockSha256 -Context 'user Skills managed manifest binding lockSha256'
+
+    $expectedProjectionContractSha256 = Get-SkillsCatalogProjectionContractSha256 -Projections $Catalog.projections
+    if ([string]$Manifest.projectionContractSha256 -cne $expectedProjectionContractSha256 -or [string]$Manifest.projectionContractSha256 -cne [string]$Lock.projectionContractSha256) {
+        throw 'user Skills managed manifest projectionContractSha256 does not match the Catalog and Lock.'
+    }
+    if ([string]$Manifest.lockSha256 -cne $LockSha256) {
+        throw 'user Skills managed manifest lockSha256 does not match the supplied Lock SHA-256.'
+    }
+
+    $catalogProjections = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([System.StringComparer]::Ordinal)
+    foreach ($projection in @($Catalog.projections)) { $catalogProjections.Add([string]$projection.id,$projection) }
+    foreach ($projectionId in @($Manifest.projections)) {
+        if (-not $catalogProjections.ContainsKey([string]$projectionId) -or [string]$catalogProjections[[string]$projectionId].scope -cne 'user') {
+            throw "user Skills managed manifest projection '$projectionId' is not a USER projection in the Catalog."
+        }
+    }
+
+    $lockedSkills = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([System.StringComparer]::Ordinal)
+    foreach ($lockedSkill in @($Lock.skills)) { $lockedSkills.Add([string]$lockedSkill.id,$lockedSkill) }
+    foreach ($file in @($Manifest.files)) {
+        $skillId = [string]$file.skillId
+        if (-not $lockedSkills.ContainsKey($skillId)) {
+            throw "user Skills managed manifest Skill '$skillId' is not present in the Lock."
+        }
+        $lockedSkill = $lockedSkills[$skillId]
+        if ([string]$file.sourceId -cne [string]$lockedSkill.sourceId) {
+            throw "user Skills managed manifest Skill '$skillId' sourceId does not match the Lock."
+        }
+        $sourcePathPrefix = [string]$lockedSkill.sourcePath + '/'
+        if (([string]$file.sourcePath).StartsWith("skills/$skillId/",[System.StringComparison]::Ordinal) -and -not ([string]$file.sourcePath).StartsWith($sourcePathPrefix,[System.StringComparison]::Ordinal)) {
+            throw "user Skills managed manifest Skill '$skillId' sourcePath does not match the Lock."
+        }
     }
 }
 
@@ -972,4 +1031,4 @@ function Test-SkillsCatalogContract {
     return [pscustomobject]@{CatalogId=[string]$catalog.catalogId;SourceCount=@($catalog.sources).Count;SkillCount=@($catalog.skills).Count;ProfileCount=@($catalog.profiles).Count;ManifestFileCount=@($manifest.files).Count}
 }
 
-Export-ModuleMember -Function Assert-LegacyManagedManifestV1, Assert-ManagedManifest, Assert-ManagedManifestV2, Assert-ManagedManifestV3, Assert-SkillsCatalogV2, Assert-SkillsCatalogV3, Assert-SkillsCatalogLockV2, Assert-SkillsCatalogLockV3, Assert-UserSkillsManagedManifest, Assert-UserSkillsManagedManifestV1, Assert-UserSkillsManagedManifestV2, Assert-UserSkillsManagedManifestV3, Get-SkillsCatalogProjectionContractSha256, Get-SkillsCatalogProjectionTargetPath, Import-SkillsCatalogJson, Test-SkillsCatalogContract, Test-SkillsCatalogDocument, Test-SkillsCatalogSourcePinsDocument, Test-SkillsCatalogLockDocument
+Export-ModuleMember -Function Assert-LegacyManagedManifestV1, Assert-ManagedManifest, Assert-ManagedManifestV2, Assert-ManagedManifestV3, Assert-SkillsCatalogV2, Assert-SkillsCatalogV3, Assert-SkillsCatalogLockV2, Assert-SkillsCatalogLockV3, Assert-UserSkillsManagedManifest, Assert-UserSkillsManagedManifestBinding, Assert-UserSkillsManagedManifestV1, Assert-UserSkillsManagedManifestV2, Assert-UserSkillsManagedManifestV3, Get-SkillsCatalogProjectionContractSha256, Get-SkillsCatalogProjectionTargetPath, Import-SkillsCatalogJson, Test-SkillsCatalogContract, Test-SkillsCatalogDocument, Test-SkillsCatalogSourcePinsDocument, Test-SkillsCatalogLockDocument

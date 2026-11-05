@@ -350,6 +350,40 @@ function Get-TestRawSha256 {
         [string]$manifest.projectionContractSha256 | Should Be (Get-SkillsCatalogProjectionContractSha256 -Projections $catalog.projections)
     }
 
+    # Scenario: A v3 USER manifest is bound to the exact catalog projections and raw Lock bytes used by its installer.
+    # Purpose: Keep document-only validation separate from the Catalog and Lock context required for safe installation.
+    It 'UnitT11l1_binds_the_v3_user_manifest_to_the_catalog_and_lock' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        $catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'
+        $lock = Import-SkillsCatalogJson -Path $script:LockV3Example -DocumentName 'Skills Catalog lock v3'
+        $lockSha256 = Get-TestRawSha256 -Path $script:LockV3Example
+
+        { Assert-UserSkillsManagedManifestBinding -Manifest $manifest -Catalog $catalog -Lock $lock -LockSha256 $lockSha256 } | Should Not Throw
+
+        $projectionDigestMismatch = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        $projectionDigestMismatch.projectionContractSha256 = '0' * 64
+        { Assert-UserSkillsManagedManifestBinding -Manifest $projectionDigestMismatch -Catalog $catalog -Lock $lock -LockSha256 $lockSha256 } | Should Throw
+
+        $lockDigestMismatch = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        { Assert-UserSkillsManagedManifestBinding -Manifest $lockDigestMismatch -Catalog $catalog -Lock $lock -LockSha256 ('0' * 64) } | Should Throw
+
+        $unknownProjection = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        $unknownProjection.projections[1] = 'user-copilot'
+        { Assert-UserSkillsManagedManifestBinding -Manifest $unknownProjection -Catalog $catalog -Lock $lock -LockSha256 $lockSha256 } | Should Throw
+
+        $unknownSkill = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        foreach ($file in @($unknownSkill.files | Where-Object { $_.skillId -ceq 'manage-task-handoff' })) {
+            $file.skillId = 'unknown-skill'
+            $file.sourcePath = 'skills/unknown-skill/SKILL.md'
+            $file.targetPath = ([string]$file.targetPath).Replace('manage-task-handoff','unknown-skill')
+        }
+        { Assert-UserSkillsManagedManifestBinding -Manifest $unknownSkill -Catalog $catalog -Lock $lock -LockSha256 $lockSha256 } | Should Throw
+
+        $sourceIdMismatch = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        foreach ($file in @($sourceIdMismatch.files | Where-Object { $_.skillId -ceq 'work-with-jira' })) { $file.sourceId = 'other-source' }
+        { Assert-UserSkillsManagedManifestBinding -Manifest $sourceIdMismatch -Catalog $catalog -Lock $lock -LockSha256 $lockSha256 } | Should Throw
+    }
+
     # Scenario: A versioned USER manifest uses traversal syntax in source or target ownership paths.
     # Purpose: Reject unsafe paths before canonical mapping rules can mistake them for a Skill-owned payload.
     It 'UnitT11la_rejects_unsafe_v2_and_v3_user_manifest_paths' {
@@ -379,6 +413,22 @@ function Get-TestRawSha256 {
         if ([string]::IsNullOrWhiteSpace($v3TargetError)) { throw 'Expected the v3 manifest to reject the unsafe target path.' }
         $v3TargetError.Contains('unsafe') | Should Be $true
         $v3TargetError.Contains('work-with-jira') | Should Be $true
+    }
+
+    # Scenario: An ordinary payload changes its filename between the canonical source package and a USER target.
+    # Purpose: Preserve per-file source provenance rather than permitting arbitrary source-to-target remapping.
+    It 'UnitT11lb_rejects_mismatched_v2_and_v3_user_manifest_payload_paths' {
+        $v2Manifest = Import-SkillsCatalogJson -Path $script:UserManifestV2Example -DocumentName 'user Skills managed manifest v2'
+        @($v2Manifest.files)[0].sourcePath = 'skills/work-with-jira/not-the-target.md'
+        $v2Error = $null
+        try { Assert-UserSkillsManagedManifest -Manifest $v2Manifest } catch { $v2Error = $_.Exception.Message }
+        if ([string]::IsNullOrWhiteSpace($v2Error) -or -not $v2Error.Contains('source and target paths must match')) { throw 'Expected the v2 manifest to reject mismatched payload paths.' }
+
+        $v3Manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        @($v3Manifest.files)[0].sourcePath = 'skills/work-with-jira/not-the-target.md'
+        $v3Error = $null
+        try { Assert-UserSkillsManagedManifest -Manifest $v3Manifest } catch { $v3Error = $_.Exception.Message }
+        if ([string]::IsNullOrWhiteSpace($v3Error) -or -not $v3Error.Contains('source and target paths must match')) { throw 'Expected the v3 manifest to reject mismatched payload paths.' }
     }
 
     # Scenario: A USER manifest projection ID is not in the fixed projection table.
@@ -444,6 +494,16 @@ function Get-TestRawSha256 {
     It 'UnitT11t_rejects_projection_parity_with_a_different_hash' {
         $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
         @($manifest.files | Where-Object { $_.targetPath -ceq '.claude/skills/work-with-jira/SKILL.md' })[0].sha256 = '9' * 64
+        { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Throw
+    }
+
+    # Scenario: Corresponding projection files differ only by the case of their relative paths.
+    # Purpose: Keep parity portable across case-sensitive and case-insensitive filesystems.
+    It 'UnitT11t1_rejects_projection_parity_with_a_case_only_path_difference' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        $file = @($manifest.files | Where-Object { $_.targetPath -ceq '.claude/skills/work-with-jira/SKILL.md' })[0]
+        $file.sourcePath = 'skills/work-with-jira/skill.md'
+        $file.targetPath = '.claude/skills/work-with-jira/skill.md'
         { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Throw
     }
 
