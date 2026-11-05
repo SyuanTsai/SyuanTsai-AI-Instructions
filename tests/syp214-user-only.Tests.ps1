@@ -2676,7 +2676,7 @@ Describe 'SYP214 USER-only bootstrap boundary' {
 
 }
 
-Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEvidence' {
+Describe 'SYP214 USER-only bootstrap sync v5 preflight' {
     BeforeEach {
         $caseRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
         $sourceRoot = Join-Path $caseRoot 'source'
@@ -2717,6 +2717,24 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
         (Get-FileHash -LiteralPath $markerPath -Algorithm SHA256).Hash | Should Be $markerHash
         (Get-Item -LiteralPath $journalPath).Length | Should Be $journalLength
         (Get-FileHash -LiteralPath $journalPath -Algorithm SHA256).Hash | Should Be $journalHash
+    }
+}
+
+Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEvidence' {
+    BeforeEach {
+        $caseRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        $sourceRoot = Join-Path $caseRoot 'source'
+        $sourceArchive = Join-Path $caseRoot 'source.zip'
+        $targetRoot = Join-Path $caseRoot 'consumer'
+        $userHome = Join-Path $caseRoot 'user'
+        $script:TestConfigurationPath = Join-Path $caseRoot 'config.json'
+        $script:TestProvenancePath = Join-Path $caseRoot 'provenance.json'
+        New-TestSource -Path $sourceRoot
+        New-TestRepository -Path $targetRoot
+        New-TestConfiguration -Path $script:TestConfigurationPath
+        New-Item -ItemType Directory -Force -Path (Join-Path $sourceRoot '.agents/skills/syp214-fixture') | Out-Null
+        Set-TestText -Path (Join-Path $sourceRoot '.agents/skills/syp214-fixture/SKILL.md') -Value '# Shared fixture'
+        Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
     }
 
     # Scenario: Valid USER and old REPO manifests own the same complete immutable Skill.
