@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/user-skills-managed-manifest-v3.schema.json",
+  "title": "User-scoped managed Agent Skills manifest v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "catalogRepository", "catalogCommit", "catalogId", "lockSha256", "projectionContractSha256", "generation", "projections", "files"],
+  "properties": {
+    "schemaVersion": { "const": 3 },
+    "catalogRepository": { "type": "string", "format": "uri", "pattern": "^https://" },
+    "catalogCommit": { "$ref": "#/$defs/commit" },
+    "catalogId": { "$ref": "#/$defs/stableId" },
+    "lockSha256": { "$ref": "#/$defs/sha256" },
+    "projectionContractSha256": { "$ref": "#/$defs/sha256" },
+    "generation": { "type": "integer", "minimum": 1, "maximum": 9223372036854775807 },
+    "projections": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "enum": ["user-agents", "user-claude", "user-copilot"] }
+    },
+    "files": { "type": "array", "items": { "$ref": "#/$defs/file" } }
+  },
+  "$defs": {
+    "stableId": { "type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$" },
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "repositoryPath": { "type": "string", "minLength": 1, "pattern": "^(?:(?!\\.{1,2}(?:/|$))(?!\\s*(?:/|$))[^/\\\\:\\u0000-\\u001F\\u007F-\\u009F]+)(?:/(?:(?!\\.{1,2}(?:/|$))(?!\\s*(?:/|$))[^/\\\\:\\u0000-\\u001F\\u007F-\\u009F]+))*$" },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["skillId", "sourceId", "sourceRepository", "sourceRef", "sourceCommit", "sourceVersion", "sourcePath", "projectionId", "targetPath", "sha256"],
+      "properties": {
+        "skillId": { "$ref": "#/$defs/stableId" },
+        "sourceId": { "$ref": "#/$defs/stableId" },
+        "sourceRepository": { "type": "string", "format": "uri", "pattern": "^https://" },
+        "sourceRef": { "type": "string", "minLength": 1 },
+        "sourceCommit": { "$ref": "#/$defs/commit" },
+        "sourceVersion": { "type": "string", "minLength": 1 },
+        "sourcePath": { "$ref": "#/$defs/repositoryPath" },
+        "projectionId": { "enum": ["user-agents", "user-claude", "user-copilot"] },
+        "targetPath": { "$ref": "#/$defs/repositoryPath" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "projectionId": { "const": "user-agents" } }, "required": ["projectionId"] },
+          "then": { "properties": { "targetPath": { "pattern": "^\\.agents/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/" } } }
+        },
+        {
+          "if": { "properties": { "projectionId": { "const": "user-claude" } }, "required": ["projectionId"] },
+          "then": { "properties": { "targetPath": { "pattern": "^\\.claude/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/" } } }
+        },
+        {
+          "if": { "properties": { "projectionId": { "const": "user-copilot" } }, "required": ["projectionId"] },
+          "then": { "properties": { "targetPath": { "pattern": "^\\.copilot/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/" } } }
+        },
+        {
+          "if": { "properties": { "targetPath": { "pattern": "^\\.(?:agents|claude|copilot)/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/\\.ai-instructions-licenses/" } }, "required": ["targetPath"] },
+          "then": {
+            "oneOf": [
+              {
+                "properties": {
+                  "sourcePath": { "$ref": "#/$defs/repositoryPath" },
+                  "targetPath": { "pattern": "^\\.(?:agents|claude|copilot)/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/\\.ai-instructions-licenses/source/.+" }
+                }
+              },
+              {
+                "properties": {
+                  "sourcePath": { "const": ".ai-instructions-generated/delivery.json" },
+                  "targetPath": { "pattern": "^\\.(?:agents|claude|copilot)/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/\\.ai-instructions-licenses/delivery\\.json$" }
+                }
+              }
+            ]
+          },
+          "else": { "properties": { "sourcePath": { "pattern": "^skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/" } } }
+        }
+      ]
+    }
+  }
+}

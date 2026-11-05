@@ -1,5 +1,7 @@
 Set-StrictMode -Version 2.0
 
+Import-Module (Join-Path $PSScriptRoot 'skills-catalog-contract.psm1') -Scope Local -ErrorAction Stop
+
 function Get-AgentEnvironmentSha256 {
     param([Parameter(Mandatory = $true)][string] $Path)
     $stream = [System.IO.File]::OpenRead($Path)
@@ -563,8 +565,34 @@ function Get-AgentEnvironmentManifest {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
     try { $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $Path | ConvertFrom-Json }
     catch { throw "User Skills managed manifest is not valid JSON: $($_.Exception.Message)" }
+    if ($null -ne $manifest.PSObject.Properties['schemaVersion'] -and
+        ($manifest.schemaVersion -is [int] -or $manifest.schemaVersion -is [long]) -and
+        [int64]$manifest.schemaVersion -eq 3) {
+        throw 'USER managed manifest schema version 3 requires a projection-aware installer.'
+    }
     Assert-UserSkillsManagedManifest -Manifest $manifest
     return $manifest
+}
+
+function Get-AgentEnvironmentManifestSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $RelativePath
+    )
+    # Both the pre-lock and locked observations use this helper.  Establish the
+    # physical path boundary before even testing or parsing the manifest.
+    $path = Assert-AgentEnvironmentPathSafe -Root $Root -RelativePath $RelativePath
+    if (Test-Path -LiteralPath $path) {
+        $item = Get-Item -Force -LiteralPath $path
+        if ($item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'User Skills managed manifest path must be a non-reparse file.'
+        }
+    }
+    $manifest = Get-AgentEnvironmentManifest -Path $path
+    return [pscustomobject][ordered]@{
+        Manifest = $manifest
+        Identity = if ($null -eq $manifest) { $null } else { [Convert]::ToBase64String((Get-AgentEnvironmentManifestBytes -Manifest $manifest)) }
+    }
 }
 
 function New-AgentEnvironmentResult {
@@ -671,6 +699,7 @@ function Invoke-UserSkillsReconciliation {
         [switch] $ForceReinstallManagedSkills,
         [switch] $MigrateLegacyCatalogSkills,
         [int] $FailureAfterMutationCount = 0,
+        [scriptblock] $BeforeLockAcquisitionAction,
         [scriptblock] $BeforeBackupValidationAction
     )
     Import-AgentEnvironmentRuntimeModules -RuntimeRoot ([string]$DesiredState.RuntimeRoot)
@@ -684,6 +713,8 @@ function Invoke-UserSkillsReconciliation {
     $journalRelative = '.agents/update-agent-environment.recovery.json'
     $manifestRelative = '.agents/catalog-skills.manifest.json'
     $manifestPath = Get-AgentEnvironmentFullPath -Root $home -RelativePath $manifestRelative
+    $existingManifestSnapshot = Get-AgentEnvironmentManifestSnapshot -Root $home -RelativePath $manifestRelative
+    $existingManifestIdentity = $existingManifestSnapshot.Identity
     if (Test-Path -LiteralPath $journalPath) {
         Assert-AgentEnvironmentPathSafe -Root $home -RelativePath $journalRelative | Out-Null
         if (-not (Test-Path -LiteralPath $journalPath -PathType Leaf)) { throw 'Agent environment recovery journal path must be a file.' }
@@ -748,6 +779,7 @@ function Invoke-UserSkillsReconciliation {
     $lockStream = $null
     try {
         try {
+            if ($null -ne $BeforeLockAcquisitionAction) { & $BeforeLockAcquisitionAction }
             if ($Mode -eq 'Apply') { $lockStream = [System.IO.File]::Open($lockPath,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None) }
             elseif (Test-Path -LiteralPath $lockPath -PathType Leaf) { $lockStream = [System.IO.File]::Open($lockPath,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::None) }
         }
@@ -757,7 +789,12 @@ function Invoke-UserSkillsReconciliation {
             if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw 'User Skills managed manifest path must be a file.' }
         }
         $manifestObservation = Get-AgentEnvironmentObservedState -Root $home -RelativePath $manifestRelative
-        $existing = Get-AgentEnvironmentManifest -Path $manifestPath
+        $lockedManifestSnapshot = Get-AgentEnvironmentManifestSnapshot -Root $home -RelativePath $manifestRelative
+        $existing = $lockedManifestSnapshot.Manifest
+        $lockedManifestIdentity = $lockedManifestSnapshot.Identity
+        if ($existingManifestIdentity -cne $lockedManifestIdentity) {
+            return New-AgentEnvironmentResult -Outcome 'concurrent' -DesiredState $DesiredState -Installed @() -Updated @() -Removed @() -Preserved @() -Failed @('User Skills managed manifest changed while acquiring the Agent environment lock.') -RollbackState 'not-started' -BackupPath $null
+        }
         $oldByPath = @{}
         if ($null -ne $existing) { foreach ($file in @($existing.files)) { $oldByPath[[string]$file.targetPath] = $file } }
         $desiredByPath = @{}
@@ -1089,24 +1126,40 @@ function Invoke-UserSkillsReconciliation {
 
 function Invoke-UserSkillsRecovery {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string] $UserHome)
+    param(
+        [Parameter(Mandatory = $true)][string] $UserHome,
+        [scriptblock] $BeforeLockAcquisitionAction
+    )
     $home = [System.IO.Path]::GetFullPath($UserHome).TrimEnd([char[]]@('\','/'))
     $agentsRoot = Join-Path $home '.agents'
     $journalPath = Join-Path $agentsRoot 'update-agent-environment.recovery.json'
     $lockPath = Join-Path $agentsRoot 'update-agent-environment.lock'
+    $manifestPath = Join-Path $agentsRoot 'catalog-skills.manifest.json'
     $journalRelative = '.agents/update-agent-environment.recovery.json'
+    $manifestRelative = '.agents/catalog-skills.manifest.json'
     $lockStream = $null
     $recoveryBackupPath = $null
     try {
-        if (-not (Test-Path -LiteralPath $journalPath)) { return [pscustomobject][ordered]@{ schemaVersion=1; outcome='nothing-to-recover'; exitCode=0; rollbackState='not-needed' } }
         Assert-AgentEnvironmentPathSafe -Root $home -RelativePath $journalRelative | Out-Null
+        if (-not (Test-Path -LiteralPath $journalPath)) { return [pscustomobject][ordered]@{ schemaVersion=1; outcome='nothing-to-recover'; exitCode=0; rollbackState='not-needed' } }
+        $existingManifestSnapshot = Get-AgentEnvironmentManifestSnapshot -Root $home -RelativePath $manifestRelative
         if (-not (Test-Path -LiteralPath $journalPath -PathType Leaf)) { throw 'Agent environment recovery journal path must be a file.' }
         if (Test-Path -LiteralPath $lockPath) {
             $lockItem = Get-Item -Force -LiteralPath $lockPath
             if ($lockItem.PSIsContainer -or ($lockItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Agent environment lock must be a non-reparse file.' }
         }
-        try { $lockStream = [System.IO.File]::Open($lockPath,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None) }
+        try {
+            if ($null -ne $BeforeLockAcquisitionAction) { & $BeforeLockAcquisitionAction }
+            $lockStream = [System.IO.File]::Open($lockPath,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+        }
         catch [System.IO.IOException] { return New-AgentEnvironmentRecoveryConcurrentResult }
+        if (-not (Test-Path -LiteralPath $journalPath)) { return [pscustomobject][ordered]@{ schemaVersion=1; outcome='nothing-to-recover'; exitCode=0; rollbackState='not-needed' } }
+        $lockedManifestSnapshot = Get-AgentEnvironmentManifestSnapshot -Root $home -RelativePath $manifestRelative
+        if ($existingManifestSnapshot.Identity -cne $lockedManifestSnapshot.Identity) {
+            return New-AgentEnvironmentRecoveryConcurrentResult
+        }
+        Assert-AgentEnvironmentPathSafe -Root $home -RelativePath $journalRelative | Out-Null
+        if (-not (Test-Path -LiteralPath $journalPath -PathType Leaf)) { throw 'Agent environment recovery journal path must be a file.' }
         $journal = Get-Content -Raw -Encoding UTF8 -LiteralPath $journalPath | ConvertFrom-Json
         $legacyJournalProperties = @('schemaVersion','userHome','backupPath','states')
         $canonicalJournalProperties = @('schemaVersion','transactionId','userHome','backupPath','phase','desiredManifestSha256','desiredInventorySha256','states')
@@ -1195,6 +1248,7 @@ function Invoke-UserSkillsRecovery {
         return [pscustomobject][ordered]@{ schemaVersion=1; outcome='recovered'; exitCode=0; rollbackState='completed'; backupPath=[string]$journal.backupPath }
     }
     catch {
+        if ($_.Exception.Message -ceq 'USER managed manifest schema version 3 requires a projection-aware installer.') { throw }
         return New-AgentEnvironmentRecoveryFailureResult -Message ([string]$_.Exception.Message) -JournalRelative $journalRelative -BackupPath $recoveryBackupPath
     }
     finally { if ($null -ne $lockStream) { $lockStream.Dispose() } }

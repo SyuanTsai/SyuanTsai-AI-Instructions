@@ -19,13 +19,13 @@
       "id": "manage-task-handoff",
       "sourceId": "agent-skills",
       "sourcePath": "skills/manage-task-handoff",
-      "contentSha256": "b56603824185ba993ed34b4186db827f54646b3242b23330fe9a601b8dc2a676"
+      "contentSha256": "12271f40dbabd29cc1df0f5e31fc7d2ff3964c60aa352549eeba7ab8f4c7e602"
     },
     {
       "id": "work-with-jira",
       "sourceId": "agent-skills",
       "sourcePath": "skills/work-with-jira",
-      "contentSha256": "bac49e6b92dde5af9646a0a46ad8c8c68314d210743d023657e79858480d71a8"
+      "contentSha256": "c128cc450181ffca8fd72956b80bf3df462a87b7363cf574241fbb24f850b143"
     }
   ]
 }

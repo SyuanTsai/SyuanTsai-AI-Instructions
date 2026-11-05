@@ -148,6 +148,81 @@ Describe 'user-scoped Agent Skills reconciliation' {
         Test-Path -LiteralPath $workingRoot | Should Be $false
     }
 
+    # Scenario: The persisted manifest is redirected outside USER home through a reparse point.
+    # Purpose: Reject the path boundary before the pre-lock manifest snapshot can read its content.
+    It 'UnitT00_path_safety_precedes_the_pre_lock_manifest_read' {
+        $userHome = Join-Path $TestDrive 'manifest-reparse-user'
+        $agentsRoot = Join-Path $userHome '.agents'
+        $manifestPath = Join-Path $agentsRoot 'catalog-skills.manifest.json'
+        $outsideRoot = Join-Path $TestDrive 'manifest-reparse-outside'
+        $outsideManifest = Join-Path $outsideRoot 'catalog-skills.manifest.json'
+        $sentinel = 'outside-manifest-sentinel-must-not-be-read'
+        New-Item -ItemType Directory -Force -Path $userHome,$agentsRoot,$outsideRoot | Out-Null
+        [System.IO.File]::WriteAllText($outsideManifest,$sentinel,[System.Text.UTF8Encoding]::new($false))
+        $usedDirectoryJunction = $false
+        try {
+            New-Item -ItemType SymbolicLink -Path $manifestPath -Target $outsideManifest -ErrorAction Stop | Out-Null
+        }
+        catch {
+            if (Test-Path -LiteralPath $manifestPath) { Remove-Item -LiteralPath $manifestPath -Force }
+            if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) { throw }
+            Remove-Item -LiteralPath $agentsRoot -Force
+            New-Item -ItemType Junction -Path $agentsRoot -Target $outsideRoot -ErrorAction Stop | Out-Null
+            $usedDirectoryJunction = $true
+        }
+        $desired = New-TestDesiredState -Root (Join-Path $TestDrive 'manifest-reparse-staging')
+        $message = $null
+        $output = @()
+        try { $output = @(& { Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply } 2>&1) }
+        catch { $message = $_.Exception.Message }
+
+        $message | Should Be $(if ($usedDirectoryJunction) { 'User .agents root must not be a reparse point.' } else { 'User Agent environment path crosses a reparse point: .agents/catalog-skills.manifest.json' })
+        (($output | Out-String) + $message) | Should Not Match $sentinel
+    }
+
+    # Scenario: Apply encounters an existing projection-aware USER manifest.
+    # Purpose: Fail closed before creating locks, journals, backups, or changing managed bytes.
+    It 'UnitT00a_rejects_an_existing_v3_manifest_before_apply_mutation' {
+        $userHome = Join-Path $TestDrive 'existing-v3-apply'
+        $agentsRoot = Join-Path $userHome '.agents'
+        $target = Join-Path $agentsRoot 'skills\work-with-jira\SKILL.md'
+        $manifestPath = Join-Path $agentsRoot 'catalog-skills.manifest.json'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+        $originalBytes = [byte[]]@(0,10,13,128,255)
+        [System.IO.File]::WriteAllBytes($target,$originalBytes)
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v3.example.json') -Destination $manifestPath
+        $desired = New-TestDesiredState -Root (Join-Path $TestDrive 'existing-v3-apply-staging')
+
+        { Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply } |
+            Should Throw 'USER managed manifest schema version 3 requires a projection-aware installer.'
+
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($target)) | Should Be ([Convert]::ToBase64String($originalBytes))
+        Test-Path -LiteralPath (Join-Path $agentsRoot 'update-agent-environment.lock') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $agentsRoot 'update-agent-environment.recovery.json') | Should Be $false
+    }
+
+    # Scenario: Recovery encounters an existing projection-aware USER manifest and a retained journal.
+    # Purpose: Fail closed before interpreting the journal or restoring any USER file.
+    It 'UnitT00b_rejects_an_existing_v3_manifest_before_recovery_mutation' {
+        $userHome = Join-Path $TestDrive 'existing-v3-recovery'
+        $agentsRoot = Join-Path $userHome '.agents'
+        $target = Join-Path $agentsRoot 'skills\work-with-jira\SKILL.md'
+        $manifestPath = Join-Path $agentsRoot 'catalog-skills.manifest.json'
+        $journalPath = Join-Path $agentsRoot 'update-agent-environment.recovery.json'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+        $originalBytes = [byte[]]@(255,128,13,10,0)
+        [System.IO.File]::WriteAllBytes($target,$originalBytes)
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v3.example.json') -Destination $manifestPath
+        [System.IO.File]::WriteAllText($journalPath,'preserve-invalid-journal')
+
+        { Invoke-UserSkillsRecovery -UserHome $userHome } |
+            Should Throw 'USER managed manifest schema version 3 requires a projection-aware installer.'
+
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($target)) | Should Be ([Convert]::ToBase64String($originalBytes))
+        [System.IO.File]::ReadAllText($journalPath) | Should Be 'preserve-invalid-journal'
+        Test-Path -LiteralPath (Join-Path $agentsRoot 'update-agent-environment.lock') | Should Be $false
+    }
+
     # Scenario: USER receives nested scripts, references and binary assets and then an updated resource inventory.
     # Purpose: Verify raw bytes, resource update/prune, complete ownership and a stable second apply in USER.
     It 'InterT01_reconciles_recursive_resources_and_binary_bytes_only_in_USER' {
@@ -189,6 +264,72 @@ Describe 'user-scoped Agent Skills reconciliation' {
         $second.outcome | Should Be 'current'
         @($second.installed).Count | Should Be 0
         @($second.updated).Count | Should Be 0
+    }
+
+    # Scenario: Another installer replaces the legacy manifest with a v3 projection-aware manifest while this updater waits for its lock.
+    # Purpose: Ensure the legacy reconciler rereads ownership under the lock and never overwrites the newer manifest or its managed files.
+    It 'InterT57_rejects_a_v3_manifest_replaced_while_acquiring_the_lock_without_mutation' {
+        $initial = New-TestDesiredState -Root (Join-Path $staging 'initial') -SkillIds @('alpha')
+        (Invoke-UserSkillsReconciliation -DesiredState $initial -UserHome $userHome -Mode Apply).outcome | Should Be 'applied'
+        $next = New-TestDesiredState -Root (Join-Path $staging 'next') -SkillIds @('alpha','beta')
+        $manifestPath = Join-Path $userHome '.agents\catalog-skills.manifest.json'
+        $skillPath = Join-Path $userHome '.agents\skills\alpha\SKILL.md'
+        $v3Bytes = [System.IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v3.example.json'))
+        $skillBytesBefore = [System.IO.File]::ReadAllBytes($skillPath)
+        $errorMessage = $null
+
+        try {
+            Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply -BeforeLockAcquisitionAction {
+                [System.IO.File]::WriteAllBytes($manifestPath,$v3Bytes)
+            } | Out-Null
+        }
+        catch { $errorMessage = $_.Exception.Message }
+
+        if ([string]::IsNullOrWhiteSpace($errorMessage)) { throw 'Expected the lock-protected manifest reread to reject schema version 3.' }
+        $errorMessage.Contains('USER managed manifest schema version 3 requires a projection-aware installer.') | Should Be $true
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($manifestPath)) | Should Be ([Convert]::ToBase64String($v3Bytes))
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($skillPath)) | Should Be ([Convert]::ToBase64String($skillBytesBefore))
+        Test-Path -LiteralPath (Join-Path $userHome '.agents\skills\beta\SKILL.md') | Should Be $false
+    }
+
+    # Scenario: A projection-aware installer replaces the legacy manifest while recovery waits for the global lock.
+    # Purpose: Ensure recovery rereads manifest ownership under the lock before it interprets a journal or restores files.
+    It 'InterT57a_rejects_a_v3_manifest_replaced_while_acquiring_the_recovery_lock_without_mutation' {
+        $userHome = Join-Path $TestDrive 'recovery-v3-lock-race'
+        $desired = New-TestDesiredState -Root (Join-Path $TestDrive 'recovery-v3-lock-race-staging') -SkillIds @('alpha')
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome | Should Be 'applied'
+        $agentsRoot = Join-Path $userHome '.agents'
+        $target = Join-Path $agentsRoot 'skills\alpha\SKILL.md'
+        $backupRoot = Join-Path $agentsRoot 'backups\recovery-v3-lock-race'
+        $backup = Join-Path $backupRoot '.agents\skills\alpha\SKILL.md'
+        $journalPath = Join-Path $agentsRoot 'update-agent-environment.recovery.json'
+        $manifestPath = Join-Path $agentsRoot 'catalog-skills.manifest.json'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $backup) | Out-Null
+        [System.IO.File]::WriteAllText($target,'applied bytes')
+        [System.IO.File]::WriteAllText($backup,'original bytes')
+        $originalSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $backup).Hash.ToLowerInvariant()
+        $appliedSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash.ToLowerInvariant()
+        $journal = New-TestRecoveryJournal -UserHome $userHome -BackupRoot $backupRoot -States @([pscustomobject][ordered]@{
+            relativePath='.agents/skills/alpha/SKILL.md'; existed=$true; backupPath=$backup
+            originalSha256=$originalSha256; backupSha256=$originalSha256; appliedSha256=$appliedSha256
+        })
+        $journal | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $journalPath -Encoding UTF8
+        $journalBytes = [System.IO.File]::ReadAllBytes($journalPath)
+        $v3Bytes = [System.IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v3.example.json'))
+        $errorMessage = $null
+
+        try {
+            Invoke-UserSkillsRecovery -UserHome $userHome -BeforeLockAcquisitionAction {
+                [System.IO.File]::WriteAllBytes($manifestPath,$v3Bytes)
+            } | Out-Null
+        }
+        catch { $errorMessage = $_.Exception.Message }
+
+        if ([string]::IsNullOrWhiteSpace($errorMessage)) { throw 'Expected the lock-protected recovery manifest reread to reject schema version 3.' }
+        $errorMessage.Contains('USER managed manifest schema version 3 requires a projection-aware installer.') | Should Be $true
+        [System.IO.File]::ReadAllText($target) | Should Be 'applied bytes'
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($journalPath)) | Should Be ([Convert]::ToBase64String($journalBytes))
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($manifestPath)) | Should Be ([Convert]::ToBase64String($v3Bytes))
     }
 
     It 'preserves an unmanaged personal Skill outside the Catalog' {
@@ -751,6 +892,66 @@ Describe 'Agent environment stable entry point' {
         @($result.failed).Count | Should Be 1
     }
 
+    # Scenario: The installed recovery entry point reads an existing v2 manifest without a recovery journal.
+    # Purpose: Ensure the reconciler loads its contract validator itself in a fresh PowerShell process.
+    It 'InterT59_recovers_a_v2_manifest_without_a_preimported_contract_module' {
+        $entry = Join-Path $script:RepositoryRoot 'scripts\update-agent-environment.ps1'
+        $codexHome = Join-Path $TestDrive ('recovery-v2-codex-' + [Guid]::NewGuid().ToString('N'))
+        $userHome = Join-Path $TestDrive ('recovery-v2-user-' + [Guid]::NewGuid().ToString('N'))
+        $runtimeRoot = Join-Path $codexHome 'hooks\ai-instructions-runtime'
+        New-Item -ItemType Directory -Force -Path $runtimeRoot,(Join-Path $userHome '.agents') | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $codexHome 'ai-instructions-install.lock'),'')
+        [System.IO.File]::WriteAllText((Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'), @'
+[CmdletBinding()]
+param([switch]$ValidateOnly)
+if (-not $ValidateOnly) { throw 'Validation switch required.' }
+'@)
+        Copy-Item -LiteralPath $script:ModulePath -Destination (Join-Path $runtimeRoot 'agent-environment-reconciler.psm1') -Force
+        Copy-Item -LiteralPath $script:ContractPath -Destination (Join-Path $runtimeRoot 'skills-catalog-contract.psm1') -Force
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v2.example.json') -Destination (Join-Path $userHome '.agents\catalog-skills.manifest.json') -Force
+        $stderrPath = Join-Path $TestDrive ('recovery-v2-stderr-' + [Guid]::NewGuid().ToString('N') + '.log')
+
+        $output = @(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry `
+            -CodexHome $codexHome -UserHome $userHome -Recover -OutputFormat Json 2> $stderrPath)
+        $exitCode = $LASTEXITCODE
+
+        $exitCode | Should Be 0
+        $output.Count | Should Be 1
+        ($output[0] | ConvertFrom-Json).outcome | Should Be 'nothing-to-recover'
+        ([System.IO.File]::ReadAllText($stderrPath)).Contains('is not recognized') | Should Be $false
+    }
+
+    # Scenario: The installed recovery entry point reads a valid v3 manifest without a recovery journal.
+    # Purpose: Ensure recovery returns nothing-to-recover without validating the projection-aware manifest.
+    It 'InterT59b_recovers_a_v3_manifest_without_a_recovery_journal' {
+        $entry = Join-Path $script:RepositoryRoot 'scripts\update-agent-environment.ps1'
+        $codexHome = Join-Path $TestDrive ('recovery-v3-codex-' + [Guid]::NewGuid().ToString('N'))
+        $userHome = Join-Path $TestDrive ('recovery-v3-user-' + [Guid]::NewGuid().ToString('N'))
+        $runtimeRoot = Join-Path $codexHome 'hooks\ai-instructions-runtime'
+        $agentsRoot = Join-Path $userHome '.agents'
+        New-Item -ItemType Directory -Force -Path $runtimeRoot,$agentsRoot | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $codexHome 'ai-instructions-install.lock'),'')
+        [System.IO.File]::WriteAllText((Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'), @'
+[CmdletBinding()]
+param([switch]$ValidateOnly)
+if (-not $ValidateOnly) { throw 'Validation switch required.' }
+'@)
+        Copy-Item -LiteralPath $script:ModulePath -Destination (Join-Path $runtimeRoot 'agent-environment-reconciler.psm1') -Force
+        Copy-Item -LiteralPath $script:ContractPath -Destination (Join-Path $runtimeRoot 'skills-catalog-contract.psm1') -Force
+        $manifestPath = Join-Path $agentsRoot 'catalog-skills.manifest.json'
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v3.example.json') -Destination $manifestPath -Force
+        $manifestBytesBefore = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($manifestPath))
+
+        $output = @(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry `
+            -CodexHome $codexHome -UserHome $userHome -Recover -OutputFormat Json)
+        $exitCode = $LASTEXITCODE
+
+        $exitCode | Should Be 0
+        $output.Count | Should Be 1
+        ($output[0] | ConvertFrom-Json).outcome | Should Be 'nothing-to-recover'
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($manifestPath)) | Should Be $manifestBytesBefore
+    }
+
     # Scenario: The stable entry point receives a malformed recovery journal while recovery is explicitly requested.
     # Purpose: Verify the child process returns machine-readable recovery-required evidence and preserves the journal for operator remediation.
     It 'InterT60_returns_structured_recovery_evidence_and_preserves_an_invalid_recovery_journal' {
@@ -766,6 +967,7 @@ param([switch]$ValidateOnly)
 if (-not $ValidateOnly) { throw 'Validation switch required.' }
 '@)
         Copy-Item -LiteralPath $script:ModulePath -Destination (Join-Path $runtimeRoot 'agent-environment-reconciler.psm1') -Force
+        Copy-Item -LiteralPath $script:ContractPath -Destination (Join-Path $runtimeRoot 'skills-catalog-contract.psm1') -Force
 
         $journalPath = Join-Path $userHome '.agents\update-agent-environment.recovery.json'
         $journal = [pscustomobject][ordered]@{
