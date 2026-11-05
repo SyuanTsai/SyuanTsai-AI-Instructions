@@ -268,15 +268,15 @@ Describe 'Standard validation resolver hardening' {
         }
     }
 
-    # Scenario: the latest-stable resolver advances to SkillSpector 2.13.0 while the parser correction remains release-specific.
+    # Scenario: the latest-stable resolver advances to SkillSpector 2.13.3 while the parser correction remains release-specific.
     # Purpose: retain dynamic stable resolution but require the exact reviewed release identity before parser correction.
     It 'UnitT26_binds_the_latest_stable_parser_profile_to_the_reviewed_2_13_release' {
         $toolPolicy=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/validation-toolchain.json') | ConvertFrom-Json
         $profile=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/static-parser-host-ownership.json') | ConvertFrom-Json
         Assert-Equal $toolPolicy.tools.skillspector.channel 'latest-stable' 'Canonical tool resolution must remain latest-stable.'
-        Assert-Equal $profile.officialScannerVersion '2.13.0' 'Parser correction must bind the reviewed stable version.'
-        Assert-Equal $profile.officialScannerReleaseCommit '091a509b3d6ba8ff5be528966e1f43c2e68cf214' 'Parser correction must bind the reviewed release commit.'
-        Assert-Equal $profile.officialScannerReleaseAssetSha256 '41e097b4127c0aa0732ad31cc909f8aee0b907d97816c866a55b8e782a6ca6dc' 'Parser correction must bind the reviewed release wheel.'
+        Assert-Equal $profile.officialScannerVersion '2.13.3' 'Parser correction must bind the reviewed stable version.'
+        Assert-Equal $profile.officialScannerReleaseCommit '38a1dfe93325d2f8bfcd4f8d0241eed706334915' 'Parser correction must bind the reviewed release commit.'
+        Assert-Equal $profile.officialScannerReleaseAssetSha256 'a421dffba5e0f966bf1baf8acd77f4750a8ece0afc5520ecf49252b4004a8577' 'Parser correction must bind the reviewed release wheel.'
     }
 
     # Scenario: The verified closure helper already produced the authoritative offline pip selection plan.

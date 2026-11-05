@@ -18,10 +18,10 @@ from typing import Callable
 MAX_SOURCE_BYTES = 1024 * 1024
 MAX_PROOF_BYTES = 8 * 1024 * 1024
 PROFILE = "powershell-native-command-ownership-v1"
-OFFICIAL_VERSION = "2.13.0"
-OFFICIAL_RELEASE_COMMIT = "091a509b3d6ba8ff5be528966e1f43c2e68cf214"
-OFFICIAL_RELEASE_ASSET_SHA256 = "41e097b4127c0aa0732ad31cc909f8aee0b907d97816c866a55b8e782a6ca6dc"
-OFFICIAL_MODULE_SHA256 = "c799169f9ad716f8dbbbec5892ef76affd0f9974433709ed0c1cfc3bcd0b66a4"
+OFFICIAL_VERSION = "2.13.3"
+OFFICIAL_RELEASE_COMMIT = "38a1dfe93325d2f8bfcd4f8d0241eed706334915"
+OFFICIAL_RELEASE_ASSET_SHA256 = "a421dffba5e0f966bf1baf8acd77f4750a8ece0afc5520ecf49252b4004a8577"
+OFFICIAL_MODULE_SHA256 = "e40e8c07e8294462b313b276b0e021e25c774f06505bf802eb0d8e96294df560"
 FENCE = re.compile(r"(?m)^```(?:powershell|pwsh|ps1)[ \t]*\n(?P<body>[\s\S]*?)^```[ \t]*$")
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish", "cmd", "pwsh",
           "powershell", "wsl", "python", "python3", "node", "perl", "ruby", "php",
@@ -246,9 +246,30 @@ def install_bridge(pwsh: str, pwsh_sha256: str, module, installed_version: str, 
     records = []
     cache = {}
 
-    def corrected(content, check_runtime, *, file_type="shell", complete_context=True):
+    # 2.13.3 delegates the public hook to a private parser. Rebind that
+    # delegate too, or the injected helper never reaches the scanner.
+    delegate = original.__globals__.get("_has_bounded_parse_exhaustion")
+    if delegate is not None and (not isinstance(delegate, types.FunctionType)
+                                 or delegate.__globals__ is not original.__globals__):
+        raise ParserCoverageError("the reviewed delegated parser changed")
+
+    def clone(function, namespace):
+        copy = types.FunctionType(function.__code__, namespace, function.__name__, function.__defaults__)
+        copy.__kwdefaults__ = function.__kwdefaults__
+        return copy
+
+    def corrected(content, check_runtime, *, file_type="shell", complete_context=True,
+                  python_import_check=None, python_stdlib_check=None):
         check_runtime()
-        original_partial = original(content, check_runtime, file_type=file_type, complete_context=complete_context)
+        # The official static runner supplies these optional import-bound
+        # callbacks; forward them unchanged to every official parser call.
+        hook_kwargs = {}
+        if python_import_check is not None:
+            hook_kwargs["python_import_check"] = python_import_check
+        if python_stdlib_check is not None:
+            hook_kwargs["python_stdlib_check"] = python_stdlib_check
+        original_partial = original(content, check_runtime, file_type=file_type,
+                                    complete_context=complete_context, **hook_kwargs)
         if not original_partial or not complete_context:
             return original_partial
         normalized = normalize_source(content)
@@ -262,7 +283,7 @@ def install_bridge(pwsh: str, pwsh_sha256: str, module, installed_version: str, 
             file_type = "powershell"
         if not paths:
             raise ParserCoverageError("scanner input is not in the frozen candidate inventory")
-        key = (file_type, digest)
+        key = (file_type, digest, python_import_check is not None, python_stdlib_check is not None)
         if key in cache:
             return cache[key]
         if hashlib.sha256(runtime.read_bytes()).hexdigest() != pwsh_sha256:
@@ -283,9 +304,10 @@ def install_bridge(pwsh: str, pwsh_sha256: str, module, installed_version: str, 
                 return original_helper(text, runtime_check, **kwargs)
             namespace = dict(original.__globals__)
             namespace["_has_shell_command_word_exhaustion"] = aware
-            scanner = types.FunctionType(original.__code__, namespace, original.__name__, original.__defaults__)
-            scanner.__kwdefaults__ = original.__kwdefaults__
-            return scanner(view, check_runtime, file_type=file_type, complete_context=True)
+            if delegate is not None:
+                namespace["_has_bounded_parse_exhaustion"] = clone(delegate, namespace)
+            scanner = clone(original, namespace)
+            return scanner(view, check_runtime, file_type=file_type, complete_context=True, **hook_kwargs)
 
         partial = check_command_views(normalized, file_type, proof, bounded, check_runtime)
         if module.analyze is not finding_analyzer:

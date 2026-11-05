@@ -6502,12 +6502,12 @@ Describe 'SYP171 internal source continuation authority binding' {
             throw 'The normative Standard must require the continuation policy and schemas to come from the authenticated authority snapshot.'
         }
         $profile = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $root 'docs/standards/static-parser-host-ownership.json') | ConvertFrom-Json
-        if ($profile.officialScannerVersion -cne '2.13.0' -or
-            $profile.officialScannerReleaseCommit -cne '091a509b3d6ba8ff5be528966e1f43c2e68cf214' -or
-            $profile.officialScannerReleaseAssetSha256 -cne '41e097b4127c0aa0732ad31cc909f8aee0b907d97816c866a55b8e782a6ca6dc' -or
-            $profile.officialAnalyzerSha256 -cne 'c799169f9ad716f8dbbbec5892ef76affd0f9974433709ed0c1cfc3bcd0b66a4' -or
-            $standard -notmatch 'SkillSpector 2\.13\.0') {
-            throw 'The normative Standard and parser profile must bind the reviewed SkillSpector 2.13.0 release.'
+        if ($profile.officialScannerVersion -cne '2.13.3' -or
+            $profile.officialScannerReleaseCommit -cne '38a1dfe93325d2f8bfcd4f8d0241eed706334915' -or
+            $profile.officialScannerReleaseAssetSha256 -cne 'a421dffba5e0f966bf1baf8acd77f4750a8ece0afc5520ecf49252b4004a8577' -or
+            $profile.officialAnalyzerSha256 -cne 'e40e8c07e8294462b313b276b0e021e25c774f06505bf802eb0d8e96294df560' -or
+            $standard -notmatch 'SkillSpector 2\.13\.3') {
+            throw 'The normative Standard and parser profile must bind the reviewed SkillSpector 2.13.3 release.'
         }
     }
     # Scenario: the central security descriptor references the internal review assessment.
