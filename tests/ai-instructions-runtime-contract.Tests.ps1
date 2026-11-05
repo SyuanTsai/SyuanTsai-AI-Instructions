@@ -923,7 +923,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
     It 'UnitT104_rejects_platform_runtime_manifest_api_drift' {
         $cases = @(
             @{ Name = 'root-module'; OldValue = "RootModule = 'platform-runtime.psm1'"; NewValue = "RootModule = 'renamed-runtime.psm1'"; Pattern = 'RootModule' },
-            @{ Name = 'function-export'; OldValue = "        'Set-PlatformProcessEnvironment'`n"; NewValue = "        `n"; Pattern = 'FunctionsToExport' }
+            @{ Name = 'function-export'; OldValue = "        'Get-PlatformCapabilities',`n"; NewValue = "        `n"; Pattern = 'FunctionsToExport' }
         )
         foreach ($case in $cases) {
             $fixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive ('runtime-v3-api-' + $case.Name))
