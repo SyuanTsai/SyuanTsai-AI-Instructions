@@ -1038,7 +1038,8 @@ finally {
             $output = & $script:TestPowerShellExecutable -NoProfile -NonInteractive -EncodedCommand $encodedCommand 2>&1
 
             $LASTEXITCODE | Should Be 0
-            (ConvertTo-TestDiagnosticText -Output $output) | Should BeNullOrEmpty
+            $diagnostic = if ($null -eq $output -or @($output).Count -eq 0) { '' } else { ConvertTo-TestDiagnosticText -Output @($output) }
+            $diagnostic | Should BeNullOrEmpty
         }
         finally {
             Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
