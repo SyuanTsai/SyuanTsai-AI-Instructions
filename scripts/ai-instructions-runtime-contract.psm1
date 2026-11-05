@@ -1259,6 +1259,465 @@ function Assert-AiInstructionsUpdateReceiptV1 {
     return $Receipt
 }
 
+function Assert-AiInstructionsInstallJournalExactProperties {
+    param(
+        [AllowNull()][object] $Object,
+        [Parameter(Mandatory = $true)][string[]] $Names,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    if ($null -eq $Object -or $Object -is [System.Array] -or $Object -is [string] -or $Object -is [ValueType]) {
+        throw "$Context must be an object."
+    }
+    foreach ($name in $Names) {
+        if (-not (Test-AiInstructionsObjectHasProperty -Object $Object -Name $name)) { throw "$Context is missing '$name'." }
+    }
+    foreach ($propertyName in @($Object.PSObject.Properties.Name)) {
+        if ($propertyName -cnotin $Names) { throw "$Context contains unsupported property '$propertyName'." }
+    }
+}
+
+function Assert-AiInstructionsInstallJournalInteger {
+    param([AllowNull()][object] $Value,[Parameter(Mandatory = $true)][string] $Context,[long] $Minimum = 0)
+    if (($Value -isnot [int] -and $Value -isnot [long]) -or [int64]$Value -lt $Minimum) {
+        throw "$Context must be an integer greater than or equal to $Minimum."
+    }
+}
+
+function Assert-AiInstructionsInstallJournalLeaf {
+    param([AllowNull()][object] $Value,[Parameter(Mandatory = $true)][string] $Context,[switch] $AllowNull,[switch] $PortableName)
+    if ($AllowNull -and $null -eq $Value) { return }
+    if ($Value -isnot [string] -or [string]$Value -in @('.','..') -or [string]::IsNullOrEmpty([string]$Value) -or
+        [string]$Value -match '[/\\\x00-\x1f\x7f]') {
+        throw "$Context must be a safe single filename."
+    }
+    if ($PortableName -and ([string]$Value -match '[:*?"<>|]' -or [string]$Value -match '[. ]$')) {
+        throw "$Context must be a portable single filename."
+    }
+    if ($PortableName) {
+        if (Test-AiInstructionsInstallJournalWindowsReservedDeviceName -Value ([string]$Value)) {
+            throw "$Context must not use a Windows reserved device name."
+        }
+    }
+}
+
+function Test-AiInstructionsInstallJournalWindowsReservedDeviceName {
+    param([Parameter(Mandatory = $true)][string] $Value)
+    $baseName = $Value.Split('.')[0].ToUpperInvariant()
+    $superscriptOne = [char]0x00B9
+    $superscriptTwo = [char]0x00B2
+    $superscriptThree = [char]0x00B3
+    if ($baseName -in @('CON','PRN','AUX','NUL','CONIN$','CONOUT$')) { return $true }
+    return $baseName -match "^(COM|LPT)[0-9$superscriptOne$superscriptTwo$superscriptThree]$"
+}
+
+function Get-AiInstructionsInstallJournalPortableNameKey {
+    param([Parameter(Mandatory = $true)][string] $Value)
+    return $Value.Normalize([Text.NormalizationForm]::FormC).ToUpperInvariant()
+}
+
+function Assert-AiInstructionsInstallJournalIdentity {
+    param([AllowNull()][object] $Identity,[Parameter(Mandatory = $true)][string] $Context,[Parameter(Mandatory = $true)][string] $ExpectedKind,[switch] $AllowNull)
+    if ($null -eq $Identity) {
+        if ($AllowNull) { return }
+        throw "$Context must not be null."
+    }
+    Assert-AiInstructionsInstallJournalExactProperties -Object $Identity -Names @('kind','device','fileId') -Context $Context
+    if ($Identity.kind -isnot [string] -or [string]$Identity.kind -cnotin @('windows-file-id','unix-device-inode')) { throw "$Context.kind is invalid." }
+    if ([string]$Identity.kind -cne $ExpectedKind) { throw "$Context.kind must be $ExpectedKind for the journal platform." }
+    foreach ($name in @('device','fileId')) {
+        $value = $Identity.PSObject.Properties[$name].Value
+        if ($value -isnot [string] -or [string]::IsNullOrEmpty([string]$value) -or ([string]$value).Length -gt 64 -or [string]$value -cnotmatch '^[0-9A-Fa-fx:-]+$') { throw "$Context.$name is invalid." }
+    }
+}
+
+function Assert-AiInstructionsInstallJournalFileState {
+    param([AllowNull()][object] $State,[Parameter(Mandatory = $true)][string] $Context)
+    Assert-AiInstructionsInstallJournalExactProperties -Object $State -Names @('exists','sha256','length','identity') -Context $Context
+    if ($State.exists -isnot [bool]) { throw "$Context.exists must be a boolean." }
+    if ($State.exists) {
+        if ($State.sha256 -isnot [string] -or [string]$State.sha256 -cnotmatch '^[0-9a-f]{64}$') { throw "$Context.sha256 must be a lowercase SHA-256 hash when exists is true." }
+        Assert-AiInstructionsInstallJournalInteger -Value $State.length -Context "$Context.length" -Minimum 0
+    }
+    elseif ($null -ne $State.sha256 -or $null -ne $State.length -or $null -ne $State.identity) {
+        throw "$Context.sha256, $Context.length, and $Context.identity must be null when exists is false."
+    }
+}
+
+function Assert-AiInstructionsInstallJournalV1 {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object] $Journal)
+
+    $topProperties = @('schemaVersion','kind','transactionId','createdAtUtc','owner','platform','lock','generation','phase','operations')
+    Assert-AiInstructionsInstallJournalExactProperties -Object $Journal -Names $topProperties -Context 'AI instructions install journal'
+    if (($Journal.schemaVersion -isnot [int] -and $Journal.schemaVersion -isnot [long]) -or [int64]$Journal.schemaVersion -ne 1) {
+        throw "Unsupported AI instructions install journal schema version '$($Journal.schemaVersion)'."
+    }
+    if ($Journal.kind -isnot [string] -or [string]$Journal.kind -cne 'ai-instructions-install-transaction') { throw 'AI instructions install journal kind is invalid.' }
+    if ($Journal.transactionId -isnot [string] -or [string]$Journal.transactionId -cnotmatch '^[0-9a-f]{32}$') { throw 'AI instructions install journal transactionId must be 32 lowercase hexadecimal characters.' }
+    if ($Journal.createdAtUtc -isnot [string] -or [string]$Journal.createdAtUtc -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$') {
+        throw 'AI instructions install journal createdAtUtc must be an ISO 8601 UTC string ending in Z.'
+    }
+    try { ConvertTo-AiInstructionsUtcDateTime -Value $Journal.createdAtUtc -Context 'AI instructions install journal createdAtUtc' | Out-Null }
+    catch { throw 'AI instructions install journal createdAtUtc must be an ISO 8601 UTC string ending in Z.' }
+
+    Assert-AiInstructionsInstallJournalExactProperties -Object $Journal.owner -Names @('component','processId','processStartIdentity') -Context 'AI instructions install journal owner'
+    if ($Journal.owner.component -isnot [string] -or [string]$Journal.owner.component -cnotin @('installer','updater','launcher-recovery')) { throw 'AI instructions install journal owner.component is invalid.' }
+    Assert-AiInstructionsInstallJournalInteger -Value $Journal.owner.processId -Context 'AI instructions install journal owner.processId' -Minimum 1
+    if ($Journal.owner.processStartIdentity -isnot [string] -or [string]::IsNullOrEmpty([string]$Journal.owner.processStartIdentity) -or
+        ([string]$Journal.owner.processStartIdentity).Length -gt 128 -or [string]$Journal.owner.processStartIdentity -match '[\x00-\x1f\x7f]') {
+        throw 'AI instructions install journal owner.processStartIdentity is invalid.'
+    }
+
+    Assert-AiInstructionsInstallJournalExactProperties -Object $Journal.platform -Names @('os','architecture') -Context 'AI instructions install journal platform'
+    if ($Journal.platform.os -isnot [string] -or [string]$Journal.platform.os -cnotin @('windows','linux','macos')) { throw 'AI instructions install journal platform.os is invalid.' }
+    if ($Journal.platform.architecture -isnot [string] -or [string]$Journal.platform.architecture -cnotin @('x64','arm64')) { throw 'AI instructions install journal platform.architecture is invalid.' }
+
+    Assert-AiInstructionsInstallJournalExactProperties -Object $Journal.lock -Names @('primitive','leaf') -Context 'AI instructions install journal lock'
+    if ($Journal.lock.primitive -isnot [string] -or [string]$Journal.lock.primitive -cnotin @('windows-fileshare','flock')) { throw 'AI instructions install journal lock.primitive is invalid.' }
+    $expectedLockPrimitive = if ([string]$Journal.platform.os -ceq 'windows') { 'windows-fileshare' } else { 'flock' }
+    if ([string]$Journal.lock.primitive -cne $expectedLockPrimitive) { throw "AI instructions install journal lock.primitive must be $expectedLockPrimitive for the journal platform." }
+    Assert-AiInstructionsInstallJournalLeaf -Value $Journal.lock.leaf -Context 'AI instructions install journal lock.leaf' -PortableName
+
+    Assert-AiInstructionsInstallJournalExactProperties -Object $Journal.generation -Names @('previousBundleSha256','candidateBundleSha256') -Context 'AI instructions install journal generation'
+    if ($null -ne $Journal.generation.previousBundleSha256 -and
+        ($Journal.generation.previousBundleSha256 -isnot [string] -or [string]$Journal.generation.previousBundleSha256 -cnotmatch '^[0-9a-f]{64}$')) {
+        throw 'AI instructions install journal generation.previousBundleSha256 is invalid.'
+    }
+    if ($Journal.generation.candidateBundleSha256 -isnot [string] -or [string]$Journal.generation.candidateBundleSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'AI instructions install journal generation.candidateBundleSha256 is invalid.'
+    }
+    if ($Journal.phase -isnot [string] -or [string]$Journal.phase -cnotin @('prepared','applying','applied','rolling-back','rolled-back','committed')) { throw 'AI instructions install journal phase is invalid.' }
+    if ($Journal.operations -isnot [System.Array] -or @($Journal.operations).Count -lt 1) { throw 'AI instructions install journal operations must be a non-empty array.' }
+
+    $paths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    $leaves = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    $expectedIdentityKind = if ([string]$Journal.platform.os -ceq 'windows') { 'windows-file-id' } else { 'unix-device-inode' }
+    $expectedSequence = 1
+    foreach ($operation in @($Journal.operations)) {
+        $context = "AI instructions install journal operation sequence $expectedSequence"
+        Assert-AiInstructionsInstallJournalExactProperties -Object $operation -Names @('sequence','kind','method','targetRelativePath','stageLeaf','backupLeaf','original','applied','permissions','state') -Context $context
+        Assert-AiInstructionsInstallJournalInteger -Value $operation.sequence -Context "$context.sequence" -Minimum 1
+        if ([int64]$operation.sequence -ne $expectedSequence) { throw "$context.sequence must be $expectedSequence for a continuous sequence." }
+        $sequence = [int64]$operation.sequence
+        $context = "AI instructions install journal operation sequence $sequence"
+        if ($operation.kind -isnot [string] -or [string]$operation.kind -cnotin @('write-file','create-file','remove-file','swap-directory')) { throw "$context.kind is invalid." }
+        if ($operation.method -isnot [string] -or [string]$operation.method -cnotin @('stage-rename','in-place','unlink')) { throw "$context.method is invalid." }
+        if ($operation.state -isnot [string] -or [string]$operation.state -cnotin @('pending','staged','applied','rolled-back')) { throw "$context.state is invalid." }
+        if ([string]$operation.kind -ceq 'remove-file' -and [string]$operation.method -cne 'unlink') { throw "$context.method must be unlink for remove-file." }
+        if ([string]$operation.kind -cne 'remove-file' -and [string]$operation.method -ceq 'unlink') { throw "$context.method unlink is only valid for remove-file." }
+        if ([string]$operation.kind -ceq 'swap-directory' -and [string]$operation.method -cne 'stage-rename') { throw "$context.method must be stage-rename for swap-directory." }
+        if ([string]$operation.method -ceq 'in-place' -and ([string]$Journal.platform.os -cne 'windows' -or [string]$operation.kind -cnotin @('write-file','create-file'))) {
+            throw "$context.method in-place is only valid for Windows write-file or create-file operations."
+        }
+        if ($operation.targetRelativePath -isnot [string] -or [string]::IsNullOrEmpty([string]$operation.targetRelativePath) -or
+            ([string]$operation.targetRelativePath).Length -gt 512 -or [string]$operation.targetRelativePath -match '[\\\x00-\x1f\x7f:*?"<>|]' -or
+            [string]$operation.targetRelativePath -match '^/' -or [string]$operation.targetRelativePath -match '/$' -or [string]$operation.targetRelativePath -match '^[A-Za-z]:' -or
+            [string]$operation.targetRelativePath -match '(^|/)(?:\.|\.\.)(?:/|$)' -or [string]$operation.targetRelativePath -match '(^|/)[^/]*[. ](?:/|$)' -or
+            [string]$operation.targetRelativePath -match '//') {
+            throw "$context.targetRelativePath is not a safe transaction-relative path."
+        }
+        foreach ($segment in ([string]$operation.targetRelativePath).Split('/')) {
+            if (Test-AiInstructionsInstallJournalWindowsReservedDeviceName -Value $segment) {
+                throw "$context.targetRelativePath contains a Windows reserved device name."
+            }
+        }
+        $pathKey = Get-AiInstructionsInstallJournalPortableNameKey -Value ([string]$operation.targetRelativePath)
+        if (-not $paths.Add($pathKey)) { throw "$context.targetRelativePath duplicates another target path after Unicode NFC and invariant case normalization." }
+        Assert-AiInstructionsInstallJournalLeaf -Value $operation.stageLeaf -Context "$context.stageLeaf" -AllowNull -PortableName
+        if ([string]$operation.method -ceq 'stage-rename' -and $null -eq $operation.stageLeaf) {
+            throw "$context.stageLeaf must not be null when method is stage-rename."
+        }
+        if ([string]$operation.method -in @('in-place','unlink') -and $null -ne $operation.stageLeaf) {
+            throw "$context.stageLeaf must be null when method is $($operation.method)."
+        }
+        if ([string]$operation.method -in @('in-place','unlink') -and [string]$operation.state -ceq 'staged') {
+            throw "$context.method $($operation.method) does not allow state staged."
+        }
+        Assert-AiInstructionsInstallJournalLeaf -Value $operation.backupLeaf -Context "$context.backupLeaf" -AllowNull -PortableName
+        foreach ($leaf in @($operation.stageLeaf,$operation.backupLeaf)) {
+            if ($null -ne $leaf) {
+                $leafKey = Get-AiInstructionsInstallJournalPortableNameKey -Value ([string]$leaf)
+                if (-not $leaves.Add($leafKey)) { throw "$context stageLeaf and backupLeaf values must be unique after Unicode NFC and invariant case normalization." }
+            }
+        }
+        Assert-AiInstructionsInstallJournalFileState -State $operation.original -Context "$context.original"
+        Assert-AiInstructionsInstallJournalFileState -State $operation.applied -Context "$context.applied"
+
+        switch ([string]$operation.kind) {
+            'create-file' { if ($operation.original.exists -or -not $operation.applied.exists) { throw "$context kind create-file requires original.exists=false and applied.exists=true." } }
+            'remove-file' { if (-not $operation.original.exists -or $operation.applied.exists) { throw "$context kind remove-file requires original.exists=true and applied.exists=false." } }
+            default { if (-not $operation.original.exists -or -not $operation.applied.exists) { throw "$context kind $($operation.kind) requires original.exists=true and applied.exists=true." } }
+        }
+        if ($operation.original.exists -and $null -eq $operation.backupLeaf) { throw "$context.backupLeaf must not be null when original.exists is true." }
+        Assert-AiInstructionsInstallJournalIdentity -Identity $operation.original.identity -Context "$context.original.identity" -ExpectedKind $expectedIdentityKind -AllowNull:(-not [bool]$operation.original.exists)
+        if (-not $operation.original.exists -and $null -ne $operation.original.identity) { throw "$context.original.identity must be null when exists is false." }
+        if ($operation.original.exists -and $null -eq $operation.permissions) { throw "$context.permissions must not be null when original.exists is true." }
+        if ($null -ne $operation.permissions) {
+            if ($operation.permissions.kind -isnot [string]) { throw "$context.permissions.kind is invalid." }
+            if ([string]$operation.permissions.kind -ceq 'windows-sddl') {
+                Assert-AiInstructionsInstallJournalExactProperties -Object $operation.permissions -Names @('kind','sddl','readOnly') -Context "$context.permissions"
+                if ($operation.permissions.sddl -isnot [string] -or [string]::IsNullOrEmpty([string]$operation.permissions.sddl) -or
+                    ([string]$operation.permissions.sddl).Length -gt 4096 -or [string]$operation.permissions.sddl -match '[\x00-\x1f\x7f]') { throw "$context.permissions.sddl is invalid." }
+                if ($operation.permissions.readOnly -isnot [bool]) { throw "$context.permissions.readOnly must be a boolean." }
+            }
+            elseif ([string]$operation.permissions.kind -ceq 'unix-mode') {
+                Assert-AiInstructionsInstallJournalExactProperties -Object $operation.permissions -Names @('kind','mode','uid','gid') -Context "$context.permissions"
+                if ($operation.permissions.mode -isnot [string] -or [string]$operation.permissions.mode -cnotmatch '^[0-7]{3,4}$') { throw "$context.permissions.mode is invalid." }
+                Assert-AiInstructionsInstallJournalInteger -Value $operation.permissions.uid -Context "$context.permissions.uid" -Minimum 0
+                Assert-AiInstructionsInstallJournalInteger -Value $operation.permissions.gid -Context "$context.permissions.gid" -Minimum 0
+            }
+            else { throw "$context.permissions.kind is invalid." }
+            $expectedPermissionsKind = if ([string]$Journal.platform.os -ceq 'windows') { 'windows-sddl' } else { 'unix-mode' }
+            if ([string]$operation.permissions.kind -cne $expectedPermissionsKind) { throw "$context.permissions.kind must be $expectedPermissionsKind for the journal platform." }
+        }
+        $appliedIdentityMayBeNull = -not [bool]$operation.applied.exists -or [string]$operation.state -ceq 'pending'
+        Assert-AiInstructionsInstallJournalIdentity -Identity $operation.applied.identity -Context "$context.applied.identity" -ExpectedKind $expectedIdentityKind -AllowNull:$appliedIdentityMayBeNull
+        if (-not $operation.applied.exists -and $null -ne $operation.applied.identity) { throw "$context.applied.identity must be null when exists is false." }
+        if ([string]$Journal.phase -ceq 'prepared' -and [string]$operation.state -cnotin @('pending','staged')) { throw "$context.state is inconsistent with phase prepared." }
+        if ([string]$Journal.phase -in @('applied','committed') -and [string]$operation.state -cne 'applied') { throw "$context.state is inconsistent with phase $($Journal.phase)." }
+        if ([string]$Journal.phase -ceq 'rolled-back' -and [string]$operation.state -cnotin @('pending','staged','rolled-back')) { throw "$context.state is inconsistent with phase rolled-back." }
+        $expectedSequence++
+    }
+    return $Journal
+}
+
+function Assert-AiInstructionsInstallJournalUnambiguousJson {
+    param([Parameter(Mandatory = $true)][string] $Json)
+    $tokenRegex = New-Object Text.RegularExpressions.Regex('\G\s*(?:"(?:\\.|[^"\\])*"|[{}\[\],:]|[^{}\[\],:\s]+)',[Text.RegularExpressions.RegexOptions]::None,[TimeSpan]::FromSeconds(2))
+    $stack = New-Object System.Collections.ArrayList
+    [void]$stack.Add([pscustomobject]@{ kind='root'; mode='value'; seen=$null })
+    $position = 0
+    try {
+        while ($position -lt $Json.Length) {
+            $match = $tokenRegex.Match($Json,$position)
+            if (-not $match.Success -or $match.Index -ne $position) {
+                if ([string]::IsNullOrWhiteSpace($Json.Substring($position))) { break }
+                throw 'AI instructions install journal JSON token is invalid.'
+            }
+            $token = $match.Value.TrimStart()
+            $position += $match.Length
+            $frame = $stack[$stack.Count - 1]
+            if ($token -ceq '}' -or $token -ceq ']') {
+                if ($frame.kind -ceq 'root' -or ($token -ceq '}' -and $frame.kind -cne 'object') -or ($token -ceq ']' -and $frame.kind -cne 'array') -or
+                    $frame.mode -notin @('keyOrEnd','valueOrEnd','commaOrEnd')) { throw 'AI instructions install journal JSON structure is invalid.' }
+                $stack.RemoveAt($stack.Count - 1)
+                continue
+            }
+            if ($token -ceq ',') {
+                if ($frame.mode -cne 'commaOrEnd') { throw 'AI instructions install journal JSON comma is invalid.' }
+                $frame.mode = if ($frame.kind -ceq 'object') { 'key' } else { 'value' }
+                continue
+            }
+            if ($token -ceq ':') {
+                if ($frame.kind -cne 'object' -or $frame.mode -cne 'colon') { throw 'AI instructions install journal JSON colon is invalid.' }
+                $frame.mode = 'value'
+                continue
+            }
+            if ($frame.kind -ceq 'object' -and $frame.mode -in @('key','keyOrEnd')) {
+                if (-not $token.StartsWith('"',[StringComparison]::Ordinal)) { throw 'AI instructions install journal JSON key is invalid.' }
+                try { $key = [string](ConvertFrom-Json -InputObject ('{"key":' + $token + '}') -ErrorAction Stop).key }
+                catch { throw 'AI instructions install journal JSON key is invalid.' }
+                if (-not $frame.seen.Add($key)) { throw "AI instructions install journal JSON contains duplicate key '$key'." }
+                $frame.mode = 'colon'
+                continue
+            }
+            if ($frame.mode -cne 'value' -and $frame.mode -cne 'valueOrEnd') { throw 'AI instructions install journal JSON value is invalid.' }
+            $frame.mode = if ($frame.kind -ceq 'root') { 'done' } else { 'commaOrEnd' }
+            if ($token -ceq '{') { [void]$stack.Add([pscustomobject]@{ kind='object'; mode='keyOrEnd'; seen=(New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)) }) }
+            elseif ($token -ceq '[') { [void]$stack.Add([pscustomobject]@{ kind='array'; mode='valueOrEnd'; seen=$null }) }
+        }
+    }
+    catch {
+        if ($_.Exception.Message -like 'AI instructions install journal JSON*') { throw }
+        throw 'AI instructions install journal JSON token scan failed.'
+    }
+    if ($stack.Count -ne 1 -or $stack[0].mode -cne 'done') { throw 'AI instructions install journal JSON is incomplete.' }
+}
+
+function ConvertFrom-AiInstructionsInstallJournalV1Json {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true,ValueFromPipeline = $true)][string] $Json)
+    process {
+        Assert-AiInstructionsInstallJournalUnambiguousJson -Json $Json
+        $convertParameters = @{ InputObject=$Json; ErrorAction='Stop' }
+        if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')) { $convertParameters.DateKind = 'String' }
+        try { $journal = ConvertFrom-Json @convertParameters }
+        catch { throw 'AI instructions install journal JSON is invalid.' }
+        if ($null -eq $journal -or $journal -is [System.Array] -or $journal -is [string] -or $journal -is [ValueType]) { throw 'AI instructions install journal JSON root must be an object.' }
+        Write-Output (Assert-AiInstructionsInstallJournalV1 -Journal $journal)
+    }
+}
+
+function New-AiInstructionsInstallJournalV1 {
+    [CmdletBinding()]
+    param(
+        [string] $TransactionId = [guid]::NewGuid().ToString('N'),
+        [string] $CreatedAtUtc = [datetime]::UtcNow.ToString('o',[Globalization.CultureInfo]::InvariantCulture),
+        [Parameter(Mandatory = $true)][string] $OwnerComponent,
+        [Parameter(Mandatory = $true)][long] $OwnerProcessId,
+        [Parameter(Mandatory = $true)][string] $OwnerProcessStartIdentity,
+        [Parameter(Mandatory = $true)][string] $PlatformOs,
+        [Parameter(Mandatory = $true)][string] $PlatformArchitecture,
+        [Parameter(Mandatory = $true)][ValidateSet('windows-fileshare','flock')][string] $LockPrimitive,
+        [Parameter(Mandatory = $true)][string] $LockLeaf,
+        [AllowNull()][object] $PreviousBundleSha256 = $null,
+        [Parameter(Mandatory = $true)][string] $CandidateBundleSha256,
+        [Parameter(Mandatory = $true)][string] $Phase,
+        [Parameter(Mandatory = $true)][object[]] $Operations
+    )
+    $journal = [pscustomobject][ordered]@{
+        schemaVersion = 1
+        kind = 'ai-instructions-install-transaction'
+        transactionId = $TransactionId
+        createdAtUtc = $CreatedAtUtc
+        owner = [pscustomobject][ordered]@{ component=$OwnerComponent; processId=$OwnerProcessId; processStartIdentity=$OwnerProcessStartIdentity }
+        platform = [pscustomobject][ordered]@{ os=$PlatformOs; architecture=$PlatformArchitecture }
+        lock = [pscustomobject][ordered]@{ primitive=$LockPrimitive; leaf=$LockLeaf }
+        generation = [pscustomobject][ordered]@{ previousBundleSha256=$PreviousBundleSha256; candidateBundleSha256=$CandidateBundleSha256 }
+        phase = $Phase
+        operations = @($Operations)
+    }
+    return (Assert-AiInstructionsInstallJournalV1 -Journal $journal)
+}
+
+function Test-AiInstructionsInstallJournalStateMatch {
+    param([Parameter(Mandatory = $true)][object] $Observation,[Parameter(Mandatory = $true)][object] $State)
+    if ([bool]$Observation.exists -ne [bool]$State.exists) { return $false }
+    if (-not [bool]$State.exists) { return $true }
+    if ($null -eq $State.identity) { return $false }
+    return [string]$Observation.sha256 -ceq [string]$State.sha256 -and [int64]$Observation.length -eq [int64]$State.length -and
+        [string]$Observation.identity.kind -ceq [string]$State.identity.kind -and
+        ([string]$Observation.identity.device).ToLowerInvariant() -ceq ([string]$State.identity.device).ToLowerInvariant() -and
+        ([string]$Observation.identity.fileId).ToLowerInvariant() -ceq ([string]$State.identity.fileId).ToLowerInvariant()
+}
+
+function Test-AiInstructionsInstallJournalPermissionsMatch {
+    param([Parameter(Mandatory = $true)][object] $Observation,[Parameter(Mandatory = $true)][object] $Permissions)
+    if ([string]$Permissions.kind -ceq 'windows-sddl') {
+        return [string]$Observation.permissions.sddl -ceq [string]$Permissions.sddl -and
+            [bool]$Observation.permissions.readOnly -eq [bool]$Permissions.readOnly
+    }
+    $observedMode = ([string]$Observation.permissions.mode).TrimStart('0')
+    $expectedMode = ([string]$Permissions.mode).TrimStart('0')
+    if ([string]::IsNullOrEmpty($observedMode)) { $observedMode = '0' }
+    if ([string]::IsNullOrEmpty($expectedMode)) { $expectedMode = '0' }
+    return [int]$observedMode -eq [int]$expectedMode -and
+        [int64]$Observation.permissions.uid -eq [int64]$Permissions.uid -and
+        [int64]$Observation.permissions.gid -eq [int64]$Permissions.gid
+}
+
+function Get-AiInstructionsInstallRecoveryDecision {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object] $Journal,[Parameter(Mandatory = $true)][object] $Observations)
+    Assert-AiInstructionsInstallJournalV1 -Journal $Journal | Out-Null
+    $expectedIdentityKind = if ([string]$Journal.platform.os -ceq 'windows') { 'windows-file-id' } else { 'unix-device-inode' }
+    $expectedPermissionsKind = if ([string]$Journal.platform.os -ceq 'windows') { 'windows-sddl' } else { 'unix-mode' }
+    if ($null -eq $Observations -or $Observations -is [string] -or $Observations -is [ValueType] -or $Observations -is [System.Array]) { throw 'AI instructions install recovery observations must be keyed by sequence.' }
+    $observationProperties = @(if ($Observations -is [System.Collections.IDictionary]) { $Observations.Keys } else { $Observations.PSObject.Properties.Name })
+    if ($observationProperties.Count -ne @($Journal.operations).Count) { throw 'AI instructions install recovery observations must correspond one-to-one with journal operations.' }
+    $bySequence = @{}
+    foreach ($keyValue in $observationProperties) {
+        $key = [string]$keyValue
+        if ($key -cnotmatch '^[1-9][0-9]*$') { throw "AI instructions install recovery observation key '$key' is not a valid sequence." }
+        $sequence = [int64]$key
+        if ($bySequence.ContainsKey($sequence)) { throw "AI instructions install recovery observations contain duplicate sequence $sequence." }
+        $value = if ($Observations -is [System.Collections.IDictionary]) { $Observations[$keyValue] } else { $Observations.PSObject.Properties[$key].Value }
+        Assert-AiInstructionsInstallJournalExactProperties -Object $value -Names @('exists','sha256','length','identity','permissions','backupAvailable') -Context "AI instructions install recovery observation sequence $sequence"
+        if ($value.exists -isnot [bool]) { throw "AI instructions install recovery observation sequence $sequence.exists must be a boolean." }
+        if ($value.backupAvailable -isnot [bool]) { throw "AI instructions install recovery observation sequence $sequence.backupAvailable must be a boolean." }
+        if ($value.exists) {
+            if ($value.sha256 -isnot [string] -or [string]$value.sha256 -cnotmatch '^[0-9a-f]{64}$') { throw "AI instructions install recovery observation sequence $sequence.sha256 is invalid." }
+            Assert-AiInstructionsInstallJournalInteger -Value $value.length -Context "AI instructions install recovery observation sequence $sequence.length" -Minimum 0
+            Assert-AiInstructionsInstallJournalIdentity -Identity $value.identity -Context "AI instructions install recovery observation sequence $sequence.identity" -ExpectedKind $expectedIdentityKind
+            if ($null -eq $value.permissions) { throw "AI instructions install recovery observation sequence $sequence.permissions must not be null when exists is true." }
+            if ($value.permissions.kind -isnot [string] -or [string]$value.permissions.kind -cne $expectedPermissionsKind) { throw "AI instructions install recovery observation sequence $sequence.permissions.kind must be $expectedPermissionsKind for the journal platform." }
+            if ($expectedPermissionsKind -ceq 'windows-sddl') {
+                Assert-AiInstructionsInstallJournalExactProperties -Object $value.permissions -Names @('kind','sddl','readOnly') -Context "AI instructions install recovery observation sequence $sequence.permissions"
+                if ($value.permissions.sddl -isnot [string] -or [string]::IsNullOrEmpty([string]$value.permissions.sddl) -or
+                    ([string]$value.permissions.sddl).Length -gt 4096 -or [string]$value.permissions.sddl -match '[\x00-\x1f\x7f]') { throw "AI instructions install recovery observation sequence $sequence.permissions.sddl is invalid." }
+                if ($value.permissions.readOnly -isnot [bool]) { throw "AI instructions install recovery observation sequence $sequence.permissions.readOnly must be a boolean." }
+            }
+            else {
+                Assert-AiInstructionsInstallJournalExactProperties -Object $value.permissions -Names @('kind','mode','uid','gid') -Context "AI instructions install recovery observation sequence $sequence.permissions"
+                if ($value.permissions.mode -isnot [string] -or [string]$value.permissions.mode -cnotmatch '^[0-7]{3,4}$') { throw "AI instructions install recovery observation sequence $sequence.permissions.mode is invalid." }
+                Assert-AiInstructionsInstallJournalInteger -Value $value.permissions.uid -Context "AI instructions install recovery observation sequence $sequence.permissions.uid" -Minimum 0
+                Assert-AiInstructionsInstallJournalInteger -Value $value.permissions.gid -Context "AI instructions install recovery observation sequence $sequence.permissions.gid" -Minimum 0
+            }
+        }
+        elseif ($null -ne $value.sha256 -or $null -ne $value.length -or $null -ne $value.identity -or $null -ne $value.permissions) { throw "AI instructions install recovery observation sequence $sequence sha256, length, identity, and permissions must be null when exists is false." }
+        $bySequence[$sequence] = $value
+    }
+    foreach ($operation in @($Journal.operations)) {
+        if (-not $bySequence.ContainsKey([int64]$operation.sequence)) { throw "AI instructions install recovery observations are missing sequence $($operation.sequence)." }
+    }
+
+    $matchesApplied = @{}
+    $matchesOriginal = @{}
+    $permissionsMatchOriginal = @{}
+    foreach ($operation in @($Journal.operations)) {
+        $sequence = [int64]$operation.sequence
+        $matchesApplied[$sequence] = Test-AiInstructionsInstallJournalStateMatch -Observation $bySequence[$sequence] -State $operation.applied
+        $matchesOriginal[$sequence] = Test-AiInstructionsInstallJournalStateMatch -Observation $bySequence[$sequence] -State $operation.original
+        $permissionsMatchOriginal[$sequence] = $true
+        if ([string]$Journal.phase -cne 'committed' -and [bool]$operation.original.exists -and $null -ne $operation.permissions) {
+            $permissionsMatchOriginal[$sequence] = Test-AiInstructionsInstallJournalPermissionsMatch -Observation $bySequence[$sequence] -Permissions $operation.permissions
+        }
+    }
+    $allApplied = @($Journal.operations | Where-Object { -not $matchesApplied[[int64]$_.sequence] }).Count -eq 0
+    $allOriginal = @($Journal.operations | Where-Object { -not $matchesOriginal[[int64]$_.sequence] }).Count -eq 0
+    if ([string]$Journal.phase -in @('committed','rolled-back')) {
+        $allOriginalPermissions = @($Journal.operations | Where-Object { -not $permissionsMatchOriginal[[int64]$_.sequence] }).Count -eq 0
+        $matchesTerminal = if ([string]$Journal.phase -ceq 'committed') { $allApplied } else { $allOriginal -and $allOriginalPermissions }
+        $terminalAction = if ($matchesTerminal) { 'none' } else { 'refuse' }
+        $reasons = New-Object System.Collections.Generic.List[string]
+        if (-not $matchesTerminal) { $reasons.Add("phase $($Journal.phase) observations do not match the expected terminal state") }
+        if ([string]$Journal.phase -ceq 'rolled-back') {
+            foreach ($operation in @($Journal.operations)) {
+                $sequence = [int64]$operation.sequence
+                if (-not $permissionsMatchOriginal[$sequence]) { $reasons.Add("sequence $sequence permissions do not match original") }
+            }
+        }
+        return [pscustomobject][ordered]@{ action=$terminalAction; reasons=$reasons.ToArray(); operations=@($Journal.operations | ForEach-Object { [pscustomobject][ordered]@{ sequence=[int64]$_.sequence; action='keep' } }) }
+    }
+    if ([string]$Journal.phase -ceq 'applied' -and $allApplied) {
+        return [pscustomobject][ordered]@{ action='commit'; reasons=@(); operations=@($Journal.operations | ForEach-Object { [pscustomobject][ordered]@{ sequence=[int64]$_.sequence; action='keep' } }) }
+    }
+
+    $reasons = New-Object System.Collections.Generic.List[string]
+    $operationDecisions = New-Object System.Collections.Generic.List[object]
+    $mustRefuse = $false
+    foreach ($operation in @($Journal.operations)) {
+        $sequence = [int64]$operation.sequence
+        $action = 'none'
+        if ($matchesOriginal[$sequence]) {
+            $action = if ($permissionsMatchOriginal[$sequence]) { 'none' } else { 'restore-permissions' }
+        }
+        elseif ($matchesApplied[$sequence]) {
+            if ($operation.original.exists) {
+                if (-not $bySequence[$sequence].backupAvailable) {
+                    $mustRefuse = $true
+                    $action = 'keep'
+                    $reasons.Add("sequence $sequence cannot restore original because backupAvailable is false")
+                }
+                else { $action = 'restore-original' }
+            }
+            else { $action = 'remove-applied' }
+        }
+        else {
+            $mustRefuse = $true
+            $action = 'keep'
+            $reasons.Add("sequence $sequence has an external change")
+        }
+        $operationDecisions.Add([pscustomobject][ordered]@{ sequence=$sequence; action=$action })
+    }
+    if ($mustRefuse) {
+        $safeDecisions = @($Journal.operations | ForEach-Object { [pscustomobject][ordered]@{ sequence=[int64]$_.sequence; action='keep' } })
+        return [pscustomobject][ordered]@{ action='refuse'; reasons=$reasons.ToArray(); operations=$safeDecisions }
+    }
+    return [pscustomobject][ordered]@{ action='roll-back'; reasons=@(); operations=$operationDecisions.ToArray() }
+}
+
 function Write-AiInstructionsJsonFile {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string] $Path,[Parameter(Mandatory = $true)][object] $Document)
@@ -1292,17 +1751,21 @@ Export-ModuleMember -Function @(
     'Assert-AiInstructionsRuntimeBundleV3',
     'Assert-AiInstructionsMutationPath',
     'Assert-AiInstructionsSafeChildDirectory',
+    'Assert-AiInstructionsInstallJournalV1',
     'Assert-AiInstructionsSyncConfigurationV4',
     'Assert-AiInstructionsSyncConfigurationV5',
     'Assert-AiInstructionsUpdateReceiptV1',
     'ConvertTo-AiInstructionsUtcDateTime',
+    'ConvertFrom-AiInstructionsInstallJournalV1Json',
     'ConvertTo-AiInstructionsSyncConfigurationV4',
     'ConvertTo-AiInstructionsSyncConfigurationV5',
     'Get-AiInstructionsFileSha256',
     'Get-AiInstructionsFullDirectoryPath',
+    'Get-AiInstructionsInstallRecoveryDecision',
     'Get-AiInstructionsRuntimeInventory',
     'Get-AiInstructionsRuntimeInventorySha256',
     'Get-AiInstructionsRuntimeInventorySha256V3',
     'New-AiInstructionsRuntimeBundleV2',
+    'New-AiInstructionsInstallJournalV1',
     'Write-AiInstructionsJsonFile'
 )

@@ -165,7 +165,7 @@ function Get-TestManagedManifestV4 {
         $schemaRoot = Join-Path $script:RepositoryRoot 'catalog\schemas'
         $schemaFiles = @(Get-ChildItem -LiteralPath $schemaRoot -File -Filter '*.schema.json')
 
-        $schemaFiles.Count | Should Be 18
+        $schemaFiles.Count | Should Be 19
         foreach ($schemaFile in $schemaFiles) {
             $schema = Import-SkillsCatalogJson -Path $schemaFile.FullName -DocumentName $schemaFile.Name
             $schema.'$schema' | Should Be 'https://json-schema.org/draft/2020-12/schema'
@@ -182,6 +182,7 @@ function Get-TestManagedManifestV4 {
         }
 
         $exampleMappings = @(
+            @{ Example = 'ai-instructions-install-journal-v1.example.json'; Schema = 'ai-instructions-install-journal-v1.schema.json'; SchemaVersion = 1 }
             @{ Example = 'ai-instructions-sync-v4.example.json'; Schema = 'ai-instructions-sync-v4.schema.json'; SchemaVersion = 4 }
             @{ Example = 'ai-instructions-sync-v5.example.json'; Schema = 'ai-instructions-sync-v5.schema.json'; SchemaVersion = 5 }
             @{ Example = 'ai-instructions-update-receipt-v1.example.json'; Schema = 'ai-instructions-update-receipt-v1.schema.json'; SchemaVersion = 1 }

@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "kind": "ai-instructions-install-transaction",
+  "transactionId": "0123456789abcdef0123456789abcdef",
+  "createdAtUtc": "2026-11-05T01:02:03.0000000Z",
+  "owner": {
+    "component": "installer",
+    "processId": 4242,
+    "processStartIdentity": "2026-11-05T01:02:00.0000000Z"
+  },
+  "platform": {
+    "os": "windows",
+    "architecture": "x64"
+  },
+  "lock": {
+    "primitive": "windows-fileshare",
+    "leaf": "install.lock"
+  },
+  "generation": {
+    "previousBundleSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "candidateBundleSha256": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "phase": "applying",
+  "operations": [
+    {
+      "sequence": 1,
+      "kind": "write-file",
+      "method": "stage-rename",
+      "targetRelativePath": "runtime/runtime-bundle.json",
+      "stageLeaf": "runtime-bundle.stage",
+      "backupLeaf": "runtime-bundle.backup",
+      "original": {
+        "exists": true,
+        "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "length": 512,
+        "identity": {
+          "kind": "windows-file-id",
+          "device": "0x1A2B",
+          "fileId": "0000ABCD:00001233"
+        }
+      },
+      "applied": {
+        "exists": true,
+        "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        "length": 640,
+        "identity": {
+          "kind": "windows-file-id",
+          "device": "0x1A2B",
+          "fileId": "0000ABCD:00001234"
+        }
+      },
+      "permissions": {
+        "kind": "windows-sddl",
+        "sddl": "O:SYG:SYD:PAI(A;;FA;;;SY)",
+        "readOnly": false
+      },
+      "state": "applied"
+    },
+    {
+      "sequence": 2,
+      "kind": "create-file",
+      "method": "stage-rename",
+      "targetRelativePath": "runtime/installed.marker",
+      "stageLeaf": "installed-marker.stage",
+      "backupLeaf": null,
+      "original": {
+        "exists": false,
+        "sha256": null,
+        "length": null,
+        "identity": null
+      },
+      "applied": {
+        "exists": true,
+        "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "length": 24,
+        "identity": {
+          "kind": "windows-file-id",
+          "device": "0x1A2B",
+          "fileId": "0000ABCD:00005678"
+        }
+      },
+      "permissions": null,
+      "state": "staged"
+    }
+  ]
+}
