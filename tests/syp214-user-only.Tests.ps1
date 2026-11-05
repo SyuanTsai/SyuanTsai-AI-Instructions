@@ -1006,6 +1006,26 @@ Describe 'SYP214 whole-Skill migration evidence' {
         }
     }
 
+    # Scenario: The migration planner receives a REPO managed manifest v4.
+    # Purpose: Defer v4 ownership to the projection-aware bootstrap before observing or mutating migration state.
+    It 'InterT15_rejects_a_repo_v4_manifest_before_mutation' {
+        $manifest.schemaVersion = 4
+        $manifestPath = Join-Path $targetRoot $script:ManifestPath
+        $excludePath = Join-Path $targetRoot '.git/info/exclude'
+        $skillPath = Join-Path $targetRoot '.agents/skills/syp214-fixture/SKILL.md'
+        [IO.File]::WriteAllText($manifestPath,($manifest | ConvertTo-Json -Depth 10)+"`n",[Text.UTF8Encoding]::new($false))
+        $manifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath))
+        $excludeBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+        $skillBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($skillPath))
+
+        { Get-RepoSharedSkillsMigrationPlan -Repository $targetRoot -Manifest $manifest -TrustedSkills @($trusted) -UserHome $userHome } |
+            Should Throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
+
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath)) | Should Be $manifestBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($skillPath)) | Should Be $skillBefore
+    }
+
     # Scenario: One prerequisite is missing, customized, tracked, incomplete or unreadable.
     # Purpose: Fail closed for the entire Skill, retaining every file and manifest entry.
     It 'InterT20_protects_the_entire_Skill_for_<State>' -TestCases @(

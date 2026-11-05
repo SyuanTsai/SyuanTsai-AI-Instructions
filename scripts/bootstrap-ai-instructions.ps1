@@ -1582,6 +1582,9 @@ function Get-SharedManagedExcludePaths {
             if ($worktreeManifestSchemaVersion -isnot [int] -and $worktreeManifestSchemaVersion -isnot [long]) {
                 throw 'schemaVersion must be an integer.'
             }
+            if ($worktreeManifestSchemaVersion -eq 4) {
+                throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
+            }
             if ($worktreeManifestSchemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $worktreeManifest }
             elseif ($worktreeManifestSchemaVersion -eq 1) { Assert-LegacyManagedManifestV1 -Manifest $worktreeManifest }
             else {
@@ -4086,6 +4089,15 @@ $repositoryIndexLock = $null
 $userSkillMigrationLock = $null
 $remediationTransaction = $null
 try {
+    $preflightManifestPath = Join-Path $targetRootPath $manifestRelativePath.Replace('/', '\')
+    if (Test-Path -LiteralPath $preflightManifestPath -PathType Leaf) {
+        try { $preflightManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $preflightManifestPath | ConvertFrom-Json }
+        catch { $preflightManifest = $null }
+        if ($null -ne $preflightManifest -and $preflightManifest.schemaVersion -eq 4) {
+            throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
+        }
+    }
+    [void](Get-SharedManagedExcludePaths -Repository $targetRootPath -CurrentManagedPaths @())
     if (-not $WhatIf) {
         $repositoryOperationLock = Open-RepositoryOperationLock -Repository $targetRootPath
         $remediationTransaction = Invoke-AgentArtifactRemediation -Repository $targetRootPath -GitExecutable $GitExecutable
@@ -4190,6 +4202,9 @@ if ($manifestExists) {
     }
 
     $manifestSchemaVersion = $manifest.schemaVersion
+    if ($manifestSchemaVersion -eq 4) {
+        throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
+    }
     if (($manifestSchemaVersion -isnot [int] -and $manifestSchemaVersion -isnot [long]) -or $manifestSchemaVersion -notin @(1, 2, 3)) {
         throw "Unsupported managed instruction manifest schema: $($manifest.schemaVersion)"
     }

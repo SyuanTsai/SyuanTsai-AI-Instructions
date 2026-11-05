@@ -663,6 +663,9 @@ function Get-CleanupSharedManagedPaths {
             if ($worktreeManifestSchemaVersion -isnot [int] -and $worktreeManifestSchemaVersion -isnot [long]) {
                 throw 'schemaVersion must be an integer.'
             }
+            if ($worktreeManifestSchemaVersion -eq 4) {
+                throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
+            }
             if ($worktreeManifestSchemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $worktreeManifest }
             elseif ($worktreeManifestSchemaVersion -eq 1) { Assert-LegacyManagedManifestV1 -Manifest $worktreeManifest }
             else {
@@ -745,6 +748,16 @@ if ((Test-CleanupCanonicalSourceRepository -Repository $targetRootPath) -or
     throw 'Tracked AI instructions pollution cleanup refuses the canonical Instructions source repository.'
 }
 
+$cleanupPreflightManifestPath = Join-Path $targetRootPath $manifestRelativePath.Replace('/','\')
+if (Test-Path -LiteralPath $cleanupPreflightManifestPath -PathType Leaf) {
+    try { $cleanupPreflightManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $cleanupPreflightManifestPath | ConvertFrom-Json }
+    catch { $cleanupPreflightManifest = $null }
+    if ($null -ne $cleanupPreflightManifest -and $cleanupPreflightManifest.schemaVersion -eq 4) {
+        throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
+    }
+}
+[void](Get-CleanupSharedManagedPaths -Repository $targetRootPath -CurrentManagedPaths @())
+
 $repositoryOperationLock = Open-CleanupRepositoryOperationLock -Repository $targetRootPath
 try {
 
@@ -756,7 +769,8 @@ Assert-CleanupManagedFilePath -TargetRoot $targetRootPath -FilePath $manifestPat
 try { $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json }
 catch { throw "Managed manifest is not valid JSON: $($_.Exception.Message)" }
 try {
-    if ($manifest.schemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $manifest }
+if ($manifest.schemaVersion -eq 4) { throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.' }
+if ($manifest.schemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $manifest }
     elseif ($manifest.schemaVersion -eq 1) { Assert-LegacyManagedManifestV1 -Manifest $manifest }
     else { throw "unsupported schemaVersion '$($manifest.schemaVersion)'." }
 }

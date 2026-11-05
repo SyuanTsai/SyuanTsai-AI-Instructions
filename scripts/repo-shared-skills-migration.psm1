@@ -230,6 +230,9 @@ function Get-RepoSharedSkillsMigrationPlan {
         [Parameter(Mandatory=$true)][string]$UserHome,
         [string]$GitExecutable='git'
     )
+    if ($Manifest.schemaVersion -eq 4) {
+        throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
+    }
     Assert-RepoAndUserRootsDistinct -Repository $Repository -UserHome $UserHome | Out-Null
     $results = New-Object 'System.Collections.Generic.List[object]'
     $user = $null

@@ -762,6 +762,40 @@ exit /b 0
         }
     }
 
+    # Scenario: A live linked worktree already carries a REPO managed manifest v4.
+    # Purpose: Require a projection-aware bootstrap before shared exclusions or managed bytes can change.
+    It 'InterT68a_rejects_a_linked_worktree_v4_manifest_before_mutation' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
+        $linkedRoot = Join-Path $TestDrive 'linked-v4-manifest-worktree'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','linked-v4-manifest-fixture',$linkedRoot) | Out-Null
+        try {
+            Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $linkedRoot | Out-Null
+            $linkedManifestPath = Join-Path $linkedRoot $script:ManifestPath
+            $linkedManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $linkedManifestPath | ConvertFrom-Json
+            $linkedManifest.schemaVersion = 4
+            Set-TestText -Path $linkedManifestPath -Value (($linkedManifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+
+            $excludePath = Join-Path $targetRoot '.git\info\exclude'
+            $manifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath))
+            $excludeBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+            $targetAgentBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md')))
+            $linkedAgentBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $linkedRoot 'AGENTS.md')))
+
+            $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
+            $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+            $LASTEXITCODE | Should Not Be 0
+            ($output -join [Environment]::NewLine) | Should Match 'REPO managed manifest schema version 4 requires a projection-aware bootstrap\.'
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath)) | Should Be $manifestBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md'))) | Should Be $targetAgentBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $linkedRoot 'AGENTS.md'))) | Should Be $linkedAgentBefore
+        }
+        finally {
+            Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
+        }
+    }
+
     # Scenario: A prior local artifact set loses its manifest, one managed file, and the managed exclude block.
     # Purpose: Reconstruct only state that immutable bytes can prove without dirtying the repository.
     It 'InterT70_self_heals_a_missing_manifest_file_and_exclude_marker' {
@@ -1133,6 +1167,29 @@ exit /b 0
         ($output -join [Environment]::NewLine) | Should Match 'Managed Skill.*must preserve the flat'
         (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')) | Should Be $agentBefore
         [string](Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json).files[0].artifactType | Should Be 'skill'
+    }
+
+    # Scenario: The target repository already carries a REPO managed manifest v4.
+    # Purpose: Stop the legacy bootstrap before it rewrites ownership, exclusions, or managed content.
+    It 'InterT74a_rejects_a_v4_managed_manifest_before_mutation' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
+        $manifestPath = Join-Path $targetRoot $script:ManifestPath
+        $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
+        $manifest.schemaVersion = 4
+        Set-TestText -Path $manifestPath -Value (($manifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+        $excludePath = Join-Path $targetRoot '.git\info\exclude'
+        $manifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath))
+        $excludeBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+        $agentBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md')))
+
+        $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+        $LASTEXITCODE | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'REPO managed manifest schema version 4 requires a projection-aware bootstrap\.'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath)) | Should Be $manifestBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md'))) | Should Be $agentBefore
     }
 
     # Scenario: A prior canonical v3 manifest retains a locally customized Skill while the bootstrap source still uses the legacy archive layout.

@@ -188,6 +188,9 @@ function Get-RemediationLegacyManifestPaths {
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { return ,$paths }
     try { $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json }
     catch { return ,$paths }
+    if ($manifest.schemaVersion -eq 4) {
+        throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
+    }
     foreach ($entry in @($manifest.files)) {
         if ($null -eq $entry -or $null -eq $entry.PSObject.Properties['targetPath']) { continue }
         $targetPath = [string]$entry.targetPath

@@ -100,6 +100,10 @@ Production acquisition adapter 只為組合前所需的 `SKILL.md` identity、de
 
 ## Managed manifest v2/v3 and user Skills provenance
 
+REPO managed manifest v4 是 reader-first 契約：Instruction entry 以 `host` 綁定 Codex、Copilot 或 Claude 的受限 target，並記錄 `rendererId`／`rendererSha256`；Skill entry 只允許已宣告的 project projection，且同一 Skill 在所有選定 projection 必須維持相同相對路徑、內容 hash 與 provenance。現行 bootstrap writer 仍寫 v2，既有 v3 仍維持 v3；P9 才由 projection-aware bootstrap 寫入 v4。
+
+`Assert-ManagedManifest` 只驗證 manifest 文件本身。REPO Skill entries 與 Lock 的綁定，以及 Instruction entries 與 renderer 的綁定，均由 P9 projection-aware bootstrap 負責；P6c 不提供這些信任邊界，也不得把單獨通過 v4 文件驗證視為可 mutation 的 ownership evidence。
+
 新 consumer manifest 只記錄 Instructions 及其 metadata。既有 v2/v3 Skill entries 僅用於保護與精確遷移舊 REPO 副本；generic stale-prune 不得清除它們。v1 沒有逐檔來源 ownership 的 Skill entries 保留，不推論式升級為可刪除副本。缺少／無效 USER、額外檔案或 tracked/staged 任一證據缺口都保留完整 Skill；共用 Skills 的唯一安裝／更新入口是 USER reconciler。獨立專案 Skills 與其他合法 host projection 不受此 consumer 契約禁止。
 
 每個 `files[]` entry 都要能獨立回答：artifact type／ID、source Repository、requested ref、resolved commit、version、source path、target path 與套用內容 hash。legacy manifest v2 配合 legacy pins，Skill entry 的 source 與 target 都必須維持 `.agents/skills/<artifactId>/...`；canonical manifest v3 才允許 `skills/<artifactId>/...` source 對應到 `.agents/skills/<artifactId>/...` target。未知 mapping／schema version 必須 fail closed，target projection 不隨 source root 自動改名。Manifest v2/v3 都不使用 Git submodule metadata。
