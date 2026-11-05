@@ -1077,10 +1077,12 @@ function Assert-UserSkillsManagedManifestBinding {
         [System.Array]::Sort($projectionIds,[System.StringComparer]::Ordinal)
         $projectionFiles = @($skillFiles | Where-Object { [string]$_.projectionId -ceq $projectionIds[0] })
         $lockedSkill = $lockedSkills[$skillId]
-        $firstTargetPath = [string]$projectionFiles[0].targetPath
-        $skillMarker = "/$skillId/"
-        $skillMarkerIndex = $firstTargetPath.IndexOf($skillMarker,[System.StringComparison]::Ordinal)
-        $targetPrefix = $firstTargetPath.Substring(0,$skillMarkerIndex + $skillMarker.Length)
+        $projectionMap = Get-SkillsCatalogProjectionMap
+        if (-not $projectionMap.ContainsKey($projectionIds[0])) {
+            throw "user Skills managed manifest projection '$($projectionIds[0])' is not in the fixed projection map."
+        }
+        $projectionRoot = [string]$projectionMap[$projectionIds[0]][1]
+        $targetPrefix = "$projectionRoot/$skillId/"
         $actualContentSha256 = Get-UserSkillsPayloadInventorySha256 -Files $projectionFiles -SourcePathPrefix (([string]$lockedSkill.sourcePath) + '/') -TargetPrefix $targetPrefix
         if ($actualContentSha256 -cne [string]$lockedSkill.contentSha256) {
             throw "user Skills managed manifest Skill '$skillId' content hash does not match the lock."

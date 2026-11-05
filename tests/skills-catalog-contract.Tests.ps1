@@ -522,6 +522,62 @@ function Assert-UserManifestBindingFailure {
         $bomLockMessage.Contains('must be UTF-8 without a BOM') | Should Be $true
     }
 
+    # Scenario: A Skill whose stable ID is the projection-root segment keeps its license namespace distinct.
+    # Purpose: Derive payload inventory prefixes from the fixed projection map rather than matching target-path text.
+    It 'UnitT11l2a_accepts_the_skills_skill_id_with_license_delivery_entries' {
+        Import-Module (Join-Path $script:RepositoryRoot 'scripts\skills-source-acquisition.psm1') -Force
+        $repositoryRoot = Join-Path $TestDrive 'skills-id-source-repository'
+        $skillRoot = Join-Path $repositoryRoot 'skills\skills'
+        New-Item -ItemType Directory -Path $skillRoot -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $skillRoot 'SKILL.md'),'# Skill',[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $skillRoot 'LICENSE'),'License',[Text.UTF8Encoding]::new($false))
+        $acquisitionHash = Get-SkillInventorySha256 -RepositoryRoot $repositoryRoot -SkillRoot $skillRoot
+
+        $catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'
+        $catalogSkill = @($catalog.skills | Where-Object { $_.id -ceq 'work-with-jira' })[0]
+        $catalogSkill.id = 'skills'
+        $catalogSkill.source.sourcePath = 'skills/skills'
+        $catalogBytes = ConvertTo-TestUtf8JsonBytes -Value $catalog
+
+        $lock = Import-SkillsCatalogJson -Path $script:LockV3Example -DocumentName 'Skills Catalog lock v3'
+        $lock.catalogSha256 = Get-TestBytesSha256 -Bytes $catalogBytes
+        $lockSkill = @($lock.skills | Where-Object { $_.id -ceq 'work-with-jira' })[0]
+        $lockSkill.id = 'skills'
+        $lockSkill.sourcePath = 'skills/skills'
+        $lockSkill.contentSha256 = $acquisitionHash
+
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        foreach ($file in @($manifest.files | Where-Object { $_.skillId -ceq 'work-with-jira' })) {
+            $file.skillId = 'skills'
+            if ([string]$file.sourcePath -ceq 'skills/work-with-jira/SKILL.md') {
+                $file.sourcePath = 'skills/skills/SKILL.md'
+                $file.sha256 = Get-TestRawSha256 -Path (Join-Path $skillRoot 'SKILL.md')
+            }
+            $file.targetPath = ([string]$file.targetPath).Replace('/work-with-jira/','/skills/')
+        }
+        $payloadTemplate = @($manifest.files | Where-Object { $_.skillId -ceq 'skills' -and $_.sourcePath -ceq 'skills/skills/SKILL.md' })[0]
+        foreach ($projectionId in @($manifest.projections)) {
+            $licensePayload = $payloadTemplate.PSObject.Copy()
+            $licensePayload.sourcePath = 'skills/skills/LICENSE'
+            $licensePayload.targetPath = ([string]$payloadTemplate.targetPath).Replace('SKILL.md','LICENSE')
+            $licensePayload.sha256 = Get-TestRawSha256 -Path (Join-Path $skillRoot 'LICENSE')
+            $licenseEntry = $licensePayload.PSObject.Copy()
+            $licenseEntry.targetPath = ([string]$payloadTemplate.targetPath).Replace('SKILL.md','.ai-instructions-licenses/source/LICENSE')
+            $receiptEntry = $payloadTemplate.PSObject.Copy()
+            $receiptEntry.sourcePath = '.ai-instructions-generated/delivery.json'
+            $receiptEntry.targetPath = ([string]$payloadTemplate.targetPath).Replace('SKILL.md','.ai-instructions-licenses/delivery.json')
+            $receiptEntry.sha256 = '3' * 64
+            $manifest.files += $licensePayload
+            $manifest.files += $licenseEntry
+            $manifest.files += $receiptEntry
+        }
+        $lockBytes = ConvertTo-TestUtf8JsonBytes -Value $lock
+        $manifest.lockSha256 = Get-TestBytesSha256 -Bytes $lockBytes
+
+        { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Not Throw
+        { Assert-UserSkillsManagedManifestBinding -Manifest $manifest -CatalogBytes $catalogBytes -LockBytes $lockBytes -ExpectedCatalogRepository ([string]$manifest.catalogRepository) -ExpectedCatalogCommit ([string]$manifest.catalogCommit) } | Should Not Throw
+    }
+
     # Scenario: Projection parity alone is insufficient if matching payload hashes are forged.
     # Purpose: Bind every installed payload inventory to the immutable content hash in the Lock.
     It 'UnitT11l3_rejects_a_v3_manifest_with_parity_preserving_payload_hash_changes' {
