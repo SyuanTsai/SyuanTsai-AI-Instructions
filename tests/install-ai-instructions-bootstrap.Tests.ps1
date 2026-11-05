@@ -734,6 +734,92 @@ Keep this section too.
         (Get-Content -Raw -LiteralPath $bundlePath) | Should Be $bundleBefore
     }
 
+    # Scenario: A projection-aware installer replaces the legacy bundle after preflight but before this installer owns the install lock.
+    # Purpose: Reread schema compatibility under the lock so the legacy installer cannot overwrite the newer runtime or begin staging.
+    It 'InterT52a_rejects_a_v3_bundle_replaced_while_acquiring_the_install_lock_without_mutation' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $runtimeRoot = Join-Path $codexHome 'hooks\ai-instructions-runtime'
+        $bundlePath = Join-Path $runtimeRoot 'runtime-bundle.json'
+        $v3Bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
+        $v3Bundle.schemaVersion = 3
+        $v3BundleBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes((($v3Bundle | ConvertTo-Json -Depth 20).Replace("`r`n","`n") + "`n"))
+        $runtimeFilePath = Join-Path $runtimeRoot 'skills-selection.psm1'
+        $runtimeFileBefore = [System.IO.File]::ReadAllBytes($runtimeFilePath)
+        $configurationPath = Join-Path $codexHome 'ai-instructions-sync.json'
+        $configurationBefore = [System.IO.File]::ReadAllBytes($configurationPath)
+        $resultPath = Join-Path $TestDrive 'installer-v3-lock-race-result.txt'
+        $wrapperPath = Join-Path $TestDrive 'installer-v3-lock-race-probe.ps1'
+        Set-TestText -Path $wrapperPath -Value @'
+param(
+    [Parameter(Mandatory = $true)][string] $InstallerScript,
+    [Parameter(Mandatory = $true)][string] $RepositoryRoot,
+    [Parameter(Mandatory = $true)][string] $CodexHome,
+    [Parameter(Mandatory = $true)][string] $SourceCommit,
+    [Parameter(Mandatory = $true)][string] $ArchiveSha256,
+    [Parameter(Mandatory = $true)][string] $ArchivePath,
+    [Parameter(Mandatory = $true)][string] $BundlePath,
+    [Parameter(Mandatory = $true)][string] $ResultPath
+)
+$lockLine = @(
+    Select-String -LiteralPath $InstallerScript -Pattern '^\s*\$installLockStream = \[System\.IO\.File\]::Open\(' |
+        Select-Object -First 1 -ExpandProperty LineNumber
+)
+if ($lockLine.Count -ne 1) { throw 'Could not locate the installer lock acquisition boundary.' }
+$global:InstallerV3RaceBundlePath = $BundlePath
+$breakpoint = Set-PSBreakpoint -Script $InstallerScript -Line $lockLine[0] -Action {
+    $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $global:InstallerV3RaceBundlePath | ConvertFrom-Json
+    $bundle.schemaVersion = 3
+    [System.IO.File]::WriteAllText(
+        $global:InstallerV3RaceBundlePath,
+        (($bundle | ConvertTo-Json -Depth 20).Replace("`r`n","`n") + "`n"),
+        (New-Object System.Text.UTF8Encoding($false)))
+}
+try {
+    $installerExit = 0
+    $installerError = ''
+    try {
+        & $InstallerScript -RepositoryRoot $RepositoryRoot -CodexHome $CodexHome `
+            -Acquisition github-codeload -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
+            -SourceCommit $SourceCommit -ArchiveSha256 $ArchiveSha256 -SourceArchivePath $ArchivePath | Out-Null
+    }
+    catch {
+        $installerExit = 1
+        $installerError = $_.Exception.Message
+    }
+}
+finally {
+    Remove-PSBreakpoint -Breakpoint $breakpoint -ErrorAction SilentlyContinue
+    Remove-Variable -Name InstallerV3RaceBundlePath -Scope Global -ErrorAction SilentlyContinue
+}
+[System.IO.File]::WriteAllText($ResultPath,(@($installerExit,$installerError) -join "`n"),(New-Object System.Text.UTF8Encoding($false)))
+'@
+        $archivePath = Join-Path $TestDrive 'installer-v3-lock-race-source.zip'
+        $archiveSha256 = New-InstallerSourceArchive -SourceRoot $repositoryRoot -ArchivePath $archivePath
+        $sourceCommit = (@(& git -C $repositoryRoot rev-parse HEAD) -join '').Trim()
+        $arguments = @(
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$wrapperPath,
+            '-InstallerScript',(Resolve-Path -LiteralPath $script:InstallScript).Path,
+            '-RepositoryRoot',$repositoryRoot,
+            '-CodexHome',$codexHome,
+            '-SourceCommit',$sourceCommit,
+            '-ArchiveSha256',$archiveSha256,
+            '-ArchivePath',$archivePath,
+            '-BundlePath',$bundlePath,
+            '-ResultPath',$resultPath
+        )
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+        $LASTEXITCODE | Should Be 0
+        (Get-Content -Raw -LiteralPath $resultPath) | Should Match '(?m)^1\r?$'
+        (Get-Content -Raw -LiteralPath $resultPath) | Should Match 'Runtime bundle schema version 3 requires a projection-aware installer\.'
+        $bundleAfter = [System.IO.File]::ReadAllBytes($bundlePath)
+        [Convert]::ToBase64String($bundleAfter) | Should Be ([Convert]::ToBase64String($v3BundleBytes))
+        (Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json).schemaVersion | Should Be 3
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($runtimeFilePath)) | Should Be ([Convert]::ToBase64String($runtimeFileBefore))
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($configurationPath)) | Should Be ([Convert]::ToBase64String($configurationBefore))
+        @(Get-ChildItem -LiteralPath $codexHome -Directory -Force | Where-Object { $_.Name -like '.ai-instructions-install-*' }).Count | Should Be 0
+    }
+
     # Scenario: A verified launcher is actively executing runtime fan-out while another installation starts for the same Codex Home.
     # Purpose: Hold a shared runtime read lock through execution so the installer cannot swap files into a mixed running bundle.
     It 'InterT53_blocks_runtime_installation_while_verified_fan_out_is_running' {

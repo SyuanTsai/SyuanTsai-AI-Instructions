@@ -144,6 +144,26 @@ function Update-TestRuntimeV3Inventory {
     $Fixture.Bundle.inventorySha256 = Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $Fixture.Bundle.inventory
 }
 
+function Invoke-TestRuntimeV3OrdinalChild {
+    param(
+        [Parameter(Mandatory = $true)][string] $Executable,
+        [Parameter(Mandatory = $true)][string] $ScriptPath,
+        [Parameter(Mandatory = $true)][string] $ModulePath,
+        [Parameter(Mandatory = $true)][string] $InventoryPath
+    )
+
+    $outputPath = Join-Path $TestDrive ('runtime-v3-ordinal-stdout-' + [Guid]::NewGuid().ToString('N') + '.txt')
+    $errorPath = Join-Path $TestDrive ('runtime-v3-ordinal-stderr-' + [Guid]::NewGuid().ToString('N') + '.txt')
+    $process = Start-Process -FilePath $Executable `
+        -ArgumentList @('-NoProfile','-NonInteractive','-File',$ScriptPath,$ModulePath,$InventoryPath) `
+        -PassThru -Wait -NoNewWindow -RedirectStandardOutput $outputPath -RedirectStandardError $errorPath
+    return [pscustomobject]@{
+        ExitCode = $process.ExitCode
+        StdOut = [IO.File]::ReadAllText($outputPath)
+        StdErr = [IO.File]::ReadAllText($errorPath)
+    }
+}
+
 Describe 'AI instructions runtime contracts' {
     BeforeAll {
         Import-Module $script:RuntimeContractModule -Force
@@ -755,7 +775,8 @@ Describe 'AI instructions runtime contracts' {
         [IO.File]::WriteAllText($inventoryPath,($inventory | ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
         $childScript = @'
 param([string] $ModulePath,[string] $InventoryPath)
-Import-Module -LiteralPath $ModulePath -Force
+$ErrorActionPreference = 'Stop'
+Import-Module -Name $ModulePath -Force -ErrorAction Stop
 $inventory = Get-Content -Raw -Encoding UTF8 -LiteralPath $InventoryPath | ConvertFrom-Json
 Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
 '@
@@ -764,8 +785,12 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $isWindowsPlatform = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
         $comparisonDigests = @()
         if ($isWindowsPlatform -and $null -ne (Get-Command powershell.exe -ErrorAction SilentlyContinue)) {
-            $comparisonDigests += (& powershell.exe -NoProfile -NonInteractive -File $childScriptPath $script:RuntimeContractModule $inventoryPath | Select-Object -Last 1)
-            $LASTEXITCODE | Should Be 0
+            $comparisonResult = Invoke-TestRuntimeV3OrdinalChild -Executable 'powershell.exe' -ScriptPath $childScriptPath -ModulePath $script:RuntimeContractModule -InventoryPath $inventoryPath
+            $comparisonResult.ExitCode | Should Be 0
+            $comparisonResult.StdErr | Should Be ''
+            $comparisonResult.StdOut.Trim() | Should Match '^[0-9a-f]{64}$'
+            $comparisonResult.StdOut.Trim() | Should Be $actual
+            $comparisonDigests += $comparisonResult.StdOut.Trim()
         }
         elseif (-not $isWindowsPlatform -and $null -ne (Get-Command pwsh -ErrorAction SilentlyContinue)) {
             $originalLang = $env:LANG
@@ -774,8 +799,12 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
                 foreach ($locale in @('C','en_US.UTF-8')) {
                     $env:LANG = $locale
                     $env:LC_ALL = $locale
-                    $comparisonDigests += (& pwsh -NoProfile -NonInteractive -File $childScriptPath $script:RuntimeContractModule $inventoryPath | Select-Object -Last 1)
-                    $LASTEXITCODE | Should Be 0
+                    $comparisonResult = Invoke-TestRuntimeV3OrdinalChild -Executable 'pwsh' -ScriptPath $childScriptPath -ModulePath $script:RuntimeContractModule -InventoryPath $inventoryPath
+                    $comparisonResult.ExitCode | Should Be 0
+                    $comparisonResult.StdErr | Should Be ''
+                    $comparisonResult.StdOut.Trim() | Should Match '^[0-9a-f]{64}$'
+                    $comparisonResult.StdOut.Trim() | Should Be $actual
+                    $comparisonDigests += $comparisonResult.StdOut.Trim()
                 }
             }
             finally {
