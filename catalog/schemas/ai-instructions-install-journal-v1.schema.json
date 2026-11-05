@@ -128,7 +128,6 @@
           "operations": {
             "items": {
               "properties": {
-                "method": { "enum": ["stage-rename", "unlink"] },
                 "original": { "properties": { "identity": { "$ref": "#/$defs/unixIdentityOrNull" } } },
                 "applied": { "properties": { "identity": { "$ref": "#/$defs/unixIdentityOrNull" } } },
                 "permissions": { "properties": { "kind": { "const": "unix-mode" } } }
@@ -267,7 +266,7 @@
       "properties": {
         "sequence": { "type": "integer", "minimum": 1 },
         "kind": { "enum": ["write-file", "create-file", "remove-file", "swap-directory"] },
-        "method": { "enum": ["stage-rename", "in-place", "unlink"] },
+        "method": { "enum": ["stage-rename", "unlink"] },
         "targetRelativePath": {
           "type": "string",
           "minLength": 1,
@@ -306,11 +305,18 @@
           "then": {
             "properties": {
               "method": { "const": "unlink" },
+              "stageLeaf": { "type": "null" },
+              "state": { "enum": ["pending", "applied", "rolled-back"] },
               "original": { "properties": { "exists": { "const": true } } },
               "applied": { "properties": { "exists": { "const": false } } }
             }
           },
-          "else": { "properties": { "method": { "enum": ["stage-rename", "in-place"] } } }
+          "else": {
+            "properties": {
+              "method": { "const": "stage-rename" },
+              "stageLeaf": { "$ref": "#/$defs/portableLeaf" }
+            }
+          }
         },
         {
           "if": { "properties": { "kind": { "enum": ["write-file", "swap-directory"] } } },
@@ -320,33 +326,6 @@
               "applied": { "properties": { "exists": { "const": true } } }
             }
           }
-        },
-        {
-          "if": { "properties": { "kind": { "const": "swap-directory" } } },
-          "then": { "properties": { "method": { "const": "stage-rename" } } }
-        },
-        {
-          "if": { "properties": { "method": { "const": "in-place" } } },
-          "then": {
-            "properties": {
-              "kind": { "enum": ["write-file", "create-file"] },
-              "stageLeaf": { "type": "null" },
-              "state": { "enum": ["pending", "applied", "rolled-back"] }
-            }
-          }
-        },
-        {
-          "if": { "properties": { "method": { "const": "unlink" } } },
-          "then": {
-            "properties": {
-              "stageLeaf": { "type": "null" },
-              "state": { "enum": ["pending", "applied", "rolled-back"] }
-            }
-          }
-        },
-        {
-          "if": { "properties": { "method": { "const": "stage-rename" } } },
-          "then": { "properties": { "stageLeaf": { "$ref": "#/$defs/portableLeaf" } } }
         },
         {
           "if": { "properties": { "original": { "properties": { "exists": { "const": true } } } } },

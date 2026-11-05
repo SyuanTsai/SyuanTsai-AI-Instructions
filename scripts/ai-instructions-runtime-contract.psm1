@@ -1402,14 +1402,10 @@ function Assert-AiInstructionsInstallJournalV1 {
         $sequence = [int64]$operation.sequence
         $context = "AI instructions install journal operation sequence $sequence"
         if ($operation.kind -isnot [string] -or [string]$operation.kind -cnotin @('write-file','create-file','remove-file','swap-directory')) { throw "$context.kind is invalid." }
-        if ($operation.method -isnot [string] -or [string]$operation.method -cnotin @('stage-rename','in-place','unlink')) { throw "$context.method is invalid." }
+        if ($operation.method -isnot [string] -or [string]$operation.method -cnotin @('stage-rename','unlink')) { throw "$context.method is invalid." }
         if ($operation.state -isnot [string] -or [string]$operation.state -cnotin @('pending','staged','applied','rolled-back')) { throw "$context.state is invalid." }
         if ([string]$operation.kind -ceq 'remove-file' -and [string]$operation.method -cne 'unlink') { throw "$context.method must be unlink for remove-file." }
-        if ([string]$operation.kind -cne 'remove-file' -and [string]$operation.method -ceq 'unlink') { throw "$context.method unlink is only valid for remove-file." }
-        if ([string]$operation.kind -ceq 'swap-directory' -and [string]$operation.method -cne 'stage-rename') { throw "$context.method must be stage-rename for swap-directory." }
-        if ([string]$operation.method -ceq 'in-place' -and ([string]$Journal.platform.os -cne 'windows' -or [string]$operation.kind -cnotin @('write-file','create-file'))) {
-            throw "$context.method in-place is only valid for Windows write-file or create-file operations."
-        }
+        if ([string]$operation.kind -cne 'remove-file' -and [string]$operation.method -cne 'stage-rename') { throw "$context.method must be stage-rename for $($operation.kind)." }
         if ($operation.targetRelativePath -isnot [string] -or [string]::IsNullOrEmpty([string]$operation.targetRelativePath) -or
             ([string]$operation.targetRelativePath).Length -gt 512 -or [string]$operation.targetRelativePath -match '[\\\x00-\x1f\x7f:*?"<>|]' -or
             [string]$operation.targetRelativePath -match '^/' -or [string]$operation.targetRelativePath -match '/$' -or [string]$operation.targetRelativePath -match '^[A-Za-z]:' -or
@@ -1428,11 +1424,11 @@ function Assert-AiInstructionsInstallJournalV1 {
         if ([string]$operation.method -ceq 'stage-rename' -and $null -eq $operation.stageLeaf) {
             throw "$context.stageLeaf must not be null when method is stage-rename."
         }
-        if ([string]$operation.method -in @('in-place','unlink') -and $null -ne $operation.stageLeaf) {
-            throw "$context.stageLeaf must be null when method is $($operation.method)."
+        if ([string]$operation.method -ceq 'unlink' -and $null -ne $operation.stageLeaf) {
+            throw "$context.stageLeaf must be null when method is unlink."
         }
-        if ([string]$operation.method -in @('in-place','unlink') -and [string]$operation.state -ceq 'staged') {
-            throw "$context.method $($operation.method) does not allow state staged."
+        if ([string]$operation.method -ceq 'unlink' -and [string]$operation.state -ceq 'staged') {
+            throw "$context.method unlink does not allow state staged."
         }
         Assert-AiInstructionsInstallJournalLeaf -Value $operation.backupLeaf -Context "$context.backupLeaf" -AllowNull -PortableName
         foreach ($leaf in @($operation.stageLeaf,$operation.backupLeaf)) {
@@ -1593,7 +1589,11 @@ function Test-AiInstructionsInstallJournalStateMatch {
 }
 
 function Test-AiInstructionsInstallJournalPermissionsMatch {
-    param([Parameter(Mandatory = $true)][object] $Observation,[Parameter(Mandatory = $true)][object] $Permissions)
+    param(
+        [Parameter(Mandatory = $true)][AllowNull()][object] $Observation,
+        [Parameter(Mandatory = $true)][AllowNull()][object] $Permissions
+    )
+    if ($null -eq $Observation -or $null -eq $Permissions -or $null -eq $Observation.permissions) { return $false }
     if ([string]$Permissions.kind -ceq 'windows-sddl') {
         return [string]$Observation.permissions.sddl -ceq [string]$Permissions.sddl -and
             [bool]$Observation.permissions.readOnly -eq [bool]$Permissions.readOnly
@@ -1660,7 +1660,7 @@ function Get-AiInstructionsInstallRecoveryDecision {
         $matchesApplied[$sequence] = Test-AiInstructionsInstallJournalStateMatch -Observation $bySequence[$sequence] -State $operation.applied
         $matchesOriginal[$sequence] = Test-AiInstructionsInstallJournalStateMatch -Observation $bySequence[$sequence] -State $operation.original
         $permissionsMatchOriginal[$sequence] = $true
-        if ([string]$Journal.phase -cne 'committed' -and [bool]$operation.original.exists -and $null -ne $operation.permissions) {
+        if ([string]$Journal.phase -cne 'committed' -and $matchesOriginal[$sequence] -and [bool]$operation.original.exists -and $null -ne $operation.permissions) {
             $permissionsMatchOriginal[$sequence] = Test-AiInstructionsInstallJournalPermissionsMatch -Observation $bySequence[$sequence] -Permissions $operation.permissions
         }
     }

@@ -1408,9 +1408,9 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $true
     }
 
-    # Scenario: A Windows write operation was published in place and has reached applied state.
-    # Purpose: Preserve the supported Windows publication path without inventing a stage object.
-    It 'UnitT129_accepts_applied_windows_in_place_write_without_stage_leaf' {
+    # Scenario: A Windows write operation claims the removed in-place publication method.
+    # Purpose: Keep journal v1 publication atomic on every platform by rejecting methods outside the closed enum.
+    It 'UnitT129_rejects_windows_in_place_write_as_an_unknown_method' {
         if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'UnitT129 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.' }
         $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
         $journal = Get-TestInstallJournalV1
@@ -1418,8 +1418,8 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $journal.operations[0].stageLeaf = $null
         $json = $journal | ConvertTo-Json -Depth 20
 
-        { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json | Out-Null } | Should Not Throw
-        (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $true
+        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'sequence 1.method is invalid'
+        (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
     }
 
     # Scenario: A stage-rename write operation omits its stage object after publication.
@@ -1435,28 +1435,28 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
     }
 
-    # Scenario: A Linux write operation claims the Windows-only in-place method.
-    # Purpose: Require non-Windows publication to retain a durable stage object.
-    It 'UnitT131_rejects_linux_in_place_write' {
+    # Scenario: A create operation claims the removal-only unlink method.
+    # Purpose: Require create publication to use stage-and-rename with durable stage evidence.
+    It 'UnitT131_rejects_unlink_for_create_file' {
         if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'UnitT131 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.' }
         $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
-        $journal = Get-TestLinuxInstallJournalV1
-        $journal.operations[0].method = 'in-place'
-        $journal.operations[0].stageLeaf = $null
+        $journal = Get-TestInstallJournalV1
+        $journal.operations[1].method = 'unlink'
+        $journal.operations[1].stageLeaf = $null
         $json = $journal | ConvertTo-Json -Depth 20
 
-        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'sequence 1.method.*only valid for Windows'
+        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'sequence 2.method.*stage-rename for create-file'
         (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
     }
 
-    # Scenario: A directory swap claims the in-place publication method.
+    # Scenario: A directory swap claims the removal-only unlink method.
     # Purpose: Require directory replacement to retain its stage-and-rename recovery evidence.
-    It 'UnitT132_rejects_in_place_swap_directory' {
+    It 'UnitT132_rejects_unlink_for_swap_directory' {
         if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'UnitT132 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.' }
         $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
         $journal = Get-TestInstallJournalV1
         $journal.operations[0].kind = 'swap-directory'
-        $journal.operations[0].method = 'in-place'
+        $journal.operations[0].method = 'unlink'
         $journal.operations[0].stageLeaf = $null
         $json = $journal | ConvertTo-Json -Depth 20
 
@@ -1481,18 +1481,23 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
     }
 
-    # Scenario: An in-place write claims that a distinct stage object was published.
-    # Purpose: Prevent recovery from looking for a stage object that the method never creates.
-    It 'UnitT134_rejects_staged_state_for_in_place_method' {
+    # Scenario: An unlink removal claims that a distinct stage object was published.
+    # Purpose: Keep removal state aligned with a method that never creates a stage object.
+    It 'UnitT134_rejects_staged_state_for_unlink_method' {
         if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'UnitT134 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.' }
         $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
         $journal = Get-TestInstallJournalV1
-        $journal.operations[0].method = 'in-place'
+        $journal.operations[0].kind = 'remove-file'
+        $journal.operations[0].method = 'unlink'
         $journal.operations[0].stageLeaf = $null
         $journal.operations[0].state = 'staged'
+        $journal.operations[0].applied.exists = $false
+        $journal.operations[0].applied.sha256 = $null
+        $journal.operations[0].applied.length = $null
+        $journal.operations[0].applied.identity = $null
         $json = $journal | ConvertTo-Json -Depth 20
 
-        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'sequence 1.method in-place.*state staged'
+        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'sequence 1.method unlink.*state staged'
         (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
     }
 
@@ -1688,5 +1693,68 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $journal.operations[1].permissions | Should Be $null
         $decision.action | Should Be 'roll-back'
         $decision.operations[1].action | Should Be 'remove-applied'
+    }
+
+    # Scenario: Applying remove-file already unlinked the target, so its valid observation has null permissions.
+    # Purpose: Roll back from the applied state without dereferencing permissions on a nonexistent target.
+    It 'UnitT147_restores_removed_file_without_comparing_absent_target_permissions' {
+        $journal = Get-TestInstallJournalV1
+        $journal.operations = @($journal.operations[0])
+        $journal.operations[0].kind = 'remove-file'
+        $journal.operations[0].method = 'unlink'
+        $journal.operations[0].stageLeaf = $null
+        $journal.operations[0].state = 'applied'
+        $journal.operations[0].applied.exists = $false
+        $journal.operations[0].applied.sha256 = $null
+        $journal.operations[0].applied.length = $null
+        $journal.operations[0].applied.identity = $null
+        $journal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20)
+        $observations = @{
+            1 = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].applied -BackupAvailable $true
+        }
+
+        $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
+
+        $observations[1].permissions | Should Be $null
+        $decision.action | Should Be 'roll-back'
+        $decision.operations[0].action | Should Be 'restore-original'
+    }
+
+    # Scenario: A rolled-back remove-file has restored original content, identity, and permissions.
+    # Purpose: Accept the terminal rollback only after the restored target and its access policy both match.
+    It 'UnitT148_accepts_rolled_back_remove_file_with_matching_permissions' {
+        $journal = Get-TestInstallJournalV1
+        $journal.phase = 'rolled-back'
+        $journal.operations = @($journal.operations[0])
+        $journal.operations[0].kind = 'remove-file'
+        $journal.operations[0].method = 'unlink'
+        $journal.operations[0].stageLeaf = $null
+        $journal.operations[0].state = 'rolled-back'
+        $journal.operations[0].applied.exists = $false
+        $journal.operations[0].applied.sha256 = $null
+        $journal.operations[0].applied.length = $null
+        $journal.operations[0].applied.identity = $null
+        $journal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20)
+        $observations = @{
+            1 = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].original
+        }
+
+        $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
+
+        $decision.action | Should Be 'none'
+        @($decision.reasons).Count | Should Be 0
+        $decision.operations[0].action | Should Be 'keep'
+    }
+
+    # Scenario: Permission comparison receives incomplete evidence from either side.
+    # Purpose: Keep the low-level matcher fail-closed and null-safe under strict mode.
+    It 'UnitT149_returns_false_when_permission_comparison_has_a_null_side' {
+        $runtimeModule = Get-Module | Where-Object { $_.Path -eq $script:RuntimeContractModule } | Select-Object -First 1
+        $permissions = [pscustomobject]@{ kind='windows-sddl'; sddl='O:SYG:SYD:PAI(A;;FA;;;SY)'; readOnly=$false }
+        $observation = [pscustomobject]@{ permissions=$permissions }
+
+        (& $runtimeModule { param($Value) Test-AiInstructionsInstallJournalPermissionsMatch -Observation $null -Permissions $Value } $permissions) | Should Be $false
+        (& $runtimeModule { param($Value) Test-AiInstructionsInstallJournalPermissionsMatch -Observation $Value -Permissions $null } $observation) | Should Be $false
+        (& $runtimeModule { param($Value,$Expected) Test-AiInstructionsInstallJournalPermissionsMatch -Observation $Value -Permissions $Expected } ([pscustomobject]@{ permissions=$null }) $permissions) | Should Be $false
     }
 }
