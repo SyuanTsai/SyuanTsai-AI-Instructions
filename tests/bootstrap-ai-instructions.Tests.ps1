@@ -1002,6 +1002,14 @@ foreach ($functionName in @('Invoke-Git','Get-ManagedWorktreeRoots')) {
     . ([scriptblock]::Create($definition.Extent.Text))
 }
 $GitExecutable = (Get-Command git -CommandType Application | Select-Object -First 1).Source
+function ConvertTo-NormalizedWorktreePath {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    $normalizedPath = [System.IO.Path]::GetFullPath($Path)
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $normalizedPath = $normalizedPath.Replace('/','\')
+    }
+    return $normalizedPath
+}
 $originalEncoding = [Console]::OutputEncoding
 try {
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
@@ -1013,9 +1021,11 @@ try {
     [Console]::OutputEncoding = $nonUtf8Encoding
     $expectedEncodingCodePage = [Console]::OutputEncoding.CodePage
     $roots = @(Get-ManagedWorktreeRoots -Repository $expectedRoot -Strict)
+    $normalizedExpectedRoot = ConvertTo-NormalizedWorktreePath $expectedRoot
     $found = $false
     foreach ($root in $roots) {
-        if ([string]::Equals([string]$root,$expectedRoot,[StringComparison]::Ordinal)) { $found = $true; break }
+        $normalizedRoot = ConvertTo-NormalizedWorktreePath ([string]$root)
+        if ([string]::Equals($normalizedRoot,$normalizedExpectedRoot,[StringComparison]::Ordinal)) { $found = $true; break }
     }
     if (-not $found) { throw 'The UTF-8-decoded worktree list did not contain the exact linked worktree path.' }
     if ([Console]::OutputEncoding.CodePage -ne $expectedEncodingCodePage) { throw 'Invoke-Git did not restore Console.OutputEncoding.' }
