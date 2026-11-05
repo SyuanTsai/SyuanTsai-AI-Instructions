@@ -55,7 +55,12 @@
       "required": ["primitive", "leaf"],
       "properties": {
         "primitive": { "enum": ["windows-fileshare", "flock"] },
-        "leaf": { "$ref": "#/$defs/portableLeaf" }
+        "leaf": {
+          "allOf": [
+            { "$ref": "#/$defs/portableLeaf" },
+            { "pattern": "^(?![.][aA][iI]-[iI][nN][sS][tT][rR][uU][cC][tT][iI][oO][nN][sS]-[tT][xX][nN]$)" }
+          ]
+        }
       }
     },
     "generation": {

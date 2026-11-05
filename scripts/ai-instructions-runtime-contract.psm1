@@ -1314,7 +1314,11 @@ function Assert-AiInstructionsInstallJournalInteger {
 function Assert-AiInstructionsInstallJournalLeaf {
     param([AllowNull()][object] $Value,[Parameter(Mandatory = $true)][string] $Context,[switch] $AllowNull,[switch] $PortableName)
     if ($AllowNull -and $null -eq $Value) { return }
-    if ($Value -isnot [string] -or [string]$Value -in @('.','..') -or [string]::IsNullOrWhiteSpace([string]$Value) -or
+    if ($Value -isnot [string]) {
+        throw "$Context must be a safe single filename."
+    }
+    Get-AiInstructionsInstallJournalUnicodeScalarLength -Value ([string]$Value) -Context $Context | Out-Null
+    if ([string]$Value -in @('.','..') -or [string]::IsNullOrWhiteSpace([string]$Value) -or
         [string]$Value -match '[/\\\x00-\x1f\x7f]') {
         throw "$Context must be a safe single filename."
     }
@@ -1327,6 +1331,25 @@ function Assert-AiInstructionsInstallJournalLeaf {
             throw "$Context must not use a Windows reserved device name."
         }
     }
+}
+
+function Get-AiInstructionsInstallJournalUnicodeScalarLength {
+    param([Parameter(Mandatory = $true)][string] $Value,[Parameter(Mandatory = $true)][string] $Context)
+    [int64]$scalarLength = 0
+    for ($index = 0; $index -lt $Value.Length; $index++) {
+        $unit = $Value[$index]
+        if ([char]::IsHighSurrogate($unit)) {
+            if ($index + 1 -ge $Value.Length -or -not [char]::IsLowSurrogate($Value[$index + 1])) {
+                throw "$Context contains an invalid unpaired Unicode surrogate."
+            }
+            $index++
+        }
+        elseif ([char]::IsLowSurrogate($unit)) {
+            throw "$Context contains an invalid unpaired Unicode surrogate."
+        }
+        $scalarLength++
+    }
+    return $scalarLength
 }
 
 function Test-AiInstructionsInstallJournalWindowsReservedDeviceName {
@@ -1355,7 +1378,8 @@ function Assert-AiInstructionsInstallJournalIdentity {
     if ([string]$Identity.kind -cne $ExpectedKind) { throw "$Context.kind must be $ExpectedKind for the journal platform." }
     foreach ($name in @('device','fileId')) {
         $value = $Identity.PSObject.Properties[$name].Value
-        if ($value -isnot [string] -or [string]::IsNullOrEmpty([string]$value) -or ([string]$value).Length -gt 64 -or [string]$value -cnotmatch '^[0-9A-Fa-fx:-]+$') { throw "$Context.$name is invalid." }
+        $scalarLength = if ($value -is [string]) { Get-AiInstructionsInstallJournalUnicodeScalarLength -Value ([string]$value) -Context "$Context.$name" } else { -1 }
+        if ($value -isnot [string] -or [string]::IsNullOrEmpty([string]$value) -or $scalarLength -gt 64 -or [string]$value -cnotmatch '^[0-9A-Fa-fx:-]+$') { throw "$Context.$name is invalid." }
     }
 }
 
@@ -1393,8 +1417,11 @@ function Assert-AiInstructionsInstallJournalV1 {
     Assert-AiInstructionsInstallJournalExactProperties -Object $Journal.owner -Names @('component','processId','processStartIdentity') -Context 'AI instructions install journal owner'
     if ($Journal.owner.component -isnot [string] -or [string]$Journal.owner.component -cnotin @('installer','updater','launcher-recovery')) { throw 'AI instructions install journal owner.component is invalid.' }
     Assert-AiInstructionsInstallJournalInteger -Value $Journal.owner.processId -Context 'AI instructions install journal owner.processId' -Minimum 1
+    $processStartIdentityScalarLength = if ($Journal.owner.processStartIdentity -is [string]) {
+        Get-AiInstructionsInstallJournalUnicodeScalarLength -Value ([string]$Journal.owner.processStartIdentity) -Context 'AI instructions install journal owner.processStartIdentity'
+    } else { -1 }
     if ($Journal.owner.processStartIdentity -isnot [string] -or [string]::IsNullOrEmpty([string]$Journal.owner.processStartIdentity) -or
-        ([string]$Journal.owner.processStartIdentity).Length -gt 128 -or [string]$Journal.owner.processStartIdentity -match '[\x00-\x1f\x7f]') {
+        $processStartIdentityScalarLength -gt 128 -or [string]$Journal.owner.processStartIdentity -match '[\x00-\x1f\x7f]') {
         throw 'AI instructions install journal owner.processStartIdentity is invalid.'
     }
 
@@ -1407,6 +1434,10 @@ function Assert-AiInstructionsInstallJournalV1 {
     $expectedLockPrimitive = if ([string]$Journal.platform.os -ceq 'windows') { 'windows-fileshare' } else { 'flock' }
     if ([string]$Journal.lock.primitive -cne $expectedLockPrimitive) { throw "AI instructions install journal lock.primitive must be $expectedLockPrimitive for the journal platform." }
     Assert-AiInstructionsInstallJournalLeaf -Value $Journal.lock.leaf -Context 'AI instructions install journal lock.leaf' -PortableName
+    $lockLeafKey = Get-AiInstructionsInstallJournalPortableNameKey -Value ([string]$Journal.lock.leaf)
+    if ($lockLeafKey -ceq '.AI-INSTRUCTIONS-TXN') {
+        throw 'AI instructions install journal lock.leaf must not use the reserved .ai-instructions-txn name.'
+    }
 
     Assert-AiInstructionsInstallJournalExactProperties -Object $Journal.generation -Names @('previousBundleSha256','candidateBundleSha256') -Context 'AI instructions install journal generation'
     if ($null -ne $Journal.generation.previousBundleSha256 -and
@@ -1445,8 +1476,11 @@ function Assert-AiInstructionsInstallJournalV1 {
                 }
             }
         }
+        $targetPathScalarLength = if ($operation.targetRelativePath -is [string]) {
+            Get-AiInstructionsInstallJournalUnicodeScalarLength -Value ([string]$operation.targetRelativePath) -Context "$context.targetRelativePath"
+        } else { -1 }
         if ($operation.targetRelativePath -isnot [string] -or [string]::IsNullOrEmpty([string]$operation.targetRelativePath) -or
-            ([string]$operation.targetRelativePath).Length -gt 512 -or [string]$operation.targetRelativePath -match '[\\\x00-\x1f\x7f:*?"<>|]' -or
+            $targetPathScalarLength -gt 512 -or [string]$operation.targetRelativePath -match '[\\\x00-\x1f\x7f:*?"<>|]' -or
             [string]$operation.targetRelativePath -match '^/' -or [string]$operation.targetRelativePath -match '/$' -or [string]$operation.targetRelativePath -match '^[A-Za-z]:' -or
             [string]$operation.targetRelativePath -match '(^|/)(?:\.|\.\.)(?:/|$)' -or $targetPathEndsWithInvalidCharacter -or
             [string]$operation.targetRelativePath -match '//') {
@@ -1465,10 +1499,12 @@ function Assert-AiInstructionsInstallJournalV1 {
             throw "$context.targetRelativePath must not use the reserved .ai-instructions-txn first segment."
         }
         $pathKey = Get-AiInstructionsInstallJournalPortableNameKey -Value ([string]$operation.targetRelativePath)
-        if (-not $paths.Add($pathKey)) { throw "$context.targetRelativePath duplicates another target path after Unicode NFC and invariant case normalization." }
         $pathSegments = @(([string]$operation.targetRelativePath).Split('/') | ForEach-Object { Get-AiInstructionsInstallJournalPortableNameKey -Value $_ })
+        if ($pathSegments.Count -eq 1 -and $pathKey -ceq $lockLeafKey) {
+            throw "$context.targetRelativePath conflicts with lock.leaf after Unicode NFC and invariant case normalization."
+        }
+        if (-not $paths.Add($pathKey)) { throw "$context.targetRelativePath duplicates another target path after Unicode NFC and invariant case normalization." }
         foreach ($otherPath in $validatedOperationPaths) {
-            if ([string]$operation.kind -cne 'swap-directory' -and [string]$otherPath.kind -cne 'swap-directory') { continue }
             $prefixLength = [Math]::Min($pathSegments.Count,[int]$otherPath.segments.Count)
             $hasCommonPrefix = $true
             for ($segmentIndex = 0; $segmentIndex -lt $prefixLength; $segmentIndex++) {
@@ -1478,7 +1514,7 @@ function Assert-AiInstructionsInstallJournalV1 {
                 }
             }
             if ($hasCommonPrefix) {
-                throw "$context.targetRelativePath conflicts with operation sequence $($otherPath.sequence) because swap-directory cannot coexist with an ancestor or descendant target path."
+                throw "$context.targetRelativePath conflicts with operation sequence $($otherPath.sequence) because operation targets cannot have an ancestor or descendant relationship."
             }
         }
         $validatedOperationPaths.Add([pscustomobject][ordered]@{ sequence=$sequence; kind=[string]$operation.kind; segments=$pathSegments }) | Out-Null
@@ -1526,8 +1562,11 @@ function Assert-AiInstructionsInstallJournalV1 {
             if ($operation.permissions.kind -isnot [string]) { throw "$context.permissions.kind is invalid." }
             if ([string]$operation.permissions.kind -ceq 'windows-sddl') {
                 Assert-AiInstructionsInstallJournalExactProperties -Object $operation.permissions -Names @('kind','sddl','readOnly') -Context "$context.permissions"
+                $sddlScalarLength = if ($operation.permissions.sddl -is [string]) {
+                    Get-AiInstructionsInstallJournalUnicodeScalarLength -Value ([string]$operation.permissions.sddl) -Context "$context.permissions.sddl"
+                } else { -1 }
                 if ($operation.permissions.sddl -isnot [string] -or [string]::IsNullOrEmpty([string]$operation.permissions.sddl) -or
-                    ([string]$operation.permissions.sddl).Length -gt 4096 -or [string]$operation.permissions.sddl -match '[\x00-\x1f\x7f]' -or
+                    $sddlScalarLength -gt 4096 -or [string]$operation.permissions.sddl -match '[\x00-\x1f\x7f]' -or
                     [string]$operation.permissions.sddl -notmatch '^D:' -or [string]$operation.permissions.sddl -match '[OGS]:') {
                     throw "$context.permissions.sddl must contain only a DACL SDDL policy."
                 }
@@ -1569,6 +1608,9 @@ function Assert-AiInstructionsInstallJournalUnambiguousJson {
             }
             $token = $match.Value.TrimStart()
             $position += $match.Length
+            if ($token.StartsWith('"',[StringComparison]::Ordinal)) {
+                Assert-AiInstructionsInstallJournalJsonStringUnicode -Token $token
+            }
             $frame = $stack[$stack.Count - 1]
             if ($token -ceq '}' -or $token -ceq ']') {
                 if ($frame.kind -ceq 'root' -or ($token -ceq '}' -and $frame.kind -cne 'object') -or ($token -ceq ']' -and $frame.kind -cne 'array') -or
@@ -1605,6 +1647,52 @@ function Assert-AiInstructionsInstallJournalUnambiguousJson {
         throw 'AI instructions install journal JSON token scan failed.'
     }
     if ($stack.Count -ne 1 -or $stack[0].mode -cne 'done') { throw 'AI instructions install journal JSON is incomplete.' }
+}
+
+function Assert-AiInstructionsInstallJournalJsonStringUnicode {
+    param([Parameter(Mandatory = $true)][string] $Token)
+    $end = $Token.Length - 1
+    for ($index = 1; $index -lt $end;) {
+        $unit = $Token[$index]
+        if ($unit -eq '\') {
+            if ($index + 1 -ge $end) { return }
+            if ($Token[$index + 1] -ne 'u' -or $index + 5 -ge $end) {
+                $index += 2
+                continue
+            }
+            $hex = $Token.Substring($index + 2,4)
+            if ($hex -cnotmatch '^[0-9A-Fa-f]{4}$') { return }
+            $escapedUnit = [char][Convert]::ToInt32($hex,16)
+            if ([char]::IsHighSurrogate($escapedUnit)) {
+                $nextEscapeIndex = $index + 6
+                if ($nextEscapeIndex + 5 -ge $end -or $Token[$nextEscapeIndex] -ne '\' -or $Token[$nextEscapeIndex + 1] -ne 'u') {
+                    throw 'AI instructions install journal JSON string contains an invalid unpaired Unicode surrogate.'
+                }
+                $lowHex = $Token.Substring($nextEscapeIndex + 2,4)
+                if ($lowHex -cnotmatch '^[0-9A-Fa-f]{4}$' -or -not [char]::IsLowSurrogate([char][Convert]::ToInt32($lowHex,16))) {
+                    throw 'AI instructions install journal JSON string contains an invalid unpaired Unicode surrogate.'
+                }
+                $index += 12
+                continue
+            }
+            if ([char]::IsLowSurrogate($escapedUnit)) {
+                throw 'AI instructions install journal JSON string contains an invalid unpaired Unicode surrogate.'
+            }
+            $index += 6
+            continue
+        }
+        if ([char]::IsHighSurrogate($unit)) {
+            if ($index + 1 -ge $end -or -not [char]::IsLowSurrogate($Token[$index + 1])) {
+                throw 'AI instructions install journal JSON string contains an invalid unpaired Unicode surrogate.'
+            }
+            $index += 2
+            continue
+        }
+        if ([char]::IsLowSurrogate($unit)) {
+            throw 'AI instructions install journal JSON string contains an invalid unpaired Unicode surrogate.'
+        }
+        $index++
+    }
 }
 
 function ConvertFrom-AiInstructionsInstallJournalV1Json {
@@ -1742,8 +1830,11 @@ function Get-AiInstructionsInstallRecoveryDecision {
             if ($value.permissions.kind -isnot [string] -or [string]$value.permissions.kind -cne $expectedPermissionsKind) { throw "AI instructions install recovery observation sequence $sequence.permissions.kind must be $expectedPermissionsKind for the journal platform." }
             if ($expectedPermissionsKind -ceq 'windows-sddl') {
                 Assert-AiInstructionsInstallJournalExactProperties -Object $value.permissions -Names @('kind','sddl','readOnly') -Context "AI instructions install recovery observation sequence $sequence.permissions"
+                $sddlScalarLength = if ($value.permissions.sddl -is [string]) {
+                    Get-AiInstructionsInstallJournalUnicodeScalarLength -Value ([string]$value.permissions.sddl) -Context "AI instructions install recovery observation sequence $sequence.permissions.sddl"
+                } else { -1 }
                 if ($value.permissions.sddl -isnot [string] -or [string]::IsNullOrEmpty([string]$value.permissions.sddl) -or
-                    ([string]$value.permissions.sddl).Length -gt 4096 -or [string]$value.permissions.sddl -match '[\x00-\x1f\x7f]' -or
+                    $sddlScalarLength -gt 4096 -or [string]$value.permissions.sddl -match '[\x00-\x1f\x7f]' -or
                     [string]$value.permissions.sddl -notmatch '^D:' -or [string]$value.permissions.sddl -match '[OGS]:') {
                     throw "AI instructions install recovery observation sequence $sequence.permissions.sddl must contain only a DACL SDDL policy."
                 }

@@ -2305,9 +2305,9 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         (@($decision.operations.action) -join ',') | Should Be 'none,none'
     }
 
-    # Scenario: A swap-directory target is an ancestor or descendant of another operation target after portable normalization.
+    # Scenario: An operation target is an ancestor or descendant of another operation target after portable normalization.
     # Purpose: Reject journals whose operations would record contradictory state for the same directory tree.
-    It 'UnitT175_rejects_swap_directory_ancestor_or_descendant_target_<Case>' -TestCases @(
+    It 'UnitT175_rejects_operation_ancestor_or_descendant_target_<Case>' -TestCases @(
         @{ Case='swap-parent'; SwapPath='runtime'; OtherPath='runtime/marker'; Reverse=$false },
         @{ Case='swap-child'; SwapPath='runtime/dir'; OtherPath='runtime'; Reverse=$true },
         @{ Case='case-insensitive'; SwapPath='Runtime'; OtherPath='runtime/x'; Reverse=$false }
@@ -2332,7 +2332,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         }
         $json = $journal | ConvertTo-Json -Depth 20
 
-        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'sequence 2.*sequence 1.*swap-directory'
+        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'sequence 2.*sequence 1.*ancestor or descendant'
     }
 
     # Scenario: A swap-directory target and another operation only share a textual prefix, not a normalized path segment.
@@ -2345,6 +2345,80 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $json = $journal | ConvertTo-Json -Depth 20
 
         { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json | Out-Null } | Should Not Throw
+    }
+
+    # Scenario: A lock leaf aliases the transaction namespace or a root-level publication target.
+    # Purpose: Keep the lock inode outside every namespace that transaction publication can replace.
+    It 'UnitT177_rejects_reserved_or_root_target_lock_leaf_and_accepts_nested_target' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'UnitT177 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.' }
+        $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
+        foreach ($reservedLeaf in @('.ai-instructions-txn','.AI-INSTRUCTIONS-TXN')) {
+            $journal = Get-TestInstallJournalV1
+            $journal.lock.leaf = $reservedLeaf
+            $json = $journal | ConvertTo-Json -Depth 20
+
+            (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'lock.*reserved .ai-instructions-txn'
+            (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
+        }
+
+        $journal = Get-TestInstallJournalV1
+        $journal.lock.leaf = 'install.lock'
+        $journal.operations[0].targetRelativePath = 'install.lock'
+        $json = $journal | ConvertTo-Json -Depth 20
+        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'sequence 1.*lock'
+        (Test-Json -Json $json -SchemaFile $schemaPath) | Should Be $true
+
+        $journal = Get-TestInstallJournalV1
+        $journal.lock.leaf = 'install.lock'
+        $journal.operations[0].targetRelativePath = 'sub/install.lock'
+        $json = $journal | ConvertTo-Json -Depth 20
+        { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json | Out-Null } | Should Not Throw
+        (Test-Json -Json $json -SchemaFile $schemaPath) | Should Be $true
+    }
+
+    # Scenario: File operations target a parent and child path, or two sibling paths.
+    # Purpose: Apply the publishable namespace rule to every operation kind without rejecting siblings.
+    It 'UnitT178_rejects_file_operation_ancestor_target_and_accepts_siblings' {
+        $journal = Get-TestInstallJournalV1
+        $journal.operations[0].targetRelativePath = 'runtime'
+        $journal.operations[1].targetRelativePath = 'runtime/marker'
+        $json = $journal | ConvertTo-Json -Depth 20
+        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'sequence 2.*sequence 1.*ancestor or descendant'
+
+        $journal = Get-TestInstallJournalV1
+        $journal.operations[0].targetRelativePath = 'a/b'
+        $journal.operations[1].targetRelativePath = 'a/c'
+        $json = $journal | ConvertTo-Json -Depth 20
+        { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json | Out-Null } | Should Not Throw
+    }
+
+    # Scenario: A target segment reaches the schema maxLength with supplementary-plane characters, then exceeds it by one scalar.
+    # Purpose: Keep the reader's Unicode scalar count aligned with JSON Schema instead of UTF-16 code units.
+    It 'UnitT179_counts_target_length_in_unicode_scalars' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'UnitT179 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.' }
+        $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
+        $supplementaryCharacter = [char]::ConvertFromUtf32(0x1F600)
+
+        $journal = Get-TestInstallJournalV1
+        $journal.operations[0].targetRelativePath = $supplementaryCharacter * 512
+        $json = $journal | ConvertTo-Json -Depth 20
+        { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json | Out-Null } | Should Not Throw
+        (Test-Json -Json $json -SchemaFile $schemaPath) | Should Be $true
+
+        $journal = Get-TestInstallJournalV1
+        $journal.operations[0].targetRelativePath = $supplementaryCharacter * 513
+        $json = $journal | ConvertTo-Json -Depth 20
+        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'targetRelativePath'
+        (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
+    }
+
+    # Scenario: JSON decodes an isolated high surrogate into a lock leaf.
+    # Purpose: Reject invalid Unicode strings before normalization or filesystem use.
+    It 'UnitT180_rejects_unpaired_surrogate_in_lock_leaf' {
+        $examplePath = Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-install-journal-v1.example.json'
+        $json = (Get-Content -Raw -Encoding UTF8 -LiteralPath $examplePath).Replace('"leaf": "install.lock"','"leaf": "\uD800"')
+
+        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'unpaired Unicode surrogate'
     }
 
     # Scenario: A journal uses Unicode whitespace at the end of a lock leaf or target path, plus whitespace-only values.
