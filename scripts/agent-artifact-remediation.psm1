@@ -15,12 +15,17 @@ function Invoke-RemediationGit {
     )
 
     $previousPreference = $ErrorActionPreference
+    $previousConsoleOutputEncoding = [Console]::OutputEncoding
     try {
         $ErrorActionPreference = 'Continue'
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
         $output = & $GitExecutable -C $Repository @Arguments 2>&1
         $exitCode = $LASTEXITCODE
     }
-    finally { $ErrorActionPreference = $previousPreference }
+    finally {
+        $ErrorActionPreference = $previousPreference
+        [Console]::OutputEncoding = $previousConsoleOutputEncoding
+    }
     if ($exitCode -ne 0) {
         throw "git $($Arguments -join ' ') failed: $($output -join [Environment]::NewLine)"
     }
@@ -35,12 +40,17 @@ function Get-RemediationGitExitCode {
     )
 
     $previousPreference = $ErrorActionPreference
+    $previousConsoleOutputEncoding = [Console]::OutputEncoding
     try {
         $ErrorActionPreference = 'Continue'
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
         $null = & $GitExecutable -C $Repository @Arguments 2>&1
         return $LASTEXITCODE
     }
-    finally { $ErrorActionPreference = $previousPreference }
+    finally {
+        $ErrorActionPreference = $previousPreference
+        [Console]::OutputEncoding = $previousConsoleOutputEncoding
+    }
 }
 
 function ConvertFrom-RemediationGitQuotedPath {

@@ -89,12 +89,17 @@ function Invoke-CleanupGit {
 function Get-CleanupGitExitCode {
     param([Parameter(Mandatory = $true)][string] $Repository,[Parameter(Mandatory = $true)][string[]] $Arguments)
     $previousPreference = $ErrorActionPreference
+    $previousConsoleOutputEncoding = [Console]::OutputEncoding
     try {
         $ErrorActionPreference = 'Continue'
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
         $null = & $GitExecutable -C $Repository @Arguments 2>&1
         return $LASTEXITCODE
     }
-    finally { $ErrorActionPreference = $previousPreference }
+    finally {
+        $ErrorActionPreference = $previousPreference
+        [Console]::OutputEncoding = $previousConsoleOutputEncoding
+    }
 }
 
 function ConvertFrom-CleanupGitQuotedPath {

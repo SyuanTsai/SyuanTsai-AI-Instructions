@@ -28,6 +28,89 @@ Describe 'Agent artifact remediation transaction' {
         }
     }
 
+    # Given: A repository root contains non-ASCII characters and a child PowerShell starts with a legacy console encoding.
+    # When: Remediation asks Git for the repository top-level path.
+    # Then: Git output is decoded as UTF-8 and the caller's console encoding is restored.
+    It 'InterT07_decodes_non_ascii_repository_paths_as_utf8_and_restores_console_output_encoding' {
+        $repository = Join-Path $TestDrive (([string][char]0x5DE5) + ([string][char]0x4F5C) + ([string][char]0x6A39) + '-' + ([string][char]0x00FC) + '-remediation')
+        New-Item -ItemType Directory -Force -Path $repository | Out-Null
+        & git -C $repository init --quiet
+        & git -C $repository config user.name 'Remediation Test'
+        & git -C $repository config user.email 'remediation@example.test'
+        [System.IO.File]::WriteAllText((Join-Path $repository 'product.txt'),"product`n",(New-Object System.Text.UTF8Encoding($false)))
+        & git -C $repository add -- product.txt
+        & git -C $repository commit --quiet -m 'fixture'
+
+        $moduleBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script:RemediationModule))
+        $repositoryBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($repository))
+        $childScript = @'
+$modulePath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__MODULE_PATH__'))
+$expectedRepository = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__REPOSITORY__'))
+$module = Import-Module $modulePath -Force -PassThru
+$originalEncoding = [Console]::OutputEncoding
+try {
+    $nonUtf8Encoding = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [Text.Encoding]::GetEncoding('windows-1252') } else { [Text.Encoding]::GetEncoding('ISO-8859-1') }
+    [Console]::OutputEncoding = $nonUtf8Encoding
+    $expectedEncodingCodePage = [Console]::OutputEncoding.CodePage
+    $actualRepository = ((& $module { param($repository) Invoke-RemediationGit -Repository $repository -GitExecutable 'git' -Arguments @('rev-parse','--show-toplevel') } $expectedRepository) | Select-Object -First 1).Trim()
+    $expectedNormalized = [IO.Path]::GetFullPath($expectedRepository)
+    $actualNormalized = [IO.Path]::GetFullPath($actualRepository)
+    if (-not [string]::Equals($actualNormalized,$expectedNormalized,[StringComparison]::Ordinal)) { throw "Remediation Git returned '$actualRepository' instead of '$expectedRepository'." }
+    if ([Console]::OutputEncoding.CodePage -ne $expectedEncodingCodePage) { throw 'Invoke-RemediationGit did not restore Console.OutputEncoding.' }
+}
+finally {
+    [Console]::OutputEncoding = $originalEncoding
+}
+'@.Replace('__MODULE_PATH__',$moduleBase64).Replace('__REPOSITORY__',$repositoryBase64)
+        $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
+        $output = & (Get-Process -Id $PID).Path -NoProfile -NonInteractive -EncodedCommand $encodedCommand 2>&1
+
+        $LASTEXITCODE | Should Be 0
+        @($output) | Should BeNullOrEmpty
+    }
+
+    # Given: Shared-Skill migration observes a repository root containing non-ASCII characters under a legacy console encoding.
+    # When: Its Git helper asks Git for the repository top-level path.
+    # Then: The returned path is exact and the child process retains its prior console encoding.
+    It 'InterT08_decodes_non_ascii_repository_paths_for_shared_skill_migration_and_restores_console_output_encoding' {
+        $repository = Join-Path $TestDrive (([string][char]0x5DE5) + ([string][char]0x4F5C) + ([string][char]0x6A39) + '-' + ([string][char]0x00FC) + '-skill-migration')
+        New-Item -ItemType Directory -Force -Path $repository | Out-Null
+        & git -C $repository init --quiet
+        & git -C $repository config user.name 'Remediation Test'
+        & git -C $repository config user.email 'remediation@example.test'
+        [System.IO.File]::WriteAllText((Join-Path $repository 'product.txt'),"product`n",(New-Object System.Text.UTF8Encoding($false)))
+        & git -C $repository add -- product.txt
+        & git -C $repository commit --quiet -m 'fixture'
+
+        $modulePath = Join-Path $script:RepositoryRoot 'scripts\repo-shared-skills-migration.psm1'
+        $moduleBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($modulePath))
+        $repositoryBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($repository))
+        $childScript = @'
+$modulePath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__MODULE_PATH__'))
+$expectedRepository = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__REPOSITORY__'))
+$module = Import-Module $modulePath -Force -PassThru
+$originalEncoding = [Console]::OutputEncoding
+try {
+    $nonUtf8Encoding = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [Text.Encoding]::GetEncoding('windows-1252') } else { [Text.Encoding]::GetEncoding('ISO-8859-1') }
+    [Console]::OutputEncoding = $nonUtf8Encoding
+    $expectedEncodingCodePage = [Console]::OutputEncoding.CodePage
+    $actualRepository = ((& $module { param($repository) Invoke-RepoSkillGit -Repository $repository -GitExecutable 'git' -Arguments @('rev-parse','--show-toplevel') } $expectedRepository) | Select-Object -First 1).Trim()
+    $expectedNormalized = [IO.Path]::GetFullPath($expectedRepository)
+    $actualNormalized = [IO.Path]::GetFullPath($actualRepository)
+    if (-not [string]::Equals($actualNormalized,$expectedNormalized,[StringComparison]::Ordinal)) { throw "Shared-Skill migration Git returned '$actualRepository' instead of '$expectedRepository'." }
+    if ([Console]::OutputEncoding.CodePage -ne $expectedEncodingCodePage) { throw 'Invoke-RepoSkillGit did not restore Console.OutputEncoding.' }
+}
+finally {
+    [Console]::OutputEncoding = $originalEncoding
+}
+'@.Replace('__MODULE_PATH__',$moduleBase64).Replace('__REPOSITORY__',$repositoryBase64)
+        $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
+        $output = & (Get-Process -Id $PID).Path -NoProfile -NonInteractive -EncodedCommand $encodedCommand 2>&1
+
+        $LASTEXITCODE | Should Be 0
+        @($output) | Should BeNullOrEmpty
+    }
+
     # Given: Remediation removed a tracked Agent file, then an external editor recreates it and an external Git process stages product work.
     # When: A later bootstrap failure asks remediation to roll back.
     # Then: Applied-state drift is reported and both external file bytes and index entries are preserved for automatic retry.

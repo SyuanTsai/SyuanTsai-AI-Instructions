@@ -156,7 +156,12 @@ function Get-RepoSkillTreeFiles {
 
 function Invoke-RepoSkillGit {
     param([string]$Repository, [string]$GitExecutable, [string[]]$Arguments)
-    $output = & $GitExecutable -C $Repository @Arguments 2>&1
+    $previousConsoleOutputEncoding = [Console]::OutputEncoding
+    try {
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+        $output = & $GitExecutable -C $Repository @Arguments 2>&1
+    }
+    finally { [Console]::OutputEncoding = $previousConsoleOutputEncoding }
     if ($LASTEXITCODE -ne 0) { throw "Skill migration Git observation failed: $($Arguments[0])" }
     return @($output | ForEach-Object { [string]$_ })
 }
