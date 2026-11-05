@@ -26,6 +26,7 @@
 - Rename 必須新增新的 stable ID，並保留舊 ID tombstone：舊 entry 設為 `lifecycle.status = removed`、`replacementId = <new-id>`；新 entry 在 `aliases` 記錄舊 ID。
 - Resolver 會把個人 `includeSkills`／`excludeSkills` 中的 removed ID 或 alias 遷移到 replacement stable ID；實體安裝目錄只使用 replacement ID。
 - 無替代品的 removal 保留 `status = removed` tombstone，但不設定 `replacementId`；明確選取此類 removed Skill 必須 fail closed。
+- Tombstone 與 alias 是遷移期設計，不是永久義務。來源 Repository 已刪除舊 Skill，且維護者決定結束遷移時，可在同一個變更中移除舊 entry 與 replacement 的 alias。移除後，個人設定若仍在 `includeSkills`／`excludeSkills` 指定舊 ID，會以 unknown Skill fail closed，使用者需改選 replacement ID。
 - Stable ID、source ID、profile ID、target path 或 alias 衝突都必須停止；不得使用 first-wins 或 last-wins。
 
 ## Profile 與 dependency resolution
