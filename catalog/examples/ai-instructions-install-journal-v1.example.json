@@ -87,6 +87,41 @@
       },
       "permissions": null,
       "state": "staged"
+    },
+    {
+      "sequence": 3,
+      "kind": "remove-file",
+      "method": "tombstone-rename",
+      "targetRelativePath": "runtime/obsolete.marker",
+      "stageLeaf": null,
+      "backupLeaf": "obsolete-marker.tombstone",
+      "original": {
+        "exists": true,
+        "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+        "length": 32,
+        "identity": {
+          "kind": "windows-file-id",
+          "device": "0x1A2B",
+          "fileId": "0000ABCD:00006789"
+        }
+      },
+      "backupIdentity": {
+        "kind": "windows-file-id",
+        "device": "0x1A2B",
+        "fileId": "0000ABCD:00006789"
+      },
+      "applied": {
+        "exists": false,
+        "sha256": null,
+        "length": null,
+        "identity": null
+      },
+      "permissions": {
+        "kind": "windows-sddl",
+        "sddl": "D:PAI(A;;FA;;;SY)",
+        "readOnly": false
+      },
+      "state": "pending"
     }
   ]
 }

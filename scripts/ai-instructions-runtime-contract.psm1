@@ -1279,7 +1279,25 @@ function Assert-AiInstructionsInstallJournalExactProperties {
 
 function Assert-AiInstructionsInstallJournalInteger {
     param([AllowNull()][object] $Value,[Parameter(Mandatory = $true)][string] $Context,[long] $Minimum = 0)
-    if (($Value -isnot [int] -and $Value -isnot [long]) -or [int64]$Value -lt $Minimum) {
+    $numericTypeCodes = @(
+        [TypeCode]::SByte,[TypeCode]::Byte,[TypeCode]::Int16,[TypeCode]::UInt16,
+        [TypeCode]::Int32,[TypeCode]::UInt32,[TypeCode]::Int64,[TypeCode]::UInt64,
+        [TypeCode]::Single,[TypeCode]::Double,[TypeCode]::Decimal
+    )
+    $typeCode = if ($null -eq $Value) { [TypeCode]::Empty } else { [Type]::GetTypeCode($Value.GetType()) }
+    $valid = $typeCode -in $numericTypeCodes
+    if ($valid -and $typeCode -eq [TypeCode]::Double) { $valid = -not [double]::IsNaN([double]$Value) -and -not [double]::IsInfinity([double]$Value) }
+    if ($valid -and $typeCode -eq [TypeCode]::Single) { $valid = -not [single]::IsNaN([single]$Value) -and -not [single]::IsInfinity([single]$Value) }
+    if ($valid) {
+        try { $decimalValue = [decimal]$Value }
+        catch { $valid = $false }
+    }
+    if ($valid) {
+        $valid = [decimal]::Truncate($decimalValue) -eq $decimalValue -and
+            $decimalValue -ge [decimal][int64]::MinValue -and $decimalValue -le [decimal][int64]::MaxValue -and
+            $decimalValue -ge [decimal]$Minimum
+    }
+    if (-not $valid) {
         throw "$Context must be an integer greater than or equal to $Minimum."
     }
 }
@@ -1287,7 +1305,7 @@ function Assert-AiInstructionsInstallJournalInteger {
 function Assert-AiInstructionsInstallJournalLeaf {
     param([AllowNull()][object] $Value,[Parameter(Mandatory = $true)][string] $Context,[switch] $AllowNull,[switch] $PortableName)
     if ($AllowNull -and $null -eq $Value) { return }
-    if ($Value -isnot [string] -or [string]$Value -in @('.','..') -or [string]::IsNullOrEmpty([string]$Value) -or
+    if ($Value -isnot [string] -or [string]$Value -in @('.','..') -or [string]::IsNullOrWhiteSpace([string]$Value) -or
         [string]$Value -match '[/\\\x00-\x1f\x7f]') {
         throw "$Context must be a safe single filename."
     }
@@ -1350,7 +1368,8 @@ function Assert-AiInstructionsInstallJournalV1 {
 
     $topProperties = @('schemaVersion','kind','transactionId','createdAtUtc','owner','platform','lock','generation','phase','operations')
     Assert-AiInstructionsInstallJournalExactProperties -Object $Journal -Names $topProperties -Context 'AI instructions install journal'
-    if (($Journal.schemaVersion -isnot [int] -and $Journal.schemaVersion -isnot [long]) -or [int64]$Journal.schemaVersion -ne 1) {
+    Assert-AiInstructionsInstallJournalInteger -Value $Journal.schemaVersion -Context 'AI instructions install journal schemaVersion' -Minimum 1
+    if ([decimal]$Journal.schemaVersion -ne 1) {
         throw "Unsupported AI instructions install journal schema version '$($Journal.schemaVersion)'."
     }
     if ($Journal.kind -isnot [string] -or [string]$Journal.kind -cne 'ai-instructions-install-transaction') { throw 'AI instructions install journal kind is invalid.' }
@@ -1402,9 +1421,9 @@ function Assert-AiInstructionsInstallJournalV1 {
         $sequence = [int64]$operation.sequence
         $context = "AI instructions install journal operation sequence $sequence"
         if ($operation.kind -isnot [string] -or [string]$operation.kind -cnotin @('write-file','create-file','remove-file','swap-directory')) { throw "$context.kind is invalid." }
-        if ($operation.method -isnot [string] -or [string]$operation.method -cnotin @('stage-rename','unlink')) { throw "$context.method is invalid." }
+        if ($operation.method -isnot [string] -or [string]$operation.method -cnotin @('stage-rename','tombstone-rename')) { throw "$context.method is invalid." }
         if ($operation.state -isnot [string] -or [string]$operation.state -cnotin @('pending','staged','applied','rolled-back')) { throw "$context.state is invalid." }
-        if ([string]$operation.kind -ceq 'remove-file' -and [string]$operation.method -cne 'unlink') { throw "$context.method must be unlink for remove-file." }
+        if ([string]$operation.kind -ceq 'remove-file' -and [string]$operation.method -cne 'tombstone-rename') { throw "$context.method must be tombstone-rename for remove-file." }
         if ([string]$operation.kind -cne 'remove-file' -and [string]$operation.method -cne 'stage-rename') { throw "$context.method must be stage-rename for $($operation.kind)." }
         if ($operation.targetRelativePath -isnot [string] -or [string]::IsNullOrEmpty([string]$operation.targetRelativePath) -or
             ([string]$operation.targetRelativePath).Length -gt 512 -or [string]$operation.targetRelativePath -match '[\\\x00-\x1f\x7f:*?"<>|]' -or
@@ -1414,6 +1433,9 @@ function Assert-AiInstructionsInstallJournalV1 {
             throw "$context.targetRelativePath is not a safe transaction-relative path."
         }
         foreach ($segment in ([string]$operation.targetRelativePath).Split('/')) {
+            if ([string]::IsNullOrWhiteSpace($segment)) {
+                throw "$context.targetRelativePath contains an empty or whitespace-only segment."
+            }
             if (Test-AiInstructionsInstallJournalWindowsReservedDeviceName -Value $segment) {
                 throw "$context.targetRelativePath contains a Windows reserved device name."
             }
@@ -1424,11 +1446,11 @@ function Assert-AiInstructionsInstallJournalV1 {
         if ([string]$operation.method -ceq 'stage-rename' -and $null -eq $operation.stageLeaf) {
             throw "$context.stageLeaf must not be null when method is stage-rename."
         }
-        if ([string]$operation.method -ceq 'unlink' -and $null -ne $operation.stageLeaf) {
-            throw "$context.stageLeaf must be null when method is unlink."
+        if ([string]$operation.method -ceq 'tombstone-rename' -and $null -ne $operation.stageLeaf) {
+            throw "$context.stageLeaf must be null when method is tombstone-rename."
         }
-        if ([string]$operation.method -ceq 'unlink' -and [string]$operation.state -ceq 'staged') {
-            throw "$context.method unlink does not allow state staged."
+        if ([string]$operation.method -ceq 'tombstone-rename' -and [string]$operation.state -ceq 'staged') {
+            throw "$context.method tombstone-rename does not allow state staged."
         }
         Assert-AiInstructionsInstallJournalLeaf -Value $operation.backupLeaf -Context "$context.backupLeaf" -AllowNull -PortableName
         foreach ($leaf in @($operation.stageLeaf,$operation.backupLeaf)) {
@@ -1448,9 +1470,14 @@ function Assert-AiInstructionsInstallJournalV1 {
         if ($operation.original.exists -and $null -eq $operation.backupLeaf) { throw "$context.backupLeaf must not be null when original.exists is true." }
         Assert-AiInstructionsInstallJournalIdentity -Identity $operation.original.identity -Context "$context.original.identity" -ExpectedKind $expectedIdentityKind -AllowNull:(-not [bool]$operation.original.exists)
         if (-not $operation.original.exists -and $null -ne $operation.original.identity) { throw "$context.original.identity must be null when exists is false." }
-        $backupIdentityMayBeNull = -not [bool]$operation.original.exists -or [string]$operation.state -ceq 'pending'
+        $backupIdentityMayBeNull = -not [bool]$operation.original.exists -or
+            ([string]$operation.state -ceq 'pending' -and [string]$operation.kind -cne 'remove-file')
         Assert-AiInstructionsInstallJournalIdentity -Identity $operation.backupIdentity -Context "$context.backupIdentity" -ExpectedKind $expectedIdentityKind -AllowNull:$backupIdentityMayBeNull
         if (-not $operation.original.exists -and $null -ne $operation.backupIdentity) { throw "$context.backupIdentity must be null when original.exists is false." }
+        if ([string]$operation.kind -ceq 'remove-file' -and
+            -not (Test-AiInstructionsInstallJournalIdentityMatch -Observed $operation.backupIdentity -Expected $operation.original.identity)) {
+            throw "$context.backupIdentity must equal original.identity for remove-file tombstone rename."
+        }
         if ($operation.original.exists -and $null -eq $operation.permissions) { throw "$context.permissions must not be null when original.exists is true." }
         if ($null -ne $operation.permissions) {
             if ($operation.permissions.kind -isnot [string]) { throw "$context.permissions.kind is invalid." }
@@ -1624,6 +1651,18 @@ function Test-AiInstructionsInstallJournalPermissionsMatch {
         [int64]$Observation.permissions.gid -eq [int64]$Permissions.gid
 }
 
+function Test-AiInstructionsInstallJournalBackupMatch {
+    param(
+        [AllowNull()][object] $Backup,
+        [Parameter(Mandatory = $true)][object] $Original,
+        [AllowNull()][object] $BackupIdentity
+    )
+    if ($null -eq $Backup -or $null -eq $BackupIdentity -or -not [bool]$Backup.exists) { return $false }
+    return [string]$Backup.sha256 -ceq [string]$Original.sha256 -and
+        [int64]$Backup.length -eq [int64]$Original.length -and
+        (Test-AiInstructionsInstallJournalIdentityMatch -Observed $Backup.identity -Expected $BackupIdentity)
+}
+
 function Get-AiInstructionsInstallRecoveryDecision {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][object] $Journal,[Parameter(Mandatory = $true)][object] $Observations)
@@ -1640,9 +1679,8 @@ function Get-AiInstructionsInstallRecoveryDecision {
         $sequence = [int64]$key
         if ($bySequence.ContainsKey($sequence)) { throw "AI instructions install recovery observations contain duplicate sequence $sequence." }
         $value = if ($Observations -is [System.Collections.IDictionary]) { $Observations[$keyValue] } else { $Observations.PSObject.Properties[$key].Value }
-        Assert-AiInstructionsInstallJournalExactProperties -Object $value -Names @('exists','sha256','length','identity','permissions','backupAvailable') -Context "AI instructions install recovery observation sequence $sequence"
+        Assert-AiInstructionsInstallJournalExactProperties -Object $value -Names @('exists','sha256','length','identity','permissions','backup') -Context "AI instructions install recovery observation sequence $sequence"
         if ($value.exists -isnot [bool]) { throw "AI instructions install recovery observation sequence $sequence.exists must be a boolean." }
-        if ($value.backupAvailable -isnot [bool]) { throw "AI instructions install recovery observation sequence $sequence.backupAvailable must be a boolean." }
         if ($value.exists) {
             if ($value.sha256 -isnot [string] -or [string]$value.sha256 -cnotmatch '^[0-9a-f]{64}$') { throw "AI instructions install recovery observation sequence $sequence.sha256 is invalid." }
             Assert-AiInstructionsInstallJournalInteger -Value $value.length -Context "AI instructions install recovery observation sequence $sequence.length" -Minimum 0
@@ -1666,6 +1704,11 @@ function Get-AiInstructionsInstallRecoveryDecision {
             }
         }
         elseif ($null -ne $value.sha256 -or $null -ne $value.length -or $null -ne $value.identity -or $null -ne $value.permissions) { throw "AI instructions install recovery observation sequence $sequence sha256, length, identity, and permissions must be null when exists is false." }
+        if ($null -ne $value.backup) {
+            Assert-AiInstructionsInstallJournalFileState -State $value.backup -Context "AI instructions install recovery observation sequence $sequence.backup"
+            if (-not [bool]$value.backup.exists) { throw "AI instructions install recovery observation sequence $sequence.backup.exists must be true when backup is not null." }
+            Assert-AiInstructionsInstallJournalIdentity -Identity $value.backup.identity -Context "AI instructions install recovery observation sequence $sequence.backup.identity" -ExpectedKind $expectedIdentityKind
+        }
         $bySequence[$sequence] = $value
     }
     foreach ($operation in @($Journal.operations)) {
@@ -1675,10 +1718,15 @@ function Get-AiInstructionsInstallRecoveryDecision {
     $matchesApplied = @{}
     $matchesOriginal = @{}
     $permissionsMatchOriginal = @{}
+    $backupMatchesOriginal = @{}
     foreach ($operation in @($Journal.operations)) {
         $sequence = [int64]$operation.sequence
         $matchesApplied[$sequence] = Test-AiInstructionsInstallJournalStateMatch -Observation $bySequence[$sequence] -State $operation.applied
         $matchesOriginal[$sequence] = Test-AiInstructionsInstallJournalStateMatch -Observation $bySequence[$sequence] -State $operation.original -AlternativeIdentity $operation.backupIdentity
+        $backupMatchesOriginal[$sequence] = Test-AiInstructionsInstallJournalBackupMatch -Backup $bySequence[$sequence].backup -Original $operation.original -BackupIdentity $operation.backupIdentity
+        if ([string]$operation.kind -ceq 'remove-file' -and -not [bool]$bySequence[$sequence].exists) {
+            $matchesApplied[$sequence] = $backupMatchesOriginal[$sequence]
+        }
         $permissionsMatchOriginal[$sequence] = $true
         if ([string]$Journal.phase -cne 'committed' -and $matchesOriginal[$sequence] -and [bool]$operation.original.exists -and $null -ne $operation.permissions) {
             $permissionsMatchOriginal[$sequence] = Test-AiInstructionsInstallJournalPermissionsMatch -Observation $bySequence[$sequence] -Permissions $operation.permissions
@@ -1715,10 +1763,10 @@ function Get-AiInstructionsInstallRecoveryDecision {
         }
         elseif ($matchesApplied[$sequence]) {
             if ($operation.original.exists) {
-                if (-not $bySequence[$sequence].backupAvailable) {
+                if (-not $backupMatchesOriginal[$sequence]) {
                     $mustRefuse = $true
                     $action = 'keep'
-                    $reasons.Add("sequence $sequence cannot restore original because backupAvailable is false")
+                    $reasons.Add("sequence $sequence cannot restore original because backup is unavailable or does not match original")
                 }
                 else { $action = 'restore-original' }
             }

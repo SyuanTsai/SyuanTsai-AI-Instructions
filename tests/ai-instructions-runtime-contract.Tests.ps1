@@ -174,7 +174,9 @@ function Invoke-TestRuntimeV3OrdinalChild {
 
 function Get-TestInstallJournalV1 {
     $path = Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-install-journal-v1.example.json'
-    return (ConvertFrom-AiInstructionsInstallJournalV1Json -Json (Get-Content -Raw -Encoding UTF8 -LiteralPath $path))
+    $journal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json (Get-Content -Raw -Encoding UTF8 -LiteralPath $path)
+    $journal.operations = @($journal.operations | Select-Object -First 2)
+    return $journal
 }
 
 function Get-TestLinuxInstallJournalV1 {
@@ -195,7 +197,7 @@ function New-TestInstallObservation {
     param(
         [Parameter(Mandatory = $true)][object] $Operation,
         [Parameter(Mandatory = $true)][object] $State,
-        [bool] $BackupAvailable = $true,
+        [AllowNull()][object] $Backup,
         [object] $Permissions = $Operation.permissions
     )
     if ([bool]$State.exists -and $null -eq $Permissions) {
@@ -207,14 +209,40 @@ function New-TestInstallObservation {
     $observedPermissions = if ($null -eq $Permissions) { $null }
         elseif ([string]$Permissions.kind -ceq 'windows-sddl') { [pscustomobject]@{ kind=$Permissions.kind; sddl=$Permissions.sddl; readOnly=$Permissions.readOnly } }
         else { [pscustomobject]@{ kind=$Permissions.kind; mode=$Permissions.mode; uid=$Permissions.uid; gid=$Permissions.gid } }
+    if (-not $PSBoundParameters.ContainsKey('Backup')) {
+        $Backup = if ([bool]$Operation.original.exists) {
+            [pscustomobject]@{
+                exists = $true
+                sha256 = $Operation.original.sha256
+                length = $Operation.original.length
+                identity = $Operation.backupIdentity
+            }
+        }
+        else { $null }
+    }
     return [pscustomobject]@{
         exists = [bool]$State.exists
         sha256 = $State.sha256
         length = $State.length
         identity = $State.identity
         permissions = if ([bool]$State.exists) { $observedPermissions } else { $null }
-        backupAvailable = $BackupAvailable
+        backup = $Backup
     }
+}
+
+function Get-TestPendingRemoveInstallJournalV1 {
+    $journal = Get-TestInstallJournalV1
+    $journal.operations = @($journal.operations[0])
+    $journal.operations[0].kind = 'remove-file'
+    $journal.operations[0].method = 'tombstone-rename'
+    $journal.operations[0].stageLeaf = $null
+    $journal.operations[0].backupIdentity = $journal.operations[0].original.identity
+    $journal.operations[0].applied.exists = $false
+    $journal.operations[0].applied.sha256 = $null
+    $journal.operations[0].applied.length = $null
+    $journal.operations[0].applied.identity = $null
+    $journal.operations[0].state = 'pending'
+    return (ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20))
 }
 
 Describe 'AI instructions runtime contracts' {
@@ -1117,12 +1145,12 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
     It 'UnitT112_refuses_install_recovery_without_backup_or_after_external_change' {
         $journal = Get-TestInstallJournalV1
         $observations = @{
-            1 = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].applied -BackupAvailable $false
+            1 = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].applied -Backup $null
             2 = New-TestInstallObservation -Operation $journal.operations[1] -State $journal.operations[1].original
         }
         $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
         $decision.action | Should Be 'refuse'
-        ($decision.reasons -join ' ') | Should Match 'sequence 1.*backupAvailable'
+        ($decision.reasons -join ' ') | Should Match 'sequence 1.*backup'
 
         $observations[1] = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].applied
         $observations[1].sha256 = '9' * 64
@@ -1386,8 +1414,9 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
         $journal = Get-TestInstallJournalV1
         $journal.operations[0].kind = 'remove-file'
-        $journal.operations[0].method = 'unlink'
+        $journal.operations[0].method = 'tombstone-rename'
         $journal.operations[0].stageLeaf = $null
+        $journal.operations[0].backupIdentity = $journal.operations[0].original.identity
         $journal.operations[0].applied.exists = $false
         $journal.operations[0].applied.sha256 = $null
         $journal.operations[0].applied.length = $null
@@ -1438,13 +1467,13 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
     }
 
-    # Scenario: A create operation claims the removal-only unlink method.
+    # Scenario: A create operation claims the removal-only tombstone-rename method.
     # Purpose: Require create publication to use stage-and-rename with durable stage evidence.
-    It 'UnitT131_rejects_unlink_for_create_file' {
+    It 'UnitT131_rejects_tombstone_rename_for_create_file' {
         if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'UnitT131 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.' }
         $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
         $journal = Get-TestInstallJournalV1
-        $journal.operations[1].method = 'unlink'
+        $journal.operations[1].method = 'tombstone-rename'
         $journal.operations[1].stageLeaf = $null
         $json = $journal | ConvertTo-Json -Depth 20
 
@@ -1452,14 +1481,14 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
     }
 
-    # Scenario: A directory swap claims the removal-only unlink method.
+    # Scenario: A directory swap claims the removal-only tombstone-rename method.
     # Purpose: Require directory replacement to retain its stage-and-rename recovery evidence.
-    It 'UnitT132_rejects_unlink_for_swap_directory' {
+    It 'UnitT132_rejects_tombstone_rename_for_swap_directory' {
         if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'UnitT132 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.' }
         $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
         $journal = Get-TestInstallJournalV1
         $journal.operations[0].kind = 'swap-directory'
-        $journal.operations[0].method = 'unlink'
+        $journal.operations[0].method = 'tombstone-rename'
         $journal.operations[0].stageLeaf = $null
         $json = $journal | ConvertTo-Json -Depth 20
 
@@ -1468,7 +1497,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
     }
 
     # Scenario: A file removal claims a stage-and-rename publication method.
-    # Purpose: Bind remove-file recovery to unlink plus backup restoration.
+    # Purpose: Bind remove-file recovery to a same-identity tombstone rename plus backup restoration.
     It 'UnitT133_rejects_stage_rename_remove_file' {
         if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'UnitT133 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.' }
         $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
@@ -1480,19 +1509,20 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $journal.operations[0].applied.identity = $null
         $json = $journal | ConvertTo-Json -Depth 20
 
-        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'sequence 1.method.*unlink for remove-file'
+        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'sequence 1.method.*tombstone-rename for remove-file'
         (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
     }
 
-    # Scenario: An unlink removal claims that a distinct stage object was published.
+    # Scenario: A tombstone removal claims that a distinct stage object was published.
     # Purpose: Keep removal state aligned with a method that never creates a stage object.
-    It 'UnitT134_rejects_staged_state_for_unlink_method' {
+    It 'UnitT134_rejects_staged_state_for_tombstone_rename_method' {
         if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'UnitT134 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.' }
         $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
         $journal = Get-TestInstallJournalV1
         $journal.operations[0].kind = 'remove-file'
-        $journal.operations[0].method = 'unlink'
+        $journal.operations[0].method = 'tombstone-rename'
         $journal.operations[0].stageLeaf = $null
+        $journal.operations[0].backupIdentity = $journal.operations[0].original.identity
         $journal.operations[0].state = 'staged'
         $journal.operations[0].applied.exists = $false
         $journal.operations[0].applied.sha256 = $null
@@ -1500,7 +1530,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $journal.operations[0].applied.identity = $null
         $json = $journal | ConvertTo-Json -Depth 20
 
-        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'sequence 1.method unlink.*state staged'
+        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'sequence 1.method tombstone-rename.*state staged'
         (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
     }
 
@@ -1698,14 +1728,15 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $decision.operations[1].action | Should Be 'remove-applied'
     }
 
-    # Scenario: Applying remove-file already unlinked the target, so its valid observation has null permissions.
+    # Scenario: Applying remove-file already renamed the target to its tombstone, so the absent target has null permissions.
     # Purpose: Roll back from the applied state without dereferencing permissions on a nonexistent target.
     It 'UnitT147_restores_removed_file_without_comparing_absent_target_permissions' {
         $journal = Get-TestInstallJournalV1
         $journal.operations = @($journal.operations[0])
         $journal.operations[0].kind = 'remove-file'
-        $journal.operations[0].method = 'unlink'
+        $journal.operations[0].method = 'tombstone-rename'
         $journal.operations[0].stageLeaf = $null
+        $journal.operations[0].backupIdentity = $journal.operations[0].original.identity
         $journal.operations[0].state = 'applied'
         $journal.operations[0].applied.exists = $false
         $journal.operations[0].applied.sha256 = $null
@@ -1713,7 +1744,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $journal.operations[0].applied.identity = $null
         $journal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20)
         $observations = @{
-            1 = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].applied -BackupAvailable $true
+            1 = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].applied
         }
 
         $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
@@ -1730,8 +1761,9 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $journal.phase = 'rolled-back'
         $journal.operations = @($journal.operations[0])
         $journal.operations[0].kind = 'remove-file'
-        $journal.operations[0].method = 'unlink'
+        $journal.operations[0].method = 'tombstone-rename'
         $journal.operations[0].stageLeaf = $null
+        $journal.operations[0].backupIdentity = $journal.operations[0].original.identity
         $journal.operations[0].state = 'rolled-back'
         $journal.operations[0].applied.exists = $false
         $journal.operations[0].applied.sha256 = $null
@@ -1761,14 +1793,15 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         (& $runtimeModule { param($Value,$Expected) Test-AiInstructionsInstallJournalPermissionsMatch -Observation $Value -Permissions $Expected } ([pscustomobject]@{ permissions=$null }) $permissions) | Should Be $false
     }
 
-    # Scenario: A remove-file rollback renamed its independent backup into place, changing the restored target identity.
-    # Purpose: Treat the recorded backup identity as an original-state identity after rollback without weakening byte or permission checks.
-    It 'UnitT150_accepts_restored_remove_file_with_backup_identity' {
+    # Scenario: A remove-file rollback renames its same-identity tombstone back into place.
+    # Purpose: Accept the restored tombstone identity without weakening byte or permission checks.
+    It 'UnitT150_accepts_restored_remove_file_with_tombstone_identity' {
         $journal = Get-TestInstallJournalV1
         $journal.operations = @($journal.operations[0])
         $journal.operations[0].kind = 'remove-file'
-        $journal.operations[0].method = 'unlink'
+        $journal.operations[0].method = 'tombstone-rename'
         $journal.operations[0].stageLeaf = $null
+        $journal.operations[0].backupIdentity = $journal.operations[0].original.identity
         $journal.operations[0].state = 'rolled-back'
         $journal.operations[0].applied.exists = $false
         $journal.operations[0].applied.sha256 = $null
@@ -1797,8 +1830,9 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $journal = Get-TestInstallJournalV1
         $journal.operations = @($journal.operations[0])
         $journal.operations[0].kind = 'remove-file'
-        $journal.operations[0].method = 'unlink'
+        $journal.operations[0].method = 'tombstone-rename'
         $journal.operations[0].stageLeaf = $null
+        $journal.operations[0].backupIdentity = $journal.operations[0].original.identity
         $journal.operations[0].state = 'rolled-back'
         $journal.operations[0].applied.exists = $false
         $journal.operations[0].applied.sha256 = $null
@@ -1861,5 +1895,129 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $json = $journal | ConvertTo-Json -Depth 20
         { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json | Out-Null } | Should Not Throw
         (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $true
+    }
+
+    # Scenario: A pending remove-file target is absent but no tombstone backup can be observed.
+    # Purpose: Refuse an external deletion instead of treating target absence alone as proof that removal was applied.
+    It 'UnitT154_refuses_pending_remove_when_target_and_backup_are_absent' {
+        $journal = Get-TestPendingRemoveInstallJournalV1
+        $observations = @{
+            1 = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].applied -Backup $null
+        }
+
+        $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
+
+        $decision.action | Should Be 'refuse'
+        ($decision.reasons -join ' ') | Should Match 'sequence 1.*external change'
+        $decision.operations[0].action | Should Be 'keep'
+    }
+
+    # Scenario: A pending remove-file target is absent and its same-identity tombstone matches the original bytes.
+    # Purpose: Use the tombstone as durable proof that the remove was applied and can be rolled back safely.
+    It 'UnitT155_restores_pending_remove_when_the_tombstone_is_available' {
+        $journal = Get-TestPendingRemoveInstallJournalV1
+        $observations = @{
+            1 = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].applied
+        }
+
+        $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
+
+        $decision.action | Should Be 'roll-back'
+        $decision.operations[0].action | Should Be 'restore-original'
+    }
+
+    # Scenario: A remove tombstone has the original bytes but an identity different from backupIdentity.
+    # Purpose: Reject a replaced or independently recreated backup as ownership evidence.
+    It 'UnitT156_refuses_remove_when_tombstone_identity_does_not_match' {
+        $journal = Get-TestPendingRemoveInstallJournalV1
+        $observation = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].applied
+        $observation.backup.identity = [pscustomobject]@{
+            kind = 'windows-file-id'
+            device = '0x1A2B'
+            fileId = '0000ABCD:99999999'
+        }
+
+        $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{ 1 = $observation }
+
+        $decision.action | Should Be 'refuse'
+        ($decision.reasons -join ' ') | Should Match 'sequence 1.*external change'
+    }
+
+    # Scenario: A remove tombstone has the recorded identity but bytes different from the original.
+    # Purpose: Require both ownership and content integrity before restoring a tombstone.
+    It 'UnitT157_refuses_remove_when_tombstone_hash_does_not_match' {
+        $journal = Get-TestPendingRemoveInstallJournalV1
+        $observation = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].applied
+        $observation.backup.sha256 = '9' * 64
+
+        $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{ 1 = $observation }
+
+        $decision.action | Should Be 'refuse'
+        ($decision.reasons -join ' ') | Should Match 'sequence 1.*external change'
+    }
+
+    # Scenario: A pending remove-file omits backupIdentity or records an identity different from its original object.
+    # Purpose: Bind every remove tombstone to the identity preserved by rename before recovery uses it as ownership proof.
+    It 'UnitT158_rejects_remove_without_the_original_backup_identity' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'UnitT158 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.' }
+        $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
+        $journal = Get-TestPendingRemoveInstallJournalV1
+        $journal.operations[0].backupIdentity = $null
+        $json = $journal | ConvertTo-Json -Depth 20
+
+        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'sequence 1.backupIdentity.*must not be null'
+        (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
+
+        $journal = Get-TestPendingRemoveInstallJournalV1
+        $journal.operations[0].backupIdentity = [pscustomobject]@{
+            kind = 'windows-file-id'
+            device = '0x1A2B'
+            fileId = '0000ABCD:99999999'
+        }
+        $json = $journal | ConvertTo-Json -Depth 20
+
+        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'sequence 1.backupIdentity.*original.identity'
+        (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $true
+    }
+
+    # Scenario: JSON integer syntax is represented as Double after conversion, while fractional and string values are also supplied.
+    # Purpose: Match draft 2020-12 integer semantics without accepting fractional or string coercion.
+    It 'UnitT159_accepts_integral_numeric_representation_and_rejects_nonintegers' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'UnitT159 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.' }
+        $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
+        $examplePath = Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-install-journal-v1.example.json'
+        $source = Get-Content -Raw -Encoding UTF8 -LiteralPath $examplePath
+
+        $integralJson = $source.Replace('"processId": 4242','"processId": 4242.0')
+        $journal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json $integralJson
+        $journal.owner.processId | Should Be 4242
+        (Test-Json -Json $integralJson -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $true
+
+        $fractionalJson = $source.Replace('"processId": 4242','"processId": 4242.5')
+        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $fractionalJson }) | Should Match 'owner.processId.*integer'
+        (Test-Json -Json $fractionalJson -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
+
+        $stringJson = $source.Replace('"processId": 4242','"processId": "4242"')
+        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $stringJson }) | Should Match 'owner.processId.*integer'
+        (Test-Json -Json $stringJson -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
+    }
+
+    # Scenario: A journal uses only Unicode whitespace for a lock leaf or one target path segment.
+    # Purpose: Keep the reader and schema aligned with PlatformPaths.Leaf whitespace rejection.
+    It 'UnitT160_rejects_unicode_whitespace_only_leaf_and_target_segment' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'UnitT160 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.' }
+        $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
+        $cases = @(
+            @{ Change={ param($j) $j.lock.leaf=[string][char]0x00A0 }; Pattern='lock.leaf' },
+            @{ Change={ param($j) $j.operations[0].targetRelativePath="runtime/$([char]0x3000)" }; Pattern='targetRelativePath' }
+        )
+        foreach ($case in $cases) {
+            $journal = Get-TestInstallJournalV1
+            & $case.Change $journal
+            $json = $journal | ConvertTo-Json -Depth 20
+
+            (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match $case.Pattern
+            (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
+        }
     }
 }
