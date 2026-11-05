@@ -17,7 +17,7 @@
     "operations"
   ],
   "properties": {
-    "schemaVersion": { "const": 1 },
+    "schemaVersion": { "const": 1, "maximum": 9223372036854775807 },
     "kind": { "const": "ai-instructions-install-transaction" },
     "transactionId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
     "createdAtUtc": {
@@ -31,7 +31,7 @@
       "required": ["component", "processId", "processStartIdentity"],
       "properties": {
         "component": { "enum": ["installer", "updater", "launcher-recovery"] },
-        "processId": { "type": "integer", "minimum": 1 },
+        "processId": { "type": "integer", "minimum": 1, "maximum": 9223372036854775807 },
         "processStartIdentity": {
           "type": "string",
           "minLength": 1,
@@ -177,7 +177,7 @@
         "length": {
           "oneOf": [
             { "type": "null" },
-            { "type": "integer", "minimum": 0 }
+            { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 }
           ]
         },
         "identity": { "$ref": "#/$defs/identity" }
@@ -195,7 +195,7 @@
           "else": {
             "properties": {
               "sha256": { "$ref": "#/$defs/hash" },
-              "length": { "type": "integer", "minimum": 0 }
+              "length": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 }
             }
           }
         }
@@ -249,8 +249,8 @@
           "properties": {
             "kind": { "const": "unix-mode" },
             "mode": { "type": "string", "pattern": "^[0-7]{3,4}$" },
-            "uid": { "type": "integer", "minimum": 0 },
-            "gid": { "type": "integer", "minimum": 0 }
+            "uid": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 },
+            "gid": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 }
           }
         }
       ]
@@ -272,7 +272,7 @@
         "state"
       ],
       "properties": {
-        "sequence": { "type": "integer", "minimum": 1 },
+        "sequence": { "type": "integer", "minimum": 1, "maximum": 9223372036854775807 },
         "kind": { "enum": ["write-file", "create-file", "remove-file", "swap-directory"] },
         "method": { "enum": ["stage-rename", "tombstone-rename"] },
         "targetRelativePath": {

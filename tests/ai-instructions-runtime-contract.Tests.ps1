@@ -2421,6 +2421,23 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'unpaired Unicode surrogate'
     }
 
+    # Scenario: The process ID reaches and then exceeds the reader's Int64 upper bound.
+    # Purpose: Keep the journal schema's integer range aligned with the reader.
+    It 'UnitT181_aligns_process_id_int64_upper_bound_between_reader_and_schema' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'UnitT181 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.' }
+        $examplePath = Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-install-journal-v1.example.json'
+        $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
+        $source = Get-Content -Raw -Encoding UTF8 -LiteralPath $examplePath
+
+        $acceptedJson = $source.Replace('"processId": 4242', '"processId": 9223372036854775807')
+        { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $acceptedJson | Out-Null } | Should Not Throw
+        (Test-Json -Json $acceptedJson -SchemaFile $schemaPath) | Should Be $true
+
+        $rejectedJson = $source.Replace('"processId": 4242', '"processId": 9223372036854775808')
+        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $rejectedJson }) | Should Match 'owner.processId'
+        (Test-Json -Json $rejectedJson -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
+    }
+
     # Scenario: A journal uses Unicode whitespace at the end of a lock leaf or target path, plus whitespace-only values.
     # Purpose: Keep the reader and schema aligned with PlatformPaths.Leaf whitespace rejection.
     It 'UnitT160_rejects_unicode_whitespace_only_leaf_and_target_segment' {
