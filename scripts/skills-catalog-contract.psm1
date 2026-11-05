@@ -154,20 +154,28 @@ function Test-IsLicenseDeliverySourcePath {
     return $isNamedLicenseDocument -or $isInsideLicenseDirectory
 }
 
+function Get-UserSkillsLicenseNamespacePrefix {
+    param([Parameter(Mandatory = $true)][string] $TargetPrefix)
+
+    return "$TargetPrefix.ai-instructions-licenses/"
+}
+
 function Get-UserSkillsPayloadInventorySha256 {
     param(
         [Parameter(Mandatory = $true)][object[]] $Files,
-        [Parameter(Mandatory = $true)][string] $SourcePathPrefix
+        [Parameter(Mandatory = $true)][string] $SourcePathPrefix,
+        [Parameter(Mandatory = $true)][string] $TargetPrefix
     )
 
     $inventoryLines = New-Object 'System.Collections.Generic.List[string]'
     $hashesByPath = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::Ordinal)
+    $licenseNamespacePrefix = Get-UserSkillsLicenseNamespacePrefix -TargetPrefix $TargetPrefix
     foreach ($file in @($Files)) {
         $sourcePath = [string]$file.sourcePath
         $targetPath = [string]$file.targetPath
         if (-not $sourcePath.StartsWith($SourcePathPrefix,[System.StringComparison]::Ordinal) -or
             $sourcePath -ceq '.ai-instructions-generated/delivery.json' -or
-            $targetPath.Contains('/.ai-instructions-licenses/')) {
+            $targetPath.StartsWith($licenseNamespacePrefix,[System.StringComparison]::Ordinal)) {
             continue
         }
         $hashesByPath.Add($sourcePath,[string]$file.sha256)
@@ -860,7 +868,7 @@ function Assert-UserSkillsManagedManifestFiles {
             throw "User-managed Skill '$skillId' target path must be inside projection root '$root'."
         }
         $targetPrefix = "$root/$skillId/"
-        $licenseNamespacePrefix = "$targetPrefix.ai-instructions-licenses/"
+        $licenseNamespacePrefix = Get-UserSkillsLicenseNamespacePrefix -TargetPrefix $targetPrefix
         $licenseTargetPattern = '^' + [regex]::Escape($licenseNamespacePrefix) + '(?:source/.+|delivery\.json)$'
         if ([string]$targetPath -ceq ($licenseNamespacePrefix + 'delivery.json')) {
             if ([string]$sourcePath -cne '.ai-instructions-generated/delivery.json') {
@@ -1069,7 +1077,11 @@ function Assert-UserSkillsManagedManifestBinding {
         [System.Array]::Sort($projectionIds,[System.StringComparer]::Ordinal)
         $projectionFiles = @($skillFiles | Where-Object { [string]$_.projectionId -ceq $projectionIds[0] })
         $lockedSkill = $lockedSkills[$skillId]
-        $actualContentSha256 = Get-UserSkillsPayloadInventorySha256 -Files $projectionFiles -SourcePathPrefix (([string]$lockedSkill.sourcePath) + '/')
+        $firstTargetPath = [string]$projectionFiles[0].targetPath
+        $skillMarker = "/$skillId/"
+        $skillMarkerIndex = $firstTargetPath.IndexOf($skillMarker,[System.StringComparison]::Ordinal)
+        $targetPrefix = $firstTargetPath.Substring(0,$skillMarkerIndex + $skillMarker.Length)
+        $actualContentSha256 = Get-UserSkillsPayloadInventorySha256 -Files $projectionFiles -SourcePathPrefix (([string]$lockedSkill.sourcePath) + '/') -TargetPrefix $targetPrefix
         if ($actualContentSha256 -cne [string]$lockedSkill.contentSha256) {
             throw "user Skills managed manifest Skill '$skillId' content hash does not match the lock."
         }

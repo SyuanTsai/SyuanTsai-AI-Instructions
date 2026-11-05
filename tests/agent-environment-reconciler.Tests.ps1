@@ -886,7 +886,7 @@ if (-not $ValidateOnly) { throw 'Validation switch required.' }
         $exitCode | Should Be 0
         $output.Count | Should Be 1
         ($output[0] | ConvertFrom-Json).outcome | Should Be 'nothing-to-recover'
-        (Get-Content -Raw -LiteralPath $stderrPath).Contains('is not recognized') | Should Be $false
+        ([System.IO.File]::ReadAllText($stderrPath)).Contains('is not recognized') | Should Be $false
     }
 
     # Scenario: The stable entry point receives a malformed recovery journal while recovery is explicitly requested.

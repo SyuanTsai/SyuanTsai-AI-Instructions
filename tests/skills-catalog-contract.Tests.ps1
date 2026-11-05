@@ -426,6 +426,43 @@ function Assert-UserManifestBindingFailure {
         { Assert-UserSkillsManagedManifestBinding -Manifest $sourceIdMismatch -CatalogBytes $catalogBytes -LockBytes $lockBytes -ExpectedCatalogRepository ([string]$manifest.catalogRepository) -ExpectedCatalogCommit ([string]$manifest.catalogCommit) } | Should Throw
     }
 
+    # Scenario: A payload directory may contain a nested directory with the license namespace name.
+    # Purpose: Exclude only the projection-root license namespace while retaining ordinary nested payload files.
+    It 'UnitT11l2_binds_nested_license_named_payload_and_excludes_root_license_namespace' {
+        Import-Module (Join-Path $script:RepositoryRoot 'scripts\skills-source-acquisition.psm1') -Force
+        $repositoryRoot = Join-Path $TestDrive 'nested-license-name-source-repository'
+        $skillRoot = Join-Path $repositoryRoot 'skills\work-with-jira'
+        New-Item -ItemType Directory -Path (Join-Path $skillRoot 'references\.ai-instructions-licenses') -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $skillRoot 'SKILL.md'),'# Skill',[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $skillRoot 'references\.ai-instructions-licenses\note.md'),'ordinary payload',[Text.UTF8Encoding]::new($false))
+        $acquisitionHash = Get-SkillInventorySha256 -RepositoryRoot $repositoryRoot -SkillRoot $skillRoot
+
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        $lock = Import-SkillsCatalogJson -Path $script:LockV3Example -DocumentName 'Skills Catalog lock v3'
+        $skillFiles = @($manifest.files | Where-Object { $_.skillId -ceq 'work-with-jira' })
+        $skillHashByRelativePath = @{
+            'SKILL.md' = Get-TestRawSha256 -Path (Join-Path $skillRoot 'SKILL.md')
+            'references/.ai-instructions-licenses/note.md' = Get-TestRawSha256 -Path (Join-Path $skillRoot 'references\.ai-instructions-licenses\note.md')
+        }
+        foreach ($file in @($skillFiles | Where-Object { $_.sourcePath -ceq 'skills/work-with-jira/SKILL.md' })) {
+            $file.sha256 = $skillHashByRelativePath['SKILL.md']
+        }
+        foreach ($projectionId in @($manifest.projections)) {
+            $template = @($skillFiles | Where-Object { $_.projectionId -ceq $projectionId -and $_.sourcePath -ceq 'skills/work-with-jira/SKILL.md' })[0]
+            $entry = $template.PSObject.Copy()
+            $entry.sourcePath = 'skills/work-with-jira/references/.ai-instructions-licenses/note.md'
+            $entry.targetPath = ([string]$template.targetPath).Replace('SKILL.md','references/.ai-instructions-licenses/note.md')
+            $entry.sha256 = $skillHashByRelativePath['references/.ai-instructions-licenses/note.md']
+            $manifest.files += $entry
+        }
+        @($lock.skills | Where-Object { $_.id -ceq 'work-with-jira' })[0].contentSha256 = $acquisitionHash
+
+        $catalogBytes = [System.IO.File]::ReadAllBytes($script:CatalogV3Example)
+        $lockBytes = ConvertTo-TestUtf8JsonBytes -Value $lock
+        $manifest.lockSha256 = Get-TestBytesSha256 -Bytes $lockBytes
+        { Assert-UserSkillsManagedManifestBinding -Manifest $manifest -CatalogBytes $catalogBytes -LockBytes $lockBytes -ExpectedCatalogRepository ([string]$manifest.catalogRepository) -ExpectedCatalogCommit ([string]$manifest.catalogCommit) } | Should Not Throw
+    }
+
     # Scenario: The binding digest uses exactly the same inventory bytes as source acquisition.
     # Purpose: Keep manifest-owned payload hashes interoperable with immutable lock generation.
     It 'UnitT11l2_rejects_reserialized_lock_bytes_when_the_manifest_retains_the_original_lock_hash' {
