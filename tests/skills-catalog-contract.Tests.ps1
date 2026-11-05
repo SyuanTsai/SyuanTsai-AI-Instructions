@@ -537,6 +537,11 @@ function Assert-UserManifestBindingFailure {
         $catalogSkill = @($catalog.skills | Where-Object { $_.id -ceq 'work-with-jira' })[0]
         $catalogSkill.id = 'skills'
         $catalogSkill.source.sourcePath = 'skills/skills'
+        foreach ($profile in @($catalog.profiles)) {
+            $profile.includes = @($profile.includes | ForEach-Object {
+                if ($_ -ceq 'work-with-jira') { 'skills' } else { $_ }
+            })
+        }
         $catalogBytes = ConvertTo-TestUtf8JsonBytes -Value $catalog
 
         $lock = Import-SkillsCatalogJson -Path $script:LockV3Example -DocumentName 'Skills Catalog lock v3'
