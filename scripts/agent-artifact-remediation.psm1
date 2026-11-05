@@ -15,12 +15,17 @@ function Invoke-RemediationGit {
     )
 
     $previousPreference = $ErrorActionPreference
+    $previousConsoleOutputEncoding = [Console]::OutputEncoding
     try {
         $ErrorActionPreference = 'Continue'
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
         $output = & $GitExecutable -C $Repository @Arguments 2>&1
         $exitCode = $LASTEXITCODE
     }
-    finally { $ErrorActionPreference = $previousPreference }
+    finally {
+        $ErrorActionPreference = $previousPreference
+        [Console]::OutputEncoding = $previousConsoleOutputEncoding
+    }
     if ($exitCode -ne 0) {
         throw "git $($Arguments -join ' ') failed: $($output -join [Environment]::NewLine)"
     }
@@ -35,12 +40,17 @@ function Get-RemediationGitExitCode {
     )
 
     $previousPreference = $ErrorActionPreference
+    $previousConsoleOutputEncoding = [Console]::OutputEncoding
     try {
         $ErrorActionPreference = 'Continue'
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
         $null = & $GitExecutable -C $Repository @Arguments 2>&1
         return $LASTEXITCODE
     }
-    finally { $ErrorActionPreference = $previousPreference }
+    finally {
+        $ErrorActionPreference = $previousPreference
+        [Console]::OutputEncoding = $previousConsoleOutputEncoding
+    }
 }
 
 function ConvertFrom-RemediationGitQuotedPath {
@@ -186,8 +196,12 @@ function Get-RemediationLegacyManifestPaths {
     $paths = New-Object 'System.Collections.Generic.HashSet[string]' $Comparer
     $manifestPath = Join-Path $Repository '.codex\ai-instructions.manifest.json'
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { return ,$paths }
+    Assert-RemediationPathHasNoReparsePoint -Repository $Repository -RelativePath '.codex/ai-instructions.manifest.json'
     try { $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json }
     catch { return ,$paths }
+    if ($manifest.schemaVersion -eq 4) {
+        throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
+    }
     foreach ($entry in @($manifest.files)) {
         if ($null -eq $entry -or $null -eq $entry.PSObject.Properties['targetPath']) { continue }
         $targetPath = [string]$entry.targetPath

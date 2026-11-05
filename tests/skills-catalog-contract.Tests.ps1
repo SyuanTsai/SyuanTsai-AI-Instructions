@@ -14,6 +14,7 @@ $script:LockV2Example = Join-Path $script:RepositoryRoot 'catalog\examples\skill
 $script:CatalogV3Example = Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog-v3.example.json'
 $script:LockV3Example = Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog-lock-v3.example.json'
 $script:ManifestV3Example = Join-Path $script:RepositoryRoot 'catalog\examples\managed-manifest-v3.example.json'
+$script:ManifestV4Example = Join-Path $script:RepositoryRoot 'catalog\examples\managed-manifest-v4.example.json'
 $script:UserManifestV2Example = Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v2.example.json'
 $script:UserManifestV3Example = Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v3.example.json'
 $script:ConfigurationExample = Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v4.example.json'
@@ -100,6 +101,62 @@ function Assert-UserManifestBindingFailure {
     $message.Contains($ExpectedMessage) | Should Be $true
 }
 
+function Get-TestManagedManifestV4 {
+    return Import-SkillsCatalogJson -Path $script:ManifestV4Example -DocumentName 'managed manifest v4'
+}
+
+    }
+
+    # Scenario: Git worktree porcelain uses SHA-256 object IDs in a SHA-256 repository.
+    # Purpose: Accept both SHA-1 and SHA-256 HEAD records while retaining strict parsing.
+    It 'UnitT03_worktree_parser_accepts_sha256_oid_porcelain_records' {
+        $mainPath = 'C:/repo/main'
+        $linkedPath = 'C:/repo/linked'
+        $sha256Oid = 'a' * 64
+        $porcelain = "worktree $mainPath`0HEAD $sha256Oid`0branch refs/heads/main`0`0worktree $linkedPath`0HEAD $sha256Oid`0branch refs/heads/linked`0`0"
+
+        $parsed = @(ConvertFrom-GitWorktreePorcelainZ -Output $porcelain -Strict)
+
+        $parsed.Count | Should Be 2
+        $parsed[0].Path | Should Be $mainPath
+        $parsed[0].Prunable | Should Be $false
+        $parsed[1].Path | Should Be $linkedPath
+        $parsed[1].Prunable | Should Be $false
+    }
+
+    # Scenario: A linked worktree is locked with a reason that spans multiple lines.
+    # Purpose: Accept Git's NUL-delimited reason field while retaining the worktree for scans.
+    It 'UnitT03a_worktree_parser_accepts_a_multiline_lock_reason' {
+        $lockedPath = 'C:/repo/locked'
+        $sha1Oid = 'a' * 40
+        $porcelain = "worktree $lockedPath`0HEAD $sha1Oid`0locked line1`nline2`0`0"
+
+        $parsed = @(ConvertFrom-GitWorktreePorcelainZ -Output $porcelain -Strict)
+
+        $parsed.Count | Should Be 1
+        $parsed[0].Path | Should Be $lockedPath
+        $parsed[0].Prunable | Should Be $false
+    }
+
+    # Scenario: The installed Git supports SHA-256 repositories and linked worktrees.
+    # Purpose: Exercise strict parsing against real `git worktree list --porcelain -z` output.
+    It 'UnitT04_worktree_parser_strictly_accepts_a_sha256_repository_when_supported' {
+        $repositoryPath = Join-Path $TestDrive 'sha256-worktree-repository'
+        New-Item -ItemType Directory -Path $repositoryPath -Force | Out-Null
+        $initOutput = @(& git -C $repositoryPath init --object-format=sha256 2>&1)
+        $initExitCode = $LASTEXITCODE
+        if ($initExitCode -ne 0) { return }
+
+        git -C $repositoryPath config user.email test@example.test
+        git -C $repositoryPath config user.name Test
+        [System.IO.File]::WriteAllText((Join-Path $repositoryPath 'README.md'), 'sha256')
+        git -C $repositoryPath add README.md
+        git -C $repositoryPath commit --quiet -m initial
+        $linkedPath = Join-Path $TestDrive 'sha256-linked-worktree'
+        git -C $repositoryPath worktree add --quiet -b linked $linkedPath HEAD
+
+        $porcelain = @(& git -C $repositoryPath worktree list --porcelain -z)
+        { ConvertFrom-GitWorktreePorcelainZ -Output $porcelain -Strict | Out-Null } | Should Not Throw
     }
 
     # Scenario: Every checked-in JSON Schema document is loaded by the repository's oldest supported PowerShell runtime.
@@ -108,7 +165,7 @@ function Assert-UserManifestBindingFailure {
         $schemaRoot = Join-Path $script:RepositoryRoot 'catalog\schemas'
         $schemaFiles = @(Get-ChildItem -LiteralPath $schemaRoot -File -Filter '*.schema.json')
 
-        $schemaFiles.Count | Should Be 15
+        $schemaFiles.Count | Should Be 16
         foreach ($schemaFile in $schemaFiles) {
             $schema = Import-SkillsCatalogJson -Path $schemaFile.FullName -DocumentName $schemaFile.Name
             $schema.'$schema' | Should Be 'https://json-schema.org/draft/2020-12/schema'
@@ -129,6 +186,7 @@ function Assert-UserManifestBindingFailure {
             @{ Example = 'ai-instructions-update-receipt-v1.example.json'; Schema = 'ai-instructions-update-receipt-v1.schema.json'; SchemaVersion = 1 }
             @{ Example = 'managed-manifest-v2.example.json'; Schema = 'managed-manifest-v2.schema.json'; SchemaVersion = 2 }
             @{ Example = 'managed-manifest-v3.example.json'; Schema = 'managed-manifest-v3.schema.json'; SchemaVersion = 3 }
+            @{ Example = 'managed-manifest-v4.example.json'; Schema = 'managed-manifest-v4.schema.json'; SchemaVersion = 4 }
             @{ Example = 'runtime-bundle-v2.example.json'; Schema = 'runtime-bundle-v2.schema.json'; SchemaVersion = 2 }
             @{ Example = 'skills-catalog-lock-v2.example.json'; Schema = 'skills-catalog-lock-v2.schema.json'; SchemaVersion = 2 }
             @{ Example = 'skills-catalog-lock-v3.example.json'; Schema = 'skills-catalog-lock-v3.schema.json'; SchemaVersion = 3 }
@@ -243,6 +301,213 @@ function Assert-UserManifestBindingFailure {
         @($manifestV3.files)[0].sourcePath | Should Match '^skills/work-with-jira/'
         @($manifestV3.files)[0].targetPath | Should Match '^\.agents/skills/work-with-jira/'
         @($userManifestV2.files)[0].sourcePath | Should Match '^skills/work-with-jira/'
+    }
+
+    # Scenario: The reader receives the checked-in REPO multi-host manifest v4 example.
+    # Purpose: Establish the reader-first document contract without enabling a v4 writer.
+    It 'UnitT11v_accepts_the_repo_managed_manifest_v4_example' {
+        $manifest = Get-TestManagedManifestV4
+        $catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'
+        { Assert-ManagedManifest -Manifest $manifest } | Should Not Throw
+        @($manifest.files | Where-Object artifactType -eq 'instruction' | Select-Object -ExpandProperty host | Sort-Object) -join ',' | Should Be 'claude,codex,copilot'
+        @($manifest.projections) -join ',' | Should Be 'project-agents'
+        [string]$manifest.projectionContractSha256 | Should Be (Get-SkillsCatalogProjectionContractSha256 -Projections $catalog.projections)
+    }
+
+    # Scenario: A v4 instruction names a host outside the closed host set.
+    # Purpose: Prevent an unreviewed host adapter from claiming REPO ownership.
+    It 'UnitT11v1_rejects_an_unknown_v4_instruction_host' {
+        $manifest = Get-TestManagedManifestV4
+        @($manifest.files | Where-Object artifactType -eq 'instruction')[0].host = 'unknown'
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw "Unknown managed manifest instruction host 'unknown'."
+    }
+
+    # Scenario: A v4 Claude entry claims a Codex target.
+    # Purpose: Bind each instruction target to its declared host whitelist.
+    It 'UnitT11v2_rejects_a_v4_host_target_mismatch' {
+        $manifest = Get-TestManagedManifestV4
+        @($manifest.files | Where-Object host -eq 'claude')[0].targetPath = '.github/AI-Rules/CodeReview.en.md'
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw "target path is not allowed for host 'claude'"
+    }
+
+    # Scenario: A v4 Claude instruction claims the Codex license delivery namespace.
+    # Purpose: Bind license ownership to the same host boundary as ordinary instruction targets.
+    It 'UnitT11v2a_rejects_a_v4_license_target_for_a_different_host' {
+        $manifest = Get-TestManagedManifestV4
+        @($manifest.files | Where-Object host -eq 'claude')[0].targetPath = '.codex/ai-instructions-licenses/source/LICENSE'
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw "target path is not allowed for host 'claude'"
+    }
+
+    # Scenario: A v4 manifest selects an unknown project projection.
+    # Purpose: Keep project destinations inside the reviewed projection table.
+    It 'UnitT11v3_rejects_an_unknown_v4_project_projection' {
+        $manifest = Get-TestManagedManifestV4
+        $manifest.projections[0] = 'project-unknown'
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw "Unsupported REPO managed manifest projection 'project-unknown'."
+    }
+
+    # Scenario: A v4 REPO manifest selects a known USER projection.
+    # Purpose: Keep USER and project ownership scopes separate.
+    It 'UnitT11v4_rejects_a_non_project_v4_projection' {
+        $manifest = Get-TestManagedManifestV4
+        $manifest.projections[0] = 'user-agents'
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw "Unsupported REPO managed manifest projection 'user-agents'."
+    }
+
+    # Scenario: A v4 Skill names a project projection omitted from the manifest set.
+    # Purpose: Require every Skill destination to be explicitly selected.
+    It 'UnitT11v5_rejects_a_v4_skill_projection_not_listed_by_the_manifest' {
+        $manifest = Get-TestManagedManifestV4
+        $manifest.projections = @('project-claude')
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw "projection 'project-agents' is not listed in projections."
+    }
+
+    # Scenario: A v4 manifest has no selected projections but still contains a Skill entry.
+    # Purpose: Make an empty projection set Instructions-only.
+    It 'UnitT11v6_rejects_a_v4_skill_when_projections_are_empty' {
+        $manifest = Get-TestManagedManifestV4
+        $manifest.projections = @()
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw "projection 'project-agents' is not listed in projections."
+    }
+
+    # Scenario: Corresponding v4 Skill projection files carry different hashes.
+    # Purpose: Reuse the projection parity contract for REPO Skills.
+    It 'UnitT11v7_rejects_v4_skill_projection_parity_drift' {
+        $manifest = Get-TestManagedManifestV4
+        $manifest.projections = @('project-agents','project-claude')
+        $source = @($manifest.files | Where-Object artifactType -eq 'skill')[0]
+        $copy = ($source | ConvertTo-Json -Depth 10 | ConvertFrom-Json)
+        $copy.projectionId = 'project-claude'
+        $copy.targetPath = '.claude/skills/work-with-jira/SKILL.md'
+        $copy.sha256 = '0' * 64
+        $manifest.files += $copy
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw 'projection parity differs'
+    }
+
+    # Scenario: Two projection provenance tuples have the same newline-joined text but different field values.
+    # Purpose: Compare every provenance field ordinally instead of accepting a delimiter collision.
+    It 'UnitT11v7a_rejects_newline_colliding_projection_provenance' {
+        $manifest = Get-TestManagedManifestV4
+        $manifest.projections = @('project-agents','project-claude')
+        $source = @($manifest.files | Where-Object artifactType -eq 'skill')[0]
+        $copy = ($source | ConvertTo-Json -Depth 10 | ConvertFrom-Json)
+        $copy.projectionId = 'project-claude'
+        $copy.targetPath = '.claude/skills/work-with-jira/SKILL.md'
+        $commit = [string]$source.sourceCommit
+        $source.sourceRef = "main`n$commit"
+        $source.sourceVersion = 'release'
+        $copy.sourceRef = 'main'
+        $copy.sourceVersion = "$commit`nrelease"
+        $manifest.files += $copy
+
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw 'inconsistent source identity across projections'
+    }
+
+    # Scenario: A v4 Skill changes its path below the projection root.
+    # Purpose: Preserve canonical source-to-target relative paths.
+    It 'UnitT11v8_rejects_a_v4_skill_source_target_relative_path_mismatch' {
+        $manifest = Get-TestManagedManifestV4
+        @($manifest.files | Where-Object artifactType -eq 'skill')[0].targetPath = '.agents/skills/work-with-jira/OTHER.md'
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw 'source and target paths must match.'
+    }
+
+    # Scenario: A v4 Skill delivery receipt claims an ordinary payload source, then uses the synthetic receipt source.
+    # Purpose: Keep the portable schema and executable parser aligned for projection-root license delivery.
+    It 'UnitT11v8a_aligns_v4_skill_delivery_receipt_schema_and_parser_validation' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) {
+            throw 'UnitT11v8a requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.'
+        }
+        $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\managed-manifest-v4.schema.json'
+        $manifest = Get-TestManagedManifestV4
+        $skillEntry = @($manifest.files | Where-Object artifactType -eq 'skill')[0]
+        $skillEntry.sourcePath = 'skills/work-with-jira/receipt.json'
+        $skillEntry.targetPath = '.agents/skills/work-with-jira/.ai-instructions-licenses/delivery.json'
+        $invalidJson = $manifest | ConvertTo-Json -Depth 100
+
+        (Test-Json -Json $invalidJson -SchemaFile $schemaPath) | Should Be $false
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw 'delivery receipt must use the synthetic source path'
+
+        $skillEntry.sourcePath = '.ai-instructions-generated/delivery.json'
+        $validJson = $manifest | ConvertTo-Json -Depth 100
+        (Test-Json -Json $validJson -SchemaFile $schemaPath) | Should Be $true
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Not Throw
+    }
+
+    # Scenario: REPO and USER license source paths use the same case-insensitive source-name contract.
+    # Purpose: Keep JSON Schema validation aligned with Test-IsLicenseDeliverySourcePath and its callers.
+    It 'UnitT11v8b_aligns_case_insensitive_license_source_names_in_v4_and_user_v3_manifests' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) {
+            throw 'UnitT11v8b requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.'
+        }
+
+        $repoSchemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\managed-manifest-v4.schema.json'
+        $repoManifest = Get-TestManagedManifestV4
+        $repoSkill = @($repoManifest.files | Where-Object artifactType -eq 'skill')[0]
+        $repoSkill.sourcePath = 'license'
+        $repoSkill.targetPath = '.agents/skills/work-with-jira/.ai-instructions-licenses/source/license'
+        (Test-Json -Json ($repoManifest | ConvertTo-Json -Depth 100) -SchemaFile $repoSchemaPath) | Should Be $true
+        { Assert-ManagedManifestV4 -Manifest $repoManifest } | Should Not Throw
+
+        $repoInvalid = Get-TestManagedManifestV4
+        $repoInvalidSkill = @($repoInvalid.files | Where-Object artifactType -eq 'skill')[0]
+        $repoInvalidSkill.sourcePath = 'readme.md'
+        $repoInvalidSkill.targetPath = '.agents/skills/work-with-jira/.ai-instructions-licenses/source/readme.md'
+        (Test-Json -Json ($repoInvalid | ConvertTo-Json -Depth 100) -SchemaFile $repoSchemaPath) | Should Be $false
+        { Assert-ManagedManifestV4 -Manifest $repoInvalid } | Should Throw
+
+        $userSchemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\user-skills-managed-manifest-v3.schema.json'
+        $userManifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        foreach ($file in @($userManifest.files | Where-Object { $_.targetPath -cmatch '/\.ai-instructions-licenses/source/' })) { $file.sourcePath = 'licenses/foo.txt' }
+        (Test-Json -Json ($userManifest | ConvertTo-Json -Depth 100) -SchemaFile $userSchemaPath) | Should Be $true
+        { Assert-UserSkillsManagedManifest -Manifest $userManifest } | Should Not Throw
+
+        $userInvalid = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        foreach ($file in @($userInvalid.files | Where-Object { $_.targetPath -cmatch '/\.ai-instructions-licenses/source/' })) { $file.sourcePath = 'readme.md' }
+        (Test-Json -Json ($userInvalid | ConvertTo-Json -Depth 100) -SchemaFile $userSchemaPath) | Should Be $false
+        { Assert-UserSkillsManagedManifest -Manifest $userInvalid } | Should Throw
+    }
+
+    # Scenario: A v4 file source path contains traversal.
+    # Purpose: Reject traversal before projection or provenance comparisons.
+    It 'UnitT11v9_rejects_a_v4_traversal_path' {
+        $manifest = Get-TestManagedManifestV4
+        @($manifest.files)[0].sourcePath = '../AGENTS.md'
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw 'Unsafe source path in managed manifest'
+    }
+
+    # Scenario: Two v4 entries claim the same target path.
+    # Purpose: Keep ownership unambiguous, including case variants.
+    It 'UnitT11v10_rejects_a_duplicate_v4_target_path' {
+        $manifest = Get-TestManagedManifestV4
+        $source = @($manifest.files | Where-Object host -eq 'codex')[0]
+        $copy = ($source | ConvertTo-Json -Depth 10 | ConvertFrom-Json)
+        $copy.artifactId = 'codex-base-copy'
+        $manifest.files += $copy
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw 'Duplicate target path in managed manifest: AGENTS.md'
+    }
+
+    # Scenario: A v4 renderer hash is not a lowercase SHA-256.
+    # Purpose: Keep renderer provenance syntactically bounded.
+    It 'UnitT11v11_rejects_an_invalid_v4_renderer_hash' {
+        $manifest = Get-TestManagedManifestV4
+        @($manifest.files | Where-Object artifactType -eq 'instruction')[0].rendererSha256 = 'invalid'
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw 'rendererSha256 must be a lowercase 64-character SHA-256 hash.'
+    }
+
+    # Scenario: A persisted v4 generation is zero.
+    # Purpose: Reserve positive generations for projection-aware state.
+    It 'UnitT11v12_rejects_v4_generation_zero' {
+        $manifest = Get-TestManagedManifestV4
+        $manifest.generation = 0
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw 'generation must be an integer greater than or equal to 1.'
+    }
+
+    # Scenario: A v4 manifest carries an undeclared top-level property.
+    # Purpose: Retain the strict-object contract at the document boundary.
+    It 'UnitT11v13_rejects_an_unknown_v4_top_level_property' {
+        $manifest = Get-TestManagedManifestV4
+        $manifest | Add-Member -NotePropertyName unexpected -NotePropertyValue $true
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw "managed manifest contains unsupported property 'unexpected'."
     }
 
     # Scenario: A v3 Catalog declares several bounded USER and project projections and its Lock binds their canonical digest.

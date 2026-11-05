@@ -1106,13 +1106,16 @@ function Invoke-Git {
     )
 
     $previousErrorActionPreference = $ErrorActionPreference
+    $previousConsoleOutputEncoding = [Console]::OutputEncoding
     try {
         $ErrorActionPreference = 'Continue'
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
         $output = & $GitExecutable -C $Repository @Arguments 2>&1
         $exitCode = $LASTEXITCODE
     }
     finally {
         $ErrorActionPreference = $previousErrorActionPreference
+        [Console]::OutputEncoding = $previousConsoleOutputEncoding
     }
 
     if ($exitCode -ne 0) {
@@ -1555,9 +1558,85 @@ function Assert-ManagedPathDoesNotCrossReparsePoint {
     while ($inspectionPath.StartsWith($rootPrefix,[System.StringComparison]::OrdinalIgnoreCase)) {
         if (Test-Path -LiteralPath $inspectionPath) {
             $item = Get-Item -Force -LiteralPath $inspectionPath
-            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw "$Context crosses a reparse point: $inspectionPath" }
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                $exception = [System.IO.IOException]::new("$Context crosses a reparse point: $inspectionPath")
+                $exception.Data['CodexAiInstructionsPathSafetyReason'] = 'reparse-point'
+                throw $exception
+            }
         }
         $inspectionPath = Split-Path -Parent $inspectionPath
+    }
+}
+
+function Get-ManagedWorktreeRoots {
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [switch] $Strict
+    )
+
+    $output = @(Invoke-Git -Repository $Repository -Arguments @('worktree','list','--porcelain','-z'))
+    foreach ($record in @(ConvertFrom-GitWorktreePorcelainZ -Output $output -Strict:$Strict)) {
+        if ([bool]$record.Prunable) { continue }
+        [string]$record.Path
+    }
+}
+
+function Assert-NoRepoManagedManifestV4 {
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [switch] $Strict
+    )
+
+    try { $worktreeRoots = @(Get-ManagedWorktreeRoots -Repository $Repository -Strict:$Strict) }
+    catch {
+        if ($Strict) { throw 'Cannot determine linked worktree manifests before mutation.' }
+        return
+    }
+    foreach ($worktreeRoot in $worktreeRoots) {
+        $isSchemaV4 = $false
+        $worktreeManifestPath = [string]$worktreeRoot
+        try {
+            $worktreeManifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/','\')
+            if ($Strict -and -not (Test-Path -LiteralPath $worktreeRoot -PathType Container)) { continue }
+            if (-not (Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf)) { continue }
+            Assert-ManagedPathDoesNotCrossReparsePoint -Root $worktreeRoot -Path $worktreeManifestPath -Context 'REPO managed manifest v4 detection'
+        }
+        catch {
+            if ([string]$_.Exception.Data['CodexAiInstructionsPathSafetyReason'] -ceq 'reparse-point') {
+                if ($Strict) { throw }
+                continue
+            }
+            if ($Strict) {
+                $inspectionException = $_.Exception
+                try { $manifestStillExists = Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf }
+                catch {
+                    throw "Cannot inspect linked worktree manifest before mutation: $worktreeManifestPath. $($_.Exception.Message)"
+                }
+                if (-not $manifestStillExists) { continue }
+                throw "Cannot inspect linked worktree manifest before mutation: $worktreeManifestPath. $($inspectionException.Message)"
+            }
+            continue
+        }
+        try {
+            $worktreeManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $worktreeManifestPath | ConvertFrom-Json
+            $schemaVersion = $worktreeManifest.schemaVersion
+            $isSchemaV4 = ($schemaVersion -is [int] -or $schemaVersion -is [long]) -and [int64]$schemaVersion -eq 4
+        }
+        catch {
+            if ($Strict) {
+                $inspectionException = $_.Exception
+                try { $manifestStillExists = Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf }
+                catch {
+                    throw "Cannot inspect linked worktree manifest before mutation: $worktreeManifestPath. $($_.Exception.Message)"
+                }
+                if (-not $manifestStillExists) { continue }
+                throw "Cannot inspect linked worktree manifest before mutation: $worktreeManifestPath. $($inspectionException.Message)"
+            }
+            continue
+        }
+        if ($isSchemaV4) {
+            throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
+        }
     }
 }
 
@@ -1569,10 +1648,7 @@ function Get-SharedManagedExcludePaths {
 
     $paths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     foreach ($currentManagedPath in $CurrentManagedPaths) { [void]$paths.Add($currentManagedPath.Replace('\','/')) }
-    foreach ($line in @(Invoke-Git -Repository $Repository -Arguments @('worktree','list','--porcelain'))) {
-        $text = [string]$line
-        if (-not $text.StartsWith('worktree ',[System.StringComparison]::Ordinal)) { continue }
-        $worktreeRoot = $text.Substring('worktree '.Length)
+    foreach ($worktreeRoot in @(Get-ManagedWorktreeRoots -Repository $Repository)) {
         $worktreeManifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/','\')
         if (-not (Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf)) { continue }
         Assert-ManagedPathDoesNotCrossReparsePoint -Root $worktreeRoot -Path $worktreeManifestPath -Context 'Linked worktree managed manifest'
@@ -1581,6 +1657,9 @@ function Get-SharedManagedExcludePaths {
             $worktreeManifestSchemaVersion = $worktreeManifest.schemaVersion
             if ($worktreeManifestSchemaVersion -isnot [int] -and $worktreeManifestSchemaVersion -isnot [long]) {
                 throw 'schemaVersion must be an integer.'
+            }
+            if ($worktreeManifestSchemaVersion -eq 4) {
+                throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
             }
             if ($worktreeManifestSchemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $worktreeManifest }
             elseif ($worktreeManifestSchemaVersion -eq 1) { Assert-LegacyManagedManifestV1 -Manifest $worktreeManifest }
@@ -3954,14 +4033,12 @@ function Restore-SkillMigrationJournal {
 $script:SkillMigrationJournalContext = $null
 $syncStartPath = Get-FullPathWithoutTrailingSeparator -Path (Get-Location).Path
 if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
-    $previousErrorActionPreference = $ErrorActionPreference
     try {
-        $ErrorActionPreference = 'Continue'
-        $resolvedRoot = & $GitExecutable -C (Get-Location).Path rev-parse --show-toplevel 2>$null
-        $resolveExitCode = $LASTEXITCODE
+        $resolvedRoot = @(Invoke-Git -Repository (Get-Location).Path -Arguments @('rev-parse','--show-toplevel'))
+        $resolveExitCode = 0
     }
-    finally {
-        $ErrorActionPreference = $previousErrorActionPreference
+    catch {
+        $resolveExitCode = 1
     }
 
     if ($resolveExitCode -ne 0) {
@@ -4086,8 +4163,10 @@ $repositoryIndexLock = $null
 $userSkillMigrationLock = $null
 $remediationTransaction = $null
 try {
+    Assert-NoRepoManagedManifestV4 -Repository $targetRootPath
     if (-not $WhatIf) {
         $repositoryOperationLock = Open-RepositoryOperationLock -Repository $targetRootPath
+        Assert-NoRepoManagedManifestV4 -Repository $targetRootPath -Strict
         $remediationTransaction = Invoke-AgentArtifactRemediation -Repository $targetRootPath -GitExecutable $GitExecutable
     }
     if ($null -ne $remediationTransaction) {
@@ -4190,6 +4269,9 @@ if ($manifestExists) {
     }
 
     $manifestSchemaVersion = $manifest.schemaVersion
+    if ($manifestSchemaVersion -eq 4) {
+        throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
+    }
     if (($manifestSchemaVersion -isnot [int] -and $manifestSchemaVersion -isnot [long]) -or $manifestSchemaVersion -notin @(1, 2, 3)) {
         throw "Unsupported managed instruction manifest schema: $($manifest.schemaVersion)"
     }

@@ -212,6 +212,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "catalog/examples/managed-manifest-v4.example.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "catalog/examples/runtime-bundle-v2.example.json",
       "license": "Apache-2.0"
     },
@@ -265,6 +269,10 @@
     },
     {
       "path": "catalog/schemas/managed-manifest-v3.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "catalog/schemas/managed-manifest-v4.schema.json",
       "license": "Apache-2.0"
     },
     {

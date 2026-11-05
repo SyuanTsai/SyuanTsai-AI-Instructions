@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/managed-manifest-v4.schema.json",
+  "title": "Managed AI Instructions manifest v4",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "catalogId", "lockSha256", "projectionContractSha256", "generation", "projections", "files"],
+  "properties": {
+    "schemaVersion": { "const": 4 },
+    "catalogId": { "$ref": "#/$defs/stableId" },
+    "lockSha256": { "$ref": "#/$defs/sha256" },
+    "projectionContractSha256": { "$ref": "#/$defs/sha256" },
+    "generation": { "type": "integer", "minimum": 1, "maximum": 9223372036854775807 },
+    "projections": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "enum": ["project-agents", "project-claude", "project-github"] }
+    },
+    "files": { "type": "array", "items": { "$ref": "#/$defs/file" } }
+  },
+  "$defs": {
+    "stableId": { "type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "repositoryPath": { "type": "string", "minLength": 1, "pattern": "^(?:(?!\\.{1,2}(?:/|$))(?!\\s*(?:/|$))[^/\\\\:\\u0000-\\u001F\\u007F-\\u009F]+)(?:/(?:(?!\\.{1,2}(?:/|$))(?!\\s*(?:/|$))[^/\\\\:\\u0000-\\u001F\\u007F-\\u009F]+))*$" },
+    "licenseTarget": { "type": "string", "pattern": "^\\.(?:codex|github)/ai-instructions-licenses/(?:[0-9a-f]{40}/)?(?:delivery\\.json|source/.+)$" },
+    "codexLicenseTarget": { "type": "string", "pattern": "^\\.codex/ai-instructions-licenses/(?:[0-9a-f]{40}/)?(?:delivery\\.json|source/.+)$" },
+    "copilotLicenseTarget": { "type": "string", "pattern": "^\\.github/ai-instructions-licenses/(?:[0-9a-f]{40}/)?(?:delivery\\.json|source/.+)$" },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "artifactType": { "type": "string", "enum": ["instruction", "skill"] },
+        "artifactId": { "$ref": "#/$defs/stableId" },
+        "host": { "type": "string", "enum": ["codex", "copilot", "claude"] },
+        "sourceId": { "$ref": "#/$defs/stableId" },
+        "sourceRepository": { "type": "string", "format": "uri", "pattern": "^https://" },
+        "sourceRef": { "type": "string", "minLength": 1 },
+        "sourceCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "sourceVersion": { "type": "string", "minLength": 1 },
+        "sourcePath": { "$ref": "#/$defs/repositoryPath" },
+        "rendererId": { "$ref": "#/$defs/stableId" },
+        "rendererSha256": { "$ref": "#/$defs/sha256" },
+        "projectionId": { "type": "string", "enum": ["project-agents", "project-claude", "project-github"] },
+        "targetPath": { "$ref": "#/$defs/repositoryPath" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      },
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["artifactType", "artifactId", "host", "sourceId", "sourceRepository", "sourceRef", "sourceCommit", "sourceVersion", "sourcePath", "rendererId", "rendererSha256", "targetPath", "sha256"],
+          "properties": {
+            "artifactType": { "const": "instruction" },
+            "artifactId": { "$ref": "#/$defs/stableId" },
+            "host": { "type": "string", "enum": ["codex", "copilot", "claude"] },
+            "sourceId": { "$ref": "#/$defs/stableId" },
+            "sourceRepository": { "type": "string", "format": "uri", "pattern": "^https://" },
+            "sourceRef": { "type": "string", "minLength": 1 },
+            "sourceCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "sourceVersion": { "type": "string", "minLength": 1 },
+            "sourcePath": { "$ref": "#/$defs/repositoryPath" },
+            "rendererId": { "$ref": "#/$defs/stableId" },
+            "rendererSha256": { "$ref": "#/$defs/sha256" },
+            "targetPath": {
+              "oneOf": [
+                { "$ref": "#/$defs/licenseTarget" },
+                { "type": "string", "pattern": "^(?:AGENTS\\.md|\\.codex/AI-Rules/[^/\\\\]+\\.en\\.md|\\.github/copilot-instructions\\.md|\\.github/AI-Rules/[^/\\\\]+\\.en\\.md|CLAUDE\\.md|\\.claude/AI-Rules/[^/\\\\]+\\.en\\.md)$" }
+              ]
+            },
+            "sha256": { "$ref": "#/$defs/sha256" }
+          },
+          "allOf": [
+            { "if": { "properties": { "host": { "const": "codex" } } }, "then": { "properties": { "targetPath": { "oneOf": [{ "$ref": "#/$defs/codexLicenseTarget" }, { "type": "string", "pattern": "^(?:AGENTS\\.md|\\.codex/AI-Rules/[^/\\\\]+\\.en\\.md)$" }] } } } },
+            { "if": { "properties": { "host": { "const": "copilot" } } }, "then": { "properties": { "targetPath": { "oneOf": [{ "$ref": "#/$defs/copilotLicenseTarget" }, { "type": "string", "pattern": "^(?:\\.github/copilot-instructions\\.md|\\.github/AI-Rules/[^/\\\\]+\\.en\\.md)$" }] } } } },
+            { "if": { "properties": { "host": { "const": "claude" } } }, "then": { "properties": { "targetPath": { "type": "string", "pattern": "^(?:CLAUDE\\.md|\\.claude/AI-Rules/[^/\\\\]+\\.en\\.md)$" } } } }
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["artifactType", "artifactId", "sourceId", "sourceRepository", "sourceRef", "sourceCommit", "sourceVersion", "sourcePath", "projectionId", "targetPath", "sha256"],
+          "properties": {
+            "artifactType": { "const": "skill" },
+            "artifactId": { "$ref": "#/$defs/stableId" },
+            "sourceId": { "$ref": "#/$defs/stableId" },
+            "sourceRepository": { "type": "string", "format": "uri", "pattern": "^https://" },
+            "sourceRef": { "type": "string", "minLength": 1 },
+            "sourceCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "sourceVersion": { "type": "string", "minLength": 1 },
+            "sourcePath": { "$ref": "#/$defs/repositoryPath" },
+            "projectionId": { "type": "string", "enum": ["project-agents", "project-claude", "project-github"] },
+            "targetPath": { "type": "string", "pattern": "^(?:\\.agents/skills|\\.claude/skills|\\.github/skills)/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/.+$" },
+            "sha256": { "$ref": "#/$defs/sha256" }
+          },
+          "allOf": [
+            { "if": { "properties": { "projectionId": { "const": "project-agents" } } }, "then": { "properties": { "targetPath": { "type": "string", "pattern": "^\\.agents/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/.+$" } } } },
+            { "if": { "properties": { "projectionId": { "const": "project-claude" } } }, "then": { "properties": { "targetPath": { "type": "string", "pattern": "^\\.claude/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/.+$" } } } },
+            { "if": { "properties": { "projectionId": { "const": "project-github" } } }, "then": { "properties": { "targetPath": { "type": "string", "pattern": "^\\.github/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/.+$" } } } },
+            {
+              "if": { "properties": { "targetPath": { "pattern": "^\\.(?:agents|claude|github)/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/\\.ai-instructions-licenses/" } }, "required": ["targetPath"] },
+              "then": {
+                "oneOf": [
+                  {
+                    "properties": {
+                      "sourcePath": { "pattern": "^(?:(?:[^/]+/)*[Ll][Ii][Cc][Ee][Nn][Ss][Ee][Ss]/.+|(?:[^/]+/)*(?:[Ll][Ii][Cc][Ee][Nn][Ss][Ee]|[Ll][Ii][Cc][Ee][Nn][Cc][Ee]|[Cc][Oo][Pp][Yy][Ii][Nn][Gg]|[Nn][Oo][Tt][Ii][Cc][Ee]|[Tt][Hh][Ii][Rr][Dd]_[Pp][Aa][Rr][Tt][Yy]_[Nn][Oo][Tt][Ii][Cc][Ee][Ss]|[Tt][Hh][Ii][Rr][Dd]_[Pp][Aa][Rr][Tt][Yy]_[Ll][Ii][Cc][Ee][Nn][Ss][Ee][Ss]|[Pp][Rr][Oo][Vv][Ee][Nn][Aa][Nn][Cc][Ee])(?:[-_][^/.]+)?(?:\\.(?:[Mm][Dd]|[Tt][Xx][Tt]|[Rr][Ss][Tt]|[Hh][Tt][Mm][Ll]))?|(?:[^/]+/)*[Ll][Ii][Cc][Ee][Nn][Ss][Ii][Nn][Gg]-[Ss][Cc][Oo][Pp][Ee]\\.json)$" },
+                      "targetPath": { "pattern": "^\\.(?:agents|claude|github)/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/\\.ai-instructions-licenses/source/.+" }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "sourcePath": { "const": ".ai-instructions-generated/delivery.json" },
+                      "targetPath": { "pattern": "^\\.(?:agents|claude|github)/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/\\.ai-instructions-licenses/delivery\\.json$" }
+                    }
+                  }
+                ]
+              },
+              "else": { "properties": { "sourcePath": { "pattern": "^skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/" } } }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

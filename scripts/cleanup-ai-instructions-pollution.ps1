@@ -71,12 +71,17 @@ Import-Module (Join-Path (Split-Path -Parent $runtimeContractPath) 'license-deli
 function Invoke-CleanupGit {
     param([Parameter(Mandatory = $true)][string] $Repository,[Parameter(Mandatory = $true)][string[]] $Arguments)
     $previousPreference = $ErrorActionPreference
+    $previousConsoleOutputEncoding = [Console]::OutputEncoding
     try {
         $ErrorActionPreference = 'Continue'
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
         $output = & $GitExecutable -C $Repository @Arguments 2>&1
         $exitCode = $LASTEXITCODE
     }
-    finally { $ErrorActionPreference = $previousPreference }
+    finally {
+        $ErrorActionPreference = $previousPreference
+        [Console]::OutputEncoding = $previousConsoleOutputEncoding
+    }
     if ($exitCode -ne 0) { throw "git $($Arguments -join ' ') failed: $($output -join [Environment]::NewLine)" }
     return $output
 }
@@ -84,12 +89,17 @@ function Invoke-CleanupGit {
 function Get-CleanupGitExitCode {
     param([Parameter(Mandatory = $true)][string] $Repository,[Parameter(Mandatory = $true)][string[]] $Arguments)
     $previousPreference = $ErrorActionPreference
+    $previousConsoleOutputEncoding = [Console]::OutputEncoding
     try {
         $ErrorActionPreference = 'Continue'
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
         $null = & $GitExecutable -C $Repository @Arguments 2>&1
         return $LASTEXITCODE
     }
-    finally { $ErrorActionPreference = $previousPreference }
+    finally {
+        $ErrorActionPreference = $previousPreference
+        [Console]::OutputEncoding = $previousConsoleOutputEncoding
+    }
 }
 
 function ConvertFrom-CleanupGitQuotedPath {
@@ -634,12 +644,86 @@ function Assert-CleanupManagedFilePath {
         if (Test-Path -LiteralPath $inspectionPath) {
             $item = Get-Item -Force -LiteralPath $inspectionPath
             if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-                throw "$Context crosses a reparse point: $inspectionPath"
+                $exception = [System.IO.IOException]::new("$Context crosses a reparse point: $inspectionPath")
+                $exception.Data['CodexAiInstructionsPathSafetyReason'] = 'reparse-point'
+                throw $exception
             }
         }
         $inspectionPath = Split-Path -Parent $inspectionPath
     }
     if (-not (Test-Path -LiteralPath $resolvedFile -PathType Leaf)) { throw "$Context must be a file: $resolvedFile" }
+}
+
+function Get-CleanupWorktreeRoots {
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [switch] $Strict
+    )
+
+    $output = @(Invoke-CleanupGit -Repository $Repository -Arguments @('worktree','list','--porcelain','-z'))
+    foreach ($record in @(ConvertFrom-GitWorktreePorcelainZ -Output $output -Strict:$Strict)) {
+        if ([bool]$record.Prunable) { continue }
+        [string]$record.Path
+    }
+}
+
+function Assert-NoRepoManagedManifestV4 {
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [switch] $Strict
+    )
+
+    try { $worktreeRoots = @(Get-CleanupWorktreeRoots -Repository $Repository -Strict:$Strict) }
+    catch {
+        if ($Strict) { throw 'Cannot determine linked worktree manifests before mutation.' }
+        return
+    }
+    foreach ($worktreeRoot in $worktreeRoots) {
+        $isSchemaV4 = $false
+        $worktreeManifestPath = [string]$worktreeRoot
+        try {
+            $worktreeManifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/','\')
+            if ($Strict -and -not (Test-Path -LiteralPath $worktreeRoot -PathType Container)) { continue }
+            if (-not (Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf)) { continue }
+            Assert-CleanupManagedFilePath -TargetRoot $worktreeRoot -FilePath $worktreeManifestPath -Context 'REPO managed manifest v4 detection'
+        }
+        catch {
+            if ([string]$_.Exception.Data['CodexAiInstructionsPathSafetyReason'] -ceq 'reparse-point') {
+                if ($Strict) { throw }
+                continue
+            }
+            if ($Strict) {
+                $inspectionException = $_.Exception
+                try { $manifestStillExists = Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf }
+                catch {
+                    throw "Cannot inspect linked worktree manifest before mutation: $worktreeManifestPath. $($_.Exception.Message)"
+                }
+                if (-not $manifestStillExists) { continue }
+                throw "Cannot inspect linked worktree manifest before mutation: $worktreeManifestPath. $($inspectionException.Message)"
+            }
+            continue
+        }
+        try {
+            $worktreeManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $worktreeManifestPath | ConvertFrom-Json
+            $schemaVersion = $worktreeManifest.schemaVersion
+            $isSchemaV4 = ($schemaVersion -is [int] -or $schemaVersion -is [long]) -and [int64]$schemaVersion -eq 4
+        }
+        catch {
+            if ($Strict) {
+                $inspectionException = $_.Exception
+                try { $manifestStillExists = Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf }
+                catch {
+                    throw "Cannot inspect linked worktree manifest before mutation: $worktreeManifestPath. $($_.Exception.Message)"
+                }
+                if (-not $manifestStillExists) { continue }
+                throw "Cannot inspect linked worktree manifest before mutation: $worktreeManifestPath. $($inspectionException.Message)"
+            }
+            continue
+        }
+        if ($isSchemaV4) {
+            throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
+        }
+    }
 }
 
 function Get-CleanupSharedManagedPaths {
@@ -650,10 +734,7 @@ function Get-CleanupSharedManagedPaths {
 
     $paths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     foreach ($currentManagedPath in $CurrentManagedPaths) { [void]$paths.Add($currentManagedPath.Replace('\','/')) }
-    foreach ($line in @(Invoke-CleanupGit -Repository $Repository -Arguments @('worktree','list','--porcelain'))) {
-        $text = [string]$line
-        if (-not $text.StartsWith('worktree ',[System.StringComparison]::Ordinal)) { continue }
-        $worktreeRoot = $text.Substring('worktree '.Length)
+    foreach ($worktreeRoot in @(Get-CleanupWorktreeRoots -Repository $Repository)) {
         $worktreeManifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/','\')
         if (-not (Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf)) { continue }
         Assert-CleanupManagedFilePath -TargetRoot $worktreeRoot -FilePath $worktreeManifestPath -Context 'Linked worktree managed manifest'
@@ -662,6 +743,9 @@ function Get-CleanupSharedManagedPaths {
             $worktreeManifestSchemaVersion = $worktreeManifest.schemaVersion
             if ($worktreeManifestSchemaVersion -isnot [int] -and $worktreeManifestSchemaVersion -isnot [long]) {
                 throw 'schemaVersion must be an integer.'
+            }
+            if ($worktreeManifestSchemaVersion -eq 4) {
+                throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
             }
             if ($worktreeManifestSchemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $worktreeManifest }
             elseif ($worktreeManifestSchemaVersion -eq 1) { Assert-LegacyManagedManifestV1 -Manifest $worktreeManifest }
@@ -745,8 +829,11 @@ if ((Test-CleanupCanonicalSourceRepository -Repository $targetRootPath) -or
     throw 'Tracked AI instructions pollution cleanup refuses the canonical Instructions source repository.'
 }
 
+Assert-NoRepoManagedManifestV4 -Repository $targetRootPath
+
 $repositoryOperationLock = Open-CleanupRepositoryOperationLock -Repository $targetRootPath
 try {
+Assert-NoRepoManagedManifestV4 -Repository $targetRootPath -Strict
 
 $manifestPath = Join-Path $targetRootPath $manifestRelativePath.Replace('/','\')
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
@@ -756,7 +843,8 @@ Assert-CleanupManagedFilePath -TargetRoot $targetRootPath -FilePath $manifestPat
 try { $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json }
 catch { throw "Managed manifest is not valid JSON: $($_.Exception.Message)" }
 try {
-    if ($manifest.schemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $manifest }
+    if ($manifest.schemaVersion -eq 4) { throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.' }
+    elseif ($manifest.schemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $manifest }
     elseif ($manifest.schemaVersion -eq 1) { Assert-LegacyManagedManifestV1 -Manifest $manifest }
     else { throw "unsupported schemaVersion '$($manifest.schemaVersion)'." }
 }

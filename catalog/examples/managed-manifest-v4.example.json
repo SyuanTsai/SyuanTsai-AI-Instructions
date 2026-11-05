@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 4,
+  "catalogId": "example-agent-skills-v3",
+  "lockSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "projectionContractSha256": "488b93d25eed36b8f6aedeb5ef0a900134dbf08e6d6927dd693f9b415c8151f0",
+  "generation": 1,
+  "projections": ["project-agents"],
+  "files": [
+    {
+      "artifactType": "instruction", "artifactId": "codex-base", "host": "codex",
+      "sourceId": "ai-instructions", "sourceRepository": "https://github.com/example/ai-instructions.git", "sourceRef": "main", "sourceCommit": "0123456789abcdef0123456789abcdef01234567", "sourceVersion": "1.0.0",
+      "sourcePath": ".codex/AGENTS.en.md", "rendererId": "codex-instruction-renderer", "rendererSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "targetPath": "AGENTS.md", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "artifactType": "instruction", "artifactId": "copilot-base", "host": "copilot",
+      "sourceId": "ai-instructions", "sourceRepository": "https://github.com/example/ai-instructions.git", "sourceRef": "main", "sourceCommit": "0123456789abcdef0123456789abcdef01234567", "sourceVersion": "1.0.0",
+      "sourcePath": ".github/copilot-instructions.en.md", "rendererId": "copilot-instruction-renderer", "rendererSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "targetPath": ".github/copilot-instructions.md", "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    {
+      "artifactType": "instruction", "artifactId": "claude-base", "host": "claude",
+      "sourceId": "ai-instructions", "sourceRepository": "https://github.com/example/ai-instructions.git", "sourceRef": "main", "sourceCommit": "0123456789abcdef0123456789abcdef01234567", "sourceVersion": "1.0.0",
+      "sourcePath": ".codex/AGENTS.en.md", "rendererId": "claude-instruction-renderer", "rendererSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "targetPath": "CLAUDE.md", "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      "artifactType": "skill", "artifactId": "work-with-jira",
+      "sourceId": "agent-skills", "sourceRepository": "https://github.com/example/agent-skills-catalog.git", "sourceRef": "v1.0.0", "sourceCommit": "89abcdef0123456789abcdef0123456789abcdef", "sourceVersion": "1.0.0",
+      "sourcePath": "skills/work-with-jira/SKILL.md", "projectionId": "project-agents", "targetPath": ".agents/skills/work-with-jira/SKILL.md", "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  ]
+}

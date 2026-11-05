@@ -762,6 +762,451 @@ exit /b 0
         }
     }
 
+    # Scenario: A live linked worktree already carries a REPO managed manifest v4.
+    # Purpose: Require a projection-aware bootstrap before shared exclusions or managed bytes can change.
+    It 'InterT68a_rejects_a_linked_worktree_v4_manifest_before_mutation' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
+        $linkedRoot = Join-Path $TestDrive 'linked-v4-manifest-worktree'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','linked-v4-manifest-fixture',$linkedRoot) | Out-Null
+        try {
+            Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $linkedRoot | Out-Null
+            $linkedManifestPath = Join-Path $linkedRoot $script:ManifestPath
+            $linkedManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $linkedManifestPath | ConvertFrom-Json
+            $linkedManifest.schemaVersion = 4
+            Set-TestText -Path $linkedManifestPath -Value (($linkedManifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+
+            $excludePath = Join-Path $targetRoot '.git\info\exclude'
+            $manifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath))
+            $excludeBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+            $targetAgentBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md')))
+            $linkedAgentBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $linkedRoot 'AGENTS.md')))
+
+            $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
+            $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+            $LASTEXITCODE | Should Not Be 0
+            ($output -join [Environment]::NewLine) | Should Match 'REPO managed manifest schema version 4 requires a projection-aware bootstrap\.'
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath)) | Should Be $manifestBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md'))) | Should Be $targetAgentBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $linkedRoot 'AGENTS.md'))) | Should Be $linkedAgentBefore
+        }
+        finally {
+            Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
+        }
+    }
+
+    # Scenario: The first worktree inventory succeeds, but the strict inventory under the repository lock fails.
+    # Purpose: Fail closed before remediation can change the index, shared exclusions, or managed bytes.
+    It 'InterT68d_fails_closed_when_the_locked_worktree_inventory_fails' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('add','--force','--','AGENTS.md',$script:ManifestPath.Replace('\','/')) | Out-Null
+        Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','tracked remediation fixture') | Out-Null
+        $wrapperRoot = Join-Path $TestDrive 'locked-worktree-list-failure-wrapper'
+        New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
+        $realGit = (Get-Command git.exe).Source
+        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $firstListMarker = Join-Path $wrapperRoot 'first-list.marker'
+        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+        $gitWrapper = @"
+@echo off
+echo %* | "$findString" /C:"worktree list --porcelain" >nul
+if errorlevel 1 goto forward
+if exist "$firstListMarker" exit /b 91
+type nul > "$firstListMarker"
+:forward
+"$realGit" %*
+"@
+        Set-TestText -Path $gitWrapperPath -Value $gitWrapper
+        $indexPath = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','index') | Select-Object -First 1).Trim()
+        if (-not [IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $targetRoot $indexPath }
+        $excludePath = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
+        if (-not [IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+        $indexBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath))
+        $excludeBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+        $manifestPath = Join-Path $targetRoot $script:ManifestPath
+        $manifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath))
+        $agentBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md')))
+        $headBefore = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim()
+        $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot,'-GitExecutable',$gitWrapperPath)
+
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+        $LASTEXITCODE | Should Not Be 0
+        (ConvertTo-TestDiagnosticText -Output $output) | Should Match 'Cannot determine linked worktree manifests before mutation\.'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath)) | Should Be $indexBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath)) | Should Be $manifestBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md'))) | Should Be $agentBefore
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim() | Should Be $headBefore
+    }
+
+    # Scenario: A linked worktree publishes v4 after the optimistic scan and before the locked scan.
+    # Purpose: Recheck projection ownership under the repository lock before remediation can create a commit.
+    It 'InterT68e_detects_linked_v4_published_before_the_locked_scan' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
+        $linkedRoot = Join-Path $TestDrive 'linked-v4-race-worktree'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','linked-v4-race-fixture',$linkedRoot) | Out-Null
+        try {
+            Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $linkedRoot | Out-Null
+            Invoke-TestGit -Repository $targetRoot -Arguments @('add','--force','--','AGENTS.md',$script:ManifestPath.Replace('\','/')) | Out-Null
+            Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','tracked v4 race fixture') | Out-Null
+            $linkedManifestPath = Join-Path $linkedRoot $script:ManifestPath
+            $v4ManifestPath = Join-Path $TestDrive 'linked-v4-race.json'
+            $v4Manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $linkedManifestPath | ConvertFrom-Json
+            $v4Manifest.schemaVersion = 4
+            Set-TestText -Path $v4ManifestPath -Value (($v4Manifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+            $wrapperRoot = Join-Path $TestDrive 'locked-v4-publication-wrapper'
+            New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
+            $realGit = (Get-Command git.exe).Source
+            $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+            $firstListMarker = Join-Path $wrapperRoot 'first-list.marker'
+            $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+            $gitWrapper = @"
+@echo off
+echo %* | "$findString" /C:"worktree list --porcelain" >nul
+if errorlevel 1 goto forward
+if not exist "$firstListMarker" (
+  type nul > "$firstListMarker"
+  goto forward
+)
+copy /y "$v4ManifestPath" "$linkedManifestPath" >nul
+if errorlevel 1 exit /b 92
+:forward
+"$realGit" %*
+"@
+            Set-TestText -Path $gitWrapperPath -Value $gitWrapper
+            $indexPath = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','index') | Select-Object -First 1).Trim()
+            if (-not [IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $targetRoot $indexPath }
+            $excludePath = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
+            if (-not [IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+            $indexBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath))
+            $excludeBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+            $agentBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md')))
+            $headBefore = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim()
+            $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot,'-GitExecutable',$gitWrapperPath)
+
+            $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+            $LASTEXITCODE | Should Not Be 0
+            (ConvertTo-TestDiagnosticText -Output $output) | Should Match 'REPO managed manifest schema version 4 requires a projection-aware bootstrap\.'
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath)) | Should Be $indexBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md'))) | Should Be $agentBefore
+            (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim() | Should Be $headBefore
+        }
+        finally {
+            Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
+        }
+    }
+
+    # Scenario: A linked worktree has a syntactically invalid manifest while the current worktree needs tracked-artifact remediation.
+    # Purpose: Fail under the repository lock before remediation can change the index, shared excludes, managed bytes, or commit history.
+    It 'InterT68f_fails_closed_when_a_linked_worktree_manifest_is_not_valid_json' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
+        $linkedRoot = Join-Path $TestDrive 'linked-malformed-manifest-worktree'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','linked-malformed-manifest-fixture',$linkedRoot) | Out-Null
+        try {
+            Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $linkedRoot | Out-Null
+            $linkedManifestPath = Join-Path $linkedRoot $script:ManifestPath
+            Set-TestText -Path $linkedManifestPath -Value '{ malformed json'
+            Invoke-TestGit -Repository $targetRoot -Arguments @('add','--force','--','AGENTS.md',$script:ManifestPath.Replace('\','/')) | Out-Null
+            Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','tracked malformed manifest fixture') | Out-Null
+            $indexPath = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','index') | Select-Object -First 1).Trim()
+            if (-not [IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $targetRoot $indexPath }
+            $excludePath = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
+            if (-not [IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+            $indexBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath))
+            $excludeBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+            $manifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot $script:ManifestPath)))
+            $agentBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md')))
+            $linkedManifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath))
+            $headBefore = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim()
+            $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
+
+            $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+            $LASTEXITCODE | Should Not Be 0
+            (ConvertTo-TestDiagnosticText -Output $output) | Should Match 'Cannot inspect linked worktree manifest before mutation'
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath)) | Should Be $indexBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot $script:ManifestPath))) | Should Be $manifestBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md'))) | Should Be $agentBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath)) | Should Be $linkedManifestBefore
+            (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim() | Should Be $headBefore
+            @(Invoke-TestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
+        }
+        finally {
+            Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
+        }
+    }
+
+    # Scenario: Git reports a linked worktree whose path requires non-ASCII characters without C quoting under -z.
+    # Purpose: Inspect the real linked path and reject its v4 manifest before remediation can mutate bytes or history.
+    It 'InterT68g_rejects_v4_in_a_non_ascii_linked_worktree_path_before_mutation' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
+        $unicodeWorktreeName = ([string][char]0x5DE5) + ([string][char]0x4F5C) + ([string][char]0x6A39) + '-' + ([string][char]0x00FC) + '-bootstrap'
+        $linkedRoot = Join-Path $TestDrive $unicodeWorktreeName
+        Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','linked-unicode-v4-fixture',$linkedRoot) | Out-Null
+        try {
+            Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $linkedRoot | Out-Null
+            $linkedManifestPath = Join-Path $linkedRoot $script:ManifestPath
+            $linkedManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $linkedManifestPath | ConvertFrom-Json
+            $linkedManifest.schemaVersion = 4
+            Set-TestText -Path $linkedManifestPath -Value (($linkedManifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+            Invoke-TestGit -Repository $targetRoot -Arguments @('add','--force','--','AGENTS.md',$script:ManifestPath.Replace('\','/')) | Out-Null
+            Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','tracked unicode worktree fixture') | Out-Null
+            $manifestPath = Join-Path $targetRoot $script:ManifestPath
+            $excludePath = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
+            if (-not [IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+            $manifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath))
+            $excludeBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+            $linkedManifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath))
+            $headBefore = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim()
+            $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
+
+            $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+            $LASTEXITCODE | Should Not Be 0
+            (ConvertTo-TestDiagnosticText -Output $output) | Should Match 'REPO managed manifest schema version 4 requires a projection-aware bootstrap\.'
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath)) | Should Be $manifestBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath)) | Should Be $linkedManifestBefore
+            (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim() | Should Be $headBefore
+        }
+        finally {
+            Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
+        }
+    }
+
+    # Scenario: The child PowerShell process decodes native Git output using a non-UTF-8 console encoding.
+    # Purpose: Worktree enumeration must preserve a non-ASCII path exactly and restore the caller's encoding.
+    It 'InterT68i_decodes_non_ascii_worktree_paths_as_utf8_and_restores_console_output_encoding' {
+        $unicodeWorktreeName = ([string][char]0x5DE5) + ([string][char]0x4F5C) + ([string][char]0x6A39) + '-' + ([string][char]0x00FC) + '-encoding'
+        $linkedRoot = Join-Path $TestDrive $unicodeWorktreeName
+        Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','linked-unicode-encoding-fixture',$linkedRoot) | Out-Null
+        try {
+            $bootstrapBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script:BootstrapScript))
+            $linkedRootBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($linkedRoot))
+            $childScript = @'
+$bootstrapScript = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__BOOTSTRAP_SCRIPT__'))
+$expectedRoot = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__LINKED_ROOT__'))
+Import-Module (Join-Path (Split-Path -Parent $bootstrapScript) 'skills-catalog-contract.psm1') -Force
+$tokens = $null
+$parseErrors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile($bootstrapScript,[ref]$tokens,[ref]$parseErrors)
+if ($parseErrors.Count -ne 0) { throw 'Bootstrap script did not parse.' }
+foreach ($functionName in @('Invoke-Git','Get-ManagedWorktreeRoots')) {
+    $definition = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $functionName },$true))[0]
+    if ($null -eq $definition) { throw "Missing bootstrap helper: $functionName" }
+    . ([scriptblock]::Create($definition.Extent.Text))
+}
+$GitExecutable = (Get-Command git -CommandType Application | Select-Object -First 1).Source
+function ConvertTo-NormalizedWorktreePath {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    $normalizedPath = [System.IO.Path]::GetFullPath($Path)
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $normalizedPath = $normalizedPath.Replace('/','\')
+    }
+    return $normalizedPath
+}
+$originalEncoding = [Console]::OutputEncoding
+try {
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $nonUtf8Encoding = [Text.Encoding]::GetEncoding('windows-1252')
+    }
+    else {
+        $nonUtf8Encoding = [Text.Encoding]::GetEncoding('ISO-8859-1')
+    }
+    [Console]::OutputEncoding = $nonUtf8Encoding
+    $expectedEncodingCodePage = [Console]::OutputEncoding.CodePage
+    $roots = @(Get-ManagedWorktreeRoots -Repository $expectedRoot -Strict)
+    $normalizedExpectedRoot = ConvertTo-NormalizedWorktreePath $expectedRoot
+    $found = $false
+    foreach ($root in $roots) {
+        $normalizedRoot = ConvertTo-NormalizedWorktreePath ([string]$root)
+        if ([string]::Equals($normalizedRoot,$normalizedExpectedRoot,[StringComparison]::Ordinal)) { $found = $true; break }
+    }
+    if (-not $found) { throw 'The UTF-8-decoded worktree list did not contain the exact linked worktree path.' }
+    if ([Console]::OutputEncoding.CodePage -ne $expectedEncodingCodePage) { throw 'Invoke-Git did not restore Console.OutputEncoding.' }
+}
+finally {
+    [Console]::OutputEncoding = $originalEncoding
+}
+'@.Replace('__BOOTSTRAP_SCRIPT__',$bootstrapBase64).Replace('__LINKED_ROOT__',$linkedRootBase64)
+            $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
+            $output = & $script:TestPowerShellExecutable -NoProfile -NonInteractive -EncodedCommand $encodedCommand 2>&1
+
+            $LASTEXITCODE | Should Be 0
+            $diagnostic = if ($null -eq $output -or @($output).Count -eq 0) { '' } else { ConvertTo-TestDiagnosticText -Output @($output) }
+            $diagnostic | Should BeNullOrEmpty
+        }
+        finally {
+            Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
+        }
+    }
+
+    # Scenario: Strict linked-manifest inspection reaches an existing manifest but its path safety check fails with I/O.
+    # Purpose: Propagate non-reparse inspection errors instead of treating the manifest as absent.
+    It 'InterT68h_fails_closed_when_strict_manifest_path_safety_throws_io' {
+        $tokens = $null; $parseErrors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($script:BootstrapScript,[ref]$tokens,[ref]$parseErrors)
+        foreach ($functionName in @('Get-ManagedWorktreeRoots','Assert-ManagedPathDoesNotCrossReparsePoint','Assert-NoRepoManagedManifestV4')) {
+            $definition = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $functionName },$true))[0]
+            . ([scriptblock]::Create($definition.Extent.Text))
+        }
+        $script:manifestRelativePath = $script:ManifestPath
+        $fixtureRoot = Join-Path $TestDrive 'strict-bootstrap-io'
+        New-Item -ItemType Directory -Force -Path (Join-Path $fixtureRoot '.codex') | Out-Null
+        Set-TestText -Path (Join-Path $fixtureRoot $script:ManifestPath) -Value '{}'
+        Mock Get-ManagedWorktreeRoots { @($fixtureRoot) }
+        Mock Assert-ManagedPathDoesNotCrossReparsePoint { throw [System.IO.IOException]::new('Injected manifest inspection I/O failure.') }
+        $message = $null
+
+        try { Assert-NoRepoManagedManifestV4 -Repository $fixtureRoot -Strict }
+        catch { $message = $_.Exception.Message }
+
+        if ([string]::IsNullOrWhiteSpace($message)) { throw 'Expected strict linked-manifest inspection to fail.' }
+        $message.Contains('Cannot inspect linked worktree manifest before mutation') | Should Be $true
+        $message.Contains('Injected manifest inspection I/O failure.') | Should Be $true
+    }
+
+    # Scenario: A linked worktree carries v4 while the current worktree has unsafe legacy ownership evidence.
+    # Purpose: Detect the projection-aware state before remediation can report or mutate the current worktree.
+    It 'InterT68b_reports_linked_v4_before_a_current_legacy_remediation_error' {
+        $linkedRoot = Join-Path $TestDrive 'linked-v4-before-remediation-worktree'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','linked-v4-before-remediation-fixture',$linkedRoot) | Out-Null
+        try {
+            Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $linkedRoot | Out-Null
+            $linkedManifestPath = Join-Path $linkedRoot $script:ManifestPath
+            $linkedManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $linkedManifestPath | ConvertFrom-Json
+            $linkedManifest.schemaVersion = 4
+            Set-TestText -Path $linkedManifestPath -Value (($linkedManifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+
+            Set-TestText -Path (Join-Path $targetRoot 'production.txt') -Value 'production bytes'
+            $manifestPath = Join-Path $targetRoot $script:ManifestPath
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $manifestPath) | Out-Null
+            $unsafeManifest = [ordered]@{
+                schemaVersion=1
+                sourceRepository='https://example.com/legacy-ai-instructions.git'
+                sourceRef='legacy-pin'
+                files=@([ordered]@{sourcePath='production.txt';targetPath='production.txt';sha256=('a' * 64)})
+            }
+            Set-TestText -Path $manifestPath -Value (($unsafeManifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+            Invoke-TestGit -Repository $targetRoot -Arguments @('add','--force','--','production.txt',$script:ManifestPath) | Out-Null
+            Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','unsafe manifest precedence fixture') | Out-Null
+            $headBefore = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim()
+
+            $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
+            $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+            $LASTEXITCODE | Should Not Be 0
+            ($output -join [Environment]::NewLine) | Should Match 'REPO managed manifest schema version 4 requires a projection-aware bootstrap\.'
+            ($output -join [Environment]::NewLine) | Should Not Match 'outside the reserved Agent artifact scope'
+            (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) | Should Be $headBefore
+            (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'production.txt')).Trim() | Should Be 'production bytes'
+        }
+        finally {
+            Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
+        }
+    }
+
+    # Scenario: A linked worktree exposes a v4 manifest only through a directory junction.
+    # Purpose: Fail under the repository lock before remediation, without reading unsafe manifest bytes.
+    It 'InterT68c_does_not_read_a_reparse_backed_linked_v4_manifest' {
+        $linkedRoot = Join-Path $TestDrive 'linked-reparse-v4-worktree'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','linked-reparse-v4-fixture',$linkedRoot) | Out-Null
+        try {
+            Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $linkedRoot | Out-Null
+            $linkedManifestPath = Join-Path $linkedRoot $script:ManifestPath
+            $linkedManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $linkedManifestPath | ConvertFrom-Json
+            $linkedManifest.schemaVersion = 4
+            $sentinel = 'reparse-backed-linked-v4-manifest-must-not-be-read'
+            $sourceRefEntry = @($linkedManifest.files | Where-Object { $null -ne $_.PSObject.Properties['sourceRef'] } | Select-Object -First 1)
+            $sourceRefEntry.Count | Should Be 1
+            $sourceRefEntry[0].sourceRef = $sentinel
+            Set-TestText -Path $linkedManifestPath -Value (($linkedManifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+            $linkedCodexPath = Join-Path $linkedRoot '.codex'
+            $externalCodexPath = Join-Path $TestDrive 'linked-reparse-v4-content'
+            Move-Item -LiteralPath $linkedCodexPath -Destination $externalCodexPath
+            New-Item -ItemType Junction -Path $linkedCodexPath -Target $externalCodexPath | Out-Null
+
+            Set-TestText -Path (Join-Path $targetRoot 'production.txt') -Value 'production bytes'
+            $manifestPath = Join-Path $targetRoot $script:ManifestPath
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $manifestPath) | Out-Null
+            $unsafeManifest = [ordered]@{
+                schemaVersion=1
+                sourceRepository='https://example.com/legacy-ai-instructions.git'
+                sourceRef='legacy-pin'
+                files=@([ordered]@{sourcePath='production.txt';targetPath='production.txt';sha256=('a' * 64)})
+            }
+            Set-TestText -Path $manifestPath -Value (($unsafeManifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+            Invoke-TestGit -Repository $targetRoot -Arguments @('add','--force','--','production.txt',$script:ManifestPath) | Out-Null
+            Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','reparse detection fixture') | Out-Null
+            $indexPath = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','index') | Select-Object -First 1).Trim()
+            if (-not [IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $targetRoot $indexPath }
+            $excludePath = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
+            if (-not [IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+            $indexBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath))
+            $excludeBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+            $manifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath))
+            $agentPath = Join-Path $targetRoot 'AGENTS.md'
+            $agentExistedBefore = Test-Path -LiteralPath $agentPath -PathType Leaf
+            $agentBefore = if ($agentExistedBefore) { [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentPath)) } else { $null }
+            $linkedManifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath))
+            $headBefore = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim()
+
+            $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
+            $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+            $LASTEXITCODE | Should Not Be 0
+            $diagnostic = ConvertTo-TestDiagnosticText -Output $output
+            $diagnostic | Should Match 'REPO managed manifest v4 detection crosses a reparse point'
+            $diagnostic | Should Not Match $sentinel
+            $diagnostic | Should Not Match 'outside the reserved Agent artifact scope.*production\.txt'
+            $diagnostic | Should Not Match 'REPO managed manifest schema version 4 requires a projection-aware bootstrap\.'
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath)) | Should Be $indexBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath)) | Should Be $manifestBefore
+            (Test-Path -LiteralPath $agentPath -PathType Leaf) | Should Be $agentExistedBefore
+            if ($agentExistedBefore) { [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentPath)) | Should Be $agentBefore }
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath)) | Should Be $linkedManifestBefore
+            (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim() | Should Be $headBefore
+            @(Invoke-TestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
+        }
+        finally {
+            Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
+        }
+    }
+
+    # Scenario: Git retains a prunable linked worktree record whose local manifest is schema-v4.
+    # Purpose: Ignore stale records consistently during optimistic, locked, and shared-exclude scans.
+    It 'InterT68h_ignores_a_prunable_linked_worktree_v4_manifest_in_all_bootstrap_scans' {
+        $linkedRoot = Join-Path $TestDrive 'prunable-v4-bootstrap-worktree'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','prunable-v4-bootstrap-fixture',$linkedRoot) | Out-Null
+        try {
+            Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $linkedRoot | Out-Null
+            $linkedManifestPath = Join-Path $linkedRoot $script:ManifestPath
+            $linkedManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $linkedManifestPath | ConvertFrom-Json
+            $linkedManifest.schemaVersion = 4
+            $linkedManifest.files[0].targetPath = 'stale-prunable-bootstrap-only.md'
+            Set-TestText -Path $linkedManifestPath -Value (($linkedManifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+            Remove-Item -LiteralPath (Join-Path $linkedRoot '.git') -Force
+
+            (@(Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','list','--porcelain')) -join "`n") | Should Match 'prunable'
+            $output = Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot
+
+            $output | Should Not BeNullOrEmpty
+            $excludePath = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
+            if (-not [IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+            (Get-Content -Raw -LiteralPath $excludePath) | Should Not Match ([regex]::Escape('stale-prunable-bootstrap-only.md'))
+        }
+        finally {
+            Remove-Item -LiteralPath $linkedRoot -Recurse -Force -ErrorAction SilentlyContinue
+            Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','prune') | Out-Null
+        }
+    }
+
     # Scenario: A prior local artifact set loses its manifest, one managed file, and the managed exclude block.
     # Purpose: Reconstruct only state that immutable bytes can prove without dirtying the repository.
     It 'InterT70_self_heals_a_missing_manifest_file_and_exclude_marker' {
@@ -1133,6 +1578,29 @@ exit /b 0
         ($output -join [Environment]::NewLine) | Should Match 'Managed Skill.*must preserve the flat'
         (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'AGENTS.md')) | Should Be $agentBefore
         [string](Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json).files[0].artifactType | Should Be 'skill'
+    }
+
+    # Scenario: The target repository already carries a REPO managed manifest v4.
+    # Purpose: Stop the legacy bootstrap before it rewrites ownership, exclusions, or managed content.
+    It 'InterT74a_rejects_a_v4_managed_manifest_before_mutation' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
+        $manifestPath = Join-Path $targetRoot $script:ManifestPath
+        $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
+        $manifest.schemaVersion = 4
+        Set-TestText -Path $manifestPath -Value (($manifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+        $excludePath = Join-Path $targetRoot '.git\info\exclude'
+        $manifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath))
+        $excludeBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+        $agentBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md')))
+
+        $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+        $LASTEXITCODE | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'REPO managed manifest schema version 4 requires a projection-aware bootstrap\.'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath)) | Should Be $manifestBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md'))) | Should Be $agentBefore
     }
 
     # Scenario: A prior canonical v3 manifest retains a locally customized Skill while the bootstrap source still uses the legacy archive layout.
