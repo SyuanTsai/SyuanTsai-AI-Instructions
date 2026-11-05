@@ -2,7 +2,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $script:CanonicalRepository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
-$script:SkillsCatalogContractModule = Import-Module (Join-Path $PSScriptRoot 'skills-catalog-contract.psm1') -PassThru -Scope Local -ErrorAction Stop
+$script:SkillsCatalogContractModule = $null
 $script:ExpectedPlatformRuntimeRootModule = 'platform-runtime.psm1'
 $script:ExpectedPlatformRuntimeFunctionsToExport = @(
     'Assert-PlatformRuntimeInventory',
@@ -27,6 +27,22 @@ $script:ExpectedPlatformRuntimeFunctionsToExport = @(
     'Set-PlatformProcessEnvironment'
 )
 $script:ExpectedPlatformRuntimeEmptyExports = @('CmdletsToExport','VariablesToExport','AliasesToExport')
+
+function Get-AiInstructionsSkillsCatalogContractModule {
+    if ($null -ne $script:SkillsCatalogContractModule) { return $script:SkillsCatalogContractModule }
+
+    $modulePath = Join-Path $PSScriptRoot 'skills-catalog-contract.psm1'
+    if (-not (Test-Path -LiteralPath $modulePath -PathType Leaf)) {
+        throw "Runtime bundle v3 Catalog validation requires module 'skills-catalog-contract.psm1' beside the runtime contract."
+    }
+    try {
+        $script:SkillsCatalogContractModule = Import-Module $modulePath -PassThru -Scope Local -ErrorAction Stop
+    }
+    catch {
+        throw "Runtime bundle v3 Catalog validation could not import module 'skills-catalog-contract.psm1'."
+    }
+    return $script:SkillsCatalogContractModule
+}
 
 function Test-AiInstructionsObjectHasProperty {
     param([AllowNull()][object] $Object,[Parameter(Mandatory = $true)][string] $Name)
@@ -1132,7 +1148,8 @@ function Assert-AiInstructionsRuntimeBundleV3 {
         throw 'Installed Skills Catalog must use schemaVersion 3.'
     }
     $catalogPath = Resolve-AiInstructionsRuntimeFilePath -RuntimeRoot $RuntimeRoot -RelativePath $catalogRelativePath -Context 'Installed Skills Catalog'
-    $catalog = & $script:SkillsCatalogContractModule.ExportedCommands['Test-SkillsCatalogDocument'] -CatalogPath $catalogPath
+    $skillsCatalogContractModule = Get-AiInstructionsSkillsCatalogContractModule
+    $catalog = & $skillsCatalogContractModule.ExportedCommands['Test-SkillsCatalogDocument'] -CatalogPath $catalogPath
     if ([int64]$Configuration.schemaVersion -eq 5) {
         $installedProjectionIds = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
         foreach ($projection in @($catalog.projections)) { [void]$installedProjectionIds.Add([string]$projection.id) }

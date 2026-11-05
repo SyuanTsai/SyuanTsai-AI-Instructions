@@ -96,7 +96,7 @@ try {
             }
             & $installedLauncher -ValidateOnly
             $installedRuntimeRoot = Split-Path -Parent $installedModule
-            foreach ($fileName in @('ai-instructions-updater.psm1','ai-instructions-runtime-contract.psm1','safe-zip.psm1')) {
+            foreach ($fileName in @('ai-instructions-updater.psm1','ai-instructions-runtime-contract.psm1','safe-zip.psm1','skills-catalog-contract.psm1')) {
                 Copy-Item -LiteralPath (Join-Path $installedRuntimeRoot $fileName) -Destination (Join-Path $runtimeSnapshotRoot $fileName)
             }
         }

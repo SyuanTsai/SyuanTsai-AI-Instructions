@@ -177,6 +177,33 @@ Describe 'AI instructions runtime contracts' {
         Import-Module $script:RuntimeContractModule -Force
     }
 
+    # Scenario: The stable updater snapshots the runtime contract without its v3-only Catalog validator.
+    # Purpose: Keep module loading plus v2 bundle and v4 sync validation independent from the Catalog contract.
+    It 'UnitT02_imports_an_isolated_runtime_contract_for_v2_and_v4_validation' {
+        $isolatedRoot = Join-Path $TestDrive 'isolated-runtime-contract'
+        $runtimeRoot = Join-Path $isolatedRoot 'runtime'
+        New-Item -ItemType Directory -Force -Path $isolatedRoot,$runtimeRoot | Out-Null
+        $isolatedModulePath = Join-Path $isolatedRoot 'ai-instructions-runtime-contract.psm1'
+        Copy-Item -LiteralPath $script:RuntimeContractModule -Destination $isolatedModulePath
+        [IO.File]::WriteAllText((Join-Path $runtimeRoot 'bootstrap.ps1'),"Write-Output 'ok'`n")
+
+        $isolatedModule = Import-Module $isolatedModulePath -PassThru -Scope Local -Force
+        try {
+            $configuration = & $isolatedModule.ExportedCommands['ConvertTo-AiInstructionsSyncConfigurationV4'] `
+                -CatalogRepository $script:CanonicalRepository `
+                -CatalogRef ('2' * 40)
+            $bundle = & $isolatedModule.ExportedCommands['New-AiInstructionsRuntimeBundleV2'] `
+                -RuntimeRoot $runtimeRoot `
+                -Repository $script:CanonicalRepository `
+                -Commit ('2' * 40) `
+                -Acquisition git-checkout
+
+            { & $isolatedModule.ExportedCommands['Assert-AiInstructionsSyncConfigurationV4'] -Configuration $configuration } | Should Not Throw
+            { & $isolatedModule.ExportedCommands['Assert-AiInstructionsRuntimeBundleV2'] -Bundle $bundle -Configuration $configuration -RuntimeRoot $runtimeRoot } | Should Not Throw
+        }
+        finally { Remove-Module -ModuleInfo $isolatedModule -Force }
+    }
+
     # Scenario: A supported personal configuration is installed by the current runtime.
     # Purpose: Preserve exclusions and selections while removing obsolete auto-commit authority.
     It 'UnitT10_migrates_schema_v<schemaVersion>_to_v4_without_auto_commit' -TestCases @(
@@ -896,7 +923,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
     It 'UnitT104_rejects_platform_runtime_manifest_api_drift' {
         $cases = @(
             @{ Name = 'root-module'; OldValue = "RootModule = 'platform-runtime.psm1'"; NewValue = "RootModule = 'renamed-runtime.psm1'"; Pattern = 'RootModule' },
-            @{ Name = 'function-export'; OldValue = "        'Set-PlatformProcessEnvironment'`n"; NewValue = ''; Pattern = 'FunctionsToExport' }
+            @{ Name = 'function-export'; OldValue = "        'Set-PlatformProcessEnvironment'`n"; NewValue = "        `n"; Pattern = 'FunctionsToExport' }
         )
         foreach ($case in $cases) {
             $fixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive ('runtime-v3-api-' + $case.Name))
