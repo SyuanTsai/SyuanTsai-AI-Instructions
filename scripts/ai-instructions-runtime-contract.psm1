@@ -1421,6 +1421,7 @@ function Assert-AiInstructionsInstallJournalV1 {
 
     $paths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     $leaves = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    $validatedOperationPaths = New-Object System.Collections.Generic.List[object]
     $expectedIdentityKind = if ([string]$Journal.platform.os -ceq 'windows') { 'windows-file-id' } else { 'unix-device-inode' }
     $expectedSequence = 1
     foreach ($operation in @($Journal.operations)) {
@@ -1465,6 +1466,22 @@ function Assert-AiInstructionsInstallJournalV1 {
         }
         $pathKey = Get-AiInstructionsInstallJournalPortableNameKey -Value ([string]$operation.targetRelativePath)
         if (-not $paths.Add($pathKey)) { throw "$context.targetRelativePath duplicates another target path after Unicode NFC and invariant case normalization." }
+        $pathSegments = @(([string]$operation.targetRelativePath).Split('/') | ForEach-Object { Get-AiInstructionsInstallJournalPortableNameKey -Value $_ })
+        foreach ($otherPath in $validatedOperationPaths) {
+            if ([string]$operation.kind -cne 'swap-directory' -and [string]$otherPath.kind -cne 'swap-directory') { continue }
+            $prefixLength = [Math]::Min($pathSegments.Count,[int]$otherPath.segments.Count)
+            $hasCommonPrefix = $true
+            for ($segmentIndex = 0; $segmentIndex -lt $prefixLength; $segmentIndex++) {
+                if ([string]$pathSegments[$segmentIndex] -cne [string]$otherPath.segments[$segmentIndex]) {
+                    $hasCommonPrefix = $false
+                    break
+                }
+            }
+            if ($hasCommonPrefix) {
+                throw "$context.targetRelativePath conflicts with operation sequence $($otherPath.sequence) because swap-directory cannot coexist with an ancestor or descendant target path."
+            }
+        }
+        $validatedOperationPaths.Add([pscustomobject][ordered]@{ sequence=$sequence; kind=[string]$operation.kind; segments=$pathSegments }) | Out-Null
         Assert-AiInstructionsInstallJournalLeaf -Value $operation.stageLeaf -Context "$context.stageLeaf" -AllowNull -PortableName
         if ([string]$operation.method -ceq 'stage-rename' -and $null -eq $operation.stageLeaf) {
             throw "$context.stageLeaf must not be null when method is stage-rename."
@@ -1778,25 +1795,23 @@ function Get-AiInstructionsInstallRecoveryDecision {
     $allApplied = @($Journal.operations | Where-Object { -not $matchesApplied[[int64]$_.sequence] }).Count -eq 0
     $allOriginal = @($Journal.operations | Where-Object { -not $matchesOriginal[[int64]$_.sequence] }).Count -eq 0
     $allBackupEvidenceValid = @($Journal.operations | Where-Object { -not $backupEvidenceValid[[int64]$_.sequence] }).Count -eq 0
+    if (-not $allBackupEvidenceValid) {
+        $reasons = New-Object System.Collections.Generic.List[string]
+        foreach ($operation in @($Journal.operations)) {
+            $sequence = [int64]$operation.sequence
+            if ($backupEvidenceValid[$sequence]) { continue }
+            if ([string]$operation.kind -ceq 'create-file') { $reasons.Add("sequence $sequence backup must be null for create-file") }
+            elseif ([string]$operation.kind -ceq 'remove-file') { $reasons.Add("sequence $sequence tombstone backup does not match original") }
+            else { $reasons.Add("sequence $sequence backup does not match original") }
+        }
+        return [pscustomobject][ordered]@{ action='refuse'; reasons=$reasons.ToArray(); operations=@($Journal.operations | ForEach-Object { [pscustomobject][ordered]@{ sequence=[int64]$_.sequence; action='keep' } }) }
+    }
     if ([string]$Journal.phase -in @('committed','rolled-back')) {
         $allOriginalPermissions = @($Journal.operations | Where-Object { -not $permissionsMatchOriginal[[int64]$_.sequence] }).Count -eq 0
-        $matchesTerminal = if ([string]$Journal.phase -ceq 'committed') { $allApplied -and $allBackupEvidenceValid } else { $allOriginal -and $allOriginalPermissions -and $allBackupEvidenceValid }
+        $matchesTerminal = if ([string]$Journal.phase -ceq 'committed') { $allApplied } else { $allOriginal -and $allOriginalPermissions }
         $terminalAction = if ($matchesTerminal) { 'none' } else { 'refuse' }
         $reasons = New-Object System.Collections.Generic.List[string]
         if (-not $matchesTerminal) { $reasons.Add("phase $($Journal.phase) observations do not match the expected terminal state") }
-        foreach ($operation in @($Journal.operations)) {
-            $sequence = [int64]$operation.sequence
-            if (-not $backupEvidenceValid[$sequence]) { $reasons.Add("sequence $sequence backup does not match original") }
-        }
-        if ([string]$Journal.phase -ceq 'committed') {
-            foreach ($operation in @($Journal.operations)) {
-                $sequence = [int64]$operation.sequence
-                if ([string]$operation.kind -ceq 'remove-file' -and -not [bool]$bySequence[$sequence].exists -and
-                    $null -ne $bySequence[$sequence].backup -and -not $backupMatchesOriginal[$sequence]) {
-                    $reasons.Add("sequence $sequence tombstone does not match original")
-                }
-            }
-        }
         if ([string]$Journal.phase -ceq 'rolled-back') {
             foreach ($operation in @($Journal.operations)) {
                 $sequence = [int64]$operation.sequence
@@ -1806,14 +1821,6 @@ function Get-AiInstructionsInstallRecoveryDecision {
         return [pscustomobject][ordered]@{ action=$terminalAction; reasons=$reasons.ToArray(); operations=@($Journal.operations | ForEach-Object { [pscustomobject][ordered]@{ sequence=[int64]$_.sequence; action='keep' } }) }
     }
     if ([string]$Journal.phase -ceq 'applied' -and $allApplied) {
-        if (-not $allBackupEvidenceValid) {
-            $reasons = New-Object System.Collections.Generic.List[string]
-            foreach ($operation in @($Journal.operations)) {
-                $sequence = [int64]$operation.sequence
-                if (-not $backupEvidenceValid[$sequence]) { $reasons.Add("sequence $sequence backup does not match original") }
-            }
-            return [pscustomobject][ordered]@{ action='refuse'; reasons=$reasons.ToArray(); operations=@($Journal.operations | ForEach-Object { [pscustomobject][ordered]@{ sequence=[int64]$_.sequence; action='keep' } }) }
-        }
         return [pscustomobject][ordered]@{ action='commit'; reasons=@(); operations=@($Journal.operations | ForEach-Object { [pscustomobject][ordered]@{ sequence=[int64]$_.sequence; action='keep' } }) }
     }
 
@@ -1823,12 +1830,7 @@ function Get-AiInstructionsInstallRecoveryDecision {
     foreach ($operation in @($Journal.operations)) {
         $sequence = [int64]$operation.sequence
         $action = 'none'
-        if ([string]$operation.kind -ceq 'create-file' -and -not $backupEvidenceValid[$sequence]) {
-            $mustRefuse = $true
-            $action = 'keep'
-            $reasons.Add("sequence $sequence backup must be null for create-file")
-        }
-        elseif ($matchesOriginal[$sequence]) {
+        if ($matchesOriginal[$sequence]) {
             $action = if ($permissionsMatchOriginal[$sequence]) { 'none' } else { 'restore-permissions' }
         }
         elseif ($matchesApplied[$sequence]) {

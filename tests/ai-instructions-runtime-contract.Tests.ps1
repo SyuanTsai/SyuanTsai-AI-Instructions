@@ -2061,7 +2061,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{ 1 = $observation }
 
         $decision.action | Should Be 'refuse'
-        ($decision.reasons -join ' ') | Should Match 'sequence 1.*external change'
+        ($decision.reasons -join ' ') | Should Match 'sequence 1.*backup'
     }
 
     # Scenario: A remove tombstone has the recorded identity but bytes different from the original.
@@ -2074,7 +2074,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{ 1 = $observation }
 
         $decision.action | Should Be 'refuse'
-        ($decision.reasons -join ' ') | Should Match 'sequence 1.*external change'
+        ($decision.reasons -join ' ') | Should Match 'sequence 1.*backup'
     }
 
     # Scenario: A pending remove-file omits backupIdentity or records an identity different from its original object.
@@ -2249,6 +2249,102 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $decision.action | Should Be 'refuse'
         ($decision.reasons -join ' ') | Should Match 'sequence 2.*backup'
         @($decision.reasons).Count | Should BeGreaterThan 0
+    }
+
+    # Scenario: Applying recovery sees original target content but a residual write-file backup has different bytes.
+    # Purpose: Validate every observed backup before selecting even a no-op rollback action.
+    It 'UnitT172_refuses_applying_original_state_with_a_mismatched_residual_backup' {
+        $journal = Get-TestInstallJournalV1
+        $journal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20)
+        $observations = @{}
+        foreach ($operation in $journal.operations) {
+            $observations[[int64]$operation.sequence] = New-TestInstallObservation -Operation $operation -State $operation.original
+        }
+        $observations[[int64]1].backup.sha256 = '9' * 64
+
+        $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
+
+        $decision.action | Should Be 'refuse'
+        ($decision.reasons -join ' ') | Should Match 'sequence 1.*backup'
+        (@($decision.operations.action) -join ',') | Should Be 'keep,keep'
+    }
+
+    # Scenario: Rolling back restored original target content but not permissions, while the residual backup identity was replaced.
+    # Purpose: Refuse before selecting restore-permissions when backup ownership evidence is invalid.
+    It 'UnitT173_refuses_rolling_back_permission_drift_with_a_mismatched_backup_identity' {
+        $journal = Get-TestInstallJournalV1
+        $journal.phase = 'rolling-back'
+        $journal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20)
+        $observations = @{}
+        foreach ($operation in $journal.operations) {
+            $observations[[int64]$operation.sequence] = New-TestInstallObservation -Operation $operation -State $operation.original
+        }
+        $observations[[int64]1].permissions.readOnly = -not $observations[[int64]1].permissions.readOnly
+        $observations[[int64]1].backup.identity.fileId = '0000ABCD:99999999'
+
+        $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
+
+        $decision.action | Should Be 'refuse'
+        ($decision.reasons -join ' ') | Should Match 'sequence 1.*backup'
+        (@($decision.operations.action) -join ',') | Should Be 'keep,keep'
+    }
+
+    # Scenario: Applying recovery sees every target in its original state and no residual backup remains.
+    # Purpose: Preserve the safe no-op rollback decision when the global backup precondition succeeds.
+    It 'UnitT174_rolls_back_with_none_when_original_state_has_no_residual_backup' {
+        $journal = Get-TestInstallJournalV1
+        $journal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20)
+        $observations = @{}
+        foreach ($operation in $journal.operations) {
+            $observations[[int64]$operation.sequence] = New-TestInstallObservation -Operation $operation -State $operation.original -Backup $null
+        }
+
+        $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
+
+        $decision.action | Should Be 'roll-back'
+        (@($decision.operations.action) -join ',') | Should Be 'none,none'
+    }
+
+    # Scenario: A swap-directory target is an ancestor or descendant of another operation target after portable normalization.
+    # Purpose: Reject journals whose operations would record contradictory state for the same directory tree.
+    It 'UnitT175_rejects_swap_directory_ancestor_or_descendant_target_<Case>' -TestCases @(
+        @{ Case='swap-parent'; SwapPath='runtime'; OtherPath='runtime/marker'; Reverse=$false },
+        @{ Case='swap-child'; SwapPath='runtime/dir'; OtherPath='runtime'; Reverse=$true },
+        @{ Case='case-insensitive'; SwapPath='Runtime'; OtherPath='runtime/x'; Reverse=$false }
+    ) {
+        param($Case,$SwapPath,$OtherPath,$Reverse)
+        $journal = Get-TestInstallJournalV1
+        if ($Reverse) {
+            $swapSource = ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20)
+            $swapOperation = $swapSource.operations[0]
+            $swapOperation.sequence = 2
+            $swapOperation.kind = 'swap-directory'
+            $swapOperation.targetRelativePath = $SwapPath
+            $swapOperation.stageLeaf = 'swap-directory.stage'
+            $swapOperation.backupLeaf = 'swap-directory.backup'
+            $journal.operations[0].targetRelativePath = $OtherPath
+            $journal.operations = @($journal.operations[0],$swapOperation)
+        }
+        else {
+            $journal.operations[0].kind = 'swap-directory'
+            $journal.operations[0].targetRelativePath = $SwapPath
+            $journal.operations[1].targetRelativePath = $OtherPath
+        }
+        $json = $journal | ConvertTo-Json -Depth 20
+
+        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'sequence 2.*sequence 1.*swap-directory'
+    }
+
+    # Scenario: A swap-directory target and another operation only share a textual prefix, not a normalized path segment.
+    # Purpose: Accept sibling namespaces such as runtime and runtime2.
+    It 'UnitT176_accepts_swap_directory_with_a_non_descendant_textual_prefix' {
+        $journal = Get-TestInstallJournalV1
+        $journal.operations[0].kind = 'swap-directory'
+        $journal.operations[0].targetRelativePath = 'runtime'
+        $journal.operations[1].targetRelativePath = 'runtime2/x'
+        $json = $journal | ConvertTo-Json -Depth 20
+
+        { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json | Out-Null } | Should Not Throw
     }
 
     # Scenario: A journal uses Unicode whitespace at the end of a lock leaf or target path, plus whitespace-only values.
