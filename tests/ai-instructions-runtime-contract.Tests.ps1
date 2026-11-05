@@ -82,6 +82,28 @@ function Copy-TestCanonicalRuntimeText {
     [IO.File]::WriteAllBytes($Destination,$utf8.GetBytes($utf8.GetString($bytes).Replace("`r`n","`n")))
 }
 
+function New-TestRuntimeV3Fixture {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    New-Item -ItemType Directory -Force -Path $Path,(Join-Path $Path 'catalog') | Out-Null
+    $manifest = Import-PowerShellDataFile -LiteralPath (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psd1')
+    foreach ($relativePath in @($manifest.FileList)) {
+        $destination = Join-Path $Path $relativePath
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+        Copy-TestCanonicalRuntimeText -Source (Join-Path $script:RepositoryRoot "scripts\$relativePath") -Destination $destination
+    }
+    Copy-TestCanonicalRuntimeText `
+        -Source (Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog-v3.example.json') `
+        -Destination (Join-Path $Path 'catalog\skills-catalog.json')
+    $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\runtime-bundle-v3.example.json') | ConvertFrom-Json
+    return [pscustomobject]@{ Root=$Path; Bundle=$bundle }
+}
+
+function Update-TestRuntimeV3Inventory {
+    param([Parameter(Mandatory = $true)][object] $Fixture)
+    $Fixture.Bundle.inventory = @(Get-AiInstructionsRuntimeInventory -RuntimeRoot $Fixture.Root)
+    $Fixture.Bundle.inventorySha256 = Get-AiInstructionsRuntimeInventorySha256 -Inventory $Fixture.Bundle.inventory
+}
+
 Describe 'AI instructions runtime contracts' {
     BeforeAll {
         Import-Module $script:RuntimeContractModule -Force
@@ -496,10 +518,12 @@ Describe 'AI instructions runtime contracts' {
     It 'UnitT97_validates_v5_and_migrates_v1_through_v4_with_default_projections' {
         $example = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v5.example.json') | ConvertFrom-Json
         { Assert-AiInstructionsSyncConfigurationV5 -Configuration $example } | Should Not Throw
+        @($example.projections.user) | Should Be @('user-agents','user-claude')
+        @($example.projections.project).Count | Should Be 0
         foreach ($version in 1..4) {
             $migrated = ConvertTo-AiInstructionsSyncConfigurationV5 -ExistingConfiguration (New-TestConfigurationDocument -SchemaVersion $version) -CatalogRepository $script:CanonicalRepository -CatalogRef ('c' * 40)
             $migrated.schemaVersion | Should Be 5
-            @($migrated.projections.user) | Should Be @('user-agents')
+            @($migrated.projections.user) | Should Be @('user-agents','user-claude')
             @($migrated.projections.project).Count | Should Be 0
             [string]$migrated.catalog.ref | Should Be ('c' * 40)
         }
@@ -528,31 +552,24 @@ Describe 'AI instructions runtime contracts' {
         }
     }
 
-    # Scenario: The checked-in v3 bundle describes an exact two-file runtime fixture.
-    # Purpose: Exercise the reader's platform, capability, projection, and inventory bindings.
+    # Scenario: The checked-in v3 bundle describes the complete platform runtime and installed Catalog fixture.
+    # Purpose: Exercise closure, platform, capability, projection, fingerprint, and inventory bindings independently of sync v4/v5 rollout.
     It 'UnitT99_validates_the_runtime_bundle_v3_example' {
-        $runtimeRoot = Join-Path $TestDrive 'runtime-v3-example'
-        New-Item -ItemType Directory -Force -Path $runtimeRoot,(Join-Path $runtimeRoot 'platform') | Out-Null
-        Copy-TestCanonicalRuntimeText -Source (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psd1') -Destination (Join-Path $runtimeRoot 'platform-runtime.psd1')
-        Copy-TestCanonicalRuntimeText -Source (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psm1') -Destination (Join-Path $runtimeRoot 'platform-runtime.psm1')
-        foreach ($name in @('PlatformNative.cs','UnixNative.cs','WindowsNative.cs','OwnedProcess.cs','UnixProcess.cs','WindowsProcess.cs')) {
-            Copy-TestCanonicalRuntimeText -Source (Join-Path $script:RepositoryRoot "scripts\platform\$name") -Destination (Join-Path $runtimeRoot "platform\$name")
-        }
-        $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\runtime-bundle-v3.example.json') | ConvertFrom-Json
-        $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v5.example.json') | ConvertFrom-Json
-        { Assert-AiInstructionsRuntimeBundleV3 -Bundle $bundle -Configuration $configuration -RuntimeRoot $runtimeRoot } | Should Not Throw
+        $fixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-example')
+        $actualInventory = @(Get-AiInstructionsRuntimeInventory -RuntimeRoot $fixture.Root)
+        (Get-AiInstructionsRuntimeInventorySha256 -Inventory $fixture.Bundle.inventory) | Should Be $fixture.Bundle.inventorySha256
+        (Get-AiInstructionsRuntimeInventorySha256 -Inventory $actualInventory) | Should Be $fixture.Bundle.inventorySha256
+        $configurationV5 = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v5.example.json') | ConvertFrom-Json
+        $configurationV4 = New-TestConfigurationDocument -SchemaVersion 4
+        $configurationV4.catalog.ref = $fixture.Bundle.commit
+        { Assert-AiInstructionsRuntimeBundleV3 -Bundle $fixture.Bundle -Configuration $configurationV4 -RuntimeRoot $fixture.Root } | Should Not Throw
+        { Assert-AiInstructionsRuntimeBundleV3 -Bundle $fixture.Bundle -Configuration $configurationV5 -RuntimeRoot $fixture.Root } | Should Not Throw
     }
 
     # Scenario: Platform metadata, capability declarations, and required runtime inventory are malformed.
     # Purpose: Fail closed on every v3-only contract boundary.
     It 'UnitT86_rejects_invalid_runtime_bundle_v3_fields' {
-        $runtimeRoot = Join-Path $TestDrive 'runtime-v3-negative'
-        New-Item -ItemType Directory -Force -Path $runtimeRoot,(Join-Path $runtimeRoot 'platform') | Out-Null
-        Copy-TestCanonicalRuntimeText -Source (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psd1') -Destination (Join-Path $runtimeRoot 'platform-runtime.psd1')
-        Copy-TestCanonicalRuntimeText -Source (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psm1') -Destination (Join-Path $runtimeRoot 'platform-runtime.psm1')
-        foreach ($name in @('PlatformNative.cs','UnixNative.cs','WindowsNative.cs','OwnedProcess.cs','UnixProcess.cs','WindowsProcess.cs')) {
-            Copy-TestCanonicalRuntimeText -Source (Join-Path $script:RepositoryRoot "scripts\platform\$name") -Destination (Join-Path $runtimeRoot "platform\$name")
-        }
+        $fixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-negative')
         $bundlePath = Join-Path $script:RepositoryRoot 'catalog\examples\runtime-bundle-v3.example.json'
         $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v5.example.json') | ConvertFrom-Json
         $cases = @(
@@ -567,12 +584,58 @@ Describe 'AI instructions runtime contracts' {
         foreach ($case in $cases) {
             $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
             & $case.Mutate $bundle
-            (Get-RuntimeContractError { Assert-AiInstructionsRuntimeBundleV3 -Bundle $bundle -Configuration $configuration -RuntimeRoot $runtimeRoot }) | Should Match $case.Pattern
+            if ($case.Pattern -cne 'digest') { $bundle.inventorySha256 = Get-AiInstructionsRuntimeInventorySha256 -Inventory $bundle.inventory }
+            (Get-RuntimeContractError { Assert-AiInstructionsRuntimeBundleV3 -Bundle $bundle -Configuration $configuration -RuntimeRoot $fixture.Root }) | Should Match $case.Pattern
         }
-        Remove-Item -LiteralPath (Join-Path $runtimeRoot 'platform-runtime.psm1')
-        $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
-        $bundle.inventory = @($bundle.inventory | Where-Object { $_.path -cne 'platform-runtime.psm1' })
-        $bundle.inventorySha256 = Get-AiInstructionsRuntimeInventorySha256 -Inventory $bundle.inventory
-        (Get-RuntimeContractError { Assert-AiInstructionsRuntimeBundleV3 -Bundle $bundle -Configuration $configuration -RuntimeRoot $runtimeRoot }) | Should Match 'must include.*platform-runtime.psm1'
+    }
+
+    # Scenario: Installed platform closure, Catalog projections, manifest trust pin, or source fingerprint drifts from the v3 bundle.
+    # Purpose: Bind every executable runtime dependency and the selected projection contract before use.
+    It 'UnitT87_rejects_runtime_bundle_v3_closure_and_projection_drift' {
+        $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v5.example.json') | ConvertFrom-Json
+        $missingFixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-missing-closure')
+        Remove-Item -LiteralPath (Join-Path $missingFixture.Root 'platform\Linux.psm1')
+        Update-TestRuntimeV3Inventory -Fixture $missingFixture
+        (Get-RuntimeContractError { Assert-AiInstructionsRuntimeBundleV3 -Bundle $missingFixture.Bundle -Configuration $configuration -RuntimeRoot $missingFixture.Root }) |
+            Should Match 'missing platform runtime closure file'
+
+        $hashFixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-closure-hash')
+        @($hashFixture.Bundle.inventory | Where-Object path -eq 'platform/Linux.psm1')[0].sha256 = '0' * 64
+        $hashFixture.Bundle.inventorySha256 = Get-AiInstructionsRuntimeInventorySha256 -Inventory $hashFixture.Bundle.inventory
+        (Get-RuntimeContractError { Assert-AiInstructionsRuntimeBundleV3 -Bundle $hashFixture.Bundle -Configuration $configuration -RuntimeRoot $hashFixture.Root }) |
+            Should Match 'inventory'
+
+        $manifestFixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-manifest-hash')
+        $manifestFixture.Bundle.platformRuntime.manifestSha256 = '0' * 64
+        (Get-RuntimeContractError { Assert-AiInstructionsRuntimeBundleV3 -Bundle $manifestFixture.Bundle -Configuration $configuration -RuntimeRoot $manifestFixture.Root }) |
+            Should Match 'manifestSha256'
+
+        $catalogV2Fixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-catalog-v2')
+        $catalogPath = Join-Path $catalogV2Fixture.Root 'catalog\skills-catalog.json'
+        $catalog = Get-Content -Raw -Encoding UTF8 -LiteralPath $catalogPath | ConvertFrom-Json
+        $catalog.schemaVersion = 2
+        [IO.File]::WriteAllText($catalogPath,($catalog | ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false))
+        Update-TestRuntimeV3Inventory -Fixture $catalogV2Fixture
+        (Get-RuntimeContractError { Assert-AiInstructionsRuntimeBundleV3 -Bundle $catalogV2Fixture.Bundle -Configuration $configuration -RuntimeRoot $catalogV2Fixture.Root }) |
+            Should Match 'Catalog must use schemaVersion 3'
+
+        $catalogProjectionFixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-catalog-projection')
+        $catalogProjectionPath = Join-Path $catalogProjectionFixture.Root 'catalog\skills-catalog.json'
+        $catalogProjection = Get-Content -Raw -Encoding UTF8 -LiteralPath $catalogProjectionPath | ConvertFrom-Json
+        $catalogProjection.projections = @($catalogProjection.projections | Where-Object id -ne 'project-agents')
+        [IO.File]::WriteAllText($catalogProjectionPath,($catalogProjection | ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false))
+        Update-TestRuntimeV3Inventory -Fixture $catalogProjectionFixture
+        (Get-RuntimeContractError { Assert-AiInstructionsRuntimeBundleV3 -Bundle $catalogProjectionFixture.Bundle -Configuration $configuration -RuntimeRoot $catalogProjectionFixture.Root }) |
+            Should Match 'projectionContractSha256'
+
+        $projectionFixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-projection')
+        $projectionFixture.Bundle.projectionContractSha256 = '0' * 64
+        (Get-RuntimeContractError { Assert-AiInstructionsRuntimeBundleV3 -Bundle $projectionFixture.Bundle -Configuration $configuration -RuntimeRoot $projectionFixture.Root }) |
+            Should Match 'projectionContractSha256'
+
+        $fingerprintFixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-fingerprint')
+        $fingerprintFixture.Bundle.platformRuntime.sourceFingerprint = '0' * 64
+        (Get-RuntimeContractError { Assert-AiInstructionsRuntimeBundleV3 -Bundle $fingerprintFixture.Bundle -Configuration $configuration -RuntimeRoot $fingerprintFixture.Root }) |
+            Should Match 'sourceFingerprint'
     }
 }

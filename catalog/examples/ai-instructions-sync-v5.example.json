@@ -10,5 +10,5 @@
     "excludeSkills": ["capture-private-course-knowledge"]
   },
   "updates": { "mode": "notify-only", "channel": "protected-branch", "ref": "main", "minimumCheckIntervalMinutes": 1440 },
-  "projections": { "user": ["user-agents", "user-claude"], "project": ["project-agents"] }
+  "projections": { "user": ["user-agents", "user-claude"], "project": [] }
 }

@@ -41,7 +41,9 @@ Describe 'AI instructions updater workflow' {
         $bundleBefore = [IO.File]::ReadAllBytes($bundlePath)
         $configurationBefore = [IO.File]::ReadAllBytes($configurationPath)
 
-        $message = Get-RuntimeContractError { Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck }
+        $message = $null
+        try { Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck | Out-Null }
+        catch { $message = $_.Exception.Message }
 
         $message | Should Be 'Runtime bundle schema version 3 requires a projection-aware installer.'
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($bundlePath)) | Should Be ([Convert]::ToBase64String($bundleBefore))

@@ -2693,6 +2693,32 @@ Describe 'SYP214 USER-only bootstrap fixture evidence' -Tag 'Syp214FixtureEviden
         Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
     }
 
+    # Scenario: Recovery is requested while the installed sync configuration already uses schema v5.
+    # Purpose: Reject the projection-aware contract before opening or applying the recovery journal.
+    It 'InterT39_rejects_sync_v5_before_recovery_mutation' {
+        $markerPath = Join-Path $targetRoot 'recovery-marker.bin'
+        $journalPath = Join-Path $caseRoot 'recovery/skill-migration.json'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $journalPath) | Out-Null
+        [IO.File]::WriteAllBytes($markerPath,[byte[]]@(0x10,0x20,0x30,0x40))
+        [IO.File]::WriteAllBytes($journalPath,[byte[]]@(0x7b,0x7d,0x0a))
+        $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:TestConfigurationPath | ConvertFrom-Json
+        $configuration.schemaVersion = 5
+        [IO.File]::WriteAllText($script:TestConfigurationPath,($configuration | ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false))
+        $markerLength = (Get-Item -LiteralPath $markerPath).Length
+        $markerHash = (Get-FileHash -LiteralPath $markerPath -Algorithm SHA256).Hash
+        $journalLength = (Get-Item -LiteralPath $journalPath).Length
+        $journalHash = (Get-FileHash -LiteralPath $journalPath -Algorithm SHA256).Hash
+
+        $result = Invoke-Syp214Bootstrap -RecoverSkillMigration $journalPath -CaptureFailure
+
+        $result.exitCode | Should Not Be 0
+        ($result.output -join [Environment]::NewLine) | Should Match 'AI Instructions sync configuration schema version 5 requires a projection-aware installer\.'
+        (Get-Item -LiteralPath $markerPath).Length | Should Be $markerLength
+        (Get-FileHash -LiteralPath $markerPath -Algorithm SHA256).Hash | Should Be $markerHash
+        (Get-Item -LiteralPath $journalPath).Length | Should Be $journalLength
+        (Get-FileHash -LiteralPath $journalPath -Algorithm SHA256).Hash | Should Be $journalHash
+    }
+
     # Scenario: Valid USER and old REPO manifests own the same complete immutable Skill.
     # Purpose: Retire only ignored unchanged files, retain backup, and never rebuild after a branch change.
     It 'InterT40_verified_USER_allows_exact_migration_after_a_mutation_free_dry_run' {
