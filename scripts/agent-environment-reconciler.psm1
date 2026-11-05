@@ -1126,9 +1126,9 @@ function Invoke-UserSkillsRecovery {
     $journalRelative = '.agents/update-agent-environment.recovery.json'
     $lockStream = $null
     $recoveryBackupPath = $null
-    $existingManifestSnapshot = Get-AgentEnvironmentManifestSnapshot -Path $manifestPath
     try {
         if (-not (Test-Path -LiteralPath $journalPath)) { return [pscustomobject][ordered]@{ schemaVersion=1; outcome='nothing-to-recover'; exitCode=0; rollbackState='not-needed' } }
+        $existingManifestSnapshot = Get-AgentEnvironmentManifestSnapshot -Path $manifestPath
         Assert-AgentEnvironmentPathSafe -Root $home -RelativePath $journalRelative | Out-Null
         if (-not (Test-Path -LiteralPath $journalPath -PathType Leaf)) { throw 'Agent environment recovery journal path must be a file.' }
         if (Test-Path -LiteralPath $lockPath) {
@@ -1140,6 +1140,7 @@ function Invoke-UserSkillsRecovery {
             $lockStream = [System.IO.File]::Open($lockPath,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
         }
         catch [System.IO.IOException] { return New-AgentEnvironmentRecoveryConcurrentResult }
+        if (-not (Test-Path -LiteralPath $journalPath)) { return [pscustomobject][ordered]@{ schemaVersion=1; outcome='nothing-to-recover'; exitCode=0; rollbackState='not-needed' } }
         $lockedManifestSnapshot = Get-AgentEnvironmentManifestSnapshot -Path $manifestPath
         if ($existingManifestSnapshot.Identity -cne $lockedManifestSnapshot.Identity) {
             return New-AgentEnvironmentRecoveryConcurrentResult

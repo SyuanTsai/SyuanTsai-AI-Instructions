@@ -889,6 +889,37 @@ if (-not $ValidateOnly) { throw 'Validation switch required.' }
         ([System.IO.File]::ReadAllText($stderrPath)).Contains('is not recognized') | Should Be $false
     }
 
+    # Scenario: The installed recovery entry point reads a valid v3 manifest without a recovery journal.
+    # Purpose: Ensure recovery returns nothing-to-recover without validating the projection-aware manifest.
+    It 'InterT59b_recovers_a_v3_manifest_without_a_recovery_journal' {
+        $entry = Join-Path $script:RepositoryRoot 'scripts\update-agent-environment.ps1'
+        $codexHome = Join-Path $TestDrive ('recovery-v3-codex-' + [Guid]::NewGuid().ToString('N'))
+        $userHome = Join-Path $TestDrive ('recovery-v3-user-' + [Guid]::NewGuid().ToString('N'))
+        $runtimeRoot = Join-Path $codexHome 'hooks\ai-instructions-runtime'
+        $agentsRoot = Join-Path $userHome '.agents'
+        New-Item -ItemType Directory -Force -Path $runtimeRoot,$agentsRoot | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $codexHome 'ai-instructions-install.lock'),'')
+        [System.IO.File]::WriteAllText((Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'), @'
+[CmdletBinding()]
+param([switch]$ValidateOnly)
+if (-not $ValidateOnly) { throw 'Validation switch required.' }
+'@)
+        Copy-Item -LiteralPath $script:ModulePath -Destination (Join-Path $runtimeRoot 'agent-environment-reconciler.psm1') -Force
+        Copy-Item -LiteralPath $script:ContractPath -Destination (Join-Path $runtimeRoot 'skills-catalog-contract.psm1') -Force
+        $manifestPath = Join-Path $agentsRoot 'catalog-skills.manifest.json'
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v3.example.json') -Destination $manifestPath -Force
+        $manifestBytesBefore = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($manifestPath))
+
+        $output = @(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry `
+            -CodexHome $codexHome -UserHome $userHome -Recover -OutputFormat Json)
+        $exitCode = $LASTEXITCODE
+
+        $exitCode | Should Be 0
+        $output.Count | Should Be 1
+        ($output[0] | ConvertFrom-Json).outcome | Should Be 'nothing-to-recover'
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($manifestPath)) | Should Be $manifestBytesBefore
+    }
+
     # Scenario: The stable entry point receives a malformed recovery journal while recovery is explicitly requested.
     # Purpose: Verify the child process returns machine-readable recovery-required evidence and preserves the journal for operator remediation.
     It 'InterT60_returns_structured_recovery_evidence_and_preserves_an_invalid_recovery_journal' {
