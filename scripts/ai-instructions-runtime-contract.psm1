@@ -1286,16 +1286,25 @@ function Assert-AiInstructionsInstallJournalInteger {
     )
     $typeCode = if ($null -eq $Value) { [TypeCode]::Empty } else { [Type]::GetTypeCode($Value.GetType()) }
     $valid = $typeCode -in $numericTypeCodes
-    if ($valid -and $typeCode -eq [TypeCode]::Double) { $valid = -not [double]::IsNaN([double]$Value) -and -not [double]::IsInfinity([double]$Value) }
-    if ($valid -and $typeCode -eq [TypeCode]::Single) { $valid = -not [single]::IsNaN([single]$Value) -and -not [single]::IsInfinity([single]$Value) }
-    if ($valid) {
+    if ($valid -and $typeCode -in @([TypeCode]::Double,[TypeCode]::Single)) {
+        $doubleValue = [double]$Value
+        $valid = -not [double]::IsNaN($doubleValue) -and -not [double]::IsInfinity($doubleValue) -and
+            [Math]::Floor($doubleValue) -eq $doubleValue -and
+            $doubleValue -ge -9.2233720368547758E18 -and $doubleValue -lt 9.2233720368547758E18 -and
+            $doubleValue -ge [double]$Minimum
+    }
+    elseif ($valid -and $typeCode -eq [TypeCode]::Decimal) {
+        $valid = [decimal]::Truncate([decimal]$Value) -eq [decimal]$Value -and
+            [decimal]$Value -ge [decimal][int64]::MinValue -and [decimal]$Value -le [decimal][int64]::MaxValue -and
+            [decimal]$Value -ge [decimal]$Minimum
+    }
+    elseif ($valid) {
         try { $decimalValue = [decimal]$Value }
         catch { $valid = $false }
-    }
-    if ($valid) {
-        $valid = [decimal]::Truncate($decimalValue) -eq $decimalValue -and
-            $decimalValue -ge [decimal][int64]::MinValue -and $decimalValue -le [decimal][int64]::MaxValue -and
-            $decimalValue -ge [decimal]$Minimum
+        if ($valid) {
+            $valid = $decimalValue -ge [decimal][int64]::MinValue -and $decimalValue -le [decimal][int64]::MaxValue -and
+                $decimalValue -ge [decimal]$Minimum
+        }
     }
     if (-not $valid) {
         throw "$Context must be an integer greater than or equal to $Minimum."
@@ -1733,11 +1742,13 @@ function Get-AiInstructionsInstallRecoveryDecision {
     $matchesOriginal = @{}
     $permissionsMatchOriginal = @{}
     $backupMatchesOriginal = @{}
+    $backupEvidenceValid = @{}
     foreach ($operation in @($Journal.operations)) {
         $sequence = [int64]$operation.sequence
         $matchesApplied[$sequence] = Test-AiInstructionsInstallJournalStateMatch -Observation $bySequence[$sequence] -State $operation.applied
         $matchesOriginal[$sequence] = Test-AiInstructionsInstallJournalStateMatch -Observation $bySequence[$sequence] -State $operation.original -AlternativeIdentity $operation.backupIdentity
         $backupMatchesOriginal[$sequence] = Test-AiInstructionsInstallJournalBackupMatch -Backup $bySequence[$sequence].backup -Original $operation.original -BackupIdentity $operation.backupIdentity
+        $backupEvidenceValid[$sequence] = -not [bool]$operation.original.exists -or $null -eq $bySequence[$sequence].backup -or $backupMatchesOriginal[$sequence]
         if ([string]$operation.kind -ceq 'remove-file' -and -not [bool]$bySequence[$sequence].exists) {
             if ([string]$Journal.phase -ceq 'committed') {
                 $matchesApplied[$sequence] = ($null -eq $bySequence[$sequence].backup -or $backupMatchesOriginal[$sequence])
@@ -1753,12 +1764,17 @@ function Get-AiInstructionsInstallRecoveryDecision {
     }
     $allApplied = @($Journal.operations | Where-Object { -not $matchesApplied[[int64]$_.sequence] }).Count -eq 0
     $allOriginal = @($Journal.operations | Where-Object { -not $matchesOriginal[[int64]$_.sequence] }).Count -eq 0
+    $allBackupEvidenceValid = @($Journal.operations | Where-Object { -not $backupEvidenceValid[[int64]$_.sequence] }).Count -eq 0
     if ([string]$Journal.phase -in @('committed','rolled-back')) {
         $allOriginalPermissions = @($Journal.operations | Where-Object { -not $permissionsMatchOriginal[[int64]$_.sequence] }).Count -eq 0
-        $matchesTerminal = if ([string]$Journal.phase -ceq 'committed') { $allApplied } else { $allOriginal -and $allOriginalPermissions }
+        $matchesTerminal = if ([string]$Journal.phase -ceq 'committed') { $allApplied -and $allBackupEvidenceValid } else { $allOriginal -and $allOriginalPermissions }
         $terminalAction = if ($matchesTerminal) { 'none' } else { 'refuse' }
         $reasons = New-Object System.Collections.Generic.List[string]
         if (-not $matchesTerminal) { $reasons.Add("phase $($Journal.phase) observations do not match the expected terminal state") }
+        foreach ($operation in @($Journal.operations)) {
+            $sequence = [int64]$operation.sequence
+            if (-not $backupEvidenceValid[$sequence]) { $reasons.Add("sequence $sequence backup does not match original") }
+        }
         if ([string]$Journal.phase -ceq 'committed') {
             foreach ($operation in @($Journal.operations)) {
                 $sequence = [int64]$operation.sequence
@@ -1777,6 +1793,14 @@ function Get-AiInstructionsInstallRecoveryDecision {
         return [pscustomobject][ordered]@{ action=$terminalAction; reasons=$reasons.ToArray(); operations=@($Journal.operations | ForEach-Object { [pscustomobject][ordered]@{ sequence=[int64]$_.sequence; action='keep' } }) }
     }
     if ([string]$Journal.phase -ceq 'applied' -and $allApplied) {
+        if (-not $allBackupEvidenceValid) {
+            $reasons = New-Object System.Collections.Generic.List[string]
+            foreach ($operation in @($Journal.operations)) {
+                $sequence = [int64]$operation.sequence
+                if (-not $backupEvidenceValid[$sequence]) { $reasons.Add("sequence $sequence backup does not match original") }
+            }
+            return [pscustomobject][ordered]@{ action='refuse'; reasons=$reasons.ToArray(); operations=@($Journal.operations | ForEach-Object { [pscustomobject][ordered]@{ sequence=[int64]$_.sequence; action='keep' } }) }
+        }
         return [pscustomobject][ordered]@{ action='commit'; reasons=@(); operations=@($Journal.operations | ForEach-Object { [pscustomobject][ordered]@{ sequence=[int64]$_.sequence; action='keep' } }) }
     }
 

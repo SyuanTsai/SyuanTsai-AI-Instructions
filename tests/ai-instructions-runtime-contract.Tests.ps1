@@ -220,13 +220,34 @@ function New-TestInstallObservation {
         }
         else { $null }
     }
+    $copyIdentity = {
+        param([AllowNull()][object] $Identity)
+        if ($null -eq $Identity) { $null }
+        else {
+            [pscustomobject]@{
+                kind = $Identity.kind
+                device = $Identity.device
+                fileId = $Identity.fileId
+            }
+        }
+    }
+    $observedIdentity = & $copyIdentity $State.identity
+    $observedBackup = if ($null -eq $Backup) { $null }
+        else {
+            [pscustomobject]@{
+                exists = $Backup.exists
+                sha256 = $Backup.sha256
+                length = $Backup.length
+                identity = & $copyIdentity $Backup.identity
+            }
+        }
     return [pscustomobject]@{
         exists = [bool]$State.exists
         sha256 = $State.sha256
         length = $State.length
-        identity = $State.identity
+        identity = $observedIdentity
         permissions = if ([bool]$State.exists) { $observedPermissions } else { $null }
-        backup = $Backup
+        backup = $observedBackup
     }
 }
 
@@ -1812,7 +1833,11 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $observations = @{
             1 = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].original
         }
-        $observations[1].identity = $journal.operations[0].backupIdentity
+        $observations[1].identity = [pscustomobject]@{
+            kind = $journal.operations[0].backupIdentity.kind
+            device = $journal.operations[0].backupIdentity.device
+            fileId = $journal.operations[0].backupIdentity.fileId
+        }
 
         $terminalDecision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
         $terminalDecision.action | Should Be 'none'
@@ -2096,6 +2121,55 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $stringJson = $source.Replace('"processId": 4242','"processId": "4242"')
         (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $stringJson }) | Should Match 'owner.processId.*integer'
         (Test-Json -Json $stringJson -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
+    }
+
+    # Scenario: Floating-point values that round to zero when coerced to Decimal are supplied as journal integers.
+    # Purpose: Validate integer semantics against the original floating-point value before any narrowing conversion.
+    It 'UnitT166_rejects_fractional_subnormal_lengths_without_decimal_rounding' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'UnitT166 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.' }
+        foreach ($value in @('1e-29','0.5','1E-300')) {
+            $source = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-install-journal-v1.example.json')
+            $json = $source.Replace('"length": 512','"length": ' + $value)
+            (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'length.*integer'
+        }
+
+        $source = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-install-journal-v1.example.json')
+        $json = $source.Replace('"length": 512','"length": 4242.0')
+        { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json | Out-Null } | Should Not Throw
+    }
+
+    # Scenario: An applied or committed write-file retains a backup that no longer proves the original bytes and identity.
+    # Purpose: Refuse terminal cleanup when a residual backup was replaced, while allowing a matching or absent backup.
+    It 'UnitT167_validates_residual_write_file_backups_before_terminal_decision' {
+        $appliedJournal = Get-TestInstallJournalV1
+        $appliedJournal.phase = 'applied'
+        foreach ($operation in $appliedJournal.operations) { $operation.state = 'applied' }
+        $appliedJournal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($appliedJournal | ConvertTo-Json -Depth 20)
+        $observations = @{}
+        foreach ($operation in $appliedJournal.operations) { $observations[[int64]$operation.sequence] = New-TestInstallObservation -Operation $operation -State $operation.applied }
+        $observations[[int64]1].backup.sha256 = '9' * 64
+        $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $appliedJournal -Observations $observations
+        $decision.action | Should Be 'refuse'
+        ($decision.reasons -join ' ') | Should Match 'sequence 1 backup'
+
+        $observations[[int64]1] = New-TestInstallObservation -Operation $appliedJournal.operations[0] -State $appliedJournal.operations[0].applied
+        $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $appliedJournal -Observations $observations
+        $decision.action | Should Be 'commit'
+
+        $committedJournal = Get-TestInstallJournalV1
+        $committedJournal.phase = 'committed'
+        foreach ($operation in $committedJournal.operations) { $operation.state = 'applied' }
+        $committedJournal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($committedJournal | ConvertTo-Json -Depth 20)
+        $observations = @{}
+        foreach ($operation in $committedJournal.operations) { $observations[[int64]$operation.sequence] = New-TestInstallObservation -Operation $operation -State $operation.applied }
+        $observations[[int64]1].backup.identity.fileId = '0000ABCD:99999999'
+        $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $committedJournal -Observations $observations
+        $decision.action | Should Be 'refuse'
+        ($decision.reasons -join ' ') | Should Match 'sequence 1 backup'
+
+        $observations[[int64]1].backup = $null
+        $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $committedJournal -Observations $observations
+        $decision.action | Should Be 'none'
     }
 
     # Scenario: A journal uses Unicode whitespace at the end of a lock leaf or target path, plus whitespace-only values.
