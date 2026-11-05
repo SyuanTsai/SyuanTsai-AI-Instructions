@@ -562,6 +562,44 @@ if errorlevel 1 exit /b 92
         }
     }
 
+    # Scenario: A linked worktree has a syntactically invalid manifest during authorized cleanup.
+    # Purpose: Fail under the cleanup lock before the index, shared excludes, or managed bytes can change.
+    It 'InterT69c_fails_closed_when_a_linked_worktree_manifest_is_not_valid_json' {
+        $targetRoot = Join-Path $TestDrive 'linked-malformed-manifest-cleanup'
+        New-PollutedTestRepository -Path $targetRoot
+        $linkedRoot = Join-Path $TestDrive 'linked-malformed-manifest-cleanup-worktree'
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','cleanup-linked-malformed-manifest-fixture',$linkedRoot) | Out-Null
+        try {
+            $linkedManifestPath = Join-Path $linkedRoot $script:ManifestRelativePath
+            Set-CleanupTestText -Path $linkedManifestPath -Value '{ malformed json'
+            $indexPath = (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','index') | Select-Object -First 1).Trim()
+            if (-not [IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $targetRoot $indexPath }
+            $excludePath = (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
+            if (-not [IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+            $indexBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath))
+            $excludeBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+            $manifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot $script:ManifestRelativePath)))
+            $agentBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md')))
+            $linkedManifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath))
+            $headBefore = (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim()
+
+            $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+
+            $result.ExitCode | Should Not Be 0
+            $result.Output | Should Match '(?is)linked worktree manifest.*(invalid json|unexpected character|unexpected token)'
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath)) | Should Be $indexBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot $script:ManifestRelativePath))) | Should Be $manifestBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md'))) | Should Be $agentBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath)) | Should Be $linkedManifestBefore
+            (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim() | Should Be $headBefore
+            @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
+        }
+        finally {
+            Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
+        }
+    }
+
     # Scenario: Bootstrap or another cleanup process holds the shared repository runtime lock.
     # Purpose: Prevent cleanup index changes from interleaving with stash, manifest, or exclude transactions.
     It 'InterT70_refuses_cleanup_while_the_repository_runtime_lock_is_held' {

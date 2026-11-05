@@ -900,6 +900,47 @@ if errorlevel 1 exit /b 92
         }
     }
 
+    # Scenario: A linked worktree has a syntactically invalid manifest while the current worktree needs tracked-artifact remediation.
+    # Purpose: Fail under the repository lock before remediation can change the index, shared excludes, managed bytes, or commit history.
+    It 'InterT68f_fails_closed_when_a_linked_worktree_manifest_is_not_valid_json' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
+        $linkedRoot = Join-Path $TestDrive 'linked-malformed-manifest-worktree'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','linked-malformed-manifest-fixture',$linkedRoot) | Out-Null
+        try {
+            Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $linkedRoot | Out-Null
+            $linkedManifestPath = Join-Path $linkedRoot $script:ManifestPath
+            Set-TestText -Path $linkedManifestPath -Value '{ malformed json'
+            Invoke-TestGit -Repository $targetRoot -Arguments @('add','--force','--','AGENTS.md',$script:ManifestPath.Replace('\','/')) | Out-Null
+            Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','tracked malformed manifest fixture') | Out-Null
+            $indexPath = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','index') | Select-Object -First 1).Trim()
+            if (-not [IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $targetRoot $indexPath }
+            $excludePath = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
+            if (-not [IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+            $indexBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath))
+            $excludeBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+            $manifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot $script:ManifestPath)))
+            $agentBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md')))
+            $linkedManifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath))
+            $headBefore = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim()
+            $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
+
+            $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+            $LASTEXITCODE | Should Not Be 0
+            (ConvertTo-TestDiagnosticText -Output $output) | Should Match '(?is)linked worktree manifest.*(invalid json|unexpected character|unexpected token)'
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath)) | Should Be $indexBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot $script:ManifestPath))) | Should Be $manifestBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md'))) | Should Be $agentBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath)) | Should Be $linkedManifestBefore
+            (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim() | Should Be $headBefore
+            @(Invoke-TestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
+        }
+        finally {
+            Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
+        }
+    }
+
     # Scenario: A linked worktree carries v4 while the current worktree has unsafe legacy ownership evidence.
     # Purpose: Detect the projection-aware state before remediation can report or mutate the current worktree.
     It 'InterT68b_reports_linked_v4_before_a_current_legacy_remediation_error' {

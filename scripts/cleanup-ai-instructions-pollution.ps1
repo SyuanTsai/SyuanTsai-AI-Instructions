@@ -701,11 +701,19 @@ function Assert-NoRepoManagedManifestV4 {
             $worktreeManifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/','\')
             if (-not (Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf)) { continue }
             Assert-CleanupManagedFilePath -TargetRoot $worktreeRoot -FilePath $worktreeManifestPath -Context 'REPO managed manifest v4 detection'
+        }
+        catch { continue }
+        try {
             $worktreeManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $worktreeManifestPath | ConvertFrom-Json
             $schemaVersion = $worktreeManifest.schemaVersion
             $isSchemaV4 = ($schemaVersion -is [int] -or $schemaVersion -is [long]) -and [int64]$schemaVersion -eq 4
         }
-        catch { continue }
+        catch {
+            if ($Strict) {
+                throw "Cannot inspect linked worktree manifest before mutation: $worktreeManifestPath. $($_.Exception.Message)"
+            }
+            continue
+        }
         if ($isSchemaV4) {
             throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
         }
