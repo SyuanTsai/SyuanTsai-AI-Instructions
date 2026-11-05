@@ -100,6 +100,29 @@ function Get-RawFileSha256 {
     finally { $stream.Dispose() }
 }
 
+function Get-BytesSha256 {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $Bytes)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([System.BitConverter]::ToString($sha256.ComputeHash($Bytes))).Replace('-','').ToLowerInvariant() }
+    finally { $sha256.Dispose() }
+}
+
+function ConvertFrom-StrictUtf8JsonBytes {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $Bytes,
+        [Parameter(Mandatory = $true)][string] $DocumentName
+    )
+
+    if ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) {
+        throw "$DocumentName must be UTF-8 without a BOM."
+    }
+    try {
+        $text = (New-Object System.Text.UTF8Encoding($false,$true)).GetString($Bytes)
+        return $text | ConvertFrom-Json
+    }
+    catch { throw "$DocumentName must be valid UTF-8 JSON without a BOM. $($_.Exception.Message)" }
+}
+
 function Assert-FullCommitSha {
     param([object] $Value,[string] $Context)
     if ($Value -isnot [string]) { throw "$Context resolvedCommit must be a string." }
@@ -963,19 +986,29 @@ function Assert-UserSkillsManagedManifestBinding {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][object] $Manifest,
-        [Parameter(Mandatory = $true)][object] $Catalog,
-        [Parameter(Mandatory = $true)][object] $Lock,
-        [Parameter(Mandatory = $true)][string] $LockSha256,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $CatalogBytes,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $LockBytes,
         [Parameter(Mandatory = $true)][string] $ExpectedCatalogRepository,
         [Parameter(Mandatory = $true)][string] $ExpectedCatalogCommit
     )
 
+    $catalogSha256 = Get-BytesSha256 -Bytes $CatalogBytes
+    $lockSha256 = Get-BytesSha256 -Bytes $LockBytes
+    $catalog = ConvertFrom-StrictUtf8JsonBytes -Bytes $CatalogBytes -DocumentName 'Skills Catalog binding bytes'
+    $lock = ConvertFrom-StrictUtf8JsonBytes -Bytes $LockBytes -DocumentName 'Skills Catalog lock binding bytes'
+
     Assert-UserSkillsManagedManifestV3 -Manifest $Manifest
-    Assert-SkillsCatalogV3 -Catalog $Catalog
-    Assert-SkillsCatalogLockV3 -Lock $Lock -Catalog $Catalog
-    Assert-Sha256 -Value $LockSha256 -Context 'user Skills managed manifest binding lockSha256'
+    Assert-SkillsCatalog -Catalog $catalog
+    Assert-SkillsCatalogLock -Lock $lock -Catalog $catalog
     Assert-HttpsRepositoryUrl -Value $ExpectedCatalogRepository -Context 'user Skills managed manifest binding expected catalog repository'
     Assert-FullCommitSha -Value $ExpectedCatalogCommit -Context 'user Skills managed manifest binding expected catalog commit'
+
+    if ([string]$lock.catalogSha256 -cne $catalogSha256) {
+        throw 'Skills Catalog lock catalogSha256 does not match the supplied Catalog bytes SHA-256.'
+    }
+    if ([string]$Manifest.lockSha256 -cne $lockSha256) {
+        throw 'user Skills managed manifest lockSha256 does not match the supplied Lock bytes SHA-256.'
+    }
 
     if ([string]$Manifest.catalogRepository -cne $ExpectedCatalogRepository) {
         throw 'user Skills managed manifest catalog repository does not match the trusted catalog repository.'
@@ -987,9 +1020,6 @@ function Assert-UserSkillsManagedManifestBinding {
     $expectedProjectionContractSha256 = Get-SkillsCatalogProjectionContractSha256 -Projections $Catalog.projections
     if ([string]$Manifest.projectionContractSha256 -cne $expectedProjectionContractSha256 -or [string]$Manifest.projectionContractSha256 -cne [string]$Lock.projectionContractSha256) {
         throw 'user Skills managed manifest projectionContractSha256 does not match the Catalog and Lock.'
-    }
-    if ([string]$Manifest.lockSha256 -cne $LockSha256) {
-        throw 'user Skills managed manifest lockSha256 does not match the supplied Lock SHA-256.'
     }
     if ([string]$Manifest.catalogId -cne [string]$Lock.catalogId -or [string]$Manifest.catalogId -cne [string]$Catalog.catalogId) {
         throw 'user Skills managed manifest catalogId does not match the Catalog and Lock.'

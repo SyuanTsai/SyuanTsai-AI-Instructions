@@ -1,5 +1,7 @@
 Set-StrictMode -Version 2.0
 
+Import-Module (Join-Path $PSScriptRoot 'skills-catalog-contract.psm1') -Scope Local -ErrorAction Stop
+
 function Get-AgentEnvironmentSha256 {
     param([Parameter(Mandatory = $true)][string] $Path)
     $stream = [System.IO.File]::OpenRead($Path)
