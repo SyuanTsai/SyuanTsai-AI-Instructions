@@ -106,6 +106,7 @@
       "three-required-context-projections"
     ],
     "setup": "Existing approved-source resolver acquires only during explicit setup, freezes three actual tool receipts and full installed closure; source execution never downloads or changes source.",
+    "skillToolsFreeze": "Freeze the executed Node runtime and entry-point payload with exact hashes. Bind the npm launcher shim to that payload, runtime and installed closure through launcher integrity; launcher-shim membership in frozenFiles is not required.",
     "binding": "One immutable candidate, authority, adapter, fresh run and raw process output; duplicate/empty/partial inventory, changed identity, invalid parse, failure, timeout or cleanup failure never passes. Platform-unavailable requires a runner-owned native compatibility probe bound to the frozen command/arguments digest, verified tool/runtime receipt identity and same-event process result. Missing observations block. Probe execution never implies scanner PASS, scan execution, complete coverage or release eligibility.",
     "platformUnavailableAuthorization": "runner-native-skillspector-probe-v1",
     "semantic": "Source checks cover stages 1–5 only; no provider, consent, signer, key or release prerequisite. Existing explicit Semantic and full lifecycle retain their own contract.",

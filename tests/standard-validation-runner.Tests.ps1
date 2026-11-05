@@ -22,6 +22,15 @@ else { [void][IO.Directory]::CreateSymbolicLink($Target, $Target + '.moved') }
             Invoke-StandardValidationProcess -Command $hostPath -Arguments @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$child,$Target,$Replacement) -WorkingDirectory $script:ReservationFixtureRoot -Environment @{} -TimeoutSeconds 15
         }
     }
+    # Scenario: Source setup passes a GitHub API token through the runner namespace, or tries the ambient GitHub key directly.
+    # Purpose: Permit the resolver-specific namespace without broadening the child environment credential boundary.
+    It 'UnitT05_accepts_the_resolver_token_namespace_and_rejects_GITHUB_TOKEN' {
+        $token = 'runner-namespace-fixture-token'
+        $child = Get-StandardValidationChildEnvironment -Environment @{ STANDARD_VALIDATION_GITHUB_API_TOKEN = $token }
+        $child['STANDARD_VALIDATION_GITHUB_API_TOKEN'] | Should Be $token
+        $child.ContainsKey('GITHUB_TOKEN') | Should Be $false
+        { Get-StandardValidationChildEnvironment -Environment @{ GITHUB_TOKEN = $token } } | Should Throw "outside the runner namespace"
+    }
     # Scenario: A root path and an ordinary child are decomposed without touching the filesystem.
     # Purpose: Preserve the root separator and never pass an empty relative component to P2.
     if ($IsWindows) {

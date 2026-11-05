@@ -31,6 +31,18 @@ Describe 'SYP258 explicit source validation contract' {
         if ($core.Count -ne 1 -or @($core[0].Body.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -ceq 'SourceValidation' }).Count -ne 1) { throw 'The v2 runner must receive the explicit source switch.' }
     }
 
+    # Scenario: The source contract distinguishes executed skill-tools files from its npm launcher identity.
+    # Purpose: Keep workflow setup aligned with the three-platform Core contract instead of freezing a Unix symlink as a regular file.
+    It 'UnitT15_declares_skill_tools_runtime_payload_freeze_without_launcher_membership' {
+        $root = Split-Path -Parent $PSScriptRoot
+        $policy = Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/standard-core-validation-v2.json') | ConvertFrom-Json
+        $advanced = Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/standard-validation-contract-v1.json') | ConvertFrom-Json
+        [string]::IsNullOrWhiteSpace([string]$policy.sourceValidation.skillToolsFreeze) | Should Be $false
+        $policy.sourceValidation.skillToolsFreeze | Should Match 'executed Node runtime and entry-point payload'
+        $policy.sourceValidation.skillToolsFreeze | Should Match 'launcher-shim membership in frozenFiles is not required'
+        $advanced.execution.unixSkillToolsTransport | Should Match 'launcher identity only.*execute the bound Node runtime and payload instead of the shim'
+    }
+
     # Scenario: Source validation rechecks the tracked candidate before repository checks and again after check execution.
     # Purpose: V2/V6 prevents mandatory development-content input from prompting or breaking immutable candidate revalidation.
     It 'UnitT20_supplies_required_development_content_mode_to_every_candidate_inventory_call' {
@@ -406,6 +418,8 @@ jobs:
         $standard=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/skill-repository-standard.md')
         $required=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml')
         $diagnostic=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/standards-conformance.yml')
+        $runner=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardValidation.ps1')
+        $resolver=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Resolve-StandardValidationTool.ps1')
         Assert-Match $standard '12\.3 Central reference implementation ownership and CI' 'The Standard must publish the central implementation ownership map.'
         Assert-Match $standard 'Invoke-StandardValidation\.ps1.*skill-repository-standard\.Tests\.ps1.*standard-validation-runner\.Tests\.ps1.*standard-core-pester-adapter\.Tests\.ps1' 'The Standard must map the runner and report owner to its regression paths.'
         Assert-Match $standard 'Resolve-StandardValidationTool\.ps1.*standard-validation-resolver-hardening\.Tests\.ps1' 'The Standard must map the tool resolver to its hardening regression.'
@@ -419,6 +433,9 @@ jobs:
         Assert-Match $required '\$\{\{ runner\.temp \}\}/windows-core/authority-result\.json' 'Windows Core must upload the normal authority gate result.'
         Assert-Match $diagnostic '(?m)^  workflow_dispatch:\s*$' 'Standards Conformance must remain an on-demand diagnostic.'
         Assert-NotMatch $diagnostic '(?m)^  (pull_request|push):\s*$' 'The manual diagnostic must not be described as the required normal CI gate.'
+        Assert-Match $runner '(?s)\^STANDARD_VALIDATION_\[A-Za-z0-9_\]\+\$.*outside the runner namespace' 'The runner must continue accepting only its namespaced child environment.'
+        Assert-Match $resolver '(?s)STANDARD_VALIDATION_GITHUB_API_TOKEN.*GITHUB_TOKEN.*GH_TOKEN.*SetEnvironmentVariable' 'The resolver must consume the runner token namespace and clear every GitHub token alias.'
+        Assert-Match $resolver "Host -cne 'api\.github\.com'.*continue" 'Authorization must be stripped from every non-api.github.com request.'
     }
     }
     # Scenario: A new discovered Pester file is added while the isolated-file set remains stable.

@@ -3202,6 +3202,23 @@ function Assert-AuthorityLauncherReceipt {
     }
     Assert-AuthorityPathWithinRoot -Path $shimPath -Root $InstallRoot -Context "$Context launcher shim"
     Assert-AuthorityPathWithinRoot -Path $payloadPath -Root $InstallRoot -Context "$Context launcher payload"
+    if ($kind -ceq 'unix-node-shim') {
+        $shimItem = Get-Item -Force -LiteralPath $shimPath -ErrorAction Stop
+        if (($shimItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+            throw "$Context Unix package launcher must be a symbolic link to its payload."
+        }
+        [void](Get-AuthoritySafeUnixSymlinkEntry -Item $shimItem -Root $InstallRoot)
+        $shimTarget = Get-AuthoritySymlinkTarget -Item $shimItem
+        $resolvedShimTarget = if ([IO.Path]::IsPathRooted($shimTarget)) {
+            [IO.Path]::GetFullPath($shimTarget)
+        }
+        else {
+            [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetDirectoryName($shimPath)) $shimTarget))
+        }
+        if (-not [string]::Equals($resolvedShimTarget, $payloadPath, $comparison)) {
+            throw "$Context Unix package launcher does not target its bound payload."
+        }
+    }
     if ($kind -ceq 'skillspector-python') {
         $expectedRuntime = Join-Path ([IO.Path]::GetDirectoryName($ExecutablePath)) $(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'python.exe' } else { 'python' })
         if ($payloadPath -cne $shimPath -or $runtimePath -cne $expectedRuntime -or
