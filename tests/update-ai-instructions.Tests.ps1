@@ -28,6 +28,28 @@ Describe 'AI instructions updater workflow' {
         Import-Module $script:UpdaterModule -Force
     }
 
+    # Scenario: A future projection-aware bundle reaches the legacy updater.
+    # Purpose: Reject it before creating locks, receipts, or changing active bytes.
+    It 'UnitT05_rejects_runtime_bundle_v3_before_updater_mutation' {
+        $codexHome = Join-Path $TestDrive 'bundle-v3'
+        New-TestUpdaterHome -Path $codexHome
+        $bundlePath = Join-Path $codexHome 'hooks\ai-instructions-runtime\runtime-bundle.json'
+        $configurationPath = Join-Path $codexHome 'ai-instructions-sync.json'
+        $bundle = Get-Content -Raw -LiteralPath $bundlePath | ConvertFrom-Json
+        $bundle.schemaVersion = 3
+        [IO.File]::WriteAllText($bundlePath,($bundle | ConvertTo-Json -Depth 20))
+        $bundleBefore = [IO.File]::ReadAllBytes($bundlePath)
+        $configurationBefore = [IO.File]::ReadAllBytes($configurationPath)
+
+        $message = Get-RuntimeContractError { Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck }
+
+        $message | Should Be 'Runtime bundle schema version 3 requires a projection-aware installer.'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($bundlePath)) | Should Be ([Convert]::ToBase64String($bundleBefore))
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($configurationPath)) | Should Be ([Convert]::ToBase64String($configurationBefore))
+        Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update.lock') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json') | Should Be $false
+    }
+
     # Scenario: The canonical protected ref still resolves to the installed commit.
     # Purpose: Record a successful check without downloading or mutating the runtime.
     It 'UnitT10_reports_current_without_installing' {

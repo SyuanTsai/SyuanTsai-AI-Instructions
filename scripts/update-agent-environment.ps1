@@ -160,6 +160,12 @@ try {
             $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
         }
         catch { throw "Installed Agent environment state is invalid: $($_.Exception.Message)" }
+        if (($configuration.schemaVersion -is [int] -or $configuration.schemaVersion -is [long]) -and [int64]$configuration.schemaVersion -eq 5) {
+            throw 'AI Instructions sync configuration schema version 5 requires a projection-aware installer.'
+        }
+        if (($bundle.schemaVersion -is [int] -or $bundle.schemaVersion -is [long]) -and [int64]$bundle.schemaVersion -eq 3) {
+            throw 'Runtime bundle schema version 3 requires a projection-aware installer.'
+        }
         if ([string]$configuration.catalog.ref -cne [string]$bundle.commit) { throw 'Installed Catalog configuration and runtime bundle commit do not match.' }
 
         $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('agent-environment-' + [Guid]::NewGuid().ToString('N'))

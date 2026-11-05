@@ -452,6 +452,51 @@ Keep this section too.
         (Get-Content -Raw -LiteralPath $bundlePath) | Should Be $bundleBefore
     }
 
+    # Scenario: The active configuration already uses projection-aware schema v5.
+    # Purpose: Keep the legacy installer from downgrading or replacing active bytes.
+    It 'InterT41_rejects_sync_v5_before_installation_changes' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $configurationPath = Join-Path $codexHome 'ai-instructions-sync.json'
+        $bundlePath = Join-Path $codexHome 'hooks\ai-instructions-runtime\runtime-bundle.json'
+        $hookPath = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
+        $configuration = Get-Content -Raw -LiteralPath $configurationPath | ConvertFrom-Json
+        $configuration.schemaVersion = 5
+        $configuration | Add-Member -NotePropertyName projections -NotePropertyValue ([pscustomobject]@{user=@('user-agents');project=@()})
+        Set-TestJson -Path $configurationPath -Document $configuration
+        $configurationBefore = [IO.File]::ReadAllBytes($configurationPath)
+        $bundleBefore = [IO.File]::ReadAllBytes($bundlePath)
+        $hookBefore = [IO.File]::ReadAllBytes($hookPath)
+
+        $result = Invoke-InstallExpectFailure -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+
+        $result.ExitCode | Should Not Be 0
+        $result.Output | Should Match 'AI Instructions sync configuration schema version 5 requires a projection-aware installer\.'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($configurationPath)) | Should Be ([Convert]::ToBase64String($configurationBefore))
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($bundlePath)) | Should Be ([Convert]::ToBase64String($bundleBefore))
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($hookPath)) | Should Be ([Convert]::ToBase64String($hookBefore))
+    }
+
+    # Scenario: The stable launcher sees sync configuration v5.
+    # Purpose: Fail before bootstrap can update, recover, or mutate consumer bytes.
+    It 'InterT39_rejects_sync_v5_in_the_launcher_before_mutation' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $configurationPath = Join-Path $codexHome 'ai-instructions-sync.json'
+        $bundlePath = Join-Path $codexHome 'hooks\ai-instructions-runtime\runtime-bundle.json'
+        $launcherPath = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
+        $configuration = Get-Content -Raw -LiteralPath $configurationPath | ConvertFrom-Json
+        $configuration.schemaVersion = 5
+        $configuration | Add-Member -NotePropertyName projections -NotePropertyValue ([pscustomobject]@{user=@('user-agents');project=@()})
+        Set-TestJson -Path $configurationPath -Document $configuration
+        $configurationBefore = [IO.File]::ReadAllBytes($configurationPath)
+        $bundleBefore = [IO.File]::ReadAllBytes($bundlePath)
+        $output = & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $launcherPath -ValidateOnly -SkipUpdateCheck 2>&1
+
+        $LASTEXITCODE | Should Not Be 0
+        ($output -join [Environment]::NewLine) | Should Match 'AI Instructions sync configuration schema version 5 requires a projection-aware installer\.'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($configurationPath)) | Should Be ([Convert]::ToBase64String($configurationBefore))
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($bundlePath)) | Should Be ([Convert]::ToBase64String($bundleBefore))
+    }
+
     # Scenario: An existing schema-v4 configuration points at a noncanonical bundle repository.
     # Purpose: Preserve the single canonical trust boundary before any active runtime replacement.
     It 'InterT42_rejects_a_schema_v4_bundle_repository_from_another_repo' {

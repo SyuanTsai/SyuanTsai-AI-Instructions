@@ -4108,6 +4108,11 @@ if (Test-Path -LiteralPath $configurationFullPath -PathType Leaf) {
         throw "AI instruction sync configuration is not valid JSON: $configurationFullPath"
     }
 
+    if ($configuration.PSObject.Properties.Name -contains 'schemaVersion' -and
+        ($configuration.schemaVersion -is [int] -or $configuration.schemaVersion -is [long]) -and
+        [int64]$configuration.schemaVersion -eq 5) {
+        throw 'AI Instructions sync configuration schema version 5 requires a projection-aware installer.'
+    }
     if ($configuration.PSObject.Properties.Name -notcontains 'schemaVersion' -or
         $configuration.schemaVersion -ne 3) {
         throw "Unsupported AI instruction sync configuration schema: $configurationFullPath"

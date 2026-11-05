@@ -57,6 +57,15 @@ function New-TestConfigurationDocument {
                 }
             }
         }
+        5 {
+            $configuration = New-TestConfigurationDocument -SchemaVersion 4
+            $configuration.schemaVersion = 5
+            $configuration | Add-Member -NotePropertyName projections -NotePropertyValue ([pscustomobject]@{
+                user = @('user-agents','user-claude')
+                project = @('project-agents')
+            })
+            return $configuration
+        }
     }
 }
 
@@ -64,6 +73,13 @@ function Get-RuntimeContractError {
     param([Parameter(Mandatory = $true)][scriptblock] $Action)
     try { & $Action; return $null }
     catch { return $_.Exception.Message }
+}
+
+function Copy-TestCanonicalRuntimeText {
+    param([Parameter(Mandatory = $true)][string] $Source,[Parameter(Mandatory = $true)][string] $Destination)
+    $utf8 = New-Object System.Text.UTF8Encoding($false,$true)
+    $bytes = [IO.File]::ReadAllBytes($Source)
+    [IO.File]::WriteAllBytes($Destination,$utf8.GetBytes($utf8.GetString($bytes).Replace("`r`n","`n")))
 }
 
 Describe 'AI instructions runtime contracts' {
@@ -292,10 +308,14 @@ Describe 'AI instructions runtime contracts' {
     # Purpose: Prevent schema-only consumers from approving a repository that executable validation must reject.
     It 'UnitT88_keeps_canonical_repository_identity_in_schema_and_runtime_parser_sync' {
         $configurationSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-sync-v4.schema.json') | ConvertFrom-Json
+        $configurationSchemaV5 = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-sync-v5.schema.json') | ConvertFrom-Json
         $bundleSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\schemas\runtime-bundle-v2.schema.json') | ConvertFrom-Json
+        $bundleSchemaV3 = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\schemas\runtime-bundle-v3.schema.json') | ConvertFrom-Json
 
         [string]$configurationSchema.properties.catalog.properties.repository.const | Should Be $script:CanonicalRepository
+        [string]$configurationSchemaV5.properties.catalog.properties.repository.const | Should Be $script:CanonicalRepository
         [string]$bundleSchema.properties.repository.const | Should Be $script:CanonicalRepository
+        [string]$bundleSchemaV3.properties.repository.const | Should Be $script:CanonicalRepository
 
         $configuration = New-TestConfigurationDocument -SchemaVersion 4
         $configuration.catalog.repository = 'https://github.com/example/other-ai-instructions.git'
@@ -320,6 +340,11 @@ Describe 'AI instructions runtime contracts' {
         $configuration.excludedRepositoryPaths = 'docs/planning'
         (Get-RuntimeContractError { Assert-AiInstructionsSyncConfigurationV4 -Configuration $configuration }) |
             Should Match 'excludedRepositoryPaths must be an array'
+
+        $configuration = New-TestConfigurationDocument -SchemaVersion 5
+        $configuration.projections.user = 'user-agents'
+        (Get-RuntimeContractError { Assert-AiInstructionsSyncConfigurationV5 -Configuration $configuration }) |
+            Should Match 'projections.user must be an array'
     }
 
     # Scenario: A schema-v4 update interval exceeds the Int32 range used by idempotent configuration migration.
@@ -355,6 +380,15 @@ Describe 'AI instructions runtime contracts' {
         (Get-RuntimeContractError {
             Assert-AiInstructionsRuntimeBundleV2 -Bundle $bundle -Configuration $configuration -RuntimeRoot $runtimeRoot
         }) | Should Match 'archiveSha256 is invalid'
+
+        $runtimeV3Root = Join-Path $TestDrive 'runtime-v3-empty-archive-hash'
+        New-Item -ItemType Directory -Force -Path $runtimeV3Root | Out-Null
+        $configurationV5 = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v5.example.json') | ConvertFrom-Json
+        $bundleV3 = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\runtime-bundle-v3.example.json') | ConvertFrom-Json
+        $bundleV3.archiveSha256 = ''
+        (Get-RuntimeContractError {
+            Assert-AiInstructionsRuntimeBundleV3 -Bundle $bundleV3 -Configuration $configurationV5 -RuntimeRoot $runtimeV3Root
+        }) | Should Match 'archiveSha256 is required'
     }
 
     # Scenario: A receipt uses a date-only value that JSON Schema date-time consumers reject.
@@ -455,5 +489,90 @@ Describe 'AI instructions runtime contracts' {
         (Get-RuntimeContractError {
             Get-AiInstructionsRuntimeInventory -RuntimeRoot $junction
         }) | Should Match "^AI instructions runtime root '.+' must be a non-reparse directory\.$"
+    }
+
+    # Scenario: The reader receives the checked-in v5 sync configuration and migrates every legacy version safely.
+    # Purpose: Add projection-aware reading without changing the v4 writer path.
+    It 'UnitT97_validates_v5_and_migrates_v1_through_v4_with_default_projections' {
+        $example = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v5.example.json') | ConvertFrom-Json
+        { Assert-AiInstructionsSyncConfigurationV5 -Configuration $example } | Should Not Throw
+        foreach ($version in 1..4) {
+            $migrated = ConvertTo-AiInstructionsSyncConfigurationV5 -ExistingConfiguration (New-TestConfigurationDocument -SchemaVersion $version) -CatalogRepository $script:CanonicalRepository -CatalogRef ('c' * 40)
+            $migrated.schemaVersion | Should Be 5
+            @($migrated.projections.user) | Should Be @('user-agents')
+            @($migrated.projections.project).Count | Should Be 0
+            [string]$migrated.catalog.ref | Should Be ('c' * 40)
+        }
+        $same = ConvertTo-AiInstructionsSyncConfigurationV5 -ExistingConfiguration $example -CatalogRepository $script:CanonicalRepository -CatalogRef ('d' * 40)
+        [object]::ReferenceEquals($same,$example) | Should Be $true
+        (Get-RuntimeContractError { ConvertTo-AiInstructionsSyncConfigurationV4 -ExistingConfiguration $example -CatalogRepository $script:CanonicalRepository -CatalogRef ('d' * 40) }) |
+            Should Be 'AI Instructions sync configuration schema version 5 requires a projection-aware installer.'
+    }
+
+    # Scenario: Projection selections are malformed, cross scoped, duplicated, or extended unexpectedly.
+    # Purpose: Keep v5 projection selection bound to the P6a fixed projection contract.
+    It 'UnitT98_rejects_invalid_v5_projection_selections_and_unknown_properties' {
+        $path = Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v5.example.json'
+        $cases = @(
+            @{ Mutate={ param($x) $x.projections.user=@('user-claude') }; Pattern='must include' },
+            @{ Mutate={ param($x) $x.projections.user=@('user-agents','project-agents') }; Pattern='wrong-scope' },
+            @{ Mutate={ param($x) $x.projections.project=@('user-claude') }; Pattern='wrong-scope' },
+            @{ Mutate={ param($x) $x.projections.user=@('user-agents','user-agents') }; Pattern='duplicate' },
+            @{ Mutate={ param($x) $x.projections.project=@('project-unknown') }; Pattern='unknown' },
+            @{ Mutate={ param($x) $x | Add-Member -NotePropertyName unexpected -NotePropertyValue $true }; Pattern='unsupported property' }
+        )
+        foreach ($case in $cases) {
+            $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath $path | ConvertFrom-Json
+            & $case.Mutate $configuration
+            (Get-RuntimeContractError { Assert-AiInstructionsSyncConfigurationV5 -Configuration $configuration }) | Should Match $case.Pattern
+        }
+    }
+
+    # Scenario: The checked-in v3 bundle describes an exact two-file runtime fixture.
+    # Purpose: Exercise the reader's platform, capability, projection, and inventory bindings.
+    It 'UnitT99_validates_the_runtime_bundle_v3_example' {
+        $runtimeRoot = Join-Path $TestDrive 'runtime-v3-example'
+        New-Item -ItemType Directory -Force -Path $runtimeRoot,(Join-Path $runtimeRoot 'platform') | Out-Null
+        Copy-TestCanonicalRuntimeText -Source (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psd1') -Destination (Join-Path $runtimeRoot 'platform-runtime.psd1')
+        Copy-TestCanonicalRuntimeText -Source (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psm1') -Destination (Join-Path $runtimeRoot 'platform-runtime.psm1')
+        foreach ($name in @('PlatformNative.cs','UnixNative.cs','WindowsNative.cs','OwnedProcess.cs','UnixProcess.cs','WindowsProcess.cs')) {
+            Copy-TestCanonicalRuntimeText -Source (Join-Path $script:RepositoryRoot "scripts\platform\$name") -Destination (Join-Path $runtimeRoot "platform\$name")
+        }
+        $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\runtime-bundle-v3.example.json') | ConvertFrom-Json
+        $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v5.example.json') | ConvertFrom-Json
+        { Assert-AiInstructionsRuntimeBundleV3 -Bundle $bundle -Configuration $configuration -RuntimeRoot $runtimeRoot } | Should Not Throw
+    }
+
+    # Scenario: Platform metadata, capability declarations, and required runtime inventory are malformed.
+    # Purpose: Fail closed on every v3-only contract boundary.
+    It 'UnitT86_rejects_invalid_runtime_bundle_v3_fields' {
+        $runtimeRoot = Join-Path $TestDrive 'runtime-v3-negative'
+        New-Item -ItemType Directory -Force -Path $runtimeRoot,(Join-Path $runtimeRoot 'platform') | Out-Null
+        Copy-TestCanonicalRuntimeText -Source (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psd1') -Destination (Join-Path $runtimeRoot 'platform-runtime.psd1')
+        Copy-TestCanonicalRuntimeText -Source (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psm1') -Destination (Join-Path $runtimeRoot 'platform-runtime.psm1')
+        foreach ($name in @('PlatformNative.cs','UnixNative.cs','WindowsNative.cs','OwnedProcess.cs','UnixProcess.cs','WindowsProcess.cs')) {
+            Copy-TestCanonicalRuntimeText -Source (Join-Path $script:RepositoryRoot "scripts\platform\$name") -Destination (Join-Path $runtimeRoot "platform\$name")
+        }
+        $bundlePath = Join-Path $script:RepositoryRoot 'catalog\examples\runtime-bundle-v3.example.json'
+        $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v5.example.json') | ConvertFrom-Json
+        $cases = @(
+            @{ Mutate={param($x)$x.platform.os='bsd'}; Pattern='platform.os' },
+            @{ Mutate={param($x)$x.platform.architecture='riscv64'}; Pattern='platform.architecture' },
+            @{ Mutate={param($x)$x.requiredCapabilities=@('unknown')}; Pattern='unknown required capability' },
+            @{ Mutate={param($x)$x.requiredCapabilities=@('lock','lock')}; Pattern='duplicate required capability' },
+            @{ Mutate={param($x)$x.platformRuntime.apiVersion='1'}; Pattern='apiVersion' },
+            @{ Mutate={param($x)$x.inventorySha256=('0' * 64)}; Pattern='digest' },
+            @{ Mutate={param($x)$x | Add-Member -NotePropertyName unexpected -NotePropertyValue $true}; Pattern='unsupported property' }
+        )
+        foreach ($case in $cases) {
+            $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
+            & $case.Mutate $bundle
+            (Get-RuntimeContractError { Assert-AiInstructionsRuntimeBundleV3 -Bundle $bundle -Configuration $configuration -RuntimeRoot $runtimeRoot }) | Should Match $case.Pattern
+        }
+        Remove-Item -LiteralPath (Join-Path $runtimeRoot 'platform-runtime.psm1')
+        $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
+        $bundle.inventory = @($bundle.inventory | Where-Object { $_.path -cne 'platform-runtime.psm1' })
+        $bundle.inventorySha256 = Get-AiInstructionsRuntimeInventorySha256 -Inventory $bundle.inventory
+        (Get-RuntimeContractError { Assert-AiInstructionsRuntimeBundleV3 -Bundle $bundle -Configuration $configuration -RuntimeRoot $runtimeRoot }) | Should Match 'must include.*platform-runtime.psm1'
     }
 }

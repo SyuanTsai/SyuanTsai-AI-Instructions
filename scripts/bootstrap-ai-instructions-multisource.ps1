@@ -138,6 +138,9 @@ function Assert-MultiSourceConfiguration {
     )
 
     $schemaVersion = Get-RequiredPropertyValue -Object $Configuration -Name 'schemaVersion' -Context 'AI instruction sync configuration'
+    if (($schemaVersion -is [int] -or $schemaVersion -is [long]) -and [int64]$schemaVersion -eq 5) {
+        throw 'AI Instructions sync configuration schema version 5 requires a projection-aware installer.'
+    }
     if ($schemaVersion -ne 4) {
         throw "Multi-source bootstrap requires AI instruction sync configuration schemaVersion 4; actual: $schemaVersion"
     }

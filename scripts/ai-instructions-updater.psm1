@@ -367,6 +367,17 @@ function Invoke-AiInstructionsUpdateWorkflow {
     foreach ($stableFilePath in @($configurationPath,$bundlePath,$receiptPath,$lockPath,(Join-Path $codexHomePath 'ai-instructions-install.lock'))) {
         Assert-AiInstructionsMutationPath -Path $stableFilePath -ExpectedType File -Context 'AI instructions stable file' | Out-Null
     }
+    try {
+        $preflightConfiguration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json
+        $preflightBundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
+    }
+    catch { throw "Installed AI instruction update state is invalid: $($_.Exception.Message)" }
+    if (($preflightConfiguration.schemaVersion -is [int] -or $preflightConfiguration.schemaVersion -is [long]) -and [int64]$preflightConfiguration.schemaVersion -eq 5) {
+        throw 'AI Instructions sync configuration schema version 5 requires a projection-aware installer.'
+    }
+    if (($preflightBundle.schemaVersion -is [int] -or $preflightBundle.schemaVersion -is [long]) -and [int64]$preflightBundle.schemaVersion -eq 3) {
+        throw 'Runtime bundle schema version 3 requires a projection-aware installer.'
+    }
     if ($null -eq $NowUtc -or $NowUtc -eq [datetime]::MinValue) { $NowUtc = (Get-Date).ToUniversalTime() }
     else { $NowUtc = $NowUtc.ToUniversalTime() }
     if ($null -eq $ResolveCandidate) { $ResolveCandidate = { param($request) Get-AiInstructionsRemoteCandidate -Request $request } }

@@ -522,6 +522,21 @@ Assert-InstallerMutationPath -Path $runtimeDirectory -ExpectedType Directory
 foreach ($filePath in @($hookScript,$updateScript,$environmentUpdateScript,$cleanupScript,$agentsPath,$hooksPath,$configurationPath,$installLockPath)) {
     Assert-InstallerMutationPath -Path $filePath -ExpectedType File
 }
+if (Test-Path -LiteralPath $configurationPath -PathType Leaf) {
+    try { $preflightConfiguration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json }
+    catch { throw "AI instruction sync configuration is not valid JSON: $configurationPath" }
+    if (($preflightConfiguration.schemaVersion -is [int] -or $preflightConfiguration.schemaVersion -is [long]) -and [int64]$preflightConfiguration.schemaVersion -eq 5) {
+        throw 'AI Instructions sync configuration schema version 5 requires a projection-aware installer.'
+    }
+}
+$preflightBundlePath = Join-Path $runtimeDirectory 'runtime-bundle.json'
+if (Test-Path -LiteralPath $preflightBundlePath -PathType Leaf) {
+    try { $preflightBundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $preflightBundlePath | ConvertFrom-Json }
+    catch { throw "Installed AI instruction runtime bundle is not valid JSON: $preflightBundlePath" }
+    if (($preflightBundle.schemaVersion -is [int] -or $preflightBundle.schemaVersion -is [long]) -and [int64]$preflightBundle.schemaVersion -eq 3) {
+        throw 'Runtime bundle schema version 3 requires a projection-aware installer.'
+    }
+}
 New-Item -ItemType Directory -Force -Path $codexHomePath,$hookDirectory | Out-Null
 $installLockStream = $null
 $activeMutationGuard = Open-InstallerMutationDirectoryGuard -TargetRoot $codexHomePath -RelativeDirectory 'hooks'
