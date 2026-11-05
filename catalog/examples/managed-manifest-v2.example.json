@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "catalogId": "example-agent-skills",
-  "lockSha256": "5fc3fd2dd8068b652e3041eae36d4036c30ecd08592fe84e56250d3f54534de7",
+  "lockSha256": "62d8065995eee7eda91d97b7f0298b0eaedc24bee2a4202302c4ac4878700370",
   "files": [
     {
       "artifactType": "instruction",
