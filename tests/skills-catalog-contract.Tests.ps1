@@ -362,6 +362,40 @@ function Get-TestManagedManifestV4 {
         { Assert-ManagedManifestV4 -Manifest $manifest } | Should Not Throw
     }
 
+    # Scenario: REPO and USER license source paths use the same case-insensitive source-name contract.
+    # Purpose: Keep JSON Schema validation aligned with Test-IsLicenseDeliverySourcePath and its callers.
+    It 'UnitT11v8b_aligns_case_insensitive_license_source_names_in_v4_and_user_v3_manifests' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) {
+            throw 'UnitT11v8b requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.'
+        }
+
+        $repoSchemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\managed-manifest-v4.schema.json'
+        $repoManifest = Get-TestManagedManifestV4
+        $repoSkill = @($repoManifest.files | Where-Object artifactType -eq 'skill')[0]
+        $repoSkill.sourcePath = 'license'
+        $repoSkill.targetPath = '.agents/skills/work-with-jira/.ai-instructions-licenses/source/license'
+        (Test-Json -Json ($repoManifest | ConvertTo-Json -Depth 100) -SchemaFile $repoSchemaPath) | Should Be $true
+        { Assert-ManagedManifestV4 -Manifest $repoManifest } | Should Not Throw
+
+        $repoInvalid = Get-TestManagedManifestV4
+        $repoInvalidSkill = @($repoInvalid.files | Where-Object artifactType -eq 'skill')[0]
+        $repoInvalidSkill.sourcePath = 'readme.md'
+        $repoInvalidSkill.targetPath = '.agents/skills/work-with-jira/.ai-instructions-licenses/source/readme.md'
+        (Test-Json -Json ($repoInvalid | ConvertTo-Json -Depth 100) -SchemaFile $repoSchemaPath) | Should Be $false
+        { Assert-ManagedManifestV4 -Manifest $repoInvalid } | Should Throw
+
+        $userSchemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\user-skills-managed-manifest-v3.schema.json'
+        $userManifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        foreach ($file in @($userManifest.files | Where-Object { $_.targetPath -cmatch '/\.ai-instructions-licenses/source/' })) { $file.sourcePath = 'licenses/foo.txt' }
+        (Test-Json -Json ($userManifest | ConvertTo-Json -Depth 100) -SchemaFile $userSchemaPath) | Should Be $true
+        { Assert-UserSkillsManagedManifest -Manifest $userManifest } | Should Not Throw
+
+        $userInvalid = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        foreach ($file in @($userInvalid.files | Where-Object { $_.targetPath -cmatch '/\.ai-instructions-licenses/source/' })) { $file.sourcePath = 'readme.md' }
+        (Test-Json -Json ($userInvalid | ConvertTo-Json -Depth 100) -SchemaFile $userSchemaPath) | Should Be $false
+        { Assert-UserSkillsManagedManifest -Manifest $userInvalid } | Should Throw
+    }
+
     # Scenario: A v4 file source path contains traversal.
     # Purpose: Reject traversal before projection or provenance comparisons.
     It 'UnitT11v9_rejects_a_v4_traversal_path' {

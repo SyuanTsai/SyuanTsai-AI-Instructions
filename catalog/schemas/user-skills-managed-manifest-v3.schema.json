@@ -61,7 +61,12 @@
             "oneOf": [
               {
                 "properties": {
-                  "sourcePath": { "$ref": "#/$defs/repositoryPath" },
+                  "sourcePath": {
+                    "allOf": [
+                      { "$ref": "#/$defs/repositoryPath" },
+                      { "pattern": "^(?:(?:[^/]+/)*[Ll][Ii][Cc][Ee][Nn][Ss][Ee][Ss]/.+|(?:[^/]+/)*(?:[Ll][Ii][Cc][Ee][Nn][Ss][Ee]|[Ll][Ii][Cc][Ee][Nn][Cc][Ee]|[Cc][Oo][Pp][Yy][Ii][Nn][Gg]|[Nn][Oo][Tt][Ii][Cc][Ee]|[Tt][Hh][Ii][Rr][Dd]_[Pp][Aa][Rr][Tt][Yy]_[Nn][Oo][Tt][Ii][Cc][Ee][Ss]|[Tt][Hh][Ii][Rr][Dd]_[Pp][Aa][Rr][Tt][Yy]_[Ll][Ii][Cc][Ee][Nn][Ss][Ee][Ss]|[Pp][Rr][Oo][Vv][Ee][Nn][Aa][Nn][Cc][Ee])(?:[-_][^/.]+)?(?:\\.(?:[Mm][Dd]|[Tt][Xx][Tt]|[Rr][Ss][Tt]|[Hh][Tt][Mm][Ll]))?|(?:[^/]+/)*[Ll][Ii][Cc][Ee][Nn][Ss][Ii][Nn][Gg]-[Ss][Cc][Oo][Pp][Ee]\\.json)$" }
+                    ]
+                  },
                   "targetPath": { "pattern": "^\\.(?:agents|claude|copilot)/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/\\.ai-instructions-licenses/source/.+" }
                 }
               },
