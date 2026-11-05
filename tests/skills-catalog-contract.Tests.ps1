@@ -555,8 +555,8 @@ function Assert-UserManifestBindingFailure {
             }
             $file.targetPath = ([string]$file.targetPath).Replace('/work-with-jira/','/skills/')
         }
-        $payloadTemplate = @($manifest.files | Where-Object { $_.skillId -ceq 'skills' -and $_.sourcePath -ceq 'skills/skills/SKILL.md' })[0]
         foreach ($projectionId in @($manifest.projections)) {
+            $payloadTemplate = @($manifest.files | Where-Object { $_.skillId -ceq 'skills' -and $_.sourcePath -ceq 'skills/skills/SKILL.md' -and $_.projectionId -ceq $projectionId })[0]
             $licensePayload = $payloadTemplate.PSObject.Copy()
             $licensePayload.sourcePath = 'skills/skills/LICENSE'
             $licensePayload.targetPath = ([string]$payloadTemplate.targetPath).Replace('SKILL.md','LICENSE')
