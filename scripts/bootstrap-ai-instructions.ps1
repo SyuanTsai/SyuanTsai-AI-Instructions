@@ -1555,7 +1555,11 @@ function Assert-ManagedPathDoesNotCrossReparsePoint {
     while ($inspectionPath.StartsWith($rootPrefix,[System.StringComparison]::OrdinalIgnoreCase)) {
         if (Test-Path -LiteralPath $inspectionPath) {
             $item = Get-Item -Force -LiteralPath $inspectionPath
-            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw "$Context crosses a reparse point: $inspectionPath" }
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                $exception = [System.IO.IOException]::new("$Context crosses a reparse point: $inspectionPath")
+                $exception.Data['CodexAiInstructionsPathSafetyReason'] = 'reparse-point'
+                throw $exception
+            }
         }
         $inspectionPath = Split-Path -Parent $inspectionPath
     }
@@ -1567,40 +1571,16 @@ function Get-ManagedWorktreeRoots {
         [switch] $Strict
     )
 
-    $lines = @(Invoke-Git -Repository $Repository -Arguments @('worktree','list','--porcelain'))
-    if (-not $Strict) {
-        foreach ($line in $lines) {
-            $text = [string]$line
-            if ($text.StartsWith('worktree ',[System.StringComparison]::Ordinal)) { $text.Substring('worktree '.Length) }
-        }
-        return
+    $previousConsoleOutputEncoding = [Console]::OutputEncoding
+    try {
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+        $output = @(Invoke-Git -Repository $Repository -Arguments @('worktree','list','--porcelain','-z'))
     }
-    $expectWorktree = $true
-    $worktreeCount = 0
-    $recordHasState = $false
-    foreach ($line in $lines) {
-        $text = [string]$line
-        if ([string]::IsNullOrEmpty($text)) {
-            if (-not $expectWorktree -and -not $recordHasState) { throw 'Invalid git worktree porcelain output.' }
-            $expectWorktree = $true
-            continue
-        }
-        if ($expectWorktree) {
-            if (-not $text.StartsWith('worktree ',[System.StringComparison]::Ordinal) -or $text.Length -eq 'worktree '.Length) {
-                throw 'Invalid git worktree porcelain output.'
-            }
-            $worktreeCount++
-            $expectWorktree = $false
-            $recordHasState = $false
-            $text.Substring('worktree '.Length)
-            continue
-        }
-        if ($text -cnotmatch '^(?:HEAD [0-9a-f]{40}|branch .+|detached|bare|locked(?: .*)?|prunable(?: .*)?)$') {
-            throw 'Invalid git worktree porcelain output.'
-        }
-        if ($text -cmatch '^(?:HEAD [0-9a-f]{40}|bare)$') { $recordHasState = $true }
+    finally { [Console]::OutputEncoding = $previousConsoleOutputEncoding }
+    foreach ($record in @(ConvertFrom-GitWorktreePorcelainZ -Output $output -Strict:$Strict)) {
+        if ($Strict -and [bool]$record.Prunable) { continue }
+        [string]$record.Path
     }
-    if ($worktreeCount -eq 0 -or (-not $expectWorktree -and -not $recordHasState)) { throw 'Invalid git worktree porcelain output.' }
 }
 
 function Assert-NoRepoManagedManifestV4 {
@@ -1616,12 +1596,26 @@ function Assert-NoRepoManagedManifestV4 {
     }
     foreach ($worktreeRoot in $worktreeRoots) {
         $isSchemaV4 = $false
+        $worktreeManifestPath = [string]$worktreeRoot
         try {
             $worktreeManifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/','\')
+            if ($Strict -and -not (Test-Path -LiteralPath $worktreeRoot -PathType Container)) { continue }
             if (-not (Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf)) { continue }
             Assert-ManagedPathDoesNotCrossReparsePoint -Root $worktreeRoot -Path $worktreeManifestPath -Context 'REPO managed manifest v4 detection'
         }
-        catch { continue }
+        catch {
+            if ([string]$_.Exception.Data['CodexAiInstructionsPathSafetyReason'] -ceq 'reparse-point') { continue }
+            if ($Strict) {
+                $inspectionException = $_.Exception
+                try { $manifestStillExists = Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf }
+                catch {
+                    throw "Cannot inspect linked worktree manifest before mutation: $worktreeManifestPath. $($_.Exception.Message)"
+                }
+                if (-not $manifestStillExists) { continue }
+                throw "Cannot inspect linked worktree manifest before mutation: $worktreeManifestPath. $($inspectionException.Message)"
+            }
+            continue
+        }
         try {
             $worktreeManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $worktreeManifestPath | ConvertFrom-Json
             $schemaVersion = $worktreeManifest.schemaVersion
@@ -1629,7 +1623,13 @@ function Assert-NoRepoManagedManifestV4 {
         }
         catch {
             if ($Strict) {
-                throw "Cannot inspect linked worktree manifest before mutation: $worktreeManifestPath. $($_.Exception.Message)"
+                $inspectionException = $_.Exception
+                try { $manifestStillExists = Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf }
+                catch {
+                    throw "Cannot inspect linked worktree manifest before mutation: $worktreeManifestPath. $($_.Exception.Message)"
+                }
+                if (-not $manifestStillExists) { continue }
+                throw "Cannot inspect linked worktree manifest before mutation: $worktreeManifestPath. $($inspectionException.Message)"
             }
             continue
         }

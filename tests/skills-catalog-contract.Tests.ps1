@@ -332,6 +332,25 @@ function Get-TestManagedManifestV4 {
         { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw 'projection parity differs'
     }
 
+    # Scenario: Two projection provenance tuples have the same newline-joined text but different field values.
+    # Purpose: Compare every provenance field ordinally instead of accepting a delimiter collision.
+    It 'UnitT11v7a_rejects_newline_colliding_projection_provenance' {
+        $manifest = Get-TestManagedManifestV4
+        $manifest.projections = @('project-agents','project-claude')
+        $source = @($manifest.files | Where-Object artifactType -eq 'skill')[0]
+        $copy = ($source | ConvertTo-Json -Depth 10 | ConvertFrom-Json)
+        $copy.projectionId = 'project-claude'
+        $copy.targetPath = '.claude/skills/work-with-jira/SKILL.md'
+        $commit = [string]$source.sourceCommit
+        $source.sourceRef = "main`n$commit"
+        $source.sourceVersion = 'release'
+        $copy.sourceRef = 'main'
+        $copy.sourceVersion = "$commit`nrelease"
+        $manifest.files += $copy
+
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw 'inconsistent source identity across projections'
+    }
+
     # Scenario: A v4 Skill changes its path below the projection root.
     # Purpose: Preserve canonical source-to-target relative paths.
     It 'UnitT11v8_rejects_a_v4_skill_source_target_relative_path_mismatch' {

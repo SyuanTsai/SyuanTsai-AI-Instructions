@@ -804,6 +804,53 @@ function Test-IsManagedManifestV4InstructionTarget {
     }
 }
 
+function ConvertFrom-GitWorktreePorcelainZ {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Output,
+        [switch] $Strict
+    )
+
+    $raw = @($Output | ForEach-Object { [string]$_ }) -join "`n"
+    if ([string]::IsNullOrEmpty($raw)) {
+        if ($Strict) { throw 'Invalid git worktree porcelain output.' }
+        return
+    }
+    if (-not $raw.EndsWith("`0`0",[System.StringComparison]::Ordinal)) {
+        if ($Strict) { throw 'Invalid git worktree porcelain output.' }
+        return
+    }
+
+    $recordCount = 0
+    foreach ($recordText in @($raw.Split(@("`0`0"),[System.StringSplitOptions]::None))) {
+        if ([string]::IsNullOrEmpty($recordText)) { continue }
+        $fields = @($recordText.Split([char]0))
+        if ($fields.Count -eq 0 -or -not ([string]$fields[0]).StartsWith('worktree ',[System.StringComparison]::Ordinal) -or
+            ([string]$fields[0]).Length -eq 'worktree '.Length) {
+            if ($Strict) { throw 'Invalid git worktree porcelain output.' }
+            continue
+        }
+
+        $recordHasState = $false
+        $prunable = $false
+        for ($index = 1; $index -lt $fields.Count; $index++) {
+            $field = [string]$fields[$index]
+            if ($field -cnotmatch '^(?:HEAD [0-9a-f]{40}|branch .+|detached|bare|locked(?: .*)?|prunable(?: .*)?)$') {
+                if ($Strict) { throw 'Invalid git worktree porcelain output.' }
+                continue
+            }
+            if ($field -cmatch '^(?:HEAD [0-9a-f]{40}|bare)$') { $recordHasState = $true }
+            if ($field -cmatch '^prunable(?: .*)?$') { $prunable = $true }
+        }
+        if ($Strict -and -not $recordHasState) { throw 'Invalid git worktree porcelain output.' }
+        $recordCount++
+        [pscustomobject][ordered]@{
+            Path = ([string]$fields[0]).Substring('worktree '.Length)
+            Prunable = $prunable
+        }
+    }
+    if ($Strict -and $recordCount -eq 0) { throw 'Invalid git worktree porcelain output.' }
+}
+
 function Assert-ProjectionSkillParity {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Validated,
@@ -817,9 +864,21 @@ function Assert-ProjectionSkillParity {
         $sourcePathsByRelativePath = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::Ordinal)
         foreach ($file in $skillFiles) {
             $entry = $file.Entry
-            $currentIdentity = @([string]$entry.sourceId,[string]$entry.sourceRepository,[string]$entry.sourceRef,[string]$entry.sourceCommit,[string]$entry.sourceVersion) -join "`n"
+            $currentIdentity = [pscustomobject][ordered]@{
+                sourceId = [string]$entry.sourceId
+                sourceRepository = [string]$entry.sourceRepository
+                sourceRef = [string]$entry.sourceRef
+                sourceCommit = [string]$entry.sourceCommit
+                sourceVersion = [string]$entry.sourceVersion
+            }
             if ($null -eq $identity) { $identity = $currentIdentity }
-            elseif ($currentIdentity -cne $identity) { throw "$Context '$skillId' has inconsistent source identity across projections." }
+            elseif (
+                $currentIdentity.sourceId -cne $identity.sourceId -or
+                $currentIdentity.sourceRepository -cne $identity.sourceRepository -or
+                $currentIdentity.sourceRef -cne $identity.sourceRef -or
+                $currentIdentity.sourceCommit -cne $identity.sourceCommit -or
+                $currentIdentity.sourceVersion -cne $identity.sourceVersion
+            ) { throw "$Context '$skillId' has inconsistent source identity across projections." }
             if (-not $sourcePathsByRelativePath.ContainsKey([string]$file.RelativePath)) { $sourcePathsByRelativePath[[string]$file.RelativePath] = [string]$entry.sourcePath }
             elseif ([string]$sourcePathsByRelativePath[[string]$file.RelativePath] -cne [string]$entry.sourcePath) { throw "$Context '$skillId' has inconsistent sourcePath for '$($file.RelativePath)' across projections." }
         }
@@ -1253,4 +1312,4 @@ function Test-SkillsCatalogContract {
     return [pscustomobject]@{CatalogId=[string]$catalog.catalogId;SourceCount=@($catalog.sources).Count;SkillCount=@($catalog.skills).Count;ProfileCount=@($catalog.profiles).Count;ManifestFileCount=@($manifest.files).Count}
 }
 
-Export-ModuleMember -Function Assert-LegacyManagedManifestV1, Assert-ManagedManifest, Assert-ManagedManifestV2, Assert-ManagedManifestV3, Assert-ManagedManifestV4, Assert-SkillsCatalogV2, Assert-SkillsCatalogV3, Assert-SkillsCatalogLockV2, Assert-SkillsCatalogLockV3, Assert-UserSkillsManagedManifest, Assert-UserSkillsManagedManifestBinding, Assert-UserSkillsManagedManifestV1, Assert-UserSkillsManagedManifestV2, Assert-UserSkillsManagedManifestV3, Get-SkillsCatalogProjectionContractSha256, Get-SkillsCatalogProjectionTargetPath, Import-SkillsCatalogJson, Test-SkillsCatalogContract, Test-SkillsCatalogDocument, Test-SkillsCatalogSourcePinsDocument, Test-SkillsCatalogLockDocument
+Export-ModuleMember -Function Assert-LegacyManagedManifestV1, Assert-ManagedManifest, Assert-ManagedManifestV2, Assert-ManagedManifestV3, Assert-ManagedManifestV4, Assert-SkillsCatalogV2, Assert-SkillsCatalogV3, Assert-SkillsCatalogLockV2, Assert-SkillsCatalogLockV3, Assert-UserSkillsManagedManifest, Assert-UserSkillsManagedManifestBinding, Assert-UserSkillsManagedManifestV1, Assert-UserSkillsManagedManifestV2, Assert-UserSkillsManagedManifestV3, ConvertFrom-GitWorktreePorcelainZ, Get-SkillsCatalogProjectionContractSha256, Get-SkillsCatalogProjectionTargetPath, Import-SkillsCatalogJson, Test-SkillsCatalogContract, Test-SkillsCatalogDocument, Test-SkillsCatalogSourcePinsDocument, Test-SkillsCatalogLockDocument

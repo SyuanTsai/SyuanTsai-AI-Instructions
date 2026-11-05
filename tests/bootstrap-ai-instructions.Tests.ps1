@@ -927,7 +927,7 @@ if errorlevel 1 exit /b 92
             $output = & $script:TestPowerShellExecutable @arguments 2>&1
 
             $LASTEXITCODE | Should Not Be 0
-            (ConvertTo-TestDiagnosticText -Output $output) | Should Match '(?is)linked worktree manifest.*(invalid json|unexpected character|unexpected token)'
+            (ConvertTo-TestDiagnosticText -Output $output) | Should Match 'Cannot inspect linked worktree manifest before mutation'
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath)) | Should Be $indexBefore
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
             [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot $script:ManifestPath))) | Should Be $manifestBefore
@@ -939,6 +939,69 @@ if errorlevel 1 exit /b 92
         finally {
             Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
         }
+    }
+
+    # Scenario: Git reports a linked worktree whose path requires non-ASCII characters without C quoting under -z.
+    # Purpose: Inspect the real linked path and reject its v4 manifest before remediation can mutate bytes or history.
+    It 'InterT68g_rejects_v4_in_a_non_ascii_linked_worktree_path_before_mutation' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
+        $unicodeWorktreeName = ([string][char]0x5DE5) + ([string][char]0x4F5C) + ([string][char]0x6A39) + '-' + ([string][char]0x00FC) + '-bootstrap'
+        $linkedRoot = Join-Path $TestDrive $unicodeWorktreeName
+        Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','linked-unicode-v4-fixture',$linkedRoot) | Out-Null
+        try {
+            Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $linkedRoot | Out-Null
+            $linkedManifestPath = Join-Path $linkedRoot $script:ManifestPath
+            $linkedManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $linkedManifestPath | ConvertFrom-Json
+            $linkedManifest.schemaVersion = 4
+            Set-TestText -Path $linkedManifestPath -Value (($linkedManifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+            Invoke-TestGit -Repository $targetRoot -Arguments @('add','--force','--','AGENTS.md',$script:ManifestPath.Replace('\','/')) | Out-Null
+            Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','tracked unicode worktree fixture') | Out-Null
+            $manifestPath = Join-Path $targetRoot $script:ManifestPath
+            $excludePath = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
+            if (-not [IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+            $manifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath))
+            $excludeBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+            $linkedManifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath))
+            $headBefore = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim()
+            $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
+
+            $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+            $LASTEXITCODE | Should Not Be 0
+            (ConvertTo-TestDiagnosticText -Output $output) | Should Match 'REPO managed manifest schema version 4 requires a projection-aware bootstrap\.'
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath)) | Should Be $manifestBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath)) | Should Be $linkedManifestBefore
+            (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim() | Should Be $headBefore
+        }
+        finally {
+            Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
+        }
+    }
+
+    # Scenario: Strict linked-manifest inspection reaches an existing manifest but its path safety check fails with I/O.
+    # Purpose: Propagate non-reparse inspection errors instead of treating the manifest as absent.
+    It 'InterT68h_fails_closed_when_strict_manifest_path_safety_throws_io' {
+        $tokens = $null; $parseErrors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($script:BootstrapScript,[ref]$tokens,[ref]$parseErrors)
+        foreach ($functionName in @('Get-ManagedWorktreeRoots','Assert-ManagedPathDoesNotCrossReparsePoint','Assert-NoRepoManagedManifestV4')) {
+            $definition = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $functionName },$true))[0]
+            . ([scriptblock]::Create($definition.Extent.Text))
+        }
+        $script:manifestRelativePath = $script:ManifestPath
+        $fixtureRoot = Join-Path $TestDrive 'strict-bootstrap-io'
+        New-Item -ItemType Directory -Force -Path (Join-Path $fixtureRoot '.codex') | Out-Null
+        Set-TestText -Path (Join-Path $fixtureRoot $script:ManifestPath) -Value '{}'
+        Mock Get-ManagedWorktreeRoots { @($fixtureRoot) }
+        Mock Assert-ManagedPathDoesNotCrossReparsePoint { throw [System.IO.IOException]::new('Injected manifest inspection I/O failure.') }
+        $message = $null
+
+        try { Assert-NoRepoManagedManifestV4 -Repository $fixtureRoot -Strict }
+        catch { $message = $_.Exception.Message }
+
+        if ([string]::IsNullOrWhiteSpace($message)) { throw 'Expected strict linked-manifest inspection to fail.' }
+        $message.Contains('Cannot inspect linked worktree manifest before mutation') | Should Be $true
+        $message.Contains('Injected manifest inspection I/O failure.') | Should Be $true
     }
 
     # Scenario: A linked worktree carries v4 while the current worktree has unsafe legacy ownership evidence.

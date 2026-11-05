@@ -586,7 +586,7 @@ if errorlevel 1 exit /b 92
             $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
 
             $result.ExitCode | Should Not Be 0
-            $result.Output | Should Match '(?is)linked worktree manifest.*(invalid json|unexpected character|unexpected token)'
+            $result.Output | Should Match 'Cannot inspect linked worktree manifest before mutation'
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath)) | Should Be $indexBefore
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
             [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot $script:ManifestRelativePath))) | Should Be $manifestBefore
@@ -598,6 +598,71 @@ if errorlevel 1 exit /b 92
         finally {
             Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
         }
+    }
+
+    # Scenario: Git reports a linked worktree whose path contains non-ASCII characters without C quoting under -z.
+    # Purpose: Inspect the real linked path and reject its v4 manifest before cleanup mutates bytes or the index.
+    It 'InterT69d_rejects_v4_in_a_non_ascii_linked_worktree_path_before_mutation' {
+        $targetRoot = Join-Path $TestDrive 'unicode-linked-v4-cleanup'
+        New-PollutedTestRepository -Path $targetRoot
+        $unicodeWorktreeName = ([string][char]0x5DE5) + ([string][char]0x4F5C) + ([string][char]0x6A39) + '-' + ([string][char]0x00FC) + '-cleanup'
+        $linkedRoot = Join-Path $TestDrive $unicodeWorktreeName
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','cleanup-linked-unicode-v4-fixture',$linkedRoot) | Out-Null
+        try {
+            $linkedManifestPath = Join-Path $linkedRoot $script:ManifestRelativePath
+            $linkedManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $linkedManifestPath | ConvertFrom-Json
+            $linkedManifest.schemaVersion = 4
+            Set-CleanupTestText -Path $linkedManifestPath -Value (($linkedManifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+            $indexPath = (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','index') | Select-Object -First 1).Trim()
+            if (-not [IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $targetRoot $indexPath }
+            $excludePath = (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
+            if (-not [IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+            $manifestPath = Join-Path $targetRoot $script:ManifestRelativePath
+            $indexBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath))
+            $excludeBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+            $manifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath))
+            $linkedManifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath))
+            $headBefore = (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim()
+
+            $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+
+            $result.ExitCode | Should Not Be 0
+            $result.Output | Should Match 'REPO managed manifest schema version 4 requires a projection-aware bootstrap\.'
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath)) | Should Be $indexBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath)) | Should Be $manifestBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath)) | Should Be $linkedManifestBefore
+            (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim() | Should Be $headBefore
+            @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
+        }
+        finally {
+            Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
+        }
+    }
+
+    # Scenario: Strict cleanup inspection reaches an existing manifest but its path safety check fails with I/O.
+    # Purpose: Propagate non-reparse inspection errors instead of treating the manifest as absent.
+    It 'InterT69e_fails_closed_when_strict_manifest_path_safety_throws_io' {
+        $tokens = $null; $parseErrors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($script:CleanupScript,[ref]$tokens,[ref]$parseErrors)
+        foreach ($functionName in @('Get-CleanupWorktreeRoots','Assert-CleanupManagedFilePath','Assert-NoRepoManagedManifestV4')) {
+            $definition = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $functionName },$true))[0]
+            . ([scriptblock]::Create($definition.Extent.Text))
+        }
+        $script:manifestRelativePath = $script:ManifestRelativePath
+        $fixtureRoot = Join-Path $TestDrive 'strict-cleanup-io'
+        New-Item -ItemType Directory -Force -Path (Join-Path $fixtureRoot '.codex') | Out-Null
+        Set-CleanupTestText -Path (Join-Path $fixtureRoot $script:ManifestRelativePath) -Value '{}'
+        Mock Get-CleanupWorktreeRoots { @($fixtureRoot) }
+        Mock Assert-CleanupManagedFilePath { throw [System.IO.IOException]::new('Injected manifest inspection I/O failure.') }
+        $message = $null
+
+        try { Assert-NoRepoManagedManifestV4 -Repository $fixtureRoot -Strict }
+        catch { $message = $_.Exception.Message }
+
+        if ([string]::IsNullOrWhiteSpace($message)) { throw 'Expected strict linked-manifest inspection to fail.' }
+        $message.Contains('Cannot inspect linked worktree manifest before mutation') | Should Be $true
+        $message.Contains('Injected manifest inspection I/O failure.') | Should Be $true
     }
 
     # Scenario: Bootstrap or another cleanup process holds the shared repository runtime lock.
