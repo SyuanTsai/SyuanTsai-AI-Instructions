@@ -128,6 +128,27 @@ function Convert-TestTargetManifestToV1 {
 }
 
 Describe 'bootstrap-ai-instructions-multisource' {
+    # Scenario: A projection-aware sync configuration reaches the legacy multi-source bootstrap.
+    # Purpose: Reject v5 before creating working directories or changing target bytes.
+    It 'InterT04_rejects_sync_v5_before_multisource_mutation' {
+        $catalogPath=Join-Path $TestDrive 'v5-catalog.json';$lockPath=Join-Path $TestDrive 'v5-lock.json';$configurationPath=Join-Path $TestDrive 'v5-config.json'
+        $instructionArchive=Join-Path $TestDrive 'v5-instructions.zip';$skillArchivePath=Join-Path $TestDrive 'v5-source.zip';$targetRoot=Join-Path $TestDrive 'v5-target'
+        New-TestInstructionArchive (Join-Path $TestDrive 'v5-instruction-root') $instructionArchive
+        $skillArchive=New-TestSkillArchive (Join-Path $TestDrive 'v5-skill-root') $skillArchivePath
+        New-TestDocuments $catalogPath $lockPath $configurationPath $skillArchive
+        $configuration=Get-Content -Raw -LiteralPath $configurationPath|ConvertFrom-Json
+        $configuration.schemaVersion=5
+        $configuration|Add-Member -NotePropertyName projections -NotePropertyValue ([pscustomobject]@{user=@('user-agents');project=@()})
+        Set-TestUtf8Text $configurationPath (($configuration|ConvertTo-Json -Depth 20).Replace("`r`n","`n")+"`n")
+        New-TestTargetRepository $targetRoot
+        $readmePath=Join-Path $targetRoot 'README.md';$before=[IO.File]::ReadAllBytes($readmePath)
+
+        Assert-ThrowsMessage -Action { & $script:BootstrapScript -CatalogPath $catalogPath -LockPath $lockPath -ConfigurationPath $configurationPath -InstructionSourceArchivePath $instructionArchive -InstructionSourceCommit ('c'*40) -SourceArchivePaths @{'source-a'=$skillArchivePath} -TargetRoot $targetRoot } -Pattern 'AI Instructions sync configuration schema version 5 requires a projection-aware installer\.'
+
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($readmePath))|Should Be ([Convert]::ToBase64String($before))
+        Test-Path -LiteralPath (Join-Path $targetRoot '.codex\ai-instructions.manifest.json')|Should Be $false
+    }
+
     # Scenario: A licensed external Skill is selected for consumer Instructions synchronization.
     # Purpose: Keep Instructions license delivery while shared Skill grants remain in USER composition/reconciliation.
     It 'InterT05_keeps_licensed_external_Skills_out_of_REPO' {

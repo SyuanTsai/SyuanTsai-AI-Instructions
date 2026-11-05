@@ -4075,6 +4075,33 @@ if ((Get-GitExitCode -Repository $targetRootPath -Arguments @('rev-parse', '--ve
     return
 }
 
+if ([string]::IsNullOrWhiteSpace($ConfigurationPath)) {
+    $codexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
+        $env:CODEX_HOME
+    }
+    else {
+        Join-Path $HOME '.codex'
+    }
+    $ConfigurationPath = Join-Path $codexHome 'ai-instructions-sync.json'
+}
+
+$configurationFullPath = [System.IO.Path]::GetFullPath($ConfigurationPath)
+$configuration = $null
+if (Test-Path -LiteralPath $configurationFullPath -PathType Leaf) {
+    try {
+        $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationFullPath | ConvertFrom-Json
+    }
+    catch {
+        throw "AI instruction sync configuration is not valid JSON: $configurationFullPath"
+    }
+
+    if ($configuration.PSObject.Properties.Name -contains 'schemaVersion' -and
+        ($configuration.schemaVersion -is [int] -or $configuration.schemaVersion -is [long]) -and
+        [int64]$configuration.schemaVersion -eq 5) {
+        throw 'AI Instructions sync configuration schema version 5 requires a projection-aware installer.'
+    }
+}
+
 if (-not [string]::IsNullOrWhiteSpace($RecoverSkillMigration)) {
     $recoveryLock = Open-RepositoryOperationLock $targetRootPath
     $recoveryIndexLock = $null
@@ -4089,25 +4116,7 @@ if (-not [string]::IsNullOrWhiteSpace($RecoverSkillMigration)) {
     return
 }
 
-if ([string]::IsNullOrWhiteSpace($ConfigurationPath)) {
-    $codexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
-        $env:CODEX_HOME
-    }
-    else {
-        Join-Path $HOME '.codex'
-    }
-    $ConfigurationPath = Join-Path $codexHome 'ai-instructions-sync.json'
-}
-
-$configurationFullPath = [System.IO.Path]::GetFullPath($ConfigurationPath)
 if (Test-Path -LiteralPath $configurationFullPath -PathType Leaf) {
-    try {
-        $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationFullPath | ConvertFrom-Json
-    }
-    catch {
-        throw "AI instruction sync configuration is not valid JSON: $configurationFullPath"
-    }
-
     if ($configuration.PSObject.Properties.Name -notcontains 'schemaVersion' -or
         $configuration.schemaVersion -ne 3) {
         throw "Unsupported AI instruction sync configuration schema: $configurationFullPath"

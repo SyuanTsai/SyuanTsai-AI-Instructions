@@ -2,6 +2,47 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $script:CanonicalRepository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
+$script:SkillsCatalogContractModule = $null
+$script:ExpectedPlatformRuntimeRootModule = 'platform-runtime.psm1'
+$script:ExpectedPlatformRuntimeFunctionsToExport = @(
+    'Assert-PlatformRuntimeInventory',
+    'Get-PlatformCapabilities',
+    'Open-PlatformDirectory',
+    'Open-PlatformFile',
+    'Assert-PlatformFileIdentity',
+    'Enter-PlatformLock',
+    'Publish-PlatformFile',
+    'Remove-PlatformOwnedFile',
+    'Get-PlatformPermissions',
+    'Set-PlatformPermissions',
+    'Start-PlatformOwnedProcess',
+    'Stop-PlatformOwnedProcess',
+    'Resolve-PlatformPowerShell',
+    'Resolve-PlatformPhysicalPath',
+    'Initialize-PlatformAuthorityPester',
+    'Assert-PlatformAuthorityPester',
+    'New-PlatformPrivateRoot',
+    'Invoke-PlatformPreparationCommand',
+    'Initialize-PlatformPester',
+    'Set-PlatformProcessEnvironment'
+)
+$script:ExpectedPlatformRuntimeEmptyExports = @('CmdletsToExport','VariablesToExport','AliasesToExport')
+
+function Get-AiInstructionsSkillsCatalogContractModule {
+    if ($null -ne $script:SkillsCatalogContractModule) { return $script:SkillsCatalogContractModule }
+
+    $modulePath = Join-Path $PSScriptRoot 'skills-catalog-contract.psm1'
+    if (-not (Test-Path -LiteralPath $modulePath -PathType Leaf)) {
+        throw "Runtime bundle v3 Catalog validation requires module 'skills-catalog-contract.psm1' beside the runtime contract."
+    }
+    try {
+        $script:SkillsCatalogContractModule = Import-Module $modulePath -PassThru -Scope Local -ErrorAction Stop
+    }
+    catch {
+        throw "Runtime bundle v3 Catalog validation could not import module 'skills-catalog-contract.psm1'."
+    }
+    return $script:SkillsCatalogContractModule
+}
 
 function Test-AiInstructionsObjectHasProperty {
     param([AllowNull()][object] $Object,[Parameter(Mandatory = $true)][string] $Name)
@@ -257,6 +298,9 @@ function ConvertTo-AiInstructionsSyncConfigurationV4 {
             throw 'AI instruction sync configuration schemaVersion must be an integer.'
         }
         $schemaVersion = [int]$ExistingConfiguration.schemaVersion
+        if ($schemaVersion -eq 5) {
+            throw 'AI Instructions sync configuration schema version 5 requires a projection-aware installer.'
+        }
         if ($schemaVersion -notin @(1,2,3,4)) {
             throw "Unsupported AI instruction sync configuration schemaVersion '$schemaVersion'."
         }
@@ -351,6 +395,39 @@ function ConvertTo-AiInstructionsSyncConfigurationV4 {
     return $configuration
 }
 
+function ConvertTo-AiInstructionsSyncConfigurationV5 {
+    [CmdletBinding()]
+    param(
+        [AllowNull()][object] $ExistingConfiguration,
+        [Parameter(Mandatory = $true)][string] $CatalogRepository,
+        [Parameter(Mandatory = $true)][string] $CatalogRef,
+        [string[]] $AdditionalExcludedRepositoryUrls = @(),
+        [string[]] $AdditionalExcludedRepositoryPaths = @(),
+        [AllowNull()][object] $Catalog,
+        [string] $CanonicalRepository = $script:CanonicalRepository
+    )
+
+    if ($null -ne $ExistingConfiguration -and
+        (Test-AiInstructionsObjectHasProperty -Object $ExistingConfiguration -Name 'schemaVersion') -and
+        ($ExistingConfiguration.schemaVersion -is [int] -or $ExistingConfiguration.schemaVersion -is [long]) -and
+        [int64]$ExistingConfiguration.schemaVersion -eq 5) {
+        Assert-AiInstructionsSyncConfigurationV5 -Configuration $ExistingConfiguration -CanonicalRepository $CanonicalRepository | Out-Null
+        return $ExistingConfiguration
+    }
+
+    $v4 = ConvertTo-AiInstructionsSyncConfigurationV4 @PSBoundParameters
+    $v5 = [pscustomobject][ordered]@{
+        schemaVersion = 5
+        excludedRepositoryUrls = @($v4.excludedRepositoryUrls)
+        excludedRepositoryPaths = @($v4.excludedRepositoryPaths)
+        catalog = $v4.catalog
+        updates = $v4.updates
+        projections = [pscustomobject][ordered]@{ user=@('user-agents','user-claude'); project=@() }
+    }
+    Assert-AiInstructionsSyncConfigurationV5 -Configuration $v5 -CanonicalRepository $CanonicalRepository | Out-Null
+    return $v5
+}
+
 function Assert-AiInstructionsSyncConfigurationV4 {
     [CmdletBinding()]
     param(
@@ -359,6 +436,11 @@ function Assert-AiInstructionsSyncConfigurationV4 {
         [switch] $AllowCanonicalRepositoryAlias
     )
 
+    if ((Test-AiInstructionsObjectHasProperty -Object $Configuration -Name 'schemaVersion') -and
+        ($Configuration.schemaVersion -is [int] -or $Configuration.schemaVersion -is [long]) -and
+        [int64]$Configuration.schemaVersion -eq 5) {
+        throw 'AI Instructions sync configuration schema version 5 requires a projection-aware installer.'
+    }
     if (-not (Test-AiInstructionsObjectHasProperty -Object $Configuration -Name 'schemaVersion') -or
         ($Configuration.schemaVersion -isnot [int] -and $Configuration.schemaVersion -isnot [long]) -or
         $Configuration.schemaVersion -ne 4) {
@@ -421,6 +503,62 @@ function Assert-AiInstructionsSyncConfigurationV4 {
     return $Configuration
 }
 
+function Assert-AiInstructionsProjectionIdArray {
+    param(
+        [Parameter(Mandatory = $true)][object] $Value,
+        [Parameter(Mandatory = $true)][string[]] $Allowed,
+        [Parameter(Mandatory = $true)][string] $Context,
+        [switch] $RequireUserAgents
+    )
+    if ($Value -isnot [System.Array]) { throw "$Context must be an array." }
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($item in @($Value)) {
+        if ($item -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$item)) { throw "$Context must contain only non-empty strings." }
+        if ([string]$item -cnotin $Allowed) { throw "$Context contains unknown or wrong-scope projection '$item'." }
+        if (-not $seen.Add([string]$item)) { throw "$Context contains duplicate projection '$item'." }
+    }
+    if ($RequireUserAgents -and -not $seen.Contains('user-agents')) { throw "$Context must include 'user-agents'." }
+}
+
+function Assert-AiInstructionsSyncConfigurationV5 {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object] $Configuration,
+        [string] $CanonicalRepository = $script:CanonicalRepository,
+        [switch] $AllowCanonicalRepositoryAlias
+    )
+    if (-not (Test-AiInstructionsObjectHasProperty -Object $Configuration -Name 'schemaVersion') -or
+        ($Configuration.schemaVersion -isnot [int] -and $Configuration.schemaVersion -isnot [long]) -or
+        [int64]$Configuration.schemaVersion -ne 5) { throw 'AI instruction sync configuration must use schemaVersion 5.' }
+    foreach ($propertyName in @($Configuration.PSObject.Properties.Name)) {
+        if ($propertyName -cnotin @('schemaVersion','excludedRepositoryUrls','excludedRepositoryPaths','catalog','updates','projections')) {
+            throw "AI instruction sync configuration contains unsupported property '$propertyName'."
+        }
+    }
+    foreach ($name in @('excludedRepositoryUrls','excludedRepositoryPaths','catalog','updates','projections')) {
+        if (-not (Test-AiInstructionsObjectHasProperty -Object $Configuration -Name $name)) { throw "AI instruction sync configuration is missing '$name'." }
+    }
+    $v4 = [pscustomobject][ordered]@{
+        schemaVersion=4
+        excludedRepositoryUrls=$Configuration.excludedRepositoryUrls
+        excludedRepositoryPaths=$Configuration.excludedRepositoryPaths
+        catalog=$Configuration.catalog
+        updates=$Configuration.updates
+    }
+    Assert-AiInstructionsSyncConfigurationV4 -Configuration $v4 -CanonicalRepository $CanonicalRepository -AllowCanonicalRepositoryAlias:$AllowCanonicalRepositoryAlias | Out-Null
+    foreach ($propertyName in @($Configuration.projections.PSObject.Properties.Name)) {
+        if ($propertyName -cnotin @('user','project')) { throw "AI instruction sync configuration projections contains unsupported property '$propertyName'." }
+    }
+    foreach ($name in @('user','project')) {
+        if (-not (Test-AiInstructionsObjectHasProperty -Object $Configuration.projections -Name $name)) { throw "AI instruction sync configuration projections is missing '$name'." }
+    }
+    # P6a owns the projection root map. This reader only enforces its fixed scope IDs,
+    # avoiding an import cycle from the runtime contract into the Catalog contract.
+    Assert-AiInstructionsProjectionIdArray -Value $Configuration.projections.user -Allowed @('user-agents','user-claude','user-copilot') -Context 'AI instruction sync configuration projections.user' -RequireUserAgents
+    Assert-AiInstructionsProjectionIdArray -Value $Configuration.projections.project -Allowed @('project-agents','project-claude','project-github') -Context 'AI instruction sync configuration projections.project'
+    return $Configuration
+}
+
 function Get-AiInstructionsFileSha256 {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -428,6 +566,288 @@ function Get-AiInstructionsFileSha256 {
     try {
         $sha = [System.Security.Cryptography.SHA256]::Create()
         try { return ([System.BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','').ToLowerInvariant() }
+        finally { $sha.Dispose() }
+    }
+    finally { $stream.Dispose() }
+}
+
+function Get-AiInstructionsCanonicalTextSha256 {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    [byte[]]$bytes = [System.IO.File]::ReadAllBytes([System.IO.Path]::GetFullPath($Path))
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xef -and $bytes[1] -eq 0xbb -and $bytes[2] -eq 0xbf) {
+        throw 'Platform runtime files must be UTF-8 without BOM.'
+    }
+    $utf8 = New-Object System.Text.UTF8Encoding($false,$true)
+    $canonicalBytes = $utf8.GetBytes($utf8.GetString($bytes).Replace("`r`n","`n"))
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([System.BitConverter]::ToString($sha.ComputeHash($canonicalBytes))).Replace('-','').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+
+function Resolve-AiInstructionsRuntimeFilePath {
+    param(
+        [Parameter(Mandatory = $true)][string] $RuntimeRoot,
+        [Parameter(Mandatory = $true)][string] $RelativePath,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $root = Get-AiInstructionsFullDirectoryPath -Path $RuntimeRoot
+    Assert-AiInstructionsMutationPath -Path $root -ExpectedType Directory -Context 'AI instructions runtime root' | Out-Null
+    if ([string]::IsNullOrWhiteSpace($RelativePath) -or $RelativePath.Contains('\') -or
+        [System.IO.Path]::IsPathRooted($RelativePath) -or $RelativePath -match '(^|/)\.\.?(/|$)' -or
+        $RelativePath -match '[\x00-\x1f:]') {
+        throw "$Context contains an unsafe runtime-relative path '$RelativePath'."
+    }
+
+    $current = $root
+    $segments = @($RelativePath.Split('/'))
+    for ($index = 0; $index -lt $segments.Count; $index++) {
+        $current = Join-Path $current $segments[$index]
+        if (-not (Test-Path -LiteralPath $current)) { throw "$Context file is missing: $RelativePath" }
+        $item = Get-Item -Force -LiteralPath $current
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "$Context must not traverse a reparse point: $RelativePath"
+        }
+        $isFinal = $index -eq ($segments.Count - 1)
+        if (($isFinal -and $item.PSIsContainer) -or (-not $isFinal -and -not $item.PSIsContainer)) {
+            throw "$Context must resolve to a regular file: $RelativePath"
+        }
+    }
+    return [System.IO.Path]::GetFullPath($current)
+}
+
+function Get-AiInstructionsDataValue {
+    param([AllowNull()][object] $Object,[Parameter(Mandatory = $true)][string] $Name)
+    if ($null -eq $Object) { return $null }
+    if ($Object -is [System.Collections.IDictionary] -and $Object.Contains($Name)) { return $Object[$Name] }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -ne $property) { return $property.Value }
+    return $null
+}
+
+function ConvertTo-AiInstructionsPlatformRuntimeRelativePath {
+    param(
+        [Parameter(Mandatory = $true)][object] $Value,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string] $ManifestDirectory,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+    $pathValue = $Value
+    if ($Value -isnot [string]) { $pathValue = Get-AiInstructionsDataValue -Object $Value -Name 'ModuleName' }
+    if ($pathValue -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$pathValue)) {
+        throw "$Context must identify a non-empty relative path."
+    }
+    $relativePath = ([string]$pathValue).Replace('\','/')
+    if ([System.IO.Path]::IsPathRooted($relativePath) -or $relativePath -match '(^|/)\.\.?(/|$)' -or $relativePath -match '[\x00-\x1f:]') {
+        throw "$Context contains an unsafe relative path '$relativePath'."
+    }
+    if ([string]::IsNullOrWhiteSpace($ManifestDirectory)) { return $relativePath }
+    return "$ManifestDirectory/$relativePath"
+}
+
+function Get-AiInstructionsPlatformRuntimeClosurePaths {
+    param(
+        [Parameter(Mandatory = $true)][object] $Manifest,
+        [Parameter(Mandatory = $true)][string] $ManifestPath
+    )
+    $separatorIndex = $ManifestPath.LastIndexOf('/')
+    $manifestDirectory = if ($separatorIndex -lt 0) { '' } else { $ManifestPath.Substring(0,$separatorIndex) }
+    $paths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($field in @('FileList','RootModule','NestedModules','RequiredModules')) {
+        $value = Get-AiInstructionsDataValue -Object $Manifest -Name $field
+        if ($null -eq $value -or ($field -in @('NestedModules','RequiredModules') -and @($value).Count -eq 0)) { continue }
+        foreach ($item in @($value)) {
+            $relativePath = ConvertTo-AiInstructionsPlatformRuntimeRelativePath -Value $item -ManifestDirectory $manifestDirectory -Context "Platform runtime manifest $field"
+            [void]$paths.Add($relativePath)
+        }
+    }
+    $privateData = Get-AiInstructionsDataValue -Object $Manifest -Name 'PrivateData'
+    $platformRuntime = Get-AiInstructionsDataValue -Object $privateData -Name 'PlatformRuntime'
+    $manifestInventory = Get-AiInstructionsDataValue -Object $platformRuntime -Name 'Inventory'
+    foreach ($entry in @($manifestInventory)) {
+        $entryPath = Get-AiInstructionsDataValue -Object $entry -Name 'Path'
+        $relativePath = ConvertTo-AiInstructionsPlatformRuntimeRelativePath -Value $entryPath -ManifestDirectory $manifestDirectory -Context 'Platform runtime manifest inventory'
+        [void]$paths.Add($relativePath)
+    }
+    return @($paths)
+}
+
+function Assert-AiInstructionsPlatformRuntimeManifestLoadFields {
+    param([Parameter(Mandatory = $true)][object] $Manifest)
+
+    # This runtime deliberately uses only RootModule and FileList.  Any other
+    # manifest import hook could load code or metadata outside the authenticated
+    # closure, so it must remain absent or explicitly empty.
+    foreach ($field in @('ModuleToProcess','NestedModules','RequiredModules','ScriptsToProcess','RequiredAssemblies','TypesToProcess','FormatsToProcess')) {
+        $value = Get-AiInstructionsDataValue -Object $Manifest -Name $field
+        if ($null -eq $value) { continue }
+        if ($value -is [string] -and $value.Length -eq 0) { continue }
+        if ($value -isnot [string] -and @($value).Count -eq 0) { continue }
+        throw "Platform runtime manifest loading field '$field' must be absent or empty."
+    }
+}
+
+function Assert-AiInstructionsPlatformRuntimeManifestApi {
+    param([Parameter(Mandatory = $true)][object] $Manifest)
+
+    $rootModule = Get-AiInstructionsDataValue -Object $Manifest -Name 'RootModule'
+    if ($rootModule -isnot [string] -or [string]$rootModule -cne $script:ExpectedPlatformRuntimeRootModule) {
+        throw "Platform runtime manifest RootModule must be '$($script:ExpectedPlatformRuntimeRootModule)'."
+    }
+
+    $actualFunctions = @(Get-AiInstructionsDataValue -Object $Manifest -Name 'FunctionsToExport')
+    $actualFunctionSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($functionName in $actualFunctions) {
+        if ($functionName -isnot [string] -or -not $actualFunctionSet.Add([string]$functionName)) {
+            throw 'Platform runtime manifest FunctionsToExport must exactly match the expected API.'
+        }
+    }
+    $expectedFunctionSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($functionName in $script:ExpectedPlatformRuntimeFunctionsToExport) { [void]$expectedFunctionSet.Add($functionName) }
+    if ($actualFunctionSet.Count -ne $expectedFunctionSet.Count -or -not $actualFunctionSet.SetEquals($expectedFunctionSet)) {
+        throw 'Platform runtime manifest FunctionsToExport must exactly match the expected API.'
+    }
+
+    foreach ($field in $script:ExpectedPlatformRuntimeEmptyExports) {
+        $value = Get-AiInstructionsDataValue -Object $Manifest -Name $field
+        if ($null -ne $value -and @($value).Count -ne 0) {
+            throw "Platform runtime manifest $field must be empty."
+        }
+    }
+}
+
+function Assert-AiInstructionsPlatformRuntimeManifestInventory {
+    param(
+        [Parameter(Mandatory = $true)][object] $Manifest,
+        [Parameter(Mandatory = $true)][string] $RuntimeRoot,
+        [Parameter(Mandatory = $true)][string] $BundleApiVersion
+    )
+
+    Assert-AiInstructionsPlatformRuntimeManifestLoadFields -Manifest $Manifest
+    Assert-AiInstructionsPlatformRuntimeManifestApi -Manifest $Manifest
+    $privateData = Get-AiInstructionsDataValue -Object $Manifest -Name 'PrivateData'
+    $platformRuntime = Get-AiInstructionsDataValue -Object $privateData -Name 'PlatformRuntime'
+    $manifestApiVersion = Get-AiInstructionsDataValue -Object $platformRuntime -Name 'ApiVersion'
+    $hashMode = Get-AiInstructionsDataValue -Object $platformRuntime -Name 'HashMode'
+    $inventory = Get-AiInstructionsDataValue -Object $platformRuntime -Name 'Inventory'
+    if ($manifestApiVersion -isnot [string] -or [string]$manifestApiVersion -cne $BundleApiVersion) {
+        throw 'Platform runtime manifest ApiVersion does not match runtime bundle platformRuntime.apiVersion.'
+    }
+    if ($hashMode -isnot [string] -or [string]$hashMode -cne 'sha256-utf8-lf' -or $null -eq $inventory) {
+        throw 'Platform runtime manifest has no bound sha256-utf8-lf inventory.'
+    }
+
+    $declaredPaths = New-Object System.Collections.Generic.List[string]
+    foreach ($entry in @($inventory)) {
+        $relativePath = ([string](Get-AiInstructionsDataValue -Object $entry -Name 'Path')).Replace('\','/')
+        $expectedHash = Get-AiInstructionsDataValue -Object $entry -Name 'Sha256'
+        if ([string]::IsNullOrWhiteSpace($relativePath) -or
+            [IO.Path]::IsPathRooted($relativePath) -or
+            @($relativePath.Split('/') | Where-Object { $_ -ceq '..' }).Count -gt 0 -or
+            $expectedHash -isnot [string] -or [string]$expectedHash -cnotmatch '^[a-f0-9]{64}$') {
+            throw 'Platform runtime manifest inventory contains an invalid entry.'
+        }
+        $declaredPaths.Add($relativePath)
+    }
+
+    $expectedFileList = @('platform-runtime.psd1') + @($declaredPaths.ToArray())
+    $manifestFileList = @(
+        @(Get-AiInstructionsDataValue -Object $Manifest -Name 'FileList') | ForEach-Object {
+            ([string]$_).Replace('\','/')
+        }
+    )
+    $expectedFileListText = (@($expectedFileList | Sort-Object) -join "`n")
+    $manifestFileListText = (@($manifestFileList | Sort-Object) -join "`n")
+    if ($expectedFileListText -cne $manifestFileListText -or
+        @($expectedFileList | Select-Object -Unique).Count -ne $expectedFileList.Count) {
+        throw 'Platform runtime manifest FileList differs from its bound inventory.'
+    }
+
+    $platformRoot = Join-Path (Get-AiInstructionsFullDirectoryPath -Path $RuntimeRoot) 'platform'
+    if (-not (Test-Path -LiteralPath $platformRoot -PathType Container)) {
+        throw 'Platform runtime implementation directory is missing.'
+    }
+    $actualPlatformPaths = @(
+        Get-ChildItem -LiteralPath $platformRoot -File -Recurse | ForEach-Object {
+            ('platform/' + $_.FullName.Substring($platformRoot.Length).TrimStart('\','/')).Replace('\','/')
+        }
+    )
+    $declaredPlatformPaths = @($declaredPaths | Where-Object { $_.StartsWith('platform/',[StringComparison]::Ordinal) })
+    if ((@($actualPlatformPaths | Sort-Object) -join "`n") -cne (@($declaredPlatformPaths | Sort-Object) -join "`n")) {
+        throw 'Platform runtime implementation directory contains missing or extra files.'
+    }
+
+    foreach ($entry in @($inventory)) {
+        $relativePath = ([string](Get-AiInstructionsDataValue -Object $entry -Name 'Path')).Replace('\','/')
+        $fullPath = Resolve-AiInstructionsRuntimeFilePath -RuntimeRoot $RuntimeRoot -RelativePath $relativePath -Context 'Platform runtime manifest inventory'
+        $actualHash = Get-AiInstructionsCanonicalTextSha256 -Path $fullPath
+        if ($actualHash -cne [string](Get-AiInstructionsDataValue -Object $entry -Name 'Sha256')) {
+            throw "Platform runtime manifest inventory hash mismatch: $relativePath"
+        }
+    }
+}
+
+function Get-AiInstructionsProjectionContractSha256 {
+    param([Parameter(Mandatory = $true)][object] $Projections)
+    if ($Projections -isnot [System.Array]) { throw 'Installed Skills Catalog v3 projections must be an array.' }
+    $allowed = @{
+        'user-agents'=@('user','.agents/skills'); 'user-claude'=@('user','.claude/skills'); 'user-copilot'=@('user','.copilot/skills')
+        'project-agents'=@('project','.agents/skills'); 'project-claude'=@('project','.claude/skills'); 'project-github'=@('project','.github/skills')
+    }
+    $byId = @{}
+    foreach ($projection in @($Projections)) {
+        foreach ($name in @('id','scope','root')) {
+            if (-not (Test-AiInstructionsObjectHasProperty -Object $projection -Name $name) -or $projection.$name -isnot [string]) {
+                throw "Installed Skills Catalog v3 projection is missing string '$name'."
+            }
+        }
+        $id = [string]$projection.id
+        if (-not $allowed.ContainsKey($id)) { throw "Installed Skills Catalog v3 contains unknown projection '$id'." }
+        if ($byId.ContainsKey($id)) { throw "Installed Skills Catalog v3 contains duplicate projection '$id'." }
+        if ([string]$projection.scope -cne [string]$allowed[$id][0] -or [string]$projection.root -cne [string]$allowed[$id][1]) {
+            throw "Installed Skills Catalog v3 projection '$id' has an invalid scope or root."
+        }
+        $byId[$id] = $projection
+    }
+    if (-not $byId.ContainsKey('user-agents')) { throw "Installed Skills Catalog v3 projections must include 'user-agents'." }
+    [string[]]$ids = @($byId.Keys)
+    [System.Array]::Sort($ids,[System.StringComparer]::Ordinal)
+    $canonical = [string]::Concat(@($ids | ForEach-Object { $projection=$byId[$_]; "$($_)`t$([string]$projection.scope)`t$([string]$projection.root)`n" }))
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($canonical)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+
+function Read-AiInstructionsRuntimeJsonFile {
+    param(
+        [Parameter(Mandatory = $true)][string] $RuntimeRoot,
+        [Parameter(Mandatory = $true)][string] $RelativePath,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+    $path = Resolve-AiInstructionsRuntimeFilePath -RuntimeRoot $RuntimeRoot -RelativePath $RelativePath -Context $Context
+    [byte[]]$bytes = [System.IO.File]::ReadAllBytes($path)
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xef -and $bytes[1] -eq 0xbb -and $bytes[2] -eq 0xbf) { throw "$Context must be UTF-8 without BOM." }
+    $utf8 = New-Object System.Text.UTF8Encoding($false,$true)
+    try { return ($utf8.GetString($bytes) | ConvertFrom-Json) }
+    catch { throw "$Context is not valid strict UTF-8 JSON." }
+}
+
+function Get-AiInstructionsPlatformRuntimeSourceFingerprint {
+    param([Parameter(Mandatory = $true)][string] $RuntimeRoot)
+    $utf8 = New-Object System.Text.UTF8Encoding($false,$true)
+    $stream = New-Object System.IO.MemoryStream
+    try {
+        foreach ($relativePath in @('platform/PlatformNative.cs','platform/UnixNative.cs','platform/WindowsNative.cs','platform/OwnedProcess.cs','platform/UnixProcess.cs','platform/WindowsProcess.cs')) {
+            $fullPath = Resolve-AiInstructionsRuntimeFilePath -RuntimeRoot $RuntimeRoot -RelativePath $relativePath -Context 'Platform runtime source'
+            [byte[]]$bytes = [System.IO.File]::ReadAllBytes($fullPath)
+            if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xef -and $bytes[1] -eq 0xbb -and $bytes[2] -eq 0xbf) { throw 'Platform runtime files must be UTF-8 without BOM.' }
+            [byte[]]$canonicalBytes = $utf8.GetBytes($utf8.GetString($bytes).Replace("`r`n","`n"))
+            [byte[]]$prefixBytes = $utf8.GetBytes($relativePath + "`n" + $canonicalBytes.Length.ToString([System.Globalization.CultureInfo]::InvariantCulture) + "`n")
+            $stream.Write($prefixBytes,0,$prefixBytes.Length)
+            $stream.Write($canonicalBytes,0,$canonicalBytes.Length)
+        }
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try { return ([System.BitConverter]::ToString($sha.ComputeHash($stream.ToArray()))).Replace('-','').ToLowerInvariant() }
         finally { $sha.Dispose() }
     }
     finally { $stream.Dispose() }
@@ -478,6 +898,32 @@ function Get-AiInstructionsRuntimeInventorySha256 {
     finally { $sha.Dispose() }
 }
 
+function Get-AiInstructionsRuntimeInventorySha256V3 {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Inventory)
+
+    $paths = New-Object System.Collections.Generic.List[string]
+    $hashesByPath = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::Ordinal)
+    foreach ($entry in @($Inventory)) {
+        $path = [string]$entry.path
+        $hash = [string]$entry.sha256
+        if ($path -match '[\x00-\x1f\x7f]') { throw "Runtime inventory path contains a control character: $path" }
+        if ([string]::IsNullOrWhiteSpace($path) -or $path.Contains('\') -or $path.StartsWith('/') -or $path -match '(^|/)\.\.(/|$)') { throw "Unsafe runtime inventory path: $path" }
+        if ($hash -cnotmatch '^[0-9a-f]{64}$') { throw "Invalid runtime inventory hash for '$path'." }
+        if ($hashesByPath.ContainsKey($path)) { throw "Duplicate runtime inventory path '$path'." }
+        $hashesByPath.Add($path,$hash)
+        $paths.Add($path)
+    }
+    $sortedPaths = [string[]]$paths.ToArray()
+    [Array]::Sort($sortedPaths,[StringComparer]::Ordinal)
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($path in $sortedPaths) { $lines.Add("$path`t$($hashesByPath[$path])`n") }
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes(($lines -join ''))
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+
 function New-AiInstructionsRuntimeBundleV2 {
     [CmdletBinding()]
     param(
@@ -519,6 +965,11 @@ function Assert-AiInstructionsRuntimeBundleV2 {
         [string] $CanonicalRepository = $script:CanonicalRepository
     )
 
+    if ((Test-AiInstructionsObjectHasProperty -Object $Bundle -Name 'schemaVersion') -and
+        ($Bundle.schemaVersion -is [int] -or $Bundle.schemaVersion -is [long]) -and
+        [int64]$Bundle.schemaVersion -eq 3) {
+        throw 'Runtime bundle schema version 3 requires a projection-aware installer.'
+    }
     Assert-AiInstructionsSyncConfigurationV4 -Configuration $Configuration -CanonicalRepository $CanonicalRepository | Out-Null
     foreach ($name in @('schemaVersion','repository','commit','acquisition','archiveSha256','inventorySha256','inventory')) {
         if (-not (Test-AiInstructionsObjectHasProperty -Object $Bundle -Name $name)) { throw "Runtime bundle is missing '$name'." }
@@ -568,6 +1019,156 @@ function Assert-AiInstructionsRuntimeBundleV2 {
             throw "Installed AI instruction runtime inventory mismatch at '$($declaredInventory[$index].path)'."
         }
     }
+    return $Bundle
+}
+
+# requiredCapabilities is a bundle-declared requirement; this validator checks syntax and known names only.
+# Projection-aware installers and launchers must verify it on the target host before enabling the runtime.
+function Assert-AiInstructionsRuntimeBundleV3 {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object] $Bundle,
+        [Parameter(Mandatory = $true)][object] $Configuration,
+        [Parameter(Mandatory = $true)][string] $RuntimeRoot,
+        [string] $CanonicalRepository = $script:CanonicalRepository
+    )
+    $allowed = @('schemaVersion','repository','commit','acquisition','archiveSha256','inventorySha256','inventory','platform','platformRuntime','requiredCapabilities','projectionContractSha256')
+    foreach ($name in $allowed) { if (-not (Test-AiInstructionsObjectHasProperty -Object $Bundle -Name $name)) { throw "Runtime bundle is missing '$name'." } }
+    foreach ($name in @($Bundle.PSObject.Properties.Name)) { if ($name -cnotin $allowed) { throw "Runtime bundle contains unsupported property '$name'." } }
+    if (($Bundle.schemaVersion -isnot [int] -and $Bundle.schemaVersion -isnot [long]) -or [int64]$Bundle.schemaVersion -ne 3) { throw 'Runtime bundle must use integer schemaVersion 3.' }
+    if (-not (Test-AiInstructionsObjectHasProperty -Object $Configuration -Name 'schemaVersion') -or
+        ($Configuration.schemaVersion -isnot [int] -and $Configuration.schemaVersion -isnot [long])) {
+        throw 'Runtime bundle configuration schemaVersion is invalid.'
+    }
+    if ([int64]$Configuration.schemaVersion -eq 4) {
+        Assert-AiInstructionsSyncConfigurationV4 -Configuration $Configuration -CanonicalRepository $CanonicalRepository | Out-Null
+        $v4Configuration = $Configuration
+    }
+    elseif ([int64]$Configuration.schemaVersion -eq 5) {
+        Assert-AiInstructionsSyncConfigurationV5 -Configuration $Configuration -CanonicalRepository $CanonicalRepository | Out-Null
+        $v4Configuration = [pscustomobject][ordered]@{
+            schemaVersion=4; excludedRepositoryUrls=$Configuration.excludedRepositoryUrls; excludedRepositoryPaths=$Configuration.excludedRepositoryPaths
+            catalog=$Configuration.catalog; updates=$Configuration.updates
+        }
+    }
+    else { throw 'Runtime bundle requires sync configuration schemaVersion 4 or 5.' }
+
+    # Validate v3-only shapes before the inventory digest so each malformed field fails on its own boundary.
+    foreach ($shape in @(@($Bundle.platform,@('os','architecture'),'Runtime bundle platform'),@($Bundle.platformRuntime,@('apiVersion','manifestSha256','sourceFingerprint'),'Runtime bundle platformRuntime'))) {
+        foreach ($name in @($shape[1])) { if (-not (Test-AiInstructionsObjectHasProperty -Object $shape[0] -Name $name)) { throw "$($shape[2]) is missing '$name'." } }
+        foreach ($name in @($shape[0].PSObject.Properties.Name)) { if ($name -cnotin @($shape[1])) { throw "$($shape[2]) contains unsupported property '$name'." } }
+    }
+    if ($Bundle.platform.os -isnot [string] -or [string]$Bundle.platform.os -cnotin @('windows','linux','macos')) { throw 'Runtime bundle platform.os is invalid.' }
+    if ($Bundle.platform.architecture -isnot [string] -or [string]$Bundle.platform.architecture -cnotin @('x64','arm64')) { throw 'Runtime bundle platform.architecture is invalid.' }
+    Assert-AiInstructionsStringValue -Value $Bundle.platformRuntime.apiVersion -Context 'Runtime bundle platformRuntime.apiVersion'
+    if ([string]$Bundle.platformRuntime.apiVersion -cnotmatch '^[0-9]+\.[0-9]+$') { throw 'Runtime bundle platformRuntime.apiVersion is invalid.' }
+    if ([string]$Bundle.platformRuntime.apiVersion -cne '1.0') { throw "Unsupported runtime bundle platformRuntime.apiVersion '$($Bundle.platformRuntime.apiVersion)'." }
+    foreach ($name in @('manifestSha256','sourceFingerprint')) {
+        Assert-AiInstructionsStringValue -Value $Bundle.platformRuntime.$name -Context "Runtime bundle platformRuntime.$name"
+        if ([string]$Bundle.platformRuntime.$name -cnotmatch '^[0-9a-f]{64}$') { throw "Runtime bundle platformRuntime.$name is invalid." }
+    }
+    Assert-AiInstructionsStringValue -Value $Bundle.projectionContractSha256 -Context 'Runtime bundle projectionContractSha256'
+    if ([string]$Bundle.projectionContractSha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Runtime bundle projectionContractSha256 is invalid.' }
+    if ($Bundle.requiredCapabilities -isnot [System.Array] -or @($Bundle.requiredCapabilities).Count -lt 1) { throw 'Runtime bundle requiredCapabilities must be a non-empty array.' }
+    $capabilities = @('directory-lease','file-lease','file-identity','lock','publication','owned-file-removal','permissions','process-isolation','owned-process','process-cleanup','powershell-resolution','pester-initialization','powershell-runtime','pester-module','process-environment')
+    $seenCapabilities = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($capability in @($Bundle.requiredCapabilities)) {
+        if ($capability -isnot [string] -or [string]$capability -cnotin $capabilities) { throw "Runtime bundle contains unknown required capability '$capability'." }
+        if (-not $seenCapabilities.Add([string]$capability)) { throw "Runtime bundle contains duplicate required capability '$capability'." }
+    }
+    Assert-AiInstructionsStringValue -Value $Bundle.repository -Context 'Runtime bundle repository'
+    Assert-AiInstructionsStringValue -Value $Bundle.commit -Context 'Runtime bundle commit'
+    Assert-AiInstructionsStringValue -Value $Bundle.acquisition -Context 'Runtime bundle acquisition'
+    Assert-AiInstructionsStringValue -Value $Bundle.archiveSha256 -Context 'Runtime bundle archiveSha256' -AllowNull
+    Assert-AiInstructionsStringValue -Value $Bundle.inventorySha256 -Context 'Runtime bundle inventorySha256'
+    Assert-AiInstructionsCanonicalRepository -Repository ([string]$Bundle.repository) -CanonicalRepository $CanonicalRepository
+    if ([string]$Bundle.repository -cne $CanonicalRepository) { throw "Runtime bundle repository must use the canonical repository '$CanonicalRepository'." }
+    if ([string]$Bundle.commit -cnotmatch '^[0-9a-f]{40}$') { throw 'Runtime bundle commit must be a full lowercase 40-character commit SHA.' }
+    if ([string]$Bundle.repository -cne [string]$v4Configuration.catalog.repository -or [string]$Bundle.commit -cne [string]$v4Configuration.catalog.ref) {
+        throw 'Installed AI instruction runtime bundle does not match the configured immutable Catalog bundle pin.'
+    }
+    if ([string]$Bundle.acquisition -cnotin @('git-checkout','github-codeload')) { throw "Unsupported runtime bundle acquisition '$($Bundle.acquisition)'." }
+    if ([string]$Bundle.acquisition -ceq 'github-codeload' -and [string]$Bundle.archiveSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'Runtime bundle archiveSha256 is required for github-codeload acquisition.'
+    }
+    if ($null -ne $Bundle.archiveSha256 -and [string]$Bundle.archiveSha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Runtime bundle archiveSha256 is invalid.' }
+    if ($Bundle.inventory -isnot [System.Array]) { throw 'Runtime bundle inventory must be an array.' }
+    $inventoryByPath = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([System.StringComparer]::Ordinal)
+    foreach ($entry in @($Bundle.inventory)) {
+        if ($null -eq $entry.PSObject.Properties['path'] -or $null -eq $entry.PSObject.Properties['sha256']) { throw 'Runtime bundle inventory entry is missing path or sha256.' }
+        foreach ($propertyName in @($entry.PSObject.Properties.Name)) {
+            if ($propertyName -cnotin @('path','sha256')) { throw "Runtime bundle inventory entry contains unsupported property '$propertyName'." }
+        }
+        Assert-AiInstructionsStringValue -Value $entry.path -Context 'Runtime bundle inventory path'
+        Assert-AiInstructionsStringValue -Value $entry.sha256 -Context "Runtime bundle inventory hash for '$($entry.path)'"
+        if ($inventoryByPath.ContainsKey([string]$entry.path)) { throw "Duplicate runtime inventory path '$($entry.path)'." }
+        $inventoryByPath.Add([string]$entry.path,$entry)
+    }
+    $declaredDigest = Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $Bundle.inventory
+    if ($declaredDigest -cne [string]$Bundle.inventorySha256) { throw 'Runtime bundle inventory digest does not match inventorySha256.' }
+    $actualInventory = @(Get-AiInstructionsRuntimeInventory -RuntimeRoot $RuntimeRoot)
+    $actualDigest = Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $actualInventory
+    if ($actualDigest -cne [string]$Bundle.inventorySha256 -or $actualInventory.Count -ne $Bundle.inventory.Count) {
+        throw 'Installed AI instruction runtime inventory does not match the verified bundle.'
+    }
+    foreach ($actualEntry in $actualInventory) {
+        $actualPath = [string]$actualEntry.path
+        if (-not $inventoryByPath.ContainsKey($actualPath) -or [string]$inventoryByPath[$actualPath].sha256 -cne [string]$actualEntry.sha256) {
+            throw "Installed AI instruction runtime inventory mismatch at '$actualPath'."
+        }
+    }
+    $manifestPaths = @($inventoryByPath.Keys | Where-Object { [string]$_ -ceq 'platform-runtime.psd1' -or [string]$_ -clike '*/platform-runtime.psd1' })
+    if ($manifestPaths.Count -ne 1 -or [string]$manifestPaths[0] -cne 'platform-runtime.psd1') {
+        throw "Runtime bundle inventory must include exactly one 'platform-runtime.psd1' at the runtime root."
+    }
+    $manifestRelativePath = 'platform-runtime.psd1'
+    $manifestFullPath = Resolve-AiInstructionsRuntimeFilePath -RuntimeRoot $RuntimeRoot -RelativePath $manifestRelativePath -Context 'Platform runtime manifest'
+    $actualManifestSha256 = Get-AiInstructionsCanonicalTextSha256 -Path $manifestFullPath
+    if ($actualManifestSha256 -cne [string]$Bundle.platformRuntime.manifestSha256) { throw 'Runtime bundle platformRuntime.manifestSha256 does not match the installed platform runtime manifest.' }
+    try { $manifest = Import-PowerShellDataFile -LiteralPath $manifestFullPath }
+    catch { throw 'Installed platform runtime manifest is not a valid PowerShell data file.' }
+    Assert-AiInstructionsPlatformRuntimeManifestInventory `
+        -Manifest $manifest `
+        -RuntimeRoot $RuntimeRoot `
+        -BundleApiVersion ([string]$Bundle.platformRuntime.apiVersion)
+    foreach ($closurePath in @(Get-AiInstructionsPlatformRuntimeClosurePaths -Manifest $manifest -ManifestPath $manifestRelativePath)) {
+        if (-not $inventoryByPath.ContainsKey($closurePath)) { throw "Runtime bundle inventory is missing platform runtime closure file '$closurePath'." }
+        $closureFullPath = Resolve-AiInstructionsRuntimeFilePath -RuntimeRoot $RuntimeRoot -RelativePath $closurePath -Context 'Platform runtime closure'
+        $actualClosureSha256 = Get-AiInstructionsFileSha256 -Path $closureFullPath
+        if ($actualClosureSha256 -cne [string]$inventoryByPath[$closurePath].sha256) {
+            throw "Runtime bundle inventory hash does not match platform runtime closure file '$closurePath'."
+        }
+    }
+    $catalogPaths = @($inventoryByPath.Keys | Where-Object { [string]$_ -ceq 'catalog/skills-catalog.json' -or [string]$_ -clike '*/catalog/skills-catalog.json' })
+    if ($catalogPaths.Count -ne 1 -or [string]$catalogPaths[0] -cne 'catalog/skills-catalog.json') {
+        throw "Runtime bundle inventory must include exactly one 'catalog/skills-catalog.json' at the fixed Catalog path."
+    }
+    $catalogRelativePath = 'catalog/skills-catalog.json'
+    $catalog = Read-AiInstructionsRuntimeJsonFile -RuntimeRoot $RuntimeRoot -RelativePath $catalogRelativePath -Context 'Installed Skills Catalog'
+    if (-not (Test-AiInstructionsObjectHasProperty -Object $catalog -Name 'schemaVersion') -or
+        ($catalog.schemaVersion -isnot [int] -and $catalog.schemaVersion -isnot [long]) -or [int64]$catalog.schemaVersion -ne 3) {
+        throw 'Installed Skills Catalog must use schemaVersion 3.'
+    }
+    $catalogPath = Resolve-AiInstructionsRuntimeFilePath -RuntimeRoot $RuntimeRoot -RelativePath $catalogRelativePath -Context 'Installed Skills Catalog'
+    $skillsCatalogContractModule = Get-AiInstructionsSkillsCatalogContractModule
+    $catalog = & $skillsCatalogContractModule.ExportedCommands['Test-SkillsCatalogDocument'] -CatalogPath $catalogPath
+    if ([int64]$Configuration.schemaVersion -eq 5) {
+        $installedProjectionIds = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+        foreach ($projection in @($catalog.projections)) { [void]$installedProjectionIds.Add([string]$projection.id) }
+        foreach ($scope in @('user','project')) {
+            foreach ($projectionId in @($Configuration.projections.$scope)) {
+                if (-not $installedProjectionIds.Contains([string]$projectionId)) {
+                    throw "Runtime bundle projection '$projectionId' is not declared by the installed catalog."
+                }
+            }
+        }
+    }
+    $actualProjectionContractSha256 = Get-AiInstructionsProjectionContractSha256 -Projections $catalog.projections
+    if ($actualProjectionContractSha256 -cne [string]$Bundle.projectionContractSha256) {
+        throw 'Runtime bundle projectionContractSha256 does not match the installed Skills Catalog projections.'
+    }
+    $actualSourceFingerprint = Get-AiInstructionsPlatformRuntimeSourceFingerprint -RuntimeRoot $RuntimeRoot
+    if ($actualSourceFingerprint -cne [string]$Bundle.platformRuntime.sourceFingerprint) { throw 'Runtime bundle platformRuntime.sourceFingerprint does not match the installed platform runtime source.' }
     return $Bundle
 }
 
@@ -688,16 +1289,20 @@ function Write-AiInstructionsJsonFile {
 Export-ModuleMember -Function @(
     'Assert-AiInstructionsCanonicalRepository',
     'Assert-AiInstructionsRuntimeBundleV2',
+    'Assert-AiInstructionsRuntimeBundleV3',
     'Assert-AiInstructionsMutationPath',
     'Assert-AiInstructionsSafeChildDirectory',
     'Assert-AiInstructionsSyncConfigurationV4',
+    'Assert-AiInstructionsSyncConfigurationV5',
     'Assert-AiInstructionsUpdateReceiptV1',
     'ConvertTo-AiInstructionsUtcDateTime',
     'ConvertTo-AiInstructionsSyncConfigurationV4',
+    'ConvertTo-AiInstructionsSyncConfigurationV5',
     'Get-AiInstructionsFileSha256',
     'Get-AiInstructionsFullDirectoryPath',
     'Get-AiInstructionsRuntimeInventory',
     'Get-AiInstructionsRuntimeInventorySha256',
+    'Get-AiInstructionsRuntimeInventorySha256V3',
     'New-AiInstructionsRuntimeBundleV2',
     'Write-AiInstructionsJsonFile'
 )

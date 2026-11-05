@@ -1,5 +1,15 @@
 # Agent Skills Catalog contract
 
+## Reader-first runtime contracts
+
+Runtime bundle v3 extends v2 with an exact platform identity, a bound platform-runtime API/manifest/source fingerprint, required capabilities, and the projection-contract digest. Personal sync configuration v5 extends v4 with explicit fixed USER and PROJECT projection selections. The production writers continue to emit runtime bundle v2 and sync configuration v4; P7 adopts bundle v3 before P8 adopts sync v5, so the bundle v3 reader accepts either sync v4 or v5 and validates each contract independently. Until each writer is adopted, its legacy operational launcher, updater, installer, and multi-source bootstrap entry point fails closed before mutation on the newer contract it does not own.
+
+Runtime bundle v2 的 inventory digest 依執行環境的語系排序，只適用於產生該 digest 的同一環境。Runtime bundle v3 則以 path 的 ordinal 比較排序，再將每筆 `<path>\t<sha256>\n` 以 UTF-8（無 BOM）編碼後計算 SHA-256；跨平台 installer 必須使用 v3，不得以 v2 digest 作為跨環境完整性證據。
+
+`runtime-bundle-v3.example.json` is a static JSON Schema example. Executable validation additionally requires `Assert-AiInstructionsRuntimeBundleV3 -RuntimeRoot <installed-runtime-root>` so the reader can verify `platform-runtime.psd1` at the installed runtime root, the manifest's own API/FileList/canonical inventory contract, its complete declared closure and source fingerprint, and `catalog/skills-catalog.json` as a complete Catalog v3 document. A nested or duplicate platform runtime manifest is invalid; closure paths and the source fingerprint are always resolved from the fixed runtime-root manifest directory. The bundle projection digest must equal the digest computed from the fully validated installed Catalog's `projections`; validating the JSON document alone does not establish those filesystem bindings.
+
+`requiredCapabilities` declares the bundle's requirements. The contract validator checks only its shape, including known capability names and uniqueness; projection-aware installers and launchers **MUST** validate the declared set on the target host with `Get-PlatformCapabilities -Required <requiredCapabilities>` before enabling a v3 runtime, and apply installer policy to confirm that the set has not been downgraded. Until that verification succeeds, the bundle must not be treated as available.
+
 本目錄定義 AI Instructions Repository、外部 Agent Skills repositories 與目標 Repository 之間的 production 契約。Installer 與 multi-source bootstrap 直接使用這些 checked-in schemas、source pins、Catalog 與 immutable lock。共用 Skill source 只存在於 Catalog 列出的 external repositories；本 Repository 不保存副本。`Skill-Darktide-Translate`（SYP-88／SYP-92）維持獨立，不加入本 Catalog 或 Lock。
 
 本 Catalog 的 profile 與 Skill `compatibility.platforms` 是選擇 metadata；`any` 維持既有語意，表示該 Skill metadata 未宣告額外作業系統限制，schema 與 parser 相容性不變。這些 metadata 不定義本 Repository 或消費 Repository 的本機 Agent/runtime 支援平台。本機支援範圍及 owned production Skill 的 description 要求，以 [Skill Repository Standard v1](../docs/standards/skill-repository-standard.md) 為準。
@@ -121,6 +131,7 @@ Installer 將 schema v1／v2／v3／v4 idempotent 正規化為 v4：
 - `catalog.repository` 固定為 canonical AI-Instructions GitHub Repository；`catalog.ref` 是已安裝 bundle 的完整小寫 commit SHA。其他 Repository、mutable ref 或 identity mismatch 一律 fail closed。
 - `updates.mode` 為 `notify-only`（預設）或 `auto-install-approved`；`protected-branch/main` 與 `github-release/latest` 是唯一合法 channel/ref 組合，`minimumCheckIntervalMinutes` 必須介於 1 與 2147483647，確保所有 schema-valid v4 設定都能由 installer idempotent 遷移並交給 updater。
 - `notify-only` 的 `outcome = available` 是通知，不是失敗也不是安裝完成；它必須回報 `classification = notification`、`installationState = not-installed` 與 `retryable = false`，並繼續使用目前 verified runtime。安裝 candidate 必須由獨立 updater policy 或明確的單次核准觸發。
+- Projection-aware v5 migration 對 v1～v4 的預設 USER projections 是 `user-agents` 與 `user-claude`，PROJECT projections 預設為空；`user-copilot` 保持 opt-in，不會因 migration 自動啟用。
 - `update-agent-environment.ps1 -Apply` 只依目前 verified runtime 重建並套用 user Skills desired state，不執行 update check，也不傳入 `InstallApproved`。需要更新 AI-Instructions runtime 時先獨立執行 `update-ai-instructions.ps1`，完成驗證後再 reconcile environment。
 - runtime bundle v2 對所有 active runtime 檔案記錄 exact path/raw SHA-256 inventory 與總 inventory hash。`github-codeload` acquisition 另必須記錄下載 archive SHA-256。
 - Installed launcher 在載入任何 runtime module 前，以 stable script 內建 preflight 驗證 config、bundle identity、launcher reference 與完整 inventory；manual updater／Agent environment updater／cleanup 共用同一 preflight。更新完成後與實際 bootstrap 前會再次驗證，後續 runtime 再驗證 Catalog 與 Lock；缺檔、額外檔案或 byte drift 都會停止。

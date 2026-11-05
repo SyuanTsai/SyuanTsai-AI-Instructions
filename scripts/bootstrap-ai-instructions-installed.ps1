@@ -174,6 +174,9 @@ function Assert-InstalledRuntime {
     }
     catch { throw "Installed AI instruction runtime identity is invalid: $($_.Exception.Message)" }
 
+    if (($configuration.schemaVersion -is [int] -or $configuration.schemaVersion -is [long]) -and [int64]$configuration.schemaVersion -eq 5) {
+        throw 'AI Instructions sync configuration schema version 5 requires a projection-aware installer.'
+    }
     Assert-TrustedProperties -Object $configuration -Required @('schemaVersion','excludedRepositoryUrls','excludedRepositoryPaths','catalog','updates') -Context 'AI instruction sync configuration'
     if (($configuration.schemaVersion -isnot [int] -and $configuration.schemaVersion -isnot [long]) -or $configuration.schemaVersion -ne 4) { throw 'AI instruction sync configuration must use integer schemaVersion 4.' }
     Assert-TrustedStringArray -Value $configuration.excludedRepositoryUrls -Context 'AI instruction excludedRepositoryUrls'
@@ -212,6 +215,9 @@ function Assert-InstalledRuntime {
         throw 'AI instruction sync configuration update policy is invalid.'
     }
 
+    if (($bundle.schemaVersion -is [int] -or $bundle.schemaVersion -is [long]) -and [int64]$bundle.schemaVersion -eq 3) {
+        throw 'Runtime bundle schema version 3 requires a projection-aware installer.'
+    }
     Assert-TrustedProperties -Object $bundle -Required @('schemaVersion','repository','commit','acquisition','archiveSha256','inventorySha256','inventory') -Context 'Runtime bundle'
     if (($bundle.schemaVersion -isnot [int] -and $bundle.schemaVersion -isnot [long]) -or $bundle.schemaVersion -ne 2 -or
         $bundle.repository -isnot [string] -or [string]$bundle.repository -cne $canonicalRepository -or

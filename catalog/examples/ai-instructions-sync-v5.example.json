@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 5,
+  "excludedRepositoryUrls": ["https://example.org/acme/planning-only-project.git"],
+  "excludedRepositoryPaths": ["docs/architecture-planning"],
+  "catalog": {
+    "repository": "https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git",
+    "ref": "89abcdef0123456789abcdef0123456789abcdef",
+    "profiles": ["core"],
+    "includeSkills": ["work-with-jira"],
+    "excludeSkills": ["capture-private-course-knowledge"]
+  },
+  "updates": { "mode": "notify-only", "channel": "protected-branch", "ref": "main", "minimumCheckIntervalMinutes": 1440 },
+  "projections": { "user": ["user-agents", "user-claude"], "project": [] }
+}

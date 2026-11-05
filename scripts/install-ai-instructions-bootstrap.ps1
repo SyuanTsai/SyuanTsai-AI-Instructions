@@ -112,6 +112,30 @@ function Assert-InstallerMutationPath {
     }
 }
 
+function Assert-InstallerExistingRuntimeSchemaCompatibility {
+    param(
+        [Parameter(Mandatory = $true)][string] $ConfigurationPath,
+        [Parameter(Mandatory = $true)][string] $RuntimeDirectory
+    )
+
+    if (Test-Path -LiteralPath $ConfigurationPath -PathType Leaf) {
+        try { $existingConfiguration = Get-Content -Raw -Encoding UTF8 -LiteralPath $ConfigurationPath | ConvertFrom-Json }
+        catch { throw "AI instruction sync configuration is not valid JSON: $ConfigurationPath" }
+        if (($existingConfiguration.schemaVersion -is [int] -or $existingConfiguration.schemaVersion -is [long]) -and [int64]$existingConfiguration.schemaVersion -eq 5) {
+            throw 'AI Instructions sync configuration schema version 5 requires a projection-aware installer.'
+        }
+    }
+
+    $existingBundlePath = Join-Path $RuntimeDirectory 'runtime-bundle.json'
+    if (Test-Path -LiteralPath $existingBundlePath -PathType Leaf) {
+        try { $existingBundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $existingBundlePath | ConvertFrom-Json }
+        catch { throw "Installed AI instruction runtime bundle is not valid JSON: $existingBundlePath" }
+        if (($existingBundle.schemaVersion -is [int] -or $existingBundle.schemaVersion -is [long]) -and [int64]$existingBundle.schemaVersion -eq 3) {
+            throw 'Runtime bundle schema version 3 requires a projection-aware installer.'
+        }
+    }
+}
+
 function Get-InstallerFullDirectoryPath {
     param([Parameter(Mandatory = $true)][string] $Path)
     $fullPath = [System.IO.Path]::GetFullPath($Path)
@@ -522,6 +546,7 @@ Assert-InstallerMutationPath -Path $runtimeDirectory -ExpectedType Directory
 foreach ($filePath in @($hookScript,$updateScript,$environmentUpdateScript,$cleanupScript,$agentsPath,$hooksPath,$configurationPath,$installLockPath)) {
     Assert-InstallerMutationPath -Path $filePath -ExpectedType File
 }
+Assert-InstallerExistingRuntimeSchemaCompatibility -ConfigurationPath $configurationPath -RuntimeDirectory $runtimeDirectory
 New-Item -ItemType Directory -Force -Path $codexHomePath,$hookDirectory | Out-Null
 $installLockStream = $null
 $activeMutationGuard = Open-InstallerMutationDirectoryGuard -TargetRoot $codexHomePath -RelativeDirectory 'hooks'
@@ -538,6 +563,7 @@ try {
     foreach ($filePath in @($hookScript,$updateScript,$environmentUpdateScript,$cleanupScript,$agentsPath,$hooksPath,$configurationPath,$installLockPath)) {
         Assert-InstallerMutationPath -Path $filePath -ExpectedType File
     }
+    Assert-InstallerExistingRuntimeSchemaCompatibility -ConfigurationPath $configurationPath -RuntimeDirectory $runtimeDirectory
 
     if (-not [string]::IsNullOrWhiteSpace($ExpectedCurrentCommit)) {
         $installedBundlePath = Join-Path $runtimeDirectory 'runtime-bundle.json'

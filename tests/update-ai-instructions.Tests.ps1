@@ -3,6 +3,13 @@ $script:RuntimeContractModule = Join-Path $script:RepositoryRoot 'scripts\ai-ins
 $script:UpdaterModule = Join-Path $script:RepositoryRoot 'scripts\ai-instructions-updater.psm1'
 $script:CanonicalRepository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
 
+function Get-TestUpdaterFileSha256 {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha256.ComputeHash([IO.File]::ReadAllBytes($Path)))).Replace('-','').ToLowerInvariant() }
+    finally { $sha256.Dispose() }
+}
+
 function New-TestUpdaterHome {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
@@ -26,6 +33,30 @@ Describe 'AI instructions updater workflow' {
     BeforeAll {
         Import-Module $script:RuntimeContractModule -Force
         Import-Module $script:UpdaterModule -Force
+    }
+
+    # Scenario: A future projection-aware bundle reaches the legacy updater.
+    # Purpose: Reject it before creating locks, receipts, or changing active bytes.
+    It 'UnitT05_rejects_runtime_bundle_v3_before_updater_mutation' {
+        $codexHome = Join-Path $TestDrive 'bundle-v3'
+        New-TestUpdaterHome -Path $codexHome
+        $bundlePath = Join-Path $codexHome 'hooks\ai-instructions-runtime\runtime-bundle.json'
+        $configurationPath = Join-Path $codexHome 'ai-instructions-sync.json'
+        $bundle = Get-Content -Raw -LiteralPath $bundlePath | ConvertFrom-Json
+        $bundle.schemaVersion = 3
+        [IO.File]::WriteAllText($bundlePath,($bundle | ConvertTo-Json -Depth 20))
+        $bundleBefore = [IO.File]::ReadAllBytes($bundlePath)
+        $configurationBefore = [IO.File]::ReadAllBytes($configurationPath)
+
+        $message = $null
+        try { Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck | Out-Null }
+        catch { $message = $_.Exception.Message }
+
+        $message | Should Be 'Runtime bundle schema version 3 requires a projection-aware installer.'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($bundlePath)) | Should Be ([Convert]::ToBase64String($bundleBefore))
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($configurationPath)) | Should Be ([Convert]::ToBase64String($configurationBefore))
+        Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update.lock') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json') | Should Be $false
     }
 
     # Scenario: The canonical protected ref still resolves to the installed commit.
@@ -621,5 +652,58 @@ param(
         $outputText | Should Match 'classification=concurrency; installationState=not-installed; retryable=false'
         $outputText | Should Match 'concurrent|installer is already running'
         $outputText | Should Not Match 'classification=operational'
+    }
+
+    # Scenario: The installed stable entry point snapshots its verified updater dependencies before importing the updater.
+    # Purpose: Keep the v3-only Catalog validator in the snapshot with bytes identical to the validated installed runtime source.
+    It 'UnitT78_snapshots_the_catalog_contract_with_source_identical_hashes' {
+        $codexHome = Join-Path $TestDrive 'stable-snapshot'
+        $hooksRoot = Join-Path $codexHome 'hooks'
+        $runtimeRoot = Join-Path $hooksRoot 'ai-instructions-runtime'
+        $recordPath = Join-Path $codexHome 'snapshot-record.json'
+        New-Item -ItemType Directory -Force -Path $runtimeRoot | Out-Null
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts\update-ai-instructions.ps1') -Destination (Join-Path $hooksRoot 'update-ai-instructions.ps1')
+        foreach ($fileName in @('ai-instructions-runtime-contract.psm1','safe-zip.psm1','skills-catalog-contract.psm1')) {
+            Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot "scripts\$fileName") -Destination (Join-Path $runtimeRoot $fileName)
+        }
+        [IO.File]::WriteAllText(
+            (Join-Path $hooksRoot 'bootstrap-ai-instructions.ps1'),
+            "param([switch] `$ValidateOnly)`n",
+            [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $codexHome 'ai-instructions-install.lock'),'lock',[Text.UTF8Encoding]::new($false))
+        $fakeUpdaterModule = @'
+Set-StrictMode -Version Latest
+function Get-SnapshotFileSha256 {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha256.ComputeHash([IO.File]::ReadAllBytes($Path)))).Replace('-','').ToLowerInvariant() }
+    finally { $sha256.Dispose() }
+}
+$recordPath = [Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_TEST_SNAPSHOT_RECORD')
+$records = foreach ($fileName in @('ai-instructions-updater.psm1','ai-instructions-runtime-contract.psm1','safe-zip.psm1','skills-catalog-contract.psm1')) {
+    $path = Join-Path $PSScriptRoot $fileName
+    [pscustomobject]@{ name=$fileName; sha256=(Get-SnapshotFileSha256 -Path $path) }
+}
+[IO.File]::WriteAllText($recordPath,($records | ConvertTo-Json),[Text.UTF8Encoding]::new($false))
+function Invoke-AiInstructionsUpdateWorkflow { [pscustomobject]@{ outcome='current'; message='fixture'; candidateCommit=$null } }
+function Get-AiInstructionsUpdateDisposition { [pscustomobject]@{ classification='none'; installationState='current'; retryable=$false } }
+Export-ModuleMember -Function Invoke-AiInstructionsUpdateWorkflow,Get-AiInstructionsUpdateDisposition
+'@
+        [IO.File]::WriteAllText((Join-Path $runtimeRoot 'ai-instructions-updater.psm1'),$fakeUpdaterModule,[Text.UTF8Encoding]::new($false))
+        $previousRecordPath = [Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_TEST_SNAPSHOT_RECORD')
+        try {
+            [Environment]::SetEnvironmentVariable('AI_INSTRUCTIONS_TEST_SNAPSHOT_RECORD',$recordPath)
+            & (Join-Path $hooksRoot 'update-ai-instructions.ps1') -CodexHome $codexHome -ForceCheck | Out-Null
+        }
+        finally {
+            [Environment]::SetEnvironmentVariable('AI_INSTRUCTIONS_TEST_SNAPSHOT_RECORD',$previousRecordPath)
+        }
+
+        $records = Get-Content -Raw -LiteralPath $recordPath | ConvertFrom-Json
+        @($records.name) | Should Be @('ai-instructions-updater.psm1','ai-instructions-runtime-contract.psm1','safe-zip.psm1','skills-catalog-contract.psm1')
+        foreach ($record in $records) {
+            $sourceHash = Get-TestUpdaterFileSha256 -Path (Join-Path $runtimeRoot $record.name)
+            [string]$record.sha256 | Should Be $sourceHash
+        }
     }
 }
