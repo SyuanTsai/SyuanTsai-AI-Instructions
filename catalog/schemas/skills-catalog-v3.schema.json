@@ -41,6 +41,11 @@
     "stableIdArray": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/stableId" } },
     "projection": {
       "type": "object", "additionalProperties": false, "required": ["id", "scope", "root"],
+      "properties": {
+        "id": { "type": "string" },
+        "scope": { "type": "string" },
+        "root": { "type": "string" }
+      },
       "oneOf": [
         { "properties": { "id": { "const": "user-agents" }, "scope": { "const": "user" }, "root": { "const": ".agents/skills" } } },
         { "properties": { "id": { "const": "user-claude" }, "scope": { "const": "user" }, "root": { "const": ".claude/skills" } } },

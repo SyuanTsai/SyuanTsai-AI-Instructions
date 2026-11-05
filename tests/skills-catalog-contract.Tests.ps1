@@ -88,6 +88,45 @@ function Get-TestRawSha256 {
         }
     }
 
+    # Scenario: Every checked-in example is validated against its explicitly mapped schema.
+    # Purpose: Exercise the portable JSON Schema contract, including composition keywords that
+    # the PowerShell parser does not evaluate.
+    It 'UnitT06_validates_each_checked_in_example_with_its_explicit_schema_mapping' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) {
+            throw 'UnitT06 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.'
+        }
+
+        $exampleMappings = @(
+            @{ Example = 'ai-instructions-sync-v4.example.json'; Schema = 'ai-instructions-sync-v4.schema.json'; SchemaVersion = 4 }
+            @{ Example = 'ai-instructions-update-receipt-v1.example.json'; Schema = 'ai-instructions-update-receipt-v1.schema.json'; SchemaVersion = 1 }
+            @{ Example = 'managed-manifest-v2.example.json'; Schema = 'managed-manifest-v2.schema.json'; SchemaVersion = 2 }
+            @{ Example = 'managed-manifest-v3.example.json'; Schema = 'managed-manifest-v3.schema.json'; SchemaVersion = 3 }
+            @{ Example = 'runtime-bundle-v2.example.json'; Schema = 'runtime-bundle-v2.schema.json'; SchemaVersion = 2 }
+            @{ Example = 'skills-catalog-lock-v2.example.json'; Schema = 'skills-catalog-lock-v2.schema.json'; SchemaVersion = 2 }
+            @{ Example = 'skills-catalog-lock-v3.example.json'; Schema = 'skills-catalog-lock-v3.schema.json'; SchemaVersion = 3 }
+            @{ Example = 'skills-catalog-lock.example.json'; Schema = 'skills-catalog-lock.schema.json'; SchemaVersion = 1 }
+            @{ Example = 'skills-catalog-v2.example.json'; Schema = 'skills-catalog-v2.schema.json'; SchemaVersion = 2 }
+            @{ Example = 'skills-catalog-v3.example.json'; Schema = 'skills-catalog-v3.schema.json'; SchemaVersion = 3 }
+            @{ Example = 'skills-catalog.example.json'; Schema = 'skills-catalog.schema.json'; SchemaVersion = 1 }
+            @{ Example = 'user-skills-managed-manifest-v1.example.json'; Schema = 'user-skills-managed-manifest-v1.schema.json'; SchemaVersion = 1 }
+            @{ Example = 'user-skills-managed-manifest-v2.example.json'; Schema = 'user-skills-managed-manifest-v2.schema.json'; SchemaVersion = 2 }
+        )
+
+        $exampleRoot = Join-Path $script:RepositoryRoot 'catalog\examples'
+        $schemaRoot = Join-Path $script:RepositoryRoot 'catalog\schemas'
+        $mappedExamples = @($exampleMappings | ForEach-Object { $_.Example })
+        $allExamples = @(Get-ChildItem -LiteralPath $exampleRoot -File -Filter '*.example.json' | ForEach-Object { $_.Name })
+        Compare-Object -ReferenceObject $allExamples -DifferenceObject $mappedExamples | Should Be $null
+
+        foreach ($mapping in $exampleMappings) {
+            $examplePath = Join-Path $exampleRoot $mapping.Example
+            $schemaPath = Join-Path $schemaRoot $mapping.Schema
+            $document = Import-SkillsCatalogJson -Path $examplePath -DocumentName $mapping.Example
+            $document.schemaVersion | Should Be $mapping.SchemaVersion
+            (Test-Json -Json (Get-Content -LiteralPath $examplePath -Raw) -SchemaFile $schemaPath) | Should Be $true
+        }
+    }
+
     # Scenario: The checked-in examples describe the complete current catalog and all persisted contracts.
     # Purpose: Protect the executable contract used by later resolver, downloader, and migration tasks.
     It 'UnitT10_validates_the_complete_catalog_lock_manifest_and_configuration_examples' {
