@@ -119,6 +119,35 @@ function Assert-TestRecoveryConcurrentResult {
 }
 
 Describe 'user-scoped Agent Skills reconciliation' {
+    # Scenario: The legacy USER reconciler reads a valid v3 Catalog and Lock.
+    # Purpose: Fail closed before archive staging or USER mutation instead of deriving .agents/skills targets.
+    It 'UnitT00_rejects_v3_before_agent_environment_mutation' {
+        $runtimeRoot = Join-Path $TestDrive 'v3-runtime'
+        $catalogRoot = Join-Path $runtimeRoot 'catalog'
+        New-Item -ItemType Directory -Path $runtimeRoot,$catalogRoot | Out-Null
+        foreach ($moduleName in @(
+            'skills-catalog-contract.psm1','skills-selection.psm1','skills-source-routing.psm1',
+            'skills-source-retrieval.psm1','skills-source-acquisition.psm1','license-delivery.psm1','safe-zip.psm1'
+        )) {
+            Copy-Item -LiteralPath (Join-Path $script:RuntimeRoot $moduleName) -Destination (Join-Path $runtimeRoot $moduleName)
+        }
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/skills-catalog-v3.example.json') -Destination (Join-Path $catalogRoot 'skills-catalog.json')
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/skills-catalog-lock-v3.example.json') -Destination (Join-Path $catalogRoot 'skills-catalog-lock.json')
+        $workingRoot = Join-Path $TestDrive 'v3-agent-working'
+        $configuration = [pscustomobject]@{ catalog=[pscustomobject]@{ profiles=@('core'); includeSkills=@(); excludeSkills=@() } }
+        $thrown = $false
+        $message = $null
+        try {
+            Get-UserSkillsDesiredState -RuntimeRoot $runtimeRoot -Configuration $configuration `
+                -CatalogRepository 'https://github.com/example/ai-instructions.git' `
+                -CatalogCommit ('a' * 40) -WorkingRoot $workingRoot | Out-Null
+        }
+        catch { $thrown = $true; $message = $_.Exception.Message }
+        $thrown | Should Be $true
+        $message | Should Be 'Skills catalog schema version 3 requires a projection-aware installer.'
+        Test-Path -LiteralPath $workingRoot | Should Be $false
+    }
+
     # Scenario: USER receives nested scripts, references and binary assets and then an updated resource inventory.
     # Purpose: Verify raw bytes, resource update/prune, complete ownership and a stable second apply in USER.
     It 'InterT01_reconciles_recursive_resources_and_binary_bytes_only_in_USER' {

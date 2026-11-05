@@ -72,6 +72,7 @@ function Resolve-SkillsSourcePlan {
     }
     $catalogVersion = if ($null -eq $catalogVersionProperty) { 1 } else { [int64]$catalogVersionProperty.Value }
     $lockVersion = if ($null -eq $lockVersionProperty) { 1 } else { [int64]$lockVersionProperty.Value }
+    if ($catalogVersion -eq 3 -or $lockVersion -eq 3) { throw 'Skills catalog schema version 3 requires a projection-aware installer.' }
     if ($catalogVersion -notin @(1,2)) { throw "Unsupported Skills Catalog schemaVersion '$catalogVersion'." }
     if ($lockVersion -notin @(1,2)) { throw "Unsupported Skills Catalog lock schemaVersion '$lockVersion'." }
     if ($catalogVersion -ne $lockVersion) { throw "Skills Catalog lock schemaVersion '$lockVersion' does not match Skills Catalog schemaVersion '$catalogVersion'." }

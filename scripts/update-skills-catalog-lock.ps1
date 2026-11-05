@@ -94,8 +94,8 @@ try {
     foreach ($skill in @($catalog.skills | Where-Object { [string]$_.lifecycle.status -ne 'removed' } | Sort-Object id)) {
         $id = [string]$skill.id
         $sourceId = [string]$skill.source.sourceId
-        $sourcePath = if ([int64]$catalog.schemaVersion -eq 2) { [string]$skill.source.sourcePath } else { [string]$skill.source.path }
-        $targetPath = if ([int64]$catalog.schemaVersion -eq 2) { [string]$skill.source.targetPath } else { ".agents/skills/$id" }
+        $sourcePath = if ([int64]$catalog.schemaVersion -in @(2,3)) { [string]$skill.source.sourcePath } else { [string]$skill.source.path }
+        $targetPath = if ([int64]$catalog.schemaVersion -eq 2) { [string]$skill.source.targetPath } elseif ([int64]$catalog.schemaVersion -eq 1) { ".agents/skills/$id" } else { $null }
         if (-not $sourceRoots.ContainsKey($sourceId)) { throw "Skill '$id' references source '$sourceId' that was not extracted." }
         $repositoryRootPath = [string]$sourceRoots[$sourceId]
         $skillRoot = [System.IO.Path]::GetFullPath((Join-Path $repositoryRootPath $sourcePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar)))
@@ -117,9 +117,12 @@ try {
         schemaVersion = [int64]$catalog.schemaVersion
         catalogId = [string]$catalog.catalogId
         catalogSha256 = Get-RawSha256 -Path $CatalogPath
-        sources = @($lockSources)
-        skills = @($lockSkills)
     }
+    if ([int64]$catalog.schemaVersion -eq 3) {
+        $lock.projectionContractSha256 = Get-SkillsCatalogProjectionContractSha256 -Projections $catalog.projections
+    }
+    $lock.sources = @($lockSources)
+    $lock.skills = @($lockSkills)
     $json = ($lock | ConvertTo-Json -Depth 20 -Compress) + "`n"
     $resolvedOutputPath = [System.IO.Path]::GetFullPath($OutputPath)
 

@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 3,
+  "catalogId": "example-agent-skills-v3",
+  "sources": [
+    {
+      "id": "agent-skills",
+      "repository": "https://github.com/example/agent-skills-catalog.git"
+    }
+  ],
+  "profiles": [
+    {
+      "id": "core",
+      "description": "Projection-aware Catalog reader fixture.",
+      "default": true,
+      "includes": ["work-with-jira", "manage-task-handoff"],
+      "excludes": []
+    }
+  ],
+  "skills": [
+    {
+      "id": "work-with-jira",
+      "group": "work-management",
+      "source": {
+        "sourceId": "agent-skills",
+        "sourcePath": "skills/work-with-jira"
+      },
+      "profiles": ["core"],
+      "compatibility": {
+        "platforms": ["any"],
+        "shells": [],
+        "requiredCapabilities": [],
+        "anyOfCapabilities": []
+      },
+      "dependencies": [],
+      "lifecycle": {
+        "status": "active",
+        "aliases": []
+      }
+    },
+    {
+      "id": "manage-task-handoff",
+      "group": "work-management",
+      "source": {
+        "sourceId": "agent-skills",
+        "sourcePath": "skills/manage-task-handoff"
+      },
+      "profiles": ["core"],
+      "compatibility": {
+        "platforms": ["any"],
+        "shells": [],
+        "requiredCapabilities": [],
+        "anyOfCapabilities": []
+      },
+      "dependencies": [],
+      "lifecycle": {
+        "status": "active",
+        "aliases": []
+      }
+    }
+  ],
+  "projections": [
+    {
+      "id": "user-agents",
+      "scope": "user",
+      "root": ".agents/skills"
+    },
+    {
+      "id": "user-claude",
+      "scope": "user",
+      "root": ".claude/skills"
+    },
+    {
+      "id": "project-agents",
+      "scope": "project",
+      "root": ".agents/skills"
+    }
+  ]
+}

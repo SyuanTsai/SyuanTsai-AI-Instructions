@@ -159,10 +159,8 @@ function Assert-SchemaVersion {
     if ($schemaVersion -ne $Expected) { throw "Unsupported $DocumentName schemaVersion '$schemaVersion'; expected $Expected." }
 }
 
-function Assert-SkillsCatalogV1 {
-    param([object] $Catalog)
-    Assert-OnlyProperties -Object $Catalog -Allowed @('schemaVersion','catalogId','sources','profiles','skills') -Context 'Skills Catalog'
-    Assert-SchemaVersion -Document $Catalog -Expected 1 -DocumentName 'Skills Catalog'
+function Assert-SkillsCatalogCommon {
+    param([Parameter(Mandatory = $true)][object] $Catalog,[Parameter(Mandatory = $true)][int] $SchemaVersion)
     $catalogId = Get-RequiredProperty -Object $Catalog -Name 'catalogId' -Context 'Skills Catalog'
     Assert-StableId -Value $catalogId -Context 'Skills Catalog catalogId'
 
@@ -208,12 +206,27 @@ function Assert-SkillsCatalogV1 {
         $skillIds[[string]$skillId] = $true; $skillDocuments[[string]$skillId] = $skill
         Assert-StableId -Value (Get-RequiredProperty -Object $skill -Name 'group' -Context "Skills Catalog Skill '$skillId'") -Context "Skills Catalog Skill '$skillId' group"
         $source = Get-RequiredProperty -Object $skill -Name 'source' -Context "Skills Catalog Skill '$skillId'"
-        Assert-OnlyProperties -Object $source -Allowed @('sourceId','path') -Context "Skills Catalog Skill '$skillId' source"
+        $sourceProperties = if ($SchemaVersion -eq 1) { @('sourceId','path') } elseif ($SchemaVersion -eq 2) { @('sourceId','sourcePath','targetPath') } else { @('sourceId','sourcePath') }
+        Assert-OnlyProperties -Object $source -Allowed $sourceProperties -Context "Skills Catalog Skill '$skillId' source"
         $sourceId = Get-RequiredProperty -Object $source -Name 'sourceId' -Context "Skills Catalog Skill '$skillId' source"
         Assert-StableId -Value $sourceId -Context "Skills Catalog Skill '$skillId' source sourceId"
         if (-not $sourceIds.ContainsKey([string]$sourceId)) { throw "Skills Catalog Skill '$skillId' references unknown source '$sourceId'." }
-        $sourcePath = Get-RequiredProperty -Object $source -Name 'path' -Context "Skills Catalog Skill '$skillId' source"
-        if (-not (Test-IsSafeRepositoryPath -Value $sourcePath) -or [string]$sourcePath -cne ".agents/skills/$skillId") { throw "Unsafe Skill source path for '$skillId': $sourcePath" }
+        if ($SchemaVersion -eq 1) {
+            $sourcePath = Get-RequiredProperty -Object $source -Name 'path' -Context "Skills Catalog Skill '$skillId' source"
+            if (-not (Test-IsSafeRepositoryPath -Value $sourcePath) -or [string]$sourcePath -cne ".agents/skills/$skillId") { throw "Unsafe Skill source path for '$skillId': $sourcePath" }
+        }
+        else {
+            $sourcePath = Get-RequiredProperty -Object $source -Name 'sourcePath' -Context "Skills Catalog Skill '$skillId' source"
+            if (-not (Test-IsSafeRepositoryPath -Value $sourcePath) -or [string]$sourcePath -cne "skills/$skillId") {
+                throw "Skills Catalog v$SchemaVersion Skill '$skillId' must use canonical source path 'skills/$skillId'."
+            }
+            if ($SchemaVersion -eq 2) {
+                $targetPath = Get-RequiredProperty -Object $source -Name 'targetPath' -Context "Skills Catalog Skill '$skillId' source"
+                if (-not (Test-IsSafeRepositoryPath -Value $targetPath) -or [string]$targetPath -cne ".agents/skills/$skillId") {
+                    throw "Skills Catalog v2 Skill '$skillId' must use runtime target path '.agents/skills/$skillId'."
+                }
+            }
+        }
         Assert-StableIdArray -Value (Get-RequiredProperty -Object $skill -Name 'profiles' -Context "Skills Catalog Skill '$skillId'") -Context "Skills Catalog Skill '$skillId' profiles" -AllowEmpty
         foreach ($profileId in @($skill.profiles)) { if (-not $profileIds.ContainsKey([string]$profileId)) { throw "Skills Catalog Skill '$skillId' references unknown profile '$profileId'." } }
 
@@ -331,53 +344,91 @@ function Assert-SkillsCatalogV1 {
     }
 }
 
-function Convert-SkillsCatalogV2ToLegacyShape {
+function Assert-SkillsCatalogV1 {
     param([Parameter(Mandatory = $true)][object] $Catalog)
-
     Assert-OnlyProperties -Object $Catalog -Allowed @('schemaVersion','catalogId','sources','profiles','skills') -Context 'Skills Catalog'
-    Assert-SchemaVersion -Document $Catalog -Expected 2 -DocumentName 'Skills Catalog'
-
-    $legacySkills = @()
-    $catalogSkills = Get-RequiredProperty -Object $Catalog -Name 'skills' -Context 'Skills Catalog skills'
-    foreach ($skill in @($catalogSkills)) {
-        $skillId = Get-RequiredProperty -Object $skill -Name 'id' -Context 'Skills Catalog Skill'
-        Assert-StableId -Value $skillId -Context 'Skills Catalog Skill id'
-        Assert-OnlyProperties -Object $skill -Allowed @('id','group','source','profiles','compatibility','dependencies','lifecycle') -Context 'Skills Catalog Skill'
-        $source = Get-RequiredProperty -Object $skill -Name 'source' -Context "Skills Catalog Skill '$skillId'"
-        Assert-OnlyProperties -Object $source -Allowed @('sourceId','sourcePath','targetPath') -Context "Skills Catalog Skill '$skillId' source"
-        $sourceId = Get-RequiredProperty -Object $source -Name 'sourceId' -Context "Skills Catalog Skill '$skillId' source"
-        Assert-StableId -Value $sourceId -Context "Skills Catalog Skill '$skillId' source sourceId"
-        $sourcePath = Get-RequiredProperty -Object $source -Name 'sourcePath' -Context "Skills Catalog Skill '$skillId' source"
-        $targetPath = Get-RequiredProperty -Object $source -Name 'targetPath' -Context "Skills Catalog Skill '$skillId' source"
-        if ($sourcePath -isnot [string] -or [string]$sourcePath -cne "skills/$skillId") {
-            throw "Skills Catalog v2 Skill '$skillId' must use canonical source path 'skills/$skillId'."
-        }
-        if ($targetPath -isnot [string] -or [string]$targetPath -cne ".agents/skills/$skillId") {
-            throw "Skills Catalog v2 Skill '$skillId' must use runtime target path '.agents/skills/$skillId'."
-        }
-        $legacySkills += [pscustomobject][ordered]@{
-            id = $skill.id
-            group = $skill.group
-            source = [pscustomobject][ordered]@{ sourceId = $sourceId; path = ".agents/skills/$skillId" }
-            profiles = $skill.profiles
-            compatibility = $skill.compatibility
-            dependencies = $skill.dependencies
-            lifecycle = $skill.lifecycle
-        }
-    }
-
-    return [pscustomobject][ordered]@{
-        schemaVersion = 1
-        catalogId = $Catalog.catalogId
-        sources = $Catalog.sources
-        profiles = $Catalog.profiles
-        skills = $legacySkills
-    }
+    Assert-SchemaVersion -Document $Catalog -Expected 1 -DocumentName 'Skills Catalog'
+    Assert-SkillsCatalogCommon -Catalog $Catalog -SchemaVersion 1
 }
 
 function Assert-SkillsCatalogV2 {
     param([Parameter(Mandatory = $true)][object] $Catalog)
-    Assert-SkillsCatalogV1 -Catalog (Convert-SkillsCatalogV2ToLegacyShape -Catalog $Catalog)
+    Assert-OnlyProperties -Object $Catalog -Allowed @('schemaVersion','catalogId','sources','profiles','skills') -Context 'Skills Catalog'
+    Assert-SchemaVersion -Document $Catalog -Expected 2 -DocumentName 'Skills Catalog'
+    Assert-SkillsCatalogCommon -Catalog $Catalog -SchemaVersion 2
+}
+
+function Get-SkillsCatalogProjectionMap {
+    return @{
+        'user-agents' = @('user','.agents/skills')
+        'user-claude' = @('user','.claude/skills')
+        'user-copilot' = @('user','.copilot/skills')
+        'project-agents' = @('project','.agents/skills')
+        'project-claude' = @('project','.claude/skills')
+        'project-github' = @('project','.github/skills')
+    }
+}
+
+function Assert-SkillsCatalogProjections {
+    param([Parameter(Mandatory = $true)][object] $Projections)
+    Assert-Array -Value $Projections -Context 'Skills Catalog projections'
+    $allowed = Get-SkillsCatalogProjectionMap
+    $seen = @{}
+    foreach ($projection in @($Projections)) {
+        Assert-OnlyProperties -Object $projection -Allowed @('id','scope','root') -Context 'Skills Catalog projection'
+        $id = Get-RequiredProperty -Object $projection -Name 'id' -Context 'Skills Catalog projection'
+        Assert-StableId -Value $id -Context 'Skills Catalog projection id'
+        if ($seen.ContainsKey([string]$id)) { throw "Duplicate Skills Catalog projection ID: $id" }
+        $seen[[string]$id] = $true
+        if (-not $allowed.ContainsKey([string]$id)) { throw "Unknown Skills Catalog projection ID: $id" }
+        $scope = Get-RequiredProperty -Object $projection -Name 'scope' -Context "Skills Catalog projection '$id'"
+        $root = Get-RequiredProperty -Object $projection -Name 'root' -Context "Skills Catalog projection '$id'"
+        Assert-NonEmptyString -Value $scope -Context "Skills Catalog projection '$id' scope"
+        Assert-NonEmptyString -Value $root -Context "Skills Catalog projection '$id' root"
+        if ([string]$scope -cne [string]$allowed[[string]$id][0] -or [string]$root -cne [string]$allowed[[string]$id][1]) {
+            throw "Skills Catalog projection '$id' must use scope '$($allowed[[string]$id][0])' and root '$($allowed[[string]$id][1])'."
+        }
+    }
+    if (-not $seen.ContainsKey('user-agents')) { throw "Skills Catalog projections must include 'user-agents'." }
+}
+
+function Assert-SkillsCatalogV3 {
+    param([Parameter(Mandatory = $true)][object] $Catalog)
+    Assert-OnlyProperties -Object $Catalog -Allowed @('schemaVersion','catalogId','sources','profiles','skills','projections') -Context 'Skills Catalog'
+    Assert-SchemaVersion -Document $Catalog -Expected 3 -DocumentName 'Skills Catalog'
+    Assert-SkillsCatalogProjections -Projections (Get-RequiredProperty -Object $Catalog -Name 'projections' -Context 'Skills Catalog')
+    Assert-SkillsCatalogCommon -Catalog $Catalog -SchemaVersion 3
+}
+
+function Get-SkillsCatalogProjectionContractSha256 {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object] $Projections)
+    Assert-SkillsCatalogProjections -Projections $Projections
+    $byId = @{}
+    foreach ($projection in @($Projections)) { $byId[[string]$projection.id] = $projection }
+    [string[]]$ids = @($byId.Keys)
+    [System.Array]::Sort($ids,[System.StringComparer]::Ordinal)
+    $canonical = [string]::Concat(@($ids | ForEach-Object { $projection = $byId[$_]; "$($_)`t$([string]$projection.scope)`t$([string]$projection.root)`n" }))
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($canonical)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([System.BitConverter]::ToString($sha256.ComputeHash($bytes))).Replace('-','').ToLowerInvariant() }
+    finally { $sha256.Dispose() }
+}
+
+function Get-SkillsCatalogProjectionTargetPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object] $Catalog,
+        [Parameter(Mandatory = $true)][string] $SkillId,
+        [Parameter(Mandatory = $true)][string] $ProjectionId
+    )
+    if ($null -eq $Catalog.PSObject.Properties['schemaVersion'] -or [int64]$Catalog.schemaVersion -ne 3) { throw 'Skills Catalog projection targets require schemaVersion 3.' }
+    Assert-SkillsCatalogV3 -Catalog $Catalog
+    $skill = @($Catalog.skills | Where-Object { [string]$_.id -ceq $SkillId })
+    if ($skill.Count -ne 1) { throw "Skills Catalog v3 does not contain Skill '$SkillId'." }
+    $projection = @($Catalog.projections | Where-Object { [string]$_.id -ceq $ProjectionId })
+    if ($projection.Count -ne 1) { throw "Skills Catalog v3 does not contain projection '$ProjectionId'." }
+    return "$([string]$projection[0].root)/$SkillId"
 }
 
 function Assert-SkillsCatalog {
@@ -389,7 +440,8 @@ function Assert-SkillsCatalog {
     switch ([int64]$version) {
         1 { Assert-SkillsCatalogV1 -Catalog $Catalog; return }
         2 { Assert-SkillsCatalogV2 -Catalog $Catalog; return }
-        default { throw "Unsupported Skills Catalog schemaVersion '$version'; supported versions are 1 and 2." }
+        3 { Assert-SkillsCatalogV3 -Catalog $Catalog; return }
+        default { throw "Unsupported Skills Catalog schemaVersion '$version'; supported versions are 1, 2 and 3." }
     }
 }
 
@@ -478,18 +530,32 @@ function Assert-SkillsCatalogLockV1 {
     foreach ($skillId in $catalogSkills.Keys) { if (-not $lockedSkills.ContainsKey([string]$skillId)) { throw "Skills Catalog Skill '$skillId' has no content lock entry." } }
 }
 
-function Assert-SkillsCatalogLockV2 {
-    param([Parameter(Mandatory = $true)][object] $Lock,[Parameter(Mandatory = $true)][object] $Catalog)
+function Assert-SkillsCatalogLockCanonical {
+    param(
+        [Parameter(Mandatory = $true)][object] $Lock,
+        [Parameter(Mandatory = $true)][object] $Catalog,
+        [Parameter(Mandatory = $true)][ValidateSet(2,3)][int] $SchemaVersion
+    )
 
-    Assert-OnlyProperties -Object $Lock -Allowed @('schemaVersion','catalogId','catalogSha256','sources','skills') -Context 'Skills Catalog lock'
-    Assert-SchemaVersion -Document $Lock -Expected 2 -DocumentName 'Skills Catalog lock'
-    if ([int64]$Catalog.schemaVersion -ne 2) { throw 'Skills Catalog lock schemaVersion 2 requires Skills Catalog schemaVersion 2.' }
-    Assert-SkillsCatalogV2 -Catalog $Catalog
+    $lockProperties = @('schemaVersion','catalogId','catalogSha256','sources','skills')
+    if ($SchemaVersion -eq 3) { $lockProperties += 'projectionContractSha256' }
+    Assert-OnlyProperties -Object $Lock -Allowed $lockProperties -Context 'Skills Catalog lock'
+    Assert-SchemaVersion -Document $Lock -Expected $SchemaVersion -DocumentName 'Skills Catalog lock'
+    if ([int64]$Catalog.schemaVersion -ne $SchemaVersion) { throw "Skills Catalog lock schemaVersion $SchemaVersion requires Skills Catalog schemaVersion $SchemaVersion." }
+    if ($SchemaVersion -eq 2) { Assert-SkillsCatalogV2 -Catalog $Catalog } else { Assert-SkillsCatalogV3 -Catalog $Catalog }
 
     $lockCatalogId = Get-RequiredProperty -Object $Lock -Name 'catalogId' -Context 'Skills Catalog lock'
     Assert-NonEmptyString -Value $lockCatalogId -Context 'Skills Catalog lock catalogId'
     if ([string]$lockCatalogId -cne [string]$Catalog.catalogId) { throw 'Skills Catalog lock catalogId does not match the Skills Catalog.' }
     Assert-Sha256 -Value (Get-RequiredProperty -Object $Lock -Name 'catalogSha256' -Context 'Skills Catalog lock') -Context 'Skills Catalog lock catalogSha256'
+    if ($SchemaVersion -eq 3) {
+        $projectionContractSha256 = Get-RequiredProperty -Object $Lock -Name 'projectionContractSha256' -Context 'Skills Catalog lock'
+        Assert-Sha256 -Value $projectionContractSha256 -Context 'Skills Catalog lock projectionContractSha256'
+        $expectedProjectionContractSha256 = Get-SkillsCatalogProjectionContractSha256 -Projections $Catalog.projections
+        if ([string]$projectionContractSha256 -cne $expectedProjectionContractSha256) {
+            throw "Skills Catalog lock projectionContractSha256 does not match the Catalog projections: expected $expectedProjectionContractSha256."
+        }
+    }
 
     $catalogSources = @{}
     foreach ($source in @($Catalog.sources)) { $catalogSources[[string]$source.id] = $source }
@@ -521,7 +587,9 @@ function Assert-SkillsCatalogLockV2 {
     $skills = Get-RequiredProperty -Object $Lock -Name 'skills' -Context 'Skills Catalog lock'
     Assert-Array -Value $skills -Context 'Skills Catalog lock skills' -AllowEmpty
     foreach ($skill in @($skills)) {
-        Assert-OnlyProperties -Object $skill -Allowed @('id','sourceId','sourcePath','targetPath','contentSha256') -Context 'Skills Catalog lock Skill'
+        $skillProperties = @('id','sourceId','sourcePath','contentSha256')
+        if ($SchemaVersion -eq 2) { $skillProperties += 'targetPath' }
+        Assert-OnlyProperties -Object $skill -Allowed $skillProperties -Context 'Skills Catalog lock Skill'
         $skillId = Get-RequiredProperty -Object $skill -Name 'id' -Context 'Skills Catalog lock Skill'
         Assert-StableId -Value $skillId -Context 'Skills Catalog lock Skill id'
         if ($lockedSkills.ContainsKey([string]$skillId)) { throw "Duplicate Skills Catalog lock Skill ID: $skillId" }
@@ -530,16 +598,31 @@ function Assert-SkillsCatalogLockV2 {
         $sourceId = Get-RequiredProperty -Object $skill -Name 'sourceId' -Context "Skills Catalog lock Skill '$skillId'"
         Assert-StableId -Value $sourceId -Context "Skills Catalog lock Skill '$skillId' sourceId"
         $sourcePath = Get-RequiredProperty -Object $skill -Name 'sourcePath' -Context "Skills Catalog lock Skill '$skillId'"
-        $targetPath = Get-RequiredProperty -Object $skill -Name 'targetPath' -Context "Skills Catalog lock Skill '$skillId'"
-        if ($sourcePath -isnot [string] -or [string]$sourcePath -cne "skills/$skillId") { throw "Unsafe Skills Catalog v2 lock sourcePath for Skill '$skillId': $sourcePath" }
-        if ($targetPath -isnot [string] -or [string]$targetPath -cne ".agents/skills/$skillId") { throw "Unsafe Skills Catalog v2 lock targetPath for Skill '$skillId': $targetPath" }
+        if ($sourcePath -isnot [string] -or [string]$sourcePath -cne "skills/$skillId") { throw "Unsafe Skills Catalog v$SchemaVersion lock sourcePath for Skill '$skillId': $sourcePath" }
         $catalogSource = $catalogSkills[[string]$skillId].source
-        if ([string]$sourceId -cne [string]$catalogSource.sourceId -or [string]$sourcePath -cne [string]$catalogSource.sourcePath -or [string]$targetPath -cne [string]$catalogSource.targetPath) {
-            throw "Skills Catalog lock source/target does not match catalog Skill '$skillId'."
+        if ($SchemaVersion -eq 2) {
+            $targetPath = Get-RequiredProperty -Object $skill -Name 'targetPath' -Context "Skills Catalog lock Skill '$skillId'"
+            if ($targetPath -isnot [string] -or [string]$targetPath -cne ".agents/skills/$skillId") { throw "Unsafe Skills Catalog v2 lock targetPath for Skill '$skillId': $targetPath" }
+            if ([string]$sourceId -cne [string]$catalogSource.sourceId -or [string]$sourcePath -cne [string]$catalogSource.sourcePath -or [string]$targetPath -cne [string]$catalogSource.targetPath) {
+                throw "Skills Catalog lock source/target does not match catalog Skill '$skillId'."
+            }
+        }
+        elseif ([string]$sourceId -cne [string]$catalogSource.sourceId -or [string]$sourcePath -cne [string]$catalogSource.sourcePath) {
+            throw "Skills Catalog lock source does not match catalog Skill '$skillId'."
         }
         Assert-Sha256 -Value (Get-RequiredProperty -Object $skill -Name 'contentSha256' -Context "Skills Catalog lock Skill '$skillId'") -Context "Skills Catalog lock Skill '$skillId' contentSha256"
     }
     foreach ($skillId in $catalogSkills.Keys) { if (-not $lockedSkills.ContainsKey([string]$skillId)) { throw "Skills Catalog Skill '$skillId' has no content lock entry." } }
+}
+
+function Assert-SkillsCatalogLockV2 {
+    param([Parameter(Mandatory = $true)][object] $Lock,[Parameter(Mandatory = $true)][object] $Catalog)
+    Assert-SkillsCatalogLockCanonical -Lock $Lock -Catalog $Catalog -SchemaVersion 2
+}
+
+function Assert-SkillsCatalogLockV3 {
+    param([Parameter(Mandatory = $true)][object] $Lock,[Parameter(Mandatory = $true)][object] $Catalog)
+    Assert-SkillsCatalogLockCanonical -Lock $Lock -Catalog $Catalog -SchemaVersion 3
 }
 
 function Assert-SkillsCatalogLock {
@@ -552,7 +635,8 @@ function Assert-SkillsCatalogLock {
     switch ([int64]$lockVersion) {
         1 { Assert-SkillsCatalogLockV1 -Lock $Lock -Catalog $Catalog; return }
         2 { Assert-SkillsCatalogLockV2 -Lock $Lock -Catalog $Catalog; return }
-        default { throw "Unsupported Skills Catalog lock schemaVersion '$lockVersion'; supported versions are 1 and 2." }
+        3 { Assert-SkillsCatalogLockV3 -Lock $Lock -Catalog $Catalog; return }
+        default { throw "Unsupported Skills Catalog lock schemaVersion '$lockVersion'; supported versions are 1, 2 and 3." }
     }
 }
 
@@ -799,4 +883,4 @@ function Test-SkillsCatalogContract {
     return [pscustomobject]@{CatalogId=[string]$catalog.catalogId;SourceCount=@($catalog.sources).Count;SkillCount=@($catalog.skills).Count;ProfileCount=@($catalog.profiles).Count;ManifestFileCount=@($manifest.files).Count}
 }
 
-Export-ModuleMember -Function Assert-LegacyManagedManifestV1, Assert-ManagedManifest, Assert-ManagedManifestV2, Assert-ManagedManifestV3, Assert-SkillsCatalogV2, Assert-SkillsCatalogLockV2, Assert-UserSkillsManagedManifest, Assert-UserSkillsManagedManifestV1, Assert-UserSkillsManagedManifestV2, Import-SkillsCatalogJson, Test-SkillsCatalogContract, Test-SkillsCatalogDocument, Test-SkillsCatalogSourcePinsDocument, Test-SkillsCatalogLockDocument
+Export-ModuleMember -Function Assert-LegacyManagedManifestV1, Assert-ManagedManifest, Assert-ManagedManifestV2, Assert-ManagedManifestV3, Assert-SkillsCatalogV2, Assert-SkillsCatalogV3, Assert-SkillsCatalogLockV2, Assert-SkillsCatalogLockV3, Assert-UserSkillsManagedManifest, Assert-UserSkillsManagedManifestV1, Assert-UserSkillsManagedManifestV2, Get-SkillsCatalogProjectionContractSha256, Get-SkillsCatalogProjectionTargetPath, Import-SkillsCatalogJson, Test-SkillsCatalogContract, Test-SkillsCatalogDocument, Test-SkillsCatalogSourcePinsDocument, Test-SkillsCatalogLockDocument

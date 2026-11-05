@@ -11,6 +11,8 @@ $script:ManifestExample = Join-Path $script:RepositoryRoot 'catalog\examples\man
 $script:UserManifestExample = Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v1.example.json'
 $script:CatalogV2Example = Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog-v2.example.json'
 $script:LockV2Example = Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog-lock-v2.example.json'
+$script:CatalogV3Example = Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog-v3.example.json'
+$script:LockV3Example = Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog-lock-v3.example.json'
 $script:ManifestV3Example = Join-Path $script:RepositoryRoot 'catalog\examples\managed-manifest-v3.example.json'
 $script:UserManifestV2Example = Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v2.example.json'
 $script:ConfigurationExample = Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v4.example.json'
@@ -78,11 +80,50 @@ function Get-TestRawSha256 {
         $schemaRoot = Join-Path $script:RepositoryRoot 'catalog\schemas'
         $schemaFiles = @(Get-ChildItem -LiteralPath $schemaRoot -File -Filter '*.schema.json')
 
-        $schemaFiles.Count | Should Be 12
+        $schemaFiles.Count | Should Be 14
         foreach ($schemaFile in $schemaFiles) {
             $schema = Import-SkillsCatalogJson -Path $schemaFile.FullName -DocumentName $schemaFile.Name
             $schema.'$schema' | Should Be 'https://json-schema.org/draft/2020-12/schema'
             $schema.type | Should Be 'object'
+        }
+    }
+
+    # Scenario: Every checked-in example is validated against its explicitly mapped schema.
+    # Purpose: Exercise the portable JSON Schema contract, including composition keywords that
+    # the PowerShell parser does not evaluate.
+    It 'UnitT06_validates_each_checked_in_example_with_its_explicit_schema_mapping' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) {
+            throw 'UnitT06 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.'
+        }
+
+        $exampleMappings = @(
+            @{ Example = 'ai-instructions-sync-v4.example.json'; Schema = 'ai-instructions-sync-v4.schema.json'; SchemaVersion = 4 }
+            @{ Example = 'ai-instructions-update-receipt-v1.example.json'; Schema = 'ai-instructions-update-receipt-v1.schema.json'; SchemaVersion = 1 }
+            @{ Example = 'managed-manifest-v2.example.json'; Schema = 'managed-manifest-v2.schema.json'; SchemaVersion = 2 }
+            @{ Example = 'managed-manifest-v3.example.json'; Schema = 'managed-manifest-v3.schema.json'; SchemaVersion = 3 }
+            @{ Example = 'runtime-bundle-v2.example.json'; Schema = 'runtime-bundle-v2.schema.json'; SchemaVersion = 2 }
+            @{ Example = 'skills-catalog-lock-v2.example.json'; Schema = 'skills-catalog-lock-v2.schema.json'; SchemaVersion = 2 }
+            @{ Example = 'skills-catalog-lock-v3.example.json'; Schema = 'skills-catalog-lock-v3.schema.json'; SchemaVersion = 3 }
+            @{ Example = 'skills-catalog-lock.example.json'; Schema = 'skills-catalog-lock.schema.json'; SchemaVersion = 1 }
+            @{ Example = 'skills-catalog-v2.example.json'; Schema = 'skills-catalog-v2.schema.json'; SchemaVersion = 2 }
+            @{ Example = 'skills-catalog-v3.example.json'; Schema = 'skills-catalog-v3.schema.json'; SchemaVersion = 3 }
+            @{ Example = 'skills-catalog.example.json'; Schema = 'skills-catalog.schema.json'; SchemaVersion = 1 }
+            @{ Example = 'user-skills-managed-manifest-v1.example.json'; Schema = 'user-skills-managed-manifest-v1.schema.json'; SchemaVersion = 1 }
+            @{ Example = 'user-skills-managed-manifest-v2.example.json'; Schema = 'user-skills-managed-manifest-v2.schema.json'; SchemaVersion = 2 }
+        )
+
+        $exampleRoot = Join-Path $script:RepositoryRoot 'catalog\examples'
+        $schemaRoot = Join-Path $script:RepositoryRoot 'catalog\schemas'
+        $mappedExamples = @($exampleMappings | ForEach-Object { $_.Example })
+        $allExamples = @(Get-ChildItem -LiteralPath $exampleRoot -File -Filter '*.example.json' | ForEach-Object { $_.Name })
+        Compare-Object -ReferenceObject $allExamples -DifferenceObject $mappedExamples | Should Be $null
+
+        foreach ($mapping in $exampleMappings) {
+            $examplePath = Join-Path $exampleRoot $mapping.Example
+            $schemaPath = Join-Path $schemaRoot $mapping.Schema
+            $document = Import-SkillsCatalogJson -Path $examplePath -DocumentName $mapping.Example
+            $document.schemaVersion | Should Be $mapping.SchemaVersion
+            (Test-Json -Json (Get-Content -LiteralPath $examplePath -Raw) -SchemaFile $schemaPath) | Should Be $true
         }
     }
 
@@ -173,6 +214,127 @@ function Get-TestRawSha256 {
         @($manifestV3.files)[0].sourcePath | Should Match '^skills/work-with-jira/'
         @($manifestV3.files)[0].targetPath | Should Match '^\.agents/skills/work-with-jira/'
         @($userManifestV2.files)[0].sourcePath | Should Match '^skills/work-with-jira/'
+    }
+
+    # Scenario: A v3 Catalog declares several bounded USER and project projections and its Lock binds their canonical digest.
+    # Purpose: Establish reader-first v3 validation and deterministic target derivation without changing production v2 files.
+    It 'UnitT11a_accepts_v3_catalog_lock_projections_and_independent_digest' {
+        $catalog = Test-SkillsCatalogDocument -CatalogPath $script:CatalogV3Example
+        $lock = Test-SkillsCatalogLockDocument -CatalogPath $script:CatalogV3Example -LockPath $script:LockV3Example
+
+        $catalog.schemaVersion | Should Be 3
+        $lock.schemaVersion | Should Be 3
+        (Get-SkillsCatalogProjectionTargetPath -Catalog $catalog -SkillId 'work-with-jira' -ProjectionId 'user-agents') | Should Be '.agents/skills/work-with-jira'
+        (Get-SkillsCatalogProjectionTargetPath -Catalog $catalog -SkillId 'work-with-jira' -ProjectionId 'user-claude') | Should Be '.claude/skills/work-with-jira'
+        (Get-SkillsCatalogProjectionTargetPath -Catalog $catalog -SkillId 'work-with-jira' -ProjectionId 'project-agents') | Should Be '.agents/skills/work-with-jira'
+
+        $byId = @{}
+        foreach ($projection in @($catalog.projections)) { $byId[[string]$projection.id] = $projection }
+        [string[]]$ids = @($byId.Keys)
+        [System.Array]::Sort($ids,[System.StringComparer]::Ordinal)
+        $canonical = (@($ids | ForEach-Object { $projection = $byId[$_]; "$($_)`t$([string]$projection.scope)`t$([string]$projection.root)`n" }) -join '')
+        $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($canonical)
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try { $expected = ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant() }
+        finally { $sha.Dispose() }
+        (Get-SkillsCatalogProjectionContractSha256 -Projections $catalog.projections) | Should Be $expected
+        [string]$lock.projectionContractSha256 | Should Be $expected
+
+        $manifest = Import-SkillsCatalogJson -Path $script:ManifestV3Example -DocumentName 'managed manifest v3'
+        $manifest.catalogId = [string]$catalog.catalogId
+        $manifest.lockSha256 = Get-TestRawSha256 -Path $script:LockV3Example
+        $manifestPath = Write-TestJsonDocument -Document $manifest -Name 'v3-contract-manifest.json'
+        $configuration = Import-SkillsCatalogJson -Path $script:ConfigurationExample -DocumentName 'sync configuration'
+        $configuration.catalog.profiles = @('core')
+        $configuration.catalog.includeSkills = @('work-with-jira')
+        $configuration.catalog.excludeSkills = @()
+        $configurationPath = Write-TestJsonDocument -Document $configuration -Name 'v3-contract-configuration.json'
+        $result = Test-SkillsCatalogContract -CatalogPath $script:CatalogV3Example -LockPath $script:LockV3Example -ManifestPath $manifestPath -ConfigurationPath $configurationPath
+        $result.SkillCount | Should Be 2
+    }
+
+    # Scenario: A v3 projection uses an ID outside the closed projection table.
+    # Purpose: Prevent readers from accepting an arbitrary destination namespace.
+    It 'UnitT11b_rejects_an_unknown_v3_projection_id' {
+        $catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'
+        @($catalog.projections)[1].id = 'user-unknown'
+        { Assert-SkillsCatalogV3 -Catalog $catalog } | Should Throw 'Unknown Skills Catalog projection ID: user-unknown'
+    }
+
+    # Scenario: A known v3 projection ID is paired with another projection's scope or root.
+    # Purpose: Bind each projection identity to exactly one reviewed destination root.
+    It 'UnitT11c_rejects_a_mismatched_v3_projection_tuple' {
+        $catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'
+        @($catalog.projections)[1].root = '.copilot/skills'
+        { Assert-SkillsCatalogV3 -Catalog $catalog } | Should Throw "Skills Catalog projection 'user-claude' must use scope 'user' and root '.claude/skills'."
+    }
+
+    # Scenario: A v3 Catalog declares the same projection ID twice.
+    # Purpose: Keep projection target resolution unambiguous.
+    It 'UnitT11d_rejects_a_duplicate_v3_projection_id' {
+        $catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'
+        $catalog.projections += $catalog.projections[0].PSObject.Copy()
+        { Assert-SkillsCatalogV3 -Catalog $catalog } | Should Throw 'Duplicate Skills Catalog projection ID: user-agents'
+    }
+
+    # Scenario: A v3 Catalog omits the compatibility-preserving USER Agents projection.
+    # Purpose: Preserve the current USER installation location in every v3 projection contract.
+    It 'UnitT11e_requires_the_user_agents_v3_projection' {
+        $catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'
+        $catalog.projections = @($catalog.projections | Where-Object { $_.id -cne 'user-agents' })
+        { Assert-SkillsCatalogV3 -Catalog $catalog } | Should Throw "Skills Catalog projections must include 'user-agents'."
+    }
+
+    # Scenario: A v3 Skill source attempts to retain the v2 targetPath property.
+    # Purpose: Require all destinations to come from reviewed projections.
+    It 'UnitT11f_rejects_targetPath_in_a_v3_skill_source' {
+        $catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'
+        @($catalog.skills)[0].source | Add-Member -NotePropertyName targetPath -NotePropertyValue '.agents/skills/work-with-jira'
+        { Assert-SkillsCatalogV3 -Catalog $catalog } | Should Throw "Skills Catalog Skill 'work-with-jira' source contains unsupported property 'targetPath'."
+    }
+
+    # Scenario: A v3 Skill source path does not equal skills/<stable-id>.
+    # Purpose: Preserve canonical source package identity independently of projection roots.
+    It 'UnitT11g_rejects_a_noncanonical_v3_skill_sourcePath' {
+        $catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'
+        @($catalog.skills)[0].source.sourcePath = '.agents/skills/work-with-jira'
+        { Assert-SkillsCatalogV3 -Catalog $catalog } | Should Throw "Skills Catalog v3 Skill 'work-with-jira' must use canonical source path 'skills/work-with-jira'."
+    }
+
+    # Scenario: A v3 Lock Skill attempts to retain a targetPath property.
+    # Purpose: Prevent Lock data from reintroducing an arbitrary install destination.
+    It 'UnitT11h_rejects_targetPath_in_a_v3_lock_skill' {
+        $catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'
+        $lock = Import-SkillsCatalogJson -Path $script:LockV3Example -DocumentName 'Skills Catalog lock v3'
+        @($lock.skills)[0] | Add-Member -NotePropertyName targetPath -NotePropertyValue '.agents/skills/manage-task-handoff'
+        { Assert-SkillsCatalogLockV3 -Lock $lock -Catalog $catalog } | Should Throw "Skills Catalog lock Skill contains unsupported property 'targetPath'."
+    }
+
+    # Scenario: A v3 Lock carries a projection digest for different projection bytes.
+    # Purpose: Bind immutable content locks to the exact reviewed projection contract.
+    It 'UnitT11i_rejects_a_mismatched_v3_projection_digest' {
+        $catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'
+        $lock = Import-SkillsCatalogJson -Path $script:LockV3Example -DocumentName 'Skills Catalog lock v3'
+        $lock.projectionContractSha256 = '0' * 64
+        $message = $null
+        try { Assert-SkillsCatalogLockV3 -Lock $lock -Catalog $catalog }
+        catch { $message = $_.Exception.Message }
+        $message | Should Match '^Skills Catalog lock projectionContractSha256 does not match the Catalog projections:'
+    }
+
+    # Scenario: A v3 Catalog is paired with a v2 Lock.
+    # Purpose: Reject cross-version interpretation before catalogSha256 can hide the semantic mismatch.
+    It 'UnitT11j_rejects_a_v3_catalog_paired_with_a_v2_lock' {
+        { Test-SkillsCatalogLockDocument -CatalogPath $script:CatalogV3Example -LockPath $script:LockV2Example } |
+            Should Throw "Skills Catalog lock schemaVersion '2' does not match Skills Catalog schemaVersion '3'."
+    }
+
+    # Scenario: A v3 Catalog carries an undeclared top-level property.
+    # Purpose: Keep parser behavior aligned with additionalProperties=false.
+    It 'UnitT11k_rejects_an_unknown_v3_top_level_property' {
+        $catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'
+        $catalog | Add-Member -NotePropertyName targetRoot -NotePropertyValue '.agents/skills'
+        { Assert-SkillsCatalogV3 -Catalog $catalog } | Should Throw "Skills Catalog contains unsupported property 'targetRoot'."
     }
 
     # Scenario: A user Skills v2 manifest carries source-root licensing documents and its generated delivery receipt.
@@ -619,6 +781,30 @@ function Get-TestRawSha256 {
             -DocumentName 'user Skills managed manifest schema'
         $managedPattern = [string]$managedSchema.'$defs'.repositoryPath.pattern
         $userPattern = [string]$userSchema.'$defs'.repositoryPath.pattern
+        $catalogV3Schema = Import-SkillsCatalogJson `
+            -Path (Join-Path $script:RepositoryRoot 'catalog\schemas\skills-catalog-v3.schema.json') `
+            -DocumentName 'Skills Catalog v3 schema'
+        $lockV3Schema = Import-SkillsCatalogJson `
+            -Path (Join-Path $script:RepositoryRoot 'catalog\schemas\skills-catalog-lock-v3.schema.json') `
+            -DocumentName 'Skills Catalog lock v3 schema'
+        $catalogV3SourcePattern = [string]$catalogV3Schema.'$defs'.source.properties.sourcePath.pattern
+        $lockV3SourcePattern = [string]$lockV3Schema.'$defs'.skill.properties.sourcePath.pattern
+        $catalogV3SourcePattern | Should Be $lockV3SourcePattern
+        ('skills/work-with-jira' -cmatch $catalogV3SourcePattern) | Should Be $true
+        ('.agents/skills/work-with-jira' -cmatch $catalogV3SourcePattern) | Should Be $false
+        ('skills/Work-with-jira' -cmatch $catalogV3SourcePattern) | Should Be $false
+        foreach ($v3SourceCase in @(
+            @{ Path='skills/work-with-jira'; Valid=$true },
+            @{ Path='.agents/skills/work-with-jira'; Valid=$false },
+            @{ Path='skills/Work-with-jira'; Valid=$false }
+        )) {
+            $v3Catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'
+            @($v3Catalog.skills)[0].source.sourcePath = [string]$v3SourceCase.Path
+            $v3Error = $null
+            try { Assert-SkillsCatalogV3 -Catalog $v3Catalog }
+            catch { $v3Error = $_.Exception.Message }
+            [string]::IsNullOrWhiteSpace($v3Error) | Should Be ([bool]$v3SourceCase.Valid)
+        }
         $cases = @(
             @{ Name='valid'; Path='.agents/skills/work-with-jira/SKILL.md'; Valid=$true },
             @{ Name='empty'; Path=''; Valid=$false },

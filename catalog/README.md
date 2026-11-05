@@ -8,9 +8,9 @@
 
 | 文件 | Schema | 責任 |
 | --- | ---: | --- |
-| Skills Catalog | 1 (legacy read) / 2 (canonical write) | 宣告可用來源、穩定 Skill ID、群組、profiles、compatibility、dependencies 與 lifecycle。v2 明確分離 canonical source 與 runtime target；不得包含已解析 commit 或目標 Repository 的安裝狀態。 |
+| Skills Catalog | 1 (legacy read) / 2 (production write) / 3 (reader-first) | 宣告可用來源、穩定 Skill ID、群組、profiles、compatibility、dependencies 與 lifecycle。v2 明確分離 canonical source 與單一 runtime target；v3 改以固定 projection contract 推導 target。Production 仍維持 v2，v3 由後續 projection-aware installer 採用。 |
 | Catalog source pins | 1 | 記錄維護者選定的 requested ref、完整 resolved commit 與顯示版本，供 lock generator 重現與 stale-check。 |
-| Catalog lock | 1 (legacy read) / 2 (canonical write) | 將 catalog 及每個來源的 branch／tag／commit ref 鎖定到完整 commit SHA、archive hash，以及每個 Skill 的 source／target mapping 與 deterministic content hash。 |
+| Catalog lock | 1 (legacy read) / 2 (production write) / 3 (reader-first) | 將 catalog 及每個來源的 branch／tag／commit ref 鎖定到完整 commit SHA、archive hash 與 deterministic Skill content hash。v3 另以 `projectionContractSha256` 綁定 Catalog projections，且不再保存 `targetPath`。 |
 | Managed manifest | 2 (legacy read) / 3 (canonical write) | 記錄目標 Repository 實際套用的每個檔案及完整 provenance，用於 customized／unmanaged 保護與安全更新。 |
 | User Skills managed manifest | 1 (legacy read) / 2 (canonical write) | 記錄 `$HOME/.agents/skills` 中由 Catalog 管理的檔案、Catalog commit、來源 pin 與逐檔 hash；未列入此 manifest 的個人 Skill 永遠視為 unmanaged。 |
 | Personal sync configuration | 4 | 記錄 exclusions、已安裝 AI-Instructions runtime/Catalog bundle 的 canonical GitHub Repository 與完整 commit SHA、Skill selection，以及更新 mode／channel／interval；不含任何 auto-commit 設定。 |
@@ -22,7 +22,7 @@
 ## Stable ID、rename 與 removal
 
 - Skill `id` 使用 lowercase kebab-case，最長 64 個字元；建立後不得改作其他 Skill，也不得因目錄搬移、profile 或版本更新而改變。
-- Group 與 profile 只是 metadata，不是 Skill identity。Versioned canonical source 是 `skills/<skill-id>/**` 平面結構；schema v1 只作為 legacy read 保留 `.agents/skills/<skill-id>/**` source，schema v2 以 `sourcePath`／`targetPath` 明確宣告 source 與 consumer projection。Production Catalog/Lock 在 SYP-155～159 來源合併後已切換到 v2 canonical source；targetPath 仍為 `.agents/skills/<skill-id>/**`，根目錄為 USER Home；consumer Instructions bootstrap 不套用共用 Skills。不得把 target path 當成 source layout authority。
+- Group 與 profile 只是 metadata，不是 Skill identity。Versioned canonical source 是 `skills/<skill-id>/**` 平面結構；schema v1 只作為 legacy read 保留 `.agents/skills/<skill-id>/**` source，schema v2 以 `sourcePath`／`targetPath` 明確宣告 source 與單一 consumer projection。Schema v3 移除任意 `targetPath`，只允許契約列出的 USER／project projections，target 固定由 `<projection.root>/<skill-id>` 推導；`user-agents` 為必備 projection。Production Catalog/Lock 目前仍為 v2，尚未支援 projection 的 consumer 遇到 v3 必須 fail closed。不得把 target path 當成 source layout authority。
 - Rename 必須新增新的 stable ID，並保留舊 ID tombstone：舊 entry 設為 `lifecycle.status = removed`、`replacementId = <new-id>`；新 entry 在 `aliases` 記錄舊 ID。
 - Resolver 會把個人 `includeSkills`／`excludeSkills` 中的 removed ID 或 alias 遷移到 replacement stable ID；實體安裝目錄只使用 replacement ID。
 - 無替代品的 removal 保留 `status = removed` tombstone，但不設定 `replacementId`；明確選取此類 removed Skill 必須 fail closed。
@@ -85,6 +85,7 @@ Conditional operator 的 production semantics：
 - `requestedRef` 與 `requestedRefType` 是維護者在 pin 更新當下記錄的 provenance metadata，不是 runtime 的安全輸入；branch 或 tag 後續可移動，因此 `-Check` 不以目前 remote ref 反推歷史關係。PR 必須審查 pin 更新時的 ref 解析證據，runtime 與 stale-check 則只以 `resolvedCommit`、`archiveSha256` 與 `contentSha256` 為權威。
 - `resolvedCommit` 必須是 40 個小寫十六進位字元的完整 commit SHA。Bootstrap 不得重新以 mutable ref 決定內容。
 - `catalogSha256` 是 Catalog JSON 原始檔案 bytes 的 SHA-256。
+- Lock v3 的 `projectionContractSha256` 依 projection `id` 做 ordinal 排序，逐筆串接 `<id>\t<scope>\t<root>\n`，再對 UTF-8（無 BOM）bytes 計算 SHA-256。
 - `archiveSha256` 是 GitHub codeload archive 原始 bytes 的 SHA-256。
 - Skill `contentSha256` 是 deterministic inventory 的 SHA-256：以 repository-relative forward-slash path 做 ordinal 排序，每行使用 `<path>\t<raw-file-sha256>\n` 的 UTF-8（無 BOM）資料串接後計算。可雜湊的 path 必須先通過 portable safe-path contract；control characters、tab/newline、colon、empty／dot segments、absolute／traversal path、symlink／reparse／special file 與 case-collision 一律拒絕，避免 inventory ambiguity。
 - Manifest `sha256` 是實際套用到 target path 的檔案 bytes SHA-256。
