@@ -36,7 +36,7 @@ function Initialize-ResolverGitHubApiCredential {
     }
 
     foreach ($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN')) {
-        [Environment]::SetEnvironmentVariable($name, $null, [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable($name, [NullString]::Value, [EnvironmentVariableTarget]::Process)
     }
     return $capturedToken
 }
@@ -3749,7 +3749,7 @@ function Resolve-SkillSpector {
             if ($headers.ContainsKey('Authorization')) { [void]$headers.Remove('Authorization') }
             $script:ResolverGitHubApiToken = $null
             foreach ($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN')) {
-                [Environment]::SetEnvironmentVariable($name, $null, [EnvironmentVariableTarget]::Process)
+                [Environment]::SetEnvironmentVariable($name, [NullString]::Value, [EnvironmentVariableTarget]::Process)
             }
         }
 

@@ -342,7 +342,10 @@ Describe 'Standard validation resolver hardening' {
         }
         finally {
             $script:ResolverGitHubApiToken = $null
-            foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name, $previous[$name], 'Process') }
+            foreach ($name in $names) {
+                $value = if ($null -eq $previous[$name]) { [NullString]::Value } else { $previous[$name] }
+                [Environment]::SetEnvironmentVariable($name, $value, 'Process')
+            }
         }
     }
 
@@ -376,33 +379,38 @@ Describe 'Standard validation resolver hardening' {
             }
         }
         finally {
-            foreach ($entry in $values.GetEnumerator()) { [Environment]::SetEnvironmentVariable([string]$entry.Key, $previous[$entry.Key], 'Process') }
+            foreach ($entry in $values.GetEnumerator()) {
+                $value = if ($null -eq $previous[$entry.Key]) { [NullString]::Value } else { $previous[$entry.Key] }
+                [Environment]::SetEnvironmentVariable([string]$entry.Key, $value, 'Process')
+            }
         }
     }
 
     # Scenario: A mocked GitHub acquisition failure includes the exact credential in its exception text.
     # Purpose: Ensure the diagnostic writer redacts the captured value and clears the script credential on failure.
-    It 'UnitT23_redacts_the_token_from_SkillSpector_failure_diagnostics' {
-        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
-        $token = 'fixture-diagnostic-secret-value'
-        $script:TokenDiagnosticFixtureToken = $token
-        $script:ResolverGitHubApiToken = $token
-        Mock Assert-Command { 'fixture-python' }
-        Mock Assert-NoConflictingPipEnvironment { }
-        Mock Assert-NoConflictingPythonEnvironment { }
-        Mock Invoke-BoundedGitHubGet { throw "mocked acquisition exposed $script:TokenDiagnosticFixtureToken" }
-        $root = Join-Path $TestDrive 'token-diagnostic-install'
-        $policy = Get-Policy -Path $script:ToolchainPath
-        try {
-            try { Resolve-SkillSpector -ShouldInstall $true -ToolPolicy $policy.tools.skillspector -RequestedInstallRoot $root -AcquisitionLimitSeconds 30 | Out-Null } catch { }
-            $failurePath = Join-Path (Join-Path $root ("skillspector-failure-{0}" -f $script:ResolverRunId)) 'failure.json'
-            Assert-True (Test-Path -LiteralPath $failurePath -PathType Leaf) 'A mocked acquisition failure must write diagnostic-only evidence.'
-            $diagnostic = Get-Content -Raw -Encoding UTF8 -LiteralPath $failurePath
-            Assert-NotMatch $diagnostic ([regex]::Escape($token)) 'Failure diagnostics must not persist the GitHub token.'
-            Assert-Match $diagnostic '<redacted-credential>' 'Failure diagnostics must retain an explicit redaction marker.'
-            Assert-True ($null -eq $script:ResolverGitHubApiToken) 'The script-scoped token must be cleared after failed GitHub acquisition.'
+    Context 'SkillSpector failure diagnostic redaction' {
+        It 'UnitT23_redacts_the_token_from_SkillSpector_failure_diagnostics' {
+            . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+            $token = 'fixture-diagnostic-secret-value'
+            $script:TokenDiagnosticFixtureToken = $token
+            $script:ResolverGitHubApiToken = $token
+            Mock Assert-Command { 'fixture-python' }
+            Mock Assert-NoConflictingPipEnvironment { }
+            Mock Assert-NoConflictingPythonEnvironment { }
+            Mock Invoke-BoundedGitHubGet { throw "mocked acquisition exposed $script:TokenDiagnosticFixtureToken" }
+            $root = Join-Path $TestDrive 'token-diagnostic-install'
+            $policy = Get-Policy -Path $script:ToolchainPath
+            try {
+                try { Resolve-SkillSpector -ShouldInstall $true -ToolPolicy $policy.tools.skillspector -RequestedInstallRoot $root -AcquisitionLimitSeconds 30 | Out-Null } catch { }
+                $failurePath = Join-Path (Join-Path $root ("skillspector-failure-{0}" -f $script:ResolverRunId)) 'failure.json'
+                Assert-True (Test-Path -LiteralPath $failurePath -PathType Leaf) 'A mocked acquisition failure must write diagnostic-only evidence.'
+                $diagnostic = Get-Content -Raw -Encoding UTF8 -LiteralPath $failurePath
+                Assert-NotMatch $diagnostic ([regex]::Escape($token)) 'Failure diagnostics must not persist the GitHub token.'
+                Assert-Match $diagnostic '<redacted-credential>' 'Failure diagnostics must retain an explicit redaction marker.'
+                Assert-True ($null -eq $script:ResolverGitHubApiToken) 'The script-scoped token must be cleared after failed GitHub acquisition.'
+            }
+            finally { Remove-Variable -Name TokenDiagnosticFixtureToken -Scope Script -ErrorAction SilentlyContinue }
         }
-        finally { Remove-Variable -Name TokenDiagnosticFixtureToken -Scope Script -ErrorAction SilentlyContinue }
     }
 
     # Scenario: the latest-stable resolver advances to SkillSpector 2.13.0 while the parser correction remains release-specific.
