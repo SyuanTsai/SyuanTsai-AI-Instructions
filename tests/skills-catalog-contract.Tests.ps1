@@ -728,6 +728,20 @@ function Assert-UserManifestBindingFailure {
         { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Throw
     }
 
+    # Scenario: A USER manifest uses the largest generation the reader can represent.
+    # Purpose: Keep the schema numeric boundary aligned with the Int64-only reader contract.
+    It 'UnitT11x1_accepts_the_Int64_maximum_generation_in_the_reader_and_schema' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) {
+            throw 'UnitT11x1 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.'
+        }
+        $maximumGeneration = '9223372036854775807'
+        $json = (Get-Content -LiteralPath $script:UserManifestV3Example -Raw).Replace('"generation": 1', ('"generation": ' + $maximumGeneration))
+        $manifest = $json | ConvertFrom-Json
+        $manifest.generation | Should Be ([int64]::MaxValue)
+        { Assert-UserSkillsManagedManifest -Manifest $manifest } | Should Not Throw
+        (Test-Json -Json $json -SchemaFile (Join-Path $script:RepositoryRoot 'catalog\schemas\user-skills-managed-manifest-v3.schema.json')) | Should Be $true
+    }
+
     # Scenario: A USER manifest carries an undeclared top-level property.
     # Purpose: Keep parser behavior aligned with additionalProperties=false.
     It 'UnitT11y_rejects_an_unknown_user_manifest_top_level_property' {

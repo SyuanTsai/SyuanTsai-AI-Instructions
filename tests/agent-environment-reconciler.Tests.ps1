@@ -148,6 +148,38 @@ Describe 'user-scoped Agent Skills reconciliation' {
         Test-Path -LiteralPath $workingRoot | Should Be $false
     }
 
+    # Scenario: The persisted manifest is redirected outside USER home through a reparse point.
+    # Purpose: Reject the path boundary before the pre-lock manifest snapshot can read its content.
+    It 'UnitT00_path_safety_precedes_the_pre_lock_manifest_read' {
+        $userHome = Join-Path $TestDrive 'manifest-reparse-user'
+        $agentsRoot = Join-Path $userHome '.agents'
+        $manifestPath = Join-Path $agentsRoot 'catalog-skills.manifest.json'
+        $outsideRoot = Join-Path $TestDrive 'manifest-reparse-outside'
+        $outsideManifest = Join-Path $outsideRoot 'catalog-skills.manifest.json'
+        $sentinel = 'outside-manifest-sentinel-must-not-be-read'
+        New-Item -ItemType Directory -Force -Path $userHome,$agentsRoot,$outsideRoot | Out-Null
+        [System.IO.File]::WriteAllText($outsideManifest,$sentinel,[System.Text.UTF8Encoding]::new($false))
+        $usedDirectoryJunction = $false
+        try {
+            New-Item -ItemType SymbolicLink -Path $manifestPath -Target $outsideManifest -ErrorAction Stop | Out-Null
+        }
+        catch {
+            if (Test-Path -LiteralPath $manifestPath) { Remove-Item -LiteralPath $manifestPath -Force }
+            if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) { throw }
+            Remove-Item -LiteralPath $agentsRoot -Force
+            New-Item -ItemType Junction -Path $agentsRoot -Target $outsideRoot -ErrorAction Stop | Out-Null
+            $usedDirectoryJunction = $true
+        }
+        $desired = New-TestDesiredState -Root (Join-Path $TestDrive 'manifest-reparse-staging')
+        $message = $null
+        $output = @()
+        try { $output = @(& { Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply } 2>&1) }
+        catch { $message = $_.Exception.Message }
+
+        $message | Should Be $(if ($usedDirectoryJunction) { 'User .agents root must not be a reparse point.' } else { 'User Agent environment path crosses a reparse point: .agents/catalog-skills.manifest.json' })
+        (($output | Out-String) + $message) | Should Not Match $sentinel
+    }
+
     # Scenario: Apply encounters an existing projection-aware USER manifest.
     # Purpose: Fail closed before creating locks, journals, backups, or changing managed bytes.
     It 'UnitT00a_rejects_an_existing_v3_manifest_before_apply_mutation' {
