@@ -683,7 +683,10 @@ function Assert-NoRepoManagedManifestV4 {
             Assert-CleanupManagedFilePath -TargetRoot $worktreeRoot -FilePath $worktreeManifestPath -Context 'REPO managed manifest v4 detection'
         }
         catch {
-            if ([string]$_.Exception.Data['CodexAiInstructionsPathSafetyReason'] -ceq 'reparse-point') { continue }
+            if ([string]$_.Exception.Data['CodexAiInstructionsPathSafetyReason'] -ceq 'reparse-point') {
+                if ($Strict) { throw }
+                continue
+            }
             if ($Strict) {
                 $inspectionException = $_.Exception
                 try { $manifestStillExists = Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf }

@@ -1045,7 +1045,7 @@ if errorlevel 1 exit /b 92
     }
 
     # Scenario: A linked worktree exposes a v4 manifest only through a directory junction.
-    # Purpose: Skip unsafe detection input and preserve the current worktree's established remediation error.
+    # Purpose: Fail under the repository lock before remediation, without reading unsafe manifest bytes.
     It 'InterT68c_does_not_read_a_reparse_backed_linked_v4_manifest' {
         $linkedRoot = Join-Path $TestDrive 'linked-reparse-v4-worktree'
         Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','linked-reparse-v4-fixture',$linkedRoot) | Out-Null
@@ -1054,6 +1054,8 @@ if errorlevel 1 exit /b 92
             $linkedManifestPath = Join-Path $linkedRoot $script:ManifestPath
             $linkedManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $linkedManifestPath | ConvertFrom-Json
             $linkedManifest.schemaVersion = 4
+            $sentinel = 'reparse-backed-linked-v4-manifest-must-not-be-read'
+            $linkedManifest.sourceRef = $sentinel
             Set-TestText -Path $linkedManifestPath -Value (($linkedManifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
             $linkedCodexPath = Join-Path $linkedRoot '.codex'
             $externalCodexPath = Join-Path $TestDrive 'linked-reparse-v4-content'
@@ -1072,14 +1074,33 @@ if errorlevel 1 exit /b 92
             Set-TestText -Path $manifestPath -Value (($unsafeManifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
             Invoke-TestGit -Repository $targetRoot -Arguments @('add','--force','--','production.txt',$script:ManifestPath) | Out-Null
             Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','reparse detection fixture') | Out-Null
+            $indexPath = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','index') | Select-Object -First 1).Trim()
+            if (-not [IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $targetRoot $indexPath }
+            $excludePath = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
+            if (-not [IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+            $indexBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath))
+            $excludeBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+            $manifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath))
+            $agentBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md')))
+            $linkedManifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath))
+            $headBefore = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim()
 
             $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
             $output = & $script:TestPowerShellExecutable @arguments 2>&1
 
             $LASTEXITCODE | Should Not Be 0
-            ($output -join [Environment]::NewLine) | Should Match 'outside the reserved Agent artifact scope.*production\.txt'
-            ($output -join [Environment]::NewLine) | Should Not Match 'REPO managed manifest schema version 4 requires a projection-aware bootstrap\.'
-            Test-Path -LiteralPath (Join-Path $externalCodexPath 'ai-instructions.manifest.json') -PathType Leaf | Should Be $true
+            $diagnostic = ConvertTo-TestDiagnosticText -Output $output
+            $diagnostic | Should Match 'REPO managed manifest v4 detection crosses a reparse point'
+            $diagnostic | Should Not Match $sentinel
+            $diagnostic | Should Not Match 'outside the reserved Agent artifact scope.*production\.txt'
+            $diagnostic | Should Not Match 'REPO managed manifest schema version 4 requires a projection-aware bootstrap\.'
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath)) | Should Be $indexBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath)) | Should Be $manifestBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md'))) | Should Be $agentBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath)) | Should Be $linkedManifestBefore
+            (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim() | Should Be $headBefore
+            @(Invoke-TestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
         }
         finally {
             Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null

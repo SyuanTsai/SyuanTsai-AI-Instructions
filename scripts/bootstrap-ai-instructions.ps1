@@ -1604,7 +1604,10 @@ function Assert-NoRepoManagedManifestV4 {
             Assert-ManagedPathDoesNotCrossReparsePoint -Root $worktreeRoot -Path $worktreeManifestPath -Context 'REPO managed manifest v4 detection'
         }
         catch {
-            if ([string]$_.Exception.Data['CodexAiInstructionsPathSafetyReason'] -ceq 'reparse-point') { continue }
+            if ([string]$_.Exception.Data['CodexAiInstructionsPathSafetyReason'] -ceq 'reparse-point') {
+                if ($Strict) { throw }
+                continue
+            }
             if ($Strict) {
                 $inspectionException = $_.Exception
                 try { $manifestStillExists = Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf }
