@@ -3,7 +3,7 @@
   "catalogRepository": "https://github.com/example/SyuanTsai-AI-Instructions.git",
   "catalogCommit": "0123456789abcdef0123456789abcdef01234567",
   "catalogId": "example-agent-skills-v3",
-  "lockSha256": "743f1fd33f54c219d3e37b2783cdb20642b2f934967ff59b05ef7cec09a6ded7",
+  "lockSha256": "d46cc45f1adb0c1d0b7bb0709dbc3d94cf8a774afb6a39c8596647b4887399b5",
   "projectionContractSha256": "488b93d25eed36b8f6aedeb5ef0a900134dbf08e6d6927dd693f9b415c8151f0",
   "generation": 1,
   "projections": ["user-agents", "user-claude"],

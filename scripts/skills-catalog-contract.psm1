@@ -131,6 +131,36 @@ function Test-IsLicenseDeliverySourcePath {
     return $isNamedLicenseDocument -or $isInsideLicenseDirectory
 }
 
+function Get-UserSkillsPayloadInventorySha256 {
+    param(
+        [Parameter(Mandatory = $true)][object[]] $Files,
+        [Parameter(Mandatory = $true)][string] $SourcePathPrefix
+    )
+
+    $inventoryLines = New-Object 'System.Collections.Generic.List[string]'
+    $hashesByPath = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::Ordinal)
+    foreach ($file in @($Files)) {
+        $sourcePath = [string]$file.sourcePath
+        $targetPath = [string]$file.targetPath
+        if (-not $sourcePath.StartsWith($SourcePathPrefix,[System.StringComparison]::Ordinal) -or
+            $sourcePath -ceq '.ai-instructions-generated/delivery.json' -or
+            $targetPath.Contains('/.ai-instructions-licenses/')) {
+            continue
+        }
+        $hashesByPath.Add($sourcePath,[string]$file.sha256)
+    }
+
+    [string[]]$orderedPaths = @($hashesByPath.Keys)
+    [System.Array]::Sort($orderedPaths,[System.StringComparer]::Ordinal)
+    foreach ($sourcePath in $orderedPaths) {
+        $inventoryLines.Add("$sourcePath`t$($hashesByPath[$sourcePath])`n")
+    }
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes([string]::Concat($inventoryLines.ToArray()))
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([System.BitConverter]::ToString($sha256.ComputeHash($bytes))).Replace('-','').ToLowerInvariant() }
+    finally { $sha256.Dispose() }
+}
+
 function Assert-HttpsRepositoryUrl {
     param([object] $Value,[string] $Context)
     Assert-NonEmptyString -Value $Value -Context $Context
@@ -948,6 +978,9 @@ function Assert-UserSkillsManagedManifestBinding {
     if ([string]$Manifest.lockSha256 -cne $LockSha256) {
         throw 'user Skills managed manifest lockSha256 does not match the supplied Lock SHA-256.'
     }
+    if ([string]$Manifest.catalogId -cne [string]$Lock.catalogId -or [string]$Manifest.catalogId -cne [string]$Catalog.catalogId) {
+        throw 'user Skills managed manifest catalogId does not match the Catalog and Lock.'
+    }
 
     $catalogProjections = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([System.StringComparer]::Ordinal)
     foreach ($projection in @($Catalog.projections)) { $catalogProjections.Add([string]$projection.id,$projection) }
@@ -959,6 +992,8 @@ function Assert-UserSkillsManagedManifestBinding {
 
     $lockedSkills = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([System.StringComparer]::Ordinal)
     foreach ($lockedSkill in @($Lock.skills)) { $lockedSkills.Add([string]$lockedSkill.id,$lockedSkill) }
+    $lockedSources = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([System.StringComparer]::Ordinal)
+    foreach ($lockedSource in @($Lock.sources)) { $lockedSources.Add([string]$lockedSource.id,$lockedSource) }
     foreach ($file in @($Manifest.files)) {
         $skillId = [string]$file.skillId
         if (-not $lockedSkills.ContainsKey($skillId)) {
@@ -968,9 +1003,32 @@ function Assert-UserSkillsManagedManifestBinding {
         if ([string]$file.sourceId -cne [string]$lockedSkill.sourceId) {
             throw "user Skills managed manifest Skill '$skillId' sourceId does not match the Lock."
         }
+        if (-not $lockedSources.ContainsKey([string]$file.sourceId)) {
+            throw "user Skills managed manifest Skill '$skillId' source '$($file.sourceId)' is not present in the Lock."
+        }
+        $lockedSource = $lockedSources[[string]$file.sourceId]
+        if ([string]$file.sourceRepository -cne [string]$lockedSource.repository -or
+            [string]$file.sourceRef -cne [string]$lockedSource.requestedRef -or
+            [string]$file.sourceCommit -cne [string]$lockedSource.resolvedCommit -or
+            [string]$file.sourceVersion -cne [string]$lockedSource.resolvedVersion) {
+            throw "user Skills managed manifest Skill '$skillId' source provenance does not match the Lock."
+        }
         $sourcePathPrefix = [string]$lockedSkill.sourcePath + '/'
         if (([string]$file.sourcePath).StartsWith("skills/$skillId/",[System.StringComparison]::Ordinal) -and -not ([string]$file.sourcePath).StartsWith($sourcePathPrefix,[System.StringComparison]::Ordinal)) {
             throw "user Skills managed manifest Skill '$skillId' sourcePath does not match the Lock."
+        }
+    }
+
+    foreach ($skillId in @($lockedSkills.Keys)) {
+        $skillFiles = @($Manifest.files | Where-Object { [string]$_.skillId -ceq $skillId })
+        if ($skillFiles.Count -eq 0) { continue }
+        [string[]]$projectionIds = @($skillFiles | ForEach-Object { [string]$_.projectionId } | Sort-Object -Unique)
+        [System.Array]::Sort($projectionIds,[System.StringComparer]::Ordinal)
+        $projectionFiles = @($skillFiles | Where-Object { [string]$_.projectionId -ceq $projectionIds[0] })
+        $lockedSkill = $lockedSkills[$skillId]
+        $actualContentSha256 = Get-UserSkillsPayloadInventorySha256 -Files $projectionFiles -SourcePathPrefix (([string]$lockedSkill.sourcePath) + '/')
+        if ($actualContentSha256 -cne [string]$lockedSkill.contentSha256) {
+            throw "user Skills managed manifest Skill '$skillId' content hash does not match the lock."
         }
     }
 }

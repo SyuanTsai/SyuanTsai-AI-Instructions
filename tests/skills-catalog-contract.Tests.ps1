@@ -73,6 +73,22 @@ function Get-TestRawSha256 {
     finally { $stream.Dispose() }
 }
 
+function Assert-UserManifestBindingFailure {
+    param(
+        [Parameter(Mandatory = $true)][object] $Manifest,
+        [Parameter(Mandatory = $true)][object] $Catalog,
+        [Parameter(Mandatory = $true)][object] $Lock,
+        [Parameter(Mandatory = $true)][string] $LockSha256,
+        [Parameter(Mandatory = $true)][string] $ExpectedMessage
+    )
+
+    $message = $null
+    try { Assert-UserSkillsManagedManifestBinding -Manifest $Manifest -Catalog $Catalog -Lock $Lock -LockSha256 $LockSha256 }
+    catch { $message = $_.Exception.Message }
+    if ([string]::IsNullOrWhiteSpace($message)) { throw 'Expected the user Skills managed manifest binding to fail.' }
+    $message.Contains($ExpectedMessage) | Should Be $true
+}
+
     }
 
     # Scenario: Every checked-in JSON Schema document is loaded by the repository's oldest supported PowerShell runtime.
@@ -382,6 +398,93 @@ function Get-TestRawSha256 {
         $sourceIdMismatch = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
         foreach ($file in @($sourceIdMismatch.files | Where-Object { $_.skillId -ceq 'work-with-jira' })) { $file.sourceId = 'other-source' }
         { Assert-UserSkillsManagedManifestBinding -Manifest $sourceIdMismatch -Catalog $catalog -Lock $lock -LockSha256 $lockSha256 } | Should Throw
+    }
+
+    # Scenario: The binding digest uses exactly the same inventory bytes as source acquisition.
+    # Purpose: Keep manifest-owned payload hashes interoperable with immutable lock generation.
+    It 'UnitT11l2_cross_validates_v3_payload_hashes_with_source_acquisition' {
+        Import-Module (Join-Path $script:RepositoryRoot 'scripts\skills-source-acquisition.psm1') -Force
+        $repositoryRoot = Join-Path $TestDrive 'source-repository'
+        $skillRoot = Join-Path $repositoryRoot 'skills\work-with-jira'
+        New-Item -ItemType Directory -Path (Join-Path $skillRoot 'references') -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $skillRoot 'SKILL.md'),'# Skill',[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $skillRoot 'references\one.md'),'one',[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $skillRoot 'references\two.md'),'two',[Text.UTF8Encoding]::new($false))
+        $acquisitionHash = Get-SkillInventorySha256 -RepositoryRoot $repositoryRoot -SkillRoot $skillRoot
+
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        $catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'
+        $lock = Import-SkillsCatalogJson -Path $script:LockV3Example -DocumentName 'Skills Catalog lock v3'
+        $hashByRelativePath = @{}
+        foreach ($relativePath in @('SKILL.md','references/one.md','references/two.md')) {
+            $hashByRelativePath[$relativePath] = Get-TestRawSha256 -Path (Join-Path $skillRoot $relativePath.Replace('/','\'))
+        }
+        $workFiles = @($manifest.files | Where-Object { $_.skillId -ceq 'work-with-jira' })
+        foreach ($file in $workFiles) { $file.sha256 = $hashByRelativePath['SKILL.md'] }
+        foreach ($projectionId in @($manifest.projections)) {
+            $template = @($workFiles | Where-Object { $_.projectionId -ceq $projectionId })[0]
+            foreach ($relativePath in @('references/one.md','references/two.md')) {
+                $entry = $template.PSObject.Copy()
+                $entry.sourcePath = "skills/work-with-jira/$relativePath"
+                $entry.targetPath = ([string]$template.targetPath).Replace('SKILL.md',$relativePath)
+                $entry.sha256 = $hashByRelativePath[$relativePath]
+                $manifest.files += $entry
+            }
+        }
+        @($lock.skills | Where-Object { $_.id -ceq 'work-with-jira' })[0].contentSha256 = $acquisitionHash
+
+        { Assert-UserSkillsManagedManifestBinding -Manifest $manifest -Catalog $catalog -Lock $lock -LockSha256 (Get-TestRawSha256 -Path $script:LockV3Example) } | Should Not Throw
+    }
+
+    # Scenario: Projection parity alone is insufficient if matching payload hashes are forged.
+    # Purpose: Bind every installed payload inventory to the immutable content hash in the Lock.
+    It 'UnitT11l3_rejects_a_v3_manifest_with_parity_preserving_payload_hash_changes' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        $catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'
+        $lock = Import-SkillsCatalogJson -Path $script:LockV3Example -DocumentName 'Skills Catalog lock v3'
+        foreach ($file in @($manifest.files | Where-Object { $_.skillId -ceq 'work-with-jira' -and $_.sourcePath -ceq 'skills/work-with-jira/SKILL.md' })) { $file.sha256 = '0' * 64 }
+        Assert-UserManifestBindingFailure -Manifest $manifest -Catalog $catalog -Lock $lock -LockSha256 (Get-TestRawSha256 -Path $script:LockV3Example) -ExpectedMessage 'content hash does not match the lock'
+    }
+
+    # Scenario: A manifest provenance field differs from the selected immutable source.
+    # Purpose: Prevent otherwise valid payload bytes from being attributed to another source revision.
+    It 'UnitT11l4_rejects_a_v3_manifest_with_mismatched_sourceCommit' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'; $catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'; $lock = Import-SkillsCatalogJson -Path $script:LockV3Example -DocumentName 'Skills Catalog lock v3'
+        foreach ($file in @($manifest.files | Where-Object { $_.skillId -ceq 'work-with-jira' })) { $file.sourceCommit = 'f' * 40 }
+        Assert-UserManifestBindingFailure -Manifest $manifest -Catalog $catalog -Lock $lock -LockSha256 (Get-TestRawSha256 -Path $script:LockV3Example) -ExpectedMessage 'source provenance does not match the Lock'
+    }
+
+    It 'UnitT11l5_rejects_a_v3_manifest_with_mismatched_sourceRepository' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'; $catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'; $lock = Import-SkillsCatalogJson -Path $script:LockV3Example -DocumentName 'Skills Catalog lock v3'
+        foreach ($file in @($manifest.files | Where-Object { $_.skillId -ceq 'work-with-jira' })) { $file.sourceRepository = 'https://github.com/example/other.git' }
+        Assert-UserManifestBindingFailure -Manifest $manifest -Catalog $catalog -Lock $lock -LockSha256 (Get-TestRawSha256 -Path $script:LockV3Example) -ExpectedMessage 'source provenance does not match the Lock'
+    }
+
+    It 'UnitT11l6_rejects_a_v3_manifest_with_mismatched_sourceRef' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'; $catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'; $lock = Import-SkillsCatalogJson -Path $script:LockV3Example -DocumentName 'Skills Catalog lock v3'
+        foreach ($file in @($manifest.files | Where-Object { $_.skillId -ceq 'work-with-jira' })) { $file.sourceRef = 'v2.0.0' }
+        Assert-UserManifestBindingFailure -Manifest $manifest -Catalog $catalog -Lock $lock -LockSha256 (Get-TestRawSha256 -Path $script:LockV3Example) -ExpectedMessage 'source provenance does not match the Lock'
+    }
+
+    It 'UnitT11l7_rejects_a_v3_manifest_with_mismatched_sourceVersion' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'; $catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'; $lock = Import-SkillsCatalogJson -Path $script:LockV3Example -DocumentName 'Skills Catalog lock v3'
+        foreach ($file in @($manifest.files | Where-Object { $_.skillId -ceq 'work-with-jira' })) { $file.sourceVersion = '2.0.0' }
+        Assert-UserManifestBindingFailure -Manifest $manifest -Catalog $catalog -Lock $lock -LockSha256 (Get-TestRawSha256 -Path $script:LockV3Example) -ExpectedMessage 'source provenance does not match the Lock'
+    }
+
+    It 'UnitT11l8_rejects_a_v3_manifest_with_mismatched_catalogId' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'; $catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'; $lock = Import-SkillsCatalogJson -Path $script:LockV3Example -DocumentName 'Skills Catalog lock v3'
+        $manifest.catalogId = 'other-catalog'
+        Assert-UserManifestBindingFailure -Manifest $manifest -Catalog $catalog -Lock $lock -LockSha256 (Get-TestRawSha256 -Path $script:LockV3Example) -ExpectedMessage 'catalogId does not match the Catalog and Lock'
+    }
+
+    It 'UnitT11l9_rejects_a_v3_manifest_with_an_unlocked_payload_file' {
+        $manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'; $catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'; $lock = Import-SkillsCatalogJson -Path $script:LockV3Example -DocumentName 'Skills Catalog lock v3'
+        foreach ($projectionId in @($manifest.projections)) {
+            $template = @($manifest.files | Where-Object { $_.skillId -ceq 'work-with-jira' -and $_.projectionId -ceq $projectionId -and $_.sourcePath -ceq 'skills/work-with-jira/SKILL.md' })[0]
+            $entry = $template.PSObject.Copy(); $entry.sourcePath = 'skills/work-with-jira/extra.md'; $entry.targetPath = ([string]$template.targetPath).Replace('SKILL.md','extra.md'); $entry.sha256 = '4' * 64; $manifest.files += $entry
+        }
+        Assert-UserManifestBindingFailure -Manifest $manifest -Catalog $catalog -Lock $lock -LockSha256 (Get-TestRawSha256 -Path $script:LockV3Example) -ExpectedMessage 'content hash does not match the lock'
     }
 
     # Scenario: A versioned USER manifest uses traversal syntax in source or target ownership paths.
