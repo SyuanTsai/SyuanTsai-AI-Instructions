@@ -45,6 +45,7 @@ $script:ResolverGitHubApiToken = Initialize-ResolverGitHubApiCredential
 $ErrorActionPreference = 'Stop'
 $script:ResolverProcessReceipts = [Collections.Generic.List[object]]::new()
 
+try {
 $script:ResolverRunId = if ([string]::IsNullOrWhiteSpace($RunId)) {
     [guid]::NewGuid().ToString('N')
 }
@@ -4115,5 +4116,8 @@ if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
     Write-ResolverJsonOutput -Path $OutputPath -Json $json
 }
 
-$script:ResolverGitHubApiToken = $null
-$json
+    $json
+}
+finally {
+    $script:ResolverGitHubApiToken = $null
+}

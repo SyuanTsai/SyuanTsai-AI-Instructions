@@ -386,6 +386,38 @@ Describe 'Standard validation resolver hardening' {
         }
     }
 
+    # Scenario: Dot-sourced resolver setup rejects an invalid run identifier after capturing a token.
+    # Purpose: Every early exit clears the in-scope credential as well as every process token alias.
+    It 'UnitT23_clears_the_captured_GitHub_token_when_dot_sourced_setup_fails_early' {
+        $names = @('STANDARD_VALIDATION_GITHUB_API_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN')
+        $previous = @{}
+        foreach ($name in $names) {
+            $previous[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+            [Environment]::SetEnvironmentVariable($name, "$name-secret", 'Process')
+        }
+        try {
+            $failed = $false
+            try {
+                . $script:ResolverPath -PolicyPath $script:ToolchainPath -ValidatePolicyOnly -RunId 'invalid-run-id' | Out-Null
+            }
+            catch {
+                $failed = $true
+            }
+            Assert-True $failed 'The invalid RunId fixture must fail before policy validation.'
+            Assert-True ($null -eq $script:ResolverGitHubApiToken) 'Early dot-sourced resolver failure must clear the captured script credential.'
+            foreach ($name in $names) {
+                Assert-True ($null -eq [Environment]::GetEnvironmentVariable($name, 'Process')) "Early resolver failure must clear '$name'."
+            }
+        }
+        finally {
+            $script:ResolverGitHubApiToken = $null
+            foreach ($name in $names) {
+                $value = if ($null -eq $previous[$name]) { [NullString]::Value } else { $previous[$name] }
+                [Environment]::SetEnvironmentVariable($name, $value, 'Process')
+            }
+        }
+    }
+
     # Scenario: A mocked GitHub acquisition failure includes the exact credential in its exception text.
     # Purpose: Ensure the diagnostic writer redacts the captured value and clears the script credential on failure.
     Context 'SkillSpector failure diagnostic redaction' {
