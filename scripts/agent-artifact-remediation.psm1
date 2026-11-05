@@ -186,6 +186,7 @@ function Get-RemediationLegacyManifestPaths {
     $paths = New-Object 'System.Collections.Generic.HashSet[string]' $Comparer
     $manifestPath = Join-Path $Repository '.codex\ai-instructions.manifest.json'
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { return ,$paths }
+    Assert-RemediationPathHasNoReparsePoint -Repository $Repository -RelativePath '.codex/ai-instructions.manifest.json'
     try { $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json }
     catch { return ,$paths }
     if ($manifest.schemaVersion -eq 4) {

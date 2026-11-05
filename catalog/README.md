@@ -100,7 +100,7 @@ Production acquisition adapter 只為組合前所需的 `SKILL.md` identity、de
 
 ## Managed manifest v2/v3 and user Skills provenance
 
-REPO managed manifest v4 是 reader-first 契約：Instruction entry 以 `host` 綁定 Codex、Copilot 或 Claude 的受限 target，並記錄 `rendererId`／`rendererSha256`；Skill entry 只允許已宣告的 project projection，且同一 Skill 在所有選定 projection 必須維持相同相對路徑、內容 hash 與 provenance。現行 bootstrap writer 仍寫 v2，既有 v3 仍維持 v3；P9 才由 projection-aware bootstrap 寫入 v4。
+REPO managed manifest v4 是 reader-first 契約：Instruction entry 以 `host` 綁定 Codex、Copilot 或 Claude 的受限 target，並記錄 `rendererId`／`rendererSha256`；instruction license target 同樣依 host 綁定，Codex 只接受 `.codex/ai-instructions-licenses/`，Copilot 只接受 `.github/ai-instructions-licenses/`。Claude 尚無已核准的 instruction license delivery namespace，因此 v4 reader 對 Claude license target 採 fail-closed，不從其他 host namespace 推論或自行建立新路徑。Skill entry 只允許已宣告的 project projection，且同一 Skill 在所有選定 projection 必須維持相同相對路徑、內容 hash 與 provenance。現行 bootstrap writer 仍寫 v2，既有 v3 仍維持 v3；P9 才由 projection-aware bootstrap 寫入 v4。
 
 `Assert-ManagedManifest` 只驗證 manifest 文件本身。REPO Skill entries 與 Lock 的綁定，以及 Instruction entries 與 renderer 的綁定，均由 P9 projection-aware bootstrap 負責；P6c 不提供這些信任邊界，也不得把單獨通過 v4 文件驗證視為可 mutation 的 ownership evidence。
 

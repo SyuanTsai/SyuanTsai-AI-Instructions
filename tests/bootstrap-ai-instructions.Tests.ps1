@@ -796,6 +796,88 @@ exit /b 0
         }
     }
 
+    # Scenario: A linked worktree carries v4 while the current worktree has unsafe legacy ownership evidence.
+    # Purpose: Detect the projection-aware state before remediation can report or mutate the current worktree.
+    It 'InterT68b_reports_linked_v4_before_a_current_legacy_remediation_error' {
+        $linkedRoot = Join-Path $TestDrive 'linked-v4-before-remediation-worktree'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','linked-v4-before-remediation-fixture',$linkedRoot) | Out-Null
+        try {
+            Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $linkedRoot | Out-Null
+            $linkedManifestPath = Join-Path $linkedRoot $script:ManifestPath
+            $linkedManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $linkedManifestPath | ConvertFrom-Json
+            $linkedManifest.schemaVersion = 4
+            Set-TestText -Path $linkedManifestPath -Value (($linkedManifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+
+            Set-TestText -Path (Join-Path $targetRoot 'production.txt') -Value 'production bytes'
+            $manifestPath = Join-Path $targetRoot $script:ManifestPath
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $manifestPath) | Out-Null
+            $unsafeManifest = [ordered]@{
+                schemaVersion=1
+                sourceRepository='https://example.com/legacy-ai-instructions.git'
+                sourceRef='legacy-pin'
+                files=@([ordered]@{sourcePath='production.txt';targetPath='production.txt';sha256=('a' * 64)})
+            }
+            Set-TestText -Path $manifestPath -Value (($unsafeManifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+            Invoke-TestGit -Repository $targetRoot -Arguments @('add','--force','--','production.txt',$script:ManifestPath) | Out-Null
+            Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','unsafe manifest precedence fixture') | Out-Null
+            $headBefore = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim()
+
+            $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
+            $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+            $LASTEXITCODE | Should Not Be 0
+            ($output -join [Environment]::NewLine) | Should Match 'REPO managed manifest schema version 4 requires a projection-aware bootstrap\.'
+            ($output -join [Environment]::NewLine) | Should Not Match 'outside the reserved Agent artifact scope'
+            (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')) | Should Be $headBefore
+            (Get-Content -Raw -LiteralPath (Join-Path $targetRoot 'production.txt')).Trim() | Should Be 'production bytes'
+        }
+        finally {
+            Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
+        }
+    }
+
+    # Scenario: A linked worktree exposes a v4 manifest only through a directory junction.
+    # Purpose: Skip unsafe detection input and preserve the current worktree's established remediation error.
+    It 'InterT68c_does_not_read_a_reparse_backed_linked_v4_manifest' {
+        $linkedRoot = Join-Path $TestDrive 'linked-reparse-v4-worktree'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','linked-reparse-v4-fixture',$linkedRoot) | Out-Null
+        try {
+            Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $linkedRoot | Out-Null
+            $linkedManifestPath = Join-Path $linkedRoot $script:ManifestPath
+            $linkedManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $linkedManifestPath | ConvertFrom-Json
+            $linkedManifest.schemaVersion = 4
+            Set-TestText -Path $linkedManifestPath -Value (($linkedManifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+            $linkedCodexPath = Join-Path $linkedRoot '.codex'
+            $externalCodexPath = Join-Path $TestDrive 'linked-reparse-v4-content'
+            Move-Item -LiteralPath $linkedCodexPath -Destination $externalCodexPath
+            New-Item -ItemType Junction -Path $linkedCodexPath -Target $externalCodexPath | Out-Null
+
+            Set-TestText -Path (Join-Path $targetRoot 'production.txt') -Value 'production bytes'
+            $manifestPath = Join-Path $targetRoot $script:ManifestPath
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $manifestPath) | Out-Null
+            $unsafeManifest = [ordered]@{
+                schemaVersion=1
+                sourceRepository='https://example.com/legacy-ai-instructions.git'
+                sourceRef='legacy-pin'
+                files=@([ordered]@{sourcePath='production.txt';targetPath='production.txt';sha256=('a' * 64)})
+            }
+            Set-TestText -Path $manifestPath -Value (($unsafeManifest | ConvertTo-Json -Depth 10).Replace("`r`n","`n").TrimEnd())
+            Invoke-TestGit -Repository $targetRoot -Arguments @('add','--force','--','production.txt',$script:ManifestPath) | Out-Null
+            Invoke-TestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','reparse detection fixture') | Out-Null
+
+            $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot)
+            $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+            $LASTEXITCODE | Should Not Be 0
+            ($output -join [Environment]::NewLine) | Should Match 'outside the reserved Agent artifact scope.*production\.txt'
+            ($output -join [Environment]::NewLine) | Should Not Match 'REPO managed manifest schema version 4 requires a projection-aware bootstrap\.'
+            Test-Path -LiteralPath (Join-Path $externalCodexPath 'ai-instructions.manifest.json') -PathType Leaf | Should Be $true
+        }
+        finally {
+            Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
+        }
+    }
+
     # Scenario: A prior local artifact set loses its manifest, one managed file, and the managed exclude block.
     # Purpose: Reconstruct only state that immutable bytes can prove without dirtying the repository.
     It 'InterT70_self_heals_a_missing_manifest_file_and_exclude_marker' {

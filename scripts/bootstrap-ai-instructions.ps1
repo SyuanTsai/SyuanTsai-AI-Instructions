@@ -1561,6 +1561,39 @@ function Assert-ManagedPathDoesNotCrossReparsePoint {
     }
 }
 
+function Get-ManagedWorktreeRoots {
+    param([Parameter(Mandatory = $true)][string] $Repository)
+
+    foreach ($line in @(Invoke-Git -Repository $Repository -Arguments @('worktree','list','--porcelain'))) {
+        $text = [string]$line
+        if ($text.StartsWith('worktree ',[System.StringComparison]::Ordinal)) {
+            $text.Substring('worktree '.Length)
+        }
+    }
+}
+
+function Assert-NoRepoManagedManifestV4 {
+    param([Parameter(Mandatory = $true)][string] $Repository)
+
+    try { $worktreeRoots = @(Get-ManagedWorktreeRoots -Repository $Repository) }
+    catch { return }
+    foreach ($worktreeRoot in $worktreeRoots) {
+        $isSchemaV4 = $false
+        try {
+            $worktreeManifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/','\')
+            if (-not (Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf)) { continue }
+            Assert-ManagedPathDoesNotCrossReparsePoint -Root $worktreeRoot -Path $worktreeManifestPath -Context 'REPO managed manifest v4 detection'
+            $worktreeManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $worktreeManifestPath | ConvertFrom-Json
+            $schemaVersion = $worktreeManifest.schemaVersion
+            $isSchemaV4 = ($schemaVersion -is [int] -or $schemaVersion -is [long]) -and [int64]$schemaVersion -eq 4
+        }
+        catch { continue }
+        if ($isSchemaV4) {
+            throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
+        }
+    }
+}
+
 function Get-SharedManagedExcludePaths {
     param(
         [Parameter(Mandatory = $true)][string] $Repository,
@@ -1569,10 +1602,7 @@ function Get-SharedManagedExcludePaths {
 
     $paths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     foreach ($currentManagedPath in $CurrentManagedPaths) { [void]$paths.Add($currentManagedPath.Replace('\','/')) }
-    foreach ($line in @(Invoke-Git -Repository $Repository -Arguments @('worktree','list','--porcelain'))) {
-        $text = [string]$line
-        if (-not $text.StartsWith('worktree ',[System.StringComparison]::Ordinal)) { continue }
-        $worktreeRoot = $text.Substring('worktree '.Length)
+    foreach ($worktreeRoot in @(Get-ManagedWorktreeRoots -Repository $Repository)) {
         $worktreeManifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/','\')
         if (-not (Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf)) { continue }
         Assert-ManagedPathDoesNotCrossReparsePoint -Root $worktreeRoot -Path $worktreeManifestPath -Context 'Linked worktree managed manifest'
@@ -4089,15 +4119,7 @@ $repositoryIndexLock = $null
 $userSkillMigrationLock = $null
 $remediationTransaction = $null
 try {
-    $preflightManifestPath = Join-Path $targetRootPath $manifestRelativePath.Replace('/', '\')
-    if (Test-Path -LiteralPath $preflightManifestPath -PathType Leaf) {
-        try { $preflightManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $preflightManifestPath | ConvertFrom-Json }
-        catch { $preflightManifest = $null }
-        if ($null -ne $preflightManifest -and $preflightManifest.schemaVersion -eq 4) {
-            throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
-        }
-    }
-    [void](Get-SharedManagedExcludePaths -Repository $targetRootPath -CurrentManagedPaths @())
+    Assert-NoRepoManagedManifestV4 -Repository $targetRootPath
     if (-not $WhatIf) {
         $repositoryOperationLock = Open-RepositoryOperationLock -Repository $targetRootPath
         $remediationTransaction = Invoke-AgentArtifactRemediation -Repository $targetRootPath -GitExecutable $GitExecutable

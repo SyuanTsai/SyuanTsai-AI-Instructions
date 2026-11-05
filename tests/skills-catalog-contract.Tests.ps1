@@ -274,7 +274,15 @@ function Get-TestManagedManifestV4 {
     # Purpose: Bind each instruction target to its declared host whitelist.
     It 'UnitT11v2_rejects_a_v4_host_target_mismatch' {
         $manifest = Get-TestManagedManifestV4
-        @($manifest.files | Where-Object host -eq 'claude')[0].targetPath = 'AGENTS.md'
+        @($manifest.files | Where-Object host -eq 'claude')[0].targetPath = '.github/AI-Rules/CodeReview.en.md'
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw "target path is not allowed for host 'claude'"
+    }
+
+    # Scenario: A v4 Claude instruction claims the Codex license delivery namespace.
+    # Purpose: Bind license ownership to the same host boundary as ordinary instruction targets.
+    It 'UnitT11v2a_rejects_a_v4_license_target_for_a_different_host' {
+        $manifest = Get-TestManagedManifestV4
+        @($manifest.files | Where-Object host -eq 'claude')[0].targetPath = '.codex/ai-instructions-licenses/source/LICENSE'
         { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw "target path is not allowed for host 'claude'"
     }
 

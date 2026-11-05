@@ -23,6 +23,8 @@
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "repositoryPath": { "type": "string", "minLength": 1, "pattern": "^(?:(?!\\.{1,2}(?:/|$))(?!\\s*(?:/|$))[^/\\\\:\\u0000-\\u001F\\u007F-\\u009F]+)(?:/(?:(?!\\.{1,2}(?:/|$))(?!\\s*(?:/|$))[^/\\\\:\\u0000-\\u001F\\u007F-\\u009F]+))*$" },
     "licenseTarget": { "type": "string", "pattern": "^\\.(?:codex|github)/ai-instructions-licenses/(?:[0-9a-f]{40}/)?(?:delivery\\.json|source/.+)$" },
+    "codexLicenseTarget": { "type": "string", "pattern": "^\\.codex/ai-instructions-licenses/(?:[0-9a-f]{40}/)?(?:delivery\\.json|source/.+)$" },
+    "copilotLicenseTarget": { "type": "string", "pattern": "^\\.github/ai-instructions-licenses/(?:[0-9a-f]{40}/)?(?:delivery\\.json|source/.+)$" },
     "file": {
       "type": "object",
       "additionalProperties": false,
@@ -68,9 +70,9 @@
             "sha256": { "$ref": "#/$defs/sha256" }
           },
           "allOf": [
-            { "if": { "properties": { "host": { "const": "codex" } } }, "then": { "properties": { "targetPath": { "oneOf": [{ "$ref": "#/$defs/licenseTarget" }, { "type": "string", "pattern": "^(?:AGENTS\\.md|\\.codex/AI-Rules/[^/\\\\]+\\.en\\.md)$" }] } } } },
-            { "if": { "properties": { "host": { "const": "copilot" } } }, "then": { "properties": { "targetPath": { "oneOf": [{ "$ref": "#/$defs/licenseTarget" }, { "type": "string", "pattern": "^(?:\\.github/copilot-instructions\\.md|\\.github/AI-Rules/[^/\\\\]+\\.en\\.md)$" }] } } } },
-            { "if": { "properties": { "host": { "const": "claude" } } }, "then": { "properties": { "targetPath": { "oneOf": [{ "$ref": "#/$defs/licenseTarget" }, { "type": "string", "pattern": "^(?:CLAUDE\\.md|\\.claude/AI-Rules/[^/\\\\]+\\.en\\.md)$" }] } } } }
+            { "if": { "properties": { "host": { "const": "codex" } } }, "then": { "properties": { "targetPath": { "oneOf": [{ "$ref": "#/$defs/codexLicenseTarget" }, { "type": "string", "pattern": "^(?:AGENTS\\.md|\\.codex/AI-Rules/[^/\\\\]+\\.en\\.md)$" }] } } } },
+            { "if": { "properties": { "host": { "const": "copilot" } } }, "then": { "properties": { "targetPath": { "oneOf": [{ "$ref": "#/$defs/copilotLicenseTarget" }, { "type": "string", "pattern": "^(?:\\.github/copilot-instructions\\.md|\\.github/AI-Rules/[^/\\\\]+\\.en\\.md)$" }] } } } },
+            { "if": { "properties": { "host": { "const": "claude" } } }, "then": { "properties": { "targetPath": { "type": "string", "pattern": "^(?:CLAUDE\\.md|\\.claude/AI-Rules/[^/\\\\]+\\.en\\.md)$" } } } }
           ]
         },
         {

@@ -783,14 +783,19 @@ function Assert-ManagedManifestV3 {
 }
 
 function Test-IsManagedManifestV4InstructionLicensePath {
-    param([object] $Value)
+    param([Parameter(Mandatory = $true)][string] $Host,[object] $Value)
     if (-not (Test-IsSafeRepositoryPath -Value $Value)) { return $false }
-    return [string]$Value -cmatch '^\.(codex|github)/ai-instructions-licenses/([0-9a-f]{40}/)?(delivery\.json|source/.+)$'
+    $namespace = switch ($Host) {
+        'codex' { '.codex' }
+        'copilot' { '.github' }
+        default { return $false }
+    }
+    return [string]$Value -cmatch ('^' + [regex]::Escape($namespace) + '/ai-instructions-licenses/([0-9a-f]{40}/)?(delivery\.json|source/.+)$')
 }
 
 function Test-IsManagedManifestV4InstructionTarget {
     param([Parameter(Mandatory = $true)][string] $Host,[Parameter(Mandatory = $true)][string] $TargetPath)
-    if (Test-IsManagedManifestV4InstructionLicensePath -Value $TargetPath) { return $true }
+    if (Test-IsManagedManifestV4InstructionLicensePath -Host $Host -Value $TargetPath) { return $true }
     switch ($Host) {
         'codex' { return $TargetPath -ceq 'AGENTS.md' -or $TargetPath -cmatch '^\.codex/AI-Rules/[^/\\]+\.en\.md$' }
         'copilot' { return $TargetPath -ceq '.github/copilot-instructions.md' -or $TargetPath -cmatch '^\.github/AI-Rules/[^/\\]+\.en\.md$' }
