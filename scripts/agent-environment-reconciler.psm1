@@ -676,6 +676,7 @@ function Invoke-UserSkillsReconciliation {
         [switch] $ForceReinstallManagedSkills,
         [switch] $MigrateLegacyCatalogSkills,
         [int] $FailureAfterMutationCount = 0,
+        [scriptblock] $BeforeLockAcquisitionAction,
         [scriptblock] $BeforeBackupValidationAction
     )
     Import-AgentEnvironmentRuntimeModules -RuntimeRoot ([string]$DesiredState.RuntimeRoot)
@@ -690,6 +691,7 @@ function Invoke-UserSkillsReconciliation {
     $manifestRelative = '.agents/catalog-skills.manifest.json'
     $manifestPath = Get-AgentEnvironmentFullPath -Root $home -RelativePath $manifestRelative
     $existingManifest = Get-AgentEnvironmentManifest -Path $manifestPath
+    $existingManifestIdentity = if ($null -eq $existingManifest) { $null } else { [Convert]::ToBase64String((Get-AgentEnvironmentManifestBytes -Manifest $existingManifest)) }
     if (Test-Path -LiteralPath $journalPath) {
         Assert-AgentEnvironmentPathSafe -Root $home -RelativePath $journalRelative | Out-Null
         if (-not (Test-Path -LiteralPath $journalPath -PathType Leaf)) { throw 'Agent environment recovery journal path must be a file.' }
@@ -754,6 +756,7 @@ function Invoke-UserSkillsReconciliation {
     $lockStream = $null
     try {
         try {
+            if ($null -ne $BeforeLockAcquisitionAction) { & $BeforeLockAcquisitionAction }
             if ($Mode -eq 'Apply') { $lockStream = [System.IO.File]::Open($lockPath,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None) }
             elseif (Test-Path -LiteralPath $lockPath -PathType Leaf) { $lockStream = [System.IO.File]::Open($lockPath,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::None) }
         }
@@ -763,7 +766,11 @@ function Invoke-UserSkillsReconciliation {
             if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw 'User Skills managed manifest path must be a file.' }
         }
         $manifestObservation = Get-AgentEnvironmentObservedState -Root $home -RelativePath $manifestRelative
-        $existing = $existingManifest
+        $existing = Get-AgentEnvironmentManifest -Path $manifestPath
+        $lockedManifestIdentity = if ($null -eq $existing) { $null } else { [Convert]::ToBase64String((Get-AgentEnvironmentManifestBytes -Manifest $existing)) }
+        if ($existingManifestIdentity -cne $lockedManifestIdentity) {
+            return New-AgentEnvironmentResult -Outcome 'concurrent' -DesiredState $DesiredState -Installed @() -Updated @() -Removed @() -Preserved @() -Failed @('User Skills managed manifest changed while acquiring the Agent environment lock.') -RollbackState 'not-started' -BackupPath $null
+        }
         $oldByPath = @{}
         if ($null -ne $existing) { foreach ($file in @($existing.files)) { $oldByPath[[string]$file.targetPath] = $file } }
         $desiredByPath = @{}

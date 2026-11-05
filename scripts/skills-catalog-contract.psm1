@@ -789,6 +789,12 @@ function Assert-UserSkillsManagedManifestFiles {
         Assert-NonEmptyString -Value (Get-RequiredProperty -Object $entry -Name 'sourceVersion' -Context "user Skills managed manifest file '$skillId'") -Context "user Skills managed manifest file '$skillId' sourceVersion"
         $sourcePath = Get-RequiredProperty -Object $entry -Name 'sourcePath' -Context "user Skills managed manifest file '$skillId'"
         $targetPath = Get-RequiredProperty -Object $entry -Name 'targetPath' -Context "user Skills managed manifest file '$skillId'"
+        if ([string]$sourcePath -cne '.ai-instructions-generated/delivery.json' -and -not (Test-IsSafeRepositoryPath -Value $sourcePath)) {
+            throw "User-managed Skill '$skillId' has unsafe source path: $sourcePath"
+        }
+        if (-not (Test-IsSafeRepositoryPath -Value $targetPath)) {
+            throw "User-managed Skill '$skillId' has unsafe target path: $targetPath"
+        }
         $projectionId = $null
         $root = $ProjectionRoot
         if ($HasProjectionId) {
@@ -797,7 +803,7 @@ function Assert-UserSkillsManagedManifestFiles {
             if (-not $ProjectionIds.ContainsKey([string]$projectionId)) { throw "User-managed Skill '$skillId' projection '$projectionId' is not listed in projections." }
             $root = [string]$ProjectionRoots[[string]$projectionId]
         }
-        if (-not (Test-IsSafeRepositoryPath -Value $targetPath) -or -not ([string]$targetPath).StartsWith("$root/$skillId/",[System.StringComparison]::Ordinal)) {
+        if (-not ([string]$targetPath).StartsWith("$root/$skillId/",[System.StringComparison]::Ordinal)) {
             throw "User-managed Skill '$skillId' target path must be inside projection root '$root'."
         }
         $targetPrefix = "$root/$skillId/"

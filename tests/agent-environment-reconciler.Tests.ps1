@@ -234,6 +234,32 @@ Describe 'user-scoped Agent Skills reconciliation' {
         @($second.updated).Count | Should Be 0
     }
 
+    # Scenario: Another installer replaces the legacy manifest with a v3 projection-aware manifest while this updater waits for its lock.
+    # Purpose: Ensure the legacy reconciler rereads ownership under the lock and never overwrites the newer manifest or its managed files.
+    It 'InterT57_rejects_a_v3_manifest_replaced_while_acquiring_the_lock_without_mutation' {
+        $initial = New-TestDesiredState -Root (Join-Path $staging 'initial') -SkillIds @('alpha')
+        (Invoke-UserSkillsReconciliation -DesiredState $initial -UserHome $userHome -Mode Apply).outcome | Should Be 'applied'
+        $next = New-TestDesiredState -Root (Join-Path $staging 'next') -SkillIds @('alpha','beta')
+        $manifestPath = Join-Path $userHome '.agents\catalog-skills.manifest.json'
+        $skillPath = Join-Path $userHome '.agents\skills\alpha\SKILL.md'
+        $v3Bytes = [System.IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v3.example.json'))
+        $skillBytesBefore = [System.IO.File]::ReadAllBytes($skillPath)
+        $errorMessage = $null
+
+        try {
+            Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply -BeforeLockAcquisitionAction {
+                [System.IO.File]::WriteAllBytes($manifestPath,$v3Bytes)
+            } | Out-Null
+        }
+        catch { $errorMessage = $_.Exception.Message }
+
+        if ([string]::IsNullOrWhiteSpace($errorMessage)) { throw 'Expected the lock-protected manifest reread to reject schema version 3.' }
+        $errorMessage.Contains('USER managed manifest schema version 3 requires a projection-aware installer.') | Should Be $true
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($manifestPath)) | Should Be ([Convert]::ToBase64String($v3Bytes))
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($skillPath)) | Should Be ([Convert]::ToBase64String($skillBytesBefore))
+        Test-Path -LiteralPath (Join-Path $userHome '.agents\skills\beta\SKILL.md') | Should Be $false
+    }
+
     It 'preserves an unmanaged personal Skill outside the Catalog' {
         $personal = Join-Path $userHome '.agents\skills\personal\SKILL.md'
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $personal) | Out-Null

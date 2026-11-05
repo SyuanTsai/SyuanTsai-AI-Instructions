@@ -350,6 +350,37 @@ function Get-TestRawSha256 {
         [string]$manifest.projectionContractSha256 | Should Be (Get-SkillsCatalogProjectionContractSha256 -Projections $catalog.projections)
     }
 
+    # Scenario: A versioned USER manifest uses traversal syntax in source or target ownership paths.
+    # Purpose: Reject unsafe paths before canonical mapping rules can mistake them for a Skill-owned payload.
+    It 'UnitT11la_rejects_unsafe_v2_and_v3_user_manifest_paths' {
+        $v2Manifest = Import-SkillsCatalogJson -Path $script:UserManifestV2Example -DocumentName 'user Skills managed manifest v2'
+        @($v2Manifest.files)[0].sourcePath = 'skills/work-with-jira/../secret'
+        $v2Error = $null
+        try { Assert-UserSkillsManagedManifest -Manifest $v2Manifest }
+        catch { $v2Error = $_.Exception.Message }
+        if ([string]::IsNullOrWhiteSpace($v2Error)) { throw 'Expected the v2 manifest to reject the unsafe source path.' }
+        $v2Error.Contains('unsafe') | Should Be $true
+        $v2Error.Contains('work-with-jira') | Should Be $true
+
+        $v3Manifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        @($v3Manifest.files)[0].sourcePath = 'skills/work-with-jira/../secret'
+        $v3SourceError = $null
+        try { Assert-UserSkillsManagedManifest -Manifest $v3Manifest }
+        catch { $v3SourceError = $_.Exception.Message }
+        if ([string]::IsNullOrWhiteSpace($v3SourceError)) { throw 'Expected the v3 manifest to reject the unsafe source path.' }
+        $v3SourceError.Contains('unsafe') | Should Be $true
+        $v3SourceError.Contains('work-with-jira') | Should Be $true
+
+        $v3TargetManifest = Import-SkillsCatalogJson -Path $script:UserManifestV3Example -DocumentName 'user Skills managed manifest v3'
+        @($v3TargetManifest.files)[0].targetPath = '.agents/skills/work-with-jira/../secret'
+        $v3TargetError = $null
+        try { Assert-UserSkillsManagedManifest -Manifest $v3TargetManifest }
+        catch { $v3TargetError = $_.Exception.Message }
+        if ([string]::IsNullOrWhiteSpace($v3TargetError)) { throw 'Expected the v3 manifest to reject the unsafe target path.' }
+        $v3TargetError.Contains('unsafe') | Should Be $true
+        $v3TargetError.Contains('work-with-jira') | Should Be $true
+    }
+
     # Scenario: A USER manifest projection ID is not in the fixed projection table.
     # Purpose: Reject invented USER destination namespaces.
     It 'UnitT11m_rejects_an_unknown_user_manifest_projection' {
