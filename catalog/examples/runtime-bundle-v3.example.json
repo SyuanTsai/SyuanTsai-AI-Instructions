@@ -4,7 +4,7 @@
   "commit": "89abcdef0123456789abcdef0123456789abcdef",
   "acquisition": "github-codeload",
   "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "inventorySha256": "687d8188888831745a06b653ac943aac7d414ec11cad5f34ff431245ca23a09c",
+  "inventorySha256": "a2bb0e216d6e929473d57bda199274b3645c02f7a9f9595391a2094ce45ed18c",
   "inventory": [
     { "path": "Resolve-StandardValidationTool.ps1", "sha256": "26360b9e4b58e8fe22002c360191ac6a3e409279eb25bfcc571fdf7cdad08736" },
     { "path": "catalog/skills-catalog.json", "sha256": "1d5c61e35414dc6288361f4b8b5339e5043f15ee80a96f8fb3ba229a211dacc7" },

@@ -812,6 +812,31 @@ function Get-AiInstructionsRuntimeInventorySha256 {
     finally { $sha.Dispose() }
 }
 
+function Get-AiInstructionsRuntimeInventorySha256V3 {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Inventory)
+
+    $paths = New-Object System.Collections.Generic.List[string]
+    $hashesByPath = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::Ordinal)
+    foreach ($entry in @($Inventory)) {
+        $path = [string]$entry.path
+        $hash = [string]$entry.sha256
+        if ([string]::IsNullOrWhiteSpace($path) -or $path.Contains('\') -or $path.StartsWith('/') -or $path -match '(^|/)\.\.(/|$)') { throw "Unsafe runtime inventory path: $path" }
+        if ($hash -cnotmatch '^[0-9a-f]{64}$') { throw "Invalid runtime inventory hash for '$path'." }
+        if ($hashesByPath.ContainsKey($path)) { throw "Duplicate runtime inventory path '$path'." }
+        $hashesByPath.Add($path,$hash)
+        $paths.Add($path)
+    }
+    $sortedPaths = [string[]]$paths.ToArray()
+    [Array]::Sort($sortedPaths,[StringComparer]::Ordinal)
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($path in $sortedPaths) { $lines.Add("$path`t$($hashesByPath[$path])`n") }
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes(($lines -join ''))
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+
 function New-AiInstructionsRuntimeBundleV2 {
     [CmdletBinding()]
     param(
@@ -962,13 +987,47 @@ function Assert-AiInstructionsRuntimeBundleV3 {
         if ($capability -isnot [string] -or [string]$capability -cnotin $capabilities) { throw "Runtime bundle contains unknown required capability '$capability'." }
         if (-not $seenCapabilities.Add([string]$capability)) { throw "Runtime bundle contains duplicate required capability '$capability'." }
     }
-    $v2Bundle = [pscustomobject][ordered]@{
-        schemaVersion=2; repository=$Bundle.repository; commit=$Bundle.commit; acquisition=$Bundle.acquisition
-        archiveSha256=$Bundle.archiveSha256; inventorySha256=$Bundle.inventorySha256; inventory=$Bundle.inventory
+    Assert-AiInstructionsStringValue -Value $Bundle.repository -Context 'Runtime bundle repository'
+    Assert-AiInstructionsStringValue -Value $Bundle.commit -Context 'Runtime bundle commit'
+    Assert-AiInstructionsStringValue -Value $Bundle.acquisition -Context 'Runtime bundle acquisition'
+    Assert-AiInstructionsStringValue -Value $Bundle.archiveSha256 -Context 'Runtime bundle archiveSha256' -AllowNull
+    Assert-AiInstructionsStringValue -Value $Bundle.inventorySha256 -Context 'Runtime bundle inventorySha256'
+    Assert-AiInstructionsCanonicalRepository -Repository ([string]$Bundle.repository) -CanonicalRepository $CanonicalRepository
+    if ([string]$Bundle.repository -cne $CanonicalRepository) { throw "Runtime bundle repository must use the canonical repository '$CanonicalRepository'." }
+    if ([string]$Bundle.commit -cnotmatch '^[0-9a-f]{40}$') { throw 'Runtime bundle commit must be a full lowercase 40-character commit SHA.' }
+    if ([string]$Bundle.repository -cne [string]$v4Configuration.catalog.repository -or [string]$Bundle.commit -cne [string]$v4Configuration.catalog.ref) {
+        throw 'Installed AI instruction runtime bundle does not match the configured immutable Catalog bundle pin.'
     }
-    Assert-AiInstructionsRuntimeBundleV2 -Bundle $v2Bundle -Configuration $v4Configuration -RuntimeRoot $RuntimeRoot -CanonicalRepository $CanonicalRepository | Out-Null
-    $inventoryByPath = @{}
-    foreach ($entry in @($Bundle.inventory)) { $inventoryByPath[[string]$entry.path] = $entry }
+    if ([string]$Bundle.acquisition -cnotin @('git-checkout','github-codeload')) { throw "Unsupported runtime bundle acquisition '$($Bundle.acquisition)'." }
+    if ([string]$Bundle.acquisition -ceq 'github-codeload' -and [string]$Bundle.archiveSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'Runtime bundle archiveSha256 is required for github-codeload acquisition.'
+    }
+    if ($null -ne $Bundle.archiveSha256 -and [string]$Bundle.archiveSha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Runtime bundle archiveSha256 is invalid.' }
+    if ($Bundle.inventory -isnot [System.Array]) { throw 'Runtime bundle inventory must be an array.' }
+    $inventoryByPath = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([System.StringComparer]::Ordinal)
+    foreach ($entry in @($Bundle.inventory)) {
+        if ($null -eq $entry.PSObject.Properties['path'] -or $null -eq $entry.PSObject.Properties['sha256']) { throw 'Runtime bundle inventory entry is missing path or sha256.' }
+        foreach ($propertyName in @($entry.PSObject.Properties.Name)) {
+            if ($propertyName -cnotin @('path','sha256')) { throw "Runtime bundle inventory entry contains unsupported property '$propertyName'." }
+        }
+        Assert-AiInstructionsStringValue -Value $entry.path -Context 'Runtime bundle inventory path'
+        Assert-AiInstructionsStringValue -Value $entry.sha256 -Context "Runtime bundle inventory hash for '$($entry.path)'"
+        if ($inventoryByPath.ContainsKey([string]$entry.path)) { throw "Duplicate runtime inventory path '$($entry.path)'." }
+        $inventoryByPath.Add([string]$entry.path,$entry)
+    }
+    $declaredDigest = Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $Bundle.inventory
+    if ($declaredDigest -cne [string]$Bundle.inventorySha256) { throw 'Runtime bundle inventory digest does not match inventorySha256.' }
+    $actualInventory = @(Get-AiInstructionsRuntimeInventory -RuntimeRoot $RuntimeRoot)
+    $actualDigest = Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $actualInventory
+    if ($actualDigest -cne [string]$Bundle.inventorySha256 -or $actualInventory.Count -ne $Bundle.inventory.Count) {
+        throw 'Installed AI instruction runtime inventory does not match the verified bundle.'
+    }
+    foreach ($actualEntry in $actualInventory) {
+        $actualPath = [string]$actualEntry.path
+        if (-not $inventoryByPath.ContainsKey($actualPath) -or [string]$inventoryByPath[$actualPath].sha256 -cne [string]$actualEntry.sha256) {
+            throw "Installed AI instruction runtime inventory mismatch at '$actualPath'."
+        }
+    }
     $manifestPaths = @($inventoryByPath.Keys | Where-Object { [string]$_ -ceq 'platform-runtime.psd1' -or [string]$_ -clike '*/platform-runtime.psd1' })
     if ($manifestPaths.Count -ne 1 -or [string]$manifestPaths[0] -cne 'platform-runtime.psd1') {
         throw "Runtime bundle inventory must include exactly one 'platform-runtime.psd1' at the runtime root."
@@ -992,8 +1051,10 @@ function Assert-AiInstructionsRuntimeBundleV3 {
         }
     }
     $catalogPaths = @($inventoryByPath.Keys | Where-Object { [string]$_ -ceq 'catalog/skills-catalog.json' -or [string]$_ -clike '*/catalog/skills-catalog.json' })
-    if ($catalogPaths.Count -ne 1) { throw "Runtime bundle inventory must include exactly one 'catalog/skills-catalog.json'." }
-    $catalogRelativePath = [string]$catalogPaths[0]
+    if ($catalogPaths.Count -ne 1 -or [string]$catalogPaths[0] -cne 'catalog/skills-catalog.json') {
+        throw "Runtime bundle inventory must include exactly one 'catalog/skills-catalog.json' at the fixed Catalog path."
+    }
+    $catalogRelativePath = 'catalog/skills-catalog.json'
     $catalog = Read-AiInstructionsRuntimeJsonFile -RuntimeRoot $RuntimeRoot -RelativePath $catalogRelativePath -Context 'Installed Skills Catalog'
     if (-not (Test-AiInstructionsObjectHasProperty -Object $catalog -Name 'schemaVersion') -or
         ($catalog.schemaVersion -isnot [int] -and $catalog.schemaVersion -isnot [long]) -or [int64]$catalog.schemaVersion -ne 3) {
@@ -1140,6 +1201,7 @@ Export-ModuleMember -Function @(
     'Get-AiInstructionsFullDirectoryPath',
     'Get-AiInstructionsRuntimeInventory',
     'Get-AiInstructionsRuntimeInventorySha256',
+    'Get-AiInstructionsRuntimeInventorySha256V3',
     'New-AiInstructionsRuntimeBundleV2',
     'Write-AiInstructionsJsonFile'
 )

@@ -11,7 +11,10 @@
     "commit": { "$ref": "#/$defs/commit" },
     "acquisition": { "enum": ["git-checkout", "github-codeload"] },
     "archiveSha256": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/hash" }] },
-    "inventorySha256": { "$ref": "#/$defs/hash" },
+    "inventorySha256": {
+      "$ref": "#/$defs/hash",
+      "description": "SHA-256 of <path>\\t<sha256>\\n lines encoded as UTF-8 without BOM after sorting paths with ordinal comparison."
+    },
     "inventory": {
       "type": "array",
       "uniqueItems": true,

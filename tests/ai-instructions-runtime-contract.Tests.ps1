@@ -92,6 +92,20 @@ function Get-TestCanonicalTextSha256 {
     finally { $sha256.Dispose() }
 }
 
+function Get-TestOrdinalRuntimeInventorySha256 {
+    param([Parameter(Mandatory = $true)][object[]] $Inventory)
+    $hashByPath = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    $paths = [string[]]@($Inventory | ForEach-Object {
+        $hashByPath.Add([string]$_.path,[string]$_.sha256)
+        [string]$_.path
+    })
+    [Array]::Sort($paths,[StringComparer]::Ordinal)
+    $payload = (($paths | ForEach-Object { "$_`t$($hashByPath[$_])`n" }) -join '')
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha256.ComputeHash(([Text.UTF8Encoding]::new($false)).GetBytes($payload)))).Replace('-','').ToLowerInvariant() }
+    finally { $sha256.Dispose() }
+}
+
 function Set-TestTextOccurrence {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
@@ -127,7 +141,7 @@ function New-TestRuntimeV3Fixture {
 function Update-TestRuntimeV3Inventory {
     param([Parameter(Mandatory = $true)][object] $Fixture)
     $Fixture.Bundle.inventory = @(Get-AiInstructionsRuntimeInventory -RuntimeRoot $Fixture.Root)
-    $Fixture.Bundle.inventorySha256 = Get-AiInstructionsRuntimeInventorySha256 -Inventory $Fixture.Bundle.inventory
+    $Fixture.Bundle.inventorySha256 = Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $Fixture.Bundle.inventory
 }
 
 Describe 'AI instructions runtime contracts' {
@@ -582,10 +596,10 @@ Describe 'AI instructions runtime contracts' {
     # Purpose: Exercise closure, platform, capability, projection, fingerprint, and inventory bindings independently of sync v4/v5 rollout.
     It 'UnitT99_validates_the_runtime_bundle_v3_example' {
         $example = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\runtime-bundle-v3.example.json') | ConvertFrom-Json
-        (Get-AiInstructionsRuntimeInventorySha256 -Inventory $example.inventory) | Should Be $example.inventorySha256
+        (Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $example.inventory) | Should Be $example.inventorySha256
         $fixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-example')
         $actualInventory = @(Get-AiInstructionsRuntimeInventory -RuntimeRoot $fixture.Root)
-        (Get-AiInstructionsRuntimeInventorySha256 -Inventory $actualInventory) | Should Be $fixture.Bundle.inventorySha256
+        (Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $actualInventory) | Should Be $fixture.Bundle.inventorySha256
         $configurationV5 = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v5.example.json') | ConvertFrom-Json
         $configurationV4 = New-TestConfigurationDocument -SchemaVersion 4
         $configurationV4.catalog.ref = $fixture.Bundle.commit
@@ -610,7 +624,7 @@ Describe 'AI instructions runtime contracts' {
         foreach ($case in $cases) {
             $bundle = $fixture.Bundle | ConvertTo-Json -Depth 20 | ConvertFrom-Json
             & $case.Mutate $bundle
-            if ($case.Pattern -cne 'digest') { $bundle.inventorySha256 = Get-AiInstructionsRuntimeInventorySha256 -Inventory $bundle.inventory }
+            if ($case.Pattern -cne 'digest') { $bundle.inventorySha256 = Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $bundle.inventory }
             (Get-RuntimeContractError { Assert-AiInstructionsRuntimeBundleV3 -Bundle $bundle -Configuration $configuration -RuntimeRoot $fixture.Root }) | Should Match $case.Pattern
         }
     }
@@ -627,7 +641,7 @@ Describe 'AI instructions runtime contracts' {
 
         $hashFixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-closure-hash')
         @($hashFixture.Bundle.inventory | Where-Object path -eq 'platform/Linux.psm1')[0].sha256 = '0' * 64
-        $hashFixture.Bundle.inventorySha256 = Get-AiInstructionsRuntimeInventorySha256 -Inventory $hashFixture.Bundle.inventory
+        $hashFixture.Bundle.inventorySha256 = Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $hashFixture.Bundle.inventory
         (Get-RuntimeContractError { Assert-AiInstructionsRuntimeBundleV3 -Bundle $hashFixture.Bundle -Configuration $configuration -RuntimeRoot $hashFixture.Root }) |
             Should Match 'inventory'
 
@@ -638,7 +652,7 @@ Describe 'AI instructions runtime contracts' {
 
         $fileListFixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-manifest-file-list')
         $fileListManifestPath = Join-Path $fileListFixture.Root 'platform-runtime.psd1'
-        Set-TestTextOccurrence -Path $fileListManifestPath -OldValue "        'platform/Linux.psm1',`n" -NewValue ''
+        Set-TestTextOccurrence -Path $fileListManifestPath -OldValue "        'platform/Linux.psm1',`n" -NewValue "        `n"
         Update-TestRuntimeV3Inventory -Fixture $fileListFixture
         $fileListFixture.Bundle.platformRuntime.manifestSha256 = Get-TestCanonicalTextSha256 -Path $fileListManifestPath
         (Get-RuntimeContractError { Assert-AiInstructionsRuntimeBundleV3 -Bundle $fileListFixture.Bundle -Configuration $configuration -RuntimeRoot $fileListFixture.Root }) |
@@ -670,6 +684,14 @@ Describe 'AI instructions runtime contracts' {
         Update-TestRuntimeV3Inventory -Fixture $nestedManifestFixture
         (Get-RuntimeContractError { Assert-AiInstructionsRuntimeBundleV3 -Bundle $nestedManifestFixture.Bundle -Configuration $configuration -RuntimeRoot $nestedManifestFixture.Root }) |
             Should Match 'at the runtime root'
+
+        $nestedCatalogFixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-nested-catalog')
+        $nestedCatalogDirectory = Join-Path $nestedCatalogFixture.Root 'nested\catalog'
+        New-Item -ItemType Directory -Path $nestedCatalogDirectory -Force | Out-Null
+        Move-Item -LiteralPath (Join-Path $nestedCatalogFixture.Root 'catalog\skills-catalog.json') -Destination (Join-Path $nestedCatalogDirectory 'skills-catalog.json')
+        Update-TestRuntimeV3Inventory -Fixture $nestedCatalogFixture
+        (Get-RuntimeContractError { Assert-AiInstructionsRuntimeBundleV3 -Bundle $nestedCatalogFixture.Bundle -Configuration $configuration -RuntimeRoot $nestedCatalogFixture.Root }) |
+            Should Match 'fixed Catalog path'
 
         $catalogV2Fixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-catalog-v2')
         $catalogPath = Join-Path $catalogV2Fixture.Root 'catalog\skills-catalog.json'
@@ -716,5 +738,61 @@ Describe 'AI instructions runtime contracts' {
         $fingerprintFixture.Bundle.platformRuntime.sourceFingerprint = '0' * 64
         (Get-RuntimeContractError { Assert-AiInstructionsRuntimeBundleV3 -Bundle $fingerprintFixture.Bundle -Configuration $configuration -RuntimeRoot $fingerprintFixture.Root }) |
             Should Match 'sourceFingerprint'
+    }
+
+    # Scenario: Inventory paths sort differently under culture-sensitive or case-insensitive comparers.
+    # Purpose: Keep the v3 digest stable across PowerShell editions, operating systems, and process cultures.
+    It 'UnitT100_computes_runtime_bundle_v3_inventory_digest_with_ordinal_path_order' {
+        $inventory = @('B','a','a-b','a_b','aB','ab','ä') | ForEach-Object {
+            [pscustomobject]@{ path=$_; sha256=(('{0:x2}' -f ([int][char]$_[0])) * 32).Substring(0,64) }
+        }
+        $expected = Get-TestOrdinalRuntimeInventorySha256 -Inventory $inventory
+        $actual = Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
+        $actual | Should Be $expected
+
+        $inventoryPath = Join-Path $TestDrive 'runtime-v3-ordinal-inventory.json'
+        $childScriptPath = Join-Path $TestDrive 'runtime-v3-ordinal-child.ps1'
+        [IO.File]::WriteAllText($inventoryPath,($inventory | ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
+        $childScript = @'
+param([string] $ModulePath,[string] $InventoryPath)
+Import-Module -LiteralPath $ModulePath -Force
+$inventory = Get-Content -Raw -Encoding UTF8 -LiteralPath $InventoryPath | ConvertFrom-Json
+Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
+'@
+        [IO.File]::WriteAllText($childScriptPath,$childScript,[Text.UTF8Encoding]::new($false))
+
+        $isWindowsPlatform = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+        $comparisonDigests = @()
+        if ($isWindowsPlatform -and $null -ne (Get-Command powershell.exe -ErrorAction SilentlyContinue)) {
+            $comparisonDigests += (& powershell.exe -NoProfile -NonInteractive -File $childScriptPath $script:RuntimeContractModule $inventoryPath | Select-Object -Last 1)
+            $LASTEXITCODE | Should Be 0
+        }
+        elseif (-not $isWindowsPlatform -and $null -ne (Get-Command pwsh -ErrorAction SilentlyContinue)) {
+            $originalLang = $env:LANG
+            $originalLcAll = $env:LC_ALL
+            try {
+                foreach ($locale in @('C','en_US.UTF-8')) {
+                    $env:LANG = $locale
+                    $env:LC_ALL = $locale
+                    $comparisonDigests += (& pwsh -NoProfile -NonInteractive -File $childScriptPath $script:RuntimeContractModule $inventoryPath | Select-Object -Last 1)
+                    $LASTEXITCODE | Should Be 0
+                }
+            }
+            finally {
+                $env:LANG = $originalLang
+                $env:LC_ALL = $originalLcAll
+            }
+        }
+        else {
+            $originalCulture = [Threading.Thread]::CurrentThread.CurrentCulture
+            try {
+                foreach ($culture in @([Globalization.CultureInfo]::GetCultureInfo('tr-TR'),[Globalization.CultureInfo]::GetCultureInfo('zh-TW'),[Globalization.CultureInfo]::InvariantCulture)) {
+                    [Threading.Thread]::CurrentThread.CurrentCulture = $culture
+                    $comparisonDigests += Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
+                }
+            }
+            finally { [Threading.Thread]::CurrentThread.CurrentCulture = $originalCulture }
+        }
+        foreach ($digest in $comparisonDigests) { [string]$digest | Should Be $actual }
     }
 }
