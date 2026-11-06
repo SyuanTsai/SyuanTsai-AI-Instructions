@@ -2194,6 +2194,11 @@ function Get-AiInstructionsInstallRecoveryDecision {
         if ($matchesOriginal[$sequence]) {
             $action = if ($permissionsMatchOriginal[$sequence]) { 'none' } else { 'restore-permissions' }
         }
+        elseif ([string]$operation.kind -in @('write-file','swap-directory') -and
+            [bool]$operation.original.exists -and -not [bool]$bySequence[$sequence].exists -and
+            $backupMatchesOriginal[$sequence]) {
+            $action = 'restore-original'
+        }
         elseif ($matchesApplied[$sequence]) {
             if ($operation.original.exists) {
                 if (-not $backupMatchesOriginal[$sequence]) {

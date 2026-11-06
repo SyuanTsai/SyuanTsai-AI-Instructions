@@ -2823,4 +2823,78 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $next.operations[0].original.identity.fileId='changed'
         { Assert-AiInstructionsInstallJournalStoreTransition -Previous $previous -Next $next | Out-Null } | Should Throw
     }
+
+    # Scenario: A write-file stage rename crashes after moving the original to backup, leaving the target absent during applying or applied.
+    # Purpose: Restore only a byte-for-byte and identity-matching backup in nonterminal phases, while refusing invalid evidence and terminal drift.
+    It 'UnitT199_restores_target_absent_write_file_only_from_a_valid_backup' {
+        foreach($phase in @('applying','applied')) {
+            $journal=Get-TestInstallJournalV1
+            $journal.operations=@($journal.operations[0])
+            $journal.phase=$phase
+            $journal.operations[0].state=if($phase -eq 'applied'){'applied'}else{'staged'}
+            $absent=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent
+
+            $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}
+            $decision.action | Should Be 'roll-back'
+            $decision.operations[0].action | Should Be 'restore-original'
+        }
+
+        $journal=Get-TestInstallJournalV1
+        $journal.operations=@($journal.operations[0])
+        $journal.phase='applying'
+        $journal.operations[0].state='staged'
+        $absent=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+        $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent -Backup $null
+        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}).action | Should Be 'refuse'
+
+        $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent
+        $observation.backup.sha256='9' * 64
+        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}).action | Should Be 'refuse'
+
+        $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent
+        $observation.backup.identity.fileId='0000ABCD:99999999'
+        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}).action | Should Be 'refuse'
+
+        $journal.phase='rolled-back'
+        $journal.operations[0].state='rolled-back'
+        $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent
+        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}).action | Should Be 'refuse'
+    }
+
+    # Scenario: A swap-directory stage rename crashes after moving the original to backup, leaving the target absent during applying or applied.
+    # Purpose: Restore only an inventory-, count-, and identity-matching backup in nonterminal phases, while refusing invalid evidence and terminal drift.
+    It 'UnitT200_restores_target_absent_swap_directory_only_from_a_valid_backup' {
+        foreach($phase in @('applying','applied')) {
+            $journal=Get-TestSwapDirectoryInstallJournalV1
+            $journal.phase=$phase
+            $journal.operations[0].state=if($phase -eq 'applied'){'applied'}else{'staged'}
+            $absent=[pscustomobject]@{exists=$false;identity=$null;inventorySha256=$null;entryCount=$null}
+            $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent
+
+            $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}
+            $decision.action | Should Be 'roll-back'
+            $decision.operations[0].action | Should Be 'restore-original'
+        }
+
+        $journal=Get-TestSwapDirectoryInstallJournalV1
+        $journal.phase='applying'
+        $journal.operations[0].state='staged'
+        $absent=[pscustomobject]@{exists=$false;identity=$null;inventorySha256=$null;entryCount=$null}
+        $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent -Backup $null
+        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}).action | Should Be 'refuse'
+
+        $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent
+        $observation.backup.inventorySha256='9' * 64
+        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}).action | Should Be 'refuse'
+
+        $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent
+        $observation.backup.identity.fileId='0000ABCD:99999999'
+        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}).action | Should Be 'refuse'
+
+        $journal.phase='rolled-back'
+        $journal.operations[0].state='rolled-back'
+        $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent
+        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}).action | Should Be 'refuse'
+    }
 }
