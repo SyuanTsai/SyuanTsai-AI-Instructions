@@ -172,6 +172,27 @@ function New-WindowsPlatformRecoveryError {
     $error.Data['Receipt']=$Receipt
     return $error
 }
+function Open-WindowsPlatformMutationFile {
+    param($ParentLease,[string]$Leaf,$Identity,[string]$Capability,[switch]$AllowMissing,[switch]$Writable)
+    try {
+        if ($null -eq $Identity) {
+            if (-not $AllowMissing) { throw [ArgumentException]::new('An expected file identity is required.') }
+            return [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::TryOpenMutationFile($ParentLease,$Leaf)
+        }
+        $device=ConvertTo-WindowsPlatformIdentityNumber ([string]$Identity.device)
+        $fileId=ConvertTo-WindowsPlatformIdentityNumber ([string]$Identity.fileId)
+        if ($Writable) {
+            if ($AllowMissing) { throw [ArgumentException]::new('A writable mutation file must exist.') }
+            return [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenWritableMutationFile($ParentLease,$Leaf,$device,$fileId)
+        }
+        if ($AllowMissing) { return [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::TryOpenMutationFile($ParentLease,$Leaf,$device,$fileId) }
+        return [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenMutationFile($ParentLease,$Leaf,$device,$fileId)
+    }
+    catch {
+        if ($_.Exception -is [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]) { throw }
+        throw (New-WindowsPlatformVerificationError $Capability "The DELETE-scoped file handle could not be opened and identity-verified: $($_.Exception.Message)")
+    }
+}
 function Assert-WindowsPlatformJournalOperation {
     param($Journal,$ParentLease,$TransactionLease,$TransactionContext,[string]$Leaf,[AllowNull()][string]$StageLeaf,[AllowNull()][string]$BackupLeaf,$ExpectedState,$ExpectedStage,[string]$Method,[string]$Capability,[switch]$Removal)
     if ($null -eq $Journal) { return }
@@ -210,29 +231,33 @@ function Publish-WindowsPlatformFile {
     if ([string]::IsNullOrEmpty($DisplacedLeaf)) { $DisplacedLeaf=$null }
     [void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($Leaf)
     if ($null -ne $DisplacedLeaf) { [void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($DisplacedLeaf) }
+    if ($NoReplace -and [bool]$ExpectedState.exists) { throw (New-WindowsPlatformVerificationError 'publication' 'NoReplace requires ExpectedState.exists=false and relies on the native rename to reject a raced destination.') }
     $transactionContext=Assert-WindowsPlatformTransactionLease $ParentLease $TransactionLease 'publication'
     Assert-WindowsPlatformLeasePaths $ParentLease $TransactionLease 'publication'
     $stagePath=Get-WindowsPlatformLeasePath $StageLease
     $stageLeaf=[IO.Path]::GetFileName($stagePath)
     if (-not [StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetDirectoryName($stagePath),[string]$transactionContext.transactionPath)) { throw (New-WindowsPlatformVerificationError 'publication' 'StageLease is not an immediate child of TransactionLease.') }
     $stageObservation=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::AssertIdentity($StageLease,$StageLease.Observation,$true)
+    $stageIdentity=Get-WindowsPlatformIdentity $stageObservation
     if ([string]$ExpectedStage.sha256 -cnotmatch '^[0-9a-f]{64}$' -or [int64]$stageObservation.Size -ne [int64]$ExpectedStage.length -or
         [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::ComputeSha256($StageLease) -cne [string]$ExpectedStage.sha256) { throw (New-WindowsPlatformVerificationError 'publication' 'Stage hash or length differs from ExpectedStage.') }
     if ([bool]$ExpectedState.exists -ne ($null -ne $DisplacedLeaf)) { throw (New-WindowsPlatformVerificationError 'publication' 'DisplacedLeaf must be supplied exactly when ExpectedState.exists is true.') }
-    if ($NoReplace -and [bool]$ExpectedState.exists) { throw (New-WindowsPlatformVerificationError 'publication' 'NoReplace requires ExpectedState.exists=false and relies on the native rename to reject a raced destination.') }
     Assert-WindowsPlatformJournalOperation $Journal $ParentLease $TransactionLease $transactionContext $Leaf $stageLeaf $DisplacedLeaf $ExpectedState $ExpectedStage 'stage-rename' 'publication'
     # In NoReplace mode do not probe the destination name. The handle-bound native
     # rename is the authority that rejects an existing or raced destination.
-    $target=if($NoReplace){$null}else{[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::TryOpenOwnedFile($ParentLease,$Leaf)}
+    $target=$null
+    $mutationStage=$null
     $displaced=$false
     $applied=$false
-    $stagePermissions=Get-WindowsPlatformPermissions $StageLease
+    $stagePermissions=$null
     $permissionsApplied=$false
     $targetReadOnlyCleared=$false
     $preserveForRecovery=$false
     $permissions=$null
     $receipt=$null
     try {
+        $target=if($NoReplace){$null}elseif([bool]$ExpectedState.exists){Open-WindowsPlatformMutationFile $ParentLease $Leaf $ExpectedState.identity 'publication' -AllowMissing}else{Open-WindowsPlatformMutationFile $ParentLease $Leaf $null 'publication' -AllowMissing}
+        $stagePermissions=Get-WindowsPlatformPermissions $StageLease
         Assert-WindowsPlatformExpectedState $target $ExpectedState 'publication'
         if ($null -ne $target) {
             $permissions=ConvertTo-WindowsPlatformPermissionSnapshot (Get-WindowsPlatformPermissions $target) 'publication' 'Live target'
@@ -248,12 +273,18 @@ function Publish-WindowsPlatformFile {
             $probe=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenFile($ParentLease,$probeLeaf,'ReadWrite','CreateNew')
             try {
                 $permissions=ConvertTo-WindowsPlatformPermissionSnapshot (Get-WindowsPlatformPermissions $probe) 'publication' 'Inherited target'
+                $probeIdentity=Get-WindowsPlatformIdentity $probe.Observation
                 $probe.Dispose()
-                $probe=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::TryOpenOwnedFile($ParentLease,$probeLeaf)
+                $probe=Open-WindowsPlatformMutationFile $ParentLease $probeLeaf $probeIdentity 'publication'
                 [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::DeleteOnClose($probe)
             } finally { if($null -ne $probe){$probe.Dispose()} }
         }
-        [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($StageLease,[string]$permissions.sddl,$false)
+        # OpenFile intentionally preserves origin/main's read-only share mode, which
+        # blocks a second DELETE request.  Publication therefore consumes the caller's
+        # validated stage lease, then reopens the same identity relative to TransactionLease.
+        $StageLease.Dispose()
+        $mutationStage=Open-WindowsPlatformMutationFile $TransactionLease $stageLeaf $stageIdentity 'publication' -Writable
+        [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($mutationStage,[string]$permissions.sddl,$false)
         $permissionsApplied=$true
         if ($null -ne $target) {
             if ($permissions.readOnly) { [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($target,$null,$false);$targetReadOnlyCleared=$true }
@@ -261,7 +292,7 @@ function Publish-WindowsPlatformFile {
             $displaced=$true
             if ($permissions.readOnly) { [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($target,$null,$true);$targetReadOnlyCleared=$false }
         }
-        try { [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::RenameNoReplace($StageLease,$ParentLease,$Leaf) }
+        try { [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::RenameNoReplace($mutationStage,$ParentLease,$Leaf) }
         catch {
             if ($displaced) {
                 try { if ($permissions.readOnly) { [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($target,$null,$false) }; [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::RenameNoReplace($target,$ParentLease,$Leaf); if ($permissions.readOnly) { [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($target,$null,$true) }; $targetReadOnlyCleared=$false;$displaced=$false }
@@ -270,25 +301,25 @@ function Publish-WindowsPlatformFile {
             throw
         }
         $applied=$true
-        [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($StageLease,$null,[bool]$permissions.readOnly)
-        [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::Flush($StageLease)
+        [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($mutationStage,$null,[bool]$permissions.readOnly)
+        [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::Flush($mutationStage)
         $directoryFlushed=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::TryFlushDirectory($ParentLease)
         $transactionDirectoryFlushed=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::TryFlushDirectory($TransactionLease)
         [string[]]$completedSteps=@($(if($null -ne $target){'displaced-rename'})) + @('applied-rename','file-flush','directory-flush')
         $receipt=[pscustomobject][ordered]@{
             completedSteps=$completedSteps
-            appliedIdentity=(Get-WindowsPlatformIdentity $StageLease.Observation)
+            appliedIdentity=(Get-WindowsPlatformIdentity $mutationStage.Observation)
             displacedIdentity=$(if($null -eq $target){$null}else{Get-WindowsPlatformIdentity $target.Observation})
             permissions=$permissions
             displacedLeaf=$DisplacedLeaf
             flush=[pscustomobject][ordered]@{file=$true;directory=$directoryFlushed;transactionDirectory=$transactionDirectoryFlushed;directoryUnsupported=(-not $directoryFlushed -or -not $transactionDirectoryFlushed)}
         }
         try {
-            if ($null -ne $script:WindowsPublicationPostRenameTestHook) { & $script:WindowsPublicationPostRenameTestHook 'publication' $transactionContext.parentPath $transactionContext.transactionPath $ParentLease $TransactionLease $StageLease $target }
+            if ($null -ne $script:WindowsPublicationPostRenameTestHook) { & $script:WindowsPublicationPostRenameTestHook 'publication' $transactionContext.parentPath $transactionContext.transactionPath $ParentLease $TransactionLease $mutationStage $target }
             Assert-WindowsPlatformLeasePaths $ParentLease $TransactionLease 'publication'
             $published=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenValidationFile($ParentLease,$Leaf)
             try {
-                Assert-WindowsPlatformExpectedState $published ([pscustomobject]@{exists=$true;sha256=[string]$ExpectedStage.sha256;length=[int64]$ExpectedStage.length;identity=(Get-WindowsPlatformIdentity $StageLease.Observation)}) 'publication'
+                Assert-WindowsPlatformExpectedState $published ([pscustomobject]@{exists=$true;sha256=[string]$ExpectedStage.sha256;length=[int64]$ExpectedStage.length;identity=(Get-WindowsPlatformIdentity $mutationStage.Observation)}) 'publication'
                 $actualPermissions=ConvertTo-WindowsPlatformPermissionSnapshot (Get-WindowsPlatformPermissions $published) 'publication' 'Published target'
                 if ([string]$actualPermissions.sddl -cne [string]$permissions.sddl -or [bool]$actualPermissions.readOnly -ne [bool]$permissions.readOnly) { throw (New-WindowsPlatformVerificationError 'publication' "Published permissions do not match the expected snapshot (expected '$($permissions.sddl)'/$($permissions.readOnly), observed '$($actualPermissions.sddl)'/$($actualPermissions.readOnly)).") }
             } finally { if($null -ne $published){$published.Dispose()} }
@@ -304,8 +335,8 @@ function Publish-WindowsPlatformFile {
         if ($preserveForRecovery) { throw $publicationFailure }
         try {
             if ($applied) {
-                [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($StageLease,$null,$false)
-                [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::RenameNoReplace($StageLease,$TransactionLease,$stageLeaf)
+                [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($mutationStage,$null,$false)
+                [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::RenameNoReplace($mutationStage,$TransactionLease,$stageLeaf)
                 $applied=$false
             }
             if ($displaced) {
@@ -315,12 +346,15 @@ function Publish-WindowsPlatformFile {
                 $displaced=$false
             }
             elseif ($targetReadOnlyCleared) { [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($target,$null,$true);$targetReadOnlyCleared=$false }
-            if ($permissionsApplied) { [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($StageLease,[string]$stagePermissions.sddl,[bool]$stagePermissions.readOnly) }
+            if ($permissionsApplied) { [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($mutationStage,[string]$stagePermissions.sddl,[bool]$stagePermissions.readOnly) }
         }
         catch { throw (New-WindowsPlatformVerificationError 'publication' "Publication failed and rollback could not restore every rename; target='$Leaf', stage='$stageLeaf', displaced='$DisplacedLeaf'.") }
         throw $publicationFailure
     }
-    finally { if ($null -ne $target) { $target.Dispose() } }
+    finally {
+        if ($null -ne $mutationStage) { $mutationStage.Dispose() }
+        if ($null -ne $target) { $target.Dispose() }
+    }
 }
 
 function Remove-WindowsPlatformOwnedFile {
@@ -341,13 +375,14 @@ function Remove-WindowsPlatformOwnedFile {
         $path=Get-WindowsPlatformLeasePath $ParentLease
         if ([IO.Path]::GetFileName($path) -cnotmatch '^[0-9a-f]{32}$' -or [IO.Path]::GetFileName([IO.Path]::GetDirectoryName($path)) -cne '.ai-instructions-txn') { throw (New-WindowsPlatformVerificationError 'owned-file-removal' 'Cleanup is restricted to a transaction-private directory.') }
     }
-    $target=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::TryOpenOwnedFile($ParentLease,$Leaf)
+    $target=$null
     $renamed=$false
     $readOnlyCleared=$false
     $preserveForRecovery=$false
     $permissions=$null
     $receipt=$null
     try {
+        $target=if([bool]$ExpectedState.exists){Open-WindowsPlatformMutationFile $ParentLease $Leaf $ExpectedState.identity 'owned-file-removal' -AllowMissing}else{Open-WindowsPlatformMutationFile $ParentLease $Leaf $null 'owned-file-removal' -AllowMissing}
         Assert-WindowsPlatformExpectedState $target $ExpectedState 'owned-file-removal'
         $permissions=ConvertTo-WindowsPlatformPermissionSnapshot (Get-WindowsPlatformPermissions $target) 'owned-file-removal' 'Live target'
         if ($null -ne $Journal) {
@@ -376,7 +411,7 @@ function Remove-WindowsPlatformOwnedFile {
             try {
                 if ($null -ne $script:WindowsPublicationPostRenameTestHook) { & $script:WindowsPublicationPostRenameTestHook 'removal' $transactionContext.parentPath $transactionContext.transactionPath $ParentLease $TransactionLease $null $target }
                 Assert-WindowsPlatformLeasePaths $ParentLease $TransactionLease 'owned-file-removal'
-                $remaining=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::TryOpenOwnedFile($ParentLease,$Leaf)
+                $remaining=Open-WindowsPlatformMutationFile $ParentLease $Leaf $null 'owned-file-removal' -AllowMissing
                 if($null -ne $remaining){ try { throw (New-WindowsPlatformVerificationError 'owned-file-removal' 'Removed target name still exists.') } finally { $remaining.Dispose() } }
                 $tombstoneValidation=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenValidationFile($TransactionLease,$TombstoneLeaf)
                 try { Assert-WindowsPlatformExpectedState $tombstoneValidation $ExpectedState 'owned-file-removal' }

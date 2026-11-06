@@ -80,6 +80,18 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         [StructLayout(LayoutKind.Sequential)]
         private struct BasicInfo { public long Creation, Access, Write, Change; public uint Attributes; }
         [StructLayout(LayoutKind.Sequential)]
+        private struct UnicodeString { public ushort Length, MaximumLength; public IntPtr Buffer; }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ObjectAttributes
+        {
+            public int Length;
+            public IntPtr RootDirectory, ObjectName;
+            public uint Attributes;
+            public IntPtr SecurityDescriptor, SecurityQualityOfService;
+        }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct IoStatusBlock { public IntPtr Status; public UIntPtr Information; }
+        [StructLayout(LayoutKind.Sequential)]
         private struct SecurityAttributes { public int Length; public IntPtr Descriptor; public int Inherit; }
         [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern SafeFileHandle CreateFile(string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
@@ -100,6 +112,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         [DllImport("advapi32.dll", SetLastError = true)] private static extern bool GetSecurityDescriptorControl(IntPtr descriptor, out ushort control, out uint revision);
         [DllImport("advapi32.dll", SetLastError = true)] private static extern uint SetSecurityInfo(SafeFileHandle handle, int type, uint information, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
         [DllImport("advapi32.dll", SetLastError = true)] private static extern bool SetKernelObjectSecurity(SafeFileHandle handle, uint information, IntPtr descriptor);
+        [DllImport("ntdll.dll")] private static extern int NtOpenFile(out SafeFileHandle handle, uint access, ref ObjectAttributes attributes, out IoStatusBlock status, uint share, uint options);
+        [DllImport("ntdll.dll")] private static extern uint RtlNtStatusToDosError(int status);
         private static void Check(bool result, string operation) { if (!result) throw new PlatformWin32Exception(operation, Marshal.GetLastWin32Error()); }
         private static SafeFileHandle Open(string path, uint access, uint share, uint disposition)
         {
@@ -208,9 +222,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 parent.Check(); AssertIdentity(parent, parent.Observation, false);
                 if (parent.Observation.Kind != "directory") throw new ArgumentException("A directory lease is required.");
                 string path = System.IO.Path.Combine(parent.Path, leaf);
-                // Acquire DELETE on the bound lease itself so handle-based rename does not
-                // need a pathname reopen.  Keep share mode deny-delete for outside callers.
-                SafeFileHandle handle = Open(path, desired | 0x30080, share, disposition);
+                SafeFileHandle handle = Open(path, desired | 0x20080, share, disposition);
                 try
                 {
                     FileObservation value = Stat(handle); PlatformPaths.Single(value);
@@ -330,26 +342,83 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             }
         }
 
-        public static WindowsLease TryOpenOwnedFile(WindowsLease parent, string leaf)
+        private static SafeFileHandle OpenRelativeMutationHandle(WindowsLease parent, string leaf, bool writable)
+        {
+            IntPtr nameBuffer = Marshal.StringToHGlobalUni(leaf);
+            IntPtr namePointer = IntPtr.Zero;
+            try
+            {
+                UnicodeString name = new UnicodeString
+                {
+                    Length = checked((ushort)(leaf.Length * 2)),
+                    MaximumLength = checked((ushort)((leaf.Length + 1) * 2)),
+                    Buffer = nameBuffer
+                };
+                namePointer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UnicodeString)));
+                Marshal.StructureToPtr(name, namePointer, false);
+                ObjectAttributes attributes = new ObjectAttributes
+                {
+                    Length = Marshal.SizeOf(typeof(ObjectAttributes)),
+                    RootDirectory = parent.Handle.DangerousGetHandle(),
+                    ObjectName = namePointer,
+                    Attributes = 0x40
+                };
+                IoStatusBlock ioStatus;
+                SafeFileHandle handle;
+                // GENERIC_READ | optional GENERIC_WRITE | SYNCHRONIZE | DELETE |
+                // FILE_READ_ATTRIBUTES.  Publication stage handles require write access
+                // so FlushFileBuffers remains valid after the handle-bound rename.
+                // share read only; synchronous, non-directory, and open the reparse point itself.
+                uint desired = 0x80110080u | (writable ? 0x40000000u : 0u);
+                int status = NtOpenFile(out handle, desired, ref attributes, out ioStatus, 1, 0x00200060);
+                if (status < 0)
+                {
+                    uint error = RtlNtStatusToDosError(status);
+                    if (handle != null) handle.Dispose();
+                    throw new PlatformWin32Exception("NtOpenFile(relative mutation file)", unchecked((int)error));
+                }
+                return handle;
+            }
+            finally
+            {
+                if (namePointer != IntPtr.Zero) Marshal.FreeHGlobal(namePointer);
+                Marshal.FreeHGlobal(nameBuffer);
+            }
+        }
+
+        private static WindowsLease OpenMutationFileCore(WindowsLease parent, string leaf, ulong expectedDevice, ulong expectedFileId, bool verifyIdentity, bool allowMissing, bool writable)
         {
             PlatformPaths.Leaf(leaf);
             lock (parent.Sync)
             {
                 parent.Check(); AssertIdentity(parent, parent.Observation, false);
-                string path = Path.Combine(parent.Path, leaf);
+                if (parent.Observation.Kind != "directory") throw new ArgumentException("A directory lease is required.");
                 SafeFileHandle handle;
-                try { handle = Open(path, 0x80030080, 1, 3); }
-                catch (PlatformWin32Exception ex) { if (ex.Win32Error == 2 || ex.Win32Error == 3) return null; throw; }
+                try { handle = OpenRelativeMutationHandle(parent, leaf, writable); }
+                catch (PlatformWin32Exception ex) { if (allowMissing && (ex.Win32Error == 2 || ex.Win32Error == 3)) return null; throw; }
                 try
                 {
                     FileObservation value = Stat(handle); PlatformPaths.Single(value);
                     if (value.Kind != "file") throw new IOException("A regular file is required.");
-                    using (SafeFileHandle named = Open(path, 0, 7, 3)) PlatformPaths.Same(value, Stat(named));
-                    return new WindowsLease(handle, path, null, parent, value);
+                    if (verifyIdentity && (value.Device != expectedDevice || value.Inode != expectedFileId))
+                        throw new IOException("The mutation file identity differs from the expected volume serial or file ID.");
+                    return new WindowsLease(handle, Path.Combine(parent.Path, leaf), null, parent, value);
                 }
                 catch { handle.Dispose(); throw; }
             }
         }
+
+        public static WindowsLease OpenMutationFile(WindowsLease parent, string leaf, ulong expectedDevice, ulong expectedFileId)
+        { return OpenMutationFileCore(parent, leaf, expectedDevice, expectedFileId, true, false, false); }
+
+        public static WindowsLease OpenWritableMutationFile(WindowsLease parent, string leaf, ulong expectedDevice, ulong expectedFileId)
+        { return OpenMutationFileCore(parent, leaf, expectedDevice, expectedFileId, true, false, true); }
+
+        public static WindowsLease TryOpenMutationFile(WindowsLease parent, string leaf)
+        { return OpenMutationFileCore(parent, leaf, 0, 0, false, true, false); }
+
+        public static WindowsLease TryOpenMutationFile(WindowsLease parent, string leaf, ulong expectedDevice, ulong expectedFileId)
+        { return OpenMutationFileCore(parent, leaf, expectedDevice, expectedFileId, true, true, false); }
 
         public static WindowsLease OpenValidationFile(WindowsLease parent, string leaf)
         {
