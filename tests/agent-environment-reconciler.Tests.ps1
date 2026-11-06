@@ -353,6 +353,7 @@ Describe 'user-scoped Agent Skills reconciliation' {
         Remove-Item -LiteralPath (Join-Path $userHome '.agents/catalog-skills.manifest.json') -Force
         $collision=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply
         $collision.outcome | Should Be 'failed'
+        $collision.Code | Should BeNullOrEmpty
         @($collision.failureDetails|Where-Object code -eq 'unmanaged-collision').Count | Should BeGreaterThan 0
         [IO.File]::ReadAllText($personal) | Should Be 'personal'
     }
@@ -758,10 +759,105 @@ $module=Get-Module agent-environment-reconciler
         try{$recovery=Invoke-UserSkillsRecovery -UserHome $caseHome -InstallReadLease $readLease.Evidence}
         finally{$readLease.Stream.Dispose();if($readLease.Created){Remove-Item -LiteralPath $readLease.Path -Force -ErrorAction SilentlyContinue}}
 
-        $recovery.Code|Should Be 'recovery-required'
+        $recovery.Code|Should BeNullOrEmpty
+        $recovery.failureDetails[0].code|Should Be 'recovery-required'
         $recovery.failureDetails[0].path|Should Be '.ai-instructions-txn'
         Test-Path -LiteralPath (Join-Path $transaction.FullName 'journal.json') -PathType Leaf|Should Be $true
         @(Get-ChildItem -Force -LiteralPath $outside).Count|Should Be 0
+    }
+
+    # Scenario: An orphan transaction is enumerated before a malformed transaction in the same USER transaction root.
+    # Purpose: Classify and validate every residue before purging anything, preserving both entries and USER target bytes on refusal.
+    It 'InterT89_preserves_orphan_and_malformed_residue_until_the_complete_preflight_passes' {
+        $caseHome=Join-Path $TestDrive 'recovery-preflight-orphan-malformed'
+        $target=Join-Path $caseHome '.agents/skills/personal/SKILL.md'
+        $orphan=Join-Path $caseHome '.ai-instructions-txn/00000000000000000000000000000000'
+        $malformed=Join-Path $caseHome '.ai-instructions-txn/ffffffffffffffffffffffffffffffff'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target),$orphan,$malformed|Out-Null
+        [IO.File]::WriteAllText($target,'personal-before-recovery',[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $malformed 'journal.json'),'{',[Text.UTF8Encoding]::new($false))
+        $readLease=New-TestInstallReadLeaseEvidence
+        try{$result=Invoke-UserSkillsRecovery -UserHome $caseHome -InstallReadLease $readLease.Evidence}
+        finally{$readLease.Stream.Dispose();if($readLease.Created){Remove-Item -LiteralPath $readLease.Path -Force -ErrorAction SilentlyContinue}}
+
+        $result.Code|Should Be 'interrupted-install'
+        Test-Path -LiteralPath $orphan -PathType Container|Should Be $true
+        Test-Path -LiteralPath (Join-Path $malformed 'journal.json') -PathType Leaf|Should Be $true
+        [IO.File]::ReadAllText($target)|Should Be 'personal-before-recovery'
+    }
+
+    # Scenario: A recoverable user-reconciler journal is enumerated before a valid journal owned by another component.
+    # Purpose: Apply the F5 component scope to the complete residue set before recovering the first journal or changing USER targets.
+    It 'InterT90_preserves_valid_and_foreign_residue_until_the_complete_preflight_passes' {
+        $caseHome=Join-Path $TestDrive 'recovery-preflight-valid-foreign'
+        $target=Join-Path $caseHome '.agents/skills/personal/SKILL.md'
+        $validId='00000000000000000000000000000001';$foreignId='fffffffffffffffffffffffffffffffe'
+        $valid=Join-Path $caseHome ".ai-instructions-txn/$validId";$foreign=Join-Path $caseHome ".ai-instructions-txn/$foreignId"
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target),$valid,$foreign|Out-Null
+        [IO.File]::WriteAllText($target,'personal-before-foreign-refusal',[Text.UTF8Encoding]::new($false))
+        foreach($fixture in @([pscustomobject]@{Path=$valid;Id=$validId;Owner='user-reconciler'},[pscustomobject]@{Path=$foreign;Id=$foreignId;Owner='installer'})){
+            $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json -DateKind String
+            $journal.transactionId=$fixture.Id;$journal.owner.component=$fixture.Owner
+            [IO.File]::WriteAllText((Join-Path $fixture.Path 'journal.json'),($journal|ConvertTo-Json -Depth 30),[Text.UTF8Encoding]::new($false))
+        }
+        $readLease=New-TestInstallReadLeaseEvidence
+        try{$result=Invoke-UserSkillsRecovery -UserHome $caseHome -InstallReadLease $readLease.Evidence}
+        finally{$readLease.Stream.Dispose();if($readLease.Created){Remove-Item -LiteralPath $readLease.Path -Force -ErrorAction SilentlyContinue}}
+
+        $result.Code|Should Be 'interrupted-install'
+        Test-Path -LiteralPath (Join-Path $valid 'journal.json') -PathType Leaf|Should Be $true
+        Test-Path -LiteralPath (Join-Path $foreign 'journal.json') -PathType Leaf|Should Be $true
+        [IO.File]::ReadAllText($target)|Should Be 'personal-before-foreign-refusal'
+    }
+
+    # Scenario: Final inventory validation fails after publication while the transaction can still roll back completely.
+    # Purpose: Preserve the post-install-integrity-failure detail classification without promoting it to the refusal-only top-level Code.
+    It 'InterT91_classifies_rolled_back_final_inventory_failure_as_post_install_integrity_failure' {
+        $caseHome=Join-Path $TestDrive 'post-install-integrity-classification'
+        $desired=New-TestDesiredState -Root (Join-Path $TestDrive 'post-install-integrity-stage')
+        $result=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $caseHome -Mode Apply -BeforeFinalVerificationAction {
+            $desired.Files[0].sha256='f'*64
+        }
+
+        $result.outcome|Should Be 'failed'
+        $result.rollbackState|Should Be 'completed'
+        $result.Code|Should BeNullOrEmpty
+        $result.failureDetails[0].code|Should Be 'post-install-integrity-failure'
+        Test-Path -LiteralPath (Join-Path $caseHome '.agents/skills/alpha/SKILL.md')|Should Be $false
+        @(Get-ChildItem -Force -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0
+    }
+
+    # Scenario: The stable entry receives a legacy-style general failure result whose top-level Code is not in D16.
+    # Purpose: Filter the public entry surface while retaining the operational classification in failureDetails.
+    It 'InterT92_filters_non_refusal_top_level_Code_at_the_stable_entry' {
+        $entry=Join-Path $script:RepositoryRoot 'scripts/update-agent-environment.ps1'
+        $codexHome=Join-Path $TestDrive 'entry-general-code-codex';$userHome=Join-Path $TestDrive 'entry-general-code-user'
+        $runtime=Join-Path $codexHome 'hooks/ai-instructions-runtime'
+        New-Item -ItemType Directory -Force -Path $runtime,(Join-Path $runtime 'catalog'),$userHome|Out-Null
+        Copy-Item -Path (Join-Path $script:RuntimeRoot '*') -Destination $runtime -Recurse -Force
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/skills-catalog.json') -Destination (Join-Path $runtime 'catalog/skills-catalog.json')
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/skills-catalog-lock.json') -Destination (Join-Path $runtime 'catalog/skills-catalog-lock.json')
+        Move-Item -LiteralPath (Join-Path $runtime 'agent-environment-reconciler.psm1') -Destination (Join-Path $runtime 'agent-environment-reconciler-core.ps1')
+        @'
+. (Join-Path $PSScriptRoot 'agent-environment-reconciler-core.ps1')
+function Get-UserSkillsDesiredState { param($RuntimeRoot,$Configuration,$CatalogRepository,$CatalogCommit,$WorkingRoot) [pscustomobject]@{} }
+function Invoke-UserSkillsReconciliation {
+    param($DesiredState,$UserHome,$Mode,[switch]$ForceReinstallManagedSkills,[switch]$MigrateLegacyCatalogSkills,$InstallReadLease)
+    [pscustomobject][ordered]@{schemaVersion=1;outcome='failed';exitCode=1;Code='mutation-failure';catalogCommit=$null;catalogLockSha256=$null;installed=@();updated=@();removed=@();preserved=@();failed=@('injected general failure');failureDetails=@([pscustomobject]@{code='mutation-failure';path='.ai-instructions-txn'});ownership=@();rollbackState='completed';backupPath=$null;licenseWarnings=@()}
+}
+Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDesiredState,Invoke-UserSkillsReconciliation,Invoke-UserSkillsRecovery,New-AgentEnvironmentInstallReadLeaseEvidence
+'@|Set-Content -LiteralPath (Join-Path $runtime 'agent-environment-reconciler.psm1') -Encoding UTF8
+        $commit='89abcdef0123456789abcdef0123456789abcdef'
+        [IO.File]::WriteAllText((Join-Path $codexHome 'ai-instructions-install.lock'),'')
+        [IO.File]::WriteAllText((Join-Path $codexHome 'hooks/bootstrap-ai-instructions.ps1'),"param([switch]`$ValidateOnly)`nif(-not`$ValidateOnly){throw 'ValidateOnly required'}")
+        @{schemaVersion=4;catalog=@{ref=$commit}}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $codexHome 'ai-instructions-sync.json') -Encoding UTF8
+        @{schemaVersion=2;repository='https://github.com/example/ai-instructions.git';commit=$commit}|ConvertTo-Json|Set-Content (Join-Path $runtime 'runtime-bundle.json') -Encoding UTF8
+
+        $output=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $codexHome -UserHome $userHome -Apply -OutputFormat Json)
+        $LASTEXITCODE|Should Be 1
+        $result=$output[-1]|ConvertFrom-Json
+        $result.Code|Should BeNullOrEmpty
+        $result.failureDetails[0].code|Should Be 'mutation-failure'
     }
 
     It 'installs a clean multi-source selection and becomes idempotent' {
@@ -1040,6 +1136,7 @@ $module=Get-Module agent-environment-reconciler
         $failed = Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply -FailureAfterMutationCount 1
         $failed.outcome | Should Be 'failed'
         $failed.rollbackState | Should Be 'completed'
+        $failed.Code | Should BeNullOrEmpty
         @($failed.failureDetails | Where-Object { $_.code -eq 'mutation-failure' }).Count | Should Be 1
         [System.IO.File]::ReadAllText($target) | Should Be $before
         Test-Path -LiteralPath (Join-Path $userHome '.agents\update-agent-environment.recovery.json') | Should Be $false

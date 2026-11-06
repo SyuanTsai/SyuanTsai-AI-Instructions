@@ -140,6 +140,10 @@ function Open-AgentEnvironmentRuntimeReadLock {
 
 function Write-AgentEnvironmentResult {
     param([Parameter(Mandatory = $true)][object] $Result)
+    $closedCode=$null
+    if($null-ne$Result.PSObject.Properties['Code'] -and [string]$Result.Code -cin $script:agentEnvironmentRefusalCodes){$closedCode=[string]$Result.Code}
+    if($null-ne$Result.PSObject.Properties['Code']){$Result.Code=$closedCode}
+    elseif($null-ne$closedCode){$Result|Add-Member -NotePropertyName Code -NotePropertyValue $closedCode}
     if ($OutputFormat -eq 'Json') { Write-Output ($Result | ConvertTo-Json -Depth 20 -Compress); return }
     Write-Output "Agent environment outcome: $($Result.outcome)"
     if($null-ne$Result.PSObject.Properties['Code']-and-not[string]::IsNullOrEmpty([string]$Result.Code)){Write-Output "Code: $($Result.Code)"}

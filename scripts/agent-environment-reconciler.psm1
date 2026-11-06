@@ -2,6 +2,11 @@ Set-StrictMode -Version 2.0
 
 Import-Module (Join-Path $PSScriptRoot 'skills-catalog-contract.psm1') -Scope Local -ErrorAction Stop
 
+$script:agentEnvironmentRefusalCodes = @(
+    'capability-unavailable','platform-mismatch','downgrade-refused','mixed-generation','unsupported-version',
+    'closure-invalid','interrupted-install','projection-runtime-unavailable','runtime-baseline-unavailable'
+)
+
 if($null-eq('SyuanTsai.AiInstructions.AgentEnvironmentTrustedInstallReadLease' -as [type])){
     Add-Type -TypeDefinition @'
 namespace SyuanTsai.AiInstructions {
@@ -368,6 +373,7 @@ function Get-AgentEnvironmentObservedState {
     return [pscustomobject][ordered]@{
         relativePath=$RelativePath
         existed=[bool]$state.exists
+        exists=[bool]$state.exists
         sha256=$state.sha256
         length=$state.length
         identity=$state.identity
@@ -707,8 +713,15 @@ function New-AgentEnvironmentResult {
         'concurrent' { 3 }
         default { 0 }
     }
+    $code = $null
+    if (@($FailureDetails).Count -gt 0) {
+        $firstFailure = @($FailureDetails)[0]
+        if ($null -ne $firstFailure.PSObject.Properties['code'] -and [string]$firstFailure.code -cin $script:agentEnvironmentRefusalCodes) {
+            $code = [string]$firstFailure.code
+        }
+    }
     return [pscustomobject][ordered]@{
-        schemaVersion=1; outcome=$Outcome; exitCode=$exitCode; Code=$(if(@($FailureDetails).Count-gt0){[string]$FailureDetails[0].code}else{$null}); catalogCommit=[string]$DesiredState.Manifest.catalogCommit
+        schemaVersion=1; outcome=$Outcome; exitCode=$exitCode; Code=$code; catalogCommit=[string]$DesiredState.Manifest.catalogCommit
         catalogLockSha256=[string]$DesiredState.Manifest.lockSha256
         installed=@($Installed); updated=@($Updated); removed=@($Removed); preserved=@($Preserved); failed=@($Failed)
         failureDetails=@($FailureDetails); ownership=@($Ownership)
@@ -1255,14 +1268,19 @@ function Invoke-AgentEnvironmentPlatformTransaction {
             }finally{if($null-ne$parent){$parent.Dispose()}}
         }
         $journal.phase='applied';Write-AgentEnvironmentInstallJournal $transactionPath $transactionLease $journal
-        if($null-ne$BeforeFinalVerificationAction){& $BeforeFinalVerificationAction}
-        foreach($operation in @($journal.operations|Where-Object{[string]$_.kind-ceq'create-directory'})){
-            $published=Get-AgentEnvironmentDirectoryJournalState $Home ([string]$operation.targetRelativePath)
-            if(-not[bool]$published.exists-or[string]$published.inventorySha256-cne[string]$operation.applied.inventorySha256-or[int64]$published.entryCount-ne[int64]$operation.applied.entryCount){throw "Final published subtree inventory verification failed: $($operation.targetRelativePath)"}
+        try{
+            if($null-ne$BeforeFinalVerificationAction){& $BeforeFinalVerificationAction}
+            foreach($operation in @($journal.operations|Where-Object{[string]$_.kind-ceq'create-directory'})){
+                $published=Get-AgentEnvironmentDirectoryJournalState $Home ([string]$operation.targetRelativePath)
+                if(-not[bool]$published.exists-or[string]$published.inventorySha256-cne[string]$operation.applied.inventorySha256-or[int64]$published.entryCount-ne[int64]$operation.applied.entryCount){throw "Final published subtree inventory verification failed: $($operation.targetRelativePath)"}
+            }
+            foreach($file in $DesiredState.Files){$full=Assert-AgentEnvironmentPathSafe $Home ([string]$file.targetPath);if(-not(Test-Path -LiteralPath $full -PathType Leaf)-or(Get-AgentEnvironmentSha256 $full)-cne[string]$file.sha256){throw "Final user Skill inventory verification failed: $($file.targetPath)"}}
+            foreach($path in $Deletes.Keys){if(Test-Path -LiteralPath (Get-AgentEnvironmentFullPath $Home $path)){throw "Retired managed path still exists after cleanup: $path"}}
+            if((Get-AgentEnvironmentSha256 $manifestPath)-cne$ManifestSha){throw 'Final user Skills manifest byte verification failed.'}
+        }catch{
+            $_.Exception.Data['Code']='post-install-integrity-failure'
+            throw
         }
-        foreach($file in $DesiredState.Files){$full=Assert-AgentEnvironmentPathSafe $Home ([string]$file.targetPath);if(-not(Test-Path -LiteralPath $full -PathType Leaf)-or(Get-AgentEnvironmentSha256 $full)-cne[string]$file.sha256){throw "Final user Skill inventory verification failed: $($file.targetPath)"}}
-        foreach($path in $Deletes.Keys){if(Test-Path -LiteralPath (Get-AgentEnvironmentFullPath $Home $path)){throw "Retired managed path still exists after cleanup: $path"}}
-        if((Get-AgentEnvironmentSha256 $manifestPath)-cne$ManifestSha){throw 'Final user Skills manifest byte verification failed.'}
         $journal.phase='committed';Write-AgentEnvironmentInstallJournal $transactionPath $transactionLease $journal;Invoke-AgentEnvironmentFailpoint 'before-committed-cleanup' $FailpointName $mutationCount $FailureAfterMutationCount
         Remove-AgentEnvironmentEmptyManagedDirectories -Home $Home -TransactionLease $transactionLease -DeletedPaths ([string[]]@($Deletes.Keys)) -BeforeMoveAction $BeforeDirectoryPruneAction
         $backupPath=Move-AgentEnvironmentCommittedBackups -Home $Home -TransactionPath $transactionPath -TransactionLease $transactionLease -Journal $journal
@@ -1337,7 +1355,7 @@ function New-AgentEnvironmentInterruptedResult {
 function New-AgentEnvironmentNewJournalRecoveryFailureResult {
     param([string]$Message,[string]$TransactionPath,[AllowNull()][string]$BackupPath)
     $detail=New-AgentEnvironmentFailureDetail -Code 'recovery-required' -SkillId 'transaction' -Path '.ai-instructions-txn' -Classification 'controlled-candidate' -Owner 'transaction-journal' -Evidence $Message -DestructiveChangeAllowed $false -BackupCreated $true -ExpectedSha256 $null -ActualSha256 $null -Remediation @('Preserve the transaction and committed backup evidence before retrying recovery.')
-    [pscustomobject][ordered]@{schemaVersion=1;outcome='failed';exitCode=1;Code='recovery-required';catalogCommit=$null;catalogLockSha256=$null;installed=@();updated=@();removed=@();preserved=@();failed=@($Message);failureDetails=@($detail);ownership=@();rollbackState='recovery-required';backupPath=$(if([string]::IsNullOrWhiteSpace($BackupPath)){$TransactionPath}else{$BackupPath});licenseWarnings=@()}
+    [pscustomobject][ordered]@{schemaVersion=1;outcome='failed';exitCode=1;Code=$null;catalogCommit=$null;catalogLockSha256=$null;installed=@();updated=@();removed=@();preserved=@();failed=@($Message);failureDetails=@($detail);ownership=@();rollbackState='recovery-required';backupPath=$(if([string]::IsNullOrWhiteSpace($BackupPath)){$TransactionPath}else{$BackupPath});licenseWarnings=@()}
 }
 
 function Get-AgentEnvironmentExpectedInstallLockPath {
@@ -1383,30 +1401,55 @@ function Invoke-AgentEnvironmentNewJournalRecoveryLocked {
     $containerLease=$null;$recoveredBackupPath=$null
     try{
         $containerLease=Open-PlatformDirectory -Root $Home -RelativePath '.ai-instructions-txn'
+        $classifiedEntries=New-Object Collections.Generic.List[object]
+        $validatedEntries=New-Object Collections.Generic.List[object]
         foreach($entry in $entries){
             $journalPath=Join-Path $entry.FullName 'journal.json';$previousPath=Join-Path $entry.FullName 'journal.prev'
             $classification=Get-AiInstructionsInstallTransactionClassification -Name $entry.Name -EntryKind $(if($entry.PSIsContainer){'directory'}else{'other'}) -JournalEntryKind $(if(Test-Path -LiteralPath $journalPath -PathType Leaf){'file'}elseif(Test-Path -LiteralPath $journalPath){'other'}else{$null}) -JournalJson $(if(Test-Path -LiteralPath $journalPath -PathType Leaf){Get-Content -Raw -Encoding UTF8 $journalPath}else{$null}) -PreviousJournalEntryKind $(if(Test-Path -LiteralPath $previousPath -PathType Leaf){'file'}elseif(Test-Path -LiteralPath $previousPath){'other'}else{$null}) -PreviousJournalJson $(if(Test-Path -LiteralPath $previousPath -PathType Leaf){Get-Content -Raw -Encoding UTF8 $previousPath}else{$null})
+            $classifiedEntries.Add([pscustomobject][ordered]@{entry=$entry;classification=$classification})
+        }
+        $validationFailures=New-Object Collections.Generic.List[string]
+        foreach($classified in $classifiedEntries){
+            $entry=$classified.entry;$classification=$classified.classification
             if([string]$classification.classification-ceq'orphan-without-journal'){
                 $entryState=Get-PlatformDirectoryState -ParentLease $containerLease -Leaf $entry.Name
-                if([bool]$entryState.exists){Remove-AgentEnvironmentTransactionTree -TransactionRootLease $containerLease -Leaf $entry.Name -ExpectedIdentity $entryState.identity}
+                $validatedEntries.Add([pscustomobject][ordered]@{entry=$entry;classification=$classification;entryState=$entryState;journal=$null;observations=$null;decision=$null})
                 continue
             }
-            if([string]$classification.classification-cne'valid-journal'-or[string]$classification.journal.owner.component-cne'user-reconciler'){return New-AgentEnvironmentInterruptedResult "USER transaction residue '$($entry.Name)' is malformed or not owned by user-reconciler."}
+            if([string]$classification.classification-cne'valid-journal'-or[string]$classification.journal.owner.component-cne'user-reconciler'){
+                $validationFailures.Add("USER transaction residue '$($entry.Name)' is malformed or not owned by user-reconciler.")
+                continue
+            }
+            $entryState=Get-PlatformDirectoryState -ParentLease $containerLease -Leaf $entry.Name
+            $targetScopeValid=$true
             foreach($operation in @($classification.journal.operations)){
                 $directoryOperation=[string]$operation.kind-in@('swap-directory','create-directory')
                 try{Assert-AgentEnvironmentPathSafe -Root $Home -RelativePath ([string]$operation.targetRelativePath) -AllowProjectionDirectory:$directoryOperation|Out-Null}
-                catch{return New-AgentEnvironmentInterruptedResult "USER transaction residue '$($entry.Name)' contains an out-of-scope target: $($_.Exception.Message)"}
+                catch{$validationFailures.Add("USER transaction residue '$($entry.Name)' contains an out-of-scope target: $($_.Exception.Message)");$targetScopeValid=$false;break}
             }
-            $entryState=Get-PlatformDirectoryState -ParentLease $containerLease -Leaf $entry.Name
-            if(-not[bool]$entryState.exists){continue}
-            $journal=$classification.journal;$transactionLease=$null;$backupPath=$null
+            if(-not$targetScopeValid){continue}
+            $journal=$classification.journal
             try{
-                $transactionLease=Open-PlatformDirectory -Root $Home -RelativePath ".ai-instructions-txn/$($entry.Name)"
                 $observations=@{};foreach($operation in $journal.operations){$observations[[string]$operation.sequence]=Get-AgentEnvironmentRecoveryObservation $Home $entry.FullName $operation}
                 $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
-                if([string]$decision.action-ceq'refuse'){return New-AgentEnvironmentInterruptedResult "USER transaction residue '$($entry.Name)' does not have sufficient exact recovery evidence."}
+                if([string]$decision.action-ceq'refuse'){$validationFailures.Add("USER transaction residue '$($entry.Name)' does not have sufficient exact recovery evidence.");continue}
+                Get-AiInstructionsInstallRecoveryPlan -Journal $journal -Decision $decision|Out-Null
+                if([string]$decision.action-ceq'roll-back'){Assert-AgentEnvironmentRollbackStageEvidence -TransactionPath $entry.FullName -Journal $journal -Decision $decision -Observations $observations}
+            }catch{$validationFailures.Add("USER transaction residue '$($entry.Name)' does not have valid recovery evidence: $($_.Exception.Message)");continue}
+            $validatedEntries.Add([pscustomobject][ordered]@{entry=$entry;classification=$classification;entryState=$entryState;journal=$journal;observations=$observations;decision=$decision})
+        }
+        if($validationFailures.Count-gt0){return New-AgentEnvironmentInterruptedResult ($validationFailures -join ' ')}
+        foreach($validated in $validatedEntries){
+            $entry=$validated.entry;$entryState=$validated.entryState
+            if(-not[bool]$entryState.exists){continue}
+            if([string]$validated.classification.classification-ceq'orphan-without-journal'){
+                Remove-AgentEnvironmentTransactionTree -TransactionRootLease $containerLease -Leaf $entry.Name -ExpectedIdentity $entryState.identity
+                continue
+            }
+            $journal=$validated.journal;$observations=$validated.observations;$decision=$validated.decision;$transactionLease=$null;$backupPath=$null
+            try{
+                $transactionLease=Open-PlatformDirectory -Root $Home -RelativePath ".ai-instructions-txn/$($entry.Name)"
                 if([string]$decision.action-ceq'roll-back'){
-                    Assert-AgentEnvironmentRollbackStageEvidence -TransactionPath $entry.FullName -Journal $journal -Decision $decision -Observations $observations
                     Invoke-AgentEnvironmentRecoveryRollbackDecision -Home $Home -TransactionPath $entry.FullName -TransactionLease $transactionLease -Journal $journal -Decision $decision
                 }elseif([string]$decision.action-ceq'commit'){
                     $journal.phase='committed';Write-AgentEnvironmentInstallJournal $entry.FullName $transactionLease $journal
@@ -1728,8 +1771,9 @@ function Invoke-UserSkillsReconciliation {
             if($_.Exception.Data.Contains('Code')-and[string]$_.Exception.Data['Code']-ceq'concurrent'){
                 return New-AgentEnvironmentResult -Outcome 'concurrent' -DesiredState $DesiredState -Installed @() -Updated @() -Removed @() -Preserved $preserved -Failed @([string]$_.Exception.Message) -RollbackState 'not-started' -BackupPath $null -FailureDetails @() -Ownership ([object[]]$ownership.ToArray())
             }
-            $recoveryRequired=$_.Exception.Data.Contains('Code')-and[string]$_.Exception.Data['Code']-ceq'recovery-required'
-            $code=if($recoveryRequired){'recovery-required'}else{'mutation-failure'}
+            $exceptionCode=if($_.Exception.Data.Contains('Code')){[string]$_.Exception.Data['Code']}else{$null}
+            $recoveryRequired=$exceptionCode-ceq'recovery-required'
+            $code=if($recoveryRequired){'recovery-required'}elseif($exceptionCode-ceq'post-install-integrity-failure'){'post-install-integrity-failure'}else{'mutation-failure'}
             $retainedPath=if($recoveryRequired){[string]$_.Exception.Data['TransactionPath']}else{$null}
             $failureDetails.Add((New-AgentEnvironmentFailureDetail -Code $code -SkillId 'transaction' -Path '.ai-instructions-txn' -Classification 'controlled-candidate' -Owner 'transaction-journal' -Evidence ([string]$_.Exception.Message) -DestructiveChangeAllowed $false -BackupCreated $recoveryRequired -ExpectedSha256 $manifestSha -ActualSha256 $null -Remediation @('Review the transaction evidence and retry after recovery.')))
             return New-AgentEnvironmentResult -Outcome 'failed' -DesiredState $DesiredState -Installed @() -Updated @() -Removed @() -Preserved $preserved -Failed @([string]$_.Exception.Message) -RollbackState $(if($recoveryRequired){'recovery-required'}else{'completed'}) -BackupPath $retainedPath -FailureDetails ([object[]]$failureDetails.ToArray()) -Ownership ([object[]]$ownership.ToArray())
