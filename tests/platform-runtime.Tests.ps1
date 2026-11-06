@@ -3383,6 +3383,7 @@ try {
 
 Describe 'Platform P7 Windows publication, removal and permission snapshots' {
     BeforeAll {
+        $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
         Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
         function Get-P7Hash([byte[]]$Bytes) {
             $sha=[Security.Cryptography.SHA256]::Create()
