@@ -71,6 +71,9 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
 
     public static class WindowsNative
     {
+        // Internal, disabled-by-default fault injection used only by the native
+        // Windows regression tests.  It is intentionally not part of the public API.
+        internal static Action<string> PermissionsMutationTestHook = null;
         [StructLayout(LayoutKind.Sequential)]
         private struct Information
         {
@@ -292,6 +295,33 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             }
             finally { LocalFree(descriptor); }
         }
+        private static string GetDaclSddl(IntPtr descriptor)
+        {
+            IntPtr text; uint length; Check(FormatDescriptor(descriptor, 1, 4, out text, out length), "FormatSecurityDescriptor");
+            try { return Marshal.PtrToStringUni(text); }
+            finally { LocalFree(text); }
+        }
+        private static uint GetDaclSecurityInformation(IntPtr descriptor)
+        {
+            ushort control; uint revision;
+            Check(GetSecurityDescriptorControl(descriptor, out control, out revision), "GetSecurityDescriptorControl");
+            return 4u | ((control & 0x1000) != 0 ? 0x80000000u : 0x20000000u);
+        }
+        private static void ApplyDaclDescriptor(SafeFileHandle handle, IntPtr descriptor)
+        {
+            bool present, defaulted; IntPtr dacl;
+            Check(GetSecurityDescriptorDacl(descriptor, out present, out dacl, out defaulted), "GetSecurityDescriptorDacl");
+            if (!present || dacl == IntPtr.Zero) throw new ArgumentException("An explicit non-null DACL is required.");
+            ushort control; uint revision;
+            Check(GetSecurityDescriptorControl(descriptor, out control, out revision), "GetSecurityDescriptorControl");
+            uint information = GetDaclSecurityInformation(descriptor);
+            uint error = SetSecurityInfo(handle, 1, information, IntPtr.Zero, IntPtr.Zero, dacl, IntPtr.Zero);
+            if (error != 0) throw new PlatformWin32Exception("SetSecurityInfo", (int)error);
+            // Preserve the descriptor's protected and auto-inherited control flags
+            // exactly; SetSecurityInfo may otherwise synthesize the informational AI bit.
+            if ((control & 0x0400) == 0)
+                Check(SetKernelObjectSecurity(handle, information, descriptor), "SetKernelObjectSecurity");
+        }
         public static string NormalizeDaclSddl(string sddl)
         {
             if (String.IsNullOrEmpty(sddl) || !sddl.StartsWith("D:", StringComparison.Ordinal) ||
@@ -333,44 +363,72 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 AssertIdentity(lease, lease.Observation, lease.Observation.Kind == "file");
                 // SetSecurityInfo's DACL/inheritance path needs READ_CONTROL as well
                 // as WRITE_DAC. The original lease retains its deny-write/delete share.
-                using (SafeFileHandle writable = Open(lease.Path, (sddl == null ? 0u : 0x60000u) | (readOnly.HasValue ? 0x100u : 0u), 7, 3))
+                using (SafeFileHandle writable = Open(lease.Path, 0x20000u | (sddl == null ? 0u : 0x40000u) | (readOnly.HasValue ? 0x100u : 0u), 7, 3))
                 {
                     PlatformPaths.Same(Stat(writable), lease.Observation);
-                    if (sddl != null)
+                    IntPtr owner, group, originalDacl, sacl, originalDescriptor;
+                    uint snapshotError = GetSecurityInfo(writable, 1, 4, out owner, out group, out originalDacl, out sacl, out originalDescriptor);
+                    if (snapshotError != 0) throw new PlatformWin32Exception("GetSecurityInfo", (int)snapshotError);
+                    BasicInfo originalBasic; uint basicSize = (uint)Marshal.SizeOf(typeof(BasicInfo));
+                    try
                     {
-                        string normalizedSddl = NormalizeDaclSddl(sddl);
-                        IntPtr descriptor; uint size; Check(ParseDescriptor(normalizedSddl, 1, out descriptor, out size), "ParseSecurityDescriptor");
+                        Check(GetFileInformationByHandleEx(writable, 0, out originalBasic, basicSize), "GetFileInformationByHandleEx");
+                        string originalSddl = GetDaclSddl(originalDescriptor);
+                        bool originalReadOnly = (originalBasic.Attributes & 1) != 0;
+                        string normalizedSddl = sddl == null ? null : NormalizeDaclSddl(sddl);
+                        bool mutationStarted = false;
                         try
                         {
-                            bool present, defaulted; IntPtr dacl;
-                            Check(GetSecurityDescriptorDacl(descriptor, out present, out dacl, out defaulted), "GetSecurityDescriptorDacl");
-                            if (!present || dacl == IntPtr.Zero) throw new ArgumentException("An explicit non-null DACL is required.");
-                            ushort control; uint revision;
-                            Check(GetSecurityDescriptorControl(descriptor, out control, out revision), "GetSecurityDescriptorControl");
-                            uint information = 4u | ((control & 0x1000) != 0 ? 0x80000000u : 0x20000000u);
-                            uint error = SetSecurityInfo(writable, 1, information, IntPtr.Zero, IntPtr.Zero, dacl, IntPtr.Zero);
-                            if (error != 0) throw new PlatformWin32Exception("SetSecurityInfo", (int)error);
-                            // SetSecurityInfo establishes the requested inheritance boundary and
-                            // canonicalizes auto-inherited ACLs.  When the snapshot intentionally
-                            // lacks SE_DACL_AUTO_INHERITED, reapply its full descriptor so the
-                            // informational AI control bit is not invented by the setter.
-                            if ((control & 0x0400) == 0)
-                                Check(SetKernelObjectSecurity(writable, information, descriptor), "SetKernelObjectSecurity");
+                            if (normalizedSddl != null)
+                            {
+                                IntPtr descriptor; uint size; Check(ParseDescriptor(normalizedSddl, 1, out descriptor, out size), "ParseSecurityDescriptor");
+                                try { mutationStarted = true; ApplyDaclDescriptor(writable, descriptor); }
+                                finally { LocalFree(descriptor); }
+                            }
+                            if (readOnly.HasValue)
+                            {
+                                BasicInfo value = originalBasic;
+                                value.Attributes = readOnly.Value ? value.Attributes | 1 : value.Attributes & ~1u;
+                                if (value.Attributes == 0) value.Attributes = 0x80;
+                                mutationStarted = true;
+                                Check(SetFileInformationByHandle(writable, 0, ref value, basicSize), "SetFileInformationByHandle");
+                            }
+                            Action<string> hook = PermissionsMutationTestHook;
+                            if (mutationStarted && hook != null) hook("after-apply-before-readback");
                             string observedSddl = GetDaclSddl(writable);
-                            if (!String.Equals(observedSddl, normalizedSddl, StringComparison.Ordinal))
+                            bool observedReadOnly = (Stat(writable).Mode & 1) != 0;
+                            if ((normalizedSddl != null && !String.Equals(observedSddl, normalizedSddl, StringComparison.Ordinal)) ||
+                                (readOnly.HasValue && observedReadOnly != readOnly.Value))
                                 throw new PlatformVerificationException("permissions-snapshot", "windows",
-                                    String.Format("DACL readback differs from the requested normalized snapshot (expected '{0}', observed '{1}').", normalizedSddl, observedSddl));
+                                    String.Format("Permission readback differs from the requested normalized snapshot (expected '{0}'/{1}, observed '{2}'/{3}).",
+                                        normalizedSddl ?? originalSddl, readOnly.HasValue ? readOnly.Value.ToString() : originalReadOnly.ToString(), observedSddl, observedReadOnly));
                         }
-                        finally { LocalFree(descriptor); }
+                        catch (Exception mutationFailure)
+                        {
+                            if (!mutationStarted) throw;
+                            try
+                            {
+                                ApplyDaclDescriptor(writable, originalDescriptor);
+                                BasicInfo restoreBasic = originalBasic;
+                                Check(SetFileInformationByHandle(writable, 0, ref restoreBasic, basicSize), "SetFileInformationByHandle(restore)");
+                                string restoredSddl = GetDaclSddl(writable);
+                                bool restoredReadOnly = (Stat(writable).Mode & 1) != 0;
+                                if (!String.Equals(restoredSddl, originalSddl, StringComparison.Ordinal) || restoredReadOnly != originalReadOnly)
+                                    throw new IOException(String.Format("Rollback readback differs (SDDL '{0}', readOnly {1}).", restoredSddl, restoredReadOnly));
+                            }
+                            catch (Exception rollbackFailure)
+                            {
+                                string currentSddl;
+                                try { currentSddl = GetDaclSddl(writable); }
+                                catch (Exception currentFailure) { currentSddl = "<unavailable: " + currentFailure.Message + ">"; }
+                                throw new PlatformVerificationException("permissions-snapshot", "windows",
+                                    String.Format("Permission mutation failed and rollback also failed; permissions may have changed. Original SDDL '{0}', current SDDL '{1}'. Mutation: {2} Rollback: {3}",
+                                        originalSddl, currentSddl, mutationFailure.Message, rollbackFailure.Message));
+                            }
+                            throw;
+                        }
                     }
-                    if (readOnly.HasValue)
-                    {
-                        BasicInfo value; uint size = (uint)Marshal.SizeOf(typeof(BasicInfo));
-                        Check(GetFileInformationByHandleEx(writable, 0, out value, size), "GetFileInformationByHandleEx");
-                        value.Attributes = readOnly.Value ? value.Attributes | 1 : value.Attributes & ~1u;
-                        if (value.Attributes == 0) value.Attributes = 0x80;
-                        Check(SetFileInformationByHandle(writable, 0, ref value, size), "SetFileInformationByHandle");
-                    }
+                    finally { LocalFree(originalDescriptor); }
                 }
                 return GetPermissions(lease);
             }

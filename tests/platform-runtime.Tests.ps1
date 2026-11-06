@@ -3398,7 +3398,8 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $lease=Open-PlatformFile -ParentLease $Parent -Leaf $Leaf -Access Read -CreateMode OpenExisting
             try {
                 $observed=Assert-PlatformFileIdentity -Lease $lease -Expected $lease.Observation -SingleLink
-                [pscustomobject]@{identity=(Get-P7Identity $observed);bytes=[Convert]::ToBase64String($lease.ReadAllBytes(1048576))}
+                $permissions=Get-PlatformPermissions $lease
+                [pscustomobject]@{identity=(Get-P7Identity $observed);bytes=[Convert]::ToBase64String($lease.ReadAllBytes(1048576));sddl=[string]$permissions.sddl;readOnly=[bool]$permissions.readOnly}
             } finally {
                 $lease.Dispose()
                 if($reopen){$LeaseOwner.Lease=Open-PlatformFile -ParentLease $Parent -Leaf $Leaf -Access ReadWrite -CreateMode OpenExisting}
@@ -3459,6 +3460,12 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
                 if($null -eq $windowsModule){throw 'The nested Windows platform module is not loaded.'}
                 & $windowsModule { param($NestedValue) $script:WindowsPublicationDurabilityTestHook=$NestedValue } $Value
             } $Hook
+        }
+        function Set-P7WindowsPermissionMutationHook([AllowNull()][scriptblock]$Hook) {
+            $field=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative].GetField('PermissionsMutationTestHook',[Reflection.BindingFlags]'Static,NonPublic')
+            if($null -eq $field){throw 'The internal Windows permission mutation hook is unavailable.'}
+            $value=if($null -eq $Hook){$null}else{[Action[string]]{param($Point)& $Hook $Point}.GetNewClosure()}
+            $field.SetValue($null,$value)
         }
     }
 
@@ -3990,6 +3997,78 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $stageAfter.bytes | Should Be $stageBefore.bytes
             $stageAfter.identity.fileId | Should Be $stageBefore.identity.fileId
         } finally { Set-P7WindowsDurabilityHook $null;Close-P7Fixture $f @($stage.Lease) }
+    }
+
+    # Scenario: A caller supplies the transaction directory itself, or its private container, as the target parent.
+    # Purpose: Reject publish and tombstone removal before touching target, stage, or tombstone bytes.
+    It 'InterT290_rejects_transaction_and_transaction_container_target_parents_without_mutation' {
+        $f=New-P7Fixture 'p7-private-parent';$stage=$null;$transactionTarget=$null;$containerTarget=$null
+        try {
+            $stage=New-P7File $f.Transaction 'stage' ([Text.Encoding]::UTF8.GetBytes('stage'))
+            $transactionTarget=New-P7File $f.Transaction 'remove' ([Text.Encoding]::UTF8.GetBytes('transaction-target'))
+            $containerTarget=New-P7File $f.TransactionRoot 'remove' ([Text.Encoding]::UTF8.GetBytes('container-target'))
+            $stageBefore=Get-P7NamedFileState $f.Transaction 'stage' $stage
+            $transactionBefore=Get-P7NamedFileState $f.Transaction 'remove' $transactionTarget
+            $containerBefore=Get-P7NamedFileState $f.TransactionRoot 'remove' $containerTarget
+            $missing=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+
+            { Publish-PlatformFile -ParentLease $f.Transaction -Leaf 'created' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $stage.Expected -NoReplace } | Should Throw 'outside'
+            { Remove-PlatformOwnedFile -ParentLease $f.Transaction -Leaf 'remove' -ExpectedState $transactionTarget.State -TransactionLease $f.Transaction -TombstoneLeaf 'transaction.backup' } | Should Throw 'outside'
+            { Publish-PlatformFile -ParentLease $f.TransactionRoot -Leaf 'created' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $stage.Expected -NoReplace } | Should Throw 'outside'
+            { Remove-PlatformOwnedFile -ParentLease $f.TransactionRoot -Leaf 'remove' -ExpectedState $containerTarget.State -TransactionLease $f.Transaction -TombstoneLeaf 'container.backup' } | Should Throw 'outside'
+
+            $stageAfter=Get-P7NamedFileState $f.Transaction 'stage' $stage
+            $transactionAfter=Get-P7NamedFileState $f.Transaction 'remove' $transactionTarget
+            $containerAfter=Get-P7NamedFileState $f.TransactionRoot 'remove' $containerTarget
+            foreach($pair in @(@($stageBefore,$stageAfter),@($transactionBefore,$transactionAfter),@($containerBefore,$containerAfter))){
+                $pair[1].bytes|Should Be $pair[0].bytes;$pair[1].identity.fileId|Should Be $pair[0].identity.fileId;$pair[1].sddl|Should Be $pair[0].sddl;$pair[1].readOnly|Should Be $pair[0].readOnly
+            }
+            foreach($leaf in @('transaction.backup','container.backup')){Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/$leaf")|Should Be $false}
+        } finally { Close-P7Fixture $f @($stage.Lease,$transactionTarget.Lease,$containerTarget.Lease) }
+    }
+
+    # Scenario: Native permission readback fails after applying both a DACL and read-only state.
+    # Purpose: Restore the exact pre-call SDDL/read-only state for direct snapshots and publication stages.
+    It 'InterT300_rolls_back_permissions_when_post_apply_readback_fails' {
+        $f=New-P7Fixture 'p7-permission-rollback';$direct=$null;$target=$null;$stage=$null;$directCaught=$null;$publishCaught=$null
+        try {
+            $identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$changedSddl='D:P(A;;FA;;;'+$identity.User.Value+')'}finally{$identity.Dispose()}
+            $direct=New-P7File $f.Parent 'direct' ([Text.Encoding]::UTF8.GetBytes('direct'))
+            $directBefore=Get-P7NamedFileState $f.Parent 'direct' $direct
+            Set-P7WindowsPermissionMutationHook {param($point)if($point -ceq 'after-apply-before-readback'){throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]::new('permissions-snapshot','windows','injected permission readback failure')}}
+            try { Set-PlatformPermissions -Lease $direct.Lease -Snapshot ([pscustomobject]@{kind='windows-sddl';sddl=$changedSddl;readOnly=(-not $directBefore.readOnly)}) | Out-Null } catch {$directCaught=$_} finally {Set-P7WindowsPermissionMutationHook $null}
+            $directCaught | Should Not BeNullOrEmpty
+            $directAfter=Get-P7NamedFileState $f.Parent 'direct' $direct
+            $directAfter.sddl|Should Be $directBefore.sddl;$directAfter.readOnly|Should Be $directBefore.readOnly;$directAfter.bytes|Should Be $directBefore.bytes;$directAfter.identity.fileId|Should Be $directBefore.identity.fileId
+
+            $target=New-P7File $f.Parent 'publish' ([Text.Encoding]::UTF8.GetBytes('old'))
+            Set-PlatformPermissions -Lease $target.Lease -Snapshot ([pscustomobject]@{kind='windows-sddl';sddl=$changedSddl;readOnly=$true}) | Out-Null
+            $target.Lease.Dispose();$target.Lease=$null
+            $stage=New-P7File $f.Transaction 'publish.stage' ([Text.Encoding]::UTF8.GetBytes('new'))
+            $targetBefore=Get-P7NamedFileState $f.Parent 'publish';$stageBefore=Get-P7NamedFileState $f.Transaction 'publish.stage' $stage
+            Set-P7WindowsPermissionMutationHook {param($point)if($point -ceq 'after-apply-before-readback'){throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]::new('permissions-snapshot','windows','injected publication permission readback failure')}}
+            try { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'publish' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $target.State -DisplacedLeaf 'publish.backup' -ExpectedStage $stage.Expected | Out-Null } catch {$publishCaught=$_} finally {Set-P7WindowsPermissionMutationHook $null}
+            $publishCaught | Should Not BeNullOrEmpty
+            $targetAfter=Get-P7NamedFileState $f.Parent 'publish';$stageAfter=Get-P7NamedFileState $f.Transaction 'publish.stage' $stage
+            foreach($pair in @(@($targetBefore,$targetAfter),@($stageBefore,$stageAfter))){$pair[1].bytes|Should Be $pair[0].bytes;$pair[1].identity.fileId|Should Be $pair[0].identity.fileId;$pair[1].sddl|Should Be $pair[0].sddl;$pair[1].readOnly|Should Be $pair[0].readOnly}
+            Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/publish.backup")|Should Be $false
+        } finally { Set-P7WindowsPermissionMutationHook $null;Close-P7Fixture $f @($direct.Lease,$target.Lease,$stage.Lease) }
+    }
+
+    # Scenario: Cleanup clears a read-only tombstone and delete-on-close then fails.
+    # Purpose: Preserve its bytes and identity while restoring read-only through the same verified handle.
+    It 'InterT310_restores_readonly_when_cleanup_delete_on_close_fails' {
+        $f=New-P7Fixture 'p7-cleanup-readonly';$tombstone=$null;$caught=$null
+        try {
+            $tombstone=New-P7File $f.Transaction 'cleanup.backup' ([Text.Encoding]::UTF8.GetBytes('kept'))
+            Set-PlatformPermissions -Lease $tombstone.Lease -Policy @{ReadOnly=$true}|Out-Null
+            $before=Get-P7NamedFileState $f.Transaction 'cleanup.backup' $tombstone
+            Set-P7WindowsDurabilityHook {param($point,$operation,$role,$lease)if($point -ceq 'delete-on-close'){throw 'injected delete-on-close failure'}}
+            try {Remove-PlatformOwnedFile -ParentLease $f.Transaction -Leaf 'cleanup.backup' -ExpectedState $tombstone.State|Out-Null}catch{$caught=$_}finally{Set-P7WindowsDurabilityHook $null}
+            $caught | Should Not BeNullOrEmpty
+            $after=Get-P7NamedFileState $f.Transaction 'cleanup.backup' $tombstone
+            $after.bytes|Should Be $before.bytes;$after.identity.device|Should Be $before.identity.device;$after.identity.fileId|Should Be $before.identity.fileId;$after.sddl|Should Be $before.sddl;$after.readOnly|Should Be $true
+        } finally { Set-P7WindowsDurabilityHook $null;Close-P7Fixture $f @($tombstone.Lease) }
     }
     }
 }

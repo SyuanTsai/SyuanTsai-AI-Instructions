@@ -116,9 +116,18 @@ function Assert-WindowsPlatformTransactionLease {
     $transactionId=[IO.Path]::GetFileName($transactionPath)
     $transactionContainer=[IO.Path]::GetDirectoryName($transactionPath)
     $rootPath=[IO.Path]::GetDirectoryName($transactionContainer)
+    $normalizedParentPath=[IO.Path]::GetFullPath($parentPath).TrimEnd('\')
+    $normalizedTransactionPath=[IO.Path]::GetFullPath($transactionPath).TrimEnd('\')
+    $normalizedTransactionContainer=[IO.Path]::GetFullPath($transactionContainer).TrimEnd('\')
+    $sameLeaseIdentity=[uint64]$ParentLease.Observation.Device -eq [uint64]$TransactionLease.Observation.Device -and
+        [uint64]$ParentLease.Observation.Inode -eq [uint64]$TransactionLease.Observation.Inode
+    $insideTransaction=[StringComparer]::OrdinalIgnoreCase.Equals($normalizedParentPath,$normalizedTransactionPath) -or
+        $normalizedParentPath.StartsWith($normalizedTransactionPath+'\',[StringComparison]::OrdinalIgnoreCase)
+    $insideTransactionContainer=[StringComparer]::OrdinalIgnoreCase.Equals($normalizedParentPath,$normalizedTransactionContainer) -or
+        $normalizedParentPath.StartsWith($normalizedTransactionContainer+'\',[StringComparison]::OrdinalIgnoreCase)
     if ([string]::IsNullOrEmpty($rootPath) -or $transactionId -cnotmatch '^[0-9a-f]{32}$' -or [IO.Path]::GetFileName($transactionContainer) -cne '.ai-instructions-txn' -or
         [uint64]$ParentLease.Observation.Device -ne [uint64]$TransactionLease.Observation.Device -or
-        $parentPath.StartsWith($transactionPath.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)) {
+        $sameLeaseIdentity -or $insideTransaction -or $insideTransactionContainer) {
         throw (New-WindowsPlatformVerificationError $Capability 'TransactionLease must be .ai-instructions-txn/<32 lowercase hex> on the target volume, and the target must be outside it.')
     }
     return [pscustomobject][ordered]@{parentPath=$parentPath;transactionPath=$transactionPath;rootPath=$rootPath;transactionId=$transactionId}
@@ -537,7 +546,8 @@ function Remove-WindowsPlatformOwnedFile {
             return $receipt
         }
         Invoke-WindowsPlatformDirectoryFlush $ParentLease 'owned-file-removal-cleanup' 'preflight' 'parent'
-        if ($permissions.readOnly) { [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($target,$null,$false) }
+        if ($permissions.readOnly) { [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($target,$null,$false);$readOnlyCleared=$true }
+        Invoke-WindowsPlatformDurabilityHook 'delete-on-close' 'owned-file-removal-cleanup' 'file' $target
         [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::DeleteOnClose($target)
         $receipt=[pscustomobject][ordered]@{
             completedSteps=[string[]]@('delete-on-close')
