@@ -335,6 +335,33 @@ Describe 'user-scoped Agent Skills reconciliation' {
         (Get-FileHash (Join-Path $userHome '.agents/catalog-skills.manifest.json')).Hash | Should Be $before
     }
 
+    # Scenario: Two managed resource payloads exceed the journal JSON size limit, then one is replaced and the other is removed.
+    # Purpose: Keep the 16 MiB limit scoped to journal JSON while streaming backup evidence for every candidate-supported payload size.
+    It 'InterT104_reconciles_and_exports_backups_for_payloads_larger_than_16_MiB' {
+        $userHome=Join-Path $TestDrive 'large-payload-user'
+        $largeLength=16777217
+        $replaceV1=[byte[]]::new($largeLength);$replaceV1[0]=17;$replaceV1[$largeLength-1]=19
+        $removeV1=[byte[]]::new($largeLength);$removeV1[0]=23;$removeV1[$largeLength-1]=29
+        $initial=New-TestDesiredState -Root (Join-Path $TestDrive 'large-payload-initial') -Resources @{
+            'assets/replace.bin'=$replaceV1
+            'assets/remove.bin'=$removeV1
+        }
+        (Invoke-UserSkillsReconciliation -DesiredState $initial -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+
+        $replaceV2=[byte[]]::new($largeLength);$replaceV2[0]=31;$replaceV2[$largeLength-1]=37
+        $next=New-TestDesiredState -Root (Join-Path $TestDrive 'large-payload-next') -Resources @{
+            'assets/replace.bin'=$replaceV2
+        }
+        $updated=Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply
+
+        $updated.outcome|Should Be 'applied'
+        (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $userHome '.agents/skills/alpha/assets/replace.bin')).Hash.ToLowerInvariant()|Should Be $next.Files.Where({$_.targetPath-ceq'.agents/skills/alpha/assets/replace.bin'})[0].sha256
+        Test-Path -LiteralPath (Join-Path $userHome '.agents/skills/alpha/assets/remove.bin')|Should Be $false
+        (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $updated.backupPath '.agents/skills/alpha/assets/replace.bin')).Hash.ToLowerInvariant()|Should Be $initial.Files.Where({$_.targetPath-ceq'.agents/skills/alpha/assets/replace.bin'})[0].sha256
+        (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $updated.backupPath '.agents/skills/alpha/assets/remove.bin')).Hash.ToLowerInvariant()|Should Be $initial.Files.Where({$_.targetPath-ceq'.agents/skills/alpha/assets/remove.bin'})[0].sha256
+        @(Get-ChildItem -Force -LiteralPath (Join-Path $userHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0
+    }
+
     # Scenario: USER home is multiple missing components below the nearest existing physical ancestor.
     # Purpose: Keep read-only modes side-effect free, then let Apply create USER home and .agents through platform-runtime before locking.
     It 'InterT101_creates_a_missing_USER_home_only_for_Apply' {

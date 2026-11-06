@@ -114,6 +114,28 @@ function Get-AgentEnvironmentBytesSha256 {
     finally { $algorithm.Dispose() }
 }
 
+function Get-AgentEnvironmentVerifiedStreamState {
+    param(
+        [Parameter(Mandatory=$true)]$Lease,
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)]$Observed
+    )
+    $stream=$null;$algorithm=$null
+    try{
+        $expectedIdentity=ConvertTo-AgentEnvironmentInstallReadLeaseIdentity $Observed
+        $stream=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+        $streamIdentity=[SyuanTsai.AiInstructions.AgentEnvironmentInstallReadLeaseNative]::GetFileIdentity($stream.SafeFileHandle)
+        if($streamIdentity-cne$expectedIdentity-or[int64]$stream.Length-ne[int64]$Observed.Size){throw "Streamed file identity or length changed before hashing: $Path"}
+        $algorithm=[Security.Cryptography.SHA256]::Create()
+        $sha256=([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-','').ToLowerInvariant()
+        $streamIdentityAfter=[SyuanTsai.AiInstructions.AgentEnvironmentInstallReadLeaseNative]::GetFileIdentity($stream.SafeFileHandle)
+        $observedAfter=Assert-PlatformFileIdentity -Lease $Lease -Expected $Observed -SingleLink -VerifyPath
+        if($streamIdentityAfter-cne$expectedIdentity-or[int64]$stream.Length-ne[int64]$observedAfter.Size){throw "Streamed file identity or length changed while hashing: $Path"}
+        return [pscustomobject][ordered]@{exists=$true;sha256=$sha256;length=[int64]$observedAfter.Size;identity=(ConvertTo-AgentEnvironmentPlatformIdentity $observedAfter)}
+    }
+    finally{if($null-ne$algorithm){$algorithm.Dispose()};if($null-ne$stream){$stream.Dispose()}}
+}
+
 function Write-AgentEnvironmentDurableStagePayload {
     param(
         [Parameter(Mandatory=$true)]$ParentLease,
@@ -1015,15 +1037,19 @@ function Get-AgentEnvironmentPrivateFileJournalEvidence {
     try{
         $file=Open-PlatformFile -ParentLease $TransactionLease -Leaf $Leaf -Access Read -CreateMode OpenExisting
         $observed=Assert-PlatformFileIdentity -Lease $file -Expected $file.Observation -SingleLink -VerifyPath
-        if([int64]$observed.Size-gt16777216){throw "Transaction-private file is too large: $Leaf"}
-        $bytes=$file.ReadAllBytes([int]$observed.Size)
-        $json=$null
+        $json=$null;$state=$null
         if($Leaf-in@('journal.json','journal.prev','journal.stage')){
+            if([int64]$observed.Size-gt16777216){throw "Transaction journal file is too large: $Leaf"}
+            $bytes=$file.ReadAllBytes([int]$observed.Size)
             $json=[Text.UTF8Encoding]::new($false,$true).GetString($bytes)
+            $state=[pscustomobject][ordered]@{exists=$true;sha256=(Get-AgentEnvironmentBytesSha256 $bytes);length=[int64]$observed.Size;identity=(ConvertTo-AgentEnvironmentPlatformIdentity $observed)}
+        }
+        else{
+            $state=Get-AgentEnvironmentVerifiedStreamState -Lease $file -Path $full -Observed $observed
         }
         return [pscustomobject][ordered]@{
             entryKind='file';json=$json
-            state=[pscustomobject][ordered]@{exists=$true;sha256=(Get-AgentEnvironmentBytesSha256 $bytes);length=[int64]$observed.Size;identity=(ConvertTo-AgentEnvironmentPlatformIdentity $observed)}
+            state=$state
         }
     }
     catch{return [pscustomobject][ordered]@{entryKind='other';json=$null;state=$null;error=[string]$_.Exception.Message}}
@@ -1365,9 +1391,8 @@ function Move-AgentEnvironmentCommittedBackups {
                 if(Test-Path -LiteralPath $destination){
                     $destinationLease=Open-PlatformFile -ParentLease $destinationParentLease -Leaf ([IO.Path]::GetFileName($destination)) -Access Read -CreateMode OpenExisting
                     $observed=Assert-PlatformFileIdentity -Lease $destinationLease -Expected $destinationLease.Observation -SingleLink -VerifyPath
-                    if([int64]$observed.Size-gt[int]::MaxValue){throw "Committed backup is too large to verify: $relative"}
-                    $destinationBytes=$destinationLease.ReadAllBytes([int]$observed.Size)
-                    if((Get-AgentEnvironmentBytesSha256 $destinationBytes)-cne[string]$operation.original.sha256){throw "Committed backup differs from journaled original: $relative"}
+                    $destinationState=Get-AgentEnvironmentVerifiedStreamState -Lease $destinationLease -Path $destination -Observed $observed
+                    if(-not(Test-AgentEnvironmentJournalStateMatch $destinationState $operation.original)){throw "Committed backup differs from journaled original: $relative"}
                     continue
                 }
                 $backupState=Get-AgentEnvironmentPrivateFileJournalState -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ([string]$operation.backupLeaf)

@@ -116,14 +116,25 @@ function Open-AgentEnvironmentRuntimeReadLock {
     }
 }
 
+function Close-AgentEnvironmentEntryReadLeases {
+    $firstFailure=$null
+    if($null-ne$script:agentEnvironmentTrustedReadLease){
+        try{$script:agentEnvironmentTrustedReadLease.Dispose()}
+        catch{$firstFailure=$_}
+        finally{$script:agentEnvironmentTrustedReadLease=$null}
+    }
+    if($null-ne$script:agentEnvironmentRuntimeReadLock){
+        try{$script:agentEnvironmentRuntimeReadLock.Dispose()}
+        catch{if($null-eq$firstFailure){$firstFailure=$_}}
+        finally{$script:agentEnvironmentRuntimeReadLock=$null}
+    }
+    if($null-ne$firstFailure){throw $firstFailure}
+}
+
 trap {
     $message = [string]$_.Exception.Message
     $refusalCode = Get-AgentEnvironmentRefusalCode $_
-    if ($null -ne $script:agentEnvironmentRuntimeReadLock) {
-        try { $script:agentEnvironmentRuntimeReadLock.Dispose() }
-        catch { }
-        $script:agentEnvironmentRuntimeReadLock = $null
-    }
+    try{Close-AgentEnvironmentEntryReadLeases}catch{}
     $failureResult = if ($Recover -and $script:agentEnvironmentRecoveryStarted) {
         New-AgentEnvironmentStableRecoveryFailureResult -Message $message -Code $refusalCode
     }
@@ -268,10 +279,7 @@ finally {
             if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) { Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction SilentlyContinue }
         }
     }
-    if ($null -ne $script:agentEnvironmentRuntimeReadLock) {
-        $script:agentEnvironmentRuntimeReadLock.Dispose()
-        $script:agentEnvironmentRuntimeReadLock = $null
-    }
+    Close-AgentEnvironmentEntryReadLeases
 }
 
 Write-AgentEnvironmentResult -Result $finalResult
