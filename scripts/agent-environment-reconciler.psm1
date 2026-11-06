@@ -2210,9 +2210,13 @@ function Invoke-UserSkillsRecovery {
     if(-not$hasLegacy-and-not$hasNew){return [pscustomobject][ordered]@{schemaVersion=1;outcome='nothing-to-recover';exitCode=0;rollbackState='not-needed'}}
     Import-AgentEnvironmentRecoveryRuntimeModules -RuntimeRoot $PSScriptRoot
     if($hasNew-and-not(Test-AgentEnvironmentInstallReadLease $InstallReadLease)){return New-AgentEnvironmentInterruptedResult 'USER install-journal recovery requires stable-launcher validation and the install read lease.'}
-    $preLockManifestSnapshot=Get-AgentEnvironmentManifestSnapshot -Root $home -RelativePath '.agents/catalog-skills.manifest.json'
+    $preLockManifestSnapshot=$null
     $lockParentLease=$null;$lockStream=$null
     try{
+        if($hasLegacy-and-not$hasNew){
+            try{$preLockManifestSnapshot=Get-AgentEnvironmentManifestSnapshot -Root $home -RelativePath '.agents/catalog-skills.manifest.json'}
+            catch{return New-AgentEnvironmentRecoveryFailureResult -Message ([string]$_.Exception.Message) -JournalRelative '.agents/update-agent-environment.recovery.json' -BackupPath $null}
+        }
         $lockPath=Join-Path $home '.agents/update-agent-environment.lock'
         if(Test-Path -LiteralPath $lockPath){$lockItem=Get-Item -Force -LiteralPath $lockPath;if($lockItem.PSIsContainer-or($lockItem.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){throw 'Agent environment lock must be a non-reparse file.'}}
         try{

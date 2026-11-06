@@ -620,11 +620,11 @@ Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode
             $failureAfter=if($failpoint-in@('during-rollback','after-rollback-action')){1}else{0}
             if($failpoint-ceq'after-staged-subtree-verification'){Remove-Item -LiteralPath (Join-Path $caseHome '.agents/skills/alpha') -Recurse -Force}
             & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $childScript (Join-Path $caseRuntime 'agent-environment-reconciler.psm1') $desiredPath $caseHome $failpoint $failureAfter 2>$null
-            $LASTEXITCODE | Should Not Be 0 -Because "failpoint=$failpoint"
-            if($failpoint-cne'after-committed-transaction-cleanup'){@(Get-ChildItem -Force -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should BeGreaterThan 0 -Because "failpoint=$failpoint"}
+            if($LASTEXITCODE-eq0){throw "failpoint=$failpoint; child process unexpectedly succeeded."}
+            if($failpoint-cne'after-committed-transaction-cleanup'-and@(Get-ChildItem -Force -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count-le0){throw "failpoint=$failpoint; expected retained transaction residue."}
             if($failpoint-ceq'after-original-rename'){
-                Test-Path -LiteralPath (Join-Path $caseHome '.agents/skills/alpha/SKILL.md')|Should Be $false -Because "failpoint=$failpoint"
-                @(Get-ChildItem -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -Filter 'backup-*' -Recurse -File).Count|Should BeGreaterThan 0 -Because "failpoint=$failpoint"
+                if(Test-Path -LiteralPath (Join-Path $caseHome '.agents/skills/alpha/SKILL.md')){throw "failpoint=$failpoint; original target was not renamed into transaction backup."}
+                if(@(Get-ChildItem -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -Filter 'backup-*' -Recurse -File).Count-le0){throw "failpoint=$failpoint; renamed original backup is missing."}
             }
             $triggered.Add($failpoint)
             foreach($moduleName in @('skills-selection.psm1','skills-source-routing.psm1','skills-source-retrieval.psm1','skills-source-acquisition.psm1','license-delivery.psm1')){Copy-Item -LiteralPath (Join-Path $script:RuntimeRoot $moduleName) -Destination $caseRuntime -Force}
@@ -642,12 +642,18 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
             $commit='89abcdef0123456789abcdef0123456789abcdef';@{schemaVersion=4;catalog=@{ref=$commit}}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $caseCodex 'ai-instructions-sync.json') -Encoding UTF8;@{schemaVersion=2;repository='https://github.com/example/ai-instructions.git';commit=$commit}|ConvertTo-Json|Set-Content (Join-Path $caseRuntime 'runtime-bundle.json') -Encoding UTF8
             $entry=Join-Path $script:RepositoryRoot 'scripts/update-agent-environment.ps1';$beforeVerify=Get-TestTreeSnapshot $caseHome
             $verifyOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $caseCodex -UserHome $caseHome -VerifyOnly -OutputFormat Json);$verifyExit=$LASTEXITCODE;$verifyResult=$verifyOutput[-1]|ConvertFrom-Json
-            if($failpoint-ceq'after-committed-transaction-cleanup'){$verifyExit|Should Be 0 -Because "failpoint=$failpoint";$verifyResult.outcome|Should Be 'current' -Because "failpoint=$failpoint"}else{$verifyExit|Should Be 1 -Because "failpoint=$failpoint";$verifyResult.Code|Should Be 'interrupted-install' -Because "failpoint=$failpoint"}
-            (Get-TestTreeSnapshot $caseHome)|Should Be $beforeVerify -Because "failpoint=$failpoint"
-            $applyOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $caseCodex -UserHome $caseHome -Apply -OutputFormat Json);$LASTEXITCODE|Should Be 0 -Because "failpoint=$failpoint";$result=$applyOutput[-1]|ConvertFrom-Json
-            @('applied','current')|Should Contain $result.outcome -Because "failpoint=$failpoint"
-            @(Get-ChildItem -Force -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count | Should Be 0 -Because "failpoint=$failpoint"
-            (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $caseHome '.agents/skills/alpha/SKILL.md')).Hash.ToLowerInvariant() | Should Be $desired.Files[0].sha256 -Because "failpoint=$failpoint"
+            if($failpoint-ceq'after-committed-transaction-cleanup'){
+                if($verifyExit-ne0-or[string]$verifyResult.outcome-cne'current'){throw "failpoint=$failpoint; VerifyOnly must report current after committed transaction cleanup."}
+            }elseif($verifyExit-ne1-or[string]$verifyResult.Code-cne'interrupted-install'){
+                throw "failpoint=$failpoint; VerifyOnly must report Code=interrupted-install while transaction residue remains."
+            }
+            if((Get-TestTreeSnapshot $caseHome)-cne$beforeVerify){throw "failpoint=$failpoint; VerifyOnly mutated the USER tree."}
+            $applyOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $caseCodex -UserHome $caseHome -Apply -OutputFormat Json);$applyExit=$LASTEXITCODE;$result=$applyOutput[-1]|ConvertFrom-Json
+            if($applyExit-ne0){throw "failpoint=$failpoint; Apply recovery exited with code $applyExit."}
+            if([string]$result.outcome-cnotin@('applied','current')){throw "failpoint=$failpoint; Apply recovery returned outcome=$($result.outcome)."}
+            if(@(Get-ChildItem -Force -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count-ne0){throw "failpoint=$failpoint; Apply recovery retained transaction residue."}
+            $actualSha=(Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $caseHome '.agents/skills/alpha/SKILL.md')).Hash.ToLowerInvariant()
+            if($actualSha-cne[string]$desired.Files[0].sha256){throw "failpoint=$failpoint; Apply recovery produced SHA-256 $actualSha instead of $($desired.Files[0].sha256)."}
         }
         $triggered.Count|Should Be $failpoints.Count
         foreach($failpoint in $failpoints){$triggered|Should Contain $failpoint}
@@ -1711,6 +1717,26 @@ finally{if($null-ne$lease){if($lease.PSObject.Properties['Stream']){$lease.Strea
         finally { $stream.Dispose() }
         Test-Path -LiteralPath $journalPath -PathType Leaf | Should Be $true
     }
+
+    # Scenario: Public legacy recovery sees retained residue while the managed manifest is malformed.
+    # Purpose: Convert the pre-lock manifest snapshot failure into structured recovery evidence without creating a lock or mutating USER bytes.
+    It 'InterT102_returns_structured_failure_for_a_malformed_prelock_manifest_snapshot' {
+        $caseHome=Join-Path $TestDrive 'recovery-malformed-manifest'
+        $agentsRoot=Join-Path $caseHome '.agents'
+        New-Item -ItemType Directory -Force -Path $agentsRoot|Out-Null
+        $manifestPath=Join-Path $agentsRoot 'catalog-skills.manifest.json'
+        $journalPath=Join-Path $agentsRoot 'update-agent-environment.recovery.json'
+        [IO.File]::WriteAllText($manifestPath,'{"schemaVersion":')
+        [IO.File]::WriteAllText($journalPath,'{}')
+        $before=Get-TestTreeSnapshot $caseHome
+
+        $result=Invoke-UserSkillsRecovery -UserHome $caseHome
+
+        Assert-TestRecoveryFailureResult -Result $result
+        @($result.failed)[0]|Should Match 'managed manifest is not valid JSON'
+        (Get-TestTreeSnapshot $caseHome)|Should Be $before
+        Test-Path -LiteralPath (Join-Path $agentsRoot 'update-agent-environment.lock')|Should Be $false
+    }
 }
 
 Describe 'user Skills managed manifest contract' {
@@ -2105,8 +2131,9 @@ Describe 'USER directory-publication capability gating' {
         (Invoke-UserSkillsReconciliation -DesiredState $currentDesired -UserHome $driftHome -Mode WhatIf).outcome|Should Be 'planned'
         Assert-MockCalled Get-PlatformCapabilities 0 -ModuleName agent-environment-reconciler
     }
+}
 
-
+Describe 'USER commit recovery capability gating' {
     Context 'committing an already-applied directory transaction' {
         # Scenario: A create-directory operation is fully applied, but the process dies before the applied journal is committed.
         # Purpose: A commit recovery only writes journal state and cleans transaction artifacts, so unavailable directory publication must not block it.
