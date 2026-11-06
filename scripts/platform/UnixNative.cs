@@ -403,6 +403,15 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private static void Chmod(SafeFd fd, uint mode) { Check(Mac ? Darwin.fchmod(fd, mode) : Linux.fchmod(fd, mode), "fchmod"); }
         private static void Unlink(SafeFd fd, string leaf, bool directory)
         { Check(Mac ? Darwin.unlinkat(fd, leaf, directory ? AtRemoveDirectory : 0) : Linux.unlinkat(fd, leaf, directory ? AtRemoveDirectory : 0), "unlinkat-probe-cleanup"); }
+        private static void UnlinkOwnedProbeDirectory(SafeFd parent, string leaf, SafeFd directory, string context)
+        {
+            FileObservation held = Stat(directory, null);
+            FileObservation named = TryStat(parent, leaf);
+            if (held.Kind != "directory" || !SameIdentity(held, named))
+                throw new PlatformVerificationException(context, PlatformNative.GetOperatingSystem(),
+                    "probe directory identity changed before cleanup; replacement was preserved");
+            Unlink(parent, leaf, true);
+        }
         private static SafeFd WalkRoot(string root)
         {
             if (String.IsNullOrEmpty(root) || !root.StartsWith("/") || root.IndexOf('\\') >= 0 || root.IndexOf('\0') >= 0)
@@ -1170,14 +1179,46 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             }
         }
 
+        private static FileObservation AssertFileState(SafeFd fd, FileObservation expectedIdentity,
+            string sha256, long length, string context)
+        {
+            try
+            {
+                FileObservation value = Stat(fd, null);
+                if (!SameIdentity(value, expectedIdentity) || value.Kind != "file" || value.LinkCount != 1 ||
+                    value.Size != length || !String.Equals(Hash(fd, value), sha256, StringComparison.Ordinal))
+                    throw new PlatformVerificationException(context, PlatformNative.GetOperatingSystem(),
+                        "identity, type, link count, length, or SHA-256 differs from expected state");
+                return value;
+            }
+            catch (PlatformVerificationException) { throw; }
+            catch (Exception ex)
+            {
+                throw new PlatformVerificationException(context, PlatformNative.GetOperatingSystem(),
+                    "file state could not be verified: " + ex.Message);
+            }
+        }
+
+        private static FileObservation AssertNamedFileState(SafeFd parent, string leaf,
+            FileObservation expectedIdentity, string sha256, long length, string context)
+        {
+            FileObservation named = Stat(parent, leaf);
+            PlatformPaths.Same(named, expectedIdentity); PlatformPaths.Single(named);
+            using (SafeFd reopened = Open(parent, leaf, 0, 0))
+            {
+                FileObservation value = AssertFileState(reopened, expectedIdentity, sha256, length, context);
+                PlatformPaths.Same(value, named);
+            }
+            return named;
+        }
+
         private static void AssertState(UnixLease lease, ulong device, ulong inode, string sha256, long length, string context)
         {
-            FileObservation value = Stat(lease.Fd, null);
-            PlatformPaths.Single(value);
-            if (value.Device != device || value.Inode != inode || value.Size != length ||
-                !String.Equals(Hash(lease.Fd, value), sha256, StringComparison.Ordinal))
-                throw new PlatformVerificationException(context, PlatformNative.GetOperatingSystem(), "identity, length, or SHA-256 differs from expected state");
-            if (lease.Parent != null) PlatformPaths.Same(value, Stat(lease.Parent, lease.Leaf));
+            FileObservation expected = new FileObservation { Device = device, Inode = inode, Kind = "file" };
+            FileObservation value = AssertFileState(lease.Fd, expected, sha256, length, context);
+            if (lease.Parent != null && !SameIdentity(value, TryStat(lease.Parent, lease.Leaf)))
+                throw new PlatformVerificationException(context, PlatformNative.GetOperatingSystem(),
+                    "the retained file identity is no longer named by its parent directory");
         }
 
         private static void AssertStage(UnixLease transaction, UnixLease stage, string sha256, long length)
@@ -1446,10 +1487,16 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "stage-permissions-fsynced");
                     AssertPermissionSnapshot(stage.Fd, desired, "publication-stage-permissions");
                     receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "stage-permissions-verified");
+                    RunMutationTestHook("publication-after-preflight-before-revalidation");
+                    AssertMutationDirectoryPaths(parent, transaction);
+                    AssertState(stage, stageIdentity.Device, stageIdentity.Inode, stageSha256, stageLength,
+                        "publication-stage-post-preflight");
+                    AssertPermissionSnapshot(stage.Fd, desired, "publication-stage-post-preflight-permissions");
                     if (expectedExists)
                     {
-                        PlatformPaths.Same(Stat(parent.Fd, leaf), receipt.DisplacedIdentity);
-                        AssertMutationDirectoryPaths(parent, transaction);
+                        AssertState(target, expectedDevice, expectedInode, expectedSha256, expectedLength,
+                            "publication-target-post-preflight");
+                        AssertPermissionSnapshot(target.Fd, desired, "publication-target-post-preflight-permissions");
                         RenameNoReplace(parent.Fd, leaf, transaction.Fd, displacedLeaf, "rename-target-to-displaced");
                         displaced = true;
                         receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "target-displaced");
@@ -1470,8 +1517,11 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                             durabilityFailure = true; receipt.Flush.Durability = "unconfirmed"; throw;
                         }
                     }
-                    PlatformPaths.Same(Stat(transaction.Fd, stage.Leaf), stageIdentity);
-                    if (!expectedExists) AssertMutationDirectoryPaths(parent, transaction);
+                    RunMutationTestHook("publication-before-stage-rename");
+                    AssertMutationDirectoryPaths(parent, transaction);
+                    AssertState(stage, stageIdentity.Device, stageIdentity.Inode, stageSha256, stageLength,
+                        "publication-stage-before-rename");
+                    AssertPermissionSnapshot(stage.Fd, desired, "publication-stage-before-rename-permissions");
                     RenameNoReplace(transaction.Fd, stage.Leaf, parent.Fd, leaf, "rename-stage-to-target");
                     published = true;
                     receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "stage-published");
@@ -1500,8 +1550,19 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                         receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "directory-paths-verified");
                         FileObservation applied = Stat(parent.Fd, leaf);
                         PlatformPaths.Same(applied, stageIdentity); PlatformPaths.Single(applied);
-                        if ((applied.Mode & 4095) != Convert.ToUInt32(desired.Mode, 8) || applied.Uid != desired.Uid || applied.Gid != desired.Gid)
-                            throw new PlatformVerificationException("publication", PlatformNative.GetOperatingSystem(), "published mode/uid/gid readback failed");
+                        using (SafeFd publishedFile = Open(parent.Fd, leaf, 0, 0))
+                        {
+                            FileObservation reopened = AssertFileState(publishedFile, stageIdentity, stageSha256, stageLength,
+                                "publication-published-post-verification");
+                            PlatformPaths.Same(reopened, applied);
+                            AssertPermissionSnapshot(publishedFile, desired, "publication-published-post-verification-permissions");
+                        }
+                        if (expectedExists)
+                        {
+                            AssertNamedFileState(transaction.Fd, displacedLeaf, receipt.DisplacedIdentity,
+                                expectedSha256, expectedLength, "publication-displaced-post-verification");
+                            receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "displaced-content-verified");
+                        }
                         receipt.AppliedIdentity = applied;
                         receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "applied-identity-verified");
                     }
@@ -1590,15 +1651,17 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                         verifyExpectedPermissions, expectedMode, expectedUid, expectedGid, "owned-file-removal-permissions");
                     DestinationFilesystemPreflight(parent, transaction, leaf, tombstoneLeaf);
                     receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "destination-preflight");
+                    RunMutationTestHook("removal-after-preflight-before-revalidation");
+                    AssertMutationDirectoryPaths(parent, transaction);
+                    AssertState(target, expectedDevice, expectedInode, expectedSha256, expectedLength,
+                        "owned-file-removal-post-preflight");
+                    AssertPermissionSnapshot(target.Fd, receipt.Permissions, "owned-file-removal-post-preflight-permissions");
                     if (cleanup)
                     {
                         RunMutationTestHook("removal-cleanup-before-unlink");
                         AssertMutationDirectoryPaths(parent, transaction);
-                        FileObservation cleanupIdentity = TryStat(transaction.Fd, leaf);
-                        if (cleanupIdentity == null || cleanupIdentity.Device != expectedDevice || cleanupIdentity.Inode != expectedInode ||
-                            cleanupIdentity.Kind != "file" || cleanupIdentity.LinkCount != 1)
-                            throw new PlatformVerificationException("owned-file-removal", PlatformNative.GetOperatingSystem(),
-                                "private tombstone identity, type, or link count changed immediately before unlinkat");
+                        AssertState(target, expectedDevice, expectedInode, expectedSha256, expectedLength,
+                            "owned-file-removal-cleanup-before-unlink");
                         Check(Mac ? Darwin.unlinkat(transaction.Fd, leaf, 0) : Linux.unlinkat(transaction.Fd, leaf, 0), "unlinkat-private-cleanup");
                         receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "private-tombstone-unlinked");
                         try
@@ -1631,8 +1694,10 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     }
                     if (parent.Observation.Device != transaction.Observation.Device)
                         throw new PlatformCapabilityUnavailableException("same-filesystem-rename: EXDEV", PlatformNative.GetOperatingSystem());
-                    PlatformPaths.Same(Stat(parent.Fd, leaf), identity);
                     AssertMutationDirectoryPaths(parent, transaction);
+                    AssertState(target, expectedDevice, expectedInode, expectedSha256, expectedLength,
+                        "owned-file-removal-before-rename");
+                    AssertPermissionSnapshot(target.Fd, receipt.Permissions, "owned-file-removal-before-rename-permissions");
                     RenameNoReplace(parent.Fd, leaf, transaction.Fd, tombstoneLeaf, "rename-target-to-tombstone"); moved = true;
                     receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "target-tombstoned");
                     PlatformPaths.Same(Stat(transaction.Fd, tombstoneLeaf), identity);
@@ -1656,7 +1721,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                         RunMutationTestHook("removal-after-fsync-before-postcheck");
                         AssertMutationDirectoryPaths(parent, transaction);
                         receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "directory-paths-verified");
-                        PlatformPaths.Same(Stat(transaction.Fd, tombstoneLeaf), identity);
+                        AssertNamedFileState(transaction.Fd, tombstoneLeaf, identity, expectedSha256, expectedLength,
+                            "owned-file-removal-tombstone-post-verification");
                         receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "tombstone-identity-verified");
                     }
                     catch (Exception ex)
@@ -1713,37 +1779,43 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             using (SafeFd root = WalkRoot(rootPath))
             {
                 Check(Mac ? Darwin.mkdirat(root, name, 448) : Linux.mkdirat(root, name, 448), "mkdirat-publication-probe");
+                SafeFd directory = null;
+                string[] leaves = new string[] { "source", "published", "conflict-source", "conflict-destination" };
                 try
                 {
-                    using (SafeFd directory = ChildDirectory(root, name, false))
+                    directory = ChildDirectory(root, name, false);
+                    Chmod(directory, 448);
+                    if ((Stat(directory, null).Mode & 4095) != 448) throw new IOException("Publication probe directory is not private.");
+                    try
                     {
-                        Chmod(directory, 448);
-                        if ((Stat(directory, null).Mode & 4095) != 448) throw new IOException("Publication probe directory is not private.");
-                        string[] leaves = new string[] { "source", "published", "conflict-source", "conflict-destination" };
+                        using (SafeFd source = Open(directory, leaves[0], 2 | Create | Exclusive, 384)) { Sync(source, false, "fsync-publication-probe-file"); Snapshot(source, Stat(source, null)); }
+                        RenameNoReplace(directory, leaves[0], directory, leaves[1], "rename-publication-probe");
+                        // Both rename sides are this probe directory; its single fsync
+                        // persists the destination name before any cleanup can remove it.
+                        using (SafeFd conflictSource = Open(directory, leaves[2], 2 | Create | Exclusive, 384)) { }
+                        using (SafeFd conflictDestination = Open(directory, leaves[3], 2 | Create | Exclusive, 384)) { }
+                        bool refused = false;
+                        try { RenameNoReplace(directory, leaves[2], directory, leaves[3], "rename-publication-probe-conflict"); }
+                        catch (PlatformErrnoException ex) { if (ex.Errno != 17) throw; refused = true; }
+                        if (!refused || TryStat(directory, leaves[2]) == null || TryStat(directory, leaves[3]) == null)
+                            throw new IOException("No-replace publication probe did not preserve both conflicting names.");
+                        Sync(directory, true, "fsync-publication-probe-directory");
+                        return (Mac ? "renameatx_np(RENAME_EXCL)" : "renameat2(RENAME_NOREPLACE)") + ", file fsync, directory fsync, ACL/flags detection passed";
+                    }
+                    finally { foreach (string leaf in leaves) if (TryStat(directory, leaf) != null) try { Unlink(directory, leaf, false); } catch { } }
+                }
+                finally
+                {
+                    if (directory != null)
+                    {
                         try
                         {
-                            using (SafeFd source = Open(directory, leaves[0], 2 | Create | Exclusive, 384)) { Sync(source, false, "fsync-publication-probe-file"); Snapshot(source, Stat(source, null)); }
-                            RenameNoReplace(directory, leaves[0], directory, leaves[1], "rename-publication-probe");
-                            // Both rename sides are this probe directory; its single fsync
-                            // persists the destination name before any cleanup can remove it.
-                            using (SafeFd conflictSource = Open(directory, leaves[2], 2 | Create | Exclusive, 384)) { }
-                            using (SafeFd conflictDestination = Open(directory, leaves[3], 2 | Create | Exclusive, 384)) { }
-                            bool refused = false;
-                            try { RenameNoReplace(directory, leaves[2], directory, leaves[3], "rename-publication-probe-conflict"); }
-                            catch (PlatformErrnoException ex) { if (ex.Errno != 17) throw; refused = true; }
-                            if (!refused || TryStat(directory, leaves[2]) == null || TryStat(directory, leaves[3]) == null)
-                                throw new IOException("No-replace publication probe did not preserve both conflicting names.");
-                            Sync(directory, true, "fsync-publication-probe-directory");
-                            return (Mac ? "renameatx_np(RENAME_EXCL)" : "renameat2(RENAME_NOREPLACE)") + ", file fsync, directory fsync, ACL/flags detection passed";
+                            RunProbeTestHook("publication-probe-before-directory-cleanup:" + rootPath + "/" + name);
+                            UnlinkOwnedProbeDirectory(root, name, directory, "publication-probe-cleanup");
                         }
-                        finally
-                        {
-                            foreach (string leaf in leaves) if (TryStat(directory, leaf) != null)
-                                try { Unlink(directory, leaf, false); } catch { }
-                        }
+                        finally { directory.Dispose(); }
                     }
                 }
-                finally { Unlink(root, name, true); }
             }
         }
 
@@ -1755,9 +1827,10 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             using (SafeFd root = WalkRoot(rootPath))
             {
                 Check(Mac ? Darwin.mkdirat(root, name, 448) : Linux.mkdirat(root, name, 448), "mkdirat-permissions-probe");
+                SafeFd directory = null;
                 try
                 {
-                    using (SafeFd directory = ChildDirectory(root, name, false))
+                    directory = ChildDirectory(root, name, false);
                     using (SafeFd file = Open(directory, "probe", 2 | Create | Exclusive, 384))
                     {
                         try
@@ -1776,7 +1849,18 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                         finally { if (TryStat(directory, "probe") != null) Unlink(directory, "probe", false); }
                     }
                 }
-                finally { Unlink(root, name, true); }
+                finally
+                {
+                    if (directory != null)
+                    {
+                        try
+                        {
+                            RunProbeTestHook("permissions-probe-before-directory-cleanup:" + rootPath + "/" + name);
+                            UnlinkOwnedProbeDirectory(root, name, directory, "permissions-probe-cleanup");
+                        }
+                        finally { directory.Dispose(); }
+                    }
+                }
             }
         }
 

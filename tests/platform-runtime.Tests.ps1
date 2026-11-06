@@ -4116,6 +4116,90 @@ Describe 'Unix P7c durable publication and removal' {
             Test-Path -LiteralPath (Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/tombstone")|Should Be $false
         } finally {$field.SetValue($null,$null);foreach($lease in @($restored,$target)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$parent.Dispose()}
     }
+
+    # Scenario: A same-account writer rewrites the stage inode after destination preflight and before publication mutation.
+    # Purpose: Revalidate the retained stage descriptor's identity, length, SHA-256, and publication permissions before either name moves.
+    It 'InterT250_rejects_in_place_stage_drift_after_preflight_without_moving_names' {
+        $parent=New-P7cDirectory 'post-preflight-stage';$txn=New-P7cTransaction;$target=$null;$stage=$null
+        $field=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative].GetField('MutationTestHook',[Reflection.BindingFlags]'NonPublic,Static')
+        $stagePath=Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/stage"
+        try {
+            $target=New-P7cFile $parent target original;$state=Get-P7cState $target;$target.Dispose();$target=$null
+            $stage=New-P7cFile $txn.Lease stage replacement;$stageState=Get-P7cStageState $stage
+            $field.SetValue($null,[Action[string]]{param($point)if($point-ceq'publication-after-preflight-before-revalidation'){[IO.File]::WriteAllText($stagePath,'tampered-stage')}})
+            $caught=$null
+            try{Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $state -DisplacedLeaf backup -ExpectedStage $stageState|Out-Null}catch{$caught=$_.Exception}
+            $caught.GetType().Name|Should Be PlatformVerificationException
+            (Read-P7cText $parent target)|Should Be original
+            (Read-P7cText $txn.Lease stage)|Should Be 'tampered-stage'
+            Test-Path -LiteralPath (Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/backup")|Should Be $false
+        } finally {$field.SetValue($null,$null);foreach($lease in @($stage,$target)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$parent.Dispose()}
+    }
+
+    # Scenario: A same-account writer rewrites target bytes or changes target mode after destination preflight.
+    # Purpose: Revalidate the complete expected target state and snapshot permissions before target displacement while leaving the stage name intact.
+    It 'InterT255_rejects_in_place_target_or_mode_drift_after_preflight_without_moving_names' {
+        $field=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative].GetField('MutationTestHook',[Reflection.BindingFlags]'NonPublic,Static')
+        foreach($variant in @('content','mode')){
+            $parent=New-P7cDirectory "post-preflight-target-$variant";$txn=New-P7cTransaction;$target=$null;$stage=$null
+            $targetPath=Join-Path $script:P7cRoot "post-preflight-target-$variant/target"
+            try {
+                $target=New-P7cFile $parent target original;$state=Get-P7cState $target;$target.Dispose();$target=$null
+                $stage=New-P7cFile $txn.Lease stage replacement;$stageState=Get-P7cStageState $stage
+                $hookVariant=$variant
+                $hook={param($point)if($point-ceq'publication-after-preflight-before-revalidation'){if($hookVariant-ceq'content'){[IO.File]::WriteAllText($targetPath,'tampered-target')}else{[IO.File]::SetUnixFileMode($targetPath,([IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite -bor [IO.UnixFileMode]::GroupRead))}}}.GetNewClosure()
+                $field.SetValue($null,[Action[string]]$hook)
+                $caught=$null
+                try{Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $state -DisplacedLeaf backup -ExpectedStage $stageState|Out-Null}catch{$caught=$_.Exception}
+                $caught.GetType().Name|Should Be PlatformVerificationException
+                if($variant-ceq'content'){[IO.File]::ReadAllText($targetPath)|Should Be 'tampered-target'}else{[int][IO.File]::GetUnixFileMode($targetPath)|Should Be 416}
+                (Read-P7cText $txn.Lease stage)|Should Be replacement
+                Test-Path -LiteralPath (Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/backup")|Should Be $false
+            } finally {$field.SetValue($null,$null);foreach($lease in @($stage,$target)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$parent.Dispose()}
+        }
+    }
+
+    # Scenario: A same-account writer rewrites the removal target inode after destination preflight.
+    # Purpose: Revalidate full target state and permissions immediately before tombstone rename so no stale snapshot is removed.
+    It 'InterT260_rejects_in_place_removal_target_drift_after_preflight_without_tombstoning' {
+        $parent=New-P7cDirectory 'post-preflight-remove';$txn=New-P7cTransaction;$target=$null
+        $field=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative].GetField('MutationTestHook',[Reflection.BindingFlags]'NonPublic,Static')
+        $targetPath=Join-Path $script:P7cRoot 'post-preflight-remove/target'
+        try {
+            $target=New-P7cFile $parent target original;$state=Get-P7cState $target;$target.Dispose();$target=$null
+            $field.SetValue($null,[Action[string]]{param($point)if($point-ceq'removal-after-preflight-before-revalidation'){[IO.File]::WriteAllText($targetPath,'tampered-removal-target')}})
+            $caught=$null
+            try{Remove-PlatformOwnedFile -ParentLease $parent -Leaf target -ExpectedState $state -TransactionLease $txn.Lease -TombstoneLeaf tombstone|Out-Null}catch{$caught=$_.Exception}
+            $caught.GetType().Name|Should Be PlatformVerificationException
+            [IO.File]::ReadAllText($targetPath)|Should Be 'tampered-removal-target'
+            Test-Path -LiteralPath (Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/tombstone")|Should Be $false
+        } finally {$field.SetValue($null,$null);if($null-ne$target){$target.Dispose()};$txn.Lease.Dispose();$parent.Dispose()}
+    }
+
+    # Scenario: Each host capability probe directory is renamed and replaced by an unrelated empty directory immediately before cleanup.
+    # Purpose: Compare the held directory fd with fstatat ownership evidence, preserve the replacement, and report that capability unavailable.
+    It 'InterT265_preserves_replaced_host_probe_directories_and_reports_capabilities_unavailable' {
+        $field=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative].GetField('ProbeTestHook',[Reflection.BindingFlags]'NonPublic,Static')
+        foreach($case in @(
+            [pscustomobject]@{Prefix='publication-probe-before-directory-cleanup:';Capability='publication'},
+            [pscustomobject]@{Prefix='permissions-probe-before-directory-cleanup:';Capability='permissions'}
+        )){
+            $paths=[Collections.Generic.List[string]]::new();$prefix=$case.Prefix
+            try {
+                $hook={param($point)if($point.StartsWith($prefix,[StringComparison]::Ordinal)){$path=$point.Substring($prefix.Length);$moved=$path+'-held';[IO.Directory]::Move($path,$moved);[IO.Directory]::CreateDirectory($path)|Out-Null;$paths.Add($path);$paths.Add($moved)}}.GetNewClosure()
+                $field.SetValue($null,[Action[string]]$hook)
+                $receipt=Get-PlatformCapabilities -Required @()
+                $capability=$receipt.capabilities|Where-Object name -eq $case.Capability
+                $capability.status|Should Be unavailable
+                ($capability.evidence-join' ')|Should Match 'probe directory identity changed before cleanup'
+                [IO.Directory]::Exists($paths[0])|Should Be $true
+                [IO.Directory]::Exists($paths[1])|Should Be $true
+            } finally {
+                $field.SetValue($null,$null)
+                foreach($path in @($paths)){if([IO.Directory]::Exists($path)){Remove-Item -LiteralPath $path -Recurse -Force}}
+            }
+        }
+    }
     }
 }
 
