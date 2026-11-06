@@ -50,6 +50,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         public FileObservation DisplacedIdentity { get; internal set; }
         public UnixPermissionSnapshot Permissions { get; internal set; }
         public string DisplacedLeaf { get; internal set; }
+        public string[] CompletedSteps { get; internal set; }
         public UnixFlushReceipt Flush { get; internal set; }
     }
 
@@ -59,6 +60,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         public UnixPermissionSnapshot Permissions { get; internal set; }
         public string TombstoneLeaf { get; internal set; }
         public string Method { get; internal set; }
+        public string[] CompletedSteps { get; internal set; }
         public UnixFlushReceipt Flush { get; internal set; }
     }
 
@@ -280,6 +282,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private static string abiEvidence;
         private static bool abiAttempted;
         private static Exception abiFailure;
+        // Test-only barrier. Production code never assigns this internal hook.
+        internal static Action<string> MutationTestHook = null;
 
         internal static int Close(int fd) { return Mac ? Darwin.close(fd) : Linux.close(fd); }
         private static string ErrnoName(int error)
@@ -1004,6 +1008,15 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             return new UnixPermissionSnapshot { Mode = ModeText(observation.Mode), Uid = observation.Uid, Gid = observation.Gid };
         }
 
+        private static UnixPermissionSnapshot AssertExpectedPermissions(SafeFd fd, FileObservation observation,
+            bool verify, uint expectedMode, ulong expectedUid, ulong expectedGid, string context)
+        {
+            UnixPermissionSnapshot live = Snapshot(fd, observation);
+            if (verify && (Convert.ToUInt32(live.Mode, 8) != expectedMode || live.Uid != expectedUid || live.Gid != expectedGid))
+                throw new PlatformVerificationException(context, PlatformNative.GetOperatingSystem(), "live mode/uid/gid differs from journal permissions");
+            return live;
+        }
+
         private static uint EffectiveUid() { return Mac ? Darwin.geteuid() : Linux.geteuid(); }
 
         private static void ApplyPermissions(SafeFd fd, UnixPermissionSnapshot snapshot)
@@ -1085,6 +1098,26 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private static UnixFlushReceipt NewFlush(string durability)
         { return new UnixFlushReceipt { File = "confirmed", ParentDirectory = "pending", TransactionDirectory = "pending", Durability = durability }; }
 
+        private static string[] AddStep(string[] existing, string step)
+        {
+            string[] result = new string[(existing == null ? 0 : existing.Length) + 1];
+            if (existing != null) Array.Copy(existing, result, existing.Length);
+            result[result.Length - 1] = step;
+            return result;
+        }
+
+        private static void AssertMutationDirectoryPaths(UnixLease parent, UnixLease transaction)
+        {
+            GetVerifiedPath(parent);
+            GetVerifiedPath(transaction);
+        }
+
+        private static void RunMutationTestHook(string point)
+        {
+            Action<string> hook = MutationTestHook;
+            if (hook != null) hook(point);
+        }
+
         public static string GetSha256(UnixLease lease)
         {
             lock (lease.Sync) { lease.Check(); return Hash(lease.Fd, AssertIdentity(lease, lease.Observation, true)); }
@@ -1126,9 +1159,13 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
 
         public static UnixPublicationResult Publish(UnixLease parent, string leaf, UnixLease transaction, UnixLease stage,
             bool expectedExists, ulong expectedDevice, ulong expectedInode, string expectedSha256, long expectedLength,
-            string displacedLeaf, string stageSha256, long stageLength, bool noReplace, uint createMode)
+            string displacedLeaf, string stageSha256, long stageLength, bool noReplace, uint createMode,
+            bool verifyExpectedPermissions, uint expectedMode, ulong expectedUid, ulong expectedGid)
         {
-            PlatformPaths.Leaf(leaf); PlatformPaths.Leaf(displacedLeaf); ValidateAbi();
+            PlatformPaths.Leaf(leaf);
+            if (expectedExists) PlatformPaths.Leaf(displacedLeaf);
+            else if (displacedLeaf != null) throw new ArgumentException("displacedLeaf must be null when the target is absent.");
+            ValidateAbi();
             if (createMode > 4095) throw new ArgumentOutOfRangeException("createMode");
             lock (parent.Sync) lock (transaction.Sync) lock (stage.Sync)
             {
@@ -1140,8 +1177,11 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 Sync(stage.Fd, false, "fsync-stage");
                 UnixPermissionSnapshot stageOriginal = Snapshot(stage.Fd, stageIdentity);
                 UnixLease target = null;
-                bool displaced = false, published = false, permissionsChanged = false, durabilityFailure = false;
-                UnixPublicationResult receipt = new UnixPublicationResult { AppliedIdentity = stageIdentity, DisplacedLeaf = expectedExists ? displacedLeaf : null, Flush = NewFlush("unconfirmed") };
+                bool displaced = false, published = false, permissionsChanged = false, durabilityFailure = false, postVerificationFailure = false;
+                UnixPublicationResult receipt = new UnixPublicationResult {
+                    AppliedIdentity = stageIdentity, DisplacedLeaf = expectedExists ? displacedLeaf : null,
+                    CompletedSteps = new string[] { "stage-file-fsynced" }, Flush = NewFlush("unconfirmed")
+                };
                 try
                 {
                     FileObservation named = TryStat(parent.Fd, leaf);
@@ -1151,8 +1191,9 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                         if (named == null) throw new PlatformVerificationException("publication", PlatformNative.GetOperatingSystem(), "expected target is absent");
                         target = OpenFile(parent, leaf, "Read", "OpenExisting");
                         AssertState(target, expectedDevice, expectedInode, expectedSha256, expectedLength, "publication-target");
-                        desired = Snapshot(target.Fd, Stat(target.Fd, null));
                         receipt.DisplacedIdentity = Stat(target.Fd, null);
+                        desired = AssertExpectedPermissions(target.Fd, receipt.DisplacedIdentity,
+                            verifyExpectedPermissions, expectedMode, expectedUid, expectedGid, "publication-permissions");
                         if (noReplace) throw Errno("publication-noreplace-target", 17);
                     }
                     else
@@ -1162,21 +1203,26 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     }
                     receipt.Permissions = desired;
                     permissionsChanged = true; ApplyPermissions(stage.Fd, desired);
+                    AssertMutationDirectoryPaths(parent, transaction);
                     if (expectedExists)
                     {
                         PlatformPaths.Same(Stat(parent.Fd, leaf), receipt.DisplacedIdentity);
                         RenameNoReplace(parent.Fd, leaf, transaction.Fd, displacedLeaf, "rename-target-to-displaced");
                         displaced = true;
+                        receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "target-displaced");
                         PlatformPaths.Same(Stat(transaction.Fd, displacedLeaf), receipt.DisplacedIdentity);
                     }
                     PlatformPaths.Same(Stat(transaction.Fd, stage.Leaf), stageIdentity);
                     RenameNoReplace(transaction.Fd, stage.Leaf, parent.Fd, leaf, "rename-stage-to-target");
                     published = true;
+                    receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "stage-published");
                     PlatformPaths.Same(Stat(parent.Fd, leaf), stageIdentity);
                     try
                     {
                         Sync(parent.Fd, true, "fsync-target-parent"); receipt.Flush.ParentDirectory = "confirmed";
+                        receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "parent-directory-fsynced");
                         Sync(transaction.Fd, true, "fsync-transaction-directory"); receipt.Flush.TransactionDirectory = "confirmed";
+                        receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "transaction-directory-fsynced");
                         receipt.Flush.Durability = "confirmed";
                     }
                     catch (Exception ex)
@@ -1184,16 +1230,28 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                         durabilityFailure = true; receipt.Flush.Durability = "unconfirmed";
                         throw new PlatformMutationException("publication-durability", PlatformNative.GetOperatingSystem(), "published-durability-unconfirmed", ex.Message, receipt);
                     }
-                    FileObservation applied = Stat(parent.Fd, leaf);
-                    PlatformPaths.Same(applied, stageIdentity); PlatformPaths.Single(applied);
-                    if ((applied.Mode & 4095) != Convert.ToUInt32(desired.Mode, 8) || applied.Uid != desired.Uid || applied.Gid != desired.Gid)
-                        throw new PlatformVerificationException("publication", PlatformNative.GetOperatingSystem(), "published mode/uid/gid readback failed");
-                    receipt.AppliedIdentity = applied;
+                    try
+                    {
+                        RunMutationTestHook("publication-after-fsync-before-postcheck");
+                        AssertMutationDirectoryPaths(parent, transaction);
+                        receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "directory-paths-verified");
+                        FileObservation applied = Stat(parent.Fd, leaf);
+                        PlatformPaths.Same(applied, stageIdentity); PlatformPaths.Single(applied);
+                        if ((applied.Mode & 4095) != Convert.ToUInt32(desired.Mode, 8) || applied.Uid != desired.Uid || applied.Gid != desired.Gid)
+                            throw new PlatformVerificationException("publication", PlatformNative.GetOperatingSystem(), "published mode/uid/gid readback failed");
+                        receipt.AppliedIdentity = applied;
+                        receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "applied-identity-verified");
+                    }
+                    catch (Exception ex)
+                    {
+                        postVerificationFailure = true;
+                        throw new PlatformMutationException("publication-post-verification", PlatformNative.GetOperatingSystem(), "published-path-identity-unconfirmed", ex.Message, receipt);
+                    }
                     return receipt;
                 }
                 catch (Exception original)
                 {
-                    if (durabilityFailure) throw;
+                    if (durabilityFailure || postVerificationFailure) throw;
                     try
                     {
                         if (published) { RenameNoReplace(parent.Fd, leaf, transaction.Fd, stage.Leaf, "rollback-target-to-stage"); published = false; }
@@ -1212,7 +1270,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         }
 
         public static UnixRemovalResult Remove(UnixLease parent, string leaf, UnixLease transaction, string tombstoneLeaf,
-            ulong expectedDevice, ulong expectedInode, string expectedSha256, long expectedLength)
+            ulong expectedDevice, ulong expectedInode, string expectedSha256, long expectedLength,
+            bool verifyExpectedPermissions, uint expectedMode, ulong expectedUid, ulong expectedGid)
         {
             PlatformPaths.Leaf(leaf); PlatformPaths.Leaf(tombstoneLeaf); ValidateAbi();
             lock (parent.Sync) lock (transaction.Sync)
@@ -1222,29 +1281,53 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 if (cleanup && leaf != tombstoneLeaf)
                     throw new PlatformVerificationException("owned-file-removal", PlatformNative.GetOperatingSystem(), "cleanup mode requires identical private leaf names");
                 UnixLease target = OpenFile(parent, leaf, "Read", "OpenExisting");
-                UnixRemovalResult receipt = new UnixRemovalResult { TombstoneLeaf = tombstoneLeaf, Method = cleanup ? "cleanup-unlinkat" : "tombstone-rename", Flush = NewFlush("unconfirmed") };
-                bool moved = false, durabilityFailure = false;
+                UnixRemovalResult receipt = new UnixRemovalResult {
+                    TombstoneLeaf = tombstoneLeaf, Method = cleanup ? "cleanup-unlinkat" : "tombstone-rename",
+                    CompletedSteps = new string[0], Flush = NewFlush("unconfirmed")
+                };
+                bool moved = false, durabilityFailure = false, postVerificationFailure = false;
                 try
                 {
                     AssertState(target, expectedDevice, expectedInode, expectedSha256, expectedLength, "owned-file-removal");
                     FileObservation identity = Stat(target.Fd, null);
-                    receipt.BackupIdentity = identity; receipt.Permissions = Snapshot(target.Fd, identity);
+                    receipt.BackupIdentity = identity;
+                    receipt.Permissions = AssertExpectedPermissions(target.Fd, identity,
+                        verifyExpectedPermissions, expectedMode, expectedUid, expectedGid, "owned-file-removal-permissions");
                     if (cleanup)
                     {
                         Check(Mac ? Darwin.unlinkat(transaction.Fd, leaf, 0) : Linux.unlinkat(transaction.Fd, leaf, 0), "unlinkat-private-cleanup");
+                        receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "private-tombstone-unlinked");
                         Sync(transaction.Fd, true, "fsync-transaction-cleanup");
                         receipt.Flush.ParentDirectory = "confirmed"; receipt.Flush.TransactionDirectory = "confirmed"; receipt.Flush.Durability = "confirmed";
+                        receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "transaction-directory-fsynced");
+                        try
+                        {
+                            RunMutationTestHook("removal-after-fsync-before-postcheck");
+                            AssertMutationDirectoryPaths(parent, transaction);
+                            receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "directory-paths-verified");
+                            if (TryStat(transaction.Fd, leaf) != null)
+                                throw new PlatformVerificationException("owned-file-removal", PlatformNative.GetOperatingSystem(), "cleaned private tombstone name is still present");
+                        }
+                        catch (Exception ex)
+                        {
+                            postVerificationFailure = true;
+                            throw new PlatformMutationException("owned-file-removal-post-verification", PlatformNative.GetOperatingSystem(), "cleanup-path-identity-unconfirmed", ex.Message, receipt);
+                        }
                         return receipt;
                     }
                     if (parent.Observation.Device != transaction.Observation.Device)
                         throw new PlatformCapabilityUnavailableException("same-filesystem-rename: EXDEV", PlatformNative.GetOperatingSystem());
+                    AssertMutationDirectoryPaths(parent, transaction);
                     PlatformPaths.Same(Stat(parent.Fd, leaf), identity);
                     RenameNoReplace(parent.Fd, leaf, transaction.Fd, tombstoneLeaf, "rename-target-to-tombstone"); moved = true;
+                    receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "target-tombstoned");
                     PlatformPaths.Same(Stat(transaction.Fd, tombstoneLeaf), identity);
                     try
                     {
                         Sync(parent.Fd, true, "fsync-removal-parent"); receipt.Flush.ParentDirectory = "confirmed";
+                        receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "parent-directory-fsynced");
                         Sync(transaction.Fd, true, "fsync-removal-transaction"); receipt.Flush.TransactionDirectory = "confirmed";
+                        receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "transaction-directory-fsynced");
                         receipt.Flush.Durability = "confirmed";
                     }
                     catch (Exception ex)
@@ -1252,12 +1335,24 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                         durabilityFailure = true;
                         throw new PlatformMutationException("owned-file-removal-durability", PlatformNative.GetOperatingSystem(), "tombstoned-durability-unconfirmed", ex.Message, receipt);
                     }
-                    PlatformPaths.Same(Stat(transaction.Fd, tombstoneLeaf), identity);
+                    try
+                    {
+                        RunMutationTestHook("removal-after-fsync-before-postcheck");
+                        AssertMutationDirectoryPaths(parent, transaction);
+                        receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "directory-paths-verified");
+                        PlatformPaths.Same(Stat(transaction.Fd, tombstoneLeaf), identity);
+                        receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "tombstone-identity-verified");
+                    }
+                    catch (Exception ex)
+                    {
+                        postVerificationFailure = true;
+                        throw new PlatformMutationException("owned-file-removal-post-verification", PlatformNative.GetOperatingSystem(), "tombstoned-path-identity-unconfirmed", ex.Message, receipt);
+                    }
                     return receipt;
                 }
                 catch (Exception original)
                 {
-                    if (durabilityFailure) throw;
+                    if (durabilityFailure || postVerificationFailure) throw;
                     if (moved)
                     {
                         try { RenameNoReplace(transaction.Fd, tombstoneLeaf, parent.Fd, leaf, "rollback-tombstone-to-target"); moved = false; }

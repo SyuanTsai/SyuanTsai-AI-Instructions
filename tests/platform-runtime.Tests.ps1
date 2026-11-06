@@ -3430,6 +3430,20 @@ Describe 'Unix P7c durable publication and removal' {
             $lease = Open-PlatformFile -ParentLease $Parent -Leaf $Leaf -Access Read -CreateMode OpenExisting
             try { [Text.UTF8Encoding]::new($false).GetString($lease.ReadAllBytes(1048576)) } finally { $lease.Dispose() }
         }
+        function New-P7cJournalOperation {
+            param(
+                [string]$TargetRelativePath,[string]$Kind,[string]$Method,[AllowNull()][string]$StageLeaf,
+                [AllowNull()][string]$BackupLeaf,$Original,$Applied,[AllowNull()]$Permissions
+            )
+            [pscustomobject][ordered]@{
+                sequence=1;kind=$Kind;method=$Method;targetRelativePath=$TargetRelativePath
+                stageLeaf=$StageLeaf;backupLeaf=$BackupLeaf;original=$Original;backupIdentity=$null
+                applied=$Applied;permissions=$Permissions;state='pending'
+            }
+        }
+        function New-P7cAppliedState($StageState) {
+            [pscustomobject][ordered]@{ exists=$true;sha256=$StageState.sha256;length=$StageState.length;identity=$null }
+        }
     }
 
     # Scenario: A 0640 target is replaced by a transaction stage.
@@ -3455,7 +3469,7 @@ Describe 'Unix P7c durable publication and removal' {
         $parent=New-P7cDirectory 'create';$txn=New-P7cTransaction;$stage=$null;$published=$null
         try {
             $stage=New-P7cFile $txn.Lease stage 'created';$stageState=Get-P7cStageState $stage
-            $receipt=Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState (Get-P7cAbsentState) -DisplacedLeaf unused -ExpectedStage $stageState
+            $receipt=Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState (Get-P7cAbsentState) -DisplacedLeaf $null -ExpectedStage $stageState
             $published=Open-PlatformFile -ParentLease $parent -Leaf target -Access Read -CreateMode OpenExisting
             (Get-PlatformPermissions $published).mode|Should Be '600';$receipt.displacedIdentity|Should BeNullOrEmpty
         } finally {if($null-ne$published){$published.Dispose()};if($null-ne$stage){$stage.Dispose()};$txn.Lease.Dispose();$parent.Dispose()}
@@ -3503,7 +3517,7 @@ Describe 'Unix P7c durable publication and removal' {
         $parent=New-P7cDirectory boundary;$txn=New-P7cTransaction;$outside=New-P7cDirectory outside;$outsideStage=$null;$target=$null;$stage=$null;$collision=$null
         try{
             $outsideStage=New-P7cFile $outside stage outside
-            {Publish-PlatformFile -ParentLease $parent -Leaf absent -TransactionLease $txn.Lease -StageLease $outsideStage -ExpectedState (Get-P7cAbsentState) -DisplacedLeaf backup -ExpectedStage (Get-P7cStageState $outsideStage)}|Should Throw
+            {Publish-PlatformFile -ParentLease $parent -Leaf absent -TransactionLease $txn.Lease -StageLease $outsideStage -ExpectedState (Get-P7cAbsentState) -DisplacedLeaf $null -ExpectedStage (Get-P7cStageState $outsideStage)}|Should Throw
             $target=New-P7cFile $parent target original;$targetState=Get-P7cState $target;$target.Dispose();$target=$null
             $stage=New-P7cFile $txn.Lease stage replacement;$collision=New-P7cFile $txn.Lease backup occupied
             {Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $targetState -DisplacedLeaf backup -ExpectedStage (Get-P7cStageState $stage)}|Should Throw
@@ -3566,6 +3580,79 @@ Describe 'Unix P7c durable publication and removal' {
         $receipt=Get-PlatformCapabilities -Required @('publication','owned-file-removal','permissions')
         foreach($name in @('publication','owned-file-removal','permissions')){($receipt.capabilities|Where-Object name -eq $name).status|Should Be available}
         (($receipt.capabilities|Where-Object name -eq publication).evidence -join ' ')|Should Match 'renameat(2|x_np).*fsync'
+    }
+
+    # Scenario: Two journal operations share SKILL.md as their leaf, and one operation names a different parent lease.
+    # Purpose: Bind the caller-supplied operation by its full target path and reject parent confusion before mutation.
+    It 'InterT145_binds_one_journal_operation_by_full_parent_path [skip: requires Unix journal-bound publication]' -Skip:$p7cSkip {
+        $parent=New-P7cDirectory 'journal-a';$wrongParent=New-P7cDirectory 'journal-wrong';$txn=New-P7cTransaction
+        $target=$null;$wrongTarget=$null;$stage=$null;$wrongStage=$null
+        try {
+            $target=New-P7cFile $parent 'SKILL.md' 'a-original';$original=Get-P7cState $target;$permissions=Get-PlatformPermissions $target;$target.Dispose();$target=$null
+            $stage=New-P7cFile $txn.Lease 'stage-a' 'a-applied';$stageState=Get-P7cStageState $stage
+            $operations=@(
+                (New-P7cJournalOperation -TargetRelativePath 'journal-a/SKILL.md' -Kind write-file -Method stage-rename -StageLeaf stage-a -BackupLeaf backup-a -Original $original -Applied (New-P7cAppliedState $stageState) -Permissions $permissions),
+                (New-P7cJournalOperation -TargetRelativePath 'journal-b/SKILL.md' -Kind write-file -Method stage-rename -StageLeaf stage-b -BackupLeaf backup-b -Original $original -Applied (New-P7cAppliedState $stageState) -Permissions $permissions)
+            )
+            Publish-PlatformFile -ParentLease $parent -Leaf 'SKILL.md' -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $original -DisplacedLeaf backup-a -ExpectedStage $stageState -Journal $operations[0] | Out-Null
+            (Read-P7cText $parent 'SKILL.md') | Should Be 'a-applied'
+
+            $wrongTarget=New-P7cFile $wrongParent 'SKILL.md' 'wrong-original';$wrongOriginal=Get-P7cState $wrongTarget;$wrongPermissions=Get-PlatformPermissions $wrongTarget;$wrongTarget.Dispose();$wrongTarget=$null
+            $wrongStage=New-P7cFile $txn.Lease 'stage-wrong' 'wrong-applied';$wrongStageState=Get-P7cStageState $wrongStage
+            $wrongOperation=New-P7cJournalOperation -TargetRelativePath 'journal-a/SKILL.md' -Kind write-file -Method stage-rename -StageLeaf stage-wrong -BackupLeaf backup-wrong -Original $wrongOriginal -Applied (New-P7cAppliedState $wrongStageState) -Permissions $wrongPermissions
+            $caught=$null
+            try { Publish-PlatformFile -ParentLease $wrongParent -Leaf 'SKILL.md' -TransactionLease $txn.Lease -StageLease $wrongStage -ExpectedState $wrongOriginal -DisplacedLeaf backup-wrong -ExpectedStage $wrongStageState -Journal $wrongOperation | Out-Null } catch { $caught=$_.Exception }
+            $caught.GetType().Name | Should Be 'PlatformVerificationException'
+            $caught.Capability | Should Be 'journal-binding'
+            (Read-P7cText $wrongParent 'SKILL.md') | Should Be 'wrong-original'
+            (Read-P7cText $txn.Lease 'stage-wrong') | Should Be 'wrong-applied'
+            (Test-Path -LiteralPath (Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/backup-wrong")) | Should Be $false
+        } finally { foreach($lease in @($wrongStage,$stage,$wrongTarget,$target)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$wrongParent.Dispose();$parent.Dispose() }
+    }
+
+    # Scenario: Journal permissions record mode 0600, but the live target is changed to 0640 before publication.
+    # Purpose: Refuse stale permission ownership evidence before either target or stage is renamed.
+    It 'InterT150_rejects_journal_permission_drift_without_mutation [skip: requires Unix chmod and publication]' -Skip:$p7cSkip {
+        $parent=New-P7cDirectory 'journal-permissions';$txn=New-P7cTransaction;$target=$null;$stage=$null
+        try {
+            $target=New-P7cFile $parent target original;$original=Get-P7cState $target;$journalPermissions=Get-PlatformPermissions $target
+            Set-PlatformPermissions -Lease $target -Policy @{Mode=416} | Out-Null
+            $target.Dispose();$target=$null
+            $stage=New-P7cFile $txn.Lease stage replacement;$stageState=Get-P7cStageState $stage
+            $operation=New-P7cJournalOperation -TargetRelativePath 'journal-permissions/target' -Kind write-file -Method stage-rename -StageLeaf stage -BackupLeaf backup -Original $original -Applied (New-P7cAppliedState $stageState) -Permissions $journalPermissions
+            $caught=$null
+            try { Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $original -DisplacedLeaf backup -ExpectedStage $stageState -Journal $operation | Out-Null } catch { $caught=$_.Exception }
+            $caught.GetType().Name | Should Be 'PlatformVerificationException'
+            $caught.Capability | Should Be 'publication-permissions'
+            (Read-P7cText $parent target) | Should Be original
+            (Read-P7cText $txn.Lease stage) | Should Be replacement
+            (Test-Path -LiteralPath (Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/backup")) | Should Be $false
+        } finally { foreach($lease in @($stage,$target)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$parent.Dispose() }
+    }
+
+    # Scenario: A test barrier renames the target parent after durable publication and before pathname post-check.
+    # Purpose: Return a typed recovery receipt and leave the durable applied/backup entries untouched.
+    It 'InterT155_reports_post_publication_parent_move_without_compensation [skip: requires Unix rename and fsync]' -Skip:$p7cSkip {
+        $parent=New-P7cDirectory 'post-parent';$txn=New-P7cTransaction;$target=$null;$stage=$null
+        $sourcePath=Join-Path $script:P7cRoot 'post-parent';$movedPath=Join-Path $script:P7cRoot 'post-parent-moved'
+        $field=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative].GetField('MutationTestHook',[Reflection.BindingFlags]'NonPublic,Static')
+        try {
+            $target=New-P7cFile $parent target original;$original=Get-P7cState $target;$target.Dispose();$target=$null
+            $stage=New-P7cFile $txn.Lease stage replacement;$stageState=Get-P7cStageState $stage
+            $field.SetValue($null,[Action[string]]{param($point)if($point-ceq'publication-after-fsync-before-postcheck'){[IO.Directory]::Move($sourcePath,$movedPath)}})
+            $caught=$null
+            try { Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $original -DisplacedLeaf backup -ExpectedStage $stageState | Out-Null } catch { $caught=$_.Exception }
+            $caught.GetType().Name | Should Be 'PlatformMutationException'
+            $caught.Capability | Should Be 'publication-post-verification'
+            $caught.Receipt.flush.durability | Should Be 'confirmed'
+            (@($caught.Receipt.completedSteps) -contains 'stage-published') | Should Be $true
+            (@($caught.Receipt.completedSteps) -contains 'transaction-directory-fsynced') | Should Be $true
+            $caught.Receipt.appliedIdentity | Should Not BeNullOrEmpty
+            $caught.Receipt.displacedIdentity | Should Not BeNullOrEmpty
+            [IO.File]::ReadAllText((Join-Path $movedPath target)) | Should Be replacement
+            [IO.File]::ReadAllText((Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/backup")) | Should Be original
+            (Test-Path -LiteralPath (Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/stage")) | Should Be $false
+        } finally { $field.SetValue($null,$null);foreach($lease in @($stage,$target)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$parent.Dispose() }
     }
 }
 

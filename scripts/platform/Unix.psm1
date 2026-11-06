@@ -101,46 +101,113 @@ function Assert-UnixExpectedStage {
 }
 
 function Assert-UnixJournalBinding {
-    param($Journal,$TransactionLease,[string]$Leaf,$StageLease,[string]$DisplacedLeaf,$ExpectedState,$ExpectedStage,[switch]$Remove)
-    if ($null -eq $Journal) { return }
-    if ((Get-UnixContractValue $Journal schemaVersion -Required) -ne 1) { throw [ArgumentException]::new('Journal must use schemaVersion 1.') }
-    $transactionId = [string](Get-UnixContractValue $Journal transactionId -Required)
-    if ($transactionId -cnotmatch '^[0-9a-f]{32}$') { throw [ArgumentException]::new('Journal transactionId is invalid.') }
-    $verified = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetVerifiedPath($TransactionLease)
-    if ([IO.Path]::GetFileName($verified.TrimEnd([IO.Path]::DirectorySeparatorChar)) -cne $transactionId) { throw [ArgumentException]::new('Journal transactionId does not identify TransactionLease.') }
-    $platform = Get-UnixContractValue $Journal platform -Required
-    if ((Get-UnixContractValue $platform os -Required) -cne [SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetOperatingSystem()) { throw [ArgumentException]::new('Journal platform does not match the active host.') }
-    $matches = @()
-    foreach ($operation in @(Get-UnixContractValue $Journal operations -Required)) {
-        $relative = [string](Get-UnixContractValue $operation targetRelativePath -Required)
-        if (($relative.Replace('\','/').Split('/')[-1]) -ceq $Leaf) { $matches += $operation }
+    param(
+        $Journal,$ParentLease,$TransactionLease,[string]$Leaf,$StageLease,
+        [AllowNull()][string]$DisplacedLeaf,$ExpectedState,$ExpectedStage,[switch]$Remove
+    )
+    if ($null -eq $Journal) {
+        return [pscustomobject]@{ hasPermissions=$false; mode=[uint32]0; uid=[uint64]0; gid=[uint64]0 }
     }
-    if ($matches.Count -ne 1) { throw [ArgumentException]::new('Journal must contain exactly one operation for the requested target leaf.') }
-    $bound = $matches[0]
-    $journalOriginal = Get-UnixContractValue $bound original -Required
-    if ([bool](Get-UnixContractValue $journalOriginal exists -Required) -ne [bool](Get-UnixContractValue $ExpectedState exists -Required) -or
-        (Get-UnixContractValue $journalOriginal sha256) -cne (Get-UnixContractValue $ExpectedState sha256) -or
-        (Get-UnixContractValue $journalOriginal length) -ne (Get-UnixContractValue $ExpectedState length)) { throw [ArgumentException]::new('Journal original state does not match ExpectedState.') }
-    if ([bool](Get-UnixContractValue $ExpectedState exists -Required)) {
-        $journalIdentity = Get-UnixContractValue $journalOriginal identity -Required
-        $expectedIdentity = Get-UnixContractValue $ExpectedState identity -Required
-        foreach ($name in @('kind','device','fileId')) {
-            if ((Get-UnixContractValue $journalIdentity $name -Required) -cne (Get-UnixContractValue $expectedIdentity $name -Required)) { throw [ArgumentException]::new('Journal original identity does not match ExpectedState.') }
+
+    try {
+        $relative = Get-UnixContractValue $Journal targetRelativePath -Required
+        if ($relative -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$relative) -or [string]$relative -match '\\') {
+            throw [ArgumentException]::new('Journal targetRelativePath is not a canonical relative path.')
+        }
+        $segments = [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Segments([string]$relative)
+        if ($segments[-1] -cne $Leaf) { throw [ArgumentException]::new('Journal targetRelativePath leaf does not match Leaf.') }
+
+        $transactionPath = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetVerifiedPath($TransactionLease).TrimEnd([IO.Path]::DirectorySeparatorChar)
+        $transactionContainer = [IO.Directory]::GetParent($transactionPath)
+        if ($null -eq $transactionContainer -or $transactionContainer.Name -cne '.ai-instructions-txn' -or $null -eq $transactionContainer.Parent) {
+            throw [ArgumentException]::new('TransactionLease does not expose a journal transaction root.')
+        }
+        $transactionId = [IO.Path]::GetFileName($transactionPath)
+        if ($transactionId -cnotmatch '^[0-9a-f]{32}$') { throw [ArgumentException]::new('TransactionLease identifier is invalid.') }
+        $expectedParentPath = $transactionContainer.Parent.FullName
+        if ($segments.Count -gt 1) {
+            $expectedParentPath = [IO.Path]::GetFullPath([IO.Path]::Combine($expectedParentPath,[string]::Join([IO.Path]::DirectorySeparatorChar,$segments[0..($segments.Count-2)])))
+        }
+        $parentPath = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetVerifiedPath($ParentLease).TrimEnd([IO.Path]::DirectorySeparatorChar)
+        if (-not [string]::Equals($parentPath,$expectedParentPath,[StringComparison]::Ordinal)) {
+            throw [ArgumentException]::new('Journal targetRelativePath parent does not identify ParentLease.')
+        }
+
+        $journalOriginal = Assert-UnixExpectedState (Get-UnixContractValue $Journal original -Required) 'Journal.original' -AllowAbsent
+        $expectedOriginal = Assert-UnixExpectedState $ExpectedState ExpectedState -AllowAbsent
+        if ($journalOriginal.exists -ne $expectedOriginal.exists -or
+            $journalOriginal.sha256 -cne $expectedOriginal.sha256 -or
+            $journalOriginal.length -ne $expectedOriginal.length -or
+            $journalOriginal.device -ne $expectedOriginal.device -or
+            $journalOriginal.inode -ne $expectedOriginal.inode) {
+            throw [ArgumentException]::new('Journal original state does not match ExpectedState.')
+        }
+
+        if ($Remove) {
+            if ((Get-UnixContractValue $Journal kind -Required) -cne 'remove-file' -or
+                (Get-UnixContractValue $Journal method -Required) -cne 'tombstone-rename' -or
+                $null -ne (Get-UnixContractValue $Journal stageLeaf) -or
+                (Get-UnixContractValue $Journal backupLeaf -Required) -cne $DisplacedLeaf) {
+                throw [ArgumentException]::new('Journal removal operation does not match TombstoneLeaf and tombstone-rename.')
+            }
+            $journalApplied = Get-UnixContractValue $Journal applied -Required
+            if ([bool](Get-UnixContractValue $journalApplied exists -Required) -or
+                $null -ne (Get-UnixContractValue $journalApplied sha256) -or
+                $null -ne (Get-UnixContractValue $journalApplied length) -or
+                $null -ne (Get-UnixContractValue $journalApplied identity)) {
+                throw [ArgumentException]::new('Journal removal applied state must be absent.')
+            }
+        }
+        else {
+            $expectedKind = if ($expectedOriginal.exists) { 'write-file' } else { 'create-file' }
+            if ((Get-UnixContractValue $Journal kind -Required) -cne $expectedKind -or
+                (Get-UnixContractValue $Journal method -Required) -cne 'stage-rename' -or
+                (Get-UnixContractValue $Journal stageLeaf -Required) -cne [string]$StageLease.Name -or
+                (Get-UnixContractValue $Journal backupLeaf) -cne $DisplacedLeaf) {
+                throw [ArgumentException]::new('Journal publication operation does not match StageLease or DisplacedLeaf.')
+            }
+            $journalAppliedObject = Get-UnixContractValue $Journal applied -Required
+            if (-not [bool](Get-UnixContractValue $journalAppliedObject exists -Required)) {
+                throw [ArgumentException]::new('Journal publication applied state must exist.')
+            }
+            $journalApplied = Assert-UnixExpectedStage $journalAppliedObject
+            $expectedApplied = Assert-UnixExpectedStage $ExpectedStage
+            if ($journalApplied.sha256 -cne $expectedApplied.sha256 -or $journalApplied.length -ne $expectedApplied.length) {
+                throw [ArgumentException]::new('Journal applied state does not match ExpectedStage.')
+            }
+        }
+
+        $permissions = Get-UnixContractValue $Journal permissions
+        if (-not $expectedOriginal.exists) {
+            if ($null -ne $permissions) { throw [ArgumentException]::new('Journal create operation permissions must be null.') }
+            return [pscustomobject]@{ hasPermissions=$false; mode=[uint32]0; uid=[uint64]0; gid=[uint64]0 }
+        }
+        if ($null -eq $permissions -or (Get-UnixContractValue $permissions kind -Required) -cne 'unix-mode') {
+            throw [ArgumentException]::new('Journal permissions must use unix-mode for an existing target.')
+        }
+        $mode = Get-UnixContractValue $permissions mode -Required
+        $uid = Get-UnixContractValue $permissions uid -Required
+        $gid = Get-UnixContractValue $permissions gid -Required
+        if ($mode -isnot [string] -or [string]$mode -cnotmatch '^[0-7]{3,4}$') { throw [ArgumentException]::new('Journal permissions.mode is invalid.') }
+        foreach ($entry in @(@{name='uid';value=$uid},@{name='gid';value=$gid})) {
+            if ($entry.value -is [bool] -or $null -eq $entry.value -or [decimal]$entry.value -ne [Math]::Truncate([decimal]$entry.value) -or
+                [decimal]$entry.value -lt 0 -or [decimal]$entry.value -gt [uint32]::MaxValue) {
+                throw [ArgumentException]::new("Journal permissions.$($entry.name) is invalid.")
+            }
+        }
+        return [pscustomobject]@{
+            hasPermissions=$true
+            mode=[Convert]::ToUInt32([string]$mode,8)
+            uid=[uint64]$uid
+            gid=[uint64]$gid
         }
     }
-    if ($Remove) {
-        if ((Get-UnixContractValue $bound method -Required) -cne 'tombstone-rename' -or
-            (Get-UnixContractValue $bound backupLeaf -Required) -cne $DisplacedLeaf) { throw [ArgumentException]::new('Journal removal operation does not match TombstoneLeaf.') }
-    }
-    else {
-        if ((Get-UnixContractValue $bound method -Required) -cne 'stage-rename' -or
-            (Get-UnixContractValue $bound stageLeaf -Required) -cne [string]$StageLease.Name) { throw [ArgumentException]::new('Journal publication operation does not match StageLease.') }
-        $originalExists = [bool](Get-UnixContractValue $ExpectedState exists -Required)
-        $journalBackup = Get-UnixContractValue $bound backupLeaf
-        if (($originalExists -and $journalBackup -cne $DisplacedLeaf) -or (-not $originalExists -and $null -ne $journalBackup)) { throw [ArgumentException]::new('Journal publication operation does not match DisplacedLeaf.') }
-        $journalApplied = Get-UnixContractValue $bound applied -Required
-        if ((Get-UnixContractValue $journalApplied sha256 -Required) -cne (Get-UnixContractValue $ExpectedStage sha256 -Required) -or
-            [long](Get-UnixContractValue $journalApplied length -Required) -ne [long](Get-UnixContractValue $ExpectedStage length -Required)) { throw [ArgumentException]::new('Journal applied state does not match ExpectedStage.') }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] { throw }
+    catch {
+        throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]::new(
+            'journal-binding',
+            [SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetOperatingSystem(),
+            $_.Exception.Message)
     }
 }
 
@@ -178,25 +245,28 @@ function Publish-UnixPlatformFile {
     param(
         [Parameter(Mandatory=$true)] $ParentLease,[Parameter(Mandatory=$true)][string] $Leaf,
         [Parameter(Mandatory=$true)] $TransactionLease,[Parameter(Mandatory=$true)] $StageLease,
-        [Parameter(Mandatory=$true)] $ExpectedState,[Parameter(Mandatory=$true)][string] $DisplacedLeaf,
+        [Parameter(Mandatory=$true)] $ExpectedState,[Parameter(Mandatory=$true)][AllowNull()][string] $DisplacedLeaf,
         [Parameter(Mandatory=$true)] $ExpectedStage,[switch] $NoReplace,
         [ValidateRange(0,4095)][uint32] $CreateMode = 384,$Journal
     )
     Assert-UnixPlatformHost publication | Out-Null
     [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($Leaf)
-    [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($DisplacedLeaf)
     $expected = Assert-UnixExpectedState $ExpectedState ExpectedState -AllowAbsent
+    if ($expected.exists) { [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($DisplacedLeaf) }
+    elseif ($null -ne $DisplacedLeaf) { throw [ArgumentException]::new('DisplacedLeaf must be null when ExpectedState is absent.') }
     $stage = Assert-UnixExpectedStage $ExpectedStage
-    Assert-UnixJournalBinding $Journal $TransactionLease $Leaf $StageLease $DisplacedLeaf $ExpectedState $ExpectedStage
+    $journalBinding = Assert-UnixJournalBinding $Journal $ParentLease $TransactionLease $Leaf $StageLease $DisplacedLeaf $ExpectedState $ExpectedStage
     try {
         $result = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::Publish(
             $ParentLease,$Leaf,$TransactionLease,$StageLease,$expected.exists,$expected.device,$expected.inode,$expected.sha256,$expected.length,
-            $DisplacedLeaf,$stage.sha256,$stage.length,[bool]$NoReplace,$CreateMode)
+            $DisplacedLeaf,$stage.sha256,$stage.length,[bool]$NoReplace,$CreateMode,
+            [bool]$journalBinding.hasPermissions,[uint32]$journalBinding.mode,[uint64]$journalBinding.uid,[uint64]$journalBinding.gid)
         [pscustomobject][ordered]@{
             appliedIdentity=ConvertTo-UnixPlatformIdentity $result.AppliedIdentity
             displacedIdentity=ConvertTo-UnixPlatformIdentity $result.DisplacedIdentity
             permissions=ConvertTo-UnixPermissionReceipt $result.Permissions
             displacedLeaf=$result.DisplacedLeaf
+            completedSteps=[string[]]@($result.CompletedSteps)
             flush=ConvertTo-UnixFlushReceipt $result.Flush
         }
     }
@@ -207,6 +277,7 @@ function Publish-UnixPlatformFile {
             displacedIdentity=ConvertTo-UnixPlatformIdentity $native.Receipt.DisplacedIdentity
             permissions=if($null -eq $native.Receipt.Permissions){$null}else{ConvertTo-UnixPermissionReceipt $native.Receipt.Permissions}
             displacedLeaf=$native.Receipt.DisplacedLeaf
+            completedSteps=[string[]]@($native.Receipt.CompletedSteps)
             flush=ConvertTo-UnixFlushReceipt $native.Receipt.Flush
         } }
         throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformMutationException]::new($native.Capability,$native.Platform,$native.CurrentState,$native.Message,$translated)
@@ -223,14 +294,17 @@ function Remove-UnixPlatformOwnedFile {
     [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($Leaf)
     [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($TombstoneLeaf)
     $expected = Assert-UnixExpectedState $ExpectedState ExpectedState
-    Assert-UnixJournalBinding $Journal $TransactionLease $Leaf $null $TombstoneLeaf $ExpectedState $null -Remove
+    $journalBinding = Assert-UnixJournalBinding $Journal $ParentLease $TransactionLease $Leaf $null $TombstoneLeaf $ExpectedState $null -Remove
     try {
-        $result = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::Remove($ParentLease,$Leaf,$TransactionLease,$TombstoneLeaf,$expected.device,$expected.inode,$expected.sha256,$expected.length)
+        $result = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::Remove(
+            $ParentLease,$Leaf,$TransactionLease,$TombstoneLeaf,$expected.device,$expected.inode,$expected.sha256,$expected.length,
+            [bool]$journalBinding.hasPermissions,[uint32]$journalBinding.mode,[uint64]$journalBinding.uid,[uint64]$journalBinding.gid)
         [pscustomobject][ordered]@{
             backupIdentity=ConvertTo-UnixPlatformIdentity $result.BackupIdentity
             permissions=ConvertTo-UnixPermissionReceipt $result.Permissions
             tombstoneLeaf=[string]$result.TombstoneLeaf
             method=[string]$result.Method
+            completedSteps=[string[]]@($result.CompletedSteps)
             flush=ConvertTo-UnixFlushReceipt $result.Flush
         }
     }
@@ -241,6 +315,7 @@ function Remove-UnixPlatformOwnedFile {
             permissions=if($null -eq $native.Receipt.Permissions){$null}else{ConvertTo-UnixPermissionReceipt $native.Receipt.Permissions}
             tombstoneLeaf=$native.Receipt.TombstoneLeaf
             method=$native.Receipt.Method
+            completedSteps=[string[]]@($native.Receipt.CompletedSteps)
             flush=ConvertTo-UnixFlushReceipt $native.Receipt.Flush
         } }
         throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformMutationException]::new($native.Capability,$native.Platform,$native.CurrentState,$native.Message,$translated)
