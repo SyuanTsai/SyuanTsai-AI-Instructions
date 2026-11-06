@@ -277,13 +277,27 @@ function Get-AgentEnvironmentFullPath {
 function Assert-AgentEnvironmentPathSafe {
     param(
         [Parameter(Mandatory = $true)][string] $Root,
-        [Parameter(Mandatory = $true)][string] $RelativePath
+        [Parameter(Mandatory = $true)][string] $RelativePath,
+        [switch] $AllowProjectionDirectory
     )
+    $inProjection = $false
+    foreach ($projectionRoot in @(Get-SkillsCatalogUserProjectionRoots)) {
+        if ($RelativePath.StartsWith("$projectionRoot/",[System.StringComparison]::Ordinal) -or
+            ($AllowProjectionDirectory -and $RelativePath -ceq $projectionRoot)) {
+            $inProjection = $true
+            break
+        }
+        if ($AllowProjectionDirectory) {
+            $ancestor = $projectionRoot
+            while ($ancestor.Contains('/')) {
+                $ancestor = $ancestor.Substring(0,$ancestor.LastIndexOf('/'))
+                if ($RelativePath -ceq $ancestor) { $inProjection = $true; break }
+            }
+            if ($inProjection) { break }
+        }
+    }
     if ($RelativePath -cne '.agents/catalog-skills.manifest.json' -and
-        $RelativePath -cne '.agents/update-agent-environment.recovery.json' -and
-        -not $RelativePath.StartsWith('.agents/skills/',[System.StringComparison]::Ordinal) -and
-        -not $RelativePath.StartsWith('.claude/skills/',[System.StringComparison]::Ordinal) -and
-        -not $RelativePath.StartsWith('.copilot/skills/',[System.StringComparison]::Ordinal)) {
+        $RelativePath -cne '.agents/update-agent-environment.recovery.json' -and -not $inProjection) {
         throw "User Agent environment mutation is outside the approved scope: $RelativePath"
     }
     $fullPath = Get-AgentEnvironmentFullPath -Root $Root -RelativePath $RelativePath
@@ -788,7 +802,7 @@ function ConvertTo-AgentEnvironmentPermissionSnapshot {
 }
 
 function Open-AgentEnvironmentDirectoryLease {
-    param([Parameter(Mandatory = $true)][string]$Home,[Parameter(Mandatory = $true)][string]$RelativePath)
+    param([Parameter(Mandatory = $true)][string]$Home,[Parameter(Mandatory = $true)][AllowEmptyString()][string]$RelativePath)
     if ([string]::IsNullOrEmpty($RelativePath)) { return Open-PlatformDirectory -Root $Home -RootOnly }
     return Open-PlatformDirectory -Root $Home -RelativePath $RelativePath
 }
@@ -824,7 +838,7 @@ function Get-AgentEnvironmentVolumeIdentity {
 }
 
 function Get-AgentEnvironmentFileJournalState {
-    param([Parameter(Mandatory = $true)][string]$Home,[Parameter(Mandatory = $true)][string]$RelativePath)
+    param([Parameter(Mandatory = $true)][string]$Home,[Parameter(Mandatory = $true)][AllowEmptyString()][string]$RelativePath)
     $full=Assert-AgentEnvironmentPathSafe -Root $Home -RelativePath $RelativePath
     if (-not (Test-Path -LiteralPath $full)) { return [pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null} }
     $parentRelative=[IO.Path]::GetDirectoryName($RelativePath.Replace('/',[IO.Path]::DirectorySeparatorChar)).Replace('\','/')
@@ -870,7 +884,7 @@ function Get-AgentEnvironmentPrivateFileJournalState {
 }
 
 function Get-AgentEnvironmentDirectoryJournalState {
-    param([Parameter(Mandatory = $true)][string]$Home,[Parameter(Mandatory = $true)][string]$RelativePath)
+    param([Parameter(Mandatory = $true)][string]$Home,[Parameter(Mandatory = $true)][AllowEmptyString()][string]$RelativePath)
     $full=Get-AgentEnvironmentFullPath -Root $Home -RelativePath $RelativePath
     if(-not(Test-Path -LiteralPath $full)){return [pscustomobject][ordered]@{exists=$false;identity=$null;inventorySha256=$null;entryCount=$null}}
     $parentRelative=[IO.Path]::GetDirectoryName($RelativePath.Replace('/',[IO.Path]::DirectorySeparatorChar)).Replace('\','/')
@@ -955,7 +969,7 @@ function Invoke-AgentEnvironmentFailpoint {
 }
 
 function New-AgentEnvironmentPlatformOperation {
-    param([int]$Sequence,[string]$Kind,[string]$Target,[string]$StageLeaf,[string]$BackupLeaf,[string]$QuarantineLeaf,$Original,$Applied,$Permissions)
+    param([int]$Sequence,[string]$Kind,[string]$Target,[AllowNull()][object]$StageLeaf,[AllowNull()][object]$BackupLeaf,[AllowNull()][object]$QuarantineLeaf,$Original,$Applied,$Permissions)
     [pscustomobject][ordered]@{sequence=$Sequence;kind=$Kind;method=$(if($Kind-ceq'remove-file'){'tombstone-rename'}else{'stage-rename'});targetRelativePath=$Target;stageLeaf=$StageLeaf;backupLeaf=$BackupLeaf;quarantineLeaf=$QuarantineLeaf;original=$Original;backupIdentity=$(if([bool]$Original.exists){$Original.identity}else{$null});applied=$Applied;permissions=$Permissions;state='pending'}
 }
 
@@ -1035,6 +1049,8 @@ function Invoke-AgentEnvironmentRecoveryRollbackDecision {
         $action=[string]$operationDecisions[[int64]$operation.sequence].action
         if($action-cne'none'){Invoke-AgentEnvironmentFailpoint -Name 'during-rollback' -ConfiguredName $FailpointName -MutationCount 0 -FailureAfterMutationCount 0}
         $relative=[string]$operation.targetRelativePath
+        $directoryOperation=[string]$operation.kind-in@('swap-directory','create-directory')
+        Assert-AgentEnvironmentPathSafe -Root $Home -RelativePath $relative -AllowProjectionDirectory:$directoryOperation|Out-Null
         $parentRelative=[IO.Path]::GetDirectoryName($relative.Replace('/',[IO.Path]::DirectorySeparatorChar)).Replace('\','/')
         $leaf=$relative.Split('/')[-1]
         $parent=$null
@@ -1079,7 +1095,7 @@ function Remove-AgentEnvironmentEmptyManagedDirectories {
     param(
         [Parameter(Mandatory = $true)][string]$Home,
         [Parameter(Mandatory = $true)]$TransactionLease,
-        [Parameter(Mandatory = $true)][string[]]$DeletedPaths,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$DeletedPaths,
         [scriptblock]$BeforeMoveAction
     )
     $candidates=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
@@ -1252,6 +1268,7 @@ function Get-AgentEnvironmentDirectoryPermissionSnapshot {
 function Get-AgentEnvironmentRecoveryObservation {
     param([string]$Home,[string]$TransactionPath,[object]$Operation)
     $directoryOperation=[string]$Operation.kind-in@('swap-directory','create-directory')
+    Assert-AgentEnvironmentPathSafe -Root $Home -RelativePath ([string]$Operation.targetRelativePath) -AllowProjectionDirectory:$directoryOperation|Out-Null
     $target=if($directoryOperation){Get-AgentEnvironmentDirectoryJournalState $Home ([string]$Operation.targetRelativePath)}else{Get-AgentEnvironmentFileJournalState $Home ([string]$Operation.targetRelativePath)}
     $permissions=if($target.exists){if($directoryOperation){Get-AgentEnvironmentDirectoryPermissionSnapshot $Home ([string]$Operation.targetRelativePath)}else{Get-AgentEnvironmentFilePermissionSnapshot $Home ([string]$Operation.targetRelativePath)}}else{$null}
     $backup=$null

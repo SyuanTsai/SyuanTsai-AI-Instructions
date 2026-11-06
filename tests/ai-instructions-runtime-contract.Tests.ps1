@@ -3121,4 +3121,43 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $journal.lock.leaf | Should Be 'update-agent-environment.lock'
         $journal.generation.previousBundleSha256 | Should Be ('0' * 64)
     }
+
+    # Scenario: A retained USER reconciler journal names targets outside the fixed USER Skill projection roots or their exact missing ancestors.
+    # Purpose: Keep recovery authority scoped to projection content and the one managed manifest before any filesystem observation or mutation.
+    It 'UnitT213_scopes_user_reconciler_operations_to_projection_roots_and_exact_ancestors' {
+        if($PSVersionTable.PSVersion.Major -lt 7){throw 'UnitT213 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.'}
+        $examplePath=Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json'
+        $schemaPath=Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
+        function New-ScopedUserJournal([string]$Kind,[string]$Target){
+            $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath $examplePath|ConvertFrom-Json -DateKind String
+            $manifest=$journal.operations[0];$manifest.sequence=2
+            $operation=if($Kind-ceq'create-directory'){
+                [pscustomobject][ordered]@{sequence=1;kind='create-directory';method='stage-rename';targetRelativePath=$Target;stageLeaf='scope.stage';backupLeaf=$null;quarantineLeaf='scope.quarantine';original=[pscustomobject][ordered]@{exists=$false;identity=$null;inventorySha256=$null;entryCount=$null};backupIdentity=$null;applied=[pscustomobject][ordered]@{exists=$true;identity=$manifest.applied.identity;inventorySha256=('2'*64);entryCount=0};permissions=$null;state='staged'}
+            }else{
+                [pscustomobject][ordered]@{sequence=1;kind=$Kind;method='stage-rename';targetRelativePath=$Target;stageLeaf='scope.stage';backupLeaf=$null;quarantineLeaf=$null;original=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null};backupIdentity=$null;applied=[pscustomobject][ordered]@{exists=$true;sha256=('2'*64);length=1;identity=$manifest.applied.identity};permissions=$null;state='staged'}
+            }
+            $journal.operations=@($operation,$manifest)
+            return $journal
+        }
+        try{
+            foreach($target in @('Documents','.agents/other','.claude/settings.json')){
+                $json=(New-ScopedUserJournal 'create-file' $target)|ConvertTo-Json -Depth 20
+                (Get-RuntimeContractError {ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json|Out-Null})|Should Match 'outside the USER Skill projection roots'
+                (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue)|Should Be $false
+            }
+            foreach($target in @('.agents/skills/alpha/SKILL.md','.claude/skills/alpha/SKILL.md','.copilot/skills/alpha/SKILL.md')){
+                $json=(New-ScopedUserJournal 'create-file' $target)|ConvertTo-Json -Depth 20
+                {ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json|Out-Null}|Should Not Throw
+                (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue)|Should Be $true
+            }
+            foreach($target in @('.agents','.agents/skills','.claude','.claude/skills','.copilot','.copilot/skills','.agents/skills/alpha')){
+                $json=(New-ScopedUserJournal 'create-directory' $target)|ConvertTo-Json -Depth 20
+                {ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json|Out-Null}|Should Not Throw
+                (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue)|Should Be $true
+            }
+            $swap=New-ScopedUserJournal 'create-directory' '.agents/skills/alpha';$swap.operations[0].kind='swap-directory';$swapJson=$swap|ConvertTo-Json -Depth 20
+            (Get-RuntimeContractError {ConvertFrom-AiInstructionsInstallJournalV1Json -Json $swapJson|Out-Null})|Should Match 'swap-directory is not allowed'
+            (Test-Json -Json $swapJson -SchemaFile $schemaPath -ErrorAction SilentlyContinue)|Should Be $false
+        }finally{Remove-Item Function:New-ScopedUserJournal -ErrorAction SilentlyContinue}
+    }
 }

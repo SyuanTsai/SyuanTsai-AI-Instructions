@@ -172,7 +172,7 @@ try {
     & $launcher -ValidateOnly | Out-Null
 
     Remove-Module agent-environment-reconciler -Force -ErrorAction SilentlyContinue
-    $reconcilerModule = Import-Module $reconcilerPath -Force -PassThru
+    $reconcilerModule = @(Import-Module $reconcilerPath -Force -PassThru | Where-Object { [string]::Equals([IO.Path]::GetFullPath([string]$_.Path),[IO.Path]::GetFullPath($reconcilerPath),[StringComparison]::OrdinalIgnoreCase) }) | Select-Object -Last 1
     foreach($commandName in @('Assert-UserProjectionRuntimeGate','Get-UserSkillsDesiredState','Invoke-UserSkillsReconciliation','Invoke-UserSkillsRecovery','New-AgentEnvironmentInstallReadLeaseEvidence')){
         $command=$reconcilerModule.ExportedCommands[$commandName]
         if($null-eq$command){throw "Installed Agent environment reconciler does not export '$commandName'."}

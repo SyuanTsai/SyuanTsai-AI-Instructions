@@ -443,9 +443,9 @@ Describe 'user-scoped Agent Skills reconciliation' {
             $entry=Join-Path $script:RepositoryRoot 'scripts/update-agent-environment.ps1';$codexHome=Join-Path $TestDrive 'cross-volume-entry-codex';$runtime=Join-Path $codexHome 'hooks/ai-instructions-runtime'
             New-Item -ItemType Directory -Force -Path $runtime,(Join-Path $runtime 'catalog')|Out-Null;Copy-Item -Path (Join-Path $script:RuntimeRoot '*') -Destination $runtime -Recurse -Force
             Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/skills-catalog.json') -Destination (Join-Path $runtime 'catalog/skills-catalog.json');Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/skills-catalog-lock.json') -Destination (Join-Path $runtime 'catalog/skills-catalog-lock.json')
-            Move-Item -LiteralPath (Join-Path $runtime 'agent-environment-reconciler.psm1') -Destination (Join-Path $runtime 'agent-environment-reconciler-core.psm1')
+            Move-Item -LiteralPath (Join-Path $runtime 'agent-environment-reconciler.psm1') -Destination (Join-Path $runtime 'agent-environment-reconciler-core.ps1')
             @'
-. (Join-Path $PSScriptRoot 'agent-environment-reconciler-core.psm1')
+. (Join-Path $PSScriptRoot 'agent-environment-reconciler-core.ps1')
 function Get-UserSkillsDesiredState { param([string]$RuntimeRoot,[object]$Configuration,[string]$CatalogRepository,[string]$CatalogCommit,[string]$WorkingRoot) $state=Import-Clixml -LiteralPath (Join-Path $PSScriptRoot 'test-desired.clixml');$state.RuntimeRoot=$PSScriptRoot;return $state }
 Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDesiredState,Invoke-UserSkillsReconciliation,Invoke-UserSkillsRecovery,New-AgentEnvironmentInstallReadLeaseEvidence
 '@|Set-Content -LiteralPath (Join-Path $runtime 'agent-environment-reconciler.psm1') -Encoding UTF8
@@ -562,7 +562,7 @@ Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode
                 Import-Module (Join-Path $caseRuntime 'agent-environment-reconciler.psm1') -Force
                 $trusted=New-AgentEnvironmentInstallReadLeaseEvidence -Lease $readLease
                 $result=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $caseHome -Mode Apply -InstallReadLease $trusted
-            }finally{$readLease.Dispose();Import-Module $script:ModulePath -Force}
+            }finally{$readLease.Dispose();Remove-Module agent-environment-reconciler -Force -ErrorAction SilentlyContinue;Import-Module $script:ModulePath -Force}
             @('applied','current') | Should Contain $result.outcome
             @(Get-ChildItem -Force -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count | Should Be 0
             (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $caseHome '.agents/skills/alpha/SKILL.md')).Hash.ToLowerInvariant() | Should Be $desired.Files[0].sha256
@@ -616,6 +616,37 @@ $module=Get-Module agent-environment-reconciler
         } $script:RuntimeRoot $transactionPath $nextPath
         Test-Path -LiteralPath (Join-Path $transactionPath 'journal.json') -PathType Leaf|Should Be $true
         Test-Path -LiteralPath $previousPath|Should Be $false
+    }
+
+    # Scenario: A retained USER journal has exact directory evidence for an out-of-scope USER-home target.
+    # Purpose: Reject the journal before recovery can lease, quarantine, or delete that unrelated directory.
+    It 'InterT84_rejects_an_out_of_scope_directory_journal_without_target_mutation' {
+        $transactionId=[guid]::NewGuid().ToString('N')
+        $transactionPath=Join-Path $userHome ".ai-instructions-txn/$transactionId"
+        $documentsPath=Join-Path $userHome 'Documents'
+        $sentinelPath=Join-Path $documentsPath 'sentinel.txt'
+        New-Item -ItemType Directory -Force -Path $transactionPath,$documentsPath|Out-Null
+        [IO.File]::WriteAllText($sentinelPath,'preserve unrelated USER content',[Text.UTF8Encoding]::new($false))
+        $module=Get-Module agent-environment-reconciler
+        $applied=& $module {
+            param($RuntimeRoot,$Home)
+            Import-AgentEnvironmentRuntimeModules -RuntimeRoot $RuntimeRoot
+            Get-AgentEnvironmentDirectoryJournalState -Home $Home -RelativePath 'Documents'
+        } $script:RuntimeRoot $userHome
+        $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json -DateKind String
+        $journal.transactionId=$transactionId;$journal.phase='applying'
+        $manifest=$journal.operations[0];$manifest.sequence=2;$manifest.state='pending'
+        $directory=[pscustomobject][ordered]@{sequence=1;kind='create-directory';method='stage-rename';targetRelativePath='Documents';stageLeaf='directory.stage';backupLeaf=$null;quarantineLeaf='directory.quarantine';original=[pscustomobject][ordered]@{exists=$false;identity=$null;inventorySha256=$null;entryCount=$null};backupIdentity=$null;applied=$applied;permissions=$null;state='pending'}
+        $journal.operations=@($directory,$manifest)
+        [IO.File]::WriteAllText((Join-Path $transactionPath 'journal.json'),($journal|ConvertTo-Json -Depth 30),[Text.UTF8Encoding]::new($false))
+
+        $result=Invoke-UserSkillsRecovery -UserHome $userHome
+
+        $result.Code|Should Be 'interrupted-install'
+        Test-Path -LiteralPath $documentsPath -PathType Container|Should Be $true
+        [IO.File]::ReadAllText($sentinelPath)|Should Be 'preserve unrelated USER content'
+        Test-Path -LiteralPath (Join-Path $transactionPath 'journal.json') -PathType Leaf|Should Be $true
+        Test-Path -LiteralPath (Join-Path $transactionPath 'directory.quarantine')|Should Be $false
     }
 
     It 'installs a clean multi-source selection and becomes idempotent' {
@@ -901,6 +932,7 @@ $module=Get-Module agent-environment-reconciler
 
     # Scenario: Rollback restores every transaction state, but the transaction directory cannot be deleted.
     # Purpose: Verify retained journal evidence changes the result to recovery-required instead of falsely reporting completed rollback.
+    Context 'InterT26 isolated transaction cleanup mock' {
     It 'InterT26_reports_recovery_required_when_rollback_journal_cleanup_fails' {
         $initial = New-TestDesiredState -Root (Join-Path $staging 'initial') -SkillIds @('alpha')
         (Invoke-UserSkillsReconciliation -DesiredState $initial -UserHome $userHome -Mode Apply).outcome | Should Be 'applied'
@@ -913,6 +945,7 @@ $module=Get-Module agent-environment-reconciler
         @($failed.failureDetails | Where-Object { $_.code -eq 'recovery-required' }).Count | Should Be 1
         ($failed.failureDetails[0].evidence) | Should Match 'Recovery journal cleanup failed'
         Test-Path -LiteralPath (Join-Path $failed.backupPath 'journal.json') -PathType Leaf | Should Be $true
+    }
     }
 
     # Scenario: Rollback itself is interrupted after the mutation failure.
@@ -1410,9 +1443,9 @@ if (-not $ValidateOnly) { throw 'Validation switch required.' }
             Copy-Item -Path (Join-Path $script:RuntimeRoot '*') -Destination $runtime -Recurse -Force
             Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/skills-catalog.json') -Destination (Join-Path $runtime 'catalog/skills-catalog.json')
             Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/skills-catalog-lock.json') -Destination (Join-Path $runtime 'catalog/skills-catalog-lock.json')
-            Move-Item -LiteralPath (Join-Path $runtime 'agent-environment-reconciler.psm1') -Destination (Join-Path $runtime 'agent-environment-reconciler-core.psm1')
+            Move-Item -LiteralPath (Join-Path $runtime 'agent-environment-reconciler.psm1') -Destination (Join-Path $runtime 'agent-environment-reconciler-core.ps1')
             @'
-. (Join-Path $PSScriptRoot 'agent-environment-reconciler-core.psm1')
+. (Join-Path $PSScriptRoot 'agent-environment-reconciler-core.ps1')
 $script:ActualInvoke=${function:Invoke-UserSkillsReconciliation}
 function Get-UserSkillsDesiredState { param([string]$RuntimeRoot,[object]$Configuration,[string]$CatalogRepository,[string]$CatalogCommit,[string]$WorkingRoot) $state=Import-Clixml -LiteralPath (Join-Path $PSScriptRoot 'test-desired.clixml');$state.RuntimeRoot=$PSScriptRoot;return $state }
 function Invoke-UserSkillsReconciliation {
@@ -1450,9 +1483,9 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
         Copy-Item -Path (Join-Path $script:RuntimeRoot '*') -Destination $runtime -Recurse -Force
         Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/skills-catalog.json') -Destination (Join-Path $runtime 'catalog/skills-catalog.json')
         Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/skills-catalog-lock.json') -Destination (Join-Path $runtime 'catalog/skills-catalog-lock.json')
-        Move-Item -LiteralPath (Join-Path $runtime 'agent-environment-reconciler.psm1') -Destination (Join-Path $runtime 'agent-environment-reconciler-core.psm1')
+        Move-Item -LiteralPath (Join-Path $runtime 'agent-environment-reconciler.psm1') -Destination (Join-Path $runtime 'agent-environment-reconciler-core.ps1')
         @'
-. (Join-Path $PSScriptRoot 'agent-environment-reconciler-core.psm1')
+. (Join-Path $PSScriptRoot 'agent-environment-reconciler-core.ps1')
 function Get-UserSkillsDesiredState { param([string]$RuntimeRoot,[object]$Configuration,[string]$CatalogRepository,[string]$CatalogCommit,[string]$WorkingRoot) $state=Import-Clixml -LiteralPath (Join-Path $PSScriptRoot 'test-desired.clixml');$state.RuntimeRoot=$PSScriptRoot;return $state }
 Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDesiredState,Invoke-UserSkillsReconciliation,Invoke-UserSkillsRecovery,New-AgentEnvironmentInstallReadLeaseEvidence
 '@|Set-Content -LiteralPath (Join-Path $runtime 'agent-environment-reconciler.psm1') -Encoding UTF8

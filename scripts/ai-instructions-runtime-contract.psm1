@@ -101,6 +101,50 @@ function Get-AiInstructionsSkillsCatalogContractModule {
     return $script:SkillsCatalogContractModule
 }
 
+function Get-AiInstructionsUserSkillProjectionRoots {
+    $catalogModule = Get-AiInstructionsSkillsCatalogContractModule
+    $command = $catalogModule.ExportedCommands['Get-SkillsCatalogUserProjectionRoots']
+    if ($null -eq $command) { throw 'The Skills Catalog contract does not export the USER projection root contract.' }
+    return [string[]]@(& $command)
+}
+
+function Test-AiInstructionsUserReconcilerCreateDirectoryTarget {
+    param([Parameter(Mandatory = $true)][string] $TargetRelativePath)
+
+    foreach ($root in @(Get-AiInstructionsUserSkillProjectionRoots)) {
+        if ($TargetRelativePath -ceq $root -or $TargetRelativePath.StartsWith("$root/",[StringComparison]::Ordinal)) { return $true }
+        $ancestor = $root
+        while ($ancestor.Contains('/')) {
+            $ancestor = $ancestor.Substring(0,$ancestor.LastIndexOf('/'))
+            if ($TargetRelativePath -ceq $ancestor) { return $true }
+        }
+    }
+    return $false
+}
+
+function Assert-AiInstructionsUserReconcilerOperationTarget {
+    param(
+        [Parameter(Mandatory = $true)][object] $Operation,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $target = [string]$Operation.targetRelativePath
+    $kind = [string]$Operation.kind
+    if ($target -ceq '.agents/catalog-skills.manifest.json') {
+        if ($kind -cnotin @('create-file','write-file')) { throw "$Context kind must be create-file or write-file for the USER manifest target." }
+        return
+    }
+    if ($kind -ceq 'swap-directory') { throw "$Context kind swap-directory is not allowed for owner.component user-reconciler." }
+    if ($kind -ceq 'create-directory') {
+        if (Test-AiInstructionsUserReconcilerCreateDirectoryTarget -TargetRelativePath $target) { return }
+        throw "$Context.targetRelativePath is outside the USER Skill projection roots and their approved missing ancestors."
+    }
+    foreach ($root in @(Get-AiInstructionsUserSkillProjectionRoots)) {
+        if ($target.StartsWith("$root/",[StringComparison]::Ordinal)) { return }
+    }
+    throw "$Context.targetRelativePath is outside the USER Skill projection roots."
+}
+
 function Test-AiInstructionsObjectHasProperty {
     param([AllowNull()][object] $Object,[Parameter(Mandatory = $true)][string] $Name)
     return $null -ne $Object -and $null -ne $Object.PSObject.Properties[$Name]
@@ -1589,6 +1633,9 @@ function Assert-AiInstructionsInstallJournalV1 {
         if ((Get-AiInstructionsInstallJournalPortableNameKey -Value $firstTargetSegment) -ceq '.AI-INSTRUCTIONS-TXN') {
             throw "$context.targetRelativePath must not use the reserved .ai-instructions-txn first segment."
         }
+        if ([string]$Journal.owner.component -ceq 'user-reconciler') {
+            Assert-AiInstructionsUserReconcilerOperationTarget -Operation $operation -Context $context
+        }
         $pathKey = Get-AiInstructionsInstallJournalPortableNameKey -Value ([string]$operation.targetRelativePath)
         $pathSegments = @(([string]$operation.targetRelativePath).Split('/') | ForEach-Object { Get-AiInstructionsInstallJournalPortableNameKey -Value $_ })
         if ($pathSegments.Count -eq 1 -and $pathKey -ceq $lockLeafKey) {
@@ -1604,7 +1651,12 @@ function Assert-AiInstructionsInstallJournalV1 {
                     break
                 }
             }
-            if ($hasCommonPrefix) {
+            $approvedUserManifestAncestor = $hasCommonPrefix -and [string]$Journal.owner.component -ceq 'user-reconciler' -and
+                (([string]$operation.kind -ceq 'create-directory' -and [string]$otherPath.kind -in @('create-file','write-file') -and
+                  [string]$operation.targetRelativePath -ceq '.agents' -and [string]$Journal.operations[[int64]$otherPath.sequence - 1].targetRelativePath -ceq '.agents/catalog-skills.manifest.json') -or
+                 ([string]$otherPath.kind -ceq 'create-directory' -and [string]$operation.kind -in @('create-file','write-file') -and
+                  [string]$Journal.operations[[int64]$otherPath.sequence - 1].targetRelativePath -ceq '.agents' -and [string]$operation.targetRelativePath -ceq '.agents/catalog-skills.manifest.json'))
+            if ($hasCommonPrefix -and -not $approvedUserManifestAncestor) {
                 throw "$context.targetRelativePath conflicts with operation sequence $($otherPath.sequence) because operation targets cannot have an ancestor or descendant relationship."
             }
         }

@@ -94,6 +94,31 @@
           "lock": { "properties": { "leaf": { "const": "update-agent-environment.lock" } } },
           "generation": { "properties": { "previousBundleSha256": { "$ref": "#/$defs/hash" } } },
           "operations": {
+            "items": {
+              "oneOf": [
+                {
+                  "properties": {
+                    "targetRelativePath": { "const": ".agents/catalog-skills.manifest.json" },
+                    "kind": { "enum": ["create-file", "write-file"] }
+                  },
+                  "required": ["targetRelativePath", "kind"]
+                },
+                {
+                  "properties": {
+                    "targetRelativePath": { "pattern": "^(?:[.]agents/skills|[.]claude/skills|[.]copilot/skills)/.+$" },
+                    "kind": { "enum": ["create-file", "write-file", "remove-file"] }
+                  },
+                  "required": ["targetRelativePath", "kind"]
+                },
+                {
+                  "properties": {
+                    "targetRelativePath": { "pattern": "^(?:[.]agents(?:/skills(?:/.*)?)?|[.]claude(?:/skills(?:/.*)?)?|[.]copilot(?:/skills(?:/.*)?)?)$" },
+                    "kind": { "const": "create-directory" }
+                  },
+                  "required": ["targetRelativePath", "kind"]
+                }
+              ]
+            },
             "contains": {
               "properties": {
                 "targetRelativePath": { "const": ".agents/catalog-skills.manifest.json" },
