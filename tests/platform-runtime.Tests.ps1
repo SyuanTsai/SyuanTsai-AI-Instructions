@@ -3995,23 +3995,23 @@ Describe 'Unix P7c durable publication and removal' {
         } finally {if($null-ne$target){$target.Dispose()};$txn.Lease.Dispose();$parent.Dispose()}
     }
 
-    # Scenario: Replacement publication and tombstone removal complete their directory flushes successfully.
-    # Purpose: Record the crash-safe rename/fsync order, including durable backup naming before replacement publication.
+    # Scenario: Replacement publication and tombstone removal persist original file data before moving either name.
+    # Purpose: Record the crash-safe file-fsync/rename/directory-fsync order, including durable backup naming before replacement publication.
     It 'InterT220_records_backup_and_tombstone_fsync_order' {
         $publishParent=New-P7cDirectory 'ordered-publish';$removeParent=New-P7cDirectory 'ordered-remove';$txn=New-P7cTransaction;$target=$null;$stage=$null;$removeTarget=$null
         try {
             $target=New-P7cFile $publishParent target original;$state=Get-P7cState $target;$target.Dispose();$target=$null
             $stage=New-P7cFile $txn.Lease stage replacement
             $publish=Publish-PlatformFile -ParentLease $publishParent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $state -DisplacedLeaf backup -ExpectedStage (Get-P7cStageState $stage)
-            $publishOrder=@($publish.completedSteps|Where-Object{$_-in @('target-displaced','backup-transaction-directory-fsynced','backup-parent-directory-fsynced','stage-published','parent-directory-fsynced','transaction-directory-fsynced')}) -join '|'
-            $publishOrder|Should Be 'target-displaced|backup-transaction-directory-fsynced|backup-parent-directory-fsynced|stage-published|parent-directory-fsynced|transaction-directory-fsynced'
+            $publishOrder=@($publish.completedSteps|Where-Object{$_-in @('stage-file-fsynced','stage-permissions-fsynced','original-file-fsynced','target-displaced','backup-transaction-directory-fsynced','backup-parent-directory-fsynced','stage-published','parent-directory-fsynced','transaction-directory-fsynced')}) -join '|'
+            $publishOrder|Should Be 'stage-file-fsynced|stage-permissions-fsynced|original-file-fsynced|target-displaced|backup-transaction-directory-fsynced|backup-parent-directory-fsynced|stage-published|parent-directory-fsynced|transaction-directory-fsynced'
             $publish.flush.parentDirectory|Should Be confirmed;$publish.flush.transactionDirectory|Should Be confirmed;$publish.flush.durability|Should Be confirmed
 
             $removeTarget=New-P7cFile $removeParent target owned;$removeState=Get-P7cState $removeTarget;$removeTarget.Dispose();$removeTarget=$null
             $remove=Remove-PlatformOwnedFile -ParentLease $removeParent -Leaf target -ExpectedState $removeState -TransactionLease $txn.Lease -TombstoneLeaf tombstone
-            $removeOrder=@($remove.completedSteps|Where-Object{$_-in @('target-tombstoned','transaction-directory-fsynced','parent-directory-fsynced')}) -join '|'
-            $removeOrder|Should Be 'target-tombstoned|transaction-directory-fsynced|parent-directory-fsynced'
-            $remove.flush.parentDirectory|Should Be confirmed;$remove.flush.transactionDirectory|Should Be confirmed;$remove.flush.durability|Should Be confirmed
+            $removeOrder=@($remove.completedSteps|Where-Object{$_-in @('original-file-fsynced','target-tombstoned','transaction-directory-fsynced','parent-directory-fsynced')}) -join '|'
+            $removeOrder|Should Be 'original-file-fsynced|target-tombstoned|transaction-directory-fsynced|parent-directory-fsynced'
+            $remove.flush.file|Should Be confirmed;$remove.flush.parentDirectory|Should Be confirmed;$remove.flush.transactionDirectory|Should Be confirmed;$remove.flush.durability|Should Be confirmed
         } finally {foreach($lease in @($removeTarget,$stage,$target)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$removeParent.Dispose();$publishParent.Dispose()}
     }
 
@@ -4266,6 +4266,31 @@ Describe 'Unix P7c durable publication and removal' {
             }
         } finally {if($null-ne$file){$file.Dispose()};$parent.Dispose()}
     }
+    }
+
+    # Scenario: Original-file fsync fails before replacement publication or tombstone removal can rename the target.
+    # Purpose: Return the typed fsync failure and preserve every original name and the staged replacement without mutation.
+    It 'InterT285_rejects_original_file_fsync_failure_before_any_rename' {
+        $field=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative].GetField('MutationTestHook',[Reflection.BindingFlags]'NonPublic,Static')
+        $publishParent=New-P7cDirectory 'original-fsync-publish';$removeParent=New-P7cDirectory 'original-fsync-remove';$txn=New-P7cTransaction;$target=$null;$stage=$null;$removeTarget=$null
+        try {
+            $target=New-P7cFile $publishParent target original;$state=Get-P7cState $target;$target.Dispose();$target=$null
+            $stage=New-P7cFile $txn.Lease stage replacement;$stageState=Get-P7cStageState $stage
+            $field.SetValue($null,[Action[string]]{param($point)if($point-ceq'publication-before-original-file-fsync'){throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformErrnoException]::new('fsync-publication-original-file',5,'EIO')}})
+            $caught=$null
+            try{Publish-PlatformFile -ParentLease $publishParent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $state -DisplacedLeaf backup -ExpectedStage $stageState|Out-Null}catch{$caught=$_.Exception}
+            $caught.GetType().Name|Should Be PlatformErrnoException;$caught.Operation|Should Be 'fsync-publication-original-file'
+            (Read-P7cText $publishParent target)|Should Be original;(Read-P7cText $txn.Lease stage)|Should Be replacement
+            Test-Path -LiteralPath (Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/backup")|Should Be $false
+
+            $removeTarget=New-P7cFile $removeParent target owned;$removeState=Get-P7cState $removeTarget;$removeTarget.Dispose();$removeTarget=$null
+            $field.SetValue($null,[Action[string]]{param($point)if($point-ceq'removal-before-original-file-fsync'){throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformErrnoException]::new('fsync-removal-original-file',5,'EIO')}})
+            $caught=$null
+            try{Remove-PlatformOwnedFile -ParentLease $removeParent -Leaf target -ExpectedState $removeState -TransactionLease $txn.Lease -TombstoneLeaf tombstone|Out-Null}catch{$caught=$_.Exception}
+            $caught.GetType().Name|Should Be PlatformErrnoException;$caught.Operation|Should Be 'fsync-removal-original-file'
+            (Read-P7cText $removeParent target)|Should Be owned;(Read-P7cText $txn.Lease stage)|Should Be replacement
+            Test-Path -LiteralPath (Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/tombstone")|Should Be $false
+        } finally {$field.SetValue($null,$null);foreach($lease in @($removeTarget,$stage,$target)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$removeParent.Dispose();$publishParent.Dispose()}
     }
     }
 }

@@ -1514,6 +1514,11 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                         AssertState(target, expectedDevice, expectedInode, expectedSha256, expectedLength,
                             "publication-target-post-preflight");
                         AssertPermissionSnapshot(target.Fd, desired, "publication-target-post-preflight-permissions");
+                        // Directory fsync only persists directory entries. Persist the
+                        // original file data through its fd before renaming that entry.
+                        RunMutationTestHook("publication-before-original-file-fsync");
+                        Sync(target.Fd, false, "fsync-publication-original-file");
+                        receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "original-file-fsynced");
                         RenameNoReplace(parent.Fd, leaf, transaction.Fd, displacedLeaf, "rename-target-to-displaced");
                         displaced = true;
                         receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "target-displaced");
@@ -1658,6 +1663,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     TombstoneLeaf = tombstoneLeaf, Method = cleanup ? "cleanup-unlinkat" : "tombstone-rename",
                     CompletedSteps = new string[0], Flush = NewFlush("unconfirmed")
                 };
+                if (!cleanup) receipt.Flush.File = "pending";
                 bool moved = false, durabilityFailure = false, postVerificationFailure = false;
                 try
                 {
@@ -1715,6 +1721,12 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     AssertState(target, expectedDevice, expectedInode, expectedSha256, expectedLength,
                         "owned-file-removal-before-rename");
                     AssertPermissionSnapshot(target.Fd, receipt.Permissions, "owned-file-removal-before-rename-permissions");
+                    // Directory fsync only persists directory entries. Persist the
+                    // original file data through its fd before renaming that entry.
+                    RunMutationTestHook("removal-before-original-file-fsync");
+                    Sync(target.Fd, false, "fsync-removal-original-file");
+                    receipt.Flush.File = "confirmed";
+                    receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "original-file-fsynced");
                     RenameNoReplace(parent.Fd, leaf, transaction.Fd, tombstoneLeaf, "rename-target-to-tombstone"); moved = true;
                     receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "target-tombstoned");
                     PlatformPaths.Same(Stat(transaction.Fd, tombstoneLeaf), identity);
