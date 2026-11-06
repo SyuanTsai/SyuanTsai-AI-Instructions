@@ -38,11 +38,11 @@ function Get-AgentEnvironmentRefusalCode {
 }
 
 function New-AgentEnvironmentStableRecoveryFailureResult {
-    param([Parameter(Mandatory = $true)][string] $Message)
+    param([Parameter(Mandatory = $true)][string] $Message,[AllowNull()][string]$Code=$null)
     $journalPath = '.agents/update-agent-environment.recovery.json'
     $evidence = "Recovery validation failed; the retained journal '$journalPath' was not removed: $Message"
     return [pscustomobject][ordered]@{
-        schemaVersion=1; outcome='failed'; exitCode=1; runtimeCommit=$null; catalogCommit=$null; catalogLockSha256=$null
+        schemaVersion=1; outcome='failed'; exitCode=1; Code=$Code; runtimeCommit=$null; catalogCommit=$null; catalogLockSha256=$null
         installed=@(); updated=@(); removed=@(); preserved=@(); failed=@($Message)
         failureDetails=@([pscustomobject][ordered]@{
             schemaVersion=1; code='recovery-required'; skillId='transaction'; path=$journalPath
@@ -71,7 +71,7 @@ trap {
         $script:agentEnvironmentRuntimeReadLock = $null
     }
     $failureResult = if ($Recover -and $script:agentEnvironmentRecoveryStarted) {
-        New-AgentEnvironmentStableRecoveryFailureResult -Message $message
+        New-AgentEnvironmentStableRecoveryFailureResult -Message $message -Code $refusalCode
     }
     else {
         [pscustomobject][ordered]@{
@@ -142,6 +142,7 @@ function Write-AgentEnvironmentResult {
     param([Parameter(Mandatory = $true)][object] $Result)
     if ($OutputFormat -eq 'Json') { Write-Output ($Result | ConvertTo-Json -Depth 20 -Compress); return }
     Write-Output "Agent environment outcome: $($Result.outcome)"
+    if($null-ne$Result.PSObject.Properties['Code']-and-not[string]::IsNullOrEmpty([string]$Result.Code)){Write-Output "Code: $($Result.Code)"}
     foreach ($name in @('exitCode','runtimeCommit','catalogCommit','installed','updated','removed','preserved','failed','rollbackState','backupPath')) {
         if ($null -eq $Result.PSObject.Properties[$name]) { continue }
         $value = $Result.$name

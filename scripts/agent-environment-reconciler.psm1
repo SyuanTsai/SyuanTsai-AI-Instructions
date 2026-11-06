@@ -769,6 +769,30 @@ function Open-AgentEnvironmentDirectoryLease {
     return Open-PlatformDirectory -Root $Home -RelativePath $RelativePath
 }
 
+function Test-AgentEnvironmentLockContention {
+    param([Parameter(Mandatory = $true)][object]$ErrorRecordOrException)
+    $candidate=$ErrorRecordOrException
+    if($candidate-is[Management.Automation.ErrorRecord]){$candidate=$candidate.Exception}
+    while($candidate-is[Exception]){
+        if($candidate-is[IO.IOException]-or$candidate-is[TimeoutException]){return $true}
+        $candidate=$candidate.InnerException
+    }
+    return $false
+}
+
+function Get-AgentEnvironmentVolumeIdentity {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $physical=Resolve-PlatformPhysicalPath -Path $Path
+    $lease=$null
+    try{
+        $lease=Open-PlatformDirectory -Root ([string]$physical) -RootOnly
+        $observation=Assert-PlatformFileIdentity -Lease $lease -Expected $lease.Observation -VerifyPath
+        $identity=ConvertTo-AgentEnvironmentPlatformIdentity $observation
+        return [pscustomobject][ordered]@{kind=[string]$identity.kind;device=[string]$identity.device}
+    }
+    finally{if($null-ne$lease){$lease.Dispose()}}
+}
+
 function Get-AgentEnvironmentFileJournalState {
     param([Parameter(Mandatory = $true)][string]$Home,[Parameter(Mandatory = $true)][string]$RelativePath)
     $full=Assert-AgentEnvironmentPathSafe -Root $Home -RelativePath $RelativePath
@@ -908,7 +932,7 @@ function New-AgentEnvironmentPlatformOperation {
 function Assert-AgentEnvironmentProjectionVolumes {
     param([string]$Home,[object]$DesiredState)
     $homeFull = [IO.Path]::GetFullPath($Home).TrimEnd([char[]]@('\','/'))
-    $homePhysical=if(Test-Path -LiteralPath $homeFull){Resolve-PlatformPhysicalPath -Path $homeFull}else{$homeFull};$homeVolume=[IO.Path]::GetPathRoot([string]$homePhysical)
+    $homeVolume=Get-AgentEnvironmentVolumeIdentity -Path $homeFull
     $roots=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     foreach($file in @($DesiredState.Files)){$segments=@(([string]$file.targetPath).Split('/'));if($segments.Count-ge2){[void]$roots.Add("$($segments[0])/$($segments[1])")}}
     foreach($relative in $roots){
@@ -919,9 +943,8 @@ function Assert-AgentEnvironmentProjectionVolumes {
             if([string]::IsNullOrEmpty($parent)-or-not$parent.StartsWith($homeFull,(Get-AgentEnvironmentPathComparison))){$existing=$homeFull;break}
             $existing=$parent
         }
-        $physical=if(Test-Path -LiteralPath $existing){Resolve-PlatformPhysicalPath -Path $existing}else{$existing}
-        $volume=[IO.Path]::GetPathRoot([string]$physical)
-        if(-not[string]::Equals($homeVolume,$volume,[StringComparison]::OrdinalIgnoreCase)){throw (New-AiInstructionsRefusalException -Code 'capability-unavailable' -Message "USER projection '$relative' is not on the USER-home volume.")}
+        $volume=Get-AgentEnvironmentVolumeIdentity -Path $existing
+        if([string]$homeVolume.kind-cne[string]$volume.kind-or-not[string]::Equals([string]$homeVolume.device,[string]$volume.device,[StringComparison]::OrdinalIgnoreCase)){throw (New-AiInstructionsRefusalException -Code 'capability-unavailable' -Message "USER projection '$relative' is not on the USER-home volume.")}
     }
 }
 
@@ -1191,7 +1214,7 @@ function Invoke-AgentEnvironmentPlatformTransaction {
 
 function Get-AgentEnvironmentDirectoryPermissionSnapshot {
     param([string]$Home,[string]$RelativePath)
-    $lease=$null;try{$lease=Open-PlatformDirectory -Root $Home -RelativePath $RelativePath;return ConvertTo-AgentEnvironmentPermissionSnapshot (Get-PlatformPermissions $lease)}finally{if($null-ne$lease){$lease.Dispose()}}
+    $lease=$null;try{$lease=Open-AgentEnvironmentDirectoryLease -Home $Home -RelativePath $RelativePath;return ConvertTo-AgentEnvironmentPermissionSnapshot (Get-PlatformPermissions $lease)}finally{if($null-ne$lease){$lease.Dispose()}}
 }
 
 function Get-AgentEnvironmentRecoveryObservation {
@@ -1216,9 +1239,9 @@ function Test-AgentEnvironmentJournalStateMatch {
     if($null-ne$Expected.PSObject.Properties['inventorySha256']){
         if([string]$Observed.inventorySha256-cne[string]$Expected.inventorySha256-or[int64]$Observed.entryCount-ne[int64]$Expected.entryCount){return $false}
     }elseif([string]$Observed.sha256-cne[string]$Expected.sha256-or[int64]$Observed.length-ne[int64]$Expected.length){return $false}
-    if([string]$Observed.identity.kind-cne[string]$Expected.identity.kind-or[string]$Observed.identity.device-cne[string]$Expected.identity.device){return $false}
-    if([string]$Expected.identity.kind-ceq'windows-file-id'){return [string]$Observed.identity.fileId-ceq[string]$Expected.identity.fileId}
-    return [string]$Observed.identity.inode-ceq[string]$Expected.identity.inode
+    return [string]$Observed.identity.kind-ceq[string]$Expected.identity.kind -and
+        [string]::Equals([string]$Observed.identity.device,[string]$Expected.identity.device,[StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals([string]$Observed.identity.fileId,[string]$Expected.identity.fileId,[StringComparison]::OrdinalIgnoreCase)
 }
 
 function Assert-AgentEnvironmentRollbackStageEvidence {
@@ -1430,8 +1453,10 @@ function Invoke-UserSkillsReconciliation {
                 $lockStream=Enter-PlatformLock -ParentLease $lockParentLease -Leaf 'update-agent-environment.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
             }
         }
-        catch [System.IO.IOException] { return New-AgentEnvironmentResult -Outcome 'concurrent' -DesiredState $DesiredState -Installed @() -Updated @() -Removed @() -Preserved @() -Failed @('Another Agent environment update is already running.') -RollbackState 'not-started' -BackupPath $null }
-        catch [TimeoutException] { return New-AgentEnvironmentResult -Outcome 'concurrent' -DesiredState $DesiredState -Installed @() -Updated @() -Removed @() -Preserved @() -Failed @('Another Agent environment update is already running.') -RollbackState 'not-started' -BackupPath $null }
+        catch {
+            if(Test-AgentEnvironmentLockContention $_){return New-AgentEnvironmentResult -Outcome 'concurrent' -DesiredState $DesiredState -Installed @() -Updated @() -Removed @() -Preserved @() -Failed @('Another Agent environment update is already running.') -RollbackState 'not-started' -BackupPath $null}
+            throw
+        }
         $hasLegacyResidue=Test-Path -LiteralPath $journalPath
         $hasNewTransactionResidue=(Test-Path -LiteralPath $newTransactionRoot)-and(@(Get-ChildItem -Force -LiteralPath $newTransactionRoot -ErrorAction Stop).Count-gt0)
         if($Mode-eq'Apply'-and$hasLegacyResidue-and$hasNewTransactionResidue){return New-AgentEnvironmentInterruptedResult 'Legacy and install-journal USER transaction residues coexist; recovery refused before mutation.'}
@@ -1668,7 +1693,7 @@ function Invoke-UserSkillsRecovery {
             if ($null -ne $BeforeLockAcquisitionAction) { & $BeforeLockAcquisitionAction }
             if($ownsLock){$lockParentLease=Open-PlatformDirectory -Root $home -RelativePath '.agents';$lockStream=Enter-PlatformLock -ParentLease $lockParentLease -Leaf 'update-agent-environment.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)}
         }
-        catch { if($_.Exception -is [IO.IOException]-or$_.Exception -is [TimeoutException]){return New-AgentEnvironmentRecoveryConcurrentResult};throw }
+        catch { if(Test-AgentEnvironmentLockContention $_){return New-AgentEnvironmentRecoveryConcurrentResult};throw }
         $hasLegacy=Test-Path -LiteralPath $journalPath
         $hasNew=(Test-Path -LiteralPath $transactionRoot)-and(@(Get-ChildItem -Force -LiteralPath $transactionRoot -ErrorAction Stop).Count-gt0)
         if($hasLegacy-and$hasNew){return New-AgentEnvironmentInterruptedResult 'Legacy and install-journal USER transaction residues coexist; recovery refused before mutation.'}

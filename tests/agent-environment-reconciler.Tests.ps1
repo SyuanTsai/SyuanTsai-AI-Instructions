@@ -446,19 +446,18 @@ Describe 'user-scoped Agent Skills reconciliation' {
             Move-Item -LiteralPath (Join-Path $runtime 'agent-environment-reconciler.psm1') -Destination (Join-Path $runtime 'agent-environment-reconciler-core.psm1')
             @'
 . (Join-Path $PSScriptRoot 'agent-environment-reconciler-core.psm1')
-function Get-UserSkillsDesiredState { param([string]$RuntimeRoot,[object]$Configuration,[string]$CatalogRepository,[string]$CatalogCommit,[string]$WorkingRoot) $state=Import-Clixml -LiteralPath $env:P8_DESIRED_STATE;$state.RuntimeRoot=$PSScriptRoot;return $state }
+function Get-UserSkillsDesiredState { param([string]$RuntimeRoot,[object]$Configuration,[string]$CatalogRepository,[string]$CatalogCommit,[string]$WorkingRoot) $state=Import-Clixml -LiteralPath (Join-Path $PSScriptRoot 'test-desired.clixml');$state.RuntimeRoot=$PSScriptRoot;return $state }
 Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDesiredState,Invoke-UserSkillsReconciliation,Invoke-UserSkillsRecovery,New-AgentEnvironmentInstallReadLeaseEvidence
 '@|Set-Content -LiteralPath (Join-Path $runtime 'agent-environment-reconciler.psm1') -Encoding UTF8
             [IO.File]::WriteAllText((Join-Path $codexHome 'ai-instructions-install.lock'),'');[IO.File]::WriteAllText((Join-Path $codexHome 'hooks/bootstrap-ai-instructions.ps1'),"param([switch]`$ValidateOnly)`nif(-not`$ValidateOnly){throw 'ValidateOnly required'}")
             $commit='89abcdef0123456789abcdef0123456789abcdef';@{schemaVersion=4;catalog=@{ref=$commit}}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $codexHome 'ai-instructions-sync.json') -Encoding UTF8;@{schemaVersion=2;repository='https://github.com/example/ai-instructions.git';commit=$commit}|ConvertTo-Json|Set-Content (Join-Path $runtime 'runtime-bundle.json') -Encoding UTF8
-            $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'cross-volume-entry-stage');$desiredPath=Join-Path $TestDrive 'cross-volume-entry-desired.clixml';$desired|Export-Clixml $desiredPath
+            $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'cross-volume-entry-stage');$desired|Export-Clixml (Join-Path $runtime 'test-desired.clixml')
             $userHome=Join-Path $TestDrive 'cross-volume-entry-user';New-Item -ItemType Directory -Path $userHome|Out-Null;$secondary=Join-Path $script:SecondaryVolumeRoot ('ai-instructions-p8-entry-'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Path (Join-Path $secondary 'skills') -Force|Out-Null
-            $oldDesired=$env:P8_DESIRED_STATE;$env:P8_DESIRED_STATE=$desiredPath
             try{
                 New-Item -ItemType Junction -Path (Join-Path $userHome '.claude') -Target $secondary|Out-Null
                 $output=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $codexHome -UserHome $userHome -Apply -OutputFormat Json);$LASTEXITCODE|Should Be 1
                 ($output[-1]|ConvertFrom-Json).Code|Should Be 'capability-unavailable';Test-Path (Join-Path $userHome '.agents')|Should Be $false;Test-Path (Join-Path $userHome '.ai-instructions-txn')|Should Be $false
-            }finally{$env:P8_DESIRED_STATE=$oldDesired;if(Test-Path -LiteralPath (Join-Path $userHome '.claude')){Remove-Item -LiteralPath (Join-Path $userHome '.claude') -Force};if(Test-Path -LiteralPath $secondary){Remove-Item -LiteralPath $secondary -Recurse -Force}}
+            }finally{if(Test-Path -LiteralPath (Join-Path $userHome '.claude')){Remove-Item -LiteralPath (Join-Path $userHome '.claude') -Force};if(Test-Path -LiteralPath $secondary){Remove-Item -LiteralPath $secondary -Recurse -Force}}
         }
     }
 
@@ -565,7 +564,7 @@ Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode
         foreach($operation in $journal.operations){$operation.state='pending'}
         $previousPath=Join-Path $transactionPath 'journal.prev'
         [IO.File]::WriteAllText($previousPath,($journal|ConvertTo-Json -Depth 30),[Text.UTF8Encoding]::new($false))
-        $nextPath=Join-Path $TestDrive 'fallback-next-journal.clixml';$next=$journal.PSObject.Copy();$next.phase='applying';$next|Export-Clixml -LiteralPath $nextPath
+        $nextPath=Join-Path $TestDrive 'fallback-next-journal.clixml';$next=$journal.PSObject.Copy();$next.phase='applying';$next.operations=[object[]]@($next.operations);$next|Export-Clixml -LiteralPath $nextPath
         $childPath=Join-Path $TestDrive 'fallback-stage-flush-child.ps1'
         @'
 param([string]$ModulePath,[string]$TransactionPath,[string]$JournalPath)
@@ -578,6 +577,7 @@ $module=Get-Module agent-environment-reconciler
     $lease=Open-PlatformDirectory -Root $TransactionPath -RootOnly
     try{
         $journal=Import-Clixml -LiteralPath $JournalPath
+        $journal.operations=[object[]]@($journal.operations)
         $env:AI_INSTRUCTIONS_USER_RECONCILER_FAILFAST='after-journal-stage-flush'
         Write-AgentEnvironmentInstallJournal -TransactionPath $TransactionPath -TransactionLease $lease -Journal $journal
     }finally{$lease.Dispose()}
@@ -594,7 +594,7 @@ $module=Get-Module agent-environment-reconciler
             param($RuntimeRoot,$TransactionPath,$JournalPath)
             Import-AgentEnvironmentRuntimeModules -RuntimeRoot $RuntimeRoot
             $lease=Open-PlatformDirectory -Root $TransactionPath -RootOnly
-            try{Write-AgentEnvironmentInstallJournal -TransactionPath $TransactionPath -TransactionLease $lease -Journal (Import-Clixml -LiteralPath $JournalPath)}finally{$lease.Dispose()}
+            try{$journal=Import-Clixml -LiteralPath $JournalPath;$journal.operations=[object[]]@($journal.operations);Write-AgentEnvironmentInstallJournal -TransactionPath $TransactionPath -TransactionLease $lease -Journal $journal}finally{$lease.Dispose()}
         } $script:RuntimeRoot $transactionPath $nextPath
         Test-Path -LiteralPath (Join-Path $transactionPath 'journal.json') -PathType Leaf|Should Be $true
         Test-Path -LiteralPath $previousPath|Should Be $false
@@ -1396,28 +1396,33 @@ if (-not $ValidateOnly) { throw 'Validation switch required.' }
             @'
 . (Join-Path $PSScriptRoot 'agent-environment-reconciler-core.psm1')
 $script:ActualInvoke=${function:Invoke-UserSkillsReconciliation}
-function Get-UserSkillsDesiredState { param([string]$RuntimeRoot,[object]$Configuration,[string]$CatalogRepository,[string]$CatalogCommit,[string]$WorkingRoot) $state=Import-Clixml -LiteralPath $env:P8_DESIRED_STATE;$state.RuntimeRoot=$PSScriptRoot;return $state }
+function Get-UserSkillsDesiredState { param([string]$RuntimeRoot,[object]$Configuration,[string]$CatalogRepository,[string]$CatalogCommit,[string]$WorkingRoot) $state=Import-Clixml -LiteralPath (Join-Path $PSScriptRoot 'test-desired.clixml');$state.RuntimeRoot=$PSScriptRoot;return $state }
 function Invoke-UserSkillsReconciliation {
     [CmdletBinding()]param([object]$DesiredState,[string]$UserHome,[string]$Mode,[switch]$ForceReinstallManagedSkills,[switch]$MigrateLegacyCatalogSkills,[object]$InstallReadLease)
-    $ready=Join-Path $env:P8_BARRIER ("$PID.ready");[IO.File]::WriteAllText($ready,'ready');$deadline=[DateTime]::UtcNow.AddSeconds(20);while(-not(Test-Path (Join-Path $env:P8_BARRIER 'go'))){if([DateTime]::UtcNow-ge$deadline){throw 'barrier timeout'};Start-Sleep -Milliseconds 25}
-    & $script:ActualInvoke -DesiredState $DesiredState -UserHome $UserHome -Mode $Mode -ForceReinstallManagedSkills:$ForceReinstallManagedSkills -MigrateLegacyCatalogSkills:$MigrateLegacyCatalogSkills -InstallReadLease $InstallReadLease
+    $barrierAction={
+        $barrier=Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'test-barrier-path.txt')
+        $ready=Join-Path $barrier ("$PID.ready");[IO.File]::WriteAllText($ready,'ready');$deadline=[DateTime]::UtcNow.AddSeconds(20)
+        while(-not(Test-Path (Join-Path $barrier 'go'))){if([DateTime]::UtcNow-ge$deadline){throw 'barrier timeout'};Start-Sleep -Milliseconds 25}
+    }
+    & $script:ActualInvoke -DesiredState $DesiredState -UserHome $UserHome -Mode $Mode -ForceReinstallManagedSkills:$ForceReinstallManagedSkills -MigrateLegacyCatalogSkills:$MigrateLegacyCatalogSkills -InstallReadLease $InstallReadLease -BeforeLockAcquisitionAction $barrierAction
 }
 Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDesiredState,Invoke-UserSkillsReconciliation,Invoke-UserSkillsRecovery,New-AgentEnvironmentInstallReadLeaseEvidence
 '@|Set-Content -LiteralPath (Join-Path $runtime 'agent-environment-reconciler.psm1') -Encoding UTF8
+            Copy-Item -LiteralPath $desiredPath -Destination (Join-Path $runtime 'test-desired.clixml')
+            [IO.File]::WriteAllText((Join-Path $runtime 'test-barrier-path.txt'),$barrier,[Text.UTF8Encoding]::new($false))
             [IO.File]::WriteAllText((Join-Path $codexHome 'ai-instructions-install.lock'),'')
             [IO.File]::WriteAllText((Join-Path $codexHome 'hooks/bootstrap-ai-instructions.ps1'),"param([switch]`$ValidateOnly)`nif(-not`$ValidateOnly){throw 'ValidateOnly required'}")
             @{schemaVersion=4;catalog=@{ref='89abcdef0123456789abcdef0123456789abcdef'}}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $codexHome 'ai-instructions-sync.json') -Encoding UTF8
             @{schemaVersion=2;repository='https://github.com/example/ai-instructions.git';commit='89abcdef0123456789abcdef0123456789abcdef'}|ConvertTo-Json|Set-Content (Join-Path $runtime 'runtime-bundle.json') -Encoding UTF8
         }
-        $oldDesired=$env:P8_DESIRED_STATE;$oldBarrier=$env:P8_BARRIER;$env:P8_DESIRED_STATE=$desiredPath;$env:P8_BARRIER=$barrier
         $processes=@();try{
             for($i=0;$i-lt2;$i++){$out=Join-Path $TestDrive "dual-codex-$i.out";$err=Join-Path $TestDrive "dual-codex-$i.err";$processes+=,[pscustomobject]@{Process=(Start-Process -FilePath $script:TestPowerShellExecutable -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$entry,'-CodexHome',$codexHomes[$i],'-UserHome',$userHome,'-Apply','-OutputFormat','Json') -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden -PassThru);Out=$out;Err=$err}}
-            $deadline=[DateTime]::UtcNow.AddSeconds(20);while(@(Get-ChildItem -LiteralPath $barrier -Filter '*.ready' -ErrorAction SilentlyContinue).Count-lt2){if(@($processes|Where-Object{$_.Process.HasExited}).Count-gt0){throw 'entry exited before barrier'};if([DateTime]::UtcNow-ge$deadline){throw 'entry barrier timeout'};Start-Sleep -Milliseconds 25}
+            $deadline=[DateTime]::UtcNow.AddSeconds(30);while(@(Get-ChildItem -LiteralPath $barrier -Filter '*.ready' -ErrorAction SilentlyContinue).Count-lt2){if(@($processes|Where-Object{$_.Process.HasExited}).Count-gt0){$diagnostics=@($processes|ForEach-Object{"stdout=$((Get-Content -Raw -LiteralPath $_.Out -ErrorAction SilentlyContinue)) stderr=$((Get-Content -Raw -LiteralPath $_.Err -ErrorAction SilentlyContinue))"})-join' | ';throw "entry exited before lock barrier: $diagnostics"};if([DateTime]::UtcNow-ge$deadline){throw 'entry lock barrier timeout'};Start-Sleep -Milliseconds 25}
             [IO.File]::WriteAllText((Join-Path $barrier 'go'),'go');foreach($item in $processes){$item.Process.WaitForExit(30000)|Out-Null}
             $results=@($processes|ForEach-Object{(Get-Content -Raw -LiteralPath $_.Out)|ConvertFrom-Json});(@($results.outcome|Sort-Object)-join ',')|Should Be 'applied,concurrent'
             $manifest=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $userHome '.agents/catalog-skills.manifest.json')|ConvertFrom-Json;Assert-UserSkillsManagedManifest -Manifest $manifest|Out-Null
             (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $userHome '.agents/skills/alpha/SKILL.md')).Hash.ToLowerInvariant()|Should Be $desired.Files[0].sha256
-        }finally{foreach($item in $processes){if(-not$item.Process.HasExited){$item.Process.Kill()};$item.Process.Dispose()};$env:P8_DESIRED_STATE=$oldDesired;$env:P8_BARRIER=$oldBarrier}
+        }finally{foreach($item in $processes){if(-not$item.Process.HasExited){$item.Process.Kill()};$item.Process.Dispose()}}
     }
 
     # Scenario: The stable entry sees every new-transaction residue class in legacy-only/new-only/both layouts and read-only modes.
@@ -1430,13 +1435,12 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
         Move-Item -LiteralPath (Join-Path $runtime 'agent-environment-reconciler.psm1') -Destination (Join-Path $runtime 'agent-environment-reconciler-core.psm1')
         @'
 . (Join-Path $PSScriptRoot 'agent-environment-reconciler-core.psm1')
-function Get-UserSkillsDesiredState { param([string]$RuntimeRoot,[object]$Configuration,[string]$CatalogRepository,[string]$CatalogCommit,[string]$WorkingRoot) $state=Import-Clixml -LiteralPath $env:P8_DESIRED_STATE;$state.RuntimeRoot=$PSScriptRoot;return $state }
+function Get-UserSkillsDesiredState { param([string]$RuntimeRoot,[object]$Configuration,[string]$CatalogRepository,[string]$CatalogCommit,[string]$WorkingRoot) $state=Import-Clixml -LiteralPath (Join-Path $PSScriptRoot 'test-desired.clixml');$state.RuntimeRoot=$PSScriptRoot;return $state }
 Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDesiredState,Invoke-UserSkillsReconciliation,Invoke-UserSkillsRecovery,New-AgentEnvironmentInstallReadLeaseEvidence
 '@|Set-Content -LiteralPath (Join-Path $runtime 'agent-environment-reconciler.psm1') -Encoding UTF8
         [IO.File]::WriteAllText((Join-Path $codexHome 'ai-instructions-install.lock'),'');[IO.File]::WriteAllText((Join-Path $codexHome 'hooks/bootstrap-ai-instructions.ps1'),"param([switch]`$ValidateOnly)`nif(-not`$ValidateOnly){throw 'ValidateOnly required'}")
         $commit='89abcdef0123456789abcdef0123456789abcdef';@{schemaVersion=4;catalog=@{ref=$commit}}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $codexHome 'ai-instructions-sync.json') -Encoding UTF8;@{schemaVersion=2;repository='https://github.com/example/ai-instructions.git';commit=$commit}|ConvertTo-Json|Set-Content (Join-Path $runtime 'runtime-bundle.json') -Encoding UTF8
-        $desired=New-TestDesiredState -Root (Join-Path $TestDrive 'entry-matrix-stage');$desiredPath=Join-Path $TestDrive 'entry-matrix-desired.clixml';$desired|Export-Clixml $desiredPath
-        $oldDesired=$env:P8_DESIRED_STATE;$env:P8_DESIRED_STATE=$desiredPath
+        $desired=New-TestDesiredState -Root (Join-Path $TestDrive 'entry-matrix-stage');$desired|Export-Clixml (Join-Path $runtime 'test-desired.clixml')
         function Add-MatrixResidue([string]$MatrixUserHome,[string]$Classification,[string]$Layout){
             $agents=Join-Path $MatrixUserHome '.agents';New-Item -ItemType Directory -Force -Path $agents|Out-Null
             if($Layout-in@('legacy-only','both')){[IO.File]::WriteAllText((Join-Path $agents 'update-agent-environment.recovery.json'),'{}')}
@@ -1468,7 +1472,7 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
             ($downgradeOutput[-1]|ConvertFrom-Json).Code|Should Be 'downgrade-refused';Test-Path (Join-Path $downgradeHome '.agents/skills/alpha/SKILL.md')|Should Be $false
             @{schemaVersion=5;catalog=@{ref=$commit};projections=@{user=@('user-agents')}}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $codexHome 'ai-instructions-sync.json') -Encoding UTF8
             $gateHome=Join-Path $TestDrive 'matrix-gate';New-Item -ItemType Directory -Path $gateHome|Out-Null;$gateOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $codexHome -UserHome $gateHome -VerifyOnly -OutputFormat Json);$LASTEXITCODE|Should Be 1;$gate=$gateOutput[-1]|ConvertFrom-Json;$gate.Code|Should Be 'projection-runtime-unavailable';Test-Path (Join-Path $gateHome '.agents')|Should Be $false
-        }finally{$env:P8_DESIRED_STATE=$oldDesired;Remove-Item Function:Add-MatrixResidue -ErrorAction SilentlyContinue}
+        }finally{Remove-Item Function:Add-MatrixResidue -ErrorAction SilentlyContinue}
     }
 
     # Scenario: A platform publication completes its rename but reports failure before the coordinator records operation.state=applied.
