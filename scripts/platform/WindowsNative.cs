@@ -8,6 +8,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Security.Cryptography;
+using System.Security.AccessControl;
 using Microsoft.Win32.SafeHandles;
 
 namespace SyuanTsai.AIInstructions.PlatformRuntime
@@ -298,7 +299,23 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 sddl.IndexOf("G:", StringComparison.Ordinal) >= 0 ||
                 sddl.IndexOf("S:", StringComparison.Ordinal) >= 0)
                 throw new ArgumentException("Only a DACL SDDL policy is supported.", "sddl");
-            IntPtr descriptor; uint size; Check(ParseDescriptor(sddl, 1, out descriptor, out size), "ParseSecurityDescriptor");
+            RawSecurityDescriptor raw = new RawSecurityDescriptor(sddl);
+            if (raw.DiscretionaryAcl != null)
+            {
+                foreach (GenericAce ace in raw.DiscretionaryAcl)
+                {
+                    KnownAce known = ace as KnownAce;
+                    if (known == null) continue;
+                    uint mask = unchecked((uint)known.AccessMask);
+                    if ((mask & 0x80000000u) != 0) mask |= 0x00120089u; // FILE_GENERIC_READ
+                    if ((mask & 0x40000000u) != 0) mask |= 0x00120116u; // FILE_GENERIC_WRITE
+                    if ((mask & 0x20000000u) != 0) mask |= 0x001200a0u; // FILE_GENERIC_EXECUTE
+                    if ((mask & 0x10000000u) != 0) mask |= 0x001f01ffu; // FILE_ALL_ACCESS
+                    known.AccessMask = unchecked((int)(mask & 0x0fffffffu));
+                }
+            }
+            string mappedSddl = raw.GetSddlForm(AccessControlSections.Access);
+            IntPtr descriptor; uint size; Check(ParseDescriptor(mappedSddl, 1, out descriptor, out size), "ParseSecurityDescriptor");
             try
             {
                 IntPtr text; uint length; Check(FormatDescriptor(descriptor, 1, 4, out text, out length), "FormatSecurityDescriptor");
@@ -455,6 +472,44 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             }
         }
 
+        public static WindowsLease CreatePermissionProbe(WindowsLease parent, string leaf)
+        {
+            PlatformPaths.Leaf(leaf);
+            lock (parent.Sync)
+            {
+                parent.Check(); AssertIdentity(parent, parent.Observation, false);
+                if (parent.Observation.Kind != "directory") throw new ArgumentException("A directory lease is required.");
+                string path = Path.Combine(parent.Path, leaf);
+                // Arm delete-on-close in the same successful CreateFileW call.  A
+                // restrictive inherited DACL therefore cannot leave a created probe
+                // behind between creation and a later DELETE-scoped reopen.
+                SafeFileHandle handle = CreateFile(path, 0xc0010080u, 7, IntPtr.Zero, 1, 0x04200000u, IntPtr.Zero);
+                if (handle.IsInvalid)
+                {
+                    int error = Marshal.GetLastWin32Error(); handle.Dispose();
+                    throw new PlatformWin32Exception("CreateFileW(permission probe delete-on-close)", error);
+                }
+                try
+                {
+                    FileObservation value = Stat(handle); PlatformPaths.Single(value);
+                    if (value.Kind != "file") throw new IOException("A regular permission probe is required.");
+                    return new WindowsLease(handle, path, null, parent, value);
+                }
+                catch { handle.Dispose(); throw; }
+            }
+        }
+
+        public static WindowsPermissions GetPermissionProbePermissions(WindowsLease lease)
+        {
+            lock (lease.Sync)
+            {
+                lease.Check();
+                FileObservation observed = Stat(lease.Handle);
+                PlatformPaths.Same(observed, lease.Observation); PlatformPaths.Single(observed);
+                return new WindowsPermissions { Sddl = GetDaclSddl(lease.Handle), ReadOnly = (observed.Mode & 1) != 0 };
+            }
+        }
+
         public static string ComputeSha256(WindowsLease lease)
         {
             lock (lease.Sync)
@@ -515,15 +570,23 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             }
         }
 
-        public static bool TryFlushDirectory(WindowsLease lease)
+        public static void FlushDirectory(WindowsLease lease)
         {
             lock (lease.Sync)
             {
                 lease.Check(); AssertIdentity(lease, lease.Observation, false);
-                if (FlushFileBuffers(lease.Handle)) return true;
-                int error = Marshal.GetLastWin32Error();
-                if (error == 1 || error == 5 || error == 6 || error == 50 || error == 87) return false;
-                throw new PlatformWin32Exception("FlushFileBuffers(directory)", error);
+                if (lease.Observation.Kind != "directory") throw new ArgumentException("A directory lease is required.");
+                // Do not widen the long-lived lease.  Open a short-lived dedicated
+                // directory handle with write/add-file access, permissive sharing,
+                // backup semantics, and open-reparse-point behavior; then bind it
+                // back to the verified lease identity before probing or flushing.
+                using (SafeFileHandle writable = Open(lease.Path, 0x40000002u, 7, 3))
+                {
+                    FileObservation observed = Stat(writable);
+                    PlatformPaths.Same(observed, lease.Observation);
+                    if (observed.Kind != "directory") throw new IOException("A directory lease is required.");
+                    Check(FlushFileBuffers(writable), "FlushFileBuffers(directory)");
+                }
             }
         }
 

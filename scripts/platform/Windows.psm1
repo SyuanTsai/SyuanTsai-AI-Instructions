@@ -4,6 +4,7 @@
 Set-StrictMode -Version Latest
 $script:RuntimePreparationModulePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'RuntimePreparation.psm1'))
 $script:WindowsPublicationPostRenameTestHook = $null
+$script:WindowsPublicationDurabilityTestHook = $null
 $loadedRuntimePreparationModules = @(Import-Module -Name $script:RuntimePreparationModulePath -PassThru -Scope Local -ErrorAction Stop)
 if ($loadedRuntimePreparationModules.Count -ne 1 -or -not [StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetFullPath([string]$loadedRuntimePreparationModules[0].Path),$script:RuntimePreparationModulePath)) { throw [IO.InvalidDataException]::new('The verified runtime preparation dependency did not load from its bound path.') }
 $script:RuntimePreparationModule = $loadedRuntimePreparationModules[0]
@@ -172,6 +173,86 @@ function New-WindowsPlatformRecoveryError {
     $error.Data['Receipt']=$Receipt
     return $error
 }
+function Invoke-WindowsPlatformDurabilityHook {
+    param([string]$Point,[string]$Operation,[string]$Role,$Lease)
+    if ($null -ne $script:WindowsPublicationDurabilityTestHook) {
+        & $script:WindowsPublicationDurabilityTestHook $Point $Operation $Role $Lease
+    }
+}
+function Invoke-WindowsPlatformFileFlush {
+    param($Lease,[string]$Operation,[string]$Point='file-flush')
+    try {
+        Invoke-WindowsPlatformDurabilityHook $Point $Operation 'file' $Lease
+        [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::Flush($Lease)
+    }
+    catch {
+        if ($_.Exception -is [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] -and
+            [string]$_.Exception.Capability -ceq 'publication-durability') { throw }
+        throw (New-WindowsPlatformVerificationError 'publication-durability' "$Operation $Point failed before durability was confirmed: $($_.Exception.Message)")
+    }
+}
+function Invoke-WindowsPlatformDirectoryFlush {
+    param($Lease,[string]$Operation,[string]$Point,[string]$Role)
+    try {
+        Invoke-WindowsPlatformDurabilityHook $Point $Operation $Role $Lease
+        [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::FlushDirectory($Lease)
+    }
+    catch {
+        if ($_.Exception -is [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] -and
+            [string]$_.Exception.Capability -ceq 'publication-durability') { throw }
+        throw (New-WindowsPlatformVerificationError 'publication-durability' "$Operation $Point flush failed for the $Role directory: $($_.Exception.Message)")
+    }
+}
+function Get-WindowsPlatformInheritedPermissions {
+    param($ParentLease,[string]$Capability)
+    $probeLeaf='.ai-instructions-permission-probe-'+[Guid]::NewGuid().ToString('N')
+    $probe=$null
+    $probeIdentity=$null
+    try {
+        $probe=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::CreatePermissionProbe($ParentLease,$probeLeaf)
+        $probeIdentity=Get-WindowsPlatformIdentity $probe.Observation
+        $value=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::GetPermissionProbePermissions($probe)
+        Invoke-WindowsPlatformDurabilityHook 'permission-probe' $Capability 'probe' $probe
+        return ConvertTo-WindowsPlatformPermissionSnapshot ([pscustomobject][ordered]@{kind='windows-sddl';sddl=[string]$value.Sddl;readOnly=[bool]$value.ReadOnly}) $Capability 'Inherited target'
+    }
+    catch {
+        if ($_.Exception -is [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]) { throw }
+        throw (New-WindowsPlatformVerificationError $Capability "Permission probe '$probeLeaf' failed: $($_.Exception.Message)")
+    }
+    finally {
+        $cleanupFailure=$null
+        if ($null -ne $probe) {
+            try { $probe.Dispose() } catch { $cleanupFailure=$_.Exception.Message }
+            $probe=$null
+        }
+        if ($null -ne $probeIdentity) {
+            $residual=$null
+            try {
+                $residual=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::TryOpenMutationFile($ParentLease,$probeLeaf)
+                if ($null -ne $residual) {
+                    $residualIdentity=Get-WindowsPlatformIdentity $residual.Observation
+                    if (Test-WindowsPlatformIdentityMatch $probeIdentity $residualIdentity) {
+                        [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::DeleteOnClose($residual)
+                        $residual.Dispose();$residual=$null
+                        $remaining=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::TryOpenMutationFile($ParentLease,$probeLeaf)
+                        if ($null -ne $remaining) {
+                            $remainingIdentity=Get-WindowsPlatformIdentity $remaining.Observation
+                            $remaining.Dispose()
+                            if (Test-WindowsPlatformIdentityMatch $probeIdentity $remainingIdentity) {
+                                throw [IO.IOException]::new('the probe identity still occupies its leaf')
+                            }
+                        }
+                    }
+                }
+            }
+            catch { $cleanupFailure=$_.Exception.Message }
+            finally { if ($null -ne $residual) { $residual.Dispose() } }
+        }
+        if ($null -ne $cleanupFailure) {
+            throw (New-WindowsPlatformVerificationError $Capability "Permission probe cleanup failed; residual probe leaf is '$probeLeaf': $cleanupFailure")
+        }
+    }
+}
 function Open-WindowsPlatformMutationFile {
     param($ParentLease,[string]$Leaf,$Identity,[string]$Capability,[switch]$AllowMissing,[switch]$Writable)
     try {
@@ -277,23 +358,22 @@ function Publish-WindowsPlatformFile {
             }
         }
         else {
-            $probeLeaf='.ai-instructions-permission-probe-'+[Guid]::NewGuid().ToString('N')
-            $probe=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenFile($ParentLease,$probeLeaf,'ReadWrite','CreateNew')
-            try {
-                $permissions=ConvertTo-WindowsPlatformPermissionSnapshot (Get-WindowsPlatformPermissions $probe) 'publication' 'Inherited target'
-                $probeIdentity=Get-WindowsPlatformIdentity $probe.Observation
-                $probe.Dispose()
-                $probe=Open-WindowsPlatformMutationFile $ParentLease $probeLeaf $probeIdentity 'publication'
-                [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::DeleteOnClose($probe)
-            } finally { if($null -ne $probe){$probe.Dispose()} }
+            $permissions=Get-WindowsPlatformInheritedPermissions $ParentLease 'publication'
         }
         # OpenFile intentionally preserves origin/main's read-only share mode, which
         # blocks a second DELETE request.  Publication therefore consumes the caller's
         # validated stage lease, then reopens the same identity relative to TransactionLease.
         $StageLease.Dispose()
         $mutationStage=Open-WindowsPlatformMutationFile $TransactionLease $stageLeaf $stageIdentity 'publication' -Writable
-        [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($mutationStage,[string]$permissions.sddl,$false)
+        $appliedStagePermissions=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($mutationStage,[string]$permissions.sddl,[bool]$permissions.readOnly)
         $permissionsApplied=$true
+        $canonicalStagePermissions=ConvertTo-WindowsPlatformPermissionSnapshot ([pscustomobject][ordered]@{kind='windows-sddl';sddl=[string]$appliedStagePermissions.Sddl;readOnly=[bool]$appliedStagePermissions.ReadOnly}) 'publication' 'Applied stage'
+        if ([string]$canonicalStagePermissions.sddl -cne [string]$permissions.sddl -or [bool]$canonicalStagePermissions.readOnly -ne [bool]$permissions.readOnly) {
+            throw (New-WindowsPlatformVerificationError 'publication' 'Applied stage permissions do not match the target snapshot.')
+        }
+        Invoke-WindowsPlatformFileFlush $mutationStage 'publication' 'stage-flush'
+        Invoke-WindowsPlatformDirectoryFlush $ParentLease 'publication' 'preflight' 'parent'
+        Invoke-WindowsPlatformDirectoryFlush $TransactionLease 'publication' 'preflight' 'transaction'
         if ($null -ne $target) {
             if ($permissions.readOnly) { [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($target,$null,$false);$targetReadOnlyCleared=$true }
             [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::RenameNoReplace($target,$TransactionLease,$DisplacedLeaf)
@@ -309,18 +389,27 @@ function Publish-WindowsPlatformFile {
             throw
         }
         $applied=$true
-        [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($mutationStage,$null,[bool]$permissions.readOnly)
-        [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::Flush($mutationStage)
-        $directoryFlushed=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::TryFlushDirectory($ParentLease)
-        $transactionDirectoryFlushed=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::TryFlushDirectory($TransactionLease)
-        [string[]]$completedSteps=@($(if($null -ne $target){'displaced-rename'})) + @('applied-rename','file-flush','directory-flush')
+        [string[]]$completedSteps=@($(if($null -ne $target){'displaced-rename'})) + @('applied-rename','file-flush')
         $receipt=[pscustomobject][ordered]@{
             completedSteps=$completedSteps
             appliedIdentity=(Get-WindowsPlatformIdentity $mutationStage.Observation)
             displacedIdentity=$(if($null -eq $target){$null}else{Get-WindowsPlatformIdentity $target.Observation})
             permissions=$permissions
             displacedLeaf=$DisplacedLeaf
-            flush=[pscustomobject][ordered]@{file=$true;directory=$directoryFlushed;transactionDirectory=$transactionDirectoryFlushed;directoryUnsupported=(-not $directoryFlushed -or -not $transactionDirectoryFlushed)}
+            durability='unconfirmed'
+            flush=[pscustomobject][ordered]@{file=$true;directory=$false;transactionDirectory=$false}
+        }
+        try {
+            Invoke-WindowsPlatformDirectoryFlush $ParentLease 'publication' 'post-rename' 'parent'
+            $receipt.flush.directory=$true
+            Invoke-WindowsPlatformDirectoryFlush $TransactionLease 'publication' 'post-rename' 'transaction'
+            $receipt.flush.transactionDirectory=$true
+            $receipt.completedSteps=[string[]]@($receipt.completedSteps)+@('directory-flush')
+            $receipt.durability='confirmed'
+        }
+        catch {
+            $preserveForRecovery=$true
+            throw (New-WindowsPlatformRecoveryError 'publication-durability' "Post-rename directory flush failed; journal recovery is required. $($_.Exception.Message)" $receipt)
         }
         try {
             if ($null -ne $script:WindowsPublicationPostRenameTestHook) { & $script:WindowsPublicationPostRenameTestHook 'publication' $transactionContext.parentPath $transactionContext.transactionPath $ParentLease $TransactionLease $mutationStage $target }
@@ -390,7 +479,7 @@ function Remove-WindowsPlatformOwnedFile {
     $permissions=$null
     $receipt=$null
     try {
-        $target=if([bool]$ExpectedState.exists){Open-WindowsPlatformMutationFile $ParentLease $Leaf $ExpectedState.identity 'owned-file-removal' -AllowMissing}else{Open-WindowsPlatformMutationFile $ParentLease $Leaf $null 'owned-file-removal' -AllowMissing}
+        $target=if([bool]$ExpectedState.exists){Open-WindowsPlatformMutationFile $ParentLease $Leaf $ExpectedState.identity 'owned-file-removal'}else{Open-WindowsPlatformMutationFile $ParentLease $Leaf $null 'owned-file-removal' -AllowMissing}
         Assert-WindowsPlatformExpectedState $target $ExpectedState 'owned-file-removal'
         $permissions=ConvertTo-WindowsPlatformPermissionSnapshot (Get-WindowsPlatformPermissions $target) 'owned-file-removal' 'Live target'
         if ($null -ne $Journal) {
@@ -401,20 +490,36 @@ function Remove-WindowsPlatformOwnedFile {
         }
         $identity=Get-WindowsPlatformIdentity $target.Observation
         if ($tombstone) {
+            Invoke-WindowsPlatformDirectoryFlush $ParentLease 'owned-file-removal' 'preflight' 'parent'
+            Invoke-WindowsPlatformDirectoryFlush $TransactionLease 'owned-file-removal' 'preflight' 'transaction'
             if ($permissions.readOnly) { [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($target,$null,$false);$readOnlyCleared=$true }
+            $target.Dispose();$target=$null
+            $target=Open-WindowsPlatformMutationFile $ParentLease $Leaf $ExpectedState.identity 'owned-file-removal' -Writable
+            Invoke-WindowsPlatformFileFlush $target 'owned-file-removal' 'file-flush'
             [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::RenameNoReplace($target,$TransactionLease,$TombstoneLeaf)
             $renamed=$true
             if ($permissions.readOnly) { [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($target,$null,$true);$readOnlyCleared=$false }
-            $directoryFlushed=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::TryFlushDirectory($ParentLease)
-            $transactionDirectoryFlushed=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::TryFlushDirectory($TransactionLease)
             $receipt=[pscustomobject][ordered]@{
-                completedSteps=[string[]]@('tombstone-rename','directory-flush')
+                completedSteps=[string[]]@('tombstone-rename','file-flush')
                 appliedIdentity=$null
                 displacedIdentity=$identity
                 backupIdentity=$identity
                 permissions=$permissions
                 tombstoneLeaf=$TombstoneLeaf
-                flush=[pscustomobject][ordered]@{file=$false;fileNotRequired=$true;directory=$directoryFlushed;transactionDirectory=$transactionDirectoryFlushed;directoryUnsupported=(-not $directoryFlushed -or -not $transactionDirectoryFlushed)}
+                durability='unconfirmed'
+                flush=[pscustomobject][ordered]@{file=$true;directory=$false;transactionDirectory=$false}
+            }
+            try {
+                Invoke-WindowsPlatformDirectoryFlush $ParentLease 'owned-file-removal' 'post-rename' 'parent'
+                $receipt.flush.directory=$true
+                Invoke-WindowsPlatformDirectoryFlush $TransactionLease 'owned-file-removal' 'post-rename' 'transaction'
+                $receipt.flush.transactionDirectory=$true
+                $receipt.completedSteps=[string[]]@($receipt.completedSteps)+@('directory-flush')
+                $receipt.durability='confirmed'
+            }
+            catch {
+                $preserveForRecovery=$true
+                throw (New-WindowsPlatformRecoveryError 'publication-durability' "Post-rename directory flush failed; journal recovery is required. $($_.Exception.Message)" $receipt)
             }
             try {
                 if ($null -ne $script:WindowsPublicationPostRenameTestHook) { & $script:WindowsPublicationPostRenameTestHook 'removal' $transactionContext.parentPath $transactionContext.transactionPath $ParentLease $TransactionLease $null $target }
@@ -431,9 +536,31 @@ function Remove-WindowsPlatformOwnedFile {
             }
             return $receipt
         }
+        Invoke-WindowsPlatformDirectoryFlush $ParentLease 'owned-file-removal-cleanup' 'preflight' 'parent'
         if ($permissions.readOnly) { [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($target,$null,$false) }
         [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::DeleteOnClose($target)
-        return [pscustomobject][ordered]@{backupIdentity=$identity;permissions=$permissions;deleted=$true}
+        $receipt=[pscustomobject][ordered]@{
+            completedSteps=[string[]]@('delete-on-close')
+            appliedIdentity=$null
+            displacedIdentity=$identity
+            backupIdentity=$identity
+            permissions=$permissions
+            deleted=$true
+            durability='unconfirmed'
+            flush=[pscustomobject][ordered]@{file=$false;fileNotRequired=$true;directory=$false;transactionDirectory=$null}
+        }
+        $target.Dispose();$target=$null
+        try {
+            Invoke-WindowsPlatformDirectoryFlush $ParentLease 'owned-file-removal-cleanup' 'post-delete' 'parent'
+            $receipt.flush.directory=$true
+            $receipt.completedSteps=[string[]]@($receipt.completedSteps)+@('directory-flush')
+            $receipt.durability='confirmed'
+        }
+        catch {
+            $preserveForRecovery=$true
+            throw (New-WindowsPlatformRecoveryError 'publication-durability' "Post-delete directory flush failed; manual recovery verification is required. $($_.Exception.Message)" $receipt)
+        }
+        return $receipt
     }
     catch {
         $removalFailure=$_
@@ -447,7 +574,16 @@ function Remove-WindowsPlatformOwnedFile {
             }
             catch { throw (New-WindowsPlatformVerificationError 'owned-file-removal' "Removal failed and rollback could not restore the tombstone rename; target='$Leaf', tombstone='$TombstoneLeaf'.") }
         }
-        elseif ($readOnlyCleared) { [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($target,$null,$true) }
+        elseif ($readOnlyCleared) {
+            $restoreTarget=$null
+            try {
+                $restoreTarget=if($null -ne $target){$target}else{Open-WindowsPlatformMutationFile $ParentLease $Leaf $ExpectedState.identity 'owned-file-removal'}
+                [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($restoreTarget,$null,$true)
+                $readOnlyCleared=$false
+            }
+            catch { throw (New-WindowsPlatformVerificationError 'owned-file-removal' "Removal failed before rename and the read-only attribute could not be restored for '$Leaf'.") }
+            finally { if($null -eq $target -and $null -ne $restoreTarget){$restoreTarget.Dispose()} }
+        }
         throw $removalFailure
     }
     finally { if($null -ne $target){$target.Dispose()} }
