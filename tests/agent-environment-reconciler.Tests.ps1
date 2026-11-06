@@ -171,9 +171,9 @@ function New-TestInstallReadLeaseEvidence {
     $created=-not(Test-Path -LiteralPath $lockPath)
     if($created){[IO.File]::WriteAllText($lockPath,'')}
     $stream=[IO.File]::Open($lockPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
-    try{$evidence=New-AgentEnvironmentInstallReadLeaseEvidence -Lease $stream}
+    try{$evidence=New-AgentEnvironmentInstallReadLeaseEvidence -Lease $stream;$stream.Dispose();$stream=$null}
     catch{$stream.Dispose();throw}
-    return [pscustomobject]@{Evidence=$evidence;Stream=$stream;Path=$lockPath;Created=$created}
+    return [pscustomobject]@{Evidence=$evidence;Stream=$evidence.Stream;Path=$lockPath;Created=$created}
 }
 
 Describe 'user-scoped Agent Skills reconciliation' {
@@ -858,6 +858,43 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
         $result=$output[-1]|ConvertFrom-Json
         $result.Code|Should BeNullOrEmpty
         $result.failureDetails[0].code|Should Be 'mutation-failure'
+    }
+
+    # Scenario: A caller opened the canonical install lock with delete sharing, then the path was replaced after trusted evidence was established but its owned shared lease was lost.
+    # Purpose: Rebind every recovery mutation to the evidence identity and the current canonical lock identity before preserving or changing USER state.
+    It 'InterT93_rejects_a_replaced_canonical_install_lock_before_recovery_mutation' {
+        $caseHome=Join-Path $TestDrive 'replaced-install-lock-recovery'
+        $target=Join-Path $caseHome '.agents/skills/personal/SKILL.md'
+        $orphan=Join-Path $caseHome '.ai-instructions-txn/0123456789abcdef0123456789abcdef'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target),$orphan|Out-Null
+        [IO.File]::WriteAllText($target,'personal-before-install-lock-replacement',[Text.UTF8Encoding]::new($false))
+        $lockPath=Join-Path $script:RepositoryRoot 'ai-instructions-install.lock'
+        $existingBytes=if(Test-Path -LiteralPath $lockPath -PathType Leaf){[IO.File]::ReadAllBytes($lockPath)}else{$null}
+        $deleteSharingStream=$null;$trustedEvidence=$null;$staleEvidence=$null
+        try{
+            [IO.File]::WriteAllText($lockPath,'original-install-lock',[Text.UTF8Encoding]::new($false))
+            $deleteSharingStream=[IO.File]::Open($lockPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite-bor[IO.FileShare]::Delete)
+            $trustedEvidence=New-AgentEnvironmentInstallReadLeaseEvidence -Lease $deleteSharingStream
+            [object]::ReferenceEquals($trustedEvidence.Stream,$deleteSharingStream)|Should Be $false
+            $fileIdentity=[string]$trustedEvidence.FileIdentity
+            $trustedEvidence.Dispose();$trustedEvidence=$null
+            $staleEvidence=[SyuanTsai.AiInstructions.AgentEnvironmentTrustedInstallReadLease]::new($deleteSharingStream,$lockPath,$script:RuntimeRoot,$fileIdentity)
+            [IO.File]::Delete($lockPath)
+            [IO.File]::WriteAllText($lockPath,'replacement-install-lock',[Text.UTF8Encoding]::new($false))
+
+            $result=Invoke-UserSkillsRecovery -UserHome $caseHome -InstallReadLease $staleEvidence
+
+            $result.Code|Should Be 'interrupted-install'
+            Test-Path -LiteralPath $orphan -PathType Container|Should Be $true
+            [IO.File]::ReadAllText($target)|Should Be 'personal-before-install-lock-replacement'
+            Test-Path -LiteralPath (Join-Path $caseHome '.agents/update-agent-environment.lock')|Should Be $false
+        }
+        finally{
+            if($null-ne$trustedEvidence){$trustedEvidence.Dispose()}
+            if($null-ne$staleEvidence){$staleEvidence.Dispose()}
+            if($null-ne$deleteSharingStream){$deleteSharingStream.Dispose()}
+            if($null-eq$existingBytes){Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue}else{[IO.File]::WriteAllBytes($lockPath,[byte[]]$existingBytes)}
+        }
     }
 
     It 'installs a clean multi-source selection and becomes idempotent' {

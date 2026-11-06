@@ -9,16 +9,88 @@ $script:agentEnvironmentRefusalCodes = @(
 
 if($null-eq('SyuanTsai.AiInstructions.AgentEnvironmentTrustedInstallReadLease' -as [type])){
     Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Globalization;
+using System.IO;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
 namespace SyuanTsai.AiInstructions {
-    public sealed class AgentEnvironmentTrustedInstallReadLease {
+    public static class AgentEnvironmentInstallReadLeaseNative {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ByHandleFileInformation {
+            public uint FileAttributes;
+            public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+            public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+            public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+            public uint VolumeSerialNumber;
+            public uint FileSizeHigh;
+            public uint FileSizeLow;
+            public uint NumberOfLinks;
+            public uint FileIndexHigh;
+            public uint FileIndexLow;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out ByHandleFileInformation information);
+
+        [DllImport("libc", EntryPoint = "fstat", SetLastError = true)]
+        private static extern int LinuxFStat(int fileDescriptor, IntPtr stat);
+
+        [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "fstat", SetLastError = true)]
+        private static extern int DarwinFStat(int fileDescriptor, IntPtr stat);
+
+        [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "fstat$INODE64", SetLastError = true)]
+        private static extern int DarwinFStat64(int fileDescriptor, IntPtr stat);
+
+        public static string GetFileIdentity(SafeFileHandle handle) {
+            if (handle == null || handle.IsInvalid || handle.IsClosed) throw new ObjectDisposedException("handle");
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) {
+                ByHandleFileInformation information;
+                if (!GetFileInformationByHandle(handle, out information)) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to identify the install read-lease handle.");
+                }
+                ulong fileIndex = ((ulong)information.FileIndexHigh << 32) | information.FileIndexLow;
+                return "windows:" + information.VolumeSerialNumber.ToString(CultureInfo.InvariantCulture) + ":" + fileIndex.ToString(CultureInfo.InvariantCulture);
+            }
+
+            bool held = false;
+            IntPtr buffer = IntPtr.Zero;
+            try {
+                handle.DangerousAddRef(ref held);
+                buffer = Marshal.AllocHGlobal(512);
+                for (int offset = 0; offset < 512; offset += 8) Marshal.WriteInt64(buffer, offset, 0);
+                int descriptor = handle.DangerousGetHandle().ToInt32();
+                bool mac = RuntimeInformation.IsOSPlatform(OSPlatform.OSX);
+                int result = mac
+                    ? (RuntimeInformation.ProcessArchitecture == Architecture.X64 ? DarwinFStat64(descriptor, buffer) : DarwinFStat(descriptor, buffer))
+                    : LinuxFStat(descriptor, buffer);
+                if (result != 0) throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to fstat the install read-lease handle.");
+                ulong device = mac ? (uint)Marshal.ReadInt32(buffer, 0) : unchecked((ulong)Marshal.ReadInt64(buffer, 0));
+                ulong inode = unchecked((ulong)Marshal.ReadInt64(buffer, 8));
+                return "unix:" + device.ToString(CultureInfo.InvariantCulture) + ":" + inode.ToString(CultureInfo.InvariantCulture);
+            }
+            finally {
+                if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+                if (held) handle.DangerousRelease();
+            }
+        }
+    }
+
+    public sealed class AgentEnvironmentTrustedInstallReadLease : IDisposable {
         public System.IO.FileStream Stream { get; private set; }
         public string CanonicalPath { get; private set; }
         public string RuntimeRoot { get; private set; }
         public System.IntPtr HandleIdentity { get; private set; }
-        public AgentEnvironmentTrustedInstallReadLease(System.IO.FileStream stream, string canonicalPath, string runtimeRoot) {
+        public string FileIdentity { get; private set; }
+        public AgentEnvironmentTrustedInstallReadLease(System.IO.FileStream stream, string canonicalPath, string runtimeRoot, string fileIdentity) {
             Stream = stream; CanonicalPath = canonicalPath; RuntimeRoot = runtimeRoot;
             HandleIdentity = stream.SafeFileHandle.DangerousGetHandle();
+            FileIdentity = fileIdentity;
         }
+        public void Dispose() { Stream.Dispose(); }
     }
 }
 '@
@@ -910,8 +982,10 @@ function Remove-AgentEnvironmentTransactionTree {
     param(
         [Parameter(Mandatory = $true)]$TransactionRootLease,
         [Parameter(Mandatory = $true)][string]$Leaf,
-        [Parameter(Mandatory = $true)]$ExpectedIdentity
+        [Parameter(Mandatory = $true)]$ExpectedIdentity,
+        [scriptblock]$BeforeMutationAction
     )
+    if($null-ne$BeforeMutationAction){& $BeforeMutationAction}
     Remove-PlatformOwnedDirectoryTree -TransactionRootLease $TransactionRootLease -Leaf $Leaf -ExpectedIdentity $ExpectedIdentity|Out-Null
 }
 
@@ -919,17 +993,19 @@ function Remove-AgentEnvironmentTransactionPrivateFile {
     param(
         [Parameter(Mandatory = $true)]$TransactionLease,
         [Parameter(Mandatory = $true)][string]$TransactionPath,
-        [Parameter(Mandatory = $true)][string]$Leaf
+        [Parameter(Mandatory = $true)][string]$Leaf,
+        [scriptblock]$BeforeMutationAction
     )
     $state=Get-AgentEnvironmentPrivateFileJournalState -TransactionPath $TransactionPath -Leaf $Leaf
-    if([bool]$state.exists){Remove-PlatformOwnedFile -ParentLease $TransactionLease -Leaf $Leaf -ExpectedState $state|Out-Null}
+    if([bool]$state.exists){if($null-ne$BeforeMutationAction){& $BeforeMutationAction};Remove-PlatformOwnedFile -ParentLease $TransactionLease -Leaf $Leaf -ExpectedState $state|Out-Null}
 }
 
 function Write-AgentEnvironmentInstallJournal {
     param(
         [Parameter(Mandatory = $true)][string]$TransactionPath,
         [Parameter(Mandatory = $true)]$TransactionLease,
-        [Parameter(Mandatory = $true)][object]$Journal
+        [Parameter(Mandatory = $true)][object]$Journal,
+        [scriptblock]$BeforeMutationAction
     )
     Assert-AiInstructionsInstallJournalV1 -Journal $Journal | Out-Null
     $path=Join-Path $TransactionPath 'journal.json';$stage=Join-Path $TransactionPath 'journal.stage';$previous=Join-Path $TransactionPath 'journal.prev'
@@ -940,6 +1016,7 @@ function Write-AgentEnvironmentInstallJournal {
     $authoritativeJournal=if($null-ne$currentJournal){$currentJournal}else{$fallbackJournal}
     if($null-ne$authoritativeJournal){Assert-AiInstructionsInstallJournalStoreTransition -Previous $authoritativeJournal -Next $Journal|Out-Null}
     $bytes=(New-Object Text.UTF8Encoding($false)).GetBytes(($Journal|ConvertTo-Json -Depth 30)+[Environment]::NewLine)
+    if($null-ne$BeforeMutationAction){& $BeforeMutationAction}
     $stream=[IO.File]::Open($stage,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::None)
     try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
     $readBack=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ([IO.File]::ReadAllText($stage,[Text.Encoding]::UTF8)) -ExpectedTransactionId ([string]$Journal.transactionId)
@@ -949,18 +1026,19 @@ function Write-AgentEnvironmentInstallJournal {
     # An older fallback may be removed before replacement only while journal.json is
     # still authoritative.  If journal.prev is the sole durable journal, retain it
     # until the NoReplace publication and readback of the replacement complete.
-    if($null-ne$currentJournal-and$null-ne$fallbackJournal){Remove-AgentEnvironmentTransactionPrivateFile -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf 'journal.prev'}
+    if($null-ne$currentJournal-and$null-ne$fallbackJournal){Remove-AgentEnvironmentTransactionPrivateFile -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf 'journal.prev' -BeforeMutationAction $BeforeMutationAction}
     $stageState=Get-AgentEnvironmentPrivateFileJournalState -TransactionPath $TransactionPath -Leaf 'journal.stage'
     $stageLease=$null
     try{
         $stageLease=Open-PlatformFile -ParentLease $TransactionLease -Leaf 'journal.stage' -Access Read -CreateMode OpenExisting
         $expected=if($null-eq$currentJournal){[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}}else{Get-AgentEnvironmentPrivateFileJournalState -TransactionPath $TransactionPath -Leaf 'journal.json'}
+        if($null-ne$BeforeMutationAction){& $BeforeMutationAction}
         Publish-PlatformFile -ParentLease $TransactionLease -Leaf 'journal.json' -TransactionLease $TransactionLease -StageLease $stageLease -ExpectedState $expected -DisplacedLeaf $(if($null-ne$currentJournal){'journal.prev'}else{$null}) -ExpectedStage $stageState -NoReplace:($null-eq$currentJournal)|Out-Null
     }
     finally{if($null-ne$stageLease){$stageLease.Dispose()}}
     ConvertFrom-AiInstructionsInstallJournalV1Json -Json ([IO.File]::ReadAllText($path,[Text.Encoding]::UTF8)) -ExpectedTransactionId ([string]$Journal.transactionId)|Out-Null
     if([string]$env:AI_INSTRUCTIONS_USER_RECONCILER_FAILFAST-ceq'after-journal-publish'){[Environment]::FailFast('Injected USER reconciler FailFast after journal publish.')}
-    if($null-eq$currentJournal-and$null-ne$fallbackJournal){Remove-AgentEnvironmentTransactionPrivateFile -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf 'journal.prev'}
+    if($null-eq$currentJournal-and$null-ne$fallbackJournal){Remove-AgentEnvironmentTransactionPrivateFile -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf 'journal.prev' -BeforeMutationAction $BeforeMutationAction}
 }
 
 function Get-AgentEnvironmentProcessStartIdentity {
@@ -1048,11 +1126,12 @@ function Invoke-AgentEnvironmentRecoveryRollbackDecision {
         [Parameter(Mandatory = $true)]$TransactionLease,
         [Parameter(Mandatory = $true)][object]$Journal,
         [Parameter(Mandatory = $true)][object]$Decision,
-        [string]$FailpointName
+        [string]$FailpointName,
+        [scriptblock]$BeforeMutationAction
     )
     Get-AiInstructionsInstallRecoveryPlan -Journal $Journal -Decision $Decision|Out-Null
     $Journal.phase='rolling-back'
-    Write-AgentEnvironmentInstallJournal $TransactionPath $TransactionLease $Journal
+    Write-AgentEnvironmentInstallJournal $TransactionPath $TransactionLease $Journal -BeforeMutationAction $BeforeMutationAction
     $operationDecisions=@{};foreach($item in @($Decision.operations)){$operationDecisions[[int64]$item.sequence]=$item}
     $operations=[object[]]@($Journal.operations);[array]::Reverse($operations)
     foreach($operation in $operations){
@@ -1068,8 +1147,9 @@ function Invoke-AgentEnvironmentRecoveryRollbackDecision {
             $parent=Open-AgentEnvironmentDirectoryLease $Home $parentRelative
             switch($action){
                 'none' { }
-                'restore-permissions' { Set-AgentEnvironmentJournalTargetPermissions $Home $operation }
+                'restore-permissions' { if($null-ne$BeforeMutationAction){& $BeforeMutationAction};Set-AgentEnvironmentJournalTargetPermissions $Home $operation }
                 'remove-applied' {
+                    if($null-ne$BeforeMutationAction){& $BeforeMutationAction}
                     if([string]$operation.kind-ceq'create-directory'){
                         Move-PlatformOwnedDirectory -ParentLease $parent -Leaf $leaf -TransactionLease $TransactionLease -DestinationLeaf ([string]$operation.quarantineLeaf) -ExpectedIdentity $operation.applied.identity -Direction ToTransaction -ExpectedState $operation.applied -Journal $operation|Out-Null
                     }else{
@@ -1079,26 +1159,28 @@ function Invoke-AgentEnvironmentRecoveryRollbackDecision {
                 'restore-original' {
                     if([string]$operation.kind-ceq'swap-directory'){
                         $current=Get-AgentEnvironmentDirectoryJournalState $Home $relative
-                        if([bool]$current.exists){Move-PlatformOwnedDirectory -ParentLease $parent -Leaf $leaf -TransactionLease $TransactionLease -DestinationLeaf ([string]$operation.quarantineLeaf) -ExpectedIdentity $operation.applied.identity -Direction ToTransaction -ExpectedState $operation.applied -Journal $operation|Out-Null}
+                        if([bool]$current.exists){if($null-ne$BeforeMutationAction){& $BeforeMutationAction};Move-PlatformOwnedDirectory -ParentLease $parent -Leaf $leaf -TransactionLease $TransactionLease -DestinationLeaf ([string]$operation.quarantineLeaf) -ExpectedIdentity $operation.applied.identity -Direction ToTransaction -ExpectedState $operation.applied -Journal $operation|Out-Null}
+                        if($null-ne$BeforeMutationAction){& $BeforeMutationAction}
                         Move-PlatformOwnedDirectory -ParentLease $parent -Leaf ([string]$operation.backupLeaf) -TransactionLease $TransactionLease -DestinationLeaf $leaf -ExpectedIdentity $operation.original.identity -Direction FromTransaction -ExpectedState $operation.original -Journal $operation|Out-Null
                     }else{
                         $current=Get-AgentEnvironmentFileJournalState $Home $relative
-                        if([bool]$current.exists){Remove-PlatformOwnedFile -ParentLease $parent -Leaf $leaf -ExpectedState $operation.applied -TransactionLease $TransactionLease -TombstoneLeaf ("rollback-$($operation.sequence)")|Out-Null}
+                        if([bool]$current.exists){if($null-ne$BeforeMutationAction){& $BeforeMutationAction};Remove-PlatformOwnedFile -ParentLease $parent -Leaf $leaf -ExpectedState $operation.applied -TransactionLease $TransactionLease -TombstoneLeaf ("rollback-$($operation.sequence)")|Out-Null}
                         $backup=Open-PlatformFile -ParentLease $TransactionLease -Leaf ([string]$operation.backupLeaf) -Access Read -CreateMode OpenExisting
-                        try{Publish-PlatformFile -ParentLease $parent -Leaf $leaf -TransactionLease $TransactionLease -StageLease $backup -ExpectedState ([pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}) -ExpectedStage $operation.original -NoReplace|Out-Null}
+                        try{if($null-ne$BeforeMutationAction){& $BeforeMutationAction};Publish-PlatformFile -ParentLease $parent -Leaf $leaf -TransactionLease $TransactionLease -StageLease $backup -ExpectedState ([pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}) -ExpectedStage $operation.original -NoReplace|Out-Null}
                         finally{$backup.Dispose()}
+                        if($null-ne$BeforeMutationAction){& $BeforeMutationAction}
                         Set-AgentEnvironmentJournalTargetPermissions $Home $operation
                     }
                 }
                 default { throw "Unsupported USER recovery operation action '$action'." }
             }
             $operation.state='rolled-back'
-            Write-AgentEnvironmentInstallJournal $TransactionPath $TransactionLease $Journal
+            Write-AgentEnvironmentInstallJournal $TransactionPath $TransactionLease $Journal -BeforeMutationAction $BeforeMutationAction
         }
         finally{if($null-ne$parent){$parent.Dispose()}}
     }
     $Journal.phase='rolled-back'
-    Write-AgentEnvironmentInstallJournal $TransactionPath $TransactionLease $Journal
+    Write-AgentEnvironmentInstallJournal $TransactionPath $TransactionLease $Journal -BeforeMutationAction $BeforeMutationAction
 }
 
 function Remove-AgentEnvironmentEmptyManagedDirectories {
@@ -1145,7 +1227,8 @@ function Move-AgentEnvironmentCommittedBackups {
         [Parameter(Mandatory = $true)][string]$Home,
         [Parameter(Mandatory = $true)][string]$TransactionPath,
         [Parameter(Mandatory = $true)]$TransactionLease,
-        [Parameter(Mandatory = $true)][object]$Journal
+        [Parameter(Mandatory = $true)][object]$Journal,
+        [scriptblock]$BeforeMutationAction
     )
     $backupRootRelative=".agents/backups/update-agent-environment-$([string]$Journal.transactionId)"
     $backupRoot=Get-AgentEnvironmentFullPath $Home $backupRootRelative
@@ -1154,6 +1237,7 @@ function Move-AgentEnvironmentCommittedBackups {
         # CreatePrivate opens every existing ancestor without following reparse points and
         # creates only missing physical directories.  Keep the complete guard chain alive
         # until every committed backup has been verified or published.
+        if($null-ne$BeforeMutationAction){& $BeforeMutationAction}
         $backupRootLease=Open-PlatformDirectory -Root $Home -RelativePath $backupRootRelative -CreatePrivate
         foreach($operation in @($Journal.operations|Where-Object{[bool]$_.original.exists})){
             if([string]$operation.kind-in@('swap-directory')){throw 'USER reconciler committed backup export does not support swap-directory.'}
@@ -1163,6 +1247,7 @@ function Move-AgentEnvironmentCommittedBackups {
             $destinationParentRelative=[IO.Path]::GetDirectoryName($destinationRelative.Replace('/',[IO.Path]::DirectorySeparatorChar)).Replace('\','/')
             $destinationParentLease=$null;$destinationLease=$null;$backupLease=$null
             try{
+                if($null-ne$BeforeMutationAction){& $BeforeMutationAction}
                 $destinationParentLease=Open-PlatformDirectory -Root $Home -RelativePath $destinationParentRelative -CreatePrivate
                 if(Test-Path -LiteralPath $destination){
                     $destinationLease=Open-PlatformFile -ParentLease $destinationParentLease -Leaf ([IO.Path]::GetFileName($destination)) -Access Read -CreateMode OpenExisting
@@ -1175,6 +1260,7 @@ function Move-AgentEnvironmentCommittedBackups {
                 $backupState=Get-AgentEnvironmentPrivateFileJournalState $TransactionPath ([string]$operation.backupLeaf)
                 if(-not[bool]$backupState.exists-or-not(Test-AgentEnvironmentJournalStateMatch $backupState $operation.original)){throw "Committed transaction backup is missing or changed: $relative"}
                 $backupLease=Open-PlatformFile -ParentLease $TransactionLease -Leaf ([string]$operation.backupLeaf) -Access Read -CreateMode OpenExisting
+                if($null-ne$BeforeMutationAction){& $BeforeMutationAction}
                 Publish-PlatformFile -ParentLease $destinationParentLease -Leaf ([IO.Path]::GetFileName($destination)) -TransactionLease $TransactionLease -StageLease $backupLease -ExpectedState ([pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}) -ExpectedStage $operation.original -NoReplace|Out-Null
             }finally{if($null-ne$backupLease){$backupLease.Dispose()};if($null-ne$destinationLease){$destinationLease.Dispose()};if($null-ne$destinationParentLease){$destinationParentLease.Dispose()}}
         }
@@ -1365,31 +1451,78 @@ function Get-AgentEnvironmentExpectedInstallLockPath {
     return [IO.Path]::GetFullPath((Join-Path $codexHome 'ai-instructions-install.lock'))
 }
 
+function ConvertTo-AgentEnvironmentInstallReadLeaseIdentity {
+    param([Parameter(Mandatory=$true)]$Observation)
+    $prefix=if((Get-AgentEnvironmentPlatformName)-ceq'windows'){'windows'}else{'unix'}
+    return '{0}:{1}:{2}'-f $prefix,([uint64]$Observation.Device).ToString([Globalization.CultureInfo]::InvariantCulture),([uint64]$Observation.Inode).ToString([Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Get-AgentEnvironmentCanonicalInstallLockIdentity {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    $parent=$null;$file=$null
+    try{
+        $parent=Open-PlatformDirectory -Root ([IO.Path]::GetDirectoryName($Path)) -RootOnly
+        $file=Open-PlatformFile -ParentLease $parent -Leaf ([IO.Path]::GetFileName($Path)) -Access Read -CreateMode OpenExisting
+        $observed=Assert-PlatformFileIdentity -Lease $file -Expected $file.Observation -SingleLink -VerifyPath
+        return ConvertTo-AgentEnvironmentInstallReadLeaseIdentity $observed
+    }
+    finally{if($null-ne$file){$file.Dispose()};if($null-ne$parent){$parent.Dispose()}}
+}
+
 function New-AgentEnvironmentInstallReadLeaseEvidence {
     [CmdletBinding()]
     param([Parameter(Mandatory=$true)][IO.FileStream]$Lease)
     $expected=Get-AgentEnvironmentExpectedInstallLockPath
     $comparison=Get-AgentEnvironmentPathComparison
     if(-not$Lease.CanRead-or-not[string]::Equals([IO.Path]::GetFullPath([string]$Lease.Name),$expected,$comparison)){throw 'Install read lease is not bound to the installed runtime lock.'}
-    $item=Get-Item -Force -LiteralPath $expected
-    if($item.PSIsContainer-or($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){throw 'Installed runtime lock must be a non-reparse file.'}
-    return [SyuanTsai.AiInstructions.AgentEnvironmentTrustedInstallReadLease]::new($Lease,$expected,[IO.Path]::GetFullPath($PSScriptRoot))
+    Import-AgentEnvironmentRuntimeModules -RuntimeRoot $PSScriptRoot
+    $callerIdentity=[SyuanTsai.AiInstructions.AgentEnvironmentInstallReadLeaseNative]::GetFileIdentity($Lease.SafeFileHandle)
+    $parent=$null;$current=$null;$trustedStream=$null
+    try{
+        $parent=Open-PlatformDirectory -Root ([IO.Path]::GetDirectoryName($expected)) -RootOnly
+        $current=Open-PlatformFile -ParentLease $parent -Leaf ([IO.Path]::GetFileName($expected)) -Access Read -CreateMode OpenExisting
+        $observed=Assert-PlatformFileIdentity -Lease $current -Expected $current.Observation -SingleLink -VerifyPath
+        $currentIdentity=ConvertTo-AgentEnvironmentInstallReadLeaseIdentity $observed
+        if($callerIdentity-cne$currentIdentity){throw 'Install read lease handle identity does not match the canonical installed runtime lock.'}
+        $trustedStream=[IO.File]::Open($expected,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+        $trustedIdentity=[SyuanTsai.AiInstructions.AgentEnvironmentInstallReadLeaseNative]::GetFileIdentity($trustedStream.SafeFileHandle)
+        if($trustedIdentity-cne$currentIdentity){throw 'Installed runtime lock identity changed while establishing the shared read lease.'}
+        $evidence=[SyuanTsai.AiInstructions.AgentEnvironmentTrustedInstallReadLease]::new($trustedStream,$expected,[IO.Path]::GetFullPath($PSScriptRoot),$trustedIdentity)
+        $trustedStream=$null
+        return $evidence
+    }
+    finally{if($null-ne$trustedStream){$trustedStream.Dispose()};if($null-ne$current){$current.Dispose()};if($null-ne$parent){$parent.Dispose()}}
 }
 
 function Test-AgentEnvironmentInstallReadLease {
     param([object] $Lease)
-    if($Lease -isnot [SyuanTsai.AiInstructions.AgentEnvironmentTrustedInstallReadLease]){return $false}
-    $expected=Get-AgentEnvironmentExpectedInstallLockPath
-    $comparison=Get-AgentEnvironmentPathComparison
-    return $Lease.Stream -is [IO.FileStream] -and $Lease.Stream.CanRead -and
-        $Lease.HandleIdentity -eq $Lease.Stream.SafeFileHandle.DangerousGetHandle() -and
-        [string]::Equals([IO.Path]::GetFullPath([string]$Lease.CanonicalPath),$expected,$comparison) -and
-        [string]::Equals([IO.Path]::GetFullPath([string]$Lease.Stream.Name),$expected,$comparison) -and
-        [string]::Equals([IO.Path]::GetFullPath([string]$Lease.RuntimeRoot),[IO.Path]::GetFullPath($PSScriptRoot),$comparison)
+    try{
+        if($Lease -isnot [SyuanTsai.AiInstructions.AgentEnvironmentTrustedInstallReadLease]){return $false}
+        $expected=Get-AgentEnvironmentExpectedInstallLockPath
+        $comparison=Get-AgentEnvironmentPathComparison
+        if($Lease.Stream-isnot[IO.FileStream]-or-not$Lease.Stream.CanRead-or
+            $Lease.HandleIdentity-ne$Lease.Stream.SafeFileHandle.DangerousGetHandle()-or
+            [string]::IsNullOrWhiteSpace([string]$Lease.FileIdentity)-or
+            -not[string]::Equals([IO.Path]::GetFullPath([string]$Lease.CanonicalPath),$expected,$comparison)-or
+            -not[string]::Equals([IO.Path]::GetFullPath([string]$Lease.Stream.Name),$expected,$comparison)-or
+            -not[string]::Equals([IO.Path]::GetFullPath([string]$Lease.RuntimeRoot),[IO.Path]::GetFullPath($PSScriptRoot),$comparison)){return $false}
+        $handleIdentity=[SyuanTsai.AiInstructions.AgentEnvironmentInstallReadLeaseNative]::GetFileIdentity($Lease.Stream.SafeFileHandle)
+        if($handleIdentity-cne[string]$Lease.FileIdentity){return $false}
+        return (Get-AgentEnvironmentCanonicalInstallLockIdentity -Path $expected)-ceq[string]$Lease.FileIdentity
+    }
+    catch{return $false}
+}
+
+function Assert-AgentEnvironmentRecoveryInstallReadLease {
+    param([object]$InstallReadLease)
+    if(Test-AgentEnvironmentInstallReadLease $InstallReadLease){return}
+    $exception=[InvalidOperationException]::new('USER install-journal recovery lost the canonical install read lease before mutation.')
+    $exception.Data['Code']='interrupted-install'
+    throw $exception
 }
 
 function Invoke-AgentEnvironmentNewJournalRecoveryLocked {
-    param([string]$Home,[ValidateSet('Apply','VerifyOnly','WhatIf')][string]$Mode='Apply')
+    param([string]$Home,[ValidateSet('Apply','VerifyOnly','WhatIf')][string]$Mode='Apply',[object]$InstallReadLease)
     Assert-AgentEnvironmentDirectoryPublicationCapability
     $root=Join-Path $Home '.ai-instructions-txn'
     if(-not(Test-Path -LiteralPath $root)){return [pscustomobject]@{outcome='nothing-to-recover';exitCode=0}}
@@ -1399,6 +1532,7 @@ function Invoke-AgentEnvironmentNewJournalRecoveryLocked {
     if($entries.Count-eq0){return [pscustomobject]@{outcome='nothing-to-recover';exitCode=0}}
     if($Mode-cne'Apply'){return New-AgentEnvironmentInterruptedResult 'USER transaction residue requires Apply recovery before read-only reconciliation.'}
     $containerLease=$null;$recoveredBackupPath=$null
+    $beforeRecoveryMutation={Assert-AgentEnvironmentRecoveryInstallReadLease -InstallReadLease $InstallReadLease}.GetNewClosure()
     try{
         $containerLease=Open-PlatformDirectory -Root $Home -RelativePath '.ai-instructions-txn'
         $classifiedEntries=New-Object Collections.Generic.List[object]
@@ -1443,27 +1577,28 @@ function Invoke-AgentEnvironmentNewJournalRecoveryLocked {
             $entry=$validated.entry;$entryState=$validated.entryState
             if(-not[bool]$entryState.exists){continue}
             if([string]$validated.classification.classification-ceq'orphan-without-journal'){
-                Remove-AgentEnvironmentTransactionTree -TransactionRootLease $containerLease -Leaf $entry.Name -ExpectedIdentity $entryState.identity
+                Remove-AgentEnvironmentTransactionTree -TransactionRootLease $containerLease -Leaf $entry.Name -ExpectedIdentity $entryState.identity -BeforeMutationAction $beforeRecoveryMutation
                 continue
             }
             $journal=$validated.journal;$observations=$validated.observations;$decision=$validated.decision;$transactionLease=$null;$backupPath=$null
             try{
                 $transactionLease=Open-PlatformDirectory -Root $Home -RelativePath ".ai-instructions-txn/$($entry.Name)"
                 if([string]$decision.action-ceq'roll-back'){
-                    Invoke-AgentEnvironmentRecoveryRollbackDecision -Home $Home -TransactionPath $entry.FullName -TransactionLease $transactionLease -Journal $journal -Decision $decision
+                    Invoke-AgentEnvironmentRecoveryRollbackDecision -Home $Home -TransactionPath $entry.FullName -TransactionLease $transactionLease -Journal $journal -Decision $decision -BeforeMutationAction $beforeRecoveryMutation
                 }elseif([string]$decision.action-ceq'commit'){
-                    $journal.phase='committed';Write-AgentEnvironmentInstallJournal $entry.FullName $transactionLease $journal
-                    $backupPath=Move-AgentEnvironmentCommittedBackups -Home $Home -TransactionPath $entry.FullName -TransactionLease $transactionLease -Journal $journal
+                    $journal.phase='committed';Write-AgentEnvironmentInstallJournal $entry.FullName $transactionLease $journal -BeforeMutationAction $beforeRecoveryMutation
+                    $backupPath=Move-AgentEnvironmentCommittedBackups -Home $Home -TransactionPath $entry.FullName -TransactionLease $transactionLease -Journal $journal -BeforeMutationAction $beforeRecoveryMutation
                 }elseif([string]$decision.action-ceq'none'-and[string]$journal.phase-ceq'committed'){
-                    $backupPath=Move-AgentEnvironmentCommittedBackups -Home $Home -TransactionPath $entry.FullName -TransactionLease $transactionLease -Journal $journal
+                    $backupPath=Move-AgentEnvironmentCommittedBackups -Home $Home -TransactionPath $entry.FullName -TransactionLease $transactionLease -Journal $journal -BeforeMutationAction $beforeRecoveryMutation
                 }
                 if(-not[string]::IsNullOrWhiteSpace([string]$backupPath)){$recoveredBackupPath=$backupPath}
-                $transactionLease.Dispose();$transactionLease=$null;Remove-AgentEnvironmentTransactionTree -TransactionRootLease $containerLease -Leaf $entry.Name -ExpectedIdentity $entryState.identity
-            }catch{return New-AgentEnvironmentNewJournalRecoveryFailureResult -Message ([string]$_.Exception.Message) -TransactionPath $entry.FullName -BackupPath $backupPath}
+                $transactionLease.Dispose();$transactionLease=$null;Remove-AgentEnvironmentTransactionTree -TransactionRootLease $containerLease -Leaf $entry.Name -ExpectedIdentity $entryState.identity -BeforeMutationAction $beforeRecoveryMutation
+            }catch{if([string]$_.Exception.Data['Code']-ceq'interrupted-install'){return New-AgentEnvironmentInterruptedResult ([string]$_.Exception.Message)};return New-AgentEnvironmentNewJournalRecoveryFailureResult -Message ([string]$_.Exception.Message) -TransactionPath $entry.FullName -BackupPath $backupPath}
             finally{if($null-ne$transactionLease){$transactionLease.Dispose()}}
         }
         return [pscustomobject]@{outcome='recovered';exitCode=0;rollbackState='completed';backupPath=$recoveredBackupPath}
-    }finally{if($null-ne$containerLease){$containerLease.Dispose()}}
+    }catch{if([string]$_.Exception.Data['Code']-ceq'interrupted-install'){return New-AgentEnvironmentInterruptedResult ([string]$_.Exception.Message)};throw}
+    finally{if($null-ne$containerLease){$containerLease.Dispose()}}
 }
 
 function Invoke-UserSkillsReconciliation {
@@ -1506,6 +1641,7 @@ function Invoke-UserSkillsReconciliation {
     $newTransactionRoot=Join-Path $home '.ai-instructions-txn'
     $hasNewTransactionResidue=(Test-Path -LiteralPath $newTransactionRoot)-and(@(Get-ChildItem -Force -LiteralPath $newTransactionRoot -ErrorAction Stop).Count-gt0)
     if($hasNewTransactionResidue-and$Mode-cne'Apply'){return New-AgentEnvironmentInterruptedResult 'USER transaction residue requires Apply recovery before read-only reconciliation.'}
+    if($hasNewTransactionResidue-and-not(Test-AgentEnvironmentInstallReadLease $InstallReadLease)){return New-AgentEnvironmentInterruptedResult 'USER install-journal recovery requires stable-launcher validation and the install read lease.'}
 
     # Candidate and desired-manifest validation is deliberately completed before Apply
     # creates .agents or the user-scope lock. A bad candidate must not leave even an
@@ -1585,7 +1721,7 @@ function Invoke-UserSkillsReconciliation {
         }
         if($Mode-eq'Apply'-and$hasNewTransactionResidue){
             if(-not(Test-AgentEnvironmentInstallReadLease $InstallReadLease)){return New-AgentEnvironmentInterruptedResult 'USER install-journal recovery requires stable-launcher validation and the install read lease.'}
-            $newRecovery=Invoke-AgentEnvironmentNewJournalRecoveryLocked -Home $home -Mode Apply
+            $newRecovery=Invoke-AgentEnvironmentNewJournalRecoveryLocked -Home $home -Mode Apply -InstallReadLease $InstallReadLease
             if([string]$newRecovery.outcome-ceq'failed'){return $newRecovery}
         }
         if($Mode-eq'Apply'-and($hasLegacyResidue-or$hasNewTransactionResidue)){$existingManifestIdentity=(Get-AgentEnvironmentManifestSnapshot -Root $home -RelativePath $manifestRelative).Identity}
@@ -1810,6 +1946,7 @@ function Invoke-UserSkillsRecovery {
         $hasNew=(Test-Path -LiteralPath $transactionRoot)-and(@(Get-ChildItem -Force -LiteralPath $transactionRoot -ErrorAction Stop).Count-gt0)
         if(-not$hasLegacy-and-not$hasNew){return [pscustomobject][ordered]@{ schemaVersion=1; outcome='nothing-to-recover'; exitCode=0; rollbackState='not-needed' }}
         Import-AgentEnvironmentRuntimeModules -RuntimeRoot $PSScriptRoot
+        if($hasNew-and-not(Test-AgentEnvironmentInstallReadLease $InstallReadLease)){return New-AgentEnvironmentInterruptedResult 'USER install-journal recovery requires stable-launcher validation and the install read lease.'}
         $existingManifestSnapshot = Get-AgentEnvironmentManifestSnapshot -Root $home -RelativePath $manifestRelative
         if ($hasLegacy -and -not (Test-Path -LiteralPath $journalPath -PathType Leaf)) { throw 'Agent environment recovery journal path must be a file.' }
         if (Test-Path -LiteralPath $lockPath) {
@@ -1824,7 +1961,7 @@ function Invoke-UserSkillsRecovery {
         $hasLegacy=Test-Path -LiteralPath $journalPath
         $hasNew=(Test-Path -LiteralPath $transactionRoot)-and(@(Get-ChildItem -Force -LiteralPath $transactionRoot -ErrorAction Stop).Count-gt0)
         if($hasLegacy-and$hasNew){return New-AgentEnvironmentInterruptedResult 'Legacy and install-journal USER transaction residues coexist; recovery refused before mutation.'}
-        if($hasNew){if(-not(Test-AgentEnvironmentInstallReadLease $InstallReadLease)){return New-AgentEnvironmentInterruptedResult 'USER install-journal recovery requires stable-launcher validation and the install read lease.'};return Invoke-AgentEnvironmentNewJournalRecoveryLocked -Home $home -Mode Apply}
+        if($hasNew){if(-not(Test-AgentEnvironmentInstallReadLease $InstallReadLease)){return New-AgentEnvironmentInterruptedResult 'USER install-journal recovery requires stable-launcher validation and the install read lease.'};return Invoke-AgentEnvironmentNewJournalRecoveryLocked -Home $home -Mode Apply -InstallReadLease $InstallReadLease}
         if(-not$hasLegacy){return [pscustomobject][ordered]@{ schemaVersion=1; outcome='nothing-to-recover'; exitCode=0; rollbackState='not-needed' }}
         $lockedManifestSnapshot = Get-AgentEnvironmentManifestSnapshot -Root $home -RelativePath $manifestRelative
         if ($existingManifestSnapshot.Identity -cne $lockedManifestSnapshot.Identity) {
