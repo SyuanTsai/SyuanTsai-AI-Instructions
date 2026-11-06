@@ -228,12 +228,19 @@ try {
     $command=$reconcilerCommands['New-AgentEnvironmentInstallReadLeaseEvidence']
     $script:agentEnvironmentTrustedReadLease = & $command -Lease $script:agentEnvironmentRuntimeReadLock
 
-    if ($Recover) {
+    if(-not$Recover-and($VerifyOnly-or$WhatIfPreference)){
+        $command=$reconcilerCommands['Invoke-UserSkillsRecovery']
+        $readOnlyMode=if($VerifyOnly){'VerifyOnly'}else{'WhatIf'}
+        $residueResult=& $command -UserHome $userHomePath -InstallReadLease $script:agentEnvironmentTrustedReadLease -Mode $readOnlyMode
+        if([string]$residueResult.outcome-cne'nothing-to-recover'){$finalResult=$residueResult}
+    }
+
+    if($null-eq$finalResult-and$Recover) {
         $script:agentEnvironmentRecoveryStarted = $true
         $command=$reconcilerCommands['Invoke-UserSkillsRecovery']
         $finalResult = & $command -UserHome $userHomePath -InstallReadLease $script:agentEnvironmentTrustedReadLease
     }
-    else {
+    elseif($null-eq$finalResult) {
         if ([string]$configuration.catalog.ref -cne [string]$bundle.commit) { throw 'Installed Catalog configuration and runtime bundle commit do not match.' }
         $catalogVersion=(Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $runtimeRoot 'catalog/skills-catalog.json')|ConvertFrom-Json).schemaVersion
         $lockVersion=(Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $runtimeRoot 'catalog/skills-catalog-lock.json')|ConvertFrom-Json).schemaVersion

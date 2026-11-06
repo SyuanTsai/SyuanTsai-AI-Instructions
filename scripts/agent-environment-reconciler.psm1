@@ -1763,8 +1763,6 @@ function Invoke-UserSkillsReconciliation {
     $manifestPath = Get-AgentEnvironmentFullPath -Root $home -RelativePath $manifestRelative
     $existingManifestSnapshot = Get-AgentEnvironmentManifestSnapshot -Root $home -RelativePath $manifestRelative
     $existingManifestIdentity = $existingManifestSnapshot.Identity
-    Import-AgentEnvironmentRuntimeModules -RuntimeRoot ([string]$DesiredState.RuntimeRoot)
-    Assert-AgentEnvironmentProjectionVolumes -Home $home -DesiredState $DesiredState -ExistingManifest $existingManifestSnapshot.Manifest
     if ((Test-Path -LiteralPath $journalPath) -and $Mode -ne 'Apply') {
         Assert-AgentEnvironmentPathSafe -Root $home -RelativePath $journalRelative | Out-Null
         if (-not (Test-Path -LiteralPath $journalPath -PathType Leaf)) { throw 'Agent environment recovery journal path must be a file.' }
@@ -1773,6 +1771,8 @@ function Invoke-UserSkillsReconciliation {
     $newTransactionRoot=Join-Path $home '.ai-instructions-txn'
     $hasNewTransactionResidue=(Test-Path -LiteralPath $newTransactionRoot)-and(@(Get-ChildItem -Force -LiteralPath $newTransactionRoot -ErrorAction Stop).Count-gt0)
     if($hasNewTransactionResidue-and$Mode-cne'Apply'){return New-AgentEnvironmentInterruptedResult 'USER transaction residue requires Apply recovery before read-only reconciliation.'}
+    Import-AgentEnvironmentRuntimeModules -RuntimeRoot ([string]$DesiredState.RuntimeRoot)
+    Assert-AgentEnvironmentProjectionVolumes -Home $home -DesiredState $DesiredState -ExistingManifest $existingManifestSnapshot.Manifest
 
     # Candidate and desired-manifest validation is deliberately completed before Apply
     # creates .agents or the user-scope lock. A bad candidate must not leave even an
@@ -2200,6 +2200,7 @@ function Invoke-UserSkillsRecovery {
     param(
         [Parameter(Mandatory = $true)][string] $UserHome,
         [object] $InstallReadLease,
+        [ValidateSet('Apply','VerifyOnly','WhatIf')][string] $Mode = 'Apply',
         [scriptblock] $BeforeLockAcquisitionAction
     )
     $home=[IO.Path]::GetFullPath($UserHome).TrimEnd([char[]]@('\','/'))
@@ -2209,6 +2210,7 @@ function Invoke-UserSkillsRecovery {
     $hasNew=(Test-Path -LiteralPath $transactionRoot)-and(@(Get-ChildItem -Force -LiteralPath $transactionRoot -ErrorAction Stop).Count-gt0)
     if(-not$hasLegacy-and-not$hasNew){return [pscustomobject][ordered]@{schemaVersion=1;outcome='nothing-to-recover';exitCode=0;rollbackState='not-needed'}}
     Import-AgentEnvironmentRecoveryRuntimeModules -RuntimeRoot $PSScriptRoot
+    if($Mode-cne'Apply'){return New-AgentEnvironmentInterruptedResult 'USER transaction residue requires Apply recovery before read-only reconciliation.'}
     if($hasNew-and-not(Test-AgentEnvironmentInstallReadLease $InstallReadLease)){return New-AgentEnvironmentInterruptedResult 'USER install-journal recovery requires stable-launcher validation and the install read lease.'}
     $preLockManifestSnapshot=$null
     $lockParentLease=$null;$lockStream=$null

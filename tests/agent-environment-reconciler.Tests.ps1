@@ -627,7 +627,7 @@ Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode
                 if(@(Get-ChildItem -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -Filter 'backup-*' -Recurse -File).Count-le0){throw "failpoint=$failpoint; renamed original backup is missing."}
             }
             $triggered.Add($failpoint)
-            foreach($moduleName in @('skills-selection.psm1','skills-source-routing.psm1','skills-source-retrieval.psm1','skills-source-acquisition.psm1','license-delivery.psm1')){Copy-Item -LiteralPath (Join-Path $script:RuntimeRoot $moduleName) -Destination $caseRuntime -Force}
+            foreach($moduleName in @('skills-selection.psm1','skills-source-routing.psm1','skills-source-retrieval.psm1','skills-source-acquisition.psm1','license-delivery.psm1','safe-zip.psm1')){Copy-Item -LiteralPath (Join-Path $script:RuntimeRoot $moduleName) -Destination $caseRuntime -Force}
             New-Item -ItemType Directory -Force -Path (Join-Path $caseRuntime 'catalog')|Out-Null
             Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/skills-catalog.json') -Destination (Join-Path $caseRuntime 'catalog/skills-catalog.json') -Force
             Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/skills-catalog-lock.json') -Destination (Join-Path $caseRuntime 'catalog/skills-catalog-lock.json') -Force
@@ -635,12 +635,13 @@ Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode
             Copy-Item -LiteralPath $desiredPath -Destination (Join-Path $caseRuntime 'test-desired.clixml')
             @'
 . (Join-Path $PSScriptRoot 'agent-environment-reconciler-core.ps1')
-function Get-UserSkillsDesiredState { param([string]$RuntimeRoot,[object]$Configuration,[string]$CatalogRepository,[string]$CatalogCommit,[string]$WorkingRoot) $state=Import-Clixml -LiteralPath (Join-Path $PSScriptRoot 'test-desired.clixml');$state.RuntimeRoot=$PSScriptRoot;return $state }
+function Get-UserSkillsDesiredState { param([string]$RuntimeRoot,[object]$Configuration,[string]$CatalogRepository,[string]$CatalogCommit,[string]$WorkingRoot) [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'desired-state-requested.marker'),'requested');$state=Import-Clixml -LiteralPath (Join-Path $PSScriptRoot 'test-desired.clixml');$state.RuntimeRoot=$PSScriptRoot;return $state }
 Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDesiredState,Invoke-UserSkillsReconciliation,Invoke-UserSkillsRecovery,New-AgentEnvironmentInstallReadLeaseEvidence
 '@|Set-Content -LiteralPath (Join-Path $caseRuntime 'agent-environment-reconciler.psm1') -Encoding UTF8
             [IO.File]::WriteAllText((Join-Path $caseCodex 'ai-instructions-install.lock'),'');[IO.File]::WriteAllText((Join-Path $caseCodex 'hooks/bootstrap-ai-instructions.ps1'),"param([switch]`$ValidateOnly)`nif(-not`$ValidateOnly){throw 'ValidateOnly required'}")
             $commit='89abcdef0123456789abcdef0123456789abcdef';@{schemaVersion=4;catalog=@{ref=$commit}}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $caseCodex 'ai-instructions-sync.json') -Encoding UTF8;@{schemaVersion=2;repository='https://github.com/example/ai-instructions.git';commit=$commit}|ConvertTo-Json|Set-Content (Join-Path $caseRuntime 'runtime-bundle.json') -Encoding UTF8
             $entry=Join-Path $script:RepositoryRoot 'scripts/update-agent-environment.ps1';$beforeVerify=Get-TestTreeSnapshot $caseHome
+            $desiredStateMarker=Join-Path $caseRuntime 'desired-state-requested.marker'
             $verifyOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $caseCodex -UserHome $caseHome -VerifyOnly -OutputFormat Json);$verifyExit=$LASTEXITCODE;$verifyResult=$verifyOutput[-1]|ConvertFrom-Json
             if($failpoint-ceq'after-committed-transaction-cleanup'){
                 if($verifyExit-ne0-or[string]$verifyResult.outcome-cne'current'){throw "failpoint=$failpoint; VerifyOnly must report current after committed transaction cleanup."}
@@ -648,6 +649,7 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
                 throw "failpoint=$failpoint; VerifyOnly must report Code=interrupted-install while transaction residue remains."
             }
             if((Get-TestTreeSnapshot $caseHome)-cne$beforeVerify){throw "failpoint=$failpoint; VerifyOnly mutated the USER tree."}
+            if($failpoint-cne'after-committed-transaction-cleanup'-and(Test-Path -LiteralPath $desiredStateMarker)){throw "failpoint=$failpoint; VerifyOnly loaded desired state before refusing transaction residue."}
             $applyOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $caseCodex -UserHome $caseHome -Apply -OutputFormat Json);$applyExit=$LASTEXITCODE;$result=$applyOutput[-1]|ConvertFrom-Json
             if($applyExit-ne0){throw "failpoint=$failpoint; Apply recovery exited with code $applyExit."}
             if([string]$result.outcome-cnotin@('applied','current')){throw "failpoint=$failpoint; Apply recovery returned outcome=$($result.outcome)."}
