@@ -17,6 +17,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             "platform/PlatformNative.cs",
             "platform/UnixNative.cs",
             "platform/WindowsNative.cs",
+            "platform/WindowsInstallerMutation.cs",
             "platform/OwnedProcess.cs",
             "platform/UnixProcess.cs",
             "platform/WindowsProcess.cs"

@@ -663,7 +663,7 @@ param(
         $recordPath = Join-Path $codexHome 'snapshot-record.json'
         New-Item -ItemType Directory -Force -Path $runtimeRoot | Out-Null
         Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts\update-ai-instructions.ps1') -Destination (Join-Path $hooksRoot 'update-ai-instructions.ps1')
-        foreach ($fileName in @('ai-instructions-runtime-contract.psm1','safe-zip.psm1','skills-catalog-contract.psm1')) {
+        foreach ($fileName in @('ai-instructions-runtime-contract.psm1','WindowsDacl.psm1','safe-zip.psm1','skills-catalog-contract.psm1')) {
             Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot "scripts\$fileName") -Destination (Join-Path $runtimeRoot $fileName)
         }
         [IO.File]::WriteAllText(
@@ -680,7 +680,7 @@ function Get-SnapshotFileSha256 {
     finally { $sha256.Dispose() }
 }
 $recordPath = [Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_TEST_SNAPSHOT_RECORD')
-$records = foreach ($fileName in @('ai-instructions-updater.psm1','ai-instructions-runtime-contract.psm1','safe-zip.psm1','skills-catalog-contract.psm1')) {
+$records = foreach ($fileName in @('ai-instructions-updater.psm1','ai-instructions-runtime-contract.psm1','WindowsDacl.psm1','safe-zip.psm1','skills-catalog-contract.psm1')) {
     $path = Join-Path $PSScriptRoot $fileName
     [pscustomobject]@{ name=$fileName; sha256=(Get-SnapshotFileSha256 -Path $path) }
 }
@@ -700,7 +700,7 @@ Export-ModuleMember -Function Invoke-AiInstructionsUpdateWorkflow,Get-AiInstruct
         }
 
         $records = Get-Content -Raw -LiteralPath $recordPath | ConvertFrom-Json
-        @($records.name) | Should Be @('ai-instructions-updater.psm1','ai-instructions-runtime-contract.psm1','safe-zip.psm1','skills-catalog-contract.psm1')
+        @($records.name) | Should Be @('ai-instructions-updater.psm1','ai-instructions-runtime-contract.psm1','WindowsDacl.psm1','safe-zip.psm1','skills-catalog-contract.psm1')
         foreach ($record in $records) {
             $sourceHash = Get-TestUpdaterFileSha256 -Path (Join-Path $runtimeRoot $record.name)
             [string]$record.sha256 | Should Be $sourceHash

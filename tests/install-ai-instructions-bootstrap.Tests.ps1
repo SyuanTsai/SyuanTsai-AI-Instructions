@@ -159,7 +159,7 @@ Describe 'install-ai-instructions-bootstrap' {
             'bootstrap-ai-instructions-installed.ps1','bootstrap-ai-instructions-multisource.ps1','bootstrap-ai-instructions.ps1','safe-zip.psm1',
             'skills-catalog-contract.psm1','skills-selection.psm1','skills-source-routing.psm1',
             'skills-source-retrieval.psm1','skills-source-acquisition.psm1','skills-source-composition.psm1',
-            'ai-instructions-runtime-contract.psm1','agent-artifact-remediation.psm1','repo-shared-skills-migration.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1',
+            'ai-instructions-runtime-contract.psm1','WindowsDacl.psm1','agent-artifact-remediation.psm1','repo-shared-skills-migration.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1',
             'ai-instructions-updater.psm1','update-ai-instructions.ps1','agent-environment-reconciler.psm1','update-agent-environment.ps1',
             'cleanup-ai-instructions-pollution.ps1',
             'runtime-bundle.json','catalog\skills-catalog.json','catalog\skills-catalog-lock.json'
@@ -546,12 +546,14 @@ Keep this section too.
             'bootstrap-ai-instructions-installed.ps1','bootstrap-ai-instructions-multisource.ps1','bootstrap-ai-instructions.ps1',
             'safe-zip.psm1','skills-catalog-contract.psm1','skills-selection.psm1','skills-source-routing.psm1',
             'skills-source-retrieval.psm1','skills-source-acquisition.psm1','skills-source-composition.psm1',
-            'ai-instructions-runtime-contract.psm1','agent-artifact-remediation.psm1','repo-shared-skills-migration.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1',
+            'ai-instructions-runtime-contract.psm1','WindowsDacl.psm1','agent-artifact-remediation.psm1','repo-shared-skills-migration.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1',
             'ai-instructions-updater.psm1','update-ai-instructions.ps1','agent-environment-reconciler.psm1','update-agent-environment.ps1',
-            'cleanup-ai-instructions-pollution.ps1','installer-safe-mutation.psm1','license-delivery.psm1'
+            'cleanup-ai-instructions-pollution.ps1','installer-safe-mutation.psm1','platform-runtime.psd1','license-delivery.psm1'
         )) {
             Copy-Item -LiteralPath (Join-Path $repositoryRoot "scripts\$fileName") -Destination (Join-Path $cloneRoot "scripts\$fileName") -Force
         }
+        [IO.Directory]::CreateDirectory((Join-Path $cloneRoot 'scripts/platform')) | Out-Null
+        Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts/platform/WindowsInstallerMutation.cs') -Destination (Join-Path $cloneRoot 'scripts/platform/WindowsInstallerMutation.cs') -Force
         & git -C $cloneRoot add -- scripts
         & git -C $cloneRoot -c user.name='Installer Test' -c user.email='installer@example.test' commit --quiet --allow-empty -m 'installer fixture'
         if ($LASTEXITCODE -ne 0) { throw 'Failed to commit installer source fixture.' }
@@ -593,10 +595,12 @@ Keep this section too.
         if ($LASTEXITCODE -ne 0) { throw 'Failed to create invalid staging source clone.' }
         Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts\installer-safe-mutation.psm1') `
             -Destination (Join-Path $invalidSource 'scripts\installer-safe-mutation.psm1') -Force
+        Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts\platform\WindowsInstallerMutation.cs') `
+            -Destination (Join-Path $invalidSource 'scripts\platform\WindowsInstallerMutation.cs') -Force
         foreach ($fileName in @(
             'agent-artifact-remediation.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1',
             'agent-environment-reconciler.psm1','update-agent-environment.ps1','license-delivery.psm1',
-            'ai-instructions-runtime-contract.psm1'
+            'ai-instructions-runtime-contract.psm1','WindowsDacl.psm1'
         )) {
             Copy-Item -LiteralPath (Join-Path $repositoryRoot "scripts\$fileName") `
                 -Destination (Join-Path $invalidSource "scripts\$fileName") -Force

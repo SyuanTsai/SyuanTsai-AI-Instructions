@@ -257,8 +257,11 @@ function Get-AiInstructionsCandidatePackage {
         foreach ($relativePath in @(
             'scripts\install-ai-instructions-bootstrap.ps1',
             'scripts\installer-safe-mutation.psm1',
+            'scripts\platform-runtime.psd1',
+            'scripts\platform\WindowsInstallerMutation.cs',
             'scripts\bootstrap-ai-instructions-installed.ps1',
             'scripts\ai-instructions-runtime-contract.psm1',
+            'scripts\WindowsDacl.psm1',
             'scripts\ai-instructions-updater.psm1',
             'scripts\update-ai-instructions.ps1',
             'scripts\agent-environment-reconciler.psm1',

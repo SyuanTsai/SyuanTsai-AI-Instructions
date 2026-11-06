@@ -302,6 +302,7 @@ Describe 'AI instructions runtime contracts' {
         New-Item -ItemType Directory -Force -Path $isolatedRoot,$runtimeRoot | Out-Null
         $isolatedModulePath = Join-Path $isolatedRoot 'ai-instructions-runtime-contract.psm1'
         Copy-Item -LiteralPath $script:RuntimeContractModule -Destination $isolatedModulePath
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts\WindowsDacl.psm1') -Destination $isolatedRoot
         [IO.File]::WriteAllText((Join-Path $runtimeRoot 'bootstrap.ps1'),"Write-Output 'ok'`n")
 
         $isolatedModule = Import-Module $isolatedModulePath -PassThru -Scope Local -Force
@@ -844,7 +845,7 @@ Describe 'AI instructions runtime contracts' {
         $manifestInventoryPath = Join-Path $manifestInventoryFixture.Root 'platform-runtime.psd1'
         Set-TestTextOccurrence `
             -Path $manifestInventoryPath `
-            -OldValue "Sha256 = '82e7a6412abd51da98f7eb1777518dc9714dcaa3a72954af8a8ba5e959d3d879'" `
+            -OldValue "Sha256 = '6d69e4a56d72b3104224e464a2506bf749db75b331322523c259bb5ab72f0d2b'" `
             -NewValue ("Sha256 = '" + ('0' * 64) + "'")
         Update-TestRuntimeV3Inventory -Fixture $manifestInventoryFixture
         $manifestInventoryFixture.Bundle.platformRuntime.manifestSha256 = Get-TestCanonicalTextSha256 -Path $manifestInventoryPath
@@ -2991,5 +2992,56 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
             $steps[3].sequence | Should Be 1
             $steps[3].state | Should Be 'rolled-back'
         }
+    }
+
+    # Scenario: A Windows rollback journal records AI while readback clears only AI, then separate observations change an ACE or P.
+    # Purpose: Ignore the informational AI control bit but keep ACE sequence/flags/mask/SID and DACL protection authoritative.
+    It 'UnitT204_ignores_AI_only_and_rejects_ACE_or_protection_drift_in_recovery' {
+        $expectedSddl='D:PAI(A;ID;FR;;;BU)(A;;FA;;;SY)'
+        $observedWithoutAi='D:P(A;ID;FR;;;BU)(A;;FA;;;SY)'
+
+        $journal=Get-TestInstallJournalV1
+        $journal.phase='rolling-back'
+        $journal.operations=@($journal.operations[0])
+        $journal.operations[0].permissions.sddl=$expectedSddl
+        $observations=@{1=New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].original}
+        $observations[1].permissions.sddl=$observedWithoutAi
+        $matching=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
+        $matching.action | Should Be 'roll-back'
+        $matching.operations[0].action | Should Be 'none'
+
+        foreach($differentSddl in @(
+            'D:P(A;ID;FW;;;BU)(A;;FA;;;SY)',
+            'D:(A;ID;FR;;;BU)(A;;FA;;;SY)'
+        )) {
+            $journal=Get-TestInstallJournalV1
+            $journal.phase='rolling-back'
+            $journal.operations=@($journal.operations[0])
+            $journal.operations[0].permissions.sddl=$expectedSddl
+            $observations=@{1=New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].original}
+            $observations[1].permissions.sddl=$differentSddl
+            $different=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
+            $different.action | Should Be 'roll-back'
+            $different.operations[0].action | Should Be 'restore-permissions'
+        }
+    }
+
+    # Scenario: DACL policies differ only in generic spelling or AI, or differ in ACE application data, object GUIDs, and order.
+    # Purpose: Compare each normalized ACE's complete binary payload while keeping the D1 AI exception and generic file-right mapping.
+    It 'UnitT205_compares_the_complete_normalized_ACE_binary_payload' {
+        $daclModule=Import-Module (Join-Path $script:RepositoryRoot 'scripts\WindowsDacl.psm1') -PassThru -Scope Local -Force
+        $compare=$daclModule.ExportedCommands['Test-WindowsDaclEquivalent']
+        $conditionalFinance='D:(XA;;FR;;;WD;(@User.Department == "Finance"))'
+        $conditionalLegal='D:(XA;;FR;;;WD;(@User.Department == "Legal"))'
+        $objectFinance='D:(ZA;;FR;00112233-4455-6677-8899-aabbccddeeff;;WD;(@User.Department == "Finance"))'
+        $objectPartner='D:(ZA;;FR;00112233-4455-6677-8899-aabbccddeeff;;WD;(@User.Department == "Partner"))'
+
+        (& $compare -FirstSddl $conditionalFinance -SecondSddl $conditionalLegal) | Should Be $false
+        (& $compare -FirstSddl 'D:(OA;;FR;00112233-4455-6677-8899-aabbccddeeff;;WD)' -SecondSddl 'D:(OA;;FR;11112233-4455-6677-8899-aabbccddeeff;;WD)') | Should Be $false
+        (& $compare -FirstSddl $objectFinance -SecondSddl $objectPartner) | Should Be $false
+        (& $compare -FirstSddl $objectFinance -SecondSddl $objectFinance) | Should Be $true
+        (& $compare -FirstSddl 'D:(A;;GR;;;WD)' -SecondSddl 'D:(A;;FR;;;WD)') | Should Be $true
+        (& $compare -FirstSddl 'D:AI(A;;FR;;;WD)' -SecondSddl 'D:(A;;FR;;;WD)') | Should Be $true
+        (& $compare -FirstSddl 'D:(A;;FR;;;WD)(A;;FA;;;SY)' -SecondSddl 'D:(A;;FA;;;SY)(A;;FR;;;WD)') | Should Be $false
     }
 }

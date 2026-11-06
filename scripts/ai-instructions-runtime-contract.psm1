@@ -3,6 +3,12 @@ $ErrorActionPreference = 'Stop'
 
 $script:CanonicalRepository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
 $script:SkillsCatalogContractModule = $null
+$script:WindowsDaclModulePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'WindowsDacl.psm1'))
+$loadedWindowsDaclModules = @(Import-Module -Name $script:WindowsDaclModulePath -PassThru -Scope Local -ErrorAction Stop)
+$windowsDaclPathComparison = if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+if ($loadedWindowsDaclModules.Count -ne 1 -or -not [string]::Equals([IO.Path]::GetFullPath([string]$loadedWindowsDaclModules[0].Path),$script:WindowsDaclModulePath,$windowsDaclPathComparison)) { throw "The Windows DACL comparison dependency did not load from its bound path." }
+$script:WindowsDaclCompareCommand = $loadedWindowsDaclModules[0].ExportedCommands['Test-WindowsDaclEquivalent']
+if ($null -eq $script:WindowsDaclCompareCommand) { throw 'The Windows DACL comparison dependency does not export its required helper.' }
 $script:ExpectedPlatformRuntimeRootModule = 'platform-runtime.psm1'
 $script:ExpectedPlatformRuntimeFunctionsToExport = @(
     'Assert-PlatformRuntimeInventory',
@@ -885,7 +891,7 @@ function Get-AiInstructionsPlatformRuntimeSourceFingerprint {
     $utf8 = New-Object System.Text.UTF8Encoding($false,$true)
     $stream = New-Object System.IO.MemoryStream
     try {
-        foreach ($relativePath in @('platform/PlatformNative.cs','platform/UnixNative.cs','platform/WindowsNative.cs','platform/OwnedProcess.cs','platform/UnixProcess.cs','platform/WindowsProcess.cs')) {
+        foreach ($relativePath in @('platform/PlatformNative.cs','platform/UnixNative.cs','platform/WindowsNative.cs','platform/WindowsInstallerMutation.cs','platform/OwnedProcess.cs','platform/UnixProcess.cs','platform/WindowsProcess.cs')) {
             $fullPath = Resolve-AiInstructionsRuntimeFilePath -RuntimeRoot $RuntimeRoot -RelativePath $relativePath -Context 'Platform runtime source'
             [byte[]]$bytes = [System.IO.File]::ReadAllBytes($fullPath)
             if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xef -and $bytes[1] -eq 0xbb -and $bytes[2] -eq 0xbf) { throw 'Platform runtime files must be UTF-8 without BOM.' }
@@ -2025,7 +2031,7 @@ function Test-AiInstructionsInstallJournalPermissionsMatch {
     )
     if ($null -eq $Observation -or $null -eq $Permissions -or $null -eq $Observation.permissions) { return $false }
     if ([string]$Permissions.kind -ceq 'windows-sddl') {
-        return [string]$Observation.permissions.sddl -ceq [string]$Permissions.sddl -and
+        return (& $script:WindowsDaclCompareCommand -FirstSddl ([string]$Observation.permissions.sddl) -SecondSddl ([string]$Permissions.sddl)) -and
             [bool]$Observation.permissions.readOnly -eq [bool]$Permissions.readOnly
     }
     $observedMode = ([string]$Observation.permissions.mode).TrimStart('0')
