@@ -1311,6 +1311,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 UnlinkPreflightProbe(transaction, source, sourceIdentity, sourceOwned);
                 UnlinkPreflightProbe(transaction, renamed, sourceIdentity, renamedOwned);
                 UnlinkPreflightProbe(transaction, conflict, conflictIdentity, conflictOwned);
+                RunMutationTestHook("destination-preflight-after-probe-cleanup-before-transaction-fsync");
+                Sync(transaction.Fd, true, "fsync-destination-preflight-probe-cleanup");
             }
         }
 
@@ -1449,25 +1451,41 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                         displaced = true;
                         receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "target-displaced");
                         PlatformPaths.Same(Stat(transaction.Fd, displacedLeaf), receipt.DisplacedIdentity);
+                        try
+                        {
+                            RunMutationTestHook("publication-before-backup-transaction-fsync");
+                            Sync(transaction.Fd, true, "fsync-publication-backup-transaction"); receipt.Flush.TransactionDirectory = "confirmed";
+                            receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "backup-transaction-directory-fsynced");
+                            RunMutationTestHook("publication-before-backup-parent-fsync");
+                            Sync(parent.Fd, true, "fsync-publication-backup-parent"); receipt.Flush.ParentDirectory = "confirmed";
+                            receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "backup-parent-directory-fsynced");
+                        }
+                        catch
+                        {
+                            durabilityFailure = true; receipt.Flush.Durability = "unconfirmed"; throw;
+                        }
                     }
                     PlatformPaths.Same(Stat(transaction.Fd, stage.Leaf), stageIdentity);
                     if (!expectedExists) AssertMutationDirectoryPaths(parent, transaction);
                     RenameNoReplace(transaction.Fd, stage.Leaf, parent.Fd, leaf, "rename-stage-to-target");
                     published = true;
                     receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "stage-published");
+                    receipt.Flush.ParentDirectory = "pending"; receipt.Flush.TransactionDirectory = "pending";
                     PlatformPaths.Same(Stat(parent.Fd, leaf), stageIdentity);
                     try
                     {
+                        RunMutationTestHook("publication-before-parent-fsync");
                         Sync(parent.Fd, true, "fsync-target-parent"); receipt.Flush.ParentDirectory = "confirmed";
                         receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "parent-directory-fsynced");
+                        RunMutationTestHook("publication-before-transaction-fsync");
                         Sync(transaction.Fd, true, "fsync-transaction-directory"); receipt.Flush.TransactionDirectory = "confirmed";
                         receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "transaction-directory-fsynced");
                         receipt.Flush.Durability = "confirmed";
                     }
-                    catch (Exception ex)
+                    catch
                     {
                         durabilityFailure = true; receipt.Flush.Durability = "unconfirmed";
-                        throw new PlatformMutationException("publication-durability", PlatformNative.GetOperatingSystem(), "published-durability-unconfirmed", ex.Message, receipt);
+                        throw;
                     }
                     try
                     {
@@ -1490,17 +1508,46 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 }
                 catch (Exception original)
                 {
-                    if (durabilityFailure || postVerificationFailure) throw;
+                    if (postVerificationFailure) throw;
+                    bool mutated = published || displaced;
                     try
                     {
-                        if (published) { RenameNoReplace(parent.Fd, leaf, transaction.Fd, stage.Leaf, "rollback-target-to-stage"); published = false; }
-                        if (displaced) { RenameNoReplace(transaction.Fd, displacedLeaf, parent.Fd, leaf, "rollback-displaced-to-target"); displaced = false; }
+                        if (published)
+                        {
+                            AssertMutationDirectoryPaths(parent, transaction);
+                            PlatformPaths.Same(Stat(parent.Fd, leaf), stageIdentity);
+                            RenameNoReplace(parent.Fd, leaf, transaction.Fd, stage.Leaf, "rollback-target-to-stage"); published = false;
+                            receipt.Flush.ParentDirectory = "pending"; receipt.Flush.TransactionDirectory = "pending";
+                            receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "rollback-stage-to-transaction");
+                        }
+                        if (displaced)
+                        {
+                            AssertMutationDirectoryPaths(parent, transaction);
+                            PlatformPaths.Same(Stat(transaction.Fd, displacedLeaf), receipt.DisplacedIdentity);
+                            RenameNoReplace(transaction.Fd, displacedLeaf, parent.Fd, leaf, "rollback-displaced-to-target"); displaced = false;
+                            receipt.Flush.ParentDirectory = "pending"; receipt.Flush.TransactionDirectory = "pending";
+                            receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "rollback-displaced-to-target");
+                        }
+                        if (mutated)
+                        {
+                            Sync(transaction.Fd, true, "fsync-publication-rollback-transaction"); receipt.Flush.TransactionDirectory = "confirmed";
+                            receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "rollback-transaction-directory-fsynced");
+                            Sync(parent.Fd, true, "fsync-publication-rollback-parent"); receipt.Flush.ParentDirectory = "confirmed";
+                            receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "rollback-parent-directory-fsynced");
+                        }
                         if (permissionsChanged) ApplyPermissions(stage.Fd, stageOriginal);
                     }
                     catch (Exception rollback)
                     {
                         string state = String.Format("published={0};displaced={1};stage={2}", published, displaced, TryStat(transaction.Fd, stage.Leaf) != null);
                         throw new PlatformMutationException("publication-rollback", PlatformNative.GetOperatingSystem(), state, original.Message + " Rollback failed: " + rollback.Message, receipt);
+                    }
+                    if (mutated)
+                    {
+                        receipt.Flush.Durability = "unconfirmed";
+                        string capability = durabilityFailure ? "publication-durability" : "publication-mutation";
+                        string state = durabilityFailure ? "rolled-back-durability-unconfirmed" : "rolled-back-after-mutation-failure";
+                        throw new PlatformMutationException(capability, PlatformNative.GetOperatingSystem(), state, original.Message, receipt);
                     }
                     throw;
                 }
@@ -1538,6 +1585,11 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     {
                         RunMutationTestHook("removal-cleanup-before-unlink");
                         AssertMutationDirectoryPaths(parent, transaction);
+                        FileObservation cleanupIdentity = TryStat(transaction.Fd, leaf);
+                        if (cleanupIdentity == null || cleanupIdentity.Device != expectedDevice || cleanupIdentity.Inode != expectedInode ||
+                            cleanupIdentity.Kind != "file" || cleanupIdentity.LinkCount != 1)
+                            throw new PlatformVerificationException("owned-file-removal", PlatformNative.GetOperatingSystem(),
+                                "private tombstone identity, type, or link count changed immediately before unlinkat");
                         Check(Mac ? Darwin.unlinkat(transaction.Fd, leaf, 0) : Linux.unlinkat(transaction.Fd, leaf, 0), "unlinkat-private-cleanup");
                         receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "private-tombstone-unlinked");
                         try
@@ -1577,16 +1629,17 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     PlatformPaths.Same(Stat(transaction.Fd, tombstoneLeaf), identity);
                     try
                     {
-                        Sync(parent.Fd, true, "fsync-removal-parent"); receipt.Flush.ParentDirectory = "confirmed";
-                        receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "parent-directory-fsynced");
+                        RunMutationTestHook("removal-before-transaction-fsync");
                         Sync(transaction.Fd, true, "fsync-removal-transaction"); receipt.Flush.TransactionDirectory = "confirmed";
                         receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "transaction-directory-fsynced");
+                        RunMutationTestHook("removal-before-parent-fsync");
+                        Sync(parent.Fd, true, "fsync-removal-parent"); receipt.Flush.ParentDirectory = "confirmed";
+                        receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "parent-directory-fsynced");
                         receipt.Flush.Durability = "confirmed";
                     }
-                    catch (Exception ex)
+                    catch
                     {
-                        durabilityFailure = true;
-                        throw new PlatformMutationException("owned-file-removal-durability", PlatformNative.GetOperatingSystem(), "tombstoned-durability-unconfirmed", ex.Message, receipt);
+                        durabilityFailure = true; receipt.Flush.Durability = "unconfirmed"; throw;
                     }
                     try
                     {
@@ -1605,14 +1658,33 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 }
                 catch (Exception original)
                 {
-                    if (durabilityFailure || postVerificationFailure) throw;
+                    if (postVerificationFailure) throw;
+                    bool mutated = moved;
                     if (moved)
                     {
-                        try { RenameNoReplace(transaction.Fd, tombstoneLeaf, parent.Fd, leaf, "rollback-tombstone-to-target"); moved = false; }
+                        try
+                        {
+                            AssertMutationDirectoryPaths(parent, transaction);
+                            PlatformPaths.Same(Stat(transaction.Fd, tombstoneLeaf), receipt.BackupIdentity);
+                            RenameNoReplace(transaction.Fd, tombstoneLeaf, parent.Fd, leaf, "rollback-tombstone-to-target"); moved = false;
+                            receipt.Flush.ParentDirectory = "pending"; receipt.Flush.TransactionDirectory = "pending";
+                            receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "rollback-tombstone-to-target");
+                            Sync(transaction.Fd, true, "fsync-removal-rollback-transaction"); receipt.Flush.TransactionDirectory = "confirmed";
+                            receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "rollback-transaction-directory-fsynced");
+                            Sync(parent.Fd, true, "fsync-removal-rollback-parent"); receipt.Flush.ParentDirectory = "confirmed";
+                            receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "rollback-parent-directory-fsynced");
+                        }
                         catch (Exception rollback)
                         {
                             throw new PlatformMutationException("owned-file-removal-rollback", PlatformNative.GetOperatingSystem(), "tombstone=" + (TryStat(transaction.Fd, tombstoneLeaf) != null), original.Message + " Rollback failed: " + rollback.Message, receipt);
                         }
+                    }
+                    if (mutated)
+                    {
+                        receipt.Flush.Durability = "unconfirmed";
+                        string capability = durabilityFailure ? "owned-file-removal-durability" : "owned-file-removal-mutation";
+                        string state = durabilityFailure ? "rolled-back-durability-unconfirmed" : "rolled-back-after-mutation-failure";
+                        throw new PlatformMutationException(capability, PlatformNative.GetOperatingSystem(), state, original.Message, receipt);
                     }
                     throw;
                 }

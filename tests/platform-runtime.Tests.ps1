@@ -3877,6 +3877,87 @@ Describe 'Unix P7c durable publication and removal' {
             Test-Path -LiteralPath (Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/tombstone")|Should Be $false
         } finally {if($null-ne$target){$target.Dispose()};$txn.Lease.Dispose();$parent.Dispose()}
     }
+
+    # Scenario: Replacement publication and tombstone removal complete their directory flushes successfully.
+    # Purpose: Record the crash-safe rename/fsync order, including durable backup naming before replacement publication.
+    It 'InterT220_records_backup_and_tombstone_fsync_order [skip: requires Unix renameat/fsync]' -Skip:$p7cSkip {
+        $publishParent=New-P7cDirectory 'ordered-publish';$removeParent=New-P7cDirectory 'ordered-remove';$txn=New-P7cTransaction;$target=$null;$stage=$null;$removeTarget=$null
+        try {
+            $target=New-P7cFile $publishParent target original;$state=Get-P7cState $target;$target.Dispose();$target=$null
+            $stage=New-P7cFile $txn.Lease stage replacement
+            $publish=Publish-PlatformFile -ParentLease $publishParent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $state -DisplacedLeaf backup -ExpectedStage (Get-P7cStageState $stage)
+            $publishOrder=@($publish.completedSteps|Where-Object{$_-in @('target-displaced','backup-transaction-directory-fsynced','backup-parent-directory-fsynced','stage-published','parent-directory-fsynced','transaction-directory-fsynced')}) -join '|'
+            $publishOrder|Should Be 'target-displaced|backup-transaction-directory-fsynced|backup-parent-directory-fsynced|stage-published|parent-directory-fsynced|transaction-directory-fsynced'
+            $publish.flush.parentDirectory|Should Be confirmed;$publish.flush.transactionDirectory|Should Be confirmed;$publish.flush.durability|Should Be confirmed
+
+            $removeTarget=New-P7cFile $removeParent target owned;$removeState=Get-P7cState $removeTarget;$removeTarget.Dispose();$removeTarget=$null
+            $remove=Remove-PlatformOwnedFile -ParentLease $removeParent -Leaf target -ExpectedState $removeState -TransactionLease $txn.Lease -TombstoneLeaf tombstone
+            $removeOrder=@($remove.completedSteps|Where-Object{$_-in @('target-tombstoned','transaction-directory-fsynced','parent-directory-fsynced')}) -join '|'
+            $removeOrder|Should Be 'target-tombstoned|transaction-directory-fsynced|parent-directory-fsynced'
+            $remove.flush.parentDirectory|Should Be confirmed;$remove.flush.transactionDirectory|Should Be confirmed;$remove.flush.durability|Should Be confirmed
+        } finally {foreach($lease in @($removeTarget,$stage,$target)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$removeParent.Dispose();$publishParent.Dispose()}
+    }
+
+    # Scenario: Transaction-directory fsync fails after target-to-backup rename and before stage publication.
+    # Purpose: Return mutation evidence and retain the original inode either durably restored at target or safely named by DisplacedLeaf.
+    It 'InterT225_never_loses_original_inode_when_backup_fsync_fails [skip: requires Unix renameat/fsync]' -Skip:$p7cSkip {
+        $parent=New-P7cDirectory 'backup-fsync-failure';$txn=New-P7cTransaction;$target=$null;$stage=$null;$originalLease=$null
+        $field=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative].GetField('MutationTestHook',[Reflection.BindingFlags]'NonPublic,Static')
+        try {
+            $target=New-P7cFile $parent target original;$state=Get-P7cState $target;$originalInode=[uint64]$state.identity.fileId;$target.Dispose();$target=$null
+            $stage=New-P7cFile $txn.Lease stage replacement
+            $field.SetValue($null,[Action[string]]{param($point)if($point-ceq'publication-before-backup-transaction-fsync'){throw [IO.IOException]::new('injected backup transaction fsync failure')}})
+            $caught=$null
+            try{Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $state -DisplacedLeaf backup -ExpectedStage (Get-P7cStageState $stage)|Out-Null}catch{$caught=$_.Exception}
+            $caught.GetType().Name|Should Be PlatformMutationException;$caught.Capability|Should Be publication-durability;$caught.Receipt.flush.durability|Should Be unconfirmed
+            (@($caught.Receipt.completedSteps)-contains 'target-displaced')|Should Be $true
+            (@($caught.Receipt.completedSteps)-contains 'backup-transaction-directory-fsynced')|Should Be $false
+            (@($caught.Receipt.completedSteps)-contains 'stage-published')|Should Be $false
+            (@($caught.Receipt.completedSteps)-contains 'rollback-displaced-to-target')|Should Be $true
+            (@($caught.Receipt.completedSteps)-contains 'rollback-transaction-directory-fsynced')|Should Be $true
+            (@($caught.Receipt.completedSteps)-contains 'rollback-parent-directory-fsynced')|Should Be $true
+            $targetPath=Join-Path $script:P7cRoot 'backup-fsync-failure/target';$backupPath=Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/backup"
+            $targetExists=Test-Path -LiteralPath $targetPath -PathType Leaf;$backupExists=Test-Path -LiteralPath $backupPath -PathType Leaf
+            ($targetExists-xor$backupExists)|Should Be $true
+            if($targetExists){$originalLease=Open-PlatformFile -ParentLease $parent -Leaf target -Access Read -CreateMode OpenExisting}else{$originalLease=Open-PlatformFile -ParentLease $txn.Lease -Leaf backup -Access Read -CreateMode OpenExisting}
+            $originalLease.Observation.Inode|Should Be $originalInode
+            (Read-P7cText $txn.Lease stage)|Should Be replacement
+        } finally {$field.SetValue($null,$null);foreach($lease in @($originalLease,$stage,$target)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$parent.Dispose()}
+    }
+
+    # Scenario: A same-account actor replaces the private tombstone name with a different inode immediately before cleanup unlinkat.
+    # Purpose: Revalidate dev/inode, regular-file type, and single-link ownership at the final mutation boundary without unlinking the replacement.
+    It 'InterT230_rejects_replaced_tombstone_inode_immediately_before_unlink [skip: requires Unix rename/unlinkat]' -Skip:$p7cSkip {
+        $txn=New-P7cTransaction;$target=$null;$txnPath=Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)";$tombstonePath=Join-Path $txnPath tombstone;$originalPath=Join-Path $txnPath original-retained
+        $field=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative].GetField('MutationTestHook',[Reflection.BindingFlags]'NonPublic,Static')
+        try {
+            $target=New-P7cFile $txn.Lease tombstone owned;$state=Get-P7cState $target;$target.Dispose();$target=$null
+            $field.SetValue($null,[Action[string]]{param($point)if($point-ceq'removal-cleanup-before-unlink'){[IO.File]::Move($tombstonePath,$originalPath);[IO.File]::WriteAllText($tombstonePath,'replacement')}})
+            $caught=$null
+            try{Remove-PlatformOwnedFile -ParentLease $txn.Lease -Leaf tombstone -ExpectedState $state -TransactionLease $txn.Lease -TombstoneLeaf tombstone|Out-Null}catch{$caught=$_.Exception}
+            $caught.GetType().Name|Should Be PlatformVerificationException;$caught.Capability|Should Be owned-file-removal
+            [IO.File]::ReadAllText($tombstonePath)|Should Be replacement
+            [IO.File]::ReadAllText($originalPath)|Should Be owned
+        } finally {$field.SetValue($null,$null);if($null-ne$target){$target.Dispose()};$txn.Lease.Dispose()}
+    }
+
+    # Scenario: The final transaction-directory fsync fails after all destination-preflight probe leaves are removed.
+    # Purpose: Fail before target/stage mutation, leave no live probe name, and report the unavailable durability primitive as typed evidence.
+    It 'InterT235_fails_after_preflight_probe_cleanup_without_moving_target_or_stage [skip: requires Unix directory fsync/no-replace]' -Skip:$p7cSkip {
+        $parent=New-P7cDirectory 'preflight-cleanup-fsync';$txn=New-P7cTransaction;$target=$null;$stage=$null
+        $field=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative].GetField('MutationTestHook',[Reflection.BindingFlags]'NonPublic,Static')
+        try {
+            $target=New-P7cFile $parent target original;$state=Get-P7cState $target;$target.Dispose();$target=$null
+            $stage=New-P7cFile $txn.Lease stage replacement
+            $field.SetValue($null,[Action[string]]{param($point)if($point-ceq'destination-preflight-after-probe-cleanup-before-transaction-fsync'){throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]::new('directory-fsync: EINVAL',[SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetOperatingSystem())}})
+            $caught=$null
+            try{Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $state -DisplacedLeaf backup -ExpectedStage (Get-P7cStageState $stage)|Out-Null}catch{$caught=$_.Exception}
+            $caught.GetType().Name|Should Be PlatformCapabilityUnavailableException;$caught.Capability|Should Match directory-fsync
+            (Read-P7cText $parent target)|Should Be original;(Read-P7cText $txn.Lease stage)|Should Be replacement
+            Test-Path -LiteralPath (Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/backup")|Should Be $false
+            @([IO.Directory]::EnumerateFileSystemEntries((Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)"))|Where-Object{[IO.Path]::GetFileName($_)-like'.ai-instructions-preflight-*'}).Count|Should Be 0
+        } finally {$field.SetValue($null,$null);foreach($lease in @($stage,$target)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$parent.Dispose()}
+    }
 }
 
 Describe 'Platform probe cleanup evidence' {

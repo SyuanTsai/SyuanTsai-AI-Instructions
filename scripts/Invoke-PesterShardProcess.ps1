@@ -89,7 +89,7 @@ function Get-PesterShardCanonicalHash {
 function Import-PesterShardRuntime {
     param([string]$Root, [Collections.Generic.List[IDisposable]]$Guards)
     # Trust anchor belongs to this reviewed entry point, never to a candidate manifest.
-    $manifestSha256 = '51fd00556d7dc8beb3eeeb5e7e4e55430c86a7cec0655fad8bf1f8257d0c3725'
+    $manifestSha256 = '712313ced55213669d140cadc5ffa9f815e020e9128c37589de1d6cb74274768'
     $manifestPath = Join-Path $Root 'platform-runtime.psd1'
     Assert-PesterShardPathAncestorsNoReparse $manifestPath 'runtime manifest'
     if ((Get-PesterShardCanonicalHash ([IO.File]::ReadAllBytes($manifestPath))) -cne $manifestSha256) { throw 'INVALID|Untrusted platform runtime manifest.' }

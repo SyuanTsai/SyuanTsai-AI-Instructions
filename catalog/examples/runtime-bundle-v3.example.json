@@ -4,12 +4,12 @@
   "commit": "89abcdef0123456789abcdef0123456789abcdef",
   "acquisition": "github-codeload",
   "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "inventorySha256": "b30e96df07143b6418d1316d3b4d59932d339f5cae00a7f0350202bbad174fb5",
+  "inventorySha256": "82657502a6d0273f5f4ee61615b071ed3418df4370b5b0e2d9f64352472d0687",
   "inventory": [
     { "path": "Resolve-StandardValidationTool.ps1", "sha256": "e51c78847aa706dd4bed92fa1e91e1c992e0b1e8d938aaa605c4c7389b66b8f5" },
     { "path": "catalog/skills-catalog.json", "sha256": "1d5c61e35414dc6288361f4b8b5339e5043f15ee80a96f8fb3ba229a211dacc7" },
     { "path": "installer-safe-mutation.psm1", "sha256": "ac1e73ffb1b8ea1b95fdc3a177449442281d3d485f62ec42e464f6f5f38ba359" },
-    { "path": "platform-runtime.psd1", "sha256": "51fd00556d7dc8beb3eeeb5e7e4e55430c86a7cec0655fad8bf1f8257d0c3725" },
+    { "path": "platform-runtime.psd1", "sha256": "712313ced55213669d140cadc5ffa9f815e020e9128c37589de1d6cb74274768" },
     { "path": "platform-runtime.psm1", "sha256": "4e74899baec27921c4d903c17d2a70177fa01327e94de28fb5291b30ff09b83a" },
     { "path": "platform/Linux.psm1", "sha256": "fb163b03980e9a5831d06e524849e61e4dc4b1d00ca844279ebe1d330353fca7" },
     { "path": "platform/MacOS.psm1", "sha256": "b9ffcf44579013c4b3ad4e394d2cf3f21976cff7d71d60bdcf09a085e215fe1f" },
@@ -17,7 +17,7 @@
     { "path": "platform/PlatformNative.cs", "sha256": "cae2197bc4d644f108e4f0722b2c76017981922618277efc101f9da472b61607" },
     { "path": "platform/RuntimePreparation.psm1", "sha256": "dc254c04e7e2caf280726e66f67434776bc7df12a210a38c80596e41344fd077" },
     { "path": "platform/Unix.psm1", "sha256": "f4ddc352f5707f1a30dd9b99d8e5cd938d867f3b17a7dc6e764fe24839832db9" },
-    { "path": "platform/UnixNative.cs", "sha256": "70bb6b146b25637f91ad3cf2176e3c7c5ec8001992fe4d5237df2820a1c7c941" },
+    { "path": "platform/UnixNative.cs", "sha256": "922bddfd6dccc332327916385b9a800d2d4fff0485c97e45cc1361cf6e47b923" },
     { "path": "platform/UnixProcess.cs", "sha256": "125d2b3eecdad6a6c201d5f5d61a6efd0ad55ba93822c7b83a679a5397005db1" },
     { "path": "platform/Windows.psm1", "sha256": "bb916f529ebf99c7893f541749e91ae7b4b22bd66f2c2f2efce91a8b4977d7cd" },
     { "path": "platform/WindowsNative.cs", "sha256": "3c4eca15ee608d72b3985db1ab34ad9558243385b2cbe84d909b8cd219482181" },
@@ -26,8 +26,8 @@
   "platform": { "os": "windows", "architecture": "x64" },
   "platformRuntime": {
     "apiVersion": "1.0",
-    "manifestSha256": "51fd00556d7dc8beb3eeeb5e7e4e55430c86a7cec0655fad8bf1f8257d0c3725",
-    "sourceFingerprint": "4d6b623a24b805a04f4ced9ca05c26cb4bbb84429c324908d438a01d5c50c0f8"
+    "manifestSha256": "712313ced55213669d140cadc5ffa9f815e020e9128c37589de1d6cb74274768",
+    "sourceFingerprint": "e2c2b96bebda849bd8ec154cdf32fa02fca8fbe884ed3e66a726b9a035407f8d"
   },
   "requiredCapabilities": ["directory-lease", "file-identity", "lock"],
   "projectionContractSha256": "488b93d25eed36b8f6aedeb5ef0a900134dbf08e6d6927dd693f9b415c8151f0"
