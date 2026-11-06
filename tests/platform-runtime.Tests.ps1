@@ -3402,7 +3402,7 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
                 [pscustomobject]@{identity=(Get-P7Identity $observed);bytes=[Convert]::ToBase64String($lease.ReadAllBytes(1048576));sddl=[string]$permissions.sddl;readOnly=[bool]$permissions.readOnly}
             } finally {
                 $lease.Dispose()
-                if($reopen){$LeaseOwner.Lease=Open-PlatformFile -ParentLease $Parent -Leaf $Leaf -Access ReadWrite -CreateMode OpenExisting}
+                if($reopen){$access=if([bool]$permissions.readOnly){'Read'}else{'ReadWrite'};$LeaseOwner.Lease=Open-PlatformFile -ParentLease $Parent -Leaf $Leaf -Access $access -CreateMode OpenExisting}
             }
         }
         function Test-P7DaclProtected([string]$Sddl) {
