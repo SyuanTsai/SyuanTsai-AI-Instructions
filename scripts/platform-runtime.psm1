@@ -375,11 +375,9 @@ function Test-PlatformPrimitives {
         $directory = Open-PlatformDirectory -Root $root -RelativePath $name -CreatePrivate
         $file = Open-PlatformFile -ParentLease $directory -Leaf 'data' -Access ReadWrite -CreateMode CreateNew
         $fileIdentity = Assert-PlatformFileIdentity -Lease $file -Expected $file.Observation -SingleLink
-        $permissions = Get-PlatformPermissions -Lease $file
         if ($platform -eq 'windows') {
+            $permissions = Get-PlatformPermissions -Lease $file
             Set-PlatformPermissions -Lease $file -Policy @{ Sddl=$permissions.Sddl; ReadOnly=$permissions.ReadOnly } | Out-Null
-        } else {
-            Set-PlatformPermissions -Lease $file -Policy @{ Mode=384 } | Out-Null
         }
         $file.Dispose(); $file = $null
         $first = Enter-PlatformLock -ParentLease $directory -Leaf 'lock' -Mode Shared -Timeout ([TimeSpan]::Zero)
@@ -483,6 +481,34 @@ function Test-PlatformDirectoryPublication {
     return [pscustomobject]@{status=$status;evidence=[pscustomobject]$evidence}
 }
 
+function Test-UnixPublicationPrimitives {
+    $platform = Get-CurrentPlatformName
+    if ($platform -cnotin @('linux','macos')) {
+        return [pscustomobject]@{ status='unverified'; evidence=[object[]]@('Unix publication probes do not apply to this host.') }
+    }
+    try {
+        $evidence = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::ProbePublicationPrimitives()
+        return [pscustomobject]@{ status='available'; evidence=[object[]]@($evidence) }
+    }
+    catch {
+        return [pscustomobject]@{ status='unavailable'; evidence=[object[]]@($_.Exception.Message) }
+    }
+}
+
+function Test-UnixPermissionPrimitives {
+    $platform = Get-CurrentPlatformName
+    if ($platform -cnotin @('linux','macos')) {
+        return [pscustomobject]@{ status='unverified'; evidence=[object[]]@('Unix permission probes do not apply to this host.') }
+    }
+    try {
+        $evidence = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::ProbePermissionPrimitives()
+        return [pscustomobject]@{ status='available'; evidence=[object[]]@($evidence) }
+    }
+    catch {
+        return [pscustomobject]@{ status='unavailable'; evidence=[object[]]@($_.Exception.Message) }
+    }
+}
+
 function Get-PlatformCapabilities {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $Required)
@@ -490,6 +516,8 @@ function Get-PlatformCapabilities {
     $platform = Get-CurrentPlatformName
     $primitiveProbe = Test-PlatformPrimitives
     $directoryPublicationProbe = Test-PlatformDirectoryPublication
+    $publicationProbe = Test-UnixPublicationPrimitives
+    $permissionProbe = Test-UnixPermissionPrimitives
     $processProbe = Test-PlatformOwnedProcess
     $processEnvironmentMethod = @(
         [Environment].GetMethods([Reflection.BindingFlags]'Public,Static') | Where-Object {
@@ -564,13 +592,22 @@ function Get-PlatformCapabilities {
         })
     }
     foreach ($capability in $capabilities) {
-        if ($capability.name -cin @('directory-lease','file-lease','file-identity','lock','permissions')) {
+        if ($capability.name -cin @('directory-lease','file-lease','file-identity','lock') -or
+            ($platform -ceq 'windows' -and $capability.name -ceq 'permissions')) {
             $capability.status = $primitiveProbe.status
             $capability.evidence = [object[]]@($primitiveProbe.evidence)
         }
         if ($capability.name -ceq 'directory-publication') {
             $capability.status = $directoryPublicationProbe.status
             $capability.evidence = [object[]]@($directoryPublicationProbe.evidence)
+        }
+        if ($platform -cne 'windows' -and $capability.name -cin @('publication','owned-file-removal')) {
+            $capability.status = $publicationProbe.status
+            $capability.evidence = [object[]]@($publicationProbe.evidence)
+        }
+        if ($platform -cne 'windows' -and $capability.name -ceq 'permissions') {
+            $capability.status = $permissionProbe.status
+            $capability.evidence = [object[]]@($permissionProbe.evidence)
         }
         if ($capability.name -cin @('owned-process','process-cleanup','process-isolation')) {
             $capability.status = $processProbe.status

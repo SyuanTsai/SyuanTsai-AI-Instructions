@@ -1005,6 +1005,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     throw new IOException("The owned-tree root must be a non-reparse directory.");
                 if (verifyExpectedIdentity && (observation.Device != expectedDevice || observation.Inode != expectedFileId))
                     throw new IOException("The owned-tree root identity differs from ExpectedIdentity.");
+                if (!reparsePoint && observation.Kind != "directory" && observation.LinkCount != 1)
+                    throw new IOException("Owned directory tree cleanup requires every non-reparse file to have exactly one link before mutation.");
                 entry = new WindowsLease(handle, Path.Combine(parent.Path, leaf), null, parent, observation);
                 handle = null;
                 if (!reparsePoint && observation.Kind == "directory")

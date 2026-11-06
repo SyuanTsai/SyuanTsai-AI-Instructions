@@ -92,18 +92,10 @@ function New-WindowsPlatformVerificationError {
 }
 
 function Get-WindowsPlatformLeasePath { param($Lease) [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::GetVerifiedPath($Lease) }
-function Test-WindowsPlatformPathContainsTransactionSegment {
-    param([Parameter(Mandatory = $true)][string] $Path)
-    foreach ($segment in [regex]::Split([IO.Path]::GetFullPath($Path),'[\\/]+')) {
-        if ([StringComparer]::OrdinalIgnoreCase.Equals($segment,'.ai-instructions-txn')) { return $true }
-    }
-    return $false
-}
 function Assert-WindowsPlatformTargetPath {
     param($ParentLease,[string]$Leaf,[string]$Capability,[switch]$AllowTransactionParent)
     $parentPath=Get-WindowsPlatformLeasePath $ParentLease
-    $reservedLeaf=[StringComparer]::OrdinalIgnoreCase.Equals($Leaf,'.ai-instructions-txn')
-    if ($reservedLeaf -or ((Test-WindowsPlatformPathContainsTransactionSegment $parentPath) -and -not $AllowTransactionParent)) {
+    if ([SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::IsTransactionStoreTarget($parentPath,$Leaf) -and -not $AllowTransactionParent) {
         throw (New-WindowsPlatformVerificationError $Capability 'The target must stay outside .ai-instructions-txn and must not use the reserved .ai-instructions-txn leaf.')
     }
     return $parentPath

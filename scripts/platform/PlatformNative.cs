@@ -173,13 +173,37 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
     public sealed class PlatformErrnoException : InvalidOperationException
     {
         public int Errno { get; private set; }
+        public string ErrnoName { get; private set; }
         public string Operation { get; private set; }
 
         public PlatformErrnoException(string operation, int errno)
-            : base(String.Format("Native operation '{0}' failed with errno {1}.", operation, errno))
+            : this(operation, errno, "UNKNOWN")
+        {
+        }
+
+        public PlatformErrnoException(string operation, int errno, string errnoName)
+            : base(String.Format("Native operation '{0}' failed with {1} (errno {2}).", operation, errnoName, errno))
         {
             Operation = operation;
             Errno = errno;
+            ErrnoName = errnoName;
+        }
+    }
+
+    public sealed class PlatformMutationException : System.IO.IOException
+    {
+        public string Capability { get; private set; }
+        public string Platform { get; private set; }
+        public string CurrentState { get; private set; }
+        public object Receipt { get; private set; }
+
+        public PlatformMutationException(string capability, string platform, string currentState, string message, object receipt)
+            : base(String.Format("Platform mutation for '{0}' failed on '{1}' in state '{2}': {3}", capability, platform, currentState, message))
+        {
+            Capability = capability;
+            Platform = platform;
+            CurrentState = currentState;
+            Receipt = receipt;
         }
     }
 
