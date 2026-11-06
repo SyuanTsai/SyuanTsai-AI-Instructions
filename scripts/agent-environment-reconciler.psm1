@@ -876,7 +876,7 @@ function Get-AgentEnvironmentProcessStartIdentity {
 
 function Invoke-AgentEnvironmentFailpoint {
     param([string]$Name,[string]$ConfiguredName,[int]$MutationCount,[int]$FailureAfterMutationCount)
-    $allowed=@('after-original-rename','after-applied-rename','after-operation-journal','after-journal-stage-flush','after-journal-publish','after-parent-flush','during-rollback','before-committed-cleanup')
+    $allowed=@('after-original-rename','after-platform-rename','after-applied-rename','after-operation-journal','after-journal-stage-flush','after-journal-publish','after-parent-flush','during-rollback','before-committed-cleanup')
     if(-not[string]::IsNullOrEmpty($ConfiguredName)-and $ConfiguredName -cnotin $allowed){throw "Unknown Agent environment failpoint '$ConfiguredName'."}
     $trigger=$ConfiguredName -ceq $Name -or ($FailureAfterMutationCount -gt 0 -and $Name -ceq 'after-operation-journal' -and $MutationCount -ge $FailureAfterMutationCount)
     if($trigger){
@@ -925,38 +925,18 @@ function Set-AgentEnvironmentJournalTargetPermissions {
 
 function Invoke-AgentEnvironmentJournalRollback {
     param([string]$Home,[string]$TransactionPath,$TransactionLease,[object]$Journal,[string]$FailpointName)
-    $Journal.phase='rolling-back';Write-AgentEnvironmentInstallJournal $TransactionPath $TransactionLease $Journal
-    $operations=[object[]]@($Journal.operations);[array]::Reverse($operations)
-    foreach($operation in $operations){
-        if([string]$operation.state -cne 'applied'){continue}
-        Invoke-AgentEnvironmentFailpoint -Name 'during-rollback' -ConfiguredName $FailpointName -MutationCount 0 -FailureAfterMutationCount 0
-        $relative=[string]$operation.targetRelativePath;$parentRelative=[IO.Path]::GetDirectoryName($relative.Replace('/',[IO.Path]::DirectorySeparatorChar)).Replace('\','/');$leaf=([string]$relative).Split('/')[-1];$parent=$null
-        try{
-            $parent=Open-AgentEnvironmentDirectoryLease $Home $parentRelative
-            switch([string]$operation.kind){
-                'create-directory'{
-                    $current=Get-AgentEnvironmentDirectoryJournalState $Home $relative
-                    if(-not[bool]$current.exists-or[string]$current.inventorySha256-cne[string]$operation.applied.inventorySha256-or[int64]$current.entryCount-ne[int64]$operation.applied.entryCount){throw "Rollback preserved a changed published subtree: $relative"}
-                    Move-PlatformOwnedDirectory -SourceParentLease $parent -SourceLeaf $leaf -DestinationParentLease $TransactionLease -DestinationLeaf ([string]$operation.quarantineLeaf) -ExpectedState $operation.applied|Out-Null
-                }
-                'create-file'{Remove-PlatformOwnedFile -ParentLease $parent -Leaf $leaf -ExpectedState $operation.applied -TransactionLease $TransactionLease -TombstoneLeaf ("rollback-$($operation.sequence)")|Out-Null}
-                'write-file'{
-                    $current=Get-AgentEnvironmentFileJournalState $Home $relative
-                    if([bool]$current.exists){Remove-PlatformOwnedFile -ParentLease $parent -Leaf $leaf -ExpectedState $operation.applied -TransactionLease $TransactionLease -TombstoneLeaf ("rollback-$($operation.sequence)")|Out-Null}
-                    $backup=Open-PlatformFile -ParentLease $TransactionLease -Leaf ([string]$operation.backupLeaf) -Access Read -CreateMode OpenExisting
-                    Publish-PlatformFile -ParentLease $parent -Leaf $leaf -TransactionLease $TransactionLease -StageLease $backup -ExpectedState ([pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}) -ExpectedStage $operation.original -NoReplace|Out-Null
-                    Set-AgentEnvironmentJournalTargetPermissions $Home $operation
-                }
-                'remove-file'{
-                    $backup=Open-PlatformFile -ParentLease $TransactionLease -Leaf ([string]$operation.backupLeaf) -Access Read -CreateMode OpenExisting
-                    Publish-PlatformFile -ParentLease $parent -Leaf $leaf -TransactionLease $TransactionLease -StageLease $backup -ExpectedState ([pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}) -ExpectedStage $operation.original -NoReplace|Out-Null
-                    Set-AgentEnvironmentJournalTargetPermissions $Home $operation
-                }
-            }
-            $operation.state='rolled-back';Write-AgentEnvironmentInstallJournal $TransactionPath $TransactionLease $Journal
-        }finally{if($null-ne$parent){$parent.Dispose()}}
+    $observations=@{}
+    foreach($operation in @($Journal.operations)){$observations[[string]$operation.sequence]=Get-AgentEnvironmentRecoveryObservation $Home $TransactionPath $operation}
+    $decisionPhase=[string]$Journal.phase
+    if($decisionPhase-ceq'applied'){$Journal.phase='applying'}
+    try{$decision=Get-AiInstructionsInstallRecoveryDecision -Journal $Journal -Observations $observations}
+    finally{$Journal.phase=$decisionPhase}
+    if([string]$decision.action-cne'roll-back'){
+        $reason=if(@($decision.reasons).Count-gt0){@($decision.reasons)-join'; '}else{"unexpected recovery action '$($decision.action)'"}
+        throw [IO.IOException]::new("USER transaction rollback requires retained evidence: $reason")
     }
-    $Journal.phase='rolled-back';Write-AgentEnvironmentInstallJournal $TransactionPath $TransactionLease $Journal
+    Assert-AgentEnvironmentRollbackStageEvidence -TransactionPath $TransactionPath -Journal $Journal -Decision $decision -Observations $observations
+    Invoke-AgentEnvironmentRecoveryRollbackDecision -Home $Home -TransactionPath $TransactionPath -TransactionLease $TransactionLease -Journal $Journal -Decision $decision -FailpointName $FailpointName
 }
 
 function Invoke-AgentEnvironmentRecoveryRollbackDecision {
@@ -965,7 +945,8 @@ function Invoke-AgentEnvironmentRecoveryRollbackDecision {
         [Parameter(Mandatory = $true)][string]$TransactionPath,
         [Parameter(Mandatory = $true)]$TransactionLease,
         [Parameter(Mandatory = $true)][object]$Journal,
-        [Parameter(Mandatory = $true)][object]$Decision
+        [Parameter(Mandatory = $true)][object]$Decision,
+        [string]$FailpointName
     )
     Get-AiInstructionsInstallRecoveryPlan -Journal $Journal -Decision $Decision|Out-Null
     $Journal.phase='rolling-back'
@@ -974,6 +955,7 @@ function Invoke-AgentEnvironmentRecoveryRollbackDecision {
     $operations=[object[]]@($Journal.operations);[array]::Reverse($operations)
     foreach($operation in $operations){
         $action=[string]$operationDecisions[[int64]$operation.sequence].action
+        if($action-cne'none'){Invoke-AgentEnvironmentFailpoint -Name 'during-rollback' -ConfiguredName $FailpointName -MutationCount 0 -FailureAfterMutationCount 0}
         $relative=[string]$operation.targetRelativePath
         $parentRelative=[IO.Path]::GetDirectoryName($relative.Replace('/',[IO.Path]::DirectorySeparatorChar)).Replace('\','/')
         $leaf=$relative.Split('/')[-1]
@@ -1013,6 +995,38 @@ function Invoke-AgentEnvironmentRecoveryRollbackDecision {
     }
     $Journal.phase='rolled-back'
     Write-AgentEnvironmentInstallJournal $TransactionPath $TransactionLease $Journal
+}
+
+function Remove-AgentEnvironmentEmptyManagedDirectories {
+    param(
+        [Parameter(Mandatory = $true)][string]$Home,
+        [Parameter(Mandatory = $true)]$TransactionLease,
+        [Parameter(Mandatory = $true)][string[]]$DeletedPaths
+    )
+    $candidates=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach($path in $DeletedPaths){
+        $segments=@(([string]$path).Replace('\','/').Split('/'))
+        $skillsIndex=-1
+        for($index=$segments.Count-2;$index-ge0;$index--){if($segments[$index]-ceq'skills'){$skillsIndex=$index;break}}
+        if($skillsIndex-lt0-or$segments.Count-lt($skillsIndex+3)){continue}
+        for($count=$segments.Count-1;$count-ge($skillsIndex+2);$count--){[void]$candidates.Add(($segments[0..($count-1)]-join'/'))}
+    }
+    $ordinal=0
+    foreach($relative in @($candidates|Sort-Object @{Expression={@(([string]$_).Split('/')).Count};Descending=$true},@{Expression={$_};Descending=$false})){
+        $ordinal++
+        $parent=$null
+        try{
+            $state=Get-AgentEnvironmentDirectoryJournalState $Home $relative
+            if(-not[bool]$state.exists-or[int64]$state.entryCount-ne0){continue}
+            $full=Get-AgentEnvironmentFullPath $Home $relative
+            if(@(Get-ChildItem -Force -LiteralPath $full -ErrorAction Stop).Count-ne0){continue}
+            $parentRelative=[IO.Path]::GetDirectoryName($relative.Replace('/',[IO.Path]::DirectorySeparatorChar)).Replace('\','/')
+            $parent=Open-AgentEnvironmentDirectoryLease $Home $parentRelative
+            Move-PlatformOwnedDirectory -SourceParentLease $parent -SourceLeaf ($relative.Split('/')[-1]) -DestinationParentLease $TransactionLease -DestinationLeaf ("pruned-$ordinal") -ExpectedState $state|Out-Null
+        }
+        catch{ }
+        finally{if($null-ne$parent){$parent.Dispose()}}
+    }
 }
 
 function Move-AgentEnvironmentCommittedBackups {
@@ -1091,13 +1105,13 @@ function Invoke-AgentEnvironmentPlatformTransaction {
                     default{
                         if([string]$operation.kind-ceq'write-file'-and[string]$FailpointName-ceq'after-original-rename'){
                             Remove-PlatformOwnedFile -ParentLease $parent -Leaf $leaf -ExpectedState $operation.original -TransactionLease $transactionLease -TombstoneLeaf ([string]$operation.backupLeaf)|Out-Null
-                            $operation.state='applied'
                             Invoke-AgentEnvironmentFailpoint 'after-original-rename' $FailpointName $mutationCount $FailureAfterMutationCount
                         }
                         $stage=Open-PlatformFile -ParentLease $transactionLease -Leaf ([string]$operation.stageLeaf) -Access Read -CreateMode OpenExisting
                         try{Publish-PlatformFile -ParentLease $parent -Leaf $leaf -TransactionLease $transactionLease -StageLease $stage -ExpectedState $(if([string]$operation.kind-ceq'write-file'-and[string]$FailpointName-ceq'after-original-rename'){[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}}else{$operation.original}) -DisplacedLeaf $(if([string]$FailpointName-ceq'after-original-rename'){$null}else{$operation.backupLeaf}) -ExpectedStage $operation.applied -NoReplace:([string]$operation.kind-ceq'create-file'-or[string]$FailpointName-ceq'after-original-rename')|Out-Null}finally{$stage.Dispose()}
                     }
                 }
+                Invoke-AgentEnvironmentFailpoint 'after-platform-rename' $FailpointName $mutationCount $FailureAfterMutationCount
                 $operation.state='applied';$mutationCount++
                 Invoke-AgentEnvironmentFailpoint 'after-applied-rename' $FailpointName $mutationCount $FailureAfterMutationCount
                 Invoke-AgentEnvironmentFailpoint 'after-parent-flush' $FailpointName $mutationCount $FailureAfterMutationCount
@@ -1115,6 +1129,7 @@ function Invoke-AgentEnvironmentPlatformTransaction {
         foreach($path in $Deletes.Keys){if(Test-Path -LiteralPath (Get-AgentEnvironmentFullPath $Home $path)){throw "Retired managed path still exists after cleanup: $path"}}
         if((Get-AgentEnvironmentSha256 $manifestPath)-cne$ManifestSha){throw 'Final user Skills manifest byte verification failed.'}
         $journal.phase='committed';Write-AgentEnvironmentInstallJournal $transactionPath $transactionLease $journal;Invoke-AgentEnvironmentFailpoint 'before-committed-cleanup' $FailpointName $mutationCount $FailureAfterMutationCount
+        Remove-AgentEnvironmentEmptyManagedDirectories -Home $Home -TransactionLease $transactionLease -DeletedPaths ([string[]]@($Deletes.Keys))
         $backupPath=Move-AgentEnvironmentCommittedBackups -Home $Home -TransactionPath $transactionPath -TransactionLease $transactionLease -Journal $journal
         $transactionLease.Dispose();$transactionLease=$null;Remove-PlatformOwnedDirectoryTree -ParentLease $transactionContainerLease -Leaf $transactionId|Out-Null
         return [pscustomobject]@{success=$true;transactionPath=$transactionPath;journal=$journal;backupPath=$backupPath}
@@ -1142,10 +1157,39 @@ function Get-AgentEnvironmentRecoveryObservation {
     $target=if($directoryOperation){Get-AgentEnvironmentDirectoryJournalState $Home ([string]$Operation.targetRelativePath)}else{Get-AgentEnvironmentFileJournalState $Home ([string]$Operation.targetRelativePath)}
     $permissions=if($target.exists){if($directoryOperation){Get-AgentEnvironmentDirectoryPermissionSnapshot $Home ([string]$Operation.targetRelativePath)}else{Get-AgentEnvironmentFilePermissionSnapshot $Home ([string]$Operation.targetRelativePath)}}else{$null}
     $backup=$null
-    if($null-ne$Operation.backupLeaf){$backup=if($directoryOperation){Get-AgentEnvironmentDirectoryJournalState $TransactionPath ([string]$Operation.backupLeaf)}else{Get-AgentEnvironmentPrivateFileJournalState $TransactionPath ([string]$Operation.backupLeaf)}}
+    if($null-ne$Operation.backupLeaf){
+        $backupState=if($directoryOperation){Get-AgentEnvironmentDirectoryJournalState $TransactionPath ([string]$Operation.backupLeaf)}else{Get-AgentEnvironmentPrivateFileJournalState $TransactionPath ([string]$Operation.backupLeaf)}
+        if([bool]$backupState.exists){$backup=$backupState}
+    }
     $data=[ordered]@{exists=[bool]$target.exists}
     if($directoryOperation){$data.identity=$target.identity;$data.inventorySha256=$target.inventorySha256;$data.entryCount=$target.entryCount}else{$data.sha256=$target.sha256;$data.length=$target.length;$data.identity=$target.identity}
     $data.permissions=$permissions;$data.backup=$backup;return [pscustomobject]$data
+}
+
+function Test-AgentEnvironmentJournalStateMatch {
+    param([object]$Observed,[object]$Expected)
+    if([bool]$Observed.exists-ne[bool]$Expected.exists){return $false}
+    if(-not[bool]$Expected.exists){return $true}
+    if($null-ne$Expected.PSObject.Properties['inventorySha256']){
+        if([string]$Observed.inventorySha256-cne[string]$Expected.inventorySha256-or[int64]$Observed.entryCount-ne[int64]$Expected.entryCount){return $false}
+    }elseif([string]$Observed.sha256-cne[string]$Expected.sha256-or[int64]$Observed.length-ne[int64]$Expected.length){return $false}
+    if([string]$Observed.identity.kind-cne[string]$Expected.identity.kind-or[string]$Observed.identity.device-cne[string]$Expected.identity.device){return $false}
+    if([string]$Expected.identity.kind-ceq'windows-file-id'){return [string]$Observed.identity.fileId-ceq[string]$Expected.identity.fileId}
+    return [string]$Observed.identity.inode-ceq[string]$Expected.identity.inode
+}
+
+function Assert-AgentEnvironmentRollbackStageEvidence {
+    param([string]$TransactionPath,[object]$Journal,[object]$Decision,[hashtable]$Observations)
+    $decisions=@{};foreach($item in @($Decision.operations)){$decisions[[string]$item.sequence]=[string]$item.action}
+    foreach($operation in @($Journal.operations)){
+        if($null-eq$operation.stageLeaf){continue}
+        $directoryOperation=[string]$operation.kind-in@('swap-directory','create-directory')
+        $stage=if($directoryOperation){Get-AgentEnvironmentDirectoryJournalState $TransactionPath ([string]$operation.stageLeaf)}else{Get-AgentEnvironmentPrivateFileJournalState $TransactionPath ([string]$operation.stageLeaf)}
+        $action=$decisions[[string]$operation.sequence];$target=$Observations[[string]$operation.sequence]
+        if([bool]$stage.exists-and-not(Test-AgentEnvironmentJournalStateMatch $stage $operation.applied)){throw [IO.IOException]::new("USER transaction stage evidence changed for sequence $($operation.sequence).")}
+        $stageMustBeAbsent=$action-ceq'remove-applied'-or($action-ceq'restore-original'-and[bool]$target.exists)
+        if($stageMustBeAbsent-and[bool]$stage.exists){throw [IO.IOException]::new("USER transaction stage evidence is ambiguous for sequence $($operation.sequence).")}
+    }
 }
 
 function New-AgentEnvironmentInterruptedResult {
@@ -1214,6 +1258,7 @@ function Invoke-AgentEnvironmentNewJournalRecoveryLocked {
                 $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
                 if([string]$decision.action-ceq'refuse'){return New-AgentEnvironmentInterruptedResult "USER transaction residue '$($entry.Name)' does not have sufficient exact recovery evidence."}
                 if([string]$decision.action-ceq'roll-back'){
+                    Assert-AgentEnvironmentRollbackStageEvidence -TransactionPath $entry.FullName -Journal $journal -Decision $decision -Observations $observations
                     Invoke-AgentEnvironmentRecoveryRollbackDecision -Home $Home -TransactionPath $entry.FullName -TransactionLease $transactionLease -Journal $journal -Decision $decision
                 }elseif([string]$decision.action-ceq'commit'){
                     $journal.phase='committed';Write-AgentEnvironmentInstallJournal $entry.FullName $transactionLease $journal

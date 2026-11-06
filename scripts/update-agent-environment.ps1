@@ -15,6 +15,27 @@ $ErrorActionPreference = 'Stop'
 $script:agentEnvironmentRuntimeReadLock = $null
 $script:agentEnvironmentTrustedReadLease = $null
 $script:agentEnvironmentRecoveryStarted = $false
+$script:agentEnvironmentRefusalCodes = @(
+    'capability-unavailable','platform-mismatch','downgrade-refused','mixed-generation','unsupported-version',
+    'closure-invalid','interrupted-install','projection-runtime-unavailable','runtime-baseline-unavailable'
+)
+
+function Get-AgentEnvironmentRefusalCode {
+    param([Parameter(Mandatory = $true)][AllowNull()][object] $ErrorRecordOrException)
+    $candidate = $ErrorRecordOrException
+    if ($candidate -is [Management.Automation.ErrorRecord]) { $candidate = $candidate.Exception }
+    while ($candidate -is [Exception]) {
+        if ($null -ne $candidate.PSObject.Properties['Code'] -and [string]$candidate.Code -cin $script:agentEnvironmentRefusalCodes) { return [string]$candidate.Code }
+        if ($candidate.Data.Contains('Code') -and [string]$candidate.Data['Code'] -cin $script:agentEnvironmentRefusalCodes) { return [string]$candidate.Data['Code'] }
+        $candidate = $candidate.InnerException
+    }
+    $matches = [regex]::Matches([string]$ErrorRecordOrException,'\[ai-instructions-refusal-code=([^\]\r\n]*)\]')
+    if ($matches.Count -gt 0) {
+        $code = $matches[$matches.Count - 1].Groups[1].Value
+        if ($code -cin $script:agentEnvironmentRefusalCodes) { return $code }
+    }
+    return $null
+}
 
 function New-AgentEnvironmentStableRecoveryFailureResult {
     param([Parameter(Mandatory = $true)][string] $Message)
@@ -43,10 +64,7 @@ function New-AgentEnvironmentStableRecoveryFailureResult {
 
 trap {
     $message = [string]$_.Exception.Message
-    $refusalCode = $null
-    if($null-ne$_.Exception.PSObject.Properties['Code']){$refusalCode=[string]$_.Exception.Code}
-    elseif($_.Exception.Data.Contains('Code')){$refusalCode=[string]$_.Exception.Data['Code']}
-    elseif($message-match '\[ai-instructions-refusal-code=([^\]]+)\]'){$refusalCode=$Matches[1]}
+    $refusalCode = Get-AgentEnvironmentRefusalCode $_
     if ($null -ne $script:agentEnvironmentRuntimeReadLock) {
         try { $script:agentEnvironmentRuntimeReadLock.Dispose() }
         catch { }

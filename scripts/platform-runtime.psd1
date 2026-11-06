@@ -66,7 +66,7 @@
             HashMode = 'sha256-utf8-lf'
             Inventory = @(
                 @{ Path = 'platform/UnixNative.cs'; Sha256 = '6312032ac138a7c3411f82e0c25d687738993e469f7f1e3f9f5dd4f21e568607' },
-                @{ Path = 'platform/WindowsNative.cs'; Sha256 = '7724e2a3c46a28d6af19d4b0cb04761b4ebbd7d0df78058b412815898e71d954' },
+                @{ Path = 'platform/WindowsNative.cs'; Sha256 = 'b696744fb6e2bdbcefbf9022cf6309c51d9f285c00c2936ec70287e7a3e821da' },
                 @{ Path = 'platform/WindowsInstallerMutation.cs'; Sha256 = 'b88b4b09c7bb5c3e71b762ddc6ebe72007ed0cca99977ab7a7272529c3ff9218' },
                 @{ Path = 'platform/Unix.psm1'; Sha256 = 'c726488e7627115a58e73fff199cd6f74d9a83e9260977f2d2df4451e5315516' },
                 @{ Path = 'platform/RuntimePreparation.psm1'; Sha256 = 'dc254c04e7e2caf280726e66f67434776bc7df12a210a38c80596e41344fd077' },

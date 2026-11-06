@@ -1424,4 +1424,52 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
             $gateHome=Join-Path $TestDrive 'matrix-gate';New-Item -ItemType Directory -Path $gateHome|Out-Null;$gateOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $codexHome -UserHome $gateHome -VerifyOnly -OutputFormat Json);$LASTEXITCODE|Should Be 1;$gate=$gateOutput[-1]|ConvertFrom-Json;$gate.Code|Should Be 'projection-runtime-unavailable';Test-Path (Join-Path $gateHome '.agents')|Should Be $false
         }finally{$env:P8_DESIRED_STATE=$oldDesired;Remove-Item Function:Add-MatrixResidue -ErrorAction SilentlyContinue}
     }
+
+    # Scenario: A platform publication completes its rename but reports failure before the coordinator records operation.state=applied.
+    # Purpose: Derive rollback from target/backup/stage identity evidence and restore the original instead of deleting its backup as stale transaction data.
+    It 'InterT79_rolls_back_a_completed_platform_rename_from_observed_evidence' {
+        $home=Join-Path $TestDrive 'post-rename-rollback';$initial=New-TestDesiredState -Root (Join-Path $TestDrive 'post-rename-initial') -SkillIds @('alpha')
+        (Invoke-UserSkillsReconciliation -DesiredState $initial -UserHome $home -Mode Apply).outcome|Should Be 'applied'
+        $target=Join-Path $home '.agents/skills/alpha/SKILL.md';$before=[IO.File]::ReadAllBytes($target)
+        $next=New-TestDesiredState -Root (Join-Path $TestDrive 'post-rename-next') -SkillIds @('alpha')
+        [IO.File]::WriteAllText([string]$next.Files[0].stagedPath,"---`nname: alpha`ndescription: changed after rename`n---`n",[Text.UTF8Encoding]::new($false))
+        $next.Files[0].sha256=(Get-FileHash -Algorithm SHA256 -LiteralPath ([string]$next.Files[0].stagedPath)).Hash.ToLowerInvariant();$next.Manifest.files[0].sha256=$next.Files[0].sha256
+
+        $failed=Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $home -Mode Apply -FailpointName after-platform-rename
+
+        $failed.outcome|Should Be 'failed';$failed.rollbackState|Should Be 'completed'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($target))|Should Be ([Convert]::ToBase64String($before))
+        @(Get-ChildItem -Force -LiteralPath (Join-Path $home '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0
+    }
+
+    # Scenario: The final managed file for one Skill is retired from every USER projection while unrelated empty personal directories coexist.
+    # Purpose: Prune only empty directories proven to have held managed files, after commit, across every projection root.
+    It 'InterT80_prunes_retired_empty_Skill_directories_in_every_projection' {
+        $home=Join-Path $TestDrive 'projection-prune';$initial=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'projection-prune-initial')
+        (Invoke-UserSkillsReconciliation -DesiredState $initial -UserHome $home -Mode Apply).outcome|Should Be 'applied'
+        foreach($root in @('.agents/skills','.claude/skills','.copilot/skills')){New-Item -ItemType Directory -Force -Path (Join-Path $home "$root/personal-empty")|Out-Null}
+        $retired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'projection-prune-retired')
+        $retired.Files=@();$retired.Manifest.files=@();$retired.SkillIds=@()
+
+        (Invoke-UserSkillsReconciliation -DesiredState $retired -UserHome $home -Mode Apply).outcome|Should Be 'applied'
+
+        foreach($root in @('.agents/skills','.claude/skills','.copilot/skills')){
+            Test-Path -LiteralPath (Join-Path $home "$root/work-with-jira")|Should Be $false
+            Test-Path -LiteralPath (Join-Path $home "$root/personal-empty") -PathType Container|Should Be $true
+        }
+    }
+
+    # Scenario: Stable-entry failure text contains multiple refusal markers, including an unknown final marker.
+    # Purpose: Emit only the last marker when it is in the closed runtime vocabulary and never surface an unknown code as the result Code.
+    It 'InterT81_uses_the_last_closed_refusal_marker_in_entry_failures' {
+        $entry=Join-Path $script:RepositoryRoot 'scripts/update-agent-environment.ps1';$userHome=Join-Path $TestDrive 'refusal-entry-user';New-Item -ItemType Directory -Path $userHome|Out-Null
+        $validHome=Join-Path $TestDrive 'old [ai-instructions-refusal-code=closure-invalid] final [ai-instructions-refusal-code=interrupted-install]'
+        $validOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $validHome -UserHome $userHome -VerifyOnly -OutputFormat Json)
+        $LASTEXITCODE|Should Be 1;($validOutput[-1]|ConvertFrom-Json).Code|Should Be 'interrupted-install'
+        $unknownHome=Join-Path $TestDrive 'old [ai-instructions-refusal-code=closure-invalid] final [ai-instructions-refusal-code=unknown]'
+        $unknownOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $unknownHome -UserHome $userHome -VerifyOnly -OutputFormat Json)
+        $LASTEXITCODE|Should Be 1;($unknownOutput[-1]|ConvertFrom-Json).Code|Should BeNullOrEmpty
+        $unknownText=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $unknownHome -UserHome $userHome -VerifyOnly -OutputFormat Text)
+        @($unknownText|Where-Object{$_-match'^Code:'}).Count|Should Be 0
+    }
 }

@@ -628,7 +628,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 IntPtr namePointer = IntPtr.Zero;
                 try
                 {
-                    byte[] bytes = Encoding.Unicode.GetBytes(leaf);
+                    byte[] bytes = System.Text.Encoding.Unicode.GetBytes(leaf);
                     nameBuffer = Marshal.AllocHGlobal(bytes.Length + 2);
                     Marshal.Copy(bytes, 0, nameBuffer, bytes.Length);
                     Marshal.WriteInt16(nameBuffer, bytes.Length, 0);
