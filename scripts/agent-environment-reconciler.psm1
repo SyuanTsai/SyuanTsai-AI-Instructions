@@ -920,6 +920,29 @@ function Open-AgentEnvironmentDirectoryLease {
     return Open-PlatformDirectory -Root $Home -RelativePath $RelativePath
 }
 
+function Open-AgentEnvironmentUserLockDirectory {
+    param([Parameter(Mandatory = $true)][string]$Home)
+    $homeFull=[IO.Path]::GetFullPath($Home).TrimEnd([char[]]@('\','/'))
+    if(-not(Test-Path -LiteralPath $homeFull)){
+        $ancestor=$homeFull
+        while(-not(Test-Path -LiteralPath $ancestor)){
+            $parent=[IO.Directory]::GetParent($ancestor)
+            if($null-eq$parent){throw "No existing ancestor is available for USER home creation: $homeFull"}
+            $ancestor=$parent.FullName
+        }
+        $ancestorItem=Get-Item -Force -LiteralPath $ancestor
+        if(-not$ancestorItem.PSIsContainer){throw "The existing USER home ancestor is not a directory: $ancestor"}
+        $relative=[IO.Path]::GetRelativePath($ancestor,$homeFull)
+        if([IO.Path]::IsPathRooted($relative)-or$relative-ceq'..'-or$relative.StartsWith(('..'+[IO.Path]::DirectorySeparatorChar),[StringComparison]::Ordinal)){
+            throw 'USER home creation escaped its existing ancestor.'
+        }
+        $homeLease=$null
+        try{$homeLease=Open-PlatformDirectory -Root $ancestor -RelativePath $relative -CreatePrivate}
+        finally{if($null-ne$homeLease){$homeLease.Dispose()}}
+    }
+    return Open-PlatformDirectory -Root $homeFull -RelativePath '.agents' -CreatePrivate
+}
+
 function Test-AgentEnvironmentLockContention {
     param([Parameter(Mandatory = $true)][object]$ErrorRecordOrException)
     $candidate=$ErrorRecordOrException
@@ -1644,7 +1667,7 @@ function Invoke-AgentEnvironmentNewJournalRecoveryLocked {
             $entry=$classified.entry;$classification=$classified.classification
             if([string]$classification.classification-ceq'orphan-without-journal'){
                 $entryState=Get-PlatformDirectoryState -ParentLease $containerLease -Leaf $entry.Name
-                $validatedEntries.Add([pscustomobject][ordered]@{entry=$entry;classification=$classification;entryState=$entryState;journal=$null;observations=$null;decision=$null})
+                $validatedEntries.Add([pscustomobject][ordered]@{entry=$entry;classification=$classification;entryState=$entryState;journal=$null;observations=$null;decision=$null;plan=$null})
                 continue
             }
             if([string]$classification.classification-cne'valid-journal'-or[string]$classification.journal.owner.component-cne'user-reconciler'){
@@ -1666,15 +1689,15 @@ function Invoke-AgentEnvironmentNewJournalRecoveryLocked {
                 $observations=@{};foreach($operation in $journal.operations){$observations[[string]$operation.sequence]=Get-AgentEnvironmentRecoveryObservation $Home $entry.FullName $validationLease $operation}
                 $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
                 if([string]$decision.action-ceq'refuse'){$validationFailures.Add("USER transaction residue '$($entry.Name)' does not have sufficient exact recovery evidence.");continue}
-                Get-AiInstructionsInstallRecoveryPlan -Journal $journal -Decision $decision|Out-Null
+                $plan=Get-AiInstructionsInstallRecoveryPlan -Journal $journal -Decision $decision
                 if([string]$decision.action-ceq'roll-back'){Assert-AgentEnvironmentRollbackStageEvidence -TransactionPath $entry.FullName -TransactionLease $validationLease -Journal $journal -Decision $decision -Observations $observations}
             }catch{$validationFailures.Add("USER transaction residue '$($entry.Name)' does not have valid recovery evidence: $($_.Exception.Message)");continue}
             finally{if($null-ne$validationLease){$validationLease.Dispose()}}
-            $validatedEntries.Add([pscustomobject][ordered]@{entry=$entry;classification=$classification;entryState=$entryState;journal=$journal;observations=$observations;decision=$decision})
+            $validatedEntries.Add([pscustomobject][ordered]@{entry=$entry;classification=$classification;entryState=$entryState;journal=$journal;observations=$observations;decision=$decision;plan=$plan})
         }
         if($validationFailures.Count-gt0){return New-AgentEnvironmentInterruptedResult ($validationFailures -join ' ')}
         $recoveryRequiresDirectoryPublication=@($validatedEntries|Where-Object{
-            $null-ne$_.journal-and[string]$_.decision.action-cne'none'-and@($_.journal.operations|Where-Object{[string]$_.kind-ceq'create-directory'}).Count-gt0
+            $null-ne$_.plan-and@($_.plan.steps|Where-Object{[string]$_.primitive-ceq'Move-PlatformOwnedDirectory'}).Count-gt0
         }).Count-gt0
         if($recoveryRequiresDirectoryPublication){Assert-AgentEnvironmentDirectoryPublicationCapability}
         foreach($validated in $validatedEntries){
@@ -1805,7 +1828,7 @@ function Invoke-UserSkillsReconciliation {
         try {
             if ($null -ne $BeforeLockAcquisitionAction) { & $BeforeLockAcquisitionAction }
             if ($Mode -eq 'Apply') {
-                $lockParentLease=Open-PlatformDirectory -Root $home -RelativePath '.agents' -CreatePrivate
+                $lockParentLease=Open-AgentEnvironmentUserLockDirectory -Home $home
                 $lockStream=Enter-PlatformLock -ParentLease $lockParentLease -Leaf 'update-agent-environment.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
             }
             elseif(Test-Path -LiteralPath $lockPath -PathType Leaf){
@@ -2178,13 +2201,14 @@ function Invoke-UserSkillsRecovery {
     $hasNew=(Test-Path -LiteralPath $transactionRoot)-and(@(Get-ChildItem -Force -LiteralPath $transactionRoot -ErrorAction Stop).Count-gt0)
     if(-not$hasLegacy-and-not$hasNew){return [pscustomobject][ordered]@{schemaVersion=1;outcome='nothing-to-recover';exitCode=0;rollbackState='not-needed'}}
     Import-AgentEnvironmentRecoveryRuntimeModules -RuntimeRoot $PSScriptRoot
+    if($hasNew-and-not(Test-AgentEnvironmentInstallReadLease $InstallReadLease)){return New-AgentEnvironmentInterruptedResult 'USER install-journal recovery requires stable-launcher validation and the install read lease.'}
     $lockParentLease=$null;$lockStream=$null
     try{
         $lockPath=Join-Path $home '.agents/update-agent-environment.lock'
         if(Test-Path -LiteralPath $lockPath){$lockItem=Get-Item -Force -LiteralPath $lockPath;if($lockItem.PSIsContainer-or($lockItem.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){throw 'Agent environment lock must be a non-reparse file.'}}
         try{
             if($null-ne$BeforeLockAcquisitionAction){& $BeforeLockAcquisitionAction}
-            $lockParentLease=Open-PlatformDirectory -Root $home -RelativePath '.agents' -CreatePrivate
+            $lockParentLease=Open-AgentEnvironmentUserLockDirectory -Home $home
             $lockStream=Enter-PlatformLock -ParentLease $lockParentLease -Leaf 'update-agent-environment.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
         }
         catch{if(Test-AgentEnvironmentLockContention $_){return New-AgentEnvironmentRecoveryConcurrentResult};throw}

@@ -94,6 +94,28 @@ function Assert-AgentEnvironmentEntryGenerationPair {
     }
 }
 
+function Open-AgentEnvironmentRuntimeReadLock {
+    $installLockPath = Join-Path $codexHomePath 'ai-instructions-install.lock'
+    if (-not (Test-Path -LiteralPath $installLockPath -PathType Leaf)) {
+        throw 'AI instructions install lock is missing from the installed runtime.'
+    }
+    $installLockItem = Get-Item -Force -LiteralPath $installLockPath
+    if ($installLockItem.PSIsContainer -or ($installLockItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'AI instructions install lock must be a non-reparse file.'
+    }
+    try {
+        return [System.IO.File]::Open(
+            $installLockPath,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read
+        )
+    }
+    catch [System.IO.IOException] {
+        throw 'AI instructions runtime is being installed; Agent environment update stopped before reading a mixed runtime.'
+    }
+}
+
 trap {
     $message = [string]$_.Exception.Message
     $refusalCode = Get-AgentEnvironmentRefusalCode $_
@@ -150,34 +172,6 @@ $launcher = Join-Path $codexHomePath 'hooks/bootstrap-ai-instructions.ps1'
 $configurationPath = Join-Path $codexHomePath 'ai-instructions-sync.json'
 $bundlePath = Join-Path $runtimeRoot 'runtime-bundle.json'
 $configuration=$null;$bundle=$null
-try{
-    if(Test-Path -LiteralPath $configurationPath -PathType Leaf){$configuration=Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath|ConvertFrom-Json}
-    if(Test-Path -LiteralPath $bundlePath -PathType Leaf){$bundle=Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath|ConvertFrom-Json}
-}
-catch{throw (New-AgentEnvironmentEntryRefusalException -Code 'unsupported-version' -Message "Installed Agent environment generation metadata is invalid: $($_.Exception.Message)")}
-Assert-AgentEnvironmentEntryGenerationPair -Configuration $configuration -Bundle $bundle
-
-function Open-AgentEnvironmentRuntimeReadLock {
-    $installLockPath = Join-Path $codexHomePath 'ai-instructions-install.lock'
-    if (-not (Test-Path -LiteralPath $installLockPath -PathType Leaf)) {
-        throw 'AI instructions install lock is missing from the installed runtime.'
-    }
-    $installLockItem = Get-Item -Force -LiteralPath $installLockPath
-    if ($installLockItem.PSIsContainer -or ($installLockItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw 'AI instructions install lock must be a non-reparse file.'
-    }
-    try {
-        return [System.IO.File]::Open(
-            $installLockPath,
-            [System.IO.FileMode]::Open,
-            [System.IO.FileAccess]::Read,
-            [System.IO.FileShare]::Read
-        )
-    }
-    catch [System.IO.IOException] {
-        throw 'AI instructions runtime is being installed; Agent environment update stopped before reading a mixed runtime.'
-    }
-}
 
 function Write-AgentEnvironmentResult {
     param([Parameter(Mandatory = $true)][object] $Result)
@@ -208,12 +202,20 @@ $temporaryRoot = $null
 $finalResult = $null
 $reconcilerCommands = @{}
 try {
+    $script:agentEnvironmentRuntimeReadLock = Open-AgentEnvironmentRuntimeReadLock
     if (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) { throw "Installed AI instructions runtime is missing: $runtimeRoot" }
     $reconcilerPath = Join-Path $runtimeRoot 'agent-environment-reconciler.psm1'
     if (-not (Test-Path -LiteralPath $reconcilerPath -PathType Leaf)) { throw "Installed Agent environment reconciler is missing: $reconcilerPath" }
     if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) { throw "Installed AI instructions validation launcher is missing: $launcher" }
 
-    $script:agentEnvironmentRuntimeReadLock = Open-AgentEnvironmentRuntimeReadLock
+    if(-not$Recover){
+        try{
+            if(Test-Path -LiteralPath $configurationPath -PathType Leaf){$configuration=Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath|ConvertFrom-Json}
+            if(Test-Path -LiteralPath $bundlePath -PathType Leaf){$bundle=Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath|ConvertFrom-Json}
+        }
+        catch{throw (New-AgentEnvironmentEntryRefusalException -Code 'unsupported-version' -Message "Installed Agent environment generation metadata is invalid: $($_.Exception.Message)")}
+        Assert-AgentEnvironmentEntryGenerationPair -Configuration $configuration -Bundle $bundle
+    }
     & $launcher -ValidateOnly | Out-Null
 
     Remove-Module agent-environment-reconciler -Force -ErrorAction SilentlyContinue

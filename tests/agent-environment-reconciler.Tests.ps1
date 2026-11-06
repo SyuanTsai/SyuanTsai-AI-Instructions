@@ -202,7 +202,10 @@ function Copy-TestPlatformRuntimeClosure {
 
 function Copy-TestRecoveryRuntimeDependencies {
     param([Parameter(Mandatory=$true)][string]$Destination)
-    Copy-Item -LiteralPath (Join-Path $script:RuntimeRoot 'ai-instructions-runtime-contract.psm1') -Destination $Destination -Force
+    $contractSource=Join-Path $script:RuntimeRoot 'ai-instructions-runtime-contract.psm1'
+    $contractDestination=Join-Path $Destination 'ai-instructions-runtime-contract.psm1'
+    [IO.File]::Copy($contractSource,$contractDestination,$true)
+    if(-not(Test-Path -LiteralPath $contractDestination -PathType Leaf)){throw 'Recovery runtime contract fixture copy did not materialize.'}
     Copy-TestPlatformRuntimeClosure -Destination $Destination
 }
 
@@ -325,6 +328,24 @@ Describe 'user-scoped Agent Skills reconciliation' {
         $before=(Get-FileHash (Join-Path $userHome '.agents/catalog-skills.manifest.json')).Hash
         (Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply).outcome | Should Be 'current'
         (Get-FileHash (Join-Path $userHome '.agents/catalog-skills.manifest.json')).Hash | Should Be $before
+    }
+
+    # Scenario: USER home is multiple missing components below the nearest existing physical ancestor.
+    # Purpose: Keep read-only modes side-effect free, then let Apply create USER home and .agents through platform-runtime before locking.
+    It 'InterT101_creates_a_missing_USER_home_only_for_Apply' {
+        $ancestor=Join-Path $TestDrive 'missing-user-home-ancestor'
+        New-Item -ItemType Directory -Path $ancestor|Out-Null
+        $caseHome=Join-Path $ancestor 'nested/user-home'
+        $desired=New-TestDesiredState -Root (Join-Path $TestDrive 'missing-user-home-stage')
+
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $caseHome -Mode VerifyOnly).outcome|Should Be 'drift'
+        Test-Path -LiteralPath $caseHome|Should Be $false
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $caseHome -Mode WhatIf).outcome|Should Be 'planned'
+        Test-Path -LiteralPath $caseHome|Should Be $false
+
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $caseHome -Mode Apply).outcome|Should Be 'applied'
+        Test-Path -LiteralPath (Join-Path $caseHome '.agents/update-agent-environment.lock') -PathType Leaf|Should Be $true
+        Test-Path -LiteralPath (Join-Path $caseHome '.agents/skills/alpha/SKILL.md') -PathType Leaf|Should Be $true
     }
 
     # Scenario: One source pin is projected to all three legal USER roots in one coordinator generation.
@@ -1362,10 +1383,14 @@ Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode
         $desired = New-TestDesiredState -Root $staging
         $agents = Join-Path $userHome '.agents'
         New-Item -ItemType Directory -Force -Path (Join-Path $agents 'skills') | Out-Null
-        $stream = [System.IO.File]::Open((Join-Path $agents 'update-agent-environment.lock'),[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+        $lockPath=Join-Path $agents 'update-agent-environment.lock'
+        [IO.File]::WriteAllText($lockPath,'')
         $before=Get-TestTreeSnapshot $userHome
-        try { (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome | Should Be 'concurrent';(Get-TestTreeSnapshot $userHome)|Should Be $before }
+        $stream = [System.IO.File]::Open($lockPath,[System.IO.FileMode]::Open,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+        try { $result=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply }
         finally { $stream.Dispose() }
+        $result.outcome | Should Be 'concurrent'
+        (Get-TestTreeSnapshot $userHome)|Should Be $before
     }
 
     # Scenario: The P8 platform lock is held before a legacy File.Open contender starts.
@@ -1717,6 +1742,33 @@ Describe 'Agent environment stable entry point' {
         @($result.failed).Count | Should Be 1
     }
 
+    # Scenario: Installed generation metadata is invalid while the installer exclusively owns the canonical runtime lock.
+    # Purpose: Use invalid metadata as a read sentinel and prove the stable entry attempts the read lock before touching either metadata file.
+    It 'InterT99_acquires_the_runtime_read_lock_before_reading_generation_metadata' {
+        $entry=Join-Path $script:RepositoryRoot 'scripts/update-agent-environment.ps1'
+        $codexHome=Join-Path $TestDrive 'entry-lock-before-metadata'
+        $runtimeRoot=Join-Path $codexHome 'hooks/ai-instructions-runtime'
+        [void][IO.Directory]::CreateDirectory($runtimeRoot)
+        [IO.File]::WriteAllText((Join-Path $runtimeRoot 'agent-environment-reconciler.psm1'),'# metadata-order fixture')
+        [IO.File]::WriteAllText((Join-Path $codexHome 'hooks/bootstrap-ai-instructions.ps1'),'param([switch]$ValidateOnly)')
+        [IO.File]::WriteAllText((Join-Path $codexHome 'ai-instructions-sync.json'),'{')
+        [IO.File]::WriteAllText((Join-Path $runtimeRoot 'runtime-bundle.json'),'{')
+        $installLockPath=Join-Path $codexHome 'ai-instructions-install.lock'
+        [IO.File]::WriteAllText($installLockPath,'')
+        $exclusive=[IO.File]::Open($installLockPath,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+        try{$lockedOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $codexHome -UserHome (Join-Path $TestDrive 'entry-lock-user') -VerifyOnly -OutputFormat Json);$lockedExit=$LASTEXITCODE}
+        finally{$exclusive.Dispose()}
+
+        $lockedExit|Should Be 1
+        $lockedResult=$lockedOutput[-1]|ConvertFrom-Json
+        $lockedResult.Code|Should BeNullOrEmpty
+        $lockedResult.failed[0]|Should Match 'runtime is being installed'
+
+        $metadataOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $codexHome -UserHome (Join-Path $TestDrive 'entry-metadata-user') -VerifyOnly -OutputFormat Json)
+        $LASTEXITCODE|Should Be 1
+        ($metadataOutput[-1]|ConvertFrom-Json).Code|Should Be 'unsupported-version'
+    }
+
     # Scenario: The installed recovery entry point reads an existing v2 manifest without a recovery journal.
     # Purpose: Ensure the reconciler loads its contract validator itself in a fresh PowerShell process.
     It 'InterT59_recovers_a_v2_manifest_without_a_preimported_contract_module' {
@@ -2021,11 +2073,11 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
     It 'InterT81_uses_the_last_closed_refusal_marker_in_entry_failures' {
         $entry=Join-Path $script:RepositoryRoot 'scripts/update-agent-environment.ps1';$userHome=Join-Path $TestDrive 'refusal-entry-user';New-Item -ItemType Directory -Path $userHome|Out-Null
         $validHome=Join-Path $TestDrive 'old [ai-instructions-refusal-code=closure-invalid] final [ai-instructions-refusal-code=interrupted-install]'
-        $validRuntime=Join-Path $validHome 'hooks/ai-instructions-runtime';New-Item -ItemType Directory -Force -Path $validRuntime|Out-Null;@{schemaVersion=4}|ConvertTo-Json|Set-Content (Join-Path $validHome 'ai-instructions-sync.json');@{schemaVersion=2}|ConvertTo-Json|Set-Content (Join-Path $validRuntime 'runtime-bundle.json')
+        $validRuntime=Join-Path $validHome 'hooks/ai-instructions-runtime';[void][IO.Directory]::CreateDirectory($validRuntime);[IO.File]::WriteAllText((Join-Path $validHome 'ai-instructions-install.lock'),'');@{schemaVersion=4}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $validHome 'ai-instructions-sync.json');@{schemaVersion=2}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $validRuntime 'runtime-bundle.json')
         $validOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $validHome -UserHome $userHome -VerifyOnly -OutputFormat Json)
         $LASTEXITCODE|Should Be 1;($validOutput[-1]|ConvertFrom-Json).Code|Should Be 'interrupted-install'
         $unknownHome=Join-Path $TestDrive 'old [ai-instructions-refusal-code=closure-invalid] final [ai-instructions-refusal-code=unknown]'
-        $unknownRuntime=Join-Path $unknownHome 'hooks/ai-instructions-runtime';New-Item -ItemType Directory -Force -Path $unknownRuntime|Out-Null;@{schemaVersion=4}|ConvertTo-Json|Set-Content (Join-Path $unknownHome 'ai-instructions-sync.json');@{schemaVersion=2}|ConvertTo-Json|Set-Content (Join-Path $unknownRuntime 'runtime-bundle.json')
+        $unknownRuntime=Join-Path $unknownHome 'hooks/ai-instructions-runtime';[void][IO.Directory]::CreateDirectory($unknownRuntime);[IO.File]::WriteAllText((Join-Path $unknownHome 'ai-instructions-install.lock'),'');@{schemaVersion=4}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $unknownHome 'ai-instructions-sync.json');@{schemaVersion=2}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $unknownRuntime 'runtime-bundle.json')
         $unknownOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $unknownHome -UserHome $userHome -VerifyOnly -OutputFormat Json)
         $LASTEXITCODE|Should Be 1;($unknownOutput[-1]|ConvertFrom-Json).Code|Should BeNullOrEmpty
         $unknownText=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $unknownHome -UserHome $userHome -VerifyOnly -OutputFormat Text)
@@ -2045,5 +2097,31 @@ Describe 'USER directory-publication capability gating' {
         (Invoke-UserSkillsReconciliation -DesiredState $currentDesired -UserHome $driftHome -Mode VerifyOnly).outcome|Should Be 'drift'
         (Invoke-UserSkillsReconciliation -DesiredState $currentDesired -UserHome $driftHome -Mode WhatIf).outcome|Should Be 'planned'
         Assert-MockCalled Get-PlatformCapabilities 0 -ModuleName agent-environment-reconciler
+    }
+
+
+    Context 'committing an already-applied directory transaction' {
+        # Scenario: A create-directory operation is fully applied, but the process dies before the applied journal is committed.
+        # Purpose: A commit recovery only writes journal state and cleans transaction artifacts, so unavailable directory publication must not block it.
+        It 'InterT100_does_not_gate_commit_recovery_on_directory_publication' {
+            $caseHome=Join-Path $TestDrive 'capability-commit-recovery-home'
+            $desired=New-TestDesiredState -Root (Join-Path $TestDrive 'capability-commit-recovery-stage')
+            $failed=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $caseHome -Mode Apply -FailpointName before-committed-cleanup
+            $failed.rollbackState|Should Be 'recovery-required'
+            $transaction=@(Get-ChildItem -Force -Directory -LiteralPath (Join-Path $caseHome '.ai-instructions-txn'))[0]
+            $journalPath=Join-Path $transaction.FullName 'journal.json'
+            $previousJournalPath=Join-Path $transaction.FullName 'journal.prev'
+            (Get-Content -Raw -Encoding UTF8 -LiteralPath $previousJournalPath|ConvertFrom-Json -DateKind String).phase|Should Be 'applied'
+            [IO.File]::Delete($journalPath)
+            [IO.File]::Move($previousJournalPath,$journalPath)
+            Mock Get-PlatformCapabilities {throw 'directory-publication unavailable'} -ModuleName agent-environment-reconciler
+            $readLease=New-TestInstallReadLeaseEvidence
+            try{$recovered=Invoke-UserSkillsRecovery -UserHome $caseHome -InstallReadLease $readLease.Evidence}
+            finally{$readLease.Evidence.Dispose();if($readLease.Created){Remove-Item -LiteralPath $readLease.Path -Force -ErrorAction SilentlyContinue}}
+
+            $recovered.outcome|Should Be 'recovered'
+            Assert-MockCalled Get-PlatformCapabilities 0 -ModuleName agent-environment-reconciler
+            @(Get-ChildItem -Force -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0
+        }
     }
 }
