@@ -2725,7 +2725,7 @@ catch {
         Copy-PlatformRuntimeFixture -Destination $fixture
         Remove-Item -LiteralPath (Join-Path $fixture 'platform/WindowsInstallerMutation.cs') -Force
 
-        { Import-Module (Join-Path $fixture 'platform-runtime.psd1') -Force -ErrorAction Stop } | Should Throw 'inventory file is missing: platform/WindowsInstallerMutation.cs'
+        { Import-Module (Join-Path $fixture 'platform-runtime.psd1') -Force -ErrorAction Stop } | Should Throw 'implementation directory contains missing or extra files'
     }
 
     # Scenario: The retained Windows mutation dependency changes after its runtime inventory was reviewed.
@@ -3410,6 +3410,23 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $observed=Assert-PlatformFileIdentity -Lease $lease -Expected $lease.Observation -SingleLink
             [pscustomobject]@{Lease=$lease;State=[pscustomobject]@{exists=$true;sha256=(Get-P7Hash $Bytes);length=[int64]$Bytes.Length;identity=(Get-P7Identity $observed)};Expected=[pscustomobject]@{sha256=(Get-P7Hash $Bytes);length=[int64]$Bytes.Length}}
         }
+        function New-P7JournalOperation {
+            param([string]$Kind,[string]$Method,[string]$TargetRelativePath,[AllowNull()][string]$StageLeaf,[AllowNull()][string]$BackupLeaf,$Original,$Applied,$Permissions)
+            [pscustomobject][ordered]@{
+                sequence=1;kind=$Kind;method=$Method;targetRelativePath=$TargetRelativePath;stageLeaf=$StageLeaf;backupLeaf=$BackupLeaf
+                original=$Original;backupIdentity=$(if($Kind -eq 'remove-file'){$Original.identity}else{$null});applied=$Applied;permissions=$Permissions;state='pending'
+            }
+        }
+        function Set-P7WindowsPostRenameHook([AllowNull()][scriptblock]$Hook) {
+            $runtimeModule=@(Get-Module platform-runtime)[0]
+            if($null -eq $runtimeModule){throw 'The platform runtime module is not loaded.'}
+            & $runtimeModule {
+                param($Value)
+                $windowsModule=@(Get-Module -All Windows)[0]
+                if($null -eq $windowsModule){throw 'The nested Windows platform module is not loaded.'}
+                & $windowsModule { param($NestedValue) $script:WindowsPublicationPostRenameTestHook=$NestedValue } $Value
+            } $Hook
+        }
     }
 
     if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
@@ -3463,7 +3480,7 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             }
             $occupied=New-P7File $f.Transaction 'backup' ([byte[]]@(9));$occupied.Lease.Dispose();$occupied.Lease=$null
             { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $target.State -DisplacedLeaf 'backup' -ExpectedStage $stage.Expected } | Should Throw
-            { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $target.State -DisplacedLeaf 'other.backup' -ExpectedStage $stage.Expected -NoReplace } | Should Throw '*NoReplace*'
+            { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $target.State -DisplacedLeaf 'other.backup' -ExpectedStage $stage.Expected -NoReplace } | Should Throw 'NoReplace'
             [IO.File]::ReadAllText((Join-Path $f.Root 'target/data')) | Should Be 'old'
             (Get-P7Identity $stage.Lease.Observation).fileId | Should Be (Get-P7Identity $stage.Lease.Observation).fileId
         } finally { Close-P7Fixture $f @($stage.Lease,$target.Lease,$occupied.Lease) }
@@ -3477,9 +3494,9 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $stage=New-P7File $f.Transaction 'stage' ([Text.Encoding]::UTF8.GetBytes('new'))
             $outside=New-P7File $f.Parent 'outside.stage' ([Text.Encoding]::UTF8.GetBytes('outside'))
             $missing=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
-            { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'missing' -TransactionLease $f.Transaction -StageLease $outside.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $outside.Expected } | Should Throw '*immediate child*'
+            { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'missing' -TransactionLease $f.Transaction -StageLease $outside.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $outside.Expected } | Should Throw 'immediate child'
             $badStage=[pscustomobject]@{sha256='0'*64;length=$stage.Expected.length}
-            { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'missing' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $badStage } | Should Throw '*Stage hash*'
+            { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'missing' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $badStage } | Should Throw 'Stage hash'
             $target=New-P7File $f.Parent 'linked' ([Text.Encoding]::UTF8.GetBytes('old'));$target.Lease.Dispose();$target.Lease=$null
             New-Item -ItemType HardLink -Path (Join-Path $f.Root 'target/alias') -Target (Join-Path $f.Root 'target/linked') | Out-Null
             { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'linked' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $target.State -DisplacedLeaf 'backup' -ExpectedStage $stage.Expected } | Should Throw
@@ -3515,7 +3532,7 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
         try {
             $stage=New-P7File $f.Transaction 'stage' ([byte[]]@(1,2,3))
             $journal=[pscustomobject]@{method='stage-rename';targetRelativePath='wrong';stageLeaf='stage';backupLeaf=$null;original=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null};applied=[pscustomobject]@{exists=$true;sha256=$stage.Expected.sha256;length=$stage.Expected.length;identity=$null}}
-            { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $journal.original -DisplacedLeaf $null -ExpectedStage $stage.Expected -Journal $journal } | Should Throw '*Journal*'
+            { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $journal.original -DisplacedLeaf $null -ExpectedStage $stage.Expected -Journal $journal } | Should Throw 'Journal'
         } finally { Close-P7Fixture $f @($stage.Lease) }
     }
 
@@ -3532,7 +3549,7 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $tombstoneState=[pscustomobject]@{exists=$true;sha256=$target.State.sha256;length=$target.State.length;identity=(Get-P7Identity $tombstone.Observation)};$tombstone.Dispose();$tombstone=$null
             Remove-PlatformOwnedFile -ParentLease $f.Transaction -Leaf 'removed.backup' -ExpectedState $tombstoneState | Out-Null
             Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/removed.backup") | Should Be $false
-            { Remove-PlatformOwnedFile -ParentLease $f.Parent -Leaf 'unknown' -ExpectedState $tombstoneState } | Should Throw '*transaction-private*'
+            { Remove-PlatformOwnedFile -ParentLease $f.Parent -Leaf 'unknown' -ExpectedState $tombstoneState } | Should Throw 'transaction-private'
         } finally { Close-P7Fixture $f @($tombstone,$target.Lease) }
     }
 
@@ -3556,6 +3573,129 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             @(& $shell -NoProfile -Command $code)[-1] | Should Be 'True';$LASTEXITCODE | Should Be 0
         }
     }
+
+    # Scenario: Two journal operations use the same leaf under different target parents.
+    # Purpose: Bind exactly one operation to ParentLease instead of searching a journal by basename.
+    It 'InterT180_binds_one_same_leaf_journal_operation_to_its_verified_parent' {
+        $f=New-P7Fixture 'p7-journal-parent';$parentA=$null;$target=$null;$stage=$null;$validation=$null
+        try {
+            $parentA=Open-PlatformDirectory -Root $f.Root -RelativePath 'a' -CreatePrivate
+            $target=New-P7File $parentA 'SKILL.md' ([Text.Encoding]::UTF8.GetBytes('old'))
+            $permissions=Get-PlatformPermissions $target.Lease;$target.Lease.Dispose();$target.Lease=$null
+            $stage=New-P7File $f.Transaction 'skill.stage' ([Text.Encoding]::UTF8.GetBytes('new'))
+            $applied=[pscustomobject]@{exists=$true;sha256=$stage.Expected.sha256;length=$stage.Expected.length;identity=$null}
+            $operationA=New-P7JournalOperation write-file stage-rename 'a/SKILL.md' 'skill.stage' 'skill.backup' $target.State $applied $permissions
+            $operationB=New-P7JournalOperation write-file stage-rename 'b/SKILL.md' 'skill.stage' 'skill.backup' $target.State $applied $permissions
+            $stageIdentity=(Get-P7Identity $stage.Lease.Observation)
+
+            { Publish-PlatformFile -ParentLease $parentA -Leaf 'SKILL.md' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $target.State -DisplacedLeaf 'skill.backup' -ExpectedStage $stage.Expected -Journal $operationB } | Should Throw 'Journal'
+            [IO.File]::ReadAllText((Join-Path $f.Root 'a/SKILL.md')) | Should Be 'old'
+            [Text.Encoding]::UTF8.GetString($stage.Lease.ReadAllBytes(1024)) | Should Be 'new'
+            (Get-P7Identity $stage.Lease.Observation).fileId | Should Be $stageIdentity.fileId
+
+            $receipt=Publish-PlatformFile -ParentLease $parentA -Leaf 'SKILL.md' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $target.State -DisplacedLeaf 'skill.backup' -ExpectedStage $stage.Expected -Journal $operationA
+            $receipt.displacedIdentity.fileId | Should Be $target.State.identity.fileId
+        } finally { Close-P7Fixture $f @($validation,$stage.Lease,$target.Lease,$parentA) }
+    }
+
+    # Scenario: Durable journal permissions differ from the live publish and remove targets.
+    # Purpose: Reject both operations before any rename or permission mutation.
+    It 'InterT190_rejects_journal_permission_drift_before_publish_or_remove' {
+        $f=New-P7Fixture 'p7-journal-permissions';$publishTarget=$null;$removeTarget=$null;$stage=$null
+        try {
+            $publishTarget=New-P7File $f.Parent 'publish' ([Text.Encoding]::UTF8.GetBytes('publish-old'))
+            $publishPermissions=Get-PlatformPermissions $publishTarget.Lease
+            Set-PlatformPermissions -Lease $publishTarget.Lease -Policy @{ReadOnly=$true} | Out-Null
+            $publishTarget.Lease.Dispose();$publishTarget.Lease=$null
+            $stage=New-P7File $f.Transaction 'publish.stage' ([Text.Encoding]::UTF8.GetBytes('publish-new'))
+            $publishApplied=[pscustomobject]@{exists=$true;sha256=$stage.Expected.sha256;length=$stage.Expected.length;identity=$null}
+            $publishJournal=New-P7JournalOperation write-file stage-rename 'target/publish' 'publish.stage' 'publish.backup' $publishTarget.State $publishApplied $publishPermissions
+
+            { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'publish' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $publishTarget.State -DisplacedLeaf 'publish.backup' -ExpectedStage $stage.Expected -Journal $publishJournal } | Should Throw 'Journal permissions'
+            [IO.File]::ReadAllText((Join-Path $f.Root 'target/publish')) | Should Be 'publish-old'
+            [Text.Encoding]::UTF8.GetString($stage.Lease.ReadAllBytes(1024)) | Should Be 'publish-new'
+            Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/publish.backup") | Should Be $false
+
+            $removeTarget=New-P7File $f.Parent 'remove' ([Text.Encoding]::UTF8.GetBytes('remove-old'))
+            $removePermissions=Get-PlatformPermissions $removeTarget.Lease
+            Set-PlatformPermissions -Lease $removeTarget.Lease -Policy @{ReadOnly=$true} | Out-Null
+            $removeTarget.Lease.Dispose();$removeTarget.Lease=$null
+            $removed=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            $removeJournal=New-P7JournalOperation remove-file tombstone-rename 'target/remove' $null 'remove.backup' $removeTarget.State $removed $removePermissions
+
+            { Remove-PlatformOwnedFile -ParentLease $f.Parent -Leaf 'remove' -ExpectedState $removeTarget.State -TransactionLease $f.Transaction -TombstoneLeaf 'remove.backup' -Journal $removeJournal } | Should Throw 'Journal permissions'
+            [IO.File]::ReadAllText((Join-Path $f.Root 'target/remove')) | Should Be 'remove-old'
+            Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/remove.backup") | Should Be $false
+        } finally { Close-P7Fixture $f @($stage.Lease,$publishTarget.Lease,$removeTarget.Lease) }
+    }
+
+    # Scenario: The target parent is moved after publication rename and flush but before pathname revalidation.
+    # Purpose: Return recovery evidence without deleting the applied file or renaming it back to stage.
+    It 'InterT200_preserves_applied_publication_with_receipt_after_parent_move' {
+        $f=New-P7Fixture 'p7-post-publish-move';$stage=$null;$caught=$null
+        try {
+            $stage=New-P7File $f.Transaction 'create.stage' ([Text.Encoding]::UTF8.GetBytes('created'))
+            Set-P7WindowsPostRenameHook {
+                param($phase,$parentPath,$transactionPath,$parentLease,$transactionLease,$stageLease,$targetLease)
+                $stageLease.Dispose();$parentLease.Dispose();[IO.Directory]::Move($parentPath,$parentPath+'-moved')
+            }
+            try {
+                Publish-PlatformFile -ParentLease $f.Parent -Leaf 'created' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState ([pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}) -DisplacedLeaf $null -ExpectedStage $stage.Expected -NoReplace | Out-Null
+            } catch { $caught=$_ } finally { Set-P7WindowsPostRenameHook $null }
+
+            $caught.Exception.GetType().Name | Should Be 'PlatformVerificationException'
+            $receipt=$caught.Exception.Data['Receipt'];$receipt | Should Not BeNullOrEmpty
+            $receipt.appliedIdentity.fileId | Should Be (Get-P7Identity $stage.Lease.Observation).fileId
+            Test-Path -LiteralPath (Join-Path $f.Root 'target-moved/created') | Should Be $true
+            Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/create.stage") | Should Be $false
+        } finally { Set-P7WindowsPostRenameHook $null;Close-P7Fixture $f @($stage.Lease) }
+    }
+
+    # Scenario: The target parent is moved after a tombstone rename and flush but before pathname revalidation.
+    # Purpose: Keep the tombstone for journal recovery and attach the completed removal receipt.
+    It 'InterT210_preserves_tombstone_with_receipt_after_parent_move' {
+        $f=New-P7Fixture 'p7-post-remove-move';$target=$null;$caught=$null
+        try {
+            $target=New-P7File $f.Parent 'data' ([Text.Encoding]::UTF8.GetBytes('owned'));$target.Lease.Dispose();$target.Lease=$null
+            Set-P7WindowsPostRenameHook {
+                param($phase,$parentPath,$transactionPath,$parentLease,$transactionLease,$stageLease,$targetLease)
+                $targetLease.Dispose();$parentLease.Dispose();[IO.Directory]::Move($parentPath,$parentPath+'-moved')
+            }
+            try {
+                Remove-PlatformOwnedFile -ParentLease $f.Parent -Leaf 'data' -ExpectedState $target.State -TransactionLease $f.Transaction -TombstoneLeaf 'removed.backup' | Out-Null
+            } catch { $caught=$_ } finally { Set-P7WindowsPostRenameHook $null }
+
+            $caught.Exception.GetType().Name | Should Be 'PlatformVerificationException'
+            $receipt=$caught.Exception.Data['Receipt'];$receipt | Should Not BeNullOrEmpty
+            $receipt.displacedIdentity.fileId | Should Be $target.State.identity.fileId
+            Test-Path -LiteralPath (Join-Path $f.Root 'target-moved/data') | Should Be $false
+            Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/removed.backup") | Should Be $true
+        } finally { Set-P7WindowsPostRenameHook $null;Close-P7Fixture $f @($target.Lease) }
+    }
+
+    # Scenario: Cleanup of a transaction-private tombstone is mistakenly supplied a journal operation.
+    # Purpose: Keep durable intent exclusive to the tombstone rename and leave cleanup bytes untouched.
+    It 'InterT220_rejects_a_journal_in_cleanup_mode_without_mutation' {
+        $f=New-P7Fixture 'p7-cleanup-journal';$tombstone=$null
+        try {
+            $tombstone=New-P7File $f.Transaction 'cleanup.backup' ([Text.Encoding]::UTF8.GetBytes('kept'))
+            $permissions=Get-PlatformPermissions $tombstone.Lease
+            $removed=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            $journal=New-P7JournalOperation remove-file tombstone-rename 'target/data' $null 'cleanup.backup' $tombstone.State $removed $permissions
+            $before=(Get-P7Identity $tombstone.Lease.Observation)
+
+            { Remove-PlatformOwnedFile -ParentLease $f.Transaction -Leaf 'cleanup.backup' -ExpectedState $tombstone.State -Journal $journal } | Should Throw 'Journal'
+            [Text.Encoding]::UTF8.GetString($tombstone.Lease.ReadAllBytes(1024)) | Should Be 'kept'
+            (Get-P7Identity $tombstone.Lease.Observation).fileId | Should Be $before.fileId
+        } finally { Close-P7Fixture $f @($tombstone.Lease) }
+    }
+    }
+    else {
+        It 'InterT180_binds_one_same_leaf_journal_operation_to_its_verified_parent [Skipped: Windows native publication semantics required]' -Skip { }
+        It 'InterT190_rejects_journal_permission_drift_before_publish_or_remove [Skipped: Windows DACL semantics required]' -Skip { }
+        It 'InterT200_preserves_applied_publication_with_receipt_after_parent_move [Skipped: Windows native publication semantics required]' -Skip { }
+        It 'InterT210_preserves_tombstone_with_receipt_after_parent_move [Skipped: Windows native removal semantics required]' -Skip { }
+        It 'InterT220_rejects_a_journal_in_cleanup_mode_without_mutation [Skipped: Windows native removal semantics required]' -Skip { }
     }
 }
 

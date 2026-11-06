@@ -148,7 +148,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             finally { LocalFree(descriptor); }
         }
         public static WindowsLease OpenFile(WindowsLease parent, string leaf, string access, string createMode)
-        { return OpenFileCore(parent, leaf, access, createMode, 5); }
+        { return OpenFileCore(parent, leaf, access, createMode, 1); }
         // Reacquire a complete no-reparse chain for a receipt's existing runtime.
         // Never create missing directories while validating an existing closure.
         public static WindowsLease OpenPreparationRoot(string path)
@@ -208,7 +208,9 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 parent.Check(); AssertIdentity(parent, parent.Observation, false);
                 if (parent.Observation.Kind != "directory") throw new ArgumentException("A directory lease is required.");
                 string path = System.IO.Path.Combine(parent.Path, leaf);
-                SafeFileHandle handle = Open(path, desired | 0x20080, share, disposition);
+                // Acquire DELETE on the bound lease itself so handle-based rename does not
+                // need a pathname reopen.  Keep share mode deny-delete for outside callers.
+                SafeFileHandle handle = Open(path, desired | 0x30080, share, disposition);
                 try
                 {
                     FileObservation value = Stat(handle); PlatformPaths.Single(value);
@@ -272,6 +274,22 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 }
                 finally { LocalFree(descriptor); }
             }
+        }
+        public static string NormalizeDaclSddl(string sddl)
+        {
+            if (String.IsNullOrEmpty(sddl) || !sddl.StartsWith("D:", StringComparison.Ordinal) ||
+                sddl.IndexOf("O:", StringComparison.Ordinal) >= 0 ||
+                sddl.IndexOf("G:", StringComparison.Ordinal) >= 0 ||
+                sddl.IndexOf("S:", StringComparison.Ordinal) >= 0)
+                throw new ArgumentException("Only a DACL SDDL policy is supported.", "sddl");
+            IntPtr descriptor; uint size; Check(ParseDescriptor(sddl, 1, out descriptor, out size), "ParseSecurityDescriptor");
+            try
+            {
+                IntPtr text; uint length; Check(FormatDescriptor(descriptor, 1, 4, out text, out length), "FormatSecurityDescriptor");
+                try { return Marshal.PtrToStringUni(text); }
+                finally { LocalFree(text); }
+            }
+            finally { LocalFree(descriptor); }
         }
         public static WindowsPermissions SetPermissions(WindowsLease lease, string sddl, bool? readOnly)
         {
@@ -378,29 +396,24 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 if (lease.Observation.Device != destinationParent.Observation.Device)
                     throw new PlatformWin32Exception("SetFileInformationByHandle(FileRenameInfo)", 17);
                 string destinationPath = Path.Combine(destinationParent.Path, destinationLeaf);
-                byte[] name = System.Text.Encoding.Unicode.GetBytes(destinationPath);
+                // SetFileInformationByHandle does not consistently accept the native
+                // RootDirectory-relative form used by NtSetInformationFile.  Keep the
+                // source handle-bound and supply the destination as an NT DOS-device path.
+                byte[] name = System.Text.Encoding.Unicode.GetBytes(@"\??\" + destinationPath);
                 int rootOffset = IntPtr.Size == 8 ? 8 : 4;
                 int lengthOffset = rootOffset + IntPtr.Size;
                 int nameOffset = lengthOffset + 4;
-                IntPtr buffer = Marshal.AllocHGlobal(nameOffset + name.Length);
+                int bufferLength = nameOffset + name.Length + 2;
+                IntPtr buffer = Marshal.AllocHGlobal(bufferLength);
                 try
                 {
-                    for (int i = 0; i < nameOffset + name.Length; i++) Marshal.WriteByte(buffer, i, 0);
+                    for (int i = 0; i < bufferLength; i++) Marshal.WriteByte(buffer, i, 0);
                     Marshal.WriteInt32(buffer, 0, 0);
                     Marshal.WriteIntPtr(buffer, rootOffset, IntPtr.Zero);
                     Marshal.WriteInt32(buffer, lengthOffset, name.Length);
                     Marshal.Copy(name, 0, IntPtr.Add(buffer, nameOffset), name.Length);
-                    if (!SetFileInformationByHandle(lease.Handle, 3, buffer, (uint)(nameOffset + name.Length)))
-                    {
-                        int error = Marshal.GetLastWin32Error();
-                        if (error != 5) throw new PlatformWin32Exception("SetFileInformationByHandle(FileRenameInfo NoReplace)", error);
-                        using (SafeFileHandle renameHandle = Open(lease.Path, 0x10080, 7, 3))
-                        {
-                            PlatformPaths.Same(lease.Observation, Stat(renameHandle));
-                            if (!SetFileInformationByHandle(renameHandle, 3, buffer, (uint)(nameOffset + name.Length)))
-                                throw new PlatformWin32Exception("SetFileInformationByHandle(FileRenameInfo NoReplace)", Marshal.GetLastWin32Error());
-                        }
-                    }
+                    if (!SetFileInformationByHandle(lease.Handle, 3, buffer, (uint)bufferLength))
+                        throw new PlatformWin32Exception("SetFileInformationByHandle(FileRenameInfo NoReplace)", Marshal.GetLastWin32Error());
                     lease.Path = destinationPath;
                 }
                 finally { Marshal.FreeHGlobal(buffer); }
