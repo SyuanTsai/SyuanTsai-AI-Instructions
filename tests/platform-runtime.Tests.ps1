@@ -3391,6 +3391,17 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
         function Get-P7Identity($Observation) {
             [pscustomobject]@{kind='windows-file-id';device=('0x{0:x}' -f [uint64]$Observation.Device);fileId=('0x{0:x}' -f [uint64]$Observation.Inode)}
         }
+        function Get-P7NamedFileState($Parent,[string]$Leaf) {
+            $lease=Open-PlatformFile -ParentLease $Parent -Leaf $Leaf -Access Read -CreateMode OpenExisting
+            try {
+                $observed=Assert-PlatformFileIdentity -Lease $lease -Expected $lease.Observation -SingleLink
+                [pscustomobject]@{identity=(Get-P7Identity $observed);bytes=[Convert]::ToBase64String($lease.ReadAllBytes(1048576))}
+            } finally { $lease.Dispose() }
+        }
+        function Test-P7DaclProtected([string]$Sddl) {
+            $descriptor=[Security.AccessControl.RawSecurityDescriptor]::new($Sddl)
+            return ($descriptor.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected) -ne 0
+        }
         function New-P7Fixture([string]$Name) {
             $root=Join-Path $TestDrive $Name
             [IO.Directory]::CreateDirectory($root)|Out-Null
@@ -3445,10 +3456,34 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $receipt.displacedIdentity.fileId | Should Be $target.State.identity.fileId
             $receipt.permissions.readOnly | Should Be $true
             $receipt.permissions.sddl | Should Be $before.sddl
+            (Test-P7DaclProtected $receipt.permissions.sddl) | Should Be $true
             $stage.Lease.Dispose();$stage.Lease=$null
             $backup=Open-PlatformFile -ParentLease $f.Transaction -Leaf 'old.backup' -Access Read -CreateMode OpenExisting
             (Get-P7Identity $backup.Observation).fileId | Should Be $target.State.identity.fileId
+            (Test-P7DaclProtected (Get-PlatformPermissions $backup).sddl) | Should Be $true
         } finally { Close-P7Fixture $f @($backup,$stage.Lease,$target.Lease) }
+    }
+
+    # Scenario: An existing target has an unprotected inherited DACL before publication.
+    # Purpose: Preserve the target's unprotected inheritance boundary on the published file and displaced backup.
+    It 'InterT105_preserves_an_unprotected_existing_target_dacl_during_publication' {
+        $f=New-P7Fixture 'p7-write-unprotected';$target=$null;$stage=$null;$backup=$null;$published=$null
+        try {
+            $target=New-P7File $f.Parent 'data' ([Text.Encoding]::UTF8.GetBytes('old'))
+            $before=Get-PlatformPermissions $target.Lease
+            (Test-P7DaclProtected $before.sddl) | Should Be $false
+            $target.Lease.Dispose();$target.Lease=$null
+            $stage=New-P7File $f.Transaction 'new.stage' ([Text.Encoding]::UTF8.GetBytes('new'))
+            $receipt=Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $target.State -DisplacedLeaf 'old.backup' -ExpectedStage $stage.Expected
+            (Test-P7DaclProtected $receipt.permissions.sddl) | Should Be $false
+            $stage.Lease.Dispose();$stage.Lease=$null
+            $published=Open-PlatformFile -ParentLease $f.Parent -Leaf 'data' -Access Read -CreateMode OpenExisting
+            $backup=Open-PlatformFile -ParentLease $f.Transaction -Leaf 'old.backup' -Access Read -CreateMode OpenExisting
+            (Get-PlatformPermissions $published).sddl | Should Be $before.sddl
+            (Get-PlatformPermissions $backup).sddl | Should Be $before.sddl
+            (Test-P7DaclProtected (Get-PlatformPermissions $published).sddl) | Should Be $false
+            (Test-P7DaclProtected (Get-PlatformPermissions $backup).sddl) | Should Be $false
+        } finally { Close-P7Fixture $f @($published,$backup,$stage.Lease,$target.Lease) }
     }
 
     # Scenario: A missing target receives a staged file from a private transaction directory.
@@ -3471,6 +3506,8 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
         try {
             $target=New-P7File $f.Parent 'data' ([Text.Encoding]::UTF8.GetBytes('old'));$target.Lease.Dispose();$target.Lease=$null
             $stage=New-P7File $f.Transaction 'stage' ([Text.Encoding]::UTF8.GetBytes('new'))
+            $targetBefore=Get-P7NamedFileState $f.Parent 'data'
+            $stageBefore=Get-P7NamedFileState $f.Transaction 'stage'
             $badIdentity=[pscustomobject]@{kind='windows-file-id';device=$target.State.identity.device;fileId='0x0'}
             foreach($bad in @(
                 [pscustomobject]@{exists=$true;sha256=('0'*64);length=$target.State.length;identity=$target.State.identity},
@@ -3482,8 +3519,14 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $occupied=New-P7File $f.Transaction 'backup' ([byte[]]@(9));$occupied.Lease.Dispose();$occupied.Lease=$null
             { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $target.State -DisplacedLeaf 'backup' -ExpectedStage $stage.Expected } | Should Throw
             { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $target.State -DisplacedLeaf 'other.backup' -ExpectedStage $stage.Expected -NoReplace } | Should Throw 'NoReplace'
-            [IO.File]::ReadAllText((Join-Path $f.Root 'target/data')) | Should Be 'old'
-            (Get-P7Identity $stage.Lease.Observation).fileId | Should Be (Get-P7Identity $stage.Lease.Observation).fileId
+            $targetAfter=Get-P7NamedFileState $f.Parent 'data'
+            $stageAfter=Get-P7NamedFileState $f.Transaction 'stage'
+            $targetAfter.bytes | Should Be $targetBefore.bytes
+            $targetAfter.identity.device | Should Be $targetBefore.identity.device
+            $targetAfter.identity.fileId | Should Be $targetBefore.identity.fileId
+            $stageAfter.bytes | Should Be $stageBefore.bytes
+            $stageAfter.identity.device | Should Be $stageBefore.identity.device
+            $stageAfter.identity.fileId | Should Be $stageBefore.identity.fileId
         } finally { Close-P7Fixture $f @($stage.Lease,$target.Lease,$occupied.Lease) }
     }
 
@@ -3537,6 +3580,47 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
         } finally { Close-P7Fixture $f @($stage.Lease) }
     }
 
+    # Scenario: File publication/removal receives a journal kind incompatible with the requested operation or target existence.
+    # Purpose: Reject the durable intent before mutation and preserve every named file's live identity and bytes.
+    It 'InterT145_rejects_non_file_and_existence_mismatched_journal_kinds_without_mutation' {
+        $f=New-P7Fixture 'p7-journal-kind';$target=$null;$removeTarget=$null;$stage=$null
+        try {
+            $target=New-P7File $f.Parent 'data' ([Text.Encoding]::UTF8.GetBytes('old'))
+            $permissions=Get-PlatformPermissions $target.Lease;$target.Lease.Dispose();$target.Lease=$null
+            $removeTarget=New-P7File $f.Parent 'remove' ([Text.Encoding]::UTF8.GetBytes('remove-old'))
+            $removePermissions=Get-PlatformPermissions $removeTarget.Lease;$removeTarget.Lease.Dispose();$removeTarget.Lease=$null
+            $stage=New-P7File $f.Transaction 'stage' ([Text.Encoding]::UTF8.GetBytes('new'))
+            $missing=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            $applied=[pscustomobject]@{exists=$true;sha256=$stage.Expected.sha256;length=$stage.Expected.length;identity=$null}
+            $removed=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            $targetBefore=Get-P7NamedFileState $f.Parent 'data'
+            $removeBefore=Get-P7NamedFileState $f.Parent 'remove'
+            $stageBefore=Get-P7NamedFileState $f.Transaction 'stage'
+
+            $swap=New-P7JournalOperation swap-directory stage-rename 'target/data' 'stage' 'swap.backup' $target.State $applied $permissions
+            { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $target.State -DisplacedLeaf 'swap.backup' -ExpectedStage $stage.Expected -Journal $swap } | Should Throw 'Journal'
+            $writeMissing=New-P7JournalOperation write-file stage-rename 'target/created' 'stage' $null $missing $applied $null
+            { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'created' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $stage.Expected -Journal $writeMissing } | Should Throw 'Journal'
+            $createExisting=New-P7JournalOperation create-file stage-rename 'target/data' 'stage' 'create.backup' $target.State $applied $permissions
+            { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $target.State -DisplacedLeaf 'create.backup' -ExpectedStage $stage.Expected -Journal $createExisting } | Should Throw 'Journal'
+            $writeRemove=New-P7JournalOperation write-file tombstone-rename 'target/remove' $null 'remove.backup' $removeTarget.State $removed $removePermissions
+            { Remove-PlatformOwnedFile -ParentLease $f.Parent -Leaf 'remove' -ExpectedState $removeTarget.State -TransactionLease $f.Transaction -TombstoneLeaf 'remove.backup' -Journal $writeRemove } | Should Throw 'Journal'
+
+            $targetAfter=Get-P7NamedFileState $f.Parent 'data'
+            $removeAfter=Get-P7NamedFileState $f.Parent 'remove'
+            $stageAfter=Get-P7NamedFileState $f.Transaction 'stage'
+            foreach($pair in @(@($targetBefore,$targetAfter),@($removeBefore,$removeAfter),@($stageBefore,$stageAfter))) {
+                $pair[1].bytes | Should Be $pair[0].bytes
+                $pair[1].identity.device | Should Be $pair[0].identity.device
+                $pair[1].identity.fileId | Should Be $pair[0].identity.fileId
+            }
+            Test-Path -LiteralPath (Join-Path $f.Root 'target/created') | Should Be $false
+            foreach($leaf in @('swap.backup','create.backup','remove.backup')) {
+                Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/$leaf") | Should Be $false
+            }
+        } finally { Close-P7Fixture $f @($stage.Lease,$target.Lease,$removeTarget.Lease) }
+    }
+
     # Scenario: Removal uses a tombstone transaction and cleanup later deletes only inside that transaction.
     # Purpose: Preserve identity across tombstone rename and reject half-specified or outside cleanup requests.
     It 'InterT150_tombstones_with_identity_and_restricts_cleanup_to_transactions' {
@@ -3554,13 +3638,23 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
         } finally { Close-P7Fixture $f @($tombstone,$target.Lease) }
     }
 
-    # Scenario: Permission restoration receives a journal-shaped Windows snapshot or an incompatible snapshot.
-    # Purpose: Accept DACL-only windows-sddl and reject Unix or owner-bearing policies.
-    It 'UnitT160_accepts_only_valid_windows_permission_snapshots' {
+    # Scenario: Permission restoration crosses protected and unprotected inheritance boundaries in both directions.
+    # Purpose: Preserve DACL protection/auto-inheritance flags while rejecting incompatible snapshots.
+    It 'UnitT160_restores_windows_dacl_protection_in_both_directions_and_rejects_invalid_snapshots' {
         $f=New-P7Fixture 'p7-permissions';$file=$null
         try {
-            $file=New-P7File $f.Parent 'data' ([byte[]]@(1));$snapshot=Get-PlatformPermissions $file.Lease
-            (Set-PlatformPermissions -Lease $file.Lease -Snapshot $snapshot).kind | Should Be 'windows-sddl'
+            $file=New-P7File $f.Parent 'data' ([byte[]]@(1));$unprotected=Get-PlatformPermissions $file.Lease
+            (Test-P7DaclProtected $unprotected.sddl) | Should Be $false
+            $identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$protectedSddl='D:P(A;;FA;;;'+$identity.User.Value+')'}finally{$identity.Dispose()}
+            $protected=Set-PlatformPermissions -Lease $file.Lease -Snapshot ([pscustomobject]@{kind='windows-sddl';sddl=$protectedSddl;readOnly=$false})
+            (Test-P7DaclProtected $protected.sddl) | Should Be $true
+            $restoredUnprotected=Set-PlatformPermissions -Lease $file.Lease -Snapshot $unprotected
+            $restoredUnprotected.sddl | Should Be $unprotected.sddl
+            (Test-P7DaclProtected $restoredUnprotected.sddl) | Should Be $false
+            Set-PlatformPermissions -Lease $file.Lease -Snapshot $unprotected | Out-Null
+            $restoredProtected=Set-PlatformPermissions -Lease $file.Lease -Snapshot $protected
+            $restoredProtected.sddl | Should Be $protected.sddl
+            (Test-P7DaclProtected $restoredProtected.sddl) | Should Be $true
             { Set-PlatformPermissions -Lease $file.Lease -Snapshot ([pscustomobject]@{kind='unix-mode';mode='600';uid=0;gid=0}) } | Should Throw
             { Set-PlatformPermissions -Lease $file.Lease -Snapshot ([pscustomobject]@{kind='windows-sddl';sddl='O:SYD:(A;;FA;;;SY)';readOnly=$false}) } | Should Throw
         } finally { Close-P7Fixture $f @($file.Lease) }
@@ -3587,12 +3681,18 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $applied=[pscustomobject]@{exists=$true;sha256=$stage.Expected.sha256;length=$stage.Expected.length;identity=$null}
             $operationA=New-P7JournalOperation write-file stage-rename 'a/SKILL.md' 'skill.stage' 'skill.backup' $target.State $applied $permissions
             $operationB=New-P7JournalOperation write-file stage-rename 'b/SKILL.md' 'skill.stage' 'skill.backup' $target.State $applied $permissions
-            $stageIdentity=(Get-P7Identity $stage.Lease.Observation)
+            $targetBefore=Get-P7NamedFileState $parentA 'SKILL.md'
+            $stageBefore=Get-P7NamedFileState $f.Transaction 'skill.stage'
 
             { Publish-PlatformFile -ParentLease $parentA -Leaf 'SKILL.md' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $target.State -DisplacedLeaf 'skill.backup' -ExpectedStage $stage.Expected -Journal $operationB } | Should Throw 'Journal'
-            [IO.File]::ReadAllText((Join-Path $f.Root 'a/SKILL.md')) | Should Be 'old'
-            [Text.Encoding]::UTF8.GetString($stage.Lease.ReadAllBytes(1024)) | Should Be 'new'
-            (Get-P7Identity $stage.Lease.Observation).fileId | Should Be $stageIdentity.fileId
+            $targetAfter=Get-P7NamedFileState $parentA 'SKILL.md'
+            $stageAfter=Get-P7NamedFileState $f.Transaction 'skill.stage'
+            $targetAfter.bytes | Should Be $targetBefore.bytes
+            $targetAfter.identity.device | Should Be $targetBefore.identity.device
+            $targetAfter.identity.fileId | Should Be $targetBefore.identity.fileId
+            $stageAfter.bytes | Should Be $stageBefore.bytes
+            $stageAfter.identity.device | Should Be $stageBefore.identity.device
+            $stageAfter.identity.fileId | Should Be $stageBefore.identity.fileId
 
             $receipt=Publish-PlatformFile -ParentLease $parentA -Leaf 'SKILL.md' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $target.State -DisplacedLeaf 'skill.backup' -ExpectedStage $stage.Expected -Journal $operationA
             $receipt.displacedIdentity.fileId | Should Be $target.State.identity.fileId
@@ -3683,11 +3783,13 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $permissions=Get-PlatformPermissions $tombstone.Lease
             $removed=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
             $journal=New-P7JournalOperation remove-file tombstone-rename 'target/data' $null 'cleanup.backup' $tombstone.State $removed $permissions
-            $before=(Get-P7Identity $tombstone.Lease.Observation)
+            $before=Get-P7NamedFileState $f.Transaction 'cleanup.backup'
 
             { Remove-PlatformOwnedFile -ParentLease $f.Transaction -Leaf 'cleanup.backup' -ExpectedState $tombstone.State -Journal $journal } | Should Throw 'Journal'
-            [Text.Encoding]::UTF8.GetString($tombstone.Lease.ReadAllBytes(1024)) | Should Be 'kept'
-            (Get-P7Identity $tombstone.Lease.Observation).fileId | Should Be $before.fileId
+            $after=Get-P7NamedFileState $f.Transaction 'cleanup.backup'
+            $after.bytes | Should Be $before.bytes
+            $after.identity.device | Should Be $before.identity.device
+            $after.identity.fileId | Should Be $before.identity.fileId
         } finally { Close-P7Fixture $f @($tombstone.Lease) }
     }
     }

@@ -62,13 +62,13 @@
             HashMode = 'sha256-utf8-lf'
             Inventory = @(
                 @{ Path = 'platform/UnixNative.cs'; Sha256 = 'dd95835adcc4c19509fab6df017ad8f9db1aa7d61468c3dc687547cd2cb11b79' },
-                @{ Path = 'platform/WindowsNative.cs'; Sha256 = 'f1397c5d45063b1e54f5b48287f514ac50b36f7c85559c475f8b813c9058fa50' },
+                @{ Path = 'platform/WindowsNative.cs'; Sha256 = '9a02fa1ae387a1cf59b0c2f75a6c7e3f368f81dbfef2ac10807b9ce4485bfd5c' },
                 @{ Path = 'platform/WindowsInstallerMutation.cs'; Sha256 = 'b88b4b09c7bb5c3e71b762ddc6ebe72007ed0cca99977ab7a7272529c3ff9218' },
                 @{ Path = 'platform/Unix.psm1'; Sha256 = '6199e45d01293d970f33195368cdef0630b1392a4eb00a289ef85c10eda1eef0' },
                 @{ Path = 'platform/RuntimePreparation.psm1'; Sha256 = 'dc254c04e7e2caf280726e66f67434776bc7df12a210a38c80596e41344fd077' },
                 @{ Path = 'platform-runtime.psm1'; Sha256 = 'ba266adaee1cb920063bb7d3077142892d250b05692af51bb040b483bbd20bc5' },
                 @{ Path = 'platform/PlatformNative.cs'; Sha256 = '63648899e0171fad28294ed3d2c9398bac13a402de324ca5bbc1820fcd269c98' },
-                @{ Path = 'platform/Windows.psm1'; Sha256 = 'd7beb3a42e3f78c91ec0429a7d04940364365e75aa154c31e8a657c3cc477444' },
+                @{ Path = 'platform/Windows.psm1'; Sha256 = '9d3ff1dde74cb31e01dfa6ae90652d0fee7f1c8b246a2414711db2b8d29954ac' },
                 @{ Path = 'platform/Linux.psm1'; Sha256 = 'd894a145f3189033a0ab0dc4b6c169a7fd23d229d223478437f117429bdf206b' },
                 @{ Path = 'platform/MacOS.psm1'; Sha256 = 'a8b04f32e97fc939e62ee7da57b36fb2ca73f141c772bf9ecfe9c7393119535d' },
                 @{ Path = 'Resolve-StandardValidationTool.ps1'; Sha256 = 'e51c78847aa706dd4bed92fa1e91e1c992e0b1e8d938aaa605c4c7389b66b8f5' },

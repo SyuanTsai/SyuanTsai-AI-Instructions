@@ -275,17 +275,21 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             lock (lease.Sync)
             {
                 FileObservation observed = AssertIdentity(lease, lease.Observation, lease.Observation.Kind == "file");
-                IntPtr owner, group, dacl, sacl, descriptor;
-                uint error = GetSecurityInfo(lease.Handle, 1, 4, out owner, out group, out dacl, out sacl, out descriptor);
-                if (error != 0) throw new PlatformWin32Exception("GetSecurityInfo", (int)error);
-                try
-                {
-                    IntPtr text; uint length; Check(FormatDescriptor(descriptor, 1, 4, out text, out length), "FormatSecurityDescriptor");
-                    try { return new WindowsPermissions { Sddl = Marshal.PtrToStringUni(text), ReadOnly = (observed.Mode & 1) != 0 }; }
-                    finally { LocalFree(text); }
-                }
-                finally { LocalFree(descriptor); }
+                return new WindowsPermissions { Sddl = GetDaclSddl(lease.Handle), ReadOnly = (observed.Mode & 1) != 0 };
             }
+        }
+        private static string GetDaclSddl(SafeFileHandle handle)
+        {
+            IntPtr owner, group, dacl, sacl, descriptor;
+            uint error = GetSecurityInfo(handle, 1, 4, out owner, out group, out dacl, out sacl, out descriptor);
+            if (error != 0) throw new PlatformWin32Exception("GetSecurityInfo", (int)error);
+            try
+            {
+                IntPtr text; uint length; Check(FormatDescriptor(descriptor, 1, 4, out text, out length), "FormatSecurityDescriptor");
+                try { return Marshal.PtrToStringUni(text); }
+                finally { LocalFree(text); }
+            }
+            finally { LocalFree(descriptor); }
         }
         public static string NormalizeDaclSddl(string sddl)
         {
@@ -317,7 +321,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     PlatformPaths.Same(Stat(writable), lease.Observation);
                     if (sddl != null)
                     {
-                        IntPtr descriptor; uint size; Check(ParseDescriptor(sddl, 1, out descriptor, out size), "ParseSecurityDescriptor");
+                        string normalizedSddl = NormalizeDaclSddl(sddl);
+                        IntPtr descriptor; uint size; Check(ParseDescriptor(normalizedSddl, 1, out descriptor, out size), "ParseSecurityDescriptor");
                         try
                         {
                             bool present, defaulted; IntPtr dacl;
@@ -325,7 +330,19 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                             if (!present || dacl == IntPtr.Zero) throw new ArgumentException("An explicit non-null DACL is required.");
                             ushort control; uint revision;
                             Check(GetSecurityDescriptorControl(descriptor, out control, out revision), "GetSecurityDescriptorControl");
-                            Check(SetKernelObjectSecurity(writable, 4u, descriptor), "SetKernelObjectSecurity");
+                            uint information = 4u | ((control & 0x1000) != 0 ? 0x80000000u : 0x20000000u);
+                            uint error = SetSecurityInfo(writable, 1, information, IntPtr.Zero, IntPtr.Zero, dacl, IntPtr.Zero);
+                            if (error != 0) throw new PlatformWin32Exception("SetSecurityInfo", (int)error);
+                            // SetSecurityInfo establishes the requested inheritance boundary and
+                            // canonicalizes auto-inherited ACLs.  When the snapshot intentionally
+                            // lacks SE_DACL_AUTO_INHERITED, reapply its full descriptor so the
+                            // informational AI control bit is not invented by the setter.
+                            if ((control & 0x0400) == 0)
+                                Check(SetKernelObjectSecurity(writable, information, descriptor), "SetKernelObjectSecurity");
+                            string observedSddl = GetDaclSddl(writable);
+                            if (!String.Equals(observedSddl, normalizedSddl, StringComparison.Ordinal))
+                                throw new PlatformVerificationException("permissions-snapshot", "windows",
+                                    String.Format("DACL readback differs from the requested normalized snapshot (expected '{0}', observed '{1}').", normalizedSddl, observedSddl));
                         }
                         finally { LocalFree(descriptor); }
                     }

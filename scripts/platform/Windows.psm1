@@ -200,7 +200,15 @@ function Assert-WindowsPlatformJournalOperation {
         $required=@('sequence','kind','method','targetRelativePath','stageLeaf','backupLeaf','original','backupIdentity','applied','permissions','state')
         if ($Journal -is [array] -or $null -eq $Journal -or @($Journal.PSObject.Properties).Count -ne $required.Count) { throw [ArgumentException]::new('must be one validated journal v1 operation') }
         foreach($name in $required){ if($null -eq $Journal.PSObject.Properties[$name]){ throw [ArgumentException]::new("is missing $name") } }
-        if ([string]$Journal.method -cne $Method -or ($Removal -and [string]$Journal.kind -cne 'remove-file') -or (-not $Removal -and [string]$Journal.kind -ceq 'remove-file')) { throw [ArgumentException]::new("method or kind does not match $Method") }
+        if ([string]$Journal.method -cne $Method) { throw [ArgumentException]::new("method does not match $Method") }
+        if ($Removal) {
+            if ([string]$Journal.kind -cne 'remove-file') { throw [ArgumentException]::new('kind must be remove-file') }
+        }
+        elseif (([string]$Journal.kind -cne 'write-file' -and [string]$Journal.kind -cne 'create-file') -or
+            ([string]$Journal.kind -ceq 'write-file' -and -not [bool]$ExpectedState.exists) -or
+            ([string]$Journal.kind -ceq 'create-file' -and [bool]$ExpectedState.exists)) {
+            throw [ArgumentException]::new('kind must be write-file for an existing target or create-file for a missing target')
+        }
         $segments=@(([string]$Journal.targetRelativePath).Split('/'))
         if($segments.Count -lt 1 -or @($segments | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0){ throw [ArgumentException]::new('targetRelativePath is invalid') }
         foreach($segment in $segments){ [void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($segment) }
