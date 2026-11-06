@@ -2498,7 +2498,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         (Get-AiInstructionsInstallJournalDirectoryState -Inventory @() -Identity $journal.operations[0].original.identity).entryCount | Should Be 0
 
         $cases = @(
-            { param($j) $j.operations[0].original.sha256='1' * 64 },
+            { param($j) $j.operations[0].original | Add-Member -NotePropertyName sha256 -NotePropertyValue ('1' * 64) -Force },
             { param($j) $j.operations[0].original.inventorySha256='ABC' },
             { param($j) $j.operations[0].original.entryCount=1.5 },
             { param($j) $j.operations[0].original=[pscustomobject]@{ exists=$false; identity=$null; inventorySha256=('1' * 64); entryCount=$null } }
@@ -2658,9 +2658,11 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $refuse=[pscustomobject]@{action='refuse';reasons=@('x');operations=@($journal.operations|ForEach-Object{[pscustomobject]@{sequence=$_.sequence;action='keep'}})}
         $plan=Get-AiInstructionsInstallRecoveryPlan $journal $refuse; $plan.mutatesTargets|Should Be $false; @($plan.steps).Count|Should Be 0
         $none=[pscustomobject]@{action='none';reasons=@();operations=@($journal.operations|ForEach-Object{[pscustomobject]@{sequence=$_.sequence;action='keep'}})}
-        (Get-AiInstructionsInstallRecoveryPlan $journal $none).steps[0].step | Should Be 'cleanup-transaction'
+        $nonePlan=Get-AiInstructionsInstallRecoveryPlan $journal $none
+        $nonePlan.steps[0].step | Should Be 'cleanup-transaction'; $nonePlan.steps[0].primitive | Should Be 'Remove-PlatformOwnedDirectoryTree'
         $commit=[pscustomobject]@{action='commit';reasons=@();operations=@($journal.operations|ForEach-Object{[pscustomobject]@{sequence=$_.sequence;action='keep'}})}
         $commitPlan=Get-AiInstructionsInstallRecoveryPlan $journal $commit; $commitPlan.steps[0].phase|Should Be 'committed'; @($commitPlan.steps|Where-Object step -eq 'cleanup-artifact').Count|Should BeGreaterThan 0
+        @($commitPlan.steps|Where-Object step -eq 'cleanup-transaction')[0].primitive | Should Be 'Remove-PlatformOwnedDirectoryTree'
         $rollback=[pscustomobject]@{action='roll-back';reasons=@();operations=@([pscustomobject]@{sequence=1;action='restore-original'},[pscustomobject]@{sequence=2;action='remove-applied'})}
         $rollbackPlan=Get-AiInstructionsInstallRecoveryPlan $journal $rollback; $rollbackPlan.mutatesTargets|Should Be $true; (@($rollbackPlan.steps|Where-Object step -eq 'operation').sequence -join ',')|Should Be '2,1'
         (@($rollbackPlan.steps|Where-Object step -eq 'operation').primitive -join ',')|Should Be 'Remove-PlatformOwnedFile,Publish-PlatformFile'
@@ -2702,5 +2704,71 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $expected=@('Get-AiInstructionsInstallJournalDirectoryState','Get-AiInstructionsInstallJournalStoreLeaves','Assert-AiInstructionsInstallJournalStoreTransition','Get-AiInstructionsInstallTransactionClassification','Get-AiInstructionsInstallTransactionResidueKind','Get-AiInstructionsInstallTransactionDisposition','Get-AiInstructionsInstallRecoveryPlan','Get-AiInstructionsRefusalCodes','New-AiInstructionsRefusalException','Get-AiInstructionsRefusalCode')
         $commands=@((Get-Command -Module ai-instructions-runtime-contract).Name)
         foreach($name in $expected) { $commands -contains $name | Should Be $true }
+    }
+
+    # Scenario: Both journal.json and journal.prev exist while classifying an interrupted transaction directory.
+    # Purpose: Accept only a valid previous journal followed by a valid monotonic store transition to the current journal.
+    It 'UnitT194_validates_previous_to_current_journal_store_transition' {
+        $previous=Get-TestInstallJournalV1
+        $previous.phase='prepared'
+        foreach($operation in $previous.operations) { $operation.state='pending' }
+        $current=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($previous|ConvertTo-Json -Depth 20)
+        $current.phase='applying'
+        $current.operations[0].state='applied'
+        $name=$current.transactionId
+        $currentJson=$current|ConvertTo-Json -Depth 20
+        $previousJson=$previous|ConvertTo-Json -Depth 20
+
+        $valid=Get-AiInstructionsInstallTransactionClassification -Name $name -EntryKind directory -JournalEntryKind file -JournalJson $currentJson -PreviousJournalEntryKind file -PreviousJournalJson $previousJson
+        $valid.classification | Should Be 'valid-journal'
+        $valid.journalLeaf | Should Be 'journal.json'
+
+        $cases=@(
+            @{ Kind='directory'; Json=$previousJson; Current=$currentJson; Reason='previous journal' },
+            @{ Kind='file'; Json='{'; Current=$currentJson; Reason='previous journal' },
+            @{ Kind='file'; Json=((ConvertFrom-Json $previousJson)|ForEach-Object{$_.transactionId='f'*32;$_}|ConvertTo-Json -Depth 20); Current=$currentJson; Reason='previous journal' },
+            @{ Kind='file'; Json=$previousJson; Current=((ConvertFrom-Json $currentJson)|ForEach-Object{$_.operations[0].targetRelativePath='changed';$_}|ConvertTo-Json -Depth 20); Reason='transition' },
+            @{ Kind='file'; Json=$currentJson; Current=$previousJson; Reason='transition' }
+        )
+        foreach($case in $cases) {
+            $result=Get-AiInstructionsInstallTransactionClassification -Name $name -EntryKind directory -JournalEntryKind file -JournalJson $case.Current -PreviousJournalEntryKind $case.Kind -PreviousJournalJson $case.Json
+            $result.classification | Should Be 'malformed-journal'
+            $result.reason | Should Match $case.Reason
+        }
+    }
+
+    # Scenario: Rollback resumes from an applying journal with applied and pending operations, including an already-restored applied operation.
+    # Purpose: Persist each rolled-back operation state before the terminal phase and keep every journal-store transition valid.
+    It 'UnitT195_persists_rollback_operation_states_before_terminal_phase' {
+        $journal=Get-TestInstallJournalV1
+        $journal.phase='applying'
+        $journal.operations[0].state='applied'
+        $journal.operations[1].state='pending'
+        $decision=[pscustomobject]@{action='roll-back';reasons=@();operations=@(
+            [pscustomobject]@{sequence=1;action='restore-original'},
+            [pscustomobject]@{sequence=2;action='none'}
+        )}
+        $plan=Get-AiInstructionsInstallRecoveryPlan -Journal $journal -Decision $decision
+        (@($plan.steps|ForEach-Object{"$($_.step):$($_.sequence):$($_.state):$($_.phase)"}) -join '|') | Should Match 'operation:1::\|write-operation-state:1:rolled-back:'
+        @($plan.steps|Where-Object step -eq 'cleanup-transaction')[0].primitive | Should Be 'Remove-PlatformOwnedDirectoryTree'
+
+        $working=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal|ConvertTo-Json -Depth 20)
+        foreach($step in @($plan.steps|Where-Object { $_.step -in @('write-phase','write-operation-state') })) {
+            $next=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($working|ConvertTo-Json -Depth 20)
+            if($step.step -eq 'write-phase') { $next.phase=$step.phase }
+            else { @($next.operations|Where-Object sequence -eq $step.sequence)[0].state=$step.state }
+            { Assert-AiInstructionsInstallJournalStoreTransition -Previous $working -Next $next | Out-Null } | Should Not Throw
+            $working=$next
+        }
+        $working.phase | Should Be 'rolled-back'
+        { ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($working|ConvertTo-Json -Depth 20) | Out-Null } | Should Not Throw
+
+        $alreadyRestored=Get-TestInstallJournalV1
+        $alreadyRestored.phase='applying'
+        foreach($operation in $alreadyRestored.operations) { $operation.state='applied' }
+        $noneDecision=[pscustomobject]@{action='roll-back';reasons=@();operations=@($alreadyRestored.operations|ForEach-Object{[pscustomobject]@{sequence=$_.sequence;action='none'}})}
+        $stateSteps=@((Get-AiInstructionsInstallRecoveryPlan -Journal $alreadyRestored -Decision $noneDecision).steps|Where-Object step -eq 'write-operation-state')
+        ($stateSteps.sequence -join ',') | Should Be '2,1'
+        ($stateSteps.state -join ',') | Should Be 'rolled-back,rolled-back'
     }
 }

@@ -1857,6 +1857,15 @@ function Get-AiInstructionsInstallTransactionClassification {
     }
     try { $journal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json -ExpectedTransactionId $Name }
     catch { return [pscustomobject][ordered]@{ classification='malformed-journal'; journalLeaf=$leaf; journal=$null; reason='journal validation failed' } }
+    if ($journalExists -and $previousExists) {
+        if ($PreviousJournalEntryKind -isnot [string] -or [string]$PreviousJournalEntryKind -cne 'file' -or $PreviousJournalJson -isnot [string]) {
+            return [pscustomobject][ordered]@{ classification='malformed-journal'; journalLeaf='journal.json'; journal=$null; reason='previous journal entry is not a file' }
+        }
+        try { $previousJournal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json $PreviousJournalJson -ExpectedTransactionId $Name }
+        catch { return [pscustomobject][ordered]@{ classification='malformed-journal'; journalLeaf='journal.json'; journal=$null; reason='previous journal validation failed' } }
+        try { Assert-AiInstructionsInstallJournalStoreTransition -Previous $previousJournal -Next $journal | Out-Null }
+        catch { return [pscustomobject][ordered]@{ classification='malformed-journal'; journalLeaf='journal.json'; journal=$null; reason='journal transition from previous journal is invalid' } }
+    }
     return [pscustomobject][ordered]@{ classification='valid-journal'; journalLeaf=$leaf; journal=$journal; reason=$null }
 }
 
@@ -2163,7 +2172,7 @@ function Get-AiInstructionsInstallRecoveryPlan {
     switch ([string]$Decision.action) {
         'refuse' { return [pscustomobject][ordered]@{ action='refuse'; mutatesTargets=$false; steps=@() } }
         'none' {
-            $steps.Add([pscustomobject][ordered]@{ step='cleanup-transaction'; primitive='Remove-PlatformOwnedFile' })
+            $steps.Add([pscustomobject][ordered]@{ step='cleanup-transaction'; primitive='Remove-PlatformOwnedDirectoryTree' })
             return [pscustomobject][ordered]@{ action='none'; mutatesTargets=$false; steps=$steps.ToArray() }
         }
         'commit' {
@@ -2177,7 +2186,7 @@ function Get-AiInstructionsInstallRecoveryPlan {
                     $steps.Add([pscustomobject][ordered]@{ step='cleanup-artifact'; sequence=[int64]$operation.sequence; leaf=[string]$leaf; primitive=$primitive })
                 }
             }
-            $steps.Add([pscustomobject][ordered]@{ step='cleanup-transaction'; primitive='Remove-PlatformOwnedFile' })
+            $steps.Add([pscustomobject][ordered]@{ step='cleanup-transaction'; primitive='Remove-PlatformOwnedDirectoryTree' })
             return [pscustomobject][ordered]@{ action='commit'; mutatesTargets=$false; steps=$steps.ToArray() }
         }
         'roll-back' {
@@ -2186,20 +2195,25 @@ function Get-AiInstructionsInstallRecoveryPlan {
                 $operation = $Journal.operations[$index]
                 $decisionOperation = $Decision.operations[$index]
                 $action = [string]$decisionOperation.action
-                if ($action -ceq 'none') { continue }
-                $primitive = switch ($action) {
-                    'restore-original' { if ([string]$operation.kind -ceq 'swap-directory') { 'Move-PlatformOwnedDirectory' } else { 'Publish-PlatformFile' } }
-                    'remove-applied' { if ([string]$operation.kind -ceq 'create-directory') { 'Move-PlatformOwnedDirectory' } else { 'Remove-PlatformOwnedFile' } }
-                    'restore-permissions' { 'Set-PlatformPermissions' }
+                if ($action -cne 'none') {
+                    $primitive = switch ($action) {
+                        'restore-original' { if ([string]$operation.kind -ceq 'swap-directory') { 'Move-PlatformOwnedDirectory' } else { 'Publish-PlatformFile' } }
+                        'remove-applied' { if ([string]$operation.kind -ceq 'create-directory') { 'Move-PlatformOwnedDirectory' } else { 'Remove-PlatformOwnedFile' } }
+                        'restore-permissions' { 'Set-PlatformPermissions' }
+                    }
+                    $step = [ordered]@{ step='operation'; sequence=[int64]$operation.sequence; action=$action; kind=[string]$operation.kind; targetRelativePath=[string]$operation.targetRelativePath; primitive=$primitive }
+                    if ([string]$operation.kind -ceq 'swap-directory' -and $action -ceq 'restore-original') { $step.quarantineLeaf=$operation.quarantineLeaf; $step.backupLeaf=$operation.backupLeaf }
+                    if ([string]$operation.kind -ceq 'create-directory' -and $action -ceq 'remove-applied') { $step.quarantineLeaf=$operation.quarantineLeaf }
+                    if ($action -ceq 'restore-permissions') { $step.snapshot=$operation.permissions }
+                    $steps.Add([pscustomobject]$step)
+                    $steps.Add([pscustomobject][ordered]@{ step='write-operation-state'; sequence=[int64]$operation.sequence; state='rolled-back' })
                 }
-                $step = [ordered]@{ step='operation'; sequence=[int64]$operation.sequence; action=$action; kind=[string]$operation.kind; targetRelativePath=[string]$operation.targetRelativePath; primitive=$primitive }
-                if ([string]$operation.kind -ceq 'swap-directory' -and $action -ceq 'restore-original') { $step.quarantineLeaf=$operation.quarantineLeaf; $step.backupLeaf=$operation.backupLeaf }
-                if ([string]$operation.kind -ceq 'create-directory' -and $action -ceq 'remove-applied') { $step.quarantineLeaf=$operation.quarantineLeaf }
-                if ($action -ceq 'restore-permissions') { $step.snapshot=$operation.permissions }
-                $steps.Add([pscustomobject]$step)
+                elseif ([string]$operation.state -ceq 'applied') {
+                    $steps.Add([pscustomobject][ordered]@{ step='write-operation-state'; sequence=[int64]$operation.sequence; state='rolled-back' })
+                }
             }
             $steps.Add([pscustomobject][ordered]@{ step='write-phase'; phase='rolled-back' })
-            $steps.Add([pscustomobject][ordered]@{ step='cleanup-transaction'; primitive='Remove-PlatformOwnedFile' })
+            $steps.Add([pscustomobject][ordered]@{ step='cleanup-transaction'; primitive='Remove-PlatformOwnedDirectoryTree' })
             return [pscustomobject][ordered]@{ action='roll-back'; mutatesTargets=$true; steps=$steps.ToArray() }
         }
     }
