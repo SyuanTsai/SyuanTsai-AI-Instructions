@@ -194,6 +194,39 @@ function Get-InstallerAppliedSnapshotFromTransaction {
     return ($snapshot|ConvertTo-Json -Depth 20 -Compress)
 }
 
+function Get-InstallerTransactionRecoveryState {
+    param([Parameter(Mandatory = $true)][string]$RepositoryRoot,[Parameter(Mandatory = $true)][string]$CodexHome)
+    $store=Join-Path $CodexHome '.ai-instructions-txn'
+    $transactions=@(Get-ChildItem -LiteralPath $store -Force -ErrorAction SilentlyContinue)
+    if($transactions.Count-eq0){return [pscustomobject]@{RecoveryAction='no-transaction';JournalPhase=$null;Journal=$null;TransactionPath=$null}}
+    if($transactions.Count-ne1){throw "Expected one installer transaction, found $($transactions.Count)."}
+    $entry=$transactions[0]
+    $entryKind=if($entry.PSIsContainer -and ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0){'directory'}else{'other'}
+    $readJournalEntry={param($Leaf)
+        $path=Join-Path $entry.FullName $Leaf
+        if(-not(Test-Path -LiteralPath $path)){return [pscustomobject]@{Kind=$null;Json=$null}}
+        $item=Get-Item -Force -LiteralPath $path
+        if($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){return [pscustomobject]@{Kind='other';Json=$null}}
+        return [pscustomobject]@{Kind='file';Json=(Get-Content -Raw -Encoding UTF8 -LiteralPath $path)}
+    }
+    $journal=&$readJournalEntry 'journal.json'
+    $previous=&$readJournalEntry 'journal.prev'
+    $classification=Get-AiInstructionsInstallTransactionClassification -Name $entry.Name -EntryKind $entryKind -JournalEntryKind $journal.Kind -JournalJson $journal.Json -PreviousJournalEntryKind $previous.Kind -PreviousJournalJson $previous.Json
+    $disposition=Get-AiInstructionsInstallTransactionDisposition -Classification ([string]$classification.classification) -Component installer
+    if([string]$disposition.action-cne'recover'){
+        return [pscustomobject]@{RecoveryAction=[string]$disposition.action;JournalPhase=$null;Journal=$classification.journal;TransactionPath=$entry.FullName}
+    }
+    Import-Module (Join-Path $RepositoryRoot 'scripts\platform-runtime.psd1') -Force
+    Import-Module (Join-Path $RepositoryRoot 'scripts\ai-instructions-install-transaction.psm1') -Force
+    $transactionLease=Open-PlatformDirectory -Root $CodexHome -RelativePath ('.ai-instructions-txn/'+$entry.Name)
+    try{
+        $observations=Get-AiInstructionsInstallRecoveryObservations -Journal $classification.journal -CodexHome $CodexHome -TransactionLease $transactionLease -TransactionPath $entry.FullName
+        $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $classification.journal -Observations $observations
+        return [pscustomobject]@{RecoveryAction=[string]$decision.action;JournalPhase=[string]$classification.journal.phase;Journal=$classification.journal;TransactionPath=$entry.FullName}
+    }
+    finally{$transactionLease.Dispose()}
+}
+
 Describe 'install-ai-instructions-bootstrap' {
     BeforeEach {
         $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -1470,7 +1503,7 @@ Remove-Variable -Name InstallerProbeHooks,InstallerProbeSavedHooks,InstallerProb
     }
 
     # Scenario: A user edits AGENTS.md after the installer snapshots stable files but before that file is replaced.
-    # Purpose: Compare original bytes inside the mutation handle, preserve the concurrent edit, and roll back earlier installer changes.
+    # Purpose: Reject at the ExpectedState publication boundary, preserve the writer's bytes, and retain the exact D8 partial-state evidence without rollback mutation.
     It 'InterT67_preserves_a_concurrent_stable_file_edit_before_mutation' {
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         $archivePath = Join-Path $TestDrive 'installer-cas-source.zip'
@@ -1550,11 +1583,45 @@ finally {
         (Get-Content -Raw -LiteralPath $resultPath) | Should Match '(?m)^1\r?$'
         (Get-Content -Raw -LiteralPath $resultPath) | Should Match 'changed concurrently'
         (Get-Content -Raw -LiteralPath $agentsPath) | Should Be $externalAgents
+        $recoveryState=Get-InstallerTransactionRecoveryState -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $recoveryState.RecoveryAction|Should Be 'refuse'
+        $recoveryState.JournalPhase|Should Be 'applying'
+        $agentsOperation=@($recoveryState.Journal.operations|Where-Object targetRelativePath -ceq 'AGENTS.md')
+        $agentsOperation.Count|Should Be 1
+        $agentsOperation[0].state|Should Be 'pending'
+        (Get-FileHash -LiteralPath $agentsPath -Algorithm SHA256).Hash.ToLowerInvariant()|Should Not Be ([string]$agentsOperation[0].original.sha256)
+        (Get-FileHash -LiteralPath $agentsPath -Algorithm SHA256).Hash.ToLowerInvariant()|Should Not Be ([string]$agentsOperation[0].applied.sha256)
+
+        $currentSnapshot=(Get-InstallerStateSnapshot -RepositoryRoot $repositoryRoot -CodexHome $codexHome)|ConvertFrom-Json
+        foreach($operation in @($recoveryState.Journal.operations|Where-Object{[int64]$_.sequence -lt [int64]$agentsOperation[0].sequence})){
+            $operation.state|Should Be 'applied'
+            $actual=$currentSnapshot.PSObject.Properties[[string]$operation.targetRelativePath].Value
+            $actual.exists|Should Be ([bool]$operation.applied.exists)
+            ($actual.identity|ConvertTo-Json -Compress)|Should Be ($operation.applied.identity|ConvertTo-Json -Compress)
+            if([string]$operation.kind-in@('swap-directory','create-directory')){
+                $actual.inventorySha256|Should Be ([string]$operation.applied.inventorySha256)
+                $actual.entryCount|Should Be ([int64]$operation.applied.entryCount)
+            }
+            else{
+                $actual.sha256|Should Be ([string]$operation.applied.sha256)
+                $actual.length|Should Be ([int64]$operation.applied.length)
+            }
+        }
+        foreach($operation in @($recoveryState.Journal.operations|Where-Object{[int64]$_.sequence -gt [int64]$agentsOperation[0].sequence})){
+            $operation.state|Should Be 'pending'
+            $actual=$currentSnapshot.PSObject.Properties[[string]$operation.targetRelativePath].Value
+            $actual.exists|Should Be ([bool]$operation.original.exists)
+            if([bool]$operation.original.exists){
+                ($actual.identity|ConvertTo-Json -Compress)|Should Be ($operation.original.identity|ConvertTo-Json -Compress)
+                $actual.sha256|Should Be ([string]$operation.original.sha256)
+                $actual.length|Should Be ([int64]$operation.original.length)
+            }
+        }
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($hookPath)) | Should Be ([Convert]::ToBase64String($hookBefore))
-        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($bundlePath)) | Should Be ([Convert]::ToBase64String($bundleBefore))
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($bundlePath)) | Should Not Be ([Convert]::ToBase64String($bundleBefore))
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($configurationPath)) | Should Be ([Convert]::ToBase64String($configurationBefore))
-        # Journal v1 retains the isolated store root but removes the completed transaction leaf.
-        @(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Force -ErrorAction SilentlyContinue).Count | Should Be 0
+        @(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Directory -Force).Count | Should Be 1
+        Test-Path -LiteralPath (Join-Path $recoveryState.TransactionPath 'journal.json') -PathType Leaf|Should Be $true
     }
 
     # Scenario: A crash leaves an applied launcher and its original backup, then the backup bytes are modified.
@@ -1646,7 +1713,7 @@ finally {
     # Register only on the native host because junction replacement and Windows delete sharing are platform-specific.
     if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
     # Scenario: The active journal transaction directory is swapped for an outside junction when recovery begins.
-    # Purpose: Hold a no-delete-sharing directory lease through recovery so pathname replacement cannot redirect cleanup.
+    # Purpose: Hold a no-delete-sharing directory lease so the swap cannot redirect rollback, and retain journal evidence at .ai-instructions-txn/<txid> after the guarded refusal.
     It 'InterT70_blocks_a_backup_root_junction_swap_during_rollback' {
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         $candidateRoot=Join-Path $TestDrive 'installer-transaction-guard-candidate'
@@ -1736,8 +1803,15 @@ Remove-Variable -Name InstallerBackupGuardCodexHome,InstallerBackupGuardOutside,
         $LASTEXITCODE | Should Be 0
         (Get-Content -Raw -LiteralPath $resultPath) | Should Match '(?m)^1\r?$'
         (Get-Content -Raw -LiteralPath $resultPath) | Should Match '(?m)^blocked:'
-        Test-Path -LiteralPath $savedBackupRoot | Should Be $false
-        @(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Directory -Force).Count | Should Be 0
+        $transactions=@(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Directory -Force)
+        $transactions.Count | Should Be 1
+        $transactions[0].LinkType | Should BeNullOrEmpty
+        $journalPath=Join-Path $transactions[0].FullName 'journal.json'
+        Test-Path -LiteralPath $journalPath -PathType Leaf | Should Be $true
+        $journal=ConvertFrom-AiInstructionsInstallJournalV1Json -Json (Get-Content -Raw -Encoding UTF8 -LiteralPath $journalPath) -ExpectedTransactionId $transactions[0].Name
+        @($journal.operations).Count | Should BeGreaterThan 0
+        @(Get-ChildItem -LiteralPath $transactions[0].FullName -Force -Recurse).Count | Should BeGreaterThan 1
+        if(Test-Path -LiteralPath $savedBackupRoot){@(Get-ChildItem -LiteralPath $savedBackupRoot -Force).Count|Should Be 0}
         @(Get-ChildItem -LiteralPath $outsideRoot -Force).Count | Should Be 0
     }
     }
@@ -1879,33 +1953,33 @@ Remove-Variable -Name InstallerBackupGuardCodexHome,InstallerBackupGuardOutside,
     # Scenario: Each failpoint grammar family kills a subprocess at a durable install or recovery boundary.
     # Purpose: Stop after recovery, prove one complete original/applied state, then install and prove an identity-stable rerun.
     It 'InterT77_recovers_the_install_journal_failpoint_matrix_to_an_idempotent_complete_state' -TestCases @(
-        @{Failpoint='after-recovery-before-install';PreCrash=$null;Fresh=$true},
-        @{Failpoint='after-journal-prepared';PreCrash=$null;Fresh=$false},
-        @{Failpoint='after-journal-stage-flush';PreCrash=$null;Fresh=$false},
-        @{Failpoint='after-journal-publish-before-parent-flush';PreCrash=$null;Fresh=$false},
-        @{Failpoint='before-operation-1';PreCrash=$null;Fresh=$false},
-        @{Failpoint='before-operation-5';PreCrash=$null;Fresh=$false},
-        @{Failpoint='before-operation-6';PreCrash=$null;Fresh=$false},
-        @{Failpoint='after-original-to-backup-5';PreCrash=$null;Fresh=$false},
-        @{Failpoint='after-operation-1-before-journal';PreCrash=$null;Fresh=$false},
-        @{Failpoint='after-operation-5-before-journal';PreCrash=$null;Fresh=$false},
-        @{Failpoint='after-operation-6-before-journal';PreCrash=$null;Fresh=$false},
-        @{Failpoint='after-operation-1';PreCrash=$null;Fresh=$false},
-        @{Failpoint='after-operation-5';PreCrash=$null;Fresh=$false},
-        @{Failpoint='after-operation-6';PreCrash=$null;Fresh=$false},
-        @{Failpoint='after-committed-before-cleanup';PreCrash=$null;Fresh=$false},
-        @{Failpoint='before-cleanup-op-01-bootstrap.backup';PreCrash=$null;Fresh=$false},
-        @{Failpoint='after-cleanup-op-01-bootstrap.backup';PreCrash=$null;Fresh=$false},
-        @{Failpoint='before-cleanup-op-05-runtime.backup';PreCrash=$null;Fresh=$false},
-        @{Failpoint='during-cleanup-op-05-runtime.backup';PreCrash=$null;Fresh=$false},
-        @{Failpoint='after-cleanup-op-05-runtime.backup';PreCrash=$null;Fresh=$false},
-        @{Failpoint='after-rollback-operation-1';PreCrash='after-operation-1-before-journal';Fresh=$false},
-        @{Failpoint='after-rollback-operation-5';PreCrash='after-operation-5-before-journal';Fresh=$false},
-        @{Failpoint='after-rollback-operation-6';PreCrash='after-operation-6-before-journal';Fresh=$false},
-        @{Failpoint='after-operation-1-before-journal';PreCrash=$null;Fresh=$true},
-        @{Failpoint='after-operation-5-before-journal';PreCrash=$null;Fresh=$true}
+        @{Failpoint='after-recovery-before-install';PreCrash=$null;Fresh=$true;ExpectedRecovery='no-transaction';ExpectedPhase=$null;ExpectedFinal='original'},
+        @{Failpoint='after-journal-prepared';PreCrash=$null;Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='prepared';ExpectedFinal='original'},
+        @{Failpoint='after-journal-stage-flush';PreCrash=$null;Fresh=$false;ExpectedRecovery='purge-orphan';ExpectedPhase=$null;ExpectedFinal='original'},
+        @{Failpoint='after-journal-publish-before-parent-flush';PreCrash=$null;Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='prepared';ExpectedFinal='original'},
+        @{Failpoint='before-operation-1';PreCrash=$null;Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='applying';ExpectedFinal='original'},
+        @{Failpoint='before-operation-5';PreCrash=$null;Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='applying';ExpectedFinal='original'},
+        @{Failpoint='before-operation-6';PreCrash=$null;Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='applying';ExpectedFinal='original'},
+        @{Failpoint='after-original-to-backup-5';PreCrash=$null;Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='applying';ExpectedFinal='original'},
+        @{Failpoint='after-operation-1-before-journal';PreCrash=$null;Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='applying';ExpectedFinal='original'},
+        @{Failpoint='after-operation-5-before-journal';PreCrash=$null;Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='applying';ExpectedFinal='original'},
+        @{Failpoint='after-operation-6-before-journal';PreCrash=$null;Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='applying';ExpectedFinal='original'},
+        @{Failpoint='after-operation-1';PreCrash=$null;Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='applying';ExpectedFinal='original'},
+        @{Failpoint='after-operation-5';PreCrash=$null;Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='applying';ExpectedFinal='original'},
+        @{Failpoint='after-operation-6';PreCrash=$null;Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='applying';ExpectedFinal='original'},
+        @{Failpoint='after-committed-before-cleanup';PreCrash=$null;Fresh=$false;ExpectedRecovery='none';ExpectedPhase='committed';ExpectedFinal='applied'},
+        @{Failpoint='before-cleanup-op-01-bootstrap.backup';PreCrash=$null;Fresh=$false;ExpectedRecovery='none';ExpectedPhase='committed';ExpectedFinal='applied'},
+        @{Failpoint='after-cleanup-op-01-bootstrap.backup';PreCrash=$null;Fresh=$false;ExpectedRecovery='none';ExpectedPhase='committed';ExpectedFinal='applied'},
+        @{Failpoint='before-cleanup-op-05-runtime.backup';PreCrash=$null;Fresh=$false;ExpectedRecovery='none';ExpectedPhase='committed';ExpectedFinal='applied'},
+        @{Failpoint='during-cleanup-op-05-runtime.backup';PreCrash=$null;Fresh=$false;ExpectedRecovery='none';ExpectedPhase='committed';ExpectedFinal='applied'},
+        @{Failpoint='after-cleanup-op-05-runtime.backup';PreCrash=$null;Fresh=$false;ExpectedRecovery='none';ExpectedPhase='committed';ExpectedFinal='applied'},
+        @{Failpoint='after-rollback-operation-1';PreCrash='after-operation-1-before-journal';Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='rolling-back';ExpectedFinal='original'},
+        @{Failpoint='after-rollback-operation-5';PreCrash='after-operation-5-before-journal';Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='rolling-back';ExpectedFinal='original'},
+        @{Failpoint='after-rollback-operation-6';PreCrash='after-operation-6-before-journal';Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='rolling-back';ExpectedFinal='original'},
+        @{Failpoint='after-operation-1-before-journal';PreCrash=$null;Fresh=$true;ExpectedRecovery='roll-back';ExpectedPhase='applying';ExpectedFinal='original'},
+        @{Failpoint='after-operation-5-before-journal';PreCrash=$null;Fresh=$true;ExpectedRecovery='roll-back';ExpectedPhase='applying';ExpectedFinal='original'}
     ) {
-        param($Failpoint,$PreCrash,$Fresh)
+        param($Failpoint,$PreCrash,$Fresh,$ExpectedRecovery,$ExpectedPhase,$ExpectedFinal)
         if(-not$Fresh){
             Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome|Out-Null
             Set-TestJson -Path (Join-Path $codexHome 'hooks.json') -Document ([ordered]@{hooks=[ordered]@{SessionStart=@([ordered]@{matcher='startup';hooks=@([ordered]@{type='command';command="powershell.exe -File `"$(Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1')`""})})}})
@@ -1920,13 +1994,19 @@ Remove-Variable -Name InstallerBackupGuardCodexHome,InstallerBackupGuardOutside,
         $invokeCrash={param($Name)$saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT;try{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$Name;& $script:TestPowerShellExecutable @arguments 2>&1|Out-Null;return $LASTEXITCODE}finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}}
         if($null-ne$PreCrash){(& $invokeCrash $PreCrash)|Should Not Be 0}
         (& $invokeCrash $Failpoint)|Should Not Be 0
+        $recoveryState=Get-InstallerTransactionRecoveryState -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $recoveryState.RecoveryAction|Should Be $ExpectedRecovery
+        $recoveryState.JournalPhase|Should Be $ExpectedPhase
         $appliedSnapshot=Get-InstallerAppliedSnapshotFromTransaction -CodexHome $codexHome -OriginalSnapshot $originalSnapshot
         (& $invokeCrash 'after-recovery-before-install')|Should Not Be 0
         @(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Force -ErrorAction SilentlyContinue).Count|Should Be 0
         $recoveredSnapshot=Get-InstallerStateSnapshot -RepositoryRoot $repositoryRoot -CodexHome $codexHome
-        $acceptedSnapshots=@($originalSnapshot)
-        if($null-ne$appliedSnapshot){$acceptedSnapshots+=$appliedSnapshot}
-        ($acceptedSnapshots -ccontains $recoveredSnapshot)|Should Be $true
+        if($ExpectedFinal-ceq'original'){$recoveredSnapshot|Should Be $originalSnapshot}
+        else{
+            $ExpectedFinal|Should Be 'applied'
+            $appliedSnapshot|Should Not BeNullOrEmpty
+            $recoveredSnapshot|Should Be $appliedSnapshot
+        }
 
         $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
         try{Remove-Item Env:\AI_INSTRUCTIONS_INSTALL_FAILPOINT -ErrorAction SilentlyContinue;$installOutput=& $script:TestPowerShellExecutable @arguments 2>&1;$installExit=$LASTEXITCODE}

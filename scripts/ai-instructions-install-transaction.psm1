@@ -404,6 +404,38 @@ function Remove-InstallTransactionArtifact {
     }
 }
 
+function Remove-InstallTerminalTransactionArtifacts {
+    param(
+        [Parameter(Mandatory = $true)] $Journal,
+        [Parameter(Mandatory = $true)] $TransactionLease,
+        [Parameter(Mandatory = $true)][string] $TransactionPath
+    )
+    if ([string]$Journal.phase -cnotin @('committed','rolled-back')) {
+        throw "Transaction artifacts can be finalized only from a terminal journal phase: $($Journal.phase)"
+    }
+    $platformOs = [string]$Journal.platform.os
+    foreach ($operation in @($Journal.operations)) {
+        $directoryArtifact = [string]$operation.kind -in @('swap-directory','create-directory')
+        foreach ($leafName in @('backupLeaf','stageLeaf','quarantineLeaf')) {
+            $property = $operation.PSObject.Properties[$leafName]
+            if ($null -eq $property -or $null -eq $property.Value) { continue }
+            $leaf = [string]$property.Value
+            if ($directoryArtifact) {
+                $expectedIdentity = if ($leafName -ceq 'backupLeaf') { $operation.backupIdentity } else { $operation.applied.identity }
+                Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ($leaf + '.trash') -Directory:$true -PlatformOs $platformOs -ExpectedDirectoryIdentity $expectedIdentity
+                Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf $leaf -Directory:$true -PlatformOs $platformOs -ExpectedDirectoryIdentity $expectedIdentity -TrashDirectory
+            }
+            else {
+                Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf $leaf -Directory:$false -PlatformOs $platformOs
+            }
+        }
+    }
+    $storeLeaves = Get-AiInstructionsInstallJournalStoreLeaves
+    foreach ($leaf in @([string]$storeLeaves.stage,[string]$storeLeaves.previous,[string]$storeLeaves.journal)) {
+        Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf $leaf -Directory:$false -PlatformOs $platformOs
+    }
+}
+
 function Invoke-AiInstructionsInstallRecoveryPlan {
     [CmdletBinding()]
     param(
@@ -506,6 +538,7 @@ function Invoke-AiInstructionsInstallRecoveryPlan {
                             throw "Transaction quarantine identity differs from the applied journal identity for sequence $($directoryOperation.sequence)."
                         }
                     }
+                    Remove-InstallTerminalTransactionArtifacts -Journal $current -TransactionLease $TransactionLease -TransactionPath $TransactionPath
                     $TransactionLease.Dispose(); $transactionDisposed=$true
                     Remove-PlatformOwnedDirectoryTree -TransactionRootLease $TransactionRootLease -Leaf ([string]$Journal.transactionId) -ExpectedIdentity $transactionIdentity | Out-Null
                 }
