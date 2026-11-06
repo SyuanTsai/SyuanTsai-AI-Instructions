@@ -971,6 +971,14 @@ throw 'Agent environment reconciliation must not invoke the AI-Instructions upda
 
         $reconcilerFixture = @"
 Set-StrictMode -Version 2.0
+function Assert-UserProjectionRuntimeGate {
+    param([string]`$RuntimeRoot)
+    throw 'Projection runtime gate is not expected for the v2/v4 fixture.'
+}
+function New-AgentEnvironmentInstallReadLeaseEvidence {
+    param([System.IO.FileStream]`$Lease)
+    return [pscustomobject]@{ Lease = `$Lease }
+}
 function Get-UserSkillsDesiredState {
     param(
         [string]`$RuntimeRoot,
@@ -1009,7 +1017,8 @@ function Invoke-UserSkillsReconciliation {
         [string]`$UserHome,
         [string]`$Mode,
         [switch]`$ForceReinstallManagedSkills,
-        [switch]`$MigrateLegacyCatalogSkills
+        [switch]`$MigrateLegacyCatalogSkills,
+        [object]`$InstallReadLease
     )
     return [pscustomobject]@{
         schemaVersion=1; outcome='current'; exitCode=0
@@ -1019,8 +1028,20 @@ function Invoke-UserSkillsReconciliation {
         rollbackState='not-started'; backupPath=`$null
     }
 }
-function Invoke-UserSkillsRecovery { param([string]`$UserHome); throw 'Recovery is not expected in this fixture.' }
-Export-ModuleMember -Function Get-UserSkillsDesiredState,Invoke-UserSkillsReconciliation,Invoke-UserSkillsRecovery
+function Invoke-UserSkillsRecovery {
+    param(
+        [string]`$UserHome,
+        [object]`$InstallReadLease,
+        [ValidateSet('Apply','VerifyOnly','WhatIf')][string]`$Mode = 'Apply'
+    )
+    if (`$Mode -in @('VerifyOnly','WhatIf')) {
+        return [pscustomobject]@{
+            schemaVersion=1; outcome='nothing-to-recover'; exitCode=0; rollbackState='not-needed'
+        }
+    }
+    throw 'Apply recovery is not expected in this fixture.'
+}
+Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDesiredState,Invoke-UserSkillsReconciliation,Invoke-UserSkillsRecovery,New-AgentEnvironmentInstallReadLeaseEvidence
 "@
         Set-TestText -Path (Join-Path $runtimeRoot 'agent-environment-reconciler.psm1') -Value $reconcilerFixture
 
