@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Security.Cryptography;
 using Microsoft.Win32.SafeHandles;
 
 namespace SyuanTsai.AIInstructions.PlatformRuntime
@@ -85,6 +86,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out Information information);
         [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetFileInformationByHandleEx(SafeFileHandle handle, int kind, out BasicInfo information, uint size);
         [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetFileInformationByHandle(SafeFileHandle handle, int kind, ref BasicInfo information, uint size);
+        [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetFileInformationByHandle(SafeFileHandle handle, int kind, IntPtr information, uint size);
+        [DllImport("kernel32.dll", SetLastError = true)] private static extern bool FlushFileBuffers(SafeFileHandle handle);
         [DllImport("kernel32.dll", EntryPoint = "CreateDirectoryW", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern bool CreateDirectory(string path, ref SecurityAttributes attributes);
         [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr LocalFree(IntPtr pointer);
@@ -96,6 +99,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         [DllImport("advapi32.dll", SetLastError = true)] private static extern bool GetSecurityDescriptorDacl(IntPtr descriptor, out bool present, out IntPtr dacl, out bool defaulted);
         [DllImport("advapi32.dll", SetLastError = true)] private static extern bool GetSecurityDescriptorControl(IntPtr descriptor, out ushort control, out uint revision);
         [DllImport("advapi32.dll", SetLastError = true)] private static extern uint SetSecurityInfo(SafeFileHandle handle, int type, uint information, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
+        [DllImport("advapi32.dll", SetLastError = true)] private static extern bool SetKernelObjectSecurity(SafeFileHandle handle, uint information, IntPtr descriptor);
         private static void Check(bool result, string operation) { if (!result) throw new PlatformWin32Exception(operation, Marshal.GetLastWin32Error()); }
         private static SafeFileHandle Open(string path, uint access, uint share, uint disposition)
         {
@@ -118,7 +122,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         // Ownership of guards transfers on success; the PowerShell adapter disposes them on failure.
         public static WindowsLease WrapDirectory(string path, IDisposable[] guards)
         {
-            SafeFileHandle handle = Open(path, 0x20080, 3, 3);
+            SafeFileHandle handle = Open(path, 0x20081, 3, 3);
             try
             {
                 FileObservation value = Stat(handle);
@@ -144,7 +148,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             finally { LocalFree(descriptor); }
         }
         public static WindowsLease OpenFile(WindowsLease parent, string leaf, string access, string createMode)
-        { return OpenFileCore(parent, leaf, access, createMode, 1); }
+        { return OpenFileCore(parent, leaf, access, createMode, 5); }
         // Reacquire a complete no-reparse chain for a receipt's existing runtime.
         // Never create missing directories while validating an existing closure.
         public static WindowsLease OpenPreparationRoot(string path)
@@ -291,8 +295,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                             if (!present || dacl == IntPtr.Zero) throw new ArgumentException("An explicit non-null DACL is required.");
                             ushort control; uint revision;
                             Check(GetSecurityDescriptorControl(descriptor, out control, out revision), "GetSecurityDescriptorControl");
-                            uint error = SetSecurityInfo(writable, 1, 4u | ((control & 0x1000) != 0 ? 0x80000000u : 0x20000000u), IntPtr.Zero, IntPtr.Zero, dacl, IntPtr.Zero);
-                            if (error != 0) throw new PlatformWin32Exception("SetSecurityInfo", (int)error);
+                            Check(SetKernelObjectSecurity(writable, 4u, descriptor), "SetKernelObjectSecurity");
                         }
                         finally { LocalFree(descriptor); }
                     }
@@ -306,6 +309,138 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     }
                 }
                 return GetPermissions(lease);
+            }
+        }
+
+        public static WindowsLease TryOpenOwnedFile(WindowsLease parent, string leaf)
+        {
+            PlatformPaths.Leaf(leaf);
+            lock (parent.Sync)
+            {
+                parent.Check(); AssertIdentity(parent, parent.Observation, false);
+                string path = Path.Combine(parent.Path, leaf);
+                SafeFileHandle handle;
+                try { handle = Open(path, 0x80030080, 1, 3); }
+                catch (PlatformWin32Exception ex) { if (ex.Win32Error == 2 || ex.Win32Error == 3) return null; throw; }
+                try
+                {
+                    FileObservation value = Stat(handle); PlatformPaths.Single(value);
+                    if (value.Kind != "file") throw new IOException("A regular file is required.");
+                    using (SafeFileHandle named = Open(path, 0, 7, 3)) PlatformPaths.Same(value, Stat(named));
+                    return new WindowsLease(handle, path, null, parent, value);
+                }
+                catch { handle.Dispose(); throw; }
+            }
+        }
+
+        public static WindowsLease OpenValidationFile(WindowsLease parent, string leaf)
+        {
+            PlatformPaths.Leaf(leaf);
+            lock (parent.Sync)
+            {
+                parent.Check(); AssertIdentity(parent, parent.Observation, false);
+                string path = Path.Combine(parent.Path, leaf);
+                SafeFileHandle handle = Open(path, 0x80020080, 7, 3);
+                try
+                {
+                    FileObservation value = Stat(handle); PlatformPaths.Single(value);
+                    if (value.Kind != "file") throw new IOException("A regular file is required.");
+                    return new WindowsLease(handle, path, null, parent, value);
+                }
+                catch { handle.Dispose(); throw; }
+            }
+        }
+
+        public static string ComputeSha256(WindowsLease lease)
+        {
+            lock (lease.Sync)
+            {
+                lease.Check(); AssertIdentity(lease, lease.Observation, true);
+                using (var borrowed = new SafeFileHandle(lease.Handle.DangerousGetHandle(), false))
+                using (var stream = new FileStream(borrowed, FileAccess.Read))
+                using (var sha = SHA256.Create())
+                {
+                    stream.Position = 0;
+                    return BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
+                }
+            }
+        }
+
+        public static void RenameNoReplace(WindowsLease lease, WindowsLease destinationParent, string destinationLeaf)
+        {
+            PlatformPaths.Leaf(destinationLeaf);
+            lock (lease.Sync)
+            lock (destinationParent.Sync)
+            {
+                lease.Check(); destinationParent.Check();
+                AssertIdentity(lease, lease.Observation, true);
+                AssertIdentity(destinationParent, destinationParent.Observation, false);
+                if (lease.Observation.Device != destinationParent.Observation.Device)
+                    throw new PlatformWin32Exception("SetFileInformationByHandle(FileRenameInfo)", 17);
+                string destinationPath = Path.Combine(destinationParent.Path, destinationLeaf);
+                byte[] name = System.Text.Encoding.Unicode.GetBytes(destinationPath);
+                int rootOffset = IntPtr.Size == 8 ? 8 : 4;
+                int lengthOffset = rootOffset + IntPtr.Size;
+                int nameOffset = lengthOffset + 4;
+                IntPtr buffer = Marshal.AllocHGlobal(nameOffset + name.Length);
+                try
+                {
+                    for (int i = 0; i < nameOffset + name.Length; i++) Marshal.WriteByte(buffer, i, 0);
+                    Marshal.WriteInt32(buffer, 0, 0);
+                    Marshal.WriteIntPtr(buffer, rootOffset, IntPtr.Zero);
+                    Marshal.WriteInt32(buffer, lengthOffset, name.Length);
+                    Marshal.Copy(name, 0, IntPtr.Add(buffer, nameOffset), name.Length);
+                    if (!SetFileInformationByHandle(lease.Handle, 3, buffer, (uint)(nameOffset + name.Length)))
+                    {
+                        int error = Marshal.GetLastWin32Error();
+                        if (error != 5) throw new PlatformWin32Exception("SetFileInformationByHandle(FileRenameInfo NoReplace)", error);
+                        using (SafeFileHandle renameHandle = Open(lease.Path, 0x10080, 7, 3))
+                        {
+                            PlatformPaths.Same(lease.Observation, Stat(renameHandle));
+                            if (!SetFileInformationByHandle(renameHandle, 3, buffer, (uint)(nameOffset + name.Length)))
+                                throw new PlatformWin32Exception("SetFileInformationByHandle(FileRenameInfo NoReplace)", Marshal.GetLastWin32Error());
+                        }
+                    }
+                    lease.Path = destinationPath;
+                }
+                finally { Marshal.FreeHGlobal(buffer); }
+            }
+        }
+
+        public static void Flush(WindowsLease lease)
+        {
+            lock (lease.Sync)
+            {
+                lease.Check(); AssertIdentity(lease, lease.Observation, true);
+                Check(FlushFileBuffers(lease.Handle), "FlushFileBuffers");
+            }
+        }
+
+        public static bool TryFlushDirectory(WindowsLease lease)
+        {
+            lock (lease.Sync)
+            {
+                lease.Check(); AssertIdentity(lease, lease.Observation, false);
+                if (FlushFileBuffers(lease.Handle)) return true;
+                int error = Marshal.GetLastWin32Error();
+                if (error == 1 || error == 5 || error == 6 || error == 50 || error == 87) return false;
+                throw new PlatformWin32Exception("FlushFileBuffers(directory)", error);
+            }
+        }
+
+        public static void DeleteOnClose(WindowsLease lease)
+        {
+            lock (lease.Sync)
+            {
+                lease.Check(); AssertIdentity(lease, lease.Observation, true);
+                IntPtr buffer = Marshal.AllocHGlobal(4);
+                try
+                {
+                    Marshal.WriteInt32(buffer, 1);
+                    if (!SetFileInformationByHandle(lease.Handle, 4, buffer, 4))
+                        throw new PlatformWin32Exception("SetFileInformationByHandle(FileDispositionInfo)", Marshal.GetLastWin32Error());
+                }
+                finally { Marshal.FreeHGlobal(buffer); }
             }
         }
     }

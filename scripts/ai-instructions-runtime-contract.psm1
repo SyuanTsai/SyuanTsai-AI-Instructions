@@ -837,7 +837,7 @@ function Get-AiInstructionsPlatformRuntimeSourceFingerprint {
     $utf8 = New-Object System.Text.UTF8Encoding($false,$true)
     $stream = New-Object System.IO.MemoryStream
     try {
-        foreach ($relativePath in @('platform/PlatformNative.cs','platform/UnixNative.cs','platform/WindowsNative.cs','platform/OwnedProcess.cs','platform/UnixProcess.cs','platform/WindowsProcess.cs')) {
+        foreach ($relativePath in @('platform/PlatformNative.cs','platform/UnixNative.cs','platform/WindowsNative.cs','platform/WindowsInstallerMutation.cs','platform/OwnedProcess.cs','platform/UnixProcess.cs','platform/WindowsProcess.cs')) {
             $fullPath = Resolve-AiInstructionsRuntimeFilePath -RuntimeRoot $RuntimeRoot -RelativePath $relativePath -Context 'Platform runtime source'
             [byte[]]$bytes = [System.IO.File]::ReadAllBytes($fullPath)
             if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xef -and $bytes[1] -eq 0xbb -and $bytes[2] -eq 0xbf) { throw 'Platform runtime files must be UTF-8 without BOM.' }

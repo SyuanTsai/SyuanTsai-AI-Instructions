@@ -1028,6 +1028,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/platform/WindowsInstallerMutation.cs",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/platform/WindowsProcess.cs",
       "license": "Apache-2.0"
     },
