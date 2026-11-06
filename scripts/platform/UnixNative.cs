@@ -7,6 +7,9 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 
 namespace SyuanTsai.AIInstructions.PlatformRuntime
@@ -20,8 +23,43 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         public ulong LinkCount { get; internal set; }
         public uint Uid { get; internal set; }
         public uint Gid { get; internal set; }
+        public uint Flags { get; internal set; }
         public long Size { get; internal set; }
         public string Kind { get; internal set; }
+    }
+
+    public sealed class UnixPermissionSnapshot
+    {
+        public string Kind { get { return "unix-mode"; } }
+        public string Mode { get; internal set; }
+        public ulong Uid { get; internal set; }
+        public ulong Gid { get; internal set; }
+    }
+
+    public sealed class UnixFlushReceipt
+    {
+        public string File { get; internal set; }
+        public string ParentDirectory { get; internal set; }
+        public string TransactionDirectory { get; internal set; }
+        public string Durability { get; internal set; }
+    }
+
+    public sealed class UnixPublicationResult
+    {
+        public FileObservation AppliedIdentity { get; internal set; }
+        public FileObservation DisplacedIdentity { get; internal set; }
+        public UnixPermissionSnapshot Permissions { get; internal set; }
+        public string DisplacedLeaf { get; internal set; }
+        public UnixFlushReceipt Flush { get; internal set; }
+    }
+
+    public sealed class UnixRemovalResult
+    {
+        public FileObservation BackupIdentity { get; internal set; }
+        public UnixPermissionSnapshot Permissions { get; internal set; }
+        public string TombstoneLeaf { get; internal set; }
+        public string Method { get; internal set; }
+        public UnixFlushReceipt Flush { get; internal set; }
     }
 
     internal sealed class SafeFd : SafeHandle
@@ -41,6 +79,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         internal string Path;
         internal bool Locked;
         public FileObservation Observation { get; internal set; }
+        public string Name { get { return Leaf; } }
         internal bool NewWritable;
         public byte[] ReadAllBytes(int maximumBytes)
         {
@@ -152,6 +191,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             [FieldOffset(6)] public ushort Nlink; [FieldOffset(8)] public ulong Ino;
             [FieldOffset(16)] public uint Uid; [FieldOffset(20)] public uint Gid;
             [FieldOffset(96)] public long Size;
+            [FieldOffset(116)] public uint Flags;
         }
         private static class Linux
         {
@@ -161,6 +201,12 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             [DllImport("libc", SetLastError = true)] internal static extern int fstatat(SafeFd fd, string name, IntPtr stat, int flags);
             [DllImport("libc", SetLastError = true)] internal static extern int flock(SafeFd fd, int operation);
             [DllImport("libc", SetLastError = true)] internal static extern int fchmod(SafeFd fd, uint mode);
+            [DllImport("libc", SetLastError = true)] internal static extern int fchown(SafeFd fd, uint uid, uint gid);
+            [DllImport("libc", SetLastError = true)] internal static extern int fsync(SafeFd fd);
+            [DllImport("libc", SetLastError = true)] internal static extern int renameat(SafeFd oldDirectory, string oldName, SafeFd newDirectory, string newName);
+            [DllImport("libc", SetLastError = true)] internal static extern int renameat2(SafeFd oldDirectory, string oldName, SafeFd newDirectory, string newName, uint flags);
+            [DllImport("libc", SetLastError = true)] internal static extern IntPtr fgetxattr(SafeFd fd, string name, IntPtr value, UIntPtr size);
+            [DllImport("libc", SetLastError = true)] internal static extern IntPtr flistxattr(SafeFd fd, IntPtr list, UIntPtr size);
             [DllImport("libc", SetLastError = true)] internal static extern int close(int fd);
             [DllImport("libc", SetLastError = true)] internal static extern IntPtr write(SafeFd fd, IntPtr buffer, UIntPtr count);
             [DllImport("libc", SetLastError = true)] internal static extern IntPtr read(SafeFd fd, IntPtr buffer, UIntPtr count);
@@ -189,6 +235,14 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             [DllImport(Lib, EntryPoint = "fstatat$INODE64", SetLastError = true)] internal static extern int fstatat64(SafeFd fd, string name, IntPtr stat, int flags);
             [DllImport(Lib, SetLastError = true)] internal static extern int flock(SafeFd fd, int operation);
             [DllImport(Lib, SetLastError = true)] internal static extern int fchmod(SafeFd fd, uint mode);
+            [DllImport(Lib, SetLastError = true)] internal static extern int fchown(SafeFd fd, uint uid, uint gid);
+            [DllImport(Lib, SetLastError = true)] internal static extern int fsync(SafeFd fd);
+            [DllImport(Lib, SetLastError = true)] internal static extern int fchflags(SafeFd fd, uint flags);
+            [DllImport(Lib, SetLastError = true)] internal static extern int renameat(SafeFd oldDirectory, string oldName, SafeFd newDirectory, string newName);
+            [DllImport(Lib, SetLastError = true)] internal static extern int renameatx_np(SafeFd oldDirectory, string oldName, SafeFd newDirectory, string newName, uint flags);
+            [DllImport(Lib, SetLastError = true)] internal static extern IntPtr acl_get_fd_np(SafeFd fd, int type);
+            [DllImport(Lib, SetLastError = true)] internal static extern int acl_get_entry(IntPtr acl, int entryId, ref IntPtr entry);
+            [DllImport(Lib, SetLastError = true)] internal static extern int acl_free(IntPtr value);
             [DllImport(Lib, SetLastError = true)] internal static extern int close(int fd);
             [DllImport(Lib, SetLastError = true)] internal static extern IntPtr write(SafeFd fd, IntPtr buffer, UIntPtr count);
             [DllImport(Lib, SetLastError = true)] internal static extern IntPtr read(SafeFd fd, IntPtr buffer, UIntPtr count);
@@ -218,14 +272,43 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private static int LockExclusive { get { return Mac ? 2 : 2; } }
         private static int LockNonBlock { get { return Mac ? 4 : 4; } }
         private static int LockUnlock { get { return Mac ? 8 : 8; } }
+        private const uint RenameNoReplaceFlag = 1;
+        private const uint RenameExclusive = 0x00000004;
+        private const int AclTypeExtended = 0x00000100;
+        private const int AclFirstEntry = 0;
         private static readonly object AbiSync = new object();
         private static string abiEvidence;
         private static bool abiAttempted;
         private static Exception abiFailure;
 
         internal static int Close(int fd) { return Mac ? Darwin.close(fd) : Linux.close(fd); }
+        private static string ErrnoName(int error)
+        {
+            switch (error)
+            {
+                case 1: return "EPERM"; case 2: return "ENOENT"; case 4: return "EINTR";
+                case 5: return "EIO"; case 9: return "EBADF"; case 13: return "EACCES";
+                case 17: return "EEXIST"; case 18: return "EXDEV"; case 20: return "ENOTDIR";
+                case 21: return "EISDIR"; case 22: return "EINVAL"; case 28: return "ENOSPC";
+                case 34: return "ERANGE";
+                case 38: return Mac ? "ERRNO_38" : "ENOSYS";
+                case 39: return Mac ? "ERRNO_39" : "ENOTEMPTY";
+                case 40: return Mac ? "EMSGSIZE" : "ELOOP";
+                case 45: return Mac ? "ENOTSUP" : "EL2NSYNC";
+                case 61: return Mac ? "ECONNREFUSED" : "ENODATA";
+                case 62: return Mac ? "ELOOP" : "ETIME";
+                case 78: return Mac ? "ENOSYS" : "EREMCHG";
+                case 93: return Mac ? "ENOATTR" : "EPROTONOSUPPORT";
+                case 95: return Mac ? "EMULTIHOP" : "EOPNOTSUPP";
+                case 96: return Mac ? "ENODATA" : "ERRNO_96";
+                case 102: return Mac ? "EOPNOTSUPP" : "ERRNO_102";
+                default: return "ERRNO_" + error.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+        }
+        private static PlatformErrnoException Errno(string operation, int error)
+        { return new PlatformErrnoException(operation, error, ErrnoName(error)); }
         private static void Check(int result, string operation)
-        { if (result < 0) throw new PlatformErrnoException(operation, Marshal.GetLastWin32Error()); }
+        { if (result < 0) { int error = Marshal.GetLastWin32Error(); throw Errno(operation, error); } }
 
         // Retain a SafeHandle reference across raw-int openat, including concurrent Dispose.
         private static SafeFd Open(SafeFd parent, string name, int flags, uint mode)
@@ -280,7 +363,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 if (Mac)
                 {
                     DarwinStat s = (DarwinStat)Marshal.PtrToStructure(buffer, typeof(DarwinStat));
-                    value = new FileObservation { Device = s.Dev, Inode = s.Ino, Mode = s.Mode, LinkCount = s.Nlink, Uid = s.Uid, Gid = s.Gid, Size = s.Size };
+                    value = new FileObservation { Device = s.Dev, Inode = s.Ino, Mode = s.Mode, LinkCount = s.Nlink, Uid = s.Uid, Gid = s.Gid, Flags = s.Flags, Size = s.Size };
                 }
                 else if (X64)
                 {
@@ -393,6 +476,13 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                                             (observed.Mode & 4095) != 416 || observed.Uid != (Mac ? Darwin.geteuid() : Linux.geteuid()) ||
                                             observed.Gid != Stat(directory, null).Gid)
                                             throw new IOException("stat size/mode/uid/gid self-test failed.");
+                                        if (Mac)
+                                        {
+                                            Check(Darwin.fchflags(file, 1), "fchflags-abi-probe"); // UF_NODUMP
+                                            if (Stat(file, null).Flags != 1) throw new IOException("stat st_flags self-test failed.");
+                                            Check(Darwin.fchflags(file, 0), "fchflags-abi-probe-clear");
+                                            if (Stat(file, null).Flags != 0) throw new IOException("stat st_flags clear self-test failed.");
+                                        }
                                         Check(Mac ? Darwin.linkat(directory, "probe", directory, "alias", 0) : Linux.linkat(directory, "probe", directory, "alias", 0), "linkat-probe");
                                         try { if (Stat(file, null).LinkCount != 2) throw new IOException("stat nlink self-test failed."); }
                                         finally { Unlink(directory, "alias", false); }
@@ -417,7 +507,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                         }
                         finally { Unlink(parent, name, true); }
                     }
-                    abiEvidence = os + "-" + arch + ": stat/fstatat size, type, mode, uid, gid, inode and nlink self-test passed; nofollow/cloexec passed; create mode 0000 -> 0600 verified";
+                    abiEvidence = os + "-" + arch + ": stat/fstatat size, type, mode, uid, gid, inode, nlink" +
+                        (Mac ? " and st_flags" : "") + " self-test passed; nofollow/cloexec passed; create mode 0000 -> 0600 verified";
                     return abiEvidence;
                 }
                 catch (Exception ex)
@@ -794,6 +885,432 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             }
             catch { lease.Dispose(); throw; }
         }
+
+        private static bool SameIdentity(FileObservation left, FileObservation right)
+        { return left != null && right != null && left.Device == right.Device && left.Inode == right.Inode && left.Kind == right.Kind; }
+
+        private static FileObservation TryStat(SafeFd directory, string leaf)
+        {
+            try { return Stat(directory, leaf); }
+            catch (PlatformErrnoException ex) { if (ex.Errno == 2) return null; throw; }
+        }
+
+        private static void RenameNoReplace(SafeFd oldDirectory, string oldLeaf, SafeFd newDirectory, string newLeaf, string operation)
+        {
+            int result;
+            try
+            {
+                result = Mac
+                    ? Darwin.renameatx_np(oldDirectory, oldLeaf, newDirectory, newLeaf, RenameExclusive)
+                    : Linux.renameat2(oldDirectory, oldLeaf, newDirectory, newLeaf, RenameNoReplaceFlag);
+            }
+            catch (EntryPointNotFoundException)
+            {
+                throw new PlatformCapabilityUnavailableException("publication-noreplace: native symbol missing", PlatformNative.GetOperatingSystem());
+            }
+            if (result == 0) return;
+            int error = Marshal.GetLastWin32Error();
+            if (error == 18)
+                throw new PlatformCapabilityUnavailableException("same-filesystem-rename: EXDEV", PlatformNative.GetOperatingSystem());
+            if (error == 22 || (!Mac && (error == 38 || error == 95)) || (Mac && (error == 45 || error == 78)))
+                throw new PlatformCapabilityUnavailableException("publication-noreplace: " + ErrnoName(error), PlatformNative.GetOperatingSystem());
+            throw Errno(operation, error);
+        }
+
+        private static void Sync(SafeFd fd, bool directory, string operation)
+        {
+            int result = Mac ? Darwin.fsync(fd) : Linux.fsync(fd);
+            if (result == 0) return;
+            int error = Marshal.GetLastWin32Error();
+            if (directory && (error == 22 || (!Mac && error == 95) || (Mac && error == 45)))
+                throw new PlatformCapabilityUnavailableException("directory-fsync: " + ErrnoName(error), PlatformNative.GetOperatingSystem());
+            throw Errno(operation, error);
+        }
+
+        private static bool HasLinuxXattr(SafeFd fd, string name)
+        {
+            long result = Linux.fgetxattr(fd, name, IntPtr.Zero, UIntPtr.Zero).ToInt64();
+            if (result >= 0) return true;
+            int error = Marshal.GetLastWin32Error();
+            if (error == 61) return false; // ENODATA
+            if (error == 95) throw new PlatformCapabilityUnavailableException("linux-xattr-acl-detection: " + ErrnoName(error), "linux");
+            throw Errno("fgetxattr-" + name, error);
+        }
+
+        private static bool HasLinuxAcl(SafeFd fd)
+        {
+            bool exact = HasLinuxXattr(fd, "system.posix_acl_access") || HasLinuxXattr(fd, "system.posix_acl_default");
+            long length = Linux.flistxattr(fd, IntPtr.Zero, UIntPtr.Zero).ToInt64();
+            if (length < 0)
+            {
+                int error = Marshal.GetLastWin32Error();
+                if (error == 95) throw new PlatformCapabilityUnavailableException("linux-xattr-acl-detection: " + ErrnoName(error), "linux");
+                throw Errno("flistxattr", error);
+            }
+            if (length == 0) return exact;
+            IntPtr buffer = Marshal.AllocHGlobal(checked((int)length));
+            try
+            {
+                long read = Linux.flistxattr(fd, buffer, new UIntPtr((ulong)length)).ToInt64();
+                if (read < 0) throw Errno("flistxattr", Marshal.GetLastWin32Error());
+                byte[] bytes = new byte[checked((int)read)];
+                Marshal.Copy(buffer, bytes, 0, bytes.Length);
+                string names = Encoding.UTF8.GetString(bytes);
+                foreach (string name in names.Split('\0'))
+                    if (name == "system.posix_acl_access" || name == "system.posix_acl_default") return true;
+                return exact;
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+        }
+
+        private static bool HasDarwinAcl(SafeFd fd)
+        {
+            IntPtr acl = Darwin.acl_get_fd_np(fd, AclTypeExtended);
+            if (acl == IntPtr.Zero) throw Errno("acl_get_fd_np", Marshal.GetLastWin32Error());
+            try
+            {
+                IntPtr entry = IntPtr.Zero;
+                int result = Darwin.acl_get_entry(acl, AclFirstEntry, ref entry);
+                if (result == 0) return true;
+                int error = Marshal.GetLastWin32Error();
+                if (error == 2 || error == 22) return false;
+                throw Errno("acl_get_entry", error);
+            }
+            finally { Check(Darwin.acl_free(acl), "acl_free"); }
+        }
+
+        private static void AssertNoExtendedMetadata(SafeFd fd, FileObservation observation)
+        {
+            if (Mac)
+            {
+                if (observation.Flags != 0)
+                    throw new PlatformCapabilityUnavailableException("permissions: macOS file flags are present", "macos");
+                if (HasDarwinAcl(fd))
+                    throw new PlatformCapabilityUnavailableException("permissions: macOS extended ACL is present", "macos");
+            }
+            else if (HasLinuxAcl(fd))
+                throw new PlatformCapabilityUnavailableException("permissions: POSIX ACL xattr is present", "linux");
+        }
+
+        private static string ModeText(uint mode)
+        {
+            string value = Convert.ToString(mode & 4095, 8);
+            return value.PadLeft(value.Length > 3 ? 4 : 3, '0');
+        }
+
+        private static UnixPermissionSnapshot Snapshot(SafeFd fd, FileObservation observation)
+        {
+            AssertNoExtendedMetadata(fd, observation);
+            return new UnixPermissionSnapshot { Mode = ModeText(observation.Mode), Uid = observation.Uid, Gid = observation.Gid };
+        }
+
+        private static uint EffectiveUid() { return Mac ? Darwin.geteuid() : Linux.geteuid(); }
+
+        private static void ApplyPermissions(SafeFd fd, UnixPermissionSnapshot snapshot)
+        {
+            FileObservation before = Stat(fd, null);
+            if ((before.Uid != snapshot.Uid || before.Gid != snapshot.Gid) && EffectiveUid() != 0)
+                throw new PlatformCapabilityUnavailableException("permissions: restoring uid/gid requires root", PlatformNative.GetOperatingSystem());
+            if (before.Uid != snapshot.Uid || before.Gid != snapshot.Gid)
+                Check(Mac ? Darwin.fchown(fd, checked((uint)snapshot.Uid), checked((uint)snapshot.Gid)) : Linux.fchown(fd, checked((uint)snapshot.Uid), checked((uint)snapshot.Gid)), "fchown");
+            uint mode = Convert.ToUInt32(snapshot.Mode, 8);
+            Chmod(fd, mode);
+            FileObservation after = Stat(fd, null);
+            if ((after.Mode & 4095) != mode || after.Uid != snapshot.Uid || after.Gid != snapshot.Gid)
+                throw new PlatformVerificationException("permissions", PlatformNative.GetOperatingSystem(), "mode/uid/gid readback differs from the requested snapshot");
+            AssertNoExtendedMetadata(fd, after);
+        }
+
+        private static string Hash(SafeFd fd, FileObservation expected)
+        {
+            FileObservation before = Stat(fd, null);
+            PlatformPaths.Same(before, expected); PlatformPaths.Single(before);
+            using (var borrowed = new Microsoft.Win32.SafeHandles.SafeFileHandle(fd.DangerousGetHandle(), false))
+            using (var stream = new FileStream(borrowed, FileAccess.Read))
+            using (var sha = SHA256.Create())
+            {
+                stream.Position = 0;
+                string value = BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
+                FileObservation after = Stat(fd, null);
+                PlatformPaths.Same(after, before); PlatformPaths.Single(after);
+                if (after.Size != before.Size) throw new IOException("File size changed while hashing.");
+                return value;
+            }
+        }
+
+        private static void AssertState(UnixLease lease, ulong device, ulong inode, string sha256, long length, string context)
+        {
+            FileObservation value = Stat(lease.Fd, null);
+            PlatformPaths.Single(value);
+            if (value.Device != device || value.Inode != inode || value.Size != length ||
+                !String.Equals(Hash(lease.Fd, value), sha256, StringComparison.Ordinal))
+                throw new PlatformVerificationException(context, PlatformNative.GetOperatingSystem(), "identity, length, or SHA-256 differs from expected state");
+            if (lease.Parent != null) PlatformPaths.Same(value, Stat(lease.Parent, lease.Leaf));
+        }
+
+        private static void AssertStage(UnixLease transaction, UnixLease stage, string sha256, long length)
+        {
+            if (stage.Parent == null || !SameIdentity(Stat(stage.Parent, null), Stat(transaction.Fd, null)))
+                throw new PlatformVerificationException("publication", PlatformNative.GetOperatingSystem(), "stage is not named by TransactionLease");
+            FileObservation value = Stat(stage.Fd, null);
+            PlatformPaths.Single(value); PlatformPaths.Same(value, Stat(transaction.Fd, stage.Leaf));
+            if (value.Device != transaction.Observation.Device || value.Size != length ||
+                !String.Equals(Hash(stage.Fd, value), sha256, StringComparison.Ordinal))
+                throw new PlatformVerificationException("publication", PlatformNative.GetOperatingSystem(), "stage identity, length, or SHA-256 is invalid");
+            Snapshot(stage.Fd, value);
+        }
+
+        private static void AssertTransaction(UnixLease transaction, UnixLease targetParent)
+        {
+            FileObservation transactionValue = AssertIdentity(transaction, transaction.Observation, false);
+            if (transactionValue.Kind != "directory" || targetParent.Observation.Kind != "directory") throw new ArgumentException("Directory leases are required.");
+            string verified = GetVerifiedPath(transaction);
+            string id = Path.GetFileName(verified.TrimEnd(Path.DirectorySeparatorChar));
+            string container = Path.GetFileName(Path.GetDirectoryName(verified));
+            if (!Regex.IsMatch(id ?? "", "^[0-9a-f]{32}$", RegexOptions.CultureInvariant) || container != ".ai-instructions-txn")
+                throw new PlatformVerificationException("transaction-root", PlatformNative.GetOperatingSystem(), "TransactionLease must be .ai-instructions-txn/<32-lowercase-hex>");
+            UnixPermissionSnapshot transactionPermissions = Snapshot(transaction.Fd, transactionValue);
+            if (transactionPermissions.Mode != "700" || transactionValue.Uid != EffectiveUid())
+                throw new PlatformVerificationException("transaction-root", PlatformNative.GetOperatingSystem(), "TransactionLease must be owned by the effective user with mode 0700");
+            FileObservation parentValue = AssertIdentity(targetParent, targetParent.Observation, false);
+            if (SameIdentity(transactionValue, parentValue)) return; // cleanup mode; caller applies stricter checks.
+            string targetPath = GetVerifiedPath(targetParent).TrimEnd(Path.DirectorySeparatorChar);
+            string transactionPath = verified.TrimEnd(Path.DirectorySeparatorChar);
+            if (targetPath.StartsWith(transactionPath + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+                throw new PlatformVerificationException("transaction-root", PlatformNative.GetOperatingSystem(), "target must not be inside the transaction directory");
+            if (transactionValue.Device != parentValue.Device)
+                throw new PlatformCapabilityUnavailableException("same-filesystem-rename: EXDEV", PlatformNative.GetOperatingSystem());
+        }
+
+        private static UnixFlushReceipt NewFlush(string durability)
+        { return new UnixFlushReceipt { File = "confirmed", ParentDirectory = "pending", TransactionDirectory = "pending", Durability = durability }; }
+
+        public static string GetSha256(UnixLease lease)
+        {
+            lock (lease.Sync) { lease.Check(); return Hash(lease.Fd, AssertIdentity(lease, lease.Observation, true)); }
+        }
+
+        public static UnixPermissionSnapshot GetPermissionSnapshot(UnixLease lease)
+        {
+            lock (lease.Sync)
+            {
+                lease.Check(); FileObservation value = AssertIdentity(lease, lease.Observation, lease.Observation.Kind == "file");
+                return Snapshot(lease.Fd, value);
+            }
+        }
+
+        public static UnixPermissionSnapshot SetPermissionSnapshot(UnixLease lease, string mode, ulong uid, ulong gid)
+        {
+            if (!Regex.IsMatch(mode ?? "", "^[0-7]{3,4}$", RegexOptions.CultureInvariant)) throw new ArgumentException("Unix mode must contain three or four octal digits.");
+            lock (lease.Sync)
+            {
+                lease.Check(); AssertIdentity(lease, lease.Observation, lease.Observation.Kind == "file");
+                UnixPermissionSnapshot original = Snapshot(lease.Fd, Stat(lease.Fd, null));
+                UnixPermissionSnapshot requested = new UnixPermissionSnapshot { Mode = mode, Uid = uid, Gid = gid };
+                try
+                {
+                    ApplyPermissions(lease.Fd, requested);
+                    return Snapshot(lease.Fd, Stat(lease.Fd, null));
+                }
+                catch (Exception failure)
+                {
+                    try { ApplyPermissions(lease.Fd, original); }
+                    catch (Exception rollback)
+                    {
+                        throw new PlatformMutationException("permissions-rollback", PlatformNative.GetOperatingSystem(), "permission-state-unconfirmed", failure.Message + " Rollback failed: " + rollback.Message, null);
+                    }
+                    throw;
+                }
+            }
+        }
+
+        public static UnixPublicationResult Publish(UnixLease parent, string leaf, UnixLease transaction, UnixLease stage,
+            bool expectedExists, ulong expectedDevice, ulong expectedInode, string expectedSha256, long expectedLength,
+            string displacedLeaf, string stageSha256, long stageLength, bool noReplace, uint createMode)
+        {
+            PlatformPaths.Leaf(leaf); PlatformPaths.Leaf(displacedLeaf); ValidateAbi();
+            if (createMode > 4095) throw new ArgumentOutOfRangeException("createMode");
+            lock (parent.Sync) lock (transaction.Sync) lock (stage.Sync)
+            {
+                parent.Check(); transaction.Check(); stage.Check(); AssertTransaction(transaction, parent);
+                if (SameIdentity(parent.Observation, transaction.Observation))
+                    throw new PlatformVerificationException("publication", PlatformNative.GetOperatingSystem(), "target must not be inside the transaction directory");
+                AssertStage(transaction, stage, stageSha256, stageLength);
+                FileObservation stageIdentity = Stat(stage.Fd, null);
+                Sync(stage.Fd, false, "fsync-stage");
+                UnixPermissionSnapshot stageOriginal = Snapshot(stage.Fd, stageIdentity);
+                UnixLease target = null;
+                bool displaced = false, published = false, permissionsChanged = false, durabilityFailure = false;
+                UnixPublicationResult receipt = new UnixPublicationResult { AppliedIdentity = stageIdentity, DisplacedLeaf = expectedExists ? displacedLeaf : null, Flush = NewFlush("unconfirmed") };
+                try
+                {
+                    FileObservation named = TryStat(parent.Fd, leaf);
+                    UnixPermissionSnapshot desired;
+                    if (expectedExists)
+                    {
+                        if (named == null) throw new PlatformVerificationException("publication", PlatformNative.GetOperatingSystem(), "expected target is absent");
+                        target = OpenFile(parent, leaf, "Read", "OpenExisting");
+                        AssertState(target, expectedDevice, expectedInode, expectedSha256, expectedLength, "publication-target");
+                        desired = Snapshot(target.Fd, Stat(target.Fd, null));
+                        receipt.DisplacedIdentity = Stat(target.Fd, null);
+                        if (noReplace) throw Errno("publication-noreplace-target", 17);
+                    }
+                    else
+                    {
+                        if (named != null) throw Errno("publication-create-target", 17);
+                        desired = new UnixPermissionSnapshot { Mode = ModeText(createMode), Uid = stageIdentity.Uid, Gid = stageIdentity.Gid };
+                    }
+                    receipt.Permissions = desired;
+                    permissionsChanged = true; ApplyPermissions(stage.Fd, desired);
+                    if (expectedExists)
+                    {
+                        PlatformPaths.Same(Stat(parent.Fd, leaf), receipt.DisplacedIdentity);
+                        RenameNoReplace(parent.Fd, leaf, transaction.Fd, displacedLeaf, "rename-target-to-displaced");
+                        displaced = true;
+                        PlatformPaths.Same(Stat(transaction.Fd, displacedLeaf), receipt.DisplacedIdentity);
+                    }
+                    PlatformPaths.Same(Stat(transaction.Fd, stage.Leaf), stageIdentity);
+                    RenameNoReplace(transaction.Fd, stage.Leaf, parent.Fd, leaf, "rename-stage-to-target");
+                    published = true;
+                    PlatformPaths.Same(Stat(parent.Fd, leaf), stageIdentity);
+                    try
+                    {
+                        Sync(parent.Fd, true, "fsync-target-parent"); receipt.Flush.ParentDirectory = "confirmed";
+                        Sync(transaction.Fd, true, "fsync-transaction-directory"); receipt.Flush.TransactionDirectory = "confirmed";
+                        receipt.Flush.Durability = "confirmed";
+                    }
+                    catch (Exception ex)
+                    {
+                        durabilityFailure = true; receipt.Flush.Durability = "unconfirmed";
+                        throw new PlatformMutationException("publication-durability", PlatformNative.GetOperatingSystem(), "published-durability-unconfirmed", ex.Message, receipt);
+                    }
+                    FileObservation applied = Stat(parent.Fd, leaf);
+                    PlatformPaths.Same(applied, stageIdentity); PlatformPaths.Single(applied);
+                    if ((applied.Mode & 4095) != Convert.ToUInt32(desired.Mode, 8) || applied.Uid != desired.Uid || applied.Gid != desired.Gid)
+                        throw new PlatformVerificationException("publication", PlatformNative.GetOperatingSystem(), "published mode/uid/gid readback failed");
+                    receipt.AppliedIdentity = applied;
+                    return receipt;
+                }
+                catch (Exception original)
+                {
+                    if (durabilityFailure) throw;
+                    try
+                    {
+                        if (published) { RenameNoReplace(parent.Fd, leaf, transaction.Fd, stage.Leaf, "rollback-target-to-stage"); published = false; }
+                        if (displaced) { RenameNoReplace(transaction.Fd, displacedLeaf, parent.Fd, leaf, "rollback-displaced-to-target"); displaced = false; }
+                        if (permissionsChanged) ApplyPermissions(stage.Fd, stageOriginal);
+                    }
+                    catch (Exception rollback)
+                    {
+                        string state = String.Format("published={0};displaced={1};stage={2}", published, displaced, TryStat(transaction.Fd, stage.Leaf) != null);
+                        throw new PlatformMutationException("publication-rollback", PlatformNative.GetOperatingSystem(), state, original.Message + " Rollback failed: " + rollback.Message, receipt);
+                    }
+                    throw;
+                }
+                finally { if (target != null) target.Dispose(); }
+            }
+        }
+
+        public static UnixRemovalResult Remove(UnixLease parent, string leaf, UnixLease transaction, string tombstoneLeaf,
+            ulong expectedDevice, ulong expectedInode, string expectedSha256, long expectedLength)
+        {
+            PlatformPaths.Leaf(leaf); PlatformPaths.Leaf(tombstoneLeaf); ValidateAbi();
+            lock (parent.Sync) lock (transaction.Sync)
+            {
+                parent.Check(); transaction.Check(); AssertTransaction(transaction, parent);
+                bool cleanup = SameIdentity(Stat(parent.Fd, null), Stat(transaction.Fd, null));
+                if (cleanup && leaf != tombstoneLeaf)
+                    throw new PlatformVerificationException("owned-file-removal", PlatformNative.GetOperatingSystem(), "cleanup mode requires identical private leaf names");
+                UnixLease target = OpenFile(parent, leaf, "Read", "OpenExisting");
+                UnixRemovalResult receipt = new UnixRemovalResult { TombstoneLeaf = tombstoneLeaf, Method = cleanup ? "cleanup-unlinkat" : "tombstone-rename", Flush = NewFlush("unconfirmed") };
+                bool moved = false, durabilityFailure = false;
+                try
+                {
+                    AssertState(target, expectedDevice, expectedInode, expectedSha256, expectedLength, "owned-file-removal");
+                    FileObservation identity = Stat(target.Fd, null);
+                    receipt.BackupIdentity = identity; receipt.Permissions = Snapshot(target.Fd, identity);
+                    if (cleanup)
+                    {
+                        Check(Mac ? Darwin.unlinkat(transaction.Fd, leaf, 0) : Linux.unlinkat(transaction.Fd, leaf, 0), "unlinkat-private-cleanup");
+                        Sync(transaction.Fd, true, "fsync-transaction-cleanup");
+                        receipt.Flush.ParentDirectory = "confirmed"; receipt.Flush.TransactionDirectory = "confirmed"; receipt.Flush.Durability = "confirmed";
+                        return receipt;
+                    }
+                    if (parent.Observation.Device != transaction.Observation.Device)
+                        throw new PlatformCapabilityUnavailableException("same-filesystem-rename: EXDEV", PlatformNative.GetOperatingSystem());
+                    PlatformPaths.Same(Stat(parent.Fd, leaf), identity);
+                    RenameNoReplace(parent.Fd, leaf, transaction.Fd, tombstoneLeaf, "rename-target-to-tombstone"); moved = true;
+                    PlatformPaths.Same(Stat(transaction.Fd, tombstoneLeaf), identity);
+                    try
+                    {
+                        Sync(parent.Fd, true, "fsync-removal-parent"); receipt.Flush.ParentDirectory = "confirmed";
+                        Sync(transaction.Fd, true, "fsync-removal-transaction"); receipt.Flush.TransactionDirectory = "confirmed";
+                        receipt.Flush.Durability = "confirmed";
+                    }
+                    catch (Exception ex)
+                    {
+                        durabilityFailure = true;
+                        throw new PlatformMutationException("owned-file-removal-durability", PlatformNative.GetOperatingSystem(), "tombstoned-durability-unconfirmed", ex.Message, receipt);
+                    }
+                    PlatformPaths.Same(Stat(transaction.Fd, tombstoneLeaf), identity);
+                    return receipt;
+                }
+                catch (Exception original)
+                {
+                    if (durabilityFailure) throw;
+                    if (moved)
+                    {
+                        try { RenameNoReplace(transaction.Fd, tombstoneLeaf, parent.Fd, leaf, "rollback-tombstone-to-target"); moved = false; }
+                        catch (Exception rollback)
+                        {
+                            throw new PlatformMutationException("owned-file-removal-rollback", PlatformNative.GetOperatingSystem(), "tombstone=" + (TryStat(transaction.Fd, tombstoneLeaf) != null), original.Message + " Rollback failed: " + rollback.Message, receipt);
+                        }
+                    }
+                    throw;
+                }
+                finally { target.Dispose(); }
+            }
+        }
+
+        public static string ProbePublicationPrimitives()
+        {
+            ValidateAbi(); string rootPath = Mac ? "/private/tmp" : "/tmp";
+            string name = "platform-publication-" + Guid.NewGuid().ToString("N");
+            using (SafeFd root = WalkRoot(rootPath))
+            {
+                Check(Mac ? Darwin.mkdirat(root, name, 448) : Linux.mkdirat(root, name, 448), "mkdirat-publication-probe");
+                try
+                {
+                    using (SafeFd directory = ChildDirectory(root, name, false))
+                    {
+                        Chmod(directory, 448);
+                        if ((Stat(directory, null).Mode & 4095) != 448) throw new IOException("Publication probe directory is not private.");
+                        string[] leaves = new string[] { "source", "published", "conflict-source", "conflict-destination" };
+                        try
+                        {
+                            using (SafeFd source = Open(directory, leaves[0], 2 | Create | Exclusive, 384)) { Sync(source, false, "fsync-publication-probe-file"); Snapshot(source, Stat(source, null)); }
+                            RenameNoReplace(directory, leaves[0], directory, leaves[1], "rename-publication-probe");
+                            using (SafeFd conflictSource = Open(directory, leaves[2], 2 | Create | Exclusive, 384)) { }
+                            using (SafeFd conflictDestination = Open(directory, leaves[3], 2 | Create | Exclusive, 384)) { }
+                            bool refused = false;
+                            try { RenameNoReplace(directory, leaves[2], directory, leaves[3], "rename-publication-probe-conflict"); }
+                            catch (PlatformErrnoException ex) { if (ex.Errno != 17) throw; refused = true; }
+                            if (!refused || TryStat(directory, leaves[2]) == null || TryStat(directory, leaves[3]) == null)
+                                throw new IOException("No-replace publication probe did not preserve both conflicting names.");
+                            Sync(directory, true, "fsync-publication-probe-directory");
+                            return (Mac ? "renameatx_np(RENAME_EXCL)" : "renameat2(RENAME_NOREPLACE)") + ", file fsync, directory fsync, ACL/flags detection passed";
+                        }
+                        finally
+                        {
+                            foreach (string leaf in leaves) if (TryStat(directory, leaf) != null)
+                                try { Unlink(directory, leaf, false); } catch { }
+                        }
+                    }
+                }
+                finally { Unlink(root, name, true); }
+            }
+        }
+
         public static FileObservation GetPermissions(UnixLease lease) { return AssertIdentity(lease, lease.Observation, lease.Observation.Kind == "file"); }
         public static FileObservation SetPermissions(UnixLease lease, uint mode)
         {

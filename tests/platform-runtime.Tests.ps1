@@ -842,7 +842,7 @@ Start-Sleep 30
                 $caught.GetType().Name | Should Be 'PlatformErrnoException'
                 $caught.Operation | Should Be 'executable-lease-permission'
                 $caught.Errno | Should Be 13
-                ((Get-PlatformPermissions -Lease $file).Mode -band 4095) | Should Be 384
+                (Get-PlatformPermissions -Lease $file).Mode | Should Be '600'
             } finally { if ($null -ne $file) { $file.Dispose() }; Remove-P3Fixture $f $null }
         }
     }
@@ -881,7 +881,7 @@ printf '%s' "$0"
             try {
                 $file = Open-PlatformFile -ParentLease $f.Directory -Leaf 'executable' -Access Read -CreateMode CreateNew
                 [IO.File]::WriteAllText((Join-Path $f.Path 'executable'),"#!/bin/sh`nprintf lease-ok`nexit 17`n",[Text.UTF8Encoding]::new($false))
-                ((Set-PlatformPermissions -Lease $file -Policy @{ Mode=448 }).Mode -band 4095) | Should Be 448
+                (Set-PlatformPermissions -Lease $file -Policy @{ Mode=448 }).Mode | Should Be '700'
                 $p = Start-PlatformOwnedProcess -ExecutableLease $file -Environment @{} -WorkingDirectoryLease $f.Directory -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(10)) -StdoutPath (Join-Path $f.Path 'out') -StderrPath (Join-Path $f.Path 'err')
                 Assert-P3Exited $p
                 Assert-P3Cleaned (Stop-PlatformOwnedProcess -Lease $p)
@@ -2492,9 +2492,9 @@ Describe 'Platform runtime contract' {
         }
     }
 
-    # Scenario: A caller requires publication before P7 is installed.
-    # Purpose: Prevent partial-success receipts from authorizing an unavailable mutation path.
-    It 'UnitT20_throws_a_typed_failure_when_a_required_capability_is_not_available' {
+    # Scenario: A Windows caller requires Unix publication primitives.
+    # Purpose: P7c must not make the unimplemented Windows publication adapter appear available.
+    It 'UnitT20_throws_a_typed_failure_when_windows_publication_is_not_available [skip: Unix probes apply only on Unix]' -Skip:(-not $IsWindows) {
         $caught = $null
         try { Get-PlatformCapabilities -Required @('publication') | Out-Null }
         catch { $caught = $_ }
@@ -2518,20 +2518,27 @@ Describe 'Platform runtime contract' {
         $caught.Exception.Platform | Should Be $script:ExpectedOs
     }
 
-    # Scenario: Linux and macOS adapters are loaded directly before their P7 primitives exist.
-    # Purpose: Require typed fail-closed behavior instead of a Unix no-op or fabricated lease.
-    It 'UnitT30_rejects_unimplemented_unix_primitives_with_typed_failures' {
+    # Scenario: Linux and macOS adapters are called with the complete P7c signatures on Windows.
+    # Purpose: Cross-OS dispatch remains a typed capability failure, never a binder error or old P7 stub.
+    It 'UnitT30_rejects_cross_os_unix_publication_signatures_with_typed_failures [skip: assertion is Windows-specific]' -Skip:(-not $IsWindows) {
         foreach ($adapter in @('Linux','MacOS')) {
             $adapterPath = Join-Path $script:RepositoryRoot "scripts/platform/$adapter.psm1"
             Import-Module $adapterPath -Force
             $command = "Publish-$($adapter)PlatformFile"
             $caught = $null
-            try { & $command -ParentLease 'fixture' -StageLease 'fixture' -ExpectedState 'fixture' | Out-Null }
+            try { & $command -ParentLease 'fixture' -Leaf 'target' -TransactionLease 'fixture' -StageLease 'fixture' -ExpectedState 'fixture' -DisplacedLeaf 'backup' -ExpectedStage 'fixture' | Out-Null }
             catch { $caught = $_ }
 
             $caught | Should Not BeNullOrEmpty
-            $caught.Exception.GetType().Name | Should Be 'PlatformNotImplementedException'
-            $caught.Exception.ImplementationStep | Should Be 'P7'
+            $caught.Exception.GetType().Name | Should Be 'PlatformCapabilityUnavailableException'
+            $caught.Exception.Capability | Should Be 'publication'
+            $caught.Exception.Platform | Should Be 'windows'
+            $remove = "Remove-$($adapter)PlatformOwnedFile"
+            $caught = $null
+            try { & $remove -ParentLease 'fixture' -Leaf 'target' -ExpectedState 'fixture' -TransactionLease 'fixture' -TombstoneLeaf 'tombstone' | Out-Null } catch { $caught = $_ }
+            $caught.Exception.GetType().Name | Should Be 'PlatformCapabilityUnavailableException'
+            $caught.Exception.Capability | Should Be 'owned-file-removal'
+            $caught.Exception.Platform | Should Be 'windows'
             Remove-Module $adapter -Force -ErrorAction SilentlyContinue
         }
     }
@@ -3144,7 +3151,7 @@ try {
             $permissions = Get-PlatformPermissions -Lease $parent
             ($permissions | ConvertTo-Json) | Should Not Match 'handle'
             if ($IsWindows) { $permissions.Sddl | Should Match '^D:' }
-            else { $permissions.Kind | Should Be 'directory'; ($permissions.Mode -band 4095) | Should Be 448 }
+            else { $permissions.Kind | Should Be 'unix-mode'; $permissions.Mode | Should Be '700' }
         } finally { $parent.Dispose() }
     }
 
@@ -3251,7 +3258,7 @@ try {
         try {
             $file = Open-PlatformFile -ParentLease $parent -Leaf 'data' -Access ReadWrite -CreateMode CreateNew
             try {
-                ((Set-PlatformPermissions -Lease $file -Policy @{ Mode=416 }).Mode -band 4095) | Should Be 416
+                (Set-PlatformPermissions -Lease $file -Policy @{ Mode=416 }).Mode | Should Be '640'
                 [int][IO.File]::GetUnixFileMode((Join-Path $script:P2Root 'chmod/data')) | Should Be 416
                 $caught = $null
                 try { Set-PlatformPermissions -Lease $file -Policy @{ Acl='unsupported' } } catch { $caught = $_ }
@@ -3265,7 +3272,7 @@ try {
     # Purpose: Require independent size/mode and nlink checks instead of an assumed layout.
     It 'InterT84_passes_unix_abi_runtime_self_check' {
         $abi = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::ValidateAbi()
-        $abi | Should Match 'stat/fstatat size, type, mode, uid, gid, inode and nlink self-test passed'
+        $abi | Should Match 'stat/fstatat size, type, mode, uid, gid, inode, nlink( and st_flags)? self-test passed'
         $abi | Should Match 'create mode 0000 -> 0600 verified'
         $receipt = Get-PlatformCapabilities -Required @('file-identity')
         ($receipt.capabilities | Where-Object name -eq 'file-identity').evidence.abi | Should Match '^(linux|macos)-(x64|arm64):'
@@ -3378,6 +3385,187 @@ try {
             } finally { $file.Dispose() }
         } finally { $parent.Dispose() }
     }
+    }
+}
+
+Describe 'Unix P7c durable publication and removal' {
+    $p7cIsUnix = $IsLinux -or $IsMacOS
+    $p7cSkip = -not $p7cIsUnix
+
+    BeforeAll {
+        Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
+        $script:P7cRoot = Join-Path $TestDrive 'p7c-root'
+        [void][IO.Directory]::CreateDirectory($script:P7cRoot)
+        $script:P7cSetfacl = @(Get-Command setfacl -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1)
+
+        function New-P7cDirectory([string]$Relative) { Open-PlatformDirectory -Root $script:P7cRoot -RelativePath $Relative -CreatePrivate }
+        function New-P7cTransaction {
+            $id = [Guid]::NewGuid().ToString('N')
+            [pscustomobject]@{ Id=$id; Lease=(New-P7cDirectory ".ai-instructions-txn/$id") }
+        }
+        function New-P7cFile($Parent,[string]$Leaf,[string]$Text) {
+            $lease = Open-PlatformFile -ParentLease $Parent -Leaf $Leaf -Access ReadWrite -CreateMode CreateNew
+            $lease.WriteNewBytes([Text.UTF8Encoding]::new($false).GetBytes($Text))
+            return $lease
+        }
+        function Get-P7cState($Lease) {
+            $observed = Assert-PlatformFileIdentity -Lease $Lease -Expected $Lease.Observation -SingleLink
+            [pscustomobject][ordered]@{
+                exists=$true
+                sha256=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetSha256($Lease)
+                length=[long]$observed.Size
+                identity=[pscustomobject][ordered]@{
+                    kind='unix-device-inode'
+                    device=([uint64]$observed.Device).ToString([Globalization.CultureInfo]::InvariantCulture)
+                    fileId=([uint64]$observed.Inode).ToString([Globalization.CultureInfo]::InvariantCulture)
+                }
+            }
+        }
+        function Get-P7cStageState($Lease) {
+            $state = Get-P7cState $Lease
+            [pscustomobject][ordered]@{ sha256=$state.sha256; length=$state.length }
+        }
+        function Get-P7cAbsentState { [pscustomobject][ordered]@{ exists=$false; sha256=$null; length=$null; identity=$null } }
+        function Read-P7cText($Parent,[string]$Leaf) {
+            $lease = Open-PlatformFile -ParentLease $Parent -Leaf $Leaf -Access Read -CreateMode OpenExisting
+            try { [Text.UTF8Encoding]::new($false).GetString($lease.ReadAllBytes(1048576)) } finally { $lease.Dispose() }
+        }
+    }
+
+    # Scenario: A 0640 target is replaced by a transaction stage.
+    # Purpose: Preserve mode/uid/gid and move the original inode to DisplacedLeaf.
+    It 'InterT100_preserves_unix_metadata_and_original_inode_during_write [skip: requires Unix renameat/fsync]' -Skip:$p7cSkip {
+        $parent=New-P7cDirectory 'write'; $txn=New-P7cTransaction; $target=$null; $stage=$null; $backup=$null
+        try {
+            $target=New-P7cFile $parent 'target' 'original'; Set-PlatformPermissions -Lease $target -Policy @{Mode=416}|Out-Null
+            $original=Get-P7cState $target; $permissions=Get-PlatformPermissions $target; $target.Dispose(); $target=$null
+            $stage=New-P7cFile $txn.Lease 'stage' 'replacement'; $expectedStage=Get-P7cStageState $stage
+            $receipt=Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $original -DisplacedLeaf original -ExpectedStage $expectedStage
+            (Read-P7cText $parent target)|Should Be 'replacement'
+            $receipt.permissions.mode|Should Be '640'; $receipt.permissions.uid|Should Be $permissions.uid; $receipt.permissions.gid|Should Be $permissions.gid
+            $receipt.flush.durability|Should Be 'confirmed'
+            $backup=Open-PlatformFile -ParentLease $txn.Lease -Leaf original -Access Read -CreateMode OpenExisting
+            $backup.Observation.Inode|Should Be ([uint64]$original.identity.fileId)
+        } finally { if($null-ne$backup){$backup.Dispose()};if($null-ne$stage){$stage.Dispose()};if($null-ne$target){$target.Dispose()};$txn.Lease.Dispose();$parent.Dispose() }
+    }
+
+    # Scenario: A stage is published to an absent target.
+    # Purpose: New targets use the explicit default 0600 policy, not private-directory inheritance.
+    It 'InterT105_publishes_new_unix_files_with_default_mode_0600 [skip: requires Unix renameat/fsync]' -Skip:$p7cSkip {
+        $parent=New-P7cDirectory 'create';$txn=New-P7cTransaction;$stage=$null;$published=$null
+        try {
+            $stage=New-P7cFile $txn.Lease stage 'created';$stageState=Get-P7cStageState $stage
+            $receipt=Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState (Get-P7cAbsentState) -DisplacedLeaf unused -ExpectedStage $stageState
+            $published=Open-PlatformFile -ParentLease $parent -Leaf target -Access Read -CreateMode OpenExisting
+            (Get-PlatformPermissions $published).mode|Should Be '600';$receipt.displacedIdentity|Should BeNullOrEmpty
+        } finally {if($null-ne$published){$published.Dispose()};if($null-ne$stage){$stage.Dispose()};$txn.Lease.Dispose();$parent.Dispose()}
+    }
+
+    # Scenario: Expected hash, length, or identity differs from the current target.
+    # Purpose: Every state mismatch fails before either directory entry is renamed.
+    It 'InterT110_rejects_unix_target_state_mismatches_without_mutation [skip: requires Unix file identities]' -Skip:$p7cSkip {
+        foreach($variant in @('hash','length','identity')){
+            $parent=New-P7cDirectory "mismatch-$variant";$txn=New-P7cTransaction;$target=$null;$stage=$null
+            try{
+                $target=New-P7cFile $parent target original;$state=Get-P7cState $target;$target.Dispose();$target=$null
+                $bad=[pscustomobject][ordered]@{exists=$true;sha256=$state.sha256;length=$state.length;identity=[pscustomobject][ordered]@{kind=$state.identity.kind;device=$state.identity.device;fileId=$state.identity.fileId}}
+                if($variant-eq'hash'){$bad.sha256='0'*64}elseif($variant-eq'length'){$bad.length++}else{$bad.identity.fileId=([uint64]$bad.identity.fileId+1).ToString()}
+                $stage=New-P7cFile $txn.Lease stage replacement
+                {Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $bad -DisplacedLeaf backup -ExpectedStage (Get-P7cStageState $stage)}|Should Throw
+                (Read-P7cText $parent target)|Should Be original
+                Test-Path -LiteralPath (Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/backup")|Should Be $false
+            }finally{if($null-ne$stage){$stage.Dispose()};if($null-ne$target){$target.Dispose()};$txn.Lease.Dispose();$parent.Dispose()}
+        }
+    }
+
+    # Scenario: Target names resolve to symlink, hard-link, FIFO, or directory objects.
+    # Purpose: No-follow and single-regular-file checks reject all unsafe target types without rename.
+    It 'InterT115_rejects_unsafe_unix_target_types_without_mutation [skip: requires Unix symlink/hardlink/FIFO semantics]' -Skip:$p7cSkip {
+        $fake=[pscustomobject]@{exists=$true;sha256='0'*64;length=0;identity=[pscustomobject]@{kind='unix-device-inode';device='1';fileId='1'}}
+        foreach($kind in @('symlink','hardlink','fifo','directory')){
+            $parent=New-P7cDirectory "type-$kind";$txn=New-P7cTransaction;$stage=$null
+            try{
+                $path=Join-Path $script:P7cRoot "type-$kind"
+                if($kind-eq'symlink'){[IO.File]::WriteAllText((Join-Path $path real),'real');[IO.File]::CreateSymbolicLink((Join-Path $path target),'real')|Out-Null}
+                elseif($kind-eq'hardlink'){[IO.File]::WriteAllText((Join-Path $path real),'real');New-Item -ItemType HardLink -Path (Join-Path $path target) -Target (Join-Path $path real)|Out-Null}
+                elseif($kind-eq'fifo'){$mkfifo=@(Get-Command mkfifo -CommandType Application -ErrorAction Stop)[0];& $mkfifo.Source (Join-Path $path target);$LASTEXITCODE|Should Be 0}
+                else{[IO.Directory]::CreateDirectory((Join-Path $path target))|Out-Null}
+                $stage=New-P7cFile $txn.Lease stage replacement
+                {Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $fake -DisplacedLeaf backup -ExpectedStage (Get-P7cStageState $stage)}|Should Throw
+                Test-Path -LiteralPath (Join-Path $path target)|Should Be $true
+            }finally{if($null-ne$stage){$stage.Dispose()};$txn.Lease.Dispose();$parent.Dispose()}
+        }
+    }
+
+    # Scenario: Stage authority, displacement exclusivity, and NoReplace preconditions are violated.
+    # Purpose: Publication refuses each condition before changing target or stage names.
+    It 'InterT120_enforces_transaction_stage_and_noreplace_boundaries [skip: requires Unix no-replace rename]' -Skip:$p7cSkip {
+        $parent=New-P7cDirectory boundary;$txn=New-P7cTransaction;$outside=New-P7cDirectory outside;$outsideStage=$null;$target=$null;$stage=$null;$collision=$null
+        try{
+            $outsideStage=New-P7cFile $outside stage outside
+            {Publish-PlatformFile -ParentLease $parent -Leaf absent -TransactionLease $txn.Lease -StageLease $outsideStage -ExpectedState (Get-P7cAbsentState) -DisplacedLeaf backup -ExpectedStage (Get-P7cStageState $outsideStage)}|Should Throw
+            $target=New-P7cFile $parent target original;$targetState=Get-P7cState $target;$target.Dispose();$target=$null
+            $stage=New-P7cFile $txn.Lease stage replacement;$collision=New-P7cFile $txn.Lease backup occupied
+            {Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $targetState -DisplacedLeaf backup -ExpectedStage (Get-P7cStageState $stage)}|Should Throw
+            (Read-P7cText $parent target)|Should Be original
+            $collision.Dispose();$collision=$null
+            {Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $targetState -DisplacedLeaf backup -ExpectedStage (Get-P7cStageState $stage) -NoReplace}|Should Throw
+            (Read-P7cText $parent target)|Should Be original;(Read-P7cText $txn.Lease stage)|Should Be replacement
+        }finally{foreach($lease in @($collision,$stage,$target,$outsideStage)){if($null-ne$lease){$lease.Dispose()}};$outside.Dispose();$txn.Lease.Dispose();$parent.Dispose()}
+    }
+
+    # Scenario: A completed write is rolled back by publishing its displaced original.
+    # Purpose: Symmetric rename restores the original inode and tombstones the applied inode without copying.
+    It 'InterT125_rolls_back_by_rename_with_original_inode_unchanged [skip: requires Unix no-replace rename]' -Skip:$p7cSkip {
+        $parent=New-P7cDirectory rollback;$txn=New-P7cTransaction;$target=$null;$stage=$null;$originalLease=$null;$appliedLease=$null
+        try{
+            $target=New-P7cFile $parent target original;$original=Get-P7cState $target;$target.Dispose();$target=$null
+            $stage=New-P7cFile $txn.Lease newstage applied;$newState=Get-P7cStageState $stage
+            Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $original -DisplacedLeaf original -ExpectedStage $newState|Out-Null
+            $appliedLease=Open-PlatformFile -ParentLease $parent -Leaf target -Access Read -CreateMode OpenExisting;$applied=Get-P7cState $appliedLease;$appliedLease.Dispose();$appliedLease=$null
+            $originalLease=Open-PlatformFile -ParentLease $txn.Lease -Leaf original -Access Read -CreateMode OpenExisting
+            Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $originalLease -ExpectedState $applied -DisplacedLeaf newstage -ExpectedStage (Get-P7cStageState $originalLease)|Out-Null
+            $restored=Open-PlatformFile -ParentLease $parent -Leaf target -Access Read -CreateMode OpenExisting
+            try{$restored.Observation.Inode|Should Be ([uint64]$original.identity.fileId);[Text.UTF8Encoding]::new($false).GetString($restored.ReadAllBytes(64))|Should Be original}finally{$restored.Dispose()}
+        }finally{foreach($lease in @($appliedLease,$originalLease,$stage,$target)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$parent.Dispose()}
+    }
+
+    # Scenario: An owned target is tombstoned, then explicitly cleaned inside its private transaction directory.
+    # Purpose: Both rename and cleanup preserve/verify the inode; unlinkat is unreachable outside the private root.
+    It 'InterT130_tombstones_then_cleans_only_a_private_transaction_leaf [skip: requires Unix renameat/unlinkat]' -Skip:$p7cSkip {
+        $parent=New-P7cDirectory remove;$txn=New-P7cTransaction;$target=$null;$tombstone=$null
+        try{
+            $target=New-P7cFile $parent target owned;$state=Get-P7cState $target;$target.Dispose();$target=$null
+            $receipt=Remove-PlatformOwnedFile -ParentLease $parent -Leaf target -ExpectedState $state -TransactionLease $txn.Lease -TombstoneLeaf tombstone
+            $receipt.method|Should Be 'tombstone-rename';Test-Path -LiteralPath (Join-Path $script:P7cRoot remove/target)|Should Be $false
+            $tombstone=Open-PlatformFile -ParentLease $txn.Lease -Leaf tombstone -Access Read -CreateMode OpenExisting;$tombstone.Observation.Inode|Should Be ([uint64]$state.identity.fileId);$tombstone.Dispose();$tombstone=$null
+            $cleanup=Remove-PlatformOwnedFile -ParentLease $txn.Lease -Leaf tombstone -ExpectedState $state -TransactionLease $txn.Lease -TombstoneLeaf tombstone
+            $cleanup.method|Should Be 'cleanup-unlinkat';Test-Path -LiteralPath (Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/tombstone")|Should Be $false
+            {Remove-PlatformOwnedFile -ParentLease $parent -Leaf target -ExpectedState $state -TransactionLease $parent -TombstoneLeaf target}|Should Throw
+        }finally{foreach($lease in @($tombstone,$target)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$parent.Dispose()}
+    }
+
+    # Scenario: Linux target metadata contains system.posix_acl_access.
+    # Purpose: Extended ACL ownership is never partially replaced by mode-only publication.
+    It 'InterT135_fails_closed_for_linux_posix_acl_targets [skip: Linux setfacl/filesystem support required]' -Skip:(-not $IsLinux) {
+        if($script:P7cSetfacl.Count-eq0){if(Get-Command Set-ItResult -ErrorAction SilentlyContinue){Set-ItResult -Skipped -Because 'setfacl is unavailable'}else{Set-TestInconclusive 'setfacl is unavailable'};return}
+        $parent=New-P7cDirectory acl;$txn=New-P7cTransaction;$target=$null;$stage=$null
+        try{
+            $target=New-P7cFile $parent target original;$state=Get-P7cState $target;$target.Dispose();$target=$null
+            & $script:P7cSetfacl[0].Source -m 'u:12345:r--' (Join-Path $script:P7cRoot 'acl/target') 2>$null
+            if($LASTEXITCODE-ne0){if(Get-Command Set-ItResult -ErrorAction SilentlyContinue){Set-ItResult -Skipped -Because 'filesystem rejected POSIX ACL xattr'}else{Set-TestInconclusive 'filesystem rejected POSIX ACL xattr'};return}
+            $stage=New-P7cFile $txn.Lease stage replacement;$caught=$null
+            try{Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $state -DisplacedLeaf backup -ExpectedStage (Get-P7cStageState $stage)|Out-Null}catch{$caught=$_.Exception}
+            $caught.GetType().Name|Should Be 'PlatformCapabilityUnavailableException';(Read-P7cText $parent target)|Should Be original
+        }finally{if($null-ne$stage){$stage.Dispose()};if($null-ne$target){$target.Dispose()};$txn.Lease.Dispose();$parent.Dispose()}
+    }
+
+    # Scenario: Capability reporting is requested on the same Unix host that performs publication.
+    # Purpose: Probe evidence must name the tested no-replace primitive and directory fsync, not infer support from OS.
+    It 'InterT140_matches_unix_capabilities_to_live_publication_probe [skip: requires Unix native probes]' -Skip:$p7cSkip {
+        $receipt=Get-PlatformCapabilities -Required @('publication','owned-file-removal','permissions')
+        foreach($name in @('publication','owned-file-removal','permissions')){($receipt.capabilities|Where-Object name -eq $name).status|Should Be available}
+        (($receipt.capabilities|Where-Object name -eq publication).evidence -join ' ')|Should Match 'renameat(2|x_np).*fsync'
     }
 }
 

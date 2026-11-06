@@ -236,12 +236,27 @@ function Test-PlatformPrimitives {
     return [pscustomobject]@{ status=$status; evidence=[pscustomobject]$evidence }
 }
 
+function Test-UnixPublicationPrimitives {
+    $platform = Get-CurrentPlatformName
+    if ($platform -cnotin @('linux','macos')) {
+        return [pscustomobject]@{ status='unverified'; evidence=[object[]]@('Unix publication probes do not apply to this host.') }
+    }
+    try {
+        $evidence = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::ProbePublicationPrimitives()
+        return [pscustomobject]@{ status='available'; evidence=[object[]]@($evidence) }
+    }
+    catch {
+        return [pscustomobject]@{ status='unavailable'; evidence=[object[]]@($_.Exception.Message) }
+    }
+}
+
 function Get-PlatformCapabilities {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $Required)
 
     $platform = Get-CurrentPlatformName
     $primitiveProbe = Test-PlatformPrimitives
+    $publicationProbe = Test-UnixPublicationPrimitives
     $processProbe = Test-PlatformOwnedProcess
     $processEnvironmentMethod = @(
         [Environment].GetMethods([Reflection.BindingFlags]'Public,Static') | Where-Object {
@@ -315,9 +330,14 @@ function Get-PlatformCapabilities {
         })
     }
     foreach ($capability in $capabilities) {
-        if ($capability.name -cin @('directory-lease','file-lease','file-identity','lock','permissions')) {
+        if ($capability.name -cin @('directory-lease','file-lease','file-identity','lock') -or
+            ($platform -ceq 'windows' -and $capability.name -ceq 'permissions')) {
             $capability.status = $primitiveProbe.status
             $capability.evidence = [object[]]@($primitiveProbe.evidence)
+        }
+        if ($platform -cne 'windows' -and $capability.name -cin @('publication','owned-file-removal','permissions')) {
+            $capability.status = $publicationProbe.status
+            $capability.evidence = [object[]]@($publicationProbe.evidence)
         }
         if ($capability.name -cin @('owned-process','process-cleanup','process-isolation')) {
             $capability.status = $processProbe.status
@@ -375,8 +395,8 @@ function Open-PlatformDirectory {
 function Open-PlatformFile { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)][string] $Access, [Parameter(Mandatory = $true)][string] $CreateMode) Invoke-PlatformAdapter 'Open-PlatformFile' @{ ParentLease=$ParentLease; Leaf=$Leaf; Access=$Access; CreateMode=$CreateMode } }
 function Assert-PlatformFileIdentity { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Lease, [Parameter(Mandatory = $true)] $Expected, [switch] $SingleLink, [switch] $VerifyPath) Invoke-PlatformAdapter 'Assert-PlatformFileIdentity' $PSBoundParameters }
 function Enter-PlatformLock { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)][ValidateSet('Shared','Exclusive')][string] $Mode, [Parameter(Mandatory = $true)][TimeSpan] $Timeout) Invoke-PlatformAdapter 'Enter-PlatformLock' $PSBoundParameters }
-function Publish-PlatformFile { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)] $StageLease, [Parameter(Mandatory = $true)] $ExpectedState, [switch] $NoReplace, $Journal) Invoke-PlatformAdapter 'Publish-PlatformFile' $PSBoundParameters }
-function Remove-PlatformOwnedFile { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)] $ExpectedState, $Journal) Invoke-PlatformAdapter 'Remove-PlatformOwnedFile' $PSBoundParameters }
+function Publish-PlatformFile { [CmdletBinding()] param([Parameter(Mandatory=$true)]$ParentLease,[Parameter(Mandatory=$true)][string]$Leaf,[Parameter(Mandatory=$true)]$TransactionLease,[Parameter(Mandatory=$true)]$StageLease,[Parameter(Mandatory=$true)]$ExpectedState,[Parameter(Mandatory=$true)][string]$DisplacedLeaf,[Parameter(Mandatory=$true)]$ExpectedStage,[switch]$NoReplace,[ValidateRange(0,4095)][uint32]$CreateMode=384,$Journal) Invoke-PlatformAdapter 'Publish-PlatformFile' $PSBoundParameters }
+function Remove-PlatformOwnedFile { [CmdletBinding()] param([Parameter(Mandatory=$true)]$ParentLease,[Parameter(Mandatory=$true)][string]$Leaf,[Parameter(Mandatory=$true)]$ExpectedState,[Parameter(Mandatory=$true)]$TransactionLease,[Parameter(Mandatory=$true)][string]$TombstoneLeaf,$Journal) Invoke-PlatformAdapter 'Remove-PlatformOwnedFile' $PSBoundParameters }
 function Get-PlatformPermissions { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Lease) Invoke-PlatformAdapter 'Get-PlatformPermissions' $PSBoundParameters }
 function Set-PlatformPermissions { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Lease, $Policy, $Snapshot) Invoke-PlatformAdapter 'Set-PlatformPermissions' $PSBoundParameters }
 function Start-PlatformOwnedProcess {
