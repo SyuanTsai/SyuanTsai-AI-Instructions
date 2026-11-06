@@ -1,4 +1,5 @@
 # Reuse the established disposable bootstrap fixtures without executing their Describe blocks.
+$script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
 $fixtureText = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'bootstrap-ai-instructions.Tests.ps1')
 . ([scriptblock]::Create($fixtureText.Substring(0, $fixtureText.IndexOf("Describe 'bootstrap-ai-instructions'")).Replace('$PSScriptRoot', "'$($PSScriptRoot.Replace("'", "''"))'")))
 

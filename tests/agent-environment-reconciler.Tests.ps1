@@ -312,6 +312,7 @@ Describe 'user-scoped Agent Skills reconciliation' {
         $userHome=Join-Path $TestDrive 'resource-user'
         $initial=New-TestDesiredState -Root (Join-Path $TestDrive 'resource-initial') -Resources @{
             'assets/nested/data.bin'=[byte[]]@(0,10,13,128,255)
+            'assets/removed.bin'=[byte[]]@(255,128,0,13,10)
             'references/details.md'=[Text.Encoding]::UTF8.GetBytes('reference v1')
             'scripts/probe.ps1'=[Text.Encoding]::UTF8.GetBytes('Write-Output sample')
         }
@@ -322,8 +323,12 @@ Describe 'user-scoped Agent Skills reconciliation' {
             'assets/nested/data.bin'=[byte[]]@(255,0,10,128)
             'scripts/probe.ps1'=[Text.Encoding]::UTF8.GetBytes('Write-Output updated')
         }
-        (Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply).outcome | Should Be 'applied'
+        $updated=Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply
+        $updated.outcome | Should Be 'applied'
         Test-Path (Join-Path $userHome '.agents/skills/alpha/references/details.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $userHome '.agents/skills/alpha/assets/removed.bin') | Should Be $false
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $updated.backupPath '.agents/skills/alpha/assets/nested/data.bin'))) | Should Be ([Convert]::ToBase64String([byte[]]@(0,10,13,128,255)))
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $updated.backupPath '.agents/skills/alpha/assets/removed.bin'))) | Should Be ([Convert]::ToBase64String([byte[]]@(255,128,0,13,10)))
         foreach($entry in $next.Files){ (Get-FileHash (Join-Path $userHome $entry.targetPath)).Hash.ToLowerInvariant() | Should Be $entry.sha256 }
         $before=(Get-FileHash (Join-Path $userHome '.agents/catalog-skills.manifest.json')).Hash
         (Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply).outcome | Should Be 'current'
@@ -615,11 +620,11 @@ Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode
             $failureAfter=if($failpoint-in@('during-rollback','after-rollback-action')){1}else{0}
             if($failpoint-ceq'after-staged-subtree-verification'){Remove-Item -LiteralPath (Join-Path $caseHome '.agents/skills/alpha') -Recurse -Force}
             & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $childScript (Join-Path $caseRuntime 'agent-environment-reconciler.psm1') $desiredPath $caseHome $failpoint $failureAfter 2>$null
-            $LASTEXITCODE | Should Not Be 0
-            if($failpoint-cne'after-committed-transaction-cleanup'){@(Get-ChildItem -Force -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should BeGreaterThan 0}
+            $LASTEXITCODE | Should Not Be 0 -Because "failpoint=$failpoint"
+            if($failpoint-cne'after-committed-transaction-cleanup'){@(Get-ChildItem -Force -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should BeGreaterThan 0 -Because "failpoint=$failpoint"}
             if($failpoint-ceq'after-original-rename'){
-                Test-Path -LiteralPath (Join-Path $caseHome '.agents/skills/alpha/SKILL.md')|Should Be $false
-                @(Get-ChildItem -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -Filter 'backup-*' -Recurse -File).Count|Should BeGreaterThan 0
+                Test-Path -LiteralPath (Join-Path $caseHome '.agents/skills/alpha/SKILL.md')|Should Be $false -Because "failpoint=$failpoint"
+                @(Get-ChildItem -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -Filter 'backup-*' -Recurse -File).Count|Should BeGreaterThan 0 -Because "failpoint=$failpoint"
             }
             $triggered.Add($failpoint)
             foreach($moduleName in @('skills-selection.psm1','skills-source-routing.psm1','skills-source-retrieval.psm1','skills-source-acquisition.psm1','license-delivery.psm1')){Copy-Item -LiteralPath (Join-Path $script:RuntimeRoot $moduleName) -Destination $caseRuntime -Force}
@@ -637,12 +642,12 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
             $commit='89abcdef0123456789abcdef0123456789abcdef';@{schemaVersion=4;catalog=@{ref=$commit}}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $caseCodex 'ai-instructions-sync.json') -Encoding UTF8;@{schemaVersion=2;repository='https://github.com/example/ai-instructions.git';commit=$commit}|ConvertTo-Json|Set-Content (Join-Path $caseRuntime 'runtime-bundle.json') -Encoding UTF8
             $entry=Join-Path $script:RepositoryRoot 'scripts/update-agent-environment.ps1';$beforeVerify=Get-TestTreeSnapshot $caseHome
             $verifyOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $caseCodex -UserHome $caseHome -VerifyOnly -OutputFormat Json);$verifyExit=$LASTEXITCODE;$verifyResult=$verifyOutput[-1]|ConvertFrom-Json
-            if($failpoint-ceq'after-committed-transaction-cleanup'){$verifyExit|Should Be 0;$verifyResult.outcome|Should Be 'current'}else{$verifyExit|Should Be 1;$verifyResult.Code|Should Be 'interrupted-install'}
-            (Get-TestTreeSnapshot $caseHome)|Should Be $beforeVerify
-            $applyOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $caseCodex -UserHome $caseHome -Apply -OutputFormat Json);$LASTEXITCODE|Should Be 0;$result=$applyOutput[-1]|ConvertFrom-Json
-            @('applied','current')|Should Contain $result.outcome
-            @(Get-ChildItem -Force -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count | Should Be 0
-            (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $caseHome '.agents/skills/alpha/SKILL.md')).Hash.ToLowerInvariant() | Should Be $desired.Files[0].sha256
+            if($failpoint-ceq'after-committed-transaction-cleanup'){$verifyExit|Should Be 0 -Because "failpoint=$failpoint";$verifyResult.outcome|Should Be 'current' -Because "failpoint=$failpoint"}else{$verifyExit|Should Be 1 -Because "failpoint=$failpoint";$verifyResult.Code|Should Be 'interrupted-install' -Because "failpoint=$failpoint"}
+            (Get-TestTreeSnapshot $caseHome)|Should Be $beforeVerify -Because "failpoint=$failpoint"
+            $applyOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $caseCodex -UserHome $caseHome -Apply -OutputFormat Json);$LASTEXITCODE|Should Be 0 -Because "failpoint=$failpoint";$result=$applyOutput[-1]|ConvertFrom-Json
+            @('applied','current')|Should Contain $result.outcome -Because "failpoint=$failpoint"
+            @(Get-ChildItem -Force -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count | Should Be 0 -Because "failpoint=$failpoint"
+            (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $caseHome '.agents/skills/alpha/SKILL.md')).Hash.ToLowerInvariant() | Should Be $desired.Files[0].sha256 -Because "failpoint=$failpoint"
         }
         $triggered.Count|Should Be $failpoints.Count
         foreach($failpoint in $failpoints){$triggered|Should Contain $failpoint}
@@ -1031,7 +1036,9 @@ Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode
         Test-Path -LiteralPath (Join-Path $transactions[0].FullName 'journal.json')|Should Be $false
         $stageRoot=@(Get-ChildItem -Directory -LiteralPath $transactions[0].FullName -Filter 'directory-*')
         $stageRoot.Count|Should Be 1
-        $stagedPayload=Join-Path $stageRoot[0].FullName 'skills/alpha/SKILL.md'
+        $stagedPayloads=@(Get-ChildItem -LiteralPath $stageRoot[0].FullName -Filter 'SKILL.md' -File -Recurse)
+        $stagedPayloads.Count|Should Be 1
+        $stagedPayload=$stagedPayloads[0].FullName
         (Get-FileHash -Algorithm SHA256 -LiteralPath $stagedPayload).Hash.ToLowerInvariant()|Should Be $desired.Files[0].sha256
 
         $readLease=New-TestInstallReadLeaseEvidence

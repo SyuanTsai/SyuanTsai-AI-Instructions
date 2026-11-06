@@ -1010,8 +1010,12 @@ function Get-AgentEnvironmentPrivateFileJournalEvidence {
         $observed=Assert-PlatformFileIdentity -Lease $file -Expected $file.Observation -SingleLink -VerifyPath
         if([int64]$observed.Size-gt16777216){throw "Transaction-private file is too large: $Leaf"}
         $bytes=$file.ReadAllBytes([int]$observed.Size)
+        $json=$null
+        if($Leaf-in@('journal.json','journal.prev','journal.stage')){
+            $json=[Text.UTF8Encoding]::new($false,$true).GetString($bytes)
+        }
         return [pscustomobject][ordered]@{
-            entryKind='file';json=[Text.UTF8Encoding]::new($false,$true).GetString($bytes)
+            entryKind='file';json=$json
             state=[pscustomobject][ordered]@{exists=$true;sha256=(Get-AgentEnvironmentBytesSha256 $bytes);length=[int64]$observed.Size;identity=(ConvertTo-AgentEnvironmentPlatformIdentity $observed)}
         }
     }
@@ -1697,7 +1701,9 @@ function Invoke-AgentEnvironmentNewJournalRecoveryLocked {
         }
         if($validationFailures.Count-gt0){return New-AgentEnvironmentInterruptedResult ($validationFailures -join ' ')}
         $recoveryRequiresDirectoryPublication=@($validatedEntries|Where-Object{
-            $null-ne$_.plan-and@($_.plan.steps|Where-Object{[string]$_.primitive-ceq'Move-PlatformOwnedDirectory'}).Count-gt0
+            $null-ne$_.plan-and@($_.plan.steps|Where-Object{
+                $null-ne$_-and$null-ne$_.PSObject.Properties['primitive']-and[string]$_.PSObject.Properties['primitive'].Value-ceq'Move-PlatformOwnedDirectory'
+            }).Count-gt0
         }).Count-gt0
         if($recoveryRequiresDirectoryPublication){Assert-AgentEnvironmentDirectoryPublicationCapability}
         foreach($validated in $validatedEntries){
@@ -2058,7 +2064,8 @@ function Invoke-UserSkillsRecoveryLocked {
     param(
         [Parameter(Mandatory = $true)][string] $UserHome,
         [Parameter(Mandatory = $true)][object] $ExistingLock,
-        [object] $InstallReadLease
+        [object] $InstallReadLease,
+        [AllowNull()][object] $PreLockManifestSnapshot
     )
     $home = [System.IO.Path]::GetFullPath($UserHome).TrimEnd([char[]]@('\','/'))
     $agentsRoot = Join-Path $home '.agents'
@@ -2079,16 +2086,17 @@ function Invoke-UserSkillsRecoveryLocked {
         if(-not$hasLegacy-and-not$hasNew){return [pscustomobject][ordered]@{ schemaVersion=1; outcome='nothing-to-recover'; exitCode=0; rollbackState='not-needed' }}
         Import-AgentEnvironmentRecoveryRuntimeModules -RuntimeRoot $PSScriptRoot
         if($hasNew-and-not(Test-AgentEnvironmentInstallReadLease $InstallReadLease)){return New-AgentEnvironmentInterruptedResult 'USER install-journal recovery requires stable-launcher validation and the install read lease.'}
-        $existingManifestSnapshot = Get-AgentEnvironmentManifestSnapshot -Root $home -RelativePath $manifestRelative
         if ($hasLegacy -and -not (Test-Path -LiteralPath $journalPath -PathType Leaf)) { throw 'Agent environment recovery journal path must be a file.' }
         $hasLegacy=Test-Path -LiteralPath $journalPath
         $hasNew=(Test-Path -LiteralPath $transactionRoot)-and(@(Get-ChildItem -Force -LiteralPath $transactionRoot -ErrorAction Stop).Count-gt0)
         if($hasLegacy-and$hasNew){return New-AgentEnvironmentInterruptedResult 'Legacy and install-journal USER transaction residues coexist; recovery refused before mutation.'}
         if($hasNew){if(-not(Test-AgentEnvironmentInstallReadLease $InstallReadLease)){return New-AgentEnvironmentInterruptedResult 'USER install-journal recovery requires stable-launcher validation and the install read lease.'};return Invoke-AgentEnvironmentNewJournalRecoveryLocked -Home $home -Mode Apply -InstallReadLease $InstallReadLease}
         if(-not$hasLegacy){return [pscustomobject][ordered]@{ schemaVersion=1; outcome='nothing-to-recover'; exitCode=0; rollbackState='not-needed' }}
-        $lockedManifestSnapshot = Get-AgentEnvironmentManifestSnapshot -Root $home -RelativePath $manifestRelative
-        if ($existingManifestSnapshot.Identity -cne $lockedManifestSnapshot.Identity) {
-            return New-AgentEnvironmentRecoveryConcurrentResult
+        if($null-ne$PreLockManifestSnapshot){
+            $lockedManifestSnapshot = Get-AgentEnvironmentManifestSnapshot -Root $home -RelativePath $manifestRelative
+            if ($PreLockManifestSnapshot.Identity -cne $lockedManifestSnapshot.Identity) {
+                return New-AgentEnvironmentRecoveryConcurrentResult
+            }
         }
         Assert-AgentEnvironmentPathSafe -Root $home -RelativePath $journalRelative | Out-Null
         if (-not (Test-Path -LiteralPath $journalPath -PathType Leaf)) { throw 'Agent environment recovery journal path must be a file.' }
@@ -2202,6 +2210,7 @@ function Invoke-UserSkillsRecovery {
     if(-not$hasLegacy-and-not$hasNew){return [pscustomobject][ordered]@{schemaVersion=1;outcome='nothing-to-recover';exitCode=0;rollbackState='not-needed'}}
     Import-AgentEnvironmentRecoveryRuntimeModules -RuntimeRoot $PSScriptRoot
     if($hasNew-and-not(Test-AgentEnvironmentInstallReadLease $InstallReadLease)){return New-AgentEnvironmentInterruptedResult 'USER install-journal recovery requires stable-launcher validation and the install read lease.'}
+    $preLockManifestSnapshot=Get-AgentEnvironmentManifestSnapshot -Root $home -RelativePath '.agents/catalog-skills.manifest.json'
     $lockParentLease=$null;$lockStream=$null
     try{
         $lockPath=Join-Path $home '.agents/update-agent-environment.lock'
@@ -2212,7 +2221,7 @@ function Invoke-UserSkillsRecovery {
             $lockStream=Enter-PlatformLock -ParentLease $lockParentLease -Leaf 'update-agent-environment.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
         }
         catch{if(Test-AgentEnvironmentLockContention $_){return New-AgentEnvironmentRecoveryConcurrentResult};throw}
-        return Invoke-UserSkillsRecoveryLocked -UserHome $home -ExistingLock $lockStream -InstallReadLease $InstallReadLease
+        return Invoke-UserSkillsRecoveryLocked -UserHome $home -ExistingLock $lockStream -InstallReadLease $InstallReadLease -PreLockManifestSnapshot $preLockManifestSnapshot
     }
     finally{if($null-ne$lockStream){$lockStream.Dispose()};if($null-ne$lockParentLease){$lockParentLease.Dispose()}}
 }
