@@ -965,35 +965,46 @@ function Get-AgentEnvironmentFileJournalState {
     finally { if($null-ne$file){$file.Dispose()};if($null-ne$parent){$parent.Dispose()} }
 }
 
-function Get-AgentEnvironmentPrivateFileJournalState {
+function Get-AgentEnvironmentPrivateFileJournalEvidence {
     param(
+        [Parameter(Mandatory = $true)] $TransactionLease,
         [Parameter(Mandatory = $true)][string] $TransactionPath,
         [Parameter(Mandatory = $true)][string] $Leaf
     )
     if ([string]::IsNullOrWhiteSpace($Leaf) -or $Leaf -ne [IO.Path]::GetFileName($Leaf) -or $Leaf.IndexOfAny([char[]]@('/', '\')) -ge 0) {
-        throw 'Transaction-private file state requires one safe leaf.'
+        throw 'Transaction-private file evidence requires one safe leaf.'
     }
     $full = Join-Path $TransactionPath $Leaf
     if (-not (Test-Path -LiteralPath $full)) {
-        return [pscustomobject][ordered]@{ exists=$false; sha256=$null; length=$null; identity=$null }
+        return [pscustomobject][ordered]@{entryKind=$null;json=$null;state=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}}
     }
-    $transactionLease = $null
-    $file = $null
-    try {
-        $transactionLease = Open-PlatformDirectory -Root $TransactionPath -RootOnly
-        $file = Open-PlatformFile -ParentLease $transactionLease -Leaf $Leaf -Access Read -CreateMode OpenExisting
-        $observed = Assert-PlatformFileIdentity -Lease $file -Expected $file.Observation -SingleLink -VerifyPath
+    $item=Get-Item -Force -LiteralPath $full
+    if(($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){return [pscustomobject][ordered]@{entryKind='reparse-point';json=$null;state=$null}}
+    if($item.PSIsContainer-or-not(Test-Path -LiteralPath $full -PathType Leaf)){return [pscustomobject][ordered]@{entryKind='other';json=$null;state=$null}}
+    $file=$null
+    try{
+        $file=Open-PlatformFile -ParentLease $TransactionLease -Leaf $Leaf -Access Read -CreateMode OpenExisting
+        $observed=Assert-PlatformFileIdentity -Lease $file -Expected $file.Observation -SingleLink -VerifyPath
+        if([int64]$observed.Size-gt16777216){throw "Transaction-private file is too large: $Leaf"}
+        $bytes=$file.ReadAllBytes([int]$observed.Size)
         return [pscustomobject][ordered]@{
-            exists = $true
-            sha256 = Get-AgentEnvironmentSha256 $full
-            length = [int64]$observed.Size
-            identity = ConvertTo-AgentEnvironmentPlatformIdentity $observed
+            entryKind='file';json=[Text.UTF8Encoding]::new($false,$true).GetString($bytes)
+            state=[pscustomobject][ordered]@{exists=$true;sha256=(Get-AgentEnvironmentBytesSha256 $bytes);length=[int64]$observed.Size;identity=(ConvertTo-AgentEnvironmentPlatformIdentity $observed)}
         }
     }
-    finally {
-        if ($null -ne $file) { $file.Dispose() }
-        if ($null -ne $transactionLease) { $transactionLease.Dispose() }
-    }
+    catch{return [pscustomobject][ordered]@{entryKind='other';json=$null;state=$null;error=[string]$_.Exception.Message}}
+    finally{if($null-ne$file){$file.Dispose()}}
+}
+
+function Get-AgentEnvironmentPrivateFileJournalState {
+    param(
+        [Parameter(Mandatory = $true)] $TransactionLease,
+        [Parameter(Mandatory = $true)][string] $TransactionPath,
+        [Parameter(Mandatory = $true)][string] $Leaf
+    )
+    $evidence=Get-AgentEnvironmentPrivateFileJournalEvidence -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf $Leaf
+    if($null-eq$evidence.state){throw "Transaction-private file is not a verified regular single-link file: $Leaf"}
+    return $evidence.state
 }
 
 function Get-AgentEnvironmentDirectoryJournalState {
@@ -1027,7 +1038,7 @@ function Remove-AgentEnvironmentTransactionPrivateFile {
         [Parameter(Mandatory = $true)][string]$Leaf,
         [object]$RecoveryMutationContext
     )
-    $state=Get-AgentEnvironmentPrivateFileJournalState -TransactionPath $TransactionPath -Leaf $Leaf
+    $state=Get-AgentEnvironmentPrivateFileJournalState -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf $Leaf
     if([bool]$state.exists){Assert-AgentEnvironmentRecoveryMutationContext $RecoveryMutationContext;Remove-PlatformOwnedFile -ParentLease $TransactionLease -Leaf $Leaf -ExpectedState $state|Out-Null}
 }
 
@@ -1039,35 +1050,47 @@ function Write-AgentEnvironmentInstallJournal {
         [object]$RecoveryMutationContext
     )
     Assert-AiInstructionsInstallJournalV1 -Journal $Journal | Out-Null
-    $path=Join-Path $TransactionPath 'journal.json';$stage=Join-Path $TransactionPath 'journal.stage';$previous=Join-Path $TransactionPath 'journal.prev'
+    $path=Join-Path $TransactionPath 'journal.json'
     $currentJournal=$null;$fallbackJournal=$null
-    if(Test-Path -LiteralPath $path -PathType Leaf){$currentJournal=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ([IO.File]::ReadAllText($path,[Text.Encoding]::UTF8)) -ExpectedTransactionId ([string]$Journal.transactionId)}
-    if(Test-Path -LiteralPath $previous -PathType Leaf){$fallbackJournal=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ([IO.File]::ReadAllText($previous,[Text.Encoding]::UTF8)) -ExpectedTransactionId ([string]$Journal.transactionId)}
+    $currentEvidence=Get-AgentEnvironmentPrivateFileJournalEvidence -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf 'journal.json'
+    $fallbackEvidence=Get-AgentEnvironmentPrivateFileJournalEvidence -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf 'journal.prev'
+    foreach($pair in @(@('journal.json',$currentEvidence),@('journal.prev',$fallbackEvidence))){if($null-ne$pair[1].entryKind-and[string]$pair[1].entryKind-cne'file'){throw "Transaction journal leaf '$($pair[0])' is not a verified regular single-link file."}}
+    if([string]$currentEvidence.entryKind-ceq'file'){$currentJournal=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ([string]$currentEvidence.json) -ExpectedTransactionId ([string]$Journal.transactionId)}
+    if([string]$fallbackEvidence.entryKind-ceq'file'){$fallbackJournal=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ([string]$fallbackEvidence.json) -ExpectedTransactionId ([string]$Journal.transactionId)}
     if($null-ne$currentJournal-and$null-ne$fallbackJournal){Assert-AiInstructionsInstallJournalStoreTransition -Previous $fallbackJournal -Next $currentJournal|Out-Null}
     $authoritativeJournal=if($null-ne$currentJournal){$currentJournal}else{$fallbackJournal}
     if($null-ne$authoritativeJournal){Assert-AiInstructionsInstallJournalStoreTransition -Previous $authoritativeJournal -Next $Journal|Out-Null}
     $bytes=(New-Object Text.UTF8Encoding($false)).GetBytes(($Journal|ConvertTo-Json -Depth 30)+[Environment]::NewLine)
     Assert-AgentEnvironmentRecoveryMutationContext $RecoveryMutationContext
-    $stream=[IO.File]::Open($stage,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::None)
-    try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
-    $readBack=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ([IO.File]::ReadAllText($stage,[Text.Encoding]::UTF8)) -ExpectedTransactionId ([string]$Journal.transactionId)
-    if($null-ne$authoritativeJournal){Assert-AiInstructionsInstallJournalStoreTransition -Previous $authoritativeJournal -Next $readBack|Out-Null}
-    if([string]$env:AI_INSTRUCTIONS_USER_RECONCILER_FAILFAST-ceq'after-journal-stage-flush'){[Environment]::FailFast('Injected USER reconciler FailFast after journal stage flush.')}
-
-    # An older fallback may be removed before replacement only while journal.json is
-    # still authoritative.  If journal.prev is the sole durable journal, retain it
-    # until the NoReplace publication and readback of the replacement complete.
-    if($null-ne$currentJournal-and$null-ne$fallbackJournal){Remove-AgentEnvironmentTransactionPrivateFile -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf 'journal.prev' -RecoveryMutationContext $RecoveryMutationContext}
-    $stageState=Get-AgentEnvironmentPrivateFileJournalState -TransactionPath $TransactionPath -Leaf 'journal.stage'
     $stageLease=$null
     try{
-        $stageLease=Open-PlatformFile -ParentLease $TransactionLease -Leaf 'journal.stage' -Access Read -CreateMode OpenExisting
-        $expected=if($null-eq$currentJournal){[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}}else{Get-AgentEnvironmentPrivateFileJournalState -TransactionPath $TransactionPath -Leaf 'journal.json'}
+        $existingStage=Get-AgentEnvironmentPrivateFileJournalEvidence -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf 'journal.stage'
+        if($null-ne$existingStage.entryKind){
+            if([string]$existingStage.entryKind-cne'file'){throw "Transaction journal leaf 'journal.stage' is not a verified regular single-link file."}
+            Remove-AgentEnvironmentTransactionPrivateFile -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf 'journal.stage' -RecoveryMutationContext $RecoveryMutationContext
+        }
+        $stageLease=Open-PlatformFile -ParentLease $TransactionLease -Leaf 'journal.stage' -Access ReadWrite -CreateMode CreateNew
+        $stageLease.WriteNewBytes($bytes)
+        $stageObserved=Assert-PlatformFileIdentity -Lease $stageLease -Expected $stageLease.Observation -SingleLink -VerifyPath
+        $stageBytes=$stageLease.ReadAllBytes([int]$stageObserved.Size)
+        $readBack=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ([Text.UTF8Encoding]::new($false,$true).GetString($stageBytes)) -ExpectedTransactionId ([string]$Journal.transactionId)
+        if($null-ne$authoritativeJournal){Assert-AiInstructionsInstallJournalStoreTransition -Previous $authoritativeJournal -Next $readBack|Out-Null}
+        if([string]$env:AI_INSTRUCTIONS_USER_RECONCILER_FAILFAST-ceq'after-journal-stage-flush'){[Environment]::FailFast('Injected USER reconciler FailFast after journal stage flush.')}
+
+        # An older fallback may be removed before replacement only while journal.json is
+        # still authoritative. If journal.prev is the sole durable journal, retain it
+        # until the NoReplace publication and readback of the replacement complete.
+        if($null-ne$currentJournal-and$null-ne$fallbackJournal){Remove-AgentEnvironmentTransactionPrivateFile -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf 'journal.prev' -RecoveryMutationContext $RecoveryMutationContext}
+        $stageState=[pscustomobject][ordered]@{exists=$true;sha256=(Get-AgentEnvironmentBytesSha256 $stageBytes);length=[int64]$stageObserved.Size;identity=(ConvertTo-AgentEnvironmentPlatformIdentity $stageObserved)}
+        $expected=if($null-eq$currentJournal){[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}}else{$currentEvidence.state}
         Assert-AgentEnvironmentRecoveryMutationContext $RecoveryMutationContext
         Publish-PlatformFile -ParentLease $TransactionLease -Leaf 'journal.json' -TransactionLease $TransactionLease -StageLease $stageLease -ExpectedState $expected -DisplacedLeaf $(if($null-ne$currentJournal){'journal.prev'}else{$null}) -ExpectedStage $stageState -NoReplace:($null-eq$currentJournal)|Out-Null
+        if([string]$env:AI_INSTRUCTIONS_USER_RECONCILER_FAILFAST-ceq'after-journal-rename'){[Environment]::FailFast('Injected USER reconciler FailFast after journal rename.')}
     }
     finally{if($null-ne$stageLease){$stageLease.Dispose()}}
-    ConvertFrom-AiInstructionsInstallJournalV1Json -Json ([IO.File]::ReadAllText($path,[Text.Encoding]::UTF8)) -ExpectedTransactionId ([string]$Journal.transactionId)|Out-Null
+    $publishedEvidence=Get-AgentEnvironmentPrivateFileJournalEvidence -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf 'journal.json'
+    if([string]$publishedEvidence.entryKind-cne'file'){throw 'Published transaction journal is not a verified regular single-link file.'}
+    ConvertFrom-AiInstructionsInstallJournalV1Json -Json ([string]$publishedEvidence.json) -ExpectedTransactionId ([string]$Journal.transactionId)|Out-Null
     if([string]$env:AI_INSTRUCTIONS_USER_RECONCILER_FAILFAST-ceq'after-journal-publish'){[Environment]::FailFast('Injected USER reconciler FailFast after journal publish.')}
     if($null-eq$currentJournal-and$null-ne$fallbackJournal){Remove-AgentEnvironmentTransactionPrivateFile -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf 'journal.prev' -RecoveryMutationContext $RecoveryMutationContext}
 }
@@ -1078,7 +1101,12 @@ function Get-AgentEnvironmentProcessStartIdentity {
 
 function Invoke-AgentEnvironmentFailpoint {
     param([string]$Name,[string]$ConfiguredName,[int]$MutationCount,[int]$FailureAfterMutationCount)
-    $allowed=@('after-staged-subtree-verification','after-original-rename','after-platform-rename','after-applied-rename','after-operation-journal','after-journal-stage-flush','after-journal-publish','after-parent-flush','during-rollback','before-committed-cleanup')
+    $allowed=@(
+        'after-staged-subtree-verification','after-original-rename','after-platform-rename','after-applied-rename',
+        'after-operation-journal','after-journal-stage-flush','after-journal-rename','after-journal-publish','after-parent-flush',
+        'during-rollback','after-rollback-action','before-committed-cleanup','before-committed-backup-export',
+        'after-committed-backup-export','before-committed-transaction-cleanup','after-committed-transaction-cleanup'
+    )
     if(-not[string]::IsNullOrEmpty($ConfiguredName)-and $ConfiguredName -cnotin $allowed){throw "Unknown Agent environment failpoint '$ConfiguredName'."}
     $trigger=$ConfiguredName -ceq $Name -or ($FailureAfterMutationCount -gt 0 -and $Name -ceq 'after-operation-journal' -and $MutationCount -ge $FailureAfterMutationCount)
     if($trigger){
@@ -1121,6 +1149,25 @@ function Assert-AgentEnvironmentDirectoryPublicationCapability {
     }
 }
 
+function Test-AgentEnvironmentPlanRequiresCreateDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$Home,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$WritePaths
+    )
+    foreach($path in $WritePaths){
+        $segments=@($path.Replace('\','/').Split('/'))
+        $current=''
+        for($index=0;$index-lt$segments.Count-1;$index++){
+            $current=if([string]::IsNullOrEmpty($current)){$segments[$index]}else{"$current/$($segments[$index])"}
+            $full=Get-AgentEnvironmentFullPath -Root $Home -RelativePath $current
+            if(-not(Test-Path -LiteralPath $full)){return $true}
+            $item=Get-Item -Force -LiteralPath $full
+            if(-not$item.PSIsContainer-or($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){throw "Unsafe target ancestor: $current"}
+        }
+    }
+    return $false
+}
+
 function Get-AgentEnvironmentFilePermissionSnapshot {
     param([string]$Home,[string]$RelativePath)
     $full=Get-AgentEnvironmentFullPath $Home $RelativePath;$parentRelative=[IO.Path]::GetDirectoryName($RelativePath.Replace('/',[IO.Path]::DirectorySeparatorChar)).Replace('\','/');$parent=$null;$file=$null
@@ -1137,7 +1184,7 @@ function Set-AgentEnvironmentJournalTargetPermissions {
 function Invoke-AgentEnvironmentJournalRollback {
     param([string]$Home,[string]$TransactionPath,$TransactionLease,[object]$Journal,[string]$FailpointName)
     $observations=@{}
-    foreach($operation in @($Journal.operations)){$observations[[string]$operation.sequence]=Get-AgentEnvironmentRecoveryObservation $Home $TransactionPath $operation}
+    foreach($operation in @($Journal.operations)){$observations[[string]$operation.sequence]=Get-AgentEnvironmentRecoveryObservation $Home $TransactionPath $TransactionLease $operation}
     $decisionPhase=[string]$Journal.phase
     if($decisionPhase-ceq'applied'){$Journal.phase='applying'}
     try{$decision=Get-AiInstructionsInstallRecoveryDecision -Journal $Journal -Observations $observations}
@@ -1146,7 +1193,7 @@ function Invoke-AgentEnvironmentJournalRollback {
         $reason=if(@($decision.reasons).Count-gt0){@($decision.reasons)-join'; '}else{"unexpected recovery action '$($decision.action)'"}
         throw [IO.IOException]::new("USER transaction rollback requires retained evidence: $reason")
     }
-    Assert-AgentEnvironmentRollbackStageEvidence -TransactionPath $TransactionPath -Journal $Journal -Decision $decision -Observations $observations
+    Assert-AgentEnvironmentRollbackStageEvidence -TransactionPath $TransactionPath -TransactionLease $TransactionLease -Journal $Journal -Decision $decision -Observations $observations
     Invoke-AgentEnvironmentRecoveryRollbackDecision -Home $Home -TransactionPath $TransactionPath -TransactionLease $TransactionLease -Journal $Journal -Decision $decision -FailpointName $FailpointName
 }
 
@@ -1205,6 +1252,7 @@ function Invoke-AgentEnvironmentRecoveryRollbackDecision {
                 }
                 default { throw "Unsupported USER recovery operation action '$action'." }
             }
+            if($action-cne'none'){Invoke-AgentEnvironmentFailpoint -Name 'after-rollback-action' -ConfiguredName $FailpointName -MutationCount 0 -FailureAfterMutationCount 0}
             $operation.state='rolled-back'
             Write-AgentEnvironmentInstallJournal $TransactionPath $TransactionLease $Journal -RecoveryMutationContext $RecoveryMutationContext
         }
@@ -1288,7 +1336,7 @@ function Move-AgentEnvironmentCommittedBackups {
                     if((Get-AgentEnvironmentBytesSha256 $destinationBytes)-cne[string]$operation.original.sha256){throw "Committed backup differs from journaled original: $relative"}
                     continue
                 }
-                $backupState=Get-AgentEnvironmentPrivateFileJournalState $TransactionPath ([string]$operation.backupLeaf)
+                $backupState=Get-AgentEnvironmentPrivateFileJournalState -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ([string]$operation.backupLeaf)
                 if(-not[bool]$backupState.exists-or-not(Test-AgentEnvironmentJournalStateMatch $backupState $operation.original)){throw "Committed transaction backup is missing or changed: $relative"}
                 $backupLease=Open-PlatformFile -ParentLease $TransactionLease -Leaf ([string]$operation.backupLeaf) -Access Read -CreateMode OpenExisting
                 Assert-AgentEnvironmentRecoveryMutationContext $RecoveryMutationContext
@@ -1401,8 +1449,12 @@ function Invoke-AgentEnvironmentPlatformTransaction {
         }
         $journal.phase='committed';Write-AgentEnvironmentInstallJournal $transactionPath $transactionLease $journal;Invoke-AgentEnvironmentFailpoint 'before-committed-cleanup' $FailpointName $mutationCount $FailureAfterMutationCount
         Remove-AgentEnvironmentEmptyManagedDirectories -Home $Home -TransactionLease $transactionLease -DeletedPaths ([string[]]@($Deletes.Keys)) -BeforeMoveAction $BeforeDirectoryPruneAction
+        Invoke-AgentEnvironmentFailpoint 'before-committed-backup-export' $FailpointName $mutationCount $FailureAfterMutationCount
         $backupPath=Move-AgentEnvironmentCommittedBackups -Home $Home -TransactionPath $transactionPath -TransactionLease $transactionLease -Journal $journal
+        Invoke-AgentEnvironmentFailpoint 'after-committed-backup-export' $FailpointName $mutationCount $FailureAfterMutationCount
+        Invoke-AgentEnvironmentFailpoint 'before-committed-transaction-cleanup' $FailpointName $mutationCount $FailureAfterMutationCount
         $transactionLease.Dispose();$transactionLease=$null;Remove-AgentEnvironmentTransactionTree -TransactionRootLease $transactionContainerLease -Leaf $transactionId -ExpectedIdentity $transactionIdentity
+        Invoke-AgentEnvironmentFailpoint 'after-committed-transaction-cleanup' $FailpointName $mutationCount $FailureAfterMutationCount
         return [pscustomobject]@{success=$true;transactionPath=$transactionPath;journal=$journal;backupPath=$backupPath}
     }catch{
         $failure=$_
@@ -1423,14 +1475,14 @@ function Get-AgentEnvironmentDirectoryPermissionSnapshot {
 }
 
 function Get-AgentEnvironmentRecoveryObservation {
-    param([string]$Home,[string]$TransactionPath,[object]$Operation)
+    param([string]$Home,[string]$TransactionPath,$TransactionLease,[object]$Operation)
     $directoryOperation=[string]$Operation.kind-in@('swap-directory','create-directory')
     Assert-AgentEnvironmentPathSafe -Root $Home -RelativePath ([string]$Operation.targetRelativePath) -AllowProjectionDirectory:$directoryOperation|Out-Null
     $target=if($directoryOperation){Get-AgentEnvironmentDirectoryJournalState $Home ([string]$Operation.targetRelativePath)}else{Get-AgentEnvironmentFileJournalState $Home ([string]$Operation.targetRelativePath)}
     $permissions=if($target.exists){if($directoryOperation){Get-AgentEnvironmentDirectoryPermissionSnapshot $Home ([string]$Operation.targetRelativePath)}else{Get-AgentEnvironmentFilePermissionSnapshot $Home ([string]$Operation.targetRelativePath)}}else{$null}
     $backup=$null
     if($null-ne$Operation.backupLeaf){
-        $backupState=if($directoryOperation){Get-AgentEnvironmentDirectoryJournalState $TransactionPath ([string]$Operation.backupLeaf)}else{Get-AgentEnvironmentPrivateFileJournalState $TransactionPath ([string]$Operation.backupLeaf)}
+        $backupState=if($directoryOperation){Get-AgentEnvironmentDirectoryJournalState $TransactionPath ([string]$Operation.backupLeaf)}else{Get-AgentEnvironmentPrivateFileJournalState -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ([string]$Operation.backupLeaf)}
         if([bool]$backupState.exists){$backup=$backupState}
     }
     $data=[ordered]@{exists=[bool]$target.exists}
@@ -1451,12 +1503,12 @@ function Test-AgentEnvironmentJournalStateMatch {
 }
 
 function Assert-AgentEnvironmentRollbackStageEvidence {
-    param([string]$TransactionPath,[object]$Journal,[object]$Decision,[hashtable]$Observations)
+    param([string]$TransactionPath,$TransactionLease,[object]$Journal,[object]$Decision,[hashtable]$Observations)
     $decisions=@{};foreach($item in @($Decision.operations)){$decisions[[string]$item.sequence]=[string]$item.action}
     foreach($operation in @($Journal.operations)){
         if($null-eq$operation.stageLeaf){continue}
         $directoryOperation=[string]$operation.kind-in@('swap-directory','create-directory')
-        $stage=if($directoryOperation){Get-AgentEnvironmentDirectoryJournalState $TransactionPath ([string]$operation.stageLeaf)}else{Get-AgentEnvironmentPrivateFileJournalState $TransactionPath ([string]$operation.stageLeaf)}
+        $stage=if($directoryOperation){Get-AgentEnvironmentDirectoryJournalState $TransactionPath ([string]$operation.stageLeaf)}else{Get-AgentEnvironmentPrivateFileJournalState -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ([string]$operation.stageLeaf)}
         $action=$decisions[[string]$operation.sequence];$target=$Observations[[string]$operation.sequence]
         if([bool]$stage.exists-and-not(Test-AgentEnvironmentJournalStateMatch $stage $operation.applied)){throw [IO.IOException]::new("USER transaction stage evidence changed for sequence $($operation.sequence).")}
         $stageMustBeAbsent=$action-ceq'remove-applied'-or($action-ceq'restore-original'-and[bool]$target.exists)
@@ -1561,7 +1613,6 @@ function Assert-AgentEnvironmentRecoveryMutationContext {
 
 function Invoke-AgentEnvironmentNewJournalRecoveryLocked {
     param([string]$Home,[ValidateSet('Apply','VerifyOnly','WhatIf')][string]$Mode='Apply',[object]$InstallReadLease)
-    Assert-AgentEnvironmentDirectoryPublicationCapability
     $root=Join-Path $Home '.ai-instructions-txn'
     if(-not(Test-Path -LiteralPath $root)){return [pscustomobject]@{outcome='nothing-to-recover';exitCode=0}}
     $rootItem=Get-Item -Force -LiteralPath $root
@@ -1576,8 +1627,16 @@ function Invoke-AgentEnvironmentNewJournalRecoveryLocked {
         $classifiedEntries=New-Object Collections.Generic.List[object]
         $validatedEntries=New-Object Collections.Generic.List[object]
         foreach($entry in $entries){
-            $journalPath=Join-Path $entry.FullName 'journal.json';$previousPath=Join-Path $entry.FullName 'journal.prev'
-            $classification=Get-AiInstructionsInstallTransactionClassification -Name $entry.Name -EntryKind $(if($entry.PSIsContainer){'directory'}else{'other'}) -JournalEntryKind $(if(Test-Path -LiteralPath $journalPath -PathType Leaf){'file'}elseif(Test-Path -LiteralPath $journalPath){'other'}else{$null}) -JournalJson $(if(Test-Path -LiteralPath $journalPath -PathType Leaf){Get-Content -Raw -Encoding UTF8 $journalPath}else{$null}) -PreviousJournalEntryKind $(if(Test-Path -LiteralPath $previousPath -PathType Leaf){'file'}elseif(Test-Path -LiteralPath $previousPath){'other'}else{$null}) -PreviousJournalJson $(if(Test-Path -LiteralPath $previousPath -PathType Leaf){Get-Content -Raw -Encoding UTF8 $previousPath}else{$null})
+            $entryKind=if(($entry.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){'reparse-point'}elseif($entry.PSIsContainer){'directory'}else{'other'}
+            $journalEvidence=[pscustomobject]@{entryKind=$null;json=$null};$previousEvidence=[pscustomobject]@{entryKind=$null;json=$null};$classificationLease=$null
+            try{
+                if($entryKind-ceq'directory'){
+                    $classificationLease=Open-PlatformDirectory -Root $Home -RelativePath ".ai-instructions-txn/$($entry.Name)"
+                    $journalEvidence=Get-AgentEnvironmentPrivateFileJournalEvidence -TransactionLease $classificationLease -TransactionPath $entry.FullName -Leaf 'journal.json'
+                    $previousEvidence=Get-AgentEnvironmentPrivateFileJournalEvidence -TransactionLease $classificationLease -TransactionPath $entry.FullName -Leaf 'journal.prev'
+                }
+            }finally{if($null-ne$classificationLease){$classificationLease.Dispose()}}
+            $classification=Get-AiInstructionsInstallTransactionClassification -Name $entry.Name -EntryKind $entryKind -JournalEntryKind $journalEvidence.entryKind -JournalJson $journalEvidence.json -PreviousJournalEntryKind $previousEvidence.entryKind -PreviousJournalJson $previousEvidence.json
             $classifiedEntries.Add([pscustomobject][ordered]@{entry=$entry;classification=$classification})
         }
         $validationFailures=New-Object Collections.Generic.List[string]
@@ -1601,16 +1660,23 @@ function Invoke-AgentEnvironmentNewJournalRecoveryLocked {
             }
             if(-not$targetScopeValid){continue}
             $journal=$classification.journal
+            $validationLease=$null
             try{
-                $observations=@{};foreach($operation in $journal.operations){$observations[[string]$operation.sequence]=Get-AgentEnvironmentRecoveryObservation $Home $entry.FullName $operation}
+                $validationLease=Open-PlatformDirectory -Root $Home -RelativePath ".ai-instructions-txn/$($entry.Name)"
+                $observations=@{};foreach($operation in $journal.operations){$observations[[string]$operation.sequence]=Get-AgentEnvironmentRecoveryObservation $Home $entry.FullName $validationLease $operation}
                 $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
                 if([string]$decision.action-ceq'refuse'){$validationFailures.Add("USER transaction residue '$($entry.Name)' does not have sufficient exact recovery evidence.");continue}
                 Get-AiInstructionsInstallRecoveryPlan -Journal $journal -Decision $decision|Out-Null
-                if([string]$decision.action-ceq'roll-back'){Assert-AgentEnvironmentRollbackStageEvidence -TransactionPath $entry.FullName -Journal $journal -Decision $decision -Observations $observations}
+                if([string]$decision.action-ceq'roll-back'){Assert-AgentEnvironmentRollbackStageEvidence -TransactionPath $entry.FullName -TransactionLease $validationLease -Journal $journal -Decision $decision -Observations $observations}
             }catch{$validationFailures.Add("USER transaction residue '$($entry.Name)' does not have valid recovery evidence: $($_.Exception.Message)");continue}
+            finally{if($null-ne$validationLease){$validationLease.Dispose()}}
             $validatedEntries.Add([pscustomobject][ordered]@{entry=$entry;classification=$classification;entryState=$entryState;journal=$journal;observations=$observations;decision=$decision})
         }
         if($validationFailures.Count-gt0){return New-AgentEnvironmentInterruptedResult ($validationFailures -join ' ')}
+        $recoveryRequiresDirectoryPublication=@($validatedEntries|Where-Object{
+            $null-ne$_.journal-and[string]$_.decision.action-cne'none'-and@($_.journal.operations|Where-Object{[string]$_.kind-ceq'create-directory'}).Count-gt0
+        }).Count-gt0
+        if($recoveryRequiresDirectoryPublication){Assert-AgentEnvironmentDirectoryPublicationCapability}
         foreach($validated in $validatedEntries){
             $entry=$validated.entry;$entryState=$validated.entryState
             if(-not[bool]$entryState.exists){continue}
@@ -1669,7 +1735,6 @@ function Invoke-UserSkillsReconciliation {
     $existingManifestSnapshot = Get-AgentEnvironmentManifestSnapshot -Root $home -RelativePath $manifestRelative
     $existingManifestIdentity = $existingManifestSnapshot.Identity
     Import-AgentEnvironmentRuntimeModules -RuntimeRoot ([string]$DesiredState.RuntimeRoot)
-    Assert-AgentEnvironmentDirectoryPublicationCapability
     Assert-AgentEnvironmentProjectionVolumes -Home $home -DesiredState $DesiredState -ExistingManifest $existingManifestSnapshot.Manifest
     if ((Test-Path -LiteralPath $journalPath) -and $Mode -ne 'Apply') {
         Assert-AgentEnvironmentPathSafe -Root $home -RelativePath $journalRelative | Out-Null
@@ -1679,7 +1744,6 @@ function Invoke-UserSkillsReconciliation {
     $newTransactionRoot=Join-Path $home '.ai-instructions-txn'
     $hasNewTransactionResidue=(Test-Path -LiteralPath $newTransactionRoot)-and(@(Get-ChildItem -Force -LiteralPath $newTransactionRoot -ErrorAction Stop).Count-gt0)
     if($hasNewTransactionResidue-and$Mode-cne'Apply'){return New-AgentEnvironmentInterruptedResult 'USER transaction residue requires Apply recovery before read-only reconciliation.'}
-    if($hasNewTransactionResidue-and-not(Test-AgentEnvironmentInstallReadLease $InstallReadLease)){return New-AgentEnvironmentInterruptedResult 'USER install-journal recovery requires stable-launcher validation and the install read lease.'}
 
     # Candidate and desired-manifest validation is deliberately completed before Apply
     # creates .agents or the user-scope lock. A bad candidate must not leave even an
@@ -1731,7 +1795,6 @@ function Invoke-UserSkillsReconciliation {
         return New-AgentEnvironmentResult -Outcome 'failed' -DesiredState $DesiredState -Installed $installed -Updated $updated -Removed $removed -Preserved $preserved -Failed $failed -RollbackState 'not-started' -BackupPath $null -FailureDetails ([object[]]$failureDetails.ToArray()) -Ownership ([object[]]$ownership.ToArray())
     }
 
-    if ($Mode -eq 'Apply') { New-Item -ItemType Directory -Force -Path $agentsRoot,$skillsRoot | Out-Null }
     if (Test-Path -LiteralPath $lockPath) {
         $lockItem = Get-Item -Force -LiteralPath $lockPath
         if ($lockItem.PSIsContainer -or ($lockItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Agent environment lock must be a non-reparse file.' }
@@ -1741,7 +1804,16 @@ function Invoke-UserSkillsReconciliation {
     try {
         try {
             if ($null -ne $BeforeLockAcquisitionAction) { & $BeforeLockAcquisitionAction }
-            if ($Mode -eq 'Apply' -or (Test-Path -LiteralPath $agentsRoot -PathType Container)) {
+            if ($Mode -eq 'Apply') {
+                $lockParentLease=Open-PlatformDirectory -Root $home -RelativePath '.agents' -CreatePrivate
+                $lockStream=Enter-PlatformLock -ParentLease $lockParentLease -Leaf 'update-agent-environment.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
+            }
+            elseif(Test-Path -LiteralPath $lockPath -PathType Leaf){
+                # A read-only caller joins the persistent FileShare/flock protocol only
+                # when a writer has already established the lock leaf. At the absence
+                # observation, no writer has established that protocol; a writer that
+                # starts afterward is an ordinary read-only observation race, and this
+                # caller still must not turn the observation into a filesystem write.
                 $lockParentLease=Open-PlatformDirectory -Root $home -RelativePath '.agents'
                 $lockStream=Enter-PlatformLock -ParentLease $lockParentLease -Leaf 'update-agent-environment.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
             }
@@ -1754,7 +1826,7 @@ function Invoke-UserSkillsReconciliation {
         $hasNewTransactionResidue=(Test-Path -LiteralPath $newTransactionRoot)-and(@(Get-ChildItem -Force -LiteralPath $newTransactionRoot -ErrorAction Stop).Count-gt0)
         if($Mode-eq'Apply'-and$hasLegacyResidue-and$hasNewTransactionResidue){return New-AgentEnvironmentInterruptedResult 'Legacy and install-journal USER transaction residues coexist; recovery refused before mutation.'}
         if($Mode-eq'Apply'-and$hasLegacyResidue){
-            $legacyRecovery=Invoke-UserSkillsRecovery -UserHome $home -ExistingLock $lockStream -InstallReadLease $InstallReadLease
+            $legacyRecovery=Invoke-UserSkillsRecoveryLocked -UserHome $home -ExistingLock $lockStream -InstallReadLease $InstallReadLease
             if([string]$legacyRecovery.outcome-ceq'failed'-or[string]$legacyRecovery.outcome-ceq'concurrent'){return $legacyRecovery}
         }
         if($Mode-eq'Apply'-and$hasNewTransactionResidue){
@@ -1923,6 +1995,8 @@ function Invoke-UserSkillsReconciliation {
         }
         $plannedMutationObservations=@{}
         foreach($path in $mutationPaths){$plannedMutationObservations[$path]=$observationsByPath[$path]}
+        $plannedWritePaths=[string[]]@(@($writes.Keys)+@($manifestRelative)|Sort-Object -Unique)
+        if(Test-AgentEnvironmentPlanRequiresCreateDirectory -Home $home -WritePaths $plannedWritePaths){Assert-AgentEnvironmentDirectoryPublicationCapability}
         $desiredManifestVersion=[int64]$DesiredState.Manifest.schemaVersion
         if($null-ne$existing-and[int64]$existing.schemaVersion-eq3-and$desiredManifestVersion-lt3){
             $failureDetails.Add((New-AgentEnvironmentFailureDetail -Code 'downgrade-refused' -SkillId 'managed-manifest' -Path $manifestRelative -Classification 'managed' -Owner 'managed-manifest-v3' -Evidence 'A legacy writer cannot replace a USER coordinator manifest v3.' -DestructiveChangeAllowed $false -BackupCreated $false -ExpectedSha256 $null -ActualSha256 $null -Remediation @('Use the projection-aware USER reconciler.')))
@@ -1956,13 +2030,12 @@ function Invoke-UserSkillsReconciliation {
     finally { if ($null -ne $lockStream) { $lockStream.Dispose() }; if($null-ne$lockParentLease){$lockParentLease.Dispose()} }
 }
 
-function Invoke-UserSkillsRecovery {
+function Invoke-UserSkillsRecoveryLocked {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string] $UserHome,
-        [object] $ExistingLock,
-        [object] $InstallReadLease,
-        [scriptblock] $BeforeLockAcquisitionAction
+        [Parameter(Mandatory = $true)][object] $ExistingLock,
+        [object] $InstallReadLease
     )
     $home = [System.IO.Path]::GetFullPath($UserHome).TrimEnd([char[]]@('\','/'))
     $agentsRoot = Join-Path $home '.agents'
@@ -1972,8 +2045,6 @@ function Invoke-UserSkillsRecovery {
     $journalRelative = '.agents/update-agent-environment.recovery.json'
     $manifestRelative = '.agents/catalog-skills.manifest.json'
     $lockStream = $ExistingLock
-    $ownsLock = $null -eq $ExistingLock
-    $lockParentLease = $null
     $recoveryBackupPath = $null
     $hasLegacy = $false
     $hasNew = $false
@@ -1987,15 +2058,6 @@ function Invoke-UserSkillsRecovery {
         if($hasNew-and-not(Test-AgentEnvironmentInstallReadLease $InstallReadLease)){return New-AgentEnvironmentInterruptedResult 'USER install-journal recovery requires stable-launcher validation and the install read lease.'}
         $existingManifestSnapshot = Get-AgentEnvironmentManifestSnapshot -Root $home -RelativePath $manifestRelative
         if ($hasLegacy -and -not (Test-Path -LiteralPath $journalPath -PathType Leaf)) { throw 'Agent environment recovery journal path must be a file.' }
-        if (Test-Path -LiteralPath $lockPath) {
-            $lockItem = Get-Item -Force -LiteralPath $lockPath
-            if ($lockItem.PSIsContainer -or ($lockItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Agent environment lock must be a non-reparse file.' }
-        }
-        try {
-            if ($null -ne $BeforeLockAcquisitionAction) { & $BeforeLockAcquisitionAction }
-            if($ownsLock){$lockParentLease=Open-PlatformDirectory -Root $home -RelativePath '.agents' -CreatePrivate;$lockStream=Enter-PlatformLock -ParentLease $lockParentLease -Leaf 'update-agent-environment.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)}
-        }
-        catch { if(Test-AgentEnvironmentLockContention $_){return New-AgentEnvironmentRecoveryConcurrentResult};throw }
         $hasLegacy=Test-Path -LiteralPath $journalPath
         $hasNew=(Test-Path -LiteralPath $transactionRoot)-and(@(Get-ChildItem -Force -LiteralPath $transactionRoot -ErrorAction Stop).Count-gt0)
         if($hasLegacy-and$hasNew){return New-AgentEnvironmentInterruptedResult 'Legacy and install-journal USER transaction residues coexist; recovery refused before mutation.'}
@@ -2099,7 +2161,36 @@ function Invoke-UserSkillsRecovery {
         if($hasNew){return New-AgentEnvironmentInterruptedResult ([string]$_.Exception.Message)}
         return New-AgentEnvironmentRecoveryFailureResult -Message ([string]$_.Exception.Message) -JournalRelative $journalRelative -BackupPath $recoveryBackupPath
     }
-    finally { if ($ownsLock -and $null -ne $lockStream) { $lockStream.Dispose() };if($null-ne$lockParentLease){$lockParentLease.Dispose()} }
+    finally { }
+}
+
+function Invoke-UserSkillsRecovery {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $UserHome,
+        [object] $InstallReadLease,
+        [scriptblock] $BeforeLockAcquisitionAction
+    )
+    $home=[IO.Path]::GetFullPath($UserHome).TrimEnd([char[]]@('\','/'))
+    $legacyPath=Join-Path $home '.agents/update-agent-environment.recovery.json'
+    $transactionRoot=Join-Path $home '.ai-instructions-txn'
+    $hasLegacy=Test-Path -LiteralPath $legacyPath
+    $hasNew=(Test-Path -LiteralPath $transactionRoot)-and(@(Get-ChildItem -Force -LiteralPath $transactionRoot -ErrorAction Stop).Count-gt0)
+    if(-not$hasLegacy-and-not$hasNew){return [pscustomobject][ordered]@{schemaVersion=1;outcome='nothing-to-recover';exitCode=0;rollbackState='not-needed'}}
+    Import-AgentEnvironmentRecoveryRuntimeModules -RuntimeRoot $PSScriptRoot
+    $lockParentLease=$null;$lockStream=$null
+    try{
+        $lockPath=Join-Path $home '.agents/update-agent-environment.lock'
+        if(Test-Path -LiteralPath $lockPath){$lockItem=Get-Item -Force -LiteralPath $lockPath;if($lockItem.PSIsContainer-or($lockItem.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){throw 'Agent environment lock must be a non-reparse file.'}}
+        try{
+            if($null-ne$BeforeLockAcquisitionAction){& $BeforeLockAcquisitionAction}
+            $lockParentLease=Open-PlatformDirectory -Root $home -RelativePath '.agents' -CreatePrivate
+            $lockStream=Enter-PlatformLock -ParentLease $lockParentLease -Leaf 'update-agent-environment.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
+        }
+        catch{if(Test-AgentEnvironmentLockContention $_){return New-AgentEnvironmentRecoveryConcurrentResult};throw}
+        return Invoke-UserSkillsRecoveryLocked -UserHome $home -ExistingLock $lockStream -InstallReadLease $InstallReadLease
+    }
+    finally{if($null-ne$lockStream){$lockStream.Dispose()};if($null-ne$lockParentLease){$lockParentLease.Dispose()}}
 }
 
 Export-ModuleMember -Function Assert-UserProjectionRuntimeGate, Get-UserSkillsDesiredState, Invoke-UserSkillsReconciliation, Invoke-UserSkillsRecovery, New-AgentEnvironmentInstallReadLeaseEvidence

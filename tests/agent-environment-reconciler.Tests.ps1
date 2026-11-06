@@ -176,6 +176,18 @@ function New-TestInstallReadLeaseEvidence {
     return [pscustomobject]@{Evidence=$evidence;Stream=$evidence.Stream;Path=$lockPath;Created=$created}
 }
 
+function Get-TestTreeSnapshot {
+    param([Parameter(Mandatory=$true)][string]$Root)
+    if(-not(Test-Path -LiteralPath $Root)){return '<missing>'}
+    $rootFull=[IO.Path]::GetFullPath($Root).TrimEnd([char[]]@('\','/'))
+    $entries=@(Get-ChildItem -Force -Recurse -LiteralPath $rootFull|Sort-Object FullName|ForEach-Object{
+        $relative=$_.FullName.Substring($rootFull.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+        if($_.PSIsContainer){[pscustomobject][ordered]@{path=$relative;kind=$(if(($_.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){'reparse-directory'}else{'directory'});sha256=$null}}
+        else{[pscustomobject][ordered]@{path=$relative;kind=$(if(($_.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){'reparse-file'}else{'file'});sha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()}}
+    })
+    return (@($entries)|ConvertTo-Json -Depth 5 -Compress)
+}
+
 function Copy-TestPlatformRuntimeClosure {
     param([Parameter(Mandatory=$true)][string]$Destination)
     $manifestPath=Join-Path $script:RuntimeRoot 'platform-runtime.psd1'
@@ -195,6 +207,13 @@ function Copy-TestRecoveryRuntimeDependencies {
 }
 
 Describe 'user-scoped Agent Skills reconciliation' {
+    # Scenario: Callers invoke public recovery while reconciliation alone already owns the USER lock.
+    # Purpose: Keep lock reuse private so external callers cannot bypass USER lock acquisition.
+    It 'UnitT01_keeps_ExistingLock_private_to_locked_recovery' {
+        (Get-Command Invoke-UserSkillsRecovery).Parameters.ContainsKey('ExistingLock')|Should Be $false
+        (Get-Module agent-environment-reconciler).ExportedCommands.ContainsKey('Invoke-UserSkillsRecoveryLocked')|Should Be $false
+    }
+
     # Scenario: Production encounters a v3/v5 generation before the P7e gate and pins are installed.
     # Purpose: Keep the production refusal centralized and typed while function-level fixtures can exercise P8.
     It 'UnitT00_rejects_v3_before_agent_environment_mutation' {
@@ -549,7 +568,12 @@ $desired=Import-Clixml -LiteralPath $DesiredPath
 $env:AI_INSTRUCTIONS_USER_RECONCILER_FAILFAST=$Failpoint
 Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode Apply -FailpointName $Failpoint -FailureAfterMutationCount $FailureAfter|Out-Null
 '@|Set-Content -LiteralPath $childScript -Encoding UTF8
-        $failpoints=@('after-staged-subtree-verification','after-journal-stage-flush','after-journal-publish','after-operation-journal','after-original-rename','after-applied-rename','after-parent-flush','during-rollback','before-committed-cleanup')
+        $failpoints=@(
+            'after-staged-subtree-verification','after-journal-stage-flush','after-journal-rename','after-journal-publish',
+            'after-operation-journal','after-original-rename','after-platform-rename','after-applied-rename','after-parent-flush',
+            'during-rollback','after-rollback-action','before-committed-cleanup','before-committed-backup-export',
+            'after-committed-backup-export','before-committed-transaction-cleanup','after-committed-transaction-cleanup'
+        )
         $triggered=New-Object Collections.Generic.List[string]
         foreach($failpoint in $failpoints){
             $caseHome=Join-Path $TestDrive ("failfast-home-$failpoint")
@@ -567,24 +591,35 @@ Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode
             $nextSha=(Get-FileHash -Algorithm SHA256 -LiteralPath ([string]$desired.Files[0].stagedPath)).Hash.ToLowerInvariant()
             $desired.Files[0].sha256=$nextSha;$desired.Manifest.files[0].sha256=$nextSha
             $desiredPath=Join-Path $TestDrive ("desired-$failpoint.clixml");$desired|Export-Clixml -LiteralPath $desiredPath
-            $failureAfter=if($failpoint-ceq'during-rollback'){1}else{0}
+            $failureAfter=if($failpoint-in@('during-rollback','after-rollback-action')){1}else{0}
             if($failpoint-ceq'after-staged-subtree-verification'){Remove-Item -LiteralPath (Join-Path $caseHome '.agents/skills/alpha') -Recurse -Force}
             & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $childScript (Join-Path $caseRuntime 'agent-environment-reconciler.psm1') $desiredPath $caseHome $failpoint $failureAfter 2>$null
             $LASTEXITCODE | Should Not Be 0
-            @(Get-ChildItem -Force -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count | Should BeGreaterThan 0
+            if($failpoint-cne'after-committed-transaction-cleanup'){@(Get-ChildItem -Force -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should BeGreaterThan 0}
             if($failpoint-ceq'after-original-rename'){
                 Test-Path -LiteralPath (Join-Path $caseHome '.agents/skills/alpha/SKILL.md')|Should Be $false
                 @(Get-ChildItem -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -Filter 'backup-*' -Recurse -File).Count|Should BeGreaterThan 0
             }
             $triggered.Add($failpoint)
-            $readLeasePath=Join-Path $caseCodex 'ai-instructions-install.lock';[IO.File]::WriteAllText($readLeasePath,'')
-            $readLease=[IO.File]::Open($readLeasePath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
-            try{
-                Import-Module (Join-Path $caseRuntime 'agent-environment-reconciler.psm1') -Force
-                $trusted=New-AgentEnvironmentInstallReadLeaseEvidence -Lease $readLease
-                $result=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $caseHome -Mode Apply -InstallReadLease $trusted
-            }finally{$readLease.Dispose();Remove-Module agent-environment-reconciler -Force -ErrorAction SilentlyContinue;Import-Module $script:ModulePath -Force}
-            @('applied','current') | Should Contain $result.outcome
+            foreach($moduleName in @('skills-selection.psm1','skills-source-routing.psm1','skills-source-retrieval.psm1','skills-source-acquisition.psm1','license-delivery.psm1')){Copy-Item -LiteralPath (Join-Path $script:RuntimeRoot $moduleName) -Destination $caseRuntime -Force}
+            New-Item -ItemType Directory -Force -Path (Join-Path $caseRuntime 'catalog')|Out-Null
+            Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/skills-catalog.json') -Destination (Join-Path $caseRuntime 'catalog/skills-catalog.json') -Force
+            Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/skills-catalog-lock.json') -Destination (Join-Path $caseRuntime 'catalog/skills-catalog-lock.json') -Force
+            Move-Item -LiteralPath (Join-Path $caseRuntime 'agent-environment-reconciler.psm1') -Destination (Join-Path $caseRuntime 'agent-environment-reconciler-core.ps1')
+            Copy-Item -LiteralPath $desiredPath -Destination (Join-Path $caseRuntime 'test-desired.clixml')
+            @'
+. (Join-Path $PSScriptRoot 'agent-environment-reconciler-core.ps1')
+function Get-UserSkillsDesiredState { param([string]$RuntimeRoot,[object]$Configuration,[string]$CatalogRepository,[string]$CatalogCommit,[string]$WorkingRoot) $state=Import-Clixml -LiteralPath (Join-Path $PSScriptRoot 'test-desired.clixml');$state.RuntimeRoot=$PSScriptRoot;return $state }
+Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDesiredState,Invoke-UserSkillsReconciliation,Invoke-UserSkillsRecovery,New-AgentEnvironmentInstallReadLeaseEvidence
+'@|Set-Content -LiteralPath (Join-Path $caseRuntime 'agent-environment-reconciler.psm1') -Encoding UTF8
+            [IO.File]::WriteAllText((Join-Path $caseCodex 'ai-instructions-install.lock'),'');[IO.File]::WriteAllText((Join-Path $caseCodex 'hooks/bootstrap-ai-instructions.ps1'),"param([switch]`$ValidateOnly)`nif(-not`$ValidateOnly){throw 'ValidateOnly required'}")
+            $commit='89abcdef0123456789abcdef0123456789abcdef';@{schemaVersion=4;catalog=@{ref=$commit}}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $caseCodex 'ai-instructions-sync.json') -Encoding UTF8;@{schemaVersion=2;repository='https://github.com/example/ai-instructions.git';commit=$commit}|ConvertTo-Json|Set-Content (Join-Path $caseRuntime 'runtime-bundle.json') -Encoding UTF8
+            $entry=Join-Path $script:RepositoryRoot 'scripts/update-agent-environment.ps1';$beforeVerify=Get-TestTreeSnapshot $caseHome
+            $verifyOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $caseCodex -UserHome $caseHome -VerifyOnly -OutputFormat Json);$verifyExit=$LASTEXITCODE;$verifyResult=$verifyOutput[-1]|ConvertFrom-Json
+            if($failpoint-ceq'after-committed-transaction-cleanup'){$verifyExit|Should Be 0;$verifyResult.outcome|Should Be 'current'}else{$verifyExit|Should Be 1;$verifyResult.Code|Should Be 'interrupted-install'}
+            (Get-TestTreeSnapshot $caseHome)|Should Be $beforeVerify
+            $applyOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $caseCodex -UserHome $caseHome -Apply -OutputFormat Json);$LASTEXITCODE|Should Be 0;$result=$applyOutput[-1]|ConvertFrom-Json
+            @('applied','current')|Should Contain $result.outcome
             @(Get-ChildItem -Force -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count | Should Be 0
             (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $caseHome '.agents/skills/alpha/SKILL.md')).Hash.ToLowerInvariant() | Should Be $desired.Files[0].sha256
         }
@@ -637,6 +672,39 @@ $module=Get-Module agent-environment-reconciler
         } $script:RuntimeRoot $transactionPath $nextPath
         Test-Path -LiteralPath (Join-Path $transactionPath 'journal.json') -PathType Leaf|Should Be $true
         Test-Path -LiteralPath $previousPath|Should Be $false
+    }
+
+    # Scenario: An attacker prepositions journal.stage as a hard link or directory junction.
+    # Purpose: Reject the leaf through the transaction lease without truncating or changing the external target.
+    It 'InterT95_rejects_unsafe_journal_stage_without_touching_external_bytes' {
+        foreach($kind in @('hard-link','junction')){
+            $transactionId=[guid]::NewGuid().ToString('N');$transactionPath=Join-Path $TestDrive "unsafe-stage-$kind/$transactionId";New-Item -ItemType Directory -Force -Path $transactionPath|Out-Null
+            $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json -DateKind String;$journal.transactionId=$transactionId
+            $outsideRoot=Join-Path $TestDrive "unsafe-stage-$kind-outside";New-Item -ItemType Directory -Force -Path $outsideRoot|Out-Null
+            $outsideFile=Join-Path $outsideRoot 'sentinel.bin';[IO.File]::WriteAllBytes($outsideFile,[byte[]](1,3,5,7,9));$before=[Convert]::ToBase64String([IO.File]::ReadAllBytes($outsideFile))
+            $stage=Join-Path $transactionPath 'journal.stage'
+            if($kind-ceq'hard-link'){New-Item -ItemType HardLink -Path $stage -Target $outsideFile|Out-Null}else{New-Item -ItemType Junction -Path $stage -Target $outsideRoot|Out-Null}
+            $module=Get-Module agent-environment-reconciler
+            {& $module {param($RuntimeRoot,$TransactionPath,$Journal) Import-AgentEnvironmentRuntimeModules -RuntimeRoot $RuntimeRoot;$lease=Open-PlatformDirectory -Root $TransactionPath -RootOnly;try{Write-AgentEnvironmentInstallJournal -TransactionPath $TransactionPath -TransactionLease $lease -Journal $Journal}finally{$lease.Dispose()}} $script:RuntimeRoot $transactionPath $journal}|Should Throw
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($outsideFile))|Should Be $before
+            Test-Path -LiteralPath $stage|Should Be $true
+        }
+    }
+
+    # Scenario: journal.json is a hard link or a reparse-backed directory rather than one regular single-link file.
+    # Purpose: Classify the transaction as malformed, retain it, and never read or mutate through the unsafe leaf.
+    It 'InterT97_classifies_unsafe_journal_leaves_as_malformed_and_retains_evidence' {
+        foreach($kind in @('hard-link','junction')){
+            $caseHome=Join-Path $TestDrive "unsafe-journal-$kind-home";$transactionId=[guid]::NewGuid().ToString('N');$transactionPath=Join-Path $caseHome ".ai-instructions-txn/$transactionId";New-Item -ItemType Directory -Force -Path $transactionPath|Out-Null
+            $outsideRoot=Join-Path $TestDrive "unsafe-journal-$kind-outside";New-Item -ItemType Directory -Force -Path $outsideRoot|Out-Null
+            $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/ai-instructions-user-reconciler-journal-v1.example.json');$outsideFile=Join-Path $outsideRoot 'journal.json';[IO.File]::WriteAllText($outsideFile,$journal,[Text.UTF8Encoding]::new($false));$before=[Convert]::ToBase64String([IO.File]::ReadAllBytes($outsideFile))
+            $leaf=Join-Path $transactionPath 'journal.json';if($kind-ceq'hard-link'){New-Item -ItemType HardLink -Path $leaf -Target $outsideFile|Out-Null}else{New-Item -ItemType Junction -Path $leaf -Target $outsideRoot|Out-Null}
+            $readLease=New-TestInstallReadLeaseEvidence
+            try{$result=Invoke-UserSkillsRecovery -UserHome $caseHome -InstallReadLease $readLease.Evidence}finally{$readLease.Evidence.Dispose();if($readLease.Created){Remove-Item -LiteralPath $readLease.Path -Force -ErrorAction SilentlyContinue}}
+            $result.Code|Should Be 'interrupted-install'
+            Test-Path -LiteralPath $transactionPath -PathType Container|Should Be $true
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($outsideFile))|Should Be $before
+        }
     }
 
     # Scenario: A retained USER journal has exact directory evidence for an out-of-scope USER-home target.
@@ -947,7 +1015,7 @@ Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode
 
         $readLease=New-TestInstallReadLeaseEvidence
         try{$recovered=Invoke-UserSkillsRecovery -UserHome $caseHome -InstallReadLease $readLease.Evidence}
-        finally{$readLease.Stream.Dispose();if($readLease.Created){Remove-Item -LiteralPath $readLease.Path -Force -ErrorAction SilentlyContinue}}
+        finally{if($null-ne$readLease-and$null-ne$readLease.Evidence){$readLease.Evidence.Dispose()};if($null-ne$readLease-and$readLease.Created){Remove-Item -LiteralPath $readLease.Path -Force -ErrorAction SilentlyContinue}}
         $recovered.outcome|Should Be 'recovered'
         @(Get-ChildItem -Force -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0
         Test-Path -LiteralPath $target|Should Be $false
@@ -1273,18 +1341,37 @@ Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode
         Test-Path -LiteralPath (Join-Path $userHome '.agents') | Should Be $false
     }
 
+    # Scenario: Read-only reconciliation starts with either no .agents directory or a physical .agents directory without a lock leaf.
+    # Purpose: Preserve the complete USER tree and never call the create-on-open lock primitive in VerifyOnly or WhatIf.
+    It 'InterT96_keeps_read_only_lock_absence_zero_mutation' {
+        $desired=New-TestDesiredState -Root (Join-Path $staging 'read-only-lock-absence')
+        foreach($layout in @('no-agents','agents-without-lock')){
+            foreach($mode in @('VerifyOnly','WhatIf')){
+                $caseHome=Join-Path $TestDrive "read-only-$layout-$mode";New-Item -ItemType Directory -Path $caseHome|Out-Null
+                if($layout-ceq'agents-without-lock'){New-Item -ItemType Directory -Path (Join-Path $caseHome '.agents')|Out-Null}
+                $before=Get-TestTreeSnapshot $caseHome
+                $result=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $caseHome -Mode $mode
+                if($mode-ceq'VerifyOnly'){$result.outcome|Should Be 'drift'}else{$result.outcome|Should Be 'planned'}
+                (Get-TestTreeSnapshot $caseHome)|Should Be $before
+                Test-Path -LiteralPath (Join-Path $caseHome '.agents/update-agent-environment.lock')|Should Be $false
+            }
+        }
+    }
+
     It 'returns concurrent when the global user-scope lock is already held' {
         $desired = New-TestDesiredState -Root $staging
         $agents = Join-Path $userHome '.agents'
         New-Item -ItemType Directory -Force -Path (Join-Path $agents 'skills') | Out-Null
         $stream = [System.IO.File]::Open((Join-Path $agents 'update-agent-environment.lock'),[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
-        try { (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome | Should Be 'concurrent' }
+        $before=Get-TestTreeSnapshot $userHome
+        try { (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome | Should Be 'concurrent';(Get-TestTreeSnapshot $userHome)|Should Be $before }
         finally { $stream.Dispose() }
     }
 
     # Scenario: The P8 platform lock is held before a legacy File.Open contender starts.
     # Purpose: Prove the unchanged Windows FileShare.None protocol excludes legacy callers in the reverse direction too.
-    It 'InterT73_blocks_legacy_FileOpen_while_Enter_PlatformLock_is_held' {
+    if([Environment]::OSVersion.Platform-eq[PlatformID]::Win32NT){
+        It 'InterT73_blocks_legacy_FileOpen_while_Enter_PlatformLock_is_held' {
         $agents=Join-Path $userHome '.agents'
         New-Item -ItemType Directory -Force -Path $agents|Out-Null
         Import-Module (Join-Path $script:RuntimeRoot 'platform-runtime.psm1') -Force
@@ -1298,9 +1385,8 @@ Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode
             if($null-ne$platformLock){$platformLock.Dispose()}
             if($null-ne$parent){$parent.Dispose()}
         }
-    }
+        }
 
-    if([Environment]::OSVersion.Platform-eq[PlatformID]::Win32NT){
         # Scenario: Bootstrap native, legacy File.Open, and platform lock implementations contend in separate processes.
         # Purpose: Prove every pair is mutually exclusive in both holder/contender directions on the unchanged USER lock file.
         It 'InterT73a_proves_three_way_USER_lock_interop_in_both_directions' {
@@ -1777,8 +1863,10 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
         $processes=@();try{
             for($i=0;$i-lt2;$i++){$out=Join-Path $TestDrive "dual-codex-$i.out";$err=Join-Path $TestDrive "dual-codex-$i.err";$processes+=,[pscustomobject]@{Process=(Start-Process -FilePath $script:TestPowerShellExecutable -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$entry,'-CodexHome',$codexHomes[$i],'-UserHome',$userHome,'-Apply','-OutputFormat','Json') -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden -PassThru);Out=$out;Err=$err}}
             $deadline=[DateTime]::UtcNow.AddSeconds(30);while(@(Get-ChildItem -LiteralPath $barrier -Filter '*.ready' -ErrorAction SilentlyContinue).Count-lt2){if(@($processes|Where-Object{$_.Process.HasExited}).Count-gt0){$diagnostics=@($processes|ForEach-Object{"stdout=$((Get-Content -Raw -LiteralPath $_.Out -ErrorAction SilentlyContinue)) stderr=$((Get-Content -Raw -LiteralPath $_.Err -ErrorAction SilentlyContinue))"})-join' | ';throw "entry exited before lock barrier: $diagnostics"};if([DateTime]::UtcNow-ge$deadline){throw 'entry lock barrier timeout'};Start-Sleep -Milliseconds 25}
-            [IO.File]::WriteAllText((Join-Path $barrier 'go'),'go');foreach($item in $processes){$item.Process.WaitForExit(30000)|Out-Null}
-            $results=@($processes|ForEach-Object{(Get-Content -Raw -LiteralPath $_.Out)|ConvertFrom-Json});(@($results.outcome|Sort-Object)-join ',')|Should Be 'applied,concurrent'
+            [IO.File]::WriteAllText((Join-Path $barrier 'go'),'go');foreach($item in $processes){$item.Process.WaitForExit(30000)|Should Be $true;$item.Process.HasExited|Should Be $true}
+            $processResults=@($processes|ForEach-Object{[pscustomobject]@{Result=((Get-Content -Raw -LiteralPath $_.Out)|ConvertFrom-Json);ExitCode=$_.Process.ExitCode}})
+            (@($processResults.Result.outcome|Sort-Object)-join ',')|Should Be 'applied,concurrent'
+            foreach($processResult in $processResults){if([string]$processResult.Result.outcome-ceq'applied'){$processResult.ExitCode|Should Be 0}elseif([string]$processResult.Result.outcome-ceq'concurrent'){$processResult.ExitCode|Should Be 3}else{throw "Unexpected dual-entry outcome '$($processResult.Result.outcome)'."}}
             $manifest=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $userHome '.agents/catalog-skills.manifest.json')|ConvertFrom-Json;Assert-UserSkillsManagedManifest -Manifest $manifest|Out-Null
             (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $userHome '.agents/skills/alpha/SKILL.md')).Hash.ToLowerInvariant()|Should Be $desired.Files[0].sha256
         }finally{foreach($item in $processes){if(-not$item.Process.HasExited){$item.Process.Kill()};$item.Process.Dispose()}}
@@ -1794,14 +1882,20 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
         Move-Item -LiteralPath (Join-Path $runtime 'agent-environment-reconciler.psm1') -Destination (Join-Path $runtime 'agent-environment-reconciler-core.ps1')
         @'
 . (Join-Path $PSScriptRoot 'agent-environment-reconciler-core.ps1')
+[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'reconciler-imported.marker'),'imported')
 function Get-UserSkillsDesiredState { param([string]$RuntimeRoot,[object]$Configuration,[string]$CatalogRepository,[string]$CatalogCommit,[string]$WorkingRoot) $state=Import-Clixml -LiteralPath (Join-Path $PSScriptRoot 'test-desired.clixml');$state.RuntimeRoot=$PSScriptRoot;return $state }
+if(Test-Path -LiteralPath (Join-Path $PSScriptRoot 'force-capability-unavailable')){
+    function Assert-AgentEnvironmentDirectoryPublicationCapability {throw (New-AgentEnvironmentRefusalException -Code 'capability-unavailable' -Message 'Injected directory-publication refusal.')}
+}
 Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDesiredState,Invoke-UserSkillsReconciliation,Invoke-UserSkillsRecovery,New-AgentEnvironmentInstallReadLeaseEvidence
 '@|Set-Content -LiteralPath (Join-Path $runtime 'agent-environment-reconciler.psm1') -Encoding UTF8
         [IO.File]::WriteAllText((Join-Path $codexHome 'ai-instructions-install.lock'),'');[IO.File]::WriteAllText((Join-Path $codexHome 'hooks/bootstrap-ai-instructions.ps1'),"param([switch]`$ValidateOnly)`nif(-not`$ValidateOnly){throw 'ValidateOnly required'}")
         $commit='89abcdef0123456789abcdef0123456789abcdef';@{schemaVersion=4;catalog=@{ref=$commit}}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $codexHome 'ai-instructions-sync.json') -Encoding UTF8;@{schemaVersion=2;repository='https://github.com/example/ai-instructions.git';commit=$commit}|ConvertTo-Json|Set-Content (Join-Path $runtime 'runtime-bundle.json') -Encoding UTF8
         $desired=New-TestDesiredState -Root (Join-Path $TestDrive 'entry-matrix-stage');$desired|Export-Clixml (Join-Path $runtime 'test-desired.clixml')
+        [IO.File]::WriteAllText((Join-Path $runtime 'reconciler-imported.marker'),'imported')
         function Add-MatrixResidue([string]$MatrixUserHome,[string]$Classification,[string]$Layout){
             $agents=Join-Path $MatrixUserHome '.agents';New-Item -ItemType Directory -Force -Path $agents|Out-Null
+            [IO.File]::WriteAllText((Join-Path $agents 'update-agent-environment.lock'),'')
             if($Layout-in@('legacy-only','both')){[IO.File]::WriteAllText((Join-Path $agents 'update-agent-environment.recovery.json'),'{}')}
             if($Layout-in@('new-only','both')){
                 $name=if($Classification-ceq'invalid-name'){'invalid-name'}else{'0123456789abcdef0123456789abcdef'};$txn=Join-Path $MatrixUserHome ".ai-instructions-txn/$name";New-Item -ItemType Directory -Force -Path $txn|Out-Null
@@ -1812,25 +1906,59 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
         try{
             foreach($mode in @('verify','whatif')){foreach($classification in @('valid','malformed','orphan','invalid-name')){foreach($layout in @('legacy-only','new-only','both')){
                 $matrixUserHome=Join-Path $TestDrive "matrix-$mode-$classification-$layout";New-Item -ItemType Directory -Path $matrixUserHome|Out-Null;Add-MatrixResidue $matrixUserHome $classification $layout
+                $beforeUser=Get-TestTreeSnapshot $matrixUserHome;$beforeCodex=Get-TestTreeSnapshot $codexHome
                 $args=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$entry,'-CodexHome',$codexHome,'-UserHome',$matrixUserHome,'-OutputFormat','Json')+$(if($mode-ceq'verify'){@('-VerifyOnly')}else{@('-Apply','-WhatIf')})
                 $output=@(& $script:TestPowerShellExecutable @args);$exit=$LASTEXITCODE;$result=$output[-1]|ConvertFrom-Json
-                $exit|Should Be 1;$result.Code|Should Be 'interrupted-install';Test-Path -LiteralPath (Join-Path $matrixUserHome '.agents/skills/alpha/SKILL.md')|Should Be $false
+                $exit|Should Be 1;$result.Code|Should Be 'interrupted-install';(Get-TestTreeSnapshot $matrixUserHome)|Should Be $beforeUser;(Get-TestTreeSnapshot $codexHome)|Should Be $beforeCodex
                 if($layout-in@('new-only','both')){@(Get-ChildItem -Force -LiteralPath (Join-Path $matrixUserHome '.ai-instructions-txn')).Count|Should BeGreaterThan 0}
             }}}
             foreach($classification in @('valid','malformed','orphan','invalid-name')){
                 $matrixUserHome=Join-Path $TestDrive "matrix-recover-new-$classification";New-Item -ItemType Directory -Path $matrixUserHome|Out-Null;Add-MatrixResidue $matrixUserHome $classification 'new-only'
+                $recoverBefore=Get-TestTreeSnapshot $matrixUserHome;$recoverCodexBefore=Get-TestTreeSnapshot $codexHome
                 $output=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $codexHome -UserHome $matrixUserHome -Recover -OutputFormat Json);$exit=$LASTEXITCODE;$result=$output[-1]|ConvertFrom-Json
-                if($classification-in@('valid','orphan')){$exit|Should Be 0;$result.outcome|Should Be 'recovered';@(Get-ChildItem -Force -LiteralPath (Join-Path $matrixUserHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0}else{$exit|Should Be 1;$result.Code|Should Be 'interrupted-install';@(Get-ChildItem -Force -LiteralPath (Join-Path $matrixUserHome '.ai-instructions-txn')).Count|Should BeGreaterThan 0}
+                if($classification-in@('valid','orphan')){$exit|Should Be 0;$result.outcome|Should Be 'recovered';@(Get-ChildItem -Force -LiteralPath (Join-Path $matrixUserHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0}else{$exit|Should Be 1;$result.Code|Should Be 'interrupted-install';(Get-TestTreeSnapshot $matrixUserHome)|Should Be $recoverBefore;(Get-TestTreeSnapshot $codexHome)|Should Be $recoverCodexBefore}
                 $bothHome=Join-Path $TestDrive "matrix-recover-both-$classification";New-Item -ItemType Directory -Path $bothHome|Out-Null;Add-MatrixResidue $bothHome $classification 'both'
-                $bothOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $codexHome -UserHome $bothHome -Recover -OutputFormat Json);$LASTEXITCODE|Should Be 1;($bothOutput[-1]|ConvertFrom-Json).Code|Should Be 'interrupted-install'
+                $bothBefore=Get-TestTreeSnapshot $bothHome;$bothCodexBefore=Get-TestTreeSnapshot $codexHome;$bothOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $codexHome -UserHome $bothHome -Recover -OutputFormat Json);$LASTEXITCODE|Should Be 1;($bothOutput[-1]|ConvertFrom-Json).Code|Should Be 'interrupted-install';(Get-TestTreeSnapshot $bothHome)|Should Be $bothBefore;(Get-TestTreeSnapshot $codexHome)|Should Be $bothCodexBefore
             }
             foreach($mode in @('verify','whatif')){$matrixUserHome=Join-Path $TestDrive "matrix-baseline-$mode";New-Item -ItemType Directory -Path $matrixUserHome|Out-Null;$args=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$entry,'-CodexHome',$codexHome,'-UserHome',$matrixUserHome,'-OutputFormat','Json')+$(if($mode-ceq'verify'){@('-VerifyOnly')}else{@('-Apply','-WhatIf')});$output=@(& $script:TestPowerShellExecutable @args);$result=$output[-1]|ConvertFrom-Json;if($mode-ceq'verify'){$LASTEXITCODE|Should Be 2;$result.outcome|Should Be 'drift'}else{$LASTEXITCODE|Should Be 0;$result.outcome|Should Be 'planned'};Test-Path (Join-Path $matrixUserHome '.agents/skills/alpha/SKILL.md')|Should Be $false}
             $downgradeHome=Join-Path $TestDrive 'matrix-downgrade';New-Item -ItemType Directory -Force -Path (Join-Path $downgradeHome '.agents')|Out-Null
             Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/user-skills-managed-manifest-v3.example.json') -Destination (Join-Path $downgradeHome '.agents/catalog-skills.manifest.json')
+            $downgradeBefore=Get-TestTreeSnapshot $downgradeHome;$downgradeCodexBefore=Get-TestTreeSnapshot $codexHome
             $downgradeOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $codexHome -UserHome $downgradeHome -VerifyOnly -OutputFormat Json);$LASTEXITCODE|Should Be 1
-            ($downgradeOutput[-1]|ConvertFrom-Json).Code|Should Be 'downgrade-refused';Test-Path (Join-Path $downgradeHome '.agents/skills/alpha/SKILL.md')|Should Be $false
-            @{schemaVersion=5;catalog=@{ref=$commit};projections=@{user=@('user-agents')}}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $codexHome 'ai-instructions-sync.json') -Encoding UTF8
-            $gateHome=Join-Path $TestDrive 'matrix-gate';New-Item -ItemType Directory -Path $gateHome|Out-Null;$gateOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $codexHome -UserHome $gateHome -VerifyOnly -OutputFormat Json);$LASTEXITCODE|Should Be 1;$gate=$gateOutput[-1]|ConvertFrom-Json;$gate.Code|Should Be 'projection-runtime-unavailable';Test-Path (Join-Path $gateHome '.agents')|Should Be $false
+            ($downgradeOutput[-1]|ConvertFrom-Json).Code|Should Be 'downgrade-refused';(Get-TestTreeSnapshot $downgradeHome)|Should Be $downgradeBefore;(Get-TestTreeSnapshot $codexHome)|Should Be $downgradeCodexBefore
+            $importMarker=Join-Path $runtime 'reconciler-imported.marker'
+            foreach($pair in @(
+                [pscustomobject]@{Name='v5-v2';Config=5;Bundle=2;Code='mixed-generation'},
+                [pscustomobject]@{Name='v4-v3';Config=4;Bundle=3;Code='mixed-generation'},
+                [pscustomobject]@{Name='v5-v3';Config=5;Bundle=3;Code='projection-runtime-unavailable'},
+                [pscustomobject]@{Name='unknown-config';Config=99;Bundle=2;Code='unsupported-version'},
+                [pscustomobject]@{Name='unknown-bundle';Config=4;Bundle=99;Code='unsupported-version'}
+            )){
+                Remove-Item -LiteralPath $importMarker -Force -ErrorAction SilentlyContinue
+                @{schemaVersion=$pair.Config;catalog=@{ref=$commit};projections=@{user=@('user-agents')}}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $codexHome 'ai-instructions-sync.json') -Encoding UTF8
+                @{schemaVersion=$pair.Bundle;repository='https://github.com/example/ai-instructions.git';commit=$commit}|ConvertTo-Json|Set-Content (Join-Path $runtime 'runtime-bundle.json') -Encoding UTF8
+                $gateHome=Join-Path $TestDrive "matrix-gate-$($pair.Name)";New-Item -ItemType Directory -Path $gateHome|Out-Null;$beforeUser=Get-TestTreeSnapshot $gateHome;$beforeCodex=Get-TestTreeSnapshot $codexHome
+                $gateOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $codexHome -UserHome $gateHome -VerifyOnly -OutputFormat Json);$LASTEXITCODE|Should Be 1;$gate=$gateOutput[-1]|ConvertFrom-Json;$gate.Code|Should Be $pair.Code
+                (Get-TestTreeSnapshot $gateHome)|Should Be $beforeUser;(Get-TestTreeSnapshot $codexHome)|Should Be $beforeCodex;Test-Path -LiteralPath $importMarker|Should Be $false
+            }
+            foreach($missingSide in @('config','bundle')){
+                @{schemaVersion=4;catalog=@{ref=$commit}}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $codexHome 'ai-instructions-sync.json') -Encoding UTF8
+                @{schemaVersion=2;repository='https://github.com/example/ai-instructions.git';commit=$commit}|ConvertTo-Json|Set-Content (Join-Path $runtime 'runtime-bundle.json') -Encoding UTF8
+                if($missingSide-ceq'config'){Remove-Item -LiteralPath (Join-Path $codexHome 'ai-instructions-sync.json') -Force}else{Remove-Item -LiteralPath (Join-Path $runtime 'runtime-bundle.json') -Force}
+                $missingHome=Join-Path $TestDrive "matrix-gate-missing-$missingSide";New-Item -ItemType Directory -Path $missingHome|Out-Null;Remove-Item -LiteralPath $importMarker -Force -ErrorAction SilentlyContinue
+                $missingOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $codexHome -UserHome $missingHome -VerifyOnly -OutputFormat Json);$LASTEXITCODE|Should Be 1;($missingOutput[-1]|ConvertFrom-Json).Code|Should Be 'unsupported-version';Test-Path -LiteralPath $importMarker|Should Be $false
+            }
+
+            @{schemaVersion=4;catalog=@{ref=$commit}}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $codexHome 'ai-instructions-sync.json') -Encoding UTF8
+            @{schemaVersion=2;repository='https://github.com/example/ai-instructions.git';commit=$commit}|ConvertTo-Json|Set-Content (Join-Path $runtime 'runtime-bundle.json') -Encoding UTF8
+            [IO.File]::WriteAllText((Join-Path $runtime 'force-capability-unavailable'),'1');[IO.File]::WriteAllText($importMarker,'imported')
+            $capabilityHome=Join-Path $TestDrive 'matrix-capability';New-Item -ItemType Directory -Force -Path (Join-Path $capabilityHome '.agents')|Out-Null;[IO.File]::WriteAllText((Join-Path $capabilityHome '.agents/update-agent-environment.lock'),'')
+            $capabilityBefore=Get-TestTreeSnapshot $capabilityHome;$capabilityCodexBefore=Get-TestTreeSnapshot $codexHome;$capabilityOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $codexHome -UserHome $capabilityHome -Apply -OutputFormat Json);$LASTEXITCODE|Should Be 1;($capabilityOutput[-1]|ConvertFrom-Json).Code|Should Be 'capability-unavailable';(Get-TestTreeSnapshot $capabilityHome)|Should Be $capabilityBefore;(Get-TestTreeSnapshot $codexHome)|Should Be $capabilityCodexBefore;Test-Path -LiteralPath (Join-Path $capabilityHome '.ai-instructions-txn')|Should Be $false
+            Remove-Item -LiteralPath (Join-Path $runtime 'force-capability-unavailable') -Force
+
+            $legacyRecoverHome=Join-Path $TestDrive 'matrix-legacy-recover';$legacyRecovery=Join-Path $legacyRecoverHome '.agents/update-agent-environment.recovery.json';New-Item -ItemType Directory -Force -Path (Split-Path -Parent $legacyRecovery)|Out-Null;[IO.File]::WriteAllText($legacyRecovery,'{}');[IO.File]::WriteAllText((Join-Path $legacyRecoverHome '.agents/update-agent-environment.lock'),'');$legacyBefore=Get-TestTreeSnapshot $legacyRecoverHome
+            $legacyCodexBefore=Get-TestTreeSnapshot $codexHome;$legacyOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $codexHome -UserHome $legacyRecoverHome -Recover -OutputFormat Json);$LASTEXITCODE|Should Be 1;($legacyOutput[-1]|ConvertFrom-Json).outcome|Should Be 'failed';Test-Path -LiteralPath $legacyRecovery|Should Be $true;(Get-TestTreeSnapshot $legacyRecoverHome)|Should Be $legacyBefore;(Get-TestTreeSnapshot $codexHome)|Should Be $legacyCodexBefore
+            # runtime-baseline-unavailable, closure-invalid, and platform-mismatch remain P7e gate wiring cases; this P8 entry cannot honestly produce them yet.
         }finally{Remove-Item Function:Add-MatrixResidue -ErrorAction SilentlyContinue}
     }
 
@@ -1893,12 +2021,29 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
     It 'InterT81_uses_the_last_closed_refusal_marker_in_entry_failures' {
         $entry=Join-Path $script:RepositoryRoot 'scripts/update-agent-environment.ps1';$userHome=Join-Path $TestDrive 'refusal-entry-user';New-Item -ItemType Directory -Path $userHome|Out-Null
         $validHome=Join-Path $TestDrive 'old [ai-instructions-refusal-code=closure-invalid] final [ai-instructions-refusal-code=interrupted-install]'
+        $validRuntime=Join-Path $validHome 'hooks/ai-instructions-runtime';New-Item -ItemType Directory -Force -Path $validRuntime|Out-Null;@{schemaVersion=4}|ConvertTo-Json|Set-Content (Join-Path $validHome 'ai-instructions-sync.json');@{schemaVersion=2}|ConvertTo-Json|Set-Content (Join-Path $validRuntime 'runtime-bundle.json')
         $validOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $validHome -UserHome $userHome -VerifyOnly -OutputFormat Json)
         $LASTEXITCODE|Should Be 1;($validOutput[-1]|ConvertFrom-Json).Code|Should Be 'interrupted-install'
         $unknownHome=Join-Path $TestDrive 'old [ai-instructions-refusal-code=closure-invalid] final [ai-instructions-refusal-code=unknown]'
+        $unknownRuntime=Join-Path $unknownHome 'hooks/ai-instructions-runtime';New-Item -ItemType Directory -Force -Path $unknownRuntime|Out-Null;@{schemaVersion=4}|ConvertTo-Json|Set-Content (Join-Path $unknownHome 'ai-instructions-sync.json');@{schemaVersion=2}|ConvertTo-Json|Set-Content (Join-Path $unknownRuntime 'runtime-bundle.json')
         $unknownOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $unknownHome -UserHome $userHome -VerifyOnly -OutputFormat Json)
         $LASTEXITCODE|Should Be 1;($unknownOutput[-1]|ConvertFrom-Json).Code|Should BeNullOrEmpty
         $unknownText=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $unknownHome -UserHome $userHome -VerifyOnly -OutputFormat Text)
         @($unknownText|Where-Object{$_-match'^Code:'}).Count|Should Be 0
+    }
+}
+
+Describe 'USER directory-publication capability gating' {
+    # Scenario: directory-publication becomes unavailable after a current USER install exists.
+    # Purpose: Require the capability only for Apply plans that really contain create-directory, never for read-only/current/drift classification.
+    It 'InterT98_does_not_gate_read_only_or_current_paths_on_directory_publication' {
+        $currentHome=Join-Path $TestDrive 'capability-current-home';$currentDesired=New-TestDesiredState -Root (Join-Path $TestDrive 'capability-current-stage')
+        (Invoke-UserSkillsReconciliation -DesiredState $currentDesired -UserHome $currentHome -Mode Apply).outcome|Should Be 'applied'
+        Mock Get-PlatformCapabilities {throw 'directory-publication unavailable'} -ModuleName agent-environment-reconciler
+        (Invoke-UserSkillsReconciliation -DesiredState $currentDesired -UserHome $currentHome -Mode VerifyOnly).outcome|Should Be 'current'
+        $driftHome=Join-Path $TestDrive 'capability-drift-home'
+        (Invoke-UserSkillsReconciliation -DesiredState $currentDesired -UserHome $driftHome -Mode VerifyOnly).outcome|Should Be 'drift'
+        (Invoke-UserSkillsReconciliation -DesiredState $currentDesired -UserHome $driftHome -Mode WhatIf).outcome|Should Be 'planned'
+        Assert-MockCalled Get-PlatformCapabilities 0 -ModuleName agent-environment-reconciler
     }
 }

@@ -62,6 +62,38 @@ function New-AgentEnvironmentStableRecoveryFailureResult {
     }
 }
 
+function New-AgentEnvironmentEntryRefusalException {
+    param([Parameter(Mandatory=$true)][string]$Code,[Parameter(Mandatory=$true)][string]$Message)
+    $exception=[InvalidOperationException]::new("$Message [ai-instructions-refusal-code=$Code]")
+    $exception.Data['Code']=$Code
+    return $exception
+}
+
+function Get-AgentEnvironmentEntrySchemaVersion {
+    param([AllowNull()][object]$Document)
+    if($null-eq$Document-or$null-eq$Document.PSObject.Properties['schemaVersion']){return $null}
+    $value=$Document.schemaVersion
+    if($value-isnot[int]-and$value-isnot[long]){return $null}
+    return [int64]$value
+}
+
+function Assert-AgentEnvironmentEntryGenerationPair {
+    param([AllowNull()][object]$Configuration,[AllowNull()][object]$Bundle)
+    # P7e integration point: replace this minimal D11 pair gate with the verified
+    # reader/baseline/closure/platform gate once that runtime is production-pinned.
+    $configurationVersion=Get-AgentEnvironmentEntrySchemaVersion $Configuration
+    $bundleVersion=Get-AgentEnvironmentEntrySchemaVersion $Bundle
+    if($null-eq$configurationVersion-or$null-eq$bundleVersion-or$configurationVersion-notin@(4,5)-or$bundleVersion-notin@(2,3)){
+        throw (New-AgentEnvironmentEntryRefusalException -Code 'unsupported-version' -Message 'Installed Agent environment configuration or runtime bundle version is missing or unsupported.')
+    }
+    if(($configurationVersion-eq5)-xor($bundleVersion-eq3)){
+        throw (New-AgentEnvironmentEntryRefusalException -Code 'mixed-generation' -Message 'Installed Agent environment configuration and runtime bundle are from mixed generations.')
+    }
+    if($configurationVersion-eq5-and$bundleVersion-eq3){
+        throw (New-AgentEnvironmentEntryRefusalException -Code 'projection-runtime-unavailable' -Message 'Projection-aware production runtime is unavailable until the P7e gate and production pins are installed.')
+    }
+}
+
 trap {
     $message = [string]$_.Exception.Message
     $refusalCode = Get-AgentEnvironmentRefusalCode $_
@@ -115,6 +147,15 @@ $codexHomePath = [System.IO.Path]::GetFullPath($CodexHome).TrimEnd([char[]]@('\'
 $userHomePath = [System.IO.Path]::GetFullPath($UserHome).TrimEnd([char[]]@('\','/'))
 $runtimeRoot = Join-Path $codexHomePath 'hooks/ai-instructions-runtime'
 $launcher = Join-Path $codexHomePath 'hooks/bootstrap-ai-instructions.ps1'
+$configurationPath = Join-Path $codexHomePath 'ai-instructions-sync.json'
+$bundlePath = Join-Path $runtimeRoot 'runtime-bundle.json'
+$configuration=$null;$bundle=$null
+try{
+    if(Test-Path -LiteralPath $configurationPath -PathType Leaf){$configuration=Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath|ConvertFrom-Json}
+    if(Test-Path -LiteralPath $bundlePath -PathType Leaf){$bundle=Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath|ConvertFrom-Json}
+}
+catch{throw (New-AgentEnvironmentEntryRefusalException -Code 'unsupported-version' -Message "Installed Agent environment generation metadata is invalid: $($_.Exception.Message)")}
+Assert-AgentEnvironmentEntryGenerationPair -Configuration $configuration -Bundle $bundle
 
 function Open-AgentEnvironmentRuntimeReadLock {
     $installLockPath = Join-Path $codexHomePath 'ai-instructions-install.lock'
@@ -191,18 +232,6 @@ try {
         $finalResult = & $command -UserHome $userHomePath -InstallReadLease $script:agentEnvironmentTrustedReadLease
     }
     else {
-        $configurationPath = Join-Path $codexHomePath 'ai-instructions-sync.json'
-        $bundlePath = Join-Path $runtimeRoot 'runtime-bundle.json'
-        try {
-            $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json
-            $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
-        }
-        catch { throw "Installed Agent environment state is invalid: $($_.Exception.Message)" }
-        if ((($configuration.schemaVersion -is [int] -or $configuration.schemaVersion -is [long]) -and [int64]$configuration.schemaVersion -eq 5) -or
-            (($bundle.schemaVersion -is [int] -or $bundle.schemaVersion -is [long]) -and [int64]$bundle.schemaVersion -eq 3)) {
-            $command=$reconcilerCommands['Assert-UserProjectionRuntimeGate']
-            & $command -RuntimeRoot $runtimeRoot
-        }
         if ([string]$configuration.catalog.ref -cne [string]$bundle.commit) { throw 'Installed Catalog configuration and runtime bundle commit do not match.' }
         $catalogVersion=(Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $runtimeRoot 'catalog/skills-catalog.json')|ConvertFrom-Json).schemaVersion
         $lockVersion=(Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $runtimeRoot 'catalog/skills-catalog-lock.json')|ConvertFrom-Json).schemaVersion

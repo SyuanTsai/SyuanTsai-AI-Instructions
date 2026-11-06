@@ -1028,19 +1028,38 @@ Describe 'SYP214 whole-Skill migration evidence' {
         Test-Path -LiteralPath (Join-Path $userHome '.claude/skills/syp214-fixture/SKILL.md') | Should Be $true
     }
 
-    # Scenario: Any USER install-transaction residue appears during planning or after the plan was created.
-    # Purpose: Treat valid, malformed, orphan, and invalid-name residue uniformly as missing W11 USER evidence.
+    # Scenario: Legacy recovery JSON or any canonical new-transaction residue appears during planning or after the plan was created.
+    # Purpose: Treat legacy, valid, malformed, canonical orphan, and invalid-name evidence uniformly as missing W11 USER evidence while preserving REPO bytes.
     It 'InterT62_requires_an_empty_USER_transaction_root_during_plan_and_revalidation' {
-        $transactionRoot=Join-Path $userHome '.ai-instructions-txn';$residue=Join-Path $transactionRoot 'orphan'
-        New-Item -ItemType Directory -Force -Path $residue|Out-Null
-        $blocked=@(Get-RepoSharedSkillsMigrationPlan -Repository $targetRoot -Manifest $manifest -TrustedSkills @($trusted) -UserHome $userHome)
-        $blocked[0].removable | Should Be $false
+        $transactionRoot=Join-Path $userHome '.ai-instructions-txn';$legacyPath=Join-Path $userHome '.agents/update-agent-environment.recovery.json'
+        $repoFile=Join-Path $targetRoot '.agents/skills/syp214-fixture/SKILL.md';$repoBytes=[Convert]::ToBase64String([IO.File]::ReadAllBytes($repoFile))
+        $injectResidue={
+            param([string]$Kind)
+            if($Kind-ceq'legacy'){New-Item -ItemType Directory -Force -Path (Split-Path -Parent $legacyPath)|Out-Null;[IO.File]::WriteAllText($legacyPath,'{}');return $legacyPath}
+            $name=if($Kind-ceq'invalid-name'){'invalid-name'}else{'0123456789abcdef0123456789abcdef'}
+            $residue=Join-Path $transactionRoot $name;New-Item -ItemType Directory -Force -Path $residue|Out-Null
+            if($Kind-ceq'malformed'){[IO.File]::WriteAllText((Join-Path $residue 'journal.json'),'{')}
+            elseif($Kind-ceq'valid'){$journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json -DateKind String;$journal.transactionId=$name;[IO.File]::WriteAllText((Join-Path $residue 'journal.json'),($journal|ConvertTo-Json -Depth 30),[Text.UTF8Encoding]::new($false))}
+            return $residue
+        }
+        $clearResidue={Remove-Item -LiteralPath $legacyPath -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath $transactionRoot -Recurse -Force -ErrorAction SilentlyContinue}
+        foreach($kind in @('legacy','valid','malformed','orphan','invalid-name')){
+            & $clearResidue
+            $residue=& $injectResidue $kind
+            $blocked=@(Get-RepoSharedSkillsMigrationPlan -Repository $targetRoot -Manifest $manifest -TrustedSkills @($trusted) -UserHome $userHome)
+            $blocked[0].removable|Should Be $false
+            Test-Path -LiteralPath $residue|Should Be $true
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($repoFile))|Should Be $repoBytes
 
-        Remove-Item -LiteralPath $residue -Force;Remove-Item -LiteralPath $transactionRoot -Force
-        $plan=@(Get-RepoSharedSkillsMigrationPlan -Repository $targetRoot -Manifest $manifest -TrustedSkills @($trusted) -UserHome $userHome)
-        $plan[0].removable | Should Be $true
-        New-Item -ItemType Directory -Force -Path $residue|Out-Null
-        { Assert-RepoSharedSkillsMigrationEvidence -Repository $targetRoot -Skill $plan[0] } | Should Throw 'USER state changed concurrently'
+            & $clearResidue
+            $plan=@(Get-RepoSharedSkillsMigrationPlan -Repository $targetRoot -Manifest $manifest -TrustedSkills @($trusted) -UserHome $userHome)
+            $plan[0].removable|Should Be $true
+            $residue=& $injectResidue $kind
+            {Assert-RepoSharedSkillsMigrationEvidence -Repository $targetRoot -Skill $plan[0]}|Should Throw 'USER state changed concurrently'
+            Test-Path -LiteralPath $residue|Should Be $true
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($repoFile))|Should Be $repoBytes
+        }
+        & $clearResidue
     }
 
     # Scenario: The migration planner receives a REPO managed manifest v4.
