@@ -725,6 +725,40 @@ $module=Get-Module agent-environment-reconciler
         }
     }
 
+    # Scenario: Another process prepositions file-1.stage as a hard link, or as a file symlink when Windows permits it, after the transaction directory becomes observable.
+    # Purpose: Create transaction payloads exclusively through create-new platform leases so Apply cannot truncate external bytes or publish a partial projection.
+    It 'InterT103_rejects_prepositioned_payload_stage_links_without_external_or_projection_mutation' {
+        $linkKinds=New-Object Collections.Generic.List[string]
+        $linkKinds.Add('hard-link')
+        if([Environment]::OSVersion.Platform-eq[PlatformID]::Win32NT){
+            $probeTarget=Join-Path $TestDrive 'payload-stage-symlink-probe-target';$probeLink=Join-Path $TestDrive 'payload-stage-symlink-probe-link'
+            [IO.File]::WriteAllText($probeTarget,'probe')
+            try{New-Item -ItemType SymbolicLink -Path $probeLink -Target $probeTarget -ErrorAction Stop|Out-Null;$linkKinds.Add('symbolic-link')}
+            catch{}
+            finally{if(Test-Path -LiteralPath $probeLink){Remove-Item -LiteralPath $probeLink -Force};if(Test-Path -LiteralPath $probeTarget){Remove-Item -LiteralPath $probeTarget -Force}}
+        }
+        foreach($linkKind in $linkKinds){
+            $caseHome=Join-Path $TestDrive "payload-stage-$linkKind-home";$desired=New-TestDesiredState -Root (Join-Path $TestDrive "payload-stage-$linkKind-source")
+            New-Item -ItemType Directory -Force -Path (Join-Path $caseHome '.agents/skills/alpha')|Out-Null
+            $outsideFile=Join-Path $TestDrive "payload-stage-$linkKind-external.bin";$outsideBytes=[byte[]](0,17,34,51,68,85,102,119,136,153,170,187,204,221,238,255)
+            [IO.File]::WriteAllBytes($outsideFile,$outsideBytes);$before=[Convert]::ToBase64String([IO.File]::ReadAllBytes($outsideFile))
+            $result=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $caseHome -Mode Apply -BeforeTransactionPrivateWriteAction {
+                param($transactionPath)
+                $stage=Join-Path $transactionPath 'file-1.stage'
+                if($linkKind-ceq'hard-link'){New-Item -ItemType HardLink -Path $stage -Target $outsideFile -ErrorAction Stop|Out-Null}
+                else{New-Item -ItemType SymbolicLink -Path $stage -Target $outsideFile -ErrorAction Stop|Out-Null}
+            }
+            $result.outcome|Should Be 'failed'
+            $result.rollbackState|Should Be 'recovery-required'
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($outsideFile))|Should Be $before
+            Test-Path -LiteralPath (Join-Path $caseHome '.agents/skills/alpha/SKILL.md')|Should Be $false
+            Test-Path -LiteralPath (Join-Path $caseHome '.agents/catalog-skills.manifest.json')|Should Be $false
+            $retained=@(Get-ChildItem -Force -Directory -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue)
+            $retained.Count|Should Be 1
+            Test-Path -LiteralPath (Join-Path $retained[0].FullName 'file-1.stage')|Should Be $true
+        }
+    }
+
     # Scenario: journal.json is a hard link or a reparse-backed directory rather than one regular single-link file.
     # Purpose: Classify the transaction as malformed, retain it, and never read or mutate through the unsafe leaf.
     It 'InterT97_classifies_unsafe_journal_leaves_as_malformed_and_retains_evidence' {

@@ -116,16 +116,23 @@ function Get-AgentEnvironmentBytesSha256 {
 
 function Write-AgentEnvironmentDurableStagePayload {
     param(
-        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)]$ParentLease,
+        [Parameter(Mandatory=$true)][string]$Leaf,
         [Parameter(Mandatory=$true)][AllowEmptyCollection()][byte[]]$Bytes,
         [Parameter(Mandatory=$true)][string]$ExpectedSha256
     )
-    $stream=[IO.File]::Open($Path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
-    try{$stream.Write($Bytes,0,$Bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
-    $readBack=[IO.File]::ReadAllBytes($Path)
-    if([int64]$readBack.LongLength-ne[int64]$Bytes.LongLength-or(Get-AgentEnvironmentBytesSha256 $readBack)-cne$ExpectedSha256){
-        throw "Staged subtree payload readback does not match the desired bytes: $Path"
+    $file=$null
+    try{
+        $file=Open-PlatformFile -ParentLease $ParentLease -Leaf $Leaf -Access ReadWrite -CreateMode CreateNew
+        $file.WriteNewBytes($Bytes)
+        $observed=Assert-PlatformFileIdentity -Lease $file -Expected $file.Observation -SingleLink -VerifyPath
+        $readBack=$file.ReadAllBytes([int]$observed.Size)
+        if([int64]$observed.Size-ne[int64]$Bytes.LongLength-or[int64]$readBack.LongLength-ne[int64]$Bytes.LongLength-or(Get-AgentEnvironmentBytesSha256 $readBack)-cne$ExpectedSha256){
+            throw "Transaction-private payload readback does not match the desired bytes: $Leaf"
+        }
+        return [pscustomobject][ordered]@{exists=$true;sha256=$ExpectedSha256;length=[int64]$observed.Size;identity=(ConvertTo-AgentEnvironmentPlatformIdentity $observed)}
     }
+    finally{if($null-ne$file){$file.Dispose()}}
 }
 
 function Get-AgentEnvironmentPathComparison {
@@ -1375,7 +1382,7 @@ function Move-AgentEnvironmentCommittedBackups {
 }
 
 function Invoke-AgentEnvironmentPlatformTransaction {
-    param([string]$Home,[object]$DesiredState,[hashtable]$Writes,[hashtable]$Deletes,[hashtable]$StagedSnapshots,[hashtable]$PlannedObservations,[byte[]]$ManifestBytes,[string]$ManifestSha,[int]$FailureAfterMutationCount,[string]$FailpointName,[scriptblock]$BeforeTransactionSnapshotAction,[scriptblock]$BeforeFinalVerificationAction,[scriptblock]$BeforeDirectoryPruneAction)
+    param([string]$Home,[object]$DesiredState,[hashtable]$Writes,[hashtable]$Deletes,[hashtable]$StagedSnapshots,[hashtable]$PlannedObservations,[byte[]]$ManifestBytes,[string]$ManifestSha,[int]$FailureAfterMutationCount,[string]$FailpointName,[scriptblock]$BeforeTransactionSnapshotAction,[scriptblock]$BeforeTransactionPrivateWriteAction,[scriptblock]$BeforeFinalVerificationAction,[scriptblock]$BeforeDirectoryPruneAction)
     $validatedOriginals=@{}
     try{
         if($null-ne$BeforeTransactionSnapshotAction){& $BeforeTransactionSnapshotAction}
@@ -1397,6 +1404,7 @@ function Invoke-AgentEnvironmentPlatformTransaction {
         $transactionState=Get-PlatformDirectoryState -ParentLease $transactionContainerLease -Leaf $transactionId
         if(-not[bool]$transactionState.exists){throw 'Agent environment transaction directory was not created.'}
         $transactionIdentity=$transactionState.identity
+        if($null-ne$BeforeTransactionPrivateWriteAction){& $BeforeTransactionPrivateWriteAction $transactionPath}
         $allWrites=@{};foreach($key in $Writes.Keys){$allWrites[$key]=[pscustomobject]@{bytes=[byte[]]$StagedSnapshots[$key].bytes;sha256=[string]$Writes[$key].sha256}}
         $allWrites['.agents/catalog-skills.manifest.json']=[pscustomobject]@{bytes=$ManifestBytes;sha256=$ManifestSha}
         $directoryGroups=@{};$fileWritePaths=New-Object Collections.Generic.List[string]
@@ -1408,17 +1416,30 @@ function Invoke-AgentEnvironmentPlatformTransaction {
         $operations=New-Object Collections.Generic.List[object];$sequence=0
         foreach($path in @($Deletes.Keys|Sort-Object)){$sequence++;$original=$validatedOriginals[$path];$permissions=Get-AgentEnvironmentFilePermissionSnapshot $Home $path;$operations.Add((New-AgentEnvironmentPlatformOperation $sequence 'remove-file' $path $null ("backup-$sequence") $null $original ([pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}) $permissions))}
         foreach($root in @($directoryGroups.Keys|Sort-Object)){
-            $sequence++;$stageLeaf="directory-$sequence";$stagePath=Join-Path $transactionPath $stageLeaf;New-Item -ItemType Directory -Path $stagePath|Out-Null
-            foreach($path in $directoryGroups[$root]){$suffix=$path.Substring($root.Length).TrimStart('/');$destination=Join-Path $stagePath $suffix.Replace('/',[IO.Path]::DirectorySeparatorChar);New-Item -ItemType Directory -Force -Path ([IO.Path]::GetDirectoryName($destination))|Out-Null;Write-AgentEnvironmentDurableStagePayload -Path $destination -Bytes ([byte[]]$allWrites[$path].bytes) -ExpectedSha256 ([string]$allWrites[$path].sha256)}
+            $sequence++;$stageLeaf="directory-$sequence";$existingStage=Get-PlatformDirectoryState -ParentLease $transactionLease -Leaf $stageLeaf
+            if([bool]$existingStage.exists){throw "Transaction-private staged directory already exists: $stageLeaf"}
+            $stageRootLease=$null
+            try{
+                $stageRootLease=Open-PlatformDirectory -Root $transactionPath -RelativePath $stageLeaf -CreatePrivate
+                foreach($path in $directoryGroups[$root]){
+                    $suffix=$path.Substring($root.Length).TrimStart('/');$relativeParentNative=[IO.Path]::GetDirectoryName($suffix.Replace('/',[IO.Path]::DirectorySeparatorChar));$relativeParent=if($null-eq$relativeParentNative){''}else{$relativeParentNative.Replace('\','/')}
+                    $payloadParentLease=$null
+                    try{
+                        $payloadParentLease=if([string]::IsNullOrEmpty($relativeParent)){$stageRootLease}else{Open-PlatformDirectory -Root $transactionPath -RelativePath "$stageLeaf/$relativeParent" -CreatePrivate}
+                        Write-AgentEnvironmentDurableStagePayload -ParentLease $payloadParentLease -Leaf ([IO.Path]::GetFileName($suffix)) -Bytes ([byte[]]$allWrites[$path].bytes) -ExpectedSha256 ([string]$allWrites[$path].sha256)|Out-Null
+                    }
+                    finally{if($null-ne$payloadParentLease-and-not[object]::ReferenceEquals($payloadParentLease,$stageRootLease)){$payloadParentLease.Dispose()}}
+                }
+            }
+            finally{if($null-ne$stageRootLease){$stageRootLease.Dispose()}}
             $stageState=Get-AgentEnvironmentDirectoryJournalState $transactionPath $stageLeaf
             $operations.Add((New-AgentEnvironmentPlatformOperation $sequence 'create-directory' $root $stageLeaf $null ("quarantine-$sequence") ([pscustomobject][ordered]@{exists=$false;identity=$null;inventorySha256=$null;entryCount=$null}) $stageState $null))
         }
         if($directoryGroups.Count-gt0){Invoke-AgentEnvironmentFailpoint 'after-staged-subtree-verification' $FailpointName $mutationCount $FailureAfterMutationCount}
         $orderedFileWrites=@($fileWritePaths|Where-Object{$_-cne'.agents/catalog-skills.manifest.json'}|Sort-Object)+@($fileWritePaths|Where-Object{$_-ceq'.agents/catalog-skills.manifest.json'})
         foreach($path in $orderedFileWrites){
-            $sequence++;$stageLeaf="file-$sequence.stage";$stagePath=Join-Path $transactionPath $stageLeaf;[IO.File]::WriteAllBytes($stagePath,[byte[]]$allWrites[$path].bytes)
-            $stageLease=Open-PlatformFile -ParentLease $transactionLease -Leaf $stageLeaf -Access Read -CreateMode OpenExisting
-            try{$stageObserved=Assert-PlatformFileIdentity -Lease $stageLease -Expected $stageLease.Observation -SingleLink;$applied=[pscustomobject][ordered]@{exists=$true;sha256=[string]$allWrites[$path].sha256;length=[int64]$stageObserved.Size;identity=(ConvertTo-AgentEnvironmentPlatformIdentity $stageObserved)}}finally{$stageLease.Dispose()}
+            $sequence++;$stageLeaf="file-$sequence.stage"
+            $applied=Write-AgentEnvironmentDurableStagePayload -ParentLease $transactionLease -Leaf $stageLeaf -Bytes ([byte[]]$allWrites[$path].bytes) -ExpectedSha256 ([string]$allWrites[$path].sha256)
             $original=$validatedOriginals[$path];$kind=if($original.exists){'write-file'}else{'create-file'};$permissions=if($original.exists){Get-AgentEnvironmentFilePermissionSnapshot $Home $path}else{$null};$backup=if($original.exists){"backup-$sequence"}else{$null}
             $operations.Add((New-AgentEnvironmentPlatformOperation $sequence $kind $path $stageLeaf $backup $null $original $applied $permissions))
         }
@@ -1748,6 +1769,7 @@ function Invoke-UserSkillsReconciliation {
         [scriptblock] $BeforeLockAcquisitionAction,
         [scriptblock] $BeforeBackupValidationAction,
         [scriptblock] $BeforeTransactionSnapshotAction,
+        [scriptblock] $BeforeTransactionPrivateWriteAction,
         [scriptblock] $BeforeFinalVerificationAction,
         [scriptblock] $BeforeDirectoryPruneAction
     )
@@ -2042,7 +2064,7 @@ function Invoke-UserSkillsReconciliation {
             $manifestBytes=Get-AgentEnvironmentManifestBytes $DesiredState.Manifest;$manifestSha=Get-AgentEnvironmentBytesSha256 $manifestBytes
         }
         try{
-            $transactionResult=Invoke-AgentEnvironmentPlatformTransaction -Home $home -DesiredState $DesiredState -Writes $writes -Deletes $deletes -StagedSnapshots $stagedSnapshots -PlannedObservations $plannedMutationObservations -ManifestBytes $manifestBytes -ManifestSha $manifestSha -FailureAfterMutationCount $FailureAfterMutationCount -FailpointName $FailpointName -BeforeTransactionSnapshotAction $BeforeTransactionSnapshotAction -BeforeFinalVerificationAction $BeforeFinalVerificationAction -BeforeDirectoryPruneAction $BeforeDirectoryPruneAction
+            $transactionResult=Invoke-AgentEnvironmentPlatformTransaction -Home $home -DesiredState $DesiredState -Writes $writes -Deletes $deletes -StagedSnapshots $stagedSnapshots -PlannedObservations $plannedMutationObservations -ManifestBytes $manifestBytes -ManifestSha $manifestSha -FailureAfterMutationCount $FailureAfterMutationCount -FailpointName $FailpointName -BeforeTransactionSnapshotAction $BeforeTransactionSnapshotAction -BeforeTransactionPrivateWriteAction $BeforeTransactionPrivateWriteAction -BeforeFinalVerificationAction $BeforeFinalVerificationAction -BeforeDirectoryPruneAction $BeforeDirectoryPruneAction
             return New-AgentEnvironmentResult -Outcome 'applied' -DesiredState $DesiredState -Installed $installed -Updated $updated -Removed $removed -Preserved $preserved -Failed @() -RollbackState 'not-needed' -BackupPath ([string]$transactionResult.backupPath) -FailureDetails @() -Ownership ([object[]]$ownership.ToArray())
         }catch{
             if($_.Exception.Data.Contains('Code')-and[string]$_.Exception.Data['Code']-ceq'concurrent'){
