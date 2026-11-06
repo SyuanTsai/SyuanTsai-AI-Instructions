@@ -3856,6 +3856,7 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $stage=New-P7File $f.Transaction 'stage' ([Text.Encoding]::UTF8.GetBytes('new'))
             $targetBefore=Get-P7NamedFileState $f.Parent 'data'
             $stageBefore=Get-P7NamedFileState $f.Transaction 'stage' $stage
+            $stagePermissionsBefore=Get-PlatformPermissions $stage.Lease
             Set-P7WindowsDurabilityHook { param($point,$operation,$role,$lease) if($point -ceq 'stage-flush'){throw 'injected stage flush failure'} }
             try {
                 Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $target.State -DisplacedLeaf 'backup' -ExpectedStage $stage.Expected | Out-Null
