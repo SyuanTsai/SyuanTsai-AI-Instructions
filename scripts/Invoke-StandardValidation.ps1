@@ -2989,7 +2989,7 @@ function Merge-StandardValidationProcessStderr {
 function Initialize-StandardValidationPlatformRuntime {
     if ($null -ne (Get-Variable StandardValidationPlatformBinding -Scope Script -ErrorAction SilentlyContinue)) { return }
     $manifestPath = Join-Path $PSScriptRoot 'platform-runtime.psd1'
-    $pin = 'fe6a12773e439f3dcd5d3b69af9f7b18c376b9b3637a7946504d4d8f457b6212'
+    $pin = '1de1b984268d2e6edcc362a7b4ccca0a27ec08b9355b9d52e3a2ebc635c059f7'
     $canonicalHash = {
         param([string]$Path)
         $bytes = [IO.File]::ReadAllBytes($Path)

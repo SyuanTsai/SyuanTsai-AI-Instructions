@@ -548,7 +548,7 @@ Keep this section too.
             'skills-source-retrieval.psm1','skills-source-acquisition.psm1','skills-source-composition.psm1',
             'ai-instructions-runtime-contract.psm1','agent-artifact-remediation.psm1','repo-shared-skills-migration.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1',
             'ai-instructions-updater.psm1','update-ai-instructions.ps1','agent-environment-reconciler.psm1','update-agent-environment.ps1',
-            'cleanup-ai-instructions-pollution.ps1','installer-safe-mutation.psm1','license-delivery.psm1'
+            'cleanup-ai-instructions-pollution.ps1','installer-safe-mutation.psm1','platform-runtime.psd1','license-delivery.psm1'
         )) {
             Copy-Item -LiteralPath (Join-Path $repositoryRoot "scripts\$fileName") -Destination (Join-Path $cloneRoot "scripts\$fileName") -Force
         }

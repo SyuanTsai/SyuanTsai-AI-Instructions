@@ -5,6 +5,7 @@ Set-StrictMode -Version Latest
 $script:RuntimePreparationModulePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'RuntimePreparation.psm1'))
 $script:WindowsPublicationPostRenameTestHook = $null
 $script:WindowsPublicationDurabilityTestHook = $null
+$script:WindowsPublicationPreReopenTestHook = $null
 $loadedRuntimePreparationModules = @(Import-Module -Name $script:RuntimePreparationModulePath -PassThru -Scope Local -ErrorAction Stop)
 if ($loadedRuntimePreparationModules.Count -ne 1 -or -not [StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetFullPath([string]$loadedRuntimePreparationModules[0].Path),$script:RuntimePreparationModulePath)) { throw [IO.InvalidDataException]::new('The verified runtime preparation dependency did not load from its bound path.') }
 $script:RuntimePreparationModule = $loadedRuntimePreparationModules[0]
@@ -109,6 +110,24 @@ function Assert-WindowsPlatformExpectedState {
         throw (New-WindowsPlatformVerificationError $Capability 'The target identity, hash, or length differs from ExpectedState.')
     }
 }
+function Assert-WindowsPlatformExpectedContent {
+    param($Lease,$Expected,[string]$Capability,[string]$Context)
+    try {
+        if ($null -eq $Lease -or $null -eq $Expected -or $Expected.sha256 -isnot [string] -or
+            [string]$Expected.sha256 -cnotmatch '^[0-9a-f]{64}$' -or $null -eq $Expected.length -or [int64]$Expected.length -lt 0) {
+            throw [ArgumentException]::new("$Context content expectation is invalid.")
+        }
+        $observation=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::AssertIdentity($Lease,$Lease.Observation,$true)
+        if ([int64]$observation.Size -ne [int64]$Expected.length -or
+            [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::ComputeSha256($Lease) -cne [string]$Expected.sha256) {
+            throw [IO.InvalidDataException]::new("$Context hash or length differs from the bound expectation.")
+        }
+    }
+    catch {
+        if ($_.Exception -is [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]) { throw }
+        throw (New-WindowsPlatformVerificationError $Capability $_.Exception.Message)
+    }
+}
 function Assert-WindowsPlatformTransactionLease {
     param($ParentLease,$TransactionLease,[string]$Capability)
     $parentPath=Get-WindowsPlatformLeasePath $ParentLease
@@ -186,6 +205,12 @@ function Invoke-WindowsPlatformDurabilityHook {
     param([string]$Point,[string]$Operation,[string]$Role,$Lease)
     if ($null -ne $script:WindowsPublicationDurabilityTestHook) {
         & $script:WindowsPublicationDurabilityTestHook $Point $Operation $Role $Lease
+    }
+}
+function Invoke-WindowsPlatformPreReopenHook {
+    param([string]$Point,[string]$Operation,[string]$Role,[string]$Path)
+    if ($null -ne $script:WindowsPublicationPreReopenTestHook) {
+        & $script:WindowsPublicationPreReopenTestHook $Point $Operation $Role $Path
     }
 }
 function Invoke-WindowsPlatformFileFlush {
@@ -337,8 +362,7 @@ function Publish-WindowsPlatformFile {
     if (-not [StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetDirectoryName($stagePath),[string]$transactionContext.transactionPath)) { throw (New-WindowsPlatformVerificationError 'publication' 'StageLease is not an immediate child of TransactionLease.') }
     $stageObservation=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::AssertIdentity($StageLease,$StageLease.Observation,$true)
     $stageIdentity=Get-WindowsPlatformIdentity $stageObservation
-    if ([string]$ExpectedStage.sha256 -cnotmatch '^[0-9a-f]{64}$' -or [int64]$stageObservation.Size -ne [int64]$ExpectedStage.length -or
-        [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::ComputeSha256($StageLease) -cne [string]$ExpectedStage.sha256) { throw (New-WindowsPlatformVerificationError 'publication' 'Stage hash or length differs from ExpectedStage.') }
+    Assert-WindowsPlatformExpectedContent $StageLease $ExpectedStage 'publication' 'Stage'
     if ([bool]$ExpectedState.exists -ne ($null -ne $DisplacedLeaf)) { throw (New-WindowsPlatformVerificationError 'publication' 'DisplacedLeaf must be supplied exactly when ExpectedState.exists is true.') }
     Assert-WindowsPlatformJournalOperation $Journal $ParentLease $TransactionLease $transactionContext $Leaf $stageLeaf $DisplacedLeaf $ExpectedState $ExpectedStage 'stage-rename' 'publication'
     # In NoReplace mode do not probe the destination name. The handle-bound native
@@ -373,7 +397,10 @@ function Publish-WindowsPlatformFile {
         # blocks a second DELETE request.  Publication therefore consumes the caller's
         # validated stage lease, then reopens the same identity relative to TransactionLease.
         $StageLease.Dispose()
+        Invoke-WindowsPlatformPreReopenHook 'after-dispose-before-reopen' 'publication' 'stage' $stagePath
         $mutationStage=Open-WindowsPlatformMutationFile $TransactionLease $stageLeaf $stageIdentity 'publication' -Writable
+        Assert-WindowsPlatformExpectedContent $mutationStage $ExpectedStage 'publication' 'Reopened stage ExpectedStage'
+        if ($null -ne $Journal) { Assert-WindowsPlatformExpectedContent $mutationStage $Journal.applied 'publication' 'Reopened stage journal applied state' }
         $appliedStagePermissions=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($mutationStage,[string]$permissions.sddl,[bool]$permissions.readOnly)
         $permissionsApplied=$true
         $canonicalStagePermissions=ConvertTo-WindowsPlatformPermissionSnapshot ([pscustomobject][ordered]@{kind='windows-sddl';sddl=[string]$appliedStagePermissions.Sddl;readOnly=[bool]$appliedStagePermissions.ReadOnly}) 'publication' 'Applied stage'
@@ -384,6 +411,7 @@ function Publish-WindowsPlatformFile {
         Invoke-WindowsPlatformDirectoryFlush $ParentLease 'publication' 'preflight' 'parent'
         Invoke-WindowsPlatformDirectoryFlush $TransactionLease 'publication' 'preflight' 'transaction'
         if ($null -ne $target) {
+            Assert-WindowsPlatformExpectedState $target $ExpectedState 'publication'
             if ($permissions.readOnly) { [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($target,$null,$false);$targetReadOnlyCleared=$true }
             [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::RenameNoReplace($target,$TransactionLease,$DisplacedLeaf)
             $displaced=$true
@@ -502,8 +530,11 @@ function Remove-WindowsPlatformOwnedFile {
             Invoke-WindowsPlatformDirectoryFlush $ParentLease 'owned-file-removal' 'preflight' 'parent'
             Invoke-WindowsPlatformDirectoryFlush $TransactionLease 'owned-file-removal' 'preflight' 'transaction'
             if ($permissions.readOnly) { [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($target,$null,$false);$readOnlyCleared=$true }
+            $targetPath=Get-WindowsPlatformLeasePath $target
             $target.Dispose();$target=$null
+            Invoke-WindowsPlatformPreReopenHook 'after-dispose-before-reopen' 'owned-file-removal' 'target' $targetPath
             $target=Open-WindowsPlatformMutationFile $ParentLease $Leaf $ExpectedState.identity 'owned-file-removal' -Writable
+            Assert-WindowsPlatformExpectedState $target $ExpectedState 'owned-file-removal'
             Invoke-WindowsPlatformFileFlush $target 'owned-file-removal' 'file-flush'
             [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::RenameNoReplace($target,$TransactionLease,$TombstoneLeaf)
             $renamed=$true

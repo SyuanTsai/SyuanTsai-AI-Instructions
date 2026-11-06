@@ -3461,6 +3461,16 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
                 & $windowsModule { param($NestedValue) $script:WindowsPublicationDurabilityTestHook=$NestedValue } $Value
             } $Hook
         }
+        function Set-P7WindowsPreReopenHook([AllowNull()][scriptblock]$Hook) {
+            $runtimeModule=@(Get-Module platform-runtime)[0]
+            if($null -eq $runtimeModule){throw 'The platform runtime module is not loaded.'}
+            & $runtimeModule {
+                param($Value)
+                $windowsModule=@(Get-Module -All Windows)[0]
+                if($null -eq $windowsModule){throw 'The nested Windows platform module is not loaded.'}
+                & $windowsModule { param($NestedValue) $script:WindowsPublicationPreReopenTestHook=$NestedValue } $Value
+            } $Hook
+        }
         function Set-P7WindowsPermissionMutationHook([AllowNull()][scriptblock]$Hook) {
             $field=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative].GetField('PermissionsMutationTestHook',[Reflection.BindingFlags]'Static,NonPublic')
             if($null -eq $field){throw 'The internal Windows permission mutation hook is unavailable.'}
@@ -3699,6 +3709,51 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
         }
     }
 
+    # Scenario: A copied scripts tree is reached through a junction ancestor in a fresh PowerShell process.
+    # Purpose: Reject every reparse-point ancestor before reading the manifest or compiling native source.
+    It 'InterT172_rejects_an_installer_wrapper_junction_ancestor' {
+        $shell=Join-Path $PSHOME 'pwsh.exe';$physicalRoot=Join-Path $TestDrive 'wrapper-junction-physical';$junctionRoot=Join-Path $TestDrive 'wrapper-junction-alias'
+        [IO.Directory]::CreateDirectory($physicalRoot)|Out-Null
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts') -Destination (Join-Path $physicalRoot 'scripts') -Recurse
+        New-Item -ItemType Junction -Path $junctionRoot -Target $physicalRoot | Out-Null
+        $wrapper=Join-Path $junctionRoot 'scripts/installer-safe-mutation.psm1'
+        $code="try { Import-Module '$($wrapper.Replace("'","''"))' -Force -ErrorAction Stop; exit 91 } catch { `$_.Exception.GetType().FullName; `$_.Exception.Message; if (`$_.Exception -isnot [IO.InvalidDataException]) { exit 92 } }"
+        $output=@(& $shell -NoProfile -Command $code)
+        $LASTEXITCODE | Should Be 0
+        ($output -join "`n") | Should Match 'System.IO.InvalidDataException'
+        ($output -join "`n") | Should Match 'path safety'
+    }
+
+    # Scenario: The copied native source has a second hard link when the wrapper is imported in a fresh process.
+    # Purpose: Bind compilation to a regular source file whose handle reports exactly one link.
+    It 'InterT174_rejects_a_hard_linked_installer_native_source' {
+        $shell=Join-Path $PSHOME 'pwsh.exe';$copyRoot=Join-Path $TestDrive 'wrapper-hard-link'
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts') -Destination $copyRoot -Recurse
+        $source=Join-Path $copyRoot 'platform/WindowsInstallerMutation.cs'
+        New-Item -ItemType HardLink -Path (Join-Path $copyRoot 'platform/WindowsInstallerMutation.alias.cs') -Target $source | Out-Null
+        $wrapper=Join-Path $copyRoot 'installer-safe-mutation.psm1'
+        $code="try { Import-Module '$($wrapper.Replace("'","''"))' -Force -ErrorAction Stop; exit 93 } catch { `$_.Exception.GetType().FullName; `$_.Exception.Message; if (`$_.Exception -isnot [IO.InvalidDataException]) { exit 94 } }"
+        $output=@(& $shell -NoProfile -Command $code)
+        $LASTEXITCODE | Should Be 0
+        ($output -join "`n") | Should Match 'System.IO.InvalidDataException'
+        ($output -join "`n") | Should Match 'link count'
+    }
+
+    # Scenario: One byte in the copied native source differs from the manifest inventory in a fresh process.
+    # Purpose: Compile only the exact sha256-utf8-lf bytes bound by platform-runtime.psd1.
+    It 'InterT176_rejects_an_installer_native_source_hash_mismatch' {
+        $shell=Join-Path $PSHOME 'pwsh.exe';$copyRoot=Join-Path $TestDrive 'wrapper-hash-drift'
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts') -Destination $copyRoot -Recurse
+        $source=Join-Path $copyRoot 'platform/WindowsInstallerMutation.cs'
+        [IO.File]::AppendAllText($source,'x',[Text.UTF8Encoding]::new($false))
+        $wrapper=Join-Path $copyRoot 'installer-safe-mutation.psm1'
+        $code="try { Import-Module '$($wrapper.Replace("'","''"))' -Force -ErrorAction Stop; exit 95 } catch { `$_.Exception.GetType().FullName; `$_.Exception.Message; if (`$_.Exception -isnot [IO.InvalidDataException]) { exit 96 } }"
+        $output=@(& $shell -NoProfile -Command $code)
+        $LASTEXITCODE | Should Be 0
+        ($output -join "`n") | Should Match 'System.IO.InvalidDataException'
+        ($output -join "`n") | Should Match 'hash mismatch'
+    }
+
     # Scenario: Two journal operations use the same leaf under different target parents.
     # Purpose: Bind exactly one operation to ParentLease instead of searching a journal by basename.
     It 'InterT180_binds_one_same_leaf_journal_operation_to_its_verified_parent' {
@@ -3853,6 +3908,42 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $removeJournal=New-P7JournalOperation remove-file tombstone-rename 'target/remove' $null 'removed.backup' $removeTarget.State $removed $genericSnapshot
             (Remove-PlatformOwnedFile -ParentLease $f.Parent -Leaf 'remove' -ExpectedState $removeTarget.State -TransactionLease $f.Transaction -TombstoneLeaf 'removed.backup' -Journal $removeJournal).permissions.sddl | Should Be $canonical.sddl
         } finally { Close-P7Fixture $f @($published,$stage.Lease,$target.Lease,$removeTarget.Lease) }
+    }
+
+    # Scenario: Stage or removal bytes are rewritten on the same inode after the caller lease is disposed and before the mutation handle reopens.
+    # Purpose: Reject both races with typed failures before permission mutation or rename while preserving each raced identity at its original leaf.
+    It 'InterT235_revalidates_reopened_stage_and_tombstone_content_before_rename' {
+        $f=New-P7Fixture 'p7-reopen-content';$stage=$null;$removeTarget=$null;$publishCaught=$null;$removeCaught=$null
+        try {
+            $stage=New-P7File $f.Transaction 'publish.stage' ([Text.Encoding]::UTF8.GetBytes('new'))
+            $stageBefore=Get-P7NamedFileState $f.Transaction 'publish.stage' $stage
+            $missing=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            $applied=[pscustomobject]@{exists=$true;sha256=$stage.Expected.sha256;length=$stage.Expected.length;identity=$null}
+            $journal=New-P7JournalOperation create-file stage-rename 'target/created' 'publish.stage' $null $missing $applied $null
+            Set-P7WindowsPreReopenHook {param($point,$operation,$role,$path)if($operation -ceq 'publication' -and $role -ceq 'stage'){[IO.File]::WriteAllText($path,'raced-stage',[Text.UTF8Encoding]::new($false))}}
+            try { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'created' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $stage.Expected -NoReplace -Journal $journal | Out-Null } catch {$publishCaught=$_} finally {Set-P7WindowsPreReopenHook $null}
+
+            $publishCaught.Exception.GetType().Name | Should Be 'PlatformVerificationException'
+            $publishCaught.Exception.Capability | Should Be 'publication'
+            Test-Path -LiteralPath (Join-Path $f.Root 'target/created') | Should Be $false
+            $stageAfter=Get-P7NamedFileState $f.Transaction 'publish.stage' $stage
+            $stageAfter.bytes | Should Be ([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('raced-stage')))
+            $stageAfter.identity.device | Should Be $stageBefore.identity.device
+            $stageAfter.identity.fileId | Should Be $stageBefore.identity.fileId
+
+            $removeTarget=New-P7File $f.Parent 'remove' ([Text.Encoding]::UTF8.GetBytes('owned'));$removeTarget.Lease.Dispose();$removeTarget.Lease=$null
+            $removeBefore=Get-P7NamedFileState $f.Parent 'remove'
+            Set-P7WindowsPreReopenHook {param($point,$operation,$role,$path)if($operation -ceq 'owned-file-removal' -and $role -ceq 'target'){[IO.File]::WriteAllText($path,'raced-remove',[Text.UTF8Encoding]::new($false))}}
+            try { Remove-PlatformOwnedFile -ParentLease $f.Parent -Leaf 'remove' -ExpectedState $removeTarget.State -TransactionLease $f.Transaction -TombstoneLeaf 'removed.backup' | Out-Null } catch {$removeCaught=$_} finally {Set-P7WindowsPreReopenHook $null}
+
+            $removeCaught.Exception.GetType().Name | Should Be 'PlatformVerificationException'
+            $removeCaught.Exception.Capability | Should Be 'owned-file-removal'
+            $removeAfter=Get-P7NamedFileState $f.Parent 'remove'
+            $removeAfter.bytes | Should Be ([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('raced-remove')))
+            $removeAfter.identity.device | Should Be $removeBefore.identity.device
+            $removeAfter.identity.fileId | Should Be $removeBefore.identity.fileId
+            Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/removed.backup") | Should Be $false
+        } finally { Set-P7WindowsPreReopenHook $null;Close-P7Fixture $f @($stage.Lease,$removeTarget.Lease) }
     }
 
     # Scenario: The final staged bytes cannot be flushed after permission/read-only readback but before rename.

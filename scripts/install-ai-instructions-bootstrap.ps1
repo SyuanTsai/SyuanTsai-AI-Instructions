@@ -405,7 +405,7 @@ $runtimeFiles = @(
     'cleanup-ai-instructions-pollution.ps1','license-delivery.psm1','repo-shared-skills-migration.psm1'
 )
 $stableScripts = @('bootstrap-ai-instructions-installed.ps1','update-ai-instructions.ps1','update-agent-environment.ps1','cleanup-ai-instructions-pollution.ps1')
-$relativeSourcePaths = @('scripts/install-ai-instructions-bootstrap.ps1','scripts/installer-safe-mutation.psm1','scripts/platform/WindowsInstallerMutation.cs')
+$relativeSourcePaths = @('scripts/install-ai-instructions-bootstrap.ps1','scripts/installer-safe-mutation.psm1','scripts/platform-runtime.psd1','scripts/platform/WindowsInstallerMutation.cs')
 foreach ($fileName in @($runtimeFiles + $stableScripts | Sort-Object -Unique)) { $relativeSourcePaths += "scripts/$fileName" }
 $relativeSourcePaths += 'catalog/skills-catalog.json','catalog/skills-catalog-lock.json'
 $runtimeArtifactPaths = @($relativeSourcePaths)
