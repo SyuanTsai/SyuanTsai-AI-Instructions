@@ -2668,8 +2668,8 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $commitPlan=Get-AiInstructionsInstallRecoveryPlan $appliedJournal $commit; $commitPlan.steps[0].phase|Should Be 'committed'; @($commitPlan.steps|Where-Object step -eq 'cleanup-artifact').Count|Should BeGreaterThan 0
         @($commitPlan.steps|Where-Object step -eq 'cleanup-transaction')[0].primitive | Should Be 'Remove-PlatformOwnedDirectoryTree'
         $rollback=[pscustomobject]@{action='roll-back';reasons=@();operations=@([pscustomobject]@{sequence=1;action='restore-original'},[pscustomobject]@{sequence=2;action='remove-applied'})}
-        $rollbackPlan=Get-AiInstructionsInstallRecoveryPlan $journal $rollback; $rollbackPlan.mutatesTargets|Should Be $true; (@($rollbackPlan.steps|Where-Object step -eq 'operation').sequence -join ',')|Should Be '2,1'
-        (@($rollbackPlan.steps|Where-Object step -eq 'operation').primitive -join ',')|Should Be 'Remove-PlatformOwnedFile,Publish-PlatformFile'
+        $rollbackPlan=Get-AiInstructionsInstallRecoveryPlan $journal $rollback; $rollbackPlan.mutatesTargets|Should Be $true; (@($rollbackPlan.steps|Where-Object step -eq 'operation').sequence -join ',')|Should Be '2,1,1'
+        (@($rollbackPlan.steps|Where-Object step -eq 'operation').primitive -join ',')|Should Be 'Remove-PlatformOwnedFile,Publish-PlatformFile,Set-PlatformPermissions'
         $directoryJournal=Get-TestSwapDirectoryInstallJournalV1
         $directoryRollback=[pscustomobject]@{action='roll-back';reasons=@();operations=@([pscustomobject]@{sequence=1;action='restore-original'})}
         $directoryStep=@((Get-AiInstructionsInstallRecoveryPlan $directoryJournal $directoryRollback).steps|Where-Object step -eq 'operation')[0]
@@ -2753,7 +2753,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
             [pscustomobject]@{sequence=2;action='none'}
         )}
         $plan=Get-AiInstructionsInstallRecoveryPlan -Journal $journal -Decision $decision
-        (@($plan.steps|ForEach-Object{"$($_.step):$($_.sequence):$($_.state):$($_.phase)"}) -join '|') | Should Match 'operation:1::\|write-operation-state:1:rolled-back:'
+        (@($plan.steps|ForEach-Object{"$($_.step):$($_.sequence):$($_.action):$($_.state):$($_.phase)"}) -join '|') | Should Match 'operation:1:restore-original::\|operation:1:restore-permissions::\|write-operation-state:1::rolled-back:'
         @($plan.steps|Where-Object step -eq 'cleanup-transaction')[0].primitive | Should Be 'Remove-PlatformOwnedDirectoryTree'
 
         $working=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal|ConvertTo-Json -Depth 20)
@@ -2956,5 +2956,40 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         }
         $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
         { Get-AiInstructionsInstallRecoveryPlan -Journal $journal -Decision $decision | Out-Null } | Should Not Throw
+    }
+
+    # Scenario: A write-file or swap-directory rollback restores an original backup whose recorded permissions may have drifted.
+    # Purpose: Restore the original permission snapshot after publishing or moving the backup and before persisting rolled-back operation state.
+    It 'UnitT203_restores_original_permissions_before_persisting_rolled_back_state' {
+        $cases=@(
+            @{ Journal=Get-TestInstallJournalV1; Primitive='Publish-PlatformFile' },
+            @{ Journal=Get-TestSwapDirectoryInstallJournalV1; Primitive='Move-PlatformOwnedDirectory' }
+        )
+        $cases[0].Journal.operations=@($cases[0].Journal.operations[0])
+
+        foreach($case in $cases) {
+            $journal=$case.Journal
+            $decision=[pscustomobject]@{action='roll-back';reasons=@();operations=@(
+                [pscustomobject]@{sequence=1;action='restore-original'}
+            )}
+
+            $plan=Get-AiInstructionsInstallRecoveryPlan -Journal $journal -Decision $decision
+            $steps=@($plan.steps)
+
+            $steps.Count | Should Be 6
+            $steps[1].step | Should Be 'operation'
+            $steps[1].action | Should Be 'restore-original'
+            $steps[1].primitive | Should Be $case.Primitive
+            $steps[2].step | Should Be 'operation'
+            $steps[2].sequence | Should Be 1
+            $steps[2].action | Should Be 'restore-permissions'
+            $steps[2].kind | Should Be $journal.operations[0].kind
+            $steps[2].targetRelativePath | Should Be $journal.operations[0].targetRelativePath
+            $steps[2].primitive | Should Be 'Set-PlatformPermissions'
+            $steps[2].snapshot | Should Be $journal.operations[0].permissions
+            $steps[3].step | Should Be 'write-operation-state'
+            $steps[3].sequence | Should Be 1
+            $steps[3].state | Should Be 'rolled-back'
+        }
     }
 }

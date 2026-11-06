@@ -2293,6 +2293,17 @@ function Get-AiInstructionsInstallRecoveryPlan {
                     if ([string]$operation.kind -ceq 'create-directory' -and $action -ceq 'remove-applied') { $step.quarantineLeaf=$operation.quarantineLeaf }
                     if ($action -ceq 'restore-permissions') { $step.snapshot=$operation.permissions }
                     $steps.Add([pscustomobject]$step)
+                    if ($action -ceq 'restore-original' -and $null -ne $operation.permissions) {
+                        $steps.Add([pscustomobject][ordered]@{
+                            step='operation'
+                            sequence=[int64]$operation.sequence
+                            action='restore-permissions'
+                            kind=[string]$operation.kind
+                            targetRelativePath=[string]$operation.targetRelativePath
+                            primitive='Set-PlatformPermissions'
+                            snapshot=$operation.permissions
+                        })
+                    }
                     $steps.Add([pscustomobject][ordered]@{ step='write-operation-state'; sequence=[int64]$operation.sequence; state='rolled-back' })
                 }
                 elseif ([string]$operation.state -ceq 'applied') {
