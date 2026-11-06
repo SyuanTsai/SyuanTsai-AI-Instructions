@@ -1,8 +1,8 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-if (-not ('CodexAiInstructions.InstallerNativeMutation' -as [type])) {
-    Add-Type -TypeDefinition @'
+if (-not ('CodexAiInstructions.InstallerMutationSourceLoader' -as [type])) {
+    try { Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -14,24 +14,7 @@ using Microsoft.Win32.SafeHandles;
 namespace CodexAiInstructions
 {
     [StructLayout(LayoutKind.Sequential)]
-    internal struct InstallerFileDispositionInfo
-    {
-        [MarshalAs(UnmanagedType.Bool)]
-        internal bool DeleteFile;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    internal struct InstallerFileBasicInfo
-    {
-        internal long CreationTime;
-        internal long LastAccessTime;
-        internal long LastWriteTime;
-        internal long ChangeTime;
-        internal uint FileAttributes;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    internal struct InstallerByHandleFileInformation
+    internal struct InstallerSourceByHandleFileInformation
     {
         internal uint FileAttributes;
         internal System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
@@ -45,99 +28,18 @@ namespace CodexAiInstructions
         internal uint FileIndexLow;
     }
 
-    public sealed class InstallerDirectoryGuard : IDisposable
-    {
-        private List<SafeFileHandle> handles;
-
-        internal InstallerDirectoryGuard(List<SafeFileHandle> handles)
-        {
-            this.handles = handles;
-        }
-
-        public void Dispose()
-        {
-            if (handles == null)
-            {
-                return;
-            }
-            for (int index = handles.Count - 1; index >= 0; index--)
-            {
-                handles[index].Dispose();
-            }
-            handles = null;
-        }
-    }
-
-    public sealed class InstallerFileMutationContext : IDisposable
-    {
-        private SafeFileHandle fileHandle;
-        private List<SafeFileHandle> directoryHandles;
-        public bool Created { get; private set; }
-        public bool RestoreReadOnly { get; private set; }
-
-        internal InstallerFileMutationContext(
-            SafeFileHandle fileHandle,
-            List<SafeFileHandle> directoryHandles,
-            bool created,
-            bool restoreReadOnly)
-        {
-            this.fileHandle = fileHandle;
-            this.directoryHandles = directoryHandles;
-            Created = created;
-            RestoreReadOnly = restoreReadOnly;
-        }
-
-        public SafeFileHandle TakeFileHandle()
-        {
-            if (fileHandle == null)
-            {
-                throw new InvalidOperationException("The installer mutation handle has already been transferred.");
-            }
-            SafeFileHandle result = fileHandle;
-            fileHandle = null;
-            return result;
-        }
-
-        public void Dispose()
-        {
-            if (fileHandle != null)
-            {
-                fileHandle.Dispose();
-                fileHandle = null;
-            }
-            if (directoryHandles != null)
-            {
-                for (int index = directoryHandles.Count - 1; index >= 0; index--)
-                {
-                    directoryHandles[index].Dispose();
-                }
-                directoryHandles = null;
-            }
-        }
-    }
-
-    public static class InstallerNativeMutation
+    public static class InstallerMutationSourceLoader
     {
         private const uint GenericRead = 0x80000000;
-        private const uint GenericWrite = 0x40000000;
-        private const uint Delete = 0x00010000;
-        private const uint FileWriteAttributes = 0x00000100;
+        private const uint FileReadAttributes = 0x00000080;
         private const uint FileShareRead = 0x00000001;
         private const uint FileShareWrite = 0x00000002;
         private const uint FileShareDelete = 0x00000004;
-        private const uint CreateNew = 1;
         private const uint OpenExisting = 3;
-        private const uint FileAttributeReadOnly = 0x00000001;
         private const uint FileAttributeDirectory = 0x00000010;
-        private const uint FileAttributeNormal = 0x00000080;
         private const uint FileAttributeReparsePoint = 0x00000400;
         private const uint FileFlagBackupSemantics = 0x02000000;
         private const uint FileFlagOpenReparsePoint = 0x00200000;
-        private const int FileBasicInfoClass = 0;
-        private const int FileDispositionInfoClass = 4;
-        private const int ErrorFileNotFound = 2;
-        private const int ErrorPathNotFound = 3;
-        private const int ErrorAccessDenied = 5;
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateFileW")]
         private static extern SafeFileHandle CreateFile(
@@ -149,527 +51,194 @@ namespace CodexAiInstructions
             uint flagsAndAttributes,
             IntPtr templateFile);
 
-        [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "SetFileInformationByHandle")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool SetFileDispositionByHandle(
-            SafeFileHandle file,
-            int fileInformationClass,
-            ref InstallerFileDispositionInfo fileInformation,
-            uint bufferSize);
-
-        [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "SetFileInformationByHandle")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool SetFileBasicInfoByHandle(
-            SafeFileHandle file,
-            int fileInformationClass,
-            ref InstallerFileBasicInfo fileInformation,
-            uint bufferSize);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool GetFileInformationByHandleEx(
-            SafeFileHandle file,
-            int fileInformationClass,
-            out InstallerFileBasicInfo fileInformation,
-            uint bufferSize);
-
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool GetFileInformationByHandle(
             SafeFileHandle file,
-            out InstallerByHandleFileInformation fileInformation);
+            out InstallerSourceByHandleFileInformation fileInformation);
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern uint GetFinalPathNameByHandle(
-            SafeFileHandle file,
-            StringBuilder path,
-            uint pathLength,
-            uint flags);
+        private static extern uint GetFinalPathNameByHandle(SafeFileHandle file, StringBuilder path, uint pathLength, uint flags);
 
-        public static InstallerDirectoryGuard OpenDirectoryGuard(string targetRoot, string relativeDirectory)
+        public static byte[] ReadPhysicalSingleLinkFile(string path)
         {
-            string lexicalRoot = Path.GetFullPath(targetRoot).TrimEnd('\\');
             List<SafeFileHandle> handles = new List<SafeFileHandle>();
             try
             {
-                SafeFileHandle rootHandle = OpenValidatedDirectory(
-                    lexicalRoot,
-                    null,
-                    "Unable to guard the installer target root.");
+                if (Environment.OSVersion.Platform != PlatformID.Win32NT)
+                {
+                    throw new InvalidDataException("Installer source path safety validation requires Windows.");
+                }
+                string fullPath = Path.GetFullPath(path);
+                string root = Path.GetPathRoot(fullPath);
+                if (string.IsNullOrEmpty(root) || string.Equals(fullPath.TrimEnd('\\'), root.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException("Installer source path safety validation requires a file below a filesystem root.");
+                }
+
+                SafeFileHandle rootHandle = OpenComponent(root, false);
                 handles.Add(rootHandle);
-                string currentPath = lexicalRoot;
-                string currentFinalPath = GetFinalPath(rootHandle).TrimEnd('\\');
-                if (!string.IsNullOrWhiteSpace(relativeDirectory))
+                ValidateComponent(rootHandle, root, true, false);
+
+                string current = root;
+                string remainder = fullPath.Substring(root.Length);
+                string[] segments = remainder.Split(new char[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
+                if (segments.Length == 0)
                 {
-                    foreach (string segment in NormalizeRelativePath(relativeDirectory).Split('\\'))
-                    {
-                        currentPath = Path.Combine(currentPath, segment);
-                        currentFinalPath = currentFinalPath + "\\" + segment;
-                        handles.Add(OpenValidatedDirectory(
-                            currentPath,
-                            currentFinalPath,
-                            "Unable to guard an installer mutation directory."));
-                    }
+                    throw new InvalidDataException("Installer source path safety validation found no file component.");
                 }
-                InstallerDirectoryGuard result = new InstallerDirectoryGuard(handles);
-                handles = null;
-                return result;
-            }
-            finally
-            {
-                if (handles != null)
+                SafeFileHandle target = null;
+                for (int index = 0; index < segments.Length; index++)
                 {
-                    for (int index = handles.Count - 1; index >= 0; index--)
-                    {
-                        handles[index].Dispose();
-                    }
+                    bool isTarget = index == segments.Length - 1;
+                    current = Path.Combine(current, segments[index]);
+                    SafeFileHandle handle = OpenComponent(current, isTarget);
+                    handles.Add(handle);
+                    ValidateComponent(handle, current, !isTarget, isTarget);
+                    if (isTarget) target = handle;
                 }
-            }
-        }
-
-        public static void AssertSingleLinkFile(string path)
-        {
-            SafeFileHandle handle = CreateFile(
-                Path.GetFullPath(path),
-                GenericRead,
-                FileShareRead | FileShareWrite | FileShareDelete,
-                IntPtr.Zero,
-                OpenExisting,
-                FileAttributeNormal | FileFlagOpenReparsePoint,
-                IntPtr.Zero);
-            try
-            {
-                EnsureValidHandle(handle, "Unable to inspect an installer destination file.");
-                ValidateRegularFile(handle, null, "installer destination validation");
-            }
-            finally
-            {
-                handle.Dispose();
-            }
-        }
-
-        public static InstallerFileMutationContext OpenForAtomicWriteOrCreate(
-            string targetRoot,
-            string path,
-            string relativePath)
-        {
-            string safeRelativePath = NormalizeRelativePath(relativePath);
-            string lexicalRoot = Path.GetFullPath(targetRoot).TrimEnd('\\');
-            string lexicalPath = Path.GetFullPath(path);
-            string expectedLexicalPath = Path.GetFullPath(Path.Combine(lexicalRoot, safeRelativePath));
-            if (!string.Equals(lexicalPath, expectedLexicalPath, StringComparison.OrdinalIgnoreCase))
-            {
-                throw new IOException("The installer file path did not match its target-root relative path.");
-            }
-
-            string expectedFinalPath;
-            List<SafeFileHandle> directoryHandles = OpenParentGuards(
-                lexicalRoot,
-                safeRelativePath,
-                out expectedFinalPath);
-            SafeFileHandle fileHandle = null;
-            try
-            {
-                fileHandle = CreateFile(
-                    lexicalPath,
-                    GenericRead | GenericWrite | Delete | FileWriteAttributes,
-                    FileShareRead,
-                    IntPtr.Zero,
-                    OpenExisting,
-                    FileAttributeNormal | FileFlagOpenReparsePoint,
-                    IntPtr.Zero);
-                if (!fileHandle.IsInvalid)
+                string finalPath = GetFinalPath(target);
+                if (!string.Equals(NormalizePath(finalPath), NormalizePath(fullPath), StringComparison.OrdinalIgnoreCase))
                 {
-                    ValidateRegularFile(fileHandle, expectedFinalPath, "installer file mutation");
-                    InstallerFileMutationContext existingResult = new InstallerFileMutationContext(
-                        fileHandle,
-                        directoryHandles,
-                        false,
-                        false);
-                    fileHandle = null;
-                    directoryHandles = null;
-                    return existingResult;
+                    throw new InvalidDataException("Installer source path safety rejected a path that resolved through a different physical location: " + fullPath);
                 }
 
-                int openError = Marshal.GetLastWin32Error();
-                fileHandle.Dispose();
-                fileHandle = null;
-                if (openError == ErrorFileNotFound || openError == ErrorPathNotFound)
+                using (SafeFileHandle borrowed = new SafeFileHandle(target.DangerousGetHandle(), false))
+                using (FileStream stream = new FileStream(borrowed, FileAccess.Read))
+                using (MemoryStream memory = new MemoryStream())
                 {
-                    fileHandle = CreateFile(
-                        lexicalPath,
-                        GenericRead | GenericWrite | Delete | FileWriteAttributes,
-                        FileShareRead,
-                        IntPtr.Zero,
-                        CreateNew,
-                        FileAttributeNormal | FileFlagOpenReparsePoint,
-                        IntPtr.Zero);
-                    EnsureValidHandle(fileHandle, "Unable to create the installer destination file atomically.");
-                    ValidateRegularFile(fileHandle, expectedFinalPath, "installer file creation");
-                    InstallerFileMutationContext createResult = new InstallerFileMutationContext(
-                        fileHandle,
-                        directoryHandles,
-                        true,
-                        false);
-                    fileHandle = null;
-                    directoryHandles = null;
-                    return createResult;
-                }
-                if (openError != ErrorAccessDenied)
-                {
-                    throw new Win32Exception(openError, "Unable to open the installer destination for atomic mutation.");
-                }
-
-                SafeFileHandle attributeHandle = null;
-                uint originalAttributes = 0;
-                bool attributeCleared = false;
-                try
-                {
-                    attributeHandle = CreateFile(
-                        lexicalPath,
-                        GenericRead | FileWriteAttributes,
-                        FileShareRead | FileShareWrite,
-                        IntPtr.Zero,
-                        OpenExisting,
-                        FileAttributeNormal | FileFlagOpenReparsePoint,
-                        IntPtr.Zero);
-                    EnsureValidHandle(attributeHandle, "Unable to inspect a read-only installer destination.");
-                    ValidateRegularFile(attributeHandle, expectedFinalPath, "read-only installer destination");
-                    originalAttributes = GetAttributes(attributeHandle);
-                    if ((originalAttributes & FileAttributeReadOnly) == 0)
-                    {
-                        throw new Win32Exception(openError, "Unable to acquire an atomic installer write handle.");
-                    }
-                    SetAttributes(attributeHandle, originalAttributes & ~FileAttributeReadOnly);
-                    attributeCleared = true;
-                    fileHandle = CreateFile(
-                        lexicalPath,
-                        GenericRead | GenericWrite | Delete | FileWriteAttributes,
-                        FileShareRead,
-                        IntPtr.Zero,
-                        OpenExisting,
-                        FileAttributeNormal | FileFlagOpenReparsePoint,
-                        IntPtr.Zero);
-                    EnsureValidHandle(fileHandle, "Unable to reopen the read-only installer destination for mutation.");
-                    ValidateRegularFile(fileHandle, expectedFinalPath, "installer file mutation");
-                    if (!AreSameFile(attributeHandle, fileHandle))
-                    {
-                        throw new IOException("The installer write handle did not reopen the file whose read-only attribute was cleared.");
-                    }
-                    InstallerFileMutationContext readOnlyResult = new InstallerFileMutationContext(
-                        fileHandle,
-                        directoryHandles,
-                        false,
-                        true);
-                    fileHandle = null;
-                    directoryHandles = null;
-                    return readOnlyResult;
-                }
-                catch
-                {
-                    if (attributeCleared && attributeHandle != null && !attributeHandle.IsInvalid)
-                    {
-                        SetAttributes(attributeHandle, originalAttributes);
-                    }
-                    throw;
-                }
-                finally
-                {
-                    if (attributeHandle != null)
-                    {
-                        attributeHandle.Dispose();
-                    }
+                    stream.CopyTo(memory);
+                    return memory.ToArray();
                 }
             }
-            finally
+            catch (InvalidDataException)
             {
-                if (fileHandle != null)
-                {
-                    fileHandle.Dispose();
-                }
-                if (directoryHandles != null)
-                {
-                    for (int index = directoryHandles.Count - 1; index >= 0; index--)
-                    {
-                        directoryHandles[index].Dispose();
-                    }
-                }
-            }
-        }
-
-        public static SafeFileHandle OpenForAtomicDelete(string targetRoot, string path, string relativePath)
-        {
-            string expectedFinalPath;
-            List<SafeFileHandle> directoryHandles = OpenParentGuards(
-                Path.GetFullPath(targetRoot).TrimEnd('\\'),
-                NormalizeRelativePath(relativePath),
-                out expectedFinalPath);
-            SafeFileHandle handle = null;
-            try
-            {
-                handle = CreateFile(
-                    Path.GetFullPath(path),
-                    GenericRead | Delete | FileWriteAttributes,
-                    FileShareRead,
-                    IntPtr.Zero,
-                    OpenExisting,
-                    FileAttributeNormal | FileFlagOpenReparsePoint,
-                    IntPtr.Zero);
-                EnsureValidHandle(handle, "Unable to open the installer destination for atomic deletion.");
-                ValidateRegularFile(handle, expectedFinalPath, "installer file deletion");
-                SafeFileHandle result = handle;
-                handle = null;
-                return result;
-            }
-            finally
-            {
-                if (handle != null)
-                {
-                    handle.Dispose();
-                }
-                for (int index = directoryHandles.Count - 1; index >= 0; index--)
-                {
-                    directoryHandles[index].Dispose();
-                }
-            }
-        }
-
-        public static void MarkDeleteOnClose(SafeFileHandle handle)
-        {
-            uint originalAttributes = GetAttributes(handle);
-            bool restoreReadOnly = (originalAttributes & FileAttributeReadOnly) != 0;
-            if (restoreReadOnly)
-            {
-                SetAttributes(handle, originalAttributes & ~FileAttributeReadOnly);
-            }
-            try
-            {
-                InstallerFileDispositionInfo information = new InstallerFileDispositionInfo { DeleteFile = true };
-                uint size = (uint)Marshal.SizeOf(typeof(InstallerFileDispositionInfo));
-                if (!SetFileDispositionByHandle(handle, FileDispositionInfoClass, ref information, size))
-                {
-                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to mark the installer file for atomic deletion.");
-                }
-            }
-            catch
-            {
-                if (restoreReadOnly)
-                {
-                    SetAttributes(handle, originalAttributes);
-                }
                 throw;
             }
-        }
-
-        public static void RestoreReadOnly(SafeFileHandle handle)
-        {
-            uint attributes = GetAttributes(handle);
-            if ((attributes & FileAttributeReadOnly) == 0)
+            catch (Exception ex)
             {
-                SetAttributes(handle, (attributes & ~FileAttributeNormal) | FileAttributeReadOnly);
-            }
-        }
-
-        private static List<SafeFileHandle> OpenParentGuards(
-            string lexicalRoot,
-            string safeRelativePath,
-            out string expectedFileFinalPath)
-        {
-            List<SafeFileHandle> handles = new List<SafeFileHandle>();
-            try
-            {
-                SafeFileHandle rootHandle = OpenValidatedDirectory(
-                    lexicalRoot,
-                    null,
-                    "Unable to guard the installer target root.");
-                handles.Add(rootHandle);
-                string currentPath = lexicalRoot;
-                string currentFinalPath = GetFinalPath(rootHandle).TrimEnd('\\');
-                string[] segments = safeRelativePath.Split('\\');
-                for (int index = 0; index < segments.Length - 1; index++)
-                {
-                    currentPath = Path.Combine(currentPath, segments[index]);
-                    currentFinalPath = currentFinalPath + "\\" + segments[index];
-                    handles.Add(OpenValidatedDirectory(
-                        currentPath,
-                        currentFinalPath,
-                        "Unable to guard an installer destination parent directory."));
-                }
-                expectedFileFinalPath = currentFinalPath + "\\" + segments[segments.Length - 1];
-                List<SafeFileHandle> result = handles;
-                handles = null;
-                return result;
+                throw new InvalidDataException("Installer source path safety validation failed: " + ex.Message, ex);
             }
             finally
             {
-                if (handles != null)
+                for (int index = handles.Count - 1; index >= 0; index--)
                 {
-                    for (int index = handles.Count - 1; index >= 0; index--)
-                    {
-                        handles[index].Dispose();
-                    }
+                    handles[index].Dispose();
                 }
             }
         }
 
-        private static SafeFileHandle OpenValidatedDirectory(string path, string expectedFinalPath, string message)
+        private static SafeFileHandle OpenComponent(string path, bool isTarget)
         {
+            uint access = isTarget ? GenericRead | FileReadAttributes : 0u;
+            uint share = FileShareRead | (isTarget ? 0u : FileShareWrite | FileShareDelete);
             SafeFileHandle handle = CreateFile(
                 path,
-                GenericRead,
-                FileShareRead | FileShareWrite,
+                access,
+                share,
                 IntPtr.Zero,
                 OpenExisting,
                 FileFlagBackupSemantics | FileFlagOpenReparsePoint,
                 IntPtr.Zero);
-            try
+            if (handle.IsInvalid)
             {
-                EnsureValidHandle(handle, message);
-                InstallerByHandleFileInformation information = GetInformation(
-                    handle,
-                    "Unable to inspect a guarded installer directory.");
-                if ((information.FileAttributes & FileAttributeReparsePoint) != 0 ||
-                    (information.FileAttributes & FileAttributeDirectory) == 0)
-                {
-                    throw new IOException("An installer mutation directory must be a non-reparse directory.");
-                }
-                if (expectedFinalPath != null)
-                {
-                    string actualFinalPath = GetFinalPath(handle).TrimEnd('\\');
-                    if (!string.Equals(expectedFinalPath, actualFinalPath, StringComparison.OrdinalIgnoreCase))
-                    {
-                        throw new IOException("An installer mutation directory resolved outside its guarded target-root path.");
-                    }
-                }
-                return handle;
-            }
-            catch
-            {
+                int error = Marshal.GetLastWin32Error();
                 handle.Dispose();
-                throw;
+                throw new InvalidDataException("Installer source path safety validation could not open '" + path + "': " + new Win32Exception(error).Message);
             }
+            return handle;
         }
 
-        private static void ValidateRegularFile(SafeFileHandle handle, string expectedFinalPath, string operation)
+        private static void ValidateComponent(SafeFileHandle handle, string path, bool expectDirectory, bool requireSingleLink)
         {
-            InstallerByHandleFileInformation information = GetInformation(
-                handle,
-                "Unable to inspect the " + operation + " handle.");
-            if ((information.FileAttributes & FileAttributeReparsePoint) != 0 ||
-                (information.FileAttributes & FileAttributeDirectory) != 0)
-            {
-                throw new IOException("The " + operation + " handle must identify a non-reparse regular file.");
-            }
-            if (information.NumberOfLinks != 1)
-            {
-                throw new IOException(
-                    "The " + operation + " handle has multiple file-system links; hard link aliases do not provide exclusive ownership.");
-            }
-            if (expectedFinalPath != null)
-            {
-                string actualFinalPath = GetFinalPath(handle).TrimEnd('\\');
-                if (!string.Equals(expectedFinalPath, actualFinalPath, StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new IOException("The " + operation + " handle resolved outside its guarded target-root path.");
-                }
-            }
-        }
-
-        private static InstallerByHandleFileInformation GetInformation(SafeFileHandle handle, string message)
-        {
-            InstallerByHandleFileInformation information;
+            InstallerSourceByHandleFileInformation information;
             if (!GetFileInformationByHandle(handle, out information))
             {
-                throw new Win32Exception(Marshal.GetLastWin32Error(), message);
+                throw new InvalidDataException("Installer source path safety validation could not inspect '" + path + "'.");
             }
-            return information;
-        }
-
-        private static bool AreSameFile(SafeFileHandle first, SafeFileHandle second)
-        {
-            InstallerByHandleFileInformation firstInformation = GetInformation(first, "Unable to identify an installer file handle.");
-            InstallerByHandleFileInformation secondInformation = GetInformation(second, "Unable to identify a reopened installer file handle.");
-            return firstInformation.VolumeSerialNumber == secondInformation.VolumeSerialNumber &&
-                firstInformation.FileIndexHigh == secondInformation.FileIndexHigh &&
-                firstInformation.FileIndexLow == secondInformation.FileIndexLow;
-        }
-
-        private static uint GetAttributes(SafeFileHandle handle)
-        {
-            InstallerFileBasicInfo information;
-            uint size = (uint)Marshal.SizeOf(typeof(InstallerFileBasicInfo));
-            if (!GetFileInformationByHandleEx(handle, FileBasicInfoClass, out information, size))
+            if ((information.FileAttributes & FileAttributeReparsePoint) != 0)
             {
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to read installer file attributes through its handle.");
+                throw new InvalidDataException("Installer source path safety rejected a reparse point: " + path);
             }
-            return information.FileAttributes;
-        }
-
-        private static void SetAttributes(SafeFileHandle handle, uint attributes)
-        {
-            InstallerFileBasicInfo information;
-            uint size = (uint)Marshal.SizeOf(typeof(InstallerFileBasicInfo));
-            if (!GetFileInformationByHandleEx(handle, FileBasicInfoClass, out information, size))
+            bool isDirectory = (information.FileAttributes & FileAttributeDirectory) != 0;
+            if (isDirectory != expectDirectory)
             {
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to read installer file attributes through its handle.");
+                throw new InvalidDataException("Installer source path safety rejected a non-regular path component: " + path);
             }
-            information.FileAttributes = attributes == 0 ? FileAttributeNormal : attributes;
-            if (!SetFileBasicInfoByHandle(handle, FileBasicInfoClass, ref information, size))
+            if (requireSingleLink && information.NumberOfLinks != 1)
             {
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to update installer file attributes through its handle.");
+                throw new InvalidDataException("Installer source link count must be exactly one: " + path);
             }
         }
 
         private static string GetFinalPath(SafeFileHandle handle)
         {
-            uint capacity = 32768;
-            StringBuilder path = new StringBuilder((int)capacity);
-            uint length = GetFinalPathNameByHandle(handle, path, capacity, 0);
-            if (length == 0)
+            StringBuilder buffer = new StringBuilder(32768);
+            uint length = GetFinalPathNameByHandle(handle, buffer, (uint)buffer.Capacity, 0);
+            if (length == 0 || length >= buffer.Capacity)
             {
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to resolve a handle-bound installer path.");
+                throw new InvalidDataException("Installer source path safety could not resolve the opened source identity.");
             }
-            if (length >= capacity)
-            {
-                capacity = length + 1;
-                path = new StringBuilder((int)capacity);
-                length = GetFinalPathNameByHandle(handle, path, capacity, 0);
-                if (length == 0 || length >= capacity)
-                {
-                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to resolve a complete handle-bound installer path.");
-                }
-            }
-            return path.ToString().Replace('/', '\\');
+            return buffer.ToString();
         }
 
-        private static string NormalizeRelativePath(string relativePath)
+        private static string NormalizePath(string path)
         {
-            if (string.IsNullOrWhiteSpace(relativePath) || Path.IsPathRooted(relativePath))
-            {
-                throw new ArgumentException("Installer mutation requires a safe relative path.", "relativePath");
-            }
-            string[] segments = relativePath.Replace('/', '\\').Split('\\');
-            foreach (string segment in segments)
-            {
-                if (string.IsNullOrWhiteSpace(segment) || segment == "." || segment == "..")
-                {
-                    throw new ArgumentException("Installer mutation rejected an unsafe relative path.", "relativePath");
-                }
-            }
-            return string.Join("\\", segments);
-        }
-
-        private static void EnsureValidHandle(SafeFileHandle handle, string message)
-        {
-            if (handle.IsInvalid)
-            {
-                int error = Marshal.GetLastWin32Error();
-                throw new Win32Exception(error, message);
-            }
+            if (path.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) path = @"\\" + path.Substring(8);
+            else if (path.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase)) path = path.Substring(4);
+            return Path.GetFullPath(path).TrimEnd('\\');
         }
     }
 }
-'@
+'@ -ErrorAction Stop }
+    catch { throw [IO.InvalidDataException]::new("The installer source path-safety helper could not be compiled: $($_.Exception.Message)",$_.Exception) }
+}
+
+if (-not ('CodexAiInstructions.InstallerNativeMutation' -as [type])) {
+    try {
+        $manifestPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'platform-runtime.psd1'))
+        $nativeSourcePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'platform/WindowsInstallerMutation.cs'))
+        [byte[]]$manifestBytes = [CodexAiInstructions.InstallerMutationSourceLoader]::ReadPhysicalSingleLinkFile($manifestPath)
+        [byte[]]$nativeSourceBytes = [CodexAiInstructions.InstallerMutationSourceLoader]::ReadPhysicalSingleLinkFile($nativeSourcePath)
+        $utf8 = [Text.UTF8Encoding]::new($false,$true)
+        foreach($item in @(@('manifest',$manifestBytes),@('native source',$nativeSourceBytes))) {
+            [byte[]]$bytes=$item[1]
+            if($bytes.Length -ge 3 -and $bytes[0] -eq 0xef -and $bytes[1] -eq 0xbb -and $bytes[2] -eq 0xbf) {
+                throw [IO.InvalidDataException]::new("The installer $($item[0]) must be UTF-8 without BOM.")
+            }
+        }
+        $manifestText=$utf8.GetString($manifestBytes)
+        $tokens=$null;$parseErrors=$null
+        $manifestAst=[Management.Automation.Language.Parser]::ParseInput($manifestText,[ref]$tokens,[ref]$parseErrors)
+        if(@($parseErrors).Count -ne 0 -or $manifestAst.EndBlock.Statements.Count -ne 1 -or
+            $manifestAst.EndBlock.Statements[0] -isnot [Management.Automation.Language.PipelineAst] -or
+            $manifestAst.EndBlock.Statements[0].PipelineElements.Count -ne 1 -or
+            $manifestAst.EndBlock.Statements[0].PipelineElements[0] -isnot [Management.Automation.Language.CommandExpressionAst] -or
+            $manifestAst.EndBlock.Statements[0].PipelineElements[0].Expression -isnot [Management.Automation.Language.HashtableAst]) {
+            throw [IO.InvalidDataException]::new('The installer platform runtime manifest is not a safe data-file hashtable.')
+        }
+        $manifest=$manifestAst.EndBlock.Statements[0].PipelineElements[0].Expression.SafeGetValue()
+        if($null -eq $manifest.PrivateData -or $null -eq $manifest.PrivateData.PlatformRuntime -or
+            [string]$manifest.PrivateData.PlatformRuntime.HashMode -cne 'sha256-utf8-lf') {
+            throw [IO.InvalidDataException]::new('The installer platform runtime manifest has no supported inventory hash mode.')
+        }
+        $entries=@($manifest.PrivateData.PlatformRuntime.Inventory | Where-Object { [string]$_.Path -ceq 'platform/WindowsInstallerMutation.cs' })
+        if($entries.Count -ne 1 -or [string]$entries[0].Sha256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw [IO.InvalidDataException]::new('The installer platform runtime manifest must bind exactly one native source inventory entry.')
+        }
+        $nativeSourceText=$utf8.GetString($nativeSourceBytes)
+        $sha=[Security.Cryptography.SHA256]::Create()
+        try { $actualHash=([BitConverter]::ToString($sha.ComputeHash($utf8.GetBytes($nativeSourceText.Replace("`r`n","`n"))))).Replace('-','').ToLowerInvariant() }
+        finally { $sha.Dispose() }
+        if($actualHash -cne [string]$entries[0].Sha256) {
+            throw [IO.InvalidDataException]::new('The installer mutation native source hash mismatch rejected compilation.')
+        }
+        Add-Type -TypeDefinition $nativeSourceText -ErrorAction Stop
+    }
+    catch {
+        if($_.Exception -is [IO.InvalidDataException]) { throw }
+        throw [IO.InvalidDataException]::new("The installer mutation native source could not be verified and compiled: $($_.Exception.Message)",$_.Exception)
+    }
 }
 
 function Open-InstallerMutationDirectoryGuard {

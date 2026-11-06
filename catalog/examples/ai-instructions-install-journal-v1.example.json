@@ -29,6 +29,7 @@
       "targetRelativePath": "runtime/runtime-bundle.json",
       "stageLeaf": "runtime-bundle.json",
       "backupLeaf": "runtime-bundle.backup",
+      "quarantineLeaf": null,
       "original": {
         "exists": true,
         "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
@@ -42,7 +43,7 @@
       "backupIdentity": {
         "kind": "windows-file-id",
         "device": "0x1A2B",
-        "fileId": "0000ABCD:00001235"
+        "fileId": "0000ABCD:00001233"
       },
       "applied": {
         "exists": true,
@@ -68,6 +69,7 @@
       "targetRelativePath": "runtime/installed.marker",
       "stageLeaf": "installed-marker.stage",
       "backupLeaf": null,
+      "quarantineLeaf": null,
       "original": {
         "exists": false,
         "sha256": null,
@@ -95,6 +97,7 @@
       "targetRelativePath": "runtime/obsolete.marker",
       "stageLeaf": null,
       "backupLeaf": "obsolete-marker.tombstone",
+      "quarantineLeaf": null,
       "original": {
         "exists": true,
         "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
@@ -122,6 +125,46 @@
         "readOnly": false
       },
       "state": "pending"
+    },
+    {
+      "sequence": 4,
+      "kind": "swap-directory",
+      "method": "stage-rename",
+      "targetRelativePath": "managed-runtime",
+      "stageLeaf": "managed-runtime.stage",
+      "backupLeaf": "managed-runtime.backup",
+      "quarantineLeaf": "managed-runtime.quarantine",
+      "original": {
+        "exists": true,
+        "identity": {
+          "kind": "windows-file-id",
+          "device": "0x1A2B",
+          "fileId": "0000ABCD:00007890"
+        },
+        "inventorySha256": "7777777777777777777777777777777777777777777777777777777777777777",
+        "entryCount": 3
+      },
+      "backupIdentity": {
+        "kind": "windows-file-id",
+        "device": "0x1A2B",
+        "fileId": "0000ABCD:00007890"
+      },
+      "applied": {
+        "exists": true,
+        "identity": {
+          "kind": "windows-file-id",
+          "device": "0x1A2B",
+          "fileId": "0000ABCD:00007891"
+        },
+        "inventorySha256": "8888888888888888888888888888888888888888888888888888888888888888",
+        "entryCount": 4
+      },
+      "permissions": {
+        "kind": "windows-sddl",
+        "sddl": "D:PAI(A;;FA;;;SY)",
+        "readOnly": false
+      },
+      "state": "staged"
     }
   ]
 }

@@ -6,6 +6,182 @@ $ErrorActionPreference = 'Stop'
 $script:PlatformRuntimeApiVersion = '1.0'
 $script:PlatformRuntimeManifestPath = Join-Path $PSScriptRoot 'platform-runtime.psd1'
 
+if ($null -eq ('CodexAiInstructions.InstallerMutationSourceLoader' -as [type])) {
+    try { Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+namespace CodexAiInstructions
+{
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct InstallerSourceByHandleFileInformation
+    {
+        internal uint FileAttributes;
+        internal System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+        internal System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+        internal System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+        internal uint VolumeSerialNumber;
+        internal uint FileSizeHigh;
+        internal uint FileSizeLow;
+        internal uint NumberOfLinks;
+        internal uint FileIndexHigh;
+        internal uint FileIndexLow;
+    }
+
+    public static class InstallerMutationSourceLoader
+    {
+        private const uint GenericRead = 0x80000000;
+        private const uint FileReadAttributes = 0x00000080;
+        private const uint FileShareRead = 0x00000001;
+        private const uint FileShareWrite = 0x00000002;
+        private const uint FileShareDelete = 0x00000004;
+        private const uint OpenExisting = 3;
+        private const uint FileAttributeDirectory = 0x00000010;
+        private const uint FileAttributeReparsePoint = 0x00000400;
+        private const uint FileFlagBackupSemantics = 0x02000000;
+        private const uint FileFlagOpenReparsePoint = 0x00200000;
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateFileW")]
+        private static extern SafeFileHandle CreateFile(string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes, uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetFileInformationByHandle(SafeFileHandle file, out InstallerSourceByHandleFileInformation fileInformation);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFinalPathNameByHandle(SafeFileHandle file, StringBuilder path, uint pathLength, uint flags);
+
+        public static byte[] ReadPhysicalSingleLinkFile(string path)
+        {
+            List<SafeFileHandle> handles = new List<SafeFileHandle>();
+            try
+            {
+                if (Environment.OSVersion.Platform != PlatformID.Win32NT) throw new InvalidDataException("Installer source path safety validation requires Windows.");
+                string fullPath = Path.GetFullPath(path);
+                string root = Path.GetPathRoot(fullPath);
+                if (string.IsNullOrEmpty(root) || string.Equals(fullPath.TrimEnd('\\'), root.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("Installer source path safety validation requires a file below a filesystem root.");
+                SafeFileHandle rootHandle = OpenComponent(root, false);
+                handles.Add(rootHandle);
+                ValidateComponent(rootHandle, root, true, false);
+                string current = root;
+                string[] segments = fullPath.Substring(root.Length).Split(new char[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
+                if (segments.Length == 0) throw new InvalidDataException("Installer source path safety validation found no file component.");
+                SafeFileHandle target = null;
+                for (int index = 0; index < segments.Length; index++)
+                {
+                    bool isTarget = index == segments.Length - 1;
+                    current = Path.Combine(current, segments[index]);
+                    SafeFileHandle handle = OpenComponent(current, isTarget);
+                    handles.Add(handle);
+                    ValidateComponent(handle, current, !isTarget, isTarget);
+                    if (isTarget) target = handle;
+                }
+                string finalPath = GetFinalPath(target);
+                if (!string.Equals(NormalizePath(finalPath), NormalizePath(fullPath), StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("Installer source path safety rejected a path that resolved through a different physical location: " + fullPath);
+                using (SafeFileHandle borrowed = new SafeFileHandle(target.DangerousGetHandle(), false))
+                using (FileStream stream = new FileStream(borrowed, FileAccess.Read))
+                using (MemoryStream memory = new MemoryStream())
+                {
+                    stream.CopyTo(memory);
+                    return memory.ToArray();
+                }
+            }
+            catch (InvalidDataException) { throw; }
+            catch (Exception ex) { throw new InvalidDataException("Installer source path safety validation failed: " + ex.Message, ex); }
+            finally { for (int index = handles.Count - 1; index >= 0; index--) handles[index].Dispose(); }
+        }
+
+        private static SafeFileHandle OpenComponent(string path, bool isTarget)
+        {
+            uint access = isTarget ? GenericRead | FileReadAttributes : 0u;
+            uint share = FileShareRead | (isTarget ? 0u : FileShareWrite | FileShareDelete);
+            SafeFileHandle handle = CreateFile(path, access, share, IntPtr.Zero, OpenExisting, FileFlagBackupSemantics | FileFlagOpenReparsePoint, IntPtr.Zero);
+            if (handle.IsInvalid)
+            {
+                int error = Marshal.GetLastWin32Error();
+                handle.Dispose();
+                throw new InvalidDataException("Installer source path safety validation could not open '" + path + "': " + new Win32Exception(error).Message);
+            }
+            return handle;
+        }
+
+        private static void ValidateComponent(SafeFileHandle handle, string path, bool expectDirectory, bool requireSingleLink)
+        {
+            InstallerSourceByHandleFileInformation information;
+            if (!GetFileInformationByHandle(handle, out information)) throw new InvalidDataException("Installer source path safety validation could not inspect '" + path + "'.");
+            if ((information.FileAttributes & FileAttributeReparsePoint) != 0) throw new InvalidDataException("Installer source path safety rejected a reparse point: " + path);
+            bool isDirectory = (information.FileAttributes & FileAttributeDirectory) != 0;
+            if (isDirectory != expectDirectory) throw new InvalidDataException("Installer source path safety rejected a non-regular path component: " + path);
+            if (requireSingleLink && information.NumberOfLinks != 1) throw new InvalidDataException("Installer source link count must be exactly one: " + path);
+        }
+
+        private static string GetFinalPath(SafeFileHandle handle)
+        {
+            StringBuilder buffer = new StringBuilder(32768);
+            uint length = GetFinalPathNameByHandle(handle, buffer, (uint)buffer.Capacity, 0);
+            if (length == 0 || length >= buffer.Capacity) throw new InvalidDataException("Installer source path safety could not resolve the opened source identity.");
+            return buffer.ToString();
+        }
+
+        private static string NormalizePath(string path)
+        {
+            if (path.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) path = @"\\" + path.Substring(8);
+            else if (path.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase)) path = path.Substring(4);
+            return Path.GetFullPath(path).TrimEnd('\\');
+        }
+    }
+}
+'@ -ErrorAction Stop }
+    catch { throw [IO.InvalidDataException]::new("The platform runtime installer source path-safety helper could not be compiled: $($_.Exception.Message)",$_.Exception) }
+}
+
+function Get-PlatformRuntimeVerifiedInstallerSourceText {
+    if (-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+        return [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'platform/WindowsInstallerMutation.cs'),[Text.UTF8Encoding]::new($false,$true))
+    }
+    try {
+        [byte[]]$manifestBytes=[CodexAiInstructions.InstallerMutationSourceLoader]::ReadPhysicalSingleLinkFile($script:PlatformRuntimeManifestPath)
+        [byte[]]$sourceBytes=[CodexAiInstructions.InstallerMutationSourceLoader]::ReadPhysicalSingleLinkFile((Join-Path $PSScriptRoot 'platform/WindowsInstallerMutation.cs'))
+        $utf8=[Text.UTF8Encoding]::new($false,$true)
+        foreach($item in @(@('manifest',$manifestBytes),@('native source',$sourceBytes))) {
+            [byte[]]$bytes=$item[1]
+            if($bytes.Length -ge 3 -and $bytes[0] -eq 0xef -and $bytes[1] -eq 0xbb -and $bytes[2] -eq 0xbf) { throw [IO.InvalidDataException]::new("The platform runtime installer $($item[0]) must be UTF-8 without BOM.") }
+        }
+        $tokens=$null;$parseErrors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseInput($utf8.GetString($manifestBytes),[ref]$tokens,[ref]$parseErrors)
+        if(@($parseErrors).Count -ne 0 -or $ast.EndBlock.Statements.Count -ne 1 -or
+            $ast.EndBlock.Statements[0] -isnot [Management.Automation.Language.PipelineAst] -or
+            $ast.EndBlock.Statements[0].PipelineElements.Count -ne 1 -or
+            $ast.EndBlock.Statements[0].PipelineElements[0] -isnot [Management.Automation.Language.CommandExpressionAst] -or
+            $ast.EndBlock.Statements[0].PipelineElements[0].Expression -isnot [Management.Automation.Language.HashtableAst]) {
+            throw [IO.InvalidDataException]::new('The platform runtime manifest is not a safe data-file hashtable.')
+        }
+        $manifest=$ast.EndBlock.Statements[0].PipelineElements[0].Expression.SafeGetValue()
+        if($null -eq $manifest.PrivateData -or $null -eq $manifest.PrivateData.PlatformRuntime -or [string]$manifest.PrivateData.PlatformRuntime.HashMode -cne 'sha256-utf8-lf') {
+            throw [IO.InvalidDataException]::new('The platform runtime manifest has no supported installer source hash mode.')
+        }
+        $entries=@($manifest.PrivateData.PlatformRuntime.Inventory | Where-Object { [string]$_.Path -ceq 'platform/WindowsInstallerMutation.cs' })
+        if($entries.Count -ne 1 -or [string]$entries[0].Sha256 -cnotmatch '^[0-9a-f]{64}$') { throw [IO.InvalidDataException]::new('The platform runtime manifest must bind exactly one installer native source entry.') }
+        $text=$utf8.GetString($sourceBytes)
+        $sha=[Security.Cryptography.SHA256]::Create()
+        try { $actual=([BitConverter]::ToString($sha.ComputeHash($utf8.GetBytes($text.Replace("`r`n","`n"))))).Replace('-','').ToLowerInvariant() }
+        finally { $sha.Dispose() }
+        if($actual -cne [string]$entries[0].Sha256) { throw [IO.InvalidDataException]::new('The platform runtime installer native source hash mismatch rejected compilation.') }
+        return $text
+    }
+    catch {
+        if($_.Exception -is [IO.InvalidDataException]) { throw }
+        throw [IO.InvalidDataException]::new("The platform runtime installer native source could not be verified: $($_.Exception.Message)",$_.Exception)
+    }
+}
+
 function Get-PlatformRuntimeCanonicalSha256 {
     param([Parameter(Mandatory = $true)][string] $LiteralPath)
 
@@ -108,6 +284,12 @@ $nativeSourcePaths = @(
     'platform/WindowsProcess.cs'
 )
 $nativeSourceFullPaths = @($nativeSourcePaths | ForEach-Object { Join-Path $PSScriptRoot $_ })
+
+if ($null -eq ('CodexAiInstructions.InstallerNativeMutation' -as [type])) {
+    $installerMutationSourceText=Get-PlatformRuntimeVerifiedInstallerSourceText
+    try { Add-Type -TypeDefinition $installerMutationSourceText -ErrorAction Stop }
+    catch { throw [IO.InvalidDataException]::new("The verified installer mutation native source could not be compiled: $($_.Exception.Message)",$_.Exception) }
+}
 
 if ($null -eq ('SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative' -as [type])) {
     Add-Type -LiteralPath $nativeSourceFullPaths -ErrorAction Stop
@@ -412,8 +594,8 @@ function Open-PlatformDirectory {
 function Open-PlatformFile { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)][string] $Access, [Parameter(Mandatory = $true)][string] $CreateMode) Invoke-PlatformAdapter 'Open-PlatformFile' @{ ParentLease=$ParentLease; Leaf=$Leaf; Access=$Access; CreateMode=$CreateMode } }
 function Assert-PlatformFileIdentity { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Lease, [Parameter(Mandatory = $true)] $Expected, [switch] $SingleLink, [switch] $VerifyPath) Invoke-PlatformAdapter 'Assert-PlatformFileIdentity' $PSBoundParameters }
 function Enter-PlatformLock { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)][ValidateSet('Shared','Exclusive')][string] $Mode, [Parameter(Mandatory = $true)][TimeSpan] $Timeout) Invoke-PlatformAdapter 'Enter-PlatformLock' $PSBoundParameters }
-function Publish-PlatformFile { [CmdletBinding()] param([Parameter(Mandatory=$true)]$ParentLease,[Parameter(Mandatory=$true)][string]$Leaf,[Parameter(Mandatory=$true)]$TransactionLease,[Parameter(Mandatory=$true)]$StageLease,[Parameter(Mandatory=$true)]$ExpectedState,[Parameter(Mandatory=$true)][AllowNull()][string]$DisplacedLeaf,[Parameter(Mandatory=$true)]$ExpectedStage,[switch]$NoReplace,[ValidateRange(0,4095)][uint32]$CreateMode=384,$Journal) Invoke-PlatformAdapter 'Publish-PlatformFile' $PSBoundParameters }
-function Remove-PlatformOwnedFile { [CmdletBinding()] param([Parameter(Mandatory=$true)]$ParentLease,[Parameter(Mandatory=$true)][string]$Leaf,[Parameter(Mandatory=$true)]$ExpectedState,[Parameter(Mandatory=$true)]$TransactionLease,[Parameter(Mandatory=$true)][string]$TombstoneLeaf,$Journal) Invoke-PlatformAdapter 'Remove-PlatformOwnedFile' $PSBoundParameters }
+function Publish-PlatformFile { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)] $TransactionLease, [Parameter(Mandatory = $true)] $StageLease, [Parameter(Mandatory = $true)] $ExpectedState, [AllowNull()] $DisplacedLeaf, [Parameter(Mandatory = $true)] $ExpectedStage, [switch] $NoReplace, $Journal) Invoke-PlatformAdapter 'Publish-PlatformFile' $PSBoundParameters }
+function Remove-PlatformOwnedFile { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)] $ExpectedState, $TransactionLease, [AllowNull()] $TombstoneLeaf, $Journal) Invoke-PlatformAdapter 'Remove-PlatformOwnedFile' $PSBoundParameters }
 function Get-PlatformPermissions { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Lease) Invoke-PlatformAdapter 'Get-PlatformPermissions' $PSBoundParameters }
 function Set-PlatformPermissions { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Lease, $Policy, $Snapshot) Invoke-PlatformAdapter 'Set-PlatformPermissions' $PSBoundParameters }
 function Start-PlatformOwnedProcess {

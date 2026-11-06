@@ -400,12 +400,12 @@ $runtimeFiles = @(
     'bootstrap-ai-instructions-installed.ps1','bootstrap-ai-instructions-multisource.ps1','bootstrap-ai-instructions.ps1','safe-zip.psm1',
     'skills-catalog-contract.psm1','skills-selection.psm1','skills-source-routing.psm1',
     'skills-source-retrieval.psm1','skills-source-acquisition.psm1','skills-source-composition.psm1',
-    'ai-instructions-runtime-contract.psm1','agent-artifact-remediation.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1',
+    'ai-instructions-runtime-contract.psm1','WindowsDacl.psm1','agent-artifact-remediation.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1',
     'ai-instructions-updater.psm1','update-ai-instructions.ps1','agent-environment-reconciler.psm1','update-agent-environment.ps1',
     'cleanup-ai-instructions-pollution.ps1','license-delivery.psm1','repo-shared-skills-migration.psm1'
 )
 $stableScripts = @('bootstrap-ai-instructions-installed.ps1','update-ai-instructions.ps1','update-agent-environment.ps1','cleanup-ai-instructions-pollution.ps1')
-$relativeSourcePaths = @('scripts/install-ai-instructions-bootstrap.ps1','scripts/installer-safe-mutation.psm1')
+$relativeSourcePaths = @('scripts/install-ai-instructions-bootstrap.ps1','scripts/installer-safe-mutation.psm1','scripts/platform-runtime.psd1','scripts/platform/WindowsInstallerMutation.cs')
 foreach ($fileName in @($runtimeFiles + $stableScripts | Sort-Object -Unique)) { $relativeSourcePaths += "scripts/$fileName" }
 $relativeSourcePaths += 'catalog/skills-catalog.json','catalog/skills-catalog-lock.json'
 $runtimeArtifactPaths = @($relativeSourcePaths)

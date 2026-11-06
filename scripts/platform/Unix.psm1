@@ -12,6 +12,14 @@ function Assert-UnixPlatformHost {
     return $platform
 }
 
+function New-UnixPlatformVerificationError {
+    param([Parameter(Mandatory=$true)][string] $Capability,[Parameter(Mandatory=$true)][string] $Message)
+    return [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]::new(
+        $Capability,
+        [SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetOperatingSystem(),
+        $Message)
+}
+
 function Get-UnixContractValue {
     param([AllowNull()] $Object,[Parameter(Mandatory=$true)][string] $Name,[switch] $Required)
     if ($null -eq $Object) {
@@ -56,12 +64,37 @@ function ConvertTo-UnixPermissionReceipt {
 }
 
 function ConvertTo-UnixFlushReceipt {
-    param([Parameter(Mandatory=$true)] $Flush)
+    param([Parameter(Mandatory=$true)] $Flush,[switch] $Cleanup)
+    if ($Cleanup) {
+        return [pscustomobject][ordered]@{
+            file=$false
+            fileNotRequired=$true
+            directory=([string]$Flush.ParentDirectory -ceq 'confirmed')
+            transactionDirectory=$null
+        }
+    }
     [pscustomobject][ordered]@{
-        file=[string]$Flush.File
-        parentDirectory=[string]$Flush.ParentDirectory
-        transactionDirectory=[string]$Flush.TransactionDirectory
-        durability=[string]$Flush.Durability
+        file=([string]$Flush.File -ceq 'confirmed')
+        directory=([string]$Flush.ParentDirectory -ceq 'confirmed')
+        transactionDirectory=([string]$Flush.TransactionDirectory -ceq 'confirmed')
+    }
+}
+
+function Assert-UnixJournalOperationShape {
+    param([Parameter(Mandatory=$true)] $Journal)
+    $required=@('sequence','kind','method','targetRelativePath','stageLeaf','backupLeaf','quarantineLeaf','original','backupIdentity','applied','permissions','state')
+    if ($Journal -is [array] -or $null -eq $Journal -or @($Journal.PSObject.Properties).Count -ne $required.Count) {
+        throw [ArgumentException]::new('Journal must be one validated journal v1 operation.')
+    }
+    foreach ($name in $required) {
+        if ($null -eq $Journal.PSObject.Properties[$name]) { throw [ArgumentException]::new("Journal is missing $name.") }
+    }
+    $sequence=Get-UnixContractValue $Journal sequence -Required
+    if ($sequence -is [bool] -or $null -eq $sequence -or [decimal]$sequence -ne [Math]::Truncate([decimal]$sequence) -or [decimal]$sequence -lt 1 -or [decimal]$sequence -gt [long]::MaxValue) {
+        throw [ArgumentException]::new('Journal sequence is invalid.')
+    }
+    if ($null -ne (Get-UnixContractValue $Journal quarantineLeaf)) {
+        throw [ArgumentException]::new('Journal quarantineLeaf must be null for file operations.')
     }
 }
 
@@ -101,7 +134,7 @@ function Assert-UnixExpectedStage {
 }
 
 function Assert-UnixJournalBackupIdentity {
-    param([Parameter(Mandatory=$true)] $Journal,[Parameter(Mandatory=$true)] $ExpectedState,[switch] $Required)
+    param([Parameter(Mandatory=$true)] $Journal,[Parameter(Mandatory=$true)] $ExpectedState,[switch] $Required,[string] $Capability='owned-file-removal')
     try {
         $identity = Get-UnixContractValue $Journal backupIdentity
         if ($null -eq $identity) {
@@ -121,7 +154,7 @@ function Assert-UnixJournalBackupIdentity {
     catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] { throw }
     catch {
         throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]::new(
-            'journal-binding',
+            $Capability,
             [SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetOperatingSystem(),
             $_.Exception.Message)
     }
@@ -137,6 +170,8 @@ function Assert-UnixJournalBinding {
     }
 
     try {
+        Assert-UnixJournalOperationShape -Journal $Journal
+        $capability=if($Remove){'owned-file-removal'}else{'publication'}
         $relative = Get-UnixContractValue $Journal targetRelativePath -Required
         if ($relative -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$relative) -or [string]$relative -match '\\') {
             throw [ArgumentException]::new('Journal targetRelativePath is not a canonical relative path.')
@@ -169,7 +204,7 @@ function Assert-UnixJournalBinding {
             $journalOriginal.inode -ne $expectedOriginal.inode) {
             throw [ArgumentException]::new('Journal original state does not match ExpectedState.')
         }
-        Assert-UnixJournalBackupIdentity -Journal $Journal -ExpectedState $expectedOriginal -Required:$Remove
+        Assert-UnixJournalBackupIdentity -Journal $Journal -ExpectedState $expectedOriginal -Required:$Remove -Capability $capability
 
         if ($Remove) {
             if ((Get-UnixContractValue $Journal kind -Required) -cne 'remove-file' -or
@@ -233,7 +268,7 @@ function Assert-UnixJournalBinding {
     catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] { throw }
     catch {
         throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]::new(
-            'journal-binding',
+            $(if($Remove){'owned-file-removal'}else{'publication'}),
             [SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetOperatingSystem(),
             $_.Exception.Message)
     }
@@ -273,39 +308,56 @@ function Publish-UnixPlatformFile {
     param(
         [Parameter(Mandatory=$true)] $ParentLease,[Parameter(Mandatory=$true)][string] $Leaf,
         [Parameter(Mandatory=$true)] $TransactionLease,[Parameter(Mandatory=$true)] $StageLease,
-        [Parameter(Mandatory=$true)] $ExpectedState,[Parameter(Mandatory=$true)][AllowNull()][string] $DisplacedLeaf,
+        [Parameter(Mandatory=$true)] $ExpectedState,[AllowNull()][string] $DisplacedLeaf,
         [Parameter(Mandatory=$true)] $ExpectedStage,[switch] $NoReplace,
-        [ValidateRange(0,4095)][uint32] $CreateMode = 384,$Journal
+        $Journal
     )
     Assert-UnixPlatformHost publication | Out-Null
-    [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($Leaf)
-    $expected = Assert-UnixExpectedState $ExpectedState ExpectedState -AllowAbsent
-    if ($expected.exists) { [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($DisplacedLeaf) }
-    elseif ($null -ne $DisplacedLeaf) { throw [ArgumentException]::new('DisplacedLeaf must be null when ExpectedState is absent.') }
-    $stage = Assert-UnixExpectedStage $ExpectedStage
-    $journalBinding = Assert-UnixJournalBinding $Journal $ParentLease $TransactionLease $Leaf $StageLease $DisplacedLeaf $ExpectedState $ExpectedStage
+    if ([string]::IsNullOrEmpty($DisplacedLeaf)) { $DisplacedLeaf=$null }
+    try {
+        [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($Leaf)
+        $expected = Assert-UnixExpectedState $ExpectedState ExpectedState -AllowAbsent
+        if ($expected.exists -ne ($null -ne $DisplacedLeaf)) {
+            throw [ArgumentException]::new('DisplacedLeaf must be supplied exactly when ExpectedState.exists is true.')
+        }
+        if ($null -ne $DisplacedLeaf) { [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($DisplacedLeaf) }
+        if ($NoReplace -and $expected.exists) {
+            throw [ArgumentException]::new('NoReplace requires ExpectedState.exists=false and relies on the native rename to reject a raced destination.')
+        }
+        $stage = Assert-UnixExpectedStage $ExpectedStage
+        $journalBinding = Assert-UnixJournalBinding $Journal $ParentLease $TransactionLease $Leaf $StageLease $DisplacedLeaf $ExpectedState $ExpectedStage
+    }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] { throw }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException] { throw }
+    catch { throw (New-UnixPlatformVerificationError publication $_.Exception.Message) }
     try {
         $result = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::Publish(
             $ParentLease,$Leaf,$TransactionLease,$StageLease,$expected.exists,$expected.device,$expected.inode,$expected.sha256,$expected.length,
-            $DisplacedLeaf,$stage.sha256,$stage.length,[bool]$NoReplace,$CreateMode,
+            $DisplacedLeaf,$stage.sha256,$stage.length,[bool]$NoReplace,[uint32]384,
             [bool]$journalBinding.hasPermissions,[uint32]$journalBinding.mode,[uint64]$journalBinding.uid,[uint64]$journalBinding.gid)
         [pscustomobject][ordered]@{
+            completedSteps=[string[]]@($result.CompletedSteps)
             appliedIdentity=ConvertTo-UnixPlatformIdentity $result.AppliedIdentity
             displacedIdentity=ConvertTo-UnixPlatformIdentity $result.DisplacedIdentity
             permissions=ConvertTo-UnixPermissionReceipt $result.Permissions
             displacedLeaf=$result.DisplacedLeaf
-            completedSteps=[string[]]@($result.CompletedSteps)
+            durability=[string]$result.Flush.Durability
             flush=ConvertTo-UnixFlushReceipt $result.Flush
         }
+    }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] {
+        if ([string]$_.Exception.Capability -ceq 'publication') { throw }
+        throw (New-UnixPlatformVerificationError publication $_.Exception.Message)
     }
     catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformMutationException] {
         $native = $_.Exception
         $translated = if ($null -eq $native.Receipt) { $null } else { [pscustomobject][ordered]@{
+            completedSteps=[string[]]@($native.Receipt.CompletedSteps)
             appliedIdentity=ConvertTo-UnixPlatformIdentity $native.Receipt.AppliedIdentity
             displacedIdentity=ConvertTo-UnixPlatformIdentity $native.Receipt.DisplacedIdentity
             permissions=if($null -eq $native.Receipt.Permissions){$null}else{ConvertTo-UnixPermissionReceipt $native.Receipt.Permissions}
             displacedLeaf=$native.Receipt.DisplacedLeaf
-            completedSteps=[string[]]@($native.Receipt.CompletedSteps)
+            durability=[string]$native.Receipt.Flush.Durability
             flush=ConvertTo-UnixFlushReceipt $native.Receipt.Flush
         } }
         throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformMutationException]::new($native.Capability,$native.Platform,$native.CurrentState,$native.Message,$translated)
@@ -315,36 +367,72 @@ function Publish-UnixPlatformFile {
 function Remove-UnixPlatformOwnedFile {
     param(
         [Parameter(Mandatory=$true)] $ParentLease,[Parameter(Mandatory=$true)][string] $Leaf,
-        [Parameter(Mandatory=$true)] $ExpectedState,[Parameter(Mandatory=$true)] $TransactionLease,
-        [Parameter(Mandatory=$true)][string] $TombstoneLeaf,$Journal
+        [Parameter(Mandatory=$true)] $ExpectedState,$TransactionLease,
+        [AllowNull()][string] $TombstoneLeaf,$Journal
     )
     Assert-UnixPlatformHost owned-file-removal | Out-Null
-    [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($Leaf)
-    [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($TombstoneLeaf)
-    $expected = Assert-UnixExpectedState $ExpectedState ExpectedState
-    $journalBinding = Assert-UnixJournalBinding $Journal $ParentLease $TransactionLease $Leaf $null $TombstoneLeaf $ExpectedState $null -Remove
+    if ([string]::IsNullOrEmpty($TombstoneLeaf)) { $TombstoneLeaf=$null }
+    try {
+        [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($Leaf)
+        $tombstone=($null -ne $TransactionLease -and $null -ne $TombstoneLeaf)
+        if (($null -ne $TransactionLease) -ne ($null -ne $TombstoneLeaf)) {
+            throw [ArgumentException]::new('TransactionLease and TombstoneLeaf must be supplied together.')
+        }
+        if (-not $tombstone -and $null -ne $Journal) {
+            throw [ArgumentException]::new('Journal is forbidden in cleanup mode.')
+        }
+        $expected = Assert-UnixExpectedState $ExpectedState ExpectedState
+        if ($tombstone) {
+            [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($TombstoneLeaf)
+            if ([uint64]$ParentLease.Observation.Device -eq [uint64]$TransactionLease.Observation.Device -and
+                [uint64]$ParentLease.Observation.Inode -eq [uint64]$TransactionLease.Observation.Inode) {
+                throw [ArgumentException]::new('Tombstone mode requires a target parent outside TransactionLease; omit TransactionLease and TombstoneLeaf for cleanup mode.')
+            }
+            $journalBinding = Assert-UnixJournalBinding $Journal $ParentLease $TransactionLease $Leaf $null $TombstoneLeaf $ExpectedState $null -Remove
+        }
+        else {
+            $TransactionLease=$ParentLease
+            $TombstoneLeaf=$Leaf
+            $journalBinding=[pscustomobject]@{hasPermissions=$false;mode=[uint32]0;uid=[uint64]0;gid=[uint64]0}
+        }
+    }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] { throw }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException] { throw }
+    catch { throw (New-UnixPlatformVerificationError owned-file-removal $_.Exception.Message) }
     try {
         $result = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::Remove(
             $ParentLease,$Leaf,$TransactionLease,$TombstoneLeaf,$expected.device,$expected.inode,$expected.sha256,$expected.length,
             [bool]$journalBinding.hasPermissions,[uint32]$journalBinding.mode,[uint64]$journalBinding.uid,[uint64]$journalBinding.gid)
         [pscustomobject][ordered]@{
+            completedSteps=[string[]]@($result.CompletedSteps)
+            appliedIdentity=$null
+            displacedIdentity=ConvertTo-UnixPlatformIdentity $result.BackupIdentity
             backupIdentity=ConvertTo-UnixPlatformIdentity $result.BackupIdentity
             permissions=ConvertTo-UnixPermissionReceipt $result.Permissions
             tombstoneLeaf=[string]$result.TombstoneLeaf
             method=[string]$result.Method
-            completedSteps=[string[]]@($result.CompletedSteps)
-            flush=ConvertTo-UnixFlushReceipt $result.Flush
+            deleted=if($tombstone){$null}else{$true}
+            durability=[string]$result.Flush.Durability
+            flush=ConvertTo-UnixFlushReceipt $result.Flush -Cleanup:(-not $tombstone)
         }
+    }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] {
+        if ([string]$_.Exception.Capability -ceq 'owned-file-removal') { throw }
+        throw (New-UnixPlatformVerificationError owned-file-removal $_.Exception.Message)
     }
     catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformMutationException] {
         $native = $_.Exception
         $translated = if ($null -eq $native.Receipt) { $null } else { [pscustomobject][ordered]@{
+            completedSteps=[string[]]@($native.Receipt.CompletedSteps)
+            appliedIdentity=$null
+            displacedIdentity=ConvertTo-UnixPlatformIdentity $native.Receipt.BackupIdentity
             backupIdentity=ConvertTo-UnixPlatformIdentity $native.Receipt.BackupIdentity
             permissions=if($null -eq $native.Receipt.Permissions){$null}else{ConvertTo-UnixPermissionReceipt $native.Receipt.Permissions}
             tombstoneLeaf=$native.Receipt.TombstoneLeaf
             method=$native.Receipt.Method
-            completedSteps=[string[]]@($native.Receipt.CompletedSteps)
-            flush=ConvertTo-UnixFlushReceipt $native.Receipt.Flush
+            deleted=if($tombstone){$null}else{$true}
+            durability=[string]$native.Receipt.Flush.Durability
+            flush=ConvertTo-UnixFlushReceipt $native.Receipt.Flush -Cleanup:(-not $tombstone)
         } }
         throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformMutationException]::new($native.Capability,$native.Platform,$native.CurrentState,$native.Message,$translated)
     }
