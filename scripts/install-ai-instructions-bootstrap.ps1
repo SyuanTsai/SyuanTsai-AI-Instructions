@@ -15,10 +15,8 @@ param(
     [string] $ExpectedUpdateRef
 )
 
-$earlyRuntimeContract = Join-Path $PSScriptRoot 'ai-instructions-runtime-contract.psm1'
-Import-Module $earlyRuntimeContract -Force -ErrorAction Stop
 if ($PSVersionTable.PSEdition -cne 'Core' -or $PSVersionTable.PSVersion.Major -lt 7 -or [Environment]::Version.Major -lt 8) {
-    throw (New-AiInstructionsRefusalException -Code runtime-baseline-unavailable -Message 'AI instructions installation requires pwsh 7 on .NET 8 or later; run this installer with pwsh 7.')
+    throw [System.InvalidOperationException]::new('AI instructions installation requires pwsh 7 on .NET 8 or later; run this installer with pwsh 7. [ai-instructions-refusal-code=runtime-baseline-unavailable]')
 }
 
 Set-StrictMode -Version Latest
@@ -89,6 +87,9 @@ function Assert-InstallerMutationPath {
                 else { -not $item.PSIsContainer }
             if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or -not $hasExpectedType) {
                 throw "Unsafe installer mutation path '$Path': '$inspectionPath' must be a non-reparse $($(if ($isLeaf) { $ExpectedType.ToLowerInvariant() } else { 'directory' }))."
+            }
+            if ($isLeaf -and $ExpectedType -ceq 'File' -and [string]$item.LinkType -ceq 'HardLink') {
+                throw "Unsafe installer mutation path '$Path': stable files require exclusive ownership and must not be a hard link."
             }
         }
         $parent = Split-Path -Parent $inspectionPath
@@ -304,6 +305,92 @@ function Expand-InstallerGitSnapshotArchive {
     return $repositoryRoot
 }
 
+function Expand-InstallerSafeSourceArchive {
+    param(
+        [Parameter(Mandatory = $true)][System.IO.Stream] $ArchiveStream,
+        [Parameter(Mandatory = $true)][string] $DestinationRoot
+    )
+    if (-not $ArchiveStream.CanRead -or -not $ArchiveStream.CanSeek -or $ArchiveStream.Position -ne 0) {
+        throw 'ZIP archive stream must be readable, seekable, and positioned at byte zero.'
+    }
+    Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    $repositoryRoot = Join-Path ([IO.Path]::GetFullPath($DestinationRoot).TrimEnd([char[]]@('\','/'))) 'repository'
+    if (Test-Path -LiteralPath $repositoryRoot) { throw "ZIP extraction destination already exists: $repositoryRoot" }
+    $archive = New-Object IO.Compression.ZipArchive($ArchiveStream,[IO.Compression.ZipArchiveMode]::Read,$true)
+    try {
+        try { $entries = @($archive.Entries) }
+        catch { throw 'Unsafe ZIP entry path: unreadable archive entry metadata.' }
+        if ($entries.Count -eq 0) { throw 'ZIP archive is empty.' }
+        $pathCasings = New-Object 'Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
+        $explicitEntries = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+        $explicitFiles = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+        $roots = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+        foreach ($entry in $entries) {
+            if ($null -eq $entry) { throw 'Unsafe ZIP entry path: unreadable archive entry metadata.' }
+            $name = [string]$entry.FullName
+            if ([string]::IsNullOrWhiteSpace($name) -or $name.Contains('\') -or $name.StartsWith('/') -or $name.Contains(':') -or
+                @($name.ToCharArray() | Where-Object { [char]::IsControl($_) }).Count -gt 0) { throw "Unsafe ZIP entry path: $name" }
+            $isDirectory = [string]::IsNullOrEmpty([string]$entry.Name) -or $name.EndsWith('/',[StringComparison]::Ordinal)
+            $normalized = if ($isDirectory) { $name.TrimEnd('/') } else { $name }
+            $parts = @($normalized.Split('/'))
+            if ($parts.Count -lt 1 -or [string]::IsNullOrWhiteSpace($parts[0]) -or ($parts.Count -eq 1 -and -not $isDirectory)) {
+                throw "ZIP archive must contain exactly one repository root and no top-level files: $name"
+            }
+            foreach ($part in $parts) {
+                if ([string]::IsNullOrWhiteSpace($part) -or $part -in @('.','..') -or $part.EndsWith('.') -or $part.EndsWith(' ')) { throw "Unsafe ZIP entry path: $name" }
+                if ($part.Split('.')[0] -match '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') { throw "Unsafe Windows device name in ZIP entry: $name" }
+            }
+            for ($index = 0; $index -lt $parts.Count; $index++) {
+                $prefix = [string]::Join('/',[string[]]$parts[0..$index])
+                $existing = $null
+                $known = $pathCasings.TryGetValue($prefix,[ref]$existing)
+                if ($known -and $existing -cne $prefix) { throw "ZIP archive contains a case-insensitive path collision: $name" }
+                if (-not $known) { $pathCasings.Add($prefix,$prefix) }
+                $leaf = $index -eq $parts.Count - 1
+                if (-not $leaf -and $explicitFiles.Contains($prefix)) { throw "ZIP archive contains a file/directory path collision: $name" }
+                if ($leaf -and ($explicitEntries.Contains($prefix) -or (-not $isDirectory -and $known))) { throw "ZIP archive contains a duplicate or file/directory path collision: $name" }
+            }
+            [void]$explicitEntries.Add($normalized)
+            if (-not $isDirectory) { [void]$explicitFiles.Add($normalized) }
+            [void]$roots.Add($parts[0])
+            $attributes = ([int64]$entry.ExternalAttributes) -band 0xFFFFFFFFL
+            $unixType = ($attributes -shr 16) -band 0xF000L
+            $expectedType = if ($isDirectory) { 0x4000L } else { 0x8000L }
+            if ($unixType -eq 0xA000L -or ($unixType -ne 0 -and $unixType -ne $expectedType) -or ($attributes -band 0x400L) -ne 0) {
+                throw "ZIP archive contains a symbolic link, special file, or reparse-point entry: $name"
+            }
+        }
+        if ($roots.Count -ne 1) { throw "ZIP archive must contain exactly one repository root; found $($roots.Count)." }
+        $archiveRootName = @($roots)[0]
+        New-Item -ItemType Directory -Path $repositoryRoot | Out-Null
+        $destinationPrefix = $repositoryRoot + [IO.Path]::DirectorySeparatorChar
+        foreach ($entry in $entries) {
+            $name = [string]$entry.FullName
+            $relativeName = $name.Substring($archiveRootName.Length).TrimStart('/')
+            if ([string]::IsNullOrEmpty($relativeName)) { continue }
+            $destinationPath = [IO.Path]::GetFullPath((Join-Path $repositoryRoot $relativeName.Replace('/',[IO.Path]::DirectorySeparatorChar)))
+            if (-not $destinationPath.StartsWith($destinationPrefix,[StringComparison]::OrdinalIgnoreCase)) { throw "ZIP entry escapes its repository root: $name" }
+            $isDirectory = [string]::IsNullOrEmpty([string]$entry.Name) -or $name.EndsWith('/',[StringComparison]::Ordinal)
+            if ($isDirectory) { New-Item -ItemType Directory -Force -Path $destinationPath | Out-Null; continue }
+            $parent = Split-Path -Parent $destinationPath
+            if (-not (Test-Path -LiteralPath $parent -PathType Container)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+            $input = $entry.Open()
+            try {
+                $output = [IO.File]::Open($destinationPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+                try { $input.CopyTo($output) } finally { $output.Dispose() }
+            }
+            finally { $input.Dispose() }
+        }
+    }
+    catch {
+        if (Test-Path -LiteralPath $repositoryRoot) { Remove-Item -LiteralPath $repositoryRoot -Recurse -Force -ErrorAction SilentlyContinue }
+        throw
+    }
+    finally { $archive.Dispose() }
+    return $repositoryRoot
+}
+
 function Get-InstallerCanonicalTextSha256 {
     param([Parameter(Mandatory = $true)][string] $Path)
     [byte[]]$bytes = [IO.File]::ReadAllBytes([IO.Path]::GetFullPath($Path))
@@ -315,10 +402,46 @@ function Get-InstallerCanonicalTextSha256 {
     finally { $sha.Dispose() }
 }
 
+function Test-InstallerLicenseDocumentName {
+    param([Parameter(Mandatory = $true)][string] $Name)
+    return $Name -match '^(LICENSE|LICENCE|COPYING|NOTICE|THIRD_PARTY_NOTICES|THIRD_PARTY_LICENSES|PROVENANCE)([-_][^.]+)?(\.(md|txt|rst|html))?$' -or
+        $Name -ieq 'licensing-scope.json'
+}
+
+function Select-InstallerLicenseDeliveryDocumentPaths {
+    param(
+        [Parameter(Mandatory = $true)][string[]] $ArtifactPaths,
+        [Parameter(Mandatory = $true)][string[]] $SourcePaths
+    )
+    $ancestors = @{ '' = $true }
+    foreach ($path in $ArtifactPaths) {
+        if ([string]::IsNullOrWhiteSpace($path) -or $path.Contains('\') -or $path -match '[:\x00-\x1f]' -or
+            $path.StartsWith('/') -or @($path.Split('/') | Where-Object { $_ -in @('', '.', '..') -or $_ -match '[. ]$' }).Count -gt 0) {
+            throw "Unsafe license source path: $path"
+        }
+        $parent = $path
+        while ($parent.Contains('/')) {
+            $parent = $parent.Substring(0,$parent.LastIndexOf('/'))
+            $ancestors[$parent] = $true
+        }
+    }
+    foreach ($path in @($SourcePaths | Sort-Object -Unique)) {
+        foreach ($ancestor in @($ancestors.Keys | Sort-Object)) {
+            $prefix = if ($ancestor) { "$ancestor/" } else { '' }
+            if (-not $path.StartsWith($prefix,[StringComparison]::Ordinal)) { continue }
+            $relative = $path.Substring($prefix.Length)
+            if (($relative -notmatch '/' -and (Test-InstallerLicenseDocumentName -Name $relative)) -or $relative -imatch '^LICENSES/') {
+                $path
+                break
+            }
+        }
+    }
+}
+
 function Assert-InstallerPlatformRuntimeSourceInventory {
     param([Parameter(Mandatory = $true)][string] $RuntimeRoot)
     $manifestPath = Join-Path $RuntimeRoot 'platform-runtime.psd1'
-    $expectedManifestSha256 = '4ff196176470bfd0d48f2d64dcd52308cfac5c46474d66ce9d1f9bbba44bea1e'
+    $expectedManifestSha256 = '4f9d2e6860be553284f51ae4bc81afd14751df3f82d1d799e79d09671d868616'
     if ((Get-InstallerCanonicalTextSha256 -Path $manifestPath) -cne $expectedManifestSha256) { throw 'Platform runtime manifest differs from the installer trust anchor.' }
     $manifest = Import-PowerShellDataFile -LiteralPath $manifestPath
     if ($null -eq $manifest.PrivateData -or $null -eq $manifest.PrivateData.PlatformRuntime -or
@@ -402,12 +525,13 @@ function Invoke-InstallerInterruptedInstallRecovery {
             }
             $records.Add([pscustomobject]@{Path=$entry.FullName;Name=$entry.Name;Lease=$transactionLease;Identity=$identity;Classification=$classification;Disposition=$disposition;Decision=$decision;Plan=$plan})
         }
-        $refusals = @($records | Where-Object { [string]$_.Disposition.action -ceq 'refuse' -or ($null -ne $_.Decision -and [string]$_.Decision.action -ceq 'refuse') })
+        $recordArray = $records.ToArray()
+        $refusals = @($recordArray | Where-Object { [string]$_.Disposition.action -ceq 'refuse' -or ($null -ne $_.Decision -and [string]$_.Decision.action -ceq 'refuse') })
         if ($refusals.Count -gt 0) {
-            $paths = @($records | ForEach-Object { [string]$_.Path })
+            $paths = @($recordArray | ForEach-Object { [string]$_.Path })
             throw (New-AiInstructionsRefusalException -Code interrupted-install -Message ("Interrupted install residue requires manual inspection: " + ($paths -join '; ')))
         }
-        foreach ($record in @($records)) {
+        foreach ($record in $recordArray) {
             if ([string]$record.Disposition.action -ceq 'purge-orphan') {
                 $record.Lease.Dispose(); $record.Lease=$null
                 Remove-PlatformOwnedDirectoryTree -TransactionRootLease $TransactionRootLease -Leaf ([string]$record.Name) -ExpectedIdentity $record.Identity | Out-Null
@@ -422,7 +546,7 @@ function Invoke-InstallerInterruptedInstallRecovery {
             }
         }
     }
-    finally { foreach ($record in @($records)) { if ($null -ne $record.Lease) { $record.Lease.Dispose() } } }
+    finally { foreach ($record in $records.ToArray()) { if ($null -ne $record.Lease) { $record.Lease.Dispose() } } }
 }
 
 function ConvertTo-InstallerJsonBytes {
@@ -444,7 +568,13 @@ function New-InstallerFileJournalOperation {
     $leaf = $TargetRelativePath.Split('/')[-1]
     $stageLeaf = "$Token.stage"
     $stage = New-AiInstructionsInstallStageFile -TransactionLease $TransactionLease -Leaf $stageLeaf -Bytes $DesiredBytes -PlatformOs $PlatformOs
-    $captured = Get-AiInstructionsInstallFileState -ParentLease $ParentLease -Leaf $leaf -LiteralPath $TargetPath -PlatformOs $PlatformOs -IncludePermissions
+    try { $captured = Get-AiInstructionsInstallFileState -ParentLease $ParentLease -Leaf $leaf -LiteralPath $TargetPath -PlatformOs $PlatformOs -IncludePermissions }
+    catch {
+        if ($_.Exception.Message -match 'exactly one link') {
+            throw "Installer stable files require exclusive ownership and must not be a hard link. $($_.Exception.Message)"
+        }
+        throw
+    }
     if ([bool]$captured.exists -and [string]$captured.sha256 -ceq [string]$stage.sha256 -and [int64]$captured.length -eq [int64]$stage.length) { return $null }
     $original = [pscustomobject][ordered]@{exists=[bool]$captured.exists;sha256=$captured.sha256;length=$captured.length;identity=$captured.identity}
     return [pscustomobject][ordered]@{
@@ -499,18 +629,8 @@ if ($Acquisition -ceq 'git-checkout') {
     $tempRootPath = Get-InstallerFullDirectoryPath -Path ([System.IO.Path]::GetTempPath())
     $archiveSourceWorkingRoot = Join-Path $tempRootPath ('ai-instructions-installer-source-' + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $archiveSourceWorkingRoot | Out-Null
-    # Load the selector from HEAD as well; a dirty checkout must not execute an unpinned helper.
-    $licensePreflightRoot = Join-Path $archiveSourceWorkingRoot 'license-preflight'
-    New-Item -ItemType Directory -Path $licensePreflightRoot | Out-Null
-    $licensePreflightArchive = Join-Path $licensePreflightRoot 'source.zip'
-    Invoke-InstallerGit -WorkingDirectory $checkoutRootPath -Arguments @(
-        'archive','--format=zip',"--output=$licensePreflightArchive",'--prefix=candidate-root/',$catalogRef,'--','scripts/license-delivery.psm1'
-    ) | Out-Null
-    $licensePreflightSource = Expand-InstallerGitSnapshotArchive -ArchivePath $licensePreflightArchive `
-        -DestinationRoot $licensePreflightRoot -RelativePaths @('scripts/license-delivery.psm1')
-    Import-Module (Join-Path $licensePreflightSource 'scripts/license-delivery.psm1') -Force
     $snapshotPaths = @(Invoke-InstallerGit -WorkingDirectory $checkoutRootPath -Arguments @('-c','core.quotepath=false','ls-tree','-r','--name-only',$catalogRef))
-    $relativeSourcePaths += @(Select-LicenseDeliveryDocumentPaths -ArtifactPaths $runtimeArtifactPaths -SourcePaths $snapshotPaths)
+    $relativeSourcePaths += @(Select-InstallerLicenseDeliveryDocumentPaths -ArtifactPaths $runtimeArtifactPaths -SourcePaths $snapshotPaths)
     $relativeSourcePaths = @($relativeSourcePaths | Sort-Object -Unique)
     $gitSnapshotArchive = Join-Path $archiveSourceWorkingRoot 'source.zip'
     Invoke-InstallerGit -WorkingDirectory $checkoutRootPath -Arguments (@(
@@ -535,7 +655,6 @@ else {
     $archiveSourceWorkingRoot = Join-Path $tempRootPath ('ai-instructions-installer-source-' + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $archiveSourceWorkingRoot | Out-Null
     try {
-        Import-Module (Join-Path $PSScriptRoot 'safe-zip.psm1') -Force
         $archiveStream = [System.IO.File]::Open(
             [System.IO.Path]::GetFullPath($SourceArchivePath),
             [System.IO.FileMode]::Open,
@@ -548,7 +667,7 @@ else {
                 throw "github-codeload SourceArchivePath SHA-256 does not match ArchiveSha256: expected $ArchiveSha256; actual $actualArchiveSha256."
             }
             $archiveStream.Position = 0
-            $repositoryRootPath = Expand-SafeZipRepository -ArchiveStream $archiveStream -DestinationRoot $archiveSourceWorkingRoot
+            $repositoryRootPath = Expand-InstallerSafeSourceArchive -ArchiveStream $archiveStream -DestinationRoot $archiveSourceWorkingRoot
         }
         finally { $archiveStream.Dispose() }
     }
@@ -578,18 +697,20 @@ if ($expectedPolicySpecified) {
 
 foreach ($relativePath in $relativeSourcePaths) {
     if (-not (Test-Path -LiteralPath (Join-Path $repositoryRootPath $relativePath.Replace('/','\')) -PathType Leaf)) {
-        if ($Acquisition -ceq 'github-codeload') { throw "github-codeload archive runtime source was not found: $relativePath" }
-        throw "Installer runtime source was not found: $relativePath"
+        $message = if ($Acquisition -ceq 'github-codeload') { "github-codeload archive runtime source was not found: $relativePath" }
+            else { "Installer runtime source was not found: $relativePath" }
+        throw [IO.InvalidDataException]::new("$message [ai-instructions-refusal-code=closure-invalid]")
     }
 }
 
 $runtimeContractSource = Join-Path $repositoryRootPath 'scripts\ai-instructions-runtime-contract.psm1'
-Import-Module $runtimeContractSource -Force
-Import-Module (Join-Path $repositoryRootPath 'scripts\skills-catalog-contract.psm1') -Force
-Import-Module (Join-Path $repositoryRootPath 'scripts\license-delivery.psm1') -Force
 $platformRuntimeRoot = Join-Path $repositoryRootPath 'scripts'
 try { Assert-InstallerPlatformRuntimeSourceInventory -RuntimeRoot $platformRuntimeRoot }
-catch { throw (New-AiInstructionsRefusalException -Code closure-invalid -Message "The verified installer platform runtime closure is invalid. $($_.Exception.Message)" -InnerException $_.Exception) }
+catch { throw [IO.InvalidDataException]::new("The verified installer platform runtime closure is invalid. $($_.Exception.Message) [ai-instructions-refusal-code=closure-invalid]",$_.Exception) }
+try { Import-Module $runtimeContractSource -Force -ErrorAction Stop }
+catch { throw [IO.InvalidDataException]::new("The verified installer runtime contract is invalid. $($_.Exception.Message) [ai-instructions-refusal-code=closure-invalid]",$_.Exception) }
+Import-Module (Join-Path $repositoryRootPath 'scripts\skills-catalog-contract.psm1') -Force
+Import-Module (Join-Path $repositoryRootPath 'scripts\license-delivery.psm1') -Force
 $platformRuntimeModule = Import-Module (Join-Path $platformRuntimeRoot 'platform-runtime.psd1') -Force -PassThru
 try { Assert-PlatformRuntimeInventory -Root $platformRuntimeRoot -ManifestPath (Join-Path $platformRuntimeRoot 'platform-runtime.psd1') | Out-Null }
 catch { throw (New-AiInstructionsRefusalException -Code closure-invalid -Message "The imported installer platform runtime closure is invalid. $($_.Exception.Message)" -InnerException $_.Exception) }
@@ -650,6 +771,7 @@ try {
             throw (New-AiInstructionsRefusalException -Code interrupted-install -Message ('Install transaction store changed during recovery: '+(@($remainingTransactions.FullName)-join '; ')))
         }
     }
+    Invoke-AiInstructionsInstallFailpoint -Name 'after-recovery-before-install'
 
     New-Item -ItemType Directory -Force -Path $hookDirectory | Out-Null
     $hookLease = Open-PlatformDirectory -Root $codexHomePath -RelativePath 'hooks'
@@ -788,7 +910,7 @@ try {
                 if([string]$classification.classification -cne 'valid-journal'){throw "Durable journal classification is $($classification.classification)."}
                 $observations=Get-AiInstructionsInstallRecoveryObservations -Journal $classification.journal -CodexHome $codexHomePath -TransactionLease $transactionLease -TransactionPath $transactionPath
                 $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $classification.journal -Observations $observations
-                if([string]$decision.action -ceq 'refuse'){$preserveTransaction=$true;throw (New-AiInstructionsRefusalException -Code interrupted-install -Message ("Installation failed and recovery refused mutation; evidence retained at '$transactionPath'. " + (@($decision.reasons)-join '; ')) -InnerException $installError.Exception)}
+                if([string]$decision.action -ceq 'refuse'){$preserveTransaction=$true;throw (New-AiInstructionsRefusalException -Code interrupted-install -Message ("Installation target changed concurrently; recovery refused mutation and retained evidence at '$transactionPath'. " + (@($decision.reasons)-join '; ')) -InnerException $installError.Exception)}
                 $plan=Get-AiInstructionsInstallRecoveryPlan -Journal $classification.journal -Decision $decision
                 Invoke-AiInstructionsInstallRecoveryPlan -Journal $classification.journal -Plan $plan -CodexHome $codexHomePath -TransactionRootLease $transactionRootLease -TransactionLease $transactionLease -TransactionPath $transactionPath|Out-Null
                 $transactionLease=$null

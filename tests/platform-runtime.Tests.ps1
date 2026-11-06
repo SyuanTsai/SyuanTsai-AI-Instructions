@@ -6329,6 +6329,28 @@ Describe 'Platform probe cleanup evidence' {
             $body|Should Not Match '\[IO\.Directory\]::Delete\([^\r\n]*,\$true\)'
         }
     }
+
+    # Register only on the native host because the directory-publication probe is intentionally unavailable on Unix.
+    if ($IsWindows) {
+        # Scenario: Native directory publication succeeds but exact probe cleanup reports a failure.
+        # Purpose: Refuse capability availability when the probe cannot prove that its owned residue was removed.
+        It 'UnitT30_marks_directory_publication_unavailable_when_probe_cleanup_fails' {
+            InModuleScope platform-runtime {
+                $script:P7dOriginalProbeCleanup=${function:Clear-PlatformProbe}
+                try{
+                    Mock Clear-PlatformProbe {
+                        param($Directory,$Path,$Entries,$Evidence)
+                        & $script:P7dOriginalProbeCleanup -Directory $Directory -Path $Path -Entries $Entries -Evidence $Evidence
+                        $Evidence['cleanupFailure']='fixture-directory-cleanup-failure'
+                    }
+                    $receipt=Test-PlatformDirectoryPublication
+                    $receipt.status|Should Be unavailable
+                    $receipt.evidence.cleanupFailure|Should Match 'fixture-directory-cleanup-failure'
+                }
+                finally{Remove-Variable P7dOriginalProbeCleanup -Scope Script -ErrorAction SilentlyContinue}
+            }
+        }
+    }
 }
 
 Describe 'Platform P4 verified PowerShell and Pester preparation' {

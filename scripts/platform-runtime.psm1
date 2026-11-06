@@ -478,6 +478,7 @@ function Test-PlatformDirectoryPublication {
         if($null -ne $transactionRootLease){Clear-PlatformProbe -Directory $transactionRootLease -Path (Join-Path $path '.ai-instructions-txn') -Entries @() -Evidence $evidence;$transactionRootLease=$null}
         if($null -ne $rootLease){Clear-PlatformProbe -Directory $rootLease -Path $path -Entries @() -Evidence $evidence;$rootLease=$null}
     }
+    if ($evidence.Contains('cleanupFailure')) { $status = 'unavailable' }
     return [pscustomobject]@{status=$status;evidence=[pscustomobject]$evidence}
 }
 
@@ -532,6 +533,7 @@ function Test-WindowsFilePublicationPrimitives {
         if($null -ne $transactionRootLease){Clear-PlatformProbe -Directory $transactionRootLease -Path (Join-Path $path '.ai-instructions-txn') -Entries @() -Evidence $evidence;$transactionRootLease=$null}
         if($null -ne $rootLease){Clear-PlatformProbe -Directory $rootLease -Path $path -Entries @() -Evidence $evidence;$rootLease=$null}
     }
+    if ($evidence.Contains('cleanupFailure')) { $status = 'unavailable' }
     return [pscustomobject]@{status=$status;evidence=[pscustomobject]$evidence}
 }
 
@@ -658,7 +660,14 @@ function Get-PlatformCapabilities {
         }
         if ($platform -ceq 'windows' -and $capability.name -cin @('publication','owned-file-removal')) {
             $capability.status = $windowsFilePublicationProbe.status
-            $capability.evidence = [object[]]@($windowsFilePublicationProbe.evidence)
+            $evidenceName = if ($capability.name -ceq 'publication') { 'publication' } else { 'ownedFileRemoval' }
+            $capability.evidence = [object[]]@($windowsFilePublicationProbe.evidence.PSObject.Properties[$evidenceName].Value)
+            if ($windowsFilePublicationProbe.evidence.PSObject.Properties['failure']) {
+                $capability.evidence += [object[]]@([string]$windowsFilePublicationProbe.evidence.failure)
+            }
+            if ($windowsFilePublicationProbe.evidence.PSObject.Properties['cleanupFailure']) {
+                $capability.evidence += [object[]]@("Probe cleanup failed: $([string]$windowsFilePublicationProbe.evidence.cleanupFailure)")
+            }
         }
         if ($platform -cne 'windows' -and $capability.name -cin @('publication','owned-file-removal')) {
             $capability.status = $publicationProbe.status
