@@ -821,7 +821,7 @@ Describe 'AI instructions runtime contracts' {
         $manifestInventoryPath = Join-Path $manifestInventoryFixture.Root 'platform-runtime.psd1'
         Set-TestTextOccurrence `
             -Path $manifestInventoryPath `
-            -OldValue "Sha256 = 'f35a13414678ccb2c1a932735335548b300df3c3b195f464411796d5e342bddb'" `
+            -OldValue "Sha256 = '5091636f469b1e49005c81a4cd46ee7efc42defa36ae8948313080548bf39849'" `
             -NewValue ("Sha256 = '" + ('0' * 64) + "'")
         Update-TestRuntimeV3Inventory -Fixture $manifestInventoryFixture
         $manifestInventoryFixture.Bundle.platformRuntime.manifestSha256 = Get-TestCanonicalTextSha256 -Path $manifestInventoryPath

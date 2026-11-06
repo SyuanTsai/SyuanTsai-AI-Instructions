@@ -961,7 +961,9 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             if (result >= 0) return true;
             int error = Marshal.GetLastWin32Error();
             if (error == 61) return false; // ENODATA
-            if (error == 95) throw new PlatformCapabilityUnavailableException("linux-xattr-acl-detection: " + ErrnoName(error), "linux");
+            // A filesystem that does not support extended attributes cannot
+            // carry the POSIX ACL xattrs inspected by this runtime.
+            if (error == 95) return false; // ENOTSUP/EOPNOTSUPP
             throw Errno("fgetxattr-" + name, error);
         }
 
@@ -972,7 +974,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             if (length < 0)
             {
                 int error = Marshal.GetLastWin32Error();
-                if (error == 95) throw new PlatformCapabilityUnavailableException("linux-xattr-acl-detection: " + ErrnoName(error), "linux");
+                if (error == 95) return false; // ENOTSUP/EOPNOTSUPP
                 throw Errno("flistxattr", error);
             }
             if (length == 0) return exact;
@@ -980,7 +982,12 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             try
             {
                 long read = Linux.flistxattr(fd, buffer, new UIntPtr((ulong)length)).ToInt64();
-                if (read < 0) throw Errno("flistxattr", Marshal.GetLastWin32Error());
+                if (read < 0)
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    if (error == 95) return false; // ENOTSUP/EOPNOTSUPP
+                    throw Errno("flistxattr", error);
+                }
                 byte[] bytes = new byte[checked((int)read)];
                 Marshal.Copy(buffer, bytes, 0, bytes.Length);
                 string names = Encoding.UTF8.GetString(bytes);
@@ -994,7 +1001,12 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private static bool HasDarwinAcl(SafeFd fd)
         {
             IntPtr acl = Darwin.acl_get_fd_np(fd, AclTypeExtended);
-            if (acl == IntPtr.Zero) throw Errno("acl_get_fd_np", Marshal.GetLastWin32Error());
+            if (acl == IntPtr.Zero)
+            {
+                int error = Marshal.GetLastWin32Error();
+                if (error == 2) return false; // ENOENT means no extended ACL on Darwin.
+                throw Errno("acl_get_fd_np", error);
+            }
             try
             {
                 IntPtr entry = IntPtr.Zero;
@@ -1011,7 +1023,12 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         {
             IntPtr acl = Darwin.acl_get_fd_np(fd, AclTypeExtended);
             if (acl == IntPtr.Zero)
-                throw new PlatformCapabilityUnavailableException("parent-inheritance-acl: unable to read macOS ACL", "macos");
+            {
+                int error = Marshal.GetLastWin32Error();
+                if (error == 2) return false; // ENOENT means no extended ACL on Darwin.
+                throw new PlatformCapabilityUnavailableException(
+                    "parent-inheritance-acl: unable to read macOS ACL (" + ErrnoName(error) + ")", "macos");
+            }
             try
             {
                 IntPtr entry = IntPtr.Zero;

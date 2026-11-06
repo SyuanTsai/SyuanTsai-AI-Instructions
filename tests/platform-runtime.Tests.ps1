@@ -4192,6 +4192,9 @@ Describe 'Unix P7c durable publication and removal' {
                 $capability=$receipt.capabilities|Where-Object name -eq $case.Capability
                 $capability.status|Should Be unavailable
                 ($capability.evidence-join' ')|Should Match 'probe directory identity changed before cleanup'
+                foreach($legacy in @('directory-lease','file-lease','file-identity','lock')){
+                    ($receipt.capabilities|Where-Object name -eq $legacy).status|Should Be available
+                }
                 [IO.Directory]::Exists($paths[0])|Should Be $true
                 [IO.Directory]::Exists($paths[1])|Should Be $true
             } finally {
@@ -4199,6 +4202,70 @@ Describe 'Unix P7c durable publication and removal' {
                 foreach($path in @($paths)){if([IO.Directory]::Exists($path)){Remove-Item -LiteralPath $path -Recurse -Force}}
             }
         }
+    }
+
+    if ($IsMacOS) {
+    # Scenario: Ordinary APFS files and directories have no extended ACL, so acl_get_fd_np reports ENOENT.
+    # Purpose: Treat ENOENT as an empty ACL while keeping permission, publication, and legacy lease probes available.
+    It 'InterT270_accepts_macos_objects_without_extended_acls' {
+        $parent=New-P7cDirectory 'macos-no-acl';$txn=New-P7cTransaction;$file=$null;$stage=$null;$published=$null
+        try {
+            $file=New-P7cFile $parent ordinary content
+            (Get-PlatformPermissions -Lease $file).mode|Should Be '600'
+            (Get-PlatformPermissions -Lease $parent).mode|Should Be '700'
+            $stage=New-P7cFile $txn.Lease stage replacement
+            Publish-PlatformFile -ParentLease $parent -Leaf published -TransactionLease $txn.Lease -StageLease $stage -ExpectedState (Get-P7cAbsentState) -DisplacedLeaf $null -ExpectedStage (Get-P7cStageState $stage)|Out-Null
+            $published=Open-PlatformFile -ParentLease $parent -Leaf published -Access Read -CreateMode OpenExisting
+            (Read-P7cText $parent published)|Should Be replacement
+            $receipt=Get-PlatformCapabilities -Required @('permissions','publication','directory-lease')
+            foreach($name in @('permissions','publication','directory-lease','file-lease','file-identity','lock')){
+                ($receipt.capabilities|Where-Object name -eq $name).status|Should Be available
+            }
+        } finally {foreach($lease in @($published,$stage,$file)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$parent.Dispose()}
+    }
+
+    # Scenario: A macOS target carries an explicit deny-delete extended ACL.
+    # Purpose: Preserve fail-closed permission and publication behavior for a real non-empty ACL and remove the fixture ACL afterward.
+    It 'InterT275_rejects_macos_targets_with_extended_acls' {
+        $parent=New-P7cDirectory 'macos-extended-acl';$txn=New-P7cTransaction;$target=$null;$stage=$null
+        $targetPath=Join-Path $script:P7cRoot 'macos-extended-acl/target'
+        try {
+            $target=New-P7cFile $parent target original;$state=Get-P7cState $target
+            & /bin/chmod '+a' 'everyone deny delete' $targetPath
+            $LASTEXITCODE|Should Be 0
+            $caught=$null
+            try{Get-PlatformPermissions -Lease $target|Out-Null}catch{$caught=$_.Exception}
+            $caught.GetType().Name|Should Be PlatformCapabilityUnavailableException
+            $caught.Capability|Should Be 'permissions: macOS extended ACL is present'
+            $target.Dispose();$target=$null
+            $stage=New-P7cFile $txn.Lease stage replacement
+            $caught=$null
+            try{Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $state -DisplacedLeaf backup -ExpectedStage (Get-P7cStageState $stage)|Out-Null}catch{$caught=$_.Exception}
+            $caught.GetType().Name|Should Be PlatformCapabilityUnavailableException
+            (Read-P7cText $parent target)|Should Be original
+            (Read-P7cText $txn.Lease stage)|Should Be replacement
+        } finally {
+            if([IO.File]::Exists($targetPath)){& /bin/chmod '-N' $targetPath 2>$null|Out-Null}
+            foreach($lease in @($stage,$target)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$parent.Dispose()
+        }
+    }
+    }
+
+    if ($IsLinux) {
+    # Scenario: Ordinary Linux files and directories have no POSIX ACL xattrs.
+    # Purpose: Treat missing ACL data as empty and keep both P7c and legacy filesystem capabilities available.
+    It 'InterT280_accepts_linux_objects_without_acl_xattrs' {
+        $parent=New-P7cDirectory 'linux-no-acl';$file=$null
+        try {
+            $file=New-P7cFile $parent ordinary content
+            (Get-PlatformPermissions -Lease $file).mode|Should Be '600'
+            (Get-PlatformPermissions -Lease $parent).mode|Should Be '700'
+            $receipt=Get-PlatformCapabilities -Required @('permissions','publication','owned-file-removal','directory-lease','file-lease','file-identity','lock')
+            foreach($name in @('permissions','publication','owned-file-removal','directory-lease','file-lease','file-identity','lock')){
+                ($receipt.capabilities|Where-Object name -eq $name).status|Should Be available
+            }
+        } finally {if($null-ne$file){$file.Dispose()};$parent.Dispose()}
+    }
     }
     }
 }

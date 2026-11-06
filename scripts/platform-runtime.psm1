@@ -193,11 +193,9 @@ function Test-PlatformPrimitives {
         $directory = Open-PlatformDirectory -Root $root -RelativePath $name -CreatePrivate
         $file = Open-PlatformFile -ParentLease $directory -Leaf 'data' -Access ReadWrite -CreateMode CreateNew
         $fileIdentity = Assert-PlatformFileIdentity -Lease $file -Expected $file.Observation -SingleLink
-        $permissions = Get-PlatformPermissions -Lease $file
         if ($platform -eq 'windows') {
+            $permissions = Get-PlatformPermissions -Lease $file
             Set-PlatformPermissions -Lease $file -Policy @{ Sddl=$permissions.Sddl; ReadOnly=$permissions.ReadOnly } | Out-Null
-        } else {
-            Set-PlatformPermissions -Lease $file -Policy @{ Mode=384 } | Out-Null
         }
         $file.Dispose(); $file = $null
         $first = Enter-PlatformLock -ParentLease $directory -Leaf 'lock' -Mode Shared -Timeout ([TimeSpan]::Zero)
