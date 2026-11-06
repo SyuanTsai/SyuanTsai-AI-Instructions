@@ -92,6 +92,14 @@ function New-WindowsPlatformVerificationError {
 }
 
 function Get-WindowsPlatformLeasePath { param($Lease) [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::GetVerifiedPath($Lease) }
+function Assert-WindowsPlatformTargetPath {
+    param($ParentLease,[string]$Leaf,[string]$Capability,[switch]$AllowTransactionParent)
+    $parentPath=Get-WindowsPlatformLeasePath $ParentLease
+    if ([SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::IsTransactionStoreTarget($parentPath,$Leaf) -and -not $AllowTransactionParent) {
+        throw (New-WindowsPlatformVerificationError $Capability 'The target must stay outside .ai-instructions-txn and must not use the reserved .ai-instructions-txn leaf.')
+    }
+    return $parentPath
+}
 function Get-WindowsPlatformIdentity {
     param($Observation)
     [pscustomobject][ordered]@{ kind='windows-file-id'; device=('0x{0:x}' -f [uint64]$Observation.Device); fileId=('0x{0:x}' -f [uint64]$Observation.Inode) }
@@ -134,7 +142,7 @@ function Assert-WindowsPlatformExpectedContent {
     }
 }
 function Assert-WindowsPlatformTransactionLease {
-    param($ParentLease,$TransactionLease,[string]$Capability)
+    param($ParentLease,$TransactionLease,[string]$Capability,[switch]$AllowSameTransactionParent)
     $parentPath=Get-WindowsPlatformLeasePath $ParentLease
     $transactionPath=Get-WindowsPlatformLeasePath $TransactionLease
     $transactionId=[IO.Path]::GetFileName($transactionPath)
@@ -149,9 +157,9 @@ function Assert-WindowsPlatformTransactionLease {
         $normalizedParentPath.StartsWith($normalizedTransactionPath+'\',[StringComparison]::OrdinalIgnoreCase)
     $insideTransactionContainer=[StringComparer]::OrdinalIgnoreCase.Equals($normalizedParentPath,$normalizedTransactionContainer) -or
         $normalizedParentPath.StartsWith($normalizedTransactionContainer+'\',[StringComparison]::OrdinalIgnoreCase)
+    $validParentTopology=if($AllowSameTransactionParent){$sameLeaseIdentity -and [StringComparer]::OrdinalIgnoreCase.Equals($normalizedParentPath,$normalizedTransactionPath)}else{-not $sameLeaseIdentity -and -not $insideTransaction -and -not $insideTransactionContainer}
     if ([string]::IsNullOrEmpty($rootPath) -or $transactionId -cnotmatch '^[0-9a-f]{32}$' -or [IO.Path]::GetFileName($transactionContainer) -cne '.ai-instructions-txn' -or
-        [uint64]$ParentLease.Observation.Device -ne [uint64]$TransactionLease.Observation.Device -or
-        $sameLeaseIdentity -or $insideTransaction -or $insideTransactionContainer) {
+        [uint64]$ParentLease.Observation.Device -ne [uint64]$TransactionLease.Observation.Device -or -not $validParentTopology) {
         throw (New-WindowsPlatformVerificationError $Capability 'TransactionLease must be .ai-instructions-txn/<32 lowercase hex> on the target volume, and the target must be outside it.')
     }
     return [pscustomobject][ordered]@{parentPath=$parentPath;transactionPath=$transactionPath;rootPath=$rootPath;transactionId=$transactionId}
@@ -279,6 +287,65 @@ function Open-WindowsPlatformMutationFile {
         throw (New-WindowsPlatformVerificationError $Capability "The DELETE-scoped file handle could not be opened and identity-verified: $($_.Exception.Message)")
     }
 }
+function Open-WindowsPlatformMutationDirectory {
+    param($ParentLease,[string]$Leaf,$Identity,[string]$Capability)
+    try {
+        if ($null -eq $Identity -or [string]$Identity.kind -cne 'windows-file-id') { throw [ArgumentException]::new('An expected Windows directory identity is required.') }
+        $device=ConvertTo-WindowsPlatformIdentityNumber ([string]$Identity.device)
+        $fileId=ConvertTo-WindowsPlatformIdentityNumber ([string]$Identity.fileId)
+        return [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenMutationDirectory($ParentLease,$Leaf,$device,$fileId)
+    }
+    catch {
+        if ($_.Exception -is [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]) { throw }
+        throw (New-WindowsPlatformVerificationError $Capability "The DELETE-scoped directory handle could not be opened and identity-verified: $($_.Exception.Message)")
+    }
+}
+function Get-WindowsPlatformDirectoryState {
+    param([Parameter(Mandatory = $true)] $ParentLease,[Parameter(Mandatory = $true)][string] $Leaf)
+    try {
+        [void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($Leaf)
+        $state=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::TryGetDirectoryState($ParentLease,$Leaf)
+        if($null -eq $state){return [pscustomobject][ordered]@{exists=$false;identity=$null;inventorySha256=$null;entryCount=$null}}
+        return [pscustomobject][ordered]@{
+            exists=$true
+            identity=(Get-WindowsPlatformIdentity $state.Observation)
+            inventorySha256=[string]$state.InventorySha256
+            entryCount=[int64]$state.EntryCount
+        }
+    }
+    catch {
+        if($_.Exception -is [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]){throw}
+        throw (New-WindowsPlatformVerificationError 'directory-publication' "Directory state could not be captured: $($_.Exception.Message)")
+    }
+}
+function Test-WindowsPlatformDirectoryStateMatch {
+    param($First,$Second)
+    if($null -eq $First -or $null -eq $Second){return $false}
+    return ($First.exists -is [bool] -and $Second.exists -is [bool] -and [bool]$First.exists -eq [bool]$Second.exists -and
+        (Test-WindowsPlatformIdentityMatch $First.identity $Second.identity) -and
+        [string]$First.inventorySha256 -ceq [string]$Second.inventorySha256 -and
+        $null -ne $First.entryCount -and $null -ne $Second.entryCount -and [int64]$First.entryCount -eq [int64]$Second.entryCount)
+}
+function Assert-WindowsPlatformExpectedDirectoryState {
+    param($Lease,$ExpectedState,$ExpectedIdentity,[string]$Capability)
+    if ($null -eq $ExpectedState) { return }
+    try {
+        $required=@('exists','identity','inventorySha256','entryCount')
+        if ($ExpectedState -is [array] -or @($ExpectedState.PSObject.Properties).Count -ne $required.Count) { throw [ArgumentException]::new('ExpectedState must be an exact directory state.') }
+        foreach($name in $required){if($null -eq $ExpectedState.PSObject.Properties[$name]){throw [ArgumentException]::new("ExpectedState is missing $name.")}}
+        if($ExpectedState.exists -isnot [bool] -or -not [bool]$ExpectedState.exists){throw [ArgumentException]::new('ExpectedState.exists must be true for a moved source directory.')}
+        if($ExpectedState.inventorySha256 -isnot [string] -or [string]$ExpectedState.inventorySha256 -cnotmatch '^[0-9a-f]{64}$'){throw [ArgumentException]::new('ExpectedState.inventorySha256 must be a lowercase SHA-256 value.')}
+        if(($ExpectedState.entryCount -isnot [int] -and $ExpectedState.entryCount -isnot [long]) -or [int64]$ExpectedState.entryCount -lt 0){throw [ArgumentException]::new('ExpectedState.entryCount must be a non-negative integer.')}
+        if(-not (Test-WindowsPlatformIdentityMatch $ExpectedState.identity $ExpectedIdentity)){throw [ArgumentException]::new('ExpectedState.identity does not match ExpectedIdentity.')}
+        $nativeState=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::GetDirectoryState($Lease)
+        $observed=[pscustomobject][ordered]@{exists=$true;identity=(Get-WindowsPlatformIdentity $nativeState.Observation);inventorySha256=[string]$nativeState.InventorySha256;entryCount=[int64]$nativeState.EntryCount}
+        if(-not (Test-WindowsPlatformDirectoryStateMatch $observed $ExpectedState)){throw [IO.IOException]::new('The source directory identity or complete-tree inventory differs from ExpectedState.')}
+    }
+    catch {
+        if ($_.Exception -is [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]) { throw }
+        throw (New-WindowsPlatformVerificationError $Capability $_.Exception.Message)
+    }
+}
 function Assert-WindowsPlatformJournalOperation {
     param($Journal,$ParentLease,$TransactionLease,$TransactionContext,[string]$Leaf,[AllowNull()][string]$StageLeaf,[AllowNull()][string]$BackupLeaf,$ExpectedState,$ExpectedStage,[string]$Method,[string]$Capability,[switch]$Removal)
     if ($null -eq $Journal) { return }
@@ -312,7 +379,7 @@ function Assert-WindowsPlatformJournalOperation {
         if((($null -eq $boundBackupLeaf) -ne ($null -eq $Journal.backupLeaf)) -or ($null -ne $boundBackupLeaf -and -not [StringComparer]::OrdinalIgnoreCase.Equals([string]$Journal.backupLeaf,$boundBackupLeaf))){ throw [ArgumentException]::new('backupLeaf does not match the displaced leaf') }
         if($null -ne $Journal.quarantineLeaf){ throw [ArgumentException]::new('quarantineLeaf must be null for file operations') }
         if(-not (Test-WindowsPlatformStateMatch $Journal.original $ExpectedState)){ throw [ArgumentException]::new('original does not match ExpectedState') }
-        if(([bool]$ExpectedState.exists -and $null -eq $Journal.permissions) -or (-not [bool]$ExpectedState.exists -and $null -ne $Journal.permissions)){ throw [ArgumentException]::new('permissions do not match original existence') }
+        if([bool]$ExpectedState.exists -and $null -eq $Journal.permissions){ throw [ArgumentException]::new('permissions do not match original existence') }
         if($Removal){
             if($Journal.applied.exists -isnot [bool] -or [bool]$Journal.applied.exists -or $null -ne $Journal.applied.sha256 -or $null -ne $Journal.applied.length -or $null -ne $Journal.applied.identity){ throw [ArgumentException]::new('applied must describe a missing target for removal') }
         }
@@ -323,17 +390,76 @@ function Assert-WindowsPlatformJournalOperation {
     catch { throw (New-WindowsPlatformVerificationError $Capability "Journal operation mismatch: $($_.Exception.Message)") }
 }
 
+function Assert-WindowsPlatformDirectoryJournalOperation {
+    param($Journal,$TransactionContext,$ParentLease,[string]$Leaf,[string]$DestinationLeaf,$ExpectedIdentity,[string]$Direction,$ExpectedState)
+    if ($null -eq $Journal) { return }
+    try {
+        $required=@('sequence','kind','method','targetRelativePath','stageLeaf','backupLeaf','quarantineLeaf','original','backupIdentity','applied','permissions','state')
+        if($Journal -is [array] -or @($Journal.PSObject.Properties).Count -ne $required.Count){throw [ArgumentException]::new('must be one validated journal v1 operation')}
+        foreach($name in $required){if($null -eq $Journal.PSObject.Properties[$name]){throw [ArgumentException]::new("is missing $name")}}
+        if([string]$Journal.kind -cnotin @('swap-directory','create-directory')){throw [ArgumentException]::new('kind must be swap-directory or create-directory')}
+        if([string]$Journal.method -cne 'stage-rename'){throw [ArgumentException]::new('method must be stage-rename')}
+
+        $targetLeaf=if($Direction -ceq 'ToTransaction'){$Leaf}else{$DestinationLeaf}
+        $segments=@(([string]$Journal.targetRelativePath).Split('/'))
+        if($segments.Count -lt 1 -or @($segments|Where-Object{[string]::IsNullOrWhiteSpace($_)}).Count -gt 0){throw [ArgumentException]::new('targetRelativePath is invalid')}
+        foreach($segment in $segments){[void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($segment)}
+        if(-not [StringComparer]::OrdinalIgnoreCase.Equals($segments[-1],$targetLeaf)){throw [ArgumentException]::new('targetRelativePath leaf does not match the target leaf')}
+        $parentPath=Get-WindowsPlatformLeasePath $ParentLease
+        $parentRelative=[IO.Path]::GetRelativePath([string]$TransactionContext.rootPath,$parentPath).Replace('\','/')
+        if($parentRelative -eq '.'){$parentRelative=''}
+        if([IO.Path]::IsPathRooted($parentRelative) -or $parentRelative -eq '..' -or $parentRelative.StartsWith('../',[StringComparison]::Ordinal)){throw [ArgumentException]::new('ParentLease is outside the transaction root')}
+        $expectedTarget=if([string]::IsNullOrEmpty($parentRelative)){$targetLeaf}else{$parentRelative+'/'+$targetLeaf}
+        if(-not [StringComparer]::OrdinalIgnoreCase.Equals([string]$Journal.targetRelativePath,$expectedTarget)){throw [ArgumentException]::new('targetRelativePath parent does not match ParentLease')}
+
+        if($null -eq $ExpectedState){throw [ArgumentException]::new('ExpectedState is required when Journal is supplied')}
+        $journalIdentity=$null
+        $journalState=$null
+        if($Direction -ceq 'ToTransaction'){
+            if($null -ne $Journal.backupLeaf -and [StringComparer]::OrdinalIgnoreCase.Equals([string]$Journal.backupLeaf,$DestinationLeaf)){
+                if([string]$Journal.kind -cne 'swap-directory' -or -not [bool]$Journal.original.exists){throw [ArgumentException]::new('backupLeaf is incompatible with the directory operation')}
+                $journalIdentity=$Journal.original.identity
+                $journalState=$Journal.original
+            }
+            elseif($null -ne $Journal.quarantineLeaf -and [StringComparer]::OrdinalIgnoreCase.Equals([string]$Journal.quarantineLeaf,$DestinationLeaf)){
+                $journalIdentity=$Journal.applied.identity
+                $journalState=$Journal.applied
+            }
+            else{throw [ArgumentException]::new('DestinationLeaf must match backupLeaf or quarantineLeaf')}
+        }
+        else{
+            if($null -ne $Journal.stageLeaf -and [StringComparer]::OrdinalIgnoreCase.Equals([string]$Journal.stageLeaf,$Leaf)){$journalIdentity=$Journal.applied.identity;$journalState=$Journal.applied}
+            elseif($null -ne $Journal.backupLeaf -and [StringComparer]::OrdinalIgnoreCase.Equals([string]$Journal.backupLeaf,$Leaf)){
+                if([string]$Journal.kind -cne 'swap-directory'){throw [ArgumentException]::new('backupLeaf is incompatible with create-directory')}
+                $journalIdentity=$Journal.backupIdentity
+                $journalState=$Journal.original
+            }
+            else{throw [ArgumentException]::new('Leaf must match stageLeaf or backupLeaf')}
+        }
+        if(-not (Test-WindowsPlatformIdentityMatch $journalIdentity $ExpectedIdentity)){throw [ArgumentException]::new('ExpectedIdentity does not match the journal identity for this rename')}
+        if(-not (Test-WindowsPlatformDirectoryStateMatch $journalState $ExpectedState)){throw [ArgumentException]::new('ExpectedState does not match the journal directory state for this rename')}
+    }
+    catch { throw (New-WindowsPlatformVerificationError 'directory-publication' "Journal operation mismatch: $($_.Exception.Message)") }
+}
+
 function Publish-WindowsPlatformFile {
     param([Parameter(Mandatory = $true)] $ParentLease,[Parameter(Mandatory = $true)][string] $Leaf,[Parameter(Mandatory = $true)] $TransactionLease,[Parameter(Mandatory = $true)] $StageLease,[Parameter(Mandatory = $true)] $ExpectedState,[AllowNull()] $DisplacedLeaf,[Parameter(Mandatory = $true)] $ExpectedStage,[switch] $NoReplace,$Journal)
     if ([string]::IsNullOrEmpty($DisplacedLeaf)) { $DisplacedLeaf=$null }
     [void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($Leaf)
     if ($null -ne $DisplacedLeaf) { [void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($DisplacedLeaf) }
     if ($NoReplace -and [bool]$ExpectedState.exists) { throw (New-WindowsPlatformVerificationError 'publication' 'NoReplace requires ExpectedState.exists=false and relies on the native rename to reject a raced destination.') }
-    $transactionContext=Assert-WindowsPlatformTransactionLease $ParentLease $TransactionLease 'publication'
+    $journalStore=[StringComparer]::OrdinalIgnoreCase.Equals($Leaf,'journal.json') -and [object]::ReferenceEquals($ParentLease,$TransactionLease)
+    if ($journalStore -and $PSBoundParameters.ContainsKey('Journal')) { throw (New-WindowsPlatformVerificationError 'publication' 'Journal store publication must not supply Journal.') }
+    [void](Assert-WindowsPlatformTargetPath $ParentLease $Leaf 'publication' -AllowTransactionParent:$journalStore)
+    $transactionContext=Assert-WindowsPlatformTransactionLease $ParentLease $TransactionLease 'publication' -AllowSameTransactionParent:$journalStore
     Assert-WindowsPlatformLeasePaths $ParentLease $TransactionLease 'publication'
     $stagePath=Get-WindowsPlatformLeasePath $StageLease
     $stageLeaf=[IO.Path]::GetFileName($stagePath)
     if (-not [StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetDirectoryName($stagePath),[string]$transactionContext.transactionPath)) { throw (New-WindowsPlatformVerificationError 'publication' 'StageLease is not an immediate child of TransactionLease.') }
+    if ($journalStore -and (-not [StringComparer]::OrdinalIgnoreCase.Equals($stageLeaf,'journal.stage') -or
+        ([bool]$ExpectedState.exists -and -not [StringComparer]::OrdinalIgnoreCase.Equals($DisplacedLeaf,'journal.prev')))) {
+        throw (New-WindowsPlatformVerificationError 'publication' 'Journal store publication requires journal.stage and uses journal.prev when replacing journal.json.')
+    }
     $stageObservation=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::AssertIdentity($StageLease,$StageLease.Observation,$true)
     $stageIdentity=Get-WindowsPlatformIdentity $stageObservation
     Assert-WindowsPlatformExpectedContent $StageLease $ExpectedStage 'publication' 'Stage'
@@ -350,6 +476,8 @@ function Publish-WindowsPlatformFile {
     $targetReadOnlyCleared=$false
     $preserveForRecovery=$false
     $permissions=$null
+    $verifyCreatePermissionsAfterRename=$false
+    $aclFrozenAfterRename=$false
     $receipt=$null
     try {
         $target=if($NoReplace){$null}elseif([bool]$ExpectedState.exists){Open-WindowsPlatformMutationFile $ParentLease $Leaf $ExpectedState.identity 'publication' -AllowMissing}else{Open-WindowsPlatformMutationFile $ParentLease $Leaf $null 'publication' -AllowMissing}
@@ -365,7 +493,13 @@ function Publish-WindowsPlatformFile {
             }
         }
         else {
-            $permissions=Get-WindowsPlatformInheritedPermissions $ParentLease 'publication'
+            if($null -ne $Journal -and $null -ne $Journal.permissions){
+                $permissions=ConvertTo-WindowsPlatformPermissionSnapshot $Journal.permissions 'publication' 'Journal create-file stage'
+                $verifyCreatePermissionsAfterRename=$true
+            }
+            else{
+                $permissions=Get-WindowsPlatformInheritedPermissions $ParentLease 'publication'
+            }
         }
         # OpenFile intentionally preserves origin/main's read-only share mode, which
         # blocks a second DELETE request.  Publication therefore consumes the caller's
@@ -380,8 +514,8 @@ function Publish-WindowsPlatformFile {
         }
         $permissionsApplied=$true
         [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::ApplyPublicationDacl($mutationStage,[string]$permissions.sddl)
-        [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($mutationStage,$null,[bool]$permissions.readOnly)
-        $canonicalStagePermissions=ConvertTo-WindowsPlatformPermissionSnapshot (Get-WindowsPlatformPermissions $mutationStage) 'publication' 'Applied stage'
+        $nativeStagePermissions=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($mutationStage,$null,[bool]$permissions.readOnly)
+        $canonicalStagePermissions=ConvertTo-WindowsPlatformPermissionSnapshot ([pscustomobject][ordered]@{kind='windows-sddl';sddl=[string]$nativeStagePermissions.Sddl;readOnly=[bool]$nativeStagePermissions.ReadOnly}) 'publication' 'Applied stage'
         if (-not (& $script:WindowsDaclCompareCommand -FirstSddl ([string]$canonicalStagePermissions.sddl) -SecondSddl ([string]$permissions.sddl)) -or [bool]$canonicalStagePermissions.readOnly -ne [bool]$permissions.readOnly) {
             throw (New-WindowsPlatformVerificationError 'publication' 'Applied stage permissions do not match the target snapshot.')
         }
@@ -414,6 +548,20 @@ function Publish-WindowsPlatformFile {
             displacedLeaf=$DisplacedLeaf
             durability='unconfirmed'
             flush=[pscustomobject][ordered]@{file=$true;directory=$false;transactionDirectory=$false}
+        }
+        if($verifyCreatePermissionsAfterRename){
+            $aclFrozenAfterRename=$true
+            try {
+                Invoke-WindowsPlatformDurabilityHook 'after-applied-rename-before-permission-readback' 'publication' 'stage' $mutationStage
+                $publishedCreatePermissions=ConvertTo-WindowsPlatformPermissionSnapshot (Get-WindowsPlatformPermissions $mutationStage) 'publication' 'Published create-file target'
+                if(-not (& $script:WindowsDaclCompareCommand -FirstSddl ([string]$publishedCreatePermissions.sddl) -SecondSddl ([string]$permissions.sddl)) -or [bool]$publishedCreatePermissions.readOnly -ne [bool]$permissions.readOnly){
+                    throw (New-WindowsPlatformVerificationError 'publication' 'Published create-file permissions do not match the journal snapshot.')
+                }
+            }
+            catch {
+                $preserveForRecovery=$true
+                throw (New-WindowsPlatformRecoveryError 'publication' "Post-rename create-file permission verification failed; journal recovery is required. $($_.Exception.Message)" $receipt)
+            }
         }
         try {
             Invoke-WindowsPlatformDirectoryFlush $ParentLease 'publication' 'post-rename' 'parent'
@@ -448,7 +596,7 @@ function Publish-WindowsPlatformFile {
         if ($preserveForRecovery) { throw $publicationFailure }
         try {
             if ($applied) {
-                [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($mutationStage,$null,$false)
+                if(-not $aclFrozenAfterRename){[void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($mutationStage,$null,$false)}
                 [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::RenameNoReplace($mutationStage,$TransactionLease,$stageLeaf)
                 $applied=$false
             }
@@ -461,7 +609,7 @@ function Publish-WindowsPlatformFile {
                 $displaced=$false
             }
             elseif ($targetReadOnlyCleared) { [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($target,$null,$true);$targetReadOnlyCleared=$false }
-            if ($permissionsApplied) {
+            if ($permissionsApplied -and -not $aclFrozenAfterRename) {
                 [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::ApplyPublicationDacl($mutationStage,[string]$stagePermissions.sddl)
                 [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($mutationStage,$null,[bool]$stagePermissions.readOnly)
                 $restoredStagePermissions=ConvertTo-WindowsPlatformPermissionSnapshot (Get-WindowsPlatformPermissions $mutationStage) 'publication' 'Rollback stage'
@@ -483,16 +631,17 @@ function Remove-WindowsPlatformOwnedFile {
     [void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($Leaf)
     $tombstone=($null -ne $TransactionLease -and $null -ne $TombstoneLeaf)
     if (($null -ne $TransactionLease) -ne ($null -ne $TombstoneLeaf)) { throw (New-WindowsPlatformVerificationError 'owned-file-removal' 'TransactionLease and TombstoneLeaf must be supplied together.') }
-    if (-not $tombstone -and $null -ne $Journal) { throw (New-WindowsPlatformVerificationError 'owned-file-removal' 'Journal is forbidden in cleanup mode.') }
+    if (-not $tombstone -and $PSBoundParameters.ContainsKey('Journal')) { throw (New-WindowsPlatformVerificationError 'owned-file-removal' 'Journal is forbidden in cleanup mode.') }
     $transactionContext=$null
     if ($tombstone) {
         [void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($TombstoneLeaf)
+        [void](Assert-WindowsPlatformTargetPath $ParentLease $Leaf 'owned-file-removal')
         $transactionContext=Assert-WindowsPlatformTransactionLease $ParentLease $TransactionLease 'owned-file-removal'
         Assert-WindowsPlatformLeasePaths $ParentLease $TransactionLease 'owned-file-removal'
         Assert-WindowsPlatformJournalOperation $Journal $ParentLease $TransactionLease $transactionContext $Leaf $null $TombstoneLeaf $ExpectedState $null 'tombstone-rename' 'owned-file-removal' -Removal
     }
     else {
-        $path=Get-WindowsPlatformLeasePath $ParentLease
+        $path=Assert-WindowsPlatformTargetPath $ParentLease $Leaf 'owned-file-removal' -AllowTransactionParent
         if ([IO.Path]::GetFileName($path) -cnotmatch '^[0-9a-f]{32}$' -or [IO.Path]::GetFileName([IO.Path]::GetDirectoryName($path)) -cne '.ai-instructions-txn') { throw (New-WindowsPlatformVerificationError 'owned-file-removal' 'Cleanup is restricted to a transaction-private directory.') }
     }
     $target=$null
@@ -620,6 +769,111 @@ function Remove-WindowsPlatformOwnedFile {
         throw $removalFailure
     }
     finally { if($null -ne $target){$target.Dispose()} }
+}
+function Move-WindowsPlatformOwnedDirectory {
+    param(
+        [Parameter(Mandatory = $true)] $ParentLease,
+        [Parameter(Mandatory = $true)][string] $Leaf,
+        [Parameter(Mandatory = $true)] $TransactionLease,
+        [Parameter(Mandatory = $true)][string] $DestinationLeaf,
+        [Parameter(Mandatory = $true)] $ExpectedIdentity,
+        [Parameter(Mandatory = $true)][ValidateSet('ToTransaction','FromTransaction')][string] $Direction,
+        $ExpectedState,
+        $Journal
+    )
+    $source=$null
+    $renamed=$false
+    $receipt=$null
+    try {
+        if($null -ne $Journal -and $null -eq $ExpectedState){throw (New-WindowsPlatformVerificationError 'directory-publication' 'ExpectedState is required when Journal is supplied.')}
+        [void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($Leaf)
+        [void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($DestinationLeaf)
+        $targetLeaf=if($Direction -ceq 'ToTransaction'){$Leaf}else{$DestinationLeaf}
+        [void](Assert-WindowsPlatformTargetPath $ParentLease $targetLeaf 'directory-publication')
+        $transactionContext=Assert-WindowsPlatformTransactionLease $ParentLease $TransactionLease 'directory-publication'
+        Assert-WindowsPlatformLeasePaths $ParentLease $TransactionLease 'directory-publication'
+        Assert-WindowsPlatformDirectoryJournalOperation $Journal $transactionContext $ParentLease $Leaf $DestinationLeaf $ExpectedIdentity $Direction $ExpectedState
+        $sourceParent=if($Direction -ceq 'ToTransaction'){$ParentLease}else{$TransactionLease}
+        $destinationParent=if($Direction -ceq 'ToTransaction'){$TransactionLease}else{$ParentLease}
+        $sourcePath=Join-Path (Get-WindowsPlatformLeasePath $sourceParent) $Leaf
+        Invoke-WindowsPlatformPreReopenHook 'before-directory-open' 'directory-publication' 'source' $sourcePath
+        $source=Open-WindowsPlatformMutationDirectory $sourceParent $Leaf $ExpectedIdentity 'directory-publication'
+        Assert-WindowsPlatformExpectedDirectoryState $source $ExpectedState $ExpectedIdentity 'directory-publication'
+        Invoke-WindowsPlatformDirectoryFlush $ParentLease 'directory-publication' 'preflight' 'parent'
+        Invoke-WindowsPlatformDirectoryFlush $TransactionLease 'directory-publication' 'preflight' 'transaction'
+        Invoke-WindowsPlatformDurabilityHook 'before-directory-rename' 'directory-publication' 'source' $source
+        [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::RenameDirectoryNoReplace($source,$destinationParent,$DestinationLeaf)
+        $renamed=$true
+        $receipt=[pscustomobject][ordered]@{
+            capability='directory-publication'
+            sourceLeaf=$Leaf
+            destinationLeaf=$DestinationLeaf
+            direction=$Direction
+            identity=(Get-WindowsPlatformIdentity $source.Observation)
+        }
+        try {
+            Invoke-WindowsPlatformDirectoryFlush $ParentLease 'directory-publication' 'post-rename' 'parent'
+            Invoke-WindowsPlatformDirectoryFlush $TransactionLease 'directory-publication' 'post-rename' 'transaction'
+            Assert-WindowsPlatformLeasePaths $ParentLease $TransactionLease 'directory-publication'
+            $movedIdentity=Get-WindowsPlatformIdentity ([SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::AssertIdentity($source,$source.Observation,$false))
+            if(-not (Test-WindowsPlatformIdentityMatch $movedIdentity $ExpectedIdentity)){throw (New-WindowsPlatformVerificationError 'directory-publication' 'The moved directory identity changed after rename.')}
+            $source.Dispose()
+            $source=$null
+            $publishedState=Get-WindowsPlatformDirectoryState $destinationParent $DestinationLeaf
+            if(-not [bool]$publishedState.exists -or -not (Test-WindowsPlatformIdentityMatch $publishedState.identity $ExpectedIdentity)){throw (New-WindowsPlatformVerificationError 'directory-publication' 'The destination directory identity changed after rename.')}
+            if($null -ne $ExpectedState){
+                if(-not (Test-WindowsPlatformDirectoryStateMatch $publishedState $ExpectedState)){throw (New-WindowsPlatformVerificationError 'directory-publication' 'The destination directory identity or complete-tree inventory differs from ExpectedState after rename.')}
+            }
+        }
+        catch { throw (New-WindowsPlatformRecoveryError 'directory-publication' "Post-rename durability or complete-state verification failed; journal recovery is required. $($_.Exception.Message)" $receipt) }
+        return $receipt
+    }
+    catch {
+        if($renamed){throw}
+        if($_.Exception -is [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] -and [string]$_.Exception.Capability -ceq 'directory-publication'){throw}
+        throw (New-WindowsPlatformVerificationError 'directory-publication' $_.Exception.Message)
+    }
+    finally { if($null -ne $source){$source.Dispose()} }
+}
+
+function Remove-WindowsPlatformOwnedDirectoryTree {
+    [CmdletBinding(DefaultParameterSetName='TransactionRoot')]
+    param(
+        [Parameter(Mandatory = $true,ParameterSetName='TransactionRoot')] $TransactionRootLease,
+        [Parameter(Mandatory = $true,ParameterSetName='Transaction')] $TransactionLease,
+        [Parameter(Mandatory = $true)][string] $Leaf,
+        [Parameter(Mandatory = $true)] $ExpectedIdentity
+    )
+    $parentLease=if($PSCmdlet.ParameterSetName -ceq 'TransactionRoot'){$TransactionRootLease}else{$TransactionLease}
+    $receipt=$null
+    try {
+        [void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($Leaf)
+        $parentPath=Get-WindowsPlatformLeasePath $parentLease
+        if($PSCmdlet.ParameterSetName -ceq 'TransactionRoot'){
+            if([IO.Path]::GetFileName($parentPath) -cne '.ai-instructions-txn' -or $Leaf -cnotmatch '^[0-9a-f]{32}$'){
+                throw (New-WindowsPlatformVerificationError 'owned-file-removal' 'TransactionRootLease must name .ai-instructions-txn and Leaf must be a 32 lowercase hexadecimal transaction ID.')
+            }
+        }
+        elseif([IO.Path]::GetFileName($parentPath) -cnotmatch '^[0-9a-f]{32}$' -or [IO.Path]::GetFileName([IO.Path]::GetDirectoryName($parentPath)) -cne '.ai-instructions-txn'){
+            throw (New-WindowsPlatformVerificationError 'owned-file-removal' 'TransactionLease must name .ai-instructions-txn/<32 lowercase hex>.')
+        }
+        if($null -eq $ExpectedIdentity -or [string]$ExpectedIdentity.kind -cne 'windows-file-id'){
+            throw (New-WindowsPlatformVerificationError 'owned-file-removal' 'ExpectedIdentity must be a Windows file identity.')
+        }
+        $expectedDevice=ConvertTo-WindowsPlatformIdentityNumber ([string]$ExpectedIdentity.device)
+        $expectedFileId=ConvertTo-WindowsPlatformIdentityNumber ([string]$ExpectedIdentity.fileId)
+        Invoke-WindowsPlatformDirectoryFlush $parentLease 'owned-directory-tree-removal' 'preflight' 'parent'
+        Invoke-WindowsPlatformDurabilityHook 'before-owned-directory-tree-delete' 'owned-directory-tree-removal' 'directory' $parentLease
+        $removed=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::DeleteOwnedDirectoryTree($parentLease,$Leaf,$expectedDevice,$expectedFileId)
+        $receipt=[pscustomobject][ordered]@{capability='owned-file-removal';removedEntryCount=[int]$removed;leaf=$Leaf}
+        try { Invoke-WindowsPlatformDirectoryFlush $parentLease 'owned-directory-tree-removal' 'post-delete' 'parent' }
+        catch { throw (New-WindowsPlatformRecoveryError 'owned-file-removal' "Post-delete directory flush failed; manual recovery verification is required. $($_.Exception.Message)" $receipt) }
+        return $receipt
+    }
+    catch {
+        if($_.Exception -is [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] -and [string]$_.Exception.Capability -ceq 'owned-file-removal'){throw}
+        throw (New-WindowsPlatformVerificationError 'owned-file-removal' $_.Exception.Message)
+    }
 }
 function Get-WindowsPlatformPermissions {
     param([Parameter(Mandatory = $true)] $Lease)

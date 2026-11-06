@@ -52,7 +52,7 @@
       "type": "array",
       "minItems": 1,
       "uniqueItems": true,
-      "items": { "enum": ["directory-lease", "file-lease", "file-identity", "lock", "publication", "owned-file-removal", "permissions", "process-isolation", "owned-process", "process-cleanup", "powershell-resolution", "pester-initialization", "powershell-runtime", "pester-module", "process-environment"] }
+      "items": { "enum": ["directory-lease", "file-lease", "file-identity", "lock", "publication", "owned-file-removal", "directory-publication", "permissions", "process-isolation", "owned-process", "process-cleanup", "powershell-resolution", "pester-initialization", "powershell-runtime", "pester-module", "process-environment"] }
     },
     "projectionContractSha256": { "$ref": "#/$defs/hash" }
   },

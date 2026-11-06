@@ -416,6 +416,71 @@ function Test-PlatformPrimitives {
     return [pscustomobject]@{ status=$status; evidence=[pscustomobject]$evidence }
 }
 
+function Test-PlatformDirectoryPublication {
+    $platform=Get-CurrentPlatformName
+    if($platform -cne 'windows'){
+        return [pscustomobject]@{status='unavailable';evidence=[pscustomobject][ordered]@{implementation='P11 directory publication is not implemented on this platform.'}}
+    }
+    $status='unavailable'
+    $evidence=[ordered]@{
+        noReplace='not verified'
+        identityPreserved='not verified'
+        sameFileSystem='not verified'
+    }
+    $rootLease=$null;$parentLease=$null;$transactionRootLease=$null;$transactionLease=$null;$stageLease=$null;$movedLease=$null;$occupiedLease=$null;$receipt=$null;$transactionIdentity=$null
+    $root=[IO.Path]::GetTempPath().TrimEnd('\','/')
+    $name='platform-directory-publication-probe-'+[Guid]::NewGuid().ToString('N')
+    $path=Join-Path $root $name
+    $transactionId=[Guid]::NewGuid().ToString('N')
+    try{
+        $rootLease=Open-PlatformDirectory -Root $root -RelativePath $name -CreatePrivate
+        [void][IO.Directory]::CreateDirectory((Join-Path $path 'target'))
+        [void][IO.Directory]::CreateDirectory((Join-Path $path '.ai-instructions-txn'))
+        [void][IO.Directory]::CreateDirectory((Join-Path $path ".ai-instructions-txn/$transactionId"))
+        [void][IO.Directory]::CreateDirectory((Join-Path $path ".ai-instructions-txn/$transactionId/stage"))
+        [void][IO.Directory]::CreateDirectory((Join-Path $path 'target/occupied'))
+        $parentLease=Open-PlatformDirectory -Root $path -RelativePath 'target'
+        $occupiedLease=Open-PlatformDirectory -Root $path -RelativePath 'target/occupied'
+        $transactionRootLease=Open-PlatformDirectory -Root $path -RelativePath '.ai-instructions-txn'
+        $transactionLease=Open-PlatformDirectory -Root $path -RelativePath ".ai-instructions-txn/$transactionId"
+        $transactionIdentity=[pscustomobject][ordered]@{kind='windows-file-id';device=('0x{0:x}' -f [uint64]$transactionLease.Observation.Device);fileId=('0x{0:x}' -f [uint64]$transactionLease.Observation.Inode)}
+        $stageLease=Open-PlatformDirectory -Root $path -RelativePath ".ai-instructions-txn/$transactionId/stage"
+        $sourceIdentity=[pscustomobject][ordered]@{kind='windows-file-id';device=('0x{0:x}' -f [uint64]$stageLease.Observation.Device);fileId=('0x{0:x}' -f [uint64]$stageLease.Observation.Inode)}
+        $evidence.sameFileSystem=if([uint64]$stageLease.Observation.Device -eq [uint64]$parentLease.Observation.Device){'Source and destination directory leases reported the same volume serial.'}else{throw 'Source and destination are not on the same filesystem.'}
+        $stageLease.Dispose();$stageLease=$null
+        $rejected=$false
+        try{Move-PlatformOwnedDirectory -ParentLease $parentLease -Leaf 'stage' -TransactionLease $transactionLease -DestinationLeaf 'occupied' -ExpectedIdentity $sourceIdentity -Direction FromTransaction|Out-Null}
+        catch{$rejected=$true}
+        if(-not $rejected -or -not [IO.Directory]::Exists((Join-Path $path ".ai-instructions-txn/$transactionId/stage")) -or -not [IO.Directory]::Exists((Join-Path $path 'target/occupied'))){throw 'Native no-replace rename did not preserve both directory names.'}
+        $evidence.noReplace='Native no-replace directory rename rejected an existing destination and preserved both names.'
+        $receipt=Move-PlatformOwnedDirectory -ParentLease $parentLease -Leaf 'stage' -TransactionLease $transactionLease -DestinationLeaf 'published' -ExpectedIdentity $sourceIdentity -Direction FromTransaction
+        $movedLease=Open-PlatformDirectory -Root $path -RelativePath 'target/published'
+        $movedIdentity=[pscustomobject][ordered]@{kind='windows-file-id';device=('0x{0:x}' -f [uint64]$movedLease.Observation.Device);fileId=('0x{0:x}' -f [uint64]$movedLease.Observation.Inode)}
+        if([string]$receipt.identity.device -cne [string]$sourceIdentity.device -or [string]$receipt.identity.fileId -cne [string]$sourceIdentity.fileId -or [string]$movedIdentity.fileId -cne [string]$sourceIdentity.fileId){throw 'Directory identity was not preserved by rename.'}
+        $evidence.identityPreserved='Handle and path readback retained the original Windows file ID.'
+        $status='available'
+    }
+    catch{$evidence['failure']=$_.Exception.Message}
+    finally{
+        if($null -ne $movedLease){$movedLease.Dispose();$movedLease=$null}
+        if($null -ne $stageLease){$stageLease.Dispose();$stageLease=$null}
+        if($null -ne $receipt -and $null -ne $parentLease -and $null -ne $transactionLease){
+            try{Move-PlatformOwnedDirectory -ParentLease $parentLease -Leaf 'published' -TransactionLease $transactionLease -DestinationLeaf 'published.cleanup' -ExpectedIdentity $receipt.identity -Direction ToTransaction|Out-Null}
+            catch{$evidence['cleanupFailure']=$_.Exception.Message}
+        }
+        if($null -ne $transactionLease){$transactionLease.Dispose();$transactionLease=$null}
+        if($null -ne $transactionRootLease){
+            try{Remove-PlatformOwnedDirectoryTree -TransactionRootLease $transactionRootLease -Leaf $transactionId -ExpectedIdentity $transactionIdentity|Out-Null}
+            catch{$evidence['cleanupFailure']=$_.Exception.Message}
+        }
+        if($null -ne $occupiedLease){Clear-PlatformProbe -Directory $occupiedLease -Path (Join-Path $path 'target/occupied') -Entries @() -Evidence $evidence;$occupiedLease=$null}
+        if($null -ne $parentLease){Clear-PlatformProbe -Directory $parentLease -Path (Join-Path $path 'target') -Entries @() -Evidence $evidence;$parentLease=$null}
+        if($null -ne $transactionRootLease){Clear-PlatformProbe -Directory $transactionRootLease -Path (Join-Path $path '.ai-instructions-txn') -Entries @() -Evidence $evidence;$transactionRootLease=$null}
+        if($null -ne $rootLease){Clear-PlatformProbe -Directory $rootLease -Path $path -Entries @() -Evidence $evidence;$rootLease=$null}
+    }
+    return [pscustomobject]@{status=$status;evidence=[pscustomobject]$evidence}
+}
+
 function Test-UnixPublicationPrimitives {
     $platform = Get-CurrentPlatformName
     if ($platform -cnotin @('linux','macos')) {
@@ -450,6 +515,7 @@ function Get-PlatformCapabilities {
 
     $platform = Get-CurrentPlatformName
     $primitiveProbe = Test-PlatformPrimitives
+    $directoryPublicationProbe = Test-PlatformDirectoryPublication
     $publicationProbe = Test-UnixPublicationPrimitives
     $permissionProbe = Test-UnixPermissionPrimitives
     $processProbe = Test-PlatformOwnedProcess
@@ -504,6 +570,7 @@ function Get-PlatformCapabilities {
         'lock' = @('unverified','P2 probe pending.')
         'publication' = @('unverified','P7 publication primitive is not implemented or probed.')
         'owned-file-removal' = @('unverified','P7 owned-file removal is not implemented or probed.')
+        'directory-publication' = @('unverified','Directory publication probe result is applied below.')
         'permissions' = @('unverified','P2 probe pending.')
         'process-isolation' = @('unverified','P3 probe pending.')
         'owned-process' = @('unverified','P3 probe pending.')
@@ -529,6 +596,10 @@ function Get-PlatformCapabilities {
             ($platform -ceq 'windows' -and $capability.name -ceq 'permissions')) {
             $capability.status = $primitiveProbe.status
             $capability.evidence = [object[]]@($primitiveProbe.evidence)
+        }
+        if ($capability.name -ceq 'directory-publication') {
+            $capability.status = $directoryPublicationProbe.status
+            $capability.evidence = [object[]]@($directoryPublicationProbe.evidence)
         }
         if ($platform -cne 'windows' -and $capability.name -cin @('publication','owned-file-removal')) {
             $capability.status = $publicationProbe.status
@@ -596,6 +667,9 @@ function Assert-PlatformFileIdentity { [CmdletBinding()] param([Parameter(Mandat
 function Enter-PlatformLock { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)][ValidateSet('Shared','Exclusive')][string] $Mode, [Parameter(Mandatory = $true)][TimeSpan] $Timeout) Invoke-PlatformAdapter 'Enter-PlatformLock' $PSBoundParameters }
 function Publish-PlatformFile { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)] $TransactionLease, [Parameter(Mandatory = $true)] $StageLease, [Parameter(Mandatory = $true)] $ExpectedState, [AllowNull()] $DisplacedLeaf, [Parameter(Mandatory = $true)] $ExpectedStage, [switch] $NoReplace, $Journal) Invoke-PlatformAdapter 'Publish-PlatformFile' $PSBoundParameters }
 function Remove-PlatformOwnedFile { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)] $ExpectedState, $TransactionLease, [AllowNull()] $TombstoneLeaf, $Journal) Invoke-PlatformAdapter 'Remove-PlatformOwnedFile' $PSBoundParameters }
+function Get-PlatformDirectoryState { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf) Invoke-PlatformAdapter 'Get-PlatformDirectoryState' $PSBoundParameters }
+function Move-PlatformOwnedDirectory { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)] $TransactionLease, [Parameter(Mandatory = $true)][string] $DestinationLeaf, [Parameter(Mandatory = $true)] $ExpectedIdentity, [Parameter(Mandatory = $true)][ValidateSet('ToTransaction','FromTransaction')][string] $Direction, $ExpectedState, $Journal) if($null -ne $Journal -and -not $PSBoundParameters.ContainsKey('ExpectedState')){throw [ArgumentException]::new('ExpectedState is required when Journal is supplied.')} Invoke-PlatformAdapter 'Move-PlatformOwnedDirectory' $PSBoundParameters }
+function Remove-PlatformOwnedDirectoryTree { [CmdletBinding(DefaultParameterSetName='TransactionRoot')] param([Parameter(Mandatory = $true,ParameterSetName='TransactionRoot')] $TransactionRootLease, [Parameter(Mandatory = $true,ParameterSetName='Transaction')] $TransactionLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)] $ExpectedIdentity) Invoke-PlatformAdapter 'Remove-PlatformOwnedDirectoryTree' $PSBoundParameters }
 function Get-PlatformPermissions { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Lease) Invoke-PlatformAdapter 'Get-PlatformPermissions' $PSBoundParameters }
 function Set-PlatformPermissions { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Lease, $Policy, $Snapshot) Invoke-PlatformAdapter 'Set-PlatformPermissions' $PSBoundParameters }
 function Start-PlatformOwnedProcess {
@@ -835,6 +909,9 @@ Export-ModuleMember -Function @(
     'Enter-PlatformLock',
     'Publish-PlatformFile',
     'Remove-PlatformOwnedFile',
+    'Get-PlatformDirectoryState',
+    'Move-PlatformOwnedDirectory',
+    'Remove-PlatformOwnedDirectoryTree',
     'Get-PlatformPermissions',
     'Set-PlatformPermissions',
     'Start-PlatformOwnedProcess',
