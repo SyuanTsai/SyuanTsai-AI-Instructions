@@ -932,6 +932,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/WindowsDacl.psm1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/agent-artifact-remediation.psm1",
       "license": "Apache-2.0"
     },

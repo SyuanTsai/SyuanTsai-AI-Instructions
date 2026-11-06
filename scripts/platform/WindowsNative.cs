@@ -74,6 +74,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         // Internal, disabled-by-default fault injection used only by the native
         // Windows regression tests.  It is intentionally not part of the public API.
         internal static Action<string> PermissionsMutationTestHook = null;
+        internal static Action<string> PublicationDaclTestHook = null;
         [StructLayout(LayoutKind.Sequential)]
         private struct Information
         {
@@ -97,6 +98,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private struct IoStatusBlock { public IntPtr Status; public UIntPtr Information; }
         [StructLayout(LayoutKind.Sequential)]
         private struct SecurityAttributes { public int Length; public IntPtr Descriptor; public int Inherit; }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct GenericMapping { public uint Read, Write, Execute, All; }
         [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern SafeFileHandle CreateFile(string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
         [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out Information information);
@@ -104,6 +107,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetFileInformationByHandle(SafeFileHandle handle, int kind, ref BasicInfo information, uint size);
         [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetFileInformationByHandle(SafeFileHandle handle, int kind, IntPtr information, uint size);
         [DllImport("kernel32.dll", SetLastError = true)] private static extern bool FlushFileBuffers(SafeFileHandle handle);
+        [DllImport("kernel32.dll")] private static extern IntPtr GetCurrentProcess();
+        [DllImport("kernel32.dll")] private static extern IntPtr GetCurrentThread();
         [DllImport("kernel32.dll", EntryPoint = "CreateDirectoryW", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern bool CreateDirectory(string path, ref SecurityAttributes attributes);
         [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr LocalFree(IntPtr pointer);
@@ -116,9 +121,23 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         [DllImport("advapi32.dll", SetLastError = true)] private static extern bool GetSecurityDescriptorControl(IntPtr descriptor, out ushort control, out uint revision);
         [DllImport("advapi32.dll", SetLastError = true)] private static extern uint SetSecurityInfo(SafeFileHandle handle, int type, uint information, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
         [DllImport("advapi32.dll", SetLastError = true)] private static extern bool SetKernelObjectSecurity(SafeFileHandle handle, uint information, IntPtr descriptor);
+        [DllImport("advapi32.dll", SetLastError = true)] private static extern bool OpenProcessToken(IntPtr process, uint desiredAccess, out SafeAccessTokenHandle token);
+        [DllImport("advapi32.dll", SetLastError = true)] private static extern bool OpenThreadToken(IntPtr thread, uint desiredAccess, bool openAsSelf, out SafeAccessTokenHandle token);
+        [DllImport("advapi32.dll", SetLastError = true)] private static extern bool CreatePrivateObjectSecurityEx(IntPtr parentDescriptor, IntPtr creatorDescriptor, out IntPtr newDescriptor, IntPtr objectType, bool isContainerObject, uint autoInheritFlags, IntPtr token, ref GenericMapping genericMapping);
+        [DllImport("advapi32.dll", SetLastError = true)] private static extern bool DestroyPrivateObjectSecurity(ref IntPtr descriptor);
         [DllImport("ntdll.dll")] private static extern int NtOpenFile(out SafeFileHandle handle, uint access, ref ObjectAttributes attributes, out IoStatusBlock status, uint share, uint options);
         [DllImport("ntdll.dll")] private static extern uint RtlNtStatusToDosError(int status);
         private static void Check(bool result, string operation) { if (!result) throw new PlatformWin32Exception(operation, Marshal.GetLastWin32Error()); }
+        private static SafeAccessTokenHandle OpenEffectiveToken()
+        {
+            SafeAccessTokenHandle token;
+            if (OpenThreadToken(GetCurrentThread(), 0x0008u, true, out token)) return token; // TOKEN_QUERY
+            int error = Marshal.GetLastWin32Error();
+            if (token != null) token.Dispose();
+            if (error != 1008) throw new PlatformWin32Exception("OpenThreadToken(CreatePrivateObjectSecurityEx)", error); // ERROR_NO_TOKEN
+            Check(OpenProcessToken(GetCurrentProcess(), 0x0008u, out token), "OpenProcessToken(CreatePrivateObjectSecurityEx)");
+            return token;
+        }
         private static SafeFileHandle Open(string path, uint access, uint share, uint disposition)
         {
             SafeFileHandle handle = CreateFile(path, access, share, IntPtr.Zero, disposition, 0x02200000, IntPtr.Zero);
@@ -282,6 +301,54 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 return new WindowsPermissions { Sddl = GetDaclSddl(lease.Handle), ReadOnly = (observed.Mode & 1) != 0 };
             }
         }
+        public static WindowsPermissions GetInheritedFilePermissions(WindowsLease parent)
+        {
+            lock (parent.Sync)
+            {
+                parent.Check(); AssertIdentity(parent, parent.Observation, false);
+                if (parent.Observation.Kind != "directory") throw new ArgumentException("A directory lease is required.");
+                IntPtr owner, group, dacl, sacl, parentDescriptor;
+                uint error = GetSecurityInfo(parent.Handle, 1, 7, out owner, out group, out dacl, out sacl, out parentDescriptor);
+                if (error != 0) throw new PlatformWin32Exception("GetSecurityInfo(parent inheritance)", (int)error);
+                IntPtr inheritedDescriptor = IntPtr.Zero;
+                try
+                {
+                    GenericMapping mapping = new GenericMapping
+                    {
+                        Read = 0x00120089u,
+                        Write = 0x00120116u,
+                        Execute = 0x001200a0u,
+                        All = 0x001f01ffu
+                    };
+                    // SEF_DACL_AUTO_INHERIT preserves file inheritance semantics.
+                    // SEF_AVOID_PRIVILEGE_CHECK and SEF_AVOID_OWNER_CHECK avoid
+                    // requiring privilege/owner authority while calculating a DACL
+                    // that will be applied separately.  Owner/group are deliberately
+                    // not defaulted from the parent: the effective thread/process token
+                    // supplies the creator owner and primary group for CO/CG expansion.
+                    Action<string> hook = PublicationDaclTestHook;
+                    if (hook != null) hook("before-open-effective-token");
+                    SafeAccessTokenHandle token = OpenEffectiveToken();
+                    using (token)
+                    {
+                        if (hook != null) hook("before-create-private-object-security");
+                        Check(CreatePrivateObjectSecurityEx(parentDescriptor, IntPtr.Zero, out inheritedDescriptor,
+                            IntPtr.Zero, false, 0x19u, token.DangerousGetHandle(), ref mapping), "CreatePrivateObjectSecurityEx(file)");
+                    }
+                    if (inheritedDescriptor == IntPtr.Zero) throw new IOException("CreatePrivateObjectSecurityEx returned a null descriptor.");
+                    return new WindowsPermissions { Sddl = GetDaclSddl(inheritedDescriptor), ReadOnly = false };
+                }
+                finally
+                {
+                    try
+                    {
+                        if (inheritedDescriptor != IntPtr.Zero)
+                            Check(DestroyPrivateObjectSecurity(ref inheritedDescriptor), "DestroyPrivateObjectSecurity");
+                    }
+                    finally { LocalFree(parentDescriptor); }
+                }
+            }
+        }
         private static string GetDaclSddl(SafeFileHandle handle)
         {
             IntPtr owner, group, dacl, sacl, descriptor;
@@ -322,6 +389,31 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             if ((control & 0x0400) == 0)
                 Check(SetKernelObjectSecurity(handle, information, descriptor), "SetKernelObjectSecurity");
         }
+        public static void ApplyPublicationDacl(WindowsLease lease, string sddl)
+        {
+            if (String.IsNullOrEmpty(sddl) || !sddl.StartsWith("D:", StringComparison.Ordinal) ||
+                sddl.IndexOf("O:", StringComparison.Ordinal) >= 0 ||
+                sddl.IndexOf("G:", StringComparison.Ordinal) >= 0 ||
+                sddl.IndexOf("S:", StringComparison.Ordinal) >= 0)
+                throw new ArgumentException("Only a DACL SDDL policy is supported.", "sddl");
+            lock (lease.Sync)
+            {
+                AssertIdentity(lease, lease.Observation, true);
+                IntPtr descriptor; uint size; Check(ParseDescriptor(sddl, 1, out descriptor, out size), "ParseSecurityDescriptor(publication)");
+                try
+                {
+                    bool present, defaulted; IntPtr dacl;
+                    Check(GetSecurityDescriptorDacl(descriptor, out present, out dacl, out defaulted), "GetSecurityDescriptorDacl(publication)");
+                    if (!present || dacl == IntPtr.Zero) throw new ArgumentException("An explicit non-null DACL is required.", "sddl");
+                    Action<string> hook = PublicationDaclTestHook;
+                    if (hook != null) hook("before-low-level-dacl-write");
+                    // DACL_SECURITY_INFORMATION only.  The descriptor retains P and
+                    // every ACE flag; AI is intentionally allowed to clear on readback.
+                    Check(SetKernelObjectSecurity(lease.Handle, 4u, descriptor), "SetKernelObjectSecurity(publication DACL)");
+                }
+                finally { LocalFree(descriptor); }
+            }
+        }
         public static string NormalizeDaclSddl(string sddl)
         {
             if (String.IsNullOrEmpty(sddl) || !sddl.StartsWith("D:", StringComparison.Ordinal) ||
@@ -361,9 +453,14 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             lock (lease.Sync)
             {
                 AssertIdentity(lease, lease.Observation, lease.Observation.Kind == "file");
-                // SetSecurityInfo's DACL/inheritance path needs READ_CONTROL as well
-                // as WRITE_DAC. The original lease retains its deny-write/delete share.
-                using (SafeFileHandle writable = Open(lease.Path, 0x20000u | (sddl == null ? 0u : 0x40000u) | (readOnly.HasValue ? 0x100u : 0u), 7, 3))
+                // Snapshot/readback needs READ_CONTROL and FILE_READ_ATTRIBUTES.
+                // Add only the mutation rights requested by this call; rollback is
+                // limited to dimensions whose mutation was started. The original
+                // lease retains its deny-write/delete share.
+                uint desiredAccess = 0x00020080u;
+                if (sddl != null) desiredAccess |= 0x00040000u; // WRITE_DAC
+                if (readOnly.HasValue) desiredAccess |= 0x00000100u; // FILE_WRITE_ATTRIBUTES
+                using (SafeFileHandle writable = Open(lease.Path, desiredAccess, 7, 3))
                 {
                     PlatformPaths.Same(Stat(writable), lease.Observation);
                     IntPtr owner, group, originalDacl, sacl, originalDescriptor;
@@ -376,13 +473,14 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                         string originalSddl = GetDaclSddl(originalDescriptor);
                         bool originalReadOnly = (originalBasic.Attributes & 1) != 0;
                         string normalizedSddl = sddl == null ? null : NormalizeDaclSddl(sddl);
-                        bool mutationStarted = false;
+                        bool daclMutationStarted = false;
+                        bool readOnlyMutationStarted = false;
                         try
                         {
                             if (normalizedSddl != null)
                             {
                                 IntPtr descriptor; uint size; Check(ParseDescriptor(normalizedSddl, 1, out descriptor, out size), "ParseSecurityDescriptor");
-                                try { mutationStarted = true; ApplyDaclDescriptor(writable, descriptor); }
+                                try { daclMutationStarted = true; ApplyDaclDescriptor(writable, descriptor); }
                                 finally { LocalFree(descriptor); }
                             }
                             if (readOnly.HasValue)
@@ -390,11 +488,11 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                                 BasicInfo value = originalBasic;
                                 value.Attributes = readOnly.Value ? value.Attributes | 1 : value.Attributes & ~1u;
                                 if (value.Attributes == 0) value.Attributes = 0x80;
-                                mutationStarted = true;
+                                readOnlyMutationStarted = true;
                                 Check(SetFileInformationByHandle(writable, 0, ref value, basicSize), "SetFileInformationByHandle");
                             }
                             Action<string> hook = PermissionsMutationTestHook;
-                            if (mutationStarted && hook != null) hook("after-apply-before-readback");
+                            if ((daclMutationStarted || readOnlyMutationStarted) && hook != null) hook("after-apply-before-readback");
                             string observedSddl = GetDaclSddl(writable);
                             bool observedReadOnly = (Stat(writable).Mode & 1) != 0;
                             if ((normalizedSddl != null && !String.Equals(observedSddl, normalizedSddl, StringComparison.Ordinal)) ||
@@ -405,15 +503,19 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                         }
                         catch (Exception mutationFailure)
                         {
-                            if (!mutationStarted) throw;
+                            if (!daclMutationStarted && !readOnlyMutationStarted) throw;
                             try
                             {
-                                ApplyDaclDescriptor(writable, originalDescriptor);
-                                BasicInfo restoreBasic = originalBasic;
-                                Check(SetFileInformationByHandle(writable, 0, ref restoreBasic, basicSize), "SetFileInformationByHandle(restore)");
+                                if (daclMutationStarted) ApplyDaclDescriptor(writable, originalDescriptor);
+                                if (readOnlyMutationStarted)
+                                {
+                                    BasicInfo restoreBasic = originalBasic;
+                                    Check(SetFileInformationByHandle(writable, 0, ref restoreBasic, basicSize), "SetFileInformationByHandle(restore)");
+                                }
                                 string restoredSddl = GetDaclSddl(writable);
                                 bool restoredReadOnly = (Stat(writable).Mode & 1) != 0;
-                                if (!String.Equals(restoredSddl, originalSddl, StringComparison.Ordinal) || restoredReadOnly != originalReadOnly)
+                                if ((daclMutationStarted && !String.Equals(restoredSddl, originalSddl, StringComparison.Ordinal)) ||
+                                    (readOnlyMutationStarted && restoredReadOnly != originalReadOnly))
                                     throw new IOException(String.Format("Rollback readback differs (SDDL '{0}', readOnly {1}).", restoredSddl, restoredReadOnly));
                             }
                             catch (Exception rollbackFailure)
@@ -434,7 +536,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             }
         }
 
-        private static SafeFileHandle OpenRelativeMutationHandle(WindowsLease parent, string leaf, bool writable)
+        private static SafeFileHandle OpenRelativeMutationHandle(WindowsLease parent, string leaf, bool writable, bool writeDacl)
         {
             IntPtr nameBuffer = Marshal.StringToHGlobalUni(leaf);
             IntPtr namePointer = IntPtr.Zero;
@@ -461,7 +563,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 // FILE_READ_ATTRIBUTES.  Publication stage handles require write access
                 // so FlushFileBuffers remains valid after the handle-bound rename.
                 // share read only; synchronous, non-directory, and open the reparse point itself.
-                uint desired = 0x80110080u | (writable ? 0x40000000u : 0u);
+                uint desired = 0x80110080u | (writable ? 0x40000000u : 0u) | (writeDacl ? 0x00040000u : 0u);
                 int status = NtOpenFile(out handle, desired, ref attributes, out ioStatus, 1, 0x00200060);
                 if (status < 0)
                 {
@@ -478,7 +580,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             }
         }
 
-        private static WindowsLease OpenMutationFileCore(WindowsLease parent, string leaf, ulong expectedDevice, ulong expectedFileId, bool verifyIdentity, bool allowMissing, bool writable)
+        private static WindowsLease OpenMutationFileCore(WindowsLease parent, string leaf, ulong expectedDevice, ulong expectedFileId, bool verifyIdentity, bool allowMissing, bool writable, bool writeDacl)
         {
             PlatformPaths.Leaf(leaf);
             lock (parent.Sync)
@@ -486,7 +588,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 parent.Check(); AssertIdentity(parent, parent.Observation, false);
                 if (parent.Observation.Kind != "directory") throw new ArgumentException("A directory lease is required.");
                 SafeFileHandle handle;
-                try { handle = OpenRelativeMutationHandle(parent, leaf, writable); }
+                try { handle = OpenRelativeMutationHandle(parent, leaf, writable, writeDacl); }
                 catch (PlatformWin32Exception ex) { if (allowMissing && (ex.Win32Error == 2 || ex.Win32Error == 3)) return null; throw; }
                 try
                 {
@@ -501,16 +603,19 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         }
 
         public static WindowsLease OpenMutationFile(WindowsLease parent, string leaf, ulong expectedDevice, ulong expectedFileId)
-        { return OpenMutationFileCore(parent, leaf, expectedDevice, expectedFileId, true, false, false); }
+        { return OpenMutationFileCore(parent, leaf, expectedDevice, expectedFileId, true, false, false, false); }
 
         public static WindowsLease OpenWritableMutationFile(WindowsLease parent, string leaf, ulong expectedDevice, ulong expectedFileId)
-        { return OpenMutationFileCore(parent, leaf, expectedDevice, expectedFileId, true, false, true); }
+        { return OpenMutationFileCore(parent, leaf, expectedDevice, expectedFileId, true, false, true, false); }
+
+        public static WindowsLease OpenPublicationStageFile(WindowsLease parent, string leaf, ulong expectedDevice, ulong expectedFileId)
+        { return OpenMutationFileCore(parent, leaf, expectedDevice, expectedFileId, true, false, true, true); }
 
         public static WindowsLease TryOpenMutationFile(WindowsLease parent, string leaf)
-        { return OpenMutationFileCore(parent, leaf, 0, 0, false, true, false); }
+        { return OpenMutationFileCore(parent, leaf, 0, 0, false, true, false, false); }
 
         public static WindowsLease TryOpenMutationFile(WindowsLease parent, string leaf, ulong expectedDevice, ulong expectedFileId)
-        { return OpenMutationFileCore(parent, leaf, expectedDevice, expectedFileId, true, true, false); }
+        { return OpenMutationFileCore(parent, leaf, expectedDevice, expectedFileId, true, true, false, false); }
 
         public static WindowsLease OpenValidationFile(WindowsLease parent, string leaf)
         {
@@ -527,44 +632,6 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     return new WindowsLease(handle, path, null, parent, value);
                 }
                 catch { handle.Dispose(); throw; }
-            }
-        }
-
-        public static WindowsLease CreatePermissionProbe(WindowsLease parent, string leaf)
-        {
-            PlatformPaths.Leaf(leaf);
-            lock (parent.Sync)
-            {
-                parent.Check(); AssertIdentity(parent, parent.Observation, false);
-                if (parent.Observation.Kind != "directory") throw new ArgumentException("A directory lease is required.");
-                string path = Path.Combine(parent.Path, leaf);
-                // Arm delete-on-close in the same successful CreateFileW call.  A
-                // restrictive inherited DACL therefore cannot leave a created probe
-                // behind between creation and a later DELETE-scoped reopen.
-                SafeFileHandle handle = CreateFile(path, 0xc0010080u, 7, IntPtr.Zero, 1, 0x04200000u, IntPtr.Zero);
-                if (handle.IsInvalid)
-                {
-                    int error = Marshal.GetLastWin32Error(); handle.Dispose();
-                    throw new PlatformWin32Exception("CreateFileW(permission probe delete-on-close)", error);
-                }
-                try
-                {
-                    FileObservation value = Stat(handle); PlatformPaths.Single(value);
-                    if (value.Kind != "file") throw new IOException("A regular permission probe is required.");
-                    return new WindowsLease(handle, path, null, parent, value);
-                }
-                catch { handle.Dispose(); throw; }
-            }
-        }
-
-        public static WindowsPermissions GetPermissionProbePermissions(WindowsLease lease)
-        {
-            lock (lease.Sync)
-            {
-                lease.Check();
-                FileObservation observed = Stat(lease.Handle);
-                PlatformPaths.Same(observed, lease.Observation); PlatformPaths.Single(observed);
-                return new WindowsPermissions { Sddl = GetDaclSddl(lease.Handle), ReadOnly = (observed.Mode & 1) != 0 };
             }
         }
 
@@ -638,7 +705,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 // directory handle with write/add-file access, permissive sharing,
                 // backup semantics, and open-reparse-point behavior; then bind it
                 // back to the verified lease identity before probing or flushing.
-                using (SafeFileHandle writable = Open(lease.Path, 0x40000002u, 7, 3))
+                using (SafeFileHandle writable = Open(lease.Path, 0x40000082u, 7, 3))
                 {
                     FileObservation observed = Stat(writable);
                     PlatformPaths.Same(observed, lease.Observation);

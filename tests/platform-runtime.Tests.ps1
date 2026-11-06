@@ -3382,9 +3382,36 @@ try {
 }
 
 Describe 'Platform P7 Windows publication, removal and permission snapshots' {
+    $script:P7CreatorOwnerParentOwnerSid = $null
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+        $creatorOwnerProbe = Join-Path ([IO.Path]::GetTempPath()) ('p7-creator-owner-capability-' + [Guid]::NewGuid().ToString('N'))
+        try {
+            [IO.Directory]::CreateDirectory($creatorOwnerProbe) | Out-Null
+            $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+            try { $effectiveOwnerSid = $identity.Owner.Value } finally { $identity.Dispose() }
+            foreach ($candidateSid in @('S-1-5-32-544','S-1-5-18')) {
+                if ($candidateSid -ceq $effectiveOwnerSid) { continue }
+                try {
+                    $security = [Security.AccessControl.DirectorySecurity]::new()
+                    $security.SetOwner([Security.Principal.SecurityIdentifier]::new($candidateSid))
+                    [IO.FileSystemAclExtensions]::SetAccessControl([IO.DirectoryInfo]::new($creatorOwnerProbe),$security)
+                    $ownerSecurity = [IO.FileSystemAclExtensions]::GetAccessControl([IO.DirectoryInfo]::new($creatorOwnerProbe),[Security.AccessControl.AccessControlSections]::Owner)
+                    $observed = $ownerSecurity.GetOwner([Security.Principal.SecurityIdentifier]).Value
+                    if ($observed -ceq $candidateSid) {
+                        $script:P7CreatorOwnerParentOwnerSid = $candidateSid
+                        break
+                    }
+                } catch {}
+            }
+        } finally {
+            if ([IO.Directory]::Exists($creatorOwnerProbe)) { [IO.Directory]::Delete($creatorOwnerProbe,$true) }
+        }
+    }
     BeforeAll {
         $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
         Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
+        $script:P7RuntimeContractModule = Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/ai-instructions-runtime-contract.psm1') -PassThru -Force -Scope Local
+        $script:P7WindowsDaclModule = Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/WindowsDacl.psm1') -PassThru -Scope Local
         function Get-P7Hash([byte[]]$Bytes) {
             $sha=[Security.Cryptography.SHA256]::Create()
             try { ([BitConverter]::ToString($sha.ComputeHash($Bytes))).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose() }
@@ -3408,6 +3435,54 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
         function Test-P7DaclProtected([string]$Sddl) {
             $descriptor=[Security.AccessControl.RawSecurityDescriptor]::new($Sddl)
             return ($descriptor.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected) -ne 0
+        }
+        function Get-P7DaclControl([string]$Sddl) {
+            return [int]([Security.AccessControl.RawSecurityDescriptor]::new($Sddl).ControlFlags)
+        }
+        function Test-P7EquivalentDacl([string]$First,[string]$Second) {
+            return & $script:P7WindowsDaclModule.ExportedCommands['Test-WindowsDaclEquivalent'] -FirstSddl $First -SecondSddl $Second
+        }
+        function Set-P7InheritanceFixture($Fixture) {
+            $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+            try { $sid=$identity.User.Value } finally { $identity.Dispose() }
+            $transactionSddl='D:P(A;OICI;FA;;;'+$sid+')(A;OICI;FA;;;SY)'
+            $Fixture.Parent.Dispose()
+            $icacls=Join-Path $env:SystemRoot 'System32\icacls.exe'
+            & $icacls (Join-Path $Fixture.Root 'target') '/inheritance:e' '/grant:r' ("*$sid`:(OI)(CI)(F)") '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-545:(OI)(CI)(R)' | Out-Null
+            if($LASTEXITCODE -ne 0){throw 'Failed to configure the unprotected target-parent fixture DACL.'}
+            $Fixture.Parent=Open-PlatformDirectory -Root $Fixture.Root -RelativePath 'target'
+            [void](Set-PlatformPermissions -Lease $Fixture.Transaction -Snapshot ([pscustomobject]@{kind='windows-sddl';sddl=$transactionSddl;readOnly=$false}))
+            $parentSddl=(Get-PlatformPermissions $Fixture.Parent).sddl
+            if(Test-P7DaclProtected $parentSddl){throw 'The target-parent fixture DACL remained protected.'}
+            return [pscustomobject]@{Sid=$sid;ParentSddl=$parentSddl;TransactionSddl=$transactionSddl}
+        }
+        function Set-P7CreatorOwnerFixture($Fixture,[string]$ParentOwnerSid) {
+            $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+            try {
+                $effectiveOwnerSid=$identity.Owner.Value
+                $effectiveUserSid=$identity.User.Value
+            } finally {$identity.Dispose()}
+            if($ParentOwnerSid -ceq $effectiveOwnerSid){throw 'The parent owner fixture must differ from the effective token owner.'}
+            $Fixture.Parent.Dispose()
+            $path=Join-Path $Fixture.Root 'target'
+            $security=[Security.AccessControl.DirectorySecurity]::new()
+            $security.SetAccessRuleProtection($true,$false)
+            $allow=[Security.AccessControl.AccessControlType]::Allow
+            $full=[Security.AccessControl.FileSystemRights]::FullControl
+            $none=[Security.AccessControl.InheritanceFlags]::None
+            $noPropagation=[Security.AccessControl.PropagationFlags]::None
+            $objectInherit=[Security.AccessControl.InheritanceFlags]::ObjectInherit
+            $inheritOnly=[Security.AccessControl.PropagationFlags]::InheritOnly
+            $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($effectiveUserSid),$full,$none,$noPropagation,$allow))
+            $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-3-0'),$full,$objectInherit,$inheritOnly,$allow))
+            $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-3-1'),$full,$objectInherit,$inheritOnly,$allow))
+            $security.SetOwner([Security.Principal.SecurityIdentifier]::new($ParentOwnerSid))
+            [IO.FileSystemAclExtensions]::SetAccessControl([IO.DirectoryInfo]::new($path),$security)
+            $Fixture.Parent=Open-PlatformDirectory -Root $Fixture.Root -RelativePath 'target'
+            $ownerSecurity=[IO.FileSystemAclExtensions]::GetAccessControl([IO.DirectoryInfo]::new($path),[Security.AccessControl.AccessControlSections]::Owner)
+            $observedOwner=$ownerSecurity.GetOwner([Security.Principal.SecurityIdentifier]).Value
+            if($observedOwner -cne $ParentOwnerSid){throw 'The target-parent owner fixture was not applied.'}
+            return [pscustomobject]@{EffectiveOwnerSid=$effectiveOwnerSid;ParentOwnerSid=$observedOwner}
         }
         function New-P7Fixture([string]$Name) {
             $root=Join-Path $TestDrive $Name
@@ -3435,11 +3510,14 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             [pscustomobject]@{Lease=$lease;State=[pscustomobject]@{exists=$true;sha256=(Get-P7Hash $Bytes);length=[int64]$Bytes.Length;identity=(Get-P7Identity $observed)};Expected=[pscustomobject]@{sha256=(Get-P7Hash $Bytes);length=[int64]$Bytes.Length}}
         }
         function New-P7JournalOperation {
-            param([string]$Kind,[string]$Method,[string]$TargetRelativePath,[AllowNull()][string]$StageLeaf,[AllowNull()][string]$BackupLeaf,$Original,$Applied,$Permissions)
-            [pscustomobject][ordered]@{
+            param([string]$Kind,[string]$Method,[string]$TargetRelativePath,$StageLeaf,$BackupLeaf,$Original,$Applied,$Permissions,$QuarantineLeaf=$null)
+            $operation=[pscustomobject][ordered]@{
                 sequence=1;kind=$Kind;method=$Method;targetRelativePath=$TargetRelativePath;stageLeaf=$StageLeaf;backupLeaf=$BackupLeaf
-                original=$Original;backupIdentity=$(if($Kind -eq 'remove-file'){$Original.identity}else{$null});applied=$Applied;permissions=$Permissions;state='pending'
+                quarantineLeaf=$QuarantineLeaf;original=$Original;backupIdentity=$(if([bool]$Original.exists){$Original.identity}else{$null});applied=$Applied;permissions=$Permissions;state='pending'
             }
+            $journal=New-AiInstructionsInstallJournalV1 -OwnerComponent installer -OwnerProcessId 1 -OwnerProcessStartIdentity 'p7-test' -PlatformOs windows -PlatformArchitecture x64 -LockPrimitive windows-fileshare -LockLeaf install.lock -CandidateBundleSha256 ('a'*64) -Phase prepared -Operations @($operation)
+            $json=$journal | ConvertTo-Json -Depth 20 -Compress
+            return (ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json -ExpectedTransactionId $journal.transactionId).operations[0]
         }
         function Set-P7WindowsPostRenameHook([AllowNull()][scriptblock]$Hook) {
             $runtimeModule=@(Get-Module platform-runtime)[0]
@@ -3474,6 +3552,12 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
         function Set-P7WindowsPermissionMutationHook([AllowNull()][scriptblock]$Hook) {
             $field=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative].GetField('PermissionsMutationTestHook',[Reflection.BindingFlags]'Static,NonPublic')
             if($null -eq $field){throw 'The internal Windows permission mutation hook is unavailable.'}
+            $value=if($null -eq $Hook){$null}else{[Action[string]]{param($Point)& $Hook $Point}.GetNewClosure()}
+            $field.SetValue($null,$value)
+        }
+        function Set-P7WindowsPublicationDaclHook([AllowNull()][scriptblock]$Hook) {
+            $field=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative].GetField('PublicationDaclTestHook',[Reflection.BindingFlags]'Static,NonPublic')
+            if($null -eq $field){throw 'The internal Windows publication DACL hook is unavailable.'}
             $value=if($null -eq $Hook){$null}else{[Action[string]]{param($Point)& $Hook $Point}.GetNewClosure()}
             $field.SetValue($null,$value)
         }
@@ -3518,8 +3602,8 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $stage.Lease.Dispose();$stage.Lease=$null
             $published=Open-PlatformFile -ParentLease $f.Parent -Leaf 'data' -Access Read -CreateMode OpenExisting
             $backup=Open-PlatformFile -ParentLease $f.Transaction -Leaf 'old.backup' -Access Read -CreateMode OpenExisting
-            (Get-PlatformPermissions $published).sddl | Should Be $before.sddl
-            (Get-PlatformPermissions $backup).sddl | Should Be $before.sddl
+            (Test-P7EquivalentDacl (Get-PlatformPermissions $published).sddl $before.sddl) | Should Be $true
+            (Test-P7EquivalentDacl (Get-PlatformPermissions $backup).sddl $before.sddl) | Should Be $true
             (Test-P7DaclProtected (Get-PlatformPermissions $published).sddl) | Should Be $false
             (Test-P7DaclProtected (Get-PlatformPermissions $backup).sddl) | Should Be $false
         } finally { Close-P7Fixture $f @($published,$backup,$stage.Lease,$target.Lease) }
@@ -3534,7 +3618,7 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $stage=New-P7File $f.Transaction 'create.stage' ([Text.Encoding]::UTF8.GetBytes('created'))
             Publish-PlatformFile -ParentLease $f.Parent -Leaf 'created' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState ([pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}) -DisplacedLeaf $null -ExpectedStage $stage.Expected -NoReplace | Out-Null
             $stage.Lease.Dispose();$stage.Lease=$null;$published=Open-PlatformFile -ParentLease $f.Parent -Leaf 'created' -Access Read -CreateMode OpenExisting
-            (Get-PlatformPermissions $published).sddl | Should Be $controlPermissions.sddl
+            (Test-P7EquivalentDacl (Get-PlatformPermissions $published).sddl $controlPermissions.sddl) | Should Be $true
         } finally { Close-P7Fixture $f @($published,$stage.Lease,$control.Lease) }
     }
 
@@ -3603,7 +3687,8 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $applied=Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $original.State -DisplacedLeaf 'old.backup' -ExpectedStage $stage.Expected
             $stage.Lease.Dispose();$stage.Lease=$null;$backup=Open-PlatformFile -ParentLease $f.Transaction -Leaf 'old.backup' -Access ReadWrite -CreateMode OpenExisting
             $appliedState=[pscustomobject]@{exists=$true;sha256=$stage.Expected.sha256;length=$stage.Expected.length;identity=$applied.appliedIdentity}
-            Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $backup -ExpectedState $appliedState -DisplacedLeaf 'new.stage' -ExpectedStage ([pscustomobject]@{sha256=$original.State.sha256;length=$original.State.length}) | Out-Null
+            $rollbackJournal=New-P7JournalOperation write-file stage-rename 'target/data' 'old.backup' 'new.stage' $appliedState $original.State $applied.permissions
+            Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $backup -ExpectedState $appliedState -DisplacedLeaf 'new.stage' -ExpectedStage ([pscustomobject]@{sha256=$original.State.sha256;length=$original.State.length}) -Journal $rollbackJournal | Out-Null
             (Get-P7Identity $backup.Observation).fileId | Should Be $original.State.identity.fileId
             [IO.File]::ReadAllText((Join-Path $f.Root 'target/data')) | Should Be 'old'
         } finally { Close-P7Fixture $f @($backup,$stage.Lease,$original.Lease) }
@@ -3615,7 +3700,9 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
         $f=New-P7Fixture 'p7-journal';$stage=$null
         try {
             $stage=New-P7File $f.Transaction 'stage' ([byte[]]@(1,2,3))
-            $journal=[pscustomobject]@{method='stage-rename';targetRelativePath='wrong';stageLeaf='stage';backupLeaf=$null;original=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null};applied=[pscustomobject]@{exists=$true;sha256=$stage.Expected.sha256;length=$stage.Expected.length;identity=$null}}
+            $missing=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            $applied=[pscustomobject]@{exists=$true;sha256=$stage.Expected.sha256;length=$stage.Expected.length;identity=$stage.State.identity}
+            $journal=New-P7JournalOperation create-file stage-rename 'wrong' 'stage' $null $missing $applied $null
             { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $journal.original -DisplacedLeaf $null -ExpectedStage $stage.Expected -Journal $journal } | Should Throw 'Journal'
         } finally { Close-P7Fixture $f @($stage.Lease) }
     }
@@ -3631,19 +3718,21 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $removePermissions=Get-PlatformPermissions $removeTarget.Lease;$removeTarget.Lease.Dispose();$removeTarget.Lease=$null
             $stage=New-P7File $f.Transaction 'stage' ([Text.Encoding]::UTF8.GetBytes('new'))
             $missing=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
-            $applied=[pscustomobject]@{exists=$true;sha256=$stage.Expected.sha256;length=$stage.Expected.length;identity=$null}
+            $applied=[pscustomobject]@{exists=$true;sha256=$stage.Expected.sha256;length=$stage.Expected.length;identity=$stage.State.identity}
             $removed=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
             $targetBefore=Get-P7NamedFileState $f.Parent 'data'
             $removeBefore=Get-P7NamedFileState $f.Parent 'remove'
             $stageBefore=Get-P7NamedFileState $f.Transaction 'stage' $stage
 
-            $swap=New-P7JournalOperation swap-directory stage-rename 'target/data' 'stage' 'swap.backup' $target.State $applied $permissions
+            $directoryOriginal=[pscustomobject]@{exists=$true;identity=$target.State.identity;inventorySha256=('1'*64);entryCount=1}
+            $directoryApplied=[pscustomobject]@{exists=$true;identity=$stage.State.identity;inventorySha256=('2'*64);entryCount=1}
+            $swap=New-P7JournalOperation swap-directory stage-rename 'target/data' 'stage' 'swap.backup' $directoryOriginal $directoryApplied $permissions 'swap.quarantine'
             { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $target.State -DisplacedLeaf 'swap.backup' -ExpectedStage $stage.Expected -Journal $swap } | Should Throw 'Journal'
-            $writeMissing=New-P7JournalOperation write-file stage-rename 'target/created' 'stage' $null $missing $applied $null
+            $writeMissing=New-P7JournalOperation write-file stage-rename 'target/created' 'stage' 'write.backup' $target.State $applied $permissions
             { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'created' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $stage.Expected -Journal $writeMissing } | Should Throw 'Journal'
-            $createExisting=New-P7JournalOperation create-file stage-rename 'target/data' 'stage' 'create.backup' $target.State $applied $permissions
+            $createExisting=New-P7JournalOperation create-file stage-rename 'target/data' 'stage' $null $missing $applied $null
             { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $target.State -DisplacedLeaf 'create.backup' -ExpectedStage $stage.Expected -Journal $createExisting } | Should Throw 'Journal'
-            $writeRemove=New-P7JournalOperation write-file tombstone-rename 'target/remove' $null 'remove.backup' $removeTarget.State $removed $removePermissions
+            $writeRemove=New-P7JournalOperation write-file stage-rename 'target/remove' 'stage' 'remove.backup' $removeTarget.State $applied $removePermissions
             { Remove-PlatformOwnedFile -ParentLease $f.Parent -Leaf 'remove' -ExpectedState $removeTarget.State -TransactionLease $f.Transaction -TombstoneLeaf 'remove.backup' -Journal $writeRemove } | Should Throw 'Journal'
 
             $targetAfter=Get-P7NamedFileState $f.Parent 'data'
@@ -3655,7 +3744,7 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
                 $pair[1].identity.fileId | Should Be $pair[0].identity.fileId
             }
             Test-Path -LiteralPath (Join-Path $f.Root 'target/created') | Should Be $false
-            foreach($leaf in @('swap.backup','create.backup','remove.backup')) {
+            foreach($leaf in @('swap.backup','swap.quarantine','write.backup','create.backup','remove.backup')) {
                 Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/$leaf") | Should Be $false
             }
         } finally { Close-P7Fixture $f @($stage.Lease,$target.Lease,$removeTarget.Lease) }
@@ -3763,7 +3852,7 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $target=New-P7File $parentA 'SKILL.md' ([Text.Encoding]::UTF8.GetBytes('old'))
             $permissions=Get-PlatformPermissions $target.Lease;$target.Lease.Dispose();$target.Lease=$null
             $stage=New-P7File $f.Transaction 'skill.stage' ([Text.Encoding]::UTF8.GetBytes('new'))
-            $applied=[pscustomobject]@{exists=$true;sha256=$stage.Expected.sha256;length=$stage.Expected.length;identity=$null}
+            $applied=[pscustomobject]@{exists=$true;sha256=$stage.Expected.sha256;length=$stage.Expected.length;identity=$stage.State.identity}
             $operationA=New-P7JournalOperation write-file stage-rename 'a/SKILL.md' 'skill.stage' 'skill.backup' $target.State $applied $permissions
             $operationB=New-P7JournalOperation write-file stage-rename 'b/SKILL.md' 'skill.stage' 'skill.backup' $target.State $applied $permissions
             $targetBefore=Get-P7NamedFileState $parentA 'SKILL.md'
@@ -3794,7 +3883,7 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             Set-PlatformPermissions -Lease $publishTarget.Lease -Policy @{ReadOnly=$true} | Out-Null
             $publishTarget.Lease.Dispose();$publishTarget.Lease=$null
             $stage=New-P7File $f.Transaction 'publish.stage' ([Text.Encoding]::UTF8.GetBytes('publish-new'))
-            $publishApplied=[pscustomobject]@{exists=$true;sha256=$stage.Expected.sha256;length=$stage.Expected.length;identity=$null}
+            $publishApplied=[pscustomobject]@{exists=$true;sha256=$stage.Expected.sha256;length=$stage.Expected.length;identity=$stage.State.identity}
             $publishJournal=New-P7JournalOperation write-file stage-rename 'target/publish' 'publish.stage' 'publish.backup' $publishTarget.State $publishApplied $publishPermissions
 
             { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'publish' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $publishTarget.State -DisplacedLeaf 'publish.backup' -ExpectedStage $stage.Expected -Journal $publishJournal } | Should Throw 'Journal permissions'
@@ -3892,7 +3981,7 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $target.Lease.Dispose();$target.Lease=$null
             $stage=New-P7File $f.Transaction 'generic.stage' ([Text.Encoding]::UTF8.GetBytes('new'))
             $genericSnapshot=[pscustomobject]@{kind='windows-sddl';sddl=$genericSddl;readOnly=$false}
-            $applied=[pscustomobject]@{exists=$true;sha256=$stage.Expected.sha256;length=$stage.Expected.length;identity=$null}
+            $applied=[pscustomobject]@{exists=$true;sha256=$stage.Expected.sha256;length=$stage.Expected.length;identity=$stage.State.identity}
             $journal=New-P7JournalOperation write-file stage-rename 'target/data' 'generic.stage' 'generic.backup' $target.State $applied $genericSnapshot
 
             $receipt=Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $target.State -DisplacedLeaf 'generic.backup' -ExpectedStage $stage.Expected -Journal $journal
@@ -3918,7 +4007,7 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $stage=New-P7File $f.Transaction 'publish.stage' ([Text.Encoding]::UTF8.GetBytes('new'))
             $stageBefore=Get-P7NamedFileState $f.Transaction 'publish.stage' $stage
             $missing=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
-            $applied=[pscustomobject]@{exists=$true;sha256=$stage.Expected.sha256;length=$stage.Expected.length;identity=$null}
+            $applied=[pscustomobject]@{exists=$true;sha256=$stage.Expected.sha256;length=$stage.Expected.length;identity=$stage.State.identity}
             $journal=New-P7JournalOperation create-file stage-rename 'target/created' 'publish.stage' $null $missing $applied $null
             Set-P7WindowsPreReopenHook {param($point,$operation,$role,$path)if($operation -ceq 'publication' -and $role -ceq 'stage'){[IO.File]::WriteAllText($path,'raced-stage',[Text.UTF8Encoding]::new($false))}}
             try { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'created' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $stage.Expected -NoReplace -Journal $journal | Out-Null } catch {$publishCaught=$_} finally {Set-P7WindowsPreReopenHook $null}
@@ -4072,22 +4161,29 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
         } finally { Set-P7WindowsDurabilityHook $null;Close-P7Fixture $f @($stage.Lease,$target.Lease,$removeTarget.Lease,$cleanupTarget.Lease) }
     }
 
-    # Scenario: Publication fails immediately after an inherited-permission probe is created and delete-on-close armed.
-    # Purpose: Remove only the created probe identity and leave no probe leaf or target behind on every failure path.
-    It 'InterT280_cleans_the_permission_probe_when_probe_processing_fails' {
-        $f=New-P7Fixture 'p7-probe-cleanup';$stage=$null
-        try {
-            $stage=New-P7File $f.Transaction 'stage' ([Text.Encoding]::UTF8.GetBytes('new'))
-            $stageBefore=Get-P7NamedFileState $f.Transaction 'stage' $stage
-            Set-P7WindowsDurabilityHook { param($point,$operation,$role,$lease) if($point -ceq 'permission-probe'){throw 'injected permission probe failure'} }
-            { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'created' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState ([pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}) -DisplacedLeaf $null -ExpectedStage $stage.Expected -NoReplace } | Should Throw 'Permission probe'
-            Set-P7WindowsDurabilityHook $null
-            Test-Path -LiteralPath (Join-Path $f.Root 'target/created') | Should Be $false
-            @(Get-ChildItem -LiteralPath (Join-Path $f.Root 'target') -Force -Filter '.ai-instructions-permission-probe-*').Count | Should Be 0
-            $stageAfter=Get-P7NamedFileState $f.Transaction 'stage' $stage
-            $stageAfter.bytes | Should Be $stageBefore.bytes
-            $stageAfter.identity.fileId | Should Be $stageBefore.identity.fileId
-        } finally { Set-P7WindowsDurabilityHook $null;Close-P7Fixture $f @($stage.Lease) }
+    # Scenario: Effective-token lookup, CreatePrivateObjectSecurityEx, or the low-level publication DACL write fails for a missing target.
+    # Purpose: Return a typed failure without creating a target or changing stage bytes, identity, or DACL.
+    It 'InterT280_leaves_no_residue_when_create_dacl_preparation_or_write_fails' {
+        $cases=@('before-open-effective-token','before-create-private-object-security','before-low-level-dacl-write')
+        for($index=0;$index -lt $cases.Count;$index++){
+            $f=New-P7Fixture ('p7-create-dacl-failure-'+$index);$stage=$null;$caught=$null;$failurePoint=$cases[$index]
+            try {
+                $stage=New-P7File $f.Transaction 'stage' ([Text.Encoding]::UTF8.GetBytes('new'))
+                $stageBefore=Get-P7NamedFileState $f.Transaction 'stage' $stage
+                Set-P7WindowsPublicationDaclHook {param($point)if($point -ceq $failurePoint){throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]::new('publication-dacl','windows',('injected '+$point+' failure'))}}
+                try { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'created' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState ([pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}) -DisplacedLeaf $null -ExpectedStage $stage.Expected -NoReplace | Out-Null } catch {$caught=$_}
+                $caught | Should Not BeNullOrEmpty
+                $typedFailure=$caught.Exception
+                if($typedFailure -is [Management.Automation.MethodInvocationException] -and $null -ne $typedFailure.InnerException){$typedFailure=$typedFailure.InnerException}
+                $typedFailure.GetType().Name | Should Be 'PlatformVerificationException'
+                Test-Path -LiteralPath (Join-Path $f.Root 'target/created') | Should Be $false
+                @(Get-ChildItem -LiteralPath (Join-Path $f.Root 'target') -Force).Count | Should Be 0
+                $stageAfter=Get-P7NamedFileState $f.Transaction 'stage' $stage
+                $stageAfter.bytes | Should Be $stageBefore.bytes
+                $stageAfter.identity.fileId | Should Be $stageBefore.identity.fileId
+                (Test-P7EquivalentDacl $stageAfter.sddl $stageBefore.sddl) | Should Be $true
+            } finally { Set-P7WindowsPublicationDaclHook $null;Close-P7Fixture $f @($stage.Lease) }
+        }
     }
 
     # Scenario: A caller supplies the transaction directory itself, or its private container, as the target parent.
@@ -4141,7 +4237,7 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             try { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'publish' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $target.State -DisplacedLeaf 'publish.backup' -ExpectedStage $stage.Expected | Out-Null } catch {$publishCaught=$_} finally {Set-P7WindowsPermissionMutationHook $null}
             $publishCaught | Should Not BeNullOrEmpty
             $targetAfter=Get-P7NamedFileState $f.Parent 'publish';$stageAfter=Get-P7NamedFileState $f.Transaction 'publish.stage' $stage
-            foreach($pair in @(@($targetBefore,$targetAfter),@($stageBefore,$stageAfter))){$pair[1].bytes|Should Be $pair[0].bytes;$pair[1].identity.fileId|Should Be $pair[0].identity.fileId;$pair[1].sddl|Should Be $pair[0].sddl;$pair[1].readOnly|Should Be $pair[0].readOnly}
+            foreach($pair in @(@($targetBefore,$targetAfter),@($stageBefore,$stageAfter))){$pair[1].bytes|Should Be $pair[0].bytes;$pair[1].identity.fileId|Should Be $pair[0].identity.fileId;(Test-P7EquivalentDacl $pair[1].sddl $pair[0].sddl)|Should Be $true;$pair[1].readOnly|Should Be $pair[0].readOnly}
             Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/publish.backup")|Should Be $false
         } finally { Set-P7WindowsPermissionMutationHook $null;Close-P7Fixture $f @($direct.Lease,$target.Lease,$stage.Lease) }
     }
@@ -4160,6 +4256,345 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $after=Get-P7NamedFileState $f.Transaction 'cleanup.backup' $tombstone
             $after.bytes|Should Be $before.bytes;$after.identity.device|Should Be $before.identity.device;$after.identity.fileId|Should Be $before.identity.fileId;$after.sddl|Should Be $before.sddl;$after.readOnly|Should Be $true
         } finally { Set-P7WindowsDurabilityHook $null;Close-P7Fixture $f @($tombstone.Lease) }
+    }
+
+    # Scenario: A non-read-only file receives only a DACL SDDL policy.
+    # Purpose: The dedicated permission handle can snapshot and read back basic attributes without changing read-only.
+    It 'InterT320_applies_sddl_only_to_a_non_readonly_file' {
+        $f=New-P7Fixture 'p7-sddl-only';$file=$null
+        try {
+            $file=New-P7File $f.Parent 'data' ([Text.Encoding]::UTF8.GetBytes('data'))
+            $identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$sddl='D:P(A;;FA;;;'+$identity.User.Value+')'}finally{$identity.Dispose()}
+            $applied=Set-PlatformPermissions -Lease $file.Lease -Policy @{Sddl=$sddl}
+            $observed=Get-PlatformPermissions $file.Lease
+            $applied.sddl|Should Be $observed.sddl;$applied.readOnly|Should Be $false;$observed.readOnly|Should Be $false;(Test-P7DaclProtected $observed.sddl)|Should Be $true
+        } finally { Close-P7Fixture $f @($file.Lease) }
+    }
+
+    # Scenario: A windows-sddl snapshot explicitly keeps a non-read-only file writable.
+    # Purpose: Applying readOnly false together with a DACL succeeds and returns the exact normalized snapshot.
+    It 'InterT330_applies_a_writable_windows_sddl_snapshot' {
+        $f=New-P7Fixture 'p7-writable-snapshot';$file=$null
+        try {
+            $file=New-P7File $f.Parent 'data' ([Text.Encoding]::UTF8.GetBytes('data'))
+            $identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$sddl='D:P(A;;FA;;;'+$identity.User.Value+')'}finally{$identity.Dispose()}
+            $applied=Set-PlatformPermissions -Lease $file.Lease -Snapshot ([pscustomobject]@{kind='windows-sddl';sddl=$sddl;readOnly=$false})
+            $observed=Get-PlatformPermissions $file.Lease
+            $applied.sddl|Should Be $observed.sddl;$applied.readOnly|Should Be $false;$observed.readOnly|Should Be $false;(Test-P7DaclProtected $observed.sddl)|Should Be $true
+        } finally { Close-P7Fixture $f @($file.Lease) }
+    }
+
+    # Scenario: Publication replaces an existing writable target that has a custom DACL.
+    # Purpose: Copy only the target DACL to the stage before rename and preserve writable state after publication.
+    It 'InterT340_publishes_over_a_non_readonly_target_with_its_custom_dacl' {
+        $f=New-P7Fixture 'p7-publish-sddl-only';$target=$null;$stage=$null;$published=$null
+        try {
+            $target=New-P7File $f.Parent 'data' ([Text.Encoding]::UTF8.GetBytes('old'))
+            $identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$sddl='D:P(A;;FA;;;'+$identity.User.Value+')'}finally{$identity.Dispose()}
+            $targetPermissions=Set-PlatformPermissions -Lease $target.Lease -Policy @{Sddl=$sddl}
+            $targetPermissions.readOnly|Should Be $false
+            $target.Lease.Dispose();$target.Lease=$null
+            $stage=New-P7File $f.Transaction 'new.stage' ([Text.Encoding]::UTF8.GetBytes('new'))
+            $receipt=Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $target.State -DisplacedLeaf 'old.backup' -ExpectedStage $stage.Expected
+            $receipt.permissions.sddl|Should Be $targetPermissions.sddl;$receipt.permissions.readOnly|Should Be $false
+            $stage.Lease.Dispose();$stage.Lease=$null
+            $published=Open-PlatformFile -ParentLease $f.Parent -Leaf 'data' -Access ReadWrite -CreateMode OpenExisting
+            $publishedPermissions=Get-PlatformPermissions $published
+            $publishedPermissions.sddl|Should Be $targetPermissions.sddl;$publishedPermissions.readOnly|Should Be $false;(Test-P7DaclProtected $publishedPermissions.sddl)|Should Be $true
+        } finally { Close-P7Fixture $f @($published,$stage.Lease,$target.Lease) }
+    }
+
+    # Scenario: A writable file receives only a ReadOnly policy.
+    # Purpose: Preserve its DACL while the dedicated permission handle updates and verifies basic attributes.
+    It 'InterT350_applies_readonly_only_without_changing_the_dacl' {
+        $f=New-P7Fixture 'p7-readonly-only';$file=$null
+        try {
+            $file=New-P7File $f.Parent 'data' ([Text.Encoding]::UTF8.GetBytes('data'))
+            $before=Get-PlatformPermissions $file.Lease
+            $applied=Set-PlatformPermissions -Lease $file.Lease -Policy @{ReadOnly=$true}
+            $observed=Get-PlatformPermissions $file.Lease
+            $applied.sddl|Should Be $before.sddl;$observed.sddl|Should Be $before.sddl;$applied.readOnly|Should Be $true;$observed.readOnly|Should Be $true
+        } finally { Close-P7Fixture $f @($file.Lease) }
+    }
+
+    # Scenario: A target containing only inherited ACEs is published from a transaction directory with different inheritable ACEs.
+    # Purpose: Preserve the target ACE sequence, ID flags, P state, and displaced identity while accepting the documented AI clear.
+    It 'InterT360_preserves_an_inherited_only_target_dacl_and_clears_AI' {
+        $f=New-P7Fixture 'p7-inherited-only';$target=$null;$stage=$null
+        try {
+            [void](Set-P7InheritanceFixture $f)
+            $target=New-P7File $f.Parent 'data' ([Text.Encoding]::UTF8.GetBytes('old'))
+            $targetBefore=Get-P7NamedFileState $f.Parent 'data' $target
+            $targetDescriptor=[Security.AccessControl.RawSecurityDescriptor]::new($targetBefore.sddl)
+            @($targetDescriptor.DiscretionaryAcl | Where-Object {-not $_.IsInherited}).Count | Should Be 0
+            @($targetDescriptor.DiscretionaryAcl | Where-Object {$_.IsInherited}).Count | Should Not Be 0
+            ((Get-P7DaclControl $targetBefore.sddl) -band [int][Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInherited) | Should Not Be 0
+            $target.Lease.Dispose();$target.Lease=$null
+            $stage=New-P7File $f.Transaction 'new.stage' ([Text.Encoding]::UTF8.GetBytes('new'))
+            [void](Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $target.State -DisplacedLeaf 'old.backup' -ExpectedStage $stage.Expected)
+            $published=Get-P7NamedFileState $f.Parent 'data'
+            $displaced=Get-P7NamedFileState $f.Transaction 'old.backup'
+            (Test-P7EquivalentDacl $published.sddl $targetBefore.sddl) | Should Be $true
+            ((Get-P7DaclControl $published.sddl) -band [int][Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInherited) | Should Be 0
+            (Test-P7EquivalentDacl $displaced.sddl $targetBefore.sddl) | Should Be $true
+            $displaced.identity.fileId | Should Be $target.State.identity.fileId
+        } finally { Close-P7Fixture $f @($stage.Lease,$target.Lease) }
+    }
+
+    # Scenario: A target combines an explicit ACE with inherited ACEs before publication from a differently protected transaction directory.
+    # Purpose: Preserve explicit/inherited ordering and every ID flag while documenting that low-level DACL write clears only AI.
+    It 'InterT370_preserves_a_mixed_explicit_and_inherited_target_dacl_and_clears_AI' {
+        $f=New-P7Fixture 'p7-mixed-dacl';$target=$null;$stage=$null
+        try {
+            $aclFixture=Set-P7InheritanceFixture $f
+            $target=New-P7File $f.Parent 'data' ([Text.Encoding]::UTF8.GetBytes('old'))
+            $inherited=(Get-PlatformPermissions $target.Lease).sddl
+            $mixed='D:AI(A;;FW;;;'+$aclFixture.Sid+')'+$inherited.Substring($inherited.IndexOf('('))
+            [void](Set-PlatformPermissions -Lease $target.Lease -Snapshot ([pscustomobject]@{kind='windows-sddl';sddl=$mixed;readOnly=$false}))
+            $targetBefore=Get-P7NamedFileState $f.Parent 'data' $target
+            $targetDescriptor=[Security.AccessControl.RawSecurityDescriptor]::new($targetBefore.sddl)
+            @($targetDescriptor.DiscretionaryAcl | Where-Object {-not $_.IsInherited}).Count | Should Not Be 0
+            @($targetDescriptor.DiscretionaryAcl | Where-Object {$_.IsInherited}).Count | Should Not Be 0
+            ((Get-P7DaclControl $targetBefore.sddl) -band [int][Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInherited) | Should Not Be 0
+            $target.Lease.Dispose();$target.Lease=$null
+            $stage=New-P7File $f.Transaction 'new.stage' ([Text.Encoding]::UTF8.GetBytes('new'))
+            [void](Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $target.State -DisplacedLeaf 'old.backup' -ExpectedStage $stage.Expected)
+            $published=Get-P7NamedFileState $f.Parent 'data'
+            $displaced=Get-P7NamedFileState $f.Transaction 'old.backup'
+            (Test-P7EquivalentDacl $published.sddl $targetBefore.sddl) | Should Be $true
+            ((Get-P7DaclControl $published.sddl) -band [int][Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInherited) | Should Be 0
+            (Test-P7EquivalentDacl $displaced.sddl $targetBefore.sddl) | Should Be $true
+            $displaced.identity.fileId | Should Be $target.State.identity.fileId
+        } finally { Close-P7Fixture $f @($stage.Lease,$target.Lease) }
+    }
+
+    # Scenario: A missing target is published from a protected transaction directory into an unprotected parent with a distinct inheritable ACE.
+    # Purpose: Match a direct CreateNew file's ACE sequence and P state while accepting the observed low-level AI clear.
+    It 'InterT380_derives_create_permissions_from_the_target_parent_and_clears_AI' {
+        $f=New-P7Fixture 'p7-create-derived-dacl';$control=$null;$stage=$null
+        try {
+            [void](Set-P7InheritanceFixture $f)
+            $control=New-P7File $f.Parent 'control' ([byte[]]@(1))
+            $controlPermissions=Get-PlatformPermissions $control.Lease
+            ((Get-P7DaclControl $controlPermissions.sddl) -band [int][Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInherited) | Should Not Be 0
+            $stage=New-P7File $f.Transaction 'create.stage' ([Text.Encoding]::UTF8.GetBytes('created'))
+            [void](Publish-PlatformFile -ParentLease $f.Parent -Leaf 'created' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState ([pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}) -DisplacedLeaf $null -ExpectedStage $stage.Expected -NoReplace)
+            $published=Get-P7NamedFileState $f.Parent 'created'
+            (Test-P7EquivalentDacl $published.sddl $controlPermissions.sddl) | Should Be $true
+            ((Get-P7DaclControl $published.sddl) -band [int][Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInherited) | Should Be 0
+        } finally { Close-P7Fixture $f @($control.Lease,$stage.Lease) }
+    }
+
+    # Scenario: Publication fails after moving an inherited-ACL original aside but before the applied stage rename.
+    # Purpose: Move the original identity back symmetrically and restore both original and stage DACLs without inheriting from the transaction directory.
+    It 'InterT390_restores_the_original_identity_and_dacls_on_pre_applied_rename_failure' {
+        $f=New-P7Fixture 'p7-dacl-rollback';$target=$null;$stage=$null;$caught=$null
+        try {
+            [void](Set-P7InheritanceFixture $f)
+            $target=New-P7File $f.Parent 'data' ([Text.Encoding]::UTF8.GetBytes('old'))
+            $targetBefore=Get-P7NamedFileState $f.Parent 'data' $target
+            $target.Lease.Dispose();$target.Lease=$null
+            $stage=New-P7File $f.Transaction 'new.stage' ([Text.Encoding]::UTF8.GetBytes('new'))
+            $stageBefore=Get-P7NamedFileState $f.Transaction 'new.stage' $stage
+            Set-P7WindowsDurabilityHook {param($point,$operation,$role,$lease)if($point -ceq 'before-applied-rename'){throw 'injected pre-applied rename failure'}}
+            try { [void](Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $target.State -DisplacedLeaf 'old.backup' -ExpectedStage $stage.Expected) } catch {$caught=$_} finally {Set-P7WindowsDurabilityHook $null}
+            $caught | Should Not BeNullOrEmpty
+            $targetAfter=Get-P7NamedFileState $f.Parent 'data'
+            $stageAfter=Get-P7NamedFileState $f.Transaction 'new.stage'
+            $targetAfter.identity.fileId | Should Be $targetBefore.identity.fileId
+            $targetAfter.bytes | Should Be $targetBefore.bytes
+            (Test-P7EquivalentDacl $targetAfter.sddl $targetBefore.sddl) | Should Be $true
+            $stageAfter.identity.fileId | Should Be $stageBefore.identity.fileId
+            $stageAfter.bytes | Should Be $stageBefore.bytes
+            (Test-P7EquivalentDacl $stageAfter.sddl $stageBefore.sddl) | Should Be $true
+            Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/old.backup") | Should Be $false
+        } finally { Set-P7WindowsDurabilityHook $null;Close-P7Fixture $f @($stage.Lease,$target.Lease) }
+    }
+
+    # Scenario: The file owner is denied WRITE_DAC but retains read-control and attribute read/write access.
+    # Purpose: ReadOnly-only mutation must not request WRITE_DAC, while an SDDL mutation fails with a typed native error before changing the file.
+    It 'InterT400_requests_only_the_access_required_by_each_permission_dimension' {
+        $f=New-P7Fixture 'p7-minimum-permission-access';$file=$null;$caught=$null
+        try {
+            $file=New-P7File $f.Parent 'data' ([Text.Encoding]::UTF8.GetBytes('data'))
+            $identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$sid=$identity.User.Value}finally{$identity.Dispose()}
+            $delegatedSddl='D:P(D;;WD;;;OW)(A;;0x00130189;;;'+$sid+')'
+            [void](Set-PlatformPermissions -Lease $file.Lease -Policy @{Sddl=$delegatedSddl})
+
+            $readOnlyResult=Set-PlatformPermissions -Lease $file.Lease -Policy @{ReadOnly=$true}
+            $readOnlyResult.readOnly | Should Be $true
+            $before=Get-P7NamedFileState $f.Parent 'data' $file
+            try { Set-PlatformPermissions -Lease $file.Lease -Policy @{Sddl=('D:P(A;;FA;;;'+$sid+')')} | Out-Null } catch {$caught=$_}
+            $caught | Should Not BeNullOrEmpty
+            $typedFailure=$caught.Exception
+            if($typedFailure -is [Management.Automation.MethodInvocationException] -and $null -ne $typedFailure.InnerException){$typedFailure=$typedFailure.InnerException}
+            $typedFailure.GetType().Name | Should Be 'PlatformWin32Exception'
+            $after=Get-P7NamedFileState $f.Parent 'data' $file
+            $after.bytes | Should Be $before.bytes
+            $after.identity.fileId | Should Be $before.identity.fileId
+            $after.sddl | Should Be $before.sddl
+            $after.readOnly | Should Be $before.readOnly
+        } finally { Close-P7Fixture $f @($file.Lease) }
+    }
+
+    # Scenario: Injected permission readback failure follows a ReadOnly-only call and then an SDDL-only call.
+    # Purpose: Roll back only the dimension that the call could mutate, using no unrequested write access for the other dimension.
+    It 'InterT410_rolls_back_only_the_permission_dimension_that_was_mutated' {
+        $f=New-P7Fixture 'p7-dimension-rollback';$readOnlyFile=$null;$daclFile=$null;$readOnlyCaught=$null;$daclCaught=$null
+        try {
+            $identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$changedSddl='D:P(A;;FA;;;'+$identity.User.Value+')'}finally{$identity.Dispose()}
+            $readOnlyFile=New-P7File $f.Parent 'readonly' ([Text.Encoding]::UTF8.GetBytes('readonly'))
+            [void](Set-PlatformPermissions -Lease $readOnlyFile.Lease -Policy @{Sddl=$changedSddl})
+            $readOnlyBefore=Get-P7NamedFileState $f.Parent 'readonly' $readOnlyFile
+            Set-P7WindowsPermissionMutationHook {param($point)if($point -ceq 'after-apply-before-readback'){throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]::new('permissions-snapshot','windows','injected ReadOnly-only readback failure')}}
+            try { Set-PlatformPermissions -Lease $readOnlyFile.Lease -Policy @{ReadOnly=(-not $readOnlyBefore.readOnly)} | Out-Null } catch {$readOnlyCaught=$_} finally {Set-P7WindowsPermissionMutationHook $null}
+            $readOnlyCaught | Should Not BeNullOrEmpty
+            $readOnlyAfter=Get-P7NamedFileState $f.Parent 'readonly' $readOnlyFile
+            $readOnlyAfter.sddl | Should Be $readOnlyBefore.sddl
+            $readOnlyAfter.readOnly | Should Be $readOnlyBefore.readOnly
+
+            $daclFile=New-P7File $f.Parent 'dacl' ([Text.Encoding]::UTF8.GetBytes('dacl'))
+            [void](Set-PlatformPermissions -Lease $daclFile.Lease -Policy @{ReadOnly=$true})
+            $daclBefore=Get-P7NamedFileState $f.Parent 'dacl' $daclFile
+            Set-P7WindowsPermissionMutationHook {param($point)if($point -ceq 'after-apply-before-readback'){throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]::new('permissions-snapshot','windows','injected DACL-only readback failure')}}
+            try { Set-PlatformPermissions -Lease $daclFile.Lease -Policy @{Sddl=$changedSddl} | Out-Null } catch {$daclCaught=$_} finally {Set-P7WindowsPermissionMutationHook $null}
+            $daclCaught | Should Not BeNullOrEmpty
+            $daclAfter=Get-P7NamedFileState $f.Parent 'dacl' $daclFile
+            $daclAfter.sddl | Should Be $daclBefore.sddl
+            $daclAfter.readOnly | Should Be $daclBefore.readOnly
+        } finally { Set-P7WindowsPermissionMutationHook $null;Close-P7Fixture $f @($readOnlyFile.Lease,$daclFile.Lease) }
+    }
+
+    # Scenario: A parent owned by another principal exposes an inheritable CREATOR OWNER ACE for new files.
+    # Purpose: Derive publication create permissions from the effective token owner, exactly like a direct CreateNew file, rather than from the parent owner.
+    if ($null -ne $script:P7CreatorOwnerParentOwnerSid) {
+    It 'InterT420_replaces_CREATOR_OWNER_with_the_effective_token_owner' {
+        $f=New-P7Fixture 'p7-create-creator-owner';$control=$null;$stage=$null
+        try {
+            $fixture=Set-P7CreatorOwnerFixture $f $script:P7CreatorOwnerParentOwnerSid
+            $fixture.ParentOwnerSid | Should Not Be $fixture.EffectiveOwnerSid
+            $control=New-P7File $f.Parent 'control' ([byte[]]@(1))
+            $controlPermissions=Get-PlatformPermissions $control.Lease
+            $stage=New-P7File $f.Transaction 'create.stage' ([Text.Encoding]::UTF8.GetBytes('created'))
+            [void](Publish-PlatformFile -ParentLease $f.Parent -Leaf 'created' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState ([pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}) -DisplacedLeaf $null -ExpectedStage $stage.Expected -NoReplace)
+            $published=Get-P7NamedFileState $f.Parent 'created'
+            (Test-P7EquivalentDacl $published.sddl $controlPermissions.sddl) | Should Be $true
+            $descriptor=[Security.AccessControl.RawSecurityDescriptor]::new($published.sddl)
+            $creatorOwnerAces=@($descriptor.DiscretionaryAcl | Where-Object {
+                $_ -is [Security.AccessControl.KnownAce] -and
+                $_.SecurityIdentifier.Value -ceq $fixture.EffectiveOwnerSid -and
+                ($_.AceFlags -band [Security.AccessControl.AceFlags]::Inherited) -ne 0
+            })
+            $creatorOwnerAces.Count | Should Be 1
+            @($descriptor.DiscretionaryAcl | Where-Object { $_ -is [Security.AccessControl.KnownAce] -and $_.SecurityIdentifier.Value -ceq 'S-1-3-0' }).Count | Should Be 0
+        } finally { Close-P7Fixture $f @($control.Lease,$stage.Lease) }
+    }
+    }
+
+    # Scenario: Strict journal v1 reader output is passed unchanged to all three Windows file mutation shapes.
+    # Purpose: Keep the platform operation contract synchronized with every property emitted by the durable reader.
+    It 'InterT430_accepts_strict_reader_write_create_and_remove_file_operations' {
+        $f=New-P7Fixture 'p7-strict-journal';$writeTarget=$null;$writeStage=$null;$createStage=$null;$removeTarget=$null
+        try {
+            $writeTarget=New-P7File $f.Parent 'write' ([Text.Encoding]::UTF8.GetBytes('write-old'))
+            $writePermissions=Get-PlatformPermissions $writeTarget.Lease;$writeTarget.Lease.Dispose();$writeTarget.Lease=$null
+            $writeStage=New-P7File $f.Transaction 'write.stage' ([Text.Encoding]::UTF8.GetBytes('write-new'))
+            $writeApplied=[pscustomobject]@{exists=$true;sha256=$writeStage.State.sha256;length=$writeStage.State.length;identity=$writeStage.State.identity}
+            $writeOperation=New-P7JournalOperation write-file stage-rename 'target/write' 'write.stage' 'write.backup' $writeTarget.State $writeApplied $writePermissions
+            $writeReceipt=Publish-PlatformFile -ParentLease $f.Parent -Leaf 'write' -TransactionLease $f.Transaction -StageLease $writeStage.Lease -ExpectedState $writeTarget.State -DisplacedLeaf 'write.backup' -ExpectedStage $writeStage.Expected -Journal $writeOperation
+            $writeReceipt.appliedIdentity.fileId | Should Be $writeStage.State.identity.fileId
+            [IO.File]::ReadAllText((Join-Path $f.Root 'target/write')) | Should Be 'write-new'
+
+            $createStage=New-P7File $f.Transaction 'create.stage' ([Text.Encoding]::UTF8.GetBytes('created'))
+            $missing=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            $createApplied=[pscustomobject]@{exists=$true;sha256=$createStage.State.sha256;length=$createStage.State.length;identity=$createStage.State.identity}
+            $createOperation=New-P7JournalOperation create-file stage-rename 'target/created' 'create.stage' $null $missing $createApplied $null
+            $createReceipt=Publish-PlatformFile -ParentLease $f.Parent -Leaf 'created' -TransactionLease $f.Transaction -StageLease $createStage.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $createStage.Expected -NoReplace -Journal $createOperation
+            $createReceipt.appliedIdentity.fileId | Should Be $createStage.State.identity.fileId
+            [IO.File]::ReadAllText((Join-Path $f.Root 'target/created')) | Should Be 'created'
+
+            $removeTarget=New-P7File $f.Parent 'remove' ([Text.Encoding]::UTF8.GetBytes('remove-old'))
+            $removePermissions=Get-PlatformPermissions $removeTarget.Lease;$removeTarget.Lease.Dispose();$removeTarget.Lease=$null
+            $removed=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            $removeOperation=New-P7JournalOperation remove-file tombstone-rename 'target/remove' $null 'remove.backup' $removeTarget.State $removed $removePermissions
+            $removeReceipt=Remove-PlatformOwnedFile -ParentLease $f.Parent -Leaf 'remove' -ExpectedState $removeTarget.State -TransactionLease $f.Transaction -TombstoneLeaf 'remove.backup' -Journal $removeOperation
+            $removeReceipt.backupIdentity.fileId | Should Be $removeTarget.State.identity.fileId
+            Test-Path -LiteralPath (Join-Path $f.Root 'target/remove') | Should Be $false
+            Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/remove.backup") | Should Be $true
+        } finally { Close-P7Fixture $f @($writeStage.Lease,$createStage.Lease,$writeTarget.Lease,$removeTarget.Lease) }
+    }
+
+    # Scenario: A file journal operation carries the directory-only quarantine leaf after strict validation.
+    # Purpose: Reject the schema-incompatible durable intent before permissions or names change.
+    It 'InterT440_rejects_a_non_null_file_quarantine_leaf_without_mutation' {
+        $f=New-P7Fixture 'p7-journal-quarantine';$stage=$null
+        try {
+            $stage=New-P7File $f.Transaction 'create.stage' ([Text.Encoding]::UTF8.GetBytes('created'))
+            $missing=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            $applied=[pscustomobject]@{exists=$true;sha256=$stage.State.sha256;length=$stage.State.length;identity=$stage.State.identity}
+            $operation=New-P7JournalOperation create-file stage-rename 'target/created' 'create.stage' $null $missing $applied $null
+            $operation.quarantineLeaf='unexpected.quarantine'
+            $stageBefore=Get-P7NamedFileState $f.Transaction 'create.stage' $stage
+            { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'created' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $stage.Expected -NoReplace -Journal $operation } | Should Throw 'Journal'
+            Test-Path -LiteralPath (Join-Path $f.Root 'target/created') | Should Be $false
+            $stageAfter=Get-P7NamedFileState $f.Transaction 'create.stage' $stage
+            $stageAfter.bytes | Should Be $stageBefore.bytes
+            $stageAfter.identity.fileId | Should Be $stageBefore.identity.fileId
+        } finally { Close-P7Fixture $f @($stage.Lease) }
+    }
+
+    # Scenario: Durable applied identity names another same-content file instead of the bound stage.
+    # Purpose: Reject before DACL/readOnly mutation or rename even when hash and length still match.
+    It 'InterT450_rejects_journal_applied_identity_mismatch_without_mutation' {
+        $f=New-P7Fixture 'p7-journal-identity';$stage=$null;$other=$null
+        try {
+            $bytes=[Text.Encoding]::UTF8.GetBytes('same-bytes')
+            $stage=New-P7File $f.Transaction 'create.stage' $bytes
+            $other=New-P7File $f.Transaction 'other.stage' $bytes
+            $missing=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            $applied=[pscustomobject]@{exists=$true;sha256=$stage.State.sha256;length=$stage.State.length;identity=$other.State.identity}
+            $operation=New-P7JournalOperation create-file stage-rename 'target/created' 'create.stage' $null $missing $applied $null
+            $stageBefore=Get-P7NamedFileState $f.Transaction 'create.stage' $stage
+            $stagePermissionsBefore=Get-PlatformPermissions $stage.Lease
+            { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'created' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $stage.Expected -NoReplace -Journal $operation } | Should Throw 'Journal'
+            Test-Path -LiteralPath (Join-Path $f.Root 'target/created') | Should Be $false
+            $stageAfter=Get-P7NamedFileState $f.Transaction 'create.stage' $stage
+            $stageAfter.bytes | Should Be $stageBefore.bytes
+            $stageAfter.identity.fileId | Should Be $stageBefore.identity.fileId
+            (Get-PlatformPermissions $stage.Lease).sddl | Should Be $stagePermissionsBefore.sddl
+            (Get-PlatformPermissions $stage.Lease).readOnly | Should Be $stagePermissionsBefore.readOnly
+        } finally { Close-P7Fixture $f @($stage.Lease,$other.Lease) }
+    }
+
+    # Scenario: The stage name is replaced by a different same-content identity between caller validation and mutation reopen.
+    # Purpose: Reject identity substitution despite matching bytes and leave the target absent.
+    It 'InterT460_rejects_a_same_bytes_replacement_stage_identity' {
+        $f=New-P7Fixture 'p7-replaced-stage';$stage=$null;$replacement=$null
+        try {
+            $bytes=[Text.Encoding]::UTF8.GetBytes('same-bytes')
+            $stage=New-P7File $f.Transaction 'create.stage' $bytes
+            $replacement=New-P7File $f.Transaction 'replacement.stage' $bytes
+            $replacement.Lease.Dispose();$replacement.Lease=$null
+            $missing=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            $applied=[pscustomobject]@{exists=$true;sha256=$stage.State.sha256;length=$stage.State.length;identity=$stage.State.identity}
+            $operation=New-P7JournalOperation create-file stage-rename 'target/created' 'create.stage' $null $missing $applied $null
+            $transactionPath=Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)"
+            Set-P7WindowsPreReopenHook ({
+                param($point,$operationName,$role,$path)
+                if($operationName -ceq 'publication' -and $role -ceq 'stage'){
+                    [IO.File]::Move($path,(Join-Path $transactionPath 'original.stage'))
+                    [IO.File]::Move((Join-Path $transactionPath 'replacement.stage'),$path)
+                }
+            }.GetNewClosure())
+            { Publish-PlatformFile -ParentLease $f.Parent -Leaf 'created' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $stage.Expected -NoReplace -Journal $operation } | Should Throw
+            Set-P7WindowsPreReopenHook $null
+            Test-Path -LiteralPath (Join-Path $f.Root 'target/created') | Should Be $false
+            $replaced=Get-P7NamedFileState $f.Transaction 'create.stage'
+            $preserved=Get-P7NamedFileState $f.Transaction 'original.stage'
+            $replaced.bytes | Should Be $preserved.bytes
+            $replaced.identity.fileId | Should Be $replacement.State.identity.fileId
+            $preserved.identity.fileId | Should Be $stage.State.identity.fileId
+        } finally { Set-P7WindowsPreReopenHook $null;Close-P7Fixture $f @($stage.Lease,$replacement.Lease) }
     }
     }
 }

@@ -159,7 +159,7 @@ Describe 'install-ai-instructions-bootstrap' {
             'bootstrap-ai-instructions-installed.ps1','bootstrap-ai-instructions-multisource.ps1','bootstrap-ai-instructions.ps1','safe-zip.psm1',
             'skills-catalog-contract.psm1','skills-selection.psm1','skills-source-routing.psm1',
             'skills-source-retrieval.psm1','skills-source-acquisition.psm1','skills-source-composition.psm1',
-            'ai-instructions-runtime-contract.psm1','agent-artifact-remediation.psm1','repo-shared-skills-migration.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1',
+            'ai-instructions-runtime-contract.psm1','WindowsDacl.psm1','agent-artifact-remediation.psm1','repo-shared-skills-migration.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1',
             'ai-instructions-updater.psm1','update-ai-instructions.ps1','agent-environment-reconciler.psm1','update-agent-environment.ps1',
             'cleanup-ai-instructions-pollution.ps1',
             'runtime-bundle.json','catalog\skills-catalog.json','catalog\skills-catalog-lock.json'
@@ -546,7 +546,7 @@ Keep this section too.
             'bootstrap-ai-instructions-installed.ps1','bootstrap-ai-instructions-multisource.ps1','bootstrap-ai-instructions.ps1',
             'safe-zip.psm1','skills-catalog-contract.psm1','skills-selection.psm1','skills-source-routing.psm1',
             'skills-source-retrieval.psm1','skills-source-acquisition.psm1','skills-source-composition.psm1',
-            'ai-instructions-runtime-contract.psm1','agent-artifact-remediation.psm1','repo-shared-skills-migration.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1',
+            'ai-instructions-runtime-contract.psm1','WindowsDacl.psm1','agent-artifact-remediation.psm1','repo-shared-skills-migration.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1',
             'ai-instructions-updater.psm1','update-ai-instructions.ps1','agent-environment-reconciler.psm1','update-agent-environment.ps1',
             'cleanup-ai-instructions-pollution.ps1','installer-safe-mutation.psm1','platform-runtime.psd1','license-delivery.psm1'
         )) {
@@ -600,7 +600,7 @@ Keep this section too.
         foreach ($fileName in @(
             'agent-artifact-remediation.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1',
             'agent-environment-reconciler.psm1','update-agent-environment.ps1','license-delivery.psm1',
-            'ai-instructions-runtime-contract.psm1'
+            'ai-instructions-runtime-contract.psm1','WindowsDacl.psm1'
         )) {
             Copy-Item -LiteralPath (Join-Path $repositoryRoot "scripts\$fileName") `
                 -Destination (Join-Path $invalidSource "scripts\$fileName") -Force

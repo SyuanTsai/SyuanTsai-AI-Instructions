@@ -38,6 +38,7 @@
     FileList = @(
         'platform-runtime.psd1',
         'platform-runtime.psm1',
+        'WindowsDacl.psm1',
         'platform/PlatformNative.cs',
         'platform/UnixNative.cs',
         'platform/WindowsNative.cs',
@@ -62,13 +63,14 @@
             HashMode = 'sha256-utf8-lf'
             Inventory = @(
                 @{ Path = 'platform/UnixNative.cs'; Sha256 = 'dd95835adcc4c19509fab6df017ad8f9db1aa7d61468c3dc687547cd2cb11b79' },
-                @{ Path = 'platform/WindowsNative.cs'; Sha256 = '58eb05436ddb3bf4650fdaf2d83b6be2dddc029917602005e0faf3e3b5e106e9' },
+                @{ Path = 'platform/WindowsNative.cs'; Sha256 = '5b97c308eee77b7e15d1981864eddbabffe0256412aa9cb410c6affdfbbf9a71' },
                 @{ Path = 'platform/WindowsInstallerMutation.cs'; Sha256 = 'b88b4b09c7bb5c3e71b762ddc6ebe72007ed0cca99977ab7a7272529c3ff9218' },
                 @{ Path = 'platform/Unix.psm1'; Sha256 = '6199e45d01293d970f33195368cdef0630b1392a4eb00a289ef85c10eda1eef0' },
                 @{ Path = 'platform/RuntimePreparation.psm1'; Sha256 = 'dc254c04e7e2caf280726e66f67434776bc7df12a210a38c80596e41344fd077' },
                 @{ Path = 'platform-runtime.psm1'; Sha256 = 'ecc89c9852e70f476fdb0310478f7ffed8065b50ed31b4947e1f5d6a013ae014' },
+                @{ Path = 'WindowsDacl.psm1'; Sha256 = 'ffa1f85d94bb6bce9bf8353f8c7733bdbe59880a3d0d075191938cc28aebb5f6' },
                 @{ Path = 'platform/PlatformNative.cs'; Sha256 = '63648899e0171fad28294ed3d2c9398bac13a402de324ca5bbc1820fcd269c98' },
-                @{ Path = 'platform/Windows.psm1'; Sha256 = 'ac8c6c8950a419afce21c11fa8b6affbd70c1cb816382285aead7dc164038fed' },
+                @{ Path = 'platform/Windows.psm1'; Sha256 = '6d69e4a56d72b3104224e464a2506bf749db75b331322523c259bb5ab72f0d2b' },
                 @{ Path = 'platform/Linux.psm1'; Sha256 = 'd894a145f3189033a0ab0dc4b6c169a7fd23d229d223478437f117429bdf206b' },
                 @{ Path = 'platform/MacOS.psm1'; Sha256 = 'a8b04f32e97fc939e62ee7da57b36fb2ca73f141c772bf9ecfe9c7393119535d' },
                 @{ Path = 'Resolve-StandardValidationTool.ps1'; Sha256 = 'e51c78847aa706dd4bed92fa1e91e1c992e0b1e8d938aaa605c4c7389b66b8f5' },
