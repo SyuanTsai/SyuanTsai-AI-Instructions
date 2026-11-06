@@ -1298,6 +1298,9 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     }
                     catch (PlatformErrnoException ex) { if (ex.Errno != 17) throw; }
                 }
+                // Source and destination are the same directory, so this one
+                // immediate fsync persists both rename sides before cleanup.
+                Sync(transaction.Fd, true, "fsync-destination-preflight-rename");
                 conflictIdentity = CreatePreflightProbe(transaction, reserved, "conflict", out conflict);
                 conflictOwned = true;
                 bool refused = false;
@@ -1453,6 +1456,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                         PlatformPaths.Same(Stat(transaction.Fd, displacedLeaf), receipt.DisplacedIdentity);
                         try
                         {
+                            // After A -> B, persist destination B before source A so the
+                            // inode always retains at least one durable name across a crash.
                             RunMutationTestHook("publication-before-backup-transaction-fsync");
                             Sync(transaction.Fd, true, "fsync-publication-backup-transaction"); receipt.Flush.TransactionDirectory = "confirmed";
                             receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "backup-transaction-directory-fsynced");
@@ -1474,6 +1479,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     PlatformPaths.Same(Stat(parent.Fd, leaf), stageIdentity);
                     try
                     {
+                        // stage transaction -> target parent: destination before source.
                         RunMutationTestHook("publication-before-parent-fsync");
                         Sync(parent.Fd, true, "fsync-target-parent"); receipt.Flush.ParentDirectory = "confirmed";
                         receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "parent-directory-fsynced");
@@ -1519,6 +1525,11 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                             RenameNoReplace(parent.Fd, leaf, transaction.Fd, stage.Leaf, "rollback-target-to-stage"); published = false;
                             receipt.Flush.ParentDirectory = "pending"; receipt.Flush.TransactionDirectory = "pending";
                             receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "rollback-stage-to-transaction");
+                            // target parent -> stage transaction: destination before source.
+                            Sync(transaction.Fd, true, "fsync-publication-rollback-stage-transaction"); receipt.Flush.TransactionDirectory = "confirmed";
+                            receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "rollback-stage-transaction-directory-fsynced");
+                            Sync(parent.Fd, true, "fsync-publication-rollback-stage-parent"); receipt.Flush.ParentDirectory = "confirmed";
+                            receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "rollback-stage-parent-directory-fsynced");
                         }
                         if (displaced)
                         {
@@ -1527,13 +1538,11 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                             RenameNoReplace(transaction.Fd, displacedLeaf, parent.Fd, leaf, "rollback-displaced-to-target"); displaced = false;
                             receipt.Flush.ParentDirectory = "pending"; receipt.Flush.TransactionDirectory = "pending";
                             receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "rollback-displaced-to-target");
-                        }
-                        if (mutated)
-                        {
-                            Sync(transaction.Fd, true, "fsync-publication-rollback-transaction"); receipt.Flush.TransactionDirectory = "confirmed";
-                            receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "rollback-transaction-directory-fsynced");
+                            // displaced transaction -> target parent: destination before source.
                             Sync(parent.Fd, true, "fsync-publication-rollback-parent"); receipt.Flush.ParentDirectory = "confirmed";
                             receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "rollback-parent-directory-fsynced");
+                            Sync(transaction.Fd, true, "fsync-publication-rollback-transaction"); receipt.Flush.TransactionDirectory = "confirmed";
+                            receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "rollback-transaction-directory-fsynced");
                         }
                         if (permissionsChanged) ApplyPermissions(stage.Fd, stageOriginal);
                     }
@@ -1629,6 +1638,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     PlatformPaths.Same(Stat(transaction.Fd, tombstoneLeaf), identity);
                     try
                     {
+                        // target parent -> tombstone transaction: destination before source.
                         RunMutationTestHook("removal-before-transaction-fsync");
                         Sync(transaction.Fd, true, "fsync-removal-transaction"); receipt.Flush.TransactionDirectory = "confirmed";
                         receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "transaction-directory-fsynced");
@@ -1669,10 +1679,11 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                             RenameNoReplace(transaction.Fd, tombstoneLeaf, parent.Fd, leaf, "rollback-tombstone-to-target"); moved = false;
                             receipt.Flush.ParentDirectory = "pending"; receipt.Flush.TransactionDirectory = "pending";
                             receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "rollback-tombstone-to-target");
-                            Sync(transaction.Fd, true, "fsync-removal-rollback-transaction"); receipt.Flush.TransactionDirectory = "confirmed";
-                            receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "rollback-transaction-directory-fsynced");
+                            // tombstone transaction -> target parent: destination before source.
                             Sync(parent.Fd, true, "fsync-removal-rollback-parent"); receipt.Flush.ParentDirectory = "confirmed";
                             receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "rollback-parent-directory-fsynced");
+                            Sync(transaction.Fd, true, "fsync-removal-rollback-transaction"); receipt.Flush.TransactionDirectory = "confirmed";
+                            receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "rollback-transaction-directory-fsynced");
                         }
                         catch (Exception rollback)
                         {
@@ -1713,6 +1724,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                         {
                             using (SafeFd source = Open(directory, leaves[0], 2 | Create | Exclusive, 384)) { Sync(source, false, "fsync-publication-probe-file"); Snapshot(source, Stat(source, null)); }
                             RenameNoReplace(directory, leaves[0], directory, leaves[1], "rename-publication-probe");
+                            // Both rename sides are this probe directory; its single fsync
+                            // persists the destination name before any cleanup can remove it.
                             using (SafeFd conflictSource = Open(directory, leaves[2], 2 | Create | Exclusive, 384)) { }
                             using (SafeFd conflictDestination = Open(directory, leaves[3], 2 | Create | Exclusive, 384)) { }
                             bool refused = false;

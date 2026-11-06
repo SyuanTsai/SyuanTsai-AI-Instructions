@@ -3958,6 +3958,47 @@ Describe 'Unix P7c durable publication and removal' {
             @([IO.Directory]::EnumerateFileSystemEntries((Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)"))|Where-Object{[IO.Path]::GetFileName($_)-like'.ai-instructions-preflight-*'}).Count|Should Be 0
         } finally {$field.SetValue($null,$null);foreach($lease in @($stage,$target)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$parent.Dispose()}
     }
+
+    # Scenario: Replacement publication fails after stage-to-target rename and rolls both names back.
+    # Purpose: Persist each rollback rename destination before its source and restore the original target inode.
+    It 'InterT240_orders_publication_rollback_destination_fsync_before_source [skip: requires Unix renameat/fsync]' -Skip:$p7cSkip {
+        $parent=New-P7cDirectory 'publication-rollback-order';$txn=New-P7cTransaction;$target=$null;$stage=$null;$restored=$null
+        $field=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative].GetField('MutationTestHook',[Reflection.BindingFlags]'NonPublic,Static')
+        try {
+            $target=New-P7cFile $parent target original;$state=Get-P7cState $target;$originalInode=[uint64]$state.identity.fileId;$target.Dispose();$target=$null
+            $stage=New-P7cFile $txn.Lease stage replacement
+            $field.SetValue($null,[Action[string]]{param($point)if($point-ceq'publication-before-parent-fsync'){throw [IO.IOException]::new('injected failure after stage rename')}})
+            $caught=$null
+            try{Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $state -DisplacedLeaf backup -ExpectedStage (Get-P7cStageState $stage)|Out-Null}catch{$caught=$_.Exception}
+            $caught.GetType().Name|Should Be PlatformMutationException;$caught.Capability|Should Be publication-durability;$caught.Receipt.flush.durability|Should Be unconfirmed
+            $rollbackOrder=@($caught.Receipt.completedSteps|Where-Object{$_-in @('stage-published','rollback-stage-to-transaction','rollback-stage-transaction-directory-fsynced','rollback-stage-parent-directory-fsynced','rollback-displaced-to-target','rollback-parent-directory-fsynced','rollback-transaction-directory-fsynced')}) -join '|'
+            $rollbackOrder|Should Be 'stage-published|rollback-stage-to-transaction|rollback-stage-transaction-directory-fsynced|rollback-stage-parent-directory-fsynced|rollback-displaced-to-target|rollback-parent-directory-fsynced|rollback-transaction-directory-fsynced'
+            $restored=Open-PlatformFile -ParentLease $parent -Leaf target -Access Read -CreateMode OpenExisting
+            $restored.Observation.Inode|Should Be $originalInode
+            (Read-P7cText $parent target)|Should Be original;(Read-P7cText $txn.Lease stage)|Should Be replacement
+            Test-Path -LiteralPath (Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/backup")|Should Be $false
+        } finally {$field.SetValue($null,$null);foreach($lease in @($restored,$stage,$target)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$parent.Dispose()}
+    }
+
+    # Scenario: Tombstone removal fails after target-to-tombstone rename and restores the target.
+    # Purpose: Persist the rollback target name before tombstone removal and preserve the original inode identity.
+    It 'InterT245_orders_removal_rollback_destination_fsync_before_source [skip: requires Unix renameat/fsync]' -Skip:$p7cSkip {
+        $parent=New-P7cDirectory 'removal-rollback-order';$txn=New-P7cTransaction;$target=$null;$restored=$null
+        $field=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative].GetField('MutationTestHook',[Reflection.BindingFlags]'NonPublic,Static')
+        try {
+            $target=New-P7cFile $parent target original;$state=Get-P7cState $target;$originalInode=[uint64]$state.identity.fileId;$target.Dispose();$target=$null
+            $field.SetValue($null,[Action[string]]{param($point)if($point-ceq'removal-before-transaction-fsync'){throw [IO.IOException]::new('injected failure after tombstone rename')}})
+            $caught=$null
+            try{Remove-PlatformOwnedFile -ParentLease $parent -Leaf target -ExpectedState $state -TransactionLease $txn.Lease -TombstoneLeaf tombstone|Out-Null}catch{$caught=$_.Exception}
+            $caught.GetType().Name|Should Be PlatformMutationException;$caught.Capability|Should Be owned-file-removal-durability;$caught.Receipt.flush.durability|Should Be unconfirmed
+            $rollbackOrder=@($caught.Receipt.completedSteps|Where-Object{$_-in @('target-tombstoned','rollback-tombstone-to-target','rollback-parent-directory-fsynced','rollback-transaction-directory-fsynced')}) -join '|'
+            $rollbackOrder|Should Be 'target-tombstoned|rollback-tombstone-to-target|rollback-parent-directory-fsynced|rollback-transaction-directory-fsynced'
+            $restored=Open-PlatformFile -ParentLease $parent -Leaf target -Access Read -CreateMode OpenExisting
+            $restored.Observation.Inode|Should Be $originalInode
+            (Read-P7cText $parent target)|Should Be original
+            Test-Path -LiteralPath (Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/tombstone")|Should Be $false
+        } finally {$field.SetValue($null,$null);foreach($lease in @($restored,$target)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$parent.Dispose()}
+    }
 }
 
 Describe 'Platform probe cleanup evidence' {

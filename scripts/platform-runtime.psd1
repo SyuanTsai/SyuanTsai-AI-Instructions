@@ -61,7 +61,7 @@
             ApiVersion = '1.0'
             HashMode = 'sha256-utf8-lf'
             Inventory = @(
-                @{ Path = 'platform/UnixNative.cs'; Sha256 = '922bddfd6dccc332327916385b9a800d2d4fff0485c97e45cc1361cf6e47b923' },
+                @{ Path = 'platform/UnixNative.cs'; Sha256 = 'be6badc2194bad1710dd008ab72dc9cc3381b216e45a15b8872b2749bc1391e2' },
                 @{ Path = 'platform/WindowsNative.cs'; Sha256 = '3c4eca15ee608d72b3985db1ab34ad9558243385b2cbe84d909b8cd219482181' },
                 @{ Path = 'platform/Unix.psm1'; Sha256 = 'f4ddc352f5707f1a30dd9b99d8e5cd938d867f3b17a7dc6e764fe24839832db9' },
                 @{ Path = 'platform/RuntimePreparation.psm1'; Sha256 = 'dc254c04e7e2caf280726e66f67434776bc7df12a210a38c80596e41344fd077' },
