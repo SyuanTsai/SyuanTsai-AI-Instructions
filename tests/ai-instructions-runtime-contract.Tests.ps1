@@ -2657,11 +2657,15 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $journal=Get-TestInstallJournalV1
         $refuse=[pscustomobject]@{action='refuse';reasons=@('x');operations=@($journal.operations|ForEach-Object{[pscustomobject]@{sequence=$_.sequence;action='keep'}})}
         $plan=Get-AiInstructionsInstallRecoveryPlan $journal $refuse; $plan.mutatesTargets|Should Be $false; @($plan.steps).Count|Should Be 0
-        $none=[pscustomobject]@{action='none';reasons=@();operations=@($journal.operations|ForEach-Object{[pscustomobject]@{sequence=$_.sequence;action='keep'}})}
-        $nonePlan=Get-AiInstructionsInstallRecoveryPlan $journal $none
+        $committedJournal=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal|ConvertTo-Json -Depth 20)
+        $committedJournal.phase='committed'; foreach($operation in $committedJournal.operations) { $operation.state='applied' }
+        $none=[pscustomobject]@{action='none';reasons=@();operations=@($committedJournal.operations|ForEach-Object{[pscustomobject]@{sequence=$_.sequence;action='keep'}})}
+        $nonePlan=Get-AiInstructionsInstallRecoveryPlan $committedJournal $none
         $nonePlan.steps[0].step | Should Be 'cleanup-transaction'; $nonePlan.steps[0].primitive | Should Be 'Remove-PlatformOwnedDirectoryTree'
-        $commit=[pscustomobject]@{action='commit';reasons=@();operations=@($journal.operations|ForEach-Object{[pscustomobject]@{sequence=$_.sequence;action='keep'}})}
-        $commitPlan=Get-AiInstructionsInstallRecoveryPlan $journal $commit; $commitPlan.steps[0].phase|Should Be 'committed'; @($commitPlan.steps|Where-Object step -eq 'cleanup-artifact').Count|Should BeGreaterThan 0
+        $appliedJournal=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal|ConvertTo-Json -Depth 20)
+        $appliedJournal.phase='applied'; foreach($operation in $appliedJournal.operations) { $operation.state='applied' }
+        $commit=[pscustomobject]@{action='commit';reasons=@();operations=@($appliedJournal.operations|ForEach-Object{[pscustomobject]@{sequence=$_.sequence;action='keep'}})}
+        $commitPlan=Get-AiInstructionsInstallRecoveryPlan $appliedJournal $commit; $commitPlan.steps[0].phase|Should Be 'committed'; @($commitPlan.steps|Where-Object step -eq 'cleanup-artifact').Count|Should BeGreaterThan 0
         @($commitPlan.steps|Where-Object step -eq 'cleanup-transaction')[0].primitive | Should Be 'Remove-PlatformOwnedDirectoryTree'
         $rollback=[pscustomobject]@{action='roll-back';reasons=@();operations=@([pscustomobject]@{sequence=1;action='restore-original'},[pscustomobject]@{sequence=2;action='remove-applied'})}
         $rollbackPlan=Get-AiInstructionsInstallRecoveryPlan $journal $rollback; $rollbackPlan.mutatesTargets|Should Be $true; (@($rollbackPlan.steps|Where-Object step -eq 'operation').sequence -join ',')|Should Be '2,1'
@@ -2908,5 +2912,49 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         )
         foreach($text in $invalidCases) { (Get-AiInstructionsRefusalCode $text) | Should BeNullOrEmpty }
         (Get-AiInstructionsRefusalCode 'old [ai-instructions-refusal-code=closure-invalid] final [ai-instructions-refusal-code=interrupted-install]') | Should Be 'interrupted-install'
+    }
+
+    # Scenario: A recovery plan receives operation actions or a decision action that is incompatible with the validated journal.
+    # Purpose: Reject impossible action/journal pairs before producing steps while preserving plans from the recovery decision helper.
+    It 'UnitT202_rejects_recovery_actions_incompatible_with_the_journal' {
+        $writeFileJournal=Get-TestInstallJournalV1
+        $writeFileJournal.operations=@($writeFileJournal.operations[0])
+        $createDirectoryJournal=Get-TestCreateDirectoryInstallJournalV1
+        $createFileJournal=Get-TestInstallJournalV1
+        $createFileJournal.operations=@($createFileJournal.operations[1])
+        $createFileJournal.operations[0].sequence=1
+        $createFileJournal.operations[0].permissions=$writeFileJournal.operations[0].permissions
+        $nullPermissionsJournal=Get-TestCreateDirectoryInstallJournalV1
+
+        $committedJournal=Get-TestInstallJournalV1
+        $committedJournal.phase='committed'
+        foreach($operation in $committedJournal.operations) { $operation.state='applied' }
+        $applyingJournal=Get-TestInstallJournalV1
+
+        $cases=@(
+            @{ Journal=$writeFileJournal; DecisionAction='roll-back'; OperationActions=@('remove-applied') },
+            @{ Journal=$createDirectoryJournal; DecisionAction='roll-back'; OperationActions=@('restore-original') },
+            @{ Journal=$createFileJournal; DecisionAction='roll-back'; OperationActions=@('restore-permissions') },
+            @{ Journal=$nullPermissionsJournal; DecisionAction='roll-back'; OperationActions=@('restore-permissions') },
+            @{ Journal=$committedJournal; DecisionAction='roll-back'; OperationActions=@('restore-original','remove-applied') },
+            @{ Journal=$applyingJournal; DecisionAction='commit'; OperationActions=@('keep','keep') },
+            @{ Journal=$applyingJournal; DecisionAction='none'; OperationActions=@('keep','keep') }
+        )
+        foreach($case in $cases) {
+            $operations=@()
+            for($index=0;$index -lt @($case.Journal.operations).Count;$index++) {
+                $operations += [pscustomobject]@{sequence=$case.Journal.operations[$index].sequence;action=$case.OperationActions[$index]}
+            }
+            $decision=[pscustomobject]@{action=$case.DecisionAction;reasons=@();operations=$operations}
+            { Get-AiInstructionsInstallRecoveryPlan -Journal $case.Journal -Decision $decision | Out-Null } | Should Throw
+        }
+
+        $journal=Get-TestInstallJournalV1
+        $observations=@{
+            1=New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].applied
+            2=New-TestInstallObservation -Operation $journal.operations[1] -State $journal.operations[1].original
+        }
+        $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
+        { Get-AiInstructionsInstallRecoveryPlan -Journal $journal -Decision $decision | Out-Null } | Should Not Throw
     }
 }

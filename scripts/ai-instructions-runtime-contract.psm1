@@ -2230,13 +2230,30 @@ function Get-AiInstructionsInstallRecoveryPlan {
     Assert-AiInstructionsInstallJournalExactProperties -Object $Decision -Names @('action','reasons','operations') -Context 'AI instructions install recovery decision'
     if ($Decision.action -isnot [string] -or [string]$Decision.action -cnotin @('none','commit','roll-back','refuse')) { throw 'AI instructions install recovery decision action is invalid.' }
     if ($Decision.operations -isnot [System.Array] -or @($Decision.operations).Count -ne @($Journal.operations).Count) { throw 'AI instructions install recovery decision operations must correspond one-to-one with the journal.' }
+    $decisionAction = [string]$Decision.action
+    $journalPhase = [string]$Journal.phase
+    if ($decisionAction -ceq 'roll-back' -and $journalPhase -cnotin @('prepared','applying','applied','rolling-back')) { throw "AI instructions install recovery roll-back decision is incompatible with journal phase $journalPhase." }
+    if ($decisionAction -ceq 'commit' -and $journalPhase -cne 'applied') { throw "AI instructions install recovery commit decision is incompatible with journal phase $journalPhase." }
+    if ($decisionAction -ceq 'none' -and $journalPhase -cnotin @('committed','rolled-back')) { throw "AI instructions install recovery none decision is incompatible with journal phase $journalPhase." }
     for ($index = 0; $index -lt @($Journal.operations).Count; $index++) {
         $decisionOperation = $Decision.operations[$index]
+        $journalOperation = $Journal.operations[$index]
         Assert-AiInstructionsInstallJournalExactProperties -Object $decisionOperation -Names @('sequence','action') -Context "AI instructions install recovery decision operation $($index + 1)"
-        if ([int64]$decisionOperation.sequence -ne [int64]$Journal.operations[$index].sequence) { throw 'AI instructions install recovery decision operation sequence does not match the journal.' }
+        if ([int64]$decisionOperation.sequence -ne [int64]$journalOperation.sequence) { throw 'AI instructions install recovery decision operation sequence does not match the journal.' }
         if ($decisionOperation.action -isnot [string] -or [string]$decisionOperation.action -cnotin @('none','restore-original','remove-applied','restore-permissions','keep')) { throw 'AI instructions install recovery decision operation action is invalid.' }
         if ([string]$Decision.action -in @('none','commit','refuse') -and [string]$decisionOperation.action -cne 'keep') { throw "AI instructions install recovery decision $($Decision.action) requires keep operations." }
         if ([string]$Decision.action -ceq 'roll-back' -and [string]$decisionOperation.action -ceq 'keep') { throw 'AI instructions install recovery roll-back decision must not contain keep operations.' }
+        $operationAction = [string]$decisionOperation.action
+        $operationKind = [string]$journalOperation.kind
+        if ($operationAction -ceq 'restore-original' -and (-not [bool]$journalOperation.original.exists -or $operationKind -cnotin @('write-file','swap-directory','remove-file'))) {
+            throw "AI instructions install recovery restore-original action is incompatible with journal operation sequence $($journalOperation.sequence)."
+        }
+        if ($operationAction -ceq 'remove-applied' -and ([bool]$journalOperation.original.exists -or $operationKind -cnotin @('create-file','create-directory'))) {
+            throw "AI instructions install recovery remove-applied action is incompatible with journal operation sequence $($journalOperation.sequence)."
+        }
+        if ($operationAction -ceq 'restore-permissions' -and (-not [bool]$journalOperation.original.exists -or $null -eq $journalOperation.permissions)) {
+            throw "AI instructions install recovery restore-permissions action is incompatible with journal operation sequence $($journalOperation.sequence)."
+        }
     }
     $steps = New-Object System.Collections.Generic.List[object]
     switch ([string]$Decision.action) {
