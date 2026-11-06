@@ -1006,6 +1006,43 @@ Describe 'SYP214 whole-Skill migration evidence' {
         }
     }
 
+    # Scenario: USER coordinator manifest v3 contains user-agents and user-claude projections.
+    # Purpose: Use only user-agents as W11 deletion evidence; another projection cannot substitute for it.
+    It 'InterT61_uses_only_user_agents_entries_from_USER_manifest_v3' {
+        $userManifestPath=Join-Path $userHome '.agents/catalog-skills.manifest.json'
+        $legacy=Get-Content -Raw -Encoding UTF8 -LiteralPath $userManifestPath|ConvertFrom-Json
+        $v3Entries=@()
+        foreach($entry in $legacy.files){
+            $agents=$entry.PSObject.Copy();$agents.sourcePath=([string]$entry.sourcePath).Replace('.agents/skills/','skills/');$agents|Add-Member -NotePropertyName projectionId -NotePropertyValue 'user-agents';$v3Entries+=$agents
+            $claude=$entry.PSObject.Copy();$claude.sourcePath=([string]$entry.sourcePath).Replace('.agents/skills/','skills/');$claude|Add-Member -NotePropertyName projectionId -NotePropertyValue 'user-claude';$claude.targetPath=([string]$entry.targetPath).Replace('.agents/skills/','.claude/skills/');$v3Entries+=$claude
+            $claudePath=Join-Path $userHome $claude.targetPath;New-Item -ItemType Directory -Force -Path (Split-Path -Parent $claudePath)|Out-Null;[IO.File]::Copy((Join-Path $userHome $entry.targetPath),$claudePath)
+        }
+        $v3=[ordered]@{schemaVersion=3;catalogRepository=$legacy.catalogRepository;catalogCommit=$legacy.catalogCommit;catalogId=$legacy.catalogId;lockSha256=$legacy.lockSha256;projectionContractSha256=('d'*64);generation=1;projections=@('user-agents','user-claude');files=$v3Entries}
+        [IO.File]::WriteAllText($userManifestPath,($v3|ConvertTo-Json -Depth 10),[Text.UTF8Encoding]::new($false))
+        $plan=@(Get-RepoSharedSkillsMigrationPlan -Repository $targetRoot -Manifest $manifest -TrustedSkills @($trusted) -UserHome $userHome)
+        $plan[0].removable | Should Be $true
+
+        Remove-Item -LiteralPath (Join-Path $userHome '.agents/skills/syp214-fixture/SKILL.md') -Force
+        $protected=@(Get-RepoSharedSkillsMigrationPlan -Repository $targetRoot -Manifest $manifest -TrustedSkills @($trusted) -UserHome $userHome)
+        $protected[0].removable | Should Be $false
+        Test-Path -LiteralPath (Join-Path $userHome '.claude/skills/syp214-fixture/SKILL.md') | Should Be $true
+    }
+
+    # Scenario: Any USER install-transaction residue appears during planning or after the plan was created.
+    # Purpose: Treat valid, malformed, orphan, and invalid-name residue uniformly as missing W11 USER evidence.
+    It 'InterT62_requires_an_empty_USER_transaction_root_during_plan_and_revalidation' {
+        $transactionRoot=Join-Path $userHome '.ai-instructions-txn';$residue=Join-Path $transactionRoot 'orphan'
+        New-Item -ItemType Directory -Force -Path $residue|Out-Null
+        $blocked=@(Get-RepoSharedSkillsMigrationPlan -Repository $targetRoot -Manifest $manifest -TrustedSkills @($trusted) -UserHome $userHome)
+        $blocked[0].removable | Should Be $false
+
+        Remove-Item -LiteralPath $residue -Force;Remove-Item -LiteralPath $transactionRoot -Force
+        $plan=@(Get-RepoSharedSkillsMigrationPlan -Repository $targetRoot -Manifest $manifest -TrustedSkills @($trusted) -UserHome $userHome)
+        $plan[0].removable | Should Be $true
+        New-Item -ItemType Directory -Force -Path $residue|Out-Null
+        { Assert-RepoSharedSkillsMigrationEvidence -Repository $targetRoot -Skill $plan[0] } | Should Throw 'USER state changed concurrently'
+    }
+
     # Scenario: The migration planner receives a REPO managed manifest v4.
     # Purpose: Defer v4 ownership to the projection-aware bootstrap before observing or mutating migration state.
     It 'InterT15_rejects_a_repo_v4_manifest_before_mutation' {

@@ -19,6 +19,8 @@
         'Enter-PlatformLock',
         'Publish-PlatformFile',
         'Remove-PlatformOwnedFile',
+        'Move-PlatformOwnedDirectory',
+        'Remove-PlatformOwnedDirectoryTree',
         'Get-PlatformPermissions',
         'Set-PlatformPermissions',
         'Start-PlatformOwnedProcess',

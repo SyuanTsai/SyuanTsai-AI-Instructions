@@ -86,6 +86,32 @@ function Assert-WindowsPlatformFileIdentity {
 
 function Open-WindowsPlatformFile { param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)][string] $Access, [Parameter(Mandatory = $true)][string] $CreateMode) [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenFile($ParentLease,$Leaf,$Access,$CreateMode) }
 function Enter-WindowsPlatformLock { param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [ValidateSet('Shared','Exclusive')][string] $Mode, [TimeSpan] $Timeout) [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::EnterLock($ParentLease,$Leaf,$Mode,$Timeout) }
+function Move-WindowsPlatformOwnedDirectory {
+    param($SourceParentLease,[string]$SourceLeaf,$DestinationParentLease,[string]$DestinationLeaf,$ExpectedState)
+    [void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($SourceLeaf)
+    [void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($DestinationLeaf)
+    if ([uint64]$SourceParentLease.Observation.Device -ne [uint64]$DestinationParentLease.Observation.Device) { throw (New-WindowsPlatformVerificationError 'directory-publication' 'Directory rename requires one volume.') }
+    if($null-eq$ExpectedState-or-not[bool]$ExpectedState.exists-or[string]$ExpectedState.identity.kind-cne'windows-file-id'){throw (New-WindowsPlatformVerificationError 'directory-publication' 'ExpectedState must identify one existing Windows directory.')}
+    $source=$null
+    try{
+        $device=ConvertTo-WindowsPlatformIdentityNumber ([string]$ExpectedState.identity.device)
+        $fileId=ConvertTo-WindowsPlatformIdentityNumber ([string]$ExpectedState.identity.fileId)
+        $source=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenMutationDirectory($SourceParentLease,$SourceLeaf,$device,$fileId)
+        [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::RenameNoReplace($source,$DestinationParentLease,$DestinationLeaf)
+        [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::FlushDirectory($SourceParentLease)
+        [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::FlushDirectory($DestinationParentLease)
+    }finally{if($null-ne$source){$source.Dispose()}}
+}
+function Remove-WindowsPlatformOwnedDirectoryTree {
+    param($ParentLease,[string]$Leaf)
+    [void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($Leaf)
+    $parent=Get-WindowsPlatformLeasePath $ParentLease; $target=Join-Path $parent $Leaf
+    $item=Get-Item -Force -LiteralPath $target -ErrorAction Stop
+    if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw (New-WindowsPlatformVerificationError 'directory-cleanup' 'Owned directory cleanup target is unsafe.') }
+    if(@(Get-ChildItem -LiteralPath $target -Recurse -Force -ErrorAction Stop|Where-Object{($_.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0}).Count-ne0){throw (New-WindowsPlatformVerificationError 'directory-cleanup' 'Owned directory cleanup refuses a reparse-backed descendant.')}
+    Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop
+    [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::FlushDirectory($ParentLease)
+}
 function New-WindowsPlatformVerificationError {
     param([string]$Capability,[string]$Message)
     return [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]::new($Capability,'windows',$Message)

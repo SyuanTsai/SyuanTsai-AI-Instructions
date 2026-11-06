@@ -617,6 +617,53 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         public static WindowsLease TryOpenMutationFile(WindowsLease parent, string leaf, ulong expectedDevice, ulong expectedFileId)
         { return OpenMutationFileCore(parent, leaf, expectedDevice, expectedFileId, true, true, false, false); }
 
+        public static WindowsLease OpenMutationDirectory(WindowsLease parent, string leaf, ulong expectedDevice, ulong expectedFileId)
+        {
+            PlatformPaths.Leaf(leaf);
+            lock (parent.Sync)
+            {
+                parent.Check(); AssertIdentity(parent, parent.Observation, false);
+                if (parent.Observation.Kind != "directory") throw new ArgumentException("A directory lease is required.");
+                IntPtr nameBuffer = IntPtr.Zero;
+                IntPtr namePointer = IntPtr.Zero;
+                try
+                {
+                    byte[] bytes = Encoding.Unicode.GetBytes(leaf);
+                    nameBuffer = Marshal.AllocHGlobal(bytes.Length + 2);
+                    Marshal.Copy(bytes, 0, nameBuffer, bytes.Length);
+                    Marshal.WriteInt16(nameBuffer, bytes.Length, 0);
+                    UnicodeString name = new UnicodeString { Length = (ushort)bytes.Length, MaximumLength = (ushort)(bytes.Length + 2), Buffer = nameBuffer };
+                    namePointer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UnicodeString)));
+                    Marshal.StructureToPtr(name, namePointer, false);
+                    ObjectAttributes attributes = new ObjectAttributes { Length = Marshal.SizeOf(typeof(ObjectAttributes)), RootDirectory = parent.Handle.DangerousGetHandle(), ObjectName = namePointer, Attributes = 0x40 };
+                    IoStatusBlock ioStatus;
+                    SafeFileHandle handle;
+                    // SYNCHRONIZE | DELETE | FILE_READ_ATTRIBUTES; directory, synchronous,
+                    // and open the reparse point itself so traversal is never implicit.
+                    int status = NtOpenFile(out handle, 0x00110080u, ref attributes, out ioStatus, 7, 0x00200021u);
+                    if (status < 0)
+                    {
+                        uint error = RtlNtStatusToDosError(status);
+                        if (handle != null) handle.Dispose();
+                        throw new PlatformWin32Exception("NtOpenFile(relative mutation directory)", unchecked((int)error));
+                    }
+                    try
+                    {
+                        FileObservation value = Stat(handle);
+                        if (value.Kind != "directory" || (value.Mode & 0x400u) != 0) throw new IOException("A physical directory is required.");
+                        if (value.Device != expectedDevice || value.Inode != expectedFileId) throw new IOException("The mutation directory identity differs from the expected volume serial or file ID.");
+                        return new WindowsLease(handle, Path.Combine(parent.Path, leaf), null, parent, value);
+                    }
+                    catch { handle.Dispose(); throw; }
+                }
+                finally
+                {
+                    if (namePointer != IntPtr.Zero) Marshal.FreeHGlobal(namePointer);
+                    if (nameBuffer != IntPtr.Zero) Marshal.FreeHGlobal(nameBuffer);
+                }
+            }
+        }
+
         public static WindowsLease OpenValidationFile(WindowsLease parent, string leaf)
         {
             PlatformPaths.Leaf(leaf);

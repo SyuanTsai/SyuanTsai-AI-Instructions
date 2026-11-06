@@ -30,7 +30,7 @@
       "additionalProperties": false,
       "required": ["component", "processId", "processStartIdentity"],
       "properties": {
-        "component": { "enum": ["installer", "updater", "launcher-recovery"] },
+        "component": { "enum": ["installer", "updater", "launcher-recovery", "user-reconciler"] },
         "processId": { "type": "integer", "minimum": 1, "maximum": 9223372036854775807 },
         "processStartIdentity": {
           "type": "string",
@@ -87,6 +87,26 @@
     }
   },
   "allOf": [
+    {
+      "if": { "properties": { "owner": { "properties": { "component": { "const": "user-reconciler" } } } } },
+      "then": {
+        "properties": {
+          "lock": { "properties": { "leaf": { "const": "update-agent-environment.lock" } } },
+          "generation": { "properties": { "previousBundleSha256": { "$ref": "#/$defs/hash" } } },
+          "operations": {
+            "contains": {
+              "properties": {
+                "targetRelativePath": { "const": ".agents/catalog-skills.manifest.json" },
+                "kind": { "enum": ["create-file", "write-file"] }
+              },
+              "required": ["targetRelativePath", "kind"]
+            },
+            "minContains": 1,
+            "maxContains": 1
+          }
+        }
+      }
+    },
     {
       "if": { "properties": { "phase": { "const": "prepared" } } },
       "then": {

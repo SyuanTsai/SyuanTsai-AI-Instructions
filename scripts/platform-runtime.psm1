@@ -596,6 +596,8 @@ function Assert-PlatformFileIdentity { [CmdletBinding()] param([Parameter(Mandat
 function Enter-PlatformLock { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)][ValidateSet('Shared','Exclusive')][string] $Mode, [Parameter(Mandatory = $true)][TimeSpan] $Timeout) Invoke-PlatformAdapter 'Enter-PlatformLock' $PSBoundParameters }
 function Publish-PlatformFile { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)] $TransactionLease, [Parameter(Mandatory = $true)] $StageLease, [Parameter(Mandatory = $true)] $ExpectedState, [AllowNull()] $DisplacedLeaf, [Parameter(Mandatory = $true)] $ExpectedStage, [switch] $NoReplace, $Journal) Invoke-PlatformAdapter 'Publish-PlatformFile' $PSBoundParameters }
 function Remove-PlatformOwnedFile { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf, [Parameter(Mandatory = $true)] $ExpectedState, $TransactionLease, [AllowNull()] $TombstoneLeaf, $Journal) Invoke-PlatformAdapter 'Remove-PlatformOwnedFile' $PSBoundParameters }
+function Move-PlatformOwnedDirectory { [CmdletBinding()] param([Parameter(Mandatory = $true)] $SourceParentLease, [Parameter(Mandatory = $true)][string] $SourceLeaf, [Parameter(Mandatory = $true)] $DestinationParentLease, [Parameter(Mandatory = $true)][string] $DestinationLeaf, [Parameter(Mandatory = $true)] $ExpectedState) Invoke-PlatformAdapter 'Move-PlatformOwnedDirectory' $PSBoundParameters }
+function Remove-PlatformOwnedDirectoryTree { [CmdletBinding()] param([Parameter(Mandatory = $true)] $ParentLease, [Parameter(Mandatory = $true)][string] $Leaf) Invoke-PlatformAdapter 'Remove-PlatformOwnedDirectoryTree' $PSBoundParameters }
 function Get-PlatformPermissions { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Lease) Invoke-PlatformAdapter 'Get-PlatformPermissions' $PSBoundParameters }
 function Set-PlatformPermissions { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Lease, $Policy, $Snapshot) Invoke-PlatformAdapter 'Set-PlatformPermissions' $PSBoundParameters }
 function Start-PlatformOwnedProcess {
@@ -835,6 +837,8 @@ Export-ModuleMember -Function @(
     'Enter-PlatformLock',
     'Publish-PlatformFile',
     'Remove-PlatformOwnedFile',
+    'Move-PlatformOwnedDirectory',
+    'Remove-PlatformOwnedDirectoryTree',
     'Get-PlatformPermissions',
     'Set-PlatformPermissions',
     'Start-PlatformOwnedProcess',

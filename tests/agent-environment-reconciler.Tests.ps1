@@ -68,6 +68,34 @@ function New-TestDesiredState {
     }
 }
 
+function New-TestProjectionDesiredState {
+    param([Parameter(Mandatory=$true)][string]$Root)
+    $catalog=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/skills-catalog-v3.example.json')|ConvertFrom-Json
+    $catalog.projections=@($catalog.projections)+@([pscustomobject][ordered]@{id='user-copilot';scope='user';root='.copilot/skills'})
+    $projectionContractSha256=Get-SkillsCatalogProjectionContractSha256 -Projections $catalog.projections
+    $stageRoot=Join-Path $Root 'work-with-jira';New-Item -ItemType Directory -Force -Path $stageRoot|Out-Null
+    $stagePath=Join-Path $stageRoot 'SKILL.md';[IO.File]::WriteAllText($stagePath,"---`nname: work-with-jira`ndescription: projection test`n---`n",[Text.UTF8Encoding]::new($false))
+    $sha=(Get-FileHash -LiteralPath $stagePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $payloadBytes=[Text.UTF8Encoding]::new($false).GetBytes("skills/work-with-jira/SKILL.md`t$sha`n")
+    $algorithm=[Security.Cryptography.SHA256]::Create();try{$contentSha=([BitConverter]::ToString($algorithm.ComputeHash($payloadBytes))).Replace('-','').ToLowerInvariant()}finally{$algorithm.Dispose()}
+    $catalogBytes=[Text.UTF8Encoding]::new($false).GetBytes(($catalog|ConvertTo-Json -Depth 20)+"`n")
+    $algorithm=[Security.Cryptography.SHA256]::Create();try{$catalogSha=([BitConverter]::ToString($algorithm.ComputeHash($catalogBytes))).Replace('-','').ToLowerInvariant()}finally{$algorithm.Dispose()}
+    $lock=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/skills-catalog-lock-v3.example.json')|ConvertFrom-Json
+    $lock.catalogSha256=$catalogSha;$lock.projectionContractSha256=$projectionContractSha256
+    @($lock.skills|Where-Object id -eq 'work-with-jira')[0].contentSha256=$contentSha
+    $lockBytes=[Text.UTF8Encoding]::new($false).GetBytes(($lock|ConvertTo-Json -Depth 20)+"`n")
+    $algorithm=[Security.Cryptography.SHA256]::Create();try{$lockSha=([BitConverter]::ToString($algorithm.ComputeHash($lockBytes))).Replace('-','').ToLowerInvariant()}finally{$algorithm.Dispose()}
+    $files=@();$manifestFiles=@()
+    foreach($projection in @([pscustomobject]@{id='user-agents';root='.agents/skills'},[pscustomobject]@{id='user-claude';root='.claude/skills'},[pscustomobject]@{id='user-copilot';root='.copilot/skills'})){
+        $target="$($projection.root)/work-with-jira/SKILL.md"
+        $file=[pscustomobject][ordered]@{skillId='work-with-jira';sourceId='agent-skills';sourceRepository='https://github.com/example/agent-skills-catalog.git';sourceRef='v1.0.0';sourceCommit='0123456789abcdef0123456789abcdef01234567';sourceVersion='1.0.0';sourcePath='skills/work-with-jira/SKILL.md';targetPath=$target;sha256=$sha;stagedPath=$stagePath;projectionId=$projection.id}
+        $files+=$file;$entry=$file.PSObject.Copy();$entry.PSObject.Properties.Remove('stagedPath');$manifestFiles+=$entry
+    }
+    $manifest=[pscustomobject][ordered]@{schemaVersion=3;catalogRepository='https://github.com/example/SyuanTsai-AI-Instructions.git';catalogCommit='0123456789abcdef0123456789abcdef01234567';catalogId='example-agent-skills-v3';lockSha256=$lockSha;projectionContractSha256=$projectionContractSha256;generation=1;projections=@('user-agents','user-claude','user-copilot');files=$manifestFiles}
+    Assert-UserSkillsManagedManifestBinding -Manifest $manifest -CatalogBytes $catalogBytes -LockBytes $lockBytes -ExpectedCatalogRepository $manifest.catalogRepository -ExpectedCatalogCommit $manifest.catalogCommit|Out-Null
+    [pscustomobject][ordered]@{RuntimeRoot=$script:RuntimeRoot;Catalog=$catalog;Lock=$lock;SkillIds=@('work-with-jira');Files=$files;Manifest=$manifest;LicenseWarnings=@();CatalogBytes=$catalogBytes;LockBytes=$lockBytes;ProjectionIds=$manifest.projections}
+}
+
 function New-TestRecoveryJournal {
     param(
         [Parameter(Mandatory = $true)][string] $UserHome,
@@ -119,33 +147,15 @@ function Assert-TestRecoveryConcurrentResult {
 }
 
 Describe 'user-scoped Agent Skills reconciliation' {
-    # Scenario: The legacy USER reconciler reads a valid v3 Catalog and Lock.
-    # Purpose: Fail closed before archive staging or USER mutation instead of deriving .agents/skills targets.
+    # Scenario: Production encounters a v3/v5 generation before the P7e gate and pins are installed.
+    # Purpose: Keep the production refusal centralized and typed while function-level fixtures can exercise P8.
     It 'UnitT00_rejects_v3_before_agent_environment_mutation' {
-        $runtimeRoot = Join-Path $TestDrive 'v3-runtime'
-        $catalogRoot = Join-Path $runtimeRoot 'catalog'
-        New-Item -ItemType Directory -Path $runtimeRoot,$catalogRoot | Out-Null
-        foreach ($moduleName in @(
-            'skills-catalog-contract.psm1','skills-selection.psm1','skills-source-routing.psm1',
-            'skills-source-retrieval.psm1','skills-source-acquisition.psm1','license-delivery.psm1','safe-zip.psm1'
-        )) {
-            Copy-Item -LiteralPath (Join-Path $script:RuntimeRoot $moduleName) -Destination (Join-Path $runtimeRoot $moduleName)
-        }
-        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/skills-catalog-v3.example.json') -Destination (Join-Path $catalogRoot 'skills-catalog.json')
-        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/skills-catalog-lock-v3.example.json') -Destination (Join-Path $catalogRoot 'skills-catalog-lock.json')
-        $workingRoot = Join-Path $TestDrive 'v3-agent-working'
-        $configuration = [pscustomobject]@{ catalog=[pscustomobject]@{ profiles=@('core'); includeSkills=@(); excludeSkills=@() } }
-        $thrown = $false
-        $message = $null
-        try {
-            Get-UserSkillsDesiredState -RuntimeRoot $runtimeRoot -Configuration $configuration `
-                -CatalogRepository 'https://github.com/example/ai-instructions.git' `
-                -CatalogCommit ('a' * 40) -WorkingRoot $workingRoot | Out-Null
-        }
-        catch { $thrown = $true; $message = $_.Exception.Message }
-        $thrown | Should Be $true
-        $message | Should Be 'Skills catalog schema version 3 requires a projection-aware installer.'
-        Test-Path -LiteralPath $workingRoot | Should Be $false
+        $errorRecord=$null
+        try { Assert-UserProjectionRuntimeGate -RuntimeRoot $script:RuntimeRoot }
+        catch { $errorRecord=$_ }
+        $errorRecord | Should Not BeNullOrEmpty
+        $errorRecord.Exception.Code | Should Be 'projection-runtime-unavailable'
+        $errorRecord.Exception.Message | Should Match 'projection-runtime-unavailable'
     }
 
     # Scenario: The persisted manifest is redirected outside USER home through a reparse point.
@@ -193,11 +203,12 @@ Describe 'user-scoped Agent Skills reconciliation' {
         Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v3.example.json') -Destination $manifestPath
         $desired = New-TestDesiredState -Root (Join-Path $TestDrive 'existing-v3-apply-staging')
 
-        { Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply } |
-            Should Throw 'USER managed manifest schema version 3 requires a projection-aware installer.'
+        $result=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply
+        $result.outcome | Should Be 'failed'
+        @($result.failureDetails)[0].code | Should Be 'downgrade-refused'
 
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($target)) | Should Be ([Convert]::ToBase64String($originalBytes))
-        Test-Path -LiteralPath (Join-Path $agentsRoot 'update-agent-environment.lock') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $agentsRoot 'update-agent-environment.lock') | Should Be $true
         Test-Path -LiteralPath (Join-Path $agentsRoot 'update-agent-environment.recovery.json') | Should Be $false
     }
 
@@ -215,12 +226,13 @@ Describe 'user-scoped Agent Skills reconciliation' {
         Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v3.example.json') -Destination $manifestPath
         [System.IO.File]::WriteAllText($journalPath,'preserve-invalid-journal')
 
-        { Invoke-UserSkillsRecovery -UserHome $userHome } |
-            Should Throw 'USER managed manifest schema version 3 requires a projection-aware installer.'
+        $result=Invoke-UserSkillsRecovery -UserHome $userHome
+        $result.outcome | Should Be 'failed'
+        @($result.failureDetails)[0].code | Should Be 'recovery-required'
 
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($target)) | Should Be ([Convert]::ToBase64String($originalBytes))
         [System.IO.File]::ReadAllText($journalPath) | Should Be 'preserve-invalid-journal'
-        Test-Path -LiteralPath (Join-Path $agentsRoot 'update-agent-environment.lock') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $agentsRoot 'update-agent-environment.lock') | Should Be $true
     }
 
     # Scenario: USER receives nested scripts, references and binary assets and then an updated resource inventory.
@@ -247,10 +259,150 @@ Describe 'user-scoped Agent Skills reconciliation' {
         (Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply).outcome | Should Be 'current'
         (Get-FileHash (Join-Path $userHome '.agents/catalog-skills.manifest.json')).Hash | Should Be $before
     }
+
+    # Scenario: One source pin is projected to all three legal USER roots in one coordinator generation.
+    # Purpose: Prove exact byte/hash parity, ordered projections, monotonic generation, and idempotent current behavior.
+    It 'InterT67_reconciles_three_USER_projections_as_one_generation' {
+        $userHome=Join-Path $TestDrive 'projection-user';$desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'projection-stage')
+        $first=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply
+        $first.outcome | Should Be 'applied'
+        $paths=@('.agents/skills/work-with-jira/SKILL.md','.claude/skills/work-with-jira/SKILL.md','.copilot/skills/work-with-jira/SKILL.md')
+        $bytes=@($paths|ForEach-Object{[Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $userHome $_)))})
+        @($bytes|Select-Object -Unique).Count | Should Be 1
+        $manifest=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $userHome '.agents/catalog-skills.manifest.json')|ConvertFrom-Json
+        [int64]$manifest.generation | Should Be 1
+        (@($manifest.projections)-join ',') | Should Be 'user-agents,user-claude,user-copilot'
+        $manifestBytesBefore=[Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $userHome '.agents/catalog-skills.manifest.json')))
+        $second=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply
+        $second.outcome | Should Be 'current'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $userHome '.agents/catalog-skills.manifest.json'))) | Should Be $manifestBytesBefore
+        $desired.Manifest.catalogCommit=('f'*40)
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome | Should Be 'applied'
+        $nextManifest=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $userHome '.agents/catalog-skills.manifest.json')|ConvertFrom-Json
+        [int64]$nextManifest.generation | Should Be 2
+        @($nextManifest.projections) -join ',' | Should Be 'user-agents,user-claude,user-copilot'
+    }
+
+    # Scenario: A mutation fails after the first of three projections is published.
+    # Purpose: Roll every projection and the coordinator manifest back as one USER-home transaction.
+    It 'InterT68_rolls_back_all_USER_projections_after_a_mid_transaction_failure' {
+        $userHome=Join-Path $TestDrive 'projection-rollback-user';$desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'projection-rollback-stage')
+        $result=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply -FailureAfterMutationCount 1
+        $result.outcome | Should Be 'failed'
+        foreach($path in @('.agents/skills/work-with-jira/SKILL.md','.claude/skills/work-with-jira/SKILL.md','.copilot/skills/work-with-jira/SKILL.md','.agents/catalog-skills.manifest.json')){Test-Path -LiteralPath (Join-Path $userHome $path)|Should Be $false}
+        @(Get-ChildItem -Force -LiteralPath (Join-Path $userHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count | Should Be 0
+    }
+
+    # Scenario: Claude already contains a personal Skill and a same-name candidate is observed.
+    # Purpose: Preserve unrelated content, adopt exact bytes, and reject only differing same-name bytes.
+    It 'InterT69_preserves_personal_Claude_content_and_rejects_only_different_same_name_bytes' {
+        $userHome=Join-Path $TestDrive 'projection-personal-user';$personal=Join-Path $userHome '.claude/skills/personal/SKILL.md';New-Item -ItemType Directory -Force -Path (Split-Path $personal)|Out-Null;[IO.File]::WriteAllText($personal,'personal')
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'projection-personal-stage')
+        $exact=@($desired.Files|Where-Object projectionId -eq 'user-claude')[0];$exactTarget=Join-Path $userHome $exact.targetPath;New-Item -ItemType Directory -Force -Path (Split-Path $exactTarget)|Out-Null;[IO.File]::Copy($exact.stagedPath,$exactTarget)
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome | Should Be 'applied'
+        [IO.File]::ReadAllText($personal) | Should Be 'personal'
+        Set-Content -LiteralPath $exactTarget -Value 'different'
+        Remove-Item -LiteralPath (Join-Path $userHome '.agents/catalog-skills.manifest.json') -Force
+        $collision=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply
+        $collision.outcome | Should Be 'failed'
+        @($collision.failureDetails|Where-Object code -eq 'unmanaged-collision').Count | Should BeGreaterThan 0
+        [IO.File]::ReadAllText($personal) | Should Be 'personal'
+    }
     BeforeEach {
         $userHome = Join-Path $TestDrive ('home-' + [Guid]::NewGuid().ToString('N'))
         $staging = Join-Path $TestDrive ('staging-' + [Guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $userHome,$staging | Out-Null
+    }
+
+    # Scenario: A read-only reconciliation sees a nonempty USER install-transaction root.
+    # Purpose: Return typed interrupted-install without cleanup, while Apply purges an orphan before starting one new transaction.
+    It 'InterT70_fails_closed_read_only_and_auto_recovers_an_orphan_on_Apply' {
+        $desired=New-TestDesiredState -Root (Join-Path $staging 'orphan-recovery')
+        $orphan=Join-Path $userHome '.ai-instructions-txn\0123456789abcdef0123456789abcdef'
+        New-Item -ItemType Directory -Force -Path $orphan|Out-Null
+
+        $verify=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode VerifyOnly
+        $verify.Code | Should Be 'interrupted-install'
+        Test-Path -LiteralPath $orphan | Should Be $true
+        $whatIf=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode WhatIf
+        $whatIf.Code | Should Be 'interrupted-install'
+        Test-Path -LiteralPath $orphan | Should Be $true
+
+        $readLeasePath=Join-Path $TestDrive 'ai-instructions-install.lock';[IO.File]::WriteAllText($readLeasePath,'')
+        $readLease=[IO.File]::Open($readLeasePath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+        try{(Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply -InstallReadLease $readLease).outcome | Should Be 'applied'}finally{$readLease.Dispose()}
+        Test-Path -LiteralPath $orphan | Should Be $false
+    }
+
+    # Scenario: Legacy recovery JSON and a new install-journal transaction residue coexist.
+    # Purpose: Refuse before either recovery path mutates or removes its evidence.
+    It 'InterT71_refuses_coexisting_legacy_and_new_transaction_evidence' {
+        $desired=New-TestDesiredState -Root (Join-Path $staging 'coexisting-residue')
+        $legacy=Join-Path $userHome '.agents\update-agent-environment.recovery.json'
+        $new=Join-Path $userHome '.ai-instructions-txn\0123456789abcdef0123456789abcdef'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $legacy),$new|Out-Null
+        [IO.File]::WriteAllText($legacy,'{}')
+
+        $result=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply
+        $result.Code | Should Be 'interrupted-install'
+        Test-Path -LiteralPath $legacy | Should Be $true
+        Test-Path -LiteralPath $new | Should Be $true
+    }
+
+    # Scenario: Apply starts with only a valid predecessor recovery JSON.
+    # Purpose: Restore it under the same USER lock before committing the new install-journal transaction.
+    It 'InterT72_auto_recovers_legacy_JSON_before_the_new_Apply_transaction' {
+        $desired=New-TestDesiredState -Root (Join-Path $staging 'legacy-auto')
+        $target=Join-Path $userHome '.agents\skills\alpha\SKILL.md'
+        $backup=Join-Path $userHome '.agents\backups\legacy-auto\.agents\skills\alpha\SKILL.md'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target),(Split-Path -Parent $backup)|Out-Null
+        [IO.File]::WriteAllText($target,'interrupted-applied')
+        [IO.File]::WriteAllBytes($backup,[IO.File]::ReadAllBytes([string]$desired.Files[0].stagedPath))
+        $appliedSha=(Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash.ToLowerInvariant()
+        $originalSha=(Get-FileHash -Algorithm SHA256 -LiteralPath $backup).Hash.ToLowerInvariant()
+        $backupRoot=Split-Path -Parent (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $backup)))
+        $journal=New-TestRecoveryJournal -UserHome $userHome -BackupRoot $backupRoot -States @([pscustomobject][ordered]@{
+            relativePath='.agents/skills/alpha/SKILL.md';existed=$true;backupPath=$backup
+            originalSha256=$originalSha;backupSha256=$originalSha;appliedSha256=$appliedSha
+        })
+        $legacy=Join-Path $userHome '.agents\update-agent-environment.recovery.json'
+        $journal|ConvertTo-Json -Depth 10|Set-Content -LiteralPath $legacy -Encoding UTF8
+
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome | Should Be 'applied'
+        Test-Path -LiteralPath $legacy | Should Be $false
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash.ToLowerInvariant() | Should Be $desired.Files[0].sha256
+    }
+
+    # Scenario: The writer process dies at every P8 durable failpoint without running finally blocks.
+    # Purpose: Require the next Apply, under an install read lease, to classify and recover each residue before reconciling.
+    It 'InterT74_recovers_every_USER_reconciler_FailFast_boundary' {
+        $childScript=Join-Path $TestDrive 'user-reconciler-failfast-child.ps1'
+        @'
+param([string]$ModulePath,[string]$DesiredPath,[string]$UserHome,[string]$Failpoint,[int]$FailureAfter)
+$ErrorActionPreference='Stop'
+Import-Module $ModulePath -Force
+$desired=Import-Clixml -LiteralPath $DesiredPath
+$env:AI_INSTRUCTIONS_USER_RECONCILER_FAILFAST=$Failpoint
+Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode Apply -FailpointName $Failpoint -FailureAfterMutationCount $FailureAfter|Out-Null
+'@|Set-Content -LiteralPath $childScript -Encoding UTF8
+        $failpoints=@('after-journal-stage-flush','after-journal-publish','after-operation-journal','after-original-rename','after-applied-rename','after-parent-flush','during-rollback','before-committed-cleanup')
+        foreach($failpoint in $failpoints){
+            $caseHome=Join-Path $TestDrive ("failfast-home-$failpoint")
+            $caseStage=Join-Path $TestDrive ("failfast-stage-$failpoint")
+            New-Item -ItemType Directory -Force -Path $caseHome,$caseStage|Out-Null
+            $desired=New-TestDesiredState -Root $caseStage
+            $desiredPath=Join-Path $TestDrive ("desired-$failpoint.clixml");$desired|Export-Clixml -LiteralPath $desiredPath
+            $failureAfter=if($failpoint-ceq'during-rollback'){1}else{0}
+            & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $childScript $script:ModulePath $desiredPath $caseHome $failpoint $failureAfter 2>$null
+            $LASTEXITCODE | Should Not Be 0
+            @(Get-ChildItem -Force -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count | Should BeGreaterThan 0
+            $readLeasePath=Join-Path $TestDrive ("$failpoint-ai-instructions-install.lock");[IO.File]::WriteAllText($readLeasePath,'')
+            $readLease=[IO.File]::Open($readLeasePath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+            try{$result=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $caseHome -Mode Apply -InstallReadLease $readLease}finally{$readLease.Dispose()}
+            @('applied','current') | Should Contain $result.outcome
+            @(Get-ChildItem -Force -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count | Should Be 0
+            (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $caseHome '.agents/skills/alpha/SKILL.md')).Hash.ToLowerInvariant() | Should Be $desired.Files[0].sha256
+        }
     }
 
     It 'installs a clean multi-source selection and becomes idempotent' {
@@ -276,17 +428,10 @@ Describe 'user-scoped Agent Skills reconciliation' {
         $skillPath = Join-Path $userHome '.agents\skills\alpha\SKILL.md'
         $v3Bytes = [System.IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v3.example.json'))
         $skillBytesBefore = [System.IO.File]::ReadAllBytes($skillPath)
-        $errorMessage = $null
-
-        try {
-            Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply -BeforeLockAcquisitionAction {
+        $result=Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply -BeforeLockAcquisitionAction {
                 [System.IO.File]::WriteAllBytes($manifestPath,$v3Bytes)
-            } | Out-Null
-        }
-        catch { $errorMessage = $_.Exception.Message }
-
-        if ([string]::IsNullOrWhiteSpace($errorMessage)) { throw 'Expected the lock-protected manifest reread to reject schema version 3.' }
-        $errorMessage.Contains('USER managed manifest schema version 3 requires a projection-aware installer.') | Should Be $true
+            }
+        $result.outcome | Should Be 'concurrent'
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($manifestPath)) | Should Be ([Convert]::ToBase64String($v3Bytes))
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($skillPath)) | Should Be ([Convert]::ToBase64String($skillBytesBefore))
         Test-Path -LiteralPath (Join-Path $userHome '.agents\skills\beta\SKILL.md') | Should Be $false
@@ -316,17 +461,10 @@ Describe 'user-scoped Agent Skills reconciliation' {
         $journal | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $journalPath -Encoding UTF8
         $journalBytes = [System.IO.File]::ReadAllBytes($journalPath)
         $v3Bytes = [System.IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v3.example.json'))
-        $errorMessage = $null
-
-        try {
-            Invoke-UserSkillsRecovery -UserHome $userHome -BeforeLockAcquisitionAction {
+        $result=Invoke-UserSkillsRecovery -UserHome $userHome -BeforeLockAcquisitionAction {
                 [System.IO.File]::WriteAllBytes($manifestPath,$v3Bytes)
-            } | Out-Null
-        }
-        catch { $errorMessage = $_.Exception.Message }
-
-        if ([string]::IsNullOrWhiteSpace($errorMessage)) { throw 'Expected the lock-protected recovery manifest reread to reject schema version 3.' }
-        $errorMessage.Contains('USER managed manifest schema version 3 requires a projection-aware installer.') | Should Be $true
+            }
+        $result.outcome | Should Be 'concurrent'
         [System.IO.File]::ReadAllText($target) | Should Be 'applied bytes'
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($journalPath)) | Should Be ([Convert]::ToBase64String($journalBytes))
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($manifestPath)) | Should Be ([Convert]::ToBase64String($v3Bytes))
@@ -372,7 +510,8 @@ Describe 'user-scoped Agent Skills reconciliation' {
         $migrated = Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply -MigrateLegacyCatalogSkills
         $migrated.outcome | Should Be 'applied'
         [System.IO.File]::ReadAllText($legacy) | Should Match 'name: alpha'
-        Test-Path -LiteralPath $migrated.backupPath | Should Be $true
+        $migrated.backupPath | Should BeNullOrEmpty
+        @(Get-ChildItem -Force -LiteralPath (Join-Path $userHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count | Should Be 0
     }
 
     # Scenario: An explicit Catalog lifecycle alias points an old managed directory at the current Skill ID.
@@ -386,7 +525,8 @@ Describe 'user-scoped Agent Skills reconciliation' {
         $result.outcome | Should Be 'applied'
         Test-Path -LiteralPath $legacy | Should Be $false
         Test-Path -LiteralPath (Join-Path $userHome '.agents\skills\alpha\SKILL.md') | Should Be $true
-        Test-Path -LiteralPath (Join-Path $result.backupPath '.agents\skills\old-alpha\SKILL.md') | Should Be $true
+        $result.backupPath | Should BeNullOrEmpty
+        @(Get-ChildItem -Force -LiteralPath (Join-Path $userHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count | Should Be 0
         $legacyEvidence = @($result.ownership | Where-Object { $_.path -ceq '.agents/skills/old-alpha/SKILL.md' })
         $legacyEvidence.Count | Should Be 1
         $legacyEvidence[0].classification | Should Be 'known-legacy'
@@ -512,13 +652,13 @@ Describe 'user-scoped Agent Skills reconciliation' {
         $nextSha = (Get-FileHash -Algorithm SHA256 -LiteralPath ([string]$next.Files[0].stagedPath)).Hash.ToLowerInvariant()
         $next.Files[0].sha256 = $nextSha
         $next.Manifest.files[0].sha256 = $nextSha
-        $backupCount = @(Get-ChildItem -LiteralPath (Join-Path $userHome '.agents\backups') -Directory).Count
+        $transactionCount = @(Get-ChildItem -LiteralPath (Join-Path $userHome '.ai-instructions-txn') -Directory -ErrorAction SilentlyContinue).Count
         { Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply -BeforeBackupValidationAction {
             [System.IO.File]::WriteAllText($target,'concurrent target edit')
         } } | Should Throw
         [System.IO.File]::ReadAllText($target) | Should Be 'concurrent target edit'
         Test-Path -LiteralPath $journalPath | Should Be $false
-        @(Get-ChildItem -LiteralPath (Join-Path $userHome '.agents\backups') -Directory).Count | Should Be $backupCount
+        @(Get-ChildItem -LiteralPath (Join-Path $userHome '.ai-instructions-txn') -Directory -ErrorAction SilentlyContinue).Count | Should Be $transactionCount
 
         # The manifest participates in the same observation contract.
         [System.IO.File]::WriteAllBytes($target,[System.IO.File]::ReadAllBytes([string]$desired.Files[0].stagedPath))
@@ -529,7 +669,7 @@ Describe 'user-scoped Agent Skills reconciliation' {
         [System.IO.File]::ReadAllText($manifestPath) | Should Be ($manifestBeforeRace + ' ')
         [System.IO.File]::ReadAllText($target) | Should Match 'name: alpha'
         Test-Path -LiteralPath $journalPath | Should Be $false
-        @(Get-ChildItem -LiteralPath (Join-Path $userHome '.agents\backups') -Directory).Count | Should Be $backupCount
+        @(Get-ChildItem -LiteralPath (Join-Path $userHome '.ai-instructions-txn') -Directory -ErrorAction SilentlyContinue).Count | Should Be $transactionCount
     }
 
     # Scenario: A transaction mutation fails after a managed target is prepared.
@@ -548,39 +688,20 @@ Describe 'user-scoped Agent Skills reconciliation' {
         Test-Path -LiteralPath (Join-Path $userHome '.agents\update-agent-environment.recovery.json') | Should Be $false
     }
 
-    # Scenario: Rollback restores every transaction state, but the recovery journal cannot be deleted.
-    # Purpose: Verify the retained journal changes the result to recovery-required instead of falsely reporting completed rollback.
-    It 'InterT26_reports_recovery_required_when_rollback_journal_cleanup_fails' {
+    # Scenario: Rollback itself is interrupted after the mutation failure.
+    # Purpose: Preserve the install journal and classify the result as recovery-required instead of claiming completed rollback.
+    It 'InterT26_reports_recovery_required_when_install_journal_rollback_is_interrupted' {
         $initial = New-TestDesiredState -Root (Join-Path $staging 'initial') -SkillIds @('alpha')
         (Invoke-UserSkillsReconciliation -DesiredState $initial -UserHome $userHome -Mode Apply).outcome | Should Be 'applied'
         $next = New-TestDesiredState -Root (Join-Path $staging 'next') -SkillIds @('alpha','beta')
-        $journalPath = Join-Path $userHome '.agents\update-agent-environment.recovery.json'
-        $global:AgentEnvironmentTestJournalCleanupPath = $journalPath
-        try {
-            Mock Remove-Item {
-                param([string[]] $Path, [string[]] $LiteralPath, [switch] $Recurse)
-                foreach ($requestedPath in @($LiteralPath) + @($Path)) {
-                    if ([string]::IsNullOrWhiteSpace([string]$requestedPath)) { continue }
-                    if ([string]::Equals([string]$requestedPath,[string]$global:AgentEnvironmentTestJournalCleanupPath,[System.StringComparison]::OrdinalIgnoreCase)) {
-                        throw 'Injected recovery journal cleanup failure.'
-                    }
-                    if ([System.IO.File]::Exists([string]$requestedPath)) { [System.IO.File]::Delete([string]$requestedPath) }
-                    elseif ([System.IO.Directory]::Exists([string]$requestedPath)) { [System.IO.Directory]::Delete([string]$requestedPath,[bool]$Recurse) }
-                }
-            } -ModuleName agent-environment-reconciler
-
-            $failed = Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply -FailureAfterMutationCount 1
-        }
-        finally {
-            Remove-Variable -Name AgentEnvironmentTestJournalCleanupPath -Scope Global -ErrorAction SilentlyContinue
-            Import-Module $script:ModulePath -Force
-        }
+        $failed = Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $userHome -Mode Apply -FailureAfterMutationCount 1 -FailpointName during-rollback
 
         $failed.outcome | Should Be 'failed'
         $failed.rollbackState | Should Be 'recovery-required'
         @($failed.failureDetails | Where-Object { $_.code -eq 'recovery-required' }).Count | Should Be 1
-        ($failed.failureDetails[0].evidence) | Should Match 'Recovery journal cleanup failed'
-        Test-Path -LiteralPath $journalPath -PathType Leaf | Should Be $true
+        ($failed.failureDetails[0].evidence) | Should Match 'Rollback failed'
+        Test-Path -LiteralPath $failed.backupPath -PathType Container | Should Be $true
+        Test-Path -LiteralPath (Join-Path $failed.backupPath 'journal.json') -PathType Leaf | Should Be $true
     }
 
     It 'reports drift in VerifyOnly and a plan in WhatIf without writing' {
@@ -597,6 +718,24 @@ Describe 'user-scoped Agent Skills reconciliation' {
         $stream = [System.IO.File]::Open((Join-Path $agents 'update-agent-environment.lock'),[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
         try { (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome | Should Be 'concurrent' }
         finally { $stream.Dispose() }
+    }
+
+    # Scenario: The P8 platform lock is held before a legacy File.Open contender starts.
+    # Purpose: Prove the unchanged Windows FileShare.None protocol excludes legacy callers in the reverse direction too.
+    It 'InterT73_blocks_legacy_FileOpen_while_Enter_PlatformLock_is_held' {
+        $agents=Join-Path $userHome '.agents'
+        New-Item -ItemType Directory -Force -Path $agents|Out-Null
+        Import-Module (Join-Path $script:RuntimeRoot 'platform-runtime.psm1') -Force
+        $parent=$null;$platformLock=$null
+        try {
+            $parent=Open-PlatformDirectory -Root $userHome -RelativePath '.agents'
+            $platformLock=Enter-PlatformLock -ParentLease $parent -Leaf 'update-agent-environment.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
+            { $legacy=[IO.File]::Open((Join-Path $agents 'update-agent-environment.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None);$legacy.Dispose() } | Should Throw
+        }
+        finally {
+            if($null-ne$platformLock){$platformLock.Dispose()}
+            if($null-ne$parent){$parent.Dispose()}
+        }
     }
 
     It 'rejects an unsafe lock path before reconciliation' {

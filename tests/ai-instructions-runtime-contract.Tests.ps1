@@ -3044,4 +3044,55 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         (& $compare -FirstSddl 'D:AI(A;;FR;;;WD)' -SecondSddl 'D:(A;;FR;;;WD)') | Should Be $true
         (& $compare -FirstSddl 'D:(A;;FR;;;WD)(A;;FA;;;SY)' -SecondSddl 'D:(A;;FA;;;SY)(A;;FR;;;WD)') | Should Be $false
     }
+
+    # Scenario: USER projection coordinator persists an install journal v1 under USER home.
+    # Purpose: Add the component without a schema bump and bind its historical global USER lock basename.
+    It 'UnitT206_accepts_user_reconciler_with_the_fixed_USER_lock_leaf' {
+        $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json
+        $parsed=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal|ConvertTo-Json -Depth 20)
+        $parsed.owner.component | Should Be 'user-reconciler'
+        $parsed.lock.leaf | Should Be 'update-agent-environment.lock'
+    }
+
+    # Scenario: A USER reconciler journal names another lock or omits the previous manifest digest.
+    # Purpose: Keep lock-parent derivation and F2 generation evidence closed under journal v1.
+    It 'UnitT207_rejects_user_reconciler_lock_or_previous_manifest_digest_drift' {
+        $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json
+        $journal.lock.leaf='another.lock'
+        { Assert-AiInstructionsInstallJournalV1 $journal | Out-Null } | Should Throw
+        $journal.lock.leaf='update-agent-environment.lock'
+        $journal.generation.previousBundleSha256=$null
+        { Assert-AiInstructionsInstallJournalV1 $journal | Out-Null } | Should Throw
+    }
+
+    # Scenario: Recovery evaluates a USER reconciler journal using the same exact-state decision contract.
+    # Purpose: Prove the additive component does not fork D8 recovery semantics.
+    It 'UnitT208_uses_the_existing_recovery_decision_for_user_reconciler' {
+        $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json
+        $journal.phase='applied'
+        foreach($operation in $journal.operations){$operation.state='applied'}
+        $observations=@{}
+        foreach($operation in $journal.operations){$observations[[string]$operation.sequence]=New-TestInstallObservation -Operation $operation -State $operation.applied}
+        $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
+        $decision.action | Should Be 'commit'
+    }
+
+    # Scenario: The stable launcher has already scoped USER recovery to USER home and holds the install read lease.
+    # Purpose: Permit only user-reconciler valid journals and orphans while keeping other components fail closed.
+    It 'UnitT209_scopes_transaction_disposition_for_user_reconciler' {
+        (Get-AiInstructionsInstallTransactionDisposition -Classification valid-journal -Component user-reconciler).action | Should Be 'recover'
+        (Get-AiInstructionsInstallTransactionDisposition -Classification orphan-without-journal -Component user-reconciler).action | Should Be 'purge-orphan'
+        (Get-AiInstructionsInstallTransactionDisposition -Classification malformed-journal -Component user-reconciler).refusalCode | Should Be 'interrupted-install'
+    }
+
+    # Scenario: The additive journal example represents the USER projection coordinator.
+    # Purpose: Keep its fixed lock leaf and manifest-byte generation digests executable-reader compatible.
+    It 'UnitT210_accepts_the_user_reconciler_install_journal_example' {
+        $path = Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json'
+        $journal = Get-Content -Raw -Encoding UTF8 -LiteralPath $path | ConvertFrom-Json
+        { Assert-AiInstructionsInstallJournalV1 -Journal $journal } | Should Not Throw
+        $journal.owner.component | Should Be 'user-reconciler'
+        $journal.lock.leaf | Should Be 'update-agent-environment.lock'
+        $journal.generation.previousBundleSha256 | Should Be ('0' * 64)
+    }
 }

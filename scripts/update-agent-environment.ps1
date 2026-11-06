@@ -42,6 +42,10 @@ function New-AgentEnvironmentStableRecoveryFailureResult {
 
 trap {
     $message = [string]$_.Exception.Message
+    $refusalCode = $null
+    if($null-ne$_.Exception.PSObject.Properties['Code']){$refusalCode=[string]$_.Exception.Code}
+    elseif($_.Exception.Data.Contains('Code')){$refusalCode=[string]$_.Exception.Data['Code']}
+    elseif($message-match '\[ai-instructions-refusal-code=([^\]]+)\]'){$refusalCode=$Matches[1]}
     if ($null -ne $script:agentEnvironmentRuntimeReadLock) {
         try { $script:agentEnvironmentRuntimeReadLock.Dispose() }
         catch { }
@@ -52,7 +56,7 @@ trap {
     }
     else {
         [pscustomobject][ordered]@{
-            schemaVersion=1; outcome='failed'; exitCode=1; runtimeCommit=$null; catalogCommit=$null
+            schemaVersion=1; outcome='failed'; exitCode=1; Code=$refusalCode; runtimeCommit=$null; catalogCommit=$null
             installed=@(); updated=@(); removed=@(); preserved=@(); failed=@($message)
             rollbackState='not-started'; backupPath=$null
         }
@@ -64,6 +68,7 @@ trap {
         Write-Output "Agent environment outcome: $($failureResult.outcome)"
         Write-Output "exitCode: $($failureResult.exitCode)"
         Write-Output "failed: $message"
+        if(-not[string]::IsNullOrEmpty($refusalCode)){Write-Output "Code: $refusalCode"}
         if ($Recover -and $script:agentEnvironmentRecoveryStarted) {
             foreach ($detail in @($failureResult.failureDetails)) {
                 Write-Output ("Failure detail: {0} [{1}]" -f $detail.code, $detail.path)
@@ -150,7 +155,7 @@ try {
 
     if ($Recover) {
         $script:agentEnvironmentRecoveryStarted = $true
-        $finalResult = Invoke-UserSkillsRecovery -UserHome $userHomePath
+        $finalResult = Invoke-UserSkillsRecovery -UserHome $userHomePath -InstallReadLease $script:agentEnvironmentRuntimeReadLock
     }
     else {
         $configurationPath = Join-Path $codexHomePath 'ai-instructions-sync.json'
@@ -160,13 +165,14 @@ try {
             $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
         }
         catch { throw "Installed Agent environment state is invalid: $($_.Exception.Message)" }
-        if (($configuration.schemaVersion -is [int] -or $configuration.schemaVersion -is [long]) -and [int64]$configuration.schemaVersion -eq 5) {
-            throw 'AI Instructions sync configuration schema version 5 requires a projection-aware installer.'
-        }
-        if (($bundle.schemaVersion -is [int] -or $bundle.schemaVersion -is [long]) -and [int64]$bundle.schemaVersion -eq 3) {
-            throw 'Runtime bundle schema version 3 requires a projection-aware installer.'
+        if ((($configuration.schemaVersion -is [int] -or $configuration.schemaVersion -is [long]) -and [int64]$configuration.schemaVersion -eq 5) -or
+            (($bundle.schemaVersion -is [int] -or $bundle.schemaVersion -is [long]) -and [int64]$bundle.schemaVersion -eq 3)) {
+            Assert-UserProjectionRuntimeGate -RuntimeRoot $runtimeRoot
         }
         if ([string]$configuration.catalog.ref -cne [string]$bundle.commit) { throw 'Installed Catalog configuration and runtime bundle commit do not match.' }
+        $catalogVersion=(Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $runtimeRoot 'catalog/skills-catalog.json')|ConvertFrom-Json).schemaVersion
+        $lockVersion=(Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $runtimeRoot 'catalog/skills-catalog-lock.json')|ConvertFrom-Json).schemaVersion
+        if([int64]$catalogVersion-eq3-or[int64]$lockVersion-eq3){Assert-UserProjectionRuntimeGate -RuntimeRoot $runtimeRoot}
 
         $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('agent-environment-' + [Guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
@@ -174,7 +180,8 @@ try {
             -CatalogRepository ([string]$bundle.repository) -CatalogCommit ([string]$bundle.commit) -WorkingRoot $temporaryRoot
         $mode = if ($VerifyOnly) { 'VerifyOnly' } elseif ($WhatIfPreference) { 'WhatIf' } else { 'Apply' }
         $finalResult = Invoke-UserSkillsReconciliation -DesiredState $desiredState -UserHome $userHomePath -Mode $mode `
-            -ForceReinstallManagedSkills:$ForceReinstallManagedSkills -MigrateLegacyCatalogSkills:$MigrateLegacyCatalogSkills
+            -ForceReinstallManagedSkills:$ForceReinstallManagedSkills -MigrateLegacyCatalogSkills:$MigrateLegacyCatalogSkills `
+            -InstallReadLease $script:agentEnvironmentRuntimeReadLock
         $finalResult | Add-Member -NotePropertyName runtimeCommit -NotePropertyValue ([string]$bundle.commit) -Force
     }
 }
