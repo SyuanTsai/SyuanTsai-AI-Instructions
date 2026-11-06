@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "primaryLocale": "zh-TW",
   "fanOutLocale": "en",
   "locales": [
@@ -12,6 +12,11 @@
       "ruleSuffix": ".en.md"
     }
   ],
+  "source": {
+    "root": "instructions/common",
+    "hostBlockSyntaxVersion": 1,
+    "generatedHeader": null
+  },
   "platforms": [
     {
       "id": "codex",
@@ -38,6 +43,15 @@
         "rulesTarget": ".github/AI-Rules",
         "preserveRuleFileName": true
       }
+    },
+    {
+      "id": "claude",
+      "base": {
+        "zh-TW": ".claude/CLAUDE.md",
+        "en": ".claude/CLAUDE.en.md"
+      },
+      "rulesRoot": ".claude/AI-Rules",
+      "fanOut": null
     }
   ],
   "modules": [
@@ -46,7 +60,8 @@
       "fileStem": "CodeReview",
       "platforms": [
         "codex",
-        "github-copilot"
+        "github-copilot",
+        "claude"
       ],
       "triggers": [
         "code-review",
@@ -66,7 +81,8 @@
       "fileStem": "Database",
       "platforms": [
         "codex",
-        "github-copilot"
+        "github-copilot",
+        "claude"
       ],
       "triggers": [
         "entity-framework",
@@ -87,7 +103,8 @@
       "fileStem": "ExternalResearch",
       "platforms": [
         "codex",
-        "github-copilot"
+        "github-copilot",
+        "claude"
       ],
       "triggers": [
         "public-current-research",
@@ -110,7 +127,8 @@
       "fileStem": "GitCommit",
       "platforms": [
         "codex",
-        "github-copilot"
+        "github-copilot",
+        "claude"
       ],
       "triggers": [
         "git-commit-message-generation"
@@ -129,7 +147,8 @@
       "fileStem": "Testing",
       "platforms": [
         "codex",
-        "github-copilot"
+        "github-copilot",
+        "claude"
       ],
       "triggers": [
         "production-plan-or-change",
@@ -149,49 +168,56 @@
       "id": "base.shared-skills-user-only",
       "platforms": [
         "codex",
-        "github-copilot"
+        "github-copilot",
+        "claude"
       ]
     },
     {
       "id": "base.missing-module-no-invention",
       "platforms": [
         "codex",
-        "github-copilot"
+        "github-copilot",
+        "claude"
       ]
     },
     {
       "id": "base.optional-capability-no-invention",
       "platforms": [
         "codex",
-        "github-copilot"
+        "github-copilot",
+        "claude"
       ]
     },
     {
       "id": "base.jira-credential-nondisclosure",
       "platforms": [
         "codex",
-        "github-copilot"
+        "github-copilot",
+        "claude"
       ]
     },
     {
       "id": "base.jira-mutation-explicit-request",
       "platforms": [
         "codex",
-        "github-copilot"
+        "github-copilot",
+        "claude"
       ]
     },
     {
       "id": "base.stop-on-missing-authority-or-conflict",
       "platforms": [
         "codex",
-        "github-copilot"
+        "github-copilot",
+        "claude"
       ]
     },
     {
       "id": "base.windows-only-local-runtime",
       "platforms": [
         "codex",
-        "github-copilot"
+        "github-copilot",
+        "claude"
       ]
     },
     {

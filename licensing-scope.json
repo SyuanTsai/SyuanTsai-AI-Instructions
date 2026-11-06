@@ -4,6 +4,55 @@
   "unlistedFiles": "No additional license granted by this declaration.",
   "files": [
     {
+      "path": ".claude/AI-Rules/CodeReview.en.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".claude/AI-Rules/CodeReview.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".claude/AI-Rules/Database.en.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".claude/AI-Rules/Database.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".claude/AI-Rules/ExternalResearch.en.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".claude/AI-Rules/ExternalResearch.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".claude/AI-Rules/GitCommit.en.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".claude/AI-Rules/GitCommit.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".claude/AI-Rules/Testing.en.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".claude/AI-Rules/Testing.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".claude/CLAUDE.en.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": ".claude/CLAUDE.md",
+      "license": "Apache-2.0"
+    },
+
+    {
       "path": ".codex/AGENTS.en.md",
       "license": "Apache-2.0"
     },
@@ -191,6 +240,55 @@
       "path": "ai-instructions-contract.json",
       "license": "Apache-2.0"
     },
+    {
+      "path": "instructions/common/AI-Rules/CodeReview.en.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "instructions/common/AI-Rules/CodeReview.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "instructions/common/AI-Rules/Database.en.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "instructions/common/AI-Rules/Database.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "instructions/common/AI-Rules/ExternalResearch.en.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "instructions/common/AI-Rules/ExternalResearch.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "instructions/common/AI-Rules/GitCommit.en.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "instructions/common/AI-Rules/GitCommit.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "instructions/common/AI-Rules/Testing.en.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "instructions/common/AI-Rules/Testing.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "instructions/common/base.en.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "instructions/common/base.md",
+      "license": "Apache-2.0"
+    },
+
     {
       "path": "catalog/README.md",
       "license": "Apache-2.0"
@@ -849,6 +947,10 @@
     },
     {
       "path": "scripts/Assert-StandardValidatorMaintenanceReport.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Build-AiInstructions.ps1",
       "license": "Apache-2.0"
     },
     {
