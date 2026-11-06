@@ -133,6 +133,32 @@ function Assert-UnixExpectedStage {
     [pscustomobject]@{ sha256=[string]$sha256; length=[long]$length }
 }
 
+function Assert-UnixJournalAppliedIdentity {
+    param([Parameter(Mandatory=$true)] $Applied,[Parameter(Mandatory=$true)] $StageIdentity)
+    try {
+        $identity = Get-UnixContractValue $Applied identity -Required
+        $required = @('kind','device','fileId')
+        if ($null -eq $identity -or $identity -is [array] -or @($identity.PSObject.Properties).Count -ne $required.Count) {
+            throw [ArgumentException]::new('Journal applied.identity must be one unix-device-inode identity.')
+        }
+        foreach ($name in $required) {
+            if ($null -eq $identity.PSObject.Properties[$name]) {
+                throw [ArgumentException]::new("Journal applied.identity is missing $name.")
+            }
+        }
+        if ((Get-UnixContractValue $identity kind -Required) -cne 'unix-device-inode') {
+            throw [ArgumentException]::new('Journal applied.identity.kind must be unix-device-inode.')
+        }
+        $device = ConvertFrom-UnixIdentityNumber (Get-UnixContractValue $identity device -Required) 'Journal.applied.identity.device'
+        $inode = ConvertFrom-UnixIdentityNumber (Get-UnixContractValue $identity fileId -Required) 'Journal.applied.identity.fileId'
+        if ($device -ne [uint64]$StageIdentity.Device -or $inode -ne [uint64]$StageIdentity.Inode) {
+            throw [ArgumentException]::new('Journal applied.identity does not match the retained stage descriptor identity.')
+        }
+    }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] { throw }
+    catch { throw (New-UnixPlatformVerificationError publication $_.Exception.Message) }
+}
+
 function Assert-UnixJournalBackupIdentity {
     param([Parameter(Mandatory=$true)] $Journal,[Parameter(Mandatory=$true)] $ExpectedState,[switch] $Required,[string] $Capability='owned-file-removal')
     try {
@@ -238,6 +264,7 @@ function Assert-UnixJournalBinding {
             if ($journalApplied.sha256 -cne $expectedApplied.sha256 -or $journalApplied.length -ne $expectedApplied.length) {
                 throw [ArgumentException]::new('Journal applied state does not match ExpectedStage.')
             }
+            Assert-UnixJournalAppliedIdentity -Applied $journalAppliedObject -StageIdentity $StageLease.Observation
         }
 
         $permissions = Get-UnixContractValue $Journal permissions

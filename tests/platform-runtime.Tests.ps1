@@ -3999,6 +3999,29 @@ Describe 'Unix P7c durable publication and removal' {
         } finally {Remove-Module -ModuleInfo $unixModule -Force}
     }
 
+    # Scenario: Unix journal applied identity is missing, null, malformed, mismatched, or equal to the retained stage descriptor identity.
+    # Purpose: Validate the complete unix-device-inode shape as a publication typed failure without requiring a native Unix host.
+    It 'UnitT695_validates_unix_journal_applied_identity_shape_and_binding' {
+        $unixModule=Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform/Unix.psm1') -Force -PassThru
+        try {
+            $stage=[pscustomobject]@{Device=[uint64]11;Inode=[uint64]22}
+            $valid=[pscustomobject]@{identity=[pscustomobject][ordered]@{kind='unix-device-inode';device='11';fileId='22'}}
+            { & $unixModule {param($applied,$identity) Assert-UnixJournalAppliedIdentity $applied $identity} $valid $stage } | Should Not Throw
+            foreach($applied in @(
+                [pscustomobject]@{},
+                [pscustomobject]@{identity=$null},
+                [pscustomobject]@{identity=[pscustomobject]@{kind='windows-file-id';device='11';fileId='22'}},
+                [pscustomobject]@{identity=[pscustomobject]@{kind='unix-device-inode';device='11'}},
+                [pscustomobject]@{identity=[pscustomobject]@{kind='unix-device-inode';device='11';fileId='23'}}
+            )) {
+                $caught=$null
+                try { & $unixModule {param($value,$identity) Assert-UnixJournalAppliedIdentity $value $identity} $applied $stage } catch { $caught=$_.Exception }
+                $caught.GetType().Name | Should Be 'PlatformVerificationException'
+                $caught.Capability | Should Be 'publication'
+            }
+        } finally { Remove-Module $unixModule -Force }
+    }
+
     # Scenario: A removal journal omits backupIdentity or binds it to an inode different from ExpectedState.
     # Purpose: Reject the journal with a typed verification failure before any mutation; this pure binding regression runs on Windows too.
     It 'UnitT610_rejects_removal_backup_identity_drift_before_mutation' {
@@ -4336,6 +4359,36 @@ Describe 'Unix P7c durable publication and removal' {
             (Read-P7cText $removeParent target)|Should Be owned;(Read-P7cText $txn.Lease stage)|Should Be replacement
             Test-Path -LiteralPath (Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/tombstone")|Should Be $false
         } finally {$field.SetValue($null,$null);foreach($lease in @($removeTarget,$stage,$target)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$removeParent.Dispose();$publishParent.Dispose()}
+    }
+    }
+
+    # Register only on the native host; keep this file's Core CI skip count at zero.
+    if ($IsLinux -or $IsMacOS) {
+    # Scenario: A validated Unix journal names a same-content inode other than the retained stage, then names the correct stage identity.
+    # Purpose: Reject the mismatched durable identity without moving target or stage, and publish successfully when the fd identity matches.
+    It 'InterT700_binds_unix_journal_applied_identity_to_the_published_stage' {
+        $parent=New-P7cDirectory 'journal-applied-identity';$txn=New-P7cTransaction;$stage=$null;$other=$null;$published=$null
+        try {
+            $stage=New-P7cFile $txn.Lease stage same-bytes;$stageState=Get-P7cStageState $stage
+            $other=New-P7cFile $txn.Lease other same-bytes;$otherState=Get-P7cStageState $other
+            $missing=Get-P7cAbsentState
+            $wrongOperation=New-P7cJournalOperation -TargetRelativePath 'journal-applied-identity/created' -Kind create-file -Method stage-rename -StageLeaf stage -BackupLeaf $null -Original $missing -Applied (New-P7cAppliedState $otherState) -Permissions $null
+            $caught=$null
+            try { Publish-PlatformFile -ParentLease $parent -Leaf created -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $stageState -NoReplace -Journal $wrongOperation | Out-Null } catch { $caught=$_.Exception }
+            $caught.GetType().Name | Should Be 'PlatformVerificationException'
+            $caught.Capability | Should Be 'publication'
+            Test-Path -LiteralPath (Join-Path $script:P7cRoot 'journal-applied-identity/created') | Should Be $false
+            (Read-P7cText $txn.Lease stage) | Should Be same-bytes
+            (Read-P7cText $txn.Lease other) | Should Be same-bytes
+
+            $correctOperation=New-P7cJournalOperation -TargetRelativePath 'journal-applied-identity/created' -Kind create-file -Method stage-rename -StageLeaf stage -BackupLeaf $null -Original $missing -Applied (New-P7cAppliedState $stageState) -Permissions $null
+            $receipt=Publish-PlatformFile -ParentLease $parent -Leaf created -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $stageState -NoReplace -Journal $correctOperation
+            $published=Open-PlatformFile -ParentLease $parent -Leaf created -Access Read -CreateMode OpenExisting
+            (Read-P7cText $parent created) | Should Be same-bytes
+            $receipt.appliedIdentity.device | Should Be $stageState.identity.device
+            $receipt.appliedIdentity.fileId | Should Be $stageState.identity.fileId
+            $published.Observation.Inode | Should Be ([uint64]$stageState.identity.fileId)
+        } finally { foreach($lease in @($published,$other,$stage)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$parent.Dispose() }
     }
     }
 }
