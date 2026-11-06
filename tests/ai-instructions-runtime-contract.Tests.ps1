@@ -2897,4 +2897,16 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent
         (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}).action | Should Be 'refuse'
     }
+
+    # Scenario: Text contains an earlier valid refusal marker and a final marker with an invalid, empty, or differently cased payload.
+    # Purpose: Use only the final marker payload and reject every payload that is not an ordinal match for the closed refusal vocabulary.
+    It 'UnitT201_rejects_invalid_final_refusal_marker_payloads' {
+        $invalidCases=@(
+            'old [ai-instructions-refusal-code=closure-invalid] final [ai-instructions-refusal-code=unknown_2]',
+            'old [ai-instructions-refusal-code=closure-invalid] final [ai-instructions-refusal-code=]',
+            'old [ai-instructions-refusal-code=closure-invalid] final [ai-instructions-refusal-code=Interrupted-Install]'
+        )
+        foreach($text in $invalidCases) { (Get-AiInstructionsRefusalCode $text) | Should BeNullOrEmpty }
+        (Get-AiInstructionsRefusalCode 'old [ai-instructions-refusal-code=closure-invalid] final [ai-instructions-refusal-code=interrupted-install]') | Should Be 'interrupted-install'
+    }
 }

@@ -68,7 +68,7 @@ function Get-AiInstructionsRefusalCode {
         $candidate = $candidate.InnerException
     }
     $text = [string]$ErrorRecordOrException
-    $matches = [regex]::Matches($text,'\[ai-instructions-refusal-code=([a-z-]+)\]')
+    $matches = [regex]::Matches($text,'\[ai-instructions-refusal-code=([^\]\r\n]*)\]')
     if ($matches.Count -gt 0) {
         $match = $matches[$matches.Count - 1]
         if ($match.Groups[1].Value -cin $script:AiInstructionsRefusalCodes) { return $match.Groups[1].Value }
