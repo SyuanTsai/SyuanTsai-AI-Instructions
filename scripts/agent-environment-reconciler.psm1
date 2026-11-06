@@ -44,6 +44,30 @@ function Get-AgentEnvironmentPathComparison {
     return [System.StringComparison]::Ordinal
 }
 
+function Get-AgentEnvironmentPlatformName {
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) { return 'windows' }
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Linux)) { return 'linux' }
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)) { return 'macos' }
+    throw 'The current operating system is not supported by the Agent environment reconciler.'
+}
+
+function New-AgentEnvironmentRefusalException {
+    param(
+        [Parameter(Mandatory = $true)][string] $Code,
+        [Parameter(Mandatory = $true)][string] $Message,
+        [AllowNull()][Exception] $InnerException = $null
+    )
+    $formattedMessage = "$Message [ai-instructions-refusal-code=$Code]"
+    $refusalType = 'SyuanTsai.AiInstructions.AiInstructionsRefusalException' -as [type]
+    if ($null -ne $refusalType) {
+        $arguments = if ($null -eq $InnerException) { [object[]]@($Code,$formattedMessage) } else { [object[]]@($Code,$formattedMessage,$InnerException) }
+        return [Activator]::CreateInstance($refusalType,$arguments)
+    }
+    $exception = if ($null -eq $InnerException) { [InvalidOperationException]::new($formattedMessage) } else { [InvalidOperationException]::new($formattedMessage,$InnerException) }
+    $exception.Data['Code'] = $Code
+    return $exception
+}
+
 function Get-AgentEnvironmentInventorySha256 {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Files
@@ -487,7 +511,7 @@ function Assert-UserProjectionRuntimeGate {
     param([Parameter(Mandatory=$true)][string]$RuntimeRoot)
     Import-AgentEnvironmentRuntimeModules -RuntimeRoot $RuntimeRoot
     # P7e reader/writer selection is intentionally connected here when it lands.
-    throw (New-AiInstructionsRefusalException -Code 'projection-runtime-unavailable' -Message 'Projection-aware production runtime is unavailable until the P7e gate and production pins are installed.')
+    throw (New-AgentEnvironmentRefusalException -Code 'projection-runtime-unavailable' -Message 'Projection-aware production runtime is unavailable until the P7e gate and production pins are installed.')
 }
 
 function Get-UserSkillsDesiredState {
@@ -749,7 +773,7 @@ function Get-AgentEnvironmentCatalogNames {
 
 function ConvertTo-AgentEnvironmentPlatformIdentity {
     param([Parameter(Mandatory = $true)] $Observation)
-    if ((Get-CurrentPlatformName) -ceq 'windows') {
+    if ((Get-AgentEnvironmentPlatformName) -ceq 'windows') {
         return [pscustomobject][ordered]@{ kind='windows-file-id'; device=('0x{0:x}' -f [uint64]$Observation.Device); fileId=('0x{0:x}' -f [uint64]$Observation.Inode) }
     }
     return [pscustomobject][ordered]@{ kind='unix-device-inode'; device=([uint64]$Observation.Device).ToString(); fileId=([uint64]$Observation.Inode).ToString() }
@@ -757,7 +781,7 @@ function ConvertTo-AgentEnvironmentPlatformIdentity {
 
 function ConvertTo-AgentEnvironmentPermissionSnapshot {
     param([Parameter(Mandatory = $true)] $Snapshot)
-    if ((Get-CurrentPlatformName) -ceq 'windows') {
+    if ((Get-AgentEnvironmentPlatformName) -ceq 'windows') {
         return [pscustomobject][ordered]@{ kind='windows-sddl'; sddl=[string]$Snapshot.Sddl; readOnly=[bool]$Snapshot.ReadOnly }
     }
     return [pscustomobject][ordered]@{ kind='unix-mode'; mode=[string]$Snapshot.Mode; uid=[int64]$Snapshot.Uid; gid=[int64]$Snapshot.Gid }
@@ -782,7 +806,13 @@ function Test-AgentEnvironmentLockContention {
 
 function Get-AgentEnvironmentVolumeIdentity {
     param([Parameter(Mandatory = $true)][string]$Path)
-    $physical=Resolve-PlatformPhysicalPath -Path $Path
+    $existing=[IO.Path]::GetFullPath($Path).TrimEnd([char[]]@('\','/'))
+    while(-not(Test-Path -LiteralPath $existing)){
+        $parent=[IO.Directory]::GetParent($existing)
+        if($null-eq$parent){throw "No existing ancestor is available for volume identity: $Path"}
+        $existing=$parent.FullName
+    }
+    $physical=Resolve-PlatformPhysicalPath -Path $existing
     $lease=$null
     try{
         $lease=Open-PlatformDirectory -Root ([string]$physical) -RootOnly
@@ -930,21 +960,23 @@ function New-AgentEnvironmentPlatformOperation {
 }
 
 function Assert-AgentEnvironmentProjectionVolumes {
-    param([string]$Home,[object]$DesiredState)
+    param([string]$Home,[object]$DesiredState,[AllowNull()][object]$ExistingManifest)
     $homeFull = [IO.Path]::GetFullPath($Home).TrimEnd([char[]]@('\','/'))
     $homeVolume=Get-AgentEnvironmentVolumeIdentity -Path $homeFull
     $roots=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     foreach($file in @($DesiredState.Files)){$segments=@(([string]$file.targetPath).Split('/'));if($segments.Count-ge2){[void]$roots.Add("$($segments[0])/$($segments[1])")}}
+    if($null-ne$ExistingManifest){foreach($file in @($ExistingManifest.files)){$segments=@(([string]$file.targetPath).Split('/'));if($segments.Count-ge2){[void]$roots.Add("$($segments[0])/$($segments[1])")}}}
+    if([int64]$DesiredState.Manifest.schemaVersion-eq3){
+        foreach($projectionId in @($DesiredState.Manifest.projections)){
+            $projection=@($DesiredState.Catalog.projections|Where-Object{[string]$_.id-ceq[string]$projectionId})
+            if($projection.Count-ne1-or[string]::IsNullOrWhiteSpace([string]$projection[0].root)){throw "Selected USER projection '$projectionId' does not have one Catalog root."}
+            [void]$roots.Add([string]$projection[0].root)
+        }
+    }
     foreach($relative in $roots){
         $path=Get-AgentEnvironmentFullPath $homeFull $relative
-        $existing=$path
-        while(-not(Test-Path -LiteralPath $existing)){
-            $parent=[IO.Path]::GetDirectoryName($existing)
-            if([string]::IsNullOrEmpty($parent)-or-not$parent.StartsWith($homeFull,(Get-AgentEnvironmentPathComparison))){$existing=$homeFull;break}
-            $existing=$parent
-        }
-        $volume=Get-AgentEnvironmentVolumeIdentity -Path $existing
-        if([string]$homeVolume.kind-cne[string]$volume.kind-or-not[string]::Equals([string]$homeVolume.device,[string]$volume.device,[StringComparison]::OrdinalIgnoreCase)){throw (New-AiInstructionsRefusalException -Code 'capability-unavailable' -Message "USER projection '$relative' is not on the USER-home volume.")}
+        $volume=Get-AgentEnvironmentVolumeIdentity -Path $path
+        if([string]$homeVolume.kind-cne[string]$volume.kind-or-not[string]::Equals([string]$homeVolume.device,[string]$volume.device,[StringComparison]::OrdinalIgnoreCase)){throw (New-AgentEnvironmentRefusalException -Code 'capability-unavailable' -Message "USER projection '$relative' is not on the USER-home volume.")}
     }
 }
 
@@ -952,7 +984,7 @@ function Assert-AgentEnvironmentDirectoryPublicationCapability {
     try{Get-PlatformCapabilities -Required @('directory-publication')|Out-Null}
     catch{
         if($_.Exception.GetType().FullName-cne'SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException'){throw}
-        throw (New-AiInstructionsRefusalException -Code 'capability-unavailable' -Message 'The USER projection coordinator requires directory-publication on this host.' -InnerException $_.Exception)
+        throw (New-AgentEnvironmentRefusalException -Code 'capability-unavailable' -Message 'The USER projection coordinator requires directory-publication on this host.' -InnerException $_.Exception)
     }
 }
 
@@ -1148,7 +1180,7 @@ function Invoke-AgentEnvironmentPlatformTransaction {
             $operations.Add((New-AgentEnvironmentPlatformOperation $sequence $kind $path $stageLeaf $backup $null $original $applied $permissions))
         }
         $manifestPath=Get-AgentEnvironmentFullPath $Home '.agents/catalog-skills.manifest.json';$previousHash=if(Test-Path -LiteralPath $manifestPath){Get-AgentEnvironmentSha256 $manifestPath}else{'0'*64}
-        $platform=Get-CurrentPlatformName;$architecture=if([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()-ceq'Arm64'){'arm64'}else{'x64'}
+        $platform=Get-AgentEnvironmentPlatformName;$architecture=if([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()-ceq'Arm64'){'arm64'}else{'x64'}
         $journal=New-AiInstructionsInstallJournalV1 -TransactionId $transactionId -OwnerComponent 'user-reconciler' -OwnerProcessId $PID -OwnerProcessStartIdentity (Get-AgentEnvironmentProcessStartIdentity) -PlatformOs $platform -PlatformArchitecture $architecture -LockPrimitive $(if($platform-ceq'windows'){'windows-fileshare'}else{'flock'}) -LockLeaf 'update-agent-environment.lock' -PreviousBundleSha256 $previousHash -CandidateBundleSha256 $ManifestSha -Phase 'prepared' -Operations ([object[]]$operations.ToArray())
         Write-AgentEnvironmentInstallJournal $transactionPath $transactionLease $journal;Invoke-AgentEnvironmentFailpoint 'after-journal-publish' $FailpointName $mutationCount $FailureAfterMutationCount
         $journal.phase='applying';Write-AgentEnvironmentInstallJournal $transactionPath $transactionLease $journal
@@ -1378,7 +1410,7 @@ function Invoke-UserSkillsReconciliation {
     $existingManifestIdentity = $existingManifestSnapshot.Identity
     Import-AgentEnvironmentRuntimeModules -RuntimeRoot ([string]$DesiredState.RuntimeRoot)
     Assert-AgentEnvironmentDirectoryPublicationCapability
-    Assert-AgentEnvironmentProjectionVolumes -Home $home -DesiredState $DesiredState
+    Assert-AgentEnvironmentProjectionVolumes -Home $home -DesiredState $DesiredState -ExistingManifest $existingManifestSnapshot.Manifest
     if ((Test-Path -LiteralPath $journalPath) -and $Mode -ne 'Apply') {
         Assert-AgentEnvironmentPathSafe -Root $home -RelativePath $journalRelative | Out-Null
         if (-not (Test-Path -LiteralPath $journalPath -PathType Leaf)) { throw 'Agent environment recovery journal path must be a file.' }

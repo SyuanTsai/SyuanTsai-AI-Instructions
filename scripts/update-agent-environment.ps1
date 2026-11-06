@@ -161,6 +161,7 @@ function Write-AgentEnvironmentResult {
 
 $temporaryRoot = $null
 $finalResult = $null
+$reconcilerCommands = @{}
 try {
     if (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) { throw "Installed AI instructions runtime is missing: $runtimeRoot" }
     $reconcilerPath = Join-Path $runtimeRoot 'agent-environment-reconciler.psm1'
@@ -171,12 +172,19 @@ try {
     & $launcher -ValidateOnly | Out-Null
 
     Remove-Module agent-environment-reconciler -Force -ErrorAction SilentlyContinue
-    Import-Module $reconcilerPath -Force
-    $script:agentEnvironmentTrustedReadLease = New-AgentEnvironmentInstallReadLeaseEvidence -Lease $script:agentEnvironmentRuntimeReadLock
+    $reconcilerModule = Import-Module $reconcilerPath -Force -PassThru
+    foreach($commandName in @('Assert-UserProjectionRuntimeGate','Get-UserSkillsDesiredState','Invoke-UserSkillsReconciliation','Invoke-UserSkillsRecovery','New-AgentEnvironmentInstallReadLeaseEvidence')){
+        $command=$reconcilerModule.ExportedCommands[$commandName]
+        if($null-eq$command){throw "Installed Agent environment reconciler does not export '$commandName'."}
+        $reconcilerCommands[$commandName]=$command
+    }
+    $command=$reconcilerCommands['New-AgentEnvironmentInstallReadLeaseEvidence']
+    $script:agentEnvironmentTrustedReadLease = & $command -Lease $script:agentEnvironmentRuntimeReadLock
 
     if ($Recover) {
         $script:agentEnvironmentRecoveryStarted = $true
-        $finalResult = Invoke-UserSkillsRecovery -UserHome $userHomePath -InstallReadLease $script:agentEnvironmentTrustedReadLease
+        $command=$reconcilerCommands['Invoke-UserSkillsRecovery']
+        $finalResult = & $command -UserHome $userHomePath -InstallReadLease $script:agentEnvironmentTrustedReadLease
     }
     else {
         $configurationPath = Join-Path $codexHomePath 'ai-instructions-sync.json'
@@ -188,19 +196,22 @@ try {
         catch { throw "Installed Agent environment state is invalid: $($_.Exception.Message)" }
         if ((($configuration.schemaVersion -is [int] -or $configuration.schemaVersion -is [long]) -and [int64]$configuration.schemaVersion -eq 5) -or
             (($bundle.schemaVersion -is [int] -or $bundle.schemaVersion -is [long]) -and [int64]$bundle.schemaVersion -eq 3)) {
-            Assert-UserProjectionRuntimeGate -RuntimeRoot $runtimeRoot
+            $command=$reconcilerCommands['Assert-UserProjectionRuntimeGate']
+            & $command -RuntimeRoot $runtimeRoot
         }
         if ([string]$configuration.catalog.ref -cne [string]$bundle.commit) { throw 'Installed Catalog configuration and runtime bundle commit do not match.' }
         $catalogVersion=(Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $runtimeRoot 'catalog/skills-catalog.json')|ConvertFrom-Json).schemaVersion
         $lockVersion=(Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $runtimeRoot 'catalog/skills-catalog-lock.json')|ConvertFrom-Json).schemaVersion
-        if([int64]$catalogVersion-eq3-or[int64]$lockVersion-eq3){Assert-UserProjectionRuntimeGate -RuntimeRoot $runtimeRoot}
+        if([int64]$catalogVersion-eq3-or[int64]$lockVersion-eq3){$command=$reconcilerCommands['Assert-UserProjectionRuntimeGate'];& $command -RuntimeRoot $runtimeRoot}
 
         $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('agent-environment-' + [Guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
-        $desiredState = Get-UserSkillsDesiredState -RuntimeRoot $runtimeRoot -Configuration $configuration `
+        $command=$reconcilerCommands['Get-UserSkillsDesiredState']
+        $desiredState = & $command -RuntimeRoot $runtimeRoot -Configuration $configuration `
             -CatalogRepository ([string]$bundle.repository) -CatalogCommit ([string]$bundle.commit) -WorkingRoot $temporaryRoot
         $mode = if ($VerifyOnly) { 'VerifyOnly' } elseif ($WhatIfPreference) { 'WhatIf' } else { 'Apply' }
-        $finalResult = Invoke-UserSkillsReconciliation -DesiredState $desiredState -UserHome $userHomePath -Mode $mode `
+        $command=$reconcilerCommands['Invoke-UserSkillsReconciliation']
+        $finalResult = & $command -DesiredState $desiredState -UserHome $userHomePath -Mode $mode `
             -ForceReinstallManagedSkills:$ForceReinstallManagedSkills -MigrateLegacyCatalogSkills:$MigrateLegacyCatalogSkills `
             -InstallReadLease $script:agentEnvironmentTrustedReadLease
         $finalResult | Add-Member -NotePropertyName runtimeCommit -NotePropertyValue ([string]$bundle.commit) -Force

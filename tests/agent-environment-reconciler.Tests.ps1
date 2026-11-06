@@ -459,6 +459,24 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
                 ($output[-1]|ConvertFrom-Json).Code|Should Be 'capability-unavailable';Test-Path (Join-Path $userHome '.agents')|Should Be $false;Test-Path (Join-Path $userHome '.ai-instructions-txn')|Should Be $false
             }finally{if(Test-Path -LiteralPath (Join-Path $userHome '.claude')){Remove-Item -LiteralPath (Join-Path $userHome '.claude') -Force};if(Test-Path -LiteralPath $secondary){Remove-Item -LiteralPath $secondary -Recurse -Force}}
         }
+
+        # Scenario: The last managed Skill is retired while one still-selected projection root is on a second volume.
+        # Purpose: Check selected projection roots even when the desired file inventory is empty.
+        It 'InterT76b_rejects_an_empty_selected_projection_on_a_second_volume' {
+            $userHome=Join-Path $TestDrive 'cross-volume-empty-user';New-Item -ItemType Directory -Path $userHome|Out-Null
+            $secondary=Join-Path $script:SecondaryVolumeRoot ('ai-instructions-p8-empty-'+[guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path (Join-Path $secondary 'skills') -Force|Out-Null
+            try{
+                New-Item -ItemType Junction -Path (Join-Path $userHome '.claude') -Target $secondary|Out-Null
+                $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'cross-volume-empty-stage')
+                $desired.Files=@();$desired.Manifest.files=@();$desired.SkillIds=@()
+                $caught=$null;try{Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply|Out-Null}catch{$caught=$_}
+                $caught|Should Not BeNullOrEmpty
+                $caught.Exception.Code|Should Be 'capability-unavailable'
+                Test-Path -LiteralPath (Join-Path $userHome '.agents')|Should Be $false
+                Test-Path -LiteralPath (Join-Path $userHome '.ai-instructions-txn')|Should Be $false
+            }finally{if(Test-Path -LiteralPath (Join-Path $userHome '.claude')){Remove-Item -LiteralPath (Join-Path $userHome '.claude') -Force};if(Test-Path -LiteralPath $secondary){Remove-Item -LiteralPath $secondary -Recurse -Force}}
+        }
     }
 
     # Scenario: Legacy recovery JSON and a new install-journal transaction residue coexist.
