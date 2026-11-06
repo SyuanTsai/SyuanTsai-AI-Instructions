@@ -153,6 +153,16 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     throw new ArgumentException("Windows device names are forbidden.");
             }
         }
+        public static bool IsTransactionStoreTarget(string parentPath, string leaf)
+        {
+            if (String.IsNullOrWhiteSpace(parentPath)) throw new ArgumentException("A verified parent path is required.");
+            Leaf(leaf);
+            if (String.Equals(leaf, ".ai-instructions-txn", StringComparison.OrdinalIgnoreCase)) return true;
+            string[] segments = parentPath.Split(new char[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (string segment in segments)
+                if (String.Equals(segment, ".ai-instructions-txn", StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
         internal static void Same(FileObservation actual, FileObservation expected)
         {
             if (expected == null || actual.Device != expected.Device || actual.Inode != expected.Inode || actual.Kind != expected.Kind)
@@ -1461,8 +1471,12 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             lock (parent.Sync) lock (transaction.Sync) lock (stage.Sync)
             {
                 parent.Check(); transaction.Check(); stage.Check(); AssertTransaction(transaction, parent);
-                if (SameIdentity(parent.Observation, transaction.Observation))
-                    throw new PlatformVerificationException("publication", PlatformNative.GetOperatingSystem(), "target must not be inside the transaction directory");
+                bool sameTransaction = SameIdentity(parent.Observation, transaction.Observation);
+                bool journalStore = sameTransaction && String.Equals(leaf, "journal.json", StringComparison.OrdinalIgnoreCase) &&
+                    String.Equals(stage.Leaf, "journal.stage", StringComparison.OrdinalIgnoreCase) &&
+                    (!expectedExists || String.Equals(displacedLeaf, "journal.prev", StringComparison.OrdinalIgnoreCase));
+                if (PlatformPaths.IsTransactionStoreTarget(GetVerifiedPath(parent), leaf) && !journalStore)
+                    throw new PlatformVerificationException("publication", PlatformNative.GetOperatingSystem(), "target must stay outside .ai-instructions-txn");
                 AssertStage(transaction, stage, stageSha256, stageLength);
                 FileObservation stageIdentity = Stat(stage.Fd, null);
                 Sync(stage.Fd, false, "fsync-stage");
@@ -1496,10 +1510,13 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     if (!expectedExists)
                     {
                         permissionsChanged = true;
-                        desired = GetCreatePermissions(parent, stage, createMode);
+                        desired = verifyExpectedPermissions
+                            ? new UnixPermissionSnapshot { Mode = ModeText(expectedMode), Uid = expectedUid, Gid = expectedGid }
+                            : GetCreatePermissions(parent, stage, createMode);
                     }
                     receipt.Permissions = desired;
                     permissionsChanged = true; ApplyPermissions(stage.Fd, desired);
+                    RunMutationTestHook("publication-after-permission-apply-before-readback");
                     Sync(stage.Fd, false, "fsync-stage-after-permissions");
                     receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "stage-permissions-fsynced");
                     AssertPermissionSnapshot(stage.Fd, desired, "publication-stage-permissions");
@@ -1656,6 +1673,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             {
                 parent.Check(); transaction.Check(); AssertTransaction(transaction, parent);
                 bool cleanup = SameIdentity(Stat(parent.Fd, null), Stat(transaction.Fd, null));
+                if (!cleanup && PlatformPaths.IsTransactionStoreTarget(GetVerifiedPath(parent), leaf))
+                    throw new PlatformVerificationException("owned-file-removal", PlatformNative.GetOperatingSystem(), "target must stay outside .ai-instructions-txn");
                 if (cleanup && leaf != tombstoneLeaf)
                     throw new PlatformVerificationException("owned-file-removal", PlatformNative.GetOperatingSystem(), "cleanup mode requires identical private leaf names");
                 UnixLease target = OpenFile(parent, leaf, "Read", "OpenExisting");

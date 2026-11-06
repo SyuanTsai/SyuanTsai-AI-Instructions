@@ -19,6 +19,7 @@ $script:ExpectedPlatformRuntimeFunctionsToExport = @(
     'Enter-PlatformLock',
     'Publish-PlatformFile',
     'Remove-PlatformOwnedFile',
+    'Get-PlatformDirectoryState',
     'Move-PlatformOwnedDirectory',
     'Remove-PlatformOwnedDirectoryTree',
     'Get-PlatformPermissions',
@@ -1126,7 +1127,7 @@ function Assert-AiInstructionsRuntimeBundleV3 {
     Assert-AiInstructionsStringValue -Value $Bundle.projectionContractSha256 -Context 'Runtime bundle projectionContractSha256'
     if ([string]$Bundle.projectionContractSha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Runtime bundle projectionContractSha256 is invalid.' }
     if ($Bundle.requiredCapabilities -isnot [System.Array] -or @($Bundle.requiredCapabilities).Count -lt 1) { throw 'Runtime bundle requiredCapabilities must be a non-empty array.' }
-    $capabilities = @('directory-lease','file-lease','file-identity','lock','publication','owned-file-removal','permissions','process-isolation','owned-process','process-cleanup','powershell-resolution','pester-initialization','powershell-runtime','pester-module','process-environment')
+    $capabilities = @('directory-lease','file-lease','file-identity','lock','publication','owned-file-removal','directory-publication','permissions','process-isolation','owned-process','process-cleanup','powershell-resolution','pester-initialization','powershell-runtime','pester-module','process-environment')
     $seenCapabilities = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     foreach ($capability in @($Bundle.requiredCapabilities)) {
         if ($capability -isnot [string] -or [string]$capability -cnotin $capabilities) { throw "Runtime bundle contains unknown required capability '$capability'." }

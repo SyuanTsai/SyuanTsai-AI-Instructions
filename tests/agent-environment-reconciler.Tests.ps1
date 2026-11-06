@@ -554,6 +554,52 @@ Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode
         foreach($failpoint in $failpoints){$triggered|Should Contain $failpoint}
     }
 
+    # Scenario: Recovery has only journal.prev when a replacement journal is staged and the writer dies before publication.
+    # Purpose: Keep the sole durable fallback authoritative until journal.json has been published and read back.
+    It 'InterT82_retains_the_only_durable_journal_prev_across_stage_flush_FailFast' {
+        $transactionId=[guid]::NewGuid().ToString('N')
+        $transactionPath=Join-Path $TestDrive ".ai-instructions-txn/$transactionId"
+        New-Item -ItemType Directory -Force -Path $transactionPath|Out-Null
+        $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json -DateKind String
+        $journal.transactionId=$transactionId;$journal.phase='prepared'
+        foreach($operation in $journal.operations){$operation.state='pending'}
+        $previousPath=Join-Path $transactionPath 'journal.prev'
+        [IO.File]::WriteAllText($previousPath,($journal|ConvertTo-Json -Depth 30),[Text.UTF8Encoding]::new($false))
+        $nextPath=Join-Path $TestDrive 'fallback-next-journal.clixml';$next=$journal.PSObject.Copy();$next.phase='applying';$next|Export-Clixml -LiteralPath $nextPath
+        $childPath=Join-Path $TestDrive 'fallback-stage-flush-child.ps1'
+        @'
+param([string]$ModulePath,[string]$TransactionPath,[string]$JournalPath)
+$ErrorActionPreference='Stop'
+Import-Module $ModulePath -Force
+$module=Get-Module agent-environment-reconciler
+& $module {
+    param($RuntimeRoot,$TransactionPath,$JournalPath)
+    Import-AgentEnvironmentRuntimeModules -RuntimeRoot $RuntimeRoot
+    $lease=Open-PlatformDirectory -Root $TransactionPath -RootOnly
+    try{
+        $journal=Import-Clixml -LiteralPath $JournalPath
+        $env:AI_INSTRUCTIONS_USER_RECONCILER_FAILFAST='after-journal-stage-flush'
+        Write-AgentEnvironmentInstallJournal -TransactionPath $TransactionPath -TransactionLease $lease -Journal $journal
+    }finally{$lease.Dispose()}
+} (Split-Path -Parent $ModulePath) $TransactionPath $JournalPath
+'@|Set-Content -LiteralPath $childPath -Encoding UTF8
+
+        & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $childPath $script:ModulePath $transactionPath $nextPath 2>$null
+        $LASTEXITCODE|Should Not Be 0
+        Test-Path -LiteralPath $previousPath -PathType Leaf|Should Be $true
+        Test-Path -LiteralPath (Join-Path $transactionPath 'journal.json')|Should Be $false
+
+        $module=Get-Module agent-environment-reconciler
+        & $module {
+            param($RuntimeRoot,$TransactionPath,$JournalPath)
+            Import-AgentEnvironmentRuntimeModules -RuntimeRoot $RuntimeRoot
+            $lease=Open-PlatformDirectory -Root $TransactionPath -RootOnly
+            try{Write-AgentEnvironmentInstallJournal -TransactionPath $TransactionPath -TransactionLease $lease -Journal (Import-Clixml -LiteralPath $JournalPath)}finally{$lease.Dispose()}
+        } $script:RuntimeRoot $transactionPath $nextPath
+        Test-Path -LiteralPath (Join-Path $transactionPath 'journal.json') -PathType Leaf|Should Be $true
+        Test-Path -LiteralPath $previousPath|Should Be $false
+    }
+
     It 'installs a clean multi-source selection and becomes idempotent' {
         $desired = New-TestDesiredState -Root $staging -SkillIds @('alpha','beta')
         $first = Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply
@@ -1391,31 +1437,31 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
         $commit='89abcdef0123456789abcdef0123456789abcdef';@{schemaVersion=4;catalog=@{ref=$commit}}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $codexHome 'ai-instructions-sync.json') -Encoding UTF8;@{schemaVersion=2;repository='https://github.com/example/ai-instructions.git';commit=$commit}|ConvertTo-Json|Set-Content (Join-Path $runtime 'runtime-bundle.json') -Encoding UTF8
         $desired=New-TestDesiredState -Root (Join-Path $TestDrive 'entry-matrix-stage');$desiredPath=Join-Path $TestDrive 'entry-matrix-desired.clixml';$desired|Export-Clixml $desiredPath
         $oldDesired=$env:P8_DESIRED_STATE;$env:P8_DESIRED_STATE=$desiredPath
-        function Add-MatrixResidue([string]$Home,[string]$Classification,[string]$Layout){
-            $agents=Join-Path $Home '.agents';New-Item -ItemType Directory -Force -Path $agents|Out-Null
+        function Add-MatrixResidue([string]$MatrixUserHome,[string]$Classification,[string]$Layout){
+            $agents=Join-Path $MatrixUserHome '.agents';New-Item -ItemType Directory -Force -Path $agents|Out-Null
             if($Layout-in@('legacy-only','both')){[IO.File]::WriteAllText((Join-Path $agents 'update-agent-environment.recovery.json'),'{}')}
             if($Layout-in@('new-only','both')){
-                $name=if($Classification-ceq'invalid-name'){'invalid-name'}else{'0123456789abcdef0123456789abcdef'};$txn=Join-Path $Home ".ai-instructions-txn/$name";New-Item -ItemType Directory -Force -Path $txn|Out-Null
+                $name=if($Classification-ceq'invalid-name'){'invalid-name'}else{'0123456789abcdef0123456789abcdef'};$txn=Join-Path $MatrixUserHome ".ai-instructions-txn/$name";New-Item -ItemType Directory -Force -Path $txn|Out-Null
                 if($Classification-ceq'malformed'){[IO.File]::WriteAllText((Join-Path $txn 'journal.json'),'{')}
                 elseif($Classification-ceq'valid'){$journal=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'catalog/examples/ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json -DateKind String;$journal.transactionId=$name;[IO.File]::WriteAllText((Join-Path $txn 'journal.json'),($journal|ConvertTo-Json -Depth 30),[Text.UTF8Encoding]::new($false))}
             }
         }
         try{
             foreach($mode in @('verify','whatif')){foreach($classification in @('valid','malformed','orphan','invalid-name')){foreach($layout in @('legacy-only','new-only','both')){
-                $home=Join-Path $TestDrive "matrix-$mode-$classification-$layout";New-Item -ItemType Directory -Path $home|Out-Null;Add-MatrixResidue $home $classification $layout
-                $args=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$entry,'-CodexHome',$codexHome,'-UserHome',$home,'-OutputFormat','Json')+$(if($mode-ceq'verify'){@('-VerifyOnly')}else{@('-Apply','-WhatIf')})
+                $matrixUserHome=Join-Path $TestDrive "matrix-$mode-$classification-$layout";New-Item -ItemType Directory -Path $matrixUserHome|Out-Null;Add-MatrixResidue $matrixUserHome $classification $layout
+                $args=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$entry,'-CodexHome',$codexHome,'-UserHome',$matrixUserHome,'-OutputFormat','Json')+$(if($mode-ceq'verify'){@('-VerifyOnly')}else{@('-Apply','-WhatIf')})
                 $output=@(& $script:TestPowerShellExecutable @args);$exit=$LASTEXITCODE;$result=$output[-1]|ConvertFrom-Json
-                $exit|Should Be 1;$result.Code|Should Be 'interrupted-install';Test-Path -LiteralPath (Join-Path $home '.agents/skills/alpha/SKILL.md')|Should Be $false
-                if($layout-in@('new-only','both')){@(Get-ChildItem -Force -LiteralPath (Join-Path $home '.ai-instructions-txn')).Count|Should BeGreaterThan 0}
+                $exit|Should Be 1;$result.Code|Should Be 'interrupted-install';Test-Path -LiteralPath (Join-Path $matrixUserHome '.agents/skills/alpha/SKILL.md')|Should Be $false
+                if($layout-in@('new-only','both')){@(Get-ChildItem -Force -LiteralPath (Join-Path $matrixUserHome '.ai-instructions-txn')).Count|Should BeGreaterThan 0}
             }}}
             foreach($classification in @('valid','malformed','orphan','invalid-name')){
-                $home=Join-Path $TestDrive "matrix-recover-new-$classification";New-Item -ItemType Directory -Path $home|Out-Null;Add-MatrixResidue $home $classification 'new-only'
-                $output=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $codexHome -UserHome $home -Recover -OutputFormat Json);$exit=$LASTEXITCODE;$result=$output[-1]|ConvertFrom-Json
-                if($classification-in@('valid','orphan')){$exit|Should Be 0;$result.outcome|Should Be 'recovered';@(Get-ChildItem -Force -LiteralPath (Join-Path $home '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0}else{$exit|Should Be 1;$result.Code|Should Be 'interrupted-install';@(Get-ChildItem -Force -LiteralPath (Join-Path $home '.ai-instructions-txn')).Count|Should BeGreaterThan 0}
+                $matrixUserHome=Join-Path $TestDrive "matrix-recover-new-$classification";New-Item -ItemType Directory -Path $matrixUserHome|Out-Null;Add-MatrixResidue $matrixUserHome $classification 'new-only'
+                $output=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $codexHome -UserHome $matrixUserHome -Recover -OutputFormat Json);$exit=$LASTEXITCODE;$result=$output[-1]|ConvertFrom-Json
+                if($classification-in@('valid','orphan')){$exit|Should Be 0;$result.outcome|Should Be 'recovered';@(Get-ChildItem -Force -LiteralPath (Join-Path $matrixUserHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0}else{$exit|Should Be 1;$result.Code|Should Be 'interrupted-install';@(Get-ChildItem -Force -LiteralPath (Join-Path $matrixUserHome '.ai-instructions-txn')).Count|Should BeGreaterThan 0}
                 $bothHome=Join-Path $TestDrive "matrix-recover-both-$classification";New-Item -ItemType Directory -Path $bothHome|Out-Null;Add-MatrixResidue $bothHome $classification 'both'
                 $bothOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $codexHome -UserHome $bothHome -Recover -OutputFormat Json);$LASTEXITCODE|Should Be 1;($bothOutput[-1]|ConvertFrom-Json).Code|Should Be 'interrupted-install'
             }
-            foreach($mode in @('verify','whatif')){$home=Join-Path $TestDrive "matrix-baseline-$mode";New-Item -ItemType Directory -Path $home|Out-Null;$args=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$entry,'-CodexHome',$codexHome,'-UserHome',$home,'-OutputFormat','Json')+$(if($mode-ceq'verify'){@('-VerifyOnly')}else{@('-Apply','-WhatIf')});$output=@(& $script:TestPowerShellExecutable @args);$result=$output[-1]|ConvertFrom-Json;if($mode-ceq'verify'){$LASTEXITCODE|Should Be 2;$result.outcome|Should Be 'drift'}else{$LASTEXITCODE|Should Be 0;$result.outcome|Should Be 'planned'};Test-Path (Join-Path $home '.agents/skills/alpha/SKILL.md')|Should Be $false}
+            foreach($mode in @('verify','whatif')){$matrixUserHome=Join-Path $TestDrive "matrix-baseline-$mode";New-Item -ItemType Directory -Path $matrixUserHome|Out-Null;$args=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$entry,'-CodexHome',$codexHome,'-UserHome',$matrixUserHome,'-OutputFormat','Json')+$(if($mode-ceq'verify'){@('-VerifyOnly')}else{@('-Apply','-WhatIf')});$output=@(& $script:TestPowerShellExecutable @args);$result=$output[-1]|ConvertFrom-Json;if($mode-ceq'verify'){$LASTEXITCODE|Should Be 2;$result.outcome|Should Be 'drift'}else{$LASTEXITCODE|Should Be 0;$result.outcome|Should Be 'planned'};Test-Path (Join-Path $matrixUserHome '.agents/skills/alpha/SKILL.md')|Should Be $false}
             $downgradeHome=Join-Path $TestDrive 'matrix-downgrade';New-Item -ItemType Directory -Force -Path (Join-Path $downgradeHome '.agents')|Out-Null
             Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/user-skills-managed-manifest-v3.example.json') -Destination (Join-Path $downgradeHome '.agents/catalog-skills.manifest.json')
             $downgradeOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $codexHome -UserHome $downgradeHome -VerifyOnly -OutputFormat Json);$LASTEXITCODE|Should Be 1
@@ -1428,35 +1474,55 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
     # Scenario: A platform publication completes its rename but reports failure before the coordinator records operation.state=applied.
     # Purpose: Derive rollback from target/backup/stage identity evidence and restore the original instead of deleting its backup as stale transaction data.
     It 'InterT79_rolls_back_a_completed_platform_rename_from_observed_evidence' {
-        $home=Join-Path $TestDrive 'post-rename-rollback';$initial=New-TestDesiredState -Root (Join-Path $TestDrive 'post-rename-initial') -SkillIds @('alpha')
-        (Invoke-UserSkillsReconciliation -DesiredState $initial -UserHome $home -Mode Apply).outcome|Should Be 'applied'
-        $target=Join-Path $home '.agents/skills/alpha/SKILL.md';$before=[IO.File]::ReadAllBytes($target)
+        $testUserHome=Join-Path $TestDrive 'post-rename-rollback';$initial=New-TestDesiredState -Root (Join-Path $TestDrive 'post-rename-initial') -SkillIds @('alpha')
+        (Invoke-UserSkillsReconciliation -DesiredState $initial -UserHome $testUserHome -Mode Apply).outcome|Should Be 'applied'
+        $target=Join-Path $testUserHome '.agents/skills/alpha/SKILL.md';$before=[IO.File]::ReadAllBytes($target)
         $next=New-TestDesiredState -Root (Join-Path $TestDrive 'post-rename-next') -SkillIds @('alpha')
         [IO.File]::WriteAllText([string]$next.Files[0].stagedPath,"---`nname: alpha`ndescription: changed after rename`n---`n",[Text.UTF8Encoding]::new($false))
         $next.Files[0].sha256=(Get-FileHash -Algorithm SHA256 -LiteralPath ([string]$next.Files[0].stagedPath)).Hash.ToLowerInvariant();$next.Manifest.files[0].sha256=$next.Files[0].sha256
 
-        $failed=Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $home -Mode Apply -FailpointName after-platform-rename
+        $failed=Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $testUserHome -Mode Apply -FailpointName after-platform-rename
 
         $failed.outcome|Should Be 'failed';$failed.rollbackState|Should Be 'completed'
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($target))|Should Be ([Convert]::ToBase64String($before))
-        @(Get-ChildItem -Force -LiteralPath (Join-Path $home '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0
+        @(Get-ChildItem -Force -LiteralPath (Join-Path $testUserHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0
     }
 
     # Scenario: The final managed file for one Skill is retired from every USER projection while unrelated empty personal directories coexist.
     # Purpose: Prune only empty directories proven to have held managed files, after commit, across every projection root.
     It 'InterT80_prunes_retired_empty_Skill_directories_in_every_projection' {
-        $home=Join-Path $TestDrive 'projection-prune';$initial=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'projection-prune-initial')
-        (Invoke-UserSkillsReconciliation -DesiredState $initial -UserHome $home -Mode Apply).outcome|Should Be 'applied'
-        foreach($root in @('.agents/skills','.claude/skills','.copilot/skills')){New-Item -ItemType Directory -Force -Path (Join-Path $home "$root/personal-empty")|Out-Null}
+        $testUserHome=Join-Path $TestDrive 'projection-prune';$initial=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'projection-prune-initial')
+        (Invoke-UserSkillsReconciliation -DesiredState $initial -UserHome $testUserHome -Mode Apply).outcome|Should Be 'applied'
+        foreach($root in @('.agents/skills','.claude/skills','.copilot/skills')){New-Item -ItemType Directory -Force -Path (Join-Path $testUserHome "$root/personal-empty")|Out-Null}
         $retired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'projection-prune-retired')
         $retired.Files=@();$retired.Manifest.files=@();$retired.SkillIds=@()
 
-        (Invoke-UserSkillsReconciliation -DesiredState $retired -UserHome $home -Mode Apply).outcome|Should Be 'applied'
+        (Invoke-UserSkillsReconciliation -DesiredState $retired -UserHome $testUserHome -Mode Apply).outcome|Should Be 'applied'
 
         foreach($root in @('.agents/skills','.claude/skills','.copilot/skills')){
-            Test-Path -LiteralPath (Join-Path $home "$root/work-with-jira")|Should Be $false
-            Test-Path -LiteralPath (Join-Path $home "$root/personal-empty") -PathType Container|Should Be $true
+            Test-Path -LiteralPath (Join-Path $testUserHome "$root/work-with-jira")|Should Be $false
+            Test-Path -LiteralPath (Join-Path $testUserHome "$root/personal-empty") -PathType Container|Should Be $true
         }
+    }
+
+    # Scenario: Unmanaged content appears after the prune emptiness observation and before directory rename.
+    # Purpose: Revalidate the complete empty-directory inventory and preserve the new USER content in place.
+    It 'InterT83_preserves_unmanaged_content_raced_into_a_prune_candidate' {
+        $testUserHome=Join-Path $TestDrive 'projection-prune-race';$initial=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'projection-prune-race-initial')
+        (Invoke-UserSkillsReconciliation -DesiredState $initial -UserHome $testUserHome -Mode Apply).outcome|Should Be 'applied'
+        $retired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'projection-prune-race-retired')
+        $retired.Files=@();$retired.Manifest.files=@();$retired.SkillIds=@()
+        $external=Join-Path $testUserHome '.agents/skills/work-with-jira/external.txt'
+
+        $result=Invoke-UserSkillsReconciliation -DesiredState $retired -UserHome $testUserHome -Mode Apply -BeforeDirectoryPruneAction {
+            param($relative)
+            if($relative-ceq'.agents/skills/work-with-jira' -and -not(Test-Path -LiteralPath $external)){[IO.File]::WriteAllText($external,'unmanaged')}
+        }
+
+        $result.outcome|Should Be 'applied'
+        [IO.File]::ReadAllText($external)|Should Be 'unmanaged'
+        Test-Path -LiteralPath (Split-Path -Parent $external) -PathType Container|Should Be $true
+        @(Get-ChildItem -Force -LiteralPath (Join-Path $testUserHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0
     }
 
     # Scenario: Stable-entry failure text contains multiple refusal markers, including an unknown final marker.

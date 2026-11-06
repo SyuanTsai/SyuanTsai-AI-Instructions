@@ -843,9 +843,12 @@ Describe 'AI instructions runtime contracts' {
 
         $manifestInventoryFixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-manifest-inventory-hash')
         $manifestInventoryPath = Join-Path $manifestInventoryFixture.Root 'platform-runtime.psd1'
+        $manifestInventory = Import-PowerShellDataFile -LiteralPath $manifestInventoryPath
+        $windowsAdapterEntries = @($manifestInventory.PrivateData.PlatformRuntime.Inventory | Where-Object { [string]$_.Path -ceq 'platform/Windows.psm1' })
+        $windowsAdapterEntries.Count | Should Be 1
         Set-TestTextOccurrence `
             -Path $manifestInventoryPath `
-            -OldValue "Sha256 = '6312032ac138a7c3411f82e0c25d687738993e469f7f1e3f9f5dd4f21e568607'" `
+            -OldValue ("Sha256 = '" + [string]$windowsAdapterEntries[0].Sha256 + "'") `
             -NewValue ("Sha256 = '" + ('0' * 64) + "'")
         Update-TestRuntimeV3Inventory -Fixture $manifestInventoryFixture
         $manifestInventoryFixture.Bundle.platformRuntime.manifestSha256 = Get-TestCanonicalTextSha256 -Path $manifestInventoryPath
@@ -3045,9 +3048,32 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         (& $compare -FirstSddl 'D:(A;;FR;;;WD)(A;;FA;;;SY)' -SecondSddl 'D:(A;;FA;;;SY)(A;;FR;;;WD)') | Should Be $false
     }
 
+    # Scenario: A runtime bundle declares directory-publication as a target-host requirement.
+    # Purpose: Keep the strict runtime reader synchronized with the schema capability enum.
+    It 'UnitT206_accepts_directory_publication_as_a_known_runtime_capability' {
+        $fixture=New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-directory-publication')
+        $configuration=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v5.example.json')|ConvertFrom-Json
+        $fixture.Bundle.requiredCapabilities=@('directory-publication')
+        {Assert-AiInstructionsRuntimeBundleV3 -Bundle $fixture.Bundle -Configuration $configuration -RuntimeRoot $fixture.Root}|Should Not Throw
+        $schema=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\schemas\runtime-bundle-v3.schema.json')|ConvertFrom-Json
+        @($schema.properties.requiredCapabilities.items.enum)|Should Contain 'directory-publication'
+    }
+
+    # Scenario: A create-file operation records the permissions already applied and verified on its stage file.
+    # Purpose: Accept a legal non-null snapshot while preserving null as the other valid create-file form.
+    It 'UnitT207_accepts_create_file_with_a_non_null_permission_snapshot' {
+        if($PSVersionTable.PSVersion.Major -lt 7){throw 'UnitT207 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.'}
+        $journal=Get-TestInstallJournalV1
+        $journal.operations[1].permissions=$journal.operations[0].permissions
+        $json=$journal|ConvertTo-Json -Depth 20
+        $schemaPath=Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
+        {ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json|Out-Null}|Should Not Throw
+        (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue)|Should Be $true
+    }
+
     # Scenario: USER projection coordinator persists an install journal v1 under USER home.
     # Purpose: Add the component without a schema bump and bind its historical global USER lock basename.
-    It 'UnitT206_accepts_user_reconciler_with_the_fixed_USER_lock_leaf' {
+    It 'UnitT208_accepts_user_reconciler_with_the_fixed_USER_lock_leaf' {
         $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json -DateKind String
         $parsed=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal|ConvertTo-Json -Depth 20)
         $parsed.owner.component | Should Be 'user-reconciler'
@@ -3056,7 +3082,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
 
     # Scenario: A USER reconciler journal names another lock or omits the previous manifest digest.
     # Purpose: Keep lock-parent derivation and F2 generation evidence closed under journal v1.
-    It 'UnitT207_rejects_user_reconciler_lock_or_previous_manifest_digest_drift' {
+    It 'UnitT209_rejects_user_reconciler_lock_or_previous_manifest_digest_drift' {
         $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json -DateKind String
         $journal.lock.leaf='another.lock'
         { Assert-AiInstructionsInstallJournalV1 $journal | Out-Null } | Should Throw
@@ -3067,7 +3093,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
 
     # Scenario: Recovery evaluates a USER reconciler journal using the same exact-state decision contract.
     # Purpose: Prove the additive component does not fork D8 recovery semantics.
-    It 'UnitT208_uses_the_existing_recovery_decision_for_user_reconciler' {
+    It 'UnitT210_uses_the_existing_recovery_decision_for_user_reconciler' {
         $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json -DateKind String
         $journal.phase='applied'
         foreach($operation in $journal.operations){$operation.state='applied'}
@@ -3079,7 +3105,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
 
     # Scenario: The stable launcher has already scoped USER recovery to USER home and holds the install read lease.
     # Purpose: Permit only user-reconciler valid journals and orphans while keeping other components fail closed.
-    It 'UnitT209_scopes_transaction_disposition_for_user_reconciler' {
+    It 'UnitT211_scopes_transaction_disposition_for_user_reconciler' {
         (Get-AiInstructionsInstallTransactionDisposition -Classification valid-journal -Component user-reconciler).action | Should Be 'recover'
         (Get-AiInstructionsInstallTransactionDisposition -Classification orphan-without-journal -Component user-reconciler).action | Should Be 'purge-orphan'
         (Get-AiInstructionsInstallTransactionDisposition -Classification malformed-journal -Component user-reconciler).refusalCode | Should Be 'interrupted-install'
@@ -3087,7 +3113,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
 
     # Scenario: The additive journal example represents the USER projection coordinator.
     # Purpose: Keep its fixed lock leaf and manifest-byte generation digests executable-reader compatible.
-    It 'UnitT210_accepts_the_user_reconciler_install_journal_example' {
+    It 'UnitT212_accepts_the_user_reconciler_install_journal_example' {
         $path = Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json'
         $journal = Get-Content -Raw -Encoding UTF8 -LiteralPath $path | ConvertFrom-Json -DateKind String
         { Assert-AiInstructionsInstallJournalV1 -Journal $journal } | Should Not Throw

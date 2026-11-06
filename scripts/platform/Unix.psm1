@@ -20,6 +20,15 @@ function New-UnixPlatformVerificationError {
         $Message)
 }
 
+function Assert-UnixPlatformTargetPath {
+    param([Parameter(Mandatory=$true)] $ParentLease,[Parameter(Mandatory=$true)][string] $Leaf,[Parameter(Mandatory=$true)][string] $Capability,[switch] $AllowTransactionParent)
+    $parentPath=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetVerifiedPath($ParentLease)
+    if ([SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::IsTransactionStoreTarget($parentPath,$Leaf) -and -not $AllowTransactionParent) {
+        throw (New-UnixPlatformVerificationError $Capability 'The target must stay outside .ai-instructions-txn and must not use the reserved .ai-instructions-txn leaf.')
+    }
+    return $parentPath
+}
+
 function Get-UnixContractValue {
     param([AllowNull()] $Object,[Parameter(Mandatory=$true)][string] $Name,[switch] $Required)
     if ($null -eq $Object) {
@@ -268,12 +277,12 @@ function Assert-UnixJournalBinding {
         }
 
         $permissions = Get-UnixContractValue $Journal permissions
-        if (-not $expectedOriginal.exists) {
-            if ($null -ne $permissions) { throw [ArgumentException]::new('Journal create operation permissions must be null.') }
+        if ($null -eq $permissions) {
+            if ($expectedOriginal.exists) { throw [ArgumentException]::new('Journal permissions must use unix-mode for an existing target.') }
             return [pscustomobject]@{ hasPermissions=$false; mode=[uint32]0; uid=[uint64]0; gid=[uint64]0 }
         }
-        if ($null -eq $permissions -or (Get-UnixContractValue $permissions kind -Required) -cne 'unix-mode') {
-            throw [ArgumentException]::new('Journal permissions must use unix-mode for an existing target.')
+        if ((Get-UnixContractValue $permissions kind -Required) -cne 'unix-mode') {
+            throw [ArgumentException]::new('Journal permissions must use unix-mode.')
         }
         $mode = Get-UnixContractValue $permissions mode -Required
         $uid = Get-UnixContractValue $permissions uid -Required
@@ -343,6 +352,9 @@ function Publish-UnixPlatformFile {
     if ([string]::IsNullOrEmpty($DisplacedLeaf)) { $DisplacedLeaf=$null }
     try {
         [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($Leaf)
+        $journalStore=[StringComparer]::OrdinalIgnoreCase.Equals($Leaf,'journal.json') -and [object]::ReferenceEquals($ParentLease,$TransactionLease)
+        if($journalStore -and $PSBoundParameters.ContainsKey('Journal')){throw [ArgumentException]::new('Journal store publication must not supply Journal.')}
+        [void](Assert-UnixPlatformTargetPath $ParentLease $Leaf publication -AllowTransactionParent:$journalStore)
         $expected = Assert-UnixExpectedState $ExpectedState ExpectedState -AllowAbsent
         if ($expected.exists -ne ($null -ne $DisplacedLeaf)) {
             throw [ArgumentException]::new('DisplacedLeaf must be supplied exactly when ExpectedState.exists is true.')
@@ -352,6 +364,10 @@ function Publish-UnixPlatformFile {
             throw [ArgumentException]::new('NoReplace requires ExpectedState.exists=false and relies on the native rename to reject a raced destination.')
         }
         $stage = Assert-UnixExpectedStage $ExpectedStage
+        if($journalStore -and (-not [StringComparer]::OrdinalIgnoreCase.Equals([string]$StageLease.Name,'journal.stage') -or
+            ($expected.exists -and -not [StringComparer]::OrdinalIgnoreCase.Equals($DisplacedLeaf,'journal.prev')))){
+            throw [ArgumentException]::new('Journal store publication requires journal.stage and uses journal.prev when replacing journal.json.')
+        }
         $journalBinding = Assert-UnixJournalBinding $Journal $ParentLease $TransactionLease $Leaf $StageLease $DisplacedLeaf $ExpectedState $ExpectedStage
     }
     catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] { throw }
@@ -405,16 +421,19 @@ function Remove-UnixPlatformOwnedFile {
         if (($null -ne $TransactionLease) -ne ($null -ne $TombstoneLeaf)) {
             throw [ArgumentException]::new('TransactionLease and TombstoneLeaf must be supplied together.')
         }
-        if (-not $tombstone -and $null -ne $Journal) {
+        if (-not $tombstone -and $PSBoundParameters.ContainsKey('Journal')) {
             throw [ArgumentException]::new('Journal is forbidden in cleanup mode.')
         }
-        $expected = Assert-UnixExpectedState $ExpectedState ExpectedState
         if ($tombstone) {
             [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($TombstoneLeaf)
+            [void](Assert-UnixPlatformTargetPath $ParentLease $Leaf owned-file-removal)
             if ([uint64]$ParentLease.Observation.Device -eq [uint64]$TransactionLease.Observation.Device -and
                 [uint64]$ParentLease.Observation.Inode -eq [uint64]$TransactionLease.Observation.Inode) {
                 throw [ArgumentException]::new('Tombstone mode requires a target parent outside TransactionLease; omit TransactionLease and TombstoneLeaf for cleanup mode.')
             }
+        }
+        $expected = Assert-UnixExpectedState $ExpectedState ExpectedState
+        if ($tombstone) {
             $journalBinding = Assert-UnixJournalBinding $Journal $ParentLease $TransactionLease $Leaf $null $TombstoneLeaf $ExpectedState $null -Remove
         }
         else {
