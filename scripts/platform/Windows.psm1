@@ -355,7 +355,10 @@ function Publish-WindowsPlatformFile {
     [void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($Leaf)
     if ($null -ne $DisplacedLeaf) { [void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($DisplacedLeaf) }
     if ($NoReplace -and [bool]$ExpectedState.exists) { throw (New-WindowsPlatformVerificationError 'publication' 'NoReplace requires ExpectedState.exists=false and relies on the native rename to reject a raced destination.') }
-    $transactionContext=Assert-WindowsPlatformTransactionLease $ParentLease $TransactionLease 'publication'
+    $sameLeaseIdentity=[uint64]$ParentLease.Observation.Device -eq [uint64]$TransactionLease.Observation.Device -and [uint64]$ParentLease.Observation.Inode -eq [uint64]$TransactionLease.Observation.Inode
+    $journalStorePublication=$sameLeaseIdentity -and $Leaf-ceq'journal.json' -and [IO.Path]::GetFileName((Get-WindowsPlatformLeasePath $StageLease))-ceq'journal.stage' -and ($null-eq$DisplacedLeaf-or$DisplacedLeaf-ceq'journal.prev')
+    if($sameLeaseIdentity-and-not$journalStorePublication){throw (New-WindowsPlatformVerificationError 'publication' 'Same-directory publication is reserved for the exact install-journal store leaves.')}
+    $transactionContext=if($journalStorePublication){$path=Get-WindowsPlatformLeasePath $TransactionLease;[pscustomobject]@{parentPath=$path;transactionPath=$path;rootPath=[IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName($path));transactionId=[IO.Path]::GetFileName($path)}}else{Assert-WindowsPlatformTransactionLease $ParentLease $TransactionLease 'publication'}
     Assert-WindowsPlatformLeasePaths $ParentLease $TransactionLease 'publication'
     $stagePath=Get-WindowsPlatformLeasePath $StageLease
     $stageLeaf=[IO.Path]::GetFileName($stagePath)

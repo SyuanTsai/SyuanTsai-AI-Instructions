@@ -3048,7 +3048,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
     # Scenario: USER projection coordinator persists an install journal v1 under USER home.
     # Purpose: Add the component without a schema bump and bind its historical global USER lock basename.
     It 'UnitT206_accepts_user_reconciler_with_the_fixed_USER_lock_leaf' {
-        $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json
+        $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json -DateKind String
         $parsed=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal|ConvertTo-Json -Depth 20)
         $parsed.owner.component | Should Be 'user-reconciler'
         $parsed.lock.leaf | Should Be 'update-agent-environment.lock'
@@ -3057,7 +3057,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
     # Scenario: A USER reconciler journal names another lock or omits the previous manifest digest.
     # Purpose: Keep lock-parent derivation and F2 generation evidence closed under journal v1.
     It 'UnitT207_rejects_user_reconciler_lock_or_previous_manifest_digest_drift' {
-        $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json
+        $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json -DateKind String
         $journal.lock.leaf='another.lock'
         { Assert-AiInstructionsInstallJournalV1 $journal | Out-Null } | Should Throw
         $journal.lock.leaf='update-agent-environment.lock'
@@ -3068,7 +3068,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
     # Scenario: Recovery evaluates a USER reconciler journal using the same exact-state decision contract.
     # Purpose: Prove the additive component does not fork D8 recovery semantics.
     It 'UnitT208_uses_the_existing_recovery_decision_for_user_reconciler' {
-        $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json
+        $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json -DateKind String
         $journal.phase='applied'
         foreach($operation in $journal.operations){$operation.state='applied'}
         $observations=@{}
@@ -3089,7 +3089,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
     # Purpose: Keep its fixed lock leaf and manifest-byte generation digests executable-reader compatible.
     It 'UnitT210_accepts_the_user_reconciler_install_journal_example' {
         $path = Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json'
-        $journal = Get-Content -Raw -Encoding UTF8 -LiteralPath $path | ConvertFrom-Json
+        $journal = Get-Content -Raw -Encoding UTF8 -LiteralPath $path | ConvertFrom-Json -DateKind String
         { Assert-AiInstructionsInstallJournalV1 -Journal $journal } | Should Not Throw
         $journal.owner.component | Should Be 'user-reconciler'
         $journal.lock.leaf | Should Be 'update-agent-environment.lock'

@@ -13,6 +13,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:agentEnvironmentRuntimeReadLock = $null
+$script:agentEnvironmentTrustedReadLease = $null
 $script:agentEnvironmentRecoveryStarted = $false
 
 function New-AgentEnvironmentStableRecoveryFailureResult {
@@ -152,10 +153,11 @@ try {
 
     Remove-Module agent-environment-reconciler -Force -ErrorAction SilentlyContinue
     Import-Module $reconcilerPath -Force
+    $script:agentEnvironmentTrustedReadLease = New-AgentEnvironmentInstallReadLeaseEvidence -Lease $script:agentEnvironmentRuntimeReadLock
 
     if ($Recover) {
         $script:agentEnvironmentRecoveryStarted = $true
-        $finalResult = Invoke-UserSkillsRecovery -UserHome $userHomePath -InstallReadLease $script:agentEnvironmentRuntimeReadLock
+        $finalResult = Invoke-UserSkillsRecovery -UserHome $userHomePath -InstallReadLease $script:agentEnvironmentTrustedReadLease
     }
     else {
         $configurationPath = Join-Path $codexHomePath 'ai-instructions-sync.json'
@@ -181,7 +183,7 @@ try {
         $mode = if ($VerifyOnly) { 'VerifyOnly' } elseif ($WhatIfPreference) { 'WhatIf' } else { 'Apply' }
         $finalResult = Invoke-UserSkillsReconciliation -DesiredState $desiredState -UserHome $userHomePath -Mode $mode `
             -ForceReinstallManagedSkills:$ForceReinstallManagedSkills -MigrateLegacyCatalogSkills:$MigrateLegacyCatalogSkills `
-            -InstallReadLease $script:agentEnvironmentRuntimeReadLock
+            -InstallReadLease $script:agentEnvironmentTrustedReadLease
         $finalResult | Add-Member -NotePropertyName runtimeCommit -NotePropertyValue ([string]$bundle.commit) -Force
     }
 }
