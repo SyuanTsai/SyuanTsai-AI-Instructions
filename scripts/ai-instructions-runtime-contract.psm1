@@ -68,8 +68,11 @@ function Get-AiInstructionsRefusalCode {
         $candidate = $candidate.InnerException
     }
     $text = [string]$ErrorRecordOrException
-    $match = [regex]::Match($text,'\[ai-instructions-refusal-code=([a-z-]+)\]')
-    if ($match.Success -and $match.Groups[1].Value -cin $script:AiInstructionsRefusalCodes) { return $match.Groups[1].Value }
+    $matches = [regex]::Matches($text,'\[ai-instructions-refusal-code=([a-z-]+)\]')
+    if ($matches.Count -gt 0) {
+        $match = $matches[$matches.Count - 1]
+        if ($match.Groups[1].Value -cin $script:AiInstructionsRefusalCodes) { return $match.Groups[1].Value }
+    }
     return $null
 }
 
@@ -1801,13 +1804,75 @@ function ConvertFrom-AiInstructionsInstallJournalV1Json {
     }
 }
 
+function Test-AiInstructionsJsonNumber {
+    param([Parameter(Mandatory = $true)][object] $Value)
+    return [Type]::GetTypeCode($Value.GetType()) -in @(
+        [TypeCode]::Byte,[TypeCode]::SByte,[TypeCode]::Int16,[TypeCode]::UInt16,
+        [TypeCode]::Int32,[TypeCode]::UInt32,[TypeCode]::Int64,[TypeCode]::UInt64,
+        [TypeCode]::Single,[TypeCode]::Double,[TypeCode]::Decimal
+    )
+}
+
+function Get-AiInstructionsJsonObjectProperties {
+    param([Parameter(Mandatory = $true)][object] $Value)
+    if ($Value -is [System.Collections.IDictionary]) {
+        foreach ($key in $Value.Keys) { [pscustomobject]@{ Name=[string]$key; Value=$Value[$key] } }
+        return
+    }
+    foreach ($property in @($Value.PSObject.Properties)) {
+        [pscustomobject]@{ Name=[string]$property.Name; Value=$property.Value }
+    }
+}
+
+function Test-AiInstructionsJsonSemanticEqual {
+    param([AllowNull()][object] $Left,[AllowNull()][object] $Right)
+    if ($null -eq $Left -or $null -eq $Right) { return $null -eq $Left -and $null -eq $Right }
+
+    $leftIsNumber = Test-AiInstructionsJsonNumber -Value $Left
+    $rightIsNumber = Test-AiInstructionsJsonNumber -Value $Right
+    if ($leftIsNumber -or $rightIsNumber) {
+        if (-not ($leftIsNumber -and $rightIsNumber)) { return $false }
+        try { return [decimal]$Left -eq [decimal]$Right }
+        catch { return $false }
+    }
+    if ($Left -is [string] -or $Right -is [string]) {
+        return $Left -is [string] -and $Right -is [string] -and
+            [string]::Equals([string]$Left,[string]$Right,[StringComparison]::Ordinal)
+    }
+    if ($Left -is [bool] -or $Right -is [bool]) {
+        return $Left -is [bool] -and $Right -is [bool] -and [bool]$Left -eq [bool]$Right
+    }
+    $leftIsArray = $Left -is [System.Collections.IList]
+    $rightIsArray = $Right -is [System.Collections.IList]
+    if ($leftIsArray -or $rightIsArray) {
+        if (-not ($leftIsArray -and $rightIsArray) -or $Left.Count -ne $Right.Count) { return $false }
+        for ($index = 0; $index -lt $Left.Count; $index++) {
+            if (-not (Test-AiInstructionsJsonSemanticEqual -Left $Left[$index] -Right $Right[$index])) { return $false }
+        }
+        return $true
+    }
+    $leftIsObject = $Left -is [System.Collections.IDictionary] -or $Left -is [Management.Automation.PSCustomObject]
+    $rightIsObject = $Right -is [System.Collections.IDictionary] -or $Right -is [Management.Automation.PSCustomObject]
+    if ($leftIsObject -or $rightIsObject) {
+        if (-not ($leftIsObject -and $rightIsObject)) { return $false }
+        $leftProperties = @(Get-AiInstructionsJsonObjectProperties -Value $Left)
+        $rightProperties = @(Get-AiInstructionsJsonObjectProperties -Value $Right)
+        if ($leftProperties.Count -ne $rightProperties.Count) { return $false }
+        foreach ($leftProperty in $leftProperties) {
+            $rightProperty = @($rightProperties | Where-Object { [string]::Equals($_.Name,$leftProperty.Name,[StringComparison]::Ordinal) })
+            if ($rightProperty.Count -ne 1 -or -not (Test-AiInstructionsJsonSemanticEqual -Left $leftProperty.Value -Right $rightProperty[0].Value)) { return $false }
+        }
+        return $true
+    }
+    return $Left.GetType() -eq $Right.GetType() -and $Left.Equals($Right)
+}
+
 function Assert-AiInstructionsInstallJournalStoreTransition {
     param([Parameter(Mandatory = $true)][object] $Previous,[Parameter(Mandatory = $true)][object] $Next)
     Assert-AiInstructionsInstallJournalV1 -Journal $Previous | Out-Null
     Assert-AiInstructionsInstallJournalV1 -Journal $Next | Out-Null
-    $canonical = { param($Value) $Value | ConvertTo-Json -Depth 20 -Compress }
     foreach ($name in @('schemaVersion','kind','transactionId','createdAtUtc','owner','platform','lock','generation')) {
-        if ((& $canonical $Previous.PSObject.Properties[$name].Value) -cne (& $canonical $Next.PSObject.Properties[$name].Value)) {
+        if (-not (Test-AiInstructionsJsonSemanticEqual -Left $Previous.PSObject.Properties[$name].Value -Right $Next.PSObject.Properties[$name].Value)) {
             throw "AI instructions install journal store transition cannot change $name."
         }
     }
@@ -1817,7 +1882,7 @@ function Assert-AiInstructionsInstallJournalStoreTransition {
         $nextOperation = [ordered]@{}
         foreach ($property in @($Previous.operations[$index].PSObject.Properties)) { if ($property.Name -cne 'state') { $previousOperation[$property.Name] = $property.Value } }
         foreach ($property in @($Next.operations[$index].PSObject.Properties)) { if ($property.Name -cne 'state') { $nextOperation[$property.Name] = $property.Value } }
-        if ((& $canonical ([pscustomobject]$previousOperation)) -cne (& $canonical ([pscustomobject]$nextOperation))) { throw "AI instructions install journal store transition cannot change operation $($index + 1) fields other than state." }
+        if (-not (Test-AiInstructionsJsonSemanticEqual -Left ([pscustomobject]$previousOperation) -Right ([pscustomobject]$nextOperation))) { throw "AI instructions install journal store transition cannot change operation $($index + 1) fields other than state." }
         $fromState = [string]$Previous.operations[$index].state
         $toState = [string]$Next.operations[$index].state
         $allowedState = $fromState -ceq $toState -or
@@ -2219,15 +2284,69 @@ function Get-AiInstructionsInstallRecoveryPlan {
     }
 }
 
+function Test-AiInstructionsReservedJournalPathSegment {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    foreach ($segment in @($Path -split '[/\\]')) {
+        if ([string]::Equals($segment,'.ai-instructions-txn',[StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
+function Get-AiInstructionsPhysicalPath {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    $pathToResolve = [System.IO.Path]::GetFullPath($Path)
+    $replacementCount = 0
+    while ($true) {
+        $root = [System.IO.Path]::GetPathRoot($pathToResolve)
+        $segments = @($pathToResolve.Substring($root.Length) -split '[/\\]' | Where-Object { $_.Length -gt 0 })
+        $current = $root
+        $replaced = $false
+        for ($index = 0; $index -lt $segments.Count; $index++) {
+            $candidate = Join-Path $current $segments[$index]
+            $item = $null
+            try { $item = Get-Item -Force -LiteralPath $candidate -ErrorAction Stop }
+            catch [System.Management.Automation.ItemNotFoundException] { $item = $null }
+            if ($null -ne $item) {
+                if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    $linkTarget = $null
+                    foreach ($propertyName in @('LinkTarget','Target')) {
+                        $property = $item.PSObject.Properties[$propertyName]
+                        if ($null -eq $property) { continue }
+                        foreach ($value in @($property.Value)) {
+                            if (-not [string]::IsNullOrWhiteSpace([string]$value)) { $linkTarget = [string]$value; break }
+                        }
+                        if ($null -ne $linkTarget) { break }
+                    }
+                    if ($null -eq $linkTarget) { throw "Cannot resolve reparse point '$candidate' to a link target." }
+                    $replacementCount++
+                    if ($replacementCount -gt 40) { throw 'Physical path resolution exceeded 40 link replacements.' }
+                    $targetPath = if ([System.IO.Path]::IsPathRooted($linkTarget)) { $linkTarget } else { Join-Path (Split-Path -Parent $candidate) $linkTarget }
+                    $pathToResolve = [System.IO.Path]::GetFullPath($targetPath)
+                    for ($tailIndex = $index + 1; $tailIndex -lt $segments.Count; $tailIndex++) {
+                        $pathToResolve = Join-Path $pathToResolve $segments[$tailIndex]
+                    }
+                    $pathToResolve = [System.IO.Path]::GetFullPath($pathToResolve)
+                    $replaced = $true
+                    break
+                }
+            }
+            $current = $candidate
+        }
+        if (-not $replaced) { return $pathToResolve }
+    }
+}
+
 function Write-AiInstructionsJsonFile {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string] $Path,[Parameter(Mandatory = $true)][object] $Document)
 
     $fullPath = [System.IO.Path]::GetFullPath($Path)
-    foreach ($segment in @($fullPath -split '[/\\]')) {
-        if ([string]::Equals($segment,'.ai-instructions-txn',[StringComparison]::OrdinalIgnoreCase)) {
-            throw 'Write-AiInstructionsJsonFile must not write inside the reserved .ai-instructions-txn journal store.'
-        }
+    if (Test-AiInstructionsReservedJournalPathSegment -Path $fullPath) {
+        throw 'Write-AiInstructionsJsonFile must not write inside the reserved .ai-instructions-txn journal store.'
+    }
+    $physicalPath = Get-AiInstructionsPhysicalPath -Path $fullPath
+    if (Test-AiInstructionsReservedJournalPathSegment -Path $physicalPath) {
+        throw 'Write-AiInstructionsJsonFile must not write inside the reserved .ai-instructions-txn journal store.'
     }
     $parent = Split-Path -Parent $fullPath
     if (-not [string]::IsNullOrWhiteSpace($parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }

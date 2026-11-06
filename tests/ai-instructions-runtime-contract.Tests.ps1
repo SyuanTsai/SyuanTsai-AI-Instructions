@@ -2771,4 +2771,56 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         ($stateSteps.sequence -join ',') | Should Be '2,1'
         ($stateSteps.state -join ',') | Should Be 'rolled-back,rolled-back'
     }
+
+    # Scenario: A directory link aliases either a transaction journal directory or an ordinary directory.
+    # Purpose: Reject physical journal-store aliases before mutation while preserving supported writes through ordinary links.
+    It 'UnitT196_resolves_directory_links_before_generic_json_writes' {
+        $root=Join-Path $TestDrive 'writer-link-root'
+        $transactionDirectory=Join-Path (Join-Path $root '.ai-instructions-txn') '0123456789abcdef0123456789abcdef'
+        $ordinaryDirectory=Join-Path $root 'ordinary-target'
+        $journalAlias=Join-Path $root 'journal-alias'
+        $ordinaryAlias=Join-Path $root 'ordinary-alias'
+        New-Item -ItemType Directory -Force -Path $transactionDirectory,$ordinaryDirectory | Out-Null
+        $linkType=if($env:OS -eq 'Windows_NT'){'Junction'}else{'SymbolicLink'}
+        New-Item -ItemType $linkType -Path $journalAlias -Target $transactionDirectory | Out-Null
+        New-Item -ItemType $linkType -Path $ordinaryAlias -Target $ordinaryDirectory | Out-Null
+
+        { Write-AiInstructionsJsonFile -Path (Join-Path $journalAlias 'journal.json') -Document @{ value=1 } } | Should Throw
+        @(Get-ChildItem -Force -LiteralPath $transactionDirectory).Count | Should Be 0
+
+        $ordinaryPath=Join-Path $ordinaryAlias 'document.json'
+        { Write-AiInstructionsJsonFile -Path $ordinaryPath -Document @{ value=2 } } | Should Not Throw
+        (Get-Content -Raw -LiteralPath (Join-Path $ordinaryDirectory 'document.json') | ConvertFrom-Json).value | Should Be 2
+    }
+
+    # Scenario: Text contains an obsolete refusal marker before the authoritative marker appended at the end.
+    # Purpose: Parse only the last marker and never fall back when that final code is outside the closed vocabulary.
+    It 'UnitT197_uses_the_last_refusal_marker_in_text' {
+        (Get-AiInstructionsRefusalCode 'old [ai-instructions-refusal-code=closure-invalid] final [ai-instructions-refusal-code=interrupted-install]') | Should Be 'interrupted-install'
+        (Get-AiInstructionsRefusalCode 'old [ai-instructions-refusal-code=closure-invalid] final [ai-instructions-refusal-code=unknown]') | Should BeNullOrEmpty
+    }
+
+    # Scenario: Equivalent journals serialize immutable objects and nested operation fields in different property orders.
+    # Purpose: Compare JSON values recursively by meaning while still rejecting an immutable nested value change.
+    It 'UnitT198_compares_store_transition_fields_by_json_semantics' {
+        $previous=Get-TestInstallJournalV1
+        $next=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($previous|ConvertTo-Json -Depth 20)
+        $next.owner=[pscustomobject][ordered]@{ processStartIdentity=$next.owner.processStartIdentity; processId=[decimal]$next.owner.processId; component=$next.owner.component }
+        $operation=$next.operations[0]
+        $operation.original=[pscustomobject][ordered]@{
+            identity=[pscustomobject][ordered]@{ fileId=$operation.original.identity.fileId; device=$operation.original.identity.device; kind=$operation.original.identity.kind }
+            length=[decimal]$operation.original.length
+            sha256=$operation.original.sha256
+            exists=$operation.original.exists
+        }
+        $next.operations[0]=[pscustomobject][ordered]@{
+            state=$operation.state; applied=$operation.applied; permissions=$operation.permissions; backupIdentity=$operation.backupIdentity
+            original=$operation.original; quarantineLeaf=$operation.quarantineLeaf; backupLeaf=$operation.backupLeaf; stageLeaf=$operation.stageLeaf
+            targetRelativePath=$operation.targetRelativePath; method=$operation.method; kind=$operation.kind; sequence=$operation.sequence
+        }
+
+        { Assert-AiInstructionsInstallJournalStoreTransition -Previous $previous -Next $next | Out-Null } | Should Not Throw
+        $next.operations[0].original.identity.fileId='changed'
+        { Assert-AiInstructionsInstallJournalStoreTransition -Previous $previous -Next $next | Out-Null } | Should Throw
+    }
 }
