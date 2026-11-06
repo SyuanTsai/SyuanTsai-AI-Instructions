@@ -176,6 +176,24 @@ function New-TestInstallReadLeaseEvidence {
     return [pscustomobject]@{Evidence=$evidence;Stream=$evidence.Stream;Path=$lockPath;Created=$created}
 }
 
+function Copy-TestPlatformRuntimeClosure {
+    param([Parameter(Mandatory=$true)][string]$Destination)
+    $manifestPath=Join-Path $script:RuntimeRoot 'platform-runtime.psd1'
+    $manifest=Import-PowerShellDataFile -LiteralPath $manifestPath
+    foreach($relativePath in @($manifest.FileList)){
+        $source=Join-Path $script:RuntimeRoot ([string]$relativePath)
+        $target=Join-Path $Destination ([string]$relativePath)
+        New-Item -ItemType Directory -Force -Path ([IO.Path]::GetDirectoryName($target))|Out-Null
+        Copy-Item -LiteralPath $source -Destination $target -Force
+    }
+}
+
+function Copy-TestRecoveryRuntimeDependencies {
+    param([Parameter(Mandatory=$true)][string]$Destination)
+    Copy-Item -LiteralPath (Join-Path $script:RuntimeRoot 'ai-instructions-runtime-contract.psm1') -Destination $Destination -Force
+    Copy-TestPlatformRuntimeClosure -Destination $Destination
+}
+
 Describe 'user-scoped Agent Skills reconciliation' {
     # Scenario: Production encounters a v3/v5 generation before the P7e gate and pins are installed.
     # Purpose: Keep the production refusal centralized and typed while function-level fixtures can exercise P8.
@@ -531,7 +549,7 @@ $desired=Import-Clixml -LiteralPath $DesiredPath
 $env:AI_INSTRUCTIONS_USER_RECONCILER_FAILFAST=$Failpoint
 Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode Apply -FailpointName $Failpoint -FailureAfterMutationCount $FailureAfter|Out-Null
 '@|Set-Content -LiteralPath $childScript -Encoding UTF8
-        $failpoints=@('after-journal-stage-flush','after-journal-publish','after-operation-journal','after-original-rename','after-applied-rename','after-parent-flush','during-rollback','before-committed-cleanup')
+        $failpoints=@('after-staged-subtree-verification','after-journal-stage-flush','after-journal-publish','after-operation-journal','after-original-rename','after-applied-rename','after-parent-flush','during-rollback','before-committed-cleanup')
         $triggered=New-Object Collections.Generic.List[string]
         foreach($failpoint in $failpoints){
             $caseHome=Join-Path $TestDrive ("failfast-home-$failpoint")
@@ -541,6 +559,7 @@ Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode
             New-Item -ItemType Directory -Force -Path $caseHome,$caseStage,$caseRuntime|Out-Null
             Copy-Item -LiteralPath $script:ModulePath -Destination (Join-Path $caseRuntime 'agent-environment-reconciler.psm1')
             Copy-Item -LiteralPath $script:ContractPath -Destination (Join-Path $caseRuntime 'skills-catalog-contract.psm1')
+            Copy-TestRecoveryRuntimeDependencies -Destination $caseRuntime
             $initial=New-TestDesiredState -Root (Join-Path $caseStage 'initial')
             (Invoke-UserSkillsReconciliation -DesiredState $initial -UserHome $caseHome -Mode Apply).outcome|Should Be 'applied'
             $desired=New-TestDesiredState -Root (Join-Path $caseStage 'next')
@@ -549,6 +568,7 @@ Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode
             $desired.Files[0].sha256=$nextSha;$desired.Manifest.files[0].sha256=$nextSha
             $desiredPath=Join-Path $TestDrive ("desired-$failpoint.clixml");$desired|Export-Clixml -LiteralPath $desiredPath
             $failureAfter=if($failpoint-ceq'during-rollback'){1}else{0}
+            if($failpoint-ceq'after-staged-subtree-verification'){Remove-Item -LiteralPath (Join-Path $caseHome '.agents/skills/alpha') -Recurse -Force}
             & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $childScript (Join-Path $caseRuntime 'agent-environment-reconciler.psm1') $desiredPath $caseHome $failpoint $failureAfter 2>$null
             $LASTEXITCODE | Should Not Be 0
             @(Get-ChildItem -Force -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count | Should BeGreaterThan 0
@@ -895,6 +915,42 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
             if($null-ne$deleteSharingStream){$deleteSharingStream.Dispose()}
             if($null-eq$existingBytes){Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue}else{[IO.File]::WriteAllBytes($lockPath,[byte[]]$existingBytes)}
         }
+    }
+
+    # Scenario: A fresh-home subtree is durably staged and read back, then the writer dies before publishing its first journal.
+    # Purpose: Prove pre-journal recovery sees only a removable orphan while verified payload bytes never reach the USER target.
+    It 'InterT94_recovers_a_verified_staged_subtree_orphan_before_journal_publication' {
+        $caseHome=Join-Path $TestDrive 'verified-subtree-orphan-home'
+        $desired=New-TestDesiredState -Root (Join-Path $TestDrive 'verified-subtree-orphan-stage')
+        $desiredPath=Join-Path $TestDrive 'verified-subtree-orphan.clixml';$desired|Export-Clixml -LiteralPath $desiredPath
+        $childPath=Join-Path $TestDrive 'verified-subtree-orphan-child.ps1'
+        @'
+param([string]$ModulePath,[string]$DesiredPath,[string]$UserHome)
+$ErrorActionPreference='Stop'
+Import-Module $ModulePath -Force
+$desired=Import-Clixml -LiteralPath $DesiredPath
+$env:AI_INSTRUCTIONS_USER_RECONCILER_FAILFAST='after-staged-subtree-verification'
+Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode Apply -FailpointName after-staged-subtree-verification|Out-Null
+'@|Set-Content -LiteralPath $childPath -Encoding UTF8
+
+        & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $childPath $script:ModulePath $desiredPath $caseHome 2>$null
+        $LASTEXITCODE|Should Not Be 0
+        $target=Join-Path $caseHome '.agents/skills/alpha/SKILL.md'
+        Test-Path -LiteralPath $target|Should Be $false
+        $transactions=@(Get-ChildItem -Force -LiteralPath (Join-Path $caseHome '.ai-instructions-txn'))
+        $transactions.Count|Should Be 1
+        Test-Path -LiteralPath (Join-Path $transactions[0].FullName 'journal.json')|Should Be $false
+        $stageRoot=@(Get-ChildItem -Directory -LiteralPath $transactions[0].FullName -Filter 'directory-*')
+        $stageRoot.Count|Should Be 1
+        $stagedPayload=Join-Path $stageRoot[0].FullName 'skills/alpha/SKILL.md'
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $stagedPayload).Hash.ToLowerInvariant()|Should Be $desired.Files[0].sha256
+
+        $readLease=New-TestInstallReadLeaseEvidence
+        try{$recovered=Invoke-UserSkillsRecovery -UserHome $caseHome -InstallReadLease $readLease.Evidence}
+        finally{$readLease.Stream.Dispose();if($readLease.Created){Remove-Item -LiteralPath $readLease.Path -Force -ErrorAction SilentlyContinue}}
+        $recovered.outcome|Should Be 'recovered'
+        @(Get-ChildItem -Force -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0
+        Test-Path -LiteralPath $target|Should Be $false
     }
 
     It 'installs a clean multi-source selection and becomes idempotent' {
@@ -1591,6 +1647,7 @@ if (-not $ValidateOnly) { throw 'Validation switch required.' }
 '@)
         Copy-Item -LiteralPath $script:ModulePath -Destination (Join-Path $runtimeRoot 'agent-environment-reconciler.psm1') -Force
         Copy-Item -LiteralPath $script:ContractPath -Destination (Join-Path $runtimeRoot 'skills-catalog-contract.psm1') -Force
+        Copy-TestRecoveryRuntimeDependencies -Destination $runtimeRoot
         Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v2.example.json') -Destination (Join-Path $userHome '.agents\catalog-skills.manifest.json') -Force
         $stderrPath = Join-Path $TestDrive ('recovery-v2-stderr-' + [Guid]::NewGuid().ToString('N') + '.log')
 
@@ -1621,6 +1678,7 @@ if (-not $ValidateOnly) { throw 'Validation switch required.' }
 '@)
         Copy-Item -LiteralPath $script:ModulePath -Destination (Join-Path $runtimeRoot 'agent-environment-reconciler.psm1') -Force
         Copy-Item -LiteralPath $script:ContractPath -Destination (Join-Path $runtimeRoot 'skills-catalog-contract.psm1') -Force
+        Copy-TestRecoveryRuntimeDependencies -Destination $runtimeRoot
         $manifestPath = Join-Path $agentsRoot 'catalog-skills.manifest.json'
         Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\user-skills-managed-manifest-v3.example.json') -Destination $manifestPath -Force
         $manifestBytesBefore = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($manifestPath))
@@ -1651,6 +1709,7 @@ if (-not $ValidateOnly) { throw 'Validation switch required.' }
 '@)
         Copy-Item -LiteralPath $script:ModulePath -Destination (Join-Path $runtimeRoot 'agent-environment-reconciler.psm1') -Force
         Copy-Item -LiteralPath $script:ContractPath -Destination (Join-Path $runtimeRoot 'skills-catalog-contract.psm1') -Force
+        Copy-TestRecoveryRuntimeDependencies -Destination $runtimeRoot
 
         $journalPath = Join-Path $userHome '.agents\update-agent-environment.recovery.json'
         $journal = [pscustomobject][ordered]@{
