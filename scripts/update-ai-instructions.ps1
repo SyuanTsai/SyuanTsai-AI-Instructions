@@ -96,8 +96,18 @@ try {
             }
             & $installedLauncher -ValidateOnly
             $installedRuntimeRoot = Split-Path -Parent $installedModule
-            foreach ($fileName in @('ai-instructions-updater.psm1','ai-instructions-runtime-contract.psm1','WindowsDacl.psm1','safe-zip.psm1','skills-catalog-contract.psm1')) {
-                Copy-Item -LiteralPath (Join-Path $installedRuntimeRoot $fileName) -Destination (Join-Path $runtimeSnapshotRoot $fileName)
+            foreach ($fileName in @(
+                'ai-instructions-updater.psm1','ai-instructions-runtime-contract.psm1','ai-instructions-install-transaction.psm1',
+                'WindowsDacl.psm1','safe-zip.psm1','skills-catalog-contract.psm1','installer-safe-mutation.psm1',
+                'platform-runtime.psd1','platform-runtime.psm1','Resolve-StandardValidationTool.ps1',
+                'platform/PlatformNative.cs','platform/UnixNative.cs','platform/WindowsNative.cs','platform/WindowsInstallerMutation.cs',
+                'platform/OwnedProcess.cs','platform/UnixProcess.cs','platform/WindowsProcess.cs','platform/Unix.psm1',
+                'platform/RuntimePreparation.psm1','platform/Windows.psm1','platform/Linux.psm1','platform/MacOS.psm1'
+            )) {
+                $snapshotPath = Join-Path $runtimeSnapshotRoot $fileName
+                $snapshotParent = Split-Path -Parent $snapshotPath
+                if (-not (Test-Path -LiteralPath $snapshotParent -PathType Container)) { New-Item -ItemType Directory -Force -Path $snapshotParent | Out-Null }
+                Copy-Item -LiteralPath (Join-Path $installedRuntimeRoot $fileName) -Destination $snapshotPath
             }
         }
         finally { if ($null -ne $runtimeReadLock) { $runtimeReadLock.Dispose() } }

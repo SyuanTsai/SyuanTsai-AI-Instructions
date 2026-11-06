@@ -944,6 +944,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/ai-instructions-install-transaction.psm1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/ai-instructions-rollout.psm1",
       "license": "Apache-2.0"
     },

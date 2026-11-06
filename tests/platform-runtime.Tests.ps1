@@ -2492,16 +2492,17 @@ Describe 'Platform runtime contract' {
         }
     }
 
-    # Scenario: A Windows caller requires publication before Windows capability probing is exposed.
-    # Purpose: Preserve P7b's typed fail-closed capability receipt while Unix registers its native tests conditionally.
+    # Scenario: A Windows caller requires the durable file publication and owned-file removal primitives.
+    # Purpose: Bind availability to a live no-replace publication and tombstone-removal probe instead of OS inference.
     if ($IsWindows) {
-        It 'UnitT20_throws_a_typed_failure_when_a_required_capability_is_not_available' {
-            $caught=$null
-            try {Get-PlatformCapabilities -Required @('publication')|Out-Null}catch{$caught=$_}
-            $caught | Should Not BeNullOrEmpty
-            $caught.Exception.GetType().Name | Should Be 'PlatformCapabilityUnavailableException'
-            $caught.Exception.Capability | Should Be 'publication'
-            $caught.Exception.Platform | Should Be $script:ExpectedOs
+        It 'UnitT20_reports_windows_file_publication_from_native_probe_evidence' {
+            $receipt=Get-PlatformCapabilities -Required @('publication','owned-file-removal')
+            foreach($name in @('publication','owned-file-removal')){
+                $capability=@($receipt.capabilities|Where-Object name -ceq $name)
+                $capability.Count|Should Be 1
+                $capability[0].status|Should Be available
+                ($capability[0].evidence -join ' ')|Should Match 'confirmed.*durability'
+            }
         }
     }
 
@@ -2612,7 +2613,8 @@ Describe 'Platform runtime contract' {
         $entryPoints = @(
             @{ Path = 'scripts/Invoke-PesterShardProcess.ps1'; Function = 'Import-PesterShardRuntime'; Variable = 'manifestSha256' },
             @{ Path = 'scripts/Invoke-StandardValidation.ps1'; Function = 'Initialize-StandardValidationPlatformRuntime'; Variable = 'pin' },
-            @{ Path = 'scripts/StandardSemanticBridge.psm1'; Function = 'Initialize-StandardSemanticBridgePlatformRuntime'; Variable = 'pin' }
+            @{ Path = 'scripts/StandardSemanticBridge.psm1'; Function = 'Initialize-StandardSemanticBridgePlatformRuntime'; Variable = 'pin' },
+            @{ Path = 'scripts/install-ai-instructions-bootstrap.ps1'; Function = 'Assert-InstallerPlatformRuntimeSourceInventory'; Variable = 'expectedManifestSha256' }
         )
         foreach ($entryPoint in $entryPoints) {
             $tokens = $null

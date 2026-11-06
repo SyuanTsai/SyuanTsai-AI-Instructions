@@ -481,6 +481,60 @@ function Test-PlatformDirectoryPublication {
     return [pscustomobject]@{status=$status;evidence=[pscustomobject]$evidence}
 }
 
+function Test-WindowsFilePublicationPrimitives {
+    $platform=Get-CurrentPlatformName
+    if($platform -cne 'windows'){
+        return [pscustomobject]@{status='unverified';evidence=[pscustomobject][ordered]@{implementation='Windows file publication probe does not apply to this host.'}}
+    }
+    $status='unavailable'
+    $evidence=[ordered]@{publication='not verified';ownedFileRemoval='not verified'}
+    $rootLease=$null;$parentLease=$null;$transactionRootLease=$null;$transactionLease=$null;$stageLease=$null
+    $root=[IO.Path]::GetTempPath().TrimEnd('\','/')
+    $name='platform-file-publication-probe-'+[Guid]::NewGuid().ToString('N')
+    $path=Join-Path $root $name
+    $transactionId=[Guid]::NewGuid().ToString('N')
+    $transactionIdentity=$null
+    try{
+        $rootLease=Open-PlatformDirectory -Root $root -RelativePath $name -CreatePrivate
+        [void][IO.Directory]::CreateDirectory((Join-Path $path 'target'))
+        [void][IO.Directory]::CreateDirectory((Join-Path $path '.ai-instructions-txn'))
+        [void][IO.Directory]::CreateDirectory((Join-Path $path ".ai-instructions-txn/$transactionId"))
+        $parentLease=Open-PlatformDirectory -Root $path -RelativePath 'target'
+        $transactionRootLease=Open-PlatformDirectory -Root $path -RelativePath '.ai-instructions-txn'
+        $transactionLease=Open-PlatformDirectory -Root $path -RelativePath ".ai-instructions-txn/$transactionId"
+        $transactionIdentity=[pscustomobject][ordered]@{kind='windows-file-id';device=('0x{0:x}' -f [uint64]$transactionLease.Observation.Device);fileId=('0x{0:x}' -f [uint64]$transactionLease.Observation.Inode)}
+        [byte[]]$bytes=[Text.UTF8Encoding]::new($false).GetBytes('platform publication probe')
+        $sha=[Security.Cryptography.SHA256]::Create()
+        try{$digest=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+        $stageLease=Open-PlatformFile -ParentLease $transactionLease -Leaf 'stage' -Access ReadWrite -CreateMode CreateNew
+        $stageLease.WriteNewBytes($bytes)
+        $stageIdentity=[pscustomobject][ordered]@{kind='windows-file-id';device=('0x{0:x}' -f [uint64]$stageLease.Observation.Device);fileId=('0x{0:x}' -f [uint64]$stageLease.Observation.Inode)}
+        $missing=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}
+        $staged=[pscustomobject][ordered]@{exists=$true;sha256=$digest;length=[int64]$bytes.Length;identity=$stageIdentity}
+        $receipt=Publish-PlatformFile -ParentLease $parentLease -Leaf 'published' -TransactionLease $transactionLease -StageLease $stageLease -ExpectedState $missing -ExpectedStage $staged -NoReplace
+        $stageLease.Dispose();$stageLease=$null
+        if([string]$receipt.durability -cne 'confirmed'){throw 'File publication did not return confirmed durability.'}
+        $evidence.publication='Create-file publication used native no-replace rename with confirmed file and directory durability.'
+        $published=[pscustomobject][ordered]@{exists=$true;sha256=$digest;length=[int64]$bytes.Length;identity=$receipt.appliedIdentity}
+        $removeReceipt=Remove-PlatformOwnedFile -ParentLease $parentLease -Leaf 'published' -ExpectedState $published -TransactionLease $transactionLease -TombstoneLeaf 'removed'
+        if([string]$removeReceipt.durability -cne 'confirmed'){throw 'Owned-file removal did not return confirmed durability.'}
+        $evidence.ownedFileRemoval='Owned-file removal used tombstone rename with confirmed file and directory durability.'
+        $status='available'
+    }
+    catch{$evidence['failure']=$_.Exception.Message}
+    finally{
+        if($null -ne $stageLease){$stageLease.Dispose();$stageLease=$null}
+        if($null -ne $transactionLease){$transactionLease.Dispose();$transactionLease=$null}
+        if($null -ne $transactionRootLease -and $null -ne $transactionIdentity){
+            try{Remove-PlatformOwnedDirectoryTree -TransactionRootLease $transactionRootLease -Leaf $transactionId -ExpectedIdentity $transactionIdentity|Out-Null}catch{$evidence['cleanupFailure']=$_.Exception.Message}
+        }
+        if($null -ne $parentLease){Clear-PlatformProbe -Directory $parentLease -Path (Join-Path $path 'target') -Entries @() -Evidence $evidence;$parentLease=$null}
+        if($null -ne $transactionRootLease){Clear-PlatformProbe -Directory $transactionRootLease -Path (Join-Path $path '.ai-instructions-txn') -Entries @() -Evidence $evidence;$transactionRootLease=$null}
+        if($null -ne $rootLease){Clear-PlatformProbe -Directory $rootLease -Path $path -Entries @() -Evidence $evidence;$rootLease=$null}
+    }
+    return [pscustomobject]@{status=$status;evidence=[pscustomobject]$evidence}
+}
+
 function Test-UnixPublicationPrimitives {
     $platform = Get-CurrentPlatformName
     if ($platform -cnotin @('linux','macos')) {
@@ -516,6 +570,7 @@ function Get-PlatformCapabilities {
     $platform = Get-CurrentPlatformName
     $primitiveProbe = Test-PlatformPrimitives
     $directoryPublicationProbe = Test-PlatformDirectoryPublication
+    $windowsFilePublicationProbe = Test-WindowsFilePublicationPrimitives
     $publicationProbe = Test-UnixPublicationPrimitives
     $permissionProbe = Test-UnixPermissionPrimitives
     $processProbe = Test-PlatformOwnedProcess
@@ -600,6 +655,10 @@ function Get-PlatformCapabilities {
         if ($capability.name -ceq 'directory-publication') {
             $capability.status = $directoryPublicationProbe.status
             $capability.evidence = [object[]]@($directoryPublicationProbe.evidence)
+        }
+        if ($platform -ceq 'windows' -and $capability.name -cin @('publication','owned-file-removal')) {
+            $capability.status = $windowsFilePublicationProbe.status
+            $capability.evidence = [object[]]@($windowsFilePublicationProbe.evidence)
         }
         if ($platform -cne 'windows' -and $capability.name -cin @('publication','owned-file-removal')) {
             $capability.status = $publicationProbe.status
