@@ -27,6 +27,54 @@ $script:ExpectedPlatformRuntimeFunctionsToExport = @(
     'Set-PlatformProcessEnvironment'
 )
 $script:ExpectedPlatformRuntimeEmptyExports = @('CmdletsToExport','VariablesToExport','AliasesToExport')
+$script:AiInstructionsRefusalCodes = @(
+    'capability-unavailable','platform-mismatch','downgrade-refused','mixed-generation','unsupported-version',
+    'closure-invalid','interrupted-install','projection-runtime-unavailable','runtime-baseline-unavailable'
+)
+
+if ($null -eq ('SyuanTsai.AiInstructions.AiInstructionsRefusalException' -as [type])) {
+    Add-Type -TypeDefinition @'
+namespace SyuanTsai.AiInstructions {
+    public sealed class AiInstructionsRefusalException : System.InvalidOperationException {
+        public string Code { get; private set; }
+        public AiInstructionsRefusalException(string code, string message) : base(message) { Code = code; }
+        public AiInstructionsRefusalException(string code, string message, System.Exception inner) : base(message, inner) { Code = code; }
+    }
+}
+'@
+}
+
+function Get-AiInstructionsRefusalCodes { return [string[]]@($script:AiInstructionsRefusalCodes) }
+
+function New-AiInstructionsRefusalException {
+    param(
+        [Parameter(Mandatory = $true)][string] $Code,
+        [Parameter(Mandatory = $true)][string] $Message,
+        [AllowNull()][System.Exception] $InnerException = $null
+    )
+    if ($Code -cnotin $script:AiInstructionsRefusalCodes) { throw [ArgumentException]::new("Unknown AI instructions refusal code '$Code'.",'Code') }
+    $formattedMessage = "$Message [ai-instructions-refusal-code=$Code]"
+    if ($null -eq $InnerException) { return [SyuanTsai.AiInstructions.AiInstructionsRefusalException]::new($Code,$formattedMessage) }
+    return [SyuanTsai.AiInstructions.AiInstructionsRefusalException]::new($Code,$formattedMessage,$InnerException)
+}
+
+function Get-AiInstructionsRefusalCode {
+    param([Parameter(Mandatory = $true)][AllowNull()][object] $ErrorRecordOrException)
+    $candidate = $ErrorRecordOrException
+    if ($candidate -is [Management.Automation.ErrorRecord]) { $candidate = $candidate.Exception }
+    while ($candidate -is [Exception]) {
+        if ($candidate -is [SyuanTsai.AiInstructions.AiInstructionsRefusalException] -and
+            [string]$candidate.Code -cin $script:AiInstructionsRefusalCodes) { return [string]$candidate.Code }
+        $candidate = $candidate.InnerException
+    }
+    $text = [string]$ErrorRecordOrException
+    $matches = [regex]::Matches($text,'\[ai-instructions-refusal-code=([^\]\r\n]*)\]')
+    if ($matches.Count -gt 0) {
+        $match = $matches[$matches.Count - 1]
+        if ($match.Groups[1].Value -cin $script:AiInstructionsRefusalCodes) { return $match.Groups[1].Value }
+    }
+    return $null
+}
 
 function Get-AiInstructionsSkillsCatalogContractModule {
     if ($null -ne $script:SkillsCatalogContractModule) { return $script:SkillsCatalogContractModule }
@@ -1396,6 +1444,33 @@ function Assert-AiInstructionsInstallJournalFileState {
     }
 }
 
+function Assert-AiInstructionsInstallJournalDirectoryState {
+    param([AllowNull()][object] $State,[Parameter(Mandatory = $true)][string] $Context)
+    Assert-AiInstructionsInstallJournalExactProperties -Object $State -Names @('exists','identity','inventorySha256','entryCount') -Context $Context
+    if ($State.exists -isnot [bool]) { throw "$Context.exists must be a boolean." }
+    if ($State.exists) {
+        if ($State.inventorySha256 -isnot [string] -or [string]$State.inventorySha256 -cnotmatch '^[0-9a-f]{64}$') { throw "$Context.inventorySha256 must be a lowercase SHA-256 hash when exists is true." }
+        Assert-AiInstructionsInstallJournalInteger -Value $State.entryCount -Context "$Context.entryCount" -Minimum 0
+    }
+    elseif ($null -ne $State.identity -or $null -ne $State.inventorySha256 -or $null -ne $State.entryCount) {
+        throw "$Context.identity, $Context.inventorySha256, and $Context.entryCount must be null when exists is false."
+    }
+}
+
+function Get-AiInstructionsInstallJournalDirectoryState {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Inventory,[AllowNull()][object] $Identity)
+    return [pscustomobject][ordered]@{
+        exists = $true
+        identity = $Identity
+        inventorySha256 = Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $Inventory
+        entryCount = @($Inventory).Count
+    }
+}
+
+function Get-AiInstructionsInstallJournalStoreLeaves {
+    return [pscustomobject][ordered]@{ directory='.ai-instructions-txn'; journal='journal.json'; stage='journal.stage'; previous='journal.prev' }
+}
+
 function Assert-AiInstructionsInstallJournalV1 {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][object] $Journal)
@@ -1457,12 +1532,12 @@ function Assert-AiInstructionsInstallJournalV1 {
     $expectedSequence = 1
     foreach ($operation in @($Journal.operations)) {
         $context = "AI instructions install journal operation sequence $expectedSequence"
-        Assert-AiInstructionsInstallJournalExactProperties -Object $operation -Names @('sequence','kind','method','targetRelativePath','stageLeaf','backupLeaf','original','backupIdentity','applied','permissions','state') -Context $context
+        Assert-AiInstructionsInstallJournalExactProperties -Object $operation -Names @('sequence','kind','method','targetRelativePath','stageLeaf','backupLeaf','quarantineLeaf','original','backupIdentity','applied','permissions','state') -Context $context
         Assert-AiInstructionsInstallJournalInteger -Value $operation.sequence -Context "$context.sequence" -Minimum 1
         if ([int64]$operation.sequence -ne $expectedSequence) { throw "$context.sequence must be $expectedSequence for a continuous sequence." }
         $sequence = [int64]$operation.sequence
         $context = "AI instructions install journal operation sequence $sequence"
-        if ($operation.kind -isnot [string] -or [string]$operation.kind -cnotin @('write-file','create-file','remove-file','swap-directory')) { throw "$context.kind is invalid." }
+        if ($operation.kind -isnot [string] -or [string]$operation.kind -cnotin @('write-file','create-file','remove-file','swap-directory','create-directory')) { throw "$context.kind is invalid." }
         if ($operation.method -isnot [string] -or [string]$operation.method -cnotin @('stage-rename','tombstone-rename')) { throw "$context.method is invalid." }
         if ($operation.state -isnot [string] -or [string]$operation.state -cnotin @('pending','staged','applied','rolled-back')) { throw "$context.state is invalid." }
         if ([string]$operation.kind -ceq 'remove-file' -and [string]$operation.method -cne 'tombstone-rename') { throw "$context.method must be tombstone-rename for remove-file." }
@@ -1529,34 +1604,47 @@ function Assert-AiInstructionsInstallJournalV1 {
             throw "$context.method tombstone-rename does not allow state staged."
         }
         Assert-AiInstructionsInstallJournalLeaf -Value $operation.backupLeaf -Context "$context.backupLeaf" -AllowNull -PortableName
-        if ([string]$operation.kind -ceq 'create-file' -and $null -ne $operation.backupLeaf) {
-            throw "$context.backupLeaf must be null for create-file."
+        if ([string]$operation.kind -in @('create-file','create-directory') -and $null -ne $operation.backupLeaf) {
+            throw "$context.backupLeaf must be null for $($operation.kind)."
         }
-        foreach ($leaf in @($operation.stageLeaf,$operation.backupLeaf)) {
+        Assert-AiInstructionsInstallJournalLeaf -Value $operation.quarantineLeaf -Context "$context.quarantineLeaf" -AllowNull -PortableName
+        if ([string]$operation.kind -in @('swap-directory','create-directory')) {
+            if ($null -eq $operation.quarantineLeaf) { throw "$context.quarantineLeaf must not be null for $($operation.kind)." }
+        }
+        elseif ($null -ne $operation.quarantineLeaf) { throw "$context.quarantineLeaf must be null for file operations." }
+        foreach ($leaf in @($operation.stageLeaf,$operation.backupLeaf,$operation.quarantineLeaf)) {
             if ($null -ne $leaf) {
                 $leafKey = Get-AiInstructionsInstallJournalPortableNameKey -Value ([string]$leaf)
-                if (-not $leaves.Add($leafKey)) { throw "$context stageLeaf and backupLeaf values must be unique after Unicode NFC and invariant case normalization." }
+                if ($leafKey -ceq 'JOURNAL' -or $leafKey.StartsWith('JOURNAL.',[StringComparison]::Ordinal)) { throw "$context transaction leaves must not use the reserved journal store namespace." }
+                if (-not $leaves.Add($leafKey)) { throw "$context stageLeaf and backupLeaf and quarantineLeaf values must be unique after Unicode NFC and invariant case normalization." }
             }
         }
-        Assert-AiInstructionsInstallJournalFileState -State $operation.original -Context "$context.original"
-        Assert-AiInstructionsInstallJournalFileState -State $operation.applied -Context "$context.applied"
+        $isDirectoryOperation = [string]$operation.kind -in @('swap-directory','create-directory')
+        if ($isDirectoryOperation) {
+            Assert-AiInstructionsInstallJournalDirectoryState -State $operation.original -Context "$context.original"
+            Assert-AiInstructionsInstallJournalDirectoryState -State $operation.applied -Context "$context.applied"
+        }
+        else {
+            Assert-AiInstructionsInstallJournalFileState -State $operation.original -Context "$context.original"
+            Assert-AiInstructionsInstallJournalFileState -State $operation.applied -Context "$context.applied"
+        }
 
         switch ([string]$operation.kind) {
             'create-file' { if ($operation.original.exists -or -not $operation.applied.exists) { throw "$context kind create-file requires original.exists=false and applied.exists=true." } }
+            'create-directory' { if ($operation.original.exists -or -not $operation.applied.exists) { throw "$context kind create-directory requires original.exists=false and applied.exists=true." } }
             'remove-file' { if (-not $operation.original.exists -or $operation.applied.exists) { throw "$context kind remove-file requires original.exists=true and applied.exists=false." } }
             default { if (-not $operation.original.exists -or -not $operation.applied.exists) { throw "$context kind $($operation.kind) requires original.exists=true and applied.exists=true." } }
         }
         if ($operation.original.exists -and $null -eq $operation.backupLeaf) { throw "$context.backupLeaf must not be null when original.exists is true." }
         Assert-AiInstructionsInstallJournalIdentity -Identity $operation.original.identity -Context "$context.original.identity" -ExpectedKind $expectedIdentityKind -AllowNull:(-not [bool]$operation.original.exists)
         if (-not $operation.original.exists -and $null -ne $operation.original.identity) { throw "$context.original.identity must be null when exists is false." }
-        $backupIdentityMayBeNull = -not [bool]$operation.original.exists -or
-            ([string]$operation.state -ceq 'pending' -and [string]$operation.kind -cne 'remove-file')
-        Assert-AiInstructionsInstallJournalIdentity -Identity $operation.backupIdentity -Context "$context.backupIdentity" -ExpectedKind $expectedIdentityKind -AllowNull:$backupIdentityMayBeNull
+        Assert-AiInstructionsInstallJournalIdentity -Identity $operation.backupIdentity -Context "$context.backupIdentity" -ExpectedKind $expectedIdentityKind -AllowNull:(-not [bool]$operation.original.exists)
         if (-not $operation.original.exists -and $null -ne $operation.backupIdentity) { throw "$context.backupIdentity must be null when original.exists is false." }
-        if ([string]$operation.kind -ceq 'remove-file' -and
+        if ($operation.original.exists -and
             -not (Test-AiInstructionsInstallJournalIdentityMatch -Observed $operation.backupIdentity -Expected $operation.original.identity)) {
-            throw "$context.backupIdentity must equal original.identity for remove-file tombstone rename."
+            throw "$context.backupIdentity must equal original.identity because rename preserves identity."
         }
+        if ([string]$operation.kind -eq 'create-directory' -and $null -ne $operation.permissions) { throw "$context.permissions must be null for create-directory." }
         if ($operation.original.exists -and $null -eq $operation.permissions) { throw "$context.permissions must not be null when original.exists is true." }
         if ($null -ne $operation.permissions) {
             if ($operation.permissions.kind -isnot [string]) { throw "$context.permissions.kind is invalid." }
@@ -1582,7 +1670,7 @@ function Assert-AiInstructionsInstallJournalV1 {
             $expectedPermissionsKind = if ([string]$Journal.platform.os -ceq 'windows') { 'windows-sddl' } else { 'unix-mode' }
             if ([string]$operation.permissions.kind -cne $expectedPermissionsKind) { throw "$context.permissions.kind must be $expectedPermissionsKind for the journal platform." }
         }
-        $appliedIdentityMayBeNull = -not [bool]$operation.applied.exists -or [string]$operation.state -ceq 'pending'
+        $appliedIdentityMayBeNull = -not [bool]$operation.applied.exists
         Assert-AiInstructionsInstallJournalIdentity -Identity $operation.applied.identity -Context "$context.applied.identity" -ExpectedKind $expectedIdentityKind -AllowNull:$appliedIdentityMayBeNull
         if (-not $operation.applied.exists -and $null -ne $operation.applied.identity) { throw "$context.applied.identity must be null when exists is false." }
         if ([string]$Journal.phase -ceq 'prepared' -and [string]$operation.state -cnotin @('pending','staged')) { throw "$context.state is inconsistent with phase prepared." }
@@ -1697,7 +1785,10 @@ function Assert-AiInstructionsInstallJournalJsonStringUnicode {
 
 function ConvertFrom-AiInstructionsInstallJournalV1Json {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true,ValueFromPipeline = $true)][string] $Json)
+    param(
+        [Parameter(Mandatory = $true,ValueFromPipeline = $true)][string] $Json,
+        [string] $ExpectedTransactionId
+    )
     process {
         Assert-AiInstructionsInstallJournalUnambiguousJson -Json $Json
         $convertParameters = @{ InputObject=$Json; ErrorAction='Stop' }
@@ -1705,7 +1796,168 @@ function ConvertFrom-AiInstructionsInstallJournalV1Json {
         try { $journal = ConvertFrom-Json @convertParameters }
         catch { throw 'AI instructions install journal JSON is invalid.' }
         if ($null -eq $journal -or $journal -is [System.Array] -or $journal -is [string] -or $journal -is [ValueType]) { throw 'AI instructions install journal JSON root must be an object.' }
-        Write-Output (Assert-AiInstructionsInstallJournalV1 -Journal $journal)
+        $journal = Assert-AiInstructionsInstallJournalV1 -Journal $journal
+        if ($PSBoundParameters.ContainsKey('ExpectedTransactionId') -and [string]$journal.transactionId -cne $ExpectedTransactionId) {
+            throw 'AI instructions install journal transactionId does not match the expected transaction directory.'
+        }
+        Write-Output $journal
+    }
+}
+
+function Test-AiInstructionsJsonNumber {
+    param([Parameter(Mandatory = $true)][object] $Value)
+    return [Type]::GetTypeCode($Value.GetType()) -in @(
+        [TypeCode]::Byte,[TypeCode]::SByte,[TypeCode]::Int16,[TypeCode]::UInt16,
+        [TypeCode]::Int32,[TypeCode]::UInt32,[TypeCode]::Int64,[TypeCode]::UInt64,
+        [TypeCode]::Single,[TypeCode]::Double,[TypeCode]::Decimal
+    )
+}
+
+function Get-AiInstructionsJsonObjectProperties {
+    param([Parameter(Mandatory = $true)][object] $Value)
+    if ($Value -is [System.Collections.IDictionary]) {
+        foreach ($key in $Value.Keys) { [pscustomobject]@{ Name=[string]$key; Value=$Value[$key] } }
+        return
+    }
+    foreach ($property in @($Value.PSObject.Properties)) {
+        [pscustomobject]@{ Name=[string]$property.Name; Value=$property.Value }
+    }
+}
+
+function Test-AiInstructionsJsonSemanticEqual {
+    param([AllowNull()][object] $Left,[AllowNull()][object] $Right)
+    if ($null -eq $Left -or $null -eq $Right) { return $null -eq $Left -and $null -eq $Right }
+
+    $leftIsNumber = Test-AiInstructionsJsonNumber -Value $Left
+    $rightIsNumber = Test-AiInstructionsJsonNumber -Value $Right
+    if ($leftIsNumber -or $rightIsNumber) {
+        if (-not ($leftIsNumber -and $rightIsNumber)) { return $false }
+        try { return [decimal]$Left -eq [decimal]$Right }
+        catch { return $false }
+    }
+    if ($Left -is [string] -or $Right -is [string]) {
+        return $Left -is [string] -and $Right -is [string] -and
+            [string]::Equals([string]$Left,[string]$Right,[StringComparison]::Ordinal)
+    }
+    if ($Left -is [bool] -or $Right -is [bool]) {
+        return $Left -is [bool] -and $Right -is [bool] -and [bool]$Left -eq [bool]$Right
+    }
+    $leftIsArray = $Left -is [System.Collections.IList]
+    $rightIsArray = $Right -is [System.Collections.IList]
+    if ($leftIsArray -or $rightIsArray) {
+        if (-not ($leftIsArray -and $rightIsArray) -or $Left.Count -ne $Right.Count) { return $false }
+        for ($index = 0; $index -lt $Left.Count; $index++) {
+            if (-not (Test-AiInstructionsJsonSemanticEqual -Left $Left[$index] -Right $Right[$index])) { return $false }
+        }
+        return $true
+    }
+    $leftIsObject = $Left -is [System.Collections.IDictionary] -or $Left -is [Management.Automation.PSCustomObject]
+    $rightIsObject = $Right -is [System.Collections.IDictionary] -or $Right -is [Management.Automation.PSCustomObject]
+    if ($leftIsObject -or $rightIsObject) {
+        if (-not ($leftIsObject -and $rightIsObject)) { return $false }
+        $leftProperties = @(Get-AiInstructionsJsonObjectProperties -Value $Left)
+        $rightProperties = @(Get-AiInstructionsJsonObjectProperties -Value $Right)
+        if ($leftProperties.Count -ne $rightProperties.Count) { return $false }
+        foreach ($leftProperty in $leftProperties) {
+            $rightProperty = @($rightProperties | Where-Object { [string]::Equals($_.Name,$leftProperty.Name,[StringComparison]::Ordinal) })
+            if ($rightProperty.Count -ne 1 -or -not (Test-AiInstructionsJsonSemanticEqual -Left $leftProperty.Value -Right $rightProperty[0].Value)) { return $false }
+        }
+        return $true
+    }
+    return $Left.GetType() -eq $Right.GetType() -and $Left.Equals($Right)
+}
+
+function Assert-AiInstructionsInstallJournalStoreTransition {
+    param([Parameter(Mandatory = $true)][object] $Previous,[Parameter(Mandatory = $true)][object] $Next)
+    Assert-AiInstructionsInstallJournalV1 -Journal $Previous | Out-Null
+    Assert-AiInstructionsInstallJournalV1 -Journal $Next | Out-Null
+    foreach ($name in @('schemaVersion','kind','transactionId','createdAtUtc','owner','platform','lock','generation')) {
+        if (-not (Test-AiInstructionsJsonSemanticEqual -Left $Previous.PSObject.Properties[$name].Value -Right $Next.PSObject.Properties[$name].Value)) {
+            throw "AI instructions install journal store transition cannot change $name."
+        }
+    }
+    if (@($Previous.operations).Count -ne @($Next.operations).Count) { throw 'AI instructions install journal store transition cannot change operations count.' }
+    for ($index = 0; $index -lt @($Previous.operations).Count; $index++) {
+        $previousOperation = [ordered]@{}
+        $nextOperation = [ordered]@{}
+        foreach ($property in @($Previous.operations[$index].PSObject.Properties)) { if ($property.Name -cne 'state') { $previousOperation[$property.Name] = $property.Value } }
+        foreach ($property in @($Next.operations[$index].PSObject.Properties)) { if ($property.Name -cne 'state') { $nextOperation[$property.Name] = $property.Value } }
+        if (-not (Test-AiInstructionsJsonSemanticEqual -Left ([pscustomobject]$previousOperation) -Right ([pscustomobject]$nextOperation))) { throw "AI instructions install journal store transition cannot change operation $($index + 1) fields other than state." }
+        $fromState = [string]$Previous.operations[$index].state
+        $toState = [string]$Next.operations[$index].state
+        $allowedState = $fromState -ceq $toState -or
+            "$fromState>$toState" -cin @('pending>staged','staged>applied','pending>applied','applied>rolled-back','pending>rolled-back','staged>rolled-back')
+        if (-not $allowedState) { throw "AI instructions install journal store transition operation $($index + 1) state transition is invalid." }
+    }
+    $fromPhase = [string]$Previous.phase
+    $toPhase = [string]$Next.phase
+    $allowedPhase = $fromPhase -ceq $toPhase -or
+        "$fromPhase>$toPhase" -cin @('prepared>applying','applying>applied','applied>committed','prepared>rolling-back','applying>rolling-back','applied>rolling-back','rolling-back>rolled-back')
+    if (-not $allowedPhase) { throw 'AI instructions install journal store phase transition is invalid.' }
+    return $Next
+}
+
+function Get-AiInstructionsInstallTransactionClassification {
+    param(
+        [Parameter(Mandatory = $true)][string] $Name,
+        [Parameter(Mandatory = $true)][string] $EntryKind,
+        [AllowNull()][object] $JournalEntryKind,
+        [AllowNull()][object] $JournalJson,
+        [AllowNull()][object] $PreviousJournalEntryKind,
+        [AllowNull()][object] $PreviousJournalJson
+    )
+    if ($Name -cnotmatch '^[0-9a-f]{32}$' -or $EntryKind -cne 'directory') {
+        return [pscustomobject][ordered]@{ classification='invalid-name'; journalLeaf=$null; journal=$null; reason='invalid transaction directory name or entry kind' }
+    }
+    $journalExists = $null -ne $JournalEntryKind
+    $previousExists = $null -ne $PreviousJournalEntryKind
+    if (-not $journalExists -and -not $previousExists) {
+        return [pscustomobject][ordered]@{ classification='orphan-without-journal'; journalLeaf=$null; journal=$null; reason='journal is absent' }
+    }
+    $leaf = if ($journalExists) { 'journal.json' } else { 'journal.prev' }
+    $kind = if ($journalExists) { $JournalEntryKind } else { $PreviousJournalEntryKind }
+    $json = if ($journalExists) { $JournalJson } else { $PreviousJournalJson }
+    if ($kind -isnot [string] -or [string]$kind -cne 'file' -or $json -isnot [string]) {
+        return [pscustomobject][ordered]@{ classification='malformed-journal'; journalLeaf=$leaf; journal=$null; reason='journal entry is not a file' }
+    }
+    try { $journal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json -ExpectedTransactionId $Name }
+    catch { return [pscustomobject][ordered]@{ classification='malformed-journal'; journalLeaf=$leaf; journal=$null; reason='journal validation failed' } }
+    if ($journalExists -and $previousExists) {
+        if ($PreviousJournalEntryKind -isnot [string] -or [string]$PreviousJournalEntryKind -cne 'file' -or $PreviousJournalJson -isnot [string]) {
+            return [pscustomobject][ordered]@{ classification='malformed-journal'; journalLeaf='journal.json'; journal=$null; reason='previous journal entry is not a file' }
+        }
+        try { $previousJournal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json $PreviousJournalJson -ExpectedTransactionId $Name }
+        catch { return [pscustomobject][ordered]@{ classification='malformed-journal'; journalLeaf='journal.json'; journal=$null; reason='previous journal validation failed' } }
+        try { Assert-AiInstructionsInstallJournalStoreTransition -Previous $previousJournal -Next $journal | Out-Null }
+        catch { return [pscustomobject][ordered]@{ classification='malformed-journal'; journalLeaf='journal.json'; journal=$null; reason='journal transition from previous journal is invalid' } }
+    }
+    return [pscustomobject][ordered]@{ classification='valid-journal'; journalLeaf=$leaf; journal=$journal; reason=$null }
+}
+
+function Get-AiInstructionsInstallTransactionResidueKind {
+    param(
+        [Parameter(Mandatory = $true)][string] $Name,
+        [Parameter(Mandatory = $true)][string] $EntryKind,
+        [AllowNull()][object] $JournalEntryKind,
+        [AllowNull()][object] $PreviousJournalEntryKind
+    )
+    if ($Name -cnotmatch '^[0-9a-f]{32}$' -or $EntryKind -cne 'directory') { return 'invalid-name' }
+    if ($null -eq $JournalEntryKind -and $null -eq $PreviousJournalEntryKind) { return 'orphan-without-journal' }
+    return 'journal-present'
+}
+
+function Get-AiInstructionsInstallTransactionDisposition {
+    param(
+        [Parameter(Mandatory = $true)][string] $Classification,
+        [Parameter(Mandatory = $true)][string] $Component
+    )
+    if ($Classification -cnotin @('valid-journal','orphan-without-journal','malformed-journal','invalid-name','journal-present')) { throw "Unknown install transaction classification '$Classification'." }
+    if ($Component -cnotin @('installer','launcher','updater')) { throw "Unknown install transaction component '$Component'." }
+    if ($Component -cne 'installer') { return [pscustomobject][ordered]@{ action='refuse'; refusalCode='interrupted-install' } }
+    switch ($Classification) {
+        'valid-journal' { return [pscustomobject][ordered]@{ action='recover'; refusalCode=$null } }
+        'orphan-without-journal' { return [pscustomobject][ordered]@{ action='purge-orphan'; refusalCode=$null } }
+        default { return [pscustomobject][ordered]@{ action='refuse'; refusalCode='interrupted-install' } }
     }
 }
 
@@ -1757,7 +2009,10 @@ function Test-AiInstructionsInstallJournalStateMatch {
     if ([bool]$Observation.exists -ne [bool]$State.exists) { return $false }
     if (-not [bool]$State.exists) { return $true }
     if ($null -eq $State.identity) { return $false }
-    if ([string]$Observation.sha256 -cne [string]$State.sha256 -or [int64]$Observation.length -ne [int64]$State.length) { return $false }
+    if (Test-AiInstructionsObjectHasProperty -Object $State -Name 'inventorySha256') {
+        if ([string]$Observation.inventorySha256 -cne [string]$State.inventorySha256 -or [int64]$Observation.entryCount -ne [int64]$State.entryCount) { return $false }
+    }
+    elseif ([string]$Observation.sha256 -cne [string]$State.sha256 -or [int64]$Observation.length -ne [int64]$State.length) { return $false }
     if (Test-AiInstructionsInstallJournalIdentityMatch -Observed $Observation.identity -Expected $State.identity) { return $true }
     return $null -ne $AlternativeIdentity -and
         (Test-AiInstructionsInstallJournalIdentityMatch -Observed $Observation.identity -Expected $AlternativeIdentity)
@@ -1789,9 +2044,11 @@ function Test-AiInstructionsInstallJournalBackupMatch {
         [AllowNull()][object] $BackupIdentity
     )
     if ($null -eq $Backup -or $null -eq $BackupIdentity -or -not [bool]$Backup.exists) { return $false }
-    return [string]$Backup.sha256 -ceq [string]$Original.sha256 -and
-        [int64]$Backup.length -eq [int64]$Original.length -and
-        (Test-AiInstructionsInstallJournalIdentityMatch -Observed $Backup.identity -Expected $BackupIdentity)
+    $contentMatches = if (Test-AiInstructionsObjectHasProperty -Object $Original -Name 'inventorySha256') {
+        [string]$Backup.inventorySha256 -ceq [string]$Original.inventorySha256 -and [int64]$Backup.entryCount -eq [int64]$Original.entryCount
+    }
+    else { [string]$Backup.sha256 -ceq [string]$Original.sha256 -and [int64]$Backup.length -eq [int64]$Original.length }
+    return $contentMatches -and (Test-AiInstructionsInstallJournalIdentityMatch -Observed $Backup.identity -Expected $BackupIdentity)
 }
 
 function Test-AiInstructionsInstallJournalBackupEvidenceValid {
@@ -1799,7 +2056,7 @@ function Test-AiInstructionsInstallJournalBackupEvidenceValid {
         [Parameter(Mandatory = $true)][object] $Operation,
         [Parameter(Mandatory = $true)][object] $Observation
     )
-    if ([string]$Operation.kind -ceq 'create-file') { return $null -eq $Observation.backup }
+    if ([string]$Operation.kind -in @('create-file','create-directory')) { return $null -eq $Observation.backup }
     if ($null -eq $Observation.backup) { return $true }
     return Test-AiInstructionsInstallJournalBackupMatch -Backup $Observation.backup -Original $Operation.original -BackupIdentity $Operation.backupIdentity
 }
@@ -1820,11 +2077,21 @@ function Get-AiInstructionsInstallRecoveryDecision {
         $sequence = [int64]$key
         if ($bySequence.ContainsKey($sequence)) { throw "AI instructions install recovery observations contain duplicate sequence $sequence." }
         $value = if ($Observations -is [System.Collections.IDictionary]) { $Observations[$keyValue] } else { $Observations.PSObject.Properties[$key].Value }
-        Assert-AiInstructionsInstallJournalExactProperties -Object $value -Names @('exists','sha256','length','identity','permissions','backup') -Context "AI instructions install recovery observation sequence $sequence"
+        $operation = @($Journal.operations | Where-Object { [int64]$_.sequence -eq $sequence })[0]
+        if ($null -eq $operation) { throw "AI instructions install recovery observation sequence $sequence is not present in the journal." }
+        $isDirectoryOperation = [string]$operation.kind -in @('swap-directory','create-directory')
+        $observationNames = if ($isDirectoryOperation) { @('exists','identity','inventorySha256','entryCount','permissions','backup') } else { @('exists','sha256','length','identity','permissions','backup') }
+        Assert-AiInstructionsInstallJournalExactProperties -Object $value -Names $observationNames -Context "AI instructions install recovery observation sequence $sequence"
         if ($value.exists -isnot [bool]) { throw "AI instructions install recovery observation sequence $sequence.exists must be a boolean." }
         if ($value.exists) {
-            if ($value.sha256 -isnot [string] -or [string]$value.sha256 -cnotmatch '^[0-9a-f]{64}$') { throw "AI instructions install recovery observation sequence $sequence.sha256 is invalid." }
-            Assert-AiInstructionsInstallJournalInteger -Value $value.length -Context "AI instructions install recovery observation sequence $sequence.length" -Minimum 0
+            if ($isDirectoryOperation) {
+                if ($value.inventorySha256 -isnot [string] -or [string]$value.inventorySha256 -cnotmatch '^[0-9a-f]{64}$') { throw "AI instructions install recovery observation sequence $sequence.inventorySha256 is invalid." }
+                Assert-AiInstructionsInstallJournalInteger -Value $value.entryCount -Context "AI instructions install recovery observation sequence $sequence.entryCount" -Minimum 0
+            }
+            else {
+                if ($value.sha256 -isnot [string] -or [string]$value.sha256 -cnotmatch '^[0-9a-f]{64}$') { throw "AI instructions install recovery observation sequence $sequence.sha256 is invalid." }
+                Assert-AiInstructionsInstallJournalInteger -Value $value.length -Context "AI instructions install recovery observation sequence $sequence.length" -Minimum 0
+            }
             Assert-AiInstructionsInstallJournalIdentity -Identity $value.identity -Context "AI instructions install recovery observation sequence $sequence.identity" -ExpectedKind $expectedIdentityKind
             if ($null -eq $value.permissions) { throw "AI instructions install recovery observation sequence $sequence.permissions must not be null when exists is true." }
             if ($value.permissions.kind -isnot [string] -or [string]$value.permissions.kind -cne $expectedPermissionsKind) { throw "AI instructions install recovery observation sequence $sequence.permissions.kind must be $expectedPermissionsKind for the journal platform." }
@@ -1847,9 +2114,12 @@ function Get-AiInstructionsInstallRecoveryDecision {
                 Assert-AiInstructionsInstallJournalInteger -Value $value.permissions.gid -Context "AI instructions install recovery observation sequence $sequence.permissions.gid" -Minimum 0
             }
         }
-        elseif ($null -ne $value.sha256 -or $null -ne $value.length -or $null -ne $value.identity -or $null -ne $value.permissions) { throw "AI instructions install recovery observation sequence $sequence sha256, length, identity, and permissions must be null when exists is false." }
+        elseif (($isDirectoryOperation -and ($null -ne $value.inventorySha256 -or $null -ne $value.entryCount)) -or
+            (-not $isDirectoryOperation -and ($null -ne $value.sha256 -or $null -ne $value.length)) -or
+            $null -ne $value.identity -or $null -ne $value.permissions) { throw "AI instructions install recovery observation sequence $sequence state fields must be null when exists is false." }
         if ($null -ne $value.backup) {
-            Assert-AiInstructionsInstallJournalFileState -State $value.backup -Context "AI instructions install recovery observation sequence $sequence.backup"
+            if ($isDirectoryOperation) { Assert-AiInstructionsInstallJournalDirectoryState -State $value.backup -Context "AI instructions install recovery observation sequence $sequence.backup" }
+            else { Assert-AiInstructionsInstallJournalFileState -State $value.backup -Context "AI instructions install recovery observation sequence $sequence.backup" }
             if (-not [bool]$value.backup.exists) { throw "AI instructions install recovery observation sequence $sequence.backup.exists must be true when backup is not null." }
             Assert-AiInstructionsInstallJournalIdentity -Identity $value.backup.identity -Context "AI instructions install recovery observation sequence $sequence.backup.identity" -ExpectedKind $expectedIdentityKind
         }
@@ -1891,7 +2161,7 @@ function Get-AiInstructionsInstallRecoveryDecision {
         foreach ($operation in @($Journal.operations)) {
             $sequence = [int64]$operation.sequence
             if ($backupEvidenceValid[$sequence]) { continue }
-            if ([string]$operation.kind -ceq 'create-file') { $reasons.Add("sequence $sequence backup must be null for create-file") }
+            if ([string]$operation.kind -in @('create-file','create-directory')) { $reasons.Add("sequence $sequence backup must be null for $($operation.kind)") }
             elseif ([string]$operation.kind -ceq 'remove-file') { $reasons.Add("sequence $sequence tombstone backup does not match original") }
             else { $reasons.Add("sequence $sequence backup does not match original") }
         }
@@ -1924,6 +2194,11 @@ function Get-AiInstructionsInstallRecoveryDecision {
         if ($matchesOriginal[$sequence]) {
             $action = if ($permissionsMatchOriginal[$sequence]) { 'none' } else { 'restore-permissions' }
         }
+        elseif ([string]$operation.kind -in @('write-file','swap-directory') -and
+            [bool]$operation.original.exists -and -not [bool]$bySequence[$sequence].exists -and
+            $backupMatchesOriginal[$sequence]) {
+            $action = 'restore-original'
+        }
         elseif ($matchesApplied[$sequence]) {
             if ($operation.original.exists) {
                 if (-not $backupMatchesOriginal[$sequence]) {
@@ -1949,11 +2224,163 @@ function Get-AiInstructionsInstallRecoveryDecision {
     return [pscustomobject][ordered]@{ action='roll-back'; reasons=@(); operations=$operationDecisions.ToArray() }
 }
 
+function Get-AiInstructionsInstallRecoveryPlan {
+    param([Parameter(Mandatory = $true)][object] $Journal,[Parameter(Mandatory = $true)][object] $Decision)
+    Assert-AiInstructionsInstallJournalV1 -Journal $Journal | Out-Null
+    Assert-AiInstructionsInstallJournalExactProperties -Object $Decision -Names @('action','reasons','operations') -Context 'AI instructions install recovery decision'
+    if ($Decision.action -isnot [string] -or [string]$Decision.action -cnotin @('none','commit','roll-back','refuse')) { throw 'AI instructions install recovery decision action is invalid.' }
+    if ($Decision.operations -isnot [System.Array] -or @($Decision.operations).Count -ne @($Journal.operations).Count) { throw 'AI instructions install recovery decision operations must correspond one-to-one with the journal.' }
+    $decisionAction = [string]$Decision.action
+    $journalPhase = [string]$Journal.phase
+    if ($decisionAction -ceq 'roll-back' -and $journalPhase -cnotin @('prepared','applying','applied','rolling-back')) { throw "AI instructions install recovery roll-back decision is incompatible with journal phase $journalPhase." }
+    if ($decisionAction -ceq 'commit' -and $journalPhase -cne 'applied') { throw "AI instructions install recovery commit decision is incompatible with journal phase $journalPhase." }
+    if ($decisionAction -ceq 'none' -and $journalPhase -cnotin @('committed','rolled-back')) { throw "AI instructions install recovery none decision is incompatible with journal phase $journalPhase." }
+    for ($index = 0; $index -lt @($Journal.operations).Count; $index++) {
+        $decisionOperation = $Decision.operations[$index]
+        $journalOperation = $Journal.operations[$index]
+        Assert-AiInstructionsInstallJournalExactProperties -Object $decisionOperation -Names @('sequence','action') -Context "AI instructions install recovery decision operation $($index + 1)"
+        if ([int64]$decisionOperation.sequence -ne [int64]$journalOperation.sequence) { throw 'AI instructions install recovery decision operation sequence does not match the journal.' }
+        if ($decisionOperation.action -isnot [string] -or [string]$decisionOperation.action -cnotin @('none','restore-original','remove-applied','restore-permissions','keep')) { throw 'AI instructions install recovery decision operation action is invalid.' }
+        if ([string]$Decision.action -in @('none','commit','refuse') -and [string]$decisionOperation.action -cne 'keep') { throw "AI instructions install recovery decision $($Decision.action) requires keep operations." }
+        if ([string]$Decision.action -ceq 'roll-back' -and [string]$decisionOperation.action -ceq 'keep') { throw 'AI instructions install recovery roll-back decision must not contain keep operations.' }
+        $operationAction = [string]$decisionOperation.action
+        $operationKind = [string]$journalOperation.kind
+        if ($operationAction -ceq 'restore-original' -and (-not [bool]$journalOperation.original.exists -or $operationKind -cnotin @('write-file','swap-directory','remove-file'))) {
+            throw "AI instructions install recovery restore-original action is incompatible with journal operation sequence $($journalOperation.sequence)."
+        }
+        if ($operationAction -ceq 'remove-applied' -and ([bool]$journalOperation.original.exists -or $operationKind -cnotin @('create-file','create-directory'))) {
+            throw "AI instructions install recovery remove-applied action is incompatible with journal operation sequence $($journalOperation.sequence)."
+        }
+        if ($operationAction -ceq 'restore-permissions' -and (-not [bool]$journalOperation.original.exists -or $null -eq $journalOperation.permissions)) {
+            throw "AI instructions install recovery restore-permissions action is incompatible with journal operation sequence $($journalOperation.sequence)."
+        }
+    }
+    $steps = New-Object System.Collections.Generic.List[object]
+    switch ([string]$Decision.action) {
+        'refuse' { return [pscustomobject][ordered]@{ action='refuse'; mutatesTargets=$false; steps=@() } }
+        'none' {
+            $steps.Add([pscustomobject][ordered]@{ step='cleanup-transaction'; primitive='Remove-PlatformOwnedDirectoryTree' })
+            return [pscustomobject][ordered]@{ action='none'; mutatesTargets=$false; steps=$steps.ToArray() }
+        }
+        'commit' {
+            $steps.Add([pscustomobject][ordered]@{ step='write-phase'; phase='committed' })
+            foreach ($operation in @($Journal.operations | Sort-Object sequence)) {
+                $directoryOperation = [string]$operation.kind -in @('swap-directory','create-directory')
+                foreach ($leafName in @('backupLeaf','stageLeaf','quarantineLeaf')) {
+                    $leaf = $operation.PSObject.Properties[$leafName].Value
+                    if ($null -eq $leaf) { continue }
+                    $primitive = if ($directoryOperation) { 'Remove-PlatformOwnedDirectoryTree' } else { 'Remove-PlatformOwnedFile' }
+                    $steps.Add([pscustomobject][ordered]@{ step='cleanup-artifact'; sequence=[int64]$operation.sequence; leaf=[string]$leaf; primitive=$primitive })
+                }
+            }
+            $steps.Add([pscustomobject][ordered]@{ step='cleanup-transaction'; primitive='Remove-PlatformOwnedDirectoryTree' })
+            return [pscustomobject][ordered]@{ action='commit'; mutatesTargets=$false; steps=$steps.ToArray() }
+        }
+        'roll-back' {
+            $steps.Add([pscustomobject][ordered]@{ step='write-phase'; phase='rolling-back' })
+            for ($index = @($Journal.operations).Count - 1; $index -ge 0; $index--) {
+                $operation = $Journal.operations[$index]
+                $decisionOperation = $Decision.operations[$index]
+                $action = [string]$decisionOperation.action
+                if ($action -cne 'none') {
+                    $primitive = switch ($action) {
+                        'restore-original' { if ([string]$operation.kind -ceq 'swap-directory') { 'Move-PlatformOwnedDirectory' } else { 'Publish-PlatformFile' } }
+                        'remove-applied' { if ([string]$operation.kind -ceq 'create-directory') { 'Move-PlatformOwnedDirectory' } else { 'Remove-PlatformOwnedFile' } }
+                        'restore-permissions' { 'Set-PlatformPermissions' }
+                    }
+                    $step = [ordered]@{ step='operation'; sequence=[int64]$operation.sequence; action=$action; kind=[string]$operation.kind; targetRelativePath=[string]$operation.targetRelativePath; primitive=$primitive }
+                    if ([string]$operation.kind -ceq 'swap-directory' -and $action -ceq 'restore-original') { $step.quarantineLeaf=$operation.quarantineLeaf; $step.backupLeaf=$operation.backupLeaf }
+                    if ([string]$operation.kind -ceq 'create-directory' -and $action -ceq 'remove-applied') { $step.quarantineLeaf=$operation.quarantineLeaf }
+                    if ($action -ceq 'restore-permissions') { $step.snapshot=$operation.permissions }
+                    $steps.Add([pscustomobject]$step)
+                    if ($action -ceq 'restore-original' -and $null -ne $operation.permissions) {
+                        $steps.Add([pscustomobject][ordered]@{
+                            step='operation'
+                            sequence=[int64]$operation.sequence
+                            action='restore-permissions'
+                            kind=[string]$operation.kind
+                            targetRelativePath=[string]$operation.targetRelativePath
+                            primitive='Set-PlatformPermissions'
+                            snapshot=$operation.permissions
+                        })
+                    }
+                    $steps.Add([pscustomobject][ordered]@{ step='write-operation-state'; sequence=[int64]$operation.sequence; state='rolled-back' })
+                }
+                elseif ([string]$operation.state -ceq 'applied') {
+                    $steps.Add([pscustomobject][ordered]@{ step='write-operation-state'; sequence=[int64]$operation.sequence; state='rolled-back' })
+                }
+            }
+            $steps.Add([pscustomobject][ordered]@{ step='write-phase'; phase='rolled-back' })
+            $steps.Add([pscustomobject][ordered]@{ step='cleanup-transaction'; primitive='Remove-PlatformOwnedDirectoryTree' })
+            return [pscustomobject][ordered]@{ action='roll-back'; mutatesTargets=$true; steps=$steps.ToArray() }
+        }
+    }
+}
+
+function Test-AiInstructionsReservedJournalPathSegment {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    foreach ($segment in @($Path -split '[/\\]')) {
+        if ([string]::Equals($segment,'.ai-instructions-txn',[StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
+function Get-AiInstructionsPhysicalPath {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    $pathToResolve = [System.IO.Path]::GetFullPath($Path)
+    $replacementCount = 0
+    while ($true) {
+        $root = [System.IO.Path]::GetPathRoot($pathToResolve)
+        $segments = @($pathToResolve.Substring($root.Length) -split '[/\\]' | Where-Object { $_.Length -gt 0 })
+        $current = $root
+        $replaced = $false
+        for ($index = 0; $index -lt $segments.Count; $index++) {
+            $candidate = Join-Path $current $segments[$index]
+            $item = $null
+            try { $item = Get-Item -Force -LiteralPath $candidate -ErrorAction Stop }
+            catch [System.Management.Automation.ItemNotFoundException] { $item = $null }
+            if ($null -ne $item) {
+                if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    $linkTarget = $null
+                    foreach ($propertyName in @('LinkTarget','Target')) {
+                        $property = $item.PSObject.Properties[$propertyName]
+                        if ($null -eq $property) { continue }
+                        foreach ($value in @($property.Value)) {
+                            if (-not [string]::IsNullOrWhiteSpace([string]$value)) { $linkTarget = [string]$value; break }
+                        }
+                        if ($null -ne $linkTarget) { break }
+                    }
+                    if ($null -eq $linkTarget) { throw "Cannot resolve reparse point '$candidate' to a link target." }
+                    $replacementCount++
+                    if ($replacementCount -gt 40) { throw 'Physical path resolution exceeded 40 link replacements.' }
+                    $targetPath = if ([System.IO.Path]::IsPathRooted($linkTarget)) { $linkTarget } else { Join-Path (Split-Path -Parent $candidate) $linkTarget }
+                    $pathToResolve = [System.IO.Path]::GetFullPath($targetPath)
+                    for ($tailIndex = $index + 1; $tailIndex -lt $segments.Count; $tailIndex++) {
+                        $pathToResolve = Join-Path $pathToResolve $segments[$tailIndex]
+                    }
+                    $pathToResolve = [System.IO.Path]::GetFullPath($pathToResolve)
+                    $replaced = $true
+                    break
+                }
+            }
+            $current = $candidate
+        }
+        if (-not $replaced) { return $pathToResolve }
+    }
+}
+
 function Write-AiInstructionsJsonFile {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string] $Path,[Parameter(Mandatory = $true)][object] $Document)
 
     $fullPath = [System.IO.Path]::GetFullPath($Path)
+    if (Test-AiInstructionsReservedJournalPathSegment -Path $fullPath) {
+        throw 'Write-AiInstructionsJsonFile must not write inside the reserved .ai-instructions-txn journal store.'
+    }
+    $physicalPath = Get-AiInstructionsPhysicalPath -Path $fullPath
+    if (Test-AiInstructionsReservedJournalPathSegment -Path $physicalPath) {
+        throw 'Write-AiInstructionsJsonFile must not write inside the reserved .ai-instructions-txn journal store.'
+    }
     $parent = Split-Path -Parent $fullPath
     if (-not [string]::IsNullOrWhiteSpace($parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
     $json = ($Document | ConvertTo-Json -Depth 20).Replace("`r`n","`n") + "`n"
@@ -1993,6 +2420,16 @@ Export-ModuleMember -Function @(
     'Get-AiInstructionsFileSha256',
     'Get-AiInstructionsFullDirectoryPath',
     'Get-AiInstructionsInstallRecoveryDecision',
+    'Get-AiInstructionsInstallRecoveryPlan',
+    'Get-AiInstructionsInstallJournalDirectoryState',
+    'Get-AiInstructionsInstallJournalStoreLeaves',
+    'Get-AiInstructionsInstallTransactionClassification',
+    'Get-AiInstructionsInstallTransactionResidueKind',
+    'Get-AiInstructionsInstallTransactionDisposition',
+    'Assert-AiInstructionsInstallJournalStoreTransition',
+    'Get-AiInstructionsRefusalCodes',
+    'New-AiInstructionsRefusalException',
+    'Get-AiInstructionsRefusalCode',
     'Get-AiInstructionsRuntimeInventory',
     'Get-AiInstructionsRuntimeInventorySha256',
     'Get-AiInstructionsRuntimeInventorySha256V3',

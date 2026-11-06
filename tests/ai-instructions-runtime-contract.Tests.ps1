@@ -209,14 +209,11 @@ function New-TestInstallObservation {
     $observedPermissions = if ($null -eq $Permissions) { $null }
         elseif ([string]$Permissions.kind -ceq 'windows-sddl') { [pscustomobject]@{ kind=$Permissions.kind; sddl=$Permissions.sddl; readOnly=$Permissions.readOnly } }
         else { [pscustomobject]@{ kind=$Permissions.kind; mode=$Permissions.mode; uid=$Permissions.uid; gid=$Permissions.gid } }
+    $isDirectory = $Operation.kind -in @('swap-directory','create-directory')
     if (-not $PSBoundParameters.ContainsKey('Backup')) {
         $Backup = if ([bool]$Operation.original.exists) {
-            [pscustomobject]@{
-                exists = $true
-                sha256 = $Operation.original.sha256
-                length = $Operation.original.length
-                identity = $Operation.backupIdentity
-            }
+            if ($isDirectory) { [pscustomobject]@{ exists=$true; identity=$Operation.backupIdentity; inventorySha256=$Operation.original.inventorySha256; entryCount=$Operation.original.entryCount } }
+            else { [pscustomobject]@{ exists=$true; sha256=$Operation.original.sha256; length=$Operation.original.length; identity=$Operation.backupIdentity } }
         }
         else { $null }
     }
@@ -233,22 +230,27 @@ function New-TestInstallObservation {
     }
     $observedIdentity = & $copyIdentity $State.identity
     $observedBackup = if ($null -eq $Backup) { $null }
-        else {
-            [pscustomobject]@{
-                exists = $Backup.exists
-                sha256 = $Backup.sha256
-                length = $Backup.length
-                identity = & $copyIdentity $Backup.identity
-            }
+        elseif ($isDirectory) { [pscustomobject]@{ exists=$Backup.exists; identity=& $copyIdentity $Backup.identity; inventorySha256=$Backup.inventorySha256; entryCount=$Backup.entryCount } }
+        else { [pscustomobject]@{ exists=$Backup.exists; sha256=$Backup.sha256; length=$Backup.length; identity=& $copyIdentity $Backup.identity } }
+    if ($isDirectory) {
+        return [pscustomobject]@{
+            exists=[bool]$State.exists; identity=$observedIdentity; inventorySha256=$State.inventorySha256; entryCount=$State.entryCount
+            permissions=if ([bool]$State.exists) { $observedPermissions } else { $null }; backup=$observedBackup
         }
-    return [pscustomobject]@{
-        exists = [bool]$State.exists
-        sha256 = $State.sha256
-        length = $State.length
-        identity = $observedIdentity
-        permissions = if ([bool]$State.exists) { $observedPermissions } else { $null }
-        backup = $observedBackup
     }
+    return [pscustomobject]@{ exists=[bool]$State.exists; sha256=$State.sha256; length=$State.length; identity=$observedIdentity; permissions=if ([bool]$State.exists) { $observedPermissions } else { $null }; backup=$observedBackup }
+}
+
+function Convert-TestOperationToSwapDirectory {
+    param([Parameter(Mandatory = $true)][object] $Operation)
+    $originalIdentity = $Operation.original.identity
+    $appliedIdentity = $Operation.applied.identity
+    $Operation.kind = 'swap-directory'
+    $Operation.quarantineLeaf = 'swap-directory.quarantine'
+    $Operation.original = [pscustomobject]@{ exists=$true; identity=$originalIdentity; inventorySha256=('a' * 64); entryCount=2 }
+    $Operation.backupIdentity = $originalIdentity
+    $Operation.applied = [pscustomobject]@{ exists=$true; identity=$appliedIdentity; inventorySha256=('b' * 64); entryCount=3 }
+    return $Operation
 }
 
 function Get-TestPendingRemoveInstallJournalV1 {
@@ -263,6 +265,27 @@ function Get-TestPendingRemoveInstallJournalV1 {
     $journal.operations[0].applied.length = $null
     $journal.operations[0].applied.identity = $null
     $journal.operations[0].state = 'pending'
+    return (ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20))
+}
+
+function Get-TestSwapDirectoryInstallJournalV1 {
+    $path = Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-install-journal-v1.example.json'
+    $journal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json (Get-Content -Raw -Encoding UTF8 -LiteralPath $path)
+    $operation = $journal.operations[3]
+    $operation.sequence = 1
+    $journal.operations = @($operation)
+    return (ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20))
+}
+
+function Get-TestCreateDirectoryInstallJournalV1 {
+    $journal = Get-TestSwapDirectoryInstallJournalV1
+    $operation = $journal.operations[0]
+    $operation.kind = 'create-directory'
+    $operation.backupLeaf = $null
+    $operation.original = [pscustomobject]@{ exists=$false; identity=$null; inventorySha256=$null; entryCount=$null }
+    $operation.backupIdentity = $null
+    $operation.permissions = $null
+    $operation.state = 'pending'
     return (ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20))
 }
 
@@ -1214,7 +1237,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
             -Operations $source.operations
         $journal.transactionId | Should Match '^[0-9a-f]{32}$'
         $journal.generation.previousBundleSha256 | Should Be $null
-        $journal.operations[0].backupIdentity.fileId | Should Be '0000ABCD:00001235'
+        $journal.operations[0].backupIdentity.fileId | Should Be '0000ABCD:00001233'
         $journal.operations[1].backupIdentity | Should Be $null
         (@($journal.PSObject.Properties.Name) -join ',') | Should Be 'schemaVersion,kind,transactionId,createdAtUtc,owner,platform,lock,generation,phase,operations'
     }
@@ -1247,21 +1270,18 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         ($decision.reasons -join ' ') | Should Match 'sequence 1.*external change'
     }
 
-    # Scenario: Pending work records the future bytes before publication identity is known.
-    # Purpose: Never use a null expected identity as proof that a live target is the applied state.
-    It 'UnitT117_treats_pending_applied_state_without_identity_as_not_matching' {
+    # Scenario: D7 pending work omits the identity of the already staged publication object.
+    # Purpose: Reject a first journal that lacks the durable identity preserved by stage rename.
+    It 'UnitT117_rejects_pending_stage_rename_without_applied_identity' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'UnitT117 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.' }
+        $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
         $journal = Get-TestInstallJournalV1
-        $observation = New-TestInstallObservation -Operation $journal.operations[1] -State $journal.operations[1].applied
         $journal.operations[1].state = 'pending'
         $journal.operations[1].applied.identity = $null
-        $observations = @{
-            1 = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].original
-            2 = $observation
-        }
+        $json = $journal | ConvertTo-Json -Depth 20
 
-        $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
-        $decision.action | Should Be 'refuse'
-        ($decision.reasons -join ' ') | Should Match 'sequence 2.*external change'
+        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'sequence 2.applied.identity.*must not be null'
+        (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
     }
 
     # Scenario: Recovery can read bytes but cannot obtain the live file ID.
@@ -1891,10 +1911,12 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'sequence 1.backupIdentity.*must not be null'
         (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
 
+        $journal = Get-TestInstallJournalV1
         $journal.operations[0].state = 'pending'
+        $journal.operations[0].backupIdentity = $null
         $json = $journal | ConvertTo-Json -Depth 20
-        { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json | Out-Null } | Should Not Throw
-        (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $true
+        (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match 'sequence 1.backupIdentity.*must not be null'
+        (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
     }
 
     # Scenario: A Windows journal supplies owner, group, or SACL sections that the platform permission setter cannot restore.
@@ -2318,7 +2340,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
             $swapSource = ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20)
             $swapOperation = $swapSource.operations[0]
             $swapOperation.sequence = 2
-            $swapOperation.kind = 'swap-directory'
+            Convert-TestOperationToSwapDirectory -Operation $swapOperation | Out-Null
             $swapOperation.targetRelativePath = $SwapPath
             $swapOperation.stageLeaf = 'swap-directory.stage'
             $swapOperation.backupLeaf = 'swap-directory.backup'
@@ -2326,7 +2348,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
             $journal.operations = @($journal.operations[0],$swapOperation)
         }
         else {
-            $journal.operations[0].kind = 'swap-directory'
+            Convert-TestOperationToSwapDirectory -Operation $journal.operations[0] | Out-Null
             $journal.operations[0].targetRelativePath = $SwapPath
             $journal.operations[1].targetRelativePath = $OtherPath
         }
@@ -2339,7 +2361,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
     # Purpose: Accept sibling namespaces such as runtime and runtime2.
     It 'UnitT176_accepts_swap_directory_with_a_non_descendant_textual_prefix' {
         $journal = Get-TestInstallJournalV1
-        $journal.operations[0].kind = 'swap-directory'
+        Convert-TestOperationToSwapDirectory -Operation $journal.operations[0] | Out-Null
         $journal.operations[0].targetRelativePath = 'runtime'
         $journal.operations[1].targetRelativePath = 'runtime2/x'
         $json = $journal | ConvertTo-Json -Depth 20
@@ -2456,6 +2478,518 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
 
             (Get-RuntimeContractError { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json }) | Should Match $case.Pattern
             (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
+        }
+    }
+
+    # Scenario: D1 directory states cover present, absent, malformed, and helper-generated inventories.
+    # Purpose: Keep the executable reader and JSON Schema aligned on the directory-specific exact shape.
+    It 'UnitT182_validates_directory_state_shape_and_inventory_helper' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'UnitT182 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.' }
+        $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
+        $journal = Get-TestSwapDirectoryInstallJournalV1
+        $json = $journal | ConvertTo-Json -Depth 20
+        { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json | Out-Null } | Should Not Throw
+        (Test-Json -Json $json -SchemaFile $schemaPath) | Should Be $true
+
+        $inventory = @([pscustomobject]@{ path='a.txt'; sha256=('1' * 64); length=1 })
+        $state = Get-AiInstructionsInstallJournalDirectoryState -Inventory $inventory -Identity $journal.operations[0].original.identity
+        $state.inventorySha256 | Should Be (Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory)
+        $state.entryCount | Should Be 1
+        (Get-AiInstructionsInstallJournalDirectoryState -Inventory @() -Identity $journal.operations[0].original.identity).entryCount | Should Be 0
+
+        $cases = @(
+            { param($j) $j.operations[0].original | Add-Member -NotePropertyName sha256 -NotePropertyValue ('1' * 64) -Force },
+            { param($j) $j.operations[0].original.inventorySha256='ABC' },
+            { param($j) $j.operations[0].original.entryCount=1.5 },
+            { param($j) $j.operations[0].original=[pscustomobject]@{ exists=$false; identity=$null; inventorySha256=('1' * 64); entryCount=$null } }
+        )
+        foreach ($change in $cases) {
+            $invalid = Get-TestSwapDirectoryInstallJournalV1
+            & $change $invalid
+            $invalidJson = $invalid | ConvertTo-Json -Depth 20
+            { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $invalidJson | Out-Null } | Should Throw
+            (Test-Json -Json $invalidJson -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
+        }
+        $fileJournal=Get-TestInstallJournalV1
+        $fileJournal.operations[0].original=[pscustomobject]@{exists=$true;identity=$fileJournal.operations[0].original.identity;inventorySha256=('1' * 64);entryCount=1}
+        $fileJson=$fileJournal|ConvertTo-Json -Depth 20
+        { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $fileJson | Out-Null } | Should Throw
+        (Test-Json -Json $fileJson -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
+    }
+
+    # Scenario: D1 swap-directory recovery observes original, applied, and foreign directory states.
+    # Purpose: Select none, commit, rollback, or refusal using inventory, entry count, and identity evidence.
+    It 'UnitT183_decides_all_swap_directory_recovery_outcomes' {
+        $journal = Get-TestSwapDirectoryInstallJournalV1
+        $noneDecision = Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{ 1=(New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].original -Backup $null) }
+        $noneDecision.action | Should Be 'roll-back'
+        $noneDecision.operations[0].action | Should Be 'none'
+        $terminal=Get-TestSwapDirectoryInstallJournalV1; $terminal.phase='rolled-back'; $terminal.operations[0].state='rolled-back'
+        (Get-AiInstructionsInstallRecoveryDecision -Journal $terminal -Observations @{1=(New-TestInstallObservation -Operation $terminal.operations[0] -State $terminal.operations[0].original -Backup $null)}).action | Should Be 'none'
+
+        $journal.phase = 'applied'; $journal.operations[0].state = 'applied'
+        $appliedObservation = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].applied
+        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{ 1=$appliedObservation }).action | Should Be 'commit'
+
+        $journal.phase = 'applying'; $journal.operations[0].state = 'staged'
+        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{ 1=$appliedObservation }).operations[0].action | Should Be 'restore-original'
+        $appliedObservation.identity.fileId = '0000ABCD:99999999'
+        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{ 1=$appliedObservation }).action | Should Be 'refuse'
+        $appliedObservation = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].applied
+        $appliedObservation.backup.inventorySha256 = '9' * 64
+        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{ 1=$appliedObservation }).action | Should Be 'refuse'
+    }
+
+    # Scenario: D1 create-directory records an absent original and a staged directory publication.
+    # Purpose: Enforce fresh-install invariants, quarantine ownership, path isolation, and recovery decisions.
+    It 'UnitT184_validates_and_recovers_create_directory' {
+        $journal = Get-TestCreateDirectoryInstallJournalV1
+        { Assert-AiInstructionsInstallJournalV1 -Journal $journal | Out-Null } | Should Not Throw
+        $applied = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].applied -Backup $null
+        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{ 1=$applied }).operations[0].action | Should Be 'remove-applied'
+        $absent = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].original -Backup $null
+        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{ 1=$absent }).operations[0].action | Should Be 'none'
+        $applied.inventorySha256 = '9' * 64
+        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{ 1=$applied }).action | Should Be 'refuse'
+
+        $invalidChanges = @(
+            { param($j) $j.operations[0].original.exists=$true }, { param($j) $j.operations[0].backupLeaf='bad.backup' },
+            { param($j) $j.operations[0].permissions=[pscustomobject]@{kind='windows-sddl';sddl='D:PAI(A;;FA;;;SY)';readOnly=$false} },
+            { param($j) $j.operations[0].method='tombstone-rename' }, { param($j) $j.operations[0].quarantineLeaf=$null },
+            { param($j) $j.operations[0].quarantineLeaf=$j.operations[0].stageLeaf }
+        )
+        foreach ($change in $invalidChanges) { $invalid=Get-TestCreateDirectoryInstallJournalV1; & $change $invalid; { Assert-AiInstructionsInstallJournalV1 -Journal $invalid | Out-Null } | Should Throw }
+        $fileJournal=Get-TestInstallJournalV1; $fileJournal.operations[0].quarantineLeaf='file.quarantine'; { Assert-AiInstructionsInstallJournalV1 -Journal $fileJournal | Out-Null } | Should Throw
+        $journal=Get-TestCreateDirectoryInstallJournalV1; $other=(Get-TestInstallJournalV1).operations[0]; $other.sequence=2; $other.targetRelativePath=$journal.operations[0].targetRelativePath + '/file'; $journal.operations=@($journal.operations[0],$other); { Assert-AiInstructionsInstallJournalV1 -Journal $journal | Out-Null } | Should Throw
+    }
+
+    # Scenario: D7 first-journal identity evidence is absent or disagrees with the original rename identity.
+    # Purpose: Reject pending records before recovery can rely on incomplete durable ownership evidence.
+    It 'UnitT185_enforces_initial_identity_evidence' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'UnitT185 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.' }
+        $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
+        $journal=Get-TestInstallJournalV1; $journal.operations[0].state='pending'; $journal.operations[0].backupIdentity=$null; $json=$journal|ConvertTo-Json -Depth 20
+        { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json | Out-Null } | Should Throw
+        (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue) | Should Be $false
+        $journal=Get-TestInstallJournalV1; $journal.operations[0].backupIdentity.fileId='0000ABCD:99999999'
+        (Get-RuntimeContractError { Assert-AiInstructionsInstallJournalV1 -Journal $journal }) | Should Match 'must equal original.identity'
+    }
+
+    # Scenario: D9 journal-store leaves and transaction-directory identity are checked before use.
+    # Purpose: Reserve journal.* and bind parsed journals to their containing transaction directory.
+    It 'UnitT186_reserves_journal_store_leaves_and_expected_transaction_id' {
+        $leaves=Get-AiInstructionsInstallJournalStoreLeaves
+        "$($leaves.directory)|$($leaves.journal)|$($leaves.stage)|$($leaves.previous)" | Should Be '.ai-instructions-txn|journal.json|journal.stage|journal.prev'
+        foreach($leaf in @('journal.json','Journal.Prev','JOURNAL')) {
+            $journal=Get-TestInstallJournalV1; $journal.operations[0].stageLeaf=$leaf; { Assert-AiInstructionsInstallJournalV1 -Journal $journal | Out-Null } | Should Throw
+            $journal=Get-TestInstallJournalV1; $journal.operations[0].backupLeaf=$leaf; { Assert-AiInstructionsInstallJournalV1 -Journal $journal | Out-Null } | Should Throw
+        }
+        $journal=Get-TestInstallJournalV1; $json=$journal|ConvertTo-Json -Depth 20
+        { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json -ExpectedTransactionId $journal.transactionId | Out-Null } | Should Not Throw
+        { ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json -ExpectedTransactionId ('f' * 32) | Out-Null } | Should Throw
+    }
+
+    # Scenario: D9 journal publication advances phase and operation state without changing immutable content.
+    # Purpose: Accept only monotonic store transitions and reject metadata or operation rewrites.
+    It 'UnitT187_validates_journal_store_transitions' {
+        $previous=Get-TestInstallJournalV1; $previous.phase='prepared'; $previous.operations[0].state='pending'; $previous.operations[1].state='pending'
+        $next=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($previous|ConvertTo-Json -Depth 20); $next.phase='applying'; $next.operations[0].state='staged'
+        { Assert-AiInstructionsInstallJournalStoreTransition -Previous $previous -Next $next | Out-Null } | Should Not Throw
+        $bad=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($next|ConvertTo-Json -Depth 20); $bad.owner.processId=999; { Assert-AiInstructionsInstallJournalStoreTransition -Previous $next -Next $bad | Out-Null } | Should Throw
+        $bad=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($next|ConvertTo-Json -Depth 20); $bad.operations[0].targetRelativePath='changed'; { Assert-AiInstructionsInstallJournalStoreTransition -Previous $next -Next $bad | Out-Null } | Should Throw
+        $bad=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($next|ConvertTo-Json -Depth 20); $bad.phase='prepared'; { Assert-AiInstructionsInstallJournalStoreTransition -Previous $next -Next $bad | Out-Null } | Should Throw
+        $bad=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($next|ConvertTo-Json -Depth 20); $bad.operations[0].state='pending'; { Assert-AiInstructionsInstallJournalStoreTransition -Previous $next -Next $bad | Out-Null } | Should Throw
+    }
+
+    # Scenario: The generic JSON writer is pointed below the private journal store with mixed case.
+    # Purpose: Reject the target before creating any directory or file.
+    It 'UnitT188_rejects_generic_json_writes_to_the_journal_store' {
+        $root=Join-Path $TestDrive 'writer-root'; $path=Join-Path $root '.AI-Instructions-TXN\x\journal.json'
+        { Write-AiInstructionsJsonFile -Path $path -Document @{ value=1 } } | Should Throw
+        (Test-Path -LiteralPath $root) | Should Be $false
+    }
+
+    # Scenario: D3 classifies valid, orphaned, invalid-name, previous-only, and malformed transaction entries.
+    # Purpose: Keep full recovery classification, launcher residue mapping, and component disposition closed and deterministic.
+    It 'UnitT189_classifies_transaction_residue_and_disposition' {
+        $journal=Get-TestInstallJournalV1; $json=$journal|ConvertTo-Json -Depth 20; $name=$journal.transactionId
+        $cases=@(
+            @{ Name=$name; Entry='directory'; JKind='file'; Json=$json; PKind=$null; PJson=$null; Expected='valid-journal' },
+            @{ Name=$name; Entry='directory'; JKind=$null; Json=$null; PKind='file'; PJson=$json; Expected='valid-journal' },
+            @{ Name=$name; Entry='directory'; JKind=$null; Json=$null; PKind=$null; PJson=$null; Expected='orphan-without-journal' },
+            @{ Name=$name.ToUpperInvariant(); Entry='directory'; JKind='file'; Json=$json; PKind=$null; PJson=$null; Expected='invalid-name' },
+            @{ Name=$name; Entry='reparse-point'; JKind='file'; Json=$json; PKind=$null; PJson=$null; Expected='invalid-name' },
+            @{ Name=$name; Entry='file'; JKind='file'; Json=$json; PKind=$null; PJson=$null; Expected='invalid-name' },
+            @{ Name=$name; Entry='directory'; JKind='reparse-point'; Json=$null; PKind=$null; PJson=$null; Expected='malformed-journal' },
+            @{ Name=$name; Entry='directory'; JKind='file'; Json='{'; PKind='file'; PJson=$json; Expected='malformed-journal' },
+            @{ Name=('f' * 32); Entry='directory'; JKind='file'; Json=$json; PKind=$null; PJson=$null; Expected='malformed-journal' }
+        )
+        foreach($case in $cases) {
+            $result=Get-AiInstructionsInstallTransactionClassification -Name $case.Name -EntryKind $case.Entry -JournalEntryKind $case.JKind -JournalJson $case.Json -PreviousJournalEntryKind $case.PKind -PreviousJournalJson $case.PJson
+            $result.classification | Should Be $case.Expected
+            $minimal=Get-AiInstructionsInstallTransactionResidueKind -Name $case.Name -EntryKind $case.Entry -JournalEntryKind $case.JKind -PreviousJournalEntryKind $case.PKind
+            $mapped=if($case.Expected -eq 'invalid-name'){'invalid-name'}elseif($case.Expected -eq 'orphan-without-journal'){'orphan-without-journal'}else{'journal-present'}
+            $minimal | Should Be $mapped
+        }
+        (Get-AiInstructionsInstallTransactionDisposition valid-journal installer).action | Should Be 'recover'
+        (Get-AiInstructionsInstallTransactionDisposition orphan-without-journal installer).action | Should Be 'purge-orphan'
+        foreach($classification in @('malformed-journal','invalid-name','journal-present')) { (Get-AiInstructionsInstallTransactionDisposition $classification installer).refusalCode | Should Be 'interrupted-install' }
+        foreach($component in @('launcher','updater')) { foreach($classification in @('valid-journal','orphan-without-journal','malformed-journal','invalid-name','journal-present')) { (Get-AiInstructionsInstallTransactionDisposition $classification $component).refusalCode | Should Be 'interrupted-install' } }
+    }
+
+    if ($env:OS -eq 'Windows_NT' -and $null -ne (Get-Command powershell.exe -ErrorAction SilentlyContinue)) {
+        # Scenario: The stable launcher embeds the minimal D3 classifier in native Windows PowerShell 5.1.
+        # Purpose: Prove the function body has no module dependency or PowerShell 7-only syntax.
+        It 'UnitT190_runs_the_minimal_residue_classifier_in_windows_powershell_5_1' {
+            $tokens=$null; $errors=$null; $ast=[Management.Automation.Language.Parser]::ParseFile($script:RuntimeContractModule,[ref]$tokens,[ref]$errors)
+            $functionAst=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-AiInstructionsInstallTransactionResidueKind'},$true))[0]
+            $scriptPath=Join-Path $TestDrive 'residue-5.1.ps1'
+            [IO.File]::WriteAllText($scriptPath,$functionAst.Extent.Text + "`nGet-AiInstructionsInstallTransactionResidueKind -Name $('a' * 32) -EntryKind directory -JournalEntryKind file -PreviousJournalEntryKind `$null",[Text.UTF8Encoding]::new($false))
+            $result=& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scriptPath
+            $LASTEXITCODE | Should Be 0
+            ($result -join '').Trim() | Should Be 'journal-present'
+        }
+    }
+
+    # Scenario: D8 converts strict refusal, cleanup, commit, and reverse rollback decisions into primitive-only plans.
+    # Purpose: Keep target mutation authority explicit and sequence rollback operations from last to first.
+    It 'UnitT191_builds_strict_recovery_plans' {
+        $journal=Get-TestInstallJournalV1
+        $refuse=[pscustomobject]@{action='refuse';reasons=@('x');operations=@($journal.operations|ForEach-Object{[pscustomobject]@{sequence=$_.sequence;action='keep'}})}
+        $plan=Get-AiInstructionsInstallRecoveryPlan $journal $refuse; $plan.mutatesTargets|Should Be $false; @($plan.steps).Count|Should Be 0
+        $committedJournal=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal|ConvertTo-Json -Depth 20)
+        $committedJournal.phase='committed'; foreach($operation in $committedJournal.operations) { $operation.state='applied' }
+        $none=[pscustomobject]@{action='none';reasons=@();operations=@($committedJournal.operations|ForEach-Object{[pscustomobject]@{sequence=$_.sequence;action='keep'}})}
+        $nonePlan=Get-AiInstructionsInstallRecoveryPlan $committedJournal $none
+        $nonePlan.steps[0].step | Should Be 'cleanup-transaction'; $nonePlan.steps[0].primitive | Should Be 'Remove-PlatformOwnedDirectoryTree'
+        $appliedJournal=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal|ConvertTo-Json -Depth 20)
+        $appliedJournal.phase='applied'; foreach($operation in $appliedJournal.operations) { $operation.state='applied' }
+        $commit=[pscustomobject]@{action='commit';reasons=@();operations=@($appliedJournal.operations|ForEach-Object{[pscustomobject]@{sequence=$_.sequence;action='keep'}})}
+        $commitPlan=Get-AiInstructionsInstallRecoveryPlan $appliedJournal $commit; $commitPlan.steps[0].phase|Should Be 'committed'; @($commitPlan.steps|Where-Object step -eq 'cleanup-artifact').Count|Should BeGreaterThan 0
+        @($commitPlan.steps|Where-Object step -eq 'cleanup-transaction')[0].primitive | Should Be 'Remove-PlatformOwnedDirectoryTree'
+        $rollback=[pscustomobject]@{action='roll-back';reasons=@();operations=@([pscustomobject]@{sequence=1;action='restore-original'},[pscustomobject]@{sequence=2;action='remove-applied'})}
+        $rollbackPlan=Get-AiInstructionsInstallRecoveryPlan $journal $rollback; $rollbackPlan.mutatesTargets|Should Be $true; (@($rollbackPlan.steps|Where-Object step -eq 'operation').sequence -join ',')|Should Be '2,1,1'
+        (@($rollbackPlan.steps|Where-Object step -eq 'operation').primitive -join ',')|Should Be 'Remove-PlatformOwnedFile,Publish-PlatformFile,Set-PlatformPermissions'
+        $directoryJournal=Get-TestSwapDirectoryInstallJournalV1
+        $directoryRollback=[pscustomobject]@{action='roll-back';reasons=@();operations=@([pscustomobject]@{sequence=1;action='restore-original'})}
+        $directoryStep=@((Get-AiInstructionsInstallRecoveryPlan $directoryJournal $directoryRollback).steps|Where-Object step -eq 'operation')[0]
+        $directoryStep.primitive|Should Be 'Move-PlatformOwnedDirectory'; $directoryStep.quarantineLeaf|Should Be $directoryJournal.operations[0].quarantineLeaf
+        $createDirectory=Get-TestCreateDirectoryInstallJournalV1
+        $createRollback=[pscustomobject]@{action='roll-back';reasons=@();operations=@([pscustomobject]@{sequence=1;action='remove-applied'})}
+        @((Get-AiInstructionsInstallRecoveryPlan $createDirectory $createRollback).steps|Where-Object step -eq 'operation')[0].primitive|Should Be 'Move-PlatformOwnedDirectory'
+        foreach($bad in @(
+            [pscustomobject]@{action='commit';reasons=@();operations=@([pscustomobject]@{action='keep'},[pscustomobject]@{sequence=2;action='keep'})},
+            [pscustomobject]@{action='commit';reasons=@();operations=@([pscustomobject]@{sequence=1;action='none'},[pscustomobject]@{sequence=2;action='keep'})},
+            [pscustomobject]@{action='roll-back';reasons=@();operations=@([pscustomobject]@{sequence=1;action='keep'},[pscustomobject]@{sequence=2;action='none'})},
+            [pscustomobject]@{action='unknown';reasons=@();operations=@()}
+        )) { { Get-AiInstructionsInstallRecoveryPlan $journal $bad | Out-Null } | Should Throw }
+    }
+
+    # Scenario: D16 refusal codes travel as typed exceptions, error records, inner exceptions, and stderr strings.
+    # Purpose: Preserve the closed refusal vocabulary across in-process and cross-process boundaries.
+    It 'UnitT192_round_trips_typed_refusal_codes' {
+        $expected=@('capability-unavailable','platform-mismatch','downgrade-refused','mixed-generation','unsupported-version','closure-invalid','interrupted-install','projection-runtime-unavailable','runtime-baseline-unavailable')
+        (@(Get-AiInstructionsRefusalCodes)-join ',') | Should Be ($expected-join ',')
+        $exception=New-AiInstructionsRefusalException -Code interrupted-install -Message 'Stopped'
+        $exception.GetType().FullName | Should Be 'SyuanTsai.AiInstructions.AiInstructionsRefusalException'
+        $exception.Code | Should Be 'interrupted-install'
+        $exception.Message | Should Match '\[ai-instructions-refusal-code=interrupted-install\]$'
+        (Get-AiInstructionsRefusalCode $exception) | Should Be 'interrupted-install'
+        try { throw $exception } catch { (Get-AiInstructionsRefusalCode $_) | Should Be 'interrupted-install' }
+        $outer=[InvalidOperationException]::new('outer',$exception); (Get-AiInstructionsRefusalCode $outer) | Should Be 'interrupted-install'
+        (Get-AiInstructionsRefusalCode 'failure [ai-instructions-refusal-code=closure-invalid]') | Should Be 'closure-invalid'
+        (Get-AiInstructionsRefusalCode 'failure [ai-instructions-refusal-code=unknown]') | Should BeNullOrEmpty
+        { New-AiInstructionsRefusalException -Code unknown -Message x | Out-Null } | Should Throw
+    }
+
+    # Scenario: P7d1 adds a closed set of public pure helpers to the runtime contract module.
+    # Purpose: Prevent a later export-list edit from silently hiding an implemented contract API.
+    It 'UnitT193_exports_all_p7d1_contract_helpers' {
+        $expected=@('Get-AiInstructionsInstallJournalDirectoryState','Get-AiInstructionsInstallJournalStoreLeaves','Assert-AiInstructionsInstallJournalStoreTransition','Get-AiInstructionsInstallTransactionClassification','Get-AiInstructionsInstallTransactionResidueKind','Get-AiInstructionsInstallTransactionDisposition','Get-AiInstructionsInstallRecoveryPlan','Get-AiInstructionsRefusalCodes','New-AiInstructionsRefusalException','Get-AiInstructionsRefusalCode')
+        $commands=@((Get-Command -Module ai-instructions-runtime-contract).Name)
+        foreach($name in $expected) { $commands -contains $name | Should Be $true }
+    }
+
+    # Scenario: Both journal.json and journal.prev exist while classifying an interrupted transaction directory.
+    # Purpose: Accept only a valid previous journal followed by a valid monotonic store transition to the current journal.
+    It 'UnitT194_validates_previous_to_current_journal_store_transition' {
+        $previous=Get-TestInstallJournalV1
+        $previous.phase='prepared'
+        foreach($operation in $previous.operations) { $operation.state='pending' }
+        $current=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($previous|ConvertTo-Json -Depth 20)
+        $current.phase='applying'
+        $current.operations[0].state='applied'
+        $name=$current.transactionId
+        $currentJson=$current|ConvertTo-Json -Depth 20
+        $previousJson=$previous|ConvertTo-Json -Depth 20
+
+        $valid=Get-AiInstructionsInstallTransactionClassification -Name $name -EntryKind directory -JournalEntryKind file -JournalJson $currentJson -PreviousJournalEntryKind file -PreviousJournalJson $previousJson
+        $valid.classification | Should Be 'valid-journal'
+        $valid.journalLeaf | Should Be 'journal.json'
+
+        $cases=@(
+            @{ Kind='directory'; Json=$previousJson; Current=$currentJson; Reason='previous journal' },
+            @{ Kind='file'; Json='{'; Current=$currentJson; Reason='previous journal' },
+            @{ Kind='file'; Json=((ConvertFrom-Json $previousJson)|ForEach-Object{$_.transactionId='f'*32;$_}|ConvertTo-Json -Depth 20); Current=$currentJson; Reason='previous journal' },
+            @{ Kind='file'; Json=$previousJson; Current=((ConvertFrom-Json $currentJson)|ForEach-Object{$_.operations[0].targetRelativePath='changed';$_}|ConvertTo-Json -Depth 20); Reason='transition' },
+            @{ Kind='file'; Json=$currentJson; Current=$previousJson; Reason='transition' }
+        )
+        foreach($case in $cases) {
+            $result=Get-AiInstructionsInstallTransactionClassification -Name $name -EntryKind directory -JournalEntryKind file -JournalJson $case.Current -PreviousJournalEntryKind $case.Kind -PreviousJournalJson $case.Json
+            $result.classification | Should Be 'malformed-journal'
+            $result.reason | Should Match $case.Reason
+        }
+    }
+
+    # Scenario: Rollback resumes from an applying journal with applied and pending operations, including an already-restored applied operation.
+    # Purpose: Persist each rolled-back operation state before the terminal phase and keep every journal-store transition valid.
+    It 'UnitT195_persists_rollback_operation_states_before_terminal_phase' {
+        $journal=Get-TestInstallJournalV1
+        $journal.phase='applying'
+        $journal.operations[0].state='applied'
+        $journal.operations[1].state='pending'
+        $decision=[pscustomobject]@{action='roll-back';reasons=@();operations=@(
+            [pscustomobject]@{sequence=1;action='restore-original'},
+            [pscustomobject]@{sequence=2;action='none'}
+        )}
+        $plan=Get-AiInstructionsInstallRecoveryPlan -Journal $journal -Decision $decision
+        (@($plan.steps|ForEach-Object{"$($_.step):$($_.sequence):$($_.action):$($_.state):$($_.phase)"}) -join '|') | Should Match 'operation:1:restore-original::\|operation:1:restore-permissions::\|write-operation-state:1::rolled-back:'
+        @($plan.steps|Where-Object step -eq 'cleanup-transaction')[0].primitive | Should Be 'Remove-PlatformOwnedDirectoryTree'
+
+        $working=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal|ConvertTo-Json -Depth 20)
+        foreach($step in @($plan.steps|Where-Object { $_.step -in @('write-phase','write-operation-state') })) {
+            $next=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($working|ConvertTo-Json -Depth 20)
+            if($step.step -eq 'write-phase') { $next.phase=$step.phase }
+            else { @($next.operations|Where-Object sequence -eq $step.sequence)[0].state=$step.state }
+            { Assert-AiInstructionsInstallJournalStoreTransition -Previous $working -Next $next | Out-Null } | Should Not Throw
+            $working=$next
+        }
+        $working.phase | Should Be 'rolled-back'
+        { ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($working|ConvertTo-Json -Depth 20) | Out-Null } | Should Not Throw
+
+        $alreadyRestored=Get-TestInstallJournalV1
+        $alreadyRestored.phase='applying'
+        foreach($operation in $alreadyRestored.operations) { $operation.state='applied' }
+        $noneDecision=[pscustomobject]@{action='roll-back';reasons=@();operations=@($alreadyRestored.operations|ForEach-Object{[pscustomobject]@{sequence=$_.sequence;action='none'}})}
+        $stateSteps=@((Get-AiInstructionsInstallRecoveryPlan -Journal $alreadyRestored -Decision $noneDecision).steps|Where-Object step -eq 'write-operation-state')
+        ($stateSteps.sequence -join ',') | Should Be '2,1'
+        ($stateSteps.state -join ',') | Should Be 'rolled-back,rolled-back'
+    }
+
+    # Scenario: A directory link aliases either a transaction journal directory or an ordinary directory.
+    # Purpose: Reject physical journal-store aliases before mutation while preserving supported writes through ordinary links.
+    It 'UnitT196_resolves_directory_links_before_generic_json_writes' {
+        $root=Join-Path $TestDrive 'writer-link-root'
+        $transactionDirectory=Join-Path (Join-Path $root '.ai-instructions-txn') '0123456789abcdef0123456789abcdef'
+        $ordinaryDirectory=Join-Path $root 'ordinary-target'
+        $journalAlias=Join-Path $root 'journal-alias'
+        $ordinaryAlias=Join-Path $root 'ordinary-alias'
+        New-Item -ItemType Directory -Force -Path $transactionDirectory,$ordinaryDirectory | Out-Null
+        $linkType=if($env:OS -eq 'Windows_NT'){'Junction'}else{'SymbolicLink'}
+        New-Item -ItemType $linkType -Path $journalAlias -Target $transactionDirectory | Out-Null
+        New-Item -ItemType $linkType -Path $ordinaryAlias -Target $ordinaryDirectory | Out-Null
+
+        { Write-AiInstructionsJsonFile -Path (Join-Path $journalAlias 'journal.json') -Document @{ value=1 } } | Should Throw
+        @(Get-ChildItem -Force -LiteralPath $transactionDirectory).Count | Should Be 0
+
+        $ordinaryPath=Join-Path $ordinaryAlias 'document.json'
+        { Write-AiInstructionsJsonFile -Path $ordinaryPath -Document @{ value=2 } } | Should Not Throw
+        (Get-Content -Raw -LiteralPath (Join-Path $ordinaryDirectory 'document.json') | ConvertFrom-Json).value | Should Be 2
+    }
+
+    # Scenario: Text contains an obsolete refusal marker before the authoritative marker appended at the end.
+    # Purpose: Parse only the last marker and never fall back when that final code is outside the closed vocabulary.
+    It 'UnitT197_uses_the_last_refusal_marker_in_text' {
+        (Get-AiInstructionsRefusalCode 'old [ai-instructions-refusal-code=closure-invalid] final [ai-instructions-refusal-code=interrupted-install]') | Should Be 'interrupted-install'
+        (Get-AiInstructionsRefusalCode 'old [ai-instructions-refusal-code=closure-invalid] final [ai-instructions-refusal-code=unknown]') | Should BeNullOrEmpty
+    }
+
+    # Scenario: Equivalent journals serialize immutable objects and nested operation fields in different property orders.
+    # Purpose: Compare JSON values recursively by meaning while still rejecting an immutable nested value change.
+    It 'UnitT198_compares_store_transition_fields_by_json_semantics' {
+        $previous=Get-TestInstallJournalV1
+        $next=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($previous|ConvertTo-Json -Depth 20)
+        $next.owner=[pscustomobject][ordered]@{ processStartIdentity=$next.owner.processStartIdentity; processId=[decimal]$next.owner.processId; component=$next.owner.component }
+        $operation=$next.operations[0]
+        $operation.original=[pscustomobject][ordered]@{
+            identity=[pscustomobject][ordered]@{ fileId=$operation.original.identity.fileId; device=$operation.original.identity.device; kind=$operation.original.identity.kind }
+            length=[decimal]$operation.original.length
+            sha256=$operation.original.sha256
+            exists=$operation.original.exists
+        }
+        $next.operations[0]=[pscustomobject][ordered]@{
+            state=$operation.state; applied=$operation.applied; permissions=$operation.permissions; backupIdentity=$operation.backupIdentity
+            original=$operation.original; quarantineLeaf=$operation.quarantineLeaf; backupLeaf=$operation.backupLeaf; stageLeaf=$operation.stageLeaf
+            targetRelativePath=$operation.targetRelativePath; method=$operation.method; kind=$operation.kind; sequence=$operation.sequence
+        }
+
+        { Assert-AiInstructionsInstallJournalStoreTransition -Previous $previous -Next $next | Out-Null } | Should Not Throw
+        $next.operations[0].original.identity.fileId='changed'
+        { Assert-AiInstructionsInstallJournalStoreTransition -Previous $previous -Next $next | Out-Null } | Should Throw
+    }
+
+    # Scenario: A write-file stage rename crashes after moving the original to backup, leaving the target absent during applying or applied.
+    # Purpose: Restore only a byte-for-byte and identity-matching backup in nonterminal phases, while refusing invalid evidence and terminal drift.
+    It 'UnitT199_restores_target_absent_write_file_only_from_a_valid_backup' {
+        foreach($phase in @('applying','applied')) {
+            $journal=Get-TestInstallJournalV1
+            $journal.operations=@($journal.operations[0])
+            $journal.phase=$phase
+            $journal.operations[0].state=if($phase -eq 'applied'){'applied'}else{'staged'}
+            $absent=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent
+
+            $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}
+            $decision.action | Should Be 'roll-back'
+            $decision.operations[0].action | Should Be 'restore-original'
+        }
+
+        $journal=Get-TestInstallJournalV1
+        $journal.operations=@($journal.operations[0])
+        $journal.phase='applying'
+        $journal.operations[0].state='staged'
+        $absent=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+        $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent -Backup $null
+        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}).action | Should Be 'refuse'
+
+        $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent
+        $observation.backup.sha256='9' * 64
+        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}).action | Should Be 'refuse'
+
+        $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent
+        $observation.backup.identity.fileId='0000ABCD:99999999'
+        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}).action | Should Be 'refuse'
+
+        $journal.phase='rolled-back'
+        $journal.operations[0].state='rolled-back'
+        $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent
+        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}).action | Should Be 'refuse'
+    }
+
+    # Scenario: A swap-directory stage rename crashes after moving the original to backup, leaving the target absent during applying or applied.
+    # Purpose: Restore only an inventory-, count-, and identity-matching backup in nonterminal phases, while refusing invalid evidence and terminal drift.
+    It 'UnitT200_restores_target_absent_swap_directory_only_from_a_valid_backup' {
+        foreach($phase in @('applying','applied')) {
+            $journal=Get-TestSwapDirectoryInstallJournalV1
+            $journal.phase=$phase
+            $journal.operations[0].state=if($phase -eq 'applied'){'applied'}else{'staged'}
+            $absent=[pscustomobject]@{exists=$false;identity=$null;inventorySha256=$null;entryCount=$null}
+            $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent
+
+            $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}
+            $decision.action | Should Be 'roll-back'
+            $decision.operations[0].action | Should Be 'restore-original'
+        }
+
+        $journal=Get-TestSwapDirectoryInstallJournalV1
+        $journal.phase='applying'
+        $journal.operations[0].state='staged'
+        $absent=[pscustomobject]@{exists=$false;identity=$null;inventorySha256=$null;entryCount=$null}
+        $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent -Backup $null
+        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}).action | Should Be 'refuse'
+
+        $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent
+        $observation.backup.inventorySha256='9' * 64
+        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}).action | Should Be 'refuse'
+
+        $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent
+        $observation.backup.identity.fileId='0000ABCD:99999999'
+        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}).action | Should Be 'refuse'
+
+        $journal.phase='rolled-back'
+        $journal.operations[0].state='rolled-back'
+        $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent
+        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}).action | Should Be 'refuse'
+    }
+
+    # Scenario: Text contains an earlier valid refusal marker and a final marker with an invalid, empty, or differently cased payload.
+    # Purpose: Use only the final marker payload and reject every payload that is not an ordinal match for the closed refusal vocabulary.
+    It 'UnitT201_rejects_invalid_final_refusal_marker_payloads' {
+        $invalidCases=@(
+            'old [ai-instructions-refusal-code=closure-invalid] final [ai-instructions-refusal-code=unknown_2]',
+            'old [ai-instructions-refusal-code=closure-invalid] final [ai-instructions-refusal-code=]',
+            'old [ai-instructions-refusal-code=closure-invalid] final [ai-instructions-refusal-code=Interrupted-Install]'
+        )
+        foreach($text in $invalidCases) { (Get-AiInstructionsRefusalCode $text) | Should BeNullOrEmpty }
+        (Get-AiInstructionsRefusalCode 'old [ai-instructions-refusal-code=closure-invalid] final [ai-instructions-refusal-code=interrupted-install]') | Should Be 'interrupted-install'
+    }
+
+    # Scenario: A recovery plan receives operation actions or a decision action that is incompatible with the validated journal.
+    # Purpose: Reject impossible action/journal pairs before producing steps while preserving plans from the recovery decision helper.
+    It 'UnitT202_rejects_recovery_actions_incompatible_with_the_journal' {
+        $writeFileJournal=Get-TestInstallJournalV1
+        $writeFileJournal.operations=@($writeFileJournal.operations[0])
+        $createDirectoryJournal=Get-TestCreateDirectoryInstallJournalV1
+        $createFileJournal=Get-TestInstallJournalV1
+        $createFileJournal.operations=@($createFileJournal.operations[1])
+        $createFileJournal.operations[0].sequence=1
+        $createFileJournal.operations[0].permissions=$writeFileJournal.operations[0].permissions
+        $nullPermissionsJournal=Get-TestCreateDirectoryInstallJournalV1
+
+        $committedJournal=Get-TestInstallJournalV1
+        $committedJournal.phase='committed'
+        foreach($operation in $committedJournal.operations) { $operation.state='applied' }
+        $applyingJournal=Get-TestInstallJournalV1
+
+        $cases=@(
+            @{ Journal=$writeFileJournal; DecisionAction='roll-back'; OperationActions=@('remove-applied') },
+            @{ Journal=$createDirectoryJournal; DecisionAction='roll-back'; OperationActions=@('restore-original') },
+            @{ Journal=$createFileJournal; DecisionAction='roll-back'; OperationActions=@('restore-permissions') },
+            @{ Journal=$nullPermissionsJournal; DecisionAction='roll-back'; OperationActions=@('restore-permissions') },
+            @{ Journal=$committedJournal; DecisionAction='roll-back'; OperationActions=@('restore-original','remove-applied') },
+            @{ Journal=$applyingJournal; DecisionAction='commit'; OperationActions=@('keep','keep') },
+            @{ Journal=$applyingJournal; DecisionAction='none'; OperationActions=@('keep','keep') }
+        )
+        foreach($case in $cases) {
+            $operations=@()
+            for($index=0;$index -lt @($case.Journal.operations).Count;$index++) {
+                $operations += [pscustomobject]@{sequence=$case.Journal.operations[$index].sequence;action=$case.OperationActions[$index]}
+            }
+            $decision=[pscustomobject]@{action=$case.DecisionAction;reasons=@();operations=$operations}
+            { Get-AiInstructionsInstallRecoveryPlan -Journal $case.Journal -Decision $decision | Out-Null } | Should Throw
+        }
+
+        $journal=Get-TestInstallJournalV1
+        $observations=@{
+            1=New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].applied
+            2=New-TestInstallObservation -Operation $journal.operations[1] -State $journal.operations[1].original
+        }
+        $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
+        { Get-AiInstructionsInstallRecoveryPlan -Journal $journal -Decision $decision | Out-Null } | Should Not Throw
+    }
+
+    # Scenario: A write-file or swap-directory rollback restores an original backup whose recorded permissions may have drifted.
+    # Purpose: Restore the original permission snapshot after publishing or moving the backup and before persisting rolled-back operation state.
+    It 'UnitT203_restores_original_permissions_before_persisting_rolled_back_state' {
+        $cases=@(
+            @{ Journal=Get-TestInstallJournalV1; Primitive='Publish-PlatformFile' },
+            @{ Journal=Get-TestSwapDirectoryInstallJournalV1; Primitive='Move-PlatformOwnedDirectory' }
+        )
+        $cases[0].Journal.operations=@($cases[0].Journal.operations[0])
+
+        foreach($case in $cases) {
+            $journal=$case.Journal
+            $decision=[pscustomobject]@{action='roll-back';reasons=@();operations=@(
+                [pscustomobject]@{sequence=1;action='restore-original'}
+            )}
+
+            $plan=Get-AiInstructionsInstallRecoveryPlan -Journal $journal -Decision $decision
+            $steps=@($plan.steps)
+
+            $steps.Count | Should Be 6
+            $steps[1].step | Should Be 'operation'
+            $steps[1].action | Should Be 'restore-original'
+            $steps[1].primitive | Should Be $case.Primitive
+            $steps[2].step | Should Be 'operation'
+            $steps[2].sequence | Should Be 1
+            $steps[2].action | Should Be 'restore-permissions'
+            $steps[2].kind | Should Be $journal.operations[0].kind
+            $steps[2].targetRelativePath | Should Be $journal.operations[0].targetRelativePath
+            $steps[2].primitive | Should Be 'Set-PlatformPermissions'
+            $steps[2].snapshot | Should Be $journal.operations[0].permissions
+            $steps[3].step | Should Be 'write-operation-state'
+            $steps[3].sequence | Should Be 1
+            $steps[3].state | Should Be 'rolled-back'
         }
     }
 }

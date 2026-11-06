@@ -162,6 +162,12 @@
       "pattern": "^(?=.*[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000])(?!.*[.\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]$)[^/\\\\:*?\"<>|\\u0000-\\u001F\\u007F]+$",
       "not": { "enum": [".", ".."] }
     },
+    "transactionLeaf": {
+      "allOf": [
+        { "$ref": "#/$defs/portableLeaf" },
+        { "not": { "pattern": "^[Jj][Oo][Uu][Rr][Nn][Aa][Ll](?:\\.|$)" } }
+      ]
+    },
     "fileState": {
       "type": "object",
       "additionalProperties": false,
@@ -198,6 +204,24 @@
               "length": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 }
             }
           }
+        }
+      ]
+    },
+    "directoryState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exists", "identity", "inventorySha256", "entryCount"],
+      "properties": {
+        "exists": { "type": "boolean" },
+        "identity": { "$ref": "#/$defs/identity" },
+        "inventorySha256": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/hash" }] },
+        "entryCount": { "oneOf": [{ "type": "null" }, { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 }] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "exists": { "const": false } } },
+          "then": { "properties": { "identity": { "type": "null" }, "inventorySha256": { "type": "null" }, "entryCount": { "type": "null" } } },
+          "else": { "properties": { "inventorySha256": { "$ref": "#/$defs/hash" }, "entryCount": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 } } }
         }
       ]
     },
@@ -265,6 +289,7 @@
         "targetRelativePath",
         "stageLeaf",
         "backupLeaf",
+        "quarantineLeaf",
         "original",
         "backupIdentity",
         "applied",
@@ -273,7 +298,7 @@
       ],
       "properties": {
         "sequence": { "type": "integer", "minimum": 1, "maximum": 9223372036854775807 },
-        "kind": { "enum": ["write-file", "create-file", "remove-file", "swap-directory"] },
+        "kind": { "enum": ["write-file", "create-file", "remove-file", "swap-directory", "create-directory"] },
         "method": { "enum": ["stage-rename", "tombstone-rename"] },
         "targetRelativePath": {
           "type": "string",
@@ -284,18 +309,24 @@
         "stageLeaf": {
           "oneOf": [
             { "type": "null" },
-            { "$ref": "#/$defs/portableLeaf" }
+            { "$ref": "#/$defs/transactionLeaf" }
           ]
         },
         "backupLeaf": {
           "oneOf": [
             { "type": "null" },
-            { "$ref": "#/$defs/portableLeaf" }
+            { "$ref": "#/$defs/transactionLeaf" }
           ]
         },
-        "original": { "$ref": "#/$defs/fileState" },
+        "quarantineLeaf": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/transactionLeaf" }
+          ]
+        },
+        "original": {},
         "backupIdentity": { "$ref": "#/$defs/identity" },
-        "applied": { "$ref": "#/$defs/fileState" },
+        "applied": {},
         "permissions": { "$ref": "#/$defs/permissions" },
         "state": { "enum": ["pending", "staged", "applied", "rolled-back"] }
       },
@@ -305,8 +336,24 @@
           "then": {
             "properties": {
               "backupLeaf": { "type": "null" },
+              "quarantineLeaf": { "type": "null" },
               "original": { "properties": { "exists": { "const": false } } },
               "applied": { "properties": { "exists": { "const": true } } }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "create-directory" } } },
+          "then": {
+            "properties": {
+              "method": { "const": "stage-rename" },
+              "stageLeaf": { "$ref": "#/$defs/transactionLeaf" },
+              "backupLeaf": { "type": "null" },
+              "quarantineLeaf": { "$ref": "#/$defs/transactionLeaf" },
+              "original": { "allOf": [{ "$ref": "#/$defs/directoryState" }, { "properties": { "exists": { "const": false } } }] },
+              "backupIdentity": { "type": "null" },
+              "applied": { "allOf": [{ "$ref": "#/$defs/directoryState" }, { "properties": { "exists": { "const": true } } }] },
+              "permissions": { "type": "null" }
             }
           }
         },
@@ -316,6 +363,7 @@
             "properties": {
               "method": { "const": "tombstone-rename" },
               "stageLeaf": { "type": "null" },
+              "quarantineLeaf": { "type": "null" },
               "state": { "enum": ["pending", "applied", "rolled-back"] },
               "original": { "properties": { "exists": { "const": true } } },
               "backupIdentity": { "$ref": "#/$defs/identityObject" },
@@ -325,7 +373,7 @@
           "else": {
             "properties": {
               "method": { "const": "stage-rename" },
-              "stageLeaf": { "$ref": "#/$defs/portableLeaf" }
+              "stageLeaf": { "$ref": "#/$defs/transactionLeaf" }
             }
           }
         },
@@ -339,11 +387,29 @@
           }
         },
         {
+          "if": { "properties": { "kind": { "enum": ["swap-directory", "create-directory"] } } },
+          "then": {
+            "properties": {
+              "original": { "$ref": "#/$defs/directoryState" },
+              "applied": { "$ref": "#/$defs/directoryState" },
+              "quarantineLeaf": { "$ref": "#/$defs/transactionLeaf" }
+            }
+          },
+          "else": {
+            "properties": {
+              "original": { "$ref": "#/$defs/fileState" },
+              "applied": { "$ref": "#/$defs/fileState" },
+              "quarantineLeaf": { "type": "null" }
+            }
+          }
+        },
+        {
           "if": { "properties": { "original": { "properties": { "exists": { "const": true } } } } },
           "then": {
             "properties": {
               "backupLeaf": { "$ref": "#/$defs/portableLeaf" },
               "original": { "properties": { "identity": { "$ref": "#/$defs/identityObject" } } },
+              "backupIdentity": { "$ref": "#/$defs/identityObject" },
               "permissions": { "not": { "type": "null" } }
             }
           },
@@ -356,20 +422,7 @@
         {
           "if": {
             "properties": {
-              "original": { "properties": { "exists": { "const": true } } },
-              "state": { "enum": ["staged", "applied", "rolled-back"] }
-            }
-          },
-          "then": {
-            "properties": {
-              "backupIdentity": { "$ref": "#/$defs/identityObject" }
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "state": { "enum": ["staged", "applied", "rolled-back"] },
+              "method": { "const": "stage-rename" },
               "applied": { "properties": { "exists": { "const": true } } }
             }
           },
