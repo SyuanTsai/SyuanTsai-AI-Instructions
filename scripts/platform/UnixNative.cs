@@ -245,6 +245,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             [DllImport(Lib, SetLastError = true)] internal static extern int renameatx_np(SafeFd oldDirectory, string oldName, SafeFd newDirectory, string newName, uint flags);
             [DllImport(Lib, SetLastError = true)] internal static extern IntPtr acl_get_fd_np(SafeFd fd, int type);
             [DllImport(Lib, SetLastError = true)] internal static extern int acl_get_entry(IntPtr acl, int entryId, ref IntPtr entry);
+            [DllImport(Lib, SetLastError = true)] internal static extern int acl_get_flagset_np(IntPtr entry, ref IntPtr flagset);
+            [DllImport(Lib, SetLastError = true)] internal static extern int acl_get_flag_np(IntPtr flagset, int flag);
             [DllImport(Lib, SetLastError = true)] internal static extern int acl_free(IntPtr value);
             [DllImport(Lib, SetLastError = true)] internal static extern int close(int fd);
             [DllImport(Lib, SetLastError = true)] internal static extern IntPtr write(SafeFd fd, IntPtr buffer, UIntPtr count);
@@ -279,6 +281,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private const uint RenameExclusive = 0x00000004;
         private const int AclTypeExtended = 0x00000100;
         private const int AclFirstEntry = 0;
+        private const int AclNextEntry = 1;
+        private static readonly int[] DarwinAclInheritanceFlags = new int[] { 0x0001, 0x0002, 0x0004, 0x0008, 0x0010 };
         // Linux include/uapi/linux/fs.h deny mask 0x42900834.
         // Semantic-changing: FS_IMMUTABLE_FL 0x00000010 and FS_APPEND_FL
         // 0x00000020 alter write/rename/unlink behavior. Not preserved by
@@ -927,7 +931,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             int error = Marshal.GetLastWin32Error();
             if (error == 18)
                 throw new PlatformCapabilityUnavailableException("same-filesystem-rename: EXDEV", PlatformNative.GetOperatingSystem());
-            if (error == 22 || (!Mac && (error == 38 || error == 95)) || (Mac && (error == 45 || error == 78)))
+            if (error == 22 || (!Mac && (error == 38 || error == 95)) || (Mac && (error == 45 || error == 78 || error == 102)))
                 throw new PlatformCapabilityUnavailableException("publication-noreplace: " + ErrnoName(error), PlatformNative.GetOperatingSystem());
             throw Errno(operation, error);
         }
@@ -937,7 +941,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             int result = Mac ? Darwin.fsync(fd) : Linux.fsync(fd);
             if (result == 0) return;
             int error = Marshal.GetLastWin32Error();
-            if (directory && (error == 22 || (!Mac && error == 95) || (Mac && error == 45)))
+            if (directory && (error == 22 || (!Mac && error == 95) || (Mac && (error == 45 || error == 102))))
                 throw new PlatformCapabilityUnavailableException("directory-fsync: " + ErrnoName(error), PlatformNative.GetOperatingSystem());
             throw Errno(operation, error);
         }
@@ -990,6 +994,45 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 int error = Marshal.GetLastWin32Error();
                 if (error == 2 || error == 22) return false;
                 throw Errno("acl_get_entry", error);
+            }
+            finally { Check(Darwin.acl_free(acl), "acl_free"); }
+        }
+
+        private static bool HasDarwinInheritableAcl(SafeFd fd)
+        {
+            IntPtr acl = Darwin.acl_get_fd_np(fd, AclTypeExtended);
+            if (acl == IntPtr.Zero)
+                throw new PlatformCapabilityUnavailableException("parent-inheritance-acl: unable to read macOS ACL", "macos");
+            try
+            {
+                IntPtr entry = IntPtr.Zero;
+                int entryId = AclFirstEntry;
+                while (true)
+                {
+                    int result = Darwin.acl_get_entry(acl, entryId, ref entry);
+                    if (result != 0)
+                    {
+                        int error = Marshal.GetLastWin32Error();
+                        if (error == 2 || error == 22) return false;
+                        throw new PlatformCapabilityUnavailableException(
+                            "parent-inheritance-acl: unable to enumerate macOS ACL entries (" + ErrnoName(error) + ")", "macos");
+                    }
+                    IntPtr flagset = IntPtr.Zero;
+                    if (Darwin.acl_get_flagset_np(entry, ref flagset) != 0 || flagset == IntPtr.Zero)
+                        throw new PlatformCapabilityUnavailableException("parent-inheritance-acl: unable to read macOS ACL flags", "macos");
+                    foreach (int flag in DarwinAclInheritanceFlags)
+                    {
+                        int present = Darwin.acl_get_flag_np(flagset, flag);
+                        if (present == 1) return true;
+                        if (present < 0)
+                            throw new PlatformCapabilityUnavailableException("parent-inheritance-acl: unable to determine macOS inheritance flags", "macos");
+                    }
+                    entryId = AclNextEntry;
+                }
+            }
+            catch (EntryPointNotFoundException ex)
+            {
+                throw new PlatformCapabilityUnavailableException("parent-inheritance-acl: native symbol missing: " + ex.Message, "macos");
             }
             finally { Check(Darwin.acl_free(acl), "acl_free"); }
         }
@@ -1077,13 +1120,21 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
 
         private static uint EffectiveUid() { return Mac ? Darwin.geteuid() : Linux.geteuid(); }
 
+        private static void ChangeOwnership(SafeFd fd, uint uid, uint gid, string operation)
+        {
+            int result = Mac ? Darwin.fchown(fd, uid, gid) : Linux.fchown(fd, uid, gid);
+            if (result == 0) return;
+            int error = Marshal.GetLastWin32Error();
+            if (error == 1 || error == 13)
+                throw new PlatformCapabilityUnavailableException("permissions: " + operation + " failed with " + ErrnoName(error), PlatformNative.GetOperatingSystem());
+            throw Errno(operation, error);
+        }
+
         private static void ApplyPermissions(SafeFd fd, UnixPermissionSnapshot snapshot)
         {
             FileObservation before = Stat(fd, null);
-            if ((before.Uid != snapshot.Uid || before.Gid != snapshot.Gid) && EffectiveUid() != 0)
-                throw new PlatformCapabilityUnavailableException("permissions: restoring uid/gid requires root", PlatformNative.GetOperatingSystem());
             if (before.Uid != snapshot.Uid || before.Gid != snapshot.Gid)
-                Check(Mac ? Darwin.fchown(fd, checked((uint)snapshot.Uid), checked((uint)snapshot.Gid)) : Linux.fchown(fd, checked((uint)snapshot.Uid), checked((uint)snapshot.Gid)), "fchown");
+                ChangeOwnership(fd, checked((uint)snapshot.Uid), checked((uint)snapshot.Gid), "fchown");
             uint mode = Convert.ToUInt32(snapshot.Mode, 8);
             Chmod(fd, mode);
             FileObservation after = Stat(fd, null);
@@ -1180,6 +1231,109 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             GetVerifiedPath(transaction);
         }
 
+        private static string NewPreflightLeaf(HashSet<string> reserved, string suffix)
+        {
+            while (true)
+            {
+                string leaf = ".ai-instructions-preflight-" + Guid.NewGuid().ToString("N") + "-" + suffix;
+                PlatformPaths.Leaf(leaf);
+                if (reserved.Add(leaf)) return leaf;
+            }
+        }
+
+        private static FileObservation CreatePreflightProbe(UnixLease transaction, HashSet<string> reserved, string suffix, out string leaf)
+        {
+            while (true)
+            {
+                leaf = NewPreflightLeaf(reserved, suffix);
+                try
+                {
+                    using (SafeFd probe = Open(transaction.Fd, leaf, 2 | Create | Exclusive, 384))
+                    { return Stat(probe, null); }
+                }
+                catch (PlatformErrnoException ex) { if (ex.Errno != 17) throw; }
+            }
+        }
+
+        private static void UnlinkPreflightProbe(UnixLease transaction, string leaf, FileObservation expected, bool owned)
+        {
+            if (!owned) return;
+            FileObservation named = TryStat(transaction.Fd, leaf);
+            PlatformPaths.Same(named, expected);
+            Unlink(transaction.Fd, leaf, false);
+        }
+
+        private static void DestinationFilesystemPreflight(UnixLease parent, UnixLease transaction, params string[] reservedLeaves)
+        {
+            FileObservation parentValue = Stat(parent.Fd, null);
+            FileObservation transactionValue = Stat(transaction.Fd, null);
+            if (parentValue.Device != transactionValue.Device)
+                throw new PlatformCapabilityUnavailableException("same-filesystem-rename: EXDEV", PlatformNative.GetOperatingSystem());
+
+            // Get-PlatformCapabilities probes /tmp and proves only that the host exposes
+            // the primitives. Each operation must prove directory fsync and no-replace
+            // on the destination filesystem before touching target or stage names.
+            RunMutationTestHook("destination-preflight-before-transaction-fsync");
+            Sync(transaction.Fd, true, "fsync-destination-preflight-transaction");
+            RunMutationTestHook("destination-preflight-before-parent-fsync");
+            Sync(parent.Fd, true, "fsync-destination-preflight-parent");
+
+            HashSet<string> reserved = new HashSet<string>(StringComparer.Ordinal);
+            if (reservedLeaves != null) foreach (string leaf in reservedLeaves) if (leaf != null) reserved.Add(leaf);
+            string source = null, renamed = null, conflict = null;
+            FileObservation sourceIdentity = null, conflictIdentity = null;
+            bool sourceOwned = false, renamedOwned = false, conflictOwned = false;
+            try
+            {
+                sourceIdentity = CreatePreflightProbe(transaction, reserved, "source", out source);
+                sourceOwned = true;
+                RunMutationTestHook("destination-preflight-before-noreplace");
+                while (true)
+                {
+                    renamed = NewPreflightLeaf(reserved, "renamed");
+                    try
+                    {
+                        RenameNoReplace(transaction.Fd, source, transaction.Fd, renamed, "rename-destination-preflight");
+                        sourceOwned = false; renamedOwned = true; break;
+                    }
+                    catch (PlatformErrnoException ex) { if (ex.Errno != 17) throw; }
+                }
+                conflictIdentity = CreatePreflightProbe(transaction, reserved, "conflict", out conflict);
+                conflictOwned = true;
+                bool refused = false;
+                try { RenameNoReplace(transaction.Fd, conflict, transaction.Fd, renamed, "rename-destination-preflight-conflict"); }
+                catch (PlatformErrnoException ex) { if (ex.Errno != 17) throw; refused = true; }
+                if (!refused || TryStat(transaction.Fd, renamed) == null || TryStat(transaction.Fd, conflict) == null)
+                    throw new PlatformVerificationException("destination-preflight", PlatformNative.GetOperatingSystem(), "no-replace did not preserve both conflicting probe names");
+            }
+            finally
+            {
+                UnlinkPreflightProbe(transaction, source, sourceIdentity, sourceOwned);
+                UnlinkPreflightProbe(transaction, renamed, sourceIdentity, renamedOwned);
+                UnlinkPreflightProbe(transaction, conflict, conflictIdentity, conflictOwned);
+            }
+        }
+
+        private static UnixPermissionSnapshot GetCreatePermissions(UnixLease parent, UnixLease stage, uint createMode)
+        {
+            FileObservation parentValue = Stat(parent.Fd, null);
+            bool inheritedAcl = Mac ? HasDarwinInheritableAcl(parent.Fd) : HasLinuxXattr(parent.Fd, "system.posix_acl_default");
+            if (inheritedAcl)
+                throw new PlatformCapabilityUnavailableException("parent-inheritance-acl: inheritable ACL is present", PlatformNative.GetOperatingSystem());
+
+            FileObservation stageValue = Stat(stage.Fd, null);
+            uint gid = stageValue.Gid;
+            if ((parentValue.Mode & 0x400) != 0)
+            {
+                ChangeOwnership(stage.Fd, UInt32.MaxValue, parentValue.Gid, "fchown-stage-parent-gid");
+                FileObservation changed = Stat(stage.Fd, null);
+                if (changed.Gid != parentValue.Gid)
+                    throw new PlatformVerificationException("publication-parent-setgid", PlatformNative.GetOperatingSystem(), "stage gid differs from setgid parent gid after fchown");
+                gid = parentValue.Gid;
+            }
+            return new UnixPermissionSnapshot { Mode = ModeText(createMode), Uid = stageValue.Uid, Gid = gid };
+        }
+
         private static void RunMutationTestHook(string point)
         {
             Action<string> hook = MutationTestHook;
@@ -1259,7 +1413,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 try
                 {
                     FileObservation named = TryStat(parent.Fd, leaf);
-                    UnixPermissionSnapshot desired;
+                    UnixPermissionSnapshot desired = null;
                     if (expectedExists)
                     {
                         if (named == null) throw new PlatformVerificationException("publication", PlatformNative.GetOperatingSystem(), "expected target is absent");
@@ -1273,7 +1427,13 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     else
                     {
                         if (named != null) throw Errno("publication-create-target", 17);
-                        desired = new UnixPermissionSnapshot { Mode = ModeText(createMode), Uid = stageIdentity.Uid, Gid = stageIdentity.Gid };
+                    }
+                    DestinationFilesystemPreflight(parent, transaction, leaf, stage.Leaf, displacedLeaf);
+                    receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "destination-preflight");
+                    if (!expectedExists)
+                    {
+                        permissionsChanged = true;
+                        desired = GetCreatePermissions(parent, stage, createMode);
                     }
                     receipt.Permissions = desired;
                     permissionsChanged = true; ApplyPermissions(stage.Fd, desired);
@@ -1372,6 +1532,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     receipt.BackupIdentity = identity;
                     receipt.Permissions = AssertExpectedPermissions(target.Fd, identity,
                         verifyExpectedPermissions, expectedMode, expectedUid, expectedGid, "owned-file-removal-permissions");
+                    DestinationFilesystemPreflight(parent, transaction, leaf, tombstoneLeaf);
+                    receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "destination-preflight");
                     if (cleanup)
                     {
                         RunMutationTestHook("removal-cleanup-before-unlink");
@@ -1460,6 +1622,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
 
         public static string ProbePublicationPrimitives()
         {
+            // Host-level evidence only: per-operation destination filesystem support is
+            // established by DestinationFilesystemPreflight in Publish and Remove.
             RunProbeTestHook("publication-probe");
             ValidateAbi(); string rootPath = Mac ? "/private/tmp" : "/tmp";
             string name = "platform-publication-" + Guid.NewGuid().ToString("N");

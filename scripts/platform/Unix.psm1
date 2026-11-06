@@ -100,6 +100,33 @@ function Assert-UnixExpectedStage {
     [pscustomobject]@{ sha256=[string]$sha256; length=[long]$length }
 }
 
+function Assert-UnixJournalBackupIdentity {
+    param([Parameter(Mandatory=$true)] $Journal,[Parameter(Mandatory=$true)] $ExpectedState,[switch] $Required)
+    try {
+        $identity = Get-UnixContractValue $Journal backupIdentity
+        if ($null -eq $identity) {
+            if ($Required) { throw [ArgumentException]::new('Journal backupIdentity must exist for removal and equal ExpectedState.identity.') }
+            return
+        }
+        if (-not [bool]$ExpectedState.exists) { throw [ArgumentException]::new('Journal backupIdentity must be null when ExpectedState is absent.') }
+        if ((Get-UnixContractValue $identity kind -Required) -cne 'unix-device-inode') {
+            throw [ArgumentException]::new('Journal backupIdentity.kind must be unix-device-inode.')
+        }
+        $device = ConvertFrom-UnixIdentityNumber (Get-UnixContractValue $identity device -Required) 'Journal.backupIdentity.device'
+        $inode = ConvertFrom-UnixIdentityNumber (Get-UnixContractValue $identity fileId -Required) 'Journal.backupIdentity.fileId'
+        if ($device -ne [uint64]$ExpectedState.device -or $inode -ne [uint64]$ExpectedState.inode) {
+            throw [ArgumentException]::new('Journal backupIdentity must equal ExpectedState.identity.')
+        }
+    }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] { throw }
+    catch {
+        throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]::new(
+            'journal-binding',
+            [SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetOperatingSystem(),
+            $_.Exception.Message)
+    }
+}
+
 function Assert-UnixJournalBinding {
     param(
         $Journal,$ParentLease,$TransactionLease,[string]$Leaf,$StageLease,
@@ -142,6 +169,7 @@ function Assert-UnixJournalBinding {
             $journalOriginal.inode -ne $expectedOriginal.inode) {
             throw [ArgumentException]::new('Journal original state does not match ExpectedState.')
         }
+        Assert-UnixJournalBackupIdentity -Journal $Journal -ExpectedState $expectedOriginal -Required:$Remove
 
         if ($Remove) {
             if ((Get-UnixContractValue $Journal kind -Required) -cne 'remove-file' -or
