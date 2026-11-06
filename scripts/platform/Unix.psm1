@@ -421,7 +421,7 @@ function Remove-UnixPlatformOwnedFile {
         if (($null -ne $TransactionLease) -ne ($null -ne $TombstoneLeaf)) {
             throw [ArgumentException]::new('TransactionLease and TombstoneLeaf must be supplied together.')
         }
-        if (-not $tombstone -and $null -ne $Journal) {
+        if (-not $tombstone -and $PSBoundParameters.ContainsKey('Journal')) {
             throw [ArgumentException]::new('Journal is forbidden in cleanup mode.')
         }
         if ($tombstone) {

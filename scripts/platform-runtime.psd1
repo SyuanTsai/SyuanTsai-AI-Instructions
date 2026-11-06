@@ -69,7 +69,7 @@
                 @{ Path = 'platform/UnixNative.cs'; Sha256 = '8d29441f441bc84f7fe1a8cffe3b1de3c4b4d1903438d0a912d0353d0c493bd7' },
                 @{ Path = 'platform/WindowsNative.cs'; Sha256 = '050b9a9eb79ae86c57afc0330c4f71000d85f52d6531a37a6acd42b7be34b1f3' },
                 @{ Path = 'platform/WindowsInstallerMutation.cs'; Sha256 = 'b88b4b09c7bb5c3e71b762ddc6ebe72007ed0cca99977ab7a7272529c3ff9218' },
-                @{ Path = 'platform/Unix.psm1'; Sha256 = '8eb14d3e26229225e4448f33bbd7e5211179417e9872a34ab280af81a849093f' },
+                @{ Path = 'platform/Unix.psm1'; Sha256 = 'ec3b3bb0b39e1ce84d4c8f60a78c44fb40cb9d58c13ed88a6b9d9db978fcc147' },
                 @{ Path = 'platform/RuntimePreparation.psm1'; Sha256 = 'dc254c04e7e2caf280726e66f67434776bc7df12a210a38c80596e41344fd077' },
                 @{ Path = 'platform-runtime.psm1'; Sha256 = '5fe742e71c40b2b7ba71fdea2551f6a5a78b5decc94d6863b97c1e33cfeeb08f' },
                 @{ Path = 'installer-safe-mutation.psm1'; Sha256 = 'dc031edcc2f48968df83cd68ad52eacb7f7b05d3ca6a0cc622658cf6151c8293' },

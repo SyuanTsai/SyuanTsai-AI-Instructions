@@ -6129,7 +6129,7 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $typed=$caught.Exception;if($typed -is [Management.Automation.MethodInvocationException] -and $null-ne$typed.InnerException){$typed=$typed.InnerException}
             $typed.GetType().Name|Should Be 'PlatformVerificationException';$typed.Capability|Should Be 'owned-file-removal';$typed.Message|Should Match 'exactly one link'
             [IO.File]::ReadAllText($external)|Should Be 'outside'
-            ([IO.File]::GetAttributes($external)-band[IO.FileAttributes]::ReadOnly)|Should Be [IO.FileAttributes]::ReadOnly
+            ([IO.File]::GetAttributes($external)-band[IO.FileAttributes]::ReadOnly)|Should Be ([IO.FileAttributes]::ReadOnly)
             Test-Path -LiteralPath (Join-Path $backup 'linked.txt')|Should Be $true
         }finally{
             if($null-ne$backupLease){$backupLease.Dispose()}
