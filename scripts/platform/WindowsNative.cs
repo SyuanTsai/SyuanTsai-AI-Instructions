@@ -19,6 +19,13 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         public bool ReadOnly { get; internal set; }
     }
 
+    public sealed class WindowsDirectoryState
+    {
+        public FileObservation Observation { get; internal set; }
+        public string InventorySha256 { get; internal set; }
+        public long EntryCount { get; internal set; }
+    }
+
     public sealed class WindowsLease : IDisposable
     {
         internal readonly object Sync = new object();
@@ -75,6 +82,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         // Windows regression tests.  It is intentionally not part of the public API.
         internal static Action<string> PermissionsMutationTestHook = null;
         internal static Action<string> PublicationDaclTestHook = null;
+        internal static string PublicationDaclReadbackSddlTestOverride = null;
         [StructLayout(LayoutKind.Sequential)]
         private struct Information
         {
@@ -126,6 +134,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         [DllImport("advapi32.dll", SetLastError = true)] private static extern bool CreatePrivateObjectSecurityEx(IntPtr parentDescriptor, IntPtr creatorDescriptor, out IntPtr newDescriptor, IntPtr objectType, bool isContainerObject, uint autoInheritFlags, IntPtr token, ref GenericMapping genericMapping);
         [DllImport("advapi32.dll", SetLastError = true)] private static extern bool DestroyPrivateObjectSecurity(ref IntPtr descriptor);
         [DllImport("ntdll.dll")] private static extern int NtOpenFile(out SafeFileHandle handle, uint access, ref ObjectAttributes attributes, out IoStatusBlock status, uint share, uint options);
+        [DllImport("ntdll.dll")] private static extern int NtSetInformationFile(SafeFileHandle handle, out IoStatusBlock status, IntPtr information, uint length, int informationClass);
         [DllImport("ntdll.dll")] private static extern uint RtlNtStatusToDosError(int status);
         private static void Check(bool result, string operation) { if (!result) throw new PlatformWin32Exception(operation, Marshal.GetLastWin32Error()); }
         private static SafeAccessTokenHandle OpenEffectiveToken()
@@ -149,8 +158,15 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         }
         private static FileObservation Stat(SafeFileHandle handle)
         {
+            bool reparsePoint;
+            FileObservation observation = StatEntry(handle, out reparsePoint);
+            if (reparsePoint) throw new IOException("Reparse points are forbidden.");
+            return observation;
+        }
+        private static FileObservation StatEntry(SafeFileHandle handle, out bool reparsePoint)
+        {
             Information value; Check(GetFileInformationByHandle(handle, out value), "GetFileInformationByHandle");
-            if ((value.Attributes & 0x400) != 0) throw new IOException("Reparse points are forbidden.");
+            reparsePoint = (value.Attributes & 0x400) != 0;
             return new FileObservation { Device = value.Volume, Inode = ((ulong)value.IndexHigh << 32) | value.IndexLow,
                 LinkCount = value.Links, Size = ((long)value.SizeHigh << 32) | value.SizeLow,
                 Mode = value.Attributes, Kind = (value.Attributes & 0x10) != 0 ? "directory" : "file" };
@@ -298,7 +314,11 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             lock (lease.Sync)
             {
                 FileObservation observed = AssertIdentity(lease, lease.Observation, lease.Observation.Kind == "file");
-                return new WindowsPermissions { Sddl = GetDaclSddl(lease.Handle), ReadOnly = (observed.Mode & 1) != 0 };
+                string sddl = GetDaclSddl(lease.Handle);
+                string readbackOverride = PublicationDaclReadbackSddlTestOverride;
+                PublicationDaclReadbackSddlTestOverride = null;
+                if (!String.IsNullOrEmpty(readbackOverride)) sddl = readbackOverride;
+                return new WindowsPermissions { Sddl = sddl, ReadOnly = (observed.Mode & 1) != 0 };
             }
         }
         public static WindowsPermissions GetInheritedFilePermissions(WindowsLease parent)
@@ -410,6 +430,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     // DACL_SECURITY_INFORMATION only.  The descriptor retains P and
                     // every ACE flag; AI is intentionally allowed to clear on readback.
                     Check(SetKernelObjectSecurity(lease.Handle, 4u, descriptor), "SetKernelObjectSecurity(publication DACL)");
+                    if (hook != null) hook("after-low-level-dacl-write-before-readback");
                 }
                 finally { LocalFree(descriptor); }
             }
@@ -617,6 +638,226 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         public static WindowsLease TryOpenMutationFile(WindowsLease parent, string leaf, ulong expectedDevice, ulong expectedFileId)
         { return OpenMutationFileCore(parent, leaf, expectedDevice, expectedFileId, true, true, false, false); }
 
+        private static SafeFileHandle OpenRelativeEntryHandle(WindowsLease parent, string leaf, uint access, uint share, bool directoryOnly, string operation)
+        {
+            IntPtr nameBuffer = Marshal.StringToHGlobalUni(leaf);
+            IntPtr namePointer = IntPtr.Zero;
+            try
+            {
+                UnicodeString name = new UnicodeString
+                {
+                    Length = checked((ushort)(leaf.Length * 2)),
+                    MaximumLength = checked((ushort)((leaf.Length + 1) * 2)),
+                    Buffer = nameBuffer
+                };
+                namePointer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UnicodeString)));
+                Marshal.StructureToPtr(name, namePointer, false);
+                ObjectAttributes attributes = new ObjectAttributes
+                {
+                    Length = Marshal.SizeOf(typeof(ObjectAttributes)),
+                    RootDirectory = parent.Handle.DangerousGetHandle(),
+                    ObjectName = namePointer,
+                    Attributes = 0x40
+                };
+                IoStatusBlock ioStatus;
+                SafeFileHandle handle;
+                uint options = 0x00200020u | (directoryOnly ? 0x00000001u : 0u);
+                int status = NtOpenFile(out handle, access, ref attributes, out ioStatus, share, options);
+                if (status < 0)
+                {
+                    uint error = RtlNtStatusToDosError(status);
+                    if (handle != null) handle.Dispose();
+                    throw new PlatformWin32Exception(operation, unchecked((int)error));
+                }
+                return handle;
+            }
+            finally
+            {
+                if (namePointer != IntPtr.Zero) Marshal.FreeHGlobal(namePointer);
+                Marshal.FreeHGlobal(nameBuffer);
+            }
+        }
+
+        private static SafeFileHandle OpenRelativeOwnedEntryHandle(WindowsLease parent, string leaf, bool directoryOnly)
+        {
+            // DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES;
+            // deny-delete sharing while the entry is classified and mutated.
+            // OPEN_REPARSE_POINT makes a junction/symlink itself the deletion target.
+            return OpenRelativeEntryHandle(parent, leaf, 0x00110180u, 3, directoryOnly, "NtOpenFile(relative owned entry)");
+        }
+
+        private static SafeFileHandle OpenRelativeInventoryEntryHandle(WindowsLease parent, string leaf)
+        {
+            // GENERIC_READ | SYNCHRONIZE | FILE_READ_ATTRIBUTES with read-only
+            // sharing keeps each opened entry stable while its bytes and descendants
+            // are inventoried. OPEN_REPARSE_POINT prevents traversal through links.
+            return OpenRelativeEntryHandle(parent, leaf, 0x80100080u, 1, false, "NtOpenFile(relative directory inventory entry)");
+        }
+
+        private sealed class DirectoryInventoryEntry
+        {
+            internal string Path;
+            internal string Sha256;
+            internal long Length;
+        }
+
+        private static string ComputeHandleSha256(SafeFileHandle handle)
+        {
+            using (var borrowed = new SafeFileHandle(handle.DangerousGetHandle(), false))
+            using (var stream = new FileStream(borrowed, FileAccess.Read))
+            using (var sha = SHA256.Create())
+                return BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
+        }
+
+        private static List<string> EnumerateChildLeaves(WindowsLease directory)
+        {
+            var leaves = new List<string>();
+            foreach (string childPath in Directory.EnumerateFileSystemEntries(directory.Path))
+            {
+                string leaf = Path.GetFileName(childPath);
+                PlatformPaths.Leaf(leaf);
+                leaves.Add(leaf);
+            }
+            leaves.Sort(StringComparer.Ordinal);
+            return leaves;
+        }
+
+        private static void CollectDirectoryInventory(WindowsLease directory, string prefix,
+            List<DirectoryInventoryEntry> inventory, List<WindowsLease> retained)
+        {
+            FileObservation directoryObservation = AssertIdentity(directory, directory.Observation, false);
+            if (directoryObservation.Kind != "directory") throw new IOException("A non-reparse directory is required.");
+            List<string> before = EnumerateChildLeaves(directory);
+            foreach (string leaf in before)
+            {
+                SafeFileHandle handle = OpenRelativeInventoryEntryHandle(directory, leaf);
+                WindowsLease entry = null;
+                try
+                {
+                    bool reparsePoint;
+                    FileObservation observation = StatEntry(handle, out reparsePoint);
+                    if (reparsePoint) throw new IOException("Directory inventory must not cross a reparse point.");
+                    entry = new WindowsLease(handle, Path.Combine(directory.Path, leaf), null, directory, observation);
+                    handle = null;
+                    retained.Add(entry);
+                    string relativePath = prefix + leaf;
+                    if (observation.Kind == "directory")
+                    {
+                        inventory.Add(new DirectoryInventoryEntry {
+                            Path = relativePath + "/",
+                            Sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                            Length = 0
+                        });
+                        CollectDirectoryInventory(entry, relativePath + "/", inventory, retained);
+                    }
+                    else
+                    {
+                        if (observation.Kind != "file") throw new IOException("Directory inventory contains a non-regular file.");
+                        if (observation.LinkCount > 1) throw new IOException("Directory inventory contains a multiply-linked file.");
+                        inventory.Add(new DirectoryInventoryEntry {
+                            Path = relativePath,
+                            Sha256 = ComputeHandleSha256(entry.Handle),
+                            Length = observation.Size
+                        });
+                    }
+                }
+                finally
+                {
+                    if (handle != null) handle.Dispose();
+                }
+            }
+            List<string> after = EnumerateChildLeaves(directory);
+            if (before.Count != after.Count) throw new IOException("Directory contents changed while inventory was being captured.");
+            for (int i = 0; i < before.Count; i++)
+                if (!StringComparer.Ordinal.Equals(before[i], after[i]))
+                    throw new IOException("Directory contents changed while inventory was being captured.");
+        }
+
+        private static WindowsDirectoryState ComputeDirectoryState(WindowsLease directory)
+        {
+            var inventory = new List<DirectoryInventoryEntry>();
+            var retained = new List<WindowsLease>();
+            try
+            {
+                FileObservation root = AssertIdentity(directory, directory.Observation, false);
+                if (root.Kind != "directory") throw new IOException("A non-reparse directory is required.");
+                CollectDirectoryInventory(directory, String.Empty, inventory, retained);
+                inventory.Sort(delegate(DirectoryInventoryEntry first, DirectoryInventoryEntry second) {
+                    return StringComparer.Ordinal.Compare(first.Path, second.Path);
+                });
+                var canonical = new System.Text.StringBuilder();
+                foreach (DirectoryInventoryEntry entry in inventory)
+                    canonical.Append(entry.Path).Append('\t').Append(entry.Sha256).Append('\n');
+                byte[] bytes = new System.Text.UTF8Encoding(false).GetBytes(canonical.ToString());
+                using (var sha = SHA256.Create())
+                    return new WindowsDirectoryState {
+                        Observation = root,
+                        InventorySha256 = BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant(),
+                        EntryCount = inventory.Count
+                    };
+            }
+            finally
+            {
+                for (int i = retained.Count - 1; i >= 0; i--) retained[i].Dispose();
+            }
+        }
+
+        public static WindowsDirectoryState GetDirectoryState(WindowsLease directory)
+        {
+            lock (directory.Sync)
+            {
+                directory.Check();
+                return ComputeDirectoryState(directory);
+            }
+        }
+
+        public static WindowsDirectoryState TryGetDirectoryState(WindowsLease parent, string leaf)
+        {
+            PlatformPaths.Leaf(leaf);
+            lock (parent.Sync)
+            {
+                parent.Check(); AssertIdentity(parent, parent.Observation, false);
+                if (parent.Observation.Kind != "directory") throw new ArgumentException("A directory lease is required.");
+                SafeFileHandle handle;
+                try { handle = OpenRelativeInventoryEntryHandle(parent, leaf); }
+                catch (PlatformWin32Exception ex) { if (ex.Win32Error == 2 || ex.Win32Error == 3) return null; throw; }
+                WindowsLease directory = null;
+                try
+                {
+                    FileObservation observation = Stat(handle);
+                    if (observation.Kind != "directory") throw new IOException("A non-reparse directory is required.");
+                    directory = new WindowsLease(handle, Path.Combine(parent.Path, leaf), null, parent, observation);
+                    handle = null;
+                    return ComputeDirectoryState(directory);
+                }
+                finally
+                {
+                    if (directory != null) directory.Dispose();
+                    if (handle != null) handle.Dispose();
+                }
+            }
+        }
+
+        public static WindowsLease OpenMutationDirectory(WindowsLease parent, string leaf, ulong expectedDevice, ulong expectedFileId)
+        {
+            PlatformPaths.Leaf(leaf);
+            lock (parent.Sync)
+            {
+                parent.Check(); AssertIdentity(parent, parent.Observation, false);
+                if (parent.Observation.Kind != "directory") throw new ArgumentException("A directory lease is required.");
+                SafeFileHandle handle = OpenRelativeOwnedEntryHandle(parent, leaf, true);
+                try
+                {
+                    FileObservation value = Stat(handle);
+                    if (value.Kind != "directory") throw new IOException("A non-reparse directory is required.");
+                    if (value.Device != expectedDevice || value.Inode != expectedFileId)
+                        throw new IOException("The mutation directory identity differs from the expected volume serial or file ID.");
+                    return new WindowsLease(handle, Path.Combine(parent.Path, leaf), null, parent, value);
+                }
+                catch { handle.Dispose(); throw; }
+            }
+        }
+
         public static WindowsLease OpenValidationFile(WindowsLease parent, string leaf)
         {
             PlatformPaths.Leaf(leaf);
@@ -683,6 +924,136 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     lease.Path = destinationPath;
                 }
                 finally { Marshal.FreeHGlobal(buffer); }
+            }
+        }
+
+        public static void RenameDirectoryNoReplace(WindowsLease lease, WindowsLease destinationParent, string destinationLeaf)
+        {
+            PlatformPaths.Leaf(destinationLeaf);
+            lock (lease.Sync)
+            lock (destinationParent.Sync)
+            {
+                lease.Check(); destinationParent.Check();
+                FileObservation source = AssertIdentity(lease, lease.Observation, false);
+                if (source.Kind != "directory") throw new IOException("A non-reparse directory is required.");
+                AssertIdentity(destinationParent, destinationParent.Observation, false);
+                if (source.Device != destinationParent.Observation.Device)
+                    throw new PlatformWin32Exception("SetFileInformationByHandle(FileRenameInfo directory)", 17);
+
+                byte[] name = System.Text.Encoding.Unicode.GetBytes(destinationLeaf);
+                int rootOffset = IntPtr.Size == 8 ? 8 : 4;
+                int lengthOffset = rootOffset + IntPtr.Size;
+                int nameOffset = lengthOffset + 4;
+                int bufferLength = nameOffset + name.Length + 2;
+                IntPtr buffer = Marshal.AllocHGlobal(bufferLength);
+                try
+                {
+                    for (int i = 0; i < bufferLength; i++) Marshal.WriteByte(buffer, i, 0);
+                    Marshal.WriteInt32(buffer, 0, 0); // ReplaceIfExists = FALSE
+                    Marshal.WriteIntPtr(buffer, rootOffset, destinationParent.Handle.DangerousGetHandle());
+                    Marshal.WriteInt32(buffer, lengthOffset, name.Length);
+                    Marshal.Copy(name, 0, IntPtr.Add(buffer, nameOffset), name.Length);
+                    IoStatusBlock ioStatus;
+                    int status = NtSetInformationFile(lease.Handle, out ioStatus, buffer, (uint)bufferLength, 10); // FileRenameInformation
+                    if (status < 0)
+                        throw new PlatformWin32Exception("NtSetInformationFile(FileRenameInformation directory NoReplace)", unchecked((int)RtlNtStatusToDosError(status)));
+                    lease.Path = Path.Combine(destinationParent.Path, destinationLeaf);
+                }
+                finally { Marshal.FreeHGlobal(buffer); }
+            }
+        }
+
+        private static void MarkEntryDeleteOnClose(SafeFileHandle handle)
+        {
+            IntPtr buffer = Marshal.AllocHGlobal(4);
+            try
+            {
+                const int deleteFlags = 0x00000001 | 0x00000002 | 0x00000010;
+                Marshal.WriteInt32(buffer, deleteFlags);
+                if (SetFileInformationByHandle(handle, 21, buffer, 4)) return;
+                int error = Marshal.GetLastWin32Error();
+                if (error != 87 && error != 50)
+                    throw new PlatformWin32Exception("SetFileInformationByHandle(FileDispositionInfoEx owned tree)", error);
+
+                BasicInfo basic;
+                Check(GetFileInformationByHandleEx(handle, 0, out basic, (uint)Marshal.SizeOf(typeof(BasicInfo))), "GetFileInformationByHandleEx(FileBasicInfo owned tree)");
+                if ((basic.Attributes & 1u) != 0)
+                {
+                    basic.Attributes &= ~1u;
+                    if (basic.Attributes == 0) basic.Attributes = 0x80u; // FILE_ATTRIBUTE_NORMAL
+                    Check(SetFileInformationByHandle(handle, 0, ref basic, (uint)Marshal.SizeOf(typeof(BasicInfo))), "SetFileInformationByHandle(FileBasicInfo clear readonly owned tree)");
+                }
+                Marshal.WriteInt32(buffer, 1);
+                if (!SetFileInformationByHandle(handle, 4, buffer, 4))
+                    throw new PlatformWin32Exception("SetFileInformationByHandle(FileDispositionInfo owned tree)", Marshal.GetLastWin32Error());
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+        }
+
+        private static void DeleteOwnedEntry(WindowsLease parent, string leaf, string relativePath, bool requireDirectory, bool verifyExpectedIdentity, ulong expectedDevice, ulong expectedFileId, ref int removedEntryCount, ref string remainingPath)
+        {
+            PlatformPaths.Leaf(leaf);
+            remainingPath = relativePath;
+            SafeFileHandle handle = OpenRelativeOwnedEntryHandle(parent, leaf, false);
+            WindowsLease entry = null;
+            bool deleteMarked = false;
+            try
+            {
+                bool reparsePoint;
+                FileObservation observation = StatEntry(handle, out reparsePoint);
+                if (requireDirectory && (reparsePoint || observation.Kind != "directory"))
+                    throw new IOException("The owned-tree root must be a non-reparse directory.");
+                if (verifyExpectedIdentity && (observation.Device != expectedDevice || observation.Inode != expectedFileId))
+                    throw new IOException("The owned-tree root identity differs from ExpectedIdentity.");
+                entry = new WindowsLease(handle, Path.Combine(parent.Path, leaf), null, parent, observation);
+                handle = null;
+                if (!reparsePoint && observation.Kind == "directory")
+                {
+                    foreach (string childPath in Directory.EnumerateFileSystemEntries(entry.Path))
+                    {
+                        string childLeaf = Path.GetFileName(childPath);
+                        PlatformPaths.Leaf(childLeaf);
+                        DeleteOwnedEntry(entry, childLeaf, relativePath + "\\" + childLeaf, false, false, 0, 0, ref removedEntryCount, ref remainingPath);
+                    }
+                    foreach (string unexpected in Directory.EnumerateFileSystemEntries(entry.Path))
+                        throw new IOException("A directory entry appeared during owned-tree cleanup: " + unexpected);
+                    AssertIdentity(entry, observation, false);
+                }
+                else if (!reparsePoint)
+                {
+                    AssertIdentity(entry, observation, false);
+                }
+                MarkEntryDeleteOnClose(entry.Handle);
+                deleteMarked = true;
+            }
+            finally
+            {
+                if (entry != null) entry.Dispose();
+                if (handle != null) handle.Dispose();
+            }
+            if (deleteMarked) removedEntryCount++;
+        }
+
+        public static int DeleteOwnedDirectoryTree(WindowsLease parent, string leaf, ulong expectedDevice, ulong expectedFileId)
+        {
+            PlatformPaths.Leaf(leaf);
+            lock (parent.Sync)
+            {
+                parent.Check(); AssertIdentity(parent, parent.Observation, false);
+                if (parent.Observation.Kind != "directory") throw new ArgumentException("A directory lease is required.");
+                int removedEntryCount = 0;
+                string remainingPath = leaf;
+                try
+                {
+                    DeleteOwnedEntry(parent, leaf, leaf, true, true, expectedDevice, expectedFileId, ref removedEntryCount, ref remainingPath);
+                    return removedEntryCount;
+                }
+                catch (Exception failure)
+                {
+                    throw new IOException(String.Format(
+                        "Owned directory tree cleanup stopped after deleting {0} entries; remaining path '{1}'. {2}",
+                        removedEntryCount, remainingPath, failure.Message), failure);
+                }
             }
         }
 

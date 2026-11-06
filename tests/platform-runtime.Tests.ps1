@@ -2532,6 +2532,19 @@ Describe 'Platform runtime contract' {
             $caught | Should Not BeNullOrEmpty
             $caught.Exception.GetType().Name | Should Be 'PlatformNotImplementedException'
             $caught.Exception.ImplementationStep | Should Be 'P7'
+
+            foreach($directoryCase in @(
+                @{Command="Move-$($adapter)PlatformOwnedDirectory";Arguments=@{ParentLease='fixture';Leaf='source';TransactionLease='fixture';DestinationLeaf='destination';ExpectedIdentity='fixture';Direction='ToTransaction'};Capability='directory-publication'},
+                @{Command="Remove-$($adapter)PlatformOwnedDirectoryTree";Arguments=@{TransactionLease='fixture';Leaf='backup'};Capability='owned-file-removal'}
+            )){
+                $directoryCaught=$null
+                $directoryArguments=$directoryCase.Arguments
+                try{& $directoryCase.Command @directoryArguments|Out-Null}catch{$directoryCaught=$_}
+                $directoryCaught | Should Not BeNullOrEmpty
+                $directoryCaught.Exception.GetType().Name | Should Be 'PlatformNotImplementedException'
+                $directoryCaught.Exception.Capability | Should Be $directoryCase.Capability
+                $directoryCaught.Exception.ImplementationStep | Should Be 'P11'
+            }
             Remove-Module $adapter -Force -ErrorAction SilentlyContinue
         }
     }
@@ -2578,6 +2591,40 @@ Describe 'Platform runtime contract' {
             }, $true)
             $pin | Should Not BeNullOrEmpty
             $pin.Value | Should Be $expected
+        }
+    }
+
+    # Scenario: The host capability receipt is queried for the directory-publication primitive.
+    # Purpose: Report Windows availability only after no-replace, identity, and same-filesystem probes; Unix remains explicitly deferred to P11.
+    It 'UnitT360_reports_directory_publication_from_native_probe_evidence' {
+        $receipt=Get-PlatformCapabilities -Required @()
+        $capability=@($receipt.capabilities|Where-Object name -ceq 'directory-publication')
+        $capability.Count|Should Be 1
+        $schema=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/schemas/runtime-bundle-v3.schema.json')|ConvertFrom-Json
+        (@($receipt.capabilities.name|Sort-Object)-join ',')|Should Be (@($schema.properties.requiredCapabilities.items.enum|Sort-Object)-join ',')
+        if($script:ExpectedOs -ceq 'windows'){
+            $capability[0].status|Should Be 'available'
+            $capability[0].evidence.Count|Should Be 1
+            $evidence=$capability[0].evidence[0]
+            (@($evidence.PSObject.Properties.Name|Sort-Object)-join ',')|Should Be 'identityPreserved,noReplace,sameFileSystem'
+            $evidence.noReplace|Should Match 'rejected an existing destination'
+            $evidence.identityPreserved|Should Match 'file ID'
+            $evidence.sameFileSystem|Should Match 'same volume'
+        }
+        else{
+            $capability[0].status|Should Be 'unavailable'
+            $capability[0].evidence[0].implementation|Should Match 'P11'
+        }
+    }
+
+    # Scenario: The manifest and imported module expose the two directory mutation façades.
+    # Purpose: Keep FunctionsToExport synchronized with the callable platform-runtime API.
+    It 'UnitT370_exports_the_directory_mutation_facades_exactly_once' {
+        $manifest=Import-PowerShellDataFile -LiteralPath $script:ModuleManifest
+        $module=@(Get-Module platform-runtime)[0]
+        foreach($name in @('Get-PlatformDirectoryState','Move-PlatformOwnedDirectory','Remove-PlatformOwnedDirectoryTree')){
+            @($manifest.FunctionsToExport|Where-Object{[string]$_ -ceq $name}).Count|Should Be 1
+            @($module.ExportedCommands.Keys|Where-Object{[string]$_ -ceq $name}).Count|Should Be 1
         }
     }
 
@@ -3491,7 +3538,7 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $transactionRoot=Open-PlatformDirectory -Root $root -RelativePath '.ai-instructions-txn' -CreatePrivate
             $transactionId=[Guid]::NewGuid().ToString('N')
             $transaction=Open-PlatformDirectory -Root (Join-Path $root '.ai-instructions-txn') -RelativePath $transactionId -CreatePrivate
-            [pscustomobject]@{Root=$root;Parent=$parent;TransactionRoot=$transactionRoot;Transaction=$transaction;TransactionId=$transactionId}
+            [pscustomobject]@{Root=$root;Parent=$parent;TransactionRoot=$transactionRoot;Transaction=$transaction;TransactionId=$transactionId;TransactionIdentity=(Get-P7Identity $transaction.Observation)}
         }
         function Close-P7Fixture($Fixture,[object[]]$Leases=@()) {
             foreach($lease in @($Leases)){
@@ -3508,6 +3555,15 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $lease.WriteNewBytes($Bytes)
             $observed=Assert-PlatformFileIdentity -Lease $lease -Expected $lease.Observation -SingleLink
             [pscustomobject]@{Lease=$lease;State=[pscustomobject]@{exists=$true;sha256=(Get-P7Hash $Bytes);length=[int64]$Bytes.Length;identity=(Get-P7Identity $observed)};Expected=[pscustomobject]@{sha256=(Get-P7Hash $Bytes);length=[int64]$Bytes.Length}}
+        }
+        function New-P7Directory($Fixture,[ValidateSet('Parent','Transaction')][string]$Location,[string]$Leaf,[string]$Content='content') {
+            $relative=if($Location -ceq 'Parent'){"target/$Leaf"}else{".ai-instructions-txn/$($Fixture.TransactionId)/$Leaf"}
+            $path=Join-Path $Fixture.Root $relative
+            [void][IO.Directory]::CreateDirectory($path)
+            [IO.File]::WriteAllText((Join-Path $path 'marker.txt'),$Content,[Text.UTF8Encoding]::new($false))
+            $parent=if($Location -ceq 'Parent'){$Fixture.Parent}else{$Fixture.Transaction}
+            $state=Get-PlatformDirectoryState -ParentLease $parent -Leaf $Leaf
+            [pscustomobject]@{Path=$path;Identity=$state.identity;State=$state}
         }
         function New-P7JournalOperation {
             param([string]$Kind,[string]$Method,[string]$TargetRelativePath,$StageLeaf,$BackupLeaf,$Original,$Applied,$Permissions,$QuarantineLeaf=$null)
@@ -4476,7 +4532,11 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $control=New-P7File $f.Parent 'control' ([byte[]]@(1))
             $controlPermissions=Get-PlatformPermissions $control.Lease
             $stage=New-P7File $f.Transaction 'create.stage' ([Text.Encoding]::UTF8.GetBytes('created'))
-            [void](Publish-PlatformFile -ParentLease $f.Parent -Leaf 'created' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState ([pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}) -DisplacedLeaf $null -ExpectedStage $stage.Expected -NoReplace)
+            [void](Set-PlatformPermissions -Lease $stage.Lease -Snapshot $controlPermissions)
+            $missing=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            $applied=[pscustomobject]@{exists=$true;sha256=$stage.State.sha256;length=$stage.State.length;identity=$stage.State.identity}
+            $operation=New-P7JournalOperation create-file stage-rename 'target/created' 'create.stage' $null $missing $applied $controlPermissions
+            [void](Publish-PlatformFile -ParentLease $f.Parent -Leaf 'created' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $stage.Expected -NoReplace -Journal $operation)
             $published=Get-P7NamedFileState $f.Parent 'created'
             (Test-P7EquivalentDacl $published.sddl $controlPermissions.sddl) | Should Be $true
             $descriptor=[Security.AccessControl.RawSecurityDescriptor]::new($published.sddl)
@@ -4596,6 +4656,483 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $preserved.identity.fileId | Should Be $stage.State.identity.fileId
         } finally { Set-P7WindowsPreReopenHook $null;Close-P7Fixture $f @($stage.Lease,$replacement.Lease) }
     }
+
+    # Scenario: An owned target directory is moved to transaction backup and then restored to its target name.
+    # Purpose: Preserve directory identity and contents in both rename directions without traversing the tree.
+    It 'InterT470_moves_owned_directories_in_both_directions_with_identity_and_content_preserved' {
+        $f=New-P7Fixture 'p7d2-roundtrip'
+        try{
+            $directory=New-P7Directory $f Parent 'runtime' 'original-content'
+            $toReceipt=Move-PlatformOwnedDirectory -ParentLease $f.Parent -Leaf 'runtime' -TransactionLease $f.Transaction -DestinationLeaf 'runtime.backup' -ExpectedIdentity $directory.Identity -Direction ToTransaction -ExpectedState $directory.State
+            (@($toReceipt.PSObject.Properties.Name)-join ',')|Should Be 'capability,sourceLeaf,destinationLeaf,direction,identity'
+            $toReceipt.capability|Should Be 'directory-publication'
+            $toReceipt.identity.fileId|Should Be $directory.Identity.fileId
+            Test-Path -LiteralPath $directory.Path|Should Be $false
+            [IO.File]::ReadAllText((Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/runtime.backup/marker.txt"))|Should Be 'original-content'
+
+            $fromReceipt=Move-PlatformOwnedDirectory -ParentLease $f.Parent -Leaf 'runtime.backup' -TransactionLease $f.Transaction -DestinationLeaf 'runtime' -ExpectedIdentity $directory.Identity -Direction FromTransaction -ExpectedState $directory.State
+            $fromReceipt.identity.fileId|Should Be $directory.Identity.fileId
+            [IO.File]::ReadAllText((Join-Path $directory.Path 'marker.txt'))|Should Be 'original-content'
+        }finally{Close-P7Fixture $f}
+    }
+
+    # Scenario: A stage directory is published while the destination name already exists.
+    # Purpose: Require native no-replace failure and leave both source and destination trees unchanged.
+    It 'InterT480_rejects_an_existing_directory_destination_without_mutation' {
+        $f=New-P7Fixture 'p7d2-existing-destination'
+        try{
+            $stage=New-P7Directory $f Transaction 'stage' 'stage-content'
+            $existing=New-P7Directory $f Parent 'runtime' 'existing-content'
+            {Move-PlatformOwnedDirectory -ParentLease $f.Parent -Leaf 'stage' -TransactionLease $f.Transaction -DestinationLeaf 'runtime' -ExpectedIdentity $stage.Identity -Direction FromTransaction}|Should Throw
+            [IO.File]::ReadAllText((Join-Path $stage.Path 'marker.txt'))|Should Be 'stage-content'
+            [IO.File]::ReadAllText((Join-Path $existing.Path 'marker.txt'))|Should Be 'existing-content'
+        }finally{Close-P7Fixture $f}
+    }
+
+    # Scenario: The source name is a directory junction that points outside the transaction target tree.
+    # Purpose: Reject reparse sources before rename and preserve the outside directory.
+    It 'InterT490_rejects_a_reparse_directory_source_without_mutation' {
+        $f=New-P7Fixture 'p7d2-reparse-source'
+        try{
+            $outside=Join-Path $f.Root 'outside';[void][IO.Directory]::CreateDirectory($outside);[IO.File]::WriteAllText((Join-Path $outside 'sentinel.txt'),'outside')
+            $ordinary=New-P7Directory $f Parent 'identity-source'
+            $link=Join-Path $f.Root 'target/runtime';New-Item -ItemType Junction -Path $link -Target $outside|Out-Null
+            {Move-PlatformOwnedDirectory -ParentLease $f.Parent -Leaf 'runtime' -TransactionLease $f.Transaction -DestinationLeaf 'runtime.backup' -ExpectedIdentity $ordinary.Identity -Direction ToTransaction}|Should Throw 'directory-publication'
+            [IO.File]::ReadAllText((Join-Path $outside 'sentinel.txt'))|Should Be 'outside'
+            Test-Path -LiteralPath $link|Should Be $true
+        }finally{Close-P7Fixture $f}
+    }
+
+    # Scenario: A caller binds a real source directory to a different directory identity.
+    # Purpose: Stop before rename when ExpectedIdentity does not identify the source handle.
+    It 'InterT500_rejects_a_directory_identity_mismatch_without_mutation' {
+        $f=New-P7Fixture 'p7d2-identity-mismatch'
+        try{
+            $stage=New-P7Directory $f Transaction 'stage' 'stage-content'
+            $other=New-P7Directory $f Transaction 'other' 'other-content'
+            {Move-PlatformOwnedDirectory -ParentLease $f.Parent -Leaf 'stage' -TransactionLease $f.Transaction -DestinationLeaf 'runtime' -ExpectedIdentity $other.Identity -Direction FromTransaction}|Should Throw 'identity'
+            [IO.File]::ReadAllText((Join-Path $stage.Path 'marker.txt'))|Should Be 'stage-content'
+            Test-Path -LiteralPath (Join-Path $f.Root 'target/runtime')|Should Be $false
+        }finally{Close-P7Fixture $f}
+    }
+
+    # Scenario: The target lease is inside the transaction store, or the transaction leaf is not a lowercase transaction ID.
+    # Purpose: Enforce transaction topology before opening or renaming a source directory.
+    It 'InterT510_rejects_transaction_targets_and_invalid_transaction_names_without_mutation' {
+        $f=New-P7Fixture 'p7d2-topology';$badLease=$null
+        try{
+            $stage=New-P7Directory $f Transaction 'stage' 'stage-content'
+            {Move-PlatformOwnedDirectory -ParentLease $f.Transaction -Leaf 'stage' -TransactionLease $f.Transaction -DestinationLeaf 'runtime' -ExpectedIdentity $stage.Identity -Direction FromTransaction}|Should Throw 'outside'
+            $badLease=Open-PlatformDirectory -Root (Join-Path $f.Root '.ai-instructions-txn') -RelativePath 'BAD' -CreatePrivate
+            {Move-PlatformOwnedDirectory -ParentLease $f.Parent -Leaf 'stage' -TransactionLease $badLease -DestinationLeaf 'runtime' -ExpectedIdentity $stage.Identity -Direction FromTransaction}|Should Throw '32 lowercase hex'
+            [IO.File]::ReadAllText((Join-Path $stage.Path 'marker.txt'))|Should Be 'stage-content'
+        }finally{if($null -ne $badLease){$badLease.Dispose()};Close-P7Fixture $f}
+    }
+
+    # Scenario: Directory journal intent disagrees with the bound target leaf, identity, or operation kind.
+    # Purpose: Reject every mismatch before any source or destination name changes.
+    It 'InterT520_rejects_directory_journal_mismatches_without_mutation' {
+        $f=New-P7Fixture 'p7d2-journal-mismatch'
+        try{
+            $original=New-P7Directory $f Parent 'runtime' 'original-content'
+            $stage=New-P7Directory $f Transaction 'stage' 'stage-content'
+            $originalLease=Open-PlatformDirectory -Root $f.Root -RelativePath 'target/runtime'
+            try{$originalPermissions=Get-PlatformPermissions $originalLease}finally{$originalLease.Dispose()}
+            $operation=New-P7JournalOperation swap-directory stage-rename 'target/runtime' 'stage' 'runtime.backup' $original.State $stage.State $originalPermissions 'runtime.quarantine'
+            {Move-PlatformOwnedDirectory -ParentLease $f.Parent -Leaf 'runtime' -TransactionLease $f.Transaction -DestinationLeaf 'runtime.backup' -ExpectedIdentity $original.Identity -Direction ToTransaction -Journal $operation}|Should Throw 'ExpectedState'
+            $wrongState=($original.State|ConvertTo-Json -Depth 10|ConvertFrom-Json);$wrongState.inventorySha256='b'*64
+            {Move-PlatformOwnedDirectory -ParentLease $f.Parent -Leaf 'runtime' -TransactionLease $f.Transaction -DestinationLeaf 'runtime.backup' -ExpectedIdentity $original.Identity -Direction ToTransaction -ExpectedState $wrongState -Journal $operation}|Should Throw 'Journal'
+            $cases=@(
+                {param($x)$x.targetRelativePath='target/other'},
+                {param($x)$x.original.identity=$stage.Identity;$x.backupIdentity=$stage.Identity},
+                {param($x)$x.kind='write-file'}
+            )
+            foreach($change in $cases){
+                $copy=($operation|ConvertTo-Json -Depth 20|ConvertFrom-Json);& $change $copy
+                {Move-PlatformOwnedDirectory -ParentLease $f.Parent -Leaf 'runtime' -TransactionLease $f.Transaction -DestinationLeaf 'runtime.backup' -ExpectedIdentity $original.Identity -Direction ToTransaction -ExpectedState $original.State -Journal $copy}|Should Throw 'Journal'
+                [IO.File]::ReadAllText((Join-Path $original.Path 'marker.txt'))|Should Be 'original-content'
+                Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/runtime.backup")|Should Be $false
+            }
+        }finally{Close-P7Fixture $f}
+    }
+
+    # Scenario: A complete transaction directory contains nested directories and files.
+    # Purpose: Remove every owned entry and report the exact transaction leaf through the directory-tree primitive.
+    It 'InterT530_removes_a_nested_transaction_directory_tree' {
+        $f=New-P7Fixture 'p7d2-remove-tree'
+        try{
+            $nested=Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/one/two";[void][IO.Directory]::CreateDirectory($nested);[IO.File]::WriteAllText((Join-Path $nested 'data.txt'),'data')
+            $f.Transaction.Dispose();$f.Transaction=$null
+            $receipt=Remove-PlatformOwnedDirectoryTree -TransactionRootLease $f.TransactionRoot -Leaf $f.TransactionId -ExpectedIdentity $f.TransactionIdentity
+            (@($receipt.PSObject.Properties.Name)-join ',')|Should Be 'capability,removedEntryCount,leaf'
+            $receipt.capability|Should Be 'owned-file-removal'
+            $receipt.removedEntryCount|Should BeGreaterThan 2
+            Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)")|Should Be $false
+        }finally{Close-P7Fixture $f}
+    }
+
+    # Scenario: An owned backup tree contains a junction to a directory outside the transaction store.
+    # Purpose: Delete the junction itself without following it or changing the outside sentinel.
+    It 'InterT540_removes_an_internal_junction_without_following_its_target' {
+        $f=New-P7Fixture 'p7d2-remove-junction'
+        try{
+            $outside=Join-Path $f.Root 'outside';[void][IO.Directory]::CreateDirectory($outside);[IO.File]::WriteAllText((Join-Path $outside 'sentinel.txt'),'outside')
+            $backup=Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/runtime.backup";[void][IO.Directory]::CreateDirectory($backup)
+            $backupState=Get-PlatformDirectoryState -ParentLease $f.Transaction -Leaf 'runtime.backup'
+            New-Item -ItemType Junction -Path (Join-Path $backup 'external') -Target $outside|Out-Null
+            $receipt=Remove-PlatformOwnedDirectoryTree -TransactionLease $f.Transaction -Leaf 'runtime.backup' -ExpectedIdentity $backupState.identity
+            $receipt.removedEntryCount|Should Be 2
+            Test-Path -LiteralPath $backup|Should Be $false
+            [IO.File]::ReadAllText((Join-Path $outside 'sentinel.txt'))|Should Be 'outside'
+        }finally{Close-P7Fixture $f}
+    }
+
+    # Scenario: Cleanup is requested with a non-transaction leaf or with a lease outside the reserved transaction container.
+    # Purpose: Fail before recursive deletion and preserve every directory and file.
+    It 'InterT550_rejects_invalid_directory_tree_cleanup_boundaries_without_mutation' {
+        $f=New-P7Fixture 'p7d2-remove-boundary'
+        try{
+            $nested=Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/backup";[void][IO.Directory]::CreateDirectory($nested);[IO.File]::WriteAllText((Join-Path $nested 'data.txt'),'data')
+            $backupState=Get-PlatformDirectoryState -ParentLease $f.Transaction -Leaf 'backup'
+            {Remove-PlatformOwnedDirectoryTree -TransactionRootLease $f.TransactionRoot -Leaf 'not-a-transaction' -ExpectedIdentity $backupState.identity}|Should Throw '32 lowercase'
+            {Remove-PlatformOwnedDirectoryTree -TransactionRootLease $f.Parent -Leaf $f.TransactionId -ExpectedIdentity $f.TransactionIdentity}|Should Throw '.ai-instructions-txn'
+            [IO.File]::ReadAllText((Join-Path $nested 'data.txt'))|Should Be 'data'
+        }finally{Close-P7Fixture $f}
+    }
+
+    # Scenario: Create-file journals either omit permissions or bind an explicit snapshot, including a corrupted post-write readback.
+    # Purpose: Derive null permissions from the target parent, apply non-null permissions before rename, and roll back a mismatched readback with no publication.
+    It 'InterT560_applies_create_file_permission_semantics_before_rename' {
+        $f=New-P7Fixture 'p7d2-create-permissions';$control=$null;$inheritedStage=$null;$boundStage=$null;$mismatchStage=$null;$caught=$null
+        try{
+            [void](Set-P7InheritanceFixture $f)
+            $missing=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            $control=New-P7File $f.Parent 'control' ([byte[]]@(1));$controlPermissions=Get-PlatformPermissions $control.Lease
+            $inheritedStage=New-P7File $f.Transaction 'inherited.stage' ([Text.Encoding]::UTF8.GetBytes('inherited'))
+            $inheritedApplied=[pscustomobject]@{exists=$true;sha256=$inheritedStage.State.sha256;length=$inheritedStage.State.length;identity=$inheritedStage.State.identity}
+            $inheritedOperation=New-P7JournalOperation create-file stage-rename 'target/inherited' 'inherited.stage' $null $missing $inheritedApplied $null
+            [void](Publish-PlatformFile -ParentLease $f.Parent -Leaf 'inherited' -TransactionLease $f.Transaction -StageLease $inheritedStage.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $inheritedStage.Expected -NoReplace -Journal $inheritedOperation)
+            $inheritedPublished=Get-P7NamedFileState $f.Parent 'inherited'
+            (Test-P7EquivalentDacl $inheritedPublished.sddl $controlPermissions.sddl)|Should Be $true
+
+            $identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$snapshot=[pscustomobject]@{kind='windows-sddl';sddl=('D:P(A;;FA;;;'+$identity.User.Value+')');readOnly=$false}}finally{$identity.Dispose()}
+            $boundStage=New-P7File $f.Transaction 'bound.stage' ([Text.Encoding]::UTF8.GetBytes('bound'))
+            $boundApplied=[pscustomobject]@{exists=$true;sha256=$boundStage.State.sha256;length=$boundStage.State.length;identity=$boundStage.State.identity}
+            $boundOperation=New-P7JournalOperation create-file stage-rename 'target/bound' 'bound.stage' $null $missing $boundApplied $snapshot
+            [void](Publish-PlatformFile -ParentLease $f.Parent -Leaf 'bound' -TransactionLease $f.Transaction -StageLease $boundStage.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $boundStage.Expected -NoReplace -Journal $boundOperation)
+            $boundPublished=Get-P7NamedFileState $f.Parent 'bound'
+            (Test-P7EquivalentDacl $boundPublished.sddl $snapshot.sddl)|Should Be $true
+
+            $mismatchStage=New-P7File $f.Transaction 'mismatch.stage' ([Text.Encoding]::UTF8.GetBytes('mismatch'))
+            $mismatchBefore=Get-P7NamedFileState $f.Transaction 'mismatch.stage' $mismatchStage
+            $mismatchApplied=[pscustomobject]@{exists=$true;sha256=$mismatchStage.State.sha256;length=$mismatchStage.State.length;identity=$mismatchStage.State.identity}
+            $mismatchOperation=New-P7JournalOperation create-file stage-rename 'target/mismatch' 'mismatch.stage' $null $missing $mismatchApplied $snapshot
+            $hookState=@{Injected=$false}
+            Set-P7WindowsPublicationDaclHook ({param($point)if($point -ceq 'after-low-level-dacl-write-before-readback' -and -not $hookState.Injected){$hookState.Injected=$true;$field=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative].GetField('PublicationDaclReadbackSddlTestOverride',[Reflection.BindingFlags]'Static,NonPublic');$field.SetValue($null,[string]$mismatchBefore.sddl)}}.GetNewClosure())
+            try{[void](Publish-PlatformFile -ParentLease $f.Parent -Leaf 'mismatch' -TransactionLease $f.Transaction -StageLease $mismatchStage.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $mismatchStage.Expected -NoReplace -Journal $mismatchOperation)}catch{$caught=$_}finally{Set-P7WindowsPublicationDaclHook $null}
+            $hookState.Injected|Should Be $true
+            $caught|Should Not BeNullOrEmpty
+            $typed=$caught.Exception;if($typed -is [Management.Automation.MethodInvocationException] -and $null -ne $typed.InnerException){$typed=$typed.InnerException};$typed.GetType().Name|Should Be 'PlatformVerificationException'
+            Test-Path -LiteralPath (Join-Path $f.Root 'target/mismatch')|Should Be $false
+            $mismatchAfter=Get-P7NamedFileState $f.Transaction 'mismatch.stage' $mismatchStage
+            $mismatchAfter.bytes|Should Be $mismatchBefore.bytes;$mismatchAfter.identity.fileId|Should Be $mismatchBefore.identity.fileId;(Test-P7EquivalentDacl $mismatchAfter.sddl $mismatchBefore.sddl)|Should Be $true;$mismatchAfter.readOnly|Should Be $mismatchBefore.readOnly
+        }finally{Set-P7WindowsPublicationDaclHook $null;Close-P7Fixture $f @($control.Lease,$boundStage.Lease,$inheritedStage.Lease,$mismatchStage.Lease)}
+    }
+
+    # Scenario: A same-user writer changes a create-file target DACL after its applied rename but before permission readback.
+    # Purpose: Preserve the published target for journal recovery and attach a receipt instead of attempting an unjournaled rename-back.
+    It 'InterT565_preserves_post_rename_create_file_permission_mismatches_for_recovery' {
+        $f=New-P7Fixture 'p7d2-create-permissions-post-rename';$stage=$null;$caught=$null
+        try{
+            $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+            try{
+                $expectedPermissions=[pscustomobject]@{kind='windows-sddl';sddl=('D:P(A;;FA;;;'+$identity.User.Value+')');readOnly=$false}
+                $changedSddl='D:P(A;;FA;;;'+$identity.User.Value+')(A;;FR;;;WD)'
+            }finally{$identity.Dispose()}
+            $stage=New-P7File $f.Transaction 'post-rename.stage' ([Text.Encoding]::UTF8.GetBytes('published'))
+            $stageIdentity=$stage.State.identity
+            $missing=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            $applied=[pscustomobject]@{exists=$true;sha256=$stage.State.sha256;length=$stage.State.length;identity=$stageIdentity}
+            $operation=New-P7JournalOperation create-file stage-rename 'target/post-rename' 'post-rename.stage' $null $missing $applied $expectedPermissions
+            $hookState=@{Injected=$false}
+            Set-P7WindowsDurabilityHook ({param($point,$operationName,$role,$lease)if($point -ceq 'after-applied-rename-before-permission-readback' -and -not $hookState.Injected){$hookState.Injected=$true;[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::ApplyPublicationDacl($lease,$changedSddl)}}.GetNewClosure())
+            try{[void](Publish-PlatformFile -ParentLease $f.Parent -Leaf 'post-rename' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $stage.Expected -NoReplace -Journal $operation)}catch{$caught=$_}finally{Set-P7WindowsDurabilityHook $null}
+
+            $hookState.Injected|Should Be $true
+            $caught|Should Not BeNullOrEmpty
+            $typed=$caught.Exception;if($typed -is [Management.Automation.MethodInvocationException] -and $null -ne $typed.InnerException){$typed=$typed.InnerException}
+            $typed.GetType().Name|Should Be 'PlatformVerificationException';$typed.Capability|Should Be 'publication'
+            $receipt=$typed.Data['Receipt'];$receipt|Should Not BeNullOrEmpty;$receipt.completedSteps|Should Contain 'applied-rename';$receipt.appliedIdentity.fileId|Should Be $stageIdentity.fileId
+            Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/post-rename.stage")|Should Be $false
+            $published=Get-P7NamedFileState $f.Parent 'post-rename'
+            $published.bytes|Should Be ([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('published')));$published.identity.fileId|Should Be $stageIdentity.fileId
+        }finally{Set-P7WindowsDurabilityHook $null;Close-P7Fixture $f @($stage.Lease)}
+    }
+
+    # Scenario: A directory state contains every file and empty directory, including runtime-bundle.json, and rejects a junction.
+    # Purpose: Match the journal v1 ordinal inventory digest while detecting every complete-tree mutation without following reparses.
+    It 'InterT570_captures_complete_directory_inventory_state' {
+        $f=New-P7Fixture 'p7d2-directory-state'
+        try{
+            $path=Join-Path $f.Root 'target/runtime';[void][IO.Directory]::CreateDirectory($path)
+            $bundleBytes=[Text.UTF8Encoding]::new($false).GetBytes('bundle-one');[IO.File]::WriteAllBytes((Join-Path $path 'runtime-bundle.json'),$bundleBytes)
+            $initial=Get-PlatformDirectoryState -ParentLease $f.Parent -Leaf 'runtime'
+            $bundleBytes=[Text.UTF8Encoding]::new($false).GetBytes('bundle-two');[IO.File]::WriteAllBytes((Join-Path $path 'runtime-bundle.json'),$bundleBytes)
+            $changedBundle=Get-PlatformDirectoryState -ParentLease $f.Parent -Leaf 'runtime';$changedBundle.inventorySha256|Should Not Be $initial.inventorySha256
+            [void][IO.Directory]::CreateDirectory((Join-Path $path 'empty'))
+            $withEmpty=Get-PlatformDirectoryState -ParentLease $f.Parent -Leaf 'runtime';$withEmpty.inventorySha256|Should Not Be $changedBundle.inventorySha256;$withEmpty.entryCount|Should Be ($changedBundle.entryCount+1)
+            $extraBytes=[Text.UTF8Encoding]::new($false).GetBytes('extra');[IO.File]::WriteAllBytes((Join-Path $path 'extra.txt'),$extraBytes)
+            $withFile=Get-PlatformDirectoryState -ParentLease $f.Parent -Leaf 'runtime';$withFile.inventorySha256|Should Not Be $withEmpty.inventorySha256;$withFile.entryCount|Should Be ($withEmpty.entryCount+1)
+            $inventory=@(
+                [pscustomobject]@{path='empty/';sha256=(Get-P7Hash ([byte[]]@()));length=[int64]0},
+                [pscustomobject]@{path='extra.txt';sha256=(Get-P7Hash $extraBytes);length=[int64]$extraBytes.Length},
+                [pscustomobject]@{path='runtime-bundle.json';sha256=(Get-P7Hash $bundleBytes);length=[int64]$bundleBytes.Length}
+            )
+            $journalState=& $script:P7RuntimeContractModule.ExportedCommands['Get-AiInstructionsInstallJournalDirectoryState'] -Inventory $inventory -Identity $withFile.identity
+            $withFile.inventorySha256|Should Be $journalState.inventorySha256;$withFile.entryCount|Should Be $journalState.entryCount
+            $missing=Get-PlatformDirectoryState -ParentLease $f.Parent -Leaf 'missing'
+            (@($missing.PSObject.Properties.Name)-join ',')|Should Be 'exists,identity,inventorySha256,entryCount';$missing.exists|Should Be $false;$missing.identity|Should BeNullOrEmpty;$missing.inventorySha256|Should BeNullOrEmpty;$missing.entryCount|Should BeNullOrEmpty
+            $outside=Join-Path $f.Root 'outside';[void][IO.Directory]::CreateDirectory($outside);New-Item -ItemType Junction -Path (Join-Path $path 'junction') -Target $outside|Out-Null
+            {Get-PlatformDirectoryState -ParentLease $f.Parent -Leaf 'runtime'}|Should Throw 'directory-publication'
+        }finally{Close-P7Fixture $f}
+    }
+
+    # Scenario: A held source directory keeps its root identity while a child changes or an empty child directory appears.
+    # Purpose: Refuse both renames by comparing complete-tree state immediately before the native rename.
+    It 'InterT575_rejects_directory_tree_changes_with_zero_rename_mutation' {
+        $f=New-P7Fixture 'p7d2-directory-state-mismatch'
+        try{
+            $content=New-P7Directory $f Transaction 'content-stage' 'before';[IO.File]::WriteAllText((Join-Path $content.Path 'marker.txt'),'after',[Text.UTF8Encoding]::new($false))
+            {Move-PlatformOwnedDirectory -ParentLease $f.Parent -Leaf 'content-stage' -TransactionLease $f.Transaction -DestinationLeaf 'runtime' -ExpectedIdentity $content.Identity -Direction FromTransaction -ExpectedState $content.State}|Should Throw 'complete-tree'
+            [IO.File]::ReadAllText((Join-Path $content.Path 'marker.txt'))|Should Be 'after';Test-Path -LiteralPath (Join-Path $f.Root 'target/runtime')|Should Be $false
+
+            $empty=New-P7Directory $f Transaction 'empty-stage' 'stable';[void][IO.Directory]::CreateDirectory((Join-Path $empty.Path 'new-empty'))
+            {Move-PlatformOwnedDirectory -ParentLease $f.Parent -Leaf 'empty-stage' -TransactionLease $f.Transaction -DestinationLeaf 'runtime' -ExpectedIdentity $empty.Identity -Direction FromTransaction -ExpectedState $empty.State}|Should Throw 'complete-tree'
+            Test-Path -LiteralPath (Join-Path $empty.Path 'new-empty')|Should Be $true;Test-Path -LiteralPath (Join-Path $f.Root 'target/runtime')|Should Be $false
+        }finally{Close-P7Fixture $f}
+    }
+
+    # Scenario: Failure injection fires before a directory source reopen and immediately before its native rename.
+    # Purpose: Register the directory-publication hook points and prove both stop with zero mutation.
+    It 'InterT580_exposes_directory_publication_preopen_and_prerename_failure_hooks' {
+        $f=New-P7Fixture 'p7d2-directory-hooks'
+        try{
+            $stage=New-P7Directory $f Transaction 'stage' 'stage-content'
+            $points=New-Object Collections.Generic.List[string]
+            Set-P7WindowsPreReopenHook {param($point,$operation,$role,$path)$points.Add("$operation/$point")|Out-Null;throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]::new('directory-publication','windows','injected preopen failure')}
+            {Move-PlatformOwnedDirectory -ParentLease $f.Parent -Leaf 'stage' -TransactionLease $f.Transaction -DestinationLeaf 'runtime' -ExpectedIdentity $stage.Identity -Direction FromTransaction}|Should Throw 'preopen'
+            Set-P7WindowsPreReopenHook $null
+            $points|Should Contain 'directory-publication/before-directory-open'
+            [IO.File]::ReadAllText((Join-Path $stage.Path 'marker.txt'))|Should Be 'stage-content'
+
+            Set-P7WindowsDurabilityHook {param($point,$operation,$role,$lease)if($point -ceq 'before-directory-rename'){throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]::new('directory-publication','windows','injected prerename failure')}}
+            {Move-PlatformOwnedDirectory -ParentLease $f.Parent -Leaf 'stage' -TransactionLease $f.Transaction -DestinationLeaf 'runtime' -ExpectedIdentity $stage.Identity -Direction FromTransaction}|Should Throw 'prerename'
+            [IO.File]::ReadAllText((Join-Path $stage.Path 'marker.txt'))|Should Be 'stage-content'
+            Test-Path -LiteralPath (Join-Path $f.Root 'target/runtime')|Should Be $false
+        }finally{Set-P7WindowsPreReopenHook $null;Set-P7WindowsDurabilityHook $null;Close-P7Fixture $f}
+    }
+
+    # Scenario: A non-cooperating same-user writer adds an empty destination child after rename but before the post-check.
+    # Purpose: Return a typed error with the completed-rename receipt and leave rollback to the journal caller.
+    It 'InterT585_rejects_post_rename_directory_changes_without_automatic_compensation' {
+        $f=New-P7Fixture 'p7d2-directory-postcheck';$caught=$null
+        try{
+            $stage=New-P7Directory $f Transaction 'stage' 'stage-content'
+            $destinationPath=Join-Path $f.Root 'target/runtime'
+            $hookState=@{Injected=$false}
+            Set-P7WindowsDurabilityHook ({param($point,$operation,$role,$lease)if($operation -ceq 'directory-publication' -and $point -ceq 'post-rename' -and -not $hookState.Injected){$hookState.Injected=$true;[void][IO.Directory]::CreateDirectory((Join-Path $destinationPath 'raced-empty'))}}.GetNewClosure())
+            try{[void](Move-PlatformOwnedDirectory -ParentLease $f.Parent -Leaf 'stage' -TransactionLease $f.Transaction -DestinationLeaf 'runtime' -ExpectedIdentity $stage.Identity -Direction FromTransaction -ExpectedState $stage.State)}catch{$caught=$_}
+            $hookState.Injected|Should Be $true
+            $caught|Should Not BeNullOrEmpty
+            $typed=$caught.Exception;if($typed -is [Management.Automation.MethodInvocationException] -and $null -ne $typed.InnerException){$typed=$typed.InnerException}
+            $typed.GetType().Name|Should Be 'PlatformVerificationException';$typed.Capability|Should Be 'directory-publication'
+            $receipt=$typed.Data['Receipt'];$receipt|Should Not BeNullOrEmpty
+            $receipt.capability|Should Be 'directory-publication';$receipt.sourceLeaf|Should Be 'stage';$receipt.destinationLeaf|Should Be 'runtime';$receipt.direction|Should Be 'FromTransaction';$receipt.identity.fileId|Should Be $stage.Identity.fileId
+            Test-Path -LiteralPath $stage.Path|Should Be $false
+            Test-Path -LiteralPath $destinationPath|Should Be $true
+            Test-Path -LiteralPath (Join-Path $destinationPath 'raced-empty')|Should Be $true
+        }finally{Set-P7WindowsDurabilityHook $null;Close-P7Fixture $f}
+    }
+
+    # Scenario: Failure injection fires before recursive deletion of an owned transaction subtree.
+    # Purpose: Register the owned-directory-tree cleanup hook and preserve every entry when it rejects the operation.
+    It 'InterT590_exposes_the_owned_directory_tree_predelete_failure_hook' {
+        $f=New-P7Fixture 'p7d2-tree-hook'
+        try{
+            $backup=Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/backup";[void][IO.Directory]::CreateDirectory($backup);[IO.File]::WriteAllText((Join-Path $backup 'data.txt'),'data')
+            $backupState=Get-PlatformDirectoryState -ParentLease $f.Transaction -Leaf 'backup'
+            Set-P7WindowsDurabilityHook {param($point,$operation,$role,$lease)if($point -ceq 'before-owned-directory-tree-delete'){throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]::new('owned-file-removal','windows','injected tree cleanup failure')}}
+            {Remove-PlatformOwnedDirectoryTree -TransactionLease $f.Transaction -Leaf 'backup' -ExpectedIdentity $backupState.identity}|Should Throw 'tree cleanup'
+            [IO.File]::ReadAllText((Join-Path $backup 'data.txt'))|Should Be 'data'
+        }finally{Set-P7WindowsDurabilityHook $null;Close-P7Fixture $f}
+    }
+
+    # Scenario: An owned transaction subtree contains read-only files and read-only directories.
+    # Purpose: Delete the entire tree with disposition-ex ignore-readonly semantics or its legacy fallback.
+    It 'InterT600_removes_readonly_owned_directory_trees' {
+        $f=New-P7Fixture 'p7d2-readonly-tree'
+        try{
+            $backup=Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/backup";$nested=Join-Path $backup 'nested';[void][IO.Directory]::CreateDirectory($nested)
+            $file=Join-Path $nested 'data.txt';[IO.File]::WriteAllText($file,'data',[Text.UTF8Encoding]::new($false))
+            [IO.File]::SetAttributes($file,[IO.File]::GetAttributes($file)-bor[IO.FileAttributes]::ReadOnly)
+            [IO.File]::SetAttributes($nested,[IO.File]::GetAttributes($nested)-bor[IO.FileAttributes]::ReadOnly)
+            [IO.File]::SetAttributes($backup,[IO.File]::GetAttributes($backup)-bor[IO.FileAttributes]::ReadOnly)
+            $backupState=Get-PlatformDirectoryState -ParentLease $f.Transaction -Leaf 'backup'
+            $receipt=Remove-PlatformOwnedDirectoryTree -TransactionLease $f.Transaction -Leaf 'backup' -ExpectedIdentity $backupState.identity
+            $receipt.removedEntryCount|Should Be 3;Test-Path -LiteralPath $backup|Should Be $false
+        }finally{Close-P7Fixture $f}
+    }
+
+    # Scenario: The caller releases a transaction lease and a same-user writer replaces the UUID directory before whole-tree cleanup.
+    # Purpose: Bind recursive cleanup to the recorded root identity and preserve every entry in the replacement directory on mismatch.
+    It 'InterT605_rejects_replaced_transaction_directory_identity_without_deletion' {
+        $f=New-P7Fixture 'p7d2-replaced-transaction-tree';$caught=$null
+        try{
+            $transactionPath=Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)"
+            $originalPath=$transactionPath+'.original'
+            [IO.File]::WriteAllText((Join-Path $transactionPath 'original.txt'),'original')
+            $f.Transaction.Dispose();$f.Transaction=$null
+            [IO.Directory]::Move($transactionPath,$originalPath)
+            [void][IO.Directory]::CreateDirectory($transactionPath)
+            [IO.File]::WriteAllText((Join-Path $transactionPath 'replacement.txt'),'replacement')
+
+            try{[void](Remove-PlatformOwnedDirectoryTree -TransactionRootLease $f.TransactionRoot -Leaf $f.TransactionId -ExpectedIdentity $f.TransactionIdentity)}catch{$caught=$_}
+
+            $caught|Should Not BeNullOrEmpty
+            $typed=$caught.Exception;if($typed -is [Management.Automation.MethodInvocationException] -and $null -ne $typed.InnerException){$typed=$typed.InnerException}
+            $typed.GetType().Name|Should Be 'PlatformVerificationException';$typed.Capability|Should Be 'owned-file-removal';$typed.Message|Should Match 'identity'
+            [IO.File]::ReadAllText((Join-Path $transactionPath 'replacement.txt'))|Should Be 'replacement'
+            [IO.File]::ReadAllText((Join-Path $originalPath 'original.txt'))|Should Be 'original'
+        }finally{Close-P7Fixture $f}
+    }
+
+    # Scenario: Unjournaled file publication or tombstone removal targets the transaction container itself or a different transaction directory.
+    # Purpose: Reject every reserved target before a file open, permission change, or rename while preserving all target and stage identities.
+    It 'InterT610_rejects_reserved_file_targets_without_mutation' {
+        $f=New-P7Fixture 'p7d2-reserved-file-targets';$rootLease=$null;$otherTransaction=$null;$stage=$null;$otherTarget=$null
+        try{
+            $rootLease=Open-PlatformDirectory -Root $f.Root -RootOnly
+            $otherId=[Guid]::NewGuid().ToString('N')
+            $otherTransaction=Open-PlatformDirectory -Root (Join-Path $f.Root '.ai-instructions-txn') -RelativePath $otherId -CreatePrivate
+            $stage=New-P7File $f.Transaction 'publish.stage' ([Text.Encoding]::UTF8.GetBytes('new'))
+            $otherTarget=New-P7File $otherTransaction 'data' ([Text.Encoding]::UTF8.GetBytes('owned'))
+            $missing=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            $stageBefore=Get-P7NamedFileState $f.Transaction 'publish.stage' $stage
+            $targetBefore=Get-P7NamedFileState $otherTransaction 'data' $otherTarget
+
+            {Publish-PlatformFile -ParentLease $rootLease -Leaf '.ai-instructions-txn' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $stage.Expected -NoReplace}|Should Throw '.ai-instructions-txn'
+            {Remove-PlatformOwnedFile -ParentLease $rootLease -Leaf '.ai-instructions-txn' -ExpectedState $missing -TransactionLease $f.Transaction -TombstoneLeaf 'container.backup'}|Should Throw '.ai-instructions-txn'
+            {Publish-PlatformFile -ParentLease $otherTransaction -Leaf 'created' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $stage.Expected -NoReplace}|Should Throw '.ai-instructions-txn'
+            {Remove-PlatformOwnedFile -ParentLease $otherTransaction -Leaf 'data' -ExpectedState $otherTarget.State -TransactionLease $f.Transaction -TombstoneLeaf 'other.backup'}|Should Throw '.ai-instructions-txn'
+
+            $stageAfter=Get-P7NamedFileState $f.Transaction 'publish.stage' $stage
+            $targetAfter=Get-P7NamedFileState $otherTransaction 'data' $otherTarget
+            $stageAfter.bytes|Should Be $stageBefore.bytes;$stageAfter.identity.fileId|Should Be $stageBefore.identity.fileId
+            $targetAfter.bytes|Should Be $targetBefore.bytes;$targetAfter.identity.fileId|Should Be $targetBefore.identity.fileId
+            Test-Path -LiteralPath (Join-Path $f.Root '.ai-instructions-txn')|Should Be $true
+            foreach($leaf in @('container.backup','other.backup')){Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/$leaf")|Should Be $false}
+            Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$otherId/created")|Should Be $false
+        }finally{if($null -ne $rootLease){$rootLease.Dispose()};if($null -ne $otherTransaction){$otherTransaction.Dispose()};Close-P7Fixture $f @($stage.Lease,$otherTarget.Lease)}
+    }
+
+    # Scenario: D9 creates and replaces journal.json, then removes journal.prev and journal.stage as transaction-private cleanup.
+    # Purpose: Preserve the narrowly scoped journal-store exception while retaining ordinary cleanup of its temporary artifacts.
+    It 'InterT620_allows_only_unjournaled_journal_store_publication_and_cleanup' {
+        $f=New-P7Fixture 'p7d2-journal-store';$firstStage=$null;$secondStage=$null;$cleanupStage=$null
+        try{
+            $firstBytes=[Text.Encoding]::UTF8.GetBytes('journal-v1');$secondBytes=[Text.Encoding]::UTF8.GetBytes('journal-v2')
+            $missing=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            $firstStage=New-P7File $f.Transaction 'journal.stage' $firstBytes
+            $firstReceipt=Publish-PlatformFile -ParentLease $f.Transaction -Leaf 'journal.json' -TransactionLease $f.Transaction -StageLease $firstStage.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $firstStage.Expected -NoReplace
+            $firstState=[pscustomobject]@{exists=$true;sha256=(Get-P7Hash $firstBytes);length=[int64]$firstBytes.Length;identity=$firstReceipt.appliedIdentity}
+            [IO.File]::ReadAllText((Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/journal.json"))|Should Be 'journal-v1'
+
+            $secondStage=New-P7File $f.Transaction 'journal.stage' $secondBytes
+            $secondReceipt=Publish-PlatformFile -ParentLease $f.Transaction -Leaf 'journal.json' -TransactionLease $f.Transaction -StageLease $secondStage.Lease -ExpectedState $firstState -DisplacedLeaf 'journal.prev' -ExpectedStage $secondStage.Expected
+            $secondReceipt.displacedLeaf|Should Be 'journal.prev'
+            [IO.File]::ReadAllText((Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/journal.json"))|Should Be 'journal-v2'
+            [IO.File]::ReadAllText((Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/journal.prev"))|Should Be 'journal-v1'
+
+            $cleanupStage=New-P7File $f.Transaction 'journal.stage' ([Text.Encoding]::UTF8.GetBytes('temporary'))
+            $cleanupStage.Lease.Dispose();$cleanupStage.Lease=$null
+            (Remove-PlatformOwnedFile -ParentLease $f.Transaction -Leaf 'journal.prev' -ExpectedState $firstState).deleted|Should Be $true
+            (Remove-PlatformOwnedFile -ParentLease $f.Transaction -Leaf 'journal.stage' -ExpectedState $cleanupStage.State).deleted|Should Be $true
+            foreach($leaf in @('journal.prev','journal.stage')){Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/$leaf")|Should Be $false}
+            [IO.File]::ReadAllText((Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/journal.json"))|Should Be 'journal-v2'
+        }finally{Close-P7Fixture $f @($firstStage.Lease,$secondStage.Lease,$cleanupStage.Lease)}
+    }
+
+    # Scenario: A caller supplies Journal while publishing journal.json or deleting journal.prev in cleanup mode.
+    # Purpose: Keep the journal store self-contained and reject recursive durable intent with zero mutation.
+    It 'InterT630_rejects_journal_store_operations_that_supply_Journal' {
+        $f=New-P7Fixture 'p7d2-journal-store-journal';$stage=$null;$previous=$null
+        try{
+            $stage=New-P7File $f.Transaction 'journal.stage' ([Text.Encoding]::UTF8.GetBytes('new-journal'))
+            $previous=New-P7File $f.Transaction 'journal.prev' ([Text.Encoding]::UTF8.GetBytes('previous-journal'))
+            $missing=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            $applied=[pscustomobject]@{exists=$true;sha256=$stage.State.sha256;length=$stage.State.length;identity=$stage.State.identity}
+            $legalPublishJournal=New-P7JournalOperation create-file stage-rename 'target/created' 'publish.stage' $null $missing $applied $null
+            $publishJournal=($legalPublishJournal|ConvertTo-Json -Depth 20|ConvertFrom-Json);$publishJournal.stageLeaf='journal.stage'
+            $removed=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            $legalRemoveJournal=New-P7JournalOperation remove-file tombstone-rename 'target/data' $null 'remove.backup' $previous.State $removed (Get-PlatformPermissions $previous.Lease)
+            $removeJournal=($legalRemoveJournal|ConvertTo-Json -Depth 20|ConvertFrom-Json);$removeJournal.backupLeaf='journal.prev'
+            $stageBefore=Get-P7NamedFileState $f.Transaction 'journal.stage' $stage
+            $previousBefore=Get-P7NamedFileState $f.Transaction 'journal.prev' $previous
+
+            {Publish-PlatformFile -ParentLease $f.Transaction -Leaf 'journal.json' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $stage.Expected -NoReplace -Journal $publishJournal}|Should Throw 'must not supply Journal'
+            {Publish-PlatformFile -ParentLease $f.Transaction -Leaf 'journal.json' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $stage.Expected -NoReplace -Journal $null}|Should Throw 'must not supply Journal'
+            {Remove-PlatformOwnedFile -ParentLease $f.Transaction -Leaf 'journal.prev' -ExpectedState $previous.State -Journal $removeJournal}|Should Throw 'Journal is forbidden'
+            {Remove-PlatformOwnedFile -ParentLease $f.Transaction -Leaf 'journal.prev' -ExpectedState $previous.State -Journal $null}|Should Throw 'Journal is forbidden'
+
+            $stageAfter=Get-P7NamedFileState $f.Transaction 'journal.stage' $stage
+            $previousAfter=Get-P7NamedFileState $f.Transaction 'journal.prev' $previous
+            $stageAfter.bytes|Should Be $stageBefore.bytes;$stageAfter.identity.fileId|Should Be $stageBefore.identity.fileId
+            $previousAfter.bytes|Should Be $previousBefore.bytes;$previousAfter.identity.fileId|Should Be $previousBefore.identity.fileId
+            Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/journal.json")|Should Be $false
+        }finally{Close-P7Fixture $f @($stage.Lease,$previous.Lease)}
+    }
+
+    # Scenario: The ParentLease side of either directory-move direction is a reserved transaction path or reserved leaf.
+    # Purpose: Apply the same physical target boundary to directory publication before any source directory is opened or renamed.
+    It 'InterT640_rejects_reserved_directory_move_targets_without_mutation' {
+        $f=New-P7Fixture 'p7d2-reserved-directory-targets';$otherTransaction=$null
+        try{
+            $otherId=[Guid]::NewGuid().ToString('N')
+            $otherTransaction=Open-PlatformDirectory -Root (Join-Path $f.Root '.ai-instructions-txn') -RelativePath $otherId -CreatePrivate
+            $fromSource=New-P7Directory $f Transaction 'from-stage' 'from-content'
+            $otherSourcePath=Join-Path $f.Root ".ai-instructions-txn/$otherId/to-source";[void][IO.Directory]::CreateDirectory($otherSourcePath);[IO.File]::WriteAllText((Join-Path $otherSourcePath 'marker.txt'),'to-content')
+            $otherSource=Get-PlatformDirectoryState -ParentLease $otherTransaction -Leaf 'to-source'
+            $reservedSource=New-P7Directory $f Parent '.ai-instructions-txn' 'reserved-content'
+
+            {Move-PlatformOwnedDirectory -ParentLease $otherTransaction -Leaf 'to-source' -TransactionLease $f.Transaction -DestinationLeaf 'to.backup' -ExpectedIdentity $otherSource.identity -Direction ToTransaction -ExpectedState $otherSource}|Should Throw '.ai-instructions-txn'
+            {Move-PlatformOwnedDirectory -ParentLease $otherTransaction -Leaf 'from-stage' -TransactionLease $f.Transaction -DestinationLeaf 'published' -ExpectedIdentity $fromSource.Identity -Direction FromTransaction -ExpectedState $fromSource.State}|Should Throw '.ai-instructions-txn'
+            {Move-PlatformOwnedDirectory -ParentLease $f.Parent -Leaf '.ai-instructions-txn' -TransactionLease $f.Transaction -DestinationLeaf 'reserved.backup' -ExpectedIdentity $reservedSource.Identity -Direction ToTransaction -ExpectedState $reservedSource.State}|Should Throw '.ai-instructions-txn'
+
+            Test-Path -LiteralPath $otherSourcePath|Should Be $true
+            Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/from-stage")|Should Be $true
+            Test-Path -LiteralPath (Join-Path $f.Root 'target/.ai-instructions-txn')|Should Be $true
+            foreach($leaf in @('to.backup','reserved.backup')){Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/$leaf")|Should Be $false}
+            Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$otherId/published")|Should Be $false
+        }finally{if($null -ne $otherTransaction){$otherTransaction.Dispose()};Close-P7Fixture $f}
+    }
+
+    # Scenario: journal.json is addressed through a second lease to the same physical transaction directory.
+    # Purpose: Keep the D9 exception restricted to the exact TransactionLease object, not merely a matching pathname or identity.
+    It 'InterT650_requires_the_exact_TransactionLease_for_journal_store_publication' {
+        $f=New-P7Fixture 'p7d2-journal-store-exact-lease';$secondLease=$null;$stage=$null
+        try{
+            $secondLease=Open-PlatformDirectory -Root (Join-Path $f.Root '.ai-instructions-txn') -RelativePath $f.TransactionId
+            $stage=New-P7File $f.Transaction 'journal.stage' ([Text.Encoding]::UTF8.GetBytes('journal'))
+            $missing=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            $before=Get-P7NamedFileState $f.Transaction 'journal.stage' $stage
+
+            {Publish-PlatformFile -ParentLease $secondLease -Leaf 'journal.json' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $stage.Expected -NoReplace}|Should Throw '.ai-instructions-txn'
+
+            $after=Get-P7NamedFileState $f.Transaction 'journal.stage' $stage
+            $after.bytes|Should Be $before.bytes;$after.identity.fileId|Should Be $before.identity.fileId
+            Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/journal.json")|Should Be $false
+        }finally{if($null -ne $secondLease){$secondLease.Dispose()};Close-P7Fixture $f @($stage.Lease)}
+    }
     }
 }
 
@@ -4619,6 +5156,19 @@ Describe 'Platform probe cleanup evidence' {
                 $receipt.status | Should Be 'available'
                 $receipt.evidence.cleanupFailure | Should Be 'fixture-cleanup-evidence'
             } finally { Remove-Variable P2OriginalProbeCleanup -Scope Script -ErrorAction SilentlyContinue }
+        }
+    }
+
+    # Scenario: The directory-publication probe finishes or fails after creating a nested transaction and published directory.
+    # Purpose: Bind cleanup to owned-directory and leased-identity primitives instead of recursively deleting a released pathname.
+    It 'UnitT20_binds_directory_publication_probe_cleanup_to_owned_identities' {
+        InModuleScope platform-runtime {
+            $body=${function:Test-PlatformDirectoryPublication}.Ast.Extent.Text
+            $body|Should Match 'Move-PlatformOwnedDirectory'
+            $body|Should Match 'Remove-PlatformOwnedDirectoryTree'
+            $body|Should Match 'Remove-PlatformOwnedDirectoryTree[^\r\n]+-ExpectedIdentity \$transactionIdentity'
+            $body|Should Match 'Clear-PlatformProbe'
+            $body|Should Not Match '\[IO\.Directory\]::Delete\([^\r\n]*,\$true\)'
         }
     }
 }

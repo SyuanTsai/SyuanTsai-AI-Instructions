@@ -843,9 +843,12 @@ Describe 'AI instructions runtime contracts' {
 
         $manifestInventoryFixture = New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-manifest-inventory-hash')
         $manifestInventoryPath = Join-Path $manifestInventoryFixture.Root 'platform-runtime.psd1'
+        $manifestInventory = Import-PowerShellDataFile -LiteralPath $manifestInventoryPath
+        $windowsAdapterEntries = @($manifestInventory.PrivateData.PlatformRuntime.Inventory | Where-Object { [string]$_.Path -ceq 'platform/Windows.psm1' })
+        $windowsAdapterEntries.Count | Should Be 1
         Set-TestTextOccurrence `
             -Path $manifestInventoryPath `
-            -OldValue "Sha256 = '6d69e4a56d72b3104224e464a2506bf749db75b331322523c259bb5ab72f0d2b'" `
+            -OldValue ("Sha256 = '" + [string]$windowsAdapterEntries[0].Sha256 + "'") `
             -NewValue ("Sha256 = '" + ('0' * 64) + "'")
         Update-TestRuntimeV3Inventory -Fixture $manifestInventoryFixture
         $manifestInventoryFixture.Bundle.platformRuntime.manifestSha256 = Get-TestCanonicalTextSha256 -Path $manifestInventoryPath
@@ -3043,5 +3046,28 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         (& $compare -FirstSddl 'D:(A;;GR;;;WD)' -SecondSddl 'D:(A;;FR;;;WD)') | Should Be $true
         (& $compare -FirstSddl 'D:AI(A;;FR;;;WD)' -SecondSddl 'D:(A;;FR;;;WD)') | Should Be $true
         (& $compare -FirstSddl 'D:(A;;FR;;;WD)(A;;FA;;;SY)' -SecondSddl 'D:(A;;FA;;;SY)(A;;FR;;;WD)') | Should Be $false
+    }
+
+    # Scenario: A runtime bundle declares directory-publication as a target-host requirement.
+    # Purpose: Keep the strict runtime reader synchronized with the schema capability enum.
+    It 'UnitT206_accepts_directory_publication_as_a_known_runtime_capability' {
+        $fixture=New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-directory-publication')
+        $configuration=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v5.example.json')|ConvertFrom-Json
+        $fixture.Bundle.requiredCapabilities=@('directory-publication')
+        {Assert-AiInstructionsRuntimeBundleV3 -Bundle $fixture.Bundle -Configuration $configuration -RuntimeRoot $fixture.Root}|Should Not Throw
+        $schema=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\schemas\runtime-bundle-v3.schema.json')|ConvertFrom-Json
+        @($schema.properties.requiredCapabilities.items.enum)|Should Contain 'directory-publication'
+    }
+
+    # Scenario: A create-file operation records the permissions already applied and verified on its stage file.
+    # Purpose: Accept a legal non-null snapshot while preserving null as the other valid create-file form.
+    It 'UnitT207_accepts_create_file_with_a_non_null_permission_snapshot' {
+        if($PSVersionTable.PSVersion.Major -lt 7){throw 'UnitT207 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.'}
+        $journal=Get-TestInstallJournalV1
+        $journal.operations[1].permissions=$journal.operations[0].permissions
+        $json=$journal|ConvertTo-Json -Depth 20
+        $schemaPath=Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
+        {ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json|Out-Null}|Should Not Throw
+        (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue)|Should Be $true
     }
 }
