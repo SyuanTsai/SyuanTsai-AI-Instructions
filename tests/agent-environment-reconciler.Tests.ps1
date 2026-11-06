@@ -640,13 +640,128 @@ $module=Get-Module agent-environment-reconciler
         $journal.operations=@($directory,$manifest)
         [IO.File]::WriteAllText((Join-Path $transactionPath 'journal.json'),($journal|ConvertTo-Json -Depth 30),[Text.UTF8Encoding]::new($false))
 
-        $result=Invoke-UserSkillsRecovery -UserHome $userHome
+        $readLease=New-TestInstallReadLeaseEvidence
+        try{$result=Invoke-UserSkillsRecovery -UserHome $userHome -InstallReadLease $readLease.Evidence}
+        finally{$readLease.Stream.Dispose();if($readLease.Created){Remove-Item -LiteralPath $readLease.Path -Force -ErrorAction SilentlyContinue}}
 
         $result.Code|Should Be 'interrupted-install'
+        $result.failureDetails[0].path|Should Be '.ai-instructions-txn'
         Test-Path -LiteralPath $documentsPath -PathType Container|Should Be $true
         [IO.File]::ReadAllText($sentinelPath)|Should Be 'preserve unrelated USER content'
         Test-Path -LiteralPath (Join-Path $transactionPath 'journal.json') -PathType Leaf|Should Be $true
         Test-Path -LiteralPath (Join-Path $transactionPath 'directory.quarantine')|Should Be $false
+    }
+
+    # Scenario: Apply, VerifyOnly, WhatIf, and explicit Recover see an out-of-scope install journal in a USER home that did not have .agents.
+    # Purpose: Return the same interrupted-install refusal without touching the unrelated target or retained transaction evidence.
+    It 'InterT85_classifies_fresh_home_transaction_residue_consistently_in_every_mode' {
+        $desired=New-TestDesiredState -Root (Join-Path $TestDrive 'fresh-home-mode-staging')
+        $readLease=New-TestInstallReadLeaseEvidence
+        try{
+            foreach($mode in @('Apply','VerifyOnly','WhatIf','Recover')){
+                $caseHome=Join-Path $TestDrive "fresh-home-$mode"
+                $transactionId=[guid]::NewGuid().ToString('N')
+                $transactionPath=Join-Path $caseHome ".ai-instructions-txn/$transactionId"
+                $documentsPath=Join-Path $caseHome 'Documents'
+                $sentinelPath=Join-Path $documentsPath 'sentinel.txt'
+                New-Item -ItemType Directory -Force -Path $transactionPath,$documentsPath|Out-Null
+                [IO.File]::WriteAllText($sentinelPath,"preserve-$mode",[Text.UTF8Encoding]::new($false))
+                $module=Get-Module agent-environment-reconciler
+                $applied=& $module {
+                    param($RuntimeRoot,$Home)
+                    Import-AgentEnvironmentRuntimeModules -RuntimeRoot $RuntimeRoot
+                    Get-AgentEnvironmentDirectoryJournalState -Home $Home -RelativePath 'Documents'
+                } $script:RuntimeRoot $caseHome
+                $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json -DateKind String
+                $journal.transactionId=$transactionId;$journal.phase='applying'
+                $manifest=$journal.operations[0];$manifest.sequence=2;$manifest.state='pending'
+                $directory=[pscustomobject][ordered]@{sequence=1;kind='create-directory';method='stage-rename';targetRelativePath='Documents';stageLeaf='directory.stage';backupLeaf=$null;quarantineLeaf='directory.quarantine';original=[pscustomobject][ordered]@{exists=$false;identity=$null;inventorySha256=$null;entryCount=$null};backupIdentity=$null;applied=$applied;permissions=$null;state='pending'}
+                $journal.operations=@($directory,$manifest)
+                $journalPath=Join-Path $transactionPath 'journal.json'
+                [IO.File]::WriteAllText($journalPath,($journal|ConvertTo-Json -Depth 30),[Text.UTF8Encoding]::new($false))
+                Test-Path -LiteralPath (Join-Path $caseHome '.agents')|Should Be $false
+
+                $result=switch($mode){
+                    'Recover'{Invoke-UserSkillsRecovery -UserHome $caseHome -InstallReadLease $readLease.Evidence}
+                    default{Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $caseHome -Mode $mode -InstallReadLease $readLease.Evidence}
+                }
+
+                $result.Code|Should Be 'interrupted-install'
+                $result.failureDetails[0].path|Should Be '.ai-instructions-txn'
+                [IO.File]::ReadAllText($sentinelPath)|Should Be "preserve-$mode"
+                Test-Path -LiteralPath $journalPath -PathType Leaf|Should Be $true
+                Test-Path -LiteralPath (Join-Path $transactionPath 'directory.quarantine')|Should Be $false
+            }
+        }finally{$readLease.Stream.Dispose();if($readLease.Created){Remove-Item -LiteralPath $readLease.Path -Force -ErrorAction SilentlyContinue}}
+    }
+
+    # Scenario: An unmanaged file appears after planning and the first pre-transaction validation but before the journal snapshot.
+    # Purpose: Bind the transaction snapshot to the planned absent state and preserve the newly created USER bytes without publishing a journal.
+    It 'InterT86_rejects_an_unmanaged_file_created_before_the_transaction_snapshot' {
+        $caseHome=Join-Path $TestDrive 'transaction-snapshot-create-race'
+        $target=Join-Path $caseHome '.agents/skills/alpha/SKILL.md'
+        $desired=New-TestDesiredState -Root (Join-Path $TestDrive 'transaction-snapshot-create-stage')
+
+        $result=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $caseHome -Mode Apply -BeforeTransactionSnapshotAction {
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target)|Out-Null
+            [IO.File]::WriteAllText($target,'concurrent unmanaged bytes',[Text.UTF8Encoding]::new($false))
+        }
+
+        $result.outcome|Should Be 'concurrent'
+        [IO.File]::ReadAllText($target)|Should Be 'concurrent unmanaged bytes'
+        Test-Path -LiteralPath (Join-Path $caseHome '.agents/catalog-skills.manifest.json')|Should Be $false
+        @(Get-ChildItem -Force -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0
+    }
+
+    # Scenario: A managed file is customized after planning and the first pre-transaction validation but before the journal snapshot.
+    # Purpose: Reject the stale replacement authorization, preserve the concurrent customization, and create no transaction journal.
+    It 'InterT87_rejects_managed_bytes_changed_before_the_transaction_snapshot' {
+        $caseHome=Join-Path $TestDrive 'transaction-snapshot-update-race'
+        $initial=New-TestDesiredState -Root (Join-Path $TestDrive 'transaction-snapshot-update-initial')
+        (Invoke-UserSkillsReconciliation -DesiredState $initial -UserHome $caseHome -Mode Apply).outcome|Should Be 'applied'
+        $next=New-TestDesiredState -Root (Join-Path $TestDrive 'transaction-snapshot-update-next')
+        [IO.File]::WriteAllText([string]$next.Files[0].stagedPath,"---`nname: alpha`ndescription: next`n---`n",[Text.UTF8Encoding]::new($false))
+        $next.Files[0].sha256=(Get-FileHash -Algorithm SHA256 -LiteralPath ([string]$next.Files[0].stagedPath)).Hash.ToLowerInvariant()
+        $next.Manifest.files[0].sha256=$next.Files[0].sha256
+        $target=Join-Path $caseHome '.agents/skills/alpha/SKILL.md'
+
+        $result=Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $caseHome -Mode Apply -BeforeTransactionSnapshotAction {
+            [IO.File]::WriteAllText($target,'concurrent customization',[Text.UTF8Encoding]::new($false))
+        }
+
+        $result.outcome|Should Be 'concurrent'
+        [IO.File]::ReadAllText($target)|Should Be 'concurrent customization'
+        @(Get-ChildItem -Force -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0
+    }
+
+    # Scenario: A committed transaction's predictable backup directory is replaced by a junction before recovery exports its original bytes.
+    # Purpose: Reject every reparse-backed backup ancestor, preserve the journal, and never write through the junction target.
+    It 'InterT88_rejects_a_junction_at_the_committed_backup_path' {
+        $caseHome=Join-Path $TestDrive 'committed-backup-junction'
+        $initial=New-TestDesiredState -Root (Join-Path $TestDrive 'committed-backup-junction-initial')
+        (Invoke-UserSkillsReconciliation -DesiredState $initial -UserHome $caseHome -Mode Apply).outcome|Should Be 'applied'
+        $next=New-TestDesiredState -Root (Join-Path $TestDrive 'committed-backup-junction-next')
+        [IO.File]::WriteAllText([string]$next.Files[0].stagedPath,"---`nname: alpha`ndescription: committed next`n---`n",[Text.UTF8Encoding]::new($false))
+        $next.Files[0].sha256=(Get-FileHash -Algorithm SHA256 -LiteralPath ([string]$next.Files[0].stagedPath)).Hash.ToLowerInvariant()
+        $next.Manifest.files[0].sha256=$next.Files[0].sha256
+        $failed=Invoke-UserSkillsReconciliation -DesiredState $next -UserHome $caseHome -Mode Apply -FailpointName before-committed-cleanup
+        $failed.rollbackState|Should Be 'recovery-required'
+        $transactions=@(Get-ChildItem -Force -Directory -LiteralPath (Join-Path $caseHome '.ai-instructions-txn'))
+        $transactions.Count|Should Be 1
+        $transaction=$transactions[0]
+        $outside=Join-Path $TestDrive 'committed-backup-junction-outside'
+        $backupRoot=Join-Path $caseHome ".agents/backups/update-agent-environment-$($transaction.Name)"
+        New-Item -ItemType Directory -Force -Path $outside|Out-Null
+        if([Environment]::OSVersion.Platform-eq[PlatformID]::Win32NT){New-Item -ItemType Junction -Path $backupRoot -Target $outside|Out-Null}
+        else{New-Item -ItemType SymbolicLink -Path $backupRoot -Target $outside|Out-Null}
+        $readLease=New-TestInstallReadLeaseEvidence
+        try{$recovery=Invoke-UserSkillsRecovery -UserHome $caseHome -InstallReadLease $readLease.Evidence}
+        finally{$readLease.Stream.Dispose();if($readLease.Created){Remove-Item -LiteralPath $readLease.Path -Force -ErrorAction SilentlyContinue}}
+
+        $recovery.Code|Should Be 'recovery-required'
+        $recovery.failureDetails[0].path|Should Be '.ai-instructions-txn'
+        Test-Path -LiteralPath (Join-Path $transaction.FullName 'journal.json') -PathType Leaf|Should Be $true
+        @(Get-ChildItem -Force -LiteralPath $outside).Count|Should Be 0
     }
 
     It 'installs a clean multi-source selection and becomes idempotent' {
