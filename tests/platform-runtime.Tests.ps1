@@ -3429,6 +3429,7 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
         }
     }
 
+    # Register only on the native host; keep this file's Core CI skip count at zero.
     if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
     # Scenario: A read-only target with an explicit DACL is replaced through two no-replace renames.
     # Purpose: Preserve DACL/read-only and move the original file to backup without changing identity.
@@ -3689,13 +3690,6 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             (Get-P7Identity $tombstone.Lease.Observation).fileId | Should Be $before.fileId
         } finally { Close-P7Fixture $f @($tombstone.Lease) }
     }
-    }
-    else {
-        It 'InterT180_binds_one_same_leaf_journal_operation_to_its_verified_parent [Skipped: Windows native publication semantics required]' -Skip { }
-        It 'InterT190_rejects_journal_permission_drift_before_publish_or_remove [Skipped: Windows DACL semantics required]' -Skip { }
-        It 'InterT200_preserves_applied_publication_with_receipt_after_parent_move [Skipped: Windows native publication semantics required]' -Skip { }
-        It 'InterT210_preserves_tombstone_with_receipt_after_parent_move [Skipped: Windows native removal semantics required]' -Skip { }
-        It 'InterT220_rejects_a_journal_in_cleanup_mode_without_mutation [Skipped: Windows native removal semantics required]' -Skip { }
     }
 }
 
