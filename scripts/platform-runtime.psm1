@@ -250,6 +250,20 @@ function Test-UnixPublicationPrimitives {
     }
 }
 
+function Test-UnixPermissionPrimitives {
+    $platform = Get-CurrentPlatformName
+    if ($platform -cnotin @('linux','macos')) {
+        return [pscustomobject]@{ status='unverified'; evidence=[object[]]@('Unix permission probes do not apply to this host.') }
+    }
+    try {
+        $evidence = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::ProbePermissionPrimitives()
+        return [pscustomobject]@{ status='available'; evidence=[object[]]@($evidence) }
+    }
+    catch {
+        return [pscustomobject]@{ status='unavailable'; evidence=[object[]]@($_.Exception.Message) }
+    }
+}
+
 function Get-PlatformCapabilities {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $Required)
@@ -257,6 +271,7 @@ function Get-PlatformCapabilities {
     $platform = Get-CurrentPlatformName
     $primitiveProbe = Test-PlatformPrimitives
     $publicationProbe = Test-UnixPublicationPrimitives
+    $permissionProbe = Test-UnixPermissionPrimitives
     $processProbe = Test-PlatformOwnedProcess
     $processEnvironmentMethod = @(
         [Environment].GetMethods([Reflection.BindingFlags]'Public,Static') | Where-Object {
@@ -335,9 +350,13 @@ function Get-PlatformCapabilities {
             $capability.status = $primitiveProbe.status
             $capability.evidence = [object[]]@($primitiveProbe.evidence)
         }
-        if ($platform -cne 'windows' -and $capability.name -cin @('publication','owned-file-removal','permissions')) {
+        if ($platform -cne 'windows' -and $capability.name -cin @('publication','owned-file-removal')) {
             $capability.status = $publicationProbe.status
             $capability.evidence = [object[]]@($publicationProbe.evidence)
+        }
+        if ($platform -cne 'windows' -and $capability.name -ceq 'permissions') {
+            $capability.status = $permissionProbe.status
+            $capability.evidence = [object[]]@($permissionProbe.evidence)
         }
         if ($capability.name -cin @('owned-process','process-cleanup','process-isolation')) {
             $capability.status = $processProbe.status

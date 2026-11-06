@@ -61,11 +61,11 @@
             ApiVersion = '1.0'
             HashMode = 'sha256-utf8-lf'
             Inventory = @(
-                @{ Path = 'platform/UnixNative.cs'; Sha256 = 'd0be0b2f40a0076f7c26cc009511f36f9b0012988a69bd2acd51c84322e500eb' },
+                @{ Path = 'platform/UnixNative.cs'; Sha256 = '6b88dccf375fe8c39250f7a9bb1a641497a3c8b3169a4543a154c04108370e67' },
                 @{ Path = 'platform/WindowsNative.cs'; Sha256 = '3c4eca15ee608d72b3985db1ab34ad9558243385b2cbe84d909b8cd219482181' },
                 @{ Path = 'platform/Unix.psm1'; Sha256 = 'e3309c53531c2701b8f684f0bfd34f2cf4937d336554111b7246abc7bb8db55c' },
                 @{ Path = 'platform/RuntimePreparation.psm1'; Sha256 = 'dc254c04e7e2caf280726e66f67434776bc7df12a210a38c80596e41344fd077' },
-                @{ Path = 'platform-runtime.psm1'; Sha256 = '8e52543e96f3c167073ea5ee6b86bb96e0ef923ae9b320de673e3f3913777b74' },
+                @{ Path = 'platform-runtime.psm1'; Sha256 = '4e74899baec27921c4d903c17d2a70177fa01327e94de28fb5291b30ff09b83a' },
                 @{ Path = 'installer-safe-mutation.psm1'; Sha256 = 'ac1e73ffb1b8ea1b95fdc3a177449442281d3d485f62ec42e464f6f5f38ba359' },
                 @{ Path = 'platform/PlatformNative.cs'; Sha256 = 'cae2197bc4d644f108e4f0722b2c76017981922618277efc101f9da472b61607' },
                 @{ Path = 'platform/Windows.psm1'; Sha256 = 'bb916f529ebf99c7893f541749e91ae7b4b22bd66f2c2f2efce91a8b4977d7cd' },

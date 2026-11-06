@@ -3397,6 +3397,8 @@ Describe 'Unix P7c durable publication and removal' {
         $script:P7cRoot = Join-Path $TestDrive 'p7c-root'
         [void][IO.Directory]::CreateDirectory($script:P7cRoot)
         $script:P7cSetfacl = @(Get-Command setfacl -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1)
+        $script:P7cChattr = @(Get-Command chattr -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1)
+        $script:P7cId = @(Get-Command id -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1)
 
         function New-P7cDirectory([string]$Relative) { Open-PlatformDirectory -Root $script:P7cRoot -RelativePath $Relative -CreatePrivate }
         function New-P7cTransaction {
@@ -3443,6 +3445,9 @@ Describe 'Unix P7c durable publication and removal' {
         }
         function New-P7cAppliedState($StageState) {
             [pscustomobject][ordered]@{ exists=$true;sha256=$StageState.sha256;length=$StageState.length;identity=$null }
+        }
+        function Set-P7cSkipped([string]$Because) {
+            if(Get-Command Set-ItResult -ErrorAction SilentlyContinue){Set-ItResult -Skipped -Because $Because}else{Set-TestInconclusive $Because}
         }
     }
 
@@ -3653,6 +3658,115 @@ Describe 'Unix P7c durable publication and removal' {
             [IO.File]::ReadAllText((Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/backup")) | Should Be original
             (Test-Path -LiteralPath (Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/stage")) | Should Be $false
         } finally { $field.SetValue($null,$null);foreach($lease in @($stage,$target)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$parent.Dispose() }
+    }
+
+    # Scenario: Publication changes a 0600 stage to the existing target's 0640 ownership snapshot.
+    # Purpose: Require the post-permission stage fsync and mode/uid/gid readback before either rename.
+    It 'InterT160_fsyncs_and_revalidates_stage_permissions_before_publication [skip: requires Unix fchmod/fsync/rename]' -Skip:$p7cSkip {
+        $parent=New-P7cDirectory 'permission-fsync';$txn=New-P7cTransaction;$target=$null;$stage=$null;$published=$null
+        try {
+            $target=New-P7cFile $parent target original;Set-PlatformPermissions -Lease $target -Policy @{Mode=416}|Out-Null
+            $state=Get-P7cState $target;$expectedPermissions=Get-PlatformPermissions $target;$target.Dispose();$target=$null
+            $stage=New-P7cFile $txn.Lease stage replacement
+            $receipt=Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $state -DisplacedLeaf backup -ExpectedStage (Get-P7cStageState $stage)
+            $published=Open-PlatformFile -ParentLease $parent -Leaf target -Access Read -CreateMode OpenExisting
+            $actualPermissions=Get-PlatformPermissions $published
+            $actualPermissions.mode|Should Be '640';$actualPermissions.uid|Should Be $expectedPermissions.uid;$actualPermissions.gid|Should Be $expectedPermissions.gid
+            (@($receipt.completedSteps)-contains 'stage-permissions-fsynced')|Should Be $true
+            (@($receipt.completedSteps)-contains 'stage-permissions-verified')|Should Be $true
+        } finally {foreach($lease in @($published,$stage,$target)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$parent.Dispose()}
+    }
+
+    # Scenario: Private tombstone unlink succeeds, then transaction-directory fsync fails.
+    # Purpose: Distinguish an already-deleted entry from a pre-mutation failure with an unconfirmed durability receipt.
+    It 'InterT165_reports_cleanup_unlink_before_fsync_failure_as_a_mutation [skip: requires Unix unlinkat/fsync]' -Skip:$p7cSkip {
+        $txn=New-P7cTransaction;$target=$null;$field=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative].GetField('MutationTestHook',[Reflection.BindingFlags]'NonPublic,Static')
+        try {
+            $target=New-P7cFile $txn.Lease tombstone owned;$state=Get-P7cState $target;$target.Dispose();$target=$null
+            $field.SetValue($null,[Action[string]]{param($point)if($point-ceq'removal-cleanup-after-unlink-before-fsync'){throw [IO.IOException]::new('injected cleanup fsync failure')}})
+            $caught=$null
+            try{Remove-PlatformOwnedFile -ParentLease $txn.Lease -Leaf tombstone -ExpectedState $state -TransactionLease $txn.Lease -TombstoneLeaf tombstone|Out-Null}catch{$caught=$_.Exception}
+            $caught.GetType().Name|Should Be 'PlatformMutationException';$caught.Capability|Should Be 'owned-file-removal-durability'
+            $caught.Receipt.method|Should Be 'cleanup-unlinkat';$caught.Receipt.flush.durability|Should Be 'unconfirmed'
+            (@($caught.Receipt.completedSteps)-contains 'private-tombstone-unlinked')|Should Be $true
+            (@($caught.Receipt.completedSteps)-contains 'transaction-directory-fsynced')|Should Be $false
+            Test-Path -LiteralPath (Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/tombstone")|Should Be $false
+        } finally {$field.SetValue($null,$null);if($null-ne$target){$target.Dispose()};$txn.Lease.Dispose()}
+    }
+
+    # Scenario: The private transaction directory is moved after identity/hash verification and immediately before cleanup unlink.
+    # Purpose: Revalidate both directory paths at the mutation boundary and leave the tombstone linked when either path moved.
+    It 'InterT170_rejects_moved_cleanup_directory_before_unlink [skip: requires Unix directory rename]' -Skip:$p7cSkip {
+        $txn=New-P7cTransaction;$target=$null;$sourcePath=Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)";$movedPath="$sourcePath-moved"
+        $field=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative].GetField('MutationTestHook',[Reflection.BindingFlags]'NonPublic,Static')
+        try {
+            $target=New-P7cFile $txn.Lease tombstone owned;$state=Get-P7cState $target;$target.Dispose();$target=$null
+            $field.SetValue($null,[Action[string]]{param($point)if($point-ceq'removal-cleanup-before-unlink'){[IO.Directory]::Move($sourcePath,$movedPath)}})
+            $caught=$null
+            try{Remove-PlatformOwnedFile -ParentLease $txn.Lease -Leaf tombstone -ExpectedState $state -TransactionLease $txn.Lease -TombstoneLeaf tombstone|Out-Null}catch{$caught=$_.Exception}
+            $caught.GetType().Name|Should Be 'PlatformErrnoException'
+            [IO.File]::ReadAllText((Join-Path $movedPath tombstone))|Should Be owned
+        } finally {$field.SetValue($null,$null);if($null-ne$target){$target.Dispose()};$txn.Lease.Dispose()}
+    }
+
+    # Scenario: The publication probe is forced unavailable while the permission-only probe remains operational.
+    # Purpose: Prove permissions capability does not inherit rename or directory-fsync probe status.
+    It 'InterT175_probes_unix_permissions_independently_from_publication [skip: requires Unix native probes]' -Skip:$p7cSkip {
+        $field=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative].GetField('ProbeTestHook',[Reflection.BindingFlags]'NonPublic,Static')
+        try {
+            $field.SetValue($null,[Action[string]]{param($point)if($point-ceq'publication-probe'){throw [IO.IOException]::new('injected publication probe failure')}})
+            $receipt=Get-PlatformCapabilities -Required @('permissions')
+            ($receipt.capabilities|Where-Object name -eq permissions).status|Should Be available
+            (($receipt.capabilities|Where-Object name -eq permissions).evidence -join ' ')|Should Match 'fstat/fchmod.*ACL.*flags'
+            ($receipt.capabilities|Where-Object name -eq publication).status|Should Be unavailable
+            (($receipt.capabilities|Where-Object name -eq publication).evidence -join ' ')|Should Match 'injected publication probe failure'
+        } finally {$field.SetValue($null,$null)}
+    }
+
+    # Scenario: A Linux target carries only FS_NODUMP_FL in addition to ordinary filesystem implementation flags.
+    # Purpose: Accept flags outside the explicit deny mask and complete normal stage-to-rename publication.
+    It 'InterT180_accepts_linux_nodump_and_implementation_inode_flags [skip: Linux chattr/filesystem support required]' -Skip:(-not $IsLinux) {
+        if($script:P7cChattr.Count-eq0){Set-P7cSkipped 'chattr is unavailable';return}
+        $parent=New-P7cDirectory 'flags-accepted';$txn=New-P7cTransaction;$target=$null;$stage=$null;$targetPath=Join-Path $script:P7cRoot 'flags-accepted/target';$backupPath=Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/backup"
+        try {
+            $target=New-P7cFile $parent target original;$state=Get-P7cState $target;$target.Dispose();$target=$null
+            & $script:P7cChattr[0].Source +d $targetPath 2>$null
+            if($LASTEXITCODE-ne0){Set-P7cSkipped 'filesystem rejected FS_NODUMP_FL';return}
+            $stage=New-P7cFile $txn.Lease stage replacement
+            Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $state -DisplacedLeaf backup -ExpectedStage (Get-P7cStageState $stage)|Out-Null
+            (Read-P7cText $parent target)|Should Be replacement
+        } finally {if(Test-Path -LiteralPath $targetPath){& $script:P7cChattr[0].Source -d $targetPath 2>$null|Out-Null};if(Test-Path -LiteralPath $backupPath){& $script:P7cChattr[0].Source -d $backupPath 2>$null|Out-Null};foreach($lease in @($stage,$target)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$parent.Dispose()}
+    }
+
+    # Scenario: A root-capable Linux fixture applies FS_IMMUTABLE_FL and FS_APPEND_FL to an owned target.
+    # Purpose: Fail closed from descriptor-bound flag evidence before target or stage names change, then always clear test flags.
+    It 'InterT185_rejects_linux_immutable_or_append_inode_flags_without_mutation [skip: Linux root/chattr/filesystem support required]' -Skip:(-not $IsLinux) {
+        if($script:P7cChattr.Count-eq0){Set-P7cSkipped 'chattr is unavailable';return}
+        if($script:P7cId.Count-eq0 -or ((& $script:P7cId[0].Source -u 2>$null|Out-String).Trim())-cne'0'){Set-P7cSkipped 'root privileges are required for immutable/append flags';return}
+        foreach($flag in @('i','a')){
+            $parent=New-P7cDirectory "flags-denied-$flag";$txn=New-P7cTransaction;$target=$null;$stage=$null;$targetPath=Join-Path $script:P7cRoot "flags-denied-$flag/target"
+            try {
+                $target=New-P7cFile $parent target original;$state=Get-P7cState $target;$target.Dispose();$target=$null
+                & $script:P7cChattr[0].Source "+$flag" $targetPath 2>$null
+                if($LASTEXITCODE-ne0){Set-P7cSkipped "filesystem rejected +$flag";return}
+                $stage=New-P7cFile $txn.Lease stage replacement;$caught=$null
+                try{Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState $state -DisplacedLeaf backup -ExpectedStage (Get-P7cStageState $stage)|Out-Null}catch{$caught=$_.Exception}
+                $caught.GetType().Name|Should Be 'PlatformCapabilityUnavailableException'
+                (Read-P7cText $parent target)|Should Be original;(Read-P7cText $txn.Lease stage)|Should Be replacement
+                Test-Path -LiteralPath (Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/backup")|Should Be $false
+            } finally {if(Test-Path -LiteralPath $targetPath){& $script:P7cChattr[0].Source "-$flag" $targetPath 2>$null|Out-Null};foreach($lease in @($stage,$target)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$parent.Dispose()}
+        }
+    }
+
+    # Scenario: Linux inode-flag integers contain ignored implementation bits or one explicit denied bit.
+    # Purpose: Keep deny-mask policy deterministic and testable on Windows without invoking ioctl.
+    It 'UnitT190_applies_only_the_explicit_linux_inode_flag_deny_mask' {
+        foreach($accepted in @([int]0,[int]0x40,[int]0x00080000,[int]0x10000000,[int]0x00001000,[int]0x00040000)){
+            [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::HasDeniedLinuxInodeFlags($accepted)|Should Be $false
+        }
+        foreach($denied in @([int]0x00000004,[int]0x00000010,[int]0x00000020,[int]0x00000800,[int]0x00800000,[int]0x00100000,[int]0x02000000,[int]0x40000000,[int]0x42900834)){
+            [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::HasDeniedLinuxInodeFlags($denied)|Should Be $true
+        }
     }
 }
 

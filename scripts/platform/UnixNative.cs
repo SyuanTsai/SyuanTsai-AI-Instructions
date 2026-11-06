@@ -209,6 +209,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             [DllImport("libc", SetLastError = true)] internal static extern int renameat2(SafeFd oldDirectory, string oldName, SafeFd newDirectory, string newName, uint flags);
             [DllImport("libc", SetLastError = true)] internal static extern IntPtr fgetxattr(SafeFd fd, string name, IntPtr value, UIntPtr size);
             [DllImport("libc", SetLastError = true)] internal static extern IntPtr flistxattr(SafeFd fd, IntPtr list, UIntPtr size);
+            [DllImport("libc", SetLastError = true)] internal static extern int ioctl(SafeFd fd, UIntPtr request, IntPtr argument);
             [DllImport("libc", SetLastError = true)] internal static extern int close(int fd);
             [DllImport("libc", SetLastError = true)] internal static extern IntPtr write(SafeFd fd, IntPtr buffer, UIntPtr count);
             [DllImport("libc", SetLastError = true)] internal static extern IntPtr read(SafeFd fd, IntPtr buffer, UIntPtr count);
@@ -278,12 +279,22 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private const uint RenameExclusive = 0x00000004;
         private const int AclTypeExtended = 0x00000100;
         private const int AclFirstEntry = 0;
+        // Linux include/uapi/linux/fs.h deny mask 0x42900834.
+        // Semantic-changing: FS_IMMUTABLE_FL 0x00000010 and FS_APPEND_FL
+        // 0x00000020 alter write/rename/unlink behavior. Not preserved by
+        // stage->rename: FS_COMPR_FL 0x00000004, FS_ENCRYPT_FL 0x00000800,
+        // FS_NOCOW_FL 0x00800000, FS_VERITY_FL 0x00100000,
+        // FS_DAX_FL 0x02000000, and FS_CASEFOLD_FL 0x40000000.
+        // FS_NODUMP_FL and implementation flags such as EXTENT, INLINE_DATA,
+        // INDEX, and HUGE_FILE are intentionally outside this deny mask.
+        private const uint LinuxDeniedInodeFlags = 0x42900834;
         private static readonly object AbiSync = new object();
         private static string abiEvidence;
         private static bool abiAttempted;
         private static Exception abiFailure;
         // Test-only barrier. Production code never assigns this internal hook.
         internal static Action<string> MutationTestHook = null;
+        internal static Action<string> ProbeTestHook = null;
 
         internal static int Close(int fd) { return Mac ? Darwin.close(fd) : Linux.close(fd); }
         private static string ErrnoName(int error)
@@ -983,6 +994,45 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             finally { Check(Darwin.acl_free(acl), "acl_free"); }
         }
 
+        private static ulong GetLinuxFsIocGetFlagsRequest()
+        {
+            string architecture = PlatformNative.GetArchitecture();
+            if (architecture != "x64" && architecture != "arm64")
+                throw new PlatformCapabilityUnavailableException(
+                    "linux-inode-flags-abi: unsupported architecture " + architecture, "linux");
+            // asm-generic _IOC: dir[31:30], size[29:16], type[15:8], nr[7:0].
+            // _IOR('f', 1, long) uses IOC_READ=2 and sizeof(long)=8 on both
+            // supported 64-bit ABIs, yielding FS_IOC_GETFLAGS 0x80086601.
+            ulong request = (2UL << 30) | (8UL << 16) | ((ulong)'f' << 8) | 1UL;
+            if (request != 0x80086601UL)
+                throw new PlatformCapabilityUnavailableException("linux-inode-flags-abi", "linux-" + architecture);
+            return request;
+        }
+
+        public static bool HasDeniedLinuxInodeFlags(int flags)
+        {
+            return (((uint)flags) & LinuxDeniedInodeFlags) != 0;
+        }
+
+        private static int GetLinuxInodeFlags(SafeFd fd)
+        {
+            // The request encodes sizeof(long)==8, while the kernel writes a
+            // 32-bit flags value. Allocate the encoded size and read only int.
+            IntPtr buffer = Marshal.AllocHGlobal(8);
+            try
+            {
+                Marshal.WriteInt64(buffer, 0);
+                int result = Linux.ioctl(fd, new UIntPtr(GetLinuxFsIocGetFlagsRequest()), buffer);
+                if (result == 0) return Marshal.ReadInt32(buffer);
+                int error = Marshal.GetLastWin32Error();
+                // Filesystems returning these errors cannot expose inode flags
+                // for this file, so no flag can be present on this descriptor.
+                if (error == 22 || error == 25 || error == 95) return 0; // EINVAL, ENOTTY, ENOTSUP/EOPNOTSUPP
+                throw Errno("ioctl-FS_IOC_GETFLAGS", error);
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+        }
+
         private static void AssertNoExtendedMetadata(SafeFd fd, FileObservation observation)
         {
             if (Mac)
@@ -992,8 +1042,16 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 if (HasDarwinAcl(fd))
                     throw new PlatformCapabilityUnavailableException("permissions: macOS extended ACL is present", "macos");
             }
-            else if (HasLinuxAcl(fd))
-                throw new PlatformCapabilityUnavailableException("permissions: POSIX ACL xattr is present", "linux");
+            else
+            {
+                if (HasLinuxAcl(fd))
+                    throw new PlatformCapabilityUnavailableException("permissions: POSIX ACL xattr is present", "linux");
+                int flags = GetLinuxInodeFlags(fd);
+                if (HasDeniedLinuxInodeFlags(flags))
+                    throw new PlatformCapabilityUnavailableException(
+                        "permissions: denied Linux inode flags are present (0x" +
+                        ((uint)flags).ToString("x8", System.Globalization.CultureInfo.InvariantCulture) + ")", "linux");
+            }
         }
 
         private static string ModeText(uint mode)
@@ -1032,6 +1090,16 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             if ((after.Mode & 4095) != mode || after.Uid != snapshot.Uid || after.Gid != snapshot.Gid)
                 throw new PlatformVerificationException("permissions", PlatformNative.GetOperatingSystem(), "mode/uid/gid readback differs from the requested snapshot");
             AssertNoExtendedMetadata(fd, after);
+        }
+
+        private static void AssertPermissionSnapshot(SafeFd fd, UnixPermissionSnapshot expected, string context)
+        {
+            FileObservation observed = Stat(fd, null);
+            uint mode = Convert.ToUInt32(expected.Mode, 8);
+            if ((observed.Mode & 4095) != mode || observed.Uid != expected.Uid || observed.Gid != expected.Gid)
+                throw new PlatformVerificationException(context, PlatformNative.GetOperatingSystem(),
+                    "mode/uid/gid readback differs after fsync");
+            AssertNoExtendedMetadata(fd, observed);
         }
 
         private static string Hash(SafeFd fd, FileObservation expected)
@@ -1115,6 +1183,12 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private static void RunMutationTestHook(string point)
         {
             Action<string> hook = MutationTestHook;
+            if (hook != null) hook(point);
+        }
+
+        private static void RunProbeTestHook(string point)
+        {
+            Action<string> hook = ProbeTestHook;
             if (hook != null) hook(point);
         }
 
@@ -1203,16 +1277,21 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     }
                     receipt.Permissions = desired;
                     permissionsChanged = true; ApplyPermissions(stage.Fd, desired);
-                    AssertMutationDirectoryPaths(parent, transaction);
+                    Sync(stage.Fd, false, "fsync-stage-after-permissions");
+                    receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "stage-permissions-fsynced");
+                    AssertPermissionSnapshot(stage.Fd, desired, "publication-stage-permissions");
+                    receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "stage-permissions-verified");
                     if (expectedExists)
                     {
                         PlatformPaths.Same(Stat(parent.Fd, leaf), receipt.DisplacedIdentity);
+                        AssertMutationDirectoryPaths(parent, transaction);
                         RenameNoReplace(parent.Fd, leaf, transaction.Fd, displacedLeaf, "rename-target-to-displaced");
                         displaced = true;
                         receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "target-displaced");
                         PlatformPaths.Same(Stat(transaction.Fd, displacedLeaf), receipt.DisplacedIdentity);
                     }
                     PlatformPaths.Same(Stat(transaction.Fd, stage.Leaf), stageIdentity);
+                    if (!expectedExists) AssertMutationDirectoryPaths(parent, transaction);
                     RenameNoReplace(transaction.Fd, stage.Leaf, parent.Fd, leaf, "rename-stage-to-target");
                     published = true;
                     receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "stage-published");
@@ -1295,11 +1374,23 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                         verifyExpectedPermissions, expectedMode, expectedUid, expectedGid, "owned-file-removal-permissions");
                     if (cleanup)
                     {
+                        RunMutationTestHook("removal-cleanup-before-unlink");
+                        AssertMutationDirectoryPaths(parent, transaction);
                         Check(Mac ? Darwin.unlinkat(transaction.Fd, leaf, 0) : Linux.unlinkat(transaction.Fd, leaf, 0), "unlinkat-private-cleanup");
                         receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "private-tombstone-unlinked");
-                        Sync(transaction.Fd, true, "fsync-transaction-cleanup");
-                        receipt.Flush.ParentDirectory = "confirmed"; receipt.Flush.TransactionDirectory = "confirmed"; receipt.Flush.Durability = "confirmed";
-                        receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "transaction-directory-fsynced");
+                        try
+                        {
+                            RunMutationTestHook("removal-cleanup-after-unlink-before-fsync");
+                            Sync(transaction.Fd, true, "fsync-transaction-cleanup");
+                            receipt.Flush.ParentDirectory = "confirmed"; receipt.Flush.TransactionDirectory = "confirmed"; receipt.Flush.Durability = "confirmed";
+                            receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "transaction-directory-fsynced");
+                        }
+                        catch (Exception ex)
+                        {
+                            durabilityFailure = true;
+                            receipt.Flush.ParentDirectory = "unconfirmed"; receipt.Flush.TransactionDirectory = "unconfirmed"; receipt.Flush.Durability = "unconfirmed";
+                            throw new PlatformMutationException("owned-file-removal-durability", PlatformNative.GetOperatingSystem(), "cleaned-durability-unconfirmed", ex.Message, receipt);
+                        }
                         try
                         {
                             RunMutationTestHook("removal-after-fsync-before-postcheck");
@@ -1317,8 +1408,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     }
                     if (parent.Observation.Device != transaction.Observation.Device)
                         throw new PlatformCapabilityUnavailableException("same-filesystem-rename: EXDEV", PlatformNative.GetOperatingSystem());
-                    AssertMutationDirectoryPaths(parent, transaction);
                     PlatformPaths.Same(Stat(parent.Fd, leaf), identity);
+                    AssertMutationDirectoryPaths(parent, transaction);
                     RenameNoReplace(parent.Fd, leaf, transaction.Fd, tombstoneLeaf, "rename-target-to-tombstone"); moved = true;
                     receipt.CompletedSteps = AddStep(receipt.CompletedSteps, "target-tombstoned");
                     PlatformPaths.Same(Stat(transaction.Fd, tombstoneLeaf), identity);
@@ -1369,6 +1460,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
 
         public static string ProbePublicationPrimitives()
         {
+            RunProbeTestHook("publication-probe");
             ValidateAbi(); string rootPath = Mac ? "/private/tmp" : "/tmp";
             string name = "platform-publication-" + Guid.NewGuid().ToString("N");
             using (SafeFd root = WalkRoot(rootPath))
@@ -1400,6 +1492,39 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                             foreach (string leaf in leaves) if (TryStat(directory, leaf) != null)
                                 try { Unlink(directory, leaf, false); } catch { }
                         }
+                    }
+                }
+                finally { Unlink(root, name, true); }
+            }
+        }
+
+        public static string ProbePermissionPrimitives()
+        {
+            RunProbeTestHook("permissions-probe");
+            ValidateAbi(); string rootPath = Mac ? "/private/tmp" : "/tmp";
+            string name = "platform-permissions-" + Guid.NewGuid().ToString("N");
+            using (SafeFd root = WalkRoot(rootPath))
+            {
+                Check(Mac ? Darwin.mkdirat(root, name, 448) : Linux.mkdirat(root, name, 448), "mkdirat-permissions-probe");
+                try
+                {
+                    using (SafeFd directory = ChildDirectory(root, name, false))
+                    using (SafeFd file = Open(directory, "probe", 2 | Create | Exclusive, 384))
+                    {
+                        try
+                        {
+                            FileObservation initial = Stat(file, null);
+                            UnixPermissionSnapshot snapshot = Snapshot(file, initial);
+                            UnixPermissionSnapshot requested = new UnixPermissionSnapshot {
+                                Mode = "640", Uid = snapshot.Uid, Gid = snapshot.Gid
+                            };
+                            ApplyPermissions(file, requested);
+                            AssertPermissionSnapshot(file, requested, "permissions-probe");
+                            return "descriptor fstat/fchmod mode, uid, gid readback and " +
+                                (Mac ? "macOS ACL/file-flags" : "Linux POSIX ACL/inode-flags ioctl") +
+                                " detection passed; rename and directory fsync were not required";
+                        }
+                        finally { if (TryStat(directory, "probe") != null) Unlink(directory, "probe", false); }
                     }
                 }
                 finally { Unlink(root, name, true); }
