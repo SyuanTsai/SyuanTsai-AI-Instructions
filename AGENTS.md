@@ -4,21 +4,20 @@
 
 ## 維護目標
 
-- `.codex/AGENTS.md`：Codex 繁體中文 Instructions。
-- `.codex/AGENTS.en.md`：Codex 英文 Instructions。
-- `.codex/AI-Rules/<rule>.md` 與 `.codex/AI-Rules/<rule>.en.md`：Codex 繁體中文與英文條件式規則模組。
-- `.github/copilot-instructions.md`：GitHub Copilot 繁體中文 Instructions。
-- `.github/copilot-instructions.en.md`：GitHub Copilot 英文 Instructions。
-- `.github/AI-Rules/<rule>.md` 與 `.github/AI-Rules/<rule>.en.md`：GitHub Copilot 繁體中文與英文條件式規則模組。
-- `ai-instructions-contract.json` 與 `tests/ai-instructions-contract.Tests.ps1`：Base／Rule inventory、locale pair、兩平台 route／trigger 與 safety invariant 的 machine-readable 維護契約與 regression；不會 fan out。
+- `instructions/common/base*.md` 與 `instructions/common/AI-Rules/*`：三平台 Instructions 的唯一手寫來源；路徑使用 `{RULE_ROOT}/`。只有 Base 可在平台能力確實不同時使用受限 host 區塊；Rules 不得使用 host 區塊。
+- `.codex/AGENTS*.md` 與 `.codex/AI-Rules/*`：由產生器建立的 Codex authority artifacts。
+- `.github/copilot-instructions*.md` 與 `.github/AI-Rules/*`：由產生器建立的 GitHub Copilot authority artifacts。
+- `.claude/CLAUDE*.md` 與 `.claude/AI-Rules/*`：由產生器建立的 Claude authority artifacts；是否 fan out 由 contract 個別宣告。
+- `scripts/Build-AiInstructions.ps1`：依 common source 與 contract 產生或檢查三平台 authority artifacts。
+- `ai-instructions-contract.json` 與 `tests/ai-instructions-contract.Tests.ps1`：source、Base／Rule inventory、locale pair、三平台 route／trigger、fan-out 與 safety invariant 的 machine-readable 維護契約與 regression；contract 本身不會 fan out。
 - `docs/standards/`：所有 Agent Skill source repository 共用 policy 的唯一 normative authority；reference implementation 或個別 source repository 不得另建競爭 policy。
 - `catalog/skills-catalog.json`、`catalog/skills-catalog.sources.json` 與 `catalog/skills-catalog-lock.json`：共用 Agent Skills 的外部來源、選擇 metadata 與 immutable production pin；Skill 內容只在各自的 external Catalog Repository 維護。
 - `catalog/schemas/*.schema.json`、`catalog/examples/*.json` 與 `scripts/skills-catalog-contract.psm1`：獨立 Agent Skills Catalog、版本 lock、managed manifest 與個人選擇設定的跨 Repository 契約；schema、去識別化 example、parser 與 tests 必須同步。
 - 根目錄 `AGENTS.md` 只規範如何維護上述檔案，不是 fan-out 產物。
 
-繁體中文版本是 Base Instructions 與條件式規則模組的主要維護來源。修改共通規則時，必須同步檢查兩個平台與英文版本；平台專屬規則只放在對應平台。英文版必須保留相同要求、限制與例外，不得自行增減語意。
+`instructions/common/` 的繁體中文版本是 Base Instructions 與條件式規則模組的主要維護來源。修改共通規則時，必須同步檢查英文來源與三平台產物；不得直接手寫產物。英文版必須保留相同要求、限制與例外，不得自行增減語意。只有 Base 可在平台能力確實不同時，以 `<!-- host:codex|copilot|claude -->` … `<!-- /host -->` 包住最小差異；不得以 host 區塊複製共通規範或臆造平台能力。Rules 不得使用 host 區塊，三平台差異只能由 `{RULE_ROOT}/` 替換，正規化後全文必須相同。
 
-Agent Skill 是兩平台共用的單一產物，不建立平台或翻譯副本。修改 Skill 內容時必須在 Catalog 指定的 external source Repository 完成、驗證並合併，再於本 Repository 更新 immutable pin 與 lock；不得把 Skill source 複製回本 Repository。
+Agent Skill 是各平台共用的單一產物，不建立平台或翻譯副本。修改 Skill 內容時必須在 Catalog 指定的 external source Repository 完成、驗證並合併，再於本 Repository 更新 immutable pin 與 lock；不得把 Skill source 複製回本 Repository。
 
 Skills Catalog 的 group 與 profile 只存在 metadata。Standard v1 將 canonical source package 與 consumer/runtime projection 明確分離：新的 source repository migration target 依 `docs/standards/skill-repository-standard.md` 使用 `skills/<skill-id>/**`；目前 production Catalog/Lock 在 SYP-155～159 migration 完成前仍可 pin legacy `.agents/skills/<skill-id>/**` source path。Consumer target 可依 host 投影到 `.agents/skills/`、`.github/skills/` 或其他受管位置。Stable Skill ID、source pin、compatibility、dependency、rename／removal 與 per-file provenance 依 `catalog/README.md` 與 `docs/standards/` 的版本化契約維護；未知 schema、重複 ID、unsafe path 或無法解析的 pin 必須停止，不得猜測或靜默選擇。
 
@@ -103,8 +102,8 @@ bootstrap 對受管理檔案的判斷以 manifest 與內容 hash 為準。目標
 1. 判斷內容屬於共通 Base、條件式模組、Agent Skill Standard、共用 Agent Skill 或平台專屬內容。
 2. 若涉及 Agent Skill repository lifecycle/security/conformance policy，先修改 `docs/standards/` normative authority，並在同一 PR 更新 `tests/skill-repository-standard.Tests.ps1`、`tests/skill-repository-workflows.Tests.ps1`、`tests/standard-validation-resolver-hardening.Tests.ps1` 中受影響的 regression，以及相關 machine-readable policy／resolver；authority regression 與 human review 通過後，才同步 reference implementation / source repositories。不得反向從單一 implementation 私自建立 policy。
 3. 依「正向規則設計原則」確認規則以期望結果、判斷依據與可採用行為為核心。
-4. 先修改繁體中文來源，再同步適用的平台與英文版本。
-5. 確認各版本的規則、例外與載入條件一致；同步更新 `ai-instructions-contract.json` 與同一行的 `ai-route`／`ai-invariant` marker，並執行 `tests/ai-instructions-contract.Tests.ps1`。
+4. 先修改 `instructions/common/` 的繁體中文來源，再同步英文來源；只有 Base 在平台能力確實不同時才使用最小 host 區塊，Rules 不得使用 host 區塊，路徑一律保留 `{RULE_ROOT}/` 佔位符。執行 `scripts/Build-AiInstructions.ps1` 重新產生三平台 authority artifacts，不得直接修改產物；若產生器回報 contract 未宣告的來源或產物檔，確認已退役後由維護者手動移除，產生器不得自動刪除。
+5. 確認各版本的規則、例外與載入條件一致；同步更新 `ai-instructions-contract.json` 與同一行的 `ai-route`／`ai-invariant` marker，執行 `scripts/Build-AiInstructions.ps1 -Check`，再執行 `tests/ai-instructions-contract.Tests.ps1`。
 6. 依「安全範例與個人設定」檢查 working tree、staged diff 與可達歷史。
 7. 修改 Catalog 契約時，同步檢查 schemas、examples、parser、README 與 `tests/skills-catalog-contract.Tests.ps1`，並執行該 Pester test file。
 8. 修改 Standard normative authority、validation tool policy／resolver 或 authority workflow 時，執行 `docs/standards/validation-security-gate.json` 的 `ordinaryAuthority.testPaths` 六檔（與 ordinary gate、workflow exclusions 一致），另依 owner 執行 runner／platform-runtime regression；以下三檔是必須同步維護並執行的 authority regression，不是 ordinary gate 的完整 inventory： `tests/skill-repository-standard.Tests.ps1`、`tests/skill-repository-workflows.Tests.ps1` 與 `tests/standard-validation-resolver-hardening.Tests.ps1`，並確認 `.github/workflows/standards-conformance.yml` 與 Ruleset-required Composition context 都呼叫同一個 authority gate。

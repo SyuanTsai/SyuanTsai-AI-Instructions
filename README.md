@@ -26,6 +26,19 @@ Test-SkillsCatalogContract `
   -ConfigurationPath .\catalog\examples\ai-instructions-sync-v4.example.json
 ```
 
+## Instructions 來源與產生
+
+三平台 authority artifacts 由 `instructions/common/` 的同源內容與 `ai-instructions-contract.json` 產生。繁體中文是主要維護來源；英文來源保留相同要求、限制與例外。規則路徑在 common source 使用 `{RULE_ROOT}/`，由產生器依 Codex、GitHub Copilot 或 Claude 的 authority root 替換。
+
+只有 Base 中平台能力確實不同的最小內容可使用 `<!-- host:codex|copilot|claude -->` … `<!-- /host -->`；區塊不得巢狀、未閉合、使用未知 host，或跨越 `ai-route`／`ai-invariant` marker 行。一般共通規範不得放入 host 區塊。Rules 不得使用 host 區塊，平台路徑差異只能透過 `{RULE_ROOT}/`，正規化後三平台全文相同。
+
+```powershell
+.\scripts\Build-AiInstructions.ps1
+.\scripts\Build-AiInstructions.ps1 -Check
+```
+
+產生器固定輸出 UTF-8 無 BOM、LF 換行與單一結尾換行。`-Check` 只比對、不寫入，並在 common source 或 authority artifact 漂移時列出受影響的輸出。Claude authority artifacts 已納入產生與 contract parity；consumer fan-out 是否啟用仍以 contract 的 `fanOut` 宣告為準。
+
 ## 內部模組 review assessment
 
 SkillSpector 的 analyzer coverage 不完整時，canonical Stage 4 仍維持 `FAILED`／exit code `20`，不得改寫成掃描完成。中央 authority 可透過 [internal-source-continuation.json](docs/standards/internal-source-continuation.json) 將特定 repository 與 Skill 登錄為內部模組；consumer 不得自行宣告或複製這份 allowlist。

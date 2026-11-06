@@ -3,6 +3,7 @@ Describe 'AI instructions machine-readable contract' {
         $script:RepositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
         $script:ContractPath = Join-Path $script:RepositoryRoot 'ai-instructions-contract.json'
         $script:BootstrapPath = Join-Path $script:RepositoryRoot 'scripts\bootstrap-ai-instructions.ps1'
+        $script:BuilderPath = Join-Path $script:RepositoryRoot 'scripts\Build-AiInstructions.ps1'
 
 function Get-AiInstructionText {
     param([Parameter(Mandatory = $true)][string] $Path)
@@ -183,7 +184,7 @@ function Get-AiRoutes {
             }
         }
         Assert-OrdinalStringSet -Actual $triggerIds -Expected @($triggerIds | Select-Object -Unique) -Context "AI route '$($payload.module)' trigger identities"
-        $targets = [regex]::Matches($line, '`(?<path>\.(?:codex|github)/AI-Rules/[^`]+\.md)`')
+        $targets = [regex]::Matches($line, '`(?<path>\.(?:codex|github|claude)/AI-Rules/[^`]+\.md)`')
         if ($targets.Count -ne 1) {
             throw "AI route '$($payload.module)' must contain exactly one AI-Rules target."
         }
@@ -204,7 +205,7 @@ function Assert-AiRuleReferences {
         [Parameter(Mandatory = $true)] $Locale
     )
 
-    $references = [regex]::Matches($Text, '`(?<path>\.(?:codex|github)/AI-Rules/[^`]+\.md)`')
+    $references = [regex]::Matches($Text, '`(?<path>\.(?:codex|github|claude)/AI-Rules/[^`]+\.md)`')
     foreach ($reference in $references) {
         $path = $reference.Groups['path'].Value
         if (-not $path.StartsWith(([string]$Platform.rulesRoot + '/'), [System.StringComparison]::Ordinal)) {
@@ -224,16 +225,82 @@ function Assert-AiRuleReferences {
     }
 }
 
+function Assert-AiInstructionContractV2Envelope {
+    param([Parameter(Mandatory = $true)] $Contract)
+
+    Assert-ExactPropertySet -Value $Contract -Expected @('schemaVersion','primaryLocale','fanOutLocale','locales','source','platforms','modules','baseInvariants') -Context 'contract'
+    if (($Contract.schemaVersion -isnot [int] -and $Contract.schemaVersion -isnot [long]) -or [int64]$Contract.schemaVersion -ne 2) {
+        throw "Unexpected schemaVersion '$($Contract.schemaVersion)'."
+    }
+    Assert-ExactPropertySet -Value $Contract.source -Expected @('root','hostBlockSyntaxVersion','generatedHeader') -Context 'contract source'
+    if ([string]$Contract.source.root -cne 'instructions/common' -or [int64]$Contract.source.hostBlockSyntaxVersion -ne 1 -or $null -ne $Contract.source.generatedHeader) {
+        throw 'Unexpected contract source declaration.'
+    }
+    foreach ($locale in @($Contract.locales)) {
+        Assert-ExactPropertySet -Value $locale -Expected @('id','ruleSuffix') -Context "locale '$($locale.id)'"
+    }
+    Assert-OrdinalStringSet -Actual @($Contract.platforms | ForEach-Object id) -Expected @('codex','github-copilot','claude') -Context 'platform inventory'
+    foreach ($platform in @($Contract.platforms)) {
+        Assert-ExactPropertySet -Value $platform -Expected @('id','base','rulesRoot','fanOut') -Context "platform '$($platform.id)'"
+        Assert-ExactPropertySet -Value $platform.base -Expected @('zh-TW','en') -Context "platform '$($platform.id)' base"
+        if ($null -ne $platform.fanOut) {
+            Assert-ExactPropertySet -Value $platform.fanOut -Expected @('baseTarget','rulesTarget','preserveRuleFileName') -Context "platform '$($platform.id)' fanOut"
+        }
+    }
+    foreach ($module in @($Contract.modules)) {
+        Assert-ExactPropertySet -Value $module -Expected @('id','fileStem','platforms','triggers','invariants') -Context "module '$($module.id)'"
+    }
+    foreach ($baseInvariant in @($Contract.baseInvariants)) {
+        Assert-ExactPropertySet -Value $baseInvariant -Expected @('id','platforms') -Context "base invariant '$($baseInvariant.id)'"
+    }
+}
+
+function Invoke-AiInstructionBuilderProcess {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [switch] $Check
+    )
+
+    $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BuilderPath,'-RepositoryRoot',$Root)
+    if ($Check) { $arguments += '-Check' }
+    $output = & powershell.exe @arguments 2>&1 | Out-String
+    return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+}
+
+function New-AiInstructionFixture {
+    param([Parameter(Mandatory = $true)][string] $Name, [switch] $IncludeOutputs)
+
+    $root = Join-Path $TestDrive $Name
+    [void](New-Item -ItemType Directory -Path $root -Force)
+    Copy-Item -LiteralPath $script:ContractPath -Destination $root
+    Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'instructions') -Destination $root -Recurse
+    if ($IncludeOutputs) {
+        foreach ($directory in @('.codex','.github','.claude')) {
+            Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot $directory) -Destination $root -Recurse
+        }
+    }
+    return $root
+}
+
     }
 
     # Scenario: The maintenance contract is parsed under every supported PowerShell lane.
     # Purpose: Reject silent contract expansion, unsafe paths, duplicate identities, and vacuous all-missing parity.
-    It 'InterT10_validates_the_closed_v1_contract_shape' {
+    It 'InterT10_validates_the_closed_v2_contract_shape_and_rejects_v1_or_unknown_fields' {
         $contract = Get-AiInstructionContract
-        Assert-ExactPropertySet -Value $contract -Expected @('schemaVersion','primaryLocale','fanOutLocale','locales','platforms','modules','baseInvariants') -Context 'contract'
-        if (($contract.schemaVersion -isnot [int] -and $contract.schemaVersion -isnot [long]) -or [int64]$contract.schemaVersion -ne 1) {
-            throw "Unexpected schemaVersion '$($contract.schemaVersion)'."
-        }
+        Assert-AiInstructionContractV2Envelope -Contract $contract
+        $v1 = ($contract | ConvertTo-Json -Depth 20) | ConvertFrom-Json
+        $v1.schemaVersion = 1
+        Assert-Throws -Action { Assert-AiInstructionContractV2Envelope -Contract $v1 } -Context 'v1 contract'
+        $unknownTopLevel = ($contract | ConvertTo-Json -Depth 20) | ConvertFrom-Json
+        $unknownTopLevel | Add-Member -NotePropertyName unsupported -NotePropertyValue $true
+        Assert-Throws -Action { Assert-AiInstructionContractV2Envelope -Contract $unknownTopLevel } -Context 'unknown top-level field'
+        $unknownSource = ($contract | ConvertTo-Json -Depth 20) | ConvertFrom-Json
+        $unknownSource.source | Add-Member -NotePropertyName unsupported -NotePropertyValue $true
+        Assert-Throws -Action { Assert-AiInstructionContractV2Envelope -Contract $unknownSource } -Context 'unknown source field'
+        $unknownPlatform = ($contract | ConvertTo-Json -Depth 20) | ConvertFrom-Json
+        $unknownPlatform.platforms[0] | Add-Member -NotePropertyName unsupported -NotePropertyValue $true
+        Assert-Throws -Action { Assert-AiInstructionContractV2Envelope -Contract $unknownPlatform } -Context 'unknown platform field'
         Assert-AiJsonString -Value $contract.primaryLocale -Context 'primaryLocale'
         Assert-AiJsonString -Value $contract.fanOutLocale -Context 'fanOutLocale'
         if ([string]$contract.primaryLocale -cne 'zh-TW') { throw "Unexpected primaryLocale '$($contract.primaryLocale)'." }
@@ -253,17 +320,25 @@ function Assert-AiRuleReferences {
             }
         }
 
-        Assert-OrdinalStringSet -Actual @($contract.platforms | ForEach-Object { $_.id }) -Expected @('codex','github-copilot') -Context 'platform inventory'
+        Assert-OrdinalStringSet -Actual @($contract.platforms | ForEach-Object { $_.id }) -Expected @('codex','github-copilot','claude') -Context 'platform inventory'
         $bootstrap = Get-AiInstructionText -Path $script:BootstrapPath
         foreach ($platform in @($contract.platforms)) {
             Assert-ExactPropertySet -Value $platform -Expected @('id','base','rulesRoot','fanOut') -Context "platform '$($platform.id)'"
             Assert-ExactPropertySet -Value $platform.base -Expected @('zh-TW','en') -Context "platform '$($platform.id)' base"
-            Assert-ExactPropertySet -Value $platform.fanOut -Expected @('baseTarget','rulesTarget','preserveRuleFileName') -Context "platform '$($platform.id)' fanOut"
             Assert-AiJsonString -Value $platform.id -Context 'platform id'
-            foreach ($pathValue in @($platform.base.'zh-TW',$platform.base.en,$platform.rulesRoot,$platform.fanOut.baseTarget,$platform.fanOut.rulesTarget)) {
+            foreach ($pathValue in @($platform.base.'zh-TW',$platform.base.en,$platform.rulesRoot)) {
                 Assert-AiJsonString -Value $pathValue -Context "platform '$($platform.id)' path"
                 $path = [string]$pathValue
                 [void](Get-ContractFullPath -RelativePath $path)
+            }
+            if ($null -eq $platform.fanOut) {
+                if ([string]$platform.id -cne 'claude') { throw "Only Claude may defer fan-out in contract v2." }
+                continue
+            }
+            Assert-ExactPropertySet -Value $platform.fanOut -Expected @('baseTarget','rulesTarget','preserveRuleFileName') -Context "platform '$($platform.id)' fanOut"
+            foreach ($pathValue in @($platform.fanOut.baseTarget,$platform.fanOut.rulesTarget)) {
+                Assert-AiJsonString -Value $pathValue -Context "platform '$($platform.id)' fan-out path"
+                [void](Get-ContractFullPath -RelativePath ([string]$pathValue))
             }
             if ($platform.fanOut.preserveRuleFileName -isnot [bool] -or -not [bool]$platform.fanOut.preserveRuleFileName) {
                 throw "Platform '$($platform.id)' must preserve rule filenames during fan-out."
@@ -282,7 +357,7 @@ function Assert-AiRuleReferences {
             }
         }
 
-        Assert-OrdinalStringSet -Actual @($contract.modules | ForEach-Object { $_.id }) -Expected @('code-review','database','external-research','git-commit','testing') -Context 'v1 module inventory'
+        Assert-OrdinalStringSet -Actual @($contract.modules | ForEach-Object { $_.id }) -Expected @('code-review','database','external-research','git-commit','testing') -Context 'v2 module inventory'
         $allInvariantIds = New-Object System.Collections.Generic.List[string]
         foreach ($module in @($contract.modules)) {
             Assert-ExactPropertySet -Value $module -Expected @('id','fileStem','platforms','triggers','invariants') -Context "module '$($module.id)'"
@@ -341,6 +416,145 @@ function Assert-AiRuleReferences {
         Assert-OrdinalStringSet -Actual @($allInvariantIds) -Expected @($allInvariantIds | Select-Object -Unique) -Context 'global invariant identities'
     }
 
+    # Scenario: An authority platform exists before its consumer fan-out is enabled.
+    # Purpose: Keep bootstrap families exactly aligned with non-null fanOut declarations and prevent premature Claude fan-out.
+    It 'InterT12_matches_bootstrap_families_to_non_null_contract_fan_out' {
+        $contract = Get-AiInstructionContract
+        $bootstrap = Get-AiInstructionText -Path $script:BootstrapPath
+        $familySection = [regex]::Match($bootstrap, '(?s)\$families\s*=\s*@\((?<body>.*?)\)\s*\r?\n\$sharedSkillsFamilyName')
+        if (-not $familySection.Success) { throw 'Could not parse bootstrap $families.' }
+        $actualNames = @([regex]::Matches($familySection.Groups['body'].Value, "Name\s*=\s*'(?<name>[^']+)'") | ForEach-Object { $_.Groups['name'].Value })
+        $nameByPlatform = @{ codex = 'Codex'; 'github-copilot' = 'GitHub Copilot'; claude = 'Claude' }
+        $expectedNames = @($contract.platforms | Where-Object { $null -ne $_.fanOut } | ForEach-Object { $nameByPlatform[[string]$_.id] })
+        Assert-OrdinalStringSet -Actual $actualNames -Expected $expectedNames -Context 'bootstrap fan-out family inventory'
+        if ($actualNames -ccontains 'Claude') { throw 'Claude fan-out must remain disabled in P9a.' }
+    }
+
+    # Scenario: A common source or generated authority artifact drifts after generation.
+    # Purpose: Require -Check to pass for the repository and identify the affected artifact for either source-side or output-side drift.
+    It 'InterT15_checks_generated_outputs_and_reports_source_or_artifact_drift' {
+        $current = Invoke-AiInstructionBuilderProcess -Root $script:RepositoryRoot -Check
+        if ($current.ExitCode -ne 0) { throw "Repository generation check failed: $($current.Output)" }
+
+        $sourceRoot = New-AiInstructionFixture -Name 'source-drift' -IncludeOutputs
+        [System.IO.File]::AppendAllText((Join-Path $sourceRoot 'instructions\common\base.md'), "source drift`n", (New-Object System.Text.UTF8Encoding($false)))
+        $sourceResult = Invoke-AiInstructionBuilderProcess -Root $sourceRoot -Check
+        if ($sourceResult.ExitCode -eq 0 -or $sourceResult.Output -cnotmatch [regex]::Escape('.codex/AGENTS.md')) {
+            throw "Common-source drift was not reported with an affected artifact: $($sourceResult.Output)"
+        }
+
+        $artifactRoot = New-AiInstructionFixture -Name 'artifact-drift' -IncludeOutputs
+        [System.IO.File]::AppendAllText((Join-Path $artifactRoot '.claude\CLAUDE.md'), "artifact drift`n", (New-Object System.Text.UTF8Encoding($false)))
+        $artifactResult = Invoke-AiInstructionBuilderProcess -Root $artifactRoot -Check
+        if ($artifactResult.ExitCode -eq 0 -or $artifactResult.Output -cnotmatch [regex]::Escape('.claude/CLAUDE.md')) {
+            throw "Artifact drift was not reported: $($artifactResult.Output)"
+        }
+    }
+
+    # Scenario: Generation runs on a host with different native encoding or newline defaults.
+    # Purpose: Keep every authority artifact byte-deterministic as UTF-8 without BOM, LF-only, and exactly one final newline.
+    It 'InterT16_emits_deterministic_utf8_lf_bytes' {
+        $root = New-AiInstructionFixture -Name 'deterministic-bytes'
+        $generation = Invoke-AiInstructionBuilderProcess -Root $root
+        if ($generation.ExitCode -ne 0) { throw "Fixture generation failed: $($generation.Output)" }
+        $contract = Get-AiInstructionContract
+        foreach ($platform in @($contract.platforms)) {
+            $paths = @($platform.base.'zh-TW', $platform.base.en)
+            foreach ($module in @($contract.modules | Where-Object { @($_.platforms) -ccontains [string]$platform.id })) {
+                foreach ($locale in @($contract.locales)) {
+                    $paths += ([string]$platform.rulesRoot + '/' + [string]$module.fileStem + [string]$locale.ruleSuffix)
+                }
+            }
+            foreach ($relativePath in $paths) {
+                $bytes = [System.IO.File]::ReadAllBytes((Join-Path $root ([string]$relativePath)))
+                if ($bytes.Length -eq 0 -or $bytes[$bytes.Length - 1] -ne 0x0A -or ($bytes.Length -gt 1 -and $bytes[$bytes.Length - 2] -eq 0x0A)) {
+                    throw "Generated artifact '$relativePath' does not have exactly one final LF."
+                }
+                if (($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) -or $bytes -contains 0x0D) {
+                    throw "Generated artifact '$relativePath' is not UTF-8 without BOM and LF-only."
+                }
+            }
+        }
+    }
+
+    # Scenario: Git checks out common sources or generated authority artifacts on a Windows runner.
+    # Purpose: Require every contract-declared source and output path to retain LF bytes across all platforms.
+    It 'InterT17_declares_lf_checkout_for_all_contract_sources_and_outputs' {
+        $contract = Get-AiInstructionContract
+        $paths = @()
+        foreach ($locale in @($contract.locales)) {
+            $paths += ([string]$contract.source.root + '/' + $(if ([string]$locale.id -ceq [string]$contract.primaryLocale) { 'base.md' } else { "base.$($locale.id).md" }))
+            foreach ($module in @($contract.modules)) {
+                $paths += ([string]$contract.source.root + '/AI-Rules/' + [string]$module.fileStem + [string]$locale.ruleSuffix)
+            }
+        }
+        foreach ($platform in @($contract.platforms)) {
+            foreach ($locale in @($contract.locales)) {
+                $paths += Get-PlatformBaseRelativePath -Platform $platform -LocaleId ([string]$locale.id)
+                foreach ($module in @($contract.modules | Where-Object { @($_.platforms) -ccontains [string]$platform.id })) {
+                    $paths += ([string]$platform.rulesRoot + '/' + [string]$module.fileStem + [string]$locale.ruleSuffix)
+                }
+            }
+        }
+        $paths = @($paths | Sort-Object -CaseSensitive -Unique)
+        $attributes = @(& git -C $script:RepositoryRoot check-attr eol -- @paths)
+        if ($LASTEXITCODE -ne 0) { throw "git check-attr failed for AI Instructions paths." }
+        $lfPaths = @($attributes | ForEach-Object {
+            $match = [regex]::Match([string]$_, '^(?<path>.*): eol: lf$')
+            if ($match.Success) { $match.Groups['path'].Value }
+        })
+        Assert-OrdinalStringSet -Actual $lfPaths -Expected $paths -Context 'AI Instructions LF attributes'
+    }
+
+    # Scenario: A host adapter block is ambiguous, incomplete, unknown, or spans a machine-readable marker.
+    # Purpose: Fail closed before generation can silently alter route or invariant membership.
+    It 'InterT18_rejects_invalid_host_block_syntax' {
+        $cases = @(
+            [pscustomobject]@{ Name = 'nested'; RelativePath = 'instructions\common\base.md'; Text = "<!-- host:codex -->`n<!-- host:claude -->`ntext`n<!-- /host -->`n<!-- /host -->`n" },
+            [pscustomobject]@{ Name = 'unclosed'; RelativePath = 'instructions\common\base.md'; Text = "<!-- host:codex -->`ntext`n" },
+            [pscustomobject]@{ Name = 'unknown'; RelativePath = 'instructions\common\base.md'; Text = "<!-- host:unknown -->text<!-- /host -->`n" },
+            [pscustomobject]@{ Name = 'marker crossing'; RelativePath = 'instructions\common\base.md'; Text = "<!-- host:codex -->`ntext <!-- ai-invariant:base.test -->`n<!-- /host -->`n" },
+            [pscustomobject]@{ Name = 'multiple inline'; RelativePath = 'instructions\common\base.md'; Text = "<!-- host:codex -->one<!-- /host --><!-- host:claude -->two<!-- /host -->`n" },
+            [pscustomobject]@{ Name = 'nested inline'; RelativePath = 'instructions\common\base.md'; Text = "<!-- host:codex -->outer <!-- host:claude -->inner<!-- /host --><!-- /host -->`n" },
+            [pscustomobject]@{ Name = 'rule block'; RelativePath = 'instructions\common\AI-Rules\Testing.md'; Text = "<!-- host:codex -->rule text<!-- /host -->`n" }
+        )
+        foreach ($case in $cases) {
+            $root = New-AiInstructionFixture -Name ("host-" + $case.Name.Replace(' ', '-'))
+            [System.IO.File]::AppendAllText((Join-Path $root ([string]$case.RelativePath)), [string]$case.Text, (New-Object System.Text.UTF8Encoding($false)))
+            $result = Invoke-AiInstructionBuilderProcess -Root $root -Check
+            if ($result.ExitCode -eq 0) { throw "Invalid host syntax '$($case.Name)' was accepted." }
+            if ($case.Name -ceq 'rule block' -and
+                ($result.Output -cnotmatch 'RuleHostBlockNotAllowed' -or $result.Output -cnotmatch [regex]::Escape('instructions/common/AI-Rules/Testing.md'))) {
+                throw "Rule host block failure did not identify its type and source file: $($result.Output)"
+            }
+        }
+    }
+
+    # Scenario: An existing generated artifact contains bytes that are not valid UTF-8.
+    # Purpose: Let -Check report the drift without writing, then let normal generation repair the artifact.
+    It 'InterT19_reports_and_repairs_invalid_utf8_generated_artifacts' {
+        $root = New-AiInstructionFixture -Name 'invalid-output-utf8' -IncludeOutputs
+        $relativePath = '.codex/AGENTS.md'
+        $targetPath = Join-Path $root '.codex\AGENTS.md'
+        [System.IO.File]::WriteAllBytes($targetPath, [byte[]]@(0xC3, 0x28))
+
+        $check = Invoke-AiInstructionBuilderProcess -Root $root -Check
+        if ($check.ExitCode -eq 0 -or $check.Output -cnotmatch [regex]::Escape($relativePath)) {
+            throw "Invalid UTF-8 artifact was not reported as drift: $($check.Output)"
+        }
+        $invalidBytes = [System.IO.File]::ReadAllBytes($targetPath)
+        if ($invalidBytes.Length -ne 2 -or $invalidBytes[0] -ne 0xC3 -or $invalidBytes[1] -ne 0x28) {
+            throw '-Check modified the invalid UTF-8 artifact.'
+        }
+
+        $generation = Invoke-AiInstructionBuilderProcess -Root $root
+        if ($generation.ExitCode -ne 0) { throw "Generation did not repair invalid UTF-8: $($generation.Output)" }
+        $strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
+        $null = $strictUtf8.GetString([System.IO.File]::ReadAllBytes($targetPath))
+        $verified = Invoke-AiInstructionBuilderProcess -Root $root -Check
+        if ($verified.ExitCode -ne 0) { throw "Repaired artifact did not pass -Check: $($verified.Output)" }
+    }
+
     # Scenario: A rule is added, removed, renamed, or translated for either platform.
     # Purpose: Require an exact declared two-locale inventory rather than allowing both sides to omit the same artifact.
     It 'InterT20_has_exact_locale_pairs_for_every_declared_artifact' {
@@ -365,6 +579,85 @@ function Assert-AiRuleReferences {
             $ruleRoot = Get-ContractFullPath -RelativePath ([string]$platform.rulesRoot)
             $actualFiles = @(Get-ChildItem -LiteralPath $ruleRoot -File | Where-Object { $_.Name.EndsWith('.md', [System.StringComparison]::Ordinal) } | ForEach-Object { $_.Name })
             Assert-OrdinalStringSet -Actual $actualFiles -Expected $expectedFiles -Context "platform '$($platform.id)' rule inventory"
+        }
+    }
+
+    # Scenario: A retired rule remains in a platform rules root or the common source rules directory.
+    # Purpose: Make both generation modes fail closed, identify every undeclared direct Markdown file, and avoid changing generated artifacts.
+    It 'InterT21_rejects_unexpected_rule_sources_and_artifacts_before_writing' {
+        $cases = @(
+            [pscustomobject]@{ Name = 'platform-artifact'; RelativePath = '.codex/AI-Rules/Old.en.md' },
+            [pscustomobject]@{ Name = 'common-source'; RelativePath = 'instructions/common/AI-Rules/Old.md' }
+        )
+        foreach ($case in $cases) {
+            foreach ($checkMode in @($false, $true)) {
+                $modeName = if ($checkMode) { 'check' } else { 'generate' }
+                $root = New-AiInstructionFixture -Name ("unexpected-$($case.Name)-$modeName") -IncludeOutputs
+                $unexpectedPath = Join-Path $root ([string]$case.RelativePath).Replace('/', '\')
+                [System.IO.File]::WriteAllText($unexpectedPath, "retired rule`n", (New-Object System.Text.UTF8Encoding($false)))
+                $sentinelPath = Join-Path $root '.codex\AGENTS.md'
+                [System.IO.File]::AppendAllText($sentinelPath, "must remain unchanged`n", (New-Object System.Text.UTF8Encoding($false)))
+                $sentinelBytes = [System.IO.File]::ReadAllBytes($sentinelPath)
+
+                $result = Invoke-AiInstructionBuilderProcess -Root $root -Check:$checkMode
+                if ($result.ExitCode -eq 0 -or
+                    $result.Output -cnotmatch 'UnexpectedInstructionArtifact' -or
+                    $result.Output -cnotmatch [regex]::Escape([string]$case.RelativePath)) {
+                    throw "Unexpected rule '$($case.RelativePath)' was not reported in $modeName mode: $($result.Output)"
+                }
+                $actualBytes = [System.IO.File]::ReadAllBytes($sentinelPath)
+                if ([Convert]::ToBase64String($sentinelBytes) -cne [Convert]::ToBase64String($actualBytes)) {
+                    throw "Builder modified an artifact before rejecting '$($case.RelativePath)' in $modeName mode."
+                }
+            }
+        }
+    }
+
+    # Scenario: An existing generated artifact has equivalent text but CRLF bytes or a UTF-8 BOM.
+    # Purpose: Require -Check to report byte drift and normal generation to restore the exact canonical LF bytes.
+    It 'InterT22_checks_and_repairs_noncanonical_generated_artifact_bytes' {
+        $relativePath = '.codex/AGENTS.md'
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        $cases = @(
+            [pscustomobject]@{
+                Name = 'crlf'
+                Mutate = {
+                    param([byte[]] $ExpectedBytes)
+                    $text = $utf8NoBom.GetString($ExpectedBytes)
+                    return $utf8NoBom.GetBytes($text.Replace("`n", "`r`n"))
+                }
+            },
+            [pscustomobject]@{
+                Name = 'bom'
+                Mutate = {
+                    param([byte[]] $ExpectedBytes)
+                    return [byte[]](@(0xEF, 0xBB, 0xBF) + @($ExpectedBytes))
+                }
+            }
+        )
+
+        foreach ($case in $cases) {
+            $root = New-AiInstructionFixture -Name ("noncanonical-output-" + $case.Name)
+            $baseline = Invoke-AiInstructionBuilderProcess -Root $root
+            if ($baseline.ExitCode -ne 0) { throw "Fixture generation failed for $($case.Name): $($baseline.Output)" }
+            $targetPath = Join-Path $root '.codex\AGENTS.md'
+            $expectedBytes = [System.IO.File]::ReadAllBytes($targetPath)
+            $driftBytes = & $case.Mutate $expectedBytes
+            [System.IO.File]::WriteAllBytes($targetPath, $driftBytes)
+
+            $check = Invoke-AiInstructionBuilderProcess -Root $root -Check
+            if ($check.ExitCode -eq 0 -or $check.Output -cnotmatch [regex]::Escape($relativePath)) {
+                throw "Noncanonical $($case.Name) artifact bytes were not reported as drift: $($check.Output)"
+            }
+            if ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($targetPath)) -cne [Convert]::ToBase64String($driftBytes)) {
+                throw "-Check modified the noncanonical $($case.Name) artifact."
+            }
+
+            $generation = Invoke-AiInstructionBuilderProcess -Root $root
+            if ($generation.ExitCode -ne 0) { throw "Generation did not repair $($case.Name) artifact bytes: $($generation.Output)" }
+            if ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($targetPath)) -cne [Convert]::ToBase64String($expectedBytes)) {
+                throw "Generation did not restore the exact canonical bytes for the $($case.Name) artifact."
+            }
         }
     }
 
@@ -434,13 +727,13 @@ function Assert-AiRuleReferences {
     }
 
     # Scenario: The USER-only safety rule disappears while the other declared Base invariants remain intact.
-    # Purpose: Require this shared installation boundary in the contract and all four Base variants.
+    # Purpose: Require this shared installation boundary in the contract and all six Base variants.
     It 'InterT45_declares_the_USER_only_shared_Skills_safety_invariant' {
         $contract = Get-AiInstructionContract
         $identity = 'base.shared-skills-user-only'
         $declaration = @($contract.baseInvariants | Where-Object { $_.id -ceq $identity })
         $declaration.Count | Should Be 1
-        Assert-OrdinalStringSet -Actual @($declaration[0].platforms) -Expected @('codex','github-copilot') -Context 'USER-only invariant platforms'
+        Assert-OrdinalStringSet -Actual @($declaration[0].platforms) -Expected @('codex','github-copilot','claude') -Context 'USER-only invariant platforms'
         foreach ($platform in @($contract.platforms)) {
             foreach ($locale in @($contract.locales)) {
                 $path = Get-ContractFullPath -RelativePath (Get-PlatformBaseRelativePath -Platform $platform -LocaleId ([string]$locale.id))
@@ -453,27 +746,32 @@ function Assert-AiRuleReferences {
         }
     }
 
-    # Scenario: A common rule changes on only Codex or Copilot while each localized pair remains present.
+    # Scenario: A common rule changes on only one platform while each localized pair remains present.
     # Purpose: Enforce exact same-locale semantics after normalizing only the declared platform rule root.
     It 'InterT50_keeps_common_rules_normalized_across_platforms' {
         $contract = Get-AiInstructionContract
-        $codex = @($contract.platforms | Where-Object { [string]$_.id -ceq 'codex' })[0]
-        $copilot = @($contract.platforms | Where-Object { [string]$_.id -ceq 'github-copilot' })[0]
-        foreach ($module in @($contract.modules | Where-Object { @($_.platforms) -ccontains 'codex' -and @($_.platforms) -ccontains 'github-copilot' })) {
+        foreach ($module in @($contract.modules)) {
             foreach ($locale in @($contract.locales)) {
-                $codexRelative = ([string]$codex.rulesRoot + '/' + [string]$module.fileStem + [string]$locale.ruleSuffix)
-                $copilotRelative = ([string]$copilot.rulesRoot + '/' + [string]$module.fileStem + [string]$locale.ruleSuffix)
-                $codexText = Get-AiInstructionText -Path (Get-ContractFullPath -RelativePath $codexRelative)
-                $copilotText = Get-AiInstructionText -Path (Get-ContractFullPath -RelativePath $copilotRelative)
-                if ($codexText.Contains(([string]$copilot.rulesRoot + '/')) -or $copilotText.Contains(([string]$codex.rulesRoot + '/'))) {
-                    throw "Module '$($module.id)' locale '$($locale.id)' contains an opposite-platform rule reference."
+                $normalizedByPlatform = @{}
+                $applicablePlatforms = @($contract.platforms | Where-Object { @($module.platforms) -ccontains [string]$_.id })
+                foreach ($platform in $applicablePlatforms) {
+                    $relative = ([string]$platform.rulesRoot + '/' + [string]$module.fileStem + [string]$locale.ruleSuffix)
+                    $text = Get-AiInstructionText -Path (Get-ContractFullPath -RelativePath $relative)
+                    foreach ($otherPlatform in @($contract.platforms | Where-Object { [string]$_.id -cne [string]$platform.id })) {
+                        if ($text.Contains(([string]$otherPlatform.rulesRoot + '/'))) {
+                            throw "Module '$($module.id)' locale '$($locale.id)' contains an opposite-platform rule reference."
+                        }
+                    }
+                    $normalizedByPlatform[[string]$platform.id] = $text.Replace(([string]$platform.rulesRoot + '/'), '{RULE_ROOT}/')
                 }
-                $codexNormalized = $codexText.Replace(([string]$codex.rulesRoot + '/'), '{RULE_ROOT}/')
-                $copilotNormalized = $copilotText.Replace(([string]$copilot.rulesRoot + '/'), '{RULE_ROOT}/')
-                if (-not [string]::Equals($codexNormalized, $copilotNormalized, [System.StringComparison]::Ordinal)) {
-                    throw "Module '$($module.id)' locale '$($locale.id)' is not normalized-equivalent across platforms."
+                $reference = [string]$normalizedByPlatform[[string]$applicablePlatforms[0].id]
+                foreach ($platform in @($applicablePlatforms | Select-Object -Skip 1)) {
+                    if (-not [string]::Equals($reference, [string]$normalizedByPlatform[[string]$platform.id], [System.StringComparison]::Ordinal)) {
+                        throw "Module '$($module.id)' locale '$($locale.id)' is not normalized-equivalent across platforms."
+                    }
                 }
             }
         }
     }
+
 }
