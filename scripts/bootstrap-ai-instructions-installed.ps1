@@ -100,8 +100,11 @@ function Get-LauncherInstallTransactionResidueKind {
 
 function Get-LauncherEntryKind {
     param([Parameter(Mandatory = $true)][string] $LiteralPath)
-    if (-not (Test-Path -LiteralPath $LiteralPath)) { return $null }
-    $item = Get-Item -Force -LiteralPath $LiteralPath
+    $parentPath = Split-Path -Parent $LiteralPath
+    $leaf = Split-Path -Leaf $LiteralPath
+    $item = @(Get-ChildItem -Force -LiteralPath $parentPath | Where-Object { $_.Name -eq $leaf } | Select-Object -First 1)
+    if ($item.Count -eq 0) { return $null }
+    $item = $item[0]
     if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return 'reparse' }
     if ($item.PSIsContainer) { return 'directory' }
     return 'file'
@@ -110,8 +113,9 @@ function Get-LauncherEntryKind {
 function Get-LauncherInterruptedInstallResidue {
     $residue = New-Object System.Collections.Generic.List[string]
     $transactionRoot = Join-Path $codexHome '.ai-instructions-txn'
-    if (Test-Path -LiteralPath $transactionRoot) {
-        $rootKind = Get-LauncherEntryKind -LiteralPath $transactionRoot
+    $transactionRootKind = Get-LauncherEntryKind -LiteralPath $transactionRoot
+    if ($null -ne $transactionRootKind) {
+        $rootKind = $transactionRootKind
         if ($rootKind -cne 'directory') { $residue.Add("$transactionRoot [$rootKind]") }
         else {
             foreach ($entry in @(Get-ChildItem -Force -LiteralPath $transactionRoot)) {
@@ -459,6 +463,7 @@ function Repair-InterruptedRuntimePin {
 }
 
 function Open-InstalledRuntimeReadLock {
+    param([switch] $ForRecovery)
     $installLockPath = Join-Path $codexHome 'ai-instructions-install.lock'
     if (-not (Test-Path -LiteralPath $installLockPath -PathType Leaf)) {
         throw [System.InvalidOperationException]::new(
@@ -480,8 +485,12 @@ function Open-InstalledRuntimeReadLock {
         )
     }
     catch [System.IO.IOException] {
+        $message = if ($ForRecovery) {
+            'Interrupted-install recovery refused to run while another AI instructions installer is active.'
+        }
+        else { 'AI instructions runtime is being installed; bootstrap stopped before reading a mixed runtime.' }
         throw [System.InvalidOperationException]::new(
-            "AI instructions runtime is being installed; bootstrap stopped before reading a mixed runtime.`nAI instructions bootstrap stopped [classification=concurrency; retryable=false].",
+            "$message`nAI instructions bootstrap stopped [classification=concurrency; retryable=false].",
             $_.Exception
         )
     }
@@ -490,7 +499,7 @@ function Open-InstalledRuntimeReadLock {
 if ($RecoverInterruptedInstall) {
     Assert-InstalledMutationRuntimeBaseline
     Assert-NoLauncherInterruptedInstallResidue
-    $trustReadLock = Open-InstalledRuntimeReadLock
+    $trustReadLock = Open-InstalledRuntimeReadLock -ForRecovery
     try {
         $recoveryState = Assert-VerifiedInstalledRuntime -AllowPinMismatch
         try { Import-Module $platformRuntimeManifestPath -Force -ErrorAction Stop }

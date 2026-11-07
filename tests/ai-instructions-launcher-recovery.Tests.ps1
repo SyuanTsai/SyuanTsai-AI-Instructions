@@ -1,20 +1,24 @@
 $script:RepositoryRoot=(Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $script:InstallerScript=Join-Path $script:RepositoryRoot 'scripts\install-ai-instructions-bootstrap.ps1'
 $script:PowerShellExecutable=(Get-Process -Id $PID).Path
+$script:CanonicalRepository='https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
 Import-Module (Join-Path $script:RepositoryRoot 'scripts\ai-instructions-runtime-contract.psm1') -Force
 
 function New-LauncherRecoverySourceArchive {
-    param([Parameter(Mandatory=$true)][string]$ArchivePath)
+    param(
+        [Parameter(Mandatory=$true)][string]$ArchivePath,
+        [string]$SourceRoot=$script:RepositoryRoot
+    )
     Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
     Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
     $stream=[IO.File]::Open($ArchivePath,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::None)
     try{
         $archive=[IO.Compression.ZipArchive]::new($stream,[IO.Compression.ZipArchiveMode]::Create,$false)
         try{
-            $files=@(Get-ChildItem -LiteralPath (Join-Path $script:RepositoryRoot 'scripts'),(Join-Path $script:RepositoryRoot 'catalog') -Recurse -File)
-            $files+=@(Get-ChildItem -LiteralPath $script:RepositoryRoot -File|Where-Object Name -in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json'))
+            $files=@(Get-ChildItem -LiteralPath (Join-Path $SourceRoot 'scripts'),(Join-Path $SourceRoot 'catalog') -Recurse -File)
+            $files+=@(Get-ChildItem -LiteralPath $SourceRoot -File|Where-Object Name -in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json'))
             foreach($file in @($files|Sort-Object FullName)){
-                $relative=$file.FullName.Substring($script:RepositoryRoot.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+                $relative=$file.FullName.Substring($SourceRoot.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
                 $entry=$archive.CreateEntry("candidate-root/$relative")
                 $input=[IO.File]::OpenRead($file.FullName);$output=$entry.Open()
                 try{$input.CopyTo($output)}finally{$output.Dispose();$input.Dispose()}
@@ -45,10 +49,24 @@ function Copy-LauncherRecoveryHome {
 
 function Get-LauncherRecoveryHomeDigest {
     param([Parameter(Mandatory=$true)][string]$CodexHome)
-    return (@(Get-ChildItem -LiteralPath $CodexHome -Recurse -Force -File|Sort-Object FullName|ForEach-Object{
+    return (@(Get-ChildItem -LiteralPath $CodexHome -Recurse -Force|Sort-Object FullName|ForEach-Object{
         $relative=$_.FullName.Substring($CodexHome.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
-        "$relative=$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())"
+        $kind=if(($_.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){'reparse'}elseif($_.PSIsContainer){'directory'}else{'file'}
+        $hash=if($kind-ceq'file'){(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}else{'-'}
+        "$relative=$kind;$([int64]$_.Attributes);$hash"
     })-join"`n")
+}
+
+function New-LauncherRecoveryFailpointCandidate {
+    param([Parameter(Mandatory=$true)][string]$DestinationRoot)
+    New-Item -ItemType Directory -Path $DestinationRoot|Out-Null
+    Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts'),(Join-Path $script:RepositoryRoot 'catalog') -Destination $DestinationRoot -Recurse
+    foreach($leaf in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json')){
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot $leaf) -Destination (Join-Path $DestinationRoot $leaf)
+    }
+    foreach($relative in @('bootstrap-ai-instructions-installed.ps1','update-ai-instructions.ps1','update-agent-environment.ps1','cleanup-ai-instructions-pollution.ps1','safe-zip.psm1')){
+        [IO.File]::AppendAllText((Join-Path $DestinationRoot "scripts\$relative"),"`n# launcher recovery failpoint candidate: $relative`n",[Text.UTF8Encoding]::new($false))
+    }
 }
 
 function Invoke-LauncherRecoveryFailure {
@@ -70,9 +88,9 @@ function Set-LauncherRecoveryPinMismatch {
     [IO.File]::WriteAllText($path,(($configuration|ConvertTo-Json -Depth 20).Replace("`r`n","`n")+"`n"),[Text.UTF8Encoding]::new($false))
 }
 
+if([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)){
 Describe 'AI instructions launcher recovery' {
     BeforeAll {
-        if(-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)){throw 'AI instructions launcher recovery is registered only on the native Windows host.'}
         $script:ExternalTestRoot=Join-Path ([IO.Path]::GetTempPath()) ('ai-instructions-launcher-recovery-'+[Guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $script:ExternalTestRoot|Out-Null
         $script:ArchivePath=Join-Path $script:ExternalTestRoot 'source.zip'
@@ -165,6 +183,67 @@ Describe 'AI instructions launcher recovery' {
         @(Get-ChildItem -Force -LiteralPath (Join-Path $fixtureHome '.ai-instructions-txn')).Count|Should Be 0
     }
 
+    # Scenario: The transaction root is a dangling junction on each launcher entry path.
+    # Purpose: Detect the namespace leaf without following its missing target and preserve every existing entry and byte.
+    It 'LaunchT08_refuses_a_dangling_transaction_root_on_every_launcher_path_without_mutation' {
+        foreach($mode in @('ordinary','validate','recover')){
+            $fixtureHome=Copy-LauncherRecoveryHome -Name ("dangling-$mode-"+[Guid]::NewGuid().ToString('N'))
+            $store=Join-Path $fixtureHome '.ai-instructions-txn'
+            if(Test-Path -LiteralPath $store){Remove-Item -LiteralPath $store -Recurse -Force}
+            $target=Join-Path $script:ExternalTestRoot ("dangling-target-$mode-"+[Guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $target|Out-Null
+            New-Item -ItemType Junction -Path $store -Target $target|Out-Null
+            Remove-Item -LiteralPath $target -Force
+            $before=Get-LauncherRecoveryHomeDigest -CodexHome $fixtureHome
+            $caught=switch($mode){
+                'ordinary'{Invoke-LauncherRecoveryFailure -CodexHome $fixtureHome}
+                'validate'{Invoke-LauncherRecoveryFailure -CodexHome $fixtureHome -ValidateOnly}
+                'recover'{Invoke-LauncherRecoveryFailure -CodexHome $fixtureHome -Recover}
+            }
+            (Get-AiInstructionsRefusalCode $caught)|Should Be interrupted-install
+            (Get-LauncherRecoveryHomeDigest -CodexHome $fixtureHome)|Should Be $before
+        }
+    }
+
+    # Scenario: The real installer FailFasts after publishing an operation and leaves a half-applied transaction.
+    # Purpose: Make direct launcher recovery refuse without changing config, runtime, transaction evidence, or lock inventory.
+    It 'LaunchT09_preserves_a_half_applied_installer_transaction_during_direct_recovery_refusal' {
+        $fixtureHome=Copy-LauncherRecoveryHome -Name ('installer-failfast-'+[Guid]::NewGuid().ToString('N'))
+        $candidateRoot=Join-Path $script:ExternalTestRoot ('candidate-'+[Guid]::NewGuid().ToString('N'))
+        New-LauncherRecoveryFailpointCandidate -DestinationRoot $candidateRoot
+        $archivePath=Join-Path $script:ExternalTestRoot ('candidate-'+[Guid]::NewGuid().ToString('N')+'.zip')
+        $archiveSha256=New-LauncherRecoverySourceArchive -ArchivePath $archivePath -SourceRoot $candidateRoot
+        $arguments=@(
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$script:InstallerScript,
+            '-RepositoryRoot',$script:RepositoryRoot,'-CodexHome',$fixtureHome,
+            '-Acquisition','github-codeload','-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git',
+            '-SourceCommit',$script:SourceCommit,'-ArchiveSha256',$archiveSha256,'-SourceArchivePath',$archivePath
+        )
+        $stdout=Join-Path $script:ExternalTestRoot 'installer-failfast.stdout';$stderr=Join-Path $script:ExternalTestRoot 'installer-failfast.stderr'
+        $previous=[Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_INSTALL_FAILPOINT','Process')
+        try{
+            [Environment]::SetEnvironmentVariable('AI_INSTRUCTIONS_INSTALL_FAILPOINT','after-operation-1-before-journal','Process')
+            $process=Start-Process -FilePath $script:PowerShellExecutable -ArgumentList $arguments -PassThru -Wait -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+        }finally{[Environment]::SetEnvironmentVariable('AI_INSTRUCTIONS_INSTALL_FAILPOINT',$previous,'Process')}
+        $process.ExitCode|Should Not Be 0;$process.Dispose()
+        @(Get-ChildItem -Force -LiteralPath (Join-Path $fixtureHome '.ai-instructions-txn')).Count|Should BeGreaterThan 0
+        $before=Get-LauncherRecoveryHomeDigest -CodexHome $fixtureHome
+        (Get-AiInstructionsRefusalCode (Invoke-LauncherRecoveryFailure -CodexHome $fixtureHome -Recover))|Should Be interrupted-install
+        (Get-LauncherRecoveryHomeDigest -CodexHome $fixtureHome)|Should Be $before
+        @(Get-ChildItem -Force -LiteralPath $fixtureHome|Where-Object Name -Match '^\.recovery-|^\.ai-instructions-sync\.json\.(recovery|backup|failed)-').Count|Should Be 0
+    }
+
+    # Scenario: A concurrent installer exclusively owns the install lock before launcher recovery begins.
+    # Purpose: Preserve the established recovery-specific lock-conflict message even when the shared trust lease fails first.
+    It 'LaunchT10_reports_the_recovery_specific_message_for_a_shared_lease_conflict' {
+        $fixtureHome=Copy-LauncherRecoveryHome -Name ('recovery-lock-'+[Guid]::NewGuid().ToString('N'))
+        Set-LauncherRecoveryPinMismatch -CodexHome $fixtureHome
+        $stream=[IO.File]::Open((Join-Path $fixtureHome 'ai-instructions-install.lock'),[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+        try{$caught=Invoke-LauncherRecoveryFailure -CodexHome $fixtureHome -Recover}finally{$stream.Dispose()}
+        $caught.Exception.Message|Should Match 'recovery refused to run while another AI instructions installer is active'
+        $caught.Exception.Message|Should Match 'classification=concurrency; retryable=false'
+    }
+
     if($null-ne(Get-Command powershell.exe -ErrorAction SilentlyContinue)){
         # Scenario: Windows PowerShell 5.1 requests the mutation-only recovery switch.
         # Purpose: Return the typed baseline refusal before creating a lock or transaction artifact.
@@ -193,6 +272,17 @@ Describe 'AI instructions launcher recovery' {
             & git -C $targetRoot add README.md
             & git -C $targetRoot commit --quiet -m fixture
             & git -C $targetRoot remote add origin 'https://example.org/team/project.git'
+            $runtimeRoot=Join-Path $fixtureHome 'hooks\ai-instructions-runtime'
+            $bootstrapPath=Join-Path $runtimeRoot 'bootstrap-ai-instructions-multisource.ps1'
+            $bootstrapFixture=@'
+param([string]$CatalogPath,[string]$LockPath,[string]$ConfigurationPath,[string]$UserHome,[string]$TargetRoot,[switch]$WhatIf)
+$manifestRoot=Join-Path $TargetRoot '.codex'
+New-Item -ItemType Directory -Force -Path $manifestRoot|Out-Null
+[IO.File]::WriteAllText((Join-Path $manifestRoot 'ai-instructions.manifest.json'),"{}`n",[Text.UTF8Encoding]::new($false))
+'@
+            [IO.File]::WriteAllText($bootstrapPath,$bootstrapFixture,[Text.UTF8Encoding]::new($false))
+            $bundle=New-AiInstructionsRuntimeBundleV2 -RuntimeRoot $runtimeRoot -Repository $script:CanonicalRepository -Commit ([string]$configuration.catalog.ref) -Acquisition git-checkout
+            [IO.File]::WriteAllText((Join-Path $runtimeRoot 'runtime-bundle.json'),(($bundle|ConvertTo-Json -Depth 20).Replace("`r`n","`n")+"`n"),[Text.UTF8Encoding]::new($false))
             $output=& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $fixtureHome 'hooks\bootstrap-ai-instructions.ps1') -TargetRoot $targetRoot -UserHome $fixtureUser 2>&1
             if($LASTEXITCODE-ne0){throw ('Windows PowerShell fan-out failed: '+(($output-join[Environment]::NewLine)-replace[regex]::Escape($script:ExternalTestRoot),'<test-root>'))}
             ($output-join[Environment]::NewLine)|Should Match 'automatic update check was skipped because it requires pwsh 7'
@@ -202,4 +292,5 @@ Describe 'AI instructions launcher recovery' {
             $source|Should Not Match "engineName = if \(.+Desktop.+powershell\.exe"
         }
     }
+}
 }

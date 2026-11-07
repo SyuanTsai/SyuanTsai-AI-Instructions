@@ -15,8 +15,11 @@ function Assert-AiInstructionsUpdaterRuntimeBaseline {
 
 function Get-AiInstructionsUpdaterEntryKind {
     param([Parameter(Mandatory = $true)][string] $LiteralPath)
-    if (-not (Test-Path -LiteralPath $LiteralPath)) { return $null }
-    $item = Get-Item -Force -LiteralPath $LiteralPath
+    $parentPath = Split-Path -Parent $LiteralPath
+    $leaf = Split-Path -Leaf $LiteralPath
+    $item = @(Get-ChildItem -Force -LiteralPath $parentPath | Where-Object { $_.Name -eq $leaf } | Select-Object -First 1)
+    if ($item.Count -eq 0) { return $null }
+    $item = $item[0]
     if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return 'reparse' }
     if ($item.PSIsContainer) { return 'directory' }
     return 'file'
@@ -25,7 +28,10 @@ function Get-AiInstructionsUpdaterEntryKind {
 function Get-AiInstructionsUpdaterJournalEntry {
     param([Parameter(Mandatory = $true)][string] $LiteralPath)
     $kind = Get-AiInstructionsUpdaterEntryKind -LiteralPath $LiteralPath
-    $json = if ($kind -ceq 'file') { Get-Content -Raw -Encoding UTF8 -LiteralPath $LiteralPath } else { $null }
+    $json = if ($kind -ceq 'file') {
+        try { Get-Content -Raw -Encoding UTF8 -LiteralPath $LiteralPath }
+        catch { $null }
+    } else { $null }
     return [pscustomobject]@{ Kind=$kind; Json=$json }
 }
 
@@ -33,8 +39,9 @@ function Get-AiInstructionsUpdaterInterruptedInstallResidue {
     param([Parameter(Mandatory = $true)][string] $CodexHome)
     $residue = New-Object System.Collections.Generic.List[string]
     $transactionRoot = Join-Path $CodexHome '.ai-instructions-txn'
-    if (Test-Path -LiteralPath $transactionRoot) {
-        $rootKind = Get-AiInstructionsUpdaterEntryKind -LiteralPath $transactionRoot
+    $transactionRootKind = Get-AiInstructionsUpdaterEntryKind -LiteralPath $transactionRoot
+    if ($null -ne $transactionRootKind) {
+        $rootKind = $transactionRootKind
         if ($rootKind -cne 'directory') { $residue.Add("$transactionRoot [invalid-name; entry=$rootKind]") }
         else {
             foreach ($entry in @(Get-ChildItem -Force -LiteralPath $transactionRoot)) {
@@ -53,9 +60,42 @@ function Get-AiInstructionsUpdaterInterruptedInstallResidue {
     return $residue.ToArray()
 }
 
+function Get-AiInstructionsUpdaterInterruptedInstallPresence {
+    param([Parameter(Mandatory = $true)][string] $CodexHome)
+    $residue = New-Object System.Collections.Generic.List[string]
+    $transactionRoot = Join-Path $CodexHome '.ai-instructions-txn'
+    $rootKind = Get-AiInstructionsUpdaterEntryKind -LiteralPath $transactionRoot
+    if ($null -ne $rootKind) {
+        if ($rootKind -cne 'directory') { $residue.Add("$transactionRoot [$rootKind]") }
+        else {
+            foreach ($entry in @(Get-ChildItem -Force -LiteralPath $transactionRoot)) {
+                $residue.Add($entry.FullName)
+            }
+        }
+    }
+    foreach ($entry in @(Get-ChildItem -Force -LiteralPath $CodexHome | Where-Object { $_.Name -like '.ai-instructions-install-*' -or $_.Name -like '.ai-instructions-backup-*' })) {
+        $residue.Add("$($entry.FullName) [legacy]")
+    }
+    return $residue.ToArray()
+}
+
+function Assert-NoAiInstructionsUpdaterInterruptedInstallPresence {
+    param([Parameter(Mandatory = $true)][string] $CodexHome)
+    $residue = @(Get-AiInstructionsUpdaterInterruptedInstallPresence -CodexHome $CodexHome)
+    if ($residue.Count -eq 0) { return }
+    throw (New-AiInstructionsRefusalException -Code interrupted-install -Message ('Interrupted install residue requires the installer to complete recovery with pwsh 7: ' + ($residue -join '; ')))
+}
+
 function Assert-NoAiInstructionsUpdaterInterruptedInstallResidue {
     param([Parameter(Mandatory = $true)][string] $CodexHome)
-    $residue = @(Get-AiInstructionsUpdaterInterruptedInstallResidue -CodexHome $CodexHome)
+    try { $residue = @(Get-AiInstructionsUpdaterInterruptedInstallResidue -CodexHome $CodexHome) }
+    catch {
+        $presence = @(Get-AiInstructionsUpdaterInterruptedInstallPresence -CodexHome $CodexHome)
+        if ($presence.Count -gt 0) {
+            throw (New-AiInstructionsRefusalException -Code interrupted-install -Message ('Interrupted install residue could not be fully classified and requires the installer to complete recovery with pwsh 7: ' + ($presence -join '; ')) -InnerException $_.Exception)
+        }
+        throw
+    }
     if ($residue.Count -eq 0) { return }
     throw (New-AiInstructionsRefusalException -Code interrupted-install -Message ('Interrupted install residue requires the installer to complete recovery with pwsh 7: ' + ($residue -join '; ')))
 }
@@ -422,6 +462,7 @@ function New-AiInstructionsUpdateResult {
 function Write-AiInstructionsUpdateReceipt {
     param([Parameter(Mandatory = $true)][string] $Path,[Parameter(Mandatory = $true)][object] $Result)
     Assert-AiInstructionsUpdaterRuntimeBaseline
+    Assert-NoAiInstructionsUpdaterInterruptedInstallPresence -CodexHome (Split-Path -Parent $Path)
     Assert-AiInstructionsUpdateReceiptV1 -Receipt $Result | Out-Null
     Assert-AiInstructionsMutationPath -Path $Path -ExpectedType File -Context 'AI instructions update receipt' | Out-Null
     Write-AiInstructionsJsonFile -Path $Path -Document $Result

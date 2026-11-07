@@ -10,6 +10,16 @@ function Get-TestUpdaterFileSha256 {
     finally { $sha256.Dispose() }
 }
 
+function Get-TestUpdaterHomeDigest {
+    param([Parameter(Mandatory=$true)][string]$CodexHome)
+    return (@(Get-ChildItem -LiteralPath $CodexHome -Recurse -Force|Sort-Object FullName|ForEach-Object{
+        $relative=$_.FullName.Substring($CodexHome.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+        $kind=if(($_.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){'reparse'}elseif($_.PSIsContainer){'directory'}else{'file'}
+        $hash=if($kind-ceq'file'){Get-TestUpdaterFileSha256 -Path $_.FullName}else{'-'}
+        "$relative=$kind;$([int64]$_.Attributes);$hash"
+    })-join"`n")
+}
+
 function New-TestUpdaterHome {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
@@ -760,22 +770,109 @@ Export-ModuleMember -Function Invoke-AiInstructionsUpdateWorkflow,Get-AiInstruct
         Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json')|Should Be $false
     }
 
-    # Scenario: Platform locks and legacy File.Open callers contend on both updater lock files.
-    # Purpose: Preserve the windows-fileshare protocol in the new-to-old direction for update then install ordering.
-    It 'UnitT81_keeps_platform_locks_mutually_exclusive_with_legacy_file_open' -TestCases @(
+    # Register only on the native host because FileShare and junction regressions exercise Windows lock and reparse semantics.
+    if([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)){
+        # Scenario: Platform locks and legacy File.Open callers contend on both updater lock files.
+        # Purpose: Preserve the windows-fileshare protocol in the new-to-old direction for update then install ordering.
+        It 'UnitT81_keeps_platform_locks_mutually_exclusive_with_legacy_file_open' -TestCases @(
         @{Leaf='ai-instructions-update.lock'},@{Leaf='ai-instructions-install.lock'}
-    ) {
-        param($Leaf)
-        $codexHome=Join-Path $TestDrive ("platform-lock-"+$Leaf);New-TestUpdaterHome -Path $codexHome
-        Import-Module (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psd1') -Force
-        $root=Open-PlatformDirectory -Root $codexHome -RootOnly
-        try{
-            $lease=Enter-PlatformLock -ParentLease $root -Leaf $Leaf -Mode Exclusive -Timeout ([TimeSpan]::Zero)
+        ) {
+            param($Leaf)
+            $codexHome=Join-Path $TestDrive ("platform-lock-"+$Leaf);New-TestUpdaterHome -Path $codexHome
+            Import-Module (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psd1') -Force
+            $root=Open-PlatformDirectory -Root $codexHome -RootOnly
+            try{
+                $lease=Enter-PlatformLock -ParentLease $root -Leaf $Leaf -Mode Exclusive -Timeout ([TimeSpan]::Zero)
+                try{
+                    $caught=$null
+                    try{$legacy=[IO.File]::Open((Join-Path $codexHome $Leaf),[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None);$legacy.Dispose()}catch{$caught=$_}
+                    $caught|Should Not BeNullOrEmpty
+                }finally{$lease.Dispose()}
+            }finally{$root.Dispose()}
+        }
+
+        # Scenario: The updater sees a dangling .ai-instructions-txn junction before it can acquire locks.
+        # Purpose: Refuse the namespace leaf without following its missing target or changing inventory and bytes.
+        It 'UnitT82_refuses_a_dangling_transaction_root_without_mutation' {
+            $codexHome=Join-Path $TestDrive 'dangling-transaction-root';New-TestUpdaterHome -Path $codexHome
+            $target=Join-Path $TestDrive 'dangling-updater-target';New-Item -ItemType Directory -Path $target|Out-Null
+            New-Item -ItemType Junction -Path (Join-Path $codexHome '.ai-instructions-txn') -Target $target|Out-Null
+            Remove-Item -LiteralPath $target -Force
+            $before=Get-TestUpdaterHomeDigest -CodexHome $codexHome
+            $caught=$null
+            try{Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck|Out-Null}catch{$caught=$_}
+            (Get-AiInstructionsRefusalCode $caught)|Should Be interrupted-install
+            (Get-TestUpdaterHomeDigest -CodexHome $codexHome)|Should Be $before
+            Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json')|Should Be $false
+        }
+
+        # Scenario: Another process-compatible stream exclusively owns journal.json while updater preflight classifies residue.
+        # Purpose: Convert the unreadable journal into interrupted-install and never write an update receipt.
+        It 'UnitT83_refuses_an_unreadable_journal_as_interrupted_install' {
+            $codexHome=Join-Path $TestDrive 'locked-journal';New-TestUpdaterHome -Path $codexHome
+            $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-install-journal-v1.example.json')|ConvertFrom-Json
+            $transaction=Join-Path $codexHome ('.ai-instructions-txn\'+[string]$journal.transactionId);New-Item -ItemType Directory -Path $transaction|Out-Null
+            $journalPath=Join-Path $transaction 'journal.json'
+            [IO.File]::WriteAllText($journalPath,(($journal|ConvertTo-Json -Depth 30)+"`n"),[Text.UTF8Encoding]::new($false))
+            $before=Get-TestUpdaterHomeDigest -CodexHome $codexHome
+            $stream=[IO.File]::Open($journalPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None)
             try{
                 $caught=$null
-                try{$legacy=[IO.File]::Open((Join-Path $codexHome $Leaf),[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None);$legacy.Dispose()}catch{$caught=$_}
-                $caught|Should Not BeNullOrEmpty
-            }finally{$lease.Dispose()}
-        }finally{$root.Dispose()}
+                try{Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck|Out-Null}catch{$caught=$_}
+            }finally{$stream.Dispose()}
+            (Get-AiInstructionsRefusalCode $caught)|Should Be interrupted-install
+            (Get-TestUpdaterHomeDigest -CodexHome $codexHome)|Should Be $before
+            Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json')|Should Be $false
+        }
+
+        # Scenario: A candidate installer publishes state and invokes the production failpoint while running in the updater process.
+        # Purpose: Prove a real FailFast kills the updater without a receipt and the next updater run refuses retained residue without mutation.
+        It 'UnitT84_failfasts_with_the_candidate_installer_then_refuses_the_retained_transaction' {
+            $codexHome=Join-Path $TestDrive 'real-updater-failfast';New-TestUpdaterHome -Path $codexHome -Mode auto-install-approved
+            $hostExecutable=(Get-Process -Id $PID).Path
+            $harness=Join-Path $TestDrive 'invoke-real-updater-failfast.ps1'
+            $harnessSource=@'
+param([string]$UpdaterModule,[string]$CodexHome)
+Import-Module $UpdaterModule -Force
+Import-Module (Join-Path (Split-Path -Parent $UpdaterModule) 'ai-instructions-install-transaction.psm1') -Force -Global
+$package=[pscustomobject]@{SourceRoot='C:\fixture';ArchivePath='C:\fixture.zip';ArchiveSha256=('c'*64)}
+$resolveCandidate={ [pscustomobject]@{Commit=('b'*40);Relation='ahead'} }.GetNewClosure()
+$acquireCandidate={ $package }.GetNewClosure()
+$installCandidate={
+    param($request)
+    $transaction=Join-Path $request.CodexHome ('.ai-instructions-txn\'+[Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $transaction|Out-Null
+    [IO.File]::WriteAllText((Join-Path $transaction 'journal.json'),'{',[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $request.CodexHome 'candidate-published-before-failfast.txt'),'published',[Text.UTF8Encoding]::new($false))
+    ai-instructions-install-transaction\Invoke-AiInstructionsInstallFailpoint -Name 'after-operation-1-before-journal'
+}.GetNewClosure()
+Invoke-AiInstructionsUpdateWorkflow -CodexHome $CodexHome -ForceCheck -InstallApproved `
+    -ResolveCandidate $resolveCandidate `
+    -AcquireCandidate $acquireCandidate `
+    -InstallCandidate $installCandidate | Out-Null
+'@
+            [IO.File]::WriteAllText($harness,$harnessSource,[Text.UTF8Encoding]::new($false))
+            $stdout=Join-Path $TestDrive 'real-updater-failfast.stdout';$stderr=Join-Path $TestDrive 'real-updater-failfast.stderr'
+            $previous=[Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_INSTALL_FAILPOINT','Process')
+            try{
+                [Environment]::SetEnvironmentVariable('AI_INSTRUCTIONS_INSTALL_FAILPOINT','after-operation-1-before-journal','Process')
+                $process=Start-Process -FilePath $hostExecutable -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$harness,'-UpdaterModule',$script:UpdaterModule,'-CodexHome',$codexHome) -PassThru -Wait -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            }finally{[Environment]::SetEnvironmentVariable('AI_INSTRUCTIONS_INSTALL_FAILPOINT',$previous,'Process')}
+            $exitCode=$process.ExitCode;$process.Dispose()
+            if($exitCode-eq0){
+                $receiptText=if(Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json')){Get-Content -Raw -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json')}else{'<no receipt>'}
+                $stdoutText=if(Test-Path -LiteralPath $stdout){Get-Content -Raw -LiteralPath $stdout}else{''}
+                $stderrText=if(Test-Path -LiteralPath $stderr){Get-Content -Raw -LiteralPath $stderr}else{''}
+                throw "Updater FailFast fixture exited normally. receipt=$receiptText stdout=$stdoutText stderr=$stderrText"
+            }
+            Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json')|Should Be $false
+            @(Get-ChildItem -Force -LiteralPath (Join-Path $codexHome '.ai-instructions-txn')).Count|Should BeGreaterThan 0
+            $before=Get-TestUpdaterHomeDigest -CodexHome $codexHome
+            $caught=$null
+            try{Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck|Out-Null}catch{$caught=$_}
+            (Get-AiInstructionsRefusalCode $caught)|Should Be interrupted-install
+            (Get-TestUpdaterHomeDigest -CodexHome $codexHome)|Should Be $before
+            Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json')|Should Be $false
+        }
     }
 }
