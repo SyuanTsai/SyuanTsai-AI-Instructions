@@ -1,4 +1,5 @@
 # Reuse the established disposable bootstrap fixtures without executing their Describe blocks.
+$script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
 $fixtureText = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'bootstrap-ai-instructions.Tests.ps1')
 . ([scriptblock]::Create($fixtureText.Substring(0, $fixtureText.IndexOf("Describe 'bootstrap-ai-instructions'")).Replace('$PSScriptRoot', "'$($PSScriptRoot.Replace("'", "''"))'")))
 
@@ -1004,6 +1005,73 @@ Describe 'SYP214 whole-Skill migration evidence' {
             # USER is validated against its own immutable version, never against the old REPO bytes.
             foreach ($entry in $manifest.files) { $entry.sourceCommit = ('a'*40); $entry.sourceVersion='older' }
         }
+    }
+
+    # Scenario: USER coordinator manifest v3 contains user-agents and user-claude projections.
+    # Purpose: Use only user-agents as W11 deletion evidence; another projection cannot substitute for it.
+    It 'InterT61_uses_only_user_agents_entries_from_USER_manifest_v3' {
+        $userManifestPath=Join-Path $userHome '.agents/catalog-skills.manifest.json'
+        $legacy=Get-Content -Raw -Encoding UTF8 -LiteralPath $userManifestPath|ConvertFrom-Json
+        $v3Entries=@()
+        foreach($entry in $legacy.files){
+            $agents=$entry.PSObject.Copy();$agents.sourcePath=([string]$entry.sourcePath).Replace('.agents/skills/','skills/');$agents|Add-Member -NotePropertyName projectionId -NotePropertyValue 'user-agents';$v3Entries+=$agents
+            $claude=$entry.PSObject.Copy();$claude.sourcePath=([string]$entry.sourcePath).Replace('.agents/skills/','skills/');$claude|Add-Member -NotePropertyName projectionId -NotePropertyValue 'user-claude';$claude.targetPath=([string]$entry.targetPath).Replace('.agents/skills/','.claude/skills/');$v3Entries+=$claude
+            $claudePath=Join-Path $userHome $claude.targetPath;New-Item -ItemType Directory -Force -Path (Split-Path -Parent $claudePath)|Out-Null;[IO.File]::Copy((Join-Path $userHome $entry.targetPath),$claudePath)
+        }
+        $v3=[ordered]@{schemaVersion=3;catalogRepository=$legacy.catalogRepository;catalogCommit=$legacy.catalogCommit;catalogId=$legacy.catalogId;lockSha256=$legacy.lockSha256;projectionContractSha256=('d'*64);generation=1;projections=@('user-agents','user-claude');files=$v3Entries}
+        [IO.File]::WriteAllText($userManifestPath,($v3|ConvertTo-Json -Depth 10),[Text.UTF8Encoding]::new($false))
+        $plan=@(Get-RepoSharedSkillsMigrationPlan -Repository $targetRoot -Manifest $manifest -TrustedSkills @($trusted) -UserHome $userHome)
+        $plan[0].removable | Should Be $true
+
+        Remove-Item -LiteralPath (Join-Path $userHome '.agents/skills/syp214-fixture/SKILL.md') -Force
+        $protected=@(Get-RepoSharedSkillsMigrationPlan -Repository $targetRoot -Manifest $manifest -TrustedSkills @($trusted) -UserHome $userHome)
+        $protected[0].removable | Should Be $false
+        Test-Path -LiteralPath (Join-Path $userHome '.claude/skills/syp214-fixture/SKILL.md') | Should Be $true
+    }
+
+    # Scenario: Legacy recovery JSON or any canonical new-transaction residue appears during planning or after the plan was created.
+    # Purpose: Treat legacy, valid, malformed, canonical orphan, and invalid-name evidence uniformly as missing W11 USER evidence while preserving REPO bytes.
+    It 'InterT62_requires_an_empty_USER_transaction_root_during_plan_and_revalidation' {
+        $transactionRoot=Join-Path $userHome '.ai-instructions-txn';$legacyPath=Join-Path $userHome '.agents/update-agent-environment.recovery.json'
+        $repoFile=Join-Path $targetRoot '.agents/skills/syp214-fixture/SKILL.md';$repoBytes=[Convert]::ToBase64String([IO.File]::ReadAllBytes($repoFile))
+        $clearResidue={Remove-Item -LiteralPath $legacyPath -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath $transactionRoot -Recurse -Force -ErrorAction SilentlyContinue}
+        foreach($kind in @('legacy','valid','malformed','orphan','invalid-name')){
+            & $clearResidue
+            if($kind-ceq'legacy'){
+                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $legacyPath)|Out-Null
+                [IO.File]::WriteAllText($legacyPath,'{}')
+                $residue=$legacyPath
+            }else{
+                $name=if($kind-ceq'invalid-name'){'invalid-name'}else{'0123456789abcdef0123456789abcdef'}
+                $residue=Join-Path $transactionRoot $name
+                New-Item -ItemType Directory -Force -Path $residue|Out-Null
+                if($kind-ceq'malformed'){[IO.File]::WriteAllText((Join-Path $residue 'journal.json'),'{')}
+                elseif($kind-ceq'valid'){$journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json -DateKind String;$journal.transactionId=$name;[IO.File]::WriteAllText((Join-Path $residue 'journal.json'),($journal|ConvertTo-Json -Depth 30),[Text.UTF8Encoding]::new($false))}
+            }
+            $blocked=@(Get-RepoSharedSkillsMigrationPlan -Repository $targetRoot -Manifest $manifest -TrustedSkills @($trusted) -UserHome $userHome)
+            $blocked[0].removable|Should Be $false
+            Test-Path -LiteralPath $residue|Should Be $true
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($repoFile))|Should Be $repoBytes
+
+            & $clearResidue
+            $plan=@(Get-RepoSharedSkillsMigrationPlan -Repository $targetRoot -Manifest $manifest -TrustedSkills @($trusted) -UserHome $userHome)
+            $plan[0].removable|Should Be $true
+            if($kind-ceq'legacy'){
+                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $legacyPath)|Out-Null
+                [IO.File]::WriteAllText($legacyPath,'{}')
+                $residue=$legacyPath
+            }else{
+                $name=if($kind-ceq'invalid-name'){'invalid-name'}else{'0123456789abcdef0123456789abcdef'}
+                $residue=Join-Path $transactionRoot $name
+                New-Item -ItemType Directory -Force -Path $residue|Out-Null
+                if($kind-ceq'malformed'){[IO.File]::WriteAllText((Join-Path $residue 'journal.json'),'{')}
+                elseif($kind-ceq'valid'){$journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json -DateKind String;$journal.transactionId=$name;[IO.File]::WriteAllText((Join-Path $residue 'journal.json'),($journal|ConvertTo-Json -Depth 30),[Text.UTF8Encoding]::new($false))}
+            }
+            {Assert-RepoSharedSkillsMigrationEvidence -Repository $targetRoot -Skill $plan[0]}|Should Throw 'USER state changed concurrently'
+            Test-Path -LiteralPath $residue|Should Be $true
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($repoFile))|Should Be $repoBytes
+        }
+        & $clearResidue
     }
 
     # Scenario: The migration planner receives a REPO managed manifest v4.

@@ -3070,4 +3070,94 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         {ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json|Out-Null}|Should Not Throw
         (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue)|Should Be $true
     }
+
+    # Scenario: USER projection coordinator persists an install journal v1 under USER home.
+    # Purpose: Add the component without a schema bump and bind its historical global USER lock basename.
+    It 'UnitT208_accepts_user_reconciler_with_the_fixed_USER_lock_leaf' {
+        $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json -DateKind String
+        $parsed=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal|ConvertTo-Json -Depth 20)
+        $parsed.owner.component | Should Be 'user-reconciler'
+        $parsed.lock.leaf | Should Be 'update-agent-environment.lock'
+    }
+
+    # Scenario: A USER reconciler journal names another lock or omits the previous manifest digest.
+    # Purpose: Keep lock-parent derivation and F2 generation evidence closed under journal v1.
+    It 'UnitT209_rejects_user_reconciler_lock_or_previous_manifest_digest_drift' {
+        $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json -DateKind String
+        $journal.lock.leaf='another.lock'
+        { Assert-AiInstructionsInstallJournalV1 $journal | Out-Null } | Should Throw
+        $journal.lock.leaf='update-agent-environment.lock'
+        $journal.generation.previousBundleSha256=$null
+        { Assert-AiInstructionsInstallJournalV1 $journal | Out-Null } | Should Throw
+    }
+
+    # Scenario: Recovery evaluates a USER reconciler journal using the same exact-state decision contract.
+    # Purpose: Prove the additive component does not fork D8 recovery semantics.
+    It 'UnitT210_uses_the_existing_recovery_decision_for_user_reconciler' {
+        $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json')|ConvertFrom-Json -DateKind String
+        $journal.phase='applied'
+        foreach($operation in $journal.operations){$operation.state='applied'}
+        $observations=@{}
+        foreach($operation in $journal.operations){$observations[[string]$operation.sequence]=New-TestInstallObservation -Operation $operation -State $operation.applied}
+        $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations $observations
+        $decision.action | Should Be 'commit'
+    }
+
+    # Scenario: The stable launcher has already scoped USER recovery to USER home and holds the install read lease.
+    # Purpose: Permit only user-reconciler valid journals and orphans while keeping other components fail closed.
+    It 'UnitT211_scopes_transaction_disposition_for_user_reconciler' {
+        (Get-AiInstructionsInstallTransactionDisposition -Classification valid-journal -Component user-reconciler).action | Should Be 'recover'
+        (Get-AiInstructionsInstallTransactionDisposition -Classification orphan-without-journal -Component user-reconciler).action | Should Be 'purge-orphan'
+        (Get-AiInstructionsInstallTransactionDisposition -Classification malformed-journal -Component user-reconciler).refusalCode | Should Be 'interrupted-install'
+    }
+
+    # Scenario: The additive journal example represents the USER projection coordinator.
+    # Purpose: Keep its fixed lock leaf and manifest-byte generation digests executable-reader compatible.
+    It 'UnitT212_accepts_the_user_reconciler_install_journal_example' {
+        $path = Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json'
+        $journal = Get-Content -Raw -Encoding UTF8 -LiteralPath $path | ConvertFrom-Json -DateKind String
+        { Assert-AiInstructionsInstallJournalV1 -Journal $journal } | Should Not Throw
+        $journal.owner.component | Should Be 'user-reconciler'
+        $journal.lock.leaf | Should Be 'update-agent-environment.lock'
+        $journal.generation.previousBundleSha256 | Should Be ('0' * 64)
+    }
+
+    # Scenario: A retained USER reconciler journal names targets outside the fixed USER Skill projection roots or their exact missing ancestors.
+    # Purpose: Keep recovery authority scoped to projection content and the one managed manifest before any filesystem observation or mutation.
+    It 'UnitT213_scopes_user_reconciler_operations_to_projection_roots_and_exact_ancestors' {
+        if($PSVersionTable.PSVersion.Major -lt 7){throw 'UnitT213 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.'}
+        $examplePath=Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-user-reconciler-journal-v1.example.json'
+        $schemaPath=Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
+        function New-ScopedUserJournal([string]$Kind,[string]$Target){
+            $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath $examplePath|ConvertFrom-Json -DateKind String
+            $manifest=$journal.operations[0];$manifest.sequence=2
+            $operation=if($Kind-ceq'create-directory'){
+                [pscustomobject][ordered]@{sequence=1;kind='create-directory';method='stage-rename';targetRelativePath=$Target;stageLeaf='scope.stage';backupLeaf=$null;quarantineLeaf='scope.quarantine';original=[pscustomobject][ordered]@{exists=$false;identity=$null;inventorySha256=$null;entryCount=$null};backupIdentity=$null;applied=[pscustomobject][ordered]@{exists=$true;identity=$manifest.applied.identity;inventorySha256=('2'*64);entryCount=0};permissions=$null;state='staged'}
+            }else{
+                [pscustomobject][ordered]@{sequence=1;kind=$Kind;method='stage-rename';targetRelativePath=$Target;stageLeaf='scope.stage';backupLeaf=$null;quarantineLeaf=$null;original=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null};backupIdentity=$null;applied=[pscustomobject][ordered]@{exists=$true;sha256=('2'*64);length=1;identity=$manifest.applied.identity};permissions=$null;state='staged'}
+            }
+            $journal.operations=@($operation,$manifest)
+            return $journal
+        }
+        try{
+            foreach($target in @('Documents','.agents/other','.claude/settings.json')){
+                $json=(New-ScopedUserJournal 'create-file' $target)|ConvertTo-Json -Depth 20
+                (Get-RuntimeContractError {ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json|Out-Null})|Should Match 'outside the USER Skill projection roots'
+                (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue)|Should Be $false
+            }
+            foreach($target in @('.agents/skills/alpha/SKILL.md','.claude/skills/alpha/SKILL.md','.copilot/skills/alpha/SKILL.md')){
+                $json=(New-ScopedUserJournal 'create-file' $target)|ConvertTo-Json -Depth 20
+                {ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json|Out-Null}|Should Not Throw
+                (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue)|Should Be $true
+            }
+            foreach($target in @('.agents','.agents/skills','.claude','.claude/skills','.copilot','.copilot/skills','.agents/skills/alpha')){
+                $json=(New-ScopedUserJournal 'create-directory' $target)|ConvertTo-Json -Depth 20
+                {ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json|Out-Null}|Should Not Throw
+                (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue)|Should Be $true
+            }
+            $swap=New-ScopedUserJournal 'create-directory' '.agents/skills/alpha';$swap.operations[0].kind='swap-directory';$swapJson=$swap|ConvertTo-Json -Depth 20
+            (Get-RuntimeContractError {ConvertFrom-AiInstructionsInstallJournalV1Json -Json $swapJson|Out-Null})|Should Match 'swap-directory is not allowed'
+            (Test-Json -Json $swapJson -SchemaFile $schemaPath -ErrorAction SilentlyContinue)|Should Be $false
+        }finally{Remove-Item Function:New-ScopedUserJournal -ErrorAction SilentlyContinue}
+    }
 }

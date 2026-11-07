@@ -101,6 +101,50 @@ function Get-AiInstructionsSkillsCatalogContractModule {
     return $script:SkillsCatalogContractModule
 }
 
+function Get-AiInstructionsUserSkillProjectionRoots {
+    $catalogModule = Get-AiInstructionsSkillsCatalogContractModule
+    $command = $catalogModule.ExportedCommands['Get-SkillsCatalogUserProjectionRoots']
+    if ($null -eq $command) { throw 'The Skills Catalog contract does not export the USER projection root contract.' }
+    return [string[]]@(& $command)
+}
+
+function Test-AiInstructionsUserReconcilerCreateDirectoryTarget {
+    param([Parameter(Mandatory = $true)][string] $TargetRelativePath)
+
+    foreach ($root in @(Get-AiInstructionsUserSkillProjectionRoots)) {
+        if ($TargetRelativePath -ceq $root -or $TargetRelativePath.StartsWith("$root/",[StringComparison]::Ordinal)) { return $true }
+        $ancestor = $root
+        while ($ancestor.Contains('/')) {
+            $ancestor = $ancestor.Substring(0,$ancestor.LastIndexOf('/'))
+            if ($TargetRelativePath -ceq $ancestor) { return $true }
+        }
+    }
+    return $false
+}
+
+function Assert-AiInstructionsUserReconcilerOperationTarget {
+    param(
+        [Parameter(Mandatory = $true)][object] $Operation,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $target = [string]$Operation.targetRelativePath
+    $kind = [string]$Operation.kind
+    if ($target -ceq '.agents/catalog-skills.manifest.json') {
+        if ($kind -cnotin @('create-file','write-file')) { throw "$Context kind must be create-file or write-file for the USER manifest target." }
+        return
+    }
+    if ($kind -ceq 'swap-directory') { throw "$Context kind swap-directory is not allowed for owner.component user-reconciler." }
+    if ($kind -ceq 'create-directory') {
+        if (Test-AiInstructionsUserReconcilerCreateDirectoryTarget -TargetRelativePath $target) { return }
+        throw "$Context.targetRelativePath is outside the USER Skill projection roots and their approved missing ancestors."
+    }
+    foreach ($root in @(Get-AiInstructionsUserSkillProjectionRoots)) {
+        if ($target.StartsWith("$root/",[StringComparison]::Ordinal)) { return }
+    }
+    throw "$Context.targetRelativePath is outside the USER Skill projection roots."
+}
+
 function Test-AiInstructionsObjectHasProperty {
     param([AllowNull()][object] $Object,[Parameter(Mandatory = $true)][string] $Name)
     return $null -ne $Object -and $null -ne $Object.PSObject.Properties[$Name]
@@ -1499,7 +1543,7 @@ function Assert-AiInstructionsInstallJournalV1 {
     catch { throw 'AI instructions install journal createdAtUtc must be an ISO 8601 UTC string ending in Z.' }
 
     Assert-AiInstructionsInstallJournalExactProperties -Object $Journal.owner -Names @('component','processId','processStartIdentity') -Context 'AI instructions install journal owner'
-    if ($Journal.owner.component -isnot [string] -or [string]$Journal.owner.component -cnotin @('installer','updater','launcher-recovery')) { throw 'AI instructions install journal owner.component is invalid.' }
+    if ($Journal.owner.component -isnot [string] -or [string]$Journal.owner.component -cnotin @('installer','updater','launcher-recovery','user-reconciler')) { throw 'AI instructions install journal owner.component is invalid.' }
     Assert-AiInstructionsInstallJournalInteger -Value $Journal.owner.processId -Context 'AI instructions install journal owner.processId' -Minimum 1
     $processStartIdentityScalarLength = if ($Journal.owner.processStartIdentity -is [string]) {
         Get-AiInstructionsInstallJournalUnicodeScalarLength -Value ([string]$Journal.owner.processStartIdentity) -Context 'AI instructions install journal owner.processStartIdentity'
@@ -1522,6 +1566,9 @@ function Assert-AiInstructionsInstallJournalV1 {
     if ($lockLeafKey -ceq '.AI-INSTRUCTIONS-TXN') {
         throw 'AI instructions install journal lock.leaf must not use the reserved .ai-instructions-txn name.'
     }
+    if ([string]$Journal.owner.component -ceq 'user-reconciler' -and [string]$Journal.lock.leaf -cne 'update-agent-environment.lock') {
+        throw 'AI instructions install journal lock.leaf must be update-agent-environment.lock for owner.component user-reconciler.'
+    }
 
     Assert-AiInstructionsInstallJournalExactProperties -Object $Journal.generation -Names @('previousBundleSha256','candidateBundleSha256') -Context 'AI instructions install journal generation'
     if ($null -ne $Journal.generation.previousBundleSha256 -and
@@ -1530,6 +1577,10 @@ function Assert-AiInstructionsInstallJournalV1 {
     }
     if ($Journal.generation.candidateBundleSha256 -isnot [string] -or [string]$Journal.generation.candidateBundleSha256 -cnotmatch '^[0-9a-f]{64}$') {
         throw 'AI instructions install journal generation.candidateBundleSha256 is invalid.'
+    }
+    if ([string]$Journal.owner.component -ceq 'user-reconciler' -and
+        ($Journal.generation.previousBundleSha256 -isnot [string] -or [string]$Journal.generation.previousBundleSha256 -cnotmatch '^[0-9a-f]{64}$')) {
+        throw 'AI instructions install journal generation.previousBundleSha256 must be a SHA-256 for owner.component user-reconciler.'
     }
     if ($Journal.phase -isnot [string] -or [string]$Journal.phase -cnotin @('prepared','applying','applied','rolling-back','rolled-back','committed')) { throw 'AI instructions install journal phase is invalid.' }
     if ($Journal.operations -isnot [System.Array] -or @($Journal.operations).Count -lt 1) { throw 'AI instructions install journal operations must be a non-empty array.' }
@@ -1582,6 +1633,9 @@ function Assert-AiInstructionsInstallJournalV1 {
         if ((Get-AiInstructionsInstallJournalPortableNameKey -Value $firstTargetSegment) -ceq '.AI-INSTRUCTIONS-TXN') {
             throw "$context.targetRelativePath must not use the reserved .ai-instructions-txn first segment."
         }
+        if ([string]$Journal.owner.component -ceq 'user-reconciler') {
+            Assert-AiInstructionsUserReconcilerOperationTarget -Operation $operation -Context $context
+        }
         $pathKey = Get-AiInstructionsInstallJournalPortableNameKey -Value ([string]$operation.targetRelativePath)
         $pathSegments = @(([string]$operation.targetRelativePath).Split('/') | ForEach-Object { Get-AiInstructionsInstallJournalPortableNameKey -Value $_ })
         if ($pathSegments.Count -eq 1 -and $pathKey -ceq $lockLeafKey) {
@@ -1597,7 +1651,12 @@ function Assert-AiInstructionsInstallJournalV1 {
                     break
                 }
             }
-            if ($hasCommonPrefix) {
+            $approvedUserManifestAncestor = $hasCommonPrefix -and [string]$Journal.owner.component -ceq 'user-reconciler' -and
+                (([string]$operation.kind -ceq 'create-directory' -and [string]$otherPath.kind -in @('create-file','write-file') -and
+                  [string]$operation.targetRelativePath -ceq '.agents' -and [string]$Journal.operations[[int64]$otherPath.sequence - 1].targetRelativePath -ceq '.agents/catalog-skills.manifest.json') -or
+                 ([string]$otherPath.kind -ceq 'create-directory' -and [string]$operation.kind -in @('create-file','write-file') -and
+                  [string]$Journal.operations[[int64]$otherPath.sequence - 1].targetRelativePath -ceq '.agents' -and [string]$operation.targetRelativePath -ceq '.agents/catalog-skills.manifest.json'))
+            if ($hasCommonPrefix -and -not $approvedUserManifestAncestor) {
                 throw "$context.targetRelativePath conflicts with operation sequence $($otherPath.sequence) because operation targets cannot have an ancestor or descendant relationship."
             }
         }
@@ -1686,6 +1745,22 @@ function Assert-AiInstructionsInstallJournalV1 {
         if ([string]$Journal.phase -in @('applied','committed') -and [string]$operation.state -cne 'applied') { throw "$context.state is inconsistent with phase $($Journal.phase)." }
         if ([string]$Journal.phase -ceq 'rolled-back' -and [string]$operation.state -cnotin @('pending','staged','rolled-back')) { throw "$context.state is inconsistent with phase rolled-back." }
         $expectedSequence++
+    }
+    if ([string]$Journal.owner.component -ceq 'user-reconciler') {
+        $manifestOperations = @($Journal.operations | Where-Object { [string]$_.targetRelativePath -ceq '.agents/catalog-skills.manifest.json' })
+        if ($manifestOperations.Count -ne 1 -or [int64]$manifestOperations[0].sequence -ne @($Journal.operations).Count -or
+            [string]$manifestOperations[0].kind -cnotin @('create-file','write-file')) {
+            throw 'AI instructions user-reconciler journal must place one USER manifest file operation last.'
+        }
+        $manifestOperation = $manifestOperations[0]
+        if ([string]$manifestOperation.applied.sha256 -cne [string]$Journal.generation.candidateBundleSha256) {
+            throw 'AI instructions user-reconciler journal candidateBundleSha256 must equal the applied USER manifest SHA-256.'
+        }
+        $previous = [string]$Journal.generation.previousBundleSha256
+        if (($previous -ceq ('0' * 64) -and [bool]$manifestOperation.original.exists) -or
+            ($previous -cne ('0' * 64) -and (-not [bool]$manifestOperation.original.exists -or [string]$manifestOperation.original.sha256 -cne $previous))) {
+            throw 'AI instructions user-reconciler journal previousBundleSha256 must describe the original USER manifest bytes or the fresh-install zero sentinel.'
+        }
     }
     return $Journal
 }
@@ -1961,8 +2036,8 @@ function Get-AiInstructionsInstallTransactionDisposition {
         [Parameter(Mandatory = $true)][string] $Component
     )
     if ($Classification -cnotin @('valid-journal','orphan-without-journal','malformed-journal','invalid-name','journal-present')) { throw "Unknown install transaction classification '$Classification'." }
-    if ($Component -cnotin @('installer','launcher','updater')) { throw "Unknown install transaction component '$Component'." }
-    if ($Component -cne 'installer') { return [pscustomobject][ordered]@{ action='refuse'; refusalCode='interrupted-install' } }
+    if ($Component -cnotin @('installer','launcher','updater','user-reconciler')) { throw "Unknown install transaction component '$Component'." }
+    if ($Component -cnotin @('installer','user-reconciler')) { return [pscustomobject][ordered]@{ action='refuse'; refusalCode='interrupted-install' } }
     switch ($Classification) {
         'valid-journal' { return [pscustomobject][ordered]@{ action='recover'; refusalCode=$null } }
         'orphan-without-journal' { return [pscustomobject][ordered]@{ action='purge-orphan'; refusalCode=$null } }

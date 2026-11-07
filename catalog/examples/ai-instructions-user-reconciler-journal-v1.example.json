@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "kind": "ai-instructions-install-transaction",
+  "transactionId": "abcdef0123456789abcdef0123456789",
+  "createdAtUtc": "2026-11-06T01:02:03.0000000Z",
+  "owner": {
+    "component": "user-reconciler",
+    "processId": 4242,
+    "processStartIdentity": "2026-11-06T01:02:00.0000000Z"
+  },
+  "platform": { "os": "windows", "architecture": "x64" },
+  "lock": { "primitive": "windows-fileshare", "leaf": "update-agent-environment.lock" },
+  "generation": {
+    "previousBundleSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "candidateBundleSha256": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "phase": "applying",
+  "operations": [
+    {
+      "sequence": 1,
+      "kind": "create-file",
+      "method": "stage-rename",
+      "targetRelativePath": ".agents/catalog-skills.manifest.json",
+      "stageLeaf": "file-1.stage",
+      "backupLeaf": null,
+      "quarantineLeaf": null,
+      "original": { "exists": false, "sha256": null, "length": null, "identity": null },
+      "backupIdentity": null,
+      "applied": {
+        "exists": true,
+        "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "length": 128,
+        "identity": { "kind": "windows-file-id", "device": "0x1A2B", "fileId": "0000ABCD:00001234" }
+      },
+      "permissions": null,
+      "state": "staged"
+    }
+  ]
+}

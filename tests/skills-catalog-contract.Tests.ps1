@@ -183,6 +183,7 @@ function Get-TestManagedManifestV4 {
 
         $exampleMappings = @(
             @{ Example = 'ai-instructions-install-journal-v1.example.json'; Schema = 'ai-instructions-install-journal-v1.schema.json'; SchemaVersion = 1 }
+            @{ Example = 'ai-instructions-user-reconciler-journal-v1.example.json'; Schema = 'ai-instructions-install-journal-v1.schema.json'; SchemaVersion = 1 }
             @{ Example = 'ai-instructions-sync-v4.example.json'; Schema = 'ai-instructions-sync-v4.schema.json'; SchemaVersion = 4 }
             @{ Example = 'ai-instructions-sync-v5.example.json'; Schema = 'ai-instructions-sync-v5.schema.json'; SchemaVersion = 5 }
             @{ Example = 'ai-instructions-update-receipt-v1.example.json'; Schema = 'ai-instructions-update-receipt-v1.schema.json'; SchemaVersion = 1 }
@@ -1816,5 +1817,17 @@ function Get-TestManagedManifestV4 {
             $skill.source.path | Should Be ".agents/skills/$($skill.id)"
         }
         Test-Path -LiteralPath (Join-Path $script:RepositoryRoot '.gitmodules') | Should Be $false
+    }
+
+    # Scenario: Install journal v1 adds the USER coordinator without changing its schema version.
+    # Purpose: Keep JSON Schema, executable reader, and documented fixed lock/generation contract synchronized.
+    It 'UnitT96_declares_the_user_reconciler_journal_v1_contract' {
+        $schema=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/schemas/ai-instructions-install-journal-v1.schema.json')|ConvertFrom-Json
+        @($schema.properties.owner.properties.component.enum) | Should Contain 'user-reconciler'
+        $schema.properties.schemaVersion.const | Should Be 1
+        $readme=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/README.md')
+        $readme | Should Match 'owner.component=user-reconciler'
+        $readme | Should Match 'update-agent-environment.lock'
+        $readme | Should Match 'out-of-band authority'
     }
 }

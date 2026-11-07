@@ -188,6 +188,14 @@ function Get-UserSharedSkillObservation {
     Assert-UserSkillsManagedManifest -Manifest $manifest
     if ([string]$manifest.catalogId -cne $CatalogId) { throw 'USER Catalog identity differs.' }
     if (Test-Path -LiteralPath (Join-Path $UserHome '.agents/update-agent-environment.recovery.json')) { throw 'USER transaction requires recovery.' }
+    $transactionRoot = Join-Path $UserHome '.ai-instructions-txn'
+    if (Test-Path -LiteralPath $transactionRoot) {
+        $transactionRootItem = Get-Item -Force -LiteralPath $transactionRoot
+        if (-not $transactionRootItem.PSIsContainer -or ($transactionRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'USER transaction root is unsafe or requires recovery.'
+        }
+        if (@(Get-ChildItem -Force -LiteralPath $transactionRoot -ErrorAction Stop).Count -gt 0) { throw 'USER transaction requires recovery.' }
+    }
     return [pscustomobject]@{manifest=$manifest; sha256=$hash}
 }
 
@@ -195,7 +203,11 @@ function Get-UserSharedSkillEvidence {
     param([string]$UserHome, [object]$Observation, [object]$Source)
     $id = [string]$Source.id
     if ($null -eq $Source.PSObject.Properties['files'] -or @($Source.files).Count -eq 0) { throw 'Trusted immutable source inventory unavailable.' }
-    $userEntries = @($Observation.manifest.files | Where-Object { [string]$_.skillId -ceq $id })
+    $manifestVersion = [int64]$Observation.manifest.schemaVersion
+    $userEntries = @($Observation.manifest.files | Where-Object {
+        [string]$_.skillId -ceq $id -and
+        ($manifestVersion -ne 3 -or [string]$_.projectionId -ceq 'user-agents')
+    })
     $sourcePaths = @($Source.files | ForEach-Object { [string]$_.targetPath } | Sort-Object)
     if ($sourcePaths -cnotcontains ".agents/skills/$id/SKILL.md" -or
         ($sourcePaths -join "`n") -cne ((@($userEntries | ForEach-Object targetPath | Sort-Object)) -join "`n") -or
@@ -295,8 +307,16 @@ function Assert-RepoSharedSkillsMigrationEvidence {
     $current = Get-RepoSkillMigrationGitState $Repository $GitExecutable
     if ($current.head -cne $Skill.gitState.head -or $current.indexSha256 -cne $Skill.gitState.indexSha256) { throw 'Skill migration Git state changed concurrently.' }
     $userPath = Get-RepoSkillSafePath $Skill.userHome '.agents/catalog-skills.manifest.json'
+    $transactionRoot = Join-Path $Skill.userHome '.ai-instructions-txn'
+    $hasTransactionResidue = $false
+    if (Test-Path -LiteralPath $transactionRoot) {
+        $transactionRootItem = Get-Item -Force -LiteralPath $transactionRoot
+        $hasTransactionResidue = -not $transactionRootItem.PSIsContainer -or
+            ($transactionRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            @(Get-ChildItem -Force -LiteralPath $transactionRoot -ErrorAction Stop).Count -gt 0
+    }
     if ((Get-FileHash -LiteralPath $userPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $Skill.userManifestSha256 -or
-        (Test-Path -LiteralPath (Join-Path $Skill.userHome '.agents/update-agent-environment.recovery.json'))) { throw 'USER state changed concurrently before Skill migration.' }
+        (Test-Path -LiteralPath (Join-Path $Skill.userHome '.agents/update-agent-environment.recovery.json')) -or $hasTransactionResidue) { throw 'USER state changed concurrently before Skill migration.' }
     foreach ($observation in $Skill.observations) {
         if ($observation.root -ceq $Repository -and $RemovedPaths -ccontains [string]$observation.path) { continue }
         $full = Get-RepoSkillSafePath $observation.root $observation.path
