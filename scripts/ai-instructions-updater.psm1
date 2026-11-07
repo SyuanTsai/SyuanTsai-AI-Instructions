@@ -414,16 +414,38 @@ function Get-AiInstructionsCandidatePackage {
     }
 }
 
+function Resolve-AiInstructionsCandidatePowerShellPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $PSHome,
+        [Parameter(Mandatory = $true)][bool] $IsWindows
+    )
+
+    if ([string]::IsNullOrWhiteSpace($PSHome)) { throw 'Candidate installer PSHOME cannot be empty.' }
+    $resolvedPSHome = [IO.Path]::GetFullPath($PSHome)
+    $executableName = if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' }
+    $powerShellPath = [IO.Path]::GetFullPath((Join-Path $resolvedPSHome $executableName))
+    $rootWithSeparator = $resolvedPSHome.TrimEnd([char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)) + [IO.Path]::DirectorySeparatorChar
+    if (-not $powerShellPath.StartsWith($rootWithSeparator, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Candidate installer PowerShell executable must be located under PSHOME.'
+    }
+    if (-not [IO.File]::Exists($powerShellPath)) {
+        throw "Candidate installer PowerShell executable was not found: $powerShellPath"
+    }
+    $fileInfo = [IO.FileInfo]::new($powerShellPath)
+    if (($fileInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Candidate installer PowerShell executable must be a regular file: $powerShellPath"
+    }
+    return $powerShellPath
+}
+
 function Install-AiInstructionsCandidatePackage {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][object] $Request)
 
     Assert-AiInstructionsUpdaterRuntimeBaseline
     $installerPath = Join-Path ([string]$Request.Package.SourceRoot) 'scripts\install-ai-instructions-bootstrap.ps1'
-    $powerShellPath = [Environment]::ProcessPath
-    if ([string]::IsNullOrWhiteSpace($powerShellPath) -or [IO.Path]::GetFileName($powerShellPath) -ine 'pwsh.exe') {
-        throw 'Candidate installer subprocess requires the current process executable to be pwsh.exe.'
-    }
+    $powerShellPath = Resolve-AiInstructionsCandidatePowerShellPath -PSHome $PSHOME -IsWindows ([bool]$IsWindows)
     $arguments = @(
         '-NoProfile','-NonInteractive','-File',$installerPath,
         '-RepositoryRoot',([string]$Request.Package.SourceRoot),

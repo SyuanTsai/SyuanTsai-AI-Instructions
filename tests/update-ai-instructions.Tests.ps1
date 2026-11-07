@@ -940,4 +940,42 @@ Invoke-AiInstructionsInstallFailpoint -Name 'after-operation-1-before-journal'
             Test-Path -LiteralPath $codexHome|Should Be $false
         }
     }
+
+    # Scenario: Candidate installer PowerShell paths are resolved from platform-specific PSHOME names.
+    # Purpose: Accept only the expected executable for each platform, reject the alternate name, and fail when the executable is absent.
+    It 'UnitT90_resolves_the_platform_specific_candidate_powershell_path' {
+        $module = Get-Module | Where-Object { $_.Path -eq $script:UpdaterModule } | Select-Object -First 1
+        $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('ai-instructions-powershell-path-' + [guid]::NewGuid().ToString('N'))
+        try {
+            & $module {
+                param($testRoot)
+                $windowsHome = Join-Path $testRoot 'windows'
+                New-Item -ItemType Directory -Force -Path $windowsHome | Out-Null
+                [IO.File]::WriteAllText((Join-Path $windowsHome 'pwsh.exe'), '')
+                (Resolve-AiInstructionsCandidatePowerShellPath -PSHome $windowsHome -IsWindows $true) | Should Be (Join-Path $windowsHome 'pwsh.exe')
+
+                $windowsAlternateHome = Join-Path $testRoot 'windows-alternate'
+                New-Item -ItemType Directory -Force -Path $windowsAlternateHome | Out-Null
+                [IO.File]::WriteAllText((Join-Path $windowsAlternateHome 'pwsh'), '')
+                { Resolve-AiInstructionsCandidatePowerShellPath -PSHome $windowsAlternateHome -IsWindows $true } | Should Throw
+
+                $unixHome = Join-Path $testRoot 'unix'
+                New-Item -ItemType Directory -Force -Path $unixHome | Out-Null
+                [IO.File]::WriteAllText((Join-Path $unixHome 'pwsh'), '')
+                (Resolve-AiInstructionsCandidatePowerShellPath -PSHome $unixHome -IsWindows $false) | Should Be (Join-Path $unixHome 'pwsh')
+
+                $unixAlternateHome = Join-Path $testRoot 'unix-alternate'
+                New-Item -ItemType Directory -Force -Path $unixAlternateHome | Out-Null
+                [IO.File]::WriteAllText((Join-Path $unixAlternateHome 'pwsh.exe'), '')
+                { Resolve-AiInstructionsCandidatePowerShellPath -PSHome $unixAlternateHome -IsWindows $false } | Should Throw
+
+                $missingHome = Join-Path $testRoot 'missing'
+                New-Item -ItemType Directory -Force -Path $missingHome | Out-Null
+                { Resolve-AiInstructionsCandidatePowerShellPath -PSHome $missingHome -IsWindows $true } | Should Throw
+            } $testRoot
+        }
+        finally {
+            if (Test-Path -LiteralPath $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }
+        }
+    }
 }
