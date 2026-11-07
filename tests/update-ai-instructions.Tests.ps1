@@ -523,7 +523,7 @@ Describe 'AI instructions updater workflow' {
     }
 
     # Scenario: The production updater delegates installation after selecting a candidate under an approved update policy.
-    # Purpose: Run the installer in a distinct pwsh process and pass every argument without corrupting paths that contain spaces.
+    # Purpose: Run the installer in a distinct pwsh process with a clean module search path and pass every argument without corrupting paths that contain spaces.
     It 'UnitT65_passes_the_expected_runtime_and_update_policy_to_the_installer' {
         $sourceRoot = Join-Path $TestDrive 'installer contract with spaces'
         $scriptsRoot = Join-Path $sourceRoot 'scripts'
@@ -541,7 +541,7 @@ param(
         sourceCommit=$SourceCommit;acquisition=$Acquisition;archiveSha256=$ArchiveSha256
         sourceArchivePath=$SourceArchivePath;expectedCurrentCommit=$ExpectedCurrentCommit
         expectedUpdateMode=$ExpectedUpdateMode;expectedUpdateChannel=$ExpectedUpdateChannel
-        expectedUpdateRef=$ExpectedUpdateRef
+        expectedUpdateRef=$ExpectedUpdateRef;psModulePath=$env:PSModulePath
     } | ConvertTo-Json)
 )
 '@
@@ -559,7 +559,13 @@ param(
             Package = [pscustomobject]@{ SourceRoot=$sourceRoot; ArchivePath=$archivePath; ArchiveSha256=('c' * 64) }
         }
 
-        Install-AiInstructionsCandidatePackage -Request $request
+        $modulePathMarker = Join-Path $TestDrive 'parent-only-module-path-marker'
+        $savedModulePath = $env:PSModulePath
+        try {
+            $env:PSModulePath = $modulePathMarker + [IO.Path]::PathSeparator + $savedModulePath
+            Install-AiInstructionsCandidatePackage -Request $request
+        }
+        finally { $env:PSModulePath = $savedModulePath }
 
         $received = [System.IO.File]::ReadAllText((Join-Path $sourceRoot 'received-state.json')) | ConvertFrom-Json
         [int]$received.pid | Should Not Be $PID
@@ -574,6 +580,7 @@ param(
         $received.expectedUpdateMode | Should Be auto-install-approved
         $received.expectedUpdateChannel | Should Be protected-branch
         $received.expectedUpdateRef | Should Be main
+        [string]$received.psModulePath | Should Not Match ([regex]::Escape($modulePathMarker))
     }
 
     # Scenario: A candidate installer subprocess writes a typed refusal to stderr and exits nonzero.

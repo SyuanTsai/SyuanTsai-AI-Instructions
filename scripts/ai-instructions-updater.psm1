@@ -421,8 +421,8 @@ function Install-AiInstructionsCandidatePackage {
     Assert-AiInstructionsUpdaterRuntimeBaseline
     $installerPath = Join-Path ([string]$Request.Package.SourceRoot) 'scripts\install-ai-instructions-bootstrap.ps1'
     $powerShellPath = [Environment]::ProcessPath
-    if ([string]::IsNullOrWhiteSpace($powerShellPath)) {
-        $powerShellPath = (Get-Process -Id $PID -ErrorAction Stop).Path
+    if ([string]::IsNullOrWhiteSpace($powerShellPath) -or [IO.Path]::GetFileName($powerShellPath) -ine 'pwsh.exe') {
+        throw 'Candidate installer subprocess requires the current process executable to be pwsh.exe.'
     }
     $arguments = @(
         '-NoProfile','-NonInteractive','-File',$installerPath,
@@ -444,6 +444,7 @@ function Install-AiInstructionsCandidatePackage {
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
+    $startInfo.Environment.Remove('PSModulePath') | Out-Null
     foreach ($argument in $arguments) { $startInfo.ArgumentList.Add([string]$argument) }
 
     $process = [Diagnostics.Process]::new()

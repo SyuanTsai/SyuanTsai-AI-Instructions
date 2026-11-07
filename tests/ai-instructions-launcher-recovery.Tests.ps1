@@ -69,6 +69,48 @@ function New-LauncherRecoveryFailpointCandidate {
     }
 }
 
+function Get-LauncherRecoveryCanonicalTextSha256 {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    [byte[]]$bytes=[IO.File]::ReadAllBytes($Path)
+    $utf8=[Text.UTF8Encoding]::new($false,$true)
+    $canonicalBytes=$utf8.GetBytes($utf8.GetString($bytes).Replace("`r`n","`n"))
+    $sha256=[Security.Cryptography.SHA256]::Create()
+    try{return ([BitConverter]::ToString($sha256.ComputeHash($canonicalBytes))).Replace('-','').ToLowerInvariant()}
+    finally{$sha256.Dispose()}
+}
+
+function New-LauncherRecoveryPlatformCandidate {
+    param([Parameter(Mandatory=$true)][string]$DestinationRoot)
+    New-Item -ItemType Directory -Path $DestinationRoot|Out-Null
+    Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts'),(Join-Path $script:RepositoryRoot 'catalog') -Destination $DestinationRoot -Recurse
+    foreach($leaf in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json')){
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot $leaf) -Destination (Join-Path $DestinationRoot $leaf)
+    }
+
+    $fingerprintedRelativePath='platform/PlatformNative.cs'
+    $fingerprintedPath=Join-Path $DestinationRoot ('scripts/'+$fingerprintedRelativePath)
+    [IO.File]::AppendAllText($fingerprintedPath,"`n// launcher updater different-build candidate`n",[Text.UTF8Encoding]::new($false))
+    $fingerprintedSha256=Get-LauncherRecoveryCanonicalTextSha256 -Path $fingerprintedPath
+
+    $sourceManifestPath=Join-Path $script:RepositoryRoot 'scripts/platform-runtime.psd1'
+    $sourceManifestSha256=Get-LauncherRecoveryCanonicalTextSha256 -Path $sourceManifestPath
+    $candidateManifestPath=Join-Path $DestinationRoot 'scripts/platform-runtime.psd1'
+    $manifestText=[IO.File]::ReadAllText($candidateManifestPath)
+    $inventoryPattern="(?m)(@\{ Path = 'platform/PlatformNative\.cs'; Sha256 = ')[0-9a-f]{64}(' \},)"
+    if([regex]::Matches($manifestText,$inventoryPattern).Count-ne1){throw 'Expected one PlatformNative.cs inventory pin in the candidate manifest.'}
+    $manifestText=[regex]::Replace($manifestText,$inventoryPattern,('${1}'+$fingerprintedSha256+'${2}'))
+    [IO.File]::WriteAllText($candidateManifestPath,$manifestText,[Text.UTF8Encoding]::new($false))
+    $candidateManifestSha256=Get-LauncherRecoveryCanonicalTextSha256 -Path $candidateManifestPath
+
+    foreach($relativePath in @('Invoke-PesterShardProcess.ps1','Invoke-StandardValidation.ps1','StandardSemanticBridge.psm1','install-ai-instructions-bootstrap.ps1')){
+        $pinPath=Join-Path $DestinationRoot ('scripts/'+$relativePath)
+        $pinText=[IO.File]::ReadAllText($pinPath)
+        if([regex]::Matches($pinText,[regex]::Escape($sourceManifestSha256)).Count-ne1){throw "Expected one platform manifest pin in $relativePath."}
+        [IO.File]::WriteAllText($pinPath,$pinText.Replace($sourceManifestSha256,$candidateManifestSha256),[Text.UTF8Encoding]::new($false))
+    }
+    return [pscustomobject]@{RelativePath=$fingerprintedRelativePath;Path=$fingerprintedPath;Sha256=$fingerprintedSha256}
+}
+
 function Invoke-LauncherRecoveryFailure {
     param([Parameter(Mandatory=$true)][string]$CodexHome,[switch]$ValidateOnly,[switch]$Recover)
     $launcher=Join-Path $CodexHome 'hooks\bootstrap-ai-instructions.ps1'
@@ -91,7 +133,8 @@ function Set-LauncherRecoveryPinMismatch {
 if([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)){
 Describe 'AI instructions launcher recovery' {
     BeforeAll {
-        $script:ExternalTestRoot=Join-Path ([IO.Path]::GetTempPath()) ('ai-instructions-launcher-recovery-'+[Guid]::NewGuid().ToString('N'))
+        # Keep recovery transaction descendants below the legacy CreateFileW path limit; this Describe does not test long-path support.
+        $script:ExternalTestRoot=Join-Path ([IO.Path]::GetTempPath()) ('ailr-'+[Guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $script:ExternalTestRoot|Out-Null
         $script:ArchivePath=Join-Path $script:ExternalTestRoot 'source.zip'
         $script:ArchiveSha256=New-LauncherRecoverySourceArchive -ArchivePath $script:ArchivePath
@@ -327,6 +370,63 @@ Describe 'AI instructions launcher recovery' {
         (Test-InstalledMutationRuntimeBaseline -EngineEdition Core -PowerShellMajor 6 -DotNetMajor 8)|Should Be $false
         (Test-InstalledMutationRuntimeBaseline -EngineEdition Core -PowerShellMajor 7 -DotNetMajor 7)|Should Be $false
         (Test-InstalledMutationRuntimeBaseline -EngineEdition Core -PowerShellMajor 7 -DotNetMajor 8)|Should Be $true
+    }
+
+    # Scenario: Runtime A is loaded by the updater before a verified candidate changes a fingerprinted platform source and its required pins.
+    # Purpose: Install runtime B in the default candidate subprocess so a different native platform build never collides with runtime A in the updater process.
+    It 'LaunchT13_installs_a_real_different_platform_runtime_build_in_the_candidate_subprocess' {
+        $fixtureHome=Join-Path $script:ExternalTestRoot ('dpb-'+[Guid]::NewGuid().ToString('N'))
+        Invoke-LauncherRecoveryInstaller -CodexHome $fixtureHome
+        $candidateRoot=Join-Path $script:ExternalTestRoot ('different-platform-candidate-'+[Guid]::NewGuid().ToString('N'))
+        $candidatePlatform=New-LauncherRecoveryPlatformCandidate -DestinationRoot $candidateRoot
+        $candidateArchive=Join-Path $script:ExternalTestRoot ('different-platform-candidate-'+[Guid]::NewGuid().ToString('N')+'.zip')
+        $candidateArchiveSha256=New-LauncherRecoverySourceArchive -ArchivePath $candidateArchive -SourceRoot $candidateRoot
+        $candidateCommit='b'*40
+        $resultPath=Join-Path $script:ExternalTestRoot ('different-platform-result-'+[Guid]::NewGuid().ToString('N')+'.json')
+        $probePath=Join-Path $script:ExternalTestRoot ('different-platform-probe-'+[Guid]::NewGuid().ToString('N')+'.ps1')
+        [IO.File]::WriteAllText($probePath,@'
+param(
+    [Parameter(Mandatory=$true)][string]$CodexHome,
+    [Parameter(Mandatory=$true)][string]$CandidateRoot,
+    [Parameter(Mandatory=$true)][string]$CandidateArchive,
+    [Parameter(Mandatory=$true)][string]$CandidateArchiveSha256,
+    [Parameter(Mandatory=$true)][string]$CandidateCommit,
+    [Parameter(Mandatory=$true)][string]$ResultPath
+)
+Import-Module (Join-Path $CodexHome 'hooks/ai-instructions-runtime/ai-instructions-updater.psm1') -Force
+$package=[pscustomobject]@{SourceRoot=$CandidateRoot;ArchivePath=$CandidateArchive;ArchiveSha256=$CandidateArchiveSha256}
+$result=Invoke-AiInstructionsUpdateWorkflow -CodexHome $CodexHome -ForceCheck -InstallApproved `
+    -ResolveCandidate { $CandidateCommit } -AcquireCandidate { $package }
+[IO.File]::WriteAllText($ResultPath,(($result|ConvertTo-Json -Depth 10)+"`n"),[Text.UTF8Encoding]::new($false))
+'@,[Text.UTF8Encoding]::new($false))
+        $probeStdout=Join-Path $script:ExternalTestRoot ('different-platform-probe-'+[Guid]::NewGuid().ToString('N')+'.stdout')
+        $probeStderr=Join-Path $script:ExternalTestRoot ('different-platform-probe-'+[Guid]::NewGuid().ToString('N')+'.stderr')
+        $probeArguments=@(
+            '-NoProfile','-NonInteractive','-File',$probePath,
+            '-CodexHome',$fixtureHome,'-CandidateRoot',$candidateRoot,'-CandidateArchive',$candidateArchive,
+            '-CandidateArchiveSha256',$candidateArchiveSha256,'-CandidateCommit',$candidateCommit,'-ResultPath',$resultPath
+        )
+        $probeProcess=Start-Process -FilePath $script:PowerShellExecutable -ArgumentList $probeArguments -PassThru -Wait -WindowStyle Hidden `
+            -RedirectStandardOutput $probeStdout -RedirectStandardError $probeStderr
+        $probeExitCode=$probeProcess.ExitCode;$probeProcess.Dispose()
+        if($probeExitCode-ne0){
+            $probeOutput=(Get-Content -Raw -LiteralPath $probeStdout -ErrorAction SilentlyContinue)+(Get-Content -Raw -LiteralPath $probeStderr -ErrorAction SilentlyContinue)
+            throw "Different-platform updater probe failed: $probeOutput"
+        }
+        $result=Get-Content -Raw -Encoding UTF8 -LiteralPath $resultPath|ConvertFrom-Json
+
+        $runtimeRoot=Join-Path $fixtureHome 'hooks/ai-instructions-runtime'
+        $activePlatformPath=Join-Path $runtimeRoot ([string]$candidatePlatform.RelativePath)
+        $bundle=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $runtimeRoot 'runtime-bundle.json')|ConvertFrom-Json
+        $receipt=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $fixtureHome 'ai-instructions-update-receipt.json')|ConvertFrom-Json
+        $result.outcome|Should Be installed
+        [string]$bundle.commit|Should Be $candidateCommit
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($activePlatformPath))|Should Be ([Convert]::ToBase64String([IO.File]::ReadAllBytes([string]$candidatePlatform.Path)))
+        [string]$receipt.outcome|Should Be installed
+        [string]$receipt.currentCommit|Should Be $script:SourceCommit
+        [string]$receipt.candidateCommit|Should Be $candidateCommit
+        [string]$receipt.archiveSha256|Should Be $candidateArchiveSha256
+        @(Get-ChildItem -Force -LiteralPath (Join-Path $fixtureHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0
     }
 
     if($null-ne(Get-Command powershell.exe -ErrorAction SilentlyContinue)){
