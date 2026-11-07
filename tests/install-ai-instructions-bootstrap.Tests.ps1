@@ -127,6 +127,18 @@ function Set-TestJson {
     Set-TestText -Path $Path -Value (($Document | ConvertTo-Json -Depth 20).Replace("`r`n","`n") + "`n")
 }
 
+function Remove-TestAnsiControlSequence {
+    param([AllowEmptyString()][string]$Text)
+    $textWithoutAnsi = $Text -replace '\x1b\[[0-?]*[ -/]*[@-~]',''
+    $textWithoutAnsi = $textWithoutAnsi -replace '\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)',''
+    return ($textWithoutAnsi -replace '\x1b','')
+}
+
+function ConvertTo-TestComparableText {
+    param([AllowEmptyString()][string]$Text)
+    return ((Remove-TestAnsiControlSequence $Text) -replace '\s','')
+}
+
 function New-InstallerFailpointCandidate {
     param([Parameter(Mandatory = $true)][string]$SourceRoot,[Parameter(Mandatory = $true)][string]$DestinationRoot)
     New-Item -ItemType Directory -Force -Path $DestinationRoot|Out-Null
@@ -1760,9 +1772,9 @@ finally {
             $LASTEXITCODE|Should Be 0
             $result=Get-Content -Raw -LiteralPath $resultPath
             $result|Should Match '(?m)^1\r?$'
-            (Get-AiInstructionsRefusalCode $result)|Should Be interrupted-install
-            ($result-replace'\s','')|Should Match ([regex]::Escape(((Join-Path $codexHome '.ai-instructions-txn')-replace'\s','')))
-            $result|Should Match 'active install recovery probe failure'
+            (Get-AiInstructionsRefusalCode (Remove-TestAnsiControlSequence $result))|Should Be interrupted-install
+            (ConvertTo-TestComparableText $result)|Should Match ([regex]::Escape((ConvertTo-TestComparableText (Join-Path $codexHome '.ai-instructions-txn'))))
+            (ConvertTo-TestComparableText $result)|Should Match ([regex]::Escape((ConvertTo-TestComparableText 'active install recovery probe failure')))
             $transaction=@(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Directory -Force)
             $transaction.Count|Should Be 1
             $journal=Get-Content -Raw -LiteralPath (Join-Path $transaction[0].FullName 'journal.json')|ConvertFrom-Json
@@ -2279,7 +2291,7 @@ Remove-Variable -Name InstallerBackupGuardCodexHome,InstallerBackupGuardOutside,
         finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
 
         $result|Should Match '(?m)^1\r?$'
-        (Get-AiInstructionsRefusalCode $result)|Should Be interrupted-install
+        (Get-AiInstructionsRefusalCode (Remove-TestAnsiControlSequence $result))|Should Be interrupted-install
         (Get-Content -Raw -LiteralPath $target)|Should Be $external
         (Get-Item -Force -LiteralPath $target).IsReadOnly|Should Be $true
         Test-Path -LiteralPath (Join-Path $state.TransactionPath 'journal.json') -PathType Leaf|Should Be $true
@@ -2315,7 +2327,7 @@ Remove-Variable -Name InstallerBackupGuardCodexHome,InstallerBackupGuardOutside,
         finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
 
         $result|Should Match '(?m)^1\r?$'
-        (Get-AiInstructionsRefusalCode $result)|Should Be interrupted-install
+        (Get-AiInstructionsRefusalCode (Remove-TestAnsiControlSequence $result))|Should Be interrupted-install
         (Get-Content -Raw -LiteralPath $target)|Should Be $external
         (Get-Item -Force -LiteralPath $target).IsReadOnly|Should Be $false
         Test-Path -LiteralPath (Join-Path $state.TransactionPath 'journal.json') -PathType Leaf|Should Be $true
@@ -2351,7 +2363,7 @@ Remove-Variable -Name InstallerBackupGuardCodexHome,InstallerBackupGuardOutside,
         finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
 
         $result|Should Match '(?m)^1\r?$'
-        (Get-AiInstructionsRefusalCode $result)|Should Be interrupted-install
+        (Get-AiInstructionsRefusalCode (Remove-TestAnsiControlSequence $result))|Should Be interrupted-install
         (Get-Content -Raw -LiteralPath $backup)|Should Be $external
         (Get-Item -Force -LiteralPath $backup).IsReadOnly|Should Be $true
         (Get-InstallerStateSnapshot -RepositoryRoot $repositoryRoot -CodexHome $codexHome)|Should Be $targetsBefore
@@ -2391,8 +2403,8 @@ Remove-Variable -Name InstallerBackupGuardCodexHome,InstallerBackupGuardOutside,
         finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
 
         $result|Should Match '(?m)^1\r?$'
-        (Get-AiInstructionsRefusalCode $result)|Should Be interrupted-install
-        ($result-replace'\s','')|Should Match ([regex]::Escape(($state.TransactionPath-replace'\s','')))
+        (Get-AiInstructionsRefusalCode (Remove-TestAnsiControlSequence $result))|Should Be interrupted-install
+        (ConvertTo-TestComparableText $result)|Should Match ([regex]::Escape((ConvertTo-TestComparableText $state.TransactionPath)))
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($journalPath))|Should Be ([Convert]::ToBase64String($journalBytes))
         $transactionLease=Open-PlatformDirectory -Root $codexHome -RelativePath $transactionRelative
         try{$replacementState=Get-AiInstructionsInstallFileState -ParentLease $transactionLease -Leaf journal.json -LiteralPath $journalPath -PlatformOs windows}
@@ -2427,8 +2439,8 @@ Remove-Variable -Name InstallerBackupGuardCodexHome,InstallerBackupGuardOutside,
         $result=$output-join[Environment]::NewLine
 
         $recoveryExit|Should Not Be 0
-        (Get-AiInstructionsRefusalCode $result)|Should Be interrupted-install
-        ($result-replace'\s','')|Should Match ([regex]::Escape(($state.TransactionPath-replace'\s','')))
+        (Get-AiInstructionsRefusalCode (Remove-TestAnsiControlSequence $result))|Should Be interrupted-install
+        (ConvertTo-TestComparableText $result)|Should Match ([regex]::Escape((ConvertTo-TestComparableText $state.TransactionPath)))
         (Get-Content -Raw -LiteralPath $stagePath)|Should Be $malformedStage
         Test-Path -LiteralPath (Join-Path $state.TransactionPath 'journal.json') -PathType Leaf|Should Be $true
         @(Get-ChildItem -LiteralPath $state.TransactionPath -Force -Recurse|ForEach-Object{$_.FullName.Substring($state.TransactionPath.Length)})|Should Be $entriesBefore
