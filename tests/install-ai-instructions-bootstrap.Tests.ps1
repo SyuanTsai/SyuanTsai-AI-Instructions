@@ -127,6 +127,34 @@ function Set-TestJson {
     Set-TestText -Path $Path -Value (($Document | ConvertTo-Json -Depth 20).Replace("`r`n","`n") + "`n")
 }
 
+function Invoke-TestAgentEnvironmentEntryWithExclusiveLockProbe {
+    param(
+        [Parameter(Mandatory=$true)][string]$EntryPath,
+        [Parameter(Mandatory=$true)][string]$CodexHome,
+        [Parameter(Mandatory=$true)][string]$UserHome,
+        [Parameter(Mandatory=$true)][string]$InstallLockPath
+    )
+    $powershell=[PowerShell]::Create()
+    try {
+        [void]$powershell.AddCommand($EntryPath).AddParameter('CodexHome',$CodexHome).AddParameter('UserHome',$UserHome).AddParameter('Apply').AddParameter('OutputFormat','Json')
+        $entryOutput=@($powershell.Invoke()|ForEach-Object{[string]$_})
+        $entryHadErrors=$powershell.HadErrors
+        $powershell.Commands.Clear()
+        $escapedInstallLockPath=$InstallLockPath.Replace("'","''")
+        [void]$powershell.AddScript(@"
+`$exclusive=`$null
+try {
+    `$exclusive=[IO.File]::Open('$escapedInstallLockPath',[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+    'exclusive-acquired'
+}
+finally { if (`$null-ne`$exclusive) { `$exclusive.Dispose() } }
+"@)
+        $exclusiveOutput=@($powershell.Invoke()|ForEach-Object{[string]$_})
+        return [pscustomobject]@{EntryOutput=$entryOutput;EntryHadErrors=$entryHadErrors;ExclusiveOutput=$exclusiveOutput;ProbeHadErrors=$powershell.HadErrors}
+    }
+    finally{$powershell.Dispose()}
+}
+
 function Remove-TestAnsiControlSequence {
     param([AllowEmptyString()][string]$Text)
     $textWithoutAnsi = $Text -replace '\x1b\[[0-?]*[ -/]*[@-~]',''
@@ -1184,6 +1212,17 @@ throw 'Agent environment reconciliation must not invoke the AI-Instructions upda
 
         $reconcilerFixture = @"
 Set-StrictMode -Version 2.0
+function Assert-UserProjectionRuntimeGate {
+    param([string]`$RuntimeRoot)
+    throw 'Projection runtime gate is not expected for the v2/v4 fixture.'
+}
+function New-AgentEnvironmentInstallReadLeaseEvidence {
+    param([System.IO.FileStream]`$Lease)
+    `$trustedStream=[System.IO.File]::Open(`$Lease.Name,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::Read)
+    `$evidence=[pscustomobject]@{Stream=`$trustedStream}
+    `$evidence|Add-Member -MemberType ScriptMethod -Name Dispose -Value { `$this.Stream.Dispose() }
+    return `$evidence
+}
 function Get-UserSkillsDesiredState {
     param(
         [string]`$RuntimeRoot,
@@ -1222,7 +1261,8 @@ function Invoke-UserSkillsReconciliation {
         [string]`$UserHome,
         [string]`$Mode,
         [switch]`$ForceReinstallManagedSkills,
-        [switch]`$MigrateLegacyCatalogSkills
+        [switch]`$MigrateLegacyCatalogSkills,
+        [object]`$InstallReadLease
     )
     return [pscustomobject]@{
         schemaVersion=1; outcome='current'; exitCode=0
@@ -1232,8 +1272,20 @@ function Invoke-UserSkillsReconciliation {
         rollbackState='not-started'; backupPath=`$null
     }
 }
-function Invoke-UserSkillsRecovery { param([string]`$UserHome); throw 'Recovery is not expected in this fixture.' }
-Export-ModuleMember -Function Get-UserSkillsDesiredState,Invoke-UserSkillsReconciliation,Invoke-UserSkillsRecovery
+function Invoke-UserSkillsRecovery {
+    param(
+        [string]`$UserHome,
+        [object]`$InstallReadLease,
+        [ValidateSet('Apply','VerifyOnly','WhatIf')][string]`$Mode = 'Apply'
+    )
+    if (`$Mode -in @('VerifyOnly','WhatIf')) {
+        return [pscustomobject]@{
+            schemaVersion=1; outcome='nothing-to-recover'; exitCode=0; rollbackState='not-needed'
+        }
+    }
+    throw 'Apply recovery is not expected in this fixture.'
+}
+Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDesiredState,Invoke-UserSkillsReconciliation,Invoke-UserSkillsRecovery,New-AgentEnvironmentInstallReadLeaseEvidence
 "@
         Set-TestText -Path (Join-Path $runtimeRoot 'agent-environment-reconciler.psm1') -Value $reconcilerFixture
 
@@ -1252,14 +1304,59 @@ Export-ModuleMember -Function Get-UserSkillsDesiredState,Invoke-UserSkillsReconc
         $environmentUpdater = Join-Path $codexHome 'hooks\update-agent-environment.ps1'
         $userHome = Join-Path $TestDrive 'locked-environment-user'
         New-Item -ItemType Directory -Path $userHome | Out-Null
-        $output = & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $environmentUpdater `
-            -CodexHome $codexHome -UserHome $userHome -Apply -OutputFormat Json 2>&1
-        $exitCode = $LASTEXITCODE
+        $runspaceResult=Invoke-TestAgentEnvironmentEntryWithExclusiveLockProbe -EntryPath $environmentUpdater -CodexHome $codexHome -UserHome $userHome -InstallLockPath $installLockPath
+        $output=$runspaceResult.EntryOutput
+        $entryResult=($output[-1]|ConvertFrom-Json)
 
-        $exitCode | Should Be 0
+        $entryResult.exitCode | Should Be 0
         ($output -join [Environment]::NewLine) | Should Match '"outcome":"current"'
         Test-Path -LiteralPath $updaterMarker | Should Be $false
         [System.IO.File]::ReadAllText($reconcilerMarker) | Should Be 'blocked-by-read-lock'
+        @($runspaceResult.ExclusiveOutput)[-1]|Should Be 'exclusive-acquired'
+    }
+
+    # Scenario: The stable Agent environment entry creates a trusted install read lease and reconciliation then fails in the same reusable PowerShell runspace.
+    # Purpose: Release the trusted lease before the entry returns through its trap so an installer can immediately acquire the exclusive install lock.
+    It 'InterT54b_agent_environment_failure_releases_the_trusted_install_read_lease' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $runtimeRoot=Join-Path $codexHome 'hooks\ai-instructions-runtime'
+        $installLockPath=Join-Path $codexHome 'ai-instructions-install.lock'
+        $escapedFailureLockPath=$installLockPath.Replace("'","''")
+        $failureFixture=@"
+Set-StrictMode -Version 2.0
+function Assert-UserProjectionRuntimeGate { param([string]`$RuntimeRoot);throw 'Projection runtime gate is not expected for the v2/v4 fixture.' }
+function New-AgentEnvironmentInstallReadLeaseEvidence {
+    param([System.IO.FileStream]`$Lease)
+    `$trustedStream=[System.IO.File]::Open('$escapedFailureLockPath',[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::Read)
+    `$evidence=[pscustomobject]@{Stream=`$trustedStream}
+    `$evidence|Add-Member -MemberType ScriptMethod -Name Dispose -Value { `$this.Stream.Dispose() }
+    return `$evidence
+}
+function Get-UserSkillsDesiredState {
+    param([string]`$RuntimeRoot,[object]`$Configuration,[string]`$CatalogRepository,[string]`$CatalogCommit,[string]`$WorkingRoot)
+    throw 'injected reconciliation setup failure after trusted lease creation'
+}
+function Invoke-UserSkillsReconciliation { param([object]`$DesiredState,[string]`$UserHome,[string]`$Mode,[switch]`$ForceReinstallManagedSkills,[switch]`$MigrateLegacyCatalogSkills,[object]`$InstallReadLease);throw 'unexpected reconciliation call' }
+function Invoke-UserSkillsRecovery { param([string]`$UserHome,[object]`$InstallReadLease,[ValidateSet('Apply','VerifyOnly','WhatIf')][string]`$Mode='Apply');throw 'unexpected recovery call' }
+Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDesiredState,Invoke-UserSkillsReconciliation,Invoke-UserSkillsRecovery,New-AgentEnvironmentInstallReadLeaseEvidence
+"@
+        Set-TestText -Path (Join-Path $runtimeRoot 'agent-environment-reconciler.psm1') -Value $failureFixture
+        $runtimeContractPath=Join-Path $runtimeRoot 'ai-instructions-runtime-contract.psm1'
+        Import-Module $runtimeContractPath -Force
+        $bundlePath=Join-Path $runtimeRoot 'runtime-bundle.json'
+        $bundle=Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath|ConvertFrom-Json
+        $updatedBundle=New-AiInstructionsRuntimeBundleV2 -RuntimeRoot $runtimeRoot -Repository ([string]$bundle.repository) -Commit ([string]$bundle.commit) -Acquisition ([string]$bundle.acquisition) -ArchiveSha256 ([string]$bundle.archiveSha256)
+        Set-TestJson -Path $bundlePath -Document $updatedBundle
+        $entryPath=Join-Path $codexHome 'hooks\update-agent-environment.ps1'
+        $userHome=Join-Path $TestDrive 'failed-environment-user';New-Item -ItemType Directory -Path $userHome|Out-Null
+
+        $runspaceResult=Invoke-TestAgentEnvironmentEntryWithExclusiveLockProbe -EntryPath $entryPath -CodexHome $codexHome -UserHome $userHome -InstallLockPath $installLockPath
+        $entryResult=(@($runspaceResult.EntryOutput)[-1]|ConvertFrom-Json)
+
+        $entryResult.outcome|Should Be 'failed'
+        $entryResult.exitCode|Should Be 1
+        @($entryResult.failed)[0]|Should Match 'injected reconciliation setup failure'
+        @($runspaceResult.ExclusiveOutput)[-1]|Should Be 'exclusive-acquired'
     }
 
     # Scenario: The installed configuration pin is changed without replacing the runtime bundle.

@@ -298,6 +298,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "catalog/examples/ai-instructions-user-reconciler-journal-v1.example.json",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "catalog/examples/ai-instructions-sync-v4.example.json",
       "license": "Apache-2.0"
     },
