@@ -1,6 +1,7 @@
 $script:InstallScript = Join-Path $PSScriptRoot '..\scripts\install-ai-instructions-bootstrap.ps1'
 $script:InstalledBootstrapScript = Join-Path $PSScriptRoot '..\scripts\bootstrap-ai-instructions-installed.ps1'
 $script:TestPowerShellExecutable = (Get-Process -Id $PID).Path
+Import-Module (Join-Path $PSScriptRoot '..\scripts\ai-instructions-runtime-contract.psm1') -Force
 
 function New-InstallerSourceArchive {
     param(
@@ -154,12 +155,201 @@ finally { if (`$null-ne`$exclusive) { `$exclusive.Dispose() } }
     finally{$powershell.Dispose()}
 }
 
+function Remove-TestAnsiControlSequence {
+    param([AllowEmptyString()][string]$Text)
+    $textWithoutAnsi = $Text -replace '\x1b\[[0-?]*[ -/]*[@-~]',''
+    $textWithoutAnsi = $textWithoutAnsi -replace '\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)',''
+    return ($textWithoutAnsi -replace '\x1b','')
+}
+
+function ConvertTo-TestComparableText {
+    param([AllowEmptyString()][string]$Text)
+    return ((Remove-TestAnsiControlSequence $Text) -replace '\s','')
+}
+
+function New-InstallerFailpointCandidate {
+    param([Parameter(Mandatory = $true)][string]$SourceRoot,[Parameter(Mandatory = $true)][string]$DestinationRoot)
+    New-Item -ItemType Directory -Force -Path $DestinationRoot|Out-Null
+    Copy-Item -LiteralPath (Join-Path $SourceRoot 'scripts'),(Join-Path $SourceRoot 'catalog') -Destination $DestinationRoot -Recurse
+    foreach($leaf in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json')){
+        Copy-Item -LiteralPath (Join-Path $SourceRoot $leaf) -Destination (Join-Path $DestinationRoot $leaf)
+    }
+    foreach($relative in @('bootstrap-ai-instructions-installed.ps1','update-ai-instructions.ps1','update-agent-environment.ps1','cleanup-ai-instructions-pollution.ps1','safe-zip.psm1')){
+        [IO.File]::AppendAllText((Join-Path $DestinationRoot "scripts\$relative"),"`n# failpoint candidate: $relative`n",[Text.UTF8Encoding]::new($false))
+    }
+}
+
+function Get-InstallerStateSnapshot {
+    param([Parameter(Mandatory = $true)][string]$RepositoryRoot,[Parameter(Mandatory = $true)][string]$CodexHome)
+    Import-Module (Join-Path $RepositoryRoot 'scripts\platform-runtime.psd1') -Force
+    Import-Module (Join-Path $RepositoryRoot 'scripts\ai-instructions-install-transaction.psm1') -Force
+    $missingFile=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null}
+    $missingDirectory=[pscustomobject][ordered]@{exists=$false;identity=$null;inventorySha256=$null;entryCount=$null;permissions=$null}
+    $states=[ordered]@{}
+    foreach($leaf in @('bootstrap-ai-instructions.ps1','update-ai-instructions.ps1','update-agent-environment.ps1','cleanup-ai-instructions-pollution.ps1')){$states["hooks/$leaf"]=$missingFile}
+    $states['hooks/ai-instructions-runtime']=$missingDirectory
+    foreach($leaf in @('ai-instructions-sync.json','AGENTS.md','hooks.json')){$states[$leaf]=$missingFile}
+    if(-not(Test-Path -LiteralPath $CodexHome -PathType Container)){return ($states|ConvertTo-Json -Depth 20 -Compress)}
+    $root=Open-PlatformDirectory -Root $CodexHome -RootOnly
+    $hooks=$null
+    try{
+        foreach($leaf in @('ai-instructions-sync.json','AGENTS.md','hooks.json')){
+            $states[$leaf]=Get-AiInstructionsInstallFileState -ParentLease $root -Leaf $leaf -LiteralPath (Join-Path $CodexHome $leaf) -PlatformOs windows
+        }
+        if(Test-Path -LiteralPath (Join-Path $CodexHome 'hooks') -PathType Container){
+            $hooks=Open-PlatformDirectory -Root $CodexHome -RelativePath hooks
+            foreach($leaf in @('bootstrap-ai-instructions.ps1','update-ai-instructions.ps1','update-agent-environment.ps1','cleanup-ai-instructions-pollution.ps1')){
+                $states["hooks/$leaf"]=Get-AiInstructionsInstallFileState -ParentLease $hooks -Leaf $leaf -LiteralPath (Join-Path $CodexHome "hooks\$leaf") -PlatformOs windows
+            }
+            $states['hooks/ai-instructions-runtime']=Get-AiInstructionsInstallDirectoryState -ParentLease $hooks -Leaf ai-instructions-runtime -LiteralPath (Join-Path $CodexHome 'hooks\ai-instructions-runtime')
+        }
+    }
+    finally{if($null-ne$hooks){$hooks.Dispose()};$root.Dispose()}
+    return ($states|ConvertTo-Json -Depth 20 -Compress)
+}
+
+function Get-InstallerAppliedSnapshotFromTransaction {
+    param([Parameter(Mandatory = $true)][string]$CodexHome,[Parameter(Mandatory = $true)][string]$OriginalSnapshot)
+    $store=Join-Path $CodexHome '.ai-instructions-txn'
+    $transactions=@(Get-ChildItem -LiteralPath $store -Directory -Force -ErrorAction SilentlyContinue)
+    if($transactions.Count-ne1){return $null}
+    $journal=$null
+    foreach($leaf in @('journal.json','journal.prev','journal.stage')){
+        $path=Join-Path $transactions[0].FullName $leaf
+        if(-not(Test-Path -LiteralPath $path -PathType Leaf)){continue}
+        try{$journal=ConvertFrom-AiInstructionsInstallJournalV1Json -Json (Get-Content -Raw -Encoding UTF8 -LiteralPath $path) -ExpectedTransactionId $transactions[0].Name;break}catch{}
+    }
+    if($null-eq$journal){return $null}
+    $snapshot=$OriginalSnapshot|ConvertFrom-Json
+    foreach($operation in @($journal.operations)){
+        $key=[string]$operation.targetRelativePath
+        if([string]$operation.kind -in @('swap-directory','create-directory')){
+            $value=[pscustomobject][ordered]@{exists=[bool]$operation.applied.exists;identity=$operation.applied.identity;inventorySha256=$operation.applied.inventorySha256;entryCount=$operation.applied.entryCount;permissions=$null}
+        }
+        else{
+            $value=[pscustomobject][ordered]@{exists=[bool]$operation.applied.exists;sha256=$operation.applied.sha256;length=$operation.applied.length;identity=$operation.applied.identity;permissions=$null}
+        }
+        $snapshot.PSObject.Properties[$key].Value=$value
+    }
+    return ($snapshot|ConvertTo-Json -Depth 20 -Compress)
+}
+
+function Get-InstallerTransactionRecoveryState {
+    param([Parameter(Mandatory = $true)][string]$RepositoryRoot,[Parameter(Mandatory = $true)][string]$CodexHome)
+    $store=Join-Path $CodexHome '.ai-instructions-txn'
+    $transactions=@(Get-ChildItem -LiteralPath $store -Force -ErrorAction SilentlyContinue)
+    if($transactions.Count-eq0){return [pscustomobject]@{RecoveryAction='no-transaction';JournalPhase=$null;Journal=$null;TransactionPath=$null}}
+    if($transactions.Count-ne1){throw "Expected one installer transaction, found $($transactions.Count)."}
+    $entry=$transactions[0]
+    $entryKind=if($entry.PSIsContainer -and ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0){'directory'}else{'other'}
+    $readJournalEntry={param($Leaf)
+        $path=Join-Path $entry.FullName $Leaf
+        if(-not(Test-Path -LiteralPath $path)){return [pscustomobject]@{Kind=$null;Json=$null}}
+        $item=Get-Item -Force -LiteralPath $path
+        if($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){return [pscustomobject]@{Kind='other';Json=$null}}
+        return [pscustomobject]@{Kind='file';Json=(Get-Content -Raw -Encoding UTF8 -LiteralPath $path)}
+    }
+    $journal=&$readJournalEntry 'journal.json'
+    $previous=&$readJournalEntry 'journal.prev'
+    $classification=Get-AiInstructionsInstallTransactionClassification -Name $entry.Name -EntryKind $entryKind -JournalEntryKind $journal.Kind -JournalJson $journal.Json -PreviousJournalEntryKind $previous.Kind -PreviousJournalJson $previous.Json
+    $disposition=Get-AiInstructionsInstallTransactionDisposition -Classification ([string]$classification.classification) -Component installer
+    if([string]$disposition.action-cne'recover'){
+        return [pscustomobject]@{RecoveryAction=[string]$disposition.action;JournalPhase=$null;Journal=$classification.journal;TransactionPath=$entry.FullName}
+    }
+    Import-Module (Join-Path $RepositoryRoot 'scripts\platform-runtime.psd1') -Force
+    Import-Module (Join-Path $RepositoryRoot 'scripts\ai-instructions-install-transaction.psm1') -Force
+    $transactionLease=Open-PlatformDirectory -Root $CodexHome -RelativePath ('.ai-instructions-txn/'+$entry.Name)
+    try{
+        $observations=Get-AiInstructionsInstallRecoveryObservations -Journal $classification.journal -CodexHome $CodexHome -TransactionLease $transactionLease -TransactionPath $entry.FullName
+        $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $classification.journal -Observations $observations
+        return [pscustomobject]@{RecoveryAction=[string]$decision.action;JournalPhase=[string]$classification.journal.phase;Journal=$classification.journal;TransactionPath=$entry.FullName}
+    }
+    finally{$transactionLease.Dispose()}
+}
+
+function Invoke-InstallerRecoveryMutationProbe {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallerScript,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][string]$CodexHome,
+        [Parameter(Mandatory = $true)][string]$SourceCommit,
+        [Parameter(Mandatory = $true)][string]$ArchiveSha256,
+        [Parameter(Mandatory = $true)][string]$ArchivePath,
+        [Parameter(Mandatory = $true)][string]$MutationPath,
+        [Parameter(Mandatory = $true)][string]$ExternalText,
+        [Parameter(Mandatory = $true)][bool]$ExternalReadOnly,
+        [Parameter(Mandatory = $true)][string]$ProbeRoot
+    )
+    $wrapperPath=Join-Path $ProbeRoot ('recovery-mutation-'+[Guid]::NewGuid().ToString('N')+'.ps1')
+    $resultPath=Join-Path $ProbeRoot ('recovery-mutation-'+[Guid]::NewGuid().ToString('N')+'.txt')
+    Set-TestText -Path $wrapperPath -Value @'
+param(
+    [Parameter(Mandatory = $true)][string]$InstallerScript,
+    [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+    [Parameter(Mandatory = $true)][string]$CodexHome,
+    [Parameter(Mandatory = $true)][string]$SourceCommit,
+    [Parameter(Mandatory = $true)][string]$ArchiveSha256,
+    [Parameter(Mandatory = $true)][string]$ArchivePath,
+    [Parameter(Mandatory = $true)][string]$MutationPath,
+    [Parameter(Mandatory = $true)][string]$ExternalText,
+    [Parameter(Mandatory = $true)][int]$ExternalReadOnlyFlag,
+    [Parameter(Mandatory = $true)][string]$ResultPath
+)
+$recoveryLine=@(
+    Select-String -LiteralPath $InstallerScript -Pattern '^\s*Invoke-AiInstructionsInstallRecoveryPlan -Journal \$record\.Classification\.journal' |
+        Select-Object -First 1 -ExpandProperty LineNumber
+)
+if($recoveryLine.Count-ne1){throw 'Could not locate the installer recovery mutation boundary.'}
+$global:RecoveryMutationPath=$MutationPath
+$global:RecoveryMutationText=$ExternalText
+$global:RecoveryMutationReadOnly=($ExternalReadOnlyFlag-ne0)
+$breakpoint=Set-PSBreakpoint -Script $InstallerScript -Line $recoveryLine[0] -Action {
+    if(Test-Path -LiteralPath $global:RecoveryMutationPath -PathType Leaf){
+        (Get-Item -Force -LiteralPath $global:RecoveryMutationPath).IsReadOnly=$false
+        [IO.File]::Delete($global:RecoveryMutationPath)
+    }
+    [IO.File]::WriteAllText($global:RecoveryMutationPath,$global:RecoveryMutationText,[Text.UTF8Encoding]::new($false))
+    (Get-Item -Force -LiteralPath $global:RecoveryMutationPath).IsReadOnly=$global:RecoveryMutationReadOnly
+}
+try{
+    try{
+        & $InstallerScript -RepositoryRoot $RepositoryRoot -CodexHome $CodexHome `
+            -Acquisition github-codeload -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
+            -SourceCommit $SourceCommit -ArchiveSha256 $ArchiveSha256 -SourceArchivePath $ArchivePath|Out-Null
+        $exitCode=0;$message='';$inner=''
+    }
+    catch{
+        $exitCode=1;$message=$_.Exception.Message
+        $inner=if($null-ne$_.Exception.InnerException){$_.Exception.InnerException.Message}else{''}
+    }
+}
+finally{
+    Remove-PSBreakpoint -Breakpoint $breakpoint -ErrorAction SilentlyContinue
+    Remove-Variable RecoveryMutationPath,RecoveryMutationText,RecoveryMutationReadOnly -Scope Global -ErrorAction SilentlyContinue
+}
+[IO.File]::WriteAllText($ResultPath,(@($exitCode,$message,$inner)-join"`n"),[Text.UTF8Encoding]::new($false))
+'@
+    $arguments=@(
+        '-NoProfile','-ExecutionPolicy','Bypass','-File',$wrapperPath,
+        '-InstallerScript',$InstallerScript,'-RepositoryRoot',$RepositoryRoot,'-CodexHome',$CodexHome,
+        '-SourceCommit',$SourceCommit,'-ArchiveSha256',$ArchiveSha256,'-ArchivePath',$ArchivePath,
+        '-MutationPath',$MutationPath,'-ExternalText',$ExternalText,
+        '-ExternalReadOnlyFlag',$(if($ExternalReadOnly){'1'}else{'0'}),'-ResultPath',$resultPath
+    )
+    $output=& $script:TestPowerShellExecutable @arguments 2>&1
+    if($LASTEXITCODE-ne0){throw "Recovery mutation probe failed: $($output-join[Environment]::NewLine)"}
+    return Get-Content -Raw -LiteralPath $resultPath
+}
+
 Describe 'install-ai-instructions-bootstrap' {
     BeforeEach {
         $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
         $codexHome = Join-Path $TestDrive ('.codex-' + [Guid]::NewGuid().ToString('N'))
     }
 
+    # Register installation-success and journal-recovery cases only on the native
+    # host because directory-publication is intentionally unavailable on Unix.
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
     # Scenario: An exact source archive supplies its licensing declarations alongside the runtime.
     # Purpose: Bind installed license bytes to the bundle inventory and immutable source commit.
     It 'InterT04_inventories_runtime_licenses_from_the_verified_source_archive' {
@@ -189,14 +379,29 @@ Describe 'install-ai-instructions-bootstrap' {
             'skills-source-retrieval.psm1','skills-source-acquisition.psm1','skills-source-composition.psm1',
             'ai-instructions-runtime-contract.psm1','WindowsDacl.psm1','agent-artifact-remediation.psm1','repo-shared-skills-migration.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1',
             'ai-instructions-updater.psm1','update-ai-instructions.ps1','agent-environment-reconciler.psm1','update-agent-environment.ps1',
-            'cleanup-ai-instructions-pollution.ps1',
+            'cleanup-ai-instructions-pollution.ps1','ai-instructions-install-transaction.psm1',
+            'platform-runtime.psd1','platform-runtime.psm1','installer-safe-mutation.psm1','Resolve-StandardValidationTool.ps1',
+            'platform\PlatformNative.cs','platform\UnixNative.cs','platform\WindowsNative.cs','platform\WindowsInstallerMutation.cs',
+            'platform\OwnedProcess.cs','platform\UnixProcess.cs','platform\WindowsProcess.cs','platform\Unix.psm1',
+            'platform\RuntimePreparation.psm1','platform\Windows.psm1','platform\Linux.psm1','platform\MacOS.psm1',
             'runtime-bundle.json','catalog\skills-catalog.json','catalog\skills-catalog-lock.json'
         )) {
             Test-Path -LiteralPath (Join-Path $runtimeRoot $relativePath) | Should Be $true
         }
+        $installedPlatformRuntime=Import-Module (Join-Path $runtimeRoot 'platform-runtime.psd1') -Force -PassThru
+        & $installedPlatformRuntime {param($root)Assert-PlatformRuntimeInventory -Root $root -ManifestPath (Join-Path $root 'platform-runtime.psd1')|Out-Null} $runtimeRoot
+        $platformRuntimeManifest=Import-PowerShellDataFile -LiteralPath (Join-Path $runtimeRoot 'platform-runtime.psd1')
+        $bundle = Get-Content -Raw -LiteralPath (Join-Path $runtimeRoot 'runtime-bundle.json') | ConvertFrom-Json
+        $bundlePaths=@($bundle.inventory|ForEach-Object{[string]$_.path})
+        foreach($declaredPath in @($platformRuntimeManifest.FileList)){
+            $normalizedPath=([string]$declaredPath).Replace('\','/')
+            Test-Path -LiteralPath (Join-Path $runtimeRoot ([string]$declaredPath)) -PathType Leaf|Should Be $true
+            $bundlePaths|Should Contain $normalizedPath
+        }
+        $installedReconciler=Import-Module (Join-Path $runtimeRoot 'agent-environment-reconciler.psm1') -Force -PassThru
+        {& $installedReconciler {param($root)Import-AgentEnvironmentRuntimeModules -RuntimeRoot $root} $runtimeRoot}|Should Not Throw
 
         $configuration = Get-Content -Raw -LiteralPath (Join-Path $codexHome 'ai-instructions-sync.json') | ConvertFrom-Json
-        $bundle = Get-Content -Raw -LiteralPath (Join-Path $runtimeRoot 'runtime-bundle.json') | ConvertFrom-Json
         $configuration.schemaVersion | Should Be 4
         ($configuration.PSObject.Properties.Name -contains 'autoCommitRepositoryUrls') | Should Be $false
         @($configuration.excludedRepositoryUrls).Count | Should Be 0
@@ -499,6 +704,7 @@ Keep this section too.
 
         $result.ExitCode | Should Not Be 0
         $result.Output | Should Match 'AI Instructions sync configuration schema version 5 requires a projection-aware installer\.'
+        (Get-AiInstructionsRefusalCode $result.Output) | Should Be unsupported-version
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($configurationPath)) | Should Be ([Convert]::ToBase64String($configurationBefore))
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($bundlePath)) | Should Be ([Convert]::ToBase64String($bundleBefore))
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($hookPath)) | Should Be ([Convert]::ToBase64String($hookBefore))
@@ -570,19 +776,21 @@ Keep this section too.
         & git -C $cloneRoot remote set-url origin $origin
         if ($LASTEXITCODE -ne 0) { throw 'Failed to reset installer source clone origin.' }
         Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts\install-ai-instructions-bootstrap.ps1') -Destination (Join-Path $cloneRoot 'scripts\install-ai-instructions-bootstrap.ps1') -Force
-        foreach ($fileName in @(
+        $platformManifest = Import-PowerShellDataFile -LiteralPath (Join-Path $repositoryRoot 'scripts\platform-runtime.psd1')
+        foreach ($fileName in @(@(
             'bootstrap-ai-instructions-installed.ps1','bootstrap-ai-instructions-multisource.ps1','bootstrap-ai-instructions.ps1',
             'safe-zip.psm1','skills-catalog-contract.psm1','skills-selection.psm1','skills-source-routing.psm1',
             'skills-source-retrieval.psm1','skills-source-acquisition.psm1','skills-source-composition.psm1',
             'ai-instructions-runtime-contract.psm1','WindowsDacl.psm1','agent-artifact-remediation.psm1','repo-shared-skills-migration.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1',
             'ai-instructions-updater.psm1','update-ai-instructions.ps1','agent-environment-reconciler.psm1','update-agent-environment.ps1',
-            'cleanup-ai-instructions-pollution.ps1','installer-safe-mutation.psm1','platform-runtime.psd1','license-delivery.psm1'
-        )) {
-            Copy-Item -LiteralPath (Join-Path $repositoryRoot "scripts\$fileName") -Destination (Join-Path $cloneRoot "scripts\$fileName") -Force
+            'cleanup-ai-instructions-pollution.ps1','license-delivery.psm1','ai-instructions-install-transaction.psm1'
+        ) + @($platformManifest.FileList) | Sort-Object -Unique)) {
+            $destination = Join-Path $cloneRoot "scripts\$fileName"
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+            Copy-Item -LiteralPath (Join-Path $repositoryRoot "scripts\$fileName") -Destination $destination -Force
         }
-        [IO.Directory]::CreateDirectory((Join-Path $cloneRoot 'scripts/platform')) | Out-Null
-        Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts/platform/WindowsInstallerMutation.cs') -Destination (Join-Path $cloneRoot 'scripts/platform/WindowsInstallerMutation.cs') -Force
-        & git -C $cloneRoot add -- scripts
+        Copy-Item -LiteralPath (Join-Path $repositoryRoot 'licensing-scope.json') -Destination (Join-Path $cloneRoot 'licensing-scope.json') -Force
+        & git -C $cloneRoot add -- scripts licensing-scope.json
         & git -C $cloneRoot -c user.name='Installer Test' -c user.email='installer@example.test' commit --quiet --allow-empty -m 'installer fixture'
         if ($LASTEXITCODE -ne 0) { throw 'Failed to commit installer source fixture.' }
         $executionEvidence = Join-Path $TestDrive 'dirty-contract-executed.txt'
@@ -616,7 +824,7 @@ Keep this section too.
     }
 
     # Scenario: A malformed codeload candidate fails during staged PowerShell validation.
-    # Purpose: Remove all staging and backup directories when failure occurs before active runtime mutation.
+    # Purpose: Remove the pre-journal transaction directory when failure occurs before active runtime mutation.
     It 'InterT46_cleans_transaction_directories_after_staging_validation_failure' {
         $invalidSource = Join-Path $TestDrive 'invalid-staging-source'
         & git clone --quiet $repositoryRoot $invalidSource
@@ -625,22 +833,26 @@ Keep this section too.
             -Destination (Join-Path $invalidSource 'scripts\installer-safe-mutation.psm1') -Force
         Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts\platform\WindowsInstallerMutation.cs') `
             -Destination (Join-Path $invalidSource 'scripts\platform\WindowsInstallerMutation.cs') -Force
-        foreach ($fileName in @(
+        $platformManifest=Import-PowerShellDataFile -LiteralPath (Join-Path $repositoryRoot 'scripts\platform-runtime.psd1')
+        foreach ($fileName in @(@(
             'agent-artifact-remediation.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1',
             'agent-environment-reconciler.psm1','update-agent-environment.ps1','license-delivery.psm1',
-            'ai-instructions-runtime-contract.psm1','WindowsDacl.psm1'
-        )) {
+            'ai-instructions-runtime-contract.psm1','ai-instructions-install-transaction.psm1'
+        )+@($platformManifest.FileList)|Sort-Object -Unique)) {
+            $destination=Join-Path $invalidSource "scripts\$fileName"
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination)|Out-Null
             Copy-Item -LiteralPath (Join-Path $repositoryRoot "scripts\$fileName") `
-                -Destination (Join-Path $invalidSource "scripts\$fileName") -Force
+                -Destination $destination -Force
         }
+        Copy-Item -LiteralPath (Join-Path $repositoryRoot 'licensing-scope.json') -Destination (Join-Path $invalidSource 'licensing-scope.json') -Force
         [System.IO.File]::AppendAllText((Join-Path $invalidSource 'scripts\skills-selection.psm1'), "`nfunction Invalid-StagingFixture {`n")
 
         $result = Invoke-InstallExpectFailure -RepositoryRoot $invalidSource -CodexHome $codexHome
 
         $result.ExitCode | Should Not Be 0
         $result.Output | Should Match 'PowerShell parse error'
-        @(Get-ChildItem -LiteralPath $codexHome -Force -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -like '.ai-instructions-install-*' -or $_.Name -like '.ai-instructions-backup-*' }).Count | Should Be 0
+        $transactions = Join-Path $codexHome '.ai-instructions-txn'
+        @(Get-ChildItem -LiteralPath $transactions -Force -ErrorAction SilentlyContinue).Count | Should Be 0
     }
 
     # Scenario: Another installer owns the per-Codex-Home installation transaction lock.
@@ -714,8 +926,8 @@ Keep this section too.
         Test-Path -LiteralPath (Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1') | Should Be $false
     }
 
-    # Scenario: A late hooks-file validation failure occurs after active installer mutation begins.
-    # Purpose: Restore launcher, runtime, configuration, Agent, and hook bytes as one transaction.
+    # Scenario: Hooks-file transformation fails before the prepared journal is made durable.
+    # Purpose: Preserve launcher, runtime, configuration, Agent, and hook bytes with no target mutation.
     It 'InterT51_rolls_back_runtime_config_and_agent_files_when_a_late_install_step_fails' {
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         $hookPath = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
@@ -793,7 +1005,7 @@ param(
     [Parameter(Mandatory = $true)][string] $ResultPath
 )
 $lockLine = @(
-    Select-String -LiteralPath $InstallerScript -Pattern '^\s*\$installLockStream = \[System\.IO\.File\]::Open\(' |
+    Select-String -LiteralPath $InstallerScript -Pattern '^\s*try \{ \$installLockLease = Enter-PlatformLock ' |
         Select-Object -First 1 -ExpandProperty LineNumber
 )
 if ($lockLine.Count -ne 1) { throw 'Could not locate the installer lock acquisition boundary.' }
@@ -844,12 +1056,13 @@ finally {
         $LASTEXITCODE | Should Be 0
         (Get-Content -Raw -LiteralPath $resultPath) | Should Match '(?m)^1\r?$'
         (Get-Content -Raw -LiteralPath $resultPath) | Should Match 'Runtime bundle schema version 3 requires a projection-aware installer\.'
+        (Get-AiInstructionsRefusalCode (Get-Content -Raw -LiteralPath $resultPath)) | Should Be unsupported-version
         $bundleAfter = [System.IO.File]::ReadAllBytes($bundlePath)
         [Convert]::ToBase64String($bundleAfter) | Should Be ([Convert]::ToBase64String($v3BundleBytes))
         (Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json).schemaVersion | Should Be 3
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($runtimeFilePath)) | Should Be ([Convert]::ToBase64String($runtimeFileBefore))
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($configurationPath)) | Should Be ([Convert]::ToBase64String($configurationBefore))
-        @(Get-ChildItem -LiteralPath $codexHome -Directory -Force | Where-Object { $_.Name -like '.ai-instructions-install-*' }).Count | Should Be 0
+        @(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Force -ErrorAction SilentlyContinue).Count | Should Be 0
     }
 
     # Scenario: A verified launcher is actively executing runtime fan-out while another installation starts for the same Codex Home.
@@ -1426,7 +1639,7 @@ param(
     [Parameter(Mandatory = $true)][string] $ResultPath
 )
 $mutationLine = @(
-    Select-String -LiteralPath $InstallerScript -Pattern "Set-InstallerTransactionalFileBytes.*hooks/bootstrap-ai-instructions\.ps1" |
+    Select-String -LiteralPath $InstallerScript -Pattern '^\s*Invoke-AiInstructionsInstallOperation -Operation ' |
         Select-Object -First 1 -ExpandProperty LineNumber
 )
 if ($mutationLine.Count -ne 1) { throw 'Could not locate the installer active-mutation boundary.' }
@@ -1484,7 +1697,7 @@ Remove-Variable -Name InstallerProbeHooks,InstallerProbeSavedHooks,InstallerProb
     }
 
     # Scenario: A user edits AGENTS.md after the installer snapshots stable files but before that file is replaced.
-    # Purpose: Compare original bytes inside the mutation handle, preserve the concurrent edit, and roll back earlier installer changes.
+    # Purpose: Preserve the writer's bytes, restore every unaffected target to its original state, and complete transaction cleanup when no original backup was displaced.
     It 'InterT67_preserves_a_concurrent_stable_file_edit_before_mutation' {
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         $archivePath = Join-Path $TestDrive 'installer-cas-source.zip'
@@ -1494,6 +1707,7 @@ Remove-Variable -Name InstallerProbeHooks,InstallerProbeSavedHooks,InstallerProb
         $bundlePath = Join-Path $codexHome 'hooks\ai-instructions-runtime\runtime-bundle.json'
         $configurationPath = Join-Path $codexHome 'ai-instructions-sync.json'
         $agentsPath = Join-Path $codexHome 'AGENTS.md'
+        Set-TestText -Path $agentsPath -Value "# Personal instructions before the concurrent edit`n"
         $hookBefore = [System.IO.File]::ReadAllBytes($hookPath)
         $bundleBefore = [System.IO.File]::ReadAllBytes($bundlePath)
         $configurationBefore = [System.IO.File]::ReadAllBytes($configurationPath)
@@ -1513,7 +1727,7 @@ param(
     [Parameter(Mandatory = $true)][string] $ResultPath
 )
 $mutationLine = @(
-    Select-String -LiteralPath $InstallerScript -Pattern "Set-InstallerTransactionalFileBytes.*hooks/bootstrap-ai-instructions\.ps1" |
+    Select-String -LiteralPath $InstallerScript -Pattern '^\s*Invoke-AiInstructionsInstallOperation -Operation ' |
         Select-Object -First 1 -ExpandProperty LineNumber
 )
 if ($mutationLine.Count -ne 1) { throw 'Could not locate the installer active-mutation boundary.' }
@@ -1566,30 +1780,42 @@ finally {
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($hookPath)) | Should Be ([Convert]::ToBase64String($hookBefore))
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($bundlePath)) | Should Be ([Convert]::ToBase64String($bundleBefore))
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($configurationPath)) | Should Be ([Convert]::ToBase64String($configurationBefore))
-        @(Get-ChildItem -LiteralPath $codexHome -Directory -Force | Where-Object { $_.Name -like '.ai-instructions-*' }).Count | Should Be 0
+        @(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Force -ErrorAction SilentlyContinue).Count | Should Be 0
     }
 
-    # Scenario: A user replaces a stable launcher after a late install failure begins rollback.
-    # Purpose: Preserve external bytes, restore every unaffected transaction file, and retain recovery backup evidence.
-    It 'InterT68_preserves_concurrent_stable_file_bytes_during_rollback' {
-        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
-        $archivePath = Join-Path $TestDrive 'installer-rollback-cas-source.zip'
-        $archiveSha256 = New-InstallerSourceArchive -SourceRoot $repositoryRoot -ArchivePath $archivePath
-        $sourceCommit = (@(& git -C $repositoryRoot rev-parse HEAD) -join '').Trim()
-        $hookPath = Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
-        $bundlePath = Join-Path $codexHome 'hooks\ai-instructions-runtime\runtime-bundle.json'
-        $configurationPath = Join-Path $codexHome 'ai-instructions-sync.json'
-        $agentsPath = Join-Path $codexHome 'AGENTS.md'
-        $hooksPath = Join-Path $codexHome 'hooks.json'
-        $bundleBefore = [System.IO.File]::ReadAllBytes($bundlePath)
-        $configurationBefore = [System.IO.File]::ReadAllBytes($configurationPath)
-        $agentsBefore = [System.IO.File]::ReadAllBytes($agentsPath)
-        Set-TestText -Path $hooksPath -Value '{not-json'
-        $hooksBefore = [System.IO.File]::ReadAllBytes($hooksPath)
-        $externalHook = "# Concurrent launcher replacement`n"
-        $resultPath = Join-Path $TestDrive 'installer-rollback-cas-result.txt'
-        $wrapperPath = Join-Path $TestDrive 'installer-rollback-cas-probe.ps1'
-        Set-TestText -Path $wrapperPath -Value @'
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+        # Scenario: An active install fails after publishing a file, while external writers replace both its target and original backup before the journal records the operation as applied.
+        # Purpose: Preserve both external artifacts and return the interrupted-install refusal marker with the original install error as its inner exception.
+        It 'InterT83_active_install_recovery_returns_typed_refusal_when_artifacts_are_retained' {
+            Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+            $candidateRoot=Join-Path $TestDrive ('active-retained-candidate-'+[Guid]::NewGuid().ToString('N'))
+            New-InstallerFailpointCandidate -SourceRoot $repositoryRoot -DestinationRoot $candidateRoot
+            $candidateTransactionModule=Join-Path $candidateRoot 'scripts\ai-instructions-install-transaction.psm1'
+            $candidateTransactionBody=Get-Content -Raw -LiteralPath $candidateTransactionModule
+            $probeBoundary='    Invoke-AiInstructionsInstallFailpoint -Name "after-operation-$sequence-before-journal"'
+            $probeInjection=@'
+    if ($sequence -eq 1 -and [Environment]::GetEnvironmentVariable('P7D2_ACTIVE_RETAINED_PROBE','Process') -ceq '1') {
+        $probeHome=[Environment]::GetEnvironmentVariable('P7D2_ACTIVE_RETAINED_HOME','Process')
+        $probeTransaction=@(Get-ChildItem -LiteralPath (Join-Path $probeHome '.ai-instructions-txn') -Directory -Force)[0]
+        $probeTarget=Join-Path $probeHome ([string]$Operation.targetRelativePath).Replace('/',[IO.Path]::DirectorySeparatorChar)
+        $probeBackup=Join-Path $probeTransaction.FullName ([string]$Operation.backupLeaf)
+        [IO.File]::Delete($probeTarget)
+        [IO.File]::Delete($probeBackup)
+        [IO.File]::WriteAllText($probeTarget,[Environment]::GetEnvironmentVariable('P7D2_ACTIVE_RETAINED_TARGET','Process'),[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($probeBackup,[Environment]::GetEnvironmentVariable('P7D2_ACTIVE_RETAINED_BACKUP','Process'),[Text.UTF8Encoding]::new($false))
+        throw 'active install recovery probe failure'
+    }
+'@
+            if(-not$candidateTransactionBody.Contains($probeBoundary)){throw 'Could not locate the active installer operation-return boundary.'}
+            Set-TestText -Path $candidateTransactionModule -Value ($candidateTransactionBody.Replace($probeBoundary,($probeInjection+"`n"+$probeBoundary)))
+            $archivePath=Join-Path $TestDrive ('active-retained-source-'+[Guid]::NewGuid().ToString('N')+'.zip')
+            $archiveSha256=New-InstallerSourceArchive -SourceRoot $candidateRoot -ArchivePath $archivePath
+            $sourceCommit=(@(& git -C $repositoryRoot rev-parse HEAD)-join '').Trim()
+            $externalTarget="# external target during active install`n"
+            $externalBackup="# external backup during active install`n"
+            $resultPath=Join-Path $TestDrive 'active-retained-result.txt'
+            $wrapperPath=Join-Path $TestDrive 'active-retained-probe.ps1'
+            Set-TestText -Path $wrapperPath -Value @'
 param(
     [Parameter(Mandatory = $true)][string] $InstallerScript,
     [Parameter(Mandatory = $true)][string] $RepositoryRoot,
@@ -1597,175 +1823,171 @@ param(
     [Parameter(Mandatory = $true)][string] $SourceCommit,
     [Parameter(Mandatory = $true)][string] $ArchiveSha256,
     [Parameter(Mandatory = $true)][string] $ArchivePath,
-    [Parameter(Mandatory = $true)][string] $HookPath,
-    [Parameter(Mandatory = $true)][string] $ExternalHook,
+    [Parameter(Mandatory = $true)][string] $ExternalTarget,
+    [Parameter(Mandatory = $true)][string] $ExternalBackup,
     [Parameter(Mandatory = $true)][string] $ResultPath
 )
-$rollbackLine = @(
-    Select-String -LiteralPath $InstallerScript -Pattern '^\s*\$installError=\$_\s*$' |
-        Select-Object -First 1 -ExpandProperty LineNumber
-)
-if ($rollbackLine.Count -ne 1) { throw 'Could not locate the installer rollback boundary.' }
-$global:InstallerRollbackCasHookPath = $HookPath
-$global:InstallerRollbackCasExternalHook = $ExternalHook
-$breakpoint = Set-PSBreakpoint -Script $InstallerScript -Line $rollbackLine[0] -Action {
-    [System.IO.File]::WriteAllText(
-        $global:InstallerRollbackCasHookPath,
-        $global:InstallerRollbackCasExternalHook,
-        (New-Object System.Text.UTF8Encoding($false)))
-}
+$env:P7D2_ACTIVE_RETAINED_PROBE='1'
+$env:P7D2_ACTIVE_RETAINED_HOME=$CodexHome
+$env:P7D2_ACTIVE_RETAINED_TARGET=$ExternalTarget
+$env:P7D2_ACTIVE_RETAINED_BACKUP=$ExternalBackup
 try {
     try {
         & $InstallerScript -RepositoryRoot $RepositoryRoot -CodexHome $CodexHome `
             -Acquisition github-codeload -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
             -SourceCommit $SourceCommit -ArchiveSha256 $ArchiveSha256 -SourceArchivePath $ArchivePath | Out-Null
-        $installerExit = 0
-        $installerError = ''
+        $installerExit=0
+        $installerError=''
+        $innerError=''
     }
     catch {
-        $installerExit = 1
-        $installerError = $_.Exception.Message
+        $installerExit=1
+        $installerError=$_.Exception.Message
+        $innerError=if($null-ne$_.Exception.InnerException){$_.Exception.InnerException.Message}else{''}
     }
 }
 finally {
-    Remove-PSBreakpoint -Breakpoint $breakpoint -ErrorAction SilentlyContinue
-    Remove-Variable -Name InstallerRollbackCasHookPath,InstallerRollbackCasExternalHook -Scope Global -ErrorAction SilentlyContinue
+    Remove-Item Env:\P7D2_ACTIVE_RETAINED_PROBE,Env:\P7D2_ACTIVE_RETAINED_HOME,Env:\P7D2_ACTIVE_RETAINED_TARGET,Env:\P7D2_ACTIVE_RETAINED_BACKUP -ErrorAction SilentlyContinue
 }
-[System.IO.File]::WriteAllText($ResultPath,(@($installerExit,$installerError) -join "`n"),(New-Object System.Text.UTF8Encoding($false)))
+[IO.File]::WriteAllText($ResultPath,(@($installerExit,$installerError,$innerError)-join"`n"),[Text.UTF8Encoding]::new($false))
 '@
+            $arguments=@(
+                '-NoProfile','-ExecutionPolicy','Bypass','-File',$wrapperPath,
+                '-InstallerScript',(Resolve-Path -LiteralPath $script:InstallScript).Path,
+                '-RepositoryRoot',$repositoryRoot,
+                '-CodexHome',$codexHome,
+                '-SourceCommit',$sourceCommit,
+                '-ArchiveSha256',$archiveSha256,
+                '-ArchivePath',$archivePath,
+                '-ExternalTarget',$externalTarget,
+                '-ExternalBackup',$externalBackup,
+                '-ResultPath',$resultPath
+            )
 
-        $arguments = @(
-            '-NoProfile','-ExecutionPolicy','Bypass','-File',$wrapperPath,
-            '-InstallerScript',(Resolve-Path -LiteralPath $script:InstallScript).Path,
-            '-RepositoryRoot',$repositoryRoot,
-            '-CodexHome',$codexHome,
-            '-SourceCommit',$sourceCommit,
-            '-ArchiveSha256',$archiveSha256,
-            '-ArchivePath',$archivePath,
-            '-HookPath',$hookPath,
-            '-ExternalHook',$externalHook,
-            '-ResultPath',$resultPath
-        )
-        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+            $output=& $script:TestPowerShellExecutable @arguments 2>&1
 
-        $LASTEXITCODE | Should Be 0
-        (Get-Content -Raw -LiteralPath $resultPath) | Should Match '(?m)^1\r?$'
-        (Get-Content -Raw -LiteralPath $resultPath) | Should Match '(?is)rollback also failed.*current bytes were preserved'
-        (Get-Content -Raw -LiteralPath $hookPath) | Should Be $externalHook
-        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($bundlePath)) | Should Be ([Convert]::ToBase64String($bundleBefore))
-        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($configurationPath)) | Should Be ([Convert]::ToBase64String($configurationBefore))
-        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($agentsPath)) | Should Be ([Convert]::ToBase64String($agentsBefore))
-        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($hooksPath)) | Should Be ([Convert]::ToBase64String($hooksBefore))
-        @(Get-ChildItem -LiteralPath $codexHome -Directory -Force | Where-Object { $_.Name -like '.ai-instructions-backup-*' }).Count | Should Be 1
+            $LASTEXITCODE|Should Be 0
+            $result=Get-Content -Raw -LiteralPath $resultPath
+            $result|Should Match '(?m)^1\r?$'
+            (Get-AiInstructionsRefusalCode (Remove-TestAnsiControlSequence $result))|Should Be interrupted-install
+            (ConvertTo-TestComparableText $result)|Should Match ([regex]::Escape((ConvertTo-TestComparableText (Join-Path $codexHome '.ai-instructions-txn'))))
+            (ConvertTo-TestComparableText $result)|Should Match ([regex]::Escape((ConvertTo-TestComparableText 'active install recovery probe failure')))
+            $transaction=@(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Directory -Force)
+            $transaction.Count|Should Be 1
+            $journal=Get-Content -Raw -LiteralPath (Join-Path $transaction[0].FullName 'journal.json')|ConvertFrom-Json
+            $operation=@($journal.operations|Where-Object sequence -eq 1)[0]
+            (Get-Content -Raw -LiteralPath (Join-Path $codexHome ([string]$operation.targetRelativePath).Replace('/',[IO.Path]::DirectorySeparatorChar)))|Should Be $externalTarget
+            (Get-Content -Raw -LiteralPath (Join-Path $transaction[0].FullName ([string]$operation.backupLeaf)))|Should Be $externalBackup
+        }
     }
 
-    # Scenario: A user adds content to the transaction-installed runtime after a late install failure begins rollback.
-    # Purpose: Quarantine and preserve unverified runtime drift instead of recursively deleting it, while restoring the previous runtime.
+    # Scenario: A crash leaves an applied launcher and its original backup, then the backup bytes are modified.
+    # Purpose: Refuse journal recovery without changing either the applied target or any transaction evidence.
+    It 'InterT68_preserves_concurrent_stable_file_bytes_during_rollback' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $candidateRoot = Join-Path $TestDrive 'installer-backup-tamper-candidate'
+        New-Item -ItemType Directory -Force -Path $candidateRoot | Out-Null
+        Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts'),(Join-Path $repositoryRoot 'catalog') -Destination $candidateRoot -Recurse
+        foreach($leaf in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json')){
+            Copy-Item -LiteralPath (Join-Path $repositoryRoot $leaf) -Destination (Join-Path $candidateRoot $leaf)
+        }
+        [IO.File]::AppendAllText((Join-Path $candidateRoot 'scripts\bootstrap-ai-instructions-installed.ps1'),"`n# crash candidate`n",[Text.UTF8Encoding]::new($false))
+        $archivePath = Join-Path $TestDrive 'installer-backup-tamper-source.zip'
+        $archiveSha256 = New-InstallerSourceArchive -SourceRoot $candidateRoot -ArchivePath $archivePath
+        $sourceCommit = (@(& git -C $repositoryRoot rev-parse HEAD) -join '').Trim()
+        $arguments = @(
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$script:InstallScript,
+            '-RepositoryRoot',$repositoryRoot,
+            '-CodexHome',$codexHome,
+            '-Acquisition','github-codeload','-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git',
+            '-SourceCommit',$sourceCommit,
+            '-ArchiveSha256',$archiveSha256,
+            '-SourceArchivePath',$archivePath
+        )
+        $savedFailpoint=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT='after-operation-1';& $script:TestPowerShellExecutable @arguments 2>&1|Out-Null;$LASTEXITCODE|Should Not Be 0}
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$savedFailpoint}
+        $transaction=@(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Directory -Force)
+        $transaction.Count|Should Be 1
+        $journal=Get-Content -Raw -LiteralPath (Join-Path $transaction[0].FullName 'journal.json')|ConvertFrom-Json
+        $operation=@($journal.operations|Where-Object sequence -eq 1)[0]
+        $backupPath=Join-Path $transaction[0].FullName ([string]$operation.backupLeaf)
+        Set-TestText -Path $backupPath -Value "tampered backup evidence`n"
+        $targetPath=Join-Path $codexHome ([string]$operation.targetRelativePath).Replace('/','\')
+        $targetBefore=[Convert]::ToBase64String([IO.File]::ReadAllBytes($targetPath))
+        $evidenceBefore=[Convert]::ToBase64String([IO.File]::ReadAllBytes($backupPath))
+
+        $result=Invoke-InstallExpectFailure -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+
+        $result.ExitCode|Should Not Be 0
+        (Get-AiInstructionsRefusalCode $result.Output)|Should Be interrupted-install
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($targetPath))|Should Be $targetBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($backupPath))|Should Be $evidenceBefore
+        Test-Path -LiteralPath (Join-Path $transaction[0].FullName 'journal.json')|Should Be $true
+    }
+
+    # Scenario: A crash leaves the candidate runtime active, then an external writer adds a file to that complete tree.
+    # Purpose: Refuse recovery and retain both the drifted target and the original runtime backup in the journal transaction.
     It 'InterT69_preserves_concurrent_runtime_content_during_rollback' {
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         $runtimePath = Join-Path $codexHome 'hooks\ai-instructions-runtime'
-        $activeSourcePath = Join-Path $runtimePath 'safe-zip.psm1'
-        $activeSourceBefore = [System.IO.File]::ReadAllBytes($activeSourcePath)
         $candidateRoot = Join-Path $TestDrive 'installer-runtime-candidate'
         New-Item -ItemType Directory -Force -Path $candidateRoot | Out-Null
-        Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts') -Destination $candidateRoot -Recurse
-        Copy-Item -LiteralPath (Join-Path $repositoryRoot 'catalog') -Destination $candidateRoot -Recurse
+        Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts'),(Join-Path $repositoryRoot 'catalog') -Destination $candidateRoot -Recurse
+        foreach($leaf in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json')){Copy-Item -LiteralPath (Join-Path $repositoryRoot $leaf) -Destination (Join-Path $candidateRoot $leaf)}
         $candidateSourcePath = Join-Path $candidateRoot 'scripts\safe-zip.psm1'
         [System.IO.File]::AppendAllText($candidateSourcePath,"`n# runtime rollback candidate`n",(New-Object System.Text.UTF8Encoding($false)))
-        $candidateSourceBytes = [System.IO.File]::ReadAllBytes($candidateSourcePath)
         $archivePath = Join-Path $TestDrive 'installer-runtime-rollback-source.zip'
         $archiveSha256 = New-InstallerSourceArchive -SourceRoot $candidateRoot -ArchivePath $archivePath
         $sourceCommit = (@(& git -C $repositoryRoot rev-parse HEAD) -join '').Trim()
-        $hooksPath = Join-Path $codexHome 'hooks.json'
-        Set-TestText -Path $hooksPath -Value '{not-json'
-        $externalRuntimeContent = "Concurrent runtime content`n"
-        $resultPath = Join-Path $TestDrive 'installer-runtime-rollback-result.txt'
-        $wrapperPath = Join-Path $TestDrive 'installer-runtime-rollback-probe.ps1'
-        Set-TestText -Path $wrapperPath -Value @'
-param(
-    [Parameter(Mandatory = $true)][string] $InstallerScript,
-    [Parameter(Mandatory = $true)][string] $RepositoryRoot,
-    [Parameter(Mandatory = $true)][string] $CodexHome,
-    [Parameter(Mandatory = $true)][string] $SourceCommit,
-    [Parameter(Mandatory = $true)][string] $ArchiveSha256,
-    [Parameter(Mandatory = $true)][string] $ArchivePath,
-    [Parameter(Mandatory = $true)][string] $ExternalRuntimeContent,
-    [Parameter(Mandatory = $true)][string] $ResultPath
-)
-$rollbackLine = @(
-    Select-String -LiteralPath $InstallerScript -Pattern '^\s*\$installError=\$_\s*$' |
-        Select-Object -First 1 -ExpandProperty LineNumber
-)
-if ($rollbackLine.Count -ne 1) { throw 'Could not locate the installer rollback boundary.' }
-$global:InstallerRollbackRuntimeRoot = Join-Path $CodexHome 'hooks\ai-instructions-runtime'
-$global:InstallerRollbackRuntimeContent = $ExternalRuntimeContent
-$breakpoint = Set-PSBreakpoint -Script $InstallerScript -Line $rollbackLine[0] -Action {
-    [System.IO.File]::WriteAllText(
-        (Join-Path $global:InstallerRollbackRuntimeRoot 'concurrent-runtime-note.txt'),
-        $global:InstallerRollbackRuntimeContent,
-        (New-Object System.Text.UTF8Encoding($false)))
-}
-try {
-    try {
-        & $InstallerScript -RepositoryRoot $RepositoryRoot -CodexHome $CodexHome `
-            -Acquisition github-codeload -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
-            -SourceCommit $SourceCommit -ArchiveSha256 $ArchiveSha256 -SourceArchivePath $ArchivePath | Out-Null
-        $installerExit = 0
-        $installerError = ''
-    }
-    catch {
-        $installerExit = 1
-        $installerError = $_.Exception.Message
-    }
-}
-finally {
-    Remove-PSBreakpoint -Breakpoint $breakpoint -ErrorAction SilentlyContinue
-    Remove-Variable -Name InstallerRollbackRuntimeRoot,InstallerRollbackRuntimeContent -Scope Global -ErrorAction SilentlyContinue
-}
-[System.IO.File]::WriteAllText($ResultPath,(@($installerExit,$installerError) -join "`n"),(New-Object System.Text.UTF8Encoding($false)))
-'@
-
         $arguments = @(
-            '-NoProfile','-ExecutionPolicy','Bypass','-File',$wrapperPath,
-            '-InstallerScript',(Resolve-Path -LiteralPath $script:InstallScript).Path,
-            '-RepositoryRoot',$repositoryRoot,
-            '-CodexHome',$codexHome,
-            '-SourceCommit',$sourceCommit,
-            '-ArchiveSha256',$archiveSha256,
-            '-ArchivePath',$archivePath,
-            '-ExternalRuntimeContent',$externalRuntimeContent,
-            '-ResultPath',$resultPath
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$script:InstallScript,'-RepositoryRoot',$repositoryRoot,'-CodexHome',$codexHome,
+            '-Acquisition','github-codeload','-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git',
+            '-SourceCommit',$sourceCommit,'-ArchiveSha256',$archiveSha256,'-SourceArchivePath',$archivePath
         )
-        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+        $savedFailpoint=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT='after-operation-1';& $script:TestPowerShellExecutable @arguments 2>&1|Out-Null;$LASTEXITCODE|Should Not Be 0}
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$savedFailpoint}
+        $transaction=@(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Directory -Force)
+        $transaction.Count|Should Be 1
+        $journal=Get-Content -Raw -LiteralPath (Join-Path $transaction[0].FullName 'journal.json')|ConvertFrom-Json
+        $runtimeOperation=@($journal.operations|Where-Object kind -eq 'swap-directory')[0]
+        $runtimeOperation.sequence|Should Be 1
+        $externalRuntimeContent="Concurrent runtime content`n"
+        Set-TestText -Path (Join-Path $runtimePath 'concurrent-runtime-note.txt') -Value $externalRuntimeContent
+        $backupPath=Join-Path $transaction[0].FullName ([string]$runtimeOperation.backupLeaf)
+        $backupDigest=(Get-FileHash -LiteralPath (Join-Path $backupPath 'safe-zip.psm1') -Algorithm SHA256).Hash
 
-        $LASTEXITCODE | Should Be 0
-        (Get-Content -Raw -LiteralPath $resultPath) | Should Match '(?m)^1\r?$'
-        (Get-Content -Raw -LiteralPath $resultPath) | Should Match '(?is)rollback also failed.*runtime rollback preserved'
-        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($activeSourcePath)) |
-            Should Be ([Convert]::ToBase64String($activeSourceBefore))
-        $backupRoot = @(Get-ChildItem -LiteralPath $codexHome -Directory -Force |
-            Where-Object { $_.Name -like '.ai-instructions-backup-*' })
-        $backupRoot.Count | Should Be 1
-        $quarantinedRuntime = Join-Path $backupRoot[0].FullName 'failed-runtime'
-        (Get-Content -Raw -LiteralPath (Join-Path $quarantinedRuntime 'concurrent-runtime-note.txt')) |
-            Should Be $externalRuntimeContent
-        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes((Join-Path $quarantinedRuntime 'safe-zip.psm1'))) |
-            Should Be ([Convert]::ToBase64String($candidateSourceBytes))
+        $result=Invoke-InstallExpectFailure -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+
+        $result.ExitCode|Should Not Be 0
+        (Get-AiInstructionsRefusalCode $result.Output)|Should Be interrupted-install
+        (Get-Content -Raw -LiteralPath (Join-Path $runtimePath 'concurrent-runtime-note.txt'))|Should Be $externalRuntimeContent
+        (Get-FileHash -LiteralPath (Join-Path $backupPath 'safe-zip.psm1') -Algorithm SHA256).Hash|Should Be $backupDigest
+        Test-Path -LiteralPath (Join-Path $transaction[0].FullName 'journal.json')|Should Be $true
     }
 
-    # Scenario: The installer backup root is swapped for an outside junction when rollback begins.
-    # Purpose: Hold a non-delete-sharing handle on the transaction backup root until rollback and cleanup are complete.
+    # Register only on the native host because junction replacement and Windows delete sharing are platform-specific.
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+    # Scenario: The active journal transaction directory is swapped for an outside junction when recovery begins.
+    # Purpose: Hold a no-delete-sharing directory lease so the swap cannot redirect rollback, and retain journal evidence at .ai-instructions-txn/<txid> after the guarded refusal.
     It 'InterT70_blocks_a_backup_root_junction_swap_during_rollback' {
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
-        $archivePath = Join-Path $TestDrive 'installer-backup-guard-source.zip'
-        $archiveSha256 = New-InstallerSourceArchive -SourceRoot $repositoryRoot -ArchivePath $archivePath
+        $candidateRoot=Join-Path $TestDrive 'installer-transaction-guard-candidate'
+        New-Item -ItemType Directory -Force -Path $candidateRoot|Out-Null
+        Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts'),(Join-Path $repositoryRoot 'catalog') -Destination $candidateRoot -Recurse
+        foreach($leaf in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json')){Copy-Item -LiteralPath (Join-Path $repositoryRoot $leaf) -Destination (Join-Path $candidateRoot $leaf)}
+        [IO.File]::AppendAllText((Join-Path $candidateRoot 'scripts\bootstrap-ai-instructions-installed.ps1'),"`n# transaction guard candidate`n",[Text.UTF8Encoding]::new($false))
+        $archivePath = Join-Path $TestDrive 'installer-transaction-guard-source.zip'
+        $archiveSha256 = New-InstallerSourceArchive -SourceRoot $candidateRoot -ArchivePath $archivePath
         $sourceCommit = (@(& git -C $repositoryRoot rev-parse HEAD) -join '').Trim()
-        $hooksPath = Join-Path $codexHome 'hooks.json'
-        Set-TestText -Path $hooksPath -Value '{not-json'
-        $outsideRoot = Join-Path $TestDrive 'installer-backup-guard-outside'
-        $savedBackupRoot = Join-Path $codexHome 'backup-root-swapped'
-        $resultPath = Join-Path $TestDrive 'installer-backup-guard-result.txt'
-        $wrapperPath = Join-Path $TestDrive 'installer-backup-guard-probe.ps1'
+        $crashArguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:InstallScript,'-RepositoryRoot',$repositoryRoot,'-CodexHome',$codexHome,'-Acquisition','github-codeload','-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git','-SourceCommit',$sourceCommit,'-ArchiveSha256',$archiveSha256,'-SourceArchivePath',$archivePath)
+        $savedFailpoint=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT='after-operation-1';& $script:TestPowerShellExecutable @crashArguments 2>&1|Out-Null;$LASTEXITCODE|Should Not Be 0}finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$savedFailpoint}
+        $outsideRoot = Join-Path $TestDrive 'installer-transaction-guard-outside'
+        $savedBackupRoot = Join-Path $TestDrive 'transaction-root-swapped'
+        $resultPath = Join-Path $TestDrive 'installer-transaction-guard-result.txt'
+        $wrapperPath = Join-Path $TestDrive 'installer-transaction-guard-probe.ps1'
         New-Item -ItemType Directory -Force -Path $outsideRoot | Out-Null
         Set-TestText -Path $wrapperPath -Value @'
 param(
@@ -1780,7 +2002,7 @@ param(
     [Parameter(Mandatory = $true)][string] $ResultPath
 )
 $rollbackLine = @(
-    Select-String -LiteralPath $InstallerScript -Pattern '^\s*\$installError=\$_\s*$' |
+    Select-String -LiteralPath $InstallerScript -Pattern '^\s*Invoke-AiInstructionsInstallRecoveryPlan -Journal \$record\.Classification\.journal' |
         Select-Object -First 1 -ExpandProperty LineNumber
 )
 if ($rollbackLine.Count -ne 1) { throw 'Could not locate the installer rollback boundary.' }
@@ -1790,14 +2012,17 @@ $global:InstallerBackupGuardSaved = $SavedBackupRoot
 $global:InstallerBackupGuardSwapResult = 'not-attempted'
 $breakpoint = Set-PSBreakpoint -Script $InstallerScript -Line $rollbackLine[0] -Action {
     try {
-        $backupRoot = @(Get-ChildItem -LiteralPath $global:InstallerBackupGuardCodexHome -Directory -Force |
-            Where-Object { $_.Name -like '.ai-instructions-backup-*' })
+        $backupRoot = @(Get-ChildItem -LiteralPath (Join-Path $global:InstallerBackupGuardCodexHome '.ai-instructions-txn') -Directory -Force)
         if ($backupRoot.Count -ne 1) { throw 'Could not identify the active installer backup root.' }
         Move-Item -LiteralPath $backupRoot[0].FullName -Destination $global:InstallerBackupGuardSaved -ErrorAction Stop
         New-Item -ItemType Junction -Path $backupRoot[0].FullName -Target $global:InstallerBackupGuardOutside -ErrorAction Stop | Out-Null
         $global:InstallerBackupGuardSwapResult = 'swapped'
     }
-    catch { $global:InstallerBackupGuardSwapResult = 'blocked: ' + $_.Exception.Message }
+    catch {
+        $global:InstallerBackupGuardSwapResult = 'blocked: ' + $_.Exception.Message
+        if($null-eq$record-or$null-eq$record.Plan){throw 'Could not bind the active recovery plan after the guarded swap was blocked.'}
+        $record.Plan.action='refuse'
+    }
 }
 try {
     try {
@@ -1839,9 +2064,566 @@ Remove-Variable -Name InstallerBackupGuardCodexHome,InstallerBackupGuardOutside,
         $LASTEXITCODE | Should Be 0
         (Get-Content -Raw -LiteralPath $resultPath) | Should Match '(?m)^1\r?$'
         (Get-Content -Raw -LiteralPath $resultPath) | Should Match '(?m)^blocked:'
-        Test-Path -LiteralPath $savedBackupRoot | Should Be $false
-        @(Get-ChildItem -LiteralPath $codexHome -Directory -Force |
-            Where-Object { $_.Name -like '.ai-instructions-backup-*' }).Count | Should Be 0
+        $transactions=@(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Directory -Force)
+        $transactions.Count | Should Be 1
+        $transactions[0].LinkType | Should BeNullOrEmpty
+        $journalPath=Join-Path $transactions[0].FullName 'journal.json'
+        Test-Path -LiteralPath $journalPath -PathType Leaf | Should Be $true
+        $journal=ConvertFrom-AiInstructionsInstallJournalV1Json -Json (Get-Content -Raw -Encoding UTF8 -LiteralPath $journalPath) -ExpectedTransactionId $transactions[0].Name
+        @($journal.operations).Count | Should BeGreaterThan 0
+        @(Get-ChildItem -LiteralPath $transactions[0].FullName -Force -Recurse).Count | Should BeGreaterThan 1
+        if(Test-Path -LiteralPath $savedBackupRoot){@(Get-ChildItem -LiteralPath $savedBackupRoot -Force).Count|Should Be 0}
         @(Get-ChildItem -LiteralPath $outsideRoot -Force).Count | Should Be 0
+    }
+    }
+
+    }
+
+    # Scenario: The transaction module publishes the complete failpoint grammar used by subprocess crash tests.
+    # Purpose: Keep every journal, operation, cleanup, and rollback crash boundary discoverable without enabling it.
+    It 'InterT71_exports_the_install_failpoint_v1_patterns' {
+        $module = Import-Module (Join-Path $repositoryRoot 'scripts\ai-instructions-install-transaction.psm1') -Force -PassThru
+        @(& $module { Get-AiInstructionsInstallFailpointPatterns }) | Should Be @(
+            'after-journal-prepared','after-journal-stage-flush','after-journal-publish-before-parent-flush',
+            'after-recovery-before-install',
+            'before-operation-<sequence>','after-original-to-backup-<sequence>',
+            'after-operation-<sequence>-before-journal','after-operation-<sequence>',
+            'after-committed-before-cleanup','before-cleanup-<artifact-leaf>',
+            'during-cleanup-<artifact-leaf>','after-cleanup-<artifact-leaf>','after-rollback-operation-<sequence>'
+        )
+    }
+
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+    # Scenario: A killed pre-journal process leaves only a private transaction directory.
+    # Purpose: Purge an orphan before preparing the next install and leave the retained store empty.
+    It 'InterT72_purges_an_orphan_transaction_before_installing' {
+        $transaction = Join-Path $codexHome ('.ai-instructions-txn\' + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $transaction | Out-Null
+        Set-TestText -Path (Join-Path $transaction 'journal.stage') -Value "partial`n"
+
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome | Out-Null
+
+        Test-Path -LiteralPath $transaction | Should Be $false
+        @(Get-ChildItem -Force -LiteralPath (Join-Path $codexHome '.ai-instructions-txn')).Count | Should Be 0
+    }
+
+    # Scenario: Residue has malformed journal bytes or a non-transaction name.
+    # Purpose: Refuse the complete residue set without changing evidence or installation targets.
+    It 'InterT73_refuses_malformed_and_invalid_name_transaction_residue_without_mutation' -TestCases @(
+        @{Name=[Guid]::NewGuid().ToString('N');Journal='{not-json'},
+        @{Name='invalid-transaction-name';Journal=$null}
+    ) {
+        param($Name,$Journal)
+        $transaction = Join-Path $codexHome ".ai-instructions-txn\$Name"
+        New-Item -ItemType Directory -Force -Path $transaction | Out-Null
+        if($null -ne $Journal){Set-TestText -Path (Join-Path $transaction 'journal.json') -Value $Journal}
+        $evidenceBefore = @(Get-ChildItem -LiteralPath $transaction -Force -Recurse | ForEach-Object { $_.FullName })
+
+        $result = Invoke-InstallExpectFailure -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+
+        $result.ExitCode | Should Not Be 0
+        (Get-AiInstructionsRefusalCode $result.Output) | Should Be interrupted-install
+        @(Get-ChildItem -LiteralPath $transaction -Force -Recurse | ForEach-Object { $_.FullName }) | Should Be $evidenceBefore
+        Test-Path -LiteralPath (Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1') | Should Be $false
+    }
+
+    # Scenario: A legacy installer left one of the pre-journal staging namespaces.
+    # Purpose: List and preserve legacy evidence instead of interpreting it as journal v1 state.
+    It 'InterT74_refuses_and_preserves_legacy_installer_residue' -TestCases @(
+        @{Leaf='.ai-instructions-install-0123456789abcdef0123456789abcdef'},
+        @{Leaf='.ai-instructions-backup-0123456789abcdef0123456789abcdef'}
+    ) {
+        param($Leaf)
+        $residue = Join-Path $codexHome $Leaf
+        New-Item -ItemType Directory -Force -Path $residue | Out-Null
+        Set-TestText -Path (Join-Path $residue 'evidence.txt') -Value "preserve`n"
+
+        $result = Invoke-InstallExpectFailure -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+
+        $result.ExitCode | Should Not Be 0
+        $result.Output | Should Match ([regex]::Escape($residue))
+        (Get-AiInstructionsRefusalCode $result.Output) | Should Be interrupted-install
+        (Get-Content -Raw -LiteralPath (Join-Path $residue 'evidence.txt')) | Should Be "preserve`n"
+    }
+
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows) -and $null -ne (Get-Command powershell.exe -ErrorAction SilentlyContinue)) {
+        # Scenario: Windows PowerShell 5.1 starts the PowerShell-7-only installer.
+        # Purpose: Return the typed baseline refusal before creating Codex Home or transaction artifacts.
+        It 'InterT75_windows_powershell_5_1_returns_typed_runtime_baseline_refusal_without_mutation' {
+            $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome 2>&1
+            $LASTEXITCODE | Should Not Be 0
+            (Get-AiInstructionsRefusalCode ($output -join [Environment]::NewLine)) | Should Be runtime-baseline-unavailable
+            Test-Path -LiteralPath $codexHome | Should Be $false
+        }
+    }
+    }
+
+    # Scenario: One required capability has a real unavailable receipt with diagnostic evidence.
+    # Purpose: Map capability selection to a typed installer refusal without a production override switch.
+    It 'InterT76_maps_an_unavailable_capability_receipt_to_a_typed_refusal' {
+        $module=Import-Module (Join-Path $repositoryRoot 'scripts\ai-instructions-install-transaction.psm1') -Force -PassThru
+        $names=@('directory-lease','file-lease','file-identity','lock','publication','owned-file-removal','permissions','directory-publication')
+        $receipt=[pscustomobject]@{capabilities=@($names|ForEach-Object{[pscustomobject]@{name=$_;status=$(if($_ -ceq 'publication'){'unavailable'}else{'available'});evidence=@("probe evidence for $_")}})}
+        $caught=$null
+        try{& $module {param($value)Assert-AiInstructionsInstallerCapabilities -Receipt $value} $receipt|Out-Null}catch{$caught=$_}
+        $caught|Should Not BeNullOrEmpty
+        (Get-AiInstructionsRefusalCode $caught)|Should Be capability-unavailable
+        $caught.Exception.Message|Should Match 'publication=unavailable: probe evidence for publication'
+    }
+
+    # Scenario: The immutable installer source closure has a missing file or a bound hash mismatch.
+    # Purpose: Return the D16 closure-invalid code before importing candidate runtime code or mutating Codex Home.
+    It 'InterT80_refuses_an_invalid_installer_source_closure_without_mutation' -TestCases @(
+        @{Variant='missing'},
+        @{Variant='hash-mismatch'}
+    ) {
+        param($Variant)
+        $candidateRoot=Join-Path $TestDrive ("closure-invalid-$Variant-"+[Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $candidateRoot|Out-Null
+        Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts'),(Join-Path $repositoryRoot 'catalog') -Destination $candidateRoot -Recurse
+        foreach($leaf in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json')){
+            Copy-Item -LiteralPath (Join-Path $repositoryRoot $leaf) -Destination (Join-Path $candidateRoot $leaf)
+        }
+        $boundFile=Join-Path $candidateRoot 'scripts\platform\Windows.psm1'
+        if($Variant -ceq 'missing'){Remove-Item -LiteralPath $boundFile -Force}
+        else{[IO.File]::AppendAllText($boundFile,"`n# invalid closure fixture`n",[Text.UTF8Encoding]::new($false))}
+        $archivePath=Join-Path $TestDrive ("closure-invalid-$Variant.zip")
+        $archiveSha256=New-InstallerSourceArchive -SourceRoot $candidateRoot -ArchivePath $archivePath
+        $sourceCommit=(@(& git -C $repositoryRoot rev-parse HEAD)-join '').Trim()
+        $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:InstallScript,'-RepositoryRoot',$repositoryRoot,'-CodexHome',$codexHome,'-Acquisition','github-codeload','-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git','-SourceCommit',$sourceCommit,'-ArchiveSha256',$archiveSha256,'-SourceArchivePath',$archivePath)
+        $output=& $script:TestPowerShellExecutable @arguments 2>&1
+        $LASTEXITCODE|Should Not Be 0
+        (Get-AiInstructionsRefusalCode ($output-join[Environment]::NewLine))|Should Be closure-invalid
+        Test-Path -LiteralPath $codexHome|Should Be $false
+    }
+
+    # Register only on Unix because directory publication is deliberately deferred there.
+    if (-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+        # Scenario: The installer runs on a Linux or macOS Core host without directory publication.
+        # Purpose: Refuse with capability evidence before creating or changing Codex Home.
+        It 'InterT79_unix_refuses_unavailable_directory_publication_without_mutation' {
+            $result=Invoke-InstallExpectFailure -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+            $result.ExitCode|Should Not Be 0
+            (Get-AiInstructionsRefusalCode $result.Output)|Should Be capability-unavailable
+            $result.Output|Should Match 'directory-publication'
+            Test-Path -LiteralPath $codexHome|Should Be $false
+        }
+    }
+
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+    # Scenario: Each failpoint grammar family kills a subprocess at a durable install or recovery boundary.
+    # Purpose: Stop after recovery, prove one complete original/applied state, then install and prove an identity-stable rerun.
+    It 'InterT77_recovers_the_install_journal_failpoint_matrix_to_an_idempotent_complete_state' -TestCases @(
+        @{Failpoint='after-recovery-before-install';PreCrash=$null;Fresh=$true;ExpectedRecovery='no-transaction';ExpectedPhase=$null;ExpectedFinal='original'},
+        @{Failpoint='after-journal-prepared';PreCrash=$null;Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='prepared';ExpectedFinal='original'},
+        @{Failpoint='after-journal-stage-flush';PreCrash=$null;Fresh=$false;ExpectedRecovery='purge-orphan';ExpectedPhase=$null;ExpectedFinal='original'},
+        @{Failpoint='after-journal-publish-before-parent-flush';PreCrash=$null;Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='prepared';ExpectedFinal='original'},
+        @{Failpoint='before-operation-1';PreCrash=$null;Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='applying';ExpectedFinal='original'},
+        @{Failpoint='before-operation-5';PreCrash=$null;Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='applying';ExpectedFinal='original'},
+        @{Failpoint='before-operation-6';PreCrash=$null;Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='applying';ExpectedFinal='original'},
+        @{Failpoint='after-original-to-backup-5';PreCrash=$null;Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='applying';ExpectedFinal='original'},
+        @{Failpoint='after-operation-1-before-journal';PreCrash=$null;Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='applying';ExpectedFinal='original'},
+        @{Failpoint='after-operation-5-before-journal';PreCrash=$null;Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='applying';ExpectedFinal='original'},
+        @{Failpoint='after-operation-6-before-journal';PreCrash=$null;Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='applying';ExpectedFinal='original'},
+        @{Failpoint='after-operation-1';PreCrash=$null;Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='applying';ExpectedFinal='original'},
+        @{Failpoint='after-operation-5';PreCrash=$null;Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='applying';ExpectedFinal='original'},
+        @{Failpoint='after-operation-6';PreCrash=$null;Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='applying';ExpectedFinal='original'},
+        @{Failpoint='after-committed-before-cleanup';PreCrash=$null;Fresh=$false;ExpectedRecovery='none';ExpectedPhase='committed';ExpectedFinal='applied'},
+        @{Failpoint='before-cleanup-op-01-bootstrap.backup';PreCrash=$null;Fresh=$false;ExpectedRecovery='none';ExpectedPhase='committed';ExpectedFinal='applied'},
+        @{Failpoint='after-cleanup-op-01-bootstrap.backup';PreCrash=$null;Fresh=$false;ExpectedRecovery='none';ExpectedPhase='committed';ExpectedFinal='applied'},
+        @{Failpoint='before-cleanup-op-05-runtime.backup';PreCrash=$null;Fresh=$false;ExpectedRecovery='none';ExpectedPhase='committed';ExpectedFinal='applied'},
+        @{Failpoint='during-cleanup-op-05-runtime.backup';PreCrash=$null;Fresh=$false;ExpectedRecovery='none';ExpectedPhase='committed';ExpectedFinal='applied'},
+        @{Failpoint='after-cleanup-op-05-runtime.backup';PreCrash=$null;Fresh=$false;ExpectedRecovery='none';ExpectedPhase='committed';ExpectedFinal='applied'},
+        @{Failpoint='after-rollback-operation-1';PreCrash='after-operation-1-before-journal';Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='rolling-back';ExpectedFinal='original'},
+        @{Failpoint='after-rollback-operation-5';PreCrash='after-operation-5-before-journal';Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='rolling-back';ExpectedFinal='original'},
+        @{Failpoint='after-rollback-operation-6';PreCrash='after-operation-6-before-journal';Fresh=$false;ExpectedRecovery='roll-back';ExpectedPhase='rolling-back';ExpectedFinal='original'},
+        @{Failpoint='after-operation-1-before-journal';PreCrash=$null;Fresh=$true;ExpectedRecovery='roll-back';ExpectedPhase='applying';ExpectedFinal='original'},
+        @{Failpoint='after-operation-5-before-journal';PreCrash=$null;Fresh=$true;ExpectedRecovery='roll-back';ExpectedPhase='applying';ExpectedFinal='original'}
+    ) {
+        param($Failpoint,$PreCrash,$Fresh,$ExpectedRecovery,$ExpectedPhase,$ExpectedFinal)
+        if(-not$Fresh){
+            Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome|Out-Null
+            Set-TestJson -Path (Join-Path $codexHome 'hooks.json') -Document ([ordered]@{hooks=[ordered]@{SessionStart=@([ordered]@{matcher='startup';hooks=@([ordered]@{type='command';command="powershell.exe -File `"$(Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1')`""})})}})
+        }
+        $originalSnapshot=Get-InstallerStateSnapshot -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $candidateRoot=Join-Path $TestDrive ("failpoint-candidate-"+[Guid]::NewGuid().ToString('N'))
+        New-InstallerFailpointCandidate -SourceRoot $repositoryRoot -DestinationRoot $candidateRoot
+        $archivePath=Join-Path $TestDrive ("failpoint-source-"+[Guid]::NewGuid().ToString('N')+'.zip')
+        $archiveSha256=New-InstallerSourceArchive -SourceRoot $candidateRoot -ArchivePath $archivePath
+        $sourceCommit=(@(& git -C $repositoryRoot rev-parse HEAD)-join '').Trim()
+        $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:InstallScript,'-RepositoryRoot',$repositoryRoot,'-CodexHome',$codexHome,'-Acquisition','github-codeload','-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git','-SourceCommit',$sourceCommit,'-ArchiveSha256',$archiveSha256,'-SourceArchivePath',$archivePath)
+        $invokeCrash={param($Name)$saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT;try{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$Name;& $script:TestPowerShellExecutable @arguments 2>&1|Out-Null;return $LASTEXITCODE}finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}}
+        if($null-ne$PreCrash){(& $invokeCrash $PreCrash)|Should Not Be 0}
+        (& $invokeCrash $Failpoint)|Should Not Be 0
+        $recoveryState=Get-InstallerTransactionRecoveryState -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $recoveryState.RecoveryAction|Should Be $ExpectedRecovery
+        $recoveryState.JournalPhase|Should Be $ExpectedPhase
+        $appliedSnapshot=Get-InstallerAppliedSnapshotFromTransaction -CodexHome $codexHome -OriginalSnapshot $originalSnapshot
+        (& $invokeCrash 'after-recovery-before-install')|Should Not Be 0
+        @(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Force -ErrorAction SilentlyContinue).Count|Should Be 0
+        $recoveredSnapshot=Get-InstallerStateSnapshot -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        if($ExpectedFinal-ceq'original'){$recoveredSnapshot|Should Be $originalSnapshot}
+        else{
+            $ExpectedFinal|Should Be 'applied'
+            $appliedSnapshot|Should Not BeNullOrEmpty
+            $recoveredSnapshot|Should Be $appliedSnapshot
+        }
+
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{Remove-Item Env:\AI_INSTRUCTIONS_INSTALL_FAILPOINT -ErrorAction SilentlyContinue;$installOutput=& $script:TestPowerShellExecutable @arguments 2>&1;$installExit=$LASTEXITCODE}
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+        $installExit|Should Be 0
+        $stableMarkerSources=[ordered]@{
+            'bootstrap-ai-instructions.ps1'='bootstrap-ai-instructions-installed.ps1'
+            'update-ai-instructions.ps1'='update-ai-instructions.ps1'
+            'update-agent-environment.ps1'='update-agent-environment.ps1'
+            'cleanup-ai-instructions-pollution.ps1'='cleanup-ai-instructions-pollution.ps1'
+        }
+        foreach($relative in @($stableMarkerSources.Keys)){
+            (Get-Content -Raw -LiteralPath (Join-Path $codexHome "hooks\$relative"))|Should Match ([regex]::Escape("# failpoint candidate: $($stableMarkerSources[$relative])"))
+        }
+        (Get-Content -Raw -LiteralPath (Join-Path $codexHome 'hooks\ai-instructions-runtime\safe-zip.psm1'))|Should Match '# failpoint candidate: safe-zip\.psm1'
+        $before=Get-InstallerStateSnapshot -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{Remove-Item Env:\AI_INSTRUCTIONS_INSTALL_FAILPOINT -ErrorAction SilentlyContinue;$idempotentOutput=& $script:TestPowerShellExecutable @arguments 2>&1;$idempotentExit=$LASTEXITCODE}finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+        $idempotentExit|Should Be 0
+        (Get-InstallerStateSnapshot -RepositoryRoot $repositoryRoot -CodexHome $codexHome)|Should Be $before
+        @(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Force -ErrorAction SilentlyContinue).Count|Should Be 0
+    }
+
+    # Scenario: A create-file crash is followed by an external replacement of the target with a directory.
+    # Purpose: Refuse the type-confused observation and preserve both the external target and transaction evidence.
+    It 'InterT81_recovery_refuses_a_create_file_target_replaced_by_a_directory' {
+        $archivePath=Join-Path $TestDrive 'type-confusion-source.zip'
+        $archiveSha256=New-InstallerSourceArchive -SourceRoot $repositoryRoot -ArchivePath $archivePath
+        $sourceCommit=(@(& git -C $repositoryRoot rev-parse HEAD)-join '').Trim()
+        $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:InstallScript,'-RepositoryRoot',$repositoryRoot,'-CodexHome',$codexHome,'-Acquisition','github-codeload','-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git','-SourceCommit',$sourceCommit,'-ArchiveSha256',$archiveSha256,'-SourceArchivePath',$archivePath)
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT='after-operation-1-before-journal';& $script:TestPowerShellExecutable @arguments 2>&1|Out-Null;$crashExit=$LASTEXITCODE}
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+        $crashExit|Should Not Be 0
+        $target=Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
+        Remove-Item -LiteralPath $target -Force
+        New-Item -ItemType Directory -Path $target|Out-Null
+        Set-TestText -Path (Join-Path $target 'external.txt') -Value "external`n"
+        $transaction=@(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Directory -Force)
+        $transaction.Count|Should Be 1
+        $evidenceBefore=@(Get-ChildItem -LiteralPath $transaction[0].FullName -Force -Recurse|ForEach-Object FullName)
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{Remove-Item Env:\AI_INSTRUCTIONS_INSTALL_FAILPOINT -ErrorAction SilentlyContinue;$output=& $script:TestPowerShellExecutable @arguments 2>&1;$exitCode=$LASTEXITCODE}
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+        $exitCode|Should Not Be 0
+        (Get-AiInstructionsRefusalCode ($output-join[Environment]::NewLine))|Should Be interrupted-install
+        Test-Path -LiteralPath (Join-Path $target 'external.txt') -PathType Leaf|Should Be $true
+        @(Get-ChildItem -LiteralPath $transaction[0].FullName -Force -Recurse|ForEach-Object FullName)|Should Be $evidenceBefore
+    }
+
+    # Scenario: A pending write-file already displaced its original into backup, then an external writer replaces the published target before the journal records applied.
+    # Purpose: Refuse recovery without mutating any target, the identity-bound original backup, or the durable journal evidence.
+    It 'InterT82_refuses_a_pending_write_with_a_valid_original_backup_and_external_target' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome|Out-Null
+        $candidateRoot=Join-Path $TestDrive ('valid-backup-external-'+[Guid]::NewGuid().ToString('N'))
+        New-InstallerFailpointCandidate -SourceRoot $repositoryRoot -DestinationRoot $candidateRoot
+        $archivePath=Join-Path $TestDrive ('valid-backup-external-'+[Guid]::NewGuid().ToString('N')+'.zip')
+        $archiveSha256=New-InstallerSourceArchive -SourceRoot $candidateRoot -ArchivePath $archivePath
+        $sourceCommit=(@(& git -C $repositoryRoot rev-parse HEAD)-join '').Trim()
+        $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:InstallScript,'-RepositoryRoot',$repositoryRoot,'-CodexHome',$codexHome,'-Acquisition','github-codeload','-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git','-SourceCommit',$sourceCommit,'-ArchiveSha256',$archiveSha256,'-SourceArchivePath',$archivePath)
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT='after-operation-1-before-journal';& $script:TestPowerShellExecutable @arguments 2>&1|Out-Null;$crashExit=$LASTEXITCODE}
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+        $crashExit|Should Not Be 0
+
+        $recoveryState=Get-InstallerTransactionRecoveryState -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $operation=@($recoveryState.Journal.operations|Where-Object sequence -eq 1)[0]
+        $operation.state|Should Be 'pending'
+        $operation.backupLeaf|Should Not BeNullOrEmpty
+        $target=Join-Path $codexHome ($operation.targetRelativePath.Replace('/',[IO.Path]::DirectorySeparatorChar))
+        Set-TestText -Path $target -Value "# external replacement after original backup`n"
+        $backup=Join-Path $recoveryState.TransactionPath ([string]$operation.backupLeaf)
+        Test-Path -LiteralPath $backup -PathType Leaf|Should Be $true
+
+        $targetsBefore=Get-InstallerStateSnapshot -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $backupBefore=[Convert]::ToBase64String([IO.File]::ReadAllBytes($backup))
+        $journalPath=Join-Path $recoveryState.TransactionPath 'journal.json'
+        $journalBefore=[Convert]::ToBase64String([IO.File]::ReadAllBytes($journalPath))
+        $entriesBefore=@(Get-ChildItem -LiteralPath $recoveryState.TransactionPath -Force -Recurse|ForEach-Object{$_.FullName.Substring($recoveryState.TransactionPath.Length)})
+
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{Remove-Item Env:\AI_INSTRUCTIONS_INSTALL_FAILPOINT -ErrorAction SilentlyContinue;$output=& $script:TestPowerShellExecutable @arguments 2>&1;$exitCode=$LASTEXITCODE}
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+
+        $exitCode|Should Not Be 0
+        (Get-AiInstructionsRefusalCode ($output-join[Environment]::NewLine))|Should Be interrupted-install
+        (Get-InstallerStateSnapshot -RepositoryRoot $repositoryRoot -CodexHome $codexHome)|Should Be $targetsBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($backup))|Should Be $backupBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($journalPath))|Should Be $journalBefore
+        @(Get-ChildItem -LiteralPath $recoveryState.TransactionPath -Force -Recurse|ForEach-Object{$_.FullName.Substring($recoveryState.TransactionPath.Length)})|Should Be $entriesBefore
+    }
+
+    # Scenario: Recovery classifies an applied write-file target, then an external writer replaces it before restore-original runs.
+    # Purpose: Bind rollback publication to operation.applied so the external bytes and permissions survive and transaction evidence remains available.
+    It 'InterT84_refuses_a_rollback_target_replaced_after_recovery_observation' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome|Out-Null
+        $candidateRoot=Join-Path $TestDrive ('rollback-cas-'+[Guid]::NewGuid().ToString('N'))
+        New-InstallerFailpointCandidate -SourceRoot $repositoryRoot -DestinationRoot $candidateRoot
+        $archivePath=Join-Path $TestDrive ('rollback-cas-'+[Guid]::NewGuid().ToString('N')+'.zip')
+        $archiveSha256=New-InstallerSourceArchive -SourceRoot $candidateRoot -ArchivePath $archivePath
+        $sourceCommit=(@(& git -C $repositoryRoot rev-parse HEAD)-join'').Trim()
+        $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:InstallScript,'-RepositoryRoot',$repositoryRoot,'-CodexHome',$codexHome,'-Acquisition','github-codeload','-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git','-SourceCommit',$sourceCommit,'-ArchiveSha256',$archiveSha256,'-SourceArchivePath',$archivePath)
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT='after-operation-1-before-journal';& $script:TestPowerShellExecutable @arguments 2>&1|Out-Null;$crashExit=$LASTEXITCODE}
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+        $crashExit|Should Not Be 0
+        $state=Get-InstallerTransactionRecoveryState -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $state.RecoveryAction|Should Be 'roll-back'
+        $operation=@($state.Journal.operations|Where-Object sequence -eq 1)[0]
+        $target=Join-Path $codexHome ([string]$operation.targetRelativePath).Replace('/',[IO.Path]::DirectorySeparatorChar)
+        $external="# external rollback target`n"
+
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{
+            Remove-Item Env:\AI_INSTRUCTIONS_INSTALL_FAILPOINT -ErrorAction SilentlyContinue
+            $result=Invoke-InstallerRecoveryMutationProbe -InstallerScript (Resolve-Path -LiteralPath $script:InstallScript).Path -RepositoryRoot $repositoryRoot -CodexHome $codexHome -SourceCommit $sourceCommit -ArchiveSha256 $archiveSha256 -ArchivePath $archivePath -MutationPath $target -ExternalText $external -ExternalReadOnly $true -ProbeRoot $TestDrive
+        }
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+
+        $result|Should Match '(?m)^1\r?$'
+        (Get-AiInstructionsRefusalCode (Remove-TestAnsiControlSequence $result))|Should Be interrupted-install
+        (Get-Content -Raw -LiteralPath $target)|Should Be $external
+        (Get-Item -Force -LiteralPath $target).IsReadOnly|Should Be $true
+        Test-Path -LiteralPath (Join-Path $state.TransactionPath 'journal.json') -PathType Leaf|Should Be $true
+        Test-Path -LiteralPath (Join-Path $state.TransactionPath ([string]$operation.backupLeaf)) -PathType Leaf|Should Be $true
+    }
+
+    # Scenario: Recovery selects restore-permissions for original bytes, then an external writer replaces the target before the permission step.
+    # Purpose: Verify journal original identity and content through the target lease before changing permissions, leaving the replacement untouched on refusal.
+    It 'InterT85_refuses_permission_restore_for_a_replaced_target' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome|Out-Null
+        $candidateRoot=Join-Path $TestDrive ('permission-cas-'+[Guid]::NewGuid().ToString('N'))
+        New-InstallerFailpointCandidate -SourceRoot $repositoryRoot -DestinationRoot $candidateRoot
+        $archivePath=Join-Path $TestDrive ('permission-cas-'+[Guid]::NewGuid().ToString('N')+'.zip')
+        $archiveSha256=New-InstallerSourceArchive -SourceRoot $candidateRoot -ArchivePath $archivePath
+        $sourceCommit=(@(& git -C $repositoryRoot rev-parse HEAD)-join'').Trim()
+        $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:InstallScript,'-RepositoryRoot',$repositoryRoot,'-CodexHome',$codexHome,'-Acquisition','github-codeload','-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git','-SourceCommit',$sourceCommit,'-ArchiveSha256',$archiveSha256,'-SourceArchivePath',$archivePath)
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT='after-journal-prepared';& $script:TestPowerShellExecutable @arguments 2>&1|Out-Null;$crashExit=$LASTEXITCODE}
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+        $crashExit|Should Not Be 0
+        $state=Get-InstallerTransactionRecoveryState -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $operation=@($state.Journal.operations|Where-Object sequence -eq 1)[0]
+        $target=Join-Path $codexHome ([string]$operation.targetRelativePath).Replace('/',[IO.Path]::DirectorySeparatorChar)
+        (Get-Item -Force -LiteralPath $target).IsReadOnly=$true
+        (Get-InstallerTransactionRecoveryState -RepositoryRoot $repositoryRoot -CodexHome $codexHome).RecoveryAction|Should Be 'roll-back'
+        $external="# external permission target`n"
+
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{
+            Remove-Item Env:\AI_INSTRUCTIONS_INSTALL_FAILPOINT -ErrorAction SilentlyContinue
+            $result=Invoke-InstallerRecoveryMutationProbe -InstallerScript (Resolve-Path -LiteralPath $script:InstallScript).Path -RepositoryRoot $repositoryRoot -CodexHome $codexHome -SourceCommit $sourceCommit -ArchiveSha256 $archiveSha256 -ArchivePath $archivePath -MutationPath $target -ExternalText $external -ExternalReadOnly $false -ProbeRoot $TestDrive
+        }
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+
+        $result|Should Match '(?m)^1\r?$'
+        (Get-AiInstructionsRefusalCode (Remove-TestAnsiControlSequence $result))|Should Be interrupted-install
+        (Get-Content -Raw -LiteralPath $target)|Should Be $external
+        (Get-Item -Force -LiteralPath $target).IsReadOnly|Should Be $false
+        Test-Path -LiteralPath (Join-Path $state.TransactionPath 'journal.json') -PathType Leaf|Should Be $true
+    }
+
+    # Scenario: A committed transaction is ready for terminal cleanup, then an external writer replaces an original backup after the recovery plan is built.
+    # Purpose: Delete only a backup whose full journal-bound identity and content still match, preserving a replacement and all recovery evidence on refusal.
+    It 'InterT86_refuses_cleanup_of_a_replaced_transaction_artifact' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome|Out-Null
+        $candidateRoot=Join-Path $TestDrive ('cleanup-cas-'+[Guid]::NewGuid().ToString('N'))
+        New-InstallerFailpointCandidate -SourceRoot $repositoryRoot -DestinationRoot $candidateRoot
+        $archivePath=Join-Path $TestDrive ('cleanup-cas-'+[Guid]::NewGuid().ToString('N')+'.zip')
+        $archiveSha256=New-InstallerSourceArchive -SourceRoot $candidateRoot -ArchivePath $archivePath
+        $sourceCommit=(@(& git -C $repositoryRoot rev-parse HEAD)-join'').Trim()
+        $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:InstallScript,'-RepositoryRoot',$repositoryRoot,'-CodexHome',$codexHome,'-Acquisition','github-codeload','-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git','-SourceCommit',$sourceCommit,'-ArchiveSha256',$archiveSha256,'-SourceArchivePath',$archivePath)
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT='after-committed-before-cleanup';& $script:TestPowerShellExecutable @arguments 2>&1|Out-Null;$crashExit=$LASTEXITCODE}
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+        $crashExit|Should Not Be 0
+        $state=Get-InstallerTransactionRecoveryState -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $state.JournalPhase|Should Be committed
+        $operation=@($state.Journal.operations|Where-Object{$null-ne$_.backupLeaf -and [string]$_.kind -eq 'write-file'}|Select-Object -First 1)
+        $operation.Count|Should Be 1
+        $backup=Join-Path $state.TransactionPath ([string]$operation[0].backupLeaf)
+        $external="# external cleanup artifact`n"
+        $targetsBefore=Get-InstallerStateSnapshot -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{
+            Remove-Item Env:\AI_INSTRUCTIONS_INSTALL_FAILPOINT -ErrorAction SilentlyContinue
+            $result=Invoke-InstallerRecoveryMutationProbe -InstallerScript (Resolve-Path -LiteralPath $script:InstallScript).Path -RepositoryRoot $repositoryRoot -CodexHome $codexHome -SourceCommit $sourceCommit -ArchiveSha256 $archiveSha256 -ArchivePath $archivePath -MutationPath $backup -ExternalText $external -ExternalReadOnly $true -ProbeRoot $TestDrive
+        }
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+
+        $result|Should Match '(?m)^1\r?$'
+        (Get-AiInstructionsRefusalCode (Remove-TestAnsiControlSequence $result))|Should Be interrupted-install
+        (Get-Content -Raw -LiteralPath $backup)|Should Be $external
+        (Get-Item -Force -LiteralPath $backup).IsReadOnly|Should Be $true
+        (Get-InstallerStateSnapshot -RepositoryRoot $repositoryRoot -CodexHome $codexHome)|Should Be $targetsBefore
+        Test-Path -LiteralPath (Join-Path $state.TransactionPath 'journal.json') -PathType Leaf|Should Be $true
+    }
+
+    # Scenario: Recovery classifies a committed journal store, then an external writer replaces journal.json with the same valid bytes on a different inode before cleanup starts.
+    # Purpose: Bind terminal cleanup to the classified journal identity as well as its content, refusing without deleting the replacement or any transaction evidence.
+    It 'InterT87_refuses_cleanup_of_a_same_bytes_replaced_journal_store_file' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome|Out-Null
+        $candidateRoot=Join-Path $TestDrive ('journal-store-cas-'+[Guid]::NewGuid().ToString('N'))
+        New-InstallerFailpointCandidate -SourceRoot $repositoryRoot -DestinationRoot $candidateRoot
+        $archivePath=Join-Path $TestDrive ('journal-store-cas-'+[Guid]::NewGuid().ToString('N')+'.zip')
+        $archiveSha256=New-InstallerSourceArchive -SourceRoot $candidateRoot -ArchivePath $archivePath
+        $sourceCommit=(@(& git -C $repositoryRoot rev-parse HEAD)-join'').Trim()
+        $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:InstallScript,'-RepositoryRoot',$repositoryRoot,'-CodexHome',$codexHome,'-Acquisition','github-codeload','-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git','-SourceCommit',$sourceCommit,'-ArchiveSha256',$archiveSha256,'-SourceArchivePath',$archivePath)
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT='after-committed-before-cleanup';& $script:TestPowerShellExecutable @arguments 2>&1|Out-Null;$crashExit=$LASTEXITCODE}
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+        $crashExit|Should Not Be 0
+        $state=Get-InstallerTransactionRecoveryState -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $state.JournalPhase|Should Be committed
+        $journalPath=Join-Path $state.TransactionPath 'journal.json'
+        [byte[]]$journalBytes=[IO.File]::ReadAllBytes($journalPath)
+        $journalText=[Text.UTF8Encoding]::new($false,$true).GetString($journalBytes)
+        $transactionRelative='.ai-instructions-txn/'+(Split-Path -Leaf $state.TransactionPath)
+        $transactionLease=Open-PlatformDirectory -Root $codexHome -RelativePath $transactionRelative
+        try{$originalState=Get-AiInstructionsInstallFileState -ParentLease $transactionLease -Leaf journal.json -LiteralPath $journalPath -PlatformOs windows}
+        finally{$transactionLease.Dispose()}
+        $entriesBefore=@(Get-ChildItem -LiteralPath $state.TransactionPath -Force -Recurse|ForEach-Object{$_.FullName.Substring($state.TransactionPath.Length)})
+
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{
+            Remove-Item Env:\AI_INSTRUCTIONS_INSTALL_FAILPOINT -ErrorAction SilentlyContinue
+            $result=Invoke-InstallerRecoveryMutationProbe -InstallerScript (Resolve-Path -LiteralPath $script:InstallScript).Path -RepositoryRoot $repositoryRoot -CodexHome $codexHome -SourceCommit $sourceCommit -ArchiveSha256 $archiveSha256 -ArchivePath $archivePath -MutationPath $journalPath -ExternalText $journalText -ExternalReadOnly $false -ProbeRoot $TestDrive
+        }
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+
+        $result|Should Match '(?m)^1\r?$'
+        (Get-AiInstructionsRefusalCode (Remove-TestAnsiControlSequence $result))|Should Be interrupted-install
+        (ConvertTo-TestComparableText $result)|Should Match ([regex]::Escape((ConvertTo-TestComparableText $state.TransactionPath)))
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($journalPath))|Should Be ([Convert]::ToBase64String($journalBytes))
+        $transactionLease=Open-PlatformDirectory -Root $codexHome -RelativePath $transactionRelative
+        try{$replacementState=Get-AiInstructionsInstallFileState -ParentLease $transactionLease -Leaf journal.json -LiteralPath $journalPath -PlatformOs windows}
+        finally{$transactionLease.Dispose()}
+        ($replacementState.identity|ConvertTo-Json -Compress)|Should Not Be ($originalState.identity|ConvertTo-Json -Compress)
+        @(Get-ChildItem -LiteralPath $state.TransactionPath -Force -Recurse|ForEach-Object{$_.FullName.Substring($state.TransactionPath.Length)})|Should Be $entriesBefore
+    }
+
+    # Scenario: Recovery classifies a valid committed journal beside a UTF-8 journal.stage whose JSON is malformed.
+    # Purpose: Require journal.stage to be the current or next journal generation before cleanup, refusing and retaining all evidence otherwise.
+    It 'InterT88_refuses_cleanup_of_a_malformed_journal_stage_generation' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome|Out-Null
+        $candidateRoot=Join-Path $TestDrive ('journal-stage-generation-'+[Guid]::NewGuid().ToString('N'))
+        New-InstallerFailpointCandidate -SourceRoot $repositoryRoot -DestinationRoot $candidateRoot
+        $archivePath=Join-Path $TestDrive ('journal-stage-generation-'+[Guid]::NewGuid().ToString('N')+'.zip')
+        $archiveSha256=New-InstallerSourceArchive -SourceRoot $candidateRoot -ArchivePath $archivePath
+        $sourceCommit=(@(& git -C $repositoryRoot rev-parse HEAD)-join'').Trim()
+        $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:InstallScript,'-RepositoryRoot',$repositoryRoot,'-CodexHome',$codexHome,'-Acquisition','github-codeload','-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git','-SourceCommit',$sourceCommit,'-ArchiveSha256',$archiveSha256,'-SourceArchivePath',$archivePath)
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT='after-committed-before-cleanup';& $script:TestPowerShellExecutable @arguments 2>&1|Out-Null;$crashExit=$LASTEXITCODE}
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+        $crashExit|Should Not Be 0
+        $state=Get-InstallerTransactionRecoveryState -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $state.JournalPhase|Should Be committed
+        $stagePath=Join-Path $state.TransactionPath 'journal.stage'
+        $malformedStage="{malformed`n"
+        Set-TestText -Path $stagePath -Value $malformedStage
+        $entriesBefore=@(Get-ChildItem -LiteralPath $state.TransactionPath -Force -Recurse|ForEach-Object{$_.FullName.Substring($state.TransactionPath.Length)})
+
+        $output=& $script:TestPowerShellExecutable @arguments 2>&1
+        $recoveryExit=$LASTEXITCODE
+        $result=$output-join[Environment]::NewLine
+
+        $recoveryExit|Should Not Be 0
+        (Get-AiInstructionsRefusalCode (Remove-TestAnsiControlSequence $result))|Should Be interrupted-install
+        (ConvertTo-TestComparableText $result)|Should Match ([regex]::Escape((ConvertTo-TestComparableText $state.TransactionPath)))
+        (Get-Content -Raw -LiteralPath $stagePath)|Should Be $malformedStage
+        Test-Path -LiteralPath (Join-Path $state.TransactionPath 'journal.json') -PathType Leaf|Should Be $true
+        @(Get-ChildItem -LiteralPath $state.TransactionPath -Force -Recurse|ForEach-Object{$_.FullName.Substring($state.TransactionPath.Length)})|Should Be $entriesBefore
+    }
+
+
+    # Scenario: An existing read-only stable file is displaced, then the installer is interrupted after publishing its replacement.
+    # Purpose: Recovery must publish the read-only backup through a read lease and restore its exact bytes and ReadOnly attribute.
+    It 'InterT89_rolls_back_a_readonly_stable_file_after_an_operation_interrupt' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome|Out-Null
+        $stablePath=Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
+        [byte[]]$originalBytes=[IO.File]::ReadAllBytes($stablePath)
+        (Get-Item -Force -LiteralPath $stablePath).IsReadOnly=$true
+        $candidateRoot=Join-Path $TestDrive ('readonly-rollback-'+[Guid]::NewGuid().ToString('N'))
+        New-InstallerFailpointCandidate -SourceRoot $repositoryRoot -DestinationRoot $candidateRoot
+        $archivePath=Join-Path $TestDrive ('readonly-rollback-'+[Guid]::NewGuid().ToString('N')+'.zip')
+        $archiveSha256=New-InstallerSourceArchive -SourceRoot $candidateRoot -ArchivePath $archivePath
+        $sourceCommit=(@(& git -C $repositoryRoot rev-parse HEAD)-join'').Trim()
+        $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:InstallScript,'-RepositoryRoot',$repositoryRoot,'-CodexHome',$codexHome,'-Acquisition','github-codeload','-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git','-SourceCommit',$sourceCommit,'-ArchiveSha256',$archiveSha256,'-SourceArchivePath',$archivePath)
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT='after-operation-1';& $script:TestPowerShellExecutable @arguments 2>&1|Out-Null;$crashExit=$LASTEXITCODE}
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+        $crashExit|Should Not Be 0
+        $state=Get-InstallerTransactionRecoveryState -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $operation=@($state.Journal.operations|Where-Object{[string]$_.targetRelativePath-ceq'hooks/bootstrap-ai-instructions.ps1'})
+        $operation.Count|Should Be 1
+        (Get-Item -Force -LiteralPath (Join-Path $state.TransactionPath ([string]$operation[0].backupLeaf))).IsReadOnly|Should Be $true
+
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT='after-recovery-before-install';& $script:TestPowerShellExecutable @arguments 2>&1|Out-Null;$recoveryExit=$LASTEXITCODE}
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+
+        $recoveryExit|Should Not Be 0
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($stablePath))|Should Be ([Convert]::ToBase64String($originalBytes))
+        (Get-Item -Force -LiteralPath $stablePath).IsReadOnly|Should Be $true
+        @(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Force -ErrorAction SilentlyContinue).Count|Should Be 0
+    }
+
+    # Scenario: A prepared rollback finds original bytes and identity on a target whose ReadOnly attribute drifted to true.
+    # Purpose: The restore-permissions step must reopen the read-only target without GENERIC_WRITE and restore the journal snapshot.
+    It 'InterT90_restores_permissions_on_a_readonly_target' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome|Out-Null
+        $stablePath=Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
+        [byte[]]$originalBytes=[IO.File]::ReadAllBytes($stablePath)
+        $candidateRoot=Join-Path $TestDrive ('readonly-permissions-'+[Guid]::NewGuid().ToString('N'))
+        New-InstallerFailpointCandidate -SourceRoot $repositoryRoot -DestinationRoot $candidateRoot
+        $archivePath=Join-Path $TestDrive ('readonly-permissions-'+[Guid]::NewGuid().ToString('N')+'.zip')
+        $archiveSha256=New-InstallerSourceArchive -SourceRoot $candidateRoot -ArchivePath $archivePath
+        $sourceCommit=(@(& git -C $repositoryRoot rev-parse HEAD)-join'').Trim()
+        $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:InstallScript,'-RepositoryRoot',$repositoryRoot,'-CodexHome',$codexHome,'-Acquisition','github-codeload','-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git','-SourceCommit',$sourceCommit,'-ArchiveSha256',$archiveSha256,'-SourceArchivePath',$archivePath)
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT='after-journal-prepared';& $script:TestPowerShellExecutable @arguments 2>&1|Out-Null;$crashExit=$LASTEXITCODE}
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+        $crashExit|Should Not Be 0
+        (Get-Item -Force -LiteralPath $stablePath).IsReadOnly=$true
+        (Get-InstallerTransactionRecoveryState -RepositoryRoot $repositoryRoot -CodexHome $codexHome).RecoveryAction|Should Be 'roll-back'
+
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT='after-recovery-before-install';& $script:TestPowerShellExecutable @arguments 2>&1|Out-Null;$recoveryExit=$LASTEXITCODE}
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+
+        $recoveryExit|Should Not Be 0
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($stablePath))|Should Be ([Convert]::ToBase64String($originalBytes))
+        (Get-Item -Force -LiteralPath $stablePath).IsReadOnly|Should Be $false
+        @(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Force -ErrorAction SilentlyContinue).Count|Should Be 0
+    }
+    }
+
+    # Register only on the native host because FileShare is the Windows lock interoperability protocol.
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+        # Scenario: The new platform lock and the legacy File.Open lock contend in both protocol directions.
+        # Purpose: Preserve FileShare.Read/None compatibility while migrating only the installer lock implementation.
+        It 'InterT78_preserves_windows_install_lock_interoperability_with_the_legacy_protocol' {
+            New-Item -ItemType Directory -Force -Path $codexHome|Out-Null
+            Import-Module (Join-Path $repositoryRoot 'scripts\platform-runtime.psd1') -Force
+            $root=Open-PlatformDirectory -Root $codexHome -RootOnly
+            $lease=Enter-PlatformLock -ParentLease $root -Leaf ai-instructions-install.lock -Mode Exclusive -Timeout ([TimeSpan]::Zero)
+            try{
+                $legacyCaught=$null
+                try{$legacy=[IO.File]::Open((Join-Path $codexHome 'ai-instructions-install.lock'),[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read);$legacy.Dispose()}catch{$legacyCaught=$_}
+                $legacyCaught|Should Not BeNullOrEmpty
+            }finally{$lease.Dispose();$root.Dispose()}
+            $legacy=[IO.File]::Open((Join-Path $codexHome 'ai-instructions-install.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+            try{$result=Invoke-InstallExpectFailure -RepositoryRoot $repositoryRoot -CodexHome $codexHome}finally{$legacy.Dispose()}
+            $result.ExitCode|Should Not Be 0
+            $result.Output|Should Match 'Another AI instructions installer is already running for this Codex Home\.'
+        }
     }
 }

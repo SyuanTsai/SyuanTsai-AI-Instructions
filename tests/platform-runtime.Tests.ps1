@@ -2492,16 +2492,17 @@ Describe 'Platform runtime contract' {
         }
     }
 
-    # Scenario: A Windows caller requires publication before Windows capability probing is exposed.
-    # Purpose: Preserve P7b's typed fail-closed capability receipt while Unix registers its native tests conditionally.
+    # Scenario: A Windows caller requires the durable file publication and owned-file removal primitives.
+    # Purpose: Bind availability to a live no-replace publication and tombstone-removal probe instead of OS inference.
     if ($IsWindows) {
-        It 'UnitT20_throws_a_typed_failure_when_a_required_capability_is_not_available' {
-            $caught=$null
-            try {Get-PlatformCapabilities -Required @('publication')|Out-Null}catch{$caught=$_}
-            $caught | Should Not BeNullOrEmpty
-            $caught.Exception.GetType().Name | Should Be 'PlatformCapabilityUnavailableException'
-            $caught.Exception.Capability | Should Be 'publication'
-            $caught.Exception.Platform | Should Be $script:ExpectedOs
+        It 'UnitT20_reports_windows_file_publication_from_native_probe_evidence' {
+            $receipt=Get-PlatformCapabilities -Required @('publication','owned-file-removal')
+            foreach($name in @('publication','owned-file-removal')){
+                $capability=@($receipt.capabilities|Where-Object name -ceq $name)
+                $capability.Count|Should Be 1
+                $capability[0].status|Should Be available
+                ($capability[0].evidence -join ' ')|Should Match 'confirmed.*durability'
+            }
         }
     }
 
@@ -2612,7 +2613,8 @@ Describe 'Platform runtime contract' {
         $entryPoints = @(
             @{ Path = 'scripts/Invoke-PesterShardProcess.ps1'; Function = 'Import-PesterShardRuntime'; Variable = 'manifestSha256' },
             @{ Path = 'scripts/Invoke-StandardValidation.ps1'; Function = 'Initialize-StandardValidationPlatformRuntime'; Variable = 'pin' },
-            @{ Path = 'scripts/StandardSemanticBridge.psm1'; Function = 'Initialize-StandardSemanticBridgePlatformRuntime'; Variable = 'pin' }
+            @{ Path = 'scripts/StandardSemanticBridge.psm1'; Function = 'Initialize-StandardSemanticBridgePlatformRuntime'; Variable = 'pin' },
+            @{ Path = 'scripts/install-ai-instructions-bootstrap.ps1'; Function = 'Assert-InstallerPlatformRuntimeSourceInventory'; Variable = 'expectedManifestSha256' }
         )
         foreach ($entryPoint in $entryPoints) {
             $tokens = $null
@@ -4730,6 +4732,16 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
                 & $windowsModule { param($NestedValue) $script:WindowsPublicationPreReopenTestHook=$NestedValue } $Value
             } $Hook
         }
+        function Set-P7WindowsPostRenamePermissionReadbackHook([AllowNull()][scriptblock]$Hook) {
+            $runtimeModule=@(Get-Module platform-runtime)[0]
+            if($null -eq $runtimeModule){throw 'The platform runtime module is not loaded.'}
+            & $runtimeModule {
+                param($Value)
+                $windowsModule=@(Get-Module -All Windows)[0]
+                if($null -eq $windowsModule){throw 'The nested Windows platform module is not loaded.'}
+                & $windowsModule { param($NestedValue) $script:WindowsPostRenamePermissionReadbackTestHook=$NestedValue } $Value
+            } $Hook
+        }
         function Set-P7WindowsPermissionMutationHook([AllowNull()][scriptblock]$Hook) {
             $field=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative].GetField('PermissionsMutationTestHook',[Reflection.BindingFlags]'Static,NonPublic')
             if($null -eq $field){throw 'The internal Windows permission mutation hook is unavailable.'}
@@ -4873,6 +4885,28 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             (Get-P7Identity $backup.Observation).fileId | Should Be $original.State.identity.fileId
             [IO.File]::ReadAllText((Join-Path $f.Root 'target/data')) | Should Be 'old'
         } finally { Close-P7Fixture $f @($backup,$stage.Lease,$original.Lease) }
+    }
+
+    # Scenario: A read-only displaced original is reopened with a read lease and used as the rollback publication stage.
+    # Purpose: Prove publication reacquires its own identity-bound mutation handle instead of requiring GENERIC_WRITE on the caller's stage lease.
+    It 'InterT135_restores_a_readonly_backup_from_a_read_stage_lease' {
+        $f=New-P7Fixture 'p7-read-stage-rollback';$original=$null;$stage=$null;$backup=$null;$restored=$null
+        try {
+            $original=New-P7File $f.Parent 'data' ([Text.Encoding]::UTF8.GetBytes('old'))
+            [void](Set-PlatformPermissions -Lease $original.Lease -Policy @{ReadOnly=$true})
+            $original.Lease.Dispose();$original.Lease=$null
+            $stage=New-P7File $f.Transaction 'new.stage' ([Text.Encoding]::UTF8.GetBytes('new'))
+            $applied=Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $original.State -DisplacedLeaf 'old.backup' -ExpectedStage $stage.Expected
+            $stage.Lease.Dispose();$stage.Lease=$null
+            $backup=Open-PlatformFile -ParentLease $f.Transaction -Leaf 'old.backup' -Access Read -CreateMode OpenExisting
+            $appliedState=[pscustomobject]@{exists=$true;sha256=$stage.Expected.sha256;length=$stage.Expected.length;identity=$applied.appliedIdentity}
+            [void](Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $backup -ExpectedState $appliedState -DisplacedLeaf 'new.stage' -ExpectedStage $original.State)
+            $backup=$null
+            $restored=Open-PlatformFile -ParentLease $f.Parent -Leaf 'data' -Access Read -CreateMode OpenExisting
+            [Text.Encoding]::UTF8.GetString($restored.ReadAllBytes(64)) | Should Be 'old'
+            (Get-PlatformPermissions $restored).readOnly | Should Be $true
+            (Get-P7Identity $restored.Observation).fileId | Should Be $original.State.identity.fileId
+        } finally { Close-P7Fixture $f @($restored,$backup,$stage.Lease,$original.Lease) }
     }
 
     # Scenario: A validated journal operation disagrees with its publication parameters.
@@ -5124,6 +5158,9 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             $caught.Exception.GetType().Name | Should Be 'PlatformVerificationException'
             $receipt=$caught.Exception.Data['Receipt'];$receipt | Should Not BeNullOrEmpty
             $receipt.displacedIdentity.fileId | Should Be $target.State.identity.fileId
+            $receipt.permissionsDrift.beforeSddl|Should Not BeNullOrEmpty
+            $receipt.permissionsDrift.afterSddl|Should Not BeNullOrEmpty
+            $caught.Exception.Message|Should Match 'before SDDL=.*after SDDL='
             Test-Path -LiteralPath (Join-Path $f.Root 'target-moved/data') | Should Be $false
             Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/removed.backup") | Should Be $true
         } finally { Set-P7WindowsPostRenameHook $null;Close-P7Fixture $f @($target.Lease) }
@@ -5590,6 +5627,23 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             (Test-P7EquivalentDacl $stageAfter.sddl $stageBefore.sddl) | Should Be $true
             Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/old.backup") | Should Be $false
         } finally { Set-P7WindowsDurabilityHook $null;Close-P7Fixture $f @($stage.Lease,$target.Lease) }
+    }
+
+    # Scenario: A read-only file needs its DACL and ReadOnly snapshot restored without requesting GENERIC_WRITE.
+    # Purpose: Give recovery a least-privilege permissions lease that opens read-only files and still supports the dedicated permission mutation path.
+    It 'InterT395_opens_readonly_files_for_permission_restore_without_generic_write' {
+        $f=New-P7Fixture 'p7-read-permissions';$file=$null;$permissionsLease=$null
+        try {
+            $file=New-P7File $f.Parent 'data' ([Text.Encoding]::UTF8.GetBytes('data'))
+            $before=Get-PlatformPermissions $file.Lease
+            [void](Set-PlatformPermissions -Lease $file.Lease -Policy @{ReadOnly=$true})
+            $file.Lease.Dispose();$file.Lease=$null
+            $permissionsLease=Open-PlatformFile -ParentLease $f.Parent -Leaf 'data' -Access ReadPermissions -CreateMode OpenExisting
+            $restored=Set-PlatformPermissions -Lease $permissionsLease -Snapshot $before
+            $restored.readOnly | Should Be $false
+            (Test-P7EquivalentDacl $restored.sddl $before.sddl) | Should Be $true
+            [Text.Encoding]::UTF8.GetString($permissionsLease.ReadAllBytes(64)) | Should Be 'data'
+        } finally { Close-P7Fixture $f @($permissionsLease,$file.Lease) }
     }
 
     # Scenario: The file owner is denied WRITE_DAC but retains read-control and attribute read/write access.
@@ -6289,6 +6343,103 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/journal.json")|Should Be $false
         }finally{if($null -ne $secondLease){$secondLease.Dispose()};Close-P7Fixture $f @($stage.Lease)}
     }
+
+    # Scenario: A file inherits its DACL from the target parent, is tombstoned into the private transaction directory, and is then restored by rollback.
+    # Purpose: Accept transaction-directory inheritance drift after rename while restoring the durable journal permission snapshot on the original target.
+    It 'InterT850_restores_an_inherited_DACL_after_tombstone_rollback' {
+        $f=New-P7Fixture 'p7d2-inherited-tombstone-rollback';$target=$null;$tombstone=$null;$restored=$null
+        try{
+            [void](Set-P7InheritanceFixture $f)
+            $target=New-P7File $f.Parent 'inherited.txt' ([Text.Encoding]::UTF8.GetBytes('inherited-content'))
+            $snapshot=Get-PlatformPermissions $target.Lease
+            $target.Lease.Dispose();$target.Lease=$null
+            $removed=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            $journal=New-P7JournalOperation remove-file tombstone-rename 'target/inherited.txt' $null 'inherited.backup' $target.State $removed $snapshot
+
+            $receipt=Remove-PlatformOwnedFile -ParentLease $f.Parent -Leaf 'inherited.txt' -ExpectedState $target.State -TransactionLease $f.Transaction -TombstoneLeaf 'inherited.backup' -Journal $journal
+            Test-Path -LiteralPath (Join-Path $f.Root 'target/inherited.txt')|Should Be $false
+            $receipt.backupIdentity.fileId|Should Be $target.State.identity.fileId
+
+            $tombstone=Open-PlatformFile -ParentLease $f.Transaction -Leaf 'inherited.backup' -Access ReadWrite -CreateMode OpenExisting
+            $missing=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            Publish-PlatformFile -ParentLease $f.Parent -Leaf 'inherited.txt' -TransactionLease $f.Transaction -StageLease $tombstone -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $target.State -NoReplace|Out-Null
+            $tombstone=$null
+            $restored=Open-PlatformFile -ParentLease $f.Parent -Leaf 'inherited.txt' -Access ReadWrite -CreateMode OpenExisting
+            Set-PlatformPermissions -Lease $restored -Snapshot $snapshot|Out-Null
+            $restoredSnapshot=Get-PlatformPermissions $restored
+
+            (Test-P7EquivalentDacl $restoredSnapshot.sddl $snapshot.sddl)|Should Be $true
+            $restoredSnapshot.readOnly|Should Be $snapshot.readOnly
+            (Get-P7Identity (Assert-PlatformFileIdentity -Lease $restored -Expected $restored.Observation -SingleLink -VerifyPath)).fileId|Should Be $target.State.identity.fileId
+        }finally{Set-P7WindowsPostRenamePermissionReadbackHook $null;Close-P7Fixture $f @($restored,$tombstone,$target.Lease)}
+    }
+
+    # Scenario: The rename-after readback hook reports a different tombstone DACL while identity, bytes, and link count remain unchanged.
+    # Purpose: Keep removal successful and record before/after permission evidence for later journal rollback instead of rejecting the tombstone.
+    It 'InterT855_records_post_rename_tombstone_DACL_drift_without_failing_removal' {
+        $f=New-P7Fixture 'p7d2-tombstone-dacl-drift';$target=$null
+        try{
+            $target=New-P7File $f.Parent 'drift.txt' ([Text.Encoding]::UTF8.GetBytes('drift-content'))
+            $snapshot=Get-PlatformPermissions $target.Lease
+            $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+            try{$changedSddl='D:P(A;;FA;;;'+$identity.User.Value+')(A;;FR;;;WD)'}finally{$identity.Dispose()}
+            if(Test-P7EquivalentDacl $snapshot.sddl $changedSddl){throw 'The drift fixture must differ from the original DACL.'}
+            $target.Lease.Dispose();$target.Lease=$null
+            $removed=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            $journal=New-P7JournalOperation remove-file tombstone-rename 'target/drift.txt' $null 'drift.backup' $target.State $removed $snapshot
+            Set-P7WindowsPostRenamePermissionReadbackHook ({
+                param($operation,$role,$actual)
+                if($operation -ceq 'owned-file-removal' -and $role -ceq 'tombstone'){
+                    return [pscustomobject][ordered]@{kind='windows-sddl';sddl=$changedSddl;readOnly=[bool]$actual.readOnly}
+                }
+                return $actual
+            }.GetNewClosure())
+
+            $receipt=Remove-PlatformOwnedFile -ParentLease $f.Parent -Leaf 'drift.txt' -ExpectedState $target.State -TransactionLease $f.Transaction -TombstoneLeaf 'drift.backup' -Journal $journal
+
+            Test-Path -LiteralPath (Join-Path $f.Root 'target/drift.txt')|Should Be $false
+            Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/drift.backup")|Should Be $true
+            $receipt.backupIdentity.fileId|Should Be $target.State.identity.fileId
+            $receipt.permissionsDrift.detected|Should Be $true
+            $receipt.permissionsDrift.beforeSddl|Should Be $snapshot.sddl
+            $receipt.permissionsDrift.afterSddl|Should Be $changedSddl
+            $receipt.permissionsDrift.beforeSddl|Should Not Match ([regex]::Escape($f.Root))
+            $receipt.permissionsDrift.afterSddl|Should Not Match ([regex]::Escape($f.Root))
+        }finally{Set-P7WindowsPostRenamePermissionReadbackHook $null;Close-P7Fixture $f @($target.Lease)}
+    }
+
+    # Scenario: The rename-after readback hook reports DACL drift for an original file displaced by publication.
+    # Purpose: Apply the same diagnostic-only permission rule to original-to-backup renames while keeping applied target verification strict.
+    It 'InterT860_records_displaced_publication_DACL_drift_without_failing_publication' {
+        $f=New-P7Fixture 'p7d2-displaced-dacl-drift';$target=$null;$stage=$null
+        try{
+            $target=New-P7File $f.Parent 'published.txt' ([Text.Encoding]::UTF8.GetBytes('original'))
+            $snapshot=Get-PlatformPermissions $target.Lease
+            $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+            try{$changedSddl='D:P(A;;FA;;;'+$identity.User.Value+')(A;;FR;;;WD)'}finally{$identity.Dispose()}
+            if(Test-P7EquivalentDacl $snapshot.sddl $changedSddl){throw 'The displaced drift fixture must differ from the original DACL.'}
+            $target.Lease.Dispose();$target.Lease=$null
+            $stage=New-P7File $f.Transaction 'published.stage' ([Text.Encoding]::UTF8.GetBytes('applied'))
+            $applied=[pscustomobject]@{exists=$true;sha256=$stage.Expected.sha256;length=$stage.Expected.length;identity=$stage.State.identity}
+            $journal=New-P7JournalOperation write-file stage-rename 'target/published.txt' 'published.stage' 'published.backup' $target.State $applied $snapshot
+            Set-P7WindowsPostRenamePermissionReadbackHook ({
+                param($operation,$role,$actual)
+                if($operation -ceq 'publication' -and $role -ceq 'displaced'){
+                    return [pscustomobject][ordered]@{kind='windows-sddl';sddl=$changedSddl;readOnly=[bool]$actual.readOnly}
+                }
+                return $actual
+            }.GetNewClosure())
+
+            $receipt=Publish-PlatformFile -ParentLease $f.Parent -Leaf 'published.txt' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $target.State -DisplacedLeaf 'published.backup' -ExpectedStage $stage.Expected -Journal $journal
+
+            [IO.File]::ReadAllText((Join-Path $f.Root 'target/published.txt'))|Should Be 'applied'
+            [IO.File]::ReadAllText((Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/published.backup"))|Should Be 'original'
+            $receipt.displacedIdentity.fileId|Should Be $target.State.identity.fileId
+            $receipt.permissionsDrift.detected|Should Be $true
+            $receipt.permissionsDrift.beforeSddl|Should Be $snapshot.sddl
+            $receipt.permissionsDrift.afterSddl|Should Be $changedSddl
+        }finally{Set-P7WindowsPostRenamePermissionReadbackHook $null;Close-P7Fixture $f @($stage.Lease,$target.Lease)}
+    }
     }
 }
 
@@ -6325,6 +6476,28 @@ Describe 'Platform probe cleanup evidence' {
             $body|Should Match 'Remove-PlatformOwnedDirectoryTree[^\r\n]+-ExpectedIdentity \$transactionIdentity'
             $body|Should Match 'Clear-PlatformProbe'
             $body|Should Not Match '\[IO\.Directory\]::Delete\([^\r\n]*,\$true\)'
+        }
+    }
+
+    # Register only on the native host because the directory-publication probe is intentionally unavailable on Unix.
+    if ($IsWindows) {
+        # Scenario: Native directory publication succeeds but exact probe cleanup reports a failure.
+        # Purpose: Refuse capability availability when the probe cannot prove that its owned residue was removed.
+        It 'UnitT30_marks_directory_publication_unavailable_when_probe_cleanup_fails' {
+            InModuleScope platform-runtime {
+                $script:P7dOriginalProbeCleanup=${function:Clear-PlatformProbe}
+                try{
+                    Mock Clear-PlatformProbe {
+                        param($Directory,$Path,$Entries,$Evidence)
+                        & $script:P7dOriginalProbeCleanup -Directory $Directory -Path $Path -Entries $Entries -Evidence $Evidence
+                        $Evidence['cleanupFailure']='fixture-directory-cleanup-failure'
+                    }
+                    $receipt=Test-PlatformDirectoryPublication
+                    $receipt.status|Should Be unavailable
+                    $receipt.evidence.cleanupFailure|Should Match 'fixture-directory-cleanup-failure'
+                }
+                finally{Remove-Variable P7dOriginalProbeCleanup -Scope Script -ErrorAction SilentlyContinue}
+            }
         }
     }
 }

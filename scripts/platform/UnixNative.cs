@@ -604,8 +604,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         public static UnixLease OpenFile(UnixLease parent, string leaf, string access, string createMode)
         {
             PlatformPaths.Leaf(leaf); ValidateAbi();
-            int flags = access == "Read" ? 0 : access == "Write" ? 1 : access == "ReadWrite" ? 2 : -1;
-            if (flags < 0) throw new ArgumentException("Access must be Read, Write or ReadWrite.");
+            int flags = access == "Read" || access == "ReadPermissions" ? 0 : access == "Write" ? 1 : access == "ReadWrite" ? 2 : -1;
+            if (flags < 0) throw new ArgumentException("Access must be Read, Write, ReadWrite or ReadPermissions.");
             if (createMode == "CreateNew") flags |= Create | Exclusive;
             else if (createMode != "OpenExisting") throw new ArgumentException("CreateMode must be CreateNew or OpenExisting.");
             lock (parent.Sync)
@@ -622,7 +622,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                     PlatformPaths.Single(value);
                     PlatformPaths.Same(value, Stat(duplicate, leaf));
                     UnixLease result = new UnixLease(file, duplicate, leaf, Path.Combine(parent.Path, leaf), value);
-                    result.NewWritable = createMode == "CreateNew" && access != "Read";
+                    result.NewWritable = createMode == "CreateNew" && access != "Read" && access != "ReadPermissions";
                     file = null; duplicate = null; return result;
                 }
                 finally { if (file != null) file.Dispose(); if (duplicate != null) duplicate.Dispose(); }
