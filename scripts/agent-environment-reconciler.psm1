@@ -139,13 +139,16 @@ function Get-AgentEnvironmentVerifiedStreamState {
 function Write-AgentEnvironmentDurableStagePayload {
     param(
         [Parameter(Mandatory=$true)]$ParentLease,
+        [Parameter(Mandatory=$true)][string]$ParentPath,
+        [Parameter(Mandatory=$true)][string]$TransactionPath,
+        [Parameter(Mandatory=$true)][string]$PrivateRelativePath,
         [Parameter(Mandatory=$true)][string]$Leaf,
         [Parameter(Mandatory=$true)][AllowEmptyCollection()][byte[]]$Bytes,
         [Parameter(Mandatory=$true)][string]$ExpectedSha256
     )
     $file=$null
     try{
-        $file=Open-PlatformFile -ParentLease $ParentLease -Leaf $Leaf -Access ReadWrite -CreateMode CreateNew
+        $file=Open-AgentEnvironmentTransactionPrivateFileCreateNew -ParentLease $ParentLease -ParentPath $ParentPath -TransactionPath $TransactionPath -PrivateRelativePath $PrivateRelativePath -Leaf $Leaf
         $file.WriteNewBytes($Bytes)
         $observed=Assert-PlatformFileIdentity -Lease $file -Expected $file.Observation -SingleLink -VerifyPath
         $readBack=$file.ReadAllBytes([int]$observed.Size)
@@ -155,6 +158,46 @@ function Write-AgentEnvironmentDurableStagePayload {
         return [pscustomobject][ordered]@{exists=$true;sha256=$ExpectedSha256;length=[int64]$observed.Size;identity=(ConvertTo-AgentEnvironmentPlatformIdentity $observed)}
     }
     finally{if($null-ne$file){$file.Dispose()}}
+}
+
+function Test-AgentEnvironmentTransactionPrivateLeafExists {
+    param(
+        [Parameter(Mandatory=$true)][string]$ParentPath,
+        [Parameter(Mandatory=$true)][string]$Leaf
+    )
+    $comparison=Get-AgentEnvironmentPathComparison
+    return @(
+        Get-ChildItem -Force -LiteralPath $ParentPath -ErrorAction Stop |
+            Where-Object { [string]::Equals([string]$_.Name,$Leaf,$comparison) }
+    ).Count-gt0
+}
+
+function Open-AgentEnvironmentTransactionPrivateFileCreateNew {
+    param(
+        [Parameter(Mandatory=$true)]$ParentLease,
+        [Parameter(Mandatory=$true)][string]$ParentPath,
+        [Parameter(Mandatory=$true)][string]$TransactionPath,
+        [Parameter(Mandatory=$true)][string]$PrivateRelativePath,
+        [Parameter(Mandatory=$true)][string]$Leaf
+    )
+    try{
+        return Open-PlatformFile -ParentLease $ParentLease -Leaf $Leaf -Access ReadWrite -CreateMode CreateNew
+    }
+    catch{
+        $collision=$false
+        try{$collision=Test-AgentEnvironmentTransactionPrivateLeafExists -ParentPath $ParentPath -Leaf $Leaf}catch{}
+        $win32ErrorProperty=$_.Exception.PSObject.Properties['Win32Error']
+        if(-not$collision-and$null-ne$win32ErrorProperty-and[int]$win32ErrorProperty.Value-in@(80,183)){$collision=$true}
+        if(-not$collision){throw}
+        $privateLeaf=$PrivateRelativePath.Replace('\','/').TrimStart('/')
+        $failurePath=".ai-instructions-txn/$([IO.Path]::GetFileName($TransactionPath))/$privateLeaf"
+        $failure=[IO.IOException]::new("Transaction-private CreateNew refused a pre-existing entry at leaf '$privateLeaf'.",$_.Exception)
+        $failure.Data['Code']='recovery-required'
+        $failure.Data['TransactionPath']=$TransactionPath
+        $failure.Data['PrivateLeaf']=$privateLeaf
+        $failure.Data['FailurePath']=$failurePath
+        throw $failure
+    }
 }
 
 function Get-AgentEnvironmentPathComparison {
@@ -1102,6 +1145,44 @@ function Remove-AgentEnvironmentTransactionPrivateFile {
     if([bool]$state.exists){Assert-AgentEnvironmentRecoveryMutationContext $RecoveryMutationContext;Remove-PlatformOwnedFile -ParentLease $TransactionLease -Leaf $Leaf -ExpectedState $state|Out-Null}
 }
 
+function Assert-AgentEnvironmentOrphanTransactionTreeSafe {
+    param(
+        [Parameter(Mandatory=$true)][string]$TransactionPath,
+        [Parameter(Mandatory=$true)]$TransactionLease
+    )
+    $pending=New-Object Collections.Generic.Stack[string]
+    $pending.Push('')
+    while($pending.Count-gt0){
+        $relativeDirectory=$pending.Pop()
+        $directoryPath=if([string]::IsNullOrEmpty($relativeDirectory)){$TransactionPath}else{Join-Path $TransactionPath $relativeDirectory}
+        foreach($entry in @(Get-ChildItem -Force -LiteralPath $directoryPath -ErrorAction Stop)){
+            $relativeEntry=if([string]::IsNullOrEmpty($relativeDirectory)){[string]$entry.Name}else{"$relativeDirectory/$($entry.Name)"}
+            if(($entry.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){throw "Orphan transaction entry is a reparse point: $relativeEntry"}
+            if($entry.PSIsContainer){
+                $directoryLease=$null
+                try{
+                    $directoryLease=Open-PlatformDirectory -Root $TransactionPath -RelativePath $relativeEntry
+                    Assert-PlatformFileIdentity -Lease $directoryLease -Expected $directoryLease.Observation -VerifyPath|Out-Null
+                }
+                finally{if($null-ne$directoryLease){$directoryLease.Dispose()}}
+                $pending.Push($relativeEntry)
+                continue
+            }
+            $parentLease=$null;$fileLease=$null
+            try{
+                $parentLease=if([string]::IsNullOrEmpty($relativeDirectory)){$TransactionLease}else{Open-PlatformDirectory -Root $TransactionPath -RelativePath $relativeDirectory}
+                $fileLease=Open-PlatformFile -ParentLease $parentLease -Leaf ([string]$entry.Name) -Access Read -CreateMode OpenExisting
+                Assert-PlatformFileIdentity -Lease $fileLease -Expected $fileLease.Observation -SingleLink -VerifyPath|Out-Null
+            }
+            catch{throw "Orphan transaction entry is not a verified regular single-link file: $relativeEntry. $($_.Exception.Message)"}
+            finally{
+                if($null-ne$fileLease){$fileLease.Dispose()}
+                if($null-ne$parentLease-and-not[object]::ReferenceEquals($parentLease,$TransactionLease)){$parentLease.Dispose()}
+            }
+        }
+    }
+}
+
 function Write-AgentEnvironmentInstallJournal {
     param(
         [Parameter(Mandatory = $true)][string]$TransactionPath,
@@ -1129,7 +1210,7 @@ function Write-AgentEnvironmentInstallJournal {
             if([string]$existingStage.entryKind-cne'file'){throw "Transaction journal leaf 'journal.stage' is not a verified regular single-link file."}
             Remove-AgentEnvironmentTransactionPrivateFile -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf 'journal.stage' -RecoveryMutationContext $RecoveryMutationContext
         }
-        $stageLease=Open-PlatformFile -ParentLease $TransactionLease -Leaf 'journal.stage' -Access ReadWrite -CreateMode CreateNew
+        $stageLease=Open-AgentEnvironmentTransactionPrivateFileCreateNew -ParentLease $TransactionLease -ParentPath $TransactionPath -TransactionPath $TransactionPath -PrivateRelativePath 'journal.stage' -Leaf 'journal.stage'
         $stageLease.WriteNewBytes($bytes)
         $stageObserved=Assert-PlatformFileIdentity -Lease $stageLease -Expected $stageLease.Observation -SingleLink -VerifyPath
         $stageBytes=$stageLease.ReadAllBytes([int]$stageObserved.Size)
@@ -1451,7 +1532,8 @@ function Invoke-AgentEnvironmentPlatformTransaction {
                     $payloadParentLease=$null
                     try{
                         $payloadParentLease=if([string]::IsNullOrEmpty($relativeParent)){$stageRootLease}else{Open-PlatformDirectory -Root $transactionPath -RelativePath "$stageLeaf/$relativeParent" -CreatePrivate}
-                        Write-AgentEnvironmentDurableStagePayload -ParentLease $payloadParentLease -Leaf ([IO.Path]::GetFileName($suffix)) -Bytes ([byte[]]$allWrites[$path].bytes) -ExpectedSha256 ([string]$allWrites[$path].sha256)|Out-Null
+                        $payloadParentPath=if([string]::IsNullOrEmpty($relativeParent)){Join-Path $transactionPath $stageLeaf}else{Join-Path (Join-Path $transactionPath $stageLeaf) $relativeParent}
+                        Write-AgentEnvironmentDurableStagePayload -ParentLease $payloadParentLease -ParentPath $payloadParentPath -TransactionPath $transactionPath -PrivateRelativePath "$stageLeaf/$suffix" -Leaf ([IO.Path]::GetFileName($suffix)) -Bytes ([byte[]]$allWrites[$path].bytes) -ExpectedSha256 ([string]$allWrites[$path].sha256)|Out-Null
                     }
                     finally{if($null-ne$payloadParentLease-and-not[object]::ReferenceEquals($payloadParentLease,$stageRootLease)){$payloadParentLease.Dispose()}}
                 }
@@ -1464,7 +1546,7 @@ function Invoke-AgentEnvironmentPlatformTransaction {
         $orderedFileWrites=@($fileWritePaths|Where-Object{$_-cne'.agents/catalog-skills.manifest.json'}|Sort-Object)+@($fileWritePaths|Where-Object{$_-ceq'.agents/catalog-skills.manifest.json'})
         foreach($path in $orderedFileWrites){
             $sequence++;$stageLeaf="file-$sequence.stage"
-            $applied=Write-AgentEnvironmentDurableStagePayload -ParentLease $transactionLease -Leaf $stageLeaf -Bytes ([byte[]]$allWrites[$path].bytes) -ExpectedSha256 ([string]$allWrites[$path].sha256)
+            $applied=Write-AgentEnvironmentDurableStagePayload -ParentLease $transactionLease -ParentPath $transactionPath -TransactionPath $transactionPath -PrivateRelativePath $stageLeaf -Leaf $stageLeaf -Bytes ([byte[]]$allWrites[$path].bytes) -ExpectedSha256 ([string]$allWrites[$path].sha256)
             $original=$validatedOriginals[$path];$kind=if($original.exists){'write-file'}else{'create-file'};$permissions=if($original.exists){Get-AgentEnvironmentFilePermissionSnapshot $Home $path}else{$null};$backup=if($original.exists){"backup-$sequence"}else{$null}
             $operations.Add((New-AgentEnvironmentPlatformOperation $sequence $kind $path $stageLeaf $backup $null $original $applied $permissions))
         }
@@ -1531,6 +1613,7 @@ function Invoke-AgentEnvironmentPlatformTransaction {
         return [pscustomobject]@{success=$true;transactionPath=$transactionPath;journal=$journal;backupPath=$backupPath}
     }catch{
         $failure=$_
+        if($null-eq$journal-and$failure.Exception.Data.Contains('Code')-and[string]$failure.Exception.Data['Code']-ceq'recovery-required'){throw $failure}
         if($null-ne$journal-and[string]$journal.phase-cne'committed'){try{Invoke-AgentEnvironmentJournalRollback $Home $transactionPath $transactionLease $journal $FailpointName}catch{$rollbackFailure=[IO.IOException]::new("Agent environment transaction failed: $($failure.Exception.Message) Rollback failed: $($_.Exception.Message)",$_.Exception);$rollbackFailure.Data['Code']='recovery-required';$rollbackFailure.Data['TransactionPath']=$transactionPath;throw $rollbackFailure}}
         elseif($null-ne$journal){$cleanupFailure=[IO.IOException]::new("Committed Agent environment transaction cleanup failed: $($failure.Exception.Message)",$failure.Exception);$cleanupFailure.Data['Code']='recovery-required';$cleanupFailure.Data['TransactionPath']=$transactionPath;throw $cleanupFailure}
         if($null-ne$transactionLease){$transactionLease.Dispose();$transactionLease=$null}
@@ -1717,6 +1800,13 @@ function Invoke-AgentEnvironmentNewJournalRecoveryLocked {
             $entry=$classified.entry;$classification=$classified.classification
             if([string]$classification.classification-ceq'orphan-without-journal'){
                 $entryState=Get-PlatformDirectoryState -ParentLease $containerLease -Leaf $entry.Name
+                $orphanLease=$null
+                try{
+                    $orphanLease=Open-PlatformDirectory -Root $Home -RelativePath ".ai-instructions-txn/$($entry.Name)"
+                    Assert-AgentEnvironmentOrphanTransactionTreeSafe -TransactionPath $entry.FullName -TransactionLease $orphanLease
+                }
+                catch{$validationFailures.Add("USER orphan transaction residue '$($entry.Name)' contains unsafe prepositioned content: $($_.Exception.Message)");continue}
+                finally{if($null-ne$orphanLease){$orphanLease.Dispose()}}
                 $validatedEntries.Add([pscustomobject][ordered]@{entry=$entry;classification=$classification;entryState=$entryState;journal=$null;observations=$null;decision=$null;plan=$null})
                 continue
             }
@@ -2099,7 +2189,8 @@ function Invoke-UserSkillsReconciliation {
             $recoveryRequired=$exceptionCode-ceq'recovery-required'
             $code=if($recoveryRequired){'recovery-required'}elseif($exceptionCode-ceq'post-install-integrity-failure'){'post-install-integrity-failure'}else{'mutation-failure'}
             $retainedPath=if($recoveryRequired){[string]$_.Exception.Data['TransactionPath']}else{$null}
-            $failureDetails.Add((New-AgentEnvironmentFailureDetail -Code $code -SkillId 'transaction' -Path '.ai-instructions-txn' -Classification 'controlled-candidate' -Owner 'transaction-journal' -Evidence ([string]$_.Exception.Message) -DestructiveChangeAllowed $false -BackupCreated $recoveryRequired -ExpectedSha256 $manifestSha -ActualSha256 $null -Remediation @('Review the transaction evidence and retry after recovery.')))
+            $failurePath=if($recoveryRequired-and$_.Exception.Data.Contains('FailurePath')){[string]$_.Exception.Data['FailurePath']}else{'.ai-instructions-txn'}
+            $failureDetails.Add((New-AgentEnvironmentFailureDetail -Code $code -SkillId 'transaction' -Path $failurePath -Classification 'controlled-candidate' -Owner 'transaction-journal' -Evidence ([string]$_.Exception.Message) -DestructiveChangeAllowed $false -BackupCreated $recoveryRequired -ExpectedSha256 $manifestSha -ActualSha256 $null -Remediation @('Review the transaction evidence and retry after recovery.')))
             return New-AgentEnvironmentResult -Outcome 'failed' -DesiredState $DesiredState -Installed @() -Updated @() -Removed @() -Preserved $preserved -Failed @([string]$_.Exception.Message) -RollbackState $(if($recoveryRequired){'recovery-required'}else{'completed'}) -BackupPath $retainedPath -FailureDetails ([object[]]$failureDetails.ToArray()) -Ownership ([object[]]$ownership.ToArray())
         }
     }

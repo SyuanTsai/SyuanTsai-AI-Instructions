@@ -188,6 +188,17 @@ function Get-TestTreeSnapshot {
     return (@($entries)|ConvertTo-Json -Depth 5 -Compress)
 }
 
+function Get-TestReconciliationFailureDiagnosticJson {
+    param([Parameter(Mandatory=$true)][object]$Result)
+    return ([pscustomobject][ordered]@{
+        outcome=[string]$Result.outcome
+        rollbackState=[string]$Result.rollbackState
+        failureDetails=@($Result.failureDetails|ForEach-Object{
+            [pscustomobject][ordered]@{code=[string]$_.code;path=[string]$_.path;evidence=[string]$_.evidence}
+        })
+    }|ConvertTo-Json -Depth 8 -Compress)
+}
+
 function Copy-TestPlatformRuntimeClosure {
     param([Parameter(Mandatory=$true)][string]$Destination)
     $manifestPath=Join-Path $script:RuntimeRoot 'platform-runtime.psd1'
@@ -775,14 +786,54 @@ $module=Get-Module agent-environment-reconciler
                 if($linkKind-ceq'hard-link'){New-Item -ItemType HardLink -Path $stage -Target $outsideFile -ErrorAction Stop|Out-Null}
                 else{New-Item -ItemType SymbolicLink -Path $stage -Target $outsideFile -ErrorAction Stop|Out-Null}
             }
+            if([string]$result.outcome-cne'failed'-or[string]$result.rollbackState-cne'recovery-required'){
+                throw "InterT103 reconciliation diagnostic: $(Get-TestReconciliationFailureDiagnosticJson $result)"
+            }
             $result.outcome|Should Be 'failed'
             $result.rollbackState|Should Be 'recovery-required'
+            @($result.failureDetails)[0].path|Should Match 'file-1\.stage$'
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($outsideFile))|Should Be $before
             Test-Path -LiteralPath (Join-Path $caseHome '.agents/skills/alpha/SKILL.md')|Should Be $false
             Test-Path -LiteralPath (Join-Path $caseHome '.agents/catalog-skills.manifest.json')|Should Be $false
             $retained=@(Get-ChildItem -Force -Directory -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue)
             $retained.Count|Should Be 1
             Test-Path -LiteralPath (Join-Path $retained[0].FullName 'file-1.stage')|Should Be $true
+        }
+    }
+
+
+    if([Environment]::OSVersion.Platform-eq[PlatformID]::Win32NT){
+        # Scenario: A non-admin Windows process prepositions file-1.stage as a directory junction to an external directory before the first journal is durable.
+        # Purpose: Treat every CreateNew collision conservatively, retain the orphan evidence, and make later recovery refuse rather than follow or purge the junction.
+        It 'InterT105_rejects_a_prepositioned_payload_stage_junction_and_retains_orphan_evidence' {
+            $caseHome=Join-Path $TestDrive 'payload-stage-junction-home';$desired=New-TestDesiredState -Root (Join-Path $TestDrive 'payload-stage-junction-source')
+            New-Item -ItemType Directory -Force -Path (Join-Path $caseHome '.agents/skills/alpha')|Out-Null
+            $outsideRoot=Join-Path $TestDrive 'payload-stage-junction-external';New-Item -ItemType Directory -Force -Path $outsideRoot|Out-Null
+            $outsideFile=Join-Path $outsideRoot 'sentinel.bin';$outsideBytes=[byte[]](255,238,221,204,187,170,153,136,119,102,85,68,51,34,17,0)
+            [IO.File]::WriteAllBytes($outsideFile,$outsideBytes);$before=[Convert]::ToBase64String([IO.File]::ReadAllBytes($outsideFile))
+            $result=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $caseHome -Mode Apply -BeforeTransactionPrivateWriteAction {
+                param($transactionPath)
+                New-Item -ItemType Junction -Path (Join-Path $transactionPath 'file-1.stage') -Target $outsideRoot -ErrorAction Stop|Out-Null
+            }
+            if([string]$result.outcome-cne'failed'-or[string]$result.rollbackState-cne'recovery-required'){
+                throw "InterT105 reconciliation diagnostic: $(Get-TestReconciliationFailureDiagnosticJson $result)"
+            }
+            $result.outcome|Should Be 'failed'
+            $result.rollbackState|Should Be 'recovery-required'
+            @($result.failureDetails)[0].path|Should Match 'file-1\.stage$'
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($outsideFile))|Should Be $before
+            Test-Path -LiteralPath (Join-Path $caseHome '.agents/skills/alpha/SKILL.md')|Should Be $false
+            Test-Path -LiteralPath (Join-Path $caseHome '.agents/catalog-skills.manifest.json')|Should Be $false
+            $retained=@(Get-ChildItem -Force -Directory -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue)
+            $retained.Count|Should Be 1
+            $stagePath=Join-Path $retained[0].FullName 'file-1.stage';Test-Path -LiteralPath $stagePath|Should Be $true
+            $readLease=New-TestInstallReadLeaseEvidence
+            try{$recovery=Invoke-UserSkillsRecovery -UserHome $caseHome -InstallReadLease $readLease.Evidence}
+            finally{$readLease.Evidence.Dispose();if($readLease.Created){Remove-Item -LiteralPath $readLease.Path -Force -ErrorAction SilentlyContinue}}
+            $recovery.Code|Should Be 'interrupted-install'
+            Test-Path -LiteralPath $retained[0].FullName -PathType Container|Should Be $true
+            Test-Path -LiteralPath $stagePath|Should Be $true
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($outsideFile))|Should Be $before
         }
     }
 
@@ -1234,6 +1285,9 @@ Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode
         [System.IO.File]::WriteAllText($legacy,'legacy alias')
         $desired = New-TestDesiredState -Root $staging -Aliases @{ alpha=@('old-alpha') }
         $result = Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply -MigrateLegacyCatalogSkills
+        if([string]$result.outcome-cne'applied'){
+            throw "InterT45 reconciliation diagnostic: $(Get-TestReconciliationFailureDiagnosticJson $result)"
+        }
         $result.outcome | Should Be 'applied'
         Test-Path -LiteralPath $legacy | Should Be $false
         Test-Path -LiteralPath (Join-Path $userHome '.agents\skills\alpha\SKILL.md') | Should Be $true
