@@ -420,18 +420,52 @@ function Install-AiInstructionsCandidatePackage {
 
     Assert-AiInstructionsUpdaterRuntimeBaseline
     $installerPath = Join-Path ([string]$Request.Package.SourceRoot) 'scripts\install-ai-instructions-bootstrap.ps1'
-    & $installerPath `
-        -RepositoryRoot ([string]$Request.Package.SourceRoot) `
-        -CodexHome ([string]$Request.CodexHome) `
-        -SourceRepository ([string]$Request.Repository) `
-        -SourceCommit ([string]$Request.CandidateCommit) `
-        -Acquisition github-codeload `
-        -ArchiveSha256 ([string]$Request.Package.ArchiveSha256) `
-        -SourceArchivePath ([string]$Request.Package.ArchivePath) `
-        -ExpectedCurrentCommit ([string]$Request.CurrentCommit) `
-        -ExpectedUpdateMode ([string]$Request.Mode) `
-        -ExpectedUpdateChannel ([string]$Request.Channel) `
-        -ExpectedUpdateRef ([string]$Request.Ref)
+    $powerShellPath = [Environment]::ProcessPath
+    if ([string]::IsNullOrWhiteSpace($powerShellPath)) {
+        $powerShellPath = (Get-Process -Id $PID -ErrorAction Stop).Path
+    }
+    $arguments = @(
+        '-NoProfile','-NonInteractive','-File',$installerPath,
+        '-RepositoryRoot',([string]$Request.Package.SourceRoot),
+        '-CodexHome',([string]$Request.CodexHome),
+        '-SourceRepository',([string]$Request.Repository),
+        '-SourceCommit',([string]$Request.CandidateCommit),
+        '-Acquisition','github-codeload',
+        '-ArchiveSha256',([string]$Request.Package.ArchiveSha256),
+        '-SourceArchivePath',([string]$Request.Package.ArchivePath),
+        '-ExpectedCurrentCommit',([string]$Request.CurrentCommit),
+        '-ExpectedUpdateMode',([string]$Request.Mode),
+        '-ExpectedUpdateChannel',([string]$Request.Channel),
+        '-ExpectedUpdateRef',([string]$Request.Ref)
+    )
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $powerShellPath
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    foreach ($argument in $arguments) { $startInfo.ArgumentList.Add([string]$argument) }
+
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) { throw 'Candidate installer pwsh subprocess could not be started.' }
+        $standardOutputTask = $process.StandardOutput.ReadToEndAsync()
+        $standardErrorTask = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $standardOutput = $standardOutputTask.GetAwaiter().GetResult()
+        $standardError = $standardErrorTask.GetAwaiter().GetResult()
+        $exitCode = $process.ExitCode
+    }
+    finally { $process.Dispose() }
+
+    if (-not [string]::IsNullOrEmpty($standardOutput)) { Write-Output $standardOutput }
+    if (-not [string]::IsNullOrEmpty($standardError)) { Write-Error -Message $standardError -ErrorAction Continue }
+    if ($exitCode -ne 0) {
+        $refusalMatches = [regex]::Matches($standardError,'\[ai-instructions-refusal-code=[A-Za-z0-9-]+\]')
+        $refusalSuffix = if ($refusalMatches.Count -gt 0) { ' ' + $refusalMatches[$refusalMatches.Count - 1].Value } else { '' }
+        throw "Candidate installer pwsh subprocess exited with exit code $exitCode.$refusalSuffix"
+    }
 }
 
 function New-AiInstructionsUpdateResult {

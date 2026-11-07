@@ -523,9 +523,9 @@ Describe 'AI instructions updater workflow' {
     }
 
     # Scenario: The production updater delegates installation after selecting a candidate under an approved update policy.
-    # Purpose: Pass the expected runtime and policy identity so the installer can revalidate both under its lock.
+    # Purpose: Run the installer in a distinct pwsh process and pass every argument without corrupting paths that contain spaces.
     It 'UnitT65_passes_the_expected_runtime_and_update_policy_to_the_installer' {
-        $sourceRoot = Join-Path $TestDrive 'installer-contract'
+        $sourceRoot = Join-Path $TestDrive 'installer contract with spaces'
         $scriptsRoot = Join-Path $sourceRoot 'scripts'
         New-Item -ItemType Directory -Force -Path $scriptsRoot | Out-Null
         $fakeInstaller = @'
@@ -535,26 +535,75 @@ param(
     [string]$ExpectedUpdateMode,[string]$ExpectedUpdateChannel,[string]$ExpectedUpdateRef
 )
 [System.IO.File]::WriteAllText(
-    (Join-Path $RepositoryRoot 'expected-state.txt'),
-    (@($ExpectedCurrentCommit,$ExpectedUpdateMode,$ExpectedUpdateChannel,$ExpectedUpdateRef) -join "`n")
+    (Join-Path $RepositoryRoot 'received-state.json'),
+    ([pscustomobject][ordered]@{
+        pid=$PID;repositoryRoot=$RepositoryRoot;codexHome=$CodexHome;sourceRepository=$SourceRepository
+        sourceCommit=$SourceCommit;acquisition=$Acquisition;archiveSha256=$ArchiveSha256
+        sourceArchivePath=$SourceArchivePath;expectedCurrentCommit=$ExpectedCurrentCommit
+        expectedUpdateMode=$ExpectedUpdateMode;expectedUpdateChannel=$ExpectedUpdateChannel
+        expectedUpdateRef=$ExpectedUpdateRef
+    } | ConvertTo-Json)
 )
 '@
         [System.IO.File]::WriteAllText((Join-Path $scriptsRoot 'install-ai-instructions-bootstrap.ps1'),$fakeInstaller)
+        $codexHome = Join-Path $TestDrive 'installer contract home with spaces'
+        $archivePath = Join-Path $TestDrive 'candidate archive with spaces.zip'
         $request = [pscustomobject]@{
-            CodexHome = (Join-Path $TestDrive 'installer-contract-home')
+            CodexHome = $codexHome
             Repository = $script:CanonicalRepository
             CurrentCommit = ('a' * 40)
             CandidateCommit = ('b' * 40)
             Mode = 'auto-install-approved'
             Channel = 'protected-branch'
             Ref = 'main'
-            Package = [pscustomobject]@{ SourceRoot=$sourceRoot; ArchivePath='C:\fixture.zip'; ArchiveSha256=('c' * 64) }
+            Package = [pscustomobject]@{ SourceRoot=$sourceRoot; ArchivePath=$archivePath; ArchiveSha256=('c' * 64) }
         }
 
         Install-AiInstructionsCandidatePackage -Request $request
 
-        [System.IO.File]::ReadAllText((Join-Path $sourceRoot 'expected-state.txt')) |
-            Should Be ((@(('a' * 40),'auto-install-approved','protected-branch','main') -join "`n"))
+        $received = [System.IO.File]::ReadAllText((Join-Path $sourceRoot 'received-state.json')) | ConvertFrom-Json
+        [int]$received.pid | Should Not Be $PID
+        $received.repositoryRoot | Should Be $sourceRoot
+        $received.codexHome | Should Be $codexHome
+        $received.sourceRepository | Should Be $script:CanonicalRepository
+        $received.sourceCommit | Should Be ('b' * 40)
+        $received.acquisition | Should Be github-codeload
+        $received.archiveSha256 | Should Be ('c' * 64)
+        $received.sourceArchivePath | Should Be $archivePath
+        $received.expectedCurrentCommit | Should Be ('a' * 40)
+        $received.expectedUpdateMode | Should Be auto-install-approved
+        $received.expectedUpdateChannel | Should Be protected-branch
+        $received.expectedUpdateRef | Should Be main
+    }
+
+    # Scenario: A candidate installer subprocess writes a typed refusal to stderr and exits nonzero.
+    # Purpose: Preserve the refusal suffix in the updater exception while reporting the exact subprocess exit code.
+    It 'UnitT67_preserves_candidate_subprocess_exit_code_and_refusal' {
+        $sourceRoot = Join-Path $TestDrive 'installer-refusal'
+        $scriptsRoot = Join-Path $sourceRoot 'scripts'
+        New-Item -ItemType Directory -Force -Path $scriptsRoot | Out-Null
+        $fakeInstaller = @'
+[Console]::Error.WriteLine('candidate refused [ai-instructions-refusal-code=unsupported-version]')
+exit 23
+'@
+        [System.IO.File]::WriteAllText((Join-Path $scriptsRoot 'install-ai-instructions-bootstrap.ps1'),$fakeInstaller)
+        $request = [pscustomobject]@{
+            CodexHome = (Join-Path $TestDrive 'installer-refusal-home')
+            Repository = $script:CanonicalRepository
+            CurrentCommit = ('a' * 40)
+            CandidateCommit = ('b' * 40)
+            Mode = 'auto-install-approved'
+            Channel = 'protected-branch'
+            Ref = 'main'
+            Package = [pscustomobject]@{ SourceRoot=$sourceRoot; ArchivePath=(Join-Path $TestDrive 'candidate.zip'); ArchiveSha256=('c' * 64) }
+        }
+
+        $caught = $null
+        try { Install-AiInstructionsCandidatePackage -Request $request 2>$null }
+        catch { $caught = $_ }
+
+        $caught.Exception.Message | Should Match 'exit code 23'
+        (Get-AiInstructionsRefusalCode $caught) | Should Be unsupported-version
     }
 
     # Scenario: Another updater process holds the per-home update lock.
@@ -825,48 +874,44 @@ Export-ModuleMember -Function Invoke-AiInstructionsUpdateWorkflow,Get-AiInstruct
             Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json')|Should Be $false
         }
 
-        # Scenario: A candidate installer publishes state and invokes the production failpoint while running in the updater process.
-        # Purpose: Prove a real FailFast kills the updater without a receipt and the next updater run refuses retained residue without mutation.
+        # Scenario: The default candidate installer subprocess retains transaction evidence and invokes the production failpoint.
+        # Purpose: Return interrupted-install in the same updater run, preserve the active runtime, and keep the next run mutation-free.
         It 'UnitT84_failfasts_with_the_candidate_installer_then_refuses_the_retained_transaction' {
             $codexHome=Join-Path $TestDrive 'real-updater-failfast';New-TestUpdaterHome -Path $codexHome -Mode auto-install-approved
-            $hostExecutable=(Get-Process -Id $PID).Path
-            $harness=Join-Path $TestDrive 'invoke-real-updater-failfast.ps1'
-            $harnessSource=@'
-param([string]$UpdaterModule,[string]$CodexHome)
-Import-Module $UpdaterModule -Force
-Import-Module (Join-Path (Split-Path -Parent $UpdaterModule) 'ai-instructions-install-transaction.psm1') -Force -Global
-$package=[pscustomobject]@{SourceRoot='C:\fixture';ArchivePath='C:\fixture.zip';ArchiveSha256=('c'*64)}
-$resolveCandidate={ [pscustomobject]@{Commit=('b'*40);Relation='ahead'} }.GetNewClosure()
-$acquireCandidate={ $package }.GetNewClosure()
-$installCandidate={
-    param($request)
-    $transaction=Join-Path $request.CodexHome ('.ai-instructions-txn\'+[Guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Force -Path $transaction|Out-Null
-    [IO.File]::WriteAllText((Join-Path $transaction 'journal.json'),'{',[Text.UTF8Encoding]::new($false))
-    [IO.File]::WriteAllText((Join-Path $request.CodexHome 'candidate-published-before-failfast.txt'),'published',[Text.UTF8Encoding]::new($false))
-    ai-instructions-install-transaction\Invoke-AiInstructionsInstallFailpoint -Name 'after-operation-1-before-journal'
-}.GetNewClosure()
-Invoke-AiInstructionsUpdateWorkflow -CodexHome $CodexHome -ForceCheck -InstallApproved `
-    -ResolveCandidate $resolveCandidate `
-    -AcquireCandidate $acquireCandidate `
-    -InstallCandidate $installCandidate | Out-Null
+            $sourceRoot=Join-Path $TestDrive 'real-updater-failfast-candidate';$scriptsRoot=Join-Path $sourceRoot 'scripts'
+            New-Item -ItemType Directory -Force -Path $scriptsRoot|Out-Null
+            Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts\ai-instructions-install-transaction.psm1') -Destination $scriptsRoot
+            $fakeInstaller=@'
+param([string]$CodexHome)
+Import-Module (Join-Path $PSScriptRoot 'ai-instructions-install-transaction.psm1') -Force
+$transaction=Join-Path $CodexHome ('.ai-instructions-txn\'+[Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path $transaction|Out-Null
+[IO.File]::WriteAllText((Join-Path $transaction 'journal.json'),'{',[Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText((Join-Path $CodexHome 'candidate-published-before-failfast.txt'),'published',[Text.UTF8Encoding]::new($false))
+Invoke-AiInstructionsInstallFailpoint -Name 'after-operation-1-before-journal'
 '@
-            [IO.File]::WriteAllText($harness,$harnessSource,[Text.UTF8Encoding]::new($false))
-            $stdout=Join-Path $TestDrive 'real-updater-failfast.stdout';$stderr=Join-Path $TestDrive 'real-updater-failfast.stderr'
+            [IO.File]::WriteAllText((Join-Path $scriptsRoot 'install-ai-instructions-bootstrap.ps1'),$fakeInstaller,[Text.UTF8Encoding]::new($false))
+            $package=[pscustomobject]@{SourceRoot=$sourceRoot;ArchivePath=(Join-Path $TestDrive 'candidate.zip');ArchiveSha256=('c'*64)}
+            $configurationPath=Join-Path $codexHome 'ai-instructions-sync.json'
+            $bundlePath=Join-Path $codexHome 'hooks\ai-instructions-runtime\runtime-bundle.json'
+            $configurationBefore=[Convert]::ToBase64String([IO.File]::ReadAllBytes($configurationPath))
+            $bundleBefore=[Convert]::ToBase64String([IO.File]::ReadAllBytes($bundlePath))
             $previous=[Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_INSTALL_FAILPOINT','Process')
             try{
                 [Environment]::SetEnvironmentVariable('AI_INSTRUCTIONS_INSTALL_FAILPOINT','after-operation-1-before-journal','Process')
-                $process=Start-Process -FilePath $hostExecutable -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$harness,'-UpdaterModule',$script:UpdaterModule,'-CodexHome',$codexHome) -PassThru -Wait -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+                $caught=$null
+                try{
+                    Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck -InstallApproved `
+                        -ResolveCandidate { [pscustomobject]@{Commit=('b'*40);Relation='ahead'} } `
+                        -AcquireCandidate { $package } 2>$null|Out-Null
+                }catch{$caught=$_}
             }finally{[Environment]::SetEnvironmentVariable('AI_INSTRUCTIONS_INSTALL_FAILPOINT',$previous,'Process')}
-            $exitCode=$process.ExitCode;$process.Dispose()
-            if($exitCode-eq0){
-                $receiptText=if(Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json')){Get-Content -Raw -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json')}else{'<no receipt>'}
-                $stdoutText=if(Test-Path -LiteralPath $stdout){Get-Content -Raw -LiteralPath $stdout}else{''}
-                $stderrText=if(Test-Path -LiteralPath $stderr){Get-Content -Raw -LiteralPath $stderr}else{''}
-                throw "Updater FailFast fixture exited normally. receipt=$receiptText stdout=$stdoutText stderr=$stderrText"
-            }
+            (Get-AiInstructionsRefusalCode $caught)|Should Be interrupted-install
             Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json')|Should Be $false
             @(Get-ChildItem -Force -LiteralPath (Join-Path $codexHome '.ai-instructions-txn')).Count|Should BeGreaterThan 0
+            Test-Path -LiteralPath (Join-Path $codexHome 'candidate-published-before-failfast.txt')|Should Be $true
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($configurationPath))|Should Be $configurationBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($bundlePath))|Should Be $bundleBefore
             $before=Get-TestUpdaterHomeDigest -CodexHome $codexHome
             $caught=$null
             try{Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck|Out-Null}catch{$caught=$_}
