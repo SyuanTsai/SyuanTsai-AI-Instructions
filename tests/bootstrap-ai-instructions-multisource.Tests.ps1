@@ -13,6 +13,18 @@ function Set-TestUtf8Text {
     param([string]$Path,[string]$Value)
     [System.IO.File]::WriteAllText($Path,$Value,(New-Object System.Text.UTF8Encoding($false)))
 }
+function Copy-TestPlatformRuntimeClosure {
+    param([Parameter(Mandatory=$true)][string]$Destination)
+    $runtimeRoot=Join-Path $script:RepositoryRoot 'scripts'
+    $manifestPath=Join-Path $runtimeRoot 'platform-runtime.psd1'
+    $manifest=Import-PowerShellDataFile -LiteralPath $manifestPath
+    foreach($relativePath in @($manifest.FileList)){
+        $source=Join-Path $runtimeRoot ([string]$relativePath)
+        $target=Join-Path $Destination ([string]$relativePath)
+        New-Item -ItemType Directory -Force -Path ([IO.Path]::GetDirectoryName($target))|Out-Null
+        Copy-Item -LiteralPath $source -Destination $target -Force
+    }
+}
 function Get-TestFileSha256 {
     param([string]$Path)
     $stream=[System.IO.File]::OpenRead($Path);try{$sha=[System.Security.Cryptography.SHA256]::Create();try{return([System.BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}}finally{$stream.Dispose()}
@@ -172,6 +184,7 @@ Describe 'bootstrap-ai-instructions-multisource' {
         Import-Module (Join-Path $script:RepositoryRoot 'scripts/agent-environment-reconciler.psm1') -Force
         $runtime=Join-Path $TestDrive 'runtime'; New-Item -ItemType Directory -Force -Path (Join-Path $runtime 'catalog') | Out-Null
         Get-ChildItem -LiteralPath (Join-Path $script:RepositoryRoot 'scripts') -Filter '*.psm1' | Copy-Item -Destination $runtime
+        Copy-TestPlatformRuntimeClosure -Destination $runtime
         try {
         $catalogPath=Join-Path $runtime 'catalog/skills-catalog.json'; $lockPath=Join-Path $runtime 'catalog/skills-catalog-lock.json'; $configurationPath=Join-Path $TestDrive 'config.json'
         $skillArchivePath=Join-Path $TestDrive 'skill.zip'; $userHome=Join-Path $TestDrive 'user'
