@@ -1600,6 +1600,98 @@ finally {
         @(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Force -ErrorAction SilentlyContinue).Count | Should Be 0
     }
 
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+        # Scenario: An active install fails after publishing a file, while external writers replace both its target and original backup before the journal records the operation as applied.
+        # Purpose: Preserve both external artifacts and return the interrupted-install refusal marker with the original install error as its inner exception.
+        It 'InterT83_active_install_recovery_returns_typed_refusal_when_artifacts_are_retained' {
+            Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+            $candidateRoot=Join-Path $TestDrive ('active-retained-candidate-'+[Guid]::NewGuid().ToString('N'))
+            New-InstallerFailpointCandidate -SourceRoot $repositoryRoot -DestinationRoot $candidateRoot
+            $archivePath=Join-Path $TestDrive ('active-retained-source-'+[Guid]::NewGuid().ToString('N')+'.zip')
+            $archiveSha256=New-InstallerSourceArchive -SourceRoot $candidateRoot -ArchivePath $archivePath
+            $sourceCommit=(@(& git -C $repositoryRoot rev-parse HEAD)-join '').Trim()
+            $externalTarget="# external target during active install`n"
+            $externalBackup="# external backup during active install`n"
+            $resultPath=Join-Path $TestDrive 'active-retained-result.txt'
+            $wrapperPath=Join-Path $TestDrive 'active-retained-probe.ps1'
+            Set-TestText -Path $wrapperPath -Value @'
+param(
+    [Parameter(Mandatory = $true)][string] $InstallerScript,
+    [Parameter(Mandatory = $true)][string] $RepositoryRoot,
+    [Parameter(Mandatory = $true)][string] $CodexHome,
+    [Parameter(Mandatory = $true)][string] $SourceCommit,
+    [Parameter(Mandatory = $true)][string] $ArchiveSha256,
+    [Parameter(Mandatory = $true)][string] $ArchivePath,
+    [Parameter(Mandatory = $true)][string] $ExternalTarget,
+    [Parameter(Mandatory = $true)][string] $ExternalBackup,
+    [Parameter(Mandatory = $true)][string] $ResultPath
+)
+$stateWriteLine = @(
+    Select-String -LiteralPath $InstallerScript -Pattern 'operations\|Where-Object\{\[int64\]\$_.sequence -eq \[int64\]\$operation.sequence\}\)\[0\]\.state=''applied''' |
+        Select-Object -First 1 -ExpandProperty LineNumber
+)
+if ($stateWriteLine.Count -ne 1) { throw 'Could not locate the active installer journal state-write boundary.' }
+$global:ActiveRetainedCodexHome=$CodexHome
+$global:ActiveRetainedTarget=$ExternalTarget
+$global:ActiveRetainedBackup=$ExternalBackup
+$breakpoint=Set-PSBreakpoint -Script $InstallerScript -Line ($stateWriteLine[0]-1) -Action {
+    $targetPath=Join-Path $global:ActiveRetainedCodexHome ([string]$operation.targetRelativePath).Replace('/',[IO.Path]::DirectorySeparatorChar)
+    $backupPath=Join-Path $transactionPath ([string]$operation.backupLeaf)
+    [IO.File]::WriteAllText($targetPath,$global:ActiveRetainedTarget,[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($backupPath,$global:ActiveRetainedBackup,[Text.UTF8Encoding]::new($false))
+    throw 'active install recovery probe failure'
+}
+try {
+    try {
+        & $InstallerScript -RepositoryRoot $RepositoryRoot -CodexHome $CodexHome `
+            -Acquisition github-codeload -SourceRepository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' `
+            -SourceCommit $SourceCommit -ArchiveSha256 $ArchiveSha256 -SourceArchivePath $ArchivePath | Out-Null
+        $installerExit=0
+        $installerError=''
+        $innerError=''
+    }
+    catch {
+        $installerExit=1
+        $installerError=$_.Exception.Message
+        $innerError=if($null-ne$_.Exception.InnerException){$_.Exception.InnerException.Message}else{''}
+    }
+}
+finally {
+    Remove-PSBreakpoint -Breakpoint $breakpoint -ErrorAction SilentlyContinue
+    Remove-Variable -Name ActiveRetainedCodexHome,ActiveRetainedTarget,ActiveRetainedBackup -Scope Global -ErrorAction SilentlyContinue
+}
+[IO.File]::WriteAllText($ResultPath,(@($installerExit,$installerError,$innerError)-join"`n"),[Text.UTF8Encoding]::new($false))
+'@
+            $arguments=@(
+                '-NoProfile','-ExecutionPolicy','Bypass','-File',$wrapperPath,
+                '-InstallerScript',(Resolve-Path -LiteralPath $script:InstallScript).Path,
+                '-RepositoryRoot',$repositoryRoot,
+                '-CodexHome',$codexHome,
+                '-SourceCommit',$sourceCommit,
+                '-ArchiveSha256',$archiveSha256,
+                '-ArchivePath',$archivePath,
+                '-ExternalTarget',$externalTarget,
+                '-ExternalBackup',$externalBackup,
+                '-ResultPath',$resultPath
+            )
+
+            $output=& $script:TestPowerShellExecutable @arguments 2>&1
+
+            $LASTEXITCODE|Should Be 0
+            $result=Get-Content -Raw -LiteralPath $resultPath
+            $result|Should Match '(?m)^1\r?$'
+            (Get-AiInstructionsRefusalCode $result)|Should Be interrupted-install
+            $result|Should Match ([regex]::Escape((Join-Path $codexHome '.ai-instructions-txn')))
+            $result|Should Match 'active install recovery probe failure'
+            $transaction=@(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Directory -Force)
+            $transaction.Count|Should Be 1
+            $journal=Get-Content -Raw -LiteralPath (Join-Path $transaction[0].FullName 'journal.json')|ConvertFrom-Json
+            $operation=@($journal.operations|Where-Object sequence -eq 1)[0]
+            (Get-Content -Raw -LiteralPath (Join-Path $codexHome ([string]$operation.targetRelativePath).Replace('/',[IO.Path]::DirectorySeparatorChar)))|Should Be $externalTarget
+            (Get-Content -Raw -LiteralPath (Join-Path $transaction[0].FullName ([string]$operation.backupLeaf)))|Should Be $externalBackup
+        }
+    }
+
     # Scenario: A crash leaves an applied launcher and its original backup, then the backup bytes are modified.
     # Purpose: Refuse journal recovery without changing either the applied target or any transaction evidence.
     It 'InterT68_preserves_concurrent_stable_file_bytes_during_rollback' {

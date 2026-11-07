@@ -919,7 +919,10 @@ try {
                 if([string]$decision.action -ceq 'refuse'){$preserveTransaction=$true;throw (New-AiInstructionsRefusalException -Code interrupted-install -Message ("Installation target changed concurrently; recovery refused mutation and retained evidence at '$transactionPath'. " + (@($decision.reasons)-join '; ')) -InnerException $installError.Exception)}
                 $plan=Get-AiInstructionsInstallRecoveryPlan -Journal $classification.journal -Decision $decision
                 Invoke-AiInstructionsInstallRecoveryPlan -Journal $classification.journal -Plan $plan -CodexHome $codexHomePath -TransactionRootLease $transactionRootLease -TransactionLease $transactionLease -TransactionPath $transactionPath|Out-Null
-                if(@($plan.retainedArtifacts).Count -gt 0){$preserveTransaction=$true}
+                if(@($plan.retainedArtifacts).Count -gt 0){
+                    $preserveTransaction=$true
+                    throw (New-AiInstructionsRefusalException -Code interrupted-install -Message "AI instructions installation recovery retained external-change artifacts at '$transactionPath'; a later recovery can safely re-evaluate the same journal evidence." -InnerException $installError.Exception)
+                }
                 else{$transactionLease=$null}
             }
             catch{
