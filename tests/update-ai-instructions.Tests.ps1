@@ -48,11 +48,12 @@ Describe 'AI instructions updater workflow' {
         $bundleBefore = [IO.File]::ReadAllBytes($bundlePath)
         $configurationBefore = [IO.File]::ReadAllBytes($configurationPath)
 
-        $message = $null
+        $caught = $null
         try { Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck | Out-Null }
-        catch { $message = $_.Exception.Message }
+        catch { $caught = $_ }
 
-        $message | Should Be 'Runtime bundle schema version 3 requires a projection-aware installer.'
+        $caught.Exception.Message | Should Match '^Runtime bundle schema version 3 requires a projection-aware installer\.'
+        (Get-AiInstructionsRefusalCode $caught) | Should Be unsupported-version
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($bundlePath)) | Should Be ([Convert]::ToBase64String($bundleBefore))
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($configurationPath)) | Should Be ([Convert]::ToBase64String($configurationBefore))
         Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update.lock') | Should Be $false
@@ -711,5 +712,70 @@ Export-ModuleMember -Function Invoke-AiInstructionsUpdateWorkflow,Get-AiInstruct
             $sourceHash = Get-TestUpdaterFileSha256 -Path (Join-Path $runtimeRoot $record.name)
             [string]$record.sha256 | Should Be $sourceHash
         }
+    }
+
+    # Scenario: D3 transaction residue or a legacy staging namespace exists before updater lock acquisition.
+    # Purpose: Return interrupted-install without creating a receipt or changing the retained evidence.
+    It 'UnitT79_refuses_transaction_and_legacy_residue_before_updater_mutation' -TestCases @(
+        @{Variant='orphan'},@{Variant='valid-journal'},@{Variant='legacy'}
+    ) {
+        param($Variant)
+        Import-Module $script:UpdaterModule -Force
+        $codexHome=Join-Path $TestDrive ("residue-$Variant")
+        New-TestUpdaterHome -Path $codexHome
+        if($Variant-eq'legacy'){
+            $evidence=Join-Path $codexHome '.ai-instructions-install-evidence';New-Item -ItemType Directory -Path $evidence|Out-Null
+        }else{
+            $store=Join-Path $codexHome '.ai-instructions-txn';New-Item -ItemType Directory -Path $store|Out-Null
+            if($Variant-eq'valid-journal'){
+                $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-install-journal-v1.example.json')|ConvertFrom-Json
+                $transaction=Join-Path $store ([string]$journal.transactionId);New-Item -ItemType Directory -Path $transaction|Out-Null
+                [IO.File]::WriteAllText((Join-Path $transaction 'journal.json'),(($journal|ConvertTo-Json -Depth 30)+"`n"),[Text.UTF8Encoding]::new($false))
+            }else{New-Item -ItemType Directory -Path (Join-Path $store ([Guid]::NewGuid().ToString('N')))|Out-Null}
+        }
+        $caught=$null
+        try{Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck|Out-Null}catch{$caught=$_}
+        (Get-AiInstructionsRefusalCode $caught)|Should Be interrupted-install
+        Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json')|Should Be $false
+    }
+
+    # Scenario: The candidate installer crashes after leaving a transaction directory and before activating a complete runtime.
+    # Purpose: Prefer interrupted-install over a generic failed receipt during after-failure verification.
+    It 'UnitT80_reports_interrupted_install_after_candidate_failure_residue' {
+        Import-Module $script:UpdaterModule -Force
+        $codexHome=Join-Path $TestDrive 'candidate-failfast-residue';New-TestUpdaterHome -Path $codexHome -Mode auto-install-approved
+        $package=[pscustomobject]@{SourceRoot='C:\fixture';ArchivePath='C:\fixture.zip';ArchiveSha256=('c'*64)}
+        $caught=$null
+        try{
+            Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck `
+                -ResolveCandidate { 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' } `
+                -AcquireCandidate { $package } `
+                -InstallCandidate {
+                    param($request)
+                    New-Item -ItemType Directory -Force -Path (Join-Path $request.CodexHome ('.ai-instructions-txn\'+[Guid]::NewGuid().ToString('N')))|Out-Null
+                    throw 'simulated candidate failfast'
+                }|Out-Null
+        }catch{$caught=$_}
+        (Get-AiInstructionsRefusalCode $caught)|Should Be interrupted-install
+        Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json')|Should Be $false
+    }
+
+    # Scenario: Platform locks and legacy File.Open callers contend on both updater lock files.
+    # Purpose: Preserve the windows-fileshare protocol in the new-to-old direction for update then install ordering.
+    It 'UnitT81_keeps_platform_locks_mutually_exclusive_with_legacy_file_open' -TestCases @(
+        @{Leaf='ai-instructions-update.lock'},@{Leaf='ai-instructions-install.lock'}
+    ) {
+        param($Leaf)
+        $codexHome=Join-Path $TestDrive ("platform-lock-"+$Leaf);New-TestUpdaterHome -Path $codexHome
+        Import-Module (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psd1') -Force
+        $root=Open-PlatformDirectory -Root $codexHome -RootOnly
+        try{
+            $lease=Enter-PlatformLock -ParentLease $root -Leaf $Leaf -Mode Exclusive -Timeout ([TimeSpan]::Zero)
+            try{
+                $caught=$null
+                try{$legacy=[IO.File]::Open((Join-Path $codexHome $Leaf),[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None);$legacy.Dispose()}catch{$caught=$_}
+                $caught|Should Not BeNullOrEmpty
+            }finally{$lease.Dispose()}
+        }finally{$root.Dispose()}
     }
 }

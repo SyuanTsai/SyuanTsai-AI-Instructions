@@ -1262,6 +1262,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "tests/ai-instructions-launcher-recovery.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "tests/ai-instructions-runtime-contract.Tests.ps1",
       "license": "Apache-2.0"
     },

@@ -3203,4 +3203,21 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
             }
         }
     }
+
+    # Scenario: The Windows PowerShell 5.1 launcher embeds the transaction residue classifier without importing runtime code.
+    # Purpose: Keep the trusted launcher copy token-identical to the runtime contract body as the classifier evolves.
+    It 'UnitT209_keeps_the_launcher_residue_classifier_body_identical_to_the_contract' {
+        $launcherPath=Join-Path $script:RepositoryRoot 'scripts\bootstrap-ai-instructions-installed.ps1'
+        $tokens=$null;$errors=$null
+        $contractAst=[Management.Automation.Language.Parser]::ParseFile($script:RuntimeContractModule,[ref]$tokens,[ref]$errors)
+        @($errors).Count|Should Be 0
+        $tokens=$null;$errors=$null
+        $launcherAst=[Management.Automation.Language.Parser]::ParseFile($launcherPath,[ref]$tokens,[ref]$errors)
+        @($errors).Count|Should Be 0
+        $contractFunction=@($contractAst.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Get-AiInstructionsInstallTransactionResidueKind'},$true))[0]
+        $launcherFunction=@($launcherAst.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Get-LauncherInstallTransactionResidueKind'},$true))[0]
+        $contractFunction|Should Not BeNullOrEmpty
+        $launcherFunction|Should Not BeNullOrEmpty
+        $launcherFunction.Body.Extent.Text|Should Be $contractFunction.Body.Extent.Text
+    }
 }
