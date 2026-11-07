@@ -571,8 +571,12 @@ function Invoke-AiInstructionsInstallRecoveryPlan {
                 throw "Transaction journal store artifact changed after classification: $storeLeaf"
             }
         }
-        $stageState = $JournalStoreStates[[string]$storeLeaves.stage]
-        if ($null -eq $stageState) { throw 'The journal store does not contain a classified journal.stage state.' }
+        $classifiedStageState = $JournalStoreStates[[string]$storeLeaves.stage]
+        if ($null -eq $classifiedStageState) { throw 'The journal store does not contain a classified journal.stage state.' }
+        $stageState = Get-InstallJournalStoreFileState -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ([string]$storeLeaves.stage) -Role stage -CurrentJournal $current -PlatformOs ([string]$Journal.platform.os)
+        if (-not (Test-InstallTransactionFileStateEqual $stageState $classifiedStageState)) {
+            throw "Transaction journal store artifact changed after classification: $($storeLeaves.stage)"
+        }
         Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ([string]$storeLeaves.stage) -Directory:$false -PlatformOs ([string]$Journal.platform.os) -ExpectedFileState $stageState
         $JournalStoreStates[[string]$storeLeaves.stage] = [pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}
         $journalPath = Join-Path $TransactionPath ([string]$storeLeaves.journal)

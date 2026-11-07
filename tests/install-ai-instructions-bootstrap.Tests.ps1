@@ -2400,6 +2400,39 @@ Remove-Variable -Name InstallerBackupGuardCodexHome,InstallerBackupGuardOutside,
         ($replacementState.identity|ConvertTo-Json -Compress)|Should Not Be ($originalState.identity|ConvertTo-Json -Compress)
         @(Get-ChildItem -LiteralPath $state.TransactionPath -Force -Recurse|ForEach-Object{$_.FullName.Substring($state.TransactionPath.Length)})|Should Be $entriesBefore
     }
+
+    # Scenario: Recovery classifies a valid committed journal beside a UTF-8 journal.stage whose JSON is malformed.
+    # Purpose: Require journal.stage to be the current or next journal generation before cleanup, refusing and retaining all evidence otherwise.
+    It 'InterT88_refuses_cleanup_of_a_malformed_journal_stage_generation' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome|Out-Null
+        $candidateRoot=Join-Path $TestDrive ('journal-stage-generation-'+[Guid]::NewGuid().ToString('N'))
+        New-InstallerFailpointCandidate -SourceRoot $repositoryRoot -DestinationRoot $candidateRoot
+        $archivePath=Join-Path $TestDrive ('journal-stage-generation-'+[Guid]::NewGuid().ToString('N')+'.zip')
+        $archiveSha256=New-InstallerSourceArchive -SourceRoot $candidateRoot -ArchivePath $archivePath
+        $sourceCommit=(@(& git -C $repositoryRoot rev-parse HEAD)-join'').Trim()
+        $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:InstallScript,'-RepositoryRoot',$repositoryRoot,'-CodexHome',$codexHome,'-Acquisition','github-codeload','-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git','-SourceCommit',$sourceCommit,'-ArchiveSha256',$archiveSha256,'-SourceArchivePath',$archivePath)
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT='after-committed-before-cleanup';& $script:TestPowerShellExecutable @arguments 2>&1|Out-Null;$crashExit=$LASTEXITCODE}
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+        $crashExit|Should Not Be 0
+        $state=Get-InstallerTransactionRecoveryState -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $state.JournalPhase|Should Be committed
+        $stagePath=Join-Path $state.TransactionPath 'journal.stage'
+        $malformedStage="{malformed`n"
+        Set-TestText -Path $stagePath -Value $malformedStage
+        $entriesBefore=@(Get-ChildItem -LiteralPath $state.TransactionPath -Force -Recurse|ForEach-Object{$_.FullName.Substring($state.TransactionPath.Length)})
+
+        $output=& $script:TestPowerShellExecutable @arguments 2>&1
+        $recoveryExit=$LASTEXITCODE
+        $result=$output-join[Environment]::NewLine
+
+        $recoveryExit|Should Not Be 0
+        (Get-AiInstructionsRefusalCode $result)|Should Be interrupted-install
+        $result|Should Match ([regex]::Escape($state.TransactionPath))
+        (Get-Content -Raw -LiteralPath $stagePath)|Should Be $malformedStage
+        Test-Path -LiteralPath (Join-Path $state.TransactionPath 'journal.json') -PathType Leaf|Should Be $true
+        @(Get-ChildItem -LiteralPath $state.TransactionPath -Force -Recurse|ForEach-Object{$_.FullName.Substring($state.TransactionPath.Length)})|Should Be $entriesBefore
+    }
     }
 
     # Register only on the native host because FileShare is the Windows lock interoperability protocol.
