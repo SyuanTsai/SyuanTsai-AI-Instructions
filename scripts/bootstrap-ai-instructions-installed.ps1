@@ -78,8 +78,17 @@ $stableEnvironmentUpdaterPath = Join-Path $PSScriptRoot 'update-agent-environmen
 $stableCleanupPath = Join-Path $PSScriptRoot 'cleanup-ai-instructions-pollution.ps1'
 $canonicalRepository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
 
+function Test-InstalledMutationRuntimeBaseline {
+    param(
+        [string] $EngineEdition = [string]$PSVersionTable.PSEdition,
+        [int] $PowerShellMajor = [int]$PSVersionTable.PSVersion.Major,
+        [int] $DotNetMajor = [int][Environment]::Version.Major
+    )
+    return $EngineEdition -ceq 'Core' -and $PowerShellMajor -ge 7 -and $DotNetMajor -ge 8
+}
+
 function Assert-InstalledMutationRuntimeBaseline {
-    if ($PSVersionTable.PSEdition -cne 'Core' -or $PSVersionTable.PSVersion.Major -lt 7 -or [Environment]::Version.Major -lt 8) {
+    if (-not (Test-InstalledMutationRuntimeBaseline)) {
         throw [System.InvalidOperationException]::new(
             "Interrupted-install recovery requires pwsh 7 on .NET 8 or newer; rerun this command with pwsh 7.`nAI instructions bootstrap stopped [classification=compatibility; retryable=false].`n[ai-instructions-refusal-code=runtime-baseline-unavailable]"
         )
@@ -379,6 +388,47 @@ function Assert-VerifiedInstalledRuntime {
     }
 }
 
+function Get-VerifiedInstalledRuntimeGenerationIdentity {
+    param([Parameter(Mandatory = $true)][object] $State)
+    return [pscustomobject][ordered]@{
+        BundleSha256 = Get-TrustedFileSha256 -Path $bundlePath
+        InventorySha256 = [string]$State.Bundle.inventorySha256
+    }
+}
+
+function Assert-InstalledRuntimeGenerationUnchanged {
+    param(
+        [Parameter(Mandatory = $true)][object] $TrustedIdentity,
+        [Parameter(Mandatory = $true)][object] $LockedIdentity
+    )
+    if ([string]$TrustedIdentity.BundleSha256 -cne [string]$LockedIdentity.BundleSha256 -or
+        [string]$TrustedIdentity.InventorySha256 -cne [string]$LockedIdentity.InventorySha256) {
+        throw [System.InvalidOperationException]::new(
+            "Installed AI instructions runtime generation changed while recovery acquired the install lock; start recovery again from the newly verified runtime.`nAI instructions bootstrap stopped [classification=integrity; retryable=false].`n[ai-instructions-refusal-code=closure-invalid]"
+        )
+    }
+}
+
+function Invoke-LauncherRecoveryTestFailpoint {
+    param([Parameter(Mandatory = $true)][string] $Name)
+    if ([Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_LAUNCHER_RECOVERY_FAILPOINT','Process') -cne $Name) { return }
+    $controlRoot = [Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_LAUNCHER_RECOVERY_CONTROL_ROOT','Process')
+    if ([string]::IsNullOrWhiteSpace($controlRoot)) { throw 'Launcher recovery test failpoint control root is missing.' }
+    $controlRoot = [System.IO.Path]::GetFullPath($controlRoot)
+    $controlItem = Get-Item -Force -LiteralPath $controlRoot
+    if (-not $controlItem.PSIsContainer -or ($controlItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Launcher recovery test failpoint control root must be a non-reparse directory.'
+    }
+    $readyPath = Join-Path $controlRoot ($Name + '.ready')
+    $releasePath = Join-Path $controlRoot ($Name + '.release')
+    [System.IO.File]::WriteAllText($readyPath,"ready`n",(New-Object System.Text.UTF8Encoding($false)))
+    $deadline = [DateTime]::UtcNow.AddSeconds(60)
+    while (-not (Test-Path -LiteralPath $releasePath -PathType Leaf)) {
+        if ([DateTime]::UtcNow -ge $deadline) { throw "Launcher recovery test failpoint '$Name' timed out." }
+        Start-Sleep -Milliseconds 25
+    }
+}
+
 function Repair-InterruptedRuntimePin {
     param(
         [Parameter(Mandatory = $true)][object] $State,
@@ -502,6 +552,7 @@ if ($RecoverInterruptedInstall) {
     $trustReadLock = Open-InstalledRuntimeReadLock -ForRecovery
     try {
         $recoveryState = Assert-VerifiedInstalledRuntime -AllowPinMismatch
+        $trustedGenerationIdentity = Get-VerifiedInstalledRuntimeGenerationIdentity -State $recoveryState
         try { Import-Module $platformRuntimeManifestPath -Force -ErrorAction Stop }
         catch {
             throw [System.InvalidOperationException]::new(
@@ -520,6 +571,7 @@ if ($RecoverInterruptedInstall) {
         Assert-LauncherRecoveryCapabilities -Receipt $capabilityReceipt
     }
     finally { $trustReadLock.Dispose() }
+    Invoke-LauncherRecoveryTestFailpoint -Name 'after-trust-verification-before-install-lock'
 
     $installLockPath = Join-Path $codexHome 'ai-instructions-install.lock'
     if (Test-Path -LiteralPath $installLockPath) {
@@ -547,8 +599,8 @@ if ($RecoverInterruptedInstall) {
         }
         Assert-NoLauncherInterruptedInstallResidue
         $recoveryState = Assert-VerifiedInstalledRuntime -AllowPinMismatch
-        try { Import-Module $platformRuntimeManifestPath -Force -ErrorAction Stop }
-        catch { throw [System.InvalidOperationException]::new("Verified installed platform runtime could not be reloaded under the install lock: $($_.Exception.Message) [ai-instructions-refusal-code=closure-invalid]",$_.Exception) }
+        $lockedGenerationIdentity = Get-VerifiedInstalledRuntimeGenerationIdentity -State $recoveryState
+        Assert-InstalledRuntimeGenerationUnchanged -TrustedIdentity $trustedGenerationIdentity -LockedIdentity $lockedGenerationIdentity
         try { Assert-PlatformRuntimeInventory -Root $runtimeRoot -ManifestPath $platformRuntimeManifestPath | Out-Null }
         catch { throw [System.InvalidOperationException]::new("Installed platform runtime inventory verification failed under the install lock: $($_.Exception.Message) [ai-instructions-refusal-code=closure-invalid]",$_.Exception) }
         $capabilityReceipt = Get-PlatformCapabilities -Required @()
@@ -575,8 +627,8 @@ try {
 finally { $runtimeReadLock.Dispose() }
 if ($ValidateOnly) { return }
 if (-not $SkipUpdateCheck -and -not $WhatIf) {
-    if ($PSVersionTable.PSEdition -eq 'Desktop') {
-        [Console]::Error.WriteLine('AI instructions automatic update check was skipped because it requires pwsh 7; read-only fan-out will continue.')
+    if (-not (Test-InstalledMutationRuntimeBaseline)) {
+        [Console]::Error.WriteLine('AI instructions automatic update check was skipped because it requires pwsh 7 on .NET 8 or newer; read-only fan-out will continue.')
     }
     else {
         $engineName = 'pwsh.exe'

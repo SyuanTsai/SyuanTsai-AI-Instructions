@@ -9,12 +9,6 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-if ($PSVersionTable.PSEdition -cne 'Core' -or $PSVersionTable.PSVersion.Major -lt 7 -or [Environment]::Version.Major -lt 8) {
-    throw [System.InvalidOperationException]::new(
-        'AI instructions updater mutation requires pwsh 7 on .NET 8 or newer. [ai-instructions-refusal-code=runtime-baseline-unavailable]'
-    )
-}
-
 function Get-LocalAiInstructionsUpdateFailureDisposition {
     param([Parameter(Mandatory = $true)][string] $Message)
 
@@ -40,6 +34,13 @@ trap {
     throw [System.InvalidOperationException]::new(
         "$message`nAI instructions updater disposition [classification=$($disposition.classification); retryable=$retryable].",
         $_.Exception
+    )
+}
+
+if ($PSVersionTable.PSEdition -cne 'Core' -or $PSVersionTable.PSVersion.Major -lt 7 -or [Environment]::Version.Major -lt 8) {
+    [Console]::Error.WriteLine('[ai-instructions-refusal-code=runtime-baseline-unavailable]')
+    throw [System.InvalidOperationException]::new(
+        'AI instructions updater mutation requires pwsh 7 on .NET 8 or newer. [ai-instructions-refusal-code=runtime-baseline-unavailable]'
     )
 }
 

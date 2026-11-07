@@ -244,6 +244,91 @@ Describe 'AI instructions launcher recovery' {
         $caught.Exception.Message|Should Match 'classification=concurrency; retryable=false'
     }
 
+    # Scenario: A complete installer replaces the verified runtime after the recovery trust lease is released but before its exclusive lock is acquired.
+    # Purpose: Refuse the changed bundle generation before importing its platform runtime or performing any launcher-owned mutation.
+    It 'LaunchT11_refuses_a_runtime_generation_changed_between_recovery_verifications' {
+        $fixtureHome=Copy-LauncherRecoveryHome -Name ('mixed-generation-'+[Guid]::NewGuid().ToString('N'))
+        Set-LauncherRecoveryPinMismatch -CodexHome $fixtureHome
+        $candidateRoot=Join-Path $script:ExternalTestRoot ('mixed-generation-candidate-'+[Guid]::NewGuid().ToString('N'))
+        New-LauncherRecoveryFailpointCandidate -DestinationRoot $candidateRoot
+        $candidateArchive=Join-Path $script:ExternalTestRoot ('mixed-generation-candidate-'+[Guid]::NewGuid().ToString('N')+'.zip')
+        $candidateArchiveSha256=New-LauncherRecoverySourceArchive -ArchivePath $candidateArchive -SourceRoot $candidateRoot
+        $candidateCommit='b'*40
+        $candidateHome=Join-Path $script:ExternalTestRoot ('mixed-generation-home-'+[Guid]::NewGuid().ToString('N'))
+        $candidateInstallerArguments=@(
+            '-NoProfile','-ExecutionPolicy','Bypass','-File',$script:InstallerScript,
+            '-RepositoryRoot',$script:RepositoryRoot,'-CodexHome',$candidateHome,
+            '-Acquisition','github-codeload','-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git',
+            '-SourceCommit',$candidateCommit,'-ArchiveSha256',$candidateArchiveSha256,'-SourceArchivePath',$candidateArchive
+        )
+        $candidateInstallOutput=& $script:PowerShellExecutable @candidateInstallerArguments 2>&1
+        if($LASTEXITCODE-ne0){throw "Candidate-home installer failed: $($candidateInstallOutput-join[Environment]::NewLine)"}
+        $launcher=Join-Path $fixtureHome 'hooks\bootstrap-ai-instructions.ps1'
+        $controlRoot=Join-Path $script:ExternalTestRoot ('mixed-generation-control-'+[Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $controlRoot|Out-Null
+        $readyPath=Join-Path $controlRoot 'after-trust-verification-before-install-lock.ready'
+        $releasePath=Join-Path $controlRoot 'after-trust-verification-before-install-lock.release'
+        $stdout=Join-Path $controlRoot 'launcher.stdout';$stderr=Join-Path $controlRoot 'launcher.stderr'
+        $previousFailpoint=[Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_LAUNCHER_RECOVERY_FAILPOINT','Process')
+        $previousControl=[Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_LAUNCHER_RECOVERY_CONTROL_ROOT','Process')
+        $process=$null
+        try{
+            [Environment]::SetEnvironmentVariable('AI_INSTRUCTIONS_LAUNCHER_RECOVERY_FAILPOINT','after-trust-verification-before-install-lock','Process')
+            [Environment]::SetEnvironmentVariable('AI_INSTRUCTIONS_LAUNCHER_RECOVERY_CONTROL_ROOT',$controlRoot,'Process')
+            $process=Start-Process -FilePath $script:PowerShellExecutable -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$launcher,'-RecoverInterruptedInstall') -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            $deadline=[DateTime]::UtcNow.AddSeconds(30)
+            while(-not(Test-Path -LiteralPath $readyPath -PathType Leaf)){
+                if($process.HasExited){throw "Launcher generation-swap fixture exited before ready: $(Get-Content -Raw -LiteralPath $stderr -ErrorAction SilentlyContinue)"}
+                if([DateTime]::UtcNow-ge$deadline){throw 'Launcher generation-swap fixture did not reach the trust boundary.'}
+                Start-Sleep -Milliseconds 25
+            }
+            [Environment]::SetEnvironmentVariable('AI_INSTRUCTIONS_LAUNCHER_RECOVERY_FAILPOINT',$null,'Process')
+            [Environment]::SetEnvironmentVariable('AI_INSTRUCTIONS_LAUNCHER_RECOVERY_CONTROL_ROOT',$null,'Process')
+            $fixtureRuntime=Join-Path $fixtureHome 'hooks\ai-instructions-runtime'
+            Move-Item -LiteralPath $fixtureRuntime -Destination (Join-Path $controlRoot 'retired-runtime')
+            Copy-Item -LiteralPath (Join-Path $candidateHome 'hooks\ai-instructions-runtime') -Destination (Join-Path $fixtureHome 'hooks') -Recurse
+            foreach($leaf in @('bootstrap-ai-instructions.ps1','update-ai-instructions.ps1','update-agent-environment.ps1','cleanup-ai-instructions-pollution.ps1')){
+                Copy-Item -LiteralPath (Join-Path $candidateHome "hooks\$leaf") -Destination (Join-Path $fixtureHome "hooks\$leaf") -Force
+            }
+            Copy-Item -LiteralPath (Join-Path $candidateHome 'ai-instructions-sync.json') -Destination (Join-Path $fixtureHome 'ai-instructions-sync.json') -Force
+            $afterInstallDigest=Get-LauncherRecoveryHomeDigest -CodexHome $fixtureHome
+            [IO.File]::WriteAllText($releasePath,"release`n",[Text.UTF8Encoding]::new($false))
+            $process.WaitForExit()
+            $exitCode=$process.ExitCode
+        }finally{
+            [Environment]::SetEnvironmentVariable('AI_INSTRUCTIONS_LAUNCHER_RECOVERY_FAILPOINT',$previousFailpoint,'Process')
+            [Environment]::SetEnvironmentVariable('AI_INSTRUCTIONS_LAUNCHER_RECOVERY_CONTROL_ROOT',$previousControl,'Process')
+            if($null-ne$process){
+                if(-not$process.HasExited){
+                    if(-not(Test-Path -LiteralPath $releasePath -PathType Leaf)){[IO.File]::WriteAllText($releasePath,"release`n",[Text.UTF8Encoding]::new($false))}
+                    if(-not$process.WaitForExit(5000)){$process.Kill();$process.WaitForExit()}
+                }
+                $process.Dispose()
+            }
+        }
+        $exitCode|Should Not Be 0
+        $refusalText=(Get-Content -Raw -LiteralPath $stderr -ErrorAction SilentlyContinue)+(Get-Content -Raw -LiteralPath $stdout -ErrorAction SilentlyContinue)
+        (Get-AiInstructionsRefusalCode $refusalText)|Should Be closure-invalid
+        (Get-LauncherRecoveryHomeDigest -CodexHome $fixtureHome)|Should Be $afterInstallDigest
+        (Get-Content -Raw -LiteralPath (Join-Path $fixtureHome 'hooks\ai-instructions-runtime\bootstrap-ai-instructions-installed.ps1'))|Should Match 'launcher recovery failpoint candidate'
+        @(Get-ChildItem -Force -LiteralPath (Join-Path $fixtureHome '.ai-instructions-txn')).Count|Should Be 0
+    }
+
+    # Scenario: Launcher update-check baseline decisions are evaluated against explicit Desktop/Core, PowerShell, and .NET version inputs.
+    # Purpose: Keep PowerShell 7.0-7.3 and every pre-.NET-8 host on read-only fan-out without invoking the updater.
+    It 'LaunchT12_matches_the_updater_baseline_for_update_check_eligibility' {
+        $tokens=$null;$errors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $script:RepositoryRoot 'scripts\bootstrap-ai-instructions-installed.ps1'),[ref]$tokens,[ref]$errors)
+        $errors.Count|Should Be 0
+        $definition=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Test-InstalledMutationRuntimeBaseline'},$true))
+        $definition.Count|Should Be 1
+        Invoke-Expression $definition[0].Extent.Text
+        (Test-InstalledMutationRuntimeBaseline -EngineEdition Desktop -PowerShellMajor 5 -DotNetMajor 4)|Should Be $false
+        (Test-InstalledMutationRuntimeBaseline -EngineEdition Core -PowerShellMajor 6 -DotNetMajor 8)|Should Be $false
+        (Test-InstalledMutationRuntimeBaseline -EngineEdition Core -PowerShellMajor 7 -DotNetMajor 7)|Should Be $false
+        (Test-InstalledMutationRuntimeBaseline -EngineEdition Core -PowerShellMajor 7 -DotNetMajor 8)|Should Be $true
+    }
+
     if($null-ne(Get-Command powershell.exe -ErrorAction SilentlyContinue)){
         # Scenario: Windows PowerShell 5.1 requests the mutation-only recovery switch.
         # Purpose: Return the typed baseline refusal before creating a lock or transaction artifact.

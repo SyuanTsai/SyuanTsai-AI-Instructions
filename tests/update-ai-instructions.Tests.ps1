@@ -875,4 +875,17 @@ Invoke-AiInstructionsUpdateWorkflow -CodexHome $CodexHome -ForceCheck -InstallAp
             Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json')|Should Be $false
         }
     }
+
+    # Register only on the native Windows host because this regression exercises the Windows PowerShell 5.1 process.
+    if([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)-and$null-ne(Get-Command powershell.exe -ErrorAction SilentlyContinue)){
+        # Scenario: Windows PowerShell 5.1 invokes the stable updater before any installed runtime or Codex Home exists.
+        # Purpose: Preserve the typed runtime-baseline-unavailable refusal instead of masking it with the trap helper lookup.
+        It 'UnitT85_windows_powershell_5_1_returns_the_typed_baseline_refusal_before_mutation' {
+            $codexHome=Join-Path $TestDrive 'desktop-baseline-home'
+            $output=& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $script:RepositoryRoot 'scripts\update-ai-instructions.ps1') -CodexHome $codexHome -ForceCheck 2>&1
+            $LASTEXITCODE|Should Not Be 0
+            (Get-AiInstructionsRefusalCode ($output-join[Environment]::NewLine))|Should Be runtime-baseline-unavailable
+            Test-Path -LiteralPath $codexHome|Should Be $false
+        }
+    }
 }
