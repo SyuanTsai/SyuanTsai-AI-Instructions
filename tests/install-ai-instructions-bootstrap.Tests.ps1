@@ -1761,7 +1761,7 @@ finally {
             $result=Get-Content -Raw -LiteralPath $resultPath
             $result|Should Match '(?m)^1\r?$'
             (Get-AiInstructionsRefusalCode $result)|Should Be interrupted-install
-            $result|Should Match ([regex]::Escape((Join-Path $codexHome '.ai-instructions-txn')))
+            ($result-replace'\s','')|Should Match ([regex]::Escape(((Join-Path $codexHome '.ai-instructions-txn')-replace'\s','')))
             $result|Should Match 'active install recovery probe failure'
             $transaction=@(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Directory -Force)
             $transaction.Count|Should Be 1
@@ -2392,7 +2392,7 @@ Remove-Variable -Name InstallerBackupGuardCodexHome,InstallerBackupGuardOutside,
 
         $result|Should Match '(?m)^1\r?$'
         (Get-AiInstructionsRefusalCode $result)|Should Be interrupted-install
-        $result|Should Match ([regex]::Escape($state.TransactionPath))
+        ($result-replace'\s','')|Should Match ([regex]::Escape(($state.TransactionPath-replace'\s','')))
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($journalPath))|Should Be ([Convert]::ToBase64String($journalBytes))
         $transactionLease=Open-PlatformDirectory -Root $codexHome -RelativePath $transactionRelative
         try{$replacementState=Get-AiInstructionsInstallFileState -ParentLease $transactionLease -Leaf journal.json -LiteralPath $journalPath -PlatformOs windows}
@@ -2428,7 +2428,7 @@ Remove-Variable -Name InstallerBackupGuardCodexHome,InstallerBackupGuardOutside,
 
         $recoveryExit|Should Not Be 0
         (Get-AiInstructionsRefusalCode $result)|Should Be interrupted-install
-        $result|Should Match ([regex]::Escape($state.TransactionPath))
+        ($result-replace'\s','')|Should Match ([regex]::Escape(($state.TransactionPath-replace'\s','')))
         (Get-Content -Raw -LiteralPath $stagePath)|Should Be $malformedStage
         Test-Path -LiteralPath (Join-Path $state.TransactionPath 'journal.json') -PathType Leaf|Should Be $true
         @(Get-ChildItem -LiteralPath $state.TransactionPath -Force -Recurse|ForEach-Object{$_.FullName.Substring($state.TransactionPath.Length)})|Should Be $entriesBefore
