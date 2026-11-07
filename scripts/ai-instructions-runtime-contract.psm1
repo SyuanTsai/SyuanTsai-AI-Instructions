@@ -2143,6 +2143,7 @@ function Get-AiInstructionsInstallRecoveryDecision {
     $permissionsMatchOriginal = @{}
     $backupMatchesOriginal = @{}
     $backupEvidenceValid = @{}
+    $preservableExternalChange = @{}
     foreach ($operation in @($Journal.operations)) {
         $sequence = [int64]$operation.sequence
         $matchesApplied[$sequence] = Test-AiInstructionsInstallJournalStateMatch -Observation $bySequence[$sequence] -State $operation.applied
@@ -2161,41 +2162,71 @@ function Get-AiInstructionsInstallRecoveryDecision {
         if ([string]$Journal.phase -cne 'committed' -and $matchesOriginal[$sequence] -and [bool]$operation.original.exists -and $null -ne $operation.permissions) {
             $permissionsMatchOriginal[$sequence] = Test-AiInstructionsInstallJournalPermissionsMatch -Observation $bySequence[$sequence] -Permissions $operation.permissions
         }
+        $operationStateCanBeUnpublished = [string]$operation.state -in @('pending','staged','rolled-back')
+        $createOperationHasInvalidBackup = [string]$operation.kind -in @('create-file','create-directory') -and -not $backupEvidenceValid[$sequence]
+        $preservableExternalChange[$sequence] = $operationStateCanBeUnpublished -and
+            [string]$operation.kind -cne 'remove-file' -and
+            -not $matchesOriginal[$sequence] -and -not $matchesApplied[$sequence] -and
+            -not $createOperationHasInvalidBackup -and
+            ($null -eq $operation.backupLeaf -or -not $backupMatchesOriginal[$sequence])
     }
     $allApplied = @($Journal.operations | Where-Object { -not $matchesApplied[[int64]$_.sequence] }).Count -eq 0
     $allOriginal = @($Journal.operations | Where-Object { -not $matchesOriginal[[int64]$_.sequence] }).Count -eq 0
-    $allBackupEvidenceValid = @($Journal.operations | Where-Object { -not $backupEvidenceValid[[int64]$_.sequence] }).Count -eq 0
-    if (-not $allBackupEvidenceValid) {
+    $hasUnpreservableBackupEvidence = @($Journal.operations | Where-Object {
+        $sequence = [int64]$_.sequence
+        -not $backupEvidenceValid[$sequence] -and -not $preservableExternalChange[$sequence]
+    }).Count -gt 0
+    if ($hasUnpreservableBackupEvidence) {
         $reasons = New-Object System.Collections.Generic.List[string]
         foreach ($operation in @($Journal.operations)) {
             $sequence = [int64]$operation.sequence
-            if ($backupEvidenceValid[$sequence]) { continue }
+            if ($backupEvidenceValid[$sequence] -or $preservableExternalChange[$sequence]) { continue }
             if ([string]$operation.kind -in @('create-file','create-directory')) { $reasons.Add("sequence $sequence backup must be null for $($operation.kind)") }
             elseif ([string]$operation.kind -ceq 'remove-file') { $reasons.Add("sequence $sequence tombstone backup does not match original") }
             else { $reasons.Add("sequence $sequence backup does not match original") }
         }
-        return [pscustomobject][ordered]@{ action='refuse'; reasons=$reasons.ToArray(); operations=@($Journal.operations | ForEach-Object { [pscustomobject][ordered]@{ sequence=[int64]$_.sequence; action='keep' } }) }
+        return [pscustomobject][ordered]@{ action='refuse'; reasons=$reasons.ToArray(); operations=@($Journal.operations | ForEach-Object { [pscustomobject][ordered]@{ sequence=[int64]$_.sequence; action='keep' } }); retainedArtifacts=@() }
     }
     if ([string]$Journal.phase -in @('committed','rolled-back')) {
         $allOriginalPermissions = @($Journal.operations | Where-Object { -not $permissionsMatchOriginal[[int64]$_.sequence] }).Count -eq 0
         $matchesTerminal = if ([string]$Journal.phase -ceq 'committed') { $allApplied } else { $allOriginal -and $allOriginalPermissions }
+        $terminalExternalChanges = @($Journal.operations | Where-Object { $preservableExternalChange[[int64]$_.sequence] })
+        $terminalCanPreserveExternal = [string]$Journal.phase -ceq 'rolled-back' -and $terminalExternalChanges.Count -gt 0 -and
+            @($Journal.operations | Where-Object {
+                $sequence = [int64]$_.sequence
+                -not $preservableExternalChange[$sequence] -and (-not $matchesOriginal[$sequence] -or -not $permissionsMatchOriginal[$sequence])
+            }).Count -eq 0
         $terminalAction = if ($matchesTerminal) { 'none' } else { 'refuse' }
+        if ($terminalCanPreserveExternal) { $terminalAction = 'none' }
         $reasons = New-Object System.Collections.Generic.List[string]
-        if (-not $matchesTerminal) { $reasons.Add("phase $($Journal.phase) observations do not match the expected terminal state") }
+        if (-not $matchesTerminal -and -not $terminalCanPreserveExternal) { $reasons.Add("phase $($Journal.phase) observations do not match the expected terminal state") }
         if ([string]$Journal.phase -ceq 'rolled-back') {
             foreach ($operation in @($Journal.operations)) {
                 $sequence = [int64]$operation.sequence
                 if (-not $permissionsMatchOriginal[$sequence]) { $reasons.Add("sequence $sequence permissions do not match original") }
             }
         }
-        return [pscustomobject][ordered]@{ action=$terminalAction; reasons=$reasons.ToArray(); operations=@($Journal.operations | ForEach-Object { [pscustomobject][ordered]@{ sequence=[int64]$_.sequence; action='keep' } }) }
+        $terminalRetainedArtifacts = New-Object System.Collections.Generic.List[object]
+        $terminalOperations = @($Journal.operations | ForEach-Object {
+            $sequence = [int64]$_.sequence
+            [pscustomobject][ordered]@{ sequence=$sequence; action=$(if($terminalCanPreserveExternal -and $preservableExternalChange[$sequence]){'none'}else{'keep'}) }
+        })
+        if ($terminalCanPreserveExternal) {
+            foreach ($operation in $terminalExternalChanges) {
+                if ($null -eq $bySequence[[int64]$operation.sequence].backup) { continue }
+                $leaves = @('stageLeaf','backupLeaf','quarantineLeaf' | ForEach-Object { $value=$operation.PSObject.Properties[$_].Value; if($null -ne $value){[string]$value} })
+                $terminalRetainedArtifacts.Add([pscustomobject][ordered]@{sequence=[int64]$operation.sequence;leaves=$leaves})
+            }
+        }
+        return [pscustomobject][ordered]@{ action=$terminalAction; reasons=$reasons.ToArray(); operations=$terminalOperations; retainedArtifacts=$terminalRetainedArtifacts.ToArray() }
     }
     if ([string]$Journal.phase -ceq 'applied' -and $allApplied) {
-        return [pscustomobject][ordered]@{ action='commit'; reasons=@(); operations=@($Journal.operations | ForEach-Object { [pscustomobject][ordered]@{ sequence=[int64]$_.sequence; action='keep' } }) }
+        return [pscustomobject][ordered]@{ action='commit'; reasons=@(); operations=@($Journal.operations | ForEach-Object { [pscustomobject][ordered]@{ sequence=[int64]$_.sequence; action='keep' } }); retainedArtifacts=@() }
     }
 
     $reasons = New-Object System.Collections.Generic.List[string]
     $operationDecisions = New-Object System.Collections.Generic.List[object]
+    $retainedArtifacts = New-Object System.Collections.Generic.List[object]
     $mustRefuse = $false
     foreach ($operation in @($Journal.operations)) {
         $sequence = [int64]$operation.sequence
@@ -2219,6 +2250,13 @@ function Get-AiInstructionsInstallRecoveryDecision {
             }
             else { $action = 'remove-applied' }
         }
+        elseif ($preservableExternalChange[$sequence]) {
+            $action = 'none'
+            if ($null -ne $bySequence[$sequence].backup) {
+                $leaves = @('stageLeaf','backupLeaf','quarantineLeaf' | ForEach-Object { $value=$operation.PSObject.Properties[$_].Value; if($null -ne $value){[string]$value} })
+                $retainedArtifacts.Add([pscustomobject][ordered]@{sequence=$sequence;leaves=$leaves})
+            }
+        }
         else {
             $mustRefuse = $true
             $action = 'keep'
@@ -2228,19 +2266,39 @@ function Get-AiInstructionsInstallRecoveryDecision {
     }
     if ($mustRefuse) {
         $safeDecisions = @($Journal.operations | ForEach-Object { [pscustomobject][ordered]@{ sequence=[int64]$_.sequence; action='keep' } })
-        return [pscustomobject][ordered]@{ action='refuse'; reasons=$reasons.ToArray(); operations=$safeDecisions }
+        return [pscustomobject][ordered]@{ action='refuse'; reasons=$reasons.ToArray(); operations=$safeDecisions; retainedArtifacts=@() }
     }
-    return [pscustomobject][ordered]@{ action='roll-back'; reasons=@(); operations=$operationDecisions.ToArray() }
+    return [pscustomobject][ordered]@{ action='roll-back'; reasons=@(); operations=$operationDecisions.ToArray(); retainedArtifacts=$retainedArtifacts.ToArray() }
 }
 
 function Get-AiInstructionsInstallRecoveryPlan {
     param([Parameter(Mandatory = $true)][object] $Journal,[Parameter(Mandatory = $true)][object] $Decision)
     Assert-AiInstructionsInstallJournalV1 -Journal $Journal | Out-Null
-    Assert-AiInstructionsInstallJournalExactProperties -Object $Decision -Names @('action','reasons','operations') -Context 'AI instructions install recovery decision'
+    $decisionProperties = if (Test-AiInstructionsObjectHasProperty -Object $Decision -Name 'retainedArtifacts') { @('action','reasons','operations','retainedArtifacts') } else { @('action','reasons','operations') }
+    Assert-AiInstructionsInstallJournalExactProperties -Object $Decision -Names $decisionProperties -Context 'AI instructions install recovery decision'
     if ($Decision.action -isnot [string] -or [string]$Decision.action -cnotin @('none','commit','roll-back','refuse')) { throw 'AI instructions install recovery decision action is invalid.' }
     if ($Decision.operations -isnot [System.Array] -or @($Decision.operations).Count -ne @($Journal.operations).Count) { throw 'AI instructions install recovery decision operations must correspond one-to-one with the journal.' }
     $decisionAction = [string]$Decision.action
     $journalPhase = [string]$Journal.phase
+    $retainedArtifacts = @()
+    if (Test-AiInstructionsObjectHasProperty -Object $Decision -Name 'retainedArtifacts') {
+        if ($Decision.retainedArtifacts -isnot [System.Array]) { throw 'AI instructions install recovery decision retainedArtifacts must be an array.' }
+        $retainedSequences = New-Object 'System.Collections.Generic.HashSet[long]'
+        foreach ($retained in @($Decision.retainedArtifacts)) {
+            Assert-AiInstructionsInstallJournalExactProperties -Object $retained -Names @('sequence','leaves') -Context 'AI instructions install recovery retained artifact entry'
+            Assert-AiInstructionsInstallJournalInteger -Value $retained.sequence -Context 'AI instructions install recovery retained artifact sequence' -Minimum 1
+            if (-not $retainedSequences.Add([int64]$retained.sequence)) { throw 'AI instructions install recovery retained artifact sequences must be unique.' }
+            if ($retained.leaves -isnot [System.Array] -or @($retained.leaves).Count -eq 0) { throw 'AI instructions install recovery retained artifact leaves must be a non-empty array.' }
+            $operation = @($Journal.operations | Where-Object { [int64]$_.sequence -eq [int64]$retained.sequence })[0]
+            if ($null -eq $operation) { throw 'AI instructions install recovery retained artifact sequence is not present in the journal.' }
+            $allowedLeaves = @('stageLeaf','backupLeaf','quarantineLeaf' | ForEach-Object { $value=$operation.PSObject.Properties[$_].Value; if($null -ne $value){[string]$value} })
+            $seenLeaves = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+            foreach ($leaf in @($retained.leaves)) {
+                if ($leaf -isnot [string] -or [string]$leaf -cnotin $allowedLeaves -or -not $seenLeaves.Add([string]$leaf)) { throw 'AI instructions install recovery retained artifact leaf is invalid or duplicated.' }
+            }
+            $retainedArtifacts += [pscustomobject][ordered]@{sequence=[int64]$retained.sequence;leaves=[string[]]@($retained.leaves)}
+        }
+    }
     if ($decisionAction -ceq 'roll-back' -and $journalPhase -cnotin @('prepared','applying','applied','rolling-back')) { throw "AI instructions install recovery roll-back decision is incompatible with journal phase $journalPhase." }
     if ($decisionAction -ceq 'commit' -and $journalPhase -cne 'applied') { throw "AI instructions install recovery commit decision is incompatible with journal phase $journalPhase." }
     if ($decisionAction -ceq 'none' -and $journalPhase -cnotin @('committed','rolled-back')) { throw "AI instructions install recovery none decision is incompatible with journal phase $journalPhase." }
@@ -2250,8 +2308,11 @@ function Get-AiInstructionsInstallRecoveryPlan {
         Assert-AiInstructionsInstallJournalExactProperties -Object $decisionOperation -Names @('sequence','action') -Context "AI instructions install recovery decision operation $($index + 1)"
         if ([int64]$decisionOperation.sequence -ne [int64]$journalOperation.sequence) { throw 'AI instructions install recovery decision operation sequence does not match the journal.' }
         if ($decisionOperation.action -isnot [string] -or [string]$decisionOperation.action -cnotin @('none','restore-original','remove-applied','restore-permissions','keep')) { throw 'AI instructions install recovery decision operation action is invalid.' }
-        if ([string]$Decision.action -in @('none','commit','refuse') -and [string]$decisionOperation.action -cne 'keep') { throw "AI instructions install recovery decision $($Decision.action) requires keep operations." }
+        $retainsSequence = @($retainedArtifacts | Where-Object { [int64]$_.sequence -eq [int64]$decisionOperation.sequence }).Count -eq 1
+        if ([string]$Decision.action -in @('commit','refuse') -and [string]$decisionOperation.action -cne 'keep') { throw "AI instructions install recovery decision $($Decision.action) requires keep operations." }
+        if ([string]$Decision.action -ceq 'none' -and [string]$decisionOperation.action -cnotin @('keep','none')) { throw 'AI instructions install recovery none decision permits only keep or none operations.' }
         if ([string]$Decision.action -ceq 'roll-back' -and [string]$decisionOperation.action -ceq 'keep') { throw 'AI instructions install recovery roll-back decision must not contain keep operations.' }
+        if ($retainsSequence -and [string]$decisionOperation.action -cne 'none') { throw 'AI instructions install recovery retained artifacts require a none operation action.' }
         $operationAction = [string]$decisionOperation.action
         $operationKind = [string]$journalOperation.kind
         if ($operationAction -ceq 'restore-original' -and (-not [bool]$journalOperation.original.exists -or $operationKind -cnotin @('write-file','swap-directory','remove-file'))) {
@@ -2266,10 +2327,10 @@ function Get-AiInstructionsInstallRecoveryPlan {
     }
     $steps = New-Object System.Collections.Generic.List[object]
     switch ([string]$Decision.action) {
-        'refuse' { return [pscustomobject][ordered]@{ action='refuse'; mutatesTargets=$false; steps=@() } }
+        'refuse' { return [pscustomobject][ordered]@{ action='refuse'; mutatesTargets=$false; retainedArtifacts=@(); steps=@() } }
         'none' {
-            $steps.Add([pscustomobject][ordered]@{ step='cleanup-transaction'; primitive='Remove-PlatformOwnedDirectoryTree' })
-            return [pscustomobject][ordered]@{ action='none'; mutatesTargets=$false; steps=$steps.ToArray() }
+            if ($retainedArtifacts.Count -eq 0) { $steps.Add([pscustomobject][ordered]@{ step='cleanup-transaction'; primitive='Remove-PlatformOwnedDirectoryTree' }) }
+            return [pscustomobject][ordered]@{ action='none'; mutatesTargets=$false; retainedArtifacts=$retainedArtifacts; steps=$steps.ToArray() }
         }
         'commit' {
             $steps.Add([pscustomobject][ordered]@{ step='write-phase'; phase='committed' })
@@ -2283,7 +2344,7 @@ function Get-AiInstructionsInstallRecoveryPlan {
                 }
             }
             $steps.Add([pscustomobject][ordered]@{ step='cleanup-transaction'; primitive='Remove-PlatformOwnedDirectoryTree' })
-            return [pscustomobject][ordered]@{ action='commit'; mutatesTargets=$false; steps=$steps.ToArray() }
+            return [pscustomobject][ordered]@{ action='commit'; mutatesTargets=$false; retainedArtifacts=@(); steps=$steps.ToArray() }
         }
         'roll-back' {
             $steps.Add([pscustomobject][ordered]@{ step='write-phase'; phase='rolling-back' })
@@ -2320,8 +2381,8 @@ function Get-AiInstructionsInstallRecoveryPlan {
                 }
             }
             $steps.Add([pscustomobject][ordered]@{ step='write-phase'; phase='rolled-back' })
-            $steps.Add([pscustomobject][ordered]@{ step='cleanup-transaction'; primitive='Remove-PlatformOwnedDirectoryTree' })
-            return [pscustomobject][ordered]@{ action='roll-back'; mutatesTargets=$true; steps=$steps.ToArray() }
+            if ($retainedArtifacts.Count -eq 0) { $steps.Add([pscustomobject][ordered]@{ step='cleanup-transaction'; primitive='Remove-PlatformOwnedDirectoryTree' }) }
+            return [pscustomobject][ordered]@{ action='roll-back'; mutatesTargets=$true; retainedArtifacts=$retainedArtifacts; steps=$steps.ToArray() }
         }
     }
 }

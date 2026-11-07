@@ -663,8 +663,11 @@ param(
         $recordPath = Join-Path $codexHome 'snapshot-record.json'
         New-Item -ItemType Directory -Force -Path $runtimeRoot | Out-Null
         Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts\update-ai-instructions.ps1') -Destination (Join-Path $hooksRoot 'update-ai-instructions.ps1')
-        foreach ($fileName in @('ai-instructions-runtime-contract.psm1','WindowsDacl.psm1','safe-zip.psm1','skills-catalog-contract.psm1')) {
-            Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot "scripts\$fileName") -Destination (Join-Path $runtimeRoot $fileName)
+        $platformManifest = Import-PowerShellDataFile -LiteralPath (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psd1')
+        foreach ($fileName in @(@('ai-instructions-runtime-contract.psm1','ai-instructions-install-transaction.psm1','WindowsDacl.psm1','safe-zip.psm1','skills-catalog-contract.psm1') + @($platformManifest.FileList) | Sort-Object -Unique)) {
+            $destination = Join-Path $runtimeRoot $fileName
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+            Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot "scripts\$fileName") -Destination $destination
         }
         [IO.File]::WriteAllText(
             (Join-Path $hooksRoot 'bootstrap-ai-instructions.ps1'),
@@ -680,7 +683,9 @@ function Get-SnapshotFileSha256 {
     finally { $sha256.Dispose() }
 }
 $recordPath = [Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_TEST_SNAPSHOT_RECORD')
-$records = foreach ($fileName in @('ai-instructions-updater.psm1','ai-instructions-runtime-contract.psm1','WindowsDacl.psm1','safe-zip.psm1','skills-catalog-contract.psm1')) {
+$platformManifest = Import-PowerShellDataFile -LiteralPath (Join-Path $PSScriptRoot 'platform-runtime.psd1')
+$snapshotFiles = @(@('ai-instructions-updater.psm1','ai-instructions-runtime-contract.psm1','ai-instructions-install-transaction.psm1','WindowsDacl.psm1','safe-zip.psm1','skills-catalog-contract.psm1') + @($platformManifest.FileList) | Sort-Object -Unique)
+$records = foreach ($fileName in $snapshotFiles) {
     $path = Join-Path $PSScriptRoot $fileName
     [pscustomobject]@{ name=$fileName; sha256=(Get-SnapshotFileSha256 -Path $path) }
 }
@@ -700,7 +705,8 @@ Export-ModuleMember -Function Invoke-AiInstructionsUpdateWorkflow,Get-AiInstruct
         }
 
         $records = Get-Content -Raw -LiteralPath $recordPath | ConvertFrom-Json
-        @($records.name) | Should Be @('ai-instructions-updater.psm1','ai-instructions-runtime-contract.psm1','WindowsDacl.psm1','safe-zip.psm1','skills-catalog-contract.psm1')
+        $expectedSnapshotFiles=@(@('ai-instructions-updater.psm1','ai-instructions-runtime-contract.psm1','ai-instructions-install-transaction.psm1','WindowsDacl.psm1','safe-zip.psm1','skills-catalog-contract.psm1') + @($platformManifest.FileList) | Sort-Object -Unique)
+        @($records.name) | Should Be $expectedSnapshotFiles
         foreach ($record in $records) {
             $sourceHash = Get-TestUpdaterFileSha256 -Path (Join-Path $runtimeRoot $record.name)
             [string]$record.sha256 | Should Be $sourceHash

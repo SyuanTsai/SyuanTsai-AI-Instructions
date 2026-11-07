@@ -11,6 +11,7 @@ $script:RuntimePreparationModulePath = [IO.Path]::GetFullPath((Join-Path $PSScri
 $script:WindowsPublicationPostRenameTestHook = $null
 $script:WindowsPublicationDurabilityTestHook = $null
 $script:WindowsPublicationPreReopenTestHook = $null
+$script:WindowsPostRenamePermissionReadbackTestHook = $null
 $loadedRuntimePreparationModules = @(Import-Module -Name $script:RuntimePreparationModulePath -PassThru -Scope Local -ErrorAction Stop)
 if ($loadedRuntimePreparationModules.Count -ne 1 -or -not [StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetFullPath([string]$loadedRuntimePreparationModules[0].Path),$script:RuntimePreparationModulePath)) { throw [IO.InvalidDataException]::new('The verified runtime preparation dependency did not load from its bound path.') }
 $script:RuntimePreparationModule = $loadedRuntimePreparationModules[0]
@@ -215,6 +216,40 @@ function New-WindowsPlatformRecoveryError {
     $error.Data['Receipt']=$Receipt
     return $error
 }
+function Get-WindowsPlatformPostRenamePermissionEvidence {
+    param([string]$Operation,[string]$Role,$Before,$Lease)
+    $beforeSnapshot=ConvertTo-WindowsPlatformPermissionSnapshot $Before $Operation 'Pre-rename permissions'
+    try {
+        $afterSnapshot=ConvertTo-WindowsPlatformPermissionSnapshot (Get-WindowsPlatformPermissions $Lease) $Operation 'Post-rename permissions'
+        if ($null -ne $script:WindowsPostRenamePermissionReadbackTestHook) {
+            $afterSnapshot=ConvertTo-WindowsPlatformPermissionSnapshot (& $script:WindowsPostRenamePermissionReadbackTestHook $Operation $Role $afterSnapshot) $Operation 'Post-rename permission readback hook'
+        }
+        $matches=(& $script:WindowsDaclCompareCommand -FirstSddl ([string]$afterSnapshot.sddl) -SecondSddl ([string]$beforeSnapshot.sddl)) -and [bool]$afterSnapshot.readOnly -eq [bool]$beforeSnapshot.readOnly
+        return [pscustomobject][ordered]@{
+            detected=[bool](-not $matches)
+            readbackAvailable=$true
+            beforeSddl=[string]$beforeSnapshot.sddl
+            afterSddl=[string]$afterSnapshot.sddl
+            beforeReadOnly=[bool]$beforeSnapshot.readOnly
+            afterReadOnly=[bool]$afterSnapshot.readOnly
+        }
+    }
+    catch {
+        return [pscustomobject][ordered]@{
+            detected=$null
+            readbackAvailable=$false
+            beforeSddl=[string]$beforeSnapshot.sddl
+            afterSddl=$null
+            beforeReadOnly=[bool]$beforeSnapshot.readOnly
+            afterReadOnly=$null
+        }
+    }
+}
+function Get-WindowsPlatformPermissionDiagnostic {
+    param($Evidence)
+    if ($null -eq $Evidence) { return '' }
+    return " Rename permission readback before SDDL='$($Evidence.beforeSddl)'/readOnly=$($Evidence.beforeReadOnly), after SDDL='$($Evidence.afterSddl)'/readOnly=$($Evidence.afterReadOnly)."
+}
 function Invoke-WindowsPlatformDurabilityHook {
     param([string]$Point,[string]$Operation,[string]$Role,$Lease)
     if ($null -ne $script:WindowsPublicationDurabilityTestHook) {
@@ -263,7 +298,7 @@ function Get-WindowsPlatformInheritedPermissions {
     }
 }
 function Open-WindowsPlatformMutationFile {
-    param($ParentLease,[string]$Leaf,$Identity,[string]$Capability,[switch]$AllowMissing,[switch]$Writable,[switch]$DaclWritable)
+    param($ParentLease,[string]$Leaf,$Identity,[string]$Capability,[switch]$AllowMissing,[switch]$Writable,[switch]$PermissionWritable,[switch]$DaclWritable)
     try {
         if ($null -eq $Identity) {
             if (-not $AllowMissing) { throw [ArgumentException]::new('An expected file identity is required.') }
@@ -271,6 +306,10 @@ function Open-WindowsPlatformMutationFile {
         }
         $device=ConvertTo-WindowsPlatformIdentityNumber ([string]$Identity.device)
         $fileId=ConvertTo-WindowsPlatformIdentityNumber ([string]$Identity.fileId)
+        if ($PermissionWritable) {
+            if ($AllowMissing) { throw [ArgumentException]::new('A permission-writable mutation file must exist.') }
+            return [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenPermissionMutationFile($ParentLease,$Leaf,$device,$fileId)
+        }
         if ($DaclWritable) {
             if ($AllowMissing) { throw [ArgumentException]::new('A DACL-writable mutation file must exist.') }
             return [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenPublicationStageFile($ParentLease,$Leaf,$device,$fileId)
@@ -506,6 +545,14 @@ function Publish-WindowsPlatformFile {
         # validated stage lease, then reopens the same identity relative to TransactionLease.
         $StageLease.Dispose()
         Invoke-WindowsPlatformPreReopenHook 'after-dispose-before-reopen' 'publication' 'stage' $stagePath
+        if ([bool]$stagePermissions.readOnly) {
+            $mutationStage=Open-WindowsPlatformMutationFile $TransactionLease $stageLeaf $stageIdentity 'publication' -PermissionWritable
+            Assert-WindowsPlatformExpectedContent $mutationStage $ExpectedStage 'publication' 'Permission-opened stage ExpectedStage'
+            if ($null -ne $Journal) { Assert-WindowsPlatformExpectedContent $mutationStage $Journal.applied 'publication' 'Permission-opened stage journal applied state' }
+            $permissionsApplied=$true
+            [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($mutationStage,$null,$false)
+            $mutationStage.Dispose();$mutationStage=$null
+        }
         $mutationStage=Open-WindowsPlatformMutationFile $TransactionLease $stageLeaf $stageIdentity 'publication' -DaclWritable
         Assert-WindowsPlatformExpectedContent $mutationStage $ExpectedStage 'publication' 'Reopened stage ExpectedStage'
         if ($null -ne $Journal) { Assert-WindowsPlatformExpectedContent $mutationStage $Journal.applied 'publication' 'Reopened stage journal applied state' }
@@ -545,9 +592,13 @@ function Publish-WindowsPlatformFile {
             appliedIdentity=(Get-WindowsPlatformIdentity $mutationStage.Observation)
             displacedIdentity=$(if($null -eq $target){$null}else{Get-WindowsPlatformIdentity $target.Observation})
             permissions=$permissions
+            permissionsDrift=$null
             displacedLeaf=$DisplacedLeaf
             durability='unconfirmed'
             flush=[pscustomobject][ordered]@{file=$true;directory=$false;transactionDirectory=$false}
+        }
+        if ($null -ne $target) {
+            $receipt.permissionsDrift=Get-WindowsPlatformPostRenamePermissionEvidence -Operation publication -Role displaced -Before $permissions -Lease $target
         }
         if($verifyCreatePermissionsAfterRename){
             $aclFrozenAfterRename=$true
@@ -587,7 +638,8 @@ function Publish-WindowsPlatformFile {
         }
         catch {
             $preserveForRecovery=$true
-            throw (New-WindowsPlatformRecoveryError 'publication' "Post-publication path verification failed; journal recovery is required. $($_.Exception.Message)" $receipt)
+            $permissionDiagnostic=Get-WindowsPlatformPermissionDiagnostic $receipt.permissionsDrift
+            throw (New-WindowsPlatformRecoveryError 'publication' "Post-publication path verification failed; journal recovery is required.$permissionDiagnostic $($_.Exception.Message)" $receipt)
         }
         return $receipt
     }
@@ -610,6 +662,7 @@ function Publish-WindowsPlatformFile {
             }
             elseif ($targetReadOnlyCleared) { [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($target,$null,$true);$targetReadOnlyCleared=$false }
             if ($permissionsApplied -and -not $aclFrozenAfterRename) {
+                if ($null -eq $mutationStage) { $mutationStage=Open-WindowsPlatformMutationFile $TransactionLease $stageLeaf $stageIdentity 'publication' -PermissionWritable }
                 [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::ApplyPublicationDacl($mutationStage,[string]$stagePermissions.sddl)
                 [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($mutationStage,$null,[bool]$stagePermissions.readOnly)
                 $restoredStagePermissions=ConvertTo-WindowsPlatformPermissionSnapshot (Get-WindowsPlatformPermissions $mutationStage) 'publication' 'Rollback stage'
@@ -680,10 +733,12 @@ function Remove-WindowsPlatformOwnedFile {
                 displacedIdentity=$identity
                 backupIdentity=$identity
                 permissions=$permissions
+                permissionsDrift=$null
                 tombstoneLeaf=$TombstoneLeaf
                 durability='unconfirmed'
                 flush=[pscustomobject][ordered]@{file=$true;directory=$false;transactionDirectory=$false}
             }
+            $receipt.permissionsDrift=Get-WindowsPlatformPostRenamePermissionEvidence -Operation owned-file-removal -Role tombstone -Before $permissions -Lease $target
             try {
                 Invoke-WindowsPlatformDirectoryFlush $ParentLease 'owned-file-removal' 'post-rename' 'parent'
                 $receipt.flush.directory=$true
@@ -704,14 +759,13 @@ function Remove-WindowsPlatformOwnedFile {
                 $tombstoneValidation=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenValidationFile($TransactionLease,$TombstoneLeaf)
                 try {
                     Assert-WindowsPlatformExpectedState $tombstoneValidation $ExpectedState 'owned-file-removal'
-                    $tombstonePermissions=ConvertTo-WindowsPlatformPermissionSnapshot (Get-WindowsPlatformPermissions $tombstoneValidation) 'owned-file-removal' 'Tombstone readback'
-                    if (-not (& $script:WindowsDaclCompareCommand -FirstSddl ([string]$tombstonePermissions.sddl) -SecondSddl ([string]$permissions.sddl)) -or [bool]$tombstonePermissions.readOnly -ne [bool]$permissions.readOnly) { throw (New-WindowsPlatformVerificationError 'owned-file-removal' 'Tombstone permissions do not match the original snapshot.') }
                 }
                 finally { $tombstoneValidation.Dispose() }
             }
             catch {
                 $preserveForRecovery=$true
-                throw (New-WindowsPlatformRecoveryError 'owned-file-removal' "Post-removal path verification failed; journal recovery is required. $($_.Exception.Message)" $receipt)
+                $permissionDiagnostic=Get-WindowsPlatformPermissionDiagnostic $receipt.permissionsDrift
+                throw (New-WindowsPlatformRecoveryError 'owned-file-removal' "Post-removal path verification failed; journal recovery is required.$permissionDiagnostic $($_.Exception.Message)" $receipt)
             }
             return $receipt
         }
