@@ -81,6 +81,24 @@ function Test-InstallTransactionIdentityEqual {
         [string]::Equals([string]$First.fileId,[string]$Second.fileId,[StringComparison]::OrdinalIgnoreCase)
 }
 
+function Test-InstallTransactionFileStateEqual {
+    param([Parameter(Mandatory = $true)] $Actual,[Parameter(Mandatory = $true)] $Expected)
+    if ([bool]$Actual.exists -ne [bool]$Expected.exists) { return $false }
+    if (-not [bool]$Expected.exists) { return $true }
+    return [string]$Actual.sha256 -ceq [string]$Expected.sha256 -and
+        [int64]$Actual.length -eq [int64]$Expected.length -and
+        (Test-InstallTransactionIdentityEqual $Actual.identity $Expected.identity)
+}
+
+function Test-InstallTransactionDirectoryStateEqual {
+    param([Parameter(Mandatory = $true)] $Actual,[Parameter(Mandatory = $true)] $Expected)
+    if ([bool]$Actual.exists -ne [bool]$Expected.exists) { return $false }
+    if (-not [bool]$Expected.exists) { return $true }
+    return [string]$Actual.inventorySha256 -ceq [string]$Expected.inventorySha256 -and
+        [int64]$Actual.entryCount -eq [int64]$Expected.entryCount -and
+        (Test-InstallTransactionIdentityEqual $Actual.identity $Expected.identity)
+}
+
 function Get-InstallTransactionEntryKind {
     param([Parameter(Mandatory = $true)][string] $LiteralPath)
     try { $attributes = [IO.File]::GetAttributes([IO.Path]::GetFullPath($LiteralPath)) }
@@ -250,9 +268,10 @@ function Write-AiInstructionsInstallJournalStore {
     $validated = Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf $leaves.journal -TransactionId ([string]$Journal.transactionId)
     if (-not (Test-InstallJournalSemanticEqual -First $validated -Second $Journal)) { throw 'Published journal readback differs from the requested journal.' }
     if ($null -ne $PreviousJournal) {
-        $previousPath = Join-Path $TransactionPath $leaves.previous
-        $previousState = Get-AiInstructionsInstallFileState -ParentLease $TransactionLease -Leaf $leaves.previous -LiteralPath $previousPath -PlatformOs $PlatformOs
-        Remove-PlatformOwnedFile -ParentLease $TransactionLease -Leaf $leaves.previous -ExpectedState $previousState | Out-Null
+        # Publication preserves the displaced journal identity and bytes.  Bind
+        # cleanup to the state observed before publication instead of granting
+        # a replacement journal.prev authority to delete itself.
+        Remove-PlatformOwnedFile -ParentLease $TransactionLease -Leaf $leaves.previous -ExpectedState $current | Out-Null
     }
     return $validated
 }
@@ -357,15 +376,16 @@ function Remove-InstallTransactionArtifact {
         [Parameter(Mandatory = $true)][string] $Leaf,
         [Parameter(Mandatory = $true)][bool] $Directory,
         [Parameter(Mandatory = $true)][string] $PlatformOs,
-        [AllowNull()][object] $ExpectedDirectoryIdentity = $null,
+        [AllowNull()][object] $ExpectedFileState = $null,
+        [AllowNull()][object] $ExpectedDirectoryState = $null,
         [switch] $TrashDirectory
     )
     $path = Join-Path $TransactionPath $Leaf
     if ($Directory) {
         $state = Get-AiInstructionsInstallDirectoryState -ParentLease $TransactionLease -Leaf $Leaf -LiteralPath $path
         if ([bool]$state.exists) {
-            if ($null -ne $ExpectedDirectoryIdentity -and -not (Test-InstallTransactionIdentityEqual $state.identity $ExpectedDirectoryIdentity)) {
-                throw "Transaction directory artifact identity differs from the journal identity: $Leaf"
+            if ($null -eq $ExpectedDirectoryState -or -not (Test-InstallTransactionDirectoryStateEqual $state $ExpectedDirectoryState)) {
+                throw "Transaction directory artifact differs from the journal state: $Leaf"
             }
             if ($TrashDirectory) {
                 if ($PlatformOs -cne 'windows') { throw 'Transaction directory trash publication requires the Windows directory-publication capability.' }
@@ -396,12 +416,72 @@ function Remove-InstallTransactionArtifact {
                 Invoke-AiInstructionsInstallFailpoint -Name ("during-cleanup-" + $Leaf)
                 Remove-PlatformOwnedDirectoryTree -TransactionLease $TransactionLease -Leaf $trashLeaf -ExpectedIdentity $trashState.identity | Out-Null
             }
-            else { Remove-PlatformOwnedDirectoryTree -TransactionLease $TransactionLease -Leaf $Leaf -ExpectedIdentity $state.identity | Out-Null }
+            else { Remove-PlatformOwnedDirectoryTree -TransactionLease $TransactionLease -Leaf $Leaf -ExpectedIdentity $ExpectedDirectoryState.identity | Out-Null }
         }
     }
     else {
         $state = Get-AiInstructionsInstallFileState -ParentLease $TransactionLease -Leaf $Leaf -LiteralPath $path -PlatformOs $PlatformOs
-        if ([bool]$state.exists) { Remove-PlatformOwnedFile -ParentLease $TransactionLease -Leaf $Leaf -ExpectedState $state | Out-Null }
+        if ([bool]$state.exists) {
+            if ($null -eq $ExpectedFileState -or -not (Test-InstallTransactionFileStateEqual $state $ExpectedFileState)) {
+                throw "Transaction file artifact differs from the journal state: $Leaf"
+            }
+            Remove-PlatformOwnedFile -ParentLease $TransactionLease -Leaf $Leaf -ExpectedState $ExpectedFileState | Out-Null
+        }
+    }
+}
+
+function Get-InstallJournalStoreFileState {
+    param(
+        [Parameter(Mandatory = $true)] $TransactionLease,
+        [Parameter(Mandatory = $true)][string] $TransactionPath,
+        [Parameter(Mandatory = $true)][string] $Leaf,
+        [Parameter(Mandatory = $true)][ValidateSet('journal','stage','previous')][string] $Role,
+        [Parameter(Mandatory = $true)] $CurrentJournal,
+        [Parameter(Mandatory = $true)][string] $PlatformOs
+    )
+    $path = Join-Path $TransactionPath $Leaf
+    $state = Get-AiInstructionsInstallFileState -ParentLease $TransactionLease -Leaf $Leaf -LiteralPath $path -PlatformOs $PlatformOs
+    if (-not [bool]$state.exists) { return $state }
+    $stored = Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf $Leaf -TransactionId ([string]$CurrentJournal.transactionId)
+    $valid = Test-InstallJournalSemanticEqual -First $stored -Second $CurrentJournal
+    if (-not $valid -and $Role -ceq 'stage') {
+        try { Assert-AiInstructionsInstallJournalStoreTransition -Previous $CurrentJournal -Next $stored | Out-Null; $valid = $true }
+        catch { $valid = $false }
+    }
+    elseif (-not $valid -and $Role -ceq 'previous') {
+        try { Assert-AiInstructionsInstallJournalStoreTransition -Previous $stored -Next $CurrentJournal | Out-Null; $valid = $true }
+        catch { $valid = $false }
+    }
+    if (-not $valid) { throw "Transaction journal store artifact is not a known $Role generation: $Leaf" }
+    return $state
+}
+
+function Assert-InstallRecoveryPermissionTarget {
+    param(
+        [Parameter(Mandatory = $true)] $Lease,
+        [Parameter(Mandatory = $true)] $ParentLease,
+        [Parameter(Mandatory = $true)] $Operation,
+        [Parameter(Mandatory = $true)][string] $TargetPath,
+        [Parameter(Mandatory = $true)][string] $PlatformOs,
+        [Parameter(Mandatory = $true)][bool] $Directory
+    )
+    $observation = Assert-PlatformFileIdentity -Lease $Lease -Expected $Lease.Observation -SingleLink:(-not $Directory) -VerifyPath
+    $identity = ConvertTo-InstallTransactionIdentity -Observation $observation -PlatformOs $PlatformOs
+    if (-not (Test-InstallTransactionIdentityEqual $identity $Operation.original.identity)) {
+        throw "Recovery permission target identity differs from the journal original: $($Operation.targetRelativePath)"
+    }
+    if ($Directory) {
+        $state = Get-AiInstructionsInstallDirectoryState -ParentLease $ParentLease -Leaf (([string]$Operation.targetRelativePath).Split('/')[-1]) -LiteralPath $TargetPath
+        if (-not (Test-InstallTransactionDirectoryStateEqual $state $Operation.original)) {
+            throw "Recovery permission target content differs from the journal original: $($Operation.targetRelativePath)"
+        }
+    }
+    else {
+        [byte[]]$bytes = $Lease.ReadAllBytes(268435456)
+        if ([int64]$bytes.Length -ne [int64]$Operation.original.length -or
+            (Get-InstallTransactionSha256 -Bytes $bytes) -cne [string]$Operation.original.sha256) {
+            throw "Recovery permission target content differs from the journal original: $($Operation.targetRelativePath)"
+        }
     }
 }
 
@@ -421,19 +501,32 @@ function Remove-InstallTerminalTransactionArtifacts {
             $property = $operation.PSObject.Properties[$leafName]
             if ($null -eq $property -or $null -eq $property.Value) { continue }
             $leaf = [string]$property.Value
+            $expectedState = if ($leafName -ceq 'backupLeaf') {
+                if ($directoryArtifact) {
+                    [pscustomobject][ordered]@{ exists=$true; identity=$operation.backupIdentity; inventorySha256=$operation.original.inventorySha256; entryCount=$operation.original.entryCount }
+                }
+                else {
+                    [pscustomobject][ordered]@{ exists=$true; sha256=$operation.original.sha256; length=$operation.original.length; identity=$operation.backupIdentity }
+                }
+            }
+            else { $operation.applied }
             if ($directoryArtifact) {
-                $expectedIdentity = if ($leafName -ceq 'backupLeaf') { $operation.backupIdentity } else { $operation.applied.identity }
-                Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ($leaf + '.trash') -Directory:$true -PlatformOs $platformOs -ExpectedDirectoryIdentity $expectedIdentity
-                Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf $leaf -Directory:$true -PlatformOs $platformOs -ExpectedDirectoryIdentity $expectedIdentity -TrashDirectory
+                Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ($leaf + '.trash') -Directory:$true -PlatformOs $platformOs -ExpectedDirectoryState $expectedState
+                Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf $leaf -Directory:$true -PlatformOs $platformOs -ExpectedDirectoryState $expectedState -TrashDirectory
             }
             else {
-                Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf $leaf -Directory:$false -PlatformOs $platformOs
+                Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf $leaf -Directory:$false -PlatformOs $platformOs -ExpectedFileState $expectedState
             }
         }
     }
     $storeLeaves = Get-AiInstructionsInstallJournalStoreLeaves
-    foreach ($leaf in @([string]$storeLeaves.stage,[string]$storeLeaves.previous,[string]$storeLeaves.journal)) {
-        Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf $leaf -Directory:$false -PlatformOs $platformOs
+    foreach ($entry in @(
+        [pscustomobject]@{leaf=[string]$storeLeaves.stage;role='stage'},
+        [pscustomobject]@{leaf=[string]$storeLeaves.previous;role='previous'},
+        [pscustomobject]@{leaf=[string]$storeLeaves.journal;role='journal'}
+    )) {
+        $expected = Get-InstallJournalStoreFileState -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf $entry.leaf -Role $entry.role -CurrentJournal $Journal -PlatformOs $platformOs
+        Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf $entry.leaf -Directory:$false -PlatformOs $platformOs -ExpectedFileState $expected
     }
 }
 
@@ -454,17 +547,26 @@ function Invoke-AiInstructionsInstallRecoveryPlan {
     # validated previous generation beside the published journal.  Neither is
     # authoritative after the recovery decision has been made, and both would
     # collide with the next durable store transition.
-    Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ([string]$storeLeaves.stage) -Directory:$false -PlatformOs ([string]$Journal.platform.os)
-    $journalPath = Join-Path $TransactionPath ([string]$storeLeaves.journal)
-    $previousPath = Join-Path $TransactionPath ([string]$storeLeaves.previous)
-    $journalExists = Test-Path -LiteralPath $journalPath -PathType Leaf
-    $previousExists = Test-Path -LiteralPath $previousPath -PathType Leaf
-    if (-not $journalExists -and $previousExists) {
-        $current = Write-AiInstructionsInstallJournalStore -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Journal $current -PlatformOs ([string]$Journal.platform.os)
-        Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ([string]$storeLeaves.previous) -Directory:$false -PlatformOs ([string]$Journal.platform.os)
+    try {
+        $stageState = Get-InstallJournalStoreFileState -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ([string]$storeLeaves.stage) -Role stage -CurrentJournal $current -PlatformOs ([string]$Journal.platform.os)
+        Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ([string]$storeLeaves.stage) -Directory:$false -PlatformOs ([string]$Journal.platform.os) -ExpectedFileState $stageState
+        $journalPath = Join-Path $TransactionPath ([string]$storeLeaves.journal)
+        $previousPath = Join-Path $TransactionPath ([string]$storeLeaves.previous)
+        $journalExists = Test-Path -LiteralPath $journalPath -PathType Leaf
+        $previousExists = Test-Path -LiteralPath $previousPath -PathType Leaf
+        if (-not $journalExists -and $previousExists) {
+            $current = Write-AiInstructionsInstallJournalStore -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Journal $current -PlatformOs ([string]$Journal.platform.os)
+            $previousState = Get-InstallJournalStoreFileState -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ([string]$storeLeaves.previous) -Role previous -CurrentJournal $current -PlatformOs ([string]$Journal.platform.os)
+            Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ([string]$storeLeaves.previous) -Directory:$false -PlatformOs ([string]$Journal.platform.os) -ExpectedFileState $previousState
+        }
+        elseif ($journalExists -and $previousExists) {
+            $previousState = Get-InstallJournalStoreFileState -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ([string]$storeLeaves.previous) -Role previous -CurrentJournal $current -PlatformOs ([string]$Journal.platform.os)
+            Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ([string]$storeLeaves.previous) -Directory:$false -PlatformOs ([string]$Journal.platform.os) -ExpectedFileState $previousState
+        }
     }
-    elseif ($journalExists -and $previousExists) {
-        Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ([string]$storeLeaves.previous) -Directory:$false -PlatformOs ([string]$Journal.platform.os)
+    catch {
+        if ((Get-AiInstructionsRefusalCode $_) -ceq 'interrupted-install') { throw }
+        throw (New-AiInstructionsRefusalException -Code interrupted-install -Message "Interrupted install recovery refused mutation and retained evidence at '$TransactionPath'." -InnerException $_.Exception)
     }
     $transactionIdentity = ConvertTo-InstallTransactionIdentity -Observation $TransactionLease.Observation -PlatformOs ([string]$Journal.platform.os)
     $transactionDisposed = $false
@@ -483,13 +585,14 @@ function Invoke-AiInstructionsInstallRecoveryPlan {
                 'cleanup-artifact' {
                     Invoke-AiInstructionsInstallFailpoint -Name ("before-cleanup-" + [string]$step.leaf)
                     $directoryArtifact = [string]$step.primitive -ceq 'Remove-PlatformOwnedDirectoryTree'
-                    $expectedDirectoryIdentity = $null
-                    if ($directoryArtifact) {
-                        $cleanupOperation = @($current.operations | Where-Object { [int64]$_.sequence -eq [int64]$step.sequence })[0]
-                        if ([string]$step.leaf -ceq [string]$cleanupOperation.backupLeaf) { $expectedDirectoryIdentity = $cleanupOperation.backupIdentity }
-                        elseif ([string]$step.leaf -ceq [string]$cleanupOperation.stageLeaf -or [string]$step.leaf -ceq [string]$cleanupOperation.quarantineLeaf) { $expectedDirectoryIdentity = $cleanupOperation.applied.identity }
+                    $cleanupOperation = @($current.operations | Where-Object { [int64]$_.sequence -eq [int64]$step.sequence })[0]
+                    $isBackup = [string]$step.leaf -ceq [string]$cleanupOperation.backupLeaf
+                    $expectedState = if ($isBackup) {
+                        if ($directoryArtifact) { [pscustomobject][ordered]@{exists=$true;identity=$cleanupOperation.backupIdentity;inventorySha256=$cleanupOperation.original.inventorySha256;entryCount=$cleanupOperation.original.entryCount} }
+                        else { [pscustomobject][ordered]@{exists=$true;sha256=$cleanupOperation.original.sha256;length=$cleanupOperation.original.length;identity=$cleanupOperation.backupIdentity} }
                     }
-                    Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ([string]$step.leaf) -Directory:$directoryArtifact -PlatformOs ([string]$Journal.platform.os) -ExpectedDirectoryIdentity $expectedDirectoryIdentity -TrashDirectory:$directoryArtifact
+                    else { $cleanupOperation.applied }
+                    Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ([string]$step.leaf) -Directory:$directoryArtifact -PlatformOs ([string]$Journal.platform.os) -ExpectedFileState $(if($directoryArtifact){$null}else{$expectedState}) -ExpectedDirectoryState $(if($directoryArtifact){$expectedState}else{$null}) -TrashDirectory:$directoryArtifact
                     Invoke-AiInstructionsInstallFailpoint -Name ("after-cleanup-" + [string]$step.leaf)
                 }
                 'operation' {
@@ -499,9 +602,14 @@ function Invoke-AiInstructionsInstallRecoveryPlan {
                         $leaf = ([string]$operation.targetRelativePath).Split('/')[-1]
                         $targetPath = Join-Path $CodexHome ([string]$operation.targetRelativePath).Replace('/',[IO.Path]::DirectorySeparatorChar)
                         if ([string]$step.action -ceq 'restore-permissions') {
+                            $directoryTarget = [string]$operation.kind -in @('swap-directory','create-directory')
                             $lease = if ([string]$operation.kind -in @('swap-directory','create-directory')) { Open-PlatformDirectory -Root (Split-Path -Parent $targetPath) -RelativePath $leaf }
                                 else { Open-PlatformFile -ParentLease $parentLease -Leaf $leaf -Access ReadWrite -CreateMode OpenExisting }
-                            try { Set-PlatformPermissions -Lease $lease -Snapshot $step.snapshot | Out-Null } finally { $lease.Dispose() }
+                            try {
+                                Assert-InstallRecoveryPermissionTarget -Lease $lease -ParentLease $parentLease -Operation $operation -TargetPath $targetPath -PlatformOs ([string]$Journal.platform.os) -Directory $directoryTarget
+                                Set-PlatformPermissions -Lease $lease -Snapshot $step.snapshot | Out-Null
+                            }
+                            finally { $lease.Dispose() }
                         }
                         elseif ([string]$operation.kind -ceq 'swap-directory') {
                             $targetState = Get-AiInstructionsInstallDirectoryState -ParentLease $parentLease -Leaf $leaf -LiteralPath $targetPath
@@ -514,18 +622,18 @@ function Invoke-AiInstructionsInstallRecoveryPlan {
                             Move-PlatformOwnedDirectory -ParentLease $parentLease -Leaf $leaf -TransactionLease $TransactionLease -DestinationLeaf ([string]$operation.quarantineLeaf) -ExpectedIdentity $operation.applied.identity -Direction ToTransaction -ExpectedState $operation.applied -Journal $operation | Out-Null
                         }
                         elseif ([string]$step.action -ceq 'restore-original') {
-                            $targetState = Get-AiInstructionsInstallFileState -ParentLease $parentLease -Leaf $leaf -LiteralPath $targetPath -PlatformOs ([string]$Journal.platform.os)
+                            $targetMissing = (Get-InstallTransactionEntryKind -LiteralPath $targetPath) -ceq 'missing'
                             $backupLease = Open-PlatformFile -ParentLease $TransactionLease -Leaf ([string]$operation.backupLeaf) -Access ReadWrite -CreateMode OpenExisting
                             try {
-                                $parameters = @{ParentLease=$parentLease;Leaf=$leaf;TransactionLease=$TransactionLease;StageLease=$backupLease;ExpectedState=$targetState;ExpectedStage=$operation.original}
-                                if ([bool]$targetState.exists) { $parameters.DisplacedLeaf=[string]$operation.stageLeaf } else { $parameters.NoReplace=$true }
+                                $expectedTarget = if ($targetMissing) { [pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null} } else { $operation.applied }
+                                $parameters = @{ParentLease=$parentLease;Leaf=$leaf;TransactionLease=$TransactionLease;StageLease=$backupLease;ExpectedState=$expectedTarget;ExpectedStage=$operation.original}
+                                if ($targetMissing) { $parameters.NoReplace=$true } else { $parameters.DisplacedLeaf=[string]$operation.stageLeaf }
                                 Publish-PlatformFile @parameters | Out-Null
                             }
                             finally { $backupLease.Dispose() }
                         }
                         elseif ([string]$step.action -ceq 'remove-applied') {
-                            $targetState = Get-AiInstructionsInstallFileState -ParentLease $parentLease -Leaf $leaf -LiteralPath $targetPath -PlatformOs ([string]$Journal.platform.os)
-                            Remove-PlatformOwnedFile -ParentLease $parentLease -Leaf $leaf -ExpectedState $targetState -TransactionLease $TransactionLease -TombstoneLeaf ([string]$operation.stageLeaf) | Out-Null
+                            Remove-PlatformOwnedFile -ParentLease $parentLease -Leaf $leaf -ExpectedState $operation.applied -TransactionLease $TransactionLease -TombstoneLeaf ([string]$operation.stageLeaf) | Out-Null
                         }
                     }
                     finally { $parentLease.Dispose() }
@@ -547,7 +655,10 @@ function Invoke-AiInstructionsInstallRecoveryPlan {
             }
         }
     }
-    catch { throw }
+    catch {
+        if ((Get-AiInstructionsRefusalCode $_) -ceq 'interrupted-install') { throw }
+        throw (New-AiInstructionsRefusalException -Code interrupted-install -Message "Interrupted install recovery refused mutation and retained evidence at '$TransactionPath'." -InnerException $_.Exception)
+    }
     finally { if (-not $transactionDisposed) { } }
     return $current
 }
