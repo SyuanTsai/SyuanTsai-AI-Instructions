@@ -233,7 +233,8 @@ function Write-AiInstructionsInstallJournalStore {
         [Parameter(Mandatory = $true)][string] $TransactionPath,
         [Parameter(Mandatory = $true)][object] $Journal,
         [AllowNull()][object] $PreviousJournal = $null,
-        [Parameter(Mandatory = $true)][ValidateSet('windows','linux','macos')][string] $PlatformOs
+        [Parameter(Mandatory = $true)][ValidateSet('windows','linux','macos')][string] $PlatformOs,
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary] $JournalStoreStates
     )
     $leaves = Get-AiInstructionsInstallJournalStoreLeaves
     if ($null -ne $PreviousJournal) {
@@ -243,6 +244,7 @@ function Write-AiInstructionsInstallJournalStore {
     }
     [byte[]]$bytes = ConvertTo-InstallJournalBytes -Journal $Journal
     $stageState = New-AiInstructionsInstallStageFile -TransactionLease $TransactionLease -Leaf $leaves.stage -Bytes $bytes -PlatformOs $PlatformOs
+    $JournalStoreStates[[string]$leaves.stage] = $stageState
     Invoke-AiInstructionsInstallFailpoint -Name 'after-journal-stage-flush'
     $validatedStage = Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf $leaves.stage -TransactionId ([string]$Journal.transactionId)
     if (-not (Test-InstallJournalSemanticEqual -First $validatedStage -Second $Journal)) { throw 'Journal stage readback differs from the requested journal.' }
@@ -258,13 +260,21 @@ function Write-AiInstructionsInstallJournalStore {
             finally { $stageLease.Dispose() }
         }
         else {
-            $current = Get-AiInstructionsInstallFileState -ParentLease $TransactionLease -Leaf $leaves.journal -LiteralPath $journalPath -PlatformOs $PlatformOs
+            $current = $JournalStoreStates[[string]$leaves.journal]
+            if ($null -eq $current) { throw 'The journal store does not contain a classified journal state.' }
             $stageLease = Open-PlatformFile -ParentLease $TransactionLease -Leaf $leaves.stage -Access ReadWrite -CreateMode OpenExisting
             try { $receipt = Publish-PlatformFile -ParentLease $TransactionLease -Leaf $leaves.journal -TransactionLease $TransactionLease -StageLease $stageLease -ExpectedState $current -DisplacedLeaf $leaves.previous -ExpectedStage $stageState }
             finally { $stageLease.Dispose() }
         }
     }
     finally { if ($registerPublicationFailpoint) { Set-InstallJournalPublicationFailpointHook -Enabled $false } }
+    $JournalStoreStates[[string]$leaves.journal] = [pscustomobject][ordered]@{
+        exists=$true
+        sha256=Get-InstallTransactionSha256 -Bytes $bytes
+        length=[int64]$bytes.Length
+        identity=$receipt.appliedIdentity
+    }
+    $JournalStoreStates[[string]$leaves.stage] = [pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}
     $validated = Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf $leaves.journal -TransactionId ([string]$Journal.transactionId)
     if (-not (Test-InstallJournalSemanticEqual -First $validated -Second $Journal)) { throw 'Published journal readback differs from the requested journal.' }
     if ($null -ne $PreviousJournal) {
@@ -272,6 +282,7 @@ function Write-AiInstructionsInstallJournalStore {
         # cleanup to the state observed before publication instead of granting
         # a replacement journal.prev authority to delete itself.
         Remove-PlatformOwnedFile -ParentLease $TransactionLease -Leaf $leaves.previous -ExpectedState $current | Out-Null
+        $JournalStoreStates[[string]$leaves.previous] = [pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}
     }
     return $validated
 }
@@ -489,7 +500,8 @@ function Remove-InstallTerminalTransactionArtifacts {
     param(
         [Parameter(Mandatory = $true)] $Journal,
         [Parameter(Mandatory = $true)] $TransactionLease,
-        [Parameter(Mandatory = $true)][string] $TransactionPath
+        [Parameter(Mandatory = $true)][string] $TransactionPath,
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary] $JournalStoreStates
     )
     if ([string]$Journal.phase -cnotin @('committed','rolled-back')) {
         throw "Transaction artifacts can be finalized only from a terminal journal phase: $($Journal.phase)"
@@ -525,8 +537,10 @@ function Remove-InstallTerminalTransactionArtifacts {
         [pscustomobject]@{leaf=[string]$storeLeaves.previous;role='previous'},
         [pscustomobject]@{leaf=[string]$storeLeaves.journal;role='journal'}
     )) {
-        $expected = Get-InstallJournalStoreFileState -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf $entry.leaf -Role $entry.role -CurrentJournal $Journal -PlatformOs $platformOs
+        $expected = $JournalStoreStates[[string]$entry.leaf]
+        if ($null -eq $expected) { throw "The journal store does not contain a classified state for $($entry.leaf)." }
         Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf $entry.leaf -Directory:$false -PlatformOs $platformOs -ExpectedFileState $expected
+        $JournalStoreStates[[string]$entry.leaf] = [pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}
     }
 }
 
@@ -538,7 +552,8 @@ function Invoke-AiInstructionsInstallRecoveryPlan {
         [Parameter(Mandatory = $true)][string] $CodexHome,
         [Parameter(Mandatory = $true)] $TransactionRootLease,
         [Parameter(Mandatory = $true)] $TransactionLease,
-        [Parameter(Mandatory = $true)][string] $TransactionPath
+        [Parameter(Mandatory = $true)][string] $TransactionPath,
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary] $JournalStoreStates
     )
     if ([string]$Plan.action -ceq 'refuse') { throw (New-AiInstructionsRefusalException -Code interrupted-install -Message "Interrupted install recovery refused mutation for '$TransactionPath'.") }
     $current = $Journal
@@ -548,20 +563,32 @@ function Invoke-AiInstructionsInstallRecoveryPlan {
     # authoritative after the recovery decision has been made, and both would
     # collide with the next durable store transition.
     try {
-        $stageState = Get-InstallJournalStoreFileState -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ([string]$storeLeaves.stage) -Role stage -CurrentJournal $current -PlatformOs ([string]$Journal.platform.os)
+        foreach ($storeLeaf in @([string]$storeLeaves.journal,[string]$storeLeaves.previous,[string]$storeLeaves.stage)) {
+            $expectedStoreState = $JournalStoreStates[$storeLeaf]
+            if ($null -eq $expectedStoreState) { throw "The journal store does not contain a classified state for $storeLeaf." }
+            $liveStoreState = Get-AiInstructionsInstallFileState -ParentLease $TransactionLease -Leaf $storeLeaf -LiteralPath (Join-Path $TransactionPath $storeLeaf) -PlatformOs ([string]$Journal.platform.os)
+            if (-not (Test-InstallTransactionFileStateEqual $liveStoreState $expectedStoreState)) {
+                throw "Transaction journal store artifact changed after classification: $storeLeaf"
+            }
+        }
+        $stageState = $JournalStoreStates[[string]$storeLeaves.stage]
+        if ($null -eq $stageState) { throw 'The journal store does not contain a classified journal.stage state.' }
         Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ([string]$storeLeaves.stage) -Directory:$false -PlatformOs ([string]$Journal.platform.os) -ExpectedFileState $stageState
+        $JournalStoreStates[[string]$storeLeaves.stage] = [pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}
         $journalPath = Join-Path $TransactionPath ([string]$storeLeaves.journal)
         $previousPath = Join-Path $TransactionPath ([string]$storeLeaves.previous)
         $journalExists = Test-Path -LiteralPath $journalPath -PathType Leaf
         $previousExists = Test-Path -LiteralPath $previousPath -PathType Leaf
         if (-not $journalExists -and $previousExists) {
-            $current = Write-AiInstructionsInstallJournalStore -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Journal $current -PlatformOs ([string]$Journal.platform.os)
-            $previousState = Get-InstallJournalStoreFileState -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ([string]$storeLeaves.previous) -Role previous -CurrentJournal $current -PlatformOs ([string]$Journal.platform.os)
+            $current = Write-AiInstructionsInstallJournalStore -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Journal $current -PlatformOs ([string]$Journal.platform.os) -JournalStoreStates $JournalStoreStates
+            $previousState = $JournalStoreStates[[string]$storeLeaves.previous]
             Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ([string]$storeLeaves.previous) -Directory:$false -PlatformOs ([string]$Journal.platform.os) -ExpectedFileState $previousState
+            $JournalStoreStates[[string]$storeLeaves.previous] = [pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}
         }
         elseif ($journalExists -and $previousExists) {
-            $previousState = Get-InstallJournalStoreFileState -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ([string]$storeLeaves.previous) -Role previous -CurrentJournal $current -PlatformOs ([string]$Journal.platform.os)
+            $previousState = $JournalStoreStates[[string]$storeLeaves.previous]
             Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ([string]$storeLeaves.previous) -Directory:$false -PlatformOs ([string]$Journal.platform.os) -ExpectedFileState $previousState
+            $JournalStoreStates[[string]$storeLeaves.previous] = [pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}
         }
     }
     catch {
@@ -575,12 +602,12 @@ function Invoke-AiInstructionsInstallRecoveryPlan {
             switch ([string]$step.step) {
                 'write-phase' {
                     $next = Copy-InstallJournalWithChange -Journal $current -Phase ([string]$step.phase)
-                    $current = Write-AiInstructionsInstallJournalStore -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Journal $next -PreviousJournal $current -PlatformOs ([string]$Journal.platform.os)
+                    $current = Write-AiInstructionsInstallJournalStore -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Journal $next -PreviousJournal $current -PlatformOs ([string]$Journal.platform.os) -JournalStoreStates $JournalStoreStates
                     if ([string]$step.phase -ceq 'committed') { Invoke-AiInstructionsInstallFailpoint -Name 'after-committed-before-cleanup' }
                 }
                 'write-operation-state' {
                     $next = Copy-InstallJournalWithChange -Journal $current -Sequence ([int64]$step.sequence) -State ([string]$step.state)
-                    $current = Write-AiInstructionsInstallJournalStore -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Journal $next -PreviousJournal $current -PlatformOs ([string]$Journal.platform.os)
+                    $current = Write-AiInstructionsInstallJournalStore -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Journal $next -PreviousJournal $current -PlatformOs ([string]$Journal.platform.os) -JournalStoreStates $JournalStoreStates
                 }
                 'cleanup-artifact' {
                     Invoke-AiInstructionsInstallFailpoint -Name ("before-cleanup-" + [string]$step.leaf)
@@ -647,7 +674,7 @@ function Invoke-AiInstructionsInstallRecoveryPlan {
                             throw "Transaction quarantine identity differs from the applied journal identity for sequence $($directoryOperation.sequence)."
                         }
                     }
-                    Remove-InstallTerminalTransactionArtifacts -Journal $current -TransactionLease $TransactionLease -TransactionPath $TransactionPath
+                    Remove-InstallTerminalTransactionArtifacts -Journal $current -TransactionLease $TransactionLease -TransactionPath $TransactionPath -JournalStoreStates $JournalStoreStates
                     $TransactionLease.Dispose(); $transactionDisposed=$true
                     Remove-PlatformOwnedDirectoryTree -TransactionRootLease $TransactionRootLease -Leaf ([string]$Journal.transactionId) -ExpectedIdentity $transactionIdentity | Out-Null
                 }

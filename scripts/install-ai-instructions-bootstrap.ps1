@@ -474,13 +474,35 @@ function ConvertTo-InstallerPlatformIdentity {
 }
 
 function Get-InstallerJournalEntry {
-    param([Parameter(Mandatory = $true)] $TransactionLease,[Parameter(Mandatory = $true)][string] $TransactionPath,[Parameter(Mandatory = $true)][string] $Leaf)
+    param(
+        [Parameter(Mandatory = $true)] $TransactionLease,
+        [Parameter(Mandatory = $true)][string] $TransactionPath,
+        [Parameter(Mandatory = $true)][string] $Leaf,
+        [Parameter(Mandatory = $true)][string] $PlatformOs
+    )
     $path = Join-Path $TransactionPath $Leaf
-    if (-not (Test-Path -LiteralPath $path)) { return [pscustomobject]@{Kind=$null;Json=$null} }
+    $missing = [pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}
+    if (-not (Test-Path -LiteralPath $path)) { return [pscustomobject]@{Kind=$null;Json=$null;State=$missing} }
     $item = Get-Item -Force -LiteralPath $path
-    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return [pscustomobject]@{Kind='other';Json=$null} }
+    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return [pscustomobject]@{Kind='other';Json=$null;State=$null} }
     $lease = Open-PlatformFile -ParentLease $TransactionLease -Leaf $Leaf -Access Read -CreateMode OpenExisting
-    try { return [pscustomobject]@{Kind='file';Json=(New-Object Text.UTF8Encoding($false,$true)).GetString($lease.ReadAllBytes(16777216))} }
+    try {
+        $observation = Assert-PlatformFileIdentity -Lease $lease -Expected $lease.Observation -SingleLink -VerifyPath
+        [byte[]]$bytes = $lease.ReadAllBytes(16777216)
+        $stream = [IO.MemoryStream]::new($bytes,$false)
+        try { $sha256 = Get-InstallerStreamSha256 -Stream $stream }
+        finally { $stream.Dispose() }
+        return [pscustomobject]@{
+            Kind='file'
+            Json=(New-Object Text.UTF8Encoding($false,$true)).GetString($bytes)
+            State=[pscustomobject][ordered]@{
+                exists=$true
+                sha256=$sha256
+                length=[int64]$bytes.Length
+                identity=ConvertTo-InstallerPlatformIdentity -Observation $observation -PlatformOs $PlatformOs
+            }
+        }
+    }
     finally { $lease.Dispose() }
 }
 
@@ -504,8 +526,9 @@ function Invoke-InstallerInterruptedInstallRecovery {
             if ($entryKind -ceq 'directory') {
                 $transactionLease = Open-PlatformDirectory -Root $CodexHomePath -RelativePath ('.ai-instructions-txn/' + $entry.Name)
                 $identity = ConvertTo-InstallerPlatformIdentity -Observation $transactionLease.Observation -PlatformOs $PlatformOs
-                $journal = Get-InstallerJournalEntry -TransactionLease $transactionLease -TransactionPath $entry.FullName -Leaf 'journal.json'
-                $previous = Get-InstallerJournalEntry -TransactionLease $transactionLease -TransactionPath $entry.FullName -Leaf 'journal.prev'
+                $journal = Get-InstallerJournalEntry -TransactionLease $transactionLease -TransactionPath $entry.FullName -Leaf 'journal.json' -PlatformOs $PlatformOs
+                $previous = Get-InstallerJournalEntry -TransactionLease $transactionLease -TransactionPath $entry.FullName -Leaf 'journal.prev' -PlatformOs $PlatformOs
+                $stage = Get-InstallerJournalEntry -TransactionLease $transactionLease -TransactionPath $entry.FullName -Leaf 'journal.stage' -PlatformOs $PlatformOs
                 $classification = Get-AiInstructionsInstallTransactionClassification -Name $entry.Name -EntryKind $entryKind -JournalEntryKind $journal.Kind -JournalJson $journal.Json -PreviousJournalEntryKind $previous.Kind -PreviousJournalJson $previous.Json
             }
             else {
@@ -523,7 +546,8 @@ function Invoke-InstallerInterruptedInstallRecovery {
                     $decision = [pscustomobject]@{action='refuse';reasons=@($_.Exception.Message)}
                 }
             }
-            $records.Add([pscustomobject]@{Path=$entry.FullName;Name=$entry.Name;Lease=$transactionLease;Identity=$identity;Classification=$classification;Disposition=$disposition;Decision=$decision;Plan=$plan})
+            $storeStates = if ($entryKind -ceq 'directory') { [ordered]@{'journal.json'=$journal.State;'journal.prev'=$previous.State;'journal.stage'=$stage.State} } else { $null }
+            $records.Add([pscustomobject]@{Path=$entry.FullName;Name=$entry.Name;Lease=$transactionLease;Identity=$identity;Classification=$classification;Disposition=$disposition;Decision=$decision;Plan=$plan;JournalStoreStates=$storeStates})
         }
         $recordArray = $records.ToArray()
         $refusals = @($recordArray | Where-Object { [string]$_.Disposition.action -ceq 'refuse' -or ($null -ne $_.Decision -and [string]$_.Decision.action -ceq 'refuse') })
@@ -539,7 +563,7 @@ function Invoke-InstallerInterruptedInstallRecovery {
             }
             elseif ([string]$record.Disposition.action -ceq 'recover') {
                 try {
-                    Invoke-AiInstructionsInstallRecoveryPlan -Journal $record.Classification.journal -Plan $record.Plan -CodexHome $CodexHomePath -TransactionRootLease $TransactionRootLease -TransactionLease $record.Lease -TransactionPath $record.Path | Out-Null
+                    Invoke-AiInstructionsInstallRecoveryPlan -Journal $record.Classification.journal -Plan $record.Plan -CodexHome $CodexHomePath -TransactionRootLease $TransactionRootLease -TransactionLease $record.Lease -TransactionPath $record.Path -JournalStoreStates $record.JournalStoreStates | Out-Null
                     if (@($record.Plan.retainedArtifacts).Count -gt 0) {
                         throw (New-AiInstructionsRefusalException -Code interrupted-install -Message "Interrupted install recovery retained external-change artifacts at '$($record.Path)'; a later recovery can safely re-evaluate the same journal evidence.")
                     }
@@ -881,28 +905,33 @@ try {
             $previousBundleSha256=if(Test-Path -LiteralPath (Join-Path $runtimeDirectory 'runtime-bundle.json') -PathType Leaf){(Get-FileHash -LiteralPath (Join-Path $runtimeDirectory 'runtime-bundle.json') -Algorithm SHA256).Hash.ToLowerInvariant()}else{$null}
             $processStart=(Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o',[Globalization.CultureInfo]::InvariantCulture)
             $currentJournal=New-AiInstructionsInstallJournalV1 -TransactionId $transactionId -OwnerComponent installer -OwnerProcessId $PID -OwnerProcessStartIdentity $processStart -PlatformOs ([string]$capabilityReceipt.os) -PlatformArchitecture ([string]$capabilityReceipt.architecture) -LockPrimitive $(if([string]$capabilityReceipt.os -ceq 'windows'){'windows-fileshare'}else{'flock'}) -LockLeaf 'ai-instructions-install.lock' -PreviousBundleSha256 $previousBundleSha256 -CandidateBundleSha256 $candidateBundleSha256 -Phase prepared -Operations $operations.ToArray()
-            $currentJournal=Write-AiInstructionsInstallJournalStore -TransactionLease $transactionLease -TransactionPath $transactionPath -Journal $currentJournal -PlatformOs ([string]$capabilityReceipt.os)
+            $journalStoreStates=[ordered]@{
+                'journal.json'=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}
+                'journal.prev'=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}
+                'journal.stage'=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}
+            }
+            $currentJournal=Write-AiInstructionsInstallJournalStore -TransactionLease $transactionLease -TransactionPath $transactionPath -Journal $currentJournal -PlatformOs ([string]$capabilityReceipt.os) -JournalStoreStates $journalStoreStates
             $journalDurable=$true
             Invoke-AiInstructionsInstallFailpoint -Name 'after-journal-prepared'
             $nextJournal=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($currentJournal|ConvertTo-Json -Depth 30) -ExpectedTransactionId $transactionId
             $nextJournal.phase='applying'
-            $currentJournal=Write-AiInstructionsInstallJournalStore -TransactionLease $transactionLease -TransactionPath $transactionPath -Journal $nextJournal -PreviousJournal $currentJournal -PlatformOs ([string]$capabilityReceipt.os)
+            $currentJournal=Write-AiInstructionsInstallJournalStore -TransactionLease $transactionLease -TransactionPath $transactionPath -Journal $nextJournal -PreviousJournal $currentJournal -PlatformOs ([string]$capabilityReceipt.os) -JournalStoreStates $journalStoreStates
             foreach($operation in @($currentJournal.operations|Sort-Object sequence)){
                 $parent=if(([string]$operation.targetRelativePath).StartsWith('hooks/')){$hookLease}else{$rootLease}
                 Invoke-AiInstructionsInstallOperation -Operation $operation -ParentLease $parent -TransactionLease $transactionLease | Out-Null
                 $nextJournal=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($currentJournal|ConvertTo-Json -Depth 30) -ExpectedTransactionId $transactionId
                 @($nextJournal.operations|Where-Object{[int64]$_.sequence -eq [int64]$operation.sequence})[0].state='applied'
-                $currentJournal=Write-AiInstructionsInstallJournalStore -TransactionLease $transactionLease -TransactionPath $transactionPath -Journal $nextJournal -PreviousJournal $currentJournal -PlatformOs ([string]$capabilityReceipt.os)
+                $currentJournal=Write-AiInstructionsInstallJournalStore -TransactionLease $transactionLease -TransactionPath $transactionPath -Journal $nextJournal -PreviousJournal $currentJournal -PlatformOs ([string]$capabilityReceipt.os) -JournalStoreStates $journalStoreStates
                 Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+[string]$operation.sequence)
             }
             $nextJournal=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($currentJournal|ConvertTo-Json -Depth 30) -ExpectedTransactionId $transactionId
             $nextJournal.phase='applied'
-            $currentJournal=Write-AiInstructionsInstallJournalStore -TransactionLease $transactionLease -TransactionPath $transactionPath -Journal $nextJournal -PreviousJournal $currentJournal -PlatformOs ([string]$capabilityReceipt.os)
+            $currentJournal=Write-AiInstructionsInstallJournalStore -TransactionLease $transactionLease -TransactionPath $transactionPath -Journal $nextJournal -PreviousJournal $currentJournal -PlatformOs ([string]$capabilityReceipt.os) -JournalStoreStates $journalStoreStates
             $observations=Get-AiInstructionsInstallRecoveryObservations -Journal $currentJournal -CodexHome $codexHomePath -TransactionLease $transactionLease -TransactionPath $transactionPath
             $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $currentJournal -Observations $observations
             $plan=Get-AiInstructionsInstallRecoveryPlan -Journal $currentJournal -Decision $decision
             if([string]$plan.action -cne 'commit'){throw "Applied installer transaction did not produce a commit recovery plan: $($decision.action)"}
-            Invoke-AiInstructionsInstallRecoveryPlan -Journal $currentJournal -Plan $plan -CodexHome $codexHomePath -TransactionRootLease $transactionRootLease -TransactionLease $transactionLease -TransactionPath $transactionPath|Out-Null
+            Invoke-AiInstructionsInstallRecoveryPlan -Journal $currentJournal -Plan $plan -CodexHome $codexHomePath -TransactionRootLease $transactionRootLease -TransactionLease $transactionLease -TransactionPath $transactionPath -JournalStoreStates $journalStoreStates|Out-Null
             $transactionLease=$null
         }
     }
@@ -910,15 +939,17 @@ try {
         $installError=$_
         if($journalDurable -and $null -ne $transactionLease){
             try{
-                $journalEntry=Get-InstallerJournalEntry -TransactionLease $transactionLease -TransactionPath $transactionPath -Leaf 'journal.json'
-                $previousEntry=Get-InstallerJournalEntry -TransactionLease $transactionLease -TransactionPath $transactionPath -Leaf 'journal.prev'
+                $journalEntry=Get-InstallerJournalEntry -TransactionLease $transactionLease -TransactionPath $transactionPath -Leaf 'journal.json' -PlatformOs ([string]$capabilityReceipt.os)
+                $previousEntry=Get-InstallerJournalEntry -TransactionLease $transactionLease -TransactionPath $transactionPath -Leaf 'journal.prev' -PlatformOs ([string]$capabilityReceipt.os)
+                $stageEntry=Get-InstallerJournalEntry -TransactionLease $transactionLease -TransactionPath $transactionPath -Leaf 'journal.stage' -PlatformOs ([string]$capabilityReceipt.os)
+                $journalStoreStates=[ordered]@{'journal.json'=$journalEntry.State;'journal.prev'=$previousEntry.State;'journal.stage'=$stageEntry.State}
                 $classification=Get-AiInstructionsInstallTransactionClassification -Name $transactionId -EntryKind directory -JournalEntryKind $journalEntry.Kind -JournalJson $journalEntry.Json -PreviousJournalEntryKind $previousEntry.Kind -PreviousJournalJson $previousEntry.Json
                 if([string]$classification.classification -cne 'valid-journal'){throw "Durable journal classification is $($classification.classification)."}
                 $observations=Get-AiInstructionsInstallRecoveryObservations -Journal $classification.journal -CodexHome $codexHomePath -TransactionLease $transactionLease -TransactionPath $transactionPath
                 $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $classification.journal -Observations $observations
                 if([string]$decision.action -ceq 'refuse'){$preserveTransaction=$true;throw (New-AiInstructionsRefusalException -Code interrupted-install -Message ("Installation target changed concurrently; recovery refused mutation and retained evidence at '$transactionPath'. " + (@($decision.reasons)-join '; ')) -InnerException $installError.Exception)}
                 $plan=Get-AiInstructionsInstallRecoveryPlan -Journal $classification.journal -Decision $decision
-                Invoke-AiInstructionsInstallRecoveryPlan -Journal $classification.journal -Plan $plan -CodexHome $codexHomePath -TransactionRootLease $transactionRootLease -TransactionLease $transactionLease -TransactionPath $transactionPath|Out-Null
+                Invoke-AiInstructionsInstallRecoveryPlan -Journal $classification.journal -Plan $plan -CodexHome $codexHomePath -TransactionRootLease $transactionRootLease -TransactionLease $transactionLease -TransactionPath $transactionPath -JournalStoreStates $journalStoreStates|Out-Null
                 if(@($plan.retainedArtifacts).Count -gt 0){
                     $preserveTransaction=$true
                     throw (New-AiInstructionsRefusalException -Code interrupted-install -Message "AI instructions installation recovery retained external-change artifacts at '$transactionPath'; a later recovery can safely re-evaluate the same journal evidence." -InnerException $installError.Exception)

@@ -2357,6 +2357,49 @@ Remove-Variable -Name InstallerBackupGuardCodexHome,InstallerBackupGuardOutside,
         (Get-InstallerStateSnapshot -RepositoryRoot $repositoryRoot -CodexHome $codexHome)|Should Be $targetsBefore
         Test-Path -LiteralPath (Join-Path $state.TransactionPath 'journal.json') -PathType Leaf|Should Be $true
     }
+
+    # Scenario: Recovery classifies a committed journal store, then an external writer replaces journal.json with the same valid bytes on a different inode before cleanup starts.
+    # Purpose: Bind terminal cleanup to the classified journal identity as well as its content, refusing without deleting the replacement or any transaction evidence.
+    It 'InterT87_refuses_cleanup_of_a_same_bytes_replaced_journal_store_file' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome|Out-Null
+        $candidateRoot=Join-Path $TestDrive ('journal-store-cas-'+[Guid]::NewGuid().ToString('N'))
+        New-InstallerFailpointCandidate -SourceRoot $repositoryRoot -DestinationRoot $candidateRoot
+        $archivePath=Join-Path $TestDrive ('journal-store-cas-'+[Guid]::NewGuid().ToString('N')+'.zip')
+        $archiveSha256=New-InstallerSourceArchive -SourceRoot $candidateRoot -ArchivePath $archivePath
+        $sourceCommit=(@(& git -C $repositoryRoot rev-parse HEAD)-join'').Trim()
+        $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:InstallScript,'-RepositoryRoot',$repositoryRoot,'-CodexHome',$codexHome,'-Acquisition','github-codeload','-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git','-SourceCommit',$sourceCommit,'-ArchiveSha256',$archiveSha256,'-SourceArchivePath',$archivePath)
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT='after-committed-before-cleanup';& $script:TestPowerShellExecutable @arguments 2>&1|Out-Null;$crashExit=$LASTEXITCODE}
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+        $crashExit|Should Not Be 0
+        $state=Get-InstallerTransactionRecoveryState -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $state.JournalPhase|Should Be committed
+        $journalPath=Join-Path $state.TransactionPath 'journal.json'
+        [byte[]]$journalBytes=[IO.File]::ReadAllBytes($journalPath)
+        $journalText=[Text.UTF8Encoding]::new($false,$true).GetString($journalBytes)
+        $transactionRelative='.ai-instructions-txn/'+(Split-Path -Leaf $state.TransactionPath)
+        $transactionLease=Open-PlatformDirectory -Root $codexHome -RelativePath $transactionRelative
+        try{$originalState=Get-AiInstructionsInstallFileState -ParentLease $transactionLease -Leaf journal.json -LiteralPath $journalPath -PlatformOs windows}
+        finally{$transactionLease.Dispose()}
+        $entriesBefore=@(Get-ChildItem -LiteralPath $state.TransactionPath -Force -Recurse|ForEach-Object{$_.FullName.Substring($state.TransactionPath.Length)})
+
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{
+            Remove-Item Env:\AI_INSTRUCTIONS_INSTALL_FAILPOINT -ErrorAction SilentlyContinue
+            $result=Invoke-InstallerRecoveryMutationProbe -InstallerScript (Resolve-Path -LiteralPath $script:InstallScript).Path -RepositoryRoot $repositoryRoot -CodexHome $codexHome -SourceCommit $sourceCommit -ArchiveSha256 $archiveSha256 -ArchivePath $archivePath -MutationPath $journalPath -ExternalText $journalText -ExternalReadOnly $false -ProbeRoot $TestDrive
+        }
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+
+        $result|Should Match '(?m)^1\r?$'
+        (Get-AiInstructionsRefusalCode $result)|Should Be interrupted-install
+        $result|Should Match ([regex]::Escape($state.TransactionPath))
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($journalPath))|Should Be ([Convert]::ToBase64String($journalBytes))
+        $transactionLease=Open-PlatformDirectory -Root $codexHome -RelativePath $transactionRelative
+        try{$replacementState=Get-AiInstructionsInstallFileState -ParentLease $transactionLease -Leaf journal.json -LiteralPath $journalPath -PlatformOs windows}
+        finally{$transactionLease.Dispose()}
+        ($replacementState.identity|ConvertTo-Json -Compress)|Should Not Be ($originalState.identity|ConvertTo-Json -Compress)
+        @(Get-ChildItem -LiteralPath $state.TransactionPath -Force -Recurse|ForEach-Object{$_.FullName.Substring($state.TransactionPath.Length)})|Should Be $entriesBefore
+    }
     }
 
     # Register only on the native host because FileShare is the Windows lock interoperability protocol.
