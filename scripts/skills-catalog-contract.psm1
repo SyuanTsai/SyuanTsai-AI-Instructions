@@ -430,6 +430,16 @@ function Get-SkillsCatalogProjectionMap {
     }
 }
 
+function Get-SkillsCatalogUserProjectionRoots {
+    $projectionMap = Get-SkillsCatalogProjectionMap
+    return [string[]]@(
+        $projectionMap.GetEnumerator() |
+            Where-Object { [string]$_.Value[0] -ceq 'user' } |
+            ForEach-Object { [string]$_.Value[1] } |
+            Sort-Object
+    )
+}
+
 function Assert-SkillsCatalogProjections {
     param([Parameter(Mandatory = $true)][object] $Projections)
     Assert-Array -Value $Projections -Context 'Skills Catalog projections'
@@ -1323,4 +1333,4 @@ function Test-SkillsCatalogContract {
     return [pscustomobject]@{CatalogId=[string]$catalog.catalogId;SourceCount=@($catalog.sources).Count;SkillCount=@($catalog.skills).Count;ProfileCount=@($catalog.profiles).Count;ManifestFileCount=@($manifest.files).Count}
 }
 
-Export-ModuleMember -Function Assert-LegacyManagedManifestV1, Assert-ManagedManifest, Assert-ManagedManifestV2, Assert-ManagedManifestV3, Assert-ManagedManifestV4, Assert-SkillsCatalogV2, Assert-SkillsCatalogV3, Assert-SkillsCatalogLockV2, Assert-SkillsCatalogLockV3, Assert-UserSkillsManagedManifest, Assert-UserSkillsManagedManifestBinding, Assert-UserSkillsManagedManifestV1, Assert-UserSkillsManagedManifestV2, Assert-UserSkillsManagedManifestV3, ConvertFrom-GitWorktreePorcelainZ, Get-SkillsCatalogProjectionContractSha256, Get-SkillsCatalogProjectionTargetPath, Import-SkillsCatalogJson, Test-SkillsCatalogContract, Test-SkillsCatalogDocument, Test-SkillsCatalogSourcePinsDocument, Test-SkillsCatalogLockDocument
+Export-ModuleMember -Function Assert-LegacyManagedManifestV1, Assert-ManagedManifest, Assert-ManagedManifestV2, Assert-ManagedManifestV3, Assert-ManagedManifestV4, Assert-SkillsCatalogV2, Assert-SkillsCatalogV3, Assert-SkillsCatalogLockV2, Assert-SkillsCatalogLockV3, Assert-UserSkillsManagedManifest, Assert-UserSkillsManagedManifestBinding, Assert-UserSkillsManagedManifestV1, Assert-UserSkillsManagedManifestV2, Assert-UserSkillsManagedManifestV3, ConvertFrom-GitWorktreePorcelainZ, Get-SkillsCatalogProjectionContractSha256, Get-SkillsCatalogProjectionTargetPath, Get-SkillsCatalogUserProjectionRoots, Import-SkillsCatalogJson, Test-SkillsCatalogContract, Test-SkillsCatalogDocument, Test-SkillsCatalogSourcePinsDocument, Test-SkillsCatalogLockDocument

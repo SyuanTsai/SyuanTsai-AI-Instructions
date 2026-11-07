@@ -136,6 +136,8 @@ Skill content hash 依 canonical package relative paths 計算，不包含 host 
 
 各 projection 的 lifecycle 狀態獨立記錄，但同一選定 source revision 的 publish 必須一起驗證。跨 root／跨 filesystem 無單一 atomic rename：各 target 在同 filesystem staging，coordinator journal 記 prepare/apply/verify/finalize；全數成功才發布新 manifest generation，否則 rollback 或 recovery-required。外部 AI reader 不一定遵守此鎖，因此不能承諾所有 AI 同瞬間看見一致版本；建議在 host 未執行 Skill 的維護時段更新，並在完成前阻止本 runtime 宣稱 ready。這是 A3 應接受的限制。
 
+**P8 階段限制：** USER coordinator 第一階段只接受所有選定 projection root 與 USER home 位於同一 volume／filesystem；任一 root 不符合時，必須在任何 mutation 前以 `capability-unavailable` 拒絕並保留證據，不得退回 copy 或 in-place 寫入。跨 filesystem coordinator、各 filesystem 私有 staging 與 durable two-phase recovery 延後至 P11；P8 的 Windows 驗收需覆蓋可用的真實雙 volume host，無第二 volume 時只記錄未驗證，不得宣稱通過。
+
 ### 5.2 Instructions 同源、保留路徑及 ignore
 
 共通語意先維護繁體中文，再產生英文與三 host 輸出；新增 Claude platform 至 `ai-instructions-contract.json`，並同步兩語系、各 route/invariant 及 parity regression。共同規則的限制與例外必須一致；平台專屬 connector 能力仍只能放對應 adapter，不憑空複製到 Claude。提案可將共同內容放 `instructions/common/`，生成現有 `.codex/`、`.github/` 與新 `.claude/` authority artifacts；路徑與生成器需 A5 核准後才建立。
