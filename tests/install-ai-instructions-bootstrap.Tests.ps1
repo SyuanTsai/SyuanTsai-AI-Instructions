@@ -276,9 +276,18 @@ Describe 'install-ai-instructions-bootstrap' {
         }
         $installedPlatformRuntime=Import-Module (Join-Path $runtimeRoot 'platform-runtime.psd1') -Force -PassThru
         & $installedPlatformRuntime {param($root)Assert-PlatformRuntimeInventory -Root $root -ManifestPath (Join-Path $root 'platform-runtime.psd1')|Out-Null} $runtimeRoot
+        $platformRuntimeManifest=Import-PowerShellDataFile -LiteralPath (Join-Path $runtimeRoot 'platform-runtime.psd1')
+        $bundle = Get-Content -Raw -LiteralPath (Join-Path $runtimeRoot 'runtime-bundle.json') | ConvertFrom-Json
+        $bundlePaths=@($bundle.inventory|ForEach-Object{[string]$_.path})
+        foreach($declaredPath in @($platformRuntimeManifest.FileList)){
+            $normalizedPath=([string]$declaredPath).Replace('\','/')
+            Test-Path -LiteralPath (Join-Path $runtimeRoot ([string]$declaredPath)) -PathType Leaf|Should Be $true
+            $bundlePaths|Should Contain $normalizedPath
+        }
+        $installedReconciler=Import-Module (Join-Path $runtimeRoot 'agent-environment-reconciler.psm1') -Force -PassThru
+        {& $installedReconciler {param($root)Import-AgentEnvironmentRuntimeModules -RuntimeRoot $root} $runtimeRoot}|Should Not Throw
 
         $configuration = Get-Content -Raw -LiteralPath (Join-Path $codexHome 'ai-instructions-sync.json') | ConvertFrom-Json
-        $bundle = Get-Content -Raw -LiteralPath (Join-Path $runtimeRoot 'runtime-bundle.json') | ConvertFrom-Json
         $configuration.schemaVersion | Should Be 4
         ($configuration.PSObject.Properties.Name -contains 'autoCommitRepositoryUrls') | Should Be $false
         @($configuration.excludedRepositoryUrls).Count | Should Be 0
@@ -710,14 +719,16 @@ Keep this section too.
             -Destination (Join-Path $invalidSource 'scripts\installer-safe-mutation.psm1') -Force
         Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts\platform\WindowsInstallerMutation.cs') `
             -Destination (Join-Path $invalidSource 'scripts\platform\WindowsInstallerMutation.cs') -Force
-        foreach ($fileName in @(
+        $platformManifest=Import-PowerShellDataFile -LiteralPath (Join-Path $repositoryRoot 'scripts\platform-runtime.psd1')
+        foreach ($fileName in @(@(
             'agent-artifact-remediation.psm1','ai-instructions-rollout.psm1','invoke-ai-instructions-rollout.ps1',
             'agent-environment-reconciler.psm1','update-agent-environment.ps1','license-delivery.psm1',
-            'ai-instructions-runtime-contract.psm1','ai-instructions-install-transaction.psm1','WindowsDacl.psm1',
-            'platform-runtime.psd1','platform-runtime.psm1'
-        )) {
+            'ai-instructions-runtime-contract.psm1','ai-instructions-install-transaction.psm1'
+        )+@($platformManifest.FileList)|Sort-Object -Unique)) {
+            $destination=Join-Path $invalidSource "scripts\$fileName"
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination)|Out-Null
             Copy-Item -LiteralPath (Join-Path $repositoryRoot "scripts\$fileName") `
-                -Destination (Join-Path $invalidSource "scripts\$fileName") -Force
+                -Destination $destination -Force
         }
         Copy-Item -LiteralPath (Join-Path $repositoryRoot 'licensing-scope.json') -Destination (Join-Path $invalidSource 'licensing-scope.json') -Force
         [System.IO.File]::AppendAllText((Join-Path $invalidSource 'scripts\skills-selection.psm1'), "`nfunction Invalid-StagingFixture {`n")

@@ -75,7 +75,7 @@
                 @{ Path = 'installer-safe-mutation.psm1'; Sha256 = 'dc031edcc2f48968df83cd68ad52eacb7f7b05d3ca6a0cc622658cf6151c8293' },
                 @{ Path = 'WindowsDacl.psm1'; Sha256 = 'ffa1f85d94bb6bce9bf8353f8c7733bdbe59880a3d0d075191938cc28aebb5f6' },
                 @{ Path = 'platform/PlatformNative.cs'; Sha256 = 'f9da23bf3e6e3c8960b26d534e14873f6b4fc98b3d13f5b6cdfdd5f7716a4514' },
-                @{ Path = 'platform/Windows.psm1'; Sha256 = '16212b783503a551ca5f555bde6e30369241637a348c3cf0fbfb7455f0b2979a' },
+                @{ Path = 'platform/Windows.psm1'; Sha256 = '982bce1ba645662bac6beb6687b7c068f38b373bc313c37cae986e642c68cc54' },
                 @{ Path = 'platform/Linux.psm1'; Sha256 = '52c261d577ee7b3946771d1112030996896fdd119e06ac3849e430a3d56fb38c' },
                 @{ Path = 'platform/MacOS.psm1'; Sha256 = '8f25edfbee5ab36b5e1c42eb55c6dbab44db0bc29896c180612b1248920c7c47' },
                 @{ Path = 'Resolve-StandardValidationTool.ps1'; Sha256 = 'e51c78847aa706dd4bed92fa1e91e1c992e0b1e8d938aaa605c4c7389b66b8f5' },
