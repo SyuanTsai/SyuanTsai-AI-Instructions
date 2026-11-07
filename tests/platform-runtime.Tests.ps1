@@ -4887,6 +4887,28 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
         } finally { Close-P7Fixture $f @($backup,$stage.Lease,$original.Lease) }
     }
 
+    # Scenario: A read-only displaced original is reopened with a read lease and used as the rollback publication stage.
+    # Purpose: Prove publication reacquires its own identity-bound mutation handle instead of requiring GENERIC_WRITE on the caller's stage lease.
+    It 'InterT135_restores_a_readonly_backup_from_a_read_stage_lease' {
+        $f=New-P7Fixture 'p7-read-stage-rollback';$original=$null;$stage=$null;$backup=$null;$restored=$null
+        try {
+            $original=New-P7File $f.Parent 'data' ([Text.Encoding]::UTF8.GetBytes('old'))
+            [void](Set-PlatformPermissions -Lease $original.Lease -Policy @{ReadOnly=$true})
+            $original.Lease.Dispose();$original.Lease=$null
+            $stage=New-P7File $f.Transaction 'new.stage' ([Text.Encoding]::UTF8.GetBytes('new'))
+            $applied=Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $stage.Lease -ExpectedState $original.State -DisplacedLeaf 'old.backup' -ExpectedStage $stage.Expected
+            $stage.Lease.Dispose();$stage.Lease=$null
+            $backup=Open-PlatformFile -ParentLease $f.Transaction -Leaf 'old.backup' -Access Read -CreateMode OpenExisting
+            $appliedState=[pscustomobject]@{exists=$true;sha256=$stage.Expected.sha256;length=$stage.Expected.length;identity=$applied.appliedIdentity}
+            [void](Publish-PlatformFile -ParentLease $f.Parent -Leaf 'data' -TransactionLease $f.Transaction -StageLease $backup -ExpectedState $appliedState -DisplacedLeaf 'new.stage' -ExpectedStage $original.State)
+            $backup=$null
+            $restored=Open-PlatformFile -ParentLease $f.Parent -Leaf 'data' -Access Read -CreateMode OpenExisting
+            [Text.Encoding]::UTF8.GetString($restored.ReadAllBytes(64)) | Should Be 'old'
+            (Get-PlatformPermissions $restored).readOnly | Should Be $true
+            (Get-P7Identity $restored.Observation).fileId | Should Be $original.State.identity.fileId
+        } finally { Close-P7Fixture $f @($restored,$backup,$stage.Lease,$original.Lease) }
+    }
+
     # Scenario: A validated journal operation disagrees with its publication parameters.
     # Purpose: Refuse stale durable intent before any rename.
     It 'UnitT140_rejects_a_mismatched_journal_operation' {
@@ -5605,6 +5627,23 @@ Describe 'Platform P7 Windows publication, removal and permission snapshots' {
             (Test-P7EquivalentDacl $stageAfter.sddl $stageBefore.sddl) | Should Be $true
             Test-Path -LiteralPath (Join-Path $f.Root ".ai-instructions-txn/$($f.TransactionId)/old.backup") | Should Be $false
         } finally { Set-P7WindowsDurabilityHook $null;Close-P7Fixture $f @($stage.Lease,$target.Lease) }
+    }
+
+    # Scenario: A read-only file needs its DACL and ReadOnly snapshot restored without requesting GENERIC_WRITE.
+    # Purpose: Give recovery a least-privilege permissions lease that opens read-only files and still supports the dedicated permission mutation path.
+    It 'InterT395_opens_readonly_files_for_permission_restore_without_generic_write' {
+        $f=New-P7Fixture 'p7-read-permissions';$file=$null;$permissionsLease=$null
+        try {
+            $file=New-P7File $f.Parent 'data' ([Text.Encoding]::UTF8.GetBytes('data'))
+            $before=Get-PlatformPermissions $file.Lease
+            [void](Set-PlatformPermissions -Lease $file.Lease -Policy @{ReadOnly=$true})
+            $file.Lease.Dispose();$file.Lease=$null
+            $permissionsLease=Open-PlatformFile -ParentLease $f.Parent -Leaf 'data' -Access ReadPermissions -CreateMode OpenExisting
+            $restored=Set-PlatformPermissions -Lease $permissionsLease -Snapshot $before
+            $restored.readOnly | Should Be $false
+            (Test-P7EquivalentDacl $restored.sddl $before.sddl) | Should Be $true
+            [Text.Encoding]::UTF8.GetString($permissionsLease.ReadAllBytes(64)) | Should Be 'data'
+        } finally { Close-P7Fixture $f @($permissionsLease,$file.Lease) }
     }
 
     # Scenario: The file owner is denied WRITE_DAC but retains read-control and attribute read/write access.

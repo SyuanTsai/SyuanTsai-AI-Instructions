@@ -635,7 +635,7 @@ function Invoke-AiInstructionsInstallRecoveryPlan {
                         if ([string]$step.action -ceq 'restore-permissions') {
                             $directoryTarget = [string]$operation.kind -in @('swap-directory','create-directory')
                             $lease = if ([string]$operation.kind -in @('swap-directory','create-directory')) { Open-PlatformDirectory -Root (Split-Path -Parent $targetPath) -RelativePath $leaf }
-                                else { Open-PlatformFile -ParentLease $parentLease -Leaf $leaf -Access ReadWrite -CreateMode OpenExisting }
+                                else { Open-PlatformFile -ParentLease $parentLease -Leaf $leaf -Access ReadPermissions -CreateMode OpenExisting }
                             try {
                                 Assert-InstallRecoveryPermissionTarget -Lease $lease -ParentLease $parentLease -Operation $operation -TargetPath $targetPath -PlatformOs ([string]$Journal.platform.os) -Directory $directoryTarget
                                 Set-PlatformPermissions -Lease $lease -Snapshot $step.snapshot | Out-Null
@@ -654,7 +654,7 @@ function Invoke-AiInstructionsInstallRecoveryPlan {
                         }
                         elseif ([string]$step.action -ceq 'restore-original') {
                             $targetMissing = (Get-InstallTransactionEntryKind -LiteralPath $targetPath) -ceq 'missing'
-                            $backupLease = Open-PlatformFile -ParentLease $TransactionLease -Leaf ([string]$operation.backupLeaf) -Access ReadWrite -CreateMode OpenExisting
+                            $backupLease = Open-PlatformFile -ParentLease $TransactionLease -Leaf ([string]$operation.backupLeaf) -Access Read -CreateMode OpenExisting
                             try {
                                 $expectedTarget = if ($targetMissing) { [pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null} } else { $operation.applied }
                                 $parameters = @{ParentLease=$parentLease;Leaf=$leaf;TransactionLease=$TransactionLease;StageLease=$backupLease;ExpectedState=$expectedTarget;ExpectedStage=$operation.original}

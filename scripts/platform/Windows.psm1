@@ -298,7 +298,7 @@ function Get-WindowsPlatformInheritedPermissions {
     }
 }
 function Open-WindowsPlatformMutationFile {
-    param($ParentLease,[string]$Leaf,$Identity,[string]$Capability,[switch]$AllowMissing,[switch]$Writable,[switch]$DaclWritable)
+    param($ParentLease,[string]$Leaf,$Identity,[string]$Capability,[switch]$AllowMissing,[switch]$Writable,[switch]$PermissionWritable,[switch]$DaclWritable)
     try {
         if ($null -eq $Identity) {
             if (-not $AllowMissing) { throw [ArgumentException]::new('An expected file identity is required.') }
@@ -306,6 +306,10 @@ function Open-WindowsPlatformMutationFile {
         }
         $device=ConvertTo-WindowsPlatformIdentityNumber ([string]$Identity.device)
         $fileId=ConvertTo-WindowsPlatformIdentityNumber ([string]$Identity.fileId)
+        if ($PermissionWritable) {
+            if ($AllowMissing) { throw [ArgumentException]::new('A permission-writable mutation file must exist.') }
+            return [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenPermissionMutationFile($ParentLease,$Leaf,$device,$fileId)
+        }
         if ($DaclWritable) {
             if ($AllowMissing) { throw [ArgumentException]::new('A DACL-writable mutation file must exist.') }
             return [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenPublicationStageFile($ParentLease,$Leaf,$device,$fileId)
@@ -541,6 +545,14 @@ function Publish-WindowsPlatformFile {
         # validated stage lease, then reopens the same identity relative to TransactionLease.
         $StageLease.Dispose()
         Invoke-WindowsPlatformPreReopenHook 'after-dispose-before-reopen' 'publication' 'stage' $stagePath
+        if ([bool]$stagePermissions.readOnly) {
+            $mutationStage=Open-WindowsPlatformMutationFile $TransactionLease $stageLeaf $stageIdentity 'publication' -PermissionWritable
+            Assert-WindowsPlatformExpectedContent $mutationStage $ExpectedStage 'publication' 'Permission-opened stage ExpectedStage'
+            if ($null -ne $Journal) { Assert-WindowsPlatformExpectedContent $mutationStage $Journal.applied 'publication' 'Permission-opened stage journal applied state' }
+            $permissionsApplied=$true
+            [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($mutationStage,$null,$false)
+            $mutationStage.Dispose();$mutationStage=$null
+        }
         $mutationStage=Open-WindowsPlatformMutationFile $TransactionLease $stageLeaf $stageIdentity 'publication' -DaclWritable
         Assert-WindowsPlatformExpectedContent $mutationStage $ExpectedStage 'publication' 'Reopened stage ExpectedStage'
         if ($null -ne $Journal) { Assert-WindowsPlatformExpectedContent $mutationStage $Journal.applied 'publication' 'Reopened stage journal applied state' }
@@ -650,6 +662,7 @@ function Publish-WindowsPlatformFile {
             }
             elseif ($targetReadOnlyCleared) { [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($target,$null,$true);$targetReadOnlyCleared=$false }
             if ($permissionsApplied -and -not $aclFrozenAfterRename) {
+                if ($null -eq $mutationStage) { $mutationStage=Open-WindowsPlatformMutationFile $TransactionLease $stageLeaf $stageIdentity 'publication' -PermissionWritable }
                 [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::ApplyPublicationDacl($mutationStage,[string]$stagePermissions.sddl)
                 [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::SetPermissions($mutationStage,$null,[bool]$stagePermissions.readOnly)
                 $restoredStagePermissions=ConvertTo-WindowsPlatformPermissionSnapshot (Get-WindowsPlatformPermissions $mutationStage) 'publication' 'Rollback stage'

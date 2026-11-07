@@ -252,8 +252,9 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         private static WindowsLease OpenFileCore(WindowsLease parent, string leaf, string access, string createMode, uint share)
         {
             PlatformPaths.Leaf(leaf);
-            uint desired = access == "Read" ? 0x80000000 : access == "Write" ? 0x40000000 : access == "ReadWrite" ? 0xc0000000 : 0;
-            if (desired == 0) throw new ArgumentException("Access must be Read, Write or ReadWrite.");
+            uint desired = access == "Read" ? 0x80000000 : access == "Write" ? 0x40000000 : access == "ReadWrite" ? 0xc0000000 :
+                access == "ReadPermissions" ? 0x80040100 : 0; // GENERIC_READ | WRITE_DAC | FILE_WRITE_ATTRIBUTES
+            if (desired == 0) throw new ArgumentException("Access must be Read, Write, ReadWrite or ReadPermissions.");
             uint disposition = createMode == "CreateNew" ? 1u : createMode == "OpenExisting" ? 3u : 0u;
             if (disposition == 0) throw new ArgumentException("CreateMode must be CreateNew or OpenExisting.");
             lock (parent.Sync)
@@ -266,7 +267,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 {
                     FileObservation value = Stat(handle); PlatformPaths.Single(value);
                     using (SafeFileHandle named = Open(path, 0, 7, 3)) PlatformPaths.Same(value, Stat(named));
-                    return new WindowsLease(handle, path, null, parent, value) { NewWritable = createMode == "CreateNew" && access != "Read" };
+                    return new WindowsLease(handle, path, null, parent, value) { NewWritable = createMode == "CreateNew" && access != "Read" && access != "ReadPermissions" };
                 }
                 catch { handle.Dispose(); throw; }
             }
@@ -628,6 +629,9 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
 
         public static WindowsLease OpenWritableMutationFile(WindowsLease parent, string leaf, ulong expectedDevice, ulong expectedFileId)
         { return OpenMutationFileCore(parent, leaf, expectedDevice, expectedFileId, true, false, true, false); }
+
+        public static WindowsLease OpenPermissionMutationFile(WindowsLease parent, string leaf, ulong expectedDevice, ulong expectedFileId)
+        { return OpenMutationFileCore(parent, leaf, expectedDevice, expectedFileId, true, false, false, true); }
 
         public static WindowsLease OpenPublicationStageFile(WindowsLease parent, string leaf, ulong expectedDevice, ulong expectedFileId)
         { return OpenMutationFileCore(parent, leaf, expectedDevice, expectedFileId, true, false, true, true); }

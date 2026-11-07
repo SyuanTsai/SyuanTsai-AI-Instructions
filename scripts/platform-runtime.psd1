@@ -66,8 +66,8 @@
             ApiVersion = '1.0'
             HashMode = 'sha256-utf8-lf'
             Inventory = @(
-                @{ Path = 'platform/UnixNative.cs'; Sha256 = '8d29441f441bc84f7fe1a8cffe3b1de3c4b4d1903438d0a912d0353d0c493bd7' },
-                @{ Path = 'platform/WindowsNative.cs'; Sha256 = '050b9a9eb79ae86c57afc0330c4f71000d85f52d6531a37a6acd42b7be34b1f3' },
+                @{ Path = 'platform/UnixNative.cs'; Sha256 = '996a8e4cc1c795f4732a9d7368e597b838c801d0710e32629cafcbba89f8c004' },
+                @{ Path = 'platform/WindowsNative.cs'; Sha256 = '6eea8ca2701b6a6de88ee4a3348f053d07a0543d607832e667335c838bb7d433' },
                 @{ Path = 'platform/WindowsInstallerMutation.cs'; Sha256 = 'b88b4b09c7bb5c3e71b762ddc6ebe72007ed0cca99977ab7a7272529c3ff9218' },
                 @{ Path = 'platform/Unix.psm1'; Sha256 = 'ec3b3bb0b39e1ce84d4c8f60a78c44fb40cb9d58c13ed88a6b9d9db978fcc147' },
                 @{ Path = 'platform/RuntimePreparation.psm1'; Sha256 = 'dc254c04e7e2caf280726e66f67434776bc7df12a210a38c80596e41344fd077' },
@@ -75,7 +75,7 @@
                 @{ Path = 'installer-safe-mutation.psm1'; Sha256 = 'dc031edcc2f48968df83cd68ad52eacb7f7b05d3ca6a0cc622658cf6151c8293' },
                 @{ Path = 'WindowsDacl.psm1'; Sha256 = 'ffa1f85d94bb6bce9bf8353f8c7733bdbe59880a3d0d075191938cc28aebb5f6' },
                 @{ Path = 'platform/PlatformNative.cs'; Sha256 = 'f9da23bf3e6e3c8960b26d534e14873f6b4fc98b3d13f5b6cdfdd5f7716a4514' },
-                @{ Path = 'platform/Windows.psm1'; Sha256 = '982bce1ba645662bac6beb6687b7c068f38b373bc313c37cae986e642c68cc54' },
+                @{ Path = 'platform/Windows.psm1'; Sha256 = '9b7442178083a9b165ed3bf53367d5c3ce1b1f09d56f0f6efe964b524e17be0b' },
                 @{ Path = 'platform/Linux.psm1'; Sha256 = '52c261d577ee7b3946771d1112030996896fdd119e06ac3849e430a3d56fb38c' },
                 @{ Path = 'platform/MacOS.psm1'; Sha256 = '8f25edfbee5ab36b5e1c42eb55c6dbab44db0bc29896c180612b1248920c7c47' },
                 @{ Path = 'Resolve-StandardValidationTool.ps1'; Sha256 = 'e51c78847aa706dd4bed92fa1e91e1c992e0b1e8d938aaa605c4c7389b66b8f5' },

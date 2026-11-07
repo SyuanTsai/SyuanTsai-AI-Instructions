@@ -2433,6 +2433,68 @@ Remove-Variable -Name InstallerBackupGuardCodexHome,InstallerBackupGuardOutside,
         Test-Path -LiteralPath (Join-Path $state.TransactionPath 'journal.json') -PathType Leaf|Should Be $true
         @(Get-ChildItem -LiteralPath $state.TransactionPath -Force -Recurse|ForEach-Object{$_.FullName.Substring($state.TransactionPath.Length)})|Should Be $entriesBefore
     }
+
+
+    # Scenario: An existing read-only stable file is displaced, then the installer is interrupted after publishing its replacement.
+    # Purpose: Recovery must publish the read-only backup through a read lease and restore its exact bytes and ReadOnly attribute.
+    It 'InterT89_rolls_back_a_readonly_stable_file_after_an_operation_interrupt' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome|Out-Null
+        $stablePath=Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
+        [byte[]]$originalBytes=[IO.File]::ReadAllBytes($stablePath)
+        (Get-Item -Force -LiteralPath $stablePath).IsReadOnly=$true
+        $candidateRoot=Join-Path $TestDrive ('readonly-rollback-'+[Guid]::NewGuid().ToString('N'))
+        New-InstallerFailpointCandidate -SourceRoot $repositoryRoot -DestinationRoot $candidateRoot
+        $archivePath=Join-Path $TestDrive ('readonly-rollback-'+[Guid]::NewGuid().ToString('N')+'.zip')
+        $archiveSha256=New-InstallerSourceArchive -SourceRoot $candidateRoot -ArchivePath $archivePath
+        $sourceCommit=(@(& git -C $repositoryRoot rev-parse HEAD)-join'').Trim()
+        $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:InstallScript,'-RepositoryRoot',$repositoryRoot,'-CodexHome',$codexHome,'-Acquisition','github-codeload','-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git','-SourceCommit',$sourceCommit,'-ArchiveSha256',$archiveSha256,'-SourceArchivePath',$archivePath)
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT='after-operation-1';& $script:TestPowerShellExecutable @arguments 2>&1|Out-Null;$crashExit=$LASTEXITCODE}
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+        $crashExit|Should Not Be 0
+        $state=Get-InstallerTransactionRecoveryState -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $operation=@($state.Journal.operations|Where-Object{[string]$_.targetRelativePath-ceq'hooks/bootstrap-ai-instructions.ps1'})
+        $operation.Count|Should Be 1
+        (Get-Item -Force -LiteralPath (Join-Path $state.TransactionPath ([string]$operation[0].backupLeaf))).IsReadOnly|Should Be $true
+
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT='after-recovery-before-install';& $script:TestPowerShellExecutable @arguments 2>&1|Out-Null;$recoveryExit=$LASTEXITCODE}
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+
+        $recoveryExit|Should Not Be 0
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($stablePath))|Should Be ([Convert]::ToBase64String($originalBytes))
+        (Get-Item -Force -LiteralPath $stablePath).IsReadOnly|Should Be $true
+        @(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Force -ErrorAction SilentlyContinue).Count|Should Be 0
+    }
+
+    # Scenario: A prepared rollback finds original bytes and identity on a target whose ReadOnly attribute drifted to true.
+    # Purpose: The restore-permissions step must reopen the read-only target without GENERIC_WRITE and restore the journal snapshot.
+    It 'InterT90_restores_permissions_on_a_readonly_target' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome|Out-Null
+        $stablePath=Join-Path $codexHome 'hooks\bootstrap-ai-instructions.ps1'
+        [byte[]]$originalBytes=[IO.File]::ReadAllBytes($stablePath)
+        $candidateRoot=Join-Path $TestDrive ('readonly-permissions-'+[Guid]::NewGuid().ToString('N'))
+        New-InstallerFailpointCandidate -SourceRoot $repositoryRoot -DestinationRoot $candidateRoot
+        $archivePath=Join-Path $TestDrive ('readonly-permissions-'+[Guid]::NewGuid().ToString('N')+'.zip')
+        $archiveSha256=New-InstallerSourceArchive -SourceRoot $candidateRoot -ArchivePath $archivePath
+        $sourceCommit=(@(& git -C $repositoryRoot rev-parse HEAD)-join'').Trim()
+        $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:InstallScript,'-RepositoryRoot',$repositoryRoot,'-CodexHome',$codexHome,'-Acquisition','github-codeload','-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git','-SourceCommit',$sourceCommit,'-ArchiveSha256',$archiveSha256,'-SourceArchivePath',$archivePath)
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT='after-journal-prepared';& $script:TestPowerShellExecutable @arguments 2>&1|Out-Null;$crashExit=$LASTEXITCODE}
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+        $crashExit|Should Not Be 0
+        (Get-Item -Force -LiteralPath $stablePath).IsReadOnly=$true
+        (Get-InstallerTransactionRecoveryState -RepositoryRoot $repositoryRoot -CodexHome $codexHome).RecoveryAction|Should Be 'roll-back'
+
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT='after-recovery-before-install';& $script:TestPowerShellExecutable @arguments 2>&1|Out-Null;$recoveryExit=$LASTEXITCODE}
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+
+        $recoveryExit|Should Not Be 0
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($stablePath))|Should Be ([Convert]::ToBase64String($originalBytes))
+        (Get-Item -Force -LiteralPath $stablePath).IsReadOnly|Should Be $false
+        @(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Force -ErrorAction SilentlyContinue).Count|Should Be 0
+    }
     }
 
     # Register only on the native host because FileShare is the Windows lock interoperability protocol.
