@@ -262,8 +262,9 @@ function Copy-InstallJournalWithChange {
     $copy = ConvertFrom-AiInstructionsInstallJournalV1Json -Json (($Journal | ConvertTo-Json -Depth 30)) -ExpectedTransactionId ([string]$Journal.transactionId)
     if (-not [string]::IsNullOrEmpty($Phase)) { $copy.phase = $Phase }
     if ($null -ne $Sequence) {
-        $operation = @($copy.operations | Where-Object { [int64]$_.sequence -eq [int64]$Sequence.Value })
-        if ($operation.Count -ne 1) { throw "Journal operation sequence $($Sequence.Value) was not found." }
+        $sequenceValue = [int64]$Sequence
+        $operation = @($copy.operations | Where-Object { [int64]$_.sequence -eq $sequenceValue })
+        if ($operation.Count -ne 1) { throw "Journal operation sequence $sequenceValue was not found." }
         $operation[0].state = $State
     }
     return $copy

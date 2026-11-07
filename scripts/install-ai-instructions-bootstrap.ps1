@@ -540,9 +540,15 @@ function Invoke-InstallerInterruptedInstallRecovery {
             elseif ([string]$record.Disposition.action -ceq 'recover') {
                 try {
                     Invoke-AiInstructionsInstallRecoveryPlan -Journal $record.Classification.journal -Plan $record.Plan -CodexHome $CodexHomePath -TransactionRootLease $TransactionRootLease -TransactionLease $record.Lease -TransactionPath $record.Path | Out-Null
+                    if (@($record.Plan.retainedArtifacts).Count -gt 0) {
+                        throw (New-AiInstructionsRefusalException -Code interrupted-install -Message "Interrupted install recovery retained external-change artifacts at '$($record.Path)'; a later recovery can safely re-evaluate the same journal evidence.")
+                    }
                     $record.Lease=$null
                 }
-                catch { throw "Interrupted install recovery failed; evidence retained at '$($record.Path)'. $($_.Exception.Message)" }
+                catch {
+                    if ((Get-AiInstructionsRefusalCode $_) -ceq 'interrupted-install') { throw }
+                    throw "Interrupted install recovery failed; evidence retained at '$($record.Path)'. $($_.Exception.Message)"
+                }
             }
         }
     }
@@ -913,12 +919,16 @@ try {
                 if([string]$decision.action -ceq 'refuse'){$preserveTransaction=$true;throw (New-AiInstructionsRefusalException -Code interrupted-install -Message ("Installation target changed concurrently; recovery refused mutation and retained evidence at '$transactionPath'. " + (@($decision.reasons)-join '; ')) -InnerException $installError.Exception)}
                 $plan=Get-AiInstructionsInstallRecoveryPlan -Journal $classification.journal -Decision $decision
                 Invoke-AiInstructionsInstallRecoveryPlan -Journal $classification.journal -Plan $plan -CodexHome $codexHomePath -TransactionRootLease $transactionRootLease -TransactionLease $transactionLease -TransactionPath $transactionPath|Out-Null
-                $transactionLease=$null
+                if(@($plan.retainedArtifacts).Count -gt 0){$preserveTransaction=$true}
+                else{$transactionLease=$null}
             }
             catch{
                 $preserveTransaction=$true
                 if((Get-AiInstructionsRefusalCode $_) -ceq 'interrupted-install'){throw}
                 throw "AI instructions installation failed and rollback also failed. Transaction evidence retained at '$transactionPath'. Original error: $($installError.Exception.Message). Rollback error: $($_.Exception.Message)"
+            }
+            if ([string]$installError.Exception.Message -match 'differs from ExpectedState|changed concurrently') {
+                throw [InvalidOperationException]::new("Installation target changed concurrently; unaffected targets were rolled back without overwriting the external writer. $($installError.Exception.Message)",$installError.Exception)
             }
             throw $installError
         }

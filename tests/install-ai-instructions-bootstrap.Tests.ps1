@@ -1503,7 +1503,7 @@ Remove-Variable -Name InstallerProbeHooks,InstallerProbeSavedHooks,InstallerProb
     }
 
     # Scenario: A user edits AGENTS.md after the installer snapshots stable files but before that file is replaced.
-    # Purpose: Reject at the ExpectedState publication boundary, preserve the writer's bytes, and retain the exact D8 partial-state evidence without rollback mutation.
+    # Purpose: Preserve the writer's bytes, restore every unaffected target to its original state, and complete transaction cleanup when no original backup was displaced.
     It 'InterT67_preserves_a_concurrent_stable_file_edit_before_mutation' {
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         $archivePath = Join-Path $TestDrive 'installer-cas-source.zip'
@@ -1583,45 +1583,10 @@ finally {
         (Get-Content -Raw -LiteralPath $resultPath) | Should Match '(?m)^1\r?$'
         (Get-Content -Raw -LiteralPath $resultPath) | Should Match 'changed concurrently'
         (Get-Content -Raw -LiteralPath $agentsPath) | Should Be $externalAgents
-        $recoveryState=Get-InstallerTransactionRecoveryState -RepositoryRoot $repositoryRoot -CodexHome $codexHome
-        $recoveryState.RecoveryAction|Should Be 'refuse'
-        $recoveryState.JournalPhase|Should Be 'applying'
-        $agentsOperation=@($recoveryState.Journal.operations|Where-Object targetRelativePath -ceq 'AGENTS.md')
-        $agentsOperation.Count|Should Be 1
-        $agentsOperation[0].state|Should Be 'pending'
-        (Get-FileHash -LiteralPath $agentsPath -Algorithm SHA256).Hash.ToLowerInvariant()|Should Not Be ([string]$agentsOperation[0].original.sha256)
-        (Get-FileHash -LiteralPath $agentsPath -Algorithm SHA256).Hash.ToLowerInvariant()|Should Not Be ([string]$agentsOperation[0].applied.sha256)
-
-        $currentSnapshot=(Get-InstallerStateSnapshot -RepositoryRoot $repositoryRoot -CodexHome $codexHome)|ConvertFrom-Json
-        foreach($operation in @($recoveryState.Journal.operations|Where-Object{[int64]$_.sequence -lt [int64]$agentsOperation[0].sequence})){
-            $operation.state|Should Be 'applied'
-            $actual=$currentSnapshot.PSObject.Properties[[string]$operation.targetRelativePath].Value
-            $actual.exists|Should Be ([bool]$operation.applied.exists)
-            ($actual.identity|ConvertTo-Json -Compress)|Should Be ($operation.applied.identity|ConvertTo-Json -Compress)
-            if([string]$operation.kind-in@('swap-directory','create-directory')){
-                $actual.inventorySha256|Should Be ([string]$operation.applied.inventorySha256)
-                $actual.entryCount|Should Be ([int64]$operation.applied.entryCount)
-            }
-            else{
-                $actual.sha256|Should Be ([string]$operation.applied.sha256)
-                $actual.length|Should Be ([int64]$operation.applied.length)
-            }
-        }
-        foreach($operation in @($recoveryState.Journal.operations|Where-Object{[int64]$_.sequence -gt [int64]$agentsOperation[0].sequence})){
-            $operation.state|Should Be 'pending'
-            $actual=$currentSnapshot.PSObject.Properties[[string]$operation.targetRelativePath].Value
-            $actual.exists|Should Be ([bool]$operation.original.exists)
-            if([bool]$operation.original.exists){
-                ($actual.identity|ConvertTo-Json -Compress)|Should Be ($operation.original.identity|ConvertTo-Json -Compress)
-                $actual.sha256|Should Be ([string]$operation.original.sha256)
-                $actual.length|Should Be ([int64]$operation.original.length)
-            }
-        }
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($hookPath)) | Should Be ([Convert]::ToBase64String($hookBefore))
-        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($bundlePath)) | Should Not Be ([Convert]::ToBase64String($bundleBefore))
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($bundlePath)) | Should Be ([Convert]::ToBase64String($bundleBefore))
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($configurationPath)) | Should Be ([Convert]::ToBase64String($configurationBefore))
-        @(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Directory -Force).Count | Should Be 1
-        Test-Path -LiteralPath (Join-Path $recoveryState.TransactionPath 'journal.json') -PathType Leaf|Should Be $true
+        @(Get-ChildItem -LiteralPath (Join-Path $codexHome '.ai-instructions-txn') -Force -ErrorAction SilentlyContinue).Count | Should Be 0
     }
 
     # Scenario: A crash leaves an applied launcher and its original backup, then the backup bytes are modified.
@@ -1761,7 +1726,11 @@ $breakpoint = Set-PSBreakpoint -Script $InstallerScript -Line $rollbackLine[0] -
         New-Item -ItemType Junction -Path $backupRoot[0].FullName -Target $global:InstallerBackupGuardOutside -ErrorAction Stop | Out-Null
         $global:InstallerBackupGuardSwapResult = 'swapped'
     }
-    catch { $global:InstallerBackupGuardSwapResult = 'blocked: ' + $_.Exception.Message }
+    catch {
+        $global:InstallerBackupGuardSwapResult = 'blocked: ' + $_.Exception.Message
+        if($null-eq$record-or$null-eq$record.Plan){throw 'Could not bind the active recovery plan after the guarded swap was blocked.'}
+        $record.Plan.action='refuse'
+    }
 }
 try {
     try {
@@ -2012,8 +1981,14 @@ Remove-Variable -Name InstallerBackupGuardCodexHome,InstallerBackupGuardOutside,
         try{Remove-Item Env:\AI_INSTRUCTIONS_INSTALL_FAILPOINT -ErrorAction SilentlyContinue;$installOutput=& $script:TestPowerShellExecutable @arguments 2>&1;$installExit=$LASTEXITCODE}
         finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
         $installExit|Should Be 0
-        foreach($relative in @('bootstrap-ai-instructions.ps1','update-ai-instructions.ps1','update-agent-environment.ps1','cleanup-ai-instructions-pollution.ps1')){
-            (Get-Content -Raw -LiteralPath (Join-Path $codexHome "hooks\$relative"))|Should Match ([regex]::Escape("# failpoint candidate: $relative"))
+        $stableMarkerSources=[ordered]@{
+            'bootstrap-ai-instructions.ps1'='bootstrap-ai-instructions-installed.ps1'
+            'update-ai-instructions.ps1'='update-ai-instructions.ps1'
+            'update-agent-environment.ps1'='update-agent-environment.ps1'
+            'cleanup-ai-instructions-pollution.ps1'='cleanup-ai-instructions-pollution.ps1'
+        }
+        foreach($relative in @($stableMarkerSources.Keys)){
+            (Get-Content -Raw -LiteralPath (Join-Path $codexHome "hooks\$relative"))|Should Match ([regex]::Escape("# failpoint candidate: $($stableMarkerSources[$relative])"))
         }
         (Get-Content -Raw -LiteralPath (Join-Path $codexHome 'hooks\ai-instructions-runtime\safe-zip.psm1'))|Should Match '# failpoint candidate: safe-zip\.psm1'
         $before=Get-InstallerStateSnapshot -RepositoryRoot $repositoryRoot -CodexHome $codexHome
@@ -2049,6 +2024,48 @@ Remove-Variable -Name InstallerBackupGuardCodexHome,InstallerBackupGuardOutside,
         (Get-AiInstructionsRefusalCode ($output-join[Environment]::NewLine))|Should Be interrupted-install
         Test-Path -LiteralPath (Join-Path $target 'external.txt') -PathType Leaf|Should Be $true
         @(Get-ChildItem -LiteralPath $transaction[0].FullName -Force -Recurse|ForEach-Object FullName)|Should Be $evidenceBefore
+    }
+
+    # Scenario: A pending write-file already displaced its original into backup, then an external writer replaces the published target before the journal records applied.
+    # Purpose: Refuse recovery without mutating any target, the identity-bound original backup, or the durable journal evidence.
+    It 'InterT82_refuses_a_pending_write_with_a_valid_original_backup_and_external_target' {
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome|Out-Null
+        $candidateRoot=Join-Path $TestDrive ('valid-backup-external-'+[Guid]::NewGuid().ToString('N'))
+        New-InstallerFailpointCandidate -SourceRoot $repositoryRoot -DestinationRoot $candidateRoot
+        $archivePath=Join-Path $TestDrive ('valid-backup-external-'+[Guid]::NewGuid().ToString('N')+'.zip')
+        $archiveSha256=New-InstallerSourceArchive -SourceRoot $candidateRoot -ArchivePath $archivePath
+        $sourceCommit=(@(& git -C $repositoryRoot rev-parse HEAD)-join '').Trim()
+        $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:InstallScript,'-RepositoryRoot',$repositoryRoot,'-CodexHome',$codexHome,'-Acquisition','github-codeload','-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git','-SourceCommit',$sourceCommit,'-ArchiveSha256',$archiveSha256,'-SourceArchivePath',$archivePath)
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT='after-operation-1-before-journal';& $script:TestPowerShellExecutable @arguments 2>&1|Out-Null;$crashExit=$LASTEXITCODE}
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+        $crashExit|Should Not Be 0
+
+        $recoveryState=Get-InstallerTransactionRecoveryState -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $operation=@($recoveryState.Journal.operations|Where-Object sequence -eq 1)[0]
+        $operation.state|Should Be 'pending'
+        $operation.backupLeaf|Should Not BeNullOrEmpty
+        $target=Join-Path $codexHome ($operation.targetRelativePath.Replace('/',[IO.Path]::DirectorySeparatorChar))
+        Set-TestText -Path $target -Value "# external replacement after original backup`n"
+        $backup=Join-Path $recoveryState.TransactionPath ([string]$operation.backupLeaf)
+        Test-Path -LiteralPath $backup -PathType Leaf|Should Be $true
+
+        $targetsBefore=Get-InstallerStateSnapshot -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        $backupBefore=[Convert]::ToBase64String([IO.File]::ReadAllBytes($backup))
+        $journalPath=Join-Path $recoveryState.TransactionPath 'journal.json'
+        $journalBefore=[Convert]::ToBase64String([IO.File]::ReadAllBytes($journalPath))
+        $entriesBefore=@(Get-ChildItem -LiteralPath $recoveryState.TransactionPath -Force -Recurse|ForEach-Object{$_.FullName.Substring($recoveryState.TransactionPath.Length)})
+
+        $saved=$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT
+        try{Remove-Item Env:\AI_INSTRUCTIONS_INSTALL_FAILPOINT -ErrorAction SilentlyContinue;$output=& $script:TestPowerShellExecutable @arguments 2>&1;$exitCode=$LASTEXITCODE}
+        finally{$env:AI_INSTRUCTIONS_INSTALL_FAILPOINT=$saved}
+
+        $exitCode|Should Not Be 0
+        (Get-AiInstructionsRefusalCode ($output-join[Environment]::NewLine))|Should Be interrupted-install
+        (Get-InstallerStateSnapshot -RepositoryRoot $repositoryRoot -CodexHome $codexHome)|Should Be $targetsBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($backup))|Should Be $backupBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($journalPath))|Should Be $journalBefore
+        @(Get-ChildItem -LiteralPath $recoveryState.TransactionPath -Force -Recurse|ForEach-Object{$_.FullName.Substring($recoveryState.TransactionPath.Length)})|Should Be $entriesBefore
     }
     }
 

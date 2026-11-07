@@ -2554,7 +2554,10 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $absent = New-TestInstallObservation -Operation $journal.operations[0] -State $journal.operations[0].original -Backup $null
         (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{ 1=$absent }).operations[0].action | Should Be 'none'
         $applied.inventorySha256 = '9' * 64
-        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{ 1=$applied }).action | Should Be 'refuse'
+        # P7d2-b fix3: a pending create with a foreign target and no backup preserves that target and retains its stage evidence.
+        $foreignDecision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{ 1=$applied }
+        $foreignDecision.action | Should Be 'roll-back'
+        $foreignDecision.operations[0].action | Should Be 'none'
 
         $invalidChanges = @(
             { param($j) $j.operations[0].original.exists=$true }, { param($j) $j.operations[0].backupLeaf='bad.backup' },
@@ -2833,7 +2836,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
     }
 
     # Scenario: A write-file stage rename crashes after moving the original to backup, leaving the target absent during applying or applied.
-    # Purpose: Restore only a byte-for-byte and identity-matching backup in nonterminal phases, while refusing invalid evidence and terminal drift.
+    # Purpose: Restore a valid original backup, preserve an unpublished external state when backup evidence is absent/invalid, and still refuse terminal drift.
     It 'UnitT199_restores_target_absent_write_file_only_from_a_valid_backup' {
         foreach($phase in @('applying','applied')) {
             $journal=Get-TestInstallJournalV1
@@ -2854,15 +2857,22 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $journal.operations[0].state='staged'
         $absent=[pscustomobject]@{exists=$false;sha256=$null;length=$null;identity=$null}
         $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent -Backup $null
-        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}).action | Should Be 'refuse'
+        # P7d2-b fix3: an unpublished staged operation with no original backup does not own the target state and retains artifacts instead of refusing the whole rollback.
+        $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}
+        $decision.action | Should Be 'roll-back'
+        $decision.operations[0].action | Should Be 'none'
 
         $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent
         $observation.backup.sha256='9' * 64
-        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}).action | Should Be 'refuse'
+        $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}
+        $decision.action | Should Be 'roll-back'
+        $decision.operations[0].action | Should Be 'none'
 
         $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent
         $observation.backup.identity.fileId='0000ABCD:99999999'
-        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}).action | Should Be 'refuse'
+        $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}
+        $decision.action | Should Be 'roll-back'
+        $decision.operations[0].action | Should Be 'none'
 
         $journal.phase='rolled-back'
         $journal.operations[0].state='rolled-back'
@@ -2871,7 +2881,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
     }
 
     # Scenario: A swap-directory stage rename crashes after moving the original to backup, leaving the target absent during applying or applied.
-    # Purpose: Restore only an inventory-, count-, and identity-matching backup in nonterminal phases, while refusing invalid evidence and terminal drift.
+    # Purpose: Restore a valid original directory, preserve an unpublished external state when backup evidence is absent/invalid, and still refuse terminal drift.
     It 'UnitT200_restores_target_absent_swap_directory_only_from_a_valid_backup' {
         foreach($phase in @('applying','applied')) {
             $journal=Get-TestSwapDirectoryInstallJournalV1
@@ -2890,15 +2900,22 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $journal.operations[0].state='staged'
         $absent=[pscustomobject]@{exists=$false;identity=$null;inventorySha256=$null;entryCount=$null}
         $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent -Backup $null
-        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}).action | Should Be 'refuse'
+        # P7d2-b fix3: the staged directory was not published, so absent/invalid backup evidence retains artifacts without touching the target.
+        $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}
+        $decision.action | Should Be 'roll-back'
+        $decision.operations[0].action | Should Be 'none'
 
         $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent
         $observation.backup.inventorySha256='9' * 64
-        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}).action | Should Be 'refuse'
+        $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}
+        $decision.action | Should Be 'roll-back'
+        $decision.operations[0].action | Should Be 'none'
 
         $observation=New-TestInstallObservation -Operation $journal.operations[0] -State $absent
         $observation.backup.identity.fileId='0000ABCD:99999999'
-        (Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}).action | Should Be 'refuse'
+        $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$observation}
+        $decision.action | Should Be 'roll-back'
+        $decision.operations[0].action | Should Be 'none'
 
         $journal.phase='rolled-back'
         $journal.operations[0].state='rolled-back'
@@ -3069,5 +3086,121 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $schemaPath=Join-Path $script:RepositoryRoot 'catalog\schemas\ai-instructions-install-journal-v1.schema.json'
         {ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json|Out-Null}|Should Not Throw
         (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue)|Should Be $true
+    }
+
+    # Scenario: Pending, staged, rolled-back, and applied file/directory operations observe original, applied, or externally replaced targets with absent, mismatched, or valid backups.
+    # Purpose: Apply the recovery truth table without overwriting concurrent writers, while making every retained transaction artifact explicit in the recovery plan.
+    It 'UnitT208_applies_the_external_change_recovery_truth_table_and_marks_retained_artifacts' {
+        $externalState = {
+            param([Parameter(Mandatory = $true)][object] $Operation)
+            if([string]$Operation.kind -in @('swap-directory','create-directory')){
+                return [pscustomobject]@{
+                    exists=$true
+                    identity=[pscustomobject]@{kind=$Operation.applied.identity.kind;device=$Operation.applied.identity.device;fileId='0000ABCD:77777777'}
+                    inventorySha256=('e' * 64)
+                    entryCount=17
+                }
+            }
+            return [pscustomobject]@{
+                exists=$true
+                sha256=('e' * 64)
+                length=17
+                identity=[pscustomobject]@{kind=$Operation.applied.identity.kind;device=$Operation.applied.identity.device;fileId='0000ABCD:77777777'}
+            }
+        }
+        $singleOperationJournal = {
+            param([Parameter(Mandatory = $true)][ValidateSet('write-file','create-file','swap-directory','create-directory')][string] $Kind,[Parameter(Mandatory = $true)][string] $State)
+            $journal = switch($Kind){
+                'write-file' { Get-TestInstallJournalV1 }
+                'create-file' { Get-TestInstallJournalV1 }
+                'swap-directory' { Get-TestSwapDirectoryInstallJournalV1 }
+                'create-directory' { Get-TestCreateDirectoryInstallJournalV1 }
+            }
+            if($Kind -in @('write-file','create-file')){
+                $operationIndex=if($Kind -ceq 'create-file'){1}else{0}
+                $journal.operations=@($journal.operations[$operationIndex])
+                $journal.operations[0].sequence=1
+            }
+            $journal.phase=if($State -ceq 'rolled-back'){'rolling-back'}else{'applying'}
+            $journal.operations[0].state=$State
+            return (ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal|ConvertTo-Json -Depth 20))
+        }
+
+        foreach($kind in @('write-file','swap-directory')){
+            foreach($state in @('pending','rolled-back')){
+                $journal=& $singleOperationJournal $kind $state
+                $operation=$journal.operations[0]
+
+                $originalObservation=New-TestInstallObservation -Operation $operation -State $operation.original -Backup $null
+                $originalDecision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$originalObservation}
+                $originalDecision.action|Should Be 'roll-back'
+                $originalDecision.operations[0].action|Should Be 'none'
+                @((Get-AiInstructionsInstallRecoveryPlan -Journal $journal -Decision $originalDecision).retainedArtifacts).Count|Should Be 0
+
+                $appliedObservation=New-TestInstallObservation -Operation $operation -State $operation.applied
+                $appliedDecision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$appliedObservation}
+                $appliedDecision.action|Should Be 'roll-back'
+                $appliedDecision.operations[0].action|Should Be 'restore-original'
+
+                $external=& $externalState $operation
+                $missingBackupObservation=New-TestInstallObservation -Operation $operation -State $external -Backup $null
+                $missingBackupDecision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$missingBackupObservation}
+                $missingBackupDecision.action|Should Be 'roll-back'
+                $missingBackupDecision.operations[0].action|Should Be 'none'
+                $missingBackupPlan=Get-AiInstructionsInstallRecoveryPlan -Journal $journal -Decision $missingBackupDecision
+                # InterT67 compatibility: no original backup was displaced, so the reproducible candidate stage does not block terminal cleanup.
+                @($missingBackupPlan.retainedArtifacts).Count|Should Be 0
+                @($missingBackupPlan.steps|Where-Object step -eq 'cleanup-transaction').Count|Should Be 1
+
+                $mismatchedBackupObservation=New-TestInstallObservation -Operation $operation -State $external
+                if($kind -ceq 'swap-directory'){$mismatchedBackupObservation.backup.inventorySha256='9' * 64}
+                else{$mismatchedBackupObservation.backup.sha256='9' * 64}
+                $mismatchedBackupDecision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$mismatchedBackupObservation}
+                $mismatchedBackupDecision.action|Should Be 'roll-back'
+                $mismatchedBackupDecision.operations[0].action|Should Be 'none'
+                $mismatchedBackupPlan=Get-AiInstructionsInstallRecoveryPlan -Journal $journal -Decision $mismatchedBackupDecision
+                @($mismatchedBackupPlan.retainedArtifacts[0].leaves)|Should Contain ([string]$operation.backupLeaf)
+                @($mismatchedBackupPlan.steps|Where-Object step -eq 'cleanup-transaction').Count|Should Be 0
+
+                $validBackupObservation=New-TestInstallObservation -Operation $operation -State $external
+                $validBackupDecision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$validBackupObservation}
+                $validBackupDecision.action|Should Be 'refuse'
+                $validBackupDecision.operations[0].action|Should Be 'keep'
+                @((Get-AiInstructionsInstallRecoveryPlan -Journal $journal -Decision $validBackupDecision).steps).Count|Should Be 0
+            }
+
+            $journal=& $singleOperationJournal $kind 'applied'
+            $operation=$journal.operations[0]
+            $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=(New-TestInstallObservation -Operation $operation -State $operation.applied)}
+            $decision.action|Should Be 'roll-back'
+            $decision.operations[0].action|Should Be 'restore-original'
+
+            $journal=& $singleOperationJournal $kind 'staged'
+            $operation=$journal.operations[0]
+            $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=(New-TestInstallObservation -Operation $operation -State (& $externalState $operation) -Backup $null)}
+            $decision.action|Should Be 'roll-back'
+            $decision.operations[0].action|Should Be 'none'
+        }
+
+        foreach($kind in @('create-file','create-directory')){
+            foreach($state in @('pending','rolled-back','applied')){
+                $journal=& $singleOperationJournal $kind $state
+                $operation=$journal.operations[0]
+                $appliedDecision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=(New-TestInstallObservation -Operation $operation -State $operation.applied -Backup $null)}
+                $appliedDecision.action|Should Be 'roll-back'
+                $appliedDecision.operations[0].action|Should Be 'remove-applied'
+            }
+            foreach($state in @('pending','rolled-back')){
+                $journal=& $singleOperationJournal $kind $state
+                $operation=$journal.operations[0]
+                $externalObservation=New-TestInstallObservation -Operation $operation -State (& $externalState $operation) -Backup $null
+                $decision=Get-AiInstructionsInstallRecoveryDecision -Journal $journal -Observations @{1=$externalObservation}
+                $decision.action|Should Be 'roll-back'
+                $decision.operations[0].action|Should Be 'none'
+                $plan=Get-AiInstructionsInstallRecoveryPlan -Journal $journal -Decision $decision
+                @($plan.retainedArtifacts).Count|Should Be 0
+                @($plan.steps|Where-Object step -eq 'cleanup-transaction').Count|Should Be 1
+            }
+        }
     }
 }
