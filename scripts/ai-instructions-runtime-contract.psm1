@@ -88,6 +88,31 @@ function Get-AiInstructionsRefusalCode {
     return $null
 }
 
+function Test-AiInstructionsClaudeFamilyTargetPath {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    return $Path -ceq 'CLAUDE.md' -or
+        $Path.StartsWith('.claude/AI-Rules/',[StringComparison]::Ordinal) -or
+        $Path.StartsWith('.claude/ai-instructions-licenses/',[StringComparison]::Ordinal)
+}
+
+function Test-AiInstructionsClaudeFamilyProjectOwned {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][bool] $BaseExists,
+        [Parameter(Mandatory = $true)][bool] $BaseTracked,
+        [Parameter(Mandatory = $true)][bool] $BaseStaged,
+        [AllowNull()][string] $ManagedSha256,
+        [AllowNull()][string] $CurrentSha256
+    )
+
+    if ($BaseTracked -or $BaseStaged) { return $true }
+    if (-not $BaseExists) { return $false }
+    if ([string]::IsNullOrWhiteSpace($ManagedSha256)) { return $true }
+    return [string]$CurrentSha256 -cne $ManagedSha256
+}
+
 function Get-AiInstructionsRuntimeGeneration {
     [CmdletBinding()]
     param(
@@ -2800,6 +2825,8 @@ Export-ModuleMember -Function @(
     'Get-AiInstructionsRefusalCodes',
     'New-AiInstructionsRefusalException',
     'Get-AiInstructionsRefusalCode',
+    'Test-AiInstructionsClaudeFamilyTargetPath',
+    'Test-AiInstructionsClaudeFamilyProjectOwned',
     'Get-AiInstructionsRuntimeGeneration',
     'Get-AiInstructionsRuntimeInventory',
     'Get-AiInstructionsRuntimeInventorySha256',

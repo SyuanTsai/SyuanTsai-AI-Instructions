@@ -697,7 +697,9 @@ Describe 'AI instructions writer and reader gate' {
         $claudePath=Join-Path $target 'CLAUDE.md'
         [IO.File]::AppendAllText($claudePath,"project ownership`n",[Text.UTF8Encoding]::new($false))
         $claudeBytes=[IO.File]::ReadAllBytes($claudePath)
-        $claudeFamily=Get-P9bRepoSnapshot (Join-Path $target '.claude')
+        $claudeFamily=Get-P7eTreeSnapshot (Join-Path $target '.claude')
+        $excludePath=Join-Path $target '.git/info/exclude'
+        $claudeExcludeBefore=@([IO.File]::ReadAllLines($excludePath)|Where-Object{$_-eq'/CLAUDE.md'-or$_-like'/.claude/AI-Rules/*'-or$_-like'/.claude/ai-instructions-licenses/*'}|Sort-Object)
         $oldRule='.claude/AI-Rules/Database.en.md'
         $oldLicense='.claude/ai-instructions-licenses/cccccccccccccccccccccccccccccccccccccccc/delivery.json'
         $context=New-P9bBootstrapContext -Root $root -InstructionCommit ('d'*40)
@@ -706,12 +708,16 @@ Describe 'AI instructions writer and reader gate' {
         $result.ExitCode|Should Be 0
         $result.Output|Should Match 'claude-base-skipped-project-owned'
         [IO.File]::ReadAllBytes($claudePath)|Should Be $claudeBytes
-        (Get-P9bRepoSnapshot (Join-Path $target '.claude'))|Should Be $claudeFamily
+        (Get-P7eTreeSnapshot (Join-Path $target '.claude'))|Should Be $claudeFamily
         Test-Path -LiteralPath (Join-Path $target $oldRule) -PathType Leaf|Should Be $true
         Test-Path -LiteralPath (Join-Path $target $oldLicense) -PathType Leaf|Should Be $true
         Test-Path -LiteralPath (Join-Path $target '.claude/ai-instructions-licenses/dddddddddddddddddddddddddddddddddddddddd/delivery.json')|Should Be $false
         $manifest=Get-Content -Raw -LiteralPath (Join-Path $target '.codex/ai-instructions.manifest.json')|ConvertFrom-Json
         @($manifest.files|Where-Object{[string]$_.targetPath-in@($oldRule,$oldLicense)}).Count|Should Be 2
+        $claudeExcludeAfter=@([IO.File]::ReadAllLines($excludePath)|Where-Object{$_-eq'/CLAUDE.md'-or$_-like'/.claude/AI-Rules/*'-or$_-like'/.claude/ai-instructions-licenses/*'}|Sort-Object)
+        $claudeExcludeAfter|Should Be $claudeExcludeBefore
+        [IO.File]::ReadAllText($excludePath)|Should Match '(?m)^/\.codex/ai-instructions-licenses/dddddddddddddddddddddddddddddddddddddddd/'
+        [IO.File]::ReadAllText($excludePath)|Should Not Match '(?m)^/\.codex/ai-instructions-licenses/cccccccccccccccccccccccccccccccccccccccc/'
         ([IO.File]::ReadAllText((Join-Path $target 'AGENTS.md')))|Should Match '<!-- changed -->'
     }
 
@@ -741,6 +747,64 @@ Describe 'AI instructions writer and reader gate' {
         [string]$entry.rendererId|Should Be retained-renderer
         [string]$entry.rendererSha256|Should Be ('1'*64)
         @($updated.files|Where-Object{[string]$_.targetPath-ne$retainedTarget-and[string]$_.rendererSha256-eq$changed.RendererSha256}).Count|Should BeGreaterThan 0
+    }
+
+    # Scenario: A schema-v1 Skill entry remains after its REPO payload was already removed without staged or tracked residue.
+    # Purpose: Treat the absent payload as a completed migration and let the projection-aware writer emit a complete v4 instruction manifest.
+    It 'InterT121_advances_to_v4_after_a_legacy_Skill_payload_was_already_migrated' {
+        $root=Join-Path $script:ExternalRoot 'p9b-v1-skill-migrated';New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip')
+        $context=New-P9bBootstrapContext -Root $root
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        $skillRelative='.agents/skills/legacy-skill/SKILL.md'
+        Set-P9bJson -Path (Join-Path $target '.codex/ai-instructions.manifest.json') -Document ([ordered]@{
+            schemaVersion=1;sourceRepository='https://example.com/legacy-ai-instructions.git';sourceRef='legacy-pin'
+            files=@([ordered]@{sourcePath=$skillRelative;targetPath=$skillRelative;sha256=('a'*64)})
+        })
+
+        $result=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target
+
+        $result.ExitCode|Should Be 0
+        $manifest=Get-Content -Raw -LiteralPath (Join-Path $target '.codex/ai-instructions.manifest.json')|ConvertFrom-Json
+        [int]$manifest.schemaVersion|Should Be 4
+        @($manifest.files|Where-Object{[string]$_.targetPath-like'.agents/skills/*'}).Count|Should Be 0
+        Test-Path -LiteralPath (Join-Path $target $skillRelative)|Should Be $false
+        [IO.File]::ReadAllText((Join-Path $target '.git/info/exclude'))|Should Not Match '(?m)^/\.agents/skills/'
+    }
+
+    # Scenario: A schema-v1 Skill payload is still present, or its tracked payload is missing with a pending worktree deletion.
+    # Purpose: Preserve both legacy ownership forms with a typed refusal before any REPO byte, index, HEAD, status, or exclude mutation.
+    It 'InterT122_refuses_v4_while_legacy_Skill_ownership_must_be_retained_for_<Case>' -TestCases @(
+        @{Case='untracked-present';TrackedMissing=$false},
+        @{Case='tracked-missing';TrackedMissing=$true}
+    ) {
+        param($Case,$TrackedMissing)
+        $root=Join-Path $script:ExternalRoot ("p9b-v1-skill-retained-$Case");New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip')
+        $context=New-P9bBootstrapContext -Root $root
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        $skillRelative='.agents/skills/legacy-skill/SKILL.md'
+        $skillPath=Join-Path $target $skillRelative
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $skillPath)|Out-Null
+        [IO.File]::WriteAllText($skillPath,"# Legacy Skill`n",[Text.UTF8Encoding]::new($false))
+        $skillHash=(Get-FileHash -LiteralPath $skillPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if($TrackedMissing){
+            & git -C $target add -- $skillRelative
+            & git -C $target commit --quiet -m 'track legacy Skill payload'
+            Remove-Item -LiteralPath $skillPath -Force
+        }
+        Set-P9bJson -Path (Join-Path $target '.codex/ai-instructions.manifest.json') -Document ([ordered]@{
+            schemaVersion=1;sourceRepository='https://example.com/legacy-ai-instructions.git';sourceRef='legacy-pin'
+            files=@([ordered]@{sourcePath=$skillRelative;targetPath=$skillRelative;sha256=$skillHash})
+        })
+        $before=Get-P9bRepoSnapshot $target
+
+        $result=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target
+
+        $result.ExitCode|Should Not Be 0
+        (Get-AiInstructionsRefusalCode $result.Output)|Should Be closure-invalid
+        $result.Output|Should Match 'cannot replace retained legacy REPO Skill ownership'
+        (Get-P9bRepoSnapshot $target)|Should Be $before
     }
 
     # Scenario: The stable launcher has opened a verified closure file with its read-only sharing contract.

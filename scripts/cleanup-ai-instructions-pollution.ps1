@@ -867,16 +867,24 @@ $trackedPaths = @(Invoke-CleanupGit -Repository $targetRootPath -Arguments @('-c
     (ConvertFrom-CleanupGitQuotedPath -Path ([string]$_)).Replace('\','/')
 })
 $gitPathComparer = Get-CleanupGitPathComparer -Repository $targetRootPath
+$claudeBasePath = Join-Path $targetRootPath 'CLAUDE.md'
+$claudeBaseExists = Test-Path -LiteralPath $claudeBasePath -PathType Leaf
 $trackedClaudeBase = @($trackedPaths | Where-Object { $gitPathComparer.Equals([string]$_,'CLAUDE.md') }).Count -gt 0
+$stagedClaudeExitCode = Get-CleanupGitExitCode -Repository $targetRootPath -Arguments @('diff','--cached','--quiet','--','CLAUDE.md')
+if ($stagedClaudeExitCode -gt 1) { throw 'Unable to inspect staged Claude base ownership.' }
+$claudeManifestEntry = if ($entriesByPath.ContainsKey('CLAUDE.md')) { $entriesByPath['CLAUDE.md'] } else { $null }
+$claudeManagedSha256 = if ($null -ne $claudeManifestEntry) { [string]$claudeManifestEntry.sha256 } else { $null }
+$claudeCurrentSha256 = if ($claudeBaseExists) { Get-CleanupManagedHash -Path $claudeBasePath -TargetPath 'CLAUDE.md' } else { $null }
+$projectOwnedClaudeFamily = Test-AiInstructionsClaudeFamilyProjectOwned -BaseExists $claudeBaseExists `
+    -BaseTracked $trackedClaudeBase -BaseStaged ($stagedClaudeExitCode -eq 1) `
+    -ManagedSha256 $claudeManagedSha256 -CurrentSha256 $claudeCurrentSha256
 $trackedManagedEntries = New-Object System.Collections.Generic.List[object]
 foreach ($manifestTargetPath in @($manifestRelativePath) + @($entriesByPath.Keys | Sort-Object)) {
     if ([string]$manifestTargetPath -like '.agents/skills/*') {
         Write-Output "Tracked/project Skills are protected from Instructions pollution cleanup: $manifestTargetPath"
         continue
     }
-    if ($trackedClaudeBase -and ([string]$manifestTargetPath -ceq 'CLAUDE.md' -or
-        ([string]$manifestTargetPath).StartsWith('.claude/AI-Rules/',[StringComparison]::Ordinal) -or
-        ([string]$manifestTargetPath).StartsWith('.claude/ai-instructions-licenses/',[StringComparison]::Ordinal))) {
+    if ($projectOwnedClaudeFamily -and (Test-AiInstructionsClaudeFamilyTargetPath -Path ([string]$manifestTargetPath))) {
         Write-Output "Project-owned Claude family is protected from Instructions pollution cleanup: $manifestTargetPath"
         continue
     }

@@ -986,4 +986,53 @@ exit /b %errorlevel%
         [IO.File]::ReadAllBytes($licensePath)|Should Be $licenseBefore
         ($deleted|Where-Object{$_-like'.claude/skills/*'}).Count|Should Be 0
     }
+
+    # Scenario: An untracked unmanaged CLAUDE.md coexists with unchanged tracked Claude Rule and license entries.
+    # Purpose: Reuse bootstrap ownership classification so cleanup protects the complete project-owned Claude family without staging its deletion.
+    It 'InterT82_preserves_tracked_Claude_family_when_an_untracked_base_is_project_owned' {
+        $targetRoot=Join-Path $TestDrive 'v4-project-owned-claude-cleanup'
+        New-PollutedTestRepository -Path $targetRoot
+        $ruleRelative='.claude/AI-Rules/Testing.en.md'
+        $licenseRelative='.claude/ai-instructions-licenses/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/delivery.json'
+        $rulePath=Join-Path $targetRoot $ruleRelative
+        $licensePath=Join-Path $targetRoot $licenseRelative
+        Set-CleanupTestText -Path $rulePath -Value '# Project-owned Claude rule'
+        Set-CleanupTestText -Path $licensePath -Value '{"schemaVersion":1}'
+        $manifestPath=Join-Path $targetRoot $script:ManifestRelativePath
+        $legacy=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+        $renderer='e'*64
+        $codex=$legacy.files[0]
+        $codex|Add-Member -NotePropertyName host -NotePropertyValue codex
+        $codex|Add-Member -NotePropertyName rendererId -NotePropertyValue build-ai-instructions
+        $codex|Add-Member -NotePropertyName rendererSha256 -NotePropertyValue $renderer
+        $claudeRule=($codex|ConvertTo-Json -Depth 10|ConvertFrom-Json)
+        $claudeRule.artifactId='claude-rule-testing';$claudeRule.host='claude';$claudeRule.sourcePath='.claude/AI-Rules/Testing.en.md';$claudeRule.targetPath=$ruleRelative
+        $claudeRule.sha256=(Get-FileHash -LiteralPath $rulePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $claudeLicense=($codex|ConvertTo-Json -Depth 10|ConvertFrom-Json)
+        $claudeLicense.artifactId='claude-licensing';$claudeLicense.host='claude';$claudeLicense.sourcePath='.ai-instructions-generated/delivery.json';$claudeLicense.targetPath=$licenseRelative
+        $claudeLicense.sha256=(Get-FileHash -LiteralPath $licensePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $manifest=[ordered]@{
+            schemaVersion=4;catalogId=[string]$legacy.catalogId;lockSha256=[string]$legacy.lockSha256
+            projectionContractSha256=('f'*64);generation=1;projections=@();files=@($codex,$claudeRule,$claudeLicense)
+        }
+        Set-CleanupTestText -Path $manifestPath -Value (($manifest|ConvertTo-Json -Depth 20).Replace("`r`n","`n").TrimEnd())
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('add','--',$ruleRelative,$licenseRelative,$script:ManifestRelativePath)|Out-Null
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','v4 Claude family fixture')|Out-Null
+        Set-CleanupTestText -Path (Join-Path $targetRoot 'CLAUDE.md') -Value '# Unmanaged project Claude base'
+        $ruleBefore=[IO.File]::ReadAllBytes($rulePath);$licenseBefore=[IO.File]::ReadAllBytes($licensePath)
+
+        $result=Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+
+        $result.ExitCode|Should Be 0
+        $deleted=@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only','--diff-filter=D'))
+        ($deleted-contains'AGENTS.md')|Should Be $true
+        ($deleted-contains$script:ManifestRelativePath)|Should Be $true
+        ($deleted-contains$ruleRelative)|Should Be $false
+        ($deleted-contains$licenseRelative)|Should Be $false
+        [IO.File]::ReadAllBytes($rulePath)|Should Be $ruleBefore
+        [IO.File]::ReadAllBytes($licensePath)|Should Be $licenseBefore
+        $exclude=[IO.File]::ReadAllText((Join-Path $targetRoot '.git/info/exclude'))
+        $exclude|Should Match '(?m)^/\.claude/AI-Rules/Testing\.en\.md$'
+        $exclude|Should Match '(?m)^/\.claude/ai-instructions-licenses/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/delivery\.json$'
+    }
 }
