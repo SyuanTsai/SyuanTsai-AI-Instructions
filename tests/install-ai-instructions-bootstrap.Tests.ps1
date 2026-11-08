@@ -208,6 +208,21 @@ function Get-InstallerStateSnapshot {
     return ($states|ConvertTo-Json -Depth 20 -Compress)
 }
 
+function Get-InstallerFullTreeSnapshot {
+    param([Parameter(Mandatory=$true)][string]$Root)
+    if(-not(Test-Path -LiteralPath $Root)){return '<root-absent>'}
+    $rootPath=[IO.Path]::GetFullPath($Root).TrimEnd([char[]]@('\','/'))
+    $entries=New-Object System.Collections.Generic.List[string]
+    foreach($item in @((Get-Item -Force -LiteralPath $rootPath)) + @(Get-ChildItem -Force -LiteralPath $rootPath -Recurse)){
+        $relative=if($item.FullName-ceq$rootPath){'.'}else{$item.FullName.Substring($rootPath.Length).TrimStart([char[]]@('\','/')).Replace('\','/')}
+        $kind=if(($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){'reparse'}elseif($item.PSIsContainer){'directory'}else{'file'}
+        $hash=if($kind-ceq'file'){(Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}else{'-'}
+        $entries.Add("$relative`t$kind`t$([int64]$item.Attributes)`t$hash")
+    }
+    $values=$entries.ToArray();[Array]::Sort($values,[StringComparer]::Ordinal)
+    return ($values-join"`n")
+}
+
 function Get-InstallerAppliedSnapshotFromTransaction {
     param([Parameter(Mandatory = $true)][string]$CodexHome,[Parameter(Mandatory = $true)][string]$OriginalSnapshot)
     $store=Join-Path $CodexHome '.ai-instructions-txn'
@@ -677,12 +692,11 @@ Keep this section too.
     It 'InterT40_rejects_unknown_configuration_schema_before_installation_changes' {
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         Set-TestText -Path (Join-Path $codexHome 'ai-instructions-sync.json') -Value '{"schemaVersion":99,"excludedRepositoryUrls":[],"excludedRepositoryPaths":[]}'
-        $bundlePath = Join-Path $codexHome 'hooks\ai-instructions-runtime\runtime-bundle.json'
-        $bundleBefore = Get-Content -Raw -LiteralPath $bundlePath
+        $before = Get-InstallerFullTreeSnapshot -Root $codexHome
         $result = Invoke-InstallExpectFailure -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         $result.ExitCode | Should Not Be 0
-        $result.Output | Should Match 'Unsupported AI instruction sync configuration schemaVersion'
-        (Get-Content -Raw -LiteralPath $bundlePath) | Should Be $bundleBefore
+        (Get-AiInstructionsRefusalCode $result.Output) | Should Be unsupported-version
+        (Get-InstallerFullTreeSnapshot -Root $codexHome) | Should Be $before
     }
 
     # Scenario: The active configuration is v5 while the installed runtime bundle remains v2.

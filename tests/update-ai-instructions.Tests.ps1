@@ -37,6 +37,7 @@ function New-TestUpdaterHome {
     $bundle = New-AiInstructionsRuntimeBundleV2 -RuntimeRoot $runtimeRoot -Repository $script:CanonicalRepository -Commit $Commit -Acquisition git-checkout
     $bundleJson = ($bundle | ConvertTo-Json -Depth 10).Replace("`r`n", "`n") + "`n"
     [System.IO.File]::WriteAllText((Join-Path $runtimeRoot 'runtime-bundle.json'), $bundleJson)
+    [System.IO.File]::WriteAllText((Join-Path $Path 'ai-instructions-install.lock'),'',[Text.UTF8Encoding]::new($false))
 }
 
 function New-TestUpdaterHomeV3 {
@@ -44,7 +45,7 @@ function New-TestUpdaterHomeV3 {
         [Parameter(Mandatory=$true)][string]$Path,
         [ValidateSet('notify-only','auto-install-approved')][string]$Mode='auto-install-approved',
         [string]$Commit=('a'*40),
-        [switch]$RequireUnavailablePowerShellRuntime
+        [string]$AdditionalRequiredCapability
     )
     $runtimeRoot=Join-Path $Path 'hooks\ai-instructions-runtime'
     New-Item -ItemType Directory -Force -Path $runtimeRoot,(Join-Path $runtimeRoot 'catalog')|Out-Null
@@ -60,10 +61,18 @@ function New-TestUpdaterHomeV3 {
     Import-Module (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psd1') -Force
     $receipt=Get-PlatformCapabilities -Required @('directory-lease','file-lease','file-identity','lock','publication','owned-file-removal','permissions','directory-publication')
     $bundle=New-AiInstructionsRuntimeBundleV3 -RuntimeRoot $runtimeRoot -Repository $script:CanonicalRepository -Commit $Commit -Acquisition git-checkout -CapabilityReceipt $receipt
-    if($RequireUnavailablePowerShellRuntime){$bundle.requiredCapabilities=@($bundle.requiredCapabilities)+@('powershell-runtime')}
+    if(-not[string]::IsNullOrWhiteSpace($AdditionalRequiredCapability)){$bundle.requiredCapabilities=@($bundle.requiredCapabilities)+@($AdditionalRequiredCapability)}
     [IO.File]::WriteAllText((Join-Path $Path 'ai-instructions-sync.json'),(($configuration|ConvertTo-Json -Depth 20).Replace("`r`n","`n")+"`n"),[Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $runtimeRoot 'runtime-bundle.json'),(($bundle|ConvertTo-Json -Depth 30).Replace("`r`n","`n")+"`n"),[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $Path 'ai-instructions-install.lock'),'',[Text.UTF8Encoding]::new($false))
 }
+
+Import-Module (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psd1') -Force
+$script:UpdaterUnavailableCapability=@(
+    (Get-PlatformCapabilities -Required @()).capabilities |
+        Where-Object { [string]$_.status -cne 'available' } |
+        Select-Object -ExpandProperty name
+)[0]
 
 Describe 'AI instructions updater workflow' {
     BeforeAll {
@@ -116,15 +125,17 @@ Describe 'AI instructions updater workflow' {
         (Get-Content -Raw (Join-Path $codexHome 'ai-instructions-sync.json')|ConvertFrom-Json).schemaVersion|Should Be 5
     }
 
-    # Scenario: A v3/v5 updater gate observes a real host capability that is currently unavailable.
-    # Purpose: Use the actual receipt required by D14 and prove all Codex Home path/hash state is unchanged.
-    It 'UnitT07_refuses_real_capability_loss_before_updater_mutation' {
-        $codexHome=Join-Path $TestDrive 'v3-capability-loss';New-TestUpdaterHomeV3 -Path $codexHome -RequireUnavailablePowerShellRuntime
-        $before=Get-TestUpdaterHomeDigest $codexHome;$caught=$null
-        try{Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck|Out-Null}catch{$caught=$_}
-        (Get-AiInstructionsRefusalCode $caught)|Should Be capability-unavailable
-        (Get-TestUpdaterHomeDigest $codexHome)|Should Be $before
-        Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update.lock')|Should Be $false
+    if(-not[string]::IsNullOrWhiteSpace($script:UpdaterUnavailableCapability)){
+        # Scenario: A v3/v5 updater gate observes a real host capability that is currently unavailable or unverified.
+        # Purpose: Select from the native receipt at runtime and prove all Codex Home path/type/attribute/hash state is unchanged.
+        It 'UnitT07_refuses_real_capability_loss_before_updater_mutation' {
+            $codexHome=Join-Path $TestDrive 'v3-capability-loss';New-TestUpdaterHomeV3 -Path $codexHome -AdditionalRequiredCapability $script:UpdaterUnavailableCapability
+            $before=Get-TestUpdaterHomeDigest $codexHome;$caught=$null
+            try{Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck|Out-Null}catch{$caught=$_}
+            (Get-AiInstructionsRefusalCode $caught)|Should Be capability-unavailable
+            (Get-TestUpdaterHomeDigest $codexHome)|Should Be $before
+            Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update.lock')|Should Be $false
+        }
     }
 
     # Scenario: A candidate installer reports success after replacing v3/v5 with a valid v2/v4 pair.
@@ -609,7 +620,8 @@ Describe 'AI instructions updater workflow' {
 param(
     [string]$RepositoryRoot,[string]$CodexHome,[string]$SourceRepository,[string]$SourceCommit,
     [string]$Acquisition,[string]$ArchiveSha256,[string]$SourceArchivePath,[string]$ExpectedCurrentCommit,
-    [string]$ExpectedUpdateMode,[string]$ExpectedUpdateChannel,[string]$ExpectedUpdateRef,[string]$WriterSchema
+    [string]$ExpectedUpdateMode,[string]$ExpectedUpdateChannel,[string]$ExpectedUpdateRef,
+    [string]$ExpectedCurrentGeneration,[string]$WriterSchema
 )
 [System.IO.File]::WriteAllText(
     (Join-Path $RepositoryRoot 'received-state.json'),
@@ -618,7 +630,8 @@ param(
         sourceCommit=$SourceCommit;acquisition=$Acquisition;archiveSha256=$ArchiveSha256
         sourceArchivePath=$SourceArchivePath;expectedCurrentCommit=$ExpectedCurrentCommit
         expectedUpdateMode=$ExpectedUpdateMode;expectedUpdateChannel=$ExpectedUpdateChannel
-        expectedUpdateRef=$ExpectedUpdateRef;writerSchema=$WriterSchema;psModulePath=$env:PSModulePath
+        expectedUpdateRef=$ExpectedUpdateRef;expectedCurrentGeneration=$ExpectedCurrentGeneration
+        writerSchema=$WriterSchema;psModulePath=$env:PSModulePath
     } | ConvertTo-Json)
 )
 '@
@@ -633,6 +646,7 @@ param(
             Mode = 'auto-install-approved'
             Channel = 'protected-branch'
             Ref = 'main'
+            ExpectedCurrentGeneration = 'v3v5'
             Package = [pscustomobject]@{ SourceRoot=$sourceRoot; ArchivePath=$archivePath; ArchiveSha256=('c' * 64) }
         }
 
@@ -657,6 +671,7 @@ param(
         $received.expectedUpdateMode | Should Be auto-install-approved
         $received.expectedUpdateChannel | Should Be protected-branch
         $received.expectedUpdateRef | Should Be main
+        $received.expectedCurrentGeneration | Should Be v3v5
         $received.writerSchema | Should Be Auto
         [string]$received.psModulePath | Should Not Match ([regex]::Escape($modulePathMarker))
     }
@@ -680,6 +695,7 @@ exit 23
             Mode = 'auto-install-approved'
             Channel = 'protected-branch'
             Ref = 'main'
+            ExpectedCurrentGeneration = 'v2v4'
             Package = [pscustomobject]@{ SourceRoot=$sourceRoot; ArchivePath=(Join-Path $TestDrive 'candidate.zip'); ArchiveSha256=('c' * 64) }
         }
 

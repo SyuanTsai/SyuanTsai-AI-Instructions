@@ -13,6 +13,7 @@ param(
     [string] $ExpectedUpdateMode,
     [string] $ExpectedUpdateChannel,
     [string] $ExpectedUpdateRef,
+    [ValidateSet('v2v4','v3v5')][string] $ExpectedCurrentGeneration,
     [ValidateSet('Auto','V2V4','V3V5')][string] $WriterSchema = 'Auto'
 )
 
@@ -113,24 +114,34 @@ function Get-InstallerExistingRuntimeState {
 
     $existingConfiguration = $null
     $existingBundle = $null
-    if (Test-Path -LiteralPath $ConfigurationPath -PathType Leaf) {
+    $configurationExists = Test-Path -LiteralPath $ConfigurationPath -PathType Leaf
+    if ($configurationExists) {
         try { $existingConfiguration = Get-Content -Raw -Encoding UTF8 -LiteralPath $ConfigurationPath | ConvertFrom-Json }
         catch { throw "AI instruction sync configuration is not valid JSON: $ConfigurationPath" }
     }
 
     $existingBundlePath = Join-Path $RuntimeDirectory 'runtime-bundle.json'
-    if (Test-Path -LiteralPath $existingBundlePath -PathType Leaf) {
+    $bundleExists = Test-Path -LiteralPath $existingBundlePath -PathType Leaf
+    if ($bundleExists) {
         try { $existingBundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $existingBundlePath | ConvertFrom-Json }
         catch { throw "Installed AI instruction runtime bundle is not valid JSON: $existingBundlePath" }
     }
     $bundleVersion = if ($null -ne $existingBundle -and (Test-InstallerHasProperty -Object $existingBundle -Name 'schemaVersion')) { $existingBundle.schemaVersion } else { $null }
     $configurationVersion = if ($null -ne $existingConfiguration -and (Test-InstallerHasProperty -Object $existingConfiguration -Name 'schemaVersion')) { $existingConfiguration.schemaVersion } else { $null }
-    $generation = Get-AiInstructionsRuntimeGeneration -BundleSchemaVersion $bundleVersion -ConfigurationSchemaVersion $configurationVersion -AllowAbsent
+    $generation = Get-AiInstructionsRuntimeGeneration `
+        -BundleSchemaVersion $bundleVersion `
+        -ConfigurationSchemaVersion $configurationVersion `
+        -BundleExists:$bundleExists `
+        -ConfigurationExists:$configurationExists `
+        -AllowAbsent `
+        -AllowLegacyConfigurationOnly
     return [pscustomobject][ordered]@{
         Bundle = $existingBundle
         Configuration = $existingConfiguration
         BundleSchemaVersion = $bundleVersion
         ConfigurationSchemaVersion = $configurationVersion
+        BundleExists = $bundleExists
+        ConfigurationExists = $configurationExists
         Generation = $generation
     }
 }
@@ -141,7 +152,7 @@ function Assert-InstallerExistingRuntimeGate {
         [Parameter(Mandatory = $true)][string] $RuntimeDirectory,
         [Parameter(Mandatory = $true)][object] $DefaultCapabilityReceipt
     )
-    if ([string]$State.Generation -ceq 'none') { return $DefaultCapabilityReceipt }
+    if ([string]$State.Generation -in @('none','legacy-configuration')) { return $DefaultCapabilityReceipt }
     if ([string]$State.Generation -ceq 'v2v4') {
         Assert-AiInstructionsRuntimeBundleV2 -Bundle $State.Bundle -Configuration $State.Configuration -RuntimeRoot $RuntimeDirectory | Out-Null
         return $DefaultCapabilityReceipt
@@ -177,11 +188,17 @@ function Select-InstallerWriterSchemaForState {
     }
     $expectedOs = if ([string]$State.Generation -ceq 'v3v5') { [string]$State.Bundle.platform.os } else { [string]$receipt.os }
     $expectedArchitecture = if ([string]$State.Generation -ceq 'v3v5') { [string]$State.Bundle.platform.architecture } else { [string]$receipt.architecture }
+    $selectorBundleVersion = if ([string]$State.Generation -ceq 'legacy-configuration') { $null } else { $State.BundleSchemaVersion }
+    $selectorConfigurationVersion = if ([string]$State.Generation -ceq 'legacy-configuration') { $null } else { $State.ConfigurationSchemaVersion }
+    $selectorBundleExists = if ([string]$State.Generation -ceq 'legacy-configuration') { $false } else { [bool]$State.BundleExists }
+    $selectorConfigurationExists = if ([string]$State.Generation -ceq 'legacy-configuration') { $false } else { [bool]$State.ConfigurationExists }
     $selection = Select-AiInstructionsInstallWriterSchema `
         -WriterSchema $RequestedWriterSchema `
         -CatalogSchemaVersion $CatalogSchemaVersion `
-        -InstalledBundleSchemaVersion $State.BundleSchemaVersion `
-        -InstalledConfigurationSchemaVersion $State.ConfigurationSchemaVersion `
+        -InstalledBundleSchemaVersion $selectorBundleVersion `
+        -InstalledConfigurationSchemaVersion $selectorConfigurationVersion `
+        -InstalledBundleExists:$selectorBundleExists `
+        -InstalledConfigurationExists:$selectorConfigurationExists `
         -CapabilityReceipt $receipt `
         -ExpectedPlatformOs $expectedOs `
         -ExpectedPlatformArchitecture $expectedArchitecture `
@@ -812,8 +829,7 @@ $platformRuntimeModule = Import-Module (Join-Path $platformRuntimeRoot 'platform
 try { Assert-PlatformRuntimeInventory -Root $platformRuntimeRoot -ManifestPath (Join-Path $platformRuntimeRoot 'platform-runtime.psd1') | Out-Null }
 catch { throw (New-AiInstructionsRefusalException -Code closure-invalid -Message "The imported installer platform runtime closure is invalid. $($_.Exception.Message)" -InnerException $_.Exception) }
 Import-Module (Join-Path $repositoryRootPath 'scripts\ai-instructions-install-transaction.psm1') -Force
-$capabilityReceipt = Get-PlatformCapabilities -Required @()
-$capabilityReceipt = Assert-AiInstructionsInstallerCapabilities -Receipt $capabilityReceipt
+$capabilityReceipt = $null
 $catalogDocument = Test-SkillsCatalogDocument -CatalogPath (Join-Path $repositoryRootPath 'catalog\skills-catalog.json')
 $runtimeLicenses = New-LicenseDeliveryPackage -SourceRoot $repositoryRootPath -ArtifactPaths $runtimeArtifactPaths `
     -SourceRepository $catalogRepository -SourceCommit $catalogRef -ArtifactId 'ai-instructions-runtime'
@@ -835,17 +851,6 @@ $hooksPath = Join-Path $codexHomePath 'hooks.json'
 $configurationPath = Join-Path $codexHomePath 'ai-instructions-sync.json'
 $installLockPath = Join-Path $codexHomePath 'ai-instructions-install.lock'
 
-$prelockState = Get-InstallerExistingRuntimeState -ConfigurationPath $configurationPath -RuntimeDirectory $runtimeDirectory
-$prelockSelection = Select-InstallerWriterSchemaForState `
-    -State $prelockState `
-    -RuntimeDirectory $runtimeDirectory `
-    -DefaultCapabilityReceipt $capabilityReceipt `
-    -CatalogSchemaVersion $catalogDocument.schemaVersion `
-    -ProjectionRuntimeAvailable $projectionRuntimeAvailable `
-    -RequestedWriterSchema $WriterSchema
-$selectedWriterSchema = [string]$prelockSelection.Schema
-$capabilityReceipt = $prelockSelection.CapabilityReceipt
-
 New-Item -ItemType Directory -Force -Path $codexHomePath | Out-Null
 $rootLease = Open-PlatformDirectory -Root $codexHomePath -RootOnly
 $installLockLease = $null
@@ -860,6 +865,9 @@ try {
         if($cause -is [TimeoutException]){throw 'Another AI instructions installer is already running for this Codex Home.'}
         throw
     }
+
+    $capabilityReceipt = Get-PlatformCapabilities -Required @()
+    $capabilityReceipt = Assert-AiInstructionsInstallerCapabilities -Receipt $capabilityReceipt
 
     $legacyResidue = @(Get-ChildItem -Force -LiteralPath $codexHomePath | Where-Object { $_.Name -like '.ai-instructions-install-*' -or $_.Name -like '.ai-instructions-backup-*' })
     if ($legacyResidue.Count -gt 0) {
@@ -882,6 +890,10 @@ try {
     Invoke-AiInstructionsInstallFailpoint -Name 'after-recovery-before-install'
 
     $lockedState = Get-InstallerExistingRuntimeState -ConfigurationPath $configurationPath -RuntimeDirectory $runtimeDirectory
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedCurrentGeneration) -and [string]$lockedState.Generation -cne $ExpectedCurrentGeneration) {
+        $code = if ($ExpectedCurrentGeneration -ceq 'v3v5') { 'downgrade-refused' } else { 'mixed-generation' }
+        throw (New-AiInstructionsRefusalException -Code $code -Message "Installed runtime generation '$($lockedState.Generation)' does not match the updater's expected '$ExpectedCurrentGeneration' generation.")
+    }
     $lockedSelection = Select-InstallerWriterSchemaForState `
         -State $lockedState `
         -RuntimeDirectory $runtimeDirectory `
@@ -889,9 +901,7 @@ try {
         -CatalogSchemaVersion $catalogDocument.schemaVersion `
         -ProjectionRuntimeAvailable $projectionRuntimeAvailable `
         -RequestedWriterSchema $WriterSchema
-    if ([string]$lockedSelection.Schema -cne $selectedWriterSchema) {
-        throw (New-AiInstructionsRefusalException -Code mixed-generation -Message 'Installed runtime generation changed while the installer acquired its exclusive lease.')
-    }
+    $selectedWriterSchema = [string]$lockedSelection.Schema
     $capabilityReceipt = $lockedSelection.CapabilityReceipt
 
     New-Item -ItemType Directory -Force -Path $hookDirectory | Out-Null
@@ -1026,6 +1036,15 @@ try {
                 @($nextJournal.operations|Where-Object{[int64]$_.sequence -eq [int64]$operation.sequence})[0].state='applied'
                 $currentJournal=Write-AiInstructionsInstallJournalStore -TransactionLease $transactionLease -TransactionPath $transactionPath -Journal $nextJournal -PreviousJournal $currentJournal -PlatformOs ([string]$capabilityReceipt.os) -JournalStoreStates $journalStoreStates
                 Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+[string]$operation.sequence)
+            }
+            if (-not [string]::IsNullOrWhiteSpace($ExpectedCurrentGeneration)) {
+                $appliedState = Get-InstallerExistingRuntimeState -ConfigurationPath $configurationPath -RuntimeDirectory $runtimeDirectory
+                if ($ExpectedCurrentGeneration -ceq 'v3v5' -and [string]$appliedState.Generation -cne 'v3v5') {
+                    throw (New-AiInstructionsRefusalException -Code downgrade-refused -Message 'Candidate installation attempted to downgrade an active v3/v5 runtime before transaction commit.')
+                }
+                if ([string]$appliedState.Generation -cne $ExpectedCurrentGeneration) {
+                    throw (New-AiInstructionsRefusalException -Code mixed-generation -Message "Candidate installation produced generation '$($appliedState.Generation)' instead of expected '$ExpectedCurrentGeneration'.")
+                }
             }
             $nextJournal=ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($currentJournal|ConvertTo-Json -Depth 30) -ExpectedTransactionId $transactionId
             $nextJournal.phase='applied'

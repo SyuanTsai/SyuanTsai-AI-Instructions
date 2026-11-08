@@ -2,6 +2,12 @@ $script:RepositoryRoot=(Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $script:PowerShellExecutable=(Get-Process -Id $PID).Path
 $script:InstallerPath=Join-Path $script:RepositoryRoot 'scripts\install-ai-instructions-bootstrap.ps1'
 Import-Module (Join-Path $script:RepositoryRoot 'scripts\ai-instructions-runtime-contract.psm1') -Force
+Import-Module (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psd1') -Force
+$script:P7eUnavailableCapability = @(
+    (Get-PlatformCapabilities -Required @()).capabilities |
+        Where-Object { [string]$_.status -cne 'available' } |
+        Select-Object -ExpandProperty name
+)[0]
 
 function New-P7eSourceArchive {
     param([Parameter(Mandatory=$true)][string]$SourceRoot,[Parameter(Mandatory=$true)][string]$ArchivePath)
@@ -52,25 +58,36 @@ function Invoke-P7eInstaller {
     param(
         [Parameter(Mandatory=$true)][string]$SourceRoot,
         [Parameter(Mandatory=$true)][string]$CodexHome,
-        [ValidateSet('Auto','V2V4','V3V5')][string]$WriterSchema='Auto'
+        [ValidateSet('Auto','V2V4','V3V5')][string]$WriterSchema='Auto',
+        [string]$SourceCommit,
+        [string]$ExpectedCurrentGeneration
     )
     $archive=Join-Path (Split-Path -Parent $CodexHome) ((Split-Path -Leaf $CodexHome)+'.zip')
     $hash=New-P7eSourceArchive -SourceRoot $SourceRoot -ArchivePath $archive
-    $commit=(@(& git -C $script:RepositoryRoot rev-parse HEAD)-join'').Trim()
+    $commit=if([string]::IsNullOrWhiteSpace($SourceCommit)){(@(& git -C $script:RepositoryRoot rev-parse HEAD)-join'').Trim()}else{$SourceCommit}
     $installer=Join-Path $SourceRoot 'scripts\install-ai-instructions-bootstrap.ps1'
     $arguments=@('-NoProfile','-NonInteractive','-File',$installer,'-RepositoryRoot',$SourceRoot,'-CodexHome',$CodexHome,'-Acquisition','github-codeload','-SourceRepository','https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git','-SourceCommit',$commit,'-ArchiveSha256',$hash,'-SourceArchivePath',$archive,'-WriterSchema',$WriterSchema)
+    if(-not[string]::IsNullOrWhiteSpace($ExpectedCurrentGeneration)){$arguments+=@('-ExpectedCurrentGeneration',$ExpectedCurrentGeneration)}
     $output=& $script:PowerShellExecutable @arguments 2>&1
     return [pscustomobject]@{ExitCode=$LASTEXITCODE;Output=($output-join[Environment]::NewLine)}
 }
 
 function Get-P7eTreeSnapshot {
     param([Parameter(Mandatory=$true)][string]$Root)
-    if(-not(Test-Path -LiteralPath $Root)){return ''}
+    if(-not(Test-Path -LiteralPath $Root)){return '<root-absent>'}
     $rootPath=[IO.Path]::GetFullPath($Root).TrimEnd([char[]]@('\','/'))
-    return (@(Get-ChildItem -Force -LiteralPath $rootPath -Recurse -File|ForEach-Object{
-        $relative=$_.FullName.Substring($rootPath.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
-        "$relative`t$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())"
-    }|Sort-Object)-join"`n")
+    $entries=New-Object System.Collections.Generic.List[string]
+    $rootItem=Get-Item -Force -LiteralPath $rootPath
+    $rootKind=if(($rootItem.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){'reparse'}elseif($rootItem.PSIsContainer){'directory'}else{'file'}
+    $entries.Add(".<TAB>$rootKind<TAB>$([int64]$rootItem.Attributes)<TAB>-")
+    foreach($item in @(Get-ChildItem -Force -LiteralPath $rootPath -Recurse)){
+        $kind=if(($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){'reparse'}elseif($item.PSIsContainer){'directory'}else{'file'}
+        $relative=$item.FullName.Substring($rootPath.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+        $hash=if($kind-ceq'file'){(Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}else{'-'}
+        $entries.Add("$relative<TAB>$kind<TAB>$([int64]$item.Attributes)<TAB>$hash")
+    }
+    $values=$entries.ToArray();[Array]::Sort($values,[StringComparer]::Ordinal)
+    return ($values -join "`n").Replace('<TAB>',"`t")
 }
 
 function Copy-P7eHome {
@@ -141,11 +158,62 @@ Describe 'AI instructions writer and reader gate' {
         (Get-Content -Raw -LiteralPath (Join-Path $fixtureHome 'ai-instructions-sync.json')|ConvertFrom-Json).schemaVersion|Should Be 5
     }
 
+    # Scenario: A real v3/v5 installer advances the immutable Catalog pin from commit A to commit B.
+    # Purpose: Preserve v5 exclusions, projections, and update policy while applying the new repository/ref.
+    It 'InterT45_advances_v3v5_to_a_new_commit_without_losing_personal_configuration' {
+        $fixtureHome=Copy-P7eHome $script:BaseV3Home (Join-Path $script:ExternalRoot 'advance-v3')
+        $configurationPath=Join-Path $fixtureHome 'ai-instructions-sync.json'
+        $configuration=Get-Content -Raw -LiteralPath $configurationPath|ConvertFrom-Json
+        $configuration.excludedRepositoryUrls=@('https://example.com/preserved.git')
+        $configuration.excludedRepositoryPaths=@('preserved/path')
+        $configuration.updates.mode='auto-install-approved'
+        $configuration.updates.minimumCheckIntervalMinutes=60
+        $configuration.projections.project=@('project-agents')
+        [IO.File]::WriteAllText($configurationPath,(($configuration|ConvertTo-Json -Depth 30)+"`n"),[Text.UTF8Encoding]::new($false))
+        $commitB='b'*40
+        $result=Invoke-P7eInstaller -SourceRoot $script:V3Candidate -CodexHome $fixtureHome -WriterSchema Auto -SourceCommit $commitB
+        $result.ExitCode|Should Be 0
+        $updated=Get-Content -Raw -LiteralPath $configurationPath|ConvertFrom-Json
+        $bundle=Get-Content -Raw -LiteralPath (Join-Path $fixtureHome 'hooks\ai-instructions-runtime\runtime-bundle.json')|ConvertFrom-Json
+        [string]$updated.catalog.ref|Should Be $commitB
+        [string]$bundle.commit|Should Be $commitB
+        @($updated.excludedRepositoryUrls)|Should Be @('https://example.com/preserved.git')
+        @($updated.excludedRepositoryPaths)|Should Be @('preserved/path')
+        [string]$updated.updates.mode|Should Be 'auto-install-approved'
+        [int]$updated.updates.minimumCheckIntervalMinutes|Should Be 60
+        @($updated.projections.user)|Should Be @('user-agents','user-claude')
+        @($updated.projections.project)|Should Be @('project-agents')
+    }
+
     # Scenario: V2V4 targets an installed state containing v3 and v5.
     # Purpose: Refuse rollback before target bytes change.
     It 'InterT50_refuses_explicit_v2v4_downgrade_without_mutation' {
         $fixtureHome=Copy-P7eHome $script:BaseV3Home (Join-Path $script:ExternalRoot 'down');$before=Get-P7eTreeSnapshot $fixtureHome
         $result=Invoke-P7eInstaller -SourceRoot $script:RepositoryRoot -CodexHome $fixtureHome -WriterSchema V2V4
+        $result.ExitCode|Should Not Be 0
+        (Get-AiInstructionsRefusalCode $result.Output)|Should Be downgrade-refused
+        (Get-P7eTreeSnapshot $fixtureHome)|Should Be $before
+    }
+
+    # Scenario: A buggy candidate selects v2/v4 while the updater requires the installed v3/v5 generation to be preserved.
+    # Purpose: Detect the downgrade after journaled publication but before commit, roll back, and retain the exact original tree.
+    It 'InterT55_rolls_back_a_candidate_downgrade_before_transaction_commit' {
+        $fixtureHome=Copy-P7eHome $script:BaseV3Home (Join-Path $script:ExternalRoot 'transaction-downgrade')
+        $candidate=Join-Path $script:ExternalRoot 'downgrade-src';New-P7eV3Candidate -Destination $candidate
+        $contractPath=Join-Path $candidate 'scripts\ai-instructions-runtime-contract.psm1'
+        $contract=[IO.File]::ReadAllText($contractPath)
+        $old="if (`$WriterSchema -ceq 'V2V4' -or (`$WriterSchema -ceq 'Auto' -and `$installedGeneration -cne 'v3v5')) { return 'v2v4' }"
+        if(-not$contract.Contains($old)){throw 'P7e downgrade selector fixture marker was not found.'}
+        $contract=$contract.Replace($old,"if (`$WriterSchema -ceq 'V2V4' -or `$WriterSchema -ceq 'Auto') { return 'v2v4' }")
+        [IO.File]::WriteAllText($contractPath,$contract,[Text.UTF8Encoding]::new($false))
+        $installerPath=Join-Path $candidate 'scripts\install-ai-instructions-bootstrap.ps1'
+        $installer=[IO.File]::ReadAllText($installerPath)
+        $oldConfig='ExistingConfiguration=$existingConfiguration;CatalogRepository=$catalogRepository;CatalogRef=$catalogRef'
+        if(-not$installer.Contains($oldConfig)){throw 'P7e downgrade configuration fixture marker was not found.'}
+        $installer=$installer.Replace($oldConfig,'ExistingConfiguration=$null;CatalogRepository=$catalogRepository;CatalogRef=$catalogRef')
+        [IO.File]::WriteAllText($installerPath,$installer,[Text.UTF8Encoding]::new($false))
+        $before=Get-P7eTreeSnapshot $fixtureHome
+        $result=Invoke-P7eInstaller -SourceRoot $candidate -CodexHome $fixtureHome -WriterSchema Auto -ExpectedCurrentGeneration v3v5
         $result.ExitCode|Should Not Be 0
         (Get-AiInstructionsRefusalCode $result.Output)|Should Be downgrade-refused
         (Get-P7eTreeSnapshot $fixtureHome)|Should Be $before
@@ -161,6 +229,29 @@ Describe 'AI instructions writer and reader gate' {
         (Get-P7eTreeSnapshot $fixtureHome)|Should Be $before
     }
 
+    # Scenario: Installed runtime files are missing, or existing JSON documents omit one or both schemaVersion fields.
+    # Purpose: Distinguish partial absence from invalid present documents and refuse before journal or target mutation.
+    It 'InterT65_installer_refuses_missing_or_versionless_live_state_without_mutation_<Variant>' -TestCases @(
+        @{Variant='missing-bundle';Code='mixed-generation'},
+        @{Variant='missing-configuration';Code='mixed-generation'},
+        @{Variant='both-versionless';Code='unsupported-version'},
+        @{Variant='bundle-versionless';Code='unsupported-version'}
+    ) {
+        param($Variant,$Code)
+        $fixtureHome=Copy-P7eHome $script:BaseV3Home (Join-Path $script:ExternalRoot ("invalid-$Variant"))
+        $bundlePath=Join-Path $fixtureHome 'hooks\ai-instructions-runtime\runtime-bundle.json'
+        $configurationPath=Join-Path $fixtureHome 'ai-instructions-sync.json'
+        if($Variant-ceq'missing-bundle'){Remove-Item -LiteralPath $bundlePath -Force}
+        elseif($Variant-ceq'missing-configuration'){Remove-Item -LiteralPath $configurationPath -Force}
+        else{
+            $bundle=Get-Content -Raw -LiteralPath $bundlePath|ConvertFrom-Json;$bundle.PSObject.Properties.Remove('schemaVersion');[IO.File]::WriteAllText($bundlePath,(($bundle|ConvertTo-Json -Depth 30)+"`n"),[Text.UTF8Encoding]::new($false))
+            if($Variant-ceq'both-versionless'){$configuration=Get-Content -Raw -LiteralPath $configurationPath|ConvertFrom-Json;$configuration.PSObject.Properties.Remove('schemaVersion');[IO.File]::WriteAllText($configurationPath,(($configuration|ConvertTo-Json -Depth 30)+"`n"),[Text.UTF8Encoding]::new($false))}
+        }
+        $before=Get-P7eTreeSnapshot $fixtureHome;$result=Invoke-P7eInstaller -SourceRoot $script:V3Candidate -CodexHome $fixtureHome -WriterSchema Auto
+        $result.ExitCode|Should Not Be 0;(Get-AiInstructionsRefusalCode $result.Output)|Should Be $Code
+        (Get-P7eTreeSnapshot $fixtureHome)|Should Be $before
+    }
+
     # Scenario: The bundle declares a different host architecture.
     # Purpose: Return the fixed platform-mismatch code after the trusted capability probe and preserve all bytes.
     It 'InterT70_rejects_platform_mismatch_without_mutation' {
@@ -171,14 +262,26 @@ Describe 'AI instructions writer and reader gate' {
         (Get-P7eTreeSnapshot $fixtureHome)|Should Be $before
     }
 
-    # Scenario: The bundle adds powershell-runtime, which the current Windows receipt genuinely reports unavailable.
-    # Purpose: Satisfy D14 with a real host receipt rather than a production override.
-    It 'InterT80_rejects_a_real_unavailable_capability_without_mutation' {
-        $fixtureHome=Copy-P7eHome $script:BaseV3Home (Join-Path $script:ExternalRoot 'capability')
-        $path=Join-Path $fixtureHome 'hooks\ai-instructions-runtime\runtime-bundle.json';$bundle=Get-Content -Raw $path|ConvertFrom-Json;$bundle.requiredCapabilities=@($bundle.requiredCapabilities)+@('powershell-runtime');$bundle|ConvertTo-Json -Depth 30|Set-Content -LiteralPath $path -Encoding utf8NoBOM
-        $before=Get-P7eTreeSnapshot $fixtureHome;$result=Invoke-P7eLauncherFailure $fixtureHome
-        $result.ExitCode|Should Not Be 0;(Get-AiInstructionsRefusalCode $result.Output)|Should Be capability-unavailable
-        (Get-P7eTreeSnapshot $fixtureHome)|Should Be $before
+    if(-not[string]::IsNullOrWhiteSpace($script:P7eUnavailableCapability)){
+        # Scenario: The bundle adds a capability that the current native host receipt reports unavailable or unverified.
+        # Purpose: Satisfy D14 with a dynamically selected real receipt rather than a production override.
+        It 'InterT80_rejects_a_real_unavailable_capability_without_mutation' {
+            $fixtureHome=Copy-P7eHome $script:BaseV3Home (Join-Path $script:ExternalRoot 'capability')
+            $path=Join-Path $fixtureHome 'hooks\ai-instructions-runtime\runtime-bundle.json';$bundle=Get-Content -Raw $path|ConvertFrom-Json;$bundle.requiredCapabilities=@($bundle.requiredCapabilities)+@($script:P7eUnavailableCapability);$bundle|ConvertTo-Json -Depth 30|Set-Content -LiteralPath $path -Encoding utf8NoBOM
+            $before=Get-P7eTreeSnapshot $fixtureHome;$result=Invoke-P7eLauncherFailure $fixtureHome
+            $result.ExitCode|Should Not Be 0;(Get-AiInstructionsRefusalCode $result.Output)|Should Be capability-unavailable
+            (Get-P7eTreeSnapshot $fixtureHome)|Should Be $before
+        }
+
+        # Scenario: Auto reinstalls an existing v3/v5 runtime whose declared capability is no longer available.
+        # Purpose: Prove the installer re-runs the real host gate under its install lease and performs zero mutation.
+        It 'InterT85_installer_auto_refuses_real_capability_loss_without_mutation' {
+            $fixtureHome=Copy-P7eHome $script:BaseV3Home (Join-Path $script:ExternalRoot 'installer-capability')
+            $path=Join-Path $fixtureHome 'hooks\ai-instructions-runtime\runtime-bundle.json';$bundle=Get-Content -Raw $path|ConvertFrom-Json;$bundle.requiredCapabilities=@($bundle.requiredCapabilities)+@($script:P7eUnavailableCapability);$bundle|ConvertTo-Json -Depth 30|Set-Content -LiteralPath $path -Encoding utf8NoBOM
+            $before=Get-P7eTreeSnapshot $fixtureHome;$result=Invoke-P7eInstaller -SourceRoot $script:V3Candidate -CodexHome $fixtureHome -WriterSchema Auto
+            $result.ExitCode|Should Not Be 0;(Get-AiInstructionsRefusalCode $result.Output)|Should Be capability-unavailable
+            (Get-P7eTreeSnapshot $fixtureHome)|Should Be $before
+        }
     }
 
     # Scenario: platform-runtime.psm1 is tampered with a side-effect marker before launcher validation.
@@ -190,6 +293,26 @@ Describe 'AI instructions writer and reader gate' {
         $result.ExitCode|Should Not Be 0;(Get-AiInstructionsRefusalCode $result.Output)|Should Be closure-invalid
         (Test-Path -LiteralPath $marker)|Should Be $false
         (Get-P7eTreeSnapshot $fixtureHome)|Should Be $before
+    }
+
+    # Scenario: The stable launcher has opened a verified closure file with its read-only sharing contract.
+    # Purpose: Bind verified bytes through import/inventory assertion by denying concurrent writes and deletion until disposal.
+    It 'UnitT95_holds_launcher_closure_bytes_against_write_and_delete' {
+        $launcherPath=Join-Path $script:RepositoryRoot 'scripts\bootstrap-ai-instructions-installed.ps1'
+        $tokens=$null;$errors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile($launcherPath,[ref]$tokens,[ref]$errors)
+        @($errors).Count|Should Be 0
+        $definition=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Open-TrustedRuntimeFileLease'},$true))[0]
+        $definition|Should Not BeNullOrEmpty
+        Invoke-Expression $definition.Extent.Text
+        $path=Join-Path $script:ExternalRoot 'held-closure.psm1';[IO.File]::WriteAllText($path,"# held`n",[Text.UTF8Encoding]::new($false))
+        $lease=Open-TrustedRuntimeFileLease -Path $path
+        try{
+            { $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]::ReadWrite);$stream.Dispose() }|Should Throw
+            { Remove-Item -LiteralPath $path -Force -ErrorAction Stop }|Should Throw
+        }
+        finally{$lease.Dispose()}
+        { [IO.File]::AppendAllText($path,"# released`n",[Text.UTF8Encoding]::new($false)) }|Should Not Throw
     }
 }
 

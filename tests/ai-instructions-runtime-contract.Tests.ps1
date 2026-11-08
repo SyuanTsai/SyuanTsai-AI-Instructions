@@ -740,8 +740,20 @@ Describe 'AI instructions runtime contracts' {
             @($migrated.projections.project).Count | Should Be 0
             [string]$migrated.catalog.ref | Should Be ('c' * 40)
         }
-        $same = ConvertTo-AiInstructionsSyncConfigurationV5 -ExistingConfiguration $example -CatalogRepository $script:CanonicalRepository -CatalogRef ('d' * 40)
-        [object]::ReferenceEquals($same,$example) | Should Be $true
+        $example.excludedRepositoryUrls = @('https://example.com/preserved.git')
+        $example.excludedRepositoryPaths = @('preserved/path')
+        $example.updates.mode = 'auto-install-approved'
+        $example.updates.minimumCheckIntervalMinutes = 60
+        $example.projections.project = @('project-agents')
+        $advanced = ConvertTo-AiInstructionsSyncConfigurationV5 -ExistingConfiguration $example -CatalogRepository $script:CanonicalRepository -CatalogRef ('d' * 40)
+        [object]::ReferenceEquals($advanced,$example) | Should Be $false
+        [string]$advanced.catalog.ref | Should Be ('d' * 40)
+        @($advanced.excludedRepositoryUrls) | Should Be @('https://example.com/preserved.git')
+        @($advanced.excludedRepositoryPaths) | Should Be @('preserved/path')
+        [string]$advanced.updates.mode | Should Be 'auto-install-approved'
+        [int]$advanced.updates.minimumCheckIntervalMinutes | Should Be 60
+        @($advanced.projections.user) | Should Be @('user-agents','user-claude')
+        @($advanced.projections.project) | Should Be @('project-agents')
         (Get-RuntimeContractError { ConvertTo-AiInstructionsSyncConfigurationV4 -ExistingConfiguration $example -CatalogRepository $script:CanonicalRepository -CatalogRef ('d' * 40) }) |
             Should Be 'AI Instructions sync configuration schema version 5 requires a projection-aware installer.'
     }
@@ -3316,6 +3328,8 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
     It 'UnitT215_selects_the_writer_schema_from_the_complete_gate_truth_table' -TestCases @(
         @{Name='fresh-auto';Writer='Auto';Bundle=$null;Config=$null;Catalog=2;Available=$false;Receipt='available';Expected='v2v4';Code=$null},
         @{Name='legacy-auto';Writer='Auto';Bundle=2;Config=4;Catalog=2;Available=$false;Receipt='available';Expected='v2v4';Code=$null},
+        @{Name='fresh-auto-ready';Writer='Auto';Bundle=$null;Config=$null;Catalog=3;Available=$true;Receipt='available';Expected='v2v4';Code=$null},
+        @{Name='legacy-auto-ready';Writer='Auto';Bundle=2;Config=4;Catalog=3;Available=$true;Receipt='available';Expected='v2v4';Code=$null},
         @{Name='production-opt-in';Writer='V3V5';Bundle=$null;Config=$null;Catalog=2;Available=$false;Receipt='available';Expected=$null;Code='projection-runtime-unavailable'},
         @{Name='fixture-opt-in';Writer='V3V5';Bundle=$null;Config=$null;Catalog=3;Available=$true;Receipt='available';Expected='v3v5';Code=$null},
         @{Name='auto-preserve';Writer='Auto';Bundle=3;Config=5;Catalog=3;Available=$true;Receipt='available';Expected='v3v5';Code=$null},
@@ -3323,6 +3337,8 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         @{Name='capability-loss';Writer='Auto';Bundle=3;Config=5;Catalog=3;Available=$true;Receipt='unavailable';Expected=$null;Code='capability-unavailable'},
         @{Name='platform-drift';Writer='Auto';Bundle=3;Config=5;Catalog=3;Available=$true;Receipt='mismatch';Expected=$null;Code='platform-mismatch'},
         @{Name='mixed-new-bundle';Writer='Auto';Bundle=3;Config=4;Catalog=3;Available=$true;Receipt='available';Expected=$null;Code='mixed-generation'},
+        @{Name='explicit-downgrade-v3-v4';Writer='V2V4';Bundle=3;Config=4;Catalog=3;Available=$true;Receipt='available';Expected=$null;Code='downgrade-refused'},
+        @{Name='explicit-downgrade-v2-v5';Writer='V2V4';Bundle=2;Config=5;Catalog=3;Available=$true;Receipt='available';Expected=$null;Code='downgrade-refused'},
         @{Name='unknown-bundle';Writer='Auto';Bundle=9;Config=4;Catalog=3;Available=$true;Receipt='available';Expected=$null;Code='unsupported-version'}
     ) {
         param($Name,$Writer,$Bundle,$Config,$Catalog,$Available,$Receipt,$Expected,$Code)
@@ -3353,10 +3369,20 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
     # Scenario: One side of the installed generation pair is absent while both-absent remains a fresh install.
     # Purpose: Preserve the D11 distinction between a fresh state and a partially missing mixed generation.
     It 'UnitT217_classifies_partially_missing_pairs_as_mixed_generation' {
-        (Get-AiInstructionsRuntimeGeneration -BundleSchemaVersion $null -ConfigurationSchemaVersion $null -AllowAbsent)|Should Be none
-        foreach($pair in @(@{Bundle=2;Config=$null},@{Bundle=$null;Config=4})){
-            $caught=$null;try{Get-AiInstructionsRuntimeGeneration -BundleSchemaVersion $pair.Bundle -ConfigurationSchemaVersion $pair.Config -AllowAbsent|Out-Null}catch{$caught=$_}
+        (Get-AiInstructionsRuntimeGeneration -BundleSchemaVersion $null -ConfigurationSchemaVersion $null -BundleExists:$false -ConfigurationExists:$false -AllowAbsent)|Should Be none
+        foreach($pair in @(@{Bundle=2;Config=$null;BundleExists=$true;ConfigurationExists=$false},@{Bundle=$null;Config=4;BundleExists=$false;ConfigurationExists=$true})){
+            $caught=$null;try{Get-AiInstructionsRuntimeGeneration -BundleSchemaVersion $pair.Bundle -ConfigurationSchemaVersion $pair.Config -BundleExists:$pair.BundleExists -ConfigurationExists:$pair.ConfigurationExists -AllowAbsent|Out-Null}catch{$caught=$_}
             (Get-AiInstructionsRefusalCode $caught)|Should Be mixed-generation
+        }
+        foreach($pair in @(
+            @{Bundle=$null;Config=$null;BundleExists=$true;ConfigurationExists=$true},
+            @{Bundle=$null;Config=4;BundleExists=$true;ConfigurationExists=$true},
+            @{Bundle=2;Config=$null;BundleExists=$true;ConfigurationExists=$true},
+            @{Bundle=99;Config=4;BundleExists=$true;ConfigurationExists=$true}
+        )){
+            $caught=$null
+            try{Get-AiInstructionsRuntimeGeneration -BundleSchemaVersion $pair.Bundle -ConfigurationSchemaVersion $pair.Config -BundleExists:$pair.BundleExists -ConfigurationExists:$pair.ConfigurationExists -AllowAbsent|Out-Null}catch{$caught=$_}
+            (Get-AiInstructionsRefusalCode $caught)|Should Be unsupported-version
         }
     }
 
@@ -3373,20 +3399,26 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
             @($launcherAst.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name},$true))[0].Extent.Text
         })
         $cases=@(
-            @{Bundle=2;Config=4;Expected='v2v4';Code=$null},
-            @{Bundle=3;Config=5;Expected='v3v5';Code=$null},
-            @{Bundle=2;Config=5;Expected=$null;Code='mixed-generation'},
-            @{Bundle=3;Config=4;Expected=$null;Code='mixed-generation'},
-            @{Bundle=9;Config=4;Expected=$null;Code='unsupported-version'},
-            @{Bundle=2;Config=9;Expected=$null;Code='unsupported-version'}
+            @{Bundle=[pscustomobject]@{schemaVersion=2};Config=[pscustomobject]@{schemaVersion=4};BundleExists=$true;ConfigExists=$true;Expected='v2v4';Code=$null},
+            @{Bundle=[pscustomobject]@{schemaVersion=3};Config=[pscustomobject]@{schemaVersion=5};BundleExists=$true;ConfigExists=$true;Expected='v3v5';Code=$null},
+            @{Bundle=[pscustomobject]@{schemaVersion=2};Config=[pscustomobject]@{schemaVersion=5};BundleExists=$true;ConfigExists=$true;Expected=$null;Code='mixed-generation'},
+            @{Bundle=[pscustomobject]@{schemaVersion=3};Config=[pscustomobject]@{schemaVersion=4};BundleExists=$true;ConfigExists=$true;Expected=$null;Code='mixed-generation'},
+            @{Bundle=[pscustomobject]@{schemaVersion=9};Config=[pscustomobject]@{schemaVersion=4};BundleExists=$true;ConfigExists=$true;Expected=$null;Code='unsupported-version'},
+            @{Bundle=[pscustomobject]@{schemaVersion=2};Config=[pscustomobject]@{schemaVersion=9};BundleExists=$true;ConfigExists=$true;Expected=$null;Code='unsupported-version'},
+            @{Bundle=$null;Config=[pscustomobject]@{schemaVersion=4};BundleExists=$false;ConfigExists=$true;Expected=$null;Code='mixed-generation'},
+            @{Bundle=[pscustomobject]@{schemaVersion=2};Config=$null;BundleExists=$true;ConfigExists=$false;Expected=$null;Code='mixed-generation'},
+            @{Bundle=[pscustomobject]@{};Config=[pscustomobject]@{};BundleExists=$true;ConfigExists=$true;Expected=$null;Code='unsupported-version'},
+            @{Bundle=[pscustomobject]@{};Config=[pscustomobject]@{schemaVersion=4};BundleExists=$true;ConfigExists=$true;Expected=$null;Code='unsupported-version'}
         )
         & {
             param($Definitions,$Cases)
             foreach($definition in $Definitions){Invoke-Expression $definition}
             foreach($case in $Cases){
                 $contractValue=$null;$contractError=$null;$launcherValue=$null;$launcherError=$null
-                try{$contractValue=Get-AiInstructionsRuntimeGeneration -BundleSchemaVersion $case.Bundle -ConfigurationSchemaVersion $case.Config}catch{$contractError=$_}
-                try{$launcherValue=Get-TrustedRuntimeGeneration -Bundle ([pscustomobject]@{schemaVersion=$case.Bundle}) -Configuration ([pscustomobject]@{schemaVersion=$case.Config})}catch{$launcherError=$_}
+                $bundleVersion=if($null -ne $case.Bundle -and $null -ne $case.Bundle.PSObject.Properties['schemaVersion']){$case.Bundle.schemaVersion}else{$null}
+                $configVersion=if($null -ne $case.Config -and $null -ne $case.Config.PSObject.Properties['schemaVersion']){$case.Config.schemaVersion}else{$null}
+                try{$contractValue=Get-AiInstructionsRuntimeGeneration -BundleSchemaVersion $bundleVersion -ConfigurationSchemaVersion $configVersion -BundleExists:$case.BundleExists -ConfigurationExists:$case.ConfigExists}catch{$contractError=$_}
+                try{$launcherValue=Get-TrustedRuntimeGeneration -Bundle $case.Bundle -Configuration $case.Config -BundleExists:$case.BundleExists -ConfigurationExists:$case.ConfigExists}catch{$launcherError=$_}
                 if($null-ne$case.Code){
                     (Get-AiInstructionsRefusalCode $contractError)|Should Be $case.Code
                     (Get-AiInstructionsRefusalCode $launcherError)|Should Be $case.Code

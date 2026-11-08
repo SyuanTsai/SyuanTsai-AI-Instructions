@@ -93,18 +93,33 @@ function Get-AiInstructionsRuntimeGeneration {
     param(
         [AllowNull()][object] $BundleSchemaVersion,
         [AllowNull()][object] $ConfigurationSchemaVersion,
-        [switch] $AllowAbsent
+        [AllowNull()][Nullable[bool]] $BundleExists = $null,
+        [AllowNull()][Nullable[bool]] $ConfigurationExists = $null,
+        [switch] $AllowAbsent,
+        [switch] $AllowLegacyConfigurationOnly
     )
-    $bundleAbsent = $null -eq $BundleSchemaVersion
-    $configurationAbsent = $null -eq $ConfigurationSchemaVersion
-    if ($bundleAbsent -and $configurationAbsent -and $AllowAbsent) { return 'none' }
-    if ($bundleAbsent -or $configurationAbsent) {
-        throw (New-AiInstructionsRefusalException -Code mixed-generation -Message 'AI instructions runtime bundle and configuration must both be present or both be absent.')
+    $bundlePresent = if ($null -eq $BundleExists) { $null -ne $BundleSchemaVersion } else { [bool]$BundleExists }
+    $configurationPresent = if ($null -eq $ConfigurationExists) { $null -ne $ConfigurationSchemaVersion } else { [bool]$ConfigurationExists }
+    if (-not $bundlePresent -and -not $configurationPresent -and $AllowAbsent) { return 'none' }
+    if ($bundlePresent -and (
+        $null -eq $BundleSchemaVersion -or
+        ($BundleSchemaVersion -isnot [int] -and $BundleSchemaVersion -isnot [long]) -or
+        [int64]$BundleSchemaVersion -notin @(2,3))) {
+        throw (New-AiInstructionsRefusalException -Code unsupported-version -Message 'AI instructions runtime bundle uses a missing, invalid, or unsupported version.')
     }
-    if (($BundleSchemaVersion -isnot [int] -and $BundleSchemaVersion -isnot [long]) -or
+    if ($configurationPresent -and (
+        $null -eq $ConfigurationSchemaVersion -or
         ($ConfigurationSchemaVersion -isnot [int] -and $ConfigurationSchemaVersion -isnot [long]) -or
-        [int64]$BundleSchemaVersion -notin @(2,3) -or [int64]$ConfigurationSchemaVersion -notin @(4,5)) {
-        throw (New-AiInstructionsRefusalException -Code unsupported-version -Message 'AI instructions runtime bundle or configuration uses an unsupported version.')
+        [int64]$ConfigurationSchemaVersion -notin @(4,5))) {
+        if ($AllowLegacyConfigurationOnly -and -not $bundlePresent -and
+            ($ConfigurationSchemaVersion -is [int] -or $ConfigurationSchemaVersion -is [long]) -and
+            [int64]$ConfigurationSchemaVersion -in @(1,2,3)) {
+            return 'legacy-configuration'
+        }
+        throw (New-AiInstructionsRefusalException -Code unsupported-version -Message 'AI instructions sync configuration uses a missing, invalid, or unsupported version.')
+    }
+    if (-not $bundlePresent -or -not $configurationPresent) {
+        throw (New-AiInstructionsRefusalException -Code mixed-generation -Message 'AI instructions runtime bundle and configuration must both be present or both be absent.')
     }
     if ([int64]$BundleSchemaVersion -eq 2 -and [int64]$ConfigurationSchemaVersion -eq 4) { return 'v2v4' }
     if ([int64]$BundleSchemaVersion -eq 3 -and [int64]$ConfigurationSchemaVersion -eq 5) { return 'v3v5' }
@@ -144,6 +159,8 @@ function Select-AiInstructionsInstallWriterSchema {
         [Parameter(Mandatory = $true)][object] $CatalogSchemaVersion,
         [AllowNull()][object] $InstalledBundleSchemaVersion,
         [AllowNull()][object] $InstalledConfigurationSchemaVersion,
+        [AllowNull()][Nullable[bool]] $InstalledBundleExists = $null,
+        [AllowNull()][Nullable[bool]] $InstalledConfigurationExists = $null,
         [AllowNull()][object] $CapabilityReceipt,
         [AllowNull()][string] $ExpectedPlatformOs,
         [AllowNull()][string] $ExpectedPlatformArchitecture,
@@ -157,6 +174,8 @@ function Select-AiInstructionsInstallWriterSchema {
     $installedGeneration = Get-AiInstructionsRuntimeGeneration `
         -BundleSchemaVersion $InstalledBundleSchemaVersion `
         -ConfigurationSchemaVersion $InstalledConfigurationSchemaVersion `
+        -BundleExists $InstalledBundleExists `
+        -ConfigurationExists $InstalledConfigurationExists `
         -AllowAbsent
     if ($WriterSchema -ceq 'V2V4' -or ($WriterSchema -ceq 'Auto' -and $installedGeneration -cne 'v3v5')) { return 'v2v4' }
     if (-not $ProjectionRuntimeAvailable -or
@@ -597,22 +616,40 @@ function ConvertTo-AiInstructionsSyncConfigurationV5 {
         [string] $CanonicalRepository = $script:CanonicalRepository
     )
 
-    if ($null -ne $ExistingConfiguration -and
+    $existingV5 = $null -ne $ExistingConfiguration -and
         (Test-AiInstructionsObjectHasProperty -Object $ExistingConfiguration -Name 'schemaVersion') -and
         ($ExistingConfiguration.schemaVersion -is [int] -or $ExistingConfiguration.schemaVersion -is [long]) -and
-        [int64]$ExistingConfiguration.schemaVersion -eq 5) {
+        [int64]$ExistingConfiguration.schemaVersion -eq 5
+    if ($existingV5) {
         Assert-AiInstructionsSyncConfigurationV5 -Configuration $ExistingConfiguration -CanonicalRepository $CanonicalRepository | Out-Null
-        return $ExistingConfiguration
+        $existingProjections = $ExistingConfiguration.projections
+        $ExistingConfiguration = [pscustomobject][ordered]@{
+            schemaVersion = 4
+            excludedRepositoryUrls = @($ExistingConfiguration.excludedRepositoryUrls)
+            excludedRepositoryPaths = @($ExistingConfiguration.excludedRepositoryPaths)
+            catalog = $ExistingConfiguration.catalog
+            updates = $ExistingConfiguration.updates
+        }
     }
 
-    $v4 = ConvertTo-AiInstructionsSyncConfigurationV4 @PSBoundParameters
+    $v4 = ConvertTo-AiInstructionsSyncConfigurationV4 `
+        -ExistingConfiguration $ExistingConfiguration `
+        -CatalogRepository $CatalogRepository `
+        -CatalogRef $CatalogRef `
+        -AdditionalExcludedRepositoryUrls $AdditionalExcludedRepositoryUrls `
+        -AdditionalExcludedRepositoryPaths $AdditionalExcludedRepositoryPaths `
+        -Catalog $Catalog `
+        -CanonicalRepository $CanonicalRepository
     $v5 = [pscustomobject][ordered]@{
         schemaVersion = 5
         excludedRepositoryUrls = @($v4.excludedRepositoryUrls)
         excludedRepositoryPaths = @($v4.excludedRepositoryPaths)
         catalog = $v4.catalog
         updates = $v4.updates
-        projections = [pscustomobject][ordered]@{ user=@('user-agents','user-claude'); project=@() }
+        projections = if ($existingV5) {
+            [pscustomobject][ordered]@{ user=@($existingProjections.user); project=@($existingProjections.project) }
+        }
+        else { [pscustomobject][ordered]@{ user=@('user-agents','user-claude'); project=@() } }
     }
     Assert-AiInstructionsSyncConfigurationV5 -Configuration $v5 -CanonicalRepository $CanonicalRepository | Out-Null
     return $v5
@@ -1436,7 +1473,7 @@ function Assert-AiInstructionsRuntimeGate {
     )
     $bundleVersion = if (Test-AiInstructionsObjectHasProperty -Object $Bundle -Name 'schemaVersion') { $Bundle.schemaVersion } else { $null }
     $configurationVersion = if (Test-AiInstructionsObjectHasProperty -Object $Configuration -Name 'schemaVersion') { $Configuration.schemaVersion } else { $null }
-    $generation = Get-AiInstructionsRuntimeGeneration -BundleSchemaVersion $bundleVersion -ConfigurationSchemaVersion $configurationVersion
+    $generation = Get-AiInstructionsRuntimeGeneration -BundleSchemaVersion $bundleVersion -ConfigurationSchemaVersion $configurationVersion -BundleExists:$true -ConfigurationExists:$true
     if ($generation -ceq 'v2v4') {
         Assert-AiInstructionsRuntimeBundleV2 -Bundle $Bundle -Configuration $Configuration -RuntimeRoot $RuntimeRoot -CanonicalRepository $CanonicalRepository | Out-Null
         return [pscustomobject][ordered]@{ generation='v2v4'; capabilityReceipt=$CapabilityReceipt }

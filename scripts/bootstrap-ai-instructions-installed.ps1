@@ -201,6 +201,27 @@ function Get-TrustedFileSha256 {
     finally { $stream.Dispose() }
 }
 
+function Open-TrustedRuntimeFileLease {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $item = Get-Item -Force -LiteralPath $fullPath
+    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Trusted runtime closure path must be a non-reparse file: $fullPath"
+    }
+    $stream = [IO.File]::Open($fullPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    try {
+        $confirmedItem = Get-Item -Force -LiteralPath $fullPath
+        if ($confirmedItem.PSIsContainer -or ($confirmedItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Trusted runtime closure path became a reparse point while its lease was opened: $fullPath"
+        }
+        return $stream
+    }
+    catch {
+        $stream.Dispose()
+        throw
+    }
+}
+
 function Get-TrustedRuntimeInventory {
     param([Parameter(Mandatory = $true)][string] $Root)
     $rootPath = [System.IO.Path]::GetFullPath($Root).TrimEnd([char[]]@('\','/'))
@@ -280,12 +301,26 @@ function Get-TrustedCanonicalTextSha256 {
 }
 
 function Get-TrustedRuntimeGeneration {
-    param([Parameter(Mandatory = $true)][object] $Bundle,[Parameter(Mandatory = $true)][object] $Configuration)
-    if (-not (Test-TrustedProperty $Bundle 'schemaVersion') -or -not (Test-TrustedProperty $Configuration 'schemaVersion') -or
-        ($Bundle.schemaVersion -isnot [int] -and $Bundle.schemaVersion -isnot [long]) -or
-        ($Configuration.schemaVersion -isnot [int] -and $Configuration.schemaVersion -isnot [long]) -or
-        [int64]$Bundle.schemaVersion -notin @(2,3) -or [int64]$Configuration.schemaVersion -notin @(4,5)) {
+    param(
+        [AllowNull()][object] $Bundle,
+        [AllowNull()][object] $Configuration,
+        [AllowNull()][Nullable[bool]] $BundleExists = $null,
+        [AllowNull()][Nullable[bool]] $ConfigurationExists = $null,
+        [switch] $AllowAbsent
+    )
+    $bundlePresent = if ($null -eq $BundleExists) { $null -ne $Bundle } else { [bool]$BundleExists }
+    $configurationPresent = if ($null -eq $ConfigurationExists) { $null -ne $Configuration } else { [bool]$ConfigurationExists }
+    if (-not $bundlePresent -and -not $configurationPresent -and $AllowAbsent) { return 'none' }
+    if ($bundlePresent -and (-not (Test-TrustedProperty $Bundle 'schemaVersion') -or
+        ($Bundle.schemaVersion -isnot [int] -and $Bundle.schemaVersion -isnot [long]) -or [int64]$Bundle.schemaVersion -notin @(2,3))) {
         throw [InvalidOperationException]::new('Installed runtime uses an unsupported bundle or configuration version. [ai-instructions-refusal-code=unsupported-version]')
+    }
+    if ($configurationPresent -and (-not (Test-TrustedProperty $Configuration 'schemaVersion') -or
+        ($Configuration.schemaVersion -isnot [int] -and $Configuration.schemaVersion -isnot [long]) -or [int64]$Configuration.schemaVersion -notin @(4,5))) {
+        throw [InvalidOperationException]::new('Installed runtime uses an unsupported bundle or configuration version. [ai-instructions-refusal-code=unsupported-version]')
+    }
+    if (-not $bundlePresent -or -not $configurationPresent) {
+        throw [InvalidOperationException]::new('Installed runtime bundle and configuration must both be present or both be absent. [ai-instructions-refusal-code=mixed-generation]')
     }
     if ([int64]$Bundle.schemaVersion -eq 2 -and [int64]$Configuration.schemaVersion -eq 4) { return 'v2v4' }
     if ([int64]$Bundle.schemaVersion -eq 3 -and [int64]$Configuration.schemaVersion -eq 5) { return 'v3v5' }
@@ -294,7 +329,10 @@ function Get-TrustedRuntimeGeneration {
 
 function Assert-TrustedPlatformRuntimeClosureV3 {
     param([Parameter(Mandatory = $true)][object] $Bundle,[Parameter(Mandatory = $true)][object[]] $Inventory)
+    $leases = New-Object 'System.Collections.Generic.List[System.IDisposable]'
+    try {
     $manifestPath = Join-Path $runtimeRoot 'platform-runtime.psd1'
+    $leases.Add((Open-TrustedRuntimeFileLease -Path $manifestPath))
     if ((Get-TrustedCanonicalTextSha256 -Path $manifestPath) -cne [string]$Bundle.platformRuntime.manifestSha256) {
         throw 'Runtime bundle platformRuntime.manifestSha256 does not match the installed manifest.'
     }
@@ -328,6 +366,9 @@ function Assert-TrustedPlatformRuntimeClosureV3 {
     if ($declaredClosureSet.Count -ne $fileListSet.Count -or @($declaredClosureSet | Where-Object { -not $fileListSet.Contains($_) }).Count -ne 0) {
         throw 'Installed platform runtime manifest FileList differs from its bound closure inventory.'
     }
+    foreach ($relativePath in @($declaredClosure | Where-Object { [string]$_ -cne 'platform-runtime.psd1' })) {
+        $leases.Add((Open-TrustedRuntimeFileLease -Path (Join-Path $runtimeRoot $relativePath)))
+    }
     foreach ($entry in @($manifest.PrivateData.PlatformRuntime.Inventory)) {
         $relativePath = ([string]$entry.Path).Replace('\','/')
         if ([string]::IsNullOrWhiteSpace($relativePath) -or [IO.Path]::IsPathRooted($relativePath) -or $relativePath -match '(^|/)\.\.(/|$)' -or
@@ -339,25 +380,36 @@ function Assert-TrustedPlatformRuntimeClosureV3 {
             throw "Installed platform runtime closure hash differs at '$relativePath'."
         }
     }
+    return [System.IDisposable[]]$leases.ToArray()
+    }
+    catch {
+        foreach ($lease in @($leases)) { $lease.Dispose() }
+        throw
+    }
 }
 
 function Assert-InstalledRuntime {
     param([switch] $AllowPinMismatch)
 
-    foreach ($requiredPath in @($configurationPath,$catalogPath,$lockPath,$bundlePath,$contractPath,$launcherReferencePath,$updaterPath,$environmentUpdaterPath,$bootstrapPath,$stableUpdaterPath,$stableEnvironmentUpdaterPath,$stableCleanupPath)) {
+    foreach ($requiredPath in @($catalogPath,$lockPath,$contractPath,$launcherReferencePath,$updaterPath,$environmentUpdaterPath,$bootstrapPath,$stableUpdaterPath,$stableEnvironmentUpdaterPath,$stableCleanupPath)) {
         if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) { throw "Installed AI instruction runtime is incomplete: $requiredPath" }
     }
-    $configurationItem = Get-Item -Force -LiteralPath $configurationPath
-    if ($configurationItem.PSIsContainer -or ($configurationItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw 'Installed AI instruction configuration must be a non-reparse file.'
+    $configurationExists = Test-Path -LiteralPath $configurationPath -PathType Leaf
+    $bundleExists = Test-Path -LiteralPath $bundlePath -PathType Leaf
+    if ($configurationExists) {
+        $configurationItem = Get-Item -Force -LiteralPath $configurationPath
+        if ($configurationItem.PSIsContainer -or ($configurationItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Installed AI instruction configuration must be a non-reparse file.'
+        }
     }
     try {
-        $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json
-        $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
+        $configuration = if ($configurationExists) { Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json } else { $null }
+        $bundle = if ($bundleExists) { Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json } else { $null }
     }
     catch { throw "Installed AI instruction runtime identity is invalid: $($_.Exception.Message)" }
 
-    $generation = Get-TrustedRuntimeGeneration -Bundle $bundle -Configuration $configuration
+    $generation = Get-TrustedRuntimeGeneration -Bundle $bundle -Configuration $configuration -BundleExists:$bundleExists -ConfigurationExists:$configurationExists -AllowAbsent
+    if ($generation -ceq 'none') { throw 'Installed AI instruction runtime bundle and configuration are both absent.' }
     if ($generation -ceq 'v3v5' -and -not (Test-InstalledMutationRuntimeBaseline)) {
         throw [InvalidOperationException]::new('Runtime bundle v3 and configuration v5 require pwsh 7 on .NET 8 or newer; rerun with pwsh 7. [ai-instructions-refusal-code=runtime-baseline-unavailable]')
     }
@@ -454,7 +506,9 @@ function Assert-InstalledRuntime {
             throw "Installed AI instruction runtime inventory mismatch at '$($declaredInventory[$index].path)'."
         }
     }
-    if ($generation -ceq 'v3v5') { Assert-TrustedPlatformRuntimeClosureV3 -Bundle $bundle -Inventory $declaredInventory }
+    $platformRuntimeClosureLeases = @()
+    if ($generation -ceq 'v3v5') { $platformRuntimeClosureLeases = @(Assert-TrustedPlatformRuntimeClosureV3 -Bundle $bundle -Inventory $declaredInventory) }
+    try {
     if ((Get-TrustedFileSha256 -Path $stableLauncherPath) -cne
         (Get-TrustedFileSha256 -Path $launcherReferencePath)) {
         throw 'Installed AI instructions stable launcher does not match the active immutable runtime.'
@@ -487,6 +541,10 @@ function Assert-InstalledRuntime {
             if (-not [string]::IsNullOrWhiteSpace([string]$code)) { throw }
             throw [InvalidOperationException]::new("Installed v3/v5 runtime gate failed: $($_.Exception.Message) [ai-instructions-refusal-code=closure-invalid]",$_.Exception)
         }
+    }
+    }
+    finally {
+        foreach ($closureLease in @($platformRuntimeClosureLeases)) { $closureLease.Dispose() }
     }
     if ($pinMismatch -and -not $AllowPinMismatch) {
         throw 'Installed AI instruction runtime bundle does not match the configured immutable Catalog bundle pin.'

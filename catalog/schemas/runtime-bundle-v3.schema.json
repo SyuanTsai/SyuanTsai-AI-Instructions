@@ -48,7 +48,7 @@
       }
     },
     "requiredCapabilities": {
-      "description": "Bundle-declared requirements. Writers include the eight projection-runtime minimum capabilities; installer, launcher, and updater gates validate the exact runtime inventory and manifest closure before importing platform-runtime, then call Get-PlatformCapabilities -Required <requiredCapabilities> on the target host and fail closed if any capability is unavailable.",
+      "description": "Bundle-declared requirements. Structural contract validation enforces known unique names and the eight projection-runtime minimum capabilities; the operational installer, launcher, and updater gates validate the exact runtime inventory and manifest closure before importing platform-runtime, then call Get-PlatformCapabilities -Required <requiredCapabilities> on the target host and fail closed if any capability is unavailable.",
       "type": "array",
       "minItems": 1,
       "uniqueItems": true,
