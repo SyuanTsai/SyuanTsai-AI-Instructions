@@ -3070,7 +3070,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
     It 'UnitT206_accepts_directory_publication_as_a_known_runtime_capability' {
         $fixture=New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-directory-publication')
         $configuration=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v5.example.json')|ConvertFrom-Json
-        $fixture.Bundle.requiredCapabilities=@('directory-publication')
+        $fixture.Bundle.requiredCapabilities=@('directory-lease','file-lease','file-identity','lock','publication','owned-file-removal','permissions','directory-publication')
         {Assert-AiInstructionsRuntimeBundleV3 -Bundle $fixture.Bundle -Configuration $configuration -RuntimeRoot $fixture.Root}|Should Not Throw
         $schema=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\schemas\runtime-bundle-v3.schema.json')|ConvertFrom-Json
         @($schema.properties.requiredCapabilities.items.enum)|Should Contain 'directory-publication'
@@ -3309,5 +3309,93 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $contractFunction|Should Not BeNullOrEmpty
         $launcherFunction|Should Not BeNullOrEmpty
         $launcherFunction.Body.Extent.Text|Should Be $contractFunction.Body.Extent.Text
+    }
+
+    # Scenario: Writer selection covers fresh, legacy, preserved projection, unavailable production, downgrade, capability, and platform cases.
+    # Purpose: Keep D4, D5, D11, D14, and D16 in one pure selector truth table without a production capability override.
+    It 'UnitT215_selects_the_writer_schema_from_the_complete_gate_truth_table' -TestCases @(
+        @{Name='fresh-auto';Writer='Auto';Bundle=$null;Config=$null;Catalog=2;Available=$false;Receipt='available';Expected='v2v4';Code=$null},
+        @{Name='legacy-auto';Writer='Auto';Bundle=2;Config=4;Catalog=2;Available=$false;Receipt='available';Expected='v2v4';Code=$null},
+        @{Name='production-opt-in';Writer='V3V5';Bundle=$null;Config=$null;Catalog=2;Available=$false;Receipt='available';Expected=$null;Code='projection-runtime-unavailable'},
+        @{Name='fixture-opt-in';Writer='V3V5';Bundle=$null;Config=$null;Catalog=3;Available=$true;Receipt='available';Expected='v3v5';Code=$null},
+        @{Name='auto-preserve';Writer='Auto';Bundle=3;Config=5;Catalog=3;Available=$true;Receipt='available';Expected='v3v5';Code=$null},
+        @{Name='explicit-downgrade';Writer='V2V4';Bundle=3;Config=5;Catalog=3;Available=$true;Receipt='available';Expected=$null;Code='downgrade-refused'},
+        @{Name='capability-loss';Writer='Auto';Bundle=3;Config=5;Catalog=3;Available=$true;Receipt='unavailable';Expected=$null;Code='capability-unavailable'},
+        @{Name='platform-drift';Writer='Auto';Bundle=3;Config=5;Catalog=3;Available=$true;Receipt='mismatch';Expected=$null;Code='platform-mismatch'},
+        @{Name='mixed-new-bundle';Writer='Auto';Bundle=3;Config=4;Catalog=3;Available=$true;Receipt='available';Expected=$null;Code='mixed-generation'},
+        @{Name='unknown-bundle';Writer='Auto';Bundle=9;Config=4;Catalog=3;Available=$true;Receipt='available';Expected=$null;Code='unsupported-version'}
+    ) {
+        param($Name,$Writer,$Bundle,$Config,$Catalog,$Available,$Receipt,$Expected,$Code)
+        $capabilities=@('directory-lease','file-lease','file-identity','lock','publication','owned-file-removal','permissions','directory-publication')|ForEach-Object{
+            [pscustomobject]@{name=$_;status=$(if($Receipt-ceq'unavailable'-and$_-ceq'permissions'){'unavailable'}else{'available'})}
+        }
+        $receiptObject=[pscustomobject]@{os='windows';architecture=$(if($Receipt-ceq'mismatch'){'arm64'}else{'x64'});capabilities=@($capabilities)}
+        $caught=$null;$actual=$null
+        try{$actual=Select-AiInstructionsInstallWriterSchema -WriterSchema $Writer -CatalogSchemaVersion $Catalog -InstalledBundleSchemaVersion $Bundle -InstalledConfigurationSchemaVersion $Config -CapabilityReceipt $receiptObject -ExpectedPlatformOs windows -ExpectedPlatformArchitecture x64 -ProjectionRuntimeAvailable:$Available}
+        catch{$caught=$_}
+        if($null-ne$Code){(Get-AiInstructionsRefusalCode $caught)|Should Be $Code}
+        else{$caught|Should BeNullOrEmpty;$actual|Should Be $Expected}
+    }
+
+    # Scenario: A new v3 writer builds an ordinal bundle from a Catalog v3 runtime fixture and a real-shaped capability receipt.
+    # Purpose: Prove the generated bundle carries all eight minimum capabilities and passes the strict v3 reader with config v5.
+    It 'UnitT216_builds_a_runtime_bundle_v3_that_passes_the_strict_reader' {
+        $fixture=New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-writer')
+        $configuration=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/ai-instructions-sync-v5.example.json')|ConvertFrom-Json
+        $capabilityNames=@('directory-lease','file-lease','file-identity','lock','publication','owned-file-removal','permissions','directory-publication')
+        $receipt=[pscustomobject]@{os='windows';architecture='x64';capabilities=@($capabilityNames|ForEach-Object{[pscustomobject]@{name=$_;status='available'}})}
+        $bundle=New-AiInstructionsRuntimeBundleV3 -RuntimeRoot $fixture.Root -Repository $script:CanonicalRepository -Commit ([string]$configuration.catalog.ref) -Acquisition git-checkout -CapabilityReceipt $receipt
+        {Assert-AiInstructionsRuntimeBundleV3 -Bundle $bundle -Configuration $configuration -RuntimeRoot $fixture.Root|Out-Null}|Should Not Throw
+        @($bundle.requiredCapabilities)|Should Be $capabilityNames
+        $bundle.inventorySha256|Should Be (Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $bundle.inventory)
+    }
+
+    # Scenario: One side of the installed generation pair is absent while both-absent remains a fresh install.
+    # Purpose: Preserve the D11 distinction between a fresh state and a partially missing mixed generation.
+    It 'UnitT217_classifies_partially_missing_pairs_as_mixed_generation' {
+        (Get-AiInstructionsRuntimeGeneration -BundleSchemaVersion $null -ConfigurationSchemaVersion $null -AllowAbsent)|Should Be none
+        foreach($pair in @(@{Bundle=2;Config=$null},@{Bundle=$null;Config=4})){
+            $caught=$null;try{Get-AiInstructionsRuntimeGeneration -BundleSchemaVersion $pair.Bundle -ConfigurationSchemaVersion $pair.Config -AllowAbsent|Out-Null}catch{$caught=$_}
+            (Get-AiInstructionsRefusalCode $caught)|Should Be mixed-generation
+        }
+    }
+
+    # Scenario: The stable launcher's PowerShell 5.1-compatible inline generation reader receives the same complete version pairs as the shared contract.
+    # Purpose: Keep the minimal no-import reader equivalent to the authoritative D11 matrix for accepted, mixed, and unsupported pairs.
+    It 'UnitT218_keeps_the_launcher_generation_matrix_equivalent_to_the_runtime_contract' {
+        $launcherPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions-installed.ps1'
+        $tokens=$null;$errors=$null
+        $launcherAst=[Management.Automation.Language.Parser]::ParseFile($launcherPath,[ref]$tokens,[ref]$errors)
+        @($errors).Count|Should Be 0
+        $functionNames=@('Test-TrustedProperty','Get-TrustedRuntimeGeneration')
+        $definitions=@($functionNames|ForEach-Object{
+            $name=$_
+            @($launcherAst.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name},$true))[0].Extent.Text
+        })
+        $cases=@(
+            @{Bundle=2;Config=4;Expected='v2v4';Code=$null},
+            @{Bundle=3;Config=5;Expected='v3v5';Code=$null},
+            @{Bundle=2;Config=5;Expected=$null;Code='mixed-generation'},
+            @{Bundle=3;Config=4;Expected=$null;Code='mixed-generation'},
+            @{Bundle=9;Config=4;Expected=$null;Code='unsupported-version'},
+            @{Bundle=2;Config=9;Expected=$null;Code='unsupported-version'}
+        )
+        & {
+            param($Definitions,$Cases)
+            foreach($definition in $Definitions){Invoke-Expression $definition}
+            foreach($case in $Cases){
+                $contractValue=$null;$contractError=$null;$launcherValue=$null;$launcherError=$null
+                try{$contractValue=Get-AiInstructionsRuntimeGeneration -BundleSchemaVersion $case.Bundle -ConfigurationSchemaVersion $case.Config}catch{$contractError=$_}
+                try{$launcherValue=Get-TrustedRuntimeGeneration -Bundle ([pscustomobject]@{schemaVersion=$case.Bundle}) -Configuration ([pscustomobject]@{schemaVersion=$case.Config})}catch{$launcherError=$_}
+                if($null-ne$case.Code){
+                    (Get-AiInstructionsRefusalCode $contractError)|Should Be $case.Code
+                    (Get-AiInstructionsRefusalCode $launcherError)|Should Be $case.Code
+                }
+                else{
+                    $contractError|Should BeNullOrEmpty;$launcherError|Should BeNullOrEmpty
+                    $contractValue|Should Be $case.Expected;$launcherValue|Should Be $case.Expected
+                }
+            }
+        } $definitions $cases
     }
 }

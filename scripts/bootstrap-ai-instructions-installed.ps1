@@ -152,7 +152,7 @@ function Assert-NoLauncherInterruptedInstallResidue {
 
 function Assert-LauncherRecoveryCapabilities {
     param([Parameter(Mandatory = $true)] $Receipt)
-    $required = @('directory-lease','file-lease','file-identity','lock','publication','owned-file-removal','permissions')
+    $required = @('directory-lease','directory-publication','file-lease','file-identity','lock','publication','owned-file-removal','permissions')
     $missing = @($required | Where-Object {
         $name = $_
         @($Receipt.capabilities | Where-Object { [string]$_.name -ceq $name -and [string]$_.status -ceq 'available' }).Count -ne 1
@@ -246,6 +246,101 @@ function Get-TrustedInventorySha256 {
     finally { $sha.Dispose() }
 }
 
+function Get-TrustedInventorySha256V3 {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Inventory)
+    $hashByPath = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::Ordinal)
+    foreach ($entry in @($Inventory)) {
+        Assert-TrustedProperties -Object $entry -Required @('path','sha256') -Context 'Runtime bundle inventory entry'
+        if ($entry.path -isnot [string] -or [string]$entry.path -eq '' -or [string]$entry.path -match '(^|/)\.\.(/|$)' -or
+            [string]$entry.path -match '^/' -or [string]$entry.path -match '\\' -or [string]$entry.sha256 -isnot [string] -or
+            [string]$entry.sha256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'Runtime bundle inventory contains an unsafe path or invalid hash.'
+        }
+        if ($hashByPath.ContainsKey([string]$entry.path)) { throw "Runtime bundle inventory contains duplicate path '$($entry.path)'." }
+        $hashByPath.Add([string]$entry.path,[string]$entry.sha256)
+    }
+    $paths = [string[]]@($hashByPath.Keys)
+    [Array]::Sort($paths,[StringComparer]::Ordinal)
+    $payload = (($paths | ForEach-Object { "$_`t$($hashByPath[$_])`n" }) -join '')
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($payload)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+
+function Get-TrustedCanonicalTextSha256 {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    [byte[]]$bytes = [IO.File]::ReadAllBytes([IO.Path]::GetFullPath($Path))
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xef -and $bytes[1] -eq 0xbb -and $bytes[2] -eq 0xbf) { throw 'Trusted runtime text must be UTF-8 without BOM.' }
+    $utf8 = New-Object Text.UTF8Encoding($false,$true)
+    $text = $utf8.GetString($bytes).Replace("`r`n","`n").Replace("`r","`n")
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash($utf8.GetBytes($text)))).Replace('-','').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+
+function Get-TrustedRuntimeGeneration {
+    param([Parameter(Mandatory = $true)][object] $Bundle,[Parameter(Mandatory = $true)][object] $Configuration)
+    if (-not (Test-TrustedProperty $Bundle 'schemaVersion') -or -not (Test-TrustedProperty $Configuration 'schemaVersion') -or
+        ($Bundle.schemaVersion -isnot [int] -and $Bundle.schemaVersion -isnot [long]) -or
+        ($Configuration.schemaVersion -isnot [int] -and $Configuration.schemaVersion -isnot [long]) -or
+        [int64]$Bundle.schemaVersion -notin @(2,3) -or [int64]$Configuration.schemaVersion -notin @(4,5)) {
+        throw [InvalidOperationException]::new('Installed runtime uses an unsupported bundle or configuration version. [ai-instructions-refusal-code=unsupported-version]')
+    }
+    if ([int64]$Bundle.schemaVersion -eq 2 -and [int64]$Configuration.schemaVersion -eq 4) { return 'v2v4' }
+    if ([int64]$Bundle.schemaVersion -eq 3 -and [int64]$Configuration.schemaVersion -eq 5) { return 'v3v5' }
+    throw [InvalidOperationException]::new('Installed runtime bundle and configuration belong to different generations. [ai-instructions-refusal-code=mixed-generation]')
+}
+
+function Assert-TrustedPlatformRuntimeClosureV3 {
+    param([Parameter(Mandatory = $true)][object] $Bundle,[Parameter(Mandatory = $true)][object[]] $Inventory)
+    $manifestPath = Join-Path $runtimeRoot 'platform-runtime.psd1'
+    if ((Get-TrustedCanonicalTextSha256 -Path $manifestPath) -cne [string]$Bundle.platformRuntime.manifestSha256) {
+        throw 'Runtime bundle platformRuntime.manifestSha256 does not match the installed manifest.'
+    }
+    try { $manifest = Import-PowerShellDataFile -LiteralPath $manifestPath }
+    catch { throw "Installed platform runtime manifest is not a valid data file: $($_.Exception.Message)" }
+    if ([string]$manifest.RootModule -cne 'platform-runtime.psm1' -or
+        $null -eq $manifest.PrivateData -or $null -eq $manifest.PrivateData.PlatformRuntime -or
+        [string]$manifest.PrivateData.PlatformRuntime.ApiVersion -cne [string]$Bundle.platformRuntime.apiVersion -or
+        [string]$manifest.PrivateData.PlatformRuntime.HashMode -cne 'sha256-utf8-lf') {
+        throw 'Installed platform runtime manifest identity is invalid.'
+    }
+    $bundleByPath = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+    foreach ($entry in @($Inventory)) { $bundleByPath.Add([string]$entry.path,$entry) }
+    $fileList = @($manifest.FileList | ForEach-Object { ([string]$_).Replace('\','/') })
+    $fileListSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($relativePath in $fileList) {
+        if (-not $fileListSet.Add($relativePath)) {
+            throw 'Installed platform runtime manifest FileList is incomplete or contains duplicates.'
+        }
+    }
+    if (-not $fileListSet.Contains('platform-runtime.psd1')) {
+        throw 'Installed platform runtime manifest FileList is incomplete or contains duplicates.'
+    }
+    $declaredClosure = @('platform-runtime.psd1') + @($manifest.PrivateData.PlatformRuntime.Inventory | ForEach-Object { ([string]$_.Path).Replace('\','/') })
+    $declaredClosureSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($relativePath in $declaredClosure) {
+        if (-not $declaredClosureSet.Add($relativePath)) {
+            throw 'Installed platform runtime closure inventory contains duplicate paths.'
+        }
+    }
+    if ($declaredClosureSet.Count -ne $fileListSet.Count -or @($declaredClosureSet | Where-Object { -not $fileListSet.Contains($_) }).Count -ne 0) {
+        throw 'Installed platform runtime manifest FileList differs from its bound closure inventory.'
+    }
+    foreach ($entry in @($manifest.PrivateData.PlatformRuntime.Inventory)) {
+        $relativePath = ([string]$entry.Path).Replace('\','/')
+        if ([string]::IsNullOrWhiteSpace($relativePath) -or [IO.Path]::IsPathRooted($relativePath) -or $relativePath -match '(^|/)\.\.(/|$)' -or
+            [string]$entry.Sha256 -cnotmatch '^[0-9a-f]{64}$' -or -not $bundleByPath.ContainsKey($relativePath)) {
+            throw 'Installed platform runtime closure inventory contains an invalid or unbound entry.'
+        }
+        $fullPath = Join-Path $runtimeRoot $relativePath
+        if ((Get-TrustedCanonicalTextSha256 -Path $fullPath) -cne [string]$entry.Sha256) {
+            throw "Installed platform runtime closure hash differs at '$relativePath'."
+        }
+    }
+}
+
 function Assert-InstalledRuntime {
     param([switch] $AllowPinMismatch)
 
@@ -262,11 +357,13 @@ function Assert-InstalledRuntime {
     }
     catch { throw "Installed AI instruction runtime identity is invalid: $($_.Exception.Message)" }
 
-    if (($configuration.schemaVersion -is [int] -or $configuration.schemaVersion -is [long]) -and [int64]$configuration.schemaVersion -eq 5) {
-        throw 'AI Instructions sync configuration schema version 5 requires a projection-aware installer.'
+    $generation = Get-TrustedRuntimeGeneration -Bundle $bundle -Configuration $configuration
+    if ($generation -ceq 'v3v5' -and -not (Test-InstalledMutationRuntimeBaseline)) {
+        throw [InvalidOperationException]::new('Runtime bundle v3 and configuration v5 require pwsh 7 on .NET 8 or newer; rerun with pwsh 7. [ai-instructions-refusal-code=runtime-baseline-unavailable]')
     }
-    Assert-TrustedProperties -Object $configuration -Required @('schemaVersion','excludedRepositoryUrls','excludedRepositoryPaths','catalog','updates') -Context 'AI instruction sync configuration'
-    if (($configuration.schemaVersion -isnot [int] -and $configuration.schemaVersion -isnot [long]) -or $configuration.schemaVersion -ne 4) { throw 'AI instruction sync configuration must use integer schemaVersion 4.' }
+    $configurationProperties = @('schemaVersion','excludedRepositoryUrls','excludedRepositoryPaths','catalog','updates')
+    if ($generation -ceq 'v3v5') { $configurationProperties += 'projections' }
+    Assert-TrustedProperties -Object $configuration -Required $configurationProperties -Context 'AI instruction sync configuration'
     Assert-TrustedStringArray -Value $configuration.excludedRepositoryUrls -Context 'AI instruction excludedRepositoryUrls'
     Assert-TrustedStringArray -Value $configuration.excludedRepositoryPaths -Context 'AI instruction excludedRepositoryPaths'
     $normalizedExcludedUrls = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
@@ -302,18 +399,32 @@ function Assert-InstalledRuntime {
          [long]$configuration.updates.minimumCheckIntervalMinutes -gt [int]::MaxValue)) {
         throw 'AI instruction sync configuration update policy is invalid.'
     }
-
-    if (($bundle.schemaVersion -is [int] -or $bundle.schemaVersion -is [long]) -and [int64]$bundle.schemaVersion -eq 3) {
-        throw 'Runtime bundle schema version 3 requires a projection-aware installer.'
+    if ($generation -ceq 'v3v5') {
+        Assert-TrustedProperties -Object $configuration.projections -Required @('user','project') -Context 'AI instruction sync configuration projections'
+        Assert-TrustedStringArray -Value $configuration.projections.user -Context 'AI instruction sync configuration projections.user' -StableId
+        Assert-TrustedStringArray -Value $configuration.projections.project -Context 'AI instruction sync configuration projections.project' -StableId
     }
-    Assert-TrustedProperties -Object $bundle -Required @('schemaVersion','repository','commit','acquisition','archiveSha256','inventorySha256','inventory') -Context 'Runtime bundle'
-    if (($bundle.schemaVersion -isnot [int] -and $bundle.schemaVersion -isnot [long]) -or $bundle.schemaVersion -ne 2 -or
-        $bundle.repository -isnot [string] -or [string]$bundle.repository -cne $canonicalRepository -or
+
+    $bundleProperties = @('schemaVersion','repository','commit','acquisition','archiveSha256','inventorySha256','inventory')
+    if ($generation -ceq 'v3v5') { $bundleProperties += @('platform','platformRuntime','requiredCapabilities','projectionContractSha256') }
+    Assert-TrustedProperties -Object $bundle -Required $bundleProperties -Context 'Runtime bundle'
+    if ($bundle.repository -isnot [string] -or [string]$bundle.repository -cne $canonicalRepository -or
         $bundle.commit -isnot [string] -or [string]$bundle.commit -cnotmatch '^[0-9a-f]{40}$' -or
         $bundle.acquisition -isnot [string] -or [string]$bundle.acquisition -cnotin @('git-checkout','github-codeload') -or
         $bundle.inventorySha256 -isnot [string] -or [string]$bundle.inventorySha256 -cnotmatch '^[0-9a-f]{64}$' -or
         $bundle.inventory -isnot [System.Array]) {
         throw 'Installed AI instruction runtime bundle identity is invalid.'
+    }
+    if ($generation -ceq 'v3v5') {
+        Assert-TrustedProperties -Object $bundle.platform -Required @('os','architecture') -Context 'Runtime bundle platform'
+        Assert-TrustedProperties -Object $bundle.platformRuntime -Required @('apiVersion','manifestSha256','sourceFingerprint') -Context 'Runtime bundle platformRuntime'
+        if ([string]$bundle.platform.os -cnotin @('windows','linux','macos') -or [string]$bundle.platform.architecture -cnotin @('x64','arm64') -or
+            [string]$bundle.platformRuntime.apiVersion -cne '1.0' -or [string]$bundle.platformRuntime.manifestSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+            [string]$bundle.platformRuntime.sourceFingerprint -cnotmatch '^[0-9a-f]{64}$' -or [string]$bundle.projectionContractSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+            $bundle.requiredCapabilities -isnot [System.Array]) {
+            throw 'Installed runtime bundle v3 platform contract is invalid.'
+        }
+        Assert-TrustedStringArray -Value $bundle.requiredCapabilities -Context 'Runtime bundle requiredCapabilities'
     }
     $pinMismatch = [string]$bundle.commit -cne [string]$configuration.catalog.ref
     if (($null -ne $bundle.archiveSha256 -and ($bundle.archiveSha256 -isnot [string] -or [string]$bundle.archiveSha256 -cnotmatch '^[0-9a-f]{64}$')) -or
@@ -321,7 +432,7 @@ function Assert-InstalledRuntime {
         throw 'Installed AI instruction runtime bundle archive identity is invalid.'
     }
     $declaredInventory = @($bundle.inventory)
-    $declaredDigest = Get-TrustedInventorySha256 -Inventory $declaredInventory
+    $declaredDigest = if ($generation -ceq 'v3v5') { Get-TrustedInventorySha256V3 -Inventory $declaredInventory } else { Get-TrustedInventorySha256 -Inventory $declaredInventory }
     $actualInventoryUnordered = @(Get-TrustedRuntimeInventory -Root $runtimeRoot)
     $actualByPath = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([System.StringComparer]::Ordinal)
     foreach ($actualEntry in $actualInventoryUnordered) {
@@ -334,7 +445,7 @@ function Assert-InstalledRuntime {
             $actualByPath[[string]$declaredEntry.path]
         }
     )
-    $actualDigest = Get-TrustedInventorySha256 -Inventory $actualInventory
+    $actualDigest = if ($generation -ceq 'v3v5') { Get-TrustedInventorySha256V3 -Inventory $actualInventory } else { Get-TrustedInventorySha256 -Inventory $actualInventory }
     if ($declaredDigest -cne [string]$bundle.inventorySha256 -or $actualDigest -cne [string]$bundle.inventorySha256 -or $declaredInventory.Count -ne $actualInventoryUnordered.Count) {
         throw 'Installed AI instruction runtime inventory does not match the verified bundle.'
     }
@@ -343,6 +454,7 @@ function Assert-InstalledRuntime {
             throw "Installed AI instruction runtime inventory mismatch at '$($declaredInventory[$index].path)'."
         }
     }
+    if ($generation -ceq 'v3v5') { Assert-TrustedPlatformRuntimeClosureV3 -Bundle $bundle -Inventory $declaredInventory }
     if ((Get-TrustedFileSha256 -Path $stableLauncherPath) -cne
         (Get-TrustedFileSha256 -Path $launcherReferencePath)) {
         throw 'Installed AI instructions stable launcher does not match the active immutable runtime.'
@@ -359,6 +471,23 @@ function Assert-InstalledRuntime {
         (Get-TrustedFileSha256 -Path (Join-Path $runtimeRoot 'cleanup-ai-instructions-pollution.ps1'))) {
         throw 'Installed AI instructions stable cleanup command does not match the active immutable runtime.'
     }
+    if ($generation -ceq 'v3v5') {
+        try { Import-Module $platformRuntimeManifestPath -Force -ErrorAction Stop }
+        catch { throw [InvalidOperationException]::new("Verified installed platform runtime could not be loaded: $($_.Exception.Message) [ai-instructions-refusal-code=closure-invalid]",$_.Exception) }
+        try { Assert-PlatformRuntimeInventory -Root $runtimeRoot -ManifestPath $platformRuntimeManifestPath | Out-Null }
+        catch { throw [InvalidOperationException]::new("Installed platform runtime inventory verification failed: $($_.Exception.Message) [ai-instructions-refusal-code=closure-invalid]",$_.Exception) }
+        try { $runtimeCapabilityReceipt = Get-PlatformCapabilities -Required ([string[]]@($bundle.requiredCapabilities)) }
+        catch { throw [InvalidOperationException]::new("Installed v3/v5 runtime capabilities are unavailable: $($_.Exception.Message) [ai-instructions-refusal-code=capability-unavailable]",$_.Exception) }
+        try {
+            Import-Module $contractPath -Force -ErrorAction Stop
+            Assert-AiInstructionsRuntimeGate -Bundle $bundle -Configuration $configuration -RuntimeRoot $runtimeRoot -CapabilityReceipt $runtimeCapabilityReceipt | Out-Null
+        }
+        catch {
+            $code = if (Get-Command Get-AiInstructionsRefusalCode -ErrorAction SilentlyContinue) { Get-AiInstructionsRefusalCode $_ } else { $null }
+            if (-not [string]::IsNullOrWhiteSpace([string]$code)) { throw }
+            throw [InvalidOperationException]::new("Installed v3/v5 runtime gate failed: $($_.Exception.Message) [ai-instructions-refusal-code=closure-invalid]",$_.Exception)
+        }
+    }
     if ($pinMismatch -and -not $AllowPinMismatch) {
         throw 'Installed AI instruction runtime bundle does not match the configured immutable Catalog bundle pin.'
     }
@@ -366,6 +495,7 @@ function Assert-InstalledRuntime {
         Configuration = $configuration
         Bundle = $bundle
         PinMismatch = $pinMismatch
+        Generation = $generation
     }
 }
 
@@ -381,8 +511,9 @@ function Assert-VerifiedInstalledRuntime {
             -Exception $_.Exception `
             -FallbackClassification 'integrity'
         $retryable = ([string]$disposition.retryable).ToLowerInvariant()
+        $refusalSuffix = if ($message -match '\[ai-instructions-refusal-code=[^\]]+\]') { '' } else { "`n[ai-instructions-refusal-code=closure-invalid]" }
         throw [System.InvalidOperationException]::new(
-            "$message`nAI instructions bootstrap stopped [classification=$($disposition.classification); retryable=$retryable].",
+            "$message`nAI instructions bootstrap stopped [classification=$($disposition.classification); retryable=$retryable].$refusalSuffix",
             $_.Exception
         )
     }

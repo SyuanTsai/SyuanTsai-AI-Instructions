@@ -39,15 +39,41 @@ function New-TestUpdaterHome {
     [System.IO.File]::WriteAllText((Join-Path $runtimeRoot 'runtime-bundle.json'), $bundleJson)
 }
 
+function New-TestUpdaterHomeV3 {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [ValidateSet('notify-only','auto-install-approved')][string]$Mode='auto-install-approved',
+        [string]$Commit=('a'*40),
+        [switch]$RequireUnavailablePowerShellRuntime
+    )
+    $runtimeRoot=Join-Path $Path 'hooks\ai-instructions-runtime'
+    New-Item -ItemType Directory -Force -Path $runtimeRoot,(Join-Path $runtimeRoot 'catalog')|Out-Null
+    $manifest=Import-PowerShellDataFile -LiteralPath (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psd1')
+    foreach($relative in @($manifest.FileList)){
+        $destination=Join-Path $runtimeRoot $relative;New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination)|Out-Null
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot "scripts\$relative") -Destination $destination
+    }
+    Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog-v3.example.json') -Destination (Join-Path $runtimeRoot 'catalog\skills-catalog.json')
+    Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog-lock-v3.example.json') -Destination (Join-Path $runtimeRoot 'catalog\skills-catalog-lock.json')
+    $configuration=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v5.example.json')|ConvertFrom-Json
+    $configuration.catalog.ref=$Commit;$configuration.updates.mode=$Mode
+    Import-Module (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psd1') -Force
+    $receipt=Get-PlatformCapabilities -Required @('directory-lease','file-lease','file-identity','lock','publication','owned-file-removal','permissions','directory-publication')
+    $bundle=New-AiInstructionsRuntimeBundleV3 -RuntimeRoot $runtimeRoot -Repository $script:CanonicalRepository -Commit $Commit -Acquisition git-checkout -CapabilityReceipt $receipt
+    if($RequireUnavailablePowerShellRuntime){$bundle.requiredCapabilities=@($bundle.requiredCapabilities)+@('powershell-runtime')}
+    [IO.File]::WriteAllText((Join-Path $Path 'ai-instructions-sync.json'),(($configuration|ConvertTo-Json -Depth 20).Replace("`r`n","`n")+"`n"),[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $runtimeRoot 'runtime-bundle.json'),(($bundle|ConvertTo-Json -Depth 30).Replace("`r`n","`n")+"`n"),[Text.UTF8Encoding]::new($false))
+}
+
 Describe 'AI instructions updater workflow' {
     BeforeAll {
         Import-Module $script:RuntimeContractModule -Force
         Import-Module $script:UpdaterModule -Force
     }
 
-    # Scenario: A future projection-aware bundle reaches the legacy updater.
-    # Purpose: Reject it before creating locks, receipts, or changing active bytes.
-    It 'UnitT05_rejects_runtime_bundle_v3_before_updater_mutation' {
+    # Scenario: A v3 bundle is paired with the legacy v4 configuration.
+    # Purpose: Apply the D11 pair matrix before creating locks, receipts, or changing active bytes.
+    It 'UnitT05_rejects_a_mixed_v3_v4_pair_before_updater_mutation' {
         $codexHome = Join-Path $TestDrive 'bundle-v3'
         New-TestUpdaterHome -Path $codexHome
         $bundlePath = Join-Path $codexHome 'hooks\ai-instructions-runtime\runtime-bundle.json'
@@ -62,12 +88,63 @@ Describe 'AI instructions updater workflow' {
         try { Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck | Out-Null }
         catch { $caught = $_ }
 
-        $caught.Exception.Message | Should Match '^Runtime bundle schema version 3 requires a projection-aware installer\.'
-        (Get-AiInstructionsRefusalCode $caught) | Should Be unsupported-version
+        (Get-AiInstructionsRefusalCode $caught) | Should Be mixed-generation
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($bundlePath)) | Should Be ([Convert]::ToBase64String($bundleBefore))
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($configurationPath)) | Should Be ([Convert]::ToBase64String($configurationBefore))
         Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update.lock') | Should Be $false
         Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json') | Should Be $false
+    }
+
+    # Scenario: A verified v3/v5 runtime installs a forward candidate that remains v3/v5.
+    # Purpose: Exercise updater Auto-preserve wiring and post-install generation verification.
+    It 'UnitT06_updates_v3v5_to_v3v5_without_downgrade' {
+        $codexHome=Join-Path $TestDrive 'v3-to-v3';New-TestUpdaterHomeV3 -Path $codexHome
+        $candidate='b'*40
+        $result=Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck -InstallApproved `
+            -ResolveCandidate {[pscustomobject]@{Commit=$candidate;Relation='ahead'}} `
+            -AcquireCandidate {[pscustomobject]@{SourceRoot='C:\fixture';ArchivePath='C:\fixture.zip';ArchiveSha256=('d'*64)}} `
+            -InstallCandidate {
+                param($request)
+                $configurationPath=Join-Path $request.CodexHome 'ai-instructions-sync.json';$runtimeRoot=Join-Path $request.CodexHome 'hooks\ai-instructions-runtime';$bundlePath=Join-Path $runtimeRoot 'runtime-bundle.json'
+                $configuration=Get-Content -Raw $configurationPath|ConvertFrom-Json;$configuration.catalog.ref=[string]$request.CandidateCommit
+                $bundle=Get-Content -Raw $bundlePath|ConvertFrom-Json;$bundle.commit=[string]$request.CandidateCommit
+                [IO.File]::WriteAllText($configurationPath,(($configuration|ConvertTo-Json -Depth 20)+"`n"),[Text.UTF8Encoding]::new($false))
+                [IO.File]::WriteAllText($bundlePath,(($bundle|ConvertTo-Json -Depth 30)+"`n"),[Text.UTF8Encoding]::new($false))
+            }
+        $result.outcome|Should Be installed
+        (Get-Content -Raw (Join-Path $codexHome 'hooks\ai-instructions-runtime\runtime-bundle.json')|ConvertFrom-Json).schemaVersion|Should Be 3
+        (Get-Content -Raw (Join-Path $codexHome 'ai-instructions-sync.json')|ConvertFrom-Json).schemaVersion|Should Be 5
+    }
+
+    # Scenario: A v3/v5 updater gate observes a real host capability that is currently unavailable.
+    # Purpose: Use the actual receipt required by D14 and prove all Codex Home path/hash state is unchanged.
+    It 'UnitT07_refuses_real_capability_loss_before_updater_mutation' {
+        $codexHome=Join-Path $TestDrive 'v3-capability-loss';New-TestUpdaterHomeV3 -Path $codexHome -RequireUnavailablePowerShellRuntime
+        $before=Get-TestUpdaterHomeDigest $codexHome;$caught=$null
+        try{Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck|Out-Null}catch{$caught=$_}
+        (Get-AiInstructionsRefusalCode $caught)|Should Be capability-unavailable
+        (Get-TestUpdaterHomeDigest $codexHome)|Should Be $before
+        Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update.lock')|Should Be $false
+    }
+
+    # Scenario: A candidate installer reports success after replacing v3/v5 with a valid v2/v4 pair.
+    # Purpose: Detect the forbidden post-install downgrade and preserve its typed refusal in the failed receipt.
+    It 'UnitT08_records_a_typed_failure_when_a_candidate_downgrades_v3v5' {
+        $codexHome=Join-Path $TestDrive 'v3-downgrade';New-TestUpdaterHomeV3 -Path $codexHome
+        $result=Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck -InstallApproved `
+            -ResolveCandidate {[pscustomobject]@{Commit=('b'*40);Relation='ahead'}} `
+            -AcquireCandidate {[pscustomobject]@{SourceRoot='C:\fixture';ArchivePath='C:\fixture.zip';ArchiveSha256=('d'*64)}} `
+            -InstallCandidate {
+                param($request)
+                $runtimeRoot=Join-Path $request.CodexHome 'hooks\ai-instructions-runtime';$configurationPath=Join-Path $request.CodexHome 'ai-instructions-sync.json'
+                $configuration=ConvertTo-AiInstructionsSyncConfigurationV4 -CatalogRepository $script:CanonicalRepository -CatalogRef ([string]$request.CurrentCommit)
+                $configuration.updates.mode='auto-install-approved'
+                $bundle=New-AiInstructionsRuntimeBundleV2 -RuntimeRoot $runtimeRoot -Repository $script:CanonicalRepository -Commit ([string]$request.CurrentCommit) -Acquisition git-checkout
+                [IO.File]::WriteAllText($configurationPath,(($configuration|ConvertTo-Json -Depth 20)+"`n"),[Text.UTF8Encoding]::new($false))
+                [IO.File]::WriteAllText((Join-Path $runtimeRoot 'runtime-bundle.json'),(($bundle|ConvertTo-Json -Depth 30)+"`n"),[Text.UTF8Encoding]::new($false))
+            }
+        $result.outcome|Should Be failed
+        (Get-AiInstructionsRefusalCode $result.message)|Should Be downgrade-refused
     }
 
     # Scenario: The canonical protected ref still resolves to the installed commit.
@@ -532,7 +609,7 @@ Describe 'AI instructions updater workflow' {
 param(
     [string]$RepositoryRoot,[string]$CodexHome,[string]$SourceRepository,[string]$SourceCommit,
     [string]$Acquisition,[string]$ArchiveSha256,[string]$SourceArchivePath,[string]$ExpectedCurrentCommit,
-    [string]$ExpectedUpdateMode,[string]$ExpectedUpdateChannel,[string]$ExpectedUpdateRef
+    [string]$ExpectedUpdateMode,[string]$ExpectedUpdateChannel,[string]$ExpectedUpdateRef,[string]$WriterSchema
 )
 [System.IO.File]::WriteAllText(
     (Join-Path $RepositoryRoot 'received-state.json'),
@@ -541,7 +618,7 @@ param(
         sourceCommit=$SourceCommit;acquisition=$Acquisition;archiveSha256=$ArchiveSha256
         sourceArchivePath=$SourceArchivePath;expectedCurrentCommit=$ExpectedCurrentCommit
         expectedUpdateMode=$ExpectedUpdateMode;expectedUpdateChannel=$ExpectedUpdateChannel
-        expectedUpdateRef=$ExpectedUpdateRef;psModulePath=$env:PSModulePath
+        expectedUpdateRef=$ExpectedUpdateRef;writerSchema=$WriterSchema;psModulePath=$env:PSModulePath
     } | ConvertTo-Json)
 )
 '@
@@ -580,6 +657,7 @@ param(
         $received.expectedUpdateMode | Should Be auto-install-approved
         $received.expectedUpdateChannel | Should Be protected-branch
         $received.expectedUpdateRef | Should Be main
+        $received.writerSchema | Should Be Auto
         [string]$received.psModulePath | Should Not Match ([regex]::Escape($modulePathMarker))
     }
 

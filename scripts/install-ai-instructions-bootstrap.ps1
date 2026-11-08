@@ -12,7 +12,8 @@ param(
     [string] $ExpectedCurrentCommit,
     [string] $ExpectedUpdateMode,
     [string] $ExpectedUpdateChannel,
-    [string] $ExpectedUpdateRef
+    [string] $ExpectedUpdateRef,
+    [ValidateSet('Auto','V2V4','V3V5')][string] $WriterSchema = 'Auto'
 )
 
 if ($PSVersionTable.PSEdition -cne 'Core' -or $PSVersionTable.PSVersion.Major -lt 7 -or [Environment]::Version.Major -lt 8) {
@@ -21,6 +22,12 @@ if ($PSVersionTable.PSEdition -cne 'Core' -or $PSVersionTable.PSVersion.Major -l
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$projectionRuntimeAvailable = $false # P7E_TEST_FIXTURE_MARKER: production remains unavailable until production pins are installed.
+if ($WriterSchema -ceq 'V3V5' -and -not $projectionRuntimeAvailable) {
+    throw [System.InvalidOperationException]::new(
+        'Catalog v3 and the projection runtime production pin are not available. [ai-instructions-refusal-code=projection-runtime-unavailable]'
+    )
+}
 
 $bootstrapSection = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String(
     'IyMgUmVwb3NpdG9yeSBJbnN0cnVjdGlvbnMgQm9vdHN0cmFwCgotIOWPquacieaWsOWinuaIluabtOaWsCBwcm9kdWN0aW9uIGNvZGUg55qE5a+m5L2c6KiI55Wr5pmC77yM5omN5Z+36KGMIGAkY29kZXhIb21lID0gaWYgKC1ub3QgW3N0cmluZ106OklzTnVsbE9yV2hpdGVTcGFjZSgkZW52OkNPREVYX0hPTUUpKSB7ICRlbnY6Q09ERVhfSE9NRSB9IGVsc2UgeyBKb2luLVBhdGggJEhPTUUgJy5jb2RleCcgfTsgJiAoSm9pbi1QYXRoICRjb2RleEhvbWUgJ2hvb2tzXGJvb3RzdHJhcC1haS1pbnN0cnVjdGlvbnMucHMxJylg77yb5Zau57SU5ZWP5ZWP6aGM44CB6YeQ5riF6ZyA5rGC44CB56K66KqN5oiW6Kej6YeL5ZWP6aGM77yM5Lul5Y+K5YW25LuW5bCa5pyq6ZaL5aeL6KaP5YqDIGNvZGUg55qE5bel5L2c5LiN5b6X5Z+36KGMIGJvb3RzdHJhcOOAggotIEJvb3RzdHJhcCDnrKzkuIDmrKHlpLHmlZfoi6XmmI7norrlsazmlrzmspnnrrHmiJbmrIrpmZDmi5LntZXvvIzmiY3lj6/lhYjlj5blvpfmoLjlh4blvozph43oqabkuIDmrKHvvJvlkIzkuIAgdGFzayDkuI3lvpflho3mrKHph43ot5HjgILoi6XliIbpoZ7ngrogY29tcGF0aWJpbGl0eeOAgWNvbmZpZ3VyYXRpb24g5oiWIGludGVncml0ee+8jOW/hemgiOS/neeVmSBmYWlsLWNsb3NlZCDntZDmnpzkuJTkuI3lvpfph43oqabvvJvlm57loLHliIbpoZ7oiIcgcmVtZWRpYXRpb27vvIzkuI3lvpflgb3pgKAgY2FwYWJpbGl0eSBldmlkZW5jZe+8jOS5n+S4jeW+l+WcqCBjb25zdW1lciBSZXBvc2l0b3J5IOW7uueriyB3b3JrYXJvdW5k44CCCi0gYG5vdGlmeS1vbmx5YCDnmoQgYG91dGNvbWU9YXZhaWxhYmxlYCDlj6rmmK/mm7TmlrDpgJrnn6XvvIzooajnpLogdmVyaWZpZWQgY2FuZGlkYXRlIOWwmuacquWuieijne+8m+e5vOe6jOS9v+eUqOebruWJjSB2ZXJpZmllZCBydW50aW1l77yM5Y+q5pyJ5L2/55So6ICF5Y+m6KGM5piO56K65qC45YeG5pu05paw5pmC5omN5Z+36KGMIHVwZGF0ZXLjgIIKLSDlkIzmraXlrozmiJDlvozvvIzlhYjoroDlj5YgUmVwb3NpdG9yeSDmlrDlop7miJbmm7TmlrDnmoQgYEFHRU5UUy5tZGAg6IiH55uu5YmN5Lu75YuZ6YGp55So55qE6KaP5YmH5qih57WE77yb5L2/55So6ICF5piO56K65oyH5a6aIFNraWxsIOaIluS7u+WLmeespuWQiCBgLmFnZW50cy9za2lsbHMvYCDkuK3nmoQgU2tpbGwgZGVzY3JpcHRpb24g5pmC77yM5YaN6K6A5Y+W5bCN5oeJIGBTS0lMTC5tZGDjgIIKLSDku6UgYC5jb2RleC9haS1pbnN0cnVjdGlvbnMubWFuaWZlc3QuanNvbmAg566h55CG5YWx5LqrIEluc3RydWN0aW9ucyDoiIcgQWdlbnQgU2tpbGxz77yb5Y+q5pu05paw5pyq6KKr5YCL5Lq65L+u5pS555qE5Y+X566h55CG5qqU5qGI77yM5LiN6KaG5a+rIGN1c3RvbWl6ZWQgb3IgdW5tYW5hZ2VkIEluc3RydWN0aW9ucyBvciBBZ2VudCBTa2lsbHPjgIIKLSBSZXBvc2l0b3J5IOeahCBvcmlnaW4g6Iul5YiX5Zyo55uu5YmNIENvZGV4IEhvbWUg55qEIGBhaS1pbnN0cnVjdGlvbnMtc3luYy5qc29uYCDkuYsgYGV4Y2x1ZGVkUmVwb3NpdG9yeVVybHNg77yM5oiWIHRhc2sg5ZWf5YuV55uu6YyE5L2N5pa8IGBleGNsdWRlZFJlcG9zaXRvcnlQYXRoc2DvvIznm7TmjqXnlaXpgY7lkIzmraXjgIIKLSBSZXBvc2l0b3J5LWxvY2FsIEluc3RydWN0aW9uc+OAgVNraWxscyDoiIcgbWFuaWZlc3Qg5piv5omA5pyJIGJyYW5jaCDlhbHnlKjnmoTlgIvkurogcnVudGltZSBhcnRpZmFjdHPvvIzlv4XpoIjkv53mjIEgbG9jYWwgaWdub3JlZOOAguiLpSByZXNlcnZlZCBBZ2VudCBhcnRpZmFjdCDlt7LooqsgR2l0IHRyYWNrZWTvvIxib290c3RyYXAg5b+F6aCI5YWI5ZyoIFJlcG9zaXRvcnkg5aSW5a6M5pW05YKZ5Lu95qqU5qGI6IiHIEdpdCDni4DmhYvvvIzku6XpmpTpm6IgaW5kZXgg5bu656uL5Y+q5YyF5ZCr57K+56K6IHJlc2VydmVkIHBhdGggZGVsZXRpb25zIOeahOS4gOasoeaAp+acrOapnyByZW1lZGlhdGlvbiBjb21taXTvvIzkv53nlZnmiYDmnInnhKHpl5zorormm7TvvIzlho3kvp3mnIDmlrDkuK3lpK7kvobmupDph43lu7rkuKbnubznuozlkIzmraXvvJvkuI3lvpfoh6rli5UgcHVzaCBjb25zdW1lciBSZXBvc2l0b3J544CCUmVzZXJ2ZWQg56+E5ZyN5aSWIHRyYWNrZWQgZmlsZSDmiJbnhKHms5XlronlhajpmpTpm6LnmoTni4DmhYvku43poIggZmFpbCBjbG9zZWTjgII='
@@ -98,28 +105,88 @@ function Assert-InstallerMutationPath {
     }
 }
 
-function Assert-InstallerExistingRuntimeSchemaCompatibility {
+function Get-InstallerExistingRuntimeState {
     param(
         [Parameter(Mandatory = $true)][string] $ConfigurationPath,
         [Parameter(Mandatory = $true)][string] $RuntimeDirectory
     )
 
+    $existingConfiguration = $null
+    $existingBundle = $null
     if (Test-Path -LiteralPath $ConfigurationPath -PathType Leaf) {
         try { $existingConfiguration = Get-Content -Raw -Encoding UTF8 -LiteralPath $ConfigurationPath | ConvertFrom-Json }
         catch { throw "AI instruction sync configuration is not valid JSON: $ConfigurationPath" }
-        if (($existingConfiguration.schemaVersion -is [int] -or $existingConfiguration.schemaVersion -is [long]) -and [int64]$existingConfiguration.schemaVersion -eq 5) {
-            throw (New-AiInstructionsRefusalException -Code unsupported-version -Message 'AI Instructions sync configuration schema version 5 requires a projection-aware installer.')
-        }
     }
 
     $existingBundlePath = Join-Path $RuntimeDirectory 'runtime-bundle.json'
     if (Test-Path -LiteralPath $existingBundlePath -PathType Leaf) {
         try { $existingBundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $existingBundlePath | ConvertFrom-Json }
         catch { throw "Installed AI instruction runtime bundle is not valid JSON: $existingBundlePath" }
-        if (($existingBundle.schemaVersion -is [int] -or $existingBundle.schemaVersion -is [long]) -and [int64]$existingBundle.schemaVersion -eq 3) {
-            throw (New-AiInstructionsRefusalException -Code unsupported-version -Message 'Runtime bundle schema version 3 requires a projection-aware installer.')
-        }
     }
+    $bundleVersion = if ($null -ne $existingBundle -and (Test-InstallerHasProperty -Object $existingBundle -Name 'schemaVersion')) { $existingBundle.schemaVersion } else { $null }
+    $configurationVersion = if ($null -ne $existingConfiguration -and (Test-InstallerHasProperty -Object $existingConfiguration -Name 'schemaVersion')) { $existingConfiguration.schemaVersion } else { $null }
+    $generation = Get-AiInstructionsRuntimeGeneration -BundleSchemaVersion $bundleVersion -ConfigurationSchemaVersion $configurationVersion -AllowAbsent
+    return [pscustomobject][ordered]@{
+        Bundle = $existingBundle
+        Configuration = $existingConfiguration
+        BundleSchemaVersion = $bundleVersion
+        ConfigurationSchemaVersion = $configurationVersion
+        Generation = $generation
+    }
+}
+
+function Assert-InstallerExistingRuntimeGate {
+    param(
+        [Parameter(Mandatory = $true)][object] $State,
+        [Parameter(Mandatory = $true)][string] $RuntimeDirectory,
+        [Parameter(Mandatory = $true)][object] $DefaultCapabilityReceipt
+    )
+    if ([string]$State.Generation -ceq 'none') { return $DefaultCapabilityReceipt }
+    if ([string]$State.Generation -ceq 'v2v4') {
+        Assert-AiInstructionsRuntimeBundleV2 -Bundle $State.Bundle -Configuration $State.Configuration -RuntimeRoot $RuntimeDirectory | Out-Null
+        return $DefaultCapabilityReceipt
+    }
+    try {
+        Assert-AiInstructionsSyncConfigurationV5 -Configuration $State.Configuration | Out-Null
+        Assert-AiInstructionsRuntimeBundleV3 -Bundle $State.Bundle -Configuration $State.Configuration -RuntimeRoot $RuntimeDirectory | Out-Null
+    }
+    catch {
+        if ($null -ne (Get-AiInstructionsRefusalCode $_)) { throw }
+        throw (New-AiInstructionsRefusalException -Code closure-invalid -Message "Installed v3/v5 runtime closure is invalid: $($_.Exception.Message)" -InnerException $_.Exception)
+    }
+    try { $receipt = Get-PlatformCapabilities -Required ([string[]]@($State.Bundle.requiredCapabilities)) }
+    catch {
+        throw (New-AiInstructionsRefusalException -Code capability-unavailable -Message "Installed v3/v5 runtime capabilities are unavailable: $($_.Exception.Message)" -InnerException $_.Exception)
+    }
+    Assert-AiInstructionsRuntimeGate -Bundle $State.Bundle -Configuration $State.Configuration -RuntimeRoot $RuntimeDirectory -CapabilityReceipt $receipt | Out-Null
+    return $receipt
+}
+
+function Select-InstallerWriterSchemaForState {
+    param(
+        [Parameter(Mandatory = $true)][object] $State,
+        [Parameter(Mandatory = $true)][string] $RuntimeDirectory,
+        [Parameter(Mandatory = $true)][object] $DefaultCapabilityReceipt,
+        [Parameter(Mandatory = $true)][object] $CatalogSchemaVersion,
+        [Parameter(Mandatory = $true)][bool] $ProjectionRuntimeAvailable,
+        [Parameter(Mandatory = $true)][ValidateSet('Auto','V2V4','V3V5')][string] $RequestedWriterSchema
+    )
+    $receipt = $DefaultCapabilityReceipt
+    if ([string]$State.Generation -ceq 'v3v5' -and $RequestedWriterSchema -cne 'V2V4') {
+        $receipt = Assert-InstallerExistingRuntimeGate -State $State -RuntimeDirectory $RuntimeDirectory -DefaultCapabilityReceipt $DefaultCapabilityReceipt
+    }
+    $expectedOs = if ([string]$State.Generation -ceq 'v3v5') { [string]$State.Bundle.platform.os } else { [string]$receipt.os }
+    $expectedArchitecture = if ([string]$State.Generation -ceq 'v3v5') { [string]$State.Bundle.platform.architecture } else { [string]$receipt.architecture }
+    $selection = Select-AiInstructionsInstallWriterSchema `
+        -WriterSchema $RequestedWriterSchema `
+        -CatalogSchemaVersion $CatalogSchemaVersion `
+        -InstalledBundleSchemaVersion $State.BundleSchemaVersion `
+        -InstalledConfigurationSchemaVersion $State.ConfigurationSchemaVersion `
+        -CapabilityReceipt $receipt `
+        -ExpectedPlatformOs $expectedOs `
+        -ExpectedPlatformArchitecture $expectedArchitecture `
+        -ProjectionRuntimeAvailable:$ProjectionRuntimeAvailable
+    return [pscustomobject][ordered]@{ Schema=$selection; CapabilityReceipt=$receipt }
 }
 
 function Get-InstallerFullDirectoryPath {
@@ -768,6 +835,17 @@ $hooksPath = Join-Path $codexHomePath 'hooks.json'
 $configurationPath = Join-Path $codexHomePath 'ai-instructions-sync.json'
 $installLockPath = Join-Path $codexHomePath 'ai-instructions-install.lock'
 
+$prelockState = Get-InstallerExistingRuntimeState -ConfigurationPath $configurationPath -RuntimeDirectory $runtimeDirectory
+$prelockSelection = Select-InstallerWriterSchemaForState `
+    -State $prelockState `
+    -RuntimeDirectory $runtimeDirectory `
+    -DefaultCapabilityReceipt $capabilityReceipt `
+    -CatalogSchemaVersion $catalogDocument.schemaVersion `
+    -ProjectionRuntimeAvailable $projectionRuntimeAvailable `
+    -RequestedWriterSchema $WriterSchema
+$selectedWriterSchema = [string]$prelockSelection.Schema
+$capabilityReceipt = $prelockSelection.CapabilityReceipt
+
 New-Item -ItemType Directory -Force -Path $codexHomePath | Out-Null
 $rootLease = Open-PlatformDirectory -Root $codexHomePath -RootOnly
 $installLockLease = $null
@@ -803,37 +881,54 @@ try {
     }
     Invoke-AiInstructionsInstallFailpoint -Name 'after-recovery-before-install'
 
+    $lockedState = Get-InstallerExistingRuntimeState -ConfigurationPath $configurationPath -RuntimeDirectory $runtimeDirectory
+    $lockedSelection = Select-InstallerWriterSchemaForState `
+        -State $lockedState `
+        -RuntimeDirectory $runtimeDirectory `
+        -DefaultCapabilityReceipt $capabilityReceipt `
+        -CatalogSchemaVersion $catalogDocument.schemaVersion `
+        -ProjectionRuntimeAvailable $projectionRuntimeAvailable `
+        -RequestedWriterSchema $WriterSchema
+    if ([string]$lockedSelection.Schema -cne $selectedWriterSchema) {
+        throw (New-AiInstructionsRefusalException -Code mixed-generation -Message 'Installed runtime generation changed while the installer acquired its exclusive lease.')
+    }
+    $capabilityReceipt = $lockedSelection.CapabilityReceipt
+
     New-Item -ItemType Directory -Force -Path $hookDirectory | Out-Null
     $hookLease = Open-PlatformDirectory -Root $codexHomePath -RelativePath 'hooks'
     Assert-InstallerMutationPath -Path $codexHomePath -ExpectedType Directory
     Assert-InstallerMutationPath -Path $hookDirectory -ExpectedType Directory
     Assert-InstallerMutationPath -Path $runtimeDirectory -ExpectedType Directory
     foreach ($filePath in @($hookScript,$updateScript,$environmentUpdateScript,$cleanupScript,$agentsPath,$hooksPath,$configurationPath,$installLockPath)) { Assert-InstallerMutationPath -Path $filePath -ExpectedType File }
-    Assert-InstallerExistingRuntimeSchemaCompatibility -ConfigurationPath $configurationPath -RuntimeDirectory $runtimeDirectory
-
     if (-not [string]::IsNullOrWhiteSpace($ExpectedCurrentCommit)) {
         try {
-            $installedBundle = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $runtimeDirectory 'runtime-bundle.json') | ConvertFrom-Json
-            $installedConfiguration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json
-            Assert-AiInstructionsRuntimeBundleV2 -Bundle $installedBundle -Configuration $installedConfiguration -RuntimeRoot $runtimeDirectory | Out-Null
+            $installedBundle = $lockedState.Bundle
+            $installedConfiguration = $lockedState.Configuration
+            Assert-InstallerExistingRuntimeGate -State $lockedState -RuntimeDirectory $runtimeDirectory -DefaultCapabilityReceipt $capabilityReceipt | Out-Null
         }
         catch { throw "The installed runtime changed before installation; the candidate transaction must be resolved again. $($_.Exception.Message)" }
         if ([string]$installedBundle.commit -cne $ExpectedCurrentCommit) { throw 'The installed runtime changed before installation; the candidate transaction must be resolved again.' }
     }
 
-    $existingConfiguration = $null
-    if (Test-Path -LiteralPath $configurationPath -PathType Leaf) {
-        try { $existingConfiguration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json }
-        catch { throw "AI instruction sync configuration is not valid JSON: $configurationPath" }
-    }
+    $existingConfiguration = $lockedState.Configuration
     if ($expectedPolicySpecified) {
-        try { Assert-AiInstructionsSyncConfigurationV4 -Configuration $existingConfiguration | Out-Null }
+        try {
+            if ([string]$lockedState.Generation -ceq 'v3v5') { Assert-AiInstructionsSyncConfigurationV5 -Configuration $existingConfiguration | Out-Null }
+            else { Assert-AiInstructionsSyncConfigurationV4 -Configuration $existingConfiguration | Out-Null }
+        }
         catch { throw 'The active runtime update policy changed before installation; candidate approval must be resolved again.' }
         if ([string]$existingConfiguration.updates.mode -cne $ExpectedUpdateMode -or [string]$existingConfiguration.updates.channel -cne $ExpectedUpdateChannel -or [string]$existingConfiguration.updates.ref -cne $ExpectedUpdateRef) {
             throw 'The active runtime update policy changed before installation; candidate approval must be resolved again.'
         }
     }
-    $configuration = ConvertTo-AiInstructionsSyncConfigurationV4 -ExistingConfiguration $existingConfiguration -CatalogRepository $catalogRepository -CatalogRef $catalogRef -AdditionalExcludedRepositoryUrls $ExcludedRepositoryUrls -AdditionalExcludedRepositoryPaths $ExcludedRepositoryPaths -Catalog $catalogDocument
+    $configurationParameters = @{
+        ExistingConfiguration=$existingConfiguration;CatalogRepository=$catalogRepository;CatalogRef=$catalogRef
+        AdditionalExcludedRepositoryUrls=$ExcludedRepositoryUrls;AdditionalExcludedRepositoryPaths=$ExcludedRepositoryPaths;Catalog=$catalogDocument
+    }
+    $configuration = if ($selectedWriterSchema -ceq 'v3v5') {
+        ConvertTo-AiInstructionsSyncConfigurationV5 @configurationParameters
+    }
+    else { ConvertTo-AiInstructionsSyncConfigurationV4 @configurationParameters }
 
     if ($null -eq $transactionRootLease) { $transactionRootLease = Open-PlatformDirectory -Root $codexHomePath -RelativePath '.ai-instructions-txn' -CreatePrivate }
     $transactionId = [Guid]::NewGuid().ToString('N')
@@ -855,9 +950,17 @@ try {
         Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'catalog\skills-catalog.json') -Destination (Join-Path $stagingRuntime 'catalog\skills-catalog.json') -Force
         Copy-Item -LiteralPath (Join-Path $repositoryRootPath 'catalog\skills-catalog-lock.json') -Destination (Join-Path $stagingRuntime 'catalog\skills-catalog-lock.json') -Force
         Write-LicenseDeliveryPackage -Package $runtimeLicenses -DestinationRoot (Join-Path $stagingRuntime 'licenses')
-        $bundle = New-AiInstructionsRuntimeBundleV2 -RuntimeRoot $stagingRuntime -Repository $catalogRepository -Commit $catalogRef -Acquisition $Acquisition -ArchiveSha256 $ArchiveSha256
+        $bundle = if ($selectedWriterSchema -ceq 'v3v5') {
+            New-AiInstructionsRuntimeBundleV3 -RuntimeRoot $stagingRuntime -Repository $catalogRepository -Commit $catalogRef -Acquisition $Acquisition -ArchiveSha256 $ArchiveSha256 -CapabilityReceipt $capabilityReceipt
+        }
+        else {
+            New-AiInstructionsRuntimeBundleV2 -RuntimeRoot $stagingRuntime -Repository $catalogRepository -Commit $catalogRef -Acquisition $Acquisition -ArchiveSha256 $ArchiveSha256
+        }
         [IO.File]::WriteAllBytes((Join-Path $stagingRuntime 'runtime-bundle.json'),(ConvertTo-InstallerJsonBytes -Document $bundle))
-        Assert-AiInstructionsRuntimeBundleV2 -Bundle $bundle -Configuration $configuration -RuntimeRoot $stagingRuntime | Out-Null
+        if ($selectedWriterSchema -ceq 'v3v5') {
+            Assert-AiInstructionsRuntimeGate -Bundle $bundle -Configuration $configuration -RuntimeRoot $stagingRuntime -CapabilityReceipt $capabilityReceipt | Out-Null
+        }
+        else { Assert-AiInstructionsRuntimeBundleV2 -Bundle $bundle -Configuration $configuration -RuntimeRoot $stagingRuntime | Out-Null }
         Test-SkillsCatalogLockDocument -LockPath (Join-Path $stagingRuntime 'catalog\skills-catalog-lock.json') -CatalogPath (Join-Path $stagingRuntime 'catalog\skills-catalog.json') | Out-Null
         foreach ($scriptPath in @(Get-ChildItem -LiteralPath $stagingRuntime -Recurse -File | Where-Object { $_.Extension -in @('.ps1','.psm1') } | Select-Object -ExpandProperty FullName)) {
             $tokens=$null;$errors=$null
@@ -986,7 +1089,7 @@ Write-Output "Installed AI instructions bootstrap launcher: $hookScript"
 Write-Output "Installed AI instructions manual updater: $updateScript"
 Write-Output "Installed AI instructions pollution cleanup command: $cleanupScript"
 Write-Output "Installed immutable runtime bundle: $runtimeDirectory"
-Write-Output "Updated AI instructions sync configuration schema v4: $configurationPath"
+Write-Output "Updated AI instructions sync configuration schema v$($configuration.schemaVersion): $configurationPath"
 }
 finally {
     if (-not [string]::IsNullOrWhiteSpace($archiveSourceWorkingRoot) -and (Test-Path -LiteralPath $archiveSourceWorkingRoot)) {
