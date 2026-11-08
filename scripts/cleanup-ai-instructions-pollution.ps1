@@ -364,8 +364,9 @@ function Test-CleanupCanonicalSourceRepository {
 function Test-CleanupManagedPath {
     param([Parameter(Mandatory = $true)][string] $Path)
     if (Test-InstructionLicenseDeliveryPath $Path) { return $true }
-    if ($Path -eq 'AGENTS.md' -or $Path -eq '.github/copilot-instructions.md' -or
+    if ($Path -eq 'AGENTS.md' -or $Path -eq 'CLAUDE.md' -or $Path -eq '.github/copilot-instructions.md' -or
         $Path -match '^\.codex/AI-Rules/[^/\\]+\.en\.md$' -or
+        $Path -match '^\.claude/AI-Rules/[^/\\]+\.en\.md$' -or
         $Path -match '^\.github/AI-Rules/[^/\\]+\.en\.md$') { return $true }
     if (-not $Path.StartsWith('.agents/skills/',[System.StringComparison]::Ordinal)) { return $false }
     $parts = @($Path.Substring('.agents/skills/'.Length) -split '/')
@@ -721,7 +722,7 @@ function Assert-NoRepoManagedManifestV4 {
             continue
         }
         if ($isSchemaV4) {
-            throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
+            Assert-ManagedManifestV4 -Manifest $worktreeManifest
         }
     }
 }
@@ -744,10 +745,8 @@ function Get-CleanupSharedManagedPaths {
             if ($worktreeManifestSchemaVersion -isnot [int] -and $worktreeManifestSchemaVersion -isnot [long]) {
                 throw 'schemaVersion must be an integer.'
             }
-            if ($worktreeManifestSchemaVersion -eq 4) {
-                throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
-            }
-            if ($worktreeManifestSchemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $worktreeManifest }
+            if ($worktreeManifestSchemaVersion -eq 4) { Assert-ManagedManifestV4 -Manifest $worktreeManifest }
+            elseif ($worktreeManifestSchemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $worktreeManifest }
             elseif ($worktreeManifestSchemaVersion -eq 1) { Assert-LegacyManagedManifestV1 -Manifest $worktreeManifest }
             else {
                 throw "unsupported schemaVersion '$worktreeManifestSchemaVersion'."
@@ -843,13 +842,13 @@ Assert-CleanupManagedFilePath -TargetRoot $targetRootPath -FilePath $manifestPat
 try { $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json }
 catch { throw "Managed manifest is not valid JSON: $($_.Exception.Message)" }
 try {
-    if ($manifest.schemaVersion -eq 4) { throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.' }
+    if ($manifest.schemaVersion -eq 4) { Assert-ManagedManifestV4 -Manifest $manifest }
     elseif ($manifest.schemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $manifest }
     elseif ($manifest.schemaVersion -eq 1) { Assert-LegacyManagedManifestV1 -Manifest $manifest }
     else { throw "unsupported schemaVersion '$($manifest.schemaVersion)'." }
 }
 catch { throw "Managed manifest cannot prove cleanup ownership: $($_.Exception.Message)" }
-if (($manifest.schemaVersion -in @(2,3) -and
+if (($manifest.schemaVersion -in @(2,3,4) -and
      ([string]$manifest.catalogId -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$' -or [string]$manifest.lockSha256 -cnotmatch '^[0-9a-f]{64}$')) -or
     $manifest.files -isnot [System.Array]) {
     throw 'Managed manifest cannot prove cleanup ownership because its versioned identity is invalid.'
@@ -868,10 +867,17 @@ $trackedPaths = @(Invoke-CleanupGit -Repository $targetRootPath -Arguments @('-c
     (ConvertFrom-CleanupGitQuotedPath -Path ([string]$_)).Replace('\','/')
 })
 $gitPathComparer = Get-CleanupGitPathComparer -Repository $targetRootPath
+$trackedClaudeBase = @($trackedPaths | Where-Object { $gitPathComparer.Equals([string]$_,'CLAUDE.md') }).Count -gt 0
 $trackedManagedEntries = New-Object System.Collections.Generic.List[object]
 foreach ($manifestTargetPath in @($manifestRelativePath) + @($entriesByPath.Keys | Sort-Object)) {
     if ([string]$manifestTargetPath -like '.agents/skills/*') {
         Write-Output "Tracked/project Skills are protected from Instructions pollution cleanup: $manifestTargetPath"
+        continue
+    }
+    if ($trackedClaudeBase -and ([string]$manifestTargetPath -ceq 'CLAUDE.md' -or
+        ([string]$manifestTargetPath).StartsWith('.claude/AI-Rules/',[StringComparison]::Ordinal) -or
+        ([string]$manifestTargetPath).StartsWith('.claude/ai-instructions-licenses/',[StringComparison]::Ordinal))) {
+        Write-Output "Project-owned Claude family is protected from Instructions pollution cleanup: $manifestTargetPath"
         continue
     }
     foreach ($actualTrackedPath in $trackedPaths) {

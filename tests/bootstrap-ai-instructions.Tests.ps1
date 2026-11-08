@@ -328,6 +328,8 @@ Describe 'bootstrap-ai-instructions' {
         (Get-Content -Raw (Join-Path $targetRoot 'AGENTS.md')).Trim() | Should Be '# Codex English Base'
         (Get-Content -Raw (Join-Path $targetRoot '.codex\AI-Rules\Testing.en.md')).Trim() | Should Be '# Codex English Testing'
         (Get-Content -Raw (Join-Path $targetRoot '.github\copilot-instructions.md')).Trim() | Should Be '# Copilot English Base'
+        Test-Path -LiteralPath (Join-Path $targetRoot 'CLAUDE.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot '.claude') | Should Be $false
         (Get-Content -Raw (Join-Path $targetRoot '.github\AI-Rules\Testing.en.md')).Trim() | Should Be '# Copilot English Testing'
         Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $true
 
@@ -785,7 +787,7 @@ exit /b 0
             $output = & $script:TestPowerShellExecutable @arguments 2>&1
 
             $LASTEXITCODE | Should Not Be 0
-            ($output -join [Environment]::NewLine) | Should Match 'REPO managed manifest schema version 4 requires a projection-aware bootstrap\.'
+            ($output -join [Environment]::NewLine) | Should Match 'live worktree already contains REPO managed manifest v4.*ai-instructions-refusal-code=downgrade-refused'
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath)) | Should Be $manifestBefore
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
             [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md'))) | Should Be $targetAgentBefore
@@ -1597,7 +1599,7 @@ finally {
         $output = & $script:TestPowerShellExecutable @arguments 2>&1
 
         $LASTEXITCODE | Should Not Be 0
-        ($output -join [Environment]::NewLine) | Should Match 'REPO managed manifest schema version 4 requires a projection-aware bootstrap\.'
+        ($output -join [Environment]::NewLine) | Should Match 'live worktree already contains REPO managed manifest v4.*ai-instructions-refusal-code=downgrade-refused'
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath)) | Should Be $manifestBefore
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
         [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md'))) | Should Be $agentBefore
@@ -1634,6 +1636,8 @@ finally {
 
         { Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null } | Should Not Throw
         (Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json).schemaVersion | Should Be 3
+        Test-Path -LiteralPath (Join-Path $targetRoot 'CLAUDE.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot '.claude') | Should Be $false
     }
 
     # Scenario: A previously materialized read-only rule remains byte-identical when the immutable source removes it.

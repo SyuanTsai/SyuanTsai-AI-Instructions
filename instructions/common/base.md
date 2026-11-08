@@ -40,16 +40,16 @@
 
 ## Shared Skills
 
-`~/.agents/skills/` 提供 Codex 與 GitHub Copilot 共用的可重複工作流程。使用者明確指定 Skill，或任務符合 Skill `description` 時，先完整讀取其 `SKILL.md`，再只載入目前工作需要的 references、scripts 或 assets。安全、測試與 Repository guardrail 仍以本 Base Agent 及適用的條件式規則為準。
+`{USER_SKILLS_ROOT}/` 是目前 host 的 USER Skills root，提供可重複工作流程。使用者明確指定 Skill，或任務符合 Skill `description` 時，先完整讀取其 `SKILL.md`，再只載入目前工作需要的 references、scripts 或 assets。安全、測試與 Repository guardrail 仍以本 Base Agent 及適用的條件式規則為準。
 
-共用 Catalog Skills 只由 USER updater 安裝／更新至 USER（`~/.agents/skills/`）。Consumer bootstrap 繼續更新 Instructions；USER 缺少或驗證失敗時也不得回退 REPO 安裝，應回報 USER 修復／更新需求。專案自有 Skills 仍可使用並必須保留。 <!-- ai-invariant:base.shared-skills-user-only -->
+共用 Catalog Skills 只由 USER updater 安裝／更新至 USER（`{USER_SKILLS_ROOT}/`）。Consumer bootstrap 繼續更新 Instructions；USER 缺少或驗證失敗時也不得回退 REPO 安裝，應回報 USER 修復／更新需求。專案自有 Skills 仍可使用並必須保留。 <!-- ai-invariant:base.shared-skills-user-only -->
 
-- 提出或更新實作計畫 → `~/.agents/skills/plan-production-change/SKILL.md`
-- 效能改善、benchmark、query optimization 或 N+1 驗證 → `~/.agents/skills/verify-data-access-performance/SKILL.md`
-- 提供交給執行端（claude、codex、copilot CLI 或內建 Sub Agent）的實作提示詞 → `~/.agents/skills/write-implementation-prompt/SKILL.md`
-- 查詢或修改 Jira issue，或以 issue key 取得工作脈絡 → `~/.agents/skills/work-with-jira/SKILL.md`
-- 查詢或聚合 Datadog LOG、分析 APM trace、處理 Logs Explorer／trace／investigation widget URL，或以 Datadog telemetry 調查 incident → `~/.agents/skills/investigate-datadog-logs/SKILL.md`
-- 使用官方 Felo 搜尋、簡報、X 搜尋或 landing page 工作流程 → `~/.agents/skills/felo-search/SKILL.md`、`~/.agents/skills/felo-slides/SKILL.md`、`~/.agents/skills/felo-x-search/SKILL.md`、`~/.agents/skills/felo-landingpage/SKILL.md`
+- 提出或更新實作計畫 → `{USER_SKILLS_ROOT}/plan-production-change/SKILL.md`
+- 效能改善、benchmark、query optimization 或 N+1 驗證 → `{USER_SKILLS_ROOT}/verify-data-access-performance/SKILL.md`
+- 提供交給執行端（claude、codex、copilot CLI 或內建 Sub Agent）的實作提示詞 → `{USER_SKILLS_ROOT}/write-implementation-prompt/SKILL.md`
+- 查詢或修改 Jira issue，或以 issue key 取得工作脈絡 → `{USER_SKILLS_ROOT}/work-with-jira/SKILL.md`
+- 查詢或聚合 Datadog LOG、分析 APM trace、處理 Logs Explorer／trace／investigation widget URL，或以 Datadog telemetry 調查 incident → `{USER_SKILLS_ROOT}/investigate-datadog-logs/SKILL.md`
+- 使用官方 Felo 搜尋、簡報、X 搜尋或 landing page 工作流程 → `{USER_SKILLS_ROOT}/felo-search/SKILL.md`、`{USER_SKILLS_ROOT}/felo-slides/SKILL.md`、`{USER_SKILLS_ROOT}/felo-x-search/SKILL.md`、`{USER_SKILLS_ROOT}/felo-landingpage/SKILL.md`
 
 上述非 `core` Skill 可能未依目前 profile 或 capability 安裝。若適用 Skill 不存在，不得將缺檔本身視為任務失敗：實作提示詞改依目前 Repository 證據與 Instructions 直接整理；Jira／Datadog 只在已有核准 connector 或 API capability 時直接使用該能力；官方 Felo Skill 不存在時，依 `ExternalResearch` 規則使用已核准 connector 或平台網路搜尋。沒有安全可用 fallback 時，明確指出能力未安裝或未設定，不得臆測 Skill 流程。 <!-- ai-invariant:base.optional-capability-no-invention -->
 

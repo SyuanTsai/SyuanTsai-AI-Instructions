@@ -54,6 +54,59 @@ Write-Output 'AI instructions synchronized as local ignored runtime artifacts wi
 Describe 'AI instructions all-repository rollout' {
     BeforeAll { Import-Module $script:RolloutModule -Force }
 
+    # Scenario: Remediation and rollout classify the expanded multi-host reserved inventory.
+    # Purpose: Keep Claude instruction namespaces reserved while all four project Skill roots remain protected.
+    It 'UnitT90_keeps_rollout_and_remediation_reserved_path_classification_identical' {
+        $remediationModule = Import-Module (Join-Path $script:RepositoryRoot 'scripts\agent-artifact-remediation.psm1') -Force -PassThru
+        $rolloutModule = Get-Module ai-instructions-rollout
+        $cases = @(
+            @{ Path='AGENTS.md'; Expected=$true },
+            @{ Path='CLAUDE.md'; Expected=$false },
+            @{ Path='.claude/AI-Rules/Testing.en.md'; Expected=$true },
+            @{ Path='.claude/ai-instructions-licenses/0123456789abcdef0123456789abcdef01234567/delivery.json'; Expected=$true },
+            @{ Path='.agents/skills/example/SKILL.md'; Expected=$false },
+            @{ Path='.codex/skills/example/SKILL.md'; Expected=$false },
+            @{ Path='.claude/skills/example/SKILL.md'; Expected=$false },
+            @{ Path='.github/skills/example/SKILL.md'; Expected=$false }
+        )
+        foreach ($case in $cases) {
+            $remediation = & $remediationModule { param($path) Test-IsReservedAgentArtifactPath -Path $path } $case.Path
+            $rollout = & $rolloutModule { param($path) Test-RolloutReservedAgentPath -Path $path } $case.Path
+            $remediation | Should Be $case.Expected
+            $rollout | Should Be $case.Expected
+            $rollout | Should Be $remediation
+        }
+    }
+
+    # Scenario: Rollout examines a valid v4 manifest against its bound v3 Lock projection identity.
+    # Purpose: Accept current v4 state and reject projection or lock drift while retaining legacy v2/v3 reader behavior.
+    It 'UnitT91_classifies_v4_rollout_current_by_lock_and_projection_identity' {
+        $runtimeRoot=Join-Path $TestDrive 'v4-rollout-runtime'
+        $scriptRoot=Join-Path $runtimeRoot 'scripts'
+        New-Item -ItemType Directory -Force -Path $scriptRoot,(Join-Path $runtimeRoot 'catalog')|Out-Null
+        foreach($leaf in @('ai-instructions-rollout.psm1','agent-artifact-remediation.psm1','skills-catalog-contract.psm1')){
+            Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot "scripts/$leaf") -Destination (Join-Path $scriptRoot $leaf)
+        }
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/skills-catalog-lock-v3.example.json') -Destination (Join-Path $runtimeRoot 'catalog/skills-catalog-lock.json')
+        $repository=Join-Path $TestDrive 'v4-rollout-repository';New-Item -ItemType Directory -Force -Path (Join-Path $repository '.codex')|Out-Null
+        $manifestPath=Join-Path $repository '.codex/ai-instructions.manifest.json'
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/managed-manifest-v4.example.json') -Destination $manifestPath
+        $manifest=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+        $expectedLock=[string]$manifest.lockSha256
+        $fixtureModule=Import-Module (Join-Path $scriptRoot 'ai-instructions-rollout.psm1') -Force -PassThru
+        try{
+            (& $fixtureModule {param($repo,$lock) Test-RolloutManifestCurrent -Repository $repo -ExpectedLockSha256 $lock} $repository $expectedLock)|Should Be $true
+            (& $fixtureModule {param($repo) Test-RolloutManifestCurrent -Repository $repo -ExpectedLockSha256 ('0'*64)} $repository)|Should Be $false
+            $manifest.projectionContractSha256='0'*64
+            Set-RolloutTestText -Path $manifestPath -Value (($manifest|ConvertTo-Json -Depth 20).Replace("`r`n","`n").TrimEnd())
+            (& $fixtureModule {param($repo,$lock) Test-RolloutManifestCurrent -Repository $repo -ExpectedLockSha256 $lock} $repository $expectedLock)|Should Be $false
+        }
+        finally{
+            Remove-Module $fixtureModule -Force -ErrorAction SilentlyContinue
+            Import-Module $script:RolloutModule -Force
+        }
+    }
+
     # Given: A fixed-drive-shaped search root includes a product, authority clone, dependency cache, temp fixture, and official global Skill clone.
     # When: Rollout discovers repositories with the production exclusions and authority URLs.
     # Then: Only the product is synchronized, authority is reported skipped, and system/cached repositories are untouched.

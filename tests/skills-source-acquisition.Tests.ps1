@@ -348,16 +348,18 @@ Describe 'Skills source archive acquisition' {
 
     }
 
-    # Scenario: A projection-aware v3 plan reaches the legacy acquisition consumer.
-    # Purpose: Fail closed with the migration message before creating a staging directory.
-    It 'UnitT12_rejects_v3_before_acquisition_mutation' {
+    # Scenario: A gate-verified projection-aware v3 plan reaches acquisition.
+    # Purpose: Validate the same canonical source package used for Instructions-only USER evidence.
+    It 'UnitT12_stages_v3_canonical_source_for_projection_aware_callers' {
         $workingRoot = Join-Path $TestDrive 'v3-acquisition-staging'
+        $canonical = New-TestSkillSourceArchive -Name 'v3-canonical' -SkillId 'skill-a' -SkillText (New-TestSkillText -SkillId 'skill-a') -SkillRootPrefix 'skills'
         $plan = [pscustomobject]@{
-            Sources = @()
-            Skills = @([pscustomobject]@{ id='skill-a'; sourceLayoutVersion=3 })
+            Sources = @([pscustomobject]@{ id='source-a'; archiveSha256=(Get-TestFileSha256 $canonical.ArchivePath); resolvedCommit=('a' * 40) })
+            Skills = @([pscustomobject]@{ id='skill-a'; sourceId='source-a'; sourcePath='skills/skill-a'; targetPath='.agents/skills/skill-a'; sourceLayoutVersion=3; contentSha256=$canonical.ContentHash })
         }
-        Assert-ThrowsMessage { Expand-ValidatedSkillsSourceArchives -Plan $plan -SourceArchivePaths @{} -WorkingRoot $workingRoot } '^Skills catalog schema version 3 requires a projection-aware installer\.$'
-        Test-Path -LiteralPath $workingRoot | Should Be $false
+        $result = Expand-ValidatedSkillsSourceArchives -Plan $plan -SourceArchivePaths @{ 'source-a'=$canonical.ArchivePath } -WorkingRoot $workingRoot
+        @($result.Skills).Count | Should Be 1
+        [int]$result.Skills[0].sourceLayoutVersion | Should Be 3
     }
 
     # Scenario: A required source archive's bytes do not match its locked archiveSha256.

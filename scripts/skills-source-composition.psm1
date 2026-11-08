@@ -113,7 +113,7 @@ function New-ComposedBootstrapSource {
 
     foreach ($skill in @($ResolvedSkills)) {
         $layoutVersionProperty = $skill.PSObject.Properties['sourceLayoutVersion']
-        if ($null -ne $layoutVersionProperty -and
+        if (-not $InstructionsOnly -and $null -ne $layoutVersionProperty -and
             ($layoutVersionProperty.Value -is [int] -or $layoutVersionProperty.Value -is [long]) -and
             [int64]$layoutVersionProperty.Value -eq 3) {
             throw 'Skills catalog schema version 3 requires a projection-aware installer.'

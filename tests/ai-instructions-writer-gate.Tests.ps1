@@ -97,9 +97,125 @@ function Copy-P7eHome {
 }
 
 function Invoke-P7eLauncherFailure {
-    param([string]$CodexHome,[switch]$Desktop)
+    param([string]$CodexHome,[string]$TargetRoot,[switch]$Desktop)
     $engine=if($Desktop){'powershell.exe'}else{$script:PowerShellExecutable}
-    $output=& $engine -NoProfile -ExecutionPolicy Bypass -File (Join-Path $CodexHome 'hooks\bootstrap-ai-instructions.ps1') -ValidateOnly -SkipUpdateCheck 2>&1
+    $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $CodexHome 'hooks\bootstrap-ai-instructions.ps1'),'-ValidateOnly','-SkipUpdateCheck')
+    if(-not[string]::IsNullOrWhiteSpace($TargetRoot)){$arguments+=@('-TargetRoot',$TargetRoot)}
+    $output=& $engine @arguments 2>&1
+    return [pscustomobject]@{ExitCode=$LASTEXITCODE;Output=($output-join[Environment]::NewLine)}
+}
+
+function Set-P9bJson {
+    param([Parameter(Mandatory=$true)][string]$Path,[Parameter(Mandatory=$true)][object]$Document)
+    $parent=Split-Path -Parent $Path
+    if(-not[string]::IsNullOrWhiteSpace($parent)){New-Item -ItemType Directory -Force -Path $parent|Out-Null}
+    [IO.File]::WriteAllText($Path,(($Document|ConvertTo-Json -Depth 40).Replace("`r`n","`n")+"`n"),[Text.UTF8Encoding]::new($false))
+}
+
+function New-P9bInstructionArchive {
+    param([Parameter(Mandatory=$true)][string]$WorkingRoot,[Parameter(Mandatory=$true)][string]$ArchivePath,[string]$Marker='baseline',[switch]$OmitClaudeDatabase)
+    $sourceRoot=Join-Path $WorkingRoot 'p9b-instructions'
+    Remove-Item -LiteralPath $WorkingRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $ArchivePath -Force -ErrorAction SilentlyContinue
+    foreach($relative in @('.codex/AI-Rules','.github/AI-Rules','.claude/AI-Rules','scripts')){
+        New-Item -ItemType Directory -Force -Path (Join-Path $sourceRoot $relative)|Out-Null
+    }
+    foreach($relative in @('.codex/AGENTS.en.md','.github/copilot-instructions.en.md','.claude/CLAUDE.en.md')){
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot $relative) -Destination (Join-Path $sourceRoot $relative)
+    }
+    foreach($root in @('.codex/AI-Rules','.github/AI-Rules','.claude/AI-Rules')){
+        foreach($file in @(Get-ChildItem -LiteralPath (Join-Path $script:RepositoryRoot $root) -Filter '*.en.md' -File)){
+            Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $sourceRoot "$root/$($file.Name)")
+        }
+    }
+    if($OmitClaudeDatabase){Remove-Item -LiteralPath (Join-Path $sourceRoot '.claude/AI-Rules/Database.en.md') -Force}
+    Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Build-AiInstructions.ps1') -Destination (Join-Path $sourceRoot 'scripts/Build-AiInstructions.ps1')
+    foreach($leaf in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json')){
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot $leaf) -Destination (Join-Path $sourceRoot $leaf)
+    }
+    [IO.File]::AppendAllText((Join-Path $sourceRoot '.codex/AGENTS.en.md'),"`n<!-- $Marker -->`n",[Text.UTF8Encoding]::new($false))
+
+    Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
+    $stream=[IO.File]::Open($ArchivePath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+    try{
+        $archive=[IO.Compression.ZipArchive]::new($stream,[IO.Compression.ZipArchiveMode]::Create,$false)
+        try{
+            $root=[IO.Path]::GetFullPath($sourceRoot).TrimEnd([char[]]@('\','/'))
+            foreach($file in @(Get-ChildItem -LiteralPath $root -Recurse -Force -File|Sort-Object FullName)){
+                $relative=$file.FullName.Substring($root.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+                $entry=$archive.CreateEntry("p9b-source/$relative",[IO.Compression.CompressionLevel]::Optimal)
+                $input=[IO.File]::OpenRead($file.FullName);$output=$entry.Open()
+                try{$input.CopyTo($output)}finally{$output.Dispose();$input.Dispose()}
+            }
+        }finally{$archive.Dispose()}
+    }finally{$stream.Dispose()}
+    return [pscustomobject]@{ArchivePath=$ArchivePath;SourceRoot=$sourceRoot;RendererSha256=(Get-FileHash -LiteralPath (Join-Path $sourceRoot 'scripts/Build-AiInstructions.ps1') -Algorithm SHA256).Hash.ToLowerInvariant()}
+}
+
+function New-P9bBootstrapContext {
+    param([Parameter(Mandatory=$true)][string]$Root,[switch]$SelectProjectProjection,[string]$InstructionCommit=('c'*40))
+    $runtimeRoot=Join-Path $script:BaseV3Home 'hooks/ai-instructions-runtime'
+    $configuration=Get-Content -Raw -LiteralPath (Join-Path $script:BaseV3Home 'ai-instructions-sync.json')|ConvertFrom-Json
+    if($SelectProjectProjection){$configuration.projections.project=@('project-agents')}
+    $catalog=Get-Content -Raw -LiteralPath (Join-Path $runtimeRoot 'catalog/skills-catalog.json')|ConvertFrom-Json
+    $lock=Get-Content -Raw -LiteralPath (Join-Path $runtimeRoot 'catalog/skills-catalog-lock.json')|ConvertFrom-Json
+    $lockSha=(Get-FileHash -LiteralPath (Join-Path $runtimeRoot 'catalog/skills-catalog-lock.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+    $routingPath=Join-Path $Root 'routing.json'
+    $provenancePath=Join-Path $Root 'provenance.json'
+    Set-P9bJson -Path $routingPath -Document ([ordered]@{
+        schemaVersion=4;syncConfiguration=$configuration;catalogId=[string]$catalog.catalogId
+        lockSha256=$lockSha;projectionContractSha256=[string]$lock.projectionContractSha256
+    })
+    Set-P9bJson -Path $provenancePath -Document ([ordered]@{
+        schemaVersion=1;catalogId=[string]$catalog.catalogId;lockSha256=$lockSha
+        instruction=[ordered]@{sourceId='ai-instructions';sourceRepository='https://example.com/ai-instructions.git';sourceRef=$InstructionCommit;sourceCommit=$InstructionCommit;sourceVersion="test@$($InstructionCommit.Substring(0,8))"}
+        skills=@()
+    })
+    return [pscustomobject]@{RuntimeRoot=$runtimeRoot;RoutingPath=$routingPath;ProvenancePath=$provenancePath;ProjectionContractSha256=[string]$lock.projectionContractSha256;LockSha256=$lockSha}
+}
+
+function New-P9bTargetRepository {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    New-Item -ItemType Directory -Force -Path $Path|Out-Null
+    & git -C $Path init --quiet
+    & git -C $Path config user.name 'P9b Test'
+    & git -C $Path config user.email 'p9b@example.test'
+    & git -C $Path remote add origin 'https://example.com/team/p9b-product.git'
+    [IO.File]::WriteAllText((Join-Path $Path 'README.md'),"# P9b product`n",[Text.UTF8Encoding]::new($false))
+    & git -C $Path add -- README.md
+    & git -C $Path commit --quiet -m initial
+    if($LASTEXITCODE-ne0){throw 'Could not create the P9b target repository fixture.'}
+}
+
+function Get-P9bRepoSnapshot {
+    param([Parameter(Mandatory=$true)][string]$Repository)
+    $root=[IO.Path]::GetFullPath($Repository).TrimEnd([char[]]@('\','/'))
+    $gitPrefix=(Join-Path $root '.git').TrimEnd([char[]]@('\','/'))+[IO.Path]::DirectorySeparatorChar
+    $rows=@(
+        foreach($file in @(Get-ChildItem -LiteralPath $root -Recurse -Force -File|Where-Object{-not$_.FullName.StartsWith($gitPrefix,[StringComparison]::OrdinalIgnoreCase)})){
+            $relative=$file.FullName.Substring($root.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+            "$relative`t$((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant())"
+        }
+    )
+    $excludePath=(& git -C $root rev-parse --git-path info/exclude|Select-Object -First 1).Trim()
+    if(-not[IO.Path]::IsPathRooted($excludePath)){$excludePath=Join-Path $root $excludePath}
+    $excludeHash=if(Test-Path -LiteralPath $excludePath -PathType Leaf){(Get-FileHash -LiteralPath $excludePath -Algorithm SHA256).Hash.ToLowerInvariant()}else{'absent'}
+    $head=(& git -C $root rev-parse HEAD|Select-Object -First 1).Trim()
+    $status=@(& git -C $root status --porcelain=v1 --untracked-files=all)-join"`n"
+    return ((@($rows|Sort-Object)+@("exclude`t$excludeHash","head`t$head","status`t$status"))-join"`n")
+}
+
+function Invoke-P9bRepoBootstrap {
+    param(
+        [Parameter(Mandatory=$true)][object]$Context,
+        [Parameter(Mandatory=$true)][string]$ArchivePath,
+        [Parameter(Mandatory=$true)][string]$TargetRoot
+    )
+    $userHome=Join-Path (Split-Path -Parent $TargetRoot) 'p9b-user'
+    New-Item -ItemType Directory -Force -Path $userHome|Out-Null
+    $output=& $script:PowerShellExecutable -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1') `
+        -SourceArchivePath $ArchivePath -ConfigurationPath $Context.RoutingPath -ProvenancePath $Context.ProvenancePath `
+        -RuntimeRoot $Context.RuntimeRoot -TargetRoot $TargetRoot -UserHome $userHome 2>&1
     return [pscustomobject]@{ExitCode=$LASTEXITCODE;Output=($output-join[Environment]::NewLine)}
 }
 
@@ -293,6 +409,277 @@ Describe 'AI instructions writer and reader gate' {
         $result.ExitCode|Should Not Be 0;(Get-AiInstructionsRefusalCode $result.Output)|Should Be closure-invalid
         (Test-Path -LiteralPath $marker)|Should Be $false
         (Get-P7eTreeSnapshot $fixtureHome)|Should Be $before
+    }
+
+    # Scenario: The installed launcher, multi-source coordinator, and REPO bootstrap each receive projection-aware state.
+    # Purpose: Require every layer to invoke the P7e gate from its own inputs and forbid a public parameter or environment-variable v4 bypass.
+    It 'UnitT110_requires_independent_P7e_gates_and_exposes_no_v4_bypass' {
+        $paths=@(
+            (Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions-installed.ps1'),
+            (Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions-multisource.ps1'),
+            (Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1')
+        )
+        foreach($path in $paths){
+            $tokens=$null;$errors=$null
+            $ast=[Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors)
+            @($errors).Count|Should Be 0
+            $calls=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.CommandAst]-and$node.GetCommandName()-ceq'Assert-AiInstructionsRuntimeGate'},$true))
+            $calls.Count|Should BeGreaterThan 0
+            $gateText=@($calls|ForEach-Object{$_.Extent.Text})-join"`n"
+            foreach($argument in @('-Bundle','-Configuration','-RuntimeRoot','-CapabilityReceipt')){$gateText|Should Match ([regex]::Escape($argument))}
+            $parameterNames=@($ast.ParamBlock.Parameters|ForEach-Object{$_.Name.VariablePath.UserPath})
+            @($parameterNames|Where-Object{$_-match'(?i)(writer|manifest.*v4|enable.*v4|projection.*bypass)'}).Count|Should Be 0
+            $text=[IO.File]::ReadAllText($path)
+            $text|Should Not Match '(?i)env:[A-Z0-9_]*(?:WRITER|MANIFEST_V4|ENABLE_V4|PROJECTION_BYPASS)'
+        }
+        $multi=[IO.File]::ReadAllText((Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions-multisource.ps1'))
+        foreach($identity in @('syncConfiguration','catalogId','lockSha256','projectionContractSha256')){$multi|Should Match ([regex]::Escape($identity))}
+        $multi|Should Match 'schemaVersion\s*=\s*4'
+        $multi|Should Match 'RuntimeRoot\s*=\s*\$RuntimeRoot'
+        ([IO.File]::ReadAllText((Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions-installed.ps1')))|Should Match 'RuntimeRoot\s*=\s*\$runtimeRoot'
+    }
+
+    # Scenario: A verified v3/v5 routing context reaches the REPO writer with no project projection selected.
+    # Purpose: Emit a complete v4 Claude/Codex/Copilot manifest, exact excludes, generation 1, and stable renderer evidence; repeat idempotently.
+    It 'InterT111_writes_complete_v4_manifest_and_exact_excludes_idempotently' {
+        $root=Join-Path $script:ExternalRoot 'p9b-v4-complete';New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip')
+        $context=New-P9bBootstrapContext -Root $root
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+
+        $first=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target
+        $first.ExitCode|Should Be 0
+        $manifestPath=Join-Path $target '.codex/ai-instructions.manifest.json'
+        $manifest=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+        [int]$manifest.schemaVersion|Should Be 4
+        [int64]$manifest.generation|Should Be 1
+        [string]$manifest.lockSha256|Should Be $context.LockSha256
+        [string]$manifest.projectionContractSha256|Should Be $context.ProjectionContractSha256
+        @($manifest.projections).Count|Should Be 0
+        (@($manifest.files|Where-Object artifactType -eq instruction|Select-Object -ExpandProperty host -Unique|Sort-Object)-join',')|Should Be 'claude,codex,copilot'
+        foreach($entry in @($manifest.files|Where-Object artifactType -eq instruction)){
+            [string]$entry.rendererId|Should Be 'build-ai-instructions'
+            [string]$entry.rendererSha256|Should Be $source.RendererSha256
+        }
+        @($manifest.files|Where-Object{$_.host-ceq'claude'-and$_.targetPath-ceq'CLAUDE.md'}).Count|Should Be 1
+        @($manifest.files|Where-Object{$_.host-ceq'claude'-and$_.targetPath-like'.claude/AI-Rules/*.en.md'}).Count|Should BeGreaterThan 0
+        @($manifest.files|Where-Object{$_.host-ceq'claude'-and$_.targetPath-like'.claude/ai-instructions-licenses/cccccccccccccccccccccccccccccccccccccccc/*'}).Count|Should BeGreaterThan 0
+        foreach($entry in @($manifest.files|Where-Object host -eq claude)){
+            $path=Join-Path $target ([string]$entry.targetPath)
+            Test-Path -LiteralPath $path -PathType Leaf|Should Be $true
+            (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()|Should Be ([string]$entry.sha256)
+        }
+        $excludePath=(& git -C $target rev-parse --git-path info/exclude|Select-Object -First 1).Trim()
+        if(-not[IO.Path]::IsPathRooted($excludePath)){$excludePath=Join-Path $target $excludePath}
+        $excludeLines=@([IO.File]::ReadAllLines($excludePath)|Where-Object{$_-like'/*'}|Sort-Object)
+        $expectedLines=@('/.codex/ai-instructions.manifest.json')
+        $expectedLines+=@($manifest.files|ForEach-Object{'/'+[string]$_.targetPath})
+        $expectedLines=@($expectedLines|Sort-Object -Unique)
+        $excludeLines|Should Be $expectedLines
+        ([IO.File]::ReadAllText($excludePath))|Should Not Match '(?m)^/\.claude/\*\*$'
+        $before=Get-P9bRepoSnapshot $target
+
+        $second=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target
+        $second.ExitCode|Should Be 0
+        [int64](Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json).generation|Should Be 1
+        (Get-P9bRepoSnapshot $target)|Should Be $before
+    }
+
+    # Scenario: A v4 desired state changes once, repeats, and then reaches Int64 generation maximum before another change.
+    # Purpose: Increment generation only for changed desired state and fail closed without REPO mutation on overflow.
+    It 'InterT112_advances_v4_generation_only_on_change_and_refuses_overflow' {
+        $root=Join-Path $script:ExternalRoot 'p9b-v4-generation';New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $baseline=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'baseline-work') -ArchivePath (Join-Path $root 'baseline.zip') -Marker baseline
+        $changed=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'changed-work') -ArchivePath (Join-Path $root 'changed.zip') -Marker changed
+        $context=New-P9bBootstrapContext -Root $root
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        (Invoke-P9bRepoBootstrap -Context $context -ArchivePath $baseline.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
+        (Invoke-P9bRepoBootstrap -Context $context -ArchivePath $changed.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
+        $manifestPath=Join-Path $target '.codex/ai-instructions.manifest.json'
+        [int64](Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json).generation|Should Be 2
+        (Invoke-P9bRepoBootstrap -Context $context -ArchivePath $changed.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
+        $manifest=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+        [int64]$manifest.generation|Should Be 2
+        $manifest.generation=[int64]::MaxValue;Set-P9bJson -Path $manifestPath -Document $manifest
+        $before=Get-P9bRepoSnapshot $target
+
+        $overflow=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $baseline.ArchivePath -TargetRoot $target
+        $overflow.ExitCode|Should Not Be 0
+        (Get-AiInstructionsRefusalCode $overflow.Output)|Should Be closure-invalid
+        $overflow.Output|Should Match 'generation would overflow'
+        (Get-P9bRepoSnapshot $target)|Should Be $before
+    }
+
+    # Scenario: Sync v5 selects a project projection before the P9c project runtime exists.
+    # Purpose: Return the typed J9 refusal before any REPO byte, index, history, or exclude mutation.
+    It 'InterT113_refuses_project_projection_before_REPO_mutation' {
+        $root=Join-Path $script:ExternalRoot 'p9b-project-unavailable';New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip')
+        $context=New-P9bBootstrapContext -Root $root -SelectProjectProjection
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        $before=Get-P9bRepoSnapshot $target
+
+        $result=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target
+        $result.ExitCode|Should Not Be 0
+        (Get-AiInstructionsRefusalCode $result.Output)|Should Be projection-runtime-unavailable
+        (Get-P9bRepoSnapshot $target)|Should Be $before
+    }
+
+    # Scenario: Each project-owned CLAUDE.md ownership form is crossed with tracked or untracked Claude Rules/licenses, including a linked worktree.
+    # Purpose: Skip the complete Claude family, preserve every protected byte and HEAD, avoid remediation commits, and still update other host families.
+    It 'InterT114_preserves_project_owned_Claude_family_for_<Case>' -TestCases @(
+        @{Case='tracked-base-tracked-rule';Base='tracked';Companion='tracked-rule';Linked=$false},
+        @{Case='staged-base-untracked-license';Base='staged';Companion='untracked-license';Linked=$false},
+        @{Case='unmanaged-base-tracked-license';Base='unmanaged';Companion='tracked-license';Linked=$false},
+        @{Case='manifest-customized-untracked-rule';Base='managed-customized';Companion='untracked-rule';Linked=$false},
+        @{Case='manifest-tracked-tracked-rule';Base='managed-tracked';Companion='tracked-rule';Linked=$false},
+        @{Case='linked-unmanaged-tracked-license';Base='unmanaged';Companion='tracked-license';Linked=$true}
+    ) {
+        param($Case,$Base,$Companion,$Linked)
+        $root=Join-Path $script:ExternalRoot ("p9b-owned-$Case");New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $baseline=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'baseline-work') -ArchivePath (Join-Path $root 'baseline.zip') -Marker baseline
+        $changed=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'changed-work') -ArchivePath (Join-Path $root 'changed.zip') -Marker changed
+        $context=New-P9bBootstrapContext -Root $root
+        $primary=Join-Path $root 'primary';New-P9bTargetRepository $primary
+        $target=$primary
+        if($Linked){
+            $target=Join-Path $root 'linked'
+            & git -C $primary worktree add --quiet -b p9b-linked $target
+            if($LASTEXITCODE-ne0){throw 'Could not create linked-worktree fixture.'}
+        }
+        if($Base-like'managed-*'){
+            (Invoke-P9bRepoBootstrap -Context $context -ArchivePath $baseline.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
+        }
+        $rulePath=Join-Path $target '.claude/AI-Rules/Database.en.md'
+        $licensePath=Join-Path $target '.claude/ai-instructions-licenses/cccccccccccccccccccccccccccccccccccccccc/delivery.json'
+        $companionPath=if($Companion-like'*-rule'){$rulePath}else{$licensePath}
+        if(-not(Test-Path -LiteralPath $companionPath -PathType Leaf)){
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $companionPath)|Out-Null
+            [IO.File]::WriteAllText($companionPath,"project companion $Case`n",[Text.UTF8Encoding]::new($false))
+        }
+        if($Companion-like'tracked-*'){
+            & git -C $target add -f -- ($companionPath.Substring($target.Length).TrimStart([char[]]@('\','/')).Replace('\','/'))
+            & git -C $target commit --quiet -m 'track project Claude companion'
+        }
+        $claudePath=Join-Path $target 'CLAUDE.md'
+        switch($Base){
+            'tracked' {[IO.File]::WriteAllText($claudePath,"tracked project Claude`n",[Text.UTF8Encoding]::new($false));& git -C $target add -f -- CLAUDE.md;& git -C $target commit --quiet -m 'track project Claude base'}
+            'staged' {[IO.File]::WriteAllText($claudePath,"staged project Claude`n",[Text.UTF8Encoding]::new($false));& git -C $target add -f -- CLAUDE.md}
+            'unmanaged' {[IO.File]::WriteAllText($claudePath,"unmanaged project Claude`n",[Text.UTF8Encoding]::new($false))}
+            'managed-customized' {[IO.File]::AppendAllText($claudePath,"project customization`n",[Text.UTF8Encoding]::new($false))}
+            'managed-tracked' {& git -C $target add -f -- CLAUDE.md;& git -C $target commit --quiet -m 'track formerly managed Claude base'}
+        }
+        $claudeBefore=[IO.File]::ReadAllBytes($claudePath)
+        $companionBefore=[IO.File]::ReadAllBytes($companionPath)
+        $claudeFamilyBefore=Get-P7eTreeSnapshot (Join-Path $target '.claude')
+        $headBefore=(& git -C $target rev-parse HEAD|Select-Object -First 1).Trim()
+
+        $result=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $changed.ArchivePath -TargetRoot $target
+        $result.ExitCode|Should Be 0
+        $result.Output|Should Match 'claude-base-skipped-project-owned'
+        [IO.File]::ReadAllBytes($claudePath)|Should Be $claudeBefore
+        [IO.File]::ReadAllBytes($companionPath)|Should Be $companionBefore
+        (Get-P7eTreeSnapshot (Join-Path $target '.claude'))|Should Be $claudeFamilyBefore
+        Test-Path -LiteralPath (Join-Path $target '.claude/AI-Rules/CodeReview.en.md')|Should Be ($Base-like'managed-*')
+        ([IO.File]::ReadAllText((Join-Path $target 'AGENTS.md')))|Should Match '<!-- changed -->'
+        Test-Path -LiteralPath (Join-Path $target '.github/copilot-instructions.md')|Should Be $true
+        (& git -C $target rev-parse HEAD|Select-Object -First 1).Trim()|Should Be $headBefore
+        $result.Output|Should Not Match 'Agent artifact remediation commit created'
+    }
+
+    # Scenario: Legacy production v2/v4 fan-out runs after Claude support is present in the source contract.
+    # Purpose: Preserve all v2/v3 behavior and prove the legacy writer never creates Claude base, Rules, or license paths.
+    It 'InterT115_keeps_legacy_writer_free_of_Claude_artifacts' {
+        $root=Join-Path $script:ExternalRoot 'p9b-legacy-no-claude';New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip')
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        $configuration=Join-Path $root 'routing-v3.json';Set-P9bJson -Path $configuration -Document ([ordered]@{schemaVersion=3;excludedRepositoryUrls=@();excludedRepositoryPaths=@()})
+        $provenance=Join-Path $root 'provenance.json';Set-P9bJson -Path $provenance -Document ([ordered]@{
+            schemaVersion=1;catalogId='test-catalog';lockSha256=('a'*64)
+            instruction=[ordered]@{sourceId='ai-instructions';sourceRepository='https://example.com/ai-instructions.git';sourceRef=('c'*40);sourceCommit=('c'*40);sourceVersion='test@cccccccc'};skills=@()
+        })
+        $output=& $script:PowerShellExecutable -NoProfile -NonInteractive -File (Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1') -SourceArchivePath $source.ArchivePath -ConfigurationPath $configuration -ProvenancePath $provenance -TargetRoot $target -UserHome (Join-Path $root 'user') 2>&1
+        $LASTEXITCODE|Should Be 0
+        $manifest=Get-Content -Raw -LiteralPath (Join-Path $target '.codex/ai-instructions.manifest.json')|ConvertFrom-Json
+        [int]$manifest.schemaVersion|Should Be 2
+        @($manifest.files|Where-Object{[string]$_.targetPath-like'CLAUDE.md'-or[string]$_.targetPath-like'.claude/*'}).Count|Should Be 0
+        Test-Path -LiteralPath (Join-Path $target 'CLAUDE.md')|Should Be $false
+        Test-Path -LiteralPath (Join-Path $target '.claude')|Should Be $false
+    }
+
+    # Scenario: Installed runtime state is mixed, unknown, gate-invalid, or Catalog/Lock-incompatible before fan-out.
+    # Purpose: Return the J4 typed refusal matrix and preserve the complete consumer REPO tree for every rejected v3/v5 input.
+    It 'InterT116_rejects_invalid_writer_context_without_REPO_mutation_<Case>' -TestCases @(
+        @{Case='v3-v4-mixed';Code='mixed-generation'},
+        @{Case='v2-v5-mixed';Code='mixed-generation'},
+        @{Case='unknown-bundle';Code='unsupported-version'},
+        @{Case='platform-gate';Code='platform-mismatch'},
+        @{Case='catalog-lock-incompatible';Code='closure-invalid'}
+    ) {
+        param($Case,$Code)
+        $root=Join-Path $script:ExternalRoot ("p9b-writer-$Case");New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $home=Copy-P7eHome $script:BaseV3Home (Join-Path $root 'home')
+        $bundlePath=Join-Path $home 'hooks/ai-instructions-runtime/runtime-bundle.json'
+        $configurationPath=Join-Path $home 'ai-instructions-sync.json'
+        if($Case-ceq'v3-v4-mixed'){$configuration=Get-Content -Raw $configurationPath|ConvertFrom-Json;$configuration.schemaVersion=4;$configuration.PSObject.Properties.Remove('projections');Set-P9bJson $configurationPath $configuration}
+        elseif($Case-ceq'v2-v5-mixed'){$bundle=Get-Content -Raw $bundlePath|ConvertFrom-Json;$bundle.schemaVersion=2;Set-P9bJson $bundlePath $bundle}
+        elseif($Case-ceq'unknown-bundle'){$bundle=Get-Content -Raw $bundlePath|ConvertFrom-Json;$bundle.schemaVersion=99;Set-P9bJson $bundlePath $bundle}
+        elseif($Case-ceq'platform-gate'){$bundle=Get-Content -Raw $bundlePath|ConvertFrom-Json;$bundle.platform.architecture=if($bundle.platform.architecture-ceq'x64'){'arm64'}else{'x64'};Set-P9bJson $bundlePath $bundle}
+        else{$lockPath=Join-Path $home 'hooks/ai-instructions-runtime/catalog/skills-catalog-lock.json';$lock=Get-Content -Raw $lockPath|ConvertFrom-Json;$lock.catalogId='incompatible-catalog';Set-P9bJson $lockPath $lock}
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        $before=Get-P9bRepoSnapshot $target
+
+        $result=Invoke-P7eLauncherFailure -CodexHome $home -TargetRoot $target
+        $result.ExitCode|Should Not Be 0
+        (Get-AiInstructionsRefusalCode $result.Output)|Should Be $Code
+        (Get-P9bRepoSnapshot $target)|Should Be $before
+    }
+
+    # Scenario: Bootstrap receives a routing envelope whose embedded v5 identity no longer matches the verified v3 bundle.
+    # Purpose: Prove the final layer re-runs the P7e gate instead of trusting the installed or multi-source caller.
+    It 'InterT117_bootstrap_revalidates_the_embedded_v5_context_without_REPO_mutation' {
+        $root=Join-Path $script:ExternalRoot 'p9b-bootstrap-regate';New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip')
+        $context=New-P9bBootstrapContext -Root $root
+        $routing=Get-Content -Raw -LiteralPath $context.RoutingPath|ConvertFrom-Json
+        $routing.syncConfiguration.catalog.ref='d'*40
+        Set-P9bJson -Path $context.RoutingPath -Document $routing
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        $before=Get-P9bRepoSnapshot $target
+
+        $result=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target
+        $result.ExitCode|Should Not Be 0
+        (Get-AiInstructionsRefusalCode $result.Output)|Should Be closure-invalid
+        (Get-P9bRepoSnapshot $target)|Should Be $before
+    }
+
+    # Scenario: The immutable source advances, removes one Claude Rule, and moves license payloads to a new sourceCommit namespace.
+    # Purpose: Delete obsolete Claude Rule/license paths, update the v4 manifest, and remove only their exact exclude entries.
+    It 'InterT118_reconciles_Claude_rule_license_and_exclude_cleanup' {
+        $root=Join-Path $script:ExternalRoot 'p9b-claude-cleanup';New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $baseline=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'baseline-work') -ArchivePath (Join-Path $root 'baseline.zip') -Marker baseline
+        $changed=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'changed-work') -ArchivePath (Join-Path $root 'changed.zip') -Marker changed -OmitClaudeDatabase
+        $context=New-P9bBootstrapContext -Root $root
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        (Invoke-P9bRepoBootstrap -Context $context -ArchivePath $baseline.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
+        $oldRule=Join-Path $target '.claude/AI-Rules/Database.en.md'
+        $oldLicenseRoot=Join-Path $target '.claude/ai-instructions-licenses/cccccccccccccccccccccccccccccccccccccccc'
+        Test-Path -LiteralPath $oldRule -PathType Leaf|Should Be $true
+        Test-Path -LiteralPath $oldLicenseRoot -PathType Container|Should Be $true
+        $context=New-P9bBootstrapContext -Root $root -InstructionCommit ('d'*40)
+
+        $result=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $changed.ArchivePath -TargetRoot $target
+        $result.ExitCode|Should Be 0
+        Test-Path -LiteralPath $oldRule|Should Be $false
+        @(Get-ChildItem -LiteralPath $oldLicenseRoot -File -Recurse -ErrorAction SilentlyContinue).Count|Should Be 0
+        Test-Path -LiteralPath (Join-Path $target '.claude/ai-instructions-licenses/dddddddddddddddddddddddddddddddddddddddd/delivery.json') -PathType Leaf|Should Be $true
+        $manifest=Get-Content -Raw -LiteralPath (Join-Path $target '.codex/ai-instructions.manifest.json')|ConvertFrom-Json
+        [int64]$manifest.generation|Should Be 2
+        @($manifest.files|Where-Object{[string]$_.targetPath-ceq'.claude/AI-Rules/Database.en.md'-or[string]$_.targetPath-like'.claude/ai-instructions-licenses/cccc*'}).Count|Should Be 0
+        $exclude=[IO.File]::ReadAllText((Join-Path $target '.git/info/exclude'))
+        $exclude|Should Not Match '(?m)^/\.claude/AI-Rules/Database\.en\.md$'
+        $exclude|Should Not Match '(?m)^/\.claude/ai-instructions-licenses/cccc'
+        $exclude|Should Match '(?m)^/\.claude/ai-instructions-licenses/dddd'
     }
 
     # Scenario: The stable launcher has opened a verified closure file with its read-only sharing contract.

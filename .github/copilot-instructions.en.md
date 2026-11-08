@@ -26,7 +26,7 @@ If an applicable module is missing, identify the missing file and do not invent 
 
 ## Shared Skills
 
-`~/.agents/skills/` provides repeatable workflows shared by Codex and GitHub Copilot. When the user explicitly names a Skill or the task matches its `description`, read its `SKILL.md` in full before acting, then load only the references, scripts, or assets needed for the current work. Safety, testing, and repository guardrails in this Base Agent and applicable conditional rules remain authoritative.
+`~/.agents/skills/` is the USER Skills root for the current host and provides repeatable workflows. When the user explicitly names a Skill or the task matches its `description`, read its `SKILL.md` in full before acting, then load only the references, scripts, or assets needed for the current work. Safety, testing, and repository guardrails in this Base Agent and applicable conditional rules remain authoritative.
 
 Shared Catalog Skills are installed and updated only in USER (`~/.agents/skills/`) by the USER updater. Consumer bootstrap updates Instructions and never installs shared Skills in REPO, including when USER is missing or invalid; report the USER repair/update requirement. Repository-specific Skills remain available and protected. <!-- ai-invariant:base.shared-skills-user-only -->
 

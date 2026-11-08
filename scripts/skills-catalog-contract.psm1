@@ -798,6 +798,7 @@ function Test-IsManagedManifestV4InstructionLicensePath {
     $namespace = switch ($InstructionHost) {
         'codex' { '.codex' }
         'copilot' { '.github' }
+        'claude' { '.claude' }
         default { return $false }
     }
     return [string]$Value -cmatch ('^' + [regex]::Escape($namespace) + '/ai-instructions-licenses/([0-9a-f]{40}/)?(delivery\.json|source/.+)$')
@@ -933,7 +934,7 @@ function Assert-ManagedManifestV4 {
     Assert-Sha256 -Value (Get-RequiredProperty -Object $Manifest -Name 'lockSha256' -Context 'managed manifest') -Context 'managed manifest lockSha256'
     Assert-Sha256 -Value (Get-RequiredProperty -Object $Manifest -Name 'projectionContractSha256' -Context 'managed manifest') -Context 'managed manifest projectionContractSha256'
     $generation = Get-RequiredProperty -Object $Manifest -Name 'generation' -Context 'managed manifest'
-    if (($generation -isnot [int] -and $generation -isnot [long]) -or [int64]$generation -lt 1) { throw 'managed manifest generation must be an integer greater than or equal to 1.' }
+    if (($generation -isnot [int] -and $generation -isnot [long]) -or [int64]$generation -lt 1 -or [decimal]$generation -gt [int64]::MaxValue) { throw 'managed manifest generation must be an integer from 1 through Int64 maximum.' }
 
     $projections = Get-RequiredProperty -Object $Manifest -Name 'projections' -Context 'managed manifest'
     Assert-StableIdArray -Value $projections -Context 'managed manifest projections' -AllowEmpty

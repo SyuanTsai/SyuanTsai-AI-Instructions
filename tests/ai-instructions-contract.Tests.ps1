@@ -241,7 +241,7 @@ function Assert-AiInstructionContractV2Envelope {
     }
     Assert-OrdinalStringSet -Actual @($Contract.platforms | ForEach-Object id) -Expected @('codex','github-copilot','claude') -Context 'platform inventory'
     foreach ($platform in @($Contract.platforms)) {
-        Assert-ExactPropertySet -Value $platform -Expected @('id','base','rulesRoot','fanOut') -Context "platform '$($platform.id)'"
+        Assert-ExactPropertySet -Value $platform -Expected @('id','base','rulesRoot','userSkillsRoot','fanOut') -Context "platform '$($platform.id)'"
         Assert-ExactPropertySet -Value $platform.base -Expected @('zh-TW','en') -Context "platform '$($platform.id)' base"
         if ($null -ne $platform.fanOut) {
             Assert-ExactPropertySet -Value $platform.fanOut -Expected @('baseTarget','rulesTarget','preserveRuleFileName') -Context "platform '$($platform.id)' fanOut"
@@ -323,7 +323,7 @@ function New-AiInstructionFixture {
         Assert-OrdinalStringSet -Actual @($contract.platforms | ForEach-Object { $_.id }) -Expected @('codex','github-copilot','claude') -Context 'platform inventory'
         $bootstrap = Get-AiInstructionText -Path $script:BootstrapPath
         foreach ($platform in @($contract.platforms)) {
-            Assert-ExactPropertySet -Value $platform -Expected @('id','base','rulesRoot','fanOut') -Context "platform '$($platform.id)'"
+            Assert-ExactPropertySet -Value $platform -Expected @('id','base','rulesRoot','userSkillsRoot','fanOut') -Context "platform '$($platform.id)'"
             Assert-ExactPropertySet -Value $platform.base -Expected @('zh-TW','en') -Context "platform '$($platform.id)' base"
             Assert-AiJsonString -Value $platform.id -Context 'platform id'
             foreach ($pathValue in @($platform.base.'zh-TW',$platform.base.en,$platform.rulesRoot)) {
@@ -331,10 +331,10 @@ function New-AiInstructionFixture {
                 $path = [string]$pathValue
                 [void](Get-ContractFullPath -RelativePath $path)
             }
-            if ($null -eq $platform.fanOut) {
-                if ([string]$platform.id -cne 'claude') { throw "Only Claude may defer fan-out in contract v2." }
-                continue
-            }
+            Assert-AiJsonString -Value $platform.userSkillsRoot -Context "platform '$($platform.id)' USER Skills root"
+            $expectedUserSkillsRoot = if ([string]$platform.id -ceq 'claude') { '~/.claude/skills' } else { '~/.agents/skills' }
+            if ([string]$platform.userSkillsRoot -cne $expectedUserSkillsRoot) { throw "Platform '$($platform.id)' has an unexpected USER Skills root." }
+            if ($null -eq $platform.fanOut) { throw "Platform '$($platform.id)' must declare fan-out in contract v2." }
             Assert-ExactPropertySet -Value $platform.fanOut -Expected @('baseTarget','rulesTarget','preserveRuleFileName') -Context "platform '$($platform.id)' fanOut"
             foreach ($pathValue in @($platform.fanOut.baseTarget,$platform.fanOut.rulesTarget)) {
                 Assert-AiJsonString -Value $pathValue -Context "platform '$($platform.id)' fan-out path"
@@ -344,7 +344,7 @@ function New-AiInstructionFixture {
                 throw "Platform '$($platform.id)' must preserve rule filenames during fan-out."
             }
 
-            $familyName = if ([string]$platform.id -ceq 'codex') { 'Codex' } else { 'GitHub Copilot' }
+            $familyName = if ([string]$platform.id -ceq 'codex') { 'Codex' } elseif ([string]$platform.id -ceq 'claude') { 'Claude' } else { 'GitHub Copilot' }
             $familyPattern = "(?s)Name\s*=\s*'{0}'.*?SourceBase\s*=\s*'{1}'.*?TargetBase\s*=\s*'{2}'.*?SourceRules\s*=\s*'{3}'.*?TargetRules\s*=\s*'{4}'" -f @(
                 [regex]::Escape($familyName),
                 [regex]::Escape([string]$platform.base.en),
@@ -421,13 +421,13 @@ function New-AiInstructionFixture {
     It 'InterT12_matches_bootstrap_families_to_non_null_contract_fan_out' {
         $contract = Get-AiInstructionContract
         $bootstrap = Get-AiInstructionText -Path $script:BootstrapPath
-        $familySection = [regex]::Match($bootstrap, '(?s)\$families\s*=\s*@\((?<body>.*?)\)\s*\r?\n\$sharedSkillsFamilyName')
+        $familySection = [regex]::Match($bootstrap, '(?s)\$families\s*=\s*@\((?<body>.*?)\)\s*.*?\r?\n\$sharedSkillsFamilyName')
         if (-not $familySection.Success) { throw 'Could not parse bootstrap $families.' }
-        $actualNames = @([regex]::Matches($familySection.Groups['body'].Value, "Name\s*=\s*'(?<name>[^']+)'") | ForEach-Object { $_.Groups['name'].Value })
+        $actualNames = @([regex]::Matches($familySection.Value, "Name\s*=\s*'(?<name>[^']+)'") | ForEach-Object { $_.Groups['name'].Value })
         $nameByPlatform = @{ codex = 'Codex'; 'github-copilot' = 'GitHub Copilot'; claude = 'Claude' }
         $expectedNames = @($contract.platforms | Where-Object { $null -ne $_.fanOut } | ForEach-Object { $nameByPlatform[[string]$_.id] })
         Assert-OrdinalStringSet -Actual $actualNames -Expected $expectedNames -Context 'bootstrap fan-out family inventory'
-        if ($actualNames -ccontains 'Claude') { throw 'Claude fan-out must remain disabled in P9a.' }
+        if ($actualNames -cnotcontains 'Claude') { throw 'Claude fan-out must be enabled for the v4 writer.' }
     }
 
     # Scenario: A common source or generated authority artifact drifts after generation.
@@ -747,7 +747,7 @@ function New-AiInstructionFixture {
     }
 
     # Scenario: A common rule changes on only one platform while each localized pair remains present.
-    # Purpose: Enforce exact same-locale semantics after normalizing only the declared platform rule root.
+    # Purpose: Enforce exact same-locale semantics after normalizing the declared rule and USER Skills roots.
     It 'InterT50_keeps_common_rules_normalized_across_platforms' {
         $contract = Get-AiInstructionContract
         foreach ($module in @($contract.modules)) {
@@ -762,7 +762,8 @@ function New-AiInstructionFixture {
                             throw "Module '$($module.id)' locale '$($locale.id)' contains an opposite-platform rule reference."
                         }
                     }
-                    $normalizedByPlatform[[string]$platform.id] = $text.Replace(([string]$platform.rulesRoot + '/'), '{RULE_ROOT}/')
+                    if ($text.Contains('{RULE_ROOT}') -or $text.Contains('{USER_SKILLS_ROOT}')) { throw "Module '$($module.id)' locale '$($locale.id)' contains an unresolved placeholder." }
+                    $normalizedByPlatform[[string]$platform.id] = $text.Replace(([string]$platform.rulesRoot + '/'), '{RULE_ROOT}/').Replace(([string]$platform.userSkillsRoot + '/'), '{USER_SKILLS_ROOT}/')
                 }
                 $reference = [string]$normalizedByPlatform[[string]$applicablePlatforms[0].id]
                 foreach ($platform in @($applicablePlatforms | Select-Object -Skip 1)) {

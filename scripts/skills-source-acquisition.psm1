@@ -595,15 +595,6 @@ function Expand-ValidatedSkillsSourceArchives {
         [Parameter(Mandatory = $true)][string] $WorkingRoot
     )
 
-    foreach ($skill in @($Plan.Skills)) {
-        $layoutVersionProperty = $skill.PSObject.Properties['sourceLayoutVersion']
-        if ($null -ne $layoutVersionProperty -and
-            ($layoutVersionProperty.Value -is [int] -or $layoutVersionProperty.Value -is [long]) -and
-            [int64]$layoutVersionProperty.Value -eq 3) {
-            throw 'Skills catalog schema version 3 requires a projection-aware installer.'
-        }
-    }
-
     $workingRootPath = [System.IO.Path]::GetFullPath($WorkingRoot)
     if (Test-Path -LiteralPath $workingRootPath) {
         if (-not (Test-Path -LiteralPath $workingRootPath -PathType Container)) {
@@ -692,8 +683,7 @@ function Expand-ValidatedSkillsSourceArchives {
             throw "Selected Skill '$skillId' source layout version must be an integer."
         }
         $sourceLayoutVersion = if ($null -ne $layoutVersionProperty) { [int64]$layoutVersionProperty.Value } else { 1 }
-        if ($sourceLayoutVersion -eq 3) { throw 'Skills catalog schema version 3 requires a projection-aware installer.' }
-        if ($sourceLayoutVersion -notin @(1,2)) {
+        if ($sourceLayoutVersion -notin @(1,2,3)) {
             throw "Unsupported source layout version '$sourceLayoutVersion' for selected Skill '$skillId'."
         }
         if (-not $stagedSourcesById.ContainsKey($sourceId)) {
@@ -705,8 +695,8 @@ function Expand-ValidatedSkillsSourceArchives {
         if (-not (Test-SafeSourceRelativePath -Path $targetPath)) {
             throw "Unsafe target path for selected Skill '$skillId': $targetPath"
         }
-        if ($sourceLayoutVersion -eq 2 -and ($sourcePath -cne "skills/$skillId" -or $targetPath -cne ".agents/skills/$skillId")) {
-            throw "Selected Skill '$skillId' has a non-canonical v2 source/target mapping."
+        if ($sourceLayoutVersion -in @(2,3) -and ($sourcePath -cne "skills/$skillId" -or $targetPath -cne ".agents/skills/$skillId")) {
+            throw "Selected Skill '$skillId' has a non-canonical v$sourceLayoutVersion source/target mapping."
         }
 
         $sourceRoot = [string] $stagedSourcesById[$sourceId].rootPath

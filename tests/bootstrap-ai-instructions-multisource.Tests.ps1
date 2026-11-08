@@ -140,9 +140,9 @@ function Convert-TestTargetManifestToV1 {
 }
 
 Describe 'bootstrap-ai-instructions-multisource' {
-    # Scenario: A gate-verified projection-aware sync configuration reaches the multi-source bootstrap.
-    # Purpose: Accept v5 for the same Instructions-only fan-out behavior while projection ownership stays with P8.
-    It 'InterT04_accepts_sync_v5_for_instructions_fan_out' {
+    # Scenario: A v5 sync configuration is paired with the legacy Catalog/Lock fixture.
+    # Purpose: Enforce the P7e gate before acquisition or target mutation instead of treating v5 alone as trusted.
+    It 'InterT04_rejects_sync_v5_with_a_legacy_catalog_pair_without_mutation' {
         $catalogPath=Join-Path $TestDrive 'v5-catalog.json';$lockPath=Join-Path $TestDrive 'v5-lock.json';$configurationPath=Join-Path $TestDrive 'v5-config.json'
         $instructionArchive=Join-Path $TestDrive 'v5-instructions.zip';$skillArchivePath=Join-Path $TestDrive 'v5-source.zip';$targetRoot=Join-Path $TestDrive 'v5-target'
         New-TestInstructionArchive (Join-Path $TestDrive 'v5-instruction-root') $instructionArchive
@@ -155,11 +155,15 @@ Describe 'bootstrap-ai-instructions-multisource' {
         New-TestTargetRepository $targetRoot
         $readmePath=Join-Path $targetRoot 'README.md';$before=[IO.File]::ReadAllBytes($readmePath)
 
-        & $script:BootstrapScript -CatalogPath $catalogPath -LockPath $lockPath -ConfigurationPath $configurationPath -InstructionSourceArchivePath $instructionArchive -InstructionSourceCommit ('c'*40) -SourceArchivePaths @{'source-a'=$skillArchivePath} -TargetRoot $targetRoot
+        $message=$null
+        try { & $script:BootstrapScript -CatalogPath $catalogPath -LockPath $lockPath -ConfigurationPath $configurationPath -InstructionSourceArchivePath $instructionArchive -InstructionSourceCommit ('c'*40) -SourceArchivePaths @{'source-a'=$skillArchivePath} -TargetRoot $targetRoot }
+        catch { $message=$_.Exception.Message }
 
+        $message | Should Match 'consistent Catalog/Lock v3 pair'
+        $message | Should Match 'ai-instructions-refusal-code=projection-runtime-unavailable'
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($readmePath))|Should Be ([Convert]::ToBase64String($before))
-        Test-Path -LiteralPath (Join-Path $targetRoot '.codex\ai-instructions.manifest.json')|Should Be $true
-        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md')|Should Be $true
+        Test-Path -LiteralPath (Join-Path $targetRoot '.codex\ai-instructions.manifest.json')|Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md')|Should Be $false
     }
 
     # Scenario: A licensed external Skill is selected for consumer Instructions synchronization.

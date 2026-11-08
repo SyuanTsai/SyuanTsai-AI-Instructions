@@ -25,6 +25,7 @@
         "en": ".codex/AGENTS.en.md"
       },
       "rulesRoot": ".codex/AI-Rules",
+      "userSkillsRoot": "~/.agents/skills",
       "fanOut": {
         "baseTarget": "AGENTS.md",
         "rulesTarget": ".codex/AI-Rules",
@@ -38,6 +39,7 @@
         "en": ".github/copilot-instructions.en.md"
       },
       "rulesRoot": ".github/AI-Rules",
+      "userSkillsRoot": "~/.agents/skills",
       "fanOut": {
         "baseTarget": ".github/copilot-instructions.md",
         "rulesTarget": ".github/AI-Rules",
@@ -51,7 +53,12 @@
         "en": ".claude/CLAUDE.en.md"
       },
       "rulesRoot": ".claude/AI-Rules",
-      "fanOut": null
+      "userSkillsRoot": "~/.claude/skills",
+      "fanOut": {
+        "baseTarget": "CLAUDE.md",
+        "rulesTarget": ".claude/AI-Rules",
+        "preserveRuleFileName": true
+      }
     }
   ],
   "modules": [

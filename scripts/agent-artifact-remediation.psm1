@@ -1,6 +1,8 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+Import-Module (Join-Path $PSScriptRoot 'skills-catalog-contract.psm1') -Force
+
 $script:RemediationMessage = 'chore: stop tracking local AI instructions'
 $script:RemediationUserName = 'Codex AI Instructions'
 $script:RemediationUserEmail = 'codex-ai-instructions@example.invalid'
@@ -123,7 +125,9 @@ function Test-IsReservedAgentArtifactPath {
     catch { return $false }
     # Skills may be tracked project content. Migration needs whole-Skill ownership evidence.
     if ($normalized.StartsWith('.agents/skills/',[StringComparison]::OrdinalIgnoreCase) -or
-        $normalized.StartsWith('.codex/skills/',[StringComparison]::OrdinalIgnoreCase)) { return $false }
+        $normalized.StartsWith('.codex/skills/',[StringComparison]::OrdinalIgnoreCase) -or
+        $normalized.StartsWith('.claude/skills/',[StringComparison]::OrdinalIgnoreCase) -or
+        $normalized.StartsWith('.github/skills/',[StringComparison]::OrdinalIgnoreCase)) { return $false }
     foreach ($exactPath in @(
         'AGENTS.md',
         'AGENTS.en.md',
@@ -138,6 +142,8 @@ function Test-IsReservedAgentArtifactPath {
     foreach ($prefix in @(
         '.agents/',
         '.codex/ai-instructions-licenses/',
+        '.claude/AI-Rules/',
+        '.claude/ai-instructions-licenses/',
         '.github/ai-instructions-licenses/',
         '.github/AI-Rules/',
         '.github/agents/',
@@ -199,14 +205,14 @@ function Get-RemediationLegacyManifestPaths {
     Assert-RemediationPathHasNoReparsePoint -Repository $Repository -RelativePath '.codex/ai-instructions.manifest.json'
     try { $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json }
     catch { return ,$paths }
-    if ($manifest.schemaVersion -eq 4) {
-        throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
-    }
+    if ($manifest.schemaVersion -eq 4) { Assert-ManagedManifestV4 -Manifest $manifest }
     foreach ($entry in @($manifest.files)) {
         if ($null -eq $entry -or $null -eq $entry.PSObject.Properties['targetPath']) { continue }
         $targetPath = [string]$entry.targetPath
         if ($targetPath.StartsWith('.agents/skills/',[StringComparison]::OrdinalIgnoreCase) -or
-            $targetPath.StartsWith('.codex/skills/',[StringComparison]::OrdinalIgnoreCase)) { continue }
+            $targetPath.StartsWith('.codex/skills/',[StringComparison]::OrdinalIgnoreCase) -or
+            $targetPath.StartsWith('.claude/skills/',[StringComparison]::OrdinalIgnoreCase) -or
+            $targetPath.StartsWith('.github/skills/',[StringComparison]::OrdinalIgnoreCase)) { continue }
         if (-not (Test-IsAllowedLegacyAgentArtifactPath -Path $targetPath)) {
             $isTracked = $false
             try {
@@ -217,7 +223,10 @@ function Get-RemediationLegacyManifestPaths {
             if ($isTracked) { throw "Tracked manifest target is outside the reserved Agent artifact scope: $targetPath" }
             continue
         }
-        if (-not $targetPath.StartsWith('.agents/skills/',[StringComparison]::OrdinalIgnoreCase) -and -not $targetPath.StartsWith('.codex/skills/',[StringComparison]::OrdinalIgnoreCase)) { [void]$paths.Add((ConvertTo-RemediationPath -Path $targetPath)) }
+        if (-not $targetPath.StartsWith('.agents/skills/',[StringComparison]::OrdinalIgnoreCase) -and
+            -not $targetPath.StartsWith('.codex/skills/',[StringComparison]::OrdinalIgnoreCase) -and
+            -not $targetPath.StartsWith('.claude/skills/',[StringComparison]::OrdinalIgnoreCase) -and
+            -not $targetPath.StartsWith('.github/skills/',[StringComparison]::OrdinalIgnoreCase)) { [void]$paths.Add((ConvertTo-RemediationPath -Path $targetPath)) }
     }
     return ,$paths
 }
@@ -649,7 +658,8 @@ function Invoke-AgentArtifactRemediation {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string] $Repository,
-        [string] $GitExecutable = 'git'
+        [string] $GitExecutable = 'git',
+        [string[]] $ProtectedPathPrefixes = @()
     )
 
     $repositoryRoot = ((Invoke-RemediationGit -Repository $Repository -GitExecutable $GitExecutable -Arguments @('rev-parse','--show-toplevel')) | Select-Object -First 1).Trim()
@@ -683,6 +693,15 @@ function Invoke-AgentArtifactRemediation {
     $trackedReserved = New-Object 'System.Collections.Generic.HashSet[string]' $comparer
     foreach ($trackedPath in @(@($trackedSets.Index) + @($trackedSets.Head))) {
         if (Test-IsReservedAgentArtifactPath -Path ([string]$trackedPath) -LegacyManifestPaths $legacyManifestPaths) {
+            $protected = $false
+            foreach ($prefix in @($ProtectedPathPrefixes)) {
+                $normalizedPrefix = (ConvertTo-RemediationPath -Path ([string]$prefix)).TrimEnd('/')
+                if ([string]$trackedPath -ceq $normalizedPrefix -or ([string]$trackedPath).StartsWith($normalizedPrefix + '/',[StringComparison]::OrdinalIgnoreCase)) {
+                    $protected = $true
+                    break
+                }
+            }
+            if ($protected) { continue }
             [void]$trackedReserved.Add([string]$trackedPath)
         }
     }

@@ -4,6 +4,7 @@ param(
     [string] $TargetRoot,
     [string] $ConfigurationPath,
     [string] $ProvenancePath,
+    [string] $RuntimeRoot = $PSScriptRoot,
     [string] $GitExecutable = 'git',
     [string] $UserHome = [Environment]::GetFolderPath('UserProfile'),
     [switch] $WhatIf,
@@ -1321,8 +1322,10 @@ function Test-IsAllowedManagedPath {
     if (Test-InstructionLicenseDeliveryPath $Path) { return $true }
 
     if ($Path -eq 'AGENTS.md' -or
+        $Path -eq 'CLAUDE.md' -or
         $Path -eq '.github/copilot-instructions.md' -or
         $Path -match '^\.codex/AI-Rules/[^/\\]+\.en\.md$' -or
+        $Path -match '^\.claude/AI-Rules/[^/\\]+\.en\.md$' -or
         $Path -match '^\.github/AI-Rules/[^/\\]+\.en\.md$') {
         return $true
     }
@@ -1581,9 +1584,47 @@ function Get-ManagedWorktreeRoots {
     }
 }
 
+function Get-ClaudeProjectOwnedWorktreeRoots {
+    param([Parameter(Mandatory = $true)][string] $Repository,[switch] $Strict)
+    $owned = New-Object System.Collections.Generic.List[string]
+    foreach ($worktreeRoot in @(Get-ManagedWorktreeRoots -Repository $Repository -Strict:$Strict)) {
+        $basePath = Join-Path $worktreeRoot 'CLAUDE.md'
+        $tracked = (Get-GitExitCode -Repository $worktreeRoot -Arguments @('ls-files','--error-unmatch','--','CLAUDE.md')) -eq 0
+        $staged = Test-GitPathHasStagedChanges -Repository $worktreeRoot -Path 'CLAUDE.md'
+        if (-not (Test-Path -LiteralPath $basePath -PathType Leaf)) {
+            if ($tracked -or $staged) { $owned.Add([string]$worktreeRoot) }
+            continue
+        }
+        $managedEntry = $null
+        $manifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/','\')
+        if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+            try {
+                $candidate = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
+                if ($candidate.schemaVersion -eq 4) { Assert-ManagedManifestV4 -Manifest $candidate }
+                elseif ($candidate.schemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $candidate }
+                elseif ($candidate.schemaVersion -eq 1) { Assert-LegacyManagedManifestV1 -Manifest $candidate }
+                else { throw "unsupported schemaVersion '$($candidate.schemaVersion)'." }
+                $matches = @($candidate.files | Where-Object { [string]$_.targetPath -ceq 'CLAUDE.md' })
+                if ($matches.Count -gt 1) { throw 'duplicate CLAUDE.md ownership entries.' }
+                if ($matches.Count -eq 1) { $managedEntry = $matches[0] }
+            }
+            catch {
+                if ($Strict) { throw "Cannot classify Claude ownership in linked worktree '$worktreeRoot': $($_.Exception.Message)" }
+                $owned.Add([string]$worktreeRoot)
+                continue
+            }
+        }
+        $hashMatches = $null -ne $managedEntry -and
+            (Get-ManagedContentHash -Path $basePath -TargetPath 'CLAUDE.md') -ceq [string]$managedEntry.sha256
+        if ($tracked -or $staged -or $null -eq $managedEntry -or -not $hashMatches) { $owned.Add([string]$worktreeRoot) }
+    }
+    return @($owned)
+}
+
 function Assert-NoRepoManagedManifestV4 {
     param(
         [Parameter(Mandatory = $true)][string] $Repository,
+        [switch] $AllowV4,
         [switch] $Strict
     )
 
@@ -1635,7 +1676,8 @@ function Assert-NoRepoManagedManifestV4 {
             continue
         }
         if ($isSchemaV4) {
-            throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
+            if ($AllowV4) { Assert-ManagedManifestV4 -Manifest $worktreeManifest }
+            else { throw (New-AiInstructionsRefusalException -Code 'downgrade-refused' -Message 'A live worktree already contains REPO managed manifest v4; the legacy writer cannot downgrade it.') }
         }
     }
 }
@@ -1658,10 +1700,8 @@ function Get-SharedManagedExcludePaths {
             if ($worktreeManifestSchemaVersion -isnot [int] -and $worktreeManifestSchemaVersion -isnot [long]) {
                 throw 'schemaVersion must be an integer.'
             }
-            if ($worktreeManifestSchemaVersion -eq 4) {
-                throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
-            }
-            if ($worktreeManifestSchemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $worktreeManifest }
+            if ($worktreeManifestSchemaVersion -eq 4) { Assert-ManagedManifestV4 -Manifest $worktreeManifest }
+            elseif ($worktreeManifestSchemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $worktreeManifest }
             elseif ($worktreeManifestSchemaVersion -eq 1) { Assert-LegacyManagedManifestV1 -Manifest $worktreeManifest }
             else {
                 throw "unsupported schemaVersion '$worktreeManifestSchemaVersion'."
@@ -2047,8 +2087,11 @@ function New-ManifestEntry {
     elseif ($TargetPath -eq '.github/copilot-instructions.md') {
         $artifactId = 'copilot-base'
     }
+    elseif ($TargetPath -eq 'CLAUDE.md') {
+        $artifactId = 'claude-base'
+    }
     elseif (Test-InstructionLicenseDeliveryPath $TargetPath) {
-        $artifactId = if ($TargetPath.StartsWith('.codex/')) { 'codex-licensing' } else { 'copilot-licensing' }
+        $artifactId = if ($TargetPath.StartsWith('.codex/')) { 'codex-licensing' } elseif ($TargetPath.StartsWith('.claude/')) { 'claude-licensing' } else { 'copilot-licensing' }
     }
     elseif ($TargetPath.StartsWith('.codex/AI-Rules/', [System.StringComparison]::Ordinal)) {
         $ruleName = [regex]::Replace(
@@ -2066,6 +2109,14 @@ function New-ManifestEntry {
         ).Trim('-')
         $artifactId = "copilot-rule-$ruleName"
     }
+    elseif ($TargetPath.StartsWith('.claude/AI-Rules/', [System.StringComparison]::Ordinal)) {
+        $ruleName = [regex]::Replace(
+            [System.IO.Path]::GetFileName($TargetPath).Replace('.en.md', '').ToLowerInvariant(),
+            '[^a-z0-9-]',
+            '-'
+        ).Trim('-')
+        $artifactId = "claude-rule-$ruleName"
+    }
     else {
         throw "Cannot derive instruction artifact ID for managed target: $TargetPath"
     }
@@ -2074,7 +2125,7 @@ function New-ManifestEntry {
         throw "Derived artifact ID is not lowercase kebab-case: $artifactId"
     }
 
-    return [pscustomobject][ordered]@{
+    $result = [ordered]@{
         artifactType = $artifactType
         artifactId = $artifactId
         sourceId = [string] $source.sourceId
@@ -2083,9 +2134,15 @@ function New-ManifestEntry {
         sourceCommit = [string] $source.sourceCommit
         sourceVersion = [string] $source.sourceVersion
         sourcePath = $SourcePath
-        targetPath = $TargetPath
-        sha256 = $Sha256
     }
+    if ($repoManifestWriter -ceq 'v4' -and $artifactType -ceq 'instruction') {
+        $result.host = if ($TargetPath -ceq 'AGENTS.md' -or $TargetPath.StartsWith('.codex/')) { 'codex' } elseif ($TargetPath -ceq 'CLAUDE.md' -or $TargetPath.StartsWith('.claude/')) { 'claude' } else { 'copilot' }
+        $result.rendererId = 'build-ai-instructions'
+        $result.rendererSha256 = [string]$script:rendererSha256
+    }
+    $result.targetPath = $TargetPath
+    $result.sha256 = $Sha256
+    return [pscustomobject]$result
 }
 
 function Convert-ManifestEntryForSchema {
@@ -2119,7 +2176,7 @@ function Copy-ExistingManifestEntry {
     if ($null -eq $Entry.PSObject.Properties['artifactType']) {
         return [pscustomobject][ordered]@{sourcePath=$Entry.sourcePath; targetPath=$Entry.targetPath; sha256=$Entry.sha256}
     }
-    return [pscustomobject][ordered]@{
+    $copy = [ordered]@{
         artifactType = [string] $Entry.artifactType
         artifactId = [string] $Entry.artifactId
         sourceId = [string] $Entry.sourceId
@@ -2128,9 +2185,22 @@ function Copy-ExistingManifestEntry {
         sourceCommit = [string] $Entry.sourceCommit
         sourceVersion = [string] $Entry.sourceVersion
         sourcePath = [string] $Entry.sourcePath
-        targetPath = [string] $Entry.targetPath
-        sha256 = [string] $Entry.sha256
     }
+    if ($repoManifestWriter -ceq 'v4' -and [string]$Entry.artifactType -ceq 'instruction') {
+        $targetPath = [string]$Entry.targetPath
+        $copy.host = if ($targetPath -ceq 'AGENTS.md' -or $targetPath.StartsWith('.codex/')) { 'codex' } elseif ($targetPath -ceq 'CLAUDE.md' -or $targetPath.StartsWith('.claude/')) { 'claude' } else { 'copilot' }
+        $copy.rendererId = 'build-ai-instructions'
+        $copy.rendererSha256 = [string]$script:rendererSha256
+    }
+    elseif ($null -ne $Entry.PSObject.Properties['host']) {
+        $copy.host = [string]$Entry.host
+        $copy.rendererId = [string]$Entry.rendererId
+        $copy.rendererSha256 = [string]$Entry.rendererSha256
+    }
+    if ($null -ne $Entry.PSObject.Properties['projectionId']) { $copy.projectionId = [string]$Entry.projectionId }
+    $copy.targetPath = [string]$Entry.targetPath
+    $copy.sha256 = [string]$Entry.sha256
+    return [pscustomobject]$copy
 }
 
 function New-TargetMutationSnapshot {
@@ -4087,6 +4157,8 @@ if ([string]::IsNullOrWhiteSpace($ConfigurationPath)) {
 
 $configurationFullPath = [System.IO.Path]::GetFullPath($ConfigurationPath)
 $configuration = $null
+$repoManifestWriter = 'legacy'
+$projectionContractSha256 = $null
 if (Test-Path -LiteralPath $configurationFullPath -PathType Leaf) {
     try {
         $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationFullPath | ConvertFrom-Json
@@ -4099,6 +4171,50 @@ if (Test-Path -LiteralPath $configurationFullPath -PathType Leaf) {
         ($configuration.schemaVersion -is [int] -or $configuration.schemaVersion -is [long]) -and
         [int64]$configuration.schemaVersion -eq 5) {
         throw 'AI Instructions sync configuration schema version 5 requires a projection-aware installer.'
+    }
+    if (($configuration.schemaVersion -is [int] -or $configuration.schemaVersion -is [long]) -and
+        [int64]$configuration.schemaVersion -eq 4 -and $null -ne $configuration.PSObject.Properties['syncConfiguration']) {
+        foreach ($name in @($configuration.PSObject.Properties.Name)) {
+            if ($name -cnotin @('schemaVersion','syncConfiguration','catalogId','lockSha256','projectionContractSha256')) {
+                throw "Projection-aware routing configuration contains unsupported property '$name'."
+            }
+        }
+        foreach ($name in @('syncConfiguration','catalogId','lockSha256','projectionContractSha256')) {
+            if ($null -eq $configuration.PSObject.Properties[$name]) { throw "Projection-aware routing configuration is missing '$name'." }
+        }
+        $syncConfiguration = $configuration.syncConfiguration
+        Assert-AiInstructionsSyncConfigurationV5 -Configuration $syncConfiguration | Out-Null
+        if (@($syncConfiguration.projections.project).Count -gt 0) {
+            throw (New-AiInstructionsRefusalException -Code 'projection-runtime-unavailable' -Message 'Project Skill projections are unavailable until the P9c projection runtime is installed.')
+        }
+        $runtimeRootPath = [System.IO.Path]::GetFullPath($RuntimeRoot)
+        $runtimeBundlePath = Join-Path $runtimeRootPath 'runtime-bundle.json'
+        $runtimeCatalogPath = Join-Path $runtimeRootPath 'catalog\skills-catalog.json'
+        $runtimeLockPath = Join-Path $runtimeRootPath 'catalog\skills-catalog-lock.json'
+        $platformRuntimePath = Join-Path $runtimeRootPath 'platform-runtime.psd1'
+        try {
+            $runtimeBundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $runtimeBundlePath | ConvertFrom-Json
+            $runtimeCatalog = Test-SkillsCatalogDocument -CatalogPath $runtimeCatalogPath
+            $runtimeLock = Test-SkillsCatalogLockDocument -LockPath $runtimeLockPath -CatalogPath $runtimeCatalogPath
+        }
+        catch { throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Projection-aware bootstrap routing validation failed: $($_.Exception.Message)" -InnerException $_.Exception) }
+        if ([int64]$runtimeCatalog.schemaVersion -ne 3 -or [int64]$runtimeLock.schemaVersion -ne 3 -or
+            [string]$runtimeCatalog.catalogId -cne [string]$configuration.catalogId -or
+            (Get-RawContentHash -Path $runtimeLockPath) -cne [string]$configuration.lockSha256 -or
+            [string]$runtimeLock.projectionContractSha256 -cne [string]$configuration.projectionContractSha256 -or
+            [string]$runtimeBundle.projectionContractSha256 -cne [string]$configuration.projectionContractSha256) {
+            throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message 'Projection-aware routing Catalog/Lock/bundle identity is inconsistent.')
+        }
+        Import-Module $platformRuntimePath -Force -ErrorAction Stop
+        $capabilityReceipt = Get-PlatformCapabilities -Required ([string[]]@($runtimeBundle.requiredCapabilities))
+        Assert-AiInstructionsRuntimeGate -Bundle $runtimeBundle -Configuration $syncConfiguration -RuntimeRoot $runtimeRootPath -CapabilityReceipt $capabilityReceipt | Out-Null
+        $repoManifestWriter = 'v4'
+        $projectionContractSha256 = [string]$configuration.projectionContractSha256
+        $configuration = [pscustomobject][ordered]@{
+            schemaVersion = 3
+            excludedRepositoryUrls = @($syncConfiguration.excludedRepositoryUrls)
+            excludedRepositoryPaths = @($syncConfiguration.excludedRepositoryPaths)
+        }
     }
 }
 
@@ -4172,11 +4288,21 @@ $repositoryIndexLock = $null
 $userSkillMigrationLock = $null
 $remediationTransaction = $null
 try {
-    Assert-NoRepoManagedManifestV4 -Repository $targetRootPath
+    Assert-NoRepoManagedManifestV4 -Repository $targetRootPath -AllowV4:($repoManifestWriter -ceq 'v4')
+    $claudeProjectOwnedWorktrees = @(Get-ClaudeProjectOwnedWorktreeRoots -Repository $targetRootPath)
+    $remediationProtectedPaths = if ($claudeProjectOwnedWorktrees.Count -gt 0) {
+        @('CLAUDE.md','.claude/AI-Rules','.claude/ai-instructions-licenses')
+    }
+    else { @('CLAUDE.md') }
     if (-not $WhatIf) {
         $repositoryOperationLock = Open-RepositoryOperationLock -Repository $targetRootPath
-        Assert-NoRepoManagedManifestV4 -Repository $targetRootPath -Strict
-        $remediationTransaction = Invoke-AgentArtifactRemediation -Repository $targetRootPath -GitExecutable $GitExecutable
+        Assert-NoRepoManagedManifestV4 -Repository $targetRootPath -AllowV4:($repoManifestWriter -ceq 'v4') -Strict
+        $claudeProjectOwnedWorktrees = @(Get-ClaudeProjectOwnedWorktreeRoots -Repository $targetRootPath -Strict)
+        $remediationProtectedPaths = if ($claudeProjectOwnedWorktrees.Count -gt 0) {
+            @('CLAUDE.md','.claude/AI-Rules','.claude/ai-instructions-licenses')
+        }
+        else { @('CLAUDE.md') }
+        $remediationTransaction = Invoke-AgentArtifactRemediation -Repository $targetRootPath -GitExecutable $GitExecutable -ProtectedPathPrefixes $remediationProtectedPaths
     }
     if ($null -ne $remediationTransaction) {
         if (@($remediationTransaction.Paths).Count -gt 0) {
@@ -4196,6 +4322,7 @@ try {
 $families = @(
     @{
         Name = 'Codex'
+        Host = 'codex'
         SourceBase = '.codex/AGENTS.en.md'
         TargetBase = 'AGENTS.md'
         SourceRules = '.codex/AI-Rules'
@@ -4203,12 +4330,23 @@ $families = @(
     },
     @{
         Name = 'GitHub Copilot'
+        Host = 'copilot'
         SourceBase = '.github/copilot-instructions.en.md'
         TargetBase = '.github/copilot-instructions.md'
         SourceRules = '.github/AI-Rules'
         TargetRules = '.github/AI-Rules'
     }
 )
+if ($repoManifestWriter -ceq 'v4') {
+    $families += @{
+        Name = 'Claude'
+        Host = 'claude'
+        SourceBase = '.claude/CLAUDE.en.md'
+        TargetBase = 'CLAUDE.md'
+        SourceRules = '.claude/AI-Rules'
+        TargetRules = '.claude/AI-Rules'
+    }
+}
 $sharedSkillsFamilyName = 'Shared Agent Skills'
 $sharedSkillsSource = '.agents/skills'
 
@@ -4217,6 +4355,7 @@ $manifestExists = Test-Path -LiteralPath $manifestFullPath -PathType Leaf
 $manifestEntriesByTarget = @{}
 $manifestSchemaVersion = $null
 $script:instructionProvenance = $null
+$script:rendererSha256 = $null
 $script:skillProvenanceById = @{}
 $provenance = $null
 
@@ -4279,21 +4418,28 @@ if ($manifestExists) {
 
     $manifestSchemaVersion = $manifest.schemaVersion
     if ($manifestSchemaVersion -eq 4) {
-        throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
+        if ($repoManifestWriter -cne 'v4') { throw (New-AiInstructionsRefusalException -Code 'downgrade-refused' -Message 'The legacy writer cannot replace REPO managed manifest v4.') }
+        Assert-ManagedManifestV4 -Manifest $manifest
     }
-    if (($manifestSchemaVersion -isnot [int] -and $manifestSchemaVersion -isnot [long]) -or $manifestSchemaVersion -notin @(1, 2, 3)) {
+    if (($manifestSchemaVersion -isnot [int] -and $manifestSchemaVersion -isnot [long]) -or $manifestSchemaVersion -notin @(1, 2, 3, 4)) {
         throw "Unsupported managed instruction manifest schema: $($manifest.schemaVersion)"
     }
 
     if ($manifestSchemaVersion -in @(2,3)) {
         Assert-ManagedManifest -Manifest $manifest
     }
-    else { Assert-LegacyManagedManifestV1 -Manifest $manifest }
+    elseif ($manifestSchemaVersion -eq 1) { Assert-LegacyManagedManifestV1 -Manifest $manifest }
 
-    if ($manifestSchemaVersion -in @(2,3) -and
+    if ($manifestSchemaVersion -in @(2,3,4) -and
         ([string]$manifest.catalogId -cne [string]$provenance.catalogId -or
          [string]$manifest.lockSha256 -cnotmatch '^[0-9a-f]{64}$')) {
         throw 'Managed instruction manifest Catalog identity or historical lock hash is invalid.'
+    }
+    if ($manifestSchemaVersion -eq 4 -and
+        ([string]$manifest.lockSha256 -cne [string]$provenance.lockSha256 -or
+         [string]$manifest.projectionContractSha256 -cne [string]$projectionContractSha256 -or
+         @($manifest.projections).Count -ne 0)) {
+        throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message 'REPO managed manifest v4 identity does not match the verified routing context.')
     }
     foreach ($entry in @($manifest.files)) {
         $targetPath = [string] $entry.targetPath
@@ -4348,10 +4494,12 @@ $trackedPaths = New-Object 'System.Collections.Generic.HashSet[string]' $gitPath
 foreach ($trackedPath in @(Invoke-Git -Repository $targetRootPath -Arguments @('-c','core.quotePath=true','ls-files'))) {
     [void]$trackedPaths.Add((ConvertFrom-GitQuotedPath -Path ([string]$trackedPath)).Replace('\','/'))
 }
+$currentClaudeProjectOwned = @($claudeProjectOwnedWorktrees | Where-Object { [System.IO.Path]::GetFullPath([string]$_).TrimEnd([char[]]@('\','/')).Equals($targetRootPath,[System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
 $trackedPollutionPaths = @(@(
     if ($trackedPaths.Contains($manifestRelativePath)) { $manifestRelativePath }
     foreach ($targetPath in @($manifestEntriesByTarget.Keys | Sort-Object)) {
-        if (-not ([string]$targetPath).StartsWith('.agents/skills/',[StringComparison]::Ordinal) -and $trackedPaths.Contains([string]$targetPath)) { [string]$targetPath }
+        $isProtectedClaude = $currentClaudeProjectOwned -and ([string]$targetPath -ceq 'CLAUDE.md' -or ([string]$targetPath).StartsWith('.claude/AI-Rules/',[StringComparison]::Ordinal) -or ([string]$targetPath).StartsWith('.claude/ai-instructions-licenses/',[StringComparison]::Ordinal))
+        if (-not $isProtectedClaude -and -not ([string]$targetPath).StartsWith('.agents/skills/',[StringComparison]::Ordinal) -and $trackedPaths.Contains([string]$targetPath)) { [string]$targetPath }
     }
 ) | Sort-Object -Unique)
 if ($trackedPollutionPaths.Count -gt 0 -and -not $WhatIf) {
@@ -4360,7 +4508,12 @@ if ($trackedPollutionPaths.Count -gt 0 -and -not $WhatIf) {
 
 $stagedManagedPaths = @(
     foreach ($targetPath in @($manifestEntriesByTarget.Keys | Sort-Object)) {
-        if (-not ([string]$targetPath).StartsWith('.agents/skills/',[StringComparison]::Ordinal) -and (Test-GitPathHasStagedChanges -Repository $targetRootPath -Path ([string]$targetPath))) {
+        $isProtectedClaude = $currentClaudeProjectOwned -and ([string]$targetPath -ceq 'CLAUDE.md' -or
+            ([string]$targetPath).StartsWith('.claude/AI-Rules/',[StringComparison]::Ordinal) -or
+            ([string]$targetPath).StartsWith('.claude/ai-instructions-licenses/',[StringComparison]::Ordinal))
+        if (-not $isProtectedClaude -and
+            -not ([string]$targetPath).StartsWith('.agents/skills/',[StringComparison]::Ordinal) -and
+            (Test-GitPathHasStagedChanges -Repository $targetRootPath -Path ([string]$targetPath))) {
             [string]$targetPath
         }
     }
@@ -4393,6 +4546,11 @@ try {
     Copy-Item -LiteralPath $providedArchivePath -Destination $archivePath
 
     $sourceRootPath = Expand-SafeZipRepository -ArchivePath $archivePath -DestinationRoot $extractPath
+    if ($repoManifestWriter -ceq 'v4') {
+        $rendererPath = Join-Path $sourceRootPath 'scripts\Build-AiInstructions.ps1'
+        if (-not (Test-Path -LiteralPath $rendererPath -PathType Leaf)) { throw 'Projection-aware source snapshot is missing scripts/Build-AiInstructions.ps1.' }
+        $script:rendererSha256 = Get-RawContentHash -Path $rendererPath
+    }
     $desiredEntries = New-Object System.Collections.Generic.List[object]
 
     foreach ($family in $families) {
@@ -4437,7 +4595,7 @@ try {
             -ArtifactId $family.Name
         $licenseRoot = Join-Path $workingPath "licenses/$($family.Name)"
         Write-LicenseDeliveryPackage -Package $licenses -DestinationRoot $licenseRoot
-        $licenseTargetPrefix = if ($family.Name -eq 'Codex') { '.codex' } else { '.github' }
+        $licenseTargetPrefix = switch ($family.Host) { 'codex' { '.codex' } 'copilot' { '.github' } 'claude' { '.claude' } }
         foreach ($licenseFile in @($licenses.Files)) {
             $desiredEntries.Add([pscustomobject]@{
                 FamilyName = $family.Name; SourcePath = $licenseFile.sourcePath
@@ -4519,11 +4677,17 @@ try {
                 (Get-ManagedContentHash -Path $baseTargetFullPath -TargetPath $baseTargetPath) -ceq
                 [string]$desiredEntriesByTarget[$baseTargetPath].Sha256
         }
-        $eligibleFamilies[$family.Name] =
-            -not $baseTargetIsTracked -and
-            ($manifestEntriesByTarget.ContainsKey($baseTargetPath) -or
-             -not (Test-Path -LiteralPath $baseTargetFullPath -PathType Leaf) -or
-             $baseTargetMatchesDesired)
+        if ($family.Name -ceq 'Claude') {
+            $eligibleFamilies[$family.Name] = -not $currentClaudeProjectOwned
+            if (-not $eligibleFamilies[$family.Name]) { Write-Output 'claude-base-skipped-project-owned' }
+        }
+        else {
+            $eligibleFamilies[$family.Name] =
+                -not $baseTargetIsTracked -and
+                ($manifestEntriesByTarget.ContainsKey($baseTargetPath) -or
+                 -not (Test-Path -LiteralPath $baseTargetFullPath -PathType Leaf) -or
+                 $baseTargetMatchesDesired)
+        }
     }
     $createdPaths = New-Object System.Collections.Generic.List[string]
     $updatedPaths = New-Object System.Collections.Generic.List[string]
@@ -4630,6 +4794,11 @@ try {
             continue
         }
 
+        if ($desiredEntry.FamilyName -ceq 'Claude') {
+            $skippedPaths.Add($targetPath)
+            continue
+        }
+
         if (-not $trackedPaths.Contains($targetPath) -and
             -not (Test-GitPathHasStagedChanges -Repository $targetRootPath -Path $targetPath) -and
             (Get-ManagedContentHash -Path $targetFullPath -TargetPath $targetPath) -ceq $desiredEntry.Sha256) {
@@ -4701,11 +4870,35 @@ try {
         $shouldWriteManifest = $manifestExists -or $nextManifestEntries.Count -gt 0
         $manifestChanged = $false
         if ($shouldWriteManifest) {
-        $manifestObject = [ordered]@{
-            schemaVersion = if ($manifestExists -and $manifestSchemaVersion -eq 3) { 3 } else { 2 }
-            catalogId = [string] $provenance.catalogId
-            lockSha256 = [string] $provenance.lockSha256
-            files = @($nextManifestEntries | Sort-Object targetPath)
+        if ($repoManifestWriter -ceq 'v4') {
+            $generation = if ($manifestExists -and $manifestSchemaVersion -eq 4) { [int64]$manifest.generation } else { [int64]1 }
+            $candidate = [ordered]@{
+                schemaVersion = 4
+                catalogId = [string]$provenance.catalogId
+                lockSha256 = [string]$provenance.lockSha256
+                projectionContractSha256 = [string]$projectionContractSha256
+                generation = $generation
+                projections = @()
+                files = @($nextManifestEntries | Sort-Object targetPath)
+            }
+            if ($manifestExists -and $manifestSchemaVersion -eq 4) {
+                $candidateJson = ($candidate | ConvertTo-Json -Depth 20).Replace("`r`n","`n") + "`n"
+                $existingNormalized = ([System.IO.File]::ReadAllText($manifestFullPath)).Replace("`r`n","`n").Replace("`r","`n")
+                if ($candidateJson -cne $existingNormalized) {
+                    if ($generation -eq [int64]::MaxValue) { throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message 'REPO managed manifest v4 generation would overflow.') }
+                    $candidate.generation = $generation + 1
+                }
+            }
+            $manifestObject = $candidate
+            Assert-ManagedManifestV4 -Manifest ([pscustomobject]$manifestObject)
+        }
+        else {
+            $manifestObject = [ordered]@{
+                schemaVersion = if ($manifestExists -and $manifestSchemaVersion -eq 3) { 3 } else { 2 }
+                catalogId = [string] $provenance.catalogId
+                lockSha256 = [string] $provenance.lockSha256
+                files = @($nextManifestEntries | Sort-Object targetPath)
+            }
         }
         if ($retainLegacyManifest) {
             $manifestObject = [ordered]@{schemaVersion=1; sourceRepository=$manifest.sourceRepository; sourceRef=$manifest.sourceRef; files=@($nextManifestEntries | Sort-Object targetPath)}

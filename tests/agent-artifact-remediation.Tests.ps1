@@ -20,10 +20,10 @@ Describe 'Agent artifact remediation transaction' {
     # Scenario: A tracked declaration is placed under a managed instruction license namespace.
     # Purpose: Reserve only Agent delivery paths while protecting product LICENSE and NOTICE files.
     It 'UnitT05_classifies_license_delivery_without_reserving_product_licenses' {
-        foreach ($path in @('.codex/ai-instructions-licenses/source/LICENSE','.github/ai-instructions-licenses/delivery.json')) {
+        foreach ($path in @('.codex/ai-instructions-licenses/source/LICENSE','.github/ai-instructions-licenses/delivery.json','.claude/ai-instructions-licenses/source/LICENSE','.claude/AI-Rules/Testing.en.md')) {
             (Test-IsReservedAgentArtifactPath -Path $path) | Should Be $true
         }
-        foreach ($path in @('LICENSE','NOTICE','docs/LICENSE','.codex/ai-instructions-licenses/../../LICENSE')) {
+        foreach ($path in @('LICENSE','NOTICE','docs/LICENSE','CLAUDE.md','.codex/ai-instructions-licenses/../../LICENSE','.claude/skills/example/SKILL.md','.github/skills/example/SKILL.md')) {
             (Test-IsReservedAgentArtifactPath -Path $path) | Should Be $false
         }
     }
@@ -277,5 +277,28 @@ finally {
                 Remove-Item -LiteralPath $transaction.Backup.Root -Recurse -Force
             }
         }
+    }
+
+    # Scenario: Remediation reads a valid multi-host v4 manifest containing Claude instructions and project Skill projections.
+    # Purpose: Revalidate v4, reserve only Claude Rules/licenses, and keep CLAUDE.md plus every project Skill root outside remediation scope.
+    It 'UnitT61_reads_v4_ownership_without_reserving_Claude_base_or_Skills' {
+        $repository=Join-Path $TestDrive 'v4-remediation-reader'
+        New-Item -ItemType Directory -Force -Path (Join-Path $repository '.codex')|Out-Null
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/managed-manifest-v4.example.json') -Destination (Join-Path $repository '.codex/ai-instructions.manifest.json')
+        $module=Get-Module agent-artifact-remediation
+        $paths=& $module {
+            param($repository)
+            $comparer=[StringComparer]::Ordinal
+            $tracked=[pscustomobject]@{
+                Index=(New-Object 'System.Collections.Generic.HashSet[string]' $comparer)
+                Head=(New-Object 'System.Collections.Generic.HashSet[string]' $comparer)
+            }
+            $set=Get-RemediationLegacyManifestPaths -Repository $repository -Comparer $comparer -TrackedSets $tracked
+            @($set)
+        } $repository
+        ($paths-contains'.claude/AI-Rules/CodeReview.en.md')|Should Be $true
+        ($paths|Where-Object{$_-like'.claude/ai-instructions-licenses/*'}).Count|Should BeGreaterThan 0
+        ($paths-contains'CLAUDE.md')|Should Be $false
+        ($paths|Where-Object{$_-like'*/skills/*'}).Count|Should Be 0
     }
 }

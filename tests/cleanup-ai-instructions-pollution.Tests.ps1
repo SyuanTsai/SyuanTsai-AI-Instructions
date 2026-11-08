@@ -579,7 +579,7 @@ if errorlevel 1 exit /b 92
             $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize -GitExecutable $gitWrapperPath
 
             $result.ExitCode | Should Not Be 0
-            $result.Output | Should Match 'REPO managed manifest schema version 4 requires a projection-aware bootstrap\.'
+            $result.Output | Should Match '(?s)managed manifest.*(?:missing|unsupported)'
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath)) | Should Be $indexBefore
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
             [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md'))) | Should Be $agentBefore
@@ -656,7 +656,7 @@ if errorlevel 1 exit /b 92
             $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
 
             $result.ExitCode | Should Not Be 0
-            $result.Output | Should Match 'REPO managed manifest schema version 4 requires a projection-aware bootstrap\.'
+            $result.Output | Should Match '(?s)managed manifest.*(?:missing|unsupported)'
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath)) | Should Be $indexBefore
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath)) | Should Be $manifestBefore
@@ -943,5 +943,47 @@ exit /b %errorlevel%
         $excludeAfter | Should Match '/concurrent-user-rule'
         $excludeAfter | Should Match '# BEGIN Codex AI Instructions managed paths'
         $excludeAfter | Should Match ([regex]::Escape(($excludeTextBefore -split "`r?`n")[0]))
+    }
+
+    # Scenario: A valid v4 manifest owns tracked Codex base plus Claude Rule and license artifacts.
+    # Purpose: Revalidate v4 ownership, clean every precise tracked target, preserve local bytes, and avoid treating Claude Skills as cleanup scope.
+    It 'InterT81_cleans_valid_v4_Claude_rule_and_license_ownership' {
+        $targetRoot=Join-Path $TestDrive 'v4-claude-cleanup'
+        New-PollutedTestRepository -Path $targetRoot
+        $ruleRelative='.claude/AI-Rules/Testing.en.md'
+        $licenseRelative='.claude/ai-instructions-licenses/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/delivery.json'
+        $rulePath=Join-Path $targetRoot $ruleRelative
+        $licensePath=Join-Path $targetRoot $licenseRelative
+        Set-CleanupTestText -Path $rulePath -Value '# Managed Claude rule'
+        Set-CleanupTestText -Path $licensePath -Value '{"schemaVersion":1}'
+        $manifestPath=Join-Path $targetRoot $script:ManifestRelativePath
+        $legacy=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+        $renderer='e'*64
+        $codex=$legacy.files[0]
+        $codex|Add-Member -NotePropertyName host -NotePropertyValue codex
+        $codex|Add-Member -NotePropertyName rendererId -NotePropertyValue build-ai-instructions
+        $codex|Add-Member -NotePropertyName rendererSha256 -NotePropertyValue $renderer
+        $claudeRule=($codex|ConvertTo-Json -Depth 10|ConvertFrom-Json)
+        $claudeRule.artifactId='claude-rule-testing';$claudeRule.host='claude';$claudeRule.sourcePath='.claude/AI-Rules/Testing.en.md';$claudeRule.targetPath=$ruleRelative
+        $claudeRule.sha256=(Get-FileHash -LiteralPath $rulePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $claudeLicense=($codex|ConvertTo-Json -Depth 10|ConvertFrom-Json)
+        $claudeLicense.artifactId='claude-licensing';$claudeLicense.host='claude';$claudeLicense.sourcePath='.ai-instructions-generated/delivery.json';$claudeLicense.targetPath=$licenseRelative
+        $claudeLicense.sha256=(Get-FileHash -LiteralPath $licensePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $manifest=[ordered]@{
+            schemaVersion=4;catalogId=[string]$legacy.catalogId;lockSha256=[string]$legacy.lockSha256
+            projectionContractSha256=('f'*64);generation=1;projections=@();files=@($codex,$claudeRule,$claudeLicense)
+        }
+        Set-CleanupTestText -Path $manifestPath -Value (($manifest|ConvertTo-Json -Depth 20).Replace("`r`n","`n").TrimEnd())
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('add','--',$ruleRelative,$licenseRelative,$script:ManifestRelativePath)|Out-Null
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','v4 Claude pollution fixture')|Out-Null
+        $ruleBefore=[IO.File]::ReadAllBytes($rulePath);$licenseBefore=[IO.File]::ReadAllBytes($licensePath)
+
+        $result=Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+        $result.ExitCode|Should Be 0
+        $deleted=@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only','--diff-filter=D'))
+        foreach($relative in @('AGENTS.md',$script:ManifestRelativePath,$ruleRelative,$licenseRelative)){($deleted-contains$relative)|Should Be $true}
+        [IO.File]::ReadAllBytes($rulePath)|Should Be $ruleBefore
+        [IO.File]::ReadAllBytes($licensePath)|Should Be $licenseBefore
+        ($deleted|Where-Object{$_-like'.claude/skills/*'}).Count|Should Be 0
     }
 }

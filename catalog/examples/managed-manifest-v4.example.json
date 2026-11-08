@@ -9,20 +9,26 @@
     {
       "artifactType": "instruction", "artifactId": "codex-base", "host": "codex",
       "sourceId": "ai-instructions", "sourceRepository": "https://github.com/example/ai-instructions.git", "sourceRef": "main", "sourceCommit": "0123456789abcdef0123456789abcdef01234567", "sourceVersion": "1.0.0",
-      "sourcePath": ".codex/AGENTS.en.md", "rendererId": "codex-instruction-renderer", "rendererSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sourcePath": ".codex/AGENTS.en.md", "rendererId": "build-ai-instructions", "rendererSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "targetPath": "AGENTS.md", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     },
     {
       "artifactType": "instruction", "artifactId": "copilot-base", "host": "copilot",
       "sourceId": "ai-instructions", "sourceRepository": "https://github.com/example/ai-instructions.git", "sourceRef": "main", "sourceCommit": "0123456789abcdef0123456789abcdef01234567", "sourceVersion": "1.0.0",
-      "sourcePath": ".github/copilot-instructions.en.md", "rendererId": "copilot-instruction-renderer", "rendererSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sourcePath": ".github/copilot-instructions.en.md", "rendererId": "build-ai-instructions", "rendererSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "targetPath": ".github/copilot-instructions.md", "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
     },
     {
       "artifactType": "instruction", "artifactId": "claude-base", "host": "claude",
       "sourceId": "ai-instructions", "sourceRepository": "https://github.com/example/ai-instructions.git", "sourceRef": "main", "sourceCommit": "0123456789abcdef0123456789abcdef01234567", "sourceVersion": "1.0.0",
-      "sourcePath": ".codex/AGENTS.en.md", "rendererId": "claude-instruction-renderer", "rendererSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sourcePath": ".claude/CLAUDE.en.md", "rendererId": "build-ai-instructions", "rendererSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "targetPath": "CLAUDE.md", "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      "artifactType": "instruction", "artifactId": "claude-licensing", "host": "claude",
+      "sourceId": "ai-instructions", "sourceRepository": "https://github.com/example/ai-instructions.git", "sourceRef": "main", "sourceCommit": "0123456789abcdef0123456789abcdef01234567", "sourceVersion": "1.0.0",
+      "sourcePath": ".ai-instructions-generated/delivery.json", "rendererId": "build-ai-instructions", "rendererSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "targetPath": ".claude/ai-instructions-licenses/0123456789abcdef0123456789abcdef01234567/delivery.json", "sha256": "abababababababababababababababababababababababababababababababab"
     },
     {
       "artifactType": "skill", "artifactId": "work-with-jira",

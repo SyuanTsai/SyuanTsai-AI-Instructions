@@ -869,6 +869,7 @@ try {
         CatalogPath = $catalogPath
         LockPath = $lockPath
         ConfigurationPath = $configurationPath
+        RuntimeRoot = $runtimeRoot
         UserHome = $UserHome
         WhatIf = $WhatIf
     }
