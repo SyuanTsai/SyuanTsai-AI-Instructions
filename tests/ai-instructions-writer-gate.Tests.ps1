@@ -222,6 +222,20 @@ function Invoke-P9bRepoBootstrap {
     return [pscustomobject]@{ExitCode=$LASTEXITCODE;Output=($output-join[Environment]::NewLine)}
 }
 
+function Convert-P9bManifestToLegacy {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][ValidateSet(2,3)][int]$SchemaVersion
+    )
+    $manifest=Get-Content -Raw -LiteralPath $Path|ConvertFrom-Json
+    $manifest.schemaVersion=$SchemaVersion
+    foreach($propertyName in @('projectionContractSha256','generation','projections')){$manifest.PSObject.Properties.Remove($propertyName)}
+    foreach($entry in @($manifest.files|Where-Object artifactType -eq instruction)){
+        foreach($propertyName in @('host','rendererId','rendererSha256','retention')){$entry.PSObject.Properties.Remove($propertyName)}
+    }
+    Set-P9bJson -Path $Path -Document $manifest
+}
+
 Describe 'AI instructions writer and reader gate' {
     BeforeAll {
         $shortParent=Join-Path ([IO.Path]::GetTempPath()) 'p7e'
@@ -804,6 +818,116 @@ Describe 'AI instructions writer and reader gate' {
         $result.ExitCode|Should Not Be 0
         (Get-AiInstructionsRefusalCode $result.Output)|Should Be closure-invalid
         $result.Output|Should Match 'cannot replace retained legacy REPO Skill ownership'
+        (Get-P9bRepoSnapshot $target)|Should Be $before
+    }
+
+    # Scenario: A customized v2 entry or staged v3 entry is retained byte-for-byte during its one legacy-to-v4 conversion.
+    # Purpose: Record an explicit legacy retention sentinel instead of attributing unrendered bytes to the current renderer.
+    It 'InterT123_marks_retained_<Case>_legacy_instruction_with_unrendered_sentinel' -TestCases @(
+        @{Case='customized-v2';SchemaVersion=2;TargetPath='.codex/AI-Rules/CodeReview.en.md';Staged=$false},
+        @{Case='staged-v3';SchemaVersion=3;TargetPath='CLAUDE.md';Staged=$true}
+    ) {
+        param($Case,$SchemaVersion,$TargetPath,$Staged)
+        $root=Join-Path $script:ExternalRoot ("p9b-legacy-retained-$Case");New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip') -RendererMarker renderer-a
+        $context=New-P9bBootstrapContext -Root $root
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        (Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
+        $manifestPath=Join-Path $target '.codex/ai-instructions.manifest.json'
+        Convert-P9bManifestToLegacy -Path $manifestPath -SchemaVersion $SchemaVersion
+        $targetFullPath=Join-Path $target $TargetPath
+        [IO.File]::AppendAllText($targetFullPath,"retained $Case`n",[Text.UTF8Encoding]::new($false))
+        $retainedBytes=[Convert]::ToBase64String([IO.File]::ReadAllBytes($targetFullPath))
+        if($Staged){& git -C $target add --force -- $TargetPath;if($LASTEXITCODE-ne0){throw "Could not stage $TargetPath."}}
+
+        $result=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target
+
+        $result.ExitCode|Should Be 0
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($targetFullPath))|Should Be $retainedBytes
+        $manifest=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+        [int]$manifest.schemaVersion|Should Be 4
+        $entry=@($manifest.files|Where-Object targetPath -eq $TargetPath)[0]
+        [string]$entry.retention|Should Be legacy-preserved
+        [string]$entry.rendererId|Should Be legacy-unrendered
+        ($null-eq$entry.rendererSha256)|Should Be $true
+        [string]$entry.host|Should Be $(if($TargetPath-ceq'CLAUDE.md'){'claude'}else{'codex'})
+        if($Staged){(@(& git -C $target diff --cached --name-only -- $TargetPath)-join'')|Should Be $TargetPath}
+    }
+
+    # Scenario: A valid v4 sentinel entry remains customized while a later v4 run uses different renderer bytes.
+    # Purpose: Preserve the original sentinel and never mint or replace retention provenance during v4-to-v4 reconciliation.
+    It 'InterT124_preserves_an_existing_v4_unrendered_sentinel' {
+        $root=Join-Path $script:ExternalRoot 'p9b-v4-sentinel-preserved';New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $baseline=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'baseline-work') -ArchivePath (Join-Path $root 'baseline.zip') -RendererMarker renderer-a
+        $changed=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'changed-work') -ArchivePath (Join-Path $root 'changed.zip') -RendererMarker renderer-b
+        $context=New-P9bBootstrapContext -Root $root
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        (Invoke-P9bRepoBootstrap -Context $context -ArchivePath $baseline.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
+        $manifestPath=Join-Path $target '.codex/ai-instructions.manifest.json'
+        Convert-P9bManifestToLegacy -Path $manifestPath -SchemaVersion 2
+        $retainedTarget='.codex/AI-Rules/CodeReview.en.md'
+        $retainedPath=Join-Path $target $retainedTarget
+        [IO.File]::AppendAllText($retainedPath,"legacy customization`n",[Text.UTF8Encoding]::new($false))
+        (Invoke-P9bRepoBootstrap -Context $context -ArchivePath $baseline.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
+        $before=[Convert]::ToBase64String([IO.File]::ReadAllBytes($retainedPath))
+
+        $result=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $changed.ArchivePath -TargetRoot $target
+
+        $result.ExitCode|Should Be 0
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($retainedPath))|Should Be $before
+        $entry=@((Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json).files|Where-Object targetPath -eq $retainedTarget)[0]
+        [string]$entry.retention|Should Be legacy-preserved
+        [string]$entry.rendererId|Should Be legacy-unrendered
+        ($null-eq$entry.rendererSha256)|Should Be $true
+    }
+
+    # Scenario: A sentinel entry's current bytes are restored to the desired render output before the next v4 run.
+    # Purpose: Replace the legacy sentinel with verifiable renderer provenance as soon as normal reconciliation can own the bytes.
+    It 'InterT125_replaces_sentinel_after_normal_rewrite_eligibility_returns' {
+        $root=Join-Path $script:ExternalRoot 'p9b-sentinel-rewritten';New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip') -RendererMarker renderer-a
+        $context=New-P9bBootstrapContext -Root $root
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        (Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
+        $manifestPath=Join-Path $target '.codex/ai-instructions.manifest.json'
+        Convert-P9bManifestToLegacy -Path $manifestPath -SchemaVersion 3
+        $retainedTarget='.codex/AI-Rules/CodeReview.en.md'
+        $retainedPath=Join-Path $target $retainedTarget
+        [IO.File]::AppendAllText($retainedPath,"legacy customization`n",[Text.UTF8Encoding]::new($false))
+        (Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
+        Copy-Item -LiteralPath (Join-Path $source.SourceRoot $retainedTarget) -Destination $retainedPath -Force
+
+        $result=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target
+
+        $result.ExitCode|Should Be 0
+        $entry=@((Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json).files|Where-Object targetPath -eq $retainedTarget)[0]
+        @($entry.PSObject.Properties.Name)|Should Not Contain retention
+        [string]$entry.rendererId|Should Be build-ai-instructions
+        [string]$entry.rendererSha256|Should Be $source.RendererSha256
+    }
+
+    # Scenario: A retained legacy instruction uses a case-variant target that the legacy reader accepted but no exact v4 host owns.
+    # Purpose: Return a typed refusal without mutation instead of guessing a host and manufacturing v4 ownership metadata.
+    It 'InterT126_fails_closed_when_legacy_instruction_host_cannot_be_determined' {
+        $root=Join-Path $script:ExternalRoot 'p9b-legacy-host-unknown';New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip')
+        $context=New-P9bBootstrapContext -Root $root
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        (Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
+        $manifestPath=Join-Path $target '.codex/ai-instructions.manifest.json'
+        Convert-P9bManifestToLegacy -Path $manifestPath -SchemaVersion 2
+        $manifest=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+        $legacyBase=@($manifest.files|Where-Object targetPath -ceq 'AGENTS.md')[0]
+        $legacyBase.targetPath='agents.md'
+        Set-P9bJson -Path $manifestPath -Document $manifest
+        [IO.File]::AppendAllText((Join-Path $target 'AGENTS.md'),"legacy customization`n",[Text.UTF8Encoding]::new($false))
+        $before=Get-P9bRepoSnapshot $target
+
+        $result=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target
+
+        $result.ExitCode|Should Not Be 0
+        (Get-AiInstructionsRefusalCode $result.Output)|Should Be closure-invalid
+        $result.Output|Should Match 'Cannot determine exactly one instruction host'
         (Get-P9bRepoSnapshot $target)|Should Be $before
     }
 

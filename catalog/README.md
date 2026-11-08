@@ -138,6 +138,8 @@ Production acquisition adapter 只為組合前所需的 `SKILL.md` identity、de
 
 REPO managed manifest v4 是 projection-aware 契約：Instruction entry 以 `host` 綁定 Codex、Copilot 或 Claude 的受限 target，並記錄 `rendererId`／`rendererSha256`；instruction license target 同樣依 host 綁定，只接受各 host 自己的 `.codex/ai-instructions-licenses/`、`.github/ai-instructions-licenses/` 或 `.claude/ai-instructions-licenses/<sourceCommit>/` namespace，不從其他 host namespace 推論 ownership。Skill entry 只允許已宣告的 project projection，且同一 Skill 在所有選定 projection 必須維持相同相對路徑、內容 hash 與 provenance。Bootstrap 只有在 runtime bundle v3、sync config v5 與一致的 Catalog/Lock v3 通過 reader gate 後才寫 v4；legacy v2/v4 路徑仍維持 REPO manifest v2/v3，production 預設 writer 不在本階段翻轉。
 
+legacy v2/v3 第一次升級為 v4 時，若 customized 或 staged Instruction 因保護而保留原 bytes，entry 必須使用 `retention: "legacy-preserved"`、`rendererId: "legacy-unrendered"` 與 `rendererSha256: null`，表示舊 bytes 沒有可驗證的 renderer provenance。這個 retention 標記是 sentinel 的唯一保留依據：不得附在真實 renderer entry，也不得在 v4→v4 流程新產生；既有 sentinel 只沿用，drift／customization 仍只比較內容 hash。下次正常重寫或現有內容已等於 render 結果時，writer 會移除 retention 並改記 `build-ai-instructions` 與 renderer SHA-256。legacy target 若無法唯一推導 host，升級必須以 typed `closure-invalid` fail closed。
+
 `Assert-ManagedManifest` 只驗證 manifest 文件本身。REPO Skill entries 與 Lock 的綁定，以及 Instruction entries 與 renderer 的綁定，均由 P9 projection-aware bootstrap 負責；P6c 不提供這些信任邊界，也不得把單獨通過 v4 文件驗證視為可 mutation 的 ownership evidence。
 
 新 consumer manifest 只記錄 Instructions 及其 metadata。既有 v2/v3 Skill entries 僅用於保護與精確遷移舊 REPO 副本；generic stale-prune 不得清除它們。v1 沒有逐檔來源 ownership 的 Skill entries 保留，不推論式升級為可刪除副本。缺少／無效 USER、額外檔案或 tracked/staged 任一證據缺口都保留完整 Skill；共用 Skills 的唯一安裝／更新入口是 USER reconciler。獨立專案 Skills 與其他合法 host projection 不受此 consumer 契約禁止。

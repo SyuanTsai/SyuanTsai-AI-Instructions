@@ -2146,7 +2146,7 @@ function New-ManifestEntry {
         sourcePath = $SourcePath
     }
     if ($repoManifestWriter -ceq 'v4' -and $artifactType -ceq 'instruction') {
-        $result.host = if ($TargetPath -ceq 'AGENTS.md' -or $TargetPath.StartsWith('.codex/')) { 'codex' } elseif ($TargetPath -ceq 'CLAUDE.md' -or $TargetPath.StartsWith('.claude/')) { 'claude' } else { 'copilot' }
+        $result.host = Resolve-ManagedInstructionHostForTarget -TargetPath $TargetPath
         $result.rendererId = 'build-ai-instructions'
         $result.rendererSha256 = [string]$script:rendererSha256
     }
@@ -2180,6 +2180,26 @@ function Convert-ManifestEntryForSchema {
     return $Entry
 }
 
+function Resolve-ManagedInstructionHostForTarget {
+    param([Parameter(Mandatory = $true)][string] $TargetPath)
+
+    $hosts = @(
+        if ($TargetPath -ceq 'AGENTS.md' -or
+            $TargetPath -cmatch '^\.codex/AI-Rules/[^/\\]+\.en\.md$' -or
+            $TargetPath -cmatch '^\.codex/ai-instructions-licenses/(?:[0-9a-f]{40}/)?(?:delivery\.json|source/.+)$') { 'codex' }
+        if ($TargetPath -ceq '.github/copilot-instructions.md' -or
+            $TargetPath -cmatch '^\.github/AI-Rules/[^/\\]+\.en\.md$' -or
+            $TargetPath -cmatch '^\.github/ai-instructions-licenses/(?:[0-9a-f]{40}/)?(?:delivery\.json|source/.+)$') { 'copilot' }
+        if ($TargetPath -ceq 'CLAUDE.md' -or
+            $TargetPath -cmatch '^\.claude/AI-Rules/[^/\\]+\.en\.md$' -or
+            $TargetPath -cmatch '^\.claude/ai-instructions-licenses/(?:[0-9a-f]{40}/)?(?:delivery\.json|source/.+)$') { 'claude' }
+    )
+    if ($hosts.Count -ne 1) {
+        throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Cannot determine exactly one instruction host from retained legacy target path '$TargetPath'.")
+    }
+    return [string]$hosts[0]
+}
+
 function Copy-ExistingManifestEntry {
     param([Parameter(Mandatory = $true)][object] $Entry)
 
@@ -2197,22 +2217,27 @@ function Copy-ExistingManifestEntry {
         sourcePath = [string] $Entry.sourcePath
     }
     if ($repoManifestWriter -ceq 'v4' -and [string]$Entry.artifactType -ceq 'instruction') {
-        if ($null -ne $Entry.PSObject.Properties['host']) {
+        if ($manifestSchemaVersion -eq 4) {
             $copy.host = [string]$Entry.host
             $copy.rendererId = [string]$Entry.rendererId
-            $copy.rendererSha256 = [string]$Entry.rendererSha256
+            $copy.rendererSha256 = $Entry.rendererSha256
+            if ($null -ne $Entry.PSObject.Properties['retention']) { $copy.retention = [string]$Entry.retention }
+        }
+        elseif ($manifestSchemaVersion -in @(2,3)) {
+            $copy.host = Resolve-ManagedInstructionHostForTarget -TargetPath ([string]$Entry.targetPath)
+            $copy.rendererId = 'legacy-unrendered'
+            $copy.rendererSha256 = $null
+            $copy.retention = 'legacy-preserved'
         }
         else {
-            $targetPath = [string]$Entry.targetPath
-            $copy.host = if ($targetPath -ceq 'AGENTS.md' -or $targetPath.StartsWith('.codex/')) { 'codex' } elseif ($targetPath -ceq 'CLAUDE.md' -or $targetPath.StartsWith('.claude/')) { 'claude' } else { 'copilot' }
-            $copy.rendererId = 'build-ai-instructions'
-            $copy.rendererSha256 = [string]$script:rendererSha256
+            throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Cannot retain instruction entry from managed manifest schema '$manifestSchemaVersion' while writing v4.")
         }
     }
     elseif ($null -ne $Entry.PSObject.Properties['host']) {
         $copy.host = [string]$Entry.host
         $copy.rendererId = [string]$Entry.rendererId
-        $copy.rendererSha256 = [string]$Entry.rendererSha256
+        $copy.rendererSha256 = $Entry.rendererSha256
+        if ($null -ne $Entry.PSObject.Properties['retention']) { $copy.retention = [string]$Entry.retention }
     }
     if ($null -ne $Entry.PSObject.Properties['projectionId']) { $copy.projectionId = [string]$Entry.projectionId }
     $copy.targetPath = [string]$Entry.targetPath

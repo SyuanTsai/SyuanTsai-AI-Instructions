@@ -27,7 +27,7 @@
     {
       "artifactType": "instruction", "artifactId": "claude-rule-code-review", "host": "claude",
       "sourceId": "ai-instructions", "sourceRepository": "https://github.com/example/ai-instructions.git", "sourceRef": "main", "sourceCommit": "0123456789abcdef0123456789abcdef01234567", "sourceVersion": "1.0.0",
-      "sourcePath": ".claude/AI-Rules/CodeReview.en.md", "rendererId": "build-ai-instructions", "rendererSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sourcePath": ".claude/AI-Rules/CodeReview.en.md", "rendererId": "legacy-unrendered", "rendererSha256": null, "retention": "legacy-preserved",
       "targetPath": ".claude/AI-Rules/CodeReview.en.md", "sha256": "edededededededededededededededededededededededededededededededed"
     },
     {

@@ -526,6 +526,37 @@ function Get-TestManagedManifestV4 {
         { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw 'generation must be an integer from 1 through Int64 maximum.'
     }
 
+    # Scenario: An ordinary v4 instruction claims the legacy-unrendered sentinel without an explicit retention marker.
+    # Purpose: Reject fabricated sentinel provenance in both the portable schema and executable validator.
+    It 'UnitT11v15_rejects_sentinel_on_a_nonretained_v4_instruction' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) {
+            throw 'UnitT11v15 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.'
+        }
+        $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\managed-manifest-v4.schema.json'
+        $manifest = Get-TestManagedManifestV4
+        $entry = @($manifest.files | Where-Object artifactType -eq 'instruction')[0]
+        $entry.rendererId = 'legacy-unrendered'
+        $entry.rendererSha256 = $null
+
+        (Test-Json -Json ($manifest | ConvertTo-Json -Depth 100) -SchemaFile $schemaPath) | Should Be $false
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw "may use rendererId 'legacy-unrendered' only with retention 'legacy-preserved'"
+    }
+
+    # Scenario: A v4 instruction names the real build renderer but omits its renderer hash.
+    # Purpose: Prevent null provenance from being accepted as verification for rendered bytes.
+    It 'UnitT11v16_rejects_real_renderer_with_null_sha256' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) {
+            throw 'UnitT11v16 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.'
+        }
+        $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\managed-manifest-v4.schema.json'
+        $manifest = Get-TestManagedManifestV4
+        $entry = @($manifest.files | Where-Object { $_.artifactType -eq 'instruction' -and $_.rendererId -eq 'build-ai-instructions' })[0]
+        $entry.rendererSha256 = $null
+
+        (Test-Json -Json ($manifest | ConvertTo-Json -Depth 100) -SchemaFile $schemaPath) | Should Be $false
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw "with rendererId 'build-ai-instructions' must include rendererSha256"
+    }
+
     # Scenario: A v3 Catalog declares several bounded USER and project projections and its Lock binds their canonical digest.
     # Purpose: Establish reader-first v3 validation and deterministic target derivation without changing production v2 files.
     It 'UnitT11a_accepts_v3_catalog_lock_projections_and_independent_digest' {
