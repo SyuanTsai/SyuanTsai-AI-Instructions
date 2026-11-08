@@ -23,10 +23,12 @@ if ([string]::IsNullOrWhiteSpace($GitExecutable)) {
 $manifestRelativePath = '.codex/ai-instructions.manifest.json'
 $excludeBeginMarker = '# BEGIN Codex AI Instructions managed paths'
 $excludeEndMarker = '# END Codex AI Instructions managed paths'
-$script:repoManifestV4DowngradeMessage =
-    'A live worktree already contains REPO managed manifest v4 [ai-instructions-refusal-code=downgrade-refused].' +
-    [Environment]::NewLine +
+$script:repoManifestV4DowngradeSummary =
+    'A live worktree already contains REPO managed manifest v4 [ai-instructions-refusal-code=downgrade-refused].'
+$script:repoManifestV4ProjectionRequirement =
     'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
+$script:repoManifestV4DowngradeMessage =
+    $script:repoManifestV4DowngradeSummary + ' ' + $script:repoManifestV4ProjectionRequirement
 
 Import-Module (Join-Path $PSScriptRoot 'safe-zip.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'skills-catalog-contract.psm1') -Force
@@ -1690,6 +1692,8 @@ function Assert-NoRepoManagedManifestV4 {
         if ($isSchemaV4) {
             if ($AllowV4) { Assert-ManagedManifestV4 -Manifest $worktreeManifest }
             else {
+                [Console]::Error.WriteLine($script:repoManifestV4DowngradeSummary)
+                [Console]::Error.WriteLine($script:repoManifestV4ProjectionRequirement)
                 throw [SyuanTsai.AiInstructions.AiInstructionsRefusalException]::new(
                     'downgrade-refused',
                     $script:repoManifestV4DowngradeMessage
@@ -4651,6 +4655,8 @@ if ($manifestExists) {
     $manifestSchemaVersion = $manifest.schemaVersion
     if ($manifestSchemaVersion -eq 4) {
         if ($repoManifestWriter -cne 'v4') {
+            [Console]::Error.WriteLine($script:repoManifestV4DowngradeSummary)
+            [Console]::Error.WriteLine($script:repoManifestV4ProjectionRequirement)
             throw [SyuanTsai.AiInstructions.AiInstructionsRefusalException]::new(
                 'downgrade-refused',
                 $script:repoManifestV4DowngradeMessage

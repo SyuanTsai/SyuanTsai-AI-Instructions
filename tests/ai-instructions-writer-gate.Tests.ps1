@@ -1134,8 +1134,9 @@ exit /b %errorlevel%
         Test-Path -LiteralPath $appliedExcludePath -PathType Leaf|Should Be $true
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($appliedExcludePath))|Should Not Be ([Convert]::ToBase64String($excludeBefore))
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))|Should Be ([Convert]::ToBase64String($excludeBefore))
-        [IO.File]::ReadAllText($excludePath)|Should Match '(?m)^/AGENTS\.md$'
-        [IO.File]::ReadAllText($excludePath)|Should Match '(?m)^/\.github/copilot-instructions\.md$'
+        $restoredExclude=[IO.File]::ReadAllText($excludePath).Replace("`r`n","`n").Replace("`r","`n")
+        $restoredExclude|Should Match '(?m)^/AGENTS\.md$'
+        $restoredExclude|Should Match '(?m)^/\.github/copilot-instructions\.md$'
         Test-Path -LiteralPath (Join-Path $target 'AGENTS.md')|Should Be $false
         Test-Path -LiteralPath (Join-Path $target '.codex/ai-instructions.manifest.json')|Should Be $false
         [IO.File]::ReadAllText((Join-Path $target 'CLAUDE.md'))|Should Be "# Project-owned Claude`n"
