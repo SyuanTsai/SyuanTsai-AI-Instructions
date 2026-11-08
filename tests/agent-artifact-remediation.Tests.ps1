@@ -336,42 +336,50 @@ if(-not(Get-Command ConvertFrom-GitWorktreePorcelainZ -ErrorAction SilentlyConti
     }
 
     # Scenario: Every user-file mutation sink is reviewed as one table row.
-    # Purpose: Prevent a new deletion, index, commit, exclude, rollback, recovery, stash, journal, or manifest sink from bypassing the shared Claude-family guard.
-    It 'UnitT64_routes_<Function>_through_the_single_Claude_family_guard' -TestCases @(
-        @{File='scripts/agent-artifact-remediation.psm1';Function='Get-RemediationLegacyManifestPaths'},
-        @{File='scripts/agent-artifact-remediation.psm1';Function='New-AgentArtifactRemediationBackup'},
-        @{File='scripts/agent-artifact-remediation.psm1';Function='Set-RemediationGitInfoExclude'},
-        @{File='scripts/agent-artifact-remediation.psm1';Function='Set-RemediationIndexWithoutPaths'},
-        @{File='scripts/agent-artifact-remediation.psm1';Function='New-RemediationCommitObject'},
-        @{File='scripts/agent-artifact-remediation.psm1';Function='Remove-RemediationFiles'},
-        @{File='scripts/agent-artifact-remediation.psm1';Function='Set-RemediationHead'},
-        @{File='scripts/agent-artifact-remediation.psm1';Function='Restore-RemediationHead'},
-        @{File='scripts/agent-artifact-remediation.psm1';Function='Restore-RemediationFiles'},
-        @{File='scripts/agent-artifact-remediation.psm1';Function='Restore-RemediationExclude'},
-        @{File='scripts/agent-artifact-remediation.psm1';Function='Restore-AgentArtifactRemediation'},
-        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Set-ManagedGitInfoExclude'},
-        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Restore-GitInfoExcludeSnapshot'},
-        @{File='scripts/bootstrap-ai-instructions.ps1';Function='New-TargetMutationSnapshot'},
-        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Invoke-AtomicFilePublication'},
-        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Remove-TargetMutationFileAtomically'},
-        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Set-TargetMutationFileBytes'},
-        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Remove-TargetMutationFile'},
-        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Restore-TargetMutationSnapshot'},
-        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Update-PersonalAgentStash'},
-        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Save-SkillMigrationJournal'},
-        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Restore-SkillMigrationJournal'},
-        @{File='scripts/cleanup-ai-instructions-pollution.ps1';Function='Remove-CleanupIndexEntriesAtomically'},
-        @{File='scripts/cleanup-ai-instructions-pollution.ps1';Function='Restore-CleanupIndexSnapshot'},
-        @{File='scripts/cleanup-ai-instructions-pollution.ps1';Function='Set-CleanupExcludeBlock'},
-        @{File='scripts/cleanup-ai-instructions-pollution.ps1';Function='Restore-CleanupExcludeMutation'}
+    # Purpose: Prevent a forward mutation sink from bypassing the shared Claude-family guard while documenting rollback-only exceptions.
+    # The single guard boundary applies only to forward mutation sinks; rollback restores the complete pre-mutation snapshot.
+    It 'UnitT64_classifies_<Function>_for_the_single_Claude_family_guard' -TestCases @(
+        @{File='scripts/agent-artifact-remediation.psm1';Function='Get-RemediationLegacyManifestPaths';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/agent-artifact-remediation.psm1';Function='New-AgentArtifactRemediationBackup';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/agent-artifact-remediation.psm1';Function='Set-RemediationGitInfoExclude';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/agent-artifact-remediation.psm1';Function='Set-RemediationIndexWithoutPaths';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/agent-artifact-remediation.psm1';Function='New-RemediationCommitObject';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/agent-artifact-remediation.psm1';Function='Remove-RemediationFiles';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/agent-artifact-remediation.psm1';Function='Set-RemediationHead';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/agent-artifact-remediation.psm1';Function='Restore-RemediationHead';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/agent-artifact-remediation.psm1';Function='Restore-RemediationFiles';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/agent-artifact-remediation.psm1';Function='Restore-RemediationExclude';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/agent-artifact-remediation.psm1';Function='Restore-AgentArtifactRemediation';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Set-ManagedGitInfoExclude';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Restore-GitInfoExcludeSnapshot';Applicability='not applicable';Reason='rollback only restores pre-mutation snapshot'},
+        @{File='scripts/bootstrap-ai-instructions.ps1';Function='New-TargetMutationSnapshot';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Invoke-AtomicFilePublication';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Remove-TargetMutationFileAtomically';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Set-TargetMutationFileBytes';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Remove-TargetMutationFile';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Restore-TargetMutationSnapshot';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Update-PersonalAgentStash';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Save-SkillMigrationJournal';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Restore-SkillMigrationJournal';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/cleanup-ai-instructions-pollution.ps1';Function='Remove-CleanupIndexEntriesAtomically';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/cleanup-ai-instructions-pollution.ps1';Function='Restore-CleanupIndexSnapshot';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/cleanup-ai-instructions-pollution.ps1';Function='Set-CleanupExcludeBlock';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/cleanup-ai-instructions-pollution.ps1';Function='Restore-CleanupExcludeMutation';Applicability='not applicable';Reason='rollback only restores pre-mutation snapshot'}
     ) {
-        param($File,$Function)
+        param($File,$Function,$Applicability,$Reason)
         $tokens=$null;$parseErrors=$null
         $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $script:RepositoryRoot $File),[ref]$tokens,[ref]$parseErrors)
         @($parseErrors).Count|Should Be 0
         $definition=@($ast.FindAll({param($node) $node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$Function},$true))
         $definition.Count|Should Be 1
-        $definition[0].Extent.Text|Should Match 'Test-IsProtectedClaudeFamilyPath'
+        if($Applicability-ceq'applies'){
+            $Reason|Should Be 'forward mutation sink'
+            $definition[0].Extent.Text|Should Match 'Test-IsProtectedClaudeFamilyPath'
+        }else{
+            $Applicability|Should Be 'not applicable'
+            $Reason|Should Be 'rollback only restores pre-mutation snapshot'
+            $definition[0].Extent.Text|Should Not Match 'Test-IsProtectedClaudeFamilyPath'
+        }
     }
 
     # Scenario: The shared guard receives either a deliberately computed empty protection set or a missing null set.

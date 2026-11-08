@@ -686,8 +686,19 @@ function Get-CleanupWorktreeRoots {
         [switch] $Strict
     )
 
-    $output = @(Invoke-CleanupGit -Repository $Repository -Arguments @('worktree','list','--porcelain','-z'))
-    foreach ($record in @(ConvertFrom-GitWorktreePorcelainZ -Output $output -Strict:$Strict)) {
+    try {
+        $output = @(Invoke-CleanupGit -Repository $Repository -Arguments @('worktree','list','--porcelain','-z'))
+        $records = @(ConvertFrom-GitWorktreePorcelainZ -Output $output -Strict:$Strict)
+    }
+    catch {
+        if ($Strict) {
+            throw (New-AiInstructionsRefusalException -Code 'closure-invalid' `
+                -Message "Cannot determine linked worktree manifests before mutation. $($_.Exception.Message)" `
+                -InnerException $_.Exception)
+        }
+        return
+    }
+    foreach ($record in $records) {
         if ([bool]$record.Prunable) { continue }
         [string]$record.Path
     }
@@ -740,7 +751,7 @@ function Assert-NoRepoManagedManifestV4 {
 
     try { $worktreeRoots = @(Get-CleanupWorktreeRoots -Repository $Repository -Strict:$Strict) }
     catch {
-        if ($Strict) { throw 'Cannot determine linked worktree manifests before mutation.' }
+        if ($Strict) { throw }
         return
     }
     foreach ($worktreeRoot in $worktreeRoots) {
@@ -799,7 +810,7 @@ function Get-CleanupSharedManagedPaths {
 
     $paths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     foreach ($currentManagedPath in $CurrentManagedPaths) { [void]$paths.Add($currentManagedPath.Replace('\','/')) }
-    foreach ($worktreeRoot in @(Get-CleanupWorktreeRoots -Repository $Repository)) {
+    foreach ($worktreeRoot in @(Get-CleanupWorktreeRoots -Repository $Repository -Strict)) {
         $worktreeManifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/','\')
         if (-not (Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf)) { continue }
         Assert-CleanupManagedFilePath -TargetRoot $worktreeRoot -FilePath $worktreeManifestPath -Context 'Linked worktree managed manifest'

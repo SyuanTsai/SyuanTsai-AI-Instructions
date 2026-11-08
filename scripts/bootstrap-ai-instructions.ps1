@@ -1577,12 +1577,19 @@ function Get-ManagedWorktreeRoots {
         [switch] $Strict
     )
 
-    try { $output = @(Invoke-Git -Repository $Repository -Arguments @('worktree','list','--porcelain','-z')) }
+    try {
+        $output = @(Invoke-Git -Repository $Repository -Arguments @('worktree','list','--porcelain','-z'))
+        $records = @(ConvertFrom-GitWorktreePorcelainZ -Output $output -Strict:$Strict)
+    }
     catch {
-        if ($Strict) { throw "Cannot determine linked worktree manifests before mutation. $($_.Exception.Message)" }
+        if ($Strict) {
+            throw (New-AiInstructionsRefusalException -Code 'closure-invalid' `
+                -Message "Cannot determine linked worktree manifests before mutation. $($_.Exception.Message)" `
+                -InnerException $_.Exception)
+        }
         return
     }
-    foreach ($record in @(ConvertFrom-GitWorktreePorcelainZ -Output $output -Strict:$Strict)) {
+    foreach ($record in $records) {
         if ([bool]$record.Prunable) { continue }
         [string]$record.Path
     }
@@ -1696,7 +1703,7 @@ function Get-SharedManagedExcludePaths {
 
     $paths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     foreach ($currentManagedPath in $CurrentManagedPaths) { [void]$paths.Add($currentManagedPath.Replace('\','/')) }
-    foreach ($worktreeRoot in @(Get-ManagedWorktreeRoots -Repository $Repository)) {
+    foreach ($worktreeRoot in @(Get-ManagedWorktreeRoots -Repository $Repository -Strict)) {
         $worktreeManifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/','\')
         if (-not (Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf)) { continue }
         Assert-ManagedPathDoesNotCrossReparsePoint -Root $worktreeRoot -Path $worktreeManifestPath -Context 'Linked worktree managed manifest'

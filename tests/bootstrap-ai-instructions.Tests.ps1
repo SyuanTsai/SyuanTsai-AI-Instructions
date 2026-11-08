@@ -843,6 +843,69 @@ type nul > "$firstListMarker"
         (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD') | Select-Object -First 1).Trim() | Should Be $headBefore
     }
 
+    # Scenario: Every pre-mutation inventory succeeds, but shared-exclude composition cannot enumerate live worktrees.
+    # Purpose: Require the final repository-wide inventory to fail closed and roll back current and linked worktree bytes exactly.
+    It 'InterT119_fails_closed_when_shared_exclude_worktree_inventory_fails' {
+        Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null
+        $linkedRoot = Join-Path $TestDrive 'shared-exclude-list-failure-linked'
+        Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','shared-exclude-list-failure-fixture',$linkedRoot) | Out-Null
+        try {
+            Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $linkedRoot | Out-Null
+            Set-TestText -Path (Join-Path $sourceRoot '.codex/AGENTS.en.md') -Value '# Updated Codex English Base'
+            Compress-TestSource -SourceRoot $sourceRoot -ArchivePath $sourceArchive
+            New-TestProvenance -ArchivePath $sourceArchive -Path $script:TestProvenancePath -InstructionCommit ('d'*40)
+
+            $wrapperRoot = Join-Path $TestDrive 'shared-exclude-list-failure-wrapper'
+            New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
+            $realGit = (Get-Command git.exe).Source
+            $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+            $markers = 1..4 | ForEach-Object { Join-Path $wrapperRoot "list-$_.marker" }
+            $failureMarker = Join-Path $wrapperRoot 'shared-exclude-list-failed.marker'
+            $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+            $gitWrapper = @"
+@echo off
+echo %* | "$findString" /C:"worktree list --porcelain" >nul
+if errorlevel 1 goto forward
+if not exist "$($markers[0])" (type nul > "$($markers[0])" & goto forward)
+if not exist "$($markers[1])" (type nul > "$($markers[1])" & goto forward)
+if not exist "$($markers[2])" (type nul > "$($markers[2])" & goto forward)
+if not exist "$($markers[3])" (type nul > "$($markers[3])" & goto forward)
+type nul > "$failureMarker"
+exit /b 91
+:forward
+"$realGit" %*
+exit /b %errorlevel%
+"@
+            Set-TestText -Path $gitWrapperPath -Value $gitWrapper
+
+            $excludePath = (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
+            if (-not [IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+            $targetManifestPath = Join-Path $targetRoot $script:ManifestPath
+            $linkedManifestPath = Join-Path $linkedRoot $script:ManifestPath
+            $excludeBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+            $targetAgentBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md')))
+            $targetManifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($targetManifestPath))
+            $linkedAgentBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $linkedRoot 'AGENTS.md')))
+            $linkedManifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath))
+            $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot,'-GitExecutable',$gitWrapperPath)
+
+            $output = & $script:TestPowerShellExecutable @arguments 2>&1
+
+            $LASTEXITCODE | Should Not Be 0
+            Test-Path -LiteralPath $failureMarker -PathType Leaf | Should Be $true
+            (ConvertTo-TestDiagnosticText -Output $output) | Should Match 'Cannot determine linked worktree manifests before mutation\.'
+            (ConvertTo-TestDiagnosticText -Output $output) | Should Match 'ai-instructions-refusal-code=closure-invalid'
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md'))) | Should Be $targetAgentBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($targetManifestPath)) | Should Be $targetManifestBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $linkedRoot 'AGENTS.md'))) | Should Be $linkedAgentBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedManifestPath)) | Should Be $linkedManifestBefore
+        }
+        finally {
+            Invoke-TestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot) | Out-Null
+        }
+    }
+
     # Scenario: A linked worktree publishes v4 after the optimistic scan and before the locked scan.
     # Purpose: Recheck projection ownership under the repository lock before remediation can create a commit.
     It 'InterT68e_detects_linked_v4_published_before_the_locked_scan' {
@@ -2855,6 +2918,7 @@ exit /b %errorlevel%
         $excludePath = Join-Path $targetRoot '.git\info\exclude'
         $captureBeforePath = Join-Path $wrapperRoot 'target-before-readonly.json'
         $captureAfterPath = Join-Path $wrapperRoot 'target-after-readonly.json'
+        $appliedExcludePath = Join-Path $wrapperRoot 'exclude-after-mutation.bin'
         $captureScriptPath = Join-Path $wrapperRoot 'capture-target-evidence.ps1'
         $bootstrapText = [System.IO.File]::ReadAllText($script:BootstrapScript)
         $prefixEnd = $bootstrapText.IndexOf('$syncStartPath = ', [StringComparison]::Ordinal)
@@ -2892,6 +2956,8 @@ finally {
 @echo off
 echo %* | "$findString" /C:"stash store" >nul
 if errorlevel 1 goto forward
+copy /b "$excludePath" "$appliedExcludePath" >nul
+if errorlevel 1 exit /b 85
 set "SYP214_FILE_EVIDENCE_PATH=$captureBeforePath"
 "$powerShellExe" -NoProfile -ExecutionPolicy Bypass -File "$captureScriptPath" -TargetRoot "$targetRoot"
 if errorlevel 1 exit /b 87
@@ -2947,11 +3013,13 @@ exit /b %errorlevel%
         $statusAfter = @(Invoke-TestGit -Repository $targetRoot -Arguments @('status', '--porcelain')) -join "`n"
         $indexAfter = (Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash.ToLowerInvariant()
         [byte[]]$excludeBytesAfter = [System.IO.File]::ReadAllBytes($excludePath)
+        [byte[]]$appliedExcludeBytes = [System.IO.File]::ReadAllBytes($appliedExcludePath)
         $personalAgentStashCount = @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%gs') |
             Where-Object { $_ -match 'PersonalAgent$' }).Count
         $headAfter | Should Be $headBefore
         $statusAfter | Should Be $statusBefore
         $indexAfter | Should Be $indexBefore
+        [Convert]::ToBase64String($appliedExcludeBytes) | Should Not Be ([Convert]::ToBase64String($excludeBytesBefore))
         [Convert]::ToBase64String($excludeBytesAfter) | Should Be ([Convert]::ToBase64String($excludeBytesBefore))
         Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
         Test-Path -LiteralPath $manifestPath | Should Be $false

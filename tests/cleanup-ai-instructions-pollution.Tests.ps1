@@ -534,6 +534,55 @@ type nul > "$firstListMarker"
         @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
     }
 
+    # Scenario: Cleanup's preflight, locked manifest, and Claude ownership inventories succeed, but shared-exclude composition cannot enumerate worktrees.
+    # Purpose: Refuse before the exclude or worktree bytes change and preserve the typed fail-closed diagnostic.
+    It 'InterT87_fails_closed_when_shared_exclude_worktree_inventory_fails' {
+        $targetRoot = Join-Path $TestDrive 'cleanup-shared-exclude-list-failure'
+        New-PollutedTestRepository -Path $targetRoot
+        $wrapperRoot = Join-Path $TestDrive 'cleanup-shared-exclude-list-failure-wrapper'
+        New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
+        $realGit = (Get-Command git.exe).Source
+        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $markers = 1..3 | ForEach-Object { Join-Path $wrapperRoot "list-$_.marker" }
+        $failureMarker = Join-Path $wrapperRoot 'shared-exclude-list-failed.marker'
+        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+        $gitWrapper = @"
+@echo off
+echo %* | "$findString" /C:"worktree list --porcelain" >nul
+if errorlevel 1 goto forward
+if not exist "$($markers[0])" (type nul > "$($markers[0])" & goto forward)
+if not exist "$($markers[1])" (type nul > "$($markers[1])" & goto forward)
+if not exist "$($markers[2])" (type nul > "$($markers[2])" & goto forward)
+type nul > "$failureMarker"
+exit /b 91
+:forward
+"$realGit" %*
+exit /b %errorlevel%
+"@
+        Set-CleanupTestText -Path $gitWrapperPath -Value $gitWrapper
+        $indexPath = (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','index') | Select-Object -First 1).Trim()
+        if (-not [IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $targetRoot $indexPath }
+        $excludePath = (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
+        if (-not [IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+        $manifestPath = Join-Path $targetRoot $script:ManifestRelativePath
+        $indexBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath))
+        $excludeBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+        $manifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath))
+        $agentBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md')))
+
+        $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize -GitExecutable $gitWrapperPath
+
+        $result.ExitCode | Should Not Be 0
+        Test-Path -LiteralPath $failureMarker -PathType Leaf | Should Be $true
+        $result.Output | Should Match 'Cannot determine linked worktree manifests before mutation\.'
+        $result.Output | Should Match 'ai-instructions-refusal-code=closure-invalid'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath)) | Should Be $indexBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath)) | Should Be $manifestBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md'))) | Should Be $agentBefore
+        @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
+    }
+
     # Scenario: A linked worktree publishes v4 after cleanup's optimistic scan and before its locked scan.
     # Purpose: Recheck projection ownership under the repository lock before staging remediation.
     It 'InterT69b_detects_linked_v4_published_before_the_locked_scan' {
@@ -1153,10 +1202,13 @@ exit /b %errorlevel%
             $realGit=(Get-Command git.exe).Source
             $findString=Join-Path $env:SystemRoot 'System32/findstr.exe'
             $gitWrapperPath=Join-Path $wrapperRoot 'git.cmd'
+            $appliedExcludePath=Join-Path $wrapperRoot 'exclude-after-mutation.bin'
             $gitWrapper=@"
 @echo off
 echo %* | "$findString" /C:"diff --cached --name-status -- AGENTS.md" >nul
 if errorlevel 1 goto forward
+copy /b "$excludePath" "$appliedExcludePath" >nul
+if errorlevel 1 exit /b 87
 exit /b 88
 :forward
 "$realGit" %*
@@ -1167,9 +1219,11 @@ exit /b %errorlevel%
             $result=Invoke-CleanupScript -TargetRoot $targetRoot -Authorize -GitExecutable $gitWrapperPath
 
             $result.ExitCode|Should Not Be 0
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($appliedExcludePath))|Should Not Be ([Convert]::ToBase64String($excludeBefore))
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))|Should Be ([Convert]::ToBase64String($excludeBefore))
-            [IO.File]::ReadAllText($excludePath)|Should Match '(?m)^/AGENTS\.md$'
-            [IO.File]::ReadAllText($excludePath)|Should Match '(?m)^/\.github/copilot-instructions\.md$'
+            $restoredExclude=[IO.File]::ReadAllText($excludePath).Replace("`r`n","`n").Replace("`r","`n")
+            $restoredExclude|Should Match '(?m)^/AGENTS\.md$'
+            $restoredExclude|Should Match '(?m)^/\.github/copilot-instructions\.md$'
             @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count|Should Be 0
         }
         finally{Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot)|Out-Null}
