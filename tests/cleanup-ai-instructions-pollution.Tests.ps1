@@ -1035,4 +1035,19 @@ exit /b %errorlevel%
         $exclude|Should Match '(?m)^/\.claude/AI-Rules/Testing\.en\.md$'
         $exclude|Should Match '(?m)^/\.claude/ai-instructions-licenses/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/delivery\.json$'
     }
+
+    # Scenario: An ordinary polluted repository has no project-owned CLAUDE.md, so cleanup computes an empty Claude-family protection set.
+    # Purpose: Keep the empty set distinct from null and allow authorized cleanup to complete normally.
+    It 'InterT83_completes_cleanup_with_no_project_owned_Claude_family' {
+        $targetRoot=Join-Path $TestDrive 'empty-Claude-protection-cleanup'
+        New-PollutedTestRepository -Path $targetRoot
+
+        $result=Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+
+        $result.ExitCode|Should Be 0
+        $deleted=@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only','--diff-filter=D'))
+        ($deleted-contains'AGENTS.md')|Should Be $true
+        ($deleted-contains$script:ManifestRelativePath)|Should Be $true
+        Test-Path -LiteralPath (Join-Path $targetRoot 'CLAUDE.md')|Should Be $false
+    }
 }

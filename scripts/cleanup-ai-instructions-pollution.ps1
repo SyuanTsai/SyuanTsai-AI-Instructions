@@ -169,7 +169,7 @@ function Remove-CleanupIndexEntriesAtomically {
         [Parameter(Mandatory = $true)][string] $Repository,
         [Parameter(Mandatory = $true)][string[]] $Paths,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $ExpectedSnapshot,
-        [AllowEmptyCollection()][string[]] $ProtectedPaths = @()
+        [AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths = @()
     )
 
     $Paths = @($Paths | Where-Object {
@@ -246,7 +246,7 @@ function Restore-CleanupIndexSnapshot {
         [Parameter(Mandatory = $true)][string] $Repository,
         [Parameter(Mandatory = $true)][string[]] $Paths,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Snapshot,
-        [AllowEmptyCollection()][string[]] $ProtectedPaths = @()
+        [AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths = @()
     )
 
     $Paths = @($Paths | Where-Object {
@@ -626,7 +626,7 @@ function Restore-CleanupExcludeMutation {
 
     if (-not [bool]$Mutation.MutationApplied) { return }
     foreach ($managedPath in @($Mutation.ManagedPaths)) {
-        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$managedPath) -ProtectedPaths @($Mutation.ProtectedPaths)) {
+        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$managedPath) -ProtectedPaths $Mutation.ProtectedPaths) {
             Write-Warning "Protected Claude family path skipped at cleanup Git exclude rollback: $managedPath (project-owned Claude family)."
             return
         }
@@ -804,7 +804,7 @@ function Set-CleanupExcludeBlock {
         [Parameter(Mandatory = $true)][string] $Path,
         [Parameter(Mandatory = $true)][string[]] $ManagedPaths,
         [Parameter(Mandatory = $true)][object] $Mutation,
-        [AllowEmptyCollection()][string[]] $ProtectedPaths = @()
+        [AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths = @()
     )
     if ([string]$Mutation.Path -cne $Path -or [string]$Mutation.Repository -cne $Repository) {
         throw 'Shared Git exclude mutation state does not match the requested cleanup target.'
@@ -937,10 +937,10 @@ $claudeCurrentSha256 = if ($claudeBaseExists) { Get-CleanupManagedHash -Path $cl
 $projectOwnedClaudeFamily = Test-AiInstructionsClaudeFamilyProjectOwned -BaseExists $claudeBaseExists `
     -BaseTracked $trackedClaudeBase -BaseStaged ($stagedClaudeExitCode -eq 1) `
     -ManagedSha256 $claudeManagedSha256 -CurrentSha256 $claudeCurrentSha256
-$protectedClaudeFamilyPaths = if ($projectOwnedClaudeFamily) {
+$protectedClaudeFamilyPaths = @(if ($projectOwnedClaudeFamily) {
     @('CLAUDE.md','.claude/AI-Rules/','.claude/ai-instructions-licenses/')
 }
-else { @() }
+else { @() })
 $trackedManagedEntries = New-Object System.Collections.Generic.List[object]
 foreach ($manifestTargetPath in @($manifestRelativePath) + @($entriesByPath.Keys | Sort-Object)) {
     if ([string]$manifestTargetPath -like '.agents/skills/*') {

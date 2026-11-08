@@ -118,7 +118,7 @@ function Test-IsProtectedClaudeFamilyPath {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string] $Path,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $ProtectedPaths
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths
     )
 
     try { $normalizedPath = ConvertTo-RemediationPath -Path $Path }
@@ -225,7 +225,7 @@ function Get-RemediationLegacyManifestPaths {
         [Parameter(Mandatory = $true)][string] $Repository,
         [Parameter(Mandatory = $true)][System.StringComparer] $Comparer,
         [Parameter(Mandatory = $true)][object] $TrackedSets,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $ProtectedPaths
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths
     )
 
     $paths = New-Object 'System.Collections.Generic.HashSet[string]' $Comparer
@@ -326,7 +326,7 @@ function Get-RemediationMutationPaths {
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $TrackedPaths,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.HashSet[string]] $LegacyManifestPaths,
         [Parameter(Mandatory = $true)][System.StringComparer] $Comparer,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $ProtectedPaths
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths
     )
 
     $paths = New-Object 'System.Collections.Generic.HashSet[string]' $Comparer
@@ -360,7 +360,7 @@ function New-AgentArtifactRemediationBackup {
         [Parameter(Mandatory = $true)][string] $CommonGitDirectory,
         [Parameter(Mandatory = $true)][AllowEmptyString()][string] $Head,
         [AllowEmptyString()][string] $HeadReference,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $ProtectedPaths
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths
     )
 
     $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([char[]]@('\','/'))
@@ -456,7 +456,7 @@ function Set-RemediationGitInfoExclude {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
         [Parameter(Mandatory = $true)][string[]] $Patterns,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $ProtectedPaths
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths
     )
 
     $existed = Test-Path -LiteralPath $Path -PathType Leaf
@@ -505,7 +505,7 @@ function Set-RemediationIndexWithoutPaths {
         [Parameter(Mandatory = $true)][string] $IndexPath,
         [Parameter(Mandatory = $true)][string] $ExpectedIndexSha256,
         [Parameter(Mandatory = $true)][string[]] $Paths,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $ProtectedPaths
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths
     )
 
     $safePaths = @($Paths | Where-Object {
@@ -561,7 +561,7 @@ function New-RemediationCommitObject {
         [Parameter(Mandatory = $true)][string] $GitExecutable,
         [Parameter(Mandatory = $true)][string] $Head,
         [Parameter(Mandatory = $true)][string[]] $Paths,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $ProtectedPaths
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths
     )
 
     $safePaths = @($Paths | Where-Object {
@@ -601,7 +601,7 @@ function Remove-RemediationFiles {
     param([Parameter(Mandatory = $true)][object] $Transaction)
 
     foreach ($relativePath in $Transaction.MutationPaths) {
-        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$relativePath) -ProtectedPaths @($Transaction.ProtectedPaths)) {
+        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$relativePath) -ProtectedPaths $Transaction.ProtectedPaths) {
             Write-ProtectedClaudeFamilyDiagnostic -Path ([string]$relativePath) -Sink 'remediation file deletion'
             continue
         }
@@ -635,7 +635,7 @@ function Set-RemediationHead {
 
     if ([string]::IsNullOrWhiteSpace([string]$Transaction.NewCommit)) { return }
     foreach ($relativePath in @($Transaction.Paths)) {
-        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$relativePath) -ProtectedPaths @($Transaction.ProtectedPaths)) {
+        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$relativePath) -ProtectedPaths $Transaction.ProtectedPaths) {
             Write-ProtectedClaudeFamilyDiagnostic -Path ([string]$relativePath) -Sink 'remediation HEAD update'
             return
         }
@@ -671,7 +671,7 @@ function Restore-RemediationHead {
 
     if ([string]::IsNullOrWhiteSpace([string]$Transaction.NewCommit)) { return }
     foreach ($relativePath in @($Transaction.Paths)) {
-        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$relativePath) -ProtectedPaths @($Transaction.ProtectedPaths)) {
+        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$relativePath) -ProtectedPaths $Transaction.ProtectedPaths) {
             Write-ProtectedClaudeFamilyDiagnostic -Path ([string]$relativePath) -Sink 'remediation HEAD rollback'
             return
         }
@@ -697,7 +697,7 @@ function Restore-RemediationFiles {
 
     $errors = New-Object System.Collections.Generic.List[string]
     foreach ($relativePath in @($Transaction.FilesRemoved)) {
-        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$relativePath) -ProtectedPaths @($Transaction.ProtectedPaths)) {
+        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$relativePath) -ProtectedPaths $Transaction.ProtectedPaths) {
             Write-ProtectedClaudeFamilyDiagnostic -Path ([string]$relativePath) -Sink 'remediation file rollback'
             continue
         }
@@ -728,7 +728,7 @@ function Restore-RemediationExclude {
 
     if ($null -eq $Snapshot) { return }
     foreach ($relativePath in @($Snapshot.MutationPaths)) {
-        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$relativePath) -ProtectedPaths @($Snapshot.ProtectedPaths)) {
+        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$relativePath) -ProtectedPaths $Snapshot.ProtectedPaths) {
             Write-ProtectedClaudeFamilyDiagnostic -Path ([string]$relativePath) -Sink 'remediation Git exclude rollback'
             return
         }
@@ -756,7 +756,7 @@ function Restore-AgentArtifactRemediation {
         try {
             $skipIndexRollback = $false
             foreach ($relativePath in @($Transaction.Paths)) {
-                if (Test-IsProtectedClaudeFamilyPath -Path ([string]$relativePath) -ProtectedPaths @($Transaction.ProtectedPaths)) {
+                if (Test-IsProtectedClaudeFamilyPath -Path ([string]$relativePath) -ProtectedPaths $Transaction.ProtectedPaths) {
                     Write-ProtectedClaudeFamilyDiagnostic -Path ([string]$relativePath) -Sink 'remediation Git index rollback'
                     $skipIndexRollback = $true
                 }
@@ -787,7 +787,7 @@ function Invoke-AgentArtifactRemediation {
     param(
         [Parameter(Mandatory = $true)][string] $Repository,
         [string] $GitExecutable = 'git',
-        [string[]] $ProtectedPathPrefixes = @()
+        [AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPathPrefixes = @()
     )
 
     $repositoryRoot = ((Invoke-RemediationGit -Repository $Repository -GitExecutable $GitExecutable -Arguments @('rev-parse','--show-toplevel')) | Select-Object -First 1).Trim()

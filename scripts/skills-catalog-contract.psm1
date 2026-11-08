@@ -795,13 +795,13 @@ function Assert-ManagedManifestV3 {
 function Test-IsManagedManifestV4InstructionLicensePath {
     param([Parameter(Mandatory = $true)][string] $InstructionHost,[object] $Value)
     if (-not (Test-IsSafeRepositoryPath -Value $Value)) { return $false }
-    $namespace = switch ($InstructionHost) {
-        'codex' { '.codex' }
-        'copilot' { '.github' }
-        'claude' { '.claude' }
+    $pattern = switch ($InstructionHost) {
+        'codex' { '^\.codex/ai-instructions-licenses/(?:[0-9a-f]{40}/)?(?:delivery\.json|source/.+)$' }
+        'copilot' { '^\.github/ai-instructions-licenses/(?:[0-9a-f]{40}/)?(?:delivery\.json|source/.+)$' }
+        'claude' { '^\.claude/ai-instructions-licenses/[0-9a-f]{40}/(?:delivery\.json|source/.+)$' }
         default { return $false }
     }
-    return [string]$Value -cmatch ('^' + [regex]::Escape($namespace) + '/ai-instructions-licenses/([0-9a-f]{40}/)?(delivery\.json|source/.+)$')
+    return [string]$Value -cmatch $pattern
 }
 
 function Test-IsManagedManifestV4InstructionTarget {
@@ -986,6 +986,9 @@ function Assert-ManagedManifestV4 {
             Assert-StableId -Value $rendererId -Context "managed manifest instruction '$artifactId' rendererId"
             $rendererSha256 = Get-RequiredProperty -Object $entry -Name 'rendererSha256' -Context "managed manifest instruction '$artifactId'"
             $retentionProperty = $entry.PSObject.Properties['retention']
+            if ($null -ne $retentionProperty -and $retentionProperty.Value -isnot [string]) {
+                throw "Managed manifest instruction '$artifactId' retention must be a string."
+            }
             if ([string]$rendererId -ceq 'legacy-unrendered') {
                 if ($null -eq $retentionProperty -or [string]$retentionProperty.Value -cne 'legacy-preserved') {
                     throw "Managed manifest instruction '$artifactId' may use rendererId 'legacy-unrendered' only with retention 'legacy-preserved'."

@@ -1857,7 +1857,10 @@ function Open-GitInfoExcludeMutationHandle {
 function Restore-GitInfoExcludeSnapshot {
     param([Parameter(Mandatory = $true)][object] $Snapshot)
 
-    $protectedPaths = if ($Snapshot.PSObject.Properties['ProtectedPaths']) { @($Snapshot.ProtectedPaths) } else { @() }
+    $protectedPaths = @(if ($Snapshot.PSObject.Properties['ProtectedPaths']) {
+        if ($null -eq $Snapshot.ProtectedPaths) { throw 'ProtectedPaths state is null.' }
+        @($Snapshot.ProtectedPaths)
+    } else { @() })
     $managedPaths = if ($Snapshot.PSObject.Properties['ManagedPaths']) { @($Snapshot.ManagedPaths) } else { @() }
     foreach ($managedPath in $managedPaths) {
         if (Test-IsProtectedClaudeFamilyPath -Path ([string]$managedPath) -ProtectedPaths $protectedPaths) {
@@ -1974,7 +1977,7 @@ function Set-ManagedGitInfoExclude {
         [Parameter(Mandatory = $true)][string] $Repository,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $ManagedPaths,
         [Parameter(Mandatory = $true)][object] $Snapshot,
-        [AllowEmptyCollection()][string[]] $ProtectedPaths = @()
+        [AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths = @()
     )
 
     $path = Get-GitInfoExcludePath -Repository $Repository
@@ -2284,7 +2287,7 @@ function New-TargetMutationSnapshot {
         [Parameter(Mandatory = $true)][string] $TargetRoot,
         [Parameter(Mandatory = $true)][string[]] $RelativePaths,
         [Parameter(Mandatory = $true)][string] $BackupRoot,
-        [AllowEmptyCollection()][string[]] $ProtectedPaths = @()
+        [AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths = @()
     )
 
     New-Item -ItemType Directory -Force -Path $BackupRoot | Out-Null
@@ -2739,7 +2742,10 @@ function Invoke-AtomicFilePublication {
         [Parameter(Mandatory=$true)][object]$PublicationState,
         [AllowNull()][object]$Snapshot
     )
-    $protectedPaths = if ($null -ne $Snapshot -and $Snapshot.PSObject.Properties['ProtectedPaths']) { @($Snapshot.ProtectedPaths) } else { @() }
+    $protectedPaths = @(if ($null -ne $Snapshot -and $Snapshot.PSObject.Properties['ProtectedPaths']) {
+        if ($null -eq $Snapshot.ProtectedPaths) { throw 'ProtectedPaths state is null.' }
+        @($Snapshot.ProtectedPaths)
+    } else { @() })
     if ($Kind -ceq 'Target' -and (Test-IsProtectedClaudeFamilyPath -Path $RelativePath -ProtectedPaths $protectedPaths)) {
         Write-Warning "Protected Claude family path skipped at atomic file publication: $RelativePath (project-owned Claude family)."
         return $null
@@ -3068,7 +3074,10 @@ function Remove-TargetMutationFileAtomically {
         [switch] $AllowReadOnlyOnlyDrift
     )
 
-    $protectedPaths = if ($Snapshot.PSObject.Properties['ProtectedPaths']) { @($Snapshot.ProtectedPaths) } else { @() }
+    $protectedPaths = @(if ($Snapshot.PSObject.Properties['ProtectedPaths']) {
+        if ($null -eq $Snapshot.ProtectedPaths) { throw 'ProtectedPaths state is null.' }
+        @($Snapshot.ProtectedPaths)
+    } else { @() })
     if (Test-IsProtectedClaudeFamilyPath -Path $RelativePath -ProtectedPaths $protectedPaths) {
         Write-Warning "Protected Claude family path skipped at atomic file deletion: $RelativePath (project-owned Claude family)."
         return
@@ -3133,7 +3142,10 @@ function Set-TargetMutationFileBytes {
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $Bytes
     )
 
-    $protectedPaths = if ($Snapshot.PSObject.Properties['ProtectedPaths']) { @($Snapshot.ProtectedPaths) } else { @() }
+    $protectedPaths = @(if ($Snapshot.PSObject.Properties['ProtectedPaths']) {
+        if ($null -eq $Snapshot.ProtectedPaths) { throw 'ProtectedPaths state is null.' }
+        @($Snapshot.ProtectedPaths)
+    } else { @() })
     if (Test-IsProtectedClaudeFamilyPath -Path $RelativePath -ProtectedPaths $protectedPaths) {
         Write-Warning "Protected Claude family path skipped at bootstrap file write: $RelativePath (project-owned Claude family)."
         return
@@ -3168,7 +3180,10 @@ function Remove-TargetMutationFile {
         [Parameter(Mandatory = $true)][string] $RelativePath
     )
 
-    $protectedPaths = if ($Snapshot.PSObject.Properties['ProtectedPaths']) { @($Snapshot.ProtectedPaths) } else { @() }
+    $protectedPaths = @(if ($Snapshot.PSObject.Properties['ProtectedPaths']) {
+        if ($null -eq $Snapshot.ProtectedPaths) { throw 'ProtectedPaths state is null.' }
+        @($Snapshot.ProtectedPaths)
+    } else { @() })
     if (Test-IsProtectedClaudeFamilyPath -Path $RelativePath -ProtectedPaths $protectedPaths) {
         Write-Warning "Protected Claude family path skipped at bootstrap file deletion: $RelativePath (project-owned Claude family)."
         return
@@ -3254,7 +3269,10 @@ function Restore-TargetMutationSnapshot {
 
     $driftedPaths = New-Object System.Collections.Generic.List[string]
     $rollbackErrors = New-Object System.Collections.Generic.List[string]
-    $protectedPaths = if ($Snapshot.PSObject.Properties['ProtectedPaths']) { @($Snapshot.ProtectedPaths) } else { @() }
+    $protectedPaths = @(if ($Snapshot.PSObject.Properties['ProtectedPaths']) {
+        if ($null -eq $Snapshot.ProtectedPaths) { throw 'ProtectedPaths state is null.' }
+        @($Snapshot.ProtectedPaths)
+    } else { @() })
     foreach ($state in @($Snapshot.FileStates)) {
         if (Test-IsProtectedClaudeFamilyPath -Path ([string]$state.RelativePath) -ProtectedPaths $protectedPaths) {
             Write-Warning "Protected Claude family path skipped at bootstrap file rollback: $($state.RelativePath) (project-owned Claude family)."
@@ -3623,6 +3641,7 @@ function Update-PersonalAgentStash {
         [string] $ActiveIndexPath,
 
         [AllowEmptyCollection()]
+        [ValidateNotNull()]
         [string[]] $ProtectedPaths = @()
     )
 
@@ -3850,7 +3869,10 @@ function Update-PersonalAgentStash {
 function Save-SkillMigrationJournal {
     param([object]$Snapshot, [object]$ExcludeSnapshot, [string]$Path, [object]$GitState, [string]$Phase,
         [string]$PendingPath, [string]$PendingType='missing', [byte[]]$PendingBytes)
-    $protectedPaths = if ($Snapshot.PSObject.Properties['ProtectedPaths']) { @($Snapshot.ProtectedPaths) } else { @() }
+    $protectedPaths = @(if ($Snapshot.PSObject.Properties['ProtectedPaths']) {
+        if ($null -eq $Snapshot.ProtectedPaths) { throw 'ProtectedPaths state is null.' }
+        @($Snapshot.ProtectedPaths)
+    } else { @() })
     if (-not [string]::IsNullOrWhiteSpace($PendingPath) -and
         (Test-IsProtectedClaudeFamilyPath -Path $PendingPath -ProtectedPaths $protectedPaths)) {
         Write-Warning "Protected Claude family path skipped at Skill migration journal: $PendingPath (project-owned Claude family)."
@@ -3960,10 +3982,10 @@ function Restore-SkillMigrationJournal {
         [string]$journal.head -cnotmatch '^[0-9a-f]{40,64}$' -or [string]$journal.indexSha256 -cnotmatch '^[0-9a-f]{64}$') {
         throw 'Skill migration journal identity or schema is invalid.'
     }
-    $recoveryProtectedPaths = if (@(Get-ClaudeProjectOwnedWorktreeRoots -Repository $Repository -Strict).Count -gt 0) {
+    $recoveryProtectedPaths = @(if (@(Get-ClaudeProjectOwnedWorktreeRoots -Repository $Repository -Strict).Count -gt 0) {
         @('CLAUDE.md','.claude/AI-Rules/','.claude/ai-instructions-licenses/')
     }
-    else { @() }
+    else { @() })
     $protectedJournalPaths = New-Object System.Collections.Generic.List[string]
     $gitState = Get-RepoSkillMigrationGitState -Repository $Repository -GitExecutable $GitExecutable
     if ($gitState.head -cne $journal.head -or $gitState.indexSha256 -cne $journal.indexSha256) { throw 'Skill migration recovery preserved concurrent Git changes.' }
@@ -4461,18 +4483,18 @@ $remediationTransaction = $null
 try {
     Assert-NoRepoManagedManifestV4 -Repository $targetRootPath -AllowV4:($repoManifestWriter -ceq 'v4')
     $claudeProjectOwnedWorktrees = @(Get-ClaudeProjectOwnedWorktreeRoots -Repository $targetRootPath)
-    $remediationProtectedPaths = if ($claudeProjectOwnedWorktrees.Count -gt 0) {
+    $remediationProtectedPaths = @(if ($claudeProjectOwnedWorktrees.Count -gt 0) {
         @('CLAUDE.md','.claude/AI-Rules','.claude/ai-instructions-licenses')
     }
-    else { @('CLAUDE.md') }
+    else { @('CLAUDE.md') })
     if (-not $WhatIf) {
         $repositoryOperationLock = Open-RepositoryOperationLock -Repository $targetRootPath
         Assert-NoRepoManagedManifestV4 -Repository $targetRootPath -AllowV4:($repoManifestWriter -ceq 'v4') -Strict
         $claudeProjectOwnedWorktrees = @(Get-ClaudeProjectOwnedWorktreeRoots -Repository $targetRootPath -Strict)
-        $remediationProtectedPaths = if ($claudeProjectOwnedWorktrees.Count -gt 0) {
+        $remediationProtectedPaths = @(if ($claudeProjectOwnedWorktrees.Count -gt 0) {
             @('CLAUDE.md','.claude/AI-Rules','.claude/ai-instructions-licenses')
         }
-        else { @('CLAUDE.md') }
+        else { @('CLAUDE.md') })
         $remediationTransaction = Invoke-AgentArtifactRemediation -Repository $targetRootPath -GitExecutable $GitExecutable -ProtectedPathPrefixes $remediationProtectedPaths
     }
     if ($null -ne $remediationTransaction) {
@@ -4601,17 +4623,12 @@ if ($manifestExists) {
     }
     elseif ($manifestSchemaVersion -eq 1) { Assert-LegacyManagedManifestV1 -Manifest $manifest }
 
-    if ($manifestSchemaVersion -in @(2,3,4) -and
+    if ($manifestSchemaVersion -in @(2,3) -and
         ([string]$manifest.catalogId -cne [string]$provenance.catalogId -or
          [string]$manifest.lockSha256 -cnotmatch '^[0-9a-f]{64}$')) {
         throw 'Managed instruction manifest Catalog identity or historical lock hash is invalid.'
     }
-    if ($manifestSchemaVersion -eq 4 -and
-        ([string]$manifest.lockSha256 -cne [string]$provenance.lockSha256 -or
-         [string]$manifest.projectionContractSha256 -cne [string]$projectionContractSha256 -or
-         @($manifest.projections).Count -ne 0)) {
-        throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message 'REPO managed manifest v4 identity does not match the verified routing context.')
-    }
+    # A valid v4 identity is historical ownership evidence. The candidate manifest below is rebound to the current P7e-verified context.
     foreach ($entry in @($manifest.files)) {
         $targetPath = [string] $entry.targetPath
         if (-not (Test-IsAllowedManagedPath -Path $targetPath)) {
@@ -4684,10 +4701,10 @@ foreach ($trackedPath in @(Invoke-Git -Repository $targetRootPath -Arguments @('
     [void]$trackedPaths.Add((ConvertFrom-GitQuotedPath -Path ([string]$trackedPath)).Replace('\','/'))
 }
 $currentClaudeProjectOwned = @($claudeProjectOwnedWorktrees | Where-Object { [System.IO.Path]::GetFullPath([string]$_).TrimEnd([char[]]@('\','/')).Equals($targetRootPath,[System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
-$protectedClaudeFamilyPaths = if ($currentClaudeProjectOwned) {
+$protectedClaudeFamilyPaths = @(if ($currentClaudeProjectOwned) {
     @('CLAUDE.md','.claude/AI-Rules/','.claude/ai-instructions-licenses/')
 }
-else { @() }
+else { @() })
 $trackedPollutionPaths = @(@(
     if ($trackedPaths.Contains($manifestRelativePath)) { $manifestRelativePath }
     foreach ($targetPath in @($manifestEntriesByTarget.Keys | Sort-Object)) {

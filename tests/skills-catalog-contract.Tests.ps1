@@ -557,6 +557,46 @@ function Get-TestManagedManifestV4 {
         { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw "with rendererId 'build-ai-instructions' must include rendererSha256"
     }
 
+    # Scenario: A retained v4 instruction encodes retention as a singleton JSON array instead of a scalar string.
+    # Purpose: Keep the executable validator aligned with the JSON schema and prevent PowerShell string coercion from accepting the wrong type.
+    It 'UnitT11v17_rejects_non_string_retention' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) {
+            throw 'UnitT11v17 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.'
+        }
+        $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\managed-manifest-v4.schema.json'
+        $manifest = Get-TestManagedManifestV4
+        $entry = @($manifest.files | Where-Object { $_.artifactType -eq 'instruction' -and $_.rendererId -eq 'legacy-unrendered' })[0]
+        $entry.retention = @('legacy-preserved')
+
+        (Test-Json -Json ($manifest | ConvertTo-Json -Depth 100) -SchemaFile $schemaPath) | Should Be $false
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw 'retention must be a string'
+    }
+
+    # Scenario: A Claude instruction omits the commit segment from its license target while legacy Codex and GitHub targets do the same.
+    # Purpose: Require sourceCommit namespacing for Claude without breaking the documented legacy compatibility of the other hosts.
+    It 'UnitT11v18_requires_commit_segment_for_Claude_license_targets' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) {
+            throw 'UnitT11v18 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.'
+        }
+        $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\managed-manifest-v4.schema.json'
+        $manifest = Get-TestManagedManifestV4
+        $entry = @($manifest.files | Where-Object { $_.artifactType -eq 'instruction' -and $_.host -eq 'claude' -and $_.targetPath -like '.claude/ai-instructions-licenses/*' })[0]
+        $entry.targetPath = '.claude/ai-instructions-licenses/delivery.json'
+
+        (Test-Json -Json ($manifest | ConvertTo-Json -Depth 100) -SchemaFile $schemaPath) | Should Be $false
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw "target path is not allowed for host 'claude'"
+
+        $entry.host = 'codex'
+        $entry.targetPath = '.codex/ai-instructions-licenses/delivery.json'
+        (Test-Json -Json ($manifest | ConvertTo-Json -Depth 100) -SchemaFile $schemaPath) | Should Be $true
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Not Throw
+
+        $entry.host = 'copilot'
+        $entry.targetPath = '.github/ai-instructions-licenses/delivery.json'
+        (Test-Json -Json ($manifest | ConvertTo-Json -Depth 100) -SchemaFile $schemaPath) | Should Be $true
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Not Throw
+    }
+
     # Scenario: A v3 Catalog declares several bounded USER and project projections and its Lock binds their canonical digest.
     # Purpose: Establish reader-first v3 validation and deterministic target derivation without changing production v2 files.
     It 'UnitT11a_accepts_v3_catalog_lock_projections_and_independent_digest' {

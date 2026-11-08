@@ -156,9 +156,9 @@ function New-P9bInstructionArchive {
 }
 
 function New-P9bBootstrapContext {
-    param([Parameter(Mandatory=$true)][string]$Root,[switch]$SelectProjectProjection,[string]$InstructionCommit=('c'*40))
-    $runtimeRoot=Join-Path $script:BaseV3Home 'hooks/ai-instructions-runtime'
-    $configuration=Get-Content -Raw -LiteralPath (Join-Path $script:BaseV3Home 'ai-instructions-sync.json')|ConvertFrom-Json
+    param([Parameter(Mandatory=$true)][string]$Root,[switch]$SelectProjectProjection,[string]$InstructionCommit=('c'*40),[string]$CodexHome=$script:BaseV3Home)
+    $runtimeRoot=Join-Path $CodexHome 'hooks/ai-instructions-runtime'
+    $configuration=Get-Content -Raw -LiteralPath (Join-Path $CodexHome 'ai-instructions-sync.json')|ConvertFrom-Json
     if($SelectProjectProjection){$configuration.projections.project=@('project-agents')}
     $catalog=Get-Content -Raw -LiteralPath (Join-Path $runtimeRoot 'catalog/skills-catalog.json')|ConvertFrom-Json
     $lock=Get-Content -Raw -LiteralPath (Join-Path $runtimeRoot 'catalog/skills-catalog-lock.json')|ConvertFrom-Json
@@ -456,13 +456,14 @@ Describe 'AI instructions writer and reader gate' {
         ([IO.File]::ReadAllText((Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions-installed.ps1')))|Should Match 'RuntimeRoot\s*=\s*\$runtimeRoot'
     }
 
-    # Scenario: A verified v3/v5 routing context reaches the REPO writer with no project projection selected.
-    # Purpose: Emit a complete v4 Claude/Codex/Copilot manifest, exact excludes, generation 1, and stable renderer evidence; repeat idempotently.
+    # Scenario: A verified v3/v5 routing context reaches an ordinary repository with no project-owned CLAUDE.md and no project projection selected.
+    # Purpose: Preserve an explicit empty Claude protection set, emit complete v4 output, and repeat idempotently.
     It 'InterT111_writes_complete_v4_manifest_and_exact_excludes_idempotently' {
         $root=Join-Path $script:ExternalRoot 'p9b-v4-complete';New-Item -ItemType Directory -Force -Path $root|Out-Null
         $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip')
         $context=New-P9bBootstrapContext -Root $root
         $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        Test-Path -LiteralPath (Join-Path $target 'CLAUDE.md')|Should Be $false
 
         $first=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target
         $first.ExitCode|Should Be 0
@@ -928,6 +929,46 @@ Describe 'AI instructions writer and reader gate' {
         $result.ExitCode|Should Not Be 0
         (Get-AiInstructionsRefusalCode $result.Output)|Should Be closure-invalid
         $result.Output|Should Match 'Cannot determine exactly one instruction host'
+        (Get-P9bRepoSnapshot $target)|Should Be $before
+    }
+
+    # Scenario: A repository first writes v4 under one verified Catalog/Lock pair, then a newly installed v3/v5 runtime carries an updated valid Lock.
+    # Purpose: Accept the old manifest as historical ownership, bind the next manifest to current verified context, increment once, and remain idempotent.
+    It 'InterT127_advances_existing_v4_to_a_new_verified_Lock_idempotently' {
+        $root=Join-Path $script:ExternalRoot 'p9b-v4-lock-advance';New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip')
+        $initialContext=New-P9bBootstrapContext -Root $root
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        (Invoke-P9bRepoBootstrap -Context $initialContext -ArchivePath $source.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
+        $manifestPath=Join-Path $target '.codex/ai-instructions.manifest.json'
+        [int64](Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json).generation|Should Be 1
+
+        $updatedCandidate=Join-Path $root 'updated-source';New-P7eV3Candidate -Destination $updatedCandidate
+        $updatedLockPath=Join-Path $updatedCandidate 'catalog/skills-catalog-lock.json'
+        $updatedLock=Get-Content -Raw -LiteralPath $updatedLockPath|ConvertFrom-Json
+        $updatedLock.sources[0].requestedRef='v1.0.1'
+        $updatedLock.sources[0].resolvedCommit='9'*40
+        $updatedLock.sources[0].resolvedVersion='1.0.1'
+        $updatedLock.sources[0].archiveSha256='8'*64
+        foreach($skill in @($updatedLock.skills)){$skill.contentSha256='7'*64}
+        Set-P9bJson -Path $updatedLockPath -Document $updatedLock
+        $updatedHome=Join-Path $root 'updated-home'
+        $install=Invoke-P7eInstaller -SourceRoot $updatedCandidate -CodexHome $updatedHome -WriterSchema V3V5
+        $install.ExitCode|Should Be 0
+        $updatedContext=New-P9bBootstrapContext -Root $root -CodexHome $updatedHome
+        $updatedContext.LockSha256|Should Not Be $initialContext.LockSha256
+
+        $advanced=Invoke-P9bRepoBootstrap -Context $updatedContext -ArchivePath $source.ArchivePath -TargetRoot $target
+        $advanced.ExitCode|Should Be 0
+        $manifest=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+        [int64]$manifest.generation|Should Be 2
+        [string]$manifest.lockSha256|Should Be $updatedContext.LockSha256
+        [string]$manifest.projectionContractSha256|Should Be $updatedContext.ProjectionContractSha256
+        $before=Get-P9bRepoSnapshot $target
+
+        $repeat=Invoke-P9bRepoBootstrap -Context $updatedContext -ArchivePath $source.ArchivePath -TargetRoot $target
+        $repeat.ExitCode|Should Be 0
+        [int64](Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json).generation|Should Be 2
         (Get-P9bRepoSnapshot $target)|Should Be $before
     }
 

@@ -25,7 +25,7 @@
     "licenseTarget": { "type": "string", "pattern": "^\\.(?:codex|github|claude)/ai-instructions-licenses/(?:[0-9a-f]{40}/)?(?:delivery\\.json|source/.+)$" },
     "codexLicenseTarget": { "type": "string", "pattern": "^\\.codex/ai-instructions-licenses/(?:[0-9a-f]{40}/)?(?:delivery\\.json|source/.+)$" },
     "copilotLicenseTarget": { "type": "string", "pattern": "^\\.github/ai-instructions-licenses/(?:[0-9a-f]{40}/)?(?:delivery\\.json|source/.+)$" },
-    "claudeLicenseTarget": { "type": "string", "pattern": "^\\.claude/ai-instructions-licenses/(?:[0-9a-f]{40}/)?(?:delivery\\.json|source/.+)$" },
+    "claudeLicenseTarget": { "type": "string", "pattern": "^\\.claude/ai-instructions-licenses/[0-9a-f]{40}/(?:delivery\\.json|source/.+)$" },
     "file": {
       "type": "object",
       "additionalProperties": false,

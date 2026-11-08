@@ -374,6 +374,13 @@ if(-not(Get-Command ConvertFrom-GitWorktreePorcelainZ -ErrorAction SilentlyConti
         $definition[0].Extent.Text|Should Match 'Test-IsProtectedClaudeFamilyPath'
     }
 
+    # Scenario: The shared guard receives either a deliberately computed empty protection set or a missing null set.
+    # Purpose: Permit ordinary repositories with no project-owned Claude family while refusing to treat an uncomputed set as unprotected.
+    It 'UnitT65_accepts_empty_but_rejects_null_Claude_family_protection' {
+        (Test-IsProtectedClaudeFamilyPath -Path 'CLAUDE.md' -ProtectedPaths @()) | Should Be $false
+        { Test-IsProtectedClaudeFamilyPath -Path 'CLAUDE.md' -ProtectedPaths $null } | Should Throw
+    }
+
     # Scenario: Each Claude base, Rule, and license path is tracked or untracked under v2, v3, and v4 manifest ownership while the manifest itself is tracked.
     # Purpose: Preserve protected bytes and index state, omit the path from remediation commits, and emit a reason at the complete remediation sink chain.
     It 'InterT65_preserves_<PathKind>_<Tracking>_under_v<SchemaVersion>_across_remediation_sinks' -TestCases @(
