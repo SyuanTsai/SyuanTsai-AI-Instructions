@@ -305,7 +305,7 @@ Describe 'AI instructions writer and reader gate' {
         $definition=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Open-TrustedRuntimeFileLease'},$true))[0]
         $definition|Should Not BeNullOrEmpty
         Invoke-Expression $definition.Extent.Text
-        $path=Join-Path $script:ExternalRoot 'held-closure.psm1';[IO.File]::WriteAllText($path,"# held`n",[Text.UTF8Encoding]::new($false))
+        $path=Join-Path $script:ExternalRoot 'ai-instructions-runtime-contract.psm1';Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts\ai-instructions-runtime-contract.psm1') -Destination $path
         $lease=Open-TrustedRuntimeFileLease -Path $path
         try{
             { $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]::ReadWrite);$stream.Dispose() }|Should Throw

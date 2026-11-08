@@ -388,6 +388,33 @@ function Assert-TrustedPlatformRuntimeClosureV3 {
     }
 }
 
+function Assert-TrustedRuntimeContractClosureV3 {
+    param([Parameter(Mandatory = $true)][object[]] $Inventory)
+    $leases = New-Object 'System.Collections.Generic.List[System.IDisposable]'
+    try {
+        foreach ($relativePath in @(
+            'ai-instructions-runtime-contract.psm1',
+            'WindowsDacl.psm1',
+            'skills-catalog-contract.psm1'
+        )) {
+            $entry = @($Inventory | Where-Object { [string]$_.path -ceq $relativePath })
+            if ($entry.Count -ne 1 -or [string]$entry[0].sha256 -cnotmatch '^[0-9a-f]{64}$') {
+                throw "Installed runtime bundle inventory does not contain exactly one valid '$relativePath' entry."
+            }
+            $path = Join-Path $runtimeRoot $relativePath
+            $leases.Add((Open-TrustedRuntimeFileLease -Path $path))
+            if ((Get-TrustedFileSha256 -Path $path) -cne [string]$entry[0].sha256) {
+                throw "Installed runtime contract closure hash differs at '$relativePath'."
+            }
+        }
+        return [System.IDisposable[]]$leases.ToArray()
+    }
+    catch {
+        foreach ($lease in @($leases)) { $lease.Dispose() }
+        throw
+    }
+}
+
 function Assert-InstalledRuntime {
     param([switch] $AllowPinMismatch)
 
@@ -526,6 +553,7 @@ function Assert-InstalledRuntime {
         throw 'Installed AI instructions stable cleanup command does not match the active immutable runtime.'
     }
     if ($generation -ceq 'v3v5') {
+        $runtimeContractClosureLeases = @()
         try { Import-Module $platformRuntimeManifestPath -Force -ErrorAction Stop }
         catch { throw [InvalidOperationException]::new("Verified installed platform runtime could not be loaded: $($_.Exception.Message) [ai-instructions-refusal-code=closure-invalid]",$_.Exception) }
         try { Assert-PlatformRuntimeInventory -Root $runtimeRoot -ManifestPath $platformRuntimeManifestPath | Out-Null }
@@ -533,6 +561,7 @@ function Assert-InstalledRuntime {
         try { $runtimeCapabilityReceipt = Get-PlatformCapabilities -Required ([string[]]@($bundle.requiredCapabilities)) }
         catch { throw [InvalidOperationException]::new("Installed v3/v5 runtime capabilities are unavailable: $($_.Exception.Message) [ai-instructions-refusal-code=capability-unavailable]",$_.Exception) }
         try {
+            $runtimeContractClosureLeases = @(Assert-TrustedRuntimeContractClosureV3 -Inventory $declaredInventory)
             Import-Module $contractPath -Force -ErrorAction Stop
             Assert-AiInstructionsRuntimeGate -Bundle $bundle -Configuration $configuration -RuntimeRoot $runtimeRoot -CapabilityReceipt $runtimeCapabilityReceipt | Out-Null
         }
@@ -540,6 +569,9 @@ function Assert-InstalledRuntime {
             $code = if (Get-Command Get-AiInstructionsRefusalCode -ErrorAction SilentlyContinue) { Get-AiInstructionsRefusalCode $_ } else { $null }
             if (-not [string]::IsNullOrWhiteSpace([string]$code)) { throw }
             throw [InvalidOperationException]::new("Installed v3/v5 runtime gate failed: $($_.Exception.Message) [ai-instructions-refusal-code=closure-invalid]",$_.Exception)
+        }
+        finally {
+            foreach ($lease in @($runtimeContractClosureLeases)) { $lease.Dispose() }
         }
     }
     }
