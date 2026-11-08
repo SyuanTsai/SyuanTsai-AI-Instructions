@@ -212,13 +212,18 @@ function Invoke-P9bRepoBootstrap {
     param(
         [Parameter(Mandatory=$true)][object]$Context,
         [Parameter(Mandatory=$true)][string]$ArchivePath,
-        [Parameter(Mandatory=$true)][string]$TargetRoot
+        [Parameter(Mandatory=$true)][string]$TargetRoot,
+        [string]$GitExecutable
     )
     $userHome=Join-Path (Split-Path -Parent $TargetRoot) 'p9b-user'
     New-Item -ItemType Directory -Force -Path $userHome|Out-Null
-    $output=& $script:PowerShellExecutable -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1') `
-        -SourceArchivePath $ArchivePath -ConfigurationPath $Context.RoutingPath -ProvenancePath $Context.ProvenancePath `
-        -RuntimeRoot $Context.RuntimeRoot -TargetRoot $TargetRoot -UserHome $userHome 2>&1
+    $arguments=@(
+        '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'),
+        '-SourceArchivePath',$ArchivePath,'-ConfigurationPath',$Context.RoutingPath,'-ProvenancePath',$Context.ProvenancePath,
+        '-RuntimeRoot',$Context.RuntimeRoot,'-TargetRoot',$TargetRoot,'-UserHome',$userHome
+    )
+    if(-not[string]::IsNullOrWhiteSpace($GitExecutable)){$arguments+=@('-GitExecutable',$GitExecutable)}
+    $output=& $script:PowerShellExecutable @arguments 2>&1
     return [pscustomobject]@{ExitCode=$LASTEXITCODE;Output=($output-join[Environment]::NewLine)}
 }
 
@@ -973,7 +978,7 @@ Describe 'AI instructions writer and reader gate' {
     }
 
     # Scenario: Worktree A synchronizes after worktree B acquires a tracked or untracked project-owned CLAUDE.md while A retains a tracked managed Claude Rule.
-    # Purpose: Use repository-wide ownership for remediation and shared exclusions without disabling A's own Claude fan-out or touching B's bytes and index.
+    # Purpose: Use A-only ownership for remediation and repository-wide ownership for shared exclusions without disabling A's fan-out or touching B's bytes and index.
     It 'InterT128_fans_out_A_while_linked_B_owns_<Ownership>_CLAUDE' -TestCases @(
         @{Ownership='tracked'},
         @{Ownership='untracked'}
@@ -1019,6 +1024,117 @@ Describe 'AI instructions writer and reader gate' {
             }
         }
         finally{& git -C $target worktree remove --force $linkedRoot|Out-Null}
+    }
+
+    # Scenario: Worktree A tracks a manifest-owned Claude Rule while linked worktree B tracks its own Claude base and Rule.
+    # Purpose: Remediate A using only A's ownership decision while preserving B's bytes and omitting repository-wide Claude paths from the shared exclude.
+    It 'InterT129_remediates_A_without_mutating_linked_B_project_Claude_files' {
+        $root=Join-Path $script:ExternalRoot 'p9b-active-remediation-linked-Claude';New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip')
+        $context=New-P9bBootstrapContext -Root $root
+        $target=Join-Path $root 'worktree-a';New-P9bTargetRepository $target
+        (Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
+        $linkedRoot=Join-Path $root 'worktree-b'
+        & git -C $target worktree add --quiet -b linked-Claude-active-remediation $linkedRoot
+        $LASTEXITCODE|Should Be 0
+        try{
+            $linkedClaude=Join-Path $linkedRoot 'CLAUDE.md'
+            $linkedRule=Join-Path $linkedRoot '.claude/AI-Rules/Project.en.md'
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $linkedRule)|Out-Null
+            [IO.File]::WriteAllText($linkedClaude,"# Project Claude base`n",[Text.UTF8Encoding]::new($false))
+            [IO.File]::WriteAllText($linkedRule,"# Project Claude rule`n",[Text.UTF8Encoding]::new($false))
+            & git -C $linkedRoot add -f -- CLAUDE.md .claude/AI-Rules/Project.en.md
+            & git -C $linkedRoot commit --quiet -m 'track project Claude family'
+            $LASTEXITCODE|Should Be 0
+            $linkedClaudeBytes=[IO.File]::ReadAllBytes($linkedClaude)
+            $linkedRuleBytes=[IO.File]::ReadAllBytes($linkedRule)
+            $managedRule='.claude/AI-Rules/Testing.en.md'
+            & git -C $target add -f -- $managedRule
+            & git -C $target commit --quiet -m 'track managed Claude rule in A'
+            $LASTEXITCODE|Should Be 0
+
+            $result=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target
+
+            $result.ExitCode|Should Be 0
+            Test-Path -LiteralPath (Join-Path $target $managedRule)|Should Be $true
+            (@(& git -C $target ls-files -- $managedRule)-join'')|Should BeNullOrEmpty
+            [IO.File]::ReadAllBytes($linkedClaude)|Should Be $linkedClaudeBytes
+            [IO.File]::ReadAllBytes($linkedRule)|Should Be $linkedRuleBytes
+            (@(& git -C $linkedRoot status --porcelain=v1 --untracked-files=all)-join"`n")|Should BeNullOrEmpty
+            $excludePath=(& git -C $target rev-parse --git-path info/exclude|Select-Object -First 1).Trim()
+            if(-not[IO.Path]::IsPathRooted($excludePath)){$excludePath=Join-Path $target $excludePath}
+            $exclude=[IO.File]::ReadAllText($excludePath)
+            $exclude|Should Not Match '(?m)^/CLAUDE\.md$'
+            $exclude|Should Not Match '(?m)^/\.claude/'
+        }
+        finally{& git -C $target worktree remove --force $linkedRoot|Out-Null}
+    }
+
+    # Scenario: Syntactically valid source provenance disagrees with the verified routing envelope or runtime Lock identity.
+    # Purpose: Return closure-invalid with the mismatched field name before worktree, manifest, or shared-exclude mutation.
+    It 'InterT130_refuses_provenance_<Field>_mismatch_before_REPO_mutation' -TestCases @(
+        @{Field='catalogId';Value='different-catalog'},
+        @{Field='lockSha256';Value=('f'*64)}
+    ) {
+        param($Field,$Value)
+        $root=Join-Path $script:ExternalRoot "p9b-provenance-mismatch-$Field";New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip')
+        $context=New-P9bBootstrapContext -Root $root
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        $provenance=Get-Content -Raw -LiteralPath $context.ProvenancePath|ConvertFrom-Json
+        $provenance.$Field=$Value
+        Set-P9bJson -Path $context.ProvenancePath -Document $provenance
+        $before=Get-P9bRepoSnapshot $target
+
+        $result=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target
+
+        $result.ExitCode|Should Not Be 0
+        (Get-AiInstructionsRefusalCode $result.Output)|Should Be closure-invalid
+        $result.Output|Should Match ([regex]::Escape($Field))
+        (Get-P9bRepoSnapshot $target)|Should Be $before
+        Test-Path -LiteralPath (Join-Path $target '.codex/ai-instructions.manifest.json')|Should Be $false
+    }
+
+    if($IsWindows){
+    # Scenario: PersonalAgent finalization fails after a project-owned Claude family caused repository-wide protected exclude prefixes to be computed.
+    # Purpose: Restore the complete original exclude bytes, including unrelated Codex and Copilot lines, instead of treating protected prefixes as managed paths.
+    It 'InterT131_restores_complete_exclude_bytes_after_PersonalAgent_failure_with_Claude_protection' {
+        $root=Join-Path $script:ExternalRoot 'p9b-protected-exclude-rollback';New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip')
+        $context=New-P9bBootstrapContext -Root $root
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        [IO.File]::WriteAllText((Join-Path $target 'CLAUDE.md'),"# Project-owned Claude`n",[Text.UTF8Encoding]::new($false))
+        $excludePath=(& git -C $target rev-parse --git-path info/exclude|Select-Object -First 1).Trim()
+        if(-not[IO.Path]::IsPathRooted($excludePath)){$excludePath=Join-Path $target $excludePath}
+        $originalExclude="# personal prefix`r`n# BEGIN Codex AI Instructions managed paths`r`n/AGENTS.md`r`n/.github/copilot-instructions.md`r`n# END Codex AI Instructions managed paths`r`n"
+        [IO.File]::WriteAllText($excludePath,$originalExclude,[Text.UTF8Encoding]::new($false))
+        $excludeBefore=[IO.File]::ReadAllBytes($excludePath)
+        $wrapperRoot=Join-Path $root 'git-wrapper';New-Item -ItemType Directory -Path $wrapperRoot|Out-Null
+        $realGit=(Get-Command git.exe).Source
+        $findString=Join-Path $env:SystemRoot 'System32/findstr.exe'
+        $gitWrapperPath=Join-Path $wrapperRoot 'git.cmd'
+        $gitWrapper=@"
+@echo off
+echo %* | "$findString" /C:"stash store" >nul
+if errorlevel 1 goto forward
+exit /b 86
+:forward
+"$realGit" %*
+exit /b %errorlevel%
+"@
+        [IO.File]::WriteAllText($gitWrapperPath,$gitWrapper,[Text.UTF8Encoding]::new($false))
+
+        $result=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target -GitExecutable $gitWrapperPath
+
+        $result.ExitCode|Should Not Be 0
+        $result.Output|Should Match 'stash store'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))|Should Be ([Convert]::ToBase64String($excludeBefore))
+        [IO.File]::ReadAllText($excludePath)|Should Match '(?m)^/AGENTS\.md$'
+        [IO.File]::ReadAllText($excludePath)|Should Match '(?m)^/\.github/copilot-instructions\.md$'
+        Test-Path -LiteralPath (Join-Path $target 'AGENTS.md')|Should Be $false
+        Test-Path -LiteralPath (Join-Path $target '.codex/ai-instructions.manifest.json')|Should Be $false
+        [IO.File]::ReadAllText((Join-Path $target 'CLAUDE.md'))|Should Be "# Project-owned Claude`n"
+    }
     }
 
     # Scenario: The stable launcher has opened a verified closure file with its read-only sharing contract.
