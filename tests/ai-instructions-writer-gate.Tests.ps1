@@ -972,6 +972,55 @@ Describe 'AI instructions writer and reader gate' {
         (Get-P9bRepoSnapshot $target)|Should Be $before
     }
 
+    # Scenario: Worktree A synchronizes after worktree B acquires a tracked or untracked project-owned CLAUDE.md while A retains a tracked managed Claude Rule.
+    # Purpose: Use repository-wide ownership for remediation and shared exclusions without disabling A's own Claude fan-out or touching B's bytes and index.
+    It 'InterT128_fans_out_A_while_linked_B_owns_<Ownership>_CLAUDE' -TestCases @(
+        @{Ownership='tracked'},
+        @{Ownership='untracked'}
+    ) {
+        param($Ownership)
+        $root=Join-Path $script:ExternalRoot "p9b-linked-Claude-$Ownership";New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip')
+        $context=New-P9bBootstrapContext -Root $root
+        $target=Join-Path $root 'worktree-a';New-P9bTargetRepository $target
+        (Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
+        $linkedRoot=Join-Path $root 'worktree-b'
+        & git -C $target worktree add --quiet -b "linked-Claude-$Ownership" $linkedRoot
+        $LASTEXITCODE|Should Be 0
+        try{
+            $linkedClaude=Join-Path $linkedRoot 'CLAUDE.md'
+            [IO.File]::WriteAllText($linkedClaude,"project-owned $Ownership Claude`n",[Text.UTF8Encoding]::new($false))
+            if($Ownership-ceq'tracked'){
+                & git -C $linkedRoot add -f -- CLAUDE.md
+                & git -C $linkedRoot commit --quiet -m 'track project Claude base'
+                $LASTEXITCODE|Should Be 0
+            }
+            $linkedBytes=[IO.File]::ReadAllBytes($linkedClaude)
+            $managedRule='.claude/AI-Rules/Testing.en.md'
+            & git -C $target add -f -- $managedRule
+            & git -C $target commit --quiet -m 'tracked managed Claude rule fixture'
+            $LASTEXITCODE|Should Be 0
+
+            $result=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target
+
+            $result.ExitCode|Should Be 0
+            $result.Output|Should Not Match 'Tracked reserved Agent artifacts remain after controlled remediation'
+            Test-Path -LiteralPath (Join-Path $target 'CLAUDE.md')|Should Be $true
+            Test-Path -LiteralPath (Join-Path $target $managedRule)|Should Be $true
+            $manifest=Get-Content -Raw -LiteralPath (Join-Path $target '.codex/ai-instructions.manifest.json')|ConvertFrom-Json
+            @($manifest.files|Where-Object{[string]$_.targetPath-ceq'CLAUDE.md'}).Count|Should Be 1
+            [IO.File]::ReadAllBytes($linkedClaude)|Should Be $linkedBytes
+            (@(& git -C $linkedRoot diff --cached --name-only -- CLAUDE.md)-join'')|Should BeNullOrEmpty
+            $excludePath=(& git -C $target rev-parse --git-path info/exclude|Select-Object -First 1).Trim()
+            if(-not[IO.Path]::IsPathRooted($excludePath)){$excludePath=Join-Path $target $excludePath}
+            [IO.File]::ReadAllText($excludePath)|Should Not Match '(?m)^/CLAUDE\.md$'
+            if($Ownership-ceq'untracked'){
+                (@(& git -C $linkedRoot status --porcelain=v1 --untracked-files=all -- CLAUDE.md)-join"`n")|Should Match '^\?\? CLAUDE\.md$'
+            }
+        }
+        finally{& git -C $target worktree remove --force $linkedRoot|Out-Null}
+    }
+
     # Scenario: The stable launcher has opened a verified closure file with its read-only sharing contract.
     # Purpose: Bind verified bytes through import/inventory assertion by denying concurrent writes and deletion until disposal.
     It 'UnitT95_holds_launcher_closure_bytes_against_write_and_delete' {

@@ -1050,4 +1050,34 @@ exit /b %errorlevel%
         ($deleted-contains$script:ManifestRelativePath)|Should Be $true
         Test-Path -LiteralPath (Join-Path $targetRoot 'CLAUDE.md')|Should Be $false
     }
+
+    # Scenario: Cleanup runs in worktree A while live linked worktree B owns an untracked project CLAUDE.md hidden by the old shared exclude block.
+    # Purpose: Inventory repository-wide Claude ownership before rewriting the shared exclude, preserve B's bytes, and make its project file visible without staging it.
+    It 'InterT84_removes_linked_project_owned_Claude_from_the_shared_exclude' {
+        $targetRoot=Join-Path $TestDrive 'linked-Claude-cleanup-a'
+        New-PollutedTestRepository -Path $targetRoot
+        $linkedRoot=Join-Path $TestDrive 'linked-Claude-cleanup-b'
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','linked-Claude-cleanup-fixture',$linkedRoot)|Out-Null
+        try{
+            $linkedClaude=Join-Path $linkedRoot 'CLAUDE.md'
+            Set-CleanupTestText -Path $linkedClaude -Value '# Linked project Claude'
+            $linkedBytes=[IO.File]::ReadAllBytes($linkedClaude)
+            $excludePath=Join-Path $targetRoot '.git/info/exclude'
+            $exclude=[IO.File]::ReadAllText($excludePath)
+            $managedBlock='(?ms)^# BEGIN Codex AI Instructions managed paths\n.*?^# END Codex AI Instructions managed paths\n?'
+            $replacement="# BEGIN Codex AI Instructions managed paths`n/.codex/ai-instructions.manifest.json`n/AGENTS.md`n/CLAUDE.md`n# END Codex AI Instructions managed paths`n"
+            $withoutManagedBlock=[regex]::Replace($exclude.Replace("`r`n","`n"),$managedBlock,'').TrimEnd("`n")
+            $excludeWithHiddenClaude=if([string]::IsNullOrWhiteSpace($withoutManagedBlock)){$replacement}else{$withoutManagedBlock+"`n`n"+$replacement}
+            [IO.File]::WriteAllText($excludePath,$excludeWithHiddenClaude,[Text.UTF8Encoding]::new($false))
+
+            $result=Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+
+            $result.ExitCode|Should Be 0
+            [IO.File]::ReadAllBytes($linkedClaude)|Should Be $linkedBytes
+            [IO.File]::ReadAllText($excludePath)|Should Not Match '(?m)^/CLAUDE\.md$'
+            (@(Invoke-CleanupTestGit -Repository $linkedRoot -Arguments @('diff','--cached','--name-only','--','CLAUDE.md'))-join'')|Should BeNullOrEmpty
+            (@(Invoke-CleanupTestGit -Repository $linkedRoot -Arguments @('status','--porcelain=v1','--untracked-files=all','--','CLAUDE.md'))-join"`n")|Should Match '^\?\? CLAUDE\.md$'
+        }
+        finally{Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot)|Out-Null}
+    }
 }

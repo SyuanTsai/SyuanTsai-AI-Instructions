@@ -1681,7 +1681,7 @@ function Assert-NoRepoManagedManifestV4 {
             else {
                 throw [SyuanTsai.AiInstructions.AiInstructionsRefusalException]::new(
                     'downgrade-refused',
-                    'REPO managed manifest schema version 4 requires a projection-aware bootstrap. A live worktree already contains REPO managed manifest v4 [ai-instructions-refusal-code=downgrade-refused].'
+                    'A live worktree already contains REPO managed manifest v4 [ai-instructions-refusal-code=downgrade-refused]. REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
                 )
             }
         }
@@ -1977,7 +1977,8 @@ function Set-ManagedGitInfoExclude {
         [Parameter(Mandatory = $true)][string] $Repository,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $ManagedPaths,
         [Parameter(Mandatory = $true)][object] $Snapshot,
-        [AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths = @()
+        [AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths = @(),
+        [AllowEmptyCollection()][ValidateNotNull()][string[]] $PreservedProtectedPaths = @()
     )
 
     $path = Get-GitInfoExcludePath -Repository $Repository
@@ -1985,6 +1986,7 @@ function Set-ManagedGitInfoExclude {
         throw 'Shared Git exclude snapshot does not match the requested mutation target.'
     }
     Assert-GitInfoExcludeMutationPath -Repository $Repository -Path $path
+    $requestedManagedPaths = @($ManagedPaths)
     $safeManagedPaths = @($ManagedPaths | Where-Object {
         if (Test-IsProtectedClaudeFamilyPath -Path ([string]$_) -ProtectedPaths $ProtectedPaths) {
             Write-Warning "Protected Claude family path skipped at bootstrap Git exclude: $_ (project-owned Claude family)."
@@ -1992,7 +1994,15 @@ function Set-ManagedGitInfoExclude {
         }
         return $true
     })
-    $Snapshot.ManagedPaths = @($safeManagedPaths)
+    foreach ($preservedProtectedPath in $PreservedProtectedPaths) {
+        if (-not (Test-IsProtectedClaudeFamilyPath -Path ([string]$preservedProtectedPath) -ProtectedPaths $ProtectedPaths)) {
+            throw "A preserved Git exclude path is outside the protected Claude family: $preservedProtectedPath"
+        }
+        if (@($requestedManagedPaths | Where-Object { [string]$_ -ceq [string]$preservedProtectedPath }).Count -eq 0) {
+            throw "A preserved protected Git exclude path is not managed by the current worktree: $preservedProtectedPath"
+        }
+    }
+    $Snapshot.ManagedPaths = @($requestedManagedPaths + $ProtectedPaths + $PreservedProtectedPaths | Sort-Object -Unique)
     $Snapshot.ProtectedPaths = @($ProtectedPaths)
     $sharedManagedPaths = @(Get-SharedManagedExcludePaths -Repository $Repository -CurrentManagedPaths $safeManagedPaths)
     $sharedManagedPaths = @($sharedManagedPaths | Where-Object {
@@ -2002,7 +2012,11 @@ function Set-ManagedGitInfoExclude {
         }
         return $true
     })
-    $lines = @($sharedManagedPaths | ForEach-Object { ConvertTo-GitExcludeLiteralPattern -Path $_ })
+    $lines = @(
+        @($sharedManagedPaths) + @($PreservedProtectedPaths) |
+            Sort-Object -Unique |
+            ForEach-Object { ConvertTo-GitExcludeLiteralPattern -Path $_ }
+    )
     $handle = Open-GitInfoExcludeMutationHandle -Repository $Repository -Path $path
     try {
         [byte[]]$beforeBytes = if ([bool]$handle.Created) { [byte[]]@() } else { Read-GitInfoExcludeStreamBytes -Stream $handle.Stream }
@@ -2019,17 +2033,6 @@ function Set-ManagedGitInfoExclude {
         $endCount = [regex]::Matches($content,'(?m)^' + [regex]::Escape($excludeEndMarker) + '$').Count
         if ($beginCount -ne $endCount -or $beginCount -gt 1 -or ($beginCount -eq 1 -and -not [regex]::IsMatch($content,$pattern))) {
             throw "The Codex AI Instructions managed exclude block is malformed: $path"
-        }
-        if ($beginCount -eq 1) {
-            foreach ($existingPattern in @([regex]::Match($content,$pattern).Value.Replace("`r`n","`n").Split("`n"))) {
-                if ([string]::IsNullOrWhiteSpace($existingPattern) -or $existingPattern -ceq $excludeBeginMarker -or $existingPattern -ceq $excludeEndMarker) { continue }
-                $existingRelativePath = $existingPattern.TrimStart([char[]]@('/')).TrimEnd([char[]]@('/'))
-                if (Test-IsProtectedClaudeFamilyPath -Path $existingRelativePath -ProtectedPaths $ProtectedPaths) {
-                    Write-Warning "Protected Claude family exclude entry preserved at bootstrap Git exclude: $existingRelativePath (project-owned Claude family)."
-                    $lines += $existingPattern
-                }
-            }
-            $lines = @($lines | Sort-Object -Unique)
         }
         $withoutBlock = [regex]::Replace($content,$pattern,'').TrimEnd("`n")
         $updated = $withoutBlock
@@ -4611,7 +4614,12 @@ if ($manifestExists) {
 
     $manifestSchemaVersion = $manifest.schemaVersion
     if ($manifestSchemaVersion -eq 4) {
-        if ($repoManifestWriter -cne 'v4') { throw (New-AiInstructionsRefusalException -Code 'downgrade-refused' -Message 'The legacy writer cannot replace REPO managed manifest v4.') }
+        if ($repoManifestWriter -cne 'v4') {
+            throw [SyuanTsai.AiInstructions.AiInstructionsRefusalException]::new(
+                'downgrade-refused',
+                'A live worktree already contains REPO managed manifest v4 [ai-instructions-refusal-code=downgrade-refused]. REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
+            )
+        }
         Assert-ManagedManifestV4 -Manifest $manifest
     }
     if (($manifestSchemaVersion -isnot [int] -and $manifestSchemaVersion -isnot [long]) -or $manifestSchemaVersion -notin @(1, 2, 3, 4)) {
@@ -4701,14 +4709,14 @@ foreach ($trackedPath in @(Invoke-Git -Repository $targetRootPath -Arguments @('
     [void]$trackedPaths.Add((ConvertFrom-GitQuotedPath -Path ([string]$trackedPath)).Replace('\','/'))
 }
 $currentClaudeProjectOwned = @($claudeProjectOwnedWorktrees | Where-Object { [System.IO.Path]::GetFullPath([string]$_).TrimEnd([char[]]@('\','/')).Equals($targetRootPath,[System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
-$protectedClaudeFamilyPaths = @(if ($currentClaudeProjectOwned) {
+$repositoryProtectedClaudeFamilyPaths = @(if ($claudeProjectOwnedWorktrees.Count -gt 0) {
     @('CLAUDE.md','.claude/AI-Rules/','.claude/ai-instructions-licenses/')
 }
 else { @() })
 $trackedPollutionPaths = @(@(
     if ($trackedPaths.Contains($manifestRelativePath)) { $manifestRelativePath }
     foreach ($targetPath in @($manifestEntriesByTarget.Keys | Sort-Object)) {
-        $isProtectedClaude = Test-IsProtectedClaudeFamilyPath -Path ([string]$targetPath) -ProtectedPaths $protectedClaudeFamilyPaths
+        $isProtectedClaude = Test-IsProtectedClaudeFamilyPath -Path ([string]$targetPath) -ProtectedPaths $repositoryProtectedClaudeFamilyPaths
         if ($isProtectedClaude) { Write-Warning "Protected Claude family path skipped at tracked pollution inspection: $targetPath (project-owned Claude family)." }
         if (-not $isProtectedClaude -and -not ([string]$targetPath).StartsWith('.agents/skills/',[StringComparison]::Ordinal) -and $trackedPaths.Contains([string]$targetPath)) { [string]$targetPath }
     }
@@ -4719,7 +4727,7 @@ if ($trackedPollutionPaths.Count -gt 0 -and -not $WhatIf) {
 
 $stagedManagedPaths = @(
     foreach ($targetPath in @($manifestEntriesByTarget.Keys | Sort-Object)) {
-        $isProtectedClaude = Test-IsProtectedClaudeFamilyPath -Path ([string]$targetPath) -ProtectedPaths $protectedClaudeFamilyPaths
+        $isProtectedClaude = Test-IsProtectedClaudeFamilyPath -Path ([string]$targetPath) -ProtectedPaths $repositoryProtectedClaudeFamilyPaths
         if ($isProtectedClaude) { Write-Warning "Protected Claude family path skipped at staged mutation inspection: $targetPath (project-owned Claude family)." }
         if (-not $isProtectedClaude -and
             -not ([string]$targetPath).StartsWith('.agents/skills/',[StringComparison]::Ordinal) -and
@@ -4923,6 +4931,10 @@ try {
         return
     }
 
+    $targetMutationProtectedClaudeFamilyPaths = @(if ([bool]$eligibleFamilies['Claude']) {
+        @()
+    }
+    else { $repositoryProtectedClaudeFamilyPaths })
     $mutationPaths = @(
         @($desiredEntries | ForEach-Object { [string]$_.TargetPath })
         @($manifestEntriesByTarget.Keys | Where-Object {
@@ -4932,7 +4944,7 @@ try {
         $manifestRelativePath
     )
     $mutationBackupRoot = Join-Path $workingPath 'target-backup'
-    $mutationSnapshot = New-TargetMutationSnapshot -TargetRoot $targetRootPath -RelativePaths $mutationPaths -BackupRoot $mutationBackupRoot -ProtectedPaths $protectedClaudeFamilyPaths
+    $mutationSnapshot = New-TargetMutationSnapshot -TargetRoot $targetRootPath -RelativePaths $mutationPaths -BackupRoot $mutationBackupRoot -ProtectedPaths $targetMutationProtectedClaudeFamilyPaths
     $excludeSnapshot = New-GitInfoExcludeSnapshot -Repository $targetRootPath
     $migrationJournalPath = Join-Path $mutationBackupRoot 'skill-migration.json'
     $migrationGitState = $null
@@ -5042,7 +5054,7 @@ try {
         }
 
         $managedEntry = $manifestEntriesByTarget[$managedTargetPath]
-        $isProtectedClaude = Test-IsProtectedClaudeFamilyPath -Path $managedTargetPath -ProtectedPaths $protectedClaudeFamilyPaths
+        $isProtectedClaude = Test-IsProtectedClaudeFamilyPath -Path $managedTargetPath -ProtectedPaths $targetMutationProtectedClaudeFamilyPaths
         if ($isProtectedClaude) {
             Write-Warning "Protected Claude family path skipped at bootstrap manifest reconciliation: $managedTargetPath (project-owned Claude family)."
             $nextManifestEntries.Add((Copy-ExistingManifestEntry -Entry $managedEntry))
@@ -5154,7 +5166,22 @@ try {
         }
         $managedExcludePaths = @($nextManifestEntries | ForEach-Object { [string]$_.targetPath })
         if ($shouldWriteManifest) { $managedExcludePaths += $manifestRelativePath }
-        Set-ManagedGitInfoExclude -Repository $targetRootPath -ManagedPaths $managedExcludePaths -Snapshot $excludeSnapshot -ProtectedPaths $protectedClaudeFamilyPaths
+        $preservedProtectedExcludePaths = @(
+            if (-not [bool]$eligibleFamilies['Claude'] -and $claudeProjectOwnedWorktrees.Count -eq 1) {
+                foreach ($entry in @($nextManifestEntries)) {
+                    $entryPath = [string]$entry.targetPath
+                    if ($entryPath -ceq 'CLAUDE.md' -or
+                        -not (Test-IsProtectedClaudeFamilyPath -Path $entryPath -ProtectedPaths $repositoryProtectedClaudeFamilyPaths)) { continue }
+                    $entryFullPath = Join-Path $targetRootPath $entryPath.Replace('/','\')
+                    if ((Test-Path -LiteralPath $entryFullPath -PathType Leaf) -and
+                        (Get-ManagedContentHash -Path $entryFullPath -TargetPath $entryPath) -ceq [string]$entry.sha256) {
+                        $entryPath
+                    }
+                }
+            }
+        )
+        Set-ManagedGitInfoExclude -Repository $targetRootPath -ManagedPaths $managedExcludePaths -Snapshot $excludeSnapshot `
+            -ProtectedPaths $repositoryProtectedClaudeFamilyPaths -PreservedProtectedPaths $preservedProtectedExcludePaths
         if ($migrationGitState) { Save-SkillMigrationJournal $mutationSnapshot $excludeSnapshot $migrationJournalPath $migrationGitState 'applied' }
     }
     catch {
@@ -5191,7 +5218,7 @@ try {
         foreach ($manifestEntry in $nextManifestEntries) {
             if ([string]$manifestEntry.targetPath -like '.agents/skills/*') { continue }
             $targetPath = [string]$manifestEntry.targetPath
-            if (Test-IsProtectedClaudeFamilyPath -Path $targetPath -ProtectedPaths $protectedClaudeFamilyPaths) {
+            if (Test-IsProtectedClaudeFamilyPath -Path $targetPath -ProtectedPaths $targetMutationProtectedClaudeFamilyPaths) {
                 Write-Warning "Protected Claude family path skipped at PersonalAgent recovery collection: $targetPath (project-owned Claude family)."
                 continue
             }
@@ -5219,7 +5246,7 @@ try {
                     -ExpectedEntries $expectedStashEntries -PriorStashes $personalAgentStashes `
                     -PriorOwnedStashes $ownedPersonalAgentStashes `
                     -WorktreeKey $worktreeKey -EvidenceFingerprint $evidenceFingerprint `
-                    -ActiveIndexPath ([string]$repositoryIndexLock.IndexPath) -ProtectedPaths $protectedClaudeFamilyPaths
+                    -ActiveIndexPath ([string]$repositoryIndexLock.IndexPath) -ProtectedPaths $targetMutationProtectedClaudeFamilyPaths
                 Write-Output "PersonalAgent recovery evidence updated and retained without index mutation: $newStashHash"
             }
         }
