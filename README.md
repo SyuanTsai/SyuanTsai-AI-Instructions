@@ -1,5 +1,35 @@
 # SyuanTsai AI Instructions
 
+## Overview
+
+**What it is:** the single source of truth for my AI coding-agent setup — shared instructions for **Codex, GitHub Copilot and Claude**, plus a version-pinned catalog of reusable Agent Skills.
+
+**Problem it solves:** keeping AI agents consistent and safe across many repositories. Instead of hand-copying prompts, every repository gets the same reviewed rules and Skills, pinned to exact versions.
+
+**How it works**
+- One common instruction source generates the Codex, GitHub Copilot and Claude variants, so the three tools follow the same rules.
+- The Skills catalog points to separate Skill repositories ([Skill-General](https://github.com/SyuanTsai/Skill-General), Skill-Atlassian-Ecosystem, Skill-Code-Collaboration, Skill-Knowledge-Content) and locks each one to a commit SHA and content hash.
+- A bootstrap fans the instruction files out into product repositories, while shared Skills are installed once per user under `~/.agents/skills` by a separate updater rather than copied into each repository; updates are checked and reported, not silently auto-installed.
+- CI validates contracts and runs security scanning on Skills before anything is published.
+
+**Who it's for:** engineers who want repeatable, reviewable AI-assisted workflows. Local tooling is Windows-only (see below).
+
+## 概覽
+
+**這是什麼：** 我個人 AI 程式開發代理（Agent）設定的唯一來源，包含 **Codex、GitHub Copilot、Claude** 共用的指令，以及鎖定版本的可重複使用 Agent Skills 目錄。
+
+**解決什麼問題：** 讓 AI Agent 在多個 Repository 之間保持一致、安全。不再手動複製 Prompt，每個 Repository 都使用同一套經過審查、鎖定版本的規則與 Skills。
+
+**運作方式**
+- 由同一份共用指令產生 Codex、GitHub Copilot、Claude 三種版本，三個工具遵循相同規則。
+- Skills 目錄指向獨立的 Skill Repository（[Skill-General](https://github.com/SyuanTsai/Skill-General)、Skill-Atlassian-Ecosystem、Skill-Code-Collaboration、Skill-Knowledge-Content），並以 commit SHA 與內容雜湊鎖定版本。
+- bootstrap 將指令檔分發到各產品 Repository；共用 Skills 則由獨立的 updater 安裝在使用者層級的 `~/.agents/skills`，不會複製到每個 Repository；有新版本時只檢查並通知，不會自動悄悄安裝。
+- 發布前由 CI 驗證契約，並對 Skills 執行安全掃描。
+
+**適用對象：** 想要可重複、可審查的 AI 輔助開發流程的工程師。本機工具僅支援 Windows（詳見下方）。
+
+---
+
 這個 Repository 是個人 Codex／GitHub Copilot Instructions、Skills Catalog 與安裝 runtime 的 canonical source。共用 Agent Skills 只由 Catalog 指向的 external repositories 提供，本 Repository 不保存 Skill source 副本。
 
 本 Repository 與採用其共用 AI-Instructions／Skills runtime 的消費 Repository，其本機 Agent 開發、安裝、執行、驗證、測試、acceptance 與 CI host 僅支援 Windows；Linux、macOS 與 WSL 不支援。此限制不涵蓋下游產品的 target／deployment OS，也不限制核准 connector 背後遠端 SaaS 的服務 OS。
