@@ -88,15 +88,6 @@ function Get-AiInstructionsRefusalCode {
     return $null
 }
 
-function Test-AiInstructionsClaudeFamilyTargetPath {
-    [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string] $Path)
-
-    return $Path -ceq 'CLAUDE.md' -or
-        $Path.StartsWith('.claude/AI-Rules/',[StringComparison]::Ordinal) -or
-        $Path.StartsWith('.claude/ai-instructions-licenses/',[StringComparison]::Ordinal)
-}
-
 function Test-AiInstructionsClaudeFamilyProjectOwned {
     [CmdletBinding()]
     param(
@@ -2825,7 +2816,6 @@ Export-ModuleMember -Function @(
     'Get-AiInstructionsRefusalCodes',
     'New-AiInstructionsRefusalException',
     'Get-AiInstructionsRefusalCode',
-    'Test-AiInstructionsClaudeFamilyTargetPath',
     'Test-AiInstructionsClaudeFamilyProjectOwned',
     'Get-AiInstructionsRuntimeGeneration',
     'Get-AiInstructionsRuntimeInventory',

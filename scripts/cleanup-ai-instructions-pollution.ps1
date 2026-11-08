@@ -67,6 +67,11 @@ if (-not (Test-Path -LiteralPath $runtimeContractPath -PathType Leaf)) {
 }
 Import-Module $runtimeContractPath -Force
 Import-Module (Join-Path (Split-Path -Parent $runtimeContractPath) 'license-delivery.psm1') -Force
+$remediationContractPath = Join-Path (Split-Path -Parent $runtimeContractPath) 'agent-artifact-remediation.psm1'
+if (-not (Test-Path -LiteralPath $remediationContractPath -PathType Leaf)) {
+    throw "Agent artifact remediation module was not found: $remediationContractPath"
+}
+Import-Module $remediationContractPath -Force
 
 function Invoke-CleanupGit {
     param([Parameter(Mandatory = $true)][string] $Repository,[Parameter(Mandatory = $true)][string[]] $Arguments)
@@ -163,9 +168,18 @@ function Remove-CleanupIndexEntriesAtomically {
     param(
         [Parameter(Mandatory = $true)][string] $Repository,
         [Parameter(Mandatory = $true)][string[]] $Paths,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $ExpectedSnapshot
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $ExpectedSnapshot,
+        [AllowEmptyCollection()][string[]] $ProtectedPaths = @()
     )
 
+    $Paths = @($Paths | Where-Object {
+        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$_) -ProtectedPaths $ProtectedPaths) {
+            Write-Warning "Protected Claude family path skipped at cleanup Git index: $_ (project-owned Claude family)."
+            return $false
+        }
+        return $true
+    })
+    if ($Paths.Count -eq 0) { return }
     $indexPath = ((Invoke-CleanupGit -Repository $Repository -Arguments @('rev-parse','--git-path','index')) | Select-Object -First 1).Trim()
     if (-not [System.IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $Repository $indexPath }
     $indexPath = [System.IO.Path]::GetFullPath($indexPath)
@@ -231,9 +245,18 @@ function Restore-CleanupIndexSnapshot {
     param(
         [Parameter(Mandatory = $true)][string] $Repository,
         [Parameter(Mandatory = $true)][string[]] $Paths,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Snapshot
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Snapshot,
+        [AllowEmptyCollection()][string[]] $ProtectedPaths = @()
     )
 
+    $Paths = @($Paths | Where-Object {
+        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$_) -ProtectedPaths $ProtectedPaths) {
+            Write-Warning "Protected Claude family path skipped at cleanup Git index rollback: $_ (project-owned Claude family)."
+            return $false
+        }
+        return $true
+    })
+    if ($Paths.Count -eq 0) { return }
     $indexPath = ((Invoke-CleanupGit -Repository $Repository -Arguments @('rev-parse','--git-path','index')) | Select-Object -First 1).Trim()
     if (-not [System.IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $Repository $indexPath }
     $indexPath = [System.IO.Path]::GetFullPath($indexPath)
@@ -504,6 +527,8 @@ function New-CleanupExcludeMutation {
         Existed = $false
         Bytes = $null
         AppliedBytes = $null
+        ManagedPaths = @()
+        ProtectedPaths = @()
     }
 }
 
@@ -600,6 +625,12 @@ function Restore-CleanupExcludeMutation {
     param([Parameter(Mandatory = $true)][object] $Mutation)
 
     if (-not [bool]$Mutation.MutationApplied) { return }
+    foreach ($managedPath in @($Mutation.ManagedPaths)) {
+        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$managedPath) -ProtectedPaths @($Mutation.ProtectedPaths)) {
+            Write-Warning "Protected Claude family path skipped at cleanup Git exclude rollback: $managedPath (project-owned Claude family)."
+            return
+        }
+    }
     $path = [string]$Mutation.Path
     $repository = [string]$Mutation.Repository
     Assert-CleanupExcludeMutationPath -Repository $repository -Path $path
@@ -772,13 +803,30 @@ function Set-CleanupExcludeBlock {
         [Parameter(Mandatory = $true)][string] $Repository,
         [Parameter(Mandatory = $true)][string] $Path,
         [Parameter(Mandatory = $true)][string[]] $ManagedPaths,
-        [Parameter(Mandatory = $true)][object] $Mutation
+        [Parameter(Mandatory = $true)][object] $Mutation,
+        [AllowEmptyCollection()][string[]] $ProtectedPaths = @()
     )
     if ([string]$Mutation.Path -cne $Path -or [string]$Mutation.Repository -cne $Repository) {
         throw 'Shared Git exclude mutation state does not match the requested cleanup target.'
     }
     Assert-CleanupExcludeMutationPath -Repository $Repository -Path $Path
+    $ManagedPaths = @($ManagedPaths | Where-Object {
+        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$_) -ProtectedPaths $ProtectedPaths) {
+            Write-Warning "Protected Claude family path skipped at cleanup Git exclude: $_ (project-owned Claude family)."
+            return $false
+        }
+        return $true
+    })
+    $Mutation.ManagedPaths = @($ManagedPaths)
+    $Mutation.ProtectedPaths = @($ProtectedPaths)
     $sharedManagedPaths = @(Get-CleanupSharedManagedPaths -Repository $Repository -CurrentManagedPaths $ManagedPaths)
+    $sharedManagedPaths = @($sharedManagedPaths | Where-Object {
+        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$_) -ProtectedPaths $ProtectedPaths) {
+            Write-Warning "Protected Claude family path skipped at cleanup shared Git exclude: $_ (project-owned Claude family)."
+            return $false
+        }
+        return $true
+    })
     $lines = @($sharedManagedPaths | ForEach-Object { ConvertTo-CleanupExcludePattern -Path $_ })
     $handle = Open-CleanupExcludeMutationHandle -Repository $Repository -Path $Path
     try {
@@ -794,6 +842,17 @@ function Set-CleanupExcludeBlock {
         $endCount = [regex]::Matches($content,'(?m)^' + [regex]::Escape($excludeEndMarker) + '$').Count
         if ($beginCount -ne $endCount -or $beginCount -gt 1 -or ($beginCount -eq 1 -and -not [regex]::IsMatch($content,$pattern))) {
             throw "The Codex AI Instructions managed exclude block is malformed: $Path"
+        }
+        if ($beginCount -eq 1) {
+            foreach ($existingPattern in @([regex]::Match($content,$pattern).Value.Replace("`r`n","`n").Split("`n"))) {
+                if ([string]::IsNullOrWhiteSpace($existingPattern) -or $existingPattern -ceq $excludeBeginMarker -or $existingPattern -ceq $excludeEndMarker) { continue }
+                $existingRelativePath = $existingPattern.TrimStart([char[]]@('/')).TrimEnd([char[]]@('/'))
+                if (Test-IsProtectedClaudeFamilyPath -Path $existingRelativePath -ProtectedPaths $ProtectedPaths) {
+                    Write-Warning "Protected Claude family exclude entry preserved at cleanup Git exclude: $existingRelativePath (project-owned Claude family)."
+                    $lines += $existingPattern
+                }
+            }
+            $lines = @($lines | Sort-Object -Unique)
         }
         $withoutBlock = [regex]::Replace($content,$pattern,'').TrimEnd("`n")
         $block = $excludeBeginMarker + "`n" + ($lines -join "`n") + "`n" + $excludeEndMarker + "`n"
@@ -878,13 +937,17 @@ $claudeCurrentSha256 = if ($claudeBaseExists) { Get-CleanupManagedHash -Path $cl
 $projectOwnedClaudeFamily = Test-AiInstructionsClaudeFamilyProjectOwned -BaseExists $claudeBaseExists `
     -BaseTracked $trackedClaudeBase -BaseStaged ($stagedClaudeExitCode -eq 1) `
     -ManagedSha256 $claudeManagedSha256 -CurrentSha256 $claudeCurrentSha256
+$protectedClaudeFamilyPaths = if ($projectOwnedClaudeFamily) {
+    @('CLAUDE.md','.claude/AI-Rules/','.claude/ai-instructions-licenses/')
+}
+else { @() }
 $trackedManagedEntries = New-Object System.Collections.Generic.List[object]
 foreach ($manifestTargetPath in @($manifestRelativePath) + @($entriesByPath.Keys | Sort-Object)) {
     if ([string]$manifestTargetPath -like '.agents/skills/*') {
         Write-Output "Tracked/project Skills are protected from Instructions pollution cleanup: $manifestTargetPath"
         continue
     }
-    if ($projectOwnedClaudeFamily -and (Test-AiInstructionsClaudeFamilyTargetPath -Path ([string]$manifestTargetPath))) {
+    if (Test-IsProtectedClaudeFamilyPath -Path ([string]$manifestTargetPath) -ProtectedPaths $protectedClaudeFamilyPaths) {
         Write-Output "Project-owned Claude family is protected from Instructions pollution cleanup: $manifestTargetPath"
         continue
     }
@@ -939,8 +1002,8 @@ try {
         (@($indexSnapshot | ForEach-Object { [string]$_.Line }) -join "`n")) {
         throw 'Tracked managed paths changed in the Git index before cleanup mutation.'
     }
-    Set-CleanupExcludeBlock -Repository $targetRootPath -Path $gitExcludePath -ManagedPaths @($entriesByPath.Keys + $manifestRelativePath + $cleanupPaths) -Mutation $excludeMutation
-    Remove-CleanupIndexEntriesAtomically -Repository $targetRootPath -Paths $cleanupPaths -ExpectedSnapshot $indexSnapshot
+    Set-CleanupExcludeBlock -Repository $targetRootPath -Path $gitExcludePath -ManagedPaths @($entriesByPath.Keys + $manifestRelativePath + $cleanupPaths) -Mutation $excludeMutation -ProtectedPaths $protectedClaudeFamilyPaths
+    Remove-CleanupIndexEntriesAtomically -Repository $targetRootPath -Paths $cleanupPaths -ExpectedSnapshot $indexSnapshot -ProtectedPaths $protectedClaudeFamilyPaths
     foreach ($cleanupPath in $cleanupPaths) {
         $fullPath = Join-Path $targetRootPath $cleanupPath.Replace('/','\')
         if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { throw "Cleanup failed to preserve local materialization: $cleanupPath" }
@@ -951,7 +1014,7 @@ try {
 catch {
     $cleanupError = $_
     $rollbackErrors = New-Object System.Collections.Generic.List[string]
-    try { Restore-CleanupIndexSnapshot -Repository $targetRootPath -Paths $cleanupPaths -Snapshot $indexSnapshot }
+    try { Restore-CleanupIndexSnapshot -Repository $targetRootPath -Paths $cleanupPaths -Snapshot $indexSnapshot -ProtectedPaths $protectedClaudeFamilyPaths }
     catch { $rollbackErrors.Add($_.Exception.Message) }
     try { Restore-CleanupExcludeMutation -Mutation $excludeMutation }
     catch { $rollbackErrors.Add($_.Exception.Message) }
