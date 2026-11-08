@@ -70,11 +70,99 @@ $launcherReferencePath = Join-Path $runtimeRoot 'bootstrap-ai-instructions-insta
 $updaterPath = Join-Path $runtimeRoot 'update-ai-instructions.ps1'
 $environmentUpdaterPath = Join-Path $runtimeRoot 'update-agent-environment.ps1'
 $bootstrapPath = Join-Path $runtimeRoot 'bootstrap-ai-instructions-multisource.ps1'
+$platformRuntimeManifestPath = Join-Path $runtimeRoot 'platform-runtime.psd1'
+$installTransactionModulePath = Join-Path $runtimeRoot 'ai-instructions-install-transaction.psm1'
 $stableLauncherPath = [System.IO.Path]::GetFullPath($PSCommandPath)
 $stableUpdaterPath = Join-Path $PSScriptRoot 'update-ai-instructions.ps1'
 $stableEnvironmentUpdaterPath = Join-Path $PSScriptRoot 'update-agent-environment.ps1'
 $stableCleanupPath = Join-Path $PSScriptRoot 'cleanup-ai-instructions-pollution.ps1'
 $canonicalRepository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
+
+function Test-InstalledMutationRuntimeBaseline {
+    param(
+        [string] $EngineEdition = [string]$PSVersionTable.PSEdition,
+        [int] $PowerShellMajor = [int]$PSVersionTable.PSVersion.Major,
+        [int] $DotNetMajor = [int][Environment]::Version.Major
+    )
+    return $EngineEdition -ceq 'Core' -and $PowerShellMajor -ge 7 -and $DotNetMajor -ge 8
+}
+
+function Assert-InstalledMutationRuntimeBaseline {
+    if (-not (Test-InstalledMutationRuntimeBaseline)) {
+        throw [System.InvalidOperationException]::new(
+            "Interrupted-install recovery requires pwsh 7 on .NET 8 or newer; rerun this command with pwsh 7.`nAI instructions bootstrap stopped [classification=compatibility; retryable=false].`n[ai-instructions-refusal-code=runtime-baseline-unavailable]"
+        )
+    }
+}
+
+function Get-LauncherInstallTransactionResidueKind {
+    param(
+        [Parameter(Mandatory = $true)][string] $Name,
+        [Parameter(Mandatory = $true)][string] $EntryKind,
+        [AllowNull()][object] $JournalEntryKind,
+        [AllowNull()][object] $PreviousJournalEntryKind
+    )
+    if ($Name -cnotmatch '^[0-9a-f]{32}$' -or $EntryKind -cne 'directory') { return 'invalid-name' }
+    if ($null -eq $JournalEntryKind -and $null -eq $PreviousJournalEntryKind) { return 'orphan-without-journal' }
+    return 'journal-present'
+}
+
+function Get-LauncherEntryKind {
+    param([Parameter(Mandatory = $true)][string] $LiteralPath)
+    $parentPath = Split-Path -Parent $LiteralPath
+    $leaf = Split-Path -Leaf $LiteralPath
+    $item = @(Get-ChildItem -Force -LiteralPath $parentPath | Where-Object { $_.Name -eq $leaf } | Select-Object -First 1)
+    if ($item.Count -eq 0) { return $null }
+    $item = $item[0]
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return 'reparse' }
+    if ($item.PSIsContainer) { return 'directory' }
+    return 'file'
+}
+
+function Get-LauncherInterruptedInstallResidue {
+    $residue = New-Object System.Collections.Generic.List[string]
+    $transactionRoot = Join-Path $codexHome '.ai-instructions-txn'
+    $transactionRootKind = Get-LauncherEntryKind -LiteralPath $transactionRoot
+    if ($null -ne $transactionRootKind) {
+        $rootKind = $transactionRootKind
+        if ($rootKind -cne 'directory') { $residue.Add("$transactionRoot [$rootKind]") }
+        else {
+            foreach ($entry in @(Get-ChildItem -Force -LiteralPath $transactionRoot)) {
+                $entryKind = Get-LauncherEntryKind -LiteralPath $entry.FullName
+                $journalKind = if ($entryKind -ceq 'directory') { Get-LauncherEntryKind -LiteralPath (Join-Path $entry.FullName 'journal.json') } else { $null }
+                $previousKind = if ($entryKind -ceq 'directory') { Get-LauncherEntryKind -LiteralPath (Join-Path $entry.FullName 'journal.prev') } else { $null }
+                $classification = Get-LauncherInstallTransactionResidueKind -Name $entry.Name -EntryKind $entryKind -JournalEntryKind $journalKind -PreviousJournalEntryKind $previousKind
+                $residue.Add("$($entry.FullName) [$classification; entry=$entryKind; journal=$journalKind; previous=$previousKind]")
+            }
+        }
+    }
+    foreach ($entry in @(Get-ChildItem -Force -LiteralPath $codexHome | Where-Object { $_.Name -like '.ai-instructions-install-*' -or $_.Name -like '.ai-instructions-backup-*' })) {
+        $residue.Add("$($entry.FullName) [legacy]")
+    }
+    return $residue.ToArray()
+}
+
+function Assert-NoLauncherInterruptedInstallResidue {
+    $residue = @(Get-LauncherInterruptedInstallResidue)
+    if ($residue.Count -eq 0) { return }
+    throw [System.InvalidOperationException]::new(
+        "Interrupted AI instructions installation residue was found: $($residue -join '; '). Rerun the installer with pwsh 7 to complete recovery.`nAI instructions bootstrap stopped [classification=integrity; retryable=false].`n[ai-instructions-refusal-code=interrupted-install]"
+    )
+}
+
+function Assert-LauncherRecoveryCapabilities {
+    param([Parameter(Mandatory = $true)] $Receipt)
+    $required = @('directory-lease','file-lease','file-identity','lock','publication','owned-file-removal','permissions')
+    $missing = @($required | Where-Object {
+        $name = $_
+        @($Receipt.capabilities | Where-Object { [string]$_.name -ceq $name -and [string]$_.status -ceq 'available' }).Count -ne 1
+    })
+    if ($missing.Count -gt 0) {
+        throw [System.InvalidOperationException]::new(
+            ('Required recovery platform capabilities are unavailable: ' + ($missing -join ', ') + '. [ai-instructions-refusal-code=capability-unavailable]')
+        )
+    }
+}
 
 function Test-TrustedProperty {
     param([AllowNull()][object] $Object,[Parameter(Mandatory = $true)][string] $Name)
@@ -142,7 +230,7 @@ function Get-TrustedInventorySha256 {
     param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Inventory)
     $lines = New-Object System.Collections.Generic.List[string]
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
-    foreach ($entry in @($Inventory | Sort-Object path)) {
+    foreach ($entry in @($Inventory)) {
         Assert-TrustedProperties -Object $entry -Required @('path','sha256') -Context 'Runtime bundle inventory entry'
         if ($entry.path -isnot [string] -or [string]$entry.path -eq '' -or [string]$entry.path -match '(^|/)\.\.(/|$)' -or
             [string]$entry.path -match '^/' -or [string]$entry.path -match '\\' -or [string]$entry.sha256 -isnot [string] -or
@@ -232,11 +320,22 @@ function Assert-InstalledRuntime {
         ([string]$bundle.acquisition -ceq 'github-codeload' -and [string]$bundle.archiveSha256 -cnotmatch '^[0-9a-f]{64}$')) {
         throw 'Installed AI instruction runtime bundle archive identity is invalid.'
     }
-    $declaredInventory = @($bundle.inventory | Sort-Object path)
+    $declaredInventory = @($bundle.inventory)
     $declaredDigest = Get-TrustedInventorySha256 -Inventory $declaredInventory
-    $actualInventory = @(Get-TrustedRuntimeInventory -Root $runtimeRoot | Sort-Object path)
+    $actualInventoryUnordered = @(Get-TrustedRuntimeInventory -Root $runtimeRoot)
+    $actualByPath = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([System.StringComparer]::Ordinal)
+    foreach ($actualEntry in $actualInventoryUnordered) {
+        if ($actualByPath.ContainsKey([string]$actualEntry.path)) { throw "Installed AI instruction runtime inventory contains duplicate path '$($actualEntry.path)'." }
+        $actualByPath.Add([string]$actualEntry.path,$actualEntry)
+    }
+    $actualInventory = @(
+        foreach ($declaredEntry in $declaredInventory) {
+            if (-not $actualByPath.ContainsKey([string]$declaredEntry.path)) { throw "Installed AI instruction runtime inventory is missing '$($declaredEntry.path)'." }
+            $actualByPath[[string]$declaredEntry.path]
+        }
+    )
     $actualDigest = Get-TrustedInventorySha256 -Inventory $actualInventory
-    if ($declaredDigest -cne [string]$bundle.inventorySha256 -or $actualDigest -cne [string]$bundle.inventorySha256 -or $declaredInventory.Count -ne $actualInventory.Count) {
+    if ($declaredDigest -cne [string]$bundle.inventorySha256 -or $actualDigest -cne [string]$bundle.inventorySha256 -or $declaredInventory.Count -ne $actualInventoryUnordered.Count) {
         throw 'Installed AI instruction runtime inventory does not match the verified bundle.'
     }
     for ($index=0; $index -lt $declaredInventory.Count; $index++) {
@@ -289,38 +388,132 @@ function Assert-VerifiedInstalledRuntime {
     }
 }
 
-function Repair-InterruptedRuntimePin {
+function Get-VerifiedInstalledRuntimeGenerationIdentity {
     param([Parameter(Mandatory = $true)][object] $State)
+    return [pscustomobject][ordered]@{
+        BundleSha256 = Get-TrustedFileSha256 -Path $bundlePath
+        InventorySha256 = [string]$State.Bundle.inventorySha256
+    }
+}
+
+function Assert-InstalledRuntimeGenerationUnchanged {
+    param(
+        [Parameter(Mandatory = $true)][object] $TrustedIdentity,
+        [Parameter(Mandatory = $true)][object] $LockedIdentity
+    )
+    if ([string]$TrustedIdentity.BundleSha256 -cne [string]$LockedIdentity.BundleSha256 -or
+        [string]$TrustedIdentity.InventorySha256 -cne [string]$LockedIdentity.InventorySha256) {
+        throw [System.InvalidOperationException]::new(
+            "Installed AI instructions runtime generation changed while recovery acquired the install lock; start recovery again from the newly verified runtime.`nAI instructions bootstrap stopped [classification=integrity; retryable=false].`n[ai-instructions-refusal-code=closure-invalid]"
+        )
+    }
+}
+
+function Invoke-LauncherRecoveryTestFailpoint {
+    param([Parameter(Mandatory = $true)][string] $Name)
+    if ([Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_LAUNCHER_RECOVERY_FAILPOINT','Process') -cne $Name) { return }
+    $controlRoot = [Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_LAUNCHER_RECOVERY_CONTROL_ROOT','Process')
+    if ([string]::IsNullOrWhiteSpace($controlRoot)) { throw 'Launcher recovery test failpoint control root is missing.' }
+    $controlRoot = [System.IO.Path]::GetFullPath($controlRoot)
+    $controlItem = Get-Item -Force -LiteralPath $controlRoot
+    if (-not $controlItem.PSIsContainer -or ($controlItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Launcher recovery test failpoint control root must be a non-reparse directory.'
+    }
+    $readyPath = Join-Path $controlRoot ($Name + '.ready')
+    $releasePath = Join-Path $controlRoot ($Name + '.release')
+    [System.IO.File]::WriteAllText($readyPath,"ready`n",(New-Object System.Text.UTF8Encoding($false)))
+    $deadline = [DateTime]::UtcNow.AddSeconds(60)
+    while (-not (Test-Path -LiteralPath $releasePath -PathType Leaf)) {
+        if ([DateTime]::UtcNow -ge $deadline) { throw "Launcher recovery test failpoint '$Name' timed out." }
+        Start-Sleep -Milliseconds 25
+    }
+}
+
+function Repair-InterruptedRuntimePin {
+    param(
+        [Parameter(Mandatory = $true)][object] $State,
+        [Parameter(Mandatory = $true)] $RootLease,
+        [Parameter(Mandatory = $true)] $CapabilityReceipt
+    )
 
     if (-not [bool]$State.PinMismatch) { return $false }
-    $configurationDirectory = Split-Path -Parent $configurationPath
-    $configurationName = Split-Path -Leaf $configurationPath
-    $recoveryId = [Guid]::NewGuid().ToString('N')
-    $temporaryPath = Join-Path $configurationDirectory ('.' + $configurationName + '.recovery-' + $recoveryId)
-    $backupPath = Join-Path $configurationDirectory ('.' + $configurationName + '.backup-' + $recoveryId)
-    $failedPath = Join-Path $configurationDirectory ('.' + $configurationName + '.failed-' + $recoveryId)
+    $transactionRootLease = $null
+    $transactionLease = $null
+    $transactionId = [Guid]::NewGuid().ToString('N')
+    $transactionRootPath = Join-Path $codexHome '.ai-instructions-txn'
+    $transactionPath = Join-Path $transactionRootPath $transactionId
+    $journalDurable = $false
+    $currentJournal = $null
+    $journalStoreStates = [ordered]@{
+        'journal.json'=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}
+        'journal.prev'=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}
+        'journal.stage'=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}
+    }
     try {
+        $transactionRootLease = Open-PlatformDirectory -Root $codexHome -RelativePath '.ai-instructions-txn' -CreatePrivate
+        $transactionLease = Open-PlatformDirectory -Root $codexHome -RelativePath ('.ai-instructions-txn/' + $transactionId) -CreatePrivate
         $State.Configuration.catalog.ref = [string]$State.Bundle.commit
         $json = ($State.Configuration | ConvertTo-Json -Depth 20).Replace("`r`n","`n") + "`n"
-        [System.IO.File]::WriteAllText($temporaryPath,$json,(New-Object System.Text.UTF8Encoding($false)))
-        [System.IO.File]::Replace($temporaryPath,$configurationPath,$backupPath)
-        try { Assert-VerifiedInstalledRuntime | Out-Null }
-        catch {
-            $validationError = $_
-            try { [System.IO.File]::Replace($backupPath,$configurationPath,$failedPath) }
-            catch { throw "Interrupted-install recovery validation failed and configuration rollback also failed. Validation: $($validationError.Exception.Message) Rollback: $($_.Exception.Message)" }
-            throw $validationError
+        $desiredBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($json)
+        $stage = New-AiInstructionsInstallStageFile -TransactionLease $transactionLease -Leaf 'op-01-sync.stage' -Bytes $desiredBytes -PlatformOs ([string]$CapabilityReceipt.os)
+        $captured = Get-AiInstructionsInstallFileState -ParentLease $RootLease -Leaf 'ai-instructions-sync.json' -LiteralPath $configurationPath -PlatformOs ([string]$CapabilityReceipt.os) -IncludePermissions
+        $original = [pscustomobject][ordered]@{exists=$true;sha256=$captured.sha256;length=$captured.length;identity=$captured.identity}
+        $operation = [pscustomobject][ordered]@{
+            sequence=1;kind='write-file';method='stage-rename';targetRelativePath='ai-instructions-sync.json'
+            stageLeaf='op-01-sync.stage';backupLeaf='op-01-sync.backup';quarantineLeaf=$null
+            original=$original;backupIdentity=$captured.identity;applied=$stage;permissions=$captured.permissions;state='pending'
         }
+        $bundleSha256 = Get-AiInstructionsFileSha256 -Path $bundlePath
+        $processStart = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o',[Globalization.CultureInfo]::InvariantCulture)
+        $currentJournal = New-AiInstructionsInstallJournalV1 -TransactionId $transactionId -OwnerComponent launcher-recovery `
+            -OwnerProcessId $PID -OwnerProcessStartIdentity $processStart -PlatformOs ([string]$CapabilityReceipt.os) `
+            -PlatformArchitecture ([string]$CapabilityReceipt.architecture) `
+            -LockPrimitive $(if ([string]$CapabilityReceipt.os -ceq 'windows') { 'windows-fileshare' } else { 'flock' }) `
+            -LockLeaf 'ai-instructions-install.lock' -PreviousBundleSha256 $bundleSha256 -CandidateBundleSha256 $bundleSha256 `
+            -Phase prepared -Operations @($operation)
+        $currentJournal = Write-AiInstructionsInstallJournalStore -TransactionLease $transactionLease -TransactionPath $transactionPath -Journal $currentJournal -PlatformOs ([string]$CapabilityReceipt.os) -JournalStoreStates $journalStoreStates
+        $journalDurable = $true
+        $nextJournal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($currentJournal | ConvertTo-Json -Depth 30) -ExpectedTransactionId $transactionId
+        $nextJournal.phase = 'applying'
+        $currentJournal = Write-AiInstructionsInstallJournalStore -TransactionLease $transactionLease -TransactionPath $transactionPath -Journal $nextJournal -PreviousJournal $currentJournal -PlatformOs ([string]$CapabilityReceipt.os) -JournalStoreStates $journalStoreStates
+        Invoke-AiInstructionsInstallOperation -Operation $currentJournal.operations[0] -ParentLease $RootLease -TransactionLease $transactionLease | Out-Null
+        $nextJournal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($currentJournal | ConvertTo-Json -Depth 30) -ExpectedTransactionId $transactionId
+        $nextJournal.operations[0].state = 'applied'
+        $currentJournal = Write-AiInstructionsInstallJournalStore -TransactionLease $transactionLease -TransactionPath $transactionPath -Journal $nextJournal -PreviousJournal $currentJournal -PlatformOs ([string]$CapabilityReceipt.os) -JournalStoreStates $journalStoreStates
+        Assert-VerifiedInstalledRuntime | Out-Null
+        $nextJournal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($currentJournal | ConvertTo-Json -Depth 30) -ExpectedTransactionId $transactionId
+        $nextJournal.phase = 'applied'
+        $currentJournal = Write-AiInstructionsInstallJournalStore -TransactionLease $transactionLease -TransactionPath $transactionPath -Journal $nextJournal -PreviousJournal $currentJournal -PlatformOs ([string]$CapabilityReceipt.os) -JournalStoreStates $journalStoreStates
+        $observations = Get-AiInstructionsInstallRecoveryObservations -Journal $currentJournal -CodexHome $codexHome -TransactionLease $transactionLease -TransactionPath $transactionPath
+        $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $currentJournal -Observations $observations
+        $plan = Get-AiInstructionsInstallRecoveryPlan -Journal $currentJournal -Decision $decision
+        if ([string]$plan.action -cne 'commit') { throw "Runtime pin repair did not produce a commit recovery plan: $($decision.action)" }
+        Invoke-AiInstructionsInstallRecoveryPlan -Journal $currentJournal -Plan $plan -CodexHome $codexHome -TransactionRootLease $transactionRootLease -TransactionLease $transactionLease -TransactionPath $transactionPath -JournalStoreStates $journalStoreStates | Out-Null
+        $transactionLease = $null
+        return $true
+    }
+    catch {
+        $repairError = $_
+        if ($journalDurable -and $null -ne $transactionLease) {
+            try {
+                $observations = Get-AiInstructionsInstallRecoveryObservations -Journal $currentJournal -CodexHome $codexHome -TransactionLease $transactionLease -TransactionPath $transactionPath
+                $decision = Get-AiInstructionsInstallRecoveryDecision -Journal $currentJournal -Observations $observations
+                $plan = Get-AiInstructionsInstallRecoveryPlan -Journal $currentJournal -Decision $decision
+                Invoke-AiInstructionsInstallRecoveryPlan -Journal $currentJournal -Plan $plan -CodexHome $codexHome -TransactionRootLease $transactionRootLease -TransactionLease $transactionLease -TransactionPath $transactionPath -JournalStoreStates $journalStoreStates | Out-Null
+                $transactionLease = $null
+            }
+            catch { throw "Runtime pin repair validation failed and journal rollback retained evidence at '$transactionPath'. Validation: $($repairError.Exception.Message) Rollback: $($_.Exception.Message)" }
+        }
+        throw $repairError
     }
     finally {
-        foreach ($cleanupPath in @($temporaryPath,$backupPath,$failedPath)) {
-            if (Test-Path -LiteralPath $cleanupPath) { Remove-Item -LiteralPath $cleanupPath -Force -ErrorAction SilentlyContinue }
-        }
+        if ($null -ne $transactionLease) { $transactionLease.Dispose() }
+        if ($null -ne $transactionRootLease) { $transactionRootLease.Dispose() }
     }
-    return $true
 }
 
 function Open-InstalledRuntimeReadLock {
+    param([switch] $ForRecovery)
     $installLockPath = Join-Path $codexHome 'ai-instructions-install.lock'
     if (-not (Test-Path -LiteralPath $installLockPath -PathType Leaf)) {
         throw [System.InvalidOperationException]::new(
@@ -342,14 +535,44 @@ function Open-InstalledRuntimeReadLock {
         )
     }
     catch [System.IO.IOException] {
+        $message = if ($ForRecovery) {
+            'Interrupted-install recovery refused to run while another AI instructions installer is active.'
+        }
+        else { 'AI instructions runtime is being installed; bootstrap stopped before reading a mixed runtime.' }
         throw [System.InvalidOperationException]::new(
-            "AI instructions runtime is being installed; bootstrap stopped before reading a mixed runtime.`nAI instructions bootstrap stopped [classification=concurrency; retryable=false].",
+            "$message`nAI instructions bootstrap stopped [classification=concurrency; retryable=false].",
             $_.Exception
         )
     }
 }
 
 if ($RecoverInterruptedInstall) {
+    Assert-InstalledMutationRuntimeBaseline
+    Assert-NoLauncherInterruptedInstallResidue
+    $trustReadLock = Open-InstalledRuntimeReadLock -ForRecovery
+    try {
+        $recoveryState = Assert-VerifiedInstalledRuntime -AllowPinMismatch
+        $trustedGenerationIdentity = Get-VerifiedInstalledRuntimeGenerationIdentity -State $recoveryState
+        try { Import-Module $platformRuntimeManifestPath -Force -ErrorAction Stop }
+        catch {
+            throw [System.InvalidOperationException]::new(
+                "Verified installed platform runtime could not be loaded: $($_.Exception.Message)`nAI instructions bootstrap stopped [classification=integrity; retryable=false].`n[ai-instructions-refusal-code=closure-invalid]",
+                $_.Exception
+            )
+        }
+        try { Assert-PlatformRuntimeInventory -Root $runtimeRoot -ManifestPath $platformRuntimeManifestPath | Out-Null }
+        catch {
+            throw [System.InvalidOperationException]::new(
+                "Installed platform runtime inventory verification failed: $($_.Exception.Message)`nAI instructions bootstrap stopped [classification=integrity; retryable=false].`n[ai-instructions-refusal-code=closure-invalid]",
+                $_.Exception
+            )
+        }
+        $capabilityReceipt = Get-PlatformCapabilities -Required @()
+        Assert-LauncherRecoveryCapabilities -Receipt $capabilityReceipt
+    }
+    finally { $trustReadLock.Dispose() }
+    Invoke-LauncherRecoveryTestFailpoint -Name 'after-trust-verification-before-install-lock'
+
     $installLockPath = Join-Path $codexHome 'ai-instructions-install.lock'
     if (Test-Path -LiteralPath $installLockPath) {
         $installLockItem = Get-Item -Force -LiteralPath $installLockPath
@@ -359,47 +582,67 @@ if ($RecoverInterruptedInstall) {
             )
         }
     }
-    $installLockStream = $null
+    $rootLease = Open-PlatformDirectory -Root $codexHome -RootOnly
+    $installLockLease = $null
     try {
         try {
-            $installLockStream = [System.IO.File]::Open(
-                $installLockPath,
-                [System.IO.FileMode]::OpenOrCreate,
-                [System.IO.FileAccess]::ReadWrite,
-                [System.IO.FileShare]::None
-            )
+            $installLockLease = Enter-PlatformLock -ParentLease $rootLease -Leaf 'ai-instructions-install.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
         }
-        catch [System.IO.IOException] {
+        catch {
+            $cause = $_.Exception
+            while ($null -ne $cause.InnerException) { $cause = $cause.InnerException }
+            if ($cause -isnot [System.TimeoutException]) { throw }
             throw [System.InvalidOperationException]::new(
                 "Interrupted-install recovery refused to run while another AI instructions installer is active.`nAI instructions bootstrap stopped [classification=concurrency; retryable=false].",
                 $_.Exception
             )
         }
+        Assert-NoLauncherInterruptedInstallResidue
         $recoveryState = Assert-VerifiedInstalledRuntime -AllowPinMismatch
-        if (Repair-InterruptedRuntimePin -State $recoveryState) {
+        $lockedGenerationIdentity = Get-VerifiedInstalledRuntimeGenerationIdentity -State $recoveryState
+        Assert-InstalledRuntimeGenerationUnchanged -TrustedIdentity $trustedGenerationIdentity -LockedIdentity $lockedGenerationIdentity
+        try { Assert-PlatformRuntimeInventory -Root $runtimeRoot -ManifestPath $platformRuntimeManifestPath | Out-Null }
+        catch { throw [System.InvalidOperationException]::new("Installed platform runtime inventory verification failed under the install lock: $($_.Exception.Message) [ai-instructions-refusal-code=closure-invalid]",$_.Exception) }
+        $capabilityReceipt = Get-PlatformCapabilities -Required @()
+        Assert-LauncherRecoveryCapabilities -Receipt $capabilityReceipt
+        Import-Module $contractPath -Force -ErrorAction Stop
+        Import-Module $installTransactionModulePath -Force -ErrorAction Stop
+        if (Repair-InterruptedRuntimePin -State $recoveryState -RootLease $rootLease -CapabilityReceipt $capabilityReceipt) {
             Write-Output "Recovered interrupted AI instructions installation by aligning the verified configuration pin to runtime commit $($recoveryState.Bundle.commit)."
         }
         else { Write-Output 'AI instructions runtime pin is already consistent; no interrupted-install repair was required.' }
     }
-    finally { if ($null -ne $installLockStream) { $installLockStream.Dispose() } }
+    finally {
+        if ($null -ne $installLockLease) { $installLockLease.Dispose() }
+        $rootLease.Dispose()
+    }
     return
 }
 
 $runtimeReadLock = Open-InstalledRuntimeReadLock
-try { Assert-VerifiedInstalledRuntime | Out-Null }
+try {
+    Assert-NoLauncherInterruptedInstallResidue
+    Assert-VerifiedInstalledRuntime | Out-Null
+}
 finally { $runtimeReadLock.Dispose() }
 if ($ValidateOnly) { return }
 if (-not $SkipUpdateCheck -and -not $WhatIf) {
-    $engineName = if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell.exe' } else { 'pwsh.exe' }
-    $enginePath = Join-Path $PSHOME $engineName
-    if (-not (Test-Path -LiteralPath $enginePath -PathType Leaf)) { $enginePath = $engineName }
-    $updateOutput = & $enginePath -NoProfile -ExecutionPolicy Bypass -File $stableUpdaterPath -CodexHome $codexHome 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "AI instructions update check failed: $($updateOutput -join [Environment]::NewLine)" }
-    foreach ($line in @($updateOutput)) { Write-Output $line }
+    if (-not (Test-InstalledMutationRuntimeBaseline)) {
+        [Console]::Error.WriteLine('AI instructions automatic update check was skipped because it requires pwsh 7 on .NET 8 or newer; read-only fan-out will continue.')
+    }
+    else {
+        $engineName = 'pwsh.exe'
+        $enginePath = Join-Path $PSHOME $engineName
+        if (-not (Test-Path -LiteralPath $enginePath -PathType Leaf)) { $enginePath = $engineName }
+        $updateOutput = & $enginePath -NoProfile -ExecutionPolicy Bypass -File $stableUpdaterPath -CodexHome $codexHome 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "AI instructions update check failed: $($updateOutput -join [Environment]::NewLine)" }
+        foreach ($line in @($updateOutput)) { Write-Output $line }
+    }
 }
 
 $runtimeReadLock = Open-InstalledRuntimeReadLock
 try {
+    Assert-NoLauncherInterruptedInstallResidue
     Assert-VerifiedInstalledRuntime | Out-Null
     $arguments = @{
         CatalogPath = $catalogPath

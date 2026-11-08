@@ -4,7 +4,112 @@ $ProgressPreference = 'SilentlyContinue'
 
 $script:CanonicalRepository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
 $script:RuntimeContractModule = Join-Path $PSScriptRoot 'ai-instructions-runtime-contract.psm1'
+$script:PlatformRuntimeManifest = Join-Path $PSScriptRoot 'platform-runtime.psd1'
 Import-Module $script:RuntimeContractModule
+
+function Assert-AiInstructionsUpdaterRuntimeBaseline {
+    if ($PSVersionTable.PSEdition -cne 'Core' -or $PSVersionTable.PSVersion.Major -lt 7 -or [Environment]::Version.Major -lt 8) {
+        throw (New-AiInstructionsRefusalException -Code runtime-baseline-unavailable -Message 'AI instructions updater mutation requires pwsh 7 on .NET 8 or newer.')
+    }
+}
+
+function Get-AiInstructionsUpdaterEntryKind {
+    param([Parameter(Mandatory = $true)][string] $LiteralPath)
+    $parentPath = Split-Path -Parent $LiteralPath
+    $leaf = Split-Path -Leaf $LiteralPath
+    $item = @(Get-ChildItem -Force -LiteralPath $parentPath | Where-Object { $_.Name -eq $leaf } | Select-Object -First 1)
+    if ($item.Count -eq 0) { return $null }
+    $item = $item[0]
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return 'reparse' }
+    if ($item.PSIsContainer) { return 'directory' }
+    return 'file'
+}
+
+function Get-AiInstructionsUpdaterJournalEntry {
+    param([Parameter(Mandatory = $true)][string] $LiteralPath)
+    $kind = Get-AiInstructionsUpdaterEntryKind -LiteralPath $LiteralPath
+    $json = if ($kind -ceq 'file') {
+        try { Get-Content -Raw -Encoding UTF8 -LiteralPath $LiteralPath }
+        catch { $null }
+    } else { $null }
+    return [pscustomobject]@{ Kind=$kind; Json=$json }
+}
+
+function Get-AiInstructionsUpdaterInterruptedInstallResidue {
+    param([Parameter(Mandatory = $true)][string] $CodexHome)
+    $residue = New-Object System.Collections.Generic.List[string]
+    $transactionRoot = Join-Path $CodexHome '.ai-instructions-txn'
+    $transactionRootKind = Get-AiInstructionsUpdaterEntryKind -LiteralPath $transactionRoot
+    if ($null -ne $transactionRootKind) {
+        $rootKind = $transactionRootKind
+        if ($rootKind -cne 'directory') { $residue.Add("$transactionRoot [invalid-name; entry=$rootKind]") }
+        else {
+            foreach ($entry in @(Get-ChildItem -Force -LiteralPath $transactionRoot)) {
+                $entryKind = Get-AiInstructionsUpdaterEntryKind -LiteralPath $entry.FullName
+                $journal = if ($entryKind -ceq 'directory') { Get-AiInstructionsUpdaterJournalEntry -LiteralPath (Join-Path $entry.FullName 'journal.json') } else { [pscustomobject]@{Kind=$null;Json=$null} }
+                $previous = if ($entryKind -ceq 'directory') { Get-AiInstructionsUpdaterJournalEntry -LiteralPath (Join-Path $entry.FullName 'journal.prev') } else { [pscustomobject]@{Kind=$null;Json=$null} }
+                $classification = Get-AiInstructionsInstallTransactionClassification -Name $entry.Name -EntryKind $entryKind -JournalEntryKind $journal.Kind -JournalJson $journal.Json -PreviousJournalEntryKind $previous.Kind -PreviousJournalJson $previous.Json
+                $disposition = Get-AiInstructionsInstallTransactionDisposition -Classification ([string]$classification.classification) -Component updater
+                $residue.Add("$($entry.FullName) [$($classification.classification); action=$($disposition.action)]")
+            }
+        }
+    }
+    foreach ($entry in @(Get-ChildItem -Force -LiteralPath $CodexHome | Where-Object { $_.Name -like '.ai-instructions-install-*' -or $_.Name -like '.ai-instructions-backup-*' })) {
+        $residue.Add("$($entry.FullName) [legacy]")
+    }
+    return $residue.ToArray()
+}
+
+function Get-AiInstructionsUpdaterInterruptedInstallPresence {
+    param([Parameter(Mandatory = $true)][string] $CodexHome)
+    $residue = New-Object System.Collections.Generic.List[string]
+    $transactionRoot = Join-Path $CodexHome '.ai-instructions-txn'
+    $rootKind = Get-AiInstructionsUpdaterEntryKind -LiteralPath $transactionRoot
+    if ($null -ne $rootKind) {
+        if ($rootKind -cne 'directory') { $residue.Add("$transactionRoot [$rootKind]") }
+        else {
+            foreach ($entry in @(Get-ChildItem -Force -LiteralPath $transactionRoot)) {
+                $residue.Add($entry.FullName)
+            }
+        }
+    }
+    foreach ($entry in @(Get-ChildItem -Force -LiteralPath $CodexHome | Where-Object { $_.Name -like '.ai-instructions-install-*' -or $_.Name -like '.ai-instructions-backup-*' })) {
+        $residue.Add("$($entry.FullName) [legacy]")
+    }
+    return $residue.ToArray()
+}
+
+function Assert-NoAiInstructionsUpdaterInterruptedInstallPresence {
+    param([Parameter(Mandatory = $true)][string] $CodexHome)
+    $residue = @(Get-AiInstructionsUpdaterInterruptedInstallPresence -CodexHome $CodexHome)
+    if ($residue.Count -eq 0) { return }
+    throw (New-AiInstructionsRefusalException -Code interrupted-install -Message ('Interrupted install residue requires the installer to complete recovery with pwsh 7: ' + ($residue -join '; ')))
+}
+
+function Assert-NoAiInstructionsUpdaterInterruptedInstallResidue {
+    param([Parameter(Mandatory = $true)][string] $CodexHome)
+    try { $residue = @(Get-AiInstructionsUpdaterInterruptedInstallResidue -CodexHome $CodexHome) }
+    catch {
+        $presence = @(Get-AiInstructionsUpdaterInterruptedInstallPresence -CodexHome $CodexHome)
+        if ($presence.Count -gt 0) {
+            throw (New-AiInstructionsRefusalException -Code interrupted-install -Message ('Interrupted install residue could not be fully classified and requires the installer to complete recovery with pwsh 7: ' + ($presence -join '; ')) -InnerException $_.Exception)
+        }
+        throw
+    }
+    if ($residue.Count -eq 0) { return }
+    throw (New-AiInstructionsRefusalException -Code interrupted-install -Message ('Interrupted install residue requires the installer to complete recovery with pwsh 7: ' + ($residue -join '; ')))
+}
+
+function Assert-AiInstructionsUpdaterPlatformCapabilities {
+    param([Parameter(Mandatory = $true)] $Receipt)
+    $missing = @(@('lock','directory-lease') | Where-Object {
+        $name = $_
+        @($Receipt.capabilities | Where-Object { [string]$_.name -ceq $name -and [string]$_.status -ceq 'available' }).Count -ne 1
+    })
+    if ($missing.Count -gt 0) {
+        throw (New-AiInstructionsRefusalException -Code capability-unavailable -Message ('Required updater platform capabilities are unavailable: ' + ($missing -join ', ')))
+    }
+}
 
 function Test-AiInstructionsTransientHttpStatusCode {
     param([Parameter(Mandatory = $true)][int] $StatusCode)
@@ -225,6 +330,7 @@ function Get-AiInstructionsCandidatePackage {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][object] $Request)
 
+    Assert-AiInstructionsUpdaterRuntimeBaseline
     $coordinates = Get-AiInstructionsRepositoryCoordinates -Repository ([string]$Request.Repository)
     $owner = [System.Uri]::EscapeDataString([string]$coordinates.Owner)
     $repository = [System.Uri]::EscapeDataString([string]$coordinates.Repository)
@@ -308,23 +414,81 @@ function Get-AiInstructionsCandidatePackage {
     }
 }
 
+function Resolve-AiInstructionsCandidatePowerShellPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $PSHome,
+        [Parameter(Mandatory = $true)][bool] $IsWindows
+    )
+
+    if ([string]::IsNullOrWhiteSpace($PSHome)) { throw 'Candidate installer PSHOME cannot be empty.' }
+    $resolvedPSHome = [IO.Path]::GetFullPath($PSHome)
+    $executableName = if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' }
+    $powerShellPath = [IO.Path]::GetFullPath((Join-Path $resolvedPSHome $executableName))
+    $rootWithSeparator = $resolvedPSHome.TrimEnd([char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)) + [IO.Path]::DirectorySeparatorChar
+    if (-not $powerShellPath.StartsWith($rootWithSeparator, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Candidate installer PowerShell executable must be located under PSHOME.'
+    }
+    if (-not [IO.File]::Exists($powerShellPath)) {
+        throw "Candidate installer PowerShell executable was not found: $powerShellPath"
+    }
+    $fileInfo = [IO.FileInfo]::new($powerShellPath)
+    if (($fileInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Candidate installer PowerShell executable must be a regular file: $powerShellPath"
+    }
+    return $powerShellPath
+}
+
 function Install-AiInstructionsCandidatePackage {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][object] $Request)
 
+    Assert-AiInstructionsUpdaterRuntimeBaseline
     $installerPath = Join-Path ([string]$Request.Package.SourceRoot) 'scripts\install-ai-instructions-bootstrap.ps1'
-    & $installerPath `
-        -RepositoryRoot ([string]$Request.Package.SourceRoot) `
-        -CodexHome ([string]$Request.CodexHome) `
-        -SourceRepository ([string]$Request.Repository) `
-        -SourceCommit ([string]$Request.CandidateCommit) `
-        -Acquisition github-codeload `
-        -ArchiveSha256 ([string]$Request.Package.ArchiveSha256) `
-        -SourceArchivePath ([string]$Request.Package.ArchivePath) `
-        -ExpectedCurrentCommit ([string]$Request.CurrentCommit) `
-        -ExpectedUpdateMode ([string]$Request.Mode) `
-        -ExpectedUpdateChannel ([string]$Request.Channel) `
-        -ExpectedUpdateRef ([string]$Request.Ref)
+    $powerShellPath = Resolve-AiInstructionsCandidatePowerShellPath -PSHome $PSHOME -IsWindows ([bool]$IsWindows)
+    $arguments = @(
+        '-NoProfile','-NonInteractive','-File',$installerPath,
+        '-RepositoryRoot',([string]$Request.Package.SourceRoot),
+        '-CodexHome',([string]$Request.CodexHome),
+        '-SourceRepository',([string]$Request.Repository),
+        '-SourceCommit',([string]$Request.CandidateCommit),
+        '-Acquisition','github-codeload',
+        '-ArchiveSha256',([string]$Request.Package.ArchiveSha256),
+        '-SourceArchivePath',([string]$Request.Package.ArchivePath),
+        '-ExpectedCurrentCommit',([string]$Request.CurrentCommit),
+        '-ExpectedUpdateMode',([string]$Request.Mode),
+        '-ExpectedUpdateChannel',([string]$Request.Channel),
+        '-ExpectedUpdateRef',([string]$Request.Ref)
+    )
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $powerShellPath
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.Environment.Remove('PSModulePath') | Out-Null
+    foreach ($argument in $arguments) { $startInfo.ArgumentList.Add([string]$argument) }
+
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) { throw 'Candidate installer pwsh subprocess could not be started.' }
+        $standardOutputTask = $process.StandardOutput.ReadToEndAsync()
+        $standardErrorTask = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $standardOutput = $standardOutputTask.GetAwaiter().GetResult()
+        $standardError = $standardErrorTask.GetAwaiter().GetResult()
+        $exitCode = $process.ExitCode
+    }
+    finally { $process.Dispose() }
+
+    if (-not [string]::IsNullOrEmpty($standardOutput)) { Write-Output $standardOutput }
+    if (-not [string]::IsNullOrEmpty($standardError)) { Write-Error -Message $standardError -ErrorAction Continue }
+    if ($exitCode -ne 0) {
+        $refusalMatches = [regex]::Matches($standardError,'\[ai-instructions-refusal-code=[A-Za-z0-9-]+\]')
+        $refusalSuffix = if ($refusalMatches.Count -gt 0) { ' ' + $refusalMatches[$refusalMatches.Count - 1].Value } else { '' }
+        throw "Candidate installer pwsh subprocess exited with exit code $exitCode.$refusalSuffix"
+    }
 }
 
 function New-AiInstructionsUpdateResult {
@@ -354,6 +518,8 @@ function New-AiInstructionsUpdateResult {
 
 function Write-AiInstructionsUpdateReceipt {
     param([Parameter(Mandatory = $true)][string] $Path,[Parameter(Mandatory = $true)][object] $Result)
+    Assert-AiInstructionsUpdaterRuntimeBaseline
+    Assert-NoAiInstructionsUpdaterInterruptedInstallPresence -CodexHome (Split-Path -Parent $Path)
     Assert-AiInstructionsUpdateReceiptV1 -Receipt $Result | Out-Null
     Assert-AiInstructionsMutationPath -Path $Path -ExpectedType File -Context 'AI instructions update receipt' | Out-Null
     Write-AiInstructionsJsonFile -Path $Path -Document $Result
@@ -371,6 +537,7 @@ function Invoke-AiInstructionsUpdateWorkflow {
         [scriptblock] $InstallCandidate
     )
 
+    Assert-AiInstructionsUpdaterRuntimeBaseline
     $codexHomePath = Get-AiInstructionsFullDirectoryPath -Path $CodexHome -RejectFileSystemRoot -Context 'Codex Home'
     $runtimeRoot = Join-Path $codexHomePath 'hooks\ai-instructions-runtime'
     $configurationPath = Join-Path $codexHomePath 'ai-instructions-sync.json'
@@ -384,17 +551,25 @@ function Invoke-AiInstructionsUpdateWorkflow {
     foreach ($stableFilePath in @($configurationPath,$bundlePath,$receiptPath,$lockPath,(Join-Path $codexHomePath 'ai-instructions-install.lock'))) {
         Assert-AiInstructionsMutationPath -Path $stableFilePath -ExpectedType File -Context 'AI instructions stable file' | Out-Null
     }
+    Assert-NoAiInstructionsUpdaterInterruptedInstallResidue -CodexHome $codexHomePath
     try {
         $preflightConfiguration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json
         $preflightBundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
     }
     catch { throw "Installed AI instruction update state is invalid: $($_.Exception.Message)" }
     if (($preflightConfiguration.schemaVersion -is [int] -or $preflightConfiguration.schemaVersion -is [long]) -and [int64]$preflightConfiguration.schemaVersion -eq 5) {
-        throw 'AI Instructions sync configuration schema version 5 requires a projection-aware installer.'
+        throw (New-AiInstructionsRefusalException -Code unsupported-version -Message 'AI Instructions sync configuration schema version 5 requires a projection-aware installer.')
     }
     if (($preflightBundle.schemaVersion -is [int] -or $preflightBundle.schemaVersion -is [long]) -and [int64]$preflightBundle.schemaVersion -eq 3) {
-        throw 'Runtime bundle schema version 3 requires a projection-aware installer.'
+        throw (New-AiInstructionsRefusalException -Code unsupported-version -Message 'Runtime bundle schema version 3 requires a projection-aware installer.')
     }
+    Assert-AiInstructionsRuntimeBundleV2 -Bundle $preflightBundle -Configuration $preflightConfiguration -RuntimeRoot $runtimeRoot | Out-Null
+    try { Import-Module $script:PlatformRuntimeManifest -Force -ErrorAction Stop }
+    catch { throw (New-AiInstructionsRefusalException -Code closure-invalid -Message "Verified updater platform runtime could not be loaded: $($_.Exception.Message)" -InnerException $_.Exception) }
+    try { Assert-PlatformRuntimeInventory -Root $PSScriptRoot -ManifestPath $script:PlatformRuntimeManifest | Out-Null }
+    catch { throw (New-AiInstructionsRefusalException -Code closure-invalid -Message "Updater platform runtime inventory verification failed: $($_.Exception.Message)" -InnerException $_.Exception) }
+    $platformCapabilities = Get-PlatformCapabilities -Required @()
+    Assert-AiInstructionsUpdaterPlatformCapabilities -Receipt $platformCapabilities
     if ($null -eq $NowUtc -or $NowUtc -eq [datetime]::MinValue) { $NowUtc = (Get-Date).ToUniversalTime() }
     else { $NowUtc = $NowUtc.ToUniversalTime() }
     if ($null -eq $ResolveCandidate) { $ResolveCandidate = { param($request) Get-AiInstructionsRemoteCandidate -Request $request } }
@@ -402,22 +577,30 @@ function Invoke-AiInstructionsUpdateWorkflow {
     if ($null -eq $InstallCandidate) { $InstallCandidate = { param($request) Install-AiInstructionsCandidatePackage -Request $request } }
 
     New-Item -ItemType Directory -Force -Path $codexHomePath | Out-Null
+    $rootLease = Open-PlatformDirectory -Root $codexHomePath -RootOnly
     $lockStream = $null
     $installStateLockStream = $null
     try {
         try {
-            $lockStream = [System.IO.File]::Open($lockPath,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+            $lockStream = Enter-PlatformLock -ParentLease $rootLease -Leaf 'ai-instructions-update.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
         }
-        catch [System.IO.IOException] {
+        catch {
+            $cause = $_.Exception
+            while ($null -ne $cause.InnerException) { $cause = $cause.InnerException }
+            if ($cause -isnot [System.TimeoutException]) { throw }
             return [pscustomobject][ordered]@{ outcome='concurrent'; message='Another AI instructions updater is already running.' }
         }
 
         try {
-            $installStateLockStream = [System.IO.File]::Open((Join-Path $codexHomePath 'ai-instructions-install.lock'),[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+            $installStateLockStream = Enter-PlatformLock -ParentLease $rootLease -Leaf 'ai-instructions-install.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
         }
-        catch [System.IO.IOException] {
+        catch {
+            $cause = $_.Exception
+            while ($null -ne $cause.InnerException) { $cause = $cause.InnerException }
+            if ($cause -isnot [System.TimeoutException]) { throw }
             return [pscustomobject][ordered]@{ outcome='concurrent'; message='Another AI instructions installer is already running.' }
         }
+        Assert-NoAiInstructionsUpdaterInterruptedInstallResidue -CodexHome $codexHomePath
         try {
             $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json
             $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
@@ -524,11 +707,15 @@ function Invoke-AiInstructionsUpdateWorkflow {
             # The installer reports progress on stdout; keep the workflow's result stream structured.
             & $InstallCandidate $installRequest | Out-Null
             try {
-                $installStateLockStream = [System.IO.File]::Open((Join-Path $codexHomePath 'ai-instructions-install.lock'),[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+                $installStateLockStream = Enter-PlatformLock -ParentLease $rootLease -Leaf 'ai-instructions-install.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
             }
-            catch [System.IO.IOException] {
+            catch {
+                $cause = $_.Exception
+                while ($null -ne $cause.InnerException) { $cause = $cause.InnerException }
+                if ($cause -isnot [System.TimeoutException]) { throw }
                 throw 'The active runtime could not be verified because another AI instructions installer is running.'
             }
+            Assert-NoAiInstructionsUpdaterInterruptedInstallResidue -CodexHome $codexHomePath
             try {
                 try {
                     $activeConfiguration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json
@@ -556,20 +743,26 @@ function Invoke-AiInstructionsUpdateWorkflow {
             }
         }
         catch {
+            if ((Get-AiInstructionsRefusalCode $_) -ceq 'interrupted-install') { throw }
             if ($null -eq $installStateLockStream) {
                 try {
-                    $installStateLockStream = [System.IO.File]::Open((Join-Path $codexHomePath 'ai-instructions-install.lock'),[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+                    $installStateLockStream = Enter-PlatformLock -ParentLease $rootLease -Leaf 'ai-instructions-install.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
                 }
-                catch [System.IO.IOException] {
+                catch {
+                    $cause = $_.Exception
+                    while ($null -ne $cause.InnerException) { $cause = $cause.InnerException }
+                    if ($cause -isnot [System.TimeoutException]) { throw }
                     return [pscustomobject][ordered]@{ outcome='concurrent'; message='Another AI instructions installer changed or is changing the active runtime.' }
                 }
 
                 try {
+                    Assert-NoAiInstructionsUpdaterInterruptedInstallResidue -CodexHome $codexHomePath
                     $activeConfigurationAfterFailure = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json
                     $activeBundleAfterFailure = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
                     Assert-AiInstructionsRuntimeBundleV2 -Bundle $activeBundleAfterFailure -Configuration $activeConfigurationAfterFailure -RuntimeRoot $runtimeRoot | Out-Null
                 }
                 catch {
+                    if ((Get-AiInstructionsRefusalCode $_) -ceq 'interrupted-install') { throw }
                     return [pscustomobject][ordered]@{ outcome='failed'; message="The active runtime could not be verified after candidate installation failed: $($_.Exception.Message)" }
                 }
                 if ([string]$activeBundleAfterFailure.repository -cne [string]$bundle.repository -or
@@ -603,6 +796,7 @@ function Invoke-AiInstructionsUpdateWorkflow {
     finally {
         if ($null -ne $installStateLockStream) { $installStateLockStream.Dispose() }
         if ($null -ne $lockStream) { $lockStream.Dispose() }
+        $rootLease.Dispose()
     }
 }
 

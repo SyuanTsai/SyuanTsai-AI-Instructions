@@ -10,6 +10,16 @@ function Get-TestUpdaterFileSha256 {
     finally { $sha256.Dispose() }
 }
 
+function Get-TestUpdaterHomeDigest {
+    param([Parameter(Mandatory=$true)][string]$CodexHome)
+    return (@(Get-ChildItem -LiteralPath $CodexHome -Recurse -Force|Sort-Object FullName|ForEach-Object{
+        $relative=$_.FullName.Substring($CodexHome.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+        $kind=if(($_.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){'reparse'}elseif($_.PSIsContainer){'directory'}else{'file'}
+        $hash=if($kind-ceq'file'){Get-TestUpdaterFileSha256 -Path $_.FullName}else{'-'}
+        "$relative=$kind;$([int64]$_.Attributes);$hash"
+    })-join"`n")
+}
+
 function New-TestUpdaterHome {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
@@ -48,11 +58,12 @@ Describe 'AI instructions updater workflow' {
         $bundleBefore = [IO.File]::ReadAllBytes($bundlePath)
         $configurationBefore = [IO.File]::ReadAllBytes($configurationPath)
 
-        $message = $null
+        $caught = $null
         try { Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck | Out-Null }
-        catch { $message = $_.Exception.Message }
+        catch { $caught = $_ }
 
-        $message | Should Be 'Runtime bundle schema version 3 requires a projection-aware installer.'
+        $caught.Exception.Message | Should Match '^Runtime bundle schema version 3 requires a projection-aware installer\.'
+        (Get-AiInstructionsRefusalCode $caught) | Should Be unsupported-version
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($bundlePath)) | Should Be ([Convert]::ToBase64String($bundleBefore))
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($configurationPath)) | Should Be ([Convert]::ToBase64String($configurationBefore))
         Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update.lock') | Should Be $false
@@ -512,9 +523,9 @@ Describe 'AI instructions updater workflow' {
     }
 
     # Scenario: The production updater delegates installation after selecting a candidate under an approved update policy.
-    # Purpose: Pass the expected runtime and policy identity so the installer can revalidate both under its lock.
+    # Purpose: Run the installer in a distinct pwsh process with a clean module search path and pass every argument without corrupting paths that contain spaces.
     It 'UnitT65_passes_the_expected_runtime_and_update_policy_to_the_installer' {
-        $sourceRoot = Join-Path $TestDrive 'installer-contract'
+        $sourceRoot = Join-Path $TestDrive 'installer contract with spaces'
         $scriptsRoot = Join-Path $sourceRoot 'scripts'
         New-Item -ItemType Directory -Force -Path $scriptsRoot | Out-Null
         $fakeInstaller = @'
@@ -524,26 +535,82 @@ param(
     [string]$ExpectedUpdateMode,[string]$ExpectedUpdateChannel,[string]$ExpectedUpdateRef
 )
 [System.IO.File]::WriteAllText(
-    (Join-Path $RepositoryRoot 'expected-state.txt'),
-    (@($ExpectedCurrentCommit,$ExpectedUpdateMode,$ExpectedUpdateChannel,$ExpectedUpdateRef) -join "`n")
+    (Join-Path $RepositoryRoot 'received-state.json'),
+    ([pscustomobject][ordered]@{
+        pid=$PID;repositoryRoot=$RepositoryRoot;codexHome=$CodexHome;sourceRepository=$SourceRepository
+        sourceCommit=$SourceCommit;acquisition=$Acquisition;archiveSha256=$ArchiveSha256
+        sourceArchivePath=$SourceArchivePath;expectedCurrentCommit=$ExpectedCurrentCommit
+        expectedUpdateMode=$ExpectedUpdateMode;expectedUpdateChannel=$ExpectedUpdateChannel
+        expectedUpdateRef=$ExpectedUpdateRef;psModulePath=$env:PSModulePath
+    } | ConvertTo-Json)
 )
 '@
         [System.IO.File]::WriteAllText((Join-Path $scriptsRoot 'install-ai-instructions-bootstrap.ps1'),$fakeInstaller)
+        $codexHome = Join-Path $TestDrive 'installer contract home with spaces'
+        $archivePath = Join-Path $TestDrive 'candidate archive with spaces.zip'
         $request = [pscustomobject]@{
-            CodexHome = (Join-Path $TestDrive 'installer-contract-home')
+            CodexHome = $codexHome
             Repository = $script:CanonicalRepository
             CurrentCommit = ('a' * 40)
             CandidateCommit = ('b' * 40)
             Mode = 'auto-install-approved'
             Channel = 'protected-branch'
             Ref = 'main'
-            Package = [pscustomobject]@{ SourceRoot=$sourceRoot; ArchivePath='C:\fixture.zip'; ArchiveSha256=('c' * 64) }
+            Package = [pscustomobject]@{ SourceRoot=$sourceRoot; ArchivePath=$archivePath; ArchiveSha256=('c' * 64) }
         }
 
-        Install-AiInstructionsCandidatePackage -Request $request
+        $modulePathMarker = Join-Path $TestDrive 'parent-only-module-path-marker'
+        $savedModulePath = $env:PSModulePath
+        try {
+            $env:PSModulePath = $modulePathMarker + [IO.Path]::PathSeparator + $savedModulePath
+            Install-AiInstructionsCandidatePackage -Request $request
+        }
+        finally { $env:PSModulePath = $savedModulePath }
 
-        [System.IO.File]::ReadAllText((Join-Path $sourceRoot 'expected-state.txt')) |
-            Should Be ((@(('a' * 40),'auto-install-approved','protected-branch','main') -join "`n"))
+        $received = [System.IO.File]::ReadAllText((Join-Path $sourceRoot 'received-state.json')) | ConvertFrom-Json
+        [int]$received.pid | Should Not Be $PID
+        $received.repositoryRoot | Should Be $sourceRoot
+        $received.codexHome | Should Be $codexHome
+        $received.sourceRepository | Should Be $script:CanonicalRepository
+        $received.sourceCommit | Should Be ('b' * 40)
+        $received.acquisition | Should Be github-codeload
+        $received.archiveSha256 | Should Be ('c' * 64)
+        $received.sourceArchivePath | Should Be $archivePath
+        $received.expectedCurrentCommit | Should Be ('a' * 40)
+        $received.expectedUpdateMode | Should Be auto-install-approved
+        $received.expectedUpdateChannel | Should Be protected-branch
+        $received.expectedUpdateRef | Should Be main
+        [string]$received.psModulePath | Should Not Match ([regex]::Escape($modulePathMarker))
+    }
+
+    # Scenario: A candidate installer subprocess writes a typed refusal to stderr and exits nonzero.
+    # Purpose: Preserve the refusal suffix in the updater exception while reporting the exact subprocess exit code.
+    It 'UnitT67_preserves_candidate_subprocess_exit_code_and_refusal' {
+        $sourceRoot = Join-Path $TestDrive 'installer-refusal'
+        $scriptsRoot = Join-Path $sourceRoot 'scripts'
+        New-Item -ItemType Directory -Force -Path $scriptsRoot | Out-Null
+        $fakeInstaller = @'
+[Console]::Error.WriteLine('candidate refused [ai-instructions-refusal-code=unsupported-version]')
+exit 23
+'@
+        [System.IO.File]::WriteAllText((Join-Path $scriptsRoot 'install-ai-instructions-bootstrap.ps1'),$fakeInstaller)
+        $request = [pscustomobject]@{
+            CodexHome = (Join-Path $TestDrive 'installer-refusal-home')
+            Repository = $script:CanonicalRepository
+            CurrentCommit = ('a' * 40)
+            CandidateCommit = ('b' * 40)
+            Mode = 'auto-install-approved'
+            Channel = 'protected-branch'
+            Ref = 'main'
+            Package = [pscustomobject]@{ SourceRoot=$sourceRoot; ArchivePath=(Join-Path $TestDrive 'candidate.zip'); ArchiveSha256=('c' * 64) }
+        }
+
+        $caught = $null
+        try { Install-AiInstructionsCandidatePackage -Request $request 2>$null }
+        catch { $caught = $_ }
+
+        $caught.Exception.Message | Should Match 'exit code 23'
+        (Get-AiInstructionsRefusalCode $caught) | Should Be unsupported-version
     }
 
     # Scenario: Another updater process holds the per-home update lock.
@@ -710,6 +777,205 @@ Export-ModuleMember -Function Invoke-AiInstructionsUpdateWorkflow,Get-AiInstruct
         foreach ($record in $records) {
             $sourceHash = Get-TestUpdaterFileSha256 -Path (Join-Path $runtimeRoot $record.name)
             [string]$record.sha256 | Should Be $sourceHash
+        }
+    }
+
+    # Scenario: D3 transaction residue or a legacy staging namespace exists before updater lock acquisition.
+    # Purpose: Return interrupted-install without creating a receipt or changing the retained evidence.
+    It 'UnitT79_refuses_transaction_and_legacy_residue_before_updater_mutation' -TestCases @(
+        @{Variant='orphan'},@{Variant='valid-journal'},@{Variant='legacy'}
+    ) {
+        param($Variant)
+        Import-Module $script:UpdaterModule -Force
+        $codexHome=Join-Path $TestDrive ("residue-$Variant")
+        New-TestUpdaterHome -Path $codexHome
+        if($Variant-eq'legacy'){
+            $evidence=Join-Path $codexHome '.ai-instructions-install-evidence';New-Item -ItemType Directory -Path $evidence|Out-Null
+        }else{
+            $store=Join-Path $codexHome '.ai-instructions-txn';New-Item -ItemType Directory -Path $store|Out-Null
+            if($Variant-eq'valid-journal'){
+                $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-install-journal-v1.example.json')|ConvertFrom-Json
+                $transaction=Join-Path $store ([string]$journal.transactionId);New-Item -ItemType Directory -Path $transaction|Out-Null
+                [IO.File]::WriteAllText((Join-Path $transaction 'journal.json'),(($journal|ConvertTo-Json -Depth 30)+"`n"),[Text.UTF8Encoding]::new($false))
+            }else{New-Item -ItemType Directory -Path (Join-Path $store ([Guid]::NewGuid().ToString('N')))|Out-Null}
+        }
+        $caught=$null
+        try{Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck|Out-Null}catch{$caught=$_}
+        (Get-AiInstructionsRefusalCode $caught)|Should Be interrupted-install
+        Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json')|Should Be $false
+    }
+
+    # Scenario: The candidate installer crashes after leaving a transaction directory and before activating a complete runtime.
+    # Purpose: Prefer interrupted-install over a generic failed receipt during after-failure verification.
+    It 'UnitT80_reports_interrupted_install_after_candidate_failure_residue' {
+        Import-Module $script:UpdaterModule -Force
+        $codexHome=Join-Path $TestDrive 'candidate-failfast-residue';New-TestUpdaterHome -Path $codexHome -Mode auto-install-approved
+        $package=[pscustomobject]@{SourceRoot='C:\fixture';ArchivePath='C:\fixture.zip';ArchiveSha256=('c'*64)}
+        $caught=$null
+        try{
+            Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck `
+                -ResolveCandidate { 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' } `
+                -AcquireCandidate { $package } `
+                -InstallCandidate {
+                    param($request)
+                    New-Item -ItemType Directory -Force -Path (Join-Path $request.CodexHome ('.ai-instructions-txn\'+[Guid]::NewGuid().ToString('N')))|Out-Null
+                    throw 'simulated candidate failfast'
+                }|Out-Null
+        }catch{$caught=$_}
+        (Get-AiInstructionsRefusalCode $caught)|Should Be interrupted-install
+        Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json')|Should Be $false
+    }
+
+    # Register only on the native host because FileShare and junction regressions exercise Windows lock and reparse semantics.
+    if([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)){
+        # Scenario: Platform locks and legacy File.Open callers contend on both updater lock files.
+        # Purpose: Preserve the windows-fileshare protocol in the new-to-old direction for update then install ordering.
+        It 'UnitT81_keeps_platform_locks_mutually_exclusive_with_legacy_file_open' -TestCases @(
+        @{Leaf='ai-instructions-update.lock'},@{Leaf='ai-instructions-install.lock'}
+        ) {
+            param($Leaf)
+            $codexHome=Join-Path $TestDrive ("platform-lock-"+$Leaf);New-TestUpdaterHome -Path $codexHome
+            Import-Module (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psd1') -Force
+            $root=Open-PlatformDirectory -Root $codexHome -RootOnly
+            try{
+                $lease=Enter-PlatformLock -ParentLease $root -Leaf $Leaf -Mode Exclusive -Timeout ([TimeSpan]::Zero)
+                try{
+                    $caught=$null
+                    try{$legacy=[IO.File]::Open((Join-Path $codexHome $Leaf),[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None);$legacy.Dispose()}catch{$caught=$_}
+                    $caught|Should Not BeNullOrEmpty
+                }finally{$lease.Dispose()}
+            }finally{$root.Dispose()}
+        }
+
+        # Scenario: The updater sees a dangling .ai-instructions-txn junction before it can acquire locks.
+        # Purpose: Refuse the namespace leaf without following its missing target or changing inventory and bytes.
+        It 'UnitT82_refuses_a_dangling_transaction_root_without_mutation' {
+            $codexHome=Join-Path $TestDrive 'dangling-transaction-root';New-TestUpdaterHome -Path $codexHome
+            $target=Join-Path $TestDrive 'dangling-updater-target';New-Item -ItemType Directory -Path $target|Out-Null
+            New-Item -ItemType Junction -Path (Join-Path $codexHome '.ai-instructions-txn') -Target $target|Out-Null
+            Remove-Item -LiteralPath $target -Force
+            $before=Get-TestUpdaterHomeDigest -CodexHome $codexHome
+            $caught=$null
+            try{Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck|Out-Null}catch{$caught=$_}
+            (Get-AiInstructionsRefusalCode $caught)|Should Be interrupted-install
+            (Get-TestUpdaterHomeDigest -CodexHome $codexHome)|Should Be $before
+            Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json')|Should Be $false
+        }
+
+        # Scenario: Another process-compatible stream exclusively owns journal.json while updater preflight classifies residue.
+        # Purpose: Convert the unreadable journal into interrupted-install and never write an update receipt.
+        It 'UnitT83_refuses_an_unreadable_journal_as_interrupted_install' {
+            $codexHome=Join-Path $TestDrive 'locked-journal';New-TestUpdaterHome -Path $codexHome
+            $journal=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-install-journal-v1.example.json')|ConvertFrom-Json
+            $transaction=Join-Path $codexHome ('.ai-instructions-txn\'+[string]$journal.transactionId);New-Item -ItemType Directory -Path $transaction|Out-Null
+            $journalPath=Join-Path $transaction 'journal.json'
+            [IO.File]::WriteAllText($journalPath,(($journal|ConvertTo-Json -Depth 30)+"`n"),[Text.UTF8Encoding]::new($false))
+            $before=Get-TestUpdaterHomeDigest -CodexHome $codexHome
+            $stream=[IO.File]::Open($journalPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None)
+            try{
+                $caught=$null
+                try{Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck|Out-Null}catch{$caught=$_}
+            }finally{$stream.Dispose()}
+            (Get-AiInstructionsRefusalCode $caught)|Should Be interrupted-install
+            (Get-TestUpdaterHomeDigest -CodexHome $codexHome)|Should Be $before
+            Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json')|Should Be $false
+        }
+
+        # Scenario: The default candidate installer subprocess retains transaction evidence and invokes the production failpoint.
+        # Purpose: Return interrupted-install in the same updater run, preserve the active runtime, and keep the next run mutation-free.
+        It 'UnitT84_failfasts_with_the_candidate_installer_then_refuses_the_retained_transaction' {
+            $codexHome=Join-Path $TestDrive 'real-updater-failfast';New-TestUpdaterHome -Path $codexHome -Mode auto-install-approved
+            $sourceRoot=Join-Path $TestDrive 'real-updater-failfast-candidate';$scriptsRoot=Join-Path $sourceRoot 'scripts'
+            New-Item -ItemType Directory -Force -Path $scriptsRoot|Out-Null
+            Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts\ai-instructions-install-transaction.psm1') -Destination $scriptsRoot
+            $fakeInstaller=@'
+param([string]$CodexHome)
+Import-Module (Join-Path $PSScriptRoot 'ai-instructions-install-transaction.psm1') -Force
+$transaction=Join-Path $CodexHome ('.ai-instructions-txn\'+[Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path $transaction|Out-Null
+[IO.File]::WriteAllText((Join-Path $transaction 'journal.json'),'{',[Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText((Join-Path $CodexHome 'candidate-published-before-failfast.txt'),'published',[Text.UTF8Encoding]::new($false))
+Invoke-AiInstructionsInstallFailpoint -Name 'after-operation-1-before-journal'
+'@
+            [IO.File]::WriteAllText((Join-Path $scriptsRoot 'install-ai-instructions-bootstrap.ps1'),$fakeInstaller,[Text.UTF8Encoding]::new($false))
+            $package=[pscustomobject]@{SourceRoot=$sourceRoot;ArchivePath=(Join-Path $TestDrive 'candidate.zip');ArchiveSha256=('c'*64)}
+            $configurationPath=Join-Path $codexHome 'ai-instructions-sync.json'
+            $bundlePath=Join-Path $codexHome 'hooks\ai-instructions-runtime\runtime-bundle.json'
+            $configurationBefore=[Convert]::ToBase64String([IO.File]::ReadAllBytes($configurationPath))
+            $bundleBefore=[Convert]::ToBase64String([IO.File]::ReadAllBytes($bundlePath))
+            $previous=[Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_INSTALL_FAILPOINT','Process')
+            try{
+                [Environment]::SetEnvironmentVariable('AI_INSTRUCTIONS_INSTALL_FAILPOINT','after-operation-1-before-journal','Process')
+                $caught=$null
+                try{
+                    Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck -InstallApproved `
+                        -ResolveCandidate { [pscustomobject]@{Commit=('b'*40);Relation='ahead'} } `
+                        -AcquireCandidate { $package } 2>$null|Out-Null
+                }catch{$caught=$_}
+            }finally{[Environment]::SetEnvironmentVariable('AI_INSTRUCTIONS_INSTALL_FAILPOINT',$previous,'Process')}
+            (Get-AiInstructionsRefusalCode $caught)|Should Be interrupted-install
+            Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json')|Should Be $false
+            @(Get-ChildItem -Force -LiteralPath (Join-Path $codexHome '.ai-instructions-txn')).Count|Should BeGreaterThan 0
+            Test-Path -LiteralPath (Join-Path $codexHome 'candidate-published-before-failfast.txt')|Should Be $true
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($configurationPath))|Should Be $configurationBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($bundlePath))|Should Be $bundleBefore
+            $before=Get-TestUpdaterHomeDigest -CodexHome $codexHome
+            $caught=$null
+            try{Invoke-AiInstructionsUpdateWorkflow -CodexHome $codexHome -ForceCheck|Out-Null}catch{$caught=$_}
+            (Get-AiInstructionsRefusalCode $caught)|Should Be interrupted-install
+            (Get-TestUpdaterHomeDigest -CodexHome $codexHome)|Should Be $before
+            Test-Path -LiteralPath (Join-Path $codexHome 'ai-instructions-update-receipt.json')|Should Be $false
+        }
+    }
+
+    # Register only on the native Windows host because this regression exercises the Windows PowerShell 5.1 process.
+    if([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)-and$null-ne(Get-Command powershell.exe -ErrorAction SilentlyContinue)){
+        # Scenario: Windows PowerShell 5.1 invokes the stable updater before any installed runtime or Codex Home exists.
+        # Purpose: Preserve the typed runtime-baseline-unavailable refusal instead of masking it with the trap helper lookup.
+        It 'UnitT85_windows_powershell_5_1_returns_the_typed_baseline_refusal_before_mutation' {
+            $codexHome=Join-Path $TestDrive 'desktop-baseline-home'
+            $output=& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $script:RepositoryRoot 'scripts\update-ai-instructions.ps1') -CodexHome $codexHome -ForceCheck 2>&1
+            $LASTEXITCODE|Should Not Be 0
+            (Get-AiInstructionsRefusalCode ($output-join[Environment]::NewLine))|Should Be runtime-baseline-unavailable
+            Test-Path -LiteralPath $codexHome|Should Be $false
+        }
+    }
+
+    # Scenario: Candidate installer PowerShell paths are resolved from platform-specific PSHOME names.
+    # Purpose: Accept only the expected executable for each platform, reject the alternate name, and fail when the executable is absent.
+    It 'UnitT90_resolves_the_platform_specific_candidate_powershell_path' {
+        $module = Get-Module | Where-Object { $_.Path -eq $script:UpdaterModule } | Select-Object -First 1
+        $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('ai-instructions-powershell-path-' + [guid]::NewGuid().ToString('N'))
+        try {
+            & $module {
+                param($testRoot)
+                $windowsHome = Join-Path $testRoot 'windows'
+                New-Item -ItemType Directory -Force -Path $windowsHome | Out-Null
+                [IO.File]::WriteAllText((Join-Path $windowsHome 'pwsh.exe'), '')
+                (Resolve-AiInstructionsCandidatePowerShellPath -PSHome $windowsHome -IsWindows $true) | Should Be (Join-Path $windowsHome 'pwsh.exe')
+
+                $windowsAlternateHome = Join-Path $testRoot 'windows-alternate'
+                New-Item -ItemType Directory -Force -Path $windowsAlternateHome | Out-Null
+                [IO.File]::WriteAllText((Join-Path $windowsAlternateHome 'pwsh'), '')
+                { Resolve-AiInstructionsCandidatePowerShellPath -PSHome $windowsAlternateHome -IsWindows $true } | Should Throw
+
+                $unixHome = Join-Path $testRoot 'unix'
+                New-Item -ItemType Directory -Force -Path $unixHome | Out-Null
+                [IO.File]::WriteAllText((Join-Path $unixHome 'pwsh'), '')
+                (Resolve-AiInstructionsCandidatePowerShellPath -PSHome $unixHome -IsWindows $false) | Should Be (Join-Path $unixHome 'pwsh')
+
+                $unixAlternateHome = Join-Path $testRoot 'unix-alternate'
+                New-Item -ItemType Directory -Force -Path $unixAlternateHome | Out-Null
+                [IO.File]::WriteAllText((Join-Path $unixAlternateHome 'pwsh.exe'), '')
+                { Resolve-AiInstructionsCandidatePowerShellPath -PSHome $unixAlternateHome -IsWindows $false } | Should Throw
+
+                $missingHome = Join-Path $testRoot 'missing'
+                New-Item -ItemType Directory -Force -Path $missingHome | Out-Null
+                { Resolve-AiInstructionsCandidatePowerShellPath -PSHome $missingHome -IsWindows $true } | Should Throw
+            } $testRoot
+        }
+        finally {
+            if (Test-Path -LiteralPath $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }
         }
     }
 }

@@ -37,6 +37,13 @@ trap {
     )
 }
 
+if ($PSVersionTable.PSEdition -cne 'Core' -or $PSVersionTable.PSVersion.Major -lt 7 -or [Environment]::Version.Major -lt 8) {
+    [Console]::Error.WriteLine('[ai-instructions-refusal-code=runtime-baseline-unavailable]')
+    throw [System.InvalidOperationException]::new(
+        'AI instructions updater mutation requires pwsh 7 on .NET 8 or newer. [ai-instructions-refusal-code=runtime-baseline-unavailable]'
+    )
+}
+
 if ($RecoverInterruptedInstall -and ($ForceCheck -or $InstallApproved)) {
     throw [System.InvalidOperationException]::new(
         "RecoverInterruptedInstall cannot be combined with update-check or installation switches.`nAI instructions updater stopped [classification=configuration; installationState=not-installed; retryable=false]."
