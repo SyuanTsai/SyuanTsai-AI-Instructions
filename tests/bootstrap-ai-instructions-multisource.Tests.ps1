@@ -140,9 +140,9 @@ function Convert-TestTargetManifestToV1 {
 }
 
 Describe 'bootstrap-ai-instructions-multisource' {
-    # Scenario: A projection-aware sync configuration reaches the legacy multi-source bootstrap.
-    # Purpose: Reject v5 before creating working directories or changing target bytes.
-    It 'InterT04_rejects_sync_v5_before_multisource_mutation' {
+    # Scenario: A gate-verified projection-aware sync configuration reaches the multi-source bootstrap.
+    # Purpose: Accept v5 for the same Instructions-only fan-out behavior while projection ownership stays with P8.
+    It 'InterT04_accepts_sync_v5_for_instructions_fan_out' {
         $catalogPath=Join-Path $TestDrive 'v5-catalog.json';$lockPath=Join-Path $TestDrive 'v5-lock.json';$configurationPath=Join-Path $TestDrive 'v5-config.json'
         $instructionArchive=Join-Path $TestDrive 'v5-instructions.zip';$skillArchivePath=Join-Path $TestDrive 'v5-source.zip';$targetRoot=Join-Path $TestDrive 'v5-target'
         New-TestInstructionArchive (Join-Path $TestDrive 'v5-instruction-root') $instructionArchive
@@ -155,10 +155,11 @@ Describe 'bootstrap-ai-instructions-multisource' {
         New-TestTargetRepository $targetRoot
         $readmePath=Join-Path $targetRoot 'README.md';$before=[IO.File]::ReadAllBytes($readmePath)
 
-        Assert-ThrowsMessage -Action { & $script:BootstrapScript -CatalogPath $catalogPath -LockPath $lockPath -ConfigurationPath $configurationPath -InstructionSourceArchivePath $instructionArchive -InstructionSourceCommit ('c'*40) -SourceArchivePaths @{'source-a'=$skillArchivePath} -TargetRoot $targetRoot } -Pattern 'AI Instructions sync configuration schema version 5 requires a projection-aware installer\.'
+        & $script:BootstrapScript -CatalogPath $catalogPath -LockPath $lockPath -ConfigurationPath $configurationPath -InstructionSourceArchivePath $instructionArchive -InstructionSourceCommit ('c'*40) -SourceArchivePaths @{'source-a'=$skillArchivePath} -TargetRoot $targetRoot
 
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($readmePath))|Should Be ([Convert]::ToBase64String($before))
-        Test-Path -LiteralPath (Join-Path $targetRoot '.codex\ai-instructions.manifest.json')|Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot '.codex\ai-instructions.manifest.json')|Should Be $true
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md')|Should Be $true
     }
 
     # Scenario: A licensed external Skill is selected for consumer Instructions synchronization.

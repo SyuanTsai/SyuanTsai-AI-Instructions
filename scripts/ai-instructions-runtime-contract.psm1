@@ -40,6 +40,9 @@ $script:AiInstructionsRefusalCodes = @(
     'capability-unavailable','platform-mismatch','downgrade-refused','mixed-generation','unsupported-version',
     'closure-invalid','interrupted-install','projection-runtime-unavailable','runtime-baseline-unavailable'
 )
+$script:AiInstructionsProjectionRequiredCapabilities = @(
+    'directory-lease','file-lease','file-identity','lock','publication','owned-file-removal','permissions','directory-publication'
+)
 
 if ($null -eq ('SyuanTsai.AiInstructions.AiInstructionsRefusalException' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -83,6 +86,111 @@ function Get-AiInstructionsRefusalCode {
         if ($match.Groups[1].Value -cin $script:AiInstructionsRefusalCodes) { return $match.Groups[1].Value }
     }
     return $null
+}
+
+function Get-AiInstructionsRuntimeGeneration {
+    [CmdletBinding()]
+    param(
+        [AllowNull()][object] $BundleSchemaVersion,
+        [AllowNull()][object] $ConfigurationSchemaVersion,
+        [AllowNull()][Nullable[bool]] $BundleExists = $null,
+        [AllowNull()][Nullable[bool]] $ConfigurationExists = $null,
+        [switch] $AllowAbsent,
+        [switch] $AllowLegacyConfigurationOnly
+    )
+    $bundlePresent = if ($null -eq $BundleExists) { $null -ne $BundleSchemaVersion } else { [bool]$BundleExists }
+    $configurationPresent = if ($null -eq $ConfigurationExists) { $null -ne $ConfigurationSchemaVersion } else { [bool]$ConfigurationExists }
+    if (-not $bundlePresent -and -not $configurationPresent -and $AllowAbsent) { return 'none' }
+    if ($bundlePresent -and (
+        $null -eq $BundleSchemaVersion -or
+        ($BundleSchemaVersion -isnot [int] -and $BundleSchemaVersion -isnot [long]) -or
+        [int64]$BundleSchemaVersion -notin @(2,3))) {
+        throw (New-AiInstructionsRefusalException -Code unsupported-version -Message 'AI instructions runtime bundle uses a missing, invalid, or unsupported version.')
+    }
+    if ($configurationPresent -and (
+        $null -eq $ConfigurationSchemaVersion -or
+        ($ConfigurationSchemaVersion -isnot [int] -and $ConfigurationSchemaVersion -isnot [long]) -or
+        [int64]$ConfigurationSchemaVersion -notin @(4,5))) {
+        if ($AllowLegacyConfigurationOnly -and -not $bundlePresent -and
+            ($ConfigurationSchemaVersion -is [int] -or $ConfigurationSchemaVersion -is [long]) -and
+            [int64]$ConfigurationSchemaVersion -in @(1,2,3)) {
+            return 'legacy-configuration'
+        }
+        throw (New-AiInstructionsRefusalException -Code unsupported-version -Message 'AI instructions sync configuration uses a missing, invalid, or unsupported version.')
+    }
+    if (-not $bundlePresent -or -not $configurationPresent) {
+        throw (New-AiInstructionsRefusalException -Code mixed-generation -Message 'AI instructions runtime bundle and configuration must both be present or both be absent.')
+    }
+    if ([int64]$BundleSchemaVersion -eq 2 -and [int64]$ConfigurationSchemaVersion -eq 4) { return 'v2v4' }
+    if ([int64]$BundleSchemaVersion -eq 3 -and [int64]$ConfigurationSchemaVersion -eq 5) { return 'v3v5' }
+    throw (New-AiInstructionsRefusalException -Code mixed-generation -Message 'AI instructions runtime bundle and configuration belong to different generations.')
+}
+
+function Assert-AiInstructionsProjectionCapabilityReceipt {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object] $Receipt,
+        [string[]] $RequiredCapabilities = $script:AiInstructionsProjectionRequiredCapabilities
+    )
+    foreach ($name in @('os','architecture','capabilities')) {
+        if (-not (Test-AiInstructionsObjectHasProperty -Object $Receipt -Name $name)) {
+            throw (New-AiInstructionsRefusalException -Code capability-unavailable -Message "Platform capability receipt is missing '$name'.")
+        }
+    }
+    $missing = New-Object System.Collections.Generic.List[string]
+    foreach ($required in @($RequiredCapabilities)) {
+        $matches = @($Receipt.capabilities | Where-Object {
+            $_ -ne $null -and (Test-AiInstructionsObjectHasProperty -Object $_ -Name 'name') -and
+            (Test-AiInstructionsObjectHasProperty -Object $_ -Name 'status') -and
+            [string]$_.name -ceq [string]$required -and [string]$_.status -ceq 'available'
+        })
+        if ($matches.Count -ne 1) { $missing.Add([string]$required) }
+    }
+    if ($missing.Count -gt 0) {
+        throw (New-AiInstructionsRefusalException -Code capability-unavailable -Message ('Required projection runtime capabilities are unavailable: ' + ($missing.ToArray() -join ', ')))
+    }
+    return $Receipt
+}
+
+function Select-AiInstructionsInstallWriterSchema {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('Auto','V2V4','V3V5')][string] $WriterSchema,
+        [Parameter(Mandatory = $true)][object] $CatalogSchemaVersion,
+        [AllowNull()][object] $InstalledBundleSchemaVersion,
+        [AllowNull()][object] $InstalledConfigurationSchemaVersion,
+        [AllowNull()][Nullable[bool]] $InstalledBundleExists = $null,
+        [AllowNull()][Nullable[bool]] $InstalledConfigurationExists = $null,
+        [AllowNull()][object] $CapabilityReceipt,
+        [AllowNull()][string] $ExpectedPlatformOs,
+        [AllowNull()][string] $ExpectedPlatformArchitecture,
+        [bool] $ProjectionRuntimeAvailable = $false
+    )
+    $containsNewGeneration = ($InstalledBundleSchemaVersion -is [int] -or $InstalledBundleSchemaVersion -is [long]) -and [int64]$InstalledBundleSchemaVersion -eq 3
+    $containsNewGeneration = $containsNewGeneration -or ((($InstalledConfigurationSchemaVersion -is [int]) -or ($InstalledConfigurationSchemaVersion -is [long])) -and [int64]$InstalledConfigurationSchemaVersion -eq 5)
+    if ($WriterSchema -ceq 'V2V4' -and $containsNewGeneration) {
+        throw (New-AiInstructionsRefusalException -Code downgrade-refused -Message 'An installed v3 bundle or v5 configuration cannot be replaced by v2/v4.')
+    }
+    $installedGeneration = Get-AiInstructionsRuntimeGeneration `
+        -BundleSchemaVersion $InstalledBundleSchemaVersion `
+        -ConfigurationSchemaVersion $InstalledConfigurationSchemaVersion `
+        -BundleExists $InstalledBundleExists `
+        -ConfigurationExists $InstalledConfigurationExists `
+        -AllowAbsent
+    if ($WriterSchema -ceq 'V2V4' -or ($WriterSchema -ceq 'Auto' -and $installedGeneration -cne 'v3v5')) { return 'v2v4' }
+    if (-not $ProjectionRuntimeAvailable -or
+        ($CatalogSchemaVersion -isnot [int] -and $CatalogSchemaVersion -isnot [long]) -or [int64]$CatalogSchemaVersion -ne 3) {
+        throw (New-AiInstructionsRefusalException -Code projection-runtime-unavailable -Message 'Catalog v3 and the projection runtime production pin are not available.')
+    }
+    if ($null -eq $CapabilityReceipt) {
+        throw (New-AiInstructionsRefusalException -Code capability-unavailable -Message 'A current platform capability receipt is required for v3/v5.')
+    }
+    Assert-AiInstructionsProjectionCapabilityReceipt -Receipt $CapabilityReceipt | Out-Null
+    if ([string]::IsNullOrWhiteSpace($ExpectedPlatformOs) -or [string]::IsNullOrWhiteSpace($ExpectedPlatformArchitecture) -or
+        [string]$CapabilityReceipt.os -cne $ExpectedPlatformOs -or [string]$CapabilityReceipt.architecture -cne $ExpectedPlatformArchitecture) {
+        throw (New-AiInstructionsRefusalException -Code platform-mismatch -Message 'The v3 runtime platform does not match the current host capability receipt.')
+    }
+    return 'v3v5'
 }
 
 function Get-AiInstructionsSkillsCatalogContractModule {
@@ -508,22 +616,40 @@ function ConvertTo-AiInstructionsSyncConfigurationV5 {
         [string] $CanonicalRepository = $script:CanonicalRepository
     )
 
-    if ($null -ne $ExistingConfiguration -and
+    $existingV5 = $null -ne $ExistingConfiguration -and
         (Test-AiInstructionsObjectHasProperty -Object $ExistingConfiguration -Name 'schemaVersion') -and
         ($ExistingConfiguration.schemaVersion -is [int] -or $ExistingConfiguration.schemaVersion -is [long]) -and
-        [int64]$ExistingConfiguration.schemaVersion -eq 5) {
+        [int64]$ExistingConfiguration.schemaVersion -eq 5
+    if ($existingV5) {
         Assert-AiInstructionsSyncConfigurationV5 -Configuration $ExistingConfiguration -CanonicalRepository $CanonicalRepository | Out-Null
-        return $ExistingConfiguration
+        $existingProjections = $ExistingConfiguration.projections
+        $ExistingConfiguration = [pscustomobject][ordered]@{
+            schemaVersion = 4
+            excludedRepositoryUrls = @($ExistingConfiguration.excludedRepositoryUrls)
+            excludedRepositoryPaths = @($ExistingConfiguration.excludedRepositoryPaths)
+            catalog = $ExistingConfiguration.catalog
+            updates = $ExistingConfiguration.updates
+        }
     }
 
-    $v4 = ConvertTo-AiInstructionsSyncConfigurationV4 @PSBoundParameters
+    $v4 = ConvertTo-AiInstructionsSyncConfigurationV4 `
+        -ExistingConfiguration $ExistingConfiguration `
+        -CatalogRepository $CatalogRepository `
+        -CatalogRef $CatalogRef `
+        -AdditionalExcludedRepositoryUrls $AdditionalExcludedRepositoryUrls `
+        -AdditionalExcludedRepositoryPaths $AdditionalExcludedRepositoryPaths `
+        -Catalog $Catalog `
+        -CanonicalRepository $CanonicalRepository
     $v5 = [pscustomobject][ordered]@{
         schemaVersion = 5
         excludedRepositoryUrls = @($v4.excludedRepositoryUrls)
         excludedRepositoryPaths = @($v4.excludedRepositoryPaths)
         catalog = $v4.catalog
         updates = $v4.updates
-        projections = [pscustomobject][ordered]@{ user=@('user-agents','user-claude'); project=@() }
+        projections = if ($existingV5) {
+            [pscustomobject][ordered]@{ user=@($existingProjections.user); project=@($existingProjections.project) }
+        }
+        else { [pscustomobject][ordered]@{ user=@('user-agents','user-claude'); project=@() } }
     }
     Assert-AiInstructionsSyncConfigurationV5 -Configuration $v5 -CanonicalRepository $CanonicalRepository | Out-Null
     return $v5
@@ -1057,6 +1183,64 @@ function New-AiInstructionsRuntimeBundleV2 {
     }
 }
 
+function New-AiInstructionsRuntimeBundleV3 {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $RuntimeRoot,
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string] $Commit,
+        [Parameter(Mandatory = $true)][ValidateSet('git-checkout','github-codeload')][string] $Acquisition,
+        [AllowNull()][string] $ArchiveSha256,
+        [Parameter(Mandatory = $true)][object] $CapabilityReceipt,
+        [string] $CanonicalRepository = $script:CanonicalRepository
+    )
+    Assert-AiInstructionsCanonicalRepository -Repository $Repository -CanonicalRepository $CanonicalRepository
+    $Repository = $CanonicalRepository
+    if ($Commit -cnotmatch '^[0-9a-f]{40}$') { throw 'Runtime bundle commit must be a full lowercase 40-character commit SHA.' }
+    if ($Acquisition -ceq 'github-codeload' -and [string]$ArchiveSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'Runtime bundle archiveSha256 is required for github-codeload acquisition.'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ArchiveSha256) -and [string]$ArchiveSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'Runtime bundle archiveSha256 must be null or a lowercase SHA-256 value.'
+    }
+    Assert-AiInstructionsProjectionCapabilityReceipt -Receipt $CapabilityReceipt | Out-Null
+    if ([string]$CapabilityReceipt.os -cnotin @('windows','linux','macos') -or [string]$CapabilityReceipt.architecture -cnotin @('x64','arm64')) {
+        throw (New-AiInstructionsRefusalException -Code platform-mismatch -Message 'Platform capability receipt has an unsupported OS or architecture.')
+    }
+    $root = Get-AiInstructionsFullDirectoryPath -Path $RuntimeRoot
+    $manifestPath = Resolve-AiInstructionsRuntimeFilePath -RuntimeRoot $root -RelativePath 'platform-runtime.psd1' -Context 'Platform runtime manifest'
+    try { $manifest = Import-PowerShellDataFile -LiteralPath $manifestPath }
+    catch { throw 'Installed platform runtime manifest is not a valid PowerShell data file.' }
+    Assert-AiInstructionsPlatformRuntimeManifestInventory -Manifest $manifest -RuntimeRoot $root -BundleApiVersion '1.0'
+    $catalogPath = Resolve-AiInstructionsRuntimeFilePath -RuntimeRoot $root -RelativePath 'catalog/skills-catalog.json' -Context 'Installed Skills Catalog'
+    $catalogModule = Get-AiInstructionsSkillsCatalogContractModule
+    $catalog = & $catalogModule.ExportedCommands['Test-SkillsCatalogDocument'] -CatalogPath $catalogPath
+    if (($catalog.schemaVersion -isnot [int] -and $catalog.schemaVersion -isnot [long]) -or [int64]$catalog.schemaVersion -ne 3) {
+        throw (New-AiInstructionsRefusalException -Code projection-runtime-unavailable -Message 'Runtime bundle v3 requires an installed Catalog v3 fixture or production pin.')
+    }
+    $inventory = @(Get-AiInstructionsRuntimeInventory -RuntimeRoot $root)
+    return [pscustomobject][ordered]@{
+        schemaVersion = 3
+        repository = $Repository
+        commit = $Commit
+        acquisition = $Acquisition
+        archiveSha256 = if ([string]::IsNullOrWhiteSpace($ArchiveSha256)) { $null } else { $ArchiveSha256 }
+        inventorySha256 = Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
+        inventory = $inventory
+        platform = [pscustomobject][ordered]@{
+            os = [string]$CapabilityReceipt.os
+            architecture = [string]$CapabilityReceipt.architecture
+        }
+        platformRuntime = [pscustomobject][ordered]@{
+            apiVersion = '1.0'
+            manifestSha256 = Get-AiInstructionsCanonicalTextSha256 -Path $manifestPath
+            sourceFingerprint = Get-AiInstructionsPlatformRuntimeSourceFingerprint -RuntimeRoot $root
+        }
+        requiredCapabilities = [string[]]@($script:AiInstructionsProjectionRequiredCapabilities)
+        projectionContractSha256 = Get-AiInstructionsProjectionContractSha256 -Projections $catalog.projections
+    }
+}
+
 function Assert-AiInstructionsRuntimeBundleV2 {
     [CmdletBinding()]
     param(
@@ -1123,8 +1307,8 @@ function Assert-AiInstructionsRuntimeBundleV2 {
     return $Bundle
 }
 
-# requiredCapabilities is a bundle-declared requirement; this validator checks syntax and known names only.
-# Projection-aware installers and launchers must verify it on the target host before enabling the runtime.
+# This structural reader is followed by Assert-AiInstructionsRuntimeGate in installer, launcher, and updater.
+# That gate binds the validated bundle to a current host capability receipt before v3/v5 is enabled.
 function Assert-AiInstructionsRuntimeBundleV3 {
     [CmdletBinding()]
     param(
@@ -1176,6 +1360,11 @@ function Assert-AiInstructionsRuntimeBundleV3 {
     foreach ($capability in @($Bundle.requiredCapabilities)) {
         if ($capability -isnot [string] -or [string]$capability -cnotin $capabilities) { throw "Runtime bundle contains unknown required capability '$capability'." }
         if (-not $seenCapabilities.Add([string]$capability)) { throw "Runtime bundle contains duplicate required capability '$capability'." }
+    }
+    foreach ($requiredCapability in @($script:AiInstructionsProjectionRequiredCapabilities)) {
+        if (-not $seenCapabilities.Contains([string]$requiredCapability)) {
+            throw "Runtime bundle requiredCapabilities is missing projection runtime capability '$requiredCapability'."
+        }
     }
     Assert-AiInstructionsStringValue -Value $Bundle.repository -Context 'Runtime bundle repository'
     Assert-AiInstructionsStringValue -Value $Bundle.commit -Context 'Runtime bundle commit'
@@ -1271,6 +1460,41 @@ function Assert-AiInstructionsRuntimeBundleV3 {
     $actualSourceFingerprint = Get-AiInstructionsPlatformRuntimeSourceFingerprint -RuntimeRoot $RuntimeRoot
     if ($actualSourceFingerprint -cne [string]$Bundle.platformRuntime.sourceFingerprint) { throw 'Runtime bundle platformRuntime.sourceFingerprint does not match the installed platform runtime source.' }
     return $Bundle
+}
+
+function Assert-AiInstructionsRuntimeGate {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object] $Bundle,
+        [Parameter(Mandatory = $true)][object] $Configuration,
+        [Parameter(Mandatory = $true)][string] $RuntimeRoot,
+        [AllowNull()][object] $CapabilityReceipt,
+        [string] $CanonicalRepository = $script:CanonicalRepository
+    )
+    $bundleVersion = if (Test-AiInstructionsObjectHasProperty -Object $Bundle -Name 'schemaVersion') { $Bundle.schemaVersion } else { $null }
+    $configurationVersion = if (Test-AiInstructionsObjectHasProperty -Object $Configuration -Name 'schemaVersion') { $Configuration.schemaVersion } else { $null }
+    $generation = Get-AiInstructionsRuntimeGeneration -BundleSchemaVersion $bundleVersion -ConfigurationSchemaVersion $configurationVersion -BundleExists:$true -ConfigurationExists:$true
+    if ($generation -ceq 'v2v4') {
+        Assert-AiInstructionsRuntimeBundleV2 -Bundle $Bundle -Configuration $Configuration -RuntimeRoot $RuntimeRoot -CanonicalRepository $CanonicalRepository | Out-Null
+        return [pscustomobject][ordered]@{ generation='v2v4'; capabilityReceipt=$CapabilityReceipt }
+    }
+    try {
+        Assert-AiInstructionsSyncConfigurationV5 -Configuration $Configuration -CanonicalRepository $CanonicalRepository | Out-Null
+        Assert-AiInstructionsRuntimeBundleV3 -Bundle $Bundle -Configuration $Configuration -RuntimeRoot $RuntimeRoot -CanonicalRepository $CanonicalRepository | Out-Null
+    }
+    catch {
+        if ($null -ne (Get-AiInstructionsRefusalCode $_)) { throw }
+        throw (New-AiInstructionsRefusalException -Code closure-invalid -Message "Runtime bundle v3 or configuration v5 validation failed: $($_.Exception.Message)" -InnerException $_.Exception)
+    }
+    if ($null -eq $CapabilityReceipt) {
+        throw (New-AiInstructionsRefusalException -Code capability-unavailable -Message 'A current platform capability receipt is required for v3/v5.')
+    }
+    if ([string]$Bundle.platform.os -cne [string]$CapabilityReceipt.os -or
+        [string]$Bundle.platform.architecture -cne [string]$CapabilityReceipt.architecture) {
+        throw (New-AiInstructionsRefusalException -Code platform-mismatch -Message 'The installed v3 runtime platform does not match the current host.')
+    }
+    Assert-AiInstructionsProjectionCapabilityReceipt -Receipt $CapabilityReceipt -RequiredCapabilities ([string[]]@($Bundle.requiredCapabilities)) | Out-Null
+    return [pscustomobject][ordered]@{ generation='v3v5'; capabilityReceipt=$CapabilityReceipt }
 }
 
 function ConvertTo-AiInstructionsUtcDateTime {
@@ -2552,6 +2776,7 @@ Export-ModuleMember -Function @(
     'Assert-AiInstructionsCanonicalRepository',
     'Assert-AiInstructionsRuntimeBundleV2',
     'Assert-AiInstructionsRuntimeBundleV3',
+    'Assert-AiInstructionsRuntimeGate',
     'Assert-AiInstructionsMutationPath',
     'Assert-AiInstructionsSafeChildDirectory',
     'Assert-AiInstructionsInstallJournalV1',
@@ -2575,10 +2800,13 @@ Export-ModuleMember -Function @(
     'Get-AiInstructionsRefusalCodes',
     'New-AiInstructionsRefusalException',
     'Get-AiInstructionsRefusalCode',
+    'Get-AiInstructionsRuntimeGeneration',
     'Get-AiInstructionsRuntimeInventory',
     'Get-AiInstructionsRuntimeInventorySha256',
     'Get-AiInstructionsRuntimeInventorySha256V3',
     'New-AiInstructionsRuntimeBundleV2',
+    'New-AiInstructionsRuntimeBundleV3',
+    'Select-AiInstructionsInstallWriterSchema',
     'New-AiInstructionsInstallJournalV1',
     'Write-AiInstructionsJsonFile'
 )

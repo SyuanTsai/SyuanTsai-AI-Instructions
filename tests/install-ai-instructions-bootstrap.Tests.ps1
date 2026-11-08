@@ -208,6 +208,21 @@ function Get-InstallerStateSnapshot {
     return ($states|ConvertTo-Json -Depth 20 -Compress)
 }
 
+function Get-InstallerFullTreeSnapshot {
+    param([Parameter(Mandatory=$true)][string]$Root)
+    if(-not(Test-Path -LiteralPath $Root)){return '<root-absent>'}
+    $rootPath=[IO.Path]::GetFullPath($Root).TrimEnd([char[]]@('\','/'))
+    $entries=New-Object System.Collections.Generic.List[string]
+    foreach($item in @((Get-Item -Force -LiteralPath $rootPath)) + @(Get-ChildItem -Force -LiteralPath $rootPath -Recurse)){
+        $relative=if($item.FullName-ceq$rootPath){'.'}else{$item.FullName.Substring($rootPath.Length).TrimStart([char[]]@('\','/')).Replace('\','/')}
+        $kind=if(($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){'reparse'}elseif($item.PSIsContainer){'directory'}else{'file'}
+        $hash=if($kind-ceq'file'){(Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}else{'-'}
+        $entries.Add("$relative`t$kind`t$([int64]$item.Attributes)`t$hash")
+    }
+    $values=$entries.ToArray();[Array]::Sort($values,[StringComparer]::Ordinal)
+    return ($values-join"`n")
+}
+
 function Get-InstallerAppliedSnapshotFromTransaction {
     param([Parameter(Mandatory = $true)][string]$CodexHome,[Parameter(Mandatory = $true)][string]$OriginalSnapshot)
     $store=Join-Path $CodexHome '.ai-instructions-txn'
@@ -677,17 +692,16 @@ Keep this section too.
     It 'InterT40_rejects_unknown_configuration_schema_before_installation_changes' {
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         Set-TestText -Path (Join-Path $codexHome 'ai-instructions-sync.json') -Value '{"schemaVersion":99,"excludedRepositoryUrls":[],"excludedRepositoryPaths":[]}'
-        $bundlePath = Join-Path $codexHome 'hooks\ai-instructions-runtime\runtime-bundle.json'
-        $bundleBefore = Get-Content -Raw -LiteralPath $bundlePath
+        $before = Get-InstallerFullTreeSnapshot -Root $codexHome
         $result = Invoke-InstallExpectFailure -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         $result.ExitCode | Should Not Be 0
-        $result.Output | Should Match 'Unsupported AI instruction sync configuration schemaVersion'
-        (Get-Content -Raw -LiteralPath $bundlePath) | Should Be $bundleBefore
+        (Get-AiInstructionsRefusalCode $result.Output) | Should Be unsupported-version
+        (Get-InstallerFullTreeSnapshot -Root $codexHome) | Should Be $before
     }
 
-    # Scenario: The active configuration already uses projection-aware schema v5.
-    # Purpose: Keep the legacy installer from downgrading or replacing active bytes.
-    It 'InterT41_rejects_sync_v5_before_installation_changes' {
+    # Scenario: The active configuration is v5 while the installed runtime bundle remains v2.
+    # Purpose: Refuse a partial-generation transition before replacing active bytes.
+    It 'InterT41_rejects_a_mixed_v2_v5_generation_before_installation_changes' {
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         $configurationPath = Join-Path $codexHome 'ai-instructions-sync.json'
         $bundlePath = Join-Path $codexHome 'hooks\ai-instructions-runtime\runtime-bundle.json'
@@ -703,16 +717,15 @@ Keep this section too.
         $result = Invoke-InstallExpectFailure -RepositoryRoot $repositoryRoot -CodexHome $codexHome
 
         $result.ExitCode | Should Not Be 0
-        $result.Output | Should Match 'AI Instructions sync configuration schema version 5 requires a projection-aware installer\.'
-        (Get-AiInstructionsRefusalCode $result.Output) | Should Be unsupported-version
+        (Get-AiInstructionsRefusalCode $result.Output) | Should Be mixed-generation
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($configurationPath)) | Should Be ([Convert]::ToBase64String($configurationBefore))
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($bundlePath)) | Should Be ([Convert]::ToBase64String($bundleBefore))
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($hookPath)) | Should Be ([Convert]::ToBase64String($hookBefore))
     }
 
-    # Scenario: The stable launcher sees sync configuration v5.
-    # Purpose: Fail before bootstrap can update, recover, or mutate consumer bytes.
-    It 'InterT39_rejects_sync_v5_in_the_launcher_before_mutation' {
+    # Scenario: The stable launcher sees v5 configuration with a v2 runtime bundle.
+    # Purpose: Fail the mixed-generation pair before bootstrap can update, recover, or mutate consumer bytes.
+    It 'InterT39_rejects_a_mixed_v2_v5_generation_in_the_launcher_before_mutation' {
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         $configurationPath = Join-Path $codexHome 'ai-instructions-sync.json'
         $bundlePath = Join-Path $codexHome 'hooks\ai-instructions-runtime\runtime-bundle.json'
@@ -726,7 +739,7 @@ Keep this section too.
         $output = & $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $launcherPath -ValidateOnly -SkipUpdateCheck 2>&1
 
         $LASTEXITCODE | Should Not Be 0
-        ($output -join [Environment]::NewLine) | Should Match 'AI Instructions sync configuration schema version 5 requires a projection-aware installer\.'
+        (Get-AiInstructionsRefusalCode ($output -join [Environment]::NewLine)) | Should Be mixed-generation
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($configurationPath)) | Should Be ([Convert]::ToBase64String($configurationBefore))
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($bundlePath)) | Should Be ([Convert]::ToBase64String($bundleBefore))
     }
@@ -1055,8 +1068,7 @@ finally {
 
         $LASTEXITCODE | Should Be 0
         (Get-Content -Raw -LiteralPath $resultPath) | Should Match '(?m)^1\r?$'
-        (Get-Content -Raw -LiteralPath $resultPath) | Should Match 'Runtime bundle schema version 3 requires a projection-aware installer\.'
-        (Get-AiInstructionsRefusalCode (Get-Content -Raw -LiteralPath $resultPath)) | Should Be unsupported-version
+        (Get-AiInstructionsRefusalCode (Get-Content -Raw -LiteralPath $resultPath)) | Should Be mixed-generation
         $bundleAfter = [System.IO.File]::ReadAllBytes($bundlePath)
         [Convert]::ToBase64String($bundleAfter) | Should Be ([Convert]::ToBase64String($v3BundleBytes))
         (Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json).schemaVersion | Should Be 3

@@ -31,6 +31,6 @@
     "manifestSha256": "ba6af8ecbd09de50b9a55c57e5fa919d959296469125c12412bdc8300af5df5c",
     "sourceFingerprint": "4fb2c493a0a239455eb0d5b8485bd578d60cbe37143b0e1b780f975a6076d755"
   },
-  "requiredCapabilities": ["directory-lease", "file-identity", "lock"],
+  "requiredCapabilities": ["directory-lease", "file-lease", "file-identity", "lock", "publication", "owned-file-removal", "permissions", "directory-publication"],
   "projectionContractSha256": "488b93d25eed36b8f6aedeb5ef0a900134dbf08e6d6927dd693f9b415c8151f0"
 }

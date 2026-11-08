@@ -6,6 +6,11 @@ $script:CanonicalRepository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instruc
 $script:RuntimeContractModule = Join-Path $PSScriptRoot 'ai-instructions-runtime-contract.psm1'
 $script:PlatformRuntimeManifest = Join-Path $PSScriptRoot 'platform-runtime.psd1'
 Import-Module $script:RuntimeContractModule
+# The updater runs from a private snapshot that the stable launcher verified while
+# holding the install lease. Importing that snapshot supplies the lock primitive;
+# live bundle/configuration validation and capability probing still occur only
+# after this workflow acquires the target install lease.
+Import-Module $script:PlatformRuntimeManifest -Force -ErrorAction Stop
 
 function Assert-AiInstructionsUpdaterRuntimeBaseline {
     if ($PSVersionTable.PSEdition -cne 'Core' -or $PSVersionTable.PSVersion.Major -lt 7 -or [Environment]::Version.Major -lt 8) {
@@ -109,6 +114,45 @@ function Assert-AiInstructionsUpdaterPlatformCapabilities {
     if ($missing.Count -gt 0) {
         throw (New-AiInstructionsRefusalException -Code capability-unavailable -Message ('Required updater platform capabilities are unavailable: ' + ($missing -join ', ')))
     }
+}
+
+function Assert-AiInstructionsUpdaterRuntimeGate {
+    param(
+        [Parameter(Mandatory = $true)][object] $Bundle,
+        [Parameter(Mandatory = $true)][object] $Configuration,
+        [Parameter(Mandatory = $true)][string] $RuntimeRoot
+    )
+    $bundleVersion = if ($null -ne $Bundle.PSObject.Properties['schemaVersion']) { $Bundle.schemaVersion } else { $null }
+    $configurationVersion = if ($null -ne $Configuration.PSObject.Properties['schemaVersion']) { $Configuration.schemaVersion } else { $null }
+    $generation = Get-AiInstructionsRuntimeGeneration -BundleSchemaVersion $bundleVersion -ConfigurationSchemaVersion $configurationVersion -BundleExists:$true -ConfigurationExists:$true
+    try {
+        if ($generation -ceq 'v3v5') {
+            Assert-AiInstructionsRuntimeBundleV3 -Bundle $Bundle -Configuration $Configuration -RuntimeRoot $RuntimeRoot | Out-Null
+        }
+        else { Assert-AiInstructionsRuntimeBundleV2 -Bundle $Bundle -Configuration $Configuration -RuntimeRoot $RuntimeRoot | Out-Null }
+    }
+    catch {
+        if ($null -ne (Get-AiInstructionsRefusalCode $_)) { throw }
+        throw (New-AiInstructionsRefusalException -Code closure-invalid -Message "Installed updater runtime closure is invalid: $($_.Exception.Message)" -InnerException $_.Exception)
+    }
+    if ($null -eq (Get-Command Assert-PlatformRuntimeInventory -ErrorAction SilentlyContinue) -or
+        $null -eq (Get-Command Get-PlatformCapabilities -ErrorAction SilentlyContinue)) {
+        throw (New-AiInstructionsRefusalException -Code closure-invalid -Message 'Verified updater platform runtime commands are unavailable from the launcher-verified snapshot.')
+    }
+    try { Assert-PlatformRuntimeInventory -Root $PSScriptRoot -ManifestPath $script:PlatformRuntimeManifest | Out-Null }
+    catch { throw (New-AiInstructionsRefusalException -Code closure-invalid -Message "Updater platform runtime inventory verification failed: $($_.Exception.Message)" -InnerException $_.Exception) }
+    try {
+        $receipt = if ($generation -ceq 'v3v5') {
+            Get-PlatformCapabilities -Required ([string[]]@($Bundle.requiredCapabilities))
+        }
+        else { Get-PlatformCapabilities -Required @() }
+    }
+    catch { throw (New-AiInstructionsRefusalException -Code capability-unavailable -Message "Updater platform capabilities are unavailable: $($_.Exception.Message)" -InnerException $_.Exception) }
+    Assert-AiInstructionsUpdaterPlatformCapabilities -Receipt $receipt
+    if ($generation -ceq 'v3v5') {
+        Assert-AiInstructionsRuntimeGate -Bundle $Bundle -Configuration $Configuration -RuntimeRoot $RuntimeRoot -CapabilityReceipt $receipt | Out-Null
+    }
+    return [pscustomobject][ordered]@{ Generation=$generation; CapabilityReceipt=$receipt }
 }
 
 function Test-AiInstructionsTransientHttpStatusCode {
@@ -381,6 +425,7 @@ function Get-AiInstructionsCandidatePackage {
             'scripts\Resolve-StandardValidationTool.ps1',
             'scripts\bootstrap-ai-instructions-installed.ps1',
             'scripts\ai-instructions-runtime-contract.psm1',
+            'scripts\skills-catalog-contract.psm1',
             'scripts\WindowsDacl.psm1',
             'scripts\ai-instructions-updater.psm1',
             'scripts\update-ai-instructions.ps1',
@@ -458,7 +503,9 @@ function Install-AiInstructionsCandidatePackage {
         '-ExpectedCurrentCommit',([string]$Request.CurrentCommit),
         '-ExpectedUpdateMode',([string]$Request.Mode),
         '-ExpectedUpdateChannel',([string]$Request.Channel),
-        '-ExpectedUpdateRef',([string]$Request.Ref)
+        '-ExpectedUpdateRef',([string]$Request.Ref),
+        '-ExpectedCurrentGeneration',([string]$Request.ExpectedCurrentGeneration),
+        '-WriterSchema','Auto'
     )
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $powerShellPath
@@ -545,52 +592,16 @@ function Invoke-AiInstructionsUpdateWorkflow {
     $receiptPath = Join-Path $codexHomePath 'ai-instructions-update-receipt.json'
     $lockPath = Join-Path $codexHomePath 'ai-instructions-update.lock'
     $hookRoot = Join-Path $codexHomePath 'hooks'
-    Assert-AiInstructionsMutationPath -Path $codexHomePath -ExpectedType Directory -Context 'Codex Home' | Out-Null
-    Assert-AiInstructionsMutationPath -Path $hookRoot -ExpectedType Directory -Context 'Codex Home hooks directory' | Out-Null
-    Assert-AiInstructionsMutationPath -Path $runtimeRoot -ExpectedType Directory -Context 'Installed AI instructions runtime directory' | Out-Null
-    foreach ($stableFilePath in @($configurationPath,$bundlePath,$receiptPath,$lockPath,(Join-Path $codexHomePath 'ai-instructions-install.lock'))) {
-        Assert-AiInstructionsMutationPath -Path $stableFilePath -ExpectedType File -Context 'AI instructions stable file' | Out-Null
-    }
-    Assert-NoAiInstructionsUpdaterInterruptedInstallResidue -CodexHome $codexHomePath
-    try {
-        $preflightConfiguration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json
-        $preflightBundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
-    }
-    catch { throw "Installed AI instruction update state is invalid: $($_.Exception.Message)" }
-    if (($preflightConfiguration.schemaVersion -is [int] -or $preflightConfiguration.schemaVersion -is [long]) -and [int64]$preflightConfiguration.schemaVersion -eq 5) {
-        throw (New-AiInstructionsRefusalException -Code unsupported-version -Message 'AI Instructions sync configuration schema version 5 requires a projection-aware installer.')
-    }
-    if (($preflightBundle.schemaVersion -is [int] -or $preflightBundle.schemaVersion -is [long]) -and [int64]$preflightBundle.schemaVersion -eq 3) {
-        throw (New-AiInstructionsRefusalException -Code unsupported-version -Message 'Runtime bundle schema version 3 requires a projection-aware installer.')
-    }
-    Assert-AiInstructionsRuntimeBundleV2 -Bundle $preflightBundle -Configuration $preflightConfiguration -RuntimeRoot $runtimeRoot | Out-Null
-    try { Import-Module $script:PlatformRuntimeManifest -Force -ErrorAction Stop }
-    catch { throw (New-AiInstructionsRefusalException -Code closure-invalid -Message "Verified updater platform runtime could not be loaded: $($_.Exception.Message)" -InnerException $_.Exception) }
-    try { Assert-PlatformRuntimeInventory -Root $PSScriptRoot -ManifestPath $script:PlatformRuntimeManifest | Out-Null }
-    catch { throw (New-AiInstructionsRefusalException -Code closure-invalid -Message "Updater platform runtime inventory verification failed: $($_.Exception.Message)" -InnerException $_.Exception) }
-    $platformCapabilities = Get-PlatformCapabilities -Required @()
-    Assert-AiInstructionsUpdaterPlatformCapabilities -Receipt $platformCapabilities
     if ($null -eq $NowUtc -or $NowUtc -eq [datetime]::MinValue) { $NowUtc = (Get-Date).ToUniversalTime() }
     else { $NowUtc = $NowUtc.ToUniversalTime() }
     if ($null -eq $ResolveCandidate) { $ResolveCandidate = { param($request) Get-AiInstructionsRemoteCandidate -Request $request } }
     if ($null -eq $AcquireCandidate) { $AcquireCandidate = { param($request) Get-AiInstructionsCandidatePackage -Request $request } }
     if ($null -eq $InstallCandidate) { $InstallCandidate = { param($request) Install-AiInstructionsCandidatePackage -Request $request } }
 
-    New-Item -ItemType Directory -Force -Path $codexHomePath | Out-Null
     $rootLease = Open-PlatformDirectory -Root $codexHomePath -RootOnly
     $lockStream = $null
     $installStateLockStream = $null
     try {
-        try {
-            $lockStream = Enter-PlatformLock -ParentLease $rootLease -Leaf 'ai-instructions-update.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
-        }
-        catch {
-            $cause = $_.Exception
-            while ($null -ne $cause.InnerException) { $cause = $cause.InnerException }
-            if ($cause -isnot [System.TimeoutException]) { throw }
-            return [pscustomobject][ordered]@{ outcome='concurrent'; message='Another AI instructions updater is already running.' }
-        }
-
         try {
             $installStateLockStream = Enter-PlatformLock -ParentLease $rootLease -Leaf 'ai-instructions-install.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
         }
@@ -600,13 +611,28 @@ function Invoke-AiInstructionsUpdateWorkflow {
             if ($cause -isnot [System.TimeoutException]) { throw }
             return [pscustomobject][ordered]@{ outcome='concurrent'; message='Another AI instructions installer is already running.' }
         }
+        Assert-AiInstructionsMutationPath -Path $codexHomePath -ExpectedType Directory -Context 'Codex Home' | Out-Null
+        Assert-AiInstructionsMutationPath -Path $hookRoot -ExpectedType Directory -Context 'Codex Home hooks directory' | Out-Null
+        Assert-AiInstructionsMutationPath -Path $runtimeRoot -ExpectedType Directory -Context 'Installed AI instructions runtime directory' | Out-Null
+        foreach ($stableFilePath in @($configurationPath,$bundlePath,$receiptPath,$lockPath,(Join-Path $codexHomePath 'ai-instructions-install.lock'))) {
+            Assert-AiInstructionsMutationPath -Path $stableFilePath -ExpectedType File -Context 'AI instructions stable file' | Out-Null
+        }
         Assert-NoAiInstructionsUpdaterInterruptedInstallResidue -CodexHome $codexHomePath
         try {
             $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json
             $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
         }
         catch { throw "Installed AI instruction update state is invalid: $($_.Exception.Message)" }
-        Assert-AiInstructionsRuntimeBundleV2 -Bundle $bundle -Configuration $configuration -RuntimeRoot $runtimeRoot | Out-Null
+        $lockedGate = Assert-AiInstructionsUpdaterRuntimeGate -Bundle $bundle -Configuration $configuration -RuntimeRoot $runtimeRoot
+        try {
+            $lockStream = Enter-PlatformLock -ParentLease $rootLease -Leaf 'ai-instructions-update.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
+        }
+        catch {
+            $cause = $_.Exception
+            while ($null -ne $cause.InnerException) { $cause = $cause.InnerException }
+            if ($cause -isnot [System.TimeoutException]) { throw }
+            return [pscustomobject][ordered]@{ outcome='concurrent'; message='Another AI instructions updater is already running.' }
+        }
 
         if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
             try {
@@ -700,6 +726,7 @@ function Invoke-AiInstructionsUpdateWorkflow {
                 Mode = [string]$configuration.updates.mode
                 Channel = [string]$configuration.updates.channel
                 Ref = [string]$configuration.updates.ref
+                ExpectedCurrentGeneration = [string]$lockedGate.Generation
                 Package = $package
             }
             $installStateLockStream.Dispose()
@@ -722,7 +749,10 @@ function Invoke-AiInstructionsUpdateWorkflow {
                     $activeBundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
                 }
                 catch { throw "The active runtime could not be verified after installation: $($_.Exception.Message)" }
-                Assert-AiInstructionsRuntimeBundleV2 -Bundle $activeBundle -Configuration $activeConfiguration -RuntimeRoot $runtimeRoot | Out-Null
+                $activeGate = Assert-AiInstructionsUpdaterRuntimeGate -Bundle $activeBundle -Configuration $activeConfiguration -RuntimeRoot $runtimeRoot
+                if ([string]$lockedGate.Generation -ceq 'v3v5' -and [string]$activeGate.Generation -cne 'v3v5') {
+                    throw (New-AiInstructionsRefusalException -Code downgrade-refused -Message 'Updater candidate installation downgraded an active v3/v5 runtime.')
+                }
                 if ([string]$activeBundle.repository -cne [string]$bundle.repository -or [string]$activeBundle.commit -cne $candidateCommit) {
                     throw 'The active runtime does not match the selected canonical candidate after installation.'
                 }
@@ -759,7 +789,10 @@ function Invoke-AiInstructionsUpdateWorkflow {
                     Assert-NoAiInstructionsUpdaterInterruptedInstallResidue -CodexHome $codexHomePath
                     $activeConfigurationAfterFailure = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationPath | ConvertFrom-Json
                     $activeBundleAfterFailure = Get-Content -Raw -Encoding UTF8 -LiteralPath $bundlePath | ConvertFrom-Json
-                    Assert-AiInstructionsRuntimeBundleV2 -Bundle $activeBundleAfterFailure -Configuration $activeConfigurationAfterFailure -RuntimeRoot $runtimeRoot | Out-Null
+                    $activeFailureGate = Assert-AiInstructionsUpdaterRuntimeGate -Bundle $activeBundleAfterFailure -Configuration $activeConfigurationAfterFailure -RuntimeRoot $runtimeRoot
+                    if ([string]$lockedGate.Generation -ceq 'v3v5' -and [string]$activeFailureGate.Generation -cne 'v3v5') {
+                        throw (New-AiInstructionsRefusalException -Code downgrade-refused -Message 'Failed candidate installation left a downgraded active runtime.')
+                    }
                 }
                 catch {
                     if ((Get-AiInstructionsRefusalCode $_) -ceq 'interrupted-install') { throw }

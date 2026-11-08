@@ -48,7 +48,7 @@
       }
     },
     "requiredCapabilities": {
-      "description": "Bundle-declared requirements. This schema validates only the format and known capability names; projection-aware installers and launchers MUST validate the capabilities on the target host with Get-PlatformCapabilities -Required <requiredCapabilities> and apply installer policy to ensure the set has not been downgraded before enabling the v3 runtime.",
+      "description": "Bundle-declared requirements. Structural contract validation enforces known unique names and the eight projection-runtime minimum capabilities; the operational installer, launcher, and updater gates validate the exact runtime inventory and manifest closure before importing platform-runtime, then call Get-PlatformCapabilities -Required <requiredCapabilities> on the target host and fail closed if any capability is unavailable.",
       "type": "array",
       "minItems": 1,
       "uniqueItems": true,
