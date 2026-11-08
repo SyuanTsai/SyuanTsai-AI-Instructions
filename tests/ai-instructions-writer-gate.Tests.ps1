@@ -705,8 +705,8 @@ Describe 'AI instructions writer and reader gate' {
         $exclude|Should Match '(?m)^/\.claude/ai-instructions-licenses/dddd'
     }
 
-    # Scenario: A manifest-owned CLAUDE.md becomes project-owned before the source removes a Claude Rule and changes the license commit namespace.
-    # Purpose: Protect obsolete as well as still-desired Claude family entries, bytes, and excludes once the family is project-owned.
+    # Scenario: A manifest-owned CLAUDE.md becomes project-owned while its shared base exclude and older Claude Rule and license excludes still exist.
+    # Purpose: Preserve obsolete Claude Rules and licenses while removing the base exclude so project-owned CLAUDE.md bytes remain visible.
     It 'InterT119_preserves_obsolete_Claude_entries_after_the_base_becomes_project_owned' {
         $root=Join-Path $script:ExternalRoot 'p9b-owned-obsolete';New-Item -ItemType Directory -Force -Path $root|Out-Null
         $baseline=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'baseline-work') -ArchivePath (Join-Path $root 'baseline.zip') -Marker baseline
@@ -735,7 +735,9 @@ Describe 'AI instructions writer and reader gate' {
         $manifest=Get-Content -Raw -LiteralPath (Join-Path $target '.codex/ai-instructions.manifest.json')|ConvertFrom-Json
         @($manifest.files|Where-Object{[string]$_.targetPath-in@($oldRule,$oldLicense)}).Count|Should Be 2
         $claudeExcludeAfter=@([IO.File]::ReadAllLines($excludePath)|Where-Object{$_-eq'/CLAUDE.md'-or$_-like'/.claude/AI-Rules/*'-or$_-like'/.claude/ai-instructions-licenses/*'}|Sort-Object)
-        $claudeExcludeAfter|Should Be $claudeExcludeBefore
+        $expectedClaudeExcludeAfter=@($claudeExcludeBefore|Where-Object{$_-ne'/CLAUDE.md'})
+        $claudeExcludeAfter|Should Be $expectedClaudeExcludeAfter
+        [IO.File]::ReadAllText($excludePath)|Should Not Match '(?m)^/CLAUDE\.md\r?$'
         [IO.File]::ReadAllText($excludePath)|Should Match '(?m)^/\.codex/ai-instructions-licenses/dddddddddddddddddddddddddddddddddddddddd/'
         [IO.File]::ReadAllText($excludePath)|Should Not Match '(?m)^/\.codex/ai-instructions-licenses/cccccccccccccccccccccccccccccccccccccccc/'
         ([IO.File]::ReadAllText((Join-Path $target 'AGENTS.md')))|Should Match '<!-- changed -->'
@@ -1141,6 +1143,44 @@ exit /b %errorlevel%
         Test-Path -LiteralPath (Join-Path $target '.codex/ai-instructions.manifest.json')|Should Be $false
         [IO.File]::ReadAllText((Join-Path $target 'CLAUDE.md'))|Should Be "# Project-owned Claude`n"
     }
+    }
+
+    # Scenario: Primary worktree A and linked worktree B first retain unmodified managed CLAUDE.md files, then B customizes its managed base.
+    # Purpose: Keep the shared base exclude while every worktree is managed, then remove it repository-wide without changing B's project-owned bytes.
+    It 'InterT132_reconciles_shared_CLAUDE_exclude_across_managed_and_project_owned_worktrees' {
+        $root=Join-Path $script:ExternalRoot 'p9b-linked-Claude-exclude-transition';New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip')
+        $context=New-P9bBootstrapContext -Root $root
+        $target=Join-Path $root 'worktree-a';New-P9bTargetRepository $target
+        (Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
+        $linkedRoot=Join-Path $root 'worktree-b'
+        & git -C $target worktree add --quiet -b linked-Claude-exclude-transition $linkedRoot
+        $LASTEXITCODE|Should Be 0
+        try{
+            (Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $linkedRoot).ExitCode|Should Be 0
+            $managedResult=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target
+            $managedResult.ExitCode|Should Be 0
+
+            $excludePath=(& git -C $target rev-parse --git-path info/exclude|Select-Object -First 1).Trim()
+            if(-not[IO.Path]::IsPathRooted($excludePath)){$excludePath=Join-Path $target $excludePath}
+            [IO.File]::ReadAllText($excludePath)|Should Match '(?m)^/CLAUDE\.md\r?$'
+            foreach($worktree in @($target,$linkedRoot)){
+                $manifest=Get-Content -Raw -LiteralPath (Join-Path $worktree '.codex/ai-instructions.manifest.json')|ConvertFrom-Json
+                $entry=@($manifest.files|Where-Object{[string]$_.targetPath-ceq'CLAUDE.md'})[0]
+                $entry|Should Not BeNullOrEmpty
+                (Get-FileHash -LiteralPath (Join-Path $worktree 'CLAUDE.md') -Algorithm SHA256).Hash.ToLowerInvariant()|Should Be ([string]$entry.sha256)
+            }
+
+            $linkedClaude=Join-Path $linkedRoot 'CLAUDE.md'
+            [IO.File]::AppendAllText($linkedClaude,"project-owned linked worktree Claude`n",[Text.UTF8Encoding]::new($false))
+            $linkedClaudeBytes=[Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedClaude))
+            $projectOwnedResult=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target
+
+            $projectOwnedResult.ExitCode|Should Be 0
+            [IO.File]::ReadAllText($excludePath)|Should Not Match '(?m)^/CLAUDE\.md\r?$'
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($linkedClaude))|Should Be $linkedClaudeBytes
+        }
+        finally{& git -C $target worktree remove --force $linkedRoot|Out-Null}
     }
 
     # Scenario: The stable launcher has opened a verified closure file with its read-only sharing contract.
