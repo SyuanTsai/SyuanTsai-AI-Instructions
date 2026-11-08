@@ -301,4 +301,25 @@ finally {
         ($paths-contains'CLAUDE.md')|Should Be $false
         ($paths|Where-Object{$_-like'*/skills/*'}).Count|Should Be 0
     }
+
+    # Scenario: Bootstrap has already imported the Catalog contract before it force-loads the remediation module in the same PowerShell process.
+    # Purpose: Keep the caller's exported worktree parser available across the nested remediation import on Windows PowerShell 5.1 and PowerShell 7.
+    It 'InterT62_keeps_the_callers_catalog_commands_loaded_after_remediation_import' {
+        $catalogModule=Join-Path $script:RepositoryRoot 'scripts\skills-catalog-contract.psm1'
+        $remediationModule=Join-Path $script:RepositoryRoot 'scripts\agent-artifact-remediation.psm1'
+        $catalogLiteral=$catalogModule.Replace("'","''")
+        $remediationLiteral=$remediationModule.Replace("'","''")
+        $probe=@"
+`$ErrorActionPreference='Stop'
+Import-Module '$catalogLiteral' -Force -ErrorAction Stop
+if(-not(Get-Command ConvertFrom-GitWorktreePorcelainZ -ErrorAction SilentlyContinue)){exit 61}
+Import-Module '$remediationLiteral' -Force -ErrorAction Stop
+if(-not(Get-Command ConvertFrom-GitWorktreePorcelainZ -ErrorAction SilentlyContinue)){exit 62}
+"@
+        $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probe))
+        $engine=(Get-Process -Id $PID).Path
+        $output=& $engine -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded 2>&1
+        $LASTEXITCODE|Should Be 0
+        ($output-join[Environment]::NewLine)|Should Not Match 'CommandNotFoundException'
+    }
 }

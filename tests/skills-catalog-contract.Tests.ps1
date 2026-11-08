@@ -314,6 +314,7 @@ function Get-TestManagedManifestV4 {
         $catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'
         { Assert-ManagedManifest -Manifest $manifest } | Should Not Throw
         @($manifest.files | Where-Object artifactType -eq 'instruction' | Select-Object -ExpandProperty host -Unique | Sort-Object) -join ',' | Should Be 'claude,codex,copilot'
+        @($manifest.files | Where-Object { $_.host -eq 'claude' -and $_.targetPath -eq '.claude/AI-Rules/CodeReview.en.md' }).Count | Should Be 1
         @($manifest.files | Where-Object { $_.host -eq 'claude' -and $_.targetPath -like '.claude/ai-instructions-licenses/*' }).Count | Should Be 1
         @($manifest.projections) -join ',' | Should Be 'project-agents'
         [string]$manifest.projectionContractSha256 | Should Be (Get-SkillsCatalogProjectionContractSha256 -Projections $catalog.projections)

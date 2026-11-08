@@ -46,7 +46,7 @@ function New-P7eV3Candidate {
     [IO.File]::WriteAllText($installerPath,$installer,[Text.UTF8Encoding]::new($false))
     $fanOutStub=@'
 [CmdletBinding()]
-param([string]$CatalogPath,[string]$LockPath,[string]$ConfigurationPath,[string]$TargetRoot,[string]$UserHome,[switch]$WhatIf)
+param([string]$CatalogPath,[string]$LockPath,[string]$ConfigurationPath,[string]$RuntimeRoot,[string]$TargetRoot,[string]$UserHome,[switch]$WhatIf)
 if([string]::IsNullOrWhiteSpace($TargetRoot)){throw 'P7e fan-out fixture requires TargetRoot.'}
 New-Item -ItemType Directory -Force -Path $TargetRoot|Out-Null
 [IO.File]::WriteAllText((Join-Path $TargetRoot 'p7e-fanout.txt'),"v3v5`n",[Text.UTF8Encoding]::new($false))
@@ -113,7 +113,7 @@ function Set-P9bJson {
 }
 
 function New-P9bInstructionArchive {
-    param([Parameter(Mandatory=$true)][string]$WorkingRoot,[Parameter(Mandatory=$true)][string]$ArchivePath,[string]$Marker='baseline',[switch]$OmitClaudeDatabase)
+    param([Parameter(Mandatory=$true)][string]$WorkingRoot,[Parameter(Mandatory=$true)][string]$ArchivePath,[string]$Marker='baseline',[string]$RendererMarker,[switch]$OmitClaudeDatabase)
     $sourceRoot=Join-Path $WorkingRoot 'p9b-instructions'
     Remove-Item -LiteralPath $WorkingRoot -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $ArchivePath -Force -ErrorAction SilentlyContinue
@@ -130,6 +130,9 @@ function New-P9bInstructionArchive {
     }
     if($OmitClaudeDatabase){Remove-Item -LiteralPath (Join-Path $sourceRoot '.claude/AI-Rules/Database.en.md') -Force}
     Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Build-AiInstructions.ps1') -Destination (Join-Path $sourceRoot 'scripts/Build-AiInstructions.ps1')
+    if(-not[string]::IsNullOrWhiteSpace($RendererMarker)){
+        [IO.File]::AppendAllText((Join-Path $sourceRoot 'scripts/Build-AiInstructions.ps1'),"`n# $RendererMarker`n",[Text.UTF8Encoding]::new($false))
+    }
     foreach($leaf in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json')){
         Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot $leaf) -Destination (Join-Path $sourceRoot $leaf)
     }
@@ -618,18 +621,18 @@ Describe 'AI instructions writer and reader gate' {
     ) {
         param($Case,$Code)
         $root=Join-Path $script:ExternalRoot ("p9b-writer-$Case");New-Item -ItemType Directory -Force -Path $root|Out-Null
-        $home=Copy-P7eHome $script:BaseV3Home (Join-Path $root 'home')
-        $bundlePath=Join-Path $home 'hooks/ai-instructions-runtime/runtime-bundle.json'
-        $configurationPath=Join-Path $home 'ai-instructions-sync.json'
+        $fixtureHome=Copy-P7eHome $script:BaseV3Home (Join-Path $root 'home')
+        $bundlePath=Join-Path $fixtureHome 'hooks/ai-instructions-runtime/runtime-bundle.json'
+        $configurationPath=Join-Path $fixtureHome 'ai-instructions-sync.json'
         if($Case-ceq'v3-v4-mixed'){$configuration=Get-Content -Raw $configurationPath|ConvertFrom-Json;$configuration.schemaVersion=4;$configuration.PSObject.Properties.Remove('projections');Set-P9bJson $configurationPath $configuration}
         elseif($Case-ceq'v2-v5-mixed'){$bundle=Get-Content -Raw $bundlePath|ConvertFrom-Json;$bundle.schemaVersion=2;Set-P9bJson $bundlePath $bundle}
         elseif($Case-ceq'unknown-bundle'){$bundle=Get-Content -Raw $bundlePath|ConvertFrom-Json;$bundle.schemaVersion=99;Set-P9bJson $bundlePath $bundle}
         elseif($Case-ceq'platform-gate'){$bundle=Get-Content -Raw $bundlePath|ConvertFrom-Json;$bundle.platform.architecture=if($bundle.platform.architecture-ceq'x64'){'arm64'}else{'x64'};Set-P9bJson $bundlePath $bundle}
-        else{$lockPath=Join-Path $home 'hooks/ai-instructions-runtime/catalog/skills-catalog-lock.json';$lock=Get-Content -Raw $lockPath|ConvertFrom-Json;$lock.catalogId='incompatible-catalog';Set-P9bJson $lockPath $lock}
+        else{$lockPath=Join-Path $fixtureHome 'hooks/ai-instructions-runtime/catalog/skills-catalog-lock.json';$lock=Get-Content -Raw $lockPath|ConvertFrom-Json;$lock.catalogId='incompatible-catalog';Set-P9bJson $lockPath $lock}
         $target=Join-Path $root 'target';New-P9bTargetRepository $target
         $before=Get-P9bRepoSnapshot $target
 
-        $result=Invoke-P7eLauncherFailure -CodexHome $home -TargetRoot $target
+        $result=Invoke-P7eLauncherFailure -CodexHome $fixtureHome -TargetRoot $target
         $result.ExitCode|Should Not Be 0
         (Get-AiInstructionsRefusalCode $result.Output)|Should Be $Code
         (Get-P9bRepoSnapshot $target)|Should Be $before
@@ -680,6 +683,64 @@ Describe 'AI instructions writer and reader gate' {
         $exclude|Should Not Match '(?m)^/\.claude/AI-Rules/Database\.en\.md$'
         $exclude|Should Not Match '(?m)^/\.claude/ai-instructions-licenses/cccc'
         $exclude|Should Match '(?m)^/\.claude/ai-instructions-licenses/dddd'
+    }
+
+    # Scenario: A manifest-owned CLAUDE.md becomes project-owned before the source removes a Claude Rule and changes the license commit namespace.
+    # Purpose: Protect obsolete as well as still-desired Claude family entries, bytes, and excludes once the family is project-owned.
+    It 'InterT119_preserves_obsolete_Claude_entries_after_the_base_becomes_project_owned' {
+        $root=Join-Path $script:ExternalRoot 'p9b-owned-obsolete';New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $baseline=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'baseline-work') -ArchivePath (Join-Path $root 'baseline.zip') -Marker baseline
+        $changed=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'changed-work') -ArchivePath (Join-Path $root 'changed.zip') -Marker changed -OmitClaudeDatabase
+        $context=New-P9bBootstrapContext -Root $root
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        (Invoke-P9bRepoBootstrap -Context $context -ArchivePath $baseline.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
+        $claudePath=Join-Path $target 'CLAUDE.md'
+        [IO.File]::AppendAllText($claudePath,"project ownership`n",[Text.UTF8Encoding]::new($false))
+        $claudeBytes=[IO.File]::ReadAllBytes($claudePath)
+        $claudeFamily=Get-P9bRepoSnapshot (Join-Path $target '.claude')
+        $oldRule='.claude/AI-Rules/Database.en.md'
+        $oldLicense='.claude/ai-instructions-licenses/cccccccccccccccccccccccccccccccccccccccc/delivery.json'
+        $context=New-P9bBootstrapContext -Root $root -InstructionCommit ('d'*40)
+
+        $result=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $changed.ArchivePath -TargetRoot $target
+        $result.ExitCode|Should Be 0
+        $result.Output|Should Match 'claude-base-skipped-project-owned'
+        [IO.File]::ReadAllBytes($claudePath)|Should Be $claudeBytes
+        (Get-P9bRepoSnapshot (Join-Path $target '.claude'))|Should Be $claudeFamily
+        Test-Path -LiteralPath (Join-Path $target $oldRule) -PathType Leaf|Should Be $true
+        Test-Path -LiteralPath (Join-Path $target $oldLicense) -PathType Leaf|Should Be $true
+        Test-Path -LiteralPath (Join-Path $target '.claude/ai-instructions-licenses/dddddddddddddddddddddddddddddddddddddddd/delivery.json')|Should Be $false
+        $manifest=Get-Content -Raw -LiteralPath (Join-Path $target '.codex/ai-instructions.manifest.json')|ConvertFrom-Json
+        @($manifest.files|Where-Object{[string]$_.targetPath-in@($oldRule,$oldLicense)}).Count|Should Be 2
+        ([IO.File]::ReadAllText((Join-Path $target 'AGENTS.md')))|Should Match '<!-- changed -->'
+    }
+
+    # Scenario: A customized retained instruction is carried from an existing v4 manifest while the source renderer changes.
+    # Purpose: Preserve the retained entry's host, renderer ID, and renderer hash instead of attributing old bytes to the current renderer.
+    It 'InterT120_preserves_renderer_provenance_for_a_retained_v4_instruction' {
+        $root=Join-Path $script:ExternalRoot 'p9b-retained-renderer';New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $baseline=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'baseline-work') -ArchivePath (Join-Path $root 'baseline.zip') -Marker baseline -RendererMarker renderer-a
+        $changed=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'changed-work') -ArchivePath (Join-Path $root 'changed.zip') -Marker changed -RendererMarker renderer-b
+        $context=New-P9bBootstrapContext -Root $root
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        (Invoke-P9bRepoBootstrap -Context $context -ArchivePath $baseline.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
+        $manifestPath=Join-Path $target '.codex/ai-instructions.manifest.json'
+        $manifest=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+        $retainedTarget='.codex/AI-Rules/CodeReview.en.md'
+        $retained=@($manifest.files|Where-Object targetPath -eq $retainedTarget)[0]
+        $retained.rendererId='retained-renderer'
+        $retained.rendererSha256='1'*64
+        Set-P9bJson -Path $manifestPath -Document $manifest
+        [IO.File]::AppendAllText((Join-Path $target $retainedTarget),"project customization`n",[Text.UTF8Encoding]::new($false))
+
+        $result=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $changed.ArchivePath -TargetRoot $target
+        $result.ExitCode|Should Be 0
+        $updated=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+        $entry=@($updated.files|Where-Object targetPath -eq $retainedTarget)[0]
+        [string]$entry.host|Should Be codex
+        [string]$entry.rendererId|Should Be retained-renderer
+        [string]$entry.rendererSha256|Should Be ('1'*64)
+        @($updated.files|Where-Object{[string]$_.targetPath-ne$retainedTarget-and[string]$_.rendererSha256-eq$changed.RendererSha256}).Count|Should BeGreaterThan 0
     }
 
     # Scenario: The stable launcher has opened a verified closure file with its read-only sharing contract.

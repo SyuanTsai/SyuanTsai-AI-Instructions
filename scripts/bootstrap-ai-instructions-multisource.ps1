@@ -238,16 +238,16 @@ $configuration = Read-JsonDocument -Path $ConfigurationPath -Name 'AI instructio
 Assert-MultiSourceConfiguration -Configuration $configuration -Catalog $catalog
 $runtimeGeneration = if ([int64]$configuration.schemaVersion -eq 5) { 'v3v5' } else { 'v2v4' }
 if ($runtimeGeneration -ceq 'v3v5') {
+    if (($catalog.schemaVersion -isnot [int] -and $catalog.schemaVersion -isnot [long]) -or [int64]$catalog.schemaVersion -ne 3 -or
+        ($lock.schemaVersion -isnot [int] -and $lock.schemaVersion -isnot [long]) -or [int64]$lock.schemaVersion -ne 3) {
+        throw (New-AiInstructionsRefusalException -Code 'projection-runtime-unavailable' -Message 'Sync configuration v5 requires a consistent Catalog/Lock v3 pair.')
+    }
     $runtimeRootPath = [System.IO.Path]::GetFullPath($RuntimeRoot)
     $bundlePath = Join-Path $runtimeRootPath 'runtime-bundle.json'
     $platformRuntimePath = Join-Path $runtimeRootPath 'platform-runtime.psd1'
     $runtimeCatalogPath = Join-Path $runtimeRootPath 'catalog\skills-catalog.json'
     $runtimeLockPath = Join-Path $runtimeRootPath 'catalog\skills-catalog-lock.json'
     $bundle = Read-JsonDocument -Path $bundlePath -Name 'AI instruction runtime bundle'
-    if (($catalog.schemaVersion -isnot [int] -and $catalog.schemaVersion -isnot [long]) -or [int64]$catalog.schemaVersion -ne 3 -or
-        ($lock.schemaVersion -isnot [int] -and $lock.schemaVersion -isnot [long]) -or [int64]$lock.schemaVersion -ne 3) {
-        throw (New-AiInstructionsRefusalException -Code 'projection-runtime-unavailable' -Message 'Sync configuration v5 requires a consistent Catalog/Lock v3 pair.')
-    }
     if (@($configuration.projections.project).Count -gt 0) {
         throw (New-AiInstructionsRefusalException -Code 'projection-runtime-unavailable' -Message 'Project Skill projections are unavailable until the P9c projection runtime is installed.')
     }

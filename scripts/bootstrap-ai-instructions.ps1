@@ -2187,10 +2187,17 @@ function Copy-ExistingManifestEntry {
         sourcePath = [string] $Entry.sourcePath
     }
     if ($repoManifestWriter -ceq 'v4' -and [string]$Entry.artifactType -ceq 'instruction') {
-        $targetPath = [string]$Entry.targetPath
-        $copy.host = if ($targetPath -ceq 'AGENTS.md' -or $targetPath.StartsWith('.codex/')) { 'codex' } elseif ($targetPath -ceq 'CLAUDE.md' -or $targetPath.StartsWith('.claude/')) { 'claude' } else { 'copilot' }
-        $copy.rendererId = 'build-ai-instructions'
-        $copy.rendererSha256 = [string]$script:rendererSha256
+        if ($null -ne $Entry.PSObject.Properties['host']) {
+            $copy.host = [string]$Entry.host
+            $copy.rendererId = [string]$Entry.rendererId
+            $copy.rendererSha256 = [string]$Entry.rendererSha256
+        }
+        else {
+            $targetPath = [string]$Entry.targetPath
+            $copy.host = if ($targetPath -ceq 'AGENTS.md' -or $targetPath.StartsWith('.codex/')) { 'codex' } elseif ($targetPath -ceq 'CLAUDE.md' -or $targetPath.StartsWith('.claude/')) { 'claude' } else { 'copilot' }
+            $copy.rendererId = 'build-ai-instructions'
+            $copy.rendererSha256 = [string]$script:rendererSha256
+        }
     }
     elseif ($null -ne $Entry.PSObject.Properties['host']) {
         $copy.host = [string]$Entry.host
@@ -4730,6 +4737,9 @@ try {
         $entryIsEligible = [bool]$eligibleFamilies[$desiredEntry.FamilyName]
         if (-not $entryIsEligible) {
             $skippedPaths.Add($targetPath)
+            if ($manifestEntriesByTarget.ContainsKey($targetPath)) {
+                $nextManifestEntries.Add((Copy-ExistingManifestEntry -Entry $manifestEntriesByTarget[$targetPath]))
+            }
             continue
         }
 
@@ -4816,6 +4826,15 @@ try {
         }
 
         $managedEntry = $manifestEntriesByTarget[$managedTargetPath]
+        $isProtectedClaude = $currentClaudeProjectOwned -and
+            ($managedTargetPath -ceq 'CLAUDE.md' -or
+             $managedTargetPath.StartsWith('.claude/AI-Rules/',[StringComparison]::Ordinal) -or
+             $managedTargetPath.StartsWith('.claude/ai-instructions-licenses/',[StringComparison]::Ordinal))
+        if ($isProtectedClaude) {
+            $nextManifestEntries.Add((Copy-ExistingManifestEntry -Entry $managedEntry))
+            $skippedPaths.Add($managedTargetPath)
+            continue
+        }
         if ($managedTargetPath.StartsWith('.agents/skills/',[StringComparison]::Ordinal)) {
             $id = $managedTargetPath.Split('/')[2]
             if ($migrationById.ContainsKey($id) -and $migrationById[$id].removable) {

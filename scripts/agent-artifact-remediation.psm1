@@ -1,7 +1,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-Import-Module (Join-Path $PSScriptRoot 'skills-catalog-contract.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'skills-catalog-contract.psm1') -Scope Local -ErrorAction Stop
 
 $script:RemediationMessage = 'chore: stop tracking local AI instructions'
 $script:RemediationUserName = 'Codex AI Instructions'

@@ -2,6 +2,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'agent-artifact-remediation.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'skills-catalog-contract.psm1') -Scope Local -ErrorAction Stop
 
 $script:RolloutAuthorityRepositoryUrls = @(
     'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git',
@@ -289,6 +290,7 @@ function Test-RolloutManifestCurrent {
         elseif ([int]$manifest.schemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $manifest }
         else { return $false }
     }
+    catch [System.Management.Automation.CommandNotFoundException] { throw }
     catch { return $false }
     if (-not [string]::IsNullOrWhiteSpace($ExpectedLockSha256)) {
         if ($null -eq $manifest.PSObject.Properties['lockSha256'] -or [string]$manifest.lockSha256 -cne $ExpectedLockSha256) { return $false }
