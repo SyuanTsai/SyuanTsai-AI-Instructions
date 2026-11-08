@@ -23,6 +23,10 @@ if ([string]::IsNullOrWhiteSpace($GitExecutable)) {
 $manifestRelativePath = '.codex/ai-instructions.manifest.json'
 $excludeBeginMarker = '# BEGIN Codex AI Instructions managed paths'
 $excludeEndMarker = '# END Codex AI Instructions managed paths'
+$script:repoManifestV4DowngradeMessage =
+    'A live worktree already contains REPO managed manifest v4 [ai-instructions-refusal-code=downgrade-refused].' +
+    [Environment]::NewLine +
+    'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
 
 Import-Module (Join-Path $PSScriptRoot 'safe-zip.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'skills-catalog-contract.psm1') -Force
@@ -1688,7 +1692,7 @@ function Assert-NoRepoManagedManifestV4 {
             else {
                 throw [SyuanTsai.AiInstructions.AiInstructionsRefusalException]::new(
                     'downgrade-refused',
-                    'A live worktree already contains REPO managed manifest v4 [ai-instructions-refusal-code=downgrade-refused]. REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
+                    $script:repoManifestV4DowngradeMessage
                 )
             }
         }
@@ -4509,6 +4513,10 @@ try {
         @('CLAUDE.md','.claude/AI-Rules','.claude/ai-instructions-licenses')
     }
     else { @('CLAUDE.md') })
+    $repositoryProtectedClaudeFamilyPaths = @(if ($claudeProjectOwnedWorktrees.Count -gt 0) {
+        @('CLAUDE.md','.claude/AI-Rules/','.claude/ai-instructions-licenses/')
+    }
+    else { @() })
     if (-not $WhatIf) {
         $repositoryOperationLock = Open-RepositoryOperationLock -Repository $targetRootPath
         Assert-NoRepoManagedManifestV4 -Repository $targetRootPath -AllowV4:($repoManifestWriter -ceq 'v4') -Strict
@@ -4520,7 +4528,13 @@ try {
             @('CLAUDE.md','.claude/AI-Rules','.claude/ai-instructions-licenses')
         }
         else { @('CLAUDE.md') })
-        $remediationTransaction = Invoke-AgentArtifactRemediation -Repository $targetRootPath -GitExecutable $GitExecutable -ProtectedPathPrefixes $activeWorktreeProtectedClaudeFamilyPaths
+        $repositoryProtectedClaudeFamilyPaths = @(if ($claudeProjectOwnedWorktrees.Count -gt 0) {
+            @('CLAUDE.md','.claude/AI-Rules/','.claude/ai-instructions-licenses/')
+        }
+        else { @() })
+        $remediationTransaction = Invoke-AgentArtifactRemediation -Repository $targetRootPath -GitExecutable $GitExecutable `
+            -ProtectedPathPrefixes $activeWorktreeProtectedClaudeFamilyPaths `
+            -SharedExcludeProtectedPathPrefixes $repositoryProtectedClaudeFamilyPaths
     }
     if ($null -ne $remediationTransaction) {
         if (@($remediationTransaction.Paths).Count -gt 0) {
@@ -4639,7 +4653,7 @@ if ($manifestExists) {
         if ($repoManifestWriter -cne 'v4') {
             throw [SyuanTsai.AiInstructions.AiInstructionsRefusalException]::new(
                 'downgrade-refused',
-                'A live worktree already contains REPO managed manifest v4 [ai-instructions-refusal-code=downgrade-refused]. REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
+                $script:repoManifestV4DowngradeMessage
             )
         }
         Assert-ManagedManifestV4 -Manifest $manifest
@@ -4730,10 +4744,6 @@ $trackedPaths = New-Object 'System.Collections.Generic.HashSet[string]' $gitPath
 foreach ($trackedPath in @(Invoke-Git -Repository $targetRootPath -Arguments @('-c','core.quotePath=true','ls-files'))) {
     [void]$trackedPaths.Add((ConvertFrom-GitQuotedPath -Path ([string]$trackedPath)).Replace('\','/'))
 }
-$repositoryProtectedClaudeFamilyPaths = @(if ($claudeProjectOwnedWorktrees.Count -gt 0) {
-    @('CLAUDE.md','.claude/AI-Rules/','.claude/ai-instructions-licenses/')
-}
-else { @() })
 $trackedPollutionPaths = @(@(
     if ($trackedPaths.Contains($manifestRelativePath)) { $manifestRelativePath }
     foreach ($targetPath in @($manifestEntriesByTarget.Keys | Sort-Object)) {
@@ -5189,7 +5199,7 @@ try {
         if ($shouldWriteManifest) { $managedExcludePaths += $manifestRelativePath }
         $preservedProtectedExcludePaths = @(
             if (-not [bool]$eligibleFamilies['Claude'] -and $claudeProjectOwnedWorktrees.Count -eq 1) {
-                foreach ($entry in @($nextManifestEntries)) {
+                foreach ($entry in $nextManifestEntries) {
                     $entryPath = [string]$entry.targetPath
                     if ($entryPath -ceq 'CLAUDE.md' -or
                         -not (Test-IsProtectedClaudeFamilyPath -Path $entryPath -ProtectedPaths $repositoryProtectedClaudeFamilyPaths)) { continue }

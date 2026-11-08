@@ -474,6 +474,11 @@ function Set-RemediationGitInfoExclude {
     if ($beginCount -eq 1) {
         foreach ($line in @([regex]::Match($content,$blockPattern).Value.Replace("`r`n","`n").Split("`n"))) {
             if (-not [string]::IsNullOrWhiteSpace($line) -and $line -cne $script:RemediationExcludeBegin -and $line -cne $script:RemediationExcludeEnd) {
+                $storedPath = if ($line.StartsWith('/')) { $line.Substring(1) } else { $line }
+                if (Test-IsProtectedClaudeFamilyPath -Path $storedPath -ProtectedPaths $ProtectedPaths) {
+                    Write-ProtectedClaudeFamilyDiagnostic -Path $storedPath -Sink 'remediation Git exclude'
+                    continue
+                }
                 [void]$storedPatterns.Add($line)
             }
         }
@@ -787,8 +792,13 @@ function Invoke-AgentArtifactRemediation {
     param(
         [Parameter(Mandatory = $true)][string] $Repository,
         [string] $GitExecutable = 'git',
-        [AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPathPrefixes = @()
+        [AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPathPrefixes = @(),
+        [AllowEmptyCollection()][ValidateNotNull()][string[]] $SharedExcludeProtectedPathPrefixes
     )
+
+    if (-not $PSBoundParameters.ContainsKey('SharedExcludeProtectedPathPrefixes')) {
+        $SharedExcludeProtectedPathPrefixes = @($ProtectedPathPrefixes)
+    }
 
     $repositoryRoot = ((Invoke-RemediationGit -Repository $Repository -GitExecutable $GitExecutable -Arguments @('rev-parse','--show-toplevel')) | Select-Object -First 1).Trim()
     $repositoryRoot = [System.IO.Path]::GetFullPath($repositoryRoot).TrimEnd([char[]]@('\','/'))
@@ -871,7 +881,7 @@ function Invoke-AgentArtifactRemediation {
         if ($trackedPaths.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($head)) {
             $transaction.NewCommit = New-RemediationCommitObject -Repository $repositoryRoot -GitExecutable $GitExecutable -Head $head -Paths $trackedPaths -ProtectedPaths $ProtectedPathPrefixes
         }
-        $transaction.ExcludeSnapshot = Set-RemediationGitInfoExclude -Path $excludePath -Patterns $excludePatterns -ProtectedPaths $ProtectedPathPrefixes
+        $transaction.ExcludeSnapshot = Set-RemediationGitInfoExclude -Path $excludePath -Patterns $excludePatterns -ProtectedPaths $SharedExcludeProtectedPathPrefixes
         if ($trackedPaths.Count -gt 0) {
             $transaction.AppliedIndexSha256 = Set-RemediationIndexWithoutPaths -Repository $repositoryRoot -GitExecutable $GitExecutable `
                 -IndexPath $indexPath -ExpectedIndexSha256 $backup.IndexSha256 -Paths $trackedPaths `

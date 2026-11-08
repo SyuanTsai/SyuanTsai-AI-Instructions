@@ -466,4 +466,35 @@ if(-not(Get-Command ConvertFrom-GitWorktreePorcelainZ -ErrorAction SilentlyConti
         if($SchemaVersion-in2,3){$failure|Should Match 'outside the reserved Agent artifact scope.*production\.txt'}
         (Get-Content -Raw -LiteralPath (Join-Path $repository 'production.txt')).Trim()|Should Be 'production'
     }
+
+    # Scenario: The active worktree permits Claude Rule remediation while a linked worktree makes the Claude family repository-wide protected for shared exclusions.
+    # Purpose: Remove the active tracked Rule without adding a shared exclude line that would hide a linked worktree's project-owned Claude file.
+    It 'InterT67_separates_active_remediation_from_repository-wide_shared_exclude_protection' {
+        $repository=Join-Path $TestDrive 'separate-remediation-exclude-scopes'
+        $rulePath='.claude/AI-Rules/Testing.en.md'
+        New-Item -ItemType Directory -Force -Path (Join-Path $repository '.claude/AI-Rules')|Out-Null
+        & git -C $repository init --quiet
+        & git -C $repository config user.name 'Remediation Test'
+        & git -C $repository config user.email 'remediation@example.test'
+        [IO.File]::WriteAllText((Join-Path $repository 'product.txt'),"product`n",[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $repository $rulePath),"managed Claude Rule`n",[Text.UTF8Encoding]::new($false))
+        & git -C $repository add -- product.txt $rulePath
+        & git -C $repository commit --quiet -m fixture
+        $excludePath=(& git -C $repository rev-parse --git-path info/exclude|Select-Object -First 1).Trim()
+        if(-not[IO.Path]::IsPathRooted($excludePath)){$excludePath=Join-Path $repository $excludePath}
+        [IO.File]::AppendAllText($excludePath,"`n# BEGIN Codex AI Instructions remediated paths`n/$rulePath`n# END Codex AI Instructions remediated paths`n",[Text.UTF8Encoding]::new($false))
+
+        $transaction=Invoke-AgentArtifactRemediation -Repository $repository `
+            -ProtectedPathPrefixes @('CLAUDE.md') `
+            -SharedExcludeProtectedPathPrefixes @('CLAUDE.md','.claude/AI-Rules/','.claude/ai-instructions-licenses/')
+        try {
+            @($transaction.Paths)|Should Contain $rulePath
+            Test-Path -LiteralPath (Join-Path $repository $rulePath)|Should Be $false
+            (@(& git -C $repository ls-files -- $rulePath)-join'')|Should BeNullOrEmpty
+            [IO.File]::ReadAllText($excludePath)|Should Not Match '(?m)^/\.claude/'
+        }
+        finally {
+            if(Test-Path -LiteralPath $transaction.Backup.Root){Remove-Item -LiteralPath $transaction.Backup.Root -Recurse -Force}
+        }
+    }
 }

@@ -1112,11 +1112,14 @@ Describe 'AI instructions writer and reader gate' {
         $wrapperRoot=Join-Path $root 'git-wrapper';New-Item -ItemType Directory -Path $wrapperRoot|Out-Null
         $realGit=(Get-Command git.exe).Source
         $findString=Join-Path $env:SystemRoot 'System32/findstr.exe'
+        $appliedExcludePath=Join-Path $wrapperRoot 'exclude-after-mutation.bin'
         $gitWrapperPath=Join-Path $wrapperRoot 'git.cmd'
         $gitWrapper=@"
 @echo off
 echo %* | "$findString" /C:"stash store" >nul
 if errorlevel 1 goto forward
+copy /b "$excludePath" "$appliedExcludePath" >nul
+if errorlevel 1 exit /b 85
 exit /b 86
 :forward
 "$realGit" %*
@@ -1128,6 +1131,8 @@ exit /b %errorlevel%
 
         $result.ExitCode|Should Not Be 0
         $result.Output|Should Match 'stash store'
+        Test-Path -LiteralPath $appliedExcludePath -PathType Leaf|Should Be $true
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($appliedExcludePath))|Should Not Be ([Convert]::ToBase64String($excludeBefore))
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))|Should Be ([Convert]::ToBase64String($excludeBefore))
         [IO.File]::ReadAllText($excludePath)|Should Match '(?m)^/AGENTS\.md$'
         [IO.File]::ReadAllText($excludePath)|Should Match '(?m)^/\.github/copilot-instructions\.md$'
