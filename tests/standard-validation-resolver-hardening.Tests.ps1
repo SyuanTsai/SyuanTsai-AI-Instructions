@@ -632,6 +632,39 @@ Describe 'Standard validation resolver hardening' {
         Assert-Match $helper '(?s)def self_test_command.*self_test_candidate_priority\(\)' 'The offline fixture must run in the retained authority self-test.'
     }
 
+    # Scenario: dep 1.0.dev6 is newer than a satisfying dep 0.28.1 final release.
+    # Purpose: Materialize the final release first when no requirement explicitly opts into prereleases.
+    It 'UnitT29a_prefers_a_satisfying_final_release_over_a_newer_prerelease' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $helper = Join-Path $script:RepositoryRoot 'scripts/Resolve-PythonWheelClosure.py'
+        $output = Invoke-IsolatedPythonCommand -PythonCommand (Assert-Command -Name 'python') -Arguments @(
+            '-B', '-c', 'import runpy,sys; h=runpy.run_path(sys.argv[1]); h["self_test_prefers_final_over_prerelease"](); print("final-first-self-test: passed")', $helper
+        )
+        Assert-Match ($output -join "`n") 'final-first-self-test: passed' 'A satisfying final release must precede a newer prerelease.'
+    }
+
+    # Scenario: dep 1.0.dev6 is the only candidate satisfying dep>=0.28.0.
+    # Purpose: Fall back to the prerelease after the final-release partition is exhausted.
+    It 'UnitT29b_falls_back_to_a_prerelease_when_no_final_release_is_available' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $helper = Join-Path $script:RepositoryRoot 'scripts/Resolve-PythonWheelClosure.py'
+        $output = Invoke-IsolatedPythonCommand -PythonCommand (Assert-Command -Name 'python') -Arguments @(
+            '-B', '-c', 'import runpy,sys; h=runpy.run_path(sys.argv[1]); h["self_test_falls_back_to_prerelease"](); print("prerelease-fallback-self-test: passed")', $helper
+        )
+        Assert-Match ($output -join "`n") 'prerelease-fallback-self-test: passed' 'Prerelease fallback must remain solvable when no final candidate exists.'
+    }
+
+    # Scenario: dep>=1.0.dev1 explicitly permits dep 1.0.dev6.
+    # Purpose: Preserve explicit PEP 440 prerelease opt-in while applying the default partition elsewhere.
+    It 'UnitT29c_honors_an_explicit_prerelease_requirement' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $helper = Join-Path $script:RepositoryRoot 'scripts/Resolve-PythonWheelClosure.py'
+        $output = Invoke-IsolatedPythonCommand -PythonCommand (Assert-Command -Name 'python') -Arguments @(
+            '-B', '-c', 'import runpy,sys; h=runpy.run_path(sys.argv[1]); h["self_test_honors_explicit_prerelease_requirement"](); print("explicit-prerelease-self-test: passed")', $helper
+        )
+        Assert-Match ($output -join "`n") 'explicit-prerelease-self-test: passed' 'An explicit prerelease requirement must still select its prerelease candidate.'
+    }
+
     # Scenario: Sequential HTTPS GETs complete, abort, change host, redirect or encounter a transport timeout.
     # Purpose: Exercise the real response lifecycle so reuse cannot bypass TLS, deadline, destination or retry checks.
     It 'InterT29_reuses_only_complete_same_host_https_responses' {

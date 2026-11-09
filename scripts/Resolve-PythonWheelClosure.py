@@ -929,15 +929,22 @@ class LazyPoolResolver:
             return False
         attempted = self.attempted.setdefault(project, set())
         descriptors = self.catalog.descriptors(project)
-        if prefer_joint_constraints:
-            requirements = tuple(self.requirements.get(project, {}).values())
-            # Stable partition only: losing parents can make the current graph
-            # too restrictive, so retain every original any-specifier fallback.
-            descriptors = sorted(descriptors, key=lambda descriptor: not all(
+        requirements = tuple(self.requirements.get(project, {}).values())
+        explicitly_allows_prereleases = any(
+            requirement.specifier.prereleases is True for requirement in requirements
+        )
+        # Stable partitions only: prioritize the current joint range first, then
+        # pip's default final-release preference. Keep every original fallback
+        # because losing parents may disappear and a prerelease may be the only
+        # candidate capable of satisfying the final requirement graph.
+        descriptors = sorted(descriptors, key=lambda descriptor: (
+            prefer_joint_constraints and not all(
                 not requirement.specifier
                 or requirement.specifier.contains(descriptor.version, prereleases=True)
                 for requirement in requirements
-            ))
+            ),
+            not explicitly_allows_prereleases and descriptor.version.is_prerelease,
+        ))
         for descriptor in descriptors:
             if descriptor.filename in attempted or not self._eligible(descriptor):
                 continue
@@ -1675,6 +1682,46 @@ def self_test_candidate_priority() -> None:
             raise AssertionError("Fallback exploration must retain the original descending candidate order")
 
 
+def self_test_prerelease_candidate_priority(requirement: str, versions: Sequence[str],
+                                            expected_version: str) -> None:
+    with tempfile.TemporaryDirectory(prefix="wheel-prerelease-priority-") as temporary:
+        root = Path(temporary)
+        sources = root / "sources"
+        sources.mkdir()
+        root_wheel = make_test_wheel(sources, "prerelease-root", "1.0", (requirement,))
+        wheels = [make_test_wheel(sources, "dep", version) for version in versions]
+        resolver = LazyPoolResolver(
+            LocalCatalog([local_descriptor(path) for path in wheels]),
+            root_wheel, file_sha256(root_wheel), root / "pool", root / "plan.json",
+        )
+        resolver.resolve()
+        selection = validate_and_select_plan(root / "plan.json", resolver, root / "selected")
+        selected = {entry["normalizedName"]: entry["version"] for entry in selection["entries"]}
+        if selected.get("dep") != expected_version:
+            raise AssertionError(
+                f"Requirement {requirement!r} with candidates {tuple(versions)!r} selected "
+                f"{selected.get('dep')!r}; expected {expected_version!r}"
+            )
+
+
+def self_test_prefers_final_over_prerelease() -> None:
+    # Scenario: A newer development release and a satisfying final release are both available.
+    # Purpose: Preserve pip's default preference for a final release over a prerelease.
+    self_test_prerelease_candidate_priority("dep>=0.28.0", ("1.0.dev6", "0.28.1"), "0.28.1")
+
+
+def self_test_falls_back_to_prerelease() -> None:
+    # Scenario: The only candidate satisfying a requirement is a development release.
+    # Purpose: Retain prerelease fallback instead of turning a solvable closure into exhaustion.
+    self_test_prerelease_candidate_priority("dep>=0.28.0", ("1.0.dev6",), "1.0.dev6")
+
+
+def self_test_honors_explicit_prerelease_requirement() -> None:
+    # Scenario: A requirement's specifier explicitly opts into development releases.
+    # Purpose: Keep prerelease candidates eligible under explicit PEP 440 prerelease semantics.
+    self_test_prerelease_candidate_priority("dep>=1.0.dev1", ("1.0.dev6",), "1.0.dev6")
+
+
 def self_test_sequential_https() -> None:
     # Scenario: Sequential GETs complete, abort, redirect or fail on a TLS connection.
     # Purpose: Reuse only fully consumed same-host responses without weakening trust or retry rules.
@@ -1789,6 +1836,9 @@ def self_test_sequential_https() -> None:
 
 def self_test_command(arguments: argparse.Namespace) -> None:
     self_test_candidate_priority()
+    self_test_prefers_final_over_prerelease()
+    self_test_falls_back_to_prerelease()
+    self_test_honors_explicit_prerelease_requirement()
     self_test_sequential_https()
     with tempfile.TemporaryDirectory(prefix="python-wheel-closure-self-test-") as temporary:
         root = Path(temporary)
