@@ -469,6 +469,7 @@ Describe 'Standard validation resolver hardening' {
     # Scenario: policy selects the reviewed SkillSpector registry and the registry activates a native 2.13.4 entry.
     # Purpose: replace mutable latest-release discovery with an explicit multi-version trust registry.
     It 'UnitT26_binds_SkillSpector_to_the_active_approved_source_entry' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
         $toolPolicy=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/validation-toolchain.json') | ConvertFrom-Json
         $registry=Get-SkillSpectorApprovedSources -Path (Join-Path $script:RepositoryRoot $toolPolicy.tools.skillspector.approvedSources)
         $profile=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/static-parser-host-ownership.json') | ConvertFrom-Json
@@ -529,10 +530,14 @@ Describe 'Standard validation resolver hardening' {
         $registry=Get-SkillSpectorApprovedSources -Path (Join-Path $script:RepositoryRoot $policy.tools.skillspector.approvedSources)
         $script:SkillSpectorApprovedEntry=$registry.activeEntry
         $script:SkillSpectorGitHubCalls=[Collections.Generic.List[string]]::new()
-        Mock Assert-Command {'fixture-python'}
-        Mock Assert-NoConflictingPipEnvironment {}
-        Mock Assert-NoConflictingPythonEnvironment {}
-        Mock Invoke-BoundedGitHubGet {
+        $originalAssertCommand=(Get-Item Function:Assert-Command).ScriptBlock
+        $originalAssertNoConflictingPipEnvironment=(Get-Item Function:Assert-NoConflictingPipEnvironment).ScriptBlock
+        $originalAssertNoConflictingPythonEnvironment=(Get-Item Function:Assert-NoConflictingPythonEnvironment).ScriptBlock
+        $originalInvokeBoundedGitHubGet=(Get-Item Function:Invoke-BoundedGitHubGet).ScriptBlock
+        Set-Item Function:Assert-Command -Value {'fixture-python'}
+        Set-Item Function:Assert-NoConflictingPipEnvironment -Value {}
+        Set-Item Function:Assert-NoConflictingPythonEnvironment -Value {}
+        Set-Item Function:Invoke-BoundedGitHubGet -Value {
             param($Uri,$Headers,$Stopwatch,$LimitSeconds,$OutFile)
             $uriText=[string]$Uri
             $script:SkillSpectorGitHubCalls.Add($uriText)
@@ -549,20 +554,28 @@ Describe 'Standard validation resolver hardening' {
             }
             throw "Unexpected mocked GitHub request: $uriText"
         }
-        foreach($case in @(
-            @{Drift='commit';Pattern='release commit mismatch'},
-            @{Drift='wheel-name';Pattern='Expected exactly one approved SkillSpector wheel'},
-            @{Drift='asset-digest';Pattern='release asset digest mismatch'}
-        )){
-            $script:SkillSpectorReleaseDrift=$case.Drift
-            $script:SkillSpectorGitHubCalls.Clear()
-            $message=''
-            try{Resolve-SkillSpector -ShouldInstall $false -ToolPolicy $policy.tools.skillspector -AcquisitionLimitSeconds 30 | Out-Null}catch{$message=$_.Exception.Message}
-            Assert-Match $message $case.Pattern "Mocked $($case.Drift) drift was not rejected."
-            Assert-True ($script:SkillSpectorGitHubCalls[0] -match '/releases/tags/v2\.13\.4$') 'Resolver did not start with the exact active release endpoint.'
-            Assert-True (-not (@($script:SkillSpectorGitHubCalls) -match '/releases/latest')) 'Resolver queried mutable latest release metadata.'
+        try {
+            foreach($case in @(
+                @{Drift='commit';Pattern='release commit mismatch'},
+                @{Drift='wheel-name';Pattern='Expected exactly one approved SkillSpector wheel'},
+                @{Drift='asset-digest';Pattern='release asset digest mismatch'}
+            )){
+                $script:SkillSpectorReleaseDrift=$case.Drift
+                $script:SkillSpectorGitHubCalls.Clear()
+                $message=''
+                try{Resolve-SkillSpector -ShouldInstall $false -ToolPolicy $policy.tools.skillspector -AcquisitionLimitSeconds 30 | Out-Null}catch{$message=$_.Exception.Message}
+                Assert-Match $message $case.Pattern "Mocked $($case.Drift) drift was not rejected."
+                Assert-True ($script:SkillSpectorGitHubCalls[0] -match '/releases/tags/v2\.13\.4$') 'Resolver did not start with the exact active release endpoint.'
+                Assert-True (-not (@($script:SkillSpectorGitHubCalls) -match '/releases/latest')) 'Resolver queried mutable latest release metadata.'
+            }
         }
-        Remove-Variable SkillSpectorApprovedEntry,SkillSpectorGitHubCalls,SkillSpectorReleaseDrift -Scope Script -ErrorAction SilentlyContinue
+        finally {
+            Set-Item Function:Assert-Command -Value $originalAssertCommand
+            Set-Item Function:Assert-NoConflictingPipEnvironment -Value $originalAssertNoConflictingPipEnvironment
+            Set-Item Function:Assert-NoConflictingPythonEnvironment -Value $originalAssertNoConflictingPythonEnvironment
+            Set-Item Function:Invoke-BoundedGitHubGet -Value $originalInvokeBoundedGitHubGet
+            Remove-Variable SkillSpectorApprovedEntry,SkillSpectorGitHubCalls,SkillSpectorReleaseDrift -Scope Script -ErrorAction SilentlyContinue
+        }
     }
 
     # Scenario: The verified closure helper already produced the authoritative offline pip selection plan.

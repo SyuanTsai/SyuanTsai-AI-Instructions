@@ -2440,14 +2440,16 @@ public sealed class C245SlowTrickleStream : Stream {
         $sibling = Join-Path $script:tailRoot 'adjacent-root'
         [void](New-Item -ItemType Directory -Path $sibling -Force)
         $script:tailPython=(Get-Command python -CommandType Application -ErrorAction Stop|Select-Object -First 1).Path
+        $originalGetSkillSpectorApprovedSources=(Get-Item Function:Get-SkillSpectorApprovedSources).ScriptBlock
+        $originalAssertSkillSpectorWheelIdentity=(Get-Item Function:Assert-SkillSpectorWheelIdentity).ScriptBlock
         Mock Assert-Command { $script:tailPython }
         Mock Assert-NoConflictingPipEnvironment { }
         Mock Assert-NoConflictingPythonEnvironment { }
-        Mock Get-SkillSpectorApprovedSources { [pscustomobject]@{active='1.0.0';activeEntry=[pscustomobject]@{version='1.0.0';releaseTag='v1.0.0';releaseCommit=('a'*40);wheelFileName='skillspector-1.0.0-py3-none-any.whl';wheelSha256=$script:tailHash;analyzerSha256=('b'*64);parserCorrection='none'}} }
+        Set-Item Function:Get-SkillSpectorApprovedSources -Value { [pscustomobject]@{active='1.0.0';activeEntry=[pscustomobject]@{version='1.0.0';releaseTag='v1.0.0';releaseCommit=('a'*40);wheelFileName='skillspector-1.0.0-py3-none-any.whl';wheelSha256=$script:tailHash;analyzerSha256=('b'*64);parserCorrection='none'}} }
         Mock Get-GitHubHeaders { @{} }
         Mock Add-ProcessPathValue { }
         Mock Get-PythonWheelMetadata { [pscustomobject]@{ name='skillspector'; version='1.0.0'; requiresDist=@() } }
-        Mock Assert-SkillSpectorWheelIdentity { }
+        Set-Item Function:Assert-SkillSpectorWheelIdentity -Value { }
         Mock Invoke-BoundedGitHubGet {
             if ($OutFile) {
                 [IO.File]::WriteAllBytes($OutFile, $script:tailBytes)
@@ -2485,7 +2487,12 @@ public sealed class C245SlowTrickleStream : Stream {
             try { $receipt = Resolve-SkillSpector -ShouldInstall $true -ToolPolicy $policy.tools.skillspector -RequestedInstallRoot $script:tailRoot -AcquisitionLimitSeconds 2 }
             catch { $failure = $_.Exception.Message }
         }
-        finally { $env:GITHUB_TOKEN = $tokenBefore; $env:GH_TOKEN = $ghBefore }
+        finally {
+            $env:GITHUB_TOKEN = $tokenBefore
+            $env:GH_TOKEN = $ghBefore
+            Set-Item Function:Get-SkillSpectorApprovedSources -Value $originalGetSkillSpectorApprovedSources
+            Set-Item Function:Assert-SkillSpectorWheelIdentity -Value $originalAssertSkillSpectorWheelIdentity
+        }
         Assert-Match $failure 'synthetic tail acquisition deadline exceeded' 'The late budget failure must propagate.'
         $saved = Join-Path $script:tailRoot ('skillspector-failure-'+$script:ResolverRunId)
         Assert-True (Test-Path -LiteralPath (Join-Path $saved 'offline-backtracking-plan.json')) 'The completed plan must survive tail cleanup.'
