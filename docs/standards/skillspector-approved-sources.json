@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "policy": "skillspector-approved-sources-v1",
+  "source": "NVIDIA/SkillSpector",
+  "active": "2.13.4",
+  "entries": {
+    "2.13.0": {
+      "kind": "pypi-release",
+      "version": "2.13.0",
+      "releaseTag": "v2.13.0",
+      "releaseCommit": "091a509b3d6ba8ff5be528966e1f43c2e68cf214",
+      "wheelFileName": "skillspector-2.13.0-py3-none-any.whl",
+      "wheelSha256": "41e097b4127c0aa0732ad31cc909f8aee0b907d97816c866a55b8e782a6ca6dc",
+      "analyzerSha256": "c799169f9ad716f8dbbbec5892ef76affd0f9974433709ed0c1cfc3bcd0b66a4",
+      "parserCorrection": "powershell-native-command-ownership-v1"
+    },
+    "2.13.4": {
+      "kind": "pypi-release",
+      "version": "2.13.4",
+      "releaseTag": "v2.13.4",
+      "releaseCommit": "54824463814a0be01360792523ec7245a69190fc",
+      "wheelFileName": "skillspector-2.13.4-py3-none-any.whl",
+      "wheelSha256": "c5e7f290897c65018013a6e37022fabdd2ba1aeeb4994b65df2de8b0d536bea0",
+      "analyzerSha256": "bde3d1497ee85caee5569288ff1f6e2b6459cccea193c144bb50def4c7215d09",
+      "parserCorrection": "none"
+    }
+  }
+}

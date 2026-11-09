@@ -116,7 +116,7 @@ Describe 'Runner observed SkillSpector native compatibility' {
                 status = 'verified'
                 toolName = 'skillspector'
                 source = 'fixture'
-                channel = 'latest-stable'
+                channel = 'approved-source-registry'
                 resolvedVersion = '1.0.0'
                 resolvedIdentity = 'fixture-identity'
                 installRoot = $installRoot
@@ -132,7 +132,7 @@ Describe 'Runner observed SkillSpector native compatibility' {
                     attestationType = 'trusted-supervisor-validation-tool-v1'
                     toolName = 'skillspector'
                     source = 'fixture'
-                    channel = 'latest-stable'
+                    channel = 'approved-source-registry'
                     status = 'verified'
                     resolvedVersion = '1.0.0'
                     resolvedIdentity = 'fixture-identity'

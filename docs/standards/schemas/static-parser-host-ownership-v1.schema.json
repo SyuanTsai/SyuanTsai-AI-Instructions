@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://example.test/standards/static-parser-host-ownership-v1.schema.json",
-  "title": "Reviewed static parser host ownership policy",
+  "title": "Reviewed SkillSpector 2.13.0 PowerShell parser correction policy",
   "type": "object",
   "additionalProperties": false,
   "required": [

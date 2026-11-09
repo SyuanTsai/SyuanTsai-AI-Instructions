@@ -379,7 +379,7 @@ The human policy reviewer accepted the identified missing `static_patterns_tool_
 
 Only a protected consumer workflow evaluated on that exact PR test-merge, using reviewed base driver code and immutable central authority files, **MAY** publish a separate source-merge-only decision to the three required source contexts. It **MUST** distinguish that decision from canonical source conformance, preserve the original failed job and reports in the evidence, and reject a caller-supplied approval, proposal status, arbitrary development-harness PASS, another PR/source SHA, or an unreviewed workflow revision. The GitHub Actions required-check result is the publication boundary; locally invoking a helper cannot establish it. Normal source candidates still require complete canonical source conformance. This bounded source-check change **MUST NOT** satisfy scanner completeness, Stage 5, Stage 6–10, release, installation, publication, or Catalog/Lock selection. If protected CI or the reviewed source/workflow/authority identity changes, the route remains failed until the changed exact candidate is reviewed again under §19.
 
-Production adapter command spec **MUST** resolve to a directly executable, non-reparse trusted file or a resolver-attested package shim and carry a candidate-independent resolver receipt whose executable path/hash, latest-stable identity, install root, run binding, fresh resolution timestamp, complete installed dependency closure, launcher payload/runtime hashes, and trusted-supervisor signature are verified；the runner **MUST** bind each adapter slot to its fixed canonical tool role (`package-adapter`, `skill-validator`, `skill-tools`, `skillspector`, or `pester`) and reject a provenance or receipt whose `toolName` belongs to another slot. Membership in a caller-selected `TrustedToolRoot` or a caller-supplied hash alone is not provenance. On Windows, package launchers **MUST** use a `.cmd` shim; `skill-tools.cmd` is accepted only when the signed launcher binds the exact shim, package entry-point payload, and approved Node runtime. On Linux/macOS, directly executed managed launchers **MUST** be executable physical POSIX files with launcher/payload/runtime hash binding and **MUST NOT** be symlinks. The resolver-attested `skill-tools` npm shim is the sole non-executed exception: it **MUST** be a Unix symlink whose resolved target is exactly the regular entry-point payload inside the install root, while the runner **MUST** execute the bound Node runtime and payload instead of the shim. All executed paths and regular files **MUST** satisfy §8.4, including hard-link rejection. Python venv creation **MUST** use copy layout so interpreter file symlinks do not cross this boundary. Generic interpreters and unsigned script payloads are development-harness-only and **MUST NOT** be accepted in production. Before every child process, the runner **MUST** clear the inherited environment and copy only the approved OS/runtime allowlist plus the `STANDARD_VALIDATION_*` runner namespace; arbitrary inherited credentials, transport overrides, and configuration variables **MUST NOT** cross the supervisor boundary. Runner **MUST** reserve its final output path with a supervisor-owned exclusive handle before any child process, detect substitution, and fail closed rather than accept child-created evidence. It **MUST** revalidate the candidate snapshot inventory before and after every child process, and process cleanup **MUST** cover the complete owned descendant tree, using recursive termination where supported and reporting `cleanedUp=false` until every owned descendant has exited. Caller-supplied `CandidateRoot`, `ArtifactsRoot`, `TrustedToolRoot`, adapter paths, and fixed trust-anchor roots **MUST** be canonicalized by inspecting every existing path component; any symlink/reparse ancestor **MUST** be rejected before lexical containment comparisons or artifact creation. `canonicalValidatorPath` **MUST** identify the one candidate entry point covered by the central consumer entry-point inventory and invoked as the canonical gate. Human approval、publish/install 與 post-install evidence **MUST** be candidate-bound RSA attestations signed by the trusted supervisor；self-asserted approver/status/timestamp、authorization、release identity、installed inventory 或 integrity fields are insufficient。
+Production adapter command spec **MUST** resolve to a directly executable, non-reparse trusted file or a resolver-attested package shim and carry a candidate-independent resolver receipt whose executable path/hash, approved-channel identity, install root, run binding, fresh resolution timestamp, complete installed dependency closure, launcher payload/runtime hashes, and trusted-supervisor signature are verified；the runner **MUST** bind each adapter slot to its fixed canonical tool role (`package-adapter`, `skill-validator`, `skill-tools`, `skillspector`, or `pester`) and reject a provenance or receipt whose `toolName` belongs to another slot. Membership in a caller-selected `TrustedToolRoot` or a caller-supplied hash alone is not provenance. On Windows, package launchers **MUST** use a `.cmd` shim; `skill-tools.cmd` is accepted only when the signed launcher binds the exact shim, package entry-point payload, and approved Node runtime. On Linux/macOS, directly executed managed launchers **MUST** be executable physical POSIX files with launcher/payload/runtime hash binding and **MUST NOT** be symlinks. The resolver-attested `skill-tools` npm shim is the sole non-executed exception: it **MUST** be a Unix symlink whose resolved target is exactly the regular entry-point payload inside the install root, while the runner **MUST** execute the bound Node runtime and payload instead of the shim. All executed paths and regular files **MUST** satisfy §8.4, including hard-link rejection. Python venv creation **MUST** use copy layout so interpreter file symlinks do not cross this boundary. Generic interpreters and unsigned script payloads are development-harness-only and **MUST NOT** be accepted in production. Before every child process, the runner **MUST** clear the inherited environment and copy only the approved OS/runtime allowlist plus the `STANDARD_VALIDATION_*` runner namespace; arbitrary inherited credentials, transport overrides, and configuration variables **MUST NOT** cross the supervisor boundary. Runner **MUST** reserve its final output path with a supervisor-owned exclusive handle before any child process, detect substitution, and fail closed rather than accept child-created evidence. It **MUST** revalidate the candidate snapshot inventory before and after every child process, and process cleanup **MUST** cover the complete owned descendant tree, using recursive termination where supported and reporting `cleanedUp=false` until every owned descendant has exited. Caller-supplied `CandidateRoot`, `ArtifactsRoot`, `TrustedToolRoot`, adapter paths, and fixed trust-anchor roots **MUST** be canonicalized by inspecting every existing path component; any symlink/reparse ancestor **MUST** be rejected before lexical containment comparisons or artifact creation. `canonicalValidatorPath` **MUST** identify the one candidate entry point covered by the central consumer entry-point inventory and invoked as the canonical gate. Human approval、publish/install 與 post-install evidence **MUST** be candidate-bound RSA attestations signed by the trusted supervisor；self-asserted approver/status/timestamp、authorization、release identity、installed inventory 或 integrity fields are insufficient。
 
 The trusted supervisor **MUST** generate a fresh validation run ID at invocation start, sign a `validation-launch-binding-v1` containing that ID and the invocation identity, and pass the same ID to the resolution orchestration **before** resolver receipt creation；the binding **MUST** also contain a signed absolute `consumptionPath` outside the candidate, artifact, and trusted-tool roots. Before authority or resolver work, the central runner **MUST** atomically create a supervisor-owned create-only consumption marker at that path and **MUST** reject an existing marker, so deletion and recreation of the caller-controlled artifact root cannot replay a still-valid binding. The central runner **MUST** receive `-SupervisorLaunchBindingPath`, read, hash, and parse one retained launch-binding byte snapshot, and retain its authenticated snapshot hash for evidence registration. It MUST read the adapter and signed resolver receipt bytes once, compute and retain their corresponding snapshot SHA-256 values, parse those same bytes, authenticate the binding and receipt provenance against their snapshots, and fail closed if any binding, adapter, or receipt path changes during the handoff before full adapter validation. It MUST authenticate that binding and the signed `package-adapter` resolver receipt against its exact ID before full adapter validation. The binding **MUST** fix the candidate, adapter, artifact/output, trusted-tool, source/archive, authority-revision, and bounded validity-window inputs；the runner **MUST** revalidate its file hash before and after every child process. Every production adapter slot **MUST** bind to the same ID. The signed handoff uses lowercase 32-character hexadecimal N-format; `evidence.launchBinding.resolutionRunId` **MUST** serialize that same GUID as canonical hyphenated UUID D-format for schema validity. A caller-supplied `-RunId` **MUST** be rejected outside the development harness so an old or caller-selected `resolutionRunId` cannot be replayed into a new validation. The runner **MUST** capture each child stdout and stderr stream with a fixed maximum of 1,048,576 characters；when either stream exceeds its quota, it **MUST** terminate the complete owned process tree, retain only the bounded stream prefix, record the overflow diagnostic separately, and fail the event；it **MUST NOT** use unbounded `ReadToEnd` capture。
 
@@ -400,7 +400,7 @@ Component/diagnostic scripts **MAY** 存在，但 **MUST NOT** 成為繞過 cano
 
 中央 machine-readable policy 位於 `docs/standards/validation-toolchain.json`；中央 resolver / trust anchor 位於 `scripts/Resolve-StandardValidationTool.ps1`。
 
-正式 validation / conformance / security gate **MUST** 預設使用每個工具在 validation run 開始時從**核准來源**可解析到的 **latest stable** version，而不是 repository 各自長期 pin 不同版本。
+正式 validation / conformance / security gate **MUST** 使用中央核准的版本選擇規則：一般工具在 validation run 開始時從**核准來源**解析 **latest stable** version；SkillSpector 則使用中央已審核來源清單的 active immutable pin。Repository 不得各自選擇版本。
 
 `source` **MUST** 視為供應鏈安全屬性，不是描述性 metadata。Standard v1 的核准 source trust anchors 為：
 
@@ -409,7 +409,7 @@ Component/diagnostic scripts **MAY** 存在，但 **MUST NOT** 成為繞過 cano
 - skill-tools → `npm:skill-tools`，且 approved registry **MUST** 為 `https://registry.npmjs.org/`；
 - Pester → `PowerShellGallery:Pester`。
 
-Canonical resolver **MUST** 在解析任何工具前先驗證 machine-readable policy 中**全部**正式工具的 exact approved source 與 `channel = latest-stable`。對具可替換 distribution endpoint 的 provider，實際 registry / repository endpoint 也 **MUST** 驗證；任一 source 或 endpoint 偏離 trust anchor，即使 package name 與 channel 不變，整個 canonical validation **MUST** fail closed。
+Canonical resolver **MUST** 在解析任何工具前先驗證 machine-readable policy 中**全部**正式工具的 exact approved source 與核准 channel；SkillSpector **MUST** 為 `approved-source-registry`，其他工具 **MUST** 為 `latest-stable`。對具可替換 distribution endpoint 的 provider，實際 registry / repository endpoint 也 **MUST** 驗證；任一 source、channel 或 endpoint 偏離 trust anchor，整個 canonical validation **MUST** fail closed。
 
 對 Pester，resolver **MUST** 每次從核准的 PowerShell Gallery endpoint 解析 latest stable；中央 authority policy **MUST** 另記錄經審查的該版本 immutable payload SHA-256。若最新穩定版尚無相符核准 identity，validation **MUST** fail closed，不得退回較舊版本。`Save-Module` 取得 run-owned 產物後，resolver **MUST** 在任何 `Test-ModuleManifest`、`Import-Module` 或其他可能初始化下載程式碼的操作前，驗證完整 regular/non-reparse payload 路徑及 bytes 與該 approved identity 相符；canonical hash 只排除 PowerShellGet 每次產生的單一 `PSGetModuleInfo.xml`，不得忽略其他套件檔案。Manifest version、root module、export 與 initialization-hook metadata **MUST** 以 data-only 解析，並在比對前後確認完整 installed closure 未漂移；resolver host **MUST NOT** 載入下載的 Pester。Receipt **MUST** 綁定 approved payload 及 run-owned installed closure；需要實際執行 Pester 的既有 Stage 5／authority test 邊界仍須核對 frozen receipt 與其完整 closure 後按 exact path 載入。任何 payload、metadata、manifest 或 closure 不符都須拒絕並清理 run-owned 安裝根目錄。
 
@@ -419,7 +419,8 @@ standards-conformance 手動診斷 **MUST** 以 Windows、Linux、macOS 各一�
 
 對 `SkillSpector`，resolver **MUST**：
 
-- 只接受 `NVIDIA/SkillSpector` GitHub latest release 中符合 `v<release-semver>` 的非 draft、非 prerelease 版本；
+- 使用 `docs/standards/skillspector-approved-sources.json` 的 `active` 項目，不得查詢或信任 mutable `releases/latest`；清單只接受對應 PyPI 正式 wheel 的 GitHub release，不接受 GitHub commit distribution；
+- 將 active entry 的 release tag 解析至 exact commit，並驗證 tag、commit、wheel filename、wheel SHA-256、wheel 內 `static_patterns_tool_misuse.py` SHA-256 與 `parserCorrection`；receipt **MUST** 記錄 `approvedSourceId` 與 `parserCorrection`；
 - 將 release tag、resolved commit、預期 wheel filename、GitHub asset SHA-256、wheel `METADATA` Name/Version、安裝後 `dist-info/METADATA` Name/Version 與 `skillspector` console entry point 綁定為同一 identity；
 - checkout **MUST NOT** persist Git credentials；GitHub release resolution／asset acquisition 完成後，resolver gate **MUST** 在任何 approved-index candidate request 或其他 tool resolution 前移除 process-level `GITHUB_TOKEN` 與 `GH_TOKEN`；
 - 使用 Python `-I` isolated mode 執行 venv 建立、helper candidate acquisition 與 pip offline resolution／install，且 venv 建立 **MUST** 使用 copy layout，避免 interpreter file symlink 破壞 installed-closure 的 fail-closed 邊界；避免 `PYTHONPATH`、`PYTHONHOME`、user site 或其他 inherited `PYTHON*` interpreter control 介入 canonical resolution；安裝後的 distribution Name／Version 與 `skillspector` console entry point **MUST** 直接由 run-owned venv 的 `.dist-info/METADATA`／`entry_points.txt` 靜態驗證，在該驗證完成前 **MUST NOT** 啟動 installed interpreter 或處理 site-packages `.pth` startup code；
@@ -433,6 +434,12 @@ standards-conformance 手動診斷 **MUST** 以 Windows、Linux、macOS 各一�
 - 在 run-owned isolated venv 與 wheelhouse 解析 direct/transitive dependency closure，依 normalized distribution name 的 ordinal order 記錄每個 selected wheel SHA-256 與 deterministic closure identity，再以 Python `-B` 及 pip `--no-index --require-hashes --no-deps --no-compile` 從該 wheelhouse 安裝；helper 的 offline pip backtracking 與所有 production scanner invocation 同樣 **MUST** 使用 interpreter `-B`，使 selected distribution 不產生或更新派生 bytecode cache；`-Install` 產物只屬於同一 frozen validation run，由 central gate 控制 lifecycle，不得跨 run 當成一般 persistent install 重用；resolver receipt 的 `resolvedAtUtc` 與 trusted attestation `issuedAt` **MUST** 綁定同一 run、保持新鮮且不得接受超過 15 分鐘的舊 receipt；
 - installed metadata 與 entry-point path **MUST** 拒絕 reparse-backed content；resolved identity 與 machine-readable receipt **MUST** 綁定 `credentialIsolation=github-token-cleared-before-python`、`installedMetadataVerification=static-dist-info-metadata`、console entry point、helper／candidate／plan／selected-closure identity、pip version／resolution rounds／candidate count、dependency closure、executable 與 installed closure SHA-256；
 - 在 release、wheel metadata、asset digest、dependency closure、installed metadata、entry point 或 executable identity 任一不一致時 fail closed。
+
+### SkillSpector 已審核來源清單
+
+清單可同時保留多個已審核 PyPI 正式版，版本切換只修改 `active`。新增項目時，維護者 **MUST** 驗證 GitHub release tag 到 commit、release wheel SHA-256、wheel 內 analyzer SHA-256，並明確決定 `parserCorrection`。`powershell-native-command-ownership-v1` 只能指定給 version 與 analyzer SHA-256 都等於中央 bridge policy 綁定值的項目；其他項目使用 `none`，不得套用 bridge。將 active 降至 2.13.3 或更舊版本需要人工核准，resolver 不自行推斷或自動降版。
+
+所有平台的原生 SkillSpector 掃描 **MUST** 使用 isolated Python 的 `-X utf8`，不帶 `--output`，從 stdout 擷取單一 object-shaped JSON 並以 UTF-8 無 BOM、create-new 寫入 owned artifact。空白、truncated、非 JSON 或非物件 stdout **MUST** fail closed；stderr 不得混入報告。這項規則適用所有平台，因 SkillSpector 2.13.x 在 Windows 不支援安全 file output。
 
 對 `skill-tools`，resolver **MUST**：
 
@@ -457,12 +464,12 @@ Canonical workflow **MUST** 透過中央 resolver 取得 validation tool；**MUS
 每次 canonical validation run **MUST**：
 
 1. 在 run 開始時驗證所有 tool source trust anchors；
-2. 依中央 policy 從 approved source / endpoint 解析該 run 所需工具的 latest stable version；
+2. 依中央 policy 從 approved source / endpoint 解析該 run 所需工具的核准版本（SkillSpector 取 approved-source registry active entry，其餘工具取 latest stable）；
 3. 記錄 resolved version；
 4. provider 可提供 immutable identity、module/package coordinate、package integrity、release commit 或 asset digest 時 **MUST** 記錄 resolved identity；
 5. 將 resolved toolset freeze 到該次 run 結束，避免同一 candidate 的不同 stage 在 run 中途漂移；
 6. 顯示足以 audit 的 source、endpoint、version 與 identity evidence；
-7. 若 approved source/endpoint、latest stable、identity/integrity evidence 無法依 provider contract 解析、取得或驗證，fail closed，不得 silent fallback 到 cached old version 或另一個 source。
+7. 若 approved source/endpoint/channel、核准版本、identity/integrity evidence 無法依 provider contract 解析、取得或驗證，fail closed，不得 silent fallback 到 cached old version 或另一個 source。
 
 合法 validation tool source / endpoint 變更是**trust-root change**。此類 PR **MUST** 同時修改：
 
@@ -473,7 +480,7 @@ Canonical workflow **MUST** 透過中央 resolver 取得 validation tool；**MUS
 
 只修改 JSON `source` / registry 而沒有同步更新 resolver/test **MUST** 被 conformance gate 阻擋。
 
-Scheduled update job 與正式 validation 不需要兩套版本政策；下一次正式 validation run 自然重新解析當時 latest stable。
+Scheduled update job 與正式 validation 不需要兩套版本政策；下一次正式 validation run 依中央 policy 重新解析 latest stable 或 SkillSpector active approved entry。
 
 **Compatibility lane exception**：為證明 Windows PowerShell 5.1、舊 Pester 或其他明確 legacy compatibility，額外 test lane **MAY** pin 舊版，但必須記錄 explicit purpose，且該 lane **MUST NOT** 成為唯一或 canonical release/security gate。Central resolver **MUST** 驗證這三項 compatibility-lane boundary，而不是只讓 authority test 讀取 JSON metadata。
 
@@ -549,7 +556,7 @@ Static gate 在下列任一情況 **MUST BLOCK**：
 
 Validation **MUST** 檢查預期 analyzer set / capabilities 已完成，而不是只看 exit code。每次 run **MUST** 顯示 resolved SkillSpector source、version、identity 與 analyzer completeness evidence。
 
-因 Standard v1 預設使用 latest stable，analyzer inventory 可能隨 release 變更；adapter **MUST** 針對實際 resolved version 驗證其完整性，不能拿舊版 analyzer allowlist 假裝新版完整。
+因 Standard v1 的工具可能隨 latest stable 或 SkillSpector approved-source `active` 變更，analyzer inventory 可能隨 release 變更；adapter **MUST** 針對實際 resolved version 驗證其完整性，不能拿舊版 analyzer allowlist 假裝新版完整。
 
 ### 9.3.1 Internal source continuation
 
@@ -642,7 +649,7 @@ Applicability finding：仍未解決，未提供放行能力。Review assessment
 
 ### 9.3.1.2 Native PowerShell ownership in the static parser
 
-中央 `static-parser-host-ownership.json` 定義一個有界、可重現的 parser correction profile，限官方 SkillSpector 2.13.0 的精確 release commit、wheel、`static_patterns_tool_misuse.py` bytes 與 PowerShell 7.6.6 原生 grammar。此修正處理 PowerShell quoted strings、subexpressions、backtick continuation 及明確 PowerShell Markdown fences 被 shell tokenizer 誤判的情況；它不沿用 PR12 exception，也不讓 PR90 review assessment 授權任何操作。
+中央 `static-parser-host-ownership.json` 定義一個有界、可重現的 parser correction profile，只適用於已審核來源清單中 `parserCorrection = powershell-native-command-ownership-v1` 的項目；目前該項目為官方 SkillSpector 2.13.0 的精確 release commit、wheel、`static_patterns_tool_misuse.py` bytes 與 PowerShell 7.6.6 原生 grammar。這是 release-specific bridge，不代表唯一支援的 SkillSpector 版本。此修正處理 PowerShell quoted strings、subexpressions、backtick continuation 及明確 PowerShell Markdown fences 被 shell tokenizer 誤判的情況；它不沿用 PR12 exception，也不讓 PR90 review assessment 授權任何操作。
 
 使用此 correction profile 的受信 source Static child **MUST** 使用中央 `Invoke-StandardStaticScan.ps1`，保留未修正官方 CLI 的原始 native report，再執行帶有中央 profile 的完整 scanner graph。官方安裝與 finding analyzer bytes **MUST NOT** 被修改；所有 finding analyzers **MUST** 仍收到完整原始來源，所有非衍生 finding 與原 severity **MUST** 保留。跨兩次 graph 的保留檢查 **MUST** 精確比較 fingerprint、severity、location、evidence、內容及其餘欄位的 multiset；唯一排除於比較 key 的欄位是官方每次執行以 uuid4 建立的 finding_id，兩份 raw report 仍各自保留原 UUID，不得改寫、降低 severity 或減少 finding 數量。原始 partial report **MUST NOT** 被改寫；修正後報告的 ledger 必須來自真正重跑的 graph/analyzer，不得在 JSON 中直接變更 status/counters 或刪除 AE1。若 referenced-artifact coverage 確實完成，graph 可自行不再產生該 coverage 缺口衍生的 AE1。
 
@@ -650,9 +657,9 @@ Profile 以 Parser.ParseInput 驗證完整 host unit，列出所有 CommandAst�
 
 Parser error、無法驗證的 grammar/module/runtime identity、未知 proof shape、coverage 缺件、超限、cross-interpreter invocation、動態 shell command-string receiver 或 unsupported execution construction **MUST** 保持 partial 或 fail closed。固定 source/commands/nested-view/time budgets 不得由 candidate 提高。這個 profile 不宣稱驗證所有 analyzer applicability，也不取代語意分析、Medium human review 或 protected execution provenance。
 
-原始官方報告已 complete 的 Skill 可直接沿用原有 Static 路徑；只有需要這個 grammar correction 時才呼叫中央 wrapper，且完整 active Skill inventory 仍須逐一實跑。Wrapper 必須自行以同一 frozen receipt 重跑原始 graph，驗證所有原始 exception 都是 profile 可證明完成的 static/partial/static_parse_limit，任何 runtime limit、其他 analyzer/reason、fatal outcome 或未完成 coverage 都必須拒絕；wrapper 失敗後不得回退或改寫報告。所有 resolver receipt 必須 hash 與 parse 同一份 byte snapshot。
+中央 wrapper 依 approved entry 的 `parserCorrection` 分流：`none` 保留並採用原生 complete report；bridge profile 則以同一 frozen receipt 重跑原始與修正 graph，驗證所有原始 exception 都是 profile 可證明完成的 static/partial/static_parse_limit。任何 runtime limit、其他 analyzer/reason、fatal outcome 或未完成 coverage 都必須拒絕；wrapper 失敗後不得回退或改寫報告。完整 active Skill inventory 仍須逐一實跑，所有 resolver receipt 必須 hash 與 parse 同一份 byte snapshot。
 
-中央 bridge 的入口、Python module、native parser helper、policy/schema 與同一次執行的官方 resolver receipt/runtime identity **MUST** 綁定 protected authority inventory 及既有 candidate-bound child。Consumer 升級此 authority revision 時，signed snapshot 的 selectedFiles 與 evidence schema 必須一同使用精確 22-file inventory；舊的 16-file receipt 不得沿用。Profile execution record 固定 applicabilityStatus/executionProvenanceStatus 為 not-verified、authorizationGranted/releaseEligible 為 false、authorizedOperations 為空。Proof JSON、profile sidecar 或 caller 的 verified/hash flags 單獨沒有信任或授權效力。Raw original report、corrected graph report、profile execution record、candidate/file digests 與 cleanup evidence **MUST** 可追溯到同一個執行。只有 exact component/analyzer coverage 與既有 severity 條件均成立，Static 才能通過並進入原有 Stage 5；release/install 邊界不變。
+中央 bridge 的入口、Python module、native parser helper、policy/schema、已審核來源清單與同一次執行的官方 resolver receipt/runtime identity **MUST** 綁定 protected authority inventory 及既有 candidate-bound child。Consumer 升級此 authority revision 時，signed snapshot 的 selectedFiles 與 evidence schema 必須一同使用精確 25-file inventory；舊的 16／22-file receipt 不得沿用。Profile execution record 固定 applicabilityStatus/executionProvenanceStatus 為 not-verified、authorizationGranted/releaseEligible 為 false、authorizedOperations 為空。Proof JSON、profile sidecar 或 caller 的 verified/hash flags 單獨沒有信任或授權效力。Raw original report、final report、profile execution record、candidate/file digests 與 cleanup evidence **MUST** 可追溯到同一個執行。只有 final report 完整且既有 severity 條件均成立，Static 才能通過並進入原有 Stage 5；release/install 邊界不變。
 
 ### 9.3.3 Owned internal Skill use
 
@@ -777,7 +784,7 @@ Repository Tests stage **MUST** 在 Package Validation 與 SkillSpector Static �
 
 - normative documents / evidence index；
 - validation-tool approved sources 與 approved distribution endpoints；
-- latest-stable channel、resolved identity recording 與 central resolver trust boundary；
+- approved channel（含 SkillSpector approved-source registry）、resolved identity recording 與 central resolver trust boundary；
 - 負向 source / registry / compatibility-policy tampering fail-closed behavior；
 - stable Go release semantics，包含 prerelease / pseudo-version rejection；
 - `agents/openai.yaml` 缺省時可通過、存在時的 unquoted-key / quoted-string / 25～64 / identity contract；
@@ -893,7 +900,7 @@ Exception **MUST NOT** 建立替代 lifecycle、永久排除 Security Gate，或
 
 - immutable authority/candidate acquisition、identity、provenance、integrity 與 post-install verification；
 - complete active package inventory discovery，以及依 canonical order 執行 required Package Validation、Static Scan、Repository Tests、formal baseline tool execution 與 triggered Semantic Scan；
-- canonical gate 的 approved tool source/endpoint、latest-stable resolution、stable-release semantics、resolved identity 與 per-run freeze；第 8.2 節明確隔離的 non-canonical compatibility lane 仍依其 boundary 處理；
+- canonical gate 的 approved tool source/endpoint/channel、latest-stable 或 SkillSpector approved-source resolution、stable-release semantics、resolved identity 與 per-run freeze；第 8.2 節明確隔離的 non-canonical compatibility lane 仍依其 boundary 處理；
 - scanner/analyzer completeness、unparsable/missing/error fail-closed semantics；
 - single canonical validation entry 與 local/pre-push/CI 相同 pass/block policy；
 - Human Release Approval、approval-to-immutable-candidate binding，以及 AI Review 不得替代 human approval；
@@ -978,7 +985,7 @@ Repository 要宣稱 Standard v1 conformant，**MUST** 證明：
 4. canonical lifecycle stage ordering；
 5. single validation entry contract；
 6. validation tool approved-source / approved-endpoint enforcement；
-7. latest-stable resolution / stable-release semantics / resolved identity / complete per-run toolset freeze evidence；
+7. approved-channel resolution（含 latest-stable 與 SkillSpector approved-source registry）/ stable-release semantics / resolved identity / complete per-run toolset freeze evidence；
 8. every formal baseline tool 的 actual invocation 與完整 active package coverage；
 9. immutable workflow action pin、non-persisted checkout credentials、authority trigger coverage 與 event-aware diff evidence；
 10. SkillSpector Static Gate + analyzer completeness，僅可依第 9.1.1 節記錄非必要平台步驟；
@@ -1049,7 +1056,7 @@ Tracking: `SYP-353`（三平台 CI 範本）、`SYP-354`（installer 跨平台�
 - local、pre-push、CI 使用不同 pass/block policy；
 - scanner/analyzer 未完整執行仍 pass；
 - 將 `sourceMergeExceptionProposal`、補充測試或自我宣告的政策批准用作 required source check pass；
-- 只驗證 validation tool `channel = latest-stable` 而不驗證 exact approved `source` / distribution endpoint；
+- 只驗證 validation tool 的 channel 字串，而不驗證 exact approved `source` / distribution endpoint／SkillSpector registry entry；
 - reusable workflow action 只綁定 mutable major tag，或 checkout 對後續 subprocess 持久化 repository credentials；
 - required Composition 使用 path filter 或觸發條件，導致 main pull request/push 可略過 authority gate，或未執行保留的 bridge/regressions；workflow_dispatch-only Standards Conformance 診斷不能取代 required Composition；main push 的 whitespace gate 使用會退化成空 diff 的 range；
 - `skill-tools` 受 `.npmrc` / `NPM_CONFIG_REGISTRY` 導向未核准 registry，或 `npm view/install` 未顯式指定 approved registry；
@@ -1062,7 +1069,7 @@ Tracking: `SYP-353`（三平台 CI 範本）、`SYP-354`（installer 跨平台�
 - authority workflow 使用 mutable Go setup action、未以 `go-version: stable` 與 `check-latest: true` 取得並驗證該次 run 的 latest-stable Go runtime，或 resolver 未在 module resolution 前驗證並記錄 runtime identity；
 - 讓 `skill-validator` 解析或安裝繼承 shared / caller-controlled `GOMODCACHE`、`GOCACHE` 或非空 `GOFLAGS`，而未使用該次 invocation 專用的空白暫存 caches 與乾淨 build flags；
 - workflow 自行從 package manager / repository 安裝 canonical tool 而繞過中央 resolver；
-- canonical validation 長期固定舊工具而不解析中央 latest-stable policy；
+- canonical validation 長期固定舊工具而不解析中央 latest-stable policy 或 SkillSpector active approved entry；
 - compatibility lane 可成為 canonical release/security gate，或 resolver 不驗證 compatibility-lane boundary；
 - 同一 validation run 中途漂移 tool version；
 - provider 可提供 resolved identity / integrity evidence 卻不記錄；

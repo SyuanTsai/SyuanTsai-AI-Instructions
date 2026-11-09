@@ -8,6 +8,8 @@
 - Authority: `docs/standards/skill-repository-standard.md`
 - Cross-repository evidence: `docs/standards/skill-repository-review-matrix.md`
 - Validation tool policy: `docs/standards/validation-toolchain.json`
+- SkillSpector approved sources: `docs/standards/skillspector-approved-sources.json`
+- SkillSpector approved-source schema: `docs/standards/schemas/skillspector-approved-sources-v1.schema.json`
 - Source inventory schema: `docs/standards/schemas/source-inventory-v2.schema.json`
 - OpenAI metadata semantic schema: `docs/standards/schemas/openai-agent-metadata.schema.json`
 - Managed replacement/migration contract: `docs/standards/managed-skill-lifecycle.md`
@@ -20,6 +22,7 @@
 - Internal source review assessment schema: `docs/standards/schemas/internal-source-review-assessment-v1.schema.json`
 - Static parser host ownership policy: `docs/standards/static-parser-host-ownership.json`
 - Static parser profile execution schema: `docs/standards/schemas/static-parser-profile-execution-v1.schema.json`
+- Native static profile execution schema: `docs/standards/schemas/static-native-profile-execution-v1.schema.json`
 - Static scanner bridge: `scripts/Invoke-StandardStaticScan.ps1`
 - Validation tool resolver: `scripts/Resolve-StandardValidationTool.ps1`
 - Verified Python wheel closure helper: `scripts/Resolve-PythonWheelClosure.py`
@@ -66,7 +69,7 @@ Linux／macOS leg 依各自平台與 lane 的完成條件加入，加入後即�
 - immutable authority distribution/revision binding；
 - canonical validation / security lifecycle；
 - local / pre-push / CI 共用 validation contract；
-- trusted-source / trusted-endpoint + latest-stable validation tool policy；
+- trusted-source / trusted-endpoint + approved-channel validation tool policy（SkillSpector 使用 approved-source registry，其餘正式工具維持 latest-stable）；
 - immutable workflow-action pin、checkout credential isolation、authority trigger 與 event-aware diff contract；
 - run-owned isolated tool installation、static installed metadata verification 與 credential boundary；
 - testing、release、publish、install 與 post-install verification；
@@ -100,7 +103,7 @@ Runner 的 terminal state 與 local／pre-push／CI exit semantics 必須一致�
 3. `docs/standards/schemas/openai-agent-metadata.schema.json` 只驗 YAML parse 後的 semantic baseline；quoted-string/unquoted-key lexical style 與 exact Skill identity binding 仍由 YAML-aware validator 負責。
 5. `docs/standards/validation-security-gate.json` 是 canonical validation stage order、security severity mapping、local/pre-push/CI pass-block semantics 與 consumer entry-point contract 的 machine-readable authority；schema 與 executable gate 必須同時更新。
 6. Standard v1 的 consumer entry-point contract 要求每個 event/candidate 只有一個 canonical matrix、每個平台 leg 只有 one canonical validation execution，並 inventory workflows、hooks 與 public release commands；component scripts、compatibility status lanes 與本 authority repository 的四個 workflow roles 不得被誤判為 alternate gate。
-7. `scripts/Resolve-StandardValidationTool.ps1` 是 tool source / endpoint trust anchor 與 provider-specific resolution authority；`scripts/Resolve-PythonWheelClosure.py` 是其 hash-bound SkillSpector approved-index candidate materializer／offline backtracking helper，workflow 不得另建第二套 acquisition logic。
+7. `scripts/Resolve-StandardValidationTool.ps1` 是 tool source / endpoint trust anchor 與 provider-specific resolution authority；SkillSpector 由已審核來源清單的 active immutable pin 選擇，不使用 mutable latest release；`scripts/Resolve-PythonWheelClosure.py` 是其 hash-bound approved-index candidate materializer／offline backtracking helper，workflow 不得另建第二套 acquisition logic。
 8. scripts/Invoke-StandardAuthorityGate.ps1 是共用的 executable authority adapter。本 Repository 的三平台 Core／Install Smoke 為目標要求，分階段落實及當前 required gate 依 Standard §18.1.1；以下不表示目前 workflow 已具備或通過全部平台。目標 pr8 workflow 的 Core lane 必須在 ubuntu-latest、windows-latest、macos-latest 各執行一個必要 leg，設定 fail-fast: false，使用各平台官方 release asset 與 SHA-256 驗證的最新穩定 PowerShell 7，對 main pull request 與 push 執行唯一自動 authority gate，且不得設 paths filter；它執行 canonical gate 與保留的 source composition／acquisition tests。目標 syp101 workflow 的 Install Smoke lane 必須在三平台各執行一個必要 leg，設定 fail-fast: false，承接 production lock、真實安裝與 idempotence checks。三個 source required contexts 名稱不變，僅全部 canonical legs 完成且通過時成功；Core-only PASS 不足以滿足它們。standards-conformance.yml 僅由 workflow_dispatch 手動啟動，以 Windows、Linux、macOS 三個 fail-closed leg 提供相同 gate、完整 non-authority suite、SYP-214 與 offline fixtures 的診斷證據；它不是三平台 required 驗證，也不改變 Standard §18.1 的 required 平台狀態。SYP86 lock 保留 path-filtered push 與 workflow_dispatch 診斷；validator maintenance 僅保留 workflow_dispatch 手動診斷；兩者均不加入普通 PR 前置。此 gate 輸出 source-bound releaseEligible=false 結果，不執行外部 consumer tools，也不宣稱完整 consumer lifecycle。
 9. `scripts/Invoke-StandardValidation.ps1` 是 consumer-facing central orchestration contract 的唯一 runner；其 adapter、evidence schema 與 behavior regression 必須在同一 protected-base authority path 驗證，且 runner 的 development harness 不得成為 release approval。
 10. `tests/skill-repository-standard.Tests.ps1`、`tests/skill-repository-workflows.Tests.ps1`、`tests/standard-validation-resolver-hardening.Tests.ps1` 與 `tests/standard-validation-runner.Tests.ps1` 共同保護 Standard、merge-blocking workflow、resolver supply-chain 與 central runner contract；normative 或 executable authority change 必須在同一 PR 更新相關 regression。
