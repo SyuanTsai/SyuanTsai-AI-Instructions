@@ -312,6 +312,6 @@ Describe 'Static parser coverage and finding preservation' {
             $exit=$LASTEXITCODE
         }finally{$ErrorActionPreference=$previous}
         $output=Get-Content -LiteralPath $log -Raw
-        Assert-ParserCase ($exit -eq 0 -and $output -match 'Ran 12 tests' -and $output -match '(?m)^OK\s*$' -and $output -notmatch 'skipped=') $output
+        Assert-ParserCase ($exit -eq 0 -and $output -match 'Ran 13 tests' -and $output -match '(?m)^OK\s*$' -and $output -notmatch 'skipped=') $output
     }
 }
