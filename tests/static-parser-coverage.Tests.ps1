@@ -177,6 +177,24 @@ Describe 'Static parser coverage and finding preservation' {
         }
     }
 
+
+    # Scenario: A frozen receipt names a retained reviewed source entry that is not the registry's active entry.
+    # Purpose: Keep Static execution canonical by accepting only the currently active approved source.
+    It 'UnitT54_rejects_receipts_bound_to_a_non_active_approved_SkillSpector_entry' {
+        $approved=Get-Content -Raw (Join-Path $parserRepositoryRoot 'docs/standards/skillspector-approved-sources.json') | ConvertFrom-Json
+        $entry=$approved.entries.'2.13.0'
+        $runId='b'*32
+        $prefix='github:NVIDIA/SkillSpector@'+$entry.releaseTag+'#commit='+$entry.releaseCommit+'#asset=sha256:'+$entry.wheelSha256+'#'
+        $receipt=[pscustomobject]@{
+            toolName='skillspector';source='NVIDIA/SkillSpector';channel='approved-source-registry'
+            approvedSourceId='2.13.0';parserCorrection=$entry.parserCorrection;resolvedVersion=$entry.version;frozenForRun=$true
+            resolutionRunId=$runId;identityKind='release-commit-asset-metadata-dependency-closure-and-executable'
+            offlineResolutionVerified=$true;consoleEntryPoint='skillspector.cli:app';resolvedIdentity=$prefix+'closure=fixture'
+            installedClosureSha256='a'*64;dependencyClosure=@([pscustomobject]@{normalizedName='skillspector';version=$entry.version;sha256=$entry.wheelSha256})
+        }
+        Assert-ParserRejected {Get-StaticApprovedSkillSpectorEntry -Receipt $receipt -ApprovedSources $approved -ExpectedResolutionRunId $runId | Out-Null}
+    }
+
     # Scenario: a scan output is outside its Skill but still inside another part of the frozen candidate.
     # Purpose: forbid writes to the entire bound source and both tooling roots while accepting a separate artifact sibling.
     It 'UnitT46_forbids_outputs_inside_any_bound_source_or_tool_root' {

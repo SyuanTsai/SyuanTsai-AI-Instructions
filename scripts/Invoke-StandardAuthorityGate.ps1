@@ -3270,11 +3270,16 @@ function Assert-InstalledAuthorityToolReceipt {
         }
     }
     if ($ToolName -ceq 'skillspector') {
-        . (Join-Path $PSScriptRoot 'Resolve-StandardValidationTool.ps1') -ValidatePolicyOnly | Out-Null
         $toolchain = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/validation-toolchain.json') | ConvertFrom-Json
-        $registry = Get-SkillSpectorApprovedSources -Path (Join-Path (Split-Path -Parent $PSScriptRoot) ([string]$toolchain.tools.skillspector.approvedSources))
+        $registryPath = Join-Path (Split-Path -Parent $PSScriptRoot) ([string]$toolchain.tools.skillspector.approvedSources)
+        $registry = & {
+            param([string]$ResolverPath,[string]$ApprovedSourcesPath)
+            . $ResolverPath -ValidatePolicyOnly | Out-Null
+            Get-SkillSpectorApprovedSources -Path $ApprovedSourcesPath
+        } (Join-Path $PSScriptRoot 'Resolve-StandardValidationTool.ps1') $registryPath
         $approvedSourceId = Get-AuthorityRequiredProperty -Object $Receipt -Name 'approvedSourceId' -Context 'skillspector receipt'
         $parserCorrection = Get-AuthorityRequiredProperty -Object $Receipt -Name 'parserCorrection' -Context 'skillspector receipt'
+        if ([string]$approvedSourceId -cne [string]$registry.active) { throw 'SkillSpector receipt does not name the active approved source entry.' }
         $entryProperty = @($registry.entries.PSObject.Properties | Where-Object { $_.Name -ceq [string]$approvedSourceId })
         if ($entryProperty.Count -ne 1) { throw 'SkillSpector receipt names an unknown approved source entry.' }
         $entry = $entryProperty[0].Value

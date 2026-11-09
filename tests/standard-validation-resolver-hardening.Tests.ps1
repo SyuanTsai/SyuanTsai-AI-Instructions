@@ -506,6 +506,20 @@ Describe 'Standard validation resolver hardening' {
         }
     }
 
+    # Scenario: The retained bridge entry keeps its reviewed analyzer but changes its release commit or wheel digest.
+    # Purpose: Bind the PowerShell correction profile to the exact reviewed release bytes, not only its version and analyzer.
+    It 'UnitT26a_rejects_bridge_entries_not_bound_to_reviewed_release_bytes' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $fixture=Join-Path $TestDrive 'skillspector-bridge-release-binding.json'
+        foreach($mutation in @('release-commit','wheel-sha256')) {
+            $candidate=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/skillspector-approved-sources.json') | ConvertFrom-Json
+            if($mutation -ceq 'release-commit') {$candidate.entries.'2.13.0'.releaseCommit='0'*40}
+            else {$candidate.entries.'2.13.0'.wheelSha256='0'*64}
+            [IO.File]::WriteAllText($fixture,($candidate | ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
+            { Get-SkillSpectorApprovedSources -Path $fixture } | Should Throw
+        }
+    }
+
     # Scenario: the active approved entry is resolved through a tagged release and any pinned identity surface drifts.
     # Purpose: forbid mutable latest discovery and retain explicit fail-closed checks for commit, asset, wheel, metadata and analyzer bytes.
     It 'UnitT103_binds_tagged_release_and_every_approved_SkillSpector_identity_surface' {

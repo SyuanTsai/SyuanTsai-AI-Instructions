@@ -162,6 +162,7 @@ function Get-StaticApprovedSkillSpectorEntry($Receipt,$ApprovedSources,[string]$
     if($null -eq $approvedSourceProperty -or $null -eq $parserCorrectionProperty){throw 'Scanner receipt has no supported frozen parser profile.'}
     $receiptApprovedSourceId=[string]$approvedSourceProperty.Value
     $receiptParserCorrection=[string]$parserCorrectionProperty.Value
+    if($receiptApprovedSourceId -cne [string]$ApprovedSources.active){throw 'Scanner receipt has no supported frozen parser profile.'}
     $approvedProperty=@($ApprovedSources.entries.PSObject.Properties | Where-Object {$_.Name -ceq $receiptApprovedSourceId})
     if($approvedProperty.Count -ne 1){throw 'Scanner receipt has no supported frozen parser profile.'}
     $approvedEntry=$approvedProperty[0].Value
@@ -211,9 +212,12 @@ try {
         $frozenPath=Assert-StaticPhysicalPath (Join-Path $authorityRoot $relative)
         $frozenAuthority[$relative]=Static-Hash $frozenPath
     }
-    . (Join-Path $PSScriptRoot 'Resolve-StandardValidationTool.ps1') -ValidatePolicyOnly | Out-Null
     $approvedSourcesPath=Join-Path $authorityRoot 'docs/standards/skillspector-approved-sources.json'
-    $approvedSources=Get-SkillSpectorApprovedSources -Path $approvedSourcesPath
+    $approvedSources=& {
+        param([string]$ResolverPath,[string]$RegistryPath)
+        . $ResolverPath -ValidatePolicyOnly | Out-Null
+        Get-SkillSpectorApprovedSources -Path $RegistryPath
+    } (Join-Path $PSScriptRoot 'Resolve-StandardValidationTool.ps1') $approvedSourcesPath
     $receipt=Read-StaticFrozenReceipt -Path $receiptFull -ExpectedSha256 $ExpectedToolReceiptSha256
     $approvedEntry=Get-StaticApprovedSkillSpectorEntry -Receipt $receipt -ApprovedSources $approvedSources -ExpectedResolutionRunId $ExpectedResolutionRunId
     $receiptApprovedSourceId=[string]$receipt.approvedSourceId

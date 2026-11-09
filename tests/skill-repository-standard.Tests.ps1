@@ -651,6 +651,29 @@ Describe 'SYP258 source validation result gate' {
         if ((Invoke-SourceGateFixture -Report $report) -ne $true) { throw 'Complete candidate-bound source evidence must pass.' }
     }
 
+    # Scenario: A source-validation receipt is internally consistent with a retained registry entry that is not active.
+    # Purpose: Reject non-canonical SkillSpector receipts before source tool execution or evidence acceptance.
+    It 'UnitT22_rejects_a_non_active_approved_SkillSpector_source_receipt' {
+        $report=New-SourceGateFixture
+        $binding=$report.sourceValidation.toolReceipts[2]
+        $registry=Get-Content -Raw -Encoding UTF8 (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/skillspector-approved-sources.json') | ConvertFrom-Json
+        $entry=$registry.entries.'2.13.0'
+        Set-SourceGateReceipt -Report $report -Index 2 -Mutate {
+            param($receipt)
+            $receipt.approvedSourceId='2.13.0'
+            $receipt.parserCorrection=[string]$entry.parserCorrection
+            $receipt.resolvedVersion=[string]$entry.version
+            $receipt.resolvedIdentity='github:NVIDIA/SkillSpector@'+[string]$entry.releaseTag+'#commit='+[string]$entry.releaseCommit+'#asset=sha256:'+[string]$entry.wheelSha256+'#fixture'
+        }
+        $frozenBinding=@($report.sourceValidation.frozenFiles | Where-Object {[string]$_.path -ceq [string]$binding.path})
+        if($frozenBinding.Count -ne 1){throw 'Fixture receipt binding must have one frozen-file row.'}
+        $frozenBinding[0].sha256=[string]$binding.sha256
+        $failure=$null
+        try { Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $report.sourceValidation.frozenFiles -RunId $report.runId | Out-Null }
+        catch { $failure=$_.Exception.Message }
+        if($failure -cnotmatch '^INVALID\|Source SkillSpector receipt.*active approved source entry') { throw "Non-active source receipt returned the wrong failure: '$failure'." }
+    }
+
     # Scenario: A report relabels passed raw output or substitutes platform exception evidence.
     # Purpose: Reject summary/raw mismatches before any exception can skip native Static validation.
     It 'UnitT25_rejects_SkillSpector_summary_and_raw_envelope_mismatches' {
@@ -3280,6 +3303,43 @@ public sealed class C245NonCooperativeStream : Stream {
             catch { $errorMessage = $_.Exception.Message }
             Assert-Match $errorMessage ([string]$case.Pattern) "Policy coercion '$($case.Path)' must fail closed."
         }
+    }
+
+    # Scenario: Authority validation receives a valid active SkillSpector receipt, then the retained entry is substituted.
+    # Purpose: Isolate resolver loading from caller parameters and reject every non-active receipt even when its entry is reviewed.
+    It 'UnitT33b_preserves_authority_receipt_parameters_and_rejects_non_active_SkillSpector_sources' {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+
+        $installRoot=Join-Path $TestDrive 'skillspector-authority-install-root'
+        $toolRoot=Join-Path $installRoot 'skillspector'
+        [void](New-Item -ItemType Directory -Path $toolRoot -Force)
+        $executablePath=Join-Path $toolRoot 'skillspector.bin'
+        Write-TestUtf8File -Path $executablePath -Text 'skillspector executable fixture'
+        $executableSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $executablePath).Hash.ToLowerInvariant()
+        $launcher=[pscustomobject][ordered]@{kind='direct-executable';shimPath=$null;shimSha256=$null;payloadPath=$null;payloadSha256=$null;runtimePath=$null;runtimeSha256=$null}
+        $registry=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'docs/standards/skillspector-approved-sources.json') | ConvertFrom-Json
+        $entry=$registry.entries.($registry.active)
+        $receipt=[pscustomobject][ordered]@{
+            schemaVersion=1;toolName='skillspector';source='NVIDIA/SkillSpector';channel='approved-source-registry';frozenForRun=$true
+            resolvedVersion=[string]$entry.version;resolvedIdentity=('github:NVIDIA/SkillSpector@'+[string]$entry.releaseTag+'#commit='+[string]$entry.releaseCommit+'#asset=sha256:'+[string]$entry.wheelSha256+'#fixture')
+            identityKind='release-commit-asset-metadata-dependency-closure-and-executable';approvedSourceId=[string]$registry.active;parserCorrection=[string]$entry.parserCorrection
+            installRoot=$toolRoot;executablePath=$executablePath;executableSha256=$executableSha256;installedClosureSha256=(Get-AuthorityDirectoryClosureSha256 -Path $toolRoot)
+            launcher=$launcher;launcherDigestSha256=(Get-AuthorityLauncherDigest -Launcher $launcher);dependencyClosureSha256=('a'*64);dependencyClosure=@([pscustomobject]@{name='skillspector';version=[string]$entry.version})
+        }
+        $expectedInstallRoot=$installRoot
+        $expectedToolName='skillspector'
+        Assert-InstalledAuthorityToolReceipt -Receipt $receipt -ToolName $expectedToolName -ExpectedSource 'NVIDIA/SkillSpector' -InstallRoot $expectedInstallRoot | Out-Null
+        if($expectedInstallRoot -cne $installRoot -or $expectedToolName -cne 'skillspector') { throw 'Authority receipt caller parameters changed after resolver loading.' }
+
+        $retained=$registry.entries.'2.13.0'
+        $receipt.approvedSourceId='2.13.0'
+        $receipt.parserCorrection=[string]$retained.parserCorrection
+        $receipt.resolvedVersion=[string]$retained.version
+        $receipt.resolvedIdentity='github:NVIDIA/SkillSpector@'+[string]$retained.releaseTag+'#commit='+[string]$retained.releaseCommit+'#asset=sha256:'+[string]$retained.wheelSha256+'#fixture'
+        $failure=$null
+        try { Assert-InstalledAuthorityToolReceipt -Receipt $receipt -ToolName 'skillspector' -ExpectedSource 'NVIDIA/SkillSpector' -InstallRoot $installRoot | Out-Null }
+        catch { $failure=$_.Exception.Message }
+        Assert-Match $failure 'active approved source entry' 'A retained non-active SkillSpector source must fail closed.'
     }
 
     # Scenario: A resolver can emit a plausible Go runtime identity for a different executable or run.

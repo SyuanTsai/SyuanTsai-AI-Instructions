@@ -332,6 +332,8 @@ function Get-SkillSpectorApprovedSources {
         }
         if ([string]$entry.parserCorrection -ceq 'powershell-native-command-ownership-v1' -and
             ([string]$entry.version -cne [string]$bridgePolicy.officialScannerVersion -or
+             [string]$entry.releaseCommit -cne [string]$bridgePolicy.officialScannerReleaseCommit -or
+             [string]$entry.wheelSha256 -cne [string]$bridgePolicy.officialScannerReleaseAssetSha256 -or
              [string]$entry.analyzerSha256 -cne [string]$bridgePolicy.officialAnalyzerSha256)) {
             throw "SkillSpector approved source entry '$key' is not bound to the reviewed PowerShell bridge analyzer."
         }

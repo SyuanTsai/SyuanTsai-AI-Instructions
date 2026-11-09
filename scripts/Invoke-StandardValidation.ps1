@@ -2993,7 +2993,7 @@ function Merge-StandardValidationProcessStderr {
 function Initialize-StandardValidationPlatformRuntime {
     if ($null -ne (Get-Variable StandardValidationPlatformBinding -Scope Script -ErrorAction SilentlyContinue)) { return }
     $manifestPath = Join-Path $PSScriptRoot 'platform-runtime.psd1'
-    $pin = '548f45afb85da5631d8a6e765bdc62255b7564eb353214b74579f02246453f70'
+    $pin = '7f112390d2995a105b9e9a916876df1779485dec6df21d7516243e2dcd1c4dca'
     $canonicalHash = {
         param([string]$Path)
         $bytes = [IO.File]::ReadAllBytes($Path)
@@ -8387,6 +8387,7 @@ function Assert-StandardCoreSourceToolReceipts {
             $parserCorrection = [string](Get-StandardValidationRequiredProperty -Object $receipt -Name 'parserCorrection' -Context 'source SkillSpector receipt')
             $registryPath = Join-Path $script:StandardValidationRepositoryRoot ([string]$policy.tools.skillspector.approvedSources)
             $registry = (Get-StandardValidationJsonSnapshot -Path $registryPath -Context 'SkillSpector approved-source registry').value
+            if ($approvedSourceId -cne [string]$registry.active) { throw 'INVALID|Source SkillSpector receipt does not name the active approved source entry.' }
             $entryProperty = @($registry.entries.PSObject.Properties | Where-Object { $_.Name -ceq $approvedSourceId })
             if ($entryProperty.Count -ne 1) { throw 'INVALID|Source SkillSpector receipt names an unknown approved source entry.' }
             $entry = $entryProperty[0].Value
