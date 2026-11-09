@@ -651,6 +651,29 @@ Describe 'SYP258 source validation result gate' {
         if ((Invoke-SourceGateFixture -Report $report) -ne $true) { throw 'Complete candidate-bound source evidence must pass.' }
     }
 
+    # Scenario: A source-validation receipt is internally consistent with a retained registry entry that is not active.
+    # Purpose: Reject non-canonical SkillSpector receipts before source tool execution or evidence acceptance.
+    It 'UnitT22_rejects_a_non_active_approved_SkillSpector_source_receipt' {
+        $report=New-SourceGateFixture
+        $binding=$report.sourceValidation.toolReceipts[2]
+        $registry=Get-Content -Raw -Encoding UTF8 (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/skillspector-approved-sources.json') | ConvertFrom-Json
+        $entry=$registry.entries.'2.13.0'
+        Set-SourceGateReceipt -Report $report -Index 2 -Mutate {
+            param($receipt)
+            $receipt.approvedSourceId='2.13.0'
+            $receipt.parserCorrection=[string]$entry.parserCorrection
+            $receipt.resolvedVersion=[string]$entry.version
+            $receipt.resolvedIdentity='github:NVIDIA/SkillSpector@'+[string]$entry.releaseTag+'#commit='+[string]$entry.releaseCommit+'#asset=sha256:'+[string]$entry.wheelSha256+'#fixture'
+        }
+        $frozenBinding=@($report.sourceValidation.frozenFiles | Where-Object {[string]$_.path -ceq [string]$binding.path})
+        if($frozenBinding.Count -ne 1){throw 'Fixture receipt binding must have one frozen-file row.'}
+        $frozenBinding[0].sha256=[string]$binding.sha256
+        $failure=$null
+        try { Assert-StandardCoreSourceToolReceipts -Bindings $report.sourceValidation.toolReceipts -FrozenFiles $report.sourceValidation.frozenFiles -RunId $report.runId | Out-Null }
+        catch { $failure=$_.Exception.Message }
+        if($failure -cnotmatch '^INVALID\|Source SkillSpector receipt.*active approved source entry') { throw "Non-active source receipt returned the wrong failure: '$failure'." }
+    }
+
     # Scenario: A report relabels passed raw output or substitutes platform exception evidence.
     # Purpose: Reject summary/raw mismatches before any exception can skip native Static validation.
     It 'UnitT25_rejects_SkillSpector_summary_and_raw_envelope_mismatches' {
@@ -1460,9 +1483,11 @@ Describe 'Agent Skill Repository Standard v1 contract' {
 
         foreach ($entry in $expectedSources.GetEnumerator()) {
             Assert-Equal $toolchain.tools.($entry.Key).source $entry.Value "$($entry.Key) must use its approved source."
-            Assert-Equal $toolchain.tools.($entry.Key).channel 'latest-stable' "$($entry.Key) must use latest-stable."
+            $expectedChannel = if ($entry.Key -ceq 'skillspector') { 'approved-source-registry' } else { 'latest-stable' }
+            Assert-Equal $toolchain.tools.($entry.Key).channel $expectedChannel "$($entry.Key) must use its approved channel."
         }
 
+        Assert-Equal $toolchain.tools.skillspector.approvedSources 'docs/standards/skillspector-approved-sources.json' 'SkillSpector must bind the reviewed source registry.'
         Assert-Equal $toolchain.tools.skillspector.releaseVersionRule 'v-semver-release-only' 'SkillSpector release tags must use stable v-semver.'
         Assert-Equal $toolchain.tools.skillspector.pythonPackageIndex 'https://pypi.org/simple' 'SkillSpector dependencies must use the approved PyPI index.'
         Assert-Equal $toolchain.tools.skillspector.pythonDistribution.configIsolation 'os.devnull' 'pip configuration must be isolated.'
@@ -2438,18 +2463,22 @@ public sealed class C245SlowTrickleStream : Stream {
         $sibling = Join-Path $script:tailRoot 'adjacent-root'
         [void](New-Item -ItemType Directory -Path $sibling -Force)
         $script:tailPython=(Get-Command python -CommandType Application -ErrorAction Stop|Select-Object -First 1).Path
+        $originalGetSkillSpectorApprovedSources=(Get-Item Function:Get-SkillSpectorApprovedSources).ScriptBlock
+        $originalAssertSkillSpectorWheelIdentity=(Get-Item Function:Assert-SkillSpectorWheelIdentity).ScriptBlock
         Mock Assert-Command { $script:tailPython }
         Mock Assert-NoConflictingPipEnvironment { }
         Mock Assert-NoConflictingPythonEnvironment { }
+        Set-Item Function:Get-SkillSpectorApprovedSources -Value { [pscustomobject]@{active='1.0.0';activeEntry=[pscustomobject]@{version='1.0.0';releaseTag='v1.0.0';releaseCommit=('a'*40);wheelFileName='skillspector-1.0.0-py3-none-any.whl';wheelSha256=$script:tailHash;analyzerSha256=('b'*64);parserCorrection='none'}} }
         Mock Get-GitHubHeaders { @{} }
         Mock Add-ProcessPathValue { }
         Mock Get-PythonWheelMetadata { [pscustomobject]@{ name='skillspector'; version='1.0.0'; requiresDist=@() } }
+        Set-Item Function:Assert-SkillSpectorWheelIdentity -Value { }
         Mock Invoke-BoundedGitHubGet {
             if ($OutFile) {
                 [IO.File]::WriteAllBytes($OutFile, $script:tailBytes)
                 $script:tailWork = Join-Path (Split-Path -Parent $OutFile) 'dependency-resolution'
             }
-            elseif ($Uri -like '*/releases/latest') {
+            elseif ($Uri -like '*/releases/tags/v1.0.0') {
                 [pscustomobject]@{ draft=$false; prerelease=$false; tag_name='v1.0.0'; assets=@([pscustomobject]@{
                     name='skillspector-1.0.0-py3-none-any.whl'; digest=('sha256:'+$script:tailHash)
                     browser_download_url='https://github.com/NVIDIA/SkillSpector/releases/download/v1.0.0/skillspector-1.0.0-py3-none-any.whl'
@@ -2481,7 +2510,12 @@ public sealed class C245SlowTrickleStream : Stream {
             try { $receipt = Resolve-SkillSpector -ShouldInstall $true -ToolPolicy $policy.tools.skillspector -RequestedInstallRoot $script:tailRoot -AcquisitionLimitSeconds 2 }
             catch { $failure = $_.Exception.Message }
         }
-        finally { $env:GITHUB_TOKEN = $tokenBefore; $env:GH_TOKEN = $ghBefore }
+        finally {
+            $env:GITHUB_TOKEN = $tokenBefore
+            $env:GH_TOKEN = $ghBefore
+            Set-Item Function:Get-SkillSpectorApprovedSources -Value $originalGetSkillSpectorApprovedSources
+            Set-Item Function:Assert-SkillSpectorWheelIdentity -Value $originalAssertSkillSpectorWheelIdentity
+        }
         Assert-Match $failure 'synthetic tail acquisition deadline exceeded' 'The late budget failure must propagate.'
         $saved = Join-Path $script:tailRoot ('skillspector-failure-'+$script:ResolverRunId)
         Assert-True (Test-Path -LiteralPath (Join-Path $saved 'offline-backtracking-plan.json')) 'The completed plan must survive tail cleanup.'
@@ -3271,6 +3305,43 @@ public sealed class C245NonCooperativeStream : Stream {
         }
     }
 
+    # Scenario: Authority validation receives a valid active SkillSpector receipt, then the retained entry is substituted.
+    # Purpose: Isolate resolver loading from caller parameters and reject every non-active receipt even when its entry is reviewed.
+    It 'UnitT33b_preserves_authority_receipt_parameters_and_rejects_non_active_SkillSpector_sources' {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+
+        $installRoot=Join-Path $TestDrive 'skillspector-authority-install-root'
+        $toolRoot=Join-Path $installRoot 'skillspector'
+        [void](New-Item -ItemType Directory -Path $toolRoot -Force)
+        $executablePath=Join-Path $toolRoot 'skillspector.bin'
+        Write-TestUtf8File -Path $executablePath -Text 'skillspector executable fixture'
+        $executableSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $executablePath).Hash.ToLowerInvariant()
+        $launcher=[pscustomobject][ordered]@{kind='direct-executable';shimPath=$null;shimSha256=$null;payloadPath=$null;payloadSha256=$null;runtimePath=$null;runtimeSha256=$null}
+        $registry=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'docs/standards/skillspector-approved-sources.json') | ConvertFrom-Json
+        $entry=$registry.entries.($registry.active)
+        $receipt=[pscustomobject][ordered]@{
+            schemaVersion=1;toolName='skillspector';source='NVIDIA/SkillSpector';channel='approved-source-registry';frozenForRun=$true
+            resolvedVersion=[string]$entry.version;resolvedIdentity=('github:NVIDIA/SkillSpector@'+[string]$entry.releaseTag+'#commit='+[string]$entry.releaseCommit+'#asset=sha256:'+[string]$entry.wheelSha256+'#fixture')
+            identityKind='release-commit-asset-metadata-dependency-closure-and-executable';approvedSourceId=[string]$registry.active;parserCorrection=[string]$entry.parserCorrection
+            installRoot=$toolRoot;executablePath=$executablePath;executableSha256=$executableSha256;installedClosureSha256=(Get-AuthorityDirectoryClosureSha256 -Path $toolRoot)
+            launcher=$launcher;launcherDigestSha256=(Get-AuthorityLauncherDigest -Launcher $launcher);dependencyClosureSha256=('a'*64);dependencyClosure=@([pscustomobject]@{name='skillspector';version=[string]$entry.version})
+        }
+        $expectedInstallRoot=$installRoot
+        $expectedToolName='skillspector'
+        Assert-InstalledAuthorityToolReceipt -Receipt $receipt -ToolName $expectedToolName -ExpectedSource 'NVIDIA/SkillSpector' -InstallRoot $expectedInstallRoot | Out-Null
+        if($expectedInstallRoot -cne $installRoot -or $expectedToolName -cne 'skillspector') { throw 'Authority receipt caller parameters changed after resolver loading.' }
+
+        $retained=$registry.entries.'2.13.0'
+        $receipt.approvedSourceId='2.13.0'
+        $receipt.parserCorrection=[string]$retained.parserCorrection
+        $receipt.resolvedVersion=[string]$retained.version
+        $receipt.resolvedIdentity='github:NVIDIA/SkillSpector@'+[string]$retained.releaseTag+'#commit='+[string]$retained.releaseCommit+'#asset=sha256:'+[string]$retained.wheelSha256+'#fixture'
+        $failure=$null
+        try { Assert-InstalledAuthorityToolReceipt -Receipt $receipt -ToolName 'skillspector' -ExpectedSource 'NVIDIA/SkillSpector' -InstallRoot $installRoot | Out-Null }
+        catch { $failure=$_.Exception.Message }
+        Assert-Match $failure 'active approved source entry' 'A retained non-active SkillSpector source must fail closed.'
+    }
+
     # Scenario: A resolver can emit a plausible Go runtime identity for a different executable or run.
     # Purpose: Bind the skill-validator receipt to the exact setup-go executable, bytes, version output and authority run.
     It 'UnitT33a_requires_run_bound_skill_validator_runtime_identity' {
@@ -3381,10 +3452,18 @@ public sealed class C245NonCooperativeStream : Stream {
         Assert-False (Test-StableNpmPackageVersion -Version '01.2.3') 'SemVer numeric identifiers must not contain leading zeroes.'
     }
 
-    It 'UnitT28a_binds_SkillSpector_release_wheel_metadata_and_installed_version' {
+    # Scenario: a reviewed SkillSpector wheel has matching release metadata and analyzer bytes, or one identity surface drifts.
+    # Purpose: bind the approved registry entry to the wheel filename, METADATA and exact analyzer payload.
+    It 'UnitT28a_binds_SkillSpector_release_wheel_metadata_and_analyzer_bytes' {
         . $script:ResolverPath -ValidatePolicyOnly | Out-Null
-
-        Assert-SkillSpectorWheelIdentity -ReleaseVersion '2.12.0' -WheelFileName 'skillspector-2.12.0-py3-none-any.whl' -MetadataName 'skillspector' -MetadataVersion '2.12.0'
+        $wheelRoot=Join-Path $TestDrive 'skillspector-identity';[void](New-Item -ItemType Directory -Path $wheelRoot)
+        $wheel=New-TestWheel -Root $wheelRoot -Name 'skillspector' -Version '2.12.0'
+        $analyzerBytes=[Text.UTF8Encoding]::new($false).GetBytes('reviewed analyzer fixture')
+        $archive=[IO.Compression.ZipFile]::Open($wheel,[IO.Compression.ZipArchiveMode]::Update)
+        try{$member=$archive.CreateEntry('skillspector/nodes/analyzers/static_patterns_tool_misuse.py');$stream=$member.Open();try{$stream.Write($analyzerBytes,0,$analyzerBytes.Length)}finally{$stream.Dispose()}}finally{$archive.Dispose()}
+        $sha=[Security.Cryptography.SHA256]::Create();try{$analyzerSha=([BitConverter]::ToString($sha.ComputeHash($analyzerBytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+        $approvedEntry=[pscustomobject]@{version='2.12.0';wheelFileName='skillspector-2.12.0-py3-none-any.whl';analyzerSha256=$analyzerSha}
+        Assert-SkillSpectorWheelIdentity -ApprovedEntry $approvedEntry -WheelPath $wheel -WheelFileName 'skillspector-2.12.0-py3-none-any.whl' -MetadataName 'skillspector' -MetadataVersion '2.12.0'
 
         $cases = @(
             @{ File = 'skillspector-2.11.0-py3-none-any.whl'; Name = 'skillspector'; Version = '2.12.0'; Pattern = 'release/wheel version mismatch' },
@@ -3395,13 +3474,15 @@ public sealed class C245NonCooperativeStream : Stream {
         foreach ($case in $cases) {
             $errorMessage = $null
             try {
-                Assert-SkillSpectorWheelIdentity -ReleaseVersion '2.12.0' -WheelFileName $case.File -MetadataName $case.Name -MetadataVersion $case.Version
+                Assert-SkillSpectorWheelIdentity -ApprovedEntry $approvedEntry -WheelPath $wheel -WheelFileName $case.File -MetadataName $case.Name -MetadataVersion $case.Version
             }
             catch {
                 $errorMessage = $_.Exception.Message
             }
             Assert-Match $errorMessage $case.Pattern 'SkillSpector release identity mismatch must fail closed.'
         }
+        $approvedEntry.analyzerSha256='0'*64
+        { Assert-SkillSpectorWheelIdentity -ApprovedEntry $approvedEntry -WheelPath $wheel -WheelFileName 'skillspector-2.12.0-py3-none-any.whl' -MetadataName 'skillspector' -MetadataVersion '2.12.0' } | Should Throw 'analyzer hash mismatch'
 
         $resolverLines = Get-Content -Encoding UTF8 -LiteralPath $script:ResolverPath
         $codeOnly = (($resolverLines | Where-Object { $_ -notmatch '^\s*#' }) -join "`n")
@@ -5056,7 +5137,7 @@ public sealed class C245NonCooperativeStream : Stream {
                 $consistent.candidate.acquisition.verified = $true
                 $consistent.authority.binding.status = 'verified'
                 $consistent.authority.binding.verified = $true
-                $consistent.authority.binding.selectedFiles = @(1..22 | ForEach-Object {
+                $consistent.authority.binding.selectedFiles = @(1..25 | ForEach-Object {
                         [pscustomobject][ordered]@{ path = "authority/file-$_.json"; sha256 = ('0' * 64) }
                     })
                 $consistent.launchBinding.status = 'verified'
@@ -6531,6 +6612,9 @@ Describe 'SYP171 internal source continuation authority binding' {
                 'docs/standards/internal-source-continuation.json',
                 'docs/standards/schemas/internal-source-review-assessment-v1.schema.json',
                 'docs/standards/schemas/internal-source-continuation-v1.schema.json',
+                'docs/standards/skillspector-approved-sources.json',
+                'docs/standards/schemas/skillspector-approved-sources-v1.schema.json',
+                'docs/standards/schemas/static-native-profile-execution-v1.schema.json',
                 'docs/standards/static-parser-host-ownership.json',
                 'docs/standards/schemas/static-parser-host-ownership-v1.schema.json',
                 'docs/standards/schemas/static-parser-profile-execution-v1.schema.json',
@@ -6545,12 +6629,12 @@ Describe 'SYP171 internal source continuation authority binding' {
 
         $evidenceSchema = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $root 'docs/standards/schemas/standard-validation-evidence-v1.schema.json') | ConvertFrom-Json
         $selectedFilesSchema = $evidenceSchema.allOf[5].then.properties.authority.properties.binding.properties.selectedFiles
-        if ($selectedFilesSchema.minItems -ne 22 -or $selectedFilesSchema.maxItems -ne 22) {
-            throw 'The authority evidence schema must require the complete 22-file authenticated inventory.'
+        if ($selectedFilesSchema.minItems -ne 25 -or $selectedFilesSchema.maxItems -ne 25) {
+            throw 'The authority evidence schema must require the complete 25-file authenticated inventory.'
         }
         $verifiedBindingSchema = $evidenceSchema.'$defs'.authorityBinding.allOf[0].then.properties.selectedFiles
-        if ($verifiedBindingSchema.minItems -ne 22 -or $verifiedBindingSchema.maxItems -ne 22) {
-            throw 'Every verified authority binding must retain the complete 22-file authenticated inventory.'
+        if ($verifiedBindingSchema.minItems -ne 25 -or $verifiedBindingSchema.maxItems -ne 25) {
+            throw 'Every verified authority binding must retain the complete 25-file authenticated inventory.'
         }
 
         $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $root 'docs/standards/skill-repository-standard.md')

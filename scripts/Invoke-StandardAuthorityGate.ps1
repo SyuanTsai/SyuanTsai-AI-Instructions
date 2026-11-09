@@ -3257,15 +3257,37 @@ function Assert-InstalledAuthorityToolReceipt {
         [string](Get-AuthorityProperty -Object $Receipt -Name 'source') -cne $ExpectedSource) {
         throw "$ToolName receipt has an unapproved source."
     }
-    Assert-AuthorityExactString -Value (Get-AuthorityRequiredProperty -Object $Receipt -Name 'channel' -Context "$ToolName receipt") -Expected 'latest-stable' -Context "$ToolName receipt channel"
+    $expectedChannel = if ($ToolName -ceq 'skillspector') { 'approved-source-registry' } else { 'latest-stable' }
+    Assert-AuthorityExactString -Value (Get-AuthorityRequiredProperty -Object $Receipt -Name 'channel' -Context "$ToolName receipt") -Expected $expectedChannel -Context "$ToolName receipt channel"
     if ((Get-AuthorityProperty -Object $Receipt -Name 'frozenForRun') -isnot [bool] -or
         -not [bool](Get-AuthorityProperty -Object $Receipt -Name 'frozenForRun')) {
-        throw "$ToolName receipt is not frozen at latest-stable for this run."
+        throw "$ToolName receipt is not frozen at its approved channel for this run."
     }
     foreach ($name in @('resolvedVersion', 'resolvedIdentity', 'identityKind')) {
         $value = Get-AuthorityProperty -Object $Receipt -Name $name
         if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$value)) {
             throw "$ToolName receipt is missing $name."
+        }
+    }
+    if ($ToolName -ceq 'skillspector') {
+        $toolchain = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/validation-toolchain.json') | ConvertFrom-Json
+        $registryPath = Join-Path (Split-Path -Parent $PSScriptRoot) ([string]$toolchain.tools.skillspector.approvedSources)
+        $registry = & {
+            param([string]$ResolverPath,[string]$ApprovedSourcesPath)
+            . $ResolverPath -ValidatePolicyOnly | Out-Null
+            Get-SkillSpectorApprovedSources -Path $ApprovedSourcesPath
+        } (Join-Path $PSScriptRoot 'Resolve-StandardValidationTool.ps1') $registryPath
+        $approvedSourceId = Get-AuthorityRequiredProperty -Object $Receipt -Name 'approvedSourceId' -Context 'skillspector receipt'
+        $parserCorrection = Get-AuthorityRequiredProperty -Object $Receipt -Name 'parserCorrection' -Context 'skillspector receipt'
+        if ([string]$approvedSourceId -cne [string]$registry.active) { throw 'SkillSpector receipt does not name the active approved source entry.' }
+        $entryProperty = @($registry.entries.PSObject.Properties | Where-Object { $_.Name -ceq [string]$approvedSourceId })
+        if ($entryProperty.Count -ne 1) { throw 'SkillSpector receipt names an unknown approved source entry.' }
+        $entry = $entryProperty[0].Value
+        $identityPrefix = 'github:NVIDIA/SkillSpector@' + [string]$entry.releaseTag + '#commit=' + [string]$entry.releaseCommit + '#asset=sha256:' + [string]$entry.wheelSha256 + '#'
+        if ([string]$Receipt.resolvedVersion -cne [string]$entry.version -or
+            [string]$parserCorrection -cne [string]$entry.parserCorrection -or
+            -not ([string]$Receipt.resolvedIdentity).StartsWith($identityPrefix, [StringComparison]::Ordinal)) {
+            throw 'SkillSpector receipt does not match its approved source entry.'
         }
     }
 

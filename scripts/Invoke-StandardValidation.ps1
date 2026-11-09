@@ -1228,12 +1228,13 @@ function Assert-StandardValidationToolReceipt {
         'resolutionRunId', 'resolvedAtUtc', 'attestation'
     ) -Context "$Context resolver receipt"
     $schemaVersion = Get-StandardValidationRequiredProperty -Object $receipt -Name 'schemaVersion' -Context "$Context resolver receipt"
+    $expectedChannel = if ($ExpectedToolName -ceq 'skillspector') { 'approved-source-registry' } else { 'latest-stable' }
     if (($schemaVersion -isnot [int] -and $schemaVersion -isnot [long]) -or [int64]$schemaVersion -ne 1 -or
         [string](Get-StandardValidationRequiredProperty -Object $receipt -Name 'evidenceType' -Context "$Context resolver receipt") -cne 'validation-tool-resolution' -or
         [string](Get-StandardValidationRequiredProperty -Object $receipt -Name 'status' -Context "$Context resolver receipt") -cne 'verified' -or
         [string](Get-StandardValidationRequiredProperty -Object $receipt -Name 'toolName' -Context "$Context resolver receipt") -cne $ExpectedToolName -or
-        [string](Get-StandardValidationRequiredProperty -Object $receipt -Name 'channel' -Context "$Context resolver receipt") -cne 'latest-stable') {
-        throw "BLOCKED|$Context resolver receipt is not a verified latest-stable tool result."
+        [string](Get-StandardValidationRequiredProperty -Object $receipt -Name 'channel' -Context "$Context resolver receipt") -cne $expectedChannel) {
+        throw "BLOCKED|$Context resolver receipt is not a verified approved-channel tool result."
     }
     foreach ($name in @('source', 'resolvedVersion', 'resolvedIdentity', 'resolutionRunId')) {
         $value = Get-StandardValidationRequiredProperty -Object $receipt -Name $name -Context "$Context resolver receipt"
@@ -1708,10 +1709,13 @@ function Assert-StandardValidationAuthoritySnapshot {
         'docs/standards/schemas/standard-semantic-consent-evidence-v2.schema.json',
         'docs/standards/schemas/standard-validation-adapter-v1.schema.json',
         'docs/standards/schemas/standard-validation-evidence-v1.schema.json',
+        'docs/standards/schemas/skillspector-approved-sources-v1.schema.json',
+        'docs/standards/schemas/static-native-profile-execution-v1.schema.json',
         'docs/standards/schemas/static-parser-host-ownership-v1.schema.json',
         'docs/standards/schemas/static-parser-profile-execution-v1.schema.json',
         'docs/standards/schemas/validation-security-gate-v1.schema.json',
         'docs/standards/standard-validation-contract-v1.json',
+        'docs/standards/skillspector-approved-sources.json',
         'docs/standards/static-parser-host-ownership.json',
         'docs/standards/trust-anchors/human-approval-public-key.xml',
         'docs/standards/trust-anchors/trusted-supervisor-public-key.xml',
@@ -2989,7 +2993,7 @@ function Merge-StandardValidationProcessStderr {
 function Initialize-StandardValidationPlatformRuntime {
     if ($null -ne (Get-Variable StandardValidationPlatformBinding -Scope Script -ErrorAction SilentlyContinue)) { return }
     $manifestPath = Join-Path $PSScriptRoot 'platform-runtime.psd1'
-    $pin = 'ba6af8ecbd09de50b9a55c57e5fa919d959296469125c12412bdc8300af5df5c'
+    $pin = '7f112390d2995a105b9e9a916876df1779485dec6df21d7516243e2dcd1c4dca'
     $canonicalHash = {
         param([string]$Path)
         $bytes = [IO.File]::ReadAllBytes($Path)
@@ -8367,9 +8371,10 @@ function Assert-StandardCoreSourceToolReceipts {
         if (-not (Test-StandardValidationIntegerRange -Value $receipt.schemaVersion -Minimum 1 -Maximum 1)) { throw 'INVALID|Source resolver receipt schema is unsupported.' }
         [void](Assert-StandardValidationLifecycleTimestamp -Value $receipt.resolvedAtUtc -Context 'source resolver receipt')
         $name = [string]$receipt.toolName
+        $expectedChannel = if ($name -ceq 'skillspector') { 'approved-source-registry' } else { 'latest-stable' }
         if ($name -cnotin $expectedNames -or -not $receiptNames.Add($name) -or
             [string]$receipt.resolutionRunId -cne $RunId -or $receipt.frozenForRun -isnot [bool] -or -not $receipt.frozenForRun -or
-            [string]$receipt.channel -cne 'latest-stable' -or [string]$receipt.source -cne [string]$policy.tools.$name.source -or
+            [string]$receipt.channel -cne $expectedChannel -or [string]$receipt.source -cne [string]$policy.tools.$name.source -or
             [string]::IsNullOrWhiteSpace([string]$receipt.resolvedVersion) -or [string]::IsNullOrWhiteSpace([string]$receipt.resolvedIdentity)) { throw 'INVALID|Source resolver receipt has a wrong run, source, channel, or identity.' }
         $identityKind = switch ($name) {
             'skill-validator' { 'go-module-version-build-info-and-binary-hash' }
@@ -8377,6 +8382,22 @@ function Assert-StandardCoreSourceToolReceipts {
             'skillspector' { 'release-commit-asset-metadata-dependency-closure-and-executable' }
         }
         if ([string]$receipt.identityKind -cne $identityKind -or [string]$receipt.resolvedVersion -cnotmatch '^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') { throw 'INVALID|Source resolver receipt does not identify the installed stable tool.' }
+        if ($name -ceq 'skillspector') {
+            $approvedSourceId = [string](Get-StandardValidationRequiredProperty -Object $receipt -Name 'approvedSourceId' -Context 'source SkillSpector receipt')
+            $parserCorrection = [string](Get-StandardValidationRequiredProperty -Object $receipt -Name 'parserCorrection' -Context 'source SkillSpector receipt')
+            $registryPath = Join-Path $script:StandardValidationRepositoryRoot ([string]$policy.tools.skillspector.approvedSources)
+            $registry = (Get-StandardValidationJsonSnapshot -Path $registryPath -Context 'SkillSpector approved-source registry').value
+            if ($approvedSourceId -cne [string]$registry.active) { throw 'INVALID|Source SkillSpector receipt does not name the active approved source entry.' }
+            $entryProperty = @($registry.entries.PSObject.Properties | Where-Object { $_.Name -ceq $approvedSourceId })
+            if ($entryProperty.Count -ne 1) { throw 'INVALID|Source SkillSpector receipt names an unknown approved source entry.' }
+            $entry = $entryProperty[0].Value
+            $identityPrefix = 'github:NVIDIA/SkillSpector@' + [string]$entry.releaseTag + '#commit=' + [string]$entry.releaseCommit + '#asset=sha256:' + [string]$entry.wheelSha256 + '#'
+            if ([string]$receipt.resolvedVersion -cne [string]$entry.version -or
+                $parserCorrection -cne [string]$entry.parserCorrection -or
+                -not ([string]$receipt.resolvedIdentity).StartsWith($identityPrefix, [StringComparison]::Ordinal)) {
+                throw 'INVALID|Source SkillSpector receipt differs from its approved source entry.'
+            }
+        }
         if (-not [IO.Path]::IsPathRooted([string]$receipt.installRoot) -or -not [IO.Path]::IsPathRooted([string]$receipt.executablePath) -or
             -not (Test-StandardValidationPathWithin -Path $receipt.executablePath -Root $receipt.installRoot)) { throw 'INVALID|Source resolver executable must be inside its absolute installed root.' }
         Assert-StandardValidationSha256 -Value ([string]$receipt.executableSha256) -Context 'source resolver executable'

@@ -4,12 +4,12 @@
   "commit": "89abcdef0123456789abcdef0123456789abcdef",
   "acquisition": "github-codeload",
   "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "inventorySha256": "d94d51c32c6b835a65c21314c13c85134db2f8be727fba37340c5336c5160883",
+  "inventorySha256": "86e90c434a7e65052ed1bbd5a0d9361657110924a73dcbdf5e91b00eb5715ee1",
   "inventory": [
-    { "path": "Resolve-StandardValidationTool.ps1", "sha256": "e51c78847aa706dd4bed92fa1e91e1c992e0b1e8d938aaa605c4c7389b66b8f5" },
+    { "path": "Resolve-StandardValidationTool.ps1", "sha256": "c0d68b227fc04e19d710a89c4559fe45e0cc979eead846006261dc2dc5bfa14f" },
     { "path": "catalog/skills-catalog.json", "sha256": "68bb03240261d1a94479d41d640ae16dab6064dd0d591f04e8164883783650e3" },
     { "path": "installer-safe-mutation.psm1", "sha256": "dc031edcc2f48968df83cd68ad52eacb7f7b05d3ca6a0cc622658cf6151c8293" },
-    { "path": "platform-runtime.psd1", "sha256": "ba6af8ecbd09de50b9a55c57e5fa919d959296469125c12412bdc8300af5df5c" },
+    { "path": "platform-runtime.psd1", "sha256": "7f112390d2995a105b9e9a916876df1779485dec6df21d7516243e2dcd1c4dca" },
     { "path": "platform-runtime.psm1", "sha256": "ad051b2794ce4dc10108404201735d02f7b032ed0e633c5f22f73c884fb10370" },
     { "path": "WindowsDacl.psm1", "sha256": "ffa1f85d94bb6bce9bf8353f8c7733bdbe59880a3d0d075191938cc28aebb5f6" },
     { "path": "platform/Linux.psm1", "sha256": "52c261d577ee7b3946771d1112030996896fdd119e06ac3849e430a3d56fb38c" },
@@ -28,7 +28,7 @@
   "platform": { "os": "windows", "architecture": "x64" },
   "platformRuntime": {
     "apiVersion": "1.0",
-    "manifestSha256": "ba6af8ecbd09de50b9a55c57e5fa919d959296469125c12412bdc8300af5df5c",
+    "manifestSha256": "7f112390d2995a105b9e9a916876df1779485dec6df21d7516243e2dcd1c4dca",
     "sourceFingerprint": "4fb2c493a0a239455eb0d5b8485bd578d60cbe37143b0e1b780f975a6076d755"
   },
   "requiredCapabilities": ["directory-lease", "file-lease", "file-identity", "lock", "publication", "owned-file-removal", "permissions", "directory-publication"],

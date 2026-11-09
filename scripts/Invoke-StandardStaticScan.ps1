@@ -136,6 +136,56 @@ function Assert-StaticPreservedFindings($Original,$Corrected,$ProfileExecution) 
         if(-not $derived -or $matching.Count -eq 0 -or $completed.Count -ne 1){throw 'Corrected graph lost an original non-derived or still-uncovered finding.'}
     }
 }
+
+function Write-StaticNativeReportFromProcess($Process,[string]$Path) {
+    if($Process.status -cne 'passed' -or $Process.exitCode -ne 0 -or
+       $Process.cleanedUp -isnot [bool] -or -not $Process.cleanedUp -or
+       ($Process.PSObject.Properties['outputTruncated'] -and $Process.outputTruncated -eq $true)){
+        throw 'Official native scanner baseline failed or omitted cleanup/report.'
+    }
+    $stdoutProperty=$Process.PSObject.Properties['stdout']
+    if($null -eq $stdoutProperty){throw 'Official native scanner stdout is not a JSON report.'}
+    $stdout=(@($stdoutProperty.Value) -join [Environment]::NewLine)
+    if([string]::IsNullOrWhiteSpace($stdout)){throw 'Official native scanner stdout is not a JSON report.'}
+    try{$parsed=$stdout | ConvertFrom-Json -ErrorAction Stop}catch{throw 'Official native scanner stdout is not a JSON report.'}
+    if($null -eq $parsed -or $parsed -is [array] -or $parsed -is [string] -or $parsed -is [ValueType]){
+        throw 'Official native scanner stdout is not a JSON report.'
+    }
+    $bytes=[Text.UTF8Encoding]::new($false).GetBytes($stdout)
+    $stream=[IO.File]::Open($Path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+    try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush()}finally{$stream.Dispose()}
+}
+
+function Get-StaticApprovedSkillSpectorEntry($Receipt,$ApprovedSources,[string]$ExpectedResolutionRunId) {
+    $approvedSourceProperty=$Receipt.PSObject.Properties['approvedSourceId']
+    $parserCorrectionProperty=$Receipt.PSObject.Properties['parserCorrection']
+    if($null -eq $approvedSourceProperty -or $null -eq $parserCorrectionProperty){throw 'Scanner receipt has no supported frozen parser profile.'}
+    $receiptApprovedSourceId=[string]$approvedSourceProperty.Value
+    $receiptParserCorrection=[string]$parserCorrectionProperty.Value
+    if($receiptApprovedSourceId -cne [string]$ApprovedSources.active){throw 'Scanner receipt has no supported frozen parser profile.'}
+    $approvedProperty=@($ApprovedSources.entries.PSObject.Properties | Where-Object {$_.Name -ceq $receiptApprovedSourceId})
+    if($approvedProperty.Count -ne 1){throw 'Scanner receipt has no supported frozen parser profile.'}
+    $approvedEntry=$approvedProperty[0].Value
+    $identityPrefix='github:NVIDIA/SkillSpector@'+[string]$approvedEntry.releaseTag+'#commit='+[string]$approvedEntry.releaseCommit+'#asset=sha256:'+[string]$approvedEntry.wheelSha256+'#'
+    if($Receipt.toolName -cne 'skillspector' -or $Receipt.source -cne 'NVIDIA/SkillSpector' -or
+       $Receipt.channel -cne 'approved-source-registry' -or
+       $Receipt.resolvedVersion -cne [string]$approvedEntry.version -or
+       $receiptParserCorrection -cne [string]$approvedEntry.parserCorrection -or
+       $Receipt.frozenForRun -isnot [bool] -or -not $Receipt.frozenForRun -or
+       $Receipt.resolutionRunId -cne $ExpectedResolutionRunId -or
+       $Receipt.identityKind -cne 'release-commit-asset-metadata-dependency-closure-and-executable' -or
+       $Receipt.offlineResolutionVerified -isnot [bool] -or -not $Receipt.offlineResolutionVerified -or
+       $Receipt.consoleEntryPoint -cne 'skillspector.cli:app' -or
+       -not ([string]$Receipt.resolvedIdentity).StartsWith($identityPrefix,[StringComparison]::Ordinal) -or
+       $Receipt.installedClosureSha256 -cnotmatch '^[0-9a-f]{64}$') {throw 'Scanner receipt has no supported frozen parser profile.'}
+    if($Receipt.dependencyClosure -isnot [array]){throw 'Scanner dependency closure is not an explicit frozen array.'}
+    $rootDistributions=@($Receipt.dependencyClosure | Where-Object {[string]$_.normalizedName -ceq 'skillspector'})
+    if($rootDistributions.Count -ne 1 -or [string]$rootDistributions[0].version -cne [string]$approvedEntry.version -or
+       [string]$rootDistributions[0].sha256 -cne [string]$approvedEntry.wheelSha256){
+        throw 'Scanner dependency closure has no supported frozen parser profile.'
+    }
+    return $approvedEntry
+}
 try {
     if($env:STANDARD_VALIDATION_CANDIDATE_ID -cne $CandidateIdentity -or
        [string]::IsNullOrWhiteSpace($env:STANDARD_VALIDATION_CANDIDATE_ROOT)) {
@@ -154,29 +204,20 @@ try {
         'scripts/Invoke-StandardStaticScan.ps1','scripts/standard_static_powershell.py',
         'scripts/Get-StandardPowerShellSyntaxProof.ps1','scripts/Resolve-StandardValidationTool.ps1',
         'scripts/Invoke-StandardValidation.ps1','docs/standards/static-parser-host-ownership.json',
+        'docs/standards/skillspector-approved-sources.json',
+        'docs/standards/schemas/skillspector-approved-sources-v1.schema.json',
         'docs/standards/schemas/static-parser-host-ownership-v1.schema.json',
+        'docs/standards/schemas/static-native-profile-execution-v1.schema.json',
         'docs/standards/schemas/static-parser-profile-execution-v1.schema.json')){
         $frozenPath=Assert-StaticPhysicalPath (Join-Path $authorityRoot $relative)
         $frozenAuthority[$relative]=Static-Hash $frozenPath
     }
+    $approvedSourcesPath=Join-Path $authorityRoot 'docs/standards/skillspector-approved-sources.json'
+    . (Join-Path $PSScriptRoot 'Resolve-StandardValidationTool.ps1') -ValidatePolicyOnly | Out-Null
+    $approvedSources=Get-SkillSpectorApprovedSources -Path $approvedSourcesPath
     $receipt=Read-StaticFrozenReceipt -Path $receiptFull -ExpectedSha256 $ExpectedToolReceiptSha256
-    if($receipt.toolName -cne 'skillspector' -or $receipt.source -cne 'NVIDIA/SkillSpector' -or
-       $receipt.channel -cne 'latest-stable' -or $receipt.resolvedVersion -cne '2.13.0' -or
-       $receipt.frozenForRun -isnot [bool] -or -not $receipt.frozenForRun -or
-       $receipt.resolutionRunId -cne $ExpectedResolutionRunId -or
-       $receipt.identityKind -cne 'release-commit-asset-metadata-dependency-closure-and-executable' -or
-       $receipt.offlineResolutionVerified -isnot [bool] -or -not $receipt.offlineResolutionVerified -or
-       $receipt.consoleEntryPoint -cne 'skillspector.cli:app' -or
-       [string]$receipt.resolvedIdentity -cnotmatch '^github:NVIDIA/SkillSpector@v2\.13\.0#commit=091a509b3d6ba8ff5be528966e1f43c2e68cf214#asset=sha256:41e097b4127c0aa0732ad31cc909f8aee0b907d97816c866a55b8e782a6ca6dc#' -or
-       $receipt.installedClosureSha256 -cnotmatch '^[0-9a-f]{64}$') {throw 'Scanner receipt has no supported frozen parser profile.'}
-    if($receipt.dependencyClosure -isnot [array]){
-        throw 'Scanner dependency closure is not an explicit frozen array.'
-    }
-    $rootDistributions=@($receipt.dependencyClosure | Where-Object {[string]$_.normalizedName -ceq 'skillspector'})
-    if($rootDistributions.Count -ne 1 -or [string]$rootDistributions[0].version -cne '2.13.0' -or
-       [string]$rootDistributions[0].sha256 -cne '41e097b4127c0aa0732ad31cc909f8aee0b907d97816c866a55b8e782a6ca6dc'){
-        throw 'Scanner dependency closure has no supported frozen parser profile.'
-    }
+    $approvedEntry=Get-StaticApprovedSkillSpectorEntry -Receipt $receipt -ApprovedSources $approvedSources -ExpectedResolutionRunId $ExpectedResolutionRunId
+    $receiptApprovedSourceId=[string]$receipt.approvedSourceId
     $installFull=Assert-StaticPhysicalPath ([string]$receipt.installRoot)
     $scannerFull=Assert-StaticPhysicalPath ([string]$receipt.executablePath)
     $venv=Join-Path $installFull 'venv'
@@ -205,52 +246,80 @@ try {
     # Reuse the exact resolver closure and owned-process implementations.
     # Expected receipt identity comes from the existing trusted parent toolchain;
     # this entry point and its unsigned sidecar are not an independent authority.
-    . (Join-Path $PSScriptRoot 'Resolve-StandardValidationTool.ps1') -ValidatePolicyOnly | Out-Null
     $before=Get-DirectoryClosureIdentity -Path $installFull
     if($before.sha256 -cne [string]$receipt.installedClosureSha256){throw 'Installed scanner closure differs before execution.'}
     . (Join-Path $PSScriptRoot 'Invoke-StandardValidation.ps1') -DefineFunctionsOnly -CandidateRoot $skillFull -AdapterPath 'unused' -ArtifactsRoot ([IO.Path]::GetDirectoryName($reportFull)) -SourceRepository 'https://example.test/parser/functions-only.git' -SourceRevision $SourceRevision -BaseRevision $SourceRevision
     $profilePath=Join-Path $authorityRoot 'docs/standards/static-parser-host-ownership.json'
     $schemaPath=Join-Path $authorityRoot 'docs/standards/schemas/static-parser-host-ownership-v1.schema.json'
     if(-not((Get-Content -LiteralPath $profilePath -Raw) | Test-Json -SchemaFile $schemaPath)){throw 'Central parser policy is invalid.'}
-    $pwsh=(Get-Process -Id $PID).Path
-    if($PSVersionTable.PSVersion.ToString() -cne '7.6.6'){throw 'Native parser runtime has no reviewed grammar profile.'}
-    $pwshHash=Static-Hash $pwsh
+    $parserCorrection=[string]$approvedEntry.parserCorrection
+    $pwsh=$null;$pwshHash=$null;$bridgePath=$null;$corrected=$null
     $pythonHash=Static-Hash $python
     $working=[IO.Path]::GetDirectoryName($reportFull)
     # The shared process owner clears and rebuilds its own environment.
     $environment=@{STANDARD_VALIDATION_CANDIDATE_ID=$CandidateIdentity;STANDARD_VALIDATION_CANDIDATE_ROOT=$candidateFull}
-    $nativeArguments=@('-I','-B','-c','from skillspector.cli import app; app()','scan',$skillFull,'--no-llm','--format','json','--output',$originalReport)
+    $nativeArguments=@('-I','-B','-X','utf8','-c','from skillspector.cli import app; app()','scan',$skillFull,'--no-llm','--format','json')
     $original=Invoke-StandardValidationProcess -Command $python -Arguments $nativeArguments -WorkingDirectory $working -Environment $environment -TimeoutSeconds $staticTimeout
-    if($original.status -cne 'passed' -or $original.exitCode -ne 0 -or -not $original.cleanedUp -or -not(Test-Path -LiteralPath $originalReport -PathType Leaf)){throw 'Official native scanner baseline failed or omitted cleanup/report.'}
-    $bridgePath=Join-Path $PSScriptRoot 'standard_static_powershell.py'
-    $bridgeArguments=@('-I','-B',$bridgePath,'--pwsh',$pwsh,'--pwsh-sha256',$pwshHash,'--skill-root',$skillFull,'--report-path',$reportFull,'--evidence-path',$profileRecord,'--source-revision',$SourceRevision,'--candidate-identity',$CandidateIdentity)
-    $corrected=Invoke-StandardValidationProcess -Command $python -Arguments $bridgeArguments -WorkingDirectory $working -Environment $environment -TimeoutSeconds $staticTimeout
+    Write-StaticNativeReportFromProcess -Process $original -Path $originalReport
+    switch($parserCorrection){
+        'none' {
+            $nativeBytes=[IO.File]::ReadAllBytes($originalReport)
+            $reportStream=[IO.File]::Open($reportFull,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+            try{$reportStream.Write($nativeBytes,0,$nativeBytes.Length);$reportStream.Flush()}finally{$reportStream.Dispose()}
+            $result=Get-Content -LiteralPath $reportFull -Raw | ConvertFrom-Json
+            $profile=[ordered]@{
+                schemaVersion=1;profile='none';parserCorrection='none';approvedSourceId=$receiptApprovedSourceId
+                signed=$false;authorizationGranted=$false;sourceRevision=$SourceRevision;candidateIdentity=$CandidateIdentity
+                officialScannerVersion=[string]$approvedEntry.version;officialScannerReleaseCommit=[string]$approvedEntry.releaseCommit
+                wheelSha256=[string]$approvedEntry.wheelSha256;analyzerSha256=[string]$approvedEntry.analyzerSha256
+                installedToolModified=$false;originalSourceFindingAnalyzerUnchanged=$true;scannerGraphExecuted=$true
+                scannerExitCode=[int]$original.exitCode;correctedReportSha256=(Static-Hash $reportFull)
+                actualCompleteness=$result.analysis_completeness;applicabilityStatus='not-verified';executionProvenanceStatus='not-verified'
+                authorizedOperations=@();releaseEligible=$false
+            }
+            $profileBytes=[Text.UTF8Encoding]::new($false).GetBytes(($profile | ConvertTo-Json -Depth 12)+"`n")
+            $profileStream=[IO.File]::Open($profileRecord,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+            try{$profileStream.Write($profileBytes,0,$profileBytes.Length);$profileStream.Flush()}finally{$profileStream.Dispose()}
+        }
+        'powershell-native-command-ownership-v1' {
+            $pwsh=(Get-Process -Id $PID).Path
+            if($PSVersionTable.PSVersion.ToString() -cne '7.6.6'){throw 'Native parser runtime has no reviewed grammar profile.'}
+            $pwshHash=Static-Hash $pwsh
+            $bridgePath=Join-Path $PSScriptRoot 'standard_static_powershell.py'
+            $bridgeArguments=@('-I','-B','-X','utf8',$bridgePath,'--pwsh',$pwsh,'--pwsh-sha256',$pwshHash,'--skill-root',$skillFull,'--report-path',$reportFull,'--evidence-path',$profileRecord,'--source-revision',$SourceRevision,'--candidate-identity',$CandidateIdentity)
+            $corrected=Invoke-StandardValidationProcess -Command $python -Arguments $bridgeArguments -WorkingDirectory $working -Environment $environment -TimeoutSeconds $staticTimeout
+            if($corrected.status -cne 'passed' -or $corrected.exitCode -ne 0 -or -not $corrected.cleanedUp -or
+               -not(Test-Path -LiteralPath $reportFull -PathType Leaf) -or -not(Test-Path -LiteralPath $profileRecord -PathType Leaf)){throw 'Corrected scanner graph failed or omitted cleanup/evidence.'}
+        }
+        default {throw 'Scanner receipt has no supported frozen parser profile.'}
+    }
     foreach($relative in $frozenAuthority.Keys){
         $frozenPath=Assert-StaticPhysicalPath (Join-Path $authorityRoot $relative)
         if((Static-Hash $frozenPath) -cne $frozenAuthority[$relative]){throw 'Central static parser authority changed during analysis.'}
     }
     $after=Get-DirectoryClosureIdentity -Path $installFull
     if($after.sha256 -cne $before.sha256 -or (Static-Hash $receiptFull) -cne $ExpectedToolReceiptSha256 -or
-       (Static-Hash $python) -cne $pythonHash -or (Static-Hash $pwsh) -cne $pwshHash){throw 'Frozen tool/receipt/runtime changed during static analysis.'}
-    if($corrected.status -cne 'passed' -or $corrected.exitCode -ne 0 -or -not $corrected.cleanedUp -or
-       -not(Test-Path -LiteralPath $reportFull -PathType Leaf) -or -not(Test-Path -LiteralPath $profileRecord -PathType Leaf)){throw 'Corrected scanner graph failed or omitted cleanup/evidence.'}
-    $executionSchema=Join-Path $authorityRoot 'docs/standards/schemas/static-parser-profile-execution-v1.schema.json'
+       (Static-Hash $python) -cne $pythonHash -or
+       ($parserCorrection -ceq 'powershell-native-command-ownership-v1' -and (Static-Hash $pwsh) -cne $pwshHash)){throw 'Frozen tool/receipt/runtime changed during static analysis.'}
+    $executionSchema=Join-Path $authorityRoot $(if($parserCorrection -ceq 'none'){'docs/standards/schemas/static-native-profile-execution-v1.schema.json'}else{'docs/standards/schemas/static-parser-profile-execution-v1.schema.json'})
     if(-not((Get-Content -LiteralPath $profileRecord -Raw) | Test-Json -SchemaFile $executionSchema)){throw 'Profile execution record violates its strict schema.'}
     $profileExecution=Get-Content -LiteralPath $profileRecord -Raw | ConvertFrom-Json
     if($profileExecution.sourceRevision -cne $SourceRevision -or $profileExecution.candidateIdentity -cne $CandidateIdentity -or
        $profileExecution.correctedReportSha256 -cne (Static-Hash $reportFull)){throw 'Profile execution identity differs from this source child.'}
     $result=Get-Content -LiteralPath $reportFull -Raw | ConvertFrom-Json
     $originalNative=Get-Content -LiteralPath $originalReport -Raw | ConvertFrom-Json
-    Assert-StaticCoverageDelta -Original $originalNative -Corrected $result -ProfileExecution $profileExecution
-    Assert-StaticPreservedFindings -Original $originalNative -Corrected $result -ProfileExecution $profileExecution
+    if($parserCorrection -ceq 'powershell-native-command-ownership-v1'){
+        Assert-StaticCoverageDelta -Original $originalNative -Corrected $result -ProfileExecution $profileExecution
+        Assert-StaticPreservedFindings -Original $originalNative -Corrected $result -ProfileExecution $profileExecution
+    }
     $record=[ordered]@{
-        schemaVersion=1;profile='powershell-native-command-ownership-v1';signed=$false;authorizationGranted=$false
+        schemaVersion=1;profile=$parserCorrection;parserCorrection=$parserCorrection;approvedSourceId=$receiptApprovedSourceId;signed=$false;authorizationGranted=$false
         applicabilityStatus='not-verified';executionProvenanceStatus='not-verified';authorizedOperations=@();releaseEligible=$false
         sourceRevision=$SourceRevision;candidateIdentity=$CandidateIdentity;resolverReceiptSha256=$ExpectedToolReceiptSha256
         resolutionRunId=$ExpectedResolutionRunId;installedClosureSha256=[string]$before.sha256;authorityFiles=$frozenAuthority
         pythonPath=$python;pythonSha256=$pythonHash;nativeParserRuntimePath=$pwsh;nativeParserRuntimeSha256=$pwshHash
-        centralPolicySha256=(Static-Hash $profilePath);bridgeSha256=(Static-Hash $bridgePath)
-        nativeParserSha256=(Static-Hash (Join-Path $PSScriptRoot 'Get-StandardPowerShellSyntaxProof.ps1'))
+        centralPolicySha256=(Static-Hash $profilePath);bridgeSha256=$(if($null -eq $bridgePath){$null}else{Static-Hash $bridgePath})
+        nativeParserSha256=$(if($parserCorrection -ceq 'none'){$null}else{Static-Hash (Join-Path $PSScriptRoot 'Get-StandardPowerShellSyntaxProof.ps1')})
         originalReportPath=$originalReport;originalReportSha256=(Static-Hash $originalReport)
         correctedReportPath=$reportFull;correctedReportSha256=(Static-Hash $reportFull)
         profileExecutionPath=$profileRecord;profileExecutionSha256=(Static-Hash $profileRecord)
@@ -261,8 +330,8 @@ try {
     try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush()}finally{$stream.Dispose()}
     if($result.execution_successful -isnot [bool] -or -not $result.execution_successful -or
        $result.analysis_completeness.is_complete -isnot [bool] -or -not $result.analysis_completeness.is_complete -or
-       $result.analysis_completeness.status -cne 'complete'){throw 'Actual corrected graph still has incomplete coverage.'}
-    [pscustomobject]@{status='completed';reportPath=$reportFull;evidencePath=$evidenceFull;profile='powershell-native-command-ownership-v1';applicabilityStatus='not-verified';executionProvenanceStatus='not-verified';authorizationGranted=$false;authorizedOperations=@();releaseEligible=$false} | ConvertTo-Json -Compress
+       $result.analysis_completeness.status -cne 'complete'){throw 'Actual final graph still has incomplete coverage.'}
+    [pscustomobject]@{status='completed';reportPath=$reportFull;evidencePath=$evidenceFull;profile=$parserCorrection;approvedSourceId=$receiptApprovedSourceId;parserCorrection=$parserCorrection;applicabilityStatus='not-verified';executionProvenanceStatus='not-verified';authorizationGranted=$false;authorizedOperations=@();releaseEligible=$false} | ConvertTo-Json -Compress
 } catch {
     [pscustomobject]@{status='failed';applicabilityStatus='not-verified';executionProvenanceStatus='not-verified';authorizationGranted=$false;authorizedOperations=@();releaseEligible=$false} | ConvertTo-Json -Compress
     [Console]::Error.WriteLine('Central static scan failed closed: '+$_.Exception.Message)

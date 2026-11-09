@@ -60,7 +60,15 @@ if ($PSVersionTable.PSEdition -ceq 'Core' -and $IsMacOS -and $script:SourceGateF
                 [IO.File]::WriteAllText((Join-Path $installRoot 'dependency.bin'), ('fixture dependency ' + $name), (New-Object Text.UTF8Encoding($false)))
                 $launcher=[pscustomobject][ordered]@{kind='direct-executable';shimPath=$null;shimSha256=$null;payloadPath=$null;payloadSha256=$null;runtimePath=$null;runtimeSha256=$null}
                 $identityKind=switch($name) {'skill-validator' {'go-module-version-build-info-and-binary-hash'}; 'skill-tools' {'registry-integrity-and-locked-dependency-closure'}; 'skillspector' {'release-commit-asset-metadata-dependency-closure-and-executable'}}
-                $receiptValue=[pscustomobject]@{ schemaVersion=1; toolName=$name; resolutionRunId=$runId; resolvedAtUtc=[DateTime]::UtcNow.ToString('o'); executionContext='local'; frozenForRun=$true; channel='latest-stable'; source=$policy.tools.$name.source; resolvedVersion='1.0.0'; resolvedIdentity='fixture identity'; identityKind=$identityKind; executablePath=$toolPath; executableSha256=$frozen[0].sha256; installRoot=$installRoot; installedClosureSha256=$null; dependencyClosureSha256=$null; dependencyClosure=@(); launcher=$launcher;launcherDigestSha256=$null }
+                $receiptValue=[pscustomobject]@{ schemaVersion=1; toolName=$name; resolutionRunId=$runId; resolvedAtUtc=[DateTime]::UtcNow.ToString('o'); executionContext='local'; frozenForRun=$true; channel=[string]$policy.tools.$name.channel; source=$policy.tools.$name.source; resolvedVersion='1.0.0'; resolvedIdentity='fixture identity'; identityKind=$identityKind; executablePath=$toolPath; executableSha256=$frozen[0].sha256; installRoot=$installRoot; installedClosureSha256=$null; dependencyClosureSha256=$null; dependencyClosure=@(); launcher=$launcher;launcherDigestSha256=$null }
+                if ($name -ceq 'skillspector') {
+                    $registry=Get-Content -Raw (Join-Path (Split-Path -Parent $script:SourceGateTestRoot) $policy.tools.skillspector.approvedSources) | ConvertFrom-Json
+                    $approvedEntry=$registry.entries.($registry.active)
+                    $receiptValue.resolvedVersion=[string]$approvedEntry.version
+                    $receiptValue.resolvedIdentity='github:NVIDIA/SkillSpector@'+[string]$approvedEntry.releaseTag+'#commit='+[string]$approvedEntry.releaseCommit+'#asset=sha256:'+[string]$approvedEntry.wheelSha256+'#fixture'
+                    $receiptValue | Add-Member -NotePropertyName approvedSourceId -NotePropertyValue ([string]$registry.active)
+                    $receiptValue | Add-Member -NotePropertyName parserCorrection -NotePropertyValue ([string]$approvedEntry.parserCorrection)
+                }
                 if ($name -ceq 'skill-tools') {
                     $shim=Join-Path $installRoot $(if ($fixtureWindows) { 'skill-tools.cmd' } else { 'skill-tools' });$payload=Join-Path $installRoot 'index.js';$node=Join-Path $fixtureToolsRoot $(if ($fixtureWindows) { 'node.exe' } else { 'node' })
                     [IO.File]::WriteAllText($payload, '// fixture package payload', (New-Object Text.UTF8Encoding($false)))

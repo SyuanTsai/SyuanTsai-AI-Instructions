@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://example.test/standards/static-parser-profile-execution-v1.schema.json",
-  "title": "Unsigned execution record for actual scanner graph with reviewed host parser",
+  "title": "Unsigned execution record for the reviewed SkillSpector 2.13.0 PowerShell parser correction",
   "type": "object",
   "additionalProperties": false,
   "required": [

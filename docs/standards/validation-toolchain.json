@@ -16,7 +16,8 @@
   "tools": {
     "skillspector": {
       "source": "NVIDIA/SkillSpector",
-      "channel": "latest-stable",
+      "channel": "approved-source-registry",
+      "approvedSources": "docs/standards/skillspector-approved-sources.json",
       "releaseVersionRule": "v-semver-release-only",
       "pythonPackageIndex": "https://pypi.org/simple",
       "pythonDistribution": {

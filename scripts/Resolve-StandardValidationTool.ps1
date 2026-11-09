@@ -301,6 +301,47 @@ function Normalize-RegistryUri {
     return $uri.AbsoluteUri.TrimEnd('/') + '/'
 }
 
+function Get-SkillSpectorApprovedSources {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+        throw "SkillSpector approved source registry not found: $fullPath"
+    }
+    $raw = Get-Content -Raw -Encoding UTF8 -LiteralPath $fullPath
+    $schemaPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/schemas/skillspector-approved-sources-v1.schema.json'
+    if (-not (Test-Path -LiteralPath $schemaPath -PathType Leaf) -or -not ($raw | Test-Json -SchemaFile $schemaPath)) {
+        throw 'SkillSpector approved source registry violates its strict schema.'
+    }
+    $registry = $raw | ConvertFrom-Json
+    $entryProperties = @($registry.entries.PSObject.Properties)
+    $activeProperty = @($entryProperties | Where-Object { $_.Name -ceq [string]$registry.active })
+    if ($activeProperty.Count -ne 1) {
+        throw "SkillSpector approved source active entry '$($registry.active)' does not exist."
+    }
+
+    $bridgePolicyPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/static-parser-host-ownership.json'
+    $bridgePolicy = Get-Content -Raw -Encoding UTF8 -LiteralPath $bridgePolicyPath | ConvertFrom-Json
+    foreach ($property in $entryProperties) {
+        $key = [string]$property.Name
+        $entry = $property.Value
+        if ([string]$entry.version -cne $key -or
+            [string]$entry.releaseTag -cne ('v' + $key) -or
+            [string]$entry.wheelFileName -cne ("skillspector-{0}-py3-none-any.whl" -f $key)) {
+            throw "SkillSpector approved source entry '$key' has inconsistent version identity."
+        }
+        if ([string]$entry.parserCorrection -ceq 'powershell-native-command-ownership-v1' -and
+            ([string]$entry.version -cne [string]$bridgePolicy.officialScannerVersion -or
+             [string]$entry.releaseCommit -cne [string]$bridgePolicy.officialScannerReleaseCommit -or
+             [string]$entry.wheelSha256 -cne [string]$bridgePolicy.officialScannerReleaseAssetSha256 -or
+             [string]$entry.analyzerSha256 -cne [string]$bridgePolicy.officialAnalyzerSha256)) {
+            throw "SkillSpector approved source entry '$key' is not bound to the reviewed PowerShell bridge analyzer."
+        }
+    }
+    $registry | Add-Member -NotePropertyName activeEntry -NotePropertyValue $activeProperty[0].Value
+    return $registry
+}
+
 function Get-Policy {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -341,8 +382,9 @@ function Get-Policy {
         if ($tool.source -isnot [string] -or [string]$tool.source -cne [string]$entry.Value) {
             throw "Untrusted validation tool source for '$($entry.Key)': '$($tool.source)'. Expected '$($entry.Value)'."
         }
-        if ($tool.channel -isnot [string] -or [string]$tool.channel -cne 'latest-stable') {
-            throw "Validation tool '$($entry.Key)' must use string channel 'latest-stable'."
+        $expectedChannel = if ([string]$entry.Key -ceq 'skillspector') { 'approved-source-registry' } else { 'latest-stable' }
+        if ($tool.channel -isnot [string] -or [string]$tool.channel -cne $expectedChannel) {
+            throw "Validation tool '$($entry.Key)' must use string channel '$expectedChannel'."
         }
     }
 
@@ -360,8 +402,10 @@ function Get-Policy {
 
     $skillSpector = $policy.tools.skillspector
     Assert-ExactPropertySet -Value $skillSpector -Expected @(
-        'source', 'channel', 'releaseVersionRule', 'pythonPackageIndex', 'pythonDistribution'
+        'source', 'channel', 'approvedSources', 'releaseVersionRule', 'pythonPackageIndex', 'pythonDistribution'
     ) -Context '$.tools.skillspector'
+    Assert-JsonString -Value $skillSpector.approvedSources -Expected 'docs/standards/skillspector-approved-sources.json' -Context '$.tools.skillspector.approvedSources'
+    [void](Get-SkillSpectorApprovedSources -Path (Join-Path (Split-Path -Parent $PSScriptRoot) ([string]$skillSpector.approvedSources)))
     Assert-JsonString -Value $skillSpector.releaseVersionRule -Expected 'v-semver-release-only' -Context '$.tools.skillspector.releaseVersionRule'
     if ($skillSpector.pythonPackageIndex -isnot [string]) {
         throw 'SkillSpector pythonPackageIndex must be a string.'
@@ -1156,7 +1200,7 @@ function Invoke-BoundedGitHubGet {
     }
     else {
         $initialUri.Host -ceq 'api.github.com' -and
-        $initialUri.AbsolutePath -match '^/repos/NVIDIA/SkillSpector/(?:releases/latest|git/ref/tags/v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)|git/tags/[0-9a-f]{40})$'
+        $initialUri.AbsolutePath -match '^/repos/NVIDIA/SkillSpector/(?:releases/tags/v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)|git/ref/tags/v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)|git/tags/[0-9a-f]{40})$'
     }
     if (-not $initialUri.IsAbsoluteUri -or $initialUri.Scheme -cne 'https' -or
         -not $initialUri.IsDefaultPort -or -not [string]::IsNullOrEmpty($initialUri.UserInfo) -or
@@ -1401,6 +1445,34 @@ function Get-PythonWheelMetadata {
         }
 
         return ConvertFrom-PythonMetadataText -Text $text -Context "Wheel METADATA in '$WheelPath'"
+    }
+    finally {
+        $archive.Dispose()
+    }
+}
+
+function Get-PythonWheelEntrySha256 {
+    param(
+        [Parameter(Mandatory = $true)][string] $WheelPath,
+        [Parameter(Mandatory = $true)][string] $EntryPath
+    )
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [IO.Compression.ZipFile]::OpenRead($WheelPath)
+    try {
+        $entries = @($archive.Entries | Where-Object { $_.FullName -ceq $EntryPath })
+        if ($entries.Count -ne 1) {
+            throw "Expected exactly one '$EntryPath' entry in SkillSpector wheel; found $($entries.Count)."
+        }
+        $stream = $entries[0].Open()
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            return ([BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLowerInvariant()
+        }
+        finally {
+            $sha.Dispose()
+            $stream.Dispose()
+        }
     }
     finally {
         $archive.Dispose()
@@ -1715,21 +1787,31 @@ function Resolve-PythonWheelClosureFromApprovedIndex {
 
 function Assert-SkillSpectorWheelIdentity {
     param(
-        [Parameter(Mandatory = $true)][string] $ReleaseVersion,
+        $ApprovedEntry,
+        [string] $WheelPath,
+        [string] $ReleaseVersion,
         [Parameter(Mandatory = $true)][string] $WheelFileName,
         [Parameter(Mandatory = $true)][string] $MetadataName,
         [Parameter(Mandatory = $true)][string] $MetadataVersion
     )
 
-    $expectedWheelName = "skillspector-$ReleaseVersion-py3-none-any.whl"
+    $releaseVersion = if ($null -eq $ApprovedEntry) { [string]$ReleaseVersion } else { [string]$ApprovedEntry.version }
+    $expectedWheelName = if ($null -eq $ApprovedEntry) { "skillspector-$releaseVersion-py3-none-any.whl" } else { [string]$ApprovedEntry.wheelFileName }
     if ($WheelFileName -cne $expectedWheelName) {
         throw "SkillSpector release/wheel version mismatch. Expected '$expectedWheelName', got '$WheelFileName'."
     }
     if ((Normalize-PythonPackageName -Name $MetadataName) -cne 'skillspector') {
         throw "SkillSpector wheel METADATA Name mismatch. Expected 'skillspector', got '$MetadataName'."
     }
-    if ($MetadataVersion -cne $ReleaseVersion) {
-        throw "SkillSpector wheel METADATA Version mismatch. Expected '$ReleaseVersion', got '$MetadataVersion'."
+    if ($MetadataVersion -cne $releaseVersion) {
+        throw "SkillSpector wheel METADATA Version mismatch. Expected '$releaseVersion', got '$MetadataVersion'."
+    }
+    if ($null -ne $ApprovedEntry) {
+        if ([string]::IsNullOrWhiteSpace($WheelPath)) { throw 'Approved SkillSpector wheel identity requires wheel bytes.' }
+        $analyzerHash = Get-PythonWheelEntrySha256 -WheelPath $WheelPath -EntryPath 'skillspector/nodes/analyzers/static_patterns_tool_misuse.py'
+        if ($analyzerHash -cne [string]$ApprovedEntry.analyzerSha256) {
+            throw "SkillSpector analyzer hash mismatch. Expected '$($ApprovedEntry.analyzerSha256)', got '$analyzerHash'."
+        }
     }
 }
 
@@ -3676,20 +3758,24 @@ function Resolve-SkillSpector {
     }
     $closureHelperSha256 = Get-FileSha256 -Path $closureHelperPath
     $approvedIndex = Normalize-RegistryUri -Value ([string]$ToolPolicy.pythonPackageIndex)
+    $approvedSourcesPath = Join-Path (Split-Path -Parent $PSScriptRoot) ([string]$ToolPolicy.approvedSources)
+    $approvedSources = Get-SkillSpectorApprovedSources -Path $approvedSourcesPath
+    $approvedSourceId = [string]$approvedSources.active
+    $approvedEntry = $approvedSources.activeEntry
     Assert-NoConflictingPipEnvironment -ApprovedIndex $approvedIndex
     Assert-NoConflictingPythonEnvironment
     $headers = Get-GitHubHeaders
     try {
-        $release = Invoke-BoundedGitHubGet -Uri 'https://api.github.com/repos/NVIDIA/SkillSpector/releases/latest' -Headers $headers -Stopwatch $acquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds
+        $release = Invoke-BoundedGitHubGet -Uri ("https://api.github.com/repos/NVIDIA/SkillSpector/releases/tags/{0}" -f [string]$approvedEntry.releaseTag) -Headers $headers -Stopwatch $acquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds
         if ($null -eq $release -or [bool]$release.draft -or [bool]$release.prerelease) {
             throw 'GitHub did not return a stable SkillSpector release.'
         }
 
         $tag = [string]$release.tag_name
-        if ($tag -notmatch '^v(?<version>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))$') {
-            throw "SkillSpector stable release tag '$tag' does not match v-semver-release-only policy."
+        if ($tag -cne [string]$approvedEntry.releaseTag) {
+            throw "SkillSpector release tag mismatch. Expected '$($approvedEntry.releaseTag)', got '$tag'."
         }
-        $version = [string]$Matches.version
+        $version = [string]$approvedEntry.version
 
         $tagRef = Invoke-BoundedGitHubGet -Uri ("https://api.github.com/repos/NVIDIA/SkillSpector/git/ref/tags/{0}" -f $tag) -Headers $headers -Stopwatch $acquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds
         $commitSha = [string]$tagRef.object.sha
@@ -3702,21 +3788,25 @@ function Resolve-SkillSpector {
         if ($objectType -cne 'commit' -or $commitSha -notmatch '^[0-9a-f]{40}$') {
             throw "SkillSpector tag '$tag' did not resolve to a full commit SHA."
         }
+        if ($commitSha -cne [string]$approvedEntry.releaseCommit) {
+            throw "SkillSpector release commit mismatch. Expected '$($approvedEntry.releaseCommit)', got '$commitSha'."
+        }
 
-        $wheelAssets = @($release.assets | Where-Object { [string]$_.name -match '^skillspector-.+-py3-none-any\.whl$' })
+        $wheelAssets = @($release.assets | Where-Object { [string]$_.name -ceq [string]$approvedEntry.wheelFileName })
         if ($wheelAssets.Count -ne 1) {
-            throw "Expected exactly one SkillSpector universal wheel asset; found $($wheelAssets.Count)."
+            throw "Expected exactly one approved SkillSpector wheel '$($approvedEntry.wheelFileName)'; found $($wheelAssets.Count)."
         }
         $wheel = $wheelAssets[0]
-        $expectedWheelName = "skillspector-$version-py3-none-any.whl"
+        $expectedWheelName = [string]$approvedEntry.wheelFileName
         if ([string]$wheel.name -cne $expectedWheelName) {
             throw "SkillSpector release tag/wheel filename mismatch. Tag '$tag' requires '$expectedWheelName', got '$($wheel.name)'."
         }
         $assetUri = Get-ApprovedSkillSpectorAssetUri -Value ([string]$wheel.browser_download_url) -Tag $tag -FileName $expectedWheelName
 
-        $digest = [string]$wheel.digest
-        if ($digest -notmatch '^sha256:[0-9a-f]{64}$') {
-            throw 'SkillSpector release wheel does not expose a SHA-256 digest.'
+        $apiDigest = [string]$wheel.digest
+        $digest = 'sha256:' + [string]$approvedEntry.wheelSha256
+        if (-not [string]::IsNullOrWhiteSpace($apiDigest) -and $apiDigest -cne $digest) {
+            throw "SkillSpector release asset digest mismatch. Expected '$digest', got '$apiDigest'."
         }
     }
     catch {
@@ -3763,13 +3853,13 @@ function Resolve-SkillSpector {
         }
 
         $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $wheelPath).Hash.ToLowerInvariant()
-        $expectedHash = $digest.Substring('sha256:'.Length)
+        $expectedHash = [string]$approvedEntry.wheelSha256
         if ($actualHash -cne $expectedHash) {
             throw "SkillSpector wheel hash mismatch. Expected '$expectedHash', got '$actualHash'."
         }
 
         $wheelMetadata = Get-PythonWheelMetadata -WheelPath $wheelPath
-        Assert-SkillSpectorWheelIdentity -ReleaseVersion $version -WheelFileName ([string]$wheel.name) -MetadataName ([string]$wheelMetadata.name) -MetadataVersion ([string]$wheelMetadata.version)
+        Assert-SkillSpectorWheelIdentity -ApprovedEntry $approvedEntry -WheelPath $wheelPath -WheelFileName ([string]$wheel.name) -MetadataName ([string]$wheelMetadata.name) -MetadataVersion ([string]$wheelMetadata.version)
         Assert-NoPythonDirectReferences -Metadata $wheelMetadata -WheelFileName ([string]$wheel.name)
         if ($ShouldInstall) {
             Assert-PythonWheelInstallPath -InstallPath $toolInstallPath -WheelPath $wheelPath
@@ -3928,6 +4018,8 @@ function Resolve-SkillSpector {
         dependencyClosureSha256 = if ($null -eq $closure) { $null } else { [string]$closure.closureSha256 }
         dependencyClosure = (Get-DependencyClosureEntriesArray -Closure $closure)
         installedClosureSha256 = if ($null -eq $installedClosure) { $null } else { [string]$installedClosure.sha256 }
+        approvedSourceId = $approvedSourceId
+        parserCorrection = [string]$approvedEntry.parserCorrection
     }
     [void](Get-RemainingAcquisitionSeconds -Stopwatch $acquisitionStopwatch -LimitSeconds $AcquisitionLimitSeconds)
     return $resolvedResult
@@ -4091,6 +4183,8 @@ else {
         $result.binaryInstallIsolation = [string]$resolved.binaryInstallIsolation
     }
     if ($ToolName -eq 'skillspector') {
+        $result.approvedSourceId = [string]$resolved.approvedSourceId
+        $result.parserCorrection = [string]$resolved.parserCorrection
         $result.pythonPackageIndex = [string]$resolved.pythonPackageIndex
         $result.installEnvironment = $resolved.installEnvironment
         $result.interpreterIsolation = [string]$resolved.interpreterIsolation

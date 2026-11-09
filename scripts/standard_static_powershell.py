@@ -7,8 +7,11 @@ the actual command nodes; it does not authenticate a run or authorize actions.
 # SPDX-FileCopyrightText: 2026 SyuanTsai
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
+import contextlib
 import hashlib
+import io
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -366,18 +369,28 @@ def main(argv=None):
                              importlib.metadata.version("skillspector"), normalized)
     from skillspector.cli import app
     result = 0
+    captured = io.StringIO()
     try:
-        app(args=["scan", str(root), "--no-llm", "--format", "json", "--output", str(report)],
-            prog_name="skillspector-central-static")
+        with contextlib.redirect_stdout(captured):
+            app(args=["scan", str(root), "--no-llm", "--format", "json"],
+                prog_name="skillspector-central-static")
     except SystemExit as error:
         result = error.code if isinstance(error.code, int) else 10
     after, _ = _inventory(root)
     if after != manifest:
         raise ParserCoverageError("candidate changed during actual scanner graph execution")
-    if not report.is_file():
-        raise ParserCoverageError("actual scanner graph omitted its report")
-    report_bytes = report.read_bytes()
-    native_report = json.loads(report_bytes)
+    raw_report = captured.getvalue()
+    try:
+        native_report = json.loads(raw_report)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise ParserCoverageError("actual scanner graph stdout is not a JSON report") from error
+    if not isinstance(native_report, dict):
+        raise ParserCoverageError("actual scanner graph stdout is not a JSON object report")
+    report_bytes = raw_report.encode("utf-8")
+    with report.open("xb") as stream:
+        stream.write(report_bytes)
+        stream.flush()
+        os.fsync(stream.fileno())
     value = {"schemaVersion": 1, "profile": PROFILE, "signed": False,
              "authorizationGranted": False, "authorizedOperations": [], "releaseEligible": False,
              "applicabilityStatus": "not-verified", "executionProvenanceStatus": "not-verified",

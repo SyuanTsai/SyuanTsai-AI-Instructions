@@ -99,7 +99,7 @@
                 "properties": {
                   "status": { "const": "verified" },
                   "verified": { "const": true },
-                  "selectedFiles": { "type": "array", "minItems": 22, "maxItems": 22, "items": { "$ref": "#/$defs/selectedFile" } }
+                  "selectedFiles": { "type": "array", "minItems": 25, "maxItems": 25, "items": { "$ref": "#/$defs/selectedFile" } }
                 }
               }
             }
@@ -534,7 +534,7 @@
       "allOf": [
         {
           "if": { "properties": { "verified": { "const": true } }, "required": ["verified"] },
-          "then": { "properties": { "selectedFiles": { "minItems": 22, "maxItems": 22 } } }
+          "then": { "properties": { "selectedFiles": { "minItems": 25, "maxItems": 25 } } }
         }
       ],
       "properties": {

@@ -191,5 +191,17 @@ class StaticPowerShellParserTests(unittest.TestCase):
                 with self.subTest(version=version), self.assertRaises(ParserCoverageError):
                     install_bridge(self.pwsh, runtime_digest, module, version, {})
 
+    # Scenario: the retained 2.13.0 bridge invokes the scanner on every host.
+    # Purpose: capture the CLI JSON from stdout because the frozen CLI does not
+    # support --output on this platform, then create the report without overwrite.
+    def test_UnitT97_bridge_report_uses_stdout_capture_and_create_new(self):
+        source = (Path(__file__).resolve().parents[1] / "scripts" / "standard_static_powershell.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn('"--output"', source)
+        self.assertIn("contextlib.redirect_stdout(captured)", source)
+        self.assertIn("json.loads(raw_report)", source)
+        self.assertIn('report.open("xb")', source)
+
 if __name__ == "__main__":
     unittest.main()

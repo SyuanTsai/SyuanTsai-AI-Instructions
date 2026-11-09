@@ -327,7 +327,7 @@ Describe 'Standard validation resolver hardening' {
             $script:ResolverGitHubApiToken = $captured
             $headers = Get-GitHubHeaders
             Assert-Equal $headers.Authorization 'Bearer namespace-token' 'A captured token must produce one Authorization header.'
-            $apiHeaders = Get-BoundedGitHubRequestHeaders -Headers $headers -Uri ([Uri]'https://api.github.com/repos/NVIDIA/SkillSpector/releases/latest')
+            $apiHeaders = Get-BoundedGitHubRequestHeaders -Headers $headers -Uri ([Uri]'https://api.github.com/repos/NVIDIA/SkillSpector/releases/tags/v2.13.4')
             $assetHeaders = Get-BoundedGitHubRequestHeaders -Headers $headers -Uri ([Uri]'https://github.com/NVIDIA/SkillSpector/releases/download/v1.0.0/skillspector-1.0.0-py3-none-any.whl')
             $redirectHeaders = Get-BoundedGitHubRequestHeaders -Headers $headers -Uri ([Uri]'https://release-assets.githubusercontent.com/example/asset')
             Assert-Equal $apiHeaders.Authorization 'Bearer namespace-token' 'Only the approved GitHub API host may receive Authorization.'
@@ -466,15 +466,130 @@ Describe 'Standard validation resolver hardening' {
         }
     }
 
-    # Scenario: the latest-stable resolver advances to SkillSpector 2.13.0 while the parser correction remains release-specific.
-    # Purpose: retain dynamic stable resolution but require the exact reviewed release identity before parser correction.
-    It 'UnitT26_binds_the_latest_stable_parser_profile_to_the_reviewed_2_13_release' {
+    # Scenario: policy selects the reviewed SkillSpector registry and the registry activates a native 2.13.4 entry.
+    # Purpose: replace mutable latest-release discovery with an explicit multi-version trust registry.
+    It 'UnitT26_binds_SkillSpector_to_the_active_approved_source_entry' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
         $toolPolicy=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/validation-toolchain.json') | ConvertFrom-Json
+        $registry=Get-SkillSpectorApprovedSources -Path (Join-Path $script:RepositoryRoot $toolPolicy.tools.skillspector.approvedSources)
         $profile=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/static-parser-host-ownership.json') | ConvertFrom-Json
-        Assert-Equal $toolPolicy.tools.skillspector.channel 'latest-stable' 'Canonical tool resolution must remain latest-stable.'
-        Assert-Equal $profile.officialScannerVersion '2.13.0' 'Parser correction must bind the reviewed stable version.'
+        Assert-Equal $toolPolicy.tools.skillspector.channel 'approved-source-registry' 'SkillSpector must use the approved source registry.'
+        Assert-Equal $registry.active '2.13.4' 'The reviewed 2.13.4 release must be active.'
+        Assert-Equal $registry.activeEntry.parserCorrection 'none' 'The active release must use the native parser without the legacy bridge.'
+        Assert-Equal $registry.entries.'2.13.0'.parserCorrection 'powershell-native-command-ownership-v1' 'The retained reviewed 2.13.0 entry must keep its correction profile.'
+        Assert-Equal $profile.officialScannerVersion '2.13.0' 'Parser correction must remain bound to its reviewed release.'
         Assert-Equal $profile.officialScannerReleaseCommit '091a509b3d6ba8ff5be528966e1f43c2e68cf214' 'Parser correction must bind the reviewed release commit.'
         Assert-Equal $profile.officialScannerReleaseAssetSha256 '41e097b4127c0aa0732ad31cc909f8aee0b907d97816c866a55b8e782a6ca6dc' 'Parser correction must bind the reviewed release wheel.'
+        $resolver=Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+        Assert-Match $resolver 'releases/tags/\{0\}' 'SkillSpector resolution must query the reviewed release tag.'
+        Assert-NotMatch $resolver "NVIDIA/SkillSpector/releases/latest" 'SkillSpector resolution must not query the mutable latest release.'
+        Assert-Match $resolver 'approvedSourceId = \$approvedSourceId' 'SkillSpector receipts must record the selected registry entry.'
+        Assert-Match $resolver 'parserCorrection = \[string\]\$approvedEntry\.parserCorrection' 'SkillSpector receipts must record the selected parser correction.'
+        $canonical=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/skillspector-approved-sources.json') | ConvertFrom-Json
+        $fixture=Join-Path $TestDrive 'skillspector-approved-sources.json'
+        $canonical.active='2.13.0'
+        [IO.File]::WriteAllText($fixture,($canonical | ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
+        $accepted=Get-SkillSpectorApprovedSources -Path $fixture
+        Assert-Equal $accepted.activeEntry.version '2.13.0' 'A reviewed active switch must remain policy-valid.'
+        foreach($mutation in @('unknown-kind','missing-field','extra-field','missing-active','key-version-mismatch','bridge-analyzer-mismatch')) {
+            $candidate=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/skillspector-approved-sources.json') | ConvertFrom-Json
+            switch($mutation) {
+                'unknown-kind' {$candidate.entries.'2.13.4'.kind='github-commit'}
+                'missing-field' {$candidate.entries.'2.13.4'.PSObject.Properties.Remove('releaseCommit')}
+                'extra-field' {$candidate.entries.'2.13.4' | Add-Member -NotePropertyName unreviewed -NotePropertyValue $true}
+                'missing-active' {$candidate.active='9.9.9'}
+                'key-version-mismatch' {$candidate.entries.'2.13.4'.version='2.13.5'}
+                'bridge-analyzer-mismatch' {$candidate.entries.'2.13.0'.analyzerSha256='0'*64}
+            }
+            [IO.File]::WriteAllText($fixture,($candidate | ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
+            { Get-SkillSpectorApprovedSources -Path $fixture } | Should Throw
+        }
+    }
+
+    # Scenario: The retained bridge entry keeps its reviewed analyzer but changes its release commit or wheel digest.
+    # Purpose: Bind the PowerShell correction profile to the exact reviewed release bytes, not only its version and analyzer.
+    It 'UnitT26a_rejects_bridge_entries_not_bound_to_reviewed_release_bytes' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $fixture=Join-Path $TestDrive 'skillspector-bridge-release-binding.json'
+        foreach($mutation in @('release-commit','wheel-sha256')) {
+            $candidate=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/skillspector-approved-sources.json') | ConvertFrom-Json
+            if($mutation -ceq 'release-commit') {$candidate.entries.'2.13.0'.releaseCommit='0'*40}
+            else {$candidate.entries.'2.13.0'.wheelSha256='0'*64}
+            [IO.File]::WriteAllText($fixture,($candidate | ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
+            { Get-SkillSpectorApprovedSources -Path $fixture } | Should Throw
+        }
+    }
+
+    # Scenario: the active approved entry is resolved through a tagged release and any pinned identity surface drifts.
+    # Purpose: forbid mutable latest discovery and retain explicit fail-closed checks for commit, asset, wheel, metadata and analyzer bytes.
+    It 'UnitT103_binds_tagged_release_and_every_approved_SkillSpector_identity_surface' {
+        $resolver=Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+        $start=$resolver.IndexOf('function Resolve-SkillSpector')
+        $end=$resolver.IndexOf('$policy = Get-Policy',$start)
+        $body=$resolver.Substring($start,$end-$start)
+        Assert-NotMatch $body 'releases/latest' 'SkillSpector must not query the mutable latest release.'
+        Assert-Match $body 'releases/tags/\{0\}' 'SkillSpector must query the exact reviewed tag.'
+        foreach($message in @('release commit mismatch','release asset digest mismatch','wheel hash mismatch','METADATA Version mismatch','analyzer hash mismatch')) {
+            Assert-Match $resolver ([regex]::Escape($message)) "Resolver must retain the '$message' fail-closed check."
+        }
+        Assert-Match $resolver 'approvedSourceId' 'Resolver receipt must identify the selected approved entry.'
+        Assert-Match $resolver 'parserCorrection' 'Resolver receipt must identify the selected parser correction.'
+    }
+
+    # Scenario: mocked GitHub metadata drifts from the active approved release before any wheel is downloaded.
+    # Purpose: prove exact tagged-release lookup and fail closed on commit, asset filename and API digest mismatches.
+    It 'UnitT104_rejects_mocked_GitHub_release_identity_drift' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $policy=Get-Policy -Path $script:ToolchainPath
+        $registry=Get-SkillSpectorApprovedSources -Path (Join-Path $script:RepositoryRoot $policy.tools.skillspector.approvedSources)
+        $script:SkillSpectorApprovedEntry=$registry.activeEntry
+        $script:SkillSpectorGitHubCalls=[Collections.Generic.List[string]]::new()
+        $originalAssertCommand=(Get-Item Function:Assert-Command).ScriptBlock
+        $originalAssertNoConflictingPipEnvironment=(Get-Item Function:Assert-NoConflictingPipEnvironment).ScriptBlock
+        $originalAssertNoConflictingPythonEnvironment=(Get-Item Function:Assert-NoConflictingPythonEnvironment).ScriptBlock
+        $originalInvokeBoundedGitHubGet=(Get-Item Function:Invoke-BoundedGitHubGet).ScriptBlock
+        Set-Item Function:Assert-Command -Value {'fixture-python'}
+        Set-Item Function:Assert-NoConflictingPipEnvironment -Value {}
+        Set-Item Function:Assert-NoConflictingPythonEnvironment -Value {}
+        Set-Item Function:Invoke-BoundedGitHubGet -Value {
+            param($Uri,$Headers,$Stopwatch,$LimitSeconds,$OutFile)
+            $uriText=[string]$Uri
+            $script:SkillSpectorGitHubCalls.Add($uriText)
+            if($uriText -match '/releases/tags/'){
+                $assetName=if($script:SkillSpectorReleaseDrift -ceq 'wheel-name'){'other.whl'}else{[string]$script:SkillSpectorApprovedEntry.wheelFileName}
+                $digest=if($script:SkillSpectorReleaseDrift -ceq 'asset-digest'){'sha256:'+('0'*64)}else{'sha256:'+[string]$script:SkillSpectorApprovedEntry.wheelSha256}
+                return [pscustomobject]@{draft=$false;prerelease=$false;tag_name=[string]$script:SkillSpectorApprovedEntry.releaseTag;assets=@([pscustomobject]@{
+                    name=$assetName;digest=$digest;browser_download_url=('https://github.com/NVIDIA/SkillSpector/releases/download/'+[string]$script:SkillSpectorApprovedEntry.releaseTag+'/'+$assetName)
+                })}
+            }
+            if($uriText -match '/git/ref/tags/'){
+                $commit=if($script:SkillSpectorReleaseDrift -ceq 'commit'){('0'*40)}else{[string]$script:SkillSpectorApprovedEntry.releaseCommit}
+                return [pscustomobject]@{object=[pscustomobject]@{type='commit';sha=$commit}}
+            }
+            throw "Unexpected mocked GitHub request: $uriText"
+        }
+        try {
+            foreach($case in @(
+                @{Drift='commit';Pattern='release commit mismatch'},
+                @{Drift='wheel-name';Pattern='Expected exactly one approved SkillSpector wheel'},
+                @{Drift='asset-digest';Pattern='release asset digest mismatch'}
+            )){
+                $script:SkillSpectorReleaseDrift=$case.Drift
+                $script:SkillSpectorGitHubCalls.Clear()
+                $message=''
+                try{Resolve-SkillSpector -ShouldInstall $false -ToolPolicy $policy.tools.skillspector -AcquisitionLimitSeconds 30 | Out-Null}catch{$message=$_.Exception.Message}
+                Assert-Match $message $case.Pattern "Mocked $($case.Drift) drift was not rejected."
+                Assert-True ($script:SkillSpectorGitHubCalls[0] -match '/releases/tags/v2\.13\.4$') 'Resolver did not start with the exact active release endpoint.'
+                Assert-True (-not (@($script:SkillSpectorGitHubCalls) -match '/releases/latest')) 'Resolver queried mutable latest release metadata.'
+            }
+        }
+        finally {
+            Set-Item Function:Assert-Command -Value $originalAssertCommand
+            Set-Item Function:Assert-NoConflictingPipEnvironment -Value $originalAssertNoConflictingPipEnvironment
+            Set-Item Function:Assert-NoConflictingPythonEnvironment -Value $originalAssertNoConflictingPythonEnvironment
+            Set-Item Function:Invoke-BoundedGitHubGet -Value $originalInvokeBoundedGitHubGet
+            Remove-Variable SkillSpectorApprovedEntry,SkillSpectorGitHubCalls,SkillSpectorReleaseDrift -Scope Script -ErrorAction SilentlyContinue
+        }
     }
 
     # Scenario: The verified closure helper already produced the authoritative offline pip selection plan.
@@ -529,6 +644,39 @@ Describe 'Standard validation resolver hardening' {
         $seedEnd = $helper.IndexOf('    def _run_offline_plan(', $seedStart)
         Assert-NotMatch $helper.Substring($seedStart, $seedEnd - $seedStart) 'prefer_joint_constraints=True' 'Initial highest-version seeding must remain unchanged.'
         Assert-Match $helper '(?s)def self_test_command.*self_test_candidate_priority\(\)' 'The offline fixture must run in the retained authority self-test.'
+    }
+
+    # Scenario: dep 1.0.dev6 is newer than a satisfying dep 0.28.1 final release.
+    # Purpose: Materialize the final release first when no requirement explicitly opts into prereleases.
+    It 'UnitT29a_prefers_a_satisfying_final_release_over_a_newer_prerelease' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $helper = Join-Path $script:RepositoryRoot 'scripts/Resolve-PythonWheelClosure.py'
+        $output = Invoke-IsolatedPythonCommand -PythonCommand (Assert-Command -Name 'python') -Arguments @(
+            '-B', '-c', 'import runpy,sys; h=runpy.run_path(sys.argv[1]); h["self_test_prefers_final_over_prerelease"](); print("final-first-self-test: passed")', $helper
+        )
+        Assert-Match ($output -join "`n") 'final-first-self-test: passed' 'A satisfying final release must precede a newer prerelease.'
+    }
+
+    # Scenario: dep 1.0.dev6 is the only candidate satisfying dep>=0.28.0.
+    # Purpose: Fall back to the prerelease after the final-release partition is exhausted.
+    It 'UnitT29b_falls_back_to_a_prerelease_when_no_final_release_is_available' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $helper = Join-Path $script:RepositoryRoot 'scripts/Resolve-PythonWheelClosure.py'
+        $output = Invoke-IsolatedPythonCommand -PythonCommand (Assert-Command -Name 'python') -Arguments @(
+            '-B', '-c', 'import runpy,sys; h=runpy.run_path(sys.argv[1]); h["self_test_falls_back_to_prerelease"](); print("prerelease-fallback-self-test: passed")', $helper
+        )
+        Assert-Match ($output -join "`n") 'prerelease-fallback-self-test: passed' 'Prerelease fallback must remain solvable when no final candidate exists.'
+    }
+
+    # Scenario: dep>=1.0.dev1 explicitly permits dep 1.0.dev6.
+    # Purpose: Preserve explicit PEP 440 prerelease opt-in while applying the default partition elsewhere.
+    It 'UnitT29c_honors_an_explicit_prerelease_requirement' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $helper = Join-Path $script:RepositoryRoot 'scripts/Resolve-PythonWheelClosure.py'
+        $output = Invoke-IsolatedPythonCommand -PythonCommand (Assert-Command -Name 'python') -Arguments @(
+            '-B', '-c', 'import runpy,sys; h=runpy.run_path(sys.argv[1]); h["self_test_honors_explicit_prerelease_requirement"](); print("explicit-prerelease-self-test: passed")', $helper
+        )
+        Assert-Match ($output -join "`n") 'explicit-prerelease-self-test: passed' 'An explicit prerelease requirement must still select its prerelease candidate.'
     }
 
     # Scenario: Sequential HTTPS GETs complete, abort, change host, redirect or encounter a transport timeout.
