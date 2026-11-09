@@ -4,6 +4,7 @@ param(
     [string] $TargetRoot,
     [string] $ConfigurationPath,
     [string] $ProvenancePath,
+    [string] $RuntimeRoot = $PSScriptRoot,
     [string] $GitExecutable = 'git',
     [string] $UserHome = [Environment]::GetFolderPath('UserProfile'),
     [switch] $WhatIf,
@@ -22,6 +23,12 @@ if ([string]::IsNullOrWhiteSpace($GitExecutable)) {
 $manifestRelativePath = '.codex/ai-instructions.manifest.json'
 $excludeBeginMarker = '# BEGIN Codex AI Instructions managed paths'
 $excludeEndMarker = '# END Codex AI Instructions managed paths'
+$script:repoManifestV4DowngradeSummary =
+    'A live worktree already contains REPO managed manifest v4 [ai-instructions-refusal-code=downgrade-refused].'
+$script:repoManifestV4ProjectionRequirement =
+    'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
+$script:repoManifestV4DowngradeMessage =
+    $script:repoManifestV4DowngradeSummary + ' ' + $script:repoManifestV4ProjectionRequirement
 
 Import-Module (Join-Path $PSScriptRoot 'safe-zip.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'skills-catalog-contract.psm1') -Force
@@ -1321,8 +1328,10 @@ function Test-IsAllowedManagedPath {
     if (Test-InstructionLicenseDeliveryPath $Path) { return $true }
 
     if ($Path -eq 'AGENTS.md' -or
+        $Path -eq 'CLAUDE.md' -or
         $Path -eq '.github/copilot-instructions.md' -or
         $Path -match '^\.codex/AI-Rules/[^/\\]+\.en\.md$' -or
+        $Path -match '^\.claude/AI-Rules/[^/\\]+\.en\.md$' -or
         $Path -match '^\.github/AI-Rules/[^/\\]+\.en\.md$') {
         return $true
     }
@@ -1574,24 +1583,70 @@ function Get-ManagedWorktreeRoots {
         [switch] $Strict
     )
 
-    $output = @(Invoke-Git -Repository $Repository -Arguments @('worktree','list','--porcelain','-z'))
-    foreach ($record in @(ConvertFrom-GitWorktreePorcelainZ -Output $output -Strict:$Strict)) {
+    try {
+        $output = @(Invoke-Git -Repository $Repository -Arguments @('worktree','list','--porcelain','-z'))
+        $records = @(ConvertFrom-GitWorktreePorcelainZ -Output $output -Strict:$Strict)
+    }
+    catch {
+        if ($Strict) {
+            throw (New-AiInstructionsRefusalException -Code 'closure-invalid' `
+                -Message "Cannot determine linked worktree manifests before mutation. $($_.Exception.Message)" `
+                -InnerException $_.Exception)
+        }
+        return
+    }
+    foreach ($record in $records) {
         if ([bool]$record.Prunable) { continue }
         [string]$record.Path
     }
 }
 
+function Get-ClaudeProjectOwnedWorktreeRoots {
+    param([Parameter(Mandatory = $true)][string] $Repository,[switch] $Strict)
+    $owned = New-Object System.Collections.Generic.List[string]
+    $worktreeRoots = @(Get-ManagedWorktreeRoots -Repository $Repository -Strict:$Strict)
+    foreach ($worktreeRoot in $worktreeRoots) {
+        $basePath = Join-Path $worktreeRoot 'CLAUDE.md'
+        $tracked = (Get-GitExitCode -Repository $worktreeRoot -Arguments @('ls-files','--error-unmatch','--','CLAUDE.md')) -eq 0
+        $staged = Test-GitPathHasStagedChanges -Repository $worktreeRoot -Path 'CLAUDE.md'
+        $baseExists = Test-Path -LiteralPath $basePath -PathType Leaf
+        $managedEntry = $null
+        $manifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/','\')
+        if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+            try {
+                $candidate = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
+                if ($candidate.schemaVersion -eq 4) { Assert-ManagedManifestV4 -Manifest $candidate }
+                elseif ($candidate.schemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $candidate }
+                elseif ($candidate.schemaVersion -eq 1) { Assert-LegacyManagedManifestV1 -Manifest $candidate }
+                else { throw "unsupported schemaVersion '$($candidate.schemaVersion)'." }
+                $matches = @($candidate.files | Where-Object { [string]$_.targetPath -ceq 'CLAUDE.md' })
+                if ($matches.Count -gt 1) { throw 'duplicate CLAUDE.md ownership entries.' }
+                if ($matches.Count -eq 1) { $managedEntry = $matches[0] }
+            }
+            catch {
+                if ($Strict) { throw "Invalid linked worktree manifest '$manifestPath': $($_.Exception.Message)" }
+                $owned.Add([string]$worktreeRoot)
+                continue
+            }
+        }
+        $managedSha256 = if ($null -ne $managedEntry) { [string]$managedEntry.sha256 } else { $null }
+        $currentSha256 = if ($baseExists) { Get-ManagedContentHash -Path $basePath -TargetPath 'CLAUDE.md' } else { $null }
+        if (Test-AiInstructionsClaudeFamilyProjectOwned -BaseExists $baseExists -BaseTracked $tracked -BaseStaged $staged `
+            -ManagedSha256 $managedSha256 -CurrentSha256 $currentSha256) {
+            $owned.Add([string]$worktreeRoot)
+        }
+    }
+    return @($owned)
+}
+
 function Assert-NoRepoManagedManifestV4 {
     param(
         [Parameter(Mandatory = $true)][string] $Repository,
+        [switch] $AllowV4,
         [switch] $Strict
     )
 
-    try { $worktreeRoots = @(Get-ManagedWorktreeRoots -Repository $Repository -Strict:$Strict) }
-    catch {
-        if ($Strict) { throw 'Cannot determine linked worktree manifests before mutation.' }
-        return
-    }
+    $worktreeRoots = @(Get-ManagedWorktreeRoots -Repository $Repository -Strict:$Strict)
     foreach ($worktreeRoot in $worktreeRoots) {
         $isSchemaV4 = $false
         $worktreeManifestPath = [string]$worktreeRoot
@@ -1635,7 +1690,15 @@ function Assert-NoRepoManagedManifestV4 {
             continue
         }
         if ($isSchemaV4) {
-            throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
+            if ($AllowV4) { Assert-ManagedManifestV4 -Manifest $worktreeManifest }
+            else {
+                [Console]::Error.WriteLine($script:repoManifestV4DowngradeSummary)
+                [Console]::Error.WriteLine($script:repoManifestV4ProjectionRequirement)
+                throw [SyuanTsai.AiInstructions.AiInstructionsRefusalException]::new(
+                    'downgrade-refused',
+                    $script:repoManifestV4DowngradeMessage
+                )
+            }
         }
     }
 }
@@ -1648,7 +1711,7 @@ function Get-SharedManagedExcludePaths {
 
     $paths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     foreach ($currentManagedPath in $CurrentManagedPaths) { [void]$paths.Add($currentManagedPath.Replace('\','/')) }
-    foreach ($worktreeRoot in @(Get-ManagedWorktreeRoots -Repository $Repository)) {
+    foreach ($worktreeRoot in @(Get-ManagedWorktreeRoots -Repository $Repository -Strict)) {
         $worktreeManifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/','\')
         if (-not (Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf)) { continue }
         Assert-ManagedPathDoesNotCrossReparsePoint -Root $worktreeRoot -Path $worktreeManifestPath -Context 'Linked worktree managed manifest'
@@ -1658,10 +1721,8 @@ function Get-SharedManagedExcludePaths {
             if ($worktreeManifestSchemaVersion -isnot [int] -and $worktreeManifestSchemaVersion -isnot [long]) {
                 throw 'schemaVersion must be an integer.'
             }
-            if ($worktreeManifestSchemaVersion -eq 4) {
-                throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
-            }
-            if ($worktreeManifestSchemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $worktreeManifest }
+            if ($worktreeManifestSchemaVersion -eq 4) { Assert-ManagedManifestV4 -Manifest $worktreeManifest }
+            elseif ($worktreeManifestSchemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $worktreeManifest }
             elseif ($worktreeManifestSchemaVersion -eq 1) { Assert-LegacyManagedManifestV1 -Manifest $worktreeManifest }
             else {
                 throw "unsupported schemaVersion '$worktreeManifestSchemaVersion'."
@@ -1702,6 +1763,8 @@ function New-GitInfoExcludeSnapshot {
         PublicationDaclRecord = $null
         PublicationReadOnly = $false
         LegacyRecovery = $false
+        ManagedPaths = @()
+        ProtectedPaths = @()
     }
     $metadataHandle = $null
     $metadataStream = $null
@@ -1917,7 +1980,9 @@ function Set-ManagedGitInfoExclude {
     param(
         [Parameter(Mandatory = $true)][string] $Repository,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $ManagedPaths,
-        [Parameter(Mandatory = $true)][object] $Snapshot
+        [Parameter(Mandatory = $true)][object] $Snapshot,
+        [AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths = @(),
+        [AllowEmptyCollection()][ValidateNotNull()][string[]] $PreservedProtectedPaths = @()
     )
 
     $path = Get-GitInfoExcludePath -Repository $Repository
@@ -1925,8 +1990,37 @@ function Set-ManagedGitInfoExclude {
         throw 'Shared Git exclude snapshot does not match the requested mutation target.'
     }
     Assert-GitInfoExcludeMutationPath -Repository $Repository -Path $path
-    $sharedManagedPaths = @(Get-SharedManagedExcludePaths -Repository $Repository -CurrentManagedPaths $ManagedPaths)
-    $lines = @($sharedManagedPaths | ForEach-Object { ConvertTo-GitExcludeLiteralPattern -Path $_ })
+    $requestedManagedPaths = @($ManagedPaths)
+    $safeManagedPaths = @($ManagedPaths | Where-Object {
+        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$_) -ProtectedPaths $ProtectedPaths) {
+            Write-Warning "Protected Claude family path skipped at bootstrap Git exclude: $_ (project-owned Claude family)."
+            return $false
+        }
+        return $true
+    })
+    foreach ($preservedProtectedPath in $PreservedProtectedPaths) {
+        if (-not (Test-IsProtectedClaudeFamilyPath -Path ([string]$preservedProtectedPath) -ProtectedPaths $ProtectedPaths)) {
+            throw "A preserved Git exclude path is outside the protected Claude family: $preservedProtectedPath"
+        }
+        if (@($requestedManagedPaths | Where-Object { [string]$_ -ceq [string]$preservedProtectedPath }).Count -eq 0) {
+            throw "A preserved protected Git exclude path is not managed by the current worktree: $preservedProtectedPath"
+        }
+    }
+    $Snapshot.ManagedPaths = @($requestedManagedPaths + $PreservedProtectedPaths | Sort-Object -Unique)
+    $Snapshot.ProtectedPaths = @($ProtectedPaths)
+    $sharedManagedPaths = @(Get-SharedManagedExcludePaths -Repository $Repository -CurrentManagedPaths $safeManagedPaths)
+    $sharedManagedPaths = @($sharedManagedPaths | Where-Object {
+        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$_) -ProtectedPaths $ProtectedPaths) {
+            Write-Warning "Protected Claude family path skipped at bootstrap shared Git exclude: $_ (project-owned Claude family)."
+            return $false
+        }
+        return $true
+    })
+    $lines = @(
+        @($sharedManagedPaths) + @($PreservedProtectedPaths) |
+            Sort-Object -Unique |
+            ForEach-Object { ConvertTo-GitExcludeLiteralPattern -Path $_ }
+    )
     $handle = Open-GitInfoExcludeMutationHandle -Repository $Repository -Path $path
     try {
         [byte[]]$beforeBytes = if ([bool]$handle.Created) { [byte[]]@() } else { Read-GitInfoExcludeStreamBytes -Stream $handle.Stream }
@@ -2047,8 +2141,11 @@ function New-ManifestEntry {
     elseif ($TargetPath -eq '.github/copilot-instructions.md') {
         $artifactId = 'copilot-base'
     }
+    elseif ($TargetPath -eq 'CLAUDE.md') {
+        $artifactId = 'claude-base'
+    }
     elseif (Test-InstructionLicenseDeliveryPath $TargetPath) {
-        $artifactId = if ($TargetPath.StartsWith('.codex/')) { 'codex-licensing' } else { 'copilot-licensing' }
+        $artifactId = if ($TargetPath.StartsWith('.codex/')) { 'codex-licensing' } elseif ($TargetPath.StartsWith('.claude/')) { 'claude-licensing' } else { 'copilot-licensing' }
     }
     elseif ($TargetPath.StartsWith('.codex/AI-Rules/', [System.StringComparison]::Ordinal)) {
         $ruleName = [regex]::Replace(
@@ -2066,6 +2163,14 @@ function New-ManifestEntry {
         ).Trim('-')
         $artifactId = "copilot-rule-$ruleName"
     }
+    elseif ($TargetPath.StartsWith('.claude/AI-Rules/', [System.StringComparison]::Ordinal)) {
+        $ruleName = [regex]::Replace(
+            [System.IO.Path]::GetFileName($TargetPath).Replace('.en.md', '').ToLowerInvariant(),
+            '[^a-z0-9-]',
+            '-'
+        ).Trim('-')
+        $artifactId = "claude-rule-$ruleName"
+    }
     else {
         throw "Cannot derive instruction artifact ID for managed target: $TargetPath"
     }
@@ -2074,7 +2179,7 @@ function New-ManifestEntry {
         throw "Derived artifact ID is not lowercase kebab-case: $artifactId"
     }
 
-    return [pscustomobject][ordered]@{
+    $result = [ordered]@{
         artifactType = $artifactType
         artifactId = $artifactId
         sourceId = [string] $source.sourceId
@@ -2083,9 +2188,15 @@ function New-ManifestEntry {
         sourceCommit = [string] $source.sourceCommit
         sourceVersion = [string] $source.sourceVersion
         sourcePath = $SourcePath
-        targetPath = $TargetPath
-        sha256 = $Sha256
     }
+    if ($repoManifestWriter -ceq 'v4' -and $artifactType -ceq 'instruction') {
+        $result.host = Resolve-ManagedInstructionHostForTarget -TargetPath $TargetPath
+        $result.rendererId = 'build-ai-instructions'
+        $result.rendererSha256 = [string]$script:rendererSha256
+    }
+    $result.targetPath = $TargetPath
+    $result.sha256 = $Sha256
+    return [pscustomobject]$result
 }
 
 function Convert-ManifestEntryForSchema {
@@ -2113,13 +2224,33 @@ function Convert-ManifestEntryForSchema {
     return $Entry
 }
 
+function Resolve-ManagedInstructionHostForTarget {
+    param([Parameter(Mandatory = $true)][string] $TargetPath)
+
+    $hosts = @(
+        if ($TargetPath -ceq 'AGENTS.md' -or
+            $TargetPath -cmatch '^\.codex/AI-Rules/[^/\\]+\.en\.md$' -or
+            $TargetPath -cmatch '^\.codex/ai-instructions-licenses/(?:[0-9a-f]{40}/)?(?:delivery\.json|source/.+)$') { 'codex' }
+        if ($TargetPath -ceq '.github/copilot-instructions.md' -or
+            $TargetPath -cmatch '^\.github/AI-Rules/[^/\\]+\.en\.md$' -or
+            $TargetPath -cmatch '^\.github/ai-instructions-licenses/(?:[0-9a-f]{40}/)?(?:delivery\.json|source/.+)$') { 'copilot' }
+        if ($TargetPath -ceq 'CLAUDE.md' -or
+            $TargetPath -cmatch '^\.claude/AI-Rules/[^/\\]+\.en\.md$' -or
+            $TargetPath -cmatch '^\.claude/ai-instructions-licenses/(?:[0-9a-f]{40}/)?(?:delivery\.json|source/.+)$') { 'claude' }
+    )
+    if ($hosts.Count -ne 1) {
+        throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Cannot determine exactly one instruction host from retained legacy target path '$TargetPath'.")
+    }
+    return [string]$hosts[0]
+}
+
 function Copy-ExistingManifestEntry {
     param([Parameter(Mandatory = $true)][object] $Entry)
 
     if ($null -eq $Entry.PSObject.Properties['artifactType']) {
         return [pscustomobject][ordered]@{sourcePath=$Entry.sourcePath; targetPath=$Entry.targetPath; sha256=$Entry.sha256}
     }
-    return [pscustomobject][ordered]@{
+    $copy = [ordered]@{
         artifactType = [string] $Entry.artifactType
         artifactId = [string] $Entry.artifactId
         sourceId = [string] $Entry.sourceId
@@ -2128,16 +2259,42 @@ function Copy-ExistingManifestEntry {
         sourceCommit = [string] $Entry.sourceCommit
         sourceVersion = [string] $Entry.sourceVersion
         sourcePath = [string] $Entry.sourcePath
-        targetPath = [string] $Entry.targetPath
-        sha256 = [string] $Entry.sha256
     }
+    if ($repoManifestWriter -ceq 'v4' -and [string]$Entry.artifactType -ceq 'instruction') {
+        if ($manifestSchemaVersion -eq 4) {
+            $copy.host = [string]$Entry.host
+            $copy.rendererId = [string]$Entry.rendererId
+            $copy.rendererSha256 = $Entry.rendererSha256
+            if ($null -ne $Entry.PSObject.Properties['retention']) { $copy.retention = [string]$Entry.retention }
+        }
+        elseif ($manifestSchemaVersion -in @(2,3)) {
+            $copy.host = Resolve-ManagedInstructionHostForTarget -TargetPath ([string]$Entry.targetPath)
+            $copy.rendererId = 'legacy-unrendered'
+            $copy.rendererSha256 = $null
+            $copy.retention = 'legacy-preserved'
+        }
+        else {
+            throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Cannot retain instruction entry from managed manifest schema '$manifestSchemaVersion' while writing v4.")
+        }
+    }
+    elseif ($null -ne $Entry.PSObject.Properties['host']) {
+        $copy.host = [string]$Entry.host
+        $copy.rendererId = [string]$Entry.rendererId
+        $copy.rendererSha256 = $Entry.rendererSha256
+        if ($null -ne $Entry.PSObject.Properties['retention']) { $copy.retention = [string]$Entry.retention }
+    }
+    if ($null -ne $Entry.PSObject.Properties['projectionId']) { $copy.projectionId = [string]$Entry.projectionId }
+    $copy.targetPath = [string]$Entry.targetPath
+    $copy.sha256 = [string]$Entry.sha256
+    return [pscustomobject]$copy
 }
 
 function New-TargetMutationSnapshot {
     param(
         [Parameter(Mandatory = $true)][string] $TargetRoot,
         [Parameter(Mandatory = $true)][string[]] $RelativePaths,
-        [Parameter(Mandatory = $true)][string] $BackupRoot
+        [Parameter(Mandatory = $true)][string] $BackupRoot,
+        [AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths = @()
     )
 
     New-Item -ItemType Directory -Force -Path $BackupRoot | Out-Null
@@ -2148,6 +2305,10 @@ function New-TargetMutationSnapshot {
 
     foreach ($relativePath in @($RelativePaths | Sort-Object -Unique)) {
         if ([string]::IsNullOrWhiteSpace($relativePath)) { continue }
+        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$relativePath) -ProtectedPaths $ProtectedPaths) {
+            Write-Warning "Protected Claude family path skipped at bootstrap recovery snapshot: $relativePath (project-owned Claude family)."
+            continue
+        }
         try {
             $targetPath = [System.IO.Path]::GetFullPath((Join-Path $resolvedTargetRoot $relativePath.Replace('/', '\')))
         }
@@ -2226,6 +2387,7 @@ function New-TargetMutationSnapshot {
         TargetRoot = $resolvedTargetRoot
         FileStates = $fileStates.ToArray()
         CreatedDirectories = New-Object System.Collections.Generic.List[object]
+        ProtectedPaths = @($ProtectedPaths)
     }
 }
 
@@ -2587,6 +2749,14 @@ function Invoke-AtomicFilePublication {
         [Parameter(Mandatory=$true)][object]$PublicationState,
         [AllowNull()][object]$Snapshot
     )
+    $protectedPaths = @(if ($null -ne $Snapshot -and $Snapshot.PSObject.Properties['ProtectedPaths']) {
+        if ($null -eq $Snapshot.ProtectedPaths) { throw 'ProtectedPaths state is null.' }
+        @($Snapshot.ProtectedPaths)
+    } else { @() })
+    if ($Kind -ceq 'Target' -and (Test-IsProtectedClaudeFamilyPath -Path $RelativePath -ProtectedPaths $protectedPaths)) {
+        Write-Warning "Protected Claude family path skipped at atomic file publication: $RelativePath (project-owned Claude family)."
+        return $null
+    }
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw 'Atomic file publication requires Windows handle-bound rename support.' }
     $parent = Split-Path -Parent $Path
     $leaf = Split-Path -Leaf $Path
@@ -2911,6 +3081,14 @@ function Remove-TargetMutationFileAtomically {
         [switch] $AllowReadOnlyOnlyDrift
     )
 
+    $protectedPaths = @(if ($Snapshot.PSObject.Properties['ProtectedPaths']) {
+        if ($null -eq $Snapshot.ProtectedPaths) { throw 'ProtectedPaths state is null.' }
+        @($Snapshot.ProtectedPaths)
+    } else { @() })
+    if (Test-IsProtectedClaudeFamilyPath -Path $RelativePath -ProtectedPaths $protectedPaths) {
+        Write-Warning "Protected Claude family path skipped at atomic file deletion: $RelativePath (project-owned Claude family)."
+        return
+    }
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
         throw "$Operation requires the Windows atomic managed-file deletion boundary: $RelativePath"
     }
@@ -2971,6 +3149,14 @@ function Set-TargetMutationFileBytes {
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $Bytes
     )
 
+    $protectedPaths = @(if ($Snapshot.PSObject.Properties['ProtectedPaths']) {
+        if ($null -eq $Snapshot.ProtectedPaths) { throw 'ProtectedPaths state is null.' }
+        @($Snapshot.ProtectedPaths)
+    } else { @() })
+    if (Test-IsProtectedClaudeFamilyPath -Path $RelativePath -ProtectedPaths $protectedPaths) {
+        Write-Warning "Protected Claude family path skipped at bootstrap file write: $RelativePath (project-owned Claude family)."
+        return
+    }
     if ($RelativePath.StartsWith('.agents/skills/',[StringComparison]::OrdinalIgnoreCase)) {
         throw 'Consumer write boundary rejects shared Skill installation; use the USER reconciler.'
     }
@@ -3001,6 +3187,14 @@ function Remove-TargetMutationFile {
         [Parameter(Mandatory = $true)][string] $RelativePath
     )
 
+    $protectedPaths = @(if ($Snapshot.PSObject.Properties['ProtectedPaths']) {
+        if ($null -eq $Snapshot.ProtectedPaths) { throw 'ProtectedPaths state is null.' }
+        @($Snapshot.ProtectedPaths)
+    } else { @() })
+    if (Test-IsProtectedClaudeFamilyPath -Path $RelativePath -ProtectedPaths $protectedPaths) {
+        Write-Warning "Protected Claude family path skipped at bootstrap file deletion: $RelativePath (project-owned Claude family)."
+        return
+    }
     $state = Get-TargetMutationFileState -Snapshot $Snapshot -RelativePath $RelativePath
     if ([bool]$state.MutationApplied -or [string]$state.OriginalType -cne 'file') {
         throw "Target mutation cannot remove an unexpected snapshot state: $RelativePath"
@@ -3082,7 +3276,15 @@ function Restore-TargetMutationSnapshot {
 
     $driftedPaths = New-Object System.Collections.Generic.List[string]
     $rollbackErrors = New-Object System.Collections.Generic.List[string]
+    $protectedPaths = @(if ($Snapshot.PSObject.Properties['ProtectedPaths']) {
+        if ($null -eq $Snapshot.ProtectedPaths) { throw 'ProtectedPaths state is null.' }
+        @($Snapshot.ProtectedPaths)
+    } else { @() })
     foreach ($state in @($Snapshot.FileStates)) {
+        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$state.RelativePath) -ProtectedPaths $protectedPaths) {
+            Write-Warning "Protected Claude family path skipped at bootstrap file rollback: $($state.RelativePath) (project-owned Claude family)."
+            continue
+        }
         if (-not [bool]$state.MutationApplied) { continue }
         $stream = $null
         $restoreReadOnly = $false
@@ -3443,12 +3645,34 @@ function Update-PersonalAgentStash {
         [string] $EvidenceFingerprint,
 
         [Parameter(Mandatory = $true)]
-        [string] $ActiveIndexPath
+        [string] $ActiveIndexPath,
+
+        [AllowEmptyCollection()]
+        [ValidateNotNull()]
+        [string[]] $ProtectedPaths = @()
     )
 
+    $requestedPathCount = $Paths.Count
+    $Paths = @($Paths | Where-Object {
+        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$_) -ProtectedPaths $ProtectedPaths) {
+            Write-Warning "Protected Claude family path skipped at PersonalAgent recovery evidence: $_ (project-owned Claude family)."
+            return $false
+        }
+        return $true
+    })
     if ($Paths.Count -eq 0) {
+        if ($requestedPathCount -gt 0) { return $null }
         throw 'Cannot create PersonalAgent stash without managed changes.'
     }
+    $ExpectedEntries = @($ExpectedEntries | Where-Object {
+        $entryPath = [string]$_.targetPath
+        if (Test-IsProtectedClaudeFamilyPath -Path $entryPath -ProtectedPaths $ProtectedPaths) {
+            Write-Warning "Protected Claude family path skipped at PersonalAgent recovery evidence: $entryPath (project-owned Claude family)."
+            return $false
+        }
+        return $true
+    })
+    $EvidenceFingerprint = Get-PersonalAgentEvidenceFingerprint -Repository $Repository -Paths $Paths
 
     $expectedRawHashes = @{}
     foreach ($path in $Paths) {
@@ -3561,7 +3785,23 @@ function Update-PersonalAgentStash {
         }
     }
 
-    $obsoleteStashes = @($PriorOwnedStashes | Where-Object { $_.Hash -ne $newStashHash } | Sort-Object Index -Descending)
+    $protectedStashHashes = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($priorOwnedStash in @($PriorOwnedStashes)) {
+        $parentLine = ((Invoke-Git -Repository $Repository -Arguments @('show','--no-patch','--format=%P',[string]$priorOwnedStash.Hash)) |
+            Select-Object -First 1).Trim()
+        $parents = @($parentLine.Split(' ',[StringSplitOptions]::RemoveEmptyEntries))
+        if ($parents.Count -lt 3) { throw "Cannot inspect prior PersonalAgent recovery evidence: $($priorOwnedStash.Hash)" }
+        foreach ($line in @(Invoke-Git -Repository $Repository -Arguments @('-c','core.quotePath=true','ls-tree','-r','--name-only',$parents[2]))) {
+            $evidencePath = ConvertFrom-GitQuotedPath -Path ([string]$line)
+            if (Test-IsProtectedClaudeFamilyPath -Path $evidencePath -ProtectedPaths $ProtectedPaths) {
+                Write-Warning "Protected Claude family recovery evidence retained in stash $($priorOwnedStash.Hash): $evidencePath (project-owned Claude family)."
+                [void]$protectedStashHashes.Add([string]$priorOwnedStash.Hash)
+            }
+        }
+    }
+    $obsoleteStashes = @($PriorOwnedStashes | Where-Object {
+        $_.Hash -ne $newStashHash -and -not $protectedStashHashes.Contains([string]$_.Hash)
+    } | Sort-Object Index -Descending)
     foreach ($obsoleteStash in $obsoleteStashes) {
         $droppedHash = $null
         try {
@@ -3636,11 +3876,25 @@ function Update-PersonalAgentStash {
 function Save-SkillMigrationJournal {
     param([object]$Snapshot, [object]$ExcludeSnapshot, [string]$Path, [object]$GitState, [string]$Phase,
         [string]$PendingPath, [string]$PendingType='missing', [byte[]]$PendingBytes)
+    $protectedPaths = @(if ($Snapshot.PSObject.Properties['ProtectedPaths']) {
+        if ($null -eq $Snapshot.ProtectedPaths) { throw 'ProtectedPaths state is null.' }
+        @($Snapshot.ProtectedPaths)
+    } else { @() })
+    if (-not [string]::IsNullOrWhiteSpace($PendingPath) -and
+        (Test-IsProtectedClaudeFamilyPath -Path $PendingPath -ProtectedPaths $protectedPaths)) {
+        Write-Warning "Protected Claude family path skipped at Skill migration journal: $PendingPath (project-owned Claude family)."
+        $PendingPath = $null
+        $PendingBytes = $null
+    }
     $schemaVersion = 2
     if ($Snapshot.PSObject.Properties['JournalSchemaVersion']) { $schemaVersion = [int]$Snapshot.JournalSchemaVersion }
     if ($schemaVersion -eq 1) {
         $states = @(
             foreach ($state in $Snapshot.FileStates) {
+                if (Test-IsProtectedClaudeFamilyPath -Path ([string]$state.RelativePath) -ProtectedPaths $protectedPaths) {
+                    Write-Warning "Protected Claude family path skipped at Skill migration journal: $($state.RelativePath) (project-owned Claude family)."
+                    continue
+                }
                 $pending = [string]$state.RelativePath -ceq $PendingPath
                 $legacyState = [ordered]@{
                     relativePath=$state.RelativePath; originalType=$state.OriginalType
@@ -3675,6 +3929,10 @@ function Save-SkillMigrationJournal {
     else {
     $states = @(
         foreach ($state in $Snapshot.FileStates) {
+            if (Test-IsProtectedClaudeFamilyPath -Path ([string]$state.RelativePath) -ProtectedPaths $protectedPaths) {
+                Write-Warning "Protected Claude family path skipped at Skill migration journal: $($state.RelativePath) (project-owned Claude family)."
+                continue
+            }
             $pending = [string]$state.RelativePath -ceq $PendingPath
             [ordered]@{relativePath=$state.RelativePath; originalType=$state.OriginalType
                 backupName=$(if ($state.BackupPath) { Split-Path -Leaf $state.BackupPath } else { $null })
@@ -3731,12 +3989,23 @@ function Restore-SkillMigrationJournal {
         [string]$journal.head -cnotmatch '^[0-9a-f]{40,64}$' -or [string]$journal.indexSha256 -cnotmatch '^[0-9a-f]{64}$') {
         throw 'Skill migration journal identity or schema is invalid.'
     }
+    $recoveryProtectedPaths = @(if (@(Get-ClaudeProjectOwnedWorktreeRoots -Repository $Repository -Strict).Count -gt 0) {
+        @('CLAUDE.md','.claude/AI-Rules/','.claude/ai-instructions-licenses/')
+    }
+    else { @() })
+    $protectedJournalPaths = New-Object System.Collections.Generic.List[string]
     $gitState = Get-RepoSkillMigrationGitState -Repository $Repository -GitExecutable $GitExecutable
     if ($gitState.head -cne $journal.head -or $gitState.indexSha256 -cne $journal.indexSha256) { throw 'Skill migration recovery preserved concurrent Git changes.' }
     $states = @()
     $seen = @{}
     $seenBackups = @{}
     foreach ($state in $journal.states) {
+        $relative = [string]$state.relativePath
+        if (Test-IsProtectedClaudeFamilyPath -Path $relative -ProtectedPaths $recoveryProtectedPaths) {
+            Write-Warning "Protected Claude family path skipped at Skill migration recovery: $relative (project-owned Claude family)."
+            $protectedJournalPaths.Add($relative)
+            continue
+        }
         if ($schemaVersion -eq 2) {
             Assert-ExactJournalProperties -Value $state -Names @('relativePath','originalType','backupName','backupSha256','mutationApplied',
                 'appliedType','appliedBase64','originalDacl','originalReadOnly','originalIdentity','appliedFileIdentity','publication',
@@ -3744,7 +4013,6 @@ function Restore-SkillMigrationJournal {
                 -Context 'schema-v2 migration state'
         }
         if ($state.mutationApplied -isnot [bool]) { throw 'Invalid Skill migration recovery mutation flag.' }
-        $relative = [string]$state.relativePath
         if ((-not (Test-IsAllowedManagedPath $relative) -and $relative -cne '.codex/ai-instructions.manifest.json') -or
             $seen.ContainsKey($relative) -or $state.originalType -notin @('file','missing')) { throw 'Invalid Skill migration recovery path/state.' }
         $seen[$relative]=$true
@@ -3909,7 +4177,7 @@ function Restore-SkillMigrationJournal {
         }
     }
     $snapshot = [pscustomobject][ordered]@{TargetRoot=$Repository; FileStates=$states; CreatedDirectories=$createdDirectories
-        JournalSchemaVersion=$schemaVersion}
+        JournalSchemaVersion=$schemaVersion; ProtectedPaths=@($recoveryProtectedPaths)}
     $journalExclude = $journal.exclude
     if ([string]$journalExclude.Repository -cne $Repository -or [string]$journalExclude.Path -cne (Get-GitInfoExcludePath $Repository)) { throw 'Invalid Skill migration exclude recovery target.' }
     Assert-GitInfoExcludeMutationPath -Repository $Repository -Path $journalExclude.Path
@@ -3939,7 +4207,8 @@ function Restore-SkillMigrationJournal {
             Bytes=$(if ($null -ne $journalExclude.bytes) { [byte[]]$journalExclude.bytes } else { $null })
             AppliedBytes=$(if ($null -ne $journalExclude.appliedBytes) { [byte[]]$journalExclude.appliedBytes } else { $null })
             DaclRecord=$null;OriginalReadOnly=$false;OriginalIdentity=$null;AppliedFileIdentity=$null;Publication=$excludePublication
-            PublicationDaclRecord=$excludePublicationDacl;PublicationReadOnly=$excludePublicationReadOnly;LegacyRecovery=$true}
+            PublicationDaclRecord=$excludePublicationDacl;PublicationReadOnly=$excludePublicationReadOnly;LegacyRecovery=$true
+            ManagedPaths=[string[]]$protectedJournalPaths.ToArray();ProtectedPaths=@($recoveryProtectedPaths)}
     }
     else {
         Assert-ExactJournalProperties -Value $journalExclude -Names @('path','repository','mutationApplied','existed','bytesBase64','appliedBase64',
@@ -4004,7 +4273,8 @@ function Restore-SkillMigrationJournal {
             AppliedBytes=$excludeAppliedBytes;DaclRecord=$excludeDacl;OriginalReadOnly=[bool]$journalExclude.originalReadOnly
             OriginalIdentity=$journalExclude.originalIdentity;AppliedFileIdentity=$journalExclude.appliedFileIdentity
             Publication=$excludePublication;PublicationDaclRecord=$excludePublicationDacl
-            PublicationReadOnly=$excludePublicationReadOnly;LegacyRecovery=$false}
+            PublicationReadOnly=$excludePublicationReadOnly;LegacyRecovery=$false
+            ManagedPaths=[string[]]$protectedJournalPaths.ToArray();ProtectedPaths=@($recoveryProtectedPaths)}
     }
     if ($schemaVersion -eq 1 -and $null -eq $exclude.Publication -and [bool]$exclude.MutationApplied) {
         $legacyExcludeIsOriginal = $false
@@ -4087,6 +4357,10 @@ if ([string]::IsNullOrWhiteSpace($ConfigurationPath)) {
 
 $configurationFullPath = [System.IO.Path]::GetFullPath($ConfigurationPath)
 $configuration = $null
+$repoManifestWriter = 'legacy'
+$projectionContractSha256 = $null
+$verifiedRoutingCatalogId = $null
+$verifiedRuntimeLockSha256 = $null
 if (Test-Path -LiteralPath $configurationFullPath -PathType Leaf) {
     try {
         $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationFullPath | ConvertFrom-Json
@@ -4099,6 +4373,53 @@ if (Test-Path -LiteralPath $configurationFullPath -PathType Leaf) {
         ($configuration.schemaVersion -is [int] -or $configuration.schemaVersion -is [long]) -and
         [int64]$configuration.schemaVersion -eq 5) {
         throw 'AI Instructions sync configuration schema version 5 requires a projection-aware installer.'
+    }
+    if (($configuration.schemaVersion -is [int] -or $configuration.schemaVersion -is [long]) -and
+        [int64]$configuration.schemaVersion -eq 4 -and $null -ne $configuration.PSObject.Properties['syncConfiguration']) {
+        foreach ($name in @($configuration.PSObject.Properties.Name)) {
+            if ($name -cnotin @('schemaVersion','syncConfiguration','catalogId','lockSha256','projectionContractSha256')) {
+                throw "Projection-aware routing configuration contains unsupported property '$name'."
+            }
+        }
+        foreach ($name in @('syncConfiguration','catalogId','lockSha256','projectionContractSha256')) {
+            if ($null -eq $configuration.PSObject.Properties[$name]) { throw "Projection-aware routing configuration is missing '$name'." }
+        }
+        $syncConfiguration = $configuration.syncConfiguration
+        Assert-AiInstructionsSyncConfigurationV5 -Configuration $syncConfiguration | Out-Null
+        if (@($syncConfiguration.projections.project).Count -gt 0) {
+            throw (New-AiInstructionsRefusalException -Code 'projection-runtime-unavailable' -Message 'Project Skill projections are unavailable until the P9c projection runtime is installed.')
+        }
+        $runtimeRootPath = [System.IO.Path]::GetFullPath($RuntimeRoot)
+        $runtimeBundlePath = Join-Path $runtimeRootPath 'runtime-bundle.json'
+        $runtimeCatalogPath = Join-Path $runtimeRootPath 'catalog\skills-catalog.json'
+        $runtimeLockPath = Join-Path $runtimeRootPath 'catalog\skills-catalog-lock.json'
+        $platformRuntimePath = Join-Path $runtimeRootPath 'platform-runtime.psd1'
+        try {
+            $runtimeBundle = Get-Content -Raw -Encoding UTF8 -LiteralPath $runtimeBundlePath | ConvertFrom-Json
+            $runtimeCatalog = Test-SkillsCatalogDocument -CatalogPath $runtimeCatalogPath
+            $runtimeLock = Test-SkillsCatalogLockDocument -LockPath $runtimeLockPath -CatalogPath $runtimeCatalogPath
+        }
+        catch { throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Projection-aware bootstrap routing validation failed: $($_.Exception.Message)" -InnerException $_.Exception) }
+        $runtimeLockSha256 = Get-RawContentHash -Path $runtimeLockPath
+        if ([int64]$runtimeCatalog.schemaVersion -ne 3 -or [int64]$runtimeLock.schemaVersion -ne 3 -or
+            [string]$runtimeCatalog.catalogId -cne [string]$configuration.catalogId -or
+            $runtimeLockSha256 -cne [string]$configuration.lockSha256 -or
+            [string]$runtimeLock.projectionContractSha256 -cne [string]$configuration.projectionContractSha256 -or
+            [string]$runtimeBundle.projectionContractSha256 -cne [string]$configuration.projectionContractSha256) {
+            throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message 'Projection-aware routing Catalog/Lock/bundle identity is inconsistent.')
+        }
+        Import-Module $platformRuntimePath -Force -ErrorAction Stop
+        $capabilityReceipt = Get-PlatformCapabilities -Required ([string[]]@($runtimeBundle.requiredCapabilities))
+        Assert-AiInstructionsRuntimeGate -Bundle $runtimeBundle -Configuration $syncConfiguration -RuntimeRoot $runtimeRootPath -CapabilityReceipt $capabilityReceipt | Out-Null
+        $repoManifestWriter = 'v4'
+        $projectionContractSha256 = [string]$configuration.projectionContractSha256
+        $verifiedRoutingCatalogId = [string]$configuration.catalogId
+        $verifiedRuntimeLockSha256 = [string]$runtimeLockSha256
+        $configuration = [pscustomobject][ordered]@{
+            schemaVersion = 3
+            excludedRepositoryUrls = @($syncConfiguration.excludedRepositoryUrls)
+            excludedRepositoryPaths = @($syncConfiguration.excludedRepositoryPaths)
+        }
     }
 }
 
@@ -4167,16 +4488,57 @@ if (Test-Path -LiteralPath $configurationFullPath -PathType Leaf) {
     }
 }
 
+if ($repoManifestWriter -ceq 'v4') {
+    $identityProvenancePath = [System.IO.Path]::GetFullPath($ProvenancePath)
+    if (-not (Test-Path -LiteralPath $identityProvenancePath -PathType Leaf)) {
+        throw "Managed source provenance does not exist: $identityProvenancePath"
+    }
+    try { $identityProvenance = Get-Content -Raw -Encoding UTF8 -LiteralPath $identityProvenancePath | ConvertFrom-Json }
+    catch { throw "Managed source provenance is not valid JSON: $identityProvenancePath" }
+    $identityMismatches = New-Object System.Collections.Generic.List[string]
+    if ([string]$identityProvenance.catalogId -cne [string]$verifiedRoutingCatalogId) { $identityMismatches.Add('catalogId') }
+    if ([string]$identityProvenance.lockSha256 -cne [string]$verifiedRuntimeLockSha256) { $identityMismatches.Add('lockSha256') }
+    if ($identityMismatches.Count -gt 0) {
+        throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Managed source provenance identity is inconsistent with the verified routing/runtime context: $($identityMismatches -join ', ').")
+    }
+}
+
 $repositoryOperationLock = $null
 $repositoryIndexLock = $null
 $userSkillMigrationLock = $null
 $remediationTransaction = $null
 try {
-    Assert-NoRepoManagedManifestV4 -Repository $targetRootPath
+    Assert-NoRepoManagedManifestV4 -Repository $targetRootPath -AllowV4:($repoManifestWriter -ceq 'v4')
+    $claudeProjectOwnedWorktrees = @(Get-ClaudeProjectOwnedWorktreeRoots -Repository $targetRootPath)
+    $currentClaudeProjectOwned = @($claudeProjectOwnedWorktrees | Where-Object {
+        [System.IO.Path]::GetFullPath([string]$_).TrimEnd([char[]]@('\','/')).Equals($targetRootPath,[System.StringComparison]::OrdinalIgnoreCase)
+    }).Count -gt 0
+    $activeWorktreeProtectedClaudeFamilyPaths = @(if ($currentClaudeProjectOwned) {
+        @('CLAUDE.md','.claude/AI-Rules','.claude/ai-instructions-licenses')
+    }
+    else { @('CLAUDE.md') })
+    $repositoryProtectedClaudeFamilyPaths = @(if ($claudeProjectOwnedWorktrees.Count -gt 0) {
+        @('CLAUDE.md','.claude/AI-Rules/','.claude/ai-instructions-licenses/')
+    }
+    else { @() })
     if (-not $WhatIf) {
         $repositoryOperationLock = Open-RepositoryOperationLock -Repository $targetRootPath
-        Assert-NoRepoManagedManifestV4 -Repository $targetRootPath -Strict
-        $remediationTransaction = Invoke-AgentArtifactRemediation -Repository $targetRootPath -GitExecutable $GitExecutable
+        Assert-NoRepoManagedManifestV4 -Repository $targetRootPath -AllowV4:($repoManifestWriter -ceq 'v4') -Strict
+        $claudeProjectOwnedWorktrees = @(Get-ClaudeProjectOwnedWorktreeRoots -Repository $targetRootPath -Strict)
+        $currentClaudeProjectOwned = @($claudeProjectOwnedWorktrees | Where-Object {
+            [System.IO.Path]::GetFullPath([string]$_).TrimEnd([char[]]@('\','/')).Equals($targetRootPath,[System.StringComparison]::OrdinalIgnoreCase)
+        }).Count -gt 0
+        $activeWorktreeProtectedClaudeFamilyPaths = @(if ($currentClaudeProjectOwned) {
+            @('CLAUDE.md','.claude/AI-Rules','.claude/ai-instructions-licenses')
+        }
+        else { @('CLAUDE.md') })
+        $repositoryProtectedClaudeFamilyPaths = @(if ($claudeProjectOwnedWorktrees.Count -gt 0) {
+            @('CLAUDE.md','.claude/AI-Rules/','.claude/ai-instructions-licenses/')
+        }
+        else { @() })
+        $remediationTransaction = Invoke-AgentArtifactRemediation -Repository $targetRootPath -GitExecutable $GitExecutable `
+            -ProtectedPathPrefixes $activeWorktreeProtectedClaudeFamilyPaths `
+            -SharedExcludeProtectedPathPrefixes $repositoryProtectedClaudeFamilyPaths
     }
     if ($null -ne $remediationTransaction) {
         if (@($remediationTransaction.Paths).Count -gt 0) {
@@ -4196,6 +4558,7 @@ try {
 $families = @(
     @{
         Name = 'Codex'
+        Host = 'codex'
         SourceBase = '.codex/AGENTS.en.md'
         TargetBase = 'AGENTS.md'
         SourceRules = '.codex/AI-Rules'
@@ -4203,12 +4566,23 @@ $families = @(
     },
     @{
         Name = 'GitHub Copilot'
+        Host = 'copilot'
         SourceBase = '.github/copilot-instructions.en.md'
         TargetBase = '.github/copilot-instructions.md'
         SourceRules = '.github/AI-Rules'
         TargetRules = '.github/AI-Rules'
     }
 )
+if ($repoManifestWriter -ceq 'v4') {
+    $families += @{
+        Name = 'Claude'
+        Host = 'claude'
+        SourceBase = '.claude/CLAUDE.en.md'
+        TargetBase = 'CLAUDE.md'
+        SourceRules = '.claude/AI-Rules'
+        TargetRules = '.claude/AI-Rules'
+    }
+}
 $sharedSkillsFamilyName = 'Shared Agent Skills'
 $sharedSkillsSource = '.agents/skills'
 
@@ -4217,6 +4591,7 @@ $manifestExists = Test-Path -LiteralPath $manifestFullPath -PathType Leaf
 $manifestEntriesByTarget = @{}
 $manifestSchemaVersion = $null
 $script:instructionProvenance = $null
+$script:rendererSha256 = $null
 $script:skillProvenanceById = @{}
 $provenance = $null
 
@@ -4279,22 +4654,31 @@ if ($manifestExists) {
 
     $manifestSchemaVersion = $manifest.schemaVersion
     if ($manifestSchemaVersion -eq 4) {
-        throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
+        if ($repoManifestWriter -cne 'v4') {
+            [Console]::Error.WriteLine($script:repoManifestV4DowngradeSummary)
+            [Console]::Error.WriteLine($script:repoManifestV4ProjectionRequirement)
+            throw [SyuanTsai.AiInstructions.AiInstructionsRefusalException]::new(
+                'downgrade-refused',
+                $script:repoManifestV4DowngradeMessage
+            )
+        }
+        Assert-ManagedManifestV4 -Manifest $manifest
     }
-    if (($manifestSchemaVersion -isnot [int] -and $manifestSchemaVersion -isnot [long]) -or $manifestSchemaVersion -notin @(1, 2, 3)) {
+    if (($manifestSchemaVersion -isnot [int] -and $manifestSchemaVersion -isnot [long]) -or $manifestSchemaVersion -notin @(1, 2, 3, 4)) {
         throw "Unsupported managed instruction manifest schema: $($manifest.schemaVersion)"
     }
 
     if ($manifestSchemaVersion -in @(2,3)) {
         Assert-ManagedManifest -Manifest $manifest
     }
-    else { Assert-LegacyManagedManifestV1 -Manifest $manifest }
+    elseif ($manifestSchemaVersion -eq 1) { Assert-LegacyManagedManifestV1 -Manifest $manifest }
 
     if ($manifestSchemaVersion -in @(2,3) -and
         ([string]$manifest.catalogId -cne [string]$provenance.catalogId -or
          [string]$manifest.lockSha256 -cnotmatch '^[0-9a-f]{64}$')) {
         throw 'Managed instruction manifest Catalog identity or historical lock hash is invalid.'
     }
+    # A valid v4 identity is historical ownership evidence. The candidate manifest below is rebound to the current P7e-verified context.
     foreach ($entry in @($manifest.files)) {
         $targetPath = [string] $entry.targetPath
         if (-not (Test-IsAllowedManagedPath -Path $targetPath)) {
@@ -4342,6 +4726,24 @@ if ($manifestExists) {
     }
 }
 
+$retiredLegacySkillPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+if ($repoManifestWriter -ceq 'v4' -and $manifestExists -and $manifestSchemaVersion -eq 1) {
+    $retainedLegacySkillPaths = New-Object System.Collections.Generic.List[string]
+    foreach ($legacySkillPath in @($manifestEntriesByTarget.Keys | Where-Object { $_ -like '.agents/skills/*' } | Sort-Object)) {
+        $legacySkillFullPath = Join-Path $targetRootPath ([string]$legacySkillPath).Replace('/','\')
+        $legacySkillExists = Test-Path -LiteralPath $legacySkillFullPath -PathType Leaf
+        $legacySkillHasChanges = Test-GitPathHasChanges -Repository $targetRootPath -Path ([string]$legacySkillPath)
+        if (-not $legacySkillExists -and -not $legacySkillHasChanges) {
+            [void]$retiredLegacySkillPaths.Add([string]$legacySkillPath)
+            continue
+        }
+        $retainedLegacySkillPaths.Add([string]$legacySkillPath)
+    }
+    if ($retainedLegacySkillPaths.Count -gt 0) {
+        throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Projection-aware bootstrap cannot replace retained legacy REPO Skill ownership: $(@($retainedLegacySkillPaths) -join ', '). Complete USER migration or repair ownership evidence first.")
+    }
+}
+
 if (-not $WhatIf) { $repositoryIndexLock = Open-RepositoryIndexTransactionLock -Repository $targetRootPath }
 $gitPathComparer = Get-GitPathComparer -Repository $targetRootPath
 $trackedPaths = New-Object 'System.Collections.Generic.HashSet[string]' $gitPathComparer
@@ -4351,7 +4753,9 @@ foreach ($trackedPath in @(Invoke-Git -Repository $targetRootPath -Arguments @('
 $trackedPollutionPaths = @(@(
     if ($trackedPaths.Contains($manifestRelativePath)) { $manifestRelativePath }
     foreach ($targetPath in @($manifestEntriesByTarget.Keys | Sort-Object)) {
-        if (-not ([string]$targetPath).StartsWith('.agents/skills/',[StringComparison]::Ordinal) -and $trackedPaths.Contains([string]$targetPath)) { [string]$targetPath }
+        $isProtectedClaude = Test-IsProtectedClaudeFamilyPath -Path ([string]$targetPath) -ProtectedPaths $activeWorktreeProtectedClaudeFamilyPaths
+        if ($isProtectedClaude) { Write-Warning "Protected Claude family path skipped at tracked pollution inspection: $targetPath (project-owned Claude family)." }
+        if (-not $isProtectedClaude -and -not ([string]$targetPath).StartsWith('.agents/skills/',[StringComparison]::Ordinal) -and $trackedPaths.Contains([string]$targetPath)) { [string]$targetPath }
     }
 ) | Sort-Object -Unique)
 if ($trackedPollutionPaths.Count -gt 0 -and -not $WhatIf) {
@@ -4360,7 +4764,11 @@ if ($trackedPollutionPaths.Count -gt 0 -and -not $WhatIf) {
 
 $stagedManagedPaths = @(
     foreach ($targetPath in @($manifestEntriesByTarget.Keys | Sort-Object)) {
-        if (-not ([string]$targetPath).StartsWith('.agents/skills/',[StringComparison]::Ordinal) -and (Test-GitPathHasStagedChanges -Repository $targetRootPath -Path ([string]$targetPath))) {
+        $isProtectedClaude = Test-IsProtectedClaudeFamilyPath -Path ([string]$targetPath) -ProtectedPaths $activeWorktreeProtectedClaudeFamilyPaths
+        if ($isProtectedClaude) { Write-Warning "Protected Claude family path skipped at staged mutation inspection: $targetPath (project-owned Claude family)." }
+        if (-not $isProtectedClaude -and
+            -not ([string]$targetPath).StartsWith('.agents/skills/',[StringComparison]::Ordinal) -and
+            (Test-GitPathHasStagedChanges -Repository $targetRootPath -Path ([string]$targetPath))) {
             [string]$targetPath
         }
     }
@@ -4393,6 +4801,11 @@ try {
     Copy-Item -LiteralPath $providedArchivePath -Destination $archivePath
 
     $sourceRootPath = Expand-SafeZipRepository -ArchivePath $archivePath -DestinationRoot $extractPath
+    if ($repoManifestWriter -ceq 'v4') {
+        $rendererPath = Join-Path $sourceRootPath 'scripts\Build-AiInstructions.ps1'
+        if (-not (Test-Path -LiteralPath $rendererPath -PathType Leaf)) { throw 'Projection-aware source snapshot is missing scripts/Build-AiInstructions.ps1.' }
+        $script:rendererSha256 = Get-RawContentHash -Path $rendererPath
+    }
     $desiredEntries = New-Object System.Collections.Generic.List[object]
 
     foreach ($family in $families) {
@@ -4437,7 +4850,7 @@ try {
             -ArtifactId $family.Name
         $licenseRoot = Join-Path $workingPath "licenses/$($family.Name)"
         Write-LicenseDeliveryPackage -Package $licenses -DestinationRoot $licenseRoot
-        $licenseTargetPrefix = if ($family.Name -eq 'Codex') { '.codex' } else { '.github' }
+        $licenseTargetPrefix = switch ($family.Host) { 'codex' { '.codex' } 'copilot' { '.github' } 'claude' { '.claude' } }
         foreach ($licenseFile in @($licenses.Files)) {
             $desiredEntries.Add([pscustomobject]@{
                 FamilyName = $family.Name; SourcePath = $licenseFile.sourcePath
@@ -4484,6 +4897,18 @@ try {
         $disposition = if ($skill.removable) { 'retire verified ignored/untracked copy' } else { "preserve: $($skill.reason)" }
         Write-Output "Skill migration $($skill.id): $disposition"
     }
+    if ($repoManifestWriter -ceq 'v4' -and $manifestExists -and $manifestSchemaVersion -in @(2,3)) {
+        $retainedHistoricalSkillPaths = New-Object System.Collections.Generic.List[string]
+        foreach ($historicalSkillPath in @($manifestEntriesByTarget.Keys | Where-Object { $_ -like '.agents/skills/*' } | Sort-Object)) {
+            $historicalSkillId = ([string]$historicalSkillPath).Split('/')[2]
+            if (-not $migrationById.ContainsKey($historicalSkillId) -or -not [bool]$migrationById[$historicalSkillId].removable) {
+                $retainedHistoricalSkillPaths.Add([string]$historicalSkillPath)
+            }
+        }
+        if ($retainedHistoricalSkillPaths.Count -gt 0) {
+            throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Projection-aware bootstrap cannot replace retained legacy REPO Skill ownership: $(@($retainedHistoricalSkillPaths) -join ', '). Complete USER migration or repair ownership evidence first.")
+        }
+    }
     $existingSkillsRoot = Join-Path $targetRootPath '.agents/skills'
     if ((Test-Path -LiteralPath $existingSkillsRoot -PathType Container) -and
         -not ((Get-Item -Force -LiteralPath $existingSkillsRoot).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
@@ -4491,7 +4916,8 @@ try {
             if (-not $migrationById.ContainsKey($directory.Name)) { Write-Output "Repository Skill preserved without provable shared ownership: $($directory.Name)" }
         }
     }
-    $retainLegacyManifest = $manifestExists -and $manifestSchemaVersion -eq 1 -and @($manifestEntriesByTarget.Keys | Where-Object { $_ -like '.agents/skills/*' }).Count -gt 0
+    $retainLegacyManifest = $repoManifestWriter -cne 'v4' -and $manifestExists -and $manifestSchemaVersion -eq 1 -and
+        @($manifestEntriesByTarget.Keys | Where-Object { $_ -like '.agents/skills/*' }).Count -gt 0
 
     $desiredEntriesByTarget = @{}
     foreach ($entry in $desiredEntries) {
@@ -4519,11 +4945,17 @@ try {
                 (Get-ManagedContentHash -Path $baseTargetFullPath -TargetPath $baseTargetPath) -ceq
                 [string]$desiredEntriesByTarget[$baseTargetPath].Sha256
         }
-        $eligibleFamilies[$family.Name] =
-            -not $baseTargetIsTracked -and
-            ($manifestEntriesByTarget.ContainsKey($baseTargetPath) -or
-             -not (Test-Path -LiteralPath $baseTargetFullPath -PathType Leaf) -or
-             $baseTargetMatchesDesired)
+        if ($family.Name -ceq 'Claude') {
+            $eligibleFamilies[$family.Name] = -not $currentClaudeProjectOwned
+            if (-not $eligibleFamilies[$family.Name]) { Write-Output 'claude-base-skipped-project-owned' }
+        }
+        else {
+            $eligibleFamilies[$family.Name] =
+                -not $baseTargetIsTracked -and
+                ($manifestEntriesByTarget.ContainsKey($baseTargetPath) -or
+                 -not (Test-Path -LiteralPath $baseTargetFullPath -PathType Leaf) -or
+                 $baseTargetMatchesDesired)
+        }
     }
     $createdPaths = New-Object System.Collections.Generic.List[string]
     $updatedPaths = New-Object System.Collections.Generic.List[string]
@@ -4536,6 +4968,10 @@ try {
         return
     }
 
+    $targetMutationProtectedClaudeFamilyPaths = @(if ([bool]$eligibleFamilies['Claude']) {
+        @()
+    }
+    else { $activeWorktreeProtectedClaudeFamilyPaths })
     $mutationPaths = @(
         @($desiredEntries | ForEach-Object { [string]$_.TargetPath })
         @($manifestEntriesByTarget.Keys | Where-Object {
@@ -4545,7 +4981,7 @@ try {
         $manifestRelativePath
     )
     $mutationBackupRoot = Join-Path $workingPath 'target-backup'
-    $mutationSnapshot = New-TargetMutationSnapshot -TargetRoot $targetRootPath -RelativePaths $mutationPaths -BackupRoot $mutationBackupRoot
+    $mutationSnapshot = New-TargetMutationSnapshot -TargetRoot $targetRootPath -RelativePaths $mutationPaths -BackupRoot $mutationBackupRoot -ProtectedPaths $targetMutationProtectedClaudeFamilyPaths
     $excludeSnapshot = New-GitInfoExcludeSnapshot -Repository $targetRootPath
     $migrationJournalPath = Join-Path $mutationBackupRoot 'skill-migration.json'
     $migrationGitState = $null
@@ -4566,6 +5002,9 @@ try {
         $entryIsEligible = [bool]$eligibleFamilies[$desiredEntry.FamilyName]
         if (-not $entryIsEligible) {
             $skippedPaths.Add($targetPath)
+            if ($manifestEntriesByTarget.ContainsKey($targetPath)) {
+                $nextManifestEntries.Add((Copy-ExistingManifestEntry -Entry $manifestEntriesByTarget[$targetPath]))
+            }
             continue
         }
 
@@ -4630,6 +5069,11 @@ try {
             continue
         }
 
+        if ($desiredEntry.FamilyName -ceq 'Claude') {
+            $skippedPaths.Add($targetPath)
+            continue
+        }
+
         if (-not $trackedPaths.Contains($targetPath) -and
             -not (Test-GitPathHasStagedChanges -Repository $targetRootPath -Path $targetPath) -and
             (Get-ManagedContentHash -Path $targetFullPath -TargetPath $targetPath) -ceq $desiredEntry.Sha256) {
@@ -4647,7 +5091,15 @@ try {
         }
 
         $managedEntry = $manifestEntriesByTarget[$managedTargetPath]
+        $isProtectedClaude = Test-IsProtectedClaudeFamilyPath -Path $managedTargetPath -ProtectedPaths $targetMutationProtectedClaudeFamilyPaths
+        if ($isProtectedClaude) {
+            Write-Warning "Protected Claude family path skipped at bootstrap manifest reconciliation: $managedTargetPath (project-owned Claude family)."
+            $nextManifestEntries.Add((Copy-ExistingManifestEntry -Entry $managedEntry))
+            $skippedPaths.Add($managedTargetPath)
+            continue
+        }
         if ($managedTargetPath.StartsWith('.agents/skills/',[StringComparison]::Ordinal)) {
+            if ($retiredLegacySkillPaths.Contains($managedTargetPath)) { continue }
             $id = $managedTargetPath.Split('/')[2]
             if ($migrationById.ContainsKey($id) -and $migrationById[$id].removable) {
                 Assert-RepoSharedSkillsMigrationEvidence -Repository $targetRootPath -Skill $migrationById[$id] -RemovedPaths @($removedPaths) -GitExecutable $GitExecutable
@@ -4701,11 +5153,35 @@ try {
         $shouldWriteManifest = $manifestExists -or $nextManifestEntries.Count -gt 0
         $manifestChanged = $false
         if ($shouldWriteManifest) {
-        $manifestObject = [ordered]@{
-            schemaVersion = if ($manifestExists -and $manifestSchemaVersion -eq 3) { 3 } else { 2 }
-            catalogId = [string] $provenance.catalogId
-            lockSha256 = [string] $provenance.lockSha256
-            files = @($nextManifestEntries | Sort-Object targetPath)
+        if ($repoManifestWriter -ceq 'v4') {
+            $generation = if ($manifestExists -and $manifestSchemaVersion -eq 4) { [int64]$manifest.generation } else { [int64]1 }
+            $candidate = [ordered]@{
+                schemaVersion = 4
+                catalogId = [string]$verifiedRoutingCatalogId
+                lockSha256 = [string]$verifiedRuntimeLockSha256
+                projectionContractSha256 = [string]$projectionContractSha256
+                generation = $generation
+                projections = @()
+                files = @($nextManifestEntries | Sort-Object targetPath)
+            }
+            if ($manifestExists -and $manifestSchemaVersion -eq 4) {
+                $candidateJson = ($candidate | ConvertTo-Json -Depth 20).Replace("`r`n","`n") + "`n"
+                $existingNormalized = ([System.IO.File]::ReadAllText($manifestFullPath)).Replace("`r`n","`n").Replace("`r","`n")
+                if ($candidateJson -cne $existingNormalized) {
+                    if ($generation -eq [int64]::MaxValue) { throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message 'REPO managed manifest v4 generation would overflow.') }
+                    $candidate.generation = $generation + 1
+                }
+            }
+            $manifestObject = $candidate
+            Assert-ManagedManifestV4 -Manifest ([pscustomobject]$manifestObject)
+        }
+        else {
+            $manifestObject = [ordered]@{
+                schemaVersion = if ($manifestExists -and $manifestSchemaVersion -eq 3) { 3 } else { 2 }
+                catalogId = [string] $provenance.catalogId
+                lockSha256 = [string] $provenance.lockSha256
+                files = @($nextManifestEntries | Sort-Object targetPath)
+            }
         }
         if ($retainLegacyManifest) {
             $manifestObject = [ordered]@{schemaVersion=1; sourceRepository=$manifest.sourceRepository; sourceRef=$manifest.sourceRef; files=@($nextManifestEntries | Sort-Object targetPath)}
@@ -4727,7 +5203,22 @@ try {
         }
         $managedExcludePaths = @($nextManifestEntries | ForEach-Object { [string]$_.targetPath })
         if ($shouldWriteManifest) { $managedExcludePaths += $manifestRelativePath }
-        Set-ManagedGitInfoExclude -Repository $targetRootPath -ManagedPaths $managedExcludePaths -Snapshot $excludeSnapshot
+        $preservedProtectedExcludePaths = @(
+            if (-not [bool]$eligibleFamilies['Claude'] -and $claudeProjectOwnedWorktrees.Count -eq 1) {
+                foreach ($entry in $nextManifestEntries) {
+                    $entryPath = [string]$entry.targetPath
+                    if ($entryPath -ceq 'CLAUDE.md' -or
+                        -not (Test-IsProtectedClaudeFamilyPath -Path $entryPath -ProtectedPaths $repositoryProtectedClaudeFamilyPaths)) { continue }
+                    $entryFullPath = Join-Path $targetRootPath $entryPath.Replace('/','\')
+                    if ((Test-Path -LiteralPath $entryFullPath -PathType Leaf) -and
+                        (Get-ManagedContentHash -Path $entryFullPath -TargetPath $entryPath) -ceq [string]$entry.sha256) {
+                        $entryPath
+                    }
+                }
+            }
+        )
+        Set-ManagedGitInfoExclude -Repository $targetRootPath -ManagedPaths $managedExcludePaths -Snapshot $excludeSnapshot `
+            -ProtectedPaths $repositoryProtectedClaudeFamilyPaths -PreservedProtectedPaths $preservedProtectedExcludePaths
         if ($migrationGitState) { Save-SkillMigrationJournal $mutationSnapshot $excludeSnapshot $migrationJournalPath $migrationGitState 'applied' }
     }
     catch {
@@ -4764,6 +5255,10 @@ try {
         foreach ($manifestEntry in $nextManifestEntries) {
             if ([string]$manifestEntry.targetPath -like '.agents/skills/*') { continue }
             $targetPath = [string]$manifestEntry.targetPath
+            if (Test-IsProtectedClaudeFamilyPath -Path $targetPath -ProtectedPaths $targetMutationProtectedClaudeFamilyPaths) {
+                Write-Warning "Protected Claude family path skipped at PersonalAgent recovery collection: $targetPath (project-owned Claude family)."
+                continue
+            }
             $targetFullPath = Join-Path $targetRootPath $targetPath.Replace('/', '\')
             if ((Test-Path -LiteralPath $targetFullPath -PathType Leaf) -and
                 (Get-ManagedContentHash -Path $targetFullPath -TargetPath $targetPath) -ceq [string]$manifestEntry.sha256) {
@@ -4788,7 +5283,7 @@ try {
                     -ExpectedEntries $expectedStashEntries -PriorStashes $personalAgentStashes `
                     -PriorOwnedStashes $ownedPersonalAgentStashes `
                     -WorktreeKey $worktreeKey -EvidenceFingerprint $evidenceFingerprint `
-                    -ActiveIndexPath ([string]$repositoryIndexLock.IndexPath)
+                    -ActiveIndexPath ([string]$repositoryIndexLock.IndexPath) -ProtectedPaths $targetMutationProtectedClaudeFamilyPaths
                 Write-Output "PersonalAgent recovery evidence updated and retained without index mutation: $newStashHash"
             }
         }

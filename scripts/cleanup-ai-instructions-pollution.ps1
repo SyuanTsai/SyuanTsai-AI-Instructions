@@ -67,6 +67,11 @@ if (-not (Test-Path -LiteralPath $runtimeContractPath -PathType Leaf)) {
 }
 Import-Module $runtimeContractPath -Force
 Import-Module (Join-Path (Split-Path -Parent $runtimeContractPath) 'license-delivery.psm1') -Force
+$remediationContractPath = Join-Path (Split-Path -Parent $runtimeContractPath) 'agent-artifact-remediation.psm1'
+if (-not (Test-Path -LiteralPath $remediationContractPath -PathType Leaf)) {
+    throw "Agent artifact remediation module was not found: $remediationContractPath"
+}
+Import-Module $remediationContractPath -Force
 
 function Invoke-CleanupGit {
     param([Parameter(Mandatory = $true)][string] $Repository,[Parameter(Mandatory = $true)][string[]] $Arguments)
@@ -163,9 +168,18 @@ function Remove-CleanupIndexEntriesAtomically {
     param(
         [Parameter(Mandatory = $true)][string] $Repository,
         [Parameter(Mandatory = $true)][string[]] $Paths,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $ExpectedSnapshot
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $ExpectedSnapshot,
+        [AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths = @()
     )
 
+    $Paths = @($Paths | Where-Object {
+        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$_) -ProtectedPaths $ProtectedPaths) {
+            Write-Warning "Protected Claude family path skipped at cleanup Git index: $_ (project-owned Claude family)."
+            return $false
+        }
+        return $true
+    })
+    if ($Paths.Count -eq 0) { return }
     $indexPath = ((Invoke-CleanupGit -Repository $Repository -Arguments @('rev-parse','--git-path','index')) | Select-Object -First 1).Trim()
     if (-not [System.IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $Repository $indexPath }
     $indexPath = [System.IO.Path]::GetFullPath($indexPath)
@@ -231,9 +245,18 @@ function Restore-CleanupIndexSnapshot {
     param(
         [Parameter(Mandatory = $true)][string] $Repository,
         [Parameter(Mandatory = $true)][string[]] $Paths,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Snapshot
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Snapshot,
+        [AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths = @()
     )
 
+    $Paths = @($Paths | Where-Object {
+        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$_) -ProtectedPaths $ProtectedPaths) {
+            Write-Warning "Protected Claude family path skipped at cleanup Git index rollback: $_ (project-owned Claude family)."
+            return $false
+        }
+        return $true
+    })
+    if ($Paths.Count -eq 0) { return }
     $indexPath = ((Invoke-CleanupGit -Repository $Repository -Arguments @('rev-parse','--git-path','index')) | Select-Object -First 1).Trim()
     if (-not [System.IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $Repository $indexPath }
     $indexPath = [System.IO.Path]::GetFullPath($indexPath)
@@ -364,8 +387,9 @@ function Test-CleanupCanonicalSourceRepository {
 function Test-CleanupManagedPath {
     param([Parameter(Mandatory = $true)][string] $Path)
     if (Test-InstructionLicenseDeliveryPath $Path) { return $true }
-    if ($Path -eq 'AGENTS.md' -or $Path -eq '.github/copilot-instructions.md' -or
+    if ($Path -eq 'AGENTS.md' -or $Path -eq 'CLAUDE.md' -or $Path -eq '.github/copilot-instructions.md' -or
         $Path -match '^\.codex/AI-Rules/[^/\\]+\.en\.md$' -or
+        $Path -match '^\.claude/AI-Rules/[^/\\]+\.en\.md$' -or
         $Path -match '^\.github/AI-Rules/[^/\\]+\.en\.md$') { return $true }
     if (-not $Path.StartsWith('.agents/skills/',[System.StringComparison]::Ordinal)) { return $false }
     $parts = @($Path.Substring('.agents/skills/'.Length) -split '/')
@@ -503,6 +527,8 @@ function New-CleanupExcludeMutation {
         Existed = $false
         Bytes = $null
         AppliedBytes = $null
+        ManagedPaths = @()
+        ProtectedPaths = @()
     }
 }
 
@@ -660,11 +686,61 @@ function Get-CleanupWorktreeRoots {
         [switch] $Strict
     )
 
-    $output = @(Invoke-CleanupGit -Repository $Repository -Arguments @('worktree','list','--porcelain','-z'))
-    foreach ($record in @(ConvertFrom-GitWorktreePorcelainZ -Output $output -Strict:$Strict)) {
+    try {
+        $output = @(Invoke-CleanupGit -Repository $Repository -Arguments @('worktree','list','--porcelain','-z'))
+        $records = @(ConvertFrom-GitWorktreePorcelainZ -Output $output -Strict:$Strict)
+    }
+    catch {
+        if ($Strict) {
+            throw (New-AiInstructionsRefusalException -Code 'closure-invalid' `
+                -Message "Cannot determine linked worktree manifests before mutation. $($_.Exception.Message)" `
+                -InnerException $_.Exception)
+        }
+        return
+    }
+    foreach ($record in $records) {
         if ([bool]$record.Prunable) { continue }
         [string]$record.Path
     }
+}
+
+function Get-CleanupClaudeProjectOwnedWorktreeRoots {
+    param([Parameter(Mandatory = $true)][string] $Repository,[switch] $Strict)
+
+    $owned = New-Object System.Collections.Generic.List[string]
+    foreach ($worktreeRoot in @(Get-CleanupWorktreeRoots -Repository $Repository -Strict:$Strict)) {
+        $basePath = Join-Path $worktreeRoot 'CLAUDE.md'
+        $baseExists = Test-Path -LiteralPath $basePath -PathType Leaf
+        $tracked = (Get-CleanupGitExitCode -Repository $worktreeRoot -Arguments @('ls-files','--error-unmatch','--','CLAUDE.md')) -eq 0
+        $stagedExitCode = Get-CleanupGitExitCode -Repository $worktreeRoot -Arguments @('diff','--cached','--quiet','--','CLAUDE.md')
+        if ($stagedExitCode -gt 1) { throw "Unable to inspect staged Claude base ownership in linked worktree: $worktreeRoot" }
+        $managedEntry = $null
+        $manifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/','\')
+        if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+            try {
+                $candidate = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
+                if ($candidate.schemaVersion -eq 4) { Assert-ManagedManifestV4 -Manifest $candidate }
+                elseif ($candidate.schemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $candidate }
+                elseif ($candidate.schemaVersion -eq 1) { Assert-LegacyManagedManifestV1 -Manifest $candidate }
+                else { throw "unsupported schemaVersion '$($candidate.schemaVersion)'." }
+                $matches = @($candidate.files | Where-Object { [string]$_.targetPath -ceq 'CLAUDE.md' })
+                if ($matches.Count -gt 1) { throw 'duplicate CLAUDE.md ownership entries.' }
+                if ($matches.Count -eq 1) { $managedEntry = $matches[0] }
+            }
+            catch {
+                if ($Strict) { throw "Invalid linked worktree manifest '$manifestPath': $($_.Exception.Message)" }
+                $owned.Add([string]$worktreeRoot)
+                continue
+            }
+        }
+        $managedSha256 = if ($null -ne $managedEntry) { [string]$managedEntry.sha256 } else { $null }
+        $currentSha256 = if ($baseExists) { Get-CleanupManagedHash -Path $basePath -TargetPath 'CLAUDE.md' } else { $null }
+        if (Test-AiInstructionsClaudeFamilyProjectOwned -BaseExists $baseExists -BaseTracked $tracked `
+            -BaseStaged ($stagedExitCode -eq 1) -ManagedSha256 $managedSha256 -CurrentSha256 $currentSha256) {
+            $owned.Add([string]$worktreeRoot)
+        }
+    }
+    return @($owned)
 }
 
 function Assert-NoRepoManagedManifestV4 {
@@ -675,7 +751,7 @@ function Assert-NoRepoManagedManifestV4 {
 
     try { $worktreeRoots = @(Get-CleanupWorktreeRoots -Repository $Repository -Strict:$Strict) }
     catch {
-        if ($Strict) { throw 'Cannot determine linked worktree manifests before mutation.' }
+        if ($Strict) { throw }
         return
     }
     foreach ($worktreeRoot in $worktreeRoots) {
@@ -721,7 +797,7 @@ function Assert-NoRepoManagedManifestV4 {
             continue
         }
         if ($isSchemaV4) {
-            throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
+            Assert-ManagedManifestV4 -Manifest $worktreeManifest
         }
     }
 }
@@ -734,7 +810,7 @@ function Get-CleanupSharedManagedPaths {
 
     $paths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     foreach ($currentManagedPath in $CurrentManagedPaths) { [void]$paths.Add($currentManagedPath.Replace('\','/')) }
-    foreach ($worktreeRoot in @(Get-CleanupWorktreeRoots -Repository $Repository)) {
+    foreach ($worktreeRoot in @(Get-CleanupWorktreeRoots -Repository $Repository -Strict)) {
         $worktreeManifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/','\')
         if (-not (Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf)) { continue }
         Assert-CleanupManagedFilePath -TargetRoot $worktreeRoot -FilePath $worktreeManifestPath -Context 'Linked worktree managed manifest'
@@ -744,10 +820,8 @@ function Get-CleanupSharedManagedPaths {
             if ($worktreeManifestSchemaVersion -isnot [int] -and $worktreeManifestSchemaVersion -isnot [long]) {
                 throw 'schemaVersion must be an integer.'
             }
-            if ($worktreeManifestSchemaVersion -eq 4) {
-                throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
-            }
-            if ($worktreeManifestSchemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $worktreeManifest }
+            if ($worktreeManifestSchemaVersion -eq 4) { Assert-ManagedManifestV4 -Manifest $worktreeManifest }
+            elseif ($worktreeManifestSchemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $worktreeManifest }
             elseif ($worktreeManifestSchemaVersion -eq 1) { Assert-LegacyManagedManifestV1 -Manifest $worktreeManifest }
             else {
                 throw "unsupported schemaVersion '$worktreeManifestSchemaVersion'."
@@ -773,14 +847,42 @@ function Set-CleanupExcludeBlock {
         [Parameter(Mandatory = $true)][string] $Repository,
         [Parameter(Mandatory = $true)][string] $Path,
         [Parameter(Mandatory = $true)][string[]] $ManagedPaths,
-        [Parameter(Mandatory = $true)][object] $Mutation
+        [Parameter(Mandatory = $true)][object] $Mutation,
+        [AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths = @(),
+        [AllowEmptyCollection()][ValidateNotNull()][string[]] $PreservedProtectedPaths = @()
     )
     if ([string]$Mutation.Path -cne $Path -or [string]$Mutation.Repository -cne $Repository) {
         throw 'Shared Git exclude mutation state does not match the requested cleanup target.'
     }
     Assert-CleanupExcludeMutationPath -Repository $Repository -Path $Path
+    $requestedManagedPaths = @($ManagedPaths)
+    $ManagedPaths = @($ManagedPaths | Where-Object {
+        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$_) -ProtectedPaths $ProtectedPaths) {
+            Write-Warning "Protected Claude family path skipped at cleanup Git exclude: $_ (project-owned Claude family)."
+            return $false
+        }
+        return $true
+    })
+    foreach ($preservedProtectedPath in $PreservedProtectedPaths) {
+        if (-not (Test-IsProtectedClaudeFamilyPath -Path ([string]$preservedProtectedPath) -ProtectedPaths $ProtectedPaths)) {
+            throw "A preserved cleanup exclude path is outside the protected Claude family: $preservedProtectedPath"
+        }
+    }
+    $Mutation.ManagedPaths = @($requestedManagedPaths + $PreservedProtectedPaths | Sort-Object -Unique)
+    $Mutation.ProtectedPaths = @($ProtectedPaths)
     $sharedManagedPaths = @(Get-CleanupSharedManagedPaths -Repository $Repository -CurrentManagedPaths $ManagedPaths)
-    $lines = @($sharedManagedPaths | ForEach-Object { ConvertTo-CleanupExcludePattern -Path $_ })
+    $sharedManagedPaths = @($sharedManagedPaths | Where-Object {
+        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$_) -ProtectedPaths $ProtectedPaths) {
+            Write-Warning "Protected Claude family path skipped at cleanup shared Git exclude: $_ (project-owned Claude family)."
+            return $false
+        }
+        return $true
+    })
+    $lines = @(
+        @($sharedManagedPaths) + @($PreservedProtectedPaths) |
+            Sort-Object -Unique |
+            ForEach-Object { ConvertTo-CleanupExcludePattern -Path $_ }
+    )
     $handle = Open-CleanupExcludeMutationHandle -Repository $Repository -Path $Path
     try {
         [byte[]]$beforeBytes = Read-CleanupExcludeStreamBytes -Stream $handle.Stream
@@ -843,13 +945,13 @@ Assert-CleanupManagedFilePath -TargetRoot $targetRootPath -FilePath $manifestPat
 try { $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json }
 catch { throw "Managed manifest is not valid JSON: $($_.Exception.Message)" }
 try {
-    if ($manifest.schemaVersion -eq 4) { throw 'REPO managed manifest schema version 4 requires a projection-aware bootstrap.' }
+    if ($manifest.schemaVersion -eq 4) { Assert-ManagedManifestV4 -Manifest $manifest }
     elseif ($manifest.schemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $manifest }
     elseif ($manifest.schemaVersion -eq 1) { Assert-LegacyManagedManifestV1 -Manifest $manifest }
     else { throw "unsupported schemaVersion '$($manifest.schemaVersion)'." }
 }
 catch { throw "Managed manifest cannot prove cleanup ownership: $($_.Exception.Message)" }
-if (($manifest.schemaVersion -in @(2,3) -and
+if (($manifest.schemaVersion -in @(2,3,4) -and
      ([string]$manifest.catalogId -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$' -or [string]$manifest.lockSha256 -cnotmatch '^[0-9a-f]{64}$')) -or
     $manifest.files -isnot [System.Array]) {
     throw 'Managed manifest cannot prove cleanup ownership because its versioned identity is invalid.'
@@ -868,10 +970,39 @@ $trackedPaths = @(Invoke-CleanupGit -Repository $targetRootPath -Arguments @('-c
     (ConvertFrom-CleanupGitQuotedPath -Path ([string]$_)).Replace('\','/')
 })
 $gitPathComparer = Get-CleanupGitPathComparer -Repository $targetRootPath
+$claudeProjectOwnedWorktrees = @(Get-CleanupClaudeProjectOwnedWorktreeRoots -Repository $targetRootPath -Strict)
+$currentClaudeProjectOwned = @($claudeProjectOwnedWorktrees | Where-Object {
+    [System.IO.Path]::GetFullPath([string]$_).TrimEnd([char[]]@('\','/')).Equals($targetRootPath,[System.StringComparison]::OrdinalIgnoreCase)
+}).Count -gt 0
+$repositoryProtectedClaudeFamilyPaths = @(if ($claudeProjectOwnedWorktrees.Count -gt 0) {
+    @('CLAUDE.md','.claude/AI-Rules/','.claude/ai-instructions-licenses/')
+}
+else { @() })
+$activeWorktreeProtectedClaudeFamilyPaths = @(if ($currentClaudeProjectOwned) {
+    @('CLAUDE.md','.claude/AI-Rules/','.claude/ai-instructions-licenses/')
+}
+else { @() })
+$preservedProtectedExcludePaths = @(
+    if ($currentClaudeProjectOwned -and $claudeProjectOwnedWorktrees.Count -eq 1) {
+        foreach ($entryPath in @($entriesByPath.Keys | Sort-Object)) {
+            if ([string]$entryPath -ceq 'CLAUDE.md' -or
+                -not (Test-IsProtectedClaudeFamilyPath -Path ([string]$entryPath) -ProtectedPaths $repositoryProtectedClaudeFamilyPaths)) { continue }
+            $entryFullPath = Join-Path $targetRootPath ([string]$entryPath).Replace('/','\')
+            if ((Test-Path -LiteralPath $entryFullPath -PathType Leaf) -and
+                (Get-CleanupManagedHash -Path $entryFullPath -TargetPath ([string]$entryPath)) -ceq [string]$entriesByPath[$entryPath].sha256) {
+                [string]$entryPath
+            }
+        }
+    }
+)
 $trackedManagedEntries = New-Object System.Collections.Generic.List[object]
 foreach ($manifestTargetPath in @($manifestRelativePath) + @($entriesByPath.Keys | Sort-Object)) {
     if ([string]$manifestTargetPath -like '.agents/skills/*') {
         Write-Output "Tracked/project Skills are protected from Instructions pollution cleanup: $manifestTargetPath"
+        continue
+    }
+    if (Test-IsProtectedClaudeFamilyPath -Path ([string]$manifestTargetPath) -ProtectedPaths $activeWorktreeProtectedClaudeFamilyPaths) {
+        Write-Output "Project-owned Claude family is protected from Instructions pollution cleanup: $manifestTargetPath"
         continue
     }
     foreach ($actualTrackedPath in $trackedPaths) {
@@ -925,8 +1056,10 @@ try {
         (@($indexSnapshot | ForEach-Object { [string]$_.Line }) -join "`n")) {
         throw 'Tracked managed paths changed in the Git index before cleanup mutation.'
     }
-    Set-CleanupExcludeBlock -Repository $targetRootPath -Path $gitExcludePath -ManagedPaths @($entriesByPath.Keys + $manifestRelativePath + $cleanupPaths) -Mutation $excludeMutation
-    Remove-CleanupIndexEntriesAtomically -Repository $targetRootPath -Paths $cleanupPaths -ExpectedSnapshot $indexSnapshot
+    Set-CleanupExcludeBlock -Repository $targetRootPath -Path $gitExcludePath `
+        -ManagedPaths @($entriesByPath.Keys + $manifestRelativePath + $cleanupPaths) -Mutation $excludeMutation `
+        -ProtectedPaths $repositoryProtectedClaudeFamilyPaths -PreservedProtectedPaths $preservedProtectedExcludePaths
+    Remove-CleanupIndexEntriesAtomically -Repository $targetRootPath -Paths $cleanupPaths -ExpectedSnapshot $indexSnapshot -ProtectedPaths $activeWorktreeProtectedClaudeFamilyPaths
     foreach ($cleanupPath in $cleanupPaths) {
         $fullPath = Join-Path $targetRootPath $cleanupPath.Replace('/','\')
         if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { throw "Cleanup failed to preserve local materialization: $cleanupPath" }
@@ -937,7 +1070,7 @@ try {
 catch {
     $cleanupError = $_
     $rollbackErrors = New-Object System.Collections.Generic.List[string]
-    try { Restore-CleanupIndexSnapshot -Repository $targetRootPath -Paths $cleanupPaths -Snapshot $indexSnapshot }
+    try { Restore-CleanupIndexSnapshot -Repository $targetRootPath -Paths $cleanupPaths -Snapshot $indexSnapshot -ProtectedPaths $activeWorktreeProtectedClaudeFamilyPaths }
     catch { $rollbackErrors.Add($_.Exception.Message) }
     try { Restore-CleanupExcludeMutation -Mutation $excludeMutation }
     catch { $rollbackErrors.Add($_.Exception.Message) }

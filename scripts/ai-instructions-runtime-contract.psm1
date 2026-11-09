@@ -88,6 +88,22 @@ function Get-AiInstructionsRefusalCode {
     return $null
 }
 
+function Test-AiInstructionsClaudeFamilyProjectOwned {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][bool] $BaseExists,
+        [Parameter(Mandatory = $true)][bool] $BaseTracked,
+        [Parameter(Mandatory = $true)][bool] $BaseStaged,
+        [AllowNull()][string] $ManagedSha256,
+        [AllowNull()][string] $CurrentSha256
+    )
+
+    if ($BaseTracked -or $BaseStaged) { return $true }
+    if (-not $BaseExists) { return $false }
+    if ([string]::IsNullOrWhiteSpace($ManagedSha256)) { return $true }
+    return [string]$CurrentSha256 -cne $ManagedSha256
+}
+
 function Get-AiInstructionsRuntimeGeneration {
     [CmdletBinding()]
     param(
@@ -2800,6 +2816,7 @@ Export-ModuleMember -Function @(
     'Get-AiInstructionsRefusalCodes',
     'New-AiInstructionsRefusalException',
     'Get-AiInstructionsRefusalCode',
+    'Test-AiInstructionsClaudeFamilyProjectOwned',
     'Get-AiInstructionsRuntimeGeneration',
     'Get-AiInstructionsRuntimeInventory',
     'Get-AiInstructionsRuntimeInventorySha256',

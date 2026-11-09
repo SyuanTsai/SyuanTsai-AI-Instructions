@@ -149,7 +149,7 @@ if (-not [string]::Equals(($platformIds -join "`n"), ((@('codex','github-copilot
     throw "Contract v2 must declare exactly Codex, GitHub Copilot, and Claude."
 }
 foreach ($platform in @($contract.platforms)) {
-    Get-ExactPropertyNames -Value $platform -Expected @('id','base','rulesRoot','fanOut') -Context "platform '$($platform.id)'"
+    Get-ExactPropertyNames -Value $platform -Expected @('id','base','rulesRoot','userSkillsRoot','fanOut') -Context "platform '$($platform.id)'"
     Get-ExactPropertyNames -Value $platform.base -Expected @('zh-TW','en') -Context "platform '$($platform.id)' base"
     if ($null -ne $platform.fanOut) {
         Get-ExactPropertyNames -Value $platform.fanOut -Expected @('baseTarget','rulesTarget','preserveRuleFileName') -Context "platform '$($platform.id)' fanOut"
@@ -180,8 +180,10 @@ foreach ($platform in @($contract.platforms)) {
         $sourcePath = Resolve-RepositoryPath -Root $root -RelativePath $sourceRelative
         $rendered = Expand-InstructionHostBlocks -Text (Get-NormalizedInstructionText -Path $sourcePath) -TargetHost $targetHost -SourcePath $sourceRelative
         $ruleRoot = ([string]$platform.rulesRoot).TrimEnd('/')
+        $userSkillsRoot = ([string]$platform.userSkillsRoot).TrimEnd('/')
         $rendered = $rendered.Replace('{RULE_ROOT}/', ($ruleRoot + '/'))
-        if ($rendered.Contains('{RULE_ROOT}')) { throw "Unresolved RULE_ROOT placeholder in '$sourceRelative'." }
+        $rendered = $rendered.Replace('{USER_SKILLS_ROOT}/', ($userSkillsRoot + '/'))
+        if ($rendered.Contains('{RULE_ROOT}') -or $rendered.Contains('{USER_SKILLS_ROOT}')) { throw "Unresolved instruction placeholder in '$sourceRelative'." }
         $targetProperty = $platform.base.PSObject.Properties[$localeId]
         if ($null -eq $targetProperty) { throw "Platform '$platformId' has no Base target for locale '$localeId'." }
         $outputs.Add([pscustomobject]@{ RelativePath = [string]$targetProperty.Value; Text = $rendered })
@@ -195,7 +197,8 @@ foreach ($platform in @($contract.platforms)) {
                 throw [System.InvalidOperationException]::new("RuleHostBlockNotAllowed: '$ruleSourceRelative'. Host blocks are only allowed in Base source.")
             }
             $ruleText = $ruleText.Replace('{RULE_ROOT}/', ($ruleRoot + '/'))
-            if ($ruleText.Contains('{RULE_ROOT}')) { throw "Unresolved RULE_ROOT placeholder in '$ruleSourceRelative'." }
+            $ruleText = $ruleText.Replace('{USER_SKILLS_ROOT}/', ($userSkillsRoot + '/'))
+            if ($ruleText.Contains('{RULE_ROOT}') -or $ruleText.Contains('{USER_SKILLS_ROOT}')) { throw "Unresolved instruction placeholder in '$ruleSourceRelative'." }
             $outputs.Add([pscustomobject]@{ RelativePath = "$ruleRoot/$ruleName"; Text = $ruleText })
         }
     }

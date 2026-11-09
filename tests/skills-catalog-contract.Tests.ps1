@@ -313,7 +313,9 @@ function Get-TestManagedManifestV4 {
         $manifest = Get-TestManagedManifestV4
         $catalog = Import-SkillsCatalogJson -Path $script:CatalogV3Example -DocumentName 'Skills Catalog v3'
         { Assert-ManagedManifest -Manifest $manifest } | Should Not Throw
-        @($manifest.files | Where-Object artifactType -eq 'instruction' | Select-Object -ExpandProperty host | Sort-Object) -join ',' | Should Be 'claude,codex,copilot'
+        @($manifest.files | Where-Object artifactType -eq 'instruction' | Select-Object -ExpandProperty host -Unique | Sort-Object) -join ',' | Should Be 'claude,codex,copilot'
+        @($manifest.files | Where-Object { $_.host -eq 'claude' -and $_.targetPath -eq '.claude/AI-Rules/CodeReview.en.md' }).Count | Should Be 1
+        @($manifest.files | Where-Object { $_.host -eq 'claude' -and $_.targetPath -like '.claude/ai-instructions-licenses/*' }).Count | Should Be 1
         @($manifest.projections) -join ',' | Should Be 'project-agents'
         [string]$manifest.projectionContractSha256 | Should Be (Get-SkillsCatalogProjectionContractSha256 -Projections $catalog.projections)
     }
@@ -503,7 +505,7 @@ function Get-TestManagedManifestV4 {
     It 'UnitT11v12_rejects_v4_generation_zero' {
         $manifest = Get-TestManagedManifestV4
         $manifest.generation = 0
-        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw 'generation must be an integer greater than or equal to 1.'
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw 'generation must be an integer from 1 through Int64 maximum.'
     }
 
     # Scenario: A v4 manifest carries an undeclared top-level property.
@@ -512,6 +514,87 @@ function Get-TestManagedManifestV4 {
         $manifest = Get-TestManagedManifestV4
         $manifest | Add-Member -NotePropertyName unexpected -NotePropertyValue $true
         { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw "managed manifest contains unsupported property 'unexpected'."
+    }
+
+    # Scenario: A v4 generation reaches the Int64 boundary or exceeds it by one.
+    # Purpose: Accept the last representable generation and fail closed before overflow can enter persisted state.
+    It 'UnitT11v14_bounds_v4_generation_at_Int64_maximum' {
+        $manifest = Get-TestManagedManifestV4
+        $manifest.generation = [int64]::MaxValue
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Not Throw
+        $manifest.generation = ([decimal][int64]::MaxValue + [decimal]1)
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw 'generation must be an integer from 1 through Int64 maximum.'
+    }
+
+    # Scenario: An ordinary v4 instruction claims the legacy-unrendered sentinel without an explicit retention marker.
+    # Purpose: Reject fabricated sentinel provenance in both the portable schema and executable validator.
+    It 'UnitT11v15_rejects_sentinel_on_a_nonretained_v4_instruction' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) {
+            throw 'UnitT11v15 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.'
+        }
+        $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\managed-manifest-v4.schema.json'
+        $manifest = Get-TestManagedManifestV4
+        $entry = @($manifest.files | Where-Object artifactType -eq 'instruction')[0]
+        $entry.rendererId = 'legacy-unrendered'
+        $entry.rendererSha256 = $null
+
+        (Test-Json -Json ($manifest | ConvertTo-Json -Depth 100) -SchemaFile $schemaPath) | Should Be $false
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw "may use rendererId 'legacy-unrendered' only with retention 'legacy-preserved'"
+    }
+
+    # Scenario: A v4 instruction names the real build renderer but omits its renderer hash.
+    # Purpose: Prevent null provenance from being accepted as verification for rendered bytes.
+    It 'UnitT11v16_rejects_real_renderer_with_null_sha256' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) {
+            throw 'UnitT11v16 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.'
+        }
+        $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\managed-manifest-v4.schema.json'
+        $manifest = Get-TestManagedManifestV4
+        $entry = @($manifest.files | Where-Object { $_.artifactType -eq 'instruction' -and $_.rendererId -eq 'build-ai-instructions' })[0]
+        $entry.rendererSha256 = $null
+
+        (Test-Json -Json ($manifest | ConvertTo-Json -Depth 100) -SchemaFile $schemaPath) | Should Be $false
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw "with rendererId 'build-ai-instructions' must include rendererSha256"
+    }
+
+    # Scenario: A retained v4 instruction encodes retention as a singleton JSON array instead of a scalar string.
+    # Purpose: Keep the executable validator aligned with the JSON schema and prevent PowerShell string coercion from accepting the wrong type.
+    It 'UnitT11v17_rejects_non_string_retention' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) {
+            throw 'UnitT11v17 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.'
+        }
+        $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\managed-manifest-v4.schema.json'
+        $manifest = Get-TestManagedManifestV4
+        $entry = @($manifest.files | Where-Object { $_.artifactType -eq 'instruction' -and $_.rendererId -eq 'legacy-unrendered' })[0]
+        $entry.retention = @('legacy-preserved')
+
+        (Test-Json -Json ($manifest | ConvertTo-Json -Depth 100) -SchemaFile $schemaPath) | Should Be $false
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw 'retention must be a string'
+    }
+
+    # Scenario: A Claude instruction omits the commit segment from its license target while legacy Codex and GitHub targets do the same.
+    # Purpose: Require sourceCommit namespacing for Claude without breaking the documented legacy compatibility of the other hosts.
+    It 'UnitT11v18_requires_commit_segment_for_Claude_license_targets' {
+        if ($PSVersionTable.PSVersion.Major -lt 7) {
+            throw 'UnitT11v18 requires PowerShell 7 because Test-Json is unavailable in Windows PowerShell 5.1.'
+        }
+        $schemaPath = Join-Path $script:RepositoryRoot 'catalog\schemas\managed-manifest-v4.schema.json'
+        $manifest = Get-TestManagedManifestV4
+        $entry = @($manifest.files | Where-Object { $_.artifactType -eq 'instruction' -and $_.host -eq 'claude' -and $_.targetPath -like '.claude/ai-instructions-licenses/*' })[0]
+        $entry.targetPath = '.claude/ai-instructions-licenses/delivery.json'
+
+        (Test-Json -Json ($manifest | ConvertTo-Json -Depth 100) -SchemaFile $schemaPath) | Should Be $false
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Throw "target path is not allowed for host 'claude'"
+
+        $entry.host = 'codex'
+        $entry.targetPath = '.codex/ai-instructions-licenses/delivery.json'
+        (Test-Json -Json ($manifest | ConvertTo-Json -Depth 100) -SchemaFile $schemaPath) | Should Be $true
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Not Throw
+
+        $entry.host = 'copilot'
+        $entry.targetPath = '.github/ai-instructions-licenses/delivery.json'
+        (Test-Json -Json ($manifest | ConvertTo-Json -Depth 100) -SchemaFile $schemaPath) | Should Be $true
+        { Assert-ManagedManifestV4 -Manifest $manifest } | Should Not Throw
     }
 
     # Scenario: A v3 Catalog declares several bounded USER and project projections and its Lock binds their canonical digest.

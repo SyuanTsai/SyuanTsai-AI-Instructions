@@ -8,6 +8,7 @@ param(
     [string] $InstructionSourceCommit,
     [string] $TargetRoot,
     [string] $UserHome = [Environment]::GetFolderPath('UserProfile'),
+    [string] $RuntimeRoot = $PSScriptRoot,
     [switch] $WhatIf
 )
 
@@ -235,6 +236,29 @@ $lock = Test-SkillsCatalogLockDocument -LockPath $LockPath -CatalogPath $Catalog
 $configuration = Read-JsonDocument -Path $ConfigurationPath -Name 'AI instruction sync configuration'
 
 Assert-MultiSourceConfiguration -Configuration $configuration -Catalog $catalog
+$runtimeGeneration = if ([int64]$configuration.schemaVersion -eq 5) { 'v3v5' } else { 'v2v4' }
+if ($runtimeGeneration -ceq 'v3v5') {
+    if (($catalog.schemaVersion -isnot [int] -and $catalog.schemaVersion -isnot [long]) -or [int64]$catalog.schemaVersion -ne 3 -or
+        ($lock.schemaVersion -isnot [int] -and $lock.schemaVersion -isnot [long]) -or [int64]$lock.schemaVersion -ne 3) {
+        throw (New-AiInstructionsRefusalException -Code 'projection-runtime-unavailable' -Message 'Sync configuration v5 requires a consistent Catalog/Lock v3 pair.')
+    }
+    $runtimeRootPath = [System.IO.Path]::GetFullPath($RuntimeRoot)
+    $bundlePath = Join-Path $runtimeRootPath 'runtime-bundle.json'
+    $platformRuntimePath = Join-Path $runtimeRootPath 'platform-runtime.psd1'
+    $runtimeCatalogPath = Join-Path $runtimeRootPath 'catalog\skills-catalog.json'
+    $runtimeLockPath = Join-Path $runtimeRootPath 'catalog\skills-catalog-lock.json'
+    $bundle = Read-JsonDocument -Path $bundlePath -Name 'AI instruction runtime bundle'
+    if (@($configuration.projections.project).Count -gt 0) {
+        throw (New-AiInstructionsRefusalException -Code 'projection-runtime-unavailable' -Message 'Project Skill projections are unavailable until the P9c projection runtime is installed.')
+    }
+    if ((Get-RawFileSha256 -Path $CatalogPath) -cne (Get-RawFileSha256 -Path $runtimeCatalogPath) -or
+        (Get-RawFileSha256 -Path $LockPath) -cne (Get-RawFileSha256 -Path $runtimeLockPath)) {
+        throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message 'Multi-source Catalog/Lock inputs do not match the verified runtime pair.')
+    }
+    Import-Module $platformRuntimePath -Force -ErrorAction Stop
+    $capabilityReceipt = Get-PlatformCapabilities -Required ([string[]]@($bundle.requiredCapabilities))
+    Assert-AiInstructionsRuntimeGate -Bundle $bundle -Configuration $configuration -RuntimeRoot $runtimeRootPath -CapabilityReceipt $capabilityReceipt | Out-Null
+}
 
 $SourceRepository = [string]$configuration.catalog.repository
 $SourceRef = [string]$configuration.catalog.ref
@@ -326,10 +350,21 @@ try {
     $provenanceJson = ($provenance | ConvertTo-Json -Depth 10).Replace("`r`n", "`n") + "`n"
     [System.IO.File]::WriteAllText($provenancePath, $provenanceJson, (New-Object System.Text.UTF8Encoding($false)))
 
-    $routingConfiguration = [ordered]@{
-        schemaVersion = 3
-        excludedRepositoryUrls = @($configuration.excludedRepositoryUrls)
-        excludedRepositoryPaths = @($configuration.excludedRepositoryPaths)
+    $routingConfiguration = if ($runtimeGeneration -ceq 'v3v5') {
+        [ordered]@{
+            schemaVersion = 4
+            syncConfiguration = $configuration
+            catalogId = [string]$catalog.catalogId
+            lockSha256 = Get-RawFileSha256 -Path $LockPath
+            projectionContractSha256 = [string]$lock.projectionContractSha256
+        }
+    }
+    else {
+        [ordered]@{
+            schemaVersion = 3
+            excludedRepositoryUrls = @($configuration.excludedRepositoryUrls)
+            excludedRepositoryPaths = @($configuration.excludedRepositoryPaths)
+        }
     }
     $routingJson = ($routingConfiguration | ConvertTo-Json -Depth 10).Replace("`r`n", "`n") + "`n"
     [System.IO.File]::WriteAllText($routingConfigurationPath, $routingJson, (New-Object System.Text.UTF8Encoding($false)))
@@ -339,6 +374,7 @@ try {
         ConfigurationPath = $routingConfigurationPath
         ProvenancePath = $provenancePath
         UserHome = $UserHome
+        RuntimeRoot = $RuntimeRoot
         WhatIf = $WhatIf
     }
     if (-not [string]::IsNullOrWhiteSpace($TargetRoot)) {

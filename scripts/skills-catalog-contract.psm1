@@ -795,12 +795,13 @@ function Assert-ManagedManifestV3 {
 function Test-IsManagedManifestV4InstructionLicensePath {
     param([Parameter(Mandatory = $true)][string] $InstructionHost,[object] $Value)
     if (-not (Test-IsSafeRepositoryPath -Value $Value)) { return $false }
-    $namespace = switch ($InstructionHost) {
-        'codex' { '.codex' }
-        'copilot' { '.github' }
+    $pattern = switch ($InstructionHost) {
+        'codex' { '^\.codex/ai-instructions-licenses/(?:[0-9a-f]{40}/)?(?:delivery\.json|source/.+)$' }
+        'copilot' { '^\.github/ai-instructions-licenses/(?:[0-9a-f]{40}/)?(?:delivery\.json|source/.+)$' }
+        'claude' { '^\.claude/ai-instructions-licenses/[0-9a-f]{40}/(?:delivery\.json|source/.+)$' }
         default { return $false }
     }
-    return [string]$Value -cmatch ('^' + [regex]::Escape($namespace) + '/ai-instructions-licenses/([0-9a-f]{40}/)?(delivery\.json|source/.+)$')
+    return [string]$Value -cmatch $pattern
 }
 
 function Test-IsManagedManifestV4InstructionTarget {
@@ -933,7 +934,7 @@ function Assert-ManagedManifestV4 {
     Assert-Sha256 -Value (Get-RequiredProperty -Object $Manifest -Name 'lockSha256' -Context 'managed manifest') -Context 'managed manifest lockSha256'
     Assert-Sha256 -Value (Get-RequiredProperty -Object $Manifest -Name 'projectionContractSha256' -Context 'managed manifest') -Context 'managed manifest projectionContractSha256'
     $generation = Get-RequiredProperty -Object $Manifest -Name 'generation' -Context 'managed manifest'
-    if (($generation -isnot [int] -and $generation -isnot [long]) -or [int64]$generation -lt 1) { throw 'managed manifest generation must be an integer greater than or equal to 1.' }
+    if (($generation -isnot [int] -and $generation -isnot [long]) -or [int64]$generation -lt 1 -or [decimal]$generation -gt [int64]::MaxValue) { throw 'managed manifest generation must be an integer from 1 through Int64 maximum.' }
 
     $projections = Get-RequiredProperty -Object $Manifest -Name 'projections' -Context 'managed manifest'
     Assert-StableIdArray -Value $projections -Context 'managed manifest projections' -AllowEmpty
@@ -957,7 +958,7 @@ function Assert-ManagedManifestV4 {
         Assert-NonEmptyString -Value $artifactType -Context 'managed manifest file artifactType'
         if (@('instruction','skill') -cnotcontains [string]$artifactType) { throw "Unsupported managed manifest artifactType '$artifactType'." }
         $allowed = @('artifactType','artifactId','sourceId','sourceRepository','sourceRef','sourceCommit','sourceVersion','sourcePath','targetPath','sha256')
-        if ([string]$artifactType -ceq 'instruction') { $allowed += @('host','rendererId','rendererSha256') }
+        if ([string]$artifactType -ceq 'instruction') { $allowed += @('host','rendererId','rendererSha256','retention') }
         else { $allowed += 'projectionId' }
         Assert-OnlyProperties -Object $entry -Allowed $allowed -Context 'managed manifest file'
 
@@ -981,8 +982,30 @@ function Assert-ManagedManifestV4 {
             $instructionHost = Get-RequiredProperty -Object $entry -Name 'host' -Context "managed manifest instruction '$artifactId'"
             Assert-NonEmptyString -Value $instructionHost -Context "managed manifest instruction '$artifactId' host"
             if (@('codex','copilot','claude') -cnotcontains [string]$instructionHost) { throw "Unknown managed manifest instruction host '$instructionHost'." }
-            Assert-StableId -Value (Get-RequiredProperty -Object $entry -Name 'rendererId' -Context "managed manifest instruction '$artifactId'") -Context "managed manifest instruction '$artifactId' rendererId"
-            Assert-Sha256 -Value (Get-RequiredProperty -Object $entry -Name 'rendererSha256' -Context "managed manifest instruction '$artifactId'") -Context "managed manifest instruction '$artifactId' rendererSha256"
+            $rendererId = Get-RequiredProperty -Object $entry -Name 'rendererId' -Context "managed manifest instruction '$artifactId'"
+            Assert-StableId -Value $rendererId -Context "managed manifest instruction '$artifactId' rendererId"
+            $rendererSha256 = Get-RequiredProperty -Object $entry -Name 'rendererSha256' -Context "managed manifest instruction '$artifactId'"
+            $retentionProperty = $entry.PSObject.Properties['retention']
+            if ($null -ne $retentionProperty -and $retentionProperty.Value -isnot [string]) {
+                throw "Managed manifest instruction '$artifactId' retention must be a string."
+            }
+            if ([string]$rendererId -ceq 'legacy-unrendered') {
+                if ($null -eq $retentionProperty -or [string]$retentionProperty.Value -cne 'legacy-preserved') {
+                    throw "Managed manifest instruction '$artifactId' may use rendererId 'legacy-unrendered' only with retention 'legacy-preserved'."
+                }
+                if ($null -ne $rendererSha256) {
+                    throw "Managed manifest instruction '$artifactId' with rendererId 'legacy-unrendered' must use a null rendererSha256."
+                }
+            }
+            else {
+                if ($null -ne $retentionProperty) {
+                    throw "Managed manifest instruction '$artifactId' retention is only allowed for rendererId 'legacy-unrendered'."
+                }
+                if ($null -eq $rendererSha256) {
+                    throw "Managed manifest instruction '$artifactId' with rendererId '$rendererId' must include rendererSha256."
+                }
+                Assert-Sha256 -Value $rendererSha256 -Context "managed manifest instruction '$artifactId' rendererSha256"
+            }
             if (-not (Test-IsManagedManifestV4InstructionTarget -InstructionHost ([string]$instructionHost) -TargetPath ([string]$targetPath))) {
                 throw "Managed instruction '$artifactId' target path is not allowed for host '$instructionHost': $targetPath"
             }

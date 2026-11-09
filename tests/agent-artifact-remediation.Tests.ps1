@@ -20,10 +20,10 @@ Describe 'Agent artifact remediation transaction' {
     # Scenario: A tracked declaration is placed under a managed instruction license namespace.
     # Purpose: Reserve only Agent delivery paths while protecting product LICENSE and NOTICE files.
     It 'UnitT05_classifies_license_delivery_without_reserving_product_licenses' {
-        foreach ($path in @('.codex/ai-instructions-licenses/source/LICENSE','.github/ai-instructions-licenses/delivery.json')) {
+        foreach ($path in @('.codex/ai-instructions-licenses/source/LICENSE','.github/ai-instructions-licenses/delivery.json','.claude/ai-instructions-licenses/source/LICENSE','.claude/AI-Rules/Testing.en.md')) {
             (Test-IsReservedAgentArtifactPath -Path $path) | Should Be $true
         }
-        foreach ($path in @('LICENSE','NOTICE','docs/LICENSE','.codex/ai-instructions-licenses/../../LICENSE')) {
+        foreach ($path in @('LICENSE','NOTICE','docs/LICENSE','CLAUDE.md','.codex/ai-instructions-licenses/../../LICENSE','.claude/skills/example/SKILL.md','.github/skills/example/SKILL.md')) {
             (Test-IsReservedAgentArtifactPath -Path $path) | Should Be $false
         }
     }
@@ -276,6 +276,225 @@ finally {
             if ($null -ne $transaction -and (Test-Path -LiteralPath $transaction.Backup.Root)) {
                 Remove-Item -LiteralPath $transaction.Backup.Root -Recurse -Force
             }
+        }
+    }
+
+    # Scenario: Remediation reads a valid multi-host v4 manifest containing Claude instructions and project Skill projections.
+    # Purpose: Revalidate v4, reserve only Claude Rules/licenses, and keep CLAUDE.md plus every project Skill root outside remediation scope.
+    It 'UnitT61_reads_v4_ownership_without_reserving_Claude_base_or_Skills' {
+        $repository=Join-Path $TestDrive 'v4-remediation-reader'
+        New-Item -ItemType Directory -Force -Path (Join-Path $repository '.codex')|Out-Null
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/managed-manifest-v4.example.json') -Destination (Join-Path $repository '.codex/ai-instructions.manifest.json')
+        $module=Get-Module agent-artifact-remediation
+        $paths=& $module {
+            param($repository)
+            $comparer=[StringComparer]::Ordinal
+            $tracked=[pscustomobject]@{
+                Index=(New-Object 'System.Collections.Generic.HashSet[string]' $comparer)
+                Head=(New-Object 'System.Collections.Generic.HashSet[string]' $comparer)
+            }
+            $set=Get-RemediationLegacyManifestPaths -Repository $repository -Comparer $comparer -TrackedSets $tracked -ProtectedPaths @()
+            @($set)
+        } $repository
+        ($paths-contains'.claude/AI-Rules/CodeReview.en.md')|Should Be $true
+        ($paths|Where-Object{$_-like'.claude/ai-instructions-licenses/*'}).Count|Should BeGreaterThan 0
+        ($paths-contains'CLAUDE.md')|Should Be $false
+        ($paths|Where-Object{$_-like'*/skills/*'}).Count|Should Be 0
+    }
+
+    # Scenario: Bootstrap has already imported the Catalog contract before it force-loads the remediation module in the same PowerShell process.
+    # Purpose: Keep the caller's exported worktree parser available across the nested remediation import on Windows PowerShell 5.1 and PowerShell 7.
+    It 'InterT62_keeps_the_callers_catalog_commands_loaded_after_remediation_import' {
+        $catalogModule=Join-Path $script:RepositoryRoot 'scripts\skills-catalog-contract.psm1'
+        $remediationModule=Join-Path $script:RepositoryRoot 'scripts\agent-artifact-remediation.psm1'
+        $catalogLiteral=$catalogModule.Replace("'","''")
+        $remediationLiteral=$remediationModule.Replace("'","''")
+        $probe=@"
+`$ErrorActionPreference='Stop'
+Import-Module '$catalogLiteral' -Force -ErrorAction Stop
+if(-not(Get-Command ConvertFrom-GitWorktreePorcelainZ -ErrorAction SilentlyContinue)){exit 61}
+Import-Module '$remediationLiteral' -Force -ErrorAction Stop
+if(-not(Get-Command ConvertFrom-GitWorktreePorcelainZ -ErrorAction SilentlyContinue)){exit 62}
+"@
+        $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probe))
+        $engine=(Get-Process -Id $PID).Path
+        $output=& $engine -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded 2>&1
+        $LASTEXITCODE|Should Be 0
+        ($output-join[Environment]::NewLine)|Should Not Match 'CommandNotFoundException'
+    }
+
+    # Scenario: Claude-family paths arrive with mixed separators, trailing slashes, and Windows casing at the shared guard.
+    # Purpose: Keep one normalized protection decision for every remediation, bootstrap, and cleanup sink.
+    It 'UnitT63_normalizes_the_single_Claude_family_protection_guard' {
+        (Test-IsProtectedClaudeFamilyPath -Path 'CLAUDE.md' -ProtectedPaths @('CLAUDE.md/')) | Should Be $true
+        (Test-IsProtectedClaudeFamilyPath -Path '.claude\AI-Rules\Testing.en.md' -ProtectedPaths @('.claude/AI-Rules/')) | Should Be $true
+        (Test-IsProtectedClaudeFamilyPath -Path '.claude/ai-instructions-licenses/a/delivery.json' -ProtectedPaths @('.claude\ai-instructions-licenses\')) | Should Be $true
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            (Test-IsProtectedClaudeFamilyPath -Path '.CLAUDE/ai-rules/Testing.en.md' -ProtectedPaths @('.claude/AI-Rules')) | Should Be $true
+        }
+        (Test-IsProtectedClaudeFamilyPath -Path '.claude/skills/example/SKILL.md' -ProtectedPaths @('CLAUDE.md','.claude/AI-Rules','.claude/ai-instructions-licenses')) | Should Be $false
+    }
+
+    # Scenario: Every user-file mutation sink is reviewed as one table row.
+    # Purpose: Prevent a forward mutation sink from bypassing the shared Claude-family guard while documenting rollback-only exceptions.
+    # The single guard boundary applies only to forward mutation sinks; rollback restores the complete pre-mutation snapshot.
+    It 'UnitT64_classifies_<Function>_for_the_single_Claude_family_guard' -TestCases @(
+        @{File='scripts/agent-artifact-remediation.psm1';Function='Get-RemediationLegacyManifestPaths';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/agent-artifact-remediation.psm1';Function='New-AgentArtifactRemediationBackup';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/agent-artifact-remediation.psm1';Function='Set-RemediationGitInfoExclude';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/agent-artifact-remediation.psm1';Function='Set-RemediationIndexWithoutPaths';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/agent-artifact-remediation.psm1';Function='New-RemediationCommitObject';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/agent-artifact-remediation.psm1';Function='Remove-RemediationFiles';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/agent-artifact-remediation.psm1';Function='Set-RemediationHead';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/agent-artifact-remediation.psm1';Function='Restore-RemediationHead';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/agent-artifact-remediation.psm1';Function='Restore-RemediationFiles';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/agent-artifact-remediation.psm1';Function='Restore-RemediationExclude';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/agent-artifact-remediation.psm1';Function='Restore-AgentArtifactRemediation';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Set-ManagedGitInfoExclude';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Restore-GitInfoExcludeSnapshot';Applicability='not applicable';Reason='rollback only restores pre-mutation snapshot'},
+        @{File='scripts/bootstrap-ai-instructions.ps1';Function='New-TargetMutationSnapshot';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Invoke-AtomicFilePublication';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Remove-TargetMutationFileAtomically';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Set-TargetMutationFileBytes';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Remove-TargetMutationFile';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Restore-TargetMutationSnapshot';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Update-PersonalAgentStash';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Save-SkillMigrationJournal';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/bootstrap-ai-instructions.ps1';Function='Restore-SkillMigrationJournal';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/cleanup-ai-instructions-pollution.ps1';Function='Remove-CleanupIndexEntriesAtomically';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/cleanup-ai-instructions-pollution.ps1';Function='Restore-CleanupIndexSnapshot';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/cleanup-ai-instructions-pollution.ps1';Function='Set-CleanupExcludeBlock';Applicability='applies';Reason='forward mutation sink'},
+        @{File='scripts/cleanup-ai-instructions-pollution.ps1';Function='Restore-CleanupExcludeMutation';Applicability='not applicable';Reason='rollback only restores pre-mutation snapshot'}
+    ) {
+        param($File,$Function,$Applicability,$Reason)
+        $tokens=$null;$parseErrors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $script:RepositoryRoot $File),[ref]$tokens,[ref]$parseErrors)
+        @($parseErrors).Count|Should Be 0
+        $definition=@($ast.FindAll({param($node) $node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$Function},$true))
+        $definition.Count|Should Be 1
+        if($Applicability-ceq'applies'){
+            $Reason|Should Be 'forward mutation sink'
+            $definition[0].Extent.Text|Should Match 'Test-IsProtectedClaudeFamilyPath'
+        }else{
+            $Applicability|Should Be 'not applicable'
+            $Reason|Should Be 'rollback only restores pre-mutation snapshot'
+            $definition[0].Extent.Text|Should Not Match 'Test-IsProtectedClaudeFamilyPath'
+        }
+    }
+
+    # Scenario: The shared guard receives either a deliberately computed empty protection set or a missing null set.
+    # Purpose: Permit ordinary repositories with no project-owned Claude family while refusing to treat an uncomputed set as unprotected.
+    It 'UnitT65_accepts_empty_but_rejects_null_Claude_family_protection' {
+        (Test-IsProtectedClaudeFamilyPath -Path 'CLAUDE.md' -ProtectedPaths @()) | Should Be $false
+        { Test-IsProtectedClaudeFamilyPath -Path 'CLAUDE.md' -ProtectedPaths $null } | Should Throw
+    }
+
+    # Scenario: Each Claude base, Rule, and license path is tracked or untracked under v2, v3, and v4 manifest ownership while the manifest itself is tracked.
+    # Purpose: Preserve protected bytes and index state, omit the path from remediation commits, and emit a reason at the complete remediation sink chain.
+    It 'InterT65_preserves_<PathKind>_<Tracking>_under_v<SchemaVersion>_across_remediation_sinks' -TestCases @(
+        foreach($schemaVersion in 2,3,4){foreach($tracking in 'tracked','untracked'){foreach($pathCase in @(
+            @{PathKind='base';Path='CLAUDE.md'},
+            @{PathKind='rule';Path='.claude/AI-Rules/CodeReview.en.md'},
+            @{PathKind='license';Path='.claude/ai-instructions-licenses/0123456789abcdef0123456789abcdef01234567/delivery.json'}
+        )){@{SchemaVersion=$schemaVersion;Tracking=$tracking;PathKind=$pathCase.PathKind;ProtectedPath=$pathCase.Path}}}}
+    ) {
+        param($SchemaVersion,$Tracking,$PathKind,$ProtectedPath)
+        $repository=Join-Path $TestDrive ("protected-v$SchemaVersion-$Tracking-$PathKind")
+        New-Item -ItemType Directory -Force -Path (Join-Path $repository '.codex')|Out-Null
+        & git -C $repository init --quiet
+        & git -C $repository config user.name 'Remediation Test'
+        & git -C $repository config user.email 'remediation@example.test'
+        [IO.File]::WriteAllText((Join-Path $repository 'product.txt'),"product`n",[Text.UTF8Encoding]::new($false))
+        & git -C $repository add -- product.txt
+        & git -C $repository commit --quiet -m fixture
+        $fullPath=Join-Path $repository $ProtectedPath
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $fullPath)|Out-Null
+        [IO.File]::WriteAllText($fullPath,"protected $SchemaVersion $Tracking $PathKind`n",[Text.UTF8Encoding]::new($false))
+        $manifestPath=Join-Path $repository '.codex/ai-instructions.manifest.json'
+        if($SchemaVersion-eq4){
+            Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/managed-manifest-v4.example.json') -Destination $manifestPath -Force
+        }else{
+            $manifest=[ordered]@{schemaVersion=$SchemaVersion;files=@([ordered]@{targetPath=$ProtectedPath})}
+            [IO.File]::WriteAllText($manifestPath,(($manifest|ConvertTo-Json -Depth 5)+"`n"),[Text.UTF8Encoding]::new($false))
+        }
+        & git -C $repository add -- '.codex/ai-instructions.manifest.json'
+        if($Tracking-ceq'tracked'){& git -C $repository add -f -- $ProtectedPath}
+        & git -C $repository commit --quiet -m 'tracked manifest fixture'
+        if($Tracking-ceq'untracked'){
+            [IO.File]::WriteAllText($fullPath,"protected $SchemaVersion $Tracking $PathKind`n",[Text.UTF8Encoding]::new($false))
+        }
+        $before=[Convert]::ToBase64String([IO.File]::ReadAllBytes($fullPath))
+        $diagnostics=@(Invoke-AgentArtifactRemediation -Repository $repository -ProtectedPathPrefixes @('CLAUDE.md/','.claude\AI-Rules\','.claude/ai-instructions-licenses/') 3>&1)
+        $transaction=@($diagnostics|Where-Object{$null-ne$_.PSObject.Properties['Backup']}|Select-Object -First 1)[0]
+        try{
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($fullPath))|Should Be $before
+            (@(& git -C $repository diff --cached --name-only -- $ProtectedPath)-join'')|Should BeNullOrEmpty
+            if($null-ne$transaction-and-not[string]::IsNullOrWhiteSpace([string]$transaction.NewCommit)){
+                (@(& git -C $repository show --pretty=format: --name-only $transaction.NewCommit -- $ProtectedPath)-join'')|Should BeNullOrEmpty
+            }
+            ($diagnostics-join[Environment]::NewLine)|Should Match ([regex]::Escape($ProtectedPath))
+            ($diagnostics-join[Environment]::NewLine)|Should Match 'project-owned Claude family'
+        }finally{
+            if($null-ne$transaction-and(Test-Path -LiteralPath $transaction.Backup.Root)){Remove-Item -LiteralPath $transaction.Backup.Root -Recurse -Force}
+        }
+    }
+
+    # Scenario: A tracked manifest names an unknown tracked production path under each supported ownership generation.
+    # Purpose: Keep the protected-family exception narrow; paths outside both the protected set and reserved scope must still fail closed.
+    It 'InterT66_rejects_an_unknown_non_reserved_path_under_v<SchemaVersion>' -TestCases @(
+        @{SchemaVersion=2},@{SchemaVersion=3},@{SchemaVersion=4}
+    ) {
+        param($SchemaVersion)
+        $repository=Join-Path $TestDrive ("unknown-v$SchemaVersion")
+        New-Item -ItemType Directory -Force -Path (Join-Path $repository '.codex')|Out-Null
+        & git -C $repository init --quiet
+        & git -C $repository config user.name 'Remediation Test'
+        & git -C $repository config user.email 'remediation@example.test'
+        [IO.File]::WriteAllText((Join-Path $repository 'production.txt'),"production`n",[Text.UTF8Encoding]::new($false))
+        $manifestPath=Join-Path $repository '.codex/ai-instructions.manifest.json'
+        $manifest=if($SchemaVersion-eq4){
+            $candidate=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'catalog/examples/managed-manifest-v4.example.json')|ConvertFrom-Json
+            $candidate.files[0].targetPath='production.txt'
+            $candidate
+        }else{[ordered]@{schemaVersion=$SchemaVersion;files=@([ordered]@{targetPath='production.txt'})}}
+        [IO.File]::WriteAllText($manifestPath,(($manifest|ConvertTo-Json -Depth 5)+"`n"),[Text.UTF8Encoding]::new($false))
+        & git -C $repository add -- production.txt '.codex/ai-instructions.manifest.json'
+        & git -C $repository commit --quiet -m fixture
+        $failure=$null
+        try{Invoke-AgentArtifactRemediation -Repository $repository -ProtectedPathPrefixes @('CLAUDE.md','.claude/AI-Rules','.claude/ai-instructions-licenses')|Out-Null}catch{$failure=$_.Exception.Message}
+        [string]::IsNullOrWhiteSpace($failure)|Should Be $false
+        if($SchemaVersion-in2,3){$failure|Should Match 'outside the reserved Agent artifact scope.*production\.txt'}
+        (Get-Content -Raw -LiteralPath (Join-Path $repository 'production.txt')).Trim()|Should Be 'production'
+    }
+
+    # Scenario: The active worktree permits Claude Rule remediation while a linked worktree makes the Claude family repository-wide protected for shared exclusions.
+    # Purpose: Remove the active tracked Rule without adding a shared exclude line that would hide a linked worktree's project-owned Claude file.
+    It 'InterT67_separates_active_remediation_from_repository-wide_shared_exclude_protection' {
+        $repository=Join-Path $TestDrive 'separate-remediation-exclude-scopes'
+        $rulePath='.claude/AI-Rules/Testing.en.md'
+        New-Item -ItemType Directory -Force -Path (Join-Path $repository '.claude/AI-Rules')|Out-Null
+        & git -C $repository init --quiet
+        & git -C $repository config user.name 'Remediation Test'
+        & git -C $repository config user.email 'remediation@example.test'
+        [IO.File]::WriteAllText((Join-Path $repository 'product.txt'),"product`n",[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $repository $rulePath),"managed Claude Rule`n",[Text.UTF8Encoding]::new($false))
+        & git -C $repository add -- product.txt $rulePath
+        & git -C $repository commit --quiet -m fixture
+        $excludePath=(& git -C $repository rev-parse --git-path info/exclude|Select-Object -First 1).Trim()
+        if(-not[IO.Path]::IsPathRooted($excludePath)){$excludePath=Join-Path $repository $excludePath}
+        [IO.File]::AppendAllText($excludePath,"`n# BEGIN Codex AI Instructions remediated paths`n/$rulePath`n# END Codex AI Instructions remediated paths`n",[Text.UTF8Encoding]::new($false))
+
+        $transaction=Invoke-AgentArtifactRemediation -Repository $repository `
+            -ProtectedPathPrefixes @('CLAUDE.md') `
+            -SharedExcludeProtectedPathPrefixes @('CLAUDE.md','.claude/AI-Rules/','.claude/ai-instructions-licenses/')
+        try {
+            @($transaction.Paths)|Should Contain $rulePath
+            Test-Path -LiteralPath (Join-Path $repository $rulePath)|Should Be $false
+            (@(& git -C $repository ls-files -- $rulePath)-join'')|Should BeNullOrEmpty
+            [IO.File]::ReadAllText($excludePath)|Should Not Match '(?m)^/\.claude/'
+        }
+        finally {
+            if(Test-Path -LiteralPath $transaction.Backup.Root){Remove-Item -LiteralPath $transaction.Backup.Root -Recurse -Force}
         }
     }
 }

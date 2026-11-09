@@ -39,6 +39,7 @@ Describe 'Skills source composition' {
         Set-Content (Join-Path $instructionRoot 'AGENTS.md') 'Instructions'
         $source=Join-Path $TestDrive 'resource-source'
         $skill=New-TestSkill $source 'one' 'selected'
+        $skill | Add-Member -NotePropertyName sourceLayoutVersion -NotePropertyValue 3
         Set-Content (Join-Path $source 'LICENSE') 'root license'
         New-Item -ItemType Directory -Force -Path (Join-Path $skill.skillRootPath 'assets/nested') | Out-Null
         $binary=Join-Path $skill.skillRootPath 'assets/nested/data.bin'

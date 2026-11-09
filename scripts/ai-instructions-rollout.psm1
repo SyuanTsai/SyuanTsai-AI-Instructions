@@ -1,6 +1,9 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+Import-Module (Join-Path $PSScriptRoot 'agent-artifact-remediation.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'skills-catalog-contract.psm1') -Scope Local -ErrorAction Stop
+
 $script:RolloutAuthorityRepositoryUrls = @(
     'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git',
     'https://github.com/SyuanTsai/Skill-General.git'
@@ -210,15 +213,7 @@ function ConvertFrom-RolloutGitPath {
 
 function Test-RolloutReservedAgentPath {
     param([Parameter(Mandatory = $true)][string] $Path)
-    $normalized = (ConvertFrom-RolloutGitPath -Path $Path).TrimStart('/')
-    if ($normalized -cin @(
-        'AGENTS.md','AGENTS.en.md','.codex/ai-instructions.manifest.json','.codex/AGENTS.md','.codex/AGENTS.en.md',
-        '.github/copilot-instructions.md','.github/copilot-instructions.en.md'
-    )) { return $true }
-    foreach ($prefix in @('.agents/','.codex/skills/','.github/AI-Rules/','.github/agents/','.github/instructions/','.github/prompts/')) {
-        if ($normalized.StartsWith($prefix,[System.StringComparison]::OrdinalIgnoreCase)) { return $true }
-    }
-    return $false
+    return Test-IsReservedAgentArtifactPath -Path (ConvertFrom-RolloutGitPath -Path $Path)
 }
 
 function Get-RolloutNonAgentGitStatus {
@@ -289,9 +284,28 @@ function Test-RolloutManifestCurrent {
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { return $true }
     try { $manifest = [System.IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json }
     catch { return $false }
-    if ($null -eq $manifest.PSObject.Properties['schemaVersion'] -or [int]$manifest.schemaVersion -ne 2) { return $false }
+    if ($null -eq $manifest.PSObject.Properties['schemaVersion']) { return $false }
+    try {
+        if ([int]$manifest.schemaVersion -eq 4) { Assert-ManagedManifestV4 -Manifest $manifest }
+        elseif ([int]$manifest.schemaVersion -in @(2,3)) { Assert-ManagedManifest -Manifest $manifest }
+        else { return $false }
+    }
+    catch [System.Management.Automation.CommandNotFoundException] { throw }
+    catch { return $false }
     if (-not [string]::IsNullOrWhiteSpace($ExpectedLockSha256)) {
         if ($null -eq $manifest.PSObject.Properties['lockSha256'] -or [string]$manifest.lockSha256 -cne $ExpectedLockSha256) { return $false }
+    }
+    if ([int]$manifest.schemaVersion -eq 4) {
+        $lockCandidates = @(
+            (Join-Path $PSScriptRoot 'catalog\skills-catalog-lock.json'),
+            (Join-Path (Split-Path -Parent $PSScriptRoot) 'catalog\skills-catalog-lock.json')
+        )
+        $lockPath = @($lockCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1)
+        if ($lockPath.Count -ne 1) { return $false }
+        try { $lock = [System.IO.File]::ReadAllText([string]$lockPath[0]) | ConvertFrom-Json }
+        catch { return $false }
+        if ($null -eq $lock.PSObject.Properties['projectionContractSha256'] -or
+            [string]$manifest.projectionContractSha256 -cne [string]$lock.projectionContractSha256) { return $false }
     }
     return $true
 }

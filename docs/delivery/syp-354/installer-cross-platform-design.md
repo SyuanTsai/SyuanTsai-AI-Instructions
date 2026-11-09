@@ -142,7 +142,9 @@ Skill content hash 依 canonical package relative paths 計算，不包含 host 
 
 共通語意先維護繁體中文，再產生英文與三 host 輸出；新增 Claude platform 至 `ai-instructions-contract.json`，並同步兩語系、各 route/invariant 及 parity regression。共同規則的限制與例外必須一致；平台專屬 connector 能力仍只能放對應 adapter，不憑空複製到 Claude。提案可將共同內容放 `instructions/common/`，生成現有 `.codex/`、`.github/` 與新 `.claude/` authority artifacts；路徑與生成器需 A5 核准後才建立。
 
-REPO reserved inventory 加入精確 `CLAUDE.md` 及受管的 Claude Instructions/rule files；`.git/info/exclude` marker 僅加入該 worktree manifest 的實際 targets，再合併其他 live worktree manifests。不可用整個 `.claude/**` wildcard 隱藏使用者設定。Instructions output 可有 host-specific 路徑，manifest 記 canonical source identity／renderer identity／output hash；parity 比較規範語意，不能只比三份檔案 byte hash。
+REPO reserved inventory 加入受管的 Claude Instructions/rule files；`.git/info/exclude` marker 僅加入該 worktree manifest 的實際 targets，再合併其他 live worktree manifests。不可用整個 `.claude/**` wildcard 隱藏使用者設定。Instructions output 可有 host-specific 路徑，manifest 記 canonical source identity／renderer identity／output hash；parity 比較規範語意，不能只比三份檔案 byte hash。
+
+> **P9b 決策：**`CLAUDE.md` 不列入 reserved，因為專案自有檔案很常見；其 ownership、整個 Claude family 的保護與略過行為依 P9b H4／J7 判定。
 
 所有 Skill roots——既有 `.agents/skills/**`、`.codex/skills/**`，以及新增 `.claude/skills/**`、`.github/skills/**`——明確排除 reserved Instructions remediation。Project opt-in 管理的 exact Skill files 可以 local-ignore，但不因路徑名或同 hash 接管既有 tracked/staged/unmanaged 檔案。新 `CLAUDE.md` 若已有內容，先依 ownership 分類、備份及產生可 review 的遷移結果，不擴張既有自動刪除範圍。後續若變更 reserved lifecycle policy，須先依 Repository 規範更新 authority/tests；本設計不授予刪除任何 consumer 檔案的操作權。
 

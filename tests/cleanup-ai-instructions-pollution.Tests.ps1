@@ -534,6 +534,55 @@ type nul > "$firstListMarker"
         @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
     }
 
+    # Scenario: Cleanup's preflight, locked manifest, and Claude ownership inventories succeed, but shared-exclude composition cannot enumerate worktrees.
+    # Purpose: Refuse before the exclude or worktree bytes change and preserve the typed fail-closed diagnostic.
+    It 'InterT87_fails_closed_when_shared_exclude_worktree_inventory_fails' {
+        $targetRoot = Join-Path $TestDrive 'cleanup-shared-exclude-list-failure'
+        New-PollutedTestRepository -Path $targetRoot
+        $wrapperRoot = Join-Path $TestDrive 'cleanup-shared-exclude-list-failure-wrapper'
+        New-Item -ItemType Directory -Force -Path $wrapperRoot | Out-Null
+        $realGit = (Get-Command git.exe).Source
+        $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $markers = 1..3 | ForEach-Object { Join-Path $wrapperRoot "list-$_.marker" }
+        $failureMarker = Join-Path $wrapperRoot 'shared-exclude-list-failed.marker'
+        $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
+        $gitWrapper = @"
+@echo off
+echo %* | "$findString" /C:"worktree list --porcelain" >nul
+if errorlevel 1 goto forward
+if not exist "$($markers[0])" (type nul > "$($markers[0])" & goto forward)
+if not exist "$($markers[1])" (type nul > "$($markers[1])" & goto forward)
+if not exist "$($markers[2])" (type nul > "$($markers[2])" & goto forward)
+type nul > "$failureMarker"
+exit /b 91
+:forward
+"$realGit" %*
+exit /b %errorlevel%
+"@
+        Set-CleanupTestText -Path $gitWrapperPath -Value $gitWrapper
+        $indexPath = (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','index') | Select-Object -First 1).Trim()
+        if (-not [IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $targetRoot $indexPath }
+        $excludePath = (Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('rev-parse','--git-path','info/exclude') | Select-Object -First 1).Trim()
+        if (-not [IO.Path]::IsPathRooted($excludePath)) { $excludePath = Join-Path $targetRoot $excludePath }
+        $manifestPath = Join-Path $targetRoot $script:ManifestRelativePath
+        $indexBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath))
+        $excludeBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+        $manifestBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath))
+        $agentBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md')))
+
+        $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize -GitExecutable $gitWrapperPath
+
+        $result.ExitCode | Should Not Be 0
+        Test-Path -LiteralPath $failureMarker -PathType Leaf | Should Be $true
+        $result.Output | Should Match 'Cannot determine linked worktree manifests before mutation\.'
+        $result.Output | Should Match 'ai-instructions-refusal-code=closure-invalid'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath)) | Should Be $indexBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath)) | Should Be $manifestBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md'))) | Should Be $agentBefore
+        @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count | Should Be 0
+    }
+
     # Scenario: A linked worktree publishes v4 after cleanup's optimistic scan and before its locked scan.
     # Purpose: Recheck projection ownership under the repository lock before staging remediation.
     It 'InterT69b_detects_linked_v4_published_before_the_locked_scan' {
@@ -579,7 +628,7 @@ if errorlevel 1 exit /b 92
             $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize -GitExecutable $gitWrapperPath
 
             $result.ExitCode | Should Not Be 0
-            $result.Output | Should Match 'REPO managed manifest schema version 4 requires a projection-aware bootstrap\.'
+            $result.Output | Should Match '(?s)managed manifest.*(?:missing|unsupported)'
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath)) | Should Be $indexBefore
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
             [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot 'AGENTS.md'))) | Should Be $agentBefore
@@ -656,7 +705,7 @@ if errorlevel 1 exit /b 92
             $result = Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
 
             $result.ExitCode | Should Not Be 0
-            $result.Output | Should Match 'REPO managed manifest schema version 4 requires a projection-aware bootstrap\.'
+            $result.Output | Should Match '(?s)managed manifest.*(?:missing|unsupported)'
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath)) | Should Be $indexBefore
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath)) | Should Be $manifestBefore
@@ -943,5 +992,240 @@ exit /b %errorlevel%
         $excludeAfter | Should Match '/concurrent-user-rule'
         $excludeAfter | Should Match '# BEGIN Codex AI Instructions managed paths'
         $excludeAfter | Should Match ([regex]::Escape(($excludeTextBefore -split "`r?`n")[0]))
+    }
+
+    # Scenario: A valid v4 manifest owns tracked Codex base plus Claude Rule and license artifacts.
+    # Purpose: Revalidate v4 ownership, clean every precise tracked target, preserve local bytes, and avoid treating Claude Skills as cleanup scope.
+    It 'InterT81_cleans_valid_v4_Claude_rule_and_license_ownership' {
+        $targetRoot=Join-Path $TestDrive 'v4-claude-cleanup'
+        New-PollutedTestRepository -Path $targetRoot
+        $ruleRelative='.claude/AI-Rules/Testing.en.md'
+        $licenseRelative='.claude/ai-instructions-licenses/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/delivery.json'
+        $rulePath=Join-Path $targetRoot $ruleRelative
+        $licensePath=Join-Path $targetRoot $licenseRelative
+        Set-CleanupTestText -Path $rulePath -Value '# Managed Claude rule'
+        Set-CleanupTestText -Path $licensePath -Value '{"schemaVersion":1}'
+        $manifestPath=Join-Path $targetRoot $script:ManifestRelativePath
+        $legacy=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+        $renderer='e'*64
+        $codex=$legacy.files[0]
+        $codex|Add-Member -NotePropertyName host -NotePropertyValue codex
+        $codex|Add-Member -NotePropertyName rendererId -NotePropertyValue build-ai-instructions
+        $codex|Add-Member -NotePropertyName rendererSha256 -NotePropertyValue $renderer
+        $claudeRule=($codex|ConvertTo-Json -Depth 10|ConvertFrom-Json)
+        $claudeRule.artifactId='claude-rule-testing';$claudeRule.host='claude';$claudeRule.sourcePath='.claude/AI-Rules/Testing.en.md';$claudeRule.targetPath=$ruleRelative
+        $claudeRule.sha256=(Get-FileHash -LiteralPath $rulePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $claudeLicense=($codex|ConvertTo-Json -Depth 10|ConvertFrom-Json)
+        $claudeLicense.artifactId='claude-licensing';$claudeLicense.host='claude';$claudeLicense.sourcePath='.ai-instructions-generated/delivery.json';$claudeLicense.targetPath=$licenseRelative
+        $claudeLicense.sha256=(Get-FileHash -LiteralPath $licensePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $manifest=[ordered]@{
+            schemaVersion=4;catalogId=[string]$legacy.catalogId;lockSha256=[string]$legacy.lockSha256
+            projectionContractSha256=('f'*64);generation=1;projections=@();files=@($codex,$claudeRule,$claudeLicense)
+        }
+        Set-CleanupTestText -Path $manifestPath -Value (($manifest|ConvertTo-Json -Depth 20).Replace("`r`n","`n").TrimEnd())
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('add','--',$ruleRelative,$licenseRelative,$script:ManifestRelativePath)|Out-Null
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','v4 Claude pollution fixture')|Out-Null
+        $ruleBefore=[IO.File]::ReadAllBytes($rulePath);$licenseBefore=[IO.File]::ReadAllBytes($licensePath)
+
+        $result=Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+        $result.ExitCode|Should Be 0
+        $deleted=@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only','--diff-filter=D'))
+        foreach($relative in @('AGENTS.md',$script:ManifestRelativePath,$ruleRelative,$licenseRelative)){($deleted-contains$relative)|Should Be $true}
+        [IO.File]::ReadAllBytes($rulePath)|Should Be $ruleBefore
+        [IO.File]::ReadAllBytes($licensePath)|Should Be $licenseBefore
+        ($deleted|Where-Object{$_-like'.claude/skills/*'}).Count|Should Be 0
+    }
+
+    # Scenario: An untracked unmanaged CLAUDE.md coexists with unchanged tracked Claude Rule and license entries.
+    # Purpose: Reuse bootstrap ownership classification so cleanup protects the complete project-owned Claude family without staging its deletion.
+    It 'InterT82_preserves_tracked_Claude_family_when_an_untracked_base_is_project_owned' {
+        $targetRoot=Join-Path $TestDrive 'v4-project-owned-claude-cleanup'
+        New-PollutedTestRepository -Path $targetRoot
+        $ruleRelative='.claude/AI-Rules/Testing.en.md'
+        $licenseRelative='.claude/ai-instructions-licenses/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/delivery.json'
+        $rulePath=Join-Path $targetRoot $ruleRelative
+        $licensePath=Join-Path $targetRoot $licenseRelative
+        Set-CleanupTestText -Path $rulePath -Value '# Project-owned Claude rule'
+        Set-CleanupTestText -Path $licensePath -Value '{"schemaVersion":1}'
+        $manifestPath=Join-Path $targetRoot $script:ManifestRelativePath
+        $legacy=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+        $renderer='e'*64
+        $codex=$legacy.files[0]
+        $codex|Add-Member -NotePropertyName host -NotePropertyValue codex
+        $codex|Add-Member -NotePropertyName rendererId -NotePropertyValue build-ai-instructions
+        $codex|Add-Member -NotePropertyName rendererSha256 -NotePropertyValue $renderer
+        $claudeRule=($codex|ConvertTo-Json -Depth 10|ConvertFrom-Json)
+        $claudeRule.artifactId='claude-rule-testing';$claudeRule.host='claude';$claudeRule.sourcePath='.claude/AI-Rules/Testing.en.md';$claudeRule.targetPath=$ruleRelative
+        $claudeRule.sha256=(Get-FileHash -LiteralPath $rulePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $claudeLicense=($codex|ConvertTo-Json -Depth 10|ConvertFrom-Json)
+        $claudeLicense.artifactId='claude-licensing';$claudeLicense.host='claude';$claudeLicense.sourcePath='.ai-instructions-generated/delivery.json';$claudeLicense.targetPath=$licenseRelative
+        $claudeLicense.sha256=(Get-FileHash -LiteralPath $licensePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $manifest=[ordered]@{
+            schemaVersion=4;catalogId=[string]$legacy.catalogId;lockSha256=[string]$legacy.lockSha256
+            projectionContractSha256=('f'*64);generation=1;projections=@();files=@($codex,$claudeRule,$claudeLicense)
+        }
+        Set-CleanupTestText -Path $manifestPath -Value (($manifest|ConvertTo-Json -Depth 20).Replace("`r`n","`n").TrimEnd())
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('add','--',$ruleRelative,$licenseRelative,$script:ManifestRelativePath)|Out-Null
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','v4 Claude family fixture')|Out-Null
+        Set-CleanupTestText -Path (Join-Path $targetRoot 'CLAUDE.md') -Value '# Unmanaged project Claude base'
+        $ruleBefore=[IO.File]::ReadAllBytes($rulePath);$licenseBefore=[IO.File]::ReadAllBytes($licensePath)
+
+        $result=Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+
+        $result.ExitCode|Should Be 0
+        $deleted=@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only','--diff-filter=D'))
+        ($deleted-contains'AGENTS.md')|Should Be $true
+        ($deleted-contains$script:ManifestRelativePath)|Should Be $true
+        ($deleted-contains$ruleRelative)|Should Be $false
+        ($deleted-contains$licenseRelative)|Should Be $false
+        [IO.File]::ReadAllBytes($rulePath)|Should Be $ruleBefore
+        [IO.File]::ReadAllBytes($licensePath)|Should Be $licenseBefore
+        $exclude=[IO.File]::ReadAllText((Join-Path $targetRoot '.git/info/exclude'))
+        $exclude|Should Match '(?m)^/\.claude/AI-Rules/Testing\.en\.md$'
+        $exclude|Should Match '(?m)^/\.claude/ai-instructions-licenses/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/delivery\.json$'
+    }
+
+    # Scenario: An ordinary polluted repository has no project-owned CLAUDE.md, so cleanup computes an empty Claude-family protection set.
+    # Purpose: Keep the empty set distinct from null and allow authorized cleanup to complete normally.
+    It 'InterT83_completes_cleanup_with_no_project_owned_Claude_family' {
+        $targetRoot=Join-Path $TestDrive 'empty-Claude-protection-cleanup'
+        New-PollutedTestRepository -Path $targetRoot
+
+        $result=Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+
+        $result.ExitCode|Should Be 0
+        $deleted=@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only','--diff-filter=D'))
+        ($deleted-contains'AGENTS.md')|Should Be $true
+        ($deleted-contains$script:ManifestRelativePath)|Should Be $true
+        Test-Path -LiteralPath (Join-Path $targetRoot 'CLAUDE.md')|Should Be $false
+    }
+
+    # Scenario: Cleanup runs in worktree A while live linked worktree B owns an untracked project CLAUDE.md hidden by the old shared exclude block.
+    # Purpose: Inventory repository-wide Claude ownership before rewriting the shared exclude, preserve B's bytes, and make its project file visible without staging it.
+    It 'InterT84_removes_linked_project_owned_Claude_from_the_shared_exclude' {
+        $targetRoot=Join-Path $TestDrive 'linked-Claude-cleanup-a'
+        New-PollutedTestRepository -Path $targetRoot
+        $linkedRoot=Join-Path $TestDrive 'linked-Claude-cleanup-b'
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','linked-Claude-cleanup-fixture',$linkedRoot)|Out-Null
+        try{
+            $linkedClaude=Join-Path $linkedRoot 'CLAUDE.md'
+            Set-CleanupTestText -Path $linkedClaude -Value '# Linked project Claude'
+            $linkedBytes=[IO.File]::ReadAllBytes($linkedClaude)
+            $excludePath=Join-Path $targetRoot '.git/info/exclude'
+            $exclude=[IO.File]::ReadAllText($excludePath)
+            $managedBlock='(?ms)^# BEGIN Codex AI Instructions managed paths\n.*?^# END Codex AI Instructions managed paths\n?'
+            $replacement="# BEGIN Codex AI Instructions managed paths`n/.codex/ai-instructions.manifest.json`n/AGENTS.md`n/CLAUDE.md`n# END Codex AI Instructions managed paths`n"
+            $withoutManagedBlock=[regex]::Replace($exclude.Replace("`r`n","`n"),$managedBlock,'').TrimEnd("`n")
+            $excludeWithHiddenClaude=if([string]::IsNullOrWhiteSpace($withoutManagedBlock)){$replacement}else{$withoutManagedBlock+"`n`n"+$replacement}
+            [IO.File]::WriteAllText($excludePath,$excludeWithHiddenClaude,[Text.UTF8Encoding]::new($false))
+
+            $result=Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+
+            $result.ExitCode|Should Be 0
+            [IO.File]::ReadAllBytes($linkedClaude)|Should Be $linkedBytes
+            [IO.File]::ReadAllText($excludePath)|Should Not Match '(?m)^/CLAUDE\.md$'
+            (@(Invoke-CleanupTestGit -Repository $linkedRoot -Arguments @('diff','--cached','--name-only','--','CLAUDE.md'))-join'')|Should BeNullOrEmpty
+            (@(Invoke-CleanupTestGit -Repository $linkedRoot -Arguments @('status','--porcelain=v1','--untracked-files=all','--','CLAUDE.md'))-join"`n")|Should Match '^\?\? CLAUDE\.md$'
+        }
+        finally{Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot)|Out-Null}
+    }
+
+    # Scenario: Cleanup runs in worktree A with a tracked managed Claude Rule while linked worktree B owns its own Claude base and Rule.
+    # Purpose: Clean A from A's ownership decision, preserve B byte-for-byte, and omit shared exclude entries that would hide B's project files.
+    It 'InterT85_cleans_A_Claude_pollution_without_hiding_or_mutating_linked_B' {
+        $targetRoot=Join-Path $TestDrive 'linked-Claude-rule-cleanup-a'
+        New-PollutedTestRepository -Path $targetRoot
+        $ruleRelative='.claude/AI-Rules/Testing.en.md'
+        $rulePath=Join-Path $targetRoot $ruleRelative
+        Set-CleanupTestText -Path $rulePath -Value '# Managed Claude rule in A'
+        $manifestPath=Join-Path $targetRoot $script:ManifestRelativePath
+        $legacy=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+        $renderer='e'*64
+        $codex=$legacy.files[0]
+        $codex|Add-Member -NotePropertyName host -NotePropertyValue codex
+        $codex|Add-Member -NotePropertyName rendererId -NotePropertyValue build-ai-instructions
+        $codex|Add-Member -NotePropertyName rendererSha256 -NotePropertyValue $renderer
+        $claudeRule=($codex|ConvertTo-Json -Depth 10|ConvertFrom-Json)
+        $claudeRule.artifactId='claude-rule-testing';$claudeRule.host='claude';$claudeRule.sourcePath='.claude/AI-Rules/Testing.en.md';$claudeRule.targetPath=$ruleRelative
+        $claudeRule.sha256=(Get-FileHash -LiteralPath $rulePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $manifest=[ordered]@{
+            schemaVersion=4;catalogId=[string]$legacy.catalogId;lockSha256=[string]$legacy.lockSha256
+            projectionContractSha256=('f'*64);generation=1;projections=@();files=@($codex,$claudeRule)
+        }
+        Set-CleanupTestText -Path $manifestPath -Value (($manifest|ConvertTo-Json -Depth 20).Replace("`r`n","`n").TrimEnd())
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('add','--',$ruleRelative,$script:ManifestRelativePath)|Out-Null
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','v4 Claude rule pollution fixture')|Out-Null
+        $ruleBefore=[IO.File]::ReadAllBytes($rulePath)
+        $linkedRoot=Join-Path $TestDrive 'linked-Claude-rule-cleanup-b'
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','linked-Claude-rule-cleanup-fixture',$linkedRoot)|Out-Null
+        try{
+            $linkedClaude=Join-Path $linkedRoot 'CLAUDE.md'
+            $linkedProjectRule=Join-Path $linkedRoot '.claude/AI-Rules/Project.en.md'
+            Set-CleanupTestText -Path $linkedClaude -Value '# Linked project Claude base'
+            Set-CleanupTestText -Path $linkedProjectRule -Value '# Linked project Claude rule'
+            Invoke-CleanupTestGit -Repository $linkedRoot -Arguments @('add','-f','--',$linkedProjectRule)|Out-Null
+            Invoke-CleanupTestGit -Repository $linkedRoot -Arguments @('commit','--quiet','-m','track linked project Claude rule')|Out-Null
+            $linkedClaudeBytes=[IO.File]::ReadAllBytes($linkedClaude)
+            $linkedRuleBytes=[IO.File]::ReadAllBytes($linkedProjectRule)
+
+            $result=Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+
+            $result.ExitCode|Should Be 0
+            $deleted=@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only','--diff-filter=D'))
+            ($deleted-contains$ruleRelative)|Should Be $true
+            [IO.File]::ReadAllBytes($rulePath)|Should Be $ruleBefore
+            [IO.File]::ReadAllBytes($linkedClaude)|Should Be $linkedClaudeBytes
+            [IO.File]::ReadAllBytes($linkedProjectRule)|Should Be $linkedRuleBytes
+            $exclude=[IO.File]::ReadAllText((Join-Path $targetRoot '.git/info/exclude'))
+            $exclude|Should Not Match '(?m)^/CLAUDE\.md$'
+            $exclude|Should Not Match '(?m)^/\.claude/'
+            (@(Invoke-CleanupTestGit -Repository $linkedRoot -Arguments @('status','--porcelain=v1','--untracked-files=all','--','CLAUDE.md'))-join"`n")|Should Match '^\?\? CLAUDE\.md$'
+        }
+        finally{Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot)|Out-Null}
+    }
+
+    # Scenario: Cleanup finalization fails after linked worktree B caused repository-wide Claude protection during shared-exclude composition.
+    # Purpose: Restore the original exclude bytes, including unrelated Codex and Copilot lines, without treating protected prefixes as managed paths.
+    It 'InterT86_restores_complete_exclude_bytes_after_cleanup_failure_with_linked_Claude_protection' {
+        $targetRoot=Join-Path $TestDrive 'linked-Claude-exclude-rollback-a'
+        New-PollutedTestRepository -Path $targetRoot
+        $linkedRoot=Join-Path $TestDrive 'linked-Claude-exclude-rollback-b'
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('worktree','add','--quiet','-b','linked-Claude-exclude-rollback-fixture',$linkedRoot)|Out-Null
+        try{
+            Set-CleanupTestText -Path (Join-Path $linkedRoot 'CLAUDE.md') -Value '# Linked project Claude'
+            $excludePath=Join-Path $targetRoot '.git/info/exclude'
+            $originalExclude="# personal prefix`r`n# BEGIN Codex AI Instructions managed paths`r`n/AGENTS.md`r`n/.github/copilot-instructions.md`r`n# END Codex AI Instructions managed paths`r`n"
+            [IO.File]::WriteAllText($excludePath,$originalExclude,[Text.UTF8Encoding]::new($false))
+            $excludeBefore=[IO.File]::ReadAllBytes($excludePath)
+            $wrapperRoot=Join-Path $TestDrive 'cleanup-linked-Claude-failure-wrapper'
+            New-Item -ItemType Directory -Path $wrapperRoot|Out-Null
+            $realGit=(Get-Command git.exe).Source
+            $findString=Join-Path $env:SystemRoot 'System32/findstr.exe'
+            $gitWrapperPath=Join-Path $wrapperRoot 'git.cmd'
+            $appliedExcludePath=Join-Path $wrapperRoot 'exclude-after-mutation.bin'
+            $gitWrapper=@"
+@echo off
+echo %* | "$findString" /C:"diff --cached --name-status -- AGENTS.md" >nul
+if errorlevel 1 goto forward
+copy /b "$excludePath" "$appliedExcludePath" >nul
+if errorlevel 1 exit /b 87
+exit /b 88
+:forward
+"$realGit" %*
+exit /b %errorlevel%
+"@
+            Set-CleanupTestText -Path $gitWrapperPath -Value $gitWrapper
+
+            $result=Invoke-CleanupScript -TargetRoot $targetRoot -Authorize -GitExecutable $gitWrapperPath
+
+            $result.ExitCode|Should Not Be 0
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($appliedExcludePath))|Should Not Be ([Convert]::ToBase64String($excludeBefore))
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))|Should Be ([Convert]::ToBase64String($excludeBefore))
+            $restoredExclude=[IO.File]::ReadAllText($excludePath).Replace("`r`n","`n").Replace("`r","`n")
+            $restoredExclude|Should Match '(?m)^/AGENTS\.md$'
+            $restoredExclude|Should Match '(?m)^/\.github/copilot-instructions\.md$'
+            @(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only')).Count|Should Be 0
+        }
+        finally{Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot)|Out-Null}
     }
 }

@@ -22,9 +22,10 @@
     "stableId": { "type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$" },
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "repositoryPath": { "type": "string", "minLength": 1, "pattern": "^(?:(?!\\.{1,2}(?:/|$))(?!\\s*(?:/|$))[^/\\\\:\\u0000-\\u001F\\u007F-\\u009F]+)(?:/(?:(?!\\.{1,2}(?:/|$))(?!\\s*(?:/|$))[^/\\\\:\\u0000-\\u001F\\u007F-\\u009F]+))*$" },
-    "licenseTarget": { "type": "string", "pattern": "^\\.(?:codex|github)/ai-instructions-licenses/(?:[0-9a-f]{40}/)?(?:delivery\\.json|source/.+)$" },
+    "licenseTarget": { "type": "string", "pattern": "^\\.(?:codex|github|claude)/ai-instructions-licenses/(?:[0-9a-f]{40}/)?(?:delivery\\.json|source/.+)$" },
     "codexLicenseTarget": { "type": "string", "pattern": "^\\.codex/ai-instructions-licenses/(?:[0-9a-f]{40}/)?(?:delivery\\.json|source/.+)$" },
     "copilotLicenseTarget": { "type": "string", "pattern": "^\\.github/ai-instructions-licenses/(?:[0-9a-f]{40}/)?(?:delivery\\.json|source/.+)$" },
+    "claudeLicenseTarget": { "type": "string", "pattern": "^\\.claude/ai-instructions-licenses/[0-9a-f]{40}/(?:delivery\\.json|source/.+)$" },
     "file": {
       "type": "object",
       "additionalProperties": false,
@@ -39,7 +40,8 @@
         "sourceVersion": { "type": "string", "minLength": 1 },
         "sourcePath": { "$ref": "#/$defs/repositoryPath" },
         "rendererId": { "$ref": "#/$defs/stableId" },
-        "rendererSha256": { "$ref": "#/$defs/sha256" },
+        "rendererSha256": { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+        "retention": { "type": "string", "enum": ["legacy-preserved"] },
         "projectionId": { "type": "string", "enum": ["project-agents", "project-claude", "project-github"] },
         "targetPath": { "$ref": "#/$defs/repositoryPath" },
         "sha256": { "$ref": "#/$defs/sha256" }
@@ -60,7 +62,8 @@
             "sourceVersion": { "type": "string", "minLength": 1 },
             "sourcePath": { "$ref": "#/$defs/repositoryPath" },
             "rendererId": { "$ref": "#/$defs/stableId" },
-            "rendererSha256": { "$ref": "#/$defs/sha256" },
+            "rendererSha256": { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+            "retention": { "type": "string", "enum": ["legacy-preserved"] },
             "targetPath": {
               "oneOf": [
                 { "$ref": "#/$defs/licenseTarget" },
@@ -72,7 +75,26 @@
           "allOf": [
             { "if": { "properties": { "host": { "const": "codex" } } }, "then": { "properties": { "targetPath": { "oneOf": [{ "$ref": "#/$defs/codexLicenseTarget" }, { "type": "string", "pattern": "^(?:AGENTS\\.md|\\.codex/AI-Rules/[^/\\\\]+\\.en\\.md)$" }] } } } },
             { "if": { "properties": { "host": { "const": "copilot" } } }, "then": { "properties": { "targetPath": { "oneOf": [{ "$ref": "#/$defs/copilotLicenseTarget" }, { "type": "string", "pattern": "^(?:\\.github/copilot-instructions\\.md|\\.github/AI-Rules/[^/\\\\]+\\.en\\.md)$" }] } } } },
-            { "if": { "properties": { "host": { "const": "claude" } } }, "then": { "properties": { "targetPath": { "type": "string", "pattern": "^(?:CLAUDE\\.md|\\.claude/AI-Rules/[^/\\\\]+\\.en\\.md)$" } } } }
+            { "if": { "properties": { "host": { "const": "claude" } } }, "then": { "properties": { "targetPath": { "oneOf": [{ "$ref": "#/$defs/claudeLicenseTarget" }, { "type": "string", "pattern": "^(?:CLAUDE\\.md|\\.claude/AI-Rules/[^/\\\\]+\\.en\\.md)$" }] } } } },
+            {
+              "oneOf": [
+                {
+                  "required": ["retention"],
+                  "properties": {
+                    "rendererId": { "const": "legacy-unrendered" },
+                    "rendererSha256": { "type": "null" },
+                    "retention": { "const": "legacy-preserved" }
+                  }
+                },
+                {
+                  "not": { "required": ["retention"] },
+                  "properties": {
+                    "rendererId": { "allOf": [{ "$ref": "#/$defs/stableId" }, { "not": { "const": "legacy-unrendered" } }] },
+                    "rendererSha256": { "$ref": "#/$defs/sha256" }
+                  }
+                }
+              ]
+            }
           ]
         },
         {

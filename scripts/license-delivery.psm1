@@ -177,7 +177,7 @@ function Write-LicenseDeliveryPackage {
 
 function Test-InstructionLicenseDeliveryPath {
     param([string] $Path)
-    if ($Path -cnotmatch '^\.(codex|github)/ai-instructions-licenses/([0-9a-f]{40}/)?(delivery\.json|source/.+)$') { return $false }
+    if ($Path -cnotmatch '^\.(codex|github|claude)/ai-instructions-licenses/([0-9a-f]{40}/)?(delivery\.json|source/.+)$') { return $false }
     try { Assert-LicenseRelativePath $Path; return $true } catch { return $false }
 }
 
@@ -191,6 +191,7 @@ function Get-LicenseDeliveryOwner {
     if ($Path -cmatch '^\.agents/skills/([^/]+)/') { return "skill/$($Matches[1])" }
     if ($Path -ceq 'AGENTS.md' -or $Path.StartsWith('.codex/')) { return 'codex' }
     if ($Path.StartsWith('.github/')) { return 'copilot' }
+    if ($Path -ceq 'CLAUDE.md' -or $Path.StartsWith('.claude/')) { return 'claude' }
     return ''
 }
 
