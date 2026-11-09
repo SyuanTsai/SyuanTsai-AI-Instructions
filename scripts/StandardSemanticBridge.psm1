@@ -1201,7 +1201,7 @@ function Assert-StandardSemanticBridgePlatformRuntimeFile {
 function Initialize-StandardSemanticBridgePlatformRuntime {
     if ($null -ne (Get-Variable StandardSemanticBridgePlatformRuntimeBinding -Scope Script -ErrorAction SilentlyContinue)) { return }
 
-    $pin = 'ba6af8ecbd09de50b9a55c57e5fa919d959296469125c12412bdc8300af5df5c'
+    $pin = '548f45afb85da5631d8a6e765bdc62255b7564eb353214b74579f02246453f70'
     $manifestPath = Assert-StandardSemanticBridgePlatformRuntimeFile `
         -Path (Join-Path $PSScriptRoot 'platform-runtime.psd1') -Context 'Platform runtime manifest'
     if ((Get-StandardSemanticBridgePlatformRuntimeCanonicalHash -Path $manifestPath) -cne $pin) {
