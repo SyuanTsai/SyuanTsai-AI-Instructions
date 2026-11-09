@@ -183,12 +183,16 @@ function Test-InstructionLicenseDeliveryPath {
 
 function Test-LicenseDeliveryTargetPath {
     param([string] $Path)
-    return (Test-InstructionLicenseDeliveryPath $Path) -or $Path -cmatch '^\.agents/skills/[^/]+/\.ai-instructions-licenses/'
+    return (Test-InstructionLicenseDeliveryPath $Path) -or
+        $Path -cmatch '^\.(agents|claude|github)/skills/[^/]+/\.ai-instructions-licenses/'
 }
 
 function Get-LicenseDeliveryOwner {
     param([string] $Path)
-    if ($Path -cmatch '^\.agents/skills/([^/]+)/') { return "skill/$($Matches[1])" }
+    if ($Path -cmatch '^\.(agents|claude|github)/skills/([^/]+)/') {
+        $projectionId = switch ($Matches[1]) { 'agents' { 'project-agents' } 'claude' { 'project-claude' } 'github' { 'project-github' } }
+        return "skill/$projectionId/$($Matches[2])"
+    }
     if ($Path -ceq 'AGENTS.md' -or $Path.StartsWith('.codex/')) { return 'codex' }
     if ($Path.StartsWith('.github/')) { return 'copilot' }
     if ($Path -ceq 'CLAUDE.md' -or $Path.StartsWith('.claude/')) { return 'claude' }

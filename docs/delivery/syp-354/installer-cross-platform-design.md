@@ -128,7 +128,7 @@ Linux leased exec 仍使用 `/proc/self/fd/3`；`posix_spawn` 的 dup2 action �
 | USER shared Skills | `~/.agents/skills/<skill-id>` | Codex／Copilot 共用，維持現有管理位置 |
 | USER Claude | `~/.claude/skills/<skill-id>` | 與 shared Skills 由同一 source pin／inventory 產生實體 copy |
 | USER optional Copilot | `~/.copilot/skills/<skill-id>` | 預設不額外複製；明確 opt-in 並驗證 host discovery／重複載入問題 |
-| Project opt-in | `.agents/skills/<skill-id>`、`.claude/skills/<skill-id>`、`.github/skills/<skill-id>` | 支援全部 roots 的 versioned projection；不變更 project-owned/tracked Skills，不作 USER fallback |
+| Project opt-in | `.agents/skills/<skill-id>`、`.claude/skills/<skill-id>`、`.github/skills/<skill-id>` | 支援全部 roots 的 versioned projection；`projections.project` 是全域 opt-in，會套用到所有未排除的 consumer Repository；不變更 project-owned/tracked Skills，不作 USER fallback。逐 Repository 授權契約另案處理 |
 | USER Instructions | 既有 `CODEX_HOME/AGENTS.md` bootstrap section；擬新增 `~/.claude/CLAUDE.md` managed section | 共通規範同源，保留個人 section；Copilot USER Instructions discovery 尚未驗證，不另發明全域檔名 |
 | REPO Instructions | `AGENTS.md`、`.github/copilot-instructions.md`、新增 `CLAUDE.md`，及其生成 rule paths | 相同 canonical revision 產生，追蹤來源與 output hash；依 host adapter 載入條件式規則 |
 

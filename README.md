@@ -9,7 +9,7 @@
 **How it works**
 - One common instruction source generates the Codex, GitHub Copilot and Claude variants, so the three tools follow the same rules.
 - The Skills catalog points to separate Skill repositories ([Skill-General](https://github.com/SyuanTsai/Skill-General), Skill-Atlassian-Ecosystem, Skill-Code-Collaboration, Skill-Knowledge-Content) and locks each one to a commit SHA and content hash.
-- A bootstrap fans the instruction files out into product repositories, while shared Skills are installed once per user under `~/.agents/skills` by a separate updater rather than copied into each repository; updates are checked and reported, not silently auto-installed.
+- A bootstrap fans the instruction files out into product repositories. Shared Skills are installed once per user under `~/.agents/skills` by default; a verified v3/v5 runtime may additionally project them into explicitly selected project roots. That project selection is global and applies to every consumer repository not covered by an exclusion. Updates are checked and reported, not silently auto-installed.
 - CI validates contracts and runs security scanning on Skills before anything is published.
 
 **Who it's for:** engineers who want repeatable, reviewable AI-assisted workflows. Local tooling is Windows-only (see below).
@@ -23,7 +23,7 @@
 **運作方式**
 - 由同一份共用指令產生 Codex、GitHub Copilot、Claude 三種版本，三個工具遵循相同規則。
 - Skills 目錄指向獨立的 Skill Repository（[Skill-General](https://github.com/SyuanTsai/Skill-General)、Skill-Atlassian-Ecosystem、Skill-Code-Collaboration、Skill-Knowledge-Content），並以 commit SHA 與內容雜湊鎖定版本。
-- bootstrap 將指令檔分發到各產品 Repository；共用 Skills 則由獨立的 updater 安裝在使用者層級的 `~/.agents/skills`，不會複製到每個 Repository；有新版本時只檢查並通知，不會自動悄悄安裝。
+- bootstrap 將指令檔分發到各產品 Repository；共用 Skills 預設由獨立 updater 安裝在使用者層級的 `~/.agents/skills`。通過驗證的 v3/v5 runtime 可再把 Skills 投影到明確選取的 project roots；這是全域 opt-in，會套用到所有未排除的 consumer Repository。有新版本時只檢查並通知，不會自動悄悄安裝。
 - 發布前由 CI 驗證契約，並對 Skills 執行安全掃描。
 
 **適用對象：** 想要可重複、可審查的 AI 輔助開發流程的工程師。本機工具僅支援 Windows（詳見下方）。
@@ -34,7 +34,7 @@
 
 本 Repository 與採用其共用 AI-Instructions／Skills runtime 的消費 Repository，其本機 Agent 開發、安裝、執行、驗證、測試、acceptance 與 CI host 僅支援 Windows；Linux、macOS 與 WSL 不支援。此限制不涵蓋下游產品的 target／deployment OS，也不限制核准 connector 背後遠端 SaaS 的服務 OS。
 
-目前 runtime 採用 branch-independent 的個人本機 artifacts 模型：fan-out 到產品 Repository 的 `AGENTS.md`、`.codex/AI-Rules/**`、GitHub Copilot Instructions 與 manifest 會存在 working tree、套用於所有 branch，但由 `.git/info/exclude` 排除。一般同步不會替產品 Repository stage 或 commit；只有偵測到歷史上已 tracked 的 reserved Agent artifacts 時，會建立一次性的隔離本機 remediation commit。Bootstrap 永遠不會 push 產品 Repository。共用 Catalog Skills 只由 USER updater 安裝／更新至 `~/.agents/skills/**`；USER 缺少或不可用也不回退 REPO。專案自有 Skills 保留。
+目前 runtime 採用 branch-independent 的個人本機 artifacts 模型：fan-out 到產品 Repository 的 `AGENTS.md`、`.codex/AI-Rules/**`、GitHub Copilot Instructions 與 manifest 會存在 working tree、套用於所有 branch，但由 `.git/info/exclude` 排除。一般同步不會替產品 Repository stage 或 commit；只有偵測到歷史上已 tracked 的 reserved Agent artifacts 時，會建立一次性的隔離本機 remediation commit。Bootstrap 永遠不會 push 產品 Repository。共用 Catalog Skills 預設只由 USER updater 安裝／更新至 `~/.agents/skills/**`；USER 缺少或不可用也不回退 REPO。只有通過 v3/v5 gate 且 `projections.project` 明確非空時，project-scope durable transaction 才會從同一 immutable Catalog source 寫入 `.agents/skills/**`、`.claude/skills/**` 或 `.github/skills/**`。這個設定是全域 opt-in，會套用到所有未排除的 consumer Repository；專案自有 Skills 永遠保留。
 
 ## Production 契約
 
@@ -85,7 +85,7 @@ SkillSpector 的 analyzer coverage 不完整時，canonical Stage 4 仍維持 `F
 1. 驗證 installed config v4、runtime bundle v2、所有 runtime bytes、Catalog 與 Lock。
 2. 依更新 policy 檢查 canonical protected `main` 或 latest GitHub release；預設只通知，不自動安裝。
 3. 依 Catalog selection 解析 external Skills，只取得 lock 中的 immutable commits，驗證 archive 與每個 Skill content inventory。
-4. 將 Codex、GitHub Copilot Instructions 組成已驗證 archive，再交給 mutation engine；選中的 Skills 只提供可信 USER inventory 核對，不加入 consumer desired set。
+4. 將 Codex、GitHub Copilot 與 Claude Instructions 組成已驗證 archive，再交給 mutation engine；預設時選中的 Skills 只提供可信 USER inventory 核對。只有通過 v3/v5 gate 且全域 `projections.project` 非空時，multisource 才另外建立 lock-bound project candidate，交由 project-scope durable transaction 套用至所有未排除的 consumer Repository。
 5. 在 common Git directory 的 repository operation lock 內先辨識 reserved tracked Agent artifacts。若存在，於 Repository 外保存 HEAD、branch、完整 active index、status、diff、檔案 bytes 與 SHA-256 inventory；加入精確 `info/exclude` 規則，以 task-scoped identity 建立只含 reserved path deletions 的 `chore: stop tracking local AI instructions` 本機 commit，再依最新來源替換精確 runtime files。無 remote、缺少永久 Git identity 或 detached HEAD 都可安全完成；detached HEAD 會建立 `codex/ai-instructions-remediation-*` 本機 branch。任何後續同步失敗會以 applied-state CAS 還原 HEAD、index、檔案與 exclude snapshot；若外部程序已變更其中狀態則保留外部內容並回報 backup，且 consumer commit 永不自動 push。
 6. Mutation engine 依 manifest hash 更新未被自訂的檔案、建立新檔、移除來源已刪除且未被修改的檔案。既有 target／manifest 會以 target-root directory handle 的 final path 加上安全 relative path 核對實際 mutation handle，並拒絕 reparse file 與多重 hard-link alias；寫入在同一 deny-write/delete handle 驗證 snapshot original bytes、寫入並保存 applied bytes。新檔建立會從 target root 起逐層持有可阻擋 rename 的 parent handles，建立後再核對 file handle identity，因此 parent-junction swap 不能把 create 導向 root 外。受管檔案移除同樣在 handle-bound root confinement 內驗證 bytes，再由該 handle 設定 delete disposition，關閉後才完成刪除，不留下 verify-to-delete 或 stale-precheck path-swap 窗口。Exact-hash read-only 檔案會在 handle-bound transaction 內暫時清除 attribute；guard handle 保持開啟，且重開的 write handle 必須具有相同 volume/file ID，寫入後恢復 attribute，delete disposition 失敗時也先恢復。Rollback 只處理本交易確實變更且 current state 仍等於 applied state 的路徑；父目錄只在能以 volume/file ID 證明由本交易建立時才會刪除。
 7. Bootstrap 另取得 active worktree 原生 `index.lock`，從 tracked/staged preflight 持有到 target、exclude 與 recovery evidence finalization 完成，使外部 staging 無法在成功交易中途插入。它先驗證 `info/exclude` 的完整 parent chain 都是 common Git metadata 內的 non-reparse directory，再以單一 exclusive read-modify-write handle 將所有 live worktree manifest 的精確受管路徑聯集寫入 managed marker block；manifest/config 固定以 UTF-8 讀取，Git C-quoted path 也以 strict UTF-8 bytes 解碼，因此 Unicode Skill resource 不受 Windows code page 影響。最後以不修改 active working tree/index 的 Git plumbing 建立 branch-neutral `PersonalAgent` recovery stash，並再次驗證 bytes 與 stash tree。
@@ -96,7 +96,7 @@ SkillSpector 的 analyzer coverage 不完整時，canonical Stage 4 仍維持 `F
 - `.codex/AI-Rules/*.en.md` → `.codex/AI-Rules/*.en.md`
 - `.github/copilot-instructions.en.md` → `.github/copilot-instructions.md`
 - `.github/AI-Rules/*.en.md` → `.github/AI-Rules/*.en.md`
-- external `skills/<skill-id>/**`（或 legacy source）→ USER `~/.agents/skills/<skill-id>/**`，只由 USER updater 套用。
+- external `skills/<skill-id>/**`（或 legacy source）→ USER `~/.agents/skills/<skill-id>/**`，預設只由 USER updater 套用；明確啟用全域 project projections 時，另由已驗證 project transaction 投影到每個未排除 consumer Repository 的選定 root。
 
 `ai-instructions-contract.json` 只用於維護來源的 inventory、locale／platform parity、route、trigger 與 safety invariant regression，不會 fan out。GitHub Copilot 的 `.github/AI-Rules/**` 是由 Base Instructions 依任務明確要求讀取的條件式模組，不是 `.github/instructions/**/*.instructions.md` 的 path-specific 自動載入檔；不得以 `applyTo: "**"` 將所有模組無條件注入。不同 Copilot surface 對 Base 指示讀取其他 Repository 檔案的能力可能不同，導入新 surface 時應依 [GitHub Copilot custom instructions](https://docs.github.com/copilot/customizing-copilot/adding-custom-instructions-for-github-copilot) 驗證 References／instructions inventory，且跨 surface 必須生效的最小安全邊界應保留在 Base。
 

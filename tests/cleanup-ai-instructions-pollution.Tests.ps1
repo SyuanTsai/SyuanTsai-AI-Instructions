@@ -1228,4 +1228,35 @@ exit /b %errorlevel%
         }
         finally{Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('worktree','remove','--force',$linkedRoot)|Out-Null}
     }
+
+    # Scenario: A validated v4 manifest includes identical raw Skill payloads in Claude and GitHub project roots.
+    # Purpose: Accept all approved project Skill roots while permanently excluding artifactType=skill from pollution deletion.
+    It 'InterT88_reads_project_Skill_roots_without_staging_their_deletion' {
+        $targetRoot=Join-Path $TestDrive 'v4-project-skills-cleanup'
+        New-PollutedTestRepository -Path $targetRoot
+        $skillPaths=@('.claude/skills/example-skill/SKILL.md','.github/skills/example-skill/SKILL.md')
+        foreach($relative in $skillPaths){Set-CleanupTestText -Path (Join-Path $targetRoot $relative) -Value '# Project Skill'}
+        $skillHash=(Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $targetRoot $skillPaths[0])).Hash.ToLowerInvariant()
+        $manifestPath=Join-Path $targetRoot $script:ManifestRelativePath
+        $legacy=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+        $codex=$legacy.files[0]
+        $codex|Add-Member -NotePropertyName host -NotePropertyValue codex
+        $codex|Add-Member -NotePropertyName rendererId -NotePropertyValue build-ai-instructions
+        $codex|Add-Member -NotePropertyName rendererSha256 -NotePropertyValue ('e'*64)
+        $skills=@(
+            [pscustomobject][ordered]@{artifactType='skill';artifactId='example-skill';sourceId='skill-source';sourceRepository='https://example.com/skills.git';sourceRef=('c'*40);sourceCommit=('c'*40);sourceVersion='commit@cccccccc';sourcePath='skills/example-skill/SKILL.md';targetPath=$skillPaths[0];sha256=$skillHash;projectionId='project-claude'},
+            [pscustomobject][ordered]@{artifactType='skill';artifactId='example-skill';sourceId='skill-source';sourceRepository='https://example.com/skills.git';sourceRef=('c'*40);sourceCommit=('c'*40);sourceVersion='commit@cccccccc';sourcePath='skills/example-skill/SKILL.md';targetPath=$skillPaths[1];sha256=$skillHash;projectionId='project-github'}
+        )
+        $manifest=[ordered]@{schemaVersion=4;catalogId=[string]$legacy.catalogId;lockSha256=[string]$legacy.lockSha256;projectionContractSha256=('f'*64);generation=1;projections=@('project-claude','project-github');files=@($codex)+$skills}
+        Set-CleanupTestText -Path $manifestPath -Value (($manifest|ConvertTo-Json -Depth 20).Replace("`r`n","`n").TrimEnd())
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments (@('add','--',$script:ManifestRelativePath)+$skillPaths)|Out-Null
+        Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('commit','--quiet','-m','v4 project Skills pollution fixture')|Out-Null
+        $before=@{};foreach($relative in $skillPaths){$before[$relative]=[Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot $relative)))}
+
+        $result=Invoke-CleanupScript -TargetRoot $targetRoot -Authorize
+
+        $result.ExitCode|Should Be 0
+        $deleted=@(Invoke-CleanupTestGit -Repository $targetRoot -Arguments @('diff','--cached','--name-only','--diff-filter=D'))
+        foreach($relative in $skillPaths){($deleted-contains$relative)|Should Be $false;[Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $targetRoot $relative)))|Should Be $before[$relative]}
+    }
 }

@@ -92,10 +92,19 @@ Describe 'AI instructions all-repository rollout' {
         $manifestPath=Join-Path $repository '.codex/ai-instructions.manifest.json'
         Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/managed-manifest-v4.example.json') -Destination $manifestPath
         $manifest=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+        $skillEntry=@($manifest.files|Where-Object artifactType -eq 'skill')[0]
+        $skillPath=Join-Path $repository ([string]$skillEntry.targetPath)
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $skillPath)|Out-Null
+        [IO.File]::WriteAllBytes($skillPath,[byte[]]@(0,10,13,128,255))
+        $skillEntry.sha256=(Get-FileHash -LiteralPath $skillPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        Set-RolloutTestText -Path $manifestPath -Value (($manifest|ConvertTo-Json -Depth 20).Replace("`r`n","`n").TrimEnd())
         $expectedLock=[string]$manifest.lockSha256
         $fixtureModule=Import-Module (Join-Path $scriptRoot 'ai-instructions-rollout.psm1') -Force -PassThru
         try{
             (& $fixtureModule {param($repo,$lock) Test-RolloutManifestCurrent -Repository $repo -ExpectedLockSha256 $lock} $repository $expectedLock)|Should Be $true
+            [IO.File]::WriteAllBytes($skillPath,[byte[]]@(1,2,3))
+            (& $fixtureModule {param($repo,$lock) Test-RolloutManifestCurrent -Repository $repo -ExpectedLockSha256 $lock} $repository $expectedLock)|Should Be $false
+            [IO.File]::WriteAllBytes($skillPath,[byte[]]@(0,10,13,128,255))
             (& $fixtureModule {param($repo) Test-RolloutManifestCurrent -Repository $repo -ExpectedLockSha256 ('0'*64)} $repository)|Should Be $false
             $manifest.projectionContractSha256='0'*64
             Set-RolloutTestText -Path $manifestPath -Value (($manifest|ConvertTo-Json -Depth 20).Replace("`r`n","`n").TrimEnd())
