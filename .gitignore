@@ -97,3 +97,6 @@ x86/
 
 # Built Visual Studio Code Extensions
 *.vsix
+# Python bytecode
+__pycache__/
+*.py[cod]
