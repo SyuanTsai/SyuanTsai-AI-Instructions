@@ -195,6 +195,32 @@ Describe 'Static parser coverage and finding preservation' {
         Assert-ParserRejected {Get-StaticApprovedSkillSpectorEntry -Receipt $receipt -ApprovedSources $approved -ExpectedResolutionRunId $runId | Out-Null}
     }
 
+    # Scenario: StaticScan loads the resolver registry before later calling a resolver closure-identity function.
+    # Purpose: Keep resolver functions in the StaticScan script scope after approved-source loading completes.
+    It 'UnitT55_keeps_resolver_functions_available_after_loading_approved_sources' {
+        $resolverLoad=@($parserAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.CommandAst] -and
+                $node.InvocationOperator -eq [Management.Automation.Language.TokenKind]::Dot -and
+                $node.Extent.Text -match '(?i)-ValidatePolicyOnly'
+        },$true))
+        Assert-ParserCase ($resolverLoad.Count -eq 1) 'StaticScan must dot-source the resolver exactly once.'
+
+        $loadScriptBlock=$resolverLoad[0]
+        while($null -ne $loadScriptBlock -and $loadScriptBlock -isnot [Management.Automation.Language.ScriptBlockAst]){
+            $loadScriptBlock=$loadScriptBlock.Parent
+        }
+        Assert-ParserCase ([object]::ReferenceEquals($loadScriptBlock,$parserAst)) 'StaticScan loads the resolver in a child scope, so later resolver calls cannot resolve.'
+
+        $closureCalls=@($parserAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -ceq 'Get-DirectoryClosureIdentity'
+        },$true))
+        Assert-ParserCase ($closureCalls.Count -eq 2) 'StaticScan must verify the installed closure before and after scanner execution.'
+        Assert-ParserCase (@($closureCalls | Where-Object {$_.Extent.StartOffset -le $resolverLoad[0].Extent.EndOffset}).Count -eq 0) 'StaticScan calls a resolver function before loading the resolver.'
+    }
+
     # Scenario: a scan output is outside its Skill but still inside another part of the frozen candidate.
     # Purpose: forbid writes to the entire bound source and both tooling roots while accepting a separate artifact sibling.
     It 'UnitT46_forbids_outputs_inside_any_bound_source_or_tool_root' {

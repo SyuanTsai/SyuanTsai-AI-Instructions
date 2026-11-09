@@ -213,11 +213,8 @@ try {
         $frozenAuthority[$relative]=Static-Hash $frozenPath
     }
     $approvedSourcesPath=Join-Path $authorityRoot 'docs/standards/skillspector-approved-sources.json'
-    $approvedSources=& {
-        param([string]$ResolverPath,[string]$RegistryPath)
-        . $ResolverPath -ValidatePolicyOnly | Out-Null
-        Get-SkillSpectorApprovedSources -Path $RegistryPath
-    } (Join-Path $PSScriptRoot 'Resolve-StandardValidationTool.ps1') $approvedSourcesPath
+    . (Join-Path $PSScriptRoot 'Resolve-StandardValidationTool.ps1') -ValidatePolicyOnly | Out-Null
+    $approvedSources=Get-SkillSpectorApprovedSources -Path $approvedSourcesPath
     $receipt=Read-StaticFrozenReceipt -Path $receiptFull -ExpectedSha256 $ExpectedToolReceiptSha256
     $approvedEntry=Get-StaticApprovedSkillSpectorEntry -Receipt $receipt -ApprovedSources $approvedSources -ExpectedResolutionRunId $ExpectedResolutionRunId
     $receiptApprovedSourceId=[string]$receipt.approvedSourceId
