@@ -742,7 +742,7 @@ function New-AiInstructionFixture {
                 $text | Should Match 'projections\.project'
                 $text | Should Match '(?i)runtime bundle v3.*sync (?:configuration|config) v5'
                 $text | Should Match '(?i)project-scope durable transaction'
-                if ([string]$locale.id -ceq 'zh-tw') {
+                if ([string]$locale.id -ieq 'zh-TW') {
                     $text | Should Match '唯一例外'
                     $text | Should Match '不得因 USER Skill 缺少、較舊、損壞或不可讀而觸發例外'
                     $text | Should Match '不得以 USER 或既有 REPO 副本為來源'
@@ -757,6 +757,11 @@ function New-AiInstructionFixture {
                 Assert-Throws -Action { Assert-OrdinalStringSet -Actual @(Get-AiInvariantIds -Text $withoutRule) -Expected $expected -Context 'removed USER-only rule' } -Context 'missing USER-only invariant'
             }
         }
+        $maintenanceInstructions = Get-AiInstructionText -Path (Get-ContractFullPath -RelativePath 'AGENTS.md')
+        $maintenanceInstructions | Should Match 'instructions/common/base\.md'
+        $maintenanceInstructions | Should Match 'instructions/common/base\.en\.md'
+        $maintenanceInstructions | Should Match 'base\.shared-skills-user-only'
+        $maintenanceInstructions | Should Not Match 'consumer bootstrap 不安裝／更新／重建共用 Skills'
     }
 
     # Scenario: A common rule changes on only one platform while each localized pair remains present.
