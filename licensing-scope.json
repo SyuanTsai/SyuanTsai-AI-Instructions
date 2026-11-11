@@ -1386,6 +1386,14 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "tests/golden/pr8-powershell-validation.yml.golden",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/golden/syp101-production-smoke.yml.golden",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "tests/Initialize-SourceGateFixture.ps1",
       "license": "Apache-2.0"
     },

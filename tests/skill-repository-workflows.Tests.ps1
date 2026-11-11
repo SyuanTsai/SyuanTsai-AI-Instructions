@@ -304,316 +304,63 @@ Describe 'Agent Skill authority workflow contract' {
             [IO.File]::WriteAllText($fullPath, $Text, (New-Object Text.UTF8Encoding($false)))
         }
 
-        function Get-WorkflowIndentedBlock {
-            param(
-                [Parameter(Mandatory = $true)][string] $Text,
-                [Parameter(Mandatory = $true)][string] $StartPattern,
-                [Parameter(Mandatory = $true)][int] $Indent
-            )
-            $lines = $Text.Replace("`r`n", "`n").Replace("`r", "`n").Split("`n")
-            $starts = [Collections.Generic.List[int]]::new()
-            for ($index = 0; $index -lt $lines.Count; $index++) {
-                if ($lines[$index] -match $StartPattern) { $starts.Add($index) }
-            }
-            if ($starts.Count -ne 1) { throw "Workflow block '$StartPattern' must occur exactly once; found $($starts.Count)." }
-            $start = $starts[0]
-            $end = $lines.Count
-            for ($index = $start + 1; $index -lt $lines.Count; $index++) {
-                if ($lines[$index].Length -eq 0) { continue }
-                $leading = $lines[$index].Length - $lines[$index].TrimStart().Length
-                if ($leading -le $Indent) { $end = $index; break }
-            }
-            while ($end -gt ($start + 1) -and $lines[$end - 1].Length -eq 0) { $end-- }
-            return ($lines[$start..($end - 1)] -join "`n")
-        }
-
-        function Get-WindowsCoreWorkflowJobBlock {
-            param([string] $Text,[string] $JobId)
-            return Get-WorkflowIndentedBlock -Text $Text -StartPattern ('^  ' + [regex]::Escape($JobId) + ':$') -Indent 2
-        }
-
-        function Get-WindowsCoreWorkflowStepBlock {
-            param([string] $JobBlock,[string] $StepName)
-            return Get-WorkflowIndentedBlock -Text $JobBlock -StartPattern ('^      - name: ' + [regex]::Escape($StepName) + '$') -Indent 6
-        }
-
-        function Get-WorkflowBlockSha256 {
-            param([string] $Text)
-            $algorithm = [Security.Cryptography.SHA256]::Create()
-            try { return [Convert]::ToHexString($algorithm.ComputeHash([Text.UTF8Encoding]::new($false).GetBytes($Text))).ToLowerInvariant() }
-            finally { $algorithm.Dispose() }
-        }
-
         function ConvertTo-WorkflowLf {
-            param([string] $Text)
-            return $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+            param([Parameter(Mandatory = $true)][string] $Text)
+            return $Text.Replace("`r`n", "`n")
         }
 
-        $script:WindowsCoreJobHeaders = [ordered]@{
-            plan = @'
-  plan:
-    name: Windows Core plan
-    runs-on: windows-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    outputs:
-      matrix: ${{ steps.plan.outputs.matrix }}
-      planSha256: ${{ steps.plan.outputs.planSha256 }}
-    steps:
-'@.TrimEnd()
-            authority = @'
-  authority:
-    name: Windows Core authority
-    needs: plan
-    runs-on: windows-latest
-    timeout-minutes: 60
-    permissions:
-      contents: read
-    steps:
-'@.TrimEnd()
-            pester = @'
-  pester:
-    name: Windows Core shard ${{ matrix.id }}
-    needs: plan
-    runs-on: windows-latest
-    timeout-minutes: 75
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
-    steps:
-'@.TrimEnd()
-            fixtures = @'
-  fixtures:
-    name: Windows Core fixtures
-    needs: plan
-    runs-on: windows-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps:
-'@.TrimEnd()
+        function Assert-WorkflowMatchesGolden {
+            param(
+                [Parameter(Mandatory = $true)][string] $WorkflowText,
+                [Parameter(Mandatory = $true)][string] $GoldenText,
+                [Parameter(Mandatory = $true)][string] $Context
+            )
+
+            $actual = ConvertTo-WorkflowLf $WorkflowText
+            $expected = ConvertTo-WorkflowLf $GoldenText
+            if ($actual -ceq $expected) { return }
+
+            $actualLines = $actual.Split([string[]]@("`n"), [StringSplitOptions]::None)
+            $expectedLines = $expected.Split([string[]]@("`n"), [StringSplitOptions]::None)
+            $lineCount = [Math]::Max($actualLines.Count, $expectedLines.Count)
+            for ($index = 0; $index -lt $lineCount; $index++) {
+                $actualLine = if ($index -lt $actualLines.Count) { "'$($actualLines[$index])'" } else { '<end-of-file>' }
+                $expectedLine = if ($index -lt $expectedLines.Count) { "'$($expectedLines[$index])'" } else { '<end-of-file>' }
+                if ($actualLine -cne $expectedLine) {
+                    throw "$Context differs from its complete-file golden at line $($index + 1). Expected: $expectedLine Actual: $actualLine"
+                }
+            }
+            throw "$Context differs from its complete-file golden."
         }
-        $script:WindowsCoreStepHashes = [ordered]@{
-            plan = [ordered]@{
-                'Checkout' = 'a960680c2b7a8c3ef9a73d7241b0775881118a7237cfd93c5d2fdc50922ca76b'
-                'Restore verified PowerShell archive cache' = 'ea953105e06e55782c110c86621e7102ab3b370357e9df2ed4ea0bb418b754df'
-                'Install verified latest stable PowerShell' = '408d3e26305b99f60a0239d6f61a022b0f3d8acec0eac230809c5f1f10291b3a'
-                'Verify the selected PowerShell runtime' = 'bcb53f4ffa11f7ff96abbf80ffea7bb840cb8913ff1f0d1f36d1bedefe764bf7'
-                'Ensure Pester 4.10.1' = 'dccab939c447c634681f8de194ead9d8ef65c21f2f3630e016672cc9f6469f56'
-                'Calculate the Windows Core plan' = '8aefdd95f367390f4f57dbf5bd19d531ceb1b89a13032031c0d3403d06f17b0c'
-                'Upload Windows Core plan' = '0a956d5b673870156727e2a64608f463fbff132d44857c2533d61797fea402c6'
-            }
-            authority = [ordered]@{
-                'Checkout' = 'a960680c2b7a8c3ef9a73d7241b0775881118a7237cfd93c5d2fdc50922ca76b'
-                'Restore verified PowerShell archive cache' = 'ea953105e06e55782c110c86621e7102ab3b370357e9df2ed4ea0bb418b754df'
-                'Install verified latest stable PowerShell' = '408d3e26305b99f60a0239d6f61a022b0f3d8acec0eac230809c5f1f10291b3a'
-                'Verify the selected PowerShell runtime' = 'bcb53f4ffa11f7ff96abbf80ffea7bb840cb8913ff1f0d1f36d1bedefe764bf7'
-                'Ensure Pester 4.10.1' = 'dccab939c447c634681f8de194ead9d8ef65c21f2f3630e016672cc9f6469f56'
-                'Parse all PowerShell files' = '1c64e278d236481fabbac60bf28b9f86eb320b2e3dddae512c3a65518caf2204'
-                'Check whitespace in the event range' = '72cc9da30eb1dd1dd4c34395f54907ab691cedf077a25e16b267dede987d9d6a'
-                'Run the Standard v1 authority gate' = 'f89612f591f43ee7927099af98902f114bab2a5cd3b26037b77a5047fd5beeac'
-                'Upload Windows Core authority evidence' = '7630b08af34e5c95e9fc0f5b41f98166f7ec2d125e17cf959dda8bc7b9dcfa49'
-            }
-            pester = [ordered]@{
-                'Checkout' = 'a960680c2b7a8c3ef9a73d7241b0775881118a7237cfd93c5d2fdc50922ca76b'
-                'Restore verified PowerShell archive cache' = 'ea953105e06e55782c110c86621e7102ab3b370357e9df2ed4ea0bb418b754df'
-                'Install verified latest stable PowerShell' = '408d3e26305b99f60a0239d6f61a022b0f3d8acec0eac230809c5f1f10291b3a'
-                'Verify the selected PowerShell runtime' = 'bcb53f4ffa11f7ff96abbf80ffea7bb840cb8913ff1f0d1f36d1bedefe764bf7'
-                'Ensure Pester 4.10.1' = 'dccab939c447c634681f8de194ead9d8ef65c21f2f3630e016672cc9f6469f56'
-                'Run the planned non-authority Pester shard' = 'd65e25e317e3643341a321e6921d60a9820569e414c98b9fd3fe6376949cc940'
-                'Upload Windows Core shard evidence' = 'addb34125b24ed7e73250fcabe1647620e24345a0e17c0830bcb8491877c82c4'
-            }
-            fixtures = [ordered]@{
-                'Checkout' = 'a960680c2b7a8c3ef9a73d7241b0775881118a7237cfd93c5d2fdc50922ca76b'
-                'Restore verified PowerShell archive cache' = 'ea953105e06e55782c110c86621e7102ab3b370357e9df2ed4ea0bb418b754df'
-                'Install verified latest stable PowerShell' = '408d3e26305b99f60a0239d6f61a022b0f3d8acec0eac230809c5f1f10291b3a'
-                'Verify the selected PowerShell runtime' = 'bcb53f4ffa11f7ff96abbf80ffea7bb840cb8913ff1f0d1f36d1bedefe764bf7'
-                'Ensure Pester 4.10.1' = 'dccab939c447c634681f8de194ead9d8ef65c21f2f3630e016672cc9f6469f56'
-                'Run isolated SYP-214 fixture evidence child' = '24974e37e94f19a6854b3886ef7bbc0dc971786090de42a57e4515aa857ab692'
-                'Run offline routine semantic fixtures once' = 'd7c5d03d3f09e764231b554adde3210f82a82e2e0ccf6196d2908baf03af57d4'
-                'Upload Windows Core fixture evidence' = 'e2a5d44184df248c2269e9d917cd37d46b936a2e4d793aad1a56bdc9ba75a0dd'
-            }
-        }
-        $script:WindowsCoreAggregateGolden = @'
-  windows-core:
-    name: Windows Core
-    needs: [plan, authority, pester, fixtures]
-    if: always()
-    runs-on: windows-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
 
-      - name: Restore verified PowerShell archive cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/pwsh-cache/PowerShell-7.6.6-win-x64.zip
-          key: pwsh-zip-${{ runner.os }}-7.6.6-02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860
-
-      - name: Install verified latest stable PowerShell
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $version = '7.6.6'
-          $expectedSha256 = '02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860'
-          $archivePath = Join-Path $env:RUNNER_TEMP 'PowerShell-7.6.6-win-x64.zip'
-          $installDirectory = Join-Path $env:RUNNER_TEMP 'pwsh-7.6.6'
-          $cachePath = Join-Path $env:RUNNER_TEMP 'pwsh-cache/PowerShell-7.6.6-win-x64.zip'
-          $downloadUri = 'https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/PowerShell-7.6.6-win-x64.zip'
-          if ((Test-Path -LiteralPath $archivePath) -or (Test-Path -LiteralPath $installDirectory)) { throw 'PowerShell setup paths must be new within this job.' }
-          $cacheIsVerified = $false
-          if (Test-Path -LiteralPath $cachePath) {
-            $cacheItem = Get-Item -Force -LiteralPath $cachePath -ErrorAction Stop
-            if ($cacheItem.PSIsContainer -or ($cacheItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-              Remove-Item -LiteralPath $cachePath -Force
-            } else {
-              $cacheSha256 = (Get-FileHash -LiteralPath $cachePath -Algorithm SHA256).Hash.ToUpperInvariant()
-              if ($cacheSha256 -ceq $expectedSha256) {
-                Copy-Item -LiteralPath $cachePath -Destination $archivePath
-                $cacheIsVerified = $true
-              } else {
-                Remove-Item -LiteralPath $cachePath -Force
-              }
-            }
-          }
-          if (-not $cacheIsVerified) { Invoke-WebRequest -Uri $downloadUri -OutFile $archivePath }
-          $actualSha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToUpperInvariant()
-          if ($actualSha256 -cne $expectedSha256) { throw "PowerShell archive SHA256 mismatch: expected $expectedSha256, got $actualSha256." }
-          if (-not $cacheIsVerified) {
-            [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($cachePath)) | Out-Null
-            Copy-Item -LiteralPath $archivePath -Destination $cachePath
-          }
-          Expand-Archive -LiteralPath $archivePath -DestinationPath $installDirectory
-          $powerShellExe = Join-Path $installDirectory 'pwsh.exe'
-          if (-not (Test-Path -LiteralPath $powerShellExe -PathType Leaf)) { throw 'Verified PowerShell archive did not contain pwsh.exe.' }
-          $archiveRuntimeVersion = (& $powerShellExe -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')
-          if ($LASTEXITCODE -ne 0 -or ([string]$archiveRuntimeVersion).Trim() -cne $version) { throw "Verified archive launched unexpected PowerShell version '$archiveRuntimeVersion'." }
-          [IO.File]::AppendAllText($env:GITHUB_PATH, $installDirectory + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
-          $githubEnvironment = 'SYP_REQUIRED_PWSH_VERSION=' + $version + [Environment]::NewLine + 'SYP_REQUIRED_PWSH_SHA256=' + $expectedSha256 + [Environment]::NewLine
-          [IO.File]::AppendAllText($env:GITHUB_ENV, $githubEnvironment, [Text.UTF8Encoding]::new($false))
-          Write-Host "Resolved PowerShell $version from a SHA-256 verified ZIP; portable path: $powerShellExe"
-
-      - name: Verify the selected PowerShell runtime
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $expectedExecutable = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'pwsh-7.6.6/pwsh.exe'))
-          $selectedExecutable = [IO.Path]::GetFullPath((Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source)
-          $processExecutable = [IO.Path]::GetFullPath([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)
-          $homeExecutable = [IO.Path]::GetFullPath((Join-Path $PSHOME 'pwsh.exe'))
-          if (-not [string]::Equals($processExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase) -or
-              -not [string]::Equals($homeExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "The actual GitHub step shell is not the verified portable PowerShell: process=$processExecutable PSHOME=$PSHOME"
-          }
-          if (-not [string]::Equals($selectedExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase)) { throw "The job shell did not select the verified portable runtime: $selectedExecutable" }
-          if ($PSVersionTable.PSVersion.ToString() -cne $env:SYP_REQUIRED_PWSH_VERSION) { throw "Expected PowerShell $env:SYP_REQUIRED_PWSH_VERSION, running $($PSVersionTable.PSVersion)." }
-          if ($env:SYP_REQUIRED_PWSH_SHA256 -cne '02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860') { throw 'The verified PowerShell download hash binding changed.' }
-          Write-Host "PowerShell runtime verified: $($PSVersionTable.PSVersion) at $selectedExecutable"
-
-      - name: Ensure Pester 4.10.1
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $pesterModules = @(Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' })
-          if ($pesterModules.Count -eq 0) {
-            Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -SkipPublisherCheck
-            $pesterModules = @(Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' })
-          }
-          if ($pesterModules.Count -ne 1) { throw "Expected exactly one Pester 4.10.1 module; found $($pesterModules.Count)." }
-          $manifestPath = Join-Path ([string]$pesterModules[0].ModuleBase) 'Pester.psd1'
-          $manifestItem = Get-Item -Force -LiteralPath $manifestPath
-          if ($manifestItem.PSIsContainer -or ($manifestItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Pester manifest must be a regular non-reparse file.' }
-          $manifest = Import-PowerShellDataFile -LiteralPath $manifestPath -ErrorAction Stop
-          if ([version]$manifest.ModuleVersion -ne [version]'4.10.1') { throw 'Installed Pester manifest is not version 4.10.1.' }
-
-      - name: Download Windows Core plan
-        if: needs.plan.result == 'success'
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: windows-core-plan-${{ github.run_id }}
-          path: ${{ runner.temp }}/windows-core-artifacts/plan
-
-      - name: Download Windows Core shard evidence
-        if: needs.pester.result == 'success'
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          pattern: windows-core-shard-*-${{ github.run_id }}
-          path: ${{ runner.temp }}/windows-core-artifacts/shards
-
-      - name: Assert the Windows Core aggregate
-        shell: pwsh
-        env:
-          EXPECTED_PLAN_SHA256: ${{ needs.plan.outputs.planSha256 }}
-          EXPECTED_MATRIX_JSON: ${{ needs.plan.outputs.matrix }}
-          NEEDS_PLAN_RESULT: ${{ needs.plan.result }}
-          NEEDS_AUTHORITY_RESULT: ${{ needs.authority.result }}
-          NEEDS_PESTER_RESULT: ${{ needs.pester.result }}
-          NEEDS_FIXTURES_RESULT: ${{ needs.fixtures.result }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          & ./scripts/Assert-WindowsCoreAggregate.ps1 -RepositoryRoot . -ArtifactRoot (Join-Path $env:RUNNER_TEMP 'windows-core-artifacts') -OutputPath (Join-Path $env:RUNNER_TEMP 'windows-core-aggregate-result.json')
-          if (-not $?) { throw 'Windows Core aggregate validation failed.' }
-
-      - name: Upload Windows Core aggregate evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: windows-core-aggregate-${{ github.run_id }}
-          path: ${{ runner.temp }}/windows-core-aggregate-result.json
-          if-no-files-found: error
-          retention-days: 1
-          overwrite: true
-'@.TrimEnd()
+        $script:WindowsCoreWorkflowGoldenPath = Join-Path $script:RepositoryRoot 'tests/golden/pr8-powershell-validation.yml.golden'
+        $script:WindowsInstallSmokeWorkflowGoldenPath = Join-Path $script:RepositoryRoot 'tests/golden/syp101-production-smoke.yml.golden'
+        $script:WindowsCoreWorkflowGolden = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:WindowsCoreWorkflowGoldenPath
+        $script:WindowsInstallSmokeWorkflowGolden = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:WindowsInstallSmokeWorkflowGoldenPath
 
         function Assert-WindowsCoreWorkflowContract {
             param([Parameter(Mandatory = $true)][string] $WorkflowText)
-            $onGolden = @'
-on:
-  push:
-    branches:
-      - syp-79-multi-source-routing
-      - syp-86
-      - syp-101
-      - main
-  pull_request:
-    branches:
-      - syp-86
-      - main
-    # This required workflow always runs the complete retained source-test plan.
-  workflow_dispatch:
-'@.TrimEnd()
-            $permissionsGolden = "permissions:`n  contents: read"
-            $concurrencyGolden = @'
-concurrency:
-  group: powershell-regression-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-'@.TrimEnd()
-            if ((Get-WorkflowIndentedBlock $WorkflowText '^on:$' 0) -cne (ConvertTo-WorkflowLf $onGolden)) { throw 'The complete on block differs from its golden text.' }
-            if ((Get-WorkflowIndentedBlock $WorkflowText '^permissions:$' 0) -cne $permissionsGolden) { throw 'The top-level permissions block differs from its golden text.' }
-            if ((Get-WorkflowIndentedBlock $WorkflowText '^concurrency:$' 0) -cne (ConvertTo-WorkflowLf $concurrencyGolden)) { throw 'The concurrency block differs from its golden text.' }
-            foreach ($jobId in $script:WindowsCoreJobHeaders.Keys) {
-                $job = Get-WindowsCoreWorkflowJobBlock $WorkflowText $jobId
-                $lines = $job.Split("`n")
-                $stepsIndex = [Array]::IndexOf($lines, '    steps:')
-                if ($stepsIndex -lt 0) { throw "Job '$jobId' is missing its steps block." }
-                if (($lines[0..$stepsIndex] -join "`n") -cne (ConvertTo-WorkflowLf $script:WindowsCoreJobHeaders[$jobId])) { throw "Job '$jobId' header differs from its golden text." }
-                foreach ($entry in $script:WindowsCoreStepHashes[$jobId].GetEnumerator()) {
-                    $step = Get-WindowsCoreWorkflowStepBlock $job ([string]$entry.Key)
-                    if ((Get-WorkflowBlockSha256 $step) -cne [string]$entry.Value) { throw "Job '$jobId' step '$($entry.Key)' differs from its byte-exact golden block." }
-                }
+            Assert-WorkflowMatchesGolden -WorkflowText $WorkflowText -GoldenText $script:WindowsCoreWorkflowGolden -Context 'Windows Core workflow'
+        }
+
+        function Assert-WindowsInstallSmokeWorkflowContract {
+            param([Parameter(Mandatory = $true)][string] $WorkflowText)
+            Assert-WorkflowMatchesGolden -WorkflowText $WorkflowText -GoldenText $script:WindowsInstallSmokeWorkflowGolden -Context 'Windows Install Smoke workflow'
+        }
+
+        function Assert-RequiredCheckNameContract {
+            param(
+                [Parameter(Mandatory = $true)][string] $WindowsCoreText,
+                [Parameter(Mandatory = $true)][string] $WindowsInstallSmokeText
+            )
+
+            $combined = (ConvertTo-WorkflowLf $WindowsCoreText) + "`n" + (ConvertTo-WorkflowLf $WindowsInstallSmokeText)
+            if ([regex]::Matches($combined, '(?m)^    name: Windows Core$').Count -ne 1) {
+                throw 'The required check job name Windows Core must occur exactly once.'
             }
-            $aggregate = Get-WindowsCoreWorkflowJobBlock $WorkflowText 'windows-core'
-            if ($aggregate -cne (ConvertTo-WorkflowLf $script:WindowsCoreAggregateGolden)) { throw 'The complete Windows Core aggregate job differs from its golden text.' }
-            if ([regex]::Matches($WorkflowText, '(?m)^    name: Windows Core$').Count -ne 1) { throw 'Windows Core must occur exactly once as a job name.' }
+            if ([regex]::Matches($combined, '(?m)^    name: Windows Install Smoke$').Count -ne 1) {
+                throw 'The required check job name Windows Install Smoke must occur exactly once.'
+            }
         }
 
         function New-ConsumerEntryPointFixture {
@@ -653,25 +400,40 @@ jobs:
         Assert-Equal ([regex]::Matches($required, '& ./scripts/Invoke-PesterShardProcess\.ps1 @executorArguments')).Count 1 'Core must run the retained Pester difference through the bounded executor once.'
     }
 
-    # Scenario: The required workflow is compared as raw indentation-bounded YAML blocks.
-    # Purpose: Lock event, concurrency, every lane header, critical full steps, and the complete aggregate job without regex gaps.
-    It 'UnitT12_matches_the_complete_Windows_Core_workflow_golden_contract' {
-        $required = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml')
-        Assert-WindowsCoreWorkflowContract -WorkflowText $required
+    # Scenario: Both required workflows are compared with reviewable complete-file LF goldens.
+    # Purpose: Lock every top-level key, job, step, and required check name without fragment gaps.
+    It 'UnitT12_matches_both_complete_required_workflow_golden_contracts' {
+        $core = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml')
+        $install = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/syp101-production-smoke.yml')
+        Assert-WindowsCoreWorkflowContract -WorkflowText $core
+        Assert-WindowsInstallSmokeWorkflowContract -WorkflowText $install
+        Assert-RequiredCheckNameContract -WindowsCoreText $core -WindowsInstallSmokeText $install
     }
 
-    # Scenario: One fail-closed workflow invariant is tampered with while the remaining YAML stays unchanged.
-    # Purpose: Prove every specified aggregate and trigger mutation is rejected by the same text-parameter contract function.
+    # Scenario: One complete-file required workflow invariant is tampered with in a TestDrive copy.
+    # Purpose: Prove every specified top-level, job, step, aggregate, and Install Smoke mutation is rejected.
     It 'UnitT13_rejects_workflow_tampering_<Mutation>' -TestCases @(
-        @{ Mutation = 'aggregate-step-if' },
-        @{ Mutation = 'missing-fixtures-need' },
-        @{ Mutation = 'softened-always' },
-        @{ Mutation = 'misbound-authority-result' },
-        @{ Mutation = 'duplicate-Windows-Core-name' },
-        @{ Mutation = 'push-paths-filter' }
+        @{ Mutation = 'aggregate-step-if'; Target = 'core' },
+        @{ Mutation = 'missing-fixtures-need'; Target = 'core' },
+        @{ Mutation = 'softened-always'; Target = 'core' },
+        @{ Mutation = 'misbound-authority-result'; Target = 'core' },
+        @{ Mutation = 'duplicate-Windows-Core-name'; Target = 'core' },
+        @{ Mutation = 'push-paths-filter'; Target = 'core' },
+        @{ Mutation = 'authority-bypass-step'; Target = 'core' },
+        @{ Mutation = 'pester-appended-step'; Target = 'core' },
+        @{ Mutation = 'fixtures-deleted-step'; Target = 'core' },
+        @{ Mutation = 'plan-swapped-steps'; Target = 'core' },
+        @{ Mutation = 'extra-job'; Target = 'core' },
+        @{ Mutation = 'permissions-write'; Target = 'core' },
+        @{ Mutation = 'pull-request-target'; Target = 'core' },
+        @{ Mutation = 'top-level-env'; Target = 'core' },
+        @{ Mutation = 'install-job-name'; Target = 'install' },
+        @{ Mutation = 'install-inserted-step'; Target = 'install' }
     ) {
-        param($Mutation)
-        $workflow = (Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml')).Replace("`r`n", "`n")
+        param($Mutation,$Target)
+        $core = ConvertTo-WorkflowLf (Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml'))
+        $install = ConvertTo-WorkflowLf (Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/syp101-production-smoke.yml'))
+        $workflow = if ($Target -ceq 'core') { $core } else { $install }
         switch ($Mutation) {
             'aggregate-step-if' { $tampered = $workflow.Replace("      - name: Assert the Windows Core aggregate`n        shell: pwsh", "      - name: Assert the Windows Core aggregate`n        if: needs.pester.result == 'success'`n        shell: pwsh") }
             'missing-fixtures-need' { $tampered = $workflow.Replace('    needs: [plan, authority, pester, fixtures]', '    needs: [plan, authority, pester]') }
@@ -679,9 +441,29 @@ jobs:
             'misbound-authority-result' { $tampered = $workflow.Replace('          NEEDS_AUTHORITY_RESULT: ${{ needs.authority.result }}', '          NEEDS_AUTHORITY_RESULT: ${{ needs.plan.result }}') }
             'duplicate-Windows-Core-name' { $tampered = $workflow.TrimEnd() + "`n`n  duplicate-core:`n    name: Windows Core`n    runs-on: windows-latest`n    steps:`n      - run: exit 1`n" }
             'push-paths-filter' { $tampered = $workflow.Replace("  push:`n    branches:", "  push:`n    paths:`n      - docs/**`n    branches:") }
+            'authority-bypass-step' { $tampered = $workflow.Replace("      - name: Run the Standard v1 authority gate", "      - name: Bypass`n        run: exit 0`n`n      - name: Run the Standard v1 authority gate") }
+            'pester-appended-step' { $tampered = $workflow.Replace("`n`n  fixtures:", "`n`n      - name: Appended shard step`n        run: exit 0`n`n  fixtures:") }
+            'fixtures-deleted-step' { $tampered = [regex]::Replace($workflow, '(?ms)^      - name: Run offline routine semantic fixtures once\n.*?(?=^      - name: Upload Windows Core fixture evidence)', '') }
+            'plan-swapped-steps' { $tampered = [regex]::new('(?ms)(^      - name: Checkout\n.*?)(^      - name: Restore verified PowerShell archive cache\n.*?)(?=^      - name: Install verified latest stable PowerShell)').Replace($workflow, '${2}${1}', 1) }
+            'extra-job' { $tampered = $workflow.TrimEnd() + "`n`n  extra:`n    name: Extra`n    runs-on: windows-latest`n    steps:`n      - run: exit 0`n" }
+            'permissions-write' { $tampered = $workflow.Replace("permissions:`n  contents: read", "permissions:`n  contents: write") }
+            'pull-request-target' { $tampered = $workflow.Replace("  workflow_dispatch:", "  pull_request_target:`n  workflow_dispatch:") }
+            'top-level-env' { $tampered = $workflow.Replace("`njobs:", "`nenv:`n  BYPASS: true`n`njobs:") }
+            'install-job-name' { $tampered = $workflow.Replace('    name: Windows Install Smoke', '    name: Windows Install Smoke changed') }
+            'install-inserted-step' { $tampered = $workflow.Replace("      - name: Check production lock", "      - name: Bypass`n        run: exit 0`n`n      - name: Check production lock") }
         }
         $tampered | Should Not Be $workflow
-        { Assert-WindowsCoreWorkflowContract -WorkflowText $tampered } | Should Throw
+        $copyPath = Join-Path $TestDrive "$Mutation.yml"
+        Write-TestUtf8File -Path $copyPath -Text $tampered
+        $tamperedCopy = Get-Content -Raw -Encoding UTF8 -LiteralPath $copyPath
+        $contractError = $null
+        if ($Target -ceq 'core') {
+            try { Assert-WindowsCoreWorkflowContract -WorkflowText $tamperedCopy } catch { $contractError = $_ }
+        } else {
+            try { Assert-WindowsInstallSmokeWorkflowContract -WorkflowText $tamperedCopy } catch { $contractError = $_ }
+        }
+        $contractError | Should Not Be $null
+        $contractError.Exception.Message | Should Match 'line [0-9]+\. Expected: .* Actual: '
     }
 
     # Scenario: The required workflow fans the suite across retired runtimes and duplicate platforms.
@@ -755,8 +537,6 @@ jobs:
         $allWorkflowText=($workflowPaths|ForEach-Object{Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot $_)}) -join "`n"
         Assert-Equal ([regex]::Matches($allWorkflowText,'(?m)^    name:\s*Windows Core\s*$')).Count 1 'Exactly one workflow job may publish the Windows Core required context.'
         Assert-Equal ([regex]::Matches($allWorkflowText,'(?m)^    name:\s*Windows Install Smoke\s*$')).Count 1 'Exactly one workflow job may publish the Windows Install Smoke required context.'
-        $smokeJobBlock = Get-WindowsCoreWorkflowJobBlock $smoke 'windows-install-smoke'
-        Assert-Equal ($smokeJobBlock.Replace("`r`n","`n").Split("`n")[1]) '    name: Windows Install Smoke' 'The install required context name must belong to windows-install-smoke.'
         Assert-NotMatch $smoke '(?m)^\s+needs:' 'Windows Install Smoke must not depend on a retired job.'
         Assert-Match $executor "ValidateSet\('4\.10\.1'\)" 'The bounded executor must retire the Pester 3.4/Windows PowerShell 5.1 lane.'
         Assert-Match $executor 'requires PowerShell 7 Core on Windows, Linux or macOS' 'The bounded executor must require a supported Core host.'

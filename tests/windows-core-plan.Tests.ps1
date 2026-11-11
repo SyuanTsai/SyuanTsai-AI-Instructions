@@ -314,12 +314,21 @@ Describe 'Windows Core full planner and aggregate' {
         @{ Mutation='empty-object'; Keyword='property set' },
         @{ Mutation='missing-field'; Keyword='property set' },
         @{ Mutation='extra-field'; Keyword='property set' },
-        @{ Mutation='failed-status'; Keyword='status must be completed' }
+        @{ Mutation='failed-status'; Keyword='status must be completed' },
+        @{ Mutation='replaced-path'; Keyword='receipt paths differs' },
+        @{ Mutation='deleted-receipt'; Keyword='receipt paths differs' },
+        @{ Mutation='duplicate-path'; Keyword='duplicate receipt path' }
     ) {
         param($Mutation,$Keyword)
         $artifacts = Join-Path $TestDrive "receipt-$Mutation"
         New-WindowsCoreAggregateArtifacts $script:ActualPlan $artifacts
-        $path = (Get-ChildItem -LiteralPath (Join-Path $artifacts 'shards') -Filter 'windows-core-shard-*-summary.json' -File -Recurse | Select-Object -First 1).FullName
+        $summaryFiles = @(Get-ChildItem -LiteralPath (Join-Path $artifacts 'shards') -Filter 'windows-core-shard-*-summary.json' -File -Recurse | Sort-Object FullName)
+        $path = $summaryFiles[0].FullName
+        if ($Mutation -in @('deleted-receipt','duplicate-path')) {
+            $path = @($summaryFiles | Where-Object {
+                @((Get-Content -Raw -Encoding UTF8 -LiteralPath $_.FullName | ConvertFrom-Json).shards).Count -gt 1
+            })[0].FullName
+        }
         $summary = Get-Content -Raw -Encoding UTF8 -LiteralPath $path | ConvertFrom-Json
         switch ($Mutation) {
             'scalar' { $summary.shards = [object[]]@('not-a-shard-receipt') }
@@ -327,6 +336,9 @@ Describe 'Windows Core full planner and aggregate' {
             'missing-field' { $summary.shards[0].PSObject.Properties.Remove('cleanedUp') }
             'extra-field' { $summary.shards[0] | Add-Member -NotePropertyName unexpected -NotePropertyValue $true }
             'failed-status' { $summary.shards[0].status = 'failed' }
+            'replaced-path' { $summary.shards[0].paths[0] = 'C:/tampered/arbitrary.Tests.ps1' }
+            'deleted-receipt' { $summary.shards = [object[]]@($summary.shards | Select-Object -Skip 1) }
+            'duplicate-path' { $summary.shards[1].paths[0] = [string]$summary.shards[0].paths[0] }
         }
         Set-WindowsCoreTestText $path ($summary | ConvertTo-Json -Depth 12)
         { Invoke-WindowsCoreAggregateForTest $script:ActualPlan $artifacts } | Should Throw $Keyword
@@ -337,8 +349,8 @@ Describe 'Windows Core full planner and aggregate' {
     It 'UnitT107_rejects_aggregate_evidence_<Mutation>' -TestCases @(
         @{ Mutation='missing-summary'; Keyword='shard summaries' },
         @{ Mutation='duplicate-summary'; Keyword='shard summaries' },
-        @{ Mutation='extra-test-file'; Keyword='testFiles differs' },
-        @{ Mutation='duplicate-test-file'; Keyword='duplicate values' },
+        @{ Mutation='extra-test-file'; Keyword='receipt paths differs' },
+        @{ Mutation='duplicate-test-file'; Keyword='receipt paths differs' },
         @{ Mutation='failed-count'; Keyword='FailedCount must be zero' },
         @{ Mutation='replaced-skip'; Keyword='skippedTests differs' },
         @{ Mutation='plan-artifact'; Keyword='canonical JSON differs' },

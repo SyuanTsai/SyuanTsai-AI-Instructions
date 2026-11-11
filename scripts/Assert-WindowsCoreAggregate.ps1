@@ -107,12 +107,19 @@ function Assert-WindowsCoreShardSummary {
         if ($Summary.$arrayName -isnot [Array]) { throw "Shard $ShardId $arrayName must be a JSON array." }
     }
     if (@($Summary.shards).Count -eq 0) { throw "Shard $ShardId shards must contain at least one process receipt." }
+    $receiptPaths = [Collections.Generic.List[string]]::new()
+    $receiptPathSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     for ($receiptIndex = 0; $receiptIndex -lt @($Summary.shards).Count; $receiptIndex++) {
         Assert-WindowsCoreShardReceipt -Receipt $Summary.shards[$receiptIndex] -ShardId $ShardId -ReceiptIndex $receiptIndex
+        foreach ($receiptPath in @($Summary.shards[$receiptIndex].paths)) {
+            if (-not $receiptPathSet.Add([string]$receiptPath)) { throw "Shard $ShardId contains a duplicate receipt path: '$receiptPath'." }
+            $receiptPaths.Add([string]$receiptPath)
+        }
     }
     foreach ($path in @($Summary.testFiles)) {
         if ($path -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$path)) { throw "Shard $ShardId testFiles must contain only non-empty strings." }
     }
+    Assert-WindowsCoreAggregateEqualSet -Expected ([string[]]@($Summary.testFiles)) -Actual $receiptPaths.ToArray() -Context "Shard $ShardId receipt paths"
     foreach ($identifier in @($Summary.skippedTests)) {
         if ($identifier -isnot [string] -or [string]$identifier -notmatch '^[^:/\\]+\.Tests\.ps1::\S.+$') { throw "Shard $ShardId skippedTests contains an invalid identifier." }
     }
