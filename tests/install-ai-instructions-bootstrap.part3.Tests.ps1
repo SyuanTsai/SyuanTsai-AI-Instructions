@@ -1,7 +1,10 @@
 . (Join-Path $PSScriptRoot 'install-ai-instructions-bootstrap.TestSupport.ps1')
 
 Describe 'install-ai-instructions-bootstrap' {
-    BeforeEach $script:InstallAiInstructionsBootstrapBeforeEach
+    BeforeEach {
+        $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+        $codexHome = Join-Path $TestDrive ('.codex-' + [Guid]::NewGuid().ToString('N'))
+    }
 
     if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
 

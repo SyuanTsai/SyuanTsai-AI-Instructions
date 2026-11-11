@@ -19,11 +19,11 @@ param(
     [string] $EvidenceRoot,
     [AllowEmptyCollection()][string[]] $SelectedTestFileNames = @(),
     [string] $SummaryOutputPath = '',
+    [Threading.CancellationToken] $CancellationToken = [Threading.CancellationToken]::None,
+    [ValidateSet('cooperative','strong')][string] $IsolationRequirement = 'cooperative',
     [ValidateSet(1,2)][int] $SummarySchemaVersion = 1,
     [string] $SummaryRunId = $(if ([string]::IsNullOrWhiteSpace($env:GITHUB_RUN_ID)) { 'local' } else { [string]$env:GITHUB_RUN_ID }),
-    [ValidateRange(1, 2147483647)][int] $SummaryRunAttempt = $(if ([string]$env:GITHUB_RUN_ATTEMPT -match '^[1-9][0-9]*$') { [int]$env:GITHUB_RUN_ATTEMPT } else { 1 }),
-    [Threading.CancellationToken] $CancellationToken = [Threading.CancellationToken]::None,
-    [ValidateSet('cooperative','strong')][string] $IsolationRequirement = 'cooperative'
+    [ValidateRange(1, 2147483647)][int] $SummaryRunAttempt = $(if ([string]$env:GITHUB_RUN_ATTEMPT -match '^[1-9][0-9]*$') { [int]$env:GITHUB_RUN_ATTEMPT } else { 1 })
 )
 
 $ErrorActionPreference = 'Stop'

@@ -356,8 +356,3 @@ finally{
     if($LASTEXITCODE-ne0){throw "Recovery mutation probe failed: $($output-join[Environment]::NewLine)"}
     return Get-Content -Raw -LiteralPath $resultPath
 }
-
-$script:InstallAiInstructionsBootstrapBeforeEach = {
-    $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-    $codexHome = Join-Path $TestDrive ('.codex-' + [Guid]::NewGuid().ToString('N'))
-}

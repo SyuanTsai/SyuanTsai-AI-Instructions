@@ -3,10 +3,8 @@ param(
     [string] $RepositoryRoot = (Split-Path -Parent $PSScriptRoot),
     [string] $ArtifactRoot = $(if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { Join-Path ([IO.Path]::GetTempPath()) 'windows-core-artifacts' } else { Join-Path $env:RUNNER_TEMP 'windows-core-artifacts' }),
     [string] $WeightsPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'tests/windows-core-shard-weights.json'),
-    [string] $EventName = [string]$env:GITHUB_EVENT_NAME,
-    [string] $PullRequestHeadSha = [string]$env:PULL_REQUEST_HEAD_SHA,
     [string] $ExpectedPlanSha256 = [string]$env:EXPECTED_PLAN_SHA256,
-    [string] $PlannedMode = [string]$env:PLANNED_MODE,
+    [string] $ExpectedMatrixJson = [string]$env:EXPECTED_MATRIX_JSON,
     [string] $PlanResult = [string]$env:NEEDS_PLAN_RESULT,
     [string] $AuthorityResult = [string]$env:NEEDS_AUTHORITY_RESULT,
     [string] $PesterResult = [string]$env:NEEDS_PESTER_RESULT,
@@ -47,16 +45,81 @@ function Read-WindowsCoreAggregateJson {
     catch { throw "$Context is not valid JSON: $($_.Exception.Message)" }
 }
 
+function Test-WindowsCoreJsonInteger {
+    param($Value)
+    return $Value -is [byte] -or $Value -is [sbyte] -or $Value -is [int16] -or $Value -is [uint16] -or
+        $Value -is [int32] -or $Value -is [uint32] -or $Value -is [int64] -or $Value -is [uint64]
+}
+
+function Assert-WindowsCoreExactProperties {
+    param([Parameter(Mandatory = $true)] $Value,[Parameter(Mandatory = $true)][string[]] $Names,[Parameter(Mandatory = $true)][string] $Context)
+    if ($null -eq $Value -or $null -eq $Value.PSObject) { throw "$Context must be a JSON object." }
+    $actual = [string[]]@($Value.PSObject.Properties.Name | Sort-Object -CaseSensitive)
+    $expected = [string[]]@($Names | Sort-Object -CaseSensitive)
+    if (($actual -join "`n") -cne ($expected -join "`n")) { throw "$Context has an unexpected property set." }
+}
+
+function Assert-WindowsCoreShardSummary {
+    param(
+        [Parameter(Mandatory = $true)] $Summary,
+        [Parameter(Mandatory = $true)][string] $ShardId,
+        [Parameter(Mandatory = $true)][string] $CurrentRunId,
+        [Parameter(Mandatory = $true)][int] $CurrentRunAttempt
+    )
+    Assert-WindowsCoreExactProperties -Value $Summary -Names @(
+        'schemaVersion','type','executed','status','runtime','pesterVersion','pesterModuleSha256','executorSha256',
+        'testFiles','counts','shards','runId','runAttempt','skippedTests'
+    ) -Context "Shard $ShardId summary"
+    if (-not (Test-WindowsCoreJsonInteger $Summary.schemaVersion) -or [long]$Summary.schemaVersion -ne 2) { throw "Shard $ShardId schemaVersion must be the integer 2." }
+    if ($Summary.type -isnot [string] -or [string]$Summary.type -cne 'standard-pester-execution-summary') { throw "Shard $ShardId summary type is invalid." }
+    if ($Summary.executed -isnot [bool] -or $Summary.executed -ne $true) { throw "Shard $ShardId executed must be the JSON Boolean true." }
+    if ($Summary.status -isnot [string] -or [string]$Summary.status -cne 'completed') { throw "Shard $ShardId status must be completed." }
+    Assert-WindowsCoreExactProperties -Value $Summary.runtime -Names @('osPlatform','psEdition','psVersion') -Context "Shard $ShardId runtime"
+    foreach ($runtimeName in @('osPlatform','psEdition','psVersion')) {
+        if ($Summary.runtime.$runtimeName -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$Summary.runtime.$runtimeName)) { throw "Shard $ShardId runtime.$runtimeName must be a non-empty string." }
+    }
+    if ($Summary.pesterVersion -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$Summary.pesterVersion)) { throw "Shard $ShardId pesterVersion must be a non-empty string." }
+    foreach ($hashName in @('pesterModuleSha256','executorSha256')) {
+        if ($Summary.$hashName -isnot [string] -or [string]$Summary.$hashName -notmatch '^[0-9a-fA-F]{64}$') { throw "Shard $ShardId $hashName must be a SHA-256 string." }
+    }
+    foreach ($arrayName in @('testFiles','shards','skippedTests')) {
+        if ($Summary.$arrayName -isnot [Array]) { throw "Shard $ShardId $arrayName must be a JSON array." }
+    }
+    foreach ($path in @($Summary.testFiles)) {
+        if ($path -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$path)) { throw "Shard $ShardId testFiles must contain only non-empty strings." }
+    }
+    foreach ($identifier in @($Summary.skippedTests)) {
+        if ($identifier -isnot [string] -or [string]$identifier -notmatch '^[^:/\\]+\.Tests\.ps1::\S.+$') { throw "Shard $ShardId skippedTests contains an invalid identifier." }
+    }
+    Assert-WindowsCoreExactProperties -Value $Summary.counts -Names @('TotalCount','PassedCount','FailedCount','SkippedCount','PendingCount','InconclusiveCount') -Context "Shard $ShardId counts"
+    $countNames = @('TotalCount','PassedCount','FailedCount','SkippedCount','PendingCount','InconclusiveCount')
+    foreach ($countName in $countNames) {
+        $value = $Summary.counts.$countName
+        if (-not (Test-WindowsCoreJsonInteger $value) -or [long]$value -lt 0) { throw "Shard $ShardId $countName must be a non-negative JSON integer." }
+    }
+    if ([long]$Summary.counts.TotalCount -le 0 -or
+        ([long]$Summary.counts.PassedCount + [long]$Summary.counts.FailedCount + [long]$Summary.counts.SkippedCount + [long]$Summary.counts.PendingCount + [long]$Summary.counts.InconclusiveCount) -ne [long]$Summary.counts.TotalCount) {
+        throw "Shard $ShardId Pester counts do not add up to TotalCount."
+    }
+    foreach ($zeroName in @('FailedCount','PendingCount','InconclusiveCount')) {
+        if ([long]$Summary.counts.$zeroName -ne 0) { throw "Shard $ShardId $zeroName must be zero." }
+    }
+    if ($Summary.runId -isnot [string] -or [string]$Summary.runId -cne $CurrentRunId) { throw "Shard $ShardId runId does not equal the current workflow run." }
+    if (-not (Test-WindowsCoreJsonInteger $Summary.runAttempt)) { throw "Shard $ShardId runAttempt must be a JSON integer." }
+    $summaryRunAttempt = [long]$Summary.runAttempt
+    if ($summaryRunAttempt -lt 1 -or $summaryRunAttempt -gt $CurrentRunAttempt) {
+        throw "Shard $ShardId runAttempt '$summaryRunAttempt' must be positive and no newer than current attempt '$CurrentRunAttempt'."
+    }
+}
+
 function Assert-WindowsCoreAggregate {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string] $Root,
         [Parameter(Mandatory = $true)][string] $Artifacts,
         [Parameter(Mandatory = $true)][string] $ShardWeightsPath,
-        [Parameter(Mandatory = $true)][string] $Event,
-        [string] $ExpectedPullRequestHead,
         [Parameter(Mandatory = $true)][string] $PlanSha256,
-        [Parameter(Mandatory = $true)][ValidateSet('full','docs')][string] $PlanMode,
+        [Parameter(Mandatory = $true)][string] $MatrixJson,
         [Parameter(Mandatory = $true)][string] $PlanJobResult,
         [Parameter(Mandatory = $true)][string] $AuthorityJobResult,
         [Parameter(Mandatory = $true)][string] $PesterJobResult,
@@ -68,7 +131,8 @@ function Assert-WindowsCoreAggregate {
     foreach ($job in @(
         @{ Name = 'plan'; Value = $PlanJobResult },
         @{ Name = 'authority'; Value = $AuthorityJobResult },
-        @{ Name = 'pester'; Value = $PesterJobResult }
+        @{ Name = 'pester'; Value = $PesterJobResult },
+        @{ Name = 'fixtures'; Value = $FixturesJobResult }
     )) {
         if ($job.Value -cne 'success') { throw "Windows Core upstream '$($job.Name)' result must be success; got '$($job.Value)'." }
     }
@@ -77,20 +141,15 @@ function Assert-WindowsCoreAggregate {
     $hashPath = Get-WindowsCoreAggregateSingleFile -Root $Artifacts -Leaf 'plan.sha256'
     $artifactJson = (Get-Content -Raw -Encoding UTF8 -LiteralPath $planPath).TrimEnd("`r", "`n")
     $artifactPlan = Read-WindowsCoreAggregateJson -Path $planPath -Context 'Windows Core plan artifact'
-    $artifactRunId = [string]$artifactPlan.runId
+    if ($artifactPlan.runId -isnot [string] -or [string]$artifactPlan.runId -cne $CurrentRunId) { throw 'Plan artifact runId does not equal the current workflow run.' }
+    if (-not (Test-WindowsCoreJsonInteger $artifactPlan.runAttempt)) { throw 'Plan artifact runAttempt must be a JSON integer.' }
     $artifactRunAttempt = [long]$artifactPlan.runAttempt
-    if ($artifactRunId -cne $CurrentRunId) { throw "Plan artifact runId '$artifactRunId' does not equal current run '$CurrentRunId'." }
-    if ($artifactRunAttempt -lt 1 -or $artifactRunAttempt -gt $CurrentRunAttempt) {
-        throw "Plan artifact runAttempt '$artifactRunAttempt' must be positive and no newer than current attempt '$CurrentRunAttempt'."
-    }
+    if ($artifactRunAttempt -lt 1 -or $artifactRunAttempt -gt $CurrentRunAttempt) { throw 'Plan artifact runAttempt must be positive and no newer than the current attempt.' }
 
     . (Join-Path $Root 'scripts/Get-WindowsCorePlan.ps1') -DefineFunctionsOnly
-    $expected = Get-WindowsCorePlan -Root $Root -Event $Event -ExpectedPullRequestHead $ExpectedPullRequestHead -ShardWeightsPath $ShardWeightsPath -WorkflowRunId $artifactRunId -WorkflowRunAttempt ([int]$artifactRunAttempt)
-    if ($expected.Plan.mode -cne $PlanMode) { throw "Plan output mode '$PlanMode' differs from independently calculated mode '$($expected.Plan.mode)'." }
-    $requiredFixtureResult = if ($expected.Plan.mode -ceq 'full') { 'success' } else { 'skipped' }
-    if ($FixturesJobResult -cne $requiredFixtureResult) {
-        throw "Windows Core fixtures result must be '$requiredFixtureResult' for mode '$($expected.Plan.mode)'; got '$FixturesJobResult'."
-    }
+    $expected = Get-WindowsCorePlan -Root $Root -ShardWeightsPath $ShardWeightsPath -WorkflowRunId ([string]$artifactPlan.runId) -WorkflowRunAttempt ([int]$artifactRunAttempt)
+    if ($MatrixJson -cne $expected.MatrixJson) { throw 'Plan matrix output differs byte-for-byte from the independently calculated matrix JSON.' }
+    Assert-WindowsCoreMatrix -MatrixJson $MatrixJson -ExpectedShards $expected.Plan.shards
 
     $artifactHash = (Get-Content -Raw -Encoding UTF8 -LiteralPath $hashPath).Trim()
     if ($artifactJson -cne $expected.CanonicalJson) { throw 'Plan artifact canonical JSON differs from the independently calculated plan.' }
@@ -105,38 +164,28 @@ function Assert-WindowsCoreAggregate {
         }
     }
 
-    $summaryFiles = @(Get-ChildItem -LiteralPath $Artifacts -File -Recurse -Filter 'windows-core-shard-*-summary.json' | Sort-Object Name)
-    if ($summaryFiles.Count -ne $expected.Plan.shards.Count) {
-        throw "Expected $($expected.Plan.shards.Count) shard summaries; found $($summaryFiles.Count)."
+    $summaryFiles = @(Get-ChildItem -LiteralPath $Artifacts -File -Recurse -Filter 'windows-core-shard-*-summary.json' | Sort-Object FullName)
+    if ($summaryFiles.Count -ne $expected.Plan.shards.Count) { throw "Expected $($expected.Plan.shards.Count) shard summaries; found $($summaryFiles.Count)." }
+    $artifactDirectories = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($summaryFile in $summaryFiles) {
+        $relative = [IO.Path]::GetRelativePath($Artifacts, $summaryFile.FullName).Replace('\', '/')
+        $parts = [string[]]@($relative -split '/')
+        if ($parts.Count -lt 3 -or $parts[0] -cne 'shards' -or -not $artifactDirectories.Add($parts[1])) {
+            throw 'Each shard summary must retain its own downloaded artifact directory boundary.'
+        }
     }
+
     $observedFiles = [Collections.Generic.List[string]]::new()
     $observedSkips = [Collections.Generic.List[string]]::new()
     $observedShardIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($summaryFile in $summaryFiles) {
-        if ($summaryFile.Name -notmatch '^windows-core-shard-(?<id>[0-9]{2})-summary\.json$') {
-            throw "Shard summary filename is invalid: $($summaryFile.Name)."
-        }
+        if ($summaryFile.Name -notmatch '^windows-core-shard-(?<id>[0-9]{2})-summary\.json$') { throw "Shard summary filename is invalid: $($summaryFile.Name)." }
         $shardId = $Matches.id
         if (-not $observedShardIds.Add($shardId)) { throw "Duplicate shard summary id '$shardId'." }
         $plannedShard = @($expected.Plan.shards | Where-Object id -ceq $shardId)
         if ($plannedShard.Count -ne 1) { throw "Unexpected shard summary id '$shardId'." }
         $summary = Read-WindowsCoreAggregateJson -Path $summaryFile.FullName -Context "Shard $shardId summary"
-        if ([int]$summary.schemaVersion -ne 2 -or [string]$summary.type -cne 'standard-pester-execution-summary' -or
-            -not [bool]$summary.executed -or [string]$summary.status -cne 'completed') {
-            throw "Shard $shardId summary does not describe a completed bounded execution."
-        }
-        if ([string]$summary.runId -cne $CurrentRunId) { throw "Shard $shardId runId does not equal the current workflow run." }
-        $summaryRunAttempt = [long]$summary.runAttempt
-        if ($summaryRunAttempt -lt 1 -or $summaryRunAttempt -gt $CurrentRunAttempt) {
-            throw "Shard $shardId runAttempt '$summaryRunAttempt' must be positive and no newer than current attempt '$CurrentRunAttempt'."
-        }
-        foreach ($countName in @('FailedCount','PendingCount','InconclusiveCount')) {
-            $property = $summary.counts.PSObject.Properties[$countName]
-            if ($null -eq $property -or [long]$property.Value -ne 0) { throw "Shard $shardId $countName must be zero." }
-        }
-        if ([long]$summary.counts.TotalCount -le 0 -or ([long]$summary.counts.PassedCount + [long]$summary.counts.SkippedCount) -ne [long]$summary.counts.TotalCount) {
-            throw "Shard $shardId Pester counts are incomplete."
-        }
+        Assert-WindowsCoreShardSummary -Summary $summary -ShardId $shardId -CurrentRunId $CurrentRunId -CurrentRunAttempt $CurrentRunAttempt
         $summaryNames = [string[]]@($summary.testFiles | ForEach-Object { [IO.Path]::GetFileName([string]$_) })
         Assert-WindowsCoreAggregateEqualSet -Expected ([string[]]$plannedShard[0].files) -Actual $summaryNames -Context "Shard $shardId testFiles"
         foreach ($name in $summaryNames) { $observedFiles.Add($name) }
@@ -147,12 +196,11 @@ function Assert-WindowsCoreAggregate {
     }
     Assert-WindowsCoreAggregateEqualSet -Expected ([string[]]$expected.Plan.selectedTestFiles) -Actual $observedFiles.ToArray() -Context 'All shard testFiles'
     Assert-WindowsCoreAggregateEqualSet -Expected ([string[]]$expected.Plan.expectedSkippedTests) -Actual $observedSkips.ToArray() -Context 'All shard skippedTests'
-    if ($expected.Plan.mode -ceq 'full' -and $observedSkips.Count -ne 5) { throw 'Full Windows Core must observe exactly five reviewed skipped tests.' }
+    if ($observedSkips.Count -ne 5) { throw 'Full Windows Core must observe exactly five reviewed skipped tests.' }
 
     return [pscustomobject][ordered]@{
         schemaVersion = 1
         status = 'passed'
-        mode = $expected.Plan.mode
         planSha256 = $expected.PlanSha256
         runAttempt = $CurrentRunAttempt
         runId = $CurrentRunId
@@ -172,19 +220,14 @@ function Write-WindowsCoreAggregateResult {
 if (-not $DefineFunctionsOnly) {
     try {
         $aggregate = Assert-WindowsCoreAggregate -Root ([IO.Path]::GetFullPath($RepositoryRoot)) -Artifacts ([IO.Path]::GetFullPath($ArtifactRoot)) `
-            -ShardWeightsPath ([IO.Path]::GetFullPath($WeightsPath)) -Event $EventName -ExpectedPullRequestHead $PullRequestHeadSha `
-            -PlanSha256 $ExpectedPlanSha256 -PlanMode $PlannedMode -PlanJobResult $PlanResult -AuthorityJobResult $AuthorityResult `
-            -PesterJobResult $PesterResult -FixturesJobResult $FixturesResult -CurrentRunId $RunId -CurrentRunAttempt $RunAttempt
+            -ShardWeightsPath ([IO.Path]::GetFullPath($WeightsPath)) -PlanSha256 $ExpectedPlanSha256 -MatrixJson $ExpectedMatrixJson `
+            -PlanJobResult $PlanResult -AuthorityJobResult $AuthorityResult -PesterJobResult $PesterResult -FixturesJobResult $FixturesResult `
+            -CurrentRunId $RunId -CurrentRunAttempt $RunAttempt
         Write-WindowsCoreAggregateResult -Path $OutputPath -Result $aggregate
         Write-Host "Windows Core aggregate passed: $($aggregate.testFileCount) files across $($aggregate.shardCount) shards."
     }
     catch {
-        $failure = [pscustomobject][ordered]@{
-            schemaVersion = 1
-            status = 'failed'
-            error = $_.Exception.Message
-        }
-        Write-WindowsCoreAggregateResult -Path $OutputPath -Result $failure
+        Write-WindowsCoreAggregateResult -Path $OutputPath -Result ([pscustomobject][ordered]@{ schemaVersion = 1; status = 'failed'; error = $_.Exception.Message })
         throw
     }
 }
