@@ -6306,6 +6306,109 @@ function Assert-StandardValidationFindings {
     return $requiresHuman
 }
 
+function Assert-StandardValidationStaticExceptions {
+    param(
+        [Parameter(Mandatory)] $Envelope,
+        [Parameter(Mandatory)][string] $SnapshotRoot,
+        [Parameter(Mandatory)][string[]] $ActiveSkills,
+        [Parameter(Mandatory)][AllowEmptyString()][string] $ScannerVersion,
+        [Parameter(Mandatory)][string] $Context
+    )
+
+    $suppressed = Get-StandardValidationProperty -Object $Envelope -Name 'suppressedFindings'
+    if ($null -eq $suppressed) { return 0 }
+    if ($suppressed -isnot [array]) { throw "FAILED|$Context suppressedFindings are not an array." }
+    if ($suppressed.Count -eq 0) { return 0 }
+    foreach ($finding in $suppressed) {
+        foreach ($field in @('skillId','ruleId','severity','file','suppressionReason')) {
+            $value = Get-StandardValidationProperty -Object $finding -Name $field
+            if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value)) { throw "FAILED|$Context suppressed finding requires a nonempty string $field." }
+        }
+        if (-not (Test-StandardValidationCanonicalSeverity -Severity $finding.severity)) { throw "FAILED|$Context suppressed finding contains an unknown severity '$($finding.severity)'." }
+        if ($finding.severity -ceq 'critical' -or $finding.severity -ceq 'high') { throw "FAILED|$Context suppressed a $($finding.severity) finding." }
+    }
+
+    function Assert-StaticExceptionStrings($Object, [string[]] $Fields, [string] $Label) {
+        foreach ($field in $Fields) {
+            $value = Get-StandardValidationProperty -Object $Object -Name $field
+            if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value)) { throw "$Label requires a nonempty string $field." }
+        }
+    }
+    function Read-StaticExceptionJson([string] $RelativePath, [string] $Label) {
+        Assert-StandardValidationSafeRelativePath -Value $RelativePath -Context $Label
+        $full = Assert-StandardValidationCanonicalRootPath -Path (Join-Path $SnapshotRoot $RelativePath) -Context $Label
+        if (-not (Test-StandardValidationPathWithin -Path $full -Root $SnapshotRoot)) { throw "$Label is outside the snapshot." }
+        Assert-StandardValidationRegularFile -Path $full -Context $Label
+        return (Get-StandardValidationJsonSnapshot -Path $full -Context $Label -PreserveDateStrings).value
+    }
+
+    try {
+        $registryRelative = 'config/skillspector-exceptions.json'
+        # Inspect ancestors before testing existence or opening any approval file.
+        $registryPath = Assert-StandardValidationCanonicalRootPath -Path (Join-Path $SnapshotRoot $registryRelative) -Context 'static exception registry'
+        if (-not (Test-Path -LiteralPath $registryPath -PathType Leaf)) { throw 'reports suppressed findings without a human-approved exception registry.' }
+        $registry = Read-StaticExceptionJson -RelativePath $registryRelative -Label 'static exception registry'
+        if (-not (Test-StandardValidationIntegerRange -Value $registry.schemaVersion -Minimum 1 -Maximum 1)) { throw 'exception registry schemaVersion must be integer 1.' }
+        if ($registry.contract -isnot [string] -or -not [string]::Equals($registry.contract, 'skillspector-human-approved-exceptions-v1', [StringComparison]::Ordinal)) { throw 'exception registry contract is unsupported.' }
+        Assert-StaticExceptionStrings -Object $registry.scanner -Fields @('package','fingerprintSchema','version') -Label 'exception registry scanner'
+        if (-not [string]::Equals($registry.scanner.package, 'skillspector', [StringComparison]::Ordinal)) { throw 'exception registry scanner.package is unsupported.' }
+        if (-not [string]::Equals($registry.scanner.fingerprintSchema, 'skillspector-finding-fingerprint-v2', [StringComparison]::Ordinal)) { throw 'exception registry scanner.fingerprintSchema is unsupported.' }
+        if ($registry.scanner.version -isnot [string] -or -not [string]::Equals($registry.scanner.version, $ScannerVersion, [StringComparison]::Ordinal)) { throw 'exception registry scanner.version differs from the frozen scanner.' }
+        Assert-StaticExceptionStrings -Object $registry.approval -Fields @('approver','approvedOn','tracking') -Label 'exception registry approval'
+        $expiry = [datetime]::MinValue
+        if ($registry.review.expiresOn -isnot [string] -or
+            -not [datetime]::TryParseExact($registry.review.expiresOn, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$expiry)) { throw 'exception registry review.expiresOn must be yyyy-MM-dd.' }
+        if ($expiry.Date -lt [datetime]::UtcNow.Date) { throw 'exception registry review.expiresOn is expired.' }
+        if ($registry.baselines -isnot [array] -or $registry.baselines.Count -eq 0) { throw 'exception registry baselines must be a nonempty array.' }
+        $active = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+        foreach ($skillId in $ActiveSkills) { [void]$active.Add($skillId) }
+        $skills = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+        $fingerprints = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($binding in $registry.baselines) {
+            Assert-StaticExceptionStrings -Object $binding -Fields @('skillId','path') -Label 'baseline binding'
+            if (-not $active.Contains($binding.skillId) -or -not $skills.Add($binding.skillId)) { throw 'baseline skillId must be active and unique.' }
+            $expectedPath = "config/skillspector-exceptions/$($binding.skillId).baseline.json"
+            if (-not [string]::Equals($binding.path, $expectedPath, [StringComparison]::Ordinal)) { throw 'baseline path must match config/skillspector-exceptions/<skillId>.baseline.json.' }
+            $baseline = Read-StaticExceptionJson -RelativePath $binding.path -Label 'static exception baseline'
+            if (-not (Test-StandardValidationIntegerRange -Value $baseline.version -Minimum 2 -Maximum 2)) { throw 'baseline version must be integer 2.' }
+            if ($baseline.scanner_version -isnot [string] -or -not [string]::Equals($baseline.scanner_version, $ScannerVersion, [StringComparison]::Ordinal)) { throw 'baseline scanner_version differs from the frozen scanner.' }
+            if ($baseline.rules -isnot [array] -or $baseline.rules.Count -ne 0) { throw 'baseline rules must be an empty array.' }
+            if ($baseline.fingerprints -isnot [array] -or $baseline.fingerprints.Count -eq 0) { throw 'baseline fingerprints must be a nonempty array.' }
+            $hashes = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+            $reasons = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+            foreach ($fingerprint in $baseline.fingerprints) {
+                Assert-StaticExceptionStrings -Object $fingerprint -Fields @('hash','rule_id','file','reason') -Label 'baseline fingerprint'
+                if ($fingerprint.hash -cnotmatch '^sha256:[0-9a-f]{64}$' -or -not $hashes.Add($fingerprint.hash) -or -not $reasons.Add($fingerprint.reason)) { throw 'baseline fingerprint hash or reason is invalid or duplicated.' }
+                $fingerprints.Add([pscustomobject]@{skillId=$binding.skillId;value=$fingerprint})
+            }
+        }
+        if ($registry.exceptions -isnot [array]) { throw 'exception registry exceptions must be an array.' }
+        $exceptionHashes = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+        foreach ($exception in $registry.exceptions) {
+            Assert-StaticExceptionStrings -Object $exception -Fields @('fingerprint','skillId','ruleId','file','exceptionId','necessity','riskAssessment','compensatingControls','owner','approvedOn','severity') -Label 'registry exception'
+            if (-not ([string]::Equals($exception.severity, 'MEDIUM', [StringComparison]::Ordinal) -or [string]::Equals($exception.severity, 'LOW', [StringComparison]::Ordinal))) { throw 'registry exception severity must be MEDIUM or LOW.' }
+            $matches = @($fingerprints | Where-Object { [string]::Equals($_.value.hash, $exception.fingerprint, [StringComparison]::Ordinal) })
+            if ($matches.Count -ne 1 -or -not $exceptionHashes.Add($exception.fingerprint)) { throw 'registry exceptions and baseline fingerprints must be one-to-one.' }
+            $match = $matches[0]
+            if (-not [string]::Equals($match.skillId, $exception.skillId, [StringComparison]::Ordinal) -or
+                -not [string]::Equals($match.value.rule_id, $exception.ruleId, [StringComparison]::Ordinal) -or
+                -not [string]::Equals($match.value.file, $exception.file, [StringComparison]::Ordinal)) { throw 'registry exception skillId, ruleId or file differs from its baseline fingerprint.' }
+        }
+        if ($exceptionHashes.Count -ne $fingerprints.Count) { throw 'registry exceptions and baseline fingerprints must be one-to-one.' }
+        foreach ($finding in $suppressed) {
+            $matches = @($fingerprints | Where-Object {
+                [string]::Equals($_.skillId, $finding.skillId, [StringComparison]::Ordinal) -and
+                [string]::Equals($_.value.reason, $finding.suppressionReason, [StringComparison]::Ordinal) -and
+                [string]::Equals($_.value.rule_id, $finding.ruleId, [StringComparison]::Ordinal) -and
+                [string]::Equals($_.value.file, $finding.file, [StringComparison]::Ordinal)
+            })
+            if ($matches.Count -ne 1) { throw 'suppressed a finding that is not in the approved baseline.' }
+        }
+    }
+    catch { throw "BLOCKED|$Context $($_.Exception.Message)" }
+    return [int]$suppressed.Count
+}
+
 function Get-StandardValidationSemanticRequirement {
     param([Parameter(Mandatory = $true)] $Envelope, [Parameter(Mandatory = $true)][string] $Context)
 
@@ -8567,6 +8670,9 @@ function Invoke-StandardCoreSourceTools {
         }
         else {
             Assert-StandardCoreNativeReports -Envelope $resultEnvelope -ToolId $dispatch.tool -Skills $nativeSkills -Receipts @($Spec.toolReceipts) -RunRoot $RunRoot -ReceiptMap $receiptMap
+            if ($dispatch.tool -ceq 'static-analyzer') {
+                [void](Assert-StandardValidationStaticExceptions -Envelope $resultEnvelope -SnapshotRoot $SnapshotRoot -ActiveSkills @($SkillSet.ids) -ScannerVersion ([string]$receiptMap.receipts['skillspector'].resolvedVersion) -Context "source $($dispatch.tool)")
+            }
             if ([bool](Assert-StandardValidationFindings -Envelope $resultEnvelope -Context "source $($dispatch.tool)")) { throw 'BLOCKED|Source findings require review under the existing severity policy.' }
             if ($dispatch.tool -ceq 'static-analyzer' -and [string](Get-StandardValidationProperty -Object $resultEnvelope -Name 'analyzerCompleteness') -cne 'complete') { throw 'FAILED|Source Static coverage is incomplete.' }
         }
@@ -8699,6 +8805,9 @@ function Assert-StandardCoreSourceCheckReport {
         $nativeSkills=if ([string]::IsNullOrWhiteSpace([string]$event.skillId)) {@($source.activeSkills)} else {@([string]$event.skillId)}
         if ($eventStatus -cne 'platform-unavailable') {
             Assert-StandardCoreNativeReports -Envelope $envelope -ToolId $event.toolId -Skills $nativeSkills -Receipts @($source.toolReceipts) -RunRoot $Report.artifacts.runRoot -ReceiptMap $finalReceiptMap
+            if ([string]$event.toolId -ceq 'static-analyzer') {
+                [void](Assert-StandardValidationStaticExceptions -Envelope $envelope -SnapshotRoot $Report.artifacts.snapshotRoot -ActiveSkills @($source.activeSkills) -ScannerVersion ([string]$finalReceiptMap.receipts['skillspector'].resolvedVersion) -Context 'source report findings')
+            }
             if ([bool](Assert-StandardValidationFindings -Envelope $envelope -Context 'source report findings') -or
                 ($event.toolId -ceq 'static-analyzer' -and [string]$envelope.analyzerCompleteness -cne 'complete')) { throw 'FAILED|Source report findings or Static coverage did not pass.' }
         }
@@ -9853,6 +9962,15 @@ function Invoke-StandardValidationRun {
             throw 'FAILED|Static analyzer did not cover every active Skill.'
         }
         if ([string](Get-StandardValidationProperty -Object $invocation.envelope -Name 'status') -cne 'platform-unavailable') {
+            $staticExceptionScannerVersion = ''
+            $staticSuppressed = Get-StandardValidationProperty -Object $invocation.envelope -Name 'suppressedFindings'
+            if ($staticSuppressed -is [array] -and $staticSuppressed.Count -gt 0) {
+                $staticApprovedSources = (Get-StandardValidationJsonSnapshot -Path (Join-Path $script:StandardValidationRepositoryRoot 'docs/standards/skillspector-approved-sources.json') -Context 'SkillSpector approved-source registry').value
+                $staticApprovedEntry = @($staticApprovedSources.entries.PSObject.Properties | Where-Object { $_.Name -ceq [string]$staticApprovedSources.active })
+                if ($staticApprovedEntry.Count -ne 1) { throw 'BLOCKED|Static analyzer approved scanner version is unavailable.' }
+                $staticExceptionScannerVersion = [string]$staticApprovedEntry[0].Value.version
+            }
+            [void](Assert-StandardValidationStaticExceptions -Envelope $invocation.envelope -SnapshotRoot $snapshotRoot -ActiveSkills @($adapterResult.skills.ids) -ScannerVersion $staticExceptionScannerVersion -Context 'Static analyzer')
             if ([bool](Assert-StandardValidationFindings -Envelope $invocation.envelope -Context 'Static analyzer')) { $requiresHumanReview = $true }
             if (Get-StandardValidationSemanticRequirement -Envelope $invocation.envelope -Context 'Static analyzer') {
                 $analyzerSemanticRequired = $true

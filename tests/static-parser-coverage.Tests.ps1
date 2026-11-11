@@ -150,6 +150,41 @@ Describe 'Static parser coverage and finding preservation' {
         Assert-ParserRejected {Write-StaticNativeReportFromProcess -Process ([pscustomobject]@{status='passed';exitCode=0;cleanedUp=$true;outputTruncated=$true;stdout='{}'}) -Path (Join-Path $TestDrive 'truncated.json')}
     }
 
+    Context 'Optional exact baseline arguments' {
+        # Scenario: a legacy invocation omits the optional baseline. Purpose: retain both original argument arrays.
+        It 'UnitT10_preserves_native_and_bridge_arguments_without_a_baseline' {
+            $baselineFull=$null
+            $skillFull='candidate-skill';$bridgePath='bridge.py';$pwsh='pwsh';$pwshHash='runtime-hash'
+            $reportFull='report.json';$profileRecord='profile.json';$SourceRevision='revision';$CandidateIdentity='candidate'
+            foreach($name in @('nativeArguments','bridgeArguments')){
+                $assignment=$parserAst.Find({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ceq ('$'+$name) -and $n.Operator -eq 'Equals'},$true)
+                . ([scriptblock]::Create($assignment.Extent.Text))
+                $before=[object[]]@((Get-Variable -Name $name -ValueOnly) | ForEach-Object { $_ })
+                $conditional=$parserAst.Find({param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Extent.Text -ceq ('if($null -ne $baselineFull){$'+$name+"+=@('--baseline',`$baselineFull)}")},$true)
+                if($null -eq $conditional){throw "Missing guarded baseline arguments for $name"}
+                . ([scriptblock]::Create($conditional.Extent.Text))
+                ((Get-Variable -Name $name -ValueOnly) -join ';') | Should -BeExactly ($before -join ';')
+                $before | Should -Not -Contain '--baseline'
+            }
+        }
+
+        # Scenario: a verified baseline is supplied. Purpose: pass its exact path to both native scanner routes.
+        It 'UnitT20_appends_the_baseline_to_native_and_bridge_arguments' {
+            $baselineFull='candidate baseline.json'
+            $skillFull='candidate-skill';$bridgePath='bridge.py';$pwsh='pwsh';$pwshHash='runtime-hash'
+            $reportFull='report.json';$profileRecord='profile.json';$SourceRevision='revision';$CandidateIdentity='candidate'
+            foreach($name in @('nativeArguments','bridgeArguments')){
+                $assignment=$parserAst.Find({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ceq ('$'+$name) -and $n.Operator -eq 'Equals'},$true)
+                . ([scriptblock]::Create($assignment.Extent.Text))
+                $before=[object[]]@((Get-Variable -Name $name -ValueOnly) | ForEach-Object { $_ })
+                $conditional=$parserAst.Find({param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Extent.Text -ceq ('if($null -ne $baselineFull){$'+$name+"+=@('--baseline',`$baselineFull)}")},$true)
+                if($null -eq $conditional){throw "Missing guarded baseline arguments for $name"}
+                . ([scriptblock]::Create($conditional.Extent.Text))
+                ((Get-Variable -Name $name -ValueOnly) -join ';') | Should -BeExactly ((@($before)+@('--baseline',$baselineFull)) -join ';')
+            }
+        }
+    }
+
     # Scenario: a frozen receipt omits or changes its approved source binding before the static child consumes it.
     # Purpose: reject missing, unknown, version-drifted and identity-drifted receipts with the established parser-profile error.
     It 'UnitT53_rejects_receipts_not_bound_to_one_approved_SkillSpector_entry' {
