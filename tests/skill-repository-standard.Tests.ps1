@@ -4052,7 +4052,7 @@ public sealed class C245NonCooperativeStream : Stream {
             'docs/standards/validation-security-gate.json',
             '.github/workflows/pr8-powershell-validation.yml',
             'tests/skill-repository-workflows.Tests.ps1',
-            'platform-neutral Core lane', 'every `*.Tests.ps1` leaf name **MUST** be unique under an ordinal case-insensitive comparison', 'Windows Core continues to require exactly five reviewed skips', 'core-test-skip-inventory.json', 'union equals the expected plan', 'tests/golden/', 'inspect each golden change line by line', 'standards-conformance.yml',
+            'platform-neutral Core lane', 'every `*.Tests.ps1` leaf name **MUST** be unique under an ordinal case-insensitive comparison', 'A cancelled Windows Core aggregate **MUST** fail explicitly', 'Windows Core continues to require exactly five reviewed skips', 'core-test-skip-inventory.json', 'union equals the expected plan', 'tests/golden/', 'inspect each golden change line by line', 'standards-conformance.yml',
             'schema v2', 'testOwnership', 'unknown schema or ownership values',
             'SourceValidation execution remains owned by the central source-validation function',
             'scripts/Invoke-RepositoryCheck.ps1', 'scripts/Invoke-CorePester.ps1',

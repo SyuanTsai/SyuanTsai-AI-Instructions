@@ -1,6 +1,19 @@
 $script:WindowsCoreRepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 . (Join-Path $script:WindowsCoreRepositoryRoot 'scripts/Get-WindowsCorePlan.ps1') -DefineFunctionsOnly
 . (Join-Path $script:WindowsCoreRepositoryRoot 'scripts/Assert-WindowsCoreAggregate.ps1') -DefineFunctionsOnly
+$runnerTokens = $null
+$runnerParseErrors = $null
+$runnerAst = [Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $script:WindowsCoreRepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'),
+    [ref]$runnerTokens,
+    [ref]$runnerParseErrors)
+if (@($runnerParseErrors).Count -ne 0) { throw 'Invoke-PesterShardProcess.ps1 must parse before its shard planner can be tested.' }
+$runnerShardPlanFunctions = @($runnerAst.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'New-PesterShardPlan'
+}, $true))
+if ($runnerShardPlanFunctions.Count -ne 1) { throw 'Invoke-PesterShardProcess.ps1 must define New-PesterShardPlan exactly once.' }
+. ([scriptblock]::Create($runnerShardPlanFunctions[0].Extent.Text))
 
 function Set-WindowsCoreTestText {
     param([string] $Path,[string] $Value)
@@ -231,6 +244,51 @@ Describe 'Windows Core full planner and aggregate' {
             $owner = @($first | Where-Object { @($_.expectedSkippedTests) -ccontains $skip })
             $owner.Count | Should Be 1
             @($owner[0].files) -ccontains $skipFile | Should Be $true
+        }
+    }
+
+    # Scenario: A workflow shard selects one tiny fixture test and explicitly disables the runner's repository-wide isolated defaults.
+    # Purpose: Reproduce the found-zero defect and prove the workflow argument set accepts a shard that contains no default isolated file.
+    It 'UnitT45_accepts_an_empty_isolated_list_for_a_selected_fixture_shard' {
+        $fixtureRoot = Join-Path $TestDrive 'runner-selected-fixture'
+        $fixtureTests = Join-Path $fixtureRoot 'tests'
+        foreach ($name in @('alpha.Tests.ps1','beta.Tests.ps1','gamma.Tests.ps1')) {
+            Set-WindowsCoreTestText (Join-Path $fixtureTests $name) "Describe '$name' { It 'UnitT10_passes' { `$true | Should Be `$true } }`n"
+        }
+        $selectedPath = (Resolve-Path -LiteralPath (Join-Path $fixtureTests 'beta.Tests.ps1')).Path
+
+        $workflowPlan = @(New-PesterShardPlan `
+            -AllTestPaths @($selectedPath) `
+            -IsolatedTestFileNames ([string[]]@()) `
+            -BulkShardSize 1)
+        $workflowPlan.Count | Should Be 1
+        @($workflowPlan[0].Paths).Count | Should Be 1
+        [IO.Path]::GetFileName([string]$workflowPlan[0].Paths[0]) | Should Be 'beta.Tests.ps1'
+
+        $runnerDefaults = [string[]]@('standard-validation-runner.Tests.ps1','syp101-production-smoke-contract.Tests.ps1')
+        { New-PesterShardPlan -AllTestPaths @($selectedPath) -IsolatedTestFileNames $runnerDefaults -BulkShardSize 1 } | Should Throw 'found 0'
+    }
+
+    # Scenario: The production planner emits eight selected-file shards and each is handed to the real runner shard planner with workflow arguments.
+    # Purpose: Prove every current repository shard remains an exact one-file-per-process plan when isolated defaults are explicitly empty.
+    It 'UnitT47_accepts_every_actual_repository_shard_with_workflow_runner_arguments' {
+        @($script:ActualPlan.Plan.shards).Count | Should Be 8
+        $actualTestPaths = @(Get-ChildItem -LiteralPath (Join-Path $script:WindowsCoreRepositoryRoot 'tests') -Filter '*.Tests.ps1' -File -Recurse)
+        foreach ($workflowShard in @($script:ActualPlan.Plan.shards)) {
+            $selectedPaths = [string[]]@(
+                foreach ($name in @($workflowShard.files)) {
+                    $matches = @($actualTestPaths | Where-Object Name -ceq ([string]$name))
+                    $matches.Count | Should Be 1
+                    $matches[0].FullName
+                }
+            )
+            $runnerPlan = @(New-PesterShardPlan `
+                -AllTestPaths $selectedPaths `
+                -IsolatedTestFileNames ([string[]]@()) `
+                -BulkShardSize 1)
+            $runnerPlan.Count | Should Be @($workflowShard.files).Count
+            (@($runnerPlan.Paths | ForEach-Object { [IO.Path]::GetFileName([string]$_) } | Sort-Object -CaseSensitive) -join "`n") |
+                Should Be (@($workflowShard.files | Sort-Object -CaseSensitive) -join "`n")
         }
     }
 

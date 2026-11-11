@@ -427,6 +427,8 @@ jobs:
         @{ Mutation = 'permissions-write'; Target = 'core' },
         @{ Mutation = 'pull-request-target'; Target = 'core' },
         @{ Mutation = 'top-level-env'; Target = 'core' },
+        @{ Mutation = 'missing-cancelled-guard'; Target = 'core' },
+        @{ Mutation = 'aggregate-upload-always'; Target = 'core' },
         @{ Mutation = 'install-job-name'; Target = 'install' },
         @{ Mutation = 'install-inserted-step'; Target = 'install' }
     ) {
@@ -449,6 +451,8 @@ jobs:
             'permissions-write' { $tampered = $workflow.Replace("permissions:`n  contents: read", "permissions:`n  contents: write") }
             'pull-request-target' { $tampered = $workflow.Replace("  workflow_dispatch:", "  pull_request_target:`n  workflow_dispatch:") }
             'top-level-env' { $tampered = $workflow.Replace("`njobs:", "`nenv:`n  BYPASS: true`n`njobs:") }
+            'missing-cancelled-guard' { $tampered = [regex]::Replace($workflow, '(?ms)\n      - name: Fail a cancelled Windows Core aggregate\n.*\z', "`n") }
+            'aggregate-upload-always' { $tampered = $workflow.Replace('        if: always() && !cancelled()', '        if: always()') }
             'install-job-name' { $tampered = $workflow.Replace('    name: Windows Install Smoke', '    name: Windows Install Smoke changed') }
             'install-inserted-step' { $tampered = $workflow.Replace("      - name: Check production lock", "      - name: Bypass`n        run: exit 0`n`n      - name: Check production lock") }
         }

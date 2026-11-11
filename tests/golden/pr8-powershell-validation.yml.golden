@@ -431,6 +431,9 @@ jobs:
             PesterVersion = '4.10.1'
             ExpectedSkippedCount = $expectedSkippedTests.Count
             ExpectedSkippedTests = $expectedSkippedTests
+            # Each selected file already runs in its own process, so repository-wide isolated defaults must not be reapplied inside a matrix shard.
+            IsolatedTestFileNames = [string[]]@()
+            BulkShardSize = 1
             ShardPartitionCount = 1
             ShardPartitionIndex = 0
             OuterTimeoutSeconds = 3600
@@ -847,7 +850,7 @@ jobs:
           if (-not $?) { throw 'Windows Core aggregate validation failed.' }
 
       - name: Upload Windows Core aggregate evidence
-        if: always()
+        if: always() && !cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: windows-core-aggregate-${{ github.run_id }}
@@ -855,3 +858,9 @@ jobs:
           if-no-files-found: error
           retention-days: 1
           overwrite: true
+
+      - name: Fail a cancelled Windows Core aggregate
+        if: cancelled()
+        shell: pwsh
+        run: |
+          throw 'Windows Core aggregate was cancelled and must not be treated as successful.'
