@@ -53,10 +53,31 @@ function Test-WindowsCoreJsonInteger {
 
 function Assert-WindowsCoreExactProperties {
     param([Parameter(Mandatory = $true)] $Value,[Parameter(Mandatory = $true)][string[]] $Names,[Parameter(Mandatory = $true)][string] $Context)
-    if ($null -eq $Value -or $null -eq $Value.PSObject) { throw "$Context must be a JSON object." }
+    if ($null -eq $Value -or $Value -isnot [pscustomobject]) { throw "$Context must be a JSON object." }
     $actual = [string[]]@($Value.PSObject.Properties.Name | Sort-Object -CaseSensitive)
     $expected = [string[]]@($Names | Sort-Object -CaseSensitive)
     if (($actual -join "`n") -cne ($expected -join "`n")) { throw "$Context has an unexpected property set." }
+}
+
+function Assert-WindowsCoreShardReceipt {
+    param([Parameter(Mandatory = $true)] $Receipt,[Parameter(Mandatory = $true)][string] $ShardId,[Parameter(Mandatory = $true)][int] $ReceiptIndex)
+
+    $context = "Shard $ShardId receipt $ReceiptIndex"
+    Assert-WindowsCoreExactProperties -Value $Receipt -Names @(
+        'name','paths','processEvidencePath','resultPath','exitCode','status','cleanedUp','outputQuotaExceeded'
+    ) -Context $context
+    if ($Receipt.name -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$Receipt.name)) { throw "$context name must be a non-empty string." }
+    if ($Receipt.paths -isnot [Array] -or @($Receipt.paths).Count -eq 0) { throw "$context paths must be a non-empty JSON array." }
+    foreach ($path in @($Receipt.paths)) {
+        if ($path -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$path)) { throw "$context paths must contain only non-empty strings." }
+    }
+    foreach ($pathName in @('processEvidencePath','resultPath')) {
+        if ($Receipt.$pathName -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$Receipt.$pathName)) { throw "$context $pathName must be a non-empty string." }
+    }
+    if (-not (Test-WindowsCoreJsonInteger $Receipt.exitCode) -or [long]$Receipt.exitCode -ne 0) { throw "$context exitCode must be the integer 0." }
+    if ($Receipt.status -isnot [string] -or [string]$Receipt.status -cne 'completed') { throw "$context status must be completed." }
+    if ($Receipt.cleanedUp -isnot [bool] -or $Receipt.cleanedUp -ne $true) { throw "$context cleanedUp must be the JSON Boolean true." }
+    if ($Receipt.outputQuotaExceeded -isnot [bool] -or $Receipt.outputQuotaExceeded -ne $false) { throw "$context outputQuotaExceeded must be the JSON Boolean false." }
 }
 
 function Assert-WindowsCoreShardSummary {
@@ -84,6 +105,10 @@ function Assert-WindowsCoreShardSummary {
     }
     foreach ($arrayName in @('testFiles','shards','skippedTests')) {
         if ($Summary.$arrayName -isnot [Array]) { throw "Shard $ShardId $arrayName must be a JSON array." }
+    }
+    if (@($Summary.shards).Count -eq 0) { throw "Shard $ShardId shards must contain at least one process receipt." }
+    for ($receiptIndex = 0; $receiptIndex -lt @($Summary.shards).Count; $receiptIndex++) {
+        Assert-WindowsCoreShardReceipt -Receipt $Summary.shards[$receiptIndex] -ShardId $ShardId -ReceiptIndex $receiptIndex
     }
     foreach ($path in @($Summary.testFiles)) {
         if ($path -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$path)) { throw "Shard $ShardId testFiles must contain only non-empty strings." }

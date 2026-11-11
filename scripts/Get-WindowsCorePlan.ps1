@@ -48,12 +48,29 @@ function Get-WindowsCoreSelectedTests {
     if ($all.Count -eq 0) { throw 'Windows Core test discovery found no tests.' }
     $relativePaths = [string[]]@($all | ForEach-Object { [IO.Path]::GetRelativePath($Root, $_.FullName).Replace('\', '/') })
     if (@($relativePaths | Select-Object -Unique).Count -ne $relativePaths.Count) { throw 'Windows Core test discovery returned duplicate paths.' }
+    $pathsByLeaf = [Collections.Generic.Dictionary[string,Collections.Generic.List[string]]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($relativePath in $relativePaths) {
+        $leaf = [IO.Path]::GetFileName($relativePath)
+        if (-not $pathsByLeaf.ContainsKey($leaf)) {
+            $pathsByLeaf.Add($leaf, [Collections.Generic.List[string]]::new())
+        }
+        $pathsByLeaf[$leaf].Add($relativePath)
+    }
+    $conflictingPaths = [Collections.Generic.List[string]]::new()
+    foreach ($entry in $pathsByLeaf.GetEnumerator()) {
+        if ($entry.Value.Count -gt 1) {
+            foreach ($path in $entry.Value) { $conflictingPaths.Add($path) }
+        }
+    }
+    if ($conflictingPaths.Count -gt 0) {
+        $orderedConflicts = Sort-WindowsCoreOrdinal ([string[]]$conflictingPaths.ToArray())
+        throw "Windows Core requires every tests/ *.Tests.ps1 leaf name to be case-insensitive unique. Conflicting relative paths: $($orderedConflicts -join ', ')."
+    }
     $authoritySet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($path in $AuthorityTestFiles) { [void]$authoritySet.Add($path) }
     $nonAuthority = [string[]]@($relativePaths | Where-Object { -not $authoritySet.Contains($_) })
     if ($nonAuthority.Count -ne ($relativePaths.Count - 6)) { throw 'Windows Core exclusion did not remove exactly six authority tests.' }
     $names = [string[]]@($nonAuthority | ForEach-Object { [IO.Path]::GetFileName($_) })
-    if (@($names | Select-Object -Unique).Count -ne $names.Count) { throw 'Windows Core requires unique non-authority test leaf names.' }
     return [string[]](Sort-WindowsCoreOrdinal $names)
 }
 

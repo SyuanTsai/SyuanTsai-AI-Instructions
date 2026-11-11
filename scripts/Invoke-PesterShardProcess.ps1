@@ -42,21 +42,8 @@ if ($SummarySchemaVersion -eq 2 -and [string]::IsNullOrWhiteSpace($SummaryRunId)
 $script:PesterShardChildOutputQuotaCharacters = 1048576
 $compareExpectedSkippedTests = $PSBoundParameters.ContainsKey('ExpectedSkippedTests')
 
-function Assert-PesterShardExpectedSkippedTests {
-    param(
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $Expected,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $CaseEvidence
-    )
-
-    $expectedValues = [Collections.Generic.List[string]]::new()
-    $expectedSeen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-    foreach ($identifier in @($Expected)) {
-        if ([string]::IsNullOrWhiteSpace($identifier) -or $identifier -notmatch '^[^:/\\]+\.Tests\.ps1::\S.+$') {
-            throw "INVALID|Expected skipped test identifier is invalid: '$identifier'."
-        }
-        if (-not $expectedSeen.Add($identifier)) { throw "INVALID|Expected skipped test inventory contains a duplicate: '$identifier'." }
-        $expectedValues.Add($identifier)
-    }
+function Get-PesterShardSkippedTests {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $CaseEvidence)
 
     $actualValues = [Collections.Generic.List[string]]::new()
     $actualSeen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -73,6 +60,30 @@ function Assert-PesterShardExpectedSkippedTests {
             $actualValues.Add($identifier)
         }
     }
+    $stableActualValues = [string[]]$actualValues.ToArray()
+    [Array]::Sort($stableActualValues, [StringComparer]::Ordinal)
+    return ,$stableActualValues
+}
+
+function Assert-PesterShardExpectedSkippedTests {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $Expected,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $CaseEvidence
+    )
+
+    $expectedValues = [Collections.Generic.List[string]]::new()
+    $expectedSeen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($identifier in @($Expected)) {
+        if ([string]::IsNullOrWhiteSpace($identifier) -or $identifier -notmatch '^[^:/\\]+\.Tests\.ps1::\S.+$') {
+            throw "INVALID|Expected skipped test identifier is invalid: '$identifier'."
+        }
+        if (-not $expectedSeen.Add($identifier)) { throw "INVALID|Expected skipped test inventory contains a duplicate: '$identifier'." }
+        $expectedValues.Add($identifier)
+    }
+
+    $actualValues = [string[]](Get-PesterShardSkippedTests -CaseEvidence $CaseEvidence)
+    $actualSeen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($identifier in $actualValues) { [void]$actualSeen.Add($identifier) }
 
     $missing = @($expectedValues | Where-Object { -not $actualSeen.Contains($_) } | Sort-Object)
     $unexpected = @($actualValues | Where-Object { -not $expectedSeen.Contains($_) } | Sort-Object)
@@ -81,9 +92,7 @@ function Assert-PesterShardExpectedSkippedTests {
         $unexpectedText = if ($unexpected.Count -eq 0) { '<none>' } else { $unexpected -join ', ' }
         throw "Pester skipped test inventory mismatch. Missing: $missingText. Unexpected: $unexpectedText."
     }
-    $stableActualValues = [string[]]$actualValues.ToArray()
-    [Array]::Sort($stableActualValues, [StringComparer]::Ordinal)
-    return ,$stableActualValues
+    return ,$actualValues
 }
 
 function Get-PesterShardCanonicalHash {
@@ -1428,7 +1437,7 @@ foreach ($shard in @($selectedShards.ToArray())) {
         -CancellationToken $CancellationToken -IsolationRequirement $IsolationRequirement
     $resultPath = [string]$shardRun.resultPath
     $summary = Read-PesterShardJson $resultPath
-    if ($compareExpectedSkippedTests) {
+    if ($SummarySchemaVersion -eq 2 -or $compareExpectedSkippedTests) {
         $caseEvidenceDocuments.Add((Read-PesterShardJson ($resultPath + '.cases.json')))
     }
     $processEvidence = Read-PesterShardJson ([string]$shardRun.processEvidencePath)
@@ -1485,8 +1494,14 @@ $aggregateSummary = [pscustomobject][ordered]@{
 Assert-PesterShardResultCounts -Summary $aggregateSummary -Context 'aggregate'
 if ($ExpectedTotalCount -ge 0 -and $total -ne $ExpectedTotalCount) { throw "Pester discovered $total tests across shards; expected exactly $ExpectedTotalCount." }
 $actualSkippedTests = [string[]]@()
+if ($SummarySchemaVersion -eq 2 -or $compareExpectedSkippedTests) {
+    $actualSkippedTests = [string[]](Get-PesterShardSkippedTests -CaseEvidence $caseEvidenceDocuments.ToArray())
+}
 if ($compareExpectedSkippedTests) {
     $actualSkippedTests = [string[]](Assert-PesterShardExpectedSkippedTests -Expected $ExpectedSkippedTests -CaseEvidence $caseEvidenceDocuments.ToArray())
+}
+if ($SummarySchemaVersion -eq 2 -and $actualSkippedTests.Count -ne $skipped) {
+    throw "Pester summary v2 skippedTests count '$($actualSkippedTests.Count)' differs from SkippedCount '$skipped'."
 }
 if ($ExpectedSkippedCount -ge 0 -and $skipped -ne $ExpectedSkippedCount) { throw "Pester expected exactly $ExpectedSkippedCount platform/version skips; got $skipped." }
 Write-Host "Aggregate - Total: $total Passed: $passed Failed: $failed Skipped: $skipped Pending: $pending Inconclusive: $inconclusive"

@@ -38,8 +38,11 @@ function Get-AuthorityTestPaths {
     foreach ($name in $authority) { Set-WindowsCoreTestText (Join-Path $Root "tests/$name") "Describe '$name' {}`n" }
     $skipInventory = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:WindowsCoreRepositoryRoot 'docs/standards/core-test-skip-inventory.json') | ConvertFrom-Json
     $skipNames = [string[]]@($skipInventory.platforms.windows.expectedSkippedTests | ForEach-Object { ($_ -split '::', 2)[0] } | Select-Object -Unique)
-    $expected = [string[]]@('alpha.Tests.ps1','beta.Tests.ps1') + $skipNames
-    foreach ($name in $expected) { Set-WindowsCoreTestText (Join-Path $Root "tests/$name") "Describe '$name' {}`n" }
+    $expected = [string[]]@('alpha.Tests.ps1','beta.Tests.ps1','child.Tests.ps1') + $skipNames
+    foreach ($name in @($expected | Where-Object { $_ -cne 'child.Tests.ps1' })) {
+        Set-WindowsCoreTestText (Join-Path $Root "tests/$name") "Describe '$name' {}`n"
+    }
+    Set-WindowsCoreTestText (Join-Path $Root 'tests/nested/child.Tests.ps1') "Describe 'child.Tests.ps1' {}`n"
     Set-WindowsCoreTestText (Join-Path $Root 'docs/standards/core-test-skip-inventory.json') ($skipInventory | ConvertTo-Json -Depth 8)
     $weights = [ordered]@{ schemaVersion = 1; partitionCount = 8; weights = [ordered]@{ 'alpha.Tests.ps1' = 9; 'beta.Tests.ps1' = 4 } }
     Set-WindowsCoreTestText (Join-Path $Root 'tests/windows-core-shard-weights.json') ($weights | ConvertTo-Json -Depth 6)
@@ -75,7 +78,18 @@ function New-WindowsCoreAggregateArtifacts {
                 PendingCount = 0
                 InconclusiveCount = 0
             }
-            shards = [object[]]@()
+            shards = [object[]]@($shard.files | ForEach-Object {
+                [pscustomobject][ordered]@{
+                    name = [IO.Path]::GetFileNameWithoutExtension([IO.Path]::GetFileNameWithoutExtension([string]$_))
+                    paths = [object[]]@((Join-Path $script:WindowsCoreRepositoryRoot "tests/$_"))
+                    processEvidencePath = Join-Path $artifactRoot "$_.process.json"
+                    resultPath = Join-Path $artifactRoot "$_.result.json"
+                    exitCode = 0
+                    status = 'completed'
+                    cleanedUp = $true
+                    outputQuotaExceeded = $false
+                }
+            })
             runId = 'run-42'
             runAttempt = 1
             skippedTests = [object[]]@($shard.expectedSkippedTests)
@@ -136,6 +150,35 @@ Describe 'Windows Core full planner and aggregate' {
         $expected = New-WindowsCoreFullPlanFixture $root
         $plan = Get-WindowsCorePlan -Root $root -ShardWeightsPath (Join-Path $root 'tests/windows-core-shard-weights.json')
         ($plan.Plan.selectedTestFiles -join "`n") | Should Be ($expected -join "`n")
+        @($plan.Plan.selectedTestFiles | Where-Object { $_ -ceq 'child.Tests.ps1' }).Count | Should Be 1
+        @($plan.Plan.shards.files | Where-Object { $_ -ceq 'child.Tests.ps1' }).Count | Should Be 1
+    }
+
+    # Scenario: Two recursively discovered tests use the same leaf name in different directories.
+    # Purpose: Fail closed because the bounded executor selects by leaf name rather than relative path.
+    It 'UnitT25_rejects_duplicate_test_leaf_names_with_conflicting_paths' {
+        $root = Join-Path $TestDrive 'duplicate-leaf-fixture'
+        New-WindowsCoreFullPlanFixture $root | Out-Null
+        Set-WindowsCoreTestText (Join-Path $root 'tests/unit/common.Tests.ps1') "Describe 'unit common' {}`n"
+        Set-WindowsCoreTestText (Join-Path $root 'tests/integration/common.Tests.ps1') "Describe 'integration common' {}`n"
+
+        $message = $null
+        try { Get-WindowsCorePlan -Root $root -ShardWeightsPath (Join-Path $root 'tests/windows-core-shard-weights.json') | Out-Null }
+        catch { $message = $_.Exception.Message }
+        $message | Should Match 'tests/unit/common\.Tests\.ps1'
+        $message | Should Match 'tests/integration/common\.Tests\.ps1'
+        $message | Should Match 'leaf name.*case-insensitive.*unique'
+    }
+
+    # Scenario: Two recursively discovered tests differ only by leaf-name casing.
+    # Purpose: Match the executor's OrdinalIgnoreCase leaf-name selection boundary.
+    It 'UnitT27_rejects_case_only_test_leaf_name_collisions' {
+        $root = Join-Path $TestDrive 'case-leaf-fixture'
+        New-WindowsCoreFullPlanFixture $root | Out-Null
+        Set-WindowsCoreTestText (Join-Path $root 'tests/a/Foo.Tests.ps1') "Describe 'upper foo' {}`n"
+        Set-WindowsCoreTestText (Join-Path $root 'tests/b/foo.Tests.ps1') "Describe 'lower foo' {}`n"
+
+        { Get-WindowsCorePlan -Root $root -ShardWeightsPath (Join-Path $root 'tests/windows-core-shard-weights.json') } | Should Throw 'leaf name to be case-insensitive unique'
     }
 
     # Scenario: Each supported workflow event asks the same planner for a plan.
@@ -161,13 +204,34 @@ Describe 'Windows Core full planner and aggregate' {
         foreach ($item in @(@('a.Tests.ps1',9),@('b.Tests.ps1',8),@('c.Tests.ps1',7),@('d.Tests.ps1',6),@('e.Tests.ps1',5),@('f.Tests.ps1',4),@('g.Tests.ps1',3),@('h.Tests.ps1',2))) { $weights.weights[$item[0]]=$item[1] }
         Set-WindowsCoreTestText $weightsPath ($weights | ConvertTo-Json -Depth 6)
         $files = @('a.Tests.ps1','b.Tests.ps1','c.Tests.ps1','d.Tests.ps1','e.Tests.ps1','f.Tests.ps1','g.Tests.ps1','h.Tests.ps1','unknown.Tests.ps1')
-        $skip = 'unknown.Tests.ps1::UnitT10_reviewed_skip'
-        $first = @(New-WindowsCoreShards -SelectedTestFiles $files -ExpectedSkippedTests @($skip) -ConfigurationPath $weightsPath)
-        $second = @(New-WindowsCoreShards -SelectedTestFiles $files -ExpectedSkippedTests @($skip) -ConfigurationPath $weightsPath)
+        $skips = @('a.Tests.ps1::UnitT05_reviewed_skip','unknown.Tests.ps1::UnitT10_reviewed_skip')
+        $first = @(New-WindowsCoreShards -SelectedTestFiles $files -ExpectedSkippedTests $skips -ConfigurationPath $weightsPath)
+        $second = @(New-WindowsCoreShards -SelectedTestFiles $files -ExpectedSkippedTests $skips -ConfigurationPath $weightsPath)
         (($first | ConvertTo-Json -Depth 8 -Compress)) | Should Be (($second | ConvertTo-Json -Depth 8 -Compress))
-        ($first[7].files -join ',') | Should Be 'h.Tests.ps1,unknown.Tests.ps1'
-        ($first[7].expectedSkippedTests -join ',') | Should Be $skip
-        (@($first.files) -join ',') | Should Match 'unknown.Tests.ps1'
+        $expectedShards = @(
+            [pscustomobject]@{ id='01'; files=@('a.Tests.ps1') },
+            [pscustomobject]@{ id='02'; files=@('b.Tests.ps1') },
+            [pscustomobject]@{ id='03'; files=@('c.Tests.ps1') },
+            [pscustomobject]@{ id='04'; files=@('d.Tests.ps1') },
+            [pscustomobject]@{ id='05'; files=@('e.Tests.ps1') },
+            [pscustomobject]@{ id='06'; files=@('f.Tests.ps1') },
+            [pscustomobject]@{ id='07'; files=@('g.Tests.ps1') },
+            [pscustomobject]@{ id='08'; files=@('h.Tests.ps1','unknown.Tests.ps1') }
+        )
+        $first.Count | Should Be 8
+        for ($index = 0; $index -lt $expectedShards.Count; $index++) {
+            $first[$index].id | Should Be $expectedShards[$index].id
+            (@($first[$index].files) -join ',') | Should Be (@($expectedShards[$index].files) -join ',')
+        }
+        $assignedFiles = [string[]]@($first | ForEach-Object { $_.files })
+        @($assignedFiles | Select-Object -Unique).Count | Should Be $files.Count
+        (@($assignedFiles | Sort-Object -CaseSensitive) -join ',') | Should Be (@($files | Sort-Object -CaseSensitive) -join ',')
+        foreach ($skip in $skips) {
+            $skipFile = ($skip -split '::', 2)[0]
+            $owner = @($first | Where-Object { @($_.expectedSkippedTests) -ccontains $skip })
+            $owner.Count | Should Be 1
+            @($owner[0].files) -ccontains $skipFile | Should Be $true
+        }
     }
 
     # Scenario: A legal shard object is duplicated in a matrix before expansion.
@@ -241,6 +305,90 @@ Describe 'Windows Core full planner and aggregate' {
         }
         Set-WindowsCoreTestText $path ($summary | ConvertTo-Json -Depth 12)
         { Invoke-WindowsCoreAggregateForTest $script:ActualPlan $artifacts } | Should Throw
+    }
+
+    # Scenario: A shard summary contains malformed, incomplete, extended, or failed process receipts.
+    # Purpose: Treat every runner-written receipt as typed fail-closed evidence.
+    It 'UnitT105_rejects_invalid_shard_receipt_<Mutation>' -TestCases @(
+        @{ Mutation='scalar'; Keyword='JSON object' },
+        @{ Mutation='empty-object'; Keyword='property set' },
+        @{ Mutation='missing-field'; Keyword='property set' },
+        @{ Mutation='extra-field'; Keyword='property set' },
+        @{ Mutation='failed-status'; Keyword='status must be completed' }
+    ) {
+        param($Mutation,$Keyword)
+        $artifacts = Join-Path $TestDrive "receipt-$Mutation"
+        New-WindowsCoreAggregateArtifacts $script:ActualPlan $artifacts
+        $path = (Get-ChildItem -LiteralPath (Join-Path $artifacts 'shards') -Filter 'windows-core-shard-*-summary.json' -File -Recurse | Select-Object -First 1).FullName
+        $summary = Get-Content -Raw -Encoding UTF8 -LiteralPath $path | ConvertFrom-Json
+        switch ($Mutation) {
+            'scalar' { $summary.shards = [object[]]@('not-a-shard-receipt') }
+            'empty-object' { $summary.shards = [object[]]@([pscustomobject]@{}) }
+            'missing-field' { $summary.shards[0].PSObject.Properties.Remove('cleanedUp') }
+            'extra-field' { $summary.shards[0] | Add-Member -NotePropertyName unexpected -NotePropertyValue $true }
+            'failed-status' { $summary.shards[0].status = 'failed' }
+        }
+        Set-WindowsCoreTestText $path ($summary | ConvertTo-Json -Depth 12)
+        { Invoke-WindowsCoreAggregateForTest $script:ActualPlan $artifacts } | Should Throw $Keyword
+    }
+
+    # Scenario: One otherwise-valid aggregate evidence field or artifact boundary is tampered with.
+    # Purpose: Prove each independent aggregate invariant rejects its own targeted mutation.
+    It 'UnitT107_rejects_aggregate_evidence_<Mutation>' -TestCases @(
+        @{ Mutation='missing-summary'; Keyword='shard summaries' },
+        @{ Mutation='duplicate-summary'; Keyword='shard summaries' },
+        @{ Mutation='extra-test-file'; Keyword='testFiles differs' },
+        @{ Mutation='duplicate-test-file'; Keyword='duplicate values' },
+        @{ Mutation='failed-count'; Keyword='FailedCount must be zero' },
+        @{ Mutation='replaced-skip'; Keyword='skippedTests differs' },
+        @{ Mutation='plan-artifact'; Keyword='canonical JSON differs' },
+        @{ Mutation='plan-hash'; Keyword='SHA-256' },
+        @{ Mutation='matrix'; Keyword='matrix output differs' }
+    ) {
+        param($Mutation,$Keyword)
+        $artifacts = Join-Path $TestDrive "aggregate-$Mutation"
+        New-WindowsCoreAggregateArtifacts $script:ActualPlan $artifacts
+        $summaryFiles = @(Get-ChildItem -LiteralPath (Join-Path $artifacts 'shards') -Filter 'windows-core-shard-*-summary.json' -File -Recurse | Sort-Object FullName)
+        $overrides = @{}
+        switch ($Mutation) {
+            'missing-summary' { Remove-Item -LiteralPath $summaryFiles[0].FullName -Force }
+            'duplicate-summary' {
+                $copyRoot = Join-Path $artifacts 'shards/windows-core-shard-duplicate-run'
+                [IO.Directory]::CreateDirectory($copyRoot) | Out-Null
+                Copy-Item -LiteralPath $summaryFiles[0].FullName -Destination (Join-Path $copyRoot $summaryFiles[0].Name)
+            }
+            'extra-test-file' {
+                $summary = Get-Content -Raw -Encoding UTF8 -LiteralPath $summaryFiles[0].FullName | ConvertFrom-Json
+                $summary.testFiles = [object[]]@($summary.testFiles) + @('C:/repo/tests/extra.Tests.ps1')
+                Set-WindowsCoreTestText $summaryFiles[0].FullName ($summary | ConvertTo-Json -Depth 12)
+            }
+            'duplicate-test-file' {
+                $summary = Get-Content -Raw -Encoding UTF8 -LiteralPath $summaryFiles[0].FullName | ConvertFrom-Json
+                $summary.testFiles = [object[]]@($summary.testFiles) + @($summary.testFiles[0])
+                Set-WindowsCoreTestText $summaryFiles[0].FullName ($summary | ConvertTo-Json -Depth 12)
+            }
+            'failed-count' {
+                $summary = Get-Content -Raw -Encoding UTF8 -LiteralPath $summaryFiles[0].FullName | ConvertFrom-Json
+                $summary.counts.PassedCount = [long]$summary.counts.PassedCount - 1
+                $summary.counts.FailedCount = 1
+                Set-WindowsCoreTestText $summaryFiles[0].FullName ($summary | ConvertTo-Json -Depth 12)
+            }
+            'replaced-skip' {
+                $skipSummary = @($summaryFiles | Where-Object { (Get-Content -Raw -Encoding UTF8 -LiteralPath $_.FullName | ConvertFrom-Json).counts.SkippedCount -gt 0 })[0]
+                $summary = Get-Content -Raw -Encoding UTF8 -LiteralPath $skipSummary.FullName | ConvertFrom-Json
+                $summary.skippedTests[0] = 'replacement.Tests.ps1::UnitT99_tampered_skip'
+                Set-WindowsCoreTestText $skipSummary.FullName ($summary | ConvertTo-Json -Depth 12)
+            }
+            'plan-artifact' {
+                $planPath = Join-Path $artifacts 'plan/plan.json'
+                $planArtifact = Get-Content -Raw -Encoding UTF8 -LiteralPath $planPath | ConvertFrom-Json
+                $planArtifact.partitionCount = 7
+                Set-WindowsCoreTestText $planPath ($planArtifact | ConvertTo-Json -Depth 12 -Compress)
+            }
+            'plan-hash' { Set-WindowsCoreTestText (Join-Path $artifacts 'plan/plan.sha256') (('0' * 64) + "`n") }
+            'matrix' { $overrides.MatrixJson = $script:ActualPlan.MatrixJson.Replace('"id":"01"','"id":"09"') }
+        }
+        { Invoke-WindowsCoreAggregateForTest $script:ActualPlan $artifacts $overrides } | Should Throw $Keyword
     }
 
     # Scenario: Plan output contains an extra duplicate but otherwise legal shard.

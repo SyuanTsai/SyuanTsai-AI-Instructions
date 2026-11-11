@@ -895,6 +895,14 @@ try {
 
             $v2Fixture = New-P02AFixture
             Write-P02ASelectedFixture -Fixture $v2Fixture
+            $v2SkippedFixture = @'
+Describe 'selected schema v2 P02A fixture' {
+    It 'reports an actual skipped identifier without an expected list' -Skip {
+        1 | Should Be 1
+    }
+}
+'@
+            Write-P02AText -Path (Join-Path $v2Fixture.TestRoot 'selected.Tests.ps1') -Text $v2SkippedFixture
             $v2Invocation = New-P02AAdapterInvocation -Fixture $v2Fixture -SelectedNames @('selected.Tests.ps1') -SummarySchemaVersion 2 -SummaryRunId 'run-42' -SummaryRunAttempt 2
             $v2Run = Invoke-P02AHiddenAdapter -Invocation $v2Invocation -Fixture $v2Fixture
             Assert-P02AExpectedWithChildDiagnostics -Actual $v2Run.ExitCode -Expected 0 -Fixture $v2Fixture -Message 'An opted-in schema v2 adapter run must exit zero.'
@@ -903,7 +911,9 @@ try {
             Assert-P02AEqual $v2Summary.schemaVersion 2 'The opted-in summary schema version must be 2.'
             Assert-P02AEqual $v2Summary.runId 'run-42' 'Schema v2 must bind the workflow run id.'
             Assert-P02AEqual $v2Summary.runAttempt 2 'Schema v2 must bind the workflow run attempt.'
-            Assert-P02AEqual @($v2Summary.skippedTests).Count 0 'Schema v2 must report the exact empty skipped-test set.'
+            Assert-P02AEqual @($v2Summary.skippedTests).Count 1 'Schema v2 must report actual skipped identifiers without requiring an expected list.'
+            Assert-P02AEqual $v2Summary.skippedTests[0] 'selected.Tests.ps1::reports an actual skipped identifier without an expected list' 'Schema v2 must preserve the observed skipped case identifier.'
+            Assert-P02AEqual @($v2Summary.skippedTests).Count $v2Summary.counts.SkippedCount 'Schema v2 skipped identifiers must equal the observed skipped count.'
         }
 
         # Scenario: The adapter is invoked after Push-Location with default ./tests and relative evidence/module inputs.
