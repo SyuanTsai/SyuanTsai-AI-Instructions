@@ -76,16 +76,20 @@ Describe 'SYP353 policy and workflow authority inventory parity' {
         $expected.Count | Should Be 6
         foreach($path in $expected){[IO.File]::WriteAllText($path,'# discovery fixture')}
         [IO.File]::WriteAllText((Join-Path $fixture 'tests/ordinary.Tests.ps1'),'# ordinary discovery fixture')
+        $skipInventory=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/core-test-skip-inventory.json')|ConvertFrom-Json
+        $skipIdentifier=[string]@($skipInventory.platforms.windows.expectedSkippedTests)[0]
+        $skipFile=($skipIdentifier -split '::',2)[0]
+        [IO.File]::WriteAllText((Join-Path $fixture "tests/$skipFile"),'# reviewed skip discovery fixture')
         $stub=@'
-param($PesterModulePath,$PesterVersion,$ExpectedSkippedCount,[string[]]$ExpectedSkippedTests,$ShardPartitionCount,$ShardPartitionIndex,$OuterTimeoutSeconds,$TestRoot,$EvidenceRoot,[string[]]$SelectedTestFileNames,$SummaryOutputPath)
-$value=@{selected=@($SelectedTestFileNames);skipped=$ExpectedSkippedCount;skippedTests=@($ExpectedSkippedTests);authority=@(Get-AuthorityTestPaths -Root (Get-Location).Path)}
+param($PesterModulePath,$PesterVersion,$ExpectedSkippedCount,[string[]]$ExpectedSkippedTests,$ShardPartitionCount,$ShardPartitionIndex,$OuterTimeoutSeconds,$TestRoot,$EvidenceRoot,[string[]]$SelectedTestFileNames,$SummaryOutputPath,$SummarySchemaVersion,$SummaryRunId,$SummaryRunAttempt)
+$value=@{selected=@($SelectedTestFileNames);skipped=$ExpectedSkippedCount;skippedTests=@($ExpectedSkippedTests);summarySchemaVersion=$SummarySchemaVersion;summaryRunId=$SummaryRunId;summaryRunAttempt=$SummaryRunAttempt;authority=@(Get-AuthorityTestPaths -Root (Get-Location).Path)}
 [IO.File]::WriteAllText($SummaryOutputPath,($value|ConvertTo-Json -Depth 5))
 '@
         [IO.File]::WriteAllText((Join-Path $fixture 'scripts/Invoke-PesterShardProcess.ps1'),$stub)
         # Copy the reviewed YAML literal block verbatim to a child script. Do
         # not evaluate reconstructed source or unload Pester in this process.
         $lines=[IO.File]::ReadAllLines((Join-Path $root '.github/workflows/pr8-powershell-validation.yml'))
-        $step=@(0..($lines.Length-1)|Where-Object {$lines[$_] -ceq '      - name: Run the non-authority Pester suite once'})
+        $step=@(0..($lines.Length-1)|Where-Object {$lines[$_] -ceq '      - name: Run the planned non-authority Pester shard'})
         $step.Count | Should Be 1
         $index=$step[0]+1
         while($index -lt $lines.Length -and $lines[$index] -cne '        run: |'){$index++}
@@ -102,20 +106,32 @@ $value=@{selected=@($SelectedTestFileNames);skipped=$ExpectedSkippedCount;skippe
         $executable=if($PSVersionTable.PSEdition -ceq 'Core'){[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName}else{(Get-Command pwsh.exe -CommandType Application -ErrorAction Stop).Source}
         $previousTemp=$env:RUNNER_TEMP
         $previousRunnerOs=$env:RUNNER_OS
+        $previousRunId=$env:GITHUB_RUN_ID
+        $previousRunAttempt=$env:GITHUB_RUN_ATTEMPT
         Push-Location $fixture
         try {
             $env:RUNNER_TEMP=$fixture
             $env:RUNNER_OS='Windows'
+            $env:GITHUB_RUN_ID='417'
+            $env:GITHUB_RUN_ATTEMPT='2'
+            $env:SHARD_ID='01'
+            $selectedJson=ConvertTo-Json -Compress -InputObject @('ordinary.Tests.ps1',$skipFile)
+            $skipJson=ConvertTo-Json -Compress -InputObject @($skipIdentifier)
+            $env:SHARD_FILES_BASE64=[Convert]::ToBase64String([Text.UTF8Encoding]::new($false).GetBytes($selectedJson))
+            $env:SHARD_SKIPS_BASE64=[Convert]::ToBase64String([Text.UTF8Encoding]::new($false).GetBytes($skipJson))
             & $executable -NoLogo -NoProfile -NonInteractive -File $stepPath
             $LASTEXITCODE | Should Be 0
-        } finally {$env:RUNNER_TEMP=$previousTemp;$env:RUNNER_OS=$previousRunnerOs;Pop-Location}
-        $summary=Get-Content -Raw -Encoding UTF8 (Join-Path $fixture 'windows-core-pester-summary.json')|ConvertFrom-Json
-        @($summary.selected).Count | Should Be 1
-        $summary.selected[0] | Should Be 'ordinary.Tests.ps1'
-        $summary.skipped | Should Be 5
-        @($summary.skippedTests).Count | Should Be 5
-        $reviewedSkipInventory=Get-Content -Raw -Encoding UTF8 (Join-Path $fixture 'docs/standards/core-test-skip-inventory.json')|ConvertFrom-Json
-        (@($summary.skippedTests) -join '|') | Should Be (@($reviewedSkipInventory.platforms.windows.expectedSkippedTests) -join '|')
+        } finally {$env:RUNNER_TEMP=$previousTemp;$env:RUNNER_OS=$previousRunnerOs;$env:GITHUB_RUN_ID=$previousRunId;$env:GITHUB_RUN_ATTEMPT=$previousRunAttempt;Remove-Item Env:SHARD_ID,Env:SHARD_FILES_BASE64,Env:SHARD_SKIPS_BASE64 -ErrorAction SilentlyContinue;Pop-Location}
+        $summary=Get-Content -Raw -Encoding UTF8 (Join-Path $fixture 'windows-core-shard-01-summary.json')|ConvertFrom-Json
+        @($summary.selected).Count | Should Be 2
+        @($summary.selected) | Should Contain 'ordinary.Tests.ps1'
+        @($summary.selected) | Should Contain $skipFile
+        $summary.skipped | Should Be 1
+        @($summary.skippedTests).Count | Should Be 1
+        $summary.skippedTests[0] | Should Be $skipIdentifier
+        $summary.summarySchemaVersion | Should Be 2
+        $summary.summaryRunId | Should Be '417'
+        $summary.summaryRunAttempt | Should Be 2
         @($summary.authority).Count | Should Be 6
         (@($summary.authority) -join '|') | Should Be ($expected -join '|')
     }
@@ -125,11 +141,11 @@ $value=@{selected=@($SelectedTestFileNames);skipped=$ExpectedSkippedCount;skippe
     It 'UnitT10_matches_the_six_policy_paths_to_core_exclusions' {
         $root=Split-Path -Parent $PSScriptRoot
         $policy=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/validation-security-gate.json')|ConvertFrom-Json
-        $workflow=Get-Content -Raw -Encoding UTF8 (Join-Path $root '.github/workflows/pr8-powershell-validation.yml')
+        $planner=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'scripts/Get-WindowsCorePlan.ps1')
         . (Join-Path $root 'scripts/Invoke-StandardAuthorityGate.ps1') -DefineFunctionsOnly
         $actual=@(Get-AuthorityTestPaths -Root $root -Policy $policy)
         $actual.Count | Should Be 6
-        foreach($path in $policy.ordinaryAuthority.testPaths){$workflow.Contains("'$path'") | Should Be $true}
+        foreach($path in $policy.ordinaryAuthority.testPaths){$planner.Contains("'$path'") | Should Be $true}
         $policy.ordinaryAuthority.testPaths=@($policy.ordinaryAuthority.testPaths[1],$policy.ordinaryAuthority.testPaths[0]) + @($policy.ordinaryAuthority.testPaths|Select-Object -Skip 2)
         {Get-AuthorityTestPaths -Root $root -Policy $policy} | Should Throw 'exact ordered sequence'
     }
@@ -168,7 +184,7 @@ Describe 'Agent Skill authority workflow contract' {
         $script:SetupGoSha = 'b7ad1dad31e06c5925ef5d2fc7ad053ef454303e'
         $script:AuthorityGoVersionRule = 'latest-stable'
         $script:WorkflowExpectations = [ordered]@{
-            '.github/workflows/pr8-powershell-validation.yml' = 1
+            '.github/workflows/pr8-powershell-validation.yml' = 5
             '.github/workflows/standards-conformance.yml' = 1
             '.github/workflows/syp101-production-smoke.yml' = 1
             '.github/workflows/syp86-production-lock.yml' = 1
@@ -303,8 +319,14 @@ jobs:
                 $jobsBlock = [regex]::Match($workflow, '(?ms)^jobs:\r?\n(?<block>.*)\z')
                 Assert-True $jobsBlock.Success "Workflow '$relativePath' must define its jobs block."
                 $jobMatches = [regex]::Matches($jobsBlock.Groups['block'].Value, '(?m)^  ([a-z][a-z0-9-]*):\s*$')
-                Assert-Equal $jobMatches.Count 1 "Ordinary pull-request workflow '$relativePath' must have exactly one job."
-                $pullRequestJobNames.Add($jobMatches[0].Groups[1].Value)
+                if ($relativePath -ceq '.github/workflows/pr8-powershell-validation.yml') {
+                    Assert-Equal $jobMatches.Count 5 'PowerShell Regression must define plan, authority, pester, fixtures, and aggregate jobs.'
+                    Assert-True (@($jobMatches | Where-Object { $_.Groups[1].Value -ceq 'windows-core' }).Count -eq 1) 'PowerShell Regression must retain exactly one windows-core aggregate job id.'
+                    $pullRequestJobNames.Add('windows-core')
+                } else {
+                    Assert-Equal $jobMatches.Count 1 "Ordinary pull-request workflow '$relativePath' must have exactly one job."
+                    $pullRequestJobNames.Add($jobMatches[0].Groups[1].Value)
+                }
             }
             Assert-NotMatch $workflow 'windows-powershell-51|PowerShell 5\.1|Pester 3\.4\.0|shell:\s*powershell|runs-on:\s*ubuntu-latest|shell:\s*bash' "Workflow '$relativePath' must not retain a retired PowerShell 5.1 or Linux CI lane."
             Assert-NotMatch $workflow '(?ms)^\s*&\s+\./scripts/[^\r\n]+\.ps1[^\r\n]*\r?\n\s*if\s*\(\s*\$LASTEXITCODE' "Workflow '$relativePath' must use PowerShell success state or exceptions after PowerShell script calls, not a stale native exit code."
@@ -319,10 +341,15 @@ jobs:
             Assert-Match $workflow '\$PSHOME' "Workflow '$relativePath' must verify the active PowerShell home."
             Assert-Match $workflow '\$PSVersionTable\.PSVersion' "Workflow '$relativePath' must verify the active runtime version."
             if ($relativePath -cne '.github/workflows/standards-conformance.yml') {
-                Assert-NotMatch $workflow '(?m)^\s+matrix:\s*$' "Ordinary workflow '$relativePath' must not add a platform matrix during the P5.6 diagnostic phase."
+                if ($relativePath -ceq '.github/workflows/pr8-powershell-validation.yml') {
+                    Assert-Equal ([regex]::Matches($workflow, '(?m)^\s+matrix:\s*\$\{\{ fromJSON\(needs\.plan\.outputs\.matrix\) \}\}\s*$')).Count 1 'PowerShell Regression must use only the planner-owned Pester shard matrix.'
+                } else {
+                    Assert-NotMatch $workflow '(?m)^\s+matrix:\s*$' "Ordinary workflow '$relativePath' must not add a platform matrix during the P5.6 diagnostic phase."
+                }
                 Assert-NotMatch $workflow 'runs-on:\s*\$\{\{' "Ordinary workflow '$relativePath' must retain a fixed Windows runner during the P5.6 diagnostic phase."
                 $runnerValues = @([regex]::Matches($workflow, '(?m)^\s+runs-on:\s*([^\r\n]+)\s*$') | ForEach-Object { $_.Groups[1].Value.Trim() })
-                Assert-Equal $runnerValues.Count 1 "Ordinary workflow '$relativePath' must retain exactly one Windows job."
+                $expectedRunnerCount = if ($relativePath -ceq '.github/workflows/pr8-powershell-validation.yml') { 5 } else { 1 }
+                Assert-Equal $runnerValues.Count $expectedRunnerCount "Ordinary workflow '$relativePath' must retain the expected Windows job count."
                 Assert-Equal (@($runnerValues | Where-Object { $_ -cne 'windows-latest' }).Count) 0 "Ordinary workflow '$relativePath' may use only windows-latest."
             }
         }
@@ -344,22 +371,81 @@ jobs:
         Assert-True $smokeJobsBlock.Success 'SYP101 must define its jobs block.'
         $coreJobs = [regex]::Matches($coreJobsBlock.Groups['block'].Value, '(?m)^  ([a-z][a-z0-9-]*):\s*$')
         $smokeJobs = [regex]::Matches($smokeJobsBlock.Groups['block'].Value, '(?m)^  ([a-z][a-z0-9-]*):\s*$')
-        Assert-Equal $coreJobs.Count 1 'PowerShell Regression must have one retained normal CI job.'
-        Assert-Equal $coreJobs[0].Groups[1].Value 'windows-core' 'The sole PowerShell Regression job must be Windows Core.'
+        Assert-Equal $coreJobs.Count 5 'PowerShell Regression must have plan, authority, pester, fixtures, and aggregate jobs.'
+        Assert-Equal (($coreJobs | ForEach-Object { $_.Groups[1].Value } | Sort-Object) -join '|') 'authority|fixtures|pester|plan|windows-core' 'PowerShell Regression job ids must equal the reviewed five-lane design.'
         Assert-Equal $smokeJobs.Count 1 'SYP101 must have one retained normal CI job.'
         Assert-Equal $smokeJobs[0].Groups[1].Value 'windows-install-smoke' 'The sole SYP101 job must be Windows Install Smoke.'
-        Assert-NotMatch $required '(?m)^\s+needs:' 'Windows Core must not depend on a retired job.'
+        foreach ($jobId in @('plan','authority','pester','fixtures','windows-core')) {
+            $jobMatch=[regex]::Match($required,"(?ms)^  $([regex]::Escape($jobId)):\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)")
+            Assert-True $jobMatch.Success "Windows Core workflow must contain the complete '$jobId' job block."
+            $jobBlock=$jobMatch.Groups['block'].Value
+            Assert-Match $jobBlock '(?m)^    runs-on:\s*windows-latest\s*$' "Job '$jobId' must run on windows-latest."
+            $timeoutMatch=[regex]::Match($jobBlock,'(?m)^    timeout-minutes:\s*(\d+)\s*$')
+            Assert-True $timeoutMatch.Success "Job '$jobId' must declare a bounded timeout."
+            Assert-True ([int]$timeoutMatch.Groups[1].Value -le 75) "Job '$jobId' timeout must not exceed 75 minutes."
+            Assert-Match $jobBlock '(?ms)^    permissions:\r?\n      contents:\s*read\s*$' "Job '$jobId' must use contents: read."
+            Assert-Equal ([regex]::Matches($jobBlock,"actions/checkout@$($script:CheckoutSha)\s+# v7")).Count 1 "Job '$jobId' must use the pinned checkout exactly once."
+            Assert-Equal ([regex]::Matches($jobBlock,'persist-credentials:\s*false')).Count 1 "Job '$jobId' must disable persisted checkout credentials."
+            Assert-Equal ([regex]::Matches($jobBlock,'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9\s+# v6\.1\.0')).Count 1 "Job '$jobId' must use the pinned ZIP cache action exactly once."
+            Assert-Match $jobBlock '\$\{\{ runner\.temp \}\}/pwsh-cache/PowerShell-7\.6\.6-win-x64\.zip' "Job '$jobId' cache must use the separate runner.temp ZIP path."
+            Assert-Match $jobBlock 'key:\s*pwsh-zip-\$\{\{ runner\.os \}\}-7\.6\.6-02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860' "Job '$jobId' cache key must bind OS, version and reviewed SHA-256."
+            Assert-Equal ([regex]::Matches($jobBlock,'name:\s*Install verified latest stable PowerShell')).Count 1 "Job '$jobId' must install the verified portable runtime once."
+            foreach ($setupPattern in @(
+                "version = '7\.6\.6'",
+                "expectedSha256 = '02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860'",
+                'cachePath = Join-Path \$env:RUNNER_TEMP ''pwsh-cache/PowerShell-7\.6\.6-win-x64\.zip''',
+                'PowerShell setup paths must be new within this job',
+                'Get-FileHash -LiteralPath \$cachePath -Algorithm SHA256',
+                'Get-FileHash -LiteralPath \$archivePath -Algorithm SHA256',
+                'Remove-Item -LiteralPath \$cachePath -Force',
+                'Invoke-WebRequest -Uri \$downloadUri -OutFile \$archivePath',
+                'Copy-Item -LiteralPath \$archivePath -Destination \$cachePath',
+                'Expand-Archive -LiteralPath \$archivePath -DestinationPath \$installDirectory'
+            )) { Assert-Match $jobBlock $setupPattern "Job '$jobId' must retain verified cache/install behavior '$setupPattern'." }
+            Assert-Equal ([regex]::Matches($jobBlock,'name:\s*Verify the selected PowerShell runtime')).Count 1 "Job '$jobId' must verify the selected runtime once."
+            Assert-Match $jobBlock 'MainModule\.FileName' "Job '$jobId' must verify the actual shell executable."
+            Assert-Match $jobBlock '\$PSHOME' "Job '$jobId' must verify the active PowerShell home."
+            Assert-Match $jobBlock '\$PSVersionTable\.PSVersion' "Job '$jobId' must verify the runtime version."
+            Assert-Equal ([regex]::Matches($jobBlock,'name:\s*Ensure Pester 4\.10\.1')).Count 1 "Job '$jobId' must retain the reviewed Pester verification step."
+            Assert-Match $jobBlock "ModuleVersion -ne \[version\]'4\.10\.1'" "Job '$jobId' must validate the installed Pester manifest."
+        }
+        $allWorkflowText=($workflowPaths|ForEach-Object{Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot $_)}) -join "`n"
+        Assert-Equal ([regex]::Matches($allWorkflowText,'(?m)^    name:\s*Windows Core\s*$')).Count 1 'Exactly one workflow job may publish the Windows Core required context.'
+        Assert-Equal ([regex]::Matches($allWorkflowText,'(?m)^    name:\s*Windows Install Smoke\s*$')).Count 1 'Exactly one workflow job may publish the Windows Install Smoke required context.'
+        Assert-Match ([regex]::Match($required,'(?ms)^  windows-core:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)').Groups['block'].Value) '(?m)^    name:\s*Windows Core\s*$' 'The required context name must belong to the windows-core aggregate job.'
+        Assert-Match ([regex]::Match($smoke,'(?ms)^  windows-install-smoke:\r?\n(?<block>.*?)(?=^  [a-z][a-z0-9-]*:\s*$|\z)').Groups['block'].Value) '(?m)^    name:\s*Windows Install Smoke\s*$' 'The install required context name must belong to windows-install-smoke.'
+        Assert-Match $required '(?ms)^  windows-core:\s*.*?^    name:\s*Windows Core\s*$.*?^    needs:\s*\[plan, authority, pester, fixtures\]\s*$.*?^    if:\s*always\(\)\s*$' 'The unique Windows Core aggregate must always run after every upstream lane.'
         Assert-NotMatch $smoke '(?m)^\s+needs:' 'Windows Install Smoke must not depend on a retired job.'
-        Assert-Match $required 'timeout-minutes:\s*180' 'The sequential Core suite must have a bounded job-level timeout.'
+        $timeouts = @([regex]::Matches($required, '(?m)^\s+timeout-minutes:\s*(\d+)\s*$') | ForEach-Object { [int]$_.Groups[1].Value })
+        Assert-Equal $timeouts.Count 5 'Every Windows Core lane must have a bounded timeout.'
+        Assert-Equal (@($timeouts | Where-Object { $_ -gt 75 }).Count) 0 'No Windows Core lane timeout may exceed 75 minutes.'
         Assert-Match $required 'PesterVersion = ''4\.10\.1''' 'The retained suite must use the established Pester 4.10.1 engine.'
         Assert-Match $required '\$pester = Get-Module -ListAvailable -Name Pester' 'Core must discover the installed Pester module with a valid parameter binding.'
         Assert-Equal ([regex]::Matches($required, '& \./scripts/Invoke-PesterShardProcess\.ps1 @executorArguments')).Count 1 'Core must use the existing bounded executor exactly once.'
         Assert-Equal ([regex]::Matches($required, '(?m)^\s*& \./scripts/Invoke-StandardAuthorityGate\.ps1')).Count 1 'Windows Core must execute the authority gate exactly once.'
-        Assert-Match $required 'SelectedTestFileNames = \$selectedTestNames' 'Core must pass the dynamically discovered non-authority difference to the bounded executor.'
-        Assert-Match $required 'ShardPartitionCount = 1' 'Core must execute the retained difference as one bounded schedule.'
-        Assert-Match $required 'core-test-skip-inventory\.json' 'Core must load the reviewed machine-readable platform skip inventory.'
+        Assert-Match $required 'SelectedTestFileNames = \$selectedTestNames' 'Each matrix leg must pass only its planner-selected tests to the bounded executor.'
+        Assert-Match $required 'ShardPartitionCount = 1' 'Each matrix leg must execute its assigned tests as one bounded schedule.'
+        $planner = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Get-WindowsCorePlan.ps1')
+        Assert-Match $planner 'core-test-skip-inventory\.json' 'The planner must load the reviewed machine-readable platform skip inventory.'
         Assert-Match $required 'ExpectedSkippedCount = \$expectedSkippedTests\.Count' 'Core must derive the skip count from the reviewed platform inventory.'
         Assert-Match $required 'ExpectedSkippedTests = \$expectedSkippedTests' 'Core must pass the reviewed per-case skip inventory to the bounded executor.'
+        Assert-Match $required 'fail-fast:\s*false' 'Pester shards must all finish to preserve complete evidence.'
+        Assert-Match $required 'matrix:\s*\$\{\{ fromJSON\(needs\.plan\.outputs\.matrix\) \}\}' 'The Pester matrix must come only from the planner output.'
+        Assert-Match $required '(?ms)^  fixtures:\s*.*?^    if:\s*needs\.plan\.outputs\.mode == ''full''\s*$' 'Fixture execution must be limited to full mode.'
+        Assert-Match $required 'Assert-WindowsCoreAggregate\.ps1' 'The required aggregate must run the fail-closed aggregate validator.'
+        Assert-Equal ([regex]::Matches($required,'actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333\s+# v8\.0\.2')).Count 2 'The aggregate must use the reviewed download action for plan and shard evidence.'
+        Assert-NotMatch $required 'github\.run_attempt' 'Artifact names must remain stable across re-run failed jobs attempts.'
+        Assert-Equal ([regex]::Matches($required,'(?m)^\s+overwrite:\s*true\s*$')).Count 5 'Every Windows Core upload must replace its same-run artifact on a rerun.'
+        Assert-Match $required 'SummarySchemaVersion = 2' 'Windows Core shards must opt into exact skipped-test summary schema v2.'
+        foreach ($binding in @(
+            @('NEEDS_PLAN_RESULT','plan'),
+            @('NEEDS_AUTHORITY_RESULT','authority'),
+            @('NEEDS_PESTER_RESULT','pester'),
+            @('NEEDS_FIXTURES_RESULT','fixtures')
+        )) {
+            $pattern = '(?m)^\s+' + [regex]::Escape($binding[0]) + ':\s*\$\{\{\s*needs\.' + [regex]::Escape($binding[1]) + '\.result\s*\}\}\s*$'
+            Assert-Equal ([regex]::Matches($required,$pattern)).Count 1 "The aggregate must bind '$($binding[0])' exactly to needs.$($binding[1]).result."
+        }
         Assert-Match $executor "ValidateSet\('4\.10\.1'\)" 'The bounded executor must retire the Pester 3.4/Windows PowerShell 5.1 lane.'
         Assert-Match $executor 'requires PowerShell 7 Core on Windows, Linux or macOS' 'The bounded executor must require a supported Core host.'
         Assert-Match $executor 'Start-PlatformOwnedProcess -ExecutableLease' 'P3 must own launch and executable identity.'
@@ -371,9 +457,9 @@ jobs:
         Assert-NotMatch $executor 'PlatformID\]::Unix|PesterShardLinux|/proc|Pester 3\.4\.0|Windows PowerShell 5\.1' 'The bounded executor must not retain retired Unix process or legacy Pester paths.'
         Assert-NotMatch $required 'Run cross-platform composition and acquisition tests' 'Source composition and acquisition must not run a second time outside full Core discovery.'
         foreach ($authorityTest in $script:AuthorityTests) {
-            Assert-Match $required ([regex]::Escape("'tests/$authorityTest'")) "Core must exclude the authority-only test '$authorityTest' from its second execution."
+            Assert-Match $planner ([regex]::Escape("'tests/$authorityTest'")) "The planner must exclude the authority-only test '$authorityTest' from shard execution."
         }
-        Assert-Match $required 'Run offline routine semantic fixtures once' 'Core must retain offline semantic fixtures in the single Windows job.'
+        Assert-Match $required 'Run offline routine semantic fixtures once' 'The full-mode fixtures lane must retain offline semantic fixtures.'
         Assert-Match $required "pattern='test_routine_semantic_\*\.py'" 'Core must keep exact offline fixture discovery.'
         Assert-Match $required 'Exact offline fixture count changed' 'Core must keep its fixture coverage count assertion.'
         Assert-Match $smoke 'update-skills-catalog-lock\.ps1 -Check' 'Install Smoke must absorb production lock validation.'
@@ -420,6 +506,7 @@ jobs:
         $diagnostic=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/standards-conformance.yml')
         $runner=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardValidation.ps1')
         $resolver=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Resolve-StandardValidationTool.ps1')
+        $planner=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Get-WindowsCorePlan.ps1')
         Assert-Match $standard '12\.3 Central reference implementation ownership and CI' 'The Standard must publish the central implementation ownership map.'
         Assert-Match $standard 'Invoke-StandardValidation\.ps1.*skill-repository-standard\.Tests\.ps1.*standard-validation-runner\.Tests\.ps1.*standard-core-pester-adapter\.Tests\.ps1' 'The Standard must map the runner and report owner to its regression paths.'
         Assert-Match $standard 'Resolve-StandardValidationTool\.ps1.*standard-validation-resolver-hardening\.Tests\.ps1' 'The Standard must map the tool resolver to its hardening regression.'
@@ -427,7 +514,8 @@ jobs:
         foreach($boundary in @('normal reader PR and merged before candidate adoption', 'A pin or immutable version update alone MUST NOT transfer ownership', 'Source-copy equivalence or removal is deferred to downstream adoption', 'normal required three-platform Core CI gate', 'not a universal file inventory', 'Each source repository MUST retain its own protected reader identities')) {
             if(-not $standard.Contains($boundary)){throw "The ownership map is missing the source-reader or adoption boundary '$boundary'."}
         }
-        Assert-Match $required "platformKey -ceq 'windows'.*expectedSkippedTests\.Count -ne 5" 'Windows Core must fail closed unless the reviewed inventory retains exactly five skips.'
+        Assert-Match $planner "values\.Count -ne 5.*Select-Object -Unique.*Count -ne 5" 'The planner must fail closed unless the reviewed Windows inventory retains exactly five unique skips.'
+        Assert-Match $planner "mode -ceq 'full'.*expectedSkips\.Count -ne 5" 'A full Windows Core plan must retain all five reviewed skips.'
         Assert-Match $required 'Invoke-StandardAuthorityGate\.ps1' 'Windows Core must run the required authority gate.'
         Assert-Match $required '\$\{\{ runner\.temp \}\}/syp325-source-scope-\*/\*\*/\*\.json' 'Windows Core must upload task-run-owned SYP325 measurement evidence from runner.temp.'
         Assert-Match $required '\$\{\{ runner\.temp \}\}/windows-core/authority-result\.json' 'Windows Core must upload the normal authority gate result.'
@@ -551,6 +639,7 @@ jobs:
         $standardsEvents = [regex]::Match($workflows.Standards, '(?ms)^on:\r?\n(?<block>.*?)(?=^permissions:)').Groups['block'].Value
         $lockEvents = [regex]::Match($workflows.Lock, '(?ms)^on:\r?\n(?<block>.*?)(?=^permissions:)').Groups['block'].Value
         $maintenanceEvents = [regex]::Match($workflows.Maintenance, '(?ms)^on:\r?\n(?<block>.*?)(?=^permissions:)').Groups['block'].Value
+        Assert-NotMatch $coreEvents '(?m)^\s+paths(-ignore)?:\s*$' 'Windows Core must reject paths and paths-ignore under every configured event.'
         foreach ($pair in @(@{ Name='Core'; Events=$coreEvents }, @{ Name='Smoke'; Events=$smokeEvents })) {
             $pullRequest = [regex]::Match($pair.Events, '(?ms)^  pull_request:\r?\n(?<block>.*?)(?=^  [a-z_]+:\s*$|\z)')
             $push = [regex]::Match($pair.Events, '(?ms)^  push:\r?\n(?<block>.*?)(?=^  [a-z_]+:\s*$|\z)')
@@ -600,7 +689,8 @@ jobs:
         Assert-Match $wheelHelper '(?s)def self_test_command.*self_test_candidate_priority\(\)' 'The authority-owned offline helper regression must execute the real candidate-priority fixture.'
         Assert-Match $wheelHelper '(?s)def self_test_command.*self_test_sequential_https\(\)' 'The authority-owned offline helper regression must execute the real HTTPS response fixture.'
         Assert-False ($script:AuthorityTests -contains $resolverHardeningName) 'Resolver hardening tests must remain in Windows Core full-suite discovery.'
-        Assert-Match $workflows.Core 'Get-ChildItem -LiteralPath \$testRoot -Filter' 'Windows Core must discover the resolver hardening regression through its complete test-file inventory.'
+        $planner = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Get-WindowsCorePlan.ps1')
+        Assert-Match $planner 'Get-ChildItem -LiteralPath \$testRoot -Filter ''\*\.Tests\.ps1'' -File -Recurse' 'Windows Core must discover the resolver hardening regression through the planner complete recursive test inventory.'
         $normalMain = $gate.Substring($gate.IndexOf('if ($BindingOnly) {'))
         Assert-NotMatch $normalMain 'ExpectedGoRuntimeVersion|GoCommandPath|STANDARD_GO_|Resolve-StandardValidationTool|Resolve-PythonWheelClosure|New-AuthorityRunOwnedToolRoot|Invoke-AuthorityExternalCommand|skill-validator|skill-tools|SkillSpector|STANDARD_AUTHORITY_PYTHON|tenStageCompletionClaim' 'Normal authority gate must not require retired external dependencies.'
         Assert-Match $normalMain 'Invoke-AuthorityPesterTests -Runtime' 'Normal authority gate must execute the exact retained Pester paths.'
@@ -644,7 +734,8 @@ jobs:
         Assert-Match $standardWorkflow '(?m)^  workflow_dispatch:\s*$' 'Standards Conformance remains available for manual authority diagnosis.'
         Assert-NotMatch $standardWorkflow '(?m)^  (push|pull_request):\s*$' 'Standards Conformance must not duplicate ordinary automatic authority execution.'
         Assert-Match $requiredWorkflow 'Run the Standard v1 authority gate' 'Windows Core must execute the authority gate for managed lifecycle changes.'
-        Assert-NotMatch $requiredWorkflow '(?ms)^on:.*?^  paths(-ignore)?:\s*$' 'Windows Core must run without automatic event path filters.'
+        $requiredEvents=[regex]::Match($requiredWorkflow,'(?ms)^on:\r?\n(?<block>.*?)(?=^permissions:)').Groups['block'].Value
+        Assert-NotMatch $requiredEvents '(?m)^\s+paths(-ignore)?:\s*$' 'Windows Core must run without automatic event path filters.'
         Assert-Match $standardTests 'UnitT70_binds_managed_lifecycle_to_the_central_standard_authority' 'The workflow gate must execute lifecycle-specific authority regression.'
     }
 
@@ -677,9 +768,11 @@ jobs:
             Assert-True (Test-Path -LiteralPath $sourceTestPath -PathType Leaf) "Core source regression '$sourceTestName' must remain present."
             Assert-False ($script:AuthorityTests -contains $sourceTestName) "Core source regression '$sourceTestName' must run in the complete non-authority difference rather than be duplicated by the shared authority gate."
         }
-        Assert-Match $required 'Get-ChildItem -LiteralPath \$testRoot -Filter ''\*\.Tests\.ps1'' -File -Recurse' 'Windows Core must discover every retained Pester test file once.'
-        Assert-Match $required '\$authorityFullPaths -notcontains \$_.FullName' 'Windows Core must exclude only the exact shared authority test paths from its full discovery.'
-        Assert-NotMatch $required '(?ms)^on:.*?^  paths(-ignore)?:\s*$' 'Windows Core must cover ordinary events without path filtering.'
+        $planner = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Get-WindowsCorePlan.ps1')
+        Assert-Match $planner 'Get-ChildItem -LiteralPath \$testRoot -Filter ''\*\.Tests\.ps1'' -File -Recurse' 'The planner must discover every retained Pester test file once for full mode.'
+        Assert-Match $planner '\$authorityNames -cnotcontains \$_\.Name' 'The planner must exclude only the exact shared authority test paths from full discovery.'
+        $requiredEvents=[regex]::Match($required,'(?ms)^on:\r?\n(?<block>.*?)(?=^permissions:)').Groups['block'].Value
+        Assert-NotMatch $requiredEvents '(?m)^\s+paths(-ignore)?:\s*$' 'Windows Core must cover every event without paths or paths-ignore filtering.'
         Assert-Match $standardTests 'UnitT80_binds_upstream_interoperability_to_explicit_central_decisions' 'The workflow gate must execute the upstream interoperability regression.'
         Assert-Match $standardTests 'UnitT81_routes_upstream_negative_cases_through_the_executable_adapter' 'The workflow gate must execute the executable adapter regression.'
         foreach ($caseId in @(

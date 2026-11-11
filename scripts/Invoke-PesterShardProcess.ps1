@@ -19,6 +19,9 @@ param(
     [string] $EvidenceRoot,
     [AllowEmptyCollection()][string[]] $SelectedTestFileNames = @(),
     [string] $SummaryOutputPath = '',
+    [ValidateSet(1,2)][int] $SummarySchemaVersion = 1,
+    [string] $SummaryRunId = $(if ([string]::IsNullOrWhiteSpace($env:GITHUB_RUN_ID)) { 'local' } else { [string]$env:GITHUB_RUN_ID }),
+    [ValidateRange(1, 2147483647)][int] $SummaryRunAttempt = $(if ([string]$env:GITHUB_RUN_ATTEMPT -match '^[1-9][0-9]*$') { [int]$env:GITHUB_RUN_ATTEMPT } else { 1 }),
     [Threading.CancellationToken] $CancellationToken = [Threading.CancellationToken]::None,
     [ValidateSet('cooperative','strong')][string] $IsolationRequirement = 'cooperative'
 )
@@ -32,6 +35,9 @@ if ([Environment]::Version.Major -lt 8) {
 }
 if (-not [string]::IsNullOrWhiteSpace($CancellationPath)) {
     throw 'INVALID|Pester shard executor does not accept a caller-visible CancellationPath; use the supervisor-only cancellation token.'
+}
+if ($SummarySchemaVersion -eq 2 -and [string]::IsNullOrWhiteSpace($SummaryRunId)) {
+    throw 'INVALID|SummaryRunId is required for summary schema v2.'
 }
 $script:PesterShardChildOutputQuotaCharacters = 1048576
 $compareExpectedSkippedTests = $PSBoundParameters.ContainsKey('ExpectedSkippedTests')
@@ -75,6 +81,9 @@ function Assert-PesterShardExpectedSkippedTests {
         $unexpectedText = if ($unexpected.Count -eq 0) { '<none>' } else { $unexpected -join ', ' }
         throw "Pester skipped test inventory mismatch. Missing: $missingText. Unexpected: $unexpectedText."
     }
+    $stableActualValues = [string[]]$actualValues.ToArray()
+    [Array]::Sort($stableActualValues, [StringComparer]::Ordinal)
+    return ,$stableActualValues
 }
 
 function Get-PesterShardCanonicalHash {
@@ -1475,8 +1484,9 @@ $aggregateSummary = [pscustomobject][ordered]@{
 }
 Assert-PesterShardResultCounts -Summary $aggregateSummary -Context 'aggregate'
 if ($ExpectedTotalCount -ge 0 -and $total -ne $ExpectedTotalCount) { throw "Pester discovered $total tests across shards; expected exactly $ExpectedTotalCount." }
+$actualSkippedTests = [string[]]@()
 if ($compareExpectedSkippedTests) {
-    Assert-PesterShardExpectedSkippedTests -Expected $ExpectedSkippedTests -CaseEvidence $caseEvidenceDocuments.ToArray()
+    $actualSkippedTests = [string[]](Assert-PesterShardExpectedSkippedTests -Expected $ExpectedSkippedTests -CaseEvidence $caseEvidenceDocuments.ToArray())
 }
 if ($ExpectedSkippedCount -ge 0 -and $skipped -ne $ExpectedSkippedCount) { throw "Pester expected exactly $ExpectedSkippedCount platform/version skips; got $skipped." }
 Write-Host "Aggregate - Total: $total Passed: $passed Failed: $failed Skipped: $skipped Pending: $pending Inconclusive: $inconclusive"
@@ -1488,7 +1498,7 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedSummaryOutputPath)) {
         $completedShardSummaries.ToArray() | ForEach-Object { $_.paths }
     )
     [Array]::Sort($executedTestPaths, [StringComparer]::Ordinal)
-    $executionSummary = [pscustomobject][ordered]@{
+    $executionSummaryProperties = [ordered]@{
         schemaVersion = [int]1
         type = 'standard-pester-execution-summary'
         executed = [bool]$true
@@ -1505,6 +1515,13 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedSummaryOutputPath)) {
         counts = $aggregateSummary
         shards = [object[]]@($completedShardSummaries.ToArray())
     }
+    if ($SummarySchemaVersion -eq 2) {
+        $executionSummaryProperties.schemaVersion = [int]2
+        $executionSummaryProperties.Add('runId', [string]$SummaryRunId)
+        $executionSummaryProperties.Add('runAttempt', [int]$SummaryRunAttempt)
+        $executionSummaryProperties.Add('skippedTests', [string[]]$actualSkippedTests)
+    }
+    $executionSummary = [pscustomobject]$executionSummaryProperties
     Write-PesterShardExecutionSummary -SummaryPath $resolvedSummaryOutputPath -SummaryObject $executionSummary
 }
 

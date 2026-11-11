@@ -970,7 +970,15 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/Assert-WindowsCoreAggregate.ps1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/Get-StandardValidatorMaintenanceEvidence.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/Get-WindowsCorePlan.ps1",
       "license": "Apache-2.0"
     },
     {
@@ -1286,7 +1294,19 @@
       "license": "Apache-2.0"
     },
     {
-      "path": "tests/ai-instructions-writer-gate.Tests.ps1",
+      "path": "tests/ai-instructions-writer-gate.part1.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/ai-instructions-writer-gate.part2.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/ai-instructions-writer-gate.TestSupport.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/ai-instructions-writer-gate.windows-powershell.Tests.ps1",
       "license": "Apache-2.0"
     },
     {
@@ -1370,7 +1390,23 @@
       "license": "Apache-2.0"
     },
     {
-      "path": "tests/install-ai-instructions-bootstrap.Tests.ps1",
+      "path": "tests/install-ai-instructions-bootstrap.part1.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/install-ai-instructions-bootstrap.part2.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/install-ai-instructions-bootstrap.part3.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/install-ai-instructions-bootstrap.part4.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/install-ai-instructions-bootstrap.TestSupport.ps1",
       "license": "Apache-2.0"
     },
     {
@@ -1551,6 +1587,14 @@
     },
     {
       "path": "tests/update-ai-instructions.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/windows-core-plan.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/windows-core-shard-weights.json",
       "license": "Apache-2.0"
     }
   ]

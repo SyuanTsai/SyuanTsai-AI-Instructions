@@ -4052,7 +4052,7 @@ public sealed class C245NonCooperativeStream : Stream {
             'docs/standards/validation-security-gate.json',
             '.github/workflows/pr8-powershell-validation.yml',
             'tests/skill-repository-workflows.Tests.ps1',
-            'platform-neutral Core lane', 'ExpectedSkippedCount = 5', 'core-test-skip-inventory.json', 'exactly equal', 'standards-conformance.yml',
+            'platform-neutral Core lane', 'full Windows mode continues to require exactly five reviewed skips', 'core-test-skip-inventory.json', 'union equals the expected plan', 'standards-conformance.yml',
             'schema v2', 'testOwnership', 'unknown schema or ownership values',
             'SourceValidation execution remains owned by the central source-validation function',
             'scripts/Invoke-RepositoryCheck.ps1', 'scripts/Invoke-CorePester.ps1',
@@ -5899,13 +5899,14 @@ Describe 'SYP352 cross-platform and three-AI Standard contract' -Tag 'SYP352' {
         $adoption | Should -Match '已 pin 舊版 Standard 的 repository \*\*MUST\*\* 依其 authority commit 與 member hashes 判定，不追溯套用本次規範'
         $adoption | Should -Match '升級到包含本次修訂的 authority pin 時，\*\*MUST\*\* 同時採用三平台 matrix 與全部 leg 聚合語意'
         $adoption | Should -Match '不得只換 pin、沿用單平台 gate，或以 Core-only PASS 滿足三個 source required contexts'
-        $adoption | Should -Match 'pr8-powershell-validation\.yml.*syp101-production-smoke\.yml.*都只有 Windows job'
-        $adoption | Should -Match 'Windows leg \*\*MUST\*\* 持續為 required gate.*Windows 是唯一 required 平台'
+        $adoption | Should -Match 'pr8-powershell-validation\.yml.*syp101-production-smoke\.yml.*都只有 Windows required platform'
+        $adoption | Should -Match 'Windows platform \*\*MUST\*\* 持續為 required gate.*Windows 是唯一 required 平台'
         $adoption | Should -Match '過渡期間 \*\*MUST NOT\*\* 宣稱本 Repository 已通過三平台驗證'
         $adoption | Should -Match 'Workflow regression \*\*MUST\*\* 核對當時實際採用的 Windows 及已加入平台 legs'
         $adoption | Should -Match '過渡期僅在 SYP-353 與 SYP-354 均完成.*Core／Install Smoke 都已具備三平台 required legs'
         $matrix | Should -Match 'Target state: the Core lane becomes the automatic authority matrix'
-        $matrix | Should -Match 'Standard §18\.1\.1 transition.*currently runs only required Windows Core.*only Windows Install Smoke'
+        $matrix | Should -Match 'Standard §18\.1\.1 transition.*currently exposes only the required Windows Core platform context.*fail-closed aggregate.*only Windows Install Smoke'
+        $matrix | Should -Match 'strict fail-closed documentation fast path'
         $matrix | Should -Match 'transition ends only after SYP-353 and SYP-354 are both complete'
         $matrix | Should -Match 'MUST NOT.*claim three-platform validation'
         $matrix | Should -Not -Match 'The Core lane is the automatic authority matrix|automatic authority enforcement through all three Core matrix legs, with'
