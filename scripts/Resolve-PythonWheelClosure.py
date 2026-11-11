@@ -1023,25 +1023,34 @@ class LazyPoolResolver:
         self.last_pip_error = (stdout + "\n" + stderr).strip()
         return process.returncode == 0 and self.plan_path.is_file()
 
+    def _unsatisfied_projects(self) -> List[Tuple[str, List[Requirement], Set[str]]]:
+        # A project is a contradiction when no verified entry satisfies all of
+        # its requirements, or when no compatible wheel was materializable at all.
+        result: List[Tuple[str, List[Requirement], Set[str]]] = []
+        for project in sorted(self.requirements):
+            requirements = list(self.requirements[project].values())
+            entries = [entry for entry in self.entries.values()
+                       if entry.metadata.normalized_name == project]
+            if entries:
+                if any(all(
+                    not requirement.specifier or requirement.specifier.contains(
+                        entry.descriptor.version, prereleases=True
+                    ) for requirement in requirements
+                ) for entry in entries):
+                    continue
+            elif project == self.root_project:
+                continue
+            sources = {
+                source for names in self.requirement_sources.get(project, {}).values()
+                for source in names if source != self.root_project
+            }
+            result.append((project, requirements, sources))
+        return result
+
     def _conflict_backtrack_project(self) -> Optional[str]:
         # pip remains the final resolver. A local contradiction only identifies
         # which already-verified parent may usefully gain another candidate.
-        for project in sorted(self.requirements):
-            requirements = list(self.requirements[project].values())
-            entries = [entry for entry in self.entries.values() if entry.metadata.normalized_name == project]
-            if not entries or any(
-                all(not requirement.specifier or requirement.specifier.contains(
-                    entry.descriptor.version, prereleases=True
-                ) for requirement in requirements)
-                for entry in entries
-            ):
-                continue
-            sources = {
-                source
-                for names in self.requirement_sources.get(project, {}).values()
-                for source in names
-                if source != self.root_project
-            }
+        for project, requirements, sources in self._unsatisfied_projects():
             # A single unsatisfied constraint usually needs another version of
             # this project. Multiple incompatible parent constraints instead
             # require a parent backtrack before trying its entire version list.
@@ -1072,20 +1081,7 @@ class LazyPoolResolver:
         # verified pool still contains the earlier parent version. Preserve
         # alternative parents of actual contradictions so a failed first
         # branch does not erase a still-solvable sibling branch.
-        for project in sorted(self.requirements):
-            requirements = list(self.requirements[project].values())
-            entries = [entry for entry in self.entries.values()
-                       if entry.metadata.normalized_name == project]
-            if not entries or any(all(
-                not requirement.specifier or requirement.specifier.contains(
-                    entry.descriptor.version, prereleases=True
-                ) for requirement in requirements
-            ) for entry in entries):
-                continue
-            sources = {
-                source for names in self.requirement_sources.get(project, {}).values()
-                for source in names if source != self.root_project
-            }
+        for _project, _requirements, sources in self._unsatisfied_projects():
             for source in sorted(sources):
                 if source not in self.conflict_frontier:
                     self.conflict_frontier.append(source)
@@ -1117,6 +1113,17 @@ class LazyPoolResolver:
                 for descriptor in self.catalog.descriptors(project)
             ):
                 return project
+            sources = {
+                source for names in self.requirement_sources.get(project, {}).values()
+                for source in names if source != self.root_project
+            }
+            for source in sorted(sources):
+                if any(
+                    descriptor.filename not in self.attempted.get(source, set())
+                    and self._eligible(descriptor)
+                    for descriptor in self.catalog.descriptors(source)
+                ):
+                    return source
         return None
 
     def resolve(self) -> int:
@@ -1722,6 +1729,58 @@ def self_test_honors_explicit_prerelease_requirement() -> None:
     self_test_prerelease_candidate_priority("dep>=1.0.dev1", ("1.0.dev6",), "1.0.dev6")
 
 
+def self_test_backtracks_parent_when_dependency_has_no_wheel() -> None:
+    # Scenario: The newest parent requires a dependency with no wheel while an older parent has none.
+    # Purpose: Backtrack to the older parent instead of failing with candidate exhaustion.
+    with tempfile.TemporaryDirectory(prefix="wheel-missing-dependency-") as temporary:
+        root = Path(temporary)
+        sources = root / "sources"
+        sources.mkdir()
+        root_wheel = make_test_wheel(sources, "missing-root", "1.0", ("parent>=1",))
+        wheels = [
+            make_test_wheel(sources, "parent", "2.0", ("missingdep>=1",)),
+            make_test_wheel(sources, "parent", "1.0"),
+        ]
+        resolver = LazyPoolResolver(
+            LocalCatalog([local_descriptor(path) for path in wheels]),
+            root_wheel, file_sha256(root_wheel), root / "pool", root / "plan.json",
+        )
+        resolver._seed_new_projects()
+        if "missingdep" not in {project for project, _requirements, _sources in resolver._unsatisfied_projects()}:
+            raise AssertionError("Missing dependency must be reported as an unsatisfied project")
+        if resolver._conflict_backtrack_project() != "parent":
+            raise AssertionError("Conflict backtrack must target the parent project")
+        resolver._remember_conflict_parents()
+        if "parent" not in resolver.conflict_frontier:
+            raise AssertionError("Conflict frontier must remember the parent project")
+        resolver.resolve()
+        selection = validate_and_select_plan(root / "plan.json", resolver, root / "selected")
+        selected = {entry["normalizedName"]: entry["version"] for entry in selection["entries"]}
+        if selected.get("parent") != "1.0" or "missingdep" in selected:
+            raise AssertionError(f"Parent backtrack must select parent 1.0 without missingdep; got {selected!r}")
+
+
+def self_test_root_missing_dependency_fails_closed() -> None:
+    # Scenario: The root itself requires a dependency for which no wheel exists.
+    # Purpose: Keep root-level missing dependencies failing closed with candidate exhaustion.
+    with tempfile.TemporaryDirectory(prefix="wheel-root-missing-") as temporary:
+        root = Path(temporary)
+        sources = root / "sources"
+        sources.mkdir()
+        root_wheel = make_test_wheel(sources, "missing-root", "1.0", ("missingdep>=1",))
+        resolver = LazyPoolResolver(
+            LocalCatalog([]),
+            root_wheel, file_sha256(root_wheel), root / "pool", root / "plan.json",
+        )
+        try:
+            resolver.resolve()
+        except ClosureError as error:
+            if not str(error).startswith("Verified local wheel candidates are exhausted"):
+                raise AssertionError(f"Root-level missing dependency must report candidate exhaustion; got {error}")
+        else:
+            raise AssertionError("Root-level missing dependency must fail closed")
+
+
 def self_test_sequential_https() -> None:
     # Scenario: Sequential GETs complete, abort, redirect or fail on a TLS connection.
     # Purpose: Reuse only fully consumed same-host responses without weakening trust or retry rules.
@@ -1836,6 +1895,8 @@ def self_test_sequential_https() -> None:
 
 def self_test_command(arguments: argparse.Namespace) -> None:
     self_test_candidate_priority()
+    self_test_backtracks_parent_when_dependency_has_no_wheel()
+    self_test_root_missing_dependency_fails_closed()
     self_test_prefers_final_over_prerelease()
     self_test_falls_back_to_prerelease()
     self_test_honors_explicit_prerelease_requirement()

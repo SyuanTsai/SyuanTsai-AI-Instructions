@@ -679,6 +679,28 @@ Describe 'Standard validation resolver hardening' {
         Assert-Match ($output -join "`n") 'explicit-prerelease-self-test: passed' 'An explicit prerelease requirement must still select its prerelease candidate.'
     }
 
+    # Scenario: The newest parent requires a dependency with no wheel while an older parent has no such dependency.
+    # Purpose: Backtrack to the older parent instead of failing with candidate exhaustion.
+    It 'UnitT29d_backtracks_parent_when_dependency_has_no_wheel' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $helper = Join-Path $script:RepositoryRoot 'scripts/Resolve-PythonWheelClosure.py'
+        $output = Invoke-IsolatedPythonCommand -PythonCommand (Assert-Command -Name 'python') -Arguments @(
+            '-B', '-c', 'import runpy,sys; h=runpy.run_path(sys.argv[1]); h["self_test_backtracks_parent_when_dependency_has_no_wheel"](); print("parent-backtrack-missing-dependency-self-test: passed")', $helper
+        )
+        Assert-Match ($output -join "`n") 'parent-backtrack-missing-dependency-self-test: passed' 'A parent whose dependency has no wheel must be backtracked to an older version.'
+    }
+
+    # Scenario: The root requirement itself names a dependency with no wheel.
+    # Purpose: Keep root-level missing dependencies failing closed with the exhaustion error.
+    It 'UnitT29e_fails_closed_when_root_dependency_has_no_wheel' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $helper = Join-Path $script:RepositoryRoot 'scripts/Resolve-PythonWheelClosure.py'
+        $output = Invoke-IsolatedPythonCommand -PythonCommand (Assert-Command -Name 'python') -Arguments @(
+            '-B', '-c', 'import runpy,sys; h=runpy.run_path(sys.argv[1]); h["self_test_root_missing_dependency_fails_closed"](); print("root-missing-dependency-self-test: passed")', $helper
+        )
+        Assert-Match ($output -join "`n") 'root-missing-dependency-self-test: passed' 'A root-level missing dependency must fail closed.'
+    }
+
     # Scenario: Sequential HTTPS GETs complete, abort, change host, redirect or encounter a transport timeout.
     # Purpose: Exercise the real response lifecycle so reuse cannot bypass TLS, deadline, destination or retry checks.
     It 'InterT29_reuses_only_complete_same_host_https_responses' {
