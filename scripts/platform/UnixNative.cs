@@ -88,7 +88,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             lock (Sync)
             {
                 Check(); UnixNative.AssertIdentity(this, Observation, true);
-                byte[] bytes = LeaseBytes.Read(Fd, maximumBytes);
+                byte[] bytes = UnixNative.ReadLeaseBytes(Fd, maximumBytes);
                 UnixNative.AssertIdentity(this, Observation, true); return bytes;
             }
         }
@@ -97,7 +97,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             lock (Sync)
             {
                 Check(); UnixNative.AssertRetainedIdentity(this, Observation);
-                byte[] bytes = LeaseBytes.Read(Fd, maximumBytes);
+                byte[] bytes = UnixNative.ReadLeaseBytes(Fd, maximumBytes);
                 UnixNative.AssertRetainedIdentity(this, Observation); return bytes;
             }
         }
@@ -107,7 +107,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             {
                 Check(); UnixNative.AssertIdentity(this, Observation, true);
                 if (!NewWritable) throw new InvalidOperationException("A fresh create-only writable lease is required.");
-                NewWritable = false; LeaseBytes.Write(Fd, bytes);
+                NewWritable = false; UnixNative.WriteNewLeaseBytes(Fd, bytes);
                 UnixNative.AssertIdentity(this, Observation, true);
             }
         }
@@ -223,6 +223,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             [DllImport("libc", SetLastError = true)] internal static extern int close(int fd);
             [DllImport("libc", SetLastError = true)] internal static extern IntPtr write(SafeFd fd, IntPtr buffer, UIntPtr count);
             [DllImport("libc", SetLastError = true)] internal static extern IntPtr read(SafeFd fd, IntPtr buffer, UIntPtr count);
+            [DllImport("libc", SetLastError = true)] internal static extern IntPtr pread(SafeFd fd, IntPtr buffer, UIntPtr count, long offset);
+            [DllImport("libc", SetLastError = true)] internal static extern IntPtr pwrite(SafeFd fd, IntPtr buffer, UIntPtr count, long offset);
             [DllImport("libc", SetLastError = true)] internal static extern int unlinkat(SafeFd fd, string name, int flags);
             [DllImport("libc", SetLastError = true)] internal static extern int linkat(SafeFd fd, string name, SafeFd other, string link, int flags);
             [DllImport("libc", SetLastError = true)] internal static extern int symlinkat(string target, SafeFd fd, string name);
@@ -261,6 +263,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             [DllImport(Lib, SetLastError = true)] internal static extern int close(int fd);
             [DllImport(Lib, SetLastError = true)] internal static extern IntPtr write(SafeFd fd, IntPtr buffer, UIntPtr count);
             [DllImport(Lib, SetLastError = true)] internal static extern IntPtr read(SafeFd fd, IntPtr buffer, UIntPtr count);
+            [DllImport(Lib, SetLastError = true)] internal static extern IntPtr pread(SafeFd fd, IntPtr buffer, UIntPtr count, long offset);
+            [DllImport(Lib, SetLastError = true)] internal static extern IntPtr pwrite(SafeFd fd, IntPtr buffer, UIntPtr count, long offset);
             [DllImport(Lib, SetLastError = true)] internal static extern int unlinkat(SafeFd fd, string name, int flags);
             [DllImport(Lib, SetLastError = true)] internal static extern int linkat(SafeFd fd, string name, SafeFd other, string link, int flags);
             [DllImport(Lib, SetLastError = true)] internal static extern int symlinkat(string target, SafeFd fd, string name);
@@ -955,6 +959,78 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
             throw Errno(operation, error);
         }
 
+        // Lease data I/O uses explicit-offset pread/pwrite. Leases are opened O_NONBLOCK
+        // (FIFO safety), and .NET 11 routes FileStream I/O on O_NONBLOCK descriptors
+        // through offset-less read/write, so a FileStream Position is not honored.
+        internal static int PositionalRead(SafeFd fd, byte[] buffer, int index, int count, long fileOffset)
+        {
+            if (buffer == null) throw new ArgumentNullException("buffer");
+            if (index < 0 || count < 0 || count > buffer.Length - index || fileOffset < 0) throw new ArgumentOutOfRangeException("count");
+            if (count == 0) return 0;
+            GCHandle pinned = GCHandle.Alloc(buffer, GCHandleType.Pinned);
+            try
+            {
+                IntPtr data = IntPtr.Add(pinned.AddrOfPinnedObject(), index);
+                UIntPtr length = new UIntPtr((uint)count);
+                while (true)
+                {
+                    long result = (Mac ? Darwin.pread(fd, data, length, fileOffset) : Linux.pread(fd, data, length, fileOffset)).ToInt64();
+                    if (result < 0)
+                    {
+                        int error = Marshal.GetLastWin32Error();
+                        if (error == 4) continue; // EINTR
+                        throw new PlatformErrnoException("pread", error);
+                    }
+                    if (result > count) throw new IOException("Invalid native read result.");
+                    return (int)result;
+                }
+            }
+            finally { pinned.Free(); }
+        }
+        internal static byte[] ReadLeaseBytes(SafeFd fd, int maximumBytes)
+        {
+            if (maximumBytes < 0) throw new ArgumentOutOfRangeException("maximumBytes");
+            long length = Stat(fd, null).Size;
+            if (length < 0) throw new IOException("Invalid file length.");
+            if (length > maximumBytes) throw new IOException("File exceeds the bounded read limit.");
+            byte[] bytes = new byte[(int)length];
+            int offset = 0;
+            while (offset < bytes.Length)
+            {
+                int count = PositionalRead(fd, bytes, offset, bytes.Length - offset, offset);
+                if (count == 0) throw new EndOfStreamException();
+                offset += count;
+            }
+            if (PositionalRead(fd, new byte[1], 0, 1, offset) != 0) throw new IOException("File grew during the bounded read.");
+            return bytes;
+        }
+        internal static void WriteNewLeaseBytes(SafeFd fd, byte[] bytes)
+        {
+            if (bytes == null) throw new ArgumentNullException("bytes");
+            if (Stat(fd, null).Size != 0) throw new IOException("New evidence file is no longer empty.");
+            GCHandle pinned = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+            try
+            {
+                int offset = 0;
+                while (offset < bytes.Length)
+                {
+                    IntPtr data = IntPtr.Add(pinned.AddrOfPinnedObject(), offset);
+                    UIntPtr length = new UIntPtr((uint)(bytes.Length - offset));
+                    long written = (Mac ? Darwin.pwrite(fd, data, length, offset) : Linux.pwrite(fd, data, length, offset)).ToInt64();
+                    if (written < 0)
+                    {
+                        int error = Marshal.GetLastWin32Error();
+                        if (error == 4) continue; // EINTR, no bytes written.
+                        throw new PlatformErrnoException("pwrite", error);
+                    }
+                    if (written == 0 || written > bytes.Length - offset) throw new IOException("Invalid native write result.");
+                    offset += (int)written;
+                }
+            }
+            finally { pinned.Free(); }
+            Sync(fd, false, "fsync");
+        }
+
         private static void Sync(SafeFd fd, bool directory, string operation)
         {
             int result = Mac ? Darwin.fsync(fd) : Linux.fsync(fd);
@@ -1193,12 +1269,18 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         {
             FileObservation before = Stat(fd, null);
             PlatformPaths.Same(before, expected); PlatformPaths.Single(before);
-            using (var borrowed = new Microsoft.Win32.SafeHandles.SafeFileHandle(fd.DangerousGetHandle(), false))
-            using (var stream = new FileStream(borrowed, FileAccess.Read))
-            using (var sha = SHA256.Create())
+            using (var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
             {
-                stream.Position = 0;
-                string value = BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
+                byte[] buffer = new byte[65536];
+                long offset = 0;
+                while (offset < before.Size)
+                {
+                    int count = PositionalRead(fd, buffer, 0, (int)Math.Min(buffer.Length, before.Size - offset), offset);
+                    if (count == 0) throw new EndOfStreamException("File shrank while hashing.");
+                    sha.AppendData(buffer, 0, count); offset += count;
+                }
+                if (PositionalRead(fd, buffer, 0, 1, offset) != 0) throw new IOException("File grew while hashing.");
+                string value = BitConverter.ToString(sha.GetHashAndReset()).Replace("-", "").ToLowerInvariant();
                 FileObservation after = Stat(fd, null);
                 PlatformPaths.Same(after, before); PlatformPaths.Single(after);
                 if (after.Size != before.Size) throw new IOException("File size changed while hashing.");
