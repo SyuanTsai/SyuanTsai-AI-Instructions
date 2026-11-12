@@ -3530,4 +3530,30 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $scope.operations[0].kind='replace-git-index';$scope.operations[0].role='git-index';$scope.operations[0].method='index-lock-rename'
         (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalV2 $scope|Out-Null})|Should Match 'not the scope index'
     }
+
+    # Scenario: An applying repository transaction has created an immutable PersonalAgent evidence commit and is about to store it in Git stash history.
+    # Purpose: Persist the evidence commit ID before stash store while allowing rollback to retain the audit entry without changing any existing operation kind.
+    It 'UnitT223_accepts_write_ahead_PersonalAgent_evidence_operation_append' {
+        $previous=Get-TestInstallJournalV2
+        $previous.phase='applying'
+        $previous.operations[0].state='applied'
+        $cloneParameters=@{InputObject=($previous|ConvertTo-Json -Depth 30)}
+        if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$cloneParameters.DateKind='String'}
+        $next=ConvertFrom-Json @cloneParameters
+        $next.operations=@($next.operations)+@([pscustomobject][ordered]@{
+            sequence=2;kind='store-git-stash-evidence';role='personal-agent-evidence';method='stash-store'
+            target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'}
+            before=[pscustomobject][ordered]@{exists=$false;objectId=('c'*40)}
+            after=[pscustomobject][ordered]@{exists=$true;objectId=('c'*40)}
+            stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
+        })
+
+        {Assert-AiInstructionsInstallJournalV2 $next|Out-Null}|Should Not Throw
+        {Assert-AiInstructionsInstallJournalStoreTransition -Previous $previous -Next $next|Out-Null}|Should Not Throw
+
+        $cloneParameters.InputObject=($next|ConvertTo-Json -Depth 30)
+        $invalid=ConvertFrom-Json @cloneParameters
+        $invalid.phase='prepared'
+        (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalStoreTransition -Previous $previous -Next $invalid|Out-Null})|Should Match 'evidence operation append|phase transition'
+    }
 }

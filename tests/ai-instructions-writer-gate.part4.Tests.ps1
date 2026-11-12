@@ -169,8 +169,8 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         Test-Path -LiteralPath (Join-Path $foreign '.ai-instructions-txn')|Should -Be $false
     }
 
-    # Scenario: Attached, detached, and unborn HEAD repositories reach applied state and crash before commit publication.
-    # Purpose: Recover each mode to the exact original HEAD/ref/index/filesystem snapshot using the journaled ref and HEAD variants appropriate to that mode.
+    # Scenario: Attached and detached repositories reach applied state and crash before commit publication, while an unborn repository follows main's pre-mutation skip contract.
+    # Purpose: Recover committed-HEAD modes exactly and prove the unborn skip changes neither Git object bytes nor any ref.
     It 'InterT150_recovers_attached_detached_and_unborn_HEAD_transactions' {
         foreach($mode in @('attached','detached','unborn')){
             $target=Join-Path $script:ExternalRoot ("head-$mode")
@@ -179,15 +179,66 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
                 [IO.File]::WriteAllText((Join-Path $target 'AGENTS.md'),"tracked Agent`n",[Text.UTF8Encoding]::new($false));[IO.File]::WriteAllText((Join-Path $target 'product.txt'),"product`n",[Text.UTF8Encoding]::new($false));& git -C $target add -- AGENTS.md product.txt
             }else{Copy-Item -LiteralPath $script:P9cSeeds.True -Destination $target -Recurse;if($mode-ceq'detached'){& git -C $target checkout --detach --quiet}}
             $before=Get-P9cPublicationStateSnapshot $target
+            if($mode-ceq'unborn'){
+                $objectsRoot=Join-Path $target '.git/objects'
+                $objectsBefore=@(Get-ChildItem -LiteralPath $objectsRoot -Recurse -Force -File|Sort-Object FullName|ForEach-Object{"$($_.FullName.Substring($objectsRoot.Length).TrimStart([char[]]@('\','/')).Replace('\','/'))`t$([Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName)))"})-join"`n"
+                $refsBefore=@(& git -C $target for-each-ref '--format=%(refname)%09%(objectname)')-join"`n"
+                $result=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target
+                $result.ExitCode|Should -Be 0
+                ($result.Output-join[Environment]::NewLine)|Should -Match 'target repository has no commit'
+                $objectsAfter=@(Get-ChildItem -LiteralPath $objectsRoot -Recurse -Force -File|Sort-Object FullName|ForEach-Object{"$($_.FullName.Substring($objectsRoot.Length).TrimStart([char[]]@('\','/')).Replace('\','/'))`t$([Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName)))"})-join"`n"
+                $objectsAfter|Should -BeExactly $objectsBefore
+                (@(& git -C $target for-each-ref '--format=%(refname)%09%(objectname)')-join"`n")|Should -BeExactly $refsBefore
+                (Get-P9cPublicationStateSnapshot $target)|Should -BeExactly $before
+                Test-Path -LiteralPath (Join-Path $target '.ai-instructions-txn')|Should -Be $false
+                continue
+            }
             $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot "head-runtime-$mode") -Failpoint before-committed-journal-write -RecoveryPath NextRun
             $failed=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap;$failed.ExitCode|Should -Not -Be 0
             $transaction=@(Get-ChildItem -LiteralPath (Join-Path $target '.ai-instructions-txn') -Directory -Force);$journal=Get-Content -Raw -LiteralPath (Join-Path $transaction[0].FullName 'journal.json')|ConvertFrom-Json
+            $evidence=@($journal.operations|Where-Object kind -ceq store-git-stash-evidence);$evidence.Count|Should -Be 1
             if($mode-ceq'attached'){@($journal.operations|Where-Object kind -ceq update-git-ref).Count|Should -Be 1;@($journal.operations|Where-Object kind -ceq update-git-head).Count|Should -Be 0}
-            elseif($mode-ceq'detached'){@($journal.operations|Where-Object kind -ceq update-git-ref).Count|Should -Be 1;@($journal.operations|Where-Object kind -ceq update-git-head).Count|Should -Be 1}
-            else{@($journal.operations|Where-Object kind -in @('update-git-ref','update-git-head')).Count|Should -Be 0}
+            else{@($journal.operations|Where-Object kind -ceq update-git-ref).Count|Should -Be 1;@($journal.operations|Where-Object kind -ceq update-git-head).Count|Should -Be 1}
             $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot "head-recovery-$mode") -Failpoint RecoveryOnly
             $recovered=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $recovery;$recovered.ExitCode|Should -Not -Be 0
             $actual=Get-P9cPublicationStateSnapshot $target;if($actual-cne$before){throw "HEAD recovery mismatch for $mode. Failure: $($failed.Output) Recovery: $($recovered.Output)"}
+            (@(& git -C $target rev-parse --verify refs/stash)|Select-Object -First 1)|Should -Be ([string]$evidence[0].after.objectId)
+        }
+    }
+
+    # Scenario: Recovery interrupts immediately before or after the journaled PersonalAgent stash store while the transaction remains applying.
+    # Purpose: Prove the evidence commit ID is durable before stash mutation and rollback retains a stored evidence entry while restoring every non-stash ref.
+    It 'InterT155_journals_PersonalAgent_evidence_before_store_and_retains_it_on_rollback' {
+        $discovery=Join-Path $script:ExternalRoot 'evidence-discovery';Copy-Item -LiteralPath $script:P9cSeeds.False -Destination $discovery -Recurse
+        $prepared=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'evidence-discovery-runtime') -Failpoint after-journal-prepared -RecoveryPath NextRun
+        (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $discovery -BootstrapPath $prepared).ExitCode|Should -Not -Be 0
+        $preparedTransaction=@(Get-ChildItem -LiteralPath (Join-Path $discovery '.ai-instructions-txn') -Directory -Force)
+        $preparedJournal=Get-Content -Raw -LiteralPath (Join-Path $preparedTransaction[0].FullName 'journal.json')|ConvertFrom-Json
+        $evidenceSequence=@($preparedJournal.operations).Count+1
+
+        foreach($position in @('before','after-before-journal')){
+            $target=Join-Path $script:ExternalRoot "evidence-$position";Copy-Item -LiteralPath $script:P9cSeeds.False -Destination $target -Recurse
+            $before=Get-P9cPublicationStateSnapshot $target
+            $stashBefore=(@(& git -C $target rev-parse --verify refs/stash 2>$null)|Select-Object -First 1)
+            $failpoint=if($position-ceq'before'){"before-operation-$evidenceSequence"}else{"after-operation-$evidenceSequence-before-journal"}
+            $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot "evidence-runtime-$position") -Failpoint $failpoint -RecoveryPath NextRun
+            (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap).ExitCode|Should -Not -Be 0
+            $transaction=@(Get-ChildItem -LiteralPath (Join-Path $target '.ai-instructions-txn') -Directory -Force);$transaction.Count|Should -Be 1
+            $journal=Get-Content -Raw -LiteralPath (Join-Path $transaction[0].FullName 'journal.json')|ConvertFrom-Json
+            [string]$journal.phase|Should -Be applying
+            $evidence=@($journal.operations|Where-Object kind -ceq store-git-stash-evidence);$evidence.Count|Should -Be 1
+            [int]$evidence[0].sequence|Should -Be $evidenceSequence
+            [string]$evidence[0].state|Should -Be pending
+            [string]$evidence[0].after.objectId|Should -Match '^[0-9a-f]{40,64}$'
+            $stashAfterFailure=(@(& git -C $target rev-parse --verify refs/stash 2>$null)|Select-Object -First 1)
+            if($position-ceq'before'){[string]$stashAfterFailure|Should -Be ([string]$stashBefore)}else{[string]$stashAfterFailure|Should -Be ([string]$evidence[0].after.objectId)}
+
+            $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot "evidence-recovery-$position") -Failpoint RecoveryOnly
+            (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $recovery).ExitCode|Should -Not -Be 0
+            (Get-P9cPublicationStateSnapshot $target)|Should -BeExactly $before
+            if($position-ceq'before'){(@(& git -C $target rev-parse --verify refs/stash 2>$null)|Select-Object -First 1)|Should -Be $stashBefore}
+            else{(@(& git -C $target rev-parse --verify refs/stash 2>$null)|Select-Object -First 1)|Should -Be ([string]$evidence[0].after.objectId)}
+            @(Get-ChildItem -LiteralPath (Join-Path $target '.ai-instructions-txn') -Directory -Force -ErrorAction SilentlyContinue).Count|Should -Be 0
         }
     }
 
@@ -218,7 +269,8 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         $transaction=@(Get-ChildItem -LiteralPath (Join-Path $discovery '.ai-instructions-txn') -Directory -Force);$journal=Get-Content -Raw -LiteralPath (Join-Path $transaction[0].FullName 'journal.json')|ConvertFrom-Json
         $sequence=@($journal.operations|Where-Object role -ceq git-index)[0].sequence
         $expectedTarget=Join-Path $script:ExternalRoot 'index-expected';Copy-Item -LiteralPath $script:P9cSeeds.False -Destination $expectedTarget -Recurse
-        (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $expectedTarget).ExitCode|Should -Be 0
+        $expectedResult=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $expectedTarget
+        if($expectedResult.ExitCode-ne0){throw "Index expected-state bootstrap failed: $($expectedResult.Output)"}
         $expectedAgentsBytes=[IO.File]::ReadAllBytes((Join-Path $expectedTarget 'AGENTS.md'))
         foreach($failpoint in @('after-index-lock-write-before-rename','after-index-operation-before-journal')){
             $actualFailpoint=if($failpoint-ceq'after-index-operation-before-journal'){"after-operation-$sequence-before-journal"}else{$failpoint}
@@ -232,7 +284,8 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
                 }
                 (Get-P9cPublicationStateSnapshot $target)|Should -Be $before
                 $indexPath=(& git -C $target rev-parse --git-path index|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($indexPath)){$indexPath=Join-Path $target $indexPath};Test-Path -LiteralPath ($indexPath+'.lock')|Should -Be $false
-                $rerun=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target;$rerun.ExitCode|Should -Be 0
+                $rerun=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target
+                if($rerun.ExitCode-ne0){throw "Index recovery rerun failed for $failpoint/$recoveryPath`: $($rerun.Output)"}
                 $agentsPath=Join-Path $target 'AGENTS.md';Test-Path -LiteralPath $agentsPath -PathType Leaf|Should -Be $true
                 [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentsPath))|Should -Be ([Convert]::ToBase64String($expectedAgentsBytes))
             }
@@ -264,6 +317,7 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
             $previous=[pscustomobject][ordered]@{schemaVersion=2;kind='ai-instructions-install-transaction';transactionId=('a'*32);createdAtUtc='2026-11-12T00:00:00.0000000Z';owner=[pscustomobject][ordered]@{component='repo-bootstrap';processId=1;processStartIdentity='fixture'};platform=[pscustomobject][ordered]@{os='windows';architecture='x64'};lock=[pscustomobject][ordered]@{primitive='windows-fileshare';leaf='bootstrap-ai-instructions.lock'};generation=[pscustomobject][ordered]@{previousBundleSha256=$null;candidateBundleSha256=('b'*64)};scope=[pscustomobject][ordered]@{kind='repository'};phase='prepared';operations=@([pscustomobject][ordered]@{sequence=1;kind='create-file';target=[pscustomobject][ordered]@{value='AGENTS.md'};state='pending'})}
             $clone={param($value)$parameters=@{InputObject=($value|ConvertTo-Json -Depth 30)};if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'};ConvertFrom-Json @parameters}
             $applying=&$clone $previous;$applying.phase='applying';{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $previous $applying}|Should -Not -Throw
+            $withEvidence=&$clone $applying;$withEvidence.operations=@($withEvidence.operations)+@([pscustomobject][ordered]@{sequence=2;kind='store-git-stash-evidence';role='personal-agent-evidence';method='stash-store';target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'};before=[pscustomobject][ordered]@{exists=$false;objectId=('c'*40)};after=[pscustomobject][ordered]@{exists=$true;objectId=('c'*40)};stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'});{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $applying $withEvidence}|Should -Not -Throw
             $applied=&$clone $applying;$applied.operations[0].state='applied';{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $applying $applied}|Should -Not -Throw
             $drift=&$clone $applying;$drift.operations[0].target.value='CLAUDE.md';{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $applying $drift}|Should -Throw
             $unknown=&$clone $applying;$unknown|Add-Member unexpected $true;{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $applying $unknown}|Should -Throw

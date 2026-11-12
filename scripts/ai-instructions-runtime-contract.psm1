@@ -2199,6 +2199,14 @@ function Assert-AiInstructionsInstallJournalV2RefState {
     elseif ($null -ne $State.objectId) { throw "$Context.objectId must be null when exists is false." }
 }
 
+function Assert-AiInstructionsInstallJournalV2EvidenceState {
+    param([AllowNull()][object] $State,[Parameter(Mandatory = $true)][string] $Context,[Parameter(Mandatory = $true)][ValidateSet('sha1','sha256')][string] $ObjectFormat)
+    Assert-AiInstructionsInstallJournalExactProperties -Object $State -Names @('exists','objectId') -Context $Context
+    if ($State.exists -isnot [bool]) { throw "$Context.exists must be a boolean." }
+    $pattern = if ($ObjectFormat -ceq 'sha256') { '^[0-9a-f]{64}$' } else { '^[0-9a-f]{40}$' }
+    if ($State.objectId -isnot [string] -or [string]$State.objectId -cnotmatch $pattern) { throw "$Context.objectId does not match repository objectFormat $ObjectFormat." }
+}
+
 function Assert-AiInstructionsInstallJournalV2HeadState {
     param([AllowNull()][object] $State,[Parameter(Mandatory = $true)][string] $Context,[Parameter(Mandatory = $true)][ValidateSet('sha1','sha256')][string] $ObjectFormat)
     Assert-AiInstructionsInstallJournalExactProperties -Object $State -Names @('mode','reference','objectId','rawSha256') -Context $Context
@@ -2296,20 +2304,21 @@ function Assert-AiInstructionsInstallJournalV2 {
         Assert-AiInstructionsInstallJournalExactProperties -Object $operation -Names @('sequence','kind','role','method','target','before','after','stageLeaf','backupLeaf','quarantineLeaf','state') -Context $context
         Assert-AiInstructionsInstallJournalInteger -Value $operation.sequence -Context "$context.sequence" -Minimum 1
         if ([int64]$operation.sequence -ne $expectedSequence) { throw "$context.sequence must be $expectedSequence for a continuous sequence." }
-        if ($operation.kind -isnot [string] -or [string]$operation.kind -cnotin @('create-file','write-file','remove-file','ensure-directory-anchor','replace-git-index','update-git-ref','update-git-head')) { throw "$context.kind is invalid." }
+        if ($operation.kind -isnot [string] -or [string]$operation.kind -cnotin @('create-file','write-file','remove-file','ensure-directory-anchor','replace-git-index','update-git-ref','update-git-head','store-git-stash-evidence')) { throw "$context.kind is invalid." }
         if ($operation.role -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$operation.role)) { throw "$context.role is invalid." }
-        if ($operation.method -isnot [string] -or [string]$operation.method -cnotin @('stage-rename','tombstone-rename','directory-rename','index-lock-rename','update-ref','symbolic-ref')) { throw "$context.method is invalid." }
+        if ($operation.method -isnot [string] -or [string]$operation.method -cnotin @('stage-rename','tombstone-rename','directory-rename','index-lock-rename','update-ref','symbolic-ref','stash-store')) { throw "$context.method is invalid." }
         if ($operation.state -isnot [string] -or [string]$operation.state -cnotin @('pending','applied')) { throw "$context.state is invalid." }
         Assert-AiInstructionsInstallJournalExactProperties -Object $operation.target -Names @('kind','value') -Context "$context.target"
         $targetKind = [string]$operation.target.kind
         $targetValue = [string]$operation.target.value
-        if ($targetKind -cnotin @('repository-relative','git-shared-exclude','git-index','git-ref','git-head')) { throw "$context.target.kind is invalid." }
+        if ($targetKind -cnotin @('repository-relative','git-shared-exclude','git-index','git-ref','git-head','git-stash-evidence')) { throw "$context.target.kind is invalid." }
         switch ($targetKind) {
             'repository-relative' { Assert-AiInstructionsInstallJournalV2RelativePath -Value $operation.target.value -Context "$context.target.value" }
             'git-shared-exclude' { if ($operation.target.value -isnot [string] -or -not [string]::Equals([IO.Path]::GetFullPath($targetValue),[IO.Path]::GetFullPath((Join-Path ([string]$Journal.scope.commonGitDirectory) 'info/exclude')),$pathComparison)) { throw "$context.target.value is not the scope shared exclude." } }
             'git-index' { if ($operation.target.value -isnot [string] -or -not [string]::Equals([IO.Path]::GetFullPath($targetValue),[IO.Path]::GetFullPath([string]$Journal.scope.indexPath),$pathComparison)) { throw "$context.target.value is not the scope index." } }
             'git-head' { if ($operation.target.value -isnot [string] -or $targetValue -cne 'HEAD') { throw "$context.target.value must be HEAD." } }
             'git-ref' { if ($operation.target.value -isnot [string] -or $targetValue -cnotmatch '^refs/heads/[A-Za-z0-9._/-]+$' -or $targetValue -match '(?:^|/)\.\.?(/|$)|\.lock$|//') { throw "$context.target.value is not a safe branch ref." } }
+            'git-stash-evidence' { if ($operation.target.value -isnot [string] -or $targetValue -cne 'refs/stash') { throw "$context.target.value must be refs/stash." } }
         }
         $targetKey = "$targetKind`0$targetValue"
         if (-not $targets.Add($targetKey)) { throw "$context.target duplicates another terminal operation target." }
@@ -2357,6 +2366,13 @@ function Assert-AiInstructionsInstallJournalV2 {
                 if ([string]$operation.method -cne 'symbolic-ref' -or $null -ne $operation.stageLeaf -or $null -ne $operation.backupLeaf -or $null -ne $operation.quarantineLeaf) { throw "$context update-git-head method or artifact leaves are invalid." }
                 Assert-AiInstructionsInstallJournalV2HeadState -State $operation.before -Context "$context.before" -ObjectFormat ([string]$Journal.scope.objectFormat)
                 Assert-AiInstructionsInstallJournalV2HeadState -State $operation.after -Context "$context.after" -ObjectFormat ([string]$Journal.scope.objectFormat)
+            }
+            'store-git-stash-evidence' {
+                if ($targetKind -cne 'git-stash-evidence') { throw "$context store-git-stash-evidence target kind is invalid." }
+                if ([string]$operation.method -cne 'stash-store' -or $null -ne $operation.stageLeaf -or $null -ne $operation.backupLeaf -or $null -ne $operation.quarantineLeaf) { throw "$context store-git-stash-evidence method or artifact leaves are invalid." }
+                Assert-AiInstructionsInstallJournalV2EvidenceState -State $operation.before -Context "$context.before" -ObjectFormat ([string]$Journal.scope.objectFormat)
+                Assert-AiInstructionsInstallJournalV2EvidenceState -State $operation.after -Context "$context.after" -ObjectFormat ([string]$Journal.scope.objectFormat)
+                if ([bool]$operation.before.exists -or -not [bool]$operation.after.exists -or [string]$operation.before.objectId -cne [string]$operation.after.objectId) { throw "$context store-git-stash-evidence states are invalid." }
             }
         }
         if ([string]$Journal.phase -in @('applied','committed') -and [string]$operation.state -cne 'applied') { throw "$context.state is inconsistent with phase $($Journal.phase)." }
@@ -2498,8 +2514,16 @@ function Assert-AiInstructionsInstallJournalStoreTransition {
             throw "AI instructions install journal store transition cannot change $name."
         }
     }
-    if (@($Previous.operations).Count -ne @($Next.operations).Count) { throw 'AI instructions install journal store transition cannot change operations count.' }
-    for ($index = 0; $index -lt @($Previous.operations).Count; $index++) {
+    $previousOperationCount = @($Previous.operations).Count
+    $nextOperationCount = @($Next.operations).Count
+    $isEvidenceAppend = $previousVersion -eq 2 -and $nextVersion -eq 2 -and
+        [string]$Previous.phase -ceq 'applying' -and [string]$Next.phase -ceq 'applying' -and
+        $nextOperationCount -eq ($previousOperationCount + 1) -and
+        @($Previous.operations | Where-Object { [string]$_.kind -ceq 'store-git-stash-evidence' }).Count -eq 0 -and
+        [string]$Next.operations[$nextOperationCount - 1].kind -ceq 'store-git-stash-evidence' -and
+        [string]$Next.operations[$nextOperationCount - 1].state -ceq 'pending'
+    if ($previousOperationCount -ne $nextOperationCount -and -not $isEvidenceAppend) { throw 'AI instructions install journal store transition cannot change operations count except for one applying evidence operation append.' }
+    for ($index = 0; $index -lt $previousOperationCount; $index++) {
         $previousOperation = [ordered]@{}
         $nextOperation = [ordered]@{}
         foreach ($property in @($Previous.operations[$index].PSObject.Properties)) { if ($property.Name -cne 'state') { $previousOperation[$property.Name] = $property.Value } }

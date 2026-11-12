@@ -230,15 +230,26 @@ function Assert-InstallJournalV2TrustedTransition {
         [string]$Previous.owner.component-cne'repo-bootstrap'-or[string]$Next.owner.component-cne'repo-bootstrap') {
         throw 'Trusted install journal transition requires validated repo-bootstrap schema v2 journals.'
     }
-    if((ConvertTo-InstallJournalV2TransitionAuthorityJson $Previous)-cne(ConvertTo-InstallJournalV2TransitionAuthorityJson $Next)) {
+    $previousOperations=@($Previous.operations);$nextOperations=@($Next.operations)
+    $isEvidenceAppend=[string]$Previous.phase-ceq'applying'-and[string]$Next.phase-ceq'applying'-and
+        $nextOperations.Count-eq($previousOperations.Count+1)-and
+        @($previousOperations|Where-Object{[string]$_.kind-ceq'store-git-stash-evidence'}).Count-eq0-and
+        [string]$nextOperations[-1].kind-ceq'store-git-stash-evidence'-and[string]$nextOperations[-1].state-ceq'pending'
+    $authorityNext=$Next
+    if($isEvidenceAppend) {
+        $cloneParameters=@{InputObject=($Next|ConvertTo-Json -Depth 30)}
+        if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$cloneParameters.DateKind='String'}
+        $authorityNext=ConvertFrom-Json @cloneParameters
+        $authorityNext.operations=@($authorityNext.operations|Select-Object -First $previousOperations.Count)
+    }
+    if((ConvertTo-InstallJournalV2TransitionAuthorityJson $Previous)-cne(ConvertTo-InstallJournalV2TransitionAuthorityJson $authorityNext)) {
         throw 'AI instructions install journal store transition changed fields other than phase or operation state.'
     }
     $fromPhase=[string]$Previous.phase;$toPhase=[string]$Next.phase
     if($fromPhase-cne$toPhase-and"$fromPhase>$toPhase"-cnotin@('prepared>applying','applying>applied','applied>committed')) {
         throw 'AI instructions install journal store phase transition is invalid.'
     }
-    $previousOperations=@($Previous.operations);$nextOperations=@($Next.operations)
-    if($previousOperations.Count-ne$nextOperations.Count){throw 'AI instructions install journal store transition cannot change operations count.'}
+    if($previousOperations.Count-ne$nextOperations.Count-and-not$isEvidenceAppend){throw 'AI instructions install journal store transition cannot change operations count except for one applying evidence operation append.'}
     for($index=0;$index-lt$previousOperations.Count;$index++) {
         $fromState=[string]$previousOperations[$index].state;$toState=[string]$nextOperations[$index].state
         if($fromState-cne$toState-and"$fromState>$toState"-cne'pending>applied') {

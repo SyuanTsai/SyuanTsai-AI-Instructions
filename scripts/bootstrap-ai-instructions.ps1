@@ -4200,15 +4200,10 @@ function Update-PersonalAgentStash {
     }
 
     $stashMessage = "CodexPersonalAgent:$WorktreeKey`:$EvidenceFingerprint`:PersonalAgent"
-    $headCommit = $null
-    $headTree = $null
-    $unbornHead = (Get-GitExitCode -Repository $Repository -Arguments @('rev-parse','--verify','HEAD')) -ne 0
-    if (-not $unbornHead) {
-        $headCommit = ((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--verify','HEAD')) | Select-Object -First 1).Trim()
-        $headTree = ((Invoke-Git -Repository $Repository -Arguments @('show','--no-patch','--format=%T','HEAD')) | Select-Object -First 1).Trim()
-        foreach ($objectId in @($headCommit,$headTree)) {
-            if ($objectId -cnotmatch '^[0-9a-f]{40,64}$') { throw 'Git returned an invalid object ID while creating PersonalAgent evidence.' }
-        }
+    $headCommit = ((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--verify','HEAD')) | Select-Object -First 1).Trim()
+    $headTree = ((Invoke-Git -Repository $Repository -Arguments @('show','--no-patch','--format=%T','HEAD')) | Select-Object -First 1).Trim()
+    foreach ($objectId in @($headCommit,$headTree)) {
+        if ($objectId -cnotmatch '^[0-9a-f]{40,64}$') { throw 'Git returned an invalid object ID while creating PersonalAgent evidence.' }
     }
 
     $resolvedActiveIndexPath = [System.IO.Path]::GetFullPath($ActiveIndexPath)
@@ -4234,7 +4229,6 @@ function Update-PersonalAgentStash {
 
         $env:GIT_INDEX_FILE = $temporaryEvidenceIndexPath
         Invoke-Git -Repository $Repository -Arguments @('read-tree','--empty') | Out-Null
-        $emptyTree = ((Invoke-Git -Repository $Repository -Arguments @('write-tree')) | Select-Object -First 1).Trim()
         foreach ($path in @($Paths | Sort-Object -Unique)) {
             $blobId = ((Invoke-Git -Repository $Repository -Arguments @('hash-object','-w','--no-filters','--',$path)) | Select-Object -First 1).Trim()
             if ($blobId -cnotmatch '^[0-9a-f]{40,64}$') { throw "Git returned an invalid managed evidence blob ID: $path" }
@@ -4258,19 +4252,13 @@ function Update-PersonalAgentStash {
 
     $identityArguments = @('-c','user.name=Codex Runtime','-c','user.email=codex-runtime@example.test','commit-tree')
     $evidenceNonce = [Guid]::NewGuid().ToString('N')
-    if ($unbornHead) {
-        if ($emptyTree -cnotmatch '^[0-9a-f]{40,64}$') { throw 'Git returned an invalid empty tree ID while creating unborn PersonalAgent evidence.' }
-        $headTree = $emptyTree
-        $headCommit = ((Invoke-Git -Repository $Repository -Arguments ($identityArguments + @($emptyTree,'-m',"PersonalAgent unborn base $evidenceNonce"))) | Select-Object -First 1).Trim()
-        if ($headCommit -cnotmatch '^[0-9a-f]{40,64}$') { throw 'Git returned an invalid unborn base commit ID while creating PersonalAgent evidence.' }
-    }
     $indexCommit = ((Invoke-Git -Repository $Repository -Arguments ($identityArguments + @($indexTree,'-p',$headCommit,'-m',"PersonalAgent index $evidenceNonce"))) | Select-Object -First 1).Trim()
     $untrackedCommit = ((Invoke-Git -Repository $Repository -Arguments ($identityArguments + @($untrackedTree,'-p',$headCommit,'-m',"PersonalAgent files $evidenceNonce"))) | Select-Object -First 1).Trim()
     $newEvidenceCommit = ((Invoke-Git -Repository $Repository -Arguments ($identityArguments + @($headTree,'-p',$headCommit,'-p',$indexCommit,'-p',$untrackedCommit,'-m',$stashMessage))) | Select-Object -First 1).Trim()
     foreach ($objectId in @($indexCommit,$untrackedCommit,$newEvidenceCommit)) {
         if ($objectId -cnotmatch '^[0-9a-f]{40,64}$') { throw 'Git returned an invalid commit ID while creating PersonalAgent evidence.' }
     }
-    Invoke-Git -Repository $Repository -Arguments @('stash','store','--quiet','-m',$stashMessage,$newEvidenceCommit) | Out-Null
+    Invoke-RepositoryTransactionEvidenceStashStore -Context $script:ProjectPublicationContext -EvidenceCommit $newEvidenceCommit
 
     $priorStashHashCounts = @{}
     foreach ($priorStash in @($PriorStashes)) {
@@ -4889,6 +4877,13 @@ function Get-RepositoryTransactionGitRefState {
     return [pscustomobject][ordered]@{exists=$true;objectId=$sha}
 }
 
+function Get-RepositoryTransactionEvidenceStashState {
+    param([Parameter(Mandatory=$true)][object]$Journal,[Parameter(Mandatory=$true)][object]$Operation)
+    $commitId=[string]$Operation.after.objectId
+    $exists=@(Invoke-Git -Repository ([string]$Journal.scope.repositoryRoot) -Arguments @('stash','list','--format=%H')|Where-Object{([string]$_).Trim()-ceq$commitId}).Count-gt0
+    return [pscustomobject][ordered]@{exists=$exists;objectId=$commitId}
+}
+
 function Get-RepositoryTransactionHeadState {
     param([Parameter(Mandatory=$true)][object]$Journal)
     $repository=[string]$Journal.scope.repositoryRoot;$headPath=Join-Path ([string]$Journal.scope.gitDirectory) 'HEAD'
@@ -4993,6 +4988,7 @@ function Test-RepositoryTransactionStateEqual {
     param([Parameter(Mandatory=$true)][object]$Operation,[Parameter(Mandatory=$true)][object]$Actual,[Parameter(Mandatory=$true)][object]$Expected)
     switch([string]$Operation.kind){
         'update-git-ref'{return [bool]$Actual.exists-eq[bool]$Expected.exists-and(-not$Expected.exists-or[string]$Actual.objectId-ceq[string]$Expected.objectId)}
+        'store-git-stash-evidence'{return [bool]$Actual.exists-eq[bool]$Expected.exists-and[string]$Actual.objectId-ceq[string]$Expected.objectId}
         'update-git-head'{return [string]$Actual.mode-ceq[string]$Expected.mode-and[string]$Actual.reference-ceq[string]$Expected.reference-and[string]$Actual.objectId-ceq[string]$Expected.objectId-and[string]$Actual.rawSha256-ceq[string]$Expected.rawSha256}
         'ensure-directory-anchor'{if([bool]$Actual.exists-ne[bool]$Expected.exists){return $false};if(-not$Expected.exists){return $true};return [string]$Actual.identity.kind-ceq[string]$Expected.identity.kind-and[string]::Equals([string]$Actual.identity.device,[string]$Expected.identity.device,[StringComparison]::OrdinalIgnoreCase)-and[string]::Equals([string]$Actual.identity.fileId,[string]$Expected.identity.fileId,[StringComparison]::OrdinalIgnoreCase)}
         'replace-git-index'{return Test-RepositoryTransactionIndexStateEqual $Actual $Expected}
@@ -5005,6 +5001,7 @@ function Get-RepositoryTransactionOperationState {
     switch([string]$Operation.kind){
         'replace-git-index'{return Get-RepositoryTransactionIndexState $Journal}
         'update-git-ref'{return Get-RepositoryTransactionGitRefState $Journal $Operation}
+        'store-git-stash-evidence'{return Get-RepositoryTransactionEvidenceStashState $Journal $Operation}
         'update-git-head'{return Get-RepositoryTransactionHeadState $Journal}
         'ensure-directory-anchor'{return Get-RepositoryTransactionDirectoryAnchorState $Journal $Operation}
         default{return Get-RepositoryTransactionFileState $Journal $Operation}
@@ -5013,6 +5010,7 @@ function Get-RepositoryTransactionOperationState {
 
 function Invoke-RepositoryTransactionOperation {
     param([Parameter(Mandatory=$true)][object]$Context,[Parameter(Mandatory=$true)][object]$Journal,[Parameter(Mandatory=$true)][object]$Operation,[Parameter(Mandatory=$true)][ValidateSet('redo','undo')][string]$Direction)
+    if([string]$Operation.kind-ceq'store-git-stash-evidence'-and$Direction-ceq'undo'){return}
     $source=if($Direction-ceq'redo'){$Operation.before}else{$Operation.after};$destination=if($Direction-ceq'redo'){$Operation.after}else{$Operation.before}
     $current=Get-RepositoryTransactionOperationState $Journal $Operation
     if(Test-RepositoryTransactionStateEqual $Operation $current $destination){return}
@@ -5056,6 +5054,10 @@ function Invoke-RepositoryTransactionOperation {
             if([string]$destination.mode-ceq'detached'){Invoke-Git -Repository $repository -Arguments @('update-ref','--no-deref','HEAD',[string]$destination.objectId,[string]$source.objectId)|Out-Null}
             else{Invoke-Git -Repository $repository -Arguments @('symbolic-ref','HEAD',[string]$destination.reference)|Out-Null}
         }
+        'store-git-stash-evidence' {
+            $subject=((Invoke-Git -Repository $repository -Arguments @('show','--no-patch','--format=%s',[string]$destination.objectId))|Select-Object -First 1).Trim()
+            Invoke-Git -Repository $repository -Arguments @('stash','store','--quiet','-m',$subject,[string]$destination.objectId)|Out-Null
+        }
     }
     $readback=Get-RepositoryTransactionOperationState $Journal $Operation
     if(-not(Test-RepositoryTransactionStateEqual $Operation $readback $destination)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction sequence $($Operation.sequence) readback differs from its journal destination state.")}
@@ -5075,6 +5077,30 @@ function Write-RepositoryInstallJournalGeneration {
     param([Parameter(Mandatory=$true)][object]$Context,[Parameter(Mandatory=$true)][object]$Next)
     $previous=$Context.CurrentJournal
     $Context.CurrentJournal=Write-AiInstructionsInstallJournalStore -TransactionLease $Context.Lease -TransactionPath (Join-Path (Join-Path $Context.Repository '.ai-instructions-txn') $Context.Id) -Journal $Next -PreviousJournal $previous -PlatformOs ([string]$Next.platform.os) -JournalStoreStates $Context.JournalStoreStates
+}
+
+function Invoke-RepositoryTransactionEvidenceStashStore {
+    param([Parameter(Mandatory=$true)][object]$Context,[Parameter(Mandatory=$true)][string]$EvidenceCommit)
+    if(-not[bool]$Context.Durable-or[string]$Context.CurrentJournal.phase-cne'applying'){throw 'PersonalAgent evidence can only be stored by an applying durable repository transaction.'}
+    if($EvidenceCommit-cnotmatch'^[0-9a-f]{40,64}$'){throw 'PersonalAgent evidence commit ID is invalid.'}
+    if(@($Context.CurrentJournal.operations|Where-Object{[string]$_.kind-ceq'store-git-stash-evidence'}).Count-ne0){throw 'The repository transaction already contains a PersonalAgent evidence operation.'}
+    $next=Copy-RepositoryInstallJournal $Context.CurrentJournal
+    $sequence=@($next.operations).Count+1
+    $operation=[pscustomobject][ordered]@{
+        sequence=$sequence;kind='store-git-stash-evidence';role='personal-agent-evidence';method='stash-store'
+        target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'}
+        before=[pscustomobject][ordered]@{exists=$false;objectId=$EvidenceCommit}
+        after=[pscustomobject][ordered]@{exists=$true;objectId=$EvidenceCommit}
+        stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
+    }
+    $next.operations=@($next.operations)+@($operation)
+    Write-RepositoryInstallJournalGeneration $Context $next
+    $operation=@($Context.CurrentJournal.operations|Where-Object{[int64]$_.sequence-eq[int64]$sequence})[0]
+    Invoke-AiInstructionsInstallFailpoint -Name ("before-operation-"+$sequence)
+    Invoke-RepositoryTransactionOperation -Context $Context -Journal $Context.CurrentJournal -Operation $operation -Direction redo
+    Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+$sequence+"-before-journal")
+    Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Sequence ([int64]$sequence))
+    Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+$sequence)
 }
 
 function Add-RemediationFileIntents {
@@ -5164,6 +5190,13 @@ function Start-RepositoryInstallTransaction {
     Invoke-AiInstructionsInstallFailpoint -Name 'after-journal-prepared'
     Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Phase applying)
     foreach($operation in @($Context.CurrentJournal.operations|Sort-Object sequence)){Invoke-AiInstructionsInstallFailpoint -Name ("before-operation-"+$operation.sequence);Invoke-RepositoryTransactionOperation -Context $Context -Journal $Context.CurrentJournal -Operation $operation -Direction redo;Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+$operation.sequence+"-before-journal");Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Sequence ([int64]$operation.sequence));Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+$operation.sequence)}
+}
+
+function Complete-RepositoryInstallTransactionApply {
+    param([Parameter(Mandatory=$true)][object]$Context)
+    if(-not[bool]$Context.Durable){return}
+    if([string]$Context.CurrentJournal.phase-ceq'applied'){return}
+    if([string]$Context.CurrentJournal.phase-cne'applying'){throw "Repository transaction cannot complete apply from phase '$($Context.CurrentJournal.phase)'."}
     foreach($operation in $Context.CurrentJournal.operations){$current=Get-RepositoryTransactionOperationState $Context.CurrentJournal $operation;if(-not(Test-RepositoryTransactionStateEqual $operation $current $operation.after)){throw (New-AiInstructionsRefusalException -Code interrupted-install -Message "Repository transaction terminal verification failed for sequence $($operation.sequence).")}}
     Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Phase applied)
 }
@@ -5244,6 +5277,7 @@ function Invoke-RepositoryInstallTransaction {
     param([Parameter(Mandatory=$true)][object]$Context)
     Start-RepositoryInstallTransaction $Context
     if(-not$Context.Durable){return}
+    Complete-RepositoryInstallTransactionApply $Context
     if([string]$Context.CurrentJournal.phase-cne'applied'){throw 'Repository transaction cannot commit before applied verification.'}
     Invoke-AiInstructionsInstallFailpoint -Name 'before-committed-journal-write'
     Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Phase committed)
@@ -5269,6 +5303,11 @@ if (($insideWorkTree | Select-Object -First 1).Trim() -ne 'true') {
 
 if (Test-IsCanonicalInstructionSourceRepository -Repository $targetRootPath) {
     Write-Output 'AI instruction sync skipped: the current repository is the shared instruction source.'
+    return
+}
+
+if ((Get-GitExitCode -Repository $targetRootPath -Arguments @('rev-parse', '--verify', 'HEAD')) -ne 0) {
+    Write-Output 'AI instruction sync skipped: the target repository has no commit, so managed changes cannot be isolated safely.'
     return
 }
 

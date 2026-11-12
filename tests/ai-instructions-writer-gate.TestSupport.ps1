@@ -403,6 +403,7 @@ function Get-P9cPublicationStateSnapshot {
     $indexRows=@(& git -C $Repository ls-files --stage)|Sort-Object -CaseSensitive
     $indexEntryBytes=[Text.UTF8Encoding]::new($false).GetBytes((($indexRows-join"`n")+"`n"));$sha=[Security.Cryptography.SHA256]::Create();try{$indexEntrySha=([BitConverter]::ToString($sha.ComputeHash($indexEntryBytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
     $status=(@(& git -C $Repository status --porcelain=v1 --untracked-files=all)-join"`n")
+    $refsWithoutStash=(@(& git -C $Repository for-each-ref '--format=%(refname)%09%(objectname)'|Where-Object{[string]$_-cnotmatch'^refs/stash(?:\s|$)'}|Sort-Object -CaseSensitive)-join"`n")
     $transactionRoot=Join-Path $Repository '.ai-instructions-txn';$transactionResidue=if((Test-Path -LiteralPath $transactionRoot -PathType Container)-and@(Get-ChildItem -Force -LiteralPath $transactionRoot).Count-gt0){Get-P7eTreeSnapshot $transactionRoot}else{''}
     return ([ordered]@{
         headMode=$headMode
@@ -413,6 +414,7 @@ function Get-P9cPublicationStateSnapshot {
         indexRaw=if(Test-Path -LiteralPath $indexPath -PathType Leaf){(Get-FileHash -Algorithm SHA256 -LiteralPath $indexPath).Hash.ToLowerInvariant()}else{'absent'}
         indexEntrySet=$indexEntrySha
         status=$status
+        refsWithoutStash=$refsWithoutStash
         exclude=if(Test-Path -LiteralPath $excludePath -PathType Leaf){[Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))}else{'absent'}
         manifest=if($null-ne$manifest){[Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath))}else{'absent'}
         files=$fileRows
