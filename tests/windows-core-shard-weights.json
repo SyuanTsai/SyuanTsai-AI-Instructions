@@ -9,6 +9,7 @@
     "ai-instructions-writer-gate.part2.Tests.ps1": 30,
     "ai-instructions-writer-gate.part3.Tests.ps1": 30,
     "ai-instructions-writer-gate.part4.Tests.ps1": 30,
+    "ai-instructions-writer-gate.part5.Tests.ps1": 30,
     "bootstrap-ai-instructions.Tests.ps1": 13,
     "agent-environment-reconciler.Tests.ps1": 10,
     "syp214-user-only.Tests.ps1": 4,

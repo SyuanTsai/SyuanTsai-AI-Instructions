@@ -507,6 +507,10 @@ function New-RemediationCommitObject {
     $temporaryIndex = Join-Path ([System.IO.Path]::GetTempPath()) ('codex-agent-remediation-commit-index-' + [Guid]::NewGuid().ToString('N'))
     $hadAlternateIndex = Test-Path Env:GIT_INDEX_FILE
     $priorAlternateIndex = $env:GIT_INDEX_FILE
+    $hadAuthorDate = Test-Path Env:GIT_AUTHOR_DATE
+    $priorAuthorDate = $env:GIT_AUTHOR_DATE
+    $hadCommitterDate = Test-Path Env:GIT_COMMITTER_DATE
+    $priorCommitterDate = $env:GIT_COMMITTER_DATE
     try {
         $env:GIT_INDEX_FILE = $temporaryIndex
         Invoke-RemediationGit -Repository $Repository -GitExecutable $GitExecutable -Arguments @('read-tree',$Head) | Out-Null
@@ -514,6 +518,8 @@ function New-RemediationCommitObject {
         $tree = ((Invoke-RemediationGit -Repository $Repository -GitExecutable $GitExecutable -Arguments @('write-tree')) | Select-Object -First 1).Trim()
         $headTree = ((Invoke-RemediationGit -Repository $Repository -GitExecutable $GitExecutable -Arguments @('rev-parse',"$Head^{tree}")) | Select-Object -First 1).Trim()
         if ($tree -ceq $headTree) { return $null }
+        $env:GIT_AUTHOR_DATE = ((Invoke-RemediationGit -Repository $Repository -GitExecutable $GitExecutable -Arguments @('show','-s','--format=%aI',$Head)) | Select-Object -First 1).Trim()
+        $env:GIT_COMMITTER_DATE = ((Invoke-RemediationGit -Repository $Repository -GitExecutable $GitExecutable -Arguments @('show','-s','--format=%cI',$Head)) | Select-Object -First 1).Trim()
         return ((Invoke-RemediationGit -Repository $Repository -GitExecutable $GitExecutable -Arguments @(
             '-c',"user.name=$script:RemediationUserName",
             '-c',"user.email=$script:RemediationUserEmail",
@@ -523,6 +529,10 @@ function New-RemediationCommitObject {
     finally {
         if ($hadAlternateIndex) { $env:GIT_INDEX_FILE = $priorAlternateIndex }
         else { Remove-Item Env:GIT_INDEX_FILE -ErrorAction SilentlyContinue }
+        if ($hadAuthorDate) { $env:GIT_AUTHOR_DATE = $priorAuthorDate }
+        else { Remove-Item Env:GIT_AUTHOR_DATE -ErrorAction SilentlyContinue }
+        if ($hadCommitterDate) { $env:GIT_COMMITTER_DATE = $priorCommitterDate }
+        else { Remove-Item Env:GIT_COMMITTER_DATE -ErrorAction SilentlyContinue }
         foreach ($temporaryPath in @($temporaryIndex,($temporaryIndex + '.lock'))) {
             if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) { Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue }
         }

@@ -1314,6 +1314,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "tests/ai-instructions-writer-gate.part5.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "tests/ai-instructions-writer-gate.TestSupport.ps1",
       "license": "Apache-2.0"
     },
