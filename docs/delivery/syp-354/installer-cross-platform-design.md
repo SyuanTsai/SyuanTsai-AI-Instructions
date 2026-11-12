@@ -128,7 +128,7 @@ Linux leased exec 仍使用 `/proc/self/fd/3`；`posix_spawn` 的 dup2 action �
 | USER shared Skills | `~/.agents/skills/<skill-id>` | Codex／Copilot 共用，維持現有管理位置 |
 | USER Claude | `~/.claude/skills/<skill-id>` | 與 shared Skills 由同一 source pin／inventory 產生實體 copy |
 | USER optional Copilot | `~/.copilot/skills/<skill-id>` | 預設不額外複製；明確 opt-in 並驗證 host discovery／重複載入問題 |
-| Project opt-in | `.agents/skills/<skill-id>`、`.claude/skills/<skill-id>`、`.github/skills/<skill-id>` | 支援全部 roots 的 versioned projection；`projections.project` 是全域 opt-in，會套用到所有未排除的 consumer Repository；不變更 project-owned/tracked Skills，不作 USER fallback。逐 Repository 授權契約另案處理 |
+| Project opt-in | `.agents/skills/<skill-id>`、`.claude/skills/<skill-id>`、`.github/skills/<skill-id>` | 支援全部 roots 的 versioned projection；`projections.project` 是全域 opt-in，會套用到所有未排除的 consumer Repository；不變更 project-owned/tracked Skills，不作 USER fallback。任一選定 Skill 衝突時整筆 bootstrap 在 mutation 前拒絕，Instructions 也不更新；逐 Repository 授權契約另案處理 |
 | USER Instructions | 既有 `CODEX_HOME/AGENTS.md` bootstrap section；擬新增 `~/.claude/CLAUDE.md` managed section | 共通規範同源，保留個人 section；Copilot USER Instructions discovery 尚未驗證，不另發明全域檔名 |
 | REPO Instructions | `AGENTS.md`、`.github/copilot-instructions.md`、新增 `CLAUDE.md`，及其生成 rule paths | 相同 canonical revision 產生，追蹤來源與 output hash；依 host adapter 載入條件式規則 |
 
@@ -147,6 +147,8 @@ REPO reserved inventory 加入受管的 Claude Instructions/rule files；`.git/i
 > **P9b 決策：**`CLAUDE.md` 不列入 reserved，因為專案自有檔案很常見；其 ownership、整個 Claude family 的保護與略過行為依 P9b H4／J7 判定。
 
 所有 Skill roots——既有 `.agents/skills/**`、`.codex/skills/**`，以及新增 `.claude/skills/**`、`.github/skills/**`——明確排除 reserved Instructions remediation。Project opt-in 管理的 exact Skill files 可以 local-ignore，但不因路徑名或同 hash 接管既有 tracked/staged/unmanaged 檔案。新 `CLAUDE.md` 若已有內容，先依 ownership 分類、備份及產生可 review 的遷移結果，不擴張既有自動刪除範圍。後續若變更 reserved lifecycle policy，須先依 Repository 規範更新 authority/tests；本設計不授予刪除任何 consumer 檔案的操作權。
+
+`projections.project` 衝突採 fail-closed 的整筆 bootstrap 拒絕：任何選定的 `(projection, Skill)` 含 tracked、staged、unmanaged、drift 或 reparse 內容時，必須在 Instructions、Skill payload、manifest 與 shared exclude 的任何 mutation 前回傳 typed refusal，因此 Instructions 也不更新。診斷列出每個 Skill ID、projection、路徑與狀態；使用者可移除或改名專案自有 Skill，或將該 Skill 從 `projections.project` 移除後重試。「只拒絕 project transaction、Instructions 仍完成」需要另行重設 v4 manifest 發布模型，列為 follow-up。
 
 ## 6. Schema 影響與相容策略
 

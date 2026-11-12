@@ -1514,17 +1514,17 @@ function Get-ProjectSkillOwnershipConflicts {
             Test-GitPathEqualsOrIsUnderPrefix -Path ([string]$_) -Prefix $targetPrefix -Comparer $TrackedPaths.Comparer
         })
         foreach ($trackedPath in $trackedUnderRoot) {
-            $conflicts.Add([pscustomobject][ordered]@{projection=$projectionId;skillId=$skillId;relativePath=([string]$trackedPath).Substring($targetPrefix.Length).TrimStart('/');status='tracked'})
+            $conflicts.Add([pscustomobject][ordered]@{projection=$projectionId;skillId=$skillId;targetPath=[string]$trackedPath;relativePath=([string]$trackedPath).Substring($targetPrefix.Length).TrimStart('/');status='tracked'})
         }
         foreach ($stagedPath in @($StagedPaths | Where-Object {
             Test-GitPathEqualsOrIsUnderPrefix -Path ([string]$_) -Prefix $targetPrefix -Comparer $StagedPaths.Comparer
         })) {
-            $conflicts.Add([pscustomobject][ordered]@{projection=$projectionId;skillId=$skillId;relativePath=([string]$stagedPath).Substring($targetPrefix.Length).TrimStart('/');status='staged'})
+            $conflicts.Add([pscustomobject][ordered]@{projection=$projectionId;skillId=$skillId;targetPath=[string]$stagedPath;relativePath=([string]$stagedPath).Substring($targetPrefix.Length).TrimStart('/');status='staged'})
         }
         if (Test-Path -LiteralPath $targetRoot) {
             $rootItem = Get-Item -Force -LiteralPath $targetRoot
             if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                $conflicts.Add([pscustomobject][ordered]@{projection=$projectionId;skillId=$skillId;relativePath='.';status='reparse'})
+                $conflicts.Add([pscustomobject][ordered]@{projection=$projectionId;skillId=$skillId;targetPath=$targetPrefix;relativePath='.';status='reparse'})
                 continue
             }
             $pending = New-Object System.Collections.Generic.Stack[string]
@@ -1534,16 +1534,16 @@ function Get-ProjectSkillOwnershipConflicts {
                 foreach ($item in @(Get-ChildItem -Force -LiteralPath $directory)) {
                     $relative = $item.FullName.Substring($targetRoot.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
                     if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                        $conflicts.Add([pscustomobject][ordered]@{projection=$projectionId;skillId=$skillId;relativePath=$relative;status='reparse'})
+                        $conflicts.Add([pscustomobject][ordered]@{projection=$projectionId;skillId=$skillId;targetPath="$targetPrefix/$relative";relativePath=$relative;status='reparse'})
                     }
                     elseif ($item.PSIsContainer) { $pending.Push($item.FullName) }
                     else {
                         $path = "$targetPrefix/$relative"
                         if (-not $managed.ContainsKey($path)) {
-                            $conflicts.Add([pscustomobject][ordered]@{projection=$projectionId;skillId=$skillId;relativePath=$relative;status='unmanaged'})
+                            $conflicts.Add([pscustomobject][ordered]@{projection=$projectionId;skillId=$skillId;targetPath=$path;relativePath=$relative;status='unmanaged'})
                         }
                         elseif ((Get-RawContentHash $item.FullName) -cne [string]$managed[$path].sha256) {
-                            $conflicts.Add([pscustomobject][ordered]@{projection=$projectionId;skillId=$skillId;relativePath=$relative;status='drift'})
+                            $conflicts.Add([pscustomobject][ordered]@{projection=$projectionId;skillId=$skillId;targetPath=$path;relativePath=$relative;status='drift'})
                         }
                     }
                 }
@@ -1551,13 +1551,13 @@ function Get-ProjectSkillOwnershipConflicts {
             foreach ($path in $managed.Keys) {
                 $fullPath = Join-Path $Repository ([string]$path).Replace('/',[IO.Path]::DirectorySeparatorChar)
                 if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
-                    $conflicts.Add([pscustomobject][ordered]@{projection=$projectionId;skillId=$skillId;relativePath=([string]$path).Substring($targetPrefix.Length).TrimStart('/');status='missing'})
+                    $conflicts.Add([pscustomobject][ordered]@{projection=$projectionId;skillId=$skillId;targetPath=[string]$path;relativePath=([string]$path).Substring($targetPrefix.Length).TrimStart('/');status='missing'})
                 }
             }
         }
         elseif ($managed.Count -gt 0) {
             foreach ($path in $managed.Keys) {
-                $conflicts.Add([pscustomobject][ordered]@{projection=$projectionId;skillId=$skillId;relativePath=([string]$path).Substring($targetPrefix.Length).TrimStart('/');status='missing'})
+                $conflicts.Add([pscustomobject][ordered]@{projection=$projectionId;skillId=$skillId;targetPath=[string]$path;relativePath=([string]$path).Substring($targetPrefix.Length).TrimStart('/');status='missing'})
             }
         }
     }
@@ -1584,10 +1584,18 @@ function Get-ProjectSkillOwnershipConflictsAcrossWorktrees {
         $tracked=Get-GitListedPathSet -Repository $worktreeRoot -Comparer $comparer -Kind Tracked
         $staged=Get-GitListedPathSet -Repository $worktreeRoot -Comparer $comparer -Kind Staged
         foreach($conflict in @(Get-ProjectSkillOwnershipConflicts -Repository $worktreeRoot -DesiredFiles $DesiredFiles -ManifestEntriesByTarget $entries -TrackedPaths $tracked -StagedPaths $staged)){
-            $result.Add([pscustomobject][ordered]@{worktree=$worktreeRoot;projection=$conflict.projection;skillId=$conflict.skillId;relativePath=$conflict.relativePath;status=$conflict.status})
+            $result.Add([pscustomobject][ordered]@{worktree=$worktreeRoot;projection=$conflict.projection;skillId=$conflict.skillId;targetPath=$conflict.targetPath;relativePath=$conflict.relativePath;status=$conflict.status})
         }
     }
     return $result.ToArray()
+}
+
+function Format-ProjectSkillOwnershipConflictDetails {
+    param([Parameter(Mandatory=$true)][object[]]$Conflicts)
+
+    return (@($Conflicts|Sort-Object worktree,projection,skillId,targetPath,status|ForEach-Object{
+        "skillId=$($_.skillId), projection=$($_.projection), path=$($_.targetPath), status=$($_.status), worktree=$($_.worktree)"
+    })-join'; ')
 }
 
 function ConvertFrom-GitQuotedPath {
@@ -1969,6 +1977,22 @@ function Assert-NoRepoManagedManifestV4 {
     }
 }
 
+function Get-WorktreeGitPathSetCache {
+    param([Parameter(Mandatory=$true)][AllowEmptyCollection()][string[]]$WorktreeRoots)
+
+    $cache=[System.Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+    foreach($worktreeRoot in $WorktreeRoots){
+        if($cache.ContainsKey($worktreeRoot)){throw "Duplicate managed worktree root: $worktreeRoot"}
+        $comparer=Get-GitPathComparer -Repository $worktreeRoot
+        $cache.Add($worktreeRoot,[pscustomobject][ordered]@{
+            Comparer=$comparer
+            Tracked=Get-GitListedPathSet -Repository $worktreeRoot -Comparer $comparer -Kind Tracked
+            Staged=Get-GitListedPathSet -Repository $worktreeRoot -Comparer $comparer -Kind Staged
+        })
+    }
+    return ,$cache
+}
+
 function Get-SharedManagedExcludePaths {
     param(
         [Parameter(Mandatory = $true)][string] $Repository,
@@ -1984,10 +2008,11 @@ function Get-SharedManagedExcludePaths {
         if($normalized-cmatch'^\.(agents|claude|github)/skills/'){[void]$skillCandidatePaths.Add($normalized)}
     }
     $worktreeRoots=@(Get-ManagedWorktreeRoots -Repository $Repository -Strict)
+    $worktreeGitPathSets=Get-WorktreeGitPathSetCache -WorktreeRoots $worktreeRoots
     foreach ($worktreeRoot in $worktreeRoots) {
-        $gitPathComparer=Get-GitPathComparer -Repository $worktreeRoot
-        $worktreeTrackedPaths=Get-GitListedPathSet -Repository $worktreeRoot -Comparer $gitPathComparer -Kind Tracked
-        $worktreeStagedPaths=Get-GitListedPathSet -Repository $worktreeRoot -Comparer $gitPathComparer -Kind Staged
+        $gitPathState=$worktreeGitPathSets[$worktreeRoot]
+        $worktreeTrackedPaths=$gitPathState.Tracked
+        $worktreeStagedPaths=$gitPathState.Staged
         $worktreeManifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/','\')
         if (-not (Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf)) { continue }
         Assert-ManagedPathDoesNotCrossReparsePoint -Root $worktreeRoot -Path $worktreeManifestPath -Context 'Linked worktree managed manifest'
@@ -2038,9 +2063,10 @@ function Get-SharedManagedExcludePaths {
             try{$m=Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath|ConvertFrom-Json;Assert-ManagedManifestV4 -Manifest $m}catch{[void]$blockedSkillPaths.Add($skillCandidatePath);continue}
             $groupEntries=@($m.files|Where-Object{[string]$_.artifactType-ceq'skill'-and([string]$_.targetPath-ceq$prefix-or([string]$_.targetPath).StartsWith($prefix+'/',[StringComparison]::Ordinal))})
             $entryMap=@{};foreach($entry in $groupEntries){$entryMap[[string]$entry.targetPath]=$entry}
-            $gitPathComparer=Get-GitPathComparer -Repository $worktreeRoot
-            $worktreeTrackedPaths=Get-GitListedPathSet -Repository $worktreeRoot -Comparer $gitPathComparer -Kind Tracked
-            $worktreeStagedPaths=Get-GitListedPathSet -Repository $worktreeRoot -Comparer $gitPathComparer -Kind Staged
+            $gitPathState=$worktreeGitPathSets[$worktreeRoot]
+            $gitPathComparer=$gitPathState.Comparer
+            $worktreeTrackedPaths=$gitPathState.Tracked
+            $worktreeStagedPaths=$gitPathState.Staged
             $trackedUnderPrefix=@($worktreeTrackedPaths|Where-Object{Test-GitPathEqualsOrIsUnderPrefix -Path ([string]$_) -Prefix $prefix -Comparer $gitPathComparer})
             $stagedUnderPrefix=@($worktreeStagedPaths|Where-Object{Test-GitPathEqualsOrIsUnderPrefix -Path ([string]$_) -Prefix $prefix -Comparer $gitPathComparer})
             if(-not$entryMap.ContainsKey($skillCandidatePath) -or $trackedUnderPrefix.Count-gt0 -or $stagedUnderPrefix.Count-gt0){
@@ -3583,7 +3609,11 @@ function Invoke-ProjectPublicationRecovery {
                 $journalLeaf=if(Test-Path -LiteralPath (Join-Path $entry.FullName 'journal.json') -PathType Leaf){'journal.json'}elseif(Test-Path -LiteralPath (Join-Path $entry.FullName 'journal.prev') -PathType Leaf){'journal.prev'}else{$null}
                 if($null-eq$journalLeaf){
                     $children=@(Get-ChildItem -Force -LiteralPath $entry.FullName)
-                    if(@($children|Where-Object{$_.Name-cnotmatch'^journal-[0-9a-f]{32}\.stage$'}).Count-gt0){throw 'Project publication transaction has no recoverable journal.'}
+                    $unexpected=@($children|Where-Object{
+                        $_.PSIsContainer -or ($_.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0 -or
+                        $_.Name-cnotmatch'^(?:journal\.stage|journal-[0-9a-f]{32}\.stage|op-[0-9]{6}\.stage)$'
+                    })
+                    if($unexpected.Count-gt0){throw 'Project publication transaction has no recoverable journal and contains non-staged evidence.'}
                     $identity=ConvertTo-ProjectPublicationIdentity $lease.Observation;$lease.Dispose();$lease=$null
                     Remove-PlatformOwnedDirectoryTree -TransactionRootLease $container -Leaf $entry.Name -ExpectedIdentity $identity|Out-Null
                     continue
@@ -3624,6 +3654,9 @@ function Save-ProjectPublicationJournal {
     $bytes=[Text.UTF8Encoding]::new($false).GetBytes((($document|ConvertTo-Json -Depth 20).Replace("`r`n","`n"))+"`n")
     $Context.JournalGeneration=[int]$Context.JournalGeneration+1
     $stageLeaf='journal.stage'
+    $stagePath=Join-Path (Join-Path (Join-Path $Context.Repository '.ai-instructions-txn') $Context.Id) $stageLeaf
+    $existingStage=Get-AiInstructionsInstallFileState -ParentLease $Context.Lease -Leaf $stageLeaf -LiteralPath $stagePath -PlatformOs $(if($IsLinux){'linux'}elseif($IsMacOS){'macos'}else{'windows'})
+    if($existingStage.exists){Remove-PlatformOwnedFile -ParentLease $Context.Lease -Leaf $stageLeaf -ExpectedState $existingStage|Out-Null}
     $stage=New-AiInstructionsInstallStageFile -TransactionLease $Context.Lease -Leaf $stageLeaf -Bytes $bytes -PlatformOs $(if($IsLinux){'linux'}elseif($IsMacOS){'macos'}else{'windows'})
     $journalPath=Join-Path (Join-Path (Join-Path $Context.Repository '.ai-instructions-txn') $Context.Id) 'journal.json'
     $current=Get-AiInstructionsInstallFileState -ParentLease $Context.Lease -Leaf 'journal.json' -LiteralPath $journalPath -PlatformOs $(if($IsLinux){'linux'}elseif($IsMacOS){'macos'}else{'windows'})
@@ -5218,8 +5251,8 @@ try {
         if ($null -ne $projectCandidateState -and @($projectCandidateState.Files).Count -gt 0) {
             $earlyConflicts=@(Get-ProjectSkillOwnershipConflictsAcrossWorktrees -Repository $targetRootPath -DesiredFiles @($projectCandidateState.Files))
             if($earlyConflicts.Count-gt0){
-                $details=@($earlyConflicts|Sort-Object worktree,projection,skillId,relativePath,status|ForEach-Object{"$($_.projection)/$($_.skillId)/$($_.relativePath) [$($_.status); worktree=$($_.worktree)]"})-join'; '
-                throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project Skill transaction refused before remediation or project mutation: $details")
+                $details=Format-ProjectSkillOwnershipConflictDetails -Conflicts $earlyConflicts
+                throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project Skill transaction refused before remediation or project mutation: $details. Resolve each conflict: remove or rename the project-owned Skill, or remove that Skill from projections.project.")
             }
         }
         $remediationTransaction = Invoke-AgentArtifactRemediation -Repository $targetRootPath -GitExecutable $GitExecutable `
@@ -5630,10 +5663,8 @@ try {
     if ($projectDesiredFiles.Count -gt 0) {
         $projectConflicts = @(Get-ProjectSkillOwnershipConflictsAcrossWorktrees -Repository $targetRootPath -DesiredFiles $projectDesiredFiles)
         if ($projectConflicts.Count -gt 0) {
-            $details = @($projectConflicts | Sort-Object worktree,projection,skillId,relativePath,status | ForEach-Object {
-                "$($_.projection)/$($_.skillId)/$($_.relativePath) [$($_.status); worktree=$($_.worktree)]"
-            }) -join '; '
-            throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project Skill transaction refused before project mutation: $details")
+            $details=Format-ProjectSkillOwnershipConflictDetails -Conflicts $projectConflicts
+            throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project Skill transaction refused before project mutation: $details. Resolve each conflict: remove or rename the project-owned Skill, or remove that Skill from projections.project.")
         }
     }
     if ($manifestSchemaVersion -eq 4) {

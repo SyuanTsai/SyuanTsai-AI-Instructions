@@ -3,6 +3,8 @@ $script:PowerShellExecutable=(Get-Process -Id $PID).Path
 $script:InstallerPath=Join-Path $script:RepositoryRoot 'scripts\install-ai-instructions-bootstrap.ps1'
 Import-Module (Join-Path $script:RepositoryRoot 'scripts\ai-instructions-runtime-contract.psm1') -Force
 Import-Module (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psd1') -Force
+Import-Module (Join-Path $script:RepositoryRoot 'scripts\skills-catalog-contract.psm1') -Force
+Import-Module (Join-Path $script:RepositoryRoot 'scripts\skills-source-composition.psm1') -Force
 $script:P7eUnavailableCapability = @(
     (Get-PlatformCapabilities -Required @()).capabilities |
         Where-Object { [string]$_.status -cne 'available' } |
@@ -156,25 +158,28 @@ function New-P9bInstructionArchive {
 }
 
 function New-P9bBootstrapContext {
-    param([Parameter(Mandatory=$true)][string]$Root,[switch]$SelectProjectProjection,[string]$InstructionCommit=('c'*40),[string]$CodexHome=$script:BaseV3Home)
+    param([Parameter(Mandatory=$true)][string]$Root,[switch]$SelectProjectProjection,[string[]]$ProjectProjectionIds,[string]$ProjectCandidateArchivePath,[object[]]$SkillProvenance=@(),[string]$InstructionCommit=('c'*40),[string]$CodexHome=$script:BaseV3Home)
     $runtimeRoot=Join-Path $CodexHome 'hooks/ai-instructions-runtime'
     $configuration=Get-Content -Raw -LiteralPath (Join-Path $CodexHome 'ai-instructions-sync.json')|ConvertFrom-Json
     if($SelectProjectProjection){$configuration.projections.project=@('project-agents')}
+    if($PSBoundParameters.ContainsKey('ProjectProjectionIds')){$configuration.projections.project=@($ProjectProjectionIds)}
     $catalog=Get-Content -Raw -LiteralPath (Join-Path $runtimeRoot 'catalog/skills-catalog.json')|ConvertFrom-Json
     $lock=Get-Content -Raw -LiteralPath (Join-Path $runtimeRoot 'catalog/skills-catalog-lock.json')|ConvertFrom-Json
     $lockSha=(Get-FileHash -LiteralPath (Join-Path $runtimeRoot 'catalog/skills-catalog-lock.json') -Algorithm SHA256).Hash.ToLowerInvariant()
     $routingPath=Join-Path $Root 'routing.json'
     $provenancePath=Join-Path $Root 'provenance.json'
-    Set-P9bJson -Path $routingPath -Document ([ordered]@{
+    $routing=[ordered]@{
         schemaVersion=4;syncConfiguration=$configuration;catalogId=[string]$catalog.catalogId
         lockSha256=$lockSha;projectionContractSha256=[string]$lock.projectionContractSha256
-    })
+    }
+    if(-not[string]::IsNullOrWhiteSpace($ProjectCandidateArchivePath)){$routing.projectCandidateSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $ProjectCandidateArchivePath).Hash.ToLowerInvariant()}
+    Set-P9bJson -Path $routingPath -Document $routing
     Set-P9bJson -Path $provenancePath -Document ([ordered]@{
         schemaVersion=1;catalogId=[string]$catalog.catalogId;lockSha256=$lockSha
         instruction=[ordered]@{sourceId='ai-instructions';sourceRepository='https://example.com/ai-instructions.git';sourceRef=$InstructionCommit;sourceCommit=$InstructionCommit;sourceVersion="test@$($InstructionCommit.Substring(0,8))"}
-        skills=@()
+        skills=@($SkillProvenance)
     })
-    return [pscustomobject]@{RuntimeRoot=$runtimeRoot;RoutingPath=$routingPath;ProvenancePath=$provenancePath;ProjectionContractSha256=[string]$lock.projectionContractSha256;LockSha256=$lockSha}
+    return [pscustomobject]@{RuntimeRoot=$runtimeRoot;RoutingPath=$routingPath;ProvenancePath=$provenancePath;ProjectionContractSha256=[string]$lock.projectionContractSha256;LockSha256=$lockSha;ProjectCandidateArchivePath=$ProjectCandidateArchivePath}
 }
 
 function New-P9bTargetRepository {
@@ -213,18 +218,81 @@ function Invoke-P9bRepoBootstrap {
         [Parameter(Mandatory=$true)][object]$Context,
         [Parameter(Mandatory=$true)][string]$ArchivePath,
         [Parameter(Mandatory=$true)][string]$TargetRoot,
-        [string]$GitExecutable
+        [string]$GitExecutable,
+        [string]$BootstrapPath=(Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1')
     )
     $userHome=Join-Path (Split-Path -Parent $TargetRoot) 'p9b-user'
     New-Item -ItemType Directory -Force -Path $userHome|Out-Null
     $arguments=@(
-        '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'),
+        '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$BootstrapPath,
         '-SourceArchivePath',$ArchivePath,'-ConfigurationPath',$Context.RoutingPath,'-ProvenancePath',$Context.ProvenancePath,
         '-RuntimeRoot',$Context.RuntimeRoot,'-TargetRoot',$TargetRoot,'-UserHome',$userHome
     )
     if(-not[string]::IsNullOrWhiteSpace($GitExecutable)){$arguments+=@('-GitExecutable',$GitExecutable)}
+    if(-not[string]::IsNullOrWhiteSpace([string]$Context.ProjectCandidateArchivePath)){$arguments+=@('-ProjectCandidateArchivePath',[string]$Context.ProjectCandidateArchivePath)}
     $output=& $script:PowerShellExecutable @arguments 2>&1
     return [pscustomobject]@{ExitCode=$LASTEXITCODE;Output=($output-join[Environment]::NewLine)}
+}
+
+function New-P9cProjectFixture {
+    param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][string[]]$ProjectionIds)
+    $candidateSource=Join-Path $Root 'runtime-candidate';New-P7eV3Candidate -Destination $candidateSource
+    $catalogPath=Join-Path $candidateSource 'catalog/skills-catalog.json';$lockPath=Join-Path $candidateSource 'catalog/skills-catalog-lock.json'
+    $catalog=Get-Content -Raw -LiteralPath $catalogPath|ConvertFrom-Json
+    foreach($projectionId in @($ProjectionIds)){
+        if(@($catalog.projections|Where-Object id -ceq $projectionId).Count-eq0){
+            $rootPath=switch($projectionId){'project-claude'{'.claude/skills'}'project-github'{'.github/skills'}default{'.agents/skills'}}
+            $catalog.projections=@($catalog.projections)+@([pscustomobject][ordered]@{id=$projectionId;scope='project';root=$rootPath})
+        }
+    }
+    Set-P9bJson -Path $catalogPath -Document $catalog
+    $lock=Get-Content -Raw -LiteralPath $lockPath|ConvertFrom-Json
+    $lock.projectionContractSha256=Get-SkillsCatalogProjectionContractSha256 -Projections $catalog.projections
+    $sourceRoot=Join-Path $Root 'skill-source';New-Item -ItemType Directory -Force -Path $sourceRoot|Out-Null
+    [IO.File]::WriteAllText((Join-Path $sourceRoot 'LICENSE'),"fixture license`n",[Text.UTF8Encoding]::new($false))
+    $resolved=New-Object System.Collections.Generic.List[object]
+    foreach($skill in @($catalog.skills)){
+        $skillRoot=Join-Path $sourceRoot ([string]$skill.source.sourcePath)
+        New-Item -ItemType Directory -Force -Path $skillRoot|Out-Null
+        [IO.File]::WriteAllText((Join-Path $skillRoot 'SKILL.md'),"# $([string]$skill.id)`n",[Text.UTF8Encoding]::new($false))
+        $sourcePath="$([string]$skill.source.sourcePath)/SKILL.md";$raw=(Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $skillRoot 'SKILL.md')).Hash.ToLowerInvariant()
+        $bytes=[Text.UTF8Encoding]::new($false).GetBytes("$sourcePath`t$raw`n");$sha=[Security.Cryptography.SHA256]::Create();try{$content=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+        $lockedSkill=@($lock.skills|Where-Object{[string]$_.id-ceq[string]$skill.id})[0]
+        if($null-eq$lockedSkill){throw "P9c fixture Lock is missing Skill '$([string]$skill.id)'."}
+        $lockedSkill.contentSha256=$content
+        $resolved.Add([pscustomobject]@{id=[string]$skill.id;sourceId='agent-skills';skillRootPath=$skillRoot;sourceRootPath=$sourceRoot})
+    }
+    $lock.catalogSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $catalogPath).Hash.ToLowerInvariant();Set-P9bJson -Path $lockPath -Document $lock
+    $fixtureHome=Join-Path $Root 'home';$install=Invoke-P7eInstaller -SourceRoot $candidateSource -CodexHome $fixtureHome -WriterSchema V3V5
+    if($install.ExitCode-ne0){throw "P9c runtime fixture install failed: $($install.Output)"}
+    $runtimeRoot=Join-Path $fixtureHome 'hooks/ai-instructions-runtime';$runtimeLockPath=Join-Path $runtimeRoot 'catalog/skills-catalog-lock.json'
+    $runtimeLock=Get-Content -Raw -LiteralPath $runtimeLockPath|ConvertFrom-Json;$sourcePlan=$runtimeLock.sources[0]
+    $plans=@{'agent-skills'=$sourcePlan};$candidateRoot=Join-Path $Root 'project-candidate'
+    $runtimeCatalog=Get-Content -Raw -LiteralPath (Join-Path $runtimeRoot 'catalog/skills-catalog.json')|ConvertFrom-Json
+    New-ProjectSkillsCandidate -ResolvedSkills $resolved.ToArray() -SourcePlansById $plans -ProjectionIds $ProjectionIds `
+        -CatalogId ([string]$runtimeCatalog.catalogId) -LockSha256 ((Get-FileHash -Algorithm SHA256 -LiteralPath $runtimeLockPath).Hash.ToLowerInvariant()) `
+        -ProjectionContractSha256 ([string]$runtimeLock.projectionContractSha256) -DestinationRoot $candidateRoot|Out-Null
+    $candidateArchive=Join-Path $Root 'project-candidate.zip';New-ComposedBootstrapArchive -SourceRoot $candidateRoot -DestinationPath $candidateArchive|Out-Null
+    $provenance=@(foreach($skill in $resolved){[pscustomobject][ordered]@{id=$skill.id;sourceId='agent-skills';sourceRepository=[string]$sourcePlan.repository;sourceRef=[string]$sourcePlan.requestedRef;sourceCommit=[string]$sourcePlan.resolvedCommit;sourceVersion=[string]$sourcePlan.resolvedVersion;files=@()}})
+    $context=New-P9bBootstrapContext -Root $Root -CodexHome $fixtureHome -ProjectProjectionIds $ProjectionIds -ProjectCandidateArchivePath $candidateArchive -SkillProvenance $provenance
+    return [pscustomobject]@{Context=$context;Home=$fixtureHome;CandidateArchive=$candidateArchive;CandidateRoot=$candidateRoot;SkillProvenance=$provenance}
+}
+
+function New-P9cPreManifestTamperBootstrap {
+    param(
+        [Parameter(Mandatory=$true)][string]$Root,
+        [Parameter(Mandatory=$true)][string]$TargetRelativePath
+    )
+    $scriptRoot=Join-Path $Root 'scripts'
+    Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts') -Destination $scriptRoot -Recurse
+    $bootstrapPath=Join-Path $scriptRoot 'bootstrap-ai-instructions.ps1'
+    $text=[IO.File]::ReadAllText($bootstrapPath)
+    $marker='            # P9C_TEST_HOOK: immediately before final project Skill manifest verification.'
+    if(-not$text.Contains($marker)){throw 'Project pre-manifest verification test seam was not found.'}
+    $relative=$TargetRelativePath.Replace("'","''")
+    $injection="            [IO.File]::AppendAllText((Join-Path `$targetRootPath '$relative'),`"concurrent project edit``n`",[Text.UTF8Encoding]::new(`$false))`r`n$marker"
+    [IO.File]::WriteAllText($bootstrapPath,$text.Replace($marker,$injection),[Text.UTF8Encoding]::new($false))
+    return $bootstrapPath
 }
 
 function Convert-P9bManifestToLegacy {
