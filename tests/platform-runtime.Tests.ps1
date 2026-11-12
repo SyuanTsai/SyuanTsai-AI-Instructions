@@ -2986,6 +2986,29 @@ try {
                 } finally { $file.Dispose() }
             } finally { $parent.Dispose() }
         }
+
+        # Scenario: A lease descriptor's kernel file offset is at EOF when evidence is read back (.NET 11 routes
+        # FileStream I/O on the lease's O_NONBLOCK descriptor through offset-less read/write).
+        # Purpose: Lease reads and writes use explicit offsets, independent of and without moving the kernel offset.
+        It 'InterT15b_lease_io_is_independent_of_the_unix_descriptor_offset' {
+            if (-not ('SYP375LeaseOffset' -as [type])) {
+                Add-Type -TypeDefinition 'using System.Runtime.InteropServices; public static class SYP375LeaseOffset { [DllImport("libc", SetLastError = true)] public static extern long lseek(int fd, long offset, int whence); }'
+            }
+            $parent = Open-PlatformDirectory -Root $script:P2Root -RelativePath 'lease-io-offset' -CreatePrivate
+            try {
+                $file = Open-PlatformFile -ParentLease $parent -Leaf 'lock' -Access ReadWrite -CreateMode CreateNew
+                try {
+                    $fd = $file.GetType().GetField('Fd', [Reflection.BindingFlags]'NonPublic,Instance').GetValue($file).DangerousGetHandle().ToInt32()
+                    [SYP375LeaseOffset]::lseek($fd, 7, 0) | Should Be 7
+                    $file.WriteNewBytes([byte[]]@(1,2,3,4))
+                    [SYP375LeaseOffset]::lseek($fd, 0, 1) | Should Be 7
+                    [SYP375LeaseOffset]::lseek($fd, 0, 2) | Should Be 4
+                    [Convert]::ToBase64String($file.ReadAllBytes(4)) | Should Be 'AQIDBA=='
+                    [SYP375LeaseOffset]::lseek($fd, 0, 1) | Should Be 4
+                    [Convert]::ToBase64String($file.ReadAllBytes(4)) | Should Be 'AQIDBA=='
+                } finally { $file.Dispose() }
+            } finally { $parent.Dispose() }
+        }
     }
 
     # Scenario: Untrusted child paths contain traversal, empty, or absolute components.
