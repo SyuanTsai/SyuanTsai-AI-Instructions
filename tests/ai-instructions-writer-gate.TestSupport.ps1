@@ -350,6 +350,29 @@ function New-P9cProjectPublicationFailpointBootstrap {
     return $bootstrapPath
 }
 
+function New-P9cIndexLockTamperBootstrap {
+    param(
+        [Parameter(Mandatory=$true)][string]$Root,
+        [Parameter(Mandatory=$true)][ValidateSet('MismatchedBytes','CommittedPhase','NoJournal')][string]$TamperKind,
+        [Parameter(Mandatory=$true)][ValidateSet('InProcess','NextRun')][string]$RecoveryPath
+    )
+    $scriptRoot=Join-Path $Root 'scripts'
+    Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts') -Destination $scriptRoot -Recurse
+    $bootstrapPath=Join-Path $scriptRoot 'bootstrap-ai-instructions.ps1'
+    $text=[IO.File]::ReadAllText($bootstrapPath)
+    $marker="        Invoke-AiInstructionsInstallFailpoint -Name 'after-index-lock-write-before-rename'"
+    if(-not$text.Contains($marker)){throw 'Index lock failpoint invocation was not found.'}
+    $stop=if($RecoveryPath-ceq'InProcess'){"        throw 'Injected residual index.lock failure.'"}else{"        [Environment]::FailFast('Injected residual index.lock failure.')"}
+    $tamper=switch($TamperKind){
+        'MismatchedBytes'{"        [IO.File]::WriteAllBytes(`$lockPath,[byte[]](9,8,7,6))"}
+        'CommittedPhase'{"        `$phaseJournal=Copy-RepositoryInstallJournal `$Journal -Phase committed`r`n        `$phaseBytes=[Text.UTF8Encoding]::new(`$false).GetBytes((`$phaseJournal|ConvertTo-Json -Depth 30 -Compress))`r`n        [IO.File]::WriteAllBytes((Join-Path (Join-Path (Join-Path `$Context.Repository '.ai-instructions-txn') `$Context.Id) 'journal.json'),`$phaseBytes)`r`n        Remove-Item -LiteralPath (Join-Path (Join-Path (Join-Path `$Context.Repository '.ai-instructions-txn') `$Context.Id) 'journal.prev') -Force -ErrorAction SilentlyContinue"}
+        'NoJournal'{"        Remove-Item -LiteralPath (Join-Path (Join-Path (Join-Path `$Context.Repository '.ai-instructions-txn') `$Context.Id) 'journal.json') -Force`r`n        Remove-Item -LiteralPath (Join-Path (Join-Path (Join-Path `$Context.Repository '.ai-instructions-txn') `$Context.Id) 'journal.prev') -Force -ErrorAction SilentlyContinue"}
+    }
+    $replacement=$marker+"`r`n"+$tamper+"`r`n"+$stop
+    [IO.File]::WriteAllText($bootstrapPath,$text.Replace($marker,$replacement),[Text.UTF8Encoding]::new($false))
+    return $bootstrapPath
+}
+
 function Get-P9cPublicationStateSnapshot {
     param([Parameter(Mandatory=$true)][string]$Repository)
     $manifestPath=Join-Path $Repository '.codex/ai-instructions.manifest.json'

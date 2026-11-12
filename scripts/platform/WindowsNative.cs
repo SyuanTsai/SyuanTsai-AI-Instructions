@@ -253,9 +253,8 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         {
             PlatformPaths.Leaf(leaf);
             uint desired = access == "Read" ? 0x80000000 : access == "Write" ? 0x40000000 : access == "ReadWrite" ? 0xc0000000 :
-                access == "ReadWriteDelete" ? 0xc0010000 :
                 access == "ReadPermissions" ? 0x80040100 : 0; // GENERIC_READ | WRITE_DAC | FILE_WRITE_ATTRIBUTES
-            if (desired == 0) throw new ArgumentException("Access must be Read, Write, ReadWrite, ReadWriteDelete or ReadPermissions.");
+            if (desired == 0) throw new ArgumentException("Access must be Read, Write, ReadWrite or ReadPermissions.");
             uint disposition = createMode == "CreateNew" ? 1u : createMode == "OpenExisting" ? 3u : 0u;
             if (disposition == 0) throw new ArgumentException("CreateMode must be CreateNew or OpenExisting.");
             lock (parent.Sync)

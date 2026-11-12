@@ -117,7 +117,7 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
             $snapshots=@{}
             foreach($recoveryPath in @('InProcess','NextRun')){
                 $target=Join-Path $script:ExternalRoot ("cleanup-$($failpoint.Replace('.','-'))-$recoveryPath");Copy-Item -LiteralPath $script:P9cSeeds.False -Destination $target -Recurse
-                $targetIndexPath=(& git -C $target rev-parse --git-path index|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($targetIndexPath)){$targetIndexPath=Join-Path $target $targetIndexPath};$targetIndexBefore=(Get-FileHash -Algorithm SHA256 -LiteralPath $targetIndexPath).Hash.ToLowerInvariant()
+                $targetIndexBefore=[string]((Get-P9cPublicationStateSnapshot $target|ConvertFrom-Json).indexRaw)
                 $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot ("cleanup-runtime-"+[Guid]::NewGuid().ToString('N'))) -Failpoint $failpoint -RecoveryPath $recoveryPath
                 (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap).ExitCode|Should -Not -Be 0
                 if($recoveryPath-ceq'NextRun'){
@@ -210,23 +210,44 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
     }
 
     # Scenario: index.lock contains the journaled after bytes before rename, index has already been renamed before operation-state update, or an unrelated lock predates the transaction.
-    # Purpose: Remove only the applying transaction's exact lock, recover both crash windows, and preserve a foreign lock plus index bytes unchanged.
+    # Purpose: Roll forward only the applying transaction's exact lock, recover both crash windows, and preserve a foreign lock plus index bytes unchanged.
     It 'InterT152_enforces_index_lock_write_ahead_atomic_replace_and_residual_lock_rules' {
+        $discovery=Join-Path $script:ExternalRoot 'index-discovery';Copy-Item -LiteralPath $script:P9cSeeds.True -Destination $discovery -Recurse
+        $prepared=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'index-discovery-runtime') -Failpoint after-journal-prepared -RecoveryPath NextRun
+        (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $discovery -BootstrapPath $prepared).ExitCode|Should -Not -Be 0
+        $transaction=@(Get-ChildItem -LiteralPath (Join-Path $discovery '.ai-instructions-txn') -Directory -Force);$journal=Get-Content -Raw -LiteralPath (Join-Path $transaction[0].FullName 'journal.json')|ConvertFrom-Json
+        $sequence=@($journal.operations|Where-Object role -ceq git-index)[0].sequence
+        $expectedTarget=Join-Path $script:ExternalRoot 'index-expected';Copy-Item -LiteralPath $script:P9cSeeds.False -Destination $expectedTarget -Recurse
+        (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $expectedTarget).ExitCode|Should -Be 0
+        $expectedAgentsBytes=[IO.File]::ReadAllBytes((Join-Path $expectedTarget 'AGENTS.md'))
         foreach($failpoint in @('after-index-lock-write-before-rename','after-index-operation-before-journal')){
-            $target=Join-Path $script:ExternalRoot ("index-$failpoint");Copy-Item -LiteralPath $script:P9cSeeds.True -Destination $target -Recurse;$before=Get-P9cPublicationStateSnapshot $target
-            if($failpoint-ceq'after-index-operation-before-journal'){
-                $discovery=Join-Path $script:ExternalRoot 'index-discovery';Copy-Item -LiteralPath $script:P9cSeeds.True -Destination $discovery -Recurse
-                $prepared=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'index-discovery-runtime') -Failpoint after-journal-prepared -RecoveryPath NextRun
-                (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $discovery -BootstrapPath $prepared).ExitCode|Should -Not -Be 0
-                $transaction=@(Get-ChildItem -LiteralPath (Join-Path $discovery '.ai-instructions-txn') -Directory -Force);$journal=Get-Content -Raw -LiteralPath (Join-Path $transaction[0].FullName 'journal.json')|ConvertFrom-Json
-                $sequence=@($journal.operations|Where-Object role -ceq git-index)[0].sequence;$actualFailpoint="after-operation-$sequence-before-journal"
-            }else{$actualFailpoint=$failpoint}
-            $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot ("index-runtime-"+[Guid]::NewGuid().ToString('N'))) -Failpoint $actualFailpoint -RecoveryPath NextRun
-            (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap).ExitCode|Should -Not -Be 0
-            $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot ("index-recovery-"+[Guid]::NewGuid().ToString('N'))) -Failpoint RecoveryOnly
-            (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $recovery).ExitCode|Should -Not -Be 0
-            (Get-P9cPublicationStateSnapshot $target)|Should -Be $before
-            $indexPath=(& git -C $target rev-parse --git-path index|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($indexPath)){$indexPath=Join-Path $target $indexPath};Test-Path -LiteralPath ($indexPath+'.lock')|Should -Be $false
+            $actualFailpoint=if($failpoint-ceq'after-index-operation-before-journal'){"after-operation-$sequence-before-journal"}else{$failpoint}
+            foreach($recoveryPath in @('InProcess','NextRun')){
+                $target=Join-Path $script:ExternalRoot ("index-$failpoint-$recoveryPath");Copy-Item -LiteralPath $script:P9cSeeds.True -Destination $target -Recurse;$before=Get-P9cPublicationStateSnapshot $target
+                $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot ("index-runtime-"+[Guid]::NewGuid().ToString('N'))) -Failpoint $actualFailpoint -RecoveryPath $recoveryPath
+                (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap).ExitCode|Should -Not -Be 0
+                if($recoveryPath-ceq'NextRun'){
+                    $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot ("index-recovery-"+[Guid]::NewGuid().ToString('N'))) -Failpoint RecoveryOnly
+                    (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $recovery).ExitCode|Should -Not -Be 0
+                }
+                (Get-P9cPublicationStateSnapshot $target)|Should -Be $before
+                $indexPath=(& git -C $target rev-parse --git-path index|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($indexPath)){$indexPath=Join-Path $target $indexPath};Test-Path -LiteralPath ($indexPath+'.lock')|Should -Be $false
+                $rerun=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target;$rerun.ExitCode|Should -Be 0
+                $agentsPath=Join-Path $target 'AGENTS.md';Test-Path -LiteralPath $agentsPath -PathType Leaf|Should -Be $true
+                [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentsPath))|Should -Be ([Convert]::ToBase64String($expectedAgentsBytes))
+            }
+        }
+        foreach($tamperKind in @('MismatchedBytes','CommittedPhase','NoJournal')){
+            foreach($recoveryPath in @('InProcess','NextRun')){
+                $target=Join-Path $script:ExternalRoot ("index-refusal-$tamperKind-$recoveryPath");Copy-Item -LiteralPath $script:P9cSeeds.True -Destination $target -Recurse
+                Get-P9cPublicationStateSnapshot $target|Out-Null
+                $index=(& git -C $target rev-parse --git-path index|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($index)){$index=Join-Path $target $index};$indexBefore=[IO.File]::ReadAllBytes($index)
+                $bootstrap=New-P9cIndexLockTamperBootstrap -Root (Join-Path $script:ExternalRoot ("index-refusal-runtime-"+[Guid]::NewGuid().ToString('N'))) -TamperKind $tamperKind -RecoveryPath $recoveryPath
+                $failed=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap;$failed.ExitCode|Should -Not -Be 0
+                if($recoveryPath-ceq'NextRun'){$retry=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target;$retry.ExitCode|Should -Not -Be 0;(Get-AiInstructionsRefusalCode $retry.Output)|Should -Be interrupted-install}
+                [Convert]::ToBase64String([IO.File]::ReadAllBytes($index))|Should -Be ([Convert]::ToBase64String($indexBefore))
+                Test-Path -LiteralPath ($index+'.lock') -PathType Leaf|Should -Be $true
+            }
         }
         $foreign=Join-Path $script:ExternalRoot 'index-foreign';Copy-Item -LiteralPath $script:P9cSeeds.True -Destination $foreign -Recurse
         $index=(& git -C $foreign rev-parse --git-path index|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($index)){$index=Join-Path $foreign $index};$indexBefore=[IO.File]::ReadAllBytes($index);$lockBytes=[byte[]](1,2,3,4);[IO.File]::WriteAllBytes(($index+'.lock'),$lockBytes)
@@ -256,8 +277,8 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         $bootstrap=[IO.File]::ReadAllText($script:BootstrapPath);$transaction=[IO.File]::ReadAllText($script:TransactionModulePath)
         $bootstrap|Should -Not -Match 'P9C_TEST_HOOK|Invoke-AgentArtifactRemediation\s|Set-RemediationIndexWithoutPaths\s'
         $bootstrap|Should -Match 'Remove-InstallTerminalTransactionArtifacts'
-        $bootstrap|Should -Match "GetMethod\('Replace'.*\[string\].*\[string\].*\[string\]"
-        $bootstrap|Should -Match 'replaceMethod\.Invoke\(\$null.*\$lockPath.*\$indexPath.*\$null'
+        $bootstrap|Should -Match 'Move-Item\s+-LiteralPath\s+\$lockPath\s+-Destination\s+\$indexPath\s+-Force'
+        $bootstrap|Should -Not -Match "\$replaceMethod\s*=\s*\[IO\.File\]\.GetMethod\('Replace'|ReadWriteDelete|Remove-RepositoryIndexLockIfOwned"
         $transaction|Should -Match 'after-cleanup-journal-before-directory|during-cleanup-transaction'
     }
 }

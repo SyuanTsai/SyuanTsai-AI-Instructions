@@ -4200,10 +4200,15 @@ function Update-PersonalAgentStash {
     }
 
     $stashMessage = "CodexPersonalAgent:$WorktreeKey`:$EvidenceFingerprint`:PersonalAgent"
-    $headCommit = ((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--verify','HEAD')) | Select-Object -First 1).Trim()
-    $headTree = ((Invoke-Git -Repository $Repository -Arguments @('show','--no-patch','--format=%T','HEAD')) | Select-Object -First 1).Trim()
-    foreach ($objectId in @($headCommit,$headTree)) {
-        if ($objectId -cnotmatch '^[0-9a-f]{40,64}$') { throw 'Git returned an invalid object ID while creating PersonalAgent evidence.' }
+    $headCommit = $null
+    $headTree = $null
+    $unbornHead = (Get-GitExitCode -Repository $Repository -Arguments @('rev-parse','--verify','HEAD')) -ne 0
+    if (-not $unbornHead) {
+        $headCommit = ((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--verify','HEAD')) | Select-Object -First 1).Trim()
+        $headTree = ((Invoke-Git -Repository $Repository -Arguments @('show','--no-patch','--format=%T','HEAD')) | Select-Object -First 1).Trim()
+        foreach ($objectId in @($headCommit,$headTree)) {
+            if ($objectId -cnotmatch '^[0-9a-f]{40,64}$') { throw 'Git returned an invalid object ID while creating PersonalAgent evidence.' }
+        }
     }
 
     $resolvedActiveIndexPath = [System.IO.Path]::GetFullPath($ActiveIndexPath)
@@ -4229,6 +4234,7 @@ function Update-PersonalAgentStash {
 
         $env:GIT_INDEX_FILE = $temporaryEvidenceIndexPath
         Invoke-Git -Repository $Repository -Arguments @('read-tree','--empty') | Out-Null
+        $emptyTree = ((Invoke-Git -Repository $Repository -Arguments @('write-tree')) | Select-Object -First 1).Trim()
         foreach ($path in @($Paths | Sort-Object -Unique)) {
             $blobId = ((Invoke-Git -Repository $Repository -Arguments @('hash-object','-w','--no-filters','--',$path)) | Select-Object -First 1).Trim()
             if ($blobId -cnotmatch '^[0-9a-f]{40,64}$') { throw "Git returned an invalid managed evidence blob ID: $path" }
@@ -4252,6 +4258,12 @@ function Update-PersonalAgentStash {
 
     $identityArguments = @('-c','user.name=Codex Runtime','-c','user.email=codex-runtime@example.test','commit-tree')
     $evidenceNonce = [Guid]::NewGuid().ToString('N')
+    if ($unbornHead) {
+        if ($emptyTree -cnotmatch '^[0-9a-f]{40,64}$') { throw 'Git returned an invalid empty tree ID while creating unborn PersonalAgent evidence.' }
+        $headTree = $emptyTree
+        $headCommit = ((Invoke-Git -Repository $Repository -Arguments ($identityArguments + @($emptyTree,'-m',"PersonalAgent unborn base $evidenceNonce"))) | Select-Object -First 1).Trim()
+        if ($headCommit -cnotmatch '^[0-9a-f]{40,64}$') { throw 'Git returned an invalid unborn base commit ID while creating PersonalAgent evidence.' }
+    }
     $indexCommit = ((Invoke-Git -Repository $Repository -Arguments ($identityArguments + @($indexTree,'-p',$headCommit,'-m',"PersonalAgent index $evidenceNonce"))) | Select-Object -First 1).Trim()
     $untrackedCommit = ((Invoke-Git -Repository $Repository -Arguments ($identityArguments + @($untrackedTree,'-p',$headCommit,'-m',"PersonalAgent files $evidenceNonce"))) | Select-Object -First 1).Trim()
     $newEvidenceCommit = ((Invoke-Git -Repository $Repository -Arguments ($identityArguments + @($headTree,'-p',$headCommit,'-p',$indexCommit,'-p',$untrackedCommit,'-m',$stashMessage))) | Select-Object -First 1).Trim()
@@ -4917,50 +4929,49 @@ function New-RepositoryIndexLockRefusal {
     return New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "$Reason Confirm that no other Git process is running, then inspect the Git index and remove '$LockPath' manually only when it is safe to do so."
 }
 
-function Remove-RepositoryIndexLockIfOwned {
-    param([Parameter(Mandatory=$true)][object]$Journal,[Parameter(Mandatory=$true)][string]$ExpectedSha256)
+function Get-RepositoryIndexLockRollForwardDecision {
+    param([Parameter(Mandatory=$true)][object]$Journal)
     $lockPath=([string]$Journal.scope.indexPath)+'.lock'
-    if(-not(Test-Path -LiteralPath $lockPath)){return}
+    if(-not(Test-Path -LiteralPath $lockPath)){return $null}
     if(-not(Test-Path -LiteralPath $lockPath -PathType Leaf)-or(Get-Item -Force -LiteralPath $lockPath).Attributes-band[IO.FileAttributes]::ReparsePoint){throw (New-RepositoryIndexLockRefusal -Reason 'The residual Git index.lock is not a regular file owned by this transaction.' -LockPath $lockPath)}
     if([string]$Journal.phase-cne'applying'){throw (New-RepositoryIndexLockRefusal -Reason "The residual Git index.lock cannot belong to a repository transaction in phase '$($Journal.phase)'." -LockPath $lockPath)}
-    [byte[]]$bytes=[IO.File]::ReadAllBytes($lockPath)
-    if((Get-ByteArraySha256 $bytes)-cne$ExpectedSha256){throw (New-RepositoryIndexLockRefusal -Reason 'The residual Git index.lock bytes do not match the write-ahead SHA recorded by this transaction.' -LockPath $lockPath)}
-    $parent=[IO.Path]::GetDirectoryName($lockPath);$leaf=[IO.Path]::GetFileName($lockPath);$parentLease=Open-PlatformDirectory -Root $parent -RootOnly
-    try{
-        $state=Get-AiInstructionsInstallFileState -ParentLease $parentLease -Leaf $leaf -LiteralPath $lockPath -PlatformOs ([string]$Journal.platform.os)
-        if($IsWindows){
-            $lockLease=Open-PlatformFile -ParentLease $parentLease -Leaf $leaf -Access ReadWriteDelete -CreateMode OpenExisting
-            try{
-                $reopenedIdentity=ConvertTo-ProjectPublicationIdentity $lockLease.Observation
-                if([uint64]$lockLease.Observation.LinkCount-ne1-or[string]$reopenedIdentity.kind-cne[string]$state.identity.kind-or-not[string]::Equals([string]$reopenedIdentity.device,[string]$state.identity.device,[StringComparison]::OrdinalIgnoreCase)-or-not[string]::Equals([string]$reopenedIdentity.fileId,[string]$state.identity.fileId,[StringComparison]::OrdinalIgnoreCase)){throw (New-RepositoryIndexLockRefusal -Reason 'The residual Git index.lock identity changed during reopen.' -LockPath $lockPath)}
-                [byte[]]$readback=$lockLease.ReadAllBytes(268435456);if((Get-ByteArraySha256 $readback)-cne$ExpectedSha256){throw (New-RepositoryIndexLockRefusal -Reason 'The residual Git index.lock changed after identity-bound reopen.' -LockPath $lockPath)}
-                [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::DeleteOnClose($lockLease)
-            }finally{$lockLease.Dispose()}
-            [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::FlushDirectory($parentLease)
-        }else{Remove-PlatformOwnedFile -ParentLease $parentLease -Leaf $leaf -ExpectedState $state|Out-Null}
-        if(Test-Path -LiteralPath $lockPath){throw (New-RepositoryIndexLockRefusal -Reason 'The owned residual Git index.lock remained after identity-bound removal.' -LockPath $lockPath)}
-    }
-    finally{$parentLease.Dispose()}
+    $indexOperations=@($Journal.operations|Where-Object{[string]$_.kind-ceq'replace-git-index'})
+    if($indexOperations.Count-ne1){throw (New-RepositoryIndexLockRefusal -Reason 'A residual Git index.lock exists without exactly one journaled index step.' -LockPath $lockPath)}
+    try{[byte[]]$bytes=[IO.File]::ReadAllBytes($lockPath)}catch{throw (New-RepositoryIndexLockRefusal -Reason "The residual Git index.lock could not be read: $($_.Exception.Message)" -LockPath $lockPath)}
+    $sha256=Get-ByteArraySha256 $bytes;$operation=$indexOperations[0]
+    if($sha256-ceq[string]$operation.after.sha256){return [pscustomobject][ordered]@{LockPath=$lockPath;IndexPath=[string]$Journal.scope.indexPath;Operation=$operation;Destination=$operation.after;Direction='redo'}}
+    if($sha256-ceq[string]$operation.before.sha256){return [pscustomobject][ordered]@{LockPath=$lockPath;IndexPath=[string]$Journal.scope.indexPath;Operation=$operation;Destination=$operation.before;Direction='undo'}}
+    throw (New-RepositoryIndexLockRefusal -Reason 'The residual Git index.lock bytes do not match either write-ahead SHA recorded by this transaction.' -LockPath $lockPath)
+}
+
+function Complete-RepositoryIndexLockRollForward {
+    param([Parameter(Mandatory=$true)][object]$Journal)
+    $decision=Get-RepositoryIndexLockRollForwardDecision -Journal $Journal
+    if($null-eq$decision){return $null}
+    try{Move-Item -LiteralPath $decision.LockPath -Destination $decision.IndexPath -Force}
+    catch{throw (New-RepositoryIndexLockRefusal -Reason "The residual Git index.lock could not be rolled forward to the Git index: $($_.Exception.Message)" -LockPath $decision.LockPath)}
+    $readback=Get-RepositoryTransactionIndexState $Journal
+    if(-not(Test-RepositoryTransactionIndexStateEqual $readback $decision.Destination)){throw (New-RepositoryIndexLockRefusal -Reason 'The Git index readback differs from the journaled lock destination after roll-forward.' -LockPath $decision.LockPath)}
+    return $decision
 }
 
 function Resolve-RepositoryRecoveryIndexLock {
     param([Parameter(Mandatory=$true)][object]$Context)
     $lockPath=([string]$Context.CurrentJournal.scope.indexPath)+'.lock'
     if(-not(Test-Path -LiteralPath $lockPath)){return}
-    $indexOperations=@($Context.CurrentJournal.operations|Where-Object{[string]$_.kind-ceq'replace-git-index'})
-    if($indexOperations.Count-ne1){throw (New-RepositoryIndexLockRefusal -Reason 'A residual Git index.lock exists without exactly one journaled index step.' -LockPath $lockPath)}
-    Remove-RepositoryIndexLockIfOwned -Journal $Context.CurrentJournal -ExpectedSha256 ([string]$indexOperations[0].after.sha256)
+    Complete-RepositoryIndexLockRollForward -Journal $Context.CurrentJournal|Out-Null
 }
 
 function Invoke-RepositoryIndexReplacement {
     param([Parameter(Mandatory=$true)][object]$Context,[Parameter(Mandatory=$true)][object]$Journal,[Parameter(Mandatory=$true)][object]$Operation,[Parameter(Mandatory=$true)][object]$Source,[Parameter(Mandatory=$true)][object]$Destination,[Parameter(Mandatory=$true)][ValidateSet('redo','undo')][string]$Direction)
     $indexPath=[string]$Journal.scope.indexPath;$lockPath=$indexPath+'.lock'
-    Remove-RepositoryIndexLockIfOwned -Journal $Journal -ExpectedSha256 ([string]$Destination.sha256)
+    if(Test-Path -LiteralPath $lockPath){Complete-RepositoryIndexLockRollForward -Journal $Journal|Out-Null}
     $artifactLeaf=if($Direction-ceq'redo'){[string]$Operation.stageLeaf}else{[string]$Operation.backupLeaf}
     $artifact=Open-PlatformFile -ParentLease $Context.Lease -Leaf $artifactLeaf -Access Read -CreateMode OpenExisting
     try{[byte[]]$bytes=$artifact.ReadAllBytes(536870912)}finally{$artifact.Dispose()}
     if((Get-ByteArraySha256 $bytes)-cne[string]$Destination.sha256-or[long]$bytes.Length-ne[long]$Destination.length){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction index artifact '$artifactLeaf' differs from its write-ahead state.")}
     $live=Get-RepositoryTransactionIndexState $Journal
+    if(Test-RepositoryTransactionIndexStateEqual $live $Destination){return}
     if(-not(Test-RepositoryTransactionIndexStateEqual $live $Source)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'The Git index changed before index.lock publication; transaction evidence was retained.')}
     $stream=$null
     try{
@@ -4974,9 +4985,7 @@ function Invoke-RepositoryIndexReplacement {
         Invoke-AiInstructionsInstallFailpoint -Name 'after-index-lock-write-before-rename'
         $live=Get-RepositoryTransactionIndexState $Journal
         if(-not(Test-RepositoryTransactionIndexStateEqual $live $Source)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'The Git index changed after index.lock was flushed; transaction evidence was retained.')}
-        $replaceMethod=[IO.File].GetMethod('Replace',[type[]]@([string],[string],[string]))
-        try{[void]$replaceMethod.Invoke($null,[object[]]@($lockPath,$indexPath,$null))}
-        catch [Reflection.TargetInvocationException]{throw $_.Exception.InnerException}
+        Move-Item -LiteralPath $lockPath -Destination $indexPath -Force
     }finally{if($null-ne$stream){$stream.Dispose()}}
 }
 
@@ -5005,10 +5014,6 @@ function Get-RepositoryTransactionOperationState {
 function Invoke-RepositoryTransactionOperation {
     param([Parameter(Mandatory=$true)][object]$Context,[Parameter(Mandatory=$true)][object]$Journal,[Parameter(Mandatory=$true)][object]$Operation,[Parameter(Mandatory=$true)][ValidateSet('redo','undo')][string]$Direction)
     $source=if($Direction-ceq'redo'){$Operation.before}else{$Operation.after};$destination=if($Direction-ceq'redo'){$Operation.after}else{$Operation.before}
-    if([string]$Operation.kind-ceq'replace-git-index'){
-        $lockPath=([string]$Journal.scope.indexPath)+'.lock'
-        if(Test-Path -LiteralPath $lockPath){Remove-RepositoryIndexLockIfOwned -Journal $Journal -ExpectedSha256 ([string]$destination.sha256)}
-    }
     $current=Get-RepositoryTransactionOperationState $Journal $Operation
     if(Test-RepositoryTransactionStateEqual $Operation $current $destination){return}
     if(-not(Test-RepositoryTransactionStateEqual $Operation $current $source)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction sequence $($Operation.sequence) role $($Operation.role) target $($Operation.target.value) is in a third state; evidence was retained for manual inspection and cleanup.")}
@@ -6086,6 +6091,16 @@ try {
 
         if ($manifestEntriesByTarget.ContainsKey($targetPath)) {
             $managedEntry = $manifestEntriesByTarget[$targetPath]
+        }
+
+        if ($isPlannedRemediation) {
+            [byte[]]$desiredBytes = [System.IO.File]::ReadAllBytes([string]$desiredEntry.SourceFullPath)
+            $expectedSha256 = if ($targetExists) { Get-ManagedContentHash -Path $targetFullPath -TargetPath $targetPath } else { $null }
+            Set-TargetMutationFileBytes -Snapshot $mutationSnapshot -RelativePath $targetPath -Bytes $desiredBytes `
+                -ExpectedExists $targetExists -ExpectedSha256 $expectedSha256
+            $updatedPaths.Add($targetPath)
+            $nextManifestEntries.Add($desiredManifestEntry)
+            continue
         }
 
         if ($null -ne $managedEntry) {
