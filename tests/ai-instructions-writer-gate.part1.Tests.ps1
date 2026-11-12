@@ -541,12 +541,14 @@ Describe 'AI instructions writer and reader gate' {
         $result.ExitCode|Should Not Be 0
         (Get-AiInstructionsRefusalCode $result.Output)|Should Be closure-invalid
         foreach($conflict in $conflicts){
+            $diagnosticPattern='(?m)^Project Skill conflict: skillId='+[regex]::Escape($conflict.SkillId)+', projection='+[regex]::Escape($conflict.Projection)+', path='+[regex]::Escape($conflict.Path)+', status=unmanaged, worktree=.+$'
+            $result.Output|Should Match $diagnosticPattern
             $result.Output|Should Match ([regex]::Escape("skillId=$($conflict.SkillId)"))
             $result.Output|Should Match ([regex]::Escape("projection=$($conflict.Projection)"))
             $result.Output|Should Match ([regex]::Escape("path=$($conflict.Path)"))
             $result.Output|Should Match 'status=unmanaged'
         }
-        $result.Output|Should Match 'remove[\s|]+or rename the project-owned Skill'
+        $result.Output|Should Match '(?m)^Project Skill conflict resolution: remove or rename the project-owned Skill, or remove that Skill from projections\.project\.\r?$'
         $result.Output|Should Match 'remove that Skill from projections\.project'
         foreach($entry in $instructionEntries){[Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $target ([string]$entry.targetPath))))|Should Be $instructionBytes[[string]$entry.targetPath]}
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath))|Should Be $manifestBytes

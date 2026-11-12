@@ -213,6 +213,14 @@ function Get-P9bRepoSnapshot {
     return ((@($rows|Sort-Object)+@("exclude`t$excludeHash","head`t$head","status`t$status"))-join"`n")
 }
 
+function Get-P9bNormalizedSha256 {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    $text=[IO.File]::ReadAllText($Path).Replace("`r`n","`n").Replace("`r","`n")
+    $bytes=[Text.UTF8Encoding]::new($false).GetBytes($text)
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try{return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+}
+
 function Invoke-P9bRepoBootstrap {
     param(
         [Parameter(Mandatory=$true)][object]$Context,
@@ -235,7 +243,11 @@ function Invoke-P9bRepoBootstrap {
 }
 
 function New-P9cProjectFixture {
-    param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][string[]]$ProjectionIds)
+    param(
+        [Parameter(Mandatory=$true)][string]$Root,
+        [Parameter(Mandatory=$true)][string[]]$ProjectionIds,
+        [hashtable]$AdditionalSkillFiles=@{}
+    )
     $candidateSource=Join-Path $Root 'runtime-candidate';New-P7eV3Candidate -Destination $candidateSource
     $catalogPath=Join-Path $candidateSource 'catalog/skills-catalog.json';$lockPath=Join-Path $candidateSource 'catalog/skills-catalog-lock.json'
     $catalog=Get-Content -Raw -LiteralPath $catalogPath|ConvertFrom-Json
@@ -255,8 +267,24 @@ function New-P9cProjectFixture {
         $skillRoot=Join-Path $sourceRoot ([string]$skill.source.sourcePath)
         New-Item -ItemType Directory -Force -Path $skillRoot|Out-Null
         [IO.File]::WriteAllText((Join-Path $skillRoot 'SKILL.md'),"# $([string]$skill.id)`n",[Text.UTF8Encoding]::new($false))
-        $sourcePath="$([string]$skill.source.sourcePath)/SKILL.md";$raw=(Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $skillRoot 'SKILL.md')).Hash.ToLowerInvariant()
-        $bytes=[Text.UTF8Encoding]::new($false).GetBytes("$sourcePath`t$raw`n");$sha=[Security.Cryptography.SHA256]::Create();try{$content=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+        if($AdditionalSkillFiles.ContainsKey([string]$skill.id)){
+            foreach($relative in @($AdditionalSkillFiles[[string]$skill.id].Keys|Sort-Object)){
+                if([string]$relative-cmatch '(^|/)(?:\.|\.\.)(?:/|$)' -or [string]$relative-cmatch '\\'){throw "Unsafe additional Skill fixture path: $relative"}
+                $additionalPath=Join-Path $skillRoot ([string]$relative).Replace('/',[IO.Path]::DirectorySeparatorChar)
+                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $additionalPath)|Out-Null
+                [IO.File]::WriteAllText($additionalPath,[string]$AdditionalSkillFiles[[string]$skill.id][$relative],[Text.UTF8Encoding]::new($false))
+            }
+        }
+        $contentRows=@(
+            foreach($file in @(Get-ChildItem -LiteralPath $skillRoot -File -Recurse|Sort-Object FullName)){
+                $relative=$file.FullName.Substring($skillRoot.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+                $sourcePath="$([string]$skill.source.sourcePath)/$relative"
+                $raw=(Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+                "$sourcePath`t$raw`n"
+            }
+        )
+        [Array]::Sort($contentRows,[StringComparer]::Ordinal)
+        $bytes=[Text.UTF8Encoding]::new($false).GetBytes([string]::Concat([string[]]$contentRows));$sha=[Security.Cryptography.SHA256]::Create();try{$content=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
         $lockedSkill=@($lock.skills|Where-Object{[string]$_.id-ceq[string]$skill.id})[0]
         if($null-eq$lockedSkill){throw "P9c fixture Lock is missing Skill '$([string]$skill.id)'."}
         $lockedSkill.contentSha256=$content
@@ -276,6 +304,26 @@ function New-P9cProjectFixture {
     $provenance=@(foreach($skill in $resolved){[pscustomobject][ordered]@{id=$skill.id;sourceId='agent-skills';sourceRepository=[string]$sourcePlan.repository;sourceRef=[string]$sourcePlan.requestedRef;sourceCommit=[string]$sourcePlan.resolvedCommit;sourceVersion=[string]$sourcePlan.resolvedVersion;files=@()}})
     $context=New-P9bBootstrapContext -Root $Root -CodexHome $fixtureHome -ProjectProjectionIds $ProjectionIds -ProjectCandidateArchivePath $candidateArchive -SkillProvenance $provenance
     return [pscustomobject]@{Context=$context;Home=$fixtureHome;CandidateArchive=$candidateArchive;CandidateRoot=$candidateRoot;SkillProvenance=$provenance}
+}
+
+function New-P9cProjectPublicationFailpointBootstrap {
+    param(
+        [Parameter(Mandatory=$true)][string]$Root,
+        [Parameter(Mandatory=$true)][ValidateSet('BeforeCommit','AfterCommitted','CleanupFailure')][string]$Failpoint
+    )
+    $scriptRoot=Join-Path $Root 'scripts'
+    Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts') -Destination $scriptRoot -Recurse
+    $bootstrapPath=Join-Path $scriptRoot 'bootstrap-ai-instructions.ps1'
+    $text=[IO.File]::ReadAllText($bootstrapPath)
+    $marker=switch($Failpoint){
+        'BeforeCommit'{'    # P9C_TEST_HOOK: before project publication commit decision.'}
+        'AfterCommitted'{'    # P9C_TEST_HOOK: after project publication commit decision.'}
+        'CleanupFailure'{'    # P9C_TEST_HOOK: before project publication evidence cleanup.'}
+    }
+    if(-not$text.Contains($marker)){throw "Project publication $Failpoint test seam was not found."}
+    $injection="    throw 'Injected project publication $Failpoint failure.'`r`n$marker"
+    [IO.File]::WriteAllText($bootstrapPath,$text.Replace($marker,$injection),[Text.UTF8Encoding]::new($false))
+    return $bootstrapPath
 }
 
 function New-P9cPreManifestTamperBootstrap {

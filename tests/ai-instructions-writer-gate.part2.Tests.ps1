@@ -522,6 +522,126 @@ exit /b %errorlevel%
         finally{& git -C $target worktree remove --force $linkedRoot|Out-Null}
     }
 
+    # Scenario: A verified project Skill version removes one managed resource while retaining the rest of the same projection/Skill group.
+    # Purpose: Validate ownership against the complete prior group, retire only the clean obsolete file, retain exact manifest/exclude ownership, and remain idempotent.
+    It 'InterT138_retires_only_clean_removed_files_from_an_active_project_Skill_group' {
+        $root=Join-Path $script:ExternalRoot 'p9c-partial-retirement';New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip')
+        $additional=@{
+            'work-with-jira'=@{'resources/retired.txt'="jira retired`n"}
+            'manage-task-handoff'=@{'resources/retired.txt'="handoff retired`n"}
+        }
+        $initial=New-P9cProjectFixture -Root (Join-Path $root 'initial') -ProjectionIds @('project-agents') -AdditionalSkillFiles $additional
+        $updated=New-P9cProjectFixture -Root (Join-Path $root 'updated') -ProjectionIds @('project-agents')
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        $first=Invoke-P9bRepoBootstrap -Context $initial.Context -ArchivePath $source.ArchivePath -TargetRoot $target
+        if($first.ExitCode-ne0){throw "Initial partial-retirement fixture failed: $($first.Output)"}
+        $manifestPath=Join-Path $target '.codex/ai-instructions.manifest.json'
+        $retiredPaths=@((Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json).files|Where-Object{[string]$_.targetPath-like'*/resources/retired.txt'}|Select-Object -ExpandProperty targetPath)
+        $retiredPaths.Count|Should Be 2
+
+        $result=Invoke-P9bRepoBootstrap -Context $updated.Context -ArchivePath $source.ArchivePath -TargetRoot $target
+
+        $result.ExitCode|Should Be 0
+        $manifest=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+        @($manifest.files|Where-Object{[string]$_.targetPath-like'*/resources/retired.txt'}).Count|Should Be 0
+        $remainingSkills=@($manifest.files|Where-Object{[string]$_.artifactType-ceq'skill'})
+        @($remainingSkills|Where-Object{[string]$_.targetPath-like'*/SKILL.md'}).Count|Should Be 2
+        $exclude=[IO.File]::ReadAllText((Join-Path $target '.git/info/exclude'))
+        foreach($retiredPath in $retiredPaths){Test-Path -LiteralPath (Join-Path $target $retiredPath)|Should Be $false;$exclude|Should Not Match ([regex]::Escape('/'+$retiredPath))}
+        foreach($entry in $remainingSkills){Test-Path -LiteralPath (Join-Path $target ([string]$entry.targetPath)) -PathType Leaf|Should Be $true;$exclude|Should Match ([regex]::Escape('/'+[string]$entry.targetPath))}
+        $generation=[int64]$manifest.generation;$beforeRepeat=Get-P9bRepoSnapshot $target
+        $repeat=Invoke-P9bRepoBootstrap -Context $updated.Context -ArchivePath $source.ArchivePath -TargetRoot $target
+        $repeat.ExitCode|Should Be 0
+        [int64](Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json).generation|Should Be $generation
+        (Get-P9bRepoSnapshot $target)|Should Be $beforeRepeat
+    }
+
+    # Scenario: A resource removed by the next project Skill version was customized after the prior version installed it.
+    # Purpose: Return the K5 typed refusal before any Instructions, manifest, Skill, or shared-exclude mutation and preserve the customized bytes.
+    It 'InterT139_refuses_a_customized_file_removed_from_an_active_project_Skill_group' {
+        $root=Join-Path $script:ExternalRoot 'p9c-partial-retirement-drift';New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $baseline=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'baseline-work') -ArchivePath (Join-Path $root 'baseline.zip') -Marker baseline
+        $changed=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'changed-work') -ArchivePath (Join-Path $root 'changed.zip') -Marker changed
+        $additional=@{
+            'work-with-jira'=@{'resources/retired.txt'="jira retired`n"}
+            'manage-task-handoff'=@{'resources/retired.txt'="handoff retired`n"}
+        }
+        $initial=New-P9cProjectFixture -Root (Join-Path $root 'initial') -ProjectionIds @('project-agents') -AdditionalSkillFiles $additional
+        $updated=New-P9cProjectFixture -Root (Join-Path $root 'updated') -ProjectionIds @('project-agents')
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        (Invoke-P9bRepoBootstrap -Context $initial.Context -ArchivePath $baseline.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
+        $manifest=Get-Content -Raw -LiteralPath (Join-Path $target '.codex/ai-instructions.manifest.json')|ConvertFrom-Json
+        $retiredPath=[string]@($manifest.files|Where-Object{[string]$_.targetPath-like'*/resources/retired.txt'}|Select-Object -First 1 -ExpandProperty targetPath)[0]
+        [IO.File]::AppendAllText((Join-Path $target $retiredPath),"customized`n",[Text.UTF8Encoding]::new($false))
+        $before=Get-P9bRepoSnapshot $target
+
+        $result=Invoke-P9bRepoBootstrap -Context $updated.Context -ArchivePath $changed.ArchivePath -TargetRoot $target
+
+        $result.ExitCode|Should Not Be 0
+        (Get-AiInstructionsRefusalCode $result.Output)|Should Be closure-invalid
+        $result.Output|Should Match ('(?m)^Project Skill conflict: skillId=.+, projection=project-agents, path='+[regex]::Escape($retiredPath)+', status=drift, worktree=.+$')
+        $result.Output|Should Match '(?m)^Project Skill conflict resolution: remove or rename the project-owned Skill, or remove that Skill from projections\.project\.\r?$'
+        (Get-P9bRepoSnapshot $target)|Should Be $before
+    }
+
+    # Scenario: The process stops before the commit decision, after the committed journal publication, or because committed evidence cleanup fails.
+    # Purpose: Recover applying work by rolling back the complete mutation set, recover committed work by cleanup only, and keep Instructions, Skills, manifest, and exclude mutually consistent.
+    It 'InterT140_recovers_project_publication_<Case>_with_a_consistent_complete_state' -TestCases @(
+        @{Case='before-commit';Failpoint='BeforeCommit';ExpectedPhase='applying'},
+        @{Case='after-committed';Failpoint='AfterCommitted';ExpectedPhase='committed'},
+        @{Case='cleanup-failure';Failpoint='CleanupFailure';ExpectedPhase='committed'}
+    ) {
+        param($Case,$Failpoint,$ExpectedPhase)
+        $root=Join-Path $script:ExternalRoot "p9c-publication-$Case";New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $baseline=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'baseline-work') -ArchivePath (Join-Path $root 'baseline.zip') -Marker baseline
+        $changed=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'changed-work') -ArchivePath (Join-Path $root 'changed.zip') -Marker changed
+        $initialFiles=@{
+            'work-with-jira'=@{'resources/state.txt'="jira old`n"}
+            'manage-task-handoff'=@{'resources/state.txt'="handoff old`n"}
+        }
+        $updatedFiles=@{
+            'work-with-jira'=@{'resources/state.txt'="jira new`n";'resources/added.txt'="jira added`n"}
+            'manage-task-handoff'=@{'resources/state.txt'="handoff new`n";'resources/added.txt'="handoff added`n"}
+        }
+        $initial=New-P9cProjectFixture -Root (Join-Path $root 'initial') -ProjectionIds @('project-agents') -AdditionalSkillFiles $initialFiles
+        $updated=New-P9cProjectFixture -Root (Join-Path $root 'updated') -ProjectionIds @('project-agents') -AdditionalSkillFiles $updatedFiles
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        (Invoke-P9bRepoBootstrap -Context $initial.Context -ArchivePath $baseline.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
+        $before=Get-P9bRepoSnapshot $target
+        $failpointBootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $root 'failpoint-runtime') -Failpoint $Failpoint
+
+        $failed=Invoke-P9bRepoBootstrap -Context $updated.Context -ArchivePath $changed.ArchivePath -TargetRoot $target -BootstrapPath $failpointBootstrap
+
+        $failed.ExitCode|Should Not Be 0
+        $transactions=@(Get-ChildItem -LiteralPath (Join-Path $target '.ai-instructions-txn') -Directory -Force)
+        $transactions.Count|Should Be 1
+        $journal=Get-Content -Raw -LiteralPath (Join-Path $transactions[0].FullName 'journal.json')|ConvertFrom-Json
+        [string]$journal.phase|Should Be $ExpectedPhase
+        @($journal.operations|Where-Object{[string]$_.targetKind-ceq'repository'-and[string]$_.targetPath-ceq'AGENTS.md'}).Count|Should Be 1
+        @($journal.operations|Where-Object{[string]$_.targetKind-ceq'repository'-and[string]$_.targetPath-ceq'.codex/ai-instructions.manifest.json'}).Count|Should Be 1
+        @($journal.operations|Where-Object{[string]$_.targetKind-ceq'repository'-and[string]$_.targetPath-like'*/resources/state.txt'}).Count|Should Be 2
+        @($journal.operations|Where-Object{[string]$_.targetKind-ceq'git-exclude'}).Count|Should Be 1
+
+        $recovered=Invoke-P9bRepoBootstrap -Context $updated.Context -ArchivePath $changed.ArchivePath -TargetRoot $target
+
+        if($recovered.ExitCode-ne0){throw "Project publication recovery failed for $Case`: $($recovered.Output)"}
+        $manifestPath=Join-Path $target '.codex/ai-instructions.manifest.json';$manifest=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+        [IO.File]::ReadAllText((Join-Path $target 'AGENTS.md'))|Should Match '<!-- changed -->'
+        $agentsEntry=@($manifest.files|Where-Object{[string]$_.targetPath-ceq'AGENTS.md'})[0]
+        (Get-P9bNormalizedSha256 (Join-Path $target 'AGENTS.md'))|Should Be ([string]$agentsEntry.sha256)
+        $skillEntries=@($manifest.files|Where-Object{[string]$_.artifactType-ceq'skill'})
+        @($skillEntries|Where-Object{[string]$_.targetPath-like'*/resources/added.txt'}).Count|Should Be 2
+        foreach($entry in $skillEntries){(Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $target ([string]$entry.targetPath))).Hash.ToLowerInvariant()|Should Be ([string]$entry.sha256)}
+        $exclude=[IO.File]::ReadAllText((Join-Path $target '.git/info/exclude'))
+        foreach($path in @($manifest.files.targetPath)+@('.codex/ai-instructions.manifest.json')){$exclude|Should Match ("(?m)^/"+[regex]::Escape([string]$path)+"`r?$")}
+        @(Get-ChildItem -Force -LiteralPath (Join-Path $target '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0
+        (Get-P9bRepoSnapshot $target)|Should Not Be $before
+        $beforeRepeat=Get-P9bRepoSnapshot $target
+        (Invoke-P9bRepoBootstrap -Context $updated.Context -ArchivePath $changed.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
+        (Get-P9bRepoSnapshot $target)|Should Be $beforeRepeat
+    }
+
     # Scenario: The stable launcher has opened a verified closure file with its read-only sharing contract.
     # Purpose: Bind verified bytes through import/inventory assertion by denying concurrent writes and deletion until disposal.
     It 'UnitT95_holds_launcher_closure_bytes_against_write_and_delete' {

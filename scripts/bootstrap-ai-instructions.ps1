@@ -1598,6 +1598,15 @@ function Format-ProjectSkillOwnershipConflictDetails {
     })-join'; ')
 }
 
+function Write-ProjectSkillOwnershipConflictDiagnostics {
+    param([Parameter(Mandatory=$true)][object[]]$Conflicts)
+
+    foreach($conflict in @($Conflicts|Sort-Object worktree,projection,skillId,targetPath,status)){
+        [Console]::Error.WriteLine("Project Skill conflict: skillId=$($conflict.skillId), projection=$($conflict.projection), path=$($conflict.targetPath), status=$($conflict.status), worktree=$($conflict.worktree)")
+    }
+    [Console]::Error.WriteLine('Project Skill conflict resolution: remove or rename the project-owned Skill, or remove that Skill from projections.project.')
+}
+
 function ConvertFrom-GitQuotedPath {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -3566,7 +3575,7 @@ function Read-ProjectPublicationJournal {
     $topProperties=@('schemaVersion','transactionId','repository','phase','operations')
     if(@($journal.PSObject.Properties.Name|Where-Object{$_-notin$topProperties}).Count-gt0 -or @($topProperties|Where-Object{$null-eq$journal.PSObject.Properties[$_]}).Count-gt0 -or
         ($journal.schemaVersion-isnot[int]-and$journal.schemaVersion-isnot[long])-or[int64]$journal.schemaVersion-ne1 -or
-        [string]$journal.transactionId-cne$ExpectedId -or [string]$journal.repository-cne$Repository -or [string]$journal.phase-cne'applying'){
+        [string]$journal.transactionId-cne$ExpectedId -or [string]$journal.repository-cne$Repository -or [string]$journal.phase-cnotin@('applying','committed')){
         throw "Project publication recovery journal identity is invalid: $Leaf"
     }
     foreach($operation in @($journal.operations)){
@@ -3582,13 +3591,16 @@ function Read-ProjectPublicationJournal {
         $operationRoot=[IO.Path]::GetFullPath([string]$operation.targetRoot)
         if([string]$operation.targetKind-ceq'repository'){
             if($operationRoot-cne[IO.Path]::GetFullPath($Repository) -or
-                ([string]$operation.targetPath-cne$manifestRelativePath -and [string]$operation.targetPath-cnotmatch '^\.(agents|claude|github)/skills/')){
+                ([string]$operation.targetPath-cne$manifestRelativePath -and -not(Test-IsAllowedManagedPath ([string]$operation.targetPath)))){
                 throw "Project publication recovery operation escapes the repository scope: $Leaf"
             }
         }else{
             $exclude=[IO.Path]::GetFullPath([string](Get-GitInfoExcludePath -Repository $Repository))
             if([IO.Path]::GetFullPath((Join-Path $operationRoot ([string]$operation.targetPath)))-cne$exclude){throw "Project publication recovery operation escapes the shared exclude: $Leaf"}
         }
+    }
+    if([string]$journal.phase-ceq'committed' -and @($journal.operations|Where-Object{[string]$_.state-cne'applied'}).Count-gt0){
+        throw "Project publication committed journal contains a non-applied operation: $Leaf"
     }
     return $journal
 }
@@ -3621,7 +3633,7 @@ function Invoke-ProjectPublicationRecovery {
                 $journal=Read-ProjectPublicationJournal -Lease $lease -Leaf $journalLeaf -ExpectedId $entry.Name -Repository $Repository
                 $operations=New-Object System.Collections.Generic.List[object];foreach($operation in @($journal.operations)){$operations.Add($operation)}
                 $context=[pscustomobject][ordered]@{Repository=$Repository;Id=$entry.Name;ContainerLease=$container;Lease=$lease;Identity=(ConvertTo-ProjectPublicationIdentity $lease.Observation);Operations=$operations;JournalGeneration=0}
-                Restore-ProjectPublicationContext $context
+                if([string]$journal.phase-ceq'committed'){Remove-ProjectPublicationContextEvidence $context}else{Restore-ProjectPublicationContext $context}
                 $lease=$null;$container=$null
                 $container=Open-PlatformDirectory -Root $Repository -RelativePath '.ai-instructions-txn'
             }catch{
@@ -3649,8 +3661,9 @@ function New-ProjectPublicationContext {
 }
 
 function Save-ProjectPublicationJournal {
-    param([Parameter(Mandatory=$true)]$Context)
-    $document=[ordered]@{schemaVersion=1;transactionId=$Context.Id;repository=$Context.Repository;phase='applying';operations=$Context.Operations.ToArray()}
+    param([Parameter(Mandatory=$true)]$Context,[ValidateSet('applying','committed')][string]$Phase='applying')
+    if($Phase-ceq'committed' -and @($Context.Operations|Where-Object{[string]$_.state-cne'applied'}).Count-gt0){throw 'Project publication cannot commit while an operation is not applied.'}
+    $document=[ordered]@{schemaVersion=1;transactionId=$Context.Id;repository=$Context.Repository;phase=$Phase;operations=$Context.Operations.ToArray()}
     $bytes=[Text.UTF8Encoding]::new($false).GetBytes((($document|ConvertTo-Json -Depth 20).Replace("`r`n","`n"))+"`n")
     $Context.JournalGeneration=[int]$Context.JournalGeneration+1
     $stageLeaf='journal.stage'
@@ -3735,9 +3748,18 @@ function Remove-ProjectPublicationFile {
 
 function Complete-ProjectPublicationContext {
     param([Parameter(Mandatory=$true)]$Context)
-    $Context.Lease.Dispose();$Context.Lease=$null
-    Remove-PlatformOwnedDirectoryTree -TransactionRootLease $Context.ContainerLease -Leaf $Context.Id -ExpectedIdentity $Context.Identity|Out-Null
-    $Context.ContainerLease.Dispose();$Context.ContainerLease=$null
+    # P9C_TEST_HOOK: before project publication commit decision.
+    Save-ProjectPublicationJournal -Context $Context -Phase committed
+    # P9C_TEST_HOOK: after project publication commit decision.
+    # P9C_TEST_HOOK: before project publication evidence cleanup.
+    Remove-ProjectPublicationContextEvidence $Context
+}
+
+function Remove-ProjectPublicationContextEvidence {
+    param([Parameter(Mandatory=$true)]$Context)
+    if($null-ne$Context.Lease){$Context.Lease.Dispose();$Context.Lease=$null}
+    try{Remove-PlatformOwnedDirectoryTree -TransactionRootLease $Context.ContainerLease -Leaf $Context.Id -ExpectedIdentity $Context.Identity|Out-Null}
+    finally{if($null-ne$Context.ContainerLease){$Context.ContainerLease.Dispose();$Context.ContainerLease=$null}}
 }
 
 function Test-ProjectPublicationStateEqual {
@@ -3805,7 +3827,7 @@ function Restore-ProjectPublicationContext {
         }finally{$parentLease.Dispose()}
     }
     Save-ProjectPublicationJournal $Context
-    Complete-ProjectPublicationContext $Context
+    Remove-ProjectPublicationContextEvidence $Context
 }
 
 function Set-TargetMutationFileBytes {
@@ -5252,6 +5274,7 @@ try {
             $earlyConflicts=@(Get-ProjectSkillOwnershipConflictsAcrossWorktrees -Repository $targetRootPath -DesiredFiles @($projectCandidateState.Files))
             if($earlyConflicts.Count-gt0){
                 $details=Format-ProjectSkillOwnershipConflictDetails -Conflicts $earlyConflicts
+                Write-ProjectSkillOwnershipConflictDiagnostics -Conflicts $earlyConflicts
                 throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project Skill transaction refused before remediation or project mutation: $details. Resolve each conflict: remove or rename the project-owned Skill, or remove that Skill from projections.project.")
             }
         }
@@ -5664,20 +5687,27 @@ try {
         $projectConflicts = @(Get-ProjectSkillOwnershipConflictsAcrossWorktrees -Repository $targetRootPath -DesiredFiles $projectDesiredFiles)
         if ($projectConflicts.Count -gt 0) {
             $details=Format-ProjectSkillOwnershipConflictDetails -Conflicts $projectConflicts
+            Write-ProjectSkillOwnershipConflictDiagnostics -Conflicts $projectConflicts
             throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project Skill transaction refused before project mutation: $details. Resolve each conflict: remove or rename the project-owned Skill, or remove that Skill from projections.project.")
         }
     }
     if ($manifestSchemaVersion -eq 4) {
-        $retiredGroups = @($manifest.files | Where-Object {
+        $retiredEntries = @($manifest.files | Where-Object {
             [string]$_.artifactType -ceq 'skill' -and -not $desiredEntriesByTarget.ContainsKey([string]$_.targetPath)
-        } | Group-Object projectionId,artifactId)
+        })
+        $retiredGroups = @($retiredEntries | Group-Object projectionId,artifactId)
         foreach ($retiredGroup in $retiredGroups) {
-            $entries = @($retiredGroup.Group); $projectionId=[string]$entries[0].projectionId; $skillId=[string]$entries[0].artifactId
+            $retiredGroupEntries = @($retiredGroup.Group); $projectionId=[string]$retiredGroupEntries[0].projectionId; $skillId=[string]$retiredGroupEntries[0].artifactId
+            $entries = @($manifest.files|Where-Object{
+                [string]$_.artifactType-ceq'skill' -and [string]$_.projectionId-ceq$projectionId -and [string]$_.artifactId-ceq$skillId
+            })
+            $desiredGroupFiles = @($projectDesiredFiles|Where-Object{[string]$_.ProjectionId -ceq $projectionId -and [string]$_.SkillId -ceq $skillId})
             $prefix = ([string]$entries[0].targetPath).Split('/')[0..2] -join '/'
             $ownedReasons = New-Object System.Collections.Generic.List[string]
             if (@($trackedPaths | Where-Object { Test-GitPathEqualsOrIsUnderPrefix -Path ([string]$_) -Prefix $prefix -Comparer $gitPathComparer }).Count -gt 0) { $ownedReasons.Add('tracked') }
             if (@($stagedPaths | Where-Object { Test-GitPathEqualsOrIsUnderPrefix -Path ([string]$_) -Prefix $prefix -Comparer $gitPathComparer }).Count -gt 0) { $ownedReasons.Add('staged') }
-            $entryMap=@{};foreach($entry in $entries){$entryMap[[string]$entry.targetPath]=$entry}
+            $entryMap=New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+            foreach($entry in $entries){$entryMap.Add([string]$entry.targetPath,$entry)}
             $root=Join-Path $targetRootPath $prefix.Replace('/',[IO.Path]::DirectorySeparatorChar)
             if(Test-Path -LiteralPath $root){
                 $item=Get-Item -Force -LiteralPath $root
@@ -5701,9 +5731,21 @@ try {
             }
             foreach($entry in $entries){
                 $full=Join-Path $targetRootPath ([string]$entry.targetPath).Replace('/',[IO.Path]::DirectorySeparatorChar)
-                if(-not(Test-Path -LiteralPath $full -PathType Leaf)){$ownedReasons.Add("missing:$([string]$entry.targetPath)")}
+                if(-not(Test-Path -LiteralPath $full -PathType Leaf)){
+                    $missingRelative=([string]$entry.targetPath).Substring($prefix.Length).TrimStart('/')
+                    $ownedReasons.Add("missing:$missingRelative")
+                }
             }
             if($ownedReasons.Count-gt0){
+                if($desiredGroupFiles.Count-gt0){
+                    $conflicts=@($ownedReasons|Sort-Object -Unique|ForEach-Object{
+                        $reason=[string]$_;$separator=$reason.IndexOf(':');$status=if($separator-ge0){$reason.Substring(0,$separator)}else{$reason};$relative=if($separator-ge0){$reason.Substring($separator+1)}else{'.'}
+                        [pscustomobject][ordered]@{worktree=$targetRootPath;projection=$projectionId;skillId=$skillId;targetPath=if($relative-ceq'.'){$prefix}else{"$prefix/$relative"};relativePath=$relative;status=$status}
+                    })
+                    $details=Format-ProjectSkillOwnershipConflictDetails -Conflicts $conflicts
+                    Write-ProjectSkillOwnershipConflictDiagnostics -Conflicts $conflicts
+                    throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project Skill update retirement refused before project mutation: $details. Resolve each conflict: remove or rename the project-owned Skill, or remove that Skill from projections.project.")
+                }
                 foreach($entry in $entries){[void]$relinquishedProjectTargets.Add([string]$entry.targetPath)}
                 Write-Output "ownership-relinquished: $projectionId/$skillId [$(@($ownedReasons|Sort-Object -Unique)-join ', ')]"
             }
@@ -5781,7 +5823,11 @@ try {
         Save-SkillMigrationJournal $mutationSnapshot $excludeSnapshot $migrationJournalPath $migrationGitState 'mutating'
     }
     if ($projectMutationPaths.Count -gt 0) {
-        $script:ProjectPublicationPaths.Clear();foreach($path in $projectMutationPaths){[void]$script:ProjectPublicationPaths.Add([string]$path)};[void]$script:ProjectPublicationPaths.Add($manifestRelativePath)
+        $script:ProjectPublicationPaths.Clear()
+        foreach($path in @($mutationPaths|Sort-Object -Unique)){
+            if(-not(Test-IsProtectedClaudeFamilyPath -Path ([string]$path) -ProtectedPaths $targetMutationProtectedClaudeFamilyPaths)){[void]$script:ProjectPublicationPaths.Add([string]$path)}
+        }
+        [void]$script:ProjectPublicationPaths.Add($manifestRelativePath)
         $script:ProjectPublicationContext = New-ProjectPublicationContext -Repository $targetRootPath
     }
 
