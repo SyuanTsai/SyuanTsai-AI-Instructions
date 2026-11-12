@@ -237,6 +237,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "tests/static-approved-exceptions.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "tests/static-parser-coverage.Tests.ps1",
       "license": "Apache-2.0"
     },

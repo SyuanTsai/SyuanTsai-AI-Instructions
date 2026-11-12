@@ -6733,3 +6733,14 @@ Describe 'Validator platform ownership authority contract' {
         Test-Json -Json ($macExample | ConvertTo-Json -Depth 30) -Schema $ownershipSchema -ErrorAction SilentlyContinue | Should -BeFalse
     }
 }
+
+Describe 'SYP481 exact-fingerprint exception authority' {
+    # Scenario: repositories declare scanner-native exact exceptions. Purpose: preserve approval and non-waivable severity boundaries.
+    It 'UnitT10_requires_exact_baselines_and_retains_release_and_severity_policy' {
+        $standard=Get-Content -Raw -Encoding UTF8 (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/skill-repository-standard.md')
+        $section=[regex]::Match($standard,'(?s)#### 14\.2\.1 SkillSpector exact-fingerprint exceptions(.*?)### 14\.3').Groups[1].Value
+        foreach($required in @('skillspector-human-approved-exceptions-v1','config/skillspector-exceptions/<skillId>.baseline.json','`rules`','approved source','review.expiresOn','--baseline','suppressedFindings','suppressionReason','High／Critical **MUST NOT**','第 11 節','`releaseEligible` 不變')) {
+            $section.Contains($required) | Should Be $true
+        }
+    }
+}

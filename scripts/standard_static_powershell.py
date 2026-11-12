@@ -341,6 +341,7 @@ def main(argv=None):
     parser.add_argument("--evidence-path", required=True)
     parser.add_argument("--source-revision", required=True)
     parser.add_argument("--candidate-identity", required=True)
+    parser.add_argument("--baseline")
     args = parser.parse_args(argv)
     if (not re.fullmatch(r"[0-9a-f]{40}", args.source_revision)
             or not re.fullmatch(r"[0-9a-f]{64}", args.candidate_identity)
@@ -372,8 +373,10 @@ def main(argv=None):
     captured = io.StringIO()
     try:
         with contextlib.redirect_stdout(captured):
-            app(args=["scan", str(root), "--no-llm", "--format", "json"],
-                prog_name="skillspector-central-static")
+            scan_args = ["scan", str(root), "--no-llm", "--format", "json"]
+            if args.baseline is not None:
+                scan_args.extend(["--baseline", args.baseline])
+            app(args=scan_args, prog_name="skillspector-central-static")
     except SystemExit as error:
         result = error.code if isinstance(error.code, int) else 10
     after, _ = _inventory(root)

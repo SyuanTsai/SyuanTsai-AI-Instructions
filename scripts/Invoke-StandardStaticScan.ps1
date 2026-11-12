@@ -10,6 +10,8 @@ param(
     [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{64}$')][string]$CandidateIdentity,
     [Parameter(Mandatory=$true)][string]$ReportPath,
     [Parameter(Mandatory=$true)][string]$EvidencePath,
+    [string]$BaselinePath,
+    [string]$ExpectedBaselineSha256,
     [ValidateRange(1,600)][int]$ScanTimeoutSeconds=300
 )
 Set-StrictMode -Version Latest
@@ -187,6 +189,8 @@ function Get-StaticApprovedSkillSpectorEntry($Receipt,$ApprovedSources,[string]$
     return $approvedEntry
 }
 try {
+    if($PSBoundParameters.ContainsKey('BaselinePath') -ne $PSBoundParameters.ContainsKey('ExpectedBaselineSha256')){throw 'BaselinePath and ExpectedBaselineSha256 must be provided together.'}
+    $baselineFull=$null;$baselineSha256=$null
     if($env:STANDARD_VALIDATION_CANDIDATE_ID -cne $CandidateIdentity -or
        [string]::IsNullOrWhiteSpace($env:STANDARD_VALIDATION_CANDIDATE_ROOT)) {
         throw 'Static parser bridge requires the existing candidate-bound source child.'
@@ -198,6 +202,14 @@ try {
     $candidatePrefix=$candidateFull.TrimEnd([char[]]@('/','\'))+[IO.Path]::DirectorySeparatorChar
     if(-not $skillFull.StartsWith($candidatePrefix,[StringComparison]::OrdinalIgnoreCase)){
         throw 'Static Skill root is outside the bound source candidate.'
+    }
+    if($PSBoundParameters.ContainsKey('BaselinePath')){
+        if([string]::IsNullOrWhiteSpace($BaselinePath) -or $ExpectedBaselineSha256 -cnotmatch '^[0-9a-f]{64}$'){throw 'Baseline path or expected SHA256 is invalid.'}
+        $baselineFull=Assert-StaticPhysicalPath $BaselinePath
+        if(-not $baselineFull.StartsWith($candidatePrefix,[StringComparison]::OrdinalIgnoreCase) -or
+           (Get-Item -LiteralPath $baselineFull -Force) -isnot [IO.FileInfo]){throw 'Baseline must be a regular file inside the bound candidate.'}
+        $baselineSha256=Static-Hash $baselineFull
+        if($baselineSha256 -cne $ExpectedBaselineSha256){throw 'Baseline SHA256 differs before execution.'}
     }
     $frozenAuthority=[ordered]@{}
     foreach($relative in @(
@@ -259,6 +271,7 @@ try {
     # The shared process owner clears and rebuilds its own environment.
     $environment=@{STANDARD_VALIDATION_CANDIDATE_ID=$CandidateIdentity;STANDARD_VALIDATION_CANDIDATE_ROOT=$candidateFull}
     $nativeArguments=@('-I','-B','-X','utf8','-c','from skillspector.cli import app; app()','scan',$skillFull,'--no-llm','--format','json')
+    if($null -ne $baselineFull){$nativeArguments+=@('--baseline',$baselineFull)}
     $original=Invoke-StandardValidationProcess -Command $python -Arguments $nativeArguments -WorkingDirectory $working -Environment $environment -TimeoutSeconds $staticTimeout
     Write-StaticNativeReportFromProcess -Process $original -Path $originalReport
     switch($parserCorrection){
@@ -287,11 +300,16 @@ try {
             $pwshHash=Static-Hash $pwsh
             $bridgePath=Join-Path $PSScriptRoot 'standard_static_powershell.py'
             $bridgeArguments=@('-I','-B','-X','utf8',$bridgePath,'--pwsh',$pwsh,'--pwsh-sha256',$pwshHash,'--skill-root',$skillFull,'--report-path',$reportFull,'--evidence-path',$profileRecord,'--source-revision',$SourceRevision,'--candidate-identity',$CandidateIdentity)
+            if($null -ne $baselineFull){$bridgeArguments+=@('--baseline',$baselineFull)}
             $corrected=Invoke-StandardValidationProcess -Command $python -Arguments $bridgeArguments -WorkingDirectory $working -Environment $environment -TimeoutSeconds $staticTimeout
             if($corrected.status -cne 'passed' -or $corrected.exitCode -ne 0 -or -not $corrected.cleanedUp -or
                -not(Test-Path -LiteralPath $reportFull -PathType Leaf) -or -not(Test-Path -LiteralPath $profileRecord -PathType Leaf)){throw 'Corrected scanner graph failed or omitted cleanup/evidence.'}
         }
         default {throw 'Scanner receipt has no supported frozen parser profile.'}
+    }
+    if($null -ne $baselineFull){
+        [void](Assert-StaticPhysicalPath $baselineFull)
+        if((Get-Item -LiteralPath $baselineFull -Force) -isnot [IO.FileInfo] -or (Static-Hash $baselineFull) -cne $ExpectedBaselineSha256){throw 'Baseline changed during static analysis.'}
     }
     foreach($relative in $frozenAuthority.Keys){
         $frozenPath=Assert-StaticPhysicalPath (Join-Path $authorityRoot $relative)
@@ -323,6 +341,7 @@ try {
         originalReportPath=$originalReport;originalReportSha256=(Static-Hash $originalReport)
         correctedReportPath=$reportFull;correctedReportSha256=(Static-Hash $reportFull)
         profileExecutionPath=$profileRecord;profileExecutionSha256=(Static-Hash $profileRecord)
+        baselinePath=$baselineFull;baselineSha256=$baselineSha256
         originalProcess=$original;correctedProcess=$corrected
     }
     $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($record | ConvertTo-Json -Depth 12)+"`n")

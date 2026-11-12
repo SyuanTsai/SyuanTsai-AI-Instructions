@@ -894,6 +894,16 @@ Exception **MUST** 是顯式、可追蹤、Human Approved 的 repository-specifi
 
 Exception **MUST NOT** 建立替代 lifecycle、永久排除 Security Gate，或把「使用舊 validation tool / 未核准 tool source」變成無期限預設。若 compatibility lane 需要舊版工具，必須使用 8.2 的 compatibility-lane boundary；未核准 source 不屬於 compatibility exception。
 
+#### 14.2.1 SkillSpector exact-fingerprint exceptions
+
+Repository **MAY** 以 `config/skillspector-exceptions.json`（`skillspector-human-approved-exceptions-v1`）與每個 Skill 一份 `config/skillspector-exceptions/<skillId>.baseline.json` 宣告第 14.1／14.2 節的精確指紋例外。Baseline **MUST** 使用 SkillSpector v2 指紋、`rules` 為空、scanner 版本與本次凍結的 approved source 版本一致，且與 registry exceptions 雙向一一對應，附第 14.2 節欄位、owner 與 `review.expiresOn`。
+
+Static adapter **MUST** 僅以 scanner 原生 `--baseline` 傳入上述 baseline，並在 envelope `suppressedFindings` 逐筆回報 `skillId`、`ruleId`、`severity`、`file`、`suppressionReason`。中央 runner **MUST** 驗證 registry、baseline 與每筆抑制，任一不符 **MUST** BLOCK；High／Critical **MUST NOT** 被抑制。
+
+被驗證接受的抑制不計入 human review 與 semantic trigger；任何未被抑制的 finding（含檔案位元組或 scanner 版本改變而失效的舊指紋）仍依第 11 節與 severity policy 處理。此例外不是 release、install 或 semantic evidence，`releaseEligible` 不變。
+
+精確指紋比對由 scanner 以原生 `--baseline` 完成；SkillSpector v2 指紋綁定元件位元組、scanner 版本與 finding 欄位，JSON 不輸出該 hash。中央 runner 驗證 registry／baseline 的核准、期限與一一對應，並以 `suppressionReason`、`ruleId`、`file`、`skillId` 將每筆抑制對應到唯一核准條目。Static adapter 回報 scanner 輸出的信任邊界與其回報 findings 相同；adapter **MUST NOT** 自行產生、修改或合併抑制項，違反即屬 adapter 缺陷，不構成合法例外。
+
 ### 14.3 Non-waivable core
 
 除非先依第 19 節修改 normative authority，repository exception **MUST NOT** 豁免或降低下列 core requirements：
