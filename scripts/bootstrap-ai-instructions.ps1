@@ -1324,6 +1324,20 @@ function Get-ManagedContentHash {
     return Get-NormalizedContentHash -Path $Path
 }
 
+function Get-ManagedContentHashFromBytes {
+    param([Parameter(Mandatory=$true)][AllowEmptyCollection()][byte[]]$Bytes,[Parameter(Mandatory=$true)][string]$TargetPath)
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try{
+        if($TargetPath-cmatch'^\.(agents|claude|github)/skills/'-or(Test-InstructionLicenseDeliveryPath $TargetPath)){
+            return ([BitConverter]::ToString($sha.ComputeHash($Bytes))).Replace('-','').ToLowerInvariant()
+        }
+        $offset=if($Bytes.Length-ge3-and$Bytes[0]-eq0xEF-and$Bytes[1]-eq0xBB-and$Bytes[2]-eq0xBF){3}else{0}
+        $text=[Text.UTF8Encoding]::new($false,$true).GetString($Bytes,$offset,$Bytes.Length-$offset).Replace("`r`n","`n").Replace("`r","`n")
+        $normalized=[Text.UTF8Encoding]::new($false).GetBytes($text)
+        return ([BitConverter]::ToString($sha.ComputeHash($normalized))).Replace('-','').ToLowerInvariant()
+    }finally{$sha.Dispose()}
+}
+
 function Test-IsAllowedManagedPath {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -3560,6 +3574,7 @@ function Remove-TargetMutationFileAtomically {
 
 $script:ProjectPublicationContext = $null
 $script:ProjectPublicationPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+$script:ProjectPublicationFailureResolutionHandled = $false
 
 function ConvertTo-ProjectPublicationIdentity {
     param([Parameter(Mandatory=$true)]$Observation)
@@ -3567,14 +3582,90 @@ function ConvertTo-ProjectPublicationIdentity {
     return [pscustomobject][ordered]@{kind='unix-device-inode';device=[string][uint64]$Observation.Device;fileId=[string][uint64]$Observation.Inode}
 }
 
+function ConvertTo-ProjectPublicationRemediationRecord {
+    param([Parameter(Mandatory=$true)]$Transaction)
+    return [pscustomobject][ordered]@{
+        repository=[string]$Transaction.Repository;commonGitDirectory=[string]$Transaction.CommonGitDirectory;indexPath=[string]$Transaction.IndexPath
+        originalHead=[string]$Transaction.OriginalHead;originalHeadReference=[string]$Transaction.OriginalHeadReference
+        newHeadReference=[string]$Transaction.NewHeadReference;newCommit=[string]$Transaction.NewCommit;headUpdated=[bool]$Transaction.HeadUpdated
+        paths=@($Transaction.Paths);mutationPaths=@($Transaction.MutationPaths);filesRemoved=@($Transaction.FilesRemoved)
+        backup=[pscustomobject][ordered]@{root=[string]$Transaction.Backup.Root;indexSha256=[string]$Transaction.Backup.IndexSha256;inventory=@($Transaction.Backup.Inventory)}
+        excludeSnapshot=$(if($null-eq$Transaction.ExcludeSnapshot){$null}else{[pscustomobject][ordered]@{
+            path=[string]$Transaction.ExcludeSnapshot.Path;existed=[bool]$Transaction.ExcludeSnapshot.Existed
+            beforeBase64=[Convert]::ToBase64String([byte[]]$Transaction.ExcludeSnapshot.Before)
+            appliedBase64=[Convert]::ToBase64String([byte[]]$Transaction.ExcludeSnapshot.Applied)
+            mutationPaths=@($Transaction.ExcludeSnapshot.MutationPaths);protectedPaths=@($Transaction.ExcludeSnapshot.ProtectedPaths)
+        }})
+        indexMutated=[bool]$Transaction.IndexMutated;appliedIndexSha256=[string]$Transaction.AppliedIndexSha256
+        protectedPaths=@($Transaction.ProtectedPaths)
+    }
+}
+
+function Test-ProjectPublicationPathEqual {
+    param([Parameter(Mandatory=$true)][string]$Left,[Parameter(Mandatory=$true)][string]$Right)
+    $comparison=if($IsWindows){[StringComparison]::OrdinalIgnoreCase}else{[StringComparison]::Ordinal}
+    return [string]::Equals([IO.Path]::GetFullPath($Left),[IO.Path]::GetFullPath($Right),$comparison)
+}
+
+function ConvertFrom-ProjectPublicationRemediationRecord {
+    param([Parameter(Mandatory=$true)]$Record,[Parameter(Mandatory=$true)][string]$Repository)
+    $properties=@('repository','commonGitDirectory','indexPath','originalHead','originalHeadReference','newHeadReference','newCommit','headUpdated','paths','mutationPaths','filesRemoved','backup','excludeSnapshot','indexMutated','appliedIndexSha256','protectedPaths')
+    if(@($Record.PSObject.Properties.Name|Where-Object{$_-notin$properties}).Count-gt0 -or @($properties|Where-Object{$null-eq$Record.PSObject.Properties[$_]}).Count-gt0 -or
+        -not(Test-ProjectPublicationPathEqual -Left ([string]$Record.repository) -Right $Repository)){
+        throw 'Project publication remediation recovery record is invalid.'
+    }
+    $backupRoot=[IO.Path]::GetFullPath([string]$Record.backup.root)
+    $backupPrefix=(Join-Path ([IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([char[]]@('/','\'))) 'codex-agent-artifact-backups').TrimEnd([char[]]@('/','\'))+[IO.Path]::DirectorySeparatorChar
+    $pathComparison=if($IsWindows){[StringComparison]::OrdinalIgnoreCase}else{[StringComparison]::Ordinal}
+    if(-not$backupRoot.StartsWith($backupPrefix,$pathComparison)-or-not(Test-Path -LiteralPath $backupRoot -PathType Container)-or
+        [string]$Record.backup.indexSha256-cnotmatch'^[0-9a-f]{64}$'-or
+        (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $backupRoot 'index')).Hash.ToLowerInvariant()-cne[string]$Record.backup.indexSha256){
+        throw 'Project publication remediation backup evidence is invalid.'
+    }
+    $expectedIndex=((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--git-path','index')|Select-Object -First 1).Trim());if(-not[IO.Path]::IsPathRooted($expectedIndex)){$expectedIndex=Join-Path $Repository $expectedIndex}
+    $expectedCommon=((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--git-common-dir')|Select-Object -First 1).Trim());if(-not[IO.Path]::IsPathRooted($expectedCommon)){$expectedCommon=Join-Path $Repository $expectedCommon}
+    if(-not(Test-ProjectPublicationPathEqual -Left ([string]$Record.indexPath) -Right $expectedIndex)-or-not(Test-ProjectPublicationPathEqual -Left ([string]$Record.commonGitDirectory) -Right $expectedCommon)){
+        throw 'Project publication remediation Git identity is invalid.'
+    }
+    foreach($entry in @($Record.backup.inventory)){
+        if(-not(Test-IsSafeProjectCandidatePath ([string]$entry.path))-or[bool]$entry.exists-and[string]$entry.sha256-cnotmatch'^[0-9a-f]{64}$'){throw 'Project publication remediation inventory is invalid.'}
+        if([bool]$entry.exists){$backupFile=Join-Path (Join-Path $backupRoot 'files') ([string]$entry.path).Replace('/',[IO.Path]::DirectorySeparatorChar);if(-not(Test-Path -LiteralPath $backupFile -PathType Leaf)-or(Get-FileHash -Algorithm SHA256 -LiteralPath $backupFile).Hash.ToLowerInvariant()-cne[string]$entry.sha256){throw 'Project publication remediation file backup is invalid.'}}
+    }
+    $exclude=$null
+    if($null-ne$Record.excludeSnapshot){
+        try{$before=[Convert]::FromBase64String([string]$Record.excludeSnapshot.beforeBase64);$applied=[Convert]::FromBase64String([string]$Record.excludeSnapshot.appliedBase64)}catch{throw 'Project publication remediation exclude evidence is invalid.'}
+        $expectedExclude=[IO.Path]::GetFullPath([string](Get-GitInfoExcludePath -Repository $Repository))
+        if(-not(Test-ProjectPublicationPathEqual -Left ([string]$Record.excludeSnapshot.path) -Right $expectedExclude)){throw 'Project publication remediation exclude path is invalid.'}
+        $exclude=[pscustomobject][ordered]@{Path=$expectedExclude;Existed=[bool]$Record.excludeSnapshot.existed;Before=[byte[]]$before;Applied=[byte[]]$applied;MutationPaths=@($Record.excludeSnapshot.mutationPaths);ProtectedPaths=@($Record.excludeSnapshot.protectedPaths)}
+    }
+    $filesRemoved=New-Object 'System.Collections.Generic.List[string]';foreach($path in @($Record.filesRemoved)){$filesRemoved.Add([string]$path)}
+    return [pscustomobject][ordered]@{
+        Repository=$Repository;GitExecutable=$GitExecutable;CommonGitDirectory=[string]$Record.commonGitDirectory;IndexPath=[string]$Record.indexPath
+        OriginalHead=[string]$Record.originalHead;OriginalHeadReference=[string]$Record.originalHeadReference;NewHeadReference=[string]$Record.newHeadReference
+        NewCommit=[string]$Record.newCommit;HeadUpdated=[bool]$Record.headUpdated;Paths=@($Record.paths);MutationPaths=@($Record.mutationPaths);FilesRemoved=$filesRemoved
+        Backup=[pscustomobject][ordered]@{Root=$backupRoot;IndexSha256=[string]$Record.backup.indexSha256;Inventory=@($Record.backup.inventory)}
+        ExcludeSnapshot=$exclude;IndexMutated=[bool]$Record.indexMutated;AppliedIndexSha256=[string]$Record.appliedIndexSha256
+        RollbackAttempted=$false;RolledBack=$false;ProtectedPaths=@($Record.protectedPaths)
+    }
+}
+
+function Resolve-ProjectPublicationRecoveryAction {
+    param([Parameter(Mandatory=$true)]$JournalState)
+    if([string]$JournalState.status-ceq'missing'){return 'rollback-all'}
+    if([string]$JournalState.status-cne'valid'-or$null-eq$JournalState.journal){return 'fail-closed'}
+    if([string]$JournalState.journal.phase-ceq'applying'){return 'rollback-all'}
+    if([string]$JournalState.journal.phase-ceq'committed'){return 'roll-forward-cleanup'}
+    return 'fail-closed'
+}
+
 function Read-ProjectPublicationJournal {
     param([Parameter(Mandatory=$true)]$Lease,[Parameter(Mandatory=$true)][string]$Leaf,[Parameter(Mandatory=$true)][string]$ExpectedId,[Parameter(Mandatory=$true)][string]$Repository)
     $file=Open-PlatformFile -ParentLease $Lease -Leaf $Leaf -Access Read -CreateMode OpenExisting
     try{$json=[Text.UTF8Encoding]::new($false,$true).GetString($file.ReadAllBytes(16777216))}finally{$file.Dispose()}
     try{$journal=$json|ConvertFrom-Json}catch{throw "Project publication recovery journal is invalid JSON: $Leaf"}
-    $topProperties=@('schemaVersion','transactionId','repository','phase','operations')
+    $topProperties=if([int64]$journal.schemaVersion-eq1){@('schemaVersion','transactionId','repository','phase','operations')}else{@('schemaVersion','transactionId','repository','phase','operations','remediation')}
     if(@($journal.PSObject.Properties.Name|Where-Object{$_-notin$topProperties}).Count-gt0 -or @($topProperties|Where-Object{$null-eq$journal.PSObject.Properties[$_]}).Count-gt0 -or
-        ($journal.schemaVersion-isnot[int]-and$journal.schemaVersion-isnot[long])-or[int64]$journal.schemaVersion-ne1 -or
+        ($journal.schemaVersion-isnot[int]-and$journal.schemaVersion-isnot[long])-or[int64]$journal.schemaVersion-notin@(1,2) -or
         [string]$journal.transactionId-cne$ExpectedId -or [string]$journal.repository-cne$Repository -or [string]$journal.phase-cnotin@('applying','committed')){
         throw "Project publication recovery journal identity is invalid: $Leaf"
     }
@@ -3590,19 +3681,62 @@ function Read-ProjectPublicationJournal {
             ([bool]$operation.applied.exists-and[string]$operation.applied.sha256-cnotmatch'^[0-9a-f]{64}$')){throw "Project publication recovery operation state is invalid: $Leaf"}
         $operationRoot=[IO.Path]::GetFullPath([string]$operation.targetRoot)
         if([string]$operation.targetKind-ceq'repository'){
-            if($operationRoot-cne[IO.Path]::GetFullPath($Repository) -or
+            if(-not(Test-ProjectPublicationPathEqual -Left $operationRoot -Right $Repository) -or
                 ([string]$operation.targetPath-cne$manifestRelativePath -and -not(Test-IsAllowedManagedPath ([string]$operation.targetPath)))){
                 throw "Project publication recovery operation escapes the repository scope: $Leaf"
             }
         }else{
             $exclude=[IO.Path]::GetFullPath([string](Get-GitInfoExcludePath -Repository $Repository))
-            if([IO.Path]::GetFullPath((Join-Path $operationRoot ([string]$operation.targetPath)))-cne$exclude){throw "Project publication recovery operation escapes the shared exclude: $Leaf"}
+            if(-not(Test-ProjectPublicationPathEqual -Left (Join-Path $operationRoot ([string]$operation.targetPath)) -Right $exclude)){throw "Project publication recovery operation escapes the shared exclude: $Leaf"}
         }
     }
     if([string]$journal.phase-ceq'committed' -and @($journal.operations|Where-Object{[string]$_.state-cne'applied'}).Count-gt0){
         throw "Project publication committed journal contains a non-applied operation: $Leaf"
     }
+    if([int64]$journal.schemaVersion-eq1){$journal|Add-Member -NotePropertyName remediation -NotePropertyValue $null}
+    elseif($null-ne$journal.remediation){$journal.remediation=ConvertFrom-ProjectPublicationRemediationRecord -Record $journal.remediation -Repository $Repository}
     return $journal
+}
+
+function Get-ProjectPublicationJournalDiskState {
+    param([Parameter(Mandatory=$true)]$Context)
+    $transactionPath=Join-Path (Join-Path $Context.Repository '.ai-instructions-txn') $Context.Id
+    if(-not(Test-Path -LiteralPath $transactionPath -PathType Container)){return [pscustomobject]@{status='missing';journal=$null;leaf=$null;error=$null}}
+    $lease=$Context.Lease;$opened=$false
+    try{
+        if($null-eq$lease){$lease=Open-PlatformDirectory -Root $Context.Repository -RelativePath ".ai-instructions-txn/$($Context.Id)";$opened=$true}
+        $journalPath=Join-Path $transactionPath 'journal.json';$previousPath=Join-Path $transactionPath 'journal.prev'
+        $leaf=if(Test-Path -LiteralPath $journalPath -PathType Leaf){'journal.json'}elseif(Test-Path -LiteralPath $previousPath -PathType Leaf){'journal.prev'}else{$null}
+        if($null-eq$leaf){return [pscustomobject]@{status='missing';journal=$null;leaf=$null;error=$null}}
+        try{$journal=Read-ProjectPublicationJournal -Lease $lease -Leaf $leaf -ExpectedId $Context.Id -Repository $Context.Repository;return [pscustomobject]@{status='valid';journal=$journal;leaf=$leaf;error=$null}}
+        catch{return [pscustomobject]@{status='indeterminate';journal=$null;leaf=$leaf;error=$_.Exception}}
+    }finally{if($opened-and$null-ne$lease){$lease.Dispose()}}
+}
+
+function Invoke-ProjectPublicationRecoveryAction {
+    param([Parameter(Mandatory=$true)][ValidateSet('rollback-all','roll-forward-cleanup','fail-closed')][string]$Action,[Parameter(Mandatory=$true)]$Context,[Parameter(Mandatory=$true)]$JournalState,[AllowNull()]$InMemoryRemediation)
+    if($Action-ceq'fail-closed'){
+        $detail=if($null-ne$JournalState.error){$JournalState.error.Message}else{'the durable journal state is unknown'}
+        throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Project publication recovery could not determine the durable commit decision and retained all evidence: $detail" -InnerException $JournalState.error)
+    }
+    if([string]$JournalState.status-ceq'valid'){
+        $operations=New-Object System.Collections.Generic.List[object];foreach($operation in @($JournalState.journal.operations)){$operations.Add($operation)};$Context.Operations=$operations
+        $Context.Remediation=$JournalState.journal.remediation
+    }
+    if($Action-ceq'roll-forward-cleanup'){
+        try{Remove-ProjectPublicationContextEvidence $Context}
+        catch{throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Committed project publication cleanup failed; the committed journal was retained for the next run: $($_.Exception.Message)" -InnerException $_.Exception)}
+        return
+    }
+    try{Restore-ProjectPublicationContext $Context -RetainEvidence}
+    catch{throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Applying project publication rollback failed and retained recovery evidence: $($_.Exception.Message)" -InnerException $_.Exception)}
+    $remediation=if($null-ne$Context.Remediation){$Context.Remediation}else{$InMemoryRemediation}
+    if($null-ne$remediation-and-not[bool]$remediation.RollbackAttempted){
+        try{Restore-AgentArtifactRemediation -Transaction $remediation}
+        catch{throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Project publication rollback restored project files but remediation rollback failed: $($_.Exception.Message)" -InnerException $_.Exception)}
+    }
+    try{Remove-ProjectPublicationContextEvidence $Context}
+    catch{throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Project publication rollback completed but evidence cleanup failed: $($_.Exception.Message)" -InnerException $_.Exception)}
 }
 
 function Invoke-ProjectPublicationRecovery {
@@ -3626,14 +3760,18 @@ function Invoke-ProjectPublicationRecovery {
                         $_.Name-cnotmatch'^(?:journal\.stage|journal-[0-9a-f]{32}\.stage|op-[0-9]{6}\.stage)$'
                     })
                     if($unexpected.Count-gt0){throw 'Project publication transaction has no recoverable journal and contains non-staged evidence.'}
-                    $identity=ConvertTo-ProjectPublicationIdentity $lease.Observation;$lease.Dispose();$lease=$null
-                    Remove-PlatformOwnedDirectoryTree -TransactionRootLease $container -Leaf $entry.Name -ExpectedIdentity $identity|Out-Null
+                    $context=[pscustomobject][ordered]@{Repository=$Repository;Id=$entry.Name;ContainerLease=$container;Lease=$lease;Identity=(ConvertTo-ProjectPublicationIdentity $lease.Observation);Operations=(New-Object System.Collections.Generic.List[object]);Remediation=$null;JournalGeneration=0}
+                    $journalState=[pscustomobject]@{status='missing';journal=$null;leaf=$null;error=$null}
+                    $action=Resolve-ProjectPublicationRecoveryAction -JournalState $journalState
+                    Invoke-ProjectPublicationRecoveryAction -Action $action -Context $context -JournalState $journalState -InMemoryRemediation $null
+                    $lease=$null;$container=$null
+                    $container=Open-PlatformDirectory -Root $Repository -RelativePath '.ai-instructions-txn'
                     continue
                 }
-                $journal=Read-ProjectPublicationJournal -Lease $lease -Leaf $journalLeaf -ExpectedId $entry.Name -Repository $Repository
-                $operations=New-Object System.Collections.Generic.List[object];foreach($operation in @($journal.operations)){$operations.Add($operation)}
-                $context=[pscustomobject][ordered]@{Repository=$Repository;Id=$entry.Name;ContainerLease=$container;Lease=$lease;Identity=(ConvertTo-ProjectPublicationIdentity $lease.Observation);Operations=$operations;JournalGeneration=0}
-                if([string]$journal.phase-ceq'committed'){Remove-ProjectPublicationContextEvidence $context}else{Restore-ProjectPublicationContext $context}
+                $context=[pscustomobject][ordered]@{Repository=$Repository;Id=$entry.Name;ContainerLease=$container;Lease=$lease;Identity=(ConvertTo-ProjectPublicationIdentity $lease.Observation);Operations=(New-Object System.Collections.Generic.List[object]);Remediation=$null;JournalGeneration=0}
+                $journalState=Get-ProjectPublicationJournalDiskState -Context $context
+                $action=Resolve-ProjectPublicationRecoveryAction -JournalState $journalState
+                Invoke-ProjectPublicationRecoveryAction -Action $action -Context $context -JournalState $journalState -InMemoryRemediation $null
                 $lease=$null;$container=$null
                 $container=Open-PlatformDirectory -Root $Repository -RelativePath '.ai-instructions-txn'
             }catch{
@@ -3657,13 +3795,13 @@ function New-ProjectPublicationContext {
     $id=[guid]::NewGuid().ToString('N')
     $lease=Open-PlatformDirectory -Root $Repository -RelativePath ".ai-instructions-txn/$id" -CreatePrivate
     $identity=ConvertTo-ProjectPublicationIdentity $lease.Observation
-    return [pscustomobject][ordered]@{Repository=$Repository;Id=$id;ContainerLease=$container;Lease=$lease;Identity=$identity;Operations=(New-Object System.Collections.Generic.List[object]);JournalGeneration=0}
+    return [pscustomobject][ordered]@{Repository=$Repository;Id=$id;ContainerLease=$container;Lease=$lease;Identity=$identity;Operations=(New-Object System.Collections.Generic.List[object]);Remediation=$null;JournalGeneration=0}
 }
 
 function Save-ProjectPublicationJournal {
     param([Parameter(Mandatory=$true)]$Context,[ValidateSet('applying','committed')][string]$Phase='applying')
     if($Phase-ceq'committed' -and @($Context.Operations|Where-Object{[string]$_.state-cne'applied'}).Count-gt0){throw 'Project publication cannot commit while an operation is not applied.'}
-    $document=[ordered]@{schemaVersion=1;transactionId=$Context.Id;repository=$Context.Repository;phase=$Phase;operations=$Context.Operations.ToArray()}
+    $document=[ordered]@{schemaVersion=2;transactionId=$Context.Id;repository=$Context.Repository;phase=$Phase;operations=$Context.Operations.ToArray();remediation=$(if($null-eq$Context.Remediation){$null}else{ConvertTo-ProjectPublicationRemediationRecord $Context.Remediation})}
     $bytes=[Text.UTF8Encoding]::new($false).GetBytes((($document|ConvertTo-Json -Depth 20).Replace("`r`n","`n"))+"`n")
     $Context.JournalGeneration=[int]$Context.JournalGeneration+1
     $stageLeaf='journal.stage'
@@ -3675,6 +3813,9 @@ function Save-ProjectPublicationJournal {
     $current=Get-AiInstructionsInstallFileState -ParentLease $Context.Lease -Leaf 'journal.json' -LiteralPath $journalPath -PlatformOs $(if($IsLinux){'linux'}elseif($IsMacOS){'macos'}else{'windows'})
     $stageLease=Open-PlatformFile -ParentLease $Context.Lease -Leaf $stageLeaf -Access ReadWrite -CreateMode OpenExisting
     try{
+        if($Phase-ceq'committed'){
+        # P9C_TEST_HOOK: during project publication commit decision write.
+        }
         if($current.exists){
             $previousPath=Join-Path (Split-Path -Parent $journalPath) 'journal.prev'
             $previous=Get-AiInstructionsInstallFileState -ParentLease $Context.Lease -Leaf 'journal.prev' -LiteralPath $previousPath -PlatformOs $(if($IsLinux){'linux'}elseif($IsMacOS){'macos'}else{'windows'})
@@ -3694,6 +3835,7 @@ function Set-ProjectPublicationFileBytesCore {
         [Parameter(Mandatory=$true)][ValidateSet('repository','git-exclude')][string]$TargetKind,
         [Nullable[bool]]$ExpectedExists,
         [string]$ExpectedSha256,
+        [ValidateSet('raw','managed')][string]$ExpectedHashKind='raw',
         [object]$ExpectedState
     )
     $context=$script:ProjectPublicationContext;if($null-eq$context){throw 'Project publication context is unavailable.'}
@@ -3704,7 +3846,13 @@ function Set-ProjectPublicationFileBytesCore {
         $originalCapture=Get-AiInstructionsInstallFileState -ParentLease $parentLease -Leaf $leaf -LiteralPath $target -PlatformOs $(if($IsLinux){'linux'}elseif($IsMacOS){'macos'}else{'windows'}) -IncludePermissions
         if($null-ne$ExpectedState -and -not(Test-ProjectPublicationStateEqual $originalCapture $ExpectedState)){throw "Project publication target identity or bytes changed concurrently: $RelativePath"}
         if($null-ne$ExpectedExists -and ([bool]$originalCapture.exists-ne[bool]$ExpectedExists)) { throw "Project publication target existence changed concurrently: $RelativePath" }
-        if([bool]$originalCapture.exists -and -not[string]::IsNullOrWhiteSpace($ExpectedSha256) -and [string]$originalCapture.sha256-cne$ExpectedSha256) { throw "Project publication target bytes changed concurrently: $RelativePath" }
+        if([bool]$originalCapture.exists -and -not[string]::IsNullOrWhiteSpace($ExpectedSha256)){
+            [byte[]]$capturedBytes=[IO.File]::ReadAllBytes($target)
+            $rawSha=Get-ManagedContentHashFromBytes -Bytes $capturedBytes -TargetPath '.agents/skills/raw.bin'
+            if($rawSha-cne[string]$originalCapture.sha256){throw "Project publication target bytes changed during capture: $RelativePath"}
+            $capturedSha=if($ExpectedHashKind-ceq'raw'){$rawSha}else{Get-ManagedContentHashFromBytes -Bytes $capturedBytes -TargetPath $RelativePath}
+            if($capturedSha-cne$ExpectedSha256){throw "Project publication target content changed concurrently: $RelativePath"}
+        }
         $stageLeaf=('op-{0:D6}.stage'-f($context.Operations.Count+1));$backupLeaf=if($originalCapture.exists){'op-{0:D6}.backup'-f($context.Operations.Count+1)}else{$null}
         $stage=New-AiInstructionsInstallStageFile -TransactionLease $context.Lease -Leaf $stageLeaf -Bytes $Bytes -PlatformOs $(if($IsLinux){'linux'}elseif($IsMacOS){'macos'}else{'windows'})
         $operation=[pscustomobject][ordered]@{targetKind=$TargetKind;targetRoot=$TargetRoot;targetPath=$RelativePath;kind=if($originalCapture.exists){'write'}else{'create'};state='pending';stageLeaf=$stageLeaf;backupLeaf=$backupLeaf;original=$originalCapture;applied=$stage}
@@ -3717,14 +3865,15 @@ function Set-ProjectPublicationFileBytesCore {
 
 function Set-ProjectPublicationFileBytes {
     param([Parameter(Mandatory=$true)][string]$RelativePath,[Parameter(Mandatory=$true)][byte[]]$Bytes,[Nullable[bool]]$ExpectedExists,[string]$ExpectedSha256)
-    Set-ProjectPublicationFileBytesCore -TargetRoot $script:ProjectPublicationContext.Repository -RelativePath $RelativePath -Bytes $Bytes -TargetKind repository -ExpectedExists $ExpectedExists -ExpectedSha256 $ExpectedSha256
+    $hashKind=if($RelativePath-ceq$manifestRelativePath){'raw'}else{'managed'}
+    Set-ProjectPublicationFileBytesCore -TargetRoot $script:ProjectPublicationContext.Repository -RelativePath $RelativePath -Bytes $Bytes -TargetKind repository -ExpectedExists $ExpectedExists -ExpectedSha256 $ExpectedSha256 -ExpectedHashKind $hashKind
 }
 
 function Set-ProjectPublicationExternalFileBytes {
     param([Parameter(Mandatory=$true)][string]$LiteralPath,[Parameter(Mandatory=$true)][byte[]]$Bytes,[Parameter(Mandatory=$true)][bool]$ExpectedExists,[string]$ExpectedSha256,[object]$ExpectedState)
     $fullPath=[IO.Path]::GetFullPath($LiteralPath);$parent=[IO.Path]::GetDirectoryName($fullPath);$leaf=[IO.Path]::GetFileName($fullPath)
     if([string]::IsNullOrWhiteSpace($parent)-or[string]::IsNullOrWhiteSpace($leaf)){throw 'Project publication external target is invalid.'}
-    if($fullPath-cne[IO.Path]::GetFullPath([string](Get-GitInfoExcludePath -Repository $script:ProjectPublicationContext.Repository))){throw 'Project publication external target is not the shared Git exclude.'}
+    if(-not(Test-ProjectPublicationPathEqual -Left $fullPath -Right ([string](Get-GitInfoExcludePath -Repository $script:ProjectPublicationContext.Repository)))){throw 'Project publication external target is not the shared Git exclude.'}
     Set-ProjectPublicationFileBytesCore -TargetRoot $parent -RelativePath $leaf -Bytes $Bytes -TargetKind git-exclude -ExpectedExists $ExpectedExists -ExpectedSha256 $ExpectedSha256 -ExpectedState $ExpectedState
 }
 
@@ -3737,7 +3886,11 @@ function Remove-ProjectPublicationFile {
         $target=Join-Path $context.Repository $RelativePath.Replace('/',[IO.Path]::DirectorySeparatorChar)
         $original=Get-AiInstructionsInstallFileState -ParentLease $parentLease -Leaf $leaf -LiteralPath $target -PlatformOs $(if($IsLinux){'linux'}elseif($IsMacOS){'macos'}else{'windows'}) -IncludePermissions
         if(-not$original.exists){return}
-        if(-not[string]::IsNullOrWhiteSpace($ExpectedSha256)-and[string]$original.sha256-cne$ExpectedSha256){throw "Project publication removal target changed concurrently: $RelativePath"}
+        if(-not[string]::IsNullOrWhiteSpace($ExpectedSha256)){
+            [byte[]]$capturedBytes=[IO.File]::ReadAllBytes($target);$rawSha=Get-ManagedContentHashFromBytes -Bytes $capturedBytes -TargetPath '.agents/skills/raw.bin'
+            if($rawSha-cne[string]$original.sha256){throw "Project publication removal target bytes changed during capture: $RelativePath"}
+            if((Get-ManagedContentHashFromBytes -Bytes $capturedBytes -TargetPath $RelativePath)-cne$ExpectedSha256){throw "Project publication removal target content changed concurrently: $RelativePath"}
+        }
         $backupLeaf='op-{0:D6}.removed'-f($context.Operations.Count+1)
         $operation=[pscustomobject][ordered]@{targetKind='repository';targetRoot=$context.Repository;targetPath=$RelativePath;kind='remove';state='pending';stageLeaf=$null;backupLeaf=$backupLeaf;original=$original;applied=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=0;identity=$null}}
         $context.Operations.Add($operation);Save-ProjectPublicationJournal $context
@@ -3753,6 +3906,21 @@ function Complete-ProjectPublicationContext {
     # P9C_TEST_HOOK: after project publication commit decision.
     # P9C_TEST_HOOK: before project publication evidence cleanup.
     Remove-ProjectPublicationContextEvidence $Context
+}
+
+function Resolve-ActiveProjectPublicationFailure {
+    param([Parameter(Mandatory=$true)]$Context,[AllowNull()]$RemediationTransaction)
+    $journalState=Get-ProjectPublicationJournalDiskState -Context $Context
+    $action=Resolve-ProjectPublicationRecoveryAction -JournalState $journalState
+    Invoke-ProjectPublicationRecoveryAction -Action $action -Context $Context -JournalState $journalState -InMemoryRemediation $RemediationTransaction
+    return $action
+}
+
+function Restore-LegacyAgentArtifactRemediation {
+    param([AllowNull()]$Transaction,[Parameter(Mandatory=$true)][string]$FailurePrefix)
+    if($null-eq$Transaction-or[bool]$Transaction.RollbackAttempted){return}
+    try{Restore-AgentArtifactRemediation -Transaction $Transaction}
+    catch{throw "$FailurePrefix $($_.Exception.Message)"}
 }
 
 function Remove-ProjectPublicationContextEvidence {
@@ -3792,7 +3960,7 @@ function Assert-ProjectSkillManifestFilesCurrent {
 }
 
 function Restore-ProjectPublicationContext {
-    param([Parameter(Mandatory=$true)]$Context)
+    param([Parameter(Mandatory=$true)]$Context,[switch]$RetainEvidence)
     if($null-eq$Context.Lease){return}
     $platform=if($IsLinux){'linux'}elseif($IsMacOS){'macos'}else{'windows'}
     $operationArray=@($Context.Operations.ToArray())
@@ -3827,7 +3995,7 @@ function Restore-ProjectPublicationContext {
         }finally{$parentLease.Dispose()}
     }
     Save-ProjectPublicationJournal $Context
-    Remove-ProjectPublicationContextEvidence $Context
+    if(-not$RetainEvidence){Remove-ProjectPublicationContextEvidence $Context}
 }
 
 function Set-TargetMutationFileBytes {
@@ -5256,6 +5424,7 @@ try {
         if($repoManifestWriter-ceq'v4' -and (Test-Path -LiteralPath (Join-Path $targetRootPath '.ai-instructions-txn'))){
             Import-Module (Join-Path $PSScriptRoot 'ai-instructions-install-transaction.psm1') -Force
             Invoke-ProjectPublicationRecovery -Repository $targetRootPath
+            # P9C_TEST_HOOK: after project publication recovery.
         }
         Assert-NoRepoManagedManifestV4 -Repository $targetRootPath -AllowV4:($repoManifestWriter -ceq 'v4') -Strict
         $claudeProjectOwnedWorktrees = @(Get-ClaudeProjectOwnedWorktreeRoots -Repository $targetRootPath -Strict)
@@ -5278,9 +5447,17 @@ try {
                 throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project Skill transaction refused before remediation or project mutation: $details. Resolve each conflict: remove or rename the project-owned Skill, or remove that Skill from projections.project.")
             }
         }
+        if($projectProjectionIds.Count-gt0){
+            $script:ProjectPublicationContext=New-ProjectPublicationContext -Repository $targetRootPath
+            Save-ProjectPublicationJournal $script:ProjectPublicationContext
+        }
         $remediationTransaction = Invoke-AgentArtifactRemediation -Repository $targetRootPath -GitExecutable $GitExecutable `
             -ProtectedPathPrefixes $activeWorktreeProtectedClaudeFamilyPaths `
             -SharedExcludeProtectedPathPrefixes $repositoryProtectedClaudeFamilyPaths
+        if($null-ne$script:ProjectPublicationContext-and$null-ne$remediationTransaction){
+            $script:ProjectPublicationContext.Remediation=$remediationTransaction
+            Save-ProjectPublicationJournal $script:ProjectPublicationContext
+        }
     }
     if ($null -ne $remediationTransaction) {
         if (@($remediationTransaction.Paths).Count -gt 0) {
@@ -5828,7 +6005,7 @@ try {
             if(-not(Test-IsProtectedClaudeFamilyPath -Path ([string]$path) -ProtectedPaths $targetMutationProtectedClaudeFamilyPaths)){[void]$script:ProjectPublicationPaths.Add([string]$path)}
         }
         [void]$script:ProjectPublicationPaths.Add($manifestRelativePath)
-        $script:ProjectPublicationContext = New-ProjectPublicationContext -Repository $targetRootPath
+        if($null-eq$script:ProjectPublicationContext){throw 'Project publication context was not prepared before remediation.'}
     }
 
     try {
@@ -6083,6 +6260,7 @@ try {
     }
     catch {
         $mutationError = $_
+        if($null-ne$script:ProjectPublicationContext){throw $mutationError}
         $rollbackErrors = New-Object System.Collections.Generic.List[string]
         if ($null -ne $script:ProjectPublicationContext) {
             try {
@@ -6160,6 +6338,7 @@ try {
     }
     catch {
         $finalizationError = $_
+        if($null-ne$script:ProjectPublicationContext){throw $finalizationError}
         $rollbackErrors = New-Object System.Collections.Generic.List[string]
         if ($null -ne $script:ProjectPublicationContext) {
             try {
@@ -6201,12 +6380,21 @@ try {
 }
 catch {
     $syncError = $_
-    if ($null -ne $remediationTransaction -and -not [bool]$remediationTransaction.RollbackAttempted) {
-        try { Restore-AgentArtifactRemediation -Transaction $remediationTransaction }
-        catch {
-            throw "AI instruction sync failed after Agent artifact remediation: $($syncError.Exception.Message) $($_.Exception.Message)"
+    # P9C_TEST_HOOK: before in-process project publication recovery.
+    if($null-ne$script:ProjectPublicationContext){
+        try{
+            $action=Resolve-ActiveProjectPublicationFailure -Context $script:ProjectPublicationContext -RemediationTransaction $remediationTransaction
+            $script:ProjectPublicationFailureResolutionHandled=$true
+            $script:ProjectPublicationContext=$null;$script:ProjectPublicationPaths.Clear()
+            if($null-ne(Get-AiInstructionsRefusalCode $syncError)){throw $syncError}
+            throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Project publication failed and completed $action according to the durable journal: $($syncError.Exception.Message)" -InnerException $syncError.Exception)
+        }catch{
+            $script:ProjectPublicationFailureResolutionHandled=$true
+            $script:ProjectPublicationContext=$null;$script:ProjectPublicationPaths.Clear()
+            throw
         }
     }
+    Restore-LegacyAgentArtifactRemediation -Transaction $remediationTransaction -FailurePrefix "AI instruction sync failed after Agent artifact remediation: $($syncError.Exception.Message)"
     throw $syncError
 }
 finally {
@@ -6228,11 +6416,12 @@ finally {
 }
 catch {
     $bootstrapError = $_
-    if ($null -ne $remediationTransaction -and -not [bool]$remediationTransaction.RollbackAttempted) {
-        try { Restore-AgentArtifactRemediation -Transaction $remediationTransaction }
-        catch {
-            throw "AI instruction bootstrap failed after Agent artifact remediation: $($bootstrapError.Exception.Message) $($_.Exception.Message)"
-        }
+    if(-not$script:ProjectPublicationFailureResolutionHandled-and$null-ne$script:ProjectPublicationContext){
+        try{Resolve-ActiveProjectPublicationFailure -Context $script:ProjectPublicationContext -RemediationTransaction $remediationTransaction|Out-Null;$script:ProjectPublicationFailureResolutionHandled=$true;$script:ProjectPublicationContext=$null;$script:ProjectPublicationPaths.Clear()}
+        catch{$script:ProjectPublicationFailureResolutionHandled=$true;$script:ProjectPublicationContext=$null;$script:ProjectPublicationPaths.Clear();throw}
+    }
+    elseif (-not$script:ProjectPublicationFailureResolutionHandled) {
+        Restore-LegacyAgentArtifactRemediation -Transaction $remediationTransaction -FailurePrefix "AI instruction bootstrap failed after Agent artifact remediation: $($bootstrapError.Exception.Message)"
     }
     throw $bootstrapError
 }

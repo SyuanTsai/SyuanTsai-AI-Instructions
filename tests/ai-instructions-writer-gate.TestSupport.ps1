@@ -115,7 +115,7 @@ function Set-P9bJson {
 }
 
 function New-P9bInstructionArchive {
-    param([Parameter(Mandatory=$true)][string]$WorkingRoot,[Parameter(Mandatory=$true)][string]$ArchivePath,[string]$Marker='baseline',[string]$RendererMarker,[switch]$OmitClaudeDatabase)
+    param([Parameter(Mandatory=$true)][string]$WorkingRoot,[Parameter(Mandatory=$true)][string]$ArchivePath,[string]$Marker='baseline',[string]$RendererMarker,[switch]$OmitClaudeDatabase,[switch]$OmitCodexTesting)
     $sourceRoot=Join-Path $WorkingRoot 'p9b-instructions'
     Remove-Item -LiteralPath $WorkingRoot -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $ArchivePath -Force -ErrorAction SilentlyContinue
@@ -131,6 +131,7 @@ function New-P9bInstructionArchive {
         }
     }
     if($OmitClaudeDatabase){Remove-Item -LiteralPath (Join-Path $sourceRoot '.claude/AI-Rules/Database.en.md') -Force}
+    if($OmitCodexTesting){Remove-Item -LiteralPath (Join-Path $sourceRoot '.codex/AI-Rules/Testing.en.md') -Force}
     Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Build-AiInstructions.ps1') -Destination (Join-Path $sourceRoot 'scripts/Build-AiInstructions.ps1')
     if(-not[string]::IsNullOrWhiteSpace($RendererMarker)){
         [IO.File]::AppendAllText((Join-Path $sourceRoot 'scripts/Build-AiInstructions.ps1'),"`n# $RendererMarker`n",[Text.UTF8Encoding]::new($false))
@@ -309,7 +310,8 @@ function New-P9cProjectFixture {
 function New-P9cProjectPublicationFailpointBootstrap {
     param(
         [Parameter(Mandatory=$true)][string]$Root,
-        [Parameter(Mandatory=$true)][ValidateSet('BeforeCommit','AfterCommitted','CleanupFailure')][string]$Failpoint
+        [Parameter(Mandatory=$true)][ValidateSet('BeforeCommit','ApplyingFailure','CommitWriteFailure','AfterCommitted','CleanupFailure','RecoveryOnly')][string]$Failpoint,
+        [ValidateSet('InProcess','NextRun')][string]$RecoveryPath='InProcess'
     )
     $scriptRoot=Join-Path $Root 'scripts'
     Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts') -Destination $scriptRoot -Recurse
@@ -317,13 +319,48 @@ function New-P9cProjectPublicationFailpointBootstrap {
     $text=[IO.File]::ReadAllText($bootstrapPath)
     $marker=switch($Failpoint){
         'BeforeCommit'{'    # P9C_TEST_HOOK: before project publication commit decision.'}
+        'ApplyingFailure'{'    # P9C_TEST_HOOK: before project publication commit decision.'}
+        'CommitWriteFailure'{'        # P9C_TEST_HOOK: during project publication commit decision write.'}
         'AfterCommitted'{'    # P9C_TEST_HOOK: after project publication commit decision.'}
         'CleanupFailure'{'    # P9C_TEST_HOOK: before project publication evidence cleanup.'}
+        'RecoveryOnly'{'            # P9C_TEST_HOOK: after project publication recovery.'}
     }
     if(-not$text.Contains($marker)){throw "Project publication $Failpoint test seam was not found."}
-    $injection="    throw 'Injected project publication $Failpoint failure.'`r`n$marker"
-    [IO.File]::WriteAllText($bootstrapPath,$text.Replace($marker,$injection),[Text.UTF8Encoding]::new($false))
+    $indent=$marker.Substring(0,$marker.IndexOf('#'))
+    $failure="throw 'Injected project publication $Failpoint failure.'"
+    $injection="$indent$failure`r`n$marker"
+    $text=$text.Replace($marker,$injection)
+    if($RecoveryPath-ceq'NextRun'){
+        $catchMarker='    # P9C_TEST_HOOK: before in-process project publication recovery.'
+        if(-not$text.Contains($catchMarker)){throw 'Project publication next-run recovery seam was not found.'}
+        $skip="    `$script:ProjectPublicationFailureResolutionHandled=`$true`r`n    `$script:ProjectPublicationContext=`$null`r`n    throw `$syncError`r`n$catchMarker"
+        $text=$text.Replace($catchMarker,$skip)
+    }
+    [IO.File]::WriteAllText($bootstrapPath,$text,[Text.UTF8Encoding]::new($false))
     return $bootstrapPath
+}
+
+function Get-P9cPublicationStateSnapshot {
+    param([Parameter(Mandatory=$true)][string]$Repository)
+    $manifestPath=Join-Path $Repository '.codex/ai-instructions.manifest.json'
+    $manifest=if(Test-Path -LiteralPath $manifestPath -PathType Leaf){Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json}else{$null}
+    $indexPath=(& git -C $Repository rev-parse --git-path index|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($indexPath)){$indexPath=Join-Path $Repository $indexPath}
+    $excludePath=(& git -C $Repository rev-parse --git-path info/exclude|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($excludePath)){$excludePath=Join-Path $Repository $excludePath}
+    $fileRows=@(
+        foreach($entry in @($manifest.files|Where-Object{[string]$_.artifactType-cin@('instruction','skill')}|Sort-Object targetPath)){
+            $path=Join-Path $Repository ([string]$entry.targetPath)
+            "$([string]$entry.targetPath)`t$(if(Test-Path -LiteralPath $path -PathType Leaf){(Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()}else{'absent'})"
+        }
+    )
+    $status=(@(& git -C $Repository status --porcelain=v1 --untracked-files=all)-join"`n")
+    return ([ordered]@{
+        head=((& git -C $Repository rev-parse HEAD|Select-Object -First 1).Trim())
+        index=(Get-FileHash -Algorithm SHA256 -LiteralPath $indexPath).Hash.ToLowerInvariant()
+        status=$status
+        exclude=if(Test-Path -LiteralPath $excludePath -PathType Leaf){[Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))}else{'absent'}
+        manifest=if($null-ne$manifest){[Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath))}else{'absent'}
+        files=$fileRows
+    }|ConvertTo-Json -Depth 6 -Compress)
 }
 
 function New-P9cPreManifestTamperBootstrap {

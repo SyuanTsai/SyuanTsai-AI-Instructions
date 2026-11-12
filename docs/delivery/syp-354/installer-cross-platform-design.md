@@ -88,6 +88,8 @@ Directory fd 防止後續操作被換成 symlink 而重新導向，但不能阻�
 
 鎖檔必須是固定 inode 的普通單 link 檔案；正常 release 只 unlock/close，不 unlink 後重建，否則新舊 inode 可各自持鎖。lock receipt 記錄 primitive、owner PID/start、transaction ID，PID 僅作診斷，不用 PID 判定後強拆活鎖。Git `index.lock` 是例外：它是 Git 自有 create-only presence protocol，應用 `O_EXCL` 保留該協定，不能以 flock 取代。
 
+Project publication transaction 只以從磁碟讀回的 journal 狀態作為 commit／rollback 的事實來源，程序內 catch 與下一次執行的 recovery 必須共用同一個決策函式。`applying`（以及尚未形成可讀 journal 的已知本次交易）執行完整反向 rollback；`committed` 一律只往前完成 evidence cleanup，包含 tracked-artifact remediation 在內都不得回滾。寫入 committed 標記失敗時必須重新讀回磁碟狀態後套用相同決策；讀不到、無法驗證或狀態不明時保留 evidence 並以 typed refusal fail closed，不得依程序內旗標推測。Committed cleanup 失敗也保留 committed journal，供下一次執行繼續清理。
+
 既有鎖順序需在接線前依 caller graph 固定：updater 先 update lock 再 install-state lock，交 installer 前釋放後由 installer重驗；runtime user 持 shared install lease，涉及 USER Skills 時再取 user global lock。REPO 路線將 USER migration lock、repository operation lock、index.lock 的取得順序收斂為單一順序並測試；不增加任何反向 acquisition。多 root projection 以同一 USER coordinator lock／journal 管理，不因 `CODEX_HOME` 不同而各自寫共用 Skills。
 
 S3 對接：`Invoke-StandardValidation.ps1` 與 `Invoke-PesterShardProcess.ps1` 使用所有 R primitives，移除 duplicated Job／Unix containment；`Invoke-StandardAuthorityGate.ps1` 使用安全 temporary roots、runtime/tool/Pester receipts 及 process API。`Resolve-StandardValidationTool.ps1` 的安全工具 closure、launcher 與 Pester preparation 也要委派共用模組。不能只移植最外層三支 runner 而保留底層 Windows-only gate。

@@ -585,61 +585,134 @@ exit /b %errorlevel%
         (Get-P9bRepoSnapshot $target)|Should Be $before
     }
 
-    # Scenario: The process stops before the commit decision, after the committed journal publication, or because committed evidence cleanup fails.
-    # Purpose: Recover applying work by rolling back the complete mutation set, recover committed work by cleanup only, and keep Instructions, Skills, manifest, and exclude mutually consistent.
-    It 'InterT140_recovers_project_publication_<Case>_with_a_consistent_complete_state' -TestCases @(
-        @{Case='before-commit';Failpoint='BeforeCommit';ExpectedPhase='applying'},
-        @{Case='after-committed';Failpoint='AfterCommitted';ExpectedPhase='committed'},
-        @{Case='cleanup-failure';Failpoint='CleanupFailure';ExpectedPhase='committed'}
+    Context 'P9c fix4 project publication transaction' {
+    BeforeAll {
+        $script:P9cFix4Root=Join-Path $script:ExternalRoot 'p9c-publication-matrix';New-Item -ItemType Directory -Force -Path $script:P9cFix4Root|Out-Null
+        $script:P9cFix4Baseline=New-P9bInstructionArchive -WorkingRoot (Join-Path $script:P9cFix4Root 'baseline-work') -ArchivePath (Join-Path $script:P9cFix4Root 'baseline.zip') -Marker baseline
+        $script:P9cFix4Changed=New-P9bInstructionArchive -WorkingRoot (Join-Path $script:P9cFix4Root 'changed-work') -ArchivePath (Join-Path $script:P9cFix4Root 'changed.zip') -Marker changed
+        $initialFiles=@{'work-with-jira'=@{'resources/state.txt'="jira old`n"};'manage-task-handoff'=@{'resources/state.txt'="handoff old`n"}}
+        $updatedFiles=@{'work-with-jira'=@{'resources/state.txt'="jira new`n";'resources/added.txt'="jira added`n"};'manage-task-handoff'=@{'resources/state.txt'="handoff new`n";'resources/added.txt'="handoff added`n"}}
+        $script:P9cFix4Initial=New-P9cProjectFixture -Root (Join-Path $script:P9cFix4Root 'initial') -ProjectionIds @('project-agents') -AdditionalSkillFiles $initialFiles
+        $script:P9cFix4Updated=New-P9cProjectFixture -Root (Join-Path $script:P9cFix4Root 'updated') -ProjectionIds @('project-agents') -AdditionalSkillFiles $updatedFiles
+        $script:P9cFix4Seeds=@{}
+        foreach($withRemediation in @($false,$true)){
+            $seed=Join-Path $script:P9cFix4Root ("seed-$withRemediation");New-P9bTargetRepository $seed
+            (Invoke-P9bRepoBootstrap -Context $script:P9cFix4Initial.Context -ArchivePath $script:P9cFix4Baseline.ArchivePath -TargetRoot $seed).ExitCode|Should -Be 0
+            if($withRemediation){& git -C $seed add -f -- AGENTS.md;& git -C $seed commit --quiet -m 'tracked Agent artifact fixture';$LASTEXITCODE|Should -Be 0}
+            $script:P9cFix4Seeds[[string]$withRemediation]=$seed
+        }
+    }
+    # Scenario: Remediation is either absent or applied before each applying, commit-write, committed, and cleanup interruption, exercised both by the in-process catch and next-run recovery.
+    # Purpose: Make the single disk-journal decision restore or retain HEAD, index, exclude, manifest, Instructions, and Skill payload as one consistent transaction on both recovery paths.
+    It 'InterT140_recovers_project_publication_<Case>_with_remediation_<Remediation>_through_both_paths' -TestCases @(
+        @{Case='applying';Failpoint='ApplyingFailure';ExpectedPhase='applying';ExpectedAction='rollback-all';Remediation=$false},
+        @{Case='commit-write';Failpoint='CommitWriteFailure';ExpectedPhase='applying';ExpectedAction='rollback-all';Remediation=$false},
+        @{Case='after-committed';Failpoint='AfterCommitted';ExpectedPhase='committed';ExpectedAction='roll-forward-cleanup';Remediation=$false},
+        @{Case='cleanup-failure';Failpoint='CleanupFailure';ExpectedPhase='committed';ExpectedAction='roll-forward-cleanup';Remediation=$false},
+        @{Case='applying';Failpoint='ApplyingFailure';ExpectedPhase='applying';ExpectedAction='rollback-all';Remediation=$true},
+        @{Case='commit-write';Failpoint='CommitWriteFailure';ExpectedPhase='applying';ExpectedAction='rollback-all';Remediation=$true},
+        @{Case='after-committed';Failpoint='AfterCommitted';ExpectedPhase='committed';ExpectedAction='roll-forward-cleanup';Remediation=$true},
+        @{Case='cleanup-failure';Failpoint='CleanupFailure';ExpectedPhase='committed';ExpectedAction='roll-forward-cleanup';Remediation=$true}
     ) {
-        param($Case,$Failpoint,$ExpectedPhase)
-        $root=Join-Path $script:ExternalRoot "p9c-publication-$Case";New-Item -ItemType Directory -Force -Path $root|Out-Null
+        param($Case,$Failpoint,$ExpectedPhase,$ExpectedAction,$Remediation)
+        $root=Join-Path $script:P9cFix4Root "case-$Case-$Remediation";New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $updated=$script:P9cFix4Updated;$changed=$script:P9cFix4Changed
+        foreach($recoveryPath in @('InProcess','NextRun')){
+            $target=Join-Path $root ("target-"+$recoveryPath.ToLowerInvariant())
+            Copy-Item -LiteralPath $script:P9cFix4Seeds[[string]([bool]$Remediation)] -Destination $target -Recurse
+            $before=Get-P9cPublicationStateSnapshot $target
+            $failpointBootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $root "failpoint-$recoveryPath") -Failpoint $Failpoint -RecoveryPath $recoveryPath
+
+            $failed=Invoke-P9bRepoBootstrap -Context $updated.Context -ArchivePath $changed.ArchivePath -TargetRoot $target -BootstrapPath $failpointBootstrap
+
+            $failed.ExitCode|Should -Not -Be 0
+            if($recoveryPath-ceq'NextRun'){
+                $transactions=@(Get-ChildItem -LiteralPath (Join-Path $target '.ai-instructions-txn') -Directory -Force)
+                $transactions.Count|Should -Be 1
+                $journal=Get-Content -Raw -LiteralPath (Join-Path $transactions[0].FullName 'journal.json')|ConvertFrom-Json
+                [string]$journal.phase|Should -Be $ExpectedPhase
+                @($journal.operations|Where-Object{[string]$_.targetKind-ceq'repository'-and[string]$_.targetPath-ceq'AGENTS.md'}).Count|Should -Be 1
+                @($journal.operations|Where-Object{[string]$_.targetKind-ceq'repository'-and[string]$_.targetPath-ceq'.codex/ai-instructions.manifest.json'}).Count|Should -Be 1
+                @($journal.operations|Where-Object{[string]$_.targetKind-ceq'repository'-and[string]$_.targetPath-like'*/resources/state.txt'}).Count|Should -Be 2
+                @($journal.operations|Where-Object{[string]$_.targetKind-ceq'git-exclude'}).Count|Should -Be 1
+                ($null-ne$journal.remediation)|Should -Be $Remediation
+                $recoveryOnly=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $root "recovery-$recoveryPath") -Failpoint RecoveryOnly
+                (Invoke-P9bRepoBootstrap -Context $updated.Context -ArchivePath $changed.ArchivePath -TargetRoot $target -BootstrapPath $recoveryOnly).ExitCode|Should -Not -Be 0
+            }else{
+                (Get-AiInstructionsRefusalCode $failed.Output)|Should -Be interrupted-install
+            }
+
+            @(Get-ChildItem -Force -LiteralPath (Join-Path $target '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should -Be 0
+            $afterDecision=Get-P9cPublicationStateSnapshot $target
+            if($ExpectedAction-ceq'rollback-all'){
+                $afterDecision|Should -Be $before
+            }else{
+                $afterDecision|Should -Not -Be $before
+                [IO.File]::ReadAllText((Join-Path $target 'AGENTS.md'))|Should -Match '<!-- changed -->'
+                Test-Path -LiteralPath (Join-Path $target '.agents/skills/work-with-jira/resources/added.txt') -PathType Leaf|Should -Be $true
+                $beforeState=$before|ConvertFrom-Json;$afterState=$afterDecision|ConvertFrom-Json
+                if($Remediation){$afterState.head|Should -Not -Be $beforeState.head}else{$afterState.head|Should -Be $beforeState.head}
+            }
+
+            if($recoveryPath-ceq'NextRun'){continue}
+            $recovered=Invoke-P9bRepoBootstrap -Context $updated.Context -ArchivePath $changed.ArchivePath -TargetRoot $target
+            if($recovered.ExitCode-ne0){throw "Project publication retry failed for $Case/$Remediation/$recoveryPath`: $($recovered.Output)"}
+            $manifestPath=Join-Path $target '.codex/ai-instructions.manifest.json';$manifest=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+            [IO.File]::ReadAllText((Join-Path $target 'AGENTS.md'))|Should -Match '<!-- changed -->'
+            $agentsEntry=@($manifest.files|Where-Object{[string]$_.targetPath-ceq'AGENTS.md'})[0]
+            (Get-P9bNormalizedSha256 (Join-Path $target 'AGENTS.md'))|Should -Be ([string]$agentsEntry.sha256)
+            $skillEntries=@($manifest.files|Where-Object{[string]$_.artifactType-ceq'skill'})
+            @($skillEntries|Where-Object{[string]$_.targetPath-like'*/resources/added.txt'}).Count|Should -Be 2
+            foreach($entry in $skillEntries){(Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $target ([string]$entry.targetPath))).Hash.ToLowerInvariant()|Should -Be ([string]$entry.sha256)}
+            $exclude=[IO.File]::ReadAllText((Join-Path $target '.git/info/exclude'))
+            foreach($path in @($manifest.files.targetPath)+@('.codex/ai-instructions.manifest.json')){$exclude|Should -Match ("(?m)^/"+[regex]::Escape([string]$path)+"`r?$")}
+            $beforeRepeat=Get-P9cPublicationStateSnapshot $target
+            (Invoke-P9bRepoBootstrap -Context $updated.Context -ArchivePath $changed.ArchivePath -TargetRoot $target).ExitCode|Should -Be 0
+            (Get-P9cPublicationStateSnapshot $target)|Should -Be $beforeRepeat
+        }
+    }
+
+    # Scenario: Disk journal readback reports missing, applying, committed, or indeterminate state after a commit-write attempt.
+    # Purpose: Keep the shared decision function exhaustive and fail closed instead of allowing either caller to infer an unknown commit result.
+    It 'UnitT141_maps_only_durable_project_journal_states_to_recovery_actions' {
+        $tokens=$null;$errors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'),[ref]$tokens,[ref]$errors)
+        @($errors).Count|Should -Be 0
+        $definition=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Resolve-ProjectPublicationRecoveryAction'},$true))[0]
+        $definition|Should -Not -BeNullOrEmpty
+        Invoke-Expression $definition.Extent.Text
+        Resolve-ProjectPublicationRecoveryAction ([pscustomobject]@{status='missing';journal=$null})|Should -Be rollback-all
+        Resolve-ProjectPublicationRecoveryAction ([pscustomobject]@{status='valid';journal=[pscustomobject]@{phase='applying'}})|Should -Be rollback-all
+        Resolve-ProjectPublicationRecoveryAction ([pscustomobject]@{status='valid';journal=[pscustomobject]@{phase='committed'}})|Should -Be roll-forward-cleanup
+        Resolve-ProjectPublicationRecoveryAction ([pscustomobject]@{status='indeterminate';journal=$null})|Should -Be fail-closed
+    }
+
+    }
+    Context 'P9c fix4 raw publication CAS' {
+    # Scenario: A project-projection transaction encounters a semantically current Instruction encoded with CRLF or UTF-8 BOM while updating or retiring it.
+    # Purpose: Keep normalized hashes for ownership semantics while using raw bytes exclusively for journal publication and rollback CAS.
+    It 'InterT142_updates_or_removes_<Format>_managed_Instructions_with_raw_CAS_<Action>' -TestCases @(
+        @{Format='CRLF';Action='update'},@{Format='BOM';Action='update'},
+        @{Format='CRLF';Action='remove'},@{Format='BOM';Action='remove'}
+    ) {
+        param($Format,$Action)
+        $root=Join-Path $script:ExternalRoot "p9c-raw-cas-$Format-$Action";New-Item -ItemType Directory -Force -Path $root|Out-Null
         $baseline=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'baseline-work') -ArchivePath (Join-Path $root 'baseline.zip') -Marker baseline
-        $changed=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'changed-work') -ArchivePath (Join-Path $root 'changed.zip') -Marker changed
-        $initialFiles=@{
-            'work-with-jira'=@{'resources/state.txt'="jira old`n"}
-            'manage-task-handoff'=@{'resources/state.txt'="handoff old`n"}
-        }
-        $updatedFiles=@{
-            'work-with-jira'=@{'resources/state.txt'="jira new`n";'resources/added.txt'="jira added`n"}
-            'manage-task-handoff'=@{'resources/state.txt'="handoff new`n";'resources/added.txt'="handoff added`n"}
-        }
-        $initial=New-P9cProjectFixture -Root (Join-Path $root 'initial') -ProjectionIds @('project-agents') -AdditionalSkillFiles $initialFiles
-        $updated=New-P9cProjectFixture -Root (Join-Path $root 'updated') -ProjectionIds @('project-agents') -AdditionalSkillFiles $updatedFiles
+        $changed=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'changed-work') -ArchivePath (Join-Path $root 'changed.zip') -Marker changed -OmitCodexTesting:($Action-ceq'remove')
+        $fixture=New-P9cProjectFixture -Root $root -ProjectionIds @('project-agents')
         $target=Join-Path $root 'target';New-P9bTargetRepository $target
-        (Invoke-P9bRepoBootstrap -Context $initial.Context -ArchivePath $baseline.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
-        $before=Get-P9bRepoSnapshot $target
-        $failpointBootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $root 'failpoint-runtime') -Failpoint $Failpoint
-
-        $failed=Invoke-P9bRepoBootstrap -Context $updated.Context -ArchivePath $changed.ArchivePath -TargetRoot $target -BootstrapPath $failpointBootstrap
-
-        $failed.ExitCode|Should Not Be 0
-        $transactions=@(Get-ChildItem -LiteralPath (Join-Path $target '.ai-instructions-txn') -Directory -Force)
-        $transactions.Count|Should Be 1
-        $journal=Get-Content -Raw -LiteralPath (Join-Path $transactions[0].FullName 'journal.json')|ConvertFrom-Json
-        [string]$journal.phase|Should Be $ExpectedPhase
-        @($journal.operations|Where-Object{[string]$_.targetKind-ceq'repository'-and[string]$_.targetPath-ceq'AGENTS.md'}).Count|Should Be 1
-        @($journal.operations|Where-Object{[string]$_.targetKind-ceq'repository'-and[string]$_.targetPath-ceq'.codex/ai-instructions.manifest.json'}).Count|Should Be 1
-        @($journal.operations|Where-Object{[string]$_.targetKind-ceq'repository'-and[string]$_.targetPath-like'*/resources/state.txt'}).Count|Should Be 2
-        @($journal.operations|Where-Object{[string]$_.targetKind-ceq'git-exclude'}).Count|Should Be 1
-
-        $recovered=Invoke-P9bRepoBootstrap -Context $updated.Context -ArchivePath $changed.ArchivePath -TargetRoot $target
-
-        if($recovered.ExitCode-ne0){throw "Project publication recovery failed for $Case`: $($recovered.Output)"}
+        (Invoke-P9bRepoBootstrap -Context $fixture.Context -ArchivePath $baseline.ArchivePath -TargetRoot $target).ExitCode|Should -Be 0
         $manifestPath=Join-Path $target '.codex/ai-instructions.manifest.json';$manifest=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
-        [IO.File]::ReadAllText((Join-Path $target 'AGENTS.md'))|Should Match '<!-- changed -->'
-        $agentsEntry=@($manifest.files|Where-Object{[string]$_.targetPath-ceq'AGENTS.md'})[0]
-        (Get-P9bNormalizedSha256 (Join-Path $target 'AGENTS.md'))|Should Be ([string]$agentsEntry.sha256)
-        $skillEntries=@($manifest.files|Where-Object{[string]$_.artifactType-ceq'skill'})
-        @($skillEntries|Where-Object{[string]$_.targetPath-like'*/resources/added.txt'}).Count|Should Be 2
-        foreach($entry in $skillEntries){(Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $target ([string]$entry.targetPath))).Hash.ToLowerInvariant()|Should Be ([string]$entry.sha256)}
-        $exclude=[IO.File]::ReadAllText((Join-Path $target '.git/info/exclude'))
-        foreach($path in @($manifest.files.targetPath)+@('.codex/ai-instructions.manifest.json')){$exclude|Should Match ("(?m)^/"+[regex]::Escape([string]$path)+"`r?$")}
-        @(Get-ChildItem -Force -LiteralPath (Join-Path $target '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0
-        (Get-P9bRepoSnapshot $target)|Should Not Be $before
-        $beforeRepeat=Get-P9bRepoSnapshot $target
-        (Invoke-P9bRepoBootstrap -Context $updated.Context -ArchivePath $changed.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
-        (Get-P9bRepoSnapshot $target)|Should Be $beforeRepeat
+        $targetPath=if($Action-ceq'update'){'AGENTS.md'}else{'.codex/AI-Rules/Testing.en.md'}
+        $path=Join-Path $target $targetPath;$text=[IO.File]::ReadAllText($path).Replace("`r`n","`n").Replace("`r","`n")
+        $body=[Text.UTF8Encoding]::new($false).GetBytes($(if($Format-ceq'CRLF'){$text.Replace("`n","`r`n")}else{$text}))
+        $bytes=if($Format-ceq'BOM'){[byte[]](@(0xEF,0xBB,0xBF)+@($body))}else{$body};[IO.File]::WriteAllBytes($path,$bytes)
+
+        $result=Invoke-P9bRepoBootstrap -Context $fixture.Context -ArchivePath $changed.ArchivePath -TargetRoot $target
+
+        if($result.ExitCode-ne0){throw "Raw CAS $Format/$Action failed: $($result.Output)"}
+        if($Action-ceq'update'){[IO.File]::ReadAllText($path)|Should -Match '<!-- changed -->'}else{Test-Path -LiteralPath $path|Should -Be $false}
+    }
     }
 
     # Scenario: The stable launcher has opened a verified closure file with its read-only sharing contract.
