@@ -5065,11 +5065,18 @@ function Invoke-RepositoryTransactionOperation {
 
 function Copy-RepositoryInstallJournal {
     param([Parameter(Mandatory=$true)][object]$Journal,[string]$Phase,[Nullable[long]]$Sequence)
-    $parameters=@{InputObject=($Journal|ConvertTo-Json -Depth 30);ErrorAction='Stop'}
-    if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'}
-    $copy=ConvertFrom-Json @parameters
+    $document=[ordered]@{}
+    foreach($property in @($Journal.PSObject.Properties)){$document[$property.Name]=if($property.Name-ceq'operations'){@($property.Value)}else{$property.Value}}
+    $copy=[pscustomobject]$document
     if(-not[string]::IsNullOrEmpty($Phase)){$copy.phase=$Phase}
-    if($null-ne$Sequence){@($copy.operations|Where-Object{[int64]$_.sequence-eq[int64]$Sequence})[0].state='applied'}
+    if($null-ne$Sequence){
+        $sequenceValue=[int64]$Sequence;$operationIndex=-1
+        for($index=0;$index-lt$copy.operations.Count;$index++){if([int64]$copy.operations[$index].sequence-eq$sequenceValue){$operationIndex=$index;break}}
+        if($operationIndex-lt0){throw "Repository transaction operation sequence $sequenceValue was not found."}
+        $operationDocument=[ordered]@{}
+        foreach($property in @($copy.operations[$operationIndex].PSObject.Properties)){$operationDocument[$property.Name]=if($property.Name-ceq'state'){'applied'}else{$property.Value}}
+        $copy.operations[$operationIndex]=[pscustomobject]$operationDocument
+    }
     return $copy
 }
 
