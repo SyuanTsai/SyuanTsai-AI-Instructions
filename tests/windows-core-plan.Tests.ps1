@@ -407,8 +407,8 @@ Describe 'Windows Core full planner and aggregate' {
     It 'UnitT107_rejects_aggregate_evidence_<Mutation>' -TestCases @(
         @{ Mutation='missing-summary'; Keyword='shard summaries' },
         @{ Mutation='duplicate-summary'; Keyword='shard summaries' },
-        @{ Mutation='extra-test-file'; Keyword='receipt paths differs' },
-        @{ Mutation='duplicate-test-file'; Keyword='receipt paths differs' },
+        @{ Mutation='extra-test-file'; Keyword='testFiles differs from the independently calculated plan' },
+        @{ Mutation='duplicate-test-file'; Keyword='testFiles contains duplicate values' },
         @{ Mutation='failed-count'; Keyword='FailedCount must be zero' },
         @{ Mutation='replaced-skip'; Keyword='skippedTests differs' },
         @{ Mutation='plan-artifact'; Keyword='canonical JSON differs' },
@@ -429,12 +429,17 @@ Describe 'Windows Core full planner and aggregate' {
             }
             'extra-test-file' {
                 $summary = Get-Content -Raw -Encoding UTF8 -LiteralPath $summaryFiles[0].FullName | ConvertFrom-Json
-                $summary.testFiles = [object[]]@($summary.testFiles) + @('C:/repo/tests/extra.Tests.ps1')
+                $extraPath = Join-Path $script:WindowsCoreRepositoryRoot 'tests/extra.Tests.ps1'
+                $summary.testFiles = [object[]]@($summary.testFiles) + @($extraPath)
+                $summary.shards[0].paths = [object[]]@($summary.shards[0].paths) + @($extraPath)
                 Set-WindowsCoreTestText $summaryFiles[0].FullName ($summary | ConvertTo-Json -Depth 12)
             }
             'duplicate-test-file' {
                 $summary = Get-Content -Raw -Encoding UTF8 -LiteralPath $summaryFiles[0].FullName | ConvertFrom-Json
-                $summary.testFiles = [object[]]@($summary.testFiles) + @($summary.testFiles[0])
+                $duplicateLeaf = [IO.Path]::GetFileName([string]$summary.testFiles[0])
+                $duplicatePath = Join-Path $script:WindowsCoreRepositoryRoot "tests/alternate/$duplicateLeaf"
+                $summary.testFiles = [object[]]@($summary.testFiles) + @($duplicatePath)
+                $summary.shards[0].paths = [object[]]@($summary.shards[0].paths) + @($duplicatePath)
                 Set-WindowsCoreTestText $summaryFiles[0].FullName ($summary | ConvertTo-Json -Depth 12)
             }
             'failed-count' {
