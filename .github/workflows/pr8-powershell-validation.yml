@@ -120,7 +120,7 @@ jobs:
             ${{ runner.temp }}/windows-core/plan.json
             ${{ runner.temp }}/windows-core/plan.sha256
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 30
           overwrite: true
 
   authority:
@@ -444,7 +444,7 @@ jobs:
             ${{ runner.temp }}/pester-shard-*.stdout.log
             ${{ runner.temp }}/pester-shard-*.stderr.log
           if-no-files-found: warn
-          retention-days: 1
+          retention-days: 30
           overwrite: true
 
   fixtures:

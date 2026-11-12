@@ -348,6 +348,143 @@ Describe 'Agent Skill authority workflow contract' {
             Assert-WorkflowMatchesGolden -WorkflowText $WorkflowText -GoldenText $script:WindowsInstallSmokeWorkflowGolden -Context 'Windows Install Smoke workflow'
         }
 
+        function Get-GitHubArtifactWorkflowStructure {
+            param([Parameter(Mandatory = $true)][string] $WorkflowText)
+
+            $lines = (ConvertTo-WorkflowLf $WorkflowText).Split([string[]]@("`n"), [StringSplitOptions]::None)
+            $jobsIndex = @(
+                for ($index = 0; $index -lt $lines.Count; $index++) {
+                    if ($lines[$index] -ceq 'jobs:') { $index }
+                }
+            )
+            if ($jobsIndex.Count -ne 1) { throw "Expected exactly one top-level jobs mapping; found $($jobsIndex.Count)." }
+
+            $jobStarts = @(
+                for ($index = $jobsIndex[0] + 1; $index -lt $lines.Count; $index++) {
+                    if ($lines[$index] -match '^  (?<id>[a-zA-Z0-9][a-zA-Z0-9_-]*):\s*$') {
+                        [pscustomobject]@{ Id = [string]$Matches['id']; LineIndex = $index }
+                    }
+                }
+            )
+            if ($jobStarts.Count -eq 0) { throw 'The workflow jobs mapping contains no jobs.' }
+
+            $uploads = @()
+            $downloads = @()
+            for ($jobIndex = 0; $jobIndex -lt $jobStarts.Count; $jobIndex++) {
+                $job = $jobStarts[$jobIndex]
+                $jobEnd = if ($jobIndex + 1 -lt $jobStarts.Count) { $jobStarts[$jobIndex + 1].LineIndex } else { $lines.Count }
+                $stepsIndexes = @(
+                    for ($index = $job.LineIndex + 1; $index -lt $jobEnd; $index++) {
+                        if ($lines[$index] -ceq '    steps:') { $index }
+                    }
+                )
+                if ($stepsIndexes.Count -ne 1) { throw "Job '$($job.Id)' must contain exactly one steps sequence; found $($stepsIndexes.Count)." }
+
+                $stepStarts = @(
+                    for ($index = $stepsIndexes[0] + 1; $index -lt $jobEnd; $index++) {
+                        if ($lines[$index] -match '^      - (?<key>[a-zA-Z0-9_-]+):\s*(?<value>.*)$') {
+                            [pscustomobject]@{ LineIndex = $index; Key = [string]$Matches['key']; Value = [string]$Matches['value'] }
+                        }
+                    }
+                )
+                for ($stepIndex = 0; $stepIndex -lt $stepStarts.Count; $stepIndex++) {
+                    $step = $stepStarts[$stepIndex]
+                    $stepEnd = if ($stepIndex + 1 -lt $stepStarts.Count) { $stepStarts[$stepIndex + 1].LineIndex } else { $jobEnd }
+                    $stepName = if ($step.Key -ceq 'name') { $step.Value } else { $null }
+                    $uses = if ($step.Key -ceq 'uses') { $step.Value } else { $null }
+                    $with = [ordered]@{}
+                    $withLineIndexes = @{}
+                    $insideWith = $false
+                    for ($index = $step.LineIndex + 1; $index -lt $stepEnd; $index++) {
+                        if ($lines[$index] -match '^        name:\s*(?<value>.*)$') { $stepName = [string]$Matches['value']; continue }
+                        if ($lines[$index] -match '^        uses:\s*(?<value>.*)$') { $uses = [string]$Matches['value']; continue }
+                        if ($lines[$index] -ceq '        with:') { $insideWith = $true; continue }
+                        if ($insideWith -and $lines[$index] -match '^          (?<key>[a-zA-Z0-9_-]+):\s*(?<value>.*)$') {
+                            $key = [string]$Matches['key']
+                            $with[$key] = [string]$Matches['value']
+                            $withLineIndexes[$key] = $index
+                            continue
+                        }
+                        if ($insideWith -and $lines[$index] -match '^        \S') { $insideWith = $false }
+                    }
+
+                    if ($uses -match '^actions/upload-artifact@') {
+                        if (-not $with.Contains('name') -or [string]::IsNullOrWhiteSpace([string]$with['name'])) {
+                            throw "Artifact upload step '$stepName' in job '$($job.Id)' must declare with.name."
+                        }
+                        $retentionDays = $null
+                        if ($with.Contains('retention-days')) {
+                            $parsedRetention = 0
+                            if (-not [int]::TryParse([string]$with['retention-days'], [ref]$parsedRetention)) {
+                                throw "Artifact upload '$($with['name'])' in job '$($job.Id)' has a non-integer retention-days value."
+                            }
+                            $retentionDays = $parsedRetention
+                        }
+                        $uploads += [pscustomobject]@{
+                            JobId = [string]$job.Id
+                            StepName = [string]$stepName
+                            Name = [string]$with['name']
+                            RetentionDays = $retentionDays
+                            RetentionLineIndex = if ($withLineIndexes.ContainsKey('retention-days')) { [int]$withLineIndexes['retention-days'] } else { -1 }
+                        }
+                    } elseif ($uses -match '^actions/download-artifact@') {
+                        $selectorKeys = @(@('name', 'pattern') | Where-Object { $with.Contains($_) -and -not [string]::IsNullOrWhiteSpace([string]$with[$_]) })
+                        if ($selectorKeys.Count -ne 1) {
+                            throw "Artifact download step '$stepName' in job '$($job.Id)' must declare exactly one of with.name or with.pattern."
+                        }
+                        $selectorKey = [string]$selectorKeys[0]
+                        $downloads += [pscustomobject]@{
+                            JobId = [string]$job.Id
+                            StepName = [string]$stepName
+                            SelectorType = $selectorKey
+                            Selector = [string]$with[$selectorKey]
+                        }
+                    }
+                }
+            }
+
+            return [pscustomobject]@{ Uploads = @($uploads); Downloads = @($downloads); Lines = $lines }
+        }
+
+        function Test-GitHubArtifactSelectorMatch {
+            param(
+                [Parameter(Mandatory = $true)][string] $ArtifactName,
+                [Parameter(Mandatory = $true)][string] $SelectorType,
+                [Parameter(Mandatory = $true)][string] $Selector
+            )
+
+            if ($SelectorType -ceq 'name') { return $ArtifactName -ceq $Selector }
+            if ($SelectorType -cne 'pattern') { throw "Unsupported artifact selector type '$SelectorType'." }
+            $pattern = '^' + [regex]::Escape($Selector).Replace('\*', '.*').Replace('\?', '.') + '$'
+            return [regex]::IsMatch($ArtifactName, $pattern, [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+        }
+
+        function Get-GitHubConsumedArtifactUploads {
+            param([Parameter(Mandatory = $true)] $Structure)
+
+            return @(
+                foreach ($upload in @($Structure.Uploads)) {
+                    $consumers = @($Structure.Downloads | Where-Object {
+                        $_.JobId -cne $upload.JobId -and
+                        (Test-GitHubArtifactSelectorMatch -ArtifactName $upload.Name -SelectorType $_.SelectorType -Selector $_.Selector)
+                    })
+                    if ($consumers.Count -gt 0) {
+                        [pscustomobject]@{ Upload = $upload; Consumers = $consumers }
+                    }
+                }
+            )
+        }
+
+        function Assert-ConsumedArtifactRetention {
+            param([Parameter(Mandatory = $true)] $Structure)
+
+            foreach ($entry in @(Get-GitHubConsumedArtifactUploads -Structure $Structure)) {
+                if ($null -ne $entry.Upload.RetentionDays -and [int]$entry.Upload.RetentionDays -lt 30) {
+                    throw "Artifact '$($entry.Upload.Name)' from job '$($entry.Upload.JobId)' is consumed by another job and must retain evidence for at least 30 days or use the repository default."
+                }
+            }
+        }
+
         function Assert-RequiredCheckNameContract {
             param(
                 [Parameter(Mandatory = $true)][string] $WindowsCoreText,
@@ -468,6 +605,31 @@ jobs:
         }
         $contractError | Should Not Be $null
         $contractError.Exception.Message | Should Match 'line [0-9]+\. Expected: .* Actual: '
+    }
+
+    # Scenario: A successful producer job is not rerun after its artifact has expired, while a downstream failed job is rerun within GitHub's 30-day window.
+    # Purpose: Keep every cross-job artifact available for the full rerun window without extending retention for terminal evidence.
+    It 'UnitT14_requires_cross_job_artifacts_to_survive_the_rerun_window' {
+        $coreText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/pr8-powershell-validation.yml')
+        $smokeText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows/syp101-production-smoke.yml')
+        $coreStructure = Get-GitHubArtifactWorkflowStructure -WorkflowText $coreText
+        $smokeStructure = Get-GitHubArtifactWorkflowStructure -WorkflowText $smokeText
+
+        Assert-ConsumedArtifactRetention -Structure $coreStructure
+        Assert-ConsumedArtifactRetention -Structure $smokeStructure
+        @($coreStructure.Uploads).Count | Should Be 5
+        @($smokeStructure.Uploads).Count | Should Be 1
+        $consumed = @(Get-GitHubConsumedArtifactUploads -Structure $coreStructure)
+        @($consumed).Count | Should Be 2
+        (@($consumed | ForEach-Object { $_.Upload.Name }) -join '|') | Should Be 'windows-core-plan-${{ github.run_id }}|windows-core-shard-${{ matrix.id }}-${{ github.run_id }}'
+        @(Get-GitHubConsumedArtifactUploads -Structure $smokeStructure).Count | Should Be 0
+
+        $tamperedLines = [string[]]@($coreStructure.Lines)
+        $retentionLineIndex = [int]$consumed[0].Upload.RetentionLineIndex
+        $retentionLineIndex | Should BeGreaterThan -1
+        $tamperedLines[$retentionLineIndex] = '          retention-days: 1'
+        $tamperedStructure = Get-GitHubArtifactWorkflowStructure -WorkflowText ($tamperedLines -join "`n")
+        { Assert-ConsumedArtifactRetention -Structure $tamperedStructure } | Should Throw 'at least 30 days'
     }
 
     # Scenario: The required workflow fans the suite across retired runtimes and duplicate platforms.
