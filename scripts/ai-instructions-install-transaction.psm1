@@ -15,9 +15,14 @@ $script:InstallFailpointPatterns = @(
     'after-operation-<sequence>-before-journal',
     'after-operation-<sequence>',
     'after-committed-before-cleanup',
+    'before-committed-journal-write',
+    'after-committed-journal-write',
+    'after-index-lock-write-before-rename',
+    'after-cleanup-journal-before-directory',
     'before-cleanup-<artifact-leaf>',
     'during-cleanup-<artifact-leaf>',
     'after-cleanup-<artifact-leaf>',
+    'during-cleanup-transaction',
     'after-rollback-operation-<sequence>'
 )
 
@@ -45,7 +50,7 @@ function Assert-AiInstructionsInstallerCapabilities {
 
 function Test-AiInstructionsInstallFailpointName {
     param([Parameter(Mandatory = $true)][string] $Name)
-    if ($Name -cin @('after-journal-prepared','after-journal-stage-flush','after-journal-publish-before-parent-flush','after-recovery-before-install','after-committed-before-cleanup')) { return $true }
+    if ($Name -cin @('after-journal-prepared','after-journal-stage-flush','after-journal-publish-before-parent-flush','after-recovery-before-install','before-committed-journal-write','after-committed-journal-write','after-committed-before-cleanup','after-index-lock-write-before-rename','after-cleanup-journal-before-directory','during-cleanup-transaction')) { return $true }
     if ($Name -cmatch '^(?:before-operation-[1-9][0-9]*|after-original-to-backup-[1-9][0-9]*|after-operation-[1-9][0-9]*-before-journal|after-operation-[1-9][0-9]*|after-rollback-operation-[1-9][0-9]*)$') { return $true }
     return $Name -cmatch '^(?:before-cleanup|during-cleanup|after-cleanup)-[A-Za-z0-9][A-Za-z0-9._-]*$'
 }
@@ -201,9 +206,21 @@ function Test-InstallJournalSemanticEqual {
 }
 
 function Read-AiInstructionsInstallJournalLeaf {
-    param([Parameter(Mandatory = $true)] $TransactionLease,[Parameter(Mandatory = $true)][string] $Leaf,[Parameter(Mandatory = $true)][string] $TransactionId)
+    param([Parameter(Mandatory = $true)] $TransactionLease,[Parameter(Mandatory = $true)][string] $Leaf,[Parameter(Mandatory = $true)][string] $TransactionId,[string] $ExpectedOwnerComponent)
     $lease = Open-PlatformFile -ParentLease $TransactionLease -Leaf $Leaf -Access Read -CreateMode OpenExisting
-    try { return ConvertFrom-AiInstructionsInstallJournalV1Json -Json ([Text.UTF8Encoding]::new($false,$true).GetString($lease.ReadAllBytes(16777216))) -ExpectedTransactionId $TransactionId }
+    try {
+        $json=[Text.UTF8Encoding]::new($false,$true).GetString($lease.ReadAllBytes(16777216))
+        if($ExpectedOwnerComponent-ceq'repo-bootstrap'){
+            $parameters=@{InputObject=$json;ErrorAction='Stop'};if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'}
+            $journal=ConvertFrom-Json @parameters
+            Assert-AiInstructionsInstallJournalV2 -Journal $journal|Out-Null
+            if([string]$journal.transactionId-cne$TransactionId){throw 'AI instructions install journal transactionId does not match the expected transaction directory.'}
+            return $journal
+        }
+        $arguments=@{Json=$json;ExpectedTransactionId=$TransactionId}
+        if(-not[string]::IsNullOrWhiteSpace($ExpectedOwnerComponent)){$arguments.ExpectedOwnerComponent=$ExpectedOwnerComponent}
+        return ConvertFrom-AiInstructionsInstallJournalJson @arguments
+    }
     finally { $lease.Dispose() }
 }
 
@@ -238,15 +255,15 @@ function Write-AiInstructionsInstallJournalStore {
     )
     $leaves = Get-AiInstructionsInstallJournalStoreLeaves
     if ($null -ne $PreviousJournal) {
-        $storedPrevious = Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf (Get-AiInstructionsInstallJournalStoreLeaves).journal -TransactionId ([string]$Journal.transactionId)
-        if (-not (Test-InstallJournalSemanticEqual -First $storedPrevious -Second $PreviousJournal)) { throw 'Published journal differs from the expected previous journal generation.' }
+        $storedPrevious = if([int64]$Journal.schemaVersion-eq2){$PreviousJournal}else{Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf (Get-AiInstructionsInstallJournalStoreLeaves).journal -TransactionId ([string]$Journal.transactionId)}
+        if ([int64]$Journal.schemaVersion-ne2 -and -not (Test-InstallJournalSemanticEqual -First $storedPrevious -Second $PreviousJournal)) { throw 'Published journal differs from the expected previous journal generation.' }
         Assert-AiInstructionsInstallJournalStoreTransition -Previous $storedPrevious -Next $Journal | Out-Null
     }
     [byte[]]$bytes = ConvertTo-InstallJournalBytes -Journal $Journal
     $stageState = New-AiInstructionsInstallStageFile -TransactionLease $TransactionLease -Leaf $leaves.stage -Bytes $bytes -PlatformOs $PlatformOs
     $JournalStoreStates[[string]$leaves.stage] = $stageState
     Invoke-AiInstructionsInstallFailpoint -Name 'after-journal-stage-flush'
-    $validatedStage = Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf $leaves.stage -TransactionId ([string]$Journal.transactionId)
+    $validatedStage = Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf $leaves.stage -TransactionId ([string]$Journal.transactionId) -ExpectedOwnerComponent $(if([int64]$Journal.schemaVersion-eq2){'repo-bootstrap'}else{$null})
     if (-not (Test-InstallJournalSemanticEqual -First $validatedStage -Second $Journal)) { throw 'Journal stage readback differs from the requested journal.' }
     $journalPath = Join-Path $TransactionPath $leaves.journal
     $registerPublicationFailpoint = $PlatformOs -ceq 'windows' -and
@@ -275,7 +292,7 @@ function Write-AiInstructionsInstallJournalStore {
         identity=$receipt.appliedIdentity
     }
     $JournalStoreStates[[string]$leaves.stage] = [pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}
-    $validated = Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf $leaves.journal -TransactionId ([string]$Journal.transactionId)
+    $validated = Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf $leaves.journal -TransactionId ([string]$Journal.transactionId) -ExpectedOwnerComponent $(if([int64]$Journal.schemaVersion-eq2){'repo-bootstrap'}else{$null})
     if (-not (Test-InstallJournalSemanticEqual -First $validated -Second $Journal)) { throw 'Published journal readback differs from the requested journal.' }
     if ($null -ne $PreviousJournal) {
         # Publication preserves the displaced journal identity and bytes.  Bind
@@ -289,7 +306,8 @@ function Write-AiInstructionsInstallJournalStore {
 
 function Copy-InstallJournalWithChange {
     param([Parameter(Mandatory = $true)] $Journal,[string] $Phase,[Nullable[long]] $Sequence,[string] $State)
-    $copy = ConvertFrom-AiInstructionsInstallJournalV1Json -Json (($Journal | ConvertTo-Json -Depth 30)) -ExpectedTransactionId ([string]$Journal.transactionId)
+    if([int64]$Journal.schemaVersion-eq2){$parameters=@{InputObject=($Journal|ConvertTo-Json -Depth 30);ErrorAction='Stop'};if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'};$copy=ConvertFrom-Json @parameters;Assert-AiInstructionsInstallJournalV2 $copy|Out-Null}
+    else{$copy = ConvertFrom-AiInstructionsInstallJournalV1Json -Json (($Journal | ConvertTo-Json -Depth 30)) -ExpectedTransactionId ([string]$Journal.transactionId)}
     if (-not [string]::IsNullOrEmpty($Phase)) { $copy.phase = $Phase }
     if ($null -ne $Sequence) {
         $sequenceValue = [int64]$Sequence
@@ -507,13 +525,17 @@ function Remove-InstallTerminalTransactionArtifacts {
         throw "Transaction artifacts can be finalized only from a terminal journal phase: $($Journal.phase)"
     }
     $platformOs = [string]$Journal.platform.os
+    $repositoryJournal = [int64]$Journal.schemaVersion -eq 2 -and [string]$Journal.owner.component -ceq 'repo-bootstrap'
     foreach ($operation in @($Journal.operations)) {
-        $directoryArtifact = [string]$operation.kind -in @('swap-directory','create-directory')
+        $directoryArtifact = if ($repositoryJournal) { [string]$operation.kind -ceq 'ensure-directory-anchor' } else { [string]$operation.kind -in @('swap-directory','create-directory') }
         foreach ($leafName in @('backupLeaf','stageLeaf','quarantineLeaf')) {
             $property = $operation.PSObject.Properties[$leafName]
             if ($null -eq $property -or $null -eq $property.Value) { continue }
             $leaf = [string]$property.Value
-            $expectedState = if ($leafName -ceq 'backupLeaf') {
+            $expectedState = if ($repositoryJournal) {
+                if ($leafName -ceq 'backupLeaf') { $operation.before } else { $operation.after }
+            }
+            elseif ($leafName -ceq 'backupLeaf') {
                 if ($directoryArtifact) {
                     [pscustomobject][ordered]@{ exists=$true; identity=$operation.backupIdentity; inventorySha256=$operation.original.inventorySha256; entryCount=$operation.original.entryCount }
                 }
@@ -522,12 +544,17 @@ function Remove-InstallTerminalTransactionArtifacts {
                 }
             }
             else { $operation.applied }
+            if ($repositoryJournal) { Invoke-AiInstructionsInstallFailpoint -Name ("before-cleanup-" + $leaf) }
             if ($directoryArtifact) {
                 Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf ($leaf + '.trash') -Directory:$true -PlatformOs $platformOs -ExpectedDirectoryState $expectedState
                 Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf $leaf -Directory:$true -PlatformOs $platformOs -ExpectedDirectoryState $expectedState -TrashDirectory
             }
             else {
                 Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf $leaf -Directory:$false -PlatformOs $platformOs -ExpectedFileState $expectedState
+            }
+            if ($repositoryJournal) {
+                Invoke-AiInstructionsInstallFailpoint -Name ("during-cleanup-" + $leaf)
+                Invoke-AiInstructionsInstallFailpoint -Name ("after-cleanup-" + $leaf)
             }
         }
     }
@@ -541,6 +568,7 @@ function Remove-InstallTerminalTransactionArtifacts {
         if ($null -eq $expected) { throw "The journal store does not contain a classified state for $($entry.leaf)." }
         Remove-InstallTransactionArtifact -TransactionLease $TransactionLease -TransactionPath $TransactionPath -Leaf $entry.leaf -Directory:$false -PlatformOs $platformOs -ExpectedFileState $expected
         $JournalStoreStates[[string]$entry.leaf] = [pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}
+        if ($repositoryJournal -and [string]$entry.role -ceq 'journal') { Invoke-AiInstructionsInstallFailpoint -Name 'after-cleanup-journal-before-directory' }
     }
 }
 
@@ -698,5 +726,6 @@ Export-ModuleMember -Function @(
     'Get-AiInstructionsInstallFailpointPatterns','Invoke-AiInstructionsInstallFailpoint','Assert-AiInstructionsInstallerCapabilities',
     'Get-AiInstructionsInstallFileState','Get-AiInstructionsInstallDirectoryState','New-AiInstructionsInstallStageFile',
     'Write-AiInstructionsInstallJournalStore','Invoke-AiInstructionsInstallOperation',
-    'Get-AiInstructionsInstallRecoveryObservations','Invoke-AiInstructionsInstallRecoveryPlan'
+    'Get-AiInstructionsInstallRecoveryObservations','Invoke-AiInstructionsInstallRecoveryPlan',
+    'Remove-InstallTerminalTransactionArtifacts'
 )

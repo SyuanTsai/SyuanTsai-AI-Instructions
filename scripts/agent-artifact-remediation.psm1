@@ -452,111 +452,38 @@ function ConvertTo-RemediationExcludePattern {
     return "/$escaped"
 }
 
-function Set-RemediationGitInfoExclude {
-    param(
-        [Parameter(Mandatory = $true)][string] $Path,
-        [Parameter(Mandatory = $true)][string[]] $Patterns,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths
-    )
-
-    $existed = Test-Path -LiteralPath $Path -PathType Leaf
-    [byte[]]$beforeBytes = if ($existed) { [System.IO.File]::ReadAllBytes($Path) } else { [byte[]]@() }
-    $utf8 = New-Object System.Text.UTF8Encoding($false,$true)
-    $content = if ($beforeBytes.Length -eq 0) { '' } else { $utf8.GetString($beforeBytes) }
-    $content = $content.Replace("`r`n","`n").Replace("`r","`n")
-    $blockPattern = '(?ms)^' + [regex]::Escape($script:RemediationExcludeBegin) + '\n.*?^' + [regex]::Escape($script:RemediationExcludeEnd) + '\n?'
-    $beginCount = [regex]::Matches($content,'(?m)^' + [regex]::Escape($script:RemediationExcludeBegin) + '$').Count
-    $endCount = [regex]::Matches($content,'(?m)^' + [regex]::Escape($script:RemediationExcludeEnd) + '$').Count
-    if ($beginCount -ne $endCount -or $beginCount -gt 1 -or ($beginCount -eq 1 -and -not [regex]::IsMatch($content,$blockPattern))) {
-        throw "The remediated Agent artifact exclude block is malformed: $Path"
-    }
-    $storedPatterns = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
-    if ($beginCount -eq 1) {
-        foreach ($line in @([regex]::Match($content,$blockPattern).Value.Replace("`r`n","`n").Split("`n"))) {
-            if (-not [string]::IsNullOrWhiteSpace($line) -and $line -cne $script:RemediationExcludeBegin -and $line -cne $script:RemediationExcludeEnd) {
-                $storedPath = if ($line.StartsWith('/')) { $line.Substring(1) } else { $line }
-                if (Test-IsProtectedClaudeFamilyPath -Path $storedPath -ProtectedPaths $ProtectedPaths) {
-                    Write-ProtectedClaudeFamilyDiagnostic -Path $storedPath -Sink 'remediation Git exclude'
-                    continue
-                }
-                [void]$storedPatterns.Add($line)
-            }
-        }
-    }
-    $safePatterns = New-Object System.Collections.Generic.List[string]
-    foreach ($item in $Patterns) {
-        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$item) -ProtectedPaths $ProtectedPaths) {
-            Write-ProtectedClaudeFamilyDiagnostic -Path ([string]$item) -Sink 'remediation Git exclude'
-            continue
-        }
-        $safePatterns.Add([string]$item)
-        [void]$storedPatterns.Add((ConvertTo-RemediationExcludePattern -Path $item))
-    }
-    $withoutBlock = [regex]::Replace($content,$blockPattern,'').TrimEnd("`n")
-    $block = $script:RemediationExcludeBegin + "`n" + (@($storedPatterns | Sort-Object) -join "`n") + "`n" + $script:RemediationExcludeEnd + "`n"
-    $updated = if ([string]::IsNullOrWhiteSpace($withoutBlock)) { $block } else { $withoutBlock + "`n`n" + $block }
-    [byte[]]$updatedBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($updated)
-    [System.IO.File]::WriteAllBytes($Path,$updatedBytes)
-    return [pscustomobject][ordered]@{
-        Path=$Path;Existed=$existed;Before=$beforeBytes;Applied=$updatedBytes
-        MutationPaths=@($safePatterns);ProtectedPaths=@($ProtectedPaths)
-    }
-}
-
-function Set-RemediationIndexWithoutPaths {
+function New-RemediationIndexPlan {
     param(
         [Parameter(Mandatory = $true)][string] $Repository,
         [Parameter(Mandatory = $true)][string] $GitExecutable,
         [Parameter(Mandatory = $true)][string] $IndexPath,
-        [Parameter(Mandatory = $true)][string] $ExpectedIndexSha256,
         [Parameter(Mandatory = $true)][string[]] $Paths,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths
     )
-
-    $safePaths = @($Paths | Where-Object {
-        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$_) -ProtectedPaths $ProtectedPaths) {
-            Write-ProtectedClaudeFamilyDiagnostic -Path ([string]$_) -Sink 'remediation Git index'
-            return $false
+    [byte[]]$beforeBytes=[IO.File]::ReadAllBytes($IndexPath)
+    $temporaryIndex=Join-Path ([IO.Path]::GetTempPath()) ('codex-agent-remediation-plan-index-'+[guid]::NewGuid().ToString('N'))
+    $hadAlternateIndex=Test-Path Env:GIT_INDEX_FILE;$priorAlternateIndex=$env:GIT_INDEX_FILE
+    try{
+        [IO.File]::WriteAllBytes($temporaryIndex,$beforeBytes)
+        $env:GIT_INDEX_FILE=$temporaryIndex
+        $safePaths=@($Paths|Where-Object{
+            if(Test-IsProtectedClaudeFamilyPath -Path ([string]$_) -ProtectedPaths $ProtectedPaths){Write-ProtectedClaudeFamilyDiagnostic -Path ([string]$_) -Sink 'remediation Git index plan';return $false}
+            return $true
+        })
+        if($safePaths.Count-gt0){Invoke-RemediationGit -Repository $Repository -GitExecutable $GitExecutable -Arguments (@('update-index','--force-remove','--')+$safePaths)|Out-Null}
+        [byte[]]$afterBytes=[IO.File]::ReadAllBytes($temporaryIndex)
+        $entryLines=@(Invoke-RemediationGit -Repository $Repository -GitExecutable $GitExecutable -Arguments @('ls-files','--stage'))|Sort-Object -CaseSensitive
+        $entryText=(($entryLines-join"`n")+"`n")
+        return [pscustomobject][ordered]@{
+            BeforeBytes=$beforeBytes;AfterBytes=$afterBytes
+            BeforeSha256=Get-RemediationSha256Bytes -Bytes $beforeBytes
+            AfterSha256=Get-RemediationSha256Bytes -Bytes $afterBytes
+            AfterEntrySetSha256=Get-RemediationSha256Bytes -Bytes ([Text.UTF8Encoding]::new($false).GetBytes($entryText))
         }
-        return $true
-    })
-    if ($safePaths.Count -eq 0) { return $ExpectedIndexSha256 }
-    $lockPath = $IndexPath + '.lock'
-    $lockStream = $null
-    $temporaryIndex = Join-Path ([System.IO.Path]::GetTempPath()) ('codex-agent-remediation-index-' + [Guid]::NewGuid().ToString('N'))
-    $hadAlternateIndex = Test-Path Env:GIT_INDEX_FILE
-    $priorAlternateIndex = $env:GIT_INDEX_FILE
-    $committed = $false
-    try {
-        try { $lockStream = [System.IO.File]::Open($lockPath,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None) }
-        catch [System.IO.IOException] { throw 'The Git index is being changed by another process; remediation stopped before mutation.' }
-        [byte[]]$currentIndexBytes = [System.IO.File]::ReadAllBytes($IndexPath)
-        $currentIndexSha256 = Get-RemediationSha256Bytes -Bytes $currentIndexBytes
-        if ($currentIndexSha256 -cne $ExpectedIndexSha256) {
-            throw 'Git index changed after the remediation backup; remediation stopped before index mutation.'
-        }
-        [System.IO.File]::WriteAllBytes($temporaryIndex,$currentIndexBytes)
-        $env:GIT_INDEX_FILE = $temporaryIndex
-        Invoke-RemediationGit -Repository $Repository -GitExecutable $GitExecutable -Arguments (@('update-index','--force-remove','--') + $safePaths) | Out-Null
-        [byte[]]$preparedBytes = [System.IO.File]::ReadAllBytes($temporaryIndex)
-        $preparedSha256 = Get-RemediationSha256Bytes -Bytes $preparedBytes
-        $lockStream.SetLength(0)
-        $lockStream.Write($preparedBytes,0,$preparedBytes.Length)
-        $lockStream.Flush($true)
-        $lockStream.Dispose()
-        $lockStream = $null
-        Move-Item -LiteralPath $lockPath -Destination $IndexPath -Force
-        $committed = $true
-        return $preparedSha256
     }
-    finally {
-        if ($hadAlternateIndex) { $env:GIT_INDEX_FILE = $priorAlternateIndex }
-        else { Remove-Item Env:GIT_INDEX_FILE -ErrorAction SilentlyContinue }
-        if ($null -ne $lockStream) { $lockStream.Dispose() }
-        if (-not $committed -and (Test-Path -LiteralPath $lockPath -PathType Leaf)) { Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue }
-        foreach ($temporaryPath in @($temporaryIndex,($temporaryIndex + '.lock'))) {
-            if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) { Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue }
-        }
+    finally{
+        if($hadAlternateIndex){$env:GIT_INDEX_FILE=$priorAlternateIndex}else{Remove-Item Env:GIT_INDEX_FILE -ErrorAction SilentlyContinue}
+        foreach($path in @($temporaryIndex,($temporaryIndex+'.lock'))){if(Test-Path -LiteralPath $path -PathType Leaf){Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue}}
     }
 }
 
@@ -602,192 +529,7 @@ function New-RemediationCommitObject {
     }
 }
 
-function Remove-RemediationFiles {
-    param([Parameter(Mandatory = $true)][object] $Transaction)
-
-    foreach ($relativePath in $Transaction.MutationPaths) {
-        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$relativePath) -ProtectedPaths $Transaction.ProtectedPaths) {
-            Write-ProtectedClaudeFamilyDiagnostic -Path ([string]$relativePath) -Sink 'remediation file deletion'
-            continue
-        }
-        Assert-RemediationPathHasNoReparsePoint -Repository $Transaction.Repository -RelativePath $relativePath
-        $fullPath = Get-RemediationFullPath -Repository $Transaction.Repository -RelativePath $relativePath
-        $inventoryEntry = @($Transaction.Backup.Inventory | Where-Object { ([string]$_.path).Equals($relativePath,[System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1)
-        if ($inventoryEntry.Count -ne 1) { throw "Agent artifact backup inventory is missing: $relativePath" }
-        $entry = $inventoryEntry[0]
-        if (-not (Test-Path -LiteralPath $fullPath)) {
-            if ([bool]$entry.exists) { throw "Agent artifact changed after backup; concurrent deletion was preserved: $relativePath" }
-            continue
-        }
-        if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { throw "Expected an exact Agent artifact file but found a directory: $relativePath" }
-        if (-not [bool]$entry.exists) { throw "Agent artifact changed after backup; concurrent file was preserved: $relativePath" }
-        $currentSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $fullPath).Hash.ToLowerInvariant()
-        if ($currentSha256 -cne [string]$entry.sha256) {
-            throw "Agent artifact changed after backup; concurrent bytes were preserved: $relativePath"
-        }
-        $item = Get-Item -Force -LiteralPath $fullPath
-        if (($item.Attributes -band [System.IO.FileAttributes]::ReadOnly) -ne 0) {
-            $item.Attributes = $item.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
-        }
-        [System.IO.File]::Delete($fullPath)
-        $Transaction.FilesRemoved.Add($relativePath)
-    }
-}
-
-
-function Set-RemediationHead {
-    param([Parameter(Mandatory = $true)][object] $Transaction)
-
-    if ([string]::IsNullOrWhiteSpace([string]$Transaction.NewCommit)) { return }
-    foreach ($relativePath in @($Transaction.Paths)) {
-        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$relativePath) -ProtectedPaths $Transaction.ProtectedPaths) {
-            Write-ProtectedClaudeFamilyDiagnostic -Path ([string]$relativePath) -Sink 'remediation HEAD update'
-            return
-        }
-    }
-    if (-not [string]::IsNullOrWhiteSpace([string]$Transaction.OriginalHeadReference)) {
-        Invoke-RemediationGit -Repository $Transaction.Repository -GitExecutable $Transaction.GitExecutable -Arguments @(
-            'update-ref',$Transaction.OriginalHeadReference,$Transaction.NewCommit,$Transaction.OriginalHead
-        ) | Out-Null
-        $Transaction.NewHeadReference = $Transaction.OriginalHeadReference
-        return
-    }
-
-    $baseName = 'refs/heads/codex/ai-instructions-remediation-' + $Transaction.OriginalHead.Substring(0,12)
-    $candidate = $baseName
-    $suffix = 1
-    while ((Get-RemediationGitExitCode -Repository $Transaction.Repository -GitExecutable $Transaction.GitExecutable -Arguments @('show-ref','--verify','--quiet',$candidate)) -eq 0) {
-        $candidate = $baseName + '-' + $suffix
-        $suffix++
-    }
-    Invoke-RemediationGit -Repository $Transaction.Repository -GitExecutable $Transaction.GitExecutable -Arguments @('update-ref',$candidate,$Transaction.NewCommit) | Out-Null
-    try { Invoke-RemediationGit -Repository $Transaction.Repository -GitExecutable $Transaction.GitExecutable -Arguments @('symbolic-ref','HEAD',$candidate) | Out-Null }
-    catch {
-        $symbolicRefError = $_
-        try { Invoke-RemediationGit -Repository $Transaction.Repository -GitExecutable $Transaction.GitExecutable -Arguments @('update-ref','-d',$candidate,$Transaction.NewCommit) | Out-Null }
-        catch { throw "Detached HEAD remediation branch activation failed: $($symbolicRefError.Exception.Message) Branch cleanup also failed: $($_.Exception.Message)" }
-        throw $symbolicRefError
-    }
-    $Transaction.NewHeadReference = $candidate
-}
-
-function Restore-RemediationHead {
-    param([Parameter(Mandatory = $true)][object] $Transaction)
-
-    if ([string]::IsNullOrWhiteSpace([string]$Transaction.NewCommit)) { return }
-    foreach ($relativePath in @($Transaction.Paths)) {
-        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$relativePath) -ProtectedPaths $Transaction.ProtectedPaths) {
-            Write-ProtectedClaudeFamilyDiagnostic -Path ([string]$relativePath) -Sink 'remediation HEAD rollback'
-            return
-        }
-    }
-    if (-not [string]::IsNullOrWhiteSpace([string]$Transaction.OriginalHeadReference)) {
-        Invoke-RemediationGit -Repository $Transaction.Repository -GitExecutable $Transaction.GitExecutable -Arguments @(
-            'update-ref',$Transaction.OriginalHeadReference,$Transaction.OriginalHead,$Transaction.NewCommit
-        ) | Out-Null
-        return
-    }
-    Invoke-RemediationGit -Repository $Transaction.Repository -GitExecutable $Transaction.GitExecutable -Arguments @(
-        'update-ref','--no-deref','HEAD',$Transaction.OriginalHead,$Transaction.NewCommit
-    ) | Out-Null
-    if (-not [string]::IsNullOrWhiteSpace([string]$Transaction.NewHeadReference)) {
-        Invoke-RemediationGit -Repository $Transaction.Repository -GitExecutable $Transaction.GitExecutable -Arguments @(
-            'update-ref','-d',$Transaction.NewHeadReference,$Transaction.NewCommit
-        ) | Out-Null
-    }
-}
-
-function Restore-RemediationFiles {
-    param([Parameter(Mandatory = $true)][object] $Transaction)
-
-    $errors = New-Object System.Collections.Generic.List[string]
-    foreach ($relativePath in @($Transaction.FilesRemoved)) {
-        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$relativePath) -ProtectedPaths $Transaction.ProtectedPaths) {
-            Write-ProtectedClaudeFamilyDiagnostic -Path ([string]$relativePath) -Sink 'remediation file rollback'
-            continue
-        }
-        $entry = @($Transaction.Backup.Inventory | Where-Object { ([string]$_.path).Equals([string]$relativePath,[System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1)[0]
-        if ($null -eq $entry) { $errors.Add("Agent artifact backup inventory is missing: $relativePath"); continue }
-        $relativePath = [string]$relativePath
-        try { Assert-RemediationPathHasNoReparsePoint -Repository $Transaction.Repository -RelativePath $relativePath }
-        catch { $errors.Add($_.Exception.Message); continue }
-        $targetPath = Get-RemediationFullPath -Repository $Transaction.Repository -RelativePath $relativePath
-        if (Test-Path -LiteralPath $targetPath) {
-            if ([bool]$entry.exists -and (Test-Path -LiteralPath $targetPath -PathType Leaf)) {
-                $currentSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $targetPath).Hash.ToLowerInvariant()
-                if ($currentSha256 -ceq [string]$entry.sha256) { continue }
-            }
-            $errors.Add("Agent artifact path changed after remediation; concurrent bytes were preserved: $relativePath")
-            continue
-        }
-        if (-not [bool]$entry.exists) { continue }
-        $sourcePath = Join-Path (Join-Path $Transaction.Backup.Root 'files') $relativePath.Replace('/','\')
-        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $targetPath) | Out-Null
-        [System.IO.File]::Copy($sourcePath,$targetPath,$false)
-    }
-    if ($errors.Count -gt 0) { throw ($errors -join ' | ') }
-}
-
-function Restore-RemediationExclude {
-    param([Parameter(Mandatory = $true)][AllowNull()][object] $Snapshot)
-
-    if ($null -eq $Snapshot) { return }
-    foreach ($relativePath in @($Snapshot.MutationPaths)) {
-        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$relativePath) -ProtectedPaths $Snapshot.ProtectedPaths) {
-            Write-ProtectedClaudeFamilyDiagnostic -Path ([string]$relativePath) -Sink 'remediation Git exclude rollback'
-            return
-        }
-    }
-    [byte[]]$current = if (Test-Path -LiteralPath $Snapshot.Path -PathType Leaf) { [System.IO.File]::ReadAllBytes($Snapshot.Path) } else { [byte[]]@() }
-    if ([Convert]::ToBase64String($current) -cne [Convert]::ToBase64String([byte[]]$Snapshot.Applied)) {
-        throw "Shared Git exclude changed after remediation; concurrent bytes were preserved: $($Snapshot.Path)"
-    }
-    if ([bool]$Snapshot.Existed) { [System.IO.File]::WriteAllBytes($Snapshot.Path,[byte[]]$Snapshot.Before) }
-    elseif (Test-Path -LiteralPath $Snapshot.Path -PathType Leaf) { [System.IO.File]::Delete($Snapshot.Path) }
-}
-
-function Restore-AgentArtifactRemediation {
-    [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][object] $Transaction)
-
-    if ([bool]$Transaction.RolledBack) { return }
-    if ([bool]$Transaction.RollbackAttempted) { throw "Agent artifact remediation rollback was already attempted. Backup: $($Transaction.Backup.Root)" }
-    $Transaction.RollbackAttempted = $true
-    $errors = New-Object System.Collections.Generic.List[string]
-    if ([bool]$Transaction.HeadUpdated) {
-        try { Restore-RemediationHead -Transaction $Transaction } catch { $errors.Add($_.Exception.Message) }
-    }
-    if ([bool]$Transaction.IndexMutated) {
-        try {
-            $skipIndexRollback = $false
-            foreach ($relativePath in @($Transaction.Paths)) {
-                if (Test-IsProtectedClaudeFamilyPath -Path ([string]$relativePath) -ProtectedPaths $Transaction.ProtectedPaths) {
-                    Write-ProtectedClaudeFamilyDiagnostic -Path ([string]$relativePath) -Sink 'remediation Git index rollback'
-                    $skipIndexRollback = $true
-                }
-            }
-            if (-not $skipIndexRollback) {
-                if (-not (Test-Path -LiteralPath $Transaction.IndexPath -PathType Leaf)) {
-                    throw "Git index disappeared after remediation: $($Transaction.IndexPath)"
-                }
-                $currentIndexSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $Transaction.IndexPath).Hash.ToLowerInvariant()
-                if ($currentIndexSha256 -cne [string]$Transaction.AppliedIndexSha256) {
-                    throw "Git index changed after remediation; concurrent index bytes were preserved: $($Transaction.IndexPath)"
-                }
-                [System.IO.File]::Copy((Join-Path $Transaction.Backup.Root 'index'),$Transaction.IndexPath,$true)
-            }
-        }
-        catch { $errors.Add($_.Exception.Message) }
-    }
-    try { Restore-RemediationFiles -Transaction $Transaction } catch { $errors.Add($_.Exception.Message) }
-    try { Restore-RemediationExclude -Snapshot $Transaction.ExcludeSnapshot } catch { $errors.Add($_.Exception.Message) }
-    if ($errors.Count -gt 0) {
-        throw "Agent artifact remediation rollback failed: $($errors -join ' | '). Backup: $($Transaction.Backup.Root)"
-    }
-    $Transaction.RolledBack = $true
-}
-
-function Invoke-AgentArtifactRemediation {
+function New-AgentArtifactRemediationPlan {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string] $Repository,
@@ -859,65 +601,32 @@ function Invoke-AgentArtifactRemediation {
         Repository=$repositoryRoot
         GitExecutable=$GitExecutable
         CommonGitDirectory=$commonGitDirectory
+        GitDirectory=$gitDirectory
         IndexPath=$indexPath
         OriginalHead=$head
         OriginalHeadReference=$headReference
         NewHeadReference=''
         NewCommit=$null
-        HeadUpdated=$false
         Paths=$trackedPaths
         MutationPaths=$mutationPaths
-        FilesRemoved=(New-Object 'System.Collections.Generic.List[string]')
         Backup=$backup
-        ExcludeSnapshot=$null
-        IndexMutated=$false
-        AppliedIndexSha256=$null
-        RollbackAttempted=$false
-        RolledBack=$false
         ProtectedPaths=@($ProtectedPathPrefixes)
+        ObjectFormat=((Invoke-RemediationGit -Repository $repositoryRoot -GitExecutable $GitExecutable -Arguments @('rev-parse','--show-object-format')|Select-Object -First 1).Trim())
+        IndexPlan=$null
+        HeadMode=$(if([string]::IsNullOrWhiteSpace($head)){'unborn'}elseif([string]::IsNullOrWhiteSpace($headReference)){'detached'}else{'symbolic'})
     }
 
-    try {
-        if ($trackedPaths.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($head)) {
-            $transaction.NewCommit = New-RemediationCommitObject -Repository $repositoryRoot -GitExecutable $GitExecutable -Head $head -Paths $trackedPaths -ProtectedPaths $ProtectedPathPrefixes
-        }
-        $transaction.ExcludeSnapshot = Set-RemediationGitInfoExclude -Path $excludePath -Patterns $excludePatterns -ProtectedPaths $SharedExcludeProtectedPathPrefixes
-        if ($trackedPaths.Count -gt 0) {
-            $transaction.AppliedIndexSha256 = Set-RemediationIndexWithoutPaths -Repository $repositoryRoot -GitExecutable $GitExecutable `
-                -IndexPath $indexPath -ExpectedIndexSha256 $backup.IndexSha256 -Paths $trackedPaths `
-                -ProtectedPaths $ProtectedPathPrefixes
-            $transaction.IndexMutated = $true
-        }
-        Remove-RemediationFiles -Transaction $transaction
-        Set-RemediationHead -Transaction $transaction
-        if (-not [string]::IsNullOrWhiteSpace([string]$transaction.NewCommit)) { $transaction.HeadUpdated = $true }
-
-        $currentTrackedSets = Get-RemediationTrackedPathSets -Repository $repositoryRoot -GitExecutable $GitExecutable -Comparer $comparer
-        foreach ($trackedPath in $trackedPaths) {
-            if ($currentTrackedSets.Index.Contains($trackedPath)) {
-                throw "Reserved Agent artifact remains in the Git index after remediation: $trackedPath"
-            }
-        }
-        if (-not [string]::IsNullOrWhiteSpace([string]$transaction.NewCommit)) {
-            $commitChanges = @(Invoke-RemediationGit -Repository $repositoryRoot -GitExecutable $GitExecutable -Arguments @('-c','core.quotePath=true','diff-tree','--no-commit-id','--name-status','-r',$transaction.NewCommit))
-            if ($commitChanges.Count -eq 0) { throw 'Remediation commit unexpectedly contains no reserved path deletions.' }
-            foreach ($change in $commitChanges) {
-                $match = [regex]::Match([string]$change,'^D\s+(?<Path>.+)$')
-                if (-not $match.Success) { throw "Remediation commit contains a non-deletion change: $change" }
-                $changedPath = (ConvertFrom-RemediationGitQuotedPath -Path $match.Groups['Path'].Value).Replace('\','/')
-                if (-not $trackedReserved.Contains($changedPath)) {
-                    throw "Remediation commit contains a non-reserved change: $change"
-                }
-            }
-        }
+    if ($trackedPaths.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($head)) {
+        $transaction.NewCommit=New-RemediationCommitObject -Repository $repositoryRoot -GitExecutable $GitExecutable -Head $head -Paths $trackedPaths -ProtectedPaths $ProtectedPathPrefixes
     }
-    catch {
-        $errorRecord = $_
-        try { Restore-AgentArtifactRemediation -Transaction $transaction }
-        catch { throw "Agent artifact remediation failed: $($errorRecord.Exception.Message) $($_.Exception.Message)" }
-        throw "Agent artifact remediation failed: $($errorRecord.Exception.Message) Backup: $($backup.Root)"
+    if ($trackedPaths.Count -gt 0) {
+        $transaction.IndexPlan=New-RemediationIndexPlan -Repository $repositoryRoot -GitExecutable $GitExecutable -IndexPath $indexPath -Paths $trackedPaths -ProtectedPaths $ProtectedPathPrefixes
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$transaction.NewCommit) -and [string]::IsNullOrWhiteSpace($headReference)) {
+        $baseName='refs/heads/codex/ai-instructions-remediation-'+$head.Substring(0,12);$candidate=$baseName;$suffix=1
+        while ((Get-RemediationGitExitCode -Repository $repositoryRoot -GitExecutable $GitExecutable -Arguments @('show-ref','--verify','--quiet',$candidate)) -eq 0) {$candidate=$baseName+'-'+$suffix;$suffix++}
+        $transaction.NewHeadReference=$candidate
     }
     return $transaction
-}
-
-Export-ModuleMember -Function Invoke-AgentArtifactRemediation, Restore-AgentArtifactRemediation, Test-IsReservedAgentArtifactPath, Test-IsProtectedClaudeFamilyPath
+        }
+Export-ModuleMember -Function New-AgentArtifactRemediationPlan, Test-IsReservedAgentArtifactPath, Test-IsProtectedClaudeFamilyPath

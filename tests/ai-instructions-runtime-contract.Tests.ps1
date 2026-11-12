@@ -193,6 +193,33 @@ function Get-TestLinuxInstallJournalV1 {
     return (ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20))
 }
 
+function Get-TestInstallJournalV2 {
+    param([string] $Owner = 'repo-bootstrap')
+    $root = [IO.Path]::GetFullPath((Join-Path $TestDrive 'repo-v2'))
+    $git = Join-Path $root '.git'
+    $identity = [pscustomobject][ordered]@{kind='windows-file-id';device='00000001';fileId='00000002'}
+    $permissions = [pscustomobject][ordered]@{kind='windows-sddl';sddl='D:PAI(A;;FA;;;SY)';readOnly=$false}
+    $absent = [pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null}
+    $present = [pscustomobject][ordered]@{exists=$true;sha256=('a'*64);length=3;identity=$identity;permissions=$permissions}
+    return [pscustomobject][ordered]@{
+        schemaVersion=2;kind='ai-instructions-install-transaction';transactionId=('a'*32);createdAtUtc='2026-11-12T00:00:00.0000000Z'
+        owner=[pscustomobject][ordered]@{component=$Owner;processId=1;processStartIdentity='fixture-process'}
+        platform=[pscustomobject][ordered]@{os='windows';architecture='x64'}
+        lock=[pscustomobject][ordered]@{primitive='windows-fileshare';leaf='bootstrap-ai-instructions.lock'}
+        generation=[pscustomobject][ordered]@{previousBundleSha256=$null;candidateBundleSha256=('b'*64)}
+        scope=[pscustomobject][ordered]@{
+            kind='repository';repositoryRoot=$root;repositoryRootIdentity=$identity;commonGitDirectory=$git;gitDirectory=$git
+            indexPath=(Join-Path $git 'index');objectFormat='sha1';externalBackup=$null
+        }
+        phase='prepared'
+        operations=@([pscustomobject][ordered]@{
+            sequence=1;kind='create-file';role='instruction';method='stage-rename'
+            target=[pscustomobject][ordered]@{kind='repository-relative';value='AGENTS.md'}
+            before=$absent;after=$present;stageLeaf='operation-1.stage';backupLeaf=$null;quarantineLeaf=$null;state='pending'
+        })
+    }
+}
+
 function New-TestInstallObservation {
     param(
         [Parameter(Mandatory = $true)][object] $Operation,
@@ -3429,5 +3456,78 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
                 }
             }
         } $definitions $cases
+    }
+
+    # Scenario: A repository bootstrap creates the first install-journal family v2 document with one exact terminal file operation.
+    # Purpose: Version the repository scope and operation contract without relaxing install journal v1.
+    It 'UnitT219_accepts_exact_repo_bootstrap_install_journal_v2' {
+        $journal=Get-TestInstallJournalV2
+        {Assert-AiInstructionsInstallJournalV2 -Journal $journal|Out-Null}|Should Not Throw
+        $parsed=ConvertFrom-AiInstructionsInstallJournalJson -Json ($journal|ConvertTo-Json -Depth 20) -ExpectedOwnerComponent repo-bootstrap
+        $parsed.schemaVersion|Should Be 2
+        $parsed.operations[0].role|Should Be instruction
+        $journal.operations[0]|Add-Member -NotePropertyName unexpected -NotePropertyValue $true
+        (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalV2 -Journal $journal|Out-Null})|Should Match 'unsupported property'
+    }
+
+    # Scenario: Every known install-journal owner is paired with the wrong schema version or reader component.
+    # Purpose: Fail closed on cross-family owner/version combinations, including old readers encountering repository v2 evidence.
+    It 'UnitT220_refuses_all_install_journal_owner_version_cross_pairings' {
+        $v2=Get-TestInstallJournalV2
+        foreach($owner in @('installer','updater','launcher-recovery','user-reconciler')){
+            $copy=Get-TestInstallJournalV2 -Owner $owner
+            (Get-RuntimeContractError {ConvertFrom-AiInstructionsInstallJournalJson -Json ($copy|ConvertTo-Json -Depth 20)|Out-Null})|Should Match 'owner/version pairing'
+        }
+        $v1=Get-TestInstallJournalV1
+        $v1.owner.component='repo-bootstrap'
+        (Get-RuntimeContractError {ConvertFrom-AiInstructionsInstallJournalJson -Json ($v1|ConvertTo-Json -Depth 20)|Out-Null})|Should Match 'owner/version pairing'
+        (Get-RuntimeContractError {ConvertFrom-AiInstructionsInstallJournalJson -Json ($v2|ConvertTo-Json -Depth 20) -ExpectedOwnerComponent launcher-recovery|Out-Null})|Should Match 'owner.component must be launcher-recovery'
+        (Get-RuntimeContractError {ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($v2|ConvertTo-Json -Depth 20)|Out-Null})|Should Match 'unsupported property|schema version'
+    }
+
+    # Scenario: The generic parser reads the checked-in v1 fixture and the existing v1 constructor emits the same ordered JSON bytes as before schema v2 support.
+    # Purpose: Prove USER, installer, updater, and launcher-recovery remain v1 writers with byte-stable output.
+    It 'UnitT221_preserves_install_journal_v1_parser_and_writer_bytes' {
+        $fixturePath=Join-Path $script:RepositoryRoot 'catalog/examples/ai-instructions-install-journal-v1.example.json'
+        $fixtureJson=Get-Content -Raw -Encoding UTF8 -LiteralPath $fixturePath
+        $parsed=ConvertFrom-AiInstructionsInstallJournalJson -Json $fixtureJson
+        $parsed.schemaVersion|Should Be 1
+        $source=Get-TestInstallJournalV1
+        $constructed=New-AiInstructionsInstallJournalV1 -TransactionId $source.transactionId -CreatedAtUtc $source.createdAtUtc `
+            -OwnerComponent $source.owner.component -OwnerProcessId $source.owner.processId -OwnerProcessStartIdentity $source.owner.processStartIdentity `
+            -PlatformOs $source.platform.os -PlatformArchitecture $source.platform.architecture -LockPrimitive $source.lock.primitive -LockLeaf $source.lock.leaf `
+            -PreviousBundleSha256 $source.generation.previousBundleSha256 -CandidateBundleSha256 $source.generation.candidateBundleSha256 `
+            -Phase $source.phase -Operations $source.operations
+        $expected=($source|ConvertTo-Json -Depth 20 -Compress)
+        ($constructed|ConvertTo-Json -Depth 20 -Compress)|Should BeExactly $expected
+        @($constructed.PSObject.Properties.Name) -join ','|Should BeExactly 'schemaVersion,kind,transactionId,createdAtUtc,owner,platform,lock,generation,phase,operations'
+        [byte[]]$fixtureBytes=[IO.File]::ReadAllBytes($fixturePath)
+        [byte[]]$writerBytes=[Text.UTF8Encoding]::new($false).GetBytes((($parsed|ConvertTo-Json -Depth 30).Replace("`r`n","`n"))+"`n")
+        [Convert]::ToBase64String($writerBytes)|Should BeExactly ([Convert]::ToBase64String($fixtureBytes))
+        $sha=[Security.Cryptography.SHA256]::Create();try{$writerSha=([BitConverter]::ToString($sha.ComputeHash($writerBytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+        $writerSha|Should BeExactly '2363ee74875af2fd6c125782024e0f2d68aa2287338eab199df497fe0201c0eb'
+    }
+
+    # Scenario: Repository journal operations repeat a target, use a mismatched object id, or escape the bound Git scope.
+    # Purpose: Reject ambiguous terminal plans and scope/object-format confusion before any repository mutation.
+    It 'UnitT222_rejects_invalid_repo_journal_terminal_targets_scope_and_object_format' {
+        $duplicate=Get-TestInstallJournalV2
+        $copy=ConvertFrom-Json ($duplicate.operations[0]|ConvertTo-Json -Depth 20)
+        $copy.sequence=2
+        $duplicate.operations=@($duplicate.operations[0],$copy)
+        (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalV2 $duplicate|Out-Null})|Should Match 'duplicates another terminal operation target'
+
+        $ref=Get-TestInstallJournalV2
+        $ref.operations[0]=[pscustomobject][ordered]@{
+            sequence=1;kind='update-git-ref';role='git-ref';method='update-ref';target=[pscustomobject][ordered]@{kind='git-ref';value='refs/heads/main'}
+            before=[pscustomobject][ordered]@{exists=$true;objectId=('a'*40)};after=[pscustomobject][ordered]@{exists=$true;objectId=('b'*64)}
+            stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
+        }
+        (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalV2 $ref|Out-Null})|Should Match 'objectFormat sha1'
+
+        $scope=Get-TestInstallJournalV2
+        $scope.operations[0].target=[pscustomobject][ordered]@{kind='git-index';value=(Join-Path $TestDrive 'elsewhere.index')}
+        $scope.operations[0].kind='replace-git-index';$scope.operations[0].role='git-index';$scope.operations[0].method='index-lock-rename'
+        (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalV2 $scope|Out-Null})|Should Match 'not the scope index'
     }
 }

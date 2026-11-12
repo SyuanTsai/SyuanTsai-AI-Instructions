@@ -310,33 +310,40 @@ function New-P9cProjectFixture {
 function New-P9cProjectPublicationFailpointBootstrap {
     param(
         [Parameter(Mandatory=$true)][string]$Root,
-        [Parameter(Mandatory=$true)][ValidateSet('BeforeCommit','ApplyingFailure','CommitWriteFailure','AfterCommitted','CleanupFailure','RecoveryOnly')][string]$Failpoint,
+        [Parameter(Mandatory=$true)][string]$Failpoint,
         [ValidateSet('InProcess','NextRun')][string]$RecoveryPath='InProcess'
     )
     $scriptRoot=Join-Path $Root 'scripts'
     Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts') -Destination $scriptRoot -Recurse
     $bootstrapPath=Join-Path $scriptRoot 'bootstrap-ai-instructions.ps1'
-    $text=[IO.File]::ReadAllText($bootstrapPath)
-    $marker=switch($Failpoint){
-        'BeforeCommit'{'    # P9C_TEST_HOOK: before project publication commit decision.'}
-        'ApplyingFailure'{'    # P9C_TEST_HOOK: before project publication commit decision.'}
-        'CommitWriteFailure'{'        # P9C_TEST_HOOK: during project publication commit decision write.'}
-        'AfterCommitted'{'    # P9C_TEST_HOOK: after project publication commit decision.'}
-        'CleanupFailure'{'    # P9C_TEST_HOOK: before project publication evidence cleanup.'}
-        'RecoveryOnly'{'            # P9C_TEST_HOOK: after project publication recovery.'}
+    $failpointName=switch($Failpoint){
+        'BeforeCommit'{'before-committed-journal-write'}
+        'ApplyingFailure'{'after-operation-1-before-journal'}
+        'CommitWriteFailure'{'before-committed-journal-write'}
+        'AfterCommitted'{'after-committed-journal-write'}
+        'CleanupFailure'{'after-cleanup-journal-before-directory'}
+        default{$Failpoint}
     }
-    if(-not$text.Contains($marker)){throw "Project publication $Failpoint test seam was not found."}
-    $indent=$marker.Substring(0,$marker.IndexOf('#'))
-    $failure="throw 'Injected project publication $Failpoint failure.'"
-    $injection="$indent$failure`r`n$marker"
-    $text=$text.Replace($marker,$injection)
-    if($RecoveryPath-ceq'NextRun'){
-        $catchMarker='    # P9C_TEST_HOOK: before in-process project publication recovery.'
-        if(-not$text.Contains($catchMarker)){throw 'Project publication next-run recovery seam was not found.'}
-        $skip="    `$script:ProjectPublicationFailureResolutionHandled=`$true`r`n    `$script:ProjectPublicationContext=`$null`r`n    throw `$syncError`r`n$catchMarker"
-        $text=$text.Replace($catchMarker,$skip)
+    if($Failpoint-ceq'RecoveryOnly'){
+        $text=[IO.File]::ReadAllText($bootstrapPath)
+        $invocation='            Invoke-ProjectPublicationRecovery -Repository $targetRootPath'
+        if(-not$text.Contains($invocation)){throw 'Project publication recovery invocation was not found.'}
+        $text=$text.Replace($invocation,$invocation+"`r`n            throw 'Injected project publication RecoveryOnly failure.'")
+        [IO.File]::WriteAllText($bootstrapPath,$text,[Text.UTF8Encoding]::new($false))
+        return $bootstrapPath
     }
-    [IO.File]::WriteAllText($bootstrapPath,$text,[Text.UTF8Encoding]::new($false))
+    $modulePath=Join-Path $scriptRoot 'ai-instructions-install-transaction.psm1'
+    $moduleText=[IO.File]::ReadAllText($modulePath)
+    if($RecoveryPath-ceq'InProcess'){
+        $failFast='    [Environment]::FailFast("AI instructions installer failpoint: $Name")'
+        if(-not$moduleText.Contains($failFast)){throw 'Install failpoint invocation was not found.'}
+        $replacement='    throw "Injected AI instructions installer failpoint: $Name"'
+        $moduleText=$moduleText.Replace($failFast,$replacement)
+        [IO.File]::WriteAllText($modulePath,$moduleText,[Text.UTF8Encoding]::new($false))
+    }
+    $bootstrapText=[IO.File]::ReadAllText($bootstrapPath)
+    $prefix="[Environment]::SetEnvironmentVariable('AI_INSTRUCTIONS_INSTALL_FAILPOINT','$failpointName','Process')`r`n"
+    [IO.File]::WriteAllText($bootstrapPath,$prefix+$bootstrapText,[Text.UTF8Encoding]::new($false))
     return $bootstrapPath
 }
 
@@ -372,8 +379,8 @@ function New-P9cPreManifestTamperBootstrap {
     Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts') -Destination $scriptRoot -Recurse
     $bootstrapPath=Join-Path $scriptRoot 'bootstrap-ai-instructions.ps1'
     $text=[IO.File]::ReadAllText($bootstrapPath)
-    $marker='            # P9C_TEST_HOOK: immediately before final project Skill manifest verification.'
-    if(-not$text.Contains($marker)){throw 'Project pre-manifest verification test seam was not found.'}
+    $marker='            Assert-ProjectSkillManifestFilesCurrent -TargetRoot $targetRootPath -ManifestEntries $nextManifestEntries.ToArray()'
+    if(-not$text.Contains($marker)){throw 'Project pre-manifest verification invocation was not found.'}
     $relative=$TargetRelativePath.Replace("'","''")
     $injection="            [IO.File]::AppendAllText((Join-Path `$targetRootPath '$relative'),`"concurrent project edit``n`",[Text.UTF8Encoding]::new(`$false))`r`n$marker"
     [IO.File]::WriteAllText($bootstrapPath,$text.Replace($marker,$injection),[Text.UTF8Encoding]::new($false))
