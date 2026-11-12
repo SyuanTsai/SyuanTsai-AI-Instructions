@@ -130,6 +130,25 @@ function Set-LauncherRecoveryPinMismatch {
     [IO.File]::WriteAllText($path,(($configuration|ConvertTo-Json -Depth 20).Replace("`r`n","`n")+"`n"),[Text.UTF8Encoding]::new($false))
 }
 
+Describe 'AI instructions launcher recovery portable preflight' {
+    # Scenario: An orphaned transaction directory exists beside the stable launcher before any installed runtime is available.
+    # Purpose: Exercise the real launcher on every platform and prove it refuses interrupted-install residue before runtime verification without deleting evidence.
+    It 'UnitT00_refuses_orphaned_transaction_residue_before_runtime_verification' {
+        $fixtureHome=Join-Path $TestDrive 'portable-residue-home'
+        $hooks=Join-Path $fixtureHome 'hooks'
+        New-Item -ItemType Directory -Path $hooks|Out-Null
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts\bootstrap-ai-instructions-installed.ps1') -Destination (Join-Path $hooks 'bootstrap-ai-instructions.ps1')
+        [IO.File]::WriteAllText((Join-Path $fixtureHome 'ai-instructions-install.lock'),'',[Text.UTF8Encoding]::new($false))
+        $transactionPath=Join-Path $fixtureHome ('.ai-instructions-txn/'+('a'*32))
+        New-Item -ItemType Directory -Path $transactionPath|Out-Null
+
+        $caught=Invoke-LauncherRecoveryFailure -CodexHome $fixtureHome -ValidateOnly
+
+        (Get-AiInstructionsRefusalCode $caught)|Should Be interrupted-install
+        Test-Path -LiteralPath $transactionPath -PathType Container|Should Be $true
+    }
+}
+
 if([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)){
 Describe 'AI instructions launcher recovery' {
     BeforeAll {

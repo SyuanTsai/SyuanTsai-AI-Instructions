@@ -345,15 +345,13 @@ Describe 'Windows Core full planner and aggregate' {
         $script:ActualPlan.Plan.expectedSkippedTests.Count | Should Be 5
     }
 
-    # Scenario: Every repository Pester file is checked for at least one It outside Windows platform guards, except one pre-existing launcher-recovery file.
-    # Purpose: Keep Linux and macOS one-file shards discoverable while documenting the exact legacy exception outside SYP-417 scope.
+    # Scenario: Every repository Pester file is checked for at least one It outside Windows platform guards with no remaining exceptions.
+    # Purpose: Keep every Linux and macOS one-file shard discoverable and prove the legacy launcher-recovery gap is closed.
     It 'UnitT12_requires_non_Windows_discovery_for_every_Pester_file' {
-        $allowlist = @(
-            'tests/ai-instructions-launcher-recovery.Tests.ps1' # Existing exception outside the SYP-417 scope.
-        )
+        $allowlist = @()
         $results = @(Assert-PesterFilesHaveNonWindowsDiscovery -Root $script:WindowsCoreRepositoryRoot -Allowlist $allowlist)
-        @($results | Where-Object DiscoverableItCount -le 0).Count | Should Be 1
-        @($results | Where-Object DiscoverableItCount -gt 0).Count | Should Be ($results.Count - 1)
+        @($results | Where-Object DiscoverableItCount -le 0).Count | Should Be 0
+        @($results | Where-Object DiscoverableItCount -gt 0).Count | Should Be $results.Count
     }
 
     # Scenario: A fixture Pester file registers every It only inside an IsWindows condition.
