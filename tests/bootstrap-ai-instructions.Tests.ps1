@@ -269,6 +269,64 @@ Describe 'bootstrap-ai-instructions' {
         New-TestProvenance -ArchivePath $sourceArchive -Path $provenancePath
     }
 
+    # Register only on the native Windows host because this regression exercises the Windows PowerShell 5.1 process.
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows) -and
+        $null -ne (Get-Command powershell.exe -ErrorAction SilentlyContinue)) {
+        # Scenario: Windows PowerShell 5.1 invokes bootstrap against a clean repository with a valid source archive.
+        # Purpose: Refuse the unsupported runtime baseline before changing any worktree, Git metadata, ref, or transaction byte.
+        It 'InterT03_windows_powershell_5_1_refuses_before_repository_mutation' {
+            $gitDirectory = Join-Path $targetRoot '.git'
+            $excludePath = Join-Path $gitDirectory 'info\exclude'
+            $headPath = Join-Path $gitDirectory 'HEAD'
+            $indexPath = Join-Path $gitDirectory 'index'
+            $transactionPath = Join-Path $targetRoot '.ai-instructions-txn'
+            $getFileSnapshot = {
+                param([Parameter(Mandatory = $true)][string]$Root)
+                return @(
+                    Get-ChildItem -LiteralPath $Root -File -Recurse -Force |
+                        Where-Object { -not $_.FullName.StartsWith($gitDirectory + [IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) } |
+                        Sort-Object FullName |
+                        ForEach-Object {
+                            [pscustomobject][ordered]@{
+                                path = $_.FullName.Substring($Root.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+                                bytesBase64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName))
+                            }
+                        }
+                )
+            }
+            $getRefSnapshot = {
+                return @(
+                    Get-ChildItem -LiteralPath (Join-Path $gitDirectory 'refs') -File -Recurse -Force |
+                        Sort-Object FullName |
+                        ForEach-Object {
+                            [pscustomobject][ordered]@{
+                                path = $_.FullName.Substring($gitDirectory.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+                                bytesBase64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName))
+                            }
+                        }
+                )
+            }
+            $worktreeBefore = ConvertTo-Json -Compress -InputObject @(&$getFileSnapshot $targetRoot)
+            $refsBefore = ConvertTo-Json -Compress -InputObject @(&$getRefSnapshot)
+            $excludeBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+            $headBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($headPath))
+            $indexBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath))
+
+            $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:BootstrapScript `
+                -SourceArchivePath $sourceArchive -TargetRoot $targetRoot -ConfigurationPath $configurationPath `
+                -ProvenancePath $script:TestProvenancePath 2>&1
+
+            $LASTEXITCODE | Should Not Be 0
+            (ConvertTo-TestDiagnosticText -Output $output) | Should Match 'ai-instructions-refusal-code=runtime-baseline-unavailable'
+            (ConvertTo-Json -Compress -InputObject @(&$getFileSnapshot $targetRoot)) | Should Be $worktreeBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($headPath)) | Should Be $headBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath)) | Should Be $indexBefore
+            (ConvertTo-Json -Compress -InputObject @(&$getRefSnapshot)) | Should Be $refsBefore
+            Test-Path -LiteralPath $transactionPath | Should Be $false
+        }
+    }
+
     # Scenario: A consumer with its own root license receives, updates, and removes source declarations.
     # Purpose: Keep delivery inventoried, byte-exact and idempotent while protecting customized copies and product licenses.
     It 'InterT04_manages_instruction_license_delivery_without_touching_product_licenses' {
@@ -2836,7 +2894,7 @@ exit /b %errorlevel%
         $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
         $gitWrapper = "@echo off`necho %* >> `"$gitInvocationLog`"`n`"$realGit`" %*"
         Set-TestText -Path $gitWrapperPath -Value $gitWrapper
-        $powerShellExe = (Get-Command powershell.exe).Source
+        $powerShellExe = $script:TestPowerShellExecutable
         $arguments = @(
             '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:BootstrapScript,
             '-SourceArchivePath', $sourceArchive,
@@ -2912,7 +2970,7 @@ exit /b %errorlevel%
         $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
         $attributeExecutable = Join-Path $env:SystemRoot 'System32\attrib.exe'
         $agentPath = Join-Path $targetRoot 'AGENTS.md'
-        $powerShellExe = (Get-Command powershell.exe).Source
+        $powerShellExe = $script:TestPowerShellExecutable
         $manifestPath = Join-Path $targetRoot $script:ManifestPath.Replace('/','\')
         $indexPath = Join-Path $targetRoot '.git\index'
         $excludePath = Join-Path $targetRoot '.git\info\exclude'

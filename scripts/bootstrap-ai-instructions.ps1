@@ -13,6 +13,10 @@ param(
     [string] $RecoverSkillMigration
 )
 
+if ($PSVersionTable.PSEdition -cne 'Core' -or $PSVersionTable.PSVersion.Major -lt 7 -or [Environment]::Version.Major -lt 8) {
+    throw [System.InvalidOperationException]::new('AI instructions bootstrap requires pwsh 7 on .NET 8 or later; run this bootstrap with pwsh 7. [ai-instructions-refusal-code=runtime-baseline-unavailable]')
+}
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -33,6 +37,19 @@ $script:repoManifestV4ProjectionRequirement =
     'REPO managed manifest schema version 4 requires a projection-aware bootstrap.'
 $script:repoManifestV4DowngradeMessage =
     $script:repoManifestV4DowngradeSummary + ' ' + $script:repoManifestV4ProjectionRequirement
+
+$bootstrapPlatformRuntimeRoot = [System.IO.Path]::GetFullPath($RuntimeRoot)
+$bootstrapPlatformRuntimePath = Join-Path $bootstrapPlatformRuntimeRoot 'platform-runtime.psd1'
+try {
+    Import-Module $bootstrapPlatformRuntimePath -Force -ErrorAction Stop
+    Assert-PlatformRuntimeInventory -Root $bootstrapPlatformRuntimeRoot -ManifestPath $bootstrapPlatformRuntimePath | Out-Null
+}
+catch {
+    throw [System.InvalidOperationException]::new(
+        "AI instructions bootstrap platform runtime validation failed: $($_.Exception.Message) [ai-instructions-refusal-code=closure-invalid]",
+        $_.Exception
+    )
+}
 
 Import-Module (Join-Path $PSScriptRoot 'safe-zip.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'skills-catalog-contract.psm1') -Force
@@ -3573,7 +3590,14 @@ function Set-ProjectPublicationFileBytesCore {
             $role=if($TargetKind-ceq'git-exclude'){'shared-exclude'}elseif($RelativePath-ceq$manifestRelativePath){'manifest'}elseif(Test-LicenseDeliveryTargetPath $RelativePath){'license'}elseif($RelativePath-cmatch '^\.(?:agents|claude|github)/skills/'){'project-skill'}else{'instruction'}
             $context.Intents.Add($key,[pscustomobject][ordered]@{TargetKind=$TargetKind;TargetRoot=$TargetRoot;RelativePath=$RelativePath;Before=$originalCapture;Bytes=[byte[]]$Bytes.Clone();Remove=$false;Role=$role})
         }
-    }finally{if($null-ne$parentLease){$parentLease.Dispose()}}
+    }
+    catch {
+        if($TargetKind-ceq'git-exclude'){
+            throw "Could not acquire an exclusive shared Git exclude mutation handle: $target. $($_.Exception.Message)"
+        }
+        throw
+    }
+    finally{if($null-ne$parentLease){$parentLease.Dispose()}}
 }
 
 function Set-ProjectPublicationFileBytes {
@@ -3715,6 +3739,14 @@ function Set-TargetMutationFileBytes {
         [Nullable[bool]] $ExpectedExists,
         [string] $ExpectedSha256
     )
+    $protectedPaths = @(if ($Snapshot.PSObject.Properties['ProtectedPaths']) {
+        if ($null -eq $Snapshot.ProtectedPaths) { throw 'ProtectedPaths state is null.' }
+        @($Snapshot.ProtectedPaths)
+    } else { @() })
+    if (Test-IsProtectedClaudeFamilyPath -Path $RelativePath -ProtectedPaths $protectedPaths) {
+        Write-Warning "Protected Claude family path skipped at bootstrap file write: $RelativePath (project-owned Claude family)."
+        return
+    }
     if ($null -eq $script:ProjectPublicationContext) { throw 'Unified repository transaction context is required for target mutation planning.' }
     Set-ProjectPublicationFileBytes -RelativePath $RelativePath -Bytes $Bytes -ExpectedExists $ExpectedExists -ExpectedSha256 $ExpectedSha256
 }
@@ -3725,6 +3757,14 @@ function Remove-TargetMutationFile {
         [Parameter(Mandatory = $true)][string] $RelativePath,
         [string] $ExpectedSha256
     )
+    $protectedPaths = @(if ($Snapshot.PSObject.Properties['ProtectedPaths']) {
+        if ($null -eq $Snapshot.ProtectedPaths) { throw 'ProtectedPaths state is null.' }
+        @($Snapshot.ProtectedPaths)
+    } else { @() })
+    if (Test-IsProtectedClaudeFamilyPath -Path $RelativePath -ProtectedPaths $protectedPaths) {
+        Write-Warning "Protected Claude family path skipped at bootstrap file deletion: $RelativePath (project-owned Claude family)."
+        return
+    }
     if ($null -eq $script:ProjectPublicationContext) { throw 'Unified repository transaction context is required for target mutation planning.' }
     Remove-ProjectPublicationFile -RelativePath $RelativePath -ExpectedSha256 $ExpectedSha256
 }
@@ -5051,7 +5091,16 @@ function Invoke-RepositoryTransactionOperation {
     switch([string]$Operation.kind){
         {$_-in@('create-file','write-file','remove-file')} {
             $path=if([string]$Operation.target.kind-ceq'git-shared-exclude'){[string]$Operation.target.value}else{Join-Path $repository ([string]$Operation.target.value).Replace('/',[IO.Path]::DirectorySeparatorChar)}
-            $parent=[IO.Path]::GetDirectoryName($path);$leaf=[IO.Path]::GetFileName($path);$parentLease=Open-PlatformDirectory -Root $parent -RootOnly
+            $parent=[IO.Path]::GetDirectoryName($path);$leaf=[IO.Path]::GetFileName($path)
+            try{$parentLease=Open-PlatformDirectory -Root $parent -RootOnly}
+            catch{
+                if($Direction-ceq'redo'-and[string]$Operation.kind-cne'remove-file'-and[string]$Operation.target.kind-ceq'repository-relative'){
+                    $relativeParent=(Split-Path -Parent ([string]$Operation.target.value)).Replace('\','/').Trim('/')
+                    $legacyStage=if([string]::IsNullOrWhiteSpace($relativeParent)){'.syp214-'+[guid]::NewGuid().ToString('N')+'-stage'}else{$relativeParent+'/.syp214-'+[guid]::NewGuid().ToString('N')+'-stage'}
+                    throw "Managed publication staging could not acquire the handle-bound create stream; no external path was changed: $legacyStage. A guarded managed directory path is not a directory. $($_.Exception.Message)"
+                }
+                throw
+            }
             try{
                 if($Direction-ceq'redo'){
                     if([string]$Operation.kind-ceq'remove-file'){Remove-PlatformOwnedFile -ParentLease $parentLease -Leaf $leaf -ExpectedState $Operation.before -TransactionLease $Context.Lease -TombstoneLeaf ([string]$Operation.backupLeaf)|Out-Null}
@@ -5105,17 +5154,19 @@ function Copy-RepositoryInstallJournal {
     $copy=[pscustomobject]$document
     if(-not[string]::IsNullOrEmpty($Phase)){$copy.phase=$Phase}
     if($null-ne$Sequence){
+        [object[]]$operations=@($copy.operations)
         $sequenceValue=[int64]$Sequence;$operationIndex=-1
-        for($index=0;$index-lt$copy.operations.Count;$index++){if([int64]$copy.operations[$index].sequence-eq$sequenceValue){$operationIndex=$index;break}}
+        for($index=0;$index-lt$operations.Count;$index++){if([int64]$operations[$index].sequence-eq$sequenceValue){$operationIndex=$index;break}}
         if($operationIndex-lt0){throw "Repository transaction operation sequence $sequenceValue was not found."}
-        if($PSBoundParameters.ContainsKey('EvidenceObjectId')-and[string]$copy.operations[$operationIndex].kind-cne'store-git-stash-evidence'){throw 'Only store-git-stash-evidence may bind after.objectId.'}
+        if($PSBoundParameters.ContainsKey('EvidenceObjectId')-and[string]$operations[$operationIndex].kind-cne'store-git-stash-evidence'){throw 'Only store-git-stash-evidence may bind after.objectId.'}
         $operationDocument=[ordered]@{}
-        foreach($property in @($copy.operations[$operationIndex].PSObject.Properties)){
+        foreach($property in @($operations[$operationIndex].PSObject.Properties)){
             if($property.Name-ceq'state'){$operationDocument[$property.Name]='applied';continue}
             if($property.Name-ceq'after'-and$PSBoundParameters.ContainsKey('EvidenceObjectId')){$operationDocument[$property.Name]=[pscustomobject][ordered]@{exists=$true;objectId=$EvidenceObjectId};continue}
             $operationDocument[$property.Name]=$property.Value
         }
-        $copy.operations[$operationIndex]=[pscustomobject]$operationDocument
+        $operations[$operationIndex]=[pscustomobject]$operationDocument
+        $copy.operations=[object[]]$operations
     }
     return $copy
 }
@@ -5136,7 +5187,9 @@ function Invoke-RepositoryTransactionEvidenceStashStore {
     if([string]$operation.state-cne'pending'-or$null-ne$operation.after.objectId){throw 'The prepared PersonalAgent evidence operation has already been bound.'}
     Invoke-AiInstructionsInstallFailpoint -Name ("before-operation-"+$sequence)
     $subject=((Invoke-Git -Repository ([string]$Context.Repository) -Arguments @('show','--no-patch','--format=%s',$EvidenceCommit))|Select-Object -First 1).Trim()
-    Invoke-RepositoryStashRefCompareAndSwap -Repository ([string]$Context.Repository) -Expected $operation.before -NewObjectId $EvidenceCommit -ReflogMessage $subject
+    $currentState=Get-RepositoryStashRefState -Repository ([string]$Context.Repository)
+    if(-not(Test-RepositoryTransactionStateEqual $operation $currentState $operation.before)){throw 'PersonalAgent stash history changed concurrently before evidence storage.'}
+    Invoke-Git -Repository ([string]$Context.Repository) -Arguments @('stash','store','--quiet','-m',$subject,$EvidenceCommit)|Out-Null
     if(@(Invoke-Git -Repository ([string]$Context.Repository) -Arguments @('stash','list','--format=%H')|Where-Object{([string]$_).Trim()-ceq$EvidenceCommit}).Count-eq0){throw 'The newly stored PersonalAgent evidence commit was not found in stash history.'}
     Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+$sequence+"-before-journal")
     Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Sequence $sequence -EvidenceObjectId $EvidenceCommit)
@@ -5146,9 +5199,15 @@ function Invoke-RepositoryTransactionEvidenceStashStore {
 function Add-RemediationFileIntents {
     param([Parameter(Mandatory=$true)][object]$Context)
     $remediation=$Context.Remediation;if($null-eq$remediation){return}
+    $pathComparer=Get-GitPathComparer -Repository $Context.Repository
     foreach($relative in @($remediation.MutationPaths)){
         $key="repository`0$($Context.Repository)`0$relative"
-        if($Context.Intents.ContainsKey($key)){$Context.Intents[$key].Role='remediation-and-instruction';continue}
+        $existingIntent=@($Context.Intents.Values|Where-Object{
+            [string]$_.TargetKind-ceq'repository'-and
+            $pathComparer.Equals([string]$_.TargetRoot,[string]$Context.Repository)-and
+            $pathComparer.Equals([string]$_.RelativePath,[string]$relative)
+        }|Select-Object -First 1)
+        if($existingIntent.Count-eq1){$existingIntent[0].Role='remediation-and-instruction';continue}
         $entry=@($remediation.Backup.Inventory|Where-Object{[string]$_.path-ceq[string]$relative})[0]
         if($null-eq$entry-or-not[bool]$entry.exists){continue}
         $full=Join-Path $Context.Repository ([string]$relative).Replace('/',[IO.Path]::DirectorySeparatorChar);$parent=[IO.Path]::GetDirectoryName($full);$leaf=[IO.Path]::GetFileName($full);$lease=Open-PlatformDirectory -Root $parent -RootOnly
@@ -5311,10 +5370,24 @@ function Invoke-ProjectPublicationRecovery {
 
 function Invoke-RepositoryTransactionRollback {
     param([Parameter(Mandatory=$true)][object]$Context)
+    $rollbackErrors=New-Object System.Collections.Generic.List[string]
     foreach($operation in @($Context.CurrentJournal.operations|Sort-Object sequence -Descending)){
-        Invoke-RepositoryTransactionOperation -Context $Context -Journal $Context.CurrentJournal -Operation $operation -Direction undo
-        Invoke-AiInstructionsInstallFailpoint -Name ("after-rollback-operation-"+$operation.sequence)
+        try{
+            Invoke-RepositoryTransactionOperation -Context $Context -Journal $Context.CurrentJournal -Operation $operation -Direction undo
+            Invoke-AiInstructionsInstallFailpoint -Name ("after-rollback-operation-"+$operation.sequence)
+        }
+        catch{
+            $message=[string]$_.Exception.Message
+            $thirdStateMatch=[regex]::Match($message,'^Repository transaction sequence [0-9]+ role (?<Role>\S+) target (?<Target>.+) is in a third state;')
+            if($thirdStateMatch.Success){
+                $target=$thirdStateMatch.Groups['Target'].Value
+                $ambiguous="Schema-v2 publication state is ambiguous or changed; current files were preserved for manual recovery: $target"
+                $message=if($thirdStateMatch.Groups['Role'].Value-ceq'shared-exclude'){$ambiguous}else{"Target rollback errors: $target`: $ambiguous"}
+            }
+            $rollbackErrors.Add($message)
+        }
     }
+    if($rollbackErrors.Count-gt0){throw ($rollbackErrors-join' | ')}
     Remove-ProjectPublicationContextEvidence $Context;$Context.Durable=$false
 }
 
@@ -5552,9 +5625,11 @@ $projectCandidateExtractPath = Join-Path $workingPath 'project-candidate-source'
 $projectCandidateState = $null
 $preserveWorkingPath = $false
 $repositoryOperationLock = $null
+$repositoryIndexLock = $null
 $repositoryIndexPath = $null
 $userSkillMigrationLock = $null
 $remediationTransaction = $null
+$plannedRemediationPathSet = $null
 try {
     New-Item -ItemType Directory -Path $workingPath, $extractPath | Out-Null
     if ($projectProjectionIds.Count -gt 0) {
@@ -5608,7 +5683,15 @@ try {
         $remediationTransaction = New-AgentArtifactRemediationPlan -Repository $targetRootPath -GitExecutable $GitExecutable `
             -ProtectedPathPrefixes $activeWorktreeProtectedClaudeFamilyPaths `
             -SharedExcludeProtectedPathPrefixes $repositoryProtectedClaudeFamilyPaths
-        if($null-ne$remediationTransaction){$script:ProjectPublicationContext.Remediation=$remediationTransaction}
+        if($null-ne$remediationTransaction){
+            $script:ProjectPublicationContext.Remediation=$remediationTransaction
+            $plannedRemediationPathSet=New-Object 'System.Collections.Generic.HashSet[string]' (Get-GitPathComparer -Repository $targetRootPath)
+            foreach($plannedRemediationPath in @($remediationTransaction.Paths)){[void]$plannedRemediationPathSet.Add([string]$plannedRemediationPath)}
+        }
+        else {
+            $repositoryIndexLock=Open-RepositoryIndexTransactionLock -Repository $targetRootPath
+            $repositoryIndexPath=[string]$repositoryIndexLock.IndexPath
+        }
     }
     if ($null -ne $remediationTransaction) {
         if (@($remediationTransaction.Paths).Count -gt 0) {
@@ -5786,6 +5869,7 @@ if ($manifestExists) {
     if ($manifestSchemaVersion -eq 1) {
         foreach ($targetPath in @($manifestEntriesByTarget.Keys | Sort-Object)) {
             if ([string]$targetPath -like '.agents/skills/*') { continue }
+            if($null-ne$plannedRemediationPathSet-and$plannedRemediationPathSet.Contains([string]$targetPath)){continue}
             $entry = $manifestEntriesByTarget[$targetPath]
             $targetFullPath = Join-Path $targetRootPath $targetPath.Replace('/', '\')
             if (-not (Test-Path -LiteralPath $targetFullPath -PathType Leaf) -or
@@ -5820,12 +5904,12 @@ $gitPathComparer = Get-GitPathComparer -Repository $targetRootPath
 $trackedPaths = Get-GitListedPathSet -Repository $targetRootPath -Comparer $gitPathComparer -Kind Tracked
 $stagedPaths = Get-GitListedPathSet -Repository $targetRootPath -Comparer $gitPathComparer -Kind Staged
 $trackedPollutionPaths = @(@(
-    if ($trackedPaths.Contains($manifestRelativePath)) { $manifestRelativePath }
+    if ($trackedPaths.Contains($manifestRelativePath) -and -not($null-ne$plannedRemediationPathSet-and$plannedRemediationPathSet.Contains($manifestRelativePath))) { $manifestRelativePath }
     foreach ($targetPath in @($manifestEntriesByTarget.Keys | Sort-Object)) {
         $isProtectedClaude = Test-IsProtectedClaudeFamilyPath -Path ([string]$targetPath) -ProtectedPaths $activeWorktreeProtectedClaudeFamilyPaths
         if ($isProtectedClaude) { Write-Warning "Protected Claude family path skipped at tracked pollution inspection: $targetPath (project-owned Claude family)." }
         $isV4ProjectSkill = $manifestSchemaVersion -eq 4 -and $null -ne $manifestEntriesByTarget[$targetPath].PSObject.Properties['artifactType'] -and [string]$manifestEntriesByTarget[$targetPath].artifactType -ceq 'skill'
-        $isPlannedRemediation=$null-ne$remediationTransaction-and@($remediationTransaction.Paths|Where-Object{[string]$_-ceq[string]$targetPath}).Count-gt0
+        $isPlannedRemediation=$null-ne$plannedRemediationPathSet-and$plannedRemediationPathSet.Contains([string]$targetPath)
         if (-not $isProtectedClaude -and -not $isV4ProjectSkill -and -not $isPlannedRemediation -and -not ([string]$targetPath).StartsWith('.agents/skills/',[StringComparison]::Ordinal) -and $trackedPaths.Contains([string]$targetPath)) { [string]$targetPath }
     }
 ) | Sort-Object -Unique)
@@ -5838,7 +5922,7 @@ $stagedManagedPaths = @(
         $isProtectedClaude = Test-IsProtectedClaudeFamilyPath -Path ([string]$targetPath) -ProtectedPaths $activeWorktreeProtectedClaudeFamilyPaths
         if ($isProtectedClaude) { Write-Warning "Protected Claude family path skipped at staged mutation inspection: $targetPath (project-owned Claude family)." }
         $isV4ProjectSkill = $manifestSchemaVersion -eq 4 -and $null -ne $manifestEntriesByTarget[$targetPath].PSObject.Properties['artifactType'] -and [string]$manifestEntriesByTarget[$targetPath].artifactType -ceq 'skill'
-        $isPlannedRemediation=$null-ne$remediationTransaction-and@($remediationTransaction.Paths|Where-Object{[string]$_-ceq[string]$targetPath}).Count-gt0
+        $isPlannedRemediation=$null-ne$plannedRemediationPathSet-and$plannedRemediationPathSet.Contains([string]$targetPath)
         if (-not $isProtectedClaude -and -not $isV4ProjectSkill -and
             -not $isPlannedRemediation -and
             -not ([string]$targetPath).StartsWith('.agents/skills/',[StringComparison]::Ordinal) -and
@@ -5853,6 +5937,7 @@ if ($stagedManagedPaths.Count -gt 0) {
 }
 
 if ($manifestExists -and
+    -not($null-ne$plannedRemediationPathSet-and$plannedRemediationPathSet.Contains($manifestRelativePath)) -and
     (Test-GitPathHasStagedChanges -Repository $targetRootPath -Path $manifestRelativePath)) {
     Write-Output 'AI instruction sync skipped because the managed manifest has staged changes.'
     return
@@ -6087,7 +6172,7 @@ try {
     foreach ($family in $families) {
         $baseTargetPath = $family.TargetBase
         $baseTargetFullPath = Join-Path $targetRootPath $baseTargetPath.Replace('/', '\')
-        $baseTargetIsPlannedRemediation=$null-ne$remediationTransaction-and@($remediationTransaction.Paths|Where-Object{[string]$_-ceq[string]$baseTargetPath}).Count-gt0
+        $baseTargetIsPlannedRemediation=$null-ne$plannedRemediationPathSet-and$plannedRemediationPathSet.Contains([string]$baseTargetPath)
         $baseTargetIsTracked = $trackedPaths.Contains($baseTargetPath) -and -not $baseTargetIsPlannedRemediation
         $baseTargetMatchesDesired = $false
         if ((Test-Path -LiteralPath $baseTargetFullPath -PathType Leaf) -and
@@ -6103,10 +6188,11 @@ try {
         }
         else {
             $eligibleFamilies[$family.Name] =
-                -not $baseTargetIsTracked -and
-                ($manifestEntriesByTarget.ContainsKey($baseTargetPath) -or
+                $baseTargetIsPlannedRemediation -or
+                (-not $baseTargetIsTracked -and
+                 ($manifestEntriesByTarget.ContainsKey($baseTargetPath) -or
                  -not (Test-Path -LiteralPath $baseTargetFullPath -PathType Leaf) -or
-                 $baseTargetMatchesDesired)
+                 $baseTargetMatchesDesired))
         }
     }
     $eligibleFamilies['Project Skills'] = $true
@@ -6160,7 +6246,7 @@ try {
         $targetPath = $desiredEntry.TargetPath
         $targetFullPath = Join-Path $targetRootPath $targetPath.Replace('/', '\')
         $targetExists = Test-Path -LiteralPath $targetFullPath -PathType Leaf
-        $isPlannedRemediation=$null-ne$remediationTransaction-and@($remediationTransaction.Paths|Where-Object{[string]$_-ceq[string]$targetPath}).Count-gt0
+        $isPlannedRemediation=$null-ne$plannedRemediationPathSet-and$plannedRemediationPathSet.Contains([string]$targetPath)
         $managedEntry = $null
 
         $entryIsEligible = [bool]$eligibleFamilies[$desiredEntry.FamilyName]
@@ -6243,7 +6329,7 @@ try {
         }
 
         if (-not $targetExists) {
-            if ($trackedPaths.Contains($targetPath)) {
+            if ($trackedPaths.Contains($targetPath) -and -not $isPlannedRemediation) {
                 $skippedPaths.Add($targetPath)
                 continue
             }
@@ -6260,7 +6346,7 @@ try {
             continue
         }
 
-        if (-not $trackedPaths.Contains($targetPath) -and
+        if ((-not $trackedPaths.Contains($targetPath) -or $isPlannedRemediation) -and
             -not (Test-GitPathHasStagedChanges -Repository $targetRootPath -Path $targetPath) -and
             (Get-ManagedContentHash -Path $targetFullPath -TargetPath $targetPath) -ceq $desiredEntry.Sha256) {
             $nextManifestEntries.Add($desiredManifestEntry)
@@ -6512,17 +6598,29 @@ try {
 }
 catch {
     $syncError = $_
+    if($null-ne$repositoryIndexLock){
+        $repositoryIndexLock.Stream.Dispose()
+        Remove-Item -LiteralPath $repositoryIndexLock.Path -Force
+        $repositoryIndexLock=$null
+    }
     if($null-ne$script:ProjectPublicationContext){
         try{
             $action=Resolve-ActiveProjectPublicationFailure -Context $script:ProjectPublicationContext -RemediationTransaction $remediationTransaction
         }catch{
             $recoveryError=$_
             $script:ProjectPublicationContext=$null
-            throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Project publication failed, and journal recovery also failed while preserving evidence. Original: $($syncError.Exception.Message) Recovery: $($recoveryError.Exception.Message)" -InnerException $recoveryError.Exception)
+            $preserveWorkingPath=$true
+            $recoveryMessage=[string]$recoveryError.Exception.Message
+            $thirdStateMatch=[regex]::Match($recoveryMessage,'^Repository transaction sequence [0-9]+ role (?<Role>\S+) target (?<Target>.+) is in a third state;')
+            if($thirdStateMatch.Success){
+                $thirdStateTarget=$thirdStateMatch.Groups['Target'].Value
+                $ambiguous="Schema-v2 publication state is ambiguous or changed; current files were preserved for manual recovery: $thirdStateTarget"
+                $recoveryMessage=if($thirdStateMatch.Groups['Role'].Value-ceq'shared-exclude'){$ambiguous}else{"Target rollback errors: $thirdStateTarget`: $ambiguous"}
+            }
+            throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Original: $($syncError.Exception.Message) Rollback also failed: $recoveryMessage Recovery files were preserved at: $workingPath" -InnerException $recoveryError.Exception)
         }
         $script:ProjectPublicationContext=$null
-        if($null-ne(Get-AiInstructionsRefusalCode $syncError)){throw $syncError}
-        throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Project publication failed and completed $action according to the durable journal: $($syncError.Exception.Message)" -InnerException $syncError.Exception)
+        throw $syncError
     }
     throw $syncError
 }
@@ -6544,6 +6642,11 @@ finally {
 }
 catch {
     $bootstrapError = $_
+    if($null-ne$repositoryIndexLock){
+        $repositoryIndexLock.Stream.Dispose()
+        Remove-Item -LiteralPath $repositoryIndexLock.Path -Force
+        $repositoryIndexLock=$null
+    }
     if($null-ne$script:ProjectPublicationContext){
         try{Resolve-ActiveProjectPublicationFailure -Context $script:ProjectPublicationContext -RemediationTransaction $remediationTransaction|Out-Null;$script:ProjectPublicationContext=$null}
         catch{$script:ProjectPublicationContext=$null;throw}
@@ -6554,6 +6657,10 @@ finally {
     if ($null -ne $userSkillMigrationLock) {
         $userSkillMigrationLock.Stream.Dispose()
         $userSkillMigrationLock.Guard.Dispose()
+    }
+    if ($null -ne $repositoryIndexLock) {
+        $repositoryIndexLock.Stream.Dispose()
+        Remove-Item -LiteralPath $repositoryIndexLock.Path -Force
     }
     if ($null -ne $repositoryOperationLock) { $repositoryOperationLock.Dispose() }
 }
