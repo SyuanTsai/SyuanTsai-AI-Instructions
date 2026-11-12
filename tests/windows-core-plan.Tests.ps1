@@ -91,6 +91,125 @@ function Assert-PesterFilesHaveNonWindowsDiscovery {
     return $results
 }
 
+function Get-InstallFailpointMatrixContract {
+    param([string] $Root)
+
+    $testName = 'InterT77_recovers_the_install_journal_failpoint_matrix_to_an_idempotent_complete_state'
+    $records = [Collections.Generic.List[object]]::new()
+    foreach ($part in 1..3) {
+        $path = Join-Path $Root "tests/install-ai-instructions-bootstrap.part$part.Tests.ps1"
+        $tokens = $null
+        $parseErrors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$parseErrors)
+        if (@($parseErrors).Count -ne 0) { throw "Install part $part must parse before its failpoint matrix can be checked." }
+        $matches = @($ast.FindAll({
+            param($node)
+            if ($node -isnot [Management.Automation.Language.CommandAst] -or $node.GetCommandName() -cne 'It') { return $false }
+            $names = @($node.CommandElements | Where-Object { $_ -is [Management.Automation.Language.StringConstantExpressionAst] })
+            return @($names | Where-Object Value -CEQ $testName).Count -eq 1
+        }, $true))
+        if ($matches.Count -ne 1) { throw "Install part $part must contain InterT77 exactly once." }
+
+        $itCommand = $matches[0]
+        $hasWindowsGuard = $false
+        $parent = $itCommand.Parent
+        while ($null -ne $parent) {
+            if ($parent -is [Management.Automation.Language.IfStatementAst] -and (Test-WindowsPlatformGuard $parent)) {
+                $hasWindowsGuard = $true
+                break
+            }
+            $parent = $parent.Parent
+        }
+        if (-not $hasWindowsGuard) { throw "Install part $part InterT77 must remain inside a Windows platform guard." }
+
+        $testCasesParameter = @($itCommand.CommandElements | Where-Object {
+            $_ -is [Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -ceq 'TestCases'
+        })
+        if ($testCasesParameter.Count -ne 1) { throw "Install part $part InterT77 must declare TestCases exactly once." }
+        $parameterIndex = [Array]::IndexOf([object[]]$itCommand.CommandElements, $testCasesParameter[0])
+        if ($parameterIndex -lt 0 -or $parameterIndex + 1 -ge $itCommand.CommandElements.Count) {
+            throw "Install part $part InterT77 TestCases payload is missing."
+        }
+        $testCasesAst = $itCommand.CommandElements[$parameterIndex + 1]
+        if ($testCasesAst -isnot [Management.Automation.Language.ArrayExpressionAst]) {
+            throw "Install part $part InterT77 TestCases payload must be an array expression."
+        }
+        $body = @($itCommand.CommandElements | Where-Object { $_ -is [Management.Automation.Language.ScriptBlockExpressionAst] })
+        if ($body.Count -ne 1) { throw "Install part $part InterT77 must contain exactly one body." }
+
+        foreach ($testCase in @($testCasesAst.FindAll({ param($node) $node -is [Management.Automation.Language.HashtableAst] }, $true))) {
+            $expectedKeys = @('Failpoint','PreCrash','Fresh','ExpectedRecovery','ExpectedPhase','ExpectedFinal')
+            $actualKeys = [string[]]@($testCase.KeyValuePairs | ForEach-Object { [string]$_.Item1.Value })
+            if (($actualKeys -join '|') -cne ($expectedKeys -join '|')) {
+                throw "Install part $part InterT77 TestCase keys differ from the reviewed identity fields."
+            }
+            $values = [ordered]@{}
+            foreach ($pair in $testCase.KeyValuePairs) { $values[[string]$pair.Item1.Value] = [string]$pair.Item2.Extent.Text }
+            $identity = ($expectedKeys | ForEach-Object { "$_=$($values[$_])" }) -join '|'
+            $records.Add([pscustomobject]@{
+                Part = $part
+                Identity = $identity
+                Body = [string]$body[0].Extent.Text
+            })
+        }
+    }
+    return $records.ToArray()
+}
+
+function Assert-InstallFailpointMatrixContract {
+    param(
+        [string] $Root,
+        [string[]] $ExpectedCases
+    )
+
+    $records = @(Get-InstallFailpointMatrixContract -Root $Root)
+    $actualCases = [string[]]@($records | ForEach-Object Identity)
+    if (@($actualCases | Select-Object -Unique).Count -ne $actualCases.Count) {
+        throw 'InterT77 TestCase identities must be unique across all install parts.'
+    }
+    $actualSorted = [string[]]@($actualCases)
+    $expectedSorted = [string[]]@($ExpectedCases)
+    [Array]::Sort($actualSorted, [StringComparer]::Ordinal)
+    [Array]::Sort($expectedSorted, [StringComparer]::Ordinal)
+    if (($actualSorted -join "`n") -cne ($expectedSorted -join "`n")) {
+        throw 'InterT77 TestCase identities differ from the exact reviewed matrix.'
+    }
+    if (@($records.Body | Select-Object -Unique).Count -ne 1) {
+        throw 'InterT77 bodies must remain byte-for-byte identical across install parts.'
+    }
+    return $records
+}
+
+function Get-ExpectedInstallFailpointMatrixCases {
+    @(
+        "Failpoint='after-recovery-before-install'|PreCrash=`$null|Fresh=`$true|ExpectedRecovery='no-transaction'|ExpectedPhase=`$null|ExpectedFinal='original'",
+        "Failpoint='after-journal-prepared'|PreCrash=`$null|Fresh=`$false|ExpectedRecovery='roll-back'|ExpectedPhase='prepared'|ExpectedFinal='original'",
+        "Failpoint='after-journal-stage-flush'|PreCrash=`$null|Fresh=`$false|ExpectedRecovery='purge-orphan'|ExpectedPhase=`$null|ExpectedFinal='original'",
+        "Failpoint='after-journal-publish-before-parent-flush'|PreCrash=`$null|Fresh=`$false|ExpectedRecovery='roll-back'|ExpectedPhase='prepared'|ExpectedFinal='original'",
+        "Failpoint='before-operation-1'|PreCrash=`$null|Fresh=`$false|ExpectedRecovery='roll-back'|ExpectedPhase='applying'|ExpectedFinal='original'",
+        "Failpoint='before-operation-5'|PreCrash=`$null|Fresh=`$false|ExpectedRecovery='roll-back'|ExpectedPhase='applying'|ExpectedFinal='original'",
+        "Failpoint='before-operation-6'|PreCrash=`$null|Fresh=`$false|ExpectedRecovery='roll-back'|ExpectedPhase='applying'|ExpectedFinal='original'",
+        "Failpoint='after-original-to-backup-5'|PreCrash=`$null|Fresh=`$false|ExpectedRecovery='roll-back'|ExpectedPhase='applying'|ExpectedFinal='original'",
+        "Failpoint='after-operation-1-before-journal'|PreCrash=`$null|Fresh=`$false|ExpectedRecovery='roll-back'|ExpectedPhase='applying'|ExpectedFinal='original'",
+        "Failpoint='after-operation-5-before-journal'|PreCrash=`$null|Fresh=`$false|ExpectedRecovery='roll-back'|ExpectedPhase='applying'|ExpectedFinal='original'",
+        "Failpoint='after-operation-6-before-journal'|PreCrash=`$null|Fresh=`$false|ExpectedRecovery='roll-back'|ExpectedPhase='applying'|ExpectedFinal='original'",
+        "Failpoint='after-operation-1'|PreCrash=`$null|Fresh=`$false|ExpectedRecovery='roll-back'|ExpectedPhase='applying'|ExpectedFinal='original'",
+        "Failpoint='after-operation-5'|PreCrash=`$null|Fresh=`$false|ExpectedRecovery='roll-back'|ExpectedPhase='applying'|ExpectedFinal='original'",
+        "Failpoint='after-operation-6'|PreCrash=`$null|Fresh=`$false|ExpectedRecovery='roll-back'|ExpectedPhase='applying'|ExpectedFinal='original'",
+        "Failpoint='after-committed-before-cleanup'|PreCrash=`$null|Fresh=`$false|ExpectedRecovery='none'|ExpectedPhase='committed'|ExpectedFinal='applied'",
+        "Failpoint='before-cleanup-op-01-bootstrap.backup'|PreCrash=`$null|Fresh=`$false|ExpectedRecovery='none'|ExpectedPhase='committed'|ExpectedFinal='applied'",
+        "Failpoint='after-cleanup-op-01-bootstrap.backup'|PreCrash=`$null|Fresh=`$false|ExpectedRecovery='none'|ExpectedPhase='committed'|ExpectedFinal='applied'",
+        "Failpoint='before-cleanup-op-05-runtime.backup'|PreCrash=`$null|Fresh=`$false|ExpectedRecovery='none'|ExpectedPhase='committed'|ExpectedFinal='applied'",
+        "Failpoint='during-cleanup-op-05-runtime.backup'|PreCrash=`$null|Fresh=`$false|ExpectedRecovery='none'|ExpectedPhase='committed'|ExpectedFinal='applied'",
+        "Failpoint='after-cleanup-op-05-runtime.backup'|PreCrash=`$null|Fresh=`$false|ExpectedRecovery='none'|ExpectedPhase='committed'|ExpectedFinal='applied'",
+        "Failpoint='after-rollback-operation-1'|PreCrash='after-operation-1-before-journal'|Fresh=`$false|ExpectedRecovery='roll-back'|ExpectedPhase='rolling-back'|ExpectedFinal='original'",
+        "Failpoint='after-rollback-operation-5'|PreCrash='after-operation-5-before-journal'|Fresh=`$false|ExpectedRecovery='roll-back'|ExpectedPhase='rolling-back'|ExpectedFinal='original'",
+        "Failpoint='after-rollback-operation-6'|PreCrash='after-operation-6-before-journal'|Fresh=`$false|ExpectedRecovery='roll-back'|ExpectedPhase='rolling-back'|ExpectedFinal='original'",
+        "Failpoint='after-operation-1-before-journal'|PreCrash=`$null|Fresh=`$true|ExpectedRecovery='roll-back'|ExpectedPhase='applying'|ExpectedFinal='original'",
+        "Failpoint='after-operation-5-before-journal'|PreCrash=`$null|Fresh=`$true|ExpectedRecovery='roll-back'|ExpectedPhase='applying'|ExpectedFinal='original'"
+    )
+}
+
 function New-WindowsCoreFullPlanFixture {
     param([string] $Root)
     [IO.Directory]::CreateDirectory((Join-Path $Root 'scripts')) | Out-Null
@@ -263,6 +382,37 @@ if ($IsWindows) {
         { Assert-PesterFilesHaveNonWindowsDiscovery -Root $root -Allowlist @($Entry) } | Should Throw $Expected
     }
 
+    # Scenario: InterT77 is split across all three install parts under Windows guards.
+    # Purpose: Preserve the exact reviewed failpoint matrix once, with identical execution bodies in every part.
+    It 'UnitT18_preserves_the_exact_InterT77_failpoint_matrix_across_install_parts' {
+        $records = @(Assert-InstallFailpointMatrixContract -Root $script:WindowsCoreRepositoryRoot -ExpectedCases (Get-ExpectedInstallFailpointMatrixCases))
+        $records.Count | Should Be 25
+        @($records | Group-Object Part | Sort-Object Name | ForEach-Object Count) | Should Be @(5,15,5)
+    }
+
+    # Scenario: A copied InterT77 matrix loses one reviewed TestCase or repeats one TestCase across install parts.
+    # Purpose: Prove the AST contract fails closed for both omission and duplication.
+    It 'UnitT19_rejects_an_InterT77_<Mutation>_across_install_parts' -TestCases @(
+        @{ Mutation='missing'; Expected='differ from the exact reviewed matrix' },
+        @{ Mutation='duplicate'; Expected='must be unique across all install parts' }
+    ) {
+        param($Mutation,$Expected)
+        $root = Join-Path $TestDrive "intert77-$Mutation"
+        $testsRoot = Join-Path $root 'tests'
+        [IO.Directory]::CreateDirectory($testsRoot) | Out-Null
+        foreach ($part in 1..3) {
+            Copy-Item -LiteralPath (Join-Path $script:WindowsCoreRepositoryRoot "tests/install-ai-instructions-bootstrap.part$part.Tests.ps1") -Destination $testsRoot
+        }
+        $part1Path = Join-Path $testsRoot 'install-ai-instructions-bootstrap.part1.Tests.ps1'
+        $text = [IO.File]::ReadAllText($part1Path)
+        $testCase = "        @{Failpoint='after-recovery-before-install';PreCrash=`$null;Fresh=`$true;ExpectedRecovery='no-transaction';ExpectedPhase=`$null;ExpectedFinal='original'},"
+        $replacement = if ($Mutation -ceq 'missing') { '' } else { "$testCase`r`n$testCase" }
+        if (-not $text.Contains($testCase)) { throw 'Negative fixture could not find the reviewed InterT77 TestCase.' }
+        Set-WindowsCoreTestText $part1Path ($text.Replace($testCase, $replacement))
+
+        { Assert-InstallFailpointMatrixContract -Root $root -ExpectedCases (Get-ExpectedInstallFailpointMatrixCases) } | Should Throw $Expected
+    }
+
     # Scenario: A minimal fixture contains six authority tests and an explicit retained source-test set.
     # Purpose: Protect full recursive selection independently of the production repository inventory.
     It 'UnitT20_selects_the_complete_fixture_inventory' {
@@ -314,6 +464,56 @@ if ($IsWindows) {
             $plan.CanonicalJson | Should Be $script:ActualPlan.CanonicalJson
             $plan.MatrixJson | Should Be $script:ActualPlan.MatrixJson
         } finally { $env:GITHUB_EVENT_NAME = $previous }
+    }
+
+    # Scenario: Reviewed CI minutes are rounded into production weights and assigned through the real eight-partition LPT plan.
+    # Purpose: Keep every estimated Windows Core partition at or below the 18-minute critical-path budget.
+    It 'UnitT35_uses_the_reviewed_CI_weights_and_balances_every_real_partition_at_18_minutes' {
+        $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:WindowsCoreRepositoryRoot 'tests/windows-core-shard-weights.json') | ConvertFrom-Json
+        $expectedWeights = [ordered]@{
+            'install-ai-instructions-bootstrap.part1.Tests.ps1' = 17
+            'install-ai-instructions-bootstrap.part2.Tests.ps1' = 17
+            'install-ai-instructions-bootstrap.part3.Tests.ps1' = 16
+            'bootstrap-ai-instructions.Tests.ps1' = 14
+            'ai-instructions-writer-gate.part2.Tests.ps1' = 14
+            'agent-environment-reconciler.Tests.ps1' = 11
+            'ai-instructions-writer-gate.part1.Tests.ps1' = 7
+            'syp214-user-only.Tests.ps1' = 5
+            'platform-runtime.Tests.ps1' = 3
+            'update-ai-instructions.Tests.ps1' = 3
+            'ai-instructions-launcher-recovery.Tests.ps1' = 2
+            'cleanup-ai-instructions-pollution.Tests.ps1' = 2
+            'standard-validation-runner.Tests.ps1' = 2
+            'bootstrap-ai-instructions-multisource.Tests.ps1' = 1
+            'agent-artifact-remediation.Tests.ps1' = 1
+        }
+        @($configuration.weights.PSObject.Properties).Count | Should Be $expectedWeights.Count
+        foreach ($entry in $expectedWeights.GetEnumerator()) {
+            [int]$configuration.weights.PSObject.Properties[$entry.Key].Value | Should Be $entry.Value
+        }
+
+        $expectedShards = @(
+            @('install-ai-instructions-bootstrap.part1.Tests.ps1','standard-validation-resolver-hardening.Tests.ps1'),
+            @('install-ai-instructions-bootstrap.part2.Tests.ps1','standard-validation-skillspector-probe.Tests.ps1'),
+            @('install-ai-instructions-bootstrap.part3.Tests.ps1','skills-source-retrieval.Tests.ps1','static-approved-exceptions.Tests.ps1'),
+            @('ai-instructions-writer-gate.part2.Tests.ps1','license-delivery.Tests.ps1','skills-catalog-contract.Tests.ps1','skills-source-routing.Tests.ps1','static-parser-coverage.Tests.ps1'),
+            @('bootstrap-ai-instructions.Tests.ps1','licensing-scope.Tests.ps1','skills-catalog-source-host.Tests.ps1','source-merge-exception-draft.Tests.ps1','syp101-production-smoke-contract.Tests.ps1'),
+            @('agent-artifact-remediation.Tests.ps1','agent-environment-reconciler.Tests.ps1','ai-instructions-contract.Tests.ps1','bootstrap-ai-instructions-multisource.Tests.ps1','production-skills-catalog.Tests.ps1','skills-selection.Tests.ps1','standard-core-progress.Tests.ps1','third-party-skill-source.Tests.ps1'),
+            @('ai-instructions-runtime-contract.Tests.ps1','ai-instructions-writer-gate.part1.Tests.ps1','cleanup-ai-instructions-pollution.Tests.ps1','internal-skill-use.Tests.ps1','routine-semantic-scan.Tests.ps1','skills-source-acquisition.Tests.ps1','standard-process-discovery.Tests.ps1','third-party-source-envelope.Tests.ps1','update-ai-instructions.Tests.ps1'),
+            @('ai-instructions-launcher-recovery.Tests.ps1','bootstrap-ai-instructions-multisource-lock-arrays.Tests.ps1','invoke-ai-instructions-rollout.Tests.ps1','platform-runtime.Tests.ps1','safe-zip.Tests.ps1','skills-source-composition.Tests.ps1','standard-semantic-bridge.Tests.ps1','standard-validation-runner.Tests.ps1','syp214-user-only.Tests.ps1','windows-core-plan.Tests.ps1')
+        )
+        $script:ActualPlan.Plan.shards.Count | Should Be 8
+        for ($index = 0; $index -lt $expectedShards.Count; $index++) {
+            $shard = $script:ActualPlan.Plan.shards[$index]
+            $shard.id | Should Be ('{0:D2}' -f ($index + 1))
+            (@($shard.files) -join "`n") | Should Be ($expectedShards[$index] -join "`n")
+            $load = 0
+            foreach ($file in @($shard.files)) {
+                $weight = $configuration.weights.PSObject.Properties[$file]
+                $load += if ($null -eq $weight) { 1 } else { [int]$weight.Value }
+            }
+            $load | Should Be 18
+        }
     }
 
     # Scenario: LPT receives more weighted files than partitions, including an unknown weight.
