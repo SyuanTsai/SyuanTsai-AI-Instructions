@@ -897,6 +897,10 @@ try {
             Write-P02ASelectedFixture -Fixture $v2Fixture
             $v2SkippedFixture = @'
 Describe 'selected schema v2 P02A fixture' {
+    It 'keeps the aggregate valid while reporting skipped evidence' {
+        1 | Should Be 1
+    }
+
     It 'reports an actual skipped identifier without an expected list' -Skip {
         1 | Should Be 1
     }
@@ -911,6 +915,9 @@ Describe 'selected schema v2 P02A fixture' {
             Assert-P02AEqual $v2Summary.schemaVersion 2 'The opted-in summary schema version must be 2.'
             Assert-P02AEqual $v2Summary.runId 'run-42' 'Schema v2 must bind the workflow run id.'
             Assert-P02AEqual $v2Summary.runAttempt 2 'Schema v2 must bind the workflow run attempt.'
+            Assert-P02AEqual $v2Summary.counts.TotalCount 2 'Schema v2 fixture must report one pass and one skip.'
+            Assert-P02AEqual $v2Summary.counts.PassedCount 1 'Schema v2 fixture must keep at least one passing test.'
+            Assert-P02AEqual $v2Summary.counts.SkippedCount 1 'Schema v2 fixture must report exactly one skipped test.'
             Assert-P02AEqual @($v2Summary.skippedTests).Count 1 'Schema v2 must report actual skipped identifiers without requiring an expected list.'
             Assert-P02AEqual $v2Summary.skippedTests[0] 'selected.Tests.ps1::reports an actual skipped identifier without an expected list' 'Schema v2 must preserve the observed skipped case identifier.'
             Assert-P02AEqual @($v2Summary.skippedTests).Count $v2Summary.counts.SkippedCount 'Schema v2 skipped identifiers must equal the observed skipped count.'
