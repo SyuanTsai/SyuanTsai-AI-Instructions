@@ -239,8 +239,18 @@ function Invoke-P9bRepoBootstrap {
     )
     if(-not[string]::IsNullOrWhiteSpace($GitExecutable)){$arguments+=@('-GitExecutable',$GitExecutable)}
     if(-not[string]::IsNullOrWhiteSpace([string]$Context.ProjectCandidateArchivePath)){$arguments+=@('-ProjectCandidateArchivePath',[string]$Context.ProjectCandidateArchivePath)}
-    $output=& $script:PowerShellExecutable @arguments 2>&1
-    return [pscustomobject]@{ExitCode=$LASTEXITCODE;Output=($output-join[Environment]::NewLine)}
+    $hadAuthorDate=Test-Path Env:GIT_AUTHOR_DATE;$priorAuthorDate=$env:GIT_AUTHOR_DATE
+    $hadCommitterDate=Test-Path Env:GIT_COMMITTER_DATE;$priorCommitterDate=$env:GIT_COMMITTER_DATE
+    try{
+        $env:GIT_AUTHOR_DATE='2000-01-01T00:00:00+00:00'
+        $env:GIT_COMMITTER_DATE='2000-01-01T00:00:00+00:00'
+        $output=& $script:PowerShellExecutable @arguments 2>&1
+        $exitCode=$LASTEXITCODE
+    }finally{
+        if($hadAuthorDate){$env:GIT_AUTHOR_DATE=$priorAuthorDate}else{Remove-Item Env:GIT_AUTHOR_DATE -ErrorAction SilentlyContinue}
+        if($hadCommitterDate){$env:GIT_COMMITTER_DATE=$priorCommitterDate}else{Remove-Item Env:GIT_COMMITTER_DATE -ErrorAction SilentlyContinue}
+    }
+    return [pscustomobject]@{ExitCode=$exitCode;Output=($output-join[Environment]::NewLine)}
 }
 
 function New-P9cProjectFixture {

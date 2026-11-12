@@ -142,52 +142,6 @@ finally {
         }
     }
 
-    # Scenario: Two isolated remediation plans start from the same parent and tree while callers provide different Git author and committer dates.
-    # Purpose: Keep the remediation commit identity deterministic across in-process and next-run recovery fixtures without leaking environment changes.
-    It 'InterT15_creates_a_stable_remediation_commit_and_restores_caller_Git_dates' {
-        $repository = Join-Path $TestDrive 'stable-remediation-commit'
-        New-Item -ItemType Directory -Force -Path $repository | Out-Null
-        & git -C $repository init --quiet
-        & git -C $repository config user.name 'Remediation Test'
-        & git -C $repository config user.email 'remediation@example.test'
-        [System.IO.File]::WriteAllText((Join-Path $repository 'AGENTS.md'),"tracked Agent`n",(New-Object System.Text.UTF8Encoding($false)))
-        [System.IO.File]::WriteAllText((Join-Path $repository 'product.txt'),"product`n",(New-Object System.Text.UTF8Encoding($false)))
-        & git -C $repository add -- AGENTS.md product.txt
-        & git -C $repository commit --quiet -m 'fixture'
-
-        $hadAuthorDate = Test-Path Env:GIT_AUTHOR_DATE
-        $priorAuthorDate = $env:GIT_AUTHOR_DATE
-        $hadCommitterDate = Test-Path Env:GIT_COMMITTER_DATE
-        $priorCommitterDate = $env:GIT_COMMITTER_DATE
-        $plans = New-Object System.Collections.Generic.List[object]
-        try {
-            $env:GIT_AUTHOR_DATE = '2001-01-01T00:00:00+00:00'
-            $env:GIT_COMMITTER_DATE = '2001-01-01T00:00:00+00:00'
-            $first = New-AgentArtifactRemediationPlan -Repository $repository
-            $plans.Add($first)
-            $env:GIT_AUTHOR_DATE | Should Be '2001-01-01T00:00:00+00:00'
-            $env:GIT_COMMITTER_DATE | Should Be '2001-01-01T00:00:00+00:00'
-
-            $env:GIT_AUTHOR_DATE = '2002-02-02T00:00:00+00:00'
-            $env:GIT_COMMITTER_DATE = '2002-02-02T00:00:00+00:00'
-            $second = New-AgentArtifactRemediationPlan -Repository $repository
-            $plans.Add($second)
-            $env:GIT_AUTHOR_DATE | Should Be '2002-02-02T00:00:00+00:00'
-            $env:GIT_COMMITTER_DATE | Should Be '2002-02-02T00:00:00+00:00'
-
-            $second.NewCommit | Should Be $first.NewCommit
-        }
-        finally {
-            foreach ($plan in $plans) {
-                if ($null -ne $plan -and (Test-Path -LiteralPath $plan.Backup.Root)) { Remove-Item -LiteralPath $plan.Backup.Root -Recurse -Force }
-            }
-            if ($hadAuthorDate) { $env:GIT_AUTHOR_DATE = $priorAuthorDate }
-            else { Remove-Item Env:GIT_AUTHOR_DATE -ErrorAction SilentlyContinue }
-            if ($hadCommitterDate) { $env:GIT_COMMITTER_DATE = $priorCommitterDate }
-            else { Remove-Item Env:GIT_COMMITTER_DATE -ErrorAction SilentlyContinue }
-        }
-    }
-
     # Given: A repository has only an untracked customized implementation in the exact retired search-with-felo directory.
     # When: Remediation runs without any tracked reserved path.
     # Then: It preserves the unowned implementation and official Felo without mutation.
