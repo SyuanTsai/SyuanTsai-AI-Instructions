@@ -260,19 +260,24 @@ function Test-InstallJournalV2EvidenceBindingTransition {
 }
 
 function Assert-InstallJournalV2TrustedTransition {
-    param([Parameter(Mandatory = $true)][object] $Previous,[Parameter(Mandatory = $true)][object] $Next)
+    param(
+        [Parameter(Mandatory = $true)][object] $Previous,
+        [Parameter(Mandatory = $true)][object] $Next,
+        [AllowNull()][object] $PreviousIdentityJournal = $null
+    )
     if([int64]$Previous.schemaVersion-ne2-or[int64]$Next.schemaVersion-ne2-or
         [string]$Previous.owner.component-cne'repo-bootstrap'-or[string]$Next.owner.component-cne'repo-bootstrap') {
         throw 'Trusted install journal transition requires validated repo-bootstrap schema v2 journals.'
     }
     $previousOperations=@($Previous.operations);$nextOperations=@($Next.operations)
+    $identityOperations=if($null-eq$PreviousIdentityJournal){$previousOperations}else{@($PreviousIdentityJournal.operations)}
     if((ConvertTo-InstallJournalV2TopLevelAuthorityJson $Previous)-cne(ConvertTo-InstallJournalV2TopLevelAuthorityJson $Next)) {
         throw 'AI instructions install journal store transition changed top-level fields other than phase or operations.'
     }
-    if($previousOperations.Count-ne$nextOperations.Count){throw 'AI instructions install journal store transition cannot change operations count after prepared.'}
+    if($previousOperations.Count-ne$nextOperations.Count-or$identityOperations.Count-ne$previousOperations.Count){throw 'AI instructions install journal store transition cannot change operations count after prepared.'}
     $changedOperationIndexes=New-Object System.Collections.Generic.List[int]
     for($index=0;$index-lt$previousOperations.Count;$index++) {
-        if(-not[object]::ReferenceEquals($previousOperations[$index],$nextOperations[$index])){$changedOperationIndexes.Add($index)}
+        if(-not[object]::ReferenceEquals($identityOperations[$index],$nextOperations[$index])){$changedOperationIndexes.Add($index)}
     }
     foreach($index in $changedOperationIndexes) {
         if((ConvertTo-InstallJournalV2OperationAuthorityJson $previousOperations[$index])-cne(ConvertTo-InstallJournalV2OperationAuthorityJson $nextOperations[$index])-and
@@ -362,12 +367,32 @@ function Write-AiInstructionsInstallJournalStore {
         if($isRepoV2) {
             $current=$JournalStoreStates[[string]$leaves.journal]
             if($null-eq$current-or-not[bool]$current.exists){throw 'The journal store does not contain a classified journal state.'}
-            $trustedPrevious=$JournalStoreStates[$trustedJournalKey]
-            if($null-eq$trustedPrevious-or-not[object]::ReferenceEquals($trustedPrevious,$PreviousJournal)) {
-                [byte[]]$previousBytes=ConvertTo-InstallJournalBytes -Journal $PreviousJournal
-                if([int64]$current.length-ne$previousBytes.Length-or[string]$current.sha256-cne(Get-InstallTransactionSha256 $previousBytes)) {throw 'Published journal differs from the expected previous journal generation.'}
+            $journalPath=Join-Path $TransactionPath $leaves.journal
+            $liveCurrent=Get-AiInstructionsInstallFileState -ParentLease $TransactionLease -Leaf $leaves.journal -LiteralPath $journalPath -PlatformOs $PlatformOs
+            if(-not(Test-InstallTransactionFileStateEqual $liveCurrent $current)) {
+                $JournalStoreStates.Remove($trustedJournalKey)
+                throw 'Published journal changed after its classified store state was recorded.'
             }
-            Assert-InstallJournalV2TrustedTransition -Previous $PreviousJournal -Next $Journal|Out-Null
+            $trustedRecord=$JournalStoreStates[$trustedJournalKey]
+            $cacheHit=$null-ne$trustedRecord-and
+                $null-ne$trustedRecord.PSObject.Properties['trustedJournal']-and
+                $null-ne$trustedRecord.PSObject.Properties['issuedJournal']-and
+                $null-ne$trustedRecord.PSObject.Properties['sha256']-and
+                $null-ne$trustedRecord.PSObject.Properties['length']-and
+                [object]::ReferenceEquals($trustedRecord.issuedJournal,$PreviousJournal)-and
+                [string]$trustedRecord.sha256-ceq[string]$liveCurrent.sha256-and
+                [int64]$trustedRecord.length-eq[int64]$liveCurrent.length
+            if($cacheHit) {
+                $trustedPrevious=$trustedRecord.trustedJournal
+                $identityPrevious=$PreviousJournal
+            }
+            else {
+                [byte[]]$previousBytes=ConvertTo-InstallJournalBytes -Journal $PreviousJournal
+                if([int64]$liveCurrent.length-ne$previousBytes.Length-or[string]$liveCurrent.sha256-cne(Get-InstallTransactionSha256 $previousBytes)) {throw 'Published journal differs from the expected previous journal generation.'}
+                $trustedPrevious=$PreviousJournal
+                $identityPrevious=$PreviousJournal
+            }
+            Assert-InstallJournalV2TrustedTransition -Previous $trustedPrevious -Next $Journal -PreviousIdentityJournal $identityPrevious|Out-Null
         }
         else {
             $storedPrevious=Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf $leaves.journal -TransactionId ([string]$Journal.transactionId)
@@ -380,7 +405,13 @@ function Write-AiInstructionsInstallJournalStore {
     $stageState = New-AiInstructionsInstallStageFile -TransactionLease $TransactionLease -Leaf $leaves.stage -Bytes $bytes -PlatformOs $PlatformOs
     $JournalStoreStates[[string]$leaves.stage] = $stageState
     Invoke-AiInstructionsInstallFailpoint -Name 'after-journal-stage-flush'
-    $validatedStage = Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf $leaves.stage -TransactionId ([string]$Journal.transactionId) -ExpectedOwnerComponent $(if($isRepoV2){'repo-bootstrap'}else{$null}) -ExpectedBytes $(if($isRepoV2){$bytes}else{$null})
+    try {
+        $validatedStage = Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf $leaves.stage -TransactionId ([string]$Journal.transactionId) -ExpectedOwnerComponent $(if($isRepoV2){'repo-bootstrap'}else{$null}) -ExpectedBytes $(if($isRepoV2){$bytes}else{$null})
+    }
+    catch {
+        if($isRepoV2){$JournalStoreStates.Remove($trustedJournalKey)}
+        throw
+    }
     # Repo v2 readback already proves exact requested bytes by length and raw SHA-256.
     # Avoid serializing the growing operation array again on every durable state write.
     if (-not $isRepoV2 -and -not (Test-InstallJournalSemanticEqual -First $validatedStage -Second $Journal)) { throw 'Journal stage readback differs from the requested journal.' }
@@ -411,9 +442,22 @@ function Write-AiInstructionsInstallJournalStore {
         identity=$receipt.appliedIdentity
     }
     $JournalStoreStates[[string]$leaves.stage] = [pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}
-    $validated = Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf $leaves.journal -TransactionId ([string]$Journal.transactionId) -ExpectedOwnerComponent $(if($isRepoV2){'repo-bootstrap'}else{$null}) -ExpectedBytes $(if($isRepoV2){$bytes}else{$null})
+    try {
+        $validated = Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf $leaves.journal -TransactionId ([string]$Journal.transactionId) -ExpectedOwnerComponent $(if($isRepoV2){'repo-bootstrap'}else{$null}) -ExpectedBytes $(if($isRepoV2){$bytes}else{$null})
+    }
+    catch {
+        if($isRepoV2){$JournalStoreStates.Remove($trustedJournalKey)}
+        throw
+    }
     if (-not $isRepoV2 -and -not (Test-InstallJournalSemanticEqual -First $validated -Second $Journal)) { throw 'Published journal readback differs from the requested journal.' }
-    if($isRepoV2){$JournalStoreStates[$trustedJournalKey]=$validated}
+    if($isRepoV2){
+        $JournalStoreStates[$trustedJournalKey]=[pscustomobject][ordered]@{
+            trustedJournal=$validated
+            issuedJournal=$Journal
+            sha256=[string]$JournalStoreStates[[string]$leaves.journal].sha256
+            length=[int64]$JournalStoreStates[[string]$leaves.journal].length
+        }
+    }
     if ($null -ne $PreviousJournal) {
         # Publication preserves the displaced journal identity and bytes.  Bind
         # cleanup to the state observed before publication instead of granting
@@ -421,7 +465,7 @@ function Write-AiInstructionsInstallJournalStore {
         Remove-PlatformOwnedFile -ParentLease $TransactionLease -Leaf $leaves.previous -ExpectedState $current | Out-Null
         $JournalStoreStates[[string]$leaves.previous] = [pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}
     }
-    return $validated
+    return $(if($isRepoV2){$Journal}else{$validated})
 }
 
 function Copy-InstallJournalWithChange {

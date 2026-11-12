@@ -354,3 +354,92 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         $transaction|Should -Match 'after-cleanup-journal-before-directory|during-cleanup-transaction'
     }
 }
+
+Describe 'repo v2 journal cache conditions' {
+    BeforeAll {
+        $shortParent=Join-Path ([IO.Path]::GetTempPath()) 'p7e';New-Item -ItemType Directory -Force -Path $shortParent|Out-Null
+        $script:ExternalRoot=Join-Path $shortParent ([Guid]::NewGuid().ToString('N').Substring(0,8));New-Item -ItemType Directory -Path $script:ExternalRoot|Out-Null
+        $script:TransactionModulePath=Join-Path $script:RepositoryRoot 'scripts/ai-instructions-install-transaction.psm1'
+        $baseline=New-P9bInstructionArchive -WorkingRoot (Join-Path $script:ExternalRoot 'baseline-work') -ArchivePath (Join-Path $script:ExternalRoot 'baseline.zip') -Marker baseline
+        $changed=New-P9bInstructionArchive -WorkingRoot (Join-Path $script:ExternalRoot 'changed-work') -ArchivePath (Join-Path $script:ExternalRoot 'changed.zip') -Marker changed
+        $initial=New-P9cProjectFixture -Root (Join-Path $script:ExternalRoot 'initial') -ProjectionIds @('project-agents')
+        $updated=New-P9cProjectFixture -Root (Join-Path $script:ExternalRoot 'updated') -ProjectionIds @('project-agents') -AdditionalSkillFiles @{'work-with-jira'=@{'resources/cache.txt'="changed`n"}}
+        $seed=Join-Path $script:ExternalRoot 'seed';New-P9bTargetRepository $seed
+        $seedResult=Invoke-P9bRepoBootstrap -Context $initial.Context -ArchivePath $baseline.ArchivePath -TargetRoot $seed
+        if($seedResult.ExitCode-ne0){throw "Could not create journal cache seed: $($seedResult.Output)"}
+        $emptyTransactionRoot=Join-Path $seed '.ai-instructions-txn';if(Test-Path -LiteralPath $emptyTransactionRoot){Remove-Item -LiteralPath $emptyTransactionRoot -Force}
+        $script:JournalCacheSeed=Join-Path $script:ExternalRoot 'journal-cache-seed';Copy-Item -LiteralPath $seed -Destination $script:JournalCacheSeed -Recurse
+        $cacheBootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'journal-cache-runtime') -Failpoint after-journal-prepared -RecoveryPath NextRun
+        $cacheResult=Invoke-P9bRepoBootstrap -Context $updated.Context -ArchivePath $changed.ArchivePath -TargetRoot $script:JournalCacheSeed -BootstrapPath $cacheBootstrap
+        if($cacheResult.ExitCode-eq0){throw 'Could not retain the prepared repository journal cache fixture.'}
+    }
+    AfterAll {if(Test-Path -LiteralPath $script:ExternalRoot){Remove-Item -LiteralPath $script:ExternalRoot -Recurse -Force}}
+
+    # Scenario: A repo-v2 journal generation is read back, returned to its caller, and then the caller mutates top-level and nested values.
+    # Purpose: Keep the cache's trusted content and disk identity independent from every caller-owned journal object.
+    It 'InterT156_keeps_trusted_journal_cache_content_isolated_from_the_caller' {
+        $target=Join-Path $script:ExternalRoot 'journal-cache-caller';Copy-Item -LiteralPath $script:JournalCacheSeed -Destination $target -Recurse
+        $transaction=@(Get-ChildItem -LiteralPath (Join-Path $target '.ai-instructions-txn') -Directory -Force);$transaction.Count|Should -Be 1
+        $transactionPath=$transaction[0].FullName;$journalPath=Join-Path $transactionPath 'journal.json'
+        $module=Import-Module $script:TransactionModulePath -Force -PassThru;$lease=Open-PlatformDirectory -Root $transactionPath -RootOnly
+        try{
+            $states=[ordered]@{};foreach($leaf in @('journal.json','journal.prev','journal.stage')){$states[$leaf]=Get-AiInstructionsInstallFileState -ParentLease $lease -Leaf $leaf -LiteralPath (Join-Path $transactionPath $leaf) -PlatformOs windows}
+            $previous=Get-Content -Raw -LiteralPath $journalPath|ConvertFrom-Json;$next=$previous|ConvertTo-Json -Depth 30|ConvertFrom-Json;$next.phase='applying'
+            $returned=Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $next -PreviousJournal $previous -PlatformOs windows -JournalStoreStates $states
+            $cache=$states['__repoV2TrustedJournal'];$cache|Should -Not -BeNullOrEmpty
+            $cache.trustedJournal|Should -Not -BeNullOrEmpty
+            [string]$cache.sha256|Should -Match '^[0-9a-f]{64}$'
+            [int64]$cache.length|Should -BeGreaterThan 0
+            [object]::ReferenceEquals($cache.trustedJournal,$returned)|Should -Be $false
+            $trustedBefore=$cache.trustedJournal|ConvertTo-Json -Depth 30 -Compress;$shaBefore=[string]$cache.sha256;$lengthBefore=[int64]$cache.length
+            $returned.phase='committed';$returned.operations[0].state='applied'
+            ($cache.trustedJournal|ConvertTo-Json -Depth 30 -Compress)|Should -BeExactly $trustedBefore
+            [string]$cache.sha256|Should -BeExactly $shaBefore
+            [int64]$cache.length|Should -Be $lengthBefore
+        }finally{$lease.Dispose();Remove-Module $module -Force}
+    }
+
+    # Scenario: journal.json is externally rewritten between two transitions while the caller reuses the previously returned object.
+    # Purpose: Require both caller object identity and current raw SHA-256/length, clear the stale cache, and fail closed without overwriting external bytes.
+    It 'InterT157_rejects_external_journal_bytes_and_clears_the_trusted_cache' {
+        $target=Join-Path $script:ExternalRoot 'journal-cache-external';Copy-Item -LiteralPath $script:JournalCacheSeed -Destination $target -Recurse
+        $transaction=@(Get-ChildItem -LiteralPath (Join-Path $target '.ai-instructions-txn') -Directory -Force);$transaction.Count|Should -Be 1
+        $transactionPath=$transaction[0].FullName;$journalPath=Join-Path $transactionPath 'journal.json'
+        $module=Import-Module $script:TransactionModulePath -Force -PassThru;$lease=Open-PlatformDirectory -Root $transactionPath -RootOnly
+        try{
+            $states=[ordered]@{};foreach($leaf in @('journal.json','journal.prev','journal.stage')){$states[$leaf]=Get-AiInstructionsInstallFileState -ParentLease $lease -Leaf $leaf -LiteralPath (Join-Path $transactionPath $leaf) -PlatformOs windows}
+            $previous=Get-Content -Raw -LiteralPath $journalPath|ConvertFrom-Json;$applying=$previous|ConvertTo-Json -Depth 30|ConvertFrom-Json;$applying.phase='applying'
+            $returned=Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $applying -PreviousJournal $previous -PlatformOs windows -JournalStoreStates $states
+            $next=$returned|ConvertTo-Json -Depth 30|ConvertFrom-Json;$next.operations[0].state='applied'
+            $external=[byte[]](@([IO.File]::ReadAllBytes($journalPath))+[byte][char]' ');[IO.File]::WriteAllBytes($journalPath,$external)
+            {Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $next -PreviousJournal $returned -PlatformOs windows -JournalStoreStates $states}|Should -Throw
+            $states.Contains('__repoV2TrustedJournal')|Should -Be $false
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($journalPath))|Should -BeExactly ([Convert]::ToBase64String($external))
+        }finally{$lease.Dispose();Remove-Module $module -Force}
+    }
+
+    # Scenario: publication succeeds but the final journal readback is changed before exact-byte verification.
+    # Purpose: Clear the prior trusted cache whenever expected readback bytes do not match the published journal.
+    It 'InterT158_clears_the_trusted_cache_when_final_readback_bytes_differ' {
+        $target=Join-Path $script:ExternalRoot 'journal-cache-readback';Copy-Item -LiteralPath $script:JournalCacheSeed -Destination $target -Recurse
+        $transaction=@(Get-ChildItem -LiteralPath (Join-Path $target '.ai-instructions-txn') -Directory -Force);$transaction.Count|Should -Be 1
+        $transactionPath=$transaction[0].FullName;$journalPath=Join-Path $transactionPath 'journal.json'
+        $module=Import-Module $script:TransactionModulePath -Force -PassThru;$lease=Open-PlatformDirectory -Root $transactionPath -RootOnly
+        try{
+            $states=[ordered]@{};foreach($leaf in @('journal.json','journal.prev','journal.stage')){$states[$leaf]=Get-AiInstructionsInstallFileState -ParentLease $lease -Leaf $leaf -LiteralPath (Join-Path $transactionPath $leaf) -PlatformOs windows}
+            $previous=Get-Content -Raw -LiteralPath $journalPath|ConvertFrom-Json;$applying=$previous|ConvertTo-Json -Depth 30|ConvertFrom-Json;$applying.phase='applying'
+            $returned=Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $applying -PreviousJournal $previous -PlatformOs windows -JournalStoreStates $states
+            $next=$returned|ConvertTo-Json -Depth 30|ConvertFrom-Json;$next.operations[0].state='applied'
+            &$module {param($Path)
+                $script:Fix5gOriginalJournalRead=(Get-Command Read-AiInstructionsInstallJournalLeaf).ScriptBlock;$script:Fix5gJournalPath=$Path
+                function script:Read-AiInstructionsInstallJournalLeaf {
+                    param([Parameter(Mandatory=$true)]$TransactionLease,[Parameter(Mandatory=$true)][string]$Leaf,[Parameter(Mandatory=$true)][string]$TransactionId,[string]$ExpectedOwnerComponent,[AllowNull()][byte[]]$ExpectedBytes)
+                    if($Leaf-ceq'journal.json'-and$PSBoundParameters.ContainsKey('ExpectedBytes')){[IO.File]::WriteAllBytes($script:Fix5gJournalPath,[Text.UTF8Encoding]::new($false).GetBytes('{}'))}
+                    &$script:Fix5gOriginalJournalRead @PSBoundParameters
+                }
+            } $journalPath
+            {Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $next -PreviousJournal $returned -PlatformOs windows -JournalStoreStates $states}|Should -Throw
+            $states.Contains('__repoV2TrustedJournal')|Should -Be $false
+        }finally{$lease.Dispose();Remove-Module $module -Force}
+    }
+}
