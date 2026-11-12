@@ -16,6 +16,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+# Read-only Git inspection must not opportunistically refresh the live index;
+# the journaled index operation is the only permitted index writer.
+$env:GIT_OPTIONAL_LOCKS = '0'
 
 if ([string]::IsNullOrWhiteSpace($GitExecutable)) {
     throw 'GitExecutable must be a non-empty command name or path.'
@@ -2086,6 +2089,7 @@ function Get-SharedManagedExcludePaths {
         $segments=$skillCandidatePath.Split('/');if($segments.Count-lt4){[void]$blockedSkillPaths.Add($skillCandidatePath);continue}
         $prefix=[string]::Join('/',[string[]]$segments[0..2])
         foreach($worktreeRoot in $worktreeRoots){
+            if(Test-ProjectPublicationPathEqual -Left ([IO.Path]::GetFullPath($worktreeRoot)) -Right ([IO.Path]::GetFullPath($Repository))){continue}
             $groupRoot=Join-Path $worktreeRoot $prefix.Replace('/',[IO.Path]::DirectorySeparatorChar)
             if(-not(Test-Path -LiteralPath $groupRoot)){continue}
             $manifestPath=Join-Path $worktreeRoot $manifestRelativePath.Replace('/',[IO.Path]::DirectorySeparatorChar)
@@ -3564,7 +3568,7 @@ function Set-ProjectPublicationFileBytesCore {
             $intent=$context.Intents[$key]
             $intent.Bytes=[byte[]]$Bytes.Clone();$intent.Remove=$false
         }else{
-            $role=if($TargetKind-ceq'git-exclude'){'shared-exclude'}elseif($RelativePath-ceq$manifestRelativePath){'manifest'}elseif($RelativePath-cmatch '^\.(?:agents|claude|github)/skills/'){'project-skill'}elseif(Test-LicenseDeliveryTargetPath $RelativePath){'license'}else{'instruction'}
+            $role=if($TargetKind-ceq'git-exclude'){'shared-exclude'}elseif($RelativePath-ceq$manifestRelativePath){'manifest'}elseif(Test-LicenseDeliveryTargetPath $RelativePath){'license'}elseif($RelativePath-cmatch '^\.(?:agents|claude|github)/skills/'){'project-skill'}else{'instruction'}
             $context.Intents.Add($key,[pscustomobject][ordered]@{TargetKind=$TargetKind;TargetRoot=$TargetRoot;RelativePath=$RelativePath;Before=$originalCapture;Bytes=[byte[]]$Bytes.Clone();Remove=$false;Role=$role})
         }
     }finally{if($null-ne$parentLease){$parentLease.Dispose()}}
@@ -3604,7 +3608,7 @@ function Remove-ProjectPublicationFile {
         $key="repository`0$($context.Repository)`0$RelativePath"
         if($context.Intents.ContainsKey($key)){$intent=$context.Intents[$key];$intent.Bytes=$null;$intent.Remove=$true}
         else{
-            $role=if($RelativePath-ceq$manifestRelativePath){'manifest'}elseif($RelativePath-cmatch '^\.(?:agents|claude|github)/skills/'){'project-skill'}elseif(Test-LicenseDeliveryTargetPath $RelativePath){'license'}else{'instruction'}
+            $role=if($RelativePath-ceq$manifestRelativePath){'manifest'}elseif(Test-LicenseDeliveryTargetPath $RelativePath){'license'}elseif($RelativePath-cmatch '^\.(?:agents|claude|github)/skills/'){'project-skill'}else{'instruction'}
             $context.Intents.Add($key,[pscustomobject][ordered]@{TargetKind='repository';TargetRoot=$context.Repository;RelativePath=$RelativePath;Before=$original;Bytes=$null;Remove=$true;Role=$role})
         }
     }finally{if($null-ne$parentLease){$parentLease.Dispose()}}
@@ -3644,7 +3648,8 @@ function Resolve-ActiveProjectPublicationFailure {
             if($null-ne$Context.Lease){$Context.Lease.Dispose();$Context.Lease=$null}
             Remove-PlatformOwnedDirectoryTree -TransactionRootLease $Context.ContainerLease -Leaf $Context.DirectoryLeaf -ExpectedIdentity $Context.Identity|Out-Null
         }
-        if($null-ne$Context.ContainerLease){$Context.ContainerLease.Dispose();$Context.ContainerLease=$null};$Context.Durable=$false
+        if($null-ne$Context.ContainerLease){$Context.ContainerLease.Dispose();$Context.ContainerLease=$null}
+        $Context.Durable=$false
         return 'roll-forward-cleanup'
     }
     $action=Resolve-ProjectPublicationRecoveryAction -JournalState $journalState
@@ -3667,8 +3672,8 @@ function Test-RepositoryTransactionOrphanChild {
 function Remove-ProjectPublicationContextEvidence {
     param([Parameter(Mandatory=$true)]$Context)
     if($null-ne$Context.Lease){$Context.Lease.Dispose();$Context.Lease=$null}
-    try{Remove-PlatformOwnedDirectoryTree -TransactionRootLease $Context.ContainerLease -Leaf $Context.Id -ExpectedIdentity $Context.Identity|Out-Null}
-    finally{if($null-ne$Context.ContainerLease){$Context.ContainerLease.Dispose();$Context.ContainerLease=$null}}
+    Remove-PlatformOwnedDirectoryTree -TransactionRootLease $Context.ContainerLease -Leaf $Context.Id -ExpectedIdentity $Context.Identity|Out-Null
+    $Context.ContainerLease.Dispose();$Context.ContainerLease=$null
 }
 
 function Test-ProjectPublicationStateEqual {
@@ -4921,7 +4926,20 @@ function Remove-RepositoryIndexLockIfOwned {
     [byte[]]$bytes=[IO.File]::ReadAllBytes($lockPath)
     if((Get-ByteArraySha256 $bytes)-cne$ExpectedSha256){throw (New-RepositoryIndexLockRefusal -Reason 'The residual Git index.lock bytes do not match the write-ahead SHA recorded by this transaction.' -LockPath $lockPath)}
     $parent=[IO.Path]::GetDirectoryName($lockPath);$leaf=[IO.Path]::GetFileName($lockPath);$parentLease=Open-PlatformDirectory -Root $parent -RootOnly
-    try{$state=Get-AiInstructionsInstallFileState -ParentLease $parentLease -Leaf $leaf -LiteralPath $lockPath -PlatformOs ([string]$Journal.platform.os);Remove-PlatformOwnedFile -ParentLease $parentLease -Leaf $leaf -ExpectedState $state|Out-Null}
+    try{
+        $state=Get-AiInstructionsInstallFileState -ParentLease $parentLease -Leaf $leaf -LiteralPath $lockPath -PlatformOs ([string]$Journal.platform.os)
+        if($IsWindows){
+            $lockLease=Open-PlatformFile -ParentLease $parentLease -Leaf $leaf -Access ReadWriteDelete -CreateMode OpenExisting
+            try{
+                $reopenedIdentity=ConvertTo-ProjectPublicationIdentity $lockLease.Observation
+                if([uint64]$lockLease.Observation.LinkCount-ne1-or[string]$reopenedIdentity.kind-cne[string]$state.identity.kind-or-not[string]::Equals([string]$reopenedIdentity.device,[string]$state.identity.device,[StringComparison]::OrdinalIgnoreCase)-or-not[string]::Equals([string]$reopenedIdentity.fileId,[string]$state.identity.fileId,[StringComparison]::OrdinalIgnoreCase)){throw (New-RepositoryIndexLockRefusal -Reason 'The residual Git index.lock identity changed during reopen.' -LockPath $lockPath)}
+                [byte[]]$readback=$lockLease.ReadAllBytes(268435456);if((Get-ByteArraySha256 $readback)-cne$ExpectedSha256){throw (New-RepositoryIndexLockRefusal -Reason 'The residual Git index.lock changed after identity-bound reopen.' -LockPath $lockPath)}
+                [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::DeleteOnClose($lockLease)
+            }finally{$lockLease.Dispose()}
+            [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::FlushDirectory($parentLease)
+        }else{Remove-PlatformOwnedFile -ParentLease $parentLease -Leaf $leaf -ExpectedState $state|Out-Null}
+        if(Test-Path -LiteralPath $lockPath){throw (New-RepositoryIndexLockRefusal -Reason 'The owned residual Git index.lock remained after identity-bound removal.' -LockPath $lockPath)}
+    }
     finally{$parentLease.Dispose()}
 }
 
@@ -4956,7 +4974,9 @@ function Invoke-RepositoryIndexReplacement {
         Invoke-AiInstructionsInstallFailpoint -Name 'after-index-lock-write-before-rename'
         $live=Get-RepositoryTransactionIndexState $Journal
         if(-not(Test-RepositoryTransactionIndexStateEqual $live $Source)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'The Git index changed after index.lock was flushed; transaction evidence was retained.')}
-        [IO.File]::Replace($lockPath,$indexPath,$null)
+        $replaceMethod=[IO.File].GetMethod('Replace',[type[]]@([string],[string],[string]))
+        try{[void]$replaceMethod.Invoke($null,[object[]]@($lockPath,$indexPath,$null))}
+        catch [Reflection.TargetInvocationException]{throw $_.Exception.InnerException}
     }finally{if($null-ne$stream){$stream.Dispose()}}
 }
 
@@ -5009,7 +5029,14 @@ function Invoke-RepositoryTransactionOperation {
         }
         'ensure-directory-anchor' {
             $relative=[string]$Operation.target.value;$parentRelative=(Split-Path -Parent $relative).Replace('\','/');$leaf=Split-Path -Leaf $relative;$parentLease=if([string]::IsNullOrWhiteSpace($parentRelative)){Open-PlatformDirectory -Root $repository -RootOnly}else{Open-PlatformDirectory -Root $repository -RelativePath $parentRelative}
-            try{if($Direction-ceq'redo'){Move-PlatformOwnedDirectory -ParentLease $parentLease -Leaf ([string]$Operation.stageLeaf) -TransactionLease $Context.Lease -DestinationLeaf $leaf -ExpectedIdentity $Operation.after.identity -Direction FromTransaction|Out-Null}else{Move-PlatformOwnedDirectory -ParentLease $parentLease -Leaf $leaf -TransactionLease $Context.Lease -DestinationLeaf ([string]$Operation.stageLeaf) -ExpectedIdentity $Operation.after.identity -Direction ToTransaction|Out-Null}}finally{$parentLease.Dispose()}
+            try{
+                if($Direction-ceq'redo'){Move-PlatformOwnedDirectory -ParentLease $parentLease -Leaf ([string]$Operation.stageLeaf) -TransactionLease $Context.Lease -DestinationLeaf $leaf -ExpectedIdentity $Operation.after.identity -Direction FromTransaction|Out-Null}
+                else{
+                    $anchorPath=Join-Path $repository $relative.Replace('/',[IO.Path]::DirectorySeparatorChar)
+                    if(@(Get-ChildItem -Force -LiteralPath $anchorPath).Count-gt0){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction directory anchor '$relative' is not empty after descendant rollback; unknown content was preserved.")}
+                    Move-PlatformOwnedDirectory -ParentLease $parentLease -Leaf $leaf -TransactionLease $Context.Lease -DestinationLeaf ([string]$Operation.stageLeaf) -ExpectedIdentity $Operation.after.identity -Direction ToTransaction|Out-Null
+                }
+            }finally{$parentLease.Dispose()}
         }
         'replace-git-index' {
             Invoke-RepositoryIndexReplacement -Context $Context -Journal $Journal -Operation $Operation -Source $source -Destination $destination -Direction $Direction
@@ -5031,7 +5058,9 @@ function Invoke-RepositoryTransactionOperation {
 
 function Copy-RepositoryInstallJournal {
     param([Parameter(Mandatory=$true)][object]$Journal,[string]$Phase,[Nullable[long]]$Sequence)
-    $copy=ConvertFrom-AiInstructionsInstallJournalJson -Json ($Journal|ConvertTo-Json -Depth 30) -ExpectedOwnerComponent repo-bootstrap
+    $parameters=@{InputObject=($Journal|ConvertTo-Json -Depth 30);ErrorAction='Stop'}
+    if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'}
+    $copy=ConvertFrom-Json @parameters
     if(-not[string]::IsNullOrEmpty($Phase)){$copy.phase=$Phase}
     if($null-ne$Sequence){@($copy.operations|Where-Object{[int64]$_.sequence-eq[int64]$Sequence})[0].state='applied'}
     return $copy
@@ -5186,7 +5215,10 @@ function Invoke-ProjectPublicationRecovery {
 
 function Invoke-RepositoryTransactionRollback {
     param([Parameter(Mandatory=$true)][object]$Context)
-    foreach($operation in @($Context.CurrentJournal.operations|Sort-Object sequence -Descending)){Invoke-RepositoryTransactionOperation -Context $Context -Journal $Context.CurrentJournal -Operation $operation -Direction undo}
+    foreach($operation in @($Context.CurrentJournal.operations|Sort-Object sequence -Descending)){
+        Invoke-RepositoryTransactionOperation -Context $Context -Journal $Context.CurrentJournal -Operation $operation -Direction undo
+        Invoke-AiInstructionsInstallFailpoint -Name ("after-rollback-operation-"+$operation.sequence)
+    }
     Remove-ProjectPublicationContextEvidence $Context;$Context.Durable=$false
 }
 
@@ -5198,7 +5230,9 @@ function Complete-RepositoryTransactionCleanup {
     Remove-InstallTerminalTransactionArtifacts -Journal $Context.CurrentJournal -TransactionLease $Context.Lease -TransactionPath $transactionPath -JournalStoreStates $Context.JournalStoreStates
     Invoke-AiInstructionsInstallFailpoint -Name 'during-cleanup-transaction'
     $Context.Lease.Dispose();$Context.Lease=$null
-    Remove-PlatformOwnedDirectoryTree -TransactionRootLease $Context.ContainerLease -Leaf $Context.DirectoryLeaf -ExpectedIdentity $Context.Identity|Out-Null;$Context.ContainerLease.Dispose();$Context.ContainerLease=$null;$Context.Durable=$false
+    Remove-PlatformOwnedDirectoryTree -TransactionRootLease $Context.ContainerLease -Leaf $Context.DirectoryLeaf -ExpectedIdentity $Context.Identity|Out-Null
+    $Context.ContainerLease.Dispose();$Context.ContainerLease=$null
+    $Context.Durable=$false
 }
 
 function Invoke-RepositoryInstallTransaction {
@@ -5230,11 +5264,6 @@ if (($insideWorkTree | Select-Object -First 1).Trim() -ne 'true') {
 
 if (Test-IsCanonicalInstructionSourceRepository -Repository $targetRootPath) {
     Write-Output 'AI instruction sync skipped: the current repository is the shared instruction source.'
-    return
-}
-
-if ((Get-GitExitCode -Repository $targetRootPath -Arguments @('rev-parse', '--verify', 'HEAD')) -ne 0) {
-    Write-Output 'AI instruction sync skipped: the target repository has no commit, so managed changes cannot be isolated safely.'
     return
 }
 
@@ -5693,7 +5722,8 @@ $trackedPollutionPaths = @(@(
         $isProtectedClaude = Test-IsProtectedClaudeFamilyPath -Path ([string]$targetPath) -ProtectedPaths $activeWorktreeProtectedClaudeFamilyPaths
         if ($isProtectedClaude) { Write-Warning "Protected Claude family path skipped at tracked pollution inspection: $targetPath (project-owned Claude family)." }
         $isV4ProjectSkill = $manifestSchemaVersion -eq 4 -and $null -ne $manifestEntriesByTarget[$targetPath].PSObject.Properties['artifactType'] -and [string]$manifestEntriesByTarget[$targetPath].artifactType -ceq 'skill'
-        if (-not $isProtectedClaude -and -not $isV4ProjectSkill -and -not ([string]$targetPath).StartsWith('.agents/skills/',[StringComparison]::Ordinal) -and $trackedPaths.Contains([string]$targetPath)) { [string]$targetPath }
+        $isPlannedRemediation=$null-ne$remediationTransaction-and@($remediationTransaction.Paths|Where-Object{[string]$_-ceq[string]$targetPath}).Count-gt0
+        if (-not $isProtectedClaude -and -not $isV4ProjectSkill -and -not $isPlannedRemediation -and -not ([string]$targetPath).StartsWith('.agents/skills/',[StringComparison]::Ordinal) -and $trackedPaths.Contains([string]$targetPath)) { [string]$targetPath }
     }
 ) | Sort-Object -Unique)
 if ($trackedPollutionPaths.Count -gt 0 -and -not $WhatIf) {
@@ -5705,7 +5735,9 @@ $stagedManagedPaths = @(
         $isProtectedClaude = Test-IsProtectedClaudeFamilyPath -Path ([string]$targetPath) -ProtectedPaths $activeWorktreeProtectedClaudeFamilyPaths
         if ($isProtectedClaude) { Write-Warning "Protected Claude family path skipped at staged mutation inspection: $targetPath (project-owned Claude family)." }
         $isV4ProjectSkill = $manifestSchemaVersion -eq 4 -and $null -ne $manifestEntriesByTarget[$targetPath].PSObject.Properties['artifactType'] -and [string]$manifestEntriesByTarget[$targetPath].artifactType -ceq 'skill'
+        $isPlannedRemediation=$null-ne$remediationTransaction-and@($remediationTransaction.Paths|Where-Object{[string]$_-ceq[string]$targetPath}).Count-gt0
         if (-not $isProtectedClaude -and -not $isV4ProjectSkill -and
+            -not $isPlannedRemediation -and
             -not ([string]$targetPath).StartsWith('.agents/skills/',[StringComparison]::Ordinal) -and
             (Test-GitPathHasStagedChanges -Repository $targetRootPath -Path ([string]$targetPath))) {
             [string]$targetPath
@@ -5952,7 +5984,8 @@ try {
     foreach ($family in $families) {
         $baseTargetPath = $family.TargetBase
         $baseTargetFullPath = Join-Path $targetRootPath $baseTargetPath.Replace('/', '\')
-        $baseTargetIsTracked = $trackedPaths.Contains($baseTargetPath)
+        $baseTargetIsPlannedRemediation=$null-ne$remediationTransaction-and@($remediationTransaction.Paths|Where-Object{[string]$_-ceq[string]$baseTargetPath}).Count-gt0
+        $baseTargetIsTracked = $trackedPaths.Contains($baseTargetPath) -and -not $baseTargetIsPlannedRemediation
         $baseTargetMatchesDesired = $false
         if ((Test-Path -LiteralPath $baseTargetFullPath -PathType Leaf) -and
             -not $baseTargetIsTracked -and
@@ -6024,6 +6057,7 @@ try {
         $targetPath = $desiredEntry.TargetPath
         $targetFullPath = Join-Path $targetRootPath $targetPath.Replace('/', '\')
         $targetExists = Test-Path -LiteralPath $targetFullPath -PathType Leaf
+        $isPlannedRemediation=$null-ne$remediationTransaction-and@($remediationTransaction.Paths|Where-Object{[string]$_-ceq[string]$targetPath}).Count-gt0
         $managedEntry = $null
 
         $entryIsEligible = [bool]$eligibleFamilies[$desiredEntry.FamilyName]
@@ -6056,7 +6090,7 @@ try {
 
         if ($null -ne $managedEntry) {
             if (-not $targetExists) {
-                if (Test-GitPathHasChanges -Repository $targetRootPath -Path $targetPath) {
+                if (-not $isPlannedRemediation -and (Test-GitPathHasChanges -Repository $targetRootPath -Path $targetPath)) {
                     $skippedPaths.Add($targetPath)
                     $nextManifestEntries.Add((Copy-ExistingManifestEntry -Entry $managedEntry))
                     continue
@@ -6070,7 +6104,7 @@ try {
                 continue
             }
 
-            if (Test-GitPathHasStagedChanges -Repository $targetRootPath -Path $targetPath) {
+            if (-not $isPlannedRemediation -and (Test-GitPathHasStagedChanges -Repository $targetRootPath -Path $targetPath)) {
                 $skippedPaths.Add($targetPath)
                 $nextManifestEntries.Add((Copy-ExistingManifestEntry -Entry $managedEntry))
                 continue
@@ -6347,13 +6381,14 @@ catch {
     if($null-ne$script:ProjectPublicationContext){
         try{
             $action=Resolve-ActiveProjectPublicationFailure -Context $script:ProjectPublicationContext -RemediationTransaction $remediationTransaction
-            $script:ProjectPublicationContext=$null
-            if($null-ne(Get-AiInstructionsRefusalCode $syncError)){throw $syncError}
-            throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Project publication failed and completed $action according to the durable journal: $($syncError.Exception.Message)" -InnerException $syncError.Exception)
         }catch{
+            $recoveryError=$_
             $script:ProjectPublicationContext=$null
-            throw
+            throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Project publication failed, and journal recovery also failed while preserving evidence. Original: $($syncError.Exception.Message) Recovery: $($recoveryError.Exception.Message)" -InnerException $recoveryError.Exception)
         }
+        $script:ProjectPublicationContext=$null
+        if($null-ne(Get-AiInstructionsRefusalCode $syncError)){throw $syncError}
+        throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Project publication failed and completed $action according to the durable journal: $($syncError.Exception.Message)" -InnerException $syncError.Exception)
     }
     throw $syncError
 }

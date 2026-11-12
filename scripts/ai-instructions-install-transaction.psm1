@@ -205,11 +205,67 @@ function Test-InstallJournalSemanticEqual {
     return ($First|ConvertTo-Json -Depth 30 -Compress) -ceq ($Second|ConvertTo-Json -Depth 30 -Compress)
 }
 
+function ConvertTo-InstallJournalV2TransitionAuthorityJson {
+    param([Parameter(Mandatory = $true)][object] $Journal)
+    $document=[ordered]@{}
+    foreach($property in @($Journal.PSObject.Properties)) {
+        if($property.Name-ceq'phase'){continue}
+        if($property.Name-cne'operations'){$document[$property.Name]=$property.Value;continue}
+        $operations=New-Object System.Collections.Generic.List[object]
+        foreach($operation in @($property.Value)) {
+            $operationDocument=[ordered]@{}
+            foreach($operationProperty in @($operation.PSObject.Properties)) {
+                if($operationProperty.Name-cne'state'){$operationDocument[$operationProperty.Name]=$operationProperty.Value}
+            }
+            $operations.Add([pscustomobject]$operationDocument)
+        }
+        $document.operations=$operations.ToArray()
+    }
+    return ([pscustomobject]$document|ConvertTo-Json -Depth 30 -Compress)
+}
+
+function Assert-InstallJournalV2TrustedTransition {
+    param([Parameter(Mandatory = $true)][object] $Previous,[Parameter(Mandatory = $true)][object] $Next)
+    if([int64]$Previous.schemaVersion-ne2-or[int64]$Next.schemaVersion-ne2-or
+        [string]$Previous.owner.component-cne'repo-bootstrap'-or[string]$Next.owner.component-cne'repo-bootstrap') {
+        throw 'Trusted install journal transition requires validated repo-bootstrap schema v2 journals.'
+    }
+    if((ConvertTo-InstallJournalV2TransitionAuthorityJson $Previous)-cne(ConvertTo-InstallJournalV2TransitionAuthorityJson $Next)) {
+        throw 'AI instructions install journal store transition changed fields other than phase or operation state.'
+    }
+    $fromPhase=[string]$Previous.phase;$toPhase=[string]$Next.phase
+    if($fromPhase-cne$toPhase-and"$fromPhase>$toPhase"-cnotin@('prepared>applying','applying>applied','applied>committed')) {
+        throw 'AI instructions install journal store phase transition is invalid.'
+    }
+    $previousOperations=@($Previous.operations);$nextOperations=@($Next.operations)
+    if($previousOperations.Count-ne$nextOperations.Count){throw 'AI instructions install journal store transition cannot change operations count.'}
+    for($index=0;$index-lt$previousOperations.Count;$index++) {
+        $fromState=[string]$previousOperations[$index].state;$toState=[string]$nextOperations[$index].state
+        if($fromState-cne$toState-and"$fromState>$toState"-cne'pending>applied') {
+            throw "AI instructions install journal store transition operation $($index + 1) state transition is invalid."
+        }
+    }
+    return $Next
+}
+
 function Read-AiInstructionsInstallJournalLeaf {
-    param([Parameter(Mandatory = $true)] $TransactionLease,[Parameter(Mandatory = $true)][string] $Leaf,[Parameter(Mandatory = $true)][string] $TransactionId,[string] $ExpectedOwnerComponent)
+    param([Parameter(Mandatory = $true)] $TransactionLease,[Parameter(Mandatory = $true)][string] $Leaf,[Parameter(Mandatory = $true)][string] $TransactionId,[string] $ExpectedOwnerComponent,[AllowNull()][byte[]] $ExpectedBytes)
     $lease = Open-PlatformFile -ParentLease $TransactionLease -Leaf $Leaf -Access Read -CreateMode OpenExisting
     try {
-        $json=[Text.UTF8Encoding]::new($false,$true).GetString($lease.ReadAllBytes(16777216))
+        [byte[]]$rawBytes=$lease.ReadAllBytes(16777216)
+        if($PSBoundParameters.ContainsKey('ExpectedBytes')-and$null-ne$ExpectedBytes) {
+            if($rawBytes.Length-ne$ExpectedBytes.Length-or(Get-InstallTransactionSha256 $rawBytes)-cne(Get-InstallTransactionSha256 $ExpectedBytes)) {
+                throw "Journal readback bytes differ from the requested journal: $Leaf"
+            }
+            $json=[Text.UTF8Encoding]::new($false,$true).GetString($rawBytes)
+            $parameters=@{InputObject=$json;ErrorAction='Stop'};if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'}
+            try{$journal=ConvertFrom-Json @parameters}catch{throw 'AI instructions install journal JSON is invalid.'}
+            if($null-eq$journal-or$journal-is[System.Array]-or$journal-is[string]-or$journal-is[ValueType]){throw 'AI instructions install journal JSON root must be an object.'}
+            if([int64]$journal.schemaVersion-ne2-or[string]$journal.owner.component-cne'repo-bootstrap') {throw 'Trusted journal readback is not a repo-bootstrap schema v2 journal.'}
+            if([string]$journal.transactionId-cne$TransactionId){throw 'AI instructions install journal transactionId does not match the expected transaction directory.'}
+            return $journal
+        }
+        $json=[Text.UTF8Encoding]::new($false,$true).GetString($rawBytes)
         if($ExpectedOwnerComponent-ceq'repo-bootstrap'){
             $parameters=@{InputObject=$json;ErrorAction='Stop'};if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'}
             $journal=ConvertFrom-Json @parameters
@@ -254,16 +310,28 @@ function Write-AiInstructionsInstallJournalStore {
         [Parameter(Mandatory = $true)][System.Collections.IDictionary] $JournalStoreStates
     )
     $leaves = Get-AiInstructionsInstallJournalStoreLeaves
+    $isRepoV2=[int64]$Journal.schemaVersion-eq2
+    $current=$null
     if ($null -ne $PreviousJournal) {
-        $storedPrevious = if([int64]$Journal.schemaVersion-eq2){$PreviousJournal}else{Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf (Get-AiInstructionsInstallJournalStoreLeaves).journal -TransactionId ([string]$Journal.transactionId)}
-        if ([int64]$Journal.schemaVersion-ne2 -and -not (Test-InstallJournalSemanticEqual -First $storedPrevious -Second $PreviousJournal)) { throw 'Published journal differs from the expected previous journal generation.' }
-        Assert-AiInstructionsInstallJournalStoreTransition -Previous $storedPrevious -Next $Journal | Out-Null
+        if($isRepoV2) {
+            $current=$JournalStoreStates[[string]$leaves.journal]
+            if($null-eq$current-or-not[bool]$current.exists){throw 'The journal store does not contain a classified journal state.'}
+            [byte[]]$previousBytes=ConvertTo-InstallJournalBytes -Journal $PreviousJournal
+            if([int64]$current.length-ne$previousBytes.Length-or[string]$current.sha256-cne(Get-InstallTransactionSha256 $previousBytes)) {throw 'Published journal differs from the expected previous journal generation.'}
+            Assert-InstallJournalV2TrustedTransition -Previous $PreviousJournal -Next $Journal|Out-Null
+        }
+        else {
+            $storedPrevious=Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf $leaves.journal -TransactionId ([string]$Journal.transactionId)
+            if(-not(Test-InstallJournalSemanticEqual -First $storedPrevious -Second $PreviousJournal)){throw 'Published journal differs from the expected previous journal generation.'}
+            Assert-AiInstructionsInstallJournalStoreTransition -Previous $storedPrevious -Next $Journal|Out-Null
+        }
     }
+    elseif($isRepoV2){Assert-AiInstructionsInstallJournalV2 -Journal $Journal|Out-Null}
     [byte[]]$bytes = ConvertTo-InstallJournalBytes -Journal $Journal
     $stageState = New-AiInstructionsInstallStageFile -TransactionLease $TransactionLease -Leaf $leaves.stage -Bytes $bytes -PlatformOs $PlatformOs
     $JournalStoreStates[[string]$leaves.stage] = $stageState
     Invoke-AiInstructionsInstallFailpoint -Name 'after-journal-stage-flush'
-    $validatedStage = Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf $leaves.stage -TransactionId ([string]$Journal.transactionId) -ExpectedOwnerComponent $(if([int64]$Journal.schemaVersion-eq2){'repo-bootstrap'}else{$null})
+    $validatedStage = Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf $leaves.stage -TransactionId ([string]$Journal.transactionId) -ExpectedOwnerComponent $(if($isRepoV2){'repo-bootstrap'}else{$null}) -ExpectedBytes $(if($isRepoV2){$bytes}else{$null})
     if (-not (Test-InstallJournalSemanticEqual -First $validatedStage -Second $Journal)) { throw 'Journal stage readback differs from the requested journal.' }
     $journalPath = Join-Path $TransactionPath $leaves.journal
     $registerPublicationFailpoint = $PlatformOs -ceq 'windows' -and
@@ -277,7 +345,7 @@ function Write-AiInstructionsInstallJournalStore {
             finally { $stageLease.Dispose() }
         }
         else {
-            $current = $JournalStoreStates[[string]$leaves.journal]
+            if($null-eq$current){$current = $JournalStoreStates[[string]$leaves.journal]}
             if ($null -eq $current) { throw 'The journal store does not contain a classified journal state.' }
             $stageLease = Open-PlatformFile -ParentLease $TransactionLease -Leaf $leaves.stage -Access ReadWrite -CreateMode OpenExisting
             try { $receipt = Publish-PlatformFile -ParentLease $TransactionLease -Leaf $leaves.journal -TransactionLease $TransactionLease -StageLease $stageLease -ExpectedState $current -DisplacedLeaf $leaves.previous -ExpectedStage $stageState }
@@ -292,7 +360,7 @@ function Write-AiInstructionsInstallJournalStore {
         identity=$receipt.appliedIdentity
     }
     $JournalStoreStates[[string]$leaves.stage] = [pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}
-    $validated = Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf $leaves.journal -TransactionId ([string]$Journal.transactionId) -ExpectedOwnerComponent $(if([int64]$Journal.schemaVersion-eq2){'repo-bootstrap'}else{$null})
+    $validated = Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf $leaves.journal -TransactionId ([string]$Journal.transactionId) -ExpectedOwnerComponent $(if($isRepoV2){'repo-bootstrap'}else{$null}) -ExpectedBytes $(if($isRepoV2){$bytes}else{$null})
     if (-not (Test-InstallJournalSemanticEqual -First $validated -Second $Journal)) { throw 'Published journal readback differs from the requested journal.' }
     if ($null -ne $PreviousJournal) {
         # Publication preserves the displaced journal identity and bytes.  Bind
@@ -306,7 +374,7 @@ function Write-AiInstructionsInstallJournalStore {
 
 function Copy-InstallJournalWithChange {
     param([Parameter(Mandatory = $true)] $Journal,[string] $Phase,[Nullable[long]] $Sequence,[string] $State)
-    if([int64]$Journal.schemaVersion-eq2){$parameters=@{InputObject=($Journal|ConvertTo-Json -Depth 30);ErrorAction='Stop'};if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'};$copy=ConvertFrom-Json @parameters;Assert-AiInstructionsInstallJournalV2 $copy|Out-Null}
+    if([int64]$Journal.schemaVersion-eq2){$parameters=@{InputObject=($Journal|ConvertTo-Json -Depth 30);ErrorAction='Stop'};if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'};$copy=ConvertFrom-Json @parameters}
     else{$copy = ConvertFrom-AiInstructionsInstallJournalV1Json -Json (($Journal | ConvertTo-Json -Depth 30)) -ExpectedTransactionId ([string]$Journal.transactionId)}
     if (-not [string]::IsNullOrEmpty($Phase)) { $copy.phase = $Phase }
     if ($null -ne $Sequence) {

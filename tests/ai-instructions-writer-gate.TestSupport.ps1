@@ -337,13 +337,16 @@ function New-P9cProjectPublicationFailpointBootstrap {
     if($RecoveryPath-ceq'InProcess'){
         $failFast='    [Environment]::FailFast("AI instructions installer failpoint: $Name")'
         if(-not$moduleText.Contains($failFast)){throw 'Install failpoint invocation was not found.'}
-        $replacement='    throw "Injected AI instructions installer failpoint: $Name"'
+        $replacement='    [Environment]::SetEnvironmentVariable(''AI_INSTRUCTIONS_INSTALL_FAILPOINT'',$null,''Process'')' + "`r`n" + '    throw "Injected AI instructions installer failpoint: $Name"'
         $moduleText=$moduleText.Replace($failFast,$replacement)
         [IO.File]::WriteAllText($modulePath,$moduleText,[Text.UTF8Encoding]::new($false))
     }
     $bootstrapText=[IO.File]::ReadAllText($bootstrapPath)
     $prefix="[Environment]::SetEnvironmentVariable('AI_INSTRUCTIONS_INSTALL_FAILPOINT','$failpointName','Process')`r`n"
-    [IO.File]::WriteAllText($bootstrapPath,$prefix+$bootstrapText,[Text.UTF8Encoding]::new($false))
+    $tokens=$null;$parseErrors=$null;$ast=[Management.Automation.Language.Parser]::ParseInput($bootstrapText,[ref]$tokens,[ref]$parseErrors)
+    if(@($parseErrors).Count-ne0-or$null-eq$ast.ParamBlock){throw 'Bootstrap failpoint copy does not contain a valid param block.'}
+    $bootstrapText=$bootstrapText.Insert($ast.ParamBlock.Extent.EndOffset,"`r`n"+$prefix)
+    [IO.File]::WriteAllText($bootstrapPath,$bootstrapText,[Text.UTF8Encoding]::new($false))
     return $bootstrapPath
 }
 
@@ -354,19 +357,33 @@ function Get-P9cPublicationStateSnapshot {
     $indexPath=(& git -C $Repository rev-parse --git-path index|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($indexPath)){$indexPath=Join-Path $Repository $indexPath}
     $excludePath=(& git -C $Repository rev-parse --git-path info/exclude|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($excludePath)){$excludePath=Join-Path $Repository $excludePath}
     $fileRows=@(
-        foreach($entry in @($manifest.files|Where-Object{[string]$_.artifactType-cin@('instruction','skill')}|Sort-Object targetPath)){
+        foreach($entry in @($manifest.files|Sort-Object targetPath)){
             $path=Join-Path $Repository ([string]$entry.targetPath)
-            "$([string]$entry.targetPath)`t$(if(Test-Path -LiteralPath $path -PathType Leaf){(Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()}else{'absent'})"
+            "$([string]$entry.artifactType)`t$([string]$entry.targetPath)`t$(if(Test-Path -LiteralPath $path -PathType Leaf){(Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()}else{'absent'})"
         }
     )
+    $headReference=(@(& git -C $Repository symbolic-ref -q HEAD 2>$null)|Select-Object -First 1)
+    $headObject=(@(& git -C $Repository rev-parse --verify HEAD 2>$null)|Select-Object -First 1)
+    $refObject=if([string]::IsNullOrWhiteSpace([string]$headReference)){$null}else{(@(& git -C $Repository rev-parse --verify ([string]$headReference) 2>$null)|Select-Object -First 1)}
+    $headMode=if(-not[string]::IsNullOrWhiteSpace([string]$headReference)){if([string]::IsNullOrWhiteSpace([string]$headObject)){'unborn'}else{'symbolic'}}else{'detached'}
+    $headPath=(& git -C $Repository rev-parse --git-path HEAD|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($headPath)){$headPath=Join-Path $Repository $headPath}
+    $indexRows=@(& git -C $Repository ls-files --stage)|Sort-Object -CaseSensitive
+    $indexEntryBytes=[Text.UTF8Encoding]::new($false).GetBytes((($indexRows-join"`n")+"`n"));$sha=[Security.Cryptography.SHA256]::Create();try{$indexEntrySha=([BitConverter]::ToString($sha.ComputeHash($indexEntryBytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
     $status=(@(& git -C $Repository status --porcelain=v1 --untracked-files=all)-join"`n")
+    $transactionRoot=Join-Path $Repository '.ai-instructions-txn';$transactionResidue=if((Test-Path -LiteralPath $transactionRoot -PathType Container)-and@(Get-ChildItem -Force -LiteralPath $transactionRoot).Count-gt0){Get-P7eTreeSnapshot $transactionRoot}else{''}
     return ([ordered]@{
-        head=((& git -C $Repository rev-parse HEAD|Select-Object -First 1).Trim())
-        index=(Get-FileHash -Algorithm SHA256 -LiteralPath $indexPath).Hash.ToLowerInvariant()
+        headMode=$headMode
+        headReference=if([string]::IsNullOrWhiteSpace([string]$headReference)){$null}else{[string]$headReference.Trim()}
+        headObject=if([string]::IsNullOrWhiteSpace([string]$headObject)){$null}else{[string]$headObject.Trim()}
+        headRaw=(Get-FileHash -Algorithm SHA256 -LiteralPath $headPath).Hash.ToLowerInvariant()
+        refObject=if([string]::IsNullOrWhiteSpace([string]$refObject)){$null}else{[string]$refObject.Trim()}
+        indexRaw=if(Test-Path -LiteralPath $indexPath -PathType Leaf){(Get-FileHash -Algorithm SHA256 -LiteralPath $indexPath).Hash.ToLowerInvariant()}else{'absent'}
+        indexEntrySet=$indexEntrySha
         status=$status
         exclude=if(Test-Path -LiteralPath $excludePath -PathType Leaf){[Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))}else{'absent'}
         manifest=if($null-ne$manifest){[Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath))}else{'absent'}
         files=$fileRows
+        transactionResidue=$transactionResidue
     }|ConvertTo-Json -Depth 6 -Compress)
 }
 

@@ -1,145 +1,94 @@
 . (Join-Path $PSScriptRoot 'ai-instructions-writer-gate.TestSupport.ps1')
 
-Describe 'AI instructions unified repository transaction' {
+Describe 'AI instructions unified repository transaction failpoint matrix' {
     BeforeAll {
-        $shortParent=Join-Path ([IO.Path]::GetTempPath()) 'p7e'
-        New-Item -ItemType Directory -Force -Path $shortParent|Out-Null
-        $script:ExternalRoot=Join-Path $shortParent ([Guid]::NewGuid().ToString('N').Substring(0,8))
-        New-Item -ItemType Directory -Path $script:ExternalRoot|Out-Null
-        $script:BootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
-        $script:TransactionModulePath=Join-Path $script:RepositoryRoot 'scripts/ai-instructions-install-transaction.psm1'
-        $tokens=$null;$errors=$null
-        $script:BootstrapAst=[Management.Automation.Language.Parser]::ParseFile($script:BootstrapPath,[ref]$tokens,[ref]$errors)
-        if(@($errors).Count-ne0){throw ($errors|ForEach-Object Message|Join-String -Separator '; ')}
-        $script:BootstrapText=[IO.File]::ReadAllText($script:BootstrapPath)
-        $script:TransactionText=[IO.File]::ReadAllText($script:TransactionModulePath)
+        $shortParent=Join-Path ([IO.Path]::GetTempPath()) 'p7e';New-Item -ItemType Directory -Force -Path $shortParent|Out-Null
+        $script:ExternalRoot=Join-Path $shortParent ([Guid]::NewGuid().ToString('N').Substring(0,8));New-Item -ItemType Directory -Path $script:ExternalRoot|Out-Null
+        $script:P9cBaseline=New-P9bInstructionArchive -WorkingRoot (Join-Path $script:ExternalRoot 'baseline-work') -ArchivePath (Join-Path $script:ExternalRoot 'baseline.zip') -Marker baseline
+        $script:P9cChanged=New-P9bInstructionArchive -WorkingRoot (Join-Path $script:ExternalRoot 'changed-work') -ArchivePath (Join-Path $script:ExternalRoot 'changed.zip') -Marker changed
+        $initialFiles=@{'work-with-jira'=@{'resources/state.txt'="jira old`n"};'manage-task-handoff'=@{'resources/state.txt'="handoff old`n"}}
+        $updatedFiles=@{'work-with-jira'=@{'resources/state.txt'="jira new`n";'resources/added.txt'="jira added`n"};'manage-task-handoff'=@{'resources/state.txt'="handoff new`n";'resources/added.txt'="handoff added`n"}}
+        $script:P9cInitial=New-P9cProjectFixture -Root (Join-Path $script:ExternalRoot 'initial') -ProjectionIds @('project-agents') -AdditionalSkillFiles $initialFiles
+        $script:P9cUpdated=New-P9cProjectFixture -Root (Join-Path $script:ExternalRoot 'updated') -ProjectionIds @('project-agents') -AdditionalSkillFiles $updatedFiles
+        $script:P9cSeeds=@{}
+        foreach($withRemediation in @($false,$true)){
+            $seed=Join-Path $script:ExternalRoot ("seed-$withRemediation");New-P9bTargetRepository $seed
+            $result=Invoke-P9bRepoBootstrap -Context $script:P9cInitial.Context -ArchivePath $script:P9cBaseline.ArchivePath -TargetRoot $seed
+            if($result.ExitCode-ne0){throw "Could not create InterT140 seed: $($result.Output)"}
+            if($withRemediation){& git -C $seed add -f -- AGENTS.md;& git -C $seed commit --quiet -m 'tracked Agent artifact fixture';if($LASTEXITCODE-ne0){throw 'Could not create remediation seed.'}}
+            $script:P9cSeeds[[string]$withRemediation]=$seed
+        }
     }
     AfterAll {if(Test-Path -LiteralPath $script:ExternalRoot){Remove-Item -LiteralPath $script:ExternalRoot -Recurse -Force}}
 
-    # Scenario: Every journaled repository operation kind is wired through the shared executor with both pre-mutation and post-mutation-before-journal failpoints, and TestSupport exposes catch and crash paths.
-    # Purpose: Preserve the InterT140 matrix contract while moving it out of part2 and prohibit project-only comment seams.
-    It 'InterT140_registers_every_repository_step_failpoint_through_both_recovery_paths' -TestCases @(
-        @{Kind='replace-git-index'},@{Kind='update-git-ref'},@{Kind='update-git-head'},@{Kind='ensure-directory-anchor'},
-        @{Kind='create-file'},@{Kind='write-file'},@{Kind='remove-file'}
-    ) {
-        param($Kind)
-        $script:BootstrapText|Should -Match ([regex]::Escape("kind='$Kind'")+'|'+[regex]::Escape("'$Kind'"))
-        $script:BootstrapText|Should -Match 'before-operation-'
-        $script:BootstrapText|Should -Match 'after-operation-.+?-before-journal'
-        $support=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'ai-instructions-writer-gate.TestSupport.ps1'))
-        $support|Should -Match "RecoveryPath-ceq'InProcess'"
-        $support|Should -Match "ValidateSet\('InProcess','NextRun'\)"
-        $support|Should -Not -Match 'P9C_TEST_HOOK'
-    }
+    # Scenario: With and without tracked-artifact remediation, representative index, ref, file, Skill, license, manifest, and shared-exclude roles stop immediately before mutation or after mutation but before journal update, through both process catch and next-run recovery.
+    # Purpose: Preserve every fix4 InterT140 state assertion, select sequences by durable role instead of number, and prove both recovery paths produce identical complete repository snapshots.
+    It 'InterT140_recovers_each_repository_role_failpoint_with_and_without_remediation_through_both_paths' {
+        $normalizeCrossCloneSnapshot={param([string]$Snapshot)$state=$Snapshot|ConvertFrom-Json;$state.indexRaw='<clone-local-stat-cache>';return ($state|ConvertTo-Json -Depth 6 -Compress)}
+        $rolesByRemediation=@{
+            'False'=@('instruction','project-skill','license','manifest','shared-exclude')
+            'True'=@('git-index','git-ref','remediation-and-instruction')
+        }
+        foreach($withRemediation in @($false,$true)){
+            $discovery=Join-Path $script:ExternalRoot ("discovery-$withRemediation");Copy-Item -LiteralPath $script:P9cSeeds[[string]$withRemediation] -Destination $discovery -Recurse
+            $discoveryBootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot "discovery-runtime-$withRemediation") -Failpoint 'after-journal-prepared' -RecoveryPath NextRun
+            $discoveryResult=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $discovery -BootstrapPath $discoveryBootstrap
+            $discoveryResult.ExitCode|Should -Not -Be 0
+            $transactions=@(Get-ChildItem -LiteralPath (Join-Path $discovery '.ai-instructions-txn') -Directory -Force);$transactions.Count|Should -Be 1
+            $journal=Get-Content -Raw -LiteralPath (Join-Path $transactions[0].FullName 'journal.json')|ConvertFrom-Json
+            $roleSequences=@{}
+            foreach($role in $rolesByRemediation[[string]$withRemediation]){
+                $operation=@($journal.operations|Where-Object{[string]$_.role-ceq$role}|Sort-Object sequence|Select-Object -First 1)
+                if($operation.Count-ne1){throw "InterT140 discovery for remediation=$withRemediation is missing role '$role'. Roles: $(@($journal.operations.role)-join', '). Output: $($discoveryResult.Output)"}
+                $roleSequences[$role]=[int]$operation[0].sequence
+            }
+            foreach($role in $rolesByRemediation[[string]$withRemediation]){
+                foreach($position in @('before','after-before-journal')){
+                    $sequence=$roleSequences[$role]
+                    $failpoint=if($position-ceq'before'){"before-operation-$sequence"}else{"after-operation-$sequence-before-journal"}
+                    $decisionSnapshots=@{};$finalSnapshots=@{}
+                    foreach($recoveryPath in @('InProcess','NextRun')){
+                        $caseRoot=Join-Path $script:ExternalRoot ("case-$withRemediation-$role-$position-$recoveryPath");Copy-Item -LiteralPath $script:P9cSeeds[[string]$withRemediation] -Destination $caseRoot -Recurse
+                        $before=Get-P9cPublicationStateSnapshot $caseRoot
+                        $failpointBootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot "runtime-$withRemediation-$role-$position-$recoveryPath") -Failpoint $failpoint -RecoveryPath $recoveryPath
+                        $failed=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $caseRoot -BootstrapPath $failpointBootstrap
+                        $failed.ExitCode|Should -Not -Be 0
+                        if($recoveryPath-ceq'NextRun'){
+                            $active=@(Get-ChildItem -LiteralPath (Join-Path $caseRoot '.ai-instructions-txn') -Directory -Force);$active.Count|Should -Be 1
+                            $failedJournal=Get-Content -Raw -LiteralPath (Join-Path $active[0].FullName 'journal.json')|ConvertFrom-Json
+                            [string]$failedJournal.phase|Should -Be applying
+                            [string](@($failedJournal.operations|Where-Object sequence -eq $sequence)[0].role)|Should -Be $role
+                            @($failedJournal.operations|Where-Object{[string]$_.target.kind-ceq'repository-relative'-and[string]$_.target.value-ceq'AGENTS.md'}).Count|Should -Be 1
+                            @($failedJournal.operations|Where-Object{[string]$_.role-ceq'manifest'}).Count|Should -Be 1
+                            @($failedJournal.operations|Where-Object{[string]$_.role-ceq'project-skill'-and[string]$_.target.value-like'*/resources/state.txt'}).Count|Should -Be 2
+                            @($failedJournal.operations|Where-Object{[string]$_.role-ceq'shared-exclude'}).Count|Should -Be 1
+                            ($null-ne$failedJournal.scope.externalBackup)|Should -Be $withRemediation
+                            $recoveryOnly=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot "recovery-$withRemediation-$role-$position") -Failpoint RecoveryOnly
+                            (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $caseRoot -BootstrapPath $recoveryOnly).ExitCode|Should -Not -Be 0
+                        }else{(Get-AiInstructionsRefusalCode $failed.Output)|Should -Be interrupted-install}
+                        @(Get-ChildItem -Force -LiteralPath (Join-Path $caseRoot '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should -Be 0
+                        $afterDecision=Get-P9cPublicationStateSnapshot $caseRoot;$afterDecision|Should -Be $before;$decisionSnapshots[$recoveryPath]=$afterDecision
 
-    # Scenario: A completed current run has no terminal file, Git, manifest, or exclude mutation.
-    # Purpose: Return before creating .ai-instructions-txn and leave the complete filesystem tree byte-for-byte unchanged.
-    It 'InterT143_leaves_the_filesystem_unchanged_when_the_plan_has_no_mutation' {
-        $start=@($script:BootstrapAst.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]-and$n.Name-ceq'Start-RepositoryInstallTransaction'},$true))[-1].Extent.Text
-        $start|Should -Match 'if\(-not\$hasRemediationGit-and-not\$hasFileMutation\)\{return\}'
-        $returnOffset=$start.IndexOf('if(-not$hasRemediationGit-and-not$hasFileMutation){return}',[StringComparison]::Ordinal)
-        $createOffset=$start.IndexOf("Open-PlatformDirectory -Root `$Context.Repository -RelativePath '.ai-instructions-txn' -CreatePrivate",[StringComparison]::Ordinal)
-        $returnOffset|Should -BeGreaterThan -1
-        $createOffset|Should -BeGreaterThan $returnOffset
-    }
-
-    # Scenario: Remediation index/ref/HEAD and repository file intents are all prepared before the applying loop begins.
-    # Purpose: Enforce strict write-ahead and prevent any legacy direct mutation path from preceding the durable journal.
-    It 'InterT144_journals_each_remediation_substep_before_mutation' {
-        $start=@($script:BootstrapAst.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]-and$n.Name-ceq'Start-RepositoryInstallTransaction'},$true))[-1].Extent.Text
-        $journalOffset=$start.IndexOf('Write-AiInstructionsInstallJournalStore',[StringComparison]::Ordinal)
-        $applyingOffset=$start.IndexOf('-Phase applying',[StringComparison]::Ordinal)
-        $operationOffset=$start.IndexOf('Invoke-RepositoryTransactionOperation',[StringComparison]::Ordinal)
-        $journalOffset|Should -BeGreaterThan -1
-        $applyingOffset|Should -BeGreaterThan $journalOffset
-        $operationOffset|Should -BeGreaterThan $applyingOffset
-        $script:BootstrapText|Should -Not -Match 'Set-RemediationIndexWithoutPaths\s'
-        $script:BootstrapText|Should -Not -Match 'Invoke-AgentArtifactRemediation\s'
-    }
-
-    # Scenario: Recovery is re-entered after any partially undone remediation step.
-    # Purpose: Restart the complete reverse sequence without a rollback-progress journal and treat already-before steps as no-op.
-    It 'InterT145_restarts_reverse_undo_after_each_remediation_substep' {
-        $rollback=@($script:BootstrapAst.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]-and$n.Name-ceq'Invoke-RepositoryTransactionRollback'},$true))[-1].Extent.Text
-        $rollback|Should -Match 'Sort-Object sequence -Descending'
-        $rollback|Should -Match 'Invoke-RepositoryTransactionOperation.+-Direction undo'
-        $executor=@($script:BootstrapAst.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]-and$n.Name-ceq'Invoke-RepositoryTransactionOperation'},$true))[-1].Extent.Text
-        $executor|Should -Match 'Test-RepositoryTransactionStateEqual.+\$destination\)\{return\}'
-        $executor|Should -Not -Match 'rolled-back|RollbackAttempted|RolledBack'
-    }
-
-    # Scenario: Project selection is empty while ordinary Instructions or legacy v1-v3 retirement still requires mutation.
-    # Purpose: Keep all mutation on the unified intent/executor path and retire the legacy snapshot publication authority.
-    It 'InterT146_recovers_empty_project_selection_without_legacy_snapshot' {
-        $script:BootstrapText|Should -Match 'Start-RepositoryInstallTransaction \$script:ProjectPublicationContext'
-        $script:BootstrapText|Should -Not -Match 'Save-SkillMigrationJournal\s+-'
-        $script:BootstrapText|Should -Not -Match 'Restore-LegacyAgentArtifactRemediation.+Restore-AgentArtifactRemediation'
-    }
-
-    # Scenario: Cleanup is interrupted after one artifact or after journal deletion, through catch or next-run recovery.
-    # Purpose: Retain a committed decision while it exists, then classify the journal-less directory as a harmless orphan and never undo after-state.
-    It 'InterT147_recovers_both_committed_cleanup_interruption_points_without_undo' {
-        $cleanup=@($script:BootstrapAst.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]-and$n.Name-ceq'Complete-RepositoryTransactionCleanup'},$true))[-1].Extent.Text
-        $cleanup|Should -Match 'Sort-Object sequence\)\)\{Invoke-RepositoryTransactionOperation.+-Direction redo'
-        $cleanup|Should -Match 'Remove-InstallTerminalTransactionArtifacts'
-        $cleanup|Should -Match "during-cleanup-transaction"
-        $cleanup|Should -Not -Match 'Direction undo|\.cleanup'
-        $script:TransactionText|Should -Match "after-cleanup-journal-before-directory"
-        $script:BootstrapText|Should -Match "classification\.classification-cne'orphan-without-journal'"
-        $script:BootstrapText|Should -Match 'orphan-without-journal'
-    }
-
-    # Scenario: The disk classification is prepared, applying, applied, committed, malformed, or missing.
-    # Purpose: Give process catch and next-run recovery one exhaustive phase decision and fail closed on unknown state.
-    It 'UnitT148_maps_all_repo_journal_classifications_to_one_recovery_action' {
-        $definition=@($script:BootstrapAst.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]-and$n.Name-ceq'Resolve-ProjectPublicationRecoveryAction'},$true))[-1]
-        Invoke-Expression $definition.Extent.Text
-        foreach($phase in @('prepared','applying','applied')){Resolve-ProjectPublicationRecoveryAction ([pscustomobject]@{status='valid';journal=[pscustomobject]@{phase=$phase}})|Should -Be 'rollback-all'}
-        Resolve-ProjectPublicationRecoveryAction ([pscustomobject]@{status='valid';journal=[pscustomobject]@{phase='committed'}})|Should -Be 'roll-forward-cleanup'
-        foreach($status in @('missing','orphan','indeterminate')){Resolve-ProjectPublicationRecoveryAction ([pscustomobject]@{status=$status;journal=$null})|Should -Be 'fail-closed'}
-    }
-
-    # Scenario: File, index, ref, HEAD, or exclude state is neither its journal before nor after image.
-    # Purpose: Stop at the first third state, retain evidence, and return interrupted-install without overwriting external bytes.
-    It 'InterT149_refuses_third_state_and_foreign_index_lock_without_mutation' {
-        $executor=@($script:BootstrapAst.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]-and$n.Name-ceq'Invoke-RepositoryTransactionOperation'},$true))[-1].Extent.Text
-        $executor|Should -Match 'is in a third state; evidence was retained'
-        $lock=@($script:BootstrapAst.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]-and$n.Name-ceq'Remove-RepositoryIndexLockIfOwned'},$true))[-1].Extent.Text
-        $lock|Should -Match "phase-cne'applying'"
-        $lock|Should -Match 'Get-ByteArraySha256 \$bytes\)-cne\$ExpectedSha256'
-        $lock|Should -Match 'Remove-PlatformOwnedFile'
-        $script:BootstrapText|Should -Match 'Confirm that no other Git process is running'
-    }
-
-    # Scenario: Attached, detached, and unborn HEAD transactions are observed and restored through ref/HEAD CAS operations.
-    # Purpose: Preserve each HEAD mode and keep ref updates separate from symbolic HEAD publication.
-    It 'InterT150_recovers_attached_detached_and_unborn_HEAD_transactions' {
-        $head=@($script:BootstrapAst.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]-and$n.Name-ceq'Get-RepositoryTransactionHeadState'},$true))[-1].Extent.Text
-        foreach($mode in @('symbolic','detached','unborn')){$head|Should -Match $mode}
-        $script:BootstrapText|Should -Match "kind='update-git-ref'"
-        $script:BootstrapText|Should -Match "kind='update-git-head'"
-        $script:BootstrapText|Should -Match "update-ref','--no-deref','HEAD"
-        $script:BootstrapText|Should -Match "symbolic-ref','HEAD'"
-    }
-
-    # Scenario: A created directory anchor contains an unexpected child when undo is attempted.
-    # Purpose: Refuse recursive deletion and require the same directory identity to be empty before moving it back to transaction evidence.
-    It 'InterT151_refuses_to_remove_directory_anchors_with_unknown_children' {
-        $executor=@($script:BootstrapAst.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]-and$n.Name-ceq'Invoke-RepositoryTransactionOperation'},$true))[-1].Extent.Text
-        $executor|Should -Match "'ensure-directory-anchor'"
-        $executor|Should -Match 'Move-PlatformOwnedDirectory'
-        $executor|Should -Not -Match 'Remove-Item.+-Recurse|Remove-PlatformOwnedDirectoryTree'
-    }
-
-    # Scenario: index.lock is flushed before rename, rename completes before the journal update, or a foreign lock is present.
-    # Purpose: Bind lock cleanup to applying plus the direction SHA, use atomic replacement, and leave foreign lock/index bytes untouched.
-    It 'InterT152_enforces_index_lock_write_ahead_atomic_replace_and_residual_lock_rules' {
-        $index=@($script:BootstrapAst.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]-and$n.Name-ceq'Invoke-RepositoryIndexReplacement'},$true))[-1].Extent.Text
-        $index|Should -Match 'FileMode\]::CreateNew'
-        $index|Should -Match 'Flush\(\$true\)'
-        $index|Should -Match "after-index-lock-write-before-rename"
-        $index|Should -Match '\[IO\.File\]::Replace\(\$lockPath,\$indexPath,\$null\)'
-        $index|Should -Not -Match 'Remove-Item.+indexPath|Publish-PlatformFile'
-        $script:BootstrapText|Should -Match 'Resolve-RepositoryRecoveryIndexLock -Context \$context'
+                        $recovered=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $caseRoot
+                        if($recovered.ExitCode-ne0){throw "Project publication retry failed for $withRemediation/$role/$position/$recoveryPath`: $($recovered.Output)"}
+                        $manifestPath=Join-Path $caseRoot '.codex/ai-instructions.manifest.json';$manifest=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+                        [IO.File]::ReadAllText((Join-Path $caseRoot 'AGENTS.md'))|Should -Match '<!-- changed -->'
+                        $agentsEntry=@($manifest.files|Where-Object{[string]$_.targetPath-ceq'AGENTS.md'})[0];(Get-P9bNormalizedSha256 (Join-Path $caseRoot 'AGENTS.md'))|Should -Be ([string]$agentsEntry.sha256)
+                        $skillEntries=@($manifest.files|Where-Object{[string]$_.artifactType-ceq'skill'});@($skillEntries|Where-Object{[string]$_.targetPath-like'*/resources/added.txt'}).Count|Should -Be 2
+                        foreach($entry in $skillEntries){(Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $caseRoot ([string]$entry.targetPath))).Hash.ToLowerInvariant()|Should -Be ([string]$entry.sha256)}
+                        $exclude=[IO.File]::ReadAllText((Join-Path $caseRoot '.git/info/exclude'));foreach($path in @($manifest.files.targetPath)+@('.codex/ai-instructions.manifest.json')){$exclude|Should -Match ("(?m)^/"+[regex]::Escape([string]$path)+"`r?$")}
+                        $beforeState=$before|ConvertFrom-Json;$afterState=(Get-P9cPublicationStateSnapshot $caseRoot)|ConvertFrom-Json
+                        if($withRemediation){$afterState.headObject|Should -Not -Be $beforeState.headObject}else{$afterState.headObject|Should -Be $beforeState.headObject}
+                        $beforeRepeat=Get-P9cPublicationStateSnapshot $caseRoot
+                        (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $caseRoot).ExitCode|Should -Be 0
+                        (Get-P9cPublicationStateSnapshot $caseRoot)|Should -Be $beforeRepeat
+                        $finalSnapshots[$recoveryPath]=$beforeRepeat
+                    }
+                    (&$normalizeCrossCloneSnapshot $decisionSnapshots.InProcess)|Should -Be (&$normalizeCrossCloneSnapshot $decisionSnapshots.NextRun)
+                    (&$normalizeCrossCloneSnapshot $finalSnapshots.InProcess)|Should -Be (&$normalizeCrossCloneSnapshot $finalSnapshots.NextRun)
+                }
+            }
+        }
+        ([IO.File]::ReadAllText((Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1')))|Should -Not -Match 'P9C_TEST_HOOK'
     }
 }
