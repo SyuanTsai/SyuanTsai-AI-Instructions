@@ -2318,7 +2318,10 @@ function Assert-AiInstructionsInstallJournalV2 {
             'git-shared-exclude' { if ($operation.target.value -isnot [string] -or -not [string]::Equals([IO.Path]::GetFullPath($targetValue),[IO.Path]::GetFullPath((Join-Path ([string]$Journal.scope.commonGitDirectory) 'info/exclude')),$pathComparison)) { throw "$context.target.value is not the scope shared exclude." } }
             'git-index' { if ($operation.target.value -isnot [string] -or -not [string]::Equals([IO.Path]::GetFullPath($targetValue),[IO.Path]::GetFullPath([string]$Journal.scope.indexPath),$pathComparison)) { throw "$context.target.value is not the scope index." } }
             'git-head' { if ($operation.target.value -isnot [string] -or $targetValue -cne 'HEAD') { throw "$context.target.value must be HEAD." } }
-            'git-ref' { if ($operation.target.value -isnot [string] -or $targetValue -cnotmatch '^refs/heads/[A-Za-z0-9._/-]+$' -or $targetValue -match '(?:^|/)\.\.?(/|$)|\.lock$|//') { throw "$context.target.value is not a safe branch ref." } }
+            'git-ref' {
+                $isEvidenceReuseCas=[string]$operation.kind-ceq'update-git-ref'-and[string]$operation.role-ceq'personal-agent-evidence-cas'-and$targetValue-ceq'refs/stash'
+                if ($operation.target.value -isnot [string] -or (-not$isEvidenceReuseCas-and($targetValue -cnotmatch '^refs/heads/[A-Za-z0-9._/-]+$' -or $targetValue -match '(?:^|/)\.\.?(/|$)|\.lock$|//'))) { throw "$context.target.value is not a safe branch ref or PersonalAgent evidence CAS target." }
+            }
             'git-stash-evidence' { if ($operation.target.value -isnot [string] -or $targetValue -cne 'refs/stash') { throw "$context.target.value must be refs/stash." } }
         }
         $targetKey = "$targetKind`0$targetValue"
@@ -2361,6 +2364,7 @@ function Assert-AiInstructionsInstallJournalV2 {
                 if ([string]$operation.method -cne 'update-ref' -or $null -ne $operation.stageLeaf -or $null -ne $operation.backupLeaf -or $null -ne $operation.quarantineLeaf) { throw "$context update-git-ref method or artifact leaves are invalid." }
                 Assert-AiInstructionsInstallJournalV2RefState -State $operation.before -Context "$context.before" -ObjectFormat ([string]$Journal.scope.objectFormat)
                 Assert-AiInstructionsInstallJournalV2RefState -State $operation.after -Context "$context.after" -ObjectFormat ([string]$Journal.scope.objectFormat)
+                if([string]$operation.role-ceq'personal-agent-evidence-cas'-and($targetValue-cne'refs/stash'-or-not[bool]$operation.before.exists-or-not[bool]$operation.after.exists-or[string]$operation.before.objectId-cne[string]$operation.after.objectId)){throw "$context PersonalAgent evidence CAS must preserve one existing refs/stash object ID."}
             }
             'update-git-head' {
                 if ($targetKind -cne 'git-head') { throw "$context update-git-head target kind is invalid." }

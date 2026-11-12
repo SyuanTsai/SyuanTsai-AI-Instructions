@@ -360,6 +360,20 @@ function New-P9cProjectPublicationFailpointBootstrap {
     return $bootstrapPath
 }
 
+function New-P9cStashTamperAfterPreparedBootstrap {
+    param([Parameter(Mandatory=$true)][string]$Root)
+    $scriptRoot=Join-Path $Root 'scripts'
+    Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts') -Destination $scriptRoot -Recurse
+    $bootstrapPath=Join-Path $scriptRoot 'bootstrap-ai-instructions.ps1'
+    $text=[IO.File]::ReadAllText($bootstrapPath)
+    $invocation="    Invoke-AiInstructionsInstallFailpoint -Name 'after-journal-prepared'"
+    if(-not$text.Contains($invocation)){throw 'Prepared journal failpoint invocation was not found for refs/stash tamper injection.'}
+    $tamper=$invocation+"`r`n    Invoke-Git -Repository ([string]`$Context.Repository) -Arguments @('update-ref','refs/stash','HEAD')|Out-Null"
+    $text=$text.Replace($invocation,$tamper)
+    [IO.File]::WriteAllText($bootstrapPath,$text,[Text.UTF8Encoding]::new($false))
+    return $bootstrapPath
+}
+
 function New-P9cIndexLockTamperBootstrap {
     param(
         [Parameter(Mandatory=$true)][string]$Root,

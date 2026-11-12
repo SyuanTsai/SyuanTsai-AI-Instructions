@@ -3567,4 +3567,92 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $tampered=ConvertFrom-Json @cloneParameters;$tampered.operations[1].before.objectId=('d'*40);$tampered.operations[1].before.exists=$true
         (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalStoreTransition -Previous $bound -Next $tampered|Out-Null})|Should Match 'fields other than state'
     }
+
+    # Scenario: The same immutable-field tamper matrix is presented to the full parser transition and to the trusted cached transition, including caller-owned operations reused by reference.
+    # Purpose: Prove the trusted optimization rejects every authority drift that the complete parser rejects, without relying on a deliberately incomplete fixture.
+    It 'UnitT224_rejects_the_same_repo_v2_tamper_matrix_in_trusted_and_full_transitions' {
+        $transactionModulePath=Join-Path $script:RepositoryRoot 'scripts/ai-instructions-install-transaction.psm1'
+        $transactionModule=Import-Module $transactionModulePath -Force -PassThru
+        $clone={param($value)$parameters=@{InputObject=($value|ConvertTo-Json -Depth 30)};if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'};ConvertFrom-Json @parameters}
+        $newBaseline={
+            $journal=Get-TestInstallJournalV2
+            $journal.phase='applying'
+            $journal.operations=@($journal.operations)+@([pscustomobject][ordered]@{
+                sequence=2;kind='store-git-stash-evidence';role='personal-agent-evidence';method='stash-store'
+                target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'}
+                before=[pscustomobject][ordered]@{exists=$false;objectId=$null}
+                after=[pscustomobject][ordered]@{exists=$true;objectId=$null}
+                stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
+            })
+            Assert-AiInstructionsInstallJournalV2 $journal|Out-Null
+            return $journal
+        }
+        $samples=@(
+            [pscustomobject]@{Name='top.schemaVersion';Mutate={param($n)$n.schemaVersion=3}},
+            [pscustomobject]@{Name='top.kind';Mutate={param($n)$n.kind='tampered'}},
+            [pscustomobject]@{Name='top.transactionId';Mutate={param($n)$n.transactionId=('f'*32)}},
+            [pscustomobject]@{Name='top.createdAtUtc';Mutate={param($n)$n.createdAtUtc='2026-11-13T00:00:00.0000000Z'}},
+            [pscustomobject]@{Name='top.owner';Mutate={param($n)$n.owner.processId=2}},
+            [pscustomobject]@{Name='top.platform';Mutate={param($n)$n.platform.architecture='arm64'}},
+            [pscustomobject]@{Name='top.lock';Mutate={param($n)$n.lock.leaf='other.lock'}},
+            [pscustomobject]@{Name='top.generation';Mutate={param($n)$n.generation.candidateBundleSha256=('f'*64)}},
+            [pscustomobject]@{Name='top.scope';Mutate={param($n)$n.scope.repositoryRoot=([IO.Path]::GetFullPath((Join-Path $TestDrive 'other-repo')))}},
+            [pscustomobject]@{Name='top.phase';Mutate={param($n)$n.phase='prepared'}},
+            [pscustomobject]@{Name='operation.sequence';Mutate={param($n)$n.operations[0].sequence=9}},
+            [pscustomobject]@{Name='operation.kind';Mutate={param($n)$n.operations[0].kind='write-file'}},
+            [pscustomobject]@{Name='operation.role';Mutate={param($n)$n.operations[0].role='changed-role'}},
+            [pscustomobject]@{Name='operation.method';Mutate={param($n)$n.operations[0].method='tombstone-rename'}},
+            [pscustomobject]@{Name='operation.target';Mutate={param($n)$n.operations[0].target.value='CLAUDE.md'}},
+            [pscustomobject]@{Name='operation.before';Mutate={param($n)$n.operations[0].before.exists=$true}},
+            [pscustomobject]@{Name='operation.after';Mutate={param($n)$n.operations[0].after.sha256=('e'*64)}},
+            [pscustomobject]@{Name='operation.stageLeaf';Mutate={param($n)$n.operations[0].stageLeaf='changed.stage'}},
+            [pscustomobject]@{Name='operation.backupLeaf';Mutate={param($n)$n.operations[0].backupLeaf='changed.backup'}},
+            [pscustomobject]@{Name='operation.quarantineLeaf';Mutate={param($n)$n.operations[0].quarantineLeaf='changed.quarantine'}},
+            [pscustomobject]@{Name='operation.state';Mutate={param($n)$n.operations[0].state='invalid'}},
+            [pscustomobject]@{Name='operation.deleted';Mutate={param($n)$n.operations=@($n.operations|Select-Object -First 1)}},
+            [pscustomobject]@{Name='operation.added';Mutate={param($n)$copy=&$clone $n.operations[0];$copy.sequence=3;$copy.target.value='COPILOT.md';$copy.stageLeaf='operation-3.stage';$n.operations=@($n.operations)+@($copy)}},
+            [pscustomobject]@{Name='operation.reordered';Mutate={param($n)$n.operations=@($n.operations[1],$n.operations[0])}},
+            [pscustomobject]@{Name='evidence.rebound';Prepare={param($p)$p.operations[1].after.objectId=('c'*40);$p.operations[1].state='applied'};Mutate={param($n)$n.operations[1].after.objectId=('d'*40)}},
+            [pscustomobject]@{Name='evidence.bound-to-wrong-operation';Mutate={param($n)$n.operations[0].after|Add-Member -NotePropertyName objectId -NotePropertyValue ('c'*40);$n.operations[0].state='applied'}}
+        )
+        $acceptedByTrusted=New-Object System.Collections.Generic.List[string]
+        $acceptedByFull=New-Object System.Collections.Generic.List[string]
+        try{
+            foreach($sample in $samples){
+                $previous=&$newBaseline
+                if($null-ne$sample.PSObject.Properties['Prepare']){&$sample.Prepare $previous}
+                Assert-AiInstructionsInstallJournalV2 $previous|Out-Null
+                $trustedPrevious=&$clone $previous
+                $issuedPrevious=&$clone $previous
+                $next=[pscustomobject][ordered]@{}
+                foreach($property in @($issuedPrevious.PSObject.Properties)){$next|Add-Member -NotePropertyName $property.Name -NotePropertyValue $property.Value}
+                &$sample.Mutate $next
+                try{&$transactionModule {param($left,$right,$identity)Assert-InstallJournalV2TrustedTransition -Previous $left -Next $right -PreviousIdentityJournal $identity|Out-Null} $trustedPrevious $next $issuedPrevious;$acceptedByTrusted.Add($sample.Name)}catch{}
+                try{Assert-AiInstructionsInstallJournalStoreTransition -Previous $previous -Next $next|Out-Null;$acceptedByFull.Add($sample.Name)}catch{}
+            }
+            @($acceptedByTrusted)|Should BeNullOrEmpty
+            @($acceptedByFull)|Should BeNullOrEmpty
+        }finally{Remove-Module $transactionModule -Force}
+    }
+
+    # Scenario: A transaction that reuses PersonalAgent evidence records refs/stash as an existing before=after update-git-ref CAS operation.
+    # Purpose: Permit only the closed compare-only shape used to revalidate reuse decisions and reject target or object-ID drift.
+    It 'UnitT225_accepts_only_the_closed_PersonalAgent_evidence_reuse_CAS_shape' {
+        $journal=Get-TestInstallJournalV2
+        $journal.operations=@($journal.operations)+@([pscustomobject][ordered]@{
+            sequence=2;kind='update-git-ref';role='personal-agent-evidence-cas';method='update-ref'
+            target=[pscustomobject][ordered]@{kind='git-ref';value='refs/stash'}
+            before=[pscustomobject][ordered]@{exists=$true;objectId=('c'*40)}
+            after=[pscustomobject][ordered]@{exists=$true;objectId=('c'*40)}
+            stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
+        })
+        {Assert-AiInstructionsInstallJournalV2 $journal|Out-Null}|Should Not Throw
+        $clone={param($value)$parameters=@{InputObject=($value|ConvertTo-Json -Depth 30)};if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'};ConvertFrom-Json @parameters}
+        $wrongTarget=&$clone $journal;$wrongTarget.operations[1].target.value='refs/heads/main'
+        (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalV2 $wrongTarget|Out-Null})|Should Match 'PersonalAgent evidence CAS'
+        $differentAfter=&$clone $journal;$differentAfter.operations[1].after.objectId=('d'*40)
+        (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalV2 $differentAfter|Out-Null})|Should Match 'PersonalAgent evidence CAS'
+        $absent=&$clone $journal;$absent.operations[1].before.exists=$false;$absent.operations[1].before.objectId=$null
+        (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalV2 $absent|Out-Null})|Should Match 'PersonalAgent evidence CAS'
+    }
 }

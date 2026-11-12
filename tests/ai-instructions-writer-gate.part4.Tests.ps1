@@ -259,6 +259,26 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         }
     }
 
+    # Scenario: refs/stash is changed by an external Git writer immediately after the prepared journal for both new-store and existing-evidence reuse decisions.
+    # Purpose: Revalidate the decision-time stash ref with an expected-old CAS and fail closed without overwriting the external ref.
+    It 'InterT159_refuses_refs_stash_changes_after_prepared_for_store_and_reuse_decisions' {
+        $cases=@(
+            [pscustomobject]@{Name='store';Seed=$script:P9cSeeds.False;Context=$script:P9cUpdated.Context;Archive=$script:P9cChanged.ArchivePath},
+            [pscustomobject]@{Name='reuse';Seed=$script:P9cSeeds.True;Context=$script:P9cInitial.Context;Archive=$script:P9cBaseline.ArchivePath}
+        )
+        foreach($case in $cases){
+            $target=Join-Path $script:ExternalRoot ("stash-cas-"+$case.Name);Copy-Item -LiteralPath $case.Seed -Destination $target -Recurse
+            $stashBefore=(@(& git -C $target rev-parse --verify refs/stash)|Select-Object -First 1).Trim()
+            $bootstrap=New-P9cStashTamperAfterPreparedBootstrap -Root (Join-Path $script:ExternalRoot ("stash-cas-runtime-"+$case.Name))
+            $result=Invoke-P9bRepoBootstrap -Context $case.Context -ArchivePath $case.Archive -TargetRoot $target -BootstrapPath $bootstrap
+            $result.ExitCode|Should -Not -Be 0
+            (Get-AiInstructionsRefusalCode $result.Output)|Should -Be interrupted-install
+            $stashAfter=(@(& git -C $target rev-parse --verify refs/stash)|Select-Object -First 1).Trim()
+            $stashAfter|Should -Not -BeExactly $stashBefore
+            $result.Output|Should -Match 'refs/stash changed after the prepared decision|third state'
+        }
+    }
+
     # Scenario: A freshly created directory anchor receives an unknown child before rollback.
     # Purpose: Refuse recursive deletion, preserve the unknown child, and retain transaction evidence for manual inspection.
     It 'InterT151_refuses_to_remove_directory_anchors_with_unknown_children' {
@@ -331,7 +351,9 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
     It 'UnitT153_accepts_only_phase_and_operation_state_deltas_for_validated_v2_generations' {
         $module=Import-Module $script:TransactionModulePath -Force -PassThru
         try{
-            $previous=[pscustomobject][ordered]@{schemaVersion=2;kind='ai-instructions-install-transaction';transactionId=('a'*32);createdAtUtc='2026-11-12T00:00:00.0000000Z';owner=[pscustomobject][ordered]@{component='repo-bootstrap';processId=1;processStartIdentity='fixture'};platform=[pscustomobject][ordered]@{os='windows';architecture='x64'};lock=[pscustomobject][ordered]@{primitive='windows-fileshare';leaf='bootstrap-ai-instructions.lock'};generation=[pscustomobject][ordered]@{previousBundleSha256=$null;candidateBundleSha256=('b'*64)};scope=[pscustomobject][ordered]@{kind='repository'};phase='prepared';operations=@([pscustomobject][ordered]@{sequence=1;kind='create-file';target=[pscustomobject][ordered]@{value='AGENTS.md'};state='pending'},[pscustomobject][ordered]@{sequence=2;kind='store-git-stash-evidence';role='personal-agent-evidence';method='stash-store';target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'};before=[pscustomobject][ordered]@{exists=$false;objectId=$null};after=[pscustomobject][ordered]@{exists=$true;objectId=$null};stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})}
+            $scopeRoot=[IO.Path]::GetFullPath((Join-Path $TestDrive 'trusted-transition-repo'));$git=Join-Path $scopeRoot '.git'
+            $identity=[pscustomobject][ordered]@{kind='windows-file-id';device='00000001';fileId='00000002'};$permissions=[pscustomobject][ordered]@{kind='windows-sddl';sddl='D:PAI(A;;FA;;;SY)';readOnly=$false}
+            $previous=[pscustomobject][ordered]@{schemaVersion=2;kind='ai-instructions-install-transaction';transactionId=('a'*32);createdAtUtc='2026-11-12T00:00:00.0000000Z';owner=[pscustomobject][ordered]@{component='repo-bootstrap';processId=1;processStartIdentity='fixture'};platform=[pscustomobject][ordered]@{os='windows';architecture='x64'};lock=[pscustomobject][ordered]@{primitive='windows-fileshare';leaf='bootstrap-ai-instructions.lock'};generation=[pscustomobject][ordered]@{previousBundleSha256=$null;candidateBundleSha256=('b'*64)};scope=[pscustomobject][ordered]@{kind='repository';repositoryRoot=$scopeRoot;repositoryRootIdentity=$identity;commonGitDirectory=$git;gitDirectory=$git;indexPath=(Join-Path $git 'index');objectFormat='sha1';externalBackup=$null};phase='prepared';operations=@([pscustomobject][ordered]@{sequence=1;kind='create-file';role='instruction';method='stage-rename';target=[pscustomobject][ordered]@{kind='repository-relative';value='AGENTS.md'};before=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null};after=[pscustomobject][ordered]@{exists=$true;sha256=('a'*64);length=3;identity=$identity;permissions=$permissions};stageLeaf='operation-1.stage';backupLeaf=$null;quarantineLeaf=$null;state='pending'},[pscustomobject][ordered]@{sequence=2;kind='store-git-stash-evidence';role='personal-agent-evidence';method='stash-store';target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'};before=[pscustomobject][ordered]@{exists=$false;objectId=$null};after=[pscustomobject][ordered]@{exists=$true;objectId=$null};stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})}
             $clone={param($value)$parameters=@{InputObject=($value|ConvertTo-Json -Depth 30)};if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'};ConvertFrom-Json @parameters}
             $applying=&$clone $previous;$applying.phase='applying';{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $previous $applying}|Should -Not -Throw
             $withEvidence=&$clone $applying;$withEvidence.operations[1].after.objectId=('c'*40);$withEvidence.operations[1].state='applied';{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $applying $withEvidence}|Should -Not -Throw

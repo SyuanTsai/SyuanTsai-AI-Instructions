@@ -3531,6 +3531,7 @@ function New-ProjectPublicationContext {
         CurrentJournal=$null
         JournalStoreStates=$null
         ShouldStorePersonalAgentEvidence=$false
+        PersonalAgentEvidenceStashBefore=$null
     }
 }
 
@@ -4878,6 +4879,35 @@ function Get-RepositoryTransactionGitRefState {
     return [pscustomobject][ordered]@{exists=$true;objectId=$sha}
 }
 
+function Get-RepositoryStashRefState {
+    param([Parameter(Mandatory=$true)][string]$Repository)
+    if((Get-GitExitCode -Repository $Repository -Arguments @('show-ref','--verify','--quiet','refs/stash'))-ne0){return [pscustomobject][ordered]@{exists=$false;objectId=$null}}
+    $sha=((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--verify','refs/stash'))|Select-Object -First 1).Trim()
+    return [pscustomobject][ordered]@{exists=$true;objectId=$sha}
+}
+
+function Invoke-RepositoryStashRefCompareAndSwap {
+    param(
+        [Parameter(Mandatory=$true)][string]$Repository,
+        [Parameter(Mandatory=$true)][object]$Expected,
+        [string]$NewObjectId,
+        [string]$ReflogMessage
+    )
+    $objectLength=if(((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--show-object-format'))|Select-Object -First 1).Trim()-ceq'sha256'){64}else{40}
+    $expectedObjectId=if([bool]$Expected.exists){[string]$Expected.objectId}else{'0'*$objectLength}
+    if([string]::IsNullOrWhiteSpace($NewObjectId)){
+        if(-not[bool]$Expected.exists){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'PersonalAgent evidence reuse cannot CAS an absent refs/stash value.')}
+        $arguments=@('update-ref','refs/stash',$expectedObjectId,$expectedObjectId)
+    }else{
+        $arguments=@('update-ref','--create-reflog','-m',$ReflogMessage,'refs/stash',$NewObjectId,$expectedObjectId)
+    }
+    try{Invoke-Git -Repository $Repository -Arguments $arguments|Out-Null}
+    catch{throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'PersonalAgent evidence refused because refs/stash changed after the prepared decision.' -InnerException $_.Exception)}
+    $expectedAfter=if([string]::IsNullOrWhiteSpace($NewObjectId)){$expectedObjectId}else{$NewObjectId}
+    $readback=Get-RepositoryStashRefState -Repository $Repository
+    if(-not[bool]$readback.exists-or[string]$readback.objectId-cne$expectedAfter){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'PersonalAgent evidence refs/stash CAS readback differs from the expected object ID.')}
+}
+
 function Get-RepositoryTransactionEvidenceStashState {
     param([Parameter(Mandatory=$true)][object]$Journal,[Parameter(Mandatory=$true)][object]$Operation)
     $commitId=[string]$Operation.after.objectId
@@ -5014,7 +5044,8 @@ function Invoke-RepositoryTransactionOperation {
     if([string]$Operation.kind-ceq'store-git-stash-evidence'-and$Direction-ceq'undo'){return}
     $source=if($Direction-ceq'redo'){$Operation.before}else{$Operation.after};$destination=if($Direction-ceq'redo'){$Operation.after}else{$Operation.before}
     $current=Get-RepositoryTransactionOperationState $Journal $Operation
-    if(Test-RepositoryTransactionStateEqual $Operation $current $destination){return}
+    $requiresEvidenceReuseCas=$Direction-ceq'redo'-and[string]$Operation.kind-ceq'update-git-ref'-and[string]$Operation.role-ceq'personal-agent-evidence-cas'
+    if((Test-RepositoryTransactionStateEqual $Operation $current $destination)-and-not$requiresEvidenceReuseCas){return}
     if(-not(Test-RepositoryTransactionStateEqual $Operation $current $source)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction sequence $($Operation.sequence) role $($Operation.role) target $($Operation.target.value) is in a third state; evidence was retained for manual inspection and cleanup.")}
     $repository=[string]$Journal.scope.repositoryRoot
     switch([string]$Operation.kind){
@@ -5046,10 +5077,13 @@ function Invoke-RepositoryTransactionOperation {
             Invoke-RepositoryIndexReplacement -Context $Context -Journal $Journal -Operation $Operation -Source $source -Destination $destination -Direction $Direction
         }
         'update-git-ref' {
-            $ref=[string]$Operation.target.value;$from=$source.objectId;$to=$destination.objectId
-            if(-not[bool]$source.exists){Invoke-Git -Repository $repository -Arguments @('update-ref',$ref,$to,('0'*$(if([string]$Journal.scope.objectFormat-ceq'sha256'){64}else{40})))|Out-Null}
-            elseif(-not[bool]$destination.exists){Invoke-Git -Repository $repository -Arguments @('update-ref','-d',$ref,$from)|Out-Null}
-            else{Invoke-Git -Repository $repository -Arguments @('update-ref',$ref,$to,$from)|Out-Null}
+            if([string]$Operation.role-ceq'personal-agent-evidence-cas'){Invoke-RepositoryStashRefCompareAndSwap -Repository $repository -Expected $source}
+            else{
+                $ref=[string]$Operation.target.value;$from=$source.objectId;$to=$destination.objectId
+                if(-not[bool]$source.exists){Invoke-Git -Repository $repository -Arguments @('update-ref',$ref,$to,('0'*$(if([string]$Journal.scope.objectFormat-ceq'sha256'){64}else{40})))|Out-Null}
+                elseif(-not[bool]$destination.exists){Invoke-Git -Repository $repository -Arguments @('update-ref','-d',$ref,$from)|Out-Null}
+                else{Invoke-Git -Repository $repository -Arguments @('update-ref',$ref,$to,$from)|Out-Null}
+            }
         }
         'update-git-head' {
             if([string]$destination.mode-ceq'detached'){Invoke-Git -Repository $repository -Arguments @('update-ref','--no-deref','HEAD',[string]$destination.objectId,[string]$source.objectId)|Out-Null}
@@ -5102,7 +5136,7 @@ function Invoke-RepositoryTransactionEvidenceStashStore {
     if([string]$operation.state-cne'pending'-or$null-ne$operation.after.objectId){throw 'The prepared PersonalAgent evidence operation has already been bound.'}
     Invoke-AiInstructionsInstallFailpoint -Name ("before-operation-"+$sequence)
     $subject=((Invoke-Git -Repository ([string]$Context.Repository) -Arguments @('show','--no-patch','--format=%s',$EvidenceCommit))|Select-Object -First 1).Trim()
-    Invoke-Git -Repository ([string]$Context.Repository) -Arguments @('stash','store','--quiet','-m',$subject,$EvidenceCommit)|Out-Null
+    Invoke-RepositoryStashRefCompareAndSwap -Repository ([string]$Context.Repository) -Expected $operation.before -NewObjectId $EvidenceCommit -ReflogMessage $subject
     if(@(Invoke-Git -Repository ([string]$Context.Repository) -Arguments @('stash','list','--format=%H')|Where-Object{([string]$_).Trim()-ceq$EvidenceCommit}).Count-eq0){throw 'The newly stored PersonalAgent evidence commit was not found in stash history.'}
     Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+$sequence+"-before-journal")
     Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Sequence $sequence -EvidenceObjectId $EvidenceCommit)
@@ -5164,8 +5198,12 @@ function New-RepositoryInstallOperations {
     }
     if([bool]$Context.ShouldStorePersonalAgentEvidence){
         $sequence=$operations.Count+1
-        $stashBefore=if((Get-GitExitCode -Repository $Context.Repository -Arguments @('show-ref','--verify','--quiet','refs/stash'))-eq0){[pscustomobject][ordered]@{exists=$true;objectId=((Invoke-Git -Repository $Context.Repository -Arguments @('rev-parse','--verify','refs/stash'))|Select-Object -First 1).Trim()}}else{[pscustomobject][ordered]@{exists=$false;objectId=$null}}
+        $stashBefore=$Context.PersonalAgentEvidenceStashBefore
+        if($null-eq$stashBefore){throw 'PersonalAgent evidence store is missing its prepared refs/stash state.'}
         $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='store-git-stash-evidence';role='personal-agent-evidence';method='stash-store';target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'};before=$stashBefore;after=[pscustomobject][ordered]@{exists=$true;objectId=$null};stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
+    }elseif($operations.Count-gt0-and$null-ne$Context.PersonalAgentEvidenceStashBefore){
+        $sequence=$operations.Count+1;$stashBefore=$Context.PersonalAgentEvidenceStashBefore
+        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='update-git-ref';role='personal-agent-evidence-cas';method='update-ref';target=[pscustomobject][ordered]@{kind='git-ref';value='refs/stash'};before=$stashBefore;after=$stashBefore;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
     }
     return $operations.ToArray()
 }
@@ -5204,12 +5242,20 @@ function Start-RepositoryInstallTransaction {
     foreach($operation in @($Context.CurrentJournal.operations|Where-Object{[string]$_.kind-cne'store-git-stash-evidence'}|Sort-Object sequence)){Invoke-AiInstructionsInstallFailpoint -Name ("before-operation-"+$operation.sequence);Invoke-RepositoryTransactionOperation -Context $Context -Journal $Context.CurrentJournal -Operation $operation -Direction redo;Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+$operation.sequence+"-before-journal");Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Sequence ([int64]$operation.sequence));Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+$operation.sequence)}
 }
 
+function Assert-RepositoryEvidenceReuseCasOperations {
+    param([Parameter(Mandatory=$true)][object]$Context)
+    foreach($operation in @($Context.CurrentJournal.operations|Where-Object{[string]$_.kind-ceq'update-git-ref'-and[string]$_.role-ceq'personal-agent-evidence-cas'})){
+        Invoke-RepositoryStashRefCompareAndSwap -Repository ([string]$Context.Repository) -Expected $operation.before
+    }
+}
+
 function Complete-RepositoryInstallTransactionApply {
     param([Parameter(Mandatory=$true)][object]$Context)
     if(-not[bool]$Context.Durable){return}
     if([string]$Context.CurrentJournal.phase-ceq'applied'){return}
     if([string]$Context.CurrentJournal.phase-cne'applying'){throw "Repository transaction cannot complete apply from phase '$($Context.CurrentJournal.phase)'."}
     foreach($operation in $Context.CurrentJournal.operations){$current=Get-RepositoryTransactionOperationState $Context.CurrentJournal $operation;if(-not(Test-RepositoryTransactionStateEqual $operation $current $operation.after)){throw (New-AiInstructionsRefusalException -Code interrupted-install -Message "Repository transaction terminal verification failed for sequence $($operation.sequence).")}}
+    Assert-RepositoryEvidenceReuseCasOperations -Context $Context
     Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Phase applied)
 }
 
@@ -5291,6 +5337,7 @@ function Invoke-RepositoryInstallTransaction {
     if(-not$Context.Durable){return}
     Complete-RepositoryInstallTransactionApply $Context
     if([string]$Context.CurrentJournal.phase-cne'applied'){throw 'Repository transaction cannot commit before applied verification.'}
+    Assert-RepositoryEvidenceReuseCasOperations -Context $Context
     Invoke-AiInstructionsInstallFailpoint -Name 'before-committed-journal-write'
     Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Phase committed)
     Invoke-AiInstructionsInstallFailpoint -Name 'after-committed-journal-write'
@@ -6396,6 +6443,7 @@ try {
             $shouldStorePersonalAgentEvidence=@($plannedOwnedEvidence|Where-Object{$_.EvidenceFingerprint-ceq$plannedEvidenceFingerprint}).Count-ne1
         }
         $script:ProjectPublicationContext.ShouldStorePersonalAgentEvidence=$shouldStorePersonalAgentEvidence
+        $script:ProjectPublicationContext.PersonalAgentEvidenceStashBefore=Get-RepositoryStashRefState -Repository $targetRootPath
     }
 
     Start-RepositoryInstallTransaction $script:ProjectPublicationContext
