@@ -139,7 +139,10 @@ Describe 'unselected P02A fixture' {
                 [int] $ShardPartitionIndex = 0,
                 [int] $OuterTimeoutSeconds = 60,
                 [int] $CancelAfterMilliseconds = 0,
-                [string] $IsolationRequirement = 'cooperative'
+                [string] $IsolationRequirement = 'cooperative',
+                [ValidateSet(1,2)][int] $SummarySchemaVersion = 1,
+                [string] $SummaryRunId = 'adapter-test-run',
+                [int] $SummaryRunAttempt = 1
             )
             $runtime = Get-P02ARuntimeConfiguration
             $wrapperPath = Join-Path $Fixture.Root 'invoke-adapter.ps1'
@@ -177,6 +180,11 @@ try {
     }
     if ($config.PSObject.Properties.Name -contains 'SummaryOutputPath') {
         $parameters.SummaryOutputPath = [string]$config.SummaryOutputPath
+    }
+    if ($config.PSObject.Properties.Name -contains 'SummarySchemaVersion') {
+        $parameters.SummarySchemaVersion = [int]$config.SummarySchemaVersion
+        $parameters.SummaryRunId = [string]$config.SummaryRunId
+        $parameters.SummaryRunAttempt = [int]$config.SummaryRunAttempt
     }
     $cancellation = [Threading.CancellationTokenSource]::new()
     try {
@@ -231,6 +239,11 @@ catch {
             if ($IncludeSummary) {
                 if ([string]::IsNullOrWhiteSpace($SummaryOutputPath)) { $SummaryOutputPath = $Fixture.SummaryPath }
                 $config['SummaryOutputPath'] = $SummaryOutputPath
+            }
+            if ($SummarySchemaVersion -eq 2) {
+                $config['SummarySchemaVersion'] = 2
+                $config['SummaryRunId'] = $SummaryRunId
+                $config['SummaryRunAttempt'] = $SummaryRunAttempt
             }
             Write-P02AText -Path $configPath -Text ($config | ConvertTo-Json -Depth 8)
             return [pscustomobject]@{
@@ -833,7 +846,7 @@ try {
             Assert-P02ATrue ($summaryBytes.Length -gt 3) 'The summary must contain JSON bytes.'
             Assert-P02ATrue (-not ($summaryBytes[0] -eq 239 -and $summaryBytes[1] -eq 187 -and $summaryBytes[2] -eq 191)) 'The summary must be UTF-8 without a BOM.'
             $summary = [Text.Encoding]::UTF8.GetString($summaryBytes) | ConvertFrom-Json
-            Assert-P02AProperties $summary @('schemaVersion', 'type', 'executed', 'status', 'runtime', 'pesterVersion', 'pesterModuleSha256', 'executorSha256', 'testFiles', 'counts', 'shards') 'The summary must have the exact version 1 property set.'
+            Assert-P02AProperties $summary @('schemaVersion', 'type', 'executed', 'status', 'runtime', 'pesterVersion', 'pesterModuleSha256', 'executorSha256', 'testFiles', 'counts', 'shards') 'The default summary must retain the exact version 1 property set.'
             Assert-P02AInteger $summary.schemaVersion 'schemaVersion'
             Assert-P02AEqual $summary.schemaVersion 1 'The summary schema version must be 1.'
             Assert-P02AEqual $summary.type 'standard-pester-execution-summary' 'The summary must use the typed adapter type.'
@@ -879,6 +892,35 @@ try {
             Assert-P02ATrue ($processEvidence.cleanup.cleanedUp -is [bool] -and $processEvidence.cleanup.cleanedUp) 'Process evidence must confirm owned process cleanup.'
             Assert-P02AEqual $processEvidence.outputQuotaExceeded $false 'Process evidence must confirm no output quota overrun.'
             Assert-P02ATrue ($run.StdoutText -match 'Aggregate - Total: 1 Passed: 1 Failed: 0') 'The adapter must preserve the existing aggregate stdout.'
+
+            $v2Fixture = New-P02AFixture
+            Write-P02ASelectedFixture -Fixture $v2Fixture
+            $v2SkippedFixture = @'
+Describe 'selected schema v2 P02A fixture' {
+    It 'keeps the aggregate valid while reporting skipped evidence' {
+        1 | Should Be 1
+    }
+
+    It 'reports an actual skipped identifier without an expected list' -Skip {
+        1 | Should Be 1
+    }
+}
+'@
+            Write-P02AText -Path (Join-Path $v2Fixture.TestRoot 'selected.Tests.ps1') -Text $v2SkippedFixture
+            $v2Invocation = New-P02AAdapterInvocation -Fixture $v2Fixture -SelectedNames @('selected.Tests.ps1') -SummarySchemaVersion 2 -SummaryRunId 'run-42' -SummaryRunAttempt 2
+            $v2Run = Invoke-P02AHiddenAdapter -Invocation $v2Invocation -Fixture $v2Fixture
+            Assert-P02AExpectedWithChildDiagnostics -Actual $v2Run.ExitCode -Expected 0 -Fixture $v2Fixture -Message 'An opted-in schema v2 adapter run must exit zero.'
+            $v2Summary = Get-Content -LiteralPath $v2Run.SummaryPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            Assert-P02AProperties $v2Summary @('schemaVersion', 'type', 'executed', 'status', 'runtime', 'pesterVersion', 'pesterModuleSha256', 'executorSha256', 'testFiles', 'counts', 'shards', 'runId', 'runAttempt', 'skippedTests') 'Schema v2 must add only run identity and exact skipped-test evidence.'
+            Assert-P02AEqual $v2Summary.schemaVersion 2 'The opted-in summary schema version must be 2.'
+            Assert-P02AEqual $v2Summary.runId 'run-42' 'Schema v2 must bind the workflow run id.'
+            Assert-P02AEqual $v2Summary.runAttempt 2 'Schema v2 must bind the workflow run attempt.'
+            Assert-P02AEqual $v2Summary.counts.TotalCount 2 'Schema v2 fixture must report one pass and one skip.'
+            Assert-P02AEqual $v2Summary.counts.PassedCount 1 'Schema v2 fixture must keep at least one passing test.'
+            Assert-P02AEqual $v2Summary.counts.SkippedCount 1 'Schema v2 fixture must report exactly one skipped test.'
+            Assert-P02AEqual @($v2Summary.skippedTests).Count 1 'Schema v2 must report actual skipped identifiers without requiring an expected list.'
+            Assert-P02AEqual $v2Summary.skippedTests[0] 'selected.Tests.ps1::reports an actual skipped identifier without an expected list' 'Schema v2 must preserve the observed skipped case identifier.'
+            Assert-P02AEqual @($v2Summary.skippedTests).Count $v2Summary.counts.SkippedCount 'Schema v2 skipped identifiers must equal the observed skipped count.'
         }
 
         # Scenario: The adapter is invoked after Push-Location with default ./tests and relative evidence/module inputs.

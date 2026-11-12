@@ -11,26 +11,38 @@ on:
     branches:
       - syp-86
       - main
-    # This required check has no paths filter. Every main pull request runs the
-    # Windows Core authority gate and the complete retained PowerShell suite.
+    # This required workflow always runs the complete retained source-test plan.
   workflow_dispatch:
+
+concurrency:
+  group: powershell-regression-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
-  windows-core:
-    name: Windows Core
+  plan:
+    name: Windows Core plan
     runs-on: windows-latest
-    timeout-minutes: 180
+    timeout-minutes: 15
     permissions:
       contents: read
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      planSha256: ${{ steps.plan.outputs.planSha256 }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Restore verified PowerShell archive cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/pwsh-cache/PowerShell-7.6.6-win-x64.zip
+          key: pwsh-zip-${{ runner.os }}-7.6.6-02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860
 
       - name: Install verified latest stable PowerShell
         shell: pwsh
@@ -40,11 +52,31 @@ jobs:
           $expectedSha256 = '02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860'
           $archivePath = Join-Path $env:RUNNER_TEMP 'PowerShell-7.6.6-win-x64.zip'
           $installDirectory = Join-Path $env:RUNNER_TEMP 'pwsh-7.6.6'
+          $cachePath = Join-Path $env:RUNNER_TEMP 'pwsh-cache/PowerShell-7.6.6-win-x64.zip'
           $downloadUri = 'https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/PowerShell-7.6.6-win-x64.zip'
           if ((Test-Path -LiteralPath $archivePath) -or (Test-Path -LiteralPath $installDirectory)) { throw 'PowerShell setup paths must be new within this job.' }
-          Invoke-WebRequest -Uri $downloadUri -OutFile $archivePath
+          $cacheIsVerified = $false
+          if (Test-Path -LiteralPath $cachePath) {
+            $cacheItem = Get-Item -Force -LiteralPath $cachePath -ErrorAction Stop
+            if ($cacheItem.PSIsContainer -or ($cacheItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+              Remove-Item -LiteralPath $cachePath -Force
+            } else {
+              $cacheSha256 = (Get-FileHash -LiteralPath $cachePath -Algorithm SHA256).Hash.ToUpperInvariant()
+              if ($cacheSha256 -ceq $expectedSha256) {
+                Copy-Item -LiteralPath $cachePath -Destination $archivePath
+                $cacheIsVerified = $true
+              } else {
+                Remove-Item -LiteralPath $cachePath -Force
+              }
+            }
+          }
+          if (-not $cacheIsVerified) { Invoke-WebRequest -Uri $downloadUri -OutFile $archivePath }
           $actualSha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToUpperInvariant()
           if ($actualSha256 -cne $expectedSha256) { throw "PowerShell archive SHA256 mismatch: expected $expectedSha256, got $actualSha256." }
+          if (-not $cacheIsVerified) {
+            [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($cachePath)) | Out-Null
+            Copy-Item -LiteralPath $archivePath -Destination $cachePath
+          }
           Expand-Archive -LiteralPath $archivePath -DestinationPath $installDirectory
           $powerShellExe = Join-Path $installDirectory 'pwsh.exe'
           if (-not (Test-Path -LiteralPath $powerShellExe -PathType Leaf)) { throw 'Verified PowerShell archive did not contain pwsh.exe.' }
@@ -53,7 +85,106 @@ jobs:
           [IO.File]::AppendAllText($env:GITHUB_PATH, $installDirectory + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
           $githubEnvironment = 'SYP_REQUIRED_PWSH_VERSION=' + $version + [Environment]::NewLine + 'SYP_REQUIRED_PWSH_SHA256=' + $expectedSha256 + [Environment]::NewLine
           [IO.File]::AppendAllText($env:GITHUB_ENV, $githubEnvironment, [Text.UTF8Encoding]::new($false))
-          Write-Host "Downloaded PowerShell $version; ZIP SHA256: $actualSha256; portable path: $powerShellExe"
+          Write-Host "Resolved PowerShell $version from a SHA-256 verified ZIP; portable path: $powerShellExe"
+
+      - name: Verify the selected PowerShell runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expectedExecutable = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'pwsh-7.6.6/pwsh.exe'))
+          $selectedExecutable = [IO.Path]::GetFullPath((Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source)
+          $processExecutable = [IO.Path]::GetFullPath([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)
+          $homeExecutable = [IO.Path]::GetFullPath((Join-Path $PSHOME 'pwsh.exe'))
+          if (-not [string]::Equals($processExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase) -or
+              -not [string]::Equals($homeExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "The actual GitHub step shell is not the verified portable PowerShell: process=$processExecutable PSHOME=$PSHOME"
+          }
+          if (-not [string]::Equals($selectedExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase)) { throw "The job shell did not select the verified portable runtime: $selectedExecutable" }
+          if ($PSVersionTable.PSVersion.ToString() -cne $env:SYP_REQUIRED_PWSH_VERSION) { throw "Expected PowerShell $env:SYP_REQUIRED_PWSH_VERSION, running $($PSVersionTable.PSVersion)." }
+          if ($env:SYP_REQUIRED_PWSH_SHA256 -cne '02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860') { throw 'The verified PowerShell download hash binding changed.' }
+          Write-Host "PowerShell runtime verified: $($PSVersionTable.PSVersion) at $selectedExecutable"
+
+      - name: Calculate the Windows Core plan
+        id: plan
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./scripts/Get-WindowsCorePlan.ps1 -RepositoryRoot . -OutputPath (Join-Path $env:RUNNER_TEMP 'windows-core/plan.json')
+          if (-not $?) { throw 'Windows Core planning failed.' }
+
+      - name: Upload Windows Core plan
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: windows-core-plan-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/windows-core/plan.json
+            ${{ runner.temp }}/windows-core/plan.sha256
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+  authority:
+    name: Windows Core authority
+    needs: plan
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Restore verified PowerShell archive cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/pwsh-cache/PowerShell-7.6.6-win-x64.zip
+          key: pwsh-zip-${{ runner.os }}-7.6.6-02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860
+
+      - name: Install verified latest stable PowerShell
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '7.6.6'
+          $expectedSha256 = '02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860'
+          $archivePath = Join-Path $env:RUNNER_TEMP 'PowerShell-7.6.6-win-x64.zip'
+          $installDirectory = Join-Path $env:RUNNER_TEMP 'pwsh-7.6.6'
+          $cachePath = Join-Path $env:RUNNER_TEMP 'pwsh-cache/PowerShell-7.6.6-win-x64.zip'
+          $downloadUri = 'https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/PowerShell-7.6.6-win-x64.zip'
+          if ((Test-Path -LiteralPath $archivePath) -or (Test-Path -LiteralPath $installDirectory)) { throw 'PowerShell setup paths must be new within this job.' }
+          $cacheIsVerified = $false
+          if (Test-Path -LiteralPath $cachePath) {
+            $cacheItem = Get-Item -Force -LiteralPath $cachePath -ErrorAction Stop
+            if ($cacheItem.PSIsContainer -or ($cacheItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+              Remove-Item -LiteralPath $cachePath -Force
+            } else {
+              $cacheSha256 = (Get-FileHash -LiteralPath $cachePath -Algorithm SHA256).Hash.ToUpperInvariant()
+              if ($cacheSha256 -ceq $expectedSha256) {
+                Copy-Item -LiteralPath $cachePath -Destination $archivePath
+                $cacheIsVerified = $true
+              } else {
+                Remove-Item -LiteralPath $cachePath -Force
+              }
+            }
+          }
+          if (-not $cacheIsVerified) { Invoke-WebRequest -Uri $downloadUri -OutFile $archivePath }
+          $actualSha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToUpperInvariant()
+          if ($actualSha256 -cne $expectedSha256) { throw "PowerShell archive SHA256 mismatch: expected $expectedSha256, got $actualSha256." }
+          if (-not $cacheIsVerified) {
+            [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($cachePath)) | Out-Null
+            Copy-Item -LiteralPath $archivePath -Destination $cachePath
+          }
+          Expand-Archive -LiteralPath $archivePath -DestinationPath $installDirectory
+          $powerShellExe = Join-Path $installDirectory 'pwsh.exe'
+          if (-not (Test-Path -LiteralPath $powerShellExe -PathType Leaf)) { throw 'Verified PowerShell archive did not contain pwsh.exe.' }
+          $archiveRuntimeVersion = (& $powerShellExe -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')
+          if ($LASTEXITCODE -ne 0 -or ([string]$archiveRuntimeVersion).Trim() -cne $version) { throw "Verified archive launched unexpected PowerShell version '$archiveRuntimeVersion'." }
+          [IO.File]::AppendAllText($env:GITHUB_PATH, $installDirectory + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+          $githubEnvironment = 'SYP_REQUIRED_PWSH_VERSION=' + $version + [Environment]::NewLine + 'SYP_REQUIRED_PWSH_SHA256=' + $expectedSha256 + [Environment]::NewLine
+          [IO.File]::AppendAllText($env:GITHUB_ENV, $githubEnvironment, [Text.UTF8Encoding]::new($false))
+          Write-Host "Resolved PowerShell $version from a SHA-256 verified ZIP; portable path: $powerShellExe"
 
       - name: Verify the selected PowerShell runtime
         shell: pwsh
@@ -134,69 +265,283 @@ jobs:
           & ./scripts/Invoke-StandardAuthorityGate.ps1 -ArtifactsRoot $env:RUNNER_TEMP -CandidateRoot $candidateRoot -AuthorityRoot $candidateRoot -CandidateRevision $revision -AuthorityRevision $revision -EventName $env:GITHUB_EVENT_NAME -ResultArtifact 'windows-core/authority-result.json'
           if (-not $?) { throw 'Standard v1 authority gate failed.' }
 
-      - name: Run the non-authority Pester suite once
+      - name: Upload Windows Core authority evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: windows-core-authority-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/windows-core/authority-result.json
+            ${{ runner.temp }}/syp325-source-scope-*/**/*.json
+          if-no-files-found: warn
+          retention-days: 1
+          overwrite: true
+
+  pester:
+    name: Windows Core shard ${{ matrix.id }}
+    needs: plan
+    runs-on: windows-latest
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Restore verified PowerShell archive cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/pwsh-cache/PowerShell-7.6.6-win-x64.zip
+          key: pwsh-zip-${{ runner.os }}-7.6.6-02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860
+
+      - name: Install verified latest stable PowerShell
         shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '7.6.6'
+          $expectedSha256 = '02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860'
+          $archivePath = Join-Path $env:RUNNER_TEMP 'PowerShell-7.6.6-win-x64.zip'
+          $installDirectory = Join-Path $env:RUNNER_TEMP 'pwsh-7.6.6'
+          $cachePath = Join-Path $env:RUNNER_TEMP 'pwsh-cache/PowerShell-7.6.6-win-x64.zip'
+          $downloadUri = 'https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/PowerShell-7.6.6-win-x64.zip'
+          if ((Test-Path -LiteralPath $archivePath) -or (Test-Path -LiteralPath $installDirectory)) { throw 'PowerShell setup paths must be new within this job.' }
+          $cacheIsVerified = $false
+          if (Test-Path -LiteralPath $cachePath) {
+            $cacheItem = Get-Item -Force -LiteralPath $cachePath -ErrorAction Stop
+            if ($cacheItem.PSIsContainer -or ($cacheItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+              Remove-Item -LiteralPath $cachePath -Force
+            } else {
+              $cacheSha256 = (Get-FileHash -LiteralPath $cachePath -Algorithm SHA256).Hash.ToUpperInvariant()
+              if ($cacheSha256 -ceq $expectedSha256) {
+                Copy-Item -LiteralPath $cachePath -Destination $archivePath
+                $cacheIsVerified = $true
+              } else {
+                Remove-Item -LiteralPath $cachePath -Force
+              }
+            }
+          }
+          if (-not $cacheIsVerified) { Invoke-WebRequest -Uri $downloadUri -OutFile $archivePath }
+          $actualSha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToUpperInvariant()
+          if ($actualSha256 -cne $expectedSha256) { throw "PowerShell archive SHA256 mismatch: expected $expectedSha256, got $actualSha256." }
+          if (-not $cacheIsVerified) {
+            [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($cachePath)) | Out-Null
+            Copy-Item -LiteralPath $archivePath -Destination $cachePath
+          }
+          Expand-Archive -LiteralPath $archivePath -DestinationPath $installDirectory
+          $powerShellExe = Join-Path $installDirectory 'pwsh.exe'
+          if (-not (Test-Path -LiteralPath $powerShellExe -PathType Leaf)) { throw 'Verified PowerShell archive did not contain pwsh.exe.' }
+          $archiveRuntimeVersion = (& $powerShellExe -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')
+          if ($LASTEXITCODE -ne 0 -or ([string]$archiveRuntimeVersion).Trim() -cne $version) { throw "Verified archive launched unexpected PowerShell version '$archiveRuntimeVersion'." }
+          [IO.File]::AppendAllText($env:GITHUB_PATH, $installDirectory + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+          $githubEnvironment = 'SYP_REQUIRED_PWSH_VERSION=' + $version + [Environment]::NewLine + 'SYP_REQUIRED_PWSH_SHA256=' + $expectedSha256 + [Environment]::NewLine
+          [IO.File]::AppendAllText($env:GITHUB_ENV, $githubEnvironment, [Text.UTF8Encoding]::new($false))
+          Write-Host "Resolved PowerShell $version from a SHA-256 verified ZIP; portable path: $powerShellExe"
+
+      - name: Verify the selected PowerShell runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expectedExecutable = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'pwsh-7.6.6/pwsh.exe'))
+          $selectedExecutable = [IO.Path]::GetFullPath((Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source)
+          $processExecutable = [IO.Path]::GetFullPath([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)
+          $homeExecutable = [IO.Path]::GetFullPath((Join-Path $PSHOME 'pwsh.exe'))
+          if (-not [string]::Equals($processExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase) -or
+              -not [string]::Equals($homeExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "The actual GitHub step shell is not the verified portable PowerShell: process=$processExecutable PSHOME=$PSHOME"
+          }
+          if (-not [string]::Equals($selectedExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase)) { throw "The job shell did not select the verified portable runtime: $selectedExecutable" }
+          if ($PSVersionTable.PSVersion.ToString() -cne $env:SYP_REQUIRED_PWSH_VERSION) { throw "Expected PowerShell $env:SYP_REQUIRED_PWSH_VERSION, running $($PSVersionTable.PSVersion)." }
+          if ($env:SYP_REQUIRED_PWSH_SHA256 -cne '02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860') { throw 'The verified PowerShell download hash binding changed.' }
+          Write-Host "PowerShell runtime verified: $($PSVersionTable.PSVersion) at $selectedExecutable"
+
+      - name: Ensure Pester 4.10.1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pesterModules = @(Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' })
+          if ($pesterModules.Count -eq 0) {
+            Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -SkipPublisherCheck
+            $pesterModules = @(Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' })
+          }
+          if ($pesterModules.Count -ne 1) { throw "Expected exactly one Pester 4.10.1 module; found $($pesterModules.Count)." }
+          $manifestPath = Join-Path ([string]$pesterModules[0].ModuleBase) 'Pester.psd1'
+          $manifestItem = Get-Item -Force -LiteralPath $manifestPath
+          if ($manifestItem.PSIsContainer -or ($manifestItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Pester manifest must be a regular non-reparse file.' }
+          $manifest = Import-PowerShellDataFile -LiteralPath $manifestPath -ErrorAction Stop
+          if ([version]$manifest.ModuleVersion -ne [version]'4.10.1') { throw 'Installed Pester manifest is not version 4.10.1.' }
+
+      - name: Run the planned non-authority Pester shard
+        shell: pwsh
+        env:
+          SHARD_ID: ${{ matrix.id }}
+          SHARD_FILES_BASE64: ${{ matrix.filesBase64 }}
+          SHARD_SKIPS_BASE64: ${{ matrix.skipsBase64 }}
         run: |
           $ErrorActionPreference = 'Stop'
           Remove-Module Pester -Force -ErrorAction SilentlyContinue
           $pester = Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' } | Select-Object -First 1
-          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in the test step.' }
+          if ($null -eq $pester) { throw 'Pester 4.10.1 is unavailable in the shard step.' }
+          if ($env:SHARD_ID -notmatch '^[0-9]{2}$') { throw 'The shard id is invalid.' }
+          try {
+            $selectedTestNames = [string[]]@([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:SHARD_FILES_BASE64)) | ConvertFrom-Json)
+            $expectedSkippedTests = [string[]]@([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:SHARD_SKIPS_BASE64)) | ConvertFrom-Json)
+          }
+          catch { throw "The shard matrix payload is invalid: $($_.Exception.Message)" }
+          if ($selectedTestNames.Count -eq 0 -or @($selectedTestNames | Select-Object -Unique).Count -ne $selectedTestNames.Count) { throw 'The shard file list is empty or duplicated.' }
+          $allTestFiles = @(Get-ChildItem -LiteralPath './tests' -Filter '*.Tests.ps1' -File -Recurse)
+          foreach ($name in $selectedTestNames) {
+            if ($name -notmatch '^[^/\\]+\.Tests\.ps1$') { throw "Unsafe shard test filename '$name'." }
+            if (@($allTestFiles | Where-Object Name -ceq $name).Count -ne 1) { throw "Shard test filename must resolve exactly once: '$name'." }
+          }
           . ./scripts/Invoke-StandardAuthorityGate.ps1 -DefineFunctionsOnly
           $inventoryRoot = [IO.Path]::GetFullPath((Get-Location).Path)
-          $authorityNames = @(Get-AuthorityTestPaths -Root $inventoryRoot | ForEach-Object { [IO.Path]::GetRelativePath($inventoryRoot, $_).Replace('\', '/') })
-          $expectedAuthorityNames = @(
-            'tests/internal-source-continuation.Tests.ps1',
-            'tests/skill-repository-standard.Tests.ps1',
-            'tests/skill-repository-workflows.Tests.ps1',
-            'tests/standard-authority-entry-preflight.Tests.ps1',
-            'tests/standard-entry-point-binding.Tests.ps1',
-            'tests/standard-core-pester-adapter.Tests.ps1'
-          )
-          if ($authorityNames.Count -ne $expectedAuthorityNames.Count -or
-              (($authorityNames | Sort-Object) -join [Environment]::NewLine) -cne (($expectedAuthorityNames | Sort-Object) -join [Environment]::NewLine)) {
-            throw 'The Core Pester exclusion list no longer matches the exact authority gate test paths.'
+          $authorityNames = @(Get-AuthorityTestPaths -Root $inventoryRoot | ForEach-Object { [IO.Path]::GetFileName($_) })
+          foreach ($name in $selectedTestNames) {
+            if ($authorityNames -ccontains $name) { throw "Authority test cannot enter a Pester shard: '$name'." }
           }
-          $testRoot = [IO.Path]::GetFullPath('./tests')
-          $allTestFiles = @(Get-ChildItem -LiteralPath $testRoot -Filter '*.Tests.ps1' -File -Recurse)
-          if ($allTestFiles.Count -eq 0) { throw 'Core Pester discovery found no test files.' }
-          $authorityFullPaths = @($expectedAuthorityNames | ForEach-Object { [IO.Path]::GetFullPath((Join-Path (Get-Location) $_)) })
-          foreach ($authorityPath in $authorityFullPaths) {
-            if (@($allTestFiles | Where-Object { [string]::Equals($_.FullName, $authorityPath, [StringComparison]::OrdinalIgnoreCase) }).Count -ne 1) { throw "Authority test path must be discovered exactly once: $authorityPath" }
+          foreach ($identifier in $expectedSkippedTests) {
+            if ($identifier -notmatch '^[^:/\\]+\.Tests\.ps1::\S.+$' -or $selectedTestNames -cnotcontains (($identifier -split '::', 2)[0])) {
+              throw "Shard skip identifier is invalid or belongs to another shard: '$identifier'."
+            }
           }
-          $selectedTestNames = @($allTestFiles | Where-Object { $authorityFullPaths -notcontains $_.FullName } | ForEach-Object { $_.Name })
-          if ($selectedTestNames.Count -ne @($selectedTestNames | Select-Object -Unique).Count) { throw 'Core Pester selection has duplicate leaf names and cannot be passed safely to the bounded runner.' }
-          if ($selectedTestNames.Count -ne ($allTestFiles.Count - $expectedAuthorityNames.Count)) { throw 'Core Pester selection does not equal all discovered tests minus the unique authority test paths.' }
-          $skipInventoryPath = [IO.Path]::GetFullPath('./docs/standards/core-test-skip-inventory.json')
-          if (-not (Test-Path -LiteralPath $skipInventoryPath -PathType Leaf)) { throw 'The Core platform skip inventory is missing.' }
-          $skipInventory = Get-Content -Raw -Encoding UTF8 -LiteralPath $skipInventoryPath | ConvertFrom-Json
-          $platformKey = switch ($env:RUNNER_OS) {
-            'Windows' { 'windows' }
-            'macOS' { 'macos' }
-            'Linux' { 'linux' }
-            default { throw "The Core platform skip inventory has no runner mapping for '$env:RUNNER_OS'." }
-          }
-          $platformInventoryProperty = $skipInventory.platforms.PSObject.Properties[$platformKey]
-          if ($null -eq $platformInventoryProperty) { throw "The Core platform skip inventory has no '$platformKey' entry." }
-          $expectedSkippedTestsProperty = $platformInventoryProperty.Value.PSObject.Properties['expectedSkippedTests']
-          if ($null -eq $expectedSkippedTestsProperty) { throw "The Core platform skip inventory '$platformKey' entry has no expectedSkippedTests list." }
-          $expectedSkippedTests = [string[]]@($expectedSkippedTestsProperty.Value)
-          if ($platformKey -ceq 'windows' -and $expectedSkippedTests.Count -ne 5) { throw 'Windows Core must retain exactly five reviewed skipped tests.' }
           $executorArguments = @{
             PesterModulePath = [string]$pester.Path
             PesterVersion = '4.10.1'
             ExpectedSkippedCount = $expectedSkippedTests.Count
             ExpectedSkippedTests = $expectedSkippedTests
+            # Each selected file already runs in its own process, so repository-wide isolated defaults must not be reapplied inside a matrix shard.
+            IsolatedTestFileNames = [string[]]@()
+            BulkShardSize = 1
             ShardPartitionCount = 1
             ShardPartitionIndex = 0
             OuterTimeoutSeconds = 3600
             TestRoot = './tests'
             EvidenceRoot = $env:RUNNER_TEMP
             SelectedTestFileNames = $selectedTestNames
-            SummaryOutputPath = (Join-Path $env:RUNNER_TEMP 'windows-core-pester-summary.json')
+            SummaryOutputPath = (Join-Path $env:RUNNER_TEMP "windows-core-shard-$($env:SHARD_ID)-summary.json")
+            SummarySchemaVersion = 2
+            SummaryRunId = [string]$env:GITHUB_RUN_ID
+            SummaryRunAttempt = [int]$env:GITHUB_RUN_ATTEMPT
           }
-          Write-Host "Core Pester inventory: $($selectedTestNames.Count) files; authority files excluded once: $($expectedAuthorityNames.Count); runtime: $($PSVersionTable.PSVersion); Pester: $($pester.Version)"
           & ./scripts/Invoke-PesterShardProcess.ps1 @executorArguments
-          if (-not $?) { throw 'The bounded non-authority Pester suite failed.' }
+          if (-not $?) { throw "The bounded non-authority Pester shard '$($env:SHARD_ID)' failed." }
+
+      - name: Upload Windows Core shard evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: windows-core-shard-${{ matrix.id }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/windows-core-shard-${{ matrix.id }}-summary.json
+            ${{ runner.temp }}/pester-shard-*.json
+            ${{ runner.temp }}/pester-shard-*.process.json
+            ${{ runner.temp }}/pester-shard-*.stdout.log
+            ${{ runner.temp }}/pester-shard-*.stderr.log
+          if-no-files-found: warn
+          retention-days: 30
+          overwrite: true
+
+  fixtures:
+    name: Windows Core fixtures
+    needs: plan
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Restore verified PowerShell archive cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/pwsh-cache/PowerShell-7.6.6-win-x64.zip
+          key: pwsh-zip-${{ runner.os }}-7.6.6-02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860
+
+      - name: Install verified latest stable PowerShell
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '7.6.6'
+          $expectedSha256 = '02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860'
+          $archivePath = Join-Path $env:RUNNER_TEMP 'PowerShell-7.6.6-win-x64.zip'
+          $installDirectory = Join-Path $env:RUNNER_TEMP 'pwsh-7.6.6'
+          $cachePath = Join-Path $env:RUNNER_TEMP 'pwsh-cache/PowerShell-7.6.6-win-x64.zip'
+          $downloadUri = 'https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/PowerShell-7.6.6-win-x64.zip'
+          if ((Test-Path -LiteralPath $archivePath) -or (Test-Path -LiteralPath $installDirectory)) { throw 'PowerShell setup paths must be new within this job.' }
+          $cacheIsVerified = $false
+          if (Test-Path -LiteralPath $cachePath) {
+            $cacheItem = Get-Item -Force -LiteralPath $cachePath -ErrorAction Stop
+            if ($cacheItem.PSIsContainer -or ($cacheItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+              Remove-Item -LiteralPath $cachePath -Force
+            } else {
+              $cacheSha256 = (Get-FileHash -LiteralPath $cachePath -Algorithm SHA256).Hash.ToUpperInvariant()
+              if ($cacheSha256 -ceq $expectedSha256) {
+                Copy-Item -LiteralPath $cachePath -Destination $archivePath
+                $cacheIsVerified = $true
+              } else {
+                Remove-Item -LiteralPath $cachePath -Force
+              }
+            }
+          }
+          if (-not $cacheIsVerified) { Invoke-WebRequest -Uri $downloadUri -OutFile $archivePath }
+          $actualSha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToUpperInvariant()
+          if ($actualSha256 -cne $expectedSha256) { throw "PowerShell archive SHA256 mismatch: expected $expectedSha256, got $actualSha256." }
+          if (-not $cacheIsVerified) {
+            [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($cachePath)) | Out-Null
+            Copy-Item -LiteralPath $archivePath -Destination $cachePath
+          }
+          Expand-Archive -LiteralPath $archivePath -DestinationPath $installDirectory
+          $powerShellExe = Join-Path $installDirectory 'pwsh.exe'
+          if (-not (Test-Path -LiteralPath $powerShellExe -PathType Leaf)) { throw 'Verified PowerShell archive did not contain pwsh.exe.' }
+          $archiveRuntimeVersion = (& $powerShellExe -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')
+          if ($LASTEXITCODE -ne 0 -or ([string]$archiveRuntimeVersion).Trim() -cne $version) { throw "Verified archive launched unexpected PowerShell version '$archiveRuntimeVersion'." }
+          [IO.File]::AppendAllText($env:GITHUB_PATH, $installDirectory + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+          $githubEnvironment = 'SYP_REQUIRED_PWSH_VERSION=' + $version + [Environment]::NewLine + 'SYP_REQUIRED_PWSH_SHA256=' + $expectedSha256 + [Environment]::NewLine
+          [IO.File]::AppendAllText($env:GITHUB_ENV, $githubEnvironment, [Text.UTF8Encoding]::new($false))
+          Write-Host "Resolved PowerShell $version from a SHA-256 verified ZIP; portable path: $powerShellExe"
+
+      - name: Verify the selected PowerShell runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expectedExecutable = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'pwsh-7.6.6/pwsh.exe'))
+          $selectedExecutable = [IO.Path]::GetFullPath((Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source)
+          $processExecutable = [IO.Path]::GetFullPath([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)
+          $homeExecutable = [IO.Path]::GetFullPath((Join-Path $PSHOME 'pwsh.exe'))
+          if (-not [string]::Equals($processExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase) -or
+              -not [string]::Equals($homeExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "The actual GitHub step shell is not the verified portable PowerShell: process=$processExecutable PSHOME=$PSHOME"
+          }
+          if (-not [string]::Equals($selectedExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase)) { throw "The job shell did not select the verified portable runtime: $selectedExecutable" }
+          if ($PSVersionTable.PSVersion.ToString() -cne $env:SYP_REQUIRED_PWSH_VERSION) { throw "Expected PowerShell $env:SYP_REQUIRED_PWSH_VERSION, running $($PSVersionTable.PSVersion)." }
+          if ($env:SYP_REQUIRED_PWSH_SHA256 -cne '02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860') { throw 'The verified PowerShell download hash binding changed.' }
+          Write-Host "PowerShell runtime verified: $($PSVersionTable.PSVersion) at $selectedExecutable"
+
+      - name: Ensure Pester 4.10.1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pesterModules = @(Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' })
+          if ($pesterModules.Count -eq 0) {
+            Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -SkipPublisherCheck
+            $pesterModules = @(Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' })
+          }
+          if ($pesterModules.Count -ne 1) { throw "Expected exactly one Pester 4.10.1 module; found $($pesterModules.Count)." }
+          $manifestPath = Join-Path ([string]$pesterModules[0].ModuleBase) 'Pester.psd1'
+          $manifestItem = Get-Item -Force -LiteralPath $manifestPath
+          if ($manifestItem.PSIsContainer -or ($manifestItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Pester manifest must be a regular non-reparse file.' }
+          $manifest = Import-PowerShellDataFile -LiteralPath $manifestPath -ErrorAction Stop
+          if ([version]$manifest.ModuleVersion -ne [version]'4.10.1') { throw 'Installed Pester manifest is not version 4.10.1.' }
 
       - name: Run isolated SYP-214 fixture evidence child
         shell: pwsh
@@ -348,23 +693,142 @@ jobs:
           python -B -c "import unittest; suite=unittest.defaultTestLoader.discover('tests', pattern='test_routine_semantic_*.py'); unittest.TestCase().assertEqual(suite.countTestCases(), 61, 'Exact offline fixture count changed'); result=unittest.TextTestRunner(verbosity=2).run(suite); raise SystemExit(0 if result.wasSuccessful() and len(result.skipped) == 0 else 1)"
           if ($LASTEXITCODE -ne 0) { throw 'Offline routine semantic fixtures failed or skipped.' }
 
-      - name: Upload Windows Core test evidence
+      - name: Upload Windows Core fixture evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: windows-core-powershell-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          name: windows-core-fixtures-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/windows-core-pester-summary.json
-            ${{ runner.temp }}/pester-shard-*.json
-            ${{ runner.temp }}/pester-shard-*.process.json
-            ${{ runner.temp }}/pester-shard-*.stdout.log
-            ${{ runner.temp }}/pester-shard-*.stderr.log
             ${{ runner.temp }}/syp214-fixture-evidence/pester-summary.json
             ${{ runner.temp }}/syp214-fixture-evidence/process-result.json
             ${{ runner.temp }}/syp214-fixture-evidence/child.stdout.log
             ${{ runner.temp }}/syp214-fixture-evidence/child.stderr.log
             ${{ runner.temp }}/syp214-fixture-evidence/reports/*.json
-            ${{ runner.temp }}/syp325-source-scope-*/**/*.json
-            ${{ runner.temp }}/windows-core/authority-result.json
           if-no-files-found: warn
           retention-days: 1
+          overwrite: true
+
+  windows-core:
+    name: Windows Core
+    needs: [plan, authority, pester, fixtures]
+    if: always()
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Restore verified PowerShell archive cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/pwsh-cache/PowerShell-7.6.6-win-x64.zip
+          key: pwsh-zip-${{ runner.os }}-7.6.6-02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860
+
+      - name: Install verified latest stable PowerShell
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '7.6.6'
+          $expectedSha256 = '02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860'
+          $archivePath = Join-Path $env:RUNNER_TEMP 'PowerShell-7.6.6-win-x64.zip'
+          $installDirectory = Join-Path $env:RUNNER_TEMP 'pwsh-7.6.6'
+          $cachePath = Join-Path $env:RUNNER_TEMP 'pwsh-cache/PowerShell-7.6.6-win-x64.zip'
+          $downloadUri = 'https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/PowerShell-7.6.6-win-x64.zip'
+          if ((Test-Path -LiteralPath $archivePath) -or (Test-Path -LiteralPath $installDirectory)) { throw 'PowerShell setup paths must be new within this job.' }
+          $cacheIsVerified = $false
+          if (Test-Path -LiteralPath $cachePath) {
+            $cacheItem = Get-Item -Force -LiteralPath $cachePath -ErrorAction Stop
+            if ($cacheItem.PSIsContainer -or ($cacheItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+              Remove-Item -LiteralPath $cachePath -Force
+            } else {
+              $cacheSha256 = (Get-FileHash -LiteralPath $cachePath -Algorithm SHA256).Hash.ToUpperInvariant()
+              if ($cacheSha256 -ceq $expectedSha256) {
+                Copy-Item -LiteralPath $cachePath -Destination $archivePath
+                $cacheIsVerified = $true
+              } else {
+                Remove-Item -LiteralPath $cachePath -Force
+              }
+            }
+          }
+          if (-not $cacheIsVerified) { Invoke-WebRequest -Uri $downloadUri -OutFile $archivePath }
+          $actualSha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToUpperInvariant()
+          if ($actualSha256 -cne $expectedSha256) { throw "PowerShell archive SHA256 mismatch: expected $expectedSha256, got $actualSha256." }
+          if (-not $cacheIsVerified) {
+            [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($cachePath)) | Out-Null
+            Copy-Item -LiteralPath $archivePath -Destination $cachePath
+          }
+          Expand-Archive -LiteralPath $archivePath -DestinationPath $installDirectory
+          $powerShellExe = Join-Path $installDirectory 'pwsh.exe'
+          if (-not (Test-Path -LiteralPath $powerShellExe -PathType Leaf)) { throw 'Verified PowerShell archive did not contain pwsh.exe.' }
+          $archiveRuntimeVersion = (& $powerShellExe -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')
+          if ($LASTEXITCODE -ne 0 -or ([string]$archiveRuntimeVersion).Trim() -cne $version) { throw "Verified archive launched unexpected PowerShell version '$archiveRuntimeVersion'." }
+          [IO.File]::AppendAllText($env:GITHUB_PATH, $installDirectory + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+          $githubEnvironment = 'SYP_REQUIRED_PWSH_VERSION=' + $version + [Environment]::NewLine + 'SYP_REQUIRED_PWSH_SHA256=' + $expectedSha256 + [Environment]::NewLine
+          [IO.File]::AppendAllText($env:GITHUB_ENV, $githubEnvironment, [Text.UTF8Encoding]::new($false))
+          Write-Host "Resolved PowerShell $version from a SHA-256 verified ZIP; portable path: $powerShellExe"
+
+      - name: Verify the selected PowerShell runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expectedExecutable = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'pwsh-7.6.6/pwsh.exe'))
+          $selectedExecutable = [IO.Path]::GetFullPath((Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source)
+          $processExecutable = [IO.Path]::GetFullPath([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)
+          $homeExecutable = [IO.Path]::GetFullPath((Join-Path $PSHOME 'pwsh.exe'))
+          if (-not [string]::Equals($processExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase) -or
+              -not [string]::Equals($homeExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "The actual GitHub step shell is not the verified portable PowerShell: process=$processExecutable PSHOME=$PSHOME"
+          }
+          if (-not [string]::Equals($selectedExecutable, $expectedExecutable, [StringComparison]::OrdinalIgnoreCase)) { throw "The job shell did not select the verified portable runtime: $selectedExecutable" }
+          if ($PSVersionTable.PSVersion.ToString() -cne $env:SYP_REQUIRED_PWSH_VERSION) { throw "Expected PowerShell $env:SYP_REQUIRED_PWSH_VERSION, running $($PSVersionTable.PSVersion)." }
+          if ($env:SYP_REQUIRED_PWSH_SHA256 -cne '02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860') { throw 'The verified PowerShell download hash binding changed.' }
+          Write-Host "PowerShell runtime verified: $($PSVersionTable.PSVersion) at $selectedExecutable"
+
+      - name: Download Windows Core plan
+        if: needs.plan.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: windows-core-plan-${{ github.run_id }}
+          path: ${{ runner.temp }}/windows-core-artifacts/plan
+
+      - name: Download Windows Core shard evidence
+        if: needs.pester.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: windows-core-shard-*-${{ github.run_id }}
+          path: ${{ runner.temp }}/windows-core-artifacts/shards
+
+      - name: Assert the Windows Core aggregate
+        shell: pwsh
+        env:
+          EXPECTED_PLAN_SHA256: ${{ needs.plan.outputs.planSha256 }}
+          EXPECTED_MATRIX_JSON: ${{ needs.plan.outputs.matrix }}
+          NEEDS_PLAN_RESULT: ${{ needs.plan.result }}
+          NEEDS_AUTHORITY_RESULT: ${{ needs.authority.result }}
+          NEEDS_PESTER_RESULT: ${{ needs.pester.result }}
+          NEEDS_FIXTURES_RESULT: ${{ needs.fixtures.result }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./scripts/Assert-WindowsCoreAggregate.ps1 -RepositoryRoot . -ArtifactRoot (Join-Path $env:RUNNER_TEMP 'windows-core-artifacts') -OutputPath (Join-Path $env:RUNNER_TEMP 'windows-core-aggregate-result.json')
+          if (-not $?) { throw 'Windows Core aggregate validation failed.' }
+
+      - name: Upload Windows Core aggregate evidence
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: windows-core-aggregate-${{ github.run_id }}
+          path: ${{ runner.temp }}/windows-core-aggregate-result.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
+      - name: Fail a cancelled Windows Core aggregate
+        if: cancelled()
+        shell: pwsh
+        run: |
+          throw 'Windows Core aggregate was cancelled and must not be treated as successful.'
