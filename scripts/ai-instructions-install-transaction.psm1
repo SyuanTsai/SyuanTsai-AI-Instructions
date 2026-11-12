@@ -242,6 +242,23 @@ function ConvertTo-InstallJournalV2OperationAuthorityJson {
     return ([pscustomobject]$document|ConvertTo-Json -Depth 30 -Compress)
 }
 
+function Test-InstallJournalV2EvidenceBindingTransition {
+    param([Parameter(Mandatory=$true)][object]$Previous,[Parameter(Mandatory=$true)][object]$Next,[Parameter(Mandatory=$true)][object]$PreviousOperation,[Parameter(Mandatory=$true)][object]$NextOperation)
+    if([string]$Previous.phase-cne'applying'-or[string]$Next.phase-cne'applying'-or
+        [string]$PreviousOperation.kind-cne'store-git-stash-evidence'-or[string]$NextOperation.kind-cne'store-git-stash-evidence'-or
+        [string]$PreviousOperation.state-cne'pending'-or[string]$NextOperation.state-cne'applied'-or
+        $null-ne$PreviousOperation.after.objectId-or$null-eq$NextOperation.after.objectId-or
+        [bool]$PreviousOperation.after.exists-ne[bool]$NextOperation.after.exists){return $false}
+    $previousAuthority=[ordered]@{};$nextAuthority=[ordered]@{}
+    foreach($property in @($PreviousOperation.PSObject.Properties)){if($property.Name-cne'state'){$previousAuthority[$property.Name]=$property.Value}}
+    foreach($property in @($NextOperation.PSObject.Properties)){
+        if($property.Name-ceq'state'){continue}
+        if($property.Name-ceq'after'){$nextAuthority[$property.Name]=[pscustomobject][ordered]@{exists=[bool]$property.Value.exists;objectId=$null}}
+        else{$nextAuthority[$property.Name]=$property.Value}
+    }
+    return ([pscustomobject]$previousAuthority|ConvertTo-Json -Depth 30 -Compress)-ceq([pscustomobject]$nextAuthority|ConvertTo-Json -Depth 30 -Compress)
+}
+
 function Assert-InstallJournalV2TrustedTransition {
     param([Parameter(Mandatory = $true)][object] $Previous,[Parameter(Mandatory = $true)][object] $Next)
     if([int64]$Previous.schemaVersion-ne2-or[int64]$Next.schemaVersion-ne2-or
@@ -249,39 +266,24 @@ function Assert-InstallJournalV2TrustedTransition {
         throw 'Trusted install journal transition requires validated repo-bootstrap schema v2 journals.'
     }
     $previousOperations=@($Previous.operations);$nextOperations=@($Next.operations)
-    $isEvidenceAppend=[string]$Previous.phase-ceq'applying'-and[string]$Next.phase-ceq'applying'-and
-        $nextOperations.Count-eq($previousOperations.Count+1)-and
-        @($previousOperations|Where-Object{[string]$_.kind-ceq'store-git-stash-evidence'}).Count-eq0-and
-        [string]$nextOperations[-1].kind-ceq'store-git-stash-evidence'-and[string]$nextOperations[-1].state-ceq'pending'
-    $authorityNext=$Next
-    if($isEvidenceAppend) {
-        $cloneParameters=@{InputObject=($Next|ConvertTo-Json -Depth 30)}
-        if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$cloneParameters.DateKind='String'}
-        $authorityNext=ConvertFrom-Json @cloneParameters
-        $authorityNext.operations=@($authorityNext.operations|Select-Object -First $previousOperations.Count)
-    }
-    if((ConvertTo-InstallJournalV2TopLevelAuthorityJson $Previous)-cne(ConvertTo-InstallJournalV2TopLevelAuthorityJson $authorityNext)) {
+    if((ConvertTo-InstallJournalV2TopLevelAuthorityJson $Previous)-cne(ConvertTo-InstallJournalV2TopLevelAuthorityJson $Next)) {
         throw 'AI instructions install journal store transition changed top-level fields other than phase or operations.'
     }
+    if($previousOperations.Count-ne$nextOperations.Count){throw 'AI instructions install journal store transition cannot change operations count after prepared.'}
     $changedOperationIndexes=New-Object System.Collections.Generic.List[int]
     for($index=0;$index-lt$previousOperations.Count;$index++) {
         if(-not[object]::ReferenceEquals($previousOperations[$index],$nextOperations[$index])){$changedOperationIndexes.Add($index)}
     }
-    if($changedOperationIndexes.Count-le1) {
-        foreach($index in $changedOperationIndexes) {
-            if((ConvertTo-InstallJournalV2OperationAuthorityJson $previousOperations[$index])-cne(ConvertTo-InstallJournalV2OperationAuthorityJson $nextOperations[$index])) {
-                throw "AI instructions install journal store transition changed operation $($index + 1) fields other than state."
-            }
+    foreach($index in $changedOperationIndexes) {
+        if((ConvertTo-InstallJournalV2OperationAuthorityJson $previousOperations[$index])-cne(ConvertTo-InstallJournalV2OperationAuthorityJson $nextOperations[$index])-and
+            -not(Test-InstallJournalV2EvidenceBindingTransition -Previous $Previous -Next $Next -PreviousOperation $previousOperations[$index] -NextOperation $nextOperations[$index])) {
+            throw "AI instructions install journal store transition changed operation $($index + 1) fields other than state; store-git-stash-evidence after.objectId may be bound only once."
         }
-    }
-    elseif((ConvertTo-InstallJournalV2TransitionAuthorityJson $Previous)-cne(ConvertTo-InstallJournalV2TransitionAuthorityJson $authorityNext)) {
-        throw 'AI instructions install journal store transition changed fields other than phase or operation state.'
     }
     $fromPhase=[string]$Previous.phase;$toPhase=[string]$Next.phase
     if($fromPhase-cne$toPhase-and"$fromPhase>$toPhase"-cnotin@('prepared>applying','applying>applied','applied>committed')) {
         throw 'AI instructions install journal store phase transition is invalid.'
     }
-    if($previousOperations.Count-ne$nextOperations.Count-and-not$isEvidenceAppend){throw 'AI instructions install journal store transition cannot change operations count except for one applying evidence operation append.'}
     for($index=0;$index-lt$previousOperations.Count;$index++) {
         $fromState=[string]$previousOperations[$index].state;$toState=[string]$nextOperations[$index].state
         if($fromState-cne$toState-and"$fromState>$toState"-cne'pending>applied') {

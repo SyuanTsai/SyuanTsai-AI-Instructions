@@ -56,6 +56,11 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         [string]$journal.phase|Should -Be prepared
         @($journal.operations|Where-Object state -cne pending).Count|Should -Be 0
         foreach($role in @('git-index','git-ref','remediation-and-instruction','manifest','shared-exclude')){@($journal.operations|Where-Object role -ceq $role).Count|Should -BeGreaterThan 0}
+        $evidence=@($journal.operations|Where-Object kind -ceq store-git-stash-evidence);$evidence.Count|Should -Be 1
+        [string]$evidence[0].target.value|Should -BeExactly 'refs/stash'
+        $evidence[0].after.exists|Should -Be $true
+        $null-eq$evidence[0].after.objectId|Should -Be $true
+        [string]$evidence[0].state|Should -BeExactly pending
         (Get-P9cPublicationStateSnapshot $target|ConvertFrom-Json).files|Should -Be (($before|ConvertFrom-Json).files)
         $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'write-ahead-recovery') -Failpoint RecoveryOnly
         (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $recovery).ExitCode|Should -Not -Be 0
@@ -206,39 +211,51 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         }
     }
 
-    # Scenario: Recovery interrupts immediately before or after the journaled PersonalAgent stash store while the transaction remains applying.
-    # Purpose: Prove the evidence commit ID is durable before stash mutation and rollback retains a stored evidence entry while restoring every non-stash ref.
-    It 'InterT155_journals_PersonalAgent_evidence_before_store_and_retains_it_on_rollback' {
+    # Scenario: Recovery interrupts after prepared, before stash store, after stash store before binding, or after the one-time binding through catch and next-run paths.
+    # Purpose: Pre-register the evidence operation, leave its after.objectId explicitly pending until store succeeds, and retain any created evidence while rolling back all ordinary targets.
+    It 'InterT155_pre_registers_late_binds_and_recovers_PersonalAgent_evidence_through_both_paths' {
         $discovery=Join-Path $script:ExternalRoot 'evidence-discovery';Copy-Item -LiteralPath $script:P9cSeeds.False -Destination $discovery -Recurse
         $prepared=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'evidence-discovery-runtime') -Failpoint after-journal-prepared -RecoveryPath NextRun
         (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $discovery -BootstrapPath $prepared).ExitCode|Should -Not -Be 0
         $preparedTransaction=@(Get-ChildItem -LiteralPath (Join-Path $discovery '.ai-instructions-txn') -Directory -Force)
         $preparedJournal=Get-Content -Raw -LiteralPath (Join-Path $preparedTransaction[0].FullName 'journal.json')|ConvertFrom-Json
-        $evidenceSequence=@($preparedJournal.operations).Count+1
+        $preparedEvidence=@($preparedJournal.operations|Where-Object kind -ceq store-git-stash-evidence);$preparedEvidence.Count|Should -Be 1
+        $evidenceSequence=[int]$preparedEvidence[0].sequence
+        [string]$preparedEvidence[0].state|Should -BeExactly pending
+        $null-eq$preparedEvidence[0].after.objectId|Should -Be $true
 
-        foreach($position in @('before','after-before-journal')){
-            $target=Join-Path $script:ExternalRoot "evidence-$position";Copy-Item -LiteralPath $script:P9cSeeds.False -Destination $target -Recurse
-            $before=Get-P9cPublicationStateSnapshot $target
-            $stashBefore=(@(& git -C $target rev-parse --verify refs/stash 2>$null)|Select-Object -First 1)
-            $failpoint=if($position-ceq'before'){"before-operation-$evidenceSequence"}else{"after-operation-$evidenceSequence-before-journal"}
-            $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot "evidence-runtime-$position") -Failpoint $failpoint -RecoveryPath NextRun
-            (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap).ExitCode|Should -Not -Be 0
-            $transaction=@(Get-ChildItem -LiteralPath (Join-Path $target '.ai-instructions-txn') -Directory -Force);$transaction.Count|Should -Be 1
-            $journal=Get-Content -Raw -LiteralPath (Join-Path $transaction[0].FullName 'journal.json')|ConvertFrom-Json
-            [string]$journal.phase|Should -Be applying
-            $evidence=@($journal.operations|Where-Object kind -ceq store-git-stash-evidence);$evidence.Count|Should -Be 1
-            [int]$evidence[0].sequence|Should -Be $evidenceSequence
-            [string]$evidence[0].state|Should -Be pending
-            [string]$evidence[0].after.objectId|Should -Match '^[0-9a-f]{40,64}$'
-            $stashAfterFailure=(@(& git -C $target rev-parse --verify refs/stash 2>$null)|Select-Object -First 1)
-            if($position-ceq'before'){[string]$stashAfterFailure|Should -Be ([string]$stashBefore)}else{[string]$stashAfterFailure|Should -Be ([string]$evidence[0].after.objectId)}
+        $cases=@(
+            [pscustomobject]@{Name='prepared';Failpoint='after-journal-prepared';Stored=$false;Bound=$false},
+            [pscustomobject]@{Name='before-store';Failpoint="before-operation-$evidenceSequence";Stored=$false;Bound=$false},
+            [pscustomobject]@{Name='after-store-before-bind';Failpoint="after-operation-$evidenceSequence-before-journal";Stored=$true;Bound=$false},
+            [pscustomobject]@{Name='after-bind';Failpoint="after-operation-$evidenceSequence";Stored=$true;Bound=$true}
+        )
+        foreach($case in $cases){
+            foreach($recoveryPath in @('InProcess','NextRun')){
+                $target=Join-Path $script:ExternalRoot "evidence-$($case.Name)-$recoveryPath";Copy-Item -LiteralPath $script:P9cSeeds.False -Destination $target -Recurse
+                $before=Get-P9cPublicationStateSnapshot $target
+                $stashBefore=(@(& git -C $target rev-parse --verify refs/stash 2>$null)|Select-Object -First 1)
+                $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot "evidence-runtime-$($case.Name)-$recoveryPath") -Failpoint $case.Failpoint -RecoveryPath $recoveryPath
+                (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap).ExitCode|Should -Not -Be 0
+                $stashAfterFailure=(@(& git -C $target rev-parse --verify refs/stash 2>$null)|Select-Object -First 1)
+                if($case.Stored){[string]$stashAfterFailure|Should -Not -Be ([string]$stashBefore)}else{[string]$stashAfterFailure|Should -Be ([string]$stashBefore)}
 
-            $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot "evidence-recovery-$position") -Failpoint RecoveryOnly
-            (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $recovery).ExitCode|Should -Not -Be 0
-            (Get-P9cPublicationStateSnapshot $target)|Should -BeExactly $before
-            if($position-ceq'before'){(@(& git -C $target rev-parse --verify refs/stash 2>$null)|Select-Object -First 1)|Should -Be $stashBefore}
-            else{(@(& git -C $target rev-parse --verify refs/stash 2>$null)|Select-Object -First 1)|Should -Be ([string]$evidence[0].after.objectId)}
-            @(Get-ChildItem -LiteralPath (Join-Path $target '.ai-instructions-txn') -Directory -Force -ErrorAction SilentlyContinue).Count|Should -Be 0
+                if($recoveryPath-ceq'NextRun'){
+                    $transaction=@(Get-ChildItem -LiteralPath (Join-Path $target '.ai-instructions-txn') -Directory -Force);$transaction.Count|Should -Be 1
+                    $journal=Get-Content -Raw -LiteralPath (Join-Path $transaction[0].FullName 'journal.json')|ConvertFrom-Json
+                    $evidence=@($journal.operations|Where-Object kind -ceq store-git-stash-evidence);$evidence.Count|Should -Be 1
+                    [int]$evidence[0].sequence|Should -Be $evidenceSequence
+                    if($case.Name-ceq'prepared'){[string]$journal.phase|Should -BeExactly prepared}else{[string]$journal.phase|Should -BeExactly applying}
+                    if($case.Bound){[string]$evidence[0].state|Should -BeExactly applied;[string]$evidence[0].after.objectId|Should -BeExactly ([string]$stashAfterFailure)}
+                    else{[string]$evidence[0].state|Should -BeExactly pending;$null-eq$evidence[0].after.objectId|Should -Be $true}
+                    $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot "evidence-recovery-$($case.Name)") -Failpoint RecoveryOnly
+                    (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $recovery).ExitCode|Should -Not -Be 0
+                }
+                (Get-P9cPublicationStateSnapshot $target)|Should -BeExactly $before
+                $stashAfterRecovery=(@(& git -C $target rev-parse --verify refs/stash 2>$null)|Select-Object -First 1)
+                if($case.Stored){[string]$stashAfterRecovery|Should -BeExactly ([string]$stashAfterFailure)}else{[string]$stashAfterRecovery|Should -BeExactly ([string]$stashBefore)}
+                @(Get-ChildItem -LiteralPath (Join-Path $target '.ai-instructions-txn') -Directory -Force -ErrorAction SilentlyContinue).Count|Should -Be 0
+            }
         }
     }
 
@@ -314,10 +331,11 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
     It 'UnitT153_accepts_only_phase_and_operation_state_deltas_for_validated_v2_generations' {
         $module=Import-Module $script:TransactionModulePath -Force -PassThru
         try{
-            $previous=[pscustomobject][ordered]@{schemaVersion=2;kind='ai-instructions-install-transaction';transactionId=('a'*32);createdAtUtc='2026-11-12T00:00:00.0000000Z';owner=[pscustomobject][ordered]@{component='repo-bootstrap';processId=1;processStartIdentity='fixture'};platform=[pscustomobject][ordered]@{os='windows';architecture='x64'};lock=[pscustomobject][ordered]@{primitive='windows-fileshare';leaf='bootstrap-ai-instructions.lock'};generation=[pscustomobject][ordered]@{previousBundleSha256=$null;candidateBundleSha256=('b'*64)};scope=[pscustomobject][ordered]@{kind='repository'};phase='prepared';operations=@([pscustomobject][ordered]@{sequence=1;kind='create-file';target=[pscustomobject][ordered]@{value='AGENTS.md'};state='pending'})}
+            $previous=[pscustomobject][ordered]@{schemaVersion=2;kind='ai-instructions-install-transaction';transactionId=('a'*32);createdAtUtc='2026-11-12T00:00:00.0000000Z';owner=[pscustomobject][ordered]@{component='repo-bootstrap';processId=1;processStartIdentity='fixture'};platform=[pscustomobject][ordered]@{os='windows';architecture='x64'};lock=[pscustomobject][ordered]@{primitive='windows-fileshare';leaf='bootstrap-ai-instructions.lock'};generation=[pscustomobject][ordered]@{previousBundleSha256=$null;candidateBundleSha256=('b'*64)};scope=[pscustomobject][ordered]@{kind='repository'};phase='prepared';operations=@([pscustomobject][ordered]@{sequence=1;kind='create-file';target=[pscustomobject][ordered]@{value='AGENTS.md'};state='pending'},[pscustomobject][ordered]@{sequence=2;kind='store-git-stash-evidence';role='personal-agent-evidence';method='stash-store';target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'};before=[pscustomobject][ordered]@{exists=$false;objectId=$null};after=[pscustomobject][ordered]@{exists=$true;objectId=$null};stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})}
             $clone={param($value)$parameters=@{InputObject=($value|ConvertTo-Json -Depth 30)};if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'};ConvertFrom-Json @parameters}
             $applying=&$clone $previous;$applying.phase='applying';{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $previous $applying}|Should -Not -Throw
-            $withEvidence=&$clone $applying;$withEvidence.operations=@($withEvidence.operations)+@([pscustomobject][ordered]@{sequence=2;kind='store-git-stash-evidence';role='personal-agent-evidence';method='stash-store';target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'};before=[pscustomobject][ordered]@{exists=$false;objectId=('c'*40)};after=[pscustomobject][ordered]@{exists=$true;objectId=('c'*40)};stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'});{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $applying $withEvidence}|Should -Not -Throw
+            $withEvidence=&$clone $applying;$withEvidence.operations[1].after.objectId=('c'*40);$withEvidence.operations[1].state='applied';{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $applying $withEvidence}|Should -Not -Throw
+            $rebound=&$clone $withEvidence;$rebound.operations[1].after.objectId=('d'*40);{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $withEvidence $rebound}|Should -Throw
             $applied=&$clone $applying;$applied.operations[0].state='applied';{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $applying $applied}|Should -Not -Throw
             $drift=&$clone $applying;$drift.operations[0].target.value='CLAUDE.md';{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $applying $drift}|Should -Throw
             $unknown=&$clone $applying;$unknown|Add-Member unexpected $true;{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $applying $unknown}|Should -Throw

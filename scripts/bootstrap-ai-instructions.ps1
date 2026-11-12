@@ -3530,6 +3530,7 @@ function New-ProjectPublicationContext {
         Identity=$null
         CurrentJournal=$null
         JournalStoreStates=$null
+        ShouldStorePersonalAgentEvidence=$false
     }
 }
 
@@ -5064,7 +5065,7 @@ function Invoke-RepositoryTransactionOperation {
 }
 
 function Copy-RepositoryInstallJournal {
-    param([Parameter(Mandatory=$true)][object]$Journal,[string]$Phase,[Nullable[long]]$Sequence)
+    param([Parameter(Mandatory=$true)][object]$Journal,[string]$Phase,[Nullable[long]]$Sequence,[string]$EvidenceObjectId)
     $document=[ordered]@{}
     foreach($property in @($Journal.PSObject.Properties)){$document[$property.Name]=if($property.Name-ceq'operations'){@($property.Value)}else{$property.Value}}
     $copy=[pscustomobject]$document
@@ -5073,8 +5074,13 @@ function Copy-RepositoryInstallJournal {
         $sequenceValue=[int64]$Sequence;$operationIndex=-1
         for($index=0;$index-lt$copy.operations.Count;$index++){if([int64]$copy.operations[$index].sequence-eq$sequenceValue){$operationIndex=$index;break}}
         if($operationIndex-lt0){throw "Repository transaction operation sequence $sequenceValue was not found."}
+        if($PSBoundParameters.ContainsKey('EvidenceObjectId')-and[string]$copy.operations[$operationIndex].kind-cne'store-git-stash-evidence'){throw 'Only store-git-stash-evidence may bind after.objectId.'}
         $operationDocument=[ordered]@{}
-        foreach($property in @($copy.operations[$operationIndex].PSObject.Properties)){$operationDocument[$property.Name]=if($property.Name-ceq'state'){'applied'}else{$property.Value}}
+        foreach($property in @($copy.operations[$operationIndex].PSObject.Properties)){
+            if($property.Name-ceq'state'){$operationDocument[$property.Name]='applied';continue}
+            if($property.Name-ceq'after'-and$PSBoundParameters.ContainsKey('EvidenceObjectId')){$operationDocument[$property.Name]=[pscustomobject][ordered]@{exists=$true;objectId=$EvidenceObjectId};continue}
+            $operationDocument[$property.Name]=$property.Value
+        }
         $copy.operations[$operationIndex]=[pscustomobject]$operationDocument
     }
     return $copy
@@ -5090,23 +5096,16 @@ function Invoke-RepositoryTransactionEvidenceStashStore {
     param([Parameter(Mandatory=$true)][object]$Context,[Parameter(Mandatory=$true)][string]$EvidenceCommit)
     if(-not[bool]$Context.Durable-or[string]$Context.CurrentJournal.phase-cne'applying'){throw 'PersonalAgent evidence can only be stored by an applying durable repository transaction.'}
     if($EvidenceCommit-cnotmatch'^[0-9a-f]{40,64}$'){throw 'PersonalAgent evidence commit ID is invalid.'}
-    if(@($Context.CurrentJournal.operations|Where-Object{[string]$_.kind-ceq'store-git-stash-evidence'}).Count-ne0){throw 'The repository transaction already contains a PersonalAgent evidence operation.'}
-    $next=Copy-RepositoryInstallJournal $Context.CurrentJournal
-    $sequence=@($next.operations).Count+1
-    $operation=[pscustomobject][ordered]@{
-        sequence=$sequence;kind='store-git-stash-evidence';role='personal-agent-evidence';method='stash-store'
-        target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'}
-        before=[pscustomobject][ordered]@{exists=$false;objectId=$EvidenceCommit}
-        after=[pscustomobject][ordered]@{exists=$true;objectId=$EvidenceCommit}
-        stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
-    }
-    $next.operations=@($next.operations)+@($operation)
-    Write-RepositoryInstallJournalGeneration $Context $next
-    $operation=@($Context.CurrentJournal.operations|Where-Object{[int64]$_.sequence-eq[int64]$sequence})[0]
+    $evidenceOperations=@($Context.CurrentJournal.operations|Where-Object{[string]$_.kind-ceq'store-git-stash-evidence'})
+    if($evidenceOperations.Count-ne1){throw 'The prepared repository transaction must contain exactly one PersonalAgent evidence operation before stash store.'}
+    $operation=$evidenceOperations[0];$sequence=[int64]$operation.sequence
+    if([string]$operation.state-cne'pending'-or$null-ne$operation.after.objectId){throw 'The prepared PersonalAgent evidence operation has already been bound.'}
     Invoke-AiInstructionsInstallFailpoint -Name ("before-operation-"+$sequence)
-    Invoke-RepositoryTransactionOperation -Context $Context -Journal $Context.CurrentJournal -Operation $operation -Direction redo
+    $subject=((Invoke-Git -Repository ([string]$Context.Repository) -Arguments @('show','--no-patch','--format=%s',$EvidenceCommit))|Select-Object -First 1).Trim()
+    Invoke-Git -Repository ([string]$Context.Repository) -Arguments @('stash','store','--quiet','-m',$subject,$EvidenceCommit)|Out-Null
+    if(@(Invoke-Git -Repository ([string]$Context.Repository) -Arguments @('stash','list','--format=%H')|Where-Object{([string]$_).Trim()-ceq$EvidenceCommit}).Count-eq0){throw 'The newly stored PersonalAgent evidence commit was not found in stash history.'}
     Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+$sequence+"-before-journal")
-    Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Sequence ([int64]$sequence))
+    Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Sequence $sequence -EvidenceObjectId $EvidenceCommit)
     Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+$sequence)
 }
 
@@ -5163,6 +5162,11 @@ function New-RepositoryInstallOperations {
         $targetKind=if([string]$intent.TargetKind-ceq'git-exclude'){'git-shared-exclude'}else{'repository-relative'};$targetValue=if($targetKind-ceq'git-shared-exclude'){Join-Path ([string]$intent.TargetRoot) ([string]$intent.RelativePath)}else{[string]$intent.RelativePath}
         $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind=$kind;role=[string]$intent.Role;method=$(if($kind-ceq'remove-file'){'tombstone-rename'}else{'stage-rename'});target=[pscustomobject][ordered]@{kind=$targetKind;value=$targetValue};before=$intent.Before;after=$after;stageLeaf=$stageLeaf;backupLeaf=$backupLeaf;quarantineLeaf=$null;state='pending'})
     }
+    if([bool]$Context.ShouldStorePersonalAgentEvidence){
+        $sequence=$operations.Count+1
+        $stashBefore=if((Get-GitExitCode -Repository $Context.Repository -Arguments @('show-ref','--verify','--quiet','refs/stash'))-eq0){[pscustomobject][ordered]@{exists=$true;objectId=((Invoke-Git -Repository $Context.Repository -Arguments @('rev-parse','--verify','refs/stash'))|Select-Object -First 1).Trim()}}else{[pscustomobject][ordered]@{exists=$false;objectId=$null}}
+        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='store-git-stash-evidence';role='personal-agent-evidence';method='stash-store';target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'};before=$stashBefore;after=[pscustomobject][ordered]@{exists=$true;objectId=$null};stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
+    }
     return $operations.ToArray()
 }
 
@@ -5172,7 +5176,8 @@ function Start-RepositoryInstallTransaction {
     Add-RemediationFileIntents $Context
     $hasRemediationGit=$null-ne$Context.Remediation-and(($null-ne$Context.Remediation.IndexPlan-and[string]$Context.Remediation.IndexPlan.BeforeSha256-cne[string]$Context.Remediation.IndexPlan.AfterSha256)-or-not[string]::IsNullOrWhiteSpace([string]$Context.Remediation.NewCommit))
     $hasFileMutation=@($Context.Intents.Values|Where-Object{($_.Remove-and$_.Before.exists)-or(-not$_.Remove-and((-not$_.Before.exists)-or(Get-ByteArraySha256 ([byte[]]$_.Bytes))-cne[string]$_.Before.sha256))}).Count-gt0
-    if(-not$hasRemediationGit-and-not$hasFileMutation){return}
+    $hasEvidenceMutation=[bool]$Context.ShouldStorePersonalAgentEvidence
+    if(-not$hasRemediationGit-and-not$hasFileMutation-and-not$hasEvidenceMutation){return}
     if($null-ne$Context.Remediation-and$null-ne$Context.Remediation.IndexPlan-and[string]$Context.Remediation.IndexPlan.BeforeSha256-cne[string]$Context.Remediation.IndexPlan.AfterSha256){
         $preexistingLock=([string]$Context.Remediation.IndexPath)+'.lock'
         if(Test-Path -LiteralPath $preexistingLock){throw (New-RepositoryIndexLockRefusal -Reason 'Git index.lock existed before the repository transaction journal was created, so it cannot be attributed to this transaction.' -LockPath $preexistingLock)}
@@ -5196,7 +5201,7 @@ function Start-RepositoryInstallTransaction {
     $Context.CurrentJournal=Write-AiInstructionsInstallJournalStore -TransactionLease $Context.Lease -TransactionPath (Join-Path (Join-Path $Context.Repository '.ai-instructions-txn') $Context.Id) -Journal $journal -PlatformOs $platform -JournalStoreStates $Context.JournalStoreStates;$Context.Durable=$true
     Invoke-AiInstructionsInstallFailpoint -Name 'after-journal-prepared'
     Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Phase applying)
-    foreach($operation in @($Context.CurrentJournal.operations|Sort-Object sequence)){Invoke-AiInstructionsInstallFailpoint -Name ("before-operation-"+$operation.sequence);Invoke-RepositoryTransactionOperation -Context $Context -Journal $Context.CurrentJournal -Operation $operation -Direction redo;Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+$operation.sequence+"-before-journal");Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Sequence ([int64]$operation.sequence));Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+$operation.sequence)}
+    foreach($operation in @($Context.CurrentJournal.operations|Where-Object{[string]$_.kind-cne'store-git-stash-evidence'}|Sort-Object sequence)){Invoke-AiInstructionsInstallFailpoint -Name ("before-operation-"+$operation.sequence);Invoke-RepositoryTransactionOperation -Context $Context -Journal $Context.CurrentJournal -Operation $operation -Direction redo;Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+$operation.sequence+"-before-journal");Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Sequence ([int64]$operation.sequence));Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+$operation.sequence)}
 }
 
 function Complete-RepositoryInstallTransactionApply {
@@ -6365,13 +6370,6 @@ try {
         throw
     }
 
-    Start-RepositoryInstallTransaction $script:ProjectPublicationContext
-
-    if ($skippedPaths.Count -gt 0) {
-        $uniqueSkippedPaths = @($skippedPaths | Sort-Object -Unique)
-        Write-Output "AI instructions customized or unmanaged; not overwritten: $($uniqueSkippedPaths -join ', ')"
-    }
-
     $changedPaths = @(
         @($createdPaths) +
         @($updatedPaths) +
@@ -6379,6 +6377,33 @@ try {
         $(if ($manifestChanged) { @($manifestRelativePath) } else { @() }) |
             Sort-Object -Unique
     )
+    $plannedStashPaths=New-Object System.Collections.Generic.List[string]
+    foreach($manifestEntry in $nextManifestEntries){
+        if($null-ne$manifestEntry.PSObject.Properties['artifactType']-and[string]$manifestEntry.artifactType-ceq'skill'){continue}
+        if([string]$manifestEntry.targetPath-like'.agents/skills/*'){continue}
+        $plannedTargetPath=[string]$manifestEntry.targetPath
+        if(Test-IsProtectedClaudeFamilyPath -Path $plannedTargetPath -ProtectedPaths $targetMutationProtectedClaudeFamilyPaths){continue}
+        $plannedStashPaths.Add($plannedTargetPath)
+    }
+    if($shouldWriteManifest){$plannedStashPaths.Add($manifestRelativePath)}
+    $plannedStashPathArguments=@($plannedStashPaths|Sort-Object -Unique)
+    if($plannedStashPathArguments.Count-gt0){
+        $shouldStorePersonalAgentEvidence=$changedPaths.Count-gt0
+        if(-not$shouldStorePersonalAgentEvidence){
+            $plannedWorktreeKey=Get-PersonalAgentWorktreeKey -Repository $targetRootPath
+            $plannedEvidenceFingerprint=Get-PersonalAgentEvidenceFingerprint -Repository $targetRootPath -Paths $plannedStashPathArguments
+            $plannedOwnedEvidence=@(Get-PersonalAgentStashes -Repository $targetRootPath -WorktreeKey $plannedWorktreeKey|Where-Object{Test-PersonalAgentStashEvidence -Repository $targetRootPath -Stash $_ -ExpectedFingerprint ([string]$_.EvidenceFingerprint)})
+            $shouldStorePersonalAgentEvidence=@($plannedOwnedEvidence|Where-Object{$_.EvidenceFingerprint-ceq$plannedEvidenceFingerprint}).Count-ne1
+        }
+        $script:ProjectPublicationContext.ShouldStorePersonalAgentEvidence=$shouldStorePersonalAgentEvidence
+    }
+
+    Start-RepositoryInstallTransaction $script:ProjectPublicationContext
+
+    if ($skippedPaths.Count -gt 0) {
+        $uniqueSkippedPaths = @($skippedPaths | Sort-Object -Unique)
+        Write-Output "AI instructions customized or unmanaged; not overwritten: $($uniqueSkippedPaths -join ', ')"
+    }
 
     $stashPathArguments = @()
     try {

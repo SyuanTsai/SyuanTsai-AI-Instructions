@@ -2203,6 +2203,7 @@ function Assert-AiInstructionsInstallJournalV2EvidenceState {
     param([AllowNull()][object] $State,[Parameter(Mandatory = $true)][string] $Context,[Parameter(Mandatory = $true)][ValidateSet('sha1','sha256')][string] $ObjectFormat)
     Assert-AiInstructionsInstallJournalExactProperties -Object $State -Names @('exists','objectId') -Context $Context
     if ($State.exists -isnot [bool]) { throw "$Context.exists must be a boolean." }
+    if ($null -eq $State.objectId) { return }
     $pattern = if ($ObjectFormat -ceq 'sha256') { '^[0-9a-f]{64}$' } else { '^[0-9a-f]{40}$' }
     if ($State.objectId -isnot [string] -or [string]$State.objectId -cnotmatch $pattern) { throw "$Context.objectId does not match repository objectFormat $ObjectFormat." }
 }
@@ -2369,10 +2370,14 @@ function Assert-AiInstructionsInstallJournalV2 {
             }
             'store-git-stash-evidence' {
                 if ($targetKind -cne 'git-stash-evidence') { throw "$context store-git-stash-evidence target kind is invalid." }
-                if ([string]$operation.method -cne 'stash-store' -or $null -ne $operation.stageLeaf -or $null -ne $operation.backupLeaf -or $null -ne $operation.quarantineLeaf) { throw "$context store-git-stash-evidence method or artifact leaves are invalid." }
+                if ([string]$operation.role -cne 'personal-agent-evidence' -or [string]$operation.method -cne 'stash-store' -or $null -ne $operation.stageLeaf -or $null -ne $operation.backupLeaf -or $null -ne $operation.quarantineLeaf) { throw "$context store-git-stash-evidence role, method, or artifact leaves are invalid." }
                 Assert-AiInstructionsInstallJournalV2EvidenceState -State $operation.before -Context "$context.before" -ObjectFormat ([string]$Journal.scope.objectFormat)
                 Assert-AiInstructionsInstallJournalV2EvidenceState -State $operation.after -Context "$context.after" -ObjectFormat ([string]$Journal.scope.objectFormat)
-                if ([bool]$operation.before.exists -or -not [bool]$operation.after.exists -or [string]$operation.before.objectId -cne [string]$operation.after.objectId) { throw "$context store-git-stash-evidence states are invalid." }
+                if (([bool]$operation.before.exists -and $null -eq $operation.before.objectId) -or (-not [bool]$operation.before.exists -and $null -ne $operation.before.objectId) -or -not [bool]$operation.after.exists) { throw "$context store-git-stash-evidence states are invalid." }
+                if ([string]$operation.state -ceq 'pending') {
+                    if ($null -ne $operation.after.objectId -or [string]$Journal.phase -cnotin @('prepared','applying')) { throw "$context pending store-git-stash-evidence after.objectId must be null in prepared or applying phase." }
+                }
+                elseif ($null -eq $operation.after.objectId -or [string]$Journal.phase -ceq 'prepared') { throw "$context applied store-git-stash-evidence after.objectId must be bound outside prepared phase." }
             }
         }
         if ([string]$Journal.phase -in @('applied','committed') -and [string]$operation.state -cne 'applied') { throw "$context.state is inconsistent with phase $($Journal.phase)." }
@@ -2501,6 +2506,32 @@ function Test-AiInstructionsJsonSemanticEqual {
     return $Left.GetType() -eq $Right.GetType() -and $Left.Equals($Right)
 }
 
+function Test-AiInstructionsInstallJournalEvidenceBindingTransition {
+    param(
+        [Parameter(Mandatory = $true)][object] $PreviousJournal,
+        [Parameter(Mandatory = $true)][object] $NextJournal,
+        [Parameter(Mandatory = $true)][object] $PreviousOperation,
+        [Parameter(Mandatory = $true)][object] $NextOperation
+    )
+    if ([string]$PreviousJournal.phase -cne 'applying' -or [string]$NextJournal.phase -cne 'applying' -or
+        [string]$PreviousOperation.kind -cne 'store-git-stash-evidence' -or [string]$NextOperation.kind -cne 'store-git-stash-evidence' -or
+        [string]$PreviousOperation.state -cne 'pending' -or [string]$NextOperation.state -cne 'applied' -or
+        $null -ne $PreviousOperation.after.objectId -or $null -eq $NextOperation.after.objectId) { return $false }
+    $previousAuthority = [ordered]@{}
+    $nextAuthority = [ordered]@{}
+    foreach ($property in @($PreviousOperation.PSObject.Properties)) { if ($property.Name -cne 'state') { $previousAuthority[$property.Name] = $property.Value } }
+    foreach ($property in @($NextOperation.PSObject.Properties)) {
+        if ($property.Name -ceq 'state') { continue }
+        if ($property.Name -ceq 'after') {
+            $nextAfter = [ordered]@{}
+            foreach ($afterProperty in @($property.Value.PSObject.Properties)) { $nextAfter[$afterProperty.Name] = if ($afterProperty.Name -ceq 'objectId') { $null } else { $afterProperty.Value } }
+            $nextAuthority[$property.Name] = [pscustomobject]$nextAfter
+        }
+        else { $nextAuthority[$property.Name] = $property.Value }
+    }
+    return Test-AiInstructionsJsonSemanticEqual -Left ([pscustomobject]$previousAuthority) -Right ([pscustomobject]$nextAuthority)
+}
+
 function Assert-AiInstructionsInstallJournalStoreTransition {
     param([Parameter(Mandatory = $true)][object] $Previous,[Parameter(Mandatory = $true)][object] $Next)
     $previousVersion = [int64]$Previous.schemaVersion
@@ -2516,19 +2547,15 @@ function Assert-AiInstructionsInstallJournalStoreTransition {
     }
     $previousOperationCount = @($Previous.operations).Count
     $nextOperationCount = @($Next.operations).Count
-    $isEvidenceAppend = $previousVersion -eq 2 -and $nextVersion -eq 2 -and
-        [string]$Previous.phase -ceq 'applying' -and [string]$Next.phase -ceq 'applying' -and
-        $nextOperationCount -eq ($previousOperationCount + 1) -and
-        @($Previous.operations | Where-Object { [string]$_.kind -ceq 'store-git-stash-evidence' }).Count -eq 0 -and
-        [string]$Next.operations[$nextOperationCount - 1].kind -ceq 'store-git-stash-evidence' -and
-        [string]$Next.operations[$nextOperationCount - 1].state -ceq 'pending'
-    if ($previousOperationCount -ne $nextOperationCount -and -not $isEvidenceAppend) { throw 'AI instructions install journal store transition cannot change operations count except for one applying evidence operation append.' }
+    if ($previousOperationCount -ne $nextOperationCount) { throw 'AI instructions install journal store transition cannot change operations count after prepared.' }
     for ($index = 0; $index -lt $previousOperationCount; $index++) {
         $previousOperation = [ordered]@{}
         $nextOperation = [ordered]@{}
         foreach ($property in @($Previous.operations[$index].PSObject.Properties)) { if ($property.Name -cne 'state') { $previousOperation[$property.Name] = $property.Value } }
         foreach ($property in @($Next.operations[$index].PSObject.Properties)) { if ($property.Name -cne 'state') { $nextOperation[$property.Name] = $property.Value } }
-        if (-not (Test-AiInstructionsJsonSemanticEqual -Left ([pscustomobject]$previousOperation) -Right ([pscustomobject]$nextOperation))) { throw "AI instructions install journal store transition cannot change operation $($index + 1) fields other than state." }
+        $authorityEqual = Test-AiInstructionsJsonSemanticEqual -Left ([pscustomobject]$previousOperation) -Right ([pscustomobject]$nextOperation)
+        $evidenceBinding = $previousVersion -eq 2 -and $nextVersion -eq 2 -and (Test-AiInstructionsInstallJournalEvidenceBindingTransition -PreviousJournal $Previous -NextJournal $Next -PreviousOperation $Previous.operations[$index] -NextOperation $Next.operations[$index])
+        if (-not $authorityEqual -and -not $evidenceBinding) { throw "AI instructions install journal store transition cannot change operation $($index + 1) fields other than state; store-git-stash-evidence after.objectId may be bound only once." }
         $fromState = [string]$Previous.operations[$index].state
         $toState = [string]$Next.operations[$index].state
         $allowedState = $fromState -ceq $toState -or
