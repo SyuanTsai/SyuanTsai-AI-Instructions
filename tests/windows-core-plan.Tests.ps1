@@ -21,6 +21,76 @@ function Set-WindowsCoreTestText {
     [IO.File]::WriteAllText($Path, $Value, [Text.UTF8Encoding]::new($false))
 }
 
+function Test-WindowsPlatformGuard {
+    param([Management.Automation.Language.IfStatementAst] $IfStatement)
+    $conditionText = ($IfStatement.Clauses | ForEach-Object { $_.Item1.Extent.Text }) -join "`n"
+    return $conditionText -match '(?i)(OSPlatform\]::Windows|\$(?:(?:global|script|local|private):)?(?:\w*IsWindows|HasWindowsPowerShell\w*)\b|Windows_NT|Win32NT)'
+}
+
+function Get-NonWindowsDiscoverableItCount {
+    param([Management.Automation.Language.Ast] $Ast)
+    $count = 0
+    $itCommands = @($Ast.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'It'
+    }, $true))
+    foreach ($itCommand in $itCommands) {
+        $hasWindowsGuard = $false
+        $parent = $itCommand.Parent
+        while ($null -ne $parent) {
+            if ($parent -is [Management.Automation.Language.IfStatementAst] -and (Test-WindowsPlatformGuard $parent)) {
+                $hasWindowsGuard = $true
+                break
+            }
+            $parent = $parent.Parent
+        }
+        if (-not $hasWindowsGuard) { $count++ }
+    }
+    return $count
+}
+
+function Assert-PesterFilesHaveNonWindowsDiscovery {
+    param(
+        [string] $Root,
+        [string[]] $Allowlist = @()
+    )
+    $rootPath = (Resolve-Path -LiteralPath $Root).Path
+    $testsRoot = Join-Path $rootPath 'tests'
+    $allowlistSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($entry in $Allowlist) {
+        $normalizedEntry = ([string]$entry).Replace('\','/')
+        if (-not $allowlistSet.Add($normalizedEntry)) {
+            throw "Non-Windows discovery allowlist contains a duplicate entry: $normalizedEntry"
+        }
+    }
+
+    $results = @(
+        foreach ($file in Get-ChildItem -LiteralPath $testsRoot -Filter '*.Tests.ps1' -File -Recurse) {
+            $tokens = $null
+            $parseErrors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$parseErrors)
+            if (@($parseErrors).Count -ne 0) {
+                throw "Pester file must parse before non-Windows discovery can be checked: $($file.FullName)"
+            }
+            [pscustomobject]@{
+                Path = [IO.Path]::GetRelativePath($rootPath, $file.FullName).Replace('\','/')
+                DiscoverableItCount = Get-NonWindowsDiscoverableItCount $ast
+            }
+        }
+    )
+
+    foreach ($entry in $allowlistSet) {
+        $match = @($results | Where-Object { $_.Path -ceq $entry })
+        if ($match.Count -eq 0) { throw "Non-Windows discovery allowlist entry does not exist: $entry" }
+        if ($match[0].DiscoverableItCount -gt 0) { throw "Non-Windows discovery allowlist entry no longer needs an exception: $entry" }
+    }
+    $uncovered = @($results | Where-Object { $_.DiscoverableItCount -le 0 -and -not $allowlistSet.Contains($_.Path) })
+    if ($uncovered.Count -gt 0) {
+        throw "Pester file lacks an It outside Windows platform guards: $($uncovered.Path -join ', ')"
+    }
+    return $results
+}
+
 function New-WindowsCoreFullPlanFixture {
     param([string] $Root)
     [IO.Directory]::CreateDirectory((Join-Path $Root 'scripts')) | Out-Null
@@ -154,6 +224,43 @@ Describe 'Windows Core full planner and aggregate' {
         )
         ($script:ActualPlan.Plan.selectedTestFiles -join "`n") | Should Be ($expected -join "`n")
         $script:ActualPlan.Plan.expectedSkippedTests.Count | Should Be 5
+    }
+
+    # Scenario: Every repository Pester file is checked for at least one It outside Windows platform guards, except one pre-existing launcher-recovery file.
+    # Purpose: Keep Linux and macOS one-file shards discoverable while documenting the exact legacy exception outside SYP-417 scope.
+    It 'UnitT12_requires_non_Windows_discovery_for_every_Pester_file' {
+        $allowlist = @(
+            'tests/ai-instructions-launcher-recovery.Tests.ps1' # Existing exception outside the SYP-417 scope.
+        )
+        $results = @(Assert-PesterFilesHaveNonWindowsDiscovery -Root $script:WindowsCoreRepositoryRoot -Allowlist $allowlist)
+        @($results | Where-Object DiscoverableItCount -le 0).Count | Should Be 1
+        @($results | Where-Object DiscoverableItCount -gt 0).Count | Should Be ($results.Count - 1)
+    }
+
+    # Scenario: A fixture Pester file registers every It only inside an IsWindows condition.
+    # Purpose: Prove the static contract rejects the zero-discovery shape that breaks Linux and macOS shards.
+    It 'UnitT14_rejects_a_Pester_file_with_only_Windows_guarded_tests' {
+        $root = Join-Path $TestDrive 'all-windows-discovery'
+        Set-WindowsCoreTestText (Join-Path $root 'tests/all-windows.Tests.ps1') @'
+if ($IsWindows) {
+    Describe 'all-windows' {
+        It 'UnitT10_runs_only_on_Windows' {}
+    }
+}
+'@
+        { Assert-PesterFilesHaveNonWindowsDiscovery -Root $root } | Should Throw 'lacks an It outside Windows platform guards'
+    }
+
+    # Scenario: A discovery allowlist names either a missing file or a file that now has an unguarded It.
+    # Purpose: Keep the exception list exact so stale entries cannot hide future discovery regressions.
+    It 'UnitT16_rejects_a_<Case>_non_Windows_discovery_allowlist_entry' -TestCases @(
+        @{ Case='missing'; Entry='tests/missing.Tests.ps1'; Expected='does not exist' },
+        @{ Case='unneeded'; Entry='tests/visible.Tests.ps1'; Expected='no longer needs' }
+    ) {
+        param($Case,$Entry,$Expected)
+        $root = Join-Path $TestDrive "allowlist-$Case"
+        Set-WindowsCoreTestText (Join-Path $root 'tests/visible.Tests.ps1') "Describe 'visible' { It 'UnitT10_is_discoverable' {} }`n"
+        { Assert-PesterFilesHaveNonWindowsDiscovery -Root $root -Allowlist @($Entry) } | Should Throw $Expected
     }
 
     # Scenario: A minimal fixture contains six authority tests and an explicit retained source-test set.

@@ -1310,10 +1310,6 @@
       "license": "Apache-2.0"
     },
     {
-      "path": "tests/ai-instructions-writer-gate.windows-powershell.Tests.ps1",
-      "license": "Apache-2.0"
-    },
-    {
       "path": "tests/bootstrap-ai-instructions-multisource-lock-arrays.Tests.ps1",
       "license": "Apache-2.0"
     },
@@ -1411,10 +1407,6 @@
     },
     {
       "path": "tests/install-ai-instructions-bootstrap.part3.Tests.ps1",
-      "license": "Apache-2.0"
-    },
-    {
-      "path": "tests/install-ai-instructions-bootstrap.part4.Tests.ps1",
       "license": "Apache-2.0"
     },
     {
