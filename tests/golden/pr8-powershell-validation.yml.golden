@@ -104,22 +104,6 @@ jobs:
           if ($env:SYP_REQUIRED_PWSH_SHA256 -cne '02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860') { throw 'The verified PowerShell download hash binding changed.' }
           Write-Host "PowerShell runtime verified: $($PSVersionTable.PSVersion) at $selectedExecutable"
 
-      - name: Ensure Pester 4.10.1
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $pesterModules = @(Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' })
-          if ($pesterModules.Count -eq 0) {
-            Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -SkipPublisherCheck
-            $pesterModules = @(Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' })
-          }
-          if ($pesterModules.Count -ne 1) { throw "Expected exactly one Pester 4.10.1 module; found $($pesterModules.Count)." }
-          $manifestPath = Join-Path ([string]$pesterModules[0].ModuleBase) 'Pester.psd1'
-          $manifestItem = Get-Item -Force -LiteralPath $manifestPath
-          if ($manifestItem.PSIsContainer -or ($manifestItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Pester manifest must be a regular non-reparse file.' }
-          $manifest = Import-PowerShellDataFile -LiteralPath $manifestPath -ErrorAction Stop
-          if ([version]$manifest.ModuleVersion -ne [version]'4.10.1') { throw 'Installed Pester manifest is not version 4.10.1.' }
-
       - name: Calculate the Windows Core plan
         id: plan
         shell: pwsh
@@ -804,22 +788,6 @@ jobs:
           if ($PSVersionTable.PSVersion.ToString() -cne $env:SYP_REQUIRED_PWSH_VERSION) { throw "Expected PowerShell $env:SYP_REQUIRED_PWSH_VERSION, running $($PSVersionTable.PSVersion)." }
           if ($env:SYP_REQUIRED_PWSH_SHA256 -cne '02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860') { throw 'The verified PowerShell download hash binding changed.' }
           Write-Host "PowerShell runtime verified: $($PSVersionTable.PSVersion) at $selectedExecutable"
-
-      - name: Ensure Pester 4.10.1
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $pesterModules = @(Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' })
-          if ($pesterModules.Count -eq 0) {
-            Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -SkipPublisherCheck
-            $pesterModules = @(Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]'4.10.1' })
-          }
-          if ($pesterModules.Count -ne 1) { throw "Expected exactly one Pester 4.10.1 module; found $($pesterModules.Count)." }
-          $manifestPath = Join-Path ([string]$pesterModules[0].ModuleBase) 'Pester.psd1'
-          $manifestItem = Get-Item -Force -LiteralPath $manifestPath
-          if ($manifestItem.PSIsContainer -or ($manifestItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Pester manifest must be a regular non-reparse file.' }
-          $manifest = Import-PowerShellDataFile -LiteralPath $manifestPath -ErrorAction Stop
-          if ([version]$manifest.ModuleVersion -ne [version]'4.10.1') { throw 'Installed Pester manifest is not version 4.10.1.' }
 
       - name: Download Windows Core plan
         if: needs.plan.result == 'success'
