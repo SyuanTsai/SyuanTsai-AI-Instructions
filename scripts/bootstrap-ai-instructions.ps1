@@ -1834,17 +1834,24 @@ function Open-RepositoryOperationLock {
     }
 }
 
-function Get-RepositoryIndexTransactionPath {
+function Get-RepositoryActiveGitDirectory {
     param([Parameter(Mandatory = $true)][string] $Repository)
 
-    $gitDirectory = ((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--git-dir')) | Select-Object -First 1).Trim()
-    if (-not [System.IO.Path]::IsPathRooted($gitDirectory)) { $gitDirectory = Join-Path $Repository $gitDirectory }
+    $gitDirectory = ((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--absolute-git-dir')) | Select-Object -First 1).Trim()
+    if (-not [System.IO.Path]::IsPathRooted($gitDirectory)) { throw "Git returned a non-absolute active worktree directory: $gitDirectory" }
     $gitDirectory = [System.IO.Path]::GetFullPath($gitDirectory).TrimEnd([char[]]@('\','/'))
     if (-not (Test-Path -LiteralPath $gitDirectory -PathType Container)) { throw "Git directory is missing or invalid: $gitDirectory" }
     $gitDirectoryItem = Get-Item -Force -LiteralPath $gitDirectory
     if (($gitDirectoryItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "Git directory must not be a reparse point: $gitDirectory"
     }
+    return $gitDirectory
+}
+
+function Get-RepositoryIndexTransactionPath {
+    param([Parameter(Mandatory = $true)][string] $Repository)
+
+    $gitDirectory = Get-RepositoryActiveGitDirectory -Repository $Repository
 
     $indexPath = ((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--git-path','index')) | Select-Object -First 1).Trim()
     if (-not [System.IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $Repository $indexPath }
@@ -1871,9 +1878,16 @@ function Open-RepositoryIndexTransactionLock {
         $stream = [System.IO.File]::Open($lockPath,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
     }
     catch [System.IO.IOException] {
-        throw 'The Git index is being changed by another process; bootstrap stopped before index preflight.'
+        throw (New-RepositoryIndexLockRefusal -Reason 'The Git index is being changed by another process; bootstrap stopped before index preflight.' -LockPath $lockPath)
     }
     return [pscustomobject][ordered]@{ Stream=$stream; Path=$lockPath; IndexPath=$indexPath }
+}
+
+function Close-RepositoryIndexTransactionLock {
+    param([AllowNull()][object]$Lock)
+    if($null-eq$Lock-or$null-eq$Lock.Stream){return}
+    $Lock.Stream.Dispose();$Lock.Stream=$null
+    Remove-Item -LiteralPath $Lock.Path -Force
 }
 
 function Assert-ManagedPathDoesNotCrossReparsePoint {
@@ -3526,17 +3540,43 @@ function Test-ProjectPublicationPathEqual {
     return [string]::Equals([IO.Path]::GetFullPath($Left),[IO.Path]::GetFullPath($Right),$comparison)
 }
 
+function Get-RepositoryTransactionStorePath {
+    param([Parameter(Mandatory=$true)][string]$GitDirectory)
+    return (Join-Path $GitDirectory '.ai-instructions-txn')
+}
+
+function Get-RepositoryTransactionPath {
+    param([Parameter(Mandatory=$true)][object]$Context)
+    return (Join-Path (Get-RepositoryTransactionStorePath -GitDirectory ([string]$Context.GitDirectory)) ([string]$Context.DirectoryLeaf))
+}
+
+function Assert-RepositoryTransactionScopeBinding {
+    param(
+        [Parameter(Mandatory=$true)][string]$Repository,
+        [Parameter(Mandatory=$true)][string]$GitDirectory,
+        [Parameter(Mandatory=$true)][object]$Journal
+    )
+    $activeGitDirectory=Get-RepositoryActiveGitDirectory -Repository $Repository
+    if(-not(Test-ProjectPublicationPathEqual -Left $activeGitDirectory -Right $GitDirectory)-or
+       -not(Test-ProjectPublicationPathEqual -Left ([string]$Journal.scope.repositoryRoot) -Right $Repository)-or
+       -not(Test-ProjectPublicationPathEqual -Left ([string]$Journal.scope.gitDirectory) -Right $activeGitDirectory)){
+        throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction scope does not match the active worktree Git directory '$activeGitDirectory'; preserve the transaction evidence for manual inspection.")
+    }
+}
+
 function New-ProjectPublicationContext {
     param([Parameter(Mandatory=$true)][string]$Repository)
     Import-Module (Join-Path $PSScriptRoot 'ai-instructions-install-transaction.psm1') -Force
-    Invoke-ProjectPublicationRecovery -Repository $Repository
-    $storePath=Join-Path $Repository '.ai-instructions-txn'
+    $gitDirectory=Get-RepositoryActiveGitDirectory -Repository $Repository
+    Invoke-ProjectPublicationRecovery -Repository $Repository -GitDirectory $gitDirectory
+    $storePath=Get-RepositoryTransactionStorePath -GitDirectory $gitDirectory
     if(Test-Path -LiteralPath $storePath){
         $residue=@(Get-ChildItem -Force -LiteralPath $storePath -ErrorAction Stop)
         if($residue.Count-gt0){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Project Skill recovery evidence requires reconciliation before retry: $storePath")}
     }
     return [pscustomobject][ordered]@{
         Repository=$Repository
+        GitDirectory=$gitDirectory
         Id=[guid]::NewGuid().ToString('N')
         DirectoryLeaf=$null
         Intents=(New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal))
@@ -3547,6 +3587,7 @@ function New-ProjectPublicationContext {
         Identity=$null
         CurrentJournal=$null
         JournalStoreStates=$null
+        RepositoryIndexLock=$null
         ShouldStorePersonalAgentEvidence=$false
         PersonalAgentEvidenceStashBefore=$null
     }
@@ -3647,16 +3688,16 @@ function Complete-ProjectPublicationContext {
 
 function Get-RepositoryTransactionDiskState {
     param([Parameter(Mandatory=$true)]$Context)
-    $transactionPath=Join-Path (Join-Path $Context.Repository '.ai-instructions-txn') $Context.Id
+    $transactionPath=Get-RepositoryTransactionPath -Context $Context
     if(-not(Test-Path -LiteralPath $transactionPath -PathType Container)){return [pscustomobject]@{status='orphan';journal=$null}}
     $lease=$Context.Lease;$opened=$false
     try{
-        if($null-eq$lease){$lease=Open-PlatformDirectory -Root $Context.Repository -RelativePath ('.ai-instructions-txn/'+$Context.Id);$opened=$true}
+        if($null-eq$lease){$lease=Open-PlatformDirectory -Root $Context.GitDirectory -RelativePath ('.ai-instructions-txn/'+$Context.Id);$opened=$true}
         $readLeaf={param([string]$name)$path=Join-Path $transactionPath $name;if(-not(Test-Path -LiteralPath $path)){return [pscustomobject]@{Kind=$null;Json=$null;State=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}}};if(-not(Test-Path -LiteralPath $path -PathType Leaf)){return [pscustomobject]@{Kind='other';Json=$null;State=$null}};$state=Get-AiInstructionsInstallFileState -ParentLease $lease -Leaf $name -LiteralPath $path -PlatformOs (Get-RepositoryTransactionPlatform);return [pscustomobject]@{Kind='file';Json=[Text.UTF8Encoding]::new($false,$true).GetString([IO.File]::ReadAllBytes($path));State=$state}}
         $journal=&$readLeaf 'journal.json';$previous=&$readLeaf 'journal.prev';$stage=&$readLeaf 'journal.stage'
         $classification=Get-AiInstructionsInstallTransactionClassification -Name $Context.Id -EntryKind directory -JournalEntryKind $journal.Kind -JournalJson $journal.Json -PreviousJournalEntryKind $previous.Kind -PreviousJournalJson $previous.Json -ExpectedOwnerComponent repo-bootstrap
         $Context.JournalStoreStates=[ordered]@{'journal.json'=$journal.State;'journal.prev'=$previous.State;'journal.stage'=$stage.State}
-        if([string]$classification.classification-ceq'valid-journal'){return [pscustomobject]@{status='valid';journal=$classification.journal}}
+        if([string]$classification.classification-ceq'valid-journal'){Assert-RepositoryTransactionScopeBinding -Repository $Context.Repository -GitDirectory $Context.GitDirectory -Journal $classification.journal;return [pscustomobject]@{status='valid';journal=$classification.journal}}
         if([string]$classification.classification-ceq'orphan-without-journal'){return [pscustomobject]@{status='orphan';journal=$null}}
         return [pscustomobject]@{status='indeterminate';journal=$null;reason=[string]$classification.reason}
     }finally{if($opened){$lease.Dispose()}}
@@ -3667,7 +3708,7 @@ function Resolve-ActiveProjectPublicationFailure {
     if(-not[bool]$Context.Durable){return 'rollback-all'}
     $journalState=Get-RepositoryTransactionDiskState -Context $Context
     if([string]$journalState.status-ceq'orphan'){
-        $transactionPath=Join-Path (Join-Path $Context.Repository '.ai-instructions-txn') $Context.Id
+        $transactionPath=Get-RepositoryTransactionPath -Context $Context
         if(Test-Path -LiteralPath $transactionPath -PathType Container){
             $unexpected=@(Get-ChildItem -Force -LiteralPath $transactionPath|Where-Object{-not(Test-RepositoryTransactionOrphanChild -Item $_)})
             if($unexpected.Count-gt0){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction orphan contains unknown evidence at '$transactionPath'; inspect it manually before removal.")}
@@ -3679,12 +3720,12 @@ function Resolve-ActiveProjectPublicationFailure {
         return 'roll-forward-cleanup'
     }
     $action=Resolve-ProjectPublicationRecoveryAction -JournalState $journalState
-    if($action-ceq'fail-closed'){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction journal is unreadable or invalid at '$($Context.Repository)\.ai-instructions-txn\$($Context.Id)'; inspect the evidence manually before removal.")}
+    if($action-ceq'fail-closed'){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction journal is unreadable or invalid at '$(Get-RepositoryTransactionPath -Context $Context)'; inspect the evidence manually before removal.")}
     $Context.CurrentJournal=$journalState.journal
     Resolve-RepositoryRecoveryIndexLock -Context $Context
     if($action-ceq'rollback-all'){Invoke-RepositoryTransactionRollback $Context}
     elseif($action-ceq'roll-forward-cleanup'){Complete-RepositoryTransactionCleanup $Context}
-    else{throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction recovery state is unknown. Inspect and clear '$($Context.Repository)\.ai-instructions-txn\$($Context.Id)' only after verifying journal evidence.")}
+    else{throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction recovery state is unknown. Inspect and clear '$(Get-RepositoryTransactionPath -Context $Context)' only after verifying journal evidence.")}
     return $action
 }
 
@@ -5023,15 +5064,17 @@ function Complete-RepositoryIndexLockRollForward {
 
 function Resolve-RepositoryRecoveryIndexLock {
     param([Parameter(Mandatory=$true)][object]$Context)
+    if($null-ne$Context.RepositoryIndexLock-and$null-ne$Context.RepositoryIndexLock.Stream){return}
     $lockPath=([string]$Context.CurrentJournal.scope.indexPath)+'.lock'
-    if(-not(Test-Path -LiteralPath $lockPath)){return}
-    Complete-RepositoryIndexLockRollForward -Journal $Context.CurrentJournal|Out-Null
+    if(Test-Path -LiteralPath $lockPath){Complete-RepositoryIndexLockRollForward -Journal $Context.CurrentJournal|Out-Null}
+    try{$Context.RepositoryIndexLock=Open-RepositoryIndexTransactionLock -Repository ([string]$Context.Repository)}
+    catch{throw (New-RepositoryIndexLockRefusal -Reason "The repository recovery could not acquire the long Git index lock before undo or redo: $($_.Exception.Message)" -LockPath $lockPath)}
 }
 
 function Invoke-RepositoryIndexReplacement {
     param([Parameter(Mandatory=$true)][object]$Context,[Parameter(Mandatory=$true)][object]$Journal,[Parameter(Mandatory=$true)][object]$Operation,[Parameter(Mandatory=$true)][object]$Source,[Parameter(Mandatory=$true)][object]$Destination,[Parameter(Mandatory=$true)][ValidateSet('redo','undo')][string]$Direction)
     $indexPath=[string]$Journal.scope.indexPath;$lockPath=$indexPath+'.lock'
-    if(Test-Path -LiteralPath $lockPath){Complete-RepositoryIndexLockRollForward -Journal $Journal|Out-Null}
+    if($null-eq$Context.RepositoryIndexLock-or$null-eq$Context.RepositoryIndexLock.Stream){throw (New-RepositoryIndexLockRefusal -Reason 'The repository transaction no longer owns the long Git index lock.' -LockPath $lockPath)}
     $artifactLeaf=if($Direction-ceq'redo'){[string]$Operation.stageLeaf}else{[string]$Operation.backupLeaf}
     $artifact=Open-PlatformFile -ParentLease $Context.Lease -Leaf $artifactLeaf -Access Read -CreateMode OpenExisting
     try{[byte[]]$bytes=$artifact.ReadAllBytes(536870912)}finally{$artifact.Dispose()}
@@ -5039,20 +5082,17 @@ function Invoke-RepositoryIndexReplacement {
     $live=Get-RepositoryTransactionIndexState $Journal
     if(Test-RepositoryTransactionIndexStateEqual $live $Destination){return}
     if(-not(Test-RepositoryTransactionIndexStateEqual $live $Source)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'The Git index changed before index.lock publication; transaction evidence was retained.')}
-    $stream=$null
+    $stream=$Context.RepositoryIndexLock.Stream
     try{
-        try {
-            $stream=[IO.File]::Open($lockPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
-        }
-        catch [IO.IOException] {
-            throw (New-RepositoryIndexLockRefusal -Reason 'Git index.lock already exists and was not created by this transaction step.' -LockPath $lockPath)
-        }
-        $stream.Write($bytes,0,$bytes.Length);$stream.Flush($true);$stream.Dispose();$stream=$null
+        $stream.SetLength(0);$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true);$stream.Dispose();$stream=$null;$Context.RepositoryIndexLock.Stream=$null
         Invoke-AiInstructionsInstallFailpoint -Name 'after-index-lock-write-before-rename'
         $live=Get-RepositoryTransactionIndexState $Journal
         if(-not(Test-RepositoryTransactionIndexStateEqual $live $Source)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'The Git index changed after index.lock was flushed; transaction evidence was retained.')}
         Move-Item -LiteralPath $lockPath -Destination $indexPath -Force
-    }finally{if($null-ne$stream){$stream.Dispose()}}
+        Invoke-AiInstructionsInstallFailpoint -Name 'after-index-rename-before-reacquire'
+        try{$reacquired=Open-RepositoryIndexTransactionLock -Repository ([string]$Context.Repository);$Context.RepositoryIndexLock.Stream=$reacquired.Stream}
+        catch{throw (New-RepositoryIndexLockRefusal -Reason "The transaction could not reacquire the long Git index lock after index publication: $($_.Exception.Message)" -LockPath $lockPath)}
+    }finally{if($null-ne$stream){$stream.Dispose();$Context.RepositoryIndexLock.Stream=$null}}
 }
 
 function Test-RepositoryTransactionStateEqual {
@@ -5174,7 +5214,7 @@ function Copy-RepositoryInstallJournal {
 function Write-RepositoryInstallJournalGeneration {
     param([Parameter(Mandatory=$true)][object]$Context,[Parameter(Mandatory=$true)][object]$Next)
     $previous=$Context.CurrentJournal
-    $Context.CurrentJournal=Write-AiInstructionsInstallJournalStore -TransactionLease $Context.Lease -TransactionPath (Join-Path (Join-Path $Context.Repository '.ai-instructions-txn') $Context.Id) -Journal $Next -PreviousJournal $previous -PlatformOs ([string]$Next.platform.os) -JournalStoreStates $Context.JournalStoreStates
+    $Context.CurrentJournal=Write-AiInstructionsInstallJournalStore -TransactionLease $Context.Lease -TransactionPath (Get-RepositoryTransactionPath -Context $Context) -Journal $Next -PreviousJournal $previous -PlatformOs ([string]$Next.platform.os) -JournalStoreStates $Context.JournalStoreStates
 }
 
 function Invoke-RepositoryTransactionEvidenceStashStore {
@@ -5219,7 +5259,7 @@ function Add-RemediationFileIntents {
 function New-RepositoryInstallOperations {
     param([Parameter(Mandatory=$true)][object]$Context)
     Add-RemediationFileIntents $Context
-    $operations=New-Object System.Collections.Generic.List[object];$platform=Get-RepositoryTransactionPlatform;$transactionPath=Join-Path (Join-Path $Context.Repository '.ai-instructions-txn') $Context.Id
+    $operations=New-Object System.Collections.Generic.List[object];$platform=Get-RepositoryTransactionPlatform;$transactionPath=Get-RepositoryTransactionPath -Context $Context
     $remediation=$Context.Remediation
     if($null-ne$remediation-and$null-ne$remediation.IndexPlan-and[string]$remediation.IndexPlan.BeforeSha256-cne[string]$remediation.IndexPlan.AfterSha256){
         $sequence=$operations.Count+1;$stageLeaf=('op-{0:D6}.stage'-f$sequence);$backupLeaf=('op-{0:D6}.backup'-f$sequence)
@@ -5275,18 +5315,16 @@ function Start-RepositoryInstallTransaction {
     $hasFileMutation=@($Context.Intents.Values|Where-Object{($_.Remove-and$_.Before.exists)-or(-not$_.Remove-and((-not$_.Before.exists)-or(Get-ByteArraySha256 ([byte[]]$_.Bytes))-cne[string]$_.Before.sha256))}).Count-gt0
     $hasEvidenceMutation=[bool]$Context.ShouldStorePersonalAgentEvidence
     if(-not$hasRemediationGit-and-not$hasFileMutation-and-not$hasEvidenceMutation){return}
-    if($null-ne$Context.Remediation-and$null-ne$Context.Remediation.IndexPlan-and[string]$Context.Remediation.IndexPlan.BeforeSha256-cne[string]$Context.Remediation.IndexPlan.AfterSha256){
-        $preexistingLock=([string]$Context.Remediation.IndexPath)+'.lock'
-        if(Test-Path -LiteralPath $preexistingLock){throw (New-RepositoryIndexLockRefusal -Reason 'Git index.lock existed before the repository transaction journal was created, so it cannot be attributed to this transaction.' -LockPath $preexistingLock)}
-    }
-    $Context.ContainerLease=Open-PlatformDirectory -Root $Context.Repository -RelativePath '.ai-instructions-txn' -CreatePrivate
+    $activeGitDirectory=Get-RepositoryActiveGitDirectory -Repository $Context.Repository
+    if(-not(Test-ProjectPublicationPathEqual -Left $activeGitDirectory -Right ([string]$Context.GitDirectory))){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'The active worktree Git directory changed before repository transaction preparation.')}
+    $Context.ContainerLease=Open-PlatformDirectory -Root $Context.GitDirectory -RelativePath '.ai-instructions-txn' -CreatePrivate
     $Context.DirectoryLeaf=$Context.Id
-    $Context.Lease=Open-PlatformDirectory -Root $Context.Repository -RelativePath ('.ai-instructions-txn/'+$Context.Id) -CreatePrivate
+    $Context.Lease=Open-PlatformDirectory -Root $Context.GitDirectory -RelativePath ('.ai-instructions-txn/'+$Context.Id) -CreatePrivate
     $Context.Identity=ConvertTo-ProjectPublicationIdentity $Context.Lease.Observation
     $operations=New-RepositoryInstallOperations $Context
     if(@($operations).Count-eq0){Remove-ProjectPublicationContextEvidence $Context;return}
     $common=((Invoke-Git -Repository $Context.Repository -Arguments @('rev-parse','--git-common-dir'))|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($common)){$common=Join-Path $Context.Repository $common};$common=[IO.Path]::GetFullPath($common)
-    $git=((Invoke-Git -Repository $Context.Repository -Arguments @('rev-parse','--git-dir'))|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($git)){$git=Join-Path $Context.Repository $git};$git=[IO.Path]::GetFullPath($git)
+    $git=Get-RepositoryActiveGitDirectory -Repository $Context.Repository
     $index=((Invoke-Git -Repository $Context.Repository -Arguments @('rev-parse','--git-path','index'))|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($index)){$index=Join-Path $Context.Repository $index};$index=[IO.Path]::GetFullPath($index)
     $rootLease=Open-PlatformDirectory -Root $Context.Repository -RootOnly;try{$rootIdentity=ConvertTo-ProjectPublicationIdentity $rootLease.Observation}finally{$rootLease.Dispose()}
     $backup=$null;if($null-ne$Context.Remediation){$inventoryBytes=[Text.UTF8Encoding]::new($false).GetBytes((($Context.Remediation.Backup.Inventory|ConvertTo-Json -Depth 10 -Compress)));$backup=[pscustomobject][ordered]@{root=[string]$Context.Remediation.Backup.Root;indexSha256=[string]$Context.Remediation.Backup.IndexSha256;inventorySha256=(Get-ByteArraySha256 $inventoryBytes)}}
@@ -5295,7 +5333,7 @@ function Start-RepositoryInstallTransaction {
     $start=(Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o',[Globalization.CultureInfo]::InvariantCulture);$platform=Get-RepositoryTransactionPlatform
     $journal=New-AiInstructionsInstallJournalV2 -TransactionId $Context.Id -OwnerProcessId $PID -OwnerProcessStartIdentity $start -PlatformOs $platform -PlatformArchitecture (Get-RepositoryTransactionArchitecture) -LockPrimitive $(if($platform-ceq'windows'){'windows-fileshare'}else{'flock'}) -LockLeaf 'bootstrap-ai-instructions.lock' -PreviousBundleSha256 $previous -CandidateBundleSha256 $candidate -Scope $scope -Phase prepared -Operations $operations
     $Context.JournalStoreStates=[ordered]@{'journal.json'=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null};'journal.prev'=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null};'journal.stage'=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}}
-    $Context.CurrentJournal=Write-AiInstructionsInstallJournalStore -TransactionLease $Context.Lease -TransactionPath (Join-Path (Join-Path $Context.Repository '.ai-instructions-txn') $Context.Id) -Journal $journal -PlatformOs $platform -JournalStoreStates $Context.JournalStoreStates;$Context.Durable=$true
+    $Context.CurrentJournal=Write-AiInstructionsInstallJournalStore -TransactionLease $Context.Lease -TransactionPath (Get-RepositoryTransactionPath -Context $Context) -Journal $journal -PlatformOs $platform -JournalStoreStates $Context.JournalStoreStates;$Context.Durable=$true
     Invoke-AiInstructionsInstallFailpoint -Name 'after-journal-prepared'
     Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Phase applying)
     foreach($operation in @($Context.CurrentJournal.operations|Where-Object{[string]$_.kind-cne'store-git-stash-evidence'}|Sort-Object sequence)){Invoke-AiInstructionsInstallFailpoint -Name ("before-operation-"+$operation.sequence);Invoke-RepositoryTransactionOperation -Context $Context -Journal $Context.CurrentJournal -Operation $operation -Direction redo;Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+$operation.sequence+"-before-journal");Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Sequence ([int64]$operation.sequence));Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+$operation.sequence)}
@@ -5325,10 +5363,13 @@ function Resolve-ProjectPublicationRecoveryAction {
 }
 
 function Invoke-ProjectPublicationRecovery {
-    param([Parameter(Mandatory=$true)][string]$Repository)
-    $store=Join-Path $Repository '.ai-instructions-txn'
+    param([Parameter(Mandatory=$true)][string]$Repository,[string]$GitDirectory)
+    if([string]::IsNullOrWhiteSpace($GitDirectory)){$GitDirectory=Get-RepositoryActiveGitDirectory -Repository $Repository}
+    $activeGitDirectory=Get-RepositoryActiveGitDirectory -Repository $Repository
+    if(-not(Test-ProjectPublicationPathEqual -Left $activeGitDirectory -Right $GitDirectory)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'The requested repository transaction store is not the active worktree Git directory.')}
+    $store=Get-RepositoryTransactionStorePath -GitDirectory $GitDirectory
     if(-not(Test-Path -LiteralPath $store -PathType Container)){return}
-    $container=Open-PlatformDirectory -Root $Repository -RelativePath '.ai-instructions-txn'
+    $container=Open-PlatformDirectory -Root $GitDirectory -RelativePath '.ai-instructions-txn'
     try{
         foreach($entry in @(Get-ChildItem -Force -LiteralPath $store|Sort-Object Name)){
             $nameMatch=[regex]::Match([string]$entry.Name,'^(?<Id>[0-9a-f]{32})$')
@@ -5336,8 +5377,9 @@ function Invoke-ProjectPublicationRecovery {
                 throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Unknown repository transaction residue '$($entry.FullName)'. Inspect the evidence and remove it manually only after proving no transaction target needs recovery.")
             }
             $id=[string]$nameMatch.Groups['Id'].Value;$directoryLeaf=[string]$entry.Name
-            $lease=Open-PlatformDirectory -Root $Repository -RelativePath ('.ai-instructions-txn/'+$directoryLeaf)
+            $lease=Open-PlatformDirectory -Root $GitDirectory -RelativePath ('.ai-instructions-txn/'+$directoryLeaf)
             $identity=ConvertTo-ProjectPublicationIdentity $lease.Observation
+            $context=$null
             try{
                 $readLeaf={param($name)$path=Join-Path $entry.FullName $name;if(-not(Test-Path -LiteralPath $path)){return [pscustomobject]@{Kind=$null;Json=$null;State=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}}};if(-not(Test-Path -LiteralPath $path -PathType Leaf)){return [pscustomobject]@{Kind='other';Json=$null;State=$null}};$state=Get-AiInstructionsInstallFileState -ParentLease $lease -Leaf $name -LiteralPath $path -PlatformOs (Get-RepositoryTransactionPlatform);return [pscustomobject]@{Kind='file';Json=[Text.UTF8Encoding]::new($false,$true).GetString([IO.File]::ReadAllBytes($path));State=$state}}
                 $journal=&$readLeaf 'journal.json';$previous=&$readLeaf 'journal.prev';$stage=&$readLeaf 'journal.stage'
@@ -5354,16 +5396,18 @@ function Invoke-ProjectPublicationRecovery {
                 if([string]$classification.classification-cne'valid-journal'){
                     throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Legacy fix4 or malformed project journal residue was found at '$($entry.FullName)'. Preserve it, inspect journal.json and all stage/backup files, verify repository HEAD/index/files manually, then remove the exact transaction directory before retrying. Classification: $($classification.reason)")
                 }
-                $context=[pscustomobject][ordered]@{Repository=$Repository;Id=$id;DirectoryLeaf=$directoryLeaf;Intents=$null;Remediation=$null;Durable=$true;ContainerLease=$container;Lease=$lease;Identity=$identity;CurrentJournal=$classification.journal;JournalStoreStates=[ordered]@{'journal.json'=$journal.State;'journal.prev'=$previous.State;'journal.stage'=$stage.State}}
+                Assert-RepositoryTransactionScopeBinding -Repository $Repository -GitDirectory $GitDirectory -Journal $classification.journal
+                $context=[pscustomobject][ordered]@{Repository=$Repository;GitDirectory=$GitDirectory;Id=$id;DirectoryLeaf=$directoryLeaf;Intents=$null;Remediation=$null;Durable=$true;ContainerLease=$container;Lease=$lease;Identity=$identity;CurrentJournal=$classification.journal;JournalStoreStates=[ordered]@{'journal.json'=$journal.State;'journal.prev'=$previous.State;'journal.stage'=$stage.State};RepositoryIndexLock=$null}
                 Resolve-RepositoryRecoveryIndexLock -Context $context
                 $action=Resolve-ProjectPublicationRecoveryAction ([pscustomobject]@{status='valid';journal=$classification.journal})
                 if($action-ceq'rollback-all'){Invoke-RepositoryTransactionRollback $context}
                 elseif($action-ceq'roll-forward-cleanup'){Complete-RepositoryTransactionCleanup $context}
                 else{throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction '$directoryLeaf' has an unknown recovery state; evidence was retained.")}
+                Close-RepositoryIndexTransactionLock -Lock $context.RepositoryIndexLock
                 $lease=$null
-                if($null-eq$context.ContainerLease){$container=Open-PlatformDirectory -Root $Repository -RelativePath '.ai-instructions-txn'}
+                if($null-eq$context.ContainerLease){$container=Open-PlatformDirectory -Root $GitDirectory -RelativePath '.ai-instructions-txn'}
             }
-            catch{if($null-ne$lease){$lease.Dispose()};if((Get-AiInstructionsRefusalCode $_)-ceq'interrupted-install'){throw};throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction recovery failed and retained evidence at '$($entry.FullName)': $($_.Exception.Message)" -InnerException $_.Exception)}
+            catch{if($null-ne$context){Close-RepositoryIndexTransactionLock -Lock $context.RepositoryIndexLock};if($null-ne$lease){$lease.Dispose()};if((Get-AiInstructionsRefusalCode $_)-ceq'interrupted-install'){throw};throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction recovery failed and retained evidence at '$($entry.FullName)': $($_.Exception.Message)" -InnerException $_.Exception)}
         }
     }finally{if($null-ne$container){$container.Dispose()}}
 }
@@ -5395,7 +5439,7 @@ function Complete-RepositoryTransactionCleanup {
     param([Parameter(Mandatory=$true)][object]$Context)
     foreach($operation in @($Context.CurrentJournal.operations|Sort-Object sequence)){Invoke-RepositoryTransactionOperation -Context $Context -Journal $Context.CurrentJournal -Operation $operation -Direction redo}
     Invoke-AiInstructionsInstallFailpoint -Name 'after-committed-before-cleanup'
-    $transactionPath=Join-Path (Join-Path $Context.Repository '.ai-instructions-txn') $Context.DirectoryLeaf
+    $transactionPath=Get-RepositoryTransactionPath -Context $Context
     Remove-InstallTerminalTransactionArtifacts -Journal $Context.CurrentJournal -TransactionLease $Context.Lease -TransactionPath $transactionPath -JournalStoreStates $Context.JournalStoreStates
     Invoke-AiInstructionsInstallFailpoint -Name 'during-cleanup-transaction'
     $Context.Lease.Dispose();$Context.Lease=$null
@@ -5654,9 +5698,10 @@ try {
     else { @() })
     if (-not $WhatIf) {
         $repositoryOperationLock = Open-RepositoryOperationLock -Repository $targetRootPath
-        if(Test-Path -LiteralPath (Join-Path $targetRootPath '.ai-instructions-txn')){
+        $activeGitDirectory=Get-RepositoryActiveGitDirectory -Repository $targetRootPath
+        if(Test-Path -LiteralPath (Get-RepositoryTransactionStorePath -GitDirectory $activeGitDirectory)){
             Import-Module (Join-Path $PSScriptRoot 'ai-instructions-install-transaction.psm1') -Force
-            Invoke-ProjectPublicationRecovery -Repository $targetRootPath
+            Invoke-ProjectPublicationRecovery -Repository $targetRootPath -GitDirectory $activeGitDirectory
         }
         Assert-NoRepoManagedManifestV4 -Repository $targetRootPath -AllowV4:($repoManifestWriter -ceq 'v4') -Strict
         $claudeProjectOwnedWorktrees = @(Get-ClaudeProjectOwnedWorktreeRoots -Repository $targetRootPath -Strict)
@@ -5687,10 +5732,6 @@ try {
             $script:ProjectPublicationContext.Remediation=$remediationTransaction
             $plannedRemediationPathSet=New-Object 'System.Collections.Generic.HashSet[string]' (Get-GitPathComparer -Repository $targetRootPath)
             foreach($plannedRemediationPath in @($remediationTransaction.Paths)){[void]$plannedRemediationPathSet.Add([string]$plannedRemediationPath)}
-        }
-        else {
-            $repositoryIndexLock=Open-RepositoryIndexTransactionLock -Repository $targetRootPath
-            $repositoryIndexPath=[string]$repositoryIndexLock.IndexPath
         }
     }
     if ($null -ne $remediationTransaction) {
@@ -6532,6 +6573,9 @@ try {
         $script:ProjectPublicationContext.PersonalAgentEvidenceStashBefore=Get-RepositoryStashRefState -Repository $targetRootPath
     }
 
+    $repositoryIndexLock=Open-RepositoryIndexTransactionLock -Repository $targetRootPath
+    $repositoryIndexPath=[string]$repositoryIndexLock.IndexPath
+    $script:ProjectPublicationContext.RepositoryIndexLock=$repositoryIndexLock
     Start-RepositoryInstallTransaction $script:ProjectPublicationContext
 
     if ($skippedPaths.Count -gt 0) {
@@ -6598,11 +6642,6 @@ try {
 }
 catch {
     $syncError = $_
-    if($null-ne$repositoryIndexLock){
-        $repositoryIndexLock.Stream.Dispose()
-        Remove-Item -LiteralPath $repositoryIndexLock.Path -Force
-        $repositoryIndexLock=$null
-    }
     if($null-ne$script:ProjectPublicationContext){
         try{
             $action=Resolve-ActiveProjectPublicationFailure -Context $script:ProjectPublicationContext -RemediationTransaction $remediationTransaction
@@ -6642,11 +6681,6 @@ finally {
 }
 catch {
     $bootstrapError = $_
-    if($null-ne$repositoryIndexLock){
-        $repositoryIndexLock.Stream.Dispose()
-        Remove-Item -LiteralPath $repositoryIndexLock.Path -Force
-        $repositoryIndexLock=$null
-    }
     if($null-ne$script:ProjectPublicationContext){
         try{Resolve-ActiveProjectPublicationFailure -Context $script:ProjectPublicationContext -RemediationTransaction $remediationTransaction|Out-Null;$script:ProjectPublicationContext=$null}
         catch{$script:ProjectPublicationContext=$null;throw}
@@ -6659,8 +6693,7 @@ finally {
         $userSkillMigrationLock.Guard.Dispose()
     }
     if ($null -ne $repositoryIndexLock) {
-        $repositoryIndexLock.Stream.Dispose()
-        Remove-Item -LiteralPath $repositoryIndexLock.Path -Force
+        Close-RepositoryIndexTransactionLock -Lock $repositoryIndexLock
     }
     if ($null -ne $repositoryOperationLock) { $repositoryOperationLock.Dispose() }
 }

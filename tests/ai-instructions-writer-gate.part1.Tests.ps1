@@ -455,7 +455,8 @@ Describe 'AI instructions writer and reader gate' {
         $target=Join-Path $root 'target';New-P9bTargetRepository $target
         (Invoke-P9bRepoBootstrap -Context $fixture.Context -ArchivePath $source.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
         $transactionId=[guid]::NewGuid().ToString('N')
-        $transactionPath=Join-Path $target ".ai-instructions-txn/$transactionId"
+        $transactionRoot=Get-P9cRepositoryTransactionRoot -Repository $target
+        $transactionPath=Join-Path $transactionRoot $transactionId
         New-Item -ItemType Directory -Force -Path $transactionPath|Out-Null
         [IO.File]::WriteAllText((Join-Path $transactionPath 'journal.stage'),"interrupted stage`n",[Text.UTF8Encoding]::new($false))
         if(-not$Journal-and-not$Previous){[IO.File]::WriteAllText((Join-Path $transactionPath 'op-000001.stage'),"unpublished payload`n",[Text.UTF8Encoding]::new($false))}
@@ -467,7 +468,7 @@ Describe 'AI instructions writer and reader gate' {
 
         $result.ExitCode|Should Be 0
         Test-Path -LiteralPath $transactionPath|Should Be $false
-        @(Get-ChildItem -Force -LiteralPath (Join-Path $target '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0
+        @(Get-ChildItem -Force -LiteralPath $transactionRoot -ErrorAction SilentlyContinue).Count|Should Be 0
     }
 
     # Scenario: Shared-exclude reconciliation evaluates multiple Skill files across two live worktrees.

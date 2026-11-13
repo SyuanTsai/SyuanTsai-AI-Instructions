@@ -15,14 +15,9 @@ $script:InstallFailpointPatterns = @(
     'after-operation-<sequence>-before-journal',
     'after-operation-<sequence>',
     'after-committed-before-cleanup',
-    'before-committed-journal-write',
-    'after-committed-journal-write',
-    'after-index-lock-write-before-rename',
-    'after-cleanup-journal-before-directory',
     'before-cleanup-<artifact-leaf>',
     'during-cleanup-<artifact-leaf>',
     'after-cleanup-<artifact-leaf>',
-    'during-cleanup-transaction',
     'after-rollback-operation-<sequence>'
 )
 
@@ -50,7 +45,7 @@ function Assert-AiInstructionsInstallerCapabilities {
 
 function Test-AiInstructionsInstallFailpointName {
     param([Parameter(Mandatory = $true)][string] $Name)
-    if ($Name -cin @('after-journal-prepared','after-journal-stage-flush','after-journal-publish-before-parent-flush','after-recovery-before-install','before-committed-journal-write','after-committed-journal-write','after-committed-before-cleanup','after-index-lock-write-before-rename','after-cleanup-journal-before-directory','during-cleanup-transaction')) { return $true }
+    if ($Name -cin @('after-journal-prepared','after-journal-stage-flush','after-journal-publish-before-parent-flush','after-recovery-before-install','before-committed-journal-write','after-committed-journal-write','after-committed-before-cleanup','after-index-lock-write-before-rename','after-index-rename-before-reacquire','after-cleanup-journal-before-directory','during-cleanup-transaction')) { return $true }
     if ($Name -cmatch '^(?:before-operation-[1-9][0-9]*|after-original-to-backup-[1-9][0-9]*|after-operation-[1-9][0-9]*-before-journal|after-operation-[1-9][0-9]*|after-rollback-operation-[1-9][0-9]*)$') { return $true }
     return $Name -cmatch '^(?:before-cleanup|during-cleanup|after-cleanup)-[A-Za-z0-9][A-Za-z0-9._-]*$'
 }

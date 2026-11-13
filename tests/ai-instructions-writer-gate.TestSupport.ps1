@@ -336,7 +336,7 @@ function New-P9cProjectPublicationFailpointBootstrap {
     }
     if($Failpoint-ceq'RecoveryOnly'){
         $text=[IO.File]::ReadAllText($bootstrapPath)
-        $invocation='            Invoke-ProjectPublicationRecovery -Repository $targetRootPath'
+        $invocation='            Invoke-ProjectPublicationRecovery -Repository $targetRootPath -GitDirectory $activeGitDirectory'
         if(-not$text.Contains($invocation)){throw 'Project publication recovery invocation was not found.'}
         $text=$text.Replace($invocation,$invocation+"`r`n            throw 'Injected project publication RecoveryOnly failure.'")
         [IO.File]::WriteAllText($bootstrapPath,$text,[Text.UTF8Encoding]::new($false))
@@ -374,10 +374,22 @@ function New-P9cStashTamperAfterPreparedBootstrap {
     return $bootstrapPath
 }
 
+function New-P9cLongIndexLockProbeBootstrap {
+    param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][string]$ProbePath)
+    $bootstrapPath=New-P9cProjectPublicationFailpointBootstrap -Root $Root -Failpoint after-journal-prepared -RecoveryPath InProcess
+    $text=[IO.File]::ReadAllText($bootstrapPath)
+    $invocation="    Invoke-AiInstructionsInstallFailpoint -Name 'after-journal-prepared'"
+    if(-not$text.Contains($invocation)){throw 'Prepared journal failpoint invocation was not found for the long index lock probe.'}
+    $escapedProbePath=$ProbePath.Replace("'","''")
+    $probe="    `$gitAddOutput=@(& git -C `$Context.Repository add -- README.md 2>&1)`r`n    `$gitAddExit=`$LASTEXITCODE`r`n    [IO.File]::WriteAllText('$escapedProbePath',(`$gitAddExit.ToString()+[Environment]::NewLine+(`$gitAddOutput-join[Environment]::NewLine)),[Text.UTF8Encoding]::new(`$false))`r`n$invocation"
+    [IO.File]::WriteAllText($bootstrapPath,$text.Replace($invocation,$probe),[Text.UTF8Encoding]::new($false))
+    return $bootstrapPath
+}
+
 function New-P9cIndexLockTamperBootstrap {
     param(
         [Parameter(Mandatory=$true)][string]$Root,
-        [Parameter(Mandatory=$true)][ValidateSet('MismatchedBytes','CommittedPhase','NoJournal')][string]$TamperKind,
+        [Parameter(Mandatory=$true)][ValidateSet('EmptyBytes','MismatchedBytes','CommittedPhase','NoJournal')][string]$TamperKind,
         [Parameter(Mandatory=$true)][ValidateSet('InProcess','NextRun')][string]$RecoveryPath
     )
     $scriptRoot=Join-Path $Root 'scripts'
@@ -388,13 +400,35 @@ function New-P9cIndexLockTamperBootstrap {
     if(-not$text.Contains($marker)){throw 'Index lock failpoint invocation was not found.'}
     $stop=if($RecoveryPath-ceq'InProcess'){"        throw 'Injected residual index.lock failure.'"}else{"        [Environment]::FailFast('Injected residual index.lock failure.')"}
     $tamper=switch($TamperKind){
+        'EmptyBytes'{"        [IO.File]::WriteAllBytes(`$lockPath,[byte[]]@())"}
         'MismatchedBytes'{"        [IO.File]::WriteAllBytes(`$lockPath,[byte[]](9,8,7,6))"}
-        'CommittedPhase'{"        `$phaseJournal=Copy-RepositoryInstallJournal `$Journal -Phase committed`r`n        `$phaseBytes=[Text.UTF8Encoding]::new(`$false).GetBytes((`$phaseJournal|ConvertTo-Json -Depth 30 -Compress))`r`n        [IO.File]::WriteAllBytes((Join-Path (Join-Path (Join-Path `$Context.Repository '.ai-instructions-txn') `$Context.Id) 'journal.json'),`$phaseBytes)`r`n        Remove-Item -LiteralPath (Join-Path (Join-Path (Join-Path `$Context.Repository '.ai-instructions-txn') `$Context.Id) 'journal.prev') -Force -ErrorAction SilentlyContinue"}
-        'NoJournal'{"        Remove-Item -LiteralPath (Join-Path (Join-Path (Join-Path `$Context.Repository '.ai-instructions-txn') `$Context.Id) 'journal.json') -Force`r`n        Remove-Item -LiteralPath (Join-Path (Join-Path (Join-Path `$Context.Repository '.ai-instructions-txn') `$Context.Id) 'journal.prev') -Force -ErrorAction SilentlyContinue"}
+        'CommittedPhase'{"        `$phaseJournal=Copy-RepositoryInstallJournal `$Journal -Phase committed`r`n        `$phaseBytes=[Text.UTF8Encoding]::new(`$false).GetBytes((`$phaseJournal|ConvertTo-Json -Depth 30 -Compress))`r`n        [IO.File]::WriteAllBytes((Join-Path (Get-RepositoryTransactionPath -Context `$Context) 'journal.json'),`$phaseBytes)`r`n        Remove-Item -LiteralPath (Join-Path (Get-RepositoryTransactionPath -Context `$Context) 'journal.prev') -Force -ErrorAction SilentlyContinue"}
+        'NoJournal'{"        Remove-Item -LiteralPath (Join-Path (Get-RepositoryTransactionPath -Context `$Context) 'journal.json') -Force`r`n        Remove-Item -LiteralPath (Join-Path (Get-RepositoryTransactionPath -Context `$Context) 'journal.prev') -Force -ErrorAction SilentlyContinue"}
     }
     $replacement=$marker+"`r`n"+$tamper+"`r`n"+$stop
     [IO.File]::WriteAllText($bootstrapPath,$text.Replace($marker,$replacement),[Text.UTF8Encoding]::new($false))
     return $bootstrapPath
+}
+
+function New-P9cIndexReacquireTheftBootstrap {
+    param(
+        [Parameter(Mandatory=$true)][string]$Root,
+        [Parameter(Mandatory=$true)][string]$RollbackFailpoint
+    )
+    $bootstrapPath=New-P9cProjectPublicationFailpointBootstrap -Root $Root -Failpoint $RollbackFailpoint -RecoveryPath InProcess
+    $text=[IO.File]::ReadAllText($bootstrapPath)
+    $marker="        Invoke-AiInstructionsInstallFailpoint -Name 'after-index-rename-before-reacquire'"
+    if(-not$text.Contains($marker)){throw 'Index rename/reacquire failpoint invocation was not found.'}
+    $injection="        if(`$null-eq(Get-Variable -Name P9cIndexRenameCount -Scope Script -ErrorAction SilentlyContinue)){`$script:P9cIndexRenameCount=0}`r`n        `$script:P9cIndexRenameCount++`r`n        if(`$script:P9cIndexRenameCount-eq2){[IO.File]::WriteAllBytes(`$lockPath,[byte[]](7,6,5,4))}`r`n$marker"
+    [IO.File]::WriteAllText($bootstrapPath,$text.Replace($marker,$injection),[Text.UTF8Encoding]::new($false))
+    return $bootstrapPath
+}
+
+function Get-P9cRepositoryTransactionRoot {
+    param([Parameter(Mandatory=$true)][string]$Repository)
+    $gitDirectory=(@(& git -C $Repository rev-parse --absolute-git-dir 2>$null)|Select-Object -First 1)
+    if($LASTEXITCODE-ne0-or[string]::IsNullOrWhiteSpace([string]$gitDirectory)){throw "Could not resolve the active worktree Git directory for '$Repository'."}
+    return (Join-Path ([IO.Path]::GetFullPath(([string]$gitDirectory).Trim())) '.ai-instructions-txn')
 }
 
 function Get-P9cPublicationStateSnapshot {
@@ -418,7 +452,7 @@ function Get-P9cPublicationStateSnapshot {
     $indexEntryBytes=[Text.UTF8Encoding]::new($false).GetBytes((($indexRows-join"`n")+"`n"));$sha=[Security.Cryptography.SHA256]::Create();try{$indexEntrySha=([BitConverter]::ToString($sha.ComputeHash($indexEntryBytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
     $status=(@(& git -C $Repository status --porcelain=v1 --untracked-files=all)-join"`n")
     $refsWithoutStash=(@(& git -C $Repository for-each-ref '--format=%(refname)%09%(objectname)'|Where-Object{[string]$_-cnotmatch'^refs/stash(?:\s|$)'}|Sort-Object -CaseSensitive)-join"`n")
-    $transactionRoot=Join-Path $Repository '.ai-instructions-txn';$transactionResidue=if((Test-Path -LiteralPath $transactionRoot -PathType Container)-and@(Get-ChildItem -Force -LiteralPath $transactionRoot).Count-gt0){Get-P7eTreeSnapshot $transactionRoot}else{''}
+    $transactionRoot=Get-P9cRepositoryTransactionRoot -Repository $Repository;$transactionResidue=if((Test-Path -LiteralPath $transactionRoot -PathType Container)-and@(Get-ChildItem -Force -LiteralPath $transactionRoot).Count-gt0){Get-P7eTreeSnapshot $transactionRoot}else{''}
     return ([ordered]@{
         headMode=$headMode
         headReference=if([string]::IsNullOrWhiteSpace([string]$headReference)){$null}else{[string]$headReference.Trim()}
@@ -451,7 +485,7 @@ function Invoke-P9cInterT140FailpointMatrix {
     $discoveryBootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $ExternalRoot 'discovery-runtime') -Failpoint 'after-journal-prepared' -RecoveryPath NextRun
     $discoveryResult=Invoke-P9bRepoBootstrap -Context $Context -ArchivePath $ArchivePath -TargetRoot $discovery -BootstrapPath $discoveryBootstrap
     $discoveryResult.ExitCode|Should -Not -Be 0
-    $transactions=@(Get-ChildItem -LiteralPath (Join-Path $discovery '.ai-instructions-txn') -Directory -Force);$transactions.Count|Should -Be 1
+    $transactions=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $discovery) -Directory -Force);$transactions.Count|Should -Be 1
     $journal=Get-Content -Raw -LiteralPath (Join-Path $transactions[0].FullName 'journal.json')|ConvertFrom-Json
     $roleSequences=@{}
     foreach($role in $roles){
@@ -471,7 +505,7 @@ function Invoke-P9cInterT140FailpointMatrix {
                 $failed=Invoke-P9bRepoBootstrap -Context $Context -ArchivePath $ArchivePath -TargetRoot $caseRoot -BootstrapPath $failpointBootstrap
                 $failed.ExitCode|Should -Not -Be 0
                 if($recoveryPath-ceq'NextRun'){
-                    $active=@(Get-ChildItem -LiteralPath (Join-Path $caseRoot '.ai-instructions-txn') -Directory -Force);$active.Count|Should -Be 1
+                    $active=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $caseRoot) -Directory -Force);$active.Count|Should -Be 1
                     $failedJournal=Get-Content -Raw -LiteralPath (Join-Path $active[0].FullName 'journal.json')|ConvertFrom-Json
                     [string]$failedJournal.phase|Should -Be applying
                     [string](@($failedJournal.operations|Where-Object sequence -eq $sequence)[0].role)|Should -Be $role
@@ -483,7 +517,7 @@ function Invoke-P9cInterT140FailpointMatrix {
                     $recoveryOnly=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $ExternalRoot "recovery-$role-$position") -Failpoint RecoveryOnly
                     (Invoke-P9bRepoBootstrap -Context $Context -ArchivePath $ArchivePath -TargetRoot $caseRoot -BootstrapPath $recoveryOnly).ExitCode|Should -Not -Be 0
                 }else{(Get-AiInstructionsRefusalCode $failed.Output)|Should -Be interrupted-install}
-                @(Get-ChildItem -Force -LiteralPath (Join-Path $caseRoot '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should -Be 0
+                @(Get-ChildItem -Force -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $caseRoot) -ErrorAction SilentlyContinue).Count|Should -Be 0
                 $afterDecision=Get-P9cPublicationStateSnapshot $caseRoot;$afterDecision|Should -Be $before;$decisionSnapshots[$recoveryPath]=$afterDecision
 
                 $recovered=Invoke-P9bRepoBootstrap -Context $Context -ArchivePath $ArchivePath -TargetRoot $caseRoot

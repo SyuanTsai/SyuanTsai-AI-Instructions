@@ -279,7 +279,7 @@ Describe 'bootstrap-ai-instructions' {
             $excludePath = Join-Path $gitDirectory 'info\exclude'
             $headPath = Join-Path $gitDirectory 'HEAD'
             $indexPath = Join-Path $gitDirectory 'index'
-            $transactionPath = Join-Path $targetRoot '.ai-instructions-txn'
+            $transactionPath = Join-Path $gitDirectory '.ai-instructions-txn'
             $getFileSnapshot = {
                 param([Parameter(Mandatory = $true)][string]$Root)
                 return @(
