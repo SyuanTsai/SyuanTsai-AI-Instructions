@@ -1,5 +1,33 @@
 . (Join-Path $PSScriptRoot 'ai-instructions-writer-gate.TestSupport.ps1')
 
+function New-P9cDriftRollbackScenario {
+    param(
+        [Parameter(Mandatory=$true)][string]$Root,
+        [Parameter(Mandatory=$true)][string]$Seed,
+        [Parameter(Mandatory=$true)]$Context,
+        [Parameter(Mandatory=$true)][string]$ArchivePath
+    )
+    New-Item -ItemType Directory -Force -Path $Root|Out-Null
+    $target=Join-Path $Root 'target';Copy-Item -LiteralPath $Seed -Destination $target -Recurse
+    $unaffectedPath=Join-Path $target 'AGENTS.md';$unaffectedBefore=Get-P9cFileEvidence $unaffectedPath
+    $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $Root 'applied-runtime') -Failpoint before-committed-journal-write -RecoveryPath NextRun
+    $applied=Invoke-P9bRepoBootstrap -Context $Context -ArchivePath $ArchivePath -TargetRoot $target -BootstrapPath $bootstrap
+    if($applied.ExitCode-eq0){throw 'The drift fixture did not retain an applied transaction.'}
+    $transaction=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force)
+    if($transaction.Count-ne1){throw 'The drift fixture did not retain exactly one transaction.'}
+    $journalPath=Join-Path $transaction[0].FullName 'journal.json';$journal=Get-Content -Raw -LiteralPath $journalPath|ConvertFrom-Json
+    if([string]$journal.phase-cne'applied'){throw "The drift fixture expected phase applied, found '$($journal.phase)'."}
+    $manifestPath=Join-Path $target '.codex/ai-instructions.manifest.json'
+    [IO.File]::WriteAllBytes($manifestPath,[Text.UTF8Encoding]::new($false).GetBytes("external manifest drift`n"))
+    $driftBefore=Get-P9cFileEvidence $manifestPath
+    $retry=Invoke-P9bRepoBootstrap -Context $Context -ArchivePath $ArchivePath -TargetRoot $target
+    return [pscustomobject][ordered]@{
+        target=$target;journalPath=$journalPath;manifestPath=$manifestPath;unaffectedPath=$unaffectedPath
+        unaffectedBefore=$unaffectedBefore;unaffectedAfter=(Get-P9cFileEvidence $unaffectedPath)
+        driftBefore=$driftBefore;driftAfter=(Get-P9cFileEvidence $manifestPath);retry=$retry
+    }
+}
+
 Describe 'AI instructions unified repository transaction recovery behaviors' {
     BeforeAll {
         $shortParent=Join-Path ([IO.Path]::GetTempPath()) 'p7e';New-Item -ItemType Directory -Force -Path $shortParent|Out-Null
@@ -209,6 +237,66 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath))|Should -Be ([Convert]::ToBase64String($indexBefore))
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($lockPath))|Should -Be ([Convert]::ToBase64String($lockBytes))
         Test-Path -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $foreign)|Should -Be $false
+    }
+
+    # Scenario: One applied manifest operation is externally drifted while earlier operations still require reverse undo.
+    # Purpose: Continue the exact reverse walk after the third-state refusal and report the aggregate terminal result as interrupted-install.
+    It 'InterT166_continues_reverse_undo_after_a_third_state_and_reports_interrupted_install' {
+        $scenario=New-P9cDriftRollbackScenario -Root (Join-Path $script:ExternalRoot 'drift-terminal') -Seed $script:P9cSeeds.False -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath
+
+        $scenario.retry.ExitCode|Should -Not -Be 0
+        (Get-AiInstructionsRefusalCode $scenario.retry.Output)|Should -Be interrupted-install
+        ($scenario.unaffectedAfter|ConvertTo-Json -Depth 8 -Compress)|Should -Be ($scenario.unaffectedBefore|ConvertTo-Json -Depth 8 -Compress)
+    }
+
+    # Scenario: Recovery already restored unaffected operations, retained the journal, and encounters the same drift again on the next run.
+    # Purpose: Treat restored operations as no-op while the drifted operation remains a stable refusal across repeated recovery.
+    It 'InterT167_retains_the_journal_and_idempotently_refuses_the_same_drift_on_next_recovery' {
+        $scenario=New-P9cDriftRollbackScenario -Root (Join-Path $script:ExternalRoot 'drift-repeat') -Seed $script:P9cSeeds.False -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath
+        Test-Path -LiteralPath $scenario.journalPath -PathType Leaf|Should -Be $true
+        $unaffectedAfterFirst=Get-P9cFileEvidence $scenario.unaffectedPath
+
+        $retry=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $scenario.target
+
+        $retry.ExitCode|Should -Not -Be 0
+        (Get-AiInstructionsRefusalCode $retry.Output)|Should -Be interrupted-install
+        Test-Path -LiteralPath $scenario.journalPath -PathType Leaf|Should -Be $true
+        (Get-P9cFileEvidence $scenario.unaffectedPath|ConvertTo-Json -Depth 8 -Compress)|Should -Be ($unaffectedAfterFirst|ConvertTo-Json -Depth 8 -Compress)
+    }
+
+    # Scenario: A drifted operation is observed before recovery and after the reverse walk has processed every remaining operation.
+    # Purpose: Preserve the drifted operation's bytes, native identity, permissions, and file attributes exactly.
+    It 'InterT168_preserves_all_drift_evidence_while_undo_continues' {
+        $scenario=New-P9cDriftRollbackScenario -Root (Join-Path $script:ExternalRoot 'drift-evidence') -Seed $script:P9cSeeds.False -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath
+
+        $scenario.retry.ExitCode|Should -Not -Be 0
+        (Get-AiInstructionsRefusalCode $scenario.retry.Output)|Should -Be interrupted-install
+        ($scenario.driftAfter|ConvertTo-Json -Depth 8 -Compress)|Should -Be ($scenario.driftBefore|ConvertTo-Json -Depth 8 -Compress)
+        Test-Path -LiteralPath $scenario.journalPath -PathType Leaf|Should -Be $true
+    }
+
+    # Scenario: A Windows create-file publication is interrupted after mutation but before the applied journal generation binds observedAfter.
+    # Purpose: Keep the documented crash window recoverable by comparing bytes and identity only when observedAfter is still null.
+    It 'InterT169_undoes_a_file_when_observedAfter_is_empty_in_the_post_mutation_window' {
+        $discovery=Join-Path $script:ExternalRoot 'observed-after-discovery';Copy-Item -LiteralPath $script:P9cSeeds.False -Destination $discovery -Recurse
+        $prepared=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'observed-after-discovery-runtime') -Failpoint after-journal-prepared -RecoveryPath NextRun
+        (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $discovery -BootstrapPath $prepared).ExitCode|Should -Not -Be 0
+        $transaction=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $discovery) -Directory -Force);$journal=Get-Content -Raw -LiteralPath (Join-Path $transaction[0].FullName 'journal.json')|ConvertFrom-Json
+        $created=@($journal.operations|Where-Object{[string]$_.kind-ceq'create-file'}|Select-Object -First 1);$created.Count|Should -Be 1
+
+        $target=Join-Path $script:ExternalRoot 'observed-after-window';Copy-Item -LiteralPath $script:P9cSeeds.False -Destination $target -Recurse
+        $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'observed-after-window-runtime') -Failpoint ("after-operation-$($created[0].sequence)-before-journal") -RecoveryPath NextRun
+        (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap).ExitCode|Should -Not -Be 0
+        $active=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force);$active.Count|Should -Be 1
+        $liveJournal=Get-Content -Raw -LiteralPath (Join-Path $active[0].FullName 'journal.json')|ConvertFrom-Json
+        $liveOperation=@($liveJournal.operations|Where-Object sequence -eq $created[0].sequence)[0]
+        $null-eq$liveOperation.observedAfter|Should -Be $true
+        $createdPath=Join-Path $target ([string]$liveOperation.target.value);(Get-Item -Force -LiteralPath $createdPath).IsReadOnly=$true
+
+        $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'observed-after-recovery') -Failpoint RecoveryOnly
+        (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $recovery).ExitCode|Should -Not -Be 0
+        Test-Path -LiteralPath $createdPath|Should -Be $false
+        @(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force -ErrorAction SilentlyContinue).Count|Should -Be 0
     }
 
     # Scenario: Attached and detached repositories reach applied state and crash before commit publication, while an unborn repository follows main's pre-mutation skip contract.
@@ -491,12 +579,12 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         try{
             $scopeRoot=[IO.Path]::GetFullPath((Join-Path $TestDrive 'trusted-transition-repo'));$git=Join-Path $scopeRoot '.git'
             $identity=[pscustomobject][ordered]@{kind='windows-file-id';device='00000001';fileId='00000002'};$permissions=[pscustomobject][ordered]@{kind='windows-sddl';sddl='D:PAI(A;;FA;;;SY)';readOnly=$false}
-            $previous=[pscustomobject][ordered]@{schemaVersion=2;kind='ai-instructions-install-transaction';transactionId=('a'*32);createdAtUtc='2026-11-12T00:00:00.0000000Z';owner=[pscustomobject][ordered]@{component='repo-bootstrap';processId=1;processStartIdentity='fixture'};platform=[pscustomobject][ordered]@{os='windows';architecture='x64'};lock=[pscustomobject][ordered]@{primitive='windows-fileshare';leaf='bootstrap-ai-instructions.lock'};generation=[pscustomobject][ordered]@{previousBundleSha256=$null;candidateBundleSha256=('b'*64)};scope=[pscustomobject][ordered]@{kind='repository';repositoryRoot=$scopeRoot;repositoryRootIdentity=$identity;commonGitDirectory=$git;gitDirectory=$git;indexPath=(Join-Path $git 'index');indexLockContentSha256=('9'*64);objectFormat='sha1';externalBackup=$null};phase='prepared';operations=@([pscustomobject][ordered]@{sequence=1;kind='create-file';role='instruction';method='stage-rename';target=[pscustomobject][ordered]@{kind='repository-relative';value='AGENTS.md'};before=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null};after=[pscustomobject][ordered]@{exists=$true;sha256=('a'*64);length=3;identity=$identity;permissions=$permissions};stageLeaf='operation-1.stage';backupLeaf=$null;quarantineLeaf=$null;state='pending'},[pscustomobject][ordered]@{sequence=2;kind='store-git-stash-evidence';role='personal-agent-evidence';method='stash-store';target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'};before=[pscustomobject][ordered]@{exists=$false;objectId=$null};after=[pscustomobject][ordered]@{exists=$true;objectId=$null};stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})}
+            $previous=[pscustomobject][ordered]@{schemaVersion=2;kind='ai-instructions-install-transaction';transactionId=('a'*32);createdAtUtc='2026-11-12T00:00:00.0000000Z';owner=[pscustomobject][ordered]@{component='repo-bootstrap';processId=1;processStartIdentity='fixture'};platform=[pscustomobject][ordered]@{os='windows';architecture='x64'};lock=[pscustomobject][ordered]@{primitive='windows-fileshare';leaf='bootstrap-ai-instructions.lock'};generation=[pscustomobject][ordered]@{previousBundleSha256=$null;candidateBundleSha256=('b'*64)};scope=[pscustomobject][ordered]@{kind='repository';repositoryRoot=$scopeRoot;repositoryRootIdentity=$identity;commonGitDirectory=$git;gitDirectory=$git;indexPath=(Join-Path $git 'index');indexLockContentSha256=('9'*64);objectFormat='sha1';externalBackup=$null};phase='prepared';operations=@([pscustomobject][ordered]@{sequence=1;kind='create-file';role='instruction';method='stage-rename';target=[pscustomobject][ordered]@{kind='repository-relative';value='AGENTS.md'};before=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null};after=[pscustomobject][ordered]@{exists=$true;sha256=('a'*64);length=3;identity=$identity;permissions=$permissions};observedAfter=$null;stageLeaf='operation-1.stage';backupLeaf=$null;quarantineLeaf=$null;state='pending'},[pscustomobject][ordered]@{sequence=2;kind='store-git-stash-evidence';role='personal-agent-evidence';method='stash-store';target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'};before=[pscustomobject][ordered]@{exists=$false;objectId=$null};after=[pscustomobject][ordered]@{exists=$true;objectId=$null};observedAfter=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})}
             $clone={param($value)$parameters=@{InputObject=($value|ConvertTo-Json -Depth 30)};if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'};ConvertFrom-Json @parameters}
             $applying=&$clone $previous;$applying.phase='applying';{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $previous $applying}|Should -Not -Throw
             $withEvidence=&$clone $applying;$withEvidence.operations[1].after.objectId=('c'*40);$withEvidence.operations[1].state='applied';{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $applying $withEvidence}|Should -Not -Throw
             $rebound=&$clone $withEvidence;$rebound.operations[1].after.objectId=('d'*40);{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $withEvidence $rebound}|Should -Throw
-            $applied=&$clone $applying;$applied.operations[0].state='applied';{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $applying $applied}|Should -Not -Throw
+            $applied=&$clone $applying;$applied.operations[0].observedAfter=[pscustomobject][ordered]@{dacl=[pscustomobject][ordered]@{isNull=$true;isProtected=$false;aclBase64=$null};readOnly=$false};$applied.operations[0].state='applied';{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $applying $applied}|Should -Not -Throw
             $drift=&$clone $applying;$drift.operations[0].target.value='CLAUDE.md';{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $applying $drift}|Should -Throw
             $unknown=&$clone $applying;$unknown|Add-Member unexpected $true;{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $applying $unknown}|Should -Throw
             $reverse=&$clone $applying;$reverse.phase='prepared';{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $applying $reverse}|Should -Throw

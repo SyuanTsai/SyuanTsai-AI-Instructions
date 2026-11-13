@@ -2169,6 +2169,28 @@ function Assert-AiInstructionsInstallJournalV2FileState {
     Assert-AiInstructionsInstallJournalV2Permissions -Permissions $State.permissions -Context "$Context.permissions" -ExpectedIdentityKind $ExpectedIdentityKind
 }
 
+function Assert-AiInstructionsInstallJournalV2ObservedAfter {
+    param(
+        [AllowNull()][object] $ObservedAfter,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+    if ($null -eq $ObservedAfter) { return }
+    Assert-AiInstructionsInstallJournalExactProperties -Object $ObservedAfter -Names @('dacl','readOnly') -Context $Context
+    if ($ObservedAfter.readOnly -isnot [bool]) { throw "$Context.readOnly must be a boolean." }
+    Assert-AiInstructionsInstallJournalExactProperties -Object $ObservedAfter.dacl -Names @('isNull','isProtected','aclBase64') -Context "$Context.dacl"
+    if ($ObservedAfter.dacl.isNull -isnot [bool] -or $ObservedAfter.dacl.isProtected -isnot [bool]) { throw "$Context.dacl flags must be boolean." }
+    if ([bool]$ObservedAfter.dacl.isNull) {
+        if ($null -ne $ObservedAfter.dacl.aclBase64) { throw "$Context.dacl.aclBase64 must be null for a null DACL." }
+        return
+    }
+    if ($ObservedAfter.dacl.aclBase64 -isnot [string] -or [string]$ObservedAfter.dacl.aclBase64 -cnotmatch '^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$') {
+        throw "$Context.dacl.aclBase64 is invalid."
+    }
+    try { [byte[]]$aclBytes = [Convert]::FromBase64String([string]$ObservedAfter.dacl.aclBase64) }
+    catch { throw "$Context.dacl.aclBase64 is invalid." }
+    if ($aclBytes.Length -lt 8 -or ([BitConverter]::ToUInt16($aclBytes,2) -ne $aclBytes.Length)) { throw "$Context.dacl byte inventory is invalid." }
+}
+
 function Assert-AiInstructionsInstallJournalV2IndexState {
     param(
         [AllowNull()][object] $State,
@@ -2303,7 +2325,7 @@ function Assert-AiInstructionsInstallJournalV2 {
     $expectedSequence = 1
     foreach ($operation in @($Journal.operations)) {
         $context = "AI instructions install journal operation sequence $expectedSequence"
-        Assert-AiInstructionsInstallJournalExactProperties -Object $operation -Names @('sequence','kind','role','method','target','before','after','stageLeaf','backupLeaf','quarantineLeaf','state') -Context $context
+        Assert-AiInstructionsInstallJournalExactProperties -Object $operation -Names @('sequence','kind','role','method','target','before','after','observedAfter','stageLeaf','backupLeaf','quarantineLeaf','state') -Context $context
         Assert-AiInstructionsInstallJournalInteger -Value $operation.sequence -Context "$context.sequence" -Minimum 1
         if ([int64]$operation.sequence -ne $expectedSequence) { throw "$context.sequence must be $expectedSequence for a continuous sequence." }
         if ($operation.kind -isnot [string] -or [string]$operation.kind -cnotin @('create-file','write-file','remove-file','ensure-directory-anchor','replace-git-index','update-git-ref','update-git-head','store-git-stash-evidence')) { throw "$context.kind is invalid." }
@@ -2339,6 +2361,8 @@ function Assert-AiInstructionsInstallJournalV2 {
                 if ([string]$operation.method -cne $expectedMethod) { throw "$context file operation method must be $expectedMethod." }
                 Assert-AiInstructionsInstallJournalV2FileState -State $operation.before -Context "$context.before" -ExpectedIdentityKind $expectedIdentityKind
                 Assert-AiInstructionsInstallJournalV2FileState -State $operation.after -Context "$context.after" -ExpectedIdentityKind $expectedIdentityKind
+                Assert-AiInstructionsInstallJournalV2ObservedAfter -ObservedAfter $operation.observedAfter -Context "$context.observedAfter"
+                if ([string]$Journal.platform.os -ceq 'windows' -and [string]$operation.state -ceq 'applied' -and [string]$operation.kind -cne 'remove-file' -and $null -eq $operation.observedAfter) { throw "$context.observedAfter must be bound for an applied Windows file publication." }
                 if ([string]$operation.kind -ceq 'create-file' -and ([bool]$operation.before.exists -or -not [bool]$operation.after.exists)) { throw "$context create-file states are invalid." }
                 if ([string]$operation.kind -ceq 'write-file' -and (-not [bool]$operation.before.exists -or -not [bool]$operation.after.exists)) { throw "$context write-file states are invalid." }
                 if ([string]$operation.kind -ceq 'remove-file' -and (-not [bool]$operation.before.exists -or [bool]$operation.after.exists)) { throw "$context remove-file states are invalid." }
@@ -2348,6 +2372,7 @@ function Assert-AiInstructionsInstallJournalV2 {
                 if ($null -ne $operation.quarantineLeaf) { throw "$context.quarantineLeaf must be null for file operations." }
             }
             'ensure-directory-anchor' {
+                if ($null -ne $operation.observedAfter) { throw "$context.observedAfter must be null for non-file operations." }
                 if ($targetKind -cne 'repository-relative') { throw "$context directory anchor target kind is invalid." }
                 if ([string]$operation.method -cne 'directory-rename' -or $null -eq $operation.stageLeaf -or $null -ne $operation.backupLeaf -or $null -ne $operation.quarantineLeaf) { throw "$context directory anchor method or artifact leaves are invalid." }
                 Assert-AiInstructionsInstallJournalV2DirectoryAnchorState -State $operation.before -Context "$context.before" -ExpectedIdentityKind $expectedIdentityKind
@@ -2355,6 +2380,7 @@ function Assert-AiInstructionsInstallJournalV2 {
                 if ([bool]$operation.before.exists -or -not [bool]$operation.after.exists) { throw "$context directory anchor states are invalid." }
             }
             'replace-git-index' {
+                if ($null -ne $operation.observedAfter) { throw "$context.observedAfter must be null for non-file operations." }
                 if ($targetKind -cne 'git-index') { throw "$context replace-git-index target kind is invalid." }
                 if ([string]$operation.method -cne 'index-lock-rename' -or $null -eq $operation.stageLeaf -or $null -eq $operation.backupLeaf -or $null -ne $operation.quarantineLeaf) { throw "$context replace-git-index method or artifact leaves are invalid." }
                 Assert-AiInstructionsInstallJournalV2IndexState -State $operation.before -Context "$context.before" -ExpectedIdentityKind $expectedIdentityKind
@@ -2362,6 +2388,7 @@ function Assert-AiInstructionsInstallJournalV2 {
                 if ([string]$operation.before.sha256 -cne [string]$Journal.scope.indexLockContentSha256) { throw "$context.before.sha256 must equal the prepared index.lock content SHA." }
             }
             'update-git-ref' {
+                if ($null -ne $operation.observedAfter) { throw "$context.observedAfter must be null for non-file operations." }
                 if ($targetKind -cne 'git-ref') { throw "$context update-git-ref target kind is invalid." }
                 if ([string]$operation.method -cne 'update-ref' -or $null -ne $operation.stageLeaf -or $null -ne $operation.backupLeaf -or $null -ne $operation.quarantineLeaf) { throw "$context update-git-ref method or artifact leaves are invalid." }
                 Assert-AiInstructionsInstallJournalV2RefState -State $operation.before -Context "$context.before" -ObjectFormat ([string]$Journal.scope.objectFormat)
@@ -2369,12 +2396,14 @@ function Assert-AiInstructionsInstallJournalV2 {
                 if([string]$operation.role-ceq'personal-agent-evidence-cas'-and($targetValue-cne'refs/stash'-or-not[bool]$operation.before.exists-or-not[bool]$operation.after.exists-or[string]$operation.before.objectId-cne[string]$operation.after.objectId)){throw "$context PersonalAgent evidence CAS must preserve one existing refs/stash object ID."}
             }
             'update-git-head' {
+                if ($null -ne $operation.observedAfter) { throw "$context.observedAfter must be null for non-file operations." }
                 if ($targetKind -cne 'git-head') { throw "$context update-git-head target kind is invalid." }
                 if ([string]$operation.method -cne 'symbolic-ref' -or $null -ne $operation.stageLeaf -or $null -ne $operation.backupLeaf -or $null -ne $operation.quarantineLeaf) { throw "$context update-git-head method or artifact leaves are invalid." }
                 Assert-AiInstructionsInstallJournalV2HeadState -State $operation.before -Context "$context.before" -ObjectFormat ([string]$Journal.scope.objectFormat)
                 Assert-AiInstructionsInstallJournalV2HeadState -State $operation.after -Context "$context.after" -ObjectFormat ([string]$Journal.scope.objectFormat)
             }
             'store-git-stash-evidence' {
+                if ($null -ne $operation.observedAfter) { throw "$context.observedAfter must be null for non-file operations." }
                 if ($targetKind -cne 'git-stash-evidence') { throw "$context store-git-stash-evidence target kind is invalid." }
                 if ([string]$operation.role -cne 'personal-agent-evidence' -or [string]$operation.method -cne 'stash-store' -or $null -ne $operation.stageLeaf -or $null -ne $operation.backupLeaf -or $null -ne $operation.quarantineLeaf) { throw "$context store-git-stash-evidence role, method, or artifact leaves are invalid." }
                 Assert-AiInstructionsInstallJournalV2EvidenceState -State $operation.before -Context "$context.before" -ObjectFormat ([string]$Journal.scope.objectFormat)
@@ -2538,6 +2567,29 @@ function Test-AiInstructionsInstallJournalEvidenceBindingTransition {
     return Test-AiInstructionsJsonSemanticEqual -Left ([pscustomobject]$previousAuthority) -Right ([pscustomobject]$nextAuthority)
 }
 
+function Test-AiInstructionsInstallJournalObservedAfterBindingTransition {
+    param(
+        [Parameter(Mandatory = $true)][object] $PreviousJournal,
+        [Parameter(Mandatory = $true)][object] $NextJournal,
+        [Parameter(Mandatory = $true)][object] $PreviousOperation,
+        [Parameter(Mandatory = $true)][object] $NextOperation
+    )
+    if ([string]$PreviousJournal.phase -cne 'applying' -or [string]$NextJournal.phase -cne 'applying' -or
+        [string]$PreviousJournal.platform.os -cne 'windows' -or [string]$NextJournal.platform.os -cne 'windows' -or
+        [string]$PreviousOperation.kind -cnotin @('create-file','write-file') -or [string]$NextOperation.kind -cne [string]$PreviousOperation.kind -or
+        [string]$PreviousOperation.state -cne 'pending' -or [string]$NextOperation.state -cne 'applied' -or
+        $null -ne $PreviousOperation.observedAfter -or $null -eq $NextOperation.observedAfter) { return $false }
+    $previousAuthority = [ordered]@{}
+    $nextAuthority = [ordered]@{}
+    foreach ($property in @($PreviousOperation.PSObject.Properties)) {
+        if ($property.Name -cnotin @('state','observedAfter')) { $previousAuthority[$property.Name] = $property.Value }
+    }
+    foreach ($property in @($NextOperation.PSObject.Properties)) {
+        if ($property.Name -cnotin @('state','observedAfter')) { $nextAuthority[$property.Name] = $property.Value }
+    }
+    return Test-AiInstructionsJsonSemanticEqual -Left ([pscustomobject]$previousAuthority) -Right ([pscustomobject]$nextAuthority)
+}
+
 function Assert-AiInstructionsInstallJournalStoreTransition {
     param([Parameter(Mandatory = $true)][object] $Previous,[Parameter(Mandatory = $true)][object] $Next)
     $previousVersion = [int64]$Previous.schemaVersion
@@ -2561,7 +2613,8 @@ function Assert-AiInstructionsInstallJournalStoreTransition {
         foreach ($property in @($Next.operations[$index].PSObject.Properties)) { if ($property.Name -cne 'state') { $nextOperation[$property.Name] = $property.Value } }
         $authorityEqual = Test-AiInstructionsJsonSemanticEqual -Left ([pscustomobject]$previousOperation) -Right ([pscustomobject]$nextOperation)
         $evidenceBinding = $previousVersion -eq 2 -and $nextVersion -eq 2 -and (Test-AiInstructionsInstallJournalEvidenceBindingTransition -PreviousJournal $Previous -NextJournal $Next -PreviousOperation $Previous.operations[$index] -NextOperation $Next.operations[$index])
-        if (-not $authorityEqual -and -not $evidenceBinding) { throw "AI instructions install journal store transition cannot change operation $($index + 1) fields other than state; store-git-stash-evidence after.objectId may be bound only once." }
+        $observedAfterBinding = $previousVersion -eq 2 -and $nextVersion -eq 2 -and (Test-AiInstructionsInstallJournalObservedAfterBindingTransition -PreviousJournal $Previous -NextJournal $Next -PreviousOperation $Previous.operations[$index] -NextOperation $Next.operations[$index])
+        if (-not $authorityEqual -and -not $evidenceBinding -and -not $observedAfterBinding) { throw "AI instructions install journal store transition cannot change operation $($index + 1) fields other than state; observedAfter or store-git-stash-evidence after.objectId may be bound only once." }
         $fromState = [string]$Previous.operations[$index].state
         $toState = [string]$Next.operations[$index].state
         $allowedState = $fromState -ceq $toState -or

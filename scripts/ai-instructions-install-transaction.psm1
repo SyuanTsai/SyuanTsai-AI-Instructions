@@ -325,12 +325,12 @@ function Test-InstallJournalV2StateAuthorityEqual {
 
 function Test-InstallJournalV2OperationAuthorityEqual {
     param([Parameter(Mandatory=$true)][object]$Previous,[Parameter(Mandatory=$true)][object]$Next)
-    if($Next.PSObject.Properties.Match('*').Count-ne11){return $false}
+    if($Next.PSObject.Properties.Match('*').Count-ne12){return $false}
     $kind=[string]$Previous.kind
     if(-not(Test-InstallTransactionScalarEqual $Previous.sequence $Next.sequence)-or-not(Test-InstallTransactionScalarEqual $Previous.kind $Next.kind)-or-not(Test-InstallTransactionScalarEqual $Previous.role $Next.role)-or-not(Test-InstallTransactionScalarEqual $Previous.method $Next.method)){return $false}
     if($Next.target.PSObject.Properties.Match('*').Count-ne2-or-not(Test-InstallTransactionScalarEqual $Previous.target.kind $Next.target.kind)-or-not(Test-InstallTransactionScalarEqual $Previous.target.value $Next.target.value)){return $false}
     if(-not(Test-InstallJournalV2StateAuthorityEqual $kind $Previous.before $Next.before)-or-not(Test-InstallJournalV2StateAuthorityEqual $kind $Previous.after $Next.after)){return $false}
-    return (Test-InstallTransactionScalarEqual $Previous.stageLeaf $Next.stageLeaf)-and(Test-InstallTransactionScalarEqual $Previous.backupLeaf $Next.backupLeaf)-and(Test-InstallTransactionScalarEqual $Previous.quarantineLeaf $Next.quarantineLeaf)
+    return (Test-InstallTransactionSemanticEqual $Previous.observedAfter $Next.observedAfter)-and(Test-InstallTransactionScalarEqual $Previous.stageLeaf $Next.stageLeaf)-and(Test-InstallTransactionScalarEqual $Previous.backupLeaf $Next.backupLeaf)-and(Test-InstallTransactionScalarEqual $Previous.quarantineLeaf $Next.quarantineLeaf)
 }
 
 function Test-InstallJournalV2EvidenceBindingTransition {
@@ -351,6 +351,25 @@ function Test-InstallJournalV2EvidenceBindingTransition {
             if($previousAfter.Count-ne2-or$nextAfter.Count-ne2-or$null-eq$other.Value.PSObject.Properties['exists']-or$null-eq$other.Value.PSObject.Properties['objectId']-or[bool]$property.Value.exists-ne[bool]$other.Value.exists){return $false}
             continue
         }
+        if(-not(Test-InstallTransactionSemanticEqual $property.Value $other.Value)){return $false}
+    }
+    return $true
+}
+
+function Test-InstallJournalV2ObservedAfterBindingTransition {
+    param([Parameter(Mandatory=$true)][object]$Previous,[Parameter(Mandatory=$true)][object]$Next,[Parameter(Mandatory=$true)][object]$PreviousOperation,[Parameter(Mandatory=$true)][object]$NextOperation)
+    if([string]$Previous.phase-cne'applying'-or[string]$Next.phase-cne'applying'-or
+        [string]$Previous.platform.os-cne'windows'-or[string]$Next.platform.os-cne'windows'-or
+        [string]$PreviousOperation.kind-cnotin@('create-file','write-file')-or[string]$NextOperation.kind-cne[string]$PreviousOperation.kind-or
+        [string]$PreviousOperation.state-cne'pending'-or[string]$NextOperation.state-cne'applied'-or
+        $null-ne$PreviousOperation.observedAfter-or$null-eq$NextOperation.observedAfter){return $false}
+    try{Assert-AiInstructionsInstallJournalV2 -Journal $Next|Out-Null}catch{return $false}
+    $previousProperties=@($PreviousOperation.PSObject.Properties);$nextProperties=@($NextOperation.PSObject.Properties)
+    if($previousProperties.Count-ne$nextProperties.Count){return $false}
+    foreach($property in $previousProperties){
+        $other=$NextOperation.PSObject.Properties[$property.Name]
+        if($null-eq$other){return $false}
+        if($property.Name-cin@('state','observedAfter')){continue}
         if(-not(Test-InstallTransactionSemanticEqual $property.Value $other.Value)){return $false}
     }
     return $true
@@ -388,8 +407,9 @@ function Assert-InstallJournalV2TrustedTransition {
     if(-not$authorityEqual){
         for($index=0;$index-lt$previousOperations.Count;$index++) {
             if(-not(Test-InstallJournalV2OperationAuthorityEqual $previousOperations[$index] $nextOperations[$index])-and
-                -not(Test-InstallJournalV2EvidenceBindingTransition -Previous $Previous -Next $Next -PreviousOperation $previousOperations[$index] -NextOperation $nextOperations[$index])) {
-                throw "AI instructions install journal store transition changed operation $($index + 1) fields other than state; store-git-stash-evidence after.objectId may be bound only once."
+                -not(Test-InstallJournalV2EvidenceBindingTransition -Previous $Previous -Next $Next -PreviousOperation $previousOperations[$index] -NextOperation $nextOperations[$index])-and
+                -not(Test-InstallJournalV2ObservedAfterBindingTransition -Previous $Previous -Next $Next -PreviousOperation $previousOperations[$index] -NextOperation $nextOperations[$index])) {
+                throw "AI instructions install journal store transition changed operation $($index + 1) fields other than state; observedAfter or store-git-stash-evidence after.objectId may be bound only once."
             }
         }
     }

@@ -1981,6 +1981,7 @@ catch {
         Set-TestText -Path (Join-Path $definitionRoot '.codex\AGENTS.en.md') -Value '# Definition source'
         Set-TestText -Path (Join-Path $definitionRoot '.github\copilot-instructions.en.md') -Value '# Definition source'
         $probeRoot = Join-Path $TestDrive 'hard-link-target'
+        New-TestRepository -Path $probeRoot
         $managedParent = Join-Path $probeRoot 'managed'
         $outsidePath = Join-Path $TestDrive 'hard-link-outside.md'
         $backupRoot = Join-Path $TestDrive 'hard-link-backup'
@@ -2003,13 +2004,26 @@ param(
 )
 . $BootstrapScript -SourceArchivePath $SourceArchivePath -ConfigurationPath $ConfigurationPath `
     -ProvenancePath $ProvenancePath -TargetRoot $DefinitionRoot | Out-Null
-$snapshot = New-TargetMutationSnapshot -TargetRoot $ProbeRoot -RelativePaths @('managed/victim.md') -BackupRoot $BackupRoot
+$context = New-ProjectPublicationContext -Repository $ProbeRoot
+$script:ProjectPublicationContext = $context
 try {
-    Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath 'managed/victim.md' `
+    Set-ProjectPublicationFileBytes -RelativePath 'managed/victim.md' `
         -Bytes ((New-Object System.Text.UTF8Encoding($false)).GetBytes('# changed managed bytes'))
+    $context.RepositoryIndexLock = Open-RepositoryIndexTransactionLock -Repository $ProbeRoot
+    Start-RepositoryInstallTransaction -Context $context
     $result = 'unexpectedly-mutated'
 }
-catch { $result = $_.Exception.Message }
+catch {
+    $result = $_.Exception.Message
+    if ($context.Durable) {
+        try { Invoke-RepositoryTransactionRollback -Context $context }
+        catch { $result += ' | rollback: ' + $_.Exception.Message }
+    }
+}
+finally {
+    Close-RepositoryIndexTransactionLock -Lock $context.RepositoryIndexLock
+    $script:ProjectPublicationContext = $null
+}
 [System.IO.File]::WriteAllText($ResultPath,$result,(New-Object System.Text.UTF8Encoding($false)))
 '@
 
@@ -2041,6 +2055,7 @@ catch { $result = $_.Exception.Message }
         Set-TestText -Path (Join-Path $definitionRoot '.codex\AGENTS.en.md') -Value '# Definition source'
         Set-TestText -Path (Join-Path $definitionRoot '.github\copilot-instructions.en.md') -Value '# Definition source'
         $probeRoot = Join-Path $TestDrive 'create-bound-root'
+        New-TestRepository -Path $probeRoot
         $managedParent = Join-Path $probeRoot 'managed'
         $savedParent = Join-Path $probeRoot 'managed-original'
         $outsideRoot = Join-Path $TestDrive 'create-bound-outside'
@@ -2065,7 +2080,7 @@ param(
 . $BootstrapScript -SourceArchivePath $SourceArchivePath -ConfigurationPath $ConfigurationPath `
     -ProvenancePath $ProvenancePath -TargetRoot $DefinitionRoot | Out-Null
 $createLine = @(
-    Select-String -LiteralPath $BootstrapScript -Pattern 'File\]::Open\(\[string\]\$state\.TargetPath.*CreateNew|Open-TargetMutationAtomicCreateStream' |
+    Select-String -LiteralPath $BootstrapScript -Pattern 'Publish-PlatformFile @p\|Out-Null' |
         Select-Object -First 1 -ExpandProperty LineNumber
 )
 if ($createLine.Count -ne 1) { throw 'Could not locate the managed-file create boundary.' }
@@ -2077,13 +2092,26 @@ $breakpoint = Set-PSBreakpoint -Script $BootstrapScript -Line $createLine[0] -Ac
     New-Item -ItemType Junction -Path $global:CreateProbeParent -Target $global:CreateProbeOutside | Out-Null
 }
 try {
-    $snapshot = New-TargetMutationSnapshot -TargetRoot $ProbeRoot -RelativePaths @('managed/new.md') -BackupRoot $BackupRoot
+    $context = New-ProjectPublicationContext -Repository $ProbeRoot
+    $script:ProjectPublicationContext = $context
     try {
-        Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath 'managed/new.md' `
+        Set-ProjectPublicationFileBytes -RelativePath 'managed/new.md' `
             -Bytes ((New-Object System.Text.UTF8Encoding($false)).GetBytes('# managed create'))
+        $context.RepositoryIndexLock = Open-RepositoryIndexTransactionLock -Repository $ProbeRoot
+        Start-RepositoryInstallTransaction -Context $context
         $result = 'unexpectedly-created'
     }
-    catch { $result = $_.Exception.Message }
+    catch {
+        $result = $_.Exception.Message
+        if ($context.Durable) {
+            try { Invoke-RepositoryTransactionRollback -Context $context }
+            catch { $result += ' | rollback: ' + $_.Exception.Message }
+        }
+    }
+    finally {
+        Close-RepositoryIndexTransactionLock -Lock $context.RepositoryIndexLock
+        $script:ProjectPublicationContext = $null
+    }
 }
 finally {
     Remove-PSBreakpoint -Breakpoint $breakpoint -ErrorAction SilentlyContinue
@@ -2124,7 +2152,7 @@ finally {
         Set-TestText -Path (Join-Path $definitionRoot '.github\copilot-instructions.en.md') -Value '# Definition source'
         $probeRoot = Join-Path $TestDrive 'directory-ownership-root'
         $backupRoot = Join-Path $TestDrive 'directory-ownership-backup'
-        New-Item -ItemType Directory -Force -Path $probeRoot | Out-Null
+        New-TestRepository -Path $probeRoot
         $wrapperPath = Join-Path $TestDrive 'directory-ownership-probe.ps1'
         $resultPath = Join-Path $TestDrive 'directory-ownership-result.txt'
         Set-TestText -Path $wrapperPath -Value @'
@@ -2140,12 +2168,21 @@ param(
 )
 . $BootstrapScript -SourceArchivePath $SourceArchivePath -ConfigurationPath $ConfigurationPath `
     -ProvenancePath $ProvenancePath -TargetRoot $DefinitionRoot | Out-Null
-$snapshot = New-TargetMutationSnapshot -TargetRoot $ProbeRoot -RelativePaths @('managed/new.md') -BackupRoot $BackupRoot
+$context = New-ProjectPublicationContext -Repository $ProbeRoot
+$script:ProjectPublicationContext = $context
+Set-ProjectPublicationFileBytes -RelativePath 'managed/new.md' `
+    -Bytes ((New-Object System.Text.UTF8Encoding($false)).GetBytes('# transaction bytes'))
 $externalDirectory = Join-Path $ProbeRoot 'managed'
 New-Item -ItemType Directory -Path $externalDirectory | Out-Null
-Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath 'managed/new.md' `
-    -Bytes ((New-Object System.Text.UTF8Encoding($false)).GetBytes('# transaction bytes'))
-Restore-TargetMutationSnapshot -Snapshot $snapshot
+try {
+    $context.RepositoryIndexLock = Open-RepositoryIndexTransactionLock -Repository $ProbeRoot
+    Start-RepositoryInstallTransaction -Context $context
+    Invoke-RepositoryTransactionRollback -Context $context
+}
+finally {
+    Close-RepositoryIndexTransactionLock -Lock $context.RepositoryIndexLock
+    $script:ProjectPublicationContext = $null
+}
 $result = if (Test-Path -LiteralPath $externalDirectory -PathType Container) { 'preserved' } else { 'removed' }
 [System.IO.File]::WriteAllText($ResultPath,$result,(New-Object System.Text.UTF8Encoding($false)))
 '@
@@ -3305,6 +3342,7 @@ Describe 'SYP214 read-only rollback drift preservation' {
     BeforeEach {
         $scenarioRoot = Join-Path $TestDrive ('readonly-rollback-' + [guid]::NewGuid().ToString('N'))
         $probeRoot = Join-Path $scenarioRoot 'consumer'
+        New-TestRepository -Path $probeRoot
         $managedParent = Join-Path $probeRoot 'managed'
         New-Item -ItemType Directory -Force -Path $managedParent | Out-Null
         $backupRoot = Join-Path $scenarioRoot 'backup'
@@ -3334,7 +3372,7 @@ param(
     [Parameter(Mandatory = $true)][string] $ResultPath
 )
 $bootstrapText = [System.IO.File]::ReadAllText($BootstrapScript)
-$prefixEnd = $bootstrapText.IndexOf('$syncStartPath = ', [StringComparison]::Ordinal)
+$prefixEnd = $bootstrapText.IndexOf('$targetRootPath = Get-FullPathWithoutTrailingSeparator', [StringComparison]::Ordinal)
 if ($prefixEnd -lt 0) { throw 'Could not find the bootstrap definition prefix boundary.' }
 $bootstrapRoot = Split-Path -Parent $BootstrapScript
 $bootstrapRootLiteral = "'" + $bootstrapRoot.Replace("'", "''") + "'"
@@ -3391,14 +3429,38 @@ $newBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes('# transactio
 $unaffectedOriginalBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes('# original unaffected bytes' + "`n")
 New-Item -ItemType Directory -Force -Path $unaffectedParent | Out-Null
 [System.IO.File]::WriteAllBytes($unaffectedPath, $unaffectedOriginalBytes)
-$snapshot = New-TargetMutationSnapshot -TargetRoot $ProbeRoot `
-    -RelativePaths @($relativePath, $unaffectedRelativePath) -BackupRoot $BackupRoot
-Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath $relativePath -Bytes $newBytes
-Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath $unaffectedRelativePath `
+$unaffectedOriginalEvidence = Get-ProbeFileEvidence -Root $ProbeRoot -Path $unaffectedPath -RelativePath $unaffectedRelativePath
+$unaffectedOriginalDaclJson = ConvertTo-Json -InputObject $unaffectedOriginalEvidence.dacl -Compress -Depth 8
+$context = New-ProjectPublicationContext -Repository $ProbeRoot
+$script:ProjectPublicationContext = $context
+Set-ProjectPublicationFileBytes -RelativePath $relativePath -Bytes $newBytes
+Set-ProjectPublicationFileBytes -RelativePath $unaffectedRelativePath `
     -Bytes ((New-Object System.Text.UTF8Encoding($false)).GetBytes('# changed unaffected bytes'))
-$state = Get-TargetMutationFileState -Snapshot $snapshot -RelativePath $relativePath
-$unaffectedState = Get-TargetMutationFileState -Snapshot $snapshot -RelativePath $unaffectedRelativePath
-$unaffectedOriginalDaclJson = ConvertTo-Json -InputObject $unaffectedState.OriginalDacl -Compress -Depth 8
+$context.RepositoryIndexLock = Open-RepositoryIndexTransactionLock -Repository $ProbeRoot
+$observedAfterBreakpoint = $null
+if ($Case -eq 'parent-replacement') {
+    $global:Syp214ObservedAfterRoot = $ProbeRoot
+    $global:Syp214ObservedAfterPath = $targetPath
+    $global:Syp214ObservedAfterRelativePath = $relativePath
+    $global:Syp214ObservedAfterBound = $false
+    $observedAfterBreakpoint = Set-PSBreakpoint -Command Get-RepositoryTransactionObservedAfter -Action {
+        if (-not $global:Syp214ObservedAfterBound -and (Test-Path -LiteralPath $global:Syp214ObservedAfterPath -PathType Leaf)) {
+            $handle = [CodexAiInstructions.NativeFileMutation]::OpenForMetadata(
+                $global:Syp214ObservedAfterRoot, $global:Syp214ObservedAfterPath, $global:Syp214ObservedAfterRelativePath)
+            try { [CodexAiInstructions.NativeFileMutation]::SetReadOnly($handle, $true) }
+            finally { $handle.Dispose() }
+            $global:Syp214ObservedAfterBound = $true
+        }
+    }
+}
+try { Start-RepositoryInstallTransaction -Context $context }
+finally {
+    if ($null -ne $observedAfterBreakpoint) { Remove-PSBreakpoint -Breakpoint $observedAfterBreakpoint -ErrorAction SilentlyContinue }
+    Remove-Variable -Name Syp214ObservedAfterRoot,Syp214ObservedAfterPath,Syp214ObservedAfterRelativePath,`
+        Syp214ObservedAfterBound -Scope Global -ErrorAction SilentlyContinue
+}
+$targetOperation = @($context.CurrentJournal.operations | Where-Object { [string]$_.target.value -ceq $relativePath })[0]
+$appliedEvidence = Get-ProbeFileEvidence -Root $ProbeRoot -Path $targetPath -RelativePath $relativePath
 $debris = [ordered]@{}
 switch ($Case) {
     'later-bytes' {
@@ -3415,7 +3477,7 @@ switch ($Case) {
             $replacementIdentity = [CodexAiInstructions.NativeFileMutation]::GetFileIdentity($replacementHandle)
         }
         finally { $replacementHandle.Dispose() }
-        if ([string]$replacementIdentity -ceq [string]$state.AppliedFileIdentity) {
+        if ([string]$replacementIdentity -ceq [string]$appliedEvidence.identity) {
             throw 'A concurrently existing replacement did not have a distinct native file identity.'
         }
         Remove-Item -LiteralPath $targetPath -Force
@@ -3427,8 +3489,8 @@ switch ($Case) {
         Set-Acl -LiteralPath $targetPath -AclObject $targetAcl
     }
     'stage-and-tombstone' {
-        $stagePath = Join-Path $targetParent ([string]$state.Publication.stageLeaf)
-        $tombstonePath = Join-Path $targetParent ([string]$state.Publication.tombstoneLeaf)
+        $stagePath = Join-Path $targetParent '.syp214-external-stage'
+        $tombstonePath = Join-Path $targetParent '.syp214-external-tomb'
         [System.IO.File]::WriteAllBytes($stagePath, (New-Object System.Text.UTF8Encoding($false)).GetBytes('# unknown stage owner'))
         [System.IO.File]::WriteAllBytes($tombstonePath, (New-Object System.Text.UTF8Encoding($false)).GetBytes('# unknown tombstone owner'))
         $debris.stagePath = $stagePath
@@ -3437,13 +3499,15 @@ switch ($Case) {
     'parent-replacement' { }
     default { throw "Unsupported probe case: $Case" }
 }
-Set-ProbeFileReadOnly -Root $ProbeRoot -Path $targetPath -RelativePath $relativePath -ReadOnly $true
+if ($Case -ne 'parent-replacement') {
+    Set-ProbeFileReadOnly -Root $ProbeRoot -Path $targetPath -RelativePath $relativePath -ReadOnly $true
+}
 $before = Get-ProbeFileEvidence -Root $ProbeRoot -Path $targetPath -RelativePath $relativePath
-$appliedIdentity = [string]$state.AppliedFileIdentity
+$appliedIdentity = [string]$appliedEvidence.identity
 $appliedSha256 = Get-ByteArraySha256 -Bytes $newBytes
-$publicationDaclJson = ConvertTo-Json -InputObject $state.PublicationDaclRecord -Compress -Depth 8
+$publicationDaclJson = ConvertTo-Json -InputObject $targetOperation.observedAfter.dacl -Compress -Depth 8
 $publicationDacl = [CodexAiInstructions.NativeFileMutation]::DaclEquals(
-    (ConvertFrom-FileDaclJournalRecord $state.PublicationDaclRecord),
+    (ConvertFrom-FileDaclJournalRecord $targetOperation.observedAfter.dacl),
     (ConvertFrom-FileDaclJournalRecord (Get-ProbeFileEvidence -Root $ProbeRoot -Path $targetPath -RelativePath $relativePath).dacl))
 $parentIdentityBefore = [CodexAiInstructions.NativeFileMutation]::GetDirectoryIdentity($targetParent)
 $debrisBefore = [ordered]@{}
@@ -3469,7 +3533,7 @@ if ($Case -eq 'parent-replacement') {
     $global:Syp214ReadOnlySwapFired = $false
     $global:Syp214ReadOnlySwapSucceeded = $false
     $global:Syp214ReadOnlySwapError = $null
-    $breakpoint = Set-PSBreakpoint -Command Remove-TargetMutationFileAtomically -Action {
+    $breakpoint = Set-PSBreakpoint -Command Remove-PlatformOwnedFile -Action {
         if (-not $global:Syp214ReadOnlySwapFired) {
             $global:Syp214ReadOnlySwapFired = $true
             $oldPath = Join-Path $global:Syp214ReadOnlyParent 'new.md'
@@ -3493,7 +3557,7 @@ if ($Case -eq 'parent-replacement') {
         }
     }
 }
-try { Restore-TargetMutationSnapshot -Snapshot $snapshot }
+try { Invoke-RepositoryTransactionRollback -Context $context }
 catch { $restoreError = $_.Exception.Message }
 finally {
     if ($Case -eq 'parent-replacement') {
@@ -3505,6 +3569,8 @@ finally {
         }
     }
     if ($null -ne $breakpoint) { Remove-PSBreakpoint -Breakpoint $breakpoint -ErrorAction SilentlyContinue }
+    Close-RepositoryIndexTransactionLock -Lock $context.RepositoryIndexLock
+    $script:ProjectPublicationContext = $null
     Remove-Variable -Name Syp214ReadOnlyParent,Syp214ReadOnlySavedParent,Syp214ReadOnlyRoot,`
         Syp214ReadOnlySwapFired,Syp214ReadOnlySwapSucceeded,Syp214ReadOnlySwapError -Scope Global -ErrorAction SilentlyContinue
 }

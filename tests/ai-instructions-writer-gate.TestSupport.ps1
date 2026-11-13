@@ -452,6 +452,25 @@ function Get-P9cRepositoryTransactionRoot {
     return (Join-Path ([IO.Path]::GetFullPath(([string]$gitDirectory).Trim())) '.ai-instructions-txn')
 }
 
+function Get-P9cFileEvidence {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    $fullPath=[IO.Path]::GetFullPath($Path);$parent=[IO.Path]::GetDirectoryName($fullPath);$leaf=[IO.Path]::GetFileName($fullPath)
+    $parentLease=Open-PlatformDirectory -Root $parent -RootOnly;$fileLease=$null
+    try{
+        $fileLease=Open-PlatformFile -ParentLease $parentLease -Leaf $leaf -Access Read -CreateMode OpenExisting
+        $observation=Assert-PlatformFileIdentity -Lease $fileLease -Expected $fileLease.Observation -SingleLink -VerifyPath
+        [byte[]]$bytes=$fileLease.ReadAllBytes(16777216)
+        $sha=[Security.Cryptography.SHA256]::Create()
+        try{$sha256=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+        return [pscustomobject][ordered]@{
+            bytesBase64=[Convert]::ToBase64String($bytes);sha256=$sha256;length=[int64]$bytes.Length
+            device=[string]$observation.Device;inode=[string]$observation.Inode
+            permissions=(Get-PlatformPermissions -Lease $fileLease|ConvertTo-Json -Depth 8 -Compress)
+            attributes=[uint32][IO.File]::GetAttributes($fullPath)
+        }
+    }finally{if($null-ne$fileLease){$fileLease.Dispose()};$parentLease.Dispose()}
+}
+
 function Get-P9cPublicationStateSnapshot {
     param([Parameter(Mandatory=$true)][string]$Repository)
     $manifestPath=Join-Path $Repository '.codex/ai-instructions.manifest.json'

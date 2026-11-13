@@ -215,7 +215,7 @@ function Get-TestInstallJournalV2 {
         operations=@([pscustomobject][ordered]@{
             sequence=1;kind='create-file';role='instruction';method='stage-rename'
             target=[pscustomobject][ordered]@{kind='repository-relative';value='AGENTS.md'}
-            before=$absent;after=$present;stageLeaf='operation-1.stage';backupLeaf=$null;quarantineLeaf=$null;state='pending'
+            before=$absent;after=$present;observedAfter=$null;stageLeaf='operation-1.stage';backupLeaf=$null;quarantineLeaf=$null;state='pending'
         })
     }
 }
@@ -3521,7 +3521,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $ref.operations[0]=[pscustomobject][ordered]@{
             sequence=1;kind='update-git-ref';role='git-ref';method='update-ref';target=[pscustomobject][ordered]@{kind='git-ref';value='refs/heads/main'}
             before=[pscustomobject][ordered]@{exists=$true;objectId=('a'*40)};after=[pscustomobject][ordered]@{exists=$true;objectId=('b'*64)}
-            stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
+            observedAfter=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
         }
         (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalV2 $ref|Out-Null})|Should Match 'objectFormat sha1'
 
@@ -3540,14 +3540,14 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
             target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'}
             before=[pscustomobject][ordered]@{exists=$false;objectId=$null}
             after=[pscustomobject][ordered]@{exists=$true;objectId=$null}
-            stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
+            observedAfter=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
         })
         {Assert-AiInstructionsInstallJournalV2 $prepared|Out-Null}|Should Not Throw
 
         $cloneParameters=@{InputObject=($prepared|ConvertTo-Json -Depth 30)}
         if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$cloneParameters.DateKind='String'}
         $applying=ConvertFrom-Json @cloneParameters
-        $applying.phase='applying';$applying.operations[0].state='applied'
+        $applying.phase='applying';$applying.operations[0].observedAfter=[pscustomobject][ordered]@{dacl=[pscustomobject][ordered]@{isNull=$true;isProtected=$false;aclBase64=$null};readOnly=$false};$applying.operations[0].state='applied'
         {Assert-AiInstructionsInstallJournalV2 $applying|Out-Null}|Should Not Throw
 
         $cloneParameters.InputObject=($applying|ConvertTo-Json -Depth 30)
@@ -3582,7 +3582,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
                 target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'}
                 before=[pscustomobject][ordered]@{exists=$false;objectId=$null}
                 after=[pscustomobject][ordered]@{exists=$true;objectId=$null}
-                stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
+                observedAfter=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
             })
             Assert-AiInstructionsInstallJournalV2 $journal|Out-Null
             return $journal
@@ -3605,6 +3605,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
             [pscustomobject]@{Name='operation.target';Mutate={param($n)$n.operations[0].target.value='CLAUDE.md'}},
             [pscustomobject]@{Name='operation.before';Mutate={param($n)$n.operations[0].before.exists=$true}},
             [pscustomobject]@{Name='operation.after';Mutate={param($n)$n.operations[0].after.sha256=('e'*64)}},
+            [pscustomobject]@{Name='operation.observedAfter';Prepare={param($p)$p.operations[0].observedAfter=[pscustomobject][ordered]@{dacl=[pscustomobject][ordered]@{isNull=$true;isProtected=$false;aclBase64=$null};readOnly=$false};$p.operations[0].state='applied'};Mutate={param($n)$n.operations[0].observedAfter.readOnly=$true}},
             [pscustomobject]@{Name='operation.stageLeaf';Mutate={param($n)$n.operations[0].stageLeaf='changed.stage'}},
             [pscustomobject]@{Name='operation.backupLeaf';Mutate={param($n)$n.operations[0].backupLeaf='changed.backup'}},
             [pscustomobject]@{Name='operation.quarantineLeaf';Mutate={param($n)$n.operations[0].quarantineLeaf='changed.quarantine'}},
@@ -3644,7 +3645,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
             target=[pscustomobject][ordered]@{kind='git-ref';value='refs/stash'}
             before=[pscustomobject][ordered]@{exists=$true;objectId=('c'*40)}
             after=[pscustomobject][ordered]@{exists=$true;objectId=('c'*40)}
-            stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
+            observedAfter=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
         })
         {Assert-AiInstructionsInstallJournalV2 $journal|Out-Null}|Should Not Throw
         $clone={param($value)$parameters=@{InputObject=($value|ConvertTo-Json -Depth 30)};if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'};ConvertFrom-Json @parameters}
