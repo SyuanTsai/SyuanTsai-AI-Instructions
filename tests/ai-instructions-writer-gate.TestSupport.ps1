@@ -431,6 +431,17 @@ function Get-P9cRepositoryTransactionRoot {
     return (Join-Path ([IO.Path]::GetFullPath(([string]$gitDirectory).Trim())) '.ai-instructions-txn')
 }
 
+function Remove-P9cExpectedEmptyResidualIndexLock {
+    param([Parameter(Mandatory=$true)][string]$Repository)
+    $indexPath=(@(& git -C $Repository rev-parse --git-path index 2>$null)|Select-Object -First 1)
+    if($LASTEXITCODE-ne0-or[string]::IsNullOrWhiteSpace([string]$indexPath)){throw "Could not resolve the Git index path for '$Repository'."}
+    if(-not[IO.Path]::IsPathRooted([string]$indexPath)){$indexPath=Join-Path $Repository ([string]$indexPath)}
+    $lockPath=[IO.Path]::GetFullPath(([string]$indexPath).Trim())+'.lock'
+    Test-Path -LiteralPath $lockPath -PathType Leaf|Should -Be $true
+    ([IO.File]::ReadAllBytes($lockPath)).Count|Should -Be 0
+    Remove-Item -LiteralPath $lockPath -Force
+}
+
 function Get-P9cPublicationStateSnapshot {
     param([Parameter(Mandatory=$true)][string]$Repository)
     $manifestPath=Join-Path $Repository '.codex/ai-instructions.manifest.json'

@@ -5067,7 +5067,11 @@ function Resolve-RepositoryRecoveryIndexLock {
     if($null-ne$Context.RepositoryIndexLock-and$null-ne$Context.RepositoryIndexLock.Stream){return}
     $lockPath=([string]$Context.CurrentJournal.scope.indexPath)+'.lock'
     if(Test-Path -LiteralPath $lockPath){Complete-RepositoryIndexLockRollForward -Journal $Context.CurrentJournal|Out-Null}
-    try{$Context.RepositoryIndexLock=Open-RepositoryIndexTransactionLock -Repository ([string]$Context.Repository)}
+    try{
+        $reacquired=Open-RepositoryIndexTransactionLock -Repository ([string]$Context.Repository)
+        if($null-eq$Context.RepositoryIndexLock){$Context.RepositoryIndexLock=$reacquired}
+        else{$Context.RepositoryIndexLock.Stream=$reacquired.Stream;$Context.RepositoryIndexLock.Path=$reacquired.Path;$Context.RepositoryIndexLock.IndexPath=$reacquired.IndexPath}
+    }
     catch{throw (New-RepositoryIndexLockRefusal -Reason "The repository recovery could not acquire the long Git index lock before undo or redo: $($_.Exception.Message)" -LockPath $lockPath)}
 }
 
@@ -5228,7 +5232,7 @@ function Invoke-RepositoryTransactionEvidenceStashStore {
     Invoke-AiInstructionsInstallFailpoint -Name ("before-operation-"+$sequence)
     $subject=((Invoke-Git -Repository ([string]$Context.Repository) -Arguments @('show','--no-patch','--format=%s',$EvidenceCommit))|Select-Object -First 1).Trim()
     $currentState=Get-RepositoryStashRefState -Repository ([string]$Context.Repository)
-    if(-not(Test-RepositoryTransactionStateEqual $operation $currentState $operation.before)){throw 'PersonalAgent stash history changed concurrently before evidence storage.'}
+    if(-not(Test-RepositoryTransactionStateEqual $operation $currentState $operation.before)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'PersonalAgent evidence refused because refs/stash changed after the prepared decision before evidence storage.')}
     Invoke-Git -Repository ([string]$Context.Repository) -Arguments @('stash','store','--quiet','-m',$subject,$EvidenceCommit)|Out-Null
     if(@(Invoke-Git -Repository ([string]$Context.Repository) -Arguments @('stash','list','--format=%H')|Where-Object{([string]$_).Trim()-ceq$EvidenceCommit}).Count-eq0){throw 'The newly stored PersonalAgent evidence commit was not found in stash history.'}
     Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+$sequence+"-before-journal")
@@ -6635,7 +6639,7 @@ try {
     }
     catch {
         $preserveWorkingPath = $true
-        throw "Project publication finalization failed; durable recovery evidence was preserved: $($_.Exception.Message)"
+        throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Project publication finalization failed; durable recovery evidence was preserved: $($_.Exception.Message)" -InnerException $_.Exception)
     }
     if ($changedPaths.Count -eq 0) { Write-Output 'AI instructions are up to date; no Git commit was created.' }
     else { Write-Output "AI instructions synchronized as local ignored runtime artifacts without Git commit: $($changedPaths -join ', ')" }

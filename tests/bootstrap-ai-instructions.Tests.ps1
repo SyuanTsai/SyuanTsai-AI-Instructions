@@ -672,7 +672,7 @@ Describe 'bootstrap-ai-instructions' {
         $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
         $gitWrapper = @"
 @echo off
-echo %* | "$findString" /C:"hash-object --no-filters -- AGENTS.md" >nul
+echo %* | "$findString" /C:"hash-object -w --no-filters -- AGENTS.md" >nul
 if errorlevel 1 goto forward
 if exist "$injectedMarker" goto forward
 "$realGit" %*

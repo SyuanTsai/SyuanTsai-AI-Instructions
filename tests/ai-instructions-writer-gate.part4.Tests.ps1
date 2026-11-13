@@ -96,6 +96,7 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         $null-eq$evidence[0].after.objectId|Should -Be $true
         [string]$evidence[0].state|Should -BeExactly pending
         (Get-P9cPublicationStateSnapshot $target|ConvertFrom-Json).files|Should -Be (($before|ConvertFrom-Json).files)
+        Remove-P9cExpectedEmptyResidualIndexLock -Repository $target
         $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'write-ahead-recovery') -Failpoint RecoveryOnly
         (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $recovery).ExitCode|Should -Not -Be 0
         (Get-P9cPublicationStateSnapshot $target)|Should -Be $before
@@ -109,11 +110,13 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
             $before=Get-P9cPublicationStateSnapshot $target
             $appliedBootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot "undo-applied-$role") -Failpoint before-committed-journal-write -RecoveryPath NextRun
             $appliedResult=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $appliedBootstrap;$appliedResult.ExitCode|Should -Not -Be 0
+            Remove-P9cExpectedEmptyResidualIndexLock -Repository $target
             $transaction=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force);$journal=Get-Content -Raw -LiteralPath (Join-Path $transaction[0].FullName 'journal.json')|ConvertFrom-Json
             if([string]$journal.phase-cne'applied'){throw "Expected applied journal for $role, found '$($journal.phase)': $($appliedResult.Output)"}
             $operation=@($journal.operations|Where-Object role -ceq $role|Sort-Object sequence|Select-Object -First 1);$operation.Count|Should -Be 1
             $rollbackBootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot "undo-interrupt-$role") -Failpoint ("after-rollback-operation-"+$operation[0].sequence) -RecoveryPath NextRun
             (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $rollbackBootstrap).ExitCode|Should -Not -Be 0
+            Remove-P9cExpectedEmptyResidualIndexLock -Repository $target
             Test-Path -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target)|Should -Be $true
             foreach($attempt in 1,2){
                 $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot "undo-recovery-$role-$attempt") -Failpoint RecoveryOnly
@@ -135,6 +138,7 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         $target=Join-Path $script:ExternalRoot 'empty-case';Copy-Item -LiteralPath $script:NoProjectSeed -Destination $target -Recurse;$before=Get-P9cPublicationStateSnapshot $target
         $failed=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'empty-case-runtime') -Failpoint ("after-operation-$sequence-before-journal") -RecoveryPath NextRun
         (Invoke-P9bRepoBootstrap -Context $script:P9cNoProjectUpdated -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $failed).ExitCode|Should -Not -Be 0
+        Remove-P9cExpectedEmptyResidualIndexLock -Repository $target
         $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'empty-case-recovery') -Failpoint RecoveryOnly
         (Invoke-P9bRepoBootstrap -Context $script:P9cNoProjectUpdated -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $recovery).ExitCode|Should -Not -Be 0
         (Get-P9cPublicationStateSnapshot $target)|Should -Be $before
@@ -160,6 +164,7 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
                 $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot ("cleanup-runtime-"+[Guid]::NewGuid().ToString('N'))) -Failpoint $failpoint -RecoveryPath $recoveryPath
                 (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap).ExitCode|Should -Not -Be 0
                 if($recoveryPath-ceq'NextRun'){
+                    Remove-P9cExpectedEmptyResidualIndexLock -Repository $target
                     $active=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force);$active.Count|Should -Be 1
                     if($failpoint-like'during-cleanup-*'){[string](Get-Content -Raw -LiteralPath (Join-Path $active[0].FullName 'journal.json')|ConvertFrom-Json).phase|Should -Be committed}
                     else{Test-Path -LiteralPath (Join-Path $active[0].FullName 'journal.json')|Should -Be $false}
@@ -234,6 +239,7 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
             }
             $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot "head-runtime-$mode") -Failpoint before-committed-journal-write -RecoveryPath NextRun
             $failed=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap;$failed.ExitCode|Should -Not -Be 0
+            Remove-P9cExpectedEmptyResidualIndexLock -Repository $target
             $transaction=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force);$journal=Get-Content -Raw -LiteralPath (Join-Path $transaction[0].FullName 'journal.json')|ConvertFrom-Json
             $evidence=@($journal.operations|Where-Object kind -ceq store-git-stash-evidence);$evidence.Count|Should -Be 1
             if($mode-ceq'attached'){@($journal.operations|Where-Object kind -ceq update-git-ref).Count|Should -Be 1;@($journal.operations|Where-Object kind -ceq update-git-head).Count|Should -Be 0}
@@ -275,6 +281,7 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
                 if($case.Stored){[string]$stashAfterFailure|Should -Not -Be ([string]$stashBefore)}else{[string]$stashAfterFailure|Should -Be ([string]$stashBefore)}
 
                 if($recoveryPath-ceq'NextRun'){
+                    Remove-P9cExpectedEmptyResidualIndexLock -Repository $target
                     $transaction=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force);$transaction.Count|Should -Be 1
                     $journal=Get-Content -Raw -LiteralPath (Join-Path $transaction[0].FullName 'journal.json')|ConvertFrom-Json
                     $evidence=@($journal.operations|Where-Object kind -ceq store-git-stash-evidence);$evidence.Count|Should -Be 1
@@ -350,6 +357,7 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
                 $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot ("index-runtime-"+[Guid]::NewGuid().ToString('N'))) -Failpoint $actualFailpoint -RecoveryPath $recoveryPath
                 (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap).ExitCode|Should -Not -Be 0
                 if($recoveryPath-ceq'NextRun'){
+                    if($failpoint-ceq'after-index-operation-before-journal'){Remove-P9cExpectedEmptyResidualIndexLock -Repository $target}
                     $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot ("index-recovery-"+[Guid]::NewGuid().ToString('N'))) -Failpoint RecoveryOnly
                     (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $recovery).ExitCode|Should -Not -Be 0
                 }
@@ -391,7 +399,7 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         $laterSequence=@($journal.operations|Where-Object role -ceq shared-exclude)[0].sequence
         $target=Join-Path $script:ExternalRoot 'index-theft-case';Copy-Item -LiteralPath $script:P9cSeeds.True -Destination $target -Recurse
         $index=(& git -C $target rev-parse --git-path index|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($index)){$index=Join-Path $target $index}
-        $indexBefore=[IO.File]::ReadAllBytes($index);$statusBefore=(@(& git -C $target status --porcelain=v1 --untracked-files=all)-join"`n");$agentsBefore=[IO.File]::ReadAllBytes((Join-Path $target 'AGENTS.md'))
+        $statusBefore=(@(& git -C $target status --porcelain=v1 --untracked-files=all)-join"`n");$indexBefore=[IO.File]::ReadAllBytes($index);$agentsBefore=[IO.File]::ReadAllBytes((Join-Path $target 'AGENTS.md'))
         $bootstrap=New-P9cIndexReacquireTheftBootstrap -Root (Join-Path $script:ExternalRoot 'index-theft-runtime') -RollbackFailpoint ("after-operation-$laterSequence-before-journal")
 
         $failed=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap
