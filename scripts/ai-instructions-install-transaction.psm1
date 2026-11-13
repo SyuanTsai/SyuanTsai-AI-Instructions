@@ -325,12 +325,12 @@ function Test-InstallJournalV2StateAuthorityEqual {
 
 function Test-InstallJournalV2OperationAuthorityEqual {
     param([Parameter(Mandatory=$true)][object]$Previous,[Parameter(Mandatory=$true)][object]$Next)
-    if($Next.PSObject.Properties.Match('*').Count-ne12){return $false}
+    if($Next.PSObject.Properties.Match('*').Count-ne13){return $false}
     $kind=[string]$Previous.kind
     if(-not(Test-InstallTransactionScalarEqual $Previous.sequence $Next.sequence)-or-not(Test-InstallTransactionScalarEqual $Previous.kind $Next.kind)-or-not(Test-InstallTransactionScalarEqual $Previous.role $Next.role)-or-not(Test-InstallTransactionScalarEqual $Previous.method $Next.method)){return $false}
     if($Next.target.PSObject.Properties.Match('*').Count-ne2-or-not(Test-InstallTransactionScalarEqual $Previous.target.kind $Next.target.kind)-or-not(Test-InstallTransactionScalarEqual $Previous.target.value $Next.target.value)){return $false}
     if(-not(Test-InstallJournalV2StateAuthorityEqual $kind $Previous.before $Next.before)-or-not(Test-InstallJournalV2StateAuthorityEqual $kind $Previous.after $Next.after)){return $false}
-    return (Test-InstallTransactionSemanticEqual $Previous.observedAfter $Next.observedAfter)-and(Test-InstallTransactionScalarEqual $Previous.stageLeaf $Next.stageLeaf)-and(Test-InstallTransactionScalarEqual $Previous.backupLeaf $Next.backupLeaf)-and(Test-InstallTransactionScalarEqual $Previous.quarantineLeaf $Next.quarantineLeaf)
+    return (Test-InstallTransactionSemanticEqual $Previous.observedAfter $Next.observedAfter)-and(Test-InstallJournalV2PermissionsAuthorityEqual $Previous.displacedMetadata $Next.displacedMetadata)-and(Test-InstallTransactionScalarEqual $Previous.stageLeaf $Next.stageLeaf)-and(Test-InstallTransactionScalarEqual $Previous.backupLeaf $Next.backupLeaf)-and(Test-InstallTransactionScalarEqual $Previous.quarantineLeaf $Next.quarantineLeaf)
 }
 
 function Test-InstallJournalV2EvidenceBindingTransition {

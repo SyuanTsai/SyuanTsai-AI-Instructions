@@ -3767,11 +3767,13 @@ function Test-ProjectPublicationStateEqual {
 function Assert-ProjectSkillManifestFilesCurrent {
     param(
         [Parameter(Mandatory=$true)][string]$TargetRoot,
-        [Parameter(Mandatory=$true)][AllowEmptyCollection()][object[]]$ManifestEntries
+        [Parameter(Mandatory=$true)][AllowEmptyCollection()][object[]]$ManifestEntries,
+        [Parameter(Mandatory=$true)][AllowEmptyCollection()][string[]]$PublishedTargetPaths
     )
 
     foreach($entry in @($ManifestEntries|Where-Object{
-        $null-ne$_.PSObject.Properties['artifactType']-and[string]$_.artifactType-ceq'skill'
+        $null-ne$_.PSObject.Properties['artifactType']-and[string]$_.artifactType-ceq'skill'-and
+        $PublishedTargetPaths-ccontains[string]$_.targetPath
     }|Sort-Object targetPath)){
         $targetPath=[string]$entry.targetPath
         $targetFullPath=Join-Path $TargetRoot $targetPath.Replace('/',[IO.Path]::DirectorySeparatorChar)
@@ -4963,6 +4965,46 @@ function Get-RepositoryTransactionObservedAfter {
     return [pscustomobject][ordered]@{dacl=$evidence.dacl;readOnly=[bool]$evidence.readOnly}
 }
 
+function New-RepositoryTransactionDisplacedMetadataSnapshot {
+    param([Parameter(Mandatory=$true)][object]$Before,[Parameter(Mandatory=$true)][ValidateSet('create-file','write-file','remove-file')][string]$Kind)
+    if($Kind-ceq'create-file'){return $null}
+    if(-not[bool]$Before.exists-or$null-eq$Before.permissions){throw 'A displaced repository file is missing its prepared permission snapshot.'}
+    if([string]$Before.permissions.kind-ceq'windows-sddl'){
+        return [pscustomobject][ordered]@{kind='windows-sddl';sddl=[string]$Before.permissions.sddl;readOnly=[bool]$Before.permissions.readOnly}
+    }
+    if([string]$Before.permissions.kind-ceq'unix-mode'){
+        return [pscustomobject][ordered]@{kind='unix-mode';mode=[string]$Before.permissions.mode;uid=[uint64]$Before.permissions.uid;gid=[uint64]$Before.permissions.gid}
+    }
+    throw "Unsupported displaced repository file metadata kind '$($Before.permissions.kind)'."
+}
+
+function Test-RepositoryTransactionDisplacedMetadataEqual {
+    param([AllowNull()][object]$Actual,[AllowNull()][object]$Expected)
+    if($null-eq$Actual-or$null-eq$Expected){return $null-eq$Actual-and$null-eq$Expected}
+    if([string]$Expected.kind-ceq'windows-sddl'){
+        return [string]$Actual.kind-ceq'windows-sddl'-and[string]$Actual.sddl-ceq[string]$Expected.sddl-and[bool]$Actual.readOnly-eq[bool]$Expected.readOnly
+    }
+    return [string]$Actual.kind-ceq'unix-mode'-and[string]$Actual.mode-ceq[string]$Expected.mode-and[uint64]$Actual.uid-eq[uint64]$Expected.uid-and[uint64]$Actual.gid-eq[uint64]$Expected.gid
+}
+
+function Restore-RepositoryTransactionDisplacedMetadata {
+    param([Parameter(Mandatory=$true)][object]$Journal,[Parameter(Mandatory=$true)][object]$Operation)
+    if($null-eq$Operation.displacedMetadata){return}
+    $path=if([string]$Operation.target.kind-ceq'git-shared-exclude'){[string]$Operation.target.value}else{Join-Path ([string]$Journal.scope.repositoryRoot) ([string]$Operation.target.value).Replace('/',[IO.Path]::DirectorySeparatorChar)}
+    $parent=[IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($path));$leaf=[IO.Path]::GetFileName($path)
+    $parentLease=Open-PlatformDirectory -Root $parent -RootOnly
+    try{
+        $lease=Open-PlatformFile -ParentLease $parentLease -Leaf $leaf -Access Read -CreateMode OpenExisting
+        try{
+            Set-PlatformPermissions -Lease $lease -Snapshot $Operation.displacedMetadata|Out-Null
+            $readback=Get-PlatformPermissions -Lease $lease
+            if(-not(Test-RepositoryTransactionDisplacedMetadataEqual -Actual $readback -Expected $Operation.displacedMetadata)){
+                throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction sequence $($Operation.sequence) restored file bytes but not the exact prepared security metadata; evidence was retained.")
+            }
+        }finally{$lease.Dispose()}
+    }finally{$parentLease.Dispose()}
+}
+
 function Test-RepositoryTransactionObservedAfterEqual {
     param([AllowNull()][object]$Actual,[AllowNull()][object]$Expected)
     if($null-eq$Expected){return $true}
@@ -5168,6 +5210,7 @@ function Invoke-RepositoryTransactionOperation {
     $requiresEvidenceReuseCas=$Direction-ceq'redo'-and[string]$Operation.kind-ceq'update-git-ref'-and[string]$Operation.role-ceq'personal-agent-evidence-cas'
     if((Test-RepositoryTransactionStateEqual $Operation $current $destination)-and-not$requiresEvidenceReuseCas){
         if($Direction-ceq'redo'){return Get-RepositoryTransactionObservedAfter -Journal $Journal -Operation $Operation}
+        if([string]$Operation.kind-cin@('write-file','remove-file')){Restore-RepositoryTransactionDisplacedMetadata -Journal $Journal -Operation $Operation}
         return
     }
     if(-not(Test-RepositoryTransactionStateEqual $Operation $current $source)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction sequence $($Operation.sequence) role $($Operation.role) target $($Operation.target.value) is in a third state; evidence was retained for manual inspection and cleanup.")}
@@ -5181,7 +5224,8 @@ function Invoke-RepositoryTransactionOperation {
         try{$manifestDocument=[Text.UTF8Encoding]::new($false,$true).GetString([IO.File]::ReadAllBytes($manifestStagePath))|ConvertFrom-Json -ErrorAction Stop}
         catch{throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project Skill manifest publication refused because the staged manifest could not be decoded: $($_.Exception.Message)" -InnerException $_.Exception)}
         if($null-eq$manifestDocument-or$null-eq$manifestDocument.PSObject.Properties['files']){throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message 'Project Skill manifest publication refused because the staged manifest has no files inventory.')}
-        Assert-ProjectSkillManifestFilesCurrent -TargetRoot $repository -ManifestEntries @($manifestDocument.files)
+        $publishedProjectSkillPaths=@($Journal.operations|Where-Object{[string]$_.role-ceq'project-skill'-and[string]$_.kind-cin@('create-file','write-file')}|ForEach-Object{[string]$_.target.value})
+        Assert-ProjectSkillManifestFilesCurrent -TargetRoot $repository -ManifestEntries @($manifestDocument.files) -PublishedTargetPaths $publishedProjectSkillPaths
     }
     switch([string]$Operation.kind){
         {$_-in@('create-file','write-file','remove-file')} {
@@ -5202,7 +5246,7 @@ function Invoke-RepositoryTransactionOperation {
                     else{$stageLease=Open-PlatformFile -ParentLease $Context.Lease -Leaf ([string]$Operation.stageLeaf) -Access ReadWrite -CreateMode OpenExisting;try{$p=@{ParentLease=$parentLease;Leaf=$leaf;TransactionLease=$Context.Lease;StageLease=$stageLease;ExpectedState=$Operation.before;ExpectedStage=$Operation.after};if([string]$Operation.kind-ceq'create-file'){$p.NoReplace=$true}else{$p.DisplacedLeaf=[string]$Operation.backupLeaf};Publish-PlatformFile @p|Out-Null}finally{$stageLease.Dispose()}}
                 }else{
                     if([string]$Operation.kind-ceq'create-file'){Remove-PlatformOwnedFile -ParentLease $parentLease -Leaf $leaf -ExpectedState $Operation.after -TransactionLease $Context.Lease -TombstoneLeaf ([string]$Operation.stageLeaf)|Out-Null}
-                    else{$backupLease=Open-PlatformFile -ParentLease $Context.Lease -Leaf ([string]$Operation.backupLeaf) -Access ReadWrite -CreateMode OpenExisting;try{$p=@{ParentLease=$parentLease;Leaf=$leaf;TransactionLease=$Context.Lease;StageLease=$backupLease;ExpectedState=$Operation.after;ExpectedStage=$Operation.before};if([string]$Operation.kind-ceq'remove-file'){$p.NoReplace=$true}else{$p.DisplacedLeaf=[string]$Operation.stageLeaf};Publish-PlatformFile @p|Out-Null}finally{$backupLease.Dispose()}}
+                    else{$backupLease=Open-PlatformFile -ParentLease $Context.Lease -Leaf ([string]$Operation.backupLeaf) -Access ReadWrite -CreateMode OpenExisting;try{$p=@{ParentLease=$parentLease;Leaf=$leaf;TransactionLease=$Context.Lease;StageLease=$backupLease;ExpectedState=$Operation.after;ExpectedStage=$Operation.before};if([string]$Operation.kind-ceq'remove-file'){$p.NoReplace=$true}else{$p.DisplacedLeaf=[string]$Operation.stageLeaf};Publish-PlatformFile @p|Out-Null}finally{$backupLease.Dispose()};Restore-RepositoryTransactionDisplacedMetadata -Journal $Journal -Operation $Operation}
                 }
             }finally{$parentLease.Dispose()}
         }
@@ -5325,16 +5369,16 @@ function New-RepositoryInstallOperations {
         $backup=New-AiInstructionsInstallStageFile -TransactionLease $Context.Lease -Leaf $backupLeaf -Bytes ([byte[]]$remediation.IndexPlan.BeforeBytes) -PlatformOs $platform
         $before=[pscustomobject][ordered]@{exists=$true;sha256=$backup.sha256;length=$backup.length;identity=$backup.identity;entrySetSha256=(Get-RepositoryTransactionIndexEntrySetSha256 -Repository $Context.Repository -IndexPath ([string]$remediation.IndexPath))}
         $after=[pscustomobject][ordered]@{exists=$true;sha256=$stage.sha256;length=$stage.length;identity=$stage.identity;entrySetSha256=[string]$remediation.IndexPlan.AfterEntrySetSha256}
-        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='replace-git-index';role='git-index';method='index-lock-rename';target=[pscustomobject][ordered]@{kind='git-index';value=[string]$remediation.IndexPath};before=$before;after=$after;observedAfter=$null;stageLeaf=$stageLeaf;backupLeaf=$backupLeaf;quarantineLeaf=$null;state='pending'})
+        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='replace-git-index';role='git-index';method='index-lock-rename';target=[pscustomobject][ordered]@{kind='git-index';value=[string]$remediation.IndexPath};before=$before;after=$after;observedAfter=$null;displacedMetadata=$null;stageLeaf=$stageLeaf;backupLeaf=$backupLeaf;quarantineLeaf=$null;state='pending'})
     }
     if($null-ne$remediation-and-not[string]::IsNullOrWhiteSpace([string]$remediation.NewCommit)){
         $sequence=$operations.Count+1;$ref=if([string]::IsNullOrWhiteSpace([string]$remediation.OriginalHeadReference)){[string]$remediation.NewHeadReference}else{[string]$remediation.OriginalHeadReference}
         $before=if([string]::IsNullOrWhiteSpace([string]$remediation.OriginalHeadReference)){[pscustomobject][ordered]@{exists=$false;objectId=$null}}else{[pscustomobject][ordered]@{exists=$true;objectId=[string]$remediation.OriginalHead}}
         $after=[pscustomobject][ordered]@{exists=$true;objectId=[string]$remediation.NewCommit}
-        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='update-git-ref';role='git-ref';method='update-ref';target=[pscustomobject][ordered]@{kind='git-ref';value=$ref};before=$before;after=$after;observedAfter=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
+        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='update-git-ref';role='git-ref';method='update-ref';target=[pscustomobject][ordered]@{kind='git-ref';value=$ref};before=$before;after=$after;observedAfter=$null;displacedMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
         if([string]::IsNullOrWhiteSpace([string]$remediation.OriginalHeadReference)){
             $sequence=$operations.Count+1;$headPath=Join-Path ([string]$remediation.GitDirectory) 'HEAD';$beforeHead=[pscustomobject][ordered]@{mode='detached';reference=$null;objectId=[string]$remediation.OriginalHead;rawSha256=(Get-ByteArraySha256 ([IO.File]::ReadAllBytes($headPath)))};$afterBytes=[Text.UTF8Encoding]::new($false).GetBytes("ref: $ref`n");$afterHead=[pscustomobject][ordered]@{mode='symbolic';reference=$ref;objectId=[string]$remediation.NewCommit;rawSha256=(Get-ByteArraySha256 $afterBytes)}
-            $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='update-git-head';role='git-head';method='symbolic-ref';target=[pscustomobject][ordered]@{kind='git-head';value='HEAD'};before=$beforeHead;after=$afterHead;observedAfter=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
+            $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='update-git-head';role='git-head';method='symbolic-ref';target=[pscustomobject][ordered]@{kind='git-head';value='HEAD'};before=$beforeHead;after=$afterHead;observedAfter=$null;displacedMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
         }
     }
     $missing=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
@@ -5342,7 +5386,7 @@ function New-RepositoryInstallOperations {
     foreach($relative in @($missing|Sort-Object @{Expression={($_.Split('/')).Count}},@{Expression={$_}})){
         $sequence=$operations.Count+1;$stageLeaf=('op-{0:D6}.directory'-f$sequence);$stageLease=Open-PlatformDirectory -Root $transactionPath -RelativePath $stageLeaf -CreatePrivate
         try{$after=[pscustomobject][ordered]@{exists=$true;identity=(ConvertTo-ProjectPublicationIdentity $stageLease.Observation);permissions=(Get-PlatformPermissions -Lease $stageLease)}}finally{$stageLease.Dispose()}
-        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='ensure-directory-anchor';role='directory-anchor';method='directory-rename';target=[pscustomobject][ordered]@{kind='repository-relative';value=$relative};before=[pscustomobject][ordered]@{exists=$false;identity=$null;permissions=$null};after=$after;observedAfter=$null;stageLeaf=$stageLeaf;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
+        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='ensure-directory-anchor';role='directory-anchor';method='directory-rename';target=[pscustomobject][ordered]@{kind='repository-relative';value=$relative};before=[pscustomobject][ordered]@{exists=$false;identity=$null;permissions=$null};after=$after;observedAfter=$null;displacedMetadata=$null;stageLeaf=$stageLeaf;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
     }
     $priority=@{'instruction'=10;'project-skill'=20;'license'=30;'remediation-file'=40;'remediation-and-instruction'=40;'manifest'=90;'shared-exclude'=100}
     foreach($intent in @($Context.Intents.Values|Sort-Object @{Expression={$priority[[string]$_.Role]}},@{Expression={[string]$_.RelativePath}})){
@@ -5351,16 +5395,17 @@ function New-RepositoryInstallOperations {
         $sequence=$operations.Count+1;$kind=if($intent.Remove){'remove-file'}elseif($intent.Before.exists){'write-file'}else{'create-file'};$stageLeaf=$null;$backupLeaf=if($kind-ceq'create-file'){$null}else{('op-{0:D6}.backup'-f$sequence)}
         $after=if($intent.Remove){[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null}}else{$stageLeaf=('op-{0:D6}.stage'-f$sequence);$stage=New-AiInstructionsInstallStageFile -TransactionLease $Context.Lease -Leaf $stageLeaf -Bytes ([byte[]]$intent.Bytes) -PlatformOs $platform;$stageState=Get-AiInstructionsInstallFileState -ParentLease $Context.Lease -Leaf $stageLeaf -LiteralPath (Join-Path $transactionPath $stageLeaf) -PlatformOs $platform -IncludePermissions;[pscustomobject][ordered]@{exists=$true;sha256=$stage.sha256;length=$stage.length;identity=$stage.identity;permissions=$stageState.permissions}}
         $targetKind=if([string]$intent.TargetKind-ceq'git-exclude'){'git-shared-exclude'}else{'repository-relative'};$targetValue=if($targetKind-ceq'git-shared-exclude'){Join-Path ([string]$intent.TargetRoot) ([string]$intent.RelativePath)}else{[string]$intent.RelativePath}
-        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind=$kind;role=[string]$intent.Role;method=$(if($kind-ceq'remove-file'){'tombstone-rename'}else{'stage-rename'});target=[pscustomobject][ordered]@{kind=$targetKind;value=$targetValue};before=$intent.Before;after=$after;observedAfter=$null;stageLeaf=$stageLeaf;backupLeaf=$backupLeaf;quarantineLeaf=$null;state='pending'})
+        $displacedMetadata=New-RepositoryTransactionDisplacedMetadataSnapshot -Before $intent.Before -Kind $kind
+        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind=$kind;role=[string]$intent.Role;method=$(if($kind-ceq'remove-file'){'tombstone-rename'}else{'stage-rename'});target=[pscustomobject][ordered]@{kind=$targetKind;value=$targetValue};before=$intent.Before;after=$after;observedAfter=$null;displacedMetadata=$displacedMetadata;stageLeaf=$stageLeaf;backupLeaf=$backupLeaf;quarantineLeaf=$null;state='pending'})
     }
     if([bool]$Context.ShouldStorePersonalAgentEvidence){
         $sequence=$operations.Count+1
         $stashBefore=$Context.PersonalAgentEvidenceStashBefore
         if($null-eq$stashBefore){throw 'PersonalAgent evidence store is missing its prepared refs/stash state.'}
-        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='store-git-stash-evidence';role='personal-agent-evidence';method='stash-store';target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'};before=$stashBefore;after=[pscustomobject][ordered]@{exists=$true;objectId=$null};observedAfter=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
+        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='store-git-stash-evidence';role='personal-agent-evidence';method='stash-store';target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'};before=$stashBefore;after=[pscustomobject][ordered]@{exists=$true;objectId=$null};observedAfter=$null;displacedMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
     }elseif($operations.Count-gt0-and$null-ne$Context.PersonalAgentEvidenceStashBefore){
         $sequence=$operations.Count+1;$stashBefore=$Context.PersonalAgentEvidenceStashBefore
-        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='update-git-ref';role='personal-agent-evidence-cas';method='update-ref';target=[pscustomobject][ordered]@{kind='git-ref';value='refs/stash'};before=$stashBefore;after=$stashBefore;observedAfter=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
+        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='update-git-ref';role='personal-agent-evidence-cas';method='update-ref';target=[pscustomobject][ordered]@{kind='git-ref';value='refs/stash'};before=$stashBefore;after=$stashBefore;observedAfter=$null;displacedMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
     }
     return $operations.ToArray()
 }

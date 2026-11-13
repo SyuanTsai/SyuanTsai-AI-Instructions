@@ -1386,7 +1386,7 @@ finally {
         }
 
         $exitCode | Should Not Be 0
-        ($output -join [Environment]::NewLine) | Should Match 'exclusive shared Git exclude mutation handle'
+        (ConvertTo-TestDiagnosticText -Output $output) | Should Match 'exclusive shared Git exclude mutation handle'
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($excludePath)) | Should Be ([Convert]::ToBase64String($excludeBefore))
         Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
         Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $false
@@ -2072,7 +2072,15 @@ finally {
         $hookMarker = 'Publish-PlatformFile @p|Out-Null'
         $hookIndex = $hookBootstrapText.IndexOf($hookMarker,[StringComparison]::Ordinal)
         if ($hookIndex -lt 0) { throw 'Could not locate the managed-file publication boundary.' }
-        $hookInjection = "if([string]`$leaf-ceq'new.md'){Move-Item -LiteralPath `$global:CreateProbeParent -Destination `$global:CreateProbeSavedParent;New-Item -ItemType Junction -Path `$global:CreateProbeParent -Target `$global:CreateProbeOutside|Out-Null};$hookMarker"
+        $hookInjection = @'
+if([string]$leaf-ceq'new.md'){
+    try{
+        Move-Item -LiteralPath $global:CreateProbeParent -Destination $global:CreateProbeSavedParent
+        New-Item -ItemType Junction -Path $global:CreateProbeParent -Target $global:CreateProbeOutside|Out-Null
+        $global:CreateProbeInjectionResult='swapped'
+    }catch{$global:CreateProbeInjectionResult=$_.Exception.Message}
+}
+'@ + $hookMarker
         $hookBootstrapText = $hookBootstrapText.Remove($hookIndex,$hookMarker.Length).Insert($hookIndex,$hookInjection)
         [IO.File]::WriteAllText($hookBootstrapPath,$hookBootstrapText,[Text.UTF8Encoding]::new($false))
         Set-TestText -Path $wrapperPath -Value @'
@@ -2094,6 +2102,7 @@ param(
 $global:CreateProbeParent = $ManagedParent
 $global:CreateProbeSavedParent = $SavedParent
 $global:CreateProbeOutside = $OutsideRoot
+$global:CreateProbeInjectionResult = 'not-attempted'
 try {
     $context = New-ProjectPublicationContext -Repository $ProbeRoot
     $script:ProjectPublicationContext = $context
@@ -2102,13 +2111,13 @@ try {
             -Bytes ((New-Object System.Text.UTF8Encoding($false)).GetBytes('# managed create'))
         $context.RepositoryIndexLock = Open-RepositoryIndexTransactionLock -Repository $ProbeRoot
         Start-RepositoryInstallTransaction -Context $context
-        $result = 'unexpectedly-created'
+        $productResult = 'success'
     }
     catch {
-        $result = $_.Exception.Message
+        $productResult = $_.Exception.Message
         if ($context.Durable) {
             try { Invoke-RepositoryTransactionRollback -Context $context }
-            catch { $result += ' | rollback: ' + $_.Exception.Message }
+            catch { $productResult += ' | rollback: ' + $_.Exception.Message }
         }
     }
     finally {
@@ -2117,9 +2126,12 @@ try {
     }
 }
 finally {
-    Remove-Variable -Name CreateProbeParent,CreateProbeSavedParent,CreateProbeOutside -Scope Global -ErrorAction SilentlyContinue
+    $parentIsJunction = $false
+    if(Test-Path -LiteralPath $ManagedParent){$parentIsJunction=((Get-Item -Force -LiteralPath $ManagedParent).Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0}
+    $result=[pscustomobject][ordered]@{injection=[string]$global:CreateProbeInjectionResult;product=[string]$productResult;parentIsJunction=$parentIsJunction}
+    Remove-Variable -Name CreateProbeParent,CreateProbeSavedParent,CreateProbeOutside,CreateProbeInjectionResult -Scope Global -ErrorAction SilentlyContinue
 }
-[System.IO.File]::WriteAllText($ResultPath,$result,(New-Object System.Text.UTF8Encoding($false)))
+[System.IO.File]::WriteAllText($ResultPath,($result|ConvertTo-Json -Compress),(New-Object System.Text.UTF8Encoding($false)))
 '@
 
         $arguments = @(
@@ -2139,7 +2151,14 @@ finally {
         $output = & $script:TestPowerShellExecutable @arguments 2>&1
 
         $LASTEXITCODE | Should Be 0
-        (Get-Content -Raw -LiteralPath $resultPath) | Should Match 'reparse point|outside the expected target-root path|changed concurrently|being used by another process'
+        $result=Get-Content -Raw -LiteralPath $resultPath|ConvertFrom-Json
+        [string]$result.injection | Should Match 'swapped|sharing violation|being used by another process|lease'
+        if([string]$result.injection-ceq'swapped'){
+            [string]$result.product | Should Match 'reparse point|outside the expected target-root path|changed concurrently'
+        }else{
+            [bool]$result.parentIsJunction | Should Be $false
+            [string]$result.product | Should Match '^success$|reparse point|outside the expected target-root path|changed concurrently'
+        }
         Test-Path -LiteralPath (Join-Path $outsideRoot 'new.md') | Should Be $false
         Test-Path -LiteralPath (Join-Path $savedParent 'new.md') | Should Be $false
     }
@@ -2997,10 +3016,37 @@ exit /b %errorlevel%
         Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $true
     }
 
-    # Scenario: A target repository cannot store recovery evidence after an external actor marks a newly created target read-only.
-    # Purpose: Restore read-only transaction-created bytes and exclusions without changing the product index.
     if ($IsWindows) {
-    It 'InterT92_rolls_back_target_when_personal_agent_stash_store_fails' {
+    # Scenario: A target repository cannot store recovery evidence, without any concurrent metadata drift.
+    # Purpose: Preserve main's clean rollback guarantee when stash storage itself is the only failure.
+    It 'InterT92_rolls_back_cleanly_when_personal_agent_stash_store_fails_without_metadata_drift' {
+        New-TestConfiguration -Path $configurationPath
+        $wrapperRoot=Join-Path $TestDrive 'git-clean-stash-failure';New-Item -ItemType Directory -Force -Path $wrapperRoot|Out-Null
+        $realGit=(Get-Command git.exe).Source;$findString=Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $gitWrapper="@echo off`necho %* | `"$findString`" /C:`"stash store`" >nul`nif errorlevel 1 goto forward`nexit /b 86`n:forward`n`"$realGit`" %*`nexit /b %errorlevel%"
+        $gitWrapperPath=Join-Path $wrapperRoot 'git.cmd';Set-TestText -Path $gitWrapperPath -Value $gitWrapper
+        $headBefore=Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')
+        $statusBefore=@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain'))-join"`n"
+        $indexPath=Join-Path $targetRoot '.git\index';$indexBefore=(Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash
+        $excludePath=Join-Path $targetRoot '.git\info\exclude';$excludeBefore=[Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+
+        $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot,'-GitExecutable',$gitWrapperPath)
+        $output=& $script:TestPowerShellExecutable @arguments 2>&1;$exitCode=$LASTEXITCODE
+
+        $exitCode|Should Not Be 0
+        (ConvertTo-TestDiagnosticText -Output $output)|Should Match 'stash store'
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD'))|Should Be $headBefore
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain'))-join"`n")|Should Be $statusBefore
+        (Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash|Should Be $indexBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))|Should Be $excludeBefore
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md')|Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath)|Should Be $false
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash','list','--format=%gs')|Where-Object{$_-match'PersonalAgent$'}).Count|Should Be 0
+    }
+
+    # Scenario: A target repository cannot store recovery evidence after an external actor marks a newly created target read-only.
+    # Purpose: Preserve the third-state file and journal while reversing every unaffected operation.
+    It 'InterT92a_preserves_read_only_drift_when_personal_agent_stash_store_fails' {
         # Given
         New-TestConfiguration -Path $configurationPath
         $wrapperRoot = Join-Path $TestDrive 'git-wrapper'
@@ -3090,6 +3136,7 @@ exit /b %errorlevel%
         # Then
         $exitCode | Should Not Be 0
         ($output -join [Environment]::NewLine) | Should Match 'stash store'
+        (ConvertTo-TestDiagnosticText -Output $output) | Should Match 'ai-instructions-refusal-code=interrupted-install'
         $beforeEvidence = Get-Content -Raw -LiteralPath $captureBeforePath | ConvertFrom-Json
         $afterEvidence = Get-Content -Raw -LiteralPath $captureAfterPath | ConvertFrom-Json
         [byte[]]$beforeBytes = [Convert]::FromBase64String([string]$beforeEvidence.bytesBase64)
@@ -3113,14 +3160,20 @@ exit /b %errorlevel%
         [byte[]]$appliedExcludeBytes = [System.IO.File]::ReadAllBytes($appliedExcludePath)
         $personalAgentStashCount = @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%gs') |
             Where-Object { $_ -match 'PersonalAgent$' }).Count
+        $gitDirectory=(@(Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--absolute-git-dir'))-join'').Trim()
+        $transactionRoot=Join-Path $gitDirectory '.ai-instructions-txn'
+        $transactions=@(Get-ChildItem -LiteralPath $transactionRoot -Directory -Force -ErrorAction SilentlyContinue)
         $headAfter | Should Be $headBefore
-        $statusAfter | Should Be $statusBefore
+        $statusAfter | Should Match '^\?\? AGENTS\.md$'
         $indexAfter | Should Be $indexBefore
         [Convert]::ToBase64String($appliedExcludeBytes) | Should Not Be ([Convert]::ToBase64String($excludeBytesBefore))
         [Convert]::ToBase64String($excludeBytesAfter) | Should Be ([Convert]::ToBase64String($excludeBytesBefore))
-        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $true
+        (Get-Item -Force -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).IsReadOnly | Should Be $true
         Test-Path -LiteralPath $manifestPath | Should Be $false
         $personalAgentStashCount | Should Be 0
+        $transactions.Count | Should Be 1
+        Test-Path -LiteralPath (Join-Path $transactions[0].FullName 'journal.json') -PathType Leaf | Should Be $true
         $sha = [System.Security.Cryptography.SHA256]::Create()
         try {
             $beforeBytesHash = [BitConverter]::ToString($sha.ComputeHash($beforeBytes)).Replace('-', '').ToLowerInvariant()
@@ -3140,7 +3193,7 @@ exit /b %errorlevel%
                 sameIdentity = ([string]$beforeEvidence.nativeIdentity -ceq [string]$afterEvidence.nativeIdentity)
                 sameDacl = ($beforeDaclJson -ceq $afterDaclJson)
             }
-            repository = [ordered]@{ headPreserved = ($headAfter -ceq $headBefore); statusPreserved = ($statusAfter -ceq $statusBefore); indexPreserved = ($indexAfter -ceq $indexBefore); excludePreserved = ([Convert]::ToBase64String($excludeBytesAfter) -ceq [Convert]::ToBase64String($excludeBytesBefore)); targetRemoved = (-not (Test-Path -LiteralPath $agentPath)); manifestRemoved = (-not (Test-Path -LiteralPath $manifestPath)); personalAgentStashCount = $personalAgentStashCount }
+            repository = [ordered]@{ headPreserved = ($headAfter -ceq $headBefore); expectedThirdStateStatus = ($statusAfter -match '^\?\? AGENTS\.md$'); indexPreserved = ($indexAfter -ceq $indexBefore); excludePreserved = ([Convert]::ToBase64String($excludeBytesAfter) -ceq [Convert]::ToBase64String($excludeBytesBefore)); targetRetained = (Test-Path -LiteralPath $agentPath); manifestRemoved = (-not (Test-Path -LiteralPath $manifestPath)); journalRetained = ($transactions.Count -eq 1); personalAgentStashCount = $personalAgentStashCount }
             verified = $true
         }
         [Console]::WriteLine('SYP214 readonly rollback witness ' + (ConvertTo-Json -InputObject $witness -Depth 8 -Compress))

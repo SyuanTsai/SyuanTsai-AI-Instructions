@@ -2325,7 +2325,7 @@ function Assert-AiInstructionsInstallJournalV2 {
     $expectedSequence = 1
     foreach ($operation in @($Journal.operations)) {
         $context = "AI instructions install journal operation sequence $expectedSequence"
-        Assert-AiInstructionsInstallJournalExactProperties -Object $operation -Names @('sequence','kind','role','method','target','before','after','observedAfter','stageLeaf','backupLeaf','quarantineLeaf','state') -Context $context
+        Assert-AiInstructionsInstallJournalExactProperties -Object $operation -Names @('sequence','kind','role','method','target','before','after','observedAfter','displacedMetadata','stageLeaf','backupLeaf','quarantineLeaf','state') -Context $context
         Assert-AiInstructionsInstallJournalInteger -Value $operation.sequence -Context "$context.sequence" -Minimum 1
         if ([int64]$operation.sequence -ne $expectedSequence) { throw "$context.sequence must be $expectedSequence for a continuous sequence." }
         if ($operation.kind -isnot [string] -or [string]$operation.kind -cnotin @('create-file','write-file','remove-file','ensure-directory-anchor','replace-git-index','update-git-ref','update-git-head','store-git-stash-evidence')) { throw "$context.kind is invalid." }
@@ -2362,6 +2362,13 @@ function Assert-AiInstructionsInstallJournalV2 {
                 Assert-AiInstructionsInstallJournalV2FileState -State $operation.before -Context "$context.before" -ExpectedIdentityKind $expectedIdentityKind
                 Assert-AiInstructionsInstallJournalV2FileState -State $operation.after -Context "$context.after" -ExpectedIdentityKind $expectedIdentityKind
                 Assert-AiInstructionsInstallJournalV2ObservedAfter -ObservedAfter $operation.observedAfter -Context "$context.observedAfter"
+                if ([string]$operation.kind -ceq 'create-file') {
+                    if ($null -ne $operation.displacedMetadata) { throw "$context.displacedMetadata must be null when no original file is displaced." }
+                }
+                else {
+                    Assert-AiInstructionsInstallJournalV2Permissions -Permissions $operation.displacedMetadata -Context "$context.displacedMetadata" -ExpectedIdentityKind $expectedIdentityKind
+                    if (-not (Test-AiInstructionsJsonSemanticEqual -Left $operation.displacedMetadata -Right $operation.before.permissions)) { throw "$context.displacedMetadata must equal the prepared original-file permissions." }
+                }
                 if ([string]$Journal.platform.os -ceq 'windows' -and [string]$operation.state -ceq 'applied' -and [string]$operation.kind -cne 'remove-file' -and $null -eq $operation.observedAfter) { throw "$context.observedAfter must be bound for an applied Windows file publication." }
                 if ([string]$operation.kind -ceq 'create-file' -and ([bool]$operation.before.exists -or -not [bool]$operation.after.exists)) { throw "$context create-file states are invalid." }
                 if ([string]$operation.kind -ceq 'write-file' -and (-not [bool]$operation.before.exists -or -not [bool]$operation.after.exists)) { throw "$context write-file states are invalid." }
@@ -2373,6 +2380,7 @@ function Assert-AiInstructionsInstallJournalV2 {
             }
             'ensure-directory-anchor' {
                 if ($null -ne $operation.observedAfter) { throw "$context.observedAfter must be null for non-file operations." }
+                if ($null -ne $operation.displacedMetadata) { throw "$context.displacedMetadata must be null for non-file operations." }
                 if ($targetKind -cne 'repository-relative') { throw "$context directory anchor target kind is invalid." }
                 if ([string]$operation.method -cne 'directory-rename' -or $null -eq $operation.stageLeaf -or $null -ne $operation.backupLeaf -or $null -ne $operation.quarantineLeaf) { throw "$context directory anchor method or artifact leaves are invalid." }
                 Assert-AiInstructionsInstallJournalV2DirectoryAnchorState -State $operation.before -Context "$context.before" -ExpectedIdentityKind $expectedIdentityKind
@@ -2381,6 +2389,7 @@ function Assert-AiInstructionsInstallJournalV2 {
             }
             'replace-git-index' {
                 if ($null -ne $operation.observedAfter) { throw "$context.observedAfter must be null for non-file operations." }
+                if ($null -ne $operation.displacedMetadata) { throw "$context.displacedMetadata must be null for non-file operations." }
                 if ($targetKind -cne 'git-index') { throw "$context replace-git-index target kind is invalid." }
                 if ([string]$operation.method -cne 'index-lock-rename' -or $null -eq $operation.stageLeaf -or $null -eq $operation.backupLeaf -or $null -ne $operation.quarantineLeaf) { throw "$context replace-git-index method or artifact leaves are invalid." }
                 Assert-AiInstructionsInstallJournalV2IndexState -State $operation.before -Context "$context.before" -ExpectedIdentityKind $expectedIdentityKind
@@ -2389,6 +2398,7 @@ function Assert-AiInstructionsInstallJournalV2 {
             }
             'update-git-ref' {
                 if ($null -ne $operation.observedAfter) { throw "$context.observedAfter must be null for non-file operations." }
+                if ($null -ne $operation.displacedMetadata) { throw "$context.displacedMetadata must be null for non-file operations." }
                 if ($targetKind -cne 'git-ref') { throw "$context update-git-ref target kind is invalid." }
                 if ([string]$operation.method -cne 'update-ref' -or $null -ne $operation.stageLeaf -or $null -ne $operation.backupLeaf -or $null -ne $operation.quarantineLeaf) { throw "$context update-git-ref method or artifact leaves are invalid." }
                 Assert-AiInstructionsInstallJournalV2RefState -State $operation.before -Context "$context.before" -ObjectFormat ([string]$Journal.scope.objectFormat)
@@ -2397,6 +2407,7 @@ function Assert-AiInstructionsInstallJournalV2 {
             }
             'update-git-head' {
                 if ($null -ne $operation.observedAfter) { throw "$context.observedAfter must be null for non-file operations." }
+                if ($null -ne $operation.displacedMetadata) { throw "$context.displacedMetadata must be null for non-file operations." }
                 if ($targetKind -cne 'git-head') { throw "$context update-git-head target kind is invalid." }
                 if ([string]$operation.method -cne 'symbolic-ref' -or $null -ne $operation.stageLeaf -or $null -ne $operation.backupLeaf -or $null -ne $operation.quarantineLeaf) { throw "$context update-git-head method or artifact leaves are invalid." }
                 Assert-AiInstructionsInstallJournalV2HeadState -State $operation.before -Context "$context.before" -ObjectFormat ([string]$Journal.scope.objectFormat)
@@ -2404,6 +2415,7 @@ function Assert-AiInstructionsInstallJournalV2 {
             }
             'store-git-stash-evidence' {
                 if ($null -ne $operation.observedAfter) { throw "$context.observedAfter must be null for non-file operations." }
+                if ($null -ne $operation.displacedMetadata) { throw "$context.displacedMetadata must be null for non-file operations." }
                 if ($targetKind -cne 'git-stash-evidence') { throw "$context store-git-stash-evidence target kind is invalid." }
                 if ([string]$operation.role -cne 'personal-agent-evidence' -or [string]$operation.method -cne 'stash-store' -or $null -ne $operation.stageLeaf -or $null -ne $operation.backupLeaf -or $null -ne $operation.quarantineLeaf) { throw "$context store-git-stash-evidence role, method, or artifact leaves are invalid." }
                 Assert-AiInstructionsInstallJournalV2EvidenceState -State $operation.before -Context "$context.before" -ObjectFormat ([string]$Journal.scope.objectFormat)

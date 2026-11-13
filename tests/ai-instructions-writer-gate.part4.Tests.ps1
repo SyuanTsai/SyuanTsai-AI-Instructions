@@ -1,5 +1,12 @@
 . (Join-Path $PSScriptRoot 'ai-instructions-writer-gate.TestSupport.ps1')
 
+function Copy-P9cJournalPreservingStrings {
+    param([Parameter(Mandatory=$true)][object]$Journal)
+    $parameters=@{InputObject=($Journal|ConvertTo-Json -Depth 30);ErrorAction='Stop'}
+    if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'}
+    return ConvertFrom-Json @parameters
+}
+
 function New-P9cDriftRollbackScenario {
     param(
         [Parameter(Mandatory=$true)][string]$Root,
@@ -10,6 +17,7 @@ function New-P9cDriftRollbackScenario {
     New-Item -ItemType Directory -Force -Path $Root|Out-Null
     $target=Join-Path $Root 'target';Copy-Item -LiteralPath $Seed -Destination $target -Recurse
     $unaffectedPath=Join-Path $target 'AGENTS.md'
+    $unaffectedBefore=Get-P9cFileEvidence $unaffectedPath
     $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $Root 'applied-runtime') -Failpoint before-committed-journal-write -RecoveryPath NextRun
     $applied=Invoke-P9bRepoBootstrap -Context $Context -ArchivePath $ArchivePath -TargetRoot $target -BootstrapPath $bootstrap
     if($applied.ExitCode-eq0){throw 'The drift fixture did not retain an applied transaction.'}
@@ -19,7 +27,6 @@ function New-P9cDriftRollbackScenario {
     if([string]$journal.phase-cne'applied'){throw "The drift fixture expected phase applied, found '$($journal.phase)'."}
     $unaffectedOperation=@($journal.operations|Where-Object{[string]$_.target.kind-ceq'repository-relative'-and[string]$_.target.value-ceq'AGENTS.md'})
     if($unaffectedOperation.Count-ne1-or[string]::IsNullOrWhiteSpace([string]$unaffectedOperation[0].backupLeaf)){throw 'The drift fixture did not retain the displaced AGENTS.md operation.'}
-    $unaffectedBefore=Get-P9cFileEvidence (Join-Path $transaction[0].FullName ([string]$unaffectedOperation[0].backupLeaf))
     $manifestPath=Join-Path $target '.codex/ai-instructions.manifest.json'
     [IO.File]::WriteAllBytes($manifestPath,[Text.UTF8Encoding]::new($false).GetBytes("external manifest drift`n"))
     $driftBefore=Get-P9cFileEvidence $manifestPath
@@ -582,7 +589,7 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         try{
             $scopeRoot=[IO.Path]::GetFullPath((Join-Path $TestDrive 'trusted-transition-repo'));$git=Join-Path $scopeRoot '.git'
             $identity=[pscustomobject][ordered]@{kind='windows-file-id';device='00000001';fileId='00000002'};$permissions=[pscustomobject][ordered]@{kind='windows-sddl';sddl='D:PAI(A;;FA;;;SY)';readOnly=$false}
-            $previous=[pscustomobject][ordered]@{schemaVersion=2;kind='ai-instructions-install-transaction';transactionId=('a'*32);createdAtUtc='2026-11-12T00:00:00.0000000Z';owner=[pscustomobject][ordered]@{component='repo-bootstrap';processId=1;processStartIdentity='fixture'};platform=[pscustomobject][ordered]@{os='windows';architecture='x64'};lock=[pscustomobject][ordered]@{primitive='windows-fileshare';leaf='bootstrap-ai-instructions.lock'};generation=[pscustomobject][ordered]@{previousBundleSha256=$null;candidateBundleSha256=('b'*64)};scope=[pscustomobject][ordered]@{kind='repository';repositoryRoot=$scopeRoot;repositoryRootIdentity=$identity;commonGitDirectory=$git;gitDirectory=$git;indexPath=(Join-Path $git 'index');indexLockContentSha256=('9'*64);objectFormat='sha1';externalBackup=$null};phase='prepared';operations=@([pscustomobject][ordered]@{sequence=1;kind='create-file';role='instruction';method='stage-rename';target=[pscustomobject][ordered]@{kind='repository-relative';value='AGENTS.md'};before=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null};after=[pscustomobject][ordered]@{exists=$true;sha256=('a'*64);length=3;identity=$identity;permissions=$permissions};observedAfter=$null;stageLeaf='operation-1.stage';backupLeaf=$null;quarantineLeaf=$null;state='pending'},[pscustomobject][ordered]@{sequence=2;kind='store-git-stash-evidence';role='personal-agent-evidence';method='stash-store';target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'};before=[pscustomobject][ordered]@{exists=$false;objectId=$null};after=[pscustomobject][ordered]@{exists=$true;objectId=$null};observedAfter=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})}
+            $previous=[pscustomobject][ordered]@{schemaVersion=2;kind='ai-instructions-install-transaction';transactionId=('a'*32);createdAtUtc='2026-11-12T00:00:00.0000000Z';owner=[pscustomobject][ordered]@{component='repo-bootstrap';processId=1;processStartIdentity='fixture'};platform=[pscustomobject][ordered]@{os='windows';architecture='x64'};lock=[pscustomobject][ordered]@{primitive='windows-fileshare';leaf='bootstrap-ai-instructions.lock'};generation=[pscustomobject][ordered]@{previousBundleSha256=$null;candidateBundleSha256=('b'*64)};scope=[pscustomobject][ordered]@{kind='repository';repositoryRoot=$scopeRoot;repositoryRootIdentity=$identity;commonGitDirectory=$git;gitDirectory=$git;indexPath=(Join-Path $git 'index');indexLockContentSha256=('9'*64);objectFormat='sha1';externalBackup=$null};phase='prepared';operations=@([pscustomobject][ordered]@{sequence=1;kind='create-file';role='instruction';method='stage-rename';target=[pscustomobject][ordered]@{kind='repository-relative';value='AGENTS.md'};before=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null};after=[pscustomobject][ordered]@{exists=$true;sha256=('a'*64);length=3;identity=$identity;permissions=$permissions};observedAfter=$null;displacedMetadata=$null;stageLeaf='operation-1.stage';backupLeaf=$null;quarantineLeaf=$null;state='pending'},[pscustomobject][ordered]@{sequence=2;kind='store-git-stash-evidence';role='personal-agent-evidence';method='stash-store';target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'};before=[pscustomobject][ordered]@{exists=$false;objectId=$null};after=[pscustomobject][ordered]@{exists=$true;objectId=$null};observedAfter=$null;displacedMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})}
             $clone={param($value)$parameters=@{InputObject=($value|ConvertTo-Json -Depth 30)};if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'};ConvertFrom-Json @parameters}
             $applying=&$clone $previous;$applying.phase='applying';{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $previous $applying}|Should -Not -Throw
             $withEvidence=&$clone $applying;$withEvidence.operations[1].after.objectId=('c'*40);$withEvidence.operations[1].state='applied';{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $applying $withEvidence}|Should -Not -Throw
@@ -635,7 +642,7 @@ Describe 'repo v2 journal cache conditions' {
         $module=Import-Module $script:TransactionModulePath -Force -PassThru;$lease=Open-PlatformDirectory -Root $transactionPath -RootOnly
         try{
             $states=[ordered]@{};foreach($leaf in @('journal.json','journal.prev','journal.stage')){$states[$leaf]=Get-AiInstructionsInstallFileState -ParentLease $lease -Leaf $leaf -LiteralPath (Join-Path $transactionPath $leaf) -PlatformOs windows}
-            $previous=Get-Content -Raw -LiteralPath $journalPath|ConvertFrom-Json;$next=$previous|ConvertTo-Json -Depth 30|ConvertFrom-Json;$next.phase='applying'
+            $previous=&$module {param($transactionLease,$transactionId) Read-AiInstructionsInstallJournalLeaf -TransactionLease $transactionLease -Leaf 'journal.json' -TransactionId $transactionId -ExpectedOwnerComponent 'repo-bootstrap'} $lease ([IO.Path]::GetFileName($transactionPath));$next=Copy-P9cJournalPreservingStrings $previous;$next.phase='applying'
             $returned=Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $next -PreviousJournal $previous -PlatformOs windows -JournalStoreStates $states
             $cache=$states['__repoV2TrustedJournal'];$cache|Should -Not -BeNullOrEmpty
             $cache.trustedJournal|Should -Not -BeNullOrEmpty
@@ -659,9 +666,9 @@ Describe 'repo v2 journal cache conditions' {
         $module=Import-Module $script:TransactionModulePath -Force -PassThru;$lease=Open-PlatformDirectory -Root $transactionPath -RootOnly
         try{
             $states=[ordered]@{};foreach($leaf in @('journal.json','journal.prev','journal.stage')){$states[$leaf]=Get-AiInstructionsInstallFileState -ParentLease $lease -Leaf $leaf -LiteralPath (Join-Path $transactionPath $leaf) -PlatformOs windows}
-            $previous=Get-Content -Raw -LiteralPath $journalPath|ConvertFrom-Json;$applying=$previous|ConvertTo-Json -Depth 30|ConvertFrom-Json;$applying.phase='applying'
+            $previous=&$module {param($transactionLease,$transactionId) Read-AiInstructionsInstallJournalLeaf -TransactionLease $transactionLease -Leaf 'journal.json' -TransactionId $transactionId -ExpectedOwnerComponent 'repo-bootstrap'} $lease ([IO.Path]::GetFileName($transactionPath));$applying=Copy-P9cJournalPreservingStrings $previous;$applying.phase='applying'
             $returned=Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $applying -PreviousJournal $previous -PlatformOs windows -JournalStoreStates $states
-            $next=$returned|ConvertTo-Json -Depth 30|ConvertFrom-Json;$next.operations[0].state='applied'
+            $next=Copy-P9cJournalPreservingStrings $returned;$next.operations[0].state='applied'
             $external=[byte[]](@([IO.File]::ReadAllBytes($journalPath))+[byte][char]' ');[IO.File]::WriteAllBytes($journalPath,$external)
             {Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $next -PreviousJournal $returned -PlatformOs windows -JournalStoreStates $states}|Should -Throw
             $states.Contains('__repoV2TrustedJournal')|Should -Be $false
@@ -678,9 +685,9 @@ Describe 'repo v2 journal cache conditions' {
         $module=Import-Module $script:TransactionModulePath -Force -PassThru;$lease=Open-PlatformDirectory -Root $transactionPath -RootOnly
         try{
             $states=[ordered]@{};foreach($leaf in @('journal.json','journal.prev','journal.stage')){$states[$leaf]=Get-AiInstructionsInstallFileState -ParentLease $lease -Leaf $leaf -LiteralPath (Join-Path $transactionPath $leaf) -PlatformOs windows}
-            $previous=Get-Content -Raw -LiteralPath $journalPath|ConvertFrom-Json;$applying=$previous|ConvertTo-Json -Depth 30|ConvertFrom-Json;$applying.phase='applying'
+            $previous=&$module {param($transactionLease,$transactionId) Read-AiInstructionsInstallJournalLeaf -TransactionLease $transactionLease -Leaf 'journal.json' -TransactionId $transactionId -ExpectedOwnerComponent 'repo-bootstrap'} $lease ([IO.Path]::GetFileName($transactionPath));$applying=Copy-P9cJournalPreservingStrings $previous;$applying.phase='applying'
             $returned=Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $applying -PreviousJournal $previous -PlatformOs windows -JournalStoreStates $states
-            $next=$returned|ConvertTo-Json -Depth 30|ConvertFrom-Json;$next.operations[0].state='applied'
+            $next=Copy-P9cJournalPreservingStrings $returned;$next.operations[0].state='applied'
             &$module {param($Path)
                 $script:Fix5gOriginalJournalRead=(Get-Command Read-AiInstructionsInstallJournalLeaf).ScriptBlock;$script:Fix5gJournalPath=$Path
                 function script:Read-AiInstructionsInstallJournalLeaf {
