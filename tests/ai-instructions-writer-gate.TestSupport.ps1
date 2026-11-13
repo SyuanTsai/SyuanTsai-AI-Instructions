@@ -424,22 +424,32 @@ function New-P9cIndexReacquireTheftBootstrap {
     return $bootstrapPath
 }
 
+function New-P9cIndexLockKnownLimitBootstrap {
+    param(
+        [Parameter(Mandatory=$true)][string]$Root,
+        [Parameter(Mandatory=$true)][ValidateSet('AfterCreateBeforeWrite','AfterAcquireBeforePrepared')][string]$Window
+    )
+    $scriptRoot=Join-Path $Root 'scripts'
+    Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts') -Destination $scriptRoot -Recurse
+    $bootstrapPath=Join-Path $scriptRoot 'bootstrap-ai-instructions.ps1'
+    $text=[IO.File]::ReadAllText($bootstrapPath)
+    if($Window-ceq'AfterCreateBeforeWrite'){
+        $marker='        $stream = [System.IO.File]::Open($lockPath,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)'
+        $replacement=$marker+"`r`n        [Environment]::FailFast('Injected failure after index.lock create before prefill.')"
+    }else{
+        $marker='    $script:ProjectPublicationContext.RepositoryIndexLock=$repositoryIndexLock'
+        $replacement=$marker+"`r`n    [Environment]::FailFast('Injected failure after index.lock prefill before prepared journal.')"
+    }
+    if(-not$text.Contains($marker)){throw "Index lock known-limit injection marker was not found for $Window."}
+    [IO.File]::WriteAllText($bootstrapPath,$text.Replace($marker,$replacement),[Text.UTF8Encoding]::new($false))
+    return $bootstrapPath
+}
+
 function Get-P9cRepositoryTransactionRoot {
     param([Parameter(Mandatory=$true)][string]$Repository)
     $gitDirectory=(@(& git -C $Repository rev-parse --absolute-git-dir 2>$null)|Select-Object -First 1)
     if($LASTEXITCODE-ne0-or[string]::IsNullOrWhiteSpace([string]$gitDirectory)){throw "Could not resolve the active worktree Git directory for '$Repository'."}
     return (Join-Path ([IO.Path]::GetFullPath(([string]$gitDirectory).Trim())) '.ai-instructions-txn')
-}
-
-function Remove-P9cExpectedEmptyResidualIndexLock {
-    param([Parameter(Mandatory=$true)][string]$Repository)
-    $indexPath=(@(& git -C $Repository rev-parse --git-path index 2>$null)|Select-Object -First 1)
-    if($LASTEXITCODE-ne0-or[string]::IsNullOrWhiteSpace([string]$indexPath)){throw "Could not resolve the Git index path for '$Repository'."}
-    if(-not[IO.Path]::IsPathRooted([string]$indexPath)){$indexPath=Join-Path $Repository ([string]$indexPath)}
-    $lockPath=[IO.Path]::GetFullPath(([string]$indexPath).Trim())+'.lock'
-    Test-Path -LiteralPath $lockPath -PathType Leaf|Should -Be $true
-    ([IO.File]::ReadAllBytes($lockPath)).Count|Should -Be 0
-    Remove-Item -LiteralPath $lockPath -Force
 }
 
 function Get-P9cPublicationStateSnapshot {

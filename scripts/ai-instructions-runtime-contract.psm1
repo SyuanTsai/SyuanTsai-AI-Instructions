@@ -2279,13 +2279,14 @@ function Assert-AiInstructionsInstallJournalV2 {
     Assert-AiInstructionsInstallJournalExactProperties -Object $Journal.generation -Names @('previousBundleSha256','candidateBundleSha256') -Context 'AI instructions install journal generation'
     if ($null -ne $Journal.generation.previousBundleSha256 -and ($Journal.generation.previousBundleSha256 -isnot [string] -or [string]$Journal.generation.previousBundleSha256 -cnotmatch '^[0-9a-f]{64}$')) { throw 'AI instructions install journal generation.previousBundleSha256 is invalid.' }
     if ($Journal.generation.candidateBundleSha256 -isnot [string] -or [string]$Journal.generation.candidateBundleSha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'AI instructions install journal generation.candidateBundleSha256 is invalid.' }
-    Assert-AiInstructionsInstallJournalExactProperties -Object $Journal.scope -Names @('kind','repositoryRoot','repositoryRootIdentity','commonGitDirectory','gitDirectory','indexPath','objectFormat','externalBackup') -Context 'AI instructions install journal repository scope'
+    Assert-AiInstructionsInstallJournalExactProperties -Object $Journal.scope -Names @('kind','repositoryRoot','repositoryRootIdentity','commonGitDirectory','gitDirectory','indexPath','indexLockContentSha256','objectFormat','externalBackup') -Context 'AI instructions install journal repository scope'
     if ($Journal.scope.kind -isnot [string] -or [string]$Journal.scope.kind -cne 'repository') { throw 'AI instructions install journal repository scope.kind is invalid.' }
     foreach ($name in @('repositoryRoot','commonGitDirectory','gitDirectory','indexPath')) {
         if ($Journal.scope.$name -isnot [string] -or -not [IO.Path]::IsPathRooted([string]$Journal.scope.$name)) { throw "AI instructions install journal repository scope.$name must be an absolute path." }
     }
     $expectedIdentityKind = if ([string]$Journal.platform.os -ceq 'windows') { 'windows-file-id' } else { 'unix-device-inode' }
     Assert-AiInstructionsInstallJournalIdentity -Identity $Journal.scope.repositoryRootIdentity -Context 'AI instructions install journal repository scope.repositoryRootIdentity' -ExpectedKind $expectedIdentityKind
+    if ($Journal.scope.indexLockContentSha256 -isnot [string] -or [string]$Journal.scope.indexLockContentSha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'AI instructions install journal repository scope.indexLockContentSha256 is invalid.' }
     if ($Journal.scope.objectFormat -isnot [string] -or [string]$Journal.scope.objectFormat -cnotin @('sha1','sha256')) { throw 'AI instructions install journal repository scope.objectFormat is invalid.' }
     if ($null -ne $Journal.scope.externalBackup) {
         Assert-AiInstructionsInstallJournalExactProperties -Object $Journal.scope.externalBackup -Names @('root','indexSha256','inventorySha256') -Context 'AI instructions install journal repository scope.externalBackup'
@@ -2358,6 +2359,7 @@ function Assert-AiInstructionsInstallJournalV2 {
                 if ([string]$operation.method -cne 'index-lock-rename' -or $null -eq $operation.stageLeaf -or $null -eq $operation.backupLeaf -or $null -ne $operation.quarantineLeaf) { throw "$context replace-git-index method or artifact leaves are invalid." }
                 Assert-AiInstructionsInstallJournalV2IndexState -State $operation.before -Context "$context.before" -ExpectedIdentityKind $expectedIdentityKind
                 Assert-AiInstructionsInstallJournalV2IndexState -State $operation.after -Context "$context.after" -ExpectedIdentityKind $expectedIdentityKind
+                if ([string]$operation.before.sha256 -cne [string]$Journal.scope.indexLockContentSha256) { throw "$context.before.sha256 must equal the prepared index.lock content SHA." }
             }
             'update-git-ref' {
                 if ($targetKind -cne 'git-ref') { throw "$context update-git-ref target kind is invalid." }

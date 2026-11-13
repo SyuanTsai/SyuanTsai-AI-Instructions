@@ -1880,7 +1880,17 @@ function Open-RepositoryIndexTransactionLock {
     catch [System.IO.IOException] {
         throw (New-RepositoryIndexLockRefusal -Reason 'The Git index is being changed by another process; bootstrap stopped before index preflight.' -LockPath $lockPath)
     }
-    return [pscustomobject][ordered]@{ Stream=$stream; Path=$lockPath; IndexPath=$indexPath }
+    try {
+        [byte[]]$indexBytes=[System.IO.File]::ReadAllBytes($indexPath)
+        $stream.Write($indexBytes,0,$indexBytes.Length)
+        $stream.Flush($true)
+        $contentSha256=Get-ByteArraySha256 $indexBytes
+    }
+    catch {
+        $stream.Dispose()
+        throw (New-RepositoryIndexLockRefusal -Reason "The Git index.lock could not be prefilled durably with the current index bytes: $($_.Exception.Message)" -LockPath $lockPath)
+    }
+    return [pscustomobject][ordered]@{ Stream=$stream; Path=$lockPath; IndexPath=$indexPath; ContentSha256=$contentSha256 }
 }
 
 function Close-RepositoryIndexTransactionLock {
@@ -5041,14 +5051,19 @@ function Get-RepositoryIndexLockRollForwardDecision {
     $lockPath=([string]$Journal.scope.indexPath)+'.lock'
     if(-not(Test-Path -LiteralPath $lockPath)){return $null}
     if(-not(Test-Path -LiteralPath $lockPath -PathType Leaf)-or(Get-Item -Force -LiteralPath $lockPath).Attributes-band[IO.FileAttributes]::ReparsePoint){throw (New-RepositoryIndexLockRefusal -Reason 'The residual Git index.lock is not a regular file owned by this transaction.' -LockPath $lockPath)}
-    if([string]$Journal.phase-cne'applying'){throw (New-RepositoryIndexLockRefusal -Reason "The residual Git index.lock cannot belong to a repository transaction in phase '$($Journal.phase)'." -LockPath $lockPath)}
+    if([string]$Journal.phase-cnotin@('prepared','applying','applied','committed')){throw (New-RepositoryIndexLockRefusal -Reason "The residual Git index.lock cannot belong to a repository transaction in phase '$($Journal.phase)'." -LockPath $lockPath)}
     $indexOperations=@($Journal.operations|Where-Object{[string]$_.kind-ceq'replace-git-index'})
-    if($indexOperations.Count-ne1){throw (New-RepositoryIndexLockRefusal -Reason 'A residual Git index.lock exists without exactly one journaled index step.' -LockPath $lockPath)}
+    if($indexOperations.Count-gt1){throw (New-RepositoryIndexLockRefusal -Reason 'A residual Git index.lock exists with more than one journaled index step.' -LockPath $lockPath)}
     try{[byte[]]$bytes=[IO.File]::ReadAllBytes($lockPath)}catch{throw (New-RepositoryIndexLockRefusal -Reason "The residual Git index.lock could not be read: $($_.Exception.Message)" -LockPath $lockPath)}
-    $sha256=Get-ByteArraySha256 $bytes;$operation=$indexOperations[0]
-    if($sha256-ceq[string]$operation.after.sha256){return [pscustomobject][ordered]@{LockPath=$lockPath;IndexPath=[string]$Journal.scope.indexPath;Operation=$operation;Destination=$operation.after;Direction='redo'}}
-    if($sha256-ceq[string]$operation.before.sha256){return [pscustomobject][ordered]@{LockPath=$lockPath;IndexPath=[string]$Journal.scope.indexPath;Operation=$operation;Destination=$operation.before;Direction='undo'}}
-    throw (New-RepositoryIndexLockRefusal -Reason 'The residual Git index.lock bytes do not match either write-ahead SHA recorded by this transaction.' -LockPath $lockPath)
+    $sha256=Get-ByteArraySha256 $bytes;$preparedSha256=[string]$Journal.scope.indexLockContentSha256
+    if($indexOperations.Count-eq0){
+        if($sha256-ceq$preparedSha256){return [pscustomobject][ordered]@{LockPath=$lockPath;IndexPath=[string]$Journal.scope.indexPath;Operation=$null;Destination=$null;DestinationSha256=$preparedSha256;Direction='prefill'}}
+        throw (New-RepositoryIndexLockRefusal -Reason 'The residual Git index.lock bytes do not match the prepared lock-content SHA recorded by this transaction.' -LockPath $lockPath)
+    }
+    $operation=$indexOperations[0]
+    if($sha256-ceq[string]$operation.after.sha256){return [pscustomobject][ordered]@{LockPath=$lockPath;IndexPath=[string]$Journal.scope.indexPath;Operation=$operation;Destination=$operation.after;DestinationSha256=[string]$operation.after.sha256;Direction='redo'}}
+    if($sha256-ceq[string]$operation.before.sha256-or$sha256-ceq$preparedSha256){return [pscustomobject][ordered]@{LockPath=$lockPath;IndexPath=[string]$Journal.scope.indexPath;Operation=$operation;Destination=$operation.before;DestinationSha256=[string]$operation.before.sha256;Direction='undo'}}
+    throw (New-RepositoryIndexLockRefusal -Reason 'The residual Git index.lock bytes do not match the prepared lock-content SHA or either index write-ahead SHA recorded by this transaction.' -LockPath $lockPath)
 }
 
 function Complete-RepositoryIndexLockRollForward {
@@ -5058,7 +5073,8 @@ function Complete-RepositoryIndexLockRollForward {
     try{Move-Item -LiteralPath $decision.LockPath -Destination $decision.IndexPath -Force}
     catch{throw (New-RepositoryIndexLockRefusal -Reason "The residual Git index.lock could not be rolled forward to the Git index: $($_.Exception.Message)" -LockPath $decision.LockPath)}
     $readback=Get-RepositoryTransactionIndexState $Journal
-    if(-not(Test-RepositoryTransactionIndexStateEqual $readback $decision.Destination)){throw (New-RepositoryIndexLockRefusal -Reason 'The Git index readback differs from the journaled lock destination after roll-forward.' -LockPath $decision.LockPath)}
+    if($null-ne$decision.Destination){$matches=Test-RepositoryTransactionIndexStateEqual $readback $decision.Destination}else{$matches=[string]$readback.sha256-ceq[string]$decision.DestinationSha256}
+    if(-not$matches){throw (New-RepositoryIndexLockRefusal -Reason 'The Git index readback differs from the journaled lock destination after roll-forward.' -LockPath $decision.LockPath)}
     return $decision
 }
 
@@ -5070,7 +5086,7 @@ function Resolve-RepositoryRecoveryIndexLock {
     try{
         $reacquired=Open-RepositoryIndexTransactionLock -Repository ([string]$Context.Repository)
         if($null-eq$Context.RepositoryIndexLock){$Context.RepositoryIndexLock=$reacquired}
-        else{$Context.RepositoryIndexLock.Stream=$reacquired.Stream;$Context.RepositoryIndexLock.Path=$reacquired.Path;$Context.RepositoryIndexLock.IndexPath=$reacquired.IndexPath}
+        else{$Context.RepositoryIndexLock.Stream=$reacquired.Stream;$Context.RepositoryIndexLock.Path=$reacquired.Path;$Context.RepositoryIndexLock.IndexPath=$reacquired.IndexPath;$Context.RepositoryIndexLock.ContentSha256=$reacquired.ContentSha256}
     }
     catch{throw (New-RepositoryIndexLockRefusal -Reason "The repository recovery could not acquire the long Git index lock before undo or redo: $($_.Exception.Message)" -LockPath $lockPath)}
 }
@@ -5094,7 +5110,7 @@ function Invoke-RepositoryIndexReplacement {
         if(-not(Test-RepositoryTransactionIndexStateEqual $live $Source)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'The Git index changed after index.lock was flushed; transaction evidence was retained.')}
         Move-Item -LiteralPath $lockPath -Destination $indexPath -Force
         Invoke-AiInstructionsInstallFailpoint -Name 'after-index-rename-before-reacquire'
-        try{$reacquired=Open-RepositoryIndexTransactionLock -Repository ([string]$Context.Repository);$Context.RepositoryIndexLock.Stream=$reacquired.Stream}
+        try{$reacquired=Open-RepositoryIndexTransactionLock -Repository ([string]$Context.Repository);$Context.RepositoryIndexLock.Stream=$reacquired.Stream;$Context.RepositoryIndexLock.ContentSha256=$reacquired.ContentSha256}
         catch{throw (New-RepositoryIndexLockRefusal -Reason "The transaction could not reacquire the long Git index lock after index publication: $($_.Exception.Message)" -LockPath $lockPath)}
     }finally{if($null-ne$stream){$stream.Dispose();$Context.RepositoryIndexLock.Stream=$null}}
 }
@@ -5332,7 +5348,7 @@ function Start-RepositoryInstallTransaction {
     $index=((Invoke-Git -Repository $Context.Repository -Arguments @('rev-parse','--git-path','index'))|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($index)){$index=Join-Path $Context.Repository $index};$index=[IO.Path]::GetFullPath($index)
     $rootLease=Open-PlatformDirectory -Root $Context.Repository -RootOnly;try{$rootIdentity=ConvertTo-ProjectPublicationIdentity $rootLease.Observation}finally{$rootLease.Dispose()}
     $backup=$null;if($null-ne$Context.Remediation){$inventoryBytes=[Text.UTF8Encoding]::new($false).GetBytes((($Context.Remediation.Backup.Inventory|ConvertTo-Json -Depth 10 -Compress)));$backup=[pscustomobject][ordered]@{root=[string]$Context.Remediation.Backup.Root;indexSha256=[string]$Context.Remediation.Backup.IndexSha256;inventorySha256=(Get-ByteArraySha256 $inventoryBytes)}}
-    $scope=[pscustomobject][ordered]@{kind='repository';repositoryRoot=$Context.Repository;repositoryRootIdentity=$rootIdentity;commonGitDirectory=$common;gitDirectory=$git;indexPath=$index;objectFormat=$(if($null-ne$Context.Remediation){[string]$Context.Remediation.ObjectFormat}else{((Invoke-Git -Repository $Context.Repository -Arguments @('rev-parse','--show-object-format'))|Select-Object -First 1).Trim()});externalBackup=$backup}
+    $scope=[pscustomobject][ordered]@{kind='repository';repositoryRoot=$Context.Repository;repositoryRootIdentity=$rootIdentity;commonGitDirectory=$common;gitDirectory=$git;indexPath=$index;indexLockContentSha256=[string]$Context.RepositoryIndexLock.ContentSha256;objectFormat=$(if($null-ne$Context.Remediation){[string]$Context.Remediation.ObjectFormat}else{((Invoke-Git -Repository $Context.Repository -Arguments @('rev-parse','--show-object-format'))|Select-Object -First 1).Trim()});externalBackup=$backup}
     $manifestIntent=@($Context.Intents.Values|Where-Object{[string]$_.Role-ceq'manifest'})|Select-Object -First 1;$previous=if($null-ne$manifestIntent-and$manifestIntent.Before.exists){[string]$manifestIntent.Before.sha256}else{$null};$candidate=if($null-ne$manifestIntent-and-not$manifestIntent.Remove){Get-ByteArraySha256 ([byte[]]$manifestIntent.Bytes)}else{Get-ByteArraySha256 ([Text.UTF8Encoding]::new($false).GetBytes(($operations|ConvertTo-Json -Depth 15 -Compress)))}
     $start=(Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o',[Globalization.CultureInfo]::InvariantCulture);$platform=Get-RepositoryTransactionPlatform
     $journal=New-AiInstructionsInstallJournalV2 -TransactionId $Context.Id -OwnerProcessId $PID -OwnerProcessStartIdentity $start -PlatformOs $platform -PlatformArchitecture (Get-RepositoryTransactionArchitecture) -LockPrimitive $(if($platform-ceq'windows'){'windows-fileshare'}else{'flock'}) -LockLeaf 'bootstrap-ai-instructions.lock' -PreviousBundleSha256 $previous -CandidateBundleSha256 $candidate -Scope $scope -Phase prepared -Operations $operations
@@ -5436,6 +5452,8 @@ function Invoke-RepositoryTransactionRollback {
         }
     }
     if($rollbackErrors.Count-gt0){throw ($rollbackErrors-join' | ')}
+    Close-RepositoryIndexTransactionLock -Lock $Context.RepositoryIndexLock
+    Invoke-AiInstructionsInstallFailpoint -Name 'after-index-lock-release-before-journal-cleanup'
     Remove-ProjectPublicationContextEvidence $Context;$Context.Durable=$false
 }
 
@@ -5443,6 +5461,8 @@ function Complete-RepositoryTransactionCleanup {
     param([Parameter(Mandatory=$true)][object]$Context)
     foreach($operation in @($Context.CurrentJournal.operations|Sort-Object sequence)){Invoke-RepositoryTransactionOperation -Context $Context -Journal $Context.CurrentJournal -Operation $operation -Direction redo}
     Invoke-AiInstructionsInstallFailpoint -Name 'after-committed-before-cleanup'
+    Close-RepositoryIndexTransactionLock -Lock $Context.RepositoryIndexLock
+    Invoke-AiInstructionsInstallFailpoint -Name 'after-index-lock-release-before-journal-cleanup'
     $transactionPath=Get-RepositoryTransactionPath -Context $Context
     Remove-InstallTerminalTransactionArtifacts -Journal $Context.CurrentJournal -TransactionLease $Context.Lease -TransactionPath $transactionPath -JournalStoreStates $Context.JournalStoreStates
     Invoke-AiInstructionsInstallFailpoint -Name 'during-cleanup-transaction'

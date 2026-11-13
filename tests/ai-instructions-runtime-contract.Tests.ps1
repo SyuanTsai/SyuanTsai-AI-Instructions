@@ -209,7 +209,7 @@ function Get-TestInstallJournalV2 {
         generation=[pscustomobject][ordered]@{previousBundleSha256=$null;candidateBundleSha256=('b'*64)}
         scope=[pscustomobject][ordered]@{
             kind='repository';repositoryRoot=$root;repositoryRootIdentity=$identity;commonGitDirectory=$git;gitDirectory=$git
-            indexPath=(Join-Path $git 'index');objectFormat='sha1';externalBackup=$null
+            indexPath=(Join-Path $git 'index');indexLockContentSha256=('9'*64);objectFormat='sha1';externalBackup=$null
         }
         phase='prepared'
         operations=@([pscustomobject][ordered]@{
