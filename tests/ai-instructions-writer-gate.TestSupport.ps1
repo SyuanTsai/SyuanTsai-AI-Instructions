@@ -591,10 +591,10 @@ function New-P9cPreManifestTamperBootstrap {
     Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts') -Destination $scriptRoot -Recurse
     $bootstrapPath=Join-Path $scriptRoot 'bootstrap-ai-instructions.ps1'
     $text=[IO.File]::ReadAllText($bootstrapPath)
-    $marker='            Assert-ProjectSkillManifestFilesCurrent -TargetRoot $targetRootPath -ManifestEntries $nextManifestEntries.ToArray()'
+    $marker='        Assert-ProjectSkillManifestFilesCurrent -TargetRoot $repository -ManifestEntries @($manifestDocument.files)'
     if(-not$text.Contains($marker)){throw 'Project pre-manifest verification invocation was not found.'}
     $relative=$TargetRelativePath.Replace("'","''")
-    $injection="            [IO.File]::AppendAllText((Join-Path `$targetRootPath '$relative'),`"concurrent project edit``n`",[Text.UTF8Encoding]::new(`$false))`r`n$marker"
+    $injection="        [IO.File]::AppendAllText((Join-Path `$repository '$relative'),`"concurrent project edit``n`",[Text.UTF8Encoding]::new(`$false))`r`n$marker"
     [IO.File]::WriteAllText($bootstrapPath,$text.Replace($marker,$injection),[Text.UTF8Encoding]::new($false))
     return $bootstrapPath
 }

@@ -450,21 +450,27 @@ Describe 'AI instructions writer and reader gate' {
     ) {
         param($Case,$Journal,$Previous)
         $root=Join-Path $script:ExternalRoot "p9c-recovery-$Case";New-Item -ItemType Directory -Force -Path $root|Out-Null
-        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip')
+        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip') -Marker baseline
+        $changed=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'changed-work') -ArchivePath (Join-Path $root 'changed.zip') -Marker changed
         $fixture=New-P9cProjectFixture -Root $root -ProjectionIds @('project-agents')
         $target=Join-Path $root 'target';New-P9bTargetRepository $target
         (Invoke-P9bRepoBootstrap -Context $fixture.Context -ArchivePath $source.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
-        $transactionId=[guid]::NewGuid().ToString('N')
         $transactionRoot=Get-P9cRepositoryTransactionRoot -Repository $target
-        $transactionPath=Join-Path $transactionRoot $transactionId
-        New-Item -ItemType Directory -Force -Path $transactionPath|Out-Null
+        if(-not$Journal-and-not$Previous){
+            $transactionId=[guid]::NewGuid().ToString('N');$transactionPath=Join-Path $transactionRoot $transactionId
+            New-Item -ItemType Directory -Force -Path $transactionPath|Out-Null
+            [IO.File]::WriteAllText((Join-Path $transactionPath 'op-000001.stage'),"unpublished payload`n",[Text.UTF8Encoding]::new($false))
+        }else{
+            $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $root 'prepared-runtime') -Failpoint after-journal-prepared -RecoveryPath NextRun
+            (Invoke-P9bRepoBootstrap -Context $fixture.Context -ArchivePath $changed.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap).ExitCode|Should Not Be 0
+            $transactions=@(Get-ChildItem -LiteralPath $transactionRoot -Directory -Force);$transactions.Count|Should Be 1
+            $transactionPath=$transactions[0].FullName
+            if($Previous){Copy-Item -LiteralPath (Join-Path $transactionPath 'journal.json') -Destination (Join-Path $transactionPath 'journal.prev')}
+            if(-not$Journal){Remove-Item -LiteralPath (Join-Path $transactionPath 'journal.json') -Force}
+        }
         [IO.File]::WriteAllText((Join-Path $transactionPath 'journal.stage'),"interrupted stage`n",[Text.UTF8Encoding]::new($false))
-        if(-not$Journal-and-not$Previous){[IO.File]::WriteAllText((Join-Path $transactionPath 'op-000001.stage'),"unpublished payload`n",[Text.UTF8Encoding]::new($false))}
-        $journalDocument=[ordered]@{schemaVersion=1;transactionId=$transactionId;repository=[IO.Path]::GetFullPath($target);phase='applying';operations=@()}
-        if($Journal){Set-P9bJson -Path (Join-Path $transactionPath 'journal.json') -Document $journalDocument}
-        if($Previous){Set-P9bJson -Path (Join-Path $transactionPath 'journal.prev') -Document $journalDocument}
 
-        $result=Invoke-P9bRepoBootstrap -Context $fixture.Context -ArchivePath $source.ArchivePath -TargetRoot $target
+        $result=Invoke-P9bRepoBootstrap -Context $fixture.Context -ArchivePath $changed.ArchivePath -TargetRoot $target
 
         $result.ExitCode|Should Be 0
         Test-Path -LiteralPath $transactionPath|Should Be $false

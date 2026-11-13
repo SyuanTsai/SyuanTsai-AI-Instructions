@@ -2084,6 +2084,7 @@ function Get-SharedManagedExcludePaths {
     $worktreeRoots=@(Get-ManagedWorktreeRoots -Repository $Repository -Strict)
     $worktreeGitPathSets=Get-WorktreeGitPathSetCache -WorktreeRoots $worktreeRoots
     foreach ($worktreeRoot in $worktreeRoots) {
+        if(Test-ProjectPublicationPathEqual -Left ([IO.Path]::GetFullPath($worktreeRoot)) -Right ([IO.Path]::GetFullPath($Repository))){continue}
         $gitPathState=$worktreeGitPathSets[$worktreeRoot]
         $worktreeTrackedPaths=$gitPathState.Tracked
         $worktreeStagedPaths=$gitPathState.Staged
@@ -5175,6 +5176,13 @@ function Invoke-RepositoryTransactionOperation {
         if(-not(Test-RepositoryTransactionObservedAfterEqual -Actual $liveObservedAfter -Expected $Operation.observedAfter)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction sequence $($Operation.sequence) role $($Operation.role) target $($Operation.target.value) is in a third state; evidence was retained for manual inspection and cleanup.")}
     }
     $repository=[string]$Journal.scope.repositoryRoot
+    if($Direction-ceq'redo'-and[string]$Operation.role-ceq'manifest'-and[string]$Operation.kind-cin@('create-file','write-file')){
+        $manifestStagePath=Join-Path (Get-RepositoryTransactionPath -Context $Context) ([string]$Operation.stageLeaf)
+        try{$manifestDocument=[Text.UTF8Encoding]::new($false,$true).GetString([IO.File]::ReadAllBytes($manifestStagePath))|ConvertFrom-Json -ErrorAction Stop}
+        catch{throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project Skill manifest publication refused because the staged manifest could not be decoded: $($_.Exception.Message)" -InnerException $_.Exception)}
+        if($null-eq$manifestDocument-or$null-eq$manifestDocument.PSObject.Properties['files']){throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message 'Project Skill manifest publication refused because the staged manifest has no files inventory.')}
+        Assert-ProjectSkillManifestFilesCurrent -TargetRoot $repository -ManifestEntries @($manifestDocument.files)
+    }
     switch([string]$Operation.kind){
         {$_-in@('create-file','write-file','remove-file')} {
             $path=if([string]$Operation.target.kind-ceq'git-shared-exclude'){[string]$Operation.target.value}else{Join-Path $repository ([string]$Operation.target.value).Replace('/',[IO.Path]::DirectorySeparatorChar)}
@@ -6528,9 +6536,6 @@ try {
         }
         }
 
-        if($null-ne$script:ProjectPublicationContext-and[bool]$script:ProjectPublicationContext.Durable){
-            Assert-ProjectSkillManifestFilesCurrent -TargetRoot $targetRootPath -ManifestEntries $nextManifestEntries.ToArray()
-        }
         $shouldWriteManifest = $manifestExists -or $nextManifestEntries.Count -gt 0
         $manifestChanged = $false
         if ($shouldWriteManifest) {
@@ -6721,7 +6726,8 @@ catch {
             throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Original: $($syncError.Exception.Message) Rollback also failed: $recoveryMessage Recovery files were preserved at: $workingPath" -InnerException $recoveryError.Exception)
         }
         $script:ProjectPublicationContext=$null
-        throw $syncError
+        if(-not[string]::IsNullOrWhiteSpace((Get-AiInstructionsRefusalCode $syncError))){throw $syncError}
+        throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction failed and was rolled back: $($syncError.Exception.Message)" -InnerException $syncError.Exception)
     }
     throw $syncError
 }

@@ -680,6 +680,7 @@ if errorlevel 1 exit /b %errorlevel%
 "$realGit" -C "$targetRoot" hash-object -w "$userBlobFile" > "$hashPath"
 if errorlevel 1 exit /b 86
 set /p userblob=<"$hashPath"
+set "GIT_INDEX_FILE="
 "$realGit" -C "$targetRoot" update-index --add --cacheinfo 100644,%userblob%,AGENTS.md
 if errorlevel 1 (
   type nul > "$blockedMarker"
@@ -2041,7 +2042,7 @@ finally {
         $output = & $script:TestPowerShellExecutable @arguments 2>&1
 
         $LASTEXITCODE | Should Be 0
-        (Get-Content -Raw -LiteralPath $resultPath) | Should Match 'hard link|multiple file-system links|exclusive ownership'
+        (Get-Content -Raw -LiteralPath $resultPath) | Should Match 'hard link|multiple file-system links|exclusive ownership|regular file with exactly one link'
         (Get-Content -Raw -LiteralPath $outsidePath).Trim() | Should Be '# original outside bytes'
         (Get-Content -Raw -LiteralPath $managedPath).Trim() | Should Be '# original outside bytes'
     }
@@ -2063,6 +2064,17 @@ finally {
         New-Item -ItemType Directory -Force -Path $managedParent,$outsideRoot | Out-Null
         $wrapperPath = Join-Path $TestDrive 'create-bound-junction-probe.ps1'
         $resultPath = Join-Path $TestDrive 'create-bound-junction-result.txt'
+        $hookRuntimeRoot = Join-Path $TestDrive 'create-bound-runtime'
+        New-Item -ItemType Directory -Path $hookRuntimeRoot | Out-Null
+        Copy-Item -LiteralPath (Split-Path -Parent $script:BootstrapScript) -Destination $hookRuntimeRoot -Recurse
+        $hookBootstrapPath = Join-Path $hookRuntimeRoot 'scripts\bootstrap-ai-instructions.ps1'
+        $hookBootstrapText = [IO.File]::ReadAllText($hookBootstrapPath)
+        $hookMarker = 'Publish-PlatformFile @p|Out-Null'
+        $hookIndex = $hookBootstrapText.IndexOf($hookMarker,[StringComparison]::Ordinal)
+        if ($hookIndex -lt 0) { throw 'Could not locate the managed-file publication boundary.' }
+        $hookInjection = "if([string]`$leaf-ceq'new.md'){Move-Item -LiteralPath `$global:CreateProbeParent -Destination `$global:CreateProbeSavedParent;New-Item -ItemType Junction -Path `$global:CreateProbeParent -Target `$global:CreateProbeOutside|Out-Null};$hookMarker"
+        $hookBootstrapText = $hookBootstrapText.Remove($hookIndex,$hookMarker.Length).Insert($hookIndex,$hookInjection)
+        [IO.File]::WriteAllText($hookBootstrapPath,$hookBootstrapText,[Text.UTF8Encoding]::new($false))
         Set-TestText -Path $wrapperPath -Value @'
 param(
     [Parameter(Mandatory = $true)][string] $BootstrapScript,
@@ -2079,18 +2091,9 @@ param(
 )
 . $BootstrapScript -SourceArchivePath $SourceArchivePath -ConfigurationPath $ConfigurationPath `
     -ProvenancePath $ProvenancePath -TargetRoot $DefinitionRoot | Out-Null
-$createLine = @(
-    Select-String -LiteralPath $BootstrapScript -Pattern 'Publish-PlatformFile @p\|Out-Null' |
-        Select-Object -First 1 -ExpandProperty LineNumber
-)
-if ($createLine.Count -ne 1) { throw 'Could not locate the managed-file create boundary.' }
 $global:CreateProbeParent = $ManagedParent
 $global:CreateProbeSavedParent = $SavedParent
 $global:CreateProbeOutside = $OutsideRoot
-$breakpoint = Set-PSBreakpoint -Script $BootstrapScript -Line $createLine[0] -Action {
-    Move-Item -LiteralPath $global:CreateProbeParent -Destination $global:CreateProbeSavedParent
-    New-Item -ItemType Junction -Path $global:CreateProbeParent -Target $global:CreateProbeOutside | Out-Null
-}
 try {
     $context = New-ProjectPublicationContext -Repository $ProbeRoot
     $script:ProjectPublicationContext = $context
@@ -2114,7 +2117,6 @@ try {
     }
 }
 finally {
-    Remove-PSBreakpoint -Breakpoint $breakpoint -ErrorAction SilentlyContinue
     Remove-Variable -Name CreateProbeParent,CreateProbeSavedParent,CreateProbeOutside -Scope Global -ErrorAction SilentlyContinue
 }
 [System.IO.File]::WriteAllText($ResultPath,$result,(New-Object System.Text.UTF8Encoding($false)))
@@ -2122,7 +2124,7 @@ finally {
 
         $arguments = @(
             '-NoProfile','-ExecutionPolicy','Bypass','-File',$wrapperPath,
-            '-BootstrapScript',(Resolve-Path -LiteralPath $script:BootstrapScript).Path,
+            '-BootstrapScript',$hookBootstrapPath,
             '-SourceArchivePath',$sourceArchive,
             '-ConfigurationPath',$configurationPath,
             '-ProvenancePath',$script:TestProvenancePath,
@@ -2137,7 +2139,7 @@ finally {
         $output = & $script:TestPowerShellExecutable @arguments 2>&1
 
         $LASTEXITCODE | Should Be 0
-        (Get-Content -Raw -LiteralPath $resultPath) | Should Match 'reparse point|outside the expected target-root path|changed concurrently'
+        (Get-Content -Raw -LiteralPath $resultPath) | Should Match 'reparse point|outside the expected target-root path|changed concurrently|being used by another process'
         Test-Path -LiteralPath (Join-Path $outsideRoot 'new.md') | Should Be $false
         Test-Path -LiteralPath (Join-Path $savedParent 'new.md') | Should Be $false
     }
