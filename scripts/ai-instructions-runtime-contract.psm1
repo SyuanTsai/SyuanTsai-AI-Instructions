@@ -27,6 +27,7 @@ $script:ExpectedPlatformRuntimeFunctionsToExport = @(
     'Start-PlatformOwnedProcess',
     'Stop-PlatformOwnedProcess',
     'Resolve-PlatformPowerShell',
+    'Assert-PlatformPowerShellRuntime',
     'Resolve-PlatformPhysicalPath',
     'Initialize-PlatformAuthorityPester',
     'Assert-PlatformAuthorityPester',

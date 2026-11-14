@@ -931,6 +931,11 @@ function Test-PlatformOwnedProcess {
     [pscustomobject]@{ status=$status; evidence=[pscustomobject]$evidence }
 }
 function Resolve-PlatformPowerShell { [CmdletBinding()] param([Parameter(Mandatory = $true)] $Policy, [Parameter(Mandatory = $true)] $DestinationLease, [Parameter(Mandatory = $true)] $OfflineCache, $ReleaseMetadata) Invoke-PlatformAdapter 'Resolve-PlatformPowerShell' $PSBoundParameters }
+function Assert-PlatformPowerShellRuntime {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)] $Policy, [Parameter(Mandatory = $true)] $Receipt)
+    & $script:PlatformRuntimePreparationModule.ExportedCommands['Assert-VerifiedPlatformPowerShellRuntime'] -Policy $Policy -Receipt $Receipt -Platform (Get-CurrentPlatformName)
+}
 function Resolve-PlatformPhysicalPath {
     param([Parameter(Mandatory=$true)][string]$Path)
     & $script:PlatformRuntimePreparationModule.ExportedCommands['Resolve-PlatformPhysicalPath'] @PSBoundParameters
@@ -985,6 +990,7 @@ Export-ModuleMember -Function @(
     'Start-PlatformOwnedProcess',
     'Stop-PlatformOwnedProcess',
     'Resolve-PlatformPowerShell',
+    'Assert-PlatformPowerShellRuntime',
     'Resolve-PlatformPhysicalPath',
     'Initialize-PlatformAuthorityPester',
     'Assert-PlatformAuthorityPester',

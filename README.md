@@ -311,6 +311,122 @@ $codexHome = if (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
 
 JSON 結果固定包含 `outcome` 與 `exitCode`：`0` 表示成功或目前已一致、`1` 表示失敗、`2` 表示 VerifyOnly 偵測到 drift、`3` 表示同一使用者已有更新程序持有 global lock。
 
+## 雲端／Linux setup（SYP-354 過渡期、未列入支援矩陣）
+
+這是 SYP-354 過渡期、給可拋棄雲端環境使用的 setup，**未列入支援矩陣**。上方「本機工具僅支援 Windows」的限制維持不變；這裡不授權一般 Linux／macOS／WSL 本機安裝或使用。P10a 只做到「取得並驗證 canonical pwsh」，S7～S9（runtime 安裝、USER projections、readiness）由 P10b 接線，目前在 receipt 中標為 `not-implemented-until-p10b`。
+
+取得方式：以 git clone 取得 Repository，checkout 固定的 full commit SHA，並把同一個 SHA 傳給 `--expected-commit`。Setup 會確認 `HEAD` 等於該值，且 `scripts/setup-agent-environment.{sh,ps1}`、`scripts/setup-agent-environment.policy.{json,tsv,schema.json}`、`scripts/agent-environment-setup.psm1` 六個檔案與該 commit 完全相同，也沒有 untracked 替身。
+
+```sh
+git clone https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git ai-instructions
+cd ai-instructions
+git checkout --detach <40 位小寫 commit SHA>
+sh scripts/setup-agent-environment.sh --expected-commit <同一個 SHA> --prepare
+sh scripts/setup-agent-environment.sh --expected-commit <同一個 SHA> --offline
+```
+
+- `--prepare`：允許網路。依 `scripts/setup-agent-environment.policy.tsv`（由 `setup-agent-environment.policy.json` 衍生）只以 https、TLS 1.2 以上與逾時限制下載官方 PowerShell 7.6.6 release asset，驗證 pinned SHA-256 後放入 cache；第一次會把 canonical pwsh 展開到 setup root，之後重跑只重驗，不重新安裝。結果為 `prepared-runtime-only`。
+- `--offline`：不連網，只讀 cache 並重驗既有 canonical pwsh；cache 缺少、hash 不符或尚未 `--prepare` 都會以 typed exit code 失敗，不做任何更新。結果為 `verified-runtime-only`。
+- Setup root 固定為 `$HOME/.local/share/ai-instructions-setup`（不讀 XDG）：`cache/` 放已驗證的 archive，`pwsh/<version>-<rid>/` 放 canonical pwsh，`receipts/` 放 `runtime-<version>-<rid>.json` 與 `setup-receipt.json`（`0600`），`tmp/` 只放本次執行的暫存，結束時由 `trap` 清除。重驗失敗時 fail closed，不會自動重裝；同時執行時以 setup lock 序列化，被占用時回 `concurrent`，結束時不持有 lock。
+- Receipt 同時以單行 JSON 輸出到 stdout，欄位含 `schemaVersion`、`result`、`code`、`exitCode`、OS／architecture／RID、`setupCommit`、`runtimeCommit`（P10a 固定為 `null`）、policy hash、pwsh 路徑與 version、.NET version、capability 名稱與狀態，以及 S5～S9 步驟狀態。路徑一律寫成 `~/...`，不含使用者名稱、token 或 site。
+- `CODEX_HOME` 只在 setup 的 process scope 設為 `~/.codex`；外部已設成其他值時回 `codex-home-conflict`。`CODEX_HOME` 或 `$HOME` 下若有中斷的 install／agent-environment transaction，setup 回 `interrupted-install` 並附上 recover 指令，不會自動 recover。
+- Windows 也可直接執行 `pwsh -NoProfile -NonInteractive -File scripts/setup-agent-environment.ps1 -Prepare|-Offline -ExpectedCommit <SHA> -ArchivePath <本機 zip>`。zip 必須是 policy 指定的官方 asset（例如 `PowerShell-7.6.6-win-x64.zip`），由使用者自行從 PowerShell 官方 GitHub release 下載；policy 就是同一個 commit 的 `scripts/setup-agent-environment.policy.json`，setup 會驗證檔名與 SHA-256。
+
+手動持久化（D4）：setup 不會修改 `~/.profile` 等 shell profile，也不寫入任何 Atlassian／Datadog／Jira 設定。需要在新的 shell 沿用時，請自行決定是否在個人 profile 中設定 `CODEX_HOME="$HOME/.codex"`，並以 receipt 的 pwsh 絕對路徑呼叫 PowerShell。
+
+已知限制：
+
+- K13：`~/.claude/CLAUDE.md` managed section 尚未改用 canonical pwsh 的絕對路徑，雲端 PATH 上沒有 pwsh 時規則無法直接執行；待 P9c2 處理。
+- P10b 尚未接線：P10a 不呼叫 installer、updater 或 coordinator。
+- 祖先目錄不得為 symbolic link，且須屬於 root 或目前使用者、不可 group／other 寫入（sticky 例外）。macOS 的 `/var` 等 symlink 祖先，以及 Fedora Atomic 的 `/home` → `/var/home`，會被拒絕。
+- A1：Unix 的保證是 cooperative lock、不跟隨 link 與重驗；同帳號、不遵守 lock 的惡意 writer 不在保證範圍內。
+- P8：所有 projection root 與 USER home 必須在同一個 filesystem；setup 的暫存與 cache 也放在 setup root 底下以便同 filesystem `mv`。
+- 只驗證過 Windows fixture；Linux arm64、macOS（x64／arm64）與實際雲端環境尚未驗證。musl 系統回 `unsupported-platform`。canonical pwsh 需要系統已有其執行依賴（例如 ICU）；setup 不安裝系統套件，也不轉傳 `DOTNET_*` 等 loader／runtime 變數。
+
+Typed exit code（shell 與 PowerShell 共用，定義在 `scripts/agent-environment-setup.psm1`）：
+
+| Exit code | Code | 說明 |
+| --- | --- | --- |
+| 0 | `success` | 完成（`prepared-runtime-only` 或 `verified-runtime-only`） |
+| 1 | `internal-error` | 未預期的錯誤 |
+| 10 | `usage` | 參數錯誤或缺少必填參數 |
+| 11 | `unsupported-platform` | OS／architecture／musl 沒有 pinned asset |
+| 12 | `home-invalid` | `HOME` 不是存在、可寫的絕對路徑目錄 |
+| 13 | `unsafe-path` | 祖先為 symlink、屬主或權限不安全，或路徑型別錯誤 |
+| 14 | `missing-dependency` | 缺少 git、tar、curl／wget、sha256sum／shasum 等工具 |
+| 15 | `commit-mismatch` | `HEAD` 或六個綁定檔案與 `--expected-commit` 不一致 |
+| 16 | `policy-invalid` | policy、schema 或衍生 TSV 不合法或不一致 |
+| 17 | `download-failed` | 官方 archive 下載失敗 |
+| 18 | `archive-hash-mismatch` | archive 的 SHA-256 或檔名與 policy 不符 |
+| 19 | `archive-unsafe` | archive 含 link、裝置、絕對路徑或 traversal 成員 |
+| 20 | `cache-missing` | 已驗證的 archive cache 不存在 |
+| 21 | `runtime-missing` | `--offline` 時尚未 `--prepare` 過 canonical pwsh |
+| 22 | `runtime-incomplete` | canonical pwsh 目錄與 runtime receipt 不完整 |
+| 23 | `runtime-verification-failed` | canonical pwsh 準備或重驗失敗（不自動重裝） |
+| 24 | `runtime-baseline-unavailable` | 不是 PowerShell 7 加 .NET 8 以上 |
+| 25 | `capability-unavailable` | 必要的 platform capability 不可用 |
+| 26 | `concurrent` | 另一個 setup 正持有 setup lock |
+| 27 | `interrupted-install` | `CODEX_HOME` 或 `$HOME` 有中斷的 transaction／legacy residue |
+| 28 | `codex-home-conflict` | `CODEX_HOME` 已設成 `~/.codex` 以外的值 |
+
+## Cloud/Linux setup (SYP-354 transitional, outside the support matrix)
+
+This setup exists only for disposable cloud environments during the SYP-354 transition and is **not part of the support matrix**. The Windows-only local tooling statement above still applies; this section does not authorize general Linux, macOS or WSL local installation or use. P10a stops once a canonical pwsh is acquired and verified; S7-S9 (runtime install, USER projections, readiness) are wired in P10b and are reported as `not-implemented-until-p10b` in the receipt.
+
+How to obtain it: git clone the repository, check out a fixed full commit SHA, and pass the same SHA to `--expected-commit`. Setup checks that `HEAD` equals it and that the six bound files (`scripts/setup-agent-environment.{sh,ps1}`, `scripts/setup-agent-environment.policy.{json,tsv,schema.json}`, `scripts/agent-environment-setup.psm1`) are identical to that commit with no untracked substitutes.
+
+```sh
+git clone https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git ai-instructions
+cd ai-instructions
+git checkout --detach <40-character lowercase commit SHA>
+sh scripts/setup-agent-environment.sh --expected-commit <same SHA> --prepare
+sh scripts/setup-agent-environment.sh --expected-commit <same SHA> --offline
+```
+
+- `--prepare` may use the network. It downloads the official PowerShell 7.6.6 release asset named by `scripts/setup-agent-environment.policy.tsv` (derived from `setup-agent-environment.policy.json`) over https with TLS 1.2+ and timeouts, verifies the pinned SHA-256 and caches it. The first run expands the canonical pwsh into the setup root; reruns only re-verify it and never reinstall. Result: `prepared-runtime-only`.
+- `--offline` never uses the network. It reads the cache and re-verifies the existing canonical pwsh; a missing cache, a hash mismatch or a missing `--prepare` is a typed failure with no update. Result: `verified-runtime-only`.
+- The setup root is fixed at `$HOME/.local/share/ai-instructions-setup` (XDG is not read): `cache/` holds verified archives, `pwsh/<version>-<rid>/` the canonical pwsh, `receipts/` holds `runtime-<version>-<rid>.json` and `setup-receipt.json` (`0600`), and `tmp/` only per-run temporary data removed by a `trap`. A failed re-verification fails closed without reinstalling. Concurrent runs are serialized by the setup lock and a busy lock returns `concurrent`; no lock is held after exit.
+- The receipt is also printed to stdout as one JSON line with `schemaVersion`, `result`, `code`, `exitCode`, OS/architecture/RID, `setupCommit`, `runtimeCommit` (always `null` in P10a), the policy hash, pwsh path and version, .NET version, capability names and statuses, and the S5-S9 step states. Paths are always `~/...`; no user name, token or site is recorded.
+- `CODEX_HOME` is set to `~/.codex` for the setup process scope only; a different pre-set value returns `codex-home-conflict`. An interrupted install or agent-environment transaction under `CODEX_HOME` or `$HOME` returns `interrupted-install` with a recover command; setup never recovers automatically.
+- On Windows run `pwsh -NoProfile -NonInteractive -File scripts/setup-agent-environment.ps1 -Prepare|-Offline -ExpectedCommit <SHA> -ArchivePath <local zip>`. The zip must be the official asset named by the policy (for example `PowerShell-7.6.6-win-x64.zip`), downloaded by the user from the official PowerShell GitHub release; the policy is `scripts/setup-agent-environment.policy.json` at the same commit, and setup verifies the file name and SHA-256.
+
+Manual persistence (D4): setup never edits shell profiles such as `~/.profile` and never writes Atlassian, Datadog or Jira settings. To reuse the environment in a new shell, decide yourself whether to set `CODEX_HOME="$HOME/.codex"` in your personal profile and call PowerShell through the absolute pwsh path from the receipt.
+
+Known limitations:
+
+- K13: the `~/.claude/CLAUDE.md` managed section does not yet use the canonical pwsh absolute path, so its rules cannot run when pwsh is not on PATH; P9c2 owns this.
+- P10b is not wired yet: P10a never calls the installer, updater or coordinator.
+- Ancestor directories must not be symbolic links, must be owned by root or the current user, and must not be group/other writable unless sticky. macOS symlinked ancestors such as `/var` and Fedora Atomic `/home` → `/var/home` are refused.
+- A1: on Unix the guarantee is a cooperative lock, no link following and re-verification; a same-account malicious writer that ignores the lock is out of scope.
+- P8: all projection roots and the USER home must share one filesystem; the setup temp and cache also live under the setup root so `mv` stays on one filesystem.
+- Only the Windows fixture is verified; Linux arm64, macOS (x64/arm64) and real cloud environments are unverified. musl systems return `unsupported-platform`. The canonical pwsh needs its system runtime dependencies (for example ICU); setup installs no system packages and never forwards loader/runtime variables such as `DOTNET_*`.
+
+Typed exit codes (shared by the shell and PowerShell entry points, defined in `scripts/agent-environment-setup.psm1`):
+
+| Exit code | Code | Meaning |
+| --- | --- | --- |
+| 0 | `success` | Completed (`prepared-runtime-only` or `verified-runtime-only`) |
+| 1 | `internal-error` | Unexpected failure |
+| 10 | `usage` | Invalid or missing arguments |
+| 11 | `unsupported-platform` | No pinned asset for the OS/architecture, or musl |
+| 12 | `home-invalid` | `HOME` is not an existing, writable absolute directory |
+| 13 | `unsafe-path` | Symlinked, unsafely owned or writable ancestor, or wrong path type |
+| 14 | `missing-dependency` | git, tar, curl/wget, sha256sum/shasum or another tool is missing |
+| 15 | `commit-mismatch` | `HEAD` or a bound file differs from `--expected-commit` |
+| 16 | `policy-invalid` | The policy, schema or derived TSV is invalid or inconsistent |
+| 17 | `download-failed` | The official archive download failed |
+| 18 | `archive-hash-mismatch` | The archive SHA-256 or file name does not match the policy |
+| 19 | `archive-unsafe` | The archive has a link, device, absolute or traversal member |
+| 20 | `cache-missing` | The verified archive cache is missing |
+| 21 | `runtime-missing` | `--offline` without a prepared canonical pwsh |
+| 22 | `runtime-incomplete` | The canonical pwsh directory and runtime receipt are incomplete |
+| 23 | `runtime-verification-failed` | Preparing or re-verifying the canonical pwsh failed (no automatic reinstall) |
+| 24 | `runtime-baseline-unavailable` | Not PowerShell 7 on .NET 8 or later |
+| 25 | `capability-unavailable` | A required platform capability is unavailable |
+| 26 | `concurrent` | Another setup holds the setup lock |
+| 27 | `interrupted-install` | Interrupted transaction or legacy residue under `CODEX_HOME` or `$HOME` |
+| 28 | `codex-home-conflict` | `CODEX_HOME` is set to a value other than `~/.codex` |
+
 ## 舊 REPO Skills 遷移
 
 Bootstrap 先按完整 Skill 盤點；只有舊 manifest 的所有 files 都 unchanged、ignored/untracked，且 USER stable ID、可信來源／immutable pin 與完整 inventory 一致，才備份後移除精確舊檔及相應 entries。USER 新版的 hash 不會用來判斷舊 REPO bytes。客製、額外資源、tracked/staged、unknown ownership、missing manifest、USER 不可用或競態都保留整個 Skill，並回報人工處理或 USER 修復需求。`-WhatIf` 只盤點，不寫 manifest、exclude、index 或 payload；遷移日誌及 raw-byte 備份保留在 Repository 外。恢復及 SYP-259 跨主機部署步驟見 [SYP-214 runbook](docs/delivery/syp-214/README.md)。

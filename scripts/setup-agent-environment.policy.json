@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "powerShell": {
+    "version": "7.6.6",
+    "downloadUrlTemplate": "https://github.com/PowerShell/PowerShell/releases/download/v{version}/{assetName}",
+    "assets": [
+      {
+        "rid": "win-x64",
+        "name": "PowerShell-7.6.6-win-x64.zip",
+        "sha256": "02fe458be20493fbdf43f61ea20610b811ee6c738ab1676c61b9cfcd1a33c860"
+      },
+      {
+        "rid": "win-arm64",
+        "name": "PowerShell-7.6.6-win-arm64.zip",
+        "sha256": "bbde9dda31d148415eccb5fbe1638e6400a144187b006e5b3fd8ec2f39d781be"
+      },
+      {
+        "rid": "linux-x64",
+        "name": "powershell-7.6.6-linux-x64.tar.gz",
+        "sha256": "ddbc4a2d113bbd46d283cfedcbcd117a70caefd7673f41f2b4e0000badf103bc"
+      },
+      {
+        "rid": "linux-arm64",
+        "name": "powershell-7.6.6-linux-arm64.tar.gz",
+        "sha256": "924829e54c983648f6f1419a2dc7f9433c861b2fb5bd57736ff096c24f133729"
+      },
+      {
+        "rid": "osx-x64",
+        "name": "powershell-7.6.6-osx-x64.tar.gz",
+        "sha256": "e325ed9f666894eb39a5ea52800b602da2fb4242bbe9747ceddb39cdc66de805"
+      },
+      {
+        "rid": "osx-arm64",
+        "name": "powershell-7.6.6-osx-arm64.tar.gz",
+        "sha256": "6df833d094ebac1c1a74340d7b3437f4aaf5e03ce640484a1c4359f3ce8b3db1"
+      }
+    ]
+  }
+}

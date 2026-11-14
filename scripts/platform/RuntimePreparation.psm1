@@ -516,6 +516,63 @@ function Resolve-VerifiedPlatformPowerShell {
     finally { Close-PlatformPreparationSession $session }
 }
 
+# K15: re-verify a runtime receipt issued by Resolve-VerifiedPlatformPowerShell.
+# Read-only: no extraction, no writes beyond the existing verified identity probe,
+# and no network. The receipt must still match policy, the host RID, the physical
+# closure on disk (regular files and directories only, no links or hard-link
+# aliases, no extra or missing members), and the physical pwsh identity.
+function Assert-VerifiedPlatformPowerShellRuntime {
+    param($Policy,$Receipt,[string]$Platform)
+    $guards=$null
+    try {
+        if ($Platform -cnotin @('windows','linux','macos')) { throw 'The current platform is unsupported.' }
+        if ($null -eq $Receipt) { throw 'A runtime receipt is required.' }
+        if ($null -eq $Policy) { throw 'A PowerShell policy is required.' }
+        $fields=[ordered]@{}
+        foreach ($name in @('apiVersion','version','assetName','archiveSha256','executablePath','executableSha256','runtimeClosure','os','architecture')) {
+            $value=Get-PlatformPreparationProperty $Receipt $name
+            if ($null -eq $value -or ($value -is [string] -and [string]::IsNullOrWhiteSpace($value))) { throw "Runtime receipt lacks '$name'." }
+            $fields[$name]=$value
+        }
+        if ([string]$fields.apiVersion -cne '1.0') { throw 'Runtime receipt apiVersion is unsupported.' }
+        $architecture=[SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetArchitecture()
+        if ([string]$fields.os -cne $Platform -or [string]$fields.architecture -cne $architecture) { throw 'Runtime receipt RID does not match the current host.' }
+        $asset=Get-PlatformPowerShellAsset $Policy $Platform $architecture $null
+        if ([string]$fields.version -cne $asset.Version -or [string]$fields.assetName -cne $asset.Name -or [string]$fields.archiveSha256 -cne $asset.Sha256) {
+            throw 'Runtime receipt version or asset does not match policy.'
+        }
+        $closureValue=$fields.runtimeClosure
+        $rootPath=[string](Get-PlatformPreparationProperty $closureValue 'rootPath')
+        $closureSha=[string](Get-PlatformPreparationProperty $closureValue 'sha256')
+        $closureFiles=Get-PlatformPreparationProperty $closureValue 'files'
+        if ([string]::IsNullOrWhiteSpace($rootPath) -or $closureSha -cnotmatch '^[a-f0-9]{64}$' -or $null -eq $closureFiles) { throw 'Runtime receipt closure is incomplete.' }
+        $files=foreach ($file in @($closureFiles)) {
+            $path=[string](Get-PlatformPreparationProperty $file 'path'); $sha=[string](Get-PlatformPreparationProperty $file 'sha256')
+            if ([string]::IsNullOrWhiteSpace($path) -or $sha -cnotmatch '^[a-f0-9]{64}$') { throw 'Runtime receipt closure has an incomplete member.' }
+            [void](Assert-SafePlatformArchivePath $path $Platform)
+            [pscustomobject]@{path=$path;sha256=$sha}
+        }
+        # The receipt digest must bind its own member list before disk comparison.
+        $closure=New-PlatformExpectedClosure $rootPath @($files)
+        if ($closure.sha256 -cne $closureSha -or @($closure.files).Count -ne @($files).Count) { throw 'Runtime receipt closure digest is inconsistent.' }
+        $executable=[string]$fields.executablePath
+        if (-not [IO.Path]::IsPathFullyQualified($executable) -or [IO.Path]::GetFullPath($executable) -cne $executable) { throw 'Runtime receipt executable path is not canonical.' }
+        $leaf=if ($Platform -ceq 'windows') { 'pwsh.exe' } else { 'pwsh' }
+        if ([IO.Path]::GetFileName($executable) -cne $leaf) { throw 'Runtime receipt executable is not the canonical pwsh.' }
+        $bound=@($closure.files | Where-Object { [string]$_.path -ceq $leaf })
+        if ($bound.Count -ne 1 -or [string]$bound[0].sha256 -cne [string]$fields.executableSha256) { throw 'Runtime receipt executable hash is not bound by its closure.' }
+        $guards=Open-PlatformClosureGuards $closure $Platform
+        Assert-PlatformRuntimeClosure $executable $closure $Platform
+        [void](Test-PlatformPowerShellIdentity $executable $asset.Version $Platform $architecture $closure)
+        return $Receipt
+    }
+    catch {
+        if ($_.Exception -is [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException]) { throw }
+        throw (New-PlatformPreparationFailure 'powershell-runtime' $Platform ('Runtime receipt verification failed: '+$_.Exception.Message))
+    }
+    finally { Close-PlatformPreparationSession $guards }
+}
+
 function Import-VerifiedPesterResolverModule {
     param([string]$ResolverPath,[string]$Platform)
     [void](Test-PhysicalPlatformFile $ResolverPath $Platform 'pester-module')
@@ -1009,4 +1066,4 @@ function Initialize-VerifiedPlatformPester {
     finally { Close-PlatformPesterSnapshot $payloadSnapshot; Close-PlatformPreparationSession $session; Close-PlatformPreparationSession $runtimeGuards }
 }
 
-Export-ModuleMember -Function Resolve-VerifiedPlatformPowerShell,Initialize-VerifiedPlatformPester,Test-PlatformPowerShellIdentity,New-PlatformVerifiedProcessEnvironment,Start-PlatformVerifiedProcess,Resolve-PlatformPhysicalPath,New-PlatformPrivateRoot,Invoke-PlatformPreparationCommand,Initialize-PlatformAuthorityPester,Assert-PlatformAuthorityPester
+Export-ModuleMember -Function Resolve-VerifiedPlatformPowerShell,Assert-VerifiedPlatformPowerShellRuntime,Initialize-VerifiedPlatformPester,Test-PlatformPowerShellIdentity,New-PlatformVerifiedProcessEnvironment,Start-PlatformVerifiedProcess,Resolve-PlatformPhysicalPath,New-PlatformPrivateRoot,Invoke-PlatformPreparationCommand,Initialize-PlatformAuthorityPester,Assert-PlatformAuthorityPester
