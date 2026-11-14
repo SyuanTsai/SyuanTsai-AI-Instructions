@@ -5105,6 +5105,7 @@ function Restore-RepositoryTransactionDisplacedMetadata {
     #   never displaced (no journaled displaced-after value) -> no mutation
     #   live == prepared original metadata                   -> no-op
     #   live == journaled displaced-after metadata           -> apply the original and read it back
+    #   live == journaled published observedAfter metadata   -> apply only after this undo moved the original back
     #   anything else                                        -> third state, no mutation
     # The target handle is bound to the prepared original identity before any metadata is read or applied.
     param([Parameter(Mandatory=$true)][object]$Journal,[Parameter(Mandatory=$true)][object]$Operation)
@@ -5121,7 +5122,19 @@ function Restore-RepositoryTransactionDisplacedMetadata {
             if(-not(Test-RepositoryTransactionIdentityEqual -Actual (ConvertTo-ProjectPublicationIdentity $lease.Observation) -Expected $Operation.before.identity)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message $thirdState)}
             $live=ConvertTo-RepositoryTransactionMetadataSnapshot -Permissions (Get-PlatformPermissions -Lease $lease)
             if(Test-RepositoryTransactionDisplacedMetadataEqual -Actual $live -Expected $Operation.displacedMetadata){return}
-            if(-not(Test-RepositoryTransactionDisplacedMetadataEqual -Actual $live -Expected $displacedAfter)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message $thirdState)}
+            $matchesDisplacedAfter=Test-RepositoryTransactionDisplacedMetadataEqual -Actual $live -Expected $displacedAfter
+            # Publish-PlatformFile's undo path deliberately transfers the live published
+            # target metadata to the original backup before moving that identity back.  On
+            # Windows, parent inheritance can therefore make the restored target match the
+            # operation's durable observedAfter instead of the backup-directory snapshot.
+            # Accept only that already-journaled transaction state; arbitrary metadata still
+            # remains a third state and is never overwritten.
+            $matchesPublishedAfter=$false
+            if(-not$matchesDisplacedAfter-and$null-ne$Operation.observedAfter){
+                $liveObservedAfter=Get-RepositoryTransactionObservedAfter -Journal $Journal -Operation $Operation
+                $matchesPublishedAfter=Test-RepositoryTransactionObservedAfterEqual -Actual $liveObservedAfter -Expected $Operation.observedAfter
+            }
+            if(-not$matchesDisplacedAfter-and-not$matchesPublishedAfter){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message $thirdState)}
             Set-PlatformPermissions -Lease $lease -Snapshot $Operation.displacedMetadata|Out-Null
             $readback=Get-PlatformPermissions -Lease $lease
             if(-not(Test-RepositoryTransactionDisplacedMetadataEqual -Actual $readback -Expected $Operation.displacedMetadata)){

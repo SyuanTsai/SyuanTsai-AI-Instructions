@@ -374,6 +374,30 @@ function New-P9cStashTamperAfterPreparedBootstrap {
     return $bootstrapPath
 }
 
+function New-P9cMetadataUndoIntermediateFailpointBootstrap {
+    param(
+        [Parameter(Mandatory=$true)][string]$Root,
+        [Parameter(Mandatory=$true)][int]$Sequence,
+        [Parameter(Mandatory=$true)][string]$ProbePath
+    )
+    $bootstrapPath=New-P9cProjectPublicationFailpointBootstrap -Root $Root -Failpoint before-committed-journal-write -RecoveryPath InProcess
+    $text=[IO.File]::ReadAllText($bootstrapPath)
+    $marker=';Restore-RepositoryTransactionDisplacedMetadata -Journal $Journal -Operation $Operation}'
+    if(-not$text.Contains($marker)){throw 'Repository metadata restore marker was not found.'}
+    $escapedProbe=$ProbePath.Replace("'","''")
+    $injection=@"
+;if([int]`$Operation.sequence-eq$Sequence){
+    `$liveObservedAfter=Get-RepositoryTransactionObservedAfter -Journal `$Journal -Operation `$Operation
+    `$matchesObservedAfter=Test-RepositoryTransactionObservedAfterEqual -Actual `$liveObservedAfter -Expected `$Operation.observedAfter
+    [IO.File]::WriteAllText('$escapedProbe',([pscustomobject][ordered]@{sequence=[int]`$Operation.sequence;matchesObservedAfter=[bool]`$matchesObservedAfter;live=`$liveObservedAfter;expected=`$Operation.observedAfter}|ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new(`$false))
+    [Environment]::SetEnvironmentVariable('AI_INSTRUCTIONS_INSTALL_FAILPOINT',('after-rollback-operation-'+`$Operation.sequence),'Process')
+    Invoke-AiInstructionsInstallFailpoint -Name ('after-rollback-operation-'+`$Operation.sequence)
+};Restore-RepositoryTransactionDisplacedMetadata -Journal `$Journal -Operation `$Operation}
+"@
+    [IO.File]::WriteAllText($bootstrapPath,$text.Replace($marker,$injection.TrimEnd("`r","`n")),[Text.UTF8Encoding]::new($false))
+    return $bootstrapPath
+}
+
 function New-P9cLongIndexLockProbeBootstrap {
     param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][string]$ProbePath)
     $bootstrapPath=New-P9cProjectPublicationFailpointBootstrap -Root $Root -Failpoint after-journal-prepared -RecoveryPath InProcess

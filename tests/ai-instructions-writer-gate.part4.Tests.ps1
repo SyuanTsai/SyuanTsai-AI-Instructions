@@ -339,6 +339,39 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         @(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force -ErrorAction SilentlyContinue).Count|Should -Be 0
     }
 
+    # Scenario: A failpoint stops rollback after P7 moves the original shared exclude back, while live metadata exactly equals durable observedAfter.
+    # Purpose: Accept only that journaled P7 undo intermediate state, restore the original metadata through P7, and finish recovery without residue.
+    It 'InterT176_recovers_the_journaled_P7_undo_metadata_intermediate_state' {
+        $discovery=Join-Path $script:ExternalRoot 'metadata-undo-discovery';Copy-Item -LiteralPath $script:P9cSeeds.False -Destination $discovery -Recurse
+        $prepared=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'metadata-undo-discovery-runtime') -Failpoint after-journal-prepared -RecoveryPath NextRun
+        (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $discovery -BootstrapPath $prepared).ExitCode|Should -Not -Be 0
+        $discoveryTransaction=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $discovery) -Directory -Force);$discoveryJournal=Get-Content -Raw -LiteralPath (Join-Path $discoveryTransaction[0].FullName 'journal.json')|ConvertFrom-Json
+        $excludeOperation=@($discoveryJournal.operations|Where-Object{[string]$_.role-ceq'shared-exclude'-and[string]$_.kind-ceq'write-file'}|Select-Object -First 1);$excludeOperation.Count|Should -Be 1
+
+        $target=Join-Path $script:ExternalRoot 'metadata-undo-intermediate';Copy-Item -LiteralPath $script:P9cSeeds.False -Destination $target -Recurse
+        $excludePath=(@(& git -C $target rev-parse --git-path info/exclude)|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($excludePath)){$excludePath=Join-Path $target $excludePath}
+        $indexPath=(@(& git -C $target rev-parse --git-path index)|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($indexPath)){$indexPath=Join-Path $target $indexPath}
+        $excludeBefore=Get-P9cFileEvidence $excludePath
+        $indexBefore=[Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath))
+        $probePath=Join-Path $script:ExternalRoot 'metadata-undo-intermediate.json'
+        $bootstrap=New-P9cMetadataUndoIntermediateFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'metadata-undo-intermediate-runtime') -Sequence ([int]$excludeOperation[0].sequence) -ProbePath $probePath
+
+        $result=Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap
+
+        $result.ExitCode|Should -Not -Be 0
+        (Get-AiInstructionsRefusalCode $result.Output)|Should -Be interrupted-install
+        $probe=Get-Content -Raw -LiteralPath $probePath|ConvertFrom-Json
+        [int]$probe.sequence|Should -Be ([int]$excludeOperation[0].sequence)
+        [bool]$probe.matchesObservedAfter|Should -Be $true
+        ($probe.live|ConvertTo-Json -Depth 8 -Compress)|Should -Be ($probe.expected|ConvertTo-Json -Depth 8 -Compress)
+        @(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force).Count|Should -Be 1
+        $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'metadata-undo-recovery-runtime') -Failpoint RecoveryOnly
+        (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $recovery).ExitCode|Should -Not -Be 0
+        (Get-P9cFileEvidence $excludePath|ConvertTo-Json -Depth 8 -Compress)|Should -Be ($excludeBefore|ConvertTo-Json -Depth 8 -Compress)
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath))|Should -Be $indexBefore
+        @(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force -ErrorAction SilentlyContinue).Count|Should -Be 0
+    }
+
     # Scenario: Attached and detached repositories reach applied state and crash before commit publication, while an unborn repository follows main's pre-mutation skip contract.
     # Purpose: Recover committed-HEAD modes exactly and prove the unborn skip changes neither Git object bytes nor any ref.
     It 'InterT150_recovers_attached_detached_and_unborn_HEAD_transactions' {
