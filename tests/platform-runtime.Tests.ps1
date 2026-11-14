@@ -2597,7 +2597,7 @@ Describe 'Platform runtime contract' {
     }
 
     # Scenario: Unix optional leaf parameters receive null or empty input through PowerShell binding on any host.
-    # Purpose: Preserve null through the shared adapter and retain leaf validation after removing string type constraints.
+    # Purpose: Preserve null through the shared adapter and the .NET string boundary while retaining leaf validation.
     It 'UnitT33_preserves_null_for_unix_optional_leaf_parameters' {
         $unixPath = Join-Path $script:RepositoryRoot 'scripts/platform/Unix.psm1'
         $tokens = $null
@@ -2631,6 +2631,39 @@ Describe 'Platform runtime contract' {
             (& $command 123) | Should Be '123'
         }
         finally { $module | Remove-Module -Force -ErrorAction SilentlyContinue }
+
+        $nativeHelper = $ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'ConvertTo-UnixNativeNullableString'},$true)
+        $nativeHelper | Should Not BeNullOrEmpty
+        $nativeModule = New-Module -ScriptBlock ([scriptblock]::Create("$($nativeHelper.Extent.Text)`nExport-ModuleMember -Function ConvertTo-UnixNativeNullableString"))
+        try {
+            $nativeCommand = $nativeModule.ExportedCommands['ConvertTo-UnixNativeNullableString']
+            $nativeNull = & $nativeCommand $null
+            $nativeNull.GetType().FullName | Should Be 'System.Management.Automation.Language.NullString'
+            ([object]::ReferenceEquals($nativeNull,[NullString]::Value)) | Should Be $true
+            (& $nativeCommand 'value') | Should Be 'value'
+        }
+        finally { $nativeModule | Remove-Module -Force -ErrorAction SilentlyContinue }
+
+        $publish = $ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Publish-UnixPlatformFile'},$true)
+        foreach($binding in @(
+            @{Native='nativeExpectedSha256';Source='expected.sha256'},
+            @{Native='nativeDisplacedLeaf';Source='DisplacedLeaf'}
+        )) {
+            $assignment = @($publish.Body.FindAll({param($node)
+                $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+                $node.Left.VariablePath.UserPath -ceq $binding.Native -and
+                $node.Right.Extent.Text -match "ConvertTo-UnixNativeNullableString\s+\`$$([regex]::Escape($binding.Source))"
+            },$true))
+            $assignment.Count | Should Be 1
+        }
+        $publishCall = @($publish.Body.FindAll({param($node)
+            $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
+            $node.Static -and $node.Member.Value -ceq 'Publish'
+        },$true))
+        $publishCall.Count | Should Be 1
+        $publishCall[0].Arguments[7].VariablePath.UserPath | Should Be 'nativeExpectedSha256'
+        $publishCall[0].Arguments[9].VariablePath.UserPath | Should Be 'nativeDisplacedLeaf'
     }
 
     # Scenario: Every reviewed entry point carries its own platform-runtime manifest trust anchor.

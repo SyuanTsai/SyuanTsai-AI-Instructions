@@ -54,6 +54,12 @@ function ConvertTo-UnixOptionalLeaf {
     return $leaf
 }
 
+function ConvertTo-UnixNativeNullableString {
+    param([AllowNull()] $Value)
+    if ($null -eq $Value) { return [NullString]::Value }
+    return [string]$Value
+}
+
 function ConvertFrom-UnixIdentityNumber {
     param([Parameter(Mandatory=$true)] $Value,[Parameter(Mandatory=$true)][string] $Name)
     if ($Value -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$Value)) { throw [ArgumentException]::new("$Name must be a journal identity string.") }
@@ -322,7 +328,12 @@ function Assert-UnixJournalBinding {
 function Get-UnixPlatformPermissionSnapshot {
     param([Parameter(Mandatory=$true)] $Lease)
     Assert-UnixPlatformHost permissions | Out-Null
-    ConvertTo-UnixPermissionReceipt ([SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetPermissionSnapshot($Lease))
+    try {
+        ConvertTo-UnixPermissionReceipt ([SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetPermissionSnapshot($Lease))
+    }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException] { throw $_.Exception }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformErrnoException] { throw $_.Exception }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] { throw $_.Exception }
 }
 
 function Set-UnixPlatformPermissions {
@@ -379,13 +390,15 @@ function Publish-UnixPlatformFile {
         }
         $journalBinding = Assert-UnixJournalBinding $Journal $ParentLease $TransactionLease $Leaf $StageLease $DisplacedLeaf $ExpectedState $ExpectedStage
     }
-    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] { throw }
-    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException] { throw }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] { throw $_.Exception }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException] { throw $_.Exception }
     catch { throw (New-UnixPlatformVerificationError publication $_.Exception.Message) }
     try {
+        $nativeExpectedSha256 = ConvertTo-UnixNativeNullableString $expected.sha256
+        $nativeDisplacedLeaf = ConvertTo-UnixNativeNullableString $DisplacedLeaf
         $result = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::Publish(
-            $ParentLease,$Leaf,$TransactionLease,$StageLease,$expected.exists,$expected.device,$expected.inode,$expected.sha256,$expected.length,
-            $DisplacedLeaf,$stage.sha256,$stage.length,[bool]$NoReplace,[uint32]384,
+            $ParentLease,$Leaf,$TransactionLease,$StageLease,$expected.exists,$expected.device,$expected.inode,$nativeExpectedSha256,$expected.length,
+            $nativeDisplacedLeaf,$stage.sha256,$stage.length,[bool]$NoReplace,[uint32]384,
             [bool]$journalBinding.hasPermissions,[uint32]$journalBinding.mode,[uint64]$journalBinding.uid,[uint64]$journalBinding.gid)
         [pscustomobject][ordered]@{
             completedSteps=[string[]]@($result.CompletedSteps)
@@ -398,9 +411,11 @@ function Publish-UnixPlatformFile {
         }
     }
     catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] {
-        if ([string]$_.Exception.Capability -ceq 'publication') { throw }
+        if ([string]$_.Exception.Capability -ceq 'publication') { throw $_.Exception }
         throw (New-UnixPlatformVerificationError publication $_.Exception.Message)
     }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException] { throw $_.Exception }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformErrnoException] { throw $_.Exception }
     catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformMutationException] {
         $native = $_.Exception
         $translated = if ($null -eq $native.Receipt) { $null } else { [pscustomobject][ordered]@{
@@ -451,8 +466,8 @@ function Remove-UnixPlatformOwnedFile {
             $journalBinding=[pscustomobject]@{hasPermissions=$false;mode=[uint32]0;uid=[uint64]0;gid=[uint64]0}
         }
     }
-    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] { throw }
-    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException] { throw }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] { throw $_.Exception }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException] { throw $_.Exception }
     catch { throw (New-UnixPlatformVerificationError owned-file-removal $_.Exception.Message) }
     try {
         $result = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::Remove(
@@ -472,9 +487,11 @@ function Remove-UnixPlatformOwnedFile {
         }
     }
     catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] {
-        if ([string]$_.Exception.Capability -ceq 'owned-file-removal') { throw }
+        if ([string]$_.Exception.Capability -ceq 'owned-file-removal') { throw $_.Exception }
         throw (New-UnixPlatformVerificationError owned-file-removal $_.Exception.Message)
     }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException] { throw $_.Exception }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformErrnoException] { throw $_.Exception }
     catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformMutationException] {
         $native = $_.Exception
         $translated = if ($null -eq $native.Receipt) { $null } else { [pscustomobject][ordered]@{
