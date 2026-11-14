@@ -48,7 +48,9 @@ receipt_mode='null'
 
 refuse() {
     printf 'setup-agent-environment: %s\n' "$3" >&2
-    printf '{"schemaVersion":1,"kind":"agent-environment-setup-receipt","phase":"p10a","mode":%s,"result":"refused","code":"%s","exitCode":%s,"os":null,"architecture":null,"rid":null,"setupCommit":null,"runtimeCommit":null,"policySha256":null,"setupRoot":null,"codexHome":null,"powerShell":null,"dotNetVersion":null,"capabilities":[],"steps":[],"recoverCommand":null}\n' "$receipt_mode" "$1" "$2"
+    recover_command=${4-}
+    if [ -n "$recover_command" ]; then recover_json="\"$recover_command\""; else recover_json=null; fi
+    printf '{"schemaVersion":1,"kind":"agent-environment-setup-receipt","phase":"p10a","mode":%s,"result":"refused","code":"%s","exitCode":%s,"os":null,"architecture":null,"rid":null,"setupCommit":null,"runtimeCommit":null,"policySha256":null,"setupRoot":null,"codexHome":null,"powerShell":null,"dotNetVersion":null,"capabilities":[],"steps":[],"recoverCommand":%s}\n' "$receipt_mode" "$1" "$2" "$recover_json"
     exit "$2"
 }
 
@@ -115,11 +117,8 @@ case "$(uname -m)" in
     *) refuse unsupported-platform "$EXIT_UNSUPPORTED_PLATFORM" 'The host architecture has no pinned PowerShell asset.' ;;
 esac
 if [ "$os_token" = linux ]; then
-    for musl_loader in /lib/ld-musl-* /usr/lib/ld-musl-*; do
-        if [ -e "$musl_loader" ] || [ -L "$musl_loader" ]; then
-            refuse unsupported-platform "$EXIT_UNSUPPORTED_PLATFORM" 'musl-based Linux has no pinned PowerShell asset.'
-        fi
-    done
+    musl_loader=$(find /lib /usr/lib -maxdepth 1 -name 'ld-musl-*' -print -quit 2>/dev/null || :)
+    [ -z "$musl_loader" ] || refuse unsupported-platform "$EXIT_UNSUPPORTED_PLATFORM" 'musl-based Linux has no pinned PowerShell asset.'
 fi
 rid="$os_token-$arch_token"
 uid=$(id -u)
@@ -238,21 +237,22 @@ for bound in $BOUND_FILES $PLATFORM_BOUND_FILES; do
     git_in_repo diff --quiet HEAD -- "$bound" 2>/dev/null || refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" "Bound setup file differs from --expected-commit: $bound"
 done
 
-# F4/F5: inspect all K7 transaction residue before creating setup/cache/temp.
-# Setup publication journals are recovered by the PowerShell entry under the
-# setup lock; the shell edge refuses them before it can mutate their root.
-if [ -e "$codex_home/.ai-instructions-txn" ] || [ -L "$codex_home/.ai-instructions-txn" ] ||
-   [ -e "$home/.ai-instructions-txn" ] || [ -L "$home/.ai-instructions-txn" ]; then
-    refuse interrupted-install "$EXIT_INTERRUPTED_INSTALL" 'An interrupted install transaction exists; recover it before rerunning setup.'
+# G3/G5: before mutation, refuse only external K7 state. Setup-owned WAL is
+# handed to the verified PowerShell entry for lock-held recovery.
+if [ -e "$codex_home/.ai-instructions-txn" ] || [ -L "$codex_home/.ai-instructions-txn" ]; then
+    refuse interrupted-install "$EXIT_INTERRUPTED_INSTALL" 'An interrupted install transaction exists in CODEX_HOME; recover it before rerunning setup.' \
+        'pwsh -NoProfile -NonInteractive -File scripts/install-ai-instructions-bootstrap.ps1 -CodexHome ~/.codex'
+fi
+if [ -e "$home/.ai-instructions-txn" ] || [ -L "$home/.ai-instructions-txn" ]; then
+    refuse interrupted-install "$EXIT_INTERRUPTED_INSTALL" 'An interrupted USER agent-environment transaction exists; recover it before rerunning setup.' \
+        'pwsh -NoProfile -NonInteractive -File ~/.codex/hooks/update-agent-environment.ps1 -Recover'
 fi
 for residue in "$codex_home"/.ai-instructions-install-* "$codex_home"/.ai-instructions-backup-*; do
     if [ -e "$residue" ] || [ -L "$residue" ]; then
-        refuse interrupted-install "$EXIT_INTERRUPTED_INSTALL" 'Legacy install residue exists in CODEX_HOME; inspect it before rerunning setup.'
+        refuse interrupted-install "$EXIT_INTERRUPTED_INSTALL" 'Legacy install residue exists in CODEX_HOME; inspect it before rerunning setup.' \
+            'pwsh -NoProfile -NonInteractive -File scripts/install-ai-instructions-bootstrap.ps1 -CodexHome ~/.codex'
     fi
 done
-if [ -e "$setup_root/.ai-instructions-txn" ] || [ -L "$setup_root/.ai-instructions-txn" ]; then
-    refuse interrupted-install "$EXIT_INTERRUPTED_INSTALL" 'An interrupted setup publication exists; rerun the PowerShell entry to recover it under the setup lock.'
-fi
 
 # --- Policy (derived TSV, K2) ------------------------------------------------
 tsv="$script_dir/setup-agent-environment.policy.tsv"
@@ -265,10 +265,8 @@ url_template=$(tsv_value '#downloadUrlTemplate')
 case "$version" in
     ''|*[!0-9.]*|.*|*.|*..*) refuse policy-invalid "$EXIT_POLICY_INVALID" 'The policy TSV version is invalid.' ;;
 esac
-case "$url_template" in
-    https://*/v\{version\}/\{assetName\}) ;;
-    *) refuse policy-invalid "$EXIT_POLICY_INVALID" 'The policy TSV download URL template is invalid.' ;;
-esac
+[ "$url_template" = 'https://github.com/PowerShell/PowerShell/releases/download/v{version}/{assetName}' ] ||
+    refuse policy-invalid "$EXIT_POLICY_INVALID" 'The policy TSV download URL template must exactly name the official PowerShell GitHub release endpoint.'
 rows=$(awk -v key="$rid" 'BEGIN { FS = "\t"; n = 0 } $1 == key { n++ } END { print n }' "$tsv")
 [ "$rows" = 1 ] || refuse unsupported-platform "$EXIT_UNSUPPORTED_PLATFORM" "The policy has no single asset for $rid."
 asset_name=$(awk -v key="$rid" 'BEGIN { FS = "\t" } $1 == key { print $2 }' "$tsv")

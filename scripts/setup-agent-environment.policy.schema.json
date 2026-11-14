@@ -15,8 +15,7 @@
       "properties": {
         "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
         "downloadUrlTemplate": {
-          "type": "string",
-          "pattern": "^https://[^\\s{}]+/v\\{version\\}/\\{assetName\\}$"
+          "const": "https://github.com/PowerShell/PowerShell/releases/download/v{version}/{assetName}"
         },
         "assets": {
           "type": "array",

@@ -130,7 +130,7 @@ function Assert-AgentEnvironmentSetupPolicy {
     $root = $Policy.powerShell
     Assert-AgentEnvironmentSetupPropertySet $root @('version','downloadUrlTemplate','assets') 'Setup policy powerShell'
     if ($root.version -isnot [string] -or [string]$root.version -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { throw (New-AgentEnvironmentSetupRefusal policy-invalid 'Setup policy version must be a pinned MAJOR.MINOR.PATCH value.') }
-    if ($root.downloadUrlTemplate -isnot [string] -or [string]$root.downloadUrlTemplate -cnotmatch '^https://[^\s{}]+/v\{version\}/\{assetName\}$') { throw (New-AgentEnvironmentSetupRefusal policy-invalid 'Setup policy downloadUrlTemplate must be an https URL ending in /v{version}/{assetName}.') }
+    if ($root.downloadUrlTemplate -isnot [string] -or [string]$root.downloadUrlTemplate -cne 'https://github.com/PowerShell/PowerShell/releases/download/v{version}/{assetName}') { throw (New-AgentEnvironmentSetupRefusal policy-invalid 'Setup policy downloadUrlTemplate must exactly name the official PowerShell GitHub release endpoint.') }
     $assets = $root.assets
     if ($assets -isnot [object[]] -or @($assets).Count -ne $script:AgentEnvironmentSetupRids.Count) { throw (New-AgentEnvironmentSetupRefusal policy-invalid 'Setup policy assets must list each supported RID exactly once.') }
     $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -269,6 +269,8 @@ function ConvertTo-AgentEnvironmentSetupStoredRuntimeReceipt {
             rootPath = (ConvertTo-AgentEnvironmentSetupHomePath ([string]$closure.rootPath) $UserHome)
             sha256 = [string]$closure.sha256
             files = @($closure.files | ForEach-Object { [pscustomobject][ordered]@{ path = [string]$_.path; sha256 = [string]$_.sha256 } })
+            directories = [string[]]@($closure.directories | ForEach-Object { [string]$_ })
+            directorySha256 = [string]$closure.directorySha256
         }
         environmentAllowlist = @($Receipt.environmentAllowlist | ForEach-Object { [string]$_ })
         warningCount = [int]$Receipt.warningCount
@@ -361,7 +363,8 @@ function Get-AgentEnvironmentSetupPlan {
         [Parameter(Mandatory = $true)][string] $CodexHome,
         [Parameter(Mandatory = $true)][ValidateSet('Prepare','Offline')][string] $Mode,
         [Parameter(Mandatory = $true)][AllowEmptyString()][string] $ArchivePath,
-        [string] $Rid
+        [string] $Rid,
+        [switch] $ExternalOnly
     )
     [void](Assert-AgentEnvironmentSetupPolicy $Policy)
     if ([string]::IsNullOrWhiteSpace($Rid)) { $Rid = Get-AgentEnvironmentSetupRid }
@@ -375,6 +378,7 @@ function Get-AgentEnvironmentSetupPlan {
         assetName = $asset.Name; deferredSteps = [string[]]@($script:AgentEnvironmentSetupDeferredSteps)
     }
     $residue = @(Get-AgentEnvironmentSetupResidue -CodexHome ([IO.Path]::GetFullPath($CodexHome)) -UserHome $layout.UserHome -SetupRoot $layout.SetupRoot)
+    if($ExternalOnly){$residue=@($residue | Where-Object {$_.Scope -cne 'setup-root'})}
     if ($residue.Count -gt 0) {
         $plan.residue = @($residue | ForEach-Object { & $display $_.Path })
         $externalResidue = @($residue | Where-Object { $_.Scope -cne 'setup-root' })
@@ -396,6 +400,7 @@ function Get-AgentEnvironmentSetupPlan {
         }
         return [pscustomobject]$plan
     }
+    if($ExternalOnly){$plan.decision='acquire-lock';$plan.reason='External K7 state is clear; setup-internal state must be decided under the exclusive setup lock.';return [pscustomobject]$plan}
     $archiveEntry = if ([string]::IsNullOrWhiteSpace($ArchivePath)) { $null } else { Get-AgentEnvironmentSetupEntry ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($ArchivePath))) ([IO.Path]::GetFileName($ArchivePath)) }
     if ($null -eq $archiveEntry -or $archiveEntry.Kind -cne 'file') {
         $plan.code = 'cache-missing'
@@ -590,15 +595,67 @@ function Remove-AgentEnvironmentSetupTransactionFile {
 }
 
 function Invoke-AgentEnvironmentSetupFailpoint {
-    param([Parameter(Mandatory = $true)][string] $Name)
-    if ([Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_SETUP_FAILPOINT') -ceq $Name) {
-        throw (New-AgentEnvironmentSetupRefusal interrupted-install "Setup publication failpoint '$Name' interrupted the transaction." 'Rerun the same setup command to recover the setup publication.')
+    param([Parameter(Mandatory = $true)][string] $Name,[string]$Leaf)
+    $selectedLeaf=[Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_SETUP_FAILPOINT_LEAF')
+    if ([Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_SETUP_FAILPOINT') -ceq $Name -and
+        ([string]::IsNullOrEmpty($selectedLeaf) -or $selectedLeaf -ceq $Leaf)) {
+        [Environment]::FailFast("Setup publication failpoint '$Name' interrupted '$Leaf'.")
     }
 }
 
-# F5: recover setup-owned publication journals while the caller holds setup.lock.
-# Recovery is compare-and-swap based: only the journal's exact expected or desired
-# file identity is accepted; any substituted or ambiguous state refuses.
+function Invoke-AgentEnvironmentSetupBarrier {
+    param([Parameter(Mandatory=$true)][string]$Name)
+    $directory=[Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_SETUP_BARRIER_DIRECTORY')
+    $selected=[Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_SETUP_BARRIER')
+    if([string]::IsNullOrEmpty($directory) -or $selected -cne $Name){return}
+    $directory=[IO.Path]::GetFullPath($directory)
+    [void][IO.Directory]::CreateDirectory($directory)
+    [IO.File]::WriteAllText((Join-Path $directory 'ready'),$PID.ToString([Globalization.CultureInfo]::InvariantCulture))
+    $deadline=[DateTimeOffset]::UtcNow.AddMinutes(2)
+    while(-not [IO.File]::Exists((Join-Path $directory 'release'))){
+        if([DateTimeOffset]::UtcNow -ge $deadline){throw (New-AgentEnvironmentSetupRefusal internal-error "Setup test barrier '$Name' timed out.")}
+        [Threading.Thread]::Sleep(10)
+    }
+}
+
+function Resolve-AgentEnvironmentSetupTransaction {
+    param(
+        [Parameter(Mandatory=$true)]$Transaction,
+        [Parameter(Mandatory=$true)][string]$TransactionPath,
+        [Parameter(Mandatory=$true)]$Parent,
+        [Parameter(Mandatory=$true)][string]$ParentPath,
+        [Parameter(Mandatory=$true)]$Journal
+    )
+    $target=Get-AgentEnvironmentSetupLeafState $Parent $ParentPath ([string]$Journal.leaf)
+    $stage=Get-AgentEnvironmentSetupLeafState $Transaction $TransactionPath 'stage'
+    $displaced=Get-AgentEnvironmentSetupLeafState $Transaction $TransactionPath 'displaced'
+    $targetDesired=Test-AgentEnvironmentSetupStateEqual $target $Journal.desiredState
+    $targetExpected=Test-AgentEnvironmentSetupStateEqual $target $Journal.expectedState
+    $stageDesired=Test-AgentEnvironmentSetupStateEqual $stage $Journal.desiredState
+    $displacedExpected=Test-AgentEnvironmentSetupStateEqual $displaced $Journal.expectedState
+    if($targetExpected){
+        if($null -eq $stage){
+            if($null -ne $displaced){throw (New-AgentEnvironmentSetupRefusal interrupted-install 'A pre-publication setup transaction has an unexpected displaced file.')}
+            return [pscustomobject]@{decision='rollback';target=$target;stage=$stage;displaced=$displaced}
+        }
+        if(-not $stageDesired -or $null -ne $displaced){throw (New-AgentEnvironmentSetupRefusal interrupted-install 'A staged setup transaction differs from its write-ahead journal.')}
+        return [pscustomobject]@{decision='publish';target=$target;stage=$stage;displaced=$displaced}
+    }
+    if($targetDesired){
+        if($null -ne $stage){throw (New-AgentEnvironmentSetupRefusal interrupted-install 'A completed setup publication still has an ambiguous stage file.')}
+        if($null -ne $displaced -and -not $displacedExpected){throw (New-AgentEnvironmentSetupRefusal interrupted-install 'A completed setup publication has an unexpected displaced file.')}
+        return [pscustomobject]@{decision='complete';target=$target;stage=$stage;displaced=$displaced}
+    }
+    if($null -eq $target -and [bool]$Journal.expectedState.exists -and $stageDesired -and $displacedExpected){
+        return [pscustomobject]@{decision='publish-after-displace';target=$target;stage=$stage;displaced=$displaced}
+    }
+    throw (New-AgentEnvironmentSetupRefusal interrupted-install 'The setup publication state has no unique recovery decision.')
+}
+
+# F5/G1/G2: recover setup-owned strict write-ahead logs while setup.lock is held.
+# Resolve-AgentEnvironmentSetupTransaction is the single state resolver. Empty or
+# legacy stage-only pre-WAL directories are safe rollback; every journaled state
+# has exactly one complete/rollback/cleanup decision.
 function Repair-AgentEnvironmentSetupTransactions {
     param([Parameter(Mandatory = $true)][string] $SetupRoot)
     $storePath = Join-Path $SetupRoot '.ai-instructions-txn'
@@ -612,51 +669,57 @@ function Repair-AgentEnvironmentSetupTransactions {
             $entry = Get-AgentEnvironmentSetupEntry $storePath $transactionId
             if ($transactionId -cnotmatch '^[0-9a-f]{32}$' -or $null -eq $entry -or $entry.Kind -cne 'directory') { throw (New-AgentEnvironmentSetupRefusal interrupted-install 'The setup transaction store contains an unrecognized entry.') }
             $members = @([IO.Directory]::EnumerateFileSystemEntries($transactionPath) | ForEach-Object { [IO.Path]::GetFileName($_) })
-            if (@($members | Where-Object { $_ -cnotin @('journal.json','stage','displaced') }).Count -ne 0 -or 'journal.json' -cnotin $members) {
-                throw (New-AgentEnvironmentSetupRefusal interrupted-install "Setup transaction '$transactionId' has an incomplete or unknown journal closure.")
-            }
+            if (@($members | Where-Object { $_ -cnotin @('journal.json','journal.stage','stage','displaced') }).Count -ne 0) { throw (New-AgentEnvironmentSetupRefusal interrupted-install "Setup transaction '$transactionId' has an unknown journal closure.") }
             $transaction = Open-PlatformDirectory -Root $SetupRoot -RelativePath ".ai-instructions-txn/$transactionId"
             $parent = $null; $stage = $null
             try {
+                $hasJournal='journal.json' -cin $members
+                if(-not $hasJournal){
+                    if(@($members | Where-Object {$_ -cnotin @('journal.stage','stage')}).Count -ne 0){throw (New-AgentEnvironmentSetupRefusal interrupted-install "Setup transaction '$transactionId' lacks its write-ahead journal.")}
+                    Remove-AgentEnvironmentSetupTransactionFile $transaction $transactionPath 'journal.stage'
+                    Remove-AgentEnvironmentSetupTransactionFile $transaction $transactionPath 'stage'
+                }
+                else {
+                if('journal.stage' -cin $members){throw (New-AgentEnvironmentSetupRefusal interrupted-install "Setup transaction '$transactionId' has both a committed journal and its staging file.")}
                 $journalLease = Open-PlatformFile -ParentLease $transaction -Leaf 'journal.json' -Access Read -CreateMode OpenExisting
                 try { $journalBytes = (Get-AgentEnvironmentSetupFileState $journalLease).Bytes } finally { $journalLease.Dispose() }
                 try { $journal = [Text.UTF8Encoding]::new($false,$true).GetString($journalBytes) | ConvertFrom-Json -ErrorAction Stop }
                 catch { throw (New-AgentEnvironmentSetupRefusal interrupted-install "Setup transaction '$transactionId' has an invalid journal.") }
                 if ([int]$journal.schemaVersion -ne 1 -or [string]$journal.kind -cne 'agent-environment-setup-publication' -or
-                    [string]$journal.transactionId -cne $transactionId -or [string]$journal.phase -cne 'prepared' -or
+                    [string]$journal.transactionId -cne $transactionId -or [string]$journal.phase -cne 'intent' -or
                     [string]$journal.directory -cne 'receipts' -or [string]$journal.leaf -cnotmatch '^[A-Za-z0-9][A-Za-z0-9.-]*\.json$') {
                     throw (New-AgentEnvironmentSetupRefusal interrupted-install "Setup transaction '$transactionId' journal identity or phase is invalid.")
                 }
                 $parentPath = Join-Path $SetupRoot ([string]$journal.directory)
                 $parent = Open-PlatformDirectory -Root $SetupRoot -RelativePath ([string]$journal.directory) -CreatePrivate
-                $targetState = Get-AgentEnvironmentSetupLeafState $parent $parentPath ([string]$journal.leaf)
-                $desiredAtTarget = Test-AgentEnvironmentSetupStateEqual $targetState $journal.desiredState
-                if (-not $desiredAtTarget) {
-                    if (-not (Test-AgentEnvironmentSetupStateEqual $targetState $journal.expectedState)) { throw (New-AgentEnvironmentSetupRefusal interrupted-install "Setup transaction '$transactionId' target differs from both expected states.") }
-                    $stageState = Get-AgentEnvironmentSetupLeafState $transaction $transactionPath 'stage'
-                    if (-not (Test-AgentEnvironmentSetupStateEqual $stageState $journal.desiredState)) { throw (New-AgentEnvironmentSetupRefusal interrupted-install "Setup transaction '$transactionId' stage differs from its journal.") }
+                $resolution=Resolve-AgentEnvironmentSetupTransaction $transaction $transactionPath $parent $parentPath $journal
+                if($resolution.decision -in @('publish','publish-after-displace')){
                     $stage = Open-PlatformFile -ParentLease $transaction -Leaf 'stage' -Access ReadWrite -CreateMode OpenExisting
-                    Publish-PlatformFile -ParentLease $parent -Leaf ([string]$journal.leaf) -TransactionLease $transaction -StageLease $stage -ExpectedState $journal.expectedState `
-                        -DisplacedLeaf $(if ([bool]$journal.expectedState.exists) { 'displaced' } else { $null }) -ExpectedStage $journal.desiredState -NoReplace:(-not [bool]$journal.expectedState.exists) | Out-Null
+                    $resumeExpected=if($resolution.decision -ceq 'publish-after-displace'){[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}}else{$journal.expectedState}
+                    Publish-PlatformFile -ParentLease $parent -Leaf ([string]$journal.leaf) -TransactionLease $transaction -StageLease $stage -ExpectedState $resumeExpected `
+                        -DisplacedLeaf $(if ($resolution.decision -ceq 'publish' -and [bool]$journal.expectedState.exists) { 'displaced' } else { $null }) -ExpectedStage $journal.desiredState -NoReplace:(-not [bool]$resumeExpected.exists) | Out-Null
                     $stage.Dispose(); $stage = $null
                 }
                 Remove-AgentEnvironmentSetupTransactionFile $transaction $transactionPath 'displaced'
                 Remove-AgentEnvironmentSetupTransactionFile $transaction $transactionPath 'stage'
+                # Strict WAL: journal deletion is the final file mutation after the
+                # target and all transaction data have been verified/cleaned.
                 Remove-AgentEnvironmentSetupTransactionFile $transaction $transactionPath 'journal.json'
+                }
             } finally {
                 if ($null -ne $stage) { $stage.Dispose() }
                 if ($null -ne $parent) { $parent.Dispose() }
                 $transaction.Dispose()
             }
-            [IO.Directory]::Delete($transactionPath,$false)
+            if([IO.Directory]::Exists($transactionPath)){[IO.Directory]::Delete($transactionPath,$false)}
         }
     } finally { $store.Dispose() }
-    [IO.Directory]::Delete($storePath,$false)
+    if([IO.Directory]::Exists($storePath)){[IO.Directory]::Delete($storePath,$false)}
 }
 
-# M4/F5: publish setup-owned files through a journaled private transaction under
-# the setup root. A crash at staging, rename, or displaced cleanup leaves enough
-# durable identity/expected-state evidence for Repair-* to finish safely.
+# M4/F5/G1/G2: strict WAL publication. The immutable intent journal is written
+# and flushed before stage or target mutation, and removed only after the target
+# and transaction closure have been verified.
 function Publish-AgentEnvironmentSetupFile {
     param(
         [Parameter(Mandatory = $true)][string] $SetupRoot,
@@ -667,52 +730,72 @@ function Publish-AgentEnvironmentSetupFile {
     )
     $transactionId = [guid]::NewGuid().ToString('N')
     $transactionStore = Open-PlatformDirectory -Root $SetupRoot -RelativePath '.ai-instructions-txn' -CreatePrivate
-    $transaction = $null; $parent = $null; $stage = $null; $displaced = $null; $journalLease = $null
+    $transaction = $null; $parent = $null; $stage = $null; $journalStage = $null; $displaced = $null
     $transactionPath = Join-Path (Join-Path $SetupRoot '.ai-instructions-txn') $transactionId
-    $completed = $false
-    $journalCreated = $false
+    $completed = $false;$journalCreated = $false
     try {
         $transaction = Open-PlatformDirectory -Root $SetupRoot -RelativePath ".ai-instructions-txn/$transactionId" -CreatePrivate
-        $parent = Open-PlatformDirectory -Root $SetupRoot -RelativePath $Directory -CreatePrivate
+        Invoke-AgentEnvironmentSetupFailpoint 'after-transaction-directory' $Leaf
         $current = $null
-        $existing = Get-AgentEnvironmentSetupEntry (Join-Path $SetupRoot $Directory) $Leaf
-        if ($null -ne $existing) {
-            if ($NoReplace) { throw (New-AgentEnvironmentSetupRefusal runtime-incomplete "Setup file '$Directory/$Leaf' already exists.") }
-            if ($existing.Kind -cne 'file') { throw (New-AgentEnvironmentSetupRefusal unsafe-path "Setup file '$Directory/$Leaf' is not a regular file.") }
-            $targetLease = Open-PlatformFile -ParentLease $parent -Leaf $Leaf -Access Read -CreateMode OpenExisting
-            try { $current = (Get-AgentEnvironmentSetupFileState $targetLease).State } finally { $targetLease.Dispose() }
+        $directoryEntry = Get-AgentEnvironmentSetupEntry $SetupRoot $Directory
+        if ($null -ne $directoryEntry) {
+            if ($directoryEntry.Kind -cne 'directory') { throw (New-AgentEnvironmentSetupRefusal unsafe-path "Setup directory '$Directory' is not a directory.") }
+            $parent = Open-PlatformDirectory -Root $SetupRoot -RelativePath $Directory
+            $existing = Get-AgentEnvironmentSetupEntry (Join-Path $SetupRoot $Directory) $Leaf
+            if ($null -ne $existing) {
+                if ($NoReplace) { throw (New-AgentEnvironmentSetupRefusal runtime-incomplete "Setup file '$Directory/$Leaf' already exists.") }
+                if ($existing.Kind -cne 'file') { throw (New-AgentEnvironmentSetupRefusal unsafe-path "Setup file '$Directory/$Leaf' is not a regular file.") }
+                $targetLease = Open-PlatformFile -ParentLease $parent -Leaf $Leaf -Access Read -CreateMode OpenExisting
+                try { $current = (Get-AgentEnvironmentSetupFileState $targetLease).State } finally { $targetLease.Dispose() }
+            }
         }
+        $expected = if ($null -eq $current) { [pscustomobject][ordered]@{ exists = $false; sha256 = $null; length = $null; identity = $null } } else { $current }
+        $desired=[pscustomobject][ordered]@{exists=$true;sha256=(Get-AgentEnvironmentSetupSha256Bytes $Bytes);length=[int64]$Bytes.Length;identity=$null}
+        $journal = [pscustomobject][ordered]@{
+            schemaVersion = 1; kind = 'agent-environment-setup-publication'; transactionId = $transactionId; phase = 'intent'
+            directory = $Directory; leaf = $Leaf; expectedState = $expected; desiredState = $desired
+        }
+        $journalBytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-AgentEnvironmentSetupJsonLine $journal) + "`n")
+        $journalStage = Open-PlatformFile -ParentLease $transaction -Leaf 'journal.stage' -Access ReadWrite -CreateMode CreateNew
+        $journalStage.WriteNewBytes($journalBytes)
+        $journalStageState = (Get-AgentEnvironmentSetupFileState $journalStage).State
+        Invoke-AgentEnvironmentSetupFailpoint 'after-journal-stage' $Leaf
+        $missing=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}
+        Publish-PlatformFile -ParentLease $transaction -Leaf 'journal.json' -TransactionLease $transaction -StageLease $journalStage `
+            -ExpectedState $missing -DisplacedLeaf $null -ExpectedStage $journalStageState -NoReplace | Out-Null
+        $journalStage.Dispose(); $journalStage = $null
+        $journalCreated = $true
+        Invoke-AgentEnvironmentSetupFailpoint 'after-journal' $Leaf
+        if ($null -eq $parent) { $parent = Open-PlatformDirectory -Root $SetupRoot -RelativePath $Directory -CreatePrivate }
+        Invoke-AgentEnvironmentSetupFailpoint 'after-parent-directory' $Leaf
         $stage = Open-PlatformFile -ParentLease $transaction -Leaf 'stage' -Access ReadWrite -CreateMode CreateNew
         $stage.WriteNewBytes($Bytes)
         $stageState = Get-AgentEnvironmentSetupFileState $stage
-        if ($stageState.State.sha256 -cne (Get-AgentEnvironmentSetupSha256Bytes $Bytes)) { throw 'The staged setup file differs from its source bytes.' }
-        $expected = if ($null -eq $current) { [pscustomobject][ordered]@{ exists = $false; sha256 = $null; length = $null; identity = $null } } else { $current }
-        $journal = [pscustomobject][ordered]@{
-            schemaVersion = 1; kind = 'agent-environment-setup-publication'; transactionId = $transactionId; phase = 'prepared'
-            directory = $Directory; leaf = $Leaf; expectedState = $expected; desiredState = $stageState.State
-        }
-        $journalBytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-AgentEnvironmentSetupJsonLine $journal) + "`n")
-        $journalLease = Open-PlatformFile -ParentLease $transaction -Leaf 'journal.json' -Access ReadWrite -CreateMode CreateNew
-        $journalLease.WriteNewBytes($journalBytes)
-        [void](Get-AgentEnvironmentSetupFileState $journalLease)
-        $journalLease.Dispose(); $journalLease = $null
-        $journalCreated = $true
-        Invoke-AgentEnvironmentSetupFailpoint 'after-stage'
+        if (-not (Test-AgentEnvironmentSetupStateEqual $stageState.State $desired)) { throw 'The staged setup file differs from its write-ahead journal.' }
+        Invoke-AgentEnvironmentSetupFailpoint 'after-stage' $Leaf
         Publish-PlatformFile -ParentLease $parent -Leaf $Leaf -TransactionLease $transaction -StageLease $stage -ExpectedState $expected `
-            -DisplacedLeaf $(if ($null -eq $current) { $null } else { 'displaced' }) -ExpectedStage $stageState.State -NoReplace:($null -eq $current) | Out-Null
+            -DisplacedLeaf $(if ($null -eq $current) { $null } else { 'displaced' }) -ExpectedStage $desired -NoReplace:($null -eq $current) | Out-Null
         $stage.Dispose(); $stage = $null
-        Invoke-AgentEnvironmentSetupFailpoint 'after-rename'
+        Invoke-AgentEnvironmentSetupFailpoint 'after-rename' $Leaf
         if ($null -ne $current) { Remove-AgentEnvironmentSetupTransactionFile $transaction $transactionPath 'displaced' }
-        Invoke-AgentEnvironmentSetupFailpoint 'after-displaced-cleanup'
+        Invoke-AgentEnvironmentSetupFailpoint 'after-displaced-cleanup' $Leaf
         Remove-AgentEnvironmentSetupTransactionFile $transaction $transactionPath 'journal.json'
         $completed = $true
+        Invoke-AgentEnvironmentSetupFailpoint 'after-journal-cleanup' $Leaf
     }
     finally {
+        if (-not $journalCreated -and $null -ne (Get-AgentEnvironmentSetupEntry $transactionPath 'journal.json')) {
+            # Journal publication is atomic. A durability error after the rename
+            # must retain the committed intent for the next lock holder.
+            $journalCreated = $true
+        }
         if (-not $journalCreated -and $null -ne $transaction) {
             if ($null -ne $stage) { $stage.Dispose(); $stage = $null }
+            if ($null -ne $journalStage) { $journalStage.Dispose(); $journalStage = $null }
+            Remove-AgentEnvironmentSetupTransactionFile $transaction $transactionPath 'journal.stage'
             Remove-AgentEnvironmentSetupTransactionFile $transaction $transactionPath 'stage'
         }
-        if ($null -ne $journalLease) { $journalLease.Dispose() }
+        if ($null -ne $journalStage) { $journalStage.Dispose() }
         if ($null -ne $displaced) { $displaced.Dispose() }
         if ($null -ne $stage) { $stage.Dispose() }
         if ($null -ne $parent) { $parent.Dispose() }
@@ -726,6 +809,7 @@ function Publish-AgentEnvironmentSetupFile {
     }
     if ($completed) {
         [IO.Directory]::Delete($transactionPath,$false)
+        Invoke-AgentEnvironmentSetupFailpoint 'after-transaction-cleanup' $Leaf
         [IO.Directory]::Delete((Join-Path $SetupRoot '.ai-instructions-txn'),$false)
     }
 }
@@ -797,5 +881,5 @@ Export-ModuleMember -Function @(
     'ConvertFrom-AgentEnvironmentSetupStoredRuntimeReceipt','Assert-AgentEnvironmentSetupRuntimeReceiptLayout','Get-AgentEnvironmentSetupPlan',
     'Assert-AgentEnvironmentSetupPhysicalPath','Get-AgentEnvironmentSetupUserHome','Assert-AgentEnvironmentSetupCodexHome',
     'Assert-AgentEnvironmentSetupCommit','Test-AgentEnvironmentSetupSameFile','Get-AgentEnvironmentSetupChildEnvironment','Read-AgentEnvironmentSetupFile',
-    'Repair-AgentEnvironmentSetupTransactions','Publish-AgentEnvironmentSetupFile','New-AgentEnvironmentSetupReceipt','ConvertTo-AgentEnvironmentSetupJsonLine'
+    'Repair-AgentEnvironmentSetupTransactions','Resolve-AgentEnvironmentSetupTransaction','Publish-AgentEnvironmentSetupFile','Invoke-AgentEnvironmentSetupBarrier','New-AgentEnvironmentSetupReceipt','ConvertTo-AgentEnvironmentSetupJsonLine'
 )

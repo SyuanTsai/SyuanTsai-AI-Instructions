@@ -246,7 +246,7 @@ function Get-AuthorityTestPaths {
     }
     Set-WindowsCoreTestText (Join-Path $Root 'tests/nested/child.Tests.ps1') "Describe 'child.Tests.ps1' {}`n"
     Set-WindowsCoreTestText (Join-Path $Root 'docs/standards/core-test-skip-inventory.json') ($skipInventory | ConvertTo-Json -Depth 8)
-    $weights = [ordered]@{ schemaVersion = 1; partitionCount = 8; weights = [ordered]@{ 'alpha.Tests.ps1' = 9; 'beta.Tests.ps1' = 4 } }
+    $weights = [ordered]@{ schemaVersion = 1; partitionCount = 9; weights = [ordered]@{ 'alpha.Tests.ps1' = 9; 'beta.Tests.ps1' = 4 } }
     Set-WindowsCoreTestText (Join-Path $Root 'tests/windows-core-shard-weights.json') ($weights | ConvertTo-Json -Depth 6)
     return [string[]]@($expected | Sort-Object -CaseSensitive)
 }
@@ -521,7 +521,7 @@ if ($IsWindows) {
     # Purpose: Lock deterministic load-first then ordinal tie-breaking and skip placement.
     It 'UnitT40_assigns_a_deterministic_complete_LPT_plan' {
         $weightsPath = Join-Path $TestDrive 'weights.json'
-        $weights = [ordered]@{ schemaVersion=1; partitionCount=8; weights=[ordered]@{} }
+        $weights = [ordered]@{ schemaVersion=1; partitionCount=9; weights=[ordered]@{} }
         foreach ($item in @(@('a.Tests.ps1',9),@('b.Tests.ps1',8),@('c.Tests.ps1',7),@('d.Tests.ps1',6),@('e.Tests.ps1',5),@('f.Tests.ps1',4),@('g.Tests.ps1',3),@('h.Tests.ps1',2))) { $weights.weights[$item[0]]=$item[1] }
         Set-WindowsCoreTestText $weightsPath ($weights | ConvertTo-Json -Depth 6)
         $files = @('a.Tests.ps1','b.Tests.ps1','c.Tests.ps1','d.Tests.ps1','e.Tests.ps1','f.Tests.ps1','g.Tests.ps1','h.Tests.ps1','unknown.Tests.ps1')
@@ -537,9 +537,10 @@ if ($IsWindows) {
             [pscustomobject]@{ id='05'; files=@('e.Tests.ps1') },
             [pscustomobject]@{ id='06'; files=@('f.Tests.ps1') },
             [pscustomobject]@{ id='07'; files=@('g.Tests.ps1') },
-            [pscustomobject]@{ id='08'; files=@('h.Tests.ps1','unknown.Tests.ps1') }
+            [pscustomobject]@{ id='08'; files=@('h.Tests.ps1') },
+            [pscustomobject]@{ id='09'; files=@('unknown.Tests.ps1') }
         )
-        $first.Count | Should Be 8
+        $first.Count | Should Be 9
         for ($index = 0; $index -lt $expectedShards.Count; $index++) {
             $first[$index].id | Should Be $expectedShards[$index].id
             (@($first[$index].files) -join ',') | Should Be (@($expectedShards[$index].files) -join ',')
@@ -553,6 +554,25 @@ if ($IsWindows) {
             $owner.Count | Should Be 1
             @($owner[0].files) -ccontains $skipFile | Should Be $true
         }
+    }
+
+    # Scenario: A weights fixture requests fewer, more, or unreasonably many partitions than the reviewed production count.
+    # Purpose: G6 rejects every partitionCount other than nine before a Windows Core matrix can be produced.
+    It 'UnitT41_rejects_unreviewed_partition_counts_before_planning' {
+        foreach ($count in @(8,10,10000)) {
+            $weightsPath = Join-Path $TestDrive "weights-$count.json"
+            $weights = [ordered]@{ schemaVersion=1; partitionCount=$count; weights=[ordered]@{} }
+            Set-WindowsCoreTestText $weightsPath ($weights | ConvertTo-Json -Depth 6)
+            { New-WindowsCoreShards -SelectedTestFiles @('alpha.Tests.ps1') -ExpectedSkippedTests @() -ConfigurationPath $weightsPath } | Should Throw
+        }
+    }
+
+    # Scenario: A matrix contains more entries than the reviewed nine-partition upper bound.
+    # Purpose: G6 keeps the matrix validator independently fail closed even if an upstream planner regresses.
+    It 'UnitT42_rejects_a_matrix_above_the_reviewed_partition_upper_bound' {
+        $shards = @(1..10 | ForEach-Object { [pscustomobject]@{ id=('{0:D2}' -f $_); files=@('alpha.Tests.ps1'); expectedSkippedTests=@() } })
+        $matrix = [pscustomobject]@{ include=@($shards | ForEach-Object { [pscustomobject]@{ id=$_.id; filesBase64='YQ=='; skipsBase64='Cg==' } }) } | ConvertTo-Json -Depth 6 -Compress
+        { Assert-WindowsCoreMatrix -MatrixJson $matrix -ExpectedShards $shards } | Should Throw
     }
 
     # Scenario: A workflow shard selects one tiny fixture test and explicitly disables the runner's repository-wide isolated defaults.

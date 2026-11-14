@@ -117,6 +117,7 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
             @{ Name='unknown-rid'; Schema=$true; Mutate={ param($p) $p.powerShell.assets[2].rid = 'linux-musl-x64' } },
             @{ Name='floating-version'; Schema=$true; Mutate={ param($p) $p.powerShell.version = 'latest' } },
             @{ Name='plain-http-template'; Schema=$true; Mutate={ param($p) $p.powerShell.downloadUrlTemplate = 'http://github.com/PowerShell/PowerShell/releases/download/v{version}/{assetName}' } },
+            @{ Name='non-official-https-template'; Schema=$true; Mutate={ param($p) $p.powerShell.downloadUrlTemplate = 'https://example.com/releases/download/v{version}/{assetName}' } },
             @{ Name='missing-assets'; Schema=$true; Mutate={ param($p) $p.powerShell.PSObject.Properties.Remove('assets') } },
             @{ Name='duplicate-rid'; Schema=$false; Mutate={ param($p) $p.powerShell.assets[1].rid = 'win-x64'; $p.powerShell.assets[1].name = $p.powerShell.assets[0].name } },
             @{ Name='name-not-bound-to-version'; Schema=$false; Mutate={ param($p) $p.powerShell.assets[2].name = 'powershell-7.6.5-linux-x64.tar.gz' } }
@@ -328,7 +329,7 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         $fixture = New-SetupTestHome 'receipt-paths'
         $executable = Join-Path $fixture.Layout.RuntimeDirectory 'pwsh'
         $receipt = [pscustomobject][ordered]@{ apiVersion='1.0'; version='7.6.6'; assetName='powershell-7.6.6-linux-x64.tar.gz'; archiveSha256=('c'*64); executablePath=$executable; executableSha256=('d'*64)
-            runtimeClosure=[pscustomobject]@{ rootPath=$fixture.Layout.RuntimeDirectory; sha256=('e'*64); files=@([pscustomobject]@{path='pwsh';sha256=('d'*64)}) }
+            runtimeClosure=[pscustomobject]@{ rootPath=$fixture.Layout.RuntimeDirectory; sha256=('e'*64); files=@([pscustomobject]@{path='pwsh';sha256=('d'*64)}); directories=@(); directorySha256=('0'*64) }
             environmentAllowlist=@('PATH'); warningCount=1; warnings=@("warning about $($fixture.Home)"); protectionBoundary='A1'; os='linux'; architecture='x64' }
         $stored = ConvertTo-AgentEnvironmentSetupStoredRuntimeReceipt $receipt $fixture.Home
         $json = ConvertTo-AgentEnvironmentSetupJsonLine $stored
@@ -418,6 +419,27 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         (@(Get-AgentEnvironmentSetupBoundFiles) -join ' ') | Should BeExactly ([regex]::Match($script:SetupShellText,"(?m)^BOUND_FILES='([^']+)'$").Groups[1].Value)
     }
 
+    # Scenario: The platform runtime manifest and shell trust list are compared ordinally, including a manifest-only negative fixture.
+    # Purpose: G9 prevents a newly imported platform member from escaping the shell's pre-import K4 trust closure.
+    It 'UnitT25a_keeps_platform_bound_files_exactly_equal_to_the_manifest_file_list' {
+        function Assert-PlatformBoundFileParity {
+            param([string]$ManifestText,[string]$ShellText)
+            $manifestMatch = [regex]::Match($ManifestText,'(?ms)\bFileList\s*=\s*@\((.*?)\)\s*\r?\n\s*PrivateData\s*=')
+            $shellMatch = [regex]::Match($ShellText,"(?m)^PLATFORM_BOUND_FILES='([^']+)'$")
+            if (-not $manifestMatch.Success -or -not $shellMatch.Success) { throw 'The platform trust inventories cannot be parsed.' }
+            $manifestFiles = @([regex]::Matches($manifestMatch.Groups[1].Value,"'([^']+)'",[Text.RegularExpressions.RegexOptions]::CultureInvariant) | ForEach-Object { 'scripts/' + $_.Groups[1].Value })
+            $shellFiles = @($shellMatch.Groups[1].Value.Split(' ',[StringSplitOptions]::RemoveEmptyEntries))
+            if (@($manifestFiles | Select-Object -Unique).Count -ne $manifestFiles.Count -or @($shellFiles | Select-Object -Unique).Count -ne $shellFiles.Count) { throw 'The platform trust inventory contains duplicates.' }
+            $manifestSorted = [string[]]$manifestFiles.Clone(); [Array]::Sort($manifestSorted,[StringComparer]::Ordinal)
+            $shellSorted = [string[]]$shellFiles.Clone(); [Array]::Sort($shellSorted,[StringComparer]::Ordinal)
+            if (($manifestSorted -join "`n") -cne ($shellSorted -join "`n")) { throw 'The shell and manifest platform trust inventories differ.' }
+        }
+        $manifestText = [IO.File]::ReadAllText((Join-Path $script:SetupScripts 'platform-runtime.psd1'))
+        { Assert-PlatformBoundFileParity $manifestText $script:SetupShellText } | Should Not Throw
+        $negative = $manifestText.Replace("        'platform-runtime.psm1',","        'platform-runtime.psm1',`n        'platform/NewAdapter.psm1',")
+        { Assert-PlatformBoundFileParity $negative $script:SetupShellText } | Should Throw
+    }
+
     # Scenario: A stored runtime receipt points at a byte-identical copy instead of the selected canonical layout.
     # Purpose: F3 binds both receipt paths ordinally to RuntimeDirectory/RuntimeExecutable before K15 or re-exec.
     It 'UnitT26_binds_runtime_receipt_paths_to_the_canonical_layout' {
@@ -447,23 +469,15 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         (Get-SetupTestTreeSnapshot $fixture.Root) | Should BeExactly $before
     }
 
-    # Scenario: Publication is interrupted after stage, rename, or displaced cleanup.
-    # Purpose: F5 durable expected-state journals allow an exact lock-held rerun recovery without swallowing cleanup failures.
-    It 'UnitT28_recovers_each_setup_publication_failpoint_from_its_durable_journal' {
-        foreach ($failpoint in @('after-stage','after-rename','after-displaced-cleanup')) {
-            $fixture = New-SetupTestHome "publication-$failpoint"
-            [void][IO.Directory]::CreateDirectory($fixture.Layout.SetupRoot)
-            $first = [Text.UTF8Encoding]::new($false).GetBytes('{"generation":1}')
-            $second = [Text.UTF8Encoding]::new($false).GetBytes('{"generation":2}')
-            Publish-AgentEnvironmentSetupFile -SetupRoot $fixture.Layout.SetupRoot -Directory receipts -Leaf setup-receipt.json -Bytes $first
-            $previous = [Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_SETUP_FAILPOINT')
-            try {
-                [Environment]::SetEnvironmentVariable('AI_INSTRUCTIONS_SETUP_FAILPOINT',$failpoint)
-                (Get-SetupTestRefusalCode { Publish-AgentEnvironmentSetupFile -SetupRoot $fixture.Layout.SetupRoot -Directory receipts -Leaf setup-receipt.json -Bytes $second }) | Should Be 'interrupted-install'
-            } finally { [Environment]::SetEnvironmentVariable('AI_INSTRUCTIONS_SETUP_FAILPOINT',$previous) }
-            Test-Path -LiteralPath (Join-Path $fixture.Layout.SetupRoot '.ai-instructions-txn') | Should Be $true
+    # Scenario: A process died before WAL creation (journal-stage or legacy payload-stage state) or after WAL deletion (empty transaction).
+    # Purpose: G2 gives every proven no-journal crash window one safe cleanup decision instead of a permanent interrupted-install refusal.
+    It 'UnitT28_cleans_proven_no_journal_crash_states' {
+        foreach ($members in @(@(),@('stage'),@('journal.stage'))) {
+            $fixture = New-SetupTestHome ('publication-no-journal-' + $(if($members.Count -eq 0){'empty'}else{$members[0].Replace('.','-')}))
+            $transaction = Join-Path $fixture.Layout.SetupRoot ('.ai-instructions-txn/' + ('a'*32))
+            [void][IO.Directory]::CreateDirectory($transaction)
+            if($members.Count -gt 0){[IO.File]::WriteAllText((Join-Path $transaction $members[0]),'unpublished')}
             Repair-AgentEnvironmentSetupTransactions $fixture.Layout.SetupRoot
-            [IO.File]::ReadAllText((Join-Path $fixture.Layout.ReceiptDirectory 'setup-receipt.json')) | Should BeExactly '{"generation":2}'
             Test-Path -LiteralPath (Join-Path $fixture.Layout.SetupRoot '.ai-instructions-txn') | Should Be $false
         }
     }
@@ -519,15 +533,11 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
     }
     }
 
-    # Scenario: The host uses musl instead of the pinned glibc-compatible Linux runtime.
-    # Purpose: K2 classifies musl as unsupported in both the shell edge and the PowerShell RID detector.
-    It 'UnitT35_treats_musl_linux_as_an_unsupported_platform' {
-        $moduleText = [IO.File]::ReadAllText((Join-Path $script:SetupScripts 'agent-environment-setup.psm1'))
-        $script:SetupShellText | Should Match '/lib/ld-musl-\* /usr/lib/ld-musl-\*'
-        $script:SetupShellText | Should Match 'refuse unsupported-platform "\$EXIT_UNSUPPORTED_PLATFORM"'
-        $script:SetupShellText | Should Match 'musl-based Linux has no pinned PowerShell asset\.'
-        $moduleText | Should Match "Get-ChildItem -Force -LiteralPath '/lib' -Filter 'ld-musl-\*'"
-        $moduleText | Should Match "New-AgentEnvironmentSetupRefusal unsupported-platform 'musl-based Linux has no pinned PowerShell asset\.'"
+    # Scenario: The reviewed policy exposes only glibc-compatible Linux RIDs and no musl RID.
+    # Purpose: Keep the policy side of K2 closed; native behavior is verified with a controllable loader probe.
+    It 'UnitT35_exposes_no_musl_policy_asset' {
+        $policy=Get-SetupTestPolicy
+        @($policy.powerShell.assets.rid | Where-Object {$_ -match 'musl'}).Count | Should Be 0
     }
 
     # Scenario: A caller tries to select an automatic setup mode.
@@ -634,6 +644,41 @@ Describe 'setup-agent-environment Windows native fixture (SYP-354 P10a)' {
                 $lines = @($stdoutTask.Result.Split("`n") | ForEach-Object { $_.TrimEnd("`r") } | Where-Object { $_.Length -gt 0 })
                 return [pscustomobject]@{ ExitCode = $process.ExitCode; Lines = $lines; Stdout = $stdoutTask.Result; Stderr = $stderrTask.Result; Json = $(if ($lines.Count -eq 1) { $lines[0] | ConvertFrom-Json } else { $null }) }
             } finally { $process.Dispose() }
+        }
+
+        function Start-WinSetup {
+            param([string[]]$Arguments,[Parameter(Mandatory=$true)][string]$UserHome,[hashtable]$Environment=@{},[string]$EntryPath=$script:WinEntry)
+            $start=[Diagnostics.ProcessStartInfo]::new($script:WinPwsh)
+            foreach($argument in @('-NoLogo','-NoProfile','-NonInteractive','-File',$EntryPath)+$Arguments){$start.ArgumentList.Add($argument)}
+            $start.UseShellExecute=$false;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+            $start.Environment['HOME']=$UserHome;[void]$start.Environment.Remove('CODEX_HOME')
+            foreach($key in $Environment.Keys){$start.Environment[$key]=[string]$Environment[$key]}
+            $process=[Diagnostics.Process]::Start($start)
+            return [pscustomobject]@{Process=$process;Stdout=$process.StandardOutput.ReadToEndAsync();Stderr=$process.StandardError.ReadToEndAsync()}
+        }
+
+        function Complete-WinSetup {
+            param($Running)
+            try{
+                if(-not $Running.Process.WaitForExit(900000)){$Running.Process.Kill($true);throw 'Setup fixture run timed out.'}
+                $Running.Process.WaitForExit()
+                $stdout=$Running.Stdout.Result;$stderr=$Running.Stderr.Result
+                $lines=@($stdout.Split("`n")|ForEach-Object{$_.TrimEnd("`r")}|Where-Object{$_.Length -gt 0})
+                return [pscustomobject]@{ExitCode=$Running.Process.ExitCode;Lines=$lines;Stdout=$stdout;Stderr=$stderr;Json=$(if($lines.Count -eq 1){$lines[0]|ConvertFrom-Json}else{$null})}
+            }finally{$Running.Process.Dispose()}
+        }
+
+        function Wait-WinBarrierReady {
+            param([string]$Directory)
+            [void][IO.Directory]::CreateDirectory($Directory)
+            $ready=Join-Path $Directory 'ready'
+            if([IO.File]::Exists($ready)){return}
+            $watcher=[IO.FileSystemWatcher]::new($Directory,'ready');$watcher.EnableRaisingEvents=$true
+            try{
+                if([IO.File]::Exists($ready)){return}
+                $change=$watcher.WaitForChanged([IO.WatcherChangeTypes]::Created,120000)
+                if($change.TimedOut -or -not [IO.File]::Exists($ready)){throw 'Setup barrier did not become ready.'}
+            }finally{$watcher.Dispose()}
         }
 
         function Get-WinRuntimeSnapshot {
@@ -746,7 +791,9 @@ Describe 'setup-agent-environment Windows native fixture (SYP-354 P10a)' {
         $run.ExitCode | Should Be 21
         $run.Json.result | Should Be 'refused'
         $run.Json.code | Should Be 'runtime-missing'
-        Test-Path -LiteralPath (Join-Path $fixture.Home '.local/share/ai-instructions-setup') | Should Be $false
+        Test-Path -LiteralPath $fixture.Layout.RuntimeDirectory | Should Be $false
+        Test-Path -LiteralPath $fixture.Layout.ReceiptDirectory | Should Be $false
+        Assert-WinLockReleased $fixture
     }
 
     # Scenario: An interrupted install journal is left in CODEX_HOME or the USER home.
@@ -893,6 +940,82 @@ Describe 'setup-agent-environment Windows native fixture (SYP-354 P10a)' {
         $failure.Json.code | Should Be 'internal-error'
         Assert-WinReceiptFieldSet $failure
     }
+
+    # Scenario: Each setup receipt publication crash point terminates a real child process, then the real entry is rerun.
+    # Purpose: G1/G2/G3/G10 prove lock-held WAL recovery for pre-journal, journaled, post-rename and post-journal states.
+    It 'InterT12_recovers_every_setup_publication_crash_point_through_the_real_entry' {
+        $fixture=New-WinFixture 'publication-crashes'
+        $arguments=@('-Prepare','-ExpectedCommit',$script:WinCommit,'-ArchivePath',$script:WinArchive)
+        $initial=Invoke-WinSetup $arguments -UserHome $fixture.Home
+        Assert-WinSuccessReceipt $initial $fixture 'prepared-runtime-only' 'resolved'
+        $runtimeBefore=Get-WinRuntimeSnapshot $fixture
+        foreach($point in @('after-transaction-directory','after-journal-stage','after-journal','after-parent-directory','after-stage','after-rename','after-displaced-cleanup','after-journal-cleanup','after-transaction-cleanup')){
+            $crashed=Invoke-WinSetup $arguments -UserHome $fixture.Home -Environment @{AI_INSTRUCTIONS_SETUP_FAILPOINT=$point;AI_INSTRUCTIONS_SETUP_FAILPOINT_LEAF='setup-receipt.json'}
+            $crashed.ExitCode | Should Not Be 0
+            Test-Path -LiteralPath (Join-Path $fixture.Layout.SetupRoot '.ai-instructions-txn') | Should Be $true
+            $recovered=Invoke-WinSetup $arguments -UserHome $fixture.Home
+            Assert-WinSuccessReceipt $recovered $fixture 'prepared-runtime-only' 'reverified'
+            (Get-WinRuntimeSnapshot $fixture) | Should BeExactly $runtimeBefore
+        }
+    }
+
+    # Scenario: The target was displaced and the child died before the staged receipt rename, using a committed adapter shim.
+    # Purpose: G1 gives the two-rename gap a unique recovery decision through the real entry point.
+    It 'InterT13_recovers_the_between_renames_crash_state_through_the_real_entry' {
+        $fixture=New-WinFixture 'publication-between-renames'
+        $arguments=@('-Prepare','-ExpectedCommit',$script:WinCommit,'-ArchivePath',$script:WinArchive)
+        Assert-WinSuccessReceipt (Invoke-WinSetup $arguments -UserHome $fixture.Home) $fixture 'prepared-runtime-only' 'resolved'
+        $shimRepo=Join-Path $script:WinRoot ('between-renames-repo-'+[guid]::NewGuid().ToString('N'))
+        Copy-Item -LiteralPath $script:WinRepo -Destination $shimRepo -Recurse
+        $adapter=Join-Path $shimRepo 'scripts/platform/Windows.psm1'
+        $text=[IO.File]::ReadAllText($adapter)
+        $match=[regex]::Match($text,'(?m)^(\s*\$displaced=\$true)\r?$')
+        $match.Success | Should Be $true
+        $indent=[regex]::Match($match.Groups[1].Value,'^\s*').Value
+        $injection=$match.Groups[1].Value+"`n"+$indent+"if([Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_SETUP_FAILPOINT') -ceq 'after-displace' -and `$Leaf -ceq 'setup-receipt.json'){[Environment]::FailFast('between setup receipt renames')}"
+        $text=$text.Remove($match.Index,$match.Length).Insert($match.Index,$injection)
+        [IO.File]::WriteAllText($adapter,$text,[Text.UTF8Encoding]::new($false))
+        $manifestPath=Join-Path $shimRepo 'scripts/platform-runtime.psd1'
+        $manifestText=[IO.File]::ReadAllText($manifestPath)
+        $hash=Get-AgentEnvironmentSetupSha256Text ([IO.File]::ReadAllText($adapter))
+        $manifestText=[regex]::Replace($manifestText,"(?m)(Path = 'platform/Windows\.psm1'; Sha256 = ')[a-f0-9]{64}(')",('${1}'+$hash+'$2'))
+        [IO.File]::WriteAllText($manifestPath,$manifestText,[Text.UTF8Encoding]::new($false))
+        & git -C $shimRepo init -q 2>$null | Out-Null
+        & git -C $shimRepo add -A 2>$null | Out-Null
+        & git -C $shimRepo -c user.name=setup-test -c user.email=setup-test@example.invalid commit -q -m between-renames 2>$null | Out-Null
+        $shimCommit=[string](& git -C $shimRepo rev-parse HEAD)
+        $shimCommit | Should MatchExactly '^[0-9a-f]{40}$'
+        $shimEntry=Join-Path $shimRepo 'scripts/setup-agent-environment.ps1'
+        $shimArguments=@('-Prepare','-ExpectedCommit',$shimCommit,'-ArchivePath',$script:WinArchive)
+        $crashed=Invoke-WinSetup $shimArguments -UserHome $fixture.Home -EntryPath $shimEntry -Environment @{AI_INSTRUCTIONS_SETUP_FAILPOINT='after-displace'}
+        $crashed.ExitCode | Should Not Be 0
+        Test-Path -LiteralPath (Join-Path $fixture.Layout.SetupRoot '.ai-instructions-txn') | Should Be $true
+        $recovered=Invoke-WinSetup $shimArguments -UserHome $fixture.Home -EntryPath $shimEntry
+        $recovered.ExitCode | Should Be 0
+        $recovered.Json.powerShell.runtimeAction | Should Be 'reverified'
+        Test-Path -LiteralPath (Join-Path $fixture.Layout.SetupRoot '.ai-instructions-txn') | Should Be $false
+        Assert-WinLockReleased $fixture
+    }
+
+    # Scenario: Process A holds setup.lock after creating the runtime directory; process B starts from the real entry.
+    # Purpose: G4 uses a synchronization barrier and requires the concurrent run to return 26 rather than runtime-incomplete.
+    It 'InterT14_reports_concurrent_while_the_runtime_is_transient_under_the_lock' {
+        $fixture=New-WinFixture 'concurrency-barrier'
+        $barrier=Join-Path $script:WinRoot ('barrier-'+[guid]::NewGuid().ToString('N'))
+        $arguments=@('-Prepare','-ExpectedCommit',$script:WinCommit,'-ArchivePath',$script:WinArchive)
+        $first=Start-WinSetup $arguments -UserHome $fixture.Home -Environment @{AI_INSTRUCTIONS_SETUP_BARRIER='after-runtime-directory';AI_INSTRUCTIONS_SETUP_BARRIER_DIRECTORY=$barrier}
+        try{
+            Wait-WinBarrierReady $barrier
+            $second=Invoke-WinSetup $arguments -UserHome $fixture.Home
+            $second.ExitCode | Should Be 26
+            $second.Json.code | Should Be 'concurrent'
+            [IO.File]::WriteAllText((Join-Path $barrier 'release'),'release')
+            $completed=Complete-WinSetup $first;$first=$null
+            Assert-WinSuccessReceipt $completed $fixture 'prepared-runtime-only' 'resolved'
+        }finally{
+            if($null -ne $first){[IO.File]::WriteAllText((Join-Path $barrier 'release'),'release');[void](Complete-WinSetup $first)}
+        }
+    }
 }
 }
 
@@ -1010,12 +1133,12 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         }
 
         function Invoke-UnixSetup {
-            param([string]$UserHome,[string[]]$Arguments,[string]$Kind='runtime',[hashtable]$Environment=@{},[string]$ExpectedCommit=$script:UnixCommits[$Kind],[switch]$NoCheckout)
+            param([string]$UserHome,[string[]]$Arguments,[string]$Kind='runtime',[hashtable]$Environment=@{},[string]$ExpectedCommit=$script:UnixCommits[$Kind],[switch]$NoCheckout,[switch]$UnsetHome)
             if (-not $NoCheckout) { & git -C $script:UnixRepo checkout -q --detach $script:UnixCommits[$Kind] 2>$null | Out-Null }
             $start = [Diagnostics.ProcessStartInfo]::new('sh')
             foreach ($argument in @($script:UnixShell,'--expected-commit',$ExpectedCommit) + $Arguments) { $start.ArgumentList.Add($argument) }
             $start.UseShellExecute = $false; $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
-            $start.Environment['HOME'] = $UserHome
+            if($UnsetHome){[void]$start.Environment.Remove('HOME')}else{$start.Environment['HOME'] = $UserHome}
             # Any accidental network use fails fast instead of reaching the internet.
             $start.Environment['HTTPS_PROXY'] = 'http://127.0.0.1:9'
             [void]$start.Environment.Remove('CODEX_HOME')
@@ -1028,6 +1151,28 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
                 $lines = @($stdoutTask.Result.Split("`n") | Where-Object { $_.Length -gt 0 })
                 return [pscustomobject]@{ ExitCode = $process.ExitCode; Lines = $lines; Stdout = $stdoutTask.Result; Stderr = $stderrTask.Result; Json = $(if ($lines.Count -eq 1) { $lines[0] | ConvertFrom-Json } else { $null }) }
             } finally { $process.Dispose() }
+        }
+
+        function Start-UnixSetup {
+            param([string]$UserHome,[string[]]$Arguments,[hashtable]$Environment=@{})
+            & git -C $script:UnixRepo checkout -q --detach $script:UnixCommits['runtime'] 2>$null | Out-Null
+            $start=[Diagnostics.ProcessStartInfo]::new('sh')
+            foreach($argument in @($script:UnixShell,'--expected-commit',$script:UnixCommits['runtime'])+$Arguments){$start.ArgumentList.Add($argument)}
+            $start.UseShellExecute=$false;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+            $start.Environment['HOME']=$UserHome;$start.Environment['HTTPS_PROXY']='http://127.0.0.1:9';[void]$start.Environment.Remove('CODEX_HOME')
+            foreach($key in $Environment.Keys){$start.Environment[$key]=[string]$Environment[$key]}
+            $process=[Diagnostics.Process]::Start($start)
+            return [pscustomobject]@{Process=$process;Stdout=$process.StandardOutput.ReadToEndAsync();Stderr=$process.StandardError.ReadToEndAsync()}
+        }
+
+        function Complete-UnixSetup {
+            param($Running)
+            try{
+                if(-not $Running.Process.WaitForExit(900000)){$Running.Process.Kill($true);throw 'Shell setup fixture run timed out.'}
+                $Running.Process.WaitForExit();$stdout=$Running.Stdout.Result;$stderr=$Running.Stderr.Result
+                $lines=@($stdout.Split("`n")|Where-Object{$_.Length -gt 0})
+                return [pscustomobject]@{ExitCode=$Running.Process.ExitCode;Lines=$lines;Stdout=$stdout;Stderr=$stderr;Json=$(if($lines.Count -eq 1){$lines[0]|ConvertFrom-Json}else{$null})}
+            }finally{$Running.Process.Dispose()}
         }
 
         function Get-UnixMode {
@@ -1137,14 +1282,18 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         }
     }
 
-    # Scenario: PATH lacks every SHA-256 tool, or uname reports an unsupported OS.
-    # Purpose: Dependencies and the RID map fail with typed exits; no system package is installed.
+    # Scenario: PATH lacks every SHA-256 tool, or uname reports an unsupported OS or architecture.
+    # Purpose: Dependencies and both RID dimensions fail with typed exits; no system package is installed.
     It 'InterT24_refuses_missing_hash_tools_and_unsupported_platforms' {
         $userHome = New-UnixHome 'tools'
         $bin = New-UnixToolShim 'no-hash' -Exclude @('sha256sum','shasum')
         $run = Invoke-UnixSetup $userHome @('--offline') -Environment @{ PATH = $bin }
         $run.ExitCode | Should Be 14; $run.Json.code | Should Be 'missing-dependency'
         $bin = New-UnixToolShim 'freebsd' -Replace @{ uname = 'echo FreeBSD' }
+        $run = Invoke-UnixSetup $userHome @('--offline') -Environment @{ PATH = $bin }
+        $run.ExitCode | Should Be 11; $run.Json.code | Should Be 'unsupported-platform'
+        $uname=@('case "$1" in','  -s) echo Linux ;;','  -m) echo mystery-architecture ;;','esac') -join "`n"
+        $bin = New-UnixToolShim 'unknown-architecture' -Replace @{ uname = $uname }
         $run = Invoke-UnixSetup $userHome @('--offline') -Environment @{ PATH = $bin }
         $run.ExitCode | Should Be 11; $run.Json.code | Should Be 'unsupported-platform'
         Test-Path -LiteralPath (Join-Path $userHome '.local/share/ai-instructions-setup/pwsh') | Should Be $false
@@ -1271,25 +1420,122 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         }
     }
 
-    # Scenario: CODEX_HOME, USER, legacy, or setup-root transaction residue exists in a fresh independent HOME.
-    # Purpose: F4 performs the read-only K7 preflight before creating setup/cache/temp/lock entries.
-    It 'InterT32_refuses_each_K7_residue_with_the_complete_HOME_tree_unchanged' {
-        foreach ($scope in @('codex','user','legacy','setup')) {
+    # Scenario: CODEX_HOME, USER, or legacy external transaction residue exists in a fresh independent HOME.
+    # Purpose: G3/G5 refuse only external K7 state and emit the exact shared recovery command before mutation.
+    It 'InterT32_refuses_external_K7_residue_with_exact_recovery_commands_and_unchanged_HOME' {
+        foreach ($scope in @('codex','user','legacy')) {
             $home = New-UnixHome "residue-$scope" -WithoutCache
             $path = switch ($scope) {
                 'codex' { Join-Path $home '.codex/.ai-instructions-txn' }
                 'user' { Join-Path $home '.ai-instructions-txn' }
                 'legacy' { Join-Path $home '.codex/.ai-instructions-install-fixture' }
-                default { Join-Path $home '.local/share/ai-instructions-setup/.ai-instructions-txn' }
             }
             [void][IO.Directory]::CreateDirectory($path)
             [IO.File]::WriteAllText((Join-Path $path 'sentinel'),'residue')
             $before = Get-UnixTreeSnapshot $home
+            $policy=[IO.File]::ReadAllText((Join-Path $script:UnixRepo 'scripts/setup-agent-environment.policy.json'))|ConvertFrom-Json
+            $plan=Get-AgentEnvironmentSetupPlan -Policy $policy -UserHome $home -CodexHome (Join-Path $home '.codex') -Mode Prepare -ArchivePath '' -Rid $script:UnixRid
             $run = Invoke-UnixSetup $home @('--prepare')
             $run.ExitCode | Should Be 27
             $run.Json.code | Should Be 'interrupted-install'
+            $expected=if($scope -ceq 'user'){'pwsh -NoProfile -NonInteractive -File ~/.codex/hooks/update-agent-environment.ps1 -Recover'}else{'pwsh -NoProfile -NonInteractive -File scripts/install-ai-instructions-bootstrap.ps1 -CodexHome ~/.codex'}
+            $run.Json.recoverCommand | Should BeExactly $expected
+            $run.Json.recoverCommand | Should BeExactly $plan.recoverCommand
             (Get-UnixTreeSnapshot $home) | Should BeExactly $before
         }
+    }
+
+    # Scenario: HOME is unset, relative, root, newline-bearing, or a regular file instead of a directory.
+    # Purpose: G12 table-drives every invalid HOME shape through the native shell entry without Skip.
+    It 'InterT34_refuses_each_invalid_HOME_shape' {
+        $fileHome=Join-Path $script:UnixRoot 'home-as-file';[IO.File]::WriteAllText($fileHome,'not a directory')
+        $cases=@(
+            @{Name='unset';Value='';Unset=$true},
+            @{Name='relative';Value='relative/home';Unset=$false},
+            @{Name='root';Value='/';Unset=$false},
+            @{Name='newline';Value="/tmp/invalid`nhome";Unset=$false},
+            @{Name='file';Value=$fileHome;Unset=$false}
+        )
+        foreach($case in $cases){
+            $run=Invoke-UnixSetup $case.Value @('--offline') -UnsetHome:$case.Unset
+            $run.ExitCode | Should Be 12
+            $run.Json.code | Should Be 'home-invalid'
+        }
+    }
+
+    # Scenario: The loader probe is forced to report musl, while a control probe reports no musl loader.
+    # Purpose: G12 verifies behavior from the native entry instead of comparing source-code strings.
+    It 'InterT35_uses_the_controllable_loader_probe_to_refuse_musl' {
+        $home=New-UnixHome 'musl-probe'
+        $realFind=@(Get-Command find -CommandType Application | Select-Object -First 1)[0].Source
+        $findShim=@('if [ "$1" = /lib ] && [ "$2" = /usr/lib ]; then','  printf "%s\n" /lib/ld-musl-fixture.so.1','  exit 0','fi','exec "$REAL_FIND" "$@"') -join "`n"
+        $bin=New-UnixToolShim 'musl-probe' -Replace @{find=$findShim}
+        $run=Invoke-UnixSetup $home @('--offline') -Environment @{PATH=$bin;REAL_FIND=$realFind}
+        $run.ExitCode | Should Be 11;$run.Json.code | Should Be 'unsupported-platform'
+        $control=Invoke-UnixSetup $home @('--offline')
+        $control.Json.code | Should Not Be 'unsupported-platform'
+    }
+
+    # Scenario: A HOME ancestor is writable by other users without sticky protection, and where possible owned by another uid.
+    # Purpose: G12 rejects unsafe ancestor ownership/mode through behavior-level native fixtures.
+    It 'InterT36_refuses_unsafe_ancestor_mode_and_owner' {
+        $unsafeParent=Join-Path $script:UnixRoot 'unsafe-ancestor-mode';[void][IO.Directory]::CreateDirectory($unsafeParent)
+        [IO.File]::SetUnixFileMode($unsafeParent,[IO.UnixFileMode]511)
+        $home=Join-Path $unsafeParent 'home';[void][IO.Directory]::CreateDirectory($home);[IO.File]::SetUnixFileMode($home,[IO.UnixFileMode]448)
+        try{$run=Invoke-UnixSetup $home @('--offline');$run.ExitCode | Should Be 13;$run.Json.code | Should Be 'unsafe-path'}finally{[IO.File]::SetUnixFileMode($unsafeParent,[IO.UnixFileMode]448)}
+        if($script:SetupTestUnixUid -eq '0'){
+            $ownerParent=Join-Path $script:UnixRoot 'unsafe-ancestor-owner';[void][IO.Directory]::CreateDirectory($ownerParent)
+            $ownerHome=Join-Path $ownerParent 'home';[void][IO.Directory]::CreateDirectory($ownerHome)
+            & chown 1 $ownerParent
+            try{$run=Invoke-UnixSetup $ownerHome @('--offline');$run.ExitCode | Should Be 13;$run.Json.code | Should Be 'unsafe-path'}finally{& chown 0 $ownerParent}
+        }
+    }
+
+    # Scenario: The cache pathname is replaced after the snapshot hash is computed but before tar or PowerShell can consume bytes.
+    # Purpose: G11 uses a FIFO barrier to prove only the private snapshot is used after verification.
+    It 'InterT37_uses_only_the_private_snapshot_after_a_barrier_cache_swap' {
+        $home=New-UnixHome 'cache-race'
+        $initial=Invoke-UnixSetup $home @('--prepare')
+        $initial.ExitCode | Should Be 0
+        $barrier=Join-Path $script:UnixRoot ('cache-race-'+[guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($barrier)
+        $fifo=Join-Path $barrier 'release';& mkfifo $fifo;$LASTEXITCODE | Should Be 0
+        $ready=Join-Path $barrier 'ready';$realHash=@(Get-Command sha256sum -CommandType Application | Select-Object -First 1)[0].Source
+        $hashShim=@('result=$("$REAL_HASH" "$1")','printf ready > "$BARRIER_READY"','IFS= read -r release < "$BARRIER_FIFO"','printf "%s\n" "$result"') -join "`n"
+        $bin=New-UnixToolShim 'cache-race' -Replace @{sha256sum=$hashShim}
+        $running=Start-UnixSetup $home @('--offline') -Environment @{PATH=$bin;REAL_HASH=$realHash;BARRIER_READY=$ready;BARRIER_FIFO=$fifo}
+        try{
+            $watcher=[IO.FileSystemWatcher]::new($barrier,'ready');$watcher.EnableRaisingEvents=$true
+            try{if(-not [IO.File]::Exists($ready)){[void]$watcher.WaitForChanged([IO.WatcherChangeTypes]::Created,120000)}}finally{$watcher.Dispose()}
+            [IO.File]::Exists($ready) | Should Be $true
+            $cache=Join-Path $home ".local/share/ai-instructions-setup/cache/$($script:UnixAssetName)"
+            Move-Item -LiteralPath $cache -Destination ($cache+'.verified')
+            Copy-Item -LiteralPath $script:UnixArchives['symlink'].Path -Destination $cache
+            $writer=[IO.File]::Open($fifo,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]::ReadWrite)
+            try{$bytes=[Text.Encoding]::UTF8.GetBytes("release`n");$writer.Write($bytes,0,$bytes.Length)}finally{$writer.Dispose()}
+            $run=Complete-UnixSetup $running;$running=$null
+            $run.ExitCode | Should Be 0
+            $run.Json.result | Should Be 'verified-runtime-only'
+        }finally{if($null -ne $running){$running.Process.Kill($true);[void](Complete-UnixSetup $running)}}
+    }
+
+    # Scenario: The real PowerShell entry is killed after staging a setup receipt, then the documented shell entry is rerun.
+    # Purpose: G3/G10 prove the shell does not refuse setup-owned WAL and reaches lock-held PowerShell recovery.
+    It 'InterT38_recovers_a_setup_owned_journal_when_rerun_through_the_shell_entry' {
+        $home=New-UnixHome 'shell-recovery'
+        $initial=Invoke-UnixSetup $home @('--prepare');$initial.ExitCode | Should Be 0
+        $cache=Join-Path $home ".local/share/ai-instructions-setup/cache/$($script:UnixAssetName)"
+        $start=[Diagnostics.ProcessStartInfo]::new([Environment]::ProcessPath)
+        foreach($argument in @('-NoLogo','-NoProfile','-NonInteractive','-File',(Join-Path $script:UnixRepo 'scripts/setup-agent-environment.ps1'),'-Offline','-ExpectedCommit',$script:UnixCommits['runtime'],'-ArchivePath',$cache)){$start.ArgumentList.Add($argument)}
+        $start.UseShellExecute=$false;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+        $start.Environment['HOME']=$home;$start.Environment['AI_INSTRUCTIONS_SETUP_FAILPOINT']='after-stage';$start.Environment['AI_INSTRUCTIONS_SETUP_FAILPOINT_LEAF']='setup-receipt.json';[void]$start.Environment.Remove('CODEX_HOME')
+        $process=[Diagnostics.Process]::Start($start)
+        try{$out=$process.StandardOutput.ReadToEndAsync();$err=$process.StandardError.ReadToEndAsync();$process.WaitForExit(900000)|Should Be $true;$process.ExitCode|Should Not Be 0}finally{$process.Dispose()}
+        Test-Path -LiteralPath (Join-Path $home '.local/share/ai-instructions-setup/.ai-instructions-txn') | Should Be $true
+        $recovered=Invoke-UnixSetup $home @('--offline')
+        $recovered.ExitCode | Should Be 0
+        $recovered.Json.result | Should Be 'verified-runtime-only'
+        Test-Path -LiteralPath (Join-Path $home '.local/share/ai-instructions-setup/.ai-instructions-txn') | Should Be $false
     }
 
     # Register only when the native test process can create a genuinely foreign-owned cache fixture.

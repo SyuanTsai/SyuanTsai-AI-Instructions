@@ -8036,7 +8036,7 @@ Describe 'Platform K15 PowerShell runtime receipt reverification' {
             [void][IO.Directory]::CreateDirectory($Directory)
             $path = Join-Path $Directory $name
             $source = [IO.Path]::GetFullPath($PSHOME).TrimEnd([IO.Path]::DirectorySeparatorChar)
-            $directories = @(Get-ChildItem -LiteralPath $source -Directory -Recurse -Force | ForEach-Object { $_.FullName.Substring($source.Length+1).Replace('\','/') } | Sort-Object)
+            $directories = @(@(Get-ChildItem -LiteralPath $source -Directory -Recurse -Force | ForEach-Object { $_.FullName.Substring($source.Length+1).Replace('\','/') }) + @('k15-empty') | Sort-Object -Unique)
             $files = @(Get-ChildItem -LiteralPath $source -File -Recurse -Force | ForEach-Object { $_.FullName.Substring($source.Length+1).Replace('\','/') } | Sort-Object)
             if ($IsWindows) {
                 $archive = [IO.Compression.ZipFile]::Open($path,[IO.Compression.ZipArchiveMode]::Create)
@@ -8179,6 +8179,32 @@ Describe 'Platform K15 PowerShell runtime receipt reverification' {
         Assert-K15Baseline
     }
 
+    # Scenario: An empty directory is added after Resolve issued the runtime receipt.
+    # Purpose: G8 binds directory type and inventory on the K15 verification path, including otherwise invisible empty directories.
+    It 'InterT863a_rejects_an_extra_empty_runtime_directory' {
+        $runtime = Get-K15ResolvedRuntime
+        $extra = Join-Path $runtime.Root 'k15-extra-empty'
+        [void][IO.Directory]::CreateDirectory($extra)
+        try { Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $runtime.Receipt } 'directory|closure' }
+        finally { [IO.Directory]::Delete($extra) }
+        Assert-K15Baseline
+    }
+
+    # Scenario: A receipt-bound empty directory is removed, then replaced by a regular file at the same path.
+    # Purpose: G8 rejects both missing directories and file/directory type swaps without changing legacy closure semantics.
+    It 'InterT863b_rejects_missing_and_type_swapped_empty_runtime_directories' {
+        $runtime = Get-K15ResolvedRuntime
+        $empty = Join-Path $runtime.Root 'k15-empty'
+        [IO.Directory]::Delete($empty)
+        try {
+            Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $runtime.Receipt } 'directory|closure'
+            [IO.File]::WriteAllText($empty,'type-swap')
+            try { Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $runtime.Receipt } 'directory|closure' }
+            finally { [IO.File]::Delete($empty) }
+        } finally { [void][IO.Directory]::CreateDirectory($empty) }
+        Assert-K15Baseline
+    }
+
     # Scenario: A closure member disappears after the receipt was issued.
     # Purpose: Reject a missing member with a typed failure, then accept the restored runtime.
     # Not registered on a prerelease host, whose version cannot be bound by an x.y.z policy.
@@ -8240,6 +8266,7 @@ Describe 'Platform K15 PowerShell runtime receipt reverification' {
             @{ Pattern='apiVersion'; Mutate={ param($r) $r.apiVersion='2.0' } },
             @{ Pattern='closure is incomplete'; Mutate={ param($r) $r.runtimeClosure.PSObject.Properties.Remove('files') } },
             @{ Pattern='closure is incomplete'; Mutate={ param($r) $r.runtimeClosure.PSObject.Properties.Remove('sha256') } },
+            @{ Pattern='directory inventory'; Mutate={ param($r) $r.runtimeClosure.PSObject.Properties.Remove('directories') } },
             @{ Pattern='incomplete member'; Mutate={ param($r) $r.runtimeClosure.files[0].PSObject.Properties.Remove('sha256') } },
             @{ Pattern='digest is inconsistent'; Mutate={ param($r) $r.runtimeClosure.files=@($r.runtimeClosure.files | Select-Object -Skip 1) } },
             @{ Pattern='executable hash'; Mutate={ param($r) $r.executableSha256=('0'*64) } },

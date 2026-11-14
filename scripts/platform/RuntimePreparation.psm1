@@ -9,7 +9,7 @@ $bundle = Import-PowerShellDataFile -LiteralPath (Join-Path (Split-Path -Parent 
 $script:PesterResolverSha256 = [string](@($bundle.PrivateData.PlatformRuntime.Inventory | Where-Object Path -CEQ 'Resolve-StandardValidationTool.ps1')[0].Sha256)
 
 function New-PlatformPreparationSession {
-    return [pscustomobject]@{ Guards=[Collections.Generic.List[IDisposable]]::new(); Files=[Collections.Generic.List[object]]::new() }
+    return [pscustomobject]@{ Guards=[Collections.Generic.List[IDisposable]]::new(); Files=[Collections.Generic.List[object]]::new(); Directories=[Collections.Generic.List[string]]::new() }
 }
 
 # Resolve only caller-selected entry paths. P2 subsequently walks the physical
@@ -179,6 +179,47 @@ function New-PlatformExpectedClosure {
     try { $digest=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($canonical))).Replace('-','').ToLowerInvariant() }
     finally { $sha.Dispose() }
     return [pscustomobject]@{rootPath=[IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar);sha256=$digest;files=@($ordered.Values)}
+}
+
+# K15 additive verification metadata. Existing file-closure primitives retain
+# their exact shape and digest semantics; only the new Assert-* path consumes
+# this directory inventory.
+function New-PlatformRuntimeDirectoryReceipt {
+    param($Files,$Directories,[string]$Platform)
+    $ordered=[Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
+    foreach($directory in @($Directories)){
+        $relative=([string]$directory).TrimEnd('/')
+        if([string]::IsNullOrWhiteSpace($relative)){continue}
+        [void](Assert-SafePlatformArchivePath $relative $Platform)
+        [void]$ordered.Add($relative)
+    }
+    foreach($file in @($Files)){
+        $relative=[string]$file.path
+        [void](Assert-SafePlatformArchivePath $relative $Platform)
+        $parts=$relative.Split('/')
+        for($i=1;$i -lt $parts.Length;$i++){[void]$ordered.Add(($parts[0..($i-1)] -join '/'))}
+    }
+    $canonical=(@($ordered) | ForEach-Object { "directory`t$_`n" }) -join ''
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try{$digest=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($canonical))).Replace('-','').ToLowerInvariant()}
+    finally{$sha.Dispose()}
+    return [pscustomobject]@{directories=[string[]]@($ordered);directorySha256=$digest}
+}
+
+function Get-PlatformRuntimeDirectoryInventory {
+    param([string]$Root,[string]$Platform)
+    $rootPath=[IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)
+    $pending=[Collections.Generic.Queue[string]]::new();$pending.Enqueue($rootPath)
+    $directories=[Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
+    while($pending.Count -gt 0){
+        $directory=$pending.Dequeue()
+        foreach($child in @(Get-ChildItem -LiteralPath $directory -Force -ErrorAction Stop)){
+            $relative=$child.FullName.Substring($rootPath.Length+1).Replace('\','/')
+            if(($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $null -ne $child.LinkType){throw "Runtime directory inventory contains a link: '$relative'."}
+            if($child.PSIsContainer){[void](Assert-SafePlatformArchivePath $relative $Platform);[void]$directories.Add($relative);$pending.Enqueue($child.FullName)}
+        }
+    }
+    return [string[]]@($directories)
 }
 
 function Open-PlatformClosureGuards {
@@ -501,6 +542,9 @@ function Resolve-VerifiedPlatformPowerShell {
         # The trust baseline consists exclusively of hashes computed from member
         # bytes in the approved archive snapshot, NEVER the post-extraction disk.
         $runtimeClosure = New-PlatformExpectedClosure $destination $session.Files
+        $directoryReceipt=New-PlatformRuntimeDirectoryReceipt $session.Files $session.Directories $Platform
+        $runtimeClosure | Add-Member -NotePropertyName directories -NotePropertyValue $directoryReceipt.directories
+        $runtimeClosure | Add-Member -NotePropertyName directorySha256 -NotePropertyValue $directoryReceipt.directorySha256
         Assert-PlatformRuntimeClosure $executable $runtimeClosure $Platform
         $identity=Test-PlatformPowerShellIdentity $executable $asset.Version $Platform $architecture $runtimeClosure
         [void](Get-VerifiedPlatformLeasePath $DestinationLease $Platform)
@@ -545,7 +589,10 @@ function Assert-VerifiedPlatformPowerShellRuntime {
         $rootPath=[string](Get-PlatformPreparationProperty $closureValue 'rootPath')
         $closureSha=[string](Get-PlatformPreparationProperty $closureValue 'sha256')
         $closureFiles=Get-PlatformPreparationProperty $closureValue 'files'
+        $closureDirectories=Get-PlatformPreparationProperty $closureValue 'directories'
+        $directorySha=[string](Get-PlatformPreparationProperty $closureValue 'directorySha256')
         if ([string]::IsNullOrWhiteSpace($rootPath) -or $closureSha -cnotmatch '^[a-f0-9]{64}$' -or $null -eq $closureFiles) { throw 'Runtime receipt closure is incomplete.' }
+        if($null -eq $closureDirectories -or $directorySha -cnotmatch '^[a-f0-9]{64}$'){throw 'Runtime receipt directory inventory is incomplete.'}
         $files=foreach ($file in @($closureFiles)) {
             $path=[string](Get-PlatformPreparationProperty $file 'path'); $sha=[string](Get-PlatformPreparationProperty $file 'sha256')
             if ([string]::IsNullOrWhiteSpace($path) -or $sha -cnotmatch '^[a-f0-9]{64}$') { throw 'Runtime receipt closure has an incomplete member.' }
@@ -555,6 +602,9 @@ function Assert-VerifiedPlatformPowerShellRuntime {
         # The receipt digest must bind its own member list before disk comparison.
         $closure=New-PlatformExpectedClosure $rootPath @($files)
         if ($closure.sha256 -cne $closureSha -or @($closure.files).Count -ne @($files).Count) { throw 'Runtime receipt closure digest is inconsistent.' }
+        $directoryReceipt=New-PlatformRuntimeDirectoryReceipt @($files) @($closureDirectories) $Platform
+        if($directoryReceipt.directorySha256 -cne $directorySha -or @($directoryReceipt.directories).Count -ne @($closureDirectories).Count){throw 'Runtime receipt directory inventory digest is inconsistent.'}
+        for($i=0;$i -lt @($closureDirectories).Count;$i++){if([string]$closureDirectories[$i] -cne [string]$directoryReceipt.directories[$i]){throw 'Runtime receipt directory inventory is not ordinal or contains duplicates.'}}
         $executable=[string]$fields.executablePath
         if (-not [IO.Path]::IsPathFullyQualified($executable) -or [IO.Path]::GetFullPath($executable) -cne $executable) { throw 'Runtime receipt executable path is not canonical.' }
         $leaf=if ($Platform -ceq 'windows') { 'pwsh.exe' } else { 'pwsh' }
@@ -563,6 +613,8 @@ function Assert-VerifiedPlatformPowerShellRuntime {
         if ($bound.Count -ne 1 -or [string]$bound[0].sha256 -cne [string]$fields.executableSha256) { throw 'Runtime receipt executable hash is not bound by its closure.' }
         $guards=Open-PlatformClosureGuards $closure $Platform
         Assert-PlatformRuntimeClosure $executable $closure $Platform
+        $actualDirectories=Get-PlatformRuntimeDirectoryInventory $rootPath $Platform
+        if(@($actualDirectories).Count -ne @($directoryReceipt.directories).Count -or (@($actualDirectories) -join "`n") -cne (@($directoryReceipt.directories) -join "`n")){throw 'Runtime directory inventory differs from its receipt.'}
         [void](Test-PlatformPowerShellIdentity $executable $asset.Version $Platform $architecture $closure)
         return $Receipt
     }
@@ -637,6 +689,7 @@ function Open-WindowsPreparationDirectoryGuards {
 
 function New-PlatformPreparationDirectory {
     param($DestinationLease,[string]$RelativePath,[string]$Platform,$Session)
+    if($null -ne $Session -and -not [string]::IsNullOrWhiteSpace($RelativePath)){[void]$Session.Directories.Add($RelativePath.Replace('\','/').TrimEnd('/'))}
     if ($Platform -cne 'windows') {
         [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::CreatePreparationDirectory($DestinationLease,$RelativePath)
     } else {

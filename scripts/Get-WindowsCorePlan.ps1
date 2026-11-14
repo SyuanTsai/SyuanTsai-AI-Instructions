@@ -97,7 +97,7 @@ function New-WindowsCoreShards {
     $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath $ConfigurationPath | ConvertFrom-Json
     if ([int]$configuration.schemaVersion -ne 1) { throw 'Windows Core shard weights require schemaVersion 1.' }
     $partitionCount = [int]$configuration.partitionCount
-    if ($partitionCount -lt 1) { throw 'Windows Core shard partition count must be a positive integer.' }
+    if ($partitionCount -ne 9) { throw 'Windows Core shard partition count must equal the reviewed value 9.' }
     $weights = @{}
     foreach ($property in @($configuration.weights.PSObject.Properties)) {
         $value = [double]$property.Value
@@ -158,6 +158,7 @@ function Assert-WindowsCoreMatrix {
     try { $matrix = $MatrixJson | ConvertFrom-Json -ErrorAction Stop }
     catch { throw "Windows Core matrix is invalid JSON: $($_.Exception.Message)" }
     $include = @($matrix.include)
+    if ($include.Count -gt 9) { throw 'Windows Core matrix exceeds the reviewed nine-partition upper bound.' }
     if ($include.Count -eq 0 -or $include.Count -ne $ExpectedShards.Count) {
         throw "Windows Core matrix must contain exactly $($ExpectedShards.Count) unique planned shards."
     }

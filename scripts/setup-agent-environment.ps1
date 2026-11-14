@@ -262,9 +262,9 @@ try {
     # K4: pinned revision before any mutation.
     Assert-AgentEnvironmentSetupCommit $repositoryRoot $ExpectedCommit
 
-    # F4: a direct Windows invocation must reject K7 residue while HOME is still
-    # byte-for-byte untouched. Shell performs the same read-only preflight.
-    $plan = Get-AgentEnvironmentSetupPlan -Policy $policyInfo.Policy -UserHome $userHome -CodexHome $codexHome -Mode $mode -ArchivePath $archive -Rid $rid
+    # G4: before the lock, inspect only external K7 state. Runtime, receipt and
+    # setup-owned WAL state are transient and are decided only under setup.lock.
+    $plan = Get-AgentEnvironmentSetupPlan -Policy $policyInfo.Policy -UserHome $userHome -CodexHome $codexHome -Mode $mode -ArchivePath $archive -Rid $rid -ExternalOnly
     if ($plan.decision -ceq 'refuse') { throw (New-AgentEnvironmentSetupRefusal ([string]$plan.code) ([string]$plan.reason) ([string]$plan.recoverCommand)) }
 
     # M4/M8: private setup root, serialized by an exclusive platform lock.
@@ -277,11 +277,13 @@ try {
         throw
     }
 
-    # K7/F5: under the lock, recover only a journal whose exact expected state
-    # can be proven, then repeat the read-only residue check immediately before
-    # the first runtime or receipt mutation.
-    if ($plan.decision -ceq 'recover-setup') { Repair-AgentEnvironmentSetupTransactions $layout.SetupRoot }
+    # K7/F5/G1-G4: setup-owned WAL and all runtime/receipt decisions are inside
+    # the exclusive lock. External transactions remain refusals.
     $plan = Get-AgentEnvironmentSetupPlan -Policy $policyInfo.Policy -UserHome $userHome -CodexHome $codexHome -Mode $mode -ArchivePath $archive -Rid $rid
+    if ($plan.decision -ceq 'recover-setup') {
+        Repair-AgentEnvironmentSetupTransactions $layout.SetupRoot
+        $plan = Get-AgentEnvironmentSetupPlan -Policy $policyInfo.Policy -UserHome $userHome -CodexHome $codexHome -Mode $mode -ArchivePath $archive -Rid $rid
+    }
     if ($plan.decision -ceq 'refuse') { throw (New-AgentEnvironmentSetupRefusal ([string]$plan.code) ([string]$plan.reason) ([string]$plan.recoverCommand)) }
     if ($plan.decision -ceq 'recover-setup') { throw (New-AgentEnvironmentSetupRefusal interrupted-install 'A setup publication residue remained after recovery.' 'Inspect ~/.local/share/ai-instructions-setup/.ai-instructions-txn, then rerun setup.') }
     $archiveSha256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -294,6 +296,7 @@ try {
         $runtimeParentLease = Open-PlatformDirectory -Root $layout.SetupRoot -RelativePath 'pwsh' -CreatePrivate
         $runtimeParentLease.Dispose()
         $runtimeLease = Open-PlatformDirectory -Root $layout.SetupRoot -RelativePath $layout.RuntimeRelativePath -CreatePrivate
+        Invoke-AgentEnvironmentSetupBarrier 'after-runtime-directory'
         try {
             try { $runtimeReceipt = Resolve-PlatformPowerShell -Policy $policyInfo.Policy -DestinationLease $runtimeLease -OfflineCache $archive }
             catch { throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed ('The canonical runtime could not be prepared: ' + $_.Exception.Message)) }

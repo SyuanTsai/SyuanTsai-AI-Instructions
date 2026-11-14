@@ -163,7 +163,7 @@ function Invoke-TestRuntimeV3OrdinalChild {
     $outputPath = Join-Path $TestDrive ('runtime-v3-ordinal-stdout-' + [Guid]::NewGuid().ToString('N') + '.txt')
     $errorPath = Join-Path $TestDrive ('runtime-v3-ordinal-stderr-' + [Guid]::NewGuid().ToString('N') + '.txt')
     $process = Start-Process -FilePath $Executable `
-        -ArgumentList @('-NoProfile','-NonInteractive','-File',$ScriptPath,$ModulePath,$InventoryPath) `
+        -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$ScriptPath,$ModulePath,$InventoryPath) `
         -PassThru -Wait -NoNewWindow -RedirectStandardOutput $outputPath -RedirectStandardError $errorPath
     return [pscustomobject]@{
         ExitCode = $process.ExitCode
