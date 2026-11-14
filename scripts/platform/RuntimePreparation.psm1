@@ -565,6 +565,79 @@ function Resolve-VerifiedPlatformPowerShell {
 # and no network. The receipt must still match policy, the host RID, the physical
 # closure on disk (regular files and directories only, no links or hard-link
 # aliases, no extra or missing members), and the physical pwsh identity.
+function Open-PlatformRuntimeDirectoryLease {
+    param([string]$RootPath,[string]$RelativePath,[string]$Platform)
+    if ($Platform -cne 'windows') {
+        if ([string]::IsNullOrEmpty($RelativePath)) { return [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::OpenDirectoryRoot($RootPath) }
+        return [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::OpenDirectory($RootPath,$RelativePath,$false)
+    }
+    $current=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenPreparationRoot($RootPath)
+    try {
+        if (-not [string]::IsNullOrEmpty($RelativePath)) {
+            foreach($part in [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Segments($RelativePath)) {
+                $next=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenPreparationDirectory($current,$part)
+                $current.Dispose();$current=$next
+            }
+        }
+        $result=$current;$current=$null;return $result
+    } finally { if($null -ne $current){$current.Dispose()} }
+}
+
+function Assert-PlatformRuntimePrivateLease {
+    param($Lease,[string]$Platform,[string]$Context,[uint32]$UnixMode,[uint32]$EffectiveUid,[string]$CurrentSid)
+    if($Platform -cne 'windows'){
+        $permissions=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetPermissionSnapshot($Lease)
+        if([Convert]::ToUInt32([string]$permissions.Mode,8) -ne $UnixMode -or [uint64]$permissions.Uid -ne [uint64]$EffectiveUid){
+            throw "$Context must be owned by the effective uid with mode $([Convert]::ToString($UnixMode,8).PadLeft(3,'0'))."
+        }
+        return
+    }
+    $permissions=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::GetPermissions($Lease)
+    $owner=[SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::GetOwnerSid($Lease)
+    if($owner -cne $CurrentSid -or [bool]$permissions.ReadOnly){throw "$Context must be owned by the current SID and writable by that owner."}
+    $descriptor=[Security.AccessControl.RawSecurityDescriptor]::new([string]$permissions.Sddl)
+    $acl=$descriptor.DiscretionaryAcl
+    if($null -eq $acl -or $acl.Count -eq 0){throw "$Context must have a non-empty private DACL."}
+    foreach($ace in $acl){
+        $known=$ace -as [Security.AccessControl.KnownAce]
+        if($null -eq $known -or $known.SecurityIdentifier.Value -cne $CurrentSid -or [string]$known.AceType -cnotin @('AccessAllowed','AccessAllowedObject')){
+            throw "$Context ACL grants access outside the current SID."
+        }
+    }
+}
+
+function Assert-PlatformRuntimePrivatePermissions {
+    param([string]$RootPath,[string]$ExecutablePath,$Closure,[string[]]$Directories,[string]$Platform)
+    $effectiveUid=[uint32]0;$currentSid=$null
+    if($Platform -ceq 'windows'){
+        $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+        try{$currentSid=$identity.User.Value}finally{$identity.Dispose()}
+    }else{$effectiveUid=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetEffectiveUserId()}
+    $lease=Open-PlatformRuntimeDirectoryLease $RootPath '' $Platform
+    try{Assert-PlatformRuntimePrivateLease $lease $Platform 'Runtime root' 448 $effectiveUid $currentSid}finally{$lease.Dispose()}
+    foreach($relative in @($Directories)){
+        $lease=Open-PlatformRuntimeDirectoryLease $RootPath $relative $Platform
+        try{Assert-PlatformRuntimePrivateLease $lease $Platform "Runtime directory '$relative'" 448 $effectiveUid $currentSid}finally{$lease.Dispose()}
+    }
+    foreach($file in @($Closure.files)){
+        $relative=[string]$file.path
+        $parts=[SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Segments($relative)
+        $parentRelative=if($parts.Length -gt 1){[string]::Join([IO.Path]::DirectorySeparatorChar,$parts,0,$parts.Length-1)}else{''}
+        $parent=Open-PlatformRuntimeDirectoryLease $RootPath $parentRelative $Platform
+        try{
+            $lease=if($Platform -ceq 'windows'){
+                [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::OpenFile($parent,$parts[$parts.Length-1],'Read','OpenExisting')
+            }else{
+                [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::OpenFile($parent,$parts[$parts.Length-1],'Read','OpenExisting')
+            }
+            try{
+                $expectedMode=if([string]::Equals([IO.Path]::GetFullPath((Join-Path $RootPath $relative)),[IO.Path]::GetFullPath($ExecutablePath),$(if($Platform -ceq 'windows'){[StringComparison]::OrdinalIgnoreCase}else{[StringComparison]::Ordinal}))){448}else{384}
+                Assert-PlatformRuntimePrivateLease $lease $Platform "Runtime file '$relative'" $expectedMode $effectiveUid $currentSid
+            }finally{$lease.Dispose()}
+        }finally{$parent.Dispose()}
+    }
+}
+
 function Assert-VerifiedPlatformPowerShellRuntime {
     param($Policy,$Receipt,[string]$Platform)
     $guards=$null
@@ -615,6 +688,7 @@ function Assert-VerifiedPlatformPowerShellRuntime {
         Assert-PlatformRuntimeClosure $executable $closure $Platform
         $actualDirectories=Get-PlatformRuntimeDirectoryInventory $rootPath $Platform
         if(@($actualDirectories).Count -ne @($directoryReceipt.directories).Count -or (@($actualDirectories) -join "`n") -cne (@($directoryReceipt.directories) -join "`n")){throw 'Runtime directory inventory differs from its receipt.'}
+        Assert-PlatformRuntimePrivatePermissions $rootPath $executable $closure @($directoryReceipt.directories) $Platform
         [void](Test-PlatformPowerShellIdentity $executable $asset.Version $Platform $architecture $closure)
         return $Receipt
     }

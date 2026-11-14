@@ -62,8 +62,10 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
 
         function New-SetupTestRuntime {
             param($Fixture,[switch]$Directory,[switch]$Receipt)
-            if ($Directory) { [void][IO.Directory]::CreateDirectory($Fixture.Layout.RuntimeDirectory) }
+            $attempt = New-AgentEnvironmentSetupRuntimeAttemptLayout $Fixture.Layout $script:SetupFixtureRid
+            if ($Directory) { [void][IO.Directory]::CreateDirectory($attempt.RuntimeDirectory) }
             if ($Receipt) { [void][IO.Directory]::CreateDirectory($Fixture.Layout.ReceiptDirectory); [IO.File]::WriteAllText((Join-Path $Fixture.Layout.ReceiptDirectory $Fixture.Layout.RuntimeReceiptLeaf),'{}') }
+            return $attempt
         }
 
         function Get-SetupTestTreeSnapshot {
@@ -186,11 +188,11 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         $offline.code | Should Be 'runtime-missing'
     }
 
-    # Scenario: A canonical runtime and its receipt already exist.
-    # Purpose: Reruns and offline runs only re-verify; they never call Resolve again.
+    # Scenario: A runtime pointer receipt already exists while unrelated runtime directories may also exist.
+    # Purpose: H1 makes the receipt the only pointer; reruns only re-verify the directory it names.
     It 'UnitT11_plans_reverification_for_an_existing_runtime_in_both_modes' {
         $fixture = New-SetupTestHome 'plan-present'
-        New-SetupTestRuntime $fixture -Directory -Receipt
+        [void](New-SetupTestRuntime $fixture -Directory -Receipt)
         foreach ($mode in @('Prepare','Offline')) {
             $plan = Get-SetupTestPlan $fixture $mode
             $plan.decision | Should Be 'verify-runtime'
@@ -198,17 +200,16 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         }
     }
 
-    # Scenario: Only the runtime directory or only its receipt exists.
-    # Purpose: Fail closed as runtime-incomplete instead of reinstalling automatically.
-    It 'UnitT12_refuses_an_incomplete_runtime_without_reinstalling' {
-        $directoryOnly = New-SetupTestHome 'plan-directory-only'; New-SetupTestRuntime $directoryOnly -Directory
-        $receiptOnly = New-SetupTestHome 'plan-receipt-only'; New-SetupTestRuntime $receiptOnly -Receipt
-        foreach ($fixture in @($directoryOnly,$receiptOnly)) {
-            $plan = Get-SetupTestPlan $fixture 'Prepare'
-            $plan.decision | Should Be 'refuse'
-            $plan.code | Should Be 'runtime-incomplete'
-            $plan.recoverCommand | Should Match 'rerun setup with --prepare'
-        }
+    # Scenario: An unreferenced runtime directory exists without a receipt, or a receipt exists without a fixed directory name.
+    # Purpose: H1 ignores the orphan directory and uses only the receipt to select verification.
+    It 'UnitT12_uses_only_the_runtime_receipt_as_the_pointer' {
+        $directoryOnly = New-SetupTestHome 'plan-directory-only'; $orphan = New-SetupTestRuntime $directoryOnly -Directory
+        (Get-SetupTestPlan $directoryOnly 'Prepare').decision | Should Be 'resolve-runtime'
+        (Get-SetupTestPlan $directoryOnly 'Offline').code | Should Be 'runtime-missing'
+        Test-Path -LiteralPath $orphan.RuntimeDirectory -PathType Container | Should Be $true
+        $receiptOnly = New-SetupTestHome 'plan-receipt-only'; [void](New-SetupTestRuntime $receiptOnly -Receipt)
+        (Get-SetupTestPlan $receiptOnly 'Prepare').decision | Should Be 'verify-runtime'
+        (Get-SetupTestPlan $receiptOnly 'Offline').decision | Should Be 'verify-runtime'
     }
 
     # Scenario: CODEX_HOME holds an install transaction store (directory or file).
@@ -216,7 +217,7 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
     It 'UnitT13_refuses_codex_home_transaction_residue_with_the_installer_recovery' {
         foreach ($kind in @('directory','file')) {
             $fixture = New-SetupTestHome "plan-codex-txn-$kind"
-            New-SetupTestRuntime $fixture -Directory -Receipt
+            [void](New-SetupTestRuntime $fixture -Directory -Receipt)
             [void][IO.Directory]::CreateDirectory($fixture.CodexHome)
             $store = Join-Path $fixture.CodexHome '.ai-instructions-txn'
             if ($kind -eq 'directory') { [void][IO.Directory]::CreateDirectory((Join-Path $store ('a'*32))) } else { [IO.File]::WriteAllText($store,'x') }
@@ -258,7 +259,7 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
     It 'UnitT16_refuses_a_missing_or_non_regular_archive_as_cache_missing' {
         $fixture = New-SetupTestHome 'plan-cache'
         Remove-Item -LiteralPath $fixture.Archive
-        (Get-SetupTestPlan $fixture 'Offline').code | Should Be 'cache-missing'
+        (Get-SetupTestPlan $fixture 'Offline').code | Should Be 'runtime-missing'
         (Get-SetupTestPlan $fixture 'Prepare' '').code | Should Be 'cache-missing'
         [void][IO.Directory]::CreateDirectory($fixture.Archive)
         (Get-SetupTestPlan $fixture 'Prepare').code | Should Be 'cache-missing'
@@ -277,7 +278,7 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
     # Purpose: Get-AgentEnvironmentSetupPlan is purely read-only; the tree is byte-identical afterwards.
     It 'UnitT18_keeps_plan_evaluation_read_only' {
         $fixture = New-SetupTestHome 'plan-read-only'
-        New-SetupTestRuntime $fixture -Directory
+        [void](New-SetupTestRuntime $fixture -Directory)
         [void][IO.Directory]::CreateDirectory((Join-Path $fixture.CodexHome '.ai-instructions-install-1'))
         $before = Get-SetupTestTreeSnapshot $fixture.Root
         foreach ($mode in @('Prepare','Offline')) { [void](Get-SetupTestPlan $fixture $mode) }
@@ -327,18 +328,19 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
     # Purpose: M2 stores '~/...' paths only and restores the exact absolute paths needed for re-verification.
     It 'UnitT21_stores_runtime_receipts_home_relative_and_restores_absolute_paths' {
         $fixture = New-SetupTestHome 'receipt-paths'
-        $executable = Join-Path $fixture.Layout.RuntimeDirectory 'pwsh'
+        $attempt = New-AgentEnvironmentSetupRuntimeAttemptLayout $fixture.Layout $script:SetupFixtureRid
+        $executable = Join-Path $attempt.RuntimeDirectory 'pwsh'
         $receipt = [pscustomobject][ordered]@{ apiVersion='1.0'; version='7.6.6'; assetName='powershell-7.6.6-linux-x64.tar.gz'; archiveSha256=('c'*64); executablePath=$executable; executableSha256=('d'*64)
-            runtimeClosure=[pscustomobject]@{ rootPath=$fixture.Layout.RuntimeDirectory; sha256=('e'*64); files=@([pscustomobject]@{path='pwsh';sha256=('d'*64)}); directories=@(); directorySha256=('0'*64) }
+            runtimeClosure=[pscustomobject]@{ rootPath=$attempt.RuntimeDirectory; sha256=('e'*64); files=@([pscustomobject]@{path='pwsh';sha256=('d'*64)}); directories=@(); directorySha256=('0'*64) }
             environmentAllowlist=@('PATH'); warningCount=1; warnings=@("warning about $($fixture.Home)"); protectionBoundary='A1'; os='linux'; architecture='x64' }
         $stored = ConvertTo-AgentEnvironmentSetupStoredRuntimeReceipt $receipt $fixture.Home
         $json = ConvertTo-AgentEnvironmentSetupJsonLine $stored
         $json.Contains($fixture.Home) | Should Be $false
         $json.Contains($fixture.Home.Replace('\','/')) | Should Be $false
-        $stored.executablePath | Should BeExactly '~/.local/share/ai-instructions-setup/pwsh/7.6.6-linux-x64/pwsh'
+        $stored.executablePath | Should BeExactly ('~/.local/share/ai-instructions-setup/pwsh/' + $attempt.RuntimeLeaf + '/pwsh')
         $restored = ConvertFrom-AgentEnvironmentSetupStoredRuntimeReceipt ($json | ConvertFrom-Json) $fixture.Home
         $restored.executablePath | Should BeExactly ([IO.Path]::GetFullPath($executable))
-        $restored.runtimeClosure.rootPath | Should BeExactly ([IO.Path]::GetFullPath($fixture.Layout.RuntimeDirectory))
+        $restored.runtimeClosure.rootPath | Should BeExactly ([IO.Path]::GetFullPath($attempt.RuntimeDirectory))
         (Get-SetupTestRefusalCode { ConvertFrom-AgentEnvironmentSetupHomePath '~/../escape' $fixture.Home }) | Should Be 'runtime-verification-failed'
         (Get-SetupTestRefusalCode { ConvertTo-AgentEnvironmentSetupHomePath $fixture.Root $fixture.Home }) | Should Be 'unsafe-path'
     }
@@ -352,9 +354,10 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         try {
             foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name,$marker) }
             $fixture = New-SetupTestHome 'receipt-secrets'
-            $environment = Get-AgentEnvironmentSetupChildEnvironment $fixture.Layout.RuntimeDirectory $fixture.Home
+            $attempt = New-AgentEnvironmentSetupRuntimeAttemptLayout $fixture.Layout $script:SetupFixtureRid
+            $environment = Get-AgentEnvironmentSetupChildEnvironment $attempt.RuntimeDirectory $fixture.Home
             foreach ($name in $names) { if ($name -cne 'PSModulePath') { $environment.Contains($name) | Should Be $false } }
-            $environment['PSModulePath'] | Should BeExactly (Join-Path $fixture.Layout.RuntimeDirectory 'Modules')
+            $environment['PSModulePath'] | Should BeExactly (Join-Path $attempt.RuntimeDirectory 'Modules')
             $environment['HOME'] | Should BeExactly $fixture.Home
             (@($environment.Values) -join "`n").Contains($marker) | Should Be $false
             $receipt = New-AgentEnvironmentSetupReceipt -Mode prepare -Result prepared-runtime-only -Rid linux-x64 -SetupCommit ('a'*40) -PolicySha256 ('b'*64) -Capabilities @([pscustomobject]@{name='lock';status='available';evidence=$marker})
@@ -440,11 +443,12 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         { Assert-PlatformBoundFileParity $negative $script:SetupShellText } | Should Throw
     }
 
-    # Scenario: A stored runtime receipt points at a byte-identical copy instead of the selected canonical layout.
-    # Purpose: F3 binds both receipt paths ordinally to RuntimeDirectory/RuntimeExecutable before K15 or re-exec.
+    # Scenario: A stored runtime receipt points outside the unique receipt-addressed layout.
+    # Purpose: H1 binds both receipt paths to pwsh/<version>-<rid>-<attemptId> before K15 or re-exec.
     It 'UnitT26_binds_runtime_receipt_paths_to_the_canonical_layout' {
         $fixture = New-SetupTestHome 'receipt-layout-binding'
-        $valid = [pscustomobject]@{ executablePath=$fixture.Layout.RuntimeExecutable; runtimeClosure=[pscustomobject]@{ rootPath=$fixture.Layout.RuntimeDirectory } }
+        $attempt = New-AgentEnvironmentSetupRuntimeAttemptLayout $fixture.Layout $script:SetupFixtureRid
+        $valid = [pscustomobject]@{ os='linux'; executablePath=$attempt.RuntimeExecutable; runtimeClosure=[pscustomobject]@{ rootPath=$attempt.RuntimeDirectory } }
         { Assert-AgentEnvironmentSetupRuntimeReceiptLayout $valid $fixture.Layout } | Should Not Throw
         foreach ($mutate in @(
             { param($r,$f) $r.executablePath = Join-Path $f.Root 'copy/pwsh' },
@@ -513,13 +517,13 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
     # Scenario: The shell edge downloads and hands off to PowerShell.
     # Purpose: L7 https-only bounded downloads, M5 env -i allowlist, fixed setup root without XDG.
     It 'UnitT33_uses_https_only_bounded_downloads_and_an_environment_allowlist' {
-        $script:SetupShellText | Should Match "curl --proto '=https' --proto-redir '=https' --tlsv1\.2"
+        $script:SetupShellText | Should Match "curl -q --proto '=https' --proto-redir '=https' --tlsv1\.2"
         $script:SetupShellText | Should Match '--max-time [0-9]+'
-        $script:SetupShellText | Should Match 'wget --https-only --secure-protocol=TLSv1_2 --timeout=[0-9]+'
-        $script:SetupShellText | Should Match '(?m)^env -i "\$@" "\$bootstrap/pwsh" -NoLogo -NoProfile -NonInteractive -File '
+        $script:SetupShellText | Should Match 'wget --no-config --https-only --secure-protocol=TLSv1_2 --timeout=[0-9]+'
+        $script:SetupShellText | Should Match '(?m)^"\$env_path" -i "\$@" "\$bootstrap/pwsh" -NoLogo -NoProfile -NonInteractive -File '
         $script:SetupShellText | Should Match 'setup_root="\$home/\.local/share/ai-instructions-setup"'
         foreach ($pattern in @('XDG_','DOTNET_','LD_','DYLD_','POWERSHELL_')) { $script:SetupShellText | Should Not Match $pattern }
-        $script:SetupShellText | Should Match 'mv -f "\$download" "\$archive"'
+        $script:SetupShellText | Should Not Match 'mv -f "\$download" "\$archive"'
     }
 
     # Register only on the native host; keep this file's Core CI skip count at zero.
@@ -549,17 +553,16 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         ([IO.File]::ReadAllText($script:SetupEntryPath)) | Should Not Match '(?i)\[switch\]\s*\$Auto'
     }
 
-    # Scenario: Documentation explains how to consume the home-relative receipt paths.
-    # Purpose: F7 prevents '~/...' from being misrepresented as an immediately executable absolute path.
-    It 'UnitT37_documents_home_expansion_for_receipt_paths_in_both_languages' {
+    # Scenario: Documentation explains how to consume a random receipt-selected home-relative runtime path.
+    # Purpose: H1/F7 prevents either '~/...' or the former fixed runtime path from being treated as an executable path authority.
+    It 'UnitT37_documents_receipt_selected_runtime_paths_in_both_languages' {
         $readme = [IO.File]::ReadAllText((Join-Path $script:SetupRepositoryRoot 'README.md'))
         $englishSection = $readme.IndexOf('## Cloud/Linux setup',[StringComparison]::Ordinal)
         $englishSection | Should BeGreaterThan 0
         $readme | Should Match 'Receipt paths are `~/\.\.\.`, not absolute paths'
-        $examples = [regex]::Matches($readme,'pwsh_path="\$HOME/\$\{receipt_pwsh#~/\}"')
-        $examples.Count | Should Be 2
-        $examples[0].Index | Should BeLessThan $englishSection
-        $examples[1].Index | Should BeGreaterThan $englishSection
+        $readme | Should Match '必須讀取 `runtime-<version>-<rid>\.json` 的 `executablePath`'
+        $readme | Should Match 'Read `executablePath` from `runtime-<version>-<rid>\.json`'
+        $readme | Should Not Match 'pwsh/7\.6\.6-(?:linux|osx|win)-x64/pwsh'
     }
 }
 
@@ -718,7 +721,7 @@ Describe 'setup-agent-environment Windows native fixture (SYP-354 P10a)' {
             $Run.Json.powerShell.runtimeAction | Should Be $Action
             $Run.Json.powerShell.version | Should Be $script:WinVersion
             $Run.Json.powerShell.processPathVerified | Should Be $true
-            $Run.Json.powerShell.executablePath | Should BeExactly "~/.local/share/ai-instructions-setup/pwsh/$($script:WinVersion)-$($script:WinRid)/pwsh.exe"
+            $Run.Json.powerShell.executablePath | Should Match ("^~/\.local/share/ai-instructions-setup/pwsh/" + [regex]::Escape("$($script:WinVersion)-$($script:WinRid)-") + '[a-f0-9]{32}/pwsh\.exe$')
             (@($Run.Json.PSObject.Properties.Name) -join ',') | Should BeExactly (@(Get-AgentEnvironmentSetupReceiptFieldNames) -join ',')
             foreach ($name in @(Get-AgentEnvironmentSetupRequiredCapabilities)) { @($Run.Json.capabilities | Where-Object { $_.name -ceq $name -and $_.status -ceq 'available' }).Count | Should Be 1 }
             foreach ($forbidden in @($Fixture.Home,$Fixture.Home.Replace('\','/'),[Environment]::UserName)) { $Run.Stdout.Contains($forbidden) | Should Be $false }
@@ -785,24 +788,31 @@ Publish-AgentEnvironmentSetupFile -SetupRoot $SetupRoot -Directory receipts -Lea
         $run = Invoke-WinSetup @('-Prepare','-ExpectedCommit',$script:WinCommit,'-ArchivePath',$script:WinArchive) -UserHome $fixture.Home
         if ($run.ExitCode -ne 0) { Write-Host $run.Stdout; Write-Host $run.Stderr }
         Assert-WinSuccessReceipt $run $fixture 'prepared-runtime-only' 'resolved'
-        Test-Path -LiteralPath $fixture.Layout.RuntimeExecutable -PathType Leaf | Should Be $true
         $runtimeReceipt = [IO.File]::ReadAllText((Join-Path $fixture.Layout.ReceiptDirectory $fixture.Layout.RuntimeReceiptLeaf))
         $runtimeReceipt.Contains($fixture.Home) | Should Be $false
-        ($runtimeReceipt | ConvertFrom-Json).executablePath | Should BeExactly $run.Json.powerShell.executablePath
+        $runtimeReceiptObject = $runtimeReceipt | ConvertFrom-Json
+        $runtimeReceiptObject.executablePath | Should BeExactly $run.Json.powerShell.executablePath
+        Test-Path -LiteralPath (ConvertFrom-AgentEnvironmentSetupHomePath $runtimeReceiptObject.executablePath $fixture.Home) -PathType Leaf | Should Be $true
     }
 
-    # Scenario: --prepare runs again while secret markers sit in the caller environment.
-    # Purpose: Re-verify without Resolve, keep runtime bytes unchanged and never leak the markers.
+    # Scenario: --prepare runs again while secret markers and malicious Git configuration sit in the caller environment.
+    # Purpose: H4 re-verifies without Resolve under isolated Git helpers, keeps runtime bytes unchanged and never leaks the markers.
     It 'InterT2_reruns_prepare_as_reverification_with_unchanged_runtime_bytes_and_no_secret_leak' {
         $fixture = New-WinFixture 'prepare-rerun'
         $initial = Invoke-WinSetup @('-Prepare','-ExpectedCommit',$script:WinCommit,'-ArchivePath',$script:WinArchive) -UserHome $fixture.Home
         Assert-WinSuccessReceipt $initial $fixture 'prepared-runtime-only' 'resolved'
         $before = Get-WinRuntimeSnapshot $fixture
         $marker = 'p10a-secret-' + [guid]::NewGuid().ToString('N')
+        $gitConfig = Join-Path $script:WinRoot ('poison-git-' + [guid]::NewGuid().ToString('N'))
+        [IO.File]::WriteAllText($gitConfig,"this is not valid git config`n")
         # DOTNET_STARTUP_HOOKS is exercised after host startup by UnitT22. An
         # invalid hook injected into ProcessStartInfo is consumed by .NET before
         # this script can run, so it cannot test the setup re-exec allowlist.
-        $run = Invoke-WinSetup @('-Prepare','-ExpectedCommit',$script:WinCommit,'-ArchivePath',$script:WinArchive) -UserHome $fixture.Home -Environment @{ SYP_P10A_SECRET_TOKEN=$marker; HTTPS_PROXY="http://user:$marker@127.0.0.1:9"; POWERSHELL_TELEMETRY_OPTOUT=$marker }
+        $run = Invoke-WinSetup @('-Prepare','-ExpectedCommit',$script:WinCommit,'-ArchivePath',$script:WinArchive) -UserHome $fixture.Home -Environment @{
+            SYP_P10A_SECRET_TOKEN=$marker; HTTPS_PROXY="http://user:$marker@127.0.0.1:9"; POWERSHELL_TELEMETRY_OPTOUT=$marker
+            GIT_CONFIG_GLOBAL=$gitConfig; GIT_CONFIG_NOSYSTEM='0'; GIT_DIR=(Join-Path $script:WinRoot 'not-a-repository')
+            GIT_WORK_TREE=(Join-Path $script:WinRoot 'not-a-worktree'); GIT_CONFIG_COUNT='1'; GIT_CONFIG_KEY_0='core.fsmonitor'; GIT_CONFIG_VALUE_0=$gitConfig
+        }
         Assert-WinSuccessReceipt $run $fixture 'prepared-runtime-only' 'reverified'
         (Get-WinRuntimeSnapshot $fixture) | Should BeExactly $before
         $run.Stdout.Contains($marker) | Should Be $false
@@ -830,7 +840,7 @@ Publish-AgentEnvironmentSetupFile -SetupRoot $SetupRoot -Directory receipts -Lea
         $run.ExitCode | Should Be 21
         $run.Json.result | Should Be 'refused'
         $run.Json.code | Should Be 'runtime-missing'
-        Test-Path -LiteralPath $fixture.Layout.RuntimeDirectory | Should Be $false
+        Test-Path -LiteralPath $fixture.Layout.RuntimeParentDirectory | Should Be $false
         Test-Path -LiteralPath $fixture.Layout.ReceiptDirectory | Should Be $false
         Assert-WinLockReleased $fixture
     }
@@ -899,7 +909,9 @@ Publish-AgentEnvironmentSetupFile -SetupRoot $SetupRoot -Directory receipts -Lea
         $fixture = New-WinFixture 'runtime-tamper'
         $initial = Invoke-WinSetup @('-Prepare','-ExpectedCommit',$script:WinCommit,'-ArchivePath',$script:WinArchive) -UserHome $fixture.Home
         Assert-WinSuccessReceipt $initial $fixture 'prepared-runtime-only' 'resolved'
-        $victim = @(Get-ChildItem -LiteralPath $fixture.Layout.RuntimeDirectory -File -Filter '*.json' | Sort-Object Length | Select-Object -First 1)[0]
+        $runtimeReceipt = Get-Content -Raw -LiteralPath (Join-Path $fixture.Layout.ReceiptDirectory $fixture.Layout.RuntimeReceiptLeaf) | ConvertFrom-Json
+        $runtimeRoot = ConvertFrom-AgentEnvironmentSetupHomePath $runtimeReceipt.runtimeClosure.rootPath $fixture.Home
+        $victim = @(Get-ChildItem -LiteralPath $runtimeRoot -File -Filter '*.json' | Sort-Object Length | Select-Object -First 1)[0]
         $original = [IO.File]::ReadAllBytes($victim.FullName)
         try {
             [IO.File]::AppendAllText($victim.FullName,' ')
@@ -941,7 +953,9 @@ Publish-AgentEnvironmentSetupFile -SetupRoot $SetupRoot -Directory receipts -Lea
         $initial = Invoke-WinSetup @('-Prepare','-ExpectedCommit',$script:WinCommit,'-ArchivePath',$script:WinArchive) -UserHome $fixture.Home
         Assert-WinSuccessReceipt $initial $fixture 'prepared-runtime-only' 'resolved'
         $copyDirectory = Join-Path $fixture.Layout.SetupRoot 'runtime-copy'
-        Copy-Item -LiteralPath $fixture.Layout.RuntimeDirectory -Destination $copyDirectory -Recurse
+        $runtimeReceipt = Get-Content -Raw -LiteralPath (Join-Path $fixture.Layout.ReceiptDirectory $fixture.Layout.RuntimeReceiptLeaf) | ConvertFrom-Json
+        $runtimeRoot = ConvertFrom-AgentEnvironmentSetupHomePath $runtimeReceipt.runtimeClosure.rootPath $fixture.Home
+        Copy-Item -LiteralPath $runtimeRoot -Destination $copyDirectory -Recurse
         $receiptPath = Join-Path $fixture.Layout.ReceiptDirectory $fixture.Layout.RuntimeReceiptLeaf
         $stored = [IO.File]::ReadAllText($receiptPath) | ConvertFrom-Json
         $stored.runtimeClosure.rootPath = ConvertTo-AgentEnvironmentSetupHomePath $copyDirectory $fixture.Home
@@ -1116,6 +1130,145 @@ Publish-AgentEnvironmentSetupFile -SetupRoot $SetupRoot -Directory receipts -Lea
             if($null -ne $first){[IO.File]::WriteAllText((Join-Path $barrier 'release'),'release');[void](Complete-WinSetup $first)}
         }
     }
+
+    # Scenario: The real entry process aborts after a unique runtime directory is renamed into pwsh/ but before its pointer receipt is published.
+    # Purpose: H1 proves the next real entry uses a new directory, leaves the unreferenced orphan untouched, publishes a valid pointer, and releases the lock.
+    It 'InterT15_recovers_a_post_directory_publish_abort_with_a_new_receipt_pointer' {
+        $fixture = New-WinFixture 'runtime-pointer-abort'
+        $crashed = Invoke-WinSetup @('-Prepare','-ExpectedCommit',$script:WinCommit,'-ArchivePath',$script:WinArchive) -UserHome $fixture.Home -Environment @{ AI_INSTRUCTIONS_SETUP_FAILPOINT='after-runtime-directory-published' }
+        $crashed.ExitCode | Should Not Be 0
+        $published = @(Get-ChildItem -LiteralPath $fixture.Layout.RuntimeParentDirectory -Directory -Force | Where-Object { $_.Name.StartsWith($fixture.Layout.RuntimeLeafPrefix,[StringComparison]::Ordinal) })
+        $published.Count | Should Be 1
+        $orphan = $published[0]
+        $orphanSnapshot = Get-WinTreeSnapshot $orphan.FullName
+        $orphanMtime = $orphan.LastWriteTimeUtc.Ticks
+        Test-Path -LiteralPath (Join-Path $fixture.Layout.ReceiptDirectory $fixture.Layout.RuntimeReceiptLeaf) | Should Be $false
+
+        $run = Invoke-WinSetup @('-Prepare','-ExpectedCommit',$script:WinCommit,'-ArchivePath',$script:WinArchive) -UserHome $fixture.Home
+        Assert-WinSuccessReceipt $run $fixture 'prepared-runtime-only' 'resolved'
+        $stored = Get-Content -Raw -LiteralPath (Join-Path $fixture.Layout.ReceiptDirectory $fixture.Layout.RuntimeReceiptLeaf) | ConvertFrom-Json
+        $currentRoot = ConvertFrom-AgentEnvironmentSetupHomePath ([string]$stored.runtimeClosure.rootPath) $fixture.Home
+        $currentRoot | Should Not Be $orphan.FullName
+        Test-Path -LiteralPath $orphan.FullName -PathType Container | Should Be $true
+        (Get-WinTreeSnapshot $orphan.FullName) | Should BeExactly $orphanSnapshot
+        (Get-Item -LiteralPath $orphan.FullName).LastWriteTimeUtc.Ticks | Should Be $orphanMtime
+        Assert-WinLockReleased $fixture
+    }
+
+    # Scenario: Real child processes abort before stage creation, after a verified stage, and after the pointer receipt rename.
+    # Purpose: H1 gives every runtime-publication crash point exactly one decision: fresh attempt, preserve stage orphan, or reverify the receipt-named runtime.
+    It 'InterT15a_models_each_runtime_publication_crash_state_through_the_real_entry' {
+        $arguments = @('-Prepare','-ExpectedCommit',$script:WinCommit,'-ArchivePath',$script:WinArchive)
+
+        $beforeFixture = New-WinFixture 'runtime-before-stage-abort'
+        $beforeCrash = Invoke-WinSetup $arguments -UserHome $beforeFixture.Home -Environment @{ AI_INSTRUCTIONS_SETUP_FAILPOINT='before-runtime-stage-created'; AI_INSTRUCTIONS_SETUP_FAILPOINT_LEAF=$beforeFixture.Layout.RuntimeReceiptLeaf }
+        $beforeCrash.ExitCode | Should Not Be 0
+        @(Get-ChildItem -LiteralPath $beforeFixture.Layout.RuntimeParentDirectory -Force).Count | Should Be 0
+        Assert-WinLockReleased $beforeFixture
+        Assert-WinSuccessReceipt (Invoke-WinSetup $arguments -UserHome $beforeFixture.Home) $beforeFixture 'prepared-runtime-only' 'resolved'
+
+        $stageFixture = New-WinFixture 'runtime-stage-abort'
+        $stageCrash = Invoke-WinSetup $arguments -UserHome $stageFixture.Home -Environment @{ AI_INSTRUCTIONS_SETUP_FAILPOINT='after-runtime-stage-verified'; AI_INSTRUCTIONS_SETUP_FAILPOINT_LEAF=$stageFixture.Layout.RuntimeReceiptLeaf }
+        $stageCrash.ExitCode | Should Not Be 0
+        $stages = @(Get-ChildItem -LiteralPath $stageFixture.Layout.RuntimeParentDirectory -Directory -Force | Where-Object { $_.Name -match '^\.stage-[a-f0-9]{32}$' })
+        $stages.Count | Should Be 1
+        $stageSnapshot = Get-WinTreeSnapshot $stages[0].FullName
+        $stageMtime = $stages[0].LastWriteTimeUtc.Ticks
+        Assert-WinLockReleased $stageFixture
+        Assert-WinSuccessReceipt (Invoke-WinSetup $arguments -UserHome $stageFixture.Home) $stageFixture 'prepared-runtime-only' 'resolved'
+        (Get-WinTreeSnapshot $stages[0].FullName) | Should BeExactly $stageSnapshot
+        (Get-Item -LiteralPath $stages[0].FullName).LastWriteTimeUtc.Ticks | Should Be $stageMtime
+
+        $receiptFixture = New-WinFixture 'runtime-receipt-published-abort'
+        $receiptCrash = Invoke-WinSetup $arguments -UserHome $receiptFixture.Home -Environment @{ AI_INSTRUCTIONS_SETUP_FAILPOINT='after-rename'; AI_INSTRUCTIONS_SETUP_FAILPOINT_LEAF=$receiptFixture.Layout.RuntimeReceiptLeaf }
+        $receiptCrash.ExitCode | Should Not Be 0
+        $receiptPath = Join-Path $receiptFixture.Layout.ReceiptDirectory $receiptFixture.Layout.RuntimeReceiptLeaf
+        Test-Path -LiteralPath $receiptPath -PathType Leaf | Should Be $true
+        $receiptBefore = Get-Content -Raw -LiteralPath $receiptPath | ConvertFrom-Json
+        $rootBefore = ConvertFrom-AgentEnvironmentSetupHomePath ([string]$receiptBefore.runtimeClosure.rootPath) $receiptFixture.Home
+        Assert-WinLockReleased $receiptFixture
+        $recovered = Invoke-WinSetup $arguments -UserHome $receiptFixture.Home
+        Assert-WinSuccessReceipt $recovered $receiptFixture 'prepared-runtime-only' 'reverified'
+        $receiptAfter = Get-Content -Raw -LiteralPath $receiptPath | ConvertFrom-Json
+        (ConvertFrom-AgentEnvironmentSetupHomePath ([string]$receiptAfter.runtimeClosure.rootPath) $receiptFixture.Home) | Should BeExactly $rootBefore
+    }
+
+    # Scenario: HOME exists on Windows but its DACL denies this user permission to create the setup root.
+    # Purpose: H6 maps the setup-root access denial to the shared home-invalid typed refusal instead of internal-error.
+    It 'InterT16_refuses_an_unwritable_windows_HOME_as_home_invalid' {
+        $fixture = New-WinFixture 'unwritable-home'
+        $homeLease = Open-PlatformDirectory -Root $fixture.Home -RootOnly
+        $snapshot = $null
+        try {
+            $snapshot = Get-PlatformPermissions -Lease $homeLease
+            $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            [void](Set-PlatformPermissions -Lease $homeLease -Policy @{ Sddl="D:P(D;;DCLC;;;$sid)(A;OICI;FA;;;$sid)"; ReadOnly=$false })
+            $before = Get-WinTreeSnapshot $fixture.Home
+            $run = Invoke-WinSetup @('-Prepare','-ExpectedCommit',$script:WinCommit,'-ArchivePath',$script:WinArchive) -UserHome $fixture.Home
+            $run.ExitCode | Should Be 12
+            $run.Json.code | Should Be 'home-invalid'
+            (Get-WinTreeSnapshot $fixture.Home) | Should BeExactly $before
+        } finally {
+            if ($null -ne $snapshot) { [void](Set-PlatformPermissions -Lease $homeLease -Snapshot $snapshot) }
+            $homeLease.Dispose()
+        }
+    }
+
+    # Scenario: The receipt-named runtime root keeps its contents but its private permissions drift before an offline rerun.
+    # Purpose: H5 ensures the real --offline entry refuses permission drift through K15 rather than re-executing the runtime.
+    It 'InterT17_offline_refuses_receipt_named_runtime_permission_drift' {
+        $fixture = New-WinFixture 'offline-permission-drift'
+        $initial = Invoke-WinSetup @('-Prepare','-ExpectedCommit',$script:WinCommit,'-ArchivePath',$script:WinArchive) -UserHome $fixture.Home
+        Assert-WinSuccessReceipt $initial $fixture 'prepared-runtime-only' 'resolved'
+        $stored = Get-Content -Raw -LiteralPath (Join-Path $fixture.Layout.ReceiptDirectory $fixture.Layout.RuntimeReceiptLeaf) | ConvertFrom-Json
+        $runtimeRoot = ConvertFrom-AgentEnvironmentSetupHomePath ([string]$stored.runtimeClosure.rootPath) $fixture.Home
+        $runtimeLease = Open-PlatformDirectory -Root $runtimeRoot -RootOnly
+        $snapshot = $null
+        try {
+            $snapshot = Get-PlatformPermissions -Lease $runtimeLease
+            $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            [void](Set-PlatformPermissions -Lease $runtimeLease -Policy @{ Sddl="D:P(A;OICI;FA;;;$sid)(A;OICI;FA;;;WD)"; ReadOnly=$false })
+            $run = Invoke-WinSetup @('-Offline','-ExpectedCommit',$script:WinCommit,'-ArchivePath',$script:WinArchive) -UserHome $fixture.Home
+            $run.ExitCode | Should Be 23
+            $run.Json.code | Should Be 'runtime-verification-failed'
+        } finally {
+            if ($null -ne $snapshot) { [void](Set-PlatformPermissions -Lease $runtimeLease -Snapshot $snapshot) }
+            $runtimeLease.Dispose()
+        }
+        Assert-WinLockReleased $fixture
+    }
+
+    # Scenario: One prepare owns setup.lock before cache publication while a second prepare races with the same archive.
+    # Purpose: H2 proves the losing process cannot create or replace shared cache state before acquiring the lock.
+    It 'InterT18_does_not_publish_shared_cache_before_lock_ownership' {
+        $fixture = New-WinFixture 'cache-lock-order'
+        $barrier = Join-Path $script:WinRoot ('cache-lock-' + [guid]::NewGuid().ToString('N'))
+        $arguments = @('-Prepare','-ExpectedCommit',$script:WinCommit,'-ArchivePath',$script:WinArchive)
+        $cache = Join-Path (Join-Path $fixture.Layout.SetupRoot 'cache') ([IO.Path]::GetFileName($script:WinArchive))
+        $setup = Open-PlatformDirectory -Root $fixture.Home -RelativePath '.local/share/ai-instructions-setup' -CreatePrivate
+        $setup.Dispose()
+        [void](Publish-AgentEnvironmentSetupArchiveCache -SetupRoot $fixture.Layout.SetupRoot -Leaf ([IO.Path]::GetFileName($script:WinArchive)) -ArchivePath $script:WinArchive -ExpectedSha256 ((Get-FileHash -LiteralPath $script:WinArchive -Algorithm SHA256).Hash.ToLowerInvariant()))
+        $cacheHash = (Get-FileHash -LiteralPath $cache -Algorithm SHA256).Hash
+        $cacheMtime = (Get-Item -LiteralPath $cache).LastWriteTimeUtc.Ticks
+        $first = Start-WinSetup $arguments -UserHome $fixture.Home -Environment @{ AI_INSTRUCTIONS_SETUP_BARRIER='after-lock-acquired'; AI_INSTRUCTIONS_SETUP_BARRIER_DIRECTORY=$barrier }
+        try {
+            Wait-WinBarrierReady $barrier
+            (Get-FileHash -LiteralPath $cache -Algorithm SHA256).Hash | Should BeExactly $cacheHash
+            (Get-Item -LiteralPath $cache).LastWriteTimeUtc.Ticks | Should Be $cacheMtime
+            $second = Invoke-WinSetup $arguments -UserHome $fixture.Home
+            $second.ExitCode | Should Be 26
+            $second.Json.code | Should Be 'concurrent'
+            (Get-FileHash -LiteralPath $cache -Algorithm SHA256).Hash | Should BeExactly $cacheHash
+            (Get-Item -LiteralPath $cache).LastWriteTimeUtc.Ticks | Should Be $cacheMtime
+            [IO.File]::WriteAllText((Join-Path $barrier 'release'),'release')
+            $completed = Complete-WinSetup $first; $first = $null
+            Assert-WinSuccessReceipt $completed $fixture 'prepared-runtime-only' 'resolved'
+            (Get-FileHash -LiteralPath $cache -Algorithm SHA256).Hash | Should BeExactly $cacheHash
+            (Get-Item -LiteralPath $cache).LastWriteTimeUtc.Ticks | Should Be $cacheMtime
+        } finally {
+            if ($null -ne $first) { [IO.File]::WriteAllText((Join-Path $barrier 'release'),'release'); [void](Complete-WinSetup $first) }
+        }
+    }
 }
 }
 
@@ -1284,7 +1437,7 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
             param([string]$Name,[string[]]$Exclude=@(),[hashtable]$Replace=@{})
             $bin = Join-Path $script:UnixRoot "bin-$Name"
             [void][IO.Directory]::CreateDirectory($bin)
-            foreach ($tool in @('uname','id','awk','sed','find','mkdir','mv','rm','chmod','env','dirname','cp','git','tar','gzip','sha256sum','shasum','curl','wget','cat','ls','sh')) {
+            foreach ($tool in @('uname','id','awk','sed','find','mkdir','rm','rmdir','chmod','env','dirname','cp','mktemp','git','tar','gzip','sha256sum','shasum','curl','wget','cat','ls','sh')) {
                 if ($tool -in $Exclude) { continue }
                 if ($Replace.ContainsKey($tool)) {
                     $shim = Join-Path $bin $tool
@@ -1328,9 +1481,11 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         $offline.Json.result | Should Be 'verified-runtime-only'
         $offline.Json.powerShell.runtimeAction | Should Be 'reverified'
         $setupRoot = Join-Path $userHome '.local/share/ai-instructions-setup'
+        $runtimeReceipt = Get-Content -Raw -LiteralPath (Join-Path $setupRoot "receipts/runtime-$($script:UnixVersion)-$($script:UnixRid).json") | ConvertFrom-Json
+        $runtimeRoot = ConvertFrom-AgentEnvironmentSetupHomePath ([string]$runtimeReceipt.runtimeClosure.rootPath) $userHome
         Get-UnixMode $setupRoot | Should Be '700'
-        Get-UnixMode (Join-Path $setupRoot "pwsh/$($script:UnixVersion)-$($script:UnixRid)") | Should Be '700'
-        Get-UnixMode (Join-Path $setupRoot "pwsh/$($script:UnixVersion)-$($script:UnixRid)/pwsh") | Should Be '700'
+        Get-UnixMode $runtimeRoot | Should Be '700'
+        Get-UnixMode (Join-Path $runtimeRoot 'pwsh') | Should Be '700'
         Get-UnixMode (Join-Path $setupRoot 'receipts/setup-receipt.json') | Should Be '600'
         Get-UnixMode (Join-Path $setupRoot "receipts/runtime-$($script:UnixVersion)-$($script:UnixRid).json") | Should Be '600'
         @(Get-ChildItem -LiteralPath (Join-Path $setupRoot 'tmp') -Force).Count | Should Be 0
@@ -1431,20 +1586,25 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         }
     }
 
-    # Scenario: Empty caches use a local curl shim or wget shim that copies the reviewed fixture archive.
-    # Purpose: F8 covers both --prepare downloaders and verifies same-filesystem cache publication at mode 0600 without network.
+    # Scenario: Empty caches use curl/wget shims while malicious user config tries to redirect each downloader's output.
+    # Purpose: F8/H4 requires curl -q or wget --no-config first, then publishes the reviewed fixture to a private cache without network.
     It 'InterT28_prepares_through_curl_and_wget_shims_and_publishes_a_private_cache' {
-        $curlScript = @('out=','while [ "$#" -gt 0 ]; do','  case "$1" in','    --output) out=$2; shift 2 ;;','    *) shift ;;','  esac','done','[ -n "$out" ] || exit 64','cp -P "$FIXTURE_ARCHIVE" "$out"') -join "`n"
-        $wgetScript = @('out=','for arg in "$@"; do','  case "$arg" in --output-document=*) out=${arg#--output-document=} ;; esac','done','[ -n "$out" ] || exit 64','cp -P "$FIXTURE_ARCHIVE" "$out"') -join "`n"
+        $fixtureArchive = $script:UnixArchives['runtime'].Path
+        $curlScript = @('[ "$1" = -q ] || exit 65','out=','while [ "$#" -gt 0 ]; do','  case "$1" in','    --output) out=$2; shift 2 ;;','    *) shift ;;','  esac','done','[ -n "$out" ] || exit 64',"cp -P '$fixtureArchive' `"`$out`"") -join "`n"
+        $wgetScript = @('[ "$1" = --no-config ] || exit 65','out=','for arg in "$@"; do','  case "$arg" in --output-document=*) out=${arg#--output-document=} ;; esac','done','[ -n "$out" ] || exit 64',"cp -P '$fixtureArchive' `"`$out`"") -join "`n"
         foreach ($downloader in @('curl','wget')) {
             $home = New-UnixHome "download-$downloader" -WithoutCache
+            $configMarker = Join-Path $home 'downloader-config-marker'
+            [IO.File]::WriteAllText((Join-Path $home '.curlrc'),"--output $configMarker")
+            [IO.File]::WriteAllText((Join-Path $home 'poison-wgetrc'),"output_document = $configMarker")
             $replace = @{}; $replace[$downloader] = if ($downloader -ceq 'curl') { $curlScript } else { $wgetScript }
             $exclude = if ($downloader -ceq 'curl') { @('wget') } else { @('curl') }
             $bin = New-UnixToolShim "download-$downloader" -Exclude $exclude -Replace $replace
-            $run = Invoke-UnixSetup $home @('--prepare') -Environment @{ PATH=$bin; FIXTURE_ARCHIVE=$script:UnixArchives['runtime'].Path }
+            $run = Invoke-UnixSetup $home @('--prepare') -Environment @{ PATH=$bin; CURL_HOME=$home; WGETRC=(Join-Path $home 'poison-wgetrc') }
             if ($run.ExitCode -ne 0) { Write-Host $run.Stdout; Write-Host $run.Stderr }
             $run.ExitCode | Should Be 0
             $run.Json.result | Should Be 'prepared-runtime-only'
+            Test-Path -LiteralPath $configMarker | Should Be $false
             $cache = Join-Path $home ".local/share/ai-instructions-setup/cache/$($script:UnixAssetName)"
             Get-UnixMode $cache | Should Be '600'
             (Get-FileHash -LiteralPath $cache -Algorithm SHA256).Hash.ToLowerInvariant() | Should BeExactly $script:UnixArchives['runtime'].Sha256
@@ -1456,10 +1616,10 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
     It 'InterT29_refuses_downloader_failure_and_downloaded_hash_mismatch' {
         foreach ($case in @('failure','hash')) {
             $home = New-UnixHome "download-$case" -WithoutCache
-            $scriptText = if ($case -ceq 'failure') { 'exit 7' } else { @('out=','while [ "$#" -gt 0 ]; do','case "$1" in --output) out=$2; shift 2 ;; *) shift ;; esac','done','cp -P "$FIXTURE_ARCHIVE" "$out"') -join "`n" }
+            $fixtureArchive = $script:UnixArchives['symlink'].Path
+            $scriptText = if ($case -ceq 'failure') { 'exit 7' } else { @('out=','while [ "$#" -gt 0 ]; do','case "$1" in --output) out=$2; shift 2 ;; *) shift ;; esac','done',"cp -P '$fixtureArchive' `"`$out`"") -join "`n" }
             $bin = New-UnixToolShim "download-$case" -Exclude @('wget') -Replace @{ curl=$scriptText }
-            $fixtureArchive = if ($case -ceq 'failure') { $script:UnixArchives['runtime'].Path } else { $script:UnixArchives['symlink'].Path }
-            $run = Invoke-UnixSetup $home @('--prepare') -Environment @{ PATH=$bin; FIXTURE_ARCHIVE=$fixtureArchive }
+            $run = Invoke-UnixSetup $home @('--prepare') -Environment @{ PATH=$bin }
             $run.ExitCode | Should Be $(if ($case -ceq 'failure') { 17 } else { 18 })
             $run.Json.code | Should Be $(if ($case -ceq 'failure') { 'download-failed' } else { 'archive-hash-mismatch' })
             Test-Path -LiteralPath (Join-Path $home ".local/share/ai-instructions-setup/cache/$($script:UnixAssetName)") | Should Be $false
@@ -1568,9 +1728,9 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
     It 'InterT35_uses_the_controllable_loader_probe_to_refuse_musl' {
         $home=New-UnixHome 'musl-probe'
         $realFind=@(Get-Command find -CommandType Application | Select-Object -First 1)[0].Source
-        $findShim=@('if [ "$1" = /lib ] && [ "$2" = /usr/lib ]; then','  printf "%s\n" /lib/ld-musl-fixture.so.1','  exit 0','fi','exec "$REAL_FIND" "$@"') -join "`n"
+        $findShim=@('if [ "$1" = /lib ] && [ "$2" = /usr/lib ]; then','  printf "%s\n" /lib/ld-musl-fixture.so.1','  exit 0','fi',"exec '$realFind' `"`$@`"") -join "`n"
         $bin=New-UnixToolShim 'musl-probe' -Replace @{find=$findShim}
-        $run=Invoke-UnixSetup $home @('--offline') -Environment @{PATH=$bin;REAL_FIND=$realFind}
+        $run=Invoke-UnixSetup $home @('--offline') -Environment @{PATH=$bin}
         $run.ExitCode | Should Be 11;$run.Json.code | Should Be 'unsupported-platform'
         $control=Invoke-UnixSetup $home @('--offline')
         $control.Json.code | Should Not Be 'unsupported-platform'
@@ -1601,9 +1761,9 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         [void][IO.Directory]::CreateDirectory($barrier)
         $fifo=Join-Path $barrier 'release';& mkfifo $fifo;$LASTEXITCODE | Should Be 0
         $ready=Join-Path $barrier 'ready';$realHash=@(Get-Command sha256sum -CommandType Application | Select-Object -First 1)[0].Source
-        $hashShim=@('result=$("$REAL_HASH" "$1")','printf ready > "$BARRIER_READY"','IFS= read -r release < "$BARRIER_FIFO"','printf "%s\n" "$result"') -join "`n"
+        $hashShim=@("result=`$('$realHash' `"`$1`")","printf ready > '$ready'","IFS= read -r release < '$fifo'",'printf "%s\n" "$result"') -join "`n"
         $bin=New-UnixToolShim 'cache-race' -Replace @{sha256sum=$hashShim}
-        $running=Start-UnixSetup $home @('--offline') -Environment @{PATH=$bin;REAL_HASH=$realHash;BARRIER_READY=$ready;BARRIER_FIFO=$fifo}
+        $running=Start-UnixSetup $home @('--offline') -Environment @{PATH=$bin}
         try{
             $watcher=[IO.FileSystemWatcher]::new($barrier,'ready');$watcher.EnableRaisingEvents=$true
             try{if(-not [IO.File]::Exists($ready)){[void]$watcher.WaitForChanged([IO.WatcherChangeTypes]::Created,120000)}}finally{$watcher.Dispose()}
@@ -1636,6 +1796,73 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         $recovered.ExitCode | Should Be 0
         $recovered.Json.result | Should Be 'verified-runtime-only'
         Test-Path -LiteralPath (Join-Path $home '.local/share/ai-instructions-setup/.ai-instructions-txn') | Should Be $false
+    }
+
+    # Scenario: Caller-controlled shell startup and Git configuration variables are poisoned while a helper shim checks its own environment.
+    # Purpose: H4 proves external helpers run from env -i with only explicit values, and Git ignores ambient config/worktree authority.
+    It 'InterT39_isolates_external_helpers_from_ambient_environment_and_git_configuration' {
+        $home = New-UnixHome 'helper-environment'
+        $marker = Join-Path $script:UnixRoot 'helper-environment-marker'
+        $tarAction = Join-Path $script:UnixRoot 'poison-tar-action.sh'
+        $globalConfig = Join-Path $script:UnixRoot 'poison-gitconfig'
+        [IO.File]::WriteAllText($tarAction,"#!/bin/sh`nprintf poisoned > '$marker'`n")
+        [IO.File]::SetUnixFileMode($tarAction,[IO.UnixFileMode]448)
+        [IO.File]::WriteAllText($globalConfig,"this is not valid git config`n")
+        [IO.File]::WriteAllText((Join-Path $home '.gitconfig'),"this is also not valid git config`n")
+        $realUname = @(Get-Command uname -CommandType Application | Select-Object -First 1)[0].Source
+        $unameShim = @(
+            '[ -z "${BASH_ENV+x}${ENV+x}${CDPATH+x}${GIT_DIR+x}${GIT_WORK_TREE+x}${GIT_CONFIG_COUNT+x}" ] || exit 91',
+            "exec '$realUname' `"`$@`""
+        ) -join "`n"
+        $bin = New-UnixToolShim 'helper-environment' -Replace @{ uname=$unameShim }
+        $run = Invoke-UnixSetup $home @('--prepare') -Environment @{
+            PATH=$bin; CDPATH='/definitely/not/allowed'; TAR_OPTIONS="--checkpoint=1 --checkpoint-action=exec=$tarAction"
+            GIT_DIR='/definitely/not/a/repository'; GIT_WORK_TREE='/definitely/not/a/worktree'
+            GIT_CONFIG_GLOBAL=$globalConfig; GIT_CONFIG_NOSYSTEM='0'; GIT_CONFIG_COUNT='1'
+            GIT_CONFIG_KEY_0='core.fsmonitor'; GIT_CONFIG_VALUE_0=$tarAction; CURL_HOME=$home; WGETRC=$globalConfig
+        }
+        if ($run.ExitCode -ne 0) { Write-Host $run.Stdout; Write-Host $run.Stderr }
+        $run.ExitCode | Should Be 0
+        $run.Json.result | Should Be 'prepared-runtime-only'
+        Test-Path -LiteralPath $marker | Should Be $false
+    }
+
+    # Scenario: The receipt-named Unix runtime root keeps its approved bytes but drifts from mode 0700 before an offline rerun.
+    # Purpose: H5 proves the real shell-to-PowerShell offline path invokes K15 permission verification and returns the typed refusal.
+    It 'InterT40_offline_refuses_unix_runtime_mode_drift' {
+        $home = New-UnixHome 'offline-runtime-mode'
+        $initial = Invoke-UnixSetup $home @('--prepare')
+        $initial.ExitCode | Should Be 0
+        $runtimeReceipt = Get-Content -Raw -LiteralPath (Join-Path $home ".local/share/ai-instructions-setup/receipts/runtime-$($script:UnixVersion)-$($script:UnixRid).json") | ConvertFrom-Json
+        $runtimeRoot = ConvertFrom-AgentEnvironmentSetupHomePath ([string]$runtimeReceipt.runtimeClosure.rootPath) $home
+        [IO.File]::SetUnixFileMode($runtimeRoot,[IO.UnixFileMode]493)
+        try {
+            $run = Invoke-UnixSetup $home @('--offline')
+            $run.ExitCode | Should Be 23
+            $run.Json.code | Should Be 'runtime-verification-failed'
+        } finally { [IO.File]::SetUnixFileMode($runtimeRoot,[IO.UnixFileMode]448) }
+    }
+
+    # Scenario: A previous forced termination left an old run-specific tmp tree before another prepare starts.
+    # Purpose: H3 proves the new run uses a pid-plus-random directory and neither scans nor reclaims the old tree.
+    It 'InterT41_preserves_old_tmp_trees_and_uses_a_random_per_run_name' {
+        $home = New-UnixHome 'tmp-orphan'
+        $tmpRoot = Join-Path $home '.local/share/ai-instructions-setup/tmp'
+        $old = Join-Path $tmpRoot 'run.1234.old-orphan'
+        [void][IO.Directory]::CreateDirectory($old)
+        [IO.File]::SetUnixFileMode($tmpRoot,[IO.UnixFileMode]448)
+        [IO.File]::SetUnixFileMode($old,[IO.UnixFileMode]448)
+        [IO.File]::WriteAllText((Join-Path $old 'sentinel'),'preserve')
+        [IO.File]::SetUnixFileMode((Join-Path $old 'sentinel'),[IO.UnixFileMode]384)
+        $before = Get-UnixTreeSnapshot $old
+        $mtime = (Get-Item -LiteralPath $old).LastWriteTimeUtc.Ticks
+        $run = Invoke-UnixSetup $home @('--prepare')
+        $run.ExitCode | Should Be 0
+        (Get-UnixTreeSnapshot $old) | Should BeExactly $before
+        (Get-Item -LiteralPath $old).LastWriteTimeUtc.Ticks | Should Be $mtime
+        $newRuns = @(Get-ChildItem -LiteralPath $tmpRoot -Directory -Force | Where-Object { $_.FullName -ne $old })
+        $newRuns.Count | Should BeGreaterThan 0
+        foreach ($directory in $newRuns) { $directory.Name | Should Match '^run\.[0-9]+\.[A-Za-z0-9]+$'; $directory.Name | Should Not Match '^run\.[0-9]+$' }
     }
 
     # Register only when the native test process can create a genuinely foreign-owned cache fixture.

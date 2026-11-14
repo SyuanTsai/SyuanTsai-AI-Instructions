@@ -8293,6 +8293,50 @@ Describe 'Platform K15 PowerShell runtime receipt reverification' {
         finally { [IO.File]::Delete($alias) }
         Assert-K15Baseline
     }
+
+    # Scenario: The resolved runtime root keeps the same bytes and identity but its private directory permissions drift.
+    # Purpose: H5 makes K15 re-check A6 directory ownership/mode or the Windows private DACL before executing pwsh.
+    It 'InterT868_rejects_runtime_root_permission_drift_with_a_typed_failure' {
+        $runtime = Get-K15ResolvedRuntime
+        $lease = Open-PlatformDirectory -Root $runtime.Root -RootOnly
+        $snapshot = $null
+        try {
+            $snapshot = Get-PlatformPermissions -Lease $lease
+            $policy = if ($IsWindows) {
+                $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+                @{ Sddl = "D:P(A;OICI;FA;;;$sid)(A;OICI;FA;;;WD)"; ReadOnly = $false }
+            } else { @{ Mode = 493 } }
+            [void](Set-PlatformPermissions -Lease $lease -Policy $policy)
+            Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $runtime.Receipt } 'permission|owner|ACL|mode'
+        } finally {
+            if ($null -ne $snapshot) { [void](Set-PlatformPermissions -Lease $lease -Snapshot $snapshot) }
+            $lease.Dispose()
+        }
+        Assert-K15Baseline
+    }
+
+    # Scenario: A non-executable closure file keeps its approved bytes but becomes broadly writable.
+    # Purpose: H5 binds regular runtime files to A6 mode 0600 or the reviewed Windows private DACL.
+    It 'InterT869_rejects_runtime_file_permission_drift_with_a_typed_failure' {
+        $runtime = Get-K15ResolvedRuntime
+        $leaf = 'System.Management.Automation.dll'
+        $parent = Open-PlatformDirectory -Root $runtime.Root -RootOnly
+        $file = Open-PlatformFile -ParentLease $parent -Leaf $leaf -Access Read -CreateMode OpenExisting
+        $snapshot = $null
+        try {
+            $snapshot = Get-PlatformPermissions -Lease $file
+            $policy = if ($IsWindows) {
+                $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+                @{ Sddl = "D:P(A;;FA;;;$sid)(A;;FA;;;WD)"; ReadOnly = $false }
+            } else { @{ Mode = 438 } }
+            [void](Set-PlatformPermissions -Lease $file -Policy $policy)
+            Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $runtime.Receipt } 'permission|owner|ACL|mode'
+        } finally {
+            if ($null -ne $snapshot) { [void](Set-PlatformPermissions -Lease $file -Snapshot $snapshot) }
+            $file.Dispose(); $parent.Dispose()
+        }
+        Assert-K15Baseline
+    }
     }
 
     if ($k15ReleaseHost -and $k15IsUnix) {

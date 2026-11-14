@@ -205,18 +205,37 @@ function Get-AgentEnvironmentSetupLayout {
     param([Parameter(Mandatory = $true)][string] $UserHome, [Parameter(Mandatory = $true)][string] $Rid, [Parameter(Mandatory = $true)][string] $Version)
     $homePath = [IO.Path]::GetFullPath($UserHome).TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)
     $setupRoot = [IO.Path]::GetFullPath((Join-Path $homePath $script:AgentEnvironmentSetupRelativeRoot))
-    $runtimeLeaf = "$Version-$Rid"
+    $runtimeLeafPrefix = "$Version-$Rid-"
     return [pscustomobject][ordered]@{
         UserHome = $homePath
         SetupRoot = $setupRoot
         CodexHome = [IO.Path]::GetFullPath((Join-Path $homePath '.codex'))
-        RuntimeRelativePath = "pwsh/$runtimeLeaf"
-        RuntimeDirectory = [IO.Path]::GetFullPath((Join-Path (Join-Path $setupRoot 'pwsh') $runtimeLeaf))
-        RuntimeExecutable = [IO.Path]::GetFullPath((Join-Path (Join-Path (Join-Path $setupRoot 'pwsh') $runtimeLeaf) $(if ($Rid.StartsWith('win-',[StringComparison]::Ordinal)) { 'pwsh.exe' } else { 'pwsh' })))
+        RuntimeParentRelativePath = 'pwsh'
+        RuntimeParentDirectory = [IO.Path]::GetFullPath((Join-Path $setupRoot 'pwsh'))
+        RuntimeLeafPrefix = $runtimeLeafPrefix
         ReceiptDirectory = [IO.Path]::GetFullPath((Join-Path $setupRoot 'receipts'))
-        RuntimeReceiptLeaf = "runtime-$runtimeLeaf.json"
+        RuntimeReceiptLeaf = "runtime-$Version-$Rid.json"
         SetupReceiptLeaf = 'setup-receipt.json'
         LockLeaf = 'setup.lock'
+    }
+}
+
+function New-AgentEnvironmentSetupRuntimeAttemptLayout {
+    param([Parameter(Mandatory = $true)] $Layout,[Parameter(Mandatory = $true)][string] $Rid)
+    $attemptId = [guid]::NewGuid().ToString('N')
+    $runtimeLeaf = [string]$Layout.RuntimeLeafPrefix + $attemptId
+    $stageLeaf = '.stage-' + $attemptId
+    $runtimeDirectory = [IO.Path]::GetFullPath((Join-Path $Layout.RuntimeParentDirectory $runtimeLeaf))
+    $stageDirectory = [IO.Path]::GetFullPath((Join-Path $Layout.RuntimeParentDirectory $stageLeaf))
+    return [pscustomobject][ordered]@{
+        AttemptId = $attemptId
+        StageLeaf = $stageLeaf
+        StageRelativePath = "pwsh/$stageLeaf"
+        StageDirectory = $stageDirectory
+        RuntimeLeaf = $runtimeLeaf
+        RuntimeRelativePath = "pwsh/$runtimeLeaf"
+        RuntimeDirectory = $runtimeDirectory
+        RuntimeExecutable = [IO.Path]::GetFullPath((Join-Path $runtimeDirectory $(if ($Rid.StartsWith('win-',[StringComparison]::Ordinal)) { 'pwsh.exe' } else { 'pwsh' })))
     }
 }
 
@@ -306,8 +325,13 @@ function Assert-AgentEnvironmentSetupRuntimeReceiptLayout {
     }
     $executable = [IO.Path]::GetFullPath([string]$Receipt.executablePath)
     $root = [IO.Path]::GetFullPath([string]$Receipt.runtimeClosure.rootPath)
-    if (-not [string]::Equals($executable,[string]$Layout.RuntimeExecutable,[StringComparison]::Ordinal) -or
-        -not [string]::Equals($root,[string]$Layout.RuntimeDirectory,[StringComparison]::Ordinal)) {
+    $leaf = [IO.Path]::GetFileName($root)
+    $expectedExecutable = [IO.Path]::GetFullPath((Join-Path $root $(if ([string]$Receipt.os -ceq 'windows') { 'pwsh.exe' } else { 'pwsh' })))
+    $parent = [IO.Path]::GetFullPath([IO.Path]::GetDirectoryName($root))
+    if (-not [string]::Equals($executable,$expectedExecutable,[StringComparison]::Ordinal) -or
+        -not [string]::Equals($parent,[string]$Layout.RuntimeParentDirectory,[StringComparison]::Ordinal) -or
+        -not $leaf.StartsWith([string]$Layout.RuntimeLeafPrefix,[StringComparison]::Ordinal) -or
+        $leaf.Substring(([string]$Layout.RuntimeLeafPrefix).Length) -cnotmatch '^[0-9a-f]{32}$') {
         throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed 'The runtime receipt is not bound to the canonical setup layout.')
     }
     return $Receipt
@@ -373,7 +397,7 @@ function Get-AgentEnvironmentSetupPlan {
     $display = { param([string]$Path) ConvertTo-AgentEnvironmentSetupHomePath $Path $layout.UserHome }
     $plan = [ordered]@{
         schemaVersion = 1; mode = $Mode.ToLowerInvariant(); rid = $Rid; decision = 'refuse'; code = $null; reason = $null; recoverCommand = $null
-        residue = @(); runtimeState = $null; runtimeDirectory = (& $display $layout.RuntimeDirectory)
+        residue = @(); runtimeState = $null; runtimeDirectory = $null
         runtimeReceipt = (& $display (Join-Path $layout.ReceiptDirectory $layout.RuntimeReceiptLeaf))
         assetName = $asset.Name; deferredSteps = [string[]]@($script:AgentEnvironmentSetupDeferredSteps)
     }
@@ -401,35 +425,31 @@ function Get-AgentEnvironmentSetupPlan {
         return [pscustomobject]$plan
     }
     if($ExternalOnly){$plan.decision='acquire-lock';$plan.reason='External K7 state is clear; setup-internal state must be decided under the exclusive setup lock.';return [pscustomobject]$plan}
+    $receipt = Get-AgentEnvironmentSetupEntry $layout.ReceiptDirectory $layout.RuntimeReceiptLeaf
+    if ($null -ne $receipt -and $receipt.Kind -cne 'file') {
+        $plan.code = 'unsafe-path'
+        $plan.reason = 'The canonical runtime receipt is a link or has the wrong type.'
+        return [pscustomobject]$plan
+    }
+    if ($null -ne $receipt) {
+        $plan.runtimeState = 'present'; $plan.decision = 'verify-runtime'
+        return [pscustomobject]$plan
+    }
+    $plan.runtimeState = 'absent'
+    if ($Mode -ceq 'Offline') {
+        $plan.code = 'runtime-missing'
+        $plan.reason = 'Offline mode requires a valid canonical runtime receipt; none has been published.'
+        $plan.recoverCommand = 'Rerun setup with --prepare first.'
+        return [pscustomobject]$plan
+    }
     $archiveEntry = if ([string]::IsNullOrWhiteSpace($ArchivePath)) { $null } else { Get-AgentEnvironmentSetupEntry ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($ArchivePath))) ([IO.Path]::GetFileName($ArchivePath)) }
     if ($null -eq $archiveEntry -or $archiveEntry.Kind -cne 'file') {
         $plan.code = 'cache-missing'
         $plan.reason = "The verified PowerShell archive '$($asset.Name)' is not present as a regular file."
-        $plan.recoverCommand = $(if ($Mode -ceq 'Offline') { 'Rerun setup with --prepare while network access is allowed.' } else { 'Provide the official archive named in the setup policy.' })
+        $plan.recoverCommand = 'Provide the official archive named in the setup policy.'
         return [pscustomobject]$plan
     }
-    $directory = Get-AgentEnvironmentSetupEntry ([IO.Path]::GetDirectoryName($layout.RuntimeDirectory)) ([IO.Path]::GetFileName($layout.RuntimeDirectory))
-    $receipt = Get-AgentEnvironmentSetupEntry $layout.ReceiptDirectory $layout.RuntimeReceiptLeaf
-    if (($null -ne $directory -and $directory.Kind -cne 'directory') -or ($null -ne $receipt -and $receipt.Kind -cne 'file')) {
-        $plan.code = 'unsafe-path'
-        $plan.reason = 'The canonical runtime directory or its receipt is a link or has the wrong type.'
-        return [pscustomobject]$plan
-    }
-    if ($null -ne $directory -and $null -ne $receipt) {
-        $plan.runtimeState = 'present'; $plan.decision = 'verify-runtime'
-        return [pscustomobject]$plan
-    }
-    if ($null -eq $directory -and $null -eq $receipt) {
-        $plan.runtimeState = 'absent'
-        if ($Mode -ceq 'Prepare') { $plan.decision = 'resolve-runtime'; return [pscustomobject]$plan }
-        $plan.code = 'runtime-missing'
-        $plan.reason = 'Offline mode only re-verifies an existing canonical runtime; none has been prepared.'
-        $plan.recoverCommand = 'Rerun setup with --prepare first.'
-        return [pscustomobject]$plan
-    }
-    $plan.runtimeState = 'incomplete'; $plan.code = 'runtime-incomplete'
-    $plan.reason = 'The canonical runtime directory and its receipt are not both present; setup does not reinstall automatically.'
-    $plan.recoverCommand = "Remove $($plan.runtimeDirectory) and $($plan.runtimeReceipt) after inspection, then rerun setup with --prepare."
+    $plan.decision = 'resolve-runtime'
     return [pscustomobject]$plan
 }
 
@@ -485,8 +505,29 @@ function Assert-AgentEnvironmentSetupCommit {
     $gitPath = [string]$git[0].Source
     $invoke = {
         param([string[]]$Arguments)
-        $output = @(& $gitPath -c core.fsmonitor=false -C $RepositoryRoot @Arguments 2>$null)
-        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = @($output | ForEach-Object { [string]$_ }) }
+        $start = [Diagnostics.ProcessStartInfo]::new($gitPath)
+        foreach ($argument in @('-c','core.fsmonitor=false','-c','core.hooksPath=/dev/null','-C',$RepositoryRoot) + $Arguments) { $start.ArgumentList.Add($argument) }
+        $start.UseShellExecute = $false
+        $start.RedirectStandardOutput = $true
+        $start.RedirectStandardError = $true
+        $start.Environment.Clear()
+        $start.Environment['PATH'] = [Environment]::GetEnvironmentVariable('PATH')
+        $homeValue = [Environment]::GetEnvironmentVariable('HOME')
+        if ([string]::IsNullOrWhiteSpace($homeValue)) { $homeValue = [Environment]::GetEnvironmentVariable('USERPROFILE') }
+        if (-not [string]::IsNullOrWhiteSpace($homeValue)) { $start.Environment['HOME'] = $homeValue }
+        $start.Environment['LC_ALL'] = 'C'
+        $start.Environment['GIT_CONFIG_NOSYSTEM'] = '1'
+        $start.Environment['GIT_CONFIG_GLOBAL'] = '/dev/null'
+        $start.Environment['GIT_TERMINAL_PROMPT'] = '0'
+        $process = [Diagnostics.Process]::Start($start)
+        try {
+            $stdout = $process.StandardOutput.ReadToEndAsync()
+            $stderr = $process.StandardError.ReadToEndAsync()
+            $process.WaitForExit()
+            $lines = @($stdout.Result.Split("`n") | ForEach-Object { $_.TrimEnd("`r") } | Where-Object { $_.Length -gt 0 })
+            [void]$stderr.Result
+            return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = @($lines) }
+        } finally { $process.Dispose() }
     }
     # --show-prefix is empty only at the work-tree top level; this avoids comparing
     # path spellings (8.3 or case variants) between git and the caller.
@@ -697,9 +738,13 @@ function Repair-AgentEnvironmentSetupTransactions {
                 try { $journalBytes = (Get-AgentEnvironmentSetupFileState $journalLease).Bytes } finally { $journalLease.Dispose() }
                 try { $journal = [Text.UTF8Encoding]::new($false,$true).GetString($journalBytes) | ConvertFrom-Json -ErrorAction Stop }
                 catch { throw (New-AgentEnvironmentSetupRefusal interrupted-install "Setup transaction '$transactionId' has an invalid journal.") }
+                $journalDirectory=[string]$journal.directory;$journalLeaf=[string]$journal.leaf
+                $validJournalLeaf=if($journalDirectory -ceq 'receipts'){$journalLeaf -cmatch '^[A-Za-z0-9][A-Za-z0-9.-]*\.json$'}else{
+                    $journalDirectory -ceq 'cache' -and $journalLeaf -cmatch '^(?:PowerShell|powershell)-[0-9]+\.[0-9]+\.[0-9]+-(?:win|linux|osx)-(?:x64|arm64)\.(?:zip|tar\.gz)$'
+                }
                 if ([int]$journal.schemaVersion -ne 1 -or [string]$journal.kind -cne 'agent-environment-setup-publication' -or
                     [string]$journal.transactionId -cne $transactionId -or [string]$journal.phase -cne 'intent' -or
-                    [string]$journal.directory -cne 'receipts' -or [string]$journal.leaf -cnotmatch '^[A-Za-z0-9][A-Za-z0-9.-]*\.json$') {
+                    -not $validJournalLeaf) {
                     throw (New-AgentEnvironmentSetupRefusal interrupted-install "Setup transaction '$transactionId' journal identity or phase is invalid.")
                 }
                 $parentPath = Join-Path $SetupRoot ([string]$journal.directory)
@@ -735,11 +780,15 @@ function Repair-AgentEnvironmentSetupTransactions {
 function Publish-AgentEnvironmentSetupFile {
     param(
         [Parameter(Mandatory = $true)][string] $SetupRoot,
-        [Parameter(Mandatory = $true)][ValidateSet('receipts')][string] $Directory,
-        [Parameter(Mandatory = $true)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9.-]*\.json$')][string] $Leaf,
+        [Parameter(Mandatory = $true)][ValidateSet('receipts','cache')][string] $Directory,
+        [Parameter(Mandatory = $true)][string] $Leaf,
         [Parameter(Mandatory = $true)][byte[]] $Bytes,
         [switch] $NoReplace
     )
+    $validLeaf=if($Directory -ceq 'receipts'){$Leaf -cmatch '^[A-Za-z0-9][A-Za-z0-9.-]*\.json$'}else{
+        $Leaf -cmatch '^(?:PowerShell|powershell)-[0-9]+\.[0-9]+\.[0-9]+-(?:win|linux|osx)-(?:x64|arm64)\.(?:zip|tar\.gz)$'
+    }
+    if(-not $validLeaf){throw (New-AgentEnvironmentSetupRefusal unsafe-path "Setup publication leaf '$Directory/$Leaf' is invalid.")}
     $transactionId = [guid]::NewGuid().ToString('N')
     $transactionStore = Open-PlatformDirectory -Root $SetupRoot -RelativePath '.ai-instructions-txn' -CreatePrivate
     $transaction = $null; $parent = $null; $stage = $null; $journalStage = $null; $displaced = $null
@@ -827,6 +876,54 @@ function Publish-AgentEnvironmentSetupFile {
     }
 }
 
+# H1: publish a fully verified, unique runtime directory with one same-parent
+# rename. The destination is create-only and unpredictable. No runtime directory
+# is ever deleted or reused; the separately published receipt is the only pointer.
+function Publish-AgentEnvironmentSetupRuntimeDirectory {
+    param(
+        [Parameter(Mandatory = $true)] $Layout,
+        [Parameter(Mandatory = $true)] $Attempt,
+        [Parameter(Mandatory = $true)] $Receipt,
+        [Parameter(Mandatory = $true)] $Policy
+    )
+    if ([string]$Attempt.StageLeaf -cnotmatch '^\.stage-[0-9a-f]{32}$' -or
+        -not ([string]$Attempt.RuntimeLeaf).StartsWith([string]$Layout.RuntimeLeafPrefix,[StringComparison]::Ordinal) -or
+        ([string]$Attempt.RuntimeLeaf).Substring(([string]$Layout.RuntimeLeafPrefix).Length) -cnotmatch '^[0-9a-f]{32}$') {
+        throw (New-AgentEnvironmentSetupRefusal unsafe-path 'The runtime attempt identity is invalid.')
+    }
+    $stage = Get-AgentEnvironmentSetupEntry $Layout.RuntimeParentDirectory ([string]$Attempt.StageLeaf)
+    $target = Get-AgentEnvironmentSetupEntry $Layout.RuntimeParentDirectory ([string]$Attempt.RuntimeLeaf)
+    if ($null -eq $stage -or $stage.Kind -cne 'directory' -or $null -ne $target) {
+        throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed 'The private runtime stage is missing, linked, or its unique destination is occupied.')
+    }
+    [void](Assert-PlatformPowerShellRuntime -Policy $Policy -Receipt $Receipt)
+    try { [IO.Directory]::Move([string]$Attempt.StageDirectory,[string]$Attempt.RuntimeDirectory) }
+    catch { throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed ('The verified runtime directory could not be atomically published: ' + $_.Exception.Message)) }
+    if ([IO.Directory]::Exists([string]$Attempt.StageDirectory) -or -not [IO.Directory]::Exists([string]$Attempt.RuntimeDirectory)) {
+        throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed 'The runtime directory rename did not produce the unique published location.')
+    }
+    $Receipt.executablePath = [string]$Attempt.RuntimeExecutable
+    $Receipt.runtimeClosure.rootPath = [string]$Attempt.RuntimeDirectory
+    [void](Assert-AgentEnvironmentSetupRuntimeReceiptLayout $Receipt $Layout)
+    [void](Assert-PlatformPowerShellRuntime -Policy $Policy -Receipt $Receipt)
+    return $Receipt
+}
+
+function Publish-AgentEnvironmentSetupArchiveCache {
+    param(
+        [Parameter(Mandatory = $true)][string] $SetupRoot,
+        [Parameter(Mandatory = $true)][string] $Leaf,
+        [Parameter(Mandatory = $true)][string] $ArchivePath,
+        [Parameter(Mandatory = $true)][string] $ExpectedSha256
+    )
+    $existing = Read-AgentEnvironmentSetupFile $SetupRoot 'cache' $Leaf
+    if ($null -ne $existing -and (Get-AgentEnvironmentSetupSha256Bytes $existing.Bytes) -ceq $ExpectedSha256) { return 'current' }
+    $bytes = [IO.File]::ReadAllBytes($ArchivePath)
+    if ((Get-AgentEnvironmentSetupSha256Bytes $bytes) -cne $ExpectedSha256) { throw (New-AgentEnvironmentSetupRefusal archive-hash-mismatch 'The private archive snapshot changed before cache publication.') }
+    Publish-AgentEnvironmentSetupFile -SetupRoot $SetupRoot -Directory 'cache' -Leaf $Leaf -Bytes $bytes -NoReplace:($null -eq $existing)
+    return 'published'
+}
+
 function New-AgentEnvironmentSetupReceipt {
     param(
         [Parameter(Mandatory = $true)][ValidateSet('prepare','offline')][string] $Mode,
@@ -890,9 +987,12 @@ Export-ModuleMember -Function @(
     'Assert-AgentEnvironmentSetupPolicy','Read-AgentEnvironmentSetupPolicy','ConvertTo-AgentEnvironmentSetupPolicyTsv',
     'Assert-AgentEnvironmentSetupPolicyTsv','Get-AgentEnvironmentSetupRid','Get-AgentEnvironmentSetupPolicyAsset',
     'Get-AgentEnvironmentSetupLayout','ConvertTo-AgentEnvironmentSetupHomePath','ConvertFrom-AgentEnvironmentSetupHomePath',
+    'New-AgentEnvironmentSetupRuntimeAttemptLayout',
     'ConvertTo-AgentEnvironmentSetupSanitizedText','ConvertTo-AgentEnvironmentSetupStoredRuntimeReceipt',
     'ConvertFrom-AgentEnvironmentSetupStoredRuntimeReceipt','Assert-AgentEnvironmentSetupRuntimeReceiptLayout','Get-AgentEnvironmentSetupPlan',
     'Assert-AgentEnvironmentSetupPhysicalPath','Get-AgentEnvironmentSetupUserHome','Assert-AgentEnvironmentSetupCodexHome',
     'Assert-AgentEnvironmentSetupCommit','Test-AgentEnvironmentSetupSameFile','Get-AgentEnvironmentSetupChildEnvironment','Read-AgentEnvironmentSetupFile',
-    'Repair-AgentEnvironmentSetupTransactions','Resolve-AgentEnvironmentSetupTransaction','Publish-AgentEnvironmentSetupFile','Invoke-AgentEnvironmentSetupBarrier','New-AgentEnvironmentSetupReceipt','ConvertTo-AgentEnvironmentSetupJsonLine'
+    'Repair-AgentEnvironmentSetupTransactions','Resolve-AgentEnvironmentSetupTransaction','Publish-AgentEnvironmentSetupFile',
+    'Publish-AgentEnvironmentSetupRuntimeDirectory','Publish-AgentEnvironmentSetupArchiveCache','Invoke-AgentEnvironmentSetupFailpoint','Invoke-AgentEnvironmentSetupBarrier',
+    'New-AgentEnvironmentSetupReceipt','ConvertTo-AgentEnvironmentSetupJsonLine'
 )

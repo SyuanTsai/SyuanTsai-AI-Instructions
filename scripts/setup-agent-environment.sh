@@ -58,8 +58,13 @@ cleanup() {
     if [ -n "$run_tmp" ] && [ -n "$setup_root" ] && [ -d "$run_tmp" ] && [ ! -L "$run_tmp" ]; then
         case "$run_tmp" in
             "$setup_root"/tmp/run.*)
-                chmod -R u+rwx "$run_tmp" 2>/dev/null || :
-                rm -rf "$run_tmp" ;;
+                # H3: remove only known files and empty directories created by
+                # this run. Never traverse or reclaim any old tmp tree.
+                run_clean rm -f "$run_tmp/members" "$run_tmp/verbose" 2>/dev/null || :
+                if [ -n "${asset_name-}" ]; then
+                    run_clean rm -f "$run_tmp/$asset_name" "$run_tmp/download/$asset_name" 2>/dev/null || :
+                fi
+                run_clean rmdir "$run_tmp/download" "$run_tmp" 2>/dev/null || : ;;
         esac
     fi
 }
@@ -101,33 +106,55 @@ esac
 [ "${#expected_commit}" -eq 40 ] || refuse usage "$EXIT_USAGE" '--expected-commit must be a 40-character lowercase hexadecimal commit.'
 
 have() { command -v "$1" >/dev/null 2>&1; }
-for tool in uname id awk sed find mkdir mv rm chmod env dirname cp; do
+for tool in uname id awk sed find mkdir rm rmdir chmod env dirname cp mktemp; do
     have "$tool" || refuse missing-dependency "$EXIT_MISSING_DEPENDENCY" "Required tool '$tool' is not available; setup does not install system packages."
 done
 
+home=${HOME-}
+case "$home" in
+    /*) ;;
+    *) refuse home-invalid "$EXIT_HOME_INVALID" 'HOME must be an absolute path.' ;;
+esac
+case "$home" in
+    *'
+'*) refuse home-invalid "$EXIT_HOME_INVALID" 'HOME must not contain a newline.' ;;
+esac
+while [ "$home" != / ]; do
+    case "$home" in */) home=${home%/} ;; *) break ;; esac
+done
+[ "$home" != / ] || refuse home-invalid "$EXIT_HOME_INVALID" 'HOME must not be the filesystem root.'
+[ -d "$home" ] || refuse home-invalid "$EXIT_HOME_INVALID" 'HOME must be an existing directory.'
+[ -w "$home" ] || refuse home-invalid "$EXIT_HOME_INVALID" 'HOME must be writable.'
+
+helper_path=${PATH-/usr/bin:/bin}
+env_path=$(command -v env) || refuse missing-dependency "$EXIT_MISSING_DEPENDENCY" "Required tool 'env' is not available; setup does not install system packages."
+run_clean() {
+    "$env_path" -i "PATH=$helper_path" "HOME=$home" 'LC_ALL=C' "$@"
+}
+
 # --- S1: RID, HOME, ancestors (M7) ------------------------------------------
-case "$(uname -s)" in
+case "$(run_clean uname -s)" in
     Linux) os_token=linux ;;
     Darwin) os_token=osx ;;
     *) refuse unsupported-platform "$EXIT_UNSUPPORTED_PLATFORM" 'The host OS has no pinned PowerShell asset.' ;;
 esac
-case "$(uname -m)" in
+case "$(run_clean uname -m)" in
     x86_64|amd64) arch_token=x64 ;;
     aarch64|arm64) arch_token=arm64 ;;
     *) refuse unsupported-platform "$EXIT_UNSUPPORTED_PLATFORM" 'The host architecture has no pinned PowerShell asset.' ;;
 esac
 if [ "$os_token" = linux ]; then
-    musl_loader=$(find /lib /usr/lib -maxdepth 1 -name 'ld-musl-*' -print -quit 2>/dev/null || :)
+    musl_loader=$(run_clean find /lib /usr/lib -maxdepth 1 -name 'ld-musl-*' -print -quit 2>/dev/null || :)
     [ -z "$musl_loader" ] || refuse unsupported-platform "$EXIT_UNSUPPORTED_PLATFORM" 'musl-based Linux has no pinned PowerShell asset.'
 fi
 rid="$os_token-$arch_token"
-uid=$(id -u)
+uid=$(run_clean id -u)
 
 check_owner_mode() {
-    if [ -z "$(find "$1" -prune \( -user 0 -o -user "$uid" \) -print)" ]; then
+    if [ -z "$(run_clean find "$1" -prune \( -user 0 -o -user "$uid" \) -print)" ]; then
         refuse unsafe-path "$EXIT_UNSAFE_PATH" "$2 has an ancestor owned by another user: $1"
     fi
-    if [ -n "$(find "$1" -prune \( -perm -0020 -o -perm -0002 \) ! -perm -1000 -print)" ]; then
+    if [ -n "$(run_clean find "$1" -prune \( -perm -0020 -o -perm -0002 \) ! -perm -1000 -print)" ]; then
         refuse unsafe-path "$EXIT_UNSAFE_PATH" "$2 has a group- or world-writable ancestor without the sticky bit: $1"
     fi
 }
@@ -161,25 +188,7 @@ check_ancestors() {
     return 0
 }
 
-home=${HOME-}
-case "$home" in
-    /*) ;;
-    *) refuse home-invalid "$EXIT_HOME_INVALID" 'HOME must be an absolute path.' ;;
-esac
-case "$home" in
-    *'
-'*) refuse home-invalid "$EXIT_HOME_INVALID" 'HOME must not contain a newline.' ;;
-esac
-while [ "$home" != / ]; do
-    case "$home" in
-        */) home=${home%/} ;;
-        *) break ;;
-    esac
-done
-[ "$home" != / ] || refuse home-invalid "$EXIT_HOME_INVALID" 'HOME must not be the filesystem root.'
 check_ancestors "$home" HOME
-[ -d "$home" ] || refuse home-invalid "$EXIT_HOME_INVALID" 'HOME must be an existing directory.'
-[ -w "$home" ] || refuse home-invalid "$EXIT_HOME_INVALID" 'HOME must be writable.'
 
 codex_home="$home/.codex"
 if [ -n "${CODEX_HOME-}" ]; then
@@ -214,11 +223,12 @@ if [ "$mode" = prepare ]; then
     fi
 fi
 
-script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P) || refuse internal-error "$EXIT_INTERNAL_ERROR" 'Cannot locate the setup script directory.'
+script_dir=$(CDPATH='' cd -- "$(run_clean dirname -- "$0")" && pwd -P) || refuse internal-error "$EXIT_INTERNAL_ERROR" 'Cannot locate the setup script directory.'
 repo_root=$(CDPATH='' cd -- "$script_dir/.." && pwd -P) || refuse internal-error "$EXIT_INTERNAL_ERROR" 'Cannot locate the repository root.'
 
 git_in_repo() {
-    git -c core.fsmonitor=false -C "$repo_root" "$@"
+    run_clean GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
+        git -c core.fsmonitor=false -c core.hooksPath=/dev/null -C "$repo_root" "$@"
 }
 top=$(git_in_repo rev-parse --show-toplevel 2>/dev/null) || refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" 'The setup script is not inside a git checkout.'
 top=$(CDPATH='' cd -- "$top" && pwd -P) || refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" 'The git top level is not accessible.'
@@ -257,7 +267,7 @@ done
 # --- Policy (derived TSV, K2) ------------------------------------------------
 tsv="$script_dir/setup-agent-environment.policy.tsv"
 tsv_value() {
-    awk -v key="$1" 'BEGIN { FS = "\t" } $1 == key { print $2 }' "$tsv"
+    run_clean awk -v key="$1" 'BEGIN { FS = "\t" } $1 == key { print $2 }' "$tsv"
 }
 [ "$(tsv_value '#schemaVersion')" = 1 ] || refuse policy-invalid "$EXIT_POLICY_INVALID" 'The policy TSV schemaVersion is unknown.'
 version=$(tsv_value '#version')
@@ -267,10 +277,10 @@ case "$version" in
 esac
 [ "$url_template" = 'https://github.com/PowerShell/PowerShell/releases/download/v{version}/{assetName}' ] ||
     refuse policy-invalid "$EXIT_POLICY_INVALID" 'The policy TSV download URL template must exactly name the official PowerShell GitHub release endpoint.'
-rows=$(awk -v key="$rid" 'BEGIN { FS = "\t"; n = 0 } $1 == key { n++ } END { print n }' "$tsv")
+rows=$(run_clean awk -v key="$rid" 'BEGIN { FS = "\t"; n = 0 } $1 == key { n++ } END { print n }' "$tsv")
 [ "$rows" = 1 ] || refuse unsupported-platform "$EXIT_UNSUPPORTED_PLATFORM" "The policy has no single asset for $rid."
-asset_name=$(awk -v key="$rid" 'BEGIN { FS = "\t" } $1 == key { print $2 }' "$tsv")
-asset_sha=$(awk -v key="$rid" 'BEGIN { FS = "\t" } $1 == key { print $3 }' "$tsv")
+asset_name=$(run_clean awk -v key="$rid" 'BEGIN { FS = "\t" } $1 == key { print $2 }' "$tsv")
+asset_sha=$(run_clean awk -v key="$rid" 'BEGIN { FS = "\t" } $1 == key { print $3 }' "$tsv")
 [ "$asset_name" = "powershell-$version-$rid.tar.gz" ] || refuse policy-invalid "$EXIT_POLICY_INVALID" 'The policy asset name does not match its version and RID.'
 case "$asset_sha" in
     ''|*[!0-9a-f]*) refuse policy-invalid "$EXIT_POLICY_INVALID" 'The policy SHA-256 must be lowercase hexadecimal.' ;;
@@ -279,9 +289,9 @@ esac
 
 hash_file() {
     if [ "$hash_tool" = sha256sum ]; then
-        sha256sum "$1" | awk '{ print $1 }'
+        run_clean sha256sum "$1" | run_clean awk '{ print $1 }'
     else
-        shasum -a 256 "$1" | awk '{ print $1 }'
+        run_clean shasum -a 256 "$1" | run_clean awk '{ print $1 }'
     fi
 }
 
@@ -294,68 +304,63 @@ if [ -L "$archive" ]; then
 fi
 if [ -e "$archive" ]; then
     [ -f "$archive" ] || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The cached archive is not a regular file.'
-    [ -n "$(find "$archive" -prune -type f -user "$uid" -links 1 -perm 0600 -print)" ] || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The cached archive must be owned by the current uid, single-link and mode 0600.'
+    [ -n "$(run_clean find "$archive" -prune -type f -user "$uid" -links 1 -perm 0600 -print)" ] || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The cached archive must be owned by the current uid, single-link and mode 0600.'
     cache_present=1
 elif [ "$mode" = offline ]; then
     refuse cache-missing "$EXIT_CACHE_MISSING" 'The verified archive cache is missing; rerun with --prepare while network access is allowed.'
 fi
 
 # --- Setup root and per-run temp (M4, M7, M8) --------------------------------
-mkdir -p "$setup_root" || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'Cannot create the setup root.'
+run_clean mkdir -p "$setup_root" || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'Cannot create the setup root.'
 check_ancestors "$setup_root" 'The setup root'
-for sub in cache tmp; do
-    if [ -L "$setup_root/$sub" ]; then
-        refuse unsafe-path "$EXIT_UNSAFE_PATH" "The setup $sub directory is a symbolic link."
-    fi
-    mkdir -p "$setup_root/$sub" || refuse unsafe-path "$EXIT_UNSAFE_PATH" "Cannot create the setup $sub directory."
-    check_owner_mode "$setup_root/$sub" "The setup $sub directory"
-done
-attempt=0
-run_tmp="$setup_root/tmp/run.$$"
-while ! mkdir "$run_tmp" 2>/dev/null; do
-    attempt=$((attempt + 1))
-    [ "$attempt" -lt 100 ] || { run_tmp=''; refuse internal-error "$EXIT_INTERNAL_ERROR" 'Cannot create a private setup temp directory.'; }
-    run_tmp="$setup_root/tmp/run.$$.$attempt"
-done
+if [ -L "$setup_root/tmp" ]; then refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The setup tmp directory is a symbolic link.'; fi
+run_clean mkdir -p "$setup_root/tmp" || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'Cannot create the setup tmp directory.'
+check_owner_mode "$setup_root/tmp" 'The setup tmp directory'
+run_tmp=$(run_clean mktemp -d "$setup_root/tmp/run.$$.XXXXXXXXXX") || { run_tmp=''; refuse internal-error "$EXIT_INTERNAL_ERROR" 'Cannot create a private setup temp directory.'; }
 
 # --- S2: canonical runtime location (verified later by pwsh, K15) -----------
-canonical_dir="$setup_root/pwsh/$version-$rid"
-if [ -L "$setup_root/pwsh" ] || [ -L "$canonical_dir" ]; then
+if [ -L "$setup_root/pwsh" ]; then
     refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The canonical runtime location is a symbolic link.'
 fi
 
 # --- S3: verified official archive in the cache ------------------------------
 if [ "$cache_present" -eq 0 ]; then
-    url=$(printf '%s\n' "$url_template" | sed -e "s/{version}/$version/g" -e "s/{assetName}/$asset_name/g")
-    mkdir "$run_tmp/download"
+    url=$(printf '%s\n' "$url_template" | run_clean sed -e "s/{version}/$version/g" -e "s/{assetName}/$asset_name/g")
+    run_clean mkdir "$run_tmp/download"
     download="$run_tmp/download/$asset_name"
     if [ "$downloader" = curl ]; then
-        curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location --silent --show-error \
+        run_clean "HTTPS_PROXY=${HTTPS_PROXY-}" "HTTP_PROXY=${HTTP_PROXY-}" "NO_PROXY=${NO_PROXY-}" \
+            "https_proxy=${https_proxy-}" "http_proxy=${http_proxy-}" "no_proxy=${no_proxy-}" \
+            "SSL_CERT_FILE=${SSL_CERT_FILE-}" "SSL_CERT_DIR=${SSL_CERT_DIR-}" \
+            curl -q --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location --silent --show-error \
             --connect-timeout 30 --max-time 900 --retry 2 --output "$download" "$url" \
             || refuse download-failed "$EXIT_DOWNLOAD_FAILED" 'The official PowerShell archive download failed.'
     else
-        wget --https-only --secure-protocol=TLSv1_2 --timeout=30 --tries=3 --quiet \
+        run_clean "HTTPS_PROXY=${HTTPS_PROXY-}" "HTTP_PROXY=${HTTP_PROXY-}" "NO_PROXY=${NO_PROXY-}" \
+            "https_proxy=${https_proxy-}" "http_proxy=${http_proxy-}" "no_proxy=${no_proxy-}" \
+            "SSL_CERT_FILE=${SSL_CERT_FILE-}" "SSL_CERT_DIR=${SSL_CERT_DIR-}" \
+            wget --no-config --https-only --secure-protocol=TLSv1_2 --timeout=30 --tries=3 --quiet \
             --output-document="$download" "$url" \
             || refuse download-failed "$EXIT_DOWNLOAD_FAILED" 'The official PowerShell archive download failed.'
     fi
     [ -f "$download" ] && [ ! -L "$download" ] || refuse download-failed "$EXIT_DOWNLOAD_FAILED" 'The download did not produce a regular file.'
     [ "$(hash_file "$download")" = "$asset_sha" ] || refuse archive-hash-mismatch "$EXIT_ARCHIVE_HASH_MISMATCH" 'The downloaded archive SHA-256 does not match the policy.'
-    chmod 0600 "$download" || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The verified download cannot be made private.'
-    # Same filesystem: the per-run temp directory lives below the setup root.
-    mv -f "$download" "$archive" || refuse internal-error "$EXIT_INTERNAL_ERROR" 'Cannot move the verified archive into the cache.'
-    [ -n "$(find "$archive" -prune -type f -user "$uid" -links 1 -perm 0600 -print)" ] || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The published cache file is not private and single-link.'
+    run_clean chmod 0600 "$download" || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The verified download cannot be made private.'
+    archive_source="$download"
+else
+    archive_source="$archive"
 fi
 
 # F2: copy without following a final symlink into this run's private directory.
 # Hashing, tar listing/extraction and the PowerShell OfflineCache all use only
 # this immutable-for-the-run snapshot, never the cache pathname again.
 archive_snapshot="$run_tmp/$asset_name"
-cp -P "$archive" "$archive_snapshot" || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The cached archive cannot be copied without following links.'
+run_clean cp -P "$archive_source" "$archive_snapshot" || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The archive cannot be copied without following links.'
 if [ -L "$archive_snapshot" ] || [ ! -f "$archive_snapshot" ]; then
     refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The private archive snapshot is not a regular file.'
 fi
-chmod 0600 "$archive_snapshot" || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The private archive snapshot cannot be protected.'
-[ -n "$(find "$archive_snapshot" -prune -type f -user "$uid" -links 1 -perm 0600 -print)" ] || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The private archive snapshot is not owned, single-link and mode 0600.'
+run_clean chmod 0600 "$archive_snapshot" || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The private archive snapshot cannot be protected.'
+[ -n "$(run_clean find "$archive_snapshot" -prune -type f -user "$uid" -links 1 -perm 0600 -print)" ] || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The private archive snapshot is not owned, single-link and mode 0600.'
 [ "$(hash_file "$archive_snapshot")" = "$asset_sha" ] || refuse archive-hash-mismatch "$EXIT_ARCHIVE_HASH_MISMATCH" 'The private archive snapshot SHA-256 does not match the policy.'
 archive="$archive_snapshot"
 
@@ -365,11 +370,11 @@ archive="$archive_snapshot"
 # GNU tar strips a leading / from listed names unless -P is given; bsdtar lists
 # names verbatim. Both strip it again on extraction.
 tar_list_flag=''
-if tar --version 2>/dev/null | awk 'NR == 1 && /GNU tar/ { found = 1 } END { exit !found }'; then
+if run_clean tar --version 2>/dev/null | run_clean awk 'NR == 1 && /GNU tar/ { found = 1 } END { exit !found }'; then
     tar_list_flag='-P'
 fi
-tar -t $tar_list_flag -z -f "$archive" > "$run_tmp/members" 2>/dev/null || refuse archive-unsafe "$EXIT_ARCHIVE_UNSAFE" 'The archive cannot be listed.'
-unsafe_member=$(awk '
+run_clean tar -t $tar_list_flag -z -f "$archive" > "$run_tmp/members" 2>/dev/null || refuse archive-unsafe "$EXIT_ARCHIVE_UNSAFE" 'The archive cannot be listed.'
+unsafe_member=$(run_clean awk '
     {
         name = $0
         if (name == "." || name == "./") next
@@ -379,23 +384,23 @@ unsafe_member=$(awk '
         if (wrapped ~ /\/\.\.\// || wrapped ~ /\/\.\//) { print "unsafe"; exit }
     }' "$run_tmp/members")
 [ -z "$unsafe_member" ] || refuse archive-unsafe "$EXIT_ARCHIVE_UNSAFE" 'The archive contains an absolute or traversal member path.'
-tar -t -v $tar_list_flag -z -f "$archive" > "$run_tmp/verbose" 2>/dev/null || refuse archive-unsafe "$EXIT_ARCHIVE_UNSAFE" 'The archive cannot be listed.'
-unsafe_type=$(awk '
+run_clean tar -t -v $tar_list_flag -z -f "$archive" > "$run_tmp/verbose" 2>/dev/null || refuse archive-unsafe "$EXIT_ARCHIVE_UNSAFE" 'The archive cannot be listed.'
+unsafe_type=$(run_clean awk '
     {
         kind = substr($0, 1, 1)
         if ((kind != "-" && kind != "d") || index($0, " link to ") > 0 || index($0, " -> ") > 0) { print "unsafe"; exit }
     }' "$run_tmp/verbose")
 [ -z "$unsafe_type" ] || refuse archive-unsafe "$EXIT_ARCHIVE_UNSAFE" 'The archive contains a link, device or other non-regular member.'
 bootstrap="$run_tmp/bootstrap"
-mkdir "$bootstrap"
-tar -xzf "$archive" -C "$bootstrap" 2>/dev/null || refuse archive-unsafe "$EXIT_ARCHIVE_UNSAFE" 'The archive could not be extracted.'
-[ -z "$(find "$bootstrap" ! -type f ! -type d -print)" ] || refuse archive-unsafe "$EXIT_ARCHIVE_UNSAFE" 'The extracted tree contains a non-regular entry.'
-[ -z "$(find "$bootstrap" -type f -links +1 -print)" ] || refuse archive-unsafe "$EXIT_ARCHIVE_UNSAFE" 'The extracted tree contains a hard-linked file.'
+run_clean mkdir "$bootstrap"
+run_clean tar -xzf "$archive" -C "$bootstrap" 2>/dev/null || refuse archive-unsafe "$EXIT_ARCHIVE_UNSAFE" 'The archive could not be extracted.'
+[ -z "$(run_clean find "$bootstrap" ! -type f ! -type d -print)" ] || refuse archive-unsafe "$EXIT_ARCHIVE_UNSAFE" 'The extracted tree contains a non-regular entry.'
+[ -z "$(run_clean find "$bootstrap" -type f -links +1 -print)" ] || refuse archive-unsafe "$EXIT_ARCHIVE_UNSAFE" 'The extracted tree contains a hard-linked file.'
 if [ -L "$bootstrap/pwsh" ] || [ ! -f "$bootstrap/pwsh" ]; then
     refuse archive-unsafe "$EXIT_ARCHIVE_UNSAFE" 'The archive does not contain a regular pwsh executable.'
 fi
-chmod -R go-rwx "$bootstrap"
-chmod 0700 "$bootstrap/pwsh"
+run_clean chmod -R go-rwx "$bootstrap"
+run_clean chmod 0700 "$bootstrap/pwsh"
 
 # --- S4: hand-off with an explicit environment allowlist (M5) ----------------
 if [ "$os_token" = osx ]; then default_lang=en_US.UTF-8; else default_lang=C.UTF-8; fi
@@ -413,6 +418,6 @@ if [ -n "${CODEX_HOME+x}" ]; then set -- "$@" "CODEX_HOME=$CODEX_HOME"; fi
 if [ "$mode" = prepare ]; then mode_flag=-Prepare; else mode_flag=-Offline; fi
 cd "$setup_root"
 status=0
-env -i "$@" "$bootstrap/pwsh" -NoLogo -NoProfile -NonInteractive -File "$script_dir/setup-agent-environment.ps1" \
+"$env_path" -i "$@" "$bootstrap/pwsh" -NoLogo -NoProfile -NonInteractive -File "$script_dir/setup-agent-environment.ps1" \
     "$mode_flag" -ExpectedCommit "$expected_commit" -ArchivePath "$archive" || status=$?
 exit "$status"

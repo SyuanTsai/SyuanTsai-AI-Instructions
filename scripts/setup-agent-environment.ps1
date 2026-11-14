@@ -76,11 +76,20 @@ function Invoke-SetupVerifierGit {
         [switch] $Binary
     )
     $start = [Diagnostics.ProcessStartInfo]::new($GitPath)
-    foreach ($prefix in @('-c','core.fsmonitor=false','-C',$RepositoryRoot)) { [void]$start.ArgumentList.Add($prefix) }
+    foreach ($prefix in @('-c','core.fsmonitor=false','-c','core.hooksPath=/dev/null','-C',$RepositoryRoot)) { [void]$start.ArgumentList.Add($prefix) }
     foreach ($argument in $Arguments) { [void]$start.ArgumentList.Add($argument) }
     $start.UseShellExecute = $false
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
+    $path = [Environment]::GetEnvironmentVariable('PATH')
+    $homeValue = [Environment]::GetEnvironmentVariable('HOME')
+    $start.Environment.Clear()
+    if (-not [string]::IsNullOrEmpty($path)) { $start.Environment['PATH'] = $path }
+    if (-not [string]::IsNullOrEmpty($homeValue)) { $start.Environment['HOME'] = $homeValue }
+    $start.Environment['LC_ALL'] = 'C'
+    $start.Environment['GIT_CONFIG_NOSYSTEM'] = '1'
+    $start.Environment['GIT_CONFIG_GLOBAL'] = '/dev/null'
+    $start.Environment['GIT_TERMINAL_PROMPT'] = '0'
     $process = [Diagnostics.Process]::Start($start)
     try {
         $stderrTask = $process.StandardError.ReadToEndAsync()
@@ -224,10 +233,6 @@ try {
 
     if ($Canonical) {
         # Canonical stage: read-only. The bootstrap stage holds the setup lock.
-        $processPath = [Environment]::ProcessPath
-        if ([string]::IsNullOrEmpty($processPath) -or -not (Test-AgentEnvironmentSetupSameFile $processPath $layout.RuntimeExecutable)) {
-            throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed 'The canonical stage is not running on the canonical pwsh.')
-        }
         $expectedRuntimeReceiptPath = [IO.Path]::GetFullPath((Join-Path $layout.ReceiptDirectory $layout.RuntimeReceiptLeaf))
         if ([string]::IsNullOrWhiteSpace($RuntimeReceiptPath) -or
             -not [string]::Equals([IO.Path]::GetFullPath($RuntimeReceiptPath),$expectedRuntimeReceiptPath,[StringComparison]::Ordinal)) {
@@ -243,13 +248,17 @@ try {
             if ((Get-AgentEnvironmentSetupRefusalCode $_) -cne 'internal-error') { throw }
             throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed ('Canonical runtime re-verification failed: ' + $_.Exception.Message))
         }
+        $processPath = [Environment]::ProcessPath
+        if ([string]::IsNullOrEmpty($processPath) -or -not (Test-AgentEnvironmentSetupSameFile $processPath ([string]$runtimeReceipt.executablePath))) {
+            throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed 'The canonical stage is not running on the receipt-named pwsh.')
+        }
         try { $capabilities = Get-PlatformCapabilities -Required (Get-AgentEnvironmentSetupRequiredCapabilities) }
         catch { throw (New-AgentEnvironmentSetupRefusal capability-unavailable ('A required platform capability is unavailable: ' + $_.Exception.Message)) }
         # S6: process scope only; nothing is persisted (D4).
         [void](Set-PlatformProcessEnvironment -Name CODEX_HOME -Value $codexHome)
         Write-SetupLine (ConvertTo-AgentEnvironmentSetupJsonLine ([pscustomobject][ordered]@{
             schemaVersion = 1; stage = 'canonical'
-            executablePath = (ConvertTo-AgentEnvironmentSetupHomePath $layout.RuntimeExecutable $userHome)
+            executablePath = (ConvertTo-AgentEnvironmentSetupHomePath ([string]$runtimeReceipt.executablePath) $userHome)
             powerShellVersion = $PSVersionTable.PSVersion.ToString()
             dotNetVersion = [Runtime.InteropServices.RuntimeInformation]::FrameworkDescription
             codexHome = (ConvertTo-AgentEnvironmentSetupHomePath ([Environment]::GetEnvironmentVariable('CODEX_HOME')) $userHome)
@@ -268,7 +277,8 @@ try {
     if ($plan.decision -ceq 'refuse') { throw (New-AgentEnvironmentSetupRefusal ([string]$plan.code) ([string]$plan.reason) ([string]$plan.recoverCommand)) }
 
     # M4/M8: private setup root, serialized by an exclusive platform lock.
-    $setupLease = Open-PlatformDirectory -Root $userHome -RelativePath '.local/share/ai-instructions-setup' -CreatePrivate
+    try { $setupLease = Open-PlatformDirectory -Root $userHome -RelativePath '.local/share/ai-instructions-setup' -CreatePrivate }
+    catch { throw (New-AgentEnvironmentSetupRefusal home-invalid ('HOME is not writable for the private setup root: ' + $_.Exception.Message)) }
     try { $lock = Enter-PlatformLock -ParentLease $setupLease -Leaf $layout.LockLeaf -Mode Exclusive -Timeout ([TimeSpan]::Zero) }
     catch {
         $cause = $_.Exception
@@ -276,6 +286,7 @@ try {
         if ($cause -is [TimeoutException]) { throw (New-AgentEnvironmentSetupRefusal concurrent 'Another agent environment setup holds the setup lock.') }
         throw
     }
+    Invoke-AgentEnvironmentSetupBarrier 'after-lock-acquired'
 
     # K7/F5/G1-G4: setup-owned WAL and all runtime/receipt decisions are inside
     # the exclusive lock. External transactions remain refusals.
@@ -290,18 +301,28 @@ try {
     if ([IO.Path]::GetFileName($archive) -cne $asset.Name -or $archiveSha256 -cne $asset.Sha256) {
         throw (New-AgentEnvironmentSetupRefusal archive-hash-mismatch 'The PowerShell archive name or SHA-256 does not match the setup policy.')
     }
+    if ($Prepare) {
+        [void](Publish-AgentEnvironmentSetupArchiveCache -SetupRoot $layout.SetupRoot -Leaf $asset.Name -ArchivePath $archive -ExpectedSha256 $asset.Sha256)
+    }
 
-    # S5: create the canonical runtime once; afterwards only re-verify (K15/K16).
+    # H1/S5: each prepare attempt resolves into a new private stage, verifies it,
+    # publishes a unique directory with one rename, then atomically publishes the
+    # receipt as the only pointer. Unreferenced directories are preserved orphans.
     if ($plan.decision -ceq 'resolve-runtime') {
-        $runtimeParentLease = Open-PlatformDirectory -Root $layout.SetupRoot -RelativePath 'pwsh' -CreatePrivate
+        $attempt = New-AgentEnvironmentSetupRuntimeAttemptLayout $layout $rid
+        $runtimeParentLease = Open-PlatformDirectory -Root $layout.SetupRoot -RelativePath $layout.RuntimeParentRelativePath -CreatePrivate
         $runtimeParentLease.Dispose()
-        $runtimeLease = Open-PlatformDirectory -Root $layout.SetupRoot -RelativePath $layout.RuntimeRelativePath -CreatePrivate
+        Invoke-AgentEnvironmentSetupFailpoint 'before-runtime-stage-created' $layout.RuntimeReceiptLeaf
+        $runtimeLease = Open-PlatformDirectory -Root $layout.SetupRoot -RelativePath $attempt.StageRelativePath -CreatePrivate
         Invoke-AgentEnvironmentSetupBarrier 'after-runtime-directory'
         try {
             try { $runtimeReceipt = Resolve-PlatformPowerShell -Policy $policyInfo.Policy -DestinationLease $runtimeLease -OfflineCache $archive }
             catch { throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed ('The canonical runtime could not be prepared: ' + $_.Exception.Message)) }
         } finally { $runtimeLease.Dispose() }
-        [void](Assert-AgentEnvironmentSetupRuntimeReceiptLayout $runtimeReceipt $layout)
+        [void](Assert-PlatformPowerShellRuntime -Policy $policyInfo.Policy -Receipt $runtimeReceipt)
+        Invoke-AgentEnvironmentSetupFailpoint 'after-runtime-stage-verified' $layout.RuntimeReceiptLeaf
+        $runtimeReceipt = Publish-AgentEnvironmentSetupRuntimeDirectory -Layout $layout -Attempt $attempt -Receipt $runtimeReceipt -Policy $policyInfo.Policy
+        Invoke-AgentEnvironmentSetupFailpoint 'after-runtime-directory-published' $layout.RuntimeReceiptLeaf
         $stored = ConvertTo-AgentEnvironmentSetupStoredRuntimeReceipt $runtimeReceipt $userHome
         Publish-AgentEnvironmentSetupFile -SetupRoot $layout.SetupRoot -Directory 'receipts' -Leaf $layout.RuntimeReceiptLeaf -Bytes ([Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-AgentEnvironmentSetupJsonLine $stored) + "`n")) -NoReplace
         $runtimeAction = 'resolved'
@@ -315,7 +336,7 @@ try {
             $runtimeReceipt = Assert-PlatformPowerShellRuntime -Policy $policyInfo.Policy -Receipt $runtimeReceipt
         } catch {
             if ((Get-AgentEnvironmentSetupRefusalCode $_) -cne 'internal-error') { throw }
-            throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed ('Canonical runtime re-verification failed; setup does not reinstall automatically: ' + $_.Exception.Message) "Inspect or remove $($plan.runtimeDirectory) and $($plan.runtimeReceipt), then rerun setup with --prepare.")
+            throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed ('Receipt-named runtime re-verification failed; setup does not reinstall automatically: ' + $_.Exception.Message) "Inspect the runtime named by $($plan.runtimeReceipt), then rerun setup with --prepare after resolving the receipt safely.")
         }
         $runtimeAction = 'reverified'
     }
@@ -323,8 +344,10 @@ try {
     # S5 re-exec: the canonical pwsh re-verifies itself as an owned process with
     # an explicit environment allowlist (M5).
     $verifiedRuntimeReceiptPath = [IO.Path]::GetFullPath((Join-Path $layout.ReceiptDirectory $layout.RuntimeReceiptLeaf))
+    $runtimeExecutable = [string]$runtimeReceipt.executablePath
+    $runtimeDirectory = [string]$runtimeReceipt.runtimeClosure.rootPath
     $arguments = @('-NoLogo','-NoProfile','-NonInteractive','-File',(Join-Path $PSScriptRoot 'setup-agent-environment.ps1'),'-Canonical',$(if ($Prepare) { '-Prepare' } else { '-Offline' }),'-ExpectedCommit',$ExpectedCommit,'-ArchivePath',$archive,'-RuntimeReceiptPath',$verifiedRuntimeReceiptPath)
-    $child = Invoke-PlatformPreparationCommand -Command $layout.RuntimeExecutable -Arguments $arguments -Environment (Get-AgentEnvironmentSetupChildEnvironment $layout.RuntimeDirectory $userHome) -WorkingDirectory $layout.SetupRoot -TimeoutMilliseconds 1800000
+    $child = Invoke-PlatformPreparationCommand -Command $runtimeExecutable -Arguments $arguments -Environment (Get-AgentEnvironmentSetupChildEnvironment $runtimeDirectory $userHome) -WorkingDirectory $layout.SetupRoot -TimeoutMilliseconds 1800000
     if (-not [string]::IsNullOrWhiteSpace([string]$child.stderr)) { Write-SetupDiagnostic ('canonical stage: ' + (ConvertTo-AgentEnvironmentSetupSanitizedText ([string]$child.stderr).Trim() $userHome)) }
     $childLines = @(([string]$child.stdout).Split("`n") | ForEach-Object { $_.TrimEnd("`r") } | Where-Object { $_.Length -gt 0 })
     if ($childLines.Count -ne 1) { throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed 'The canonical stage did not return exactly one JSON line.') }
@@ -335,7 +358,7 @@ try {
         $recoverCommand = if ($null -ne $childResult.PSObject.Properties['recoverCommand']) { [string]$childResult.recoverCommand } else { $null }
         throw (New-AgentEnvironmentSetupRefusal $childCode 'The canonical stage refused.' $recoverCommand)
     }
-    if ([string]$childResult.stage -cne 'canonical' -or $childResult.processPathVerified -isnot [bool] -or -not $childResult.processPathVerified -or [string]$childResult.powerShellVersion -cne $asset.Version -or [string]$childResult.codexHome -cne '~/.codex' -or [string]$childResult.executablePath -cne (ConvertTo-AgentEnvironmentSetupHomePath $layout.RuntimeExecutable $userHome)) {
+    if ([string]$childResult.stage -cne 'canonical' -or $childResult.processPathVerified -isnot [bool] -or -not $childResult.processPathVerified -or [string]$childResult.powerShellVersion -cne $asset.Version -or [string]$childResult.codexHome -cne '~/.codex' -or [string]$childResult.executablePath -cne (ConvertTo-AgentEnvironmentSetupHomePath $runtimeExecutable $userHome)) {
         throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed 'The canonical stage evidence does not match the pinned runtime.')
     }
 
@@ -343,7 +366,7 @@ try {
         version = [string]$runtimeReceipt.version
         assetName = [string]$runtimeReceipt.assetName
         archiveSha256 = [string]$runtimeReceipt.archiveSha256
-        executablePath = (ConvertTo-AgentEnvironmentSetupHomePath $layout.RuntimeExecutable $userHome)
+        executablePath = (ConvertTo-AgentEnvironmentSetupHomePath $runtimeExecutable $userHome)
         executableSha256 = [string]$runtimeReceipt.executableSha256
         runtimeClosureSha256 = [string]$runtimeReceipt.runtimeClosure.sha256
         processPathVerified = [bool]$childResult.processPathVerified

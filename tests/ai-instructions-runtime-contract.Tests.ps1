@@ -792,6 +792,43 @@ Describe 'AI instructions runtime contracts' {
         { Assert-AiInstructionsRuntimeBundleV3 -Bundle $fixture.Bundle -Configuration $configurationV5 -RuntimeRoot $fixture.Root } | Should Not Throw
     }
 
+    # Scenario: The checked-in v3 example is compared directly with the current manifest and canonical repository files, then one copied per-file hash is changed.
+    # Purpose: H7 prevents fixture regeneration from hiding a stale per-file hash, manifestSha256, or inventorySha256 in the checked-in example.
+    It 'UnitT99a_binds_every_checked_in_runtime_bundle_v3_example_hash_to_the_actual_files' {
+        $examplePath = Join-Path $script:RepositoryRoot 'catalog\examples\runtime-bundle-v3.example.json'
+        $manifestPath = Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psd1'
+        $catalogPath = Join-Path $script:RepositoryRoot 'catalog\skills-catalog.json'
+        $manifest = Import-PowerShellDataFile -LiteralPath $manifestPath
+        $example = Get-Content -Raw -Encoding UTF8 -LiteralPath $examplePath | ConvertFrom-Json
+        $expectedPaths = @('catalog/skills-catalog.json') + @($manifest.FileList | ForEach-Object { [string]$_ })
+
+        $assertDirectAnchors = {
+            param($Bundle)
+            $actualPaths = [string[]]@($Bundle.inventory | ForEach-Object { [string]$_.path })
+            [Array]::Sort($actualPaths,[StringComparer]::Ordinal)
+            $sortedExpected = [string[]]@($expectedPaths)
+            [Array]::Sort($sortedExpected,[StringComparer]::Ordinal)
+            if (($actualPaths -join "`n") -cne ($sortedExpected -join "`n")) { throw 'The checked-in v3 example inventory paths differ from the manifest closure.' }
+            foreach ($entry in @($Bundle.inventory)) {
+                $actualPath = if ([string]$entry.path -ceq 'catalog/skills-catalog.json') {
+                    $catalogPath
+                } else {
+                    Join-Path $script:RepositoryRoot ('scripts/' + [string]$entry.path)
+                }
+                $actualHash = Get-TestCanonicalTextSha256 -Path $actualPath
+                if ([string]$entry.sha256 -cne $actualHash) { throw "The checked-in v3 example hash is stale for '$([string]$entry.path)'." }
+            }
+            $manifestHash = Get-TestCanonicalTextSha256 -Path $manifestPath
+            if ([string]$Bundle.platformRuntime.manifestSha256 -cne $manifestHash) { throw 'The checked-in v3 example manifestSha256 is stale.' }
+            if ([string]$Bundle.inventorySha256 -cne (Get-TestOrdinalRuntimeInventorySha256 -Inventory @($Bundle.inventory))) { throw 'The checked-in v3 example inventorySha256 is stale.' }
+        }
+
+        { & $assertDirectAnchors $example } | Should Not Throw
+        $negative = $example | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+        $negative.inventory[0].sha256 = '0' * 64
+        { & $assertDirectAnchors $negative } | Should Throw
+    }
+
     # Scenario: The runtime-contract module has a fixed expected platform runtime API surface.
     # Purpose: Keep the runtime bundle validator's API allowlist synchronized with the checked-in manifest.
     It 'UnitT103_keeps_expected_platform_runtime_exports_in_sync_with_the_manifest' {

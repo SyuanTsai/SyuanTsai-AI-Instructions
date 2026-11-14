@@ -1231,6 +1231,7 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
         }
 
         private static uint EffectiveUid() { return Mac ? Darwin.geteuid() : Linux.geteuid(); }
+        public static uint GetEffectiveUserId() { ValidateAbi(); return EffectiveUid(); }
 
         private static void ChangeOwnership(SafeFd fd, uint uid, uint gid, string operation)
         {

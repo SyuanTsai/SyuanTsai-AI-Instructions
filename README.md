@@ -325,14 +325,23 @@ sh scripts/setup-agent-environment.sh --expected-commit <同一個 SHA> --prepar
 sh scripts/setup-agent-environment.sh --expected-commit <同一個 SHA> --offline
 ```
 
-- `--prepare`：允許網路。依 `scripts/setup-agent-environment.policy.tsv`（由 `setup-agent-environment.policy.json` 衍生）只以 https、TLS 1.2 以上與逾時限制下載官方 PowerShell 7.6.6 release asset，驗證 pinned SHA-256 後以 `0600` 放入 cache；第一次會把 canonical pwsh 展開到 setup root，之後重跑只重驗，不重新安裝。結果為 `prepared-runtime-only`。
+- `--prepare`：允許網路。依 `scripts/setup-agent-environment.policy.tsv`（由 `setup-agent-environment.policy.json` 衍生）只以 https、TLS 1.2 以上與逾時限制下載官方 PowerShell 7.6.6 release asset。下載、雜湊與解壓只使用本次執行的私有 snapshot；取得 setup lock 後才以 WAL 發布 `0600` shared cache。第一次會發布一個不可預測、create-only 的 canonical pwsh 目錄，之後重跑只重驗 receipt 指向的目錄，不重新安裝。結果為 `prepared-runtime-only`。
 - `--offline`：不連網，只讀 cache 並重驗既有 canonical pwsh；cache 必須是目前 uid 擁有、link count 1、`0600` 的一般檔案。Setup 會以 no-follow 方式複製到本次 private temp snapshot，後續 hash、解壓與 PowerShell handoff 只使用該 snapshot。cache 缺少、metadata／hash 不符或尚未 `--prepare` 都會以 typed exit code 失敗，不做任何更新。結果為 `verified-runtime-only`。
-- Setup root 固定為 `$HOME/.local/share/ai-instructions-setup`（不讀 XDG）：`cache/` 放已驗證的 archive，`pwsh/<version>-<rid>/` 放 canonical pwsh，`receipts/` 放 `runtime-<version>-<rid>.json` 與 `setup-receipt.json`（`0600`），`tmp/` 只放本次執行的暫存，結束時由 `trap` 清除。重驗失敗時 fail closed，不會自動重裝；同時執行時以 setup lock 序列化，被占用時回 `concurrent`，結束時不持有 lock。
+- Setup root 固定為 `$HOME/.local/share/ai-instructions-setup`（不讀 XDG）：`cache/` 放已驗證的 archive，`pwsh/<version>-<rid>-<random>/` 放 immutable canonical pwsh attempt，`receipts/runtime-<version>-<rid>.json` 是唯一 current pointer，另有 `setup-receipt.json`（`0600`）。`tmp/run.<pid>.<random>/` 只屬於單次執行；結束時只會 best-effort 移除本次已知檔案與空目錄，不遞迴刪除、掃描或接管舊 tmp tree。強制終止可能留下私有 tmp 或未被 receipt 指向的 runtime orphan；此過渡 setup 只供一次性可拋棄 cloud HOME 使用，必要時直接丟棄整個環境，不要用自動清理猜測 ownership。重驗失敗時 fail closed，不會自動重裝；同時執行時以 setup lock 序列化，被占用時回 `concurrent`，結束時不持有 lock。
 - Receipt 同時以單行 JSON 輸出到 stdout，欄位含 `schemaVersion`、`result`、`code`、`exitCode`、OS／architecture／RID、`setupCommit`、`runtimeCommit`（P10a 固定為 `null`）、policy hash、pwsh 路徑與 version、.NET version、capability 名稱與狀態，以及 S5～S9 步驟狀態。路徑一律寫成 `~/...`，不含使用者名稱、token 或 site。
 - `CODEX_HOME` 只在 setup 的 process scope 設為 `~/.codex`；外部已設成其他值時回 `codex-home-conflict`。`CODEX_HOME` 或 `$HOME` 下若有中斷的 install／agent-environment transaction，setup 回 `interrupted-install` 並附上 recover 指令，不會自動 recover。Setup 自己在 publication swap 留下的 durable journal 則會在取得 setup lock 後依 recorded state 安全完成或回復；無法證明狀態時同樣 fail closed。
 - Windows 也可直接執行 `pwsh -NoProfile -NonInteractive -File scripts/setup-agent-environment.ps1 -Prepare|-Offline -ExpectedCommit <SHA> -ArchivePath <本機 zip>`。zip 必須是 policy 指定的官方 asset（例如 `PowerShell-7.6.6-win-x64.zip`），由使用者自行從 PowerShell 官方 GitHub release 下載；policy 就是同一個 commit 的 `scripts/setup-agent-environment.policy.json`，setup 會驗證檔名與 SHA-256。
 
-手動持久化（D4）：setup 不會修改 `~/.profile` 等 shell profile，也不寫入任何 Atlassian／Datadog／Jira 設定。需要在新的 shell 沿用時，請自行決定是否在個人 profile 中設定 `CODEX_HOME="$HOME/.codex"`。Receipt 內的路徑是 `~/...`，不是可直接傳給程序的絕對路徑；使用前必須以目前的 `$HOME` 展開，例如 `receipt_pwsh='~/.local/share/ai-instructions-setup/pwsh/7.6.6-linux-x64/pwsh'; pwsh_path="$HOME/${receipt_pwsh#~/}"; "$pwsh_path" -NoProfile`。
+Runtime 發布的 crash-state 契約如下；任何狀態都不會回收或覆寫已發布的 runtime 目錄：
+
+| 中斷點 | 可見狀態 | 下一次持鎖執行 |
+|---|---|---|
+| private stage 建立前 | 沒有 runtime attempt | 建立全新的 attempt |
+| stage 完整、unique runtime rename 前 | 只有私有 stage／tmp（可能成為 orphan） | 建立全新的 attempt；不掃描舊 tmp，也不使用未收據化 stage |
+| unique runtime rename 後、pointer receipt 前 | 未被引用的 immutable runtime orphan | 保留 orphan，建立新 attempt，再發布 receipt |
+| pointer receipt 發布後 | receipt 唯一命名 current runtime | 僅重驗 receipt 指向的目錄；失敗即拒絕 |
+
+手動持久化（D4）：setup 不會修改 `~/.profile` 等 shell profile，也不寫入任何 Atlassian／Datadog／Jira 設定。需要在新的 shell 沿用時，請自行決定是否在個人 profile 中設定 `CODEX_HOME="$HOME/.codex"`。Receipt 內的路徑是 `~/...`，不是可直接傳給程序的絕對路徑；必須讀取 `runtime-<version>-<rid>.json` 的 `executablePath`，再以目前的 `$HOME` 展開；不可自行推導含 random attempt ID 的路徑。
 
 已知限制：
 
@@ -361,7 +370,7 @@ Typed exit code（shell 與 PowerShell 共用，定義在 `scripts/agent-environ
 | 19 | `archive-unsafe` | archive 含 link、裝置、絕對路徑或 traversal 成員 |
 | 20 | `cache-missing` | 已驗證的 archive cache 不存在 |
 | 21 | `runtime-missing` | `--offline` 時尚未 `--prepare` 過 canonical pwsh |
-| 22 | `runtime-incomplete` | canonical pwsh 目錄與 runtime receipt 不完整 |
+| 22 | `runtime-incomplete` | 持鎖期間預期的 runtime pointer receipt 遺失或發生 create-only publication 衝突 |
 | 23 | `runtime-verification-failed` | canonical pwsh 準備或重驗失敗（不自動重裝） |
 | 24 | `runtime-baseline-unavailable` | 不是 PowerShell 7 加 .NET 8 以上 |
 | 25 | `capability-unavailable` | 必要的 platform capability 不可用 |
@@ -383,14 +392,23 @@ sh scripts/setup-agent-environment.sh --expected-commit <same SHA> --prepare
 sh scripts/setup-agent-environment.sh --expected-commit <same SHA> --offline
 ```
 
-- `--prepare` may use the network. It downloads the official PowerShell 7.6.6 release asset named by `scripts/setup-agent-environment.policy.tsv` (derived from `setup-agent-environment.policy.json`) over https with TLS 1.2+ and timeouts, verifies the pinned SHA-256 and caches it with mode `0600`. The first run expands the canonical pwsh into the setup root; reruns only re-verify it and never reinstall. Result: `prepared-runtime-only`.
+- `--prepare` may use the network. It downloads the official PowerShell 7.6.6 release asset named by `scripts/setup-agent-environment.policy.tsv` (derived from `setup-agent-environment.policy.json`) over https with TLS 1.2+ and timeouts. Downloading, hashing and extraction use only a private per-run snapshot; the `0600` shared cache is published through the WAL only after setup-lock acquisition. The first run publishes an unpredictable create-only canonical pwsh directory; reruns only re-verify the receipt-named directory and never reinstall. Result: `prepared-runtime-only`.
 - `--offline` never uses the network. The cache must be a regular file owned by the current uid, with link count 1 and mode `0600`. Setup makes a no-follow copy into its private per-run temp snapshot; all subsequent hashing, extraction and PowerShell handoff use only that snapshot. A missing cache, invalid metadata, a hash mismatch or a missing `--prepare` is a typed failure with no update. Result: `verified-runtime-only`.
-- The setup root is fixed at `$HOME/.local/share/ai-instructions-setup` (XDG is not read): `cache/` holds verified archives, `pwsh/<version>-<rid>/` the canonical pwsh, `receipts/` holds `runtime-<version>-<rid>.json` and `setup-receipt.json` (`0600`), and `tmp/` only per-run temporary data removed by a `trap`. A failed re-verification fails closed without reinstalling. Concurrent runs are serialized by the setup lock and a busy lock returns `concurrent`; no lock is held after exit.
+- The setup root is fixed at `$HOME/.local/share/ai-instructions-setup` (XDG is not read): `cache/` holds verified archives, `pwsh/<version>-<rid>-<random>/` immutable canonical pwsh attempts, and `receipts/runtime-<version>-<rid>.json` is the only current pointer alongside `setup-receipt.json` (`0600`). `tmp/run.<pid>.<random>/` belongs only to one invocation; the exit trap best-effort removes known files and empty directories from that invocation, but never recursively deletes, scans or adopts an older tmp tree. Forced termination can leave private tmp or a runtime orphan not named by a receipt. This transitional setup is only for a single-use disposable cloud HOME: discard the environment when needed instead of guessing ownership during automated cleanup. A failed re-verification fails closed without reinstalling. Concurrent runs are serialized by the setup lock and a busy lock returns `concurrent`; no lock is held after exit.
 - The receipt is also printed to stdout as one JSON line with `schemaVersion`, `result`, `code`, `exitCode`, OS/architecture/RID, `setupCommit`, `runtimeCommit` (always `null` in P10a), the policy hash, pwsh path and version, .NET version, capability names and statuses, and the S5-S9 step states. Paths are always `~/...`; no user name, token or site is recorded.
 - `CODEX_HOME` is set to `~/.codex` for the setup process scope only; a different pre-set value returns `codex-home-conflict`. An interrupted install or agent-environment transaction under `CODEX_HOME` or `$HOME` returns `interrupted-install` with a recover command; setup never recovers those external transactions automatically. A durable journal left by setup's own publication swap is safely completed or rolled back under the setup lock according to its recorded state; an unprovable state still fails closed.
 - On Windows run `pwsh -NoProfile -NonInteractive -File scripts/setup-agent-environment.ps1 -Prepare|-Offline -ExpectedCommit <SHA> -ArchivePath <local zip>`. The zip must be the official asset named by the policy (for example `PowerShell-7.6.6-win-x64.zip`), downloaded by the user from the official PowerShell GitHub release; the policy is `scripts/setup-agent-environment.policy.json` at the same commit, and setup verifies the file name and SHA-256.
 
-Manual persistence (D4): setup never edits shell profiles such as `~/.profile` and never writes Atlassian, Datadog or Jira settings. To reuse the environment in a new shell, decide yourself whether to set `CODEX_HOME="$HOME/.codex"` in your personal profile. Receipt paths are `~/...`, not absolute paths that can be passed directly to a process; expand them with the current `$HOME` first, for example: `receipt_pwsh='~/.local/share/ai-instructions-setup/pwsh/7.6.6-linux-x64/pwsh'; pwsh_path="$HOME/${receipt_pwsh#~/}"; "$pwsh_path" -NoProfile`.
+Runtime publication has the following crash-state contract; no state reclaims or overwrites a published runtime directory:
+
+| Interruption point | Visible state | Next lock holder |
+|---|---|---|
+| Before private-stage creation | No runtime attempt | Creates a fresh attempt |
+| Stage complete, before the unique runtime rename | Private stage/tmp only (possibly orphaned) | Creates a fresh attempt; does not scan old tmp or use an unreceipted stage |
+| After the unique runtime rename, before pointer receipt | Unreferenced immutable runtime orphan | Preserves the orphan, creates a fresh attempt, then publishes the receipt |
+| After pointer receipt publication | Receipt uniquely names the current runtime | Re-verifies only that directory; any failure refuses |
+
+Manual persistence (D4): setup never edits shell profiles such as `~/.profile` and never writes Atlassian, Datadog or Jira settings. To reuse the environment in a new shell, decide yourself whether to set `CODEX_HOME="$HOME/.codex"` in your personal profile. Receipt paths are `~/...`, not absolute paths that can be passed directly to a process. Read `executablePath` from `runtime-<version>-<rid>.json` and expand it with the current `$HOME`; never derive the path containing the random attempt ID yourself.
 
 Known limitations:
 
@@ -419,7 +437,7 @@ Typed exit codes (shared by the shell and PowerShell entry points, defined in `s
 | 19 | `archive-unsafe` | The archive has a link, device, absolute or traversal member |
 | 20 | `cache-missing` | The verified archive cache is missing |
 | 21 | `runtime-missing` | `--offline` without a prepared canonical pwsh |
-| 22 | `runtime-incomplete` | The canonical pwsh directory and runtime receipt are incomplete |
+| 22 | `runtime-incomplete` | The expected runtime pointer receipt disappeared under the lock, or create-only publication conflicted |
 | 23 | `runtime-verification-failed` | Preparing or re-verifying the canonical pwsh failed (no automatic reinstall) |
 | 24 | `runtime-baseline-unavailable` | Not PowerShell 7 on .NET 8 or later |
 | 25 | `capability-unavailable` | A required platform capability is unavailable |

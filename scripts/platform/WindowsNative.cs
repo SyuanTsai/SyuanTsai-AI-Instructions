@@ -9,6 +9,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Security.Cryptography;
 using System.Security.AccessControl;
+using System.Security.Principal;
 using Microsoft.Win32.SafeHandles;
 
 namespace SyuanTsai.AIInstructions.PlatformRuntime
@@ -320,6 +321,22 @@ namespace SyuanTsai.AIInstructions.PlatformRuntime
                 PublicationDaclReadbackSddlTestOverride = null;
                 if (!String.IsNullOrEmpty(readbackOverride)) sddl = readbackOverride;
                 return new WindowsPermissions { Sddl = sddl, ReadOnly = (observed.Mode & 1) != 0 };
+            }
+        }
+        public static string GetOwnerSid(WindowsLease lease)
+        {
+            lock (lease.Sync)
+            {
+                AssertIdentity(lease, lease.Observation, lease.Observation.Kind == "file");
+                IntPtr owner, group, dacl, sacl, descriptor;
+                uint error = GetSecurityInfo(lease.Handle, 1, 1, out owner, out group, out dacl, out sacl, out descriptor);
+                if (error != 0) throw new PlatformWin32Exception("GetSecurityInfo(owner)", (int)error);
+                try
+                {
+                    if (owner == IntPtr.Zero) throw new IOException("The object has no owner SID.");
+                    return new SecurityIdentifier(owner).Value;
+                }
+                finally { LocalFree(descriptor); }
             }
         }
         public static WindowsPermissions GetInheritedFilePermissions(WindowsLease parent)
