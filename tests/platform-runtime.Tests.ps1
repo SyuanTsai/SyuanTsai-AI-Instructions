@@ -2596,6 +2596,43 @@ Describe 'Platform runtime contract' {
         }
     }
 
+    # Scenario: Unix optional leaf parameters receive null or empty input through PowerShell binding on any host.
+    # Purpose: Preserve null through the shared adapter and retain leaf validation after removing string type constraints.
+    It 'UnitT33_preserves_null_for_unix_optional_leaf_parameters' {
+        $unixPath = Join-Path $script:RepositoryRoot 'scripts/platform/Unix.psm1'
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($unixPath,[ref]$tokens,[ref]$errors)
+        @($errors).Count | Should Be 0
+        foreach($case in @(
+            @{Function='Publish-UnixPlatformFile';Parameter='DisplacedLeaf'},
+            @{Function='Remove-UnixPlatformOwnedFile';Parameter='TombstoneLeaf'},
+            @{Function='Assert-UnixJournalBinding';Parameter='DisplacedLeaf'}
+        )) {
+            $function = $ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $case.Function},$true)
+            $parameter = @($function.Body.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -ceq $case.Parameter })
+            $parameter.Count | Should Be 1
+            $parameter[0].StaticType | Should Be ([object])
+            $normalizer = @($function.Body.FindAll({param($node)
+                $node -is [Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -ceq 'ConvertTo-UnixOptionalLeaf' -and
+                @($node.CommandElements | Where-Object { $_ -is [Management.Automation.Language.VariableExpressionAst] -and $_.VariablePath.UserPath -ceq $case.Parameter }).Count -eq 1
+            },$true))
+            $normalizer.Count | Should Be 1
+        }
+
+        $helper = $ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'ConvertTo-UnixOptionalLeaf'},$true)
+        $helper | Should Not BeNullOrEmpty
+        $module = New-Module -ScriptBlock ([scriptblock]::Create("$($helper.Extent.Text)`nExport-ModuleMember -Function ConvertTo-UnixOptionalLeaf"))
+        try {
+            $command = $module.ExportedCommands['ConvertTo-UnixOptionalLeaf']
+            (& $command $null) | Should BeNullOrEmpty
+            (& $command '') | Should BeNullOrEmpty
+            (& $command 123) | Should Be '123'
+        }
+        finally { $module | Remove-Module -Force -ErrorAction SilentlyContinue }
+    }
+
     # Scenario: Every reviewed entry point carries its own platform-runtime manifest trust anchor.
     # Purpose: Keep all independent pins synchronized with the canonical manifest before executable code is imported.
     It 'UnitT35_keeps_platform_runtime_entry_pins_synchronized' {
@@ -3618,8 +3655,8 @@ Describe 'Unix P7c durable publication and removal' {
         }
         function New-P7cJournalOperation {
             param(
-                [string]$TargetRelativePath,[string]$Kind,[string]$Method,[AllowNull()][string]$StageLeaf,
-                [AllowNull()][string]$BackupLeaf,$Original,$Applied,[AllowNull()]$Permissions
+                [string]$TargetRelativePath,[string]$Kind,[string]$Method,[AllowNull()]$StageLeaf,
+                [AllowNull()]$BackupLeaf,$Original,$Applied,[AllowNull()]$Permissions
             )
             $operation=[pscustomobject][ordered]@{
                 sequence=1;kind=$Kind;method=$Method;targetRelativePath=$TargetRelativePath
@@ -3667,6 +3704,48 @@ Describe 'Unix P7c durable publication and removal' {
             (Get-PlatformPermissions $published).mode|Should Be '600';$receipt.displacedIdentity|Should BeNullOrEmpty
             (@($receipt.completedSteps)-contains 'destination-preflight')|Should Be $true
         } finally {if($null-ne$published){$published.Dispose()};if($null-ne$stage){$stage.Dispose()};$txn.Lease.Dispose();$parent.Dispose()}
+    }
+
+    # Scenario: Absent Unix targets are published with DisplacedLeaf omitted or explicitly null.
+    # Purpose: Both caller forms preserve null instead of binding it to an empty string and rejecting create-file publication.
+    It 'InterT506_publishes_absent_unix_targets_with_omitted_or_null_displaced_leaf' {
+        foreach($variant in @('omitted','null')) {
+            $parent=New-P7cDirectory "create-null-$variant";$txn=New-P7cTransaction;$stage=$null;$published=$null
+            try {
+                $stage=New-P7cFile $txn.Lease stage $variant;$arguments=@{ParentLease=$parent;Leaf='target';TransactionLease=$txn.Lease;StageLease=$stage;ExpectedState=(Get-P7cAbsentState);ExpectedStage=(Get-P7cStageState $stage)}
+                if($variant -ceq 'null'){$arguments.DisplacedLeaf=$null}
+                $receipt=Publish-PlatformFile @arguments
+                $published=Open-PlatformFile -ParentLease $parent -Leaf target -Access Read -CreateMode OpenExisting
+                (Read-P7cText $parent target)|Should Be $variant
+                $receipt.displacedLeaf|Should BeNullOrEmpty
+            } finally {if($null-ne$published){$published.Dispose()};if($null-ne$stage){$stage.Dispose()};$txn.Lease.Dispose();$parent.Dispose()}
+        }
+    }
+
+    # Scenario: NoReplace publishes an absent target, then a raced destination appears before a second publication.
+    # Purpose: Null displacement supports create-only publication while native no-replace still preserves an existing destination.
+    It 'InterT507_preserves_noreplace_race_rejection_for_absent_unix_targets' {
+        $parent=New-P7cDirectory 'create-noreplace';$firstTxn=New-P7cTransaction;$secondTxn=New-P7cTransaction;$firstStage=$null;$secondStage=$null
+        try {
+            $firstStage=New-P7cFile $firstTxn.Lease stage 'first'
+            Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $firstTxn.Lease -StageLease $firstStage -ExpectedState (Get-P7cAbsentState) -NoReplace -ExpectedStage (Get-P7cStageState $firstStage)|Out-Null
+            $secondStage=New-P7cFile $secondTxn.Lease stage 'second'
+            {Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $secondTxn.Lease -StageLease $secondStage -ExpectedState (Get-P7cAbsentState) -DisplacedLeaf $null -NoReplace -ExpectedStage (Get-P7cStageState $secondStage)}|Should Throw
+            (Read-P7cText $parent target)|Should Be 'first'
+            (Read-P7cText $secondTxn.Lease stage)|Should Be 'second'
+        } finally {foreach($lease in @($secondStage,$firstStage)){if($null-ne$lease){$lease.Dispose()}};$secondTxn.Lease.Dispose();$firstTxn.Lease.Dispose();$parent.Dispose()}
+    }
+
+    # Scenario: A create-file journal binds backupLeaf=null to a publication for an absent Unix target.
+    # Purpose: Journal binding compares null to null and permits the durable create-file operation.
+    It 'InterT508_accepts_null_backup_leaf_in_unix_create_file_journal' {
+        $parent=New-P7cDirectory 'journal-null';$txn=New-P7cTransaction;$stage=$null
+        try {
+            $stage=New-P7cFile $txn.Lease stage 'journal-created';$stageState=Get-P7cStageState $stage
+            $operation=New-P7cJournalOperation -TargetRelativePath 'journal-null/target' -Kind create-file -Method stage-rename -StageLeaf stage -BackupLeaf $null -Original (Get-P7cAbsentState) -Applied (New-P7cAppliedState $stageState) -Permissions $null
+            Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState (Get-P7cAbsentState) -DisplacedLeaf $null -ExpectedStage $stageState -Journal $operation|Out-Null
+            (Read-P7cText $parent target)|Should Be 'journal-created'
+        } finally {if($null-ne$stage){$stage.Dispose()};$txn.Lease.Dispose();$parent.Dispose()}
     }
 
     # Scenario: Expected hash, length, or identity differs from the current target.
@@ -3762,6 +3841,23 @@ Describe 'Unix P7c durable publication and removal' {
             (@($cleanup.completedSteps)-contains 'destination-preflight')|Should Be $true
             {Remove-PlatformOwnedFile -ParentLease $parent -Leaf target -ExpectedState $state -TransactionLease $parent -TombstoneLeaf target}|Should Throw
         }finally{foreach($lease in @($tombstone,$target)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$parent.Dispose()}
+    }
+
+    # Scenario: Cleanup omits both optional tombstone arguments, while callers also try supplying only one member of the pair.
+    # Purpose: Null binding reaches cleanup-unlinkat, but incomplete tombstone authority remains rejected.
+    It 'InterT532_cleans_unix_transaction_files_only_when_tombstone_arguments_are_both_omitted' {
+        $txn=New-P7cTransaction;$cleanupFile=$null;$guardFile=$null
+        try {
+            $cleanupFile=New-P7cFile $txn.Lease cleanup 'cleanup';$cleanupState=Get-P7cState $cleanupFile;$cleanupFile.Dispose();$cleanupFile=$null
+            $receipt=Remove-PlatformOwnedFile -ParentLease $txn.Lease -Leaf cleanup -ExpectedState $cleanupState
+            $receipt.method|Should Be 'cleanup-unlinkat';$receipt.deleted|Should Be $true
+            Test-Path -LiteralPath (Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/cleanup")|Should Be $false
+
+            $guardFile=New-P7cFile $txn.Lease guard 'guard';$guardState=Get-P7cState $guardFile;$guardFile.Dispose();$guardFile=$null
+            {Remove-PlatformOwnedFile -ParentLease $txn.Lease -Leaf guard -ExpectedState $guardState -TransactionLease $txn.Lease}|Should Throw
+            {Remove-PlatformOwnedFile -ParentLease $txn.Lease -Leaf guard -ExpectedState $guardState -TombstoneLeaf tombstone}|Should Throw
+            (Read-P7cText $txn.Lease guard)|Should Be 'guard'
+        } finally {foreach($lease in @($guardFile,$cleanupFile)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose()}
     }
 
     }

@@ -46,6 +46,14 @@ function Get-UnixContractValue {
     return $null
 }
 
+function ConvertTo-UnixOptionalLeaf {
+    param([AllowNull()] $Value)
+    if ($null -eq $Value) { return $null }
+    $leaf = [string]$Value
+    if ([string]::IsNullOrEmpty($leaf)) { return $null }
+    return $leaf
+}
+
 function ConvertFrom-UnixIdentityNumber {
     param([Parameter(Mandatory=$true)] $Value,[Parameter(Mandatory=$true)][string] $Name)
     if ($Value -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$Value)) { throw [ArgumentException]::new("$Name must be a journal identity string.") }
@@ -198,13 +206,14 @@ function Assert-UnixJournalBackupIdentity {
 function Assert-UnixJournalBinding {
     param(
         $Journal,$ParentLease,$TransactionLease,[string]$Leaf,$StageLease,
-        [AllowNull()][string]$DisplacedLeaf,$ExpectedState,$ExpectedStage,[switch]$Remove
+        [AllowNull()]$DisplacedLeaf,$ExpectedState,$ExpectedStage,[switch]$Remove
     )
     if ($null -eq $Journal) {
         return [pscustomobject]@{ hasPermissions=$false; mode=[uint32]0; uid=[uint64]0; gid=[uint64]0 }
     }
 
     try {
+        $DisplacedLeaf = ConvertTo-UnixOptionalLeaf $DisplacedLeaf
         Assert-UnixJournalOperationShape -Journal $Journal
         $capability=if($Remove){'owned-file-removal'}else{'publication'}
         $relative = Get-UnixContractValue $Journal targetRelativePath -Required
@@ -344,13 +353,13 @@ function Publish-UnixPlatformFile {
     param(
         [Parameter(Mandatory=$true)] $ParentLease,[Parameter(Mandatory=$true)][string] $Leaf,
         [Parameter(Mandatory=$true)] $TransactionLease,[Parameter(Mandatory=$true)] $StageLease,
-        [Parameter(Mandatory=$true)] $ExpectedState,[AllowNull()][string] $DisplacedLeaf,
+        [Parameter(Mandatory=$true)] $ExpectedState,[AllowNull()] $DisplacedLeaf,
         [Parameter(Mandatory=$true)] $ExpectedStage,[switch] $NoReplace,
         $Journal
     )
     Assert-UnixPlatformHost publication | Out-Null
-    if ([string]::IsNullOrEmpty($DisplacedLeaf)) { $DisplacedLeaf=$null }
     try {
+        $DisplacedLeaf = ConvertTo-UnixOptionalLeaf $DisplacedLeaf
         [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($Leaf)
         $journalStore=[StringComparer]::OrdinalIgnoreCase.Equals($Leaf,'journal.json') -and [object]::ReferenceEquals($ParentLease,$TransactionLease)
         if($journalStore -and $PSBoundParameters.ContainsKey('Journal')){throw [ArgumentException]::new('Journal store publication must not supply Journal.')}
@@ -411,11 +420,11 @@ function Remove-UnixPlatformOwnedFile {
     param(
         [Parameter(Mandatory=$true)] $ParentLease,[Parameter(Mandatory=$true)][string] $Leaf,
         [Parameter(Mandatory=$true)] $ExpectedState,$TransactionLease,
-        [AllowNull()][string] $TombstoneLeaf,$Journal
+        [AllowNull()] $TombstoneLeaf,$Journal
     )
     Assert-UnixPlatformHost owned-file-removal | Out-Null
-    if ([string]::IsNullOrEmpty($TombstoneLeaf)) { $TombstoneLeaf=$null }
     try {
+        $TombstoneLeaf = ConvertTo-UnixOptionalLeaf $TombstoneLeaf
         [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($Leaf)
         $tombstone=($null -ne $TransactionLease -and $null -ne $TombstoneLeaf)
         if (($null -ne $TransactionLease) -ne ($null -ne $TombstoneLeaf)) {
