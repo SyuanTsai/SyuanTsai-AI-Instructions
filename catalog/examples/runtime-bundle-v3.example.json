@@ -4,12 +4,12 @@
   "commit": "89abcdef0123456789abcdef0123456789abcdef",
   "acquisition": "github-codeload",
   "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "inventorySha256": "c79bb8f85dee30ad200f6c6c6687e71188c86e8daa95085bb70c940f0ea29989",
+  "inventorySha256": "6c03728463a82a40da3b8b187d7c748e68c60e2aaab2118012dfe947701d8436",
   "inventory": [
     { "path": "Resolve-StandardValidationTool.ps1", "sha256": "c0d68b227fc04e19d710a89c4559fe45e0cc979eead846006261dc2dc5bfa14f" },
     { "path": "catalog/skills-catalog.json", "sha256": "68bb03240261d1a94479d41d640ae16dab6064dd0d591f04e8164883783650e3" },
     { "path": "installer-safe-mutation.psm1", "sha256": "dc031edcc2f48968df83cd68ad52eacb7f7b05d3ca6a0cc622658cf6151c8293" },
-    { "path": "platform-runtime.psd1", "sha256": "0c4d34727feaec586f75cda3ecdc57934af10287942ea290c121b649173441c4" },
+    { "path": "platform-runtime.psd1", "sha256": "8e1e3669d66182b5abb24e76b8142202853a7d52d12e89a662993de0717e35ff" },
     { "path": "platform-runtime.psm1", "sha256": "a79e48e45ce88b10cdf63ab0052820bbcb64d9c0f3ba39aaf2caedb6dd6fc1ef" },
     { "path": "WindowsDacl.psm1", "sha256": "ffa1f85d94bb6bce9bf8353f8c7733bdbe59880a3d0d075191938cc28aebb5f6" },
     { "path": "platform/Linux.psm1", "sha256": "52c261d577ee7b3946771d1112030996896fdd119e06ac3849e430a3d56fb38c" },
@@ -28,7 +28,7 @@
   "platform": { "os": "windows", "architecture": "x64" },
   "platformRuntime": {
     "apiVersion": "1.0",
-    "manifestSha256": "0c4d34727feaec586f75cda3ecdc57934af10287942ea290c121b649173441c4",
+    "manifestSha256": "8e1e3669d66182b5abb24e76b8142202853a7d52d12e89a662993de0717e35ff",
     "sourceFingerprint": "db67f1a8e8c8e1376f6b2383bcb6cf8052f97eb43ad0f794c9c680dad15e5532"
   },
   "requiredCapabilities": ["directory-lease", "file-lease", "file-identity", "lock", "publication", "owned-file-removal", "permissions", "directory-publication"],

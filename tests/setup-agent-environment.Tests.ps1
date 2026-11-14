@@ -733,6 +733,45 @@ Describe 'setup-agent-environment Windows native fixture (SYP-354 P10a)' {
             $Run.Lines.Count | Should Be 1
             (@($Run.Json.PSObject.Properties.Name) -join ',') | Should BeExactly (@(Get-AgentEnvironmentSetupReceiptFieldNames) -join ',')
         }
+
+        $script:WinPublicationCrashScript = Join-Path $script:WinRoot 'invoke-publication-crash.ps1'
+        [IO.File]::WriteAllText($script:WinPublicationCrashScript,@'
+param([string]$RuntimeManifest,[string]$SetupModule,[string]$SetupRoot,[string]$Leaf,[string]$PayloadPath)
+Import-Module -Name $RuntimeManifest -DisableNameChecking -Force
+Import-Module -Name $SetupModule -DisableNameChecking -Force
+Publish-AgentEnvironmentSetupFile -SetupRoot $SetupRoot -Directory receipts -Leaf $Leaf -Bytes ([IO.File]::ReadAllBytes($PayloadPath))
+'@,[Text.UTF8Encoding]::new($false))
+
+        function Invoke-WinPublicationCrash {
+            param($Fixture,[string]$Leaf,[string]$Point)
+            $targetPath=Join-Path $Fixture.Layout.ReceiptDirectory $Leaf
+            $payloadPath=Join-Path $script:WinRoot ('publication-payload-'+[guid]::NewGuid().ToString('N'))
+            [IO.File]::WriteAllBytes($payloadPath,[IO.File]::ReadAllBytes($targetPath))
+            $start=[Diagnostics.ProcessStartInfo]::new($script:WinPwsh)
+            foreach($argument in @('-NoLogo','-NoProfile','-NonInteractive','-File',$script:WinPublicationCrashScript,
+                (Join-Path $script:WinRepo 'scripts/platform-runtime.psd1'),(Join-Path $script:WinRepo 'scripts/agent-environment-setup.psm1'),
+                $Fixture.Layout.SetupRoot,$Leaf,$payloadPath)){$start.ArgumentList.Add($argument)}
+            $start.UseShellExecute=$false;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+            $start.Environment['AI_INSTRUCTIONS_SETUP_FAILPOINT']=$Point
+            $start.Environment['AI_INSTRUCTIONS_SETUP_FAILPOINT_LEAF']=$Leaf
+            $process=[Diagnostics.Process]::Start($start)
+            try{
+                $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
+                if(-not $process.WaitForExit(900000)){$process.Kill($true);throw 'Publication crash fixture timed out.'}
+                $process.WaitForExit()
+                return [pscustomobject]@{ExitCode=$process.ExitCode;Stdout=$stdout.Result;Stderr=$stderr.Result}
+            }finally{$process.Dispose();Remove-Item -LiteralPath $payloadPath -Force -ErrorAction SilentlyContinue}
+        }
+
+        function Get-WinPublicationTransactionState {
+            param($Fixture)
+            $store=Join-Path $Fixture.Layout.SetupRoot '.ai-instructions-txn'
+            $transactions=@(Get-ChildItem -LiteralPath $store -Directory -Force)
+            $transactions.Count | Should Be 1
+            $journal=Get-Content -Raw -LiteralPath (Join-Path $transactions[0].FullName 'journal.json') | ConvertFrom-Json
+            $stage=Get-Item -LiteralPath (Join-Path $transactions[0].FullName 'stage')
+            return [pscustomobject]@{Journal=$journal;Stage=$stage}
+        }
     }
 
     AfterAll {
@@ -949,14 +988,75 @@ Describe 'setup-agent-environment Windows native fixture (SYP-354 P10a)' {
         $initial=Invoke-WinSetup $arguments -UserHome $fixture.Home
         Assert-WinSuccessReceipt $initial $fixture 'prepared-runtime-only' 'resolved'
         $runtimeBefore=Get-WinRuntimeSnapshot $fixture
-        foreach($point in @('after-transaction-directory','after-journal-stage','after-journal','after-parent-directory','after-stage','after-rename','after-displaced-cleanup','after-journal-cleanup','after-transaction-cleanup')){
+        foreach($point in @('after-transaction-directory','after-journal-stage','after-journal','after-parent-directory','during-stage-write','after-stage','after-rename','after-displaced-cleanup','after-journal-cleanup','after-transaction-cleanup')){
+            $targetPath=Join-Path $fixture.Layout.ReceiptDirectory 'setup-receipt.json'
+            $targetBefore=[Convert]::ToBase64String([IO.File]::ReadAllBytes($targetPath))
             $crashed=Invoke-WinSetup $arguments -UserHome $fixture.Home -Environment @{AI_INSTRUCTIONS_SETUP_FAILPOINT=$point;AI_INSTRUCTIONS_SETUP_FAILPOINT_LEAF='setup-receipt.json'}
             $crashed.ExitCode | Should Not Be 0
             Test-Path -LiteralPath (Join-Path $fixture.Layout.SetupRoot '.ai-instructions-txn') | Should Be $true
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($targetPath)) | Should BeExactly $targetBefore
+            Assert-WinLockReleased $fixture
+            if($point -ceq 'during-stage-write'){
+                $transaction=Get-WinPublicationTransactionState $fixture
+                $transaction.Stage.Length | Should BeGreaterThan 0
+                $transaction.Stage.Length | Should BeLessThan ([int64]$transaction.Journal.desiredState.length)
+            }
             $recovered=Invoke-WinSetup $arguments -UserHome $fixture.Home
             Assert-WinSuccessReceipt $recovered $fixture 'prepared-runtime-only' 'reverified'
             (Get-WinRuntimeSnapshot $fixture) | Should BeExactly $runtimeBefore
         }
+    }
+
+    # Scenario: Runtime receipt publication is interrupted after a complete stage and halfway through a replacement stage.
+    # Purpose: Cover both stage-write outcomes for the other journaled payload and recover them through the real setup entry.
+    It 'InterT12a_recovers_complete_and_torn_runtime_receipt_stages_through_the_real_entry' {
+        $arguments=@('-Prepare','-ExpectedCommit',$script:WinCommit,'-ArchivePath',$script:WinArchive)
+
+        $completeFixture=New-WinFixture 'runtime-receipt-complete-stage'
+        $completeCrash=Invoke-WinSetup $arguments -UserHome $completeFixture.Home -Environment @{AI_INSTRUCTIONS_SETUP_FAILPOINT='after-stage';AI_INSTRUCTIONS_SETUP_FAILPOINT_LEAF=$completeFixture.Layout.RuntimeReceiptLeaf}
+        $completeCrash.ExitCode | Should Not Be 0
+        Test-Path -LiteralPath (Join-Path $completeFixture.Layout.ReceiptDirectory $completeFixture.Layout.RuntimeReceiptLeaf) | Should Be $false
+        $completeTransaction=Get-WinPublicationTransactionState $completeFixture
+        $completeTransaction.Stage.Length | Should Be ([int64]$completeTransaction.Journal.desiredState.length)
+        Assert-WinLockReleased $completeFixture
+        Assert-WinSuccessReceipt (Invoke-WinSetup $arguments -UserHome $completeFixture.Home) $completeFixture 'prepared-runtime-only' 'reverified'
+
+        $tornFixture=New-WinFixture 'runtime-receipt-torn-stage'
+        Assert-WinSuccessReceipt (Invoke-WinSetup $arguments -UserHome $tornFixture.Home) $tornFixture 'prepared-runtime-only' 'resolved'
+        $runtimePath=Join-Path $tornFixture.Layout.ReceiptDirectory $tornFixture.Layout.RuntimeReceiptLeaf
+        $targetBefore=[Convert]::ToBase64String([IO.File]::ReadAllBytes($runtimePath))
+        $identityBefore=(Read-AgentEnvironmentSetupFile $tornFixture.Layout.SetupRoot 'receipts' $tornFixture.Layout.RuntimeReceiptLeaf).State.identity
+        $tornCrash=Invoke-WinPublicationCrash $tornFixture $tornFixture.Layout.RuntimeReceiptLeaf 'during-stage-write'
+        $tornCrash.ExitCode | Should Not Be 0
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($runtimePath)) | Should BeExactly $targetBefore
+        $tornTransaction=Get-WinPublicationTransactionState $tornFixture
+        $tornTransaction.Stage.Length | Should BeGreaterThan 0
+        $tornTransaction.Stage.Length | Should BeLessThan ([int64]$tornTransaction.Journal.desiredState.length)
+        Assert-WinLockReleased $tornFixture
+        Assert-WinSuccessReceipt (Invoke-WinSetup $arguments -UserHome $tornFixture.Home) $tornFixture 'prepared-runtime-only' 'reverified'
+        $identityAfter=(Read-AgentEnvironmentSetupFile $tornFixture.Layout.SetupRoot 'receipts' $tornFixture.Layout.RuntimeReceiptLeaf).State.identity
+        [string]$identityAfter.kind | Should BeExactly ([string]$identityBefore.kind)
+        [string]$identityAfter.device | Should BeExactly ([string]$identityBefore.device)
+        [string]$identityAfter.fileId | Should BeExactly ([string]$identityBefore.fileId)
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($runtimePath)) | Should BeExactly $targetBefore
+    }
+
+    # Scenario: A torn setup-receipt stage exists but the target no longer matches either journal identity.
+    # Purpose: Preserve fail-closed recovery when the exact expected-target precondition is not satisfied.
+    It 'InterT12b_refuses_a_torn_stage_when_the_target_no_longer_matches_the_journal' {
+        $fixture=New-WinFixture 'torn-stage-target-mismatch'
+        $arguments=@('-Prepare','-ExpectedCommit',$script:WinCommit,'-ArchivePath',$script:WinArchive)
+        Assert-WinSuccessReceipt (Invoke-WinSetup $arguments -UserHome $fixture.Home) $fixture 'prepared-runtime-only' 'resolved'
+        $targetPath=Join-Path $fixture.Layout.ReceiptDirectory 'setup-receipt.json'
+        $crashed=Invoke-WinSetup $arguments -UserHome $fixture.Home -Environment @{AI_INSTRUCTIONS_SETUP_FAILPOINT='during-stage-write';AI_INSTRUCTIONS_SETUP_FAILPOINT_LEAF='setup-receipt.json'}
+        $crashed.ExitCode | Should Not Be 0
+        [IO.File]::WriteAllText($targetPath,"{}`n",[Text.UTF8Encoding]::new($false))
+        $refused=Invoke-WinSetup $arguments -UserHome $fixture.Home
+        $refused.ExitCode | Should Be 27
+        $refused.Json.code | Should Be 'interrupted-install'
+        Test-Path -LiteralPath (Join-Path $fixture.Layout.SetupRoot '.ai-instructions-txn') | Should Be $true
+        [IO.File]::ReadAllText($targetPath) | Should BeExactly "{}`n"
+        Assert-WinLockReleased $fixture
     }
 
     # Scenario: The target was displaced and the child died before the staged receipt rename, using a committed adapter shim.

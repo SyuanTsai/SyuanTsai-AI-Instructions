@@ -603,6 +603,17 @@ function Invoke-AgentEnvironmentSetupFailpoint {
     }
 }
 
+function Invoke-AgentEnvironmentSetupTornStageFailpoint {
+    param([Parameter(Mandatory=$true)]$Stage,[Parameter(Mandatory=$true)][byte[]]$Bytes,[Parameter(Mandatory=$true)][string]$Leaf)
+    $selectedLeaf=[Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_SETUP_FAILPOINT_LEAF')
+    if([Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_SETUP_FAILPOINT') -cne 'during-stage-write' -or
+        (-not [string]::IsNullOrEmpty($selectedLeaf) -and $selectedLeaf -cne $Leaf)){return}
+    $prefixLength=[Math]::Max(1,[Math]::Floor($Bytes.Length/2))
+    [byte[]]$prefix=$Bytes[0..($prefixLength-1)]
+    $Stage.WriteNewBytes($prefix)
+    [Environment]::FailFast("Setup publication failpoint 'during-stage-write' interrupted '$Leaf'.")
+}
+
 function Invoke-AgentEnvironmentSetupBarrier {
     param([Parameter(Mandatory=$true)][string]$Name)
     $directory=[Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_SETUP_BARRIER_DIRECTORY')
@@ -638,7 +649,8 @@ function Resolve-AgentEnvironmentSetupTransaction {
             if($null -ne $displaced){throw (New-AgentEnvironmentSetupRefusal interrupted-install 'A pre-publication setup transaction has an unexpected displaced file.')}
             return [pscustomobject]@{decision='rollback';target=$target;stage=$stage;displaced=$displaced}
         }
-        if(-not $stageDesired -or $null -ne $displaced){throw (New-AgentEnvironmentSetupRefusal interrupted-install 'A staged setup transaction differs from its write-ahead journal.')}
+        if($null -ne $displaced){throw (New-AgentEnvironmentSetupRefusal interrupted-install 'A pre-publication setup transaction has an unexpected displaced file.')}
+        if(-not $stageDesired){return [pscustomobject]@{decision='rollback';target=$target;stage=$stage;displaced=$displaced}}
         return [pscustomobject]@{decision='publish';target=$target;stage=$stage;displaced=$displaced}
     }
     if($targetDesired){
@@ -769,6 +781,7 @@ function Publish-AgentEnvironmentSetupFile {
         if ($null -eq $parent) { $parent = Open-PlatformDirectory -Root $SetupRoot -RelativePath $Directory -CreatePrivate }
         Invoke-AgentEnvironmentSetupFailpoint 'after-parent-directory' $Leaf
         $stage = Open-PlatformFile -ParentLease $transaction -Leaf 'stage' -Access ReadWrite -CreateMode CreateNew
+        Invoke-AgentEnvironmentSetupTornStageFailpoint $stage $Bytes $Leaf
         $stage.WriteNewBytes($Bytes)
         $stageState = Get-AgentEnvironmentSetupFileState $stage
         if (-not (Test-AgentEnvironmentSetupStateEqual $stageState.State $desired)) { throw 'The staged setup file differs from its write-ahead journal.' }
