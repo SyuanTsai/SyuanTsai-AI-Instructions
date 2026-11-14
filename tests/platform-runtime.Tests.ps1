@@ -2666,6 +2666,56 @@ Describe 'Platform runtime contract' {
         $publishCall[0].Arguments[9].VariablePath.UserPath | Should Be 'nativeDisplacedLeaf'
     }
 
+    # Scenario: Unix public mutation and permission facades invoke native methods that can throw typed platform failures.
+    # Purpose: Prevent PowerShell's MethodInvocationException wrapper from escaping instead of the platform exception contract.
+    It 'UnitT34_unwraps_typed_exceptions_from_unix_native_facades' {
+        $unixPath = Join-Path $script:RepositoryRoot 'scripts/platform/Unix.psm1'
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($unixPath,[ref]$tokens,[ref]$errors)
+        @($errors).Count | Should Be 0
+
+        $expectedCatchTypes = @{
+            'Get-UnixPlatformPermissionSnapshot' = @('PlatformCapabilityUnavailableException','PlatformErrnoException','PlatformVerificationException')
+            'Set-UnixPlatformPermissions' = @('PlatformCapabilityUnavailableException','PlatformErrnoException','PlatformVerificationException','PlatformMutationException')
+            'Publish-UnixPlatformFile' = @('PlatformCapabilityUnavailableException','PlatformErrnoException','PlatformVerificationException','PlatformMutationException')
+            'Remove-UnixPlatformOwnedFile' = @('PlatformCapabilityUnavailableException','PlatformErrnoException','PlatformVerificationException','PlatformMutationException')
+        }
+        foreach ($functionName in $expectedCatchTypes.Keys) {
+            $function = $ast.Find({param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $functionName
+            },$true)
+            $function | Should Not BeNullOrEmpty
+            $nativeCalls = @($function.Body.FindAll({param($node)
+                $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
+                $node.Static -and
+                $node.Expression.TypeName.FullName -ceq 'SyuanTsai.AIInstructions.PlatformRuntime.UnixNative'
+            },$true))
+            $nativeCalls.Count | Should BeGreaterThan 0
+
+            foreach ($nativeCall in $nativeCalls) {
+                $tryStatement = $nativeCall.Parent
+                while ($null -ne $tryStatement -and $tryStatement -isnot [Management.Automation.Language.TryStatementAst]) {
+                    $tryStatement = $tryStatement.Parent
+                }
+                $tryStatement | Should Not BeNullOrEmpty
+                foreach ($expectedCatchType in $expectedCatchTypes[$functionName]) {
+                    $catchClause = @($tryStatement.CatchClauses | Where-Object {
+                        @($_.CatchTypes | Where-Object {
+                            $_.TypeName.FullName -ceq "SyuanTsai.AIInstructions.PlatformRuntime.$expectedCatchType"
+                        }).Count -eq 1
+                    })
+                    $catchClause.Count | Should Be 1
+                    $throws = @($catchClause[0].Body.FindAll({param($node)
+                        $node -is [Management.Automation.Language.ThrowStatementAst]
+                    },$true))
+                    $throws.Count | Should BeGreaterThan 0
+                    @($throws | Where-Object { $null -eq $_.Pipeline }).Count | Should Be 0
+                }
+            }
+        }
+    }
+
     # Scenario: Every reviewed entry point carries its own platform-runtime manifest trust anchor.
     # Purpose: Keep all independent pins synchronized with the canonical manifest before executable code is imported.
     It 'UnitT35_keeps_platform_runtime_entry_pins_synchronized' {

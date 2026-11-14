@@ -339,25 +339,31 @@ function Get-UnixPlatformPermissionSnapshot {
 function Set-UnixPlatformPermissions {
     param([Parameter(Mandatory = $true)] $Lease, $Policy, $Snapshot)
     Assert-UnixPlatformHost permissions | Out-Null
-    if (($null -eq $Policy) -eq ($null -eq $Snapshot)) { throw [ArgumentException]::new('Specify exactly one of Policy or Snapshot.') }
-    if ($null -ne $Snapshot) {
-        if ((Get-UnixContractValue $Snapshot kind -Required) -cne 'unix-mode') { throw [ArgumentException]::new('Snapshot.kind must be unix-mode.') }
-        $mode = [string](Get-UnixContractValue $Snapshot mode -Required)
-        $uid = Get-UnixContractValue $Snapshot uid -Required
-        $gid = Get-UnixContractValue $Snapshot gid -Required
-    }
-    else {
-        if ($Policy -isnot [Collections.IDictionary] -or $Policy.Count -ne 1 -or -not $Policy.Contains('Mode')) {
-            throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]::new('permissions-policy: only Mode is supported',[SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetOperatingSystem())
+    try {
+        if (($null -eq $Policy) -eq ($null -eq $Snapshot)) { throw [ArgumentException]::new('Specify exactly one of Policy or Snapshot.') }
+        if ($null -ne $Snapshot) {
+            if ((Get-UnixContractValue $Snapshot kind -Required) -cne 'unix-mode') { throw [ArgumentException]::new('Snapshot.kind must be unix-mode.') }
+            $mode = [string](Get-UnixContractValue $Snapshot mode -Required)
+            $uid = Get-UnixContractValue $Snapshot uid -Required
+            $gid = Get-UnixContractValue $Snapshot gid -Required
         }
-        if ($Policy.Mode -is [string] -or $Policy.Mode -is [bool] -or $null -eq $Policy.Mode -or [decimal]$Policy.Mode -ne [Math]::Truncate([decimal]$Policy.Mode) -or [decimal]$Policy.Mode -lt 0 -or [decimal]$Policy.Mode -gt 4095) { throw [ArgumentException]::new('Mode must be an integer from 0 through 4095.') }
-        $current = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetPermissionSnapshot($Lease)
-        $mode = [Convert]::ToString([int]$Policy.Mode,8).PadLeft($(if ([int]$Policy.Mode -gt 511) { 4 } else { 3 }),'0')
-        $uid = $current.Uid; $gid = $current.Gid
+        else {
+            if ($Policy -isnot [Collections.IDictionary] -or $Policy.Count -ne 1 -or -not $Policy.Contains('Mode')) {
+                throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]::new('permissions-policy: only Mode is supported',[SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetOperatingSystem())
+            }
+            if ($Policy.Mode -is [string] -or $Policy.Mode -is [bool] -or $null -eq $Policy.Mode -or [decimal]$Policy.Mode -ne [Math]::Truncate([decimal]$Policy.Mode) -or [decimal]$Policy.Mode -lt 0 -or [decimal]$Policy.Mode -gt 4095) { throw [ArgumentException]::new('Mode must be an integer from 0 through 4095.') }
+            $current = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetPermissionSnapshot($Lease)
+            $mode = [Convert]::ToString([int]$Policy.Mode,8).PadLeft($(if ([int]$Policy.Mode -gt 511) { 4 } else { 3 }),'0')
+            $uid = $current.Uid; $gid = $current.Gid
+        }
+        if ($mode -cnotmatch '^[0-7]{3,4}$') { throw [ArgumentException]::new('Snapshot.mode must contain three or four octal digits.') }
+        foreach ($value in @($uid,$gid)) { if ($value -is [bool] -or $null -eq $value -or [decimal]$value -ne [Math]::Truncate([decimal]$value) -or [decimal]$value -lt 0 -or [decimal]$value -gt [uint32]::MaxValue) { throw [ArgumentException]::new('Snapshot uid/gid is invalid.') } }
+        ConvertTo-UnixPermissionReceipt ([SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::SetPermissionSnapshot($Lease,$mode,[uint64]$uid,[uint64]$gid))
     }
-    if ($mode -cnotmatch '^[0-7]{3,4}$') { throw [ArgumentException]::new('Snapshot.mode must contain three or four octal digits.') }
-    foreach ($value in @($uid,$gid)) { if ($value -is [bool] -or $null -eq $value -or [decimal]$value -ne [Math]::Truncate([decimal]$value) -or [decimal]$value -lt 0 -or [decimal]$value -gt [uint32]::MaxValue) { throw [ArgumentException]::new('Snapshot uid/gid is invalid.') } }
-    ConvertTo-UnixPermissionReceipt ([SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::SetPermissionSnapshot($Lease,$mode,[uint64]$uid,[uint64]$gid))
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException] { throw $_.Exception }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformErrnoException] { throw $_.Exception }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] { throw $_.Exception }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformMutationException] { throw $_.Exception }
 }
 
 function Publish-UnixPlatformFile {
