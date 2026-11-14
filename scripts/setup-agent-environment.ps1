@@ -15,7 +15,8 @@ param(
     [switch] $Offline,
     [string] $ExpectedCommit,
     [string] $ArchivePath,
-    [switch] $Canonical
+    [switch] $Canonical,
+    [string] $RuntimeReceiptPath
 )
 
 Set-StrictMode -Version Latest
@@ -27,6 +28,15 @@ $InformationPreference = 'SilentlyContinue'
 # it is used before the shared module can be loaded.
 $script:SetupBaselineExitCode = 24
 $script:SetupInternalExitCode = 1
+$script:SetupEarlyExitCodes = @{
+    'internal-error' = 1; 'usage' = 10; 'missing-dependency' = 14; 'commit-mismatch' = 15
+    'runtime-baseline-unavailable' = 24
+}
+$script:SetupReceiptFields = @(
+    'schemaVersion','kind','phase','mode','result','code','exitCode','os','architecture','rid',
+    'setupCommit','runtimeCommit','policySha256','setupRoot','codexHome','powerShell','dotNetVersion',
+    'capabilities','steps','recoverCommand'
+)
 
 function Write-SetupLine {
     param([Parameter(Mandatory = $true)][string] $Text)
@@ -38,6 +48,140 @@ function Write-SetupDiagnostic {
     param([Parameter(Mandatory = $true)][AllowEmptyString()][string] $Text)
     [Console]::Error.WriteLine('setup-agent-environment: ' + $Text)
     [Console]::Error.Flush()
+}
+
+function New-SetupEarlyReceiptLine {
+    param([Parameter(Mandatory = $true)][string] $Code,[Parameter(Mandatory = $true)][int] $ExitCode)
+    $value = [pscustomobject][ordered]@{
+        schemaVersion = 1; kind = 'agent-environment-setup-receipt'; phase = 'p10a'; mode = $null
+        result = 'refused'; code = $Code; exitCode = $ExitCode; os = $null; architecture = $null; rid = $null
+        setupCommit = $null; runtimeCommit = $null; policySha256 = $null; setupRoot = $null; codexHome = $null
+        powerShell = $null; dotNetVersion = $null; capabilities = @(); steps = @(); recoverCommand = $null
+    }
+    return ($value | ConvertTo-Json -Depth 4 -Compress)
+}
+
+function New-SetupEarlyFailure {
+    param([Parameter(Mandatory = $true)][string] $Code,[Parameter(Mandatory = $true)][string] $Message)
+    $failure = [InvalidOperationException]::new($Message)
+    $failure.Data['Code'] = $Code
+    return $failure
+}
+
+function Invoke-SetupVerifierGit {
+    param(
+        [Parameter(Mandatory = $true)][string] $GitPath,
+        [Parameter(Mandatory = $true)][string] $RepositoryRoot,
+        [Parameter(Mandatory = $true)][string[]] $Arguments,
+        [switch] $Binary
+    )
+    $start = [Diagnostics.ProcessStartInfo]::new($GitPath)
+    foreach ($prefix in @('-c','core.fsmonitor=false','-C',$RepositoryRoot)) { [void]$start.ArgumentList.Add($prefix) }
+    foreach ($argument in $Arguments) { [void]$start.ArgumentList.Add($argument) }
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::Start($start)
+    try {
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if ($Binary) {
+            $stream = [IO.MemoryStream]::new()
+            try {
+                $process.StandardOutput.BaseStream.CopyTo($stream)
+                $process.WaitForExit()
+                return [pscustomobject]@{ ExitCode = $process.ExitCode; Bytes = $stream.ToArray(); Error = $stderrTask.Result }
+            } finally { $stream.Dispose() }
+        }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $process.WaitForExit()
+        return [pscustomobject]@{ ExitCode = $process.ExitCode; Text = $stdoutTask.Result.TrimEnd("`r","`n"); Error = $stderrTask.Result }
+    } finally { $process.Dispose() }
+}
+
+function Get-SetupVerifierCanonicalSha256 {
+    param([Parameter(Mandatory = $true)][byte[]] $Bytes,[Parameter(Mandatory = $true)][string] $Context)
+    try { $text = [Text.UTF8Encoding]::new($false,$true).GetString($Bytes) }
+    catch { throw (New-SetupEarlyFailure commit-mismatch "$Context is not canonical UTF-8 text.") }
+    $canonical = [Text.UTF8Encoding]::new($false).GetBytes($text.Replace("`r`n","`n").Replace("`r","`n"))
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($sha.ComputeHash($canonical)).Replace('-','').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+
+function Assert-SetupVerifierRegularFile {
+    param([Parameter(Mandatory = $true)][string] $Path,[Parameter(Mandatory = $true)][string] $RelativePath)
+    try { $info = [IO.FileInfo]::new($Path) } catch { throw (New-SetupEarlyFailure commit-mismatch "Trusted file '$RelativePath' cannot be inspected.") }
+    if (-not $info.Exists -or ($info.Attributes -band [IO.FileAttributes]::Directory) -ne 0 -or
+        ($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $null -ne $info.LinkTarget) {
+        throw (New-SetupEarlyFailure commit-mismatch "Trusted file '$RelativePath' is missing, linked, or not a regular file.")
+    }
+}
+
+# F1 trust anchor: this verifier is intentionally self-contained. It uses only
+# .NET and git, and runs before either repository module can execute.
+function Assert-SetupBootstrapTrust {
+    param([Parameter(Mandatory = $true)][string] $RepositoryRoot,[Parameter(Mandatory = $true)][string] $ExpectedCommit)
+    if ($ExpectedCommit -cnotmatch '^[0-9a-f]{40}$') { throw (New-SetupEarlyFailure usage '-ExpectedCommit must be a 40-character lowercase hexadecimal commit.') }
+    $git = @(Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if ($git.Count -ne 1) { throw (New-SetupEarlyFailure missing-dependency 'git is required to verify the pinned setup revision.') }
+    $gitPath = [string]$git[0].Source
+    $head = Invoke-SetupVerifierGit $gitPath $RepositoryRoot @('rev-parse','--verify','HEAD^{commit}')
+    if ($head.ExitCode -ne 0 -or $head.Text -cne $ExpectedCommit) { throw (New-SetupEarlyFailure commit-mismatch 'HEAD does not equal -ExpectedCommit.') }
+
+    $manifestRelative = 'scripts/platform-runtime.psd1'
+    $manifestObject = Invoke-SetupVerifierGit $gitPath $RepositoryRoot @('rev-parse',"HEAD:$manifestRelative")
+    if ($manifestObject.ExitCode -ne 0 -or $manifestObject.Text -cnotmatch '^[0-9a-f]{40,64}$') { throw (New-SetupEarlyFailure commit-mismatch 'The platform runtime manifest is not present in HEAD.') }
+    $manifestBlob = Invoke-SetupVerifierGit $gitPath $RepositoryRoot @('cat-file','blob',$manifestObject.Text) -Binary
+    if ($manifestBlob.ExitCode -ne 0) { throw (New-SetupEarlyFailure commit-mismatch 'The platform runtime manifest HEAD blob cannot be read.') }
+    $manifestText = [Text.UTF8Encoding]::new($false,$true).GetString($manifestBlob.Bytes)
+    $fileListMatch = [regex]::Match($manifestText,'(?ms)\bFileList\s*=\s*@\((.*?)\)\s*\r?\n\s*PrivateData\s*=')
+    $inventoryMatch = [regex]::Match($manifestText,'(?ms)\bInventory\s*=\s*@\((.*?)\)\s*\r?\n\s*\}\s*\r?\n\s*\}')
+    if (-not $fileListMatch.Success -or -not $inventoryMatch.Success) { throw (New-SetupEarlyFailure commit-mismatch 'The platform runtime manifest closure cannot be parsed by the bootstrap verifier.') }
+    $fileList = @([regex]::Matches($fileListMatch.Groups[1].Value,"'([^']+)'") | ForEach-Object { [string]$_.Groups[1].Value })
+    $inventory = [ordered]@{}
+    foreach ($entry in [regex]::Matches($inventoryMatch.Groups[1].Value,"@\{\s*Path\s*=\s*'([^']+)'\s*;\s*Sha256\s*=\s*'([0-9a-f]{64})'\s*\}")) {
+        $path = [string]$entry.Groups[1].Value
+        if ($inventory.Contains($path)) { throw (New-SetupEarlyFailure commit-mismatch "The platform runtime inventory duplicates '$path'.") }
+        $inventory[$path] = [string]$entry.Groups[2].Value
+    }
+    $expectedInventory = @($fileList | Where-Object { $_ -cne 'platform-runtime.psd1' })
+    if ($fileList.Count -lt 2 -or $inventory.Count -ne $expectedInventory.Count -or
+        (@($expectedInventory | Where-Object { -not $inventory.Contains($_) }).Count -ne 0)) {
+        throw (New-SetupEarlyFailure commit-mismatch 'The platform runtime FileList and canonical inventory differ.')
+    }
+
+    $setupBound = @(
+        'scripts/setup-agent-environment.policy.json','scripts/setup-agent-environment.policy.tsv',
+        'scripts/setup-agent-environment.policy.schema.json','scripts/setup-agent-environment.sh',
+        'scripts/setup-agent-environment.ps1','scripts/agent-environment-setup.psm1'
+    )
+    $trustFiles = @($setupBound + $manifestRelative + @($fileList | Where-Object { $_ -cne 'platform-runtime.psd1' } | ForEach-Object { 'scripts/' + $_ }) | Select-Object -Unique)
+    foreach ($relative in $trustFiles) {
+        $path = [IO.Path]::GetFullPath((Join-Path $RepositoryRoot $relative))
+        Assert-SetupVerifierRegularFile $path $relative
+        foreach ($arguments in @(
+            @('ls-files','--error-unmatch','--',$relative),
+            @('diff','--quiet','HEAD','--',$relative),
+            @('diff','--cached','--quiet','HEAD','--',$relative)
+        )) {
+            $result = Invoke-SetupVerifierGit $gitPath $RepositoryRoot $arguments
+            if ($result.ExitCode -ne 0) { throw (New-SetupEarlyFailure commit-mismatch "Trusted file '$relative' differs from HEAD.") }
+        }
+        $others = Invoke-SetupVerifierGit $gitPath $RepositoryRoot @('ls-files','--others','--exclude-standard','--',$relative)
+        if ($others.ExitCode -ne 0 -or -not [string]::IsNullOrEmpty($others.Text)) { throw (New-SetupEarlyFailure commit-mismatch "Trusted file '$relative' has an untracked substitute.") }
+        $blobId = Invoke-SetupVerifierGit $gitPath $RepositoryRoot @('rev-parse',"HEAD:$relative")
+        $diskId = Invoke-SetupVerifierGit $gitPath $RepositoryRoot @('hash-object','--no-filters','--',$path)
+        if ($blobId.ExitCode -ne 0 -or $diskId.ExitCode -ne 0 -or $blobId.Text -cne $diskId.Text) { throw (New-SetupEarlyFailure commit-mismatch "Trusted file '$relative' does not match its HEAD blob.") }
+    }
+
+    $manifestDisk = [IO.File]::ReadAllBytes((Join-Path $RepositoryRoot $manifestRelative))
+    if ((Get-SetupVerifierCanonicalSha256 $manifestDisk $manifestRelative) -cne (Get-SetupVerifierCanonicalSha256 $manifestBlob.Bytes "$manifestRelative HEAD blob")) {
+        throw (New-SetupEarlyFailure commit-mismatch 'The platform runtime manifest canonical hash differs from HEAD.')
+    }
+    foreach ($relative in $inventory.Keys) {
+        $bytes = [IO.File]::ReadAllBytes((Join-Path (Join-Path $RepositoryRoot 'scripts') $relative))
+        if ((Get-SetupVerifierCanonicalSha256 $bytes $relative) -cne $inventory[$relative]) { throw (New-SetupEarlyFailure commit-mismatch "Platform runtime inventory verification failed for '$relative'.") }
+    }
 }
 
 $modeName = if ($Offline -and -not $Prepare) { 'offline' } else { 'prepare' }
@@ -52,11 +196,13 @@ $recoverCommand = $null
 
 if ($PSVersionTable.PSEdition -cne 'Core' -or $PSVersionTable.PSVersion.Major -lt 7 -or [Environment]::Version.Major -lt 8) {
     Write-SetupDiagnostic 'PowerShell 7 on .NET 8 or later is required.'
-    Write-SetupLine ('{"schemaVersion":1,"kind":"agent-environment-setup-receipt","phase":"p10a","result":"refused","code":"runtime-baseline-unavailable","exitCode":' + $script:SetupBaselineExitCode + '}')
+    Write-SetupLine (New-SetupEarlyReceiptLine runtime-baseline-unavailable $script:SetupBaselineExitCode)
     exit $script:SetupBaselineExitCode
 }
 
 try {
+    $repositoryRoot = Split-Path -Parent $PSScriptRoot
+    Assert-SetupBootstrapTrust $repositoryRoot $ExpectedCommit
     Import-Module (Join-Path $PSScriptRoot 'agent-environment-setup.psm1') -DisableNameChecking -ErrorAction Stop
     Import-Module (Join-Path $PSScriptRoot 'platform-runtime.psd1') -DisableNameChecking -ErrorAction Stop
     $moduleLoaded = $true
@@ -64,7 +210,6 @@ try {
     if ([string]::IsNullOrWhiteSpace($ArchivePath)) { throw (New-AgentEnvironmentSetupRefusal usage '-ArchivePath is required.') }
     if ($ExpectedCommit -cnotmatch '^[0-9a-f]{40}$') { throw (New-AgentEnvironmentSetupRefusal usage '-ExpectedCommit must be a 40-character lowercase hexadecimal commit.') }
     $mode = if ($Prepare) { 'Prepare' } else { 'Offline' }
-    $repositoryRoot = Split-Path -Parent $PSScriptRoot
 
     # S1 (PowerShell side): host RID, HOME, link-free ancestors, CODEX_HOME (H5).
     $rid = Get-AgentEnvironmentSetupRid
@@ -83,10 +228,16 @@ try {
         if ([string]::IsNullOrEmpty($processPath) -or -not (Test-AgentEnvironmentSetupSameFile $processPath $layout.RuntimeExecutable)) {
             throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed 'The canonical stage is not running on the canonical pwsh.')
         }
+        $expectedRuntimeReceiptPath = [IO.Path]::GetFullPath((Join-Path $layout.ReceiptDirectory $layout.RuntimeReceiptLeaf))
+        if ([string]::IsNullOrWhiteSpace($RuntimeReceiptPath) -or
+            -not [string]::Equals([IO.Path]::GetFullPath($RuntimeReceiptPath),$expectedRuntimeReceiptPath,[StringComparison]::Ordinal)) {
+            throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed 'The canonical stage did not receive the verified runtime receipt path.')
+        }
         $stored = Read-AgentEnvironmentSetupFile $layout.SetupRoot 'receipts' $layout.RuntimeReceiptLeaf
         if ($null -eq $stored) { throw (New-AgentEnvironmentSetupRefusal runtime-incomplete 'The canonical runtime receipt is missing.') }
         try {
             $runtimeReceipt = ConvertFrom-AgentEnvironmentSetupStoredRuntimeReceipt ([Text.UTF8Encoding]::new($false,$true).GetString($stored.Bytes) | ConvertFrom-Json) $userHome
+            [void](Assert-AgentEnvironmentSetupRuntimeReceiptLayout $runtimeReceipt $layout)
             [void](Assert-PlatformPowerShellRuntime -Policy $policyInfo.Policy -Receipt $runtimeReceipt)
         } catch {
             if ((Get-AgentEnvironmentSetupRefusalCode $_) -cne 'internal-error') { throw }
@@ -111,6 +262,11 @@ try {
     # K4: pinned revision before any mutation.
     Assert-AgentEnvironmentSetupCommit $repositoryRoot $ExpectedCommit
 
+    # F4: a direct Windows invocation must reject K7 residue while HOME is still
+    # byte-for-byte untouched. Shell performs the same read-only preflight.
+    $plan = Get-AgentEnvironmentSetupPlan -Policy $policyInfo.Policy -UserHome $userHome -CodexHome $codexHome -Mode $mode -ArchivePath $archive -Rid $rid
+    if ($plan.decision -ceq 'refuse') { throw (New-AgentEnvironmentSetupRefusal ([string]$plan.code) ([string]$plan.reason) ([string]$plan.recoverCommand)) }
+
     # M4/M8: private setup root, serialized by an exclusive platform lock.
     $setupLease = Open-PlatformDirectory -Root $userHome -RelativePath '.local/share/ai-instructions-setup' -CreatePrivate
     try { $lock = Enter-PlatformLock -ParentLease $setupLease -Leaf $layout.LockLeaf -Mode Exclusive -Timeout ([TimeSpan]::Zero) }
@@ -121,9 +277,13 @@ try {
         throw
     }
 
-    # K7: read-only plan before any runtime mutation.
+    # K7/F5: under the lock, recover only a journal whose exact expected state
+    # can be proven, then repeat the read-only residue check immediately before
+    # the first runtime or receipt mutation.
+    if ($plan.decision -ceq 'recover-setup') { Repair-AgentEnvironmentSetupTransactions $layout.SetupRoot }
     $plan = Get-AgentEnvironmentSetupPlan -Policy $policyInfo.Policy -UserHome $userHome -CodexHome $codexHome -Mode $mode -ArchivePath $archive -Rid $rid
     if ($plan.decision -ceq 'refuse') { throw (New-AgentEnvironmentSetupRefusal ([string]$plan.code) ([string]$plan.reason) ([string]$plan.recoverCommand)) }
+    if ($plan.decision -ceq 'recover-setup') { throw (New-AgentEnvironmentSetupRefusal interrupted-install 'A setup publication residue remained after recovery.' 'Inspect ~/.local/share/ai-instructions-setup/.ai-instructions-txn, then rerun setup.') }
     $archiveSha256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
     if ([IO.Path]::GetFileName($archive) -cne $asset.Name -or $archiveSha256 -cne $asset.Sha256) {
         throw (New-AgentEnvironmentSetupRefusal archive-hash-mismatch 'The PowerShell archive name or SHA-256 does not match the setup policy.')
@@ -131,11 +291,14 @@ try {
 
     # S5: create the canonical runtime once; afterwards only re-verify (K15/K16).
     if ($plan.decision -ceq 'resolve-runtime') {
+        $runtimeParentLease = Open-PlatformDirectory -Root $layout.SetupRoot -RelativePath 'pwsh' -CreatePrivate
+        $runtimeParentLease.Dispose()
         $runtimeLease = Open-PlatformDirectory -Root $layout.SetupRoot -RelativePath $layout.RuntimeRelativePath -CreatePrivate
         try {
             try { $runtimeReceipt = Resolve-PlatformPowerShell -Policy $policyInfo.Policy -DestinationLease $runtimeLease -OfflineCache $archive }
             catch { throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed ('The canonical runtime could not be prepared: ' + $_.Exception.Message)) }
         } finally { $runtimeLease.Dispose() }
+        [void](Assert-AgentEnvironmentSetupRuntimeReceiptLayout $runtimeReceipt $layout)
         $stored = ConvertTo-AgentEnvironmentSetupStoredRuntimeReceipt $runtimeReceipt $userHome
         Publish-AgentEnvironmentSetupFile -SetupRoot $layout.SetupRoot -Directory 'receipts' -Leaf $layout.RuntimeReceiptLeaf -Bytes ([Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-AgentEnvironmentSetupJsonLine $stored) + "`n")) -NoReplace
         $runtimeAction = 'resolved'
@@ -144,7 +307,9 @@ try {
         if ($null -eq $storedFile) { throw (New-AgentEnvironmentSetupRefusal runtime-incomplete 'The canonical runtime receipt is missing.') }
         try {
             $stored = [Text.UTF8Encoding]::new($false,$true).GetString($storedFile.Bytes) | ConvertFrom-Json
-            $runtimeReceipt = Assert-PlatformPowerShellRuntime -Policy $policyInfo.Policy -Receipt (ConvertFrom-AgentEnvironmentSetupStoredRuntimeReceipt $stored $userHome)
+            $runtimeReceipt = ConvertFrom-AgentEnvironmentSetupStoredRuntimeReceipt $stored $userHome
+            [void](Assert-AgentEnvironmentSetupRuntimeReceiptLayout $runtimeReceipt $layout)
+            $runtimeReceipt = Assert-PlatformPowerShellRuntime -Policy $policyInfo.Policy -Receipt $runtimeReceipt
         } catch {
             if ((Get-AgentEnvironmentSetupRefusalCode $_) -cne 'internal-error') { throw }
             throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed ('Canonical runtime re-verification failed; setup does not reinstall automatically: ' + $_.Exception.Message) "Inspect or remove $($plan.runtimeDirectory) and $($plan.runtimeReceipt), then rerun setup with --prepare.")
@@ -154,7 +319,8 @@ try {
 
     # S5 re-exec: the canonical pwsh re-verifies itself as an owned process with
     # an explicit environment allowlist (M5).
-    $arguments = @('-NoLogo','-NoProfile','-NonInteractive','-File',(Join-Path $PSScriptRoot 'setup-agent-environment.ps1'),'-Canonical',$(if ($Prepare) { '-Prepare' } else { '-Offline' }),'-ExpectedCommit',$ExpectedCommit,'-ArchivePath',$archive)
+    $verifiedRuntimeReceiptPath = [IO.Path]::GetFullPath((Join-Path $layout.ReceiptDirectory $layout.RuntimeReceiptLeaf))
+    $arguments = @('-NoLogo','-NoProfile','-NonInteractive','-File',(Join-Path $PSScriptRoot 'setup-agent-environment.ps1'),'-Canonical',$(if ($Prepare) { '-Prepare' } else { '-Offline' }),'-ExpectedCommit',$ExpectedCommit,'-ArchivePath',$archive,'-RuntimeReceiptPath',$verifiedRuntimeReceiptPath)
     $child = Invoke-PlatformPreparationCommand -Command $layout.RuntimeExecutable -Arguments $arguments -Environment (Get-AgentEnvironmentSetupChildEnvironment $layout.RuntimeDirectory $userHome) -WorkingDirectory $layout.SetupRoot -TimeoutMilliseconds 1800000
     if (-not [string]::IsNullOrWhiteSpace([string]$child.stderr)) { Write-SetupDiagnostic ('canonical stage: ' + (ConvertTo-AgentEnvironmentSetupSanitizedText ([string]$child.stderr).Trim() $userHome)) }
     $childLines = @(([string]$child.stdout).Split("`n") | ForEach-Object { $_.TrimEnd("`r") } | Where-Object { $_.Length -gt 0 })
@@ -203,8 +369,14 @@ catch {
         Write-SetupLine (ConvertTo-AgentEnvironmentSetupJsonLine $refusal)
         $exitCode = Get-AgentEnvironmentSetupExitCode $code
     } else {
-        Write-SetupLine ('{"schemaVersion":1,"kind":"agent-environment-setup-receipt","phase":"p10a","result":"refused","code":"internal-error","exitCode":' + $script:SetupInternalExitCode + '}')
-        $exitCode = $script:SetupInternalExitCode
+        $earlyCode = 'internal-error'
+        $cause = $_.Exception
+        while ($null -ne $cause) {
+            if ($cause.Data.Contains('Code') -and $script:SetupEarlyExitCodes.ContainsKey([string]$cause.Data['Code'])) { $earlyCode = [string]$cause.Data['Code']; break }
+            $cause = $cause.InnerException
+        }
+        $exitCode = [int]$script:SetupEarlyExitCodes[$earlyCode]
+        Write-SetupLine (New-SetupEarlyReceiptLine $earlyCode $exitCode)
     }
 }
 finally {

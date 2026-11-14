@@ -40,13 +40,15 @@ EXIT_INTERRUPTED_INSTALL=27
 EXIT_CODEX_HOME_CONFLICT=28
 
 BOUND_FILES='scripts/setup-agent-environment.policy.json scripts/setup-agent-environment.policy.tsv scripts/setup-agent-environment.policy.schema.json scripts/setup-agent-environment.sh scripts/setup-agent-environment.ps1 scripts/agent-environment-setup.psm1'
+PLATFORM_BOUND_FILES='scripts/platform-runtime.psd1 scripts/platform-runtime.psm1 scripts/installer-safe-mutation.psm1 scripts/WindowsDacl.psm1 scripts/Resolve-StandardValidationTool.ps1 scripts/platform/PlatformNative.cs scripts/platform/UnixNative.cs scripts/platform/WindowsNative.cs scripts/platform/WindowsInstallerMutation.cs scripts/platform/OwnedProcess.cs scripts/platform/UnixProcess.cs scripts/platform/WindowsProcess.cs scripts/platform/Unix.psm1 scripts/platform/RuntimePreparation.psm1 scripts/platform/Windows.psm1 scripts/platform/Linux.psm1 scripts/platform/MacOS.psm1'
 
 run_tmp=''
 setup_root=''
+receipt_mode='null'
 
 refuse() {
     printf 'setup-agent-environment: %s\n' "$3" >&2
-    printf '{"schemaVersion":1,"kind":"agent-environment-setup-receipt","phase":"p10a","stage":"shell","result":"refused","code":"%s","exitCode":%s}\n' "$1" "$2"
+    printf '{"schemaVersion":1,"kind":"agent-environment-setup-receipt","phase":"p10a","mode":%s,"result":"refused","code":"%s","exitCode":%s,"os":null,"architecture":null,"rid":null,"setupCommit":null,"runtimeCommit":null,"policySha256":null,"setupRoot":null,"codexHome":null,"powerShell":null,"dotNetVersion":null,"capabilities":[],"steps":[],"recoverCommand":null}\n' "$receipt_mode" "$1" "$2"
     exit "$2"
 }
 
@@ -90,13 +92,14 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 [ -n "$mode" ] || refuse usage "$EXIT_USAGE" 'Specify exactly one of --prepare or --offline.'
+receipt_mode='"'"$mode"'"'
 case "$expected_commit" in
     ''|*[!0-9a-f]*) refuse usage "$EXIT_USAGE" '--expected-commit must be a 40-character lowercase hexadecimal commit.' ;;
 esac
 [ "${#expected_commit}" -eq 40 ] || refuse usage "$EXIT_USAGE" '--expected-commit must be a 40-character lowercase hexadecimal commit.'
 
 have() { command -v "$1" >/dev/null 2>&1; }
-for tool in uname id awk sed find mkdir mv rm chmod env dirname; do
+for tool in uname id awk sed find mkdir mv rm chmod env dirname cp; do
     have "$tool" || refuse missing-dependency "$EXIT_MISSING_DEPENDENCY" "Required tool '$tool' is not available; setup does not install system packages."
 done
 
@@ -223,15 +226,33 @@ top=$(CDPATH='' cd -- "$top" && pwd -P) || refuse commit-mismatch "$EXIT_COMMIT_
 [ "$top" = "$repo_root" ] || refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" 'The setup script is not at the top level of its git checkout.'
 head_commit=$(git_in_repo rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" 'HEAD is not a commit.'
 [ "$head_commit" = "$expected_commit" ] || refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" 'HEAD does not equal --expected-commit.'
-for bound in $BOUND_FILES; do
+for bound in $BOUND_FILES $PLATFORM_BOUND_FILES; do
     if [ -L "$repo_root/$bound" ] || [ ! -f "$repo_root/$bound" ]; then
         refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" "Bound setup file is missing or not a regular file: $bound"
     fi
     git_in_repo ls-files --error-unmatch -- "$bound" >/dev/null 2>&1 || refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" "Bound setup file is not tracked: $bound"
     untracked=$(git_in_repo ls-files --others -- "$bound") || refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" "Cannot inspect untracked state: $bound"
     [ -z "$untracked" ] || refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" "An untracked substitute exists: $bound"
+    git_in_repo diff --cached --quiet HEAD -- "$bound" 2>/dev/null || refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" "Bound setup file has a staged difference: $bound"
+    git_in_repo diff --quiet -- "$bound" 2>/dev/null || refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" "Bound setup file has a working-tree difference: $bound"
     git_in_repo diff --quiet HEAD -- "$bound" 2>/dev/null || refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" "Bound setup file differs from --expected-commit: $bound"
 done
+
+# F4/F5: inspect all K7 transaction residue before creating setup/cache/temp.
+# Setup publication journals are recovered by the PowerShell entry under the
+# setup lock; the shell edge refuses them before it can mutate their root.
+if [ -e "$codex_home/.ai-instructions-txn" ] || [ -L "$codex_home/.ai-instructions-txn" ] ||
+   [ -e "$home/.ai-instructions-txn" ] || [ -L "$home/.ai-instructions-txn" ]; then
+    refuse interrupted-install "$EXIT_INTERRUPTED_INSTALL" 'An interrupted install transaction exists; recover it before rerunning setup.'
+fi
+for residue in "$codex_home"/.ai-instructions-install-* "$codex_home"/.ai-instructions-backup-*; do
+    if [ -e "$residue" ] || [ -L "$residue" ]; then
+        refuse interrupted-install "$EXIT_INTERRUPTED_INSTALL" 'Legacy install residue exists in CODEX_HOME; inspect it before rerunning setup.'
+    fi
+done
+if [ -e "$setup_root/.ai-instructions-txn" ] || [ -L "$setup_root/.ai-instructions-txn" ]; then
+    refuse interrupted-install "$EXIT_INTERRUPTED_INSTALL" 'An interrupted setup publication exists; rerun the PowerShell entry to recover it under the setup lock.'
+fi
 
 # --- Policy (derived TSV, K2) ------------------------------------------------
 tsv="$script_dir/setup-agent-environment.policy.tsv"
@@ -266,6 +287,21 @@ hash_file() {
     fi
 }
 
+# F2 metadata refusal is also pre-mutation. A cache owned by another uid,
+# broad-mode, linked, or substituted by a symlink never causes tmp/root writes.
+archive="$setup_root/cache/$asset_name"
+cache_present=0
+if [ -L "$archive" ]; then
+    refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The cached archive is a symbolic link.'
+fi
+if [ -e "$archive" ]; then
+    [ -f "$archive" ] || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The cached archive is not a regular file.'
+    [ -n "$(find "$archive" -prune -type f -user "$uid" -links 1 -perm 0600 -print)" ] || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The cached archive must be owned by the current uid, single-link and mode 0600.'
+    cache_present=1
+elif [ "$mode" = offline ]; then
+    refuse cache-missing "$EXIT_CACHE_MISSING" 'The verified archive cache is missing; rerun with --prepare while network access is allowed.'
+fi
+
 # --- Setup root and per-run temp (M4, M7, M8) --------------------------------
 mkdir -p "$setup_root" || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'Cannot create the setup root.'
 check_ancestors "$setup_root" 'The setup root'
@@ -291,16 +327,7 @@ if [ -L "$setup_root/pwsh" ] || [ -L "$canonical_dir" ]; then
 fi
 
 # --- S3: verified official archive in the cache ------------------------------
-archive="$setup_root/cache/$asset_name"
-if [ -L "$archive" ]; then
-    refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The cached archive is a symbolic link.'
-fi
-if [ -e "$archive" ]; then
-    [ -f "$archive" ] || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The cached archive is not a regular file.'
-    [ "$(hash_file "$archive")" = "$asset_sha" ] || refuse archive-hash-mismatch "$EXIT_ARCHIVE_HASH_MISMATCH" 'The cached archive SHA-256 does not match the policy; inspect and remove it, then rerun --prepare.'
-elif [ "$mode" = offline ]; then
-    refuse cache-missing "$EXIT_CACHE_MISSING" 'The verified archive cache is missing; rerun with --prepare while network access is allowed.'
-else
+if [ "$cache_present" -eq 0 ]; then
     url=$(printf '%s\n' "$url_template" | sed -e "s/{version}/$version/g" -e "s/{assetName}/$asset_name/g")
     mkdir "$run_tmp/download"
     download="$run_tmp/download/$asset_name"
@@ -315,10 +342,24 @@ else
     fi
     [ -f "$download" ] && [ ! -L "$download" ] || refuse download-failed "$EXIT_DOWNLOAD_FAILED" 'The download did not produce a regular file.'
     [ "$(hash_file "$download")" = "$asset_sha" ] || refuse archive-hash-mismatch "$EXIT_ARCHIVE_HASH_MISMATCH" 'The downloaded archive SHA-256 does not match the policy.'
+    chmod 0600 "$download" || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The verified download cannot be made private.'
     # Same filesystem: the per-run temp directory lives below the setup root.
     mv -f "$download" "$archive" || refuse internal-error "$EXIT_INTERNAL_ERROR" 'Cannot move the verified archive into the cache.'
-    [ "$(hash_file "$archive")" = "$asset_sha" ] || refuse archive-hash-mismatch "$EXIT_ARCHIVE_HASH_MISMATCH" 'The cached archive changed after verification.'
+    [ -n "$(find "$archive" -prune -type f -user "$uid" -links 1 -perm 0600 -print)" ] || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The published cache file is not private and single-link.'
 fi
+
+# F2: copy without following a final symlink into this run's private directory.
+# Hashing, tar listing/extraction and the PowerShell OfflineCache all use only
+# this immutable-for-the-run snapshot, never the cache pathname again.
+archive_snapshot="$run_tmp/$asset_name"
+cp -P "$archive" "$archive_snapshot" || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The cached archive cannot be copied without following links.'
+if [ -L "$archive_snapshot" ] || [ ! -f "$archive_snapshot" ]; then
+    refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The private archive snapshot is not a regular file.'
+fi
+chmod 0600 "$archive_snapshot" || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The private archive snapshot cannot be protected.'
+[ -n "$(find "$archive_snapshot" -prune -type f -user "$uid" -links 1 -perm 0600 -print)" ] || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The private archive snapshot is not owned, single-link and mode 0600.'
+[ "$(hash_file "$archive_snapshot")" = "$asset_sha" ] || refuse archive-hash-mismatch "$EXIT_ARCHIVE_HASH_MISMATCH" 'The private archive snapshot SHA-256 does not match the policy.'
+archive="$archive_snapshot"
 
 # Defence in depth (M9): member names and types are checked before extraction,
 # and the extracted tree must contain only single-link files and directories.

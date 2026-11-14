@@ -291,6 +291,26 @@ function ConvertFrom-AgentEnvironmentSetupStoredRuntimeReceipt {
     return $copy
 }
 
+# F3: a valid receipt is useful only for the canonical layout selected for this
+# run. Compare the un-resolved physical path spellings ordinally before K15 or
+# re-exec, so a receipt cannot redirect verification to a different copy.
+function Assert-AgentEnvironmentSetupRuntimeReceiptLayout {
+    param([Parameter(Mandatory = $true)] $Receipt,[Parameter(Mandatory = $true)] $Layout)
+    if ($null -eq $Receipt.PSObject.Properties['executablePath'] -or
+        $null -eq $Receipt.PSObject.Properties['runtimeClosure'] -or
+        $null -eq $Receipt.runtimeClosure -or
+        $null -eq $Receipt.runtimeClosure.PSObject.Properties['rootPath']) {
+        throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed 'The runtime receipt lacks layout binding fields.')
+    }
+    $executable = [IO.Path]::GetFullPath([string]$Receipt.executablePath)
+    $root = [IO.Path]::GetFullPath([string]$Receipt.runtimeClosure.rootPath)
+    if (-not [string]::Equals($executable,[string]$Layout.RuntimeExecutable,[StringComparison]::Ordinal) -or
+        -not [string]::Equals($root,[string]$Layout.RuntimeDirectory,[StringComparison]::Ordinal)) {
+        throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed 'The runtime receipt is not bound to the canonical setup layout.')
+    }
+    return $Receipt
+}
+
 # Directory-entry probe that also sees dangling links (Test-Path does not).
 function Get-AgentEnvironmentSetupEntry {
     param([Parameter(Mandatory = $true)][string] $Parent, [Parameter(Mandatory = $true)][string] $Leaf)
@@ -308,7 +328,11 @@ function Get-AgentEnvironmentSetupEntry {
 }
 
 function Get-AgentEnvironmentSetupResidue {
-    param([Parameter(Mandatory = $true)][string] $CodexHome, [Parameter(Mandatory = $true)][string] $UserHome)
+    param(
+        [Parameter(Mandatory = $true)][string] $CodexHome,
+        [Parameter(Mandatory = $true)][string] $UserHome,
+        [Parameter(Mandatory = $true)][string] $SetupRoot
+    )
     $found = [Collections.Generic.List[object]]::new()
     $codexTxn = Get-AgentEnvironmentSetupEntry $CodexHome '.ai-instructions-txn'
     if ($null -ne $codexTxn) { $found.Add([pscustomobject]@{ Scope = 'codex-home'; Kind = 'transaction-store'; Path = $codexTxn.Path }) }
@@ -322,6 +346,8 @@ function Get-AgentEnvironmentSetupResidue {
     }
     $userTxn = Get-AgentEnvironmentSetupEntry $UserHome '.ai-instructions-txn'
     if ($null -ne $userTxn) { $found.Add([pscustomobject]@{ Scope = 'user-home'; Kind = 'transaction-store'; Path = $userTxn.Path }) }
+    $setupTxn = Get-AgentEnvironmentSetupEntry $SetupRoot '.ai-instructions-txn'
+    if ($null -ne $setupTxn) { $found.Add([pscustomobject]@{ Scope = 'setup-root'; Kind = 'setup-publication-store'; Path = $setupTxn.Path }) }
     return [object[]]$found.ToArray()
 }
 
@@ -348,9 +374,16 @@ function Get-AgentEnvironmentSetupPlan {
         runtimeReceipt = (& $display (Join-Path $layout.ReceiptDirectory $layout.RuntimeReceiptLeaf))
         assetName = $asset.Name; deferredSteps = [string[]]@($script:AgentEnvironmentSetupDeferredSteps)
     }
-    $residue = @(Get-AgentEnvironmentSetupResidue -CodexHome ([IO.Path]::GetFullPath($CodexHome)) -UserHome $layout.UserHome)
+    $residue = @(Get-AgentEnvironmentSetupResidue -CodexHome ([IO.Path]::GetFullPath($CodexHome)) -UserHome $layout.UserHome -SetupRoot $layout.SetupRoot)
     if ($residue.Count -gt 0) {
         $plan.residue = @($residue | ForEach-Object { & $display $_.Path })
+        $externalResidue = @($residue | Where-Object { $_.Scope -cne 'setup-root' })
+        if ($externalResidue.Count -eq 0) {
+            $plan.decision = 'recover-setup'
+            $plan.reason = 'An interrupted setup publication exists and must be recovered under the setup lock.'
+            $plan.recoverCommand = 'Rerun the same setup command to recover the setup publication.'
+            return [pscustomobject]$plan
+        }
         $plan.code = 'interrupted-install'
         $codexTxn = @($residue | Where-Object { $_.Scope -ceq 'codex-home' -and $_.Kind -ceq 'transaction-store' }).Count -gt 0
         $legacy = @($residue | Where-Object { $_.Kind -ceq 'legacy-install-residue' }).Count -gt 0
@@ -529,20 +562,115 @@ function Read-AgentEnvironmentSetupFile {
     } finally { $parent.Dispose() }
 }
 
-# M4: write setup-owned files through Publish-PlatformFile with a private
-# transaction directory under the setup root (never under CODEX_HOME).
+function Test-AgentEnvironmentSetupStateEqual {
+    param([AllowNull()] $Actual,[Parameter(Mandatory = $true)] $Expected)
+    if ($null -eq $Actual) { return (-not [bool]$Expected.exists) }
+    if (-not [bool]$Expected.exists -or [string]$Actual.sha256 -cne [string]$Expected.sha256 -or [int64]$Actual.length -ne [int64]$Expected.length) { return $false }
+    if ($null -ne $Expected.identity) {
+        if ($null -eq $Actual.identity -or [string]$Actual.identity.kind -cne [string]$Expected.identity.kind -or
+            [string]$Actual.identity.device -cne [string]$Expected.identity.device -or
+            [string]$Actual.identity.fileId -cne [string]$Expected.identity.fileId) { return $false }
+    }
+    return $true
+}
+
+function Get-AgentEnvironmentSetupLeafState {
+    param([Parameter(Mandatory = $true)] $ParentLease,[Parameter(Mandatory = $true)][string] $ParentPath,[Parameter(Mandatory = $true)][string] $Leaf)
+    $entry = Get-AgentEnvironmentSetupEntry $ParentPath $Leaf
+    if ($null -eq $entry) { return $null }
+    if ($entry.Kind -cne 'file') { throw (New-AgentEnvironmentSetupRefusal interrupted-install "Setup transaction member '$Leaf' is not a regular file.") }
+    $lease = Open-PlatformFile -ParentLease $ParentLease -Leaf $Leaf -Access Read -CreateMode OpenExisting
+    try { return (Get-AgentEnvironmentSetupFileState $lease).State } finally { $lease.Dispose() }
+}
+
+function Remove-AgentEnvironmentSetupTransactionFile {
+    param([Parameter(Mandatory = $true)] $Transaction,[Parameter(Mandatory = $true)][string] $TransactionPath,[Parameter(Mandatory = $true)][string] $Leaf)
+    $state = Get-AgentEnvironmentSetupLeafState $Transaction $TransactionPath $Leaf
+    if ($null -ne $state) { Remove-PlatformOwnedFile -ParentLease $Transaction -Leaf $Leaf -ExpectedState $state | Out-Null }
+}
+
+function Invoke-AgentEnvironmentSetupFailpoint {
+    param([Parameter(Mandatory = $true)][string] $Name)
+    if ([Environment]::GetEnvironmentVariable('AI_INSTRUCTIONS_SETUP_FAILPOINT') -ceq $Name) {
+        throw (New-AgentEnvironmentSetupRefusal interrupted-install "Setup publication failpoint '$Name' interrupted the transaction." 'Rerun the same setup command to recover the setup publication.')
+    }
+}
+
+# F5: recover setup-owned publication journals while the caller holds setup.lock.
+# Recovery is compare-and-swap based: only the journal's exact expected or desired
+# file identity is accepted; any substituted or ambiguous state refuses.
+function Repair-AgentEnvironmentSetupTransactions {
+    param([Parameter(Mandatory = $true)][string] $SetupRoot)
+    $storePath = Join-Path $SetupRoot '.ai-instructions-txn'
+    $storeEntry = Get-AgentEnvironmentSetupEntry $SetupRoot '.ai-instructions-txn'
+    if ($null -eq $storeEntry) { return }
+    if ($storeEntry.Kind -cne 'directory') { throw (New-AgentEnvironmentSetupRefusal interrupted-install 'The setup transaction store is not a directory.') }
+    $store = Open-PlatformDirectory -Root $SetupRoot -RelativePath '.ai-instructions-txn'
+    try {
+        foreach ($transactionPath in @([IO.Directory]::EnumerateFileSystemEntries($storePath) | Sort-Object)) {
+            $transactionId = [IO.Path]::GetFileName($transactionPath)
+            $entry = Get-AgentEnvironmentSetupEntry $storePath $transactionId
+            if ($transactionId -cnotmatch '^[0-9a-f]{32}$' -or $null -eq $entry -or $entry.Kind -cne 'directory') { throw (New-AgentEnvironmentSetupRefusal interrupted-install 'The setup transaction store contains an unrecognized entry.') }
+            $members = @([IO.Directory]::EnumerateFileSystemEntries($transactionPath) | ForEach-Object { [IO.Path]::GetFileName($_) })
+            if (@($members | Where-Object { $_ -cnotin @('journal.json','stage','displaced') }).Count -ne 0 -or 'journal.json' -cnotin $members) {
+                throw (New-AgentEnvironmentSetupRefusal interrupted-install "Setup transaction '$transactionId' has an incomplete or unknown journal closure.")
+            }
+            $transaction = Open-PlatformDirectory -Root $SetupRoot -RelativePath ".ai-instructions-txn/$transactionId"
+            $parent = $null; $stage = $null
+            try {
+                $journalLease = Open-PlatformFile -ParentLease $transaction -Leaf 'journal.json' -Access Read -CreateMode OpenExisting
+                try { $journalBytes = (Get-AgentEnvironmentSetupFileState $journalLease).Bytes } finally { $journalLease.Dispose() }
+                try { $journal = [Text.UTF8Encoding]::new($false,$true).GetString($journalBytes) | ConvertFrom-Json -ErrorAction Stop }
+                catch { throw (New-AgentEnvironmentSetupRefusal interrupted-install "Setup transaction '$transactionId' has an invalid journal.") }
+                if ([int]$journal.schemaVersion -ne 1 -or [string]$journal.kind -cne 'agent-environment-setup-publication' -or
+                    [string]$journal.transactionId -cne $transactionId -or [string]$journal.phase -cne 'prepared' -or
+                    [string]$journal.directory -cne 'receipts' -or [string]$journal.leaf -cnotmatch '^[A-Za-z0-9][A-Za-z0-9.-]*\.json$') {
+                    throw (New-AgentEnvironmentSetupRefusal interrupted-install "Setup transaction '$transactionId' journal identity or phase is invalid.")
+                }
+                $parentPath = Join-Path $SetupRoot ([string]$journal.directory)
+                $parent = Open-PlatformDirectory -Root $SetupRoot -RelativePath ([string]$journal.directory) -CreatePrivate
+                $targetState = Get-AgentEnvironmentSetupLeafState $parent $parentPath ([string]$journal.leaf)
+                $desiredAtTarget = Test-AgentEnvironmentSetupStateEqual $targetState $journal.desiredState
+                if (-not $desiredAtTarget) {
+                    if (-not (Test-AgentEnvironmentSetupStateEqual $targetState $journal.expectedState)) { throw (New-AgentEnvironmentSetupRefusal interrupted-install "Setup transaction '$transactionId' target differs from both expected states.") }
+                    $stageState = Get-AgentEnvironmentSetupLeafState $transaction $transactionPath 'stage'
+                    if (-not (Test-AgentEnvironmentSetupStateEqual $stageState $journal.desiredState)) { throw (New-AgentEnvironmentSetupRefusal interrupted-install "Setup transaction '$transactionId' stage differs from its journal.") }
+                    $stage = Open-PlatformFile -ParentLease $transaction -Leaf 'stage' -Access ReadWrite -CreateMode OpenExisting
+                    Publish-PlatformFile -ParentLease $parent -Leaf ([string]$journal.leaf) -TransactionLease $transaction -StageLease $stage -ExpectedState $journal.expectedState `
+                        -DisplacedLeaf $(if ([bool]$journal.expectedState.exists) { 'displaced' } else { $null }) -ExpectedStage $journal.desiredState -NoReplace:(-not [bool]$journal.expectedState.exists) | Out-Null
+                    $stage.Dispose(); $stage = $null
+                }
+                Remove-AgentEnvironmentSetupTransactionFile $transaction $transactionPath 'displaced'
+                Remove-AgentEnvironmentSetupTransactionFile $transaction $transactionPath 'stage'
+                Remove-AgentEnvironmentSetupTransactionFile $transaction $transactionPath 'journal.json'
+            } finally {
+                if ($null -ne $stage) { $stage.Dispose() }
+                if ($null -ne $parent) { $parent.Dispose() }
+                $transaction.Dispose()
+            }
+            [IO.Directory]::Delete($transactionPath,$false)
+        }
+    } finally { $store.Dispose() }
+    [IO.Directory]::Delete($storePath,$false)
+}
+
+# M4/F5: publish setup-owned files through a journaled private transaction under
+# the setup root. A crash at staging, rename, or displaced cleanup leaves enough
+# durable identity/expected-state evidence for Repair-* to finish safely.
 function Publish-AgentEnvironmentSetupFile {
     param(
         [Parameter(Mandatory = $true)][string] $SetupRoot,
-        [Parameter(Mandatory = $true)][string] $Directory,
-        [Parameter(Mandatory = $true)][string] $Leaf,
+        [Parameter(Mandatory = $true)][ValidateSet('receipts')][string] $Directory,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9.-]*\.json$')][string] $Leaf,
         [Parameter(Mandatory = $true)][byte[]] $Bytes,
         [switch] $NoReplace
     )
     $transactionId = [guid]::NewGuid().ToString('N')
     $transactionStore = Open-PlatformDirectory -Root $SetupRoot -RelativePath '.ai-instructions-txn' -CreatePrivate
-    $transaction = $null; $parent = $null; $stage = $null; $displaced = $null
+    $transaction = $null; $parent = $null; $stage = $null; $displaced = $null; $journalLease = $null
     $transactionPath = Join-Path (Join-Path $SetupRoot '.ai-instructions-txn') $transactionId
+    $completed = $false
+    $journalCreated = $false
     try {
         $transaction = Open-PlatformDirectory -Root $SetupRoot -RelativePath ".ai-instructions-txn/$transactionId" -CreatePrivate
         $parent = Open-PlatformDirectory -Root $SetupRoot -RelativePath $Directory -CreatePrivate
@@ -559,27 +687,47 @@ function Publish-AgentEnvironmentSetupFile {
         $stageState = Get-AgentEnvironmentSetupFileState $stage
         if ($stageState.State.sha256 -cne (Get-AgentEnvironmentSetupSha256Bytes $Bytes)) { throw 'The staged setup file differs from its source bytes.' }
         $expected = if ($null -eq $current) { [pscustomobject][ordered]@{ exists = $false; sha256 = $null; length = $null; identity = $null } } else { $current }
+        $journal = [pscustomobject][ordered]@{
+            schemaVersion = 1; kind = 'agent-environment-setup-publication'; transactionId = $transactionId; phase = 'prepared'
+            directory = $Directory; leaf = $Leaf; expectedState = $expected; desiredState = $stageState.State
+        }
+        $journalBytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-AgentEnvironmentSetupJsonLine $journal) + "`n")
+        $journalLease = Open-PlatformFile -ParentLease $transaction -Leaf 'journal.json' -Access ReadWrite -CreateMode CreateNew
+        $journalLease.WriteNewBytes($journalBytes)
+        [void](Get-AgentEnvironmentSetupFileState $journalLease)
+        $journalLease.Dispose(); $journalLease = $null
+        $journalCreated = $true
+        Invoke-AgentEnvironmentSetupFailpoint 'after-stage'
         Publish-PlatformFile -ParentLease $parent -Leaf $Leaf -TransactionLease $transaction -StageLease $stage -ExpectedState $expected `
             -DisplacedLeaf $(if ($null -eq $current) { $null } else { 'displaced' }) -ExpectedStage $stageState.State -NoReplace:($null -eq $current) | Out-Null
         $stage.Dispose(); $stage = $null
-        if ($null -ne $current) {
-            $displaced = Open-PlatformFile -ParentLease $transaction -Leaf 'displaced' -Access Read -CreateMode OpenExisting
-            $displacedState = (Get-AgentEnvironmentSetupFileState $displaced).State
-            $displaced.Dispose(); $displaced = $null
-            Remove-PlatformOwnedFile -ParentLease $transaction -Leaf 'displaced' -ExpectedState $displacedState | Out-Null
-        }
+        Invoke-AgentEnvironmentSetupFailpoint 'after-rename'
+        if ($null -ne $current) { Remove-AgentEnvironmentSetupTransactionFile $transaction $transactionPath 'displaced' }
+        Invoke-AgentEnvironmentSetupFailpoint 'after-displaced-cleanup'
+        Remove-AgentEnvironmentSetupTransactionFile $transaction $transactionPath 'journal.json'
+        $completed = $true
     }
     finally {
+        if (-not $journalCreated -and $null -ne $transaction) {
+            if ($null -ne $stage) { $stage.Dispose(); $stage = $null }
+            Remove-AgentEnvironmentSetupTransactionFile $transaction $transactionPath 'stage'
+        }
+        if ($null -ne $journalLease) { $journalLease.Dispose() }
         if ($null -ne $displaced) { $displaced.Dispose() }
         if ($null -ne $stage) { $stage.Dispose() }
         if ($null -ne $parent) { $parent.Dispose() }
         if ($null -ne $transaction) { $transaction.Dispose() }
         $transactionStore.Dispose()
+        if (-not $journalCreated) {
+            if ([IO.Directory]::Exists($transactionPath)) { [IO.Directory]::Delete($transactionPath,$false) }
+            $storePath = Join-Path $SetupRoot '.ai-instructions-txn'
+            if ([IO.Directory]::Exists($storePath)) { [IO.Directory]::Delete($storePath,$false) }
+        }
     }
-    # Only the now-empty, setup-owned transaction directory is removed; a
-    # non-empty or substituted directory fails instead of being deleted recursively.
-    if ([IO.Directory]::Exists($transactionPath)) { [IO.Directory]::Delete($transactionPath,$false) }
-    try { [IO.Directory]::Delete((Join-Path $SetupRoot '.ai-instructions-txn'),$false) } catch [IO.IOException] { }
+    if ($completed) {
+        [IO.Directory]::Delete($transactionPath,$false)
+        [IO.Directory]::Delete((Join-Path $SetupRoot '.ai-instructions-txn'),$false)
+    }
 }
 
 function New-AgentEnvironmentSetupReceipt {
@@ -646,8 +794,8 @@ Export-ModuleMember -Function @(
     'Assert-AgentEnvironmentSetupPolicyTsv','Get-AgentEnvironmentSetupRid','Get-AgentEnvironmentSetupPolicyAsset',
     'Get-AgentEnvironmentSetupLayout','ConvertTo-AgentEnvironmentSetupHomePath','ConvertFrom-AgentEnvironmentSetupHomePath',
     'ConvertTo-AgentEnvironmentSetupSanitizedText','ConvertTo-AgentEnvironmentSetupStoredRuntimeReceipt',
-    'ConvertFrom-AgentEnvironmentSetupStoredRuntimeReceipt','Get-AgentEnvironmentSetupPlan',
+    'ConvertFrom-AgentEnvironmentSetupStoredRuntimeReceipt','Assert-AgentEnvironmentSetupRuntimeReceiptLayout','Get-AgentEnvironmentSetupPlan',
     'Assert-AgentEnvironmentSetupPhysicalPath','Get-AgentEnvironmentSetupUserHome','Assert-AgentEnvironmentSetupCodexHome',
     'Assert-AgentEnvironmentSetupCommit','Test-AgentEnvironmentSetupSameFile','Get-AgentEnvironmentSetupChildEnvironment','Read-AgentEnvironmentSetupFile',
-    'Publish-AgentEnvironmentSetupFile','New-AgentEnvironmentSetupReceipt','ConvertTo-AgentEnvironmentSetupJsonLine'
+    'Repair-AgentEnvironmentSetupTransactions','Publish-AgentEnvironmentSetupFile','New-AgentEnvironmentSetupReceipt','ConvertTo-AgentEnvironmentSetupJsonLine'
 )
