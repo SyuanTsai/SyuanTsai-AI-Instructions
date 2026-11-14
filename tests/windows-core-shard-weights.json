@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "partitionCount": 8,
+  "partitionCount": 9,
   "weights": {
     "install-ai-instructions-bootstrap.part1.Tests.ps1": 17,
     "install-ai-instructions-bootstrap.part2.Tests.ps1": 17,
@@ -16,6 +16,7 @@
     "cleanup-ai-instructions-pollution.Tests.ps1": 2,
     "standard-validation-runner.Tests.ps1": 2,
     "bootstrap-ai-instructions-multisource.Tests.ps1": 1,
-    "agent-artifact-remediation.Tests.ps1": 1
+    "agent-artifact-remediation.Tests.ps1": 1,
+    "setup-agent-environment.Tests.ps1": 5
   }
 }
