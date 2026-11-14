@@ -5099,6 +5099,24 @@ function Test-RepositoryTransactionDisplacedMetadataEqual {
     return [string]$Actual.kind-ceq'unix-mode'-and[string]$Actual.mode-ceq[string]$Expected.mode-and[uint64]$Actual.uid-eq[uint64]$Expected.uid-and[uint64]$Actual.gid-eq[uint64]$Expected.gid
 }
 
+function Get-RepositoryTransactionObservedAfterFromLease {
+    param([Parameter(Mandatory=$true)][object]$Lease)
+    if(-not$IsWindows){return $null}
+    $permissions=Get-PlatformPermissions -Lease $Lease
+    $descriptor=[Security.AccessControl.RawSecurityDescriptor]::new([string]$permissions.sddl)
+    $dacl=$descriptor.DiscretionaryAcl
+    [byte[]]$aclBytes=$null
+    if($null-ne$dacl){$aclBytes=[byte[]]::new($dacl.BinaryLength);$dacl.GetBinaryForm($aclBytes,0)}
+    return [pscustomobject][ordered]@{
+        dacl=[pscustomobject][ordered]@{
+            isNull=$null-eq$dacl
+            isProtected=($descriptor.ControlFlags-band[Security.AccessControl.ControlFlags]::DiscretionaryAclProtected)-ne0
+            aclBase64=if($null-eq$dacl){$null}else{[Convert]::ToBase64String($aclBytes)}
+        }
+        readOnly=[bool]$permissions.readOnly
+    }
+}
+
 function Restore-RepositoryTransactionDisplacedMetadata {
     # Three-state metadata CAS for an original file that undo has placed back at its target.
     # Callers invoke this unconditionally; only this function decides whether metadata may be applied:
@@ -5131,7 +5149,7 @@ function Restore-RepositoryTransactionDisplacedMetadata {
             # remains a third state and is never overwritten.
             $matchesPublishedAfter=$false
             if(-not$matchesDisplacedAfter-and$null-ne$Operation.observedAfter){
-                $liveObservedAfter=Get-RepositoryTransactionObservedAfter -Journal $Journal -Operation $Operation
+                $liveObservedAfter=Get-RepositoryTransactionObservedAfterFromLease -Lease $lease
                 $matchesPublishedAfter=Test-RepositoryTransactionObservedAfterEqual -Actual $liveObservedAfter -Expected $Operation.observedAfter
             }
             if(-not$matchesDisplacedAfter-and-not$matchesPublishedAfter){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message $thirdState)}
