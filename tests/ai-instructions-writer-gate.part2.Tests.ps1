@@ -631,6 +631,45 @@ exit /b %errorlevel%
         finally{$lease.Dispose()}
         { [IO.File]::AppendAllText($path,"# released`n",[Text.UTF8Encoding]::new($false)) }|Should Not Throw
     }
+
+    # Scenario: Shared exclude composition runs for a TargetRoot spelled through a directory junction while Git lists the same worktree by its real path.
+    # Purpose: Identify the current worktree by Git directory identity so its stale on-disk manifest never re-enters the union, while another worktree is still composed.
+    It 'InterT175_skips_the_current_worktree_by_Git_directory_identity_through_a_junction_TargetRoot' {
+        $root=Join-Path $script:ExternalRoot 'junction-current';New-Item -ItemType Directory -Path $root|Out-Null
+        $real=Join-Path $root 'real';New-Item -ItemType Directory -Path $real|Out-Null
+        & git -C $real init --quiet;$LASTEXITCODE|Should Be 0
+        [IO.File]::WriteAllText((Join-Path $real 'README.md'),"fixture`n",[Text.UTF8Encoding]::new($false))
+        & git -C $real add README.md;& git -C $real -c user.name=fixture -c user.email=fixture@example.invalid commit --quiet -m fixture;$LASTEXITCODE|Should Be 0
+        New-Item -ItemType Directory -Force -Path (Join-Path $real '.codex')|Out-Null
+        [IO.File]::WriteAllText((Join-Path $real '.codex\ai-instructions.manifest.json'),'{ stale current-worktree manifest',[Text.UTF8Encoding]::new($false))
+        $junction=Join-Path $root 'junction';New-Item -ItemType Junction -Path $junction -Target $real|Out-Null
+        $linked=Join-Path $root 'linked'
+        try{
+            (@(& git -C $junction worktree list --porcelain)[0])|Should Match 'junction-current[\\/]real$'
+            $tokens=$null;$errors=$null
+            $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $script:RepositoryRoot 'scripts\bootstrap-ai-instructions.ps1'),[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
+            $nativeType=@($ast.EndBlock.Statements|Where-Object{$_-is[Management.Automation.Language.IfStatementAst]-and$_.Extent.Text.Contains("'CodexAiInstructions.NativeFileMutation' -as [type]")})
+            $nativeType.Count|Should Be 1
+            Invoke-Expression $nativeType[0].Extent.Text
+            foreach($definition in @($ast.EndBlock.Statements|Where-Object{$_-is[Management.Automation.Language.FunctionDefinitionAst]})){Invoke-Expression $definition.Extent.Text}
+            $GitExecutable=(Get-Command git -CommandType Application|Select-Object -First 1).Source
+            $manifestRelativePath='.codex/ai-instructions.manifest.json'
+
+            @(Get-SharedManagedExcludePaths -Repository ([IO.Path]::GetFullPath($junction)) -CurrentManagedPaths @('AGENTS.md'))|Should Be @('AGENTS.md')
+
+            & git -C $real worktree add --quiet -b junction-linked-fixture $linked;$LASTEXITCODE|Should Be 0
+            New-Item -ItemType Directory -Force -Path (Join-Path $linked '.codex')|Out-Null
+            [IO.File]::WriteAllText((Join-Path $linked '.codex\ai-instructions.manifest.json'),'{ invalid linked manifest',[Text.UTF8Encoding]::new($false))
+            $message=$null
+            try{Get-SharedManagedExcludePaths -Repository ([IO.Path]::GetFullPath($junction)) -CurrentManagedPaths @('AGENTS.md')|Out-Null}catch{$message=$_.Exception.Message}
+            $message|Should Match 'linked worktree manifest is invalid'
+            $message|Should Match 'junction-current[\\/]linked[\\/]\.codex[\\/]ai-instructions\.manifest\.json'
+        }
+        finally{
+            if(Test-Path -LiteralPath $linked){& git -C $real worktree remove --force $linked|Out-Null}
+            if(Test-Path -LiteralPath $junction){[IO.Directory]::Delete($junction)}
+        }
+    }
 }
 
 $script:HasWindowsPowerShell51=$false

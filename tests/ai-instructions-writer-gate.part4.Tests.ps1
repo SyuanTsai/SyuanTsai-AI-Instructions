@@ -309,6 +309,36 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         @(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force -ErrorAction SilentlyContinue).Count|Should -Be 0
     }
 
+    # Scenario: A displacing write-file operation is still pending when the process stops, then the user changes only the target's read-only attribute.
+    # Purpose: Never apply prepared displaced metadata to an operation that was never displaced; recovery keeps the user's bytes, identity, permissions, and attributes exactly.
+    It 'InterT173_recovery_never_applies_displaced_metadata_to_a_pending_operation' {
+        $discovery=Join-Path $script:ExternalRoot 'pending-metadata-discovery';Copy-Item -LiteralPath $script:P9cSeeds.False -Destination $discovery -Recurse
+        $prepared=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'pending-metadata-discovery-runtime') -Failpoint after-journal-prepared -RecoveryPath NextRun
+        (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $discovery -BootstrapPath $prepared).ExitCode|Should -Not -Be 0
+        $transaction=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $discovery) -Directory -Force);$journal=Get-Content -Raw -LiteralPath (Join-Path $transaction[0].FullName 'journal.json')|ConvertFrom-Json
+        $written=@($journal.operations|Where-Object{[string]$_.kind-ceq'write-file'-and[string]$_.target.kind-ceq'repository-relative'}|Sort-Object sequence|Select-Object -First 1);$written.Count|Should -Be 1
+
+        $target=Join-Path $script:ExternalRoot 'pending-metadata';Copy-Item -LiteralPath $script:P9cSeeds.False -Destination $target -Recurse
+        $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'pending-metadata-runtime') -Failpoint ("before-operation-$($written[0].sequence)") -RecoveryPath NextRun
+        (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap).ExitCode|Should -Not -Be 0
+        $active=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force);$active.Count|Should -Be 1
+        $liveJournal=Get-Content -Raw -LiteralPath (Join-Path $active[0].FullName 'journal.json')|ConvertFrom-Json
+        $liveOperation=@($liveJournal.operations|Where-Object sequence -eq $written[0].sequence)[0]
+        [string]$liveOperation.state|Should -Be pending
+        $null-eq$liveOperation.displacedAfterMetadata|Should -Be $true
+        $null-ne$liveOperation.displacedMetadata|Should -Be $true
+        $targetPath=Join-Path $target ([string]$liveOperation.target.value)
+        (Get-Item -Force -LiteralPath $targetPath).IsReadOnly=$true
+        $evidenceBefore=Get-P9cFileEvidence $targetPath
+
+        $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'pending-metadata-recovery') -Failpoint RecoveryOnly
+        (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $recovery).ExitCode|Should -Not -Be 0
+
+        (Get-P9cFileEvidence $targetPath|ConvertTo-Json -Depth 8 -Compress)|Should -Be ($evidenceBefore|ConvertTo-Json -Depth 8 -Compress)
+        (Get-Item -Force -LiteralPath $targetPath).IsReadOnly|Should -Be $true
+        @(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force -ErrorAction SilentlyContinue).Count|Should -Be 0
+    }
+
     # Scenario: Attached and detached repositories reach applied state and crash before commit publication, while an unborn repository follows main's pre-mutation skip contract.
     # Purpose: Recover committed-HEAD modes exactly and prove the unborn skip changes neither Git object bytes nor any ref.
     It 'InterT150_recovers_attached_detached_and_unborn_HEAD_transactions' {
@@ -589,7 +619,7 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
         try{
             $scopeRoot=[IO.Path]::GetFullPath((Join-Path $TestDrive 'trusted-transition-repo'));$git=Join-Path $scopeRoot '.git'
             $identity=[pscustomobject][ordered]@{kind='windows-file-id';device='00000001';fileId='00000002'};$permissions=[pscustomobject][ordered]@{kind='windows-sddl';sddl='D:PAI(A;;FA;;;SY)';readOnly=$false}
-            $previous=[pscustomobject][ordered]@{schemaVersion=2;kind='ai-instructions-install-transaction';transactionId=('a'*32);createdAtUtc='2026-11-12T00:00:00.0000000Z';owner=[pscustomobject][ordered]@{component='repo-bootstrap';processId=1;processStartIdentity='fixture'};platform=[pscustomobject][ordered]@{os='windows';architecture='x64'};lock=[pscustomobject][ordered]@{primitive='windows-fileshare';leaf='bootstrap-ai-instructions.lock'};generation=[pscustomobject][ordered]@{previousBundleSha256=$null;candidateBundleSha256=('b'*64)};scope=[pscustomobject][ordered]@{kind='repository';repositoryRoot=$scopeRoot;repositoryRootIdentity=$identity;commonGitDirectory=$git;gitDirectory=$git;indexPath=(Join-Path $git 'index');indexLockContentSha256=('9'*64);objectFormat='sha1';externalBackup=$null};phase='prepared';operations=@([pscustomobject][ordered]@{sequence=1;kind='create-file';role='instruction';method='stage-rename';target=[pscustomobject][ordered]@{kind='repository-relative';value='AGENTS.md'};before=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null};after=[pscustomobject][ordered]@{exists=$true;sha256=('a'*64);length=3;identity=$identity;permissions=$permissions};observedAfter=$null;displacedMetadata=$null;stageLeaf='operation-1.stage';backupLeaf=$null;quarantineLeaf=$null;state='pending'},[pscustomobject][ordered]@{sequence=2;kind='store-git-stash-evidence';role='personal-agent-evidence';method='stash-store';target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'};before=[pscustomobject][ordered]@{exists=$false;objectId=$null};after=[pscustomobject][ordered]@{exists=$true;objectId=$null};observedAfter=$null;displacedMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})}
+            $previous=[pscustomobject][ordered]@{schemaVersion=2;kind='ai-instructions-install-transaction';transactionId=('a'*32);createdAtUtc='2026-11-12T00:00:00.0000000Z';owner=[pscustomobject][ordered]@{component='repo-bootstrap';processId=1;processStartIdentity='fixture'};platform=[pscustomobject][ordered]@{os='windows';architecture='x64'};lock=[pscustomobject][ordered]@{primitive='windows-fileshare';leaf='bootstrap-ai-instructions.lock'};generation=[pscustomobject][ordered]@{previousBundleSha256=$null;candidateBundleSha256=('b'*64)};scope=[pscustomobject][ordered]@{kind='repository';repositoryRoot=$scopeRoot;repositoryRootIdentity=$identity;commonGitDirectory=$git;gitDirectory=$git;indexPath=(Join-Path $git 'index');indexLockContentSha256=('9'*64);objectFormat='sha1';externalBackup=$null};phase='prepared';operations=@([pscustomobject][ordered]@{sequence=1;kind='create-file';role='instruction';method='stage-rename';target=[pscustomobject][ordered]@{kind='repository-relative';value='AGENTS.md'};before=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null};after=[pscustomobject][ordered]@{exists=$true;sha256=('a'*64);length=3;identity=$identity;permissions=$permissions};observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf='operation-1.stage';backupLeaf=$null;quarantineLeaf=$null;state='pending'},[pscustomobject][ordered]@{sequence=2;kind='store-git-stash-evidence';role='personal-agent-evidence';method='stash-store';target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'};before=[pscustomobject][ordered]@{exists=$false;objectId=$null};after=[pscustomobject][ordered]@{exists=$true;objectId=$null};observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})}
             $clone={param($value)$parameters=@{InputObject=($value|ConvertTo-Json -Depth 30)};if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'};ConvertFrom-Json @parameters}
             $applying=&$clone $previous;$applying.phase='applying';{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $previous $applying}|Should -Not -Throw
             $withEvidence=&$clone $applying;$withEvidence.operations[1].after.objectId=('c'*40);$withEvidence.operations[1].state='applied';{&$module {param($left,$right)Assert-InstallJournalV2TrustedTransition $left $right|Out-Null} $applying $withEvidence}|Should -Not -Throw

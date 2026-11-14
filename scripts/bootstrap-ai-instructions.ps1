@@ -2067,6 +2067,28 @@ function Get-WorktreeGitPathSetCache {
     return ,$cache
 }
 
+function Get-WorktreeGitDirectoryKey {
+    # Stable identity of a worktree's absolute Git directory: the native directory file ID on Windows,
+    # otherwise the full path reported by Git.
+    param([Parameter(Mandatory = $true)][string] $Repository)
+    $gitDirectory = Get-RepositoryActiveGitDirectory -Repository $Repository
+    if ($IsWindows) { return 'windows-file-id:' + [CodexAiInstructions.NativeFileMutation]::GetDirectoryIdentity($gitDirectory) }
+    return 'path:' + [IO.Path]::GetFullPath($gitDirectory)
+}
+
+function Test-IsCurrentWorktreeRoot {
+    param(
+        [Parameter(Mandatory = $true)][string] $WorktreeRoot,
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string] $CurrentWorktreeKey
+    )
+    if (Test-ProjectPublicationPathEqual -Left ([IO.Path]::GetFullPath($WorktreeRoot)) -Right ([IO.Path]::GetFullPath($Repository))) { return $true }
+    if (-not (Test-Path -LiteralPath $WorktreeRoot -PathType Container)) { return $false }
+    try { $worktreeKey = Get-WorktreeGitDirectoryKey -Repository $WorktreeRoot }
+    catch { return $false }
+    return [string]::Equals($worktreeKey, $CurrentWorktreeKey, [StringComparison]::Ordinal)
+}
+
 function Get-SharedManagedExcludePaths {
     param(
         [Parameter(Mandatory = $true)][string] $Repository,
@@ -2083,8 +2105,15 @@ function Get-SharedManagedExcludePaths {
     }
     $worktreeRoots=@(Get-ManagedWorktreeRoots -Repository $Repository -Strict)
     $worktreeGitPathSets=Get-WorktreeGitPathSetCache -WorktreeRoots $worktreeRoots
+    # Identify the current worktree by its Git directory identity, not by path spelling, so a junction or subst TargetRoot
+    # cannot make the current worktree's stale on-disk manifest re-enter the shared union.
+    $currentWorktreeKey=Get-WorktreeGitDirectoryKey -Repository $Repository
+    $currentWorktreeRoots=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach($worktreeRoot in $worktreeRoots){
+        if(Test-IsCurrentWorktreeRoot -WorktreeRoot $worktreeRoot -Repository $Repository -CurrentWorktreeKey $currentWorktreeKey){[void]$currentWorktreeRoots.Add([string]$worktreeRoot)}
+    }
     foreach ($worktreeRoot in $worktreeRoots) {
-        if(Test-ProjectPublicationPathEqual -Left ([IO.Path]::GetFullPath($worktreeRoot)) -Right ([IO.Path]::GetFullPath($Repository))){continue}
+        if($currentWorktreeRoots.Contains([string]$worktreeRoot)){continue}
         $gitPathState=$worktreeGitPathSets[$worktreeRoot]
         $worktreeTrackedPaths=$gitPathState.Tracked
         $worktreeStagedPaths=$gitPathState.Staged
@@ -2131,7 +2160,7 @@ function Get-SharedManagedExcludePaths {
         $segments=$skillCandidatePath.Split('/');if($segments.Count-lt4){[void]$blockedSkillPaths.Add($skillCandidatePath);continue}
         $prefix=[string]::Join('/',[string[]]$segments[0..2])
         foreach($worktreeRoot in $worktreeRoots){
-            if(Test-ProjectPublicationPathEqual -Left ([IO.Path]::GetFullPath($worktreeRoot)) -Right ([IO.Path]::GetFullPath($Repository))){continue}
+            if($currentWorktreeRoots.Contains([string]$worktreeRoot)){continue}
             $groupRoot=Join-Path $worktreeRoot $prefix.Replace('/',[IO.Path]::DirectorySeparatorChar)
             if(-not(Test-Path -LiteralPath $groupRoot)){continue}
             $manifestPath=Join-Path $worktreeRoot $manifestRelativePath.Replace('/',[IO.Path]::DirectorySeparatorChar)
@@ -3601,6 +3630,47 @@ function New-ProjectPublicationContext {
         RepositoryIndexLock=$null
         ShouldStorePersonalAgentEvidence=$false
         PersonalAgentEvidenceStashBefore=$null
+        PlanningObservations=(New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal))
+    }
+}
+
+function Get-ProjectPublicationPathObservation {
+    # Observe one repository-relative target as raw bytes SHA-256, length, and file identity.
+    # Any entry that cannot be observed as a regular file is recorded as unobservable so that
+    # final manifest verification fails closed instead of silently skipping the path.
+    param([Parameter(Mandatory=$true)][string]$Repository,[Parameter(Mandatory=$true)][string]$RelativePath)
+    $absent=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null;unobservable=$null}
+    try{
+        $full=Join-Path $Repository $RelativePath.Replace('/',[IO.Path]::DirectorySeparatorChar)
+        $parent=[IO.Path]::GetDirectoryName($full);$leaf=[IO.Path]::GetFileName($full)
+        if(-not(Test-Path -LiteralPath $parent -PathType Container)-or-not(Test-Path -LiteralPath $full)){return $absent}
+        $item=Get-Item -Force -LiteralPath $full
+        if($item.PSIsContainer-or($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){return [pscustomobject][ordered]@{exists=$true;sha256=$null;length=$null;identity=$null;unobservable='not a regular file'}}
+        $parentLease=Open-PlatformDirectory -Root $parent -RootOnly
+        try{
+            $lease=Open-PlatformFile -ParentLease $parentLease -Leaf $leaf -Access Read -CreateMode OpenExisting
+            try{
+                [byte[]]$bytes=$lease.ReadAllBytes(268435456)
+                return [pscustomobject][ordered]@{exists=$true;sha256=(Get-ByteArraySha256 $bytes);length=[int64]$bytes.Length;identity=(ConvertTo-ProjectPublicationIdentity $lease.Observation);unobservable=$null}
+            }finally{$lease.Dispose()}
+        }finally{$parentLease.Dispose()}
+    }
+    catch{return [pscustomobject][ordered]@{exists=$true;sha256=$null;length=$null;identity=$null;unobservable=[string]$_.Exception.Message}}
+}
+
+function Test-ProjectPublicationPathObservationEqual {
+    param([Parameter(Mandatory=$true)][object]$Actual,[Parameter(Mandatory=$true)][object]$Expected)
+    if($null-ne$Actual.unobservable-or$null-ne$Expected.unobservable){return $false}
+    return Test-ProjectPublicationStateEqual $Actual $Expected
+}
+
+function Register-ProjectPublicationPlanningObservations {
+    # Record the planning-time observation of every path that the next manifest can own.
+    # Final manifest verification compares every manifest path without a publication operation against this value.
+    param([Parameter(Mandatory=$true)][object]$Context,[Parameter(Mandatory=$true)][AllowEmptyCollection()][string[]]$RelativePaths)
+    foreach($relativePath in @($RelativePaths|Sort-Object -Unique)){
+        if([string]::IsNullOrWhiteSpace($relativePath)-or$Context.PlanningObservations.ContainsKey($relativePath)){continue}
+        $Context.PlanningObservations.Add($relativePath,(Get-ProjectPublicationPathObservation -Repository ([string]$Context.Repository) -RelativePath $relativePath))
     }
 }
 
@@ -3768,18 +3838,32 @@ function Assert-ProjectSkillManifestFilesCurrent {
     param(
         [Parameter(Mandatory=$true)][string]$TargetRoot,
         [Parameter(Mandatory=$true)][AllowEmptyCollection()][object[]]$ManifestEntries,
-        [Parameter(Mandatory=$true)][AllowEmptyCollection()][string[]]$PublishedTargetPaths
+        [Parameter(Mandatory=$true)][AllowEmptyCollection()][string[]]$PublishedTargetPaths,
+        [AllowNull()][object]$PlanningObservations
     )
 
-    foreach($entry in @($ManifestEntries|Where-Object{
-        $null-ne$_.PSObject.Properties['artifactType']-and[string]$_.artifactType-ceq'skill'-and
-        $PublishedTargetPaths-ccontains[string]$_.targetPath
-    }|Sort-Object targetPath)){
+    # Closed rule: the verification set is every target path owned by the manifest at the end of this transaction,
+    # selected by path only. A path published by this transaction must match the manifest-declared SHA-256;
+    # every other path must still match its planning-time raw SHA-256 and file identity.
+    $published=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach($publishedTargetPath in $PublishedTargetPaths){[void]$published.Add([string]$publishedTargetPath)}
+    foreach($entry in @($ManifestEntries|Sort-Object targetPath)){
         $targetPath=[string]$entry.targetPath
         $targetFullPath=Join-Path $TargetRoot $targetPath.Replace('/',[IO.Path]::DirectorySeparatorChar)
-        Assert-ManagedPathDoesNotCrossReparsePoint -Root $TargetRoot -Path $targetFullPath -Context "Final project Skill manifest verification '$targetPath'"
-        if(-not(Test-Path -LiteralPath $targetFullPath -PathType Leaf)-or
-            (Get-RawContentHash -Path $targetFullPath)-cne[string]$entry.sha256){
+        if($published.Contains($targetPath)){
+            Assert-ManagedPathDoesNotCrossReparsePoint -Root $TargetRoot -Path $targetFullPath -Context "Final project Skill manifest verification '$targetPath'"
+            if(-not(Test-Path -LiteralPath $targetFullPath -PathType Leaf)-or
+                (Get-ManagedContentHash -Path $targetFullPath -TargetPath $targetPath)-cne[string]$entry.sha256){
+                throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project Skill manifest publication refused because final raw-byte verification failed: $targetPath")
+            }
+            continue
+        }
+        $planned=$null
+        if($null-eq$PlanningObservations-or-not$PlanningObservations.TryGetValue($targetPath,[ref]$planned)){
+            throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project Skill manifest publication refused because final raw-byte verification failed: $targetPath has no planning observation.")
+        }
+        $live=Get-ProjectPublicationPathObservation -Repository $TargetRoot -RelativePath $targetPath
+        if(-not(Test-ProjectPublicationPathObservationEqual -Actual $live -Expected $planned)){
             throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project Skill manifest publication refused because final raw-byte verification failed: $targetPath")
         }
     }
@@ -4965,17 +5049,45 @@ function Get-RepositoryTransactionObservedAfter {
     return [pscustomobject][ordered]@{dacl=$evidence.dacl;readOnly=[bool]$evidence.readOnly}
 }
 
+# Metadata snapshot/restore set: every displaced-file metadata capture and restore goes through these functions only.
+function ConvertTo-RepositoryTransactionMetadataSnapshot {
+    param([Parameter(Mandatory=$true)][object]$Permissions)
+    if([string]$Permissions.kind-ceq'windows-sddl'){
+        return [pscustomobject][ordered]@{kind='windows-sddl';sddl=[string]$Permissions.sddl;readOnly=[bool]$Permissions.readOnly}
+    }
+    if([string]$Permissions.kind-ceq'unix-mode'){
+        return [pscustomobject][ordered]@{kind='unix-mode';mode=[string]$Permissions.mode;uid=[uint64]$Permissions.uid;gid=[uint64]$Permissions.gid}
+    }
+    throw "Unsupported displaced repository file metadata kind '$($Permissions.kind)'."
+}
+
 function New-RepositoryTransactionDisplacedMetadataSnapshot {
     param([Parameter(Mandatory=$true)][object]$Before,[Parameter(Mandatory=$true)][ValidateSet('create-file','write-file','remove-file')][string]$Kind)
     if($Kind-ceq'create-file'){return $null}
     if(-not[bool]$Before.exists-or$null-eq$Before.permissions){throw 'A displaced repository file is missing its prepared permission snapshot.'}
-    if([string]$Before.permissions.kind-ceq'windows-sddl'){
-        return [pscustomobject][ordered]@{kind='windows-sddl';sddl=[string]$Before.permissions.sddl;readOnly=[bool]$Before.permissions.readOnly}
-    }
-    if([string]$Before.permissions.kind-ceq'unix-mode'){
-        return [pscustomobject][ordered]@{kind='unix-mode';mode=[string]$Before.permissions.mode;uid=[uint64]$Before.permissions.uid;gid=[uint64]$Before.permissions.gid}
-    }
-    throw "Unsupported displaced repository file metadata kind '$($Before.permissions.kind)'."
+    return ConvertTo-RepositoryTransactionMetadataSnapshot -Permissions $Before.permissions
+}
+
+function Test-RepositoryTransactionIdentityEqual {
+    param([AllowNull()][object]$Actual,[AllowNull()][object]$Expected)
+    if($null-eq$Actual-or$null-eq$Expected){return $false}
+    return [string]$Actual.kind-ceq[string]$Expected.kind-and
+        [string]::Equals([string]$Actual.device,[string]$Expected.device,[StringComparison]::OrdinalIgnoreCase)-and
+        [string]::Equals([string]$Actual.fileId,[string]$Expected.fileId,[StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-RepositoryTransactionDisplacedAfterMetadata {
+    # Read back the displaced original inside the private transaction directory after redo displaced it.
+    # The value is bound in the same journal generation that marks the operation applied.
+    param([Parameter(Mandatory=$true)][object]$Context,[Parameter(Mandatory=$true)][object]$Operation)
+    if([string]$Operation.kind-cnotin@('write-file','remove-file')){return $null}
+    $backupLeaf=[string]$Operation.backupLeaf
+    if(-not(Test-Path -LiteralPath (Join-Path (Get-RepositoryTransactionPath -Context $Context) $backupLeaf) -PathType Leaf)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction sequence $($Operation.sequence) did not leave its displaced original in the transaction directory.")}
+    $backupLease=Open-PlatformFile -ParentLease $Context.Lease -Leaf $backupLeaf -Access Read -CreateMode OpenExisting
+    try{
+        if(-not(Test-RepositoryTransactionIdentityEqual -Actual (ConvertTo-ProjectPublicationIdentity $backupLease.Observation) -Expected $Operation.before.identity)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction sequence $($Operation.sequence) displaced original identity differs from its prepared identity.")}
+        return ConvertTo-RepositoryTransactionMetadataSnapshot -Permissions (Get-PlatformPermissions -Lease $backupLease)
+    }finally{$backupLease.Dispose()}
 }
 
 function Test-RepositoryTransactionDisplacedMetadataEqual {
@@ -4988,14 +5100,28 @@ function Test-RepositoryTransactionDisplacedMetadataEqual {
 }
 
 function Restore-RepositoryTransactionDisplacedMetadata {
+    # Three-state metadata CAS for an original file that undo has placed back at its target.
+    # Callers invoke this unconditionally; only this function decides whether metadata may be applied:
+    #   never displaced (no journaled displaced-after value) -> no mutation
+    #   live == prepared original metadata                   -> no-op
+    #   live == journaled displaced-after metadata           -> apply the original and read it back
+    #   anything else                                        -> third state, no mutation
+    # The target handle is bound to the prepared original identity before any metadata is read or applied.
     param([Parameter(Mandatory=$true)][object]$Journal,[Parameter(Mandatory=$true)][object]$Operation)
-    if($null-eq$Operation.displacedMetadata){return}
+    if([string]$Operation.kind-cnotin@('write-file','remove-file')-or$null-eq$Operation.displacedMetadata){return}
+    $displacedAfter=if($null-ne$Operation.PSObject.Properties['displacedAfterMetadata']){$Operation.displacedAfterMetadata}else{$null}
+    if($null-eq$displacedAfter){return}
+    $thirdState="Repository transaction sequence $($Operation.sequence) role $($Operation.role) target $($Operation.target.value) is in a third state; evidence was retained for manual inspection and cleanup."
     $path=if([string]$Operation.target.kind-ceq'git-shared-exclude'){[string]$Operation.target.value}else{Join-Path ([string]$Journal.scope.repositoryRoot) ([string]$Operation.target.value).Replace('/',[IO.Path]::DirectorySeparatorChar)}
     $parent=[IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($path));$leaf=[IO.Path]::GetFileName($path)
     $parentLease=Open-PlatformDirectory -Root $parent -RootOnly
     try{
         $lease=Open-PlatformFile -ParentLease $parentLease -Leaf $leaf -Access Read -CreateMode OpenExisting
         try{
+            if(-not(Test-RepositoryTransactionIdentityEqual -Actual (ConvertTo-ProjectPublicationIdentity $lease.Observation) -Expected $Operation.before.identity)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message $thirdState)}
+            $live=ConvertTo-RepositoryTransactionMetadataSnapshot -Permissions (Get-PlatformPermissions -Lease $lease)
+            if(Test-RepositoryTransactionDisplacedMetadataEqual -Actual $live -Expected $Operation.displacedMetadata){return}
+            if(-not(Test-RepositoryTransactionDisplacedMetadataEqual -Actual $live -Expected $displacedAfter)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message $thirdState)}
             Set-PlatformPermissions -Lease $lease -Snapshot $Operation.displacedMetadata|Out-Null
             $readback=Get-PlatformPermissions -Lease $lease
             if(-not(Test-RepositoryTransactionDisplacedMetadataEqual -Actual $readback -Expected $Operation.displacedMetadata)){
@@ -5209,8 +5335,8 @@ function Invoke-RepositoryTransactionOperation {
     $current=Get-RepositoryTransactionOperationState $Journal $Operation
     $requiresEvidenceReuseCas=$Direction-ceq'redo'-and[string]$Operation.kind-ceq'update-git-ref'-and[string]$Operation.role-ceq'personal-agent-evidence-cas'
     if((Test-RepositoryTransactionStateEqual $Operation $current $destination)-and-not$requiresEvidenceReuseCas){
-        if($Direction-ceq'redo'){return Get-RepositoryTransactionObservedAfter -Journal $Journal -Operation $Operation}
-        if([string]$Operation.kind-cin@('write-file','remove-file')){Restore-RepositoryTransactionDisplacedMetadata -Journal $Journal -Operation $Operation}
+        if($Direction-ceq'redo'){return [pscustomobject][ordered]@{ObservedAfter=(Get-RepositoryTransactionObservedAfter -Journal $Journal -Operation $Operation);DisplacedAfterMetadata=$null}}
+        Restore-RepositoryTransactionDisplacedMetadata -Journal $Journal -Operation $Operation
         return
     }
     if(-not(Test-RepositoryTransactionStateEqual $Operation $current $source)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction sequence $($Operation.sequence) role $($Operation.role) target $($Operation.target.value) is in a third state; evidence was retained for manual inspection and cleanup.")}
@@ -5224,8 +5350,9 @@ function Invoke-RepositoryTransactionOperation {
         try{$manifestDocument=[Text.UTF8Encoding]::new($false,$true).GetString([IO.File]::ReadAllBytes($manifestStagePath))|ConvertFrom-Json -ErrorAction Stop}
         catch{throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project Skill manifest publication refused because the staged manifest could not be decoded: $($_.Exception.Message)" -InnerException $_.Exception)}
         if($null-eq$manifestDocument-or$null-eq$manifestDocument.PSObject.Properties['files']){throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message 'Project Skill manifest publication refused because the staged manifest has no files inventory.')}
-        $publishedProjectSkillPaths=@($Journal.operations|Where-Object{[string]$_.role-ceq'project-skill'-and[string]$_.kind-cin@('create-file','write-file')}|ForEach-Object{[string]$_.target.value})
-        Assert-ProjectSkillManifestFilesCurrent -TargetRoot $repository -ManifestEntries @($manifestDocument.files) -PublishedTargetPaths $publishedProjectSkillPaths
+        $publishedTargetPaths=@($Journal.operations|Where-Object{[string]$_.kind-cin@('create-file','write-file')-and[string]$_.target.kind-ceq'repository-relative'}|ForEach-Object{[string]$_.target.value})
+        $planningObservations=if($null-ne$Context.PSObject.Properties['PlanningObservations']){$Context.PlanningObservations}else{$null}
+        Assert-ProjectSkillManifestFilesCurrent -TargetRoot $repository -ManifestEntries @($manifestDocument.files) -PublishedTargetPaths $publishedTargetPaths -PlanningObservations $planningObservations
     }
     switch([string]$Operation.kind){
         {$_-in@('create-file','write-file','remove-file')} {
@@ -5284,11 +5411,11 @@ function Invoke-RepositoryTransactionOperation {
     }
     $readback=Get-RepositoryTransactionOperationState $Journal $Operation
     if(-not(Test-RepositoryTransactionStateEqual $Operation $readback $destination)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction sequence $($Operation.sequence) readback differs from its journal destination state.")}
-    if($Direction-ceq'redo'){return Get-RepositoryTransactionObservedAfter -Journal $Journal -Operation $Operation}
+    if($Direction-ceq'redo'){return [pscustomobject][ordered]@{ObservedAfter=(Get-RepositoryTransactionObservedAfter -Journal $Journal -Operation $Operation);DisplacedAfterMetadata=(Get-RepositoryTransactionDisplacedAfterMetadata -Context $Context -Operation $Operation)}}
 }
 
 function Copy-RepositoryInstallJournal {
-    param([Parameter(Mandatory=$true)][object]$Journal,[string]$Phase,[Nullable[long]]$Sequence,[string]$EvidenceObjectId,[AllowNull()][object]$ObservedAfter)
+    param([Parameter(Mandatory=$true)][object]$Journal,[string]$Phase,[Nullable[long]]$Sequence,[string]$EvidenceObjectId,[AllowNull()][object]$ObservedAfter,[AllowNull()][object]$DisplacedAfterMetadata)
     $document=[ordered]@{}
     foreach($property in @($Journal.PSObject.Properties)){$document[$property.Name]=if($property.Name-ceq'operations'){@($property.Value)}else{$property.Value}}
     $copy=[pscustomobject]$document
@@ -5300,11 +5427,13 @@ function Copy-RepositoryInstallJournal {
         if($operationIndex-lt0){throw "Repository transaction operation sequence $sequenceValue was not found."}
         if($PSBoundParameters.ContainsKey('EvidenceObjectId')-and[string]$operations[$operationIndex].kind-cne'store-git-stash-evidence'){throw 'Only store-git-stash-evidence may bind after.objectId.'}
         if($PSBoundParameters.ContainsKey('ObservedAfter')-and[string]$operations[$operationIndex].kind-cnotin@('create-file','write-file')){throw 'Only a published file operation may bind observedAfter.'}
+        if($PSBoundParameters.ContainsKey('DisplacedAfterMetadata')-and([string]$operations[$operationIndex].kind-cnotin@('write-file','remove-file')-or$null-eq$DisplacedAfterMetadata)){throw 'Only a displacing file operation may bind a non-null displacedAfterMetadata.'}
         $operationDocument=[ordered]@{}
         foreach($property in @($operations[$operationIndex].PSObject.Properties)){
             if($property.Name-ceq'state'){$operationDocument[$property.Name]='applied';continue}
             if($property.Name-ceq'after'-and$PSBoundParameters.ContainsKey('EvidenceObjectId')){$operationDocument[$property.Name]=[pscustomobject][ordered]@{exists=$true;objectId=$EvidenceObjectId};continue}
             if($property.Name-ceq'observedAfter'-and$PSBoundParameters.ContainsKey('ObservedAfter')){$operationDocument[$property.Name]=$ObservedAfter;continue}
+            if($property.Name-ceq'displacedAfterMetadata'-and$PSBoundParameters.ContainsKey('DisplacedAfterMetadata')){$operationDocument[$property.Name]=$DisplacedAfterMetadata;continue}
             $operationDocument[$property.Name]=$property.Value
         }
         $operations[$operationIndex]=[pscustomobject]$operationDocument
@@ -5369,16 +5498,16 @@ function New-RepositoryInstallOperations {
         $backup=New-AiInstructionsInstallStageFile -TransactionLease $Context.Lease -Leaf $backupLeaf -Bytes ([byte[]]$remediation.IndexPlan.BeforeBytes) -PlatformOs $platform
         $before=[pscustomobject][ordered]@{exists=$true;sha256=$backup.sha256;length=$backup.length;identity=$backup.identity;entrySetSha256=(Get-RepositoryTransactionIndexEntrySetSha256 -Repository $Context.Repository -IndexPath ([string]$remediation.IndexPath))}
         $after=[pscustomobject][ordered]@{exists=$true;sha256=$stage.sha256;length=$stage.length;identity=$stage.identity;entrySetSha256=[string]$remediation.IndexPlan.AfterEntrySetSha256}
-        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='replace-git-index';role='git-index';method='index-lock-rename';target=[pscustomobject][ordered]@{kind='git-index';value=[string]$remediation.IndexPath};before=$before;after=$after;observedAfter=$null;displacedMetadata=$null;stageLeaf=$stageLeaf;backupLeaf=$backupLeaf;quarantineLeaf=$null;state='pending'})
+        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='replace-git-index';role='git-index';method='index-lock-rename';target=[pscustomobject][ordered]@{kind='git-index';value=[string]$remediation.IndexPath};before=$before;after=$after;observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf=$stageLeaf;backupLeaf=$backupLeaf;quarantineLeaf=$null;state='pending'})
     }
     if($null-ne$remediation-and-not[string]::IsNullOrWhiteSpace([string]$remediation.NewCommit)){
         $sequence=$operations.Count+1;$ref=if([string]::IsNullOrWhiteSpace([string]$remediation.OriginalHeadReference)){[string]$remediation.NewHeadReference}else{[string]$remediation.OriginalHeadReference}
         $before=if([string]::IsNullOrWhiteSpace([string]$remediation.OriginalHeadReference)){[pscustomobject][ordered]@{exists=$false;objectId=$null}}else{[pscustomobject][ordered]@{exists=$true;objectId=[string]$remediation.OriginalHead}}
         $after=[pscustomobject][ordered]@{exists=$true;objectId=[string]$remediation.NewCommit}
-        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='update-git-ref';role='git-ref';method='update-ref';target=[pscustomobject][ordered]@{kind='git-ref';value=$ref};before=$before;after=$after;observedAfter=$null;displacedMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
+        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='update-git-ref';role='git-ref';method='update-ref';target=[pscustomobject][ordered]@{kind='git-ref';value=$ref};before=$before;after=$after;observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
         if([string]::IsNullOrWhiteSpace([string]$remediation.OriginalHeadReference)){
             $sequence=$operations.Count+1;$headPath=Join-Path ([string]$remediation.GitDirectory) 'HEAD';$beforeHead=[pscustomobject][ordered]@{mode='detached';reference=$null;objectId=[string]$remediation.OriginalHead;rawSha256=(Get-ByteArraySha256 ([IO.File]::ReadAllBytes($headPath)))};$afterBytes=[Text.UTF8Encoding]::new($false).GetBytes("ref: $ref`n");$afterHead=[pscustomobject][ordered]@{mode='symbolic';reference=$ref;objectId=[string]$remediation.NewCommit;rawSha256=(Get-ByteArraySha256 $afterBytes)}
-            $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='update-git-head';role='git-head';method='symbolic-ref';target=[pscustomobject][ordered]@{kind='git-head';value='HEAD'};before=$beforeHead;after=$afterHead;observedAfter=$null;displacedMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
+            $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='update-git-head';role='git-head';method='symbolic-ref';target=[pscustomobject][ordered]@{kind='git-head';value='HEAD'};before=$beforeHead;after=$afterHead;observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
         }
     }
     $missing=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
@@ -5386,7 +5515,7 @@ function New-RepositoryInstallOperations {
     foreach($relative in @($missing|Sort-Object @{Expression={($_.Split('/')).Count}},@{Expression={$_}})){
         $sequence=$operations.Count+1;$stageLeaf=('op-{0:D6}.directory'-f$sequence);$stageLease=Open-PlatformDirectory -Root $transactionPath -RelativePath $stageLeaf -CreatePrivate
         try{$after=[pscustomobject][ordered]@{exists=$true;identity=(ConvertTo-ProjectPublicationIdentity $stageLease.Observation);permissions=(Get-PlatformPermissions -Lease $stageLease)}}finally{$stageLease.Dispose()}
-        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='ensure-directory-anchor';role='directory-anchor';method='directory-rename';target=[pscustomobject][ordered]@{kind='repository-relative';value=$relative};before=[pscustomobject][ordered]@{exists=$false;identity=$null;permissions=$null};after=$after;observedAfter=$null;displacedMetadata=$null;stageLeaf=$stageLeaf;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
+        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='ensure-directory-anchor';role='directory-anchor';method='directory-rename';target=[pscustomobject][ordered]@{kind='repository-relative';value=$relative};before=[pscustomobject][ordered]@{exists=$false;identity=$null;permissions=$null};after=$after;observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf=$stageLeaf;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
     }
     $priority=@{'instruction'=10;'project-skill'=20;'license'=30;'remediation-file'=40;'remediation-and-instruction'=40;'manifest'=90;'shared-exclude'=100}
     foreach($intent in @($Context.Intents.Values|Sort-Object @{Expression={$priority[[string]$_.Role]}},@{Expression={[string]$_.RelativePath}})){
@@ -5396,16 +5525,16 @@ function New-RepositoryInstallOperations {
         $after=if($intent.Remove){[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null}}else{$stageLeaf=('op-{0:D6}.stage'-f$sequence);$stage=New-AiInstructionsInstallStageFile -TransactionLease $Context.Lease -Leaf $stageLeaf -Bytes ([byte[]]$intent.Bytes) -PlatformOs $platform;$stageState=Get-AiInstructionsInstallFileState -ParentLease $Context.Lease -Leaf $stageLeaf -LiteralPath (Join-Path $transactionPath $stageLeaf) -PlatformOs $platform -IncludePermissions;[pscustomobject][ordered]@{exists=$true;sha256=$stage.sha256;length=$stage.length;identity=$stage.identity;permissions=$stageState.permissions}}
         $targetKind=if([string]$intent.TargetKind-ceq'git-exclude'){'git-shared-exclude'}else{'repository-relative'};$targetValue=if($targetKind-ceq'git-shared-exclude'){Join-Path ([string]$intent.TargetRoot) ([string]$intent.RelativePath)}else{[string]$intent.RelativePath}
         $displacedMetadata=New-RepositoryTransactionDisplacedMetadataSnapshot -Before $intent.Before -Kind $kind
-        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind=$kind;role=[string]$intent.Role;method=$(if($kind-ceq'remove-file'){'tombstone-rename'}else{'stage-rename'});target=[pscustomobject][ordered]@{kind=$targetKind;value=$targetValue};before=$intent.Before;after=$after;observedAfter=$null;displacedMetadata=$displacedMetadata;stageLeaf=$stageLeaf;backupLeaf=$backupLeaf;quarantineLeaf=$null;state='pending'})
+        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind=$kind;role=[string]$intent.Role;method=$(if($kind-ceq'remove-file'){'tombstone-rename'}else{'stage-rename'});target=[pscustomobject][ordered]@{kind=$targetKind;value=$targetValue};before=$intent.Before;after=$after;observedAfter=$null;displacedMetadata=$displacedMetadata;displacedAfterMetadata=$null;stageLeaf=$stageLeaf;backupLeaf=$backupLeaf;quarantineLeaf=$null;state='pending'})
     }
     if([bool]$Context.ShouldStorePersonalAgentEvidence){
         $sequence=$operations.Count+1
         $stashBefore=$Context.PersonalAgentEvidenceStashBefore
         if($null-eq$stashBefore){throw 'PersonalAgent evidence store is missing its prepared refs/stash state.'}
-        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='store-git-stash-evidence';role='personal-agent-evidence';method='stash-store';target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'};before=$stashBefore;after=[pscustomobject][ordered]@{exists=$true;objectId=$null};observedAfter=$null;displacedMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
+        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='store-git-stash-evidence';role='personal-agent-evidence';method='stash-store';target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'};before=$stashBefore;after=[pscustomobject][ordered]@{exists=$true;objectId=$null};observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
     }elseif($operations.Count-gt0-and$null-ne$Context.PersonalAgentEvidenceStashBefore){
         $sequence=$operations.Count+1;$stashBefore=$Context.PersonalAgentEvidenceStashBefore
-        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='update-git-ref';role='personal-agent-evidence-cas';method='update-ref';target=[pscustomobject][ordered]@{kind='git-ref';value='refs/stash'};before=$stashBefore;after=$stashBefore;observedAfter=$null;displacedMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
+        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='update-git-ref';role='personal-agent-evidence-cas';method='update-ref';target=[pscustomobject][ordered]@{kind='git-ref';value='refs/stash'};before=$stashBefore;after=$stashBefore;observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
     }
     return $operations.ToArray()
 }
@@ -5441,10 +5570,12 @@ function Start-RepositoryInstallTransaction {
     Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Phase applying)
     foreach($operation in @($Context.CurrentJournal.operations|Where-Object{[string]$_.kind-cne'store-git-stash-evidence'}|Sort-Object sequence)){
         Invoke-AiInstructionsInstallFailpoint -Name ("before-operation-"+$operation.sequence)
-        $observedAfter=Invoke-RepositoryTransactionOperation -Context $Context -Journal $Context.CurrentJournal -Operation $operation -Direction redo
+        $redoBinding=Invoke-RepositoryTransactionOperation -Context $Context -Journal $Context.CurrentJournal -Operation $operation -Direction redo
         Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+$operation.sequence+"-before-journal")
         $copyParameters=@{Journal=$Context.CurrentJournal;Sequence=[int64]$operation.sequence}
-        if($IsWindows-and[string]$operation.kind-cin@('create-file','write-file')){$copyParameters.ObservedAfter=$observedAfter}
+        if($IsWindows-and[string]$operation.kind-cin@('create-file','write-file')){$copyParameters.ObservedAfter=$redoBinding.ObservedAfter}
+        # Bind the displaced original's post-displacement metadata in the same generation that marks the operation applied.
+        if([string]$operation.kind-cin@('write-file','remove-file')){$copyParameters.DisplacedAfterMetadata=if($null-ne$redoBinding.DisplacedAfterMetadata){$redoBinding.DisplacedAfterMetadata}else{Get-RepositoryTransactionDisplacedAfterMetadata -Context $Context -Operation $operation}}
         Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal @copyParameters)
         Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+$operation.sequence)
     }
@@ -5550,7 +5681,7 @@ function Invoke-RepositoryTransactionRollback {
 
 function Complete-RepositoryTransactionCleanup {
     param([Parameter(Mandatory=$true)][object]$Context)
-    foreach($operation in @($Context.CurrentJournal.operations|Sort-Object sequence)){Invoke-RepositoryTransactionOperation -Context $Context -Journal $Context.CurrentJournal -Operation $operation -Direction redo}
+    foreach($operation in @($Context.CurrentJournal.operations|Sort-Object sequence)){Invoke-RepositoryTransactionOperation -Context $Context -Journal $Context.CurrentJournal -Operation $operation -Direction redo|Out-Null}
     Invoke-AiInstructionsInstallFailpoint -Name 'after-committed-before-cleanup'
     Close-RepositoryIndexTransactionLock -Lock $Context.RepositoryIndexLock
     Invoke-AiInstructionsInstallFailpoint -Name 'after-index-lock-release-before-journal-cleanup'
@@ -6252,8 +6383,12 @@ try {
 
         $desiredEntriesByTarget[$entry.TargetPath] = $entry
     }
+    if ($null -ne $script:ProjectPublicationContext) {
+        Register-ProjectPublicationPlanningObservations -Context $script:ProjectPublicationContext `
+            -RelativePaths @(@($desiredEntriesByTarget.Keys) + @($manifestEntriesByTarget.Keys) | ForEach-Object { [string]$_ })
+    }
 
-    $projectDesiredFiles = @($desiredEntries | Where-Object { $null -ne $_.PSObject.Properties['IsProjectSkill'] -and [bool]$_.IsProjectSkill })
+    $projectDesiredFiles =@($desiredEntries | Where-Object { $null -ne $_.PSObject.Properties['IsProjectSkill'] -and [bool]$_.IsProjectSkill })
     $relinquishedProjectTargets = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     if ($projectDesiredFiles.Count -gt 0) {
         $projectConflicts = @(Get-ProjectSkillOwnershipConflictsAcrossWorktrees -Repository $targetRootPath -DesiredFiles $projectDesiredFiles)
@@ -6739,15 +6874,11 @@ try {
         throw
     }
 
-    try {
-        if ($null -ne $script:ProjectPublicationContext) {
-            Complete-ProjectPublicationContext $script:ProjectPublicationContext
-            $script:ProjectPublicationContext=$null
-        }
-    }
-    catch {
-        $preserveWorkingPath = $true
-        throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Project publication finalization failed; durable recovery evidence was preserved: $($_.Exception.Message)" -InnerException $_.Exception)
+    # Finalization failures are classified once by the outer handler after recovery has actually run,
+    # so the final message reports whether evidence was rolled back, rolled forward, or retained.
+    if ($null -ne $script:ProjectPublicationContext) {
+        Complete-ProjectPublicationContext $script:ProjectPublicationContext
+        $script:ProjectPublicationContext=$null
     }
     if ($changedPaths.Count -eq 0) { Write-Output 'AI instructions are up to date; no Git commit was created.' }
     else { Write-Output "AI instructions synchronized as local ignored runtime artifacts without Git commit: $($changedPaths -join ', ')" }
@@ -6755,6 +6886,7 @@ try {
 catch {
     $syncError = $_
     if($null-ne$script:ProjectPublicationContext){
+        $transactionWasDurable=[bool]$script:ProjectPublicationContext.Durable
         try{
             $action=Resolve-ActiveProjectPublicationFailure -Context $script:ProjectPublicationContext -RemediationTransaction $remediationTransaction
         }catch{
@@ -6771,8 +6903,18 @@ catch {
             throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Original: $($syncError.Exception.Message) Rollback also failed: $recoveryMessage Recovery files were preserved at: $workingPath" -InnerException $recoveryError.Exception)
         }
         $script:ProjectPublicationContext=$null
-        if(-not[string]::IsNullOrWhiteSpace((Get-AiInstructionsRefusalCode $syncError))){throw $syncError}
-        throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction failed and was rolled back: $($syncError.Exception.Message)" -InnerException $syncError.Exception)
+        # No durable journal means no repository mutation happened; keep the original error classification.
+        if(-not$transactionWasDurable){throw $syncError}
+        $syncErrorCode=Get-AiInstructionsRefusalCode $syncError
+        if($action-ceq'rollback-all'){
+            if(-not[string]::IsNullOrWhiteSpace($syncErrorCode)){throw $syncError}
+            throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction failed and was rolled back: $($syncError.Exception.Message)" -InnerException $syncError.Exception)
+        }
+        if($action-ceq'roll-forward-cleanup'){
+            $rollForwardCode=if([string]::IsNullOrWhiteSpace($syncErrorCode)){'interrupted-install'}else{$syncErrorCode}
+            throw (New-AiInstructionsRefusalException -Code $rollForwardCode -Message "Repository transaction failed after its committed journal generation; recovery kept the committed repository changes and completed transaction cleanup: $($syncError.Exception.Message)" -InnerException $syncError.Exception)
+        }
+        throw $syncError
     }
     throw $syncError
 }

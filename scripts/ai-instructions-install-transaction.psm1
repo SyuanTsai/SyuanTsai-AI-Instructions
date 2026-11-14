@@ -325,12 +325,12 @@ function Test-InstallJournalV2StateAuthorityEqual {
 
 function Test-InstallJournalV2OperationAuthorityEqual {
     param([Parameter(Mandatory=$true)][object]$Previous,[Parameter(Mandatory=$true)][object]$Next)
-    if($Next.PSObject.Properties.Match('*').Count-ne13){return $false}
+    if($Next.PSObject.Properties.Match('*').Count-ne14){return $false}
     $kind=[string]$Previous.kind
     if(-not(Test-InstallTransactionScalarEqual $Previous.sequence $Next.sequence)-or-not(Test-InstallTransactionScalarEqual $Previous.kind $Next.kind)-or-not(Test-InstallTransactionScalarEqual $Previous.role $Next.role)-or-not(Test-InstallTransactionScalarEqual $Previous.method $Next.method)){return $false}
     if($Next.target.PSObject.Properties.Match('*').Count-ne2-or-not(Test-InstallTransactionScalarEqual $Previous.target.kind $Next.target.kind)-or-not(Test-InstallTransactionScalarEqual $Previous.target.value $Next.target.value)){return $false}
     if(-not(Test-InstallJournalV2StateAuthorityEqual $kind $Previous.before $Next.before)-or-not(Test-InstallJournalV2StateAuthorityEqual $kind $Previous.after $Next.after)){return $false}
-    return (Test-InstallTransactionSemanticEqual $Previous.observedAfter $Next.observedAfter)-and(Test-InstallJournalV2PermissionsAuthorityEqual $Previous.displacedMetadata $Next.displacedMetadata)-and(Test-InstallTransactionScalarEqual $Previous.stageLeaf $Next.stageLeaf)-and(Test-InstallTransactionScalarEqual $Previous.backupLeaf $Next.backupLeaf)-and(Test-InstallTransactionScalarEqual $Previous.quarantineLeaf $Next.quarantineLeaf)
+    return (Test-InstallTransactionSemanticEqual $Previous.observedAfter $Next.observedAfter)-and(Test-InstallJournalV2PermissionsAuthorityEqual $Previous.displacedMetadata $Next.displacedMetadata)-and(Test-InstallJournalV2PermissionsAuthorityEqual $Previous.displacedAfterMetadata $Next.displacedAfterMetadata)-and(Test-InstallTransactionScalarEqual $Previous.stageLeaf $Next.stageLeaf)-and(Test-InstallTransactionScalarEqual $Previous.backupLeaf $Next.backupLeaf)-and(Test-InstallTransactionScalarEqual $Previous.quarantineLeaf $Next.quarantineLeaf)
 }
 
 function Test-InstallJournalV2EvidenceBindingTransition {
@@ -356,20 +356,28 @@ function Test-InstallJournalV2EvidenceBindingTransition {
     return $true
 }
 
-function Test-InstallJournalV2ObservedAfterBindingTransition {
+function Test-InstallJournalV2AppliedBindingTransition {
+    # Trusted counterpart of the full-parser applied binding: one pending file operation becomes applied and binds,
+    # exactly once, observedAfter (Windows create-file/write-file) and/or displacedAfterMetadata (write-file/remove-file).
     param([Parameter(Mandatory=$true)][object]$Previous,[Parameter(Mandatory=$true)][object]$Next,[Parameter(Mandatory=$true)][object]$PreviousOperation,[Parameter(Mandatory=$true)][object]$NextOperation)
+    $kind=[string]$PreviousOperation.kind
     if([string]$Previous.phase-cne'applying'-or[string]$Next.phase-cne'applying'-or
-        [string]$Previous.platform.os-cne'windows'-or[string]$Next.platform.os-cne'windows'-or
-        [string]$PreviousOperation.kind-cnotin@('create-file','write-file')-or[string]$NextOperation.kind-cne[string]$PreviousOperation.kind-or
-        [string]$PreviousOperation.state-cne'pending'-or[string]$NextOperation.state-cne'applied'-or
-        $null-ne$PreviousOperation.observedAfter-or$null-eq$NextOperation.observedAfter){return $false}
+        $kind-cnotin@('create-file','write-file','remove-file')-or[string]$NextOperation.kind-cne$kind-or
+        [string]$PreviousOperation.state-cne'pending'-or[string]$NextOperation.state-cne'applied'){return $false}
+    $observedChanged=-not(Test-InstallTransactionSemanticEqual $PreviousOperation.observedAfter $NextOperation.observedAfter)
+    if($observedChanged-and([string]$Previous.platform.os-cne'windows'-or[string]$Next.platform.os-cne'windows'-or$kind-cnotin@('create-file','write-file')-or$null-ne$PreviousOperation.observedAfter-or$null-eq$NextOperation.observedAfter)){return $false}
+    $previousDisplacedAfter=$PreviousOperation.PSObject.Properties['displacedAfterMetadata'];$nextDisplacedAfter=$NextOperation.PSObject.Properties['displacedAfterMetadata']
+    if($null-eq$previousDisplacedAfter-or$null-eq$nextDisplacedAfter){return $false}
+    $displacedChanged=-not(Test-InstallTransactionSemanticEqual $previousDisplacedAfter.Value $nextDisplacedAfter.Value)
+    if($displacedChanged-and($kind-cnotin@('write-file','remove-file')-or$null-ne$previousDisplacedAfter.Value-or$null-eq$nextDisplacedAfter.Value)){return $false}
+    if(-not$observedChanged-and-not$displacedChanged){return $false}
     try{Assert-AiInstructionsInstallJournalV2 -Journal $Next|Out-Null}catch{return $false}
     $previousProperties=@($PreviousOperation.PSObject.Properties);$nextProperties=@($NextOperation.PSObject.Properties)
     if($previousProperties.Count-ne$nextProperties.Count){return $false}
     foreach($property in $previousProperties){
         $other=$NextOperation.PSObject.Properties[$property.Name]
         if($null-eq$other){return $false}
-        if($property.Name-cin@('state','observedAfter')){continue}
+        if($property.Name-cin@('state','observedAfter','displacedAfterMetadata')){continue}
         if(-not(Test-InstallTransactionSemanticEqual $property.Value $other.Value)){return $false}
     }
     return $true
@@ -408,8 +416,8 @@ function Assert-InstallJournalV2TrustedTransition {
         for($index=0;$index-lt$previousOperations.Count;$index++) {
             if(-not(Test-InstallJournalV2OperationAuthorityEqual $previousOperations[$index] $nextOperations[$index])-and
                 -not(Test-InstallJournalV2EvidenceBindingTransition -Previous $Previous -Next $Next -PreviousOperation $previousOperations[$index] -NextOperation $nextOperations[$index])-and
-                -not(Test-InstallJournalV2ObservedAfterBindingTransition -Previous $Previous -Next $Next -PreviousOperation $previousOperations[$index] -NextOperation $nextOperations[$index])) {
-                throw "AI instructions install journal store transition changed operation $($index + 1) fields other than state; observedAfter or store-git-stash-evidence after.objectId may be bound only once."
+                -not(Test-InstallJournalV2AppliedBindingTransition -Previous $Previous -Next $Next -PreviousOperation $previousOperations[$index] -NextOperation $nextOperations[$index])) {
+                throw "AI instructions install journal store transition changed operation $($index + 1) fields other than state; observedAfter, displacedAfterMetadata, or store-git-stash-evidence after.objectId may be bound only once."
             }
         }
     }
@@ -421,6 +429,16 @@ function Assert-InstallJournalV2TrustedTransition {
         $fromState=[string]$previousOperations[$index].state;$toState=[string]$nextOperations[$index].state
         if($fromState-cne$toState-and"$fromState>$toState"-cne'pending>applied') {
             throw "AI instructions install journal store transition operation $($index + 1) state transition is invalid."
+        }
+        if($fromState-ceq'pending'-and$toState-ceq'applied') {
+            # An applied file operation must carry the same once-bound evidence that the full parser requires.
+            $appliedKind=[string]$nextOperations[$index].kind
+            if($appliedKind-cin@('write-file','remove-file')-and($null-eq$nextOperations[$index].PSObject.Properties['displacedAfterMetadata']-or$null-eq$nextOperations[$index].displacedAfterMetadata)) {
+                throw "AI instructions install journal store transition operation $($index + 1) cannot become applied without displacedAfterMetadata."
+            }
+            if([string]$Next.platform.os-ceq'windows'-and$appliedKind-cin@('create-file','write-file')-and$null-eq$nextOperations[$index].observedAfter) {
+                throw "AI instructions install journal store transition operation $($index + 1) cannot become applied without observedAfter."
+            }
         }
     }
     return $Next

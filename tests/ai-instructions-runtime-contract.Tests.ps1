@@ -215,7 +215,7 @@ function Get-TestInstallJournalV2 {
         operations=@([pscustomobject][ordered]@{
             sequence=1;kind='create-file';role='instruction';method='stage-rename'
             target=[pscustomobject][ordered]@{kind='repository-relative';value='AGENTS.md'}
-            before=$absent;after=$present;observedAfter=$null;displacedMetadata=$null;stageLeaf='operation-1.stage';backupLeaf=$null;quarantineLeaf=$null;state='pending'
+            before=$absent;after=$present;observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf='operation-1.stage';backupLeaf=$null;quarantineLeaf=$null;state='pending'
         })
     }
 }
@@ -3521,7 +3521,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         $ref.operations[0]=[pscustomobject][ordered]@{
             sequence=1;kind='update-git-ref';role='git-ref';method='update-ref';target=[pscustomobject][ordered]@{kind='git-ref';value='refs/heads/main'}
             before=[pscustomobject][ordered]@{exists=$true;objectId=('a'*40)};after=[pscustomobject][ordered]@{exists=$true;objectId=('b'*64)}
-            observedAfter=$null;displacedMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
+            observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
         }
         (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalV2 $ref|Out-Null})|Should Match 'objectFormat sha1'
 
@@ -3540,7 +3540,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
             target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'}
             before=[pscustomobject][ordered]@{exists=$false;objectId=$null}
             after=[pscustomobject][ordered]@{exists=$true;objectId=$null}
-            observedAfter=$null;displacedMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
+            observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
         })
         {Assert-AiInstructionsInstallJournalV2 $prepared|Out-Null}|Should Not Throw
 
@@ -3582,11 +3582,14 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
                 target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'}
                 before=[pscustomobject][ordered]@{exists=$false;objectId=$null}
                 after=[pscustomobject][ordered]@{exists=$true;objectId=$null}
-                observedAfter=$null;displacedMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
+                observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
             })
             Assert-AiInstructionsInstallJournalV2 $journal|Out-Null
             return $journal
         }
+        $toWriteFile={param($j)$o=$j.operations[0];$o.kind='write-file';$o.before=(&$clone $o.after);$o.backupLeaf='operation-1.backup';$o.displacedMetadata=(&$clone $o.before.permissions)}
+        $toRemoveFile={param($j)$o=$j.operations[0];$o.kind='remove-file';$o.method='tombstone-rename';$o.before=(&$clone $o.after);$o.after=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null};$o.stageLeaf=$null;$o.backupLeaf='operation-1.backup';$o.displacedMetadata=(&$clone $o.before.permissions)}
+        $bindApplied={param($j)$o=$j.operations[0];if([string]$o.kind-cne'remove-file'){$o.observedAfter=[pscustomobject][ordered]@{dacl=[pscustomobject][ordered]@{isNull=$true;isProtected=$false;aclBase64=$null};readOnly=$false}};$o.displacedAfterMetadata=[pscustomobject][ordered]@{kind='windows-sddl';sddl='D:(A;ID;FA;;;SY)';readOnly=$false};$o.state='applied'}
         $samples=@(
             [pscustomobject]@{Name='top.schemaVersion';Mutate={param($n)$n.schemaVersion=3}},
             [pscustomobject]@{Name='top.kind';Mutate={param($n)$n.kind='tampered'}},
@@ -3607,6 +3610,13 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
             [pscustomobject]@{Name='operation.after';Mutate={param($n)$n.operations[0].after.sha256=('e'*64)}},
             [pscustomobject]@{Name='operation.observedAfter';Prepare={param($p)$p.operations[0].observedAfter=[pscustomobject][ordered]@{dacl=[pscustomobject][ordered]@{isNull=$true;isProtected=$false;aclBase64=$null};readOnly=$false};$p.operations[0].state='applied'};Mutate={param($n)$n.operations[0].observedAfter.readOnly=$true}},
             [pscustomobject]@{Name='operation.displacedMetadata';Mutate={param($n)$n.operations[0].displacedMetadata=[pscustomobject][ordered]@{kind='windows-sddl';sddl='D:';readOnly=$false}}},
+            [pscustomobject]@{Name='operation.displacedMetadata.write-file';Prepare={param($p)&$toWriteFile $p};Mutate={param($n)$n.operations[0].displacedMetadata.sddl='D:(A;;FA;;;WD)'}},
+            [pscustomobject]@{Name='operation.displacedMetadata.remove-file';Prepare={param($p)&$toRemoveFile $p};Mutate={param($n)$n.operations[0].displacedMetadata.readOnly=$true}},
+            [pscustomobject]@{Name='operation.displacedMetadata.applied-write-file';Prepare={param($p)&$toWriteFile $p;&$bindApplied $p};Mutate={param($n)$n.operations[0].displacedMetadata.sddl='D:(A;ID;FA;;;SY)'}},
+            [pscustomobject]@{Name='operation.displacedAfterMetadata.rebound';Prepare={param($p)&$toWriteFile $p;&$bindApplied $p};Mutate={param($n)$n.operations[0].displacedAfterMetadata.sddl='D:'}},
+            [pscustomobject]@{Name='operation.displacedAfterMetadata.cleared';Prepare={param($p)&$toRemoveFile $p;&$bindApplied $p};Mutate={param($n)$n.operations[0].displacedAfterMetadata=$null}},
+            [pscustomobject]@{Name='operation.displacedAfterMetadata.while-pending';Prepare={param($p)&$toWriteFile $p};Mutate={param($n)$n.operations[0].displacedAfterMetadata=[pscustomobject][ordered]@{kind='windows-sddl';sddl='D:(A;ID;FA;;;SY)';readOnly=$false}}},
+            [pscustomobject]@{Name='operation.displacedAfterMetadata.create-file';Mutate={param($n)&$bindApplied $n}},
             [pscustomobject]@{Name='operation.stageLeaf';Mutate={param($n)$n.operations[0].stageLeaf='changed.stage'}},
             [pscustomobject]@{Name='operation.backupLeaf';Mutate={param($n)$n.operations[0].backupLeaf='changed.backup'}},
             [pscustomobject]@{Name='operation.quarantineLeaf';Mutate={param($n)$n.operations[0].quarantineLeaf='changed.quarantine'}},
@@ -3637,6 +3647,39 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         }finally{Remove-Module $transactionModule -Force}
     }
 
+    # Scenario: A displacing write-file or remove-file operation becomes applied and binds its displaced-after metadata in that same generation.
+    # Purpose: Accept exactly that one binding in both trusted and full transitions while rejecting an applied displacing operation without the binding.
+    It 'UnitT226_binds_displacedAfterMetadata_only_with_the_applied_state_in_trusted_and_full_transitions' {
+        $transactionModulePath=Join-Path $script:RepositoryRoot 'scripts/ai-instructions-install-transaction.psm1'
+        $transactionModule=Import-Module $transactionModulePath -Force -PassThru
+        $clone={param($value)$parameters=@{InputObject=($value|ConvertTo-Json -Depth 30)};if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'};ConvertFrom-Json @parameters}
+        $displacedAfter=[pscustomobject][ordered]@{kind='windows-sddl';sddl='D:(A;ID;FA;;;SY)';readOnly=$false}
+        $observedAfter=[pscustomobject][ordered]@{dacl=[pscustomobject][ordered]@{isNull=$true;isProtected=$false;aclBase64=$null};readOnly=$false}
+        $newPending={
+            param([ValidateSet('write-file','remove-file')][string]$Kind)
+            $journal=Get-TestInstallJournalV2;$journal.phase='applying';$o=$journal.operations[0]
+            $o.kind=$Kind;$o.before=(&$clone $o.after);$o.backupLeaf='operation-1.backup';$o.displacedMetadata=(&$clone $o.before.permissions)
+            if($Kind-ceq'remove-file'){$o.method='tombstone-rename';$o.after=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null};$o.stageLeaf=$null}
+            Assert-AiInstructionsInstallJournalV2 $journal|Out-Null
+            return $journal
+        }
+        try{
+            foreach($kind in @('write-file','remove-file')){
+                $previous=&$newPending $kind
+                $bound=&$clone $previous;$bound.operations[0].state='applied';$bound.operations[0].displacedAfterMetadata=(&$clone $displacedAfter)
+                if($kind-ceq'write-file'){$bound.operations[0].observedAfter=(&$clone $observedAfter)}
+                {Assert-AiInstructionsInstallJournalStoreTransition -Previous $previous -Next $bound|Out-Null}|Should Not Throw
+                {&$transactionModule {param($left,$right)Assert-InstallJournalV2TrustedTransition -Previous $left -Next $right|Out-Null} (&$clone $previous) $bound}|Should Not Throw
+
+                $unbound=&$clone $previous;$unbound.operations[0].state='applied'
+                if($kind-ceq'write-file'){$unbound.operations[0].observedAfter=(&$clone $observedAfter)}
+                (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalV2 $unbound|Out-Null})|Should Match 'displacedAfterMetadata must not be null'
+                {Assert-AiInstructionsInstallJournalStoreTransition -Previous $previous -Next $unbound|Out-Null}|Should Throw
+                {&$transactionModule {param($left,$right)Assert-InstallJournalV2TrustedTransition -Previous $left -Next $right|Out-Null} (&$clone $previous) $unbound}|Should Throw
+            }
+        }finally{Remove-Module $transactionModule -Force}
+    }
+
     # Scenario: A transaction that reuses PersonalAgent evidence records refs/stash as an existing before=after update-git-ref CAS operation.
     # Purpose: Permit only the closed compare-only shape used to revalidate reuse decisions and reject target or object-ID drift.
     It 'UnitT225_accepts_only_the_closed_PersonalAgent_evidence_reuse_CAS_shape' {
@@ -3646,7 +3689,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
             target=[pscustomobject][ordered]@{kind='git-ref';value='refs/stash'}
             before=[pscustomobject][ordered]@{exists=$true;objectId=('c'*40)}
             after=[pscustomobject][ordered]@{exists=$true;objectId=('c'*40)}
-            observedAfter=$null;displacedMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
+            observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
         })
         {Assert-AiInstructionsInstallJournalV2 $journal|Out-Null}|Should Not Throw
         $clone={param($value)$parameters=@{InputObject=($value|ConvertTo-Json -Depth 30)};if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'};ConvertFrom-Json @parameters}

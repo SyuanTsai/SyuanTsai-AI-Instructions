@@ -439,6 +439,27 @@ Describe 'bootstrap-ai-instructions' {
         (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
     }
 
+    # Scenario: Planning fails without a refusal code before any durable repository transaction journal exists.
+    # Purpose: Keep the original error classification, never claim a rollback that did not happen, and leave no transaction residue.
+    It 'InterT171_reports_a_non_durable_planning_failure_without_claiming_rollback' {
+        $excludePath = Join-Path $targetRoot '.git\info\exclude'
+        Set-TestText -Path $excludePath -Value "# user rule`n# BEGIN Codex AI Instructions managed paths`n/old-agent.md"
+        $excludeBytes = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+        $transactionRoot = Join-Path $targetRoot '.git\.ai-instructions-txn'
+
+        try { Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null; $errorMessage = $null }
+        catch { $errorMessage = $_.Exception.Message }
+
+        $errorMessage | Should Match 'The Codex AI Instructions managed exclude block is malformed'
+        $errorMessage | Should Not Match 'ai-instructions-refusal-code=interrupted-install'
+        $errorMessage | Should Not Match 'was rolled back'
+        $errorMessage | Should Not Match 'recovery kept the committed repository changes'
+        @(Get-ChildItem -Force -LiteralPath $transactionRoot -ErrorAction SilentlyContinue).Count | Should Be 0
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBytes
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
+    }
+
     # Scenario: The canonical Instructions origin is incomplete and therefore no longer has both source-shape marker files.
     # Purpose: Refuse source-repository fan-out by canonical identity before any personal artifact is materialized.
     It 'InterT13_skips_the_canonical_source_origin_even_when_its_file_shape_is_incomplete' {
