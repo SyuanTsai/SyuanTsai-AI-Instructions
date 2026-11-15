@@ -6,7 +6,7 @@ param(
     [Parameter(Mandatory)][string]$PrivateKeyPath,
     [Parameter(Mandatory)][string]$PublicKeyXmlPath
 )
-$module=Import-Module (Join-Path $PSScriptRoot 'TrustAnchorPrivateKey.psm1') -PassThru -ErrorAction Stop
+$module=Microsoft.PowerShell.Core\Import-Module (Join-Path $PSScriptRoot 'TrustAnchorPrivateKey.psm1') -PassThru -Force -ErrorAction Stop
 try {
     & $module {param($id,$privatePath,$publicPath) Assert-TrustAnchorInteractiveHost;Invoke-NewTrustAnchorKeyPairAction -KeyId $id -PrivateKeyPath $privatePath -PublicKeyXmlPath $publicPath} $KeyId $PrivateKeyPath $PublicKeyXmlPath
 } catch {

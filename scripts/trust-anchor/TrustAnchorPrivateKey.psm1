@@ -579,12 +579,6 @@ namespace SyuanTsai.AIInstructions.TrustAnchor {
 '@
 }
 
-$script:TrustAnchorOpenBeforePermissionTestHook = $null
-$script:TrustAnchorAfterReadTestHook = $null
-$script:TrustAnchorBeforePublicWriteTestHook = $null
-$script:TrustAnchorBeforeRollbackRemovalTestHook = $null
-$script:TrustAnchorAfterRollbackRenameTestHook = $null
-
 function New-TrustAnchorError {
     param([string]$Message,[string]$Id)
     $exception=[InvalidOperationException]::new($Message)
@@ -763,13 +757,10 @@ function Remove-TrustAnchorCreatedFile {
         Assert-PlatformFileIdentity -Lease $Lease.FileLease -Expected $Lease.Expected -SingleLink -VerifyPath|Out-Null
         if($IsWindows){
             $Lease.FileLease.Dispose()
-            if($null-ne$script:TrustAnchorBeforeRollbackRemovalTestHook){$script:TrustAnchorBeforeRollbackRemovalTestHook.Invoke($Lease)|Out-Null}
             [SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector]::DeleteExact($Lease.Path,[uint64]$Lease.Expected.Device,[uint64]$Lease.Expected.Inode)
         }else{
-            if($null-ne$script:TrustAnchorBeforeRollbackRemovalTestHook){$script:TrustAnchorBeforeRollbackRemovalTestHook.Invoke($Lease)|Out-Null}
             Assert-PlatformFileIdentity -Lease $Lease.FileLease -Expected $Lease.Expected -SingleLink -VerifyPath|Out-Null
             $rollback=[SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease]::Begin((Get-TrustAnchorLeaseHandle $Lease.ParentLease),$Lease.Parent,$Lease.Leaf,[uint64]$Lease.Expected.Device,[uint64]$Lease.Expected.Inode)
-            if($null-ne$script:TrustAnchorAfterRollbackRenameTestHook){$script:TrustAnchorAfterRollbackRenameTestHook.Invoke($rollback)|Out-Null}
             $rollback.Complete()
         }
     }finally{if($null-ne$rollback){$rollback.Dispose()};$Lease.FileLease.Dispose();$Lease.ParentLease.Dispose()}
@@ -783,10 +774,8 @@ function Open-TrustAnchorPrivateKey {
         $pathEvidence=New-TrustAnchorPathEvidence -Path $Path -Purpose PrivateKey -Existing
         $file=Open-PlatformFile -ParentLease $pathEvidence.ParentLease -Leaf $pathEvidence.Leaf -Access Read -CreateMode OpenExisting;$expected=$file.Observation
         Assert-PlatformFileIdentity -Lease $file -Expected $expected -SingleLink -VerifyPath|Out-Null
-        if($null-ne$script:TrustAnchorOpenBeforePermissionTestHook){$script:TrustAnchorOpenBeforePermissionTestHook.Invoke($Path,$file)|Out-Null}
         $before=Get-TrustAnchorMetadataEvidence $file;Assert-TrustAnchorPrivatePermissions $file $before|Out-Null
         $bytes=$file.ReadAllBytes(1048576)
-        if($null-ne$script:TrustAnchorAfterReadTestHook){$script:TrustAnchorAfterReadTestHook.Invoke($Path,$file,$bytes)|Out-Null}
         Assert-PlatformFileIdentity -Lease $file -Expected $expected -SingleLink -VerifyPath|Out-Null
         $after=Get-TrustAnchorMetadataEvidence $file;Assert-TrustAnchorPrivatePermissions $file $after|Out-Null
         if(-not(Test-TrustAnchorMetadataEqual $before $after)){throw 'The private-key handle metadata changed while it was being read.'}
@@ -841,7 +830,6 @@ function Invoke-NewTrustAnchorKeyPairAction {
         $privateBytes=[Text.UTF8Encoding]::new($false).GetBytes($pem+$(if($pem.EndsWith("`n")){''}else{"`n"}))
         $privateLease=New-TrustAnchorKeyFile -PathEvidence $privateTarget -Bytes $privateBytes
         try{
-            if($null-ne$script:TrustAnchorBeforePublicWriteTestHook){$script:TrustAnchorBeforePublicWriteTestHook.Invoke($privateLease,$publicTarget)|Out-Null}
             $publicBytes=ConvertTo-TrustAnchorCanonicalXml $rsa
             try{$publicLease=New-TrustAnchorKeyFile -PathEvidence $publicTarget -Bytes $publicBytes}
             finally{[Security.Cryptography.CryptographicOperations]::ZeroMemory($publicBytes)}
