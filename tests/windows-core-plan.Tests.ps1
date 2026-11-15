@@ -465,8 +465,8 @@ if ($IsWindows) {
     }
 
     # Scenario: Reviewed CI minutes, including trust-anchor tools, are assigned through the real eight-partition LPT plan.
-    # Purpose: Recalibrate the indivisible eight-shard critical path to the attainable 19-minute lower bound.
-    It 'UnitT35_uses_the_reviewed_CI_weights_and_balances_every_real_partition_at_19_minutes' {
+    # Purpose: Recalibrate the indivisible eight-shard critical path to the exact 20-minute LPT maximum load.
+    It 'UnitT35_uses_the_reviewed_CI_weights_and_exact_eight_partition_LPT_golden' {
         $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:WindowsCoreRepositoryRoot 'tests/windows-core-shard-weights.json') | ConvertFrom-Json
         $expectedWeights = [ordered]@{
             'install-ai-instructions-bootstrap.part1.Tests.ps1' = 17
@@ -482,7 +482,7 @@ if ($IsWindows) {
             'ai-instructions-launcher-recovery.Tests.ps1' = 2
             'cleanup-ai-instructions-pollution.Tests.ps1' = 2
             'standard-validation-runner.Tests.ps1' = 2
-            'trust-anchor-tools.Tests.ps1' = 8
+            'trust-anchor-tools.Tests.ps1' = 12
             'bootstrap-ai-instructions-multisource.Tests.ps1' = 1
             'agent-artifact-remediation.Tests.ps1' = 1
         }
@@ -492,15 +492,16 @@ if ($IsWindows) {
         }
 
         $expectedShards = @(
-            @('install-ai-instructions-bootstrap.part1.Tests.ps1','skills-source-acquisition.Tests.ps1','standard-validation-resolver-hardening.Tests.ps1'),
-            @('install-ai-instructions-bootstrap.part2.Tests.ps1','skills-source-composition.Tests.ps1','standard-validation-skillspector-probe.Tests.ps1'),
-            @('install-ai-instructions-bootstrap.part3.Tests.ps1','production-skills-catalog.Tests.ps1','skills-source-retrieval.Tests.ps1','static-approved-exceptions.Tests.ps1'),
-            @('agent-artifact-remediation.Tests.ps1','ai-instructions-writer-gate.part2.Tests.ps1','bootstrap-ai-instructions-multisource.Tests.ps1','routine-semantic-scan.Tests.ps1','skills-source-routing.Tests.ps1','static-parser-coverage.Tests.ps1'),
-            @('ai-instructions-contract.Tests.ps1','bootstrap-ai-instructions.Tests.ps1','internal-skill-use.Tests.ps1','safe-zip.Tests.ps1','source-merge-exception-draft.Tests.ps1','syp101-production-smoke-contract.Tests.ps1'),
-            @('agent-environment-reconciler.Tests.ps1','ai-instructions-runtime-contract.Tests.ps1','invoke-ai-instructions-rollout.Tests.ps1','skills-catalog-contract.Tests.ps1','standard-core-progress.Tests.ps1','third-party-skill-source.Tests.ps1','update-ai-instructions.Tests.ps1'),
-            @('ai-instructions-launcher-recovery.Tests.ps1','license-delivery.Tests.ps1','platform-runtime.Tests.ps1','skills-catalog-source-host.Tests.ps1','standard-process-discovery.Tests.ps1','standard-validation-runner.Tests.ps1','third-party-source-envelope.Tests.ps1','trust-anchor-tools.Tests.ps1'),
-            @('ai-instructions-writer-gate.part1.Tests.ps1','bootstrap-ai-instructions-multisource-lock-arrays.Tests.ps1','cleanup-ai-instructions-pollution.Tests.ps1','licensing-scope.Tests.ps1','skills-selection.Tests.ps1','standard-semantic-bridge.Tests.ps1','syp214-user-only.Tests.ps1','windows-core-plan.Tests.ps1')
+            @('install-ai-instructions-bootstrap.part1.Tests.ps1','safe-zip.Tests.ps1','source-merge-exception-draft.Tests.ps1','syp101-production-smoke-contract.Tests.ps1'),
+            @('install-ai-instructions-bootstrap.part2.Tests.ps1','skills-catalog-contract.Tests.ps1','standard-core-progress.Tests.ps1','third-party-skill-source.Tests.ps1'),
+            @('install-ai-instructions-bootstrap.part3.Tests.ps1','internal-skill-use.Tests.ps1','skills-catalog-source-host.Tests.ps1','standard-process-discovery.Tests.ps1','third-party-source-envelope.Tests.ps1'),
+            @('ai-instructions-writer-gate.part2.Tests.ps1','cleanup-ai-instructions-pollution.Tests.ps1','invoke-ai-instructions-rollout.Tests.ps1','skills-selection.Tests.ps1','standard-semantic-bridge.Tests.ps1','windows-core-plan.Tests.ps1'),
+            @('bootstrap-ai-instructions.Tests.ps1','license-delivery.Tests.ps1','skills-source-acquisition.Tests.ps1','standard-validation-resolver-hardening.Tests.ps1','standard-validation-runner.Tests.ps1'),
+            @('ai-instructions-runtime-contract.Tests.ps1','licensing-scope.Tests.ps1','skills-source-composition.Tests.ps1','standard-validation-skillspector-probe.Tests.ps1','trust-anchor-tools.Tests.ps1','update-ai-instructions.Tests.ps1'),
+            @('agent-artifact-remediation.Tests.ps1','agent-environment-reconciler.Tests.ps1','bootstrap-ai-instructions-multisource-lock-arrays.Tests.ps1','platform-runtime.Tests.ps1','production-skills-catalog.Tests.ps1','skills-source-retrieval.Tests.ps1','static-approved-exceptions.Tests.ps1'),
+            @('ai-instructions-contract.Tests.ps1','ai-instructions-launcher-recovery.Tests.ps1','ai-instructions-writer-gate.part1.Tests.ps1','bootstrap-ai-instructions-multisource.Tests.ps1','routine-semantic-scan.Tests.ps1','skills-source-routing.Tests.ps1','static-parser-coverage.Tests.ps1','syp214-user-only.Tests.ps1')
         )
+        $expectedLoads = @(20,20,20,20,19,19,19,19)
         $script:ActualPlan.Plan.shards.Count | Should Be 8
         for ($index = 0; $index -lt $expectedShards.Count; $index++) {
             $shard = $script:ActualPlan.Plan.shards[$index]
@@ -511,8 +512,9 @@ if ($IsWindows) {
                 $weight = $configuration.weights.PSObject.Properties[$file]
                 $load += if ($null -eq $weight) { 1 } else { [int]$weight.Value }
             }
-            $load | Should Be 19
+            $load | Should Be $expectedLoads[$index]
         }
+        ($expectedLoads | Measure-Object -Maximum).Maximum | Should Be 20
     }
 
     # Scenario: LPT receives more weighted files than partitions, including an unknown weight.

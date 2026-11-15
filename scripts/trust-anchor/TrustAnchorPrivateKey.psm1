@@ -463,6 +463,9 @@ namespace SyuanTsai.AIInstructions.TrustAnchor {
         [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint="fsync", SetLastError=true)] private static extern int fsyncDarwin(IntPtr fd);
         [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint="mkdirat", SetLastError=true)] private static extern int mkdiratDarwin(IntPtr fd,string leaf,uint mode);
         [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint="openat", SetLastError=true)] private static extern int openatDarwin(IntPtr fd,string leaf,int flags,uint mode);
+        [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint="acl_get_fd_np", SetLastError=true)] private static extern IntPtr acl_get_fd_np(IntPtr fd,int type);
+        [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint="acl_get_entry", SetLastError=true)] private static extern int acl_get_entry(IntPtr acl,int entryId,out IntPtr entry);
+        [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint="acl_free", SetLastError=true)] private static extern int acl_free(IntPtr acl);
         private readonly SafeHandle parent;
         private SafeFileHandle directory;
         private SafeFileHandle file;
@@ -503,8 +506,21 @@ namespace SyuanTsai.AIInstructions.TrustAnchor {
         }
         private static void SameFile(NativeMetadataEvidence value,ulong device,ulong inode){if(value.Device!=device||value.Inode!=inode||value.LinkCount!=1||(value.Mode&0xF000)!=0x8000)throw new IOException("The trust-anchor rollback target identity or link count changed.");}
         private static void SameDirectory(NativeMetadataEvidence value,ulong device,ulong inode){if(value.Device!=device||value.Inode!=inode||(value.Mode&0xF000)!=0x4000)throw new IOException("The private trust-anchor rollback directory identity changed.");}
+        private static void AssertNoMacExtendedAcl(SafeHandle parent){
+            if(!Mac)return;
+            IntPtr acl=acl_get_fd_np(parent.DangerousGetHandle(),0x100);
+            if(acl==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to inspect the retained trust-anchor parent ACL.");
+            try{
+                IntPtr entry;int result=acl_get_entry(acl,0,out entry);
+                if(result==1)throw new IOException("The private trust-anchor parent must not have a macOS extended ACL.");
+                if(result!=0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to enumerate the retained trust-anchor parent ACL.");
+            }finally{if(acl_free(acl)!=0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to release the retained trust-anchor parent ACL.");}
+        }
         public static void AssertSafeParent(SafeHandle parent){
+            AssertNoMacExtendedAcl(parent);
             NativeMetadataEvidence value=UnixMetadataInspector.Inspect(parent);ulong effectiveUid=SecretBridge.EffectiveUid();
+            // Linux POSIX ACL named-user/group permissions are bounded by the ACL mask,
+            // which is exposed through the group class mode bits checked below.
             bool trustedOwner=value.Uid==effectiveUid||value.Uid==0;bool restricted=(value.Mode&0x12)==0;bool sticky=(value.Mode&0x200)!=0;
             if((value.Mode&0xF000)!=0x4000||!trustedOwner||(!restricted&&!sticky))throw new IOException("The private trust-anchor parent must be owner-only or sticky and owned by the effective user or root.");
         }
@@ -563,11 +579,17 @@ $script:TrustAnchorBeforePublicWriteTestHook = $null
 $script:TrustAnchorBeforeRollbackRemovalTestHook = $null
 $script:TrustAnchorAfterRollbackRenameTestHook = $null
 $script:TrustAnchorAfterInputBufferAllocatedTestHook = $null
+$script:TrustAnchorInteractiveStateTestHook = $null
 
 function New-TrustAnchorError {
     param([string]$Message,[string]$Id)
     $exception=[InvalidOperationException]::new($Message)
     return [Management.Automation.ErrorRecord]::new($exception,$Id,[Management.Automation.ErrorCategory]::SecurityError,$null)
+}
+
+function Get-TrustAnchorInteractiveState {
+    if($null-ne$script:TrustAnchorInteractiveStateTestHook){return $script:TrustAnchorInteractiveStateTestHook.Invoke()[0]}
+    return [pscustomobject][ordered]@{InputRedirected=[Console]::IsInputRedirected;UserInteractive=[Environment]::UserInteractive}
 }
 
 function Assert-TrustAnchorInteractiveHost {
@@ -577,7 +599,8 @@ function Assert-TrustAnchorInteractiveHost {
             throw (New-TrustAnchorError "Trust-anchor key tools cannot run while $name is set." 'TrustAnchor.NonInteractive')
         }
     }
-    if ([Console]::IsInputRedirected -or -not [Environment]::UserInteractive) {
+    $interactiveState=Get-TrustAnchorInteractiveState
+    if ($interactiveState.InputRedirected -or -not $interactiveState.UserInteractive) {
         throw (New-TrustAnchorError 'Trust-anchor key tools require an interactive host with non-redirected stdin.' 'TrustAnchor.NonInteractive')
     }
 }
