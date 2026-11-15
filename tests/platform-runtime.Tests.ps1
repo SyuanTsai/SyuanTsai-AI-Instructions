@@ -2596,6 +2596,297 @@ Describe 'Platform runtime contract' {
         }
     }
 
+    # Scenario: Unix optional leaf parameters receive null or empty input through PowerShell binding on any host.
+    # Purpose: Preserve null through the shared adapter and the .NET string boundary while retaining leaf validation.
+    It 'UnitT33_preserves_null_for_unix_optional_leaf_parameters' {
+        $unixPath = Join-Path $script:RepositoryRoot 'scripts/platform/Unix.psm1'
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($unixPath,[ref]$tokens,[ref]$errors)
+        @($errors).Count | Should Be 0
+        foreach($case in @(
+            @{Function='Publish-UnixPlatformFile';Parameter='DisplacedLeaf'},
+            @{Function='Remove-UnixPlatformOwnedFile';Parameter='TombstoneLeaf'},
+            @{Function='Assert-UnixJournalBinding';Parameter='DisplacedLeaf'}
+        )) {
+            $function = $ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $case.Function},$true)
+            $parameter = @($function.Body.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -ceq $case.Parameter })
+            $parameter.Count | Should Be 1
+            $parameter[0].StaticType | Should Be ([object])
+            $normalizer = @($function.Body.FindAll({param($node)
+                $node -is [Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -ceq 'ConvertTo-UnixOptionalLeaf' -and
+                @($node.CommandElements | Where-Object { $_ -is [Management.Automation.Language.VariableExpressionAst] -and $_.VariablePath.UserPath -ceq $case.Parameter }).Count -eq 1
+            },$true))
+            $normalizer.Count | Should Be 1
+        }
+
+        $helper = $ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'ConvertTo-UnixOptionalLeaf'},$true)
+        $helper | Should Not BeNullOrEmpty
+        $module = New-Module -ScriptBlock ([scriptblock]::Create("$($helper.Extent.Text)`nExport-ModuleMember -Function ConvertTo-UnixOptionalLeaf"))
+        try {
+            $command = $module.ExportedCommands['ConvertTo-UnixOptionalLeaf']
+            (& $command $null) | Should BeNullOrEmpty
+            (& $command '') | Should BeNullOrEmpty
+            (& $command 123) | Should Be '123'
+        }
+        finally { $module | Remove-Module -Force -ErrorAction SilentlyContinue }
+
+        $nativeHelper = $ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'ConvertTo-UnixNativeNullableString'},$true)
+        $nativeHelper | Should Not BeNullOrEmpty
+        $nativeModule = New-Module -ScriptBlock ([scriptblock]::Create("$($nativeHelper.Extent.Text)`nExport-ModuleMember -Function ConvertTo-UnixNativeNullableString"))
+        try {
+            $nativeCommand = $nativeModule.ExportedCommands['ConvertTo-UnixNativeNullableString']
+            $nativeNull = & $nativeCommand $null
+            $nativeNull.GetType().FullName | Should Be 'System.Management.Automation.Language.NullString'
+            ([object]::ReferenceEquals($nativeNull,[NullString]::Value)) | Should Be $true
+            (& $nativeCommand 'value') | Should Be 'value'
+        }
+        finally { $nativeModule | Remove-Module -Force -ErrorAction SilentlyContinue }
+
+        $publish = $ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Publish-UnixPlatformFile'},$true)
+        foreach($binding in @(
+            @{Native='nativeExpectedSha256';Source='expected.sha256'},
+            @{Native='nativeDisplacedLeaf';Source='DisplacedLeaf'}
+        )) {
+            $assignment = @($publish.Body.FindAll({param($node)
+                $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+                $node.Left.VariablePath.UserPath -ceq $binding.Native -and
+                $node.Right.Extent.Text -match "ConvertTo-UnixNativeNullableString\s+\`$$([regex]::Escape($binding.Source))"
+            },$true))
+            $assignment.Count | Should Be 1
+        }
+        $publishCall = @($publish.Body.FindAll({param($node)
+            $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
+            $node.Static -and $node.Member.Value -ceq 'Publish'
+        },$true))
+        $publishCall.Count | Should Be 1
+        $publishCall[0].Arguments[7].VariablePath.UserPath | Should Be 'nativeExpectedSha256'
+        $publishCall[0].Arguments[9].VariablePath.UserPath | Should Be 'nativeDisplacedLeaf'
+    }
+
+    # Scenario: Unix public mutation and permission facades invoke native methods that can throw typed platform failures.
+    # Purpose: Prevent PowerShell's MethodInvocationException wrapper from escaping instead of the platform exception contract.
+    It 'UnitT34_unwraps_typed_exceptions_from_unix_native_facades' {
+        function Assert-ExactExceptionUnwrapThrow {
+            param([Parameter(Mandatory = $true)] $Throw)
+            $Throw.Pipeline | Should Not BeNullOrEmpty
+            @($Throw.Pipeline.PipelineElements).Count | Should Be 1
+            $element = $Throw.Pipeline.PipelineElements[0]
+            ($element -is [Management.Automation.Language.CommandExpressionAst]) | Should Be $true
+            $member = $element.Expression
+            ($member -is [Management.Automation.Language.MemberExpressionAst]) | Should Be $true
+            $member.Static | Should Be $false
+            ($member.Expression -is [Management.Automation.Language.VariableExpressionAst]) | Should Be $true
+            @('_','PSItem') | Should Contain $member.Expression.VariablePath.UserPath
+            ($member.Member -is [Management.Automation.Language.StringConstantExpressionAst]) | Should Be $true
+            $member.Member.Value | Should BeExactly 'Exception'
+        }
+
+        function Assert-ExceptionMessageMember {
+            param([Parameter(Mandatory = $true)] $Member)
+            ($Member -is [Management.Automation.Language.MemberExpressionAst]) | Should Be $true
+            $Member.Static | Should Be $false
+            $Member.Member.Value | Should BeExactly 'Message'
+            $exceptionMember = $Member.Expression
+            ($exceptionMember -is [Management.Automation.Language.MemberExpressionAst]) | Should Be $true
+            $exceptionMember.Static | Should Be $false
+            ($exceptionMember.Expression -is [Management.Automation.Language.VariableExpressionAst]) | Should Be $true
+            @('_','PSItem') | Should Contain $exceptionMember.Expression.VariablePath.UserPath
+            $exceptionMember.Member.Value | Should BeExactly 'Exception'
+        }
+
+        function Assert-VerificationTranslationCatch {
+            param(
+                [Parameter(Mandatory = $true)] $CatchClause,
+                [Parameter(Mandatory = $true)][string] $Capability
+            )
+            $throws = @($CatchClause.Body.FindAll({param($node) $node -is [Management.Automation.Language.ThrowStatementAst]},$true))
+            $throws.Count | Should Be 2
+            $ifStatements = @($CatchClause.Body.Statements | Where-Object { $_ -is [Management.Automation.Language.IfStatementAst] })
+            $ifStatements.Count | Should Be 1
+            $ifStatement = $ifStatements[0]
+            @($ifStatement.Clauses).Count | Should Be 1
+            $ifStatement.ElseClause | Should BeNullOrEmpty
+
+            $condition = $ifStatement.Clauses[0].Item1
+            $comparisons = @($condition.FindAll({param($node) $node -is [Management.Automation.Language.BinaryExpressionAst]},$true))
+            $comparisons.Count | Should Be 1
+            $comparisons[0].Operator.ToString() | Should BeExactly 'Ceq'
+            ($comparisons[0].Right -is [Management.Automation.Language.StringConstantExpressionAst]) | Should Be $true
+            $comparisons[0].Right.Value | Should BeExactly $Capability
+            $capabilityMembers = @($comparisons[0].Left.FindAll({param($node)
+                $node -is [Management.Automation.Language.MemberExpressionAst] -and $node.Member.Value -ceq 'Capability'
+            },$true))
+            $capabilityMembers.Count | Should Be 1
+            $capabilityMembers[0].Static | Should Be $false
+            $exceptionMember = $capabilityMembers[0].Expression
+            ($exceptionMember -is [Management.Automation.Language.MemberExpressionAst]) | Should Be $true
+            $exceptionMember.Static | Should Be $false
+            ($exceptionMember.Member -is [Management.Automation.Language.StringConstantExpressionAst]) | Should Be $true
+            $exceptionMember.Member.Value | Should BeExactly 'Exception'
+            ($exceptionMember.Expression -is [Management.Automation.Language.VariableExpressionAst]) | Should Be $true
+            @('_','PSItem') | Should Contain $exceptionMember.Expression.VariablePath.UserPath
+
+            $sameCapabilityThrows = @($ifStatement.Clauses[0].Item2.FindAll({param($node) $node -is [Management.Automation.Language.ThrowStatementAst]},$true))
+            $sameCapabilityThrows.Count | Should Be 1
+            Assert-ExactExceptionUnwrapThrow $sameCapabilityThrows[0]
+
+            $translationThrows = @($CatchClause.Body.Statements | Where-Object { $_ -is [Management.Automation.Language.ThrowStatementAst] })
+            $translationThrows.Count | Should Be 1
+            $translationElement = $translationThrows[0].Pipeline.PipelineElements[0]
+            ($translationElement -is [Management.Automation.Language.CommandExpressionAst]) | Should Be $true
+            ($translationElement.Expression -is [Management.Automation.Language.ParenExpressionAst]) | Should Be $true
+            $translationPipeline = $translationElement.Expression.Pipeline
+            @($translationPipeline.PipelineElements).Count | Should Be 1
+            $translationCommand = $translationPipeline.PipelineElements[0]
+            ($translationCommand -is [Management.Automation.Language.CommandAst]) | Should Be $true
+            $translationCommand.GetCommandName() | Should BeExactly 'New-UnixPlatformVerificationError'
+            @($translationCommand.CommandElements).Count | Should Be 3
+            ($translationCommand.CommandElements[1] -is [Management.Automation.Language.StringConstantExpressionAst]) | Should Be $true
+            $translationCommand.CommandElements[1].Value | Should BeExactly $Capability
+            Assert-ExceptionMessageMember $translationCommand.CommandElements[2]
+        }
+
+        function Assert-MutationTranslationThrow {
+            param([Parameter(Mandatory = $true)] $CatchClause)
+            $throws = @($CatchClause.Body.FindAll({param($node) $node -is [Management.Automation.Language.ThrowStatementAst]},$true))
+            $throws.Count | Should Be 1
+            @($throws[0].Pipeline.PipelineElements).Count | Should Be 1
+            $element = $throws[0].Pipeline.PipelineElements[0]
+            ($element -is [Management.Automation.Language.CommandExpressionAst]) | Should Be $true
+            $constructor = $element.Expression
+            ($constructor -is [Management.Automation.Language.InvokeMemberExpressionAst]) | Should Be $true
+            $constructor.Static | Should Be $true
+            ($constructor.Expression -is [Management.Automation.Language.TypeExpressionAst]) | Should Be $true
+            $constructor.Expression.TypeName.FullName | Should BeExactly 'SyuanTsai.AIInstructions.PlatformRuntime.PlatformMutationException'
+            $constructor.Member.Value | Should BeExactly 'new'
+        }
+
+        $unixPath = Join-Path $script:RepositoryRoot 'scripts/platform/Unix.psm1'
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($unixPath,[ref]$tokens,[ref]$errors)
+        @($errors).Count | Should Be 0
+
+        $catchContract = @(
+            @{ Function='Get-UnixPlatformPermissionSnapshot'; Try=0; Catch='PlatformCapabilityUnavailableException'; Strategy='unwrap' },
+            @{ Function='Get-UnixPlatformPermissionSnapshot'; Try=0; Catch='PlatformErrnoException'; Strategy='unwrap' },
+            @{ Function='Get-UnixPlatformPermissionSnapshot'; Try=0; Catch='PlatformVerificationException'; Strategy='unwrap' },
+            @{ Function='Set-UnixPlatformPermissions'; Try=0; Catch='PlatformCapabilityUnavailableException'; Strategy='unwrap' },
+            @{ Function='Set-UnixPlatformPermissions'; Try=0; Catch='PlatformErrnoException'; Strategy='unwrap' },
+            @{ Function='Set-UnixPlatformPermissions'; Try=0; Catch='PlatformVerificationException'; Strategy='unwrap' },
+            @{ Function='Set-UnixPlatformPermissions'; Try=0; Catch='PlatformMutationException'; Strategy='unwrap' },
+            @{ Function='Publish-UnixPlatformFile'; Try=0; Catch='PlatformVerificationException'; Strategy='unwrap' },
+            @{ Function='Publish-UnixPlatformFile'; Try=0; Catch='PlatformCapabilityUnavailableException'; Strategy='unwrap' },
+            @{ Function='Publish-UnixPlatformFile'; Try=1; Catch='PlatformVerificationException'; Strategy='verification'; Capability='publication' },
+            @{ Function='Publish-UnixPlatformFile'; Try=1; Catch='PlatformCapabilityUnavailableException'; Strategy='unwrap' },
+            @{ Function='Publish-UnixPlatformFile'; Try=1; Catch='PlatformErrnoException'; Strategy='unwrap' },
+            @{ Function='Publish-UnixPlatformFile'; Try=1; Catch='PlatformMutationException'; Strategy='mutation' },
+            @{ Function='Remove-UnixPlatformOwnedFile'; Try=0; Catch='PlatformVerificationException'; Strategy='unwrap' },
+            @{ Function='Remove-UnixPlatformOwnedFile'; Try=0; Catch='PlatformCapabilityUnavailableException'; Strategy='unwrap' },
+            @{ Function='Remove-UnixPlatformOwnedFile'; Try=1; Catch='PlatformVerificationException'; Strategy='verification'; Capability='owned-file-removal' },
+            @{ Function='Remove-UnixPlatformOwnedFile'; Try=1; Catch='PlatformCapabilityUnavailableException'; Strategy='unwrap' },
+            @{ Function='Remove-UnixPlatformOwnedFile'; Try=1; Catch='PlatformErrnoException'; Strategy='unwrap' },
+            @{ Function='Remove-UnixPlatformOwnedFile'; Try=1; Catch='PlatformMutationException'; Strategy='mutation' }
+        )
+        foreach ($functionName in @($catchContract.Function | Sort-Object -Unique)) {
+            $functions = @($ast.FindAll({param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $functionName
+            },$true))
+            $functions.Count | Should Be 1
+            $function = $functions[0]
+            $nativeCalls = @($function.Body.FindAll({param($node)
+                $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
+                $node.Static -and
+                $node.Expression.TypeName.FullName -ceq 'SyuanTsai.AIInstructions.PlatformRuntime.UnixNative'
+            },$true))
+            $nativeCalls.Count | Should BeGreaterThan 0
+            foreach ($nativeCall in $nativeCalls) {
+                $tryStatement = $nativeCall.Parent
+                while ($null -ne $tryStatement -and $tryStatement -isnot [Management.Automation.Language.TryStatementAst]) {
+                    $tryStatement = $tryStatement.Parent
+                }
+                $tryStatement | Should Not BeNullOrEmpty
+            }
+        }
+
+        foreach ($row in $catchContract) {
+            $function = $ast.Find({param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $row.Function
+            },$true)
+            $tries = @($function.Body.FindAll({param($node) $node -is [Management.Automation.Language.TryStatementAst]},$true))
+            ($tries.Count -gt $row.Try) | Should Be $true
+            $tryStatement = $tries[$row.Try]
+            $catchClauses = @($tryStatement.CatchClauses | Where-Object {
+                @($_.CatchTypes).Count -eq 1 -and
+                $_.CatchTypes[0].TypeName.FullName -ceq "SyuanTsai.AIInstructions.PlatformRuntime.$($row.Catch)"
+            })
+            $catchClauses.Count | Should Be 1
+            $catchClause = $catchClauses[0]
+            if ($row.Strategy -ceq 'unwrap') {
+                $throws = @($catchClause.Body.FindAll({param($node) $node -is [Management.Automation.Language.ThrowStatementAst]},$true))
+                $throws.Count | Should Be 1
+                Assert-ExactExceptionUnwrapThrow $throws[0]
+            }
+            elseif ($row.Strategy -ceq 'verification') {
+                Assert-VerificationTranslationCatch $catchClause $row.Capability
+            }
+            elseif ($row.Strategy -ceq 'mutation') {
+                Assert-MutationTranslationThrow $catchClause
+            }
+            else { throw "Unsupported UnitT34 catch strategy '$($row.Strategy)'." }
+        }
+
+        foreach ($adapter in @(
+            @{ Platform='Linux'; Function='Publish-LinuxPlatformFile'; Delegate='Publish-UnixPlatformFile'; Binding='splat' },
+            @{ Platform='Linux'; Function='Remove-LinuxPlatformOwnedFile'; Delegate='Remove-UnixPlatformOwnedFile'; Binding='splat' },
+            @{ Platform='Linux'; Function='Get-LinuxPlatformPermissions'; Delegate='Get-UnixPlatformPermissionSnapshot'; Binding='lease' },
+            @{ Platform='Linux'; Function='Set-LinuxPlatformPermissions'; Delegate='Set-UnixPlatformPermissions'; Binding='splat' },
+            @{ Platform='MacOS'; Function='Publish-MacOSPlatformFile'; Delegate='Publish-UnixPlatformFile'; Binding='splat' },
+            @{ Platform='MacOS'; Function='Remove-MacOSPlatformOwnedFile'; Delegate='Remove-UnixPlatformOwnedFile'; Binding='splat' },
+            @{ Platform='MacOS'; Function='Get-MacOSPlatformPermissions'; Delegate='Get-UnixPlatformPermissionSnapshot'; Binding='lease' },
+            @{ Platform='MacOS'; Function='Set-MacOSPlatformPermissions'; Delegate='Set-UnixPlatformPermissions'; Binding='splat' }
+        )) {
+            $adapterPath = Join-Path $script:RepositoryRoot "scripts/platform/$($adapter.Platform).psm1"
+            $adapterTokens = $null
+            $adapterErrors = $null
+            $adapterAst = [Management.Automation.Language.Parser]::ParseFile($adapterPath,[ref]$adapterTokens,[ref]$adapterErrors)
+            @($adapterErrors).Count | Should Be 0
+            $adapterFunctions = @($adapterAst.FindAll({param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $adapter.Function
+            },$true))
+            $adapterFunctions.Count | Should Be 1
+            $adapterFunction = $adapterFunctions[0]
+            $nativeCalls = @($adapterFunction.Body.FindAll({param($node)
+                $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
+                $node.Static -and
+                $node.Expression.TypeName.FullName -ceq 'SyuanTsai.AIInstructions.PlatformRuntime.UnixNative'
+            },$true))
+            $nativeCalls.Count | Should Be 0
+            $delegates = @($adapterFunction.Body.FindAll({param($node)
+                $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq $adapter.Delegate
+            },$true))
+            $delegates.Count | Should Be 1
+            $delegate = $delegates[0]
+            if ($adapter.Binding -ceq 'splat') {
+                @($delegate.CommandElements).Count | Should Be 2
+                ($delegate.CommandElements[1] -is [Management.Automation.Language.VariableExpressionAst]) | Should Be $true
+                $delegate.CommandElements[1].Splatted | Should Be $true
+                $delegate.CommandElements[1].VariablePath.UserPath | Should BeExactly 'PSBoundParameters'
+            }
+            else {
+                @($delegate.CommandElements).Count | Should Be 3
+                ($delegate.CommandElements[1] -is [Management.Automation.Language.CommandParameterAst]) | Should Be $true
+                $delegate.CommandElements[1].ParameterName | Should BeExactly 'Lease'
+                ($delegate.CommandElements[2] -is [Management.Automation.Language.VariableExpressionAst]) | Should Be $true
+                $delegate.CommandElements[2].Splatted | Should Be $false
+                $delegate.CommandElements[2].VariablePath.UserPath | Should BeExactly 'Lease'
+            }
+        }
+    }
+
     # Scenario: Every reviewed entry point carries its own platform-runtime manifest trust anchor.
     # Purpose: Keep all independent pins synchronized with the canonical manifest before executable code is imported.
     It 'UnitT35_keeps_platform_runtime_entry_pins_synchronized' {
@@ -3618,8 +3909,8 @@ Describe 'Unix P7c durable publication and removal' {
         }
         function New-P7cJournalOperation {
             param(
-                [string]$TargetRelativePath,[string]$Kind,[string]$Method,[AllowNull()][string]$StageLeaf,
-                [AllowNull()][string]$BackupLeaf,$Original,$Applied,[AllowNull()]$Permissions
+                [string]$TargetRelativePath,[string]$Kind,[string]$Method,[AllowNull()]$StageLeaf,
+                [AllowNull()]$BackupLeaf,$Original,$Applied,[AllowNull()]$Permissions
             )
             $operation=[pscustomobject][ordered]@{
                 sequence=1;kind=$Kind;method=$Method;targetRelativePath=$TargetRelativePath
@@ -3667,6 +3958,48 @@ Describe 'Unix P7c durable publication and removal' {
             (Get-PlatformPermissions $published).mode|Should Be '600';$receipt.displacedIdentity|Should BeNullOrEmpty
             (@($receipt.completedSteps)-contains 'destination-preflight')|Should Be $true
         } finally {if($null-ne$published){$published.Dispose()};if($null-ne$stage){$stage.Dispose()};$txn.Lease.Dispose();$parent.Dispose()}
+    }
+
+    # Scenario: Absent Unix targets are published with DisplacedLeaf omitted or explicitly null.
+    # Purpose: Both caller forms preserve null instead of binding it to an empty string and rejecting create-file publication.
+    It 'InterT506_publishes_absent_unix_targets_with_omitted_or_null_displaced_leaf' {
+        foreach($variant in @('omitted','null')) {
+            $parent=New-P7cDirectory "create-null-$variant";$txn=New-P7cTransaction;$stage=$null;$published=$null
+            try {
+                $stage=New-P7cFile $txn.Lease stage $variant;$arguments=@{ParentLease=$parent;Leaf='target';TransactionLease=$txn.Lease;StageLease=$stage;ExpectedState=(Get-P7cAbsentState);ExpectedStage=(Get-P7cStageState $stage)}
+                if($variant -ceq 'null'){$arguments.DisplacedLeaf=$null}
+                $receipt=Publish-PlatformFile @arguments
+                $published=Open-PlatformFile -ParentLease $parent -Leaf target -Access Read -CreateMode OpenExisting
+                (Read-P7cText $parent target)|Should Be $variant
+                $receipt.displacedLeaf|Should BeNullOrEmpty
+            } finally {if($null-ne$published){$published.Dispose()};if($null-ne$stage){$stage.Dispose()};$txn.Lease.Dispose();$parent.Dispose()}
+        }
+    }
+
+    # Scenario: NoReplace publishes an absent target, then a raced destination appears before a second publication.
+    # Purpose: Null displacement supports create-only publication while native no-replace still preserves an existing destination.
+    It 'InterT507_preserves_noreplace_race_rejection_for_absent_unix_targets' {
+        $parent=New-P7cDirectory 'create-noreplace';$firstTxn=New-P7cTransaction;$secondTxn=New-P7cTransaction;$firstStage=$null;$secondStage=$null
+        try {
+            $firstStage=New-P7cFile $firstTxn.Lease stage 'first'
+            Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $firstTxn.Lease -StageLease $firstStage -ExpectedState (Get-P7cAbsentState) -NoReplace -ExpectedStage (Get-P7cStageState $firstStage)|Out-Null
+            $secondStage=New-P7cFile $secondTxn.Lease stage 'second'
+            {Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $secondTxn.Lease -StageLease $secondStage -ExpectedState (Get-P7cAbsentState) -DisplacedLeaf $null -NoReplace -ExpectedStage (Get-P7cStageState $secondStage)}|Should Throw
+            (Read-P7cText $parent target)|Should Be 'first'
+            (Read-P7cText $secondTxn.Lease stage)|Should Be 'second'
+        } finally {foreach($lease in @($secondStage,$firstStage)){if($null-ne$lease){$lease.Dispose()}};$secondTxn.Lease.Dispose();$firstTxn.Lease.Dispose();$parent.Dispose()}
+    }
+
+    # Scenario: A create-file journal binds backupLeaf=null to a publication for an absent Unix target.
+    # Purpose: Journal binding compares null to null and permits the durable create-file operation.
+    It 'InterT508_accepts_null_backup_leaf_in_unix_create_file_journal' {
+        $parent=New-P7cDirectory 'journal-null';$txn=New-P7cTransaction;$stage=$null
+        try {
+            $stage=New-P7cFile $txn.Lease stage 'journal-created';$stageState=Get-P7cStageState $stage
+            $operation=New-P7cJournalOperation -TargetRelativePath 'journal-null/target' -Kind create-file -Method stage-rename -StageLeaf stage -BackupLeaf $null -Original (Get-P7cAbsentState) -Applied (New-P7cAppliedState $stageState) -Permissions $null
+            Publish-PlatformFile -ParentLease $parent -Leaf target -TransactionLease $txn.Lease -StageLease $stage -ExpectedState (Get-P7cAbsentState) -DisplacedLeaf $null -ExpectedStage $stageState -Journal $operation|Out-Null
+            (Read-P7cText $parent target)|Should Be 'journal-created'
+        } finally {if($null-ne$stage){$stage.Dispose()};$txn.Lease.Dispose();$parent.Dispose()}
     }
 
     # Scenario: Expected hash, length, or identity differs from the current target.
@@ -3762,6 +4095,23 @@ Describe 'Unix P7c durable publication and removal' {
             (@($cleanup.completedSteps)-contains 'destination-preflight')|Should Be $true
             {Remove-PlatformOwnedFile -ParentLease $parent -Leaf target -ExpectedState $state -TransactionLease $parent -TombstoneLeaf target}|Should Throw
         }finally{foreach($lease in @($tombstone,$target)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose();$parent.Dispose()}
+    }
+
+    # Scenario: Cleanup omits both optional tombstone arguments, while callers also try supplying only one member of the pair.
+    # Purpose: Null binding reaches cleanup-unlinkat, but incomplete tombstone authority remains rejected.
+    It 'InterT532_cleans_unix_transaction_files_only_when_tombstone_arguments_are_both_omitted' {
+        $txn=New-P7cTransaction;$cleanupFile=$null;$guardFile=$null
+        try {
+            $cleanupFile=New-P7cFile $txn.Lease cleanup 'cleanup';$cleanupState=Get-P7cState $cleanupFile;$cleanupFile.Dispose();$cleanupFile=$null
+            $receipt=Remove-PlatformOwnedFile -ParentLease $txn.Lease -Leaf cleanup -ExpectedState $cleanupState
+            $receipt.method|Should Be 'cleanup-unlinkat';$receipt.deleted|Should Be $true
+            Test-Path -LiteralPath (Join-Path $script:P7cRoot ".ai-instructions-txn/$($txn.Id)/cleanup")|Should Be $false
+
+            $guardFile=New-P7cFile $txn.Lease guard 'guard';$guardState=Get-P7cState $guardFile;$guardFile.Dispose();$guardFile=$null
+            {Remove-PlatformOwnedFile -ParentLease $txn.Lease -Leaf guard -ExpectedState $guardState -TransactionLease $txn.Lease}|Should Throw
+            {Remove-PlatformOwnedFile -ParentLease $txn.Lease -Leaf guard -ExpectedState $guardState -TombstoneLeaf tombstone}|Should Throw
+            (Read-P7cText $txn.Lease guard)|Should Be 'guard'
+        } finally {foreach($lease in @($guardFile,$cleanupFile)){if($null-ne$lease){$lease.Dispose()}};$txn.Lease.Dispose()}
     }
 
     }
