@@ -191,9 +191,9 @@ function Get-AgentEnvironmentSetupRid {
 
 function Get-AgentEnvironmentSetupPolicyAsset {
     param([Parameter(Mandatory = $true)] $Policy, [Parameter(Mandatory = $true)][string] $Rid)
-    $matches = @($Policy.powerShell.assets | Where-Object { [string]$_.rid -ceq $Rid })
-    if ($matches.Count -ne 1) { throw (New-AgentEnvironmentSetupRefusal unsupported-platform "The setup policy has no asset for '$Rid'.") }
-    return [pscustomobject]@{ Rid = $Rid; Version = [string]$Policy.powerShell.version; Name = [string]$matches[0].name; Sha256 = [string]$matches[0].sha256 }
+    $assetMatches = @($Policy.powerShell.assets | Where-Object { [string]$_.rid -ceq $Rid })
+    if ($assetMatches.Count -ne 1) { throw (New-AgentEnvironmentSetupRefusal unsupported-platform "The setup policy has no asset for '$Rid'.") }
+    return [pscustomobject]@{ Rid = $Rid; Version = [string]$Policy.powerShell.version; Name = [string]$assetMatches[0].name; Sha256 = [string]$assetMatches[0].sha256 }
 }
 
 function Get-AgentEnvironmentSetupPathComparison {
