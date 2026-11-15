@@ -350,7 +350,7 @@ Runtime 發布的 crash-state 契約如下；任何狀態都不會回收或覆�
 - 祖先目錄不得為 symbolic link，且須屬於 root 或目前使用者、不可 group／other 寫入（sticky 例外）。macOS 的 `/var` 等 symlink 祖先，以及 Fedora Atomic 的 `/home` → `/var/home`，會被拒絕。
 - A1：Unix 的保證是 cooperative lock、不跟隨 link 與重驗；同帳號、不遵守 lock 的惡意 writer 不在保證範圍內。
 - P8：所有 projection root 與 USER home 必須在同一個 filesystem；setup 的暫存與 cache 也放在 setup root 底下以便同 filesystem `mv`。
-- 只驗證過 Windows fixture；Linux arm64、macOS（x64／arm64）與實際雲端環境尚未驗證。musl 系統回 `unsupported-platform`。canonical pwsh 需要系統已有其執行依賴（例如 ICU）；setup 不安裝系統套件，也不轉傳 `DOTNET_*` 等 loader／runtime 變數。
+- Setup native tests 已在 GitHub Actions `ubuntu-26.04`（x64）與 `macos-26-arm64` 的 Unix probe 各通過 59/59。其他 RID（例如 linux-arm64、osx-x64）尚未實跑；D9 的真實雲端 acceptance 屬於 P10b，這些 probe 結果也不是正式支援矩陣。musl 系統回 `unsupported-platform`。canonical pwsh 需要系統已有其執行依賴（例如 ICU）；setup 不安裝系統套件，也不轉傳 `DOTNET_*` 等 loader／runtime 變數。
 
 Typed exit code（shell 與 PowerShell 共用，定義在 `scripts/agent-environment-setup.psm1`）：
 
@@ -417,7 +417,7 @@ Known limitations:
 - Ancestor directories must not be symbolic links, must be owned by root or the current user, and must not be group/other writable unless sticky. macOS symlinked ancestors such as `/var` and Fedora Atomic `/home` → `/var/home` are refused.
 - A1: on Unix the guarantee is a cooperative lock, no link following and re-verification; a same-account malicious writer that ignores the lock is out of scope.
 - P8: all projection roots and the USER home must share one filesystem; the setup temp and cache also live under the setup root so `mv` stays on one filesystem.
-- Only the Windows fixture is verified; Linux arm64, macOS (x64/arm64) and real cloud environments are unverified. musl systems return `unsupported-platform`. The canonical pwsh needs its system runtime dependencies (for example ICU); setup installs no system packages and never forwards loader/runtime variables such as `DOTNET_*`.
+- The setup native tests passed 59/59 in Unix probes on GitHub Actions `ubuntu-26.04` (x64) and `macos-26-arm64`. Other RIDs (for example linux-arm64 and osx-x64) have not run; real cloud acceptance under D9 belongs to P10b, and these probe results are not a formal support matrix. musl systems return `unsupported-platform`. The canonical pwsh needs its system runtime dependencies (for example ICU); setup installs no system packages and never forwards loader/runtime variables such as `DOTNET_*`.
 
 Typed exit codes (shared by the shell and PowerShell entry points, defined in `scripts/agent-environment-setup.psm1`):
 

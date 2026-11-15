@@ -1511,7 +1511,7 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
     }
 
     # Scenario: --prepare with a pre-placed verified cache, then --offline; no network is used.
-    # Purpose: S1-S4 hand off to pwsh, which prepares and re-verifies the canonical runtime while every retained run tree stays private.
+    # Purpose: S1-S4 hand off to pwsh, which prepares and re-verifies the canonical runtime without retaining either successful run tree.
     It 'InterT20_prepares_from_a_preplaced_cache_and_reverifies_offline_with_private_modes' {
         $userHome = New-UnixHome 'success'
         $prepare = Invoke-UnixSetup $userHome @('--prepare')
@@ -1532,11 +1532,7 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         Get-UnixMode (Join-Path $setupRoot 'receipts/setup-receipt.json') | Should Be '600'
         Get-UnixMode (Join-Path $setupRoot "receipts/runtime-$($script:UnixVersion)-$($script:UnixRid).json") | Should Be '600'
         $runDirectories = @(Get-ChildItem -LiteralPath (Join-Path $setupRoot 'tmp') -Directory -Force)
-        $runDirectories.Count | Should Be 2
-        foreach($runDirectory in $runDirectories){
-            $runDirectory.Name | Should Match '^run\.[0-9]+\.[A-Za-z0-9]+$'
-            Get-UnixMode $runDirectory.FullName | Should Be '700'
-        }
+        $runDirectories.Count | Should Be 0
         $offline.Stdout.Contains($userHome) | Should Be $false
     }
 
@@ -1896,8 +1892,8 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
     }
 
     # Scenario: A previous forced termination left an old run-specific tmp tree before another prepare starts.
-    # Purpose: H3 proves the new run uses a pid-plus-random directory and neither scans nor reclaims the old tree.
-    It 'InterT41_preserves_old_tmp_trees_and_uses_a_random_per_run_name' {
+    # Purpose: H3 proves successful cleanup removes only the new run tree and neither scans nor reclaims the old tree.
+    It 'InterT41_preserves_old_tmp_trees_while_cleaning_the_current_run' {
         $homePath = New-UnixHome 'tmp-orphan'
         $tmpRoot = Join-Path $homePath '.local/share/ai-instructions-setup/tmp'
         $old = Join-Path $tmpRoot 'run.1234.old-orphan'
@@ -1913,8 +1909,50 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         (Get-UnixTreeSnapshot $old) | Should BeExactly $before
         (Get-Item -LiteralPath $old).LastWriteTimeUtc.Ticks | Should Be $mtime
         $newRuns = @(Get-ChildItem -LiteralPath $tmpRoot -Directory -Force | Where-Object { $_.FullName -ne $old })
-        $newRuns.Count | Should BeGreaterThan 0
-        foreach ($directory in $newRuns) { $directory.Name | Should Match '^run\.[0-9]+\.[A-Za-z0-9]+$'; $directory.Name | Should Not Match '^run\.[0-9]+$' }
+        $newRuns.Count | Should Be 0
+    }
+
+    # Scenario: The cache directory itself is a symbolic link to an external directory, or a dangling symbolic link.
+    # Purpose: Refuse both intermediate-link forms as unsafe-path before reading cache bytes, while HOME and external setup state remain byte-identical.
+    It 'InterT47_refuses_symbolic_and_dangling_cache_directories_without_mutation' {
+        $linkedHome = New-UnixHome 'cache-directory-link' -WithoutCache
+        $linkedSetupRoot = Join-Path $linkedHome '.local/share/ai-instructions-setup'
+        [void][IO.Directory]::CreateDirectory($linkedSetupRoot)
+        foreach ($relative in @('.local','.local/share','.local/share/ai-instructions-setup')) {
+            [IO.File]::SetUnixFileMode((Join-Path $linkedHome $relative),[IO.UnixFileMode]448)
+        }
+        $externalCache = Join-Path $script:UnixRoot 'external-cache-directory'
+        [void][IO.Directory]::CreateDirectory($externalCache)
+        [IO.File]::SetUnixFileMode($externalCache,[IO.UnixFileMode]448)
+        Copy-Item -LiteralPath $script:UnixArchives['runtime'].Path -Destination (Join-Path $externalCache $script:UnixAssetName)
+        [IO.File]::SetUnixFileMode((Join-Path $externalCache $script:UnixAssetName),[IO.UnixFileMode]384)
+        [void][IO.Directory]::CreateSymbolicLink((Join-Path $linkedSetupRoot 'cache'),$externalCache)
+        $linkedHomeBefore = Get-UnixTreeSnapshot $linkedHome
+        $externalBefore = Get-UnixTreeSnapshot $externalCache
+
+        $linkedRun = Invoke-UnixSetup $linkedHome @('--offline')
+
+        $linkedRun.ExitCode | Should Be 13
+        $linkedRun.Json.code | Should Be 'unsafe-path'
+        (Get-UnixTreeSnapshot $linkedHome) | Should BeExactly $linkedHomeBefore
+        (Get-UnixTreeSnapshot $externalCache) | Should BeExactly $externalBefore
+
+        $danglingHome = New-UnixHome 'cache-directory-dangling' -WithoutCache
+        $danglingSetupRoot = Join-Path $danglingHome '.local/share/ai-instructions-setup'
+        [void][IO.Directory]::CreateDirectory($danglingSetupRoot)
+        foreach ($relative in @('.local','.local/share','.local/share/ai-instructions-setup')) {
+            [IO.File]::SetUnixFileMode((Join-Path $danglingHome $relative),[IO.UnixFileMode]448)
+        }
+        $missingCache = Join-Path $script:UnixRoot 'missing-cache-directory'
+        [void][IO.Directory]::CreateSymbolicLink((Join-Path $danglingSetupRoot 'cache'),$missingCache)
+        $danglingBefore = Get-UnixTreeSnapshot $danglingHome
+
+        $danglingRun = Invoke-UnixSetup $danglingHome @('--offline')
+
+        $danglingRun.ExitCode | Should Be 13
+        $danglingRun.Json.code | Should Be 'unsafe-path'
+        (Get-UnixTreeSnapshot $danglingHome) | Should BeExactly $danglingBefore
+        Test-Path -LiteralPath $missingCache | Should Be $false
     }
 
     # Register only when the native test process can create a genuinely foreign-owned cache fixture.

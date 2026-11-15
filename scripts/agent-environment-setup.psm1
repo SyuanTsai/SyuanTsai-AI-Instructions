@@ -596,6 +596,60 @@ function Get-AgentEnvironmentSetupFileState {
     return [pscustomobject]@{ Bytes = $bytes; State = [pscustomobject][ordered]@{ exists = $true; sha256 = (Get-AgentEnvironmentSetupSha256Bytes $bytes); length = [int64]$observed.Size; identity = (ConvertTo-AgentEnvironmentSetupPlatformIdentity $observed) } }
 }
 
+# I2/M7/A6: cache reads and publication keep a no-follow platform guard on the
+# real cache directory and require the same private ownership boundary used by
+# setup-created directories. A missing directory is allowed only before first
+# publication; links, dangling links and permission drift are typed refusals.
+function Open-AgentEnvironmentSetupPrivateDirectoryGuard {
+    param(
+        [Parameter(Mandatory = $true)][string] $SetupRoot,
+        [Parameter(Mandatory = $true)][string] $Directory,
+        [switch] $AllowMissing
+    )
+    $entry = Get-AgentEnvironmentSetupEntry $SetupRoot $Directory
+    if ($null -eq $entry) {
+        if ($AllowMissing) { return $null }
+        throw (New-AgentEnvironmentSetupRefusal unsafe-path "Setup directory '$Directory' is missing after publication.")
+    }
+    if ($entry.Kind -cne 'directory') { throw (New-AgentEnvironmentSetupRefusal unsafe-path "Setup directory '$Directory' is a link or is not a directory.") }
+    $lease = $null
+    try {
+        $lease = Open-PlatformDirectory -Root $SetupRoot -RelativePath $Directory
+        $permissions = Get-PlatformPermissions -Lease $lease
+        if ($IsWindows) {
+            $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+            try { $currentSid = $identity.User.Value } finally { $identity.Dispose() }
+            $ownerSid = [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::GetOwnerSid($lease)
+            if ($ownerSid -cne $currentSid -or [bool]$permissions.ReadOnly) {
+                throw (New-AgentEnvironmentSetupRefusal unsafe-path "Setup directory '$Directory' must be owned by the current SID and writable by that owner.")
+            }
+            $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new([string]$permissions.Sddl)
+            $acl = $descriptor.DiscretionaryAcl
+            if ($null -eq $acl -or $acl.Count -eq 0) { throw (New-AgentEnvironmentSetupRefusal unsafe-path "Setup directory '$Directory' must have a non-empty private DACL.") }
+            foreach ($ace in $acl) {
+                $known = $ace -as [Security.AccessControl.KnownAce]
+                if ($null -eq $known -or $known.SecurityIdentifier.Value -cne $currentSid -or [string]$known.AceType -cnotin @('AccessAllowed','AccessAllowedObject')) {
+                    throw (New-AgentEnvironmentSetupRefusal unsafe-path "Setup directory '$Directory' ACL grants access outside the current SID.")
+                }
+            }
+        }
+        else {
+            $effectiveUid = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetEffectiveUserId()
+            if ([Convert]::ToUInt32([string]$permissions.Mode,8) -ne 448 -or [uint64]$permissions.Uid -ne [uint64]$effectiveUid) {
+                throw (New-AgentEnvironmentSetupRefusal unsafe-path "Setup directory '$Directory' must be owned by the effective uid with mode 0700.")
+            }
+        }
+        $result = $lease
+        $lease = $null
+        return $result
+    }
+    catch {
+        if ((Get-AgentEnvironmentSetupRefusalCode $_) -cne 'internal-error') { throw }
+        throw (New-AgentEnvironmentSetupRefusal unsafe-path "Setup directory '$Directory' could not be guarded and verified: $($_.Exception.Message)")
+    }
+    finally { if ($null -ne $lease) { $lease.Dispose() } }
+}
+
 function Read-AgentEnvironmentSetupFile {
     param([Parameter(Mandatory = $true)][string] $SetupRoot, [Parameter(Mandatory = $true)][string] $Directory, [Parameter(Mandatory = $true)][string] $Leaf)
     $entry = Get-AgentEnvironmentSetupEntry (Join-Path $SetupRoot $Directory) $Leaf
@@ -916,12 +970,18 @@ function Publish-AgentEnvironmentSetupArchiveCache {
         [Parameter(Mandatory = $true)][string] $ArchivePath,
         [Parameter(Mandatory = $true)][string] $ExpectedSha256
     )
-    $existing = Read-AgentEnvironmentSetupFile $SetupRoot 'cache' $Leaf
-    if ($null -ne $existing -and (Get-AgentEnvironmentSetupSha256Bytes $existing.Bytes) -ceq $ExpectedSha256) { return 'current' }
-    $bytes = [IO.File]::ReadAllBytes($ArchivePath)
-    if ((Get-AgentEnvironmentSetupSha256Bytes $bytes) -cne $ExpectedSha256) { throw (New-AgentEnvironmentSetupRefusal archive-hash-mismatch 'The private archive snapshot changed before cache publication.') }
-    Publish-AgentEnvironmentSetupFile -SetupRoot $SetupRoot -Directory 'cache' -Leaf $Leaf -Bytes $bytes -NoReplace:($null -eq $existing)
-    return 'published'
+    $cacheGuard = $null
+    try {
+        $cacheGuard = Open-AgentEnvironmentSetupPrivateDirectoryGuard -SetupRoot $SetupRoot -Directory 'cache' -AllowMissing
+        $existing = Read-AgentEnvironmentSetupFile $SetupRoot 'cache' $Leaf
+        if ($null -ne $existing -and (Get-AgentEnvironmentSetupSha256Bytes $existing.Bytes) -ceq $ExpectedSha256) { return 'current' }
+        $bytes = [IO.File]::ReadAllBytes($ArchivePath)
+        if ((Get-AgentEnvironmentSetupSha256Bytes $bytes) -cne $ExpectedSha256) { throw (New-AgentEnvironmentSetupRefusal archive-hash-mismatch 'The private archive snapshot changed before cache publication.') }
+        Publish-AgentEnvironmentSetupFile -SetupRoot $SetupRoot -Directory 'cache' -Leaf $Leaf -Bytes $bytes -NoReplace:($null -eq $existing)
+        if ($null -eq $cacheGuard) { $cacheGuard = Open-AgentEnvironmentSetupPrivateDirectoryGuard -SetupRoot $SetupRoot -Directory 'cache' }
+        return 'published'
+    }
+    finally { if ($null -ne $cacheGuard) { $cacheGuard.Dispose() } }
 }
 
 function New-AgentEnvironmentSetupReceipt {

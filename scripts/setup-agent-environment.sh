@@ -45,6 +45,7 @@ PLATFORM_BOUND_FILES='scripts/platform-runtime.psd1 scripts/platform-runtime.psm
 run_tmp=''
 setup_root=''
 receipt_mode='null'
+members_validated=0
 
 refuse() {
     printf 'setup-agent-environment: %s\n' "$3" >&2
@@ -58,8 +59,56 @@ cleanup() {
     if [ -n "$run_tmp" ] && [ -n "$setup_root" ] && [ -d "$run_tmp" ] && [ ! -L "$run_tmp" ]; then
         case "$run_tmp" in
             "$setup_root"/tmp/run.*)
-                # H3: remove only known files and empty directories created by
-                # this run. Never traverse or reclaim any old tmp tree.
+                # I1/H3: reuse the path-safe archive inventory to unlink only
+                # this run's known extracted files. Remove inventory-derived
+                # directories deepest-first; never scan or reclaim another run.
+                if [ "$members_validated" -eq 1 ] && [ -f "$run_tmp/members" ] && [ -n "${bootstrap-}" ]; then
+                    cleanup_max_depth=0
+                    while IFS= read -r cleanup_member || [ -n "$cleanup_member" ]; do
+                        case "$cleanup_member" in
+                            .|./|'') continue ;;
+                            ./*) cleanup_member=${cleanup_member#./} ;;
+                        esac
+                        cleanup_member=${cleanup_member%/}
+                        [ -n "$cleanup_member" ] || continue
+                        if [ -f "$bootstrap/$cleanup_member" ] && [ ! -L "$bootstrap/$cleanup_member" ]; then
+                            run_clean rm -f "$bootstrap/$cleanup_member" 2>/dev/null || :
+                        fi
+                        cleanup_probe=$cleanup_member
+                        cleanup_depth=1
+                        while [ "${cleanup_probe#*/}" != "$cleanup_probe" ]; do
+                            cleanup_probe=${cleanup_probe#*/}
+                            cleanup_depth=$((cleanup_depth + 1))
+                        done
+                        if [ "$cleanup_depth" -gt "$cleanup_max_depth" ]; then cleanup_max_depth=$cleanup_depth; fi
+                    done < "$run_tmp/members"
+                    while [ "$cleanup_max_depth" -gt 0 ]; do
+                        while IFS= read -r cleanup_member || [ -n "$cleanup_member" ]; do
+                            case "$cleanup_member" in
+                                .|./|'') continue ;;
+                                ./*) cleanup_member=${cleanup_member#./} ;;
+                            esac
+                            cleanup_candidate=${cleanup_member%/}
+                            while [ -n "$cleanup_candidate" ]; do
+                                cleanup_probe=$cleanup_candidate
+                                cleanup_depth=1
+                                while [ "${cleanup_probe#*/}" != "$cleanup_probe" ]; do
+                                    cleanup_probe=${cleanup_probe#*/}
+                                    cleanup_depth=$((cleanup_depth + 1))
+                                done
+                                if [ "$cleanup_depth" -eq "$cleanup_max_depth" ]; then
+                                    run_clean rmdir "$bootstrap/$cleanup_candidate" 2>/dev/null || :
+                                fi
+                                case "$cleanup_candidate" in
+                                    */*) cleanup_candidate=${cleanup_candidate%/*} ;;
+                                    *) cleanup_candidate='' ;;
+                                esac
+                            done
+                        done < "$run_tmp/members"
+                        cleanup_max_depth=$((cleanup_max_depth - 1))
+                    done
+                    run_clean rmdir "$bootstrap" 2>/dev/null || :
+                fi
                 run_clean rm -f "$run_tmp/members" "$run_tmp/verbose" 2>/dev/null || :
                 if [ -n "${asset_name-}" ]; then
                     run_clean rm -f "$run_tmp/$asset_name" "$run_tmp/download/$asset_name" 2>/dev/null || :
@@ -295,14 +344,29 @@ hash_file() {
     fi
 }
 
-# F2 metadata refusal is also pre-mutation. A cache owned by another uid,
-# broad-mode, linked, or substituted by a symlink never causes tmp/root writes.
-archive="$setup_root/cache/$asset_name"
+# I2/F2 metadata refusal is also pre-mutation. Validate the cache directory
+# itself without following any segment before inspecting its archive leaf.
+cache_dir="$setup_root/cache"
+check_ancestors "$cache_dir" 'The setup cache directory'
+cache_directory_present=0
+if [ -L "$cache_dir" ]; then
+    refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The setup cache directory is a symbolic link.'
+fi
+if [ -e "$cache_dir" ]; then
+    [ -d "$cache_dir" ] || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The setup cache path is not a directory.'
+    [ -n "$(run_clean find "$cache_dir" -prune -type d -user "$uid" -perm 0700 -print)" ] ||
+        refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The setup cache directory must be owned by the current uid with mode 0700.'
+    cache_directory_present=1
+fi
+
+# A cache owned by another uid, broad-mode, linked, or substituted by a
+# symlink never causes tmp/root writes.
+archive="$cache_dir/$asset_name"
 cache_present=0
-if [ -L "$archive" ]; then
+if [ "$cache_directory_present" -eq 1 ] && [ -L "$archive" ]; then
     refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The cached archive is a symbolic link.'
 fi
-if [ -e "$archive" ]; then
+if [ "$cache_directory_present" -eq 1 ] && [ -e "$archive" ]; then
     [ -f "$archive" ] || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The cached archive is not a regular file.'
     [ -n "$(run_clean find "$archive" -prune -type f -user "$uid" -links 1 -perm 0600 -print)" ] || refuse unsafe-path "$EXIT_UNSAFE_PATH" 'The cached archive must be owned by the current uid, single-link and mode 0600.'
     cache_present=1
@@ -384,6 +448,7 @@ unsafe_member=$(run_clean awk '
         if (wrapped ~ /\/\.\.\// || wrapped ~ /\/\.\//) { print "unsafe"; exit }
     }' "$run_tmp/members")
 [ -z "$unsafe_member" ] || refuse archive-unsafe "$EXIT_ARCHIVE_UNSAFE" 'The archive contains an absolute or traversal member path.'
+members_validated=1
 run_clean tar -t -v $tar_list_flag -z -f "$archive" > "$run_tmp/verbose" 2>/dev/null || refuse archive-unsafe "$EXIT_ARCHIVE_UNSAFE" 'The archive cannot be listed.'
 unsafe_type=$(run_clean awk '
     {
