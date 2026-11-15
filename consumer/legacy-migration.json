@@ -1,0 +1,1181 @@
+{
+  "schemaVersion": 1,
+  "repositories": [
+    {
+      "id": "skill-general",
+      "repository": "https://github.com/SyuanTsai/Skill-General.git",
+      "status": "ready",
+      "inventoryCommit": "65e96f10a6495dd5a5dcc2a7a7a8ac79f1dd4ef4",
+      "inventoryTree": "6f979f5154cfa540b5135c203aed6f84c48f9f86",
+      "requiredRepositoryChecks": [
+        {
+          "id": "repository-general",
+          "kind": "general",
+          "path": "scripts/Test-SkillGeneral.ps1"
+        },
+        {
+          "id": "repository-pester",
+          "kind": "pester",
+          "path": "tests"
+        }
+      ],
+      "files": [
+        {
+          "path": ".github/workflows/validate.yml",
+          "disposition": "delete",
+          "reason": "Replaced by the authority-published consumer workflow templates."
+        },
+        {
+          "path": "config/pester-6.2.0-closure.lock.json",
+          "disposition": "delete",
+          "reason": "Legacy authority tuple or repository-local Pester closure is replaced by authority-pin and gate data."
+        },
+        {
+          "path": "config/standard-v1.json",
+          "disposition": "delete",
+          "reason": "Legacy authority tuple or repository-local Pester closure is replaced by authority-pin and gate data."
+        },
+        {
+          "path": "scripts/CorePesterIntegrity.psm1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Invoke-CorePester.ps1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Prepare-PesterRuntime.ps1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/SourceToolRoots.psm1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Test-SkillGeneral.ps1",
+          "disposition": "retain",
+          "reason": "General repository domain contract remains a declared general repository check."
+        },
+        {
+          "path": "scripts/Validate.ps1",
+          "disposition": "delete",
+          "reason": "Legacy driver and PR12 bridge are replaced; historical evidence remains in Git and central authority records."
+        },
+        {
+          "path": "tests/CanonicalValidation.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/CommonToolAuthoritySupport.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/CommonToolAuthorityTransport.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/CommonToolReportIntegration.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/CorePesterIntegrity.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/CorePesterProgress.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/EnvironmentAuthorizedSql.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/GitBlobReader.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/HandoffArchive.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/HandoffRecordCore.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/LegacyNotionMemory.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ManageAiMemory.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ManageTaskHandoff.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/OfflineSemanticConsumer.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/RepositoryPesterEnvelope.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/ReviewAgentSkills.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/SemanticBridgeV2Consumer.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/SourceToolAllocation.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/SourceToolRoots.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/StandardV1Conformance.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/Test-SkillGeneral.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/fixtures/environment-authorized-sql/authorization.json",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/fixtures/environment-authorized-sql/delete.json",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/fixtures/environment-authorized-sql/denied.json",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/fixtures/environment-authorized-sql/read.json",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/fixtures/environment-authorized-sql/success.json",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/fixtures/environment-authorized-sql/uncertain.json",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/fixtures/environment-authorized-sql/update.json",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/fixtures/manage-ai-memory/fixed-agent-scenarios.json",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/fixtures/manage-ai-memory/routing-cases.json",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/fixtures/manage-notion-ai-memory/fixed-agent-scenarios.json",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/fixtures/manage-notion-ai-memory/handoff-cases.json",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/fixtures/manage-notion-ai-memory/notion-memory-contract-v4.json",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/fixtures/manage-notion-ai-memory/routing-cases.json",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/fixtures/manage-task-handoff/scenarios.json",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/helpers/ProviderAgnosticMemoryTargetAdapter.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        }
+      ]
+    },
+    {
+      "id": "skill-atlassian-ecosystem",
+      "repository": "https://github.com/SyuanTsai/Skill-Atlassian-Ecosystem.git",
+      "status": "ready",
+      "inventoryCommit": "76b4b94dd0f9395b9096db95d5c138b77c5e259d",
+      "inventoryTree": "1a261e4717d971080fcb1e8c441403e535d09dfb",
+      "requiredRepositoryChecks": [
+        {
+          "id": "repository-atlassian",
+          "kind": "general",
+          "path": "scripts/Test-AtlassianRepository.ps1"
+        },
+        {
+          "id": "repository-shared-references",
+          "kind": "general",
+          "path": "scripts/Test-SharedReferences.ps1"
+        },
+        {
+          "id": "repository-pester",
+          "kind": "pester",
+          "path": "tests"
+        }
+      ],
+      "files": [
+        {
+          "path": ".github/workflows/validate.yml",
+          "disposition": "delete",
+          "reason": "Replaced by the authority-published consumer workflow templates."
+        },
+        {
+          "path": "config/pester-6.2.0-closure.lock.json",
+          "disposition": "delete",
+          "reason": "Legacy authority tuple or repository-local Pester closure is replaced by authority-pin and gate data."
+        },
+        {
+          "path": "config/skillspector-exceptions.json",
+          "disposition": "retain",
+          "reason": "Repository-owned configuration or reviewed exception evidence remains consumer data."
+        },
+        {
+          "path": "config/skillspector-exceptions/configure-bitbucket-api-access.baseline.json",
+          "disposition": "retain",
+          "reason": "Repository-owned configuration or reviewed exception evidence remains consumer data."
+        },
+        {
+          "path": "config/skillspector-exceptions/configure-confluence-api-access.baseline.json",
+          "disposition": "retain",
+          "reason": "Repository-owned configuration or reviewed exception evidence remains consumer data."
+        },
+        {
+          "path": "config/skillspector-exceptions/configure-jira-api-access.baseline.json",
+          "disposition": "retain",
+          "reason": "Repository-owned configuration or reviewed exception evidence remains consumer data."
+        },
+        {
+          "path": "config/skillspector-exceptions/manage-confluence-docs-as-code.baseline.json",
+          "disposition": "retain",
+          "reason": "Repository-owned configuration or reviewed exception evidence remains consumer data."
+        },
+        {
+          "path": "config/skillspector-exceptions/publish-requirements-to-confluence.baseline.json",
+          "disposition": "retain",
+          "reason": "Repository-owned configuration or reviewed exception evidence remains consumer data."
+        },
+        {
+          "path": "config/skillspector-exceptions/review-bitbucket-pull-request.baseline.json",
+          "disposition": "retain",
+          "reason": "Repository-owned configuration or reviewed exception evidence remains consumer data."
+        },
+        {
+          "path": "config/standard-v1.json",
+          "disposition": "delete",
+          "reason": "Legacy authority tuple or repository-local Pester closure is replaced by authority-pin and gate data."
+        },
+        {
+          "path": "scripts/AtlassianSourceCommon.psm1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/CorePesterIntegrity.psm1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Get-StandardPowerShellSyntaxProof.ps1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Invoke-CorePester.ps1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Invoke-ParallelSkillSpector.ps1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Invoke-ParallelToolResolution.ps1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Invoke-ShardedPester.ps1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Invoke-SourceConformance.ps1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Invoke-StandardAuthorityGate.ps1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Invoke-StandardStaticScan.ps1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Invoke-StandardValidation.ps1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Prepare-PesterRuntime.ps1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Resolve-PythonWheelClosure.py",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Resolve-StandardValidationTool.ps1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/SkillSpectorExceptionCandidates.psm1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/StandardSemanticBridge.psm1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/StandardSourceDriver.psm1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Test-Repository.ps1",
+          "disposition": "split",
+          "target": "scripts/Test-AtlassianRepository.ps1",
+          "reason": "Retain only the repository-specific domain contract; remove central runner, tuple and platform orchestration."
+        },
+        {
+          "path": "scripts/Test-SharedReferences.ps1",
+          "disposition": "retain",
+          "reason": "Atlassian repository-owned shared-reference contract remains consumer logic."
+        },
+        {
+          "path": "scripts/Validate-UpstreamAdapter.ps1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Validate.ps1",
+          "disposition": "delete",
+          "reason": "Legacy source driver is replaced by the authority consumer gate."
+        },
+        {
+          "path": "scripts/WindowsDacl.psm1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/installer-safe-mutation.psm1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/platform-runtime.psd1",
+          "disposition": "delete",
+          "reason": "Authority-owned platform runtime must not remain as a consumer copy."
+        },
+        {
+          "path": "scripts/platform-runtime.psm1",
+          "disposition": "delete",
+          "reason": "Authority-owned platform runtime must not remain as a consumer copy."
+        },
+        {
+          "path": "scripts/platform/Linux.psm1",
+          "disposition": "delete",
+          "reason": "Authority-owned platform runtime must not remain as a consumer copy."
+        },
+        {
+          "path": "scripts/platform/MacOS.psm1",
+          "disposition": "delete",
+          "reason": "Authority-owned platform runtime must not remain as a consumer copy."
+        },
+        {
+          "path": "scripts/platform/OwnedProcess.cs",
+          "disposition": "delete",
+          "reason": "Authority-owned platform runtime must not remain as a consumer copy."
+        },
+        {
+          "path": "scripts/platform/PlatformNative.cs",
+          "disposition": "delete",
+          "reason": "Authority-owned platform runtime must not remain as a consumer copy."
+        },
+        {
+          "path": "scripts/platform/RuntimePreparation.psm1",
+          "disposition": "delete",
+          "reason": "Authority-owned platform runtime must not remain as a consumer copy."
+        },
+        {
+          "path": "scripts/platform/Unix.psm1",
+          "disposition": "delete",
+          "reason": "Authority-owned platform runtime must not remain as a consumer copy."
+        },
+        {
+          "path": "scripts/platform/UnixNative.cs",
+          "disposition": "delete",
+          "reason": "Authority-owned platform runtime must not remain as a consumer copy."
+        },
+        {
+          "path": "scripts/platform/UnixProcess.cs",
+          "disposition": "delete",
+          "reason": "Authority-owned platform runtime must not remain as a consumer copy."
+        },
+        {
+          "path": "scripts/platform/Windows.psm1",
+          "disposition": "delete",
+          "reason": "Authority-owned platform runtime must not remain as a consumer copy."
+        },
+        {
+          "path": "scripts/platform/WindowsInstallerMutation.cs",
+          "disposition": "delete",
+          "reason": "Authority-owned platform runtime must not remain as a consumer copy."
+        },
+        {
+          "path": "scripts/platform/WindowsNative.cs",
+          "disposition": "delete",
+          "reason": "Authority-owned platform runtime must not remain as a consumer copy."
+        },
+        {
+          "path": "scripts/platform/WindowsProcess.cs",
+          "disposition": "delete",
+          "reason": "Authority-owned platform runtime must not remain as a consumer copy."
+        },
+        {
+          "path": "scripts/standard_static_powershell.py",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "tests/ApiAccessRedirect.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/AtomicOutput.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/BitbucketReviewActions.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/CanonicalValidation.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/CentralRunner.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/ConfluenceDocs.ApiBaseIdentity.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.ApiBaseStructure.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.AttachmentBatch.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.AttachmentCreate.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.AttachmentPreview.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.Capture.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.CodeBinding.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.CreatePreview.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.CreatePublish.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.Draft.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.DraftAssets.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.Format.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.ImportReview.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.LinkedPublish.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.LiveTransport.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.Mapping.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.Markdown.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.MarkdownCli.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.MarkdownPlan.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.MarkdownPreview.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.MarkdownPushCli.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.PlatformPath.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.Publish.MultiPage.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.Publish.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.StorageReadback.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.Sync.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.Transport.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ConfluenceDocs.WriteTransport.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/CorePesterIntegrity.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/ProtectedRunner.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/RepositoryValidation.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/ShardedPesterQueue.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/SharedReferences.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/SkillSpectorExceptions.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/SourcePackageBridge.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/SourceStaticBridge.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/SourceValidationPreparation.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/StandardV1Conformance.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/Test-Repository.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/fixtures/BitbucketReviewFixture.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/fixtures/syp171-import/mixed-storage.xml",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/fixtures/work-with-jira-web-capabilities.json",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/validate-api-access.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/validate-repository-standalone.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/validate-repository.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/validate-windows-powershell.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        }
+      ]
+    },
+    {
+      "id": "skill-code-collaboration",
+      "repository": "https://github.com/SyuanTsai/Skill-Code-Collaboration.git",
+      "status": "ready",
+      "inventoryCommit": "ef8e83e4cc34a9e661d95911546ccf263640e77d",
+      "inventoryTree": "7579bca56c737eb8e386de2a5bd6b5cfea119e76",
+      "requiredRepositoryChecks": [
+        {
+          "id": "repository-code-collaboration",
+          "kind": "general",
+          "path": "scripts/Test-CodeCollaborationRepository.ps1"
+        },
+        {
+          "id": "repository-catalog",
+          "kind": "general",
+          "path": "scripts/Test-CodeCollaborationCatalog.ps1"
+        },
+        {
+          "id": "repository-pester",
+          "kind": "pester",
+          "path": "tests"
+        }
+      ],
+      "files": [
+        {
+          "path": ".github/workflows/validate.yml",
+          "disposition": "delete",
+          "reason": "Replaced by the authority-published consumer workflow templates."
+        },
+        {
+          "path": "config/pester-6.2.0-closure.lock.json",
+          "disposition": "delete",
+          "reason": "Legacy authority tuple or repository-local Pester closure is replaced by authority-pin and gate data."
+        },
+        {
+          "path": "config/standard-v1.json",
+          "disposition": "delete",
+          "reason": "Legacy authority tuple or repository-local Pester closure is replaced by authority-pin and gate data."
+        },
+        {
+          "path": "scripts/CorePesterIntegrity.psm1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Get-SourcePin.ps1",
+          "disposition": "delete",
+          "reason": "Tuple-generating legacy pin helper is replaced by config/authority-pin.json."
+        },
+        {
+          "path": "scripts/Invoke-CorePester.ps1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Invoke-RepositoryCheck.ps1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Prepare-PesterRuntime.ps1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/StandardSourceDriver.psm1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Test-Repository.ps1",
+          "disposition": "split",
+          "target": "scripts/Test-CodeCollaborationRepository.ps1",
+          "reason": "Retain only the repository-specific domain contract; remove central runner, tuple and platform orchestration."
+        },
+        {
+          "path": "scripts/Validate.ps1",
+          "disposition": "delete",
+          "reason": "Legacy source driver is replaced by the authority consumer gate."
+        },
+        {
+          "path": "tests/CanonicalValidation.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/CommonToolReportIntegration.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/CorePesterIntegrity.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/OrchestrateModelAvailability.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/OrchestrateModelBaseline.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ResolveLegacyAuthorityArchiveFixture.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/SourceValidationAdoption.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/StandardV1Conformance.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/Test-Repository.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/ValidateCatalog.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ValidateJsonRead.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/validate-catalog.ps1",
+          "disposition": "split",
+          "target": "scripts/Test-CodeCollaborationCatalog.ps1",
+          "reason": "Move the repository-owned catalog contract to a declared general check; remove protected-reader coupling."
+        }
+      ]
+    },
+    {
+      "id": "skill-knowledge-content",
+      "repository": "https://github.com/SyuanTsai/Skill-Knowledge-Content.git",
+      "status": "ready",
+      "inventoryCommit": "49ffcef53a78c131658809cebd5f54ee28511dc5",
+      "inventoryTree": "62f978f0490655817d8c532f2188dd5bb7433b3b",
+      "requiredRepositoryChecks": [
+        {
+          "id": "repository-knowledge-content",
+          "kind": "general",
+          "path": "scripts/Test-KnowledgeContentRepository.ps1"
+        },
+        {
+          "id": "repository-pester",
+          "kind": "pester",
+          "path": "tests"
+        }
+      ],
+      "files": [
+        {
+          "path": ".github/workflows/validate.yml",
+          "disposition": "delete",
+          "reason": "Replaced by the authority-published consumer workflow templates."
+        },
+        {
+          "path": "config/pester-6.2.0-closure.lock.json",
+          "disposition": "delete",
+          "reason": "Legacy authority tuple or repository-local Pester closure is replaced by authority-pin and gate data."
+        },
+        {
+          "path": "config/standard-v1.json",
+          "disposition": "delete",
+          "reason": "Legacy authority tuple or repository-local Pester closure is replaced by authority-pin and gate data."
+        },
+        {
+          "path": "scripts/CorePesterIntegrity.psm1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Invoke-CorePester.ps1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Prepare-PesterRuntime.ps1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Prepare-WorkflowPowerShell.ps1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/StandardCoreSourceValidation.ps1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Test-Repository.ps1",
+          "disposition": "split",
+          "target": "scripts/Test-KnowledgeContentRepository.ps1",
+          "reason": "Retain only the repository-specific domain contract; remove central runner, tuple and platform orchestration."
+        },
+        {
+          "path": "scripts/Validate.ps1",
+          "disposition": "delete",
+          "reason": "Legacy source driver is replaced by the authority consumer gate."
+        },
+        {
+          "path": "tests/CanonicalValidation.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/CommonToolReportIntegration.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/CorePesterIntegrity.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/SourceValidationPreparation.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/StandardV1Conformance.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/Test-Repository.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/repository.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        }
+      ]
+    },
+    {
+      "id": "skill-darktide-translate",
+      "repository": "https://github.com/SyuanTsai/Skill-Darktide-Translate.git",
+      "status": "deferred",
+      "inventoryCommit": "c183518359311569294a1c1c6134e84dfdc17b2d",
+      "inventoryTree": "4ce65af0f17fe117864b519da3497daa09837386",
+      "requiredRepositoryChecks": [
+        {
+          "id": "repository-darktide",
+          "kind": "general",
+          "path": "scripts/Test-DarktideRepository.ps1"
+        },
+        {
+          "id": "repository-pester",
+          "kind": "pester",
+          "path": "tests"
+        }
+      ],
+      "files": [
+        {
+          "path": ".github/workflows/standard-v1-candidate-windows.yml",
+          "disposition": "delete",
+          "reason": "Replaced by the authority-published consumer workflow templates."
+        },
+        {
+          "path": "config/standard-v1.json",
+          "disposition": "delete",
+          "reason": "Legacy authority tuple or repository-local Pester closure is replaced by authority-pin and gate data."
+        },
+        {
+          "path": "scripts/Get-SourcePin.ps1",
+          "disposition": "delete",
+          "reason": "Tuple-generating legacy pin helper is replaced by config/authority-pin.json."
+        },
+        {
+          "path": "scripts/Install-LatestPowerShell.ps1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Invoke-PrePushValidation.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned local development check is outside the central CI driver."
+        },
+        {
+          "path": "scripts/PowerShellRelease.psm1",
+          "disposition": "delete",
+          "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Test-CleanRepositoryHead.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned local development check is outside the central CI driver."
+        },
+        {
+          "path": "scripts/Test-Repository.ps1",
+          "disposition": "split",
+          "target": "scripts/Test-DarktideRepository.ps1",
+          "reason": "Retain only the repository-specific domain contract; remove central runner, tuple and platform orchestration."
+        },
+        {
+          "path": "scripts/Validate.ps1",
+          "disposition": "delete",
+          "reason": "Legacy source driver is replaced by the authority consumer gate."
+        },
+        {
+          "path": "tests/AtomicValidationOutput.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/BootstrapTransition.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/CanonicalValidation.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/InstalledClosureOrdering.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/Invoke-Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/LocalizationWorkset.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ModUpdateAutomation.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/RepositoryContract.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/RepositoryValidation.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/Schema15Coordination.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/Schema15SourceAcquisition.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/SkillContract.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/SkillSpectorOutput.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/SourcePin.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/StandardV1Conformance.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/Test-Repository.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        },
+        {
+          "path": "tests/TestSupport.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+        },
+        {
+          "path": "tests/ValidationTransition.Tests.ps1",
+          "disposition": "update-tests",
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+        }
+      ]
+    }
+  ]
+}
+

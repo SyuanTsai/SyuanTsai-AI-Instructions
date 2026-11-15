@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/consumer-gate-config-v1.schema.json",
+  "title": "Consumer gate configuration v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "repositoryId", "sourceRepository", "activeSkills", "repositoryChecks"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "repositoryId": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+    "sourceRepository": { "type": "string", "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\\.git$" },
+    "activeSkills": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" }
+    },
+    "repositoryChecks": {
+      "type": "array",
+      "minItems": 2,
+      "items": { "$ref": "#/$defs/repositoryCheck" }
+    }
+  },
+  "$defs": {
+    "repositoryCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "path"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
+        "kind": { "enum": ["pester", "general"] },
+        "path": { "type": "string" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "pester" } }, "required": ["kind"] },
+          "then": { "properties": { "path": { "const": "tests" } } },
+          "else": {
+            "properties": {
+              "path": {
+                "pattern": "^(?:scripts|tests)(?:/[A-Za-z0-9._-]+)*\/(?![A-Za-z0-9._-]+\\.Tests\\.ps1$)[A-Za-z0-9._-]+\\.ps1$"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -15,6 +15,9 @@
     "ai-instructions-launcher-recovery.Tests.ps1": 2,
     "cleanup-ai-instructions-pollution.Tests.ps1": 2,
     "standard-validation-runner.Tests.ps1": 2,
+    "consumer-bootstrap.Tests.ps1": 1,
+    "consumer-gate-workflow.Tests.ps1": 1,
+    "consumer-source-gate.Tests.ps1": 1,
     "bootstrap-ai-instructions-multisource.Tests.ps1": 1,
     "agent-artifact-remediation.Tests.ps1": 1
   }

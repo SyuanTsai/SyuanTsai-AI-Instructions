@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "supportedInterfaces": ["consumer-gate-v1"],
+  "currentInterface": "consumer-gate-v1",
+  "retiredInterfaces": [],
+  "phaseEnvironment": {
+    "prepare": [
+      "CONSUMER_GATE_EVENT_REPOSITORY",
+      "GITHUB_STEP_SUMMARY",
+      "RUNNER_TEMP",
+      "STANDARD_GO_RUNTIME_VERSION",
+      "STANDARD_VALIDATION_GITHUB_API_TOKEN"
+    ],
+    "validate": [
+      "CONSUMER_GATE_EVENT_REPOSITORY",
+      "GITHUB_STEP_SUMMARY",
+      "RUNNER_TEMP"
+    ],
+    "finalize": [
+      "CONSUMER_GATE_EVENT_REPOSITORY",
+      "GITHUB_STEP_SUMMARY",
+      "RUNNER_TEMP"
+    ],
+    "aggregate": [
+      "CONSUMER_GATE_EVENT_REPOSITORY",
+      "GITHUB_OUTPUT",
+      "GITHUB_STEP_SUMMARY",
+      "RUNNER_TEMP"
+    ]
+  },
+  "requiredContexts": ["repository-contract", "skill-validator", "skill-tools"],
+  "canonicalEventMap": {
+    "pull_request_target": "pull_request",
+    "push": "push",
+    "pull_request(transition)": "pull_request"
+  }
+}
