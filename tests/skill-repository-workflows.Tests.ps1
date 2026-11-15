@@ -1747,14 +1747,17 @@ Describe 'Validator platform authority routing' {
 }
 
 Describe 'SYP354 trust-anchor tool workflow isolation' {
-    # Scenario: Interactive private-key tooling is added beside the authority workflows.
-    # Purpose: Keep key generation out of CI while retaining the same authority gate in both workflow roles.
-    It 'UnitT10_keeps_interactive_key_tools_out_of_authority_workflows' {
+    # Scenario: Interactive private-key tooling is added beside the authority workflows while rotation remains an approval-boundary change.
+    # Purpose: Prevent any workflow from treating tools in the same unmerged change as fingerprint approval for that change.
+    It 'UnitT10_forbids_same_change_tools_from_authorizing_rotation' {
         $root=Split-Path -Parent $PSScriptRoot
+        $standard=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/skill-repository-standard.md')
+        $standard | Should Match 'Trust-anchor rotation changes the approval boundary and \*\*MUST\*\* merge only after the user verifies the proposed fingerprints with an independent tool that is not supplied by the same unmerged change\.'
         foreach($relative in @('.github/workflows/standards-conformance.yml','.github/workflows/pr8-powershell-validation.yml')){
             $workflow=Get-Content -Raw -Encoding UTF8 (Join-Path $root $relative)
             $workflow | Should Match 'Invoke-StandardAuthorityGate\.ps1'
             $workflow | Should Not Match 'trust-anchor/(New-TrustAnchorKeyPair|ConvertTo-TrustAnchorPublicKeyXml|Get-TrustAnchorFingerprint)\.ps1'
+            $workflow | Should Not Match '(?i)trust-anchor.*(approve|authorize|merge)'
         }
     }
 }
