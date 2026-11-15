@@ -4,7 +4,7 @@
 param(
     [Parameter(Mandatory)][string]$RepositoryRoot,
     [Parameter(Mandatory)][string]$FixtureRoot,
-    [Parameter(Mandatory)][ValidateSet('success','http-error','timeout','cancellation')][string]$Outcome,
+    [Parameter(Mandatory)][ValidateSet('success','http-error','timeout','cancellation','redirect-success','redirect-unapproved','redirect-limit')][string]$Outcome,
     [Parameter(Mandatory)][string]$Sentinel,
     [ValidateSet('none','summary','artifact','receipt','stdout','stderr')][string]$LeakSurface='none'
 )
@@ -91,12 +91,13 @@ $probe.Start()
 $port=([Net.IPEndPoint]$probe.LocalEndpoint).Port
 $probe.Stop()
 $ready=Join-Path $FixtureRoot 'http.ready'
+$headerLog=Join-Path $FixtureRoot 'http-headers.jsonl'
 $httpFixture=Join-Path $RepositoryRoot 'tests/fixtures/consumer-gate-http-fixture.ps1'
 $serverStart=[Diagnostics.ProcessStartInfo]::new()
 $serverStart.FileName=(Get-Process -Id $PID).Path
 $serverStart.UseShellExecute=$false
 foreach($argument in @('-NoProfile','-NonInteractive','-File',$httpFixture,'-Port',[string]$port,'-Mode',$Outcome,
-        '-ReadyPath',$ready,'-AssetName',$assetName,'-AssetSha256',$assetSha,'-Sentinel',$Sentinel)){
+        '-ReadyPath',$ready,'-AssetName',$assetName,'-AssetSha256',$assetSha,'-Sentinel',$Sentinel,'-HeaderLogPath',$headerLog)){
     [void]$serverStart.ArgumentList.Add($argument)
 }
 $server=[Diagnostics.Process]::new()
@@ -140,6 +141,9 @@ foreach($file in @(Get-ChildItem -LiteralPath $PSHOME -File -Force)){
     catch{[IO.File]::Copy($file.FullName,$target,$false)}
 }
 $eventLog=Join-Path $work 'events.log'
+[void][IO.Directory]::CreateDirectory((Join-Path $work 'source-tools'))
+$sentinelHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Sentinel))).ToLowerInvariant()
+[IO.File]::WriteAllText((Join-Path $work 'source-tools/credential-sentinel.sha256'),$sentinelHash,[Text.UTF8Encoding]::new($false))
 $start=[Diagnostics.ProcessStartInfo]::new()
 $start.FileName=(Get-Process -Id $PID).Path
 $start.UseShellExecute=$false

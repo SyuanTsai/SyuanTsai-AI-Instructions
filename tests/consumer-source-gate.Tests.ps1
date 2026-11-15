@@ -20,6 +20,9 @@ Describe 'Authority-owned consumer source gate' {
         $output}
         function Get-SourceFixtureGitScalar([string]$Root,[string[]]$Arguments){([string](@(Invoke-SourceFixtureGit $Root $Arguments)[0])).Trim()}
         function Copy-FixtureValue($Value){$Value|ConvertTo-Json -Depth 30|ConvertFrom-Json}
+        function Assert-ExactObjectShape($Value,[string[]]$Properties){
+            (@($Value.PSObject.Properties.Name)-join',')|Should Be ($Properties-join',')
+        }
         function Get-SourceFixtureFailure([scriptblock]$Action){try{& $Action
         return $null}catch{return [string]$_.Exception.Message}}
         function New-MinimalConsumerFixture([string]$Root,$Entry,[string]$SkillId){
@@ -196,6 +199,16 @@ Describe 'Authority-owned consumer source gate' {
         $manifestPath=Join-Path $script:RepositoryRoot 'consumer/legacy-migration.json'
         $schema=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'consumer/schemas/consumer-legacy-migration-v1.schema.json')
         $base=Get-Content -Raw -Encoding UTF8 $manifestPath|ConvertFrom-Json -Depth 100
+        foreach($allowedPath in @('tests/Legacy fixture.Tests.ps1','tests/傳統測試.Tests.ps1')){
+            $positive=Copy-FixtureValue $base
+            $positiveEntry=@($positive.repositories|Where-Object{$_.id-eq'skill-general'})[0]
+            $positiveEntry.files[0].path=$allowedPath
+            (Test-Json -Json ($positive|ConvertTo-Json -Depth 100) -Schema $schema)|Should Be $true
+            $positiveAuthority=Join-Path $TestDrive ('path-positive-'+[Convert]::ToHexString([Text.Encoding]::UTF8.GetBytes($allowedPath)))
+            [void][IO.Directory]::CreateDirectory((Join-Path $positiveAuthority 'consumer'))
+            Write-FixtureJson (Join-Path $positiveAuthority 'consumer/legacy-migration.json') $positive
+            {Get-GateManifestEntry $positiveAuthority 'skill-general'}|Should Not Throw
+        }
         $schemaCases=@(
             @{Id='ready-prerequisites';Apply={param($m)$e=@($m.repositories|Where-Object{$_.id-eq'skill-general'})[0];$e|Add-Member prerequisites @([pscustomobject]@{id='x';path=$e.files[0].path;requirement='x'})}},
             @{Id='pending-missing-prerequisites';Apply={param($m)$e=@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0];$e.PSObject.Properties.Remove('prerequisites')}},
@@ -539,6 +552,10 @@ Write-Output 'scripts/Legacy.ps1'
         $inventoryResult.result | Should Be 'FAILED'
         @($inventoryResult.violations).Count | Should Be 2
         @($inventoryResult.violations | Where-Object kind -eq 'parse-error').Count | Should Be 1
+        Assert-ExactObjectShape (@($inventoryResult.violations|Where-Object kind -eq 'parse-error')[0]) `
+            @('kind','file','line','column','message')
+        Assert-ExactObjectShape (@($inventoryResult.violations|Where-Object kind -eq 'stale-exemption')[0]) `
+            @('kind','file','blobOid','line','column','occurrenceOrdinal','targetPath')
         @($inventoryResult.violations | Where-Object {
                 $_.kind -eq 'parse-error' -and $_.file -eq 'scripts/Bad.ps1' -and $_.line -eq 1 -and $_.column -eq 5
             }).Count | Should Be 1
@@ -588,6 +605,12 @@ Write-Output 'scripts/Legacy.ps1'
         $conversionResult.result | Should Be 'FAILED'
         @($conversionResult.violations).Count | Should Be 6
         @($conversionResult.violations | Where-Object kind -eq 'template-integrity').Count | Should Be 3
+        Assert-ExactObjectShape (@($conversionResult.violations|Where-Object kind -eq 'template-integrity')[0]) `
+            @('kind','file','expectedSha256','actualSha256')
+        Assert-ExactObjectShape (@($conversionResult.violations|Where-Object kind -eq 'split-source-present')[0]) `
+            @('kind','file')
+        Assert-ExactObjectShape (@($conversionResult.violations|Where-Object kind -eq 'update-tests-outcome')[0]) `
+            @('kind','file','expectedOutcome','actual')
         @($conversionResult.violations | Where-Object {
                 $_.kind -eq 'split-source-present' -and $_.file -eq 'scripts/Split.ps1'
             }).Count | Should Be 1
@@ -603,6 +626,44 @@ Write-Output 'scripts/Legacy.ps1'
         $conversionResult.counts.templateIntegrity | Should Be 3
         $conversionResult.counts.splitSourcePresent | Should Be 1
         $conversionResult.counts.updateTestsOutcome | Should Be 2
+    }
+
+    # Scenario: Every closure violation and advisory constructor is discovered from production AST and matched to a frozen property shape.
+    # Purpose: Field deletion, rename, or an unknown field changes the machine-readable union contract immediately.
+    It 'UnitT64_closes_every_manifest_union_property_shape' {
+        $expected=[ordered]@{
+            'legacy-reference'=@('kind','file','line','column','occurrenceOrdinal','reference','targetPath','targetDisposition')
+            'parse-error'=@('kind','file','line','column','message')
+            'template-integrity'=@('kind','file','expectedSha256','actualSha256')
+            'split-source-present'=@('kind','file')
+            'update-tests-outcome'=@('kind','file','expectedOutcome','actual')
+            'stale-exemption'=@('kind','file','blobOid','line','column','occurrenceOrdinal','targetPath')
+            'dynamic-reference'=@('kind','file','line','column','reference','targetPath')
+            'documentation-reference'=@('kind','file','line','column','reference','targetPath')
+            'binary'=@('kind','file','line','column','reference','targetPath')
+        }
+        $moduleText=Get-Content -Raw -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1')
+        $tokens=$null;$errors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseInput($moduleText,[ref]$tokens,[ref]$errors)
+        @($errors).Count|Should Be 0
+        $actual=[ordered]@{}
+        foreach($table in @($ast.FindAll({param($node)$node-is[Management.Automation.Language.HashtableAst]},$true))){
+            $pairs=@($table.KeyValuePairs)
+            $kindPair=@($pairs|Where-Object{[string]$_.Item1.SafeGetValue()-ceq'kind'})
+            if($kindPair.Count-ne1){continue}
+            $kind=[string]$kindPair[0].Item2.SafeGetValue()
+            if($expected.Keys-cnotcontains$kind){continue}
+            $properties=@($pairs|ForEach-Object{[string]$_.Item1.SafeGetValue()})
+            if($actual.Contains($kind)){(@($actual[$kind])-join',')|Should Be ($properties-join',')}else{$actual[$kind]=$properties}
+        }
+        (@($actual.Keys|Sort-Object)-join"`n")|Should Be (@($expected.Keys|Sort-Object)-join"`n")
+        foreach($kind in $expected.Keys){
+            (@($actual[$kind])-join',')|Should Be (@($expected[$kind])-join',')
+            foreach($property in $expected[$kind]){
+                (@($actual[$kind]|Where-Object{$_-cne$property})-join',')|Should Not Be (@($expected[$kind])-join',')
+            }
+            (@($actual[$kind])+@('unknown')-join',')|Should Not Be (@($expected[$kind])-join',')
+        }
     }
 
     # Scenario: Each cmdlet and alias row is independently removed from an external copy of the path-consumer tables.
@@ -779,6 +840,55 @@ Write-Output 'scripts/Legacy.ps1'
             }).Count | Should Be 1
     }
 
+    # Scenario: Every supported folding operator appears before, after, and around raw occurrences of the same target.
+    # Purpose: Unary/binary join, format, expandable strings, Join-Path, Combine, and casts preserve per-character provenance.
+    It 'InterT27_preserves_provenance_for_every_supported_fold_operator' {
+        Import-Module (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1') -Force
+        $root=Join-Path $TestDrive 'folded-operator-provenance'
+        [void][IO.Directory]::CreateDirectory((Join-Path $root 'scripts'))
+        [void](Invoke-SourceFixtureGit $root @('init','-q','-b','main'))
+        [void](Invoke-SourceFixtureGit $root @('config','user.name','Fixture'))
+        [void](Invoke-SourceFixtureGit $root @('config','user.email','fixture@example.test'))
+        [IO.File]::WriteAllText((Join-Path $root 'scripts/Legacy.ps1'),'param()',[Text.UTF8Encoding]::new($false))
+        $operators=[ordered]@{
+            unary="(-join @('scripts/','Legacy.ps1'))"
+            binary="(@('scripts/','Legacy.ps1') -join '')"
+            format="('scripts/{0}' -f 'Legacy.ps1')"
+            expandable='"scripts/Legacy.ps1$tail"'
+            joinpath="(Join-Path 'scripts' 'Legacy.ps1')"
+            combine="[IO.Path]::Combine('scripts','Legacy.ps1')"
+            cast="[string]('scripts/'+'Legacy.ps1')"
+        }
+        foreach($pair in $operators.GetEnumerator()){
+            $folded=[string]$pair.Value
+            $rows=@(
+                "$folded + ';' + 'scripts/Legacy.ps1'",
+                "'scripts/Legacy.ps1' + ';' + $folded",
+                "$folded + ';' + 'scripts/Legacy.ps1' + ';' + $folded"
+            )
+            [IO.File]::WriteAllText((Join-Path $root "scripts/$($pair.Key).ps1"),($rows-join"`n")+"`n",[Text.UTF8Encoding]::new($false))
+        }
+        [void](Invoke-SourceFixtureGit $root @('add','.'))
+        [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','all fold provenance'))
+        $commit=Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
+        $tree=Get-SourceFixtureGitScalar $root @('rev-parse','HEAD^{tree}')
+        $files=@([ordered]@{path='scripts/Legacy.ps1';disposition='delete';reason='legacy'})
+        foreach($name in $operators.Keys){$files+=@([ordered]@{path="scripts/$name.ps1";disposition='retain';reason='operator provenance'})}
+        $manifestPath=Join-Path $TestDrive 'folded-operator-provenance.json'
+        Write-FixtureJson $manifestPath ([ordered]@{schemaVersion=1;repositories=@([ordered]@{
+                        id='operators';repository='https://example.test/operators.git';status='ready';inventoryCommit=$commit
+                        inventoryTree=$tree;requiredRepositoryChecks=@();files=$files})})
+        $result=Get-ConsumerManifestClosure -RepositoryRoot $root -Commit $commit -Stage inventory -Manifest $manifestPath `
+            -RepositoryId operators -AuthorityRoot $script:RepositoryRoot
+        $result.result|Should Be FAILED
+        foreach($name in $operators.Keys){
+            $rows=@($result.violations|Where-Object{$_.kind-eq'legacy-reference'-and$_.file-ceq"scripts/$name.ps1"})
+            @($rows).Count|Should Be 7
+            (@($rows|Group-Object line|Sort-Object Name|ForEach-Object Count)-join',')|Should Be '2,2,3'
+        }
+        $result.counts.legacyReference|Should Be 49
+    }
+
     # Scenario: Every frozen section 5.6 reference, boundary, exemption, classification, and advisory family has an independent row.
     # Purpose: The closure contract is protected by an exact table-driven oracle rather than an aggregate non-empty assertion.
     It 'InterT28_executes_the_complete_section_5_6_golden_vector_matrix' {
@@ -813,7 +923,8 @@ Write-Output 'scripts/Legacy.ps1'
             "`$partial='scripts/'",
             "Join-Path `$root 'scripts' 'Legacy.ps1'",
             "Copy-Item -LiteralPath (Join-Path `$root 'Other.ps1') -Destination 'scripts/Legacy.ps1'",
-            'Get-Content $dynamic'
+            'Get-Content $dynamic',
+            "Copy-Item -LiteralPath ([string]'fixture.bin') -Destination 'scripts/Legacy.ps1'"
         )
         [IO.File]::WriteAllText((Join-Path $root 'scripts/Matrix.ps1'),($lines-join"`n")+"`n",[Text.UTF8Encoding]::new($false))
         $textFiles=[ordered]@{
@@ -847,6 +958,7 @@ Write-Output 'scripts/Legacy.ps1'
             @{Line=19;Column=1;Ordinal=1;Reason='first folded fixture'},
             @{Line=19;Column=1;Ordinal=2;Reason='second folded fixture'},
             @{Line=23;Column=$lines[22].IndexOf('scripts/Legacy.ps1')+1;Ordinal=1;Reason='partial source fail-closed'}
+            @{Line=25;Column=$lines[24].IndexOf('scripts/Legacy.ps1')+1;Ordinal=1;Reason='cast constant source remains certain'}
         )
         $exemptions=@($exemptionRows|ForEach-Object{[ordered]@{file='scripts/Matrix.ps1';blobOid=$oid
                     line=$_.Line;column=$_.Column;occurrenceOrdinal=$_.Ordinal;targetPath='scripts/Legacy.ps1';reason=$_.Reason}})
@@ -869,11 +981,11 @@ Write-Output 'scripts/Legacy.ps1'
         $result.result|Should Be 'FAILED'
         $result.counts.scannedFiles|Should Be 12
         $result.counts.legacyReference|Should Be 26
-        if($result.counts.exemptedReference-ne6){
+        if($result.counts.exemptedReference-ne7){
             $details=[ordered]@{counts=$result.counts;violations=@($result.violations);advisories=@($result.advisories)}|ConvertTo-Json -Depth 20 -Compress
             throw "Complete matrix exemption oracle mismatch: $details"
         }
-        $result.counts.exemptedReference|Should Be 6
+        $result.counts.exemptedReference|Should Be 7
         $result.counts.staleExemption|Should Be 5
         $result.counts.dynamicReference|Should Be 4
         $result.counts.documentationReference|Should Be 1
@@ -885,6 +997,7 @@ Write-Output 'scripts/Legacy.ps1'
         @($actualPowerShell).Count|Should Be 17
         ((@($actualPowerShell.line)|Sort-Object)-join',')|Should Be (($expectedPowerShell|Sort-Object)-join',')
         foreach($violation in $actualPowerShell){
+            Assert-ExactObjectShape $violation @('kind','file','line','column','occurrenceOrdinal','reference','targetPath','targetDisposition')
             $violation.targetPath|Should Be 'scripts/Legacy.ps1'
             $violation.occurrenceOrdinal|Should Be 1
             $expectedColumn=if($violation.line-in@(10,22)){1}else{$lines[$violation.line-1].IndexOf('scripts',[StringComparison]::OrdinalIgnoreCase)+1}
@@ -897,13 +1010,40 @@ Write-Output 'scripts/Legacy.ps1'
         $dynamic=@($result.advisories|Where-Object{$_.kind-eq'dynamic-reference'-and$_.file-eq'scripts/Matrix.ps1'})
         (@($dynamic.line)-join',')|Should Be '11,15,23,24'
         foreach($row in $dynamic){
+            Assert-ExactObjectShape $row @('kind','file','line','column','reference','targetPath')
             $needle=if($row.line-eq11){'$item'}elseif($row.line-in@(15,24)){'$dynamic'}else{'(Join-Path'}
             $expectedDynamicColumn=if($row.line-eq11){$lines[$row.line-1].LastIndexOf($needle)+1}else{
                 $lines[$row.line-1].IndexOf($needle)+1}
             $row.column|Should Be $expectedDynamicColumn
         }
-        @($result.advisories|Where-Object{$_.kind-eq'documentation-reference'-and$_.file-eq'docs/history.md'}).Count|Should Be 1
-        @($result.advisories|Where-Object{$_.kind-eq'binary'-and$_.file-eq'scripts/payload.bin'}).Count|Should Be 1
+        $documentation=@($result.advisories|Where-Object{$_.kind-eq'documentation-reference'-and$_.file-eq'docs/history.md'})
+        @($documentation).Count|Should Be 1
+        Assert-ExactObjectShape $documentation[0] @('kind','file','line','column','reference','targetPath')
+        $binary=@($result.advisories|Where-Object{$_.kind-eq'binary'-and$_.file-eq'scripts/payload.bin'})
+        @($binary).Count|Should Be 1
+        Assert-ExactObjectShape $binary[0] @('kind','file','line','column','reference','targetPath')
+
+        $closureModulePath=Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1'
+        $closureText=Get-Content -Raw -LiteralPath $closureModulePath
+        $closureTokens=$null;$closureErrors=$null
+        $closureAst=[Management.Automation.Language.Parser]::ParseInput($closureText,[ref]$closureTokens,[ref]$closureErrors)
+        @($closureErrors).Count|Should Be 0
+        $valueFunction=@($closureAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and
+                    $node.Name-ceq'ConvertTo-ClosureFoldedValue'},$true))[0]
+        $castBranch=@($valueFunction.Body.FindAll({param($node)$node-is[Management.Automation.Language.IfStatementAst]-and
+                    $node.Extent.Text.Contains('ConvertExpressionAst',[StringComparison]::Ordinal)},$true))
+        @($castBranch).Count|Should Be 1
+        $mutantText=$closureText.Remove($castBranch[0].Extent.StartOffset,$castBranch[0].Extent.EndOffset-$castBranch[0].Extent.StartOffset)
+        $mutantPath=Join-Path $TestDrive 'ConsumerManifestClosure-mutant-cast.psm1'
+        [IO.File]::WriteAllText($mutantPath,$mutantText,[Text.UTF8Encoding]::new($false))
+        $mutantModule=Import-Module $mutantPath -Force -PassThru
+        try{
+            $mutantResult=Get-ConsumerManifestClosure -RepositoryRoot $root -Commit $commit -Stage inventory `
+                -Manifest $manifestPath -RepositoryId matrix -AuthorityRoot $script:RepositoryRoot
+            $mutantResult.counts.exemptedReference|Should Be 6
+            $mutantResult.counts.legacyReference|Should Be 27
+            @($mutantResult.violations|Where-Object{$_.kind-eq'legacy-reference'-and$_.file-eq'scripts/Matrix.ps1'-and$_.line-eq25}).Count|Should Be 1
+        }finally{Remove-Module $mutantModule -Force;Restore-ClosureFixtureModule}
     }
 
     # Scenario: Conversion rewrites split and update targets, modifies an exempted blob, and deletes another exempted file.
@@ -1029,6 +1169,7 @@ Write-Output 'scripts/Legacy.ps1'
                 @($result.resolverDumps).Count | Should Be 4
                 foreach($dump in $result.resolverDumps){
                     @($dump.tokenNames) | Should Be @('STANDARD_VALIDATION_GITHUB_API_TOKEN')
+                    @($dump.sentinelValueNames) | Should Be @('STANDARD_VALIDATION_GITHUB_API_TOKEN')
                     $dump.standardPresent | Should Be $true
                     $dump.githubPresent | Should Be $false
                     $dump.ghPresent | Should Be $false
@@ -1040,6 +1181,35 @@ Write-Output 'scripts/Legacy.ps1'
                 @($result.events).Count | Should Be 0
                 @($result.resolverDumps).Count | Should Be 0
             }
+        }
+    }
+
+    # Scenario: PowerShell asset acquisition follows only bounded approved redirects and filters credentials per hop.
+    # Purpose: Real prepare accepts approved 302 chains while rejecting host changes and redirect exhaustion without sending Authorization to assets.
+    It 'UnitT61_enforces_redirect_hosts_limits_and_per_hop_authorization' {
+        $fixture=Join-Path $script:RepositoryRoot 'tests/fixtures/Invoke-ConsumerGateCredentialFixture.ps1'
+        $sentinel='unique-redirect-credential-sentinel'
+        $expected=[ordered]@{'redirect-success'=0;'redirect-unapproved'=20;'redirect-limit'=20}
+        foreach($outcome in $expected.Keys){
+            $root=Join-Path $TestDrive "credential-$outcome"
+            $records=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $fixture `
+                -RepositoryRoot $script:RepositoryRoot -FixtureRoot $root -Outcome $outcome -Sentinel $sentinel 2>&1)
+            $LASTEXITCODE|Should Be 0
+            $result=($records-join[Environment]::NewLine)|ConvertFrom-Json -Depth 30
+            $result.exitCode|Should Be $expected[$outcome]
+            $result.outputContainsSentinel|Should Be $false
+            $requests=@(Get-Content -LiteralPath (Join-Path $root 'http-headers.jsonl')|ForEach-Object{$_|ConvertFrom-Json})
+            @($requests).Count|Should Be $(if($outcome-eq'redirect-success'){5}elseif($outcome-eq'redirect-unapproved'){3}else{8})
+            $metadata=@($requests|Where-Object path -eq '/metadata')
+            @($metadata).Count|Should Be 1
+            [string]$metadata[0].headers.Authorization|Should Be "Bearer $sentinel"
+            $assetHops=@($requests|Where-Object path -ne '/metadata')
+            foreach($hop in $assetHops){
+                @($hop.headers.PSObject.Properties.Name)|Should Not Contain 'Authorization'
+                ($hop.headers|ConvertTo-Json -Compress)|Should Not Match ([regex]::Escape($sentinel))
+            }
+            if($outcome-eq'redirect-unapproved'){$result.stderr|Should Match 'GATE_ACQUISITION_REDIRECT_HOST'}
+            if($outcome-eq'redirect-limit'){$result.stderr|Should Match 'GATE_ACQUISITION_REDIRECT_LIMIT'}
         }
     }
 
@@ -1070,13 +1240,19 @@ Write-Output 'scripts/Legacy.ps1'
         $inventory=[ordered]@{
             'ConsumerGate.Install.headers.Authorization'=@('$headers.Remove(''Authorization'')',1)
             'ConsumerGate.Install.Token'=@('Remove-Variable Token -ErrorAction SilentlyContinue',1)
+            'ConsumerGate.Install.TokenNull'=@('$Token=$null',1)
+            'ConsumerGate.Install.processEnvironment'=@('[Environment]::SetEnvironmentVariable(''STANDARD_VALIDATION_GITHUB_API_TOKEN'',$null,''Process'')',1)
             'ConsumerGate.Acquisition.Headers'=@('$Headers=$null',1)
-            'ConsumerGate.Acquisition.request'=@('$request=$null',1)
-            'ConsumerGate.Acquisition.response'=@('$response=$null',1)
+            'ConsumerGate.Acquisition.request'=@('$request=$null',2)
+            'ConsumerGate.Acquisition.response'=@('$response=$null',2)
             'ConsumerGate.Acquisition.bytes'=@('$bytes=$null',1)
             'ConsumerGate.Acquisition.buffer'=@('$buffer=$null',1)
             'ConsumerGate.Acquisition.stream'=@('$stream=$null',1)
             'ConsumerGate.Acquisition.memory'=@('$memory=$null',1)
+            'ConsumerGate.Acquisition.requestDispose'=@('$request.Dispose()',2)
+            'ConsumerGate.Acquisition.responseDispose'=@('$response.Dispose()',2)
+            'ConsumerGate.Acquisition.streamDispose'=@('$stream.Dispose()',1)
+            'ConsumerGate.Acquisition.memoryDispose'=@('$memory.Dispose()',1)
             'ConsumerGate.Resolver.processEnvironment'=@('foreach($name in @(''STANDARD_VALIDATION_GITHUB_API_TOKEN'',''GITHUB_TOKEN'',''GH_TOKEN'')){[Environment]::SetEnvironmentVariable($name,$null,''Process'')}',1)
             'ConsumerGate.Resolver.start.Environment'=@('[void]$start.Environment.Remove(''STANDARD_VALIDATION_GITHUB_API_TOKEN'')',1)
             'ConsumerGate.Resolver.preserved'=@('$preserved.Clear()',1)
@@ -1088,7 +1264,11 @@ Write-Output 'scripts/Legacy.ps1'
             'ConsumerGate.Resolver.start'=@('$start=$null',1)
             'ConsumerGate.Resolver.Token'=@('Remove-Variable Token -ErrorAction SilentlyContinue',1)
             'ConsumerGate.Scoped.processEnvironment'=@('foreach($name in @(''STANDARD_VALIDATION_GITHUB_API_TOKEN'',''GITHUB_TOKEN'',''GH_TOKEN'')){[Environment]::SetEnvironmentVariable($name,$null,''Process'')}',1)
-            'ConsumerGate.Scoped.Token'=@('Remove-Variable Token -ErrorAction SilentlyContinue',1)
+            'ConsumerGate.Scoped.Token'=@('Remove-Variable runtime,receipt,Token -ErrorAction SilentlyContinue',1)
+            'ConsumerGate.SourceSetup.Token'=@('Remove-Variable Token -ErrorAction SilentlyContinue',1)
+            'ConsumerGate.CredentialScan.Token'=@('Remove-Variable content,needle,Token -ErrorAction SilentlyContinue',1)
+            'ConsumerGate.CredentialScan.needle'=@('Remove-Variable content,needle,Token -ErrorAction SilentlyContinue',1)
+            'ConsumerGate.CredentialScan.content'=@('Remove-Variable content,needle,Token -ErrorAction SilentlyContinue',1)
             'Bootstrap.preserved'=@('$preserved.Clear()',1)
             'Bootstrap.start.Environment'=@('[void]$start.Environment.Remove([string]$name)',1)
             'Bootstrap.sentinel'=@('Remove-Variable sentinel -ErrorAction SilentlyContinue',1)
@@ -1097,14 +1277,16 @@ Write-Output 'scripts/Legacy.ps1'
             'Bootstrap.stdout'=@('$stdout = $null',1)
             'Bootstrap.stderr'=@('$stderr = $null',1)
             'Bootstrap.process'=@('$process.Dispose()',1)
+            'Bootstrap.value'=@('Remove-Variable value -ErrorAction SilentlyContinue',1)
             'GateEntry.phaseEnvironment'=@('$phaseEnvironment=$null',1)
             'GateEntry.processEnvironment'=@('[Environment]::SetEnvironmentVariable($name,$null,''Process'')',2)
             'GateEntry.Token'=@('$token=$null',1)
             'GateEntry.message'=@('$message=$null',1)
             'GateEntry.tokenVariable'=@('$tokenVariable=$null',1)
             'GateEntry.localRemoval'=@('Remove-Variable token, tokenVariable, message, phaseEnvironmentDumpPath -ErrorAction SilentlyContinue',1)
+            'GateEntry.phaseDumpValueRemoval'=@('Remove-Variable phaseEnvironment,phaseEnvironmentDump,phaseTokenNames,phaseSentinelNames,sentinelHash,value -ErrorAction SilentlyContinue',1)
         }
-        @($inventory.Keys).Count | Should Be 35
+        @($inventory.Keys).Count | Should Be 47
         $sources=[ordered]@{
             ConsumerGate=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerGate.psm1')
             Bootstrap=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'consumer/bootstrap/Invoke-PinnedAuthority.ps1')
@@ -1123,6 +1305,8 @@ Write-Output 'scripts/Legacy.ps1'
                     $entry.Key.StartsWith('ConsumerGate.Acquisition.')){'Invoke-GateAcquisitionRequest'}elseif(
                     $entry.Key.StartsWith('ConsumerGate.Resolver.')){'Invoke-GateResolver'}elseif(
                     $entry.Key.StartsWith('ConsumerGate.Scoped.')){'Invoke-GateCredentialScopedPreparation'}elseif(
+                    $entry.Key.StartsWith('ConsumerGate.SourceSetup.')){'New-GateSourceSetup'}elseif(
+                    $entry.Key.StartsWith('ConsumerGate.CredentialScan.')){'Assert-GateCredentialAbsent'}elseif(
                     $entry.Key.StartsWith('Bootstrap.')){'Invoke-ConsumerGateProcess'}else{$null}
                 if($null-ne$functionName){
                     $searchRoot=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and
@@ -1156,10 +1340,40 @@ Write-Output 'scripts/Legacy.ps1'
             }
         }
         (@($actual)-join[Environment]::NewLine) | Should Be (@($inventory.Keys)-join[Environment]::NewLine)
-        $sources.ConsumerGate | Should Not Match '\[scriptblock\]\$(?:Transport|RuntimeInstaller|ProcessInvoker|ResolverProcessInvoker)'
-        $sources.ConsumerGate | Should Match 'CONSUMER_GATE_POWERSHELL_METADATA_URI'
-        $sources.ConsumerGate | Should Match 'CONSUMER_GATE_RUNTIME_SOURCE_ROOT'
-        $sources.ConsumerGate | Should Match 'CONSUMER_GATE_RESOLVER_SCRIPT_PATH'
+        $productionAsts=[ordered]@{}
+        foreach($sourceName in $sources.Keys){$tokens=$null;$errors=$null
+            $productionAsts[$sourceName]=[Management.Automation.Language.Parser]::ParseInput($sources[$sourceName],[ref]$tokens,[ref]$errors)
+            @($errors).Count|Should Be 0}
+        $protectedFunctions=@('Install-GatePowerShell','Invoke-GateAcquisitionRequest','Invoke-GateResolver','New-GateSourceSetup',
+            'Invoke-GateCredentialScopedPreparation','Assert-GateCredentialAbsent','Invoke-ConsumerGateProcess')
+        $scriptBlockParameters=@()
+        foreach($ast in $productionAsts.Values){
+            foreach($function in @($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and
+                            $protectedFunctions-ccontains$node.Name},$true))){
+                foreach($parameter in @($function.Parameters)){
+                    $typeNames=@($parameter.Attributes|Where-Object{$_-is[Management.Automation.Language.TypeConstraintAst]}|ForEach-Object{$_.TypeName.FullName})
+                    if($typeNames-ccontains'scriptblock'){$scriptBlockParameters+="$($function.Name)|$($parameter.Name.VariablePath.UserPath)|scriptblock"}
+                }
+            }
+        }
+        @($scriptBlockParameters).Count|Should Be 0
+        $formalEnvironment=@('CONSUMER_GATE_ARTIFACT_PATHS','CONSUMER_GATE_EVENT_REPOSITORY','GITHUB_STEP_SUMMARY','RUNNER_TEMP',
+            'STANDARD_GO_RUNTIME_VERSION','STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_OUTPUT')
+        $approvedSeams=@('CONSUMER_GATE_ACQUISITION_CANCEL_PATH','CONSUMER_GATE_ACQUISITION_TIMEOUT_SECONDS',
+            'CONSUMER_GATE_EVENT_LOG_PATH','CONSUMER_GATE_PHASE_ENV_DUMP_PATH','CONSUMER_GATE_POWERSHELL_METADATA_URI',
+            'CONSUMER_GATE_RESOLVER_SCRIPT_PATH','CONSUMER_GATE_RUNTIME_EXECUTABLE_RELATIVE_PATH','CONSUMER_GATE_RUNTIME_SOURCE_ROOT')
+        $environmentAccesses=@($productionAsts.Values|ForEach-Object{$_.FindAll({param($node)
+                        $node-is[Management.Automation.Language.VariableExpressionAst]-and
+                        ([string]$node.VariablePath.UserPath).StartsWith('env:CONSUMER_GATE_',[StringComparison]::OrdinalIgnoreCase)
+                    },$true)|ForEach-Object{([string]$_.VariablePath.UserPath).Substring(4).ToUpperInvariant()}}|
+                Where-Object{$formalEnvironment-cnotcontains$_-and$_-cne'CONSUMER_GATE_TEST_TEMP_ROOT'}|Sort-Object -Unique)
+        (@($environmentAccesses)-join"`n")|Should Be (($approvedSeams|Sort-Object)-join"`n")
+        foreach($seam in $approvedSeams){
+            $deleted=@($environmentAccesses|Where-Object{$_-cne$seam})
+            (@($deleted)-join"`n")|Should Not Be (($approvedSeams|Sort-Object)-join"`n")
+            $added=@($environmentAccesses)+@('CONSUMER_GATE_UNAPPROVED_FIXTURE_SEAM')
+            (@($added|Sort-Object -Unique)-join"`n")|Should Not Be (($approvedSeams|Sort-Object)-join"`n")
+        }
     }
 
 

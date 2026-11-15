@@ -94,7 +94,10 @@ function Install-GatePowerShell([string]$AuthorityRoot,[string]$WorkRoot,[string
         $metadataUri=if([string]::IsNullOrWhiteSpace($env:CONSUMER_GATE_POWERSHELL_METADATA_URI)){
             [uri]'https://api.github.com/repos/PowerShell/PowerShell/releases/latest'
         }else{[uri]$env:CONSUMER_GATE_POWERSHELL_METADATA_URI}
-        $release=Invoke-GateAcquisitionRequest metadata $metadataUri $headers $null
+        $fixtureAcquisition=$metadataUri.Host-ceq'127.0.0.1'
+        $metadataHosts=if($fixtureAcquisition){@('127.0.0.1')}else{@('api.github.com')}
+        $assetHosts=if($fixtureAcquisition){@('127.0.0.1')}else{@('github.com','release-assets.githubusercontent.com')}
+        $release=Invoke-GateAcquisitionRequest metadata $metadataUri $headers $null $metadataHosts $metadataUri.Host $fixtureAcquisition
         if($release.draft-or$release.prerelease-or[string]$release.tag_name-cnotmatch'^v([0-9]+\.[0-9]+\.[0-9]+)$'){Throw-GateResult FAILED `
             'Latest official PowerShell release metadata is not stable.'}
         $version=$Matches[1]
@@ -110,8 +113,8 @@ function Install-GatePowerShell([string]$AuthorityRoot,[string]$WorkRoot,[string
                 'PowerShell release assets are not on the approved official endpoint.'}
         $archive=Join-Path $downloads $assetName
         $hashes=Join-Path $downloads 'hashes.sha256'
-        [void](Invoke-GateAcquisitionRequest download ([uri][string]$hashAsset[0].browser_download_url) $headers $hashes)
-        [void](Invoke-GateAcquisitionRequest download ([uri][string]$asset[0].browser_download_url) $headers $archive)
+        [void](Invoke-GateAcquisitionRequest download ([uri][string]$hashAsset[0].browser_download_url) $headers $hashes $assetHosts '' $fixtureAcquisition)
+        [void](Invoke-GateAcquisitionRequest download ([uri][string]$asset[0].browser_download_url) $headers $archive $assetHosts '' $fixtureAcquisition)
         $line=@([IO.File]::ReadAllLines($hashes)|Where-Object{$_-match("^([0-9a-f]{64})\s+\*?"+[regex]::Escape($assetName)+"$")})
         if($line.Count-ne1){Throw-GateResult FAILED 'Official PowerShell hashes do not bind the selected asset.'}
         $sha=$line[0].Substring(0,64)
@@ -193,6 +196,7 @@ function Invoke-GateResolver([string]$PowerShell,[string]$AuthorityRoot,[string]
 }
 function New-GateSourceSetup([string]$AuthorityRoot,[string]$CandidateRoot,[string]$WorkRoot,[string]$PowerShell,[string]$RunId,`
     [string]$AuthorityRevision,[string]$CandidateRevision,[string]$SourceRepository,[string]$Token) {
+    try {
     $setupRoot=Join-Path $WorkRoot 'source-tools'
     [IO.Directory]::CreateDirectory($setupRoot)|Out-Null
     $installRoot=Join-Path $WorkRoot 'runtime/installed'
@@ -268,17 +272,39 @@ function New-GateSourceSetup([string]$AuthorityRoot,[string]$CandidateRoot,[stri
     Write-GateJsonCreateOnly (Join-Path $WorkRoot 'source-tools.json') $prepared
     Write-GateBoundaryEvent 'source-tools-prepared'
     $prepared
-}
-function Invoke-GateCredentialScopedPreparation([string]$WorkRoot,[string]$Token,[scriptblock]$Action) {
-    $failure=$null
-    $result=$null
-    try{$result=& $Action}catch{$failure=$_}finally{
-        foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,$null,'Process')}
-        Assert-GateCredentialAbsent $WorkRoot $Token
+    } finally {
+        foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){
+            [Environment]::SetEnvironmentVariable($name,$null,'Process')
+        }
         $Token=$null
         Remove-Variable Token -ErrorAction SilentlyContinue
     }
+}
+function Invoke-GateCredentialScopedPreparation([string]$AuthorityRoot,[string]$CandidateRoot,[string]$WorkRoot,`
+    [string]$Platform,$Binding,[string]$EventRepository,[string]$Token) {
+    $failure=$null
+    $scanFailure=$null
+    $result=$null
+    try{
+        $runtime=Install-GatePowerShell $AuthorityRoot $WorkRoot $Platform $Token
+        $receipt=[ordered]@{schemaVersion=1
+        report='consumer-runtime-receipt-v1'
+        executablePath=[string]$runtime.executablePath
+        executableSha256=[string]$runtime.executableSha256
+        version=[string]$runtime.version
+        archiveSha256=[string]$runtime.archiveSha256}
+        Write-GateJsonCreateOnly (Join-Path $WorkRoot 'runtime/consumer-runtime-receipt.json') $receipt
+        $result=New-GateSourceSetup $AuthorityRoot $CandidateRoot $WorkRoot ([string]$runtime.executablePath) `
+            ([string]$Binding.runId) ([string]$Binding.commit) ([string]$Binding.candidateRevision) $EventRepository $Token
+    }catch{$failure=$_}finally{
+        foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,$null,'Process')}
+        try{Assert-GateCredentialAbsent $WorkRoot $Token}catch{$scanFailure=$_}finally{
+            $runtime=$null;$receipt=$null;$Token=$null
+            Remove-Variable runtime,receipt,Token -ErrorAction SilentlyContinue
+        }
+    }
     if($null-ne$failure){throw $failure}
+    if($null-ne$scanFailure){throw $scanFailure}
     $result
 }
 function New-GateAdapter([string]$Path,$Config,$Setup,[string]$PowerShell) {
@@ -480,7 +506,8 @@ function Test-GateSafeRelativePath([string]$Path,[string[]]$Roots,[switch]$Direc
     if ([string]::IsNullOrWhiteSpace($Path) -or $Path.Contains('\',[StringComparison]::Ordinal) -or [IO.Path]::IsPathRooted($Path)) { return $false }
     $value = if ($DirectoryPrefix) { $Path.TrimEnd('/') } else { $Path }
     if ($DirectoryPrefix -and -not $Path.EndsWith('/',[StringComparison]::Ordinal)) { return $false }
-    if ($value -cnotmatch '^(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$') { return $false }
+    if ([string]::IsNullOrWhiteSpace($value) -or $value.Contains('\',[StringComparison]::Ordinal) -or
+        $value.IndexOfAny([char[]]@('*','?','[',']')) -ge 0) { return $false }
     $segments = @($value -split '/')
     if (@($segments | Where-Object { $_ -in @('', '.', '..') }).Count -ne 0) { return $false }
     @($Roots | Where-Object { $value -ceq $_ -or $value.StartsWith("$_/",[StringComparison]::Ordinal) }).Count -ne 0
@@ -757,12 +784,23 @@ function Get-GateCredentialSurfaceFiles([string]$WorkRoot) {
 
 function Assert-GateCredentialAbsent([string]$Root,[string]$Token) {
     if([string]::IsNullOrEmpty($Token)){return}
-    $needle=[Text.Encoding]::Latin1.GetString([Text.UTF8Encoding]::new($false).GetBytes($Token))
-    foreach($path in @(Get-GateCredentialSurfaceFiles $Root)){$content=[Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($path))
-    if($content.IndexOf($needle,[StringComparison]::Ordinal)-ge0){Throw-GateResult FAILED 'Credential sentinel remained in a gate-owned output surface.'}}
+    $needle=$null
+    $content=$null
+    try{
+        $needle=[Text.Encoding]::Latin1.GetString([Text.UTF8Encoding]::new($false).GetBytes($Token))
+        foreach($path in @(Get-GateCredentialSurfaceFiles $Root)){
+            $content=[Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($path))
+            if($content.IndexOf($needle,[StringComparison]::Ordinal)-ge0){Throw-GateResult FAILED 'Credential sentinel remained in a gate-owned output surface.'}
+            $content=$null
+        }
+    }finally{
+        $content=$null;$needle=$null;$Token=$null
+        Remove-Variable content,needle,Token -ErrorAction SilentlyContinue
+    }
 }
 
-function Invoke-GateAcquisitionRequest([string]$Operation,[uri]$Uri,[hashtable]$Headers,[string]$Destination) {
+function Invoke-GateAcquisitionRequest([string]$Operation,[uri]$Uri,[hashtable]$Headers,[string]$Destination,`
+    [string[]]$ApprovedHosts,[string]$AuthorizationHost,[bool]$AllowLoopbackHttp) {
     $timeoutSeconds=if([string]::IsNullOrWhiteSpace($env:CONSUMER_GATE_ACQUISITION_TIMEOUT_SECONDS)){100}else{
         [int]$env:CONSUMER_GATE_ACQUISITION_TIMEOUT_SECONDS}
     if($timeoutSeconds-lt1-or$timeoutSeconds-gt600){Throw-GateResult INVALID 'Acquisition timeout setting is invalid.'}
@@ -771,19 +809,37 @@ function Invoke-GateAcquisitionRequest([string]$Operation,[uri]$Uri,[hashtable]$
     $handler.AllowAutoRedirect=$false
     $client=[Net.Http.HttpClient]::new($handler)
     $client.Timeout=[Threading.Timeout]::InfiniteTimeSpan
-    $request=[Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get,$Uri)
-    foreach($name in $Headers.Keys){[void]$request.Headers.TryAddWithoutValidation([string]$name,[string]$Headers[$name])}
+    [Net.Http.HttpRequestMessage]$request=$null
     $cts=[Threading.CancellationTokenSource]::new()
     $cts.CancelAfter([TimeSpan]::FromSeconds($timeoutSeconds))
     [Net.Http.HttpResponseMessage]$response=$null
     try{
-        if(-not[string]::IsNullOrWhiteSpace($cancelPath)-and(Test-Path -LiteralPath $cancelPath)){Throw-GateResult CANCELLED `
-            'GATE_ACQUISITION_CANCELLED: acquisition was cancelled.'}
-        try{$response=$client.SendAsync($request,[Net.Http.HttpCompletionOption]::ResponseHeadersRead,$cts.Token).GetAwaiter().GetResult()}
-        catch [OperationCanceledException]{
+        $requestUri=$Uri
+        for($redirectCount=0;$true;$redirectCount++){
+            if($redirectCount-gt5){Throw-GateResult FAILED 'GATE_ACQUISITION_REDIRECT_LIMIT: acquisition exceeded the redirect limit.'}
+            $schemeApproved=$requestUri.Scheme-ceq'https'-or($AllowLoopbackHttp-and$requestUri.Scheme-ceq'http'-and$requestUri.Host-ceq'127.0.0.1')
+            if(-not$schemeApproved-or$ApprovedHosts-cnotcontains$requestUri.Host-or-not[string]::IsNullOrEmpty($requestUri.UserInfo)-or
+                (-not$AllowLoopbackHttp-and-not$requestUri.IsDefaultPort)){Throw-GateResult FAILED `
+                    'GATE_ACQUISITION_REDIRECT_HOST: acquisition used an unapproved endpoint.'}
+            if($null-ne$request){$request.Dispose();$request=$null}
+            if($null-ne$response){$response.Dispose();$response=$null}
+            $request=[Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get,$requestUri)
+            foreach($name in $Headers.Keys){
+                if([string]$name-ieq'Authorization'-and$requestUri.Host-cne$AuthorizationHost){continue}
+                [void]$request.Headers.TryAddWithoutValidation([string]$name,[string]$Headers[$name])
+            }
             if(-not[string]::IsNullOrWhiteSpace($cancelPath)-and(Test-Path -LiteralPath $cancelPath)){Throw-GateResult CANCELLED `
                 'GATE_ACQUISITION_CANCELLED: acquisition was cancelled.'}
-            Throw-GateResult FAILED 'GATE_ACQUISITION_TIMEOUT: acquisition timed out.'
+            try{$response=$client.SendAsync($request,[Net.Http.HttpCompletionOption]::ResponseHeadersRead,$cts.Token).GetAwaiter().GetResult()}
+            catch [OperationCanceledException]{
+                if(-not[string]::IsNullOrWhiteSpace($cancelPath)-and(Test-Path -LiteralPath $cancelPath)){Throw-GateResult CANCELLED `
+                    'GATE_ACQUISITION_CANCELLED: acquisition was cancelled.'}
+                Throw-GateResult FAILED 'GATE_ACQUISITION_TIMEOUT: acquisition timed out.'
+            }
+            if([int]$response.StatusCode-notin@(301,302,303,307,308)){break}
+            $location=$response.Headers.Location
+            if($null-eq$location){Throw-GateResult FAILED 'GATE_ACQUISITION_REDIRECT_LOCATION: redirect omitted Location.'}
+            $requestUri=if($location.IsAbsoluteUri){$location}else{[uri]::new($requestUri,$location)}
         }
         $stream=$response.Content.ReadAsStreamAsync($cts.Token).GetAwaiter().GetResult()
         $memory=[IO.MemoryStream]::new()
@@ -805,7 +861,7 @@ function Invoke-GateAcquisitionRequest([string]$Operation,[uri]$Uri,[hashtable]$
         }
         [IO.File]::WriteAllBytes($Destination,$bytes)
     }finally{
-        if($null-ne$response){$response.Dispose()};$request.Dispose();$client.Dispose();$handler.Dispose();$cts.Dispose()
+        if($null-ne$response){$response.Dispose()};if($null-ne$request){$request.Dispose()};$client.Dispose();$handler.Dispose();$cts.Dispose()
         $bytes=$null;$buffer=$null;$response=$null;$request=$null;$stream=$null;$memory=$null;$Headers=$null
         Remove-Variable bytes,buffer,response,request,stream,memory,Headers -ErrorAction SilentlyContinue
     }

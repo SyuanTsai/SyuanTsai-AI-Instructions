@@ -9,8 +9,15 @@ $ErrorActionPreference='Stop'
 [void][IO.Directory]::CreateDirectory($InstallRoot)
 $environment=[Environment]::GetEnvironmentVariables('Process')
 $tokenNames=@($environment.Keys|ForEach-Object{[string]$_}|Where-Object{$_-match'(?i)(TOKEN|SECRET|KEY|PASSWORD)'}|Sort-Object)
+$sentinelHashPath=Join-Path (Split-Path -Parent $OutputPath) 'credential-sentinel.sha256'
+$sentinelHash=if(Test-Path -LiteralPath $sentinelHashPath -PathType Leaf){[IO.File]::ReadAllText($sentinelHashPath).Trim()}else{''}
+$sentinelValueNames=@($environment.Keys|ForEach-Object{[string]$_}|Where-Object{
+        $value=[string]$environment[$_]
+        -not[string]::IsNullOrEmpty($sentinelHash)-and-not[string]::IsNullOrEmpty($value)-and
+        [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($value))).ToLowerInvariant()-ceq$sentinelHash
+    }|Sort-Object)
 $dump=[ordered]@{tokenNames=$tokenNames;standardPresent=($tokenNames-ccontains'STANDARD_VALIDATION_GITHUB_API_TOKEN')
-    githubPresent=($tokenNames-ccontains'GITHUB_TOKEN');ghPresent=($tokenNames-ccontains'GH_TOKEN')}
+    githubPresent=($tokenNames-ccontains'GITHUB_TOKEN');ghPresent=($tokenNames-ccontains'GH_TOKEN');sentinelValueNames=$sentinelValueNames}
 $dumpPath=Join-Path (Split-Path -Parent $OutputPath) "environment-$ToolName.json"
 [IO.File]::WriteAllText($dumpPath,($dump|ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
 $payload=Join-Path $InstallRoot "$ToolName-fixture.bin"

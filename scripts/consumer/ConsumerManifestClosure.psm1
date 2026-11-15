@@ -278,6 +278,9 @@ function ConvertTo-ClosureNormalizedPath {
 function ConvertTo-ClosureFoldedValue {
     param([Parameter(Mandatory)] $Ast)
 
+    if ($Ast -is [Management.Automation.Language.ConvertExpressionAst]) {
+        return ConvertTo-ClosureFoldedValue $Ast.Child
+    }
     if ($Ast -is [Management.Automation.Language.StringConstantExpressionAst]) {
         return [pscustomobject]@{ Values = @([string]$Ast.Value) }
     }
@@ -411,6 +414,23 @@ function ConvertTo-ClosureFoldedText {
 function ConvertTo-ClosureFoldedProjection {
     param([Parameter(Mandatory)] $Ast)
 
+    if ($Ast -is [Management.Automation.Language.ConvertExpressionAst]) {
+        return ConvertTo-ClosureFoldedProjection $Ast.Child
+    }
+    if ($Ast -is [Management.Automation.Language.ExpandableStringExpressionAst]) {
+        $extentText=[string]$Ast.Extent.Text
+        $inner=if($extentText.Length-ge2){$extentText.Substring(1,$extentText.Length-2)}else{$extentText}
+        $builder=[Text.StringBuilder]::new()
+        $sources=[Collections.Generic.List[int]]::new()
+        $cursor=0
+        foreach($match in [regex]::Matches($inner,'\$(?:\{[^}]+\}|[A-Za-z_][A-Za-z0-9_:]*)')){
+            for($index=$cursor;$index-lt$match.Index;$index++){[void]$builder.Append($inner[$index]);$sources.Add($Ast.Extent.StartOffset+1+$index)}
+            [void]$builder.Append('<var>');foreach($character in '<var>'.ToCharArray()){$sources.Add(-1)}
+            $cursor=$match.Index+$match.Length
+        }
+        for($index=$cursor;$index-lt$inner.Length;$index++){[void]$builder.Append($inner[$index]);$sources.Add($Ast.Extent.StartOffset+1+$index)}
+        return [pscustomobject]@{Text=$builder.ToString();Sources=[int[]]$sources.ToArray()}
+    }
     if ($Ast -is [Management.Automation.Language.StringConstantExpressionAst]) {
         $value = [string] $Ast.Value
         $relativeStart = ([string] $Ast.Extent.Text).IndexOf($value, [StringComparison]::Ordinal)
@@ -446,6 +466,32 @@ function ConvertTo-ClosureFoldedProjection {
             Text = [string] $left.Text + [string] $right.Text
             Sources = [int[]] (@($left.Sources) + @($right.Sources))
         }
+    }
+    $foldedText = ConvertTo-ClosureFoldedText $Ast
+    if ($null -ne $foldedText) {
+        $mappedSources = [int[]]::new($foldedText.Length)
+        [Array]::Fill($mappedSources, -1)
+        $searchStart = 0
+        $literals = @($Ast.FindAll({
+                    param($node)
+                    $node -is [Management.Automation.Language.StringConstantExpressionAst]
+                }, $true) | Sort-Object { $_.Extent.StartOffset })
+        foreach ($literal in $literals) {
+            $literalValue = [string]$literal.Value
+            if ([string]::IsNullOrEmpty($literalValue)) { continue }
+            $foldedIndex = $foldedText.IndexOf($literalValue, $searchStart, [StringComparison]::Ordinal)
+            if ($foldedIndex -lt 0) {
+                $foldedIndex = $foldedText.IndexOf($literalValue, [StringComparison]::Ordinal)
+            }
+            if ($foldedIndex -lt 0) { continue }
+            $relativeStart = ([string]$literal.Extent.Text).IndexOf($literalValue, [StringComparison]::Ordinal)
+            if ($relativeStart -lt 0) { continue }
+            for ($index = 0; $index -lt $literalValue.Length; $index++) {
+                $mappedSources[$foldedIndex + $index] = $literal.Extent.StartOffset + $relativeStart + $index
+            }
+            $searchStart = $foldedIndex + $literalValue.Length
+        }
+        return [pscustomobject]@{ Text = $foldedText; Sources = $mappedSources }
     }
     $null
 }
@@ -1006,15 +1052,6 @@ function Get-ConsumerManifestClosure {
                                     break
                                 }
                             }
-                        }
-                    }
-                    else {
-                        $rawInExtent = @($rawForTarget | Where-Object {
-                                $_.Offset -ge $foldAst.Extent.StartOffset -and
-                                $_.Offset -lt $foldAst.Extent.EndOffset
-                            }).Count
-                        for ($index = 1; $index -le [Math]::Min($rawInExtent, $foldedMatches.Count); $index++) {
-                            [void] $pairedOrdinals.Add($index)
                         }
                     }
                     for ($ordinal = 1; $ordinal -le $foldedMatches.Count; $ordinal++) {

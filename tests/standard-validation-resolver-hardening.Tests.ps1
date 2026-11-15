@@ -90,7 +90,7 @@ Describe 'P11-pin phase-scoped resolver credential' {
         $entry=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'scripts/consumer/Invoke-ConsumerSourceGate.ps1')
         $module=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'scripts/consumer/ConsumerGate.psm1')
         foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){$entry.Contains($name)|Should Be $true;$module.Contains($name)|Should Be $true}
-        $entry.Contains('Invoke-GateCredentialScopedPreparation $WorkRoot $token')|Should Be $true
+        $entry.Contains('Invoke-GateCredentialScopedPreparation $authorityRoot $CandidateRoot $WorkRoot $Platform $binding $eventRepository $token')|Should Be $true
         $module.Contains('Assert-GateCredentialAbsent $WorkRoot $Token')|Should Be $true
     }
 }

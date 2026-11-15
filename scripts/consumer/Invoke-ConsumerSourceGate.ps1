@@ -18,11 +18,18 @@ Import-Module (Join-Path $PSScriptRoot 'ConsumerGate.psm1') -Force
 $phaseEnvironmentDumpPath=[string]$env:CONSUMER_GATE_PHASE_ENV_DUMP_PATH
 if(-not[string]::IsNullOrWhiteSpace($phaseEnvironmentDumpPath)){
     $phaseEnvironment=[Environment]::GetEnvironmentVariables('Process')
+    $sentinelHashPath="$phaseEnvironmentDumpPath.sentinel.sha256"
+    $sentinelHash=if(Test-Path -LiteralPath $sentinelHashPath -PathType Leaf){[IO.File]::ReadAllText($sentinelHashPath).Trim()}else{''}
     $phaseTokenNames=@($phaseEnvironment.Keys|ForEach-Object{[string]$_}|Where-Object{$_-match'(?i)(TOKEN|SECRET|KEY|PASSWORD)'}|Sort-Object)
-    $phaseEnvironmentDump=[ordered]@{phase=$Phase;tokenNames=$phaseTokenNames}
+    $phaseSentinelNames=@($phaseEnvironment.Keys|ForEach-Object{[string]$_}|Where-Object{
+            $value=[string]$phaseEnvironment[$_]
+            -not[string]::IsNullOrEmpty($sentinelHash)-and-not[string]::IsNullOrEmpty($value)-and
+            [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($value))).ToLowerInvariant()-ceq$sentinelHash
+        }|Sort-Object)
+    $phaseEnvironmentDump=[ordered]@{phase=$Phase;tokenNames=$phaseTokenNames;sentinelValueNames=$phaseSentinelNames}
     [IO.File]::WriteAllText($phaseEnvironmentDumpPath,($phaseEnvironmentDump|ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
-    $phaseEnvironment=$null;$phaseEnvironmentDump=$null;$phaseTokenNames=$null
-    Remove-Variable phaseEnvironment,phaseEnvironmentDump,phaseTokenNames -ErrorAction SilentlyContinue
+    $phaseEnvironment=$null;$phaseEnvironmentDump=$null;$phaseTokenNames=$null;$phaseSentinelNames=$null;$sentinelHash=$null;$value=$null
+    Remove-Variable phaseEnvironment,phaseEnvironmentDump,phaseTokenNames,phaseSentinelNames,sentinelHash,value -ErrorAction SilentlyContinue
 }
 try{
     if($Phase-cne'prepare'){
@@ -49,19 +56,7 @@ try{
             ([bool]$TransitionFromLegacy)
         Assert-GateExceptionSetUnchanged $CandidateRoot ([string]$binding.baseRevision) ([string]$binding.candidateRevision)
         $token=[string]$env:STANDARD_VALIDATION_GITHUB_API_TOKEN
-        [void](Invoke-GateCredentialScopedPreparation $WorkRoot $token {
-            $runtime=Install-GatePowerShell $authorityRoot $WorkRoot $Platform $token
-            $receipt=[ordered]@{schemaVersion=1
-            report='consumer-runtime-receipt-v1'
-            executablePath=[string]$runtime.executablePath
-            executableSha256=[string]$runtime.executableSha256
-            version=[string]$runtime.version
-            archiveSha256=[string]$runtime.archiveSha256}
-            Write-GateJsonCreateOnly (Join-Path $WorkRoot 'runtime/consumer-runtime-receipt.json') $receipt
-            [void](New-GateSourceSetup $authorityRoot $CandidateRoot $WorkRoot `
-                    ([string]$runtime.executablePath) ([string]$binding.runId) ([string]$binding.commit) `
-                    ([string]$binding.candidateRevision) $eventRepository $token)
-        })
+        [void](Invoke-GateCredentialScopedPreparation $authorityRoot $CandidateRoot $WorkRoot $Platform $binding $eventRepository $token)
     }elseif($Phase-ceq'validate'){
         $validated=Assert-GateConfig $authorityRoot $CandidateRoot $eventRepository
         $runtime=Read-GateJson (Join-Path $WorkRoot 'runtime/consumer-runtime-receipt.json') 'consumer runtime receipt'

@@ -451,7 +451,12 @@ exit 0
             '-WorkflowRunId','1001','-WorkflowRunAttempt','1'
         )
         function Invoke-FormalBootstrap([string]$Phase,[string]$WorkRoot,[string]$Platform) {
+            [void][IO.Directory]::CreateDirectory($WorkRoot)
             $env:CONSUMER_GATE_PHASE_ENV_DUMP_PATH=Join-Path $WorkRoot "environment-$Phase.json"
+            $phaseSentinelHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(`
+                    [Text.Encoding]::UTF8.GetBytes('phase-token-sentinel'))).ToLowerInvariant()
+            [IO.File]::WriteAllText("$($env:CONSUMER_GATE_PHASE_ENV_DUMP_PATH).sentinel.sha256",$phaseSentinelHash,
+                [Text.UTF8Encoding]::new($false))
             $script:FormalBootstrapOutput = @(
                 & (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $bootstrapCopy `
                     -Phase $Phase -WorkRoot $WorkRoot -Platform $Platform @common 2>&1
@@ -498,6 +503,9 @@ exit 0
         $residualStart.Environment['CONSUMER_GATE_EVENT_REPOSITORY']=$consumerRepository
         $residualStart.Environment['CONSUMER_GATE_PHASE_ENV_DUMP_PATH']=Join-Path $platformWork 'environment-validate.json'
         $residualStart.Environment['STANDARD_VALIDATION_GITHUB_API_TOKEN']='phase-token-sentinel'
+        [IO.File]::WriteAllText("$($residualStart.Environment['CONSUMER_GATE_PHASE_ENV_DUMP_PATH']).sentinel.sha256",`
+            [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes('phase-token-sentinel'))).ToLowerInvariant(),`
+            [Text.UTF8Encoding]::new($false))
         $residualProcess=[Diagnostics.Process]::new()
         try{$residualProcess.StartInfo=$residualStart;[void]$residualProcess.Start();$residualProcess.StandardOutput.ReadToEnd()|Out-Null
             $residualProcess.StandardError.ReadToEnd()|Out-Null;$residualProcess.WaitForExit();$residualProcess.ExitCode|Should Be 30}
@@ -505,6 +513,7 @@ exit 0
         (Join-Path $platformWork 'validation-artifacts/consumer-core-evidence.json')|Should Not Exist
         $residualEnvironment=Get-Content -Raw -LiteralPath (Join-Path $platformWork 'environment-validate.json')|ConvertFrom-Json
         @($residualEnvironment.tokenNames)|Should Be @('STANDARD_VALIDATION_GITHUB_API_TOKEN')
+        @($residualEnvironment.sentinelValueNames)|Should Be @('STANDARD_VALIDATION_GITHUB_API_TOKEN')
         Remove-Item Env:STANDARD_VALIDATION_GITHUB_API_TOKEN -ErrorAction SilentlyContinue
         foreach ($phase in @('validate','finalize')) {
             $phaseExit=Invoke-FormalBootstrap $phase $platformWork windows
@@ -514,6 +523,59 @@ exit 0
             $phaseExit | Should Be 0
             Assert-FormalPhaseOutput (Join-Path $platformWork "environment-$phase.json") $phase
         }
+        $casePath=Join-Path $platformWork 'validation-artifacts/repository-pester-case-inventory-v1.json'
+        $evidencePath=Join-Path $platformWork 'validation-artifacts/consumer-core-evidence.json'
+        $validatedBindingPath=Join-Path $platformWork 'validated-report-binding.json'
+        function Set-FormalCaseCount($Value){
+            $caseInventory=Get-Content -Raw -LiteralPath $casePath|ConvertFrom-Json
+            $caseInventory.caseDiscoveryCount=$Value
+            $caseInventory.caseExecutionCount=$Value
+            [IO.File]::WriteAllText($casePath,($caseInventory|ConvertTo-Json -Depth 10),[Text.UTF8Encoding]::new($false))
+            $evidence=Get-Content -Raw -LiteralPath $evidencePath|ConvertFrom-Json
+            $evidence.sourceValidation.pesterCaseInventory.sha256=(Get-FileHash -LiteralPath $casePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            [IO.File]::WriteAllText($evidencePath,($evidence|ConvertTo-Json -Depth 10),[Text.UTF8Encoding]::new($false))
+            $validatedBinding=Get-Content -Raw -LiteralPath $validatedBindingPath|ConvertFrom-Json
+            $validatedBinding.evidenceSha256=(Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            [IO.File]::WriteAllText($validatedBindingPath,($validatedBinding|ConvertTo-Json -Depth 10),[Text.UTF8Encoding]::new($false))
+        }
+        $formalCountCases=@(
+            @{Value='2';Exit=20},@{Value=[double]2.5;Exit=20},@{Value=$true;Exit=20},
+            @{Value=[int]::MaxValue;Exit=0},@{Value=[long]::MaxValue;Exit=0}
+        )
+        foreach($countCase in $formalCountCases){
+            Set-FormalCaseCount $countCase.Value
+            Remove-Item -LiteralPath (Join-Path $platformWork 'receipts/leg-windows.json') -ErrorAction SilentlyContinue
+            $countExit=Invoke-FormalBootstrap finalize $platformWork windows
+            Assert-FormalBootstrapExit $countExit $countCase.Exit "Formal receipt count type '$($countCase.Value.GetType().Name)'"
+        }
+        Set-FormalCaseCount ([long]1)
+        Remove-Item -LiteralPath (Join-Path $platformWork 'receipts/leg-windows.json') -ErrorAction SilentlyContinue
+        (Invoke-FormalBootstrap finalize $platformWork windows)|Should Be 0
+        $mutantAuthority=Join-Path $TestDrive 'formal-receipt-validator-mutant'
+        Copy-Item -LiteralPath (Join-Path $platformWork 'authority') -Destination $mutantAuthority -Recurse
+        $mutantModulePath=Join-Path $mutantAuthority 'scripts/consumer/ConsumerGate.psm1'
+        $mutantText=Get-Content -Raw -LiteralPath $mutantModulePath
+        $mutantTokens=$null;$mutantErrors=$null
+        $mutantAst=[Management.Automation.Language.Parser]::ParseInput($mutantText,[ref]$mutantTokens,[ref]$mutantErrors)
+        @($mutantErrors).Count|Should Be 0
+        $receiptFunction=@($mutantAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and
+                    $node.Name-ceq'Write-GateLegReceipt'},$true))[0]
+        $validatorCall=@($receiptFunction.Body.FindAll({param($node)$node-is[Management.Automation.Language.PipelineAst]-and
+                    $node.Extent.Text.Trim()-ceq'Assert-GatePlatformTestInventory $cases'},$true))
+        @($validatorCall).Count|Should Be 1
+        $mutantText=$mutantText.Remove($validatorCall[0].Extent.StartOffset,$validatorCall[0].Extent.EndOffset-$validatorCall[0].Extent.StartOffset)
+        [IO.File]::WriteAllText($mutantModulePath,$mutantText,[Text.UTF8Encoding]::new($false))
+        Set-FormalCaseCount '2'
+        Remove-Item -LiteralPath (Join-Path $platformWork 'receipts/leg-windows.json') -ErrorAction SilentlyContinue
+        $mutantOutput=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File `
+                (Join-Path $mutantAuthority 'scripts/consumer/Invoke-ConsumerSourceGate.ps1') -Interface consumer-gate-v1 -Phase finalize `
+                -AuthorityBindingPath (Join-Path $platformWork 'authority-binding.json') -BaseRoot $revision.BaseRoot `
+                -CandidateRoot $revision.CandidateRoot -WorkRoot $platformWork -Platform windows 2>&1)
+        $mutantExit=$LASTEXITCODE
+        $mutantExit|Should Be 0
+        Set-FormalCaseCount ([long]1)
+        Remove-Item -LiteralPath (Join-Path $platformWork 'receipts/leg-windows.json') -ErrorAction SilentlyContinue
+        (Invoke-FormalBootstrap finalize $platformWork windows)|Should Be 0
         $aggregateReceipts=Join-Path $aggregateWork 'receipts'
         [void][IO.Directory]::CreateDirectory($aggregateReceipts)
         $platformReceipt=Get-Content -Raw -LiteralPath (Join-Path $platformWork 'receipts/leg-windows.json')|ConvertFrom-Json
@@ -536,10 +598,12 @@ exit 0
         foreach ($phase in @('validate','finalize')) {
             $environment = Get-Content -Raw -LiteralPath (Join-Path $platformWork "environment-$phase.json") | ConvertFrom-Json
             @($environment.tokenNames).Count | Should Be 0
+            @($environment.sentinelValueNames).Count | Should Be 0
             ($environment | ConvertTo-Json -Depth 5) | Should Not Match 'phase-token-sentinel'
         }
-        @(Get-Content -LiteralPath (Join-Path $platformWork 'events.log'))|Should Be `
-            @('runtime-installed','source-tools-prepared','source-report-asserted')
+        $boundaryEvents=@(Get-Content -LiteralPath (Join-Path $platformWork 'events.log'))
+        @($boundaryEvents[0..2])|Should Be @('runtime-installed','source-tools-prepared','source-report-asserted')
+        @($boundaryEvents|Select-Object -Skip 3|Where-Object{$_-cne'source-report-asserted'}).Count|Should Be 0
 
         $bindingPath = Join-Path $platformWork 'authority-binding.json'
         $bindingText = Get-Content -Raw -LiteralPath $bindingPath

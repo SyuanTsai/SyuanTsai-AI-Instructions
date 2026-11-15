@@ -252,7 +252,7 @@ function Invoke-ConsumerGateProcess([string]$Executable, [string]$GatePath, [str
     $start.Environment.Clear()
      foreach ($name in $osNames + $allowed) { $value = if ($preserved.ContainsKey($name)) { $preserved[$name] } else {`
          [Environment]::GetEnvironmentVariable($name, 'Process') }
-     if ($null -ne $value) { $start.Environment[$name] = $value } }
+     try { if ($null -ne $value) { $start.Environment[$name] = $value } }finally{$value=$null;Remove-Variable value -ErrorAction SilentlyContinue} }
     $credentialNames = @($allowed | Where-Object { $_ -match '(?i)(TOKEN|SECRET|KEY|PASSWORD)' })
     $process = [Diagnostics.Process]::new()
     $resultCode = 30
@@ -300,8 +300,8 @@ function Invoke-ConsumerGateProcess([string]$Executable, [string]$GatePath, [str
         $credentialLeak = $null
         $preserved.Clear()
         $start.Environment.Clear()
-        $process.Dispose()
-        Remove-Variable standardOutput, standardError, stdout, stderr, credentialLeak, preserved, process -ErrorAction SilentlyContinue
+        $process.Dispose();$value = $null
+        Remove-Variable standardOutput, standardError, stdout, stderr, credentialLeak, preserved, process, value -ErrorAction SilentlyContinue
     }
     $resultCode
 }
