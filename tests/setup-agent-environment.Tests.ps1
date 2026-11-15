@@ -1287,6 +1287,7 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
     BeforeAll {
         $script:UnixRepositoryRoot = Split-Path -Parent $PSScriptRoot
         Import-Module (Join-Path $script:UnixRepositoryRoot 'scripts/agent-environment-setup.psm1') -DisableNameChecking -Force
+        Import-Module (Join-Path $script:UnixRepositoryRoot 'scripts/platform-runtime.psd1') -DisableNameChecking
         Add-Type -AssemblyName System.Formats.Tar
         # Resolve only the trusted test anchor (macOS /var -> /private/var).
         $physical = '/'
@@ -1619,7 +1620,7 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
             $homePath = if ($case -ceq 'symlink') { New-UnixHome "cache-$case" -WithoutCache } else { New-UnixHome "cache-$case" }
             $cache = Join-Path $homePath ".local/share/ai-instructions-setup/cache/$($script:UnixAssetName)"
             if ($case -ceq 'mode') { [IO.File]::SetUnixFileMode($cache,[IO.UnixFileMode]438) }
-            elseif ($case -ceq 'hardlink') { [IO.File]::CreateHardLink((Join-Path $homePath 'cache-alias'),$cache) | Out-Null }
+            elseif ($case -ceq 'hardlink') { & /bin/ln $cache (Join-Path $homePath 'cache-alias'); $LASTEXITCODE | Should Be 0 }
             else {
                 [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($cache))
                 foreach ($relative in @('.local','.local/share','.local/share/ai-instructions-setup','.local/share/ai-instructions-setup/cache')) { [IO.File]::SetUnixFileMode((Join-Path $homePath $relative),[IO.UnixFileMode]448) }
@@ -1770,17 +1771,21 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         }
     }
 
-    # Scenario: The loader probe is forced to report musl, while a control probe reports no musl loader.
-    # Purpose: G12 verifies behavior from the native entry instead of comparing source-code strings.
-    It 'InterT35_uses_the_controllable_loader_probe_to_refuse_musl' {
+    # Scenario: The loader probe reports musl on Linux or the same synthetic path on macOS.
+    # Purpose: G12 refuses musl only for Linux, where the pinned glibc asset is incompatible, without applying Linux loader policy to macOS.
+    It 'InterT35_scopes_the_controllable_musl_loader_probe_to_linux' {
         $homePath=New-UnixHome 'musl-probe'
         $realFind=@(Get-Command find -CommandType Application | Select-Object -First 1)[0].Source
         $findShim=@('if [ "$1" = /lib ] && [ "$2" = /usr/lib ]; then','  printf "%s\n" /lib/ld-musl-fixture.so.1','  exit 0','fi',"exec '$realFind' `"`$@`"") -join "`n"
         $bin=New-UnixToolShim 'musl-probe' -Replace @{find=$findShim}
         $run=Invoke-UnixSetup $homePath @('--offline') -Environment @{PATH=$bin}
-        $run.ExitCode | Should Be 11;$run.Json.code | Should Be 'unsupported-platform'
-        $control=Invoke-UnixSetup $homePath @('--offline')
-        $control.Json.code | Should Not Be 'unsupported-platform'
+        if ($IsLinux) {
+            $run.ExitCode | Should Be 11;$run.Json.code | Should Be 'unsupported-platform'
+            $control=Invoke-UnixSetup $homePath @('--offline')
+            $control.Json.code | Should Not Be 'unsupported-platform'
+        } else {
+            $run.ExitCode | Should Be 21;$run.Json.code | Should Be 'runtime-missing'
+        }
     }
 
     # Scenario: A HOME ancestor is writable by other users without sticky protection, and where possible owned by another uid.
@@ -1912,7 +1917,55 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         foreach ($directory in $newRuns) { $directory.Name | Should Match '^run\.[0-9]+\.[A-Za-z0-9]+$'; $directory.Name | Should Not Match '^run\.[0-9]+$' }
     }
 
-    Context 'Unix null optional leaf publication' -Tag 'UnixNullOptionalLeaf' {
+    # Register only when the native test process can create a genuinely foreign-owned cache fixture.
+    if ($setupTestUnixUid -eq '0') {
+    # Scenario: A cached archive is owned by a different uid.
+    # Purpose: F2 returns unsafe-path rather than consuming foreign-owned cache bytes.
+    It 'InterT33_refuses_a_foreign_owned_cache_file' {
+        $homePath = New-UnixHome 'cache-owner'
+        $cache = Join-Path $homePath ".local/share/ai-instructions-setup/cache/$($script:UnixAssetName)"
+        & chown 1 $cache
+        $LASTEXITCODE | Should Be 0
+        $before = Get-UnixTreeSnapshot $homePath
+        $run = Invoke-UnixSetup $homePath @('--offline')
+        $run.ExitCode | Should Be 13
+        $run.Json.code | Should Be 'unsafe-path'
+        (Get-UnixTreeSnapshot $homePath) | Should BeExactly $before
+    }
+    }
+
+    # Register only on the native host; root bypasses write permission checks.
+    if ($setupTestUnixUid -ne '0') {
+    # Scenario: HOME is not writable, or HOME is group/world writable without the sticky bit.
+    # Purpose: S1 refuses home-invalid and M7 unsafe-path with the home bytes unchanged.
+    It 'InterT25_refuses_unwritable_and_unsafely_writable_homes' {
+        $readOnly = New-UnixHome 'read-only' -WithoutCache
+        [IO.File]::SetUnixFileMode($readOnly,[IO.UnixFileMode]320)
+        try {
+            $run = Invoke-UnixSetup $readOnly @('--prepare')
+            $run.ExitCode | Should Be 12; $run.Json.code | Should Be 'home-invalid'
+        } finally { [IO.File]::SetUnixFileMode($readOnly,[IO.UnixFileMode]448) }
+        @(Get-ChildItem -LiteralPath $readOnly -Force).Count | Should Be 0
+        $open = New-UnixHome 'world-writable' -WithoutCache
+        [IO.File]::SetUnixFileMode($open,[IO.UnixFileMode]511)
+        $run = Invoke-UnixSetup $open @('--prepare')
+        $run.ExitCode | Should Be 13; $run.Json.code | Should Be 'unsafe-path'
+        @(Get-ChildItem -LiteralPath $open -Force).Count | Should Be 0
+    }
+    }
+}
+
+Describe 'setup-agent-environment Unix null optional leaf publication (SYP-354 P10a)' -Tag 'UnixNullOptionalLeaf' {
+    BeforeAll {
+        $UnixFixtureName = 'unix-setup-null-optional-leaf'
+        . (Join-Path $PSScriptRoot 'setup-agent-environment.UnixFixture.ps1')
+    }
+
+    AfterAll {
+        & git -C $script:UnixRepo checkout -q --detach $script:UnixCommits['runtime'] 2>$null | Out-Null
+        Remove-Module agent-environment-setup -Force -ErrorAction SilentlyContinue
+    }
+
     # Scenario: A lock holder publishes the first setup receipt, so both journal.json and the target have absent expected state and null displaced leaves.
     # Purpose: Protect the two Unix no-replace publication calls from null-to-empty optional-leaf coercion.
     It 'InterT42_publishes_the_first_journal_and_setup_receipt_with_null_displaced_leaves' {
@@ -1979,7 +2032,8 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         & git -C $shimRepo -c user.name=setup-test -c user.email=setup-test@example.invalid commit -q -m after-displace 2>$null | Out-Null
         $shimCommit=[string](& git -C $shimRepo rev-parse HEAD)
         $shimShell=Join-Path $shimRepo 'scripts/setup-agent-environment.sh'
-        $crashed=Invoke-UnixSetup $homePath @('--offline') -ExpectedCommit $shimCommit -NoCheckout -EntryPath $shimShell -Environment @{AI_INSTRUCTIONS_SETUP_FAILPOINT='after-displace'}
+        $shimEntry=Join-Path $shimRepo 'scripts/setup-agent-environment.ps1'
+        $crashed=Invoke-UnixSetupPowerShellChild $homePath Offline -ExpectedCommit $shimCommit -NoCheckout -EntryPath $shimEntry -Environment @{AI_INSTRUCTIONS_SETUP_FAILPOINT='after-displace'}
         $crashed.ExitCode | Should Not Be 0
         $store=Join-Path $homePath '.local/share/ai-instructions-setup/.ai-instructions-txn'
         $transaction=@(Get-ChildItem -LiteralPath $store -Directory -Force);$transaction.Count | Should Be 1
@@ -2005,7 +2059,7 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         foreach($case in @(@{Point='during-stage-write';Members=@('stage','journal.json')},@{Point='after-rename';Members=@('displaced','journal.json')})){
             $homePath=New-UnixHome ('null-leaf-cleanup-'+$case.Point)
             $initial=Invoke-UnixSetup $homePath @('--prepare');$initial.ExitCode | Should Be 0
-            $crashed=Invoke-UnixSetup $homePath @('--offline') -Environment @{AI_INSTRUCTIONS_SETUP_FAILPOINT=$case.Point;AI_INSTRUCTIONS_SETUP_FAILPOINT_LEAF='setup-receipt.json'}
+            $crashed=Invoke-UnixSetupPowerShellChild $homePath Offline -Environment @{AI_INSTRUCTIONS_SETUP_FAILPOINT=$case.Point;AI_INSTRUCTIONS_SETUP_FAILPOINT_LEAF='setup-receipt.json'}
             $crashed.ExitCode | Should Not Be 0
             $setupRoot=Join-Path $homePath '.local/share/ai-instructions-setup'
             $transaction=@(Get-ChildItem -LiteralPath (Join-Path $setupRoot '.ai-instructions-txn') -Directory -Force);$transaction.Count | Should Be 1
@@ -2047,44 +2101,6 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         foreach($directory in @($setupRoot,$runtimeRoot)){Assert-UnixPrivatePath $directory '700'}
         foreach($file in @($setupReceipt,$runtimeReceiptPath,(Join-Path $setupRoot "cache/$($script:UnixAssetName)"))){Assert-UnixPrivatePath $file '600'}
         Assert-UnixPrivatePath (Join-Path $runtimeRoot 'pwsh') '700'
-    }
-    }
-
-    # Register only when the native test process can create a genuinely foreign-owned cache fixture.
-    if ($setupTestUnixUid -eq '0') {
-    # Scenario: A cached archive is owned by a different uid.
-    # Purpose: F2 returns unsafe-path rather than consuming foreign-owned cache bytes.
-    It 'InterT33_refuses_a_foreign_owned_cache_file' {
-        $homePath = New-UnixHome 'cache-owner'
-        $cache = Join-Path $homePath ".local/share/ai-instructions-setup/cache/$($script:UnixAssetName)"
-        & chown 1 $cache
-        $LASTEXITCODE | Should Be 0
-        $before = Get-UnixTreeSnapshot $homePath
-        $run = Invoke-UnixSetup $homePath @('--offline')
-        $run.ExitCode | Should Be 13
-        $run.Json.code | Should Be 'unsafe-path'
-        (Get-UnixTreeSnapshot $homePath) | Should BeExactly $before
-    }
-    }
-
-    # Register only on the native host; root bypasses write permission checks.
-    if ($setupTestUnixUid -ne '0') {
-    # Scenario: HOME is not writable, or HOME is group/world writable without the sticky bit.
-    # Purpose: S1 refuses home-invalid and M7 unsafe-path with the home bytes unchanged.
-    It 'InterT25_refuses_unwritable_and_unsafely_writable_homes' {
-        $readOnly = New-UnixHome 'read-only' -WithoutCache
-        [IO.File]::SetUnixFileMode($readOnly,[IO.UnixFileMode]320)
-        try {
-            $run = Invoke-UnixSetup $readOnly @('--prepare')
-            $run.ExitCode | Should Be 12; $run.Json.code | Should Be 'home-invalid'
-        } finally { [IO.File]::SetUnixFileMode($readOnly,[IO.UnixFileMode]448) }
-        @(Get-ChildItem -LiteralPath $readOnly -Force).Count | Should Be 0
-        $open = New-UnixHome 'world-writable' -WithoutCache
-        [IO.File]::SetUnixFileMode($open,[IO.UnixFileMode]511)
-        $run = Invoke-UnixSetup $open @('--prepare')
-        $run.ExitCode | Should Be 13; $run.Json.code | Should Be 'unsafe-path'
-        @(Get-ChildItem -LiteralPath $open -Force).Count | Should Be 0
-    }
     }
 }
 }
