@@ -11,7 +11,6 @@ param(
     [ValidateSet('windows', 'linux', 'macos', 'aggregate')][string] $Platform,
     [switch] $TransitionFromLegacy, [switch] $DefineFunctionsOnly
 )
-
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:AuthorityRepository = 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
@@ -41,7 +40,7 @@ function Assert-PlainPath([string]$Path, [string]$Context, [switch]$Leaf) {
          if ($parent -eq $cursor) { break }
          $cursor = $parent
     }
-    if ($Leaf) {
+    if ($Leaf) { if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { Throw-ConsumerResult INVALID "$Context must be a regular file." }
         $item = Get-Item -LiteralPath $full -Force -ErrorAction Stop
         if ($item.PSIsContainer) { Throw-ConsumerResult INVALID "$Context must be a regular file." }
     }
@@ -254,26 +253,57 @@ function Invoke-ConsumerGateProcess([string]$Executable, [string]$GatePath, [str
      foreach ($name in $osNames + $allowed) { $value = if ($preserved.ContainsKey($name)) { $preserved[$name] } else {`
          [Environment]::GetEnvironmentVariable($name, 'Process') }
      if ($null -ne $value) { $start.Environment[$name] = $value } }
+    $credentialNames = @($allowed | Where-Object { $_ -match '(?i)(TOKEN|SECRET|KEY|PASSWORD)' })
     $process = [Diagnostics.Process]::new()
-     $process.StartInfo = $start
-     [void]$process.Start()
-    $stdout = $process.StandardOutput.ReadToEndAsync()
-     $stderr = $process.StandardError.ReadToEndAsync()
-     $process.WaitForExit()
-    $standardOutput = $stdout.Result
-     $standardError = $stderr.Result
-    foreach ($name in @($allowed | Where-Object { $_ -match '(?i)(TOKEN|SECRET|KEY|PASSWORD)' })) {
-        $sentinel = [string]$preserved[$name]
-        if (-not [string]::IsNullOrEmpty($sentinel) -and
-            ($standardOutput.Contains($sentinel, [StringComparison]::Ordinal) -or $standardError.Contains($sentinel, [StringComparison]::Ordinal))) {
+    $resultCode = 30
+    try {
+        $process.StartInfo = $start
+        [void]$process.Start()
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $standardOutput = $stdout.GetAwaiter().GetResult()
+        $standardError = $stderr.GetAwaiter().GetResult()
+        $credentialLeak = $false
+        foreach ($name in $credentialNames) {
+            $sentinel = [string]$preserved[$name]
+            if (-not [string]::IsNullOrEmpty($sentinel) -and
+                ($standardOutput.Contains($sentinel, [StringComparison]::Ordinal) -or
+                 $standardError.Contains($sentinel, [StringComparison]::Ordinal))) {
+                $credentialLeak = $true
+            }
+            $sentinel = $null
+            Remove-Variable sentinel -ErrorAction SilentlyContinue
+        }
+        if ($credentialLeak) {
             [Console]::Error.WriteLine('Gate output contained a credential sentinel and was suppressed.')
-            return 20
+            $resultCode = 20
+        }
+        else {
+            [Console]::Out.Write($standardOutput)
+            [Console]::Error.Write($standardError)
+            $resultCode = if ($process.ExitCode -in @(0,10,20,30,40)) { $process.ExitCode } else { 30 }
         }
     }
-    [Console]::Out.Write($standardOutput)
-     [Console]::Error.Write($standardError)
-    if ($process.ExitCode -notin @(0,10,20,30,40)) { return 30 }
-     $process.ExitCode
+    finally {
+        foreach ($name in $credentialNames) {
+            [void]$start.Environment.Remove([string]$name)
+            if ($preserved.ContainsKey($name)) {
+                $preserved[$name] = $null
+                [void]$preserved.Remove($name)
+            }
+        }
+        $standardOutput = $null
+        $standardError = $null
+        $stdout = $null
+        $stderr = $null
+        $credentialLeak = $null
+        $preserved.Clear()
+        $start.Environment.Clear()
+        $process.Dispose()
+        Remove-Variable standardOutput, standardError, stdout, stderr, credentialLeak, preserved, process -ErrorAction SilentlyContinue
+    }
+    $resultCode
 }
 
 if ($DefineFunctionsOnly) { return }
@@ -350,7 +380,10 @@ try {
         Assert-ExactProperties $runtime @('schemaVersion','report','executablePath','executableSha256','version','archiveSha256') 'consumer runtime receipt'
         $runtimeRoot=Join-Path $WorkRoot 'runtime'
         $runtimeExecutable=Assert-PlainPath ([string]$runtime.executablePath) 'verified PowerShell runtime' -Leaf
-        if($runtime.schemaVersion-ne1-or[string]$runtime.report-cne'consumer-runtime-receipt-v1'-or-not(Test-PathInside $runtimeExecutable `
+        if($runtime.schemaVersion-ne1-or[string]$runtime.report-cne'consumer-runtime-receipt-v1'-or
+            [string]$runtime.version-cnotmatch'^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$'-or
+            [string]$runtime.archiveSha256-cnotmatch'^[0-9a-f]{64}$'-or
+            [string]$runtime.executableSha256-cnotmatch'^[0-9a-f]{64}$'-or-not(Test-PathInside $runtimeExecutable `
             $runtimeRoot)-or(Get-FileSha256 $runtimeExecutable)-cne[string]$runtime.executableSha256){Throw-ConsumerResult FAILED `
                 'Verified PowerShell runtime changed.'}
         $executable = $runtimeExecutable

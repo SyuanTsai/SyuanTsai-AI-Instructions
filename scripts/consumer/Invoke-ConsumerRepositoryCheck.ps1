@@ -135,8 +135,52 @@ try {
             $arguments = @{}
             if ($command.Parameters.ContainsKey('RepositoryRoot')) { $arguments.RepositoryRoot = $candidateRoot }
             if ($command.Parameters.ContainsKey('ReadOnlySnapshot')) { $arguments.ReadOnlySnapshot = $true }
-            & $scriptPath @arguments
-            if ($LASTEXITCODE -notin @(0, $null)) { throw "General repository check failed with exit code $LASTEXITCODE." }
+            $powerShell = (Get-Process -Id $PID).Path
+            $start = [Diagnostics.ProcessStartInfo]::new()
+            $start.FileName = $powerShell
+            $start.WorkingDirectory = $candidateRoot
+            $start.UseShellExecute = $false
+            $start.RedirectStandardOutput = $true
+            $start.RedirectStandardError = $true
+            foreach ($argument in @('-NoProfile', '-NonInteractive', '-File', $scriptPath)) {
+                [void] $start.ArgumentList.Add($argument)
+            }
+            if ($arguments.ContainsKey('RepositoryRoot')) {
+                [void] $start.ArgumentList.Add('-RepositoryRoot')
+                [void] $start.ArgumentList.Add($candidateRoot)
+            }
+            if ($arguments.ContainsKey('ReadOnlySnapshot')) {
+                [void] $start.ArgumentList.Add('-ReadOnlySnapshot')
+            }
+            foreach ($name in @($start.Environment.Keys)) {
+                if ([string] $name -match '(?i)(TOKEN|SECRET|PASSWORD|PRIVATE_KEY)') {
+                    [void] $start.Environment.Remove([string] $name)
+                }
+            }
+            $process = [Diagnostics.Process]::new()
+            try {
+                $process.StartInfo = $start
+                [void] $process.Start()
+                $standardOutputTask = $process.StandardOutput.ReadToEndAsync()
+                $standardErrorTask = $process.StandardError.ReadToEndAsync()
+                $process.WaitForExit()
+                $standardOutput = $standardOutputTask.GetAwaiter().GetResult()
+                $standardError = $standardErrorTask.GetAwaiter().GetResult()
+                [Console]::Out.Write($standardOutput)
+                [Console]::Error.Write($standardError)
+                if ($process.ExitCode -ne 0) {
+                    throw "General repository check failed with exit code $($process.ExitCode)."
+                }
+            }
+            finally {
+                $standardOutput = $null
+                $standardError = $null
+                $standardOutputTask = $null
+                $standardErrorTask = $null
+                $start.Environment.Clear()
+                $process.Dispose()
+                Remove-Variable standardOutput, standardError, standardOutputTask, standardErrorTask, process -ErrorAction SilentlyContinue
+            }
         }
         exit 0
     }

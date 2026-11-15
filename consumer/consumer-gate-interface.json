@@ -5,6 +5,7 @@
   "retiredInterfaces": [],
   "phaseEnvironment": {
     "prepare": [
+      "CONSUMER_GATE_ARTIFACT_PATHS",
       "CONSUMER_GATE_EVENT_REPOSITORY",
       "GITHUB_STEP_SUMMARY",
       "RUNNER_TEMP",

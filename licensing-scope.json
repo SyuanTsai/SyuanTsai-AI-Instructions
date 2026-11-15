@@ -1330,6 +1330,22 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "tests/fixtures/Invoke-ConsumerGateCredentialFixture.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/consumer-gate-http-fixture.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/consumer-gate-resolver-fixture.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/consumer-gate-validation-runner-fixture.ps1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "tests/fixtures/internal-source-continuation/syp171-skillspector-2.12.0-shape.json",
       "license": "Apache-2.0"
     },

@@ -15,7 +15,24 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 Import-Module (Join-Path $PSScriptRoot 'ConsumerGate.psm1') -Force
+$phaseEnvironmentDumpPath=[string]$env:CONSUMER_GATE_PHASE_ENV_DUMP_PATH
+if(-not[string]::IsNullOrWhiteSpace($phaseEnvironmentDumpPath)){
+    $phaseEnvironment=[Environment]::GetEnvironmentVariables('Process')
+    $phaseTokenNames=@($phaseEnvironment.Keys|ForEach-Object{[string]$_}|Where-Object{$_-match'(?i)(TOKEN|SECRET|KEY|PASSWORD)'}|Sort-Object)
+    $phaseEnvironmentDump=[ordered]@{phase=$Phase;tokenNames=$phaseTokenNames}
+    [IO.File]::WriteAllText($phaseEnvironmentDumpPath,($phaseEnvironmentDump|ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
+    $phaseEnvironment=$null;$phaseEnvironmentDump=$null;$phaseTokenNames=$null
+    Remove-Variable phaseEnvironment,phaseEnvironmentDump,phaseTokenNames -ErrorAction SilentlyContinue
+}
 try{
+    if($Phase-cne'prepare'){
+        $credentialNames=@('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')
+        if(@($credentialNames|Where-Object{-not[string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($_,'Process'))}).Count-ne0){
+            Throw-GateResult INVALID 'Credential-bearing environment is forbidden outside prepare.'
+        }
+        $credentialNames=$null
+        Remove-Variable credentialNames -ErrorAction SilentlyContinue
+    }
     $authorityRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
     Initialize-GateGitHooks $WorkRoot
     $binding=Read-GateJson $AuthorityBindingPath 'authority binding'
@@ -67,4 +84,13 @@ try{
     CANCELLED=40}[$Matches[1]]}
     [Console]::Error.WriteLine($message)
     exit 20
+}finally{
+    foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){
+        [Environment]::SetEnvironmentVariable($name,$null,'Process')
+    }
+    $token=$null
+    $tokenVariable=$null
+    $message=$null
+    $phaseEnvironmentDumpPath=$null
+    Remove-Variable token, tokenVariable, message, phaseEnvironmentDumpPath -ErrorAction SilentlyContinue
 }

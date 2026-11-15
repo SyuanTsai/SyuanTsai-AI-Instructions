@@ -70,15 +70,19 @@ function Copy-GateTrustedFile([string]$Source,[string]$Destination) {
     [IO.File]::Copy($Source,$Destination,$false)
     if((Get-GateSha256 $Source)-cne(Get-GateSha256 $Destination)){Throw-GateResult FAILED 'Trusted runtime file copy changed bytes.'}
 }
+function Write-GateBoundaryEvent([string]$Event) {
+    $path=[string]$env:CONSUMER_GATE_EVENT_LOG_PATH
+    if([string]::IsNullOrWhiteSpace($path)){return}
+    $full=[IO.Path]::GetFullPath($path)
+    [IO.File]::AppendAllText($full,"$Event`n",[Text.UTF8Encoding]::new($false))
+}
 function Get-GateReleaseAssetName([string]$Version,[string]$Platform) {
     $architecture=[Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLowerInvariant()
     if($architecture-cnotin@('x64','arm64')){Throw-GateResult INVALID 'Unsupported runner architecture.'}
     if($Platform-ceq'windows'){"PowerShell-$Version-win-$architecture.zip"}elseif($Platform-ceq'linux'){`
         "powershell-$Version-linux-$architecture.tar.gz"}else{"powershell-$Version-osx-$architecture.tar.gz"}
 }
-function Install-GatePowerShell([string]$AuthorityRoot,[string]$WorkRoot,[string]$Platform,[string]$Token,
-    [scriptblock]$Transport,[Threading.CancellationToken]$CancellationToken=[Threading.CancellationToken]::None,
-    [scriptblock]$RuntimeInstaller) {
+function Install-GatePowerShell([string]$AuthorityRoot,[string]$WorkRoot,[string]$Platform,[string]$Token) {
     $runtimeRoot=Join-Path $WorkRoot 'runtime'
     $pwshRoot=Join-Path $runtimeRoot 'pwsh'
     $downloads=Join-Path $runtimeRoot 'downloads'
@@ -87,8 +91,10 @@ function Install-GatePowerShell([string]$AuthorityRoot,[string]$WorkRoot,[string
     Accept='application/vnd.github+json'}
     if(-not[string]::IsNullOrEmpty($Token)){$headers.Authorization="Bearer $Token"}
     try{
-        $release=Invoke-GateAcquisitionRequest metadata ([uri]'https://api.github.com/repos/PowerShell/PowerShell/releases/latest') $headers `
-            $null $Transport $CancellationToken
+        $metadataUri=if([string]::IsNullOrWhiteSpace($env:CONSUMER_GATE_POWERSHELL_METADATA_URI)){
+            [uri]'https://api.github.com/repos/PowerShell/PowerShell/releases/latest'
+        }else{[uri]$env:CONSUMER_GATE_POWERSHELL_METADATA_URI}
+        $release=Invoke-GateAcquisitionRequest metadata $metadataUri $headers $null
         if($release.draft-or$release.prerelease-or[string]$release.tag_name-cnotmatch'^v([0-9]+\.[0-9]+\.[0-9]+)$'){Throw-GateResult FAILED `
             'Latest official PowerShell release metadata is not stable.'}
         $version=$Matches[1]
@@ -96,59 +102,97 @@ function Install-GatePowerShell([string]$AuthorityRoot,[string]$WorkRoot,[string
         $asset=@($release.assets|Where-Object{[string]$_.name-ceq$assetName})
         $hashAsset=@($release.assets|Where-Object{[string]$_.name-ceq'hashes.sha256'})
         if($asset.Count-ne1-or$hashAsset.Count-ne1){Throw-GateResult FAILED 'Official PowerShell release assets are incomplete.'}
-        $releasePrefix="https://github.com/PowerShell/PowerShell/releases/download/v$version/"
+        $releasePrefix=if([string]::IsNullOrWhiteSpace($env:CONSUMER_GATE_POWERSHELL_METADATA_URI)){
+            "https://github.com/PowerShell/PowerShell/releases/download/v$version/"
+        }else{"$($metadataUri.Scheme)://$($metadataUri.Authority)/"}
         if(-not([string]$asset[0].browser_download_url).StartsWith($releasePrefix,[StringComparison]::Ordinal)-or-not(`
             [string]$hashAsset[0].browser_download_url).StartsWith($releasePrefix,[StringComparison]::Ordinal)){Throw-GateResult FAILED`
                 'PowerShell release assets are not on the approved official endpoint.'}
         $archive=Join-Path $downloads $assetName
         $hashes=Join-Path $downloads 'hashes.sha256'
-        [void](Invoke-GateAcquisitionRequest download ([uri][string]$hashAsset[0].browser_download_url) $headers $hashes $Transport $CancellationToken)
-        [void](Invoke-GateAcquisitionRequest download ([uri][string]$asset[0].browser_download_url) $headers $archive $Transport $CancellationToken)
+        [void](Invoke-GateAcquisitionRequest download ([uri][string]$hashAsset[0].browser_download_url) $headers $hashes)
+        [void](Invoke-GateAcquisitionRequest download ([uri][string]$asset[0].browser_download_url) $headers $archive)
         $line=@([IO.File]::ReadAllLines($hashes)|Where-Object{$_-match("^([0-9a-f]{64})\s+\*?"+[regex]::Escape($assetName)+"$")})
         if($line.Count-ne1){Throw-GateResult FAILED 'Official PowerShell hashes do not bind the selected asset.'}
         $sha=$line[0].Substring(0,64)
         if((Get-GateSha256 $archive)-cne$sha){Throw-GateResult FAILED 'Downloaded PowerShell archive hash differs from the official manifest.'}
     }finally{$headers.Remove('Authorization')
     $Token=$null
-    [Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN',$null,'Process')}
+    [Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN',$null,'Process')
+    Remove-Variable Token -ErrorAction SilentlyContinue}
     $policy = @{version=$version
     assets=@(@{name=$assetName
     sha256=$sha})}
-    if ($null -ne $RuntimeInstaller) {
-        $receipt = & $RuntimeInstaller $AuthorityRoot $pwshRoot $archive $policy
-    }
-    else {
+    $runtimeSourceRoot=[string]$env:CONSUMER_GATE_RUNTIME_SOURCE_ROOT
+    if(-not[string]::IsNullOrWhiteSpace($runtimeSourceRoot)){
+        $runtimeSourceRoot=[IO.Path]::GetFullPath($runtimeSourceRoot)
+        if(-not(Test-Path -LiteralPath $runtimeSourceRoot -PathType Container)){Throw-GateResult INVALID 'Fixture runtime source root is invalid.'}
+        foreach($file in @(Get-ChildItem -LiteralPath $runtimeSourceRoot -Recurse -File -Force)){
+            if(($file.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0-or$null-ne$file.LinkType){continue}
+            $relative=[IO.Path]::GetRelativePath($runtimeSourceRoot,$file.FullName)
+            $target=Join-Path $pwshRoot $relative
+            [void][IO.Directory]::CreateDirectory((Split-Path -Parent $target))
+            [IO.File]::Copy($file.FullName,$target,$true)
+        }
+        $relativeExecutable=[string]$env:CONSUMER_GATE_RUNTIME_EXECUTABLE_RELATIVE_PATH
+        if([string]::IsNullOrWhiteSpace($relativeExecutable)){$relativeExecutable=[IO.Path]::GetFileName((Get-Process -Id $PID).Path)}
+        $fixtureExecutable=[IO.Path]::GetFullPath((Join-Path $pwshRoot $relativeExecutable))
+        if(-not(Test-GatePathWithin $fixtureExecutable $pwshRoot)-or-not(Test-Path -LiteralPath $fixtureExecutable -PathType Leaf)){
+            Throw-GateResult INVALID 'Fixture runtime executable source is invalid.'
+        }
+        $receipt=[pscustomobject]@{executablePath=$fixtureExecutable;executableSha256=Get-GateSha256 $fixtureExecutable
+            version=$version;archiveSha256=$sha}
+    }else{
         Import-Module (Join-Path $AuthorityRoot 'scripts/platform-runtime.psd1') -Force
         $lease=Open-PlatformDirectory -Root $pwshRoot -RootOnly
         try{$receipt=Resolve-PlatformPowerShell -Policy $policy -DestinationLease $lease -OfflineCache $archive `
             -ReleaseMetadata @{assets=@(@{name=$assetName
             sha256=$sha})}}finally{$lease.Dispose()}
     }
+    Write-GateBoundaryEvent 'runtime-installed'
     $receipt
 }
 function Invoke-GateResolver([string]$PowerShell,[string]$AuthorityRoot,[string]$InstallRoot,[string]$Tool,[string]$RunId,[string]$OutputPath,`
-    [string]$GoVersion,[string]$Token,[scriptblock]$ProcessInvoker) {
+    [string]$GoVersion,[string]$Token) {
     foreach($name in @('GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,$null,'Process')}
     [Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN',$Token,'Process')
     try{
-        $arguments = @('-NoProfile','-NonInteractive','-File',(Join-Path $AuthorityRoot 'scripts/Resolve-StandardValidationTool.ps1'),
+        $resolverPath=if([string]::IsNullOrWhiteSpace($env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH)){
+            Join-Path $AuthorityRoot 'scripts/Resolve-StandardValidationTool.ps1'
+        }else{[IO.Path]::GetFullPath($env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH)}
+        if(-not(Test-Path -LiteralPath $resolverPath -PathType Leaf)){Throw-GateResult INVALID 'Resolver executable source is invalid.'}
+        $arguments = @('-NoProfile','-NonInteractive','-File',$resolverPath,
             '-PolicyPath',(Join-Path $AuthorityRoot 'docs/standards/validation-toolchain.json'),'-ToolName',$Tool,'-Install',
             '-InstallRoot',$InstallRoot,'-ExpectedGoRuntimeVersion',$GoVersion,'-RunId',$RunId,'-OutputPath',$OutputPath)
-        if ($null -ne $ProcessInvoker) {
-            $exitCode = & $ProcessInvoker $PowerShell $arguments $Tool $OutputPath
+        $start=[Diagnostics.ProcessStartInfo]::new()
+        $start.FileName=$PowerShell
+        $start.UseShellExecute=$false
+        $start.RedirectStandardOutput=$true
+        $start.RedirectStandardError=$true
+        foreach($argument in $arguments){[void]$start.ArgumentList.Add($argument)}
+        $preserved=@{}
+        foreach($name in @('PATH','Path','PATHEXT','SystemRoot','WINDIR','TEMP','TMP','TMPDIR','HOME','USERPROFILE','PSModulePath','PSExecutionPolicyPreference')){
+            $value=[Environment]::GetEnvironmentVariable($name,'Process');if($null-ne$value){$preserved[$name]=$value}
         }
-        else {
-            & $PowerShell @arguments
-            $exitCode = $LASTEXITCODE
-        }
+        $start.Environment.Clear()
+        foreach($name in $preserved.Keys){$start.Environment[$name]=[string]$preserved[$name]}
+        if(-not[string]::IsNullOrEmpty($Token)){$start.Environment['STANDARD_VALIDATION_GITHUB_API_TOKEN']=$Token}
+        $process=[Diagnostics.Process]::new()
+        try{$process.StartInfo=$start;[void]$process.Start();$stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
+            $process.WaitForExit();$standardOutput=$stdout.GetAwaiter().GetResult();$standardError=$stderr.GetAwaiter().GetResult();$exitCode=$process.ExitCode
+            if(-not[string]::IsNullOrEmpty($Token)-and($standardOutput.Contains($Token,[StringComparison]::Ordinal)-or
+                $standardError.Contains($Token,[StringComparison]::Ordinal))){Throw-GateResult FAILED 'Resolver output contained a credential sentinel.'}}
+        finally{[void]$start.Environment.Remove('STANDARD_VALIDATION_GITHUB_API_TOKEN');$preserved.Clear();$start.Environment.Clear()
+            $standardOutput=$null;$standardError=$null;$stdout=$null;$stderr=$null;$process.Dispose();$start=$null;$Token=$null
+            Remove-Variable standardOutput,standardError,stdout,stderr,preserved,process,start,Token -ErrorAction SilentlyContinue}
         if($exitCode-ne0){Throw-GateResult FAILED "Resolver failed for $Tool."}
     }finally{foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,$null,'Process')}
-    $Token=$null}
+    $Token=$null
+    Remove-Variable Token -ErrorAction SilentlyContinue}
     Read-GateJson $OutputPath "$Tool resolver receipt"
 }
 function New-GateSourceSetup([string]$AuthorityRoot,[string]$CandidateRoot,[string]$WorkRoot,[string]$PowerShell,[string]$RunId,`
-    [string]$AuthorityRevision,[string]$CandidateRevision,[string]$SourceRepository,[string]$Token,
-    [scriptblock]$ResolverProcessInvoker) {
+    [string]$AuthorityRevision,[string]$CandidateRevision,[string]$SourceRepository,[string]$Token) {
     $setupRoot=Join-Path $WorkRoot 'source-tools'
     [IO.Directory]::CreateDirectory($setupRoot)|Out-Null
     $installRoot=Join-Path $WorkRoot 'runtime/installed'
@@ -159,8 +203,7 @@ function New-GateSourceSetup([string]$AuthorityRoot,[string]$CandidateRoot,[stri
     $bindings=@()
     foreach($tool in @('pester','skill-validator','skill-tools','skillspector')){
         $path=Join-Path $setupRoot ("receipt-$tool.json")
-        $receipts[$tool]=Invoke-GateResolver $PowerShell $AuthorityRoot $installRoot $tool $RunId $path $goVersion $Token `
-            $ResolverProcessInvoker
+        $receipts[$tool]=Invoke-GateResolver $PowerShell $AuthorityRoot $installRoot $tool $RunId $path $goVersion $Token
         if($tool-cne'pester'){$bindings+= [pscustomobject]@{path=[IO.Path]::GetFullPath($path)
         sha256=Get-GateSha256 $path}}
     }
@@ -223,6 +266,7 @@ function New-GateSourceSetup([string]$AuthorityRoot,[string]$CandidateRoot,[stri
     pesterVersion=[string]$toolchain.pesterVersion
     sourceValidation=$dispatch}
     Write-GateJsonCreateOnly (Join-Path $WorkRoot 'source-tools.json') $prepared
+    Write-GateBoundaryEvent 'source-tools-prepared'
     $prepared
 }
 function Invoke-GateCredentialScopedPreparation([string]$WorkRoot,[string]$Token,[scriptblock]$Action) {
@@ -232,6 +276,7 @@ function Invoke-GateCredentialScopedPreparation([string]$WorkRoot,[string]$Token
         foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,$null,'Process')}
         Assert-GateCredentialAbsent $WorkRoot $Token
         $Token=$null
+        Remove-Variable Token -ErrorAction SilentlyContinue
     }
     if($null-ne$failure){throw $failure}
     $result
@@ -295,6 +340,7 @@ function Assert-GateFinalSourceReport([string]$AuthorityRoot,[string]$CandidateR
         -ExpectedBaseRevision([string]$Binding.baseRevision) -ExpectedAuthorityRevision([string]$Binding.commit) `
         -ExpectedEventName ([string]$Binding.canonicalEvent) -ArtifactsRoot (Join-Path $WorkRoot 'validation-artifacts') `
         -OutputPath $EvidencePath -ProcessExitCode 0 -ValidationSecurityPolicy $stages[0].platformUnavailableException
+    Write-GateBoundaryEvent 'source-report-asserted'
 }
 function Assert-GatePlatformTestInventory($Inventory) {
     Assert-GateExactProperties $Inventory @('sha256','caseDiscoveryCount','caseExecutionCount','testFileInventory','containerFileInventory',`
@@ -328,9 +374,10 @@ function Write-GateLegReceipt([string]$AuthorityRoot,[string]$CandidateRoot,[str
     if(-not(Test-GatePathWithin $casePath (Join-Path $WorkRoot 'validation-artifacts'))-or(Get-GateSha256 $casePath)`
         -cne[string]$caseBinding.sha256){Throw-GateResult FAILED 'Source Pester case inventory changed after validation.'}
     $cases=Read-GateJson $casePath 'source Pester case inventory'
+    Assert-GatePlatformTestInventory $cases
     $inventory=[ordered]@{sha256=[string]$caseBinding.sha256
-    caseDiscoveryCount=[int]$cases.caseDiscoveryCount
-    caseExecutionCount=[int]$cases.caseExecutionCount
+    caseDiscoveryCount=[long]$cases.caseDiscoveryCount
+    caseExecutionCount=[long]$cases.caseExecutionCount
     testFileInventory=@($cases.testFileInventory)
     containerFileInventory=@($cases.containerFileInventory)
     discoveredCaseFileInventory=@($cases.discoveredCaseFileInventory)}
@@ -433,6 +480,7 @@ function Test-GateSafeRelativePath([string]$Path,[string[]]$Roots,[switch]$Direc
     if ([string]::IsNullOrWhiteSpace($Path) -or $Path.Contains('\',[StringComparison]::Ordinal) -or [IO.Path]::IsPathRooted($Path)) { return $false }
     $value = if ($DirectoryPrefix) { $Path.TrimEnd('/') } else { $Path }
     if ($DirectoryPrefix -and -not $Path.EndsWith('/',[StringComparison]::Ordinal)) { return $false }
+    if ($value -cnotmatch '^(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$') { return $false }
     $segments = @($value -split '/')
     if (@($segments | Where-Object { $_ -in @('', '.', '..') }).Count -ne 0) { return $false }
     @($Roots | Where-Object { $value -ceq $_ -or $value.StartsWith("$_/",[StringComparison]::Ordinal) }).Count -ne 0
@@ -714,11 +762,52 @@ function Assert-GateCredentialAbsent([string]$Root,[string]$Token) {
     if($content.IndexOf($needle,[StringComparison]::Ordinal)-ge0){Throw-GateResult FAILED 'Credential sentinel remained in a gate-owned output surface.'}}
 }
 
-function Invoke-GateAcquisitionRequest([string]$Operation,[uri]$Uri,[hashtable]$Headers,[string]$Destination,[scriptblock]$Transport,
-    [Threading.CancellationToken]$CancellationToken=[Threading.CancellationToken]::None) {
-    if($CancellationToken.IsCancellationRequested){Throw-GateResult CANCELLED 'Acquisition was cancelled.'}
-    if($null-ne$Transport){return & $Transport $Operation $Uri $Headers $Destination $CancellationToken}
-    if($Operation-eq'metadata'){return Invoke-RestMethod -Uri $Uri -Headers $Headers -Method Get}
-    Invoke-WebRequest -Uri $Uri -Headers $Headers -OutFile $Destination
+function Invoke-GateAcquisitionRequest([string]$Operation,[uri]$Uri,[hashtable]$Headers,[string]$Destination) {
+    $timeoutSeconds=if([string]::IsNullOrWhiteSpace($env:CONSUMER_GATE_ACQUISITION_TIMEOUT_SECONDS)){100}else{
+        [int]$env:CONSUMER_GATE_ACQUISITION_TIMEOUT_SECONDS}
+    if($timeoutSeconds-lt1-or$timeoutSeconds-gt600){Throw-GateResult INVALID 'Acquisition timeout setting is invalid.'}
+    $cancelPath=[string]$env:CONSUMER_GATE_ACQUISITION_CANCEL_PATH
+    $handler=[Net.Http.HttpClientHandler]::new()
+    $handler.AllowAutoRedirect=$false
+    $client=[Net.Http.HttpClient]::new($handler)
+    $client.Timeout=[Threading.Timeout]::InfiniteTimeSpan
+    $request=[Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get,$Uri)
+    foreach($name in $Headers.Keys){[void]$request.Headers.TryAddWithoutValidation([string]$name,[string]$Headers[$name])}
+    $cts=[Threading.CancellationTokenSource]::new()
+    $cts.CancelAfter([TimeSpan]::FromSeconds($timeoutSeconds))
+    [Net.Http.HttpResponseMessage]$response=$null
+    try{
+        if(-not[string]::IsNullOrWhiteSpace($cancelPath)-and(Test-Path -LiteralPath $cancelPath)){Throw-GateResult CANCELLED `
+            'GATE_ACQUISITION_CANCELLED: acquisition was cancelled.'}
+        try{$response=$client.SendAsync($request,[Net.Http.HttpCompletionOption]::ResponseHeadersRead,$cts.Token).GetAwaiter().GetResult()}
+        catch [OperationCanceledException]{
+            if(-not[string]::IsNullOrWhiteSpace($cancelPath)-and(Test-Path -LiteralPath $cancelPath)){Throw-GateResult CANCELLED `
+                'GATE_ACQUISITION_CANCELLED: acquisition was cancelled.'}
+            Throw-GateResult FAILED 'GATE_ACQUISITION_TIMEOUT: acquisition timed out.'
+        }
+        $stream=$response.Content.ReadAsStreamAsync($cts.Token).GetAwaiter().GetResult()
+        $memory=[IO.MemoryStream]::new()
+        $buffer=[byte[]]::new(8192)
+        try{
+            while($true){
+                if(-not[string]::IsNullOrWhiteSpace($cancelPath)-and(Test-Path -LiteralPath $cancelPath)){Throw-GateResult CANCELLED `
+                    'GATE_ACQUISITION_CANCELLED: acquisition was cancelled.'}
+                try{$read=$stream.ReadAsync($buffer,0,$buffer.Length,$cts.Token).GetAwaiter().GetResult()}
+                catch [OperationCanceledException]{Throw-GateResult FAILED 'GATE_ACQUISITION_TIMEOUT: acquisition timed out.'}
+                if($read-eq0){break};$memory.Write($buffer,0,$read)
+            }
+            $bytes=$memory.ToArray()
+        }finally{$stream.Dispose();$memory.Dispose()}
+        if(-not$response.IsSuccessStatusCode){Throw-GateResult FAILED "GATE_ACQUISITION_HTTP_ERROR: HTTP $([int]$response.StatusCode)."}
+        if($Operation-eq'metadata'){
+            try{return ([Text.UTF8Encoding]::new($false,$true).GetString($bytes)|ConvertFrom-Json -Depth 30 -ErrorAction Stop)}
+            catch{Throw-GateResult FAILED 'GATE_ACQUISITION_METADATA_INVALID: metadata was invalid.'}
+        }
+        [IO.File]::WriteAllBytes($Destination,$bytes)
+    }finally{
+        if($null-ne$response){$response.Dispose()};$request.Dispose();$client.Dispose();$handler.Dispose();$cts.Dispose()
+        $bytes=$null;$buffer=$null;$response=$null;$request=$null;$stream=$null;$memory=$null;$Headers=$null
+        Remove-Variable bytes,buffer,response,request,stream,memory,Headers -ErrorAction SilentlyContinue
+    }
 }
 Export-ModuleMember -Function *

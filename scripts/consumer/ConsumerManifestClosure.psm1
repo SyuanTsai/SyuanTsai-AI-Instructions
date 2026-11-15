@@ -408,6 +408,48 @@ function ConvertTo-ClosureFoldedText {
     $null
 }
 
+function ConvertTo-ClosureFoldedProjection {
+    param([Parameter(Mandatory)] $Ast)
+
+    if ($Ast -is [Management.Automation.Language.StringConstantExpressionAst]) {
+        $value = [string] $Ast.Value
+        $relativeStart = ([string] $Ast.Extent.Text).IndexOf($value, [StringComparison]::Ordinal)
+        if ($relativeStart -lt 0) {
+            return $null
+        }
+        $sources = [Collections.Generic.List[int]]::new()
+        for ($index = 0; $index -lt $value.Length; $index++) {
+            $sources.Add($Ast.Extent.StartOffset + $relativeStart + $index)
+        }
+        return [pscustomobject]@{ Text = $value; Sources = [int[]] $sources.ToArray() }
+    }
+    if ($Ast -is [Management.Automation.Language.ParenExpressionAst]) {
+        return ConvertTo-ClosureFoldedProjection $Ast.Pipeline
+    }
+    if ($Ast -is [Management.Automation.Language.PipelineAst]) {
+        if ($Ast.PipelineElements.Count -ne 1) { return $null }
+        return ConvertTo-ClosureFoldedProjection $Ast.PipelineElements[0]
+    }
+    if ($Ast -is [Management.Automation.Language.CommandExpressionAst]) {
+        return ConvertTo-ClosureFoldedProjection $Ast.Expression
+    }
+    if ($Ast -is [Management.Automation.Language.StatementBlockAst]) {
+        if ($Ast.Statements.Count -ne 1) { return $null }
+        return ConvertTo-ClosureFoldedProjection $Ast.Statements[0]
+    }
+    if ($Ast -is [Management.Automation.Language.BinaryExpressionAst] -and
+        $Ast.Operator -eq [Management.Automation.Language.TokenKind]::Plus) {
+        $left = ConvertTo-ClosureFoldedProjection $Ast.Left
+        $right = ConvertTo-ClosureFoldedProjection $Ast.Right
+        if ($null -eq $left -or $null -eq $right) { return $null }
+        return [pscustomobject]@{
+            Text = [string] $left.Text + [string] $right.Text
+            Sources = [int[]] (@($left.Sources) + @($right.Sources))
+        }
+    }
+    $null
+}
+
 function Get-ClosureFoldCandidates {
     param([Parameter(Mandatory)] $RootAst)
 
@@ -919,7 +961,12 @@ function Get-ConsumerManifestClosure {
                     }
                     $extentKey = "$($foldAst.Extent.StartOffset):$($foldAst.Extent.EndOffset)"
                     if ($foldIdentity.Add($extentKey)) {
-                        $foldResults.Add([pscustomobject]@{ Ast = $foldAst; Matches = $foldedMatches })
+                        $foldResults.Add([pscustomobject]@{
+                                Ast = $foldAst
+                                Matches = $foldedMatches
+                                Text = $folded
+                                Projection = ConvertTo-ClosureFoldedProjection $foldAst
+                            })
                     }
                 }
 
@@ -938,11 +985,40 @@ function Get-ConsumerManifestClosure {
                 foreach ($foldResult in $outermost) {
                     $foldAst = $foldResult.Ast
                     $foldedMatches = @($foldResult.Matches)
-                    $rawInExtent = @($rawForTarget | Where-Object {
-                            $_.Offset -ge $foldAst.Extent.StartOffset -and
-                            $_.Offset -lt $foldAst.Extent.EndOffset
-                        }).Count
-                    for ($ordinal = $rawInExtent + 1; $ordinal -le $foldedMatches.Count; $ordinal++) {
+                    $pairedOrdinals = [Collections.Generic.HashSet[int]]::new()
+                    $projection = $foldResult.Projection
+                    if ($null -ne $projection -and [string]$projection.Text -ceq [string]$foldResult.Text) {
+                        foreach ($raw in @($rawForTarget | Where-Object {
+                                    $_.Offset -ge $foldAst.Extent.StartOffset -and
+                                    $_.Offset -lt $foldAst.Extent.EndOffset
+                                })) {
+                            for ($index = 0; $index -lt $foldedMatches.Count; $index++) {
+                                $match = $foldedMatches[$index]
+                                $sourceSlice = @($projection.Sources[$match.Index..($match.Index + $match.Length - 1)])
+                                $isContiguousRaw = $sourceSlice.Count -eq $match.Length -and $sourceSlice[0] -eq $raw.Offset
+                                for ($sourceIndex = 0; $isContiguousRaw -and $sourceIndex -lt $sourceSlice.Count; $sourceIndex++) {
+                                    if ($sourceSlice[$sourceIndex] -ne $raw.Offset + $sourceIndex) {
+                                        $isContiguousRaw = $false
+                                    }
+                                }
+                                if ($isContiguousRaw) {
+                                    [void] $pairedOrdinals.Add($index + 1)
+                                    break
+                                }
+                            }
+                        }
+                    }
+                    else {
+                        $rawInExtent = @($rawForTarget | Where-Object {
+                                $_.Offset -ge $foldAst.Extent.StartOffset -and
+                                $_.Offset -lt $foldAst.Extent.EndOffset
+                            }).Count
+                        for ($index = 1; $index -le [Math]::Min($rawInExtent, $foldedMatches.Count); $index++) {
+                            [void] $pairedOrdinals.Add($index)
+                        }
+                    }
+                    for ($ordinal = 1; $ordinal -le $foldedMatches.Count; $ordinal++) {
+                        if ($pairedOrdinals.Contains($ordinal)) { continue }
                         $key = "$($foldAst.Extent.StartLineNumber):$($foldAst.Extent.StartColumnNumber):${ordinal}:$target"
                         if ($identity.Add($key)) {
                             $occurrences.Add([pscustomobject]@{
