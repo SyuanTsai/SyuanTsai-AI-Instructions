@@ -509,11 +509,17 @@ namespace SyuanTsai.AIInstructions.TrustAnchor {
         private static void AssertNoMacExtendedAcl(SafeHandle parent){
             if(!Mac)return;
             IntPtr acl=acl_get_fd_np(parent.DangerousGetHandle(),0x100);
-            if(acl==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to inspect the retained trust-anchor parent ACL.");
+            if(acl==IntPtr.Zero){
+                int error=Marshal.GetLastWin32Error();
+                if(error==2)return;
+                throw new Win32Exception(error,"Unable to inspect the retained trust-anchor parent ACL.");
+            }
             try{
                 IntPtr entry;int result=acl_get_entry(acl,0,out entry);
-                if(result==1)throw new IOException("The private trust-anchor parent must not have a macOS extended ACL.");
-                if(result!=0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to enumerate the retained trust-anchor parent ACL.");
+                if(result==0)throw new IOException("The private trust-anchor parent must not have a macOS extended ACL.");
+                int error=Marshal.GetLastWin32Error();
+                if(error==2||error==22)return;
+                throw new Win32Exception(error,"Unable to enumerate the retained trust-anchor parent ACL.");
             }finally{if(acl_free(acl)!=0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to release the retained trust-anchor parent ACL.");}
         }
         public static void AssertSafeParent(SafeHandle parent){
@@ -578,18 +584,11 @@ $script:TrustAnchorAfterReadTestHook = $null
 $script:TrustAnchorBeforePublicWriteTestHook = $null
 $script:TrustAnchorBeforeRollbackRemovalTestHook = $null
 $script:TrustAnchorAfterRollbackRenameTestHook = $null
-$script:TrustAnchorAfterInputBufferAllocatedTestHook = $null
-$script:TrustAnchorInteractiveStateTestHook = $null
 
 function New-TrustAnchorError {
     param([string]$Message,[string]$Id)
     $exception=[InvalidOperationException]::new($Message)
     return [Management.Automation.ErrorRecord]::new($exception,$Id,[Management.Automation.ErrorCategory]::SecurityError,$null)
-}
-
-function Get-TrustAnchorInteractiveState {
-    if($null-ne$script:TrustAnchorInteractiveStateTestHook){return $script:TrustAnchorInteractiveStateTestHook.Invoke()[0]}
-    return [pscustomobject][ordered]@{InputRedirected=[Console]::IsInputRedirected;UserInteractive=[Environment]::UserInteractive}
 }
 
 function Assert-TrustAnchorInteractiveHost {
@@ -599,8 +598,9 @@ function Assert-TrustAnchorInteractiveHost {
             throw (New-TrustAnchorError "Trust-anchor key tools cannot run while $name is set." 'TrustAnchor.NonInteractive')
         }
     }
-    $interactiveState=Get-TrustAnchorInteractiveState
-    if ($interactiveState.InputRedirected -or -not $interactiveState.UserInteractive) {
+    $inputRedirected=[Console]::IsInputRedirected
+    $userInteractive=[Environment]::UserInteractive
+    if ($inputRedirected -or -not $userInteractive) {
         throw (New-TrustAnchorError 'Trust-anchor key tools require an interactive host with non-redirected stdin.' 'TrustAnchor.NonInteractive')
     }
 }
@@ -659,7 +659,6 @@ function Read-TrustAnchorInputBytes {
     try{
         if($stream.Length -gt $MaximumLength){throw "The trust-anchor input exceeds the $MaximumLength-byte limit."}
         $bytes=[byte[]]::new([int]$stream.Length);$offset=0
-        if($null-ne$script:TrustAnchorAfterInputBufferAllocatedTestHook){$script:TrustAnchorAfterInputBufferAllocatedTestHook.Invoke($stream,$bytes)|Out-Null}
         while($offset -lt $bytes.Length){$count=$stream.Read($bytes,$offset,$bytes.Length-$offset);if($count -eq 0){throw 'The trust-anchor input ended before its declared length.'};$offset+=$count}
         $succeeded=$true;return ,$bytes
     }finally{if(-not$succeeded -and $null-ne$bytes){[Security.Cryptography.CryptographicOperations]::ZeroMemory($bytes)};$stream.Dispose()}
