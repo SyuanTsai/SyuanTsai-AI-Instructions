@@ -3617,6 +3617,8 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
             [pscustomobject]@{Name='operation.displacedAfterMetadata.cleared';Prepare={param($p)&$toRemoveFile $p;&$bindApplied $p};Mutate={param($n)$n.operations[0].displacedAfterMetadata=$null}},
             [pscustomobject]@{Name='operation.displacedAfterMetadata.while-pending';Prepare={param($p)&$toWriteFile $p};Mutate={param($n)$n.operations[0].displacedAfterMetadata=[pscustomobject][ordered]@{kind='windows-sddl';sddl='D:(A;ID;FA;;;SY)';readOnly=$false}}},
             [pscustomobject]@{Name='operation.displacedAfterMetadata.create-file';Mutate={param($n)&$bindApplied $n}},
+            [pscustomobject]@{Name='operation.observedAfter.invalid-shape';Mutate={param($n)$n.operations[0].observedAfter=[pscustomobject][ordered]@{dacl=[pscustomobject][ordered]@{isNull=$false;isProtected=$false;aclBase64='invalid'};readOnly=$false};$n.operations[0].state='applied'}},
+            [pscustomobject]@{Name='operation.displacedAfterMetadata.invalid-shape';Prepare={param($p)&$toWriteFile $p};Mutate={param($n)$n.operations[0].observedAfter=[pscustomobject][ordered]@{dacl=[pscustomobject][ordered]@{isNull=$true;isProtected=$false;aclBase64=$null};readOnly=$false};$n.operations[0].displacedAfterMetadata=[pscustomobject][ordered]@{kind='windows-sddl';sddl='invalid';readOnly=$false};$n.operations[0].state='applied'}},
             [pscustomobject]@{Name='operation.stageLeaf';Mutate={param($n)$n.operations[0].stageLeaf='changed.stage'}},
             [pscustomobject]@{Name='operation.backupLeaf';Mutate={param($n)$n.operations[0].backupLeaf='changed.backup'}},
             [pscustomobject]@{Name='operation.quarantineLeaf';Mutate={param($n)$n.operations[0].quarantineLeaf='changed.quarantine'}},
@@ -3624,6 +3626,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
             [pscustomobject]@{Name='operation.deleted';Mutate={param($n)$n.operations=@($n.operations|Select-Object -First 1)}},
             [pscustomobject]@{Name='operation.added';Mutate={param($n)$copy=&$clone $n.operations[0];$copy.sequence=3;$copy.target.value='COPILOT.md';$copy.stageLeaf='operation-3.stage';$n.operations=@($n.operations)+@($copy)}},
             [pscustomobject]@{Name='operation.reordered';Mutate={param($n)$n.operations=@($n.operations[1],$n.operations[0])}},
+            [pscustomobject]@{Name='evidence.invalid-object-id';Mutate={param($n)$n.operations[1].after.objectId='invalid';$n.operations[1].state='applied'}},
             [pscustomobject]@{Name='evidence.rebound';Prepare={param($p)$p.operations[1].after.objectId=('c'*40);$p.operations[1].state='applied'};Mutate={param($n)$n.operations[1].after.objectId=('d'*40)}},
             [pscustomobject]@{Name='evidence.bound-to-wrong-operation';Mutate={param($n)$n.operations[0].after|Add-Member -NotePropertyName objectId -NotePropertyValue ('c'*40);$n.operations[0].state='applied'}}
         )

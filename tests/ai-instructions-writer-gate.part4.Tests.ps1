@@ -676,6 +676,32 @@ Describe 'AI instructions unified repository transaction recovery behaviors' {
     }
 }
 
+Describe 'install journal serialization formats' {
+    BeforeAll {
+        $shortParent=Join-Path ([IO.Path]::GetTempPath()) 'p7e';New-Item -ItemType Directory -Force -Path $shortParent|Out-Null
+        $script:JournalSerializationRoot=Join-Path $shortParent ([Guid]::NewGuid().ToString('N').Substring(0,8));New-Item -ItemType Directory -Path $script:JournalSerializationRoot|Out-Null
+        $script:TransactionModulePath=Join-Path $script:RepositoryRoot 'scripts/ai-instructions-install-transaction.psm1'
+    }
+    AfterAll {if(Test-Path -LiteralPath $script:JournalSerializationRoot){Remove-Item -LiteralPath $script:JournalSerializationRoot -Recurse -Force}}
+
+    # Scenario: A USER-family schema-v1 journal is written through the shared durable journal store.
+    # Purpose: Preserve the pre-repo-v2 pretty JSON, LF normalization, terminal LF, and exact UTF-8 bytes for every non-repo writer.
+    It 'InterT177_preserves_non_repo_journal_writer_bytes_exactly' {
+        $fixturePath=Join-Path $script:RepositoryRoot 'catalog/examples/ai-instructions-install-journal-v1.example.json'
+        $journal=ConvertFrom-AiInstructionsInstallJournalV1Json -Json (Get-Content -Raw -Encoding UTF8 -LiteralPath $fixturePath)
+        $transactionRoot=Join-Path $script:JournalSerializationRoot '.ai-instructions-txn';New-Item -ItemType Directory -Force -Path $transactionRoot|Out-Null
+        $transactionPath=Join-Path $transactionRoot ([string]$journal.transactionId);New-Item -ItemType Directory -Path $transactionPath|Out-Null
+        $module=Import-Module $script:TransactionModulePath -Force -PassThru;$lease=Open-PlatformDirectory -Root $transactionPath -RootOnly
+        try{
+            $states=[ordered]@{}
+            $null=Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $journal -PlatformOs windows -JournalStoreStates $states
+            [byte[]]$expected=[Text.UTF8Encoding]::new($false).GetBytes((($journal|ConvertTo-Json -Depth 30).Replace("`r`n","`n"))+"`n")
+            [byte[]]$actual=[IO.File]::ReadAllBytes((Join-Path $transactionPath 'journal.json'))
+            [Convert]::ToBase64String($actual)|Should -BeExactly ([Convert]::ToBase64String($expected))
+        }finally{$lease.Dispose();Remove-Module $module -Force}
+    }
+}
+
 Describe 'repo v2 journal cache conditions' {
     BeforeAll {
         $shortParent=Join-Path ([IO.Path]::GetTempPath()) 'p7e';New-Item -ItemType Directory -Force -Path $shortParent|Out-Null
@@ -695,6 +721,27 @@ Describe 'repo v2 journal cache conditions' {
         if($cacheResult.ExitCode-eq0){throw 'Could not retain the prepared repository journal cache fixture.'}
     }
     AfterAll {if(Test-Path -LiteralPath $script:ExternalRoot){Remove-Item -LiteralPath $script:ExternalRoot -Recurse -Force}}
+
+    # Scenario: A compact repo-v2 journal is advanced while no trusted-object cache entry exists for the previous generation.
+    # Purpose: Recompute the previous compact bytes for raw SHA/length comparison and keep the newly published generation compact.
+    It 'InterT178_uses_compact_repo_v2_bytes_on_cache_miss_and_publication' {
+        $target=Join-Path $script:ExternalRoot 'journal-cache-miss-format';Copy-Item -LiteralPath $script:JournalCacheSeed -Destination $target -Recurse
+        $transaction=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force);$transaction.Count|Should -Be 1
+        $transactionPath=$transaction[0].FullName;$journalPath=Join-Path $transactionPath 'journal.json'
+        $module=Import-Module $script:TransactionModulePath -Force -PassThru;$lease=Open-PlatformDirectory -Root $transactionPath -RootOnly
+        try{
+            $states=[ordered]@{};foreach($leaf in @('journal.json','journal.prev','journal.stage')){$states[$leaf]=Get-AiInstructionsInstallFileState -ParentLease $lease -Leaf $leaf -LiteralPath (Join-Path $transactionPath $leaf) -PlatformOs windows}
+            $previous=&$module {param($transactionLease,$transactionId) Read-AiInstructionsInstallJournalLeaf -TransactionLease $transactionLease -Leaf 'journal.json' -TransactionId $transactionId -ExpectedOwnerComponent 'repo-bootstrap'} $lease ([IO.Path]::GetFileName($transactionPath))
+            $states.Contains('__repoV2TrustedJournal')|Should -Be $false
+            [byte[]]$expectedPrevious=[Text.UTF8Encoding]::new($false).GetBytes(($previous|ConvertTo-Json -Depth 30 -Compress)+"`n")
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($journalPath))|Should -BeExactly ([Convert]::ToBase64String($expectedPrevious))
+            $next=Copy-P9cJournalPreservingStrings $previous;$next.phase='applying'
+            $returned=Write-AiInstructionsInstallJournalStore -TransactionLease $lease -TransactionPath $transactionPath -Journal $next -PreviousJournal $previous -PlatformOs windows -JournalStoreStates $states
+            [byte[]]$expectedNext=[Text.UTF8Encoding]::new($false).GetBytes(($next|ConvertTo-Json -Depth 30 -Compress)+"`n")
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($journalPath))|Should -BeExactly ([Convert]::ToBase64String($expectedNext))
+            [object]::ReferenceEquals($returned,$next)|Should -Be $true
+        }finally{$lease.Dispose();Remove-Module $module -Force}
+    }
 
     # Scenario: A repo-v2 journal generation is read back, returned to its caller, and then the caller mutates top-level and nested values.
     # Purpose: Keep the cache's trusted content and disk identity independent from every caller-owned journal object.

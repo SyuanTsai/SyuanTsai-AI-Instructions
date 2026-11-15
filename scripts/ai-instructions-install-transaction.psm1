@@ -172,27 +172,49 @@ function New-AiInstructionsInstallStageFile {
         [Parameter(Mandatory = $true)] $TransactionLease,
         [Parameter(Mandatory = $true)][string] $Leaf,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $Bytes,
-        [Parameter(Mandatory = $true)][ValidateSet('windows','linux','macos')][string] $PlatformOs
+        [Parameter(Mandatory = $true)][ValidateSet('windows','linux','macos')][string] $PlatformOs,
+        [switch] $IncludeReadbackBytes
     )
     $lease = Open-PlatformFile -ParentLease $TransactionLease -Leaf $Leaf -Access ReadWrite -CreateMode CreateNew
     try {
         $lease.WriteNewBytes($Bytes)
         $observation = Assert-PlatformFileIdentity -Lease $lease -Expected $lease.Observation -SingleLink -VerifyPath
         $readback = $lease.ReadAllBytes([Math]::Max(1,$Bytes.Length + 1))
-        if ([Convert]::ToBase64String($readback) -cne [Convert]::ToBase64String($Bytes)) { throw "Stage file readback differs: $Leaf" }
-        return [pscustomobject][ordered]@{
+        $sha256=Get-InstallTransactionSha256 -Bytes $Bytes
+        if (-not[Collections.StructuralComparisons]::StructuralEqualityComparer.Equals($readback,$Bytes)) { throw "Stage file readback differs: $Leaf" }
+        $state=[pscustomobject][ordered]@{
             exists=$true
-            sha256=Get-InstallTransactionSha256 -Bytes $Bytes
+            sha256=$sha256
             length=[int64]$Bytes.Length
             identity=ConvertTo-InstallTransactionIdentity -Observation $observation -PlatformOs $PlatformOs
         }
+        if($IncludeReadbackBytes){return [pscustomobject][ordered]@{State=$state;ReadbackBytes=[byte[]]$readback}}
+        return $state
     }
     finally { $lease.Dispose() }
 }
 
+function ConvertFrom-AiInstructionsInstallJournalReadbackBytes {
+    param(
+        [Parameter(Mandatory=$true)][AllowEmptyCollection()][byte[]]$RawBytes,
+        [Parameter(Mandatory=$true)][string]$TransactionId,
+        [Parameter(Mandatory=$true)][string]$ExpectedSha256,
+        [Parameter(Mandatory=$true)][int64]$ExpectedLength
+    )
+    if($RawBytes.Length-ne$ExpectedLength-or(Get-InstallTransactionSha256 $RawBytes)-cne$ExpectedSha256){throw 'Journal readback bytes differ from the requested journal.'}
+    $json=[Text.UTF8Encoding]::new($false,$true).GetString($RawBytes)
+    $parameters=@{InputObject=$json;ErrorAction='Stop'};if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'}
+    try{$journal=ConvertFrom-Json @parameters}catch{throw 'AI instructions install journal JSON is invalid.'}
+    if($null-eq$journal-or$journal-is[System.Array]-or$journal-is[string]-or$journal-is[ValueType]){throw 'AI instructions install journal JSON root must be an object.'}
+    if([int64]$journal.schemaVersion-ne2-or[string]$journal.owner.component-cne'repo-bootstrap'){throw 'Trusted journal readback is not a repo-bootstrap schema v2 journal.'}
+    if([string]$journal.transactionId-cne$TransactionId){throw 'AI instructions install journal transactionId does not match the expected transaction directory.'}
+    return $journal
+}
+
 function ConvertTo-InstallJournalBytes {
-    param([Parameter(Mandatory = $true)] $Journal)
-    return [Text.UTF8Encoding]::new($false).GetBytes((($Journal | ConvertTo-Json -Depth 30).Replace("`r`n","`n")) + "`n")
+    param([Parameter(Mandatory = $true)] $Journal,[switch] $Compact)
+    $json=if($Compact){$Journal|ConvertTo-Json -Depth 30 -Compress}else{($Journal|ConvertTo-Json -Depth 30).Replace("`r`n","`n")}
+    return [Text.UTF8Encoding]::new($false).GetBytes($json + "`n")
 }
 
 function Test-InstallJournalSemanticEqual {
@@ -333,6 +355,58 @@ function Test-InstallJournalV2OperationAuthorityEqual {
     return (Test-InstallTransactionSemanticEqual $Previous.observedAfter $Next.observedAfter)-and(Test-InstallJournalV2PermissionsAuthorityEqual $Previous.displacedMetadata $Next.displacedMetadata)-and(Test-InstallJournalV2PermissionsAuthorityEqual $Previous.displacedAfterMetadata $Next.displacedAfterMetadata)-and(Test-InstallTransactionScalarEqual $Previous.stageLeaf $Next.stageLeaf)-and(Test-InstallTransactionScalarEqual $Previous.backupLeaf $Next.backupLeaf)-and(Test-InstallTransactionScalarEqual $Previous.quarantineLeaf $Next.quarantineLeaf)
 }
 
+function Test-InstallJournalV2IntegerBindingValue {
+    param([AllowNull()][object]$Value)
+    if($null-eq$Value){return $false}
+    $typeCode=[Type]::GetTypeCode($Value.GetType())
+    if($typeCode-cnotin@([TypeCode]::SByte,[TypeCode]::Byte,[TypeCode]::Int16,[TypeCode]::UInt16,[TypeCode]::Int32,[TypeCode]::UInt32,[TypeCode]::Int64,[TypeCode]::UInt64,[TypeCode]::Single,[TypeCode]::Double,[TypeCode]::Decimal)){return $false}
+    try{
+        if($typeCode-cin@([TypeCode]::Single,[TypeCode]::Double)){
+            $number=[double]$Value
+            return -not[double]::IsNaN($number)-and-not[double]::IsInfinity($number)-and[Math]::Floor($number)-eq$number-and$number-ge0-and$number-lt9.2233720368547758E18
+        }
+        $number=[decimal]$Value
+        return [decimal]::Truncate($number)-eq$number-and$number-ge0-and$number-le[decimal][int64]::MaxValue
+    }catch{return $false}
+}
+
+function Test-InstallJournalV2PermissionsBindingValue {
+    param([AllowNull()][object]$Value,[Parameter(Mandatory=$true)][string]$PlatformOs)
+    if($null-eq$Value){return $false}
+    try{
+        if($PlatformOs-ceq'windows'){
+            if($Value.PSObject.Properties.Match('*').Count-ne3-or$Value.kind-isnot[string]-or[string]$Value.kind-cne'windows-sddl'-or$Value.sddl-isnot[string]-or[string]::IsNullOrEmpty([string]$Value.sddl)-or$Value.readOnly-isnot[bool]){return $false}
+            $sddl=[string]$Value.sddl;$scalarLength=0
+            for($index=0;$index-lt$sddl.Length;$index++){
+                if([char]::IsHighSurrogate($sddl[$index])){if($index+1-ge$sddl.Length-or-not[char]::IsLowSurrogate($sddl[$index+1])){return $false};$index++}
+                elseif([char]::IsLowSurrogate($sddl[$index])){return $false}
+                $scalarLength++
+            }
+            return $scalarLength-le4096-and$sddl-cnotmatch'[\x00-\x1f\x7f]'-and$sddl-cmatch'^D:'-and$sddl-cnotmatch'[OGS]:'
+        }
+        return $Value.PSObject.Properties.Match('*').Count-eq4-and$Value.kind-is[string]-and[string]$Value.kind-ceq'unix-mode'-and$Value.mode-is[string]-and[string]$Value.mode-cmatch'^[0-7]{3,4}$'-and
+            (Test-InstallJournalV2IntegerBindingValue $Value.uid)-and(Test-InstallJournalV2IntegerBindingValue $Value.gid)
+    }catch{return $false}
+}
+
+function Test-InstallJournalV2ObservedAfterBindingValue {
+    param([AllowNull()][object]$Value)
+    if($null-eq$Value){return $false}
+    try{
+        if($Value.PSObject.Properties.Match('*').Count-ne2-or$Value.readOnly-isnot[bool]-or$null-eq$Value.dacl-or$Value.dacl.PSObject.Properties.Match('*').Count-ne3-or$Value.dacl.isNull-isnot[bool]-or$Value.dacl.isProtected-isnot[bool]){return $false}
+        if([bool]$Value.dacl.isNull){return $null-eq$Value.dacl.aclBase64}
+        if($Value.dacl.aclBase64-isnot[string]-or[string]$Value.dacl.aclBase64-cnotmatch'^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$'){return $false}
+        [byte[]]$aclBytes=[Convert]::FromBase64String([string]$Value.dacl.aclBase64)
+        return $aclBytes.Length-ge8-and[BitConverter]::ToUInt16($aclBytes,2)-eq$aclBytes.Length
+    }catch{return $false}
+}
+
+function Test-InstallJournalV2EvidenceObjectIdBindingValue {
+    param([AllowNull()][object]$Value,[Parameter(Mandatory=$true)][string]$ObjectFormat)
+    if($Value-isnot[string]){return $false}
+    return [string]$Value-cmatch$(if($ObjectFormat-ceq'sha256'){'^[0-9a-f]{64}$'}else{'^[0-9a-f]{40}$'})
+}
+
 function Test-InstallJournalV2EvidenceBindingTransition {
     param([Parameter(Mandatory=$true)][object]$Previous,[Parameter(Mandatory=$true)][object]$Next,[Parameter(Mandatory=$true)][object]$PreviousOperation,[Parameter(Mandatory=$true)][object]$NextOperation)
     if([string]$Previous.phase-cne'applying'-or[string]$Next.phase-cne'applying'-or
@@ -340,20 +414,9 @@ function Test-InstallJournalV2EvidenceBindingTransition {
         [string]$PreviousOperation.state-cne'pending'-or[string]$NextOperation.state-cne'applied'-or
         $null-ne$PreviousOperation.after.objectId-or$null-eq$NextOperation.after.objectId-or
         [bool]$PreviousOperation.after.exists-ne[bool]$NextOperation.after.exists){return $false}
-    $previousProperties=@($PreviousOperation.PSObject.Properties);$nextProperties=@($NextOperation.PSObject.Properties)
-    if($previousProperties.Count-ne$nextProperties.Count){return $false}
-    foreach($property in $previousProperties){
-        $other=$NextOperation.PSObject.Properties[$property.Name]
-        if($null-eq$other){return $false}
-        if($property.Name-ceq'state'){continue}
-        if($property.Name-ceq'after'){
-            $previousAfter=@($property.Value.PSObject.Properties);$nextAfter=@($other.Value.PSObject.Properties)
-            if($previousAfter.Count-ne2-or$nextAfter.Count-ne2-or$null-eq$other.Value.PSObject.Properties['exists']-or$null-eq$other.Value.PSObject.Properties['objectId']-or[bool]$property.Value.exists-ne[bool]$other.Value.exists){return $false}
-            continue
-        }
-        if(-not(Test-InstallTransactionSemanticEqual $property.Value $other.Value)){return $false}
-    }
-    return $true
+    if(-not(Test-InstallJournalV2EvidenceObjectIdBindingValue -Value $NextOperation.after.objectId -ObjectFormat ([string]$Next.scope.objectFormat))){return $false}
+    return $PreviousOperation.PSObject.Properties.Match('*').Count-eq$NextOperation.PSObject.Properties.Match('*').Count-and
+        $NextOperation.after.PSObject.Properties.Match('*').Count-eq2-and$null-ne$NextOperation.after.PSObject.Properties['exists']-and$null-ne$NextOperation.after.PSObject.Properties['objectId']
 }
 
 function Test-InstallJournalV2AppliedBindingTransition {
@@ -366,21 +429,47 @@ function Test-InstallJournalV2AppliedBindingTransition {
         [string]$PreviousOperation.state-cne'pending'-or[string]$NextOperation.state-cne'applied'){return $false}
     $observedChanged=-not(Test-InstallTransactionSemanticEqual $PreviousOperation.observedAfter $NextOperation.observedAfter)
     if($observedChanged-and([string]$Previous.platform.os-cne'windows'-or[string]$Next.platform.os-cne'windows'-or$kind-cnotin@('create-file','write-file')-or$null-ne$PreviousOperation.observedAfter-or$null-eq$NextOperation.observedAfter)){return $false}
+    if($observedChanged-and-not(Test-InstallJournalV2ObservedAfterBindingValue $NextOperation.observedAfter)){return $false}
     $previousDisplacedAfter=$PreviousOperation.PSObject.Properties['displacedAfterMetadata'];$nextDisplacedAfter=$NextOperation.PSObject.Properties['displacedAfterMetadata']
     if($null-eq$previousDisplacedAfter-or$null-eq$nextDisplacedAfter){return $false}
     $displacedChanged=-not(Test-InstallTransactionSemanticEqual $previousDisplacedAfter.Value $nextDisplacedAfter.Value)
     if($displacedChanged-and($kind-cnotin@('write-file','remove-file')-or$null-ne$previousDisplacedAfter.Value-or$null-eq$nextDisplacedAfter.Value)){return $false}
+    if($displacedChanged-and(-not(Test-InstallJournalV2PermissionsBindingValue -Value $nextDisplacedAfter.Value -PlatformOs ([string]$Next.platform.os))-or[string]$nextDisplacedAfter.Value.kind-cne[string]$PreviousOperation.displacedMetadata.kind)){return $false}
     if(-not$observedChanged-and-not$displacedChanged){return $false}
-    try{Assert-AiInstructionsInstallJournalV2 -Journal $Next|Out-Null}catch{return $false}
-    $previousProperties=@($PreviousOperation.PSObject.Properties);$nextProperties=@($NextOperation.PSObject.Properties)
-    if($previousProperties.Count-ne$nextProperties.Count){return $false}
-    foreach($property in $previousProperties){
-        $other=$NextOperation.PSObject.Properties[$property.Name]
-        if($null-eq$other){return $false}
-        if($property.Name-cin@('state','observedAfter','displacedAfterMetadata')){continue}
-        if(-not(Test-InstallTransactionSemanticEqual $property.Value $other.Value)){return $false}
+    # Previous is an exact-byte readback that passed the full v2 parser. Rebuild the only permitted
+    # next authority from it: all immutable fields stay equal and only the closed binding values above
+    # are newly validated. This is equivalent to reparsing Next without rescanning every unchanged operation.
+    return $PreviousOperation.PSObject.Properties.Match('*').Count-eq$NextOperation.PSObject.Properties.Match('*').Count
+}
+
+function ConvertTo-InstallJournalV2RebuiltTransitionAuthorityJson {
+    param(
+        [Parameter(Mandatory=$true)][object]$Previous,
+        [Parameter(Mandatory=$true)][object]$NextOperation,
+        [Parameter(Mandatory=$true)][int]$OperationIndex,
+        [Parameter(Mandatory=$true)][ValidateSet('applied','evidence')][string]$Binding
+    )
+    $document=[ordered]@{}
+    foreach($property in @($Previous.PSObject.Properties)){
+        if($property.Name-ceq'phase'){continue}
+        if($property.Name-cne'operations'){$document[$property.Name]=$property.Value;continue}
+        [object[]]$operations=@($property.Value)
+        $previousOperation=$operations[$OperationIndex]
+        $operationDocument=[ordered]@{}
+        foreach($operationProperty in @($previousOperation.PSObject.Properties)){
+            if($operationProperty.Name-ceq'state'){continue}
+            if($Binding-ceq'evidence'-and$operationProperty.Name-ceq'after'){
+                $operationDocument.after=[pscustomobject][ordered]@{exists=[bool]$previousOperation.after.exists;objectId=[string]$NextOperation.after.objectId}
+                continue
+            }
+            if($Binding-ceq'applied'-and$operationProperty.Name-ceq'observedAfter'){$operationDocument.observedAfter=$NextOperation.observedAfter;continue}
+            if($Binding-ceq'applied'-and$operationProperty.Name-ceq'displacedAfterMetadata'){$operationDocument.displacedAfterMetadata=$NextOperation.displacedAfterMetadata;continue}
+            $operationDocument[$operationProperty.Name]=$operationProperty.Value
+        }
+        $operations[$OperationIndex]=[pscustomobject]$operationDocument
+        $document.operations=$operations
     }
-    return $true
+    return ConvertTo-InstallJournalV2TransitionAuthorityJson ([pscustomobject]$document)
 }
 
 function Assert-InstallJournalV2TrustedTransition {
@@ -400,36 +489,18 @@ function Assert-InstallJournalV2TrustedTransition {
     $previousAuthority=if($PSBoundParameters.ContainsKey('PreviousAuthorityJson')){$PreviousAuthorityJson}else{ConvertTo-InstallJournalV2TransitionAuthorityJson $Previous}
     $nextAuthority=if($PSBoundParameters.ContainsKey('NextAuthorityJson')){$NextAuthorityJson}else{ConvertTo-InstallJournalV2TransitionAuthorityJson $Next}
     $authorityEqual=$previousAuthority-ceq$nextAuthority
-    if(-not$authorityEqual-and-not(Test-InstallJournalV2TopLevelAuthorityEqual $Previous $Next)) {
-        $differences=New-Object System.Collections.Generic.List[string]
-        $previousTopProperties=@($Previous.PSObject.Properties);$nextTopProperties=@($Next.PSObject.Properties)
-        if($previousTopProperties.Count-ne$nextTopProperties.Count){$differences.Add('property-count')}
-        foreach($property in $previousTopProperties){
-            if($property.Name-cin@('phase','operations')){continue}
-            $other=$Next.PSObject.Properties[$property.Name]
-            if($null-eq$other-or-not(Test-InstallTransactionSemanticEqual $property.Value $other.Value)){$differences.Add($property.Name)}
-        }
-        throw "AI instructions install journal store transition changed top-level fields other than phase or operations: $($differences -join ', ')."
-    }
     if($previousOperations.Count-ne$nextOperations.Count-or$identityOperations.Count-ne$previousOperations.Count){throw 'AI instructions install journal store transition cannot change operations count after prepared.'}
-    if(-not$authorityEqual){
-        for($index=0;$index-lt$previousOperations.Count;$index++) {
-            if(-not(Test-InstallJournalV2OperationAuthorityEqual $previousOperations[$index] $nextOperations[$index])-and
-                -not(Test-InstallJournalV2EvidenceBindingTransition -Previous $Previous -Next $Next -PreviousOperation $previousOperations[$index] -NextOperation $nextOperations[$index])-and
-                -not(Test-InstallJournalV2AppliedBindingTransition -Previous $Previous -Next $Next -PreviousOperation $previousOperations[$index] -NextOperation $nextOperations[$index])) {
-                throw "AI instructions install journal store transition changed operation $($index + 1) fields other than state; observedAfter, displacedAfterMetadata, or store-git-stash-evidence after.objectId may be bound only once."
-            }
-        }
-    }
     $fromPhase=[string]$Previous.phase;$toPhase=[string]$Next.phase
     if($fromPhase-cne$toPhase-and"$fromPhase>$toPhase"-cnotin@('prepared>applying','applying>applied','applied>committed')) {
         throw 'AI instructions install journal store phase transition is invalid.'
     }
+    $changedStateIndexes=New-Object System.Collections.Generic.List[int]
     for($index=0;$index-lt$previousOperations.Count;$index++) {
         $fromState=[string]$previousOperations[$index].state;$toState=[string]$nextOperations[$index].state
         if($fromState-cne$toState-and"$fromState>$toState"-cne'pending>applied') {
             throw "AI instructions install journal store transition operation $($index + 1) state transition is invalid."
         }
+        if($fromState-cne$toState){$changedStateIndexes.Add($index)}
         if($fromState-ceq'pending'-and$toState-ceq'applied') {
             # An applied file operation must carry the same once-bound evidence that the full parser requires.
             $appliedKind=[string]$nextOperations[$index].kind
@@ -441,25 +512,30 @@ function Assert-InstallJournalV2TrustedTransition {
             }
         }
     }
+    if($changedStateIndexes.Count-gt1){throw 'AI instructions install journal store transition may change only one operation state per generation.'}
+    if(-not$authorityEqual){
+        if($changedStateIndexes.Count-ne1){throw 'AI instructions install journal store transition changed authority without one operation state transition.'}
+        $changedIndex=$changedStateIndexes[0]
+        $previousOperation=$previousOperations[$changedIndex];$nextOperation=$nextOperations[$changedIndex]
+        $binding=if(Test-InstallJournalV2EvidenceBindingTransition -Previous $Previous -Next $Next -PreviousOperation $previousOperation -NextOperation $nextOperation){'evidence'}
+            elseif(Test-InstallJournalV2AppliedBindingTransition -Previous $Previous -Next $Next -PreviousOperation $previousOperation -NextOperation $nextOperation){'applied'}
+            else{$null}
+        if($null-eq$binding){throw "AI instructions install journal store transition changed operation $($changedIndex + 1) fields other than state; observedAfter, displacedAfterMetadata, or store-git-stash-evidence after.objectId may be bound only once."}
+        $rebuiltAuthority=ConvertTo-InstallJournalV2RebuiltTransitionAuthorityJson -Previous $Previous -NextOperation $nextOperation -OperationIndex $changedIndex -Binding $binding
+        if($rebuiltAuthority-cne$nextAuthority){throw 'AI instructions install journal store transition authority differs from the exact permitted single-operation binding.'}
+    }
     return $Next
 }
 
 function Read-AiInstructionsInstallJournalLeaf {
-    param([Parameter(Mandatory = $true)] $TransactionLease,[Parameter(Mandatory = $true)][string] $Leaf,[Parameter(Mandatory = $true)][string] $TransactionId,[string] $ExpectedOwnerComponent,[AllowNull()][byte[]] $ExpectedBytes)
+    param([Parameter(Mandatory = $true)] $TransactionLease,[Parameter(Mandatory = $true)][string] $Leaf,[Parameter(Mandatory = $true)][string] $TransactionId,[string] $ExpectedOwnerComponent,[AllowNull()][byte[]] $ExpectedBytes,[string]$ExpectedSha256,[Nullable[int64]]$ExpectedLength)
     $lease = Open-PlatformFile -ParentLease $TransactionLease -Leaf $Leaf -Access Read -CreateMode OpenExisting
     try {
         [byte[]]$rawBytes=$lease.ReadAllBytes(16777216)
         if($PSBoundParameters.ContainsKey('ExpectedBytes')-and$null-ne$ExpectedBytes) {
-            if($rawBytes.Length-ne$ExpectedBytes.Length-or(Get-InstallTransactionSha256 $rawBytes)-cne(Get-InstallTransactionSha256 $ExpectedBytes)) {
-                throw "Journal readback bytes differ from the requested journal: $Leaf"
-            }
-            $json=[Text.UTF8Encoding]::new($false,$true).GetString($rawBytes)
-            $parameters=@{InputObject=$json;ErrorAction='Stop'};if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'}
-            try{$journal=ConvertFrom-Json @parameters}catch{throw 'AI instructions install journal JSON is invalid.'}
-            if($null-eq$journal-or$journal-is[System.Array]-or$journal-is[string]-or$journal-is[ValueType]){throw 'AI instructions install journal JSON root must be an object.'}
-            if([int64]$journal.schemaVersion-ne2-or[string]$journal.owner.component-cne'repo-bootstrap') {throw 'Trusted journal readback is not a repo-bootstrap schema v2 journal.'}
-            if([string]$journal.transactionId-cne$TransactionId){throw 'AI instructions install journal transactionId does not match the expected transaction directory.'}
-            return $journal
+            $sha256=if($PSBoundParameters.ContainsKey('ExpectedSha256')){$ExpectedSha256}else{Get-InstallTransactionSha256 $ExpectedBytes}
+            $length=if($PSBoundParameters.ContainsKey('ExpectedLength')){[int64]$ExpectedLength}else{[int64]$ExpectedBytes.Length}
+            try{return ConvertFrom-AiInstructionsInstallJournalReadbackBytes -RawBytes $rawBytes -TransactionId $TransactionId -ExpectedSha256 $sha256 -ExpectedLength $length}catch{if($_.Exception.Message-ceq'Journal readback bytes differ from the requested journal.'){throw "Journal readback bytes differ from the requested journal: $Leaf"};throw}
         }
         $json=[Text.UTF8Encoding]::new($false,$true).GetString($rawBytes)
         if($ExpectedOwnerComponent-ceq'repo-bootstrap'){
@@ -536,7 +612,7 @@ function Write-AiInstructionsInstallJournalStore {
                 $previousAuthorityJson=[string]$trustedRecord.authorityJson
             }
             else {
-                [byte[]]$previousBytes=ConvertTo-InstallJournalBytes -Journal $PreviousJournal
+                [byte[]]$previousBytes=ConvertTo-InstallJournalBytes -Journal $PreviousJournal -Compact:$isRepoV2
                 if([int64]$liveCurrent.length-ne$previousBytes.Length-or[string]$liveCurrent.sha256-cne(Get-InstallTransactionSha256 $previousBytes)) {throw 'Published journal differs from the expected previous journal generation.'}
                 $trustedPrevious=$PreviousJournal
                 $identityPrevious=$PreviousJournal
@@ -551,12 +627,13 @@ function Write-AiInstructionsInstallJournalStore {
         }
     }
     elseif($isRepoV2){Assert-AiInstructionsInstallJournalV2 -Journal $Journal|Out-Null}
-    [byte[]]$bytes = ConvertTo-InstallJournalBytes -Journal $Journal
-    $stageState = New-AiInstructionsInstallStageFile -TransactionLease $TransactionLease -Leaf $leaves.stage -Bytes $bytes -PlatformOs $PlatformOs
+    [byte[]]$bytes = ConvertTo-InstallJournalBytes -Journal $Journal -Compact:$isRepoV2
+    $stageReadback = New-AiInstructionsInstallStageFile -TransactionLease $TransactionLease -Leaf $leaves.stage -Bytes $bytes -PlatformOs $PlatformOs -IncludeReadbackBytes
+    $stageState=$stageReadback.State
     $JournalStoreStates[[string]$leaves.stage] = $stageState
     Invoke-AiInstructionsInstallFailpoint -Name 'after-journal-stage-flush'
     try {
-        $validatedStage = Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf $leaves.stage -TransactionId ([string]$Journal.transactionId) -ExpectedOwnerComponent $(if($isRepoV2){'repo-bootstrap'}else{$null}) -ExpectedBytes $(if($isRepoV2){$bytes}else{$null})
+        $validatedStage = if($isRepoV2){ConvertFrom-AiInstructionsInstallJournalReadbackBytes -RawBytes $stageReadback.ReadbackBytes -TransactionId ([string]$Journal.transactionId) -ExpectedSha256 ([string]$stageState.sha256) -ExpectedLength ([int64]$stageState.length)}else{Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf $leaves.stage -TransactionId ([string]$Journal.transactionId)}
     }
     catch {
         if($isRepoV2){$JournalStoreStates.Remove($trustedJournalKey)}
@@ -593,7 +670,7 @@ function Write-AiInstructionsInstallJournalStore {
     }
     $JournalStoreStates[[string]$leaves.stage] = [pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}
     try {
-        $validated = Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf $leaves.journal -TransactionId ([string]$Journal.transactionId) -ExpectedOwnerComponent $(if($isRepoV2){'repo-bootstrap'}else{$null}) -ExpectedBytes $(if($isRepoV2){$bytes}else{$null})
+        $validated = Read-AiInstructionsInstallJournalLeaf -TransactionLease $TransactionLease -Leaf $leaves.journal -TransactionId ([string]$Journal.transactionId) -ExpectedOwnerComponent $(if($isRepoV2){'repo-bootstrap'}else{$null}) -ExpectedBytes $(if($isRepoV2){$bytes}else{$null}) -ExpectedSha256 $(if($isRepoV2){[string]$stageState.sha256}else{$null}) -ExpectedLength $(if($isRepoV2){[int64]$stageState.length}else{$null})
     }
     catch {
         if($isRepoV2){$JournalStoreStates.Remove($trustedJournalKey)}
