@@ -1386,10 +1386,10 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         }
 
         function Invoke-UnixSetup {
-            param([string]$UserHome,[string[]]$Arguments,[string]$Kind='runtime',[hashtable]$Environment=@{},[string]$ExpectedCommit=$script:UnixCommits[$Kind],[switch]$NoCheckout,[switch]$UnsetHome)
+            param([string]$UserHome,[string[]]$Arguments,[string]$Kind='runtime',[hashtable]$Environment=@{},[string]$ExpectedCommit=$script:UnixCommits[$Kind],[switch]$NoCheckout,[switch]$UnsetHome,[string]$EntryPath=$script:UnixShell)
             if (-not $NoCheckout) { & git -C $script:UnixRepo checkout -q --detach $script:UnixCommits[$Kind] 2>$null | Out-Null }
             $start = [Diagnostics.ProcessStartInfo]::new('sh')
-            foreach ($argument in @($script:UnixShell,'--expected-commit',$ExpectedCommit) + $Arguments) { $start.ArgumentList.Add($argument) }
+            foreach ($argument in @($EntryPath,'--expected-commit',$ExpectedCommit) + $Arguments) { $start.ArgumentList.Add($argument) }
             $start.UseShellExecute = $false; $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
             if($UnsetHome){[void]$start.Environment.Remove('HOME')}else{$start.Environment['HOME'] = $UserHome}
             # Any accidental network use fails fast instead of reaching the internet.
@@ -1431,6 +1431,39 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         function Get-UnixMode {
             param([string]$Path)
             return ([Convert]::ToString([int][IO.File]::GetUnixFileMode($Path),8))
+        }
+
+        function Assert-UnixPrivatePath {
+            param([Parameter(Mandatory=$true)][string]$Path,[Parameter(Mandatory=$true)][string]$Mode)
+            $lease=$null;$parent=$null
+            try {
+                if([IO.Directory]::Exists($Path)){$lease=Open-PlatformDirectory -Root $Path -RootOnly}
+                else{
+                    $parent=Open-PlatformDirectory -Root ([IO.Path]::GetDirectoryName($Path)) -RootOnly
+                    $lease=Open-PlatformFile -ParentLease $parent -Leaf ([IO.Path]::GetFileName($Path)) -Access Read -CreateMode OpenExisting
+                }
+                $permissions=Get-PlatformPermissions -Lease $lease
+                ([string]$permissions.mode).TrimStart('0') | Should BeExactly $Mode.TrimStart('0')
+                [string]$permissions.uid | Should BeExactly $script:SetupTestUnixUid
+            } finally {
+                if($null -ne $lease){$lease.Dispose()}
+                if($null -ne $parent){$parent.Dispose()}
+            }
+        }
+
+        function Assert-UnixSetupLockReleased {
+            param([Parameter(Mandatory=$true)][string]$SetupRoot)
+            $setup=Open-PlatformDirectory -Root $SetupRoot -RootOnly
+            try{$lock=Enter-PlatformLock -ParentLease $setup -Leaf 'setup.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero);$lock.Dispose()}
+            finally{$setup.Dispose()}
+        }
+
+        function Assert-UnixSetupTransactionClean {
+            param([Parameter(Mandatory=$true)][string]$SetupRoot)
+            $store=Join-Path $SetupRoot '.ai-instructions-txn'
+            $residue=@(Get-ChildItem -LiteralPath $store -Recurse -Force -ErrorAction SilentlyContinue | Where-Object {$_.Name -cin @('stage','displaced','journal.json')})
+            $residue.Count | Should Be 0
+            Test-Path -LiteralPath $store | Should Be $false
         }
 
         function New-UnixToolShim {
@@ -1863,6 +1896,142 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         $newRuns = @(Get-ChildItem -LiteralPath $tmpRoot -Directory -Force | Where-Object { $_.FullName -ne $old })
         $newRuns.Count | Should BeGreaterThan 0
         foreach ($directory in $newRuns) { $directory.Name | Should Match '^run\.[0-9]+\.[A-Za-z0-9]+$'; $directory.Name | Should Not Match '^run\.[0-9]+$' }
+    }
+
+    # Scenario: A lock holder publishes the first setup receipt, so both journal.json and the target have absent expected state and null displaced leaves.
+    # Purpose: Protect the two Unix no-replace publication calls from null-to-empty optional-leaf coercion.
+    It 'InterT42_publishes_the_first_journal_and_setup_receipt_with_null_displaced_leaves' -Tag 'UnixNullOptionalLeaf' {
+        $home=New-UnixHome 'null-leaf-first-receipt' -WithoutCache
+        $layout=Get-AgentEnvironmentSetupLayout $home $script:UnixRid $script:UnixVersion
+        $created=Open-PlatformDirectory -Root $home -RelativePath '.local/share/ai-instructions-setup' -CreatePrivate;$created.Dispose()
+        $setup=Open-PlatformDirectory -Root $layout.SetupRoot -RootOnly
+        $lock=Enter-PlatformLock -ParentLease $setup -Leaf 'setup.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
+        [byte[]]$expected=[Text.UTF8Encoding]::new($false).GetBytes("{`"case`":`"first-setup-receipt`"}`n")
+        try{Publish-AgentEnvironmentSetupFile -SetupRoot $layout.SetupRoot -Directory receipts -Leaf 'setup-receipt.json' -Bytes $expected -NoReplace}
+        finally{$lock.Dispose();$setup.Dispose()}
+        $target=Join-Path $layout.ReceiptDirectory 'setup-receipt.json'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($target)) | Should BeExactly ([Convert]::ToBase64String($expected))
+        Assert-UnixSetupTransactionClean $layout.SetupRoot
+        Assert-UnixSetupLockReleased $layout.SetupRoot
+        Assert-UnixPrivatePath $layout.SetupRoot '700'
+        Assert-UnixPrivatePath $target '600'
+    }
+
+    # Scenario: A lock holder publishes the first runtime receipt and then the first shared archive cache into otherwise absent targets.
+    # Purpose: Cover both remaining setup call sites that pass ExpectedState.exists=false, DisplacedLeaf=null, and NoReplace.
+    It 'InterT43_publishes_the_first_runtime_receipt_and_shared_cache_with_null_displaced_leaves' -Tag 'UnixNullOptionalLeaf' {
+        $home=New-UnixHome 'null-leaf-runtime-cache' -WithoutCache
+        $layout=Get-AgentEnvironmentSetupLayout $home $script:UnixRid $script:UnixVersion
+        $created=Open-PlatformDirectory -Root $home -RelativePath '.local/share/ai-instructions-setup' -CreatePrivate;$created.Dispose()
+        $setup=Open-PlatformDirectory -Root $layout.SetupRoot -RootOnly
+        $lock=Enter-PlatformLock -ParentLease $setup -Leaf 'setup.lock' -Mode Exclusive -Timeout ([TimeSpan]::Zero)
+        [byte[]]$receiptBytes=[Text.UTF8Encoding]::new($false).GetBytes("{`"case`":`"first-runtime-receipt`"}`n")
+        try{
+            Publish-AgentEnvironmentSetupFile -SetupRoot $layout.SetupRoot -Directory receipts -Leaf $layout.RuntimeReceiptLeaf -Bytes $receiptBytes -NoReplace
+            Assert-UnixSetupTransactionClean $layout.SetupRoot
+            (Publish-AgentEnvironmentSetupArchiveCache -SetupRoot $layout.SetupRoot -Leaf $script:UnixAssetName -ArchivePath $script:UnixArchives['runtime'].Path -ExpectedSha256 $script:UnixArchives['runtime'].Sha256) | Should BeExactly 'published'
+        } finally {$lock.Dispose();$setup.Dispose()}
+        $receipt=Join-Path $layout.ReceiptDirectory $layout.RuntimeReceiptLeaf
+        $cache=Join-Path (Join-Path $layout.SetupRoot 'cache') $script:UnixAssetName
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($receipt)) | Should BeExactly ([Convert]::ToBase64String($receiptBytes))
+        (Get-FileHash -LiteralPath $cache -Algorithm SHA256).Hash.ToLowerInvariant() | Should BeExactly $script:UnixArchives['runtime'].Sha256
+        Assert-UnixSetupTransactionClean $layout.SetupRoot
+        Assert-UnixSetupLockReleased $layout.SetupRoot
+        Assert-UnixPrivatePath $receipt '600'
+        Assert-UnixPrivatePath $cache '600'
+    }
+
+    # Scenario: A real setup child aborts after displacing setup-receipt.json but before publishing its stage, then the same real shell entry is rerun.
+    # Purpose: Exercise publish-after-displace with resumeExpected.exists=false and a null displaced leaf through the Unix adapter.
+    It 'InterT44_recovers_publish_after_displace_with_a_null_resume_displaced_leaf' -Tag 'UnixNullOptionalLeaf' {
+        $home=New-UnixHome 'null-leaf-publish-after-displace'
+        $initial=Invoke-UnixSetup $home @('--prepare');$initial.ExitCode | Should Be 0
+        $shimRepo=Join-Path $script:UnixRoot ('after-displace-repo-'+[guid]::NewGuid().ToString('N'))
+        Copy-Item -LiteralPath $script:UnixRepo -Destination $shimRepo -Recurse
+        $native=Join-Path $shimRepo 'scripts/platform/UnixNative.cs'
+        $text=[IO.File]::ReadAllText($native)
+        $needle='                        displaced = true;'
+        ([regex]::Matches($text,[regex]::Escape($needle))).Count | Should Be 1
+        $injection=$needle+"`n                        if (Environment.GetEnvironmentVariable(`"AI_INSTRUCTIONS_SETUP_FAILPOINT`") == `"after-displace`") Environment.FailFast(`"after Unix target displacement`");"
+        $text=$text.Replace($needle,$injection)
+        [IO.File]::WriteAllText($native,$text,[Text.UTF8Encoding]::new($false))
+        $manifestPath=Join-Path $shimRepo 'scripts/platform-runtime.psd1'
+        $manifestText=[IO.File]::ReadAllText($manifestPath)
+        $hash=Get-AgentEnvironmentSetupSha256Text ([IO.File]::ReadAllText($native))
+        $manifestText=[regex]::Replace($manifestText,"(?m)(Path = 'platform/UnixNative\.cs'; Sha256 = ')[a-f0-9]{64}(')",('${1}'+$hash+'$2'))
+        [IO.File]::WriteAllText($manifestPath,$manifestText,[Text.UTF8Encoding]::new($false))
+        & git -C $shimRepo add -A 2>$null | Out-Null
+        & git -C $shimRepo -c user.name=setup-test -c user.email=setup-test@example.invalid commit -q -m after-displace 2>$null | Out-Null
+        $shimCommit=[string](& git -C $shimRepo rev-parse HEAD)
+        $shimShell=Join-Path $shimRepo 'scripts/setup-agent-environment.sh'
+        $crashed=Invoke-UnixSetup $home @('--offline') -ExpectedCommit $shimCommit -NoCheckout -EntryPath $shimShell -Environment @{AI_INSTRUCTIONS_SETUP_FAILPOINT='after-displace'}
+        $crashed.ExitCode | Should Not Be 0
+        $store=Join-Path $home '.local/share/ai-instructions-setup/.ai-instructions-txn'
+        $transaction=@(Get-ChildItem -LiteralPath $store -Directory -Force);$transaction.Count | Should Be 1
+        foreach($leaf in @('stage','displaced','journal.json')){Test-Path -LiteralPath (Join-Path $transaction[0].FullName $leaf) -PathType Leaf | Should Be $true}
+        $target=Join-Path $home '.local/share/ai-instructions-setup/receipts/setup-receipt.json'
+        Test-Path -LiteralPath $target | Should Be $false
+        [byte[]]$expected=[IO.File]::ReadAllBytes((Join-Path $transaction[0].FullName 'stage'))
+        Assert-UnixSetupLockReleased (Join-Path $home '.local/share/ai-instructions-setup')
+        $recovered=Invoke-UnixSetup $home @('--offline') -ExpectedCommit $shimCommit -NoCheckout -EntryPath $shimShell
+        $recovered.ExitCode | Should Be 0;$recovered.Json.result | Should Be 'verified-runtime-only'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($target)) | Should BeExactly ([Convert]::ToBase64String($expected))
+        $setupRoot=Join-Path $home '.local/share/ai-instructions-setup'
+        Assert-UnixSetupTransactionClean $setupRoot
+        Assert-UnixSetupLockReleased $setupRoot
+        $runtimeReceipt=Get-Content -Raw -LiteralPath (Join-Path $setupRoot "receipts/runtime-$($script:UnixVersion)-$($script:UnixRid).json")|ConvertFrom-Json
+        $runtimeRoot=ConvertFrom-AgentEnvironmentSetupHomePath ([string]$runtimeReceipt.runtimeClosure.rootPath) $home
+        Assert-UnixPrivatePath $target '600';Assert-UnixPrivatePath $runtimeRoot '700'
+    }
+
+    # Scenario: Real child aborts leave stage+journal.json or displaced+journal.json, and a real entry rerun repairs each transaction.
+    # Purpose: Exercise Remove-AgentEnvironmentSetupTransactionFile cleanup mode for stage, displaced, and journal.json without tombstone arguments.
+    It 'InterT45_cleans_stage_displaced_and_journal_files_without_tombstone_leaves' -Tag 'UnixNullOptionalLeaf' {
+        foreach($case in @(@{Point='during-stage-write';Members=@('stage','journal.json')},@{Point='after-rename';Members=@('displaced','journal.json')})){
+            $home=New-UnixHome ('null-leaf-cleanup-'+$case.Point)
+            $initial=Invoke-UnixSetup $home @('--prepare');$initial.ExitCode | Should Be 0
+            $crashed=Invoke-UnixSetup $home @('--offline') -Environment @{AI_INSTRUCTIONS_SETUP_FAILPOINT=$case.Point;AI_INSTRUCTIONS_SETUP_FAILPOINT_LEAF='setup-receipt.json'}
+            $crashed.ExitCode | Should Not Be 0
+            $setupRoot=Join-Path $home '.local/share/ai-instructions-setup'
+            $transaction=@(Get-ChildItem -LiteralPath (Join-Path $setupRoot '.ai-instructions-txn') -Directory -Force);$transaction.Count | Should Be 1
+            foreach($leaf in $case.Members){Test-Path -LiteralPath (Join-Path $transaction[0].FullName $leaf) -PathType Leaf | Should Be $true}
+            Assert-UnixSetupLockReleased $setupRoot
+            $recovered=Invoke-UnixSetup $home @('--offline')
+            $recovered.ExitCode | Should Be 0;$recovered.Json.result | Should Be 'verified-runtime-only'
+            $target=Join-Path $setupRoot 'receipts/setup-receipt.json'
+            [IO.File]::ReadAllText($target) | Should BeExactly ($recovered.Lines[0]+"`n")
+            Assert-UnixSetupTransactionClean $setupRoot
+            Assert-UnixSetupLockReleased $setupRoot
+            Assert-UnixPrivatePath $target '600'
+        }
+    }
+
+    # Scenario: A genuinely empty private HOME downloads only from a local fixture shim, prepares once, and then reruns offline.
+    # Purpose: Prove the complete native shell entry covers every null optional leaf and leaves A6-private runtime and receipt state.
+    It 'InterT46_prepares_an_empty_HOME_from_the_local_fixture_and_then_verifies_offline' -Tag 'UnixNullOptionalLeaf' {
+        $home=New-UnixHome 'null-leaf-empty-home' -WithoutCache
+        @(Get-ChildItem -LiteralPath $home -Force).Count | Should Be 0
+        $fixtureArchive=$script:UnixArchives['runtime'].Path
+        $curlScript=@('[ "$1" = -q ] || exit 65','out=','while [ "$#" -gt 0 ]; do','case "$1" in --output) out=$2; shift 2 ;; *) shift ;; esac','done','[ -n "$out" ] || exit 64',"cp -P '$fixtureArchive' `"`$out`"") -join "`n"
+        $bin=New-UnixToolShim 'null-leaf-empty-home' -Exclude @('wget') -Replace @{curl=$curlScript}
+        $prepare=Invoke-UnixSetup $home @('--prepare') -Environment @{PATH=$bin}
+        if($prepare.ExitCode -ne 0){Write-Host $prepare.Stdout;Write-Host $prepare.Stderr}
+        $prepare.ExitCode | Should Be 0;$prepare.Json.result | Should Be 'prepared-runtime-only'
+        $offline=Invoke-UnixSetup $home @('--offline')
+        $offline.ExitCode | Should Be 0;$offline.Json.result | Should Be 'verified-runtime-only'
+        $setupRoot=Join-Path $home '.local/share/ai-instructions-setup'
+        $setupReceipt=Join-Path $setupRoot 'receipts/setup-receipt.json'
+        $runtimeReceiptPath=Join-Path $setupRoot "receipts/runtime-$($script:UnixVersion)-$($script:UnixRid).json"
+        [IO.File]::ReadAllText($setupReceipt) | Should BeExactly ($offline.Lines[0]+"`n")
+        (Get-FileHash -LiteralPath (Join-Path $setupRoot "cache/$($script:UnixAssetName)") -Algorithm SHA256).Hash.ToLowerInvariant() | Should BeExactly $script:UnixArchives['runtime'].Sha256
+        $runtimeReceipt=Get-Content -Raw -LiteralPath $runtimeReceiptPath|ConvertFrom-Json
+        $runtimeRoot=ConvertFrom-AgentEnvironmentSetupHomePath ([string]$runtimeReceipt.runtimeClosure.rootPath) $home
+        Test-Path -LiteralPath (Join-Path $runtimeRoot 'pwsh') -PathType Leaf | Should Be $true
+        Assert-UnixSetupTransactionClean $setupRoot
+        Assert-UnixSetupLockReleased $setupRoot
+        foreach($directory in @($setupRoot,$runtimeRoot)){Assert-UnixPrivatePath $directory '700'}
+        foreach($file in @($setupReceipt,$runtimeReceiptPath,(Join-Path $setupRoot "cache/$($script:UnixAssetName)"))){Assert-UnixPrivatePath $file '600'}
+        Assert-UnixPrivatePath (Join-Path $runtimeRoot 'pwsh') '700'
     }
 
     # Register only when the native test process can create a genuinely foreign-owned cache fixture.
