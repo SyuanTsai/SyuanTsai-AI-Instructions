@@ -6,6 +6,13 @@ Describe 'Authority-owned consumer source gate' {
         $script:GitHooksRoot = Join-Path $TestDrive 'gate-hooks-root'
         [void][IO.Directory]::CreateDirectory($script:GitHooksRoot)
         Initialize-GateGitHooks $script:GitHooksRoot
+        function Restore-GateFixtureModule {
+            Import-Module $script:GateModule -Force
+            Initialize-GateGitHooks $script:GitHooksRoot
+        }
+        function Restore-ClosureFixtureModule {
+            Import-Module (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1') -Force
+        }
         function Write-FixtureJson([string]$Path,$Value) { [IO.File]::WriteAllText($Path,($Value | ConvertTo-Json -Depth 30),(New-Object `
             Text.UTF8Encoding($false))) }
         function Invoke-SourceFixtureGit([string]$Root,[string[]]$Arguments){$output=@(& git -c core.autocrlf=false -C $Root @Arguments 2>&1)
@@ -106,6 +113,19 @@ Describe 'Authority-owned consumer source gate' {
         $driver = @($general.files | Where-Object path -eq 'scripts/Validate.ps1')[0]
         $driver.disposition | Should Be 'delete'
         $driver.reason | Should Match 'historical evidence remains in Git and central authority records'
+        $darktide = @($manifest.repositories | Where-Object id -eq 'skill-darktide-translate')[0]
+        foreach ($path in @(
+                'tests/LocalizationWorkset.Tests.ps1','tests/ModUpdateAutomation.Tests.ps1',
+                'tests/Schema15Coordination.Tests.ps1','tests/Schema15SourceAcquisition.Tests.ps1',
+                'tests/SkillContract.Tests.ps1'
+            )) {
+            $record = @($darktide.files | Where-Object path -eq $path)[0]
+            $record.disposition | Should Be 'update-tests'
+            $record.expectedOutcome | Should Be 'rewrite'
+            $record.reason | Should Match 'dot-sources tests/TestSupport.ps1'
+        }
+        @($darktide.prerequisites | Where-Object id -eq 'portable-11').Count | Should Be 0
+        @($darktide.prerequisites | Where-Object id -eq 'replace-legacy-pre-push').Count | Should Be 1
     }
 
     # Scenario: Synthetic retained files use the supported PowerShell folds, unsafe parameter forms, aliases, and text encodings.
@@ -121,18 +141,34 @@ Describe 'Authority-owned consumer source gate' {
         $legacy = Join-Path $root 'scripts/Legacy.ps1'
         [IO.File]::WriteAllText($legacy, 'param()', [Text.UTF8Encoding]::new($false))
         $powershell = @'
-. ('scripts/' + 'Legacy.ps1')
-Copy-Item -Lit $source -Destination ('scripts/' + 'Legacy.ps1')
-Set-Content -Path $dynamic -Value 'x'
-sc $dynamic 'x'
-Out-File -FilePath $dynamic
-Move-Item -Path $source -Destination $dynamic
-mv $source $dynamic
-$cast = ([string]('scripts/' + 'Legacy.ps1'))
+. 'scripts/sub/../Legacy.ps1'
+$binary = 'scripts','Legacy.ps1' -join '/'
+$unary = -join ('scripts/','Legacy.ps1')
+$array = @('scripts','Legacy.ps1') -join '/'
+$format = 'scripts/{0}.{1}' -f 'Legacy','ps1'
+'scripts/Legacy.ps1' + ';' + ('scripts/' + 'Legacy.ps1')
+Copy-Item -Path ([string]$source) -Destination 'scripts/Legacy.ps1'
+Copy-Item -Lit $source -Destination 'scripts/Legacy.ps1'
+Write-Output 'scripts/Legacy.ps1'
 '@
         [IO.File]::WriteAllText(
             (Join-Path $root 'scripts/Retained.ps1'),
             $powershell,
+            [Text.UTF8Encoding]::new($false)
+        )
+        $dynamicCommands = @(
+            'Get-Content $dynamic','Test-Path $dynamic','Get-Item $dynamic','Get-ChildItem $dynamic',
+            'Resolve-Path $dynamic','Set-Content -Path $dynamic -Value x','Out-File -FilePath $dynamic',
+            'Import-PowerShellDataFile $dynamic','Copy-Item $dynamic','Move-Item $dynamic','Import-Module $dynamic',
+            'gc $dynamic','cat $dynamic','type $dynamic','gi $dynamic','ls $dynamic','dir $dynamic','gci $dynamic',
+            'cp $dynamic','copy $dynamic','mv $dynamic','move $dynamic','ipmo $dynamic',
+            '. $dynamic','& $dynamic','[IO.File]::ReadAllText($dynamic)',
+            '[IO.Directory]::GetFiles($dynamic)',
+            '[System.Management.Automation.Language.Parser]::ParseFile($dynamic,[ref]$null,[ref]$null)'
+        )
+        [IO.File]::WriteAllText(
+            (Join-Path $root 'scripts/dynamic.ps1'),
+            ($dynamicCommands -join "`n") + "`n",
             [Text.UTF8Encoding]::new($false)
         )
         [IO.File]::WriteAllText(
@@ -161,6 +197,9 @@ $cast = ([string]('scripts/' + 'Legacy.ps1'))
             [ordered]@{ path='scripts/Retained.ps1'
              disposition='retain'
              reason='fixture retained' },
+            [ordered]@{ path='scripts/dynamic.ps1'
+             disposition='retain'
+             reason='fixture dynamic consumers' },
             [ordered]@{ path='scripts/reference.py'
              disposition='retain'
              reason='fixture retained' },
@@ -174,6 +213,25 @@ $cast = ([string]('scripts/' + 'Legacy.ps1'))
              disposition='retain'
              reason='fixture retained' }
         )
+        $retainedOid = Get-SourceFixtureGitScalar $root @('rev-parse','HEAD:scripts/Retained.ps1')
+        $lines = $powershell -split "`n"
+        $exemptions = @(
+            [ordered]@{
+                file='scripts/Retained.ps1';blobOid=$retainedOid;line=7
+                column=$lines[6].IndexOf('scripts/Legacy.ps1')+1;occurrenceOrdinal=1
+                targetPath='scripts/Legacy.ps1';reason='Blocked by cast source operand.'
+            },
+            [ordered]@{
+                file='scripts/Retained.ps1';blobOid=$retainedOid;line=8
+                column=$lines[7].IndexOf('scripts/Legacy.ps1')+1;occurrenceOrdinal=1
+                targetPath='scripts/Legacy.ps1';reason='Blocked by abbreviated parameter.'
+            },
+            [ordered]@{
+                file='scripts/Retained.ps1';blobOid=$retainedOid;line=9
+                column=$lines[8].IndexOf('scripts/Legacy.ps1')+1;occurrenceOrdinal=1
+                targetPath='scripts/Legacy.ps1';reason='Message-only literal.'
+            }
+        )
         $manifest = [ordered]@{ schemaVersion=1
          repositories=@([ordered]@{
                     id='fixture'
@@ -183,18 +241,257 @@ $cast = ([string]('scripts/' + 'Legacy.ps1'))
                      inventoryTree=$tree
                      requiredRepositoryChecks=@()
                      files=$files
+                      literalReferenceExemptions=$exemptions
                 }) }
         $manifestPath = Join-Path $TestDrive 'closure-golden.json'
         Write-FixtureJson $manifestPath $manifest
         $result = Get-ConsumerManifestClosure -RepositoryRoot $root -Commit $commit -Stage inventory `
             -Manifest $manifestPath -RepositoryId fixture -AuthorityRoot $script:RepositoryRoot
         $result.result | Should Be FAILED
-        $result.counts.legacyReference | Should BeGreaterOrEqual 4
-        $result.counts.dynamicReference | Should BeGreaterOrEqual 5
+        $result.counts.scannedFiles | Should Be 6
+        $result.counts.legacyReference | Should Be 11
+        $result.counts.parseError | Should Be 0
+        $result.counts.templateIntegrity | Should Be 0
+        $result.counts.splitSourcePresent | Should Be 0
+        $result.counts.updateTestsOutcome | Should Be 0
+        $result.counts.staleExemption | Should Be 2
+        $result.counts.exemptedReference | Should Be 1
+        $result.counts.dynamicReference | Should Be 29
         $result.counts.documentationReference | Should Be 1
         $result.counts.binary | Should Be 1
         @($result.violations | Where-Object file -eq 'scripts/reference.py').Count | Should Be 1
         @($result.violations | Where-Object file -eq 'scripts/utf16.ps1').Count | Should Be 1
+        @($result.violations | Where-Object {
+                $_.file -eq 'scripts/reference.py' -and $_.kind -eq 'legacy-reference' -and
+                $_.line -eq 1 -and $_.column -eq 9 -and $_.occurrenceOrdinal -eq 1
+            }).Count | Should Be 1
+        @($result.violations | Where-Object {
+                $_.file -eq 'scripts/utf16.ps1' -and $_.kind -eq 'legacy-reference' -and
+                $_.line -eq 1 -and $_.column -eq 4 -and $_.occurrenceOrdinal -eq 1
+            }).Count | Should Be 1
+        @($result.violations | Where-Object {
+                $_.kind -eq 'stale-exemption' -and $_.file -eq 'scripts/Retained.ps1' -and
+                $_.line -eq 7 -and $_.column -eq ($lines[6].IndexOf('scripts/Legacy.ps1') + 1) -and
+                $_.occurrenceOrdinal -eq 1 -and $_.targetPath -eq 'scripts/Legacy.ps1'
+            }).Count | Should Be 1
+        @($result.violations | Where-Object {
+                $_.kind -eq 'stale-exemption' -and $_.file -eq 'scripts/Retained.ps1' -and
+                $_.line -eq 8 -and $_.column -eq ($lines[7].IndexOf('scripts/Legacy.ps1') + 1) -and
+                $_.occurrenceOrdinal -eq 1 -and $_.targetPath -eq 'scripts/Legacy.ps1'
+            }).Count | Should Be 1
+        $forms = @($result.violations | Where-Object {
+                $_.file -eq 'scripts/Retained.ps1' -and $_.kind -eq 'legacy-reference'
+            })
+        @($forms).Count | Should Be 9
+        @($forms | Where-Object { $_.line -eq 1 -and $_.column -eq 4 -and $_.occurrenceOrdinal -eq 1 }).Count | Should Be 1
+        @($forms | Where-Object { $_.line -eq 2 -and $_.column -eq 11 -and $_.occurrenceOrdinal -eq 1 }).Count | Should Be 1
+        @($forms | Where-Object { $_.line -eq 3 -and $_.column -eq 10 -and $_.occurrenceOrdinal -eq 1 }).Count | Should Be 1
+        @($forms | Where-Object { $_.line -eq 4 -and $_.column -eq 10 -and $_.occurrenceOrdinal -eq 1 }).Count | Should Be 1
+        @($forms | Where-Object { $_.line -eq 5 -and $_.column -eq 11 -and $_.occurrenceOrdinal -eq 1 }).Count | Should Be 1
+        @($forms | Where-Object { $_.line -eq 6 -and $_.column -eq 2 -and $_.occurrenceOrdinal -eq 1 }).Count | Should Be 1
+        @($forms | Where-Object { $_.line -eq 6 -and $_.column -eq 1 -and $_.occurrenceOrdinal -eq 2 }).Count | Should Be 1
+        @($forms | Where-Object { $_.line -in @(7,8) -and $_.kind -eq 'legacy-reference' }).Count | Should Be 2
+        for ($index = 0; $index -lt $dynamicCommands.Count; $index++) {
+            $expectedLine = $index + 1
+            $expectedColumn = $dynamicCommands[$index].IndexOf('$dynamic') + 1
+            @($result.advisories | Where-Object {
+                    $_.kind -eq 'dynamic-reference' -and $_.file -eq 'scripts/dynamic.ps1' -and
+                    $_.line -eq $expectedLine -and $_.column -eq $expectedColumn -and
+                    $_.reference -eq '$dynamic' -and $null -eq $_.targetPath
+                }).Count | Should Be 1
+        }
+        @($result.advisories | Where-Object {
+                $_.kind -eq 'dynamic-reference' -and $_.file -eq 'scripts/Retained.ps1' -and
+                $_.line -eq 7 -and $_.column -eq 17 -and $_.reference -eq '([string]$source)'
+            }).Count | Should Be 1
+        @($result.advisories | Where-Object {
+                $_.kind -eq 'documentation-reference' -and $_.file -eq 'docs/history.md' -and
+                $_.line -eq 1 -and $_.column -eq 12 -and $_.targetPath -eq 'scripts/Legacy.ps1'
+            }).Count | Should Be 1
+        @($result.advisories | Where-Object {
+                $_.kind -eq 'binary' -and $_.file -eq 'scripts/payload.bin' -and
+                $null -eq $_.line -and $null -eq $_.column -and $null -eq $_.reference -and $null -eq $_.targetPath
+            }).Count | Should Be 1
+    }
+
+    # Scenario: Inventory and conversion each produce every structural violation kind with an exact identity and count.
+    # Purpose: Keep parse, stale-exemption, template, split, and update outcome failures independently observable.
+    It 'InterT23_reports_exact_inventory_and_conversion_violation_unions' {
+        Import-Module (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1') -Force
+        $inventoryRoot = Join-Path $TestDrive 'closure-inventory-kinds'
+        [void][IO.Directory]::CreateDirectory((Join-Path $inventoryRoot 'scripts'))
+        [void](Invoke-SourceFixtureGit $inventoryRoot @('init','-q','-b','main'))
+        [void](Invoke-SourceFixtureGit $inventoryRoot @('config','user.name','Fixture'))
+        [void](Invoke-SourceFixtureGit $inventoryRoot @('config','user.email','fixture@example.test'))
+        [IO.File]::WriteAllText((Join-Path $inventoryRoot 'scripts/Legacy.ps1'),'param()',[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $inventoryRoot 'scripts/Bad.ps1'),'if (',[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $inventoryRoot 'scripts/Clean.ps1'),'param()',[Text.UTF8Encoding]::new($false))
+        [void](Invoke-SourceFixtureGit $inventoryRoot @('add','.'))
+        [void](Invoke-SourceFixtureGit $inventoryRoot @('commit','-q','-m','inventory kinds'))
+        $inventoryCommit = Get-SourceFixtureGitScalar $inventoryRoot @('rev-parse','HEAD')
+        $inventoryTree = Get-SourceFixtureGitScalar $inventoryRoot @('rev-parse','HEAD^{tree}')
+        $cleanOid = Get-SourceFixtureGitScalar $inventoryRoot @('rev-parse','HEAD:scripts/Clean.ps1')
+        $inventoryManifest = [ordered]@{schemaVersion=1;repositories=@([ordered]@{
+                    id='inventory-kinds';repository='https://example.test/inventory.git';status='ready'
+                    inventoryCommit=$inventoryCommit;inventoryTree=$inventoryTree;requiredRepositoryChecks=@()
+                    files=@(
+                        [ordered]@{path='scripts/Legacy.ps1';disposition='delete';reason='legacy'},
+                        [ordered]@{path='scripts/Bad.ps1';disposition='retain';reason='parse fixture'},
+                        [ordered]@{path='scripts/Clean.ps1';disposition='retain';reason='stale fixture'}
+                    )
+                    literalReferenceExemptions=@([ordered]@{
+                            file='scripts/Clean.ps1';blobOid=$cleanOid;line=1;column=1;occurrenceOrdinal=1
+                            targetPath='scripts/Legacy.ps1';reason='Deliberately stale fixture.'
+                        })
+                })}
+        $inventoryManifestPath = Join-Path $TestDrive 'closure-inventory-kinds.json'
+        Write-FixtureJson $inventoryManifestPath $inventoryManifest
+        $inventoryResult = Get-ConsumerManifestClosure -RepositoryRoot $inventoryRoot -Commit $inventoryCommit `
+            -Stage inventory -Manifest $inventoryManifestPath -RepositoryId inventory-kinds `
+            -AuthorityRoot $script:RepositoryRoot
+        $inventoryResult.result | Should Be 'FAILED'
+        @($inventoryResult.violations).Count | Should Be 2
+        @($inventoryResult.violations | Where-Object kind -eq 'parse-error').Count | Should Be 1
+        @($inventoryResult.violations | Where-Object {
+                $_.kind -eq 'parse-error' -and $_.file -eq 'scripts/Bad.ps1' -and $_.line -eq 1 -and $_.column -eq 5
+            }).Count | Should Be 1
+        @($inventoryResult.violations | Where-Object {
+                $_.kind -eq 'stale-exemption' -and $_.file -eq 'scripts/Clean.ps1' -and
+                $_.line -eq 1 -and $_.column -eq 1 -and $_.occurrenceOrdinal -eq 1
+            }).Count | Should Be 1
+        $inventoryResult.counts.scannedFiles | Should Be 2
+        $inventoryResult.counts.parseError | Should Be 1
+        $inventoryResult.counts.staleExemption | Should Be 1
+
+        $conversionRoot = Join-Path $TestDrive 'closure-conversion-kinds'
+        foreach ($directory in @('scripts','tests','.github/workflows')) {
+            [void][IO.Directory]::CreateDirectory((Join-Path $conversionRoot $directory))
+        }
+        [void](Invoke-SourceFixtureGit $conversionRoot @('init','-q','-b','main'))
+        [void](Invoke-SourceFixtureGit $conversionRoot @('config','user.name','Fixture'))
+        [void](Invoke-SourceFixtureGit $conversionRoot @('config','user.email','fixture@example.test'))
+        foreach ($path in @(
+                'scripts/Split.ps1','tests/Delete.Tests.ps1','tests/Rewrite.Tests.ps1',
+                'scripts/Invoke-PinnedAuthority.ps1','.github/workflows/consumer-gate.yml',
+                '.github/workflows/consumer-gate-transition.yml'
+            )) {
+            [IO.File]::WriteAllText((Join-Path $conversionRoot $path),'fixture mismatch',[Text.UTF8Encoding]::new($false))
+        }
+        [void](Invoke-SourceFixtureGit $conversionRoot @('add','.'))
+        [void](Invoke-SourceFixtureGit $conversionRoot @('commit','-q','-m','conversion base'))
+        $conversionCommit = Get-SourceFixtureGitScalar $conversionRoot @('rev-parse','HEAD')
+        $conversionTree = Get-SourceFixtureGitScalar $conversionRoot @('rev-parse','HEAD^{tree}')
+        $conversionManifest = [ordered]@{schemaVersion=1;repositories=@([ordered]@{
+                    id='conversion-kinds';repository='https://example.test/conversion.git';status='ready'
+                    inventoryCommit=$conversionCommit;inventoryTree=$conversionTree;requiredRepositoryChecks=@()
+                    files=@(
+                        [ordered]@{path='scripts/Split.ps1';disposition='split';target='scripts/New.ps1';reason='split'},
+                        [ordered]@{path='tests/Delete.Tests.ps1';disposition='update-tests';expectedOutcome='delete';reason='delete'},
+                        [ordered]@{path='tests/Rewrite.Tests.ps1';disposition='update-tests';expectedOutcome='rewrite';reason='rewrite'},
+                        [ordered]@{path='scripts/Invoke-PinnedAuthority.ps1';disposition='retain';reason='template'},
+                        [ordered]@{path='.github/workflows/consumer-gate.yml';disposition='retain';reason='template'},
+                        [ordered]@{path='.github/workflows/consumer-gate-transition.yml';disposition='retain';reason='template'}
+                    )
+                })}
+        $conversionManifestPath = Join-Path $TestDrive 'closure-conversion-kinds.json'
+        Write-FixtureJson $conversionManifestPath $conversionManifest
+        $conversionResult = Get-ConsumerManifestClosure -RepositoryRoot $conversionRoot -Commit $conversionCommit `
+            -Stage conversion -InventoryCommit $conversionCommit -Manifest $conversionManifestPath `
+            -RepositoryId conversion-kinds -AuthorityRoot $script:RepositoryRoot
+        $conversionResult.result | Should Be 'FAILED'
+        @($conversionResult.violations).Count | Should Be 6
+        @($conversionResult.violations | Where-Object kind -eq 'template-integrity').Count | Should Be 3
+        @($conversionResult.violations | Where-Object {
+                $_.kind -eq 'split-source-present' -and $_.file -eq 'scripts/Split.ps1'
+            }).Count | Should Be 1
+        @($conversionResult.violations | Where-Object {
+                $_.kind -eq 'update-tests-outcome' -and $_.file -eq 'tests/Delete.Tests.ps1' -and
+                $_.expectedOutcome -eq 'delete' -and $_.actual -eq 'unchanged'
+            }).Count | Should Be 1
+        @($conversionResult.violations | Where-Object {
+                $_.kind -eq 'update-tests-outcome' -and $_.file -eq 'tests/Rewrite.Tests.ps1' -and
+                $_.expectedOutcome -eq 'rewrite' -and $_.actual -eq 'unchanged'
+            }).Count | Should Be 1
+        $conversionResult.counts.scannedFiles | Should Be 3
+        $conversionResult.counts.templateIntegrity | Should Be 3
+        $conversionResult.counts.splitSourcePresent | Should Be 1
+        $conversionResult.counts.updateTestsOutcome | Should Be 2
+    }
+
+    # Scenario: Each cmdlet and alias row is independently removed from an external copy of the path-consumer tables.
+    # Purpose: Every table row has a golden vector that fails when that exact production mapping is deleted.
+    It 'InterT24_detects_each_path_consumer_table_deletion_mutation' {
+        $cases = @(
+            @{Kind='consumer';Name='Get-Content';Command='Get-Content $dynamic'},
+            @{Kind='consumer';Name='Test-Path';Command='Test-Path $dynamic'},
+            @{Kind='consumer';Name='Get-Item';Command='Get-Item $dynamic'},
+            @{Kind='consumer';Name='Get-ChildItem';Command='Get-ChildItem $dynamic'},
+            @{Kind='consumer';Name='Resolve-Path';Command='Resolve-Path $dynamic'},
+            @{Kind='consumer';Name='Set-Content';Command='Set-Content -Path $dynamic -Value x'},
+            @{Kind='consumer';Name='Out-File';Command='Out-File -FilePath $dynamic'},
+            @{Kind='consumer';Name='Import-PowerShellDataFile';Command='Import-PowerShellDataFile $dynamic'},
+            @{Kind='consumer';Name='Copy-Item';Command='Copy-Item $dynamic'},
+            @{Kind='consumer';Name='Move-Item';Command='Move-Item $dynamic'},
+            @{Kind='consumer';Name='Import-Module';Command='Import-Module $dynamic'},
+            @{Kind='alias';Name='gc';Command='gc $dynamic'},
+            @{Kind='alias';Name='cat';Command='cat $dynamic'},
+            @{Kind='alias';Name='type';Command='type $dynamic'},
+            @{Kind='alias';Name='gi';Command='gi $dynamic'},
+            @{Kind='alias';Name='ls';Command='ls $dynamic'},
+            @{Kind='alias';Name='dir';Command='dir $dynamic'},
+            @{Kind='alias';Name='gci';Command='gci $dynamic'},
+            @{Kind='alias';Name='cp';Command='cp $dynamic'},
+            @{Kind='alias';Name='copy';Command='copy $dynamic'},
+            @{Kind='alias';Name='mv';Command='mv $dynamic'},
+            @{Kind='alias';Name='move';Command='move $dynamic'},
+            @{Kind='alias';Name='ipmo';Command='ipmo $dynamic'}
+        )
+        $modulePath = Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1'
+        $moduleText = Get-Content -Raw -Encoding UTF8 $modulePath
+        foreach ($case in $cases) {
+            $root = Join-Path $TestDrive ("mapping-" + $case.Name)
+            [void][IO.Directory]::CreateDirectory((Join-Path $root 'scripts'))
+            [void](Invoke-SourceFixtureGit $root @('init','-q','-b','main'))
+            [void](Invoke-SourceFixtureGit $root @('config','user.name','Fixture'))
+            [void](Invoke-SourceFixtureGit $root @('config','user.email','fixture@example.test'))
+            [IO.File]::WriteAllText((Join-Path $root 'scripts/Legacy.ps1'),'param()',[Text.UTF8Encoding]::new($false))
+            [IO.File]::WriteAllText((Join-Path $root 'scripts/Dynamic.ps1'),$case.Command,[Text.UTF8Encoding]::new($false))
+            [void](Invoke-SourceFixtureGit $root @('add','.'))
+            [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','mapping fixture'))
+            $commit = Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
+            $tree = Get-SourceFixtureGitScalar $root @('rev-parse','HEAD^{tree}')
+            $manifestPath = Join-Path $TestDrive ("mapping-" + $case.Name + '.json')
+            Write-FixtureJson $manifestPath ([ordered]@{schemaVersion=1;repositories=@([ordered]@{
+                            id='mapping';repository='https://example.test/mapping.git';status='ready'
+                            inventoryCommit=$commit;inventoryTree=$tree;requiredRepositoryChecks=@()
+                            files=@(
+                                [ordered]@{path='scripts/Legacy.ps1';disposition='delete';reason='legacy'},
+                                [ordered]@{path='scripts/Dynamic.ps1';disposition='retain';reason='dynamic'}
+                            )
+                        })})
+            $parameters = @{
+                RepositoryRoot=$root;Commit=$commit;Stage='inventory';Manifest=$manifestPath
+                RepositoryId='mapping';AuthorityRoot=$script:RepositoryRoot
+            }
+            $production = Get-ConsumerManifestClosure @parameters
+            $production.counts.dynamicReference | Should Be 1
+
+            $pattern = "(?m)^\s*'" + [regex]::Escape($case.Name) + "'\s*=.*\r?\n"
+            $mutatedText = [regex]::Replace($moduleText, $pattern, '', 1)
+            $mutatedText | Should Not Be $moduleText
+            $mutantPath = Join-Path $TestDrive ("ConsumerManifestClosure-mutant-" + $case.Name + '.psm1')
+            [IO.File]::WriteAllText($mutantPath, $mutatedText, [Text.UTF8Encoding]::new($false))
+            $mutantModule = Import-Module $mutantPath -Force -PassThru
+            try {
+                $mutant = Get-ConsumerManifestClosure @parameters
+                $mutant.counts.dynamicReference | Should Be 0
+                $mutant.counts.dynamicReference | Should Not Be $production.counts.dynamicReference
+            }
+            finally {
+                Remove-Module $mutantModule -Force
+                Restore-ClosureFixtureModule
+            }
+        }
     }
 
     # Scenario: Conversion starts with exact authority templates, then changes a protected byte, adds a workflow, or restores a deleted legacy path.
@@ -252,37 +549,75 @@ $cast = ([string]('scripts/' + 'Legacy.ps1'))
             }
             $cancellation=[Threading.CancellationTokenSource]::new()
             if($outcome-eq'cancellation'){$cancellation.Cancel()}
+            $assetName = Get-GateReleaseAssetName '7.99.1' $(if ($IsWindows) { 'windows' } elseif ($IsMacOS) { 'macos' } else { 'linux' })
+            $assetBytes = [Text.UTF8Encoding]::new($false).GetBytes('fixture archive')
+            $assetHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($assetBytes)).ToLowerInvariant()
+            $observation = [pscustomobject]@{ Headers = $null }
             $transport={param($operation,$uri,$headers,$destination,$token)
-                if($outcome-eq'http-error'){throw [Net.WebException]::new('fixture HTTP error')}
-                if($outcome-eq'timeout'){throw [TimeoutException]::new('fixture timeout')}
-                if($operation-eq'metadata'){return [pscustomobject]@{tag='fixture'}}
-                [IO.File]::WriteAllBytes($destination,[byte[]](1,2,3))
+                $observation.Headers = $headers
+                if($outcome-eq'http-error'){throw [Net.WebException]::new("fixture HTTP error $sentinel")}
+                if($outcome-eq'timeout'){throw [TimeoutException]::new("fixture timeout $sentinel")}
+                if($operation-eq'metadata'){
+                    return [pscustomobject]@{
+                        draft=$false
+                        prerelease=$false
+                        tag_name='v7.99.1'
+                        assets=@(
+                            [pscustomobject]@{
+                                name=$assetName
+                                browser_download_url="https://github.com/PowerShell/PowerShell/releases/download/v7.99.1/$assetName"
+                            },
+                            [pscustomobject]@{
+                                name='hashes.sha256'
+                                browser_download_url='https://github.com/PowerShell/PowerShell/releases/download/v7.99.1/hashes.sha256'
+                            }
+                        )
+                    }
+                }
+                if ([IO.Path]::GetFileName($destination) -eq 'hashes.sha256') {
+                    [IO.File]::WriteAllText($destination, "$assetHash  $assetName`n", [Text.UTF8Encoding]::new($false))
+                }
+                else {
+                    [IO.File]::WriteAllBytes($destination,$assetBytes)
+                }
             }.GetNewClosure()
             $enteredValidate=$false
             $captured=''
             $action={
-                $metadata=Invoke-GateAcquisitionRequest metadata ([uri]'https://example.test/release') @{'Authorization'="Bearer $sentinel"} `
-                    $null $transport $cancellation.Token
-                if ($outcome -eq 'success') {
-                    Invoke-GateAcquisitionRequest download ([uri]'https://example.test/archive') `
-                        @{'Authorization'="Bearer $sentinel"} (Join-Path $root 'download.bin') `
-                        $transport $cancellation.Token
-                }
-                [IO.File]::WriteAllText((Join-Path $root 'receipt.json'),'{"result":"clean"}')
-                [IO.File]::WriteAllText($summary,'clean summary')
-                [IO.File]::WriteAllText((Join-Path $artifacts 'artifact.txt'),'clean artifact')
+                [IO.File]::WriteAllText((Join-Path $root 'receipt.json'),$sentinel)
+                [IO.File]::WriteAllText($summary,$sentinel)
+                [IO.File]::WriteAllText((Join-Path $artifacts 'artifact.txt'),$sentinel)
+                [void](Install-GatePowerShell $script:RepositoryRoot $root `
+                        $(if ($IsWindows) { 'windows' } elseif ($IsMacOS) { 'macos' } else { 'linux' }) `
+                        $sentinel $transport $cancellation.Token {
+                        param($authorityRoot,$pwshRoot,$archive,$policy)
+                        [pscustomobject]@{
+                            executablePath=(Get-Process -Id $PID).Path
+                            executableSha256=('0' * 64)
+                            version='7.99.1'
+                            archiveSha256=$assetHash
+                        }
+                    })
             }.GetNewClosure()
-            try{$records=@(Invoke-GateCredentialScopedPreparation $root $sentinel $action *>&1)
-            $captured=$records-join"`n"
-            if($outcome-ne'success'){throw 'Expected acquisition failure.'}
-            $enteredValidate=$true}catch{if($outcome-eq'success'){throw}
-            $captured+=[string]$_.Exception.Message}
+            try{
+                $records=@(Invoke-GateCredentialScopedPreparation $root $sentinel $action *>&1)
+                $captured=$records-join"`n"
+                $enteredValidate=$true
+            }
+            catch {
+                $captured+=[string]$_.Exception.Message
+            }
             $captured|Should Not Match ([regex]::Escape($sentinel))
-            if($outcome-eq'success'){$enteredValidate|Should Be $true}else{$enteredValidate|Should Be $false}
+            $captured | Should Match 'Credential sentinel remained in a gate-owned output surface'
+            $enteredValidate|Should Be $false
+            if ($outcome -ne 'cancellation') {
+                $null -ne $observation.Headers | Should Be $true
+                $observation.Headers.ContainsKey('Authorization') | Should Be $false
+            }
             foreach ($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')) {
                 [Environment]::GetEnvironmentVariable($name,'Process') | Should BeNullOrEmpty
             }
-            Assert-GateCredentialAbsent $root $sentinel
+            { Assert-GateCredentialAbsent $root $sentinel } | Should Throw 'Credential sentinel remained'
             $cancellation.Dispose()
         }
         [Environment]::SetEnvironmentVariable('GITHUB_STEP_SUMMARY',$null,'Process')
@@ -296,6 +631,310 @@ $cast = ([string]('scripts/' + 'Legacy.ps1'))
         $enteredValidate|Should Be $false
         $entry=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-ConsumerSourceGate.ps1')
         $entry|Should Match 'Invoke-GateCredentialScopedPreparation \$WorkRoot \$token'
+    }
+
+    # Scenario: One cleanup statement at a time is deleted from a module copy outside the worktree.
+    # Purpose: Prove header, alias, WorkRoot, summary, and artifact cleanup assertions kill their corresponding mutants.
+    It 'UnitT32_detects_each_deleted_credential_cleanup_point_mutation' {
+        $modulePath = Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerGate.psm1'
+        $moduleText = Get-Content -Raw -Encoding UTF8 $modulePath
+        function Import-CredentialMutant([string]$Name,[string]$Text) {
+            $path = Join-Path $TestDrive "ConsumerGate-credential-mutant-$Name.psm1"
+            [IO.File]::WriteAllText($path, $Text, [Text.UTF8Encoding]::new($false))
+            Import-Module $path -Force -PassThru
+        }
+        function Replace-CredentialFunction(
+            [string]$Source,
+            [string]$FunctionName,
+            [string]$Old,
+            [string]$New
+        ) {
+            $tokens = $null
+            $errors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseInput($Source, [ref]$tokens, [ref]$errors)
+            @($errors).Count | Should Be 0
+            $function = @($ast.FindAll({param($node)
+                        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                        $node.Name -ceq $FunctionName
+                    }, $true))[0]
+            $replacement = $function.Extent.Text.Replace($Old, $New)
+            $replacement | Should Not Be $function.Extent.Text
+            $Source.Substring(0,$function.Extent.StartOffset) + $replacement + $Source.Substring($function.Extent.EndOffset)
+        }
+
+        $headerMutantText = $moduleText.Replace("`$headers.Remove('Authorization')", '$false')
+        $headerMutantText | Should Not Be $moduleText
+        $headerModule = Import-CredentialMutant header $headerMutantText
+        try {
+            $observation = [pscustomobject]@{Headers=$null}
+            $transport = {param($operation,$uri,$headers,$destination,$token)
+                $observation.Headers = $headers
+                throw 'fixture transport stop'
+            }.GetNewClosure()
+            & $headerModule {
+                param($root,$sentinel,$transport)
+                try { Install-GatePowerShell $root $root 'windows' $sentinel $transport } catch {}
+            } $script:RepositoryRoot 'mutation-token' $transport
+            $observation.Headers.ContainsKey('Authorization') | Should Be $true
+        }
+        finally {
+            Remove-Module $headerModule -Force
+            Restore-GateFixtureModule
+        }
+
+        $installEnvironmentCleanup = "[Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN',`$null,'Process')"
+        $installMutantText = Replace-CredentialFunction $moduleText 'Install-GatePowerShell' `
+            $installEnvironmentCleanup '$null = $Token'
+        $installModule = Import-CredentialMutant install-environment $installMutantText
+        try {
+            [Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN','mutation-token','Process')
+            & $installModule {
+                param($root)
+                try {
+                    Install-GatePowerShell $root $root 'windows' 'mutation-token' { throw 'fixture transport stop' }
+                }
+                catch {}
+            } $script:RepositoryRoot
+            [Environment]::GetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN','Process') | Should Be 'mutation-token'
+        }
+        finally {
+            [Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN',$null,'Process')
+            Remove-Module $installModule -Force
+            Restore-GateFixtureModule
+        }
+
+        $resolverPreclear = "foreach(`$name in @('GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable(`$name,`$null,'Process')}"
+        $preclearMutantText = Replace-CredentialFunction $moduleText 'Invoke-GateResolver' $resolverPreclear '$null = $Token'
+        $preclearModule = Import-CredentialMutant resolver-preclear $preclearMutantText
+        $preclearReceipt = Join-Path $TestDrive 'mutation-preclear-receipt.json'
+        $preclearDump = Join-Path $TestDrive 'mutation-preclear-environment.json'
+        try {
+            foreach ($name in @('GITHUB_TOKEN','GH_TOKEN')) {
+                [Environment]::SetEnvironmentVariable($name,'mutation-token','Process')
+            }
+            & $preclearModule {
+                param($root,$receipt,$environmentDump)
+                $processInvoker = {param($exe,$args,$tool,$output)
+                        $dump = [ordered]@{github=$env:GITHUB_TOKEN;gh=$env:GH_TOKEN}
+                        [IO.File]::WriteAllText($environmentDump,($dump|ConvertTo-Json),[Text.UTF8Encoding]::new($false))
+                        [IO.File]::WriteAllText($output,'{}',[Text.UTF8Encoding]::new($false))
+                        0
+                    }.GetNewClosure()
+                [void](Invoke-GateResolver (Get-Process -Id $PID).Path $root $root pester run $receipt latest `
+                        'mutation-token' $processInvoker)
+            } $script:RepositoryRoot $preclearReceipt $preclearDump
+            $preclearEnvironment = Get-Content -Raw -LiteralPath $preclearDump | ConvertFrom-Json
+            $preclearEnvironment.github | Should Be 'mutation-token'
+            $preclearEnvironment.gh | Should Be 'mutation-token'
+        }
+        finally {
+            foreach ($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')) {
+                [Environment]::SetEnvironmentVariable($name,$null,'Process')
+            }
+            Remove-Module $preclearModule -Force
+            Restore-GateFixtureModule
+        }
+
+        $cleanupStatement = "[Environment]::SetEnvironmentVariable(`$name,`$null,'Process')"
+        foreach ($functionName in @('Invoke-GateResolver','Invoke-GateCredentialScopedPreparation')) {
+            $oldCleanup = if ($functionName -eq 'Invoke-GateResolver') {
+                "}finally{foreach(`$name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){$cleanupStatement}"
+            }
+            else {
+                $cleanupStatement
+            }
+            $newCleanup = if ($functionName -eq 'Invoke-GateResolver') {
+                "}finally{foreach(`$name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){`$null = `$name}"
+            }
+            else {
+                '$null = $name'
+            }
+            $mutantText = Replace-CredentialFunction $moduleText $functionName $oldCleanup $newCleanup
+            $mutantModule = Import-CredentialMutant $functionName $mutantText
+            try {
+                foreach ($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')) {
+                    [Environment]::SetEnvironmentVariable($name,'mutation-token','Process')
+                }
+                if ($functionName -eq 'Invoke-GateResolver') {
+                    $receipt = Join-Path $TestDrive 'mutation-resolver-receipt.json'
+                    $environmentDump = Join-Path $TestDrive 'mutation-resolver-environment.json'
+                    & $mutantModule {
+                        param($root,$receipt,$environmentDump)
+                        $processInvoker = {param($exe,$args,$tool,$output)
+                                $dump = [ordered]@{
+                                    standard=$env:STANDARD_VALIDATION_GITHUB_API_TOKEN
+                                    github=$env:GITHUB_TOKEN
+                                    gh=$env:GH_TOKEN
+                                }
+                                [IO.File]::WriteAllText($environmentDump,($dump|ConvertTo-Json),[Text.UTF8Encoding]::new($false))
+                                [IO.File]::WriteAllText($output,'{}',[Text.UTF8Encoding]::new($false))
+                                0
+                            }.GetNewClosure()
+                        [void](Invoke-GateResolver (Get-Process -Id $PID).Path $root $root pester run $receipt latest `
+                                'mutation-token' $processInvoker)
+                    } $script:RepositoryRoot $receipt $environmentDump
+                    $childEnvironment = Get-Content -Raw -LiteralPath $environmentDump | ConvertFrom-Json
+                    $childEnvironment.standard | Should Be 'mutation-token'
+                    $childEnvironment.github | Should BeNullOrEmpty
+                    $childEnvironment.gh | Should BeNullOrEmpty
+                }
+                else {
+                    & $mutantModule {
+                        param($root)
+                        [void](Invoke-GateCredentialScopedPreparation $root '' { 'clean' })
+                    } $TestDrive
+                }
+                $remainingName = if ($functionName -eq 'Invoke-GateResolver') {
+                    'STANDARD_VALIDATION_GITHUB_API_TOKEN'
+                }
+                else {
+                    'GITHUB_TOKEN'
+                }
+                [Environment]::GetEnvironmentVariable($remainingName,'Process') | Should Be 'mutation-token'
+            }
+            finally {
+                foreach ($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')) {
+                    [Environment]::SetEnvironmentVariable($name,$null,'Process')
+                }
+                Remove-Module $mutantModule -Force
+                Restore-GateFixtureModule
+            }
+        }
+
+        $surfaceCases = @(
+            @{
+                Name='workroot'
+                Old='Get-ChildItem $WorkRoot -Recurse -File -Force -ErrorAction Stop'
+                New="Get-ChildItem (Join-Path `$WorkRoot 'missing') -Recurse -File -Force -ErrorAction SilentlyContinue"
+                Environment=$null
+            },
+            @{
+                Name='summary'
+                Old="@('GITHUB_STEP_SUMMARY','CONSUMER_GATE_ARTIFACT_PATHS')"
+                New="@('CONSUMER_GATE_ARTIFACT_PATHS')"
+                Environment='GITHUB_STEP_SUMMARY'
+            },
+            @{
+                Name='artifact'
+                Old="@('GITHUB_STEP_SUMMARY','CONSUMER_GATE_ARTIFACT_PATHS')"
+                New="@('GITHUB_STEP_SUMMARY')"
+                Environment='CONSUMER_GATE_ARTIFACT_PATHS'
+            }
+        )
+        foreach ($case in $surfaceCases) {
+            $mutantText = Replace-CredentialFunction $moduleText 'Get-GateCredentialSurfaceFiles' $case.Old $case.New
+            $mutantModule = Import-CredentialMutant $case.Name $mutantText
+            $root = Join-Path $TestDrive "surface-mutant-$($case.Name)"
+            [void][IO.Directory]::CreateDirectory($root)
+            $surface = if ($null -eq $case.Environment) { Join-Path $root 'token.txt' } else { Join-Path $TestDrive "outside-$($case.Name).txt" }
+            [IO.File]::WriteAllText($surface,'mutation-token',[Text.UTF8Encoding]::new($false))
+            if ($null -ne $case.Environment) {
+                [Environment]::SetEnvironmentVariable($case.Environment,$surface,'Process')
+            }
+            try {
+                & $mutantModule { param($root) Assert-GateCredentialAbsent $root 'mutation-token' } $root
+            }
+            finally {
+                if ($null -ne $case.Environment) {
+                    [Environment]::SetEnvironmentVariable($case.Environment,$null,'Process')
+                }
+                Remove-Module $mutantModule -Force
+                Restore-GateFixtureModule
+            }
+        }
+
+        $gateEntry = Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-ConsumerSourceGate.ps1')
+        $redactionStatement = '$message = $message.Replace([string]$tokenVariable.Value, ''[REDACTED]'')'
+        $entryAliasCleanup = "foreach(`$name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable(`$name,`$null,'Process')}"
+        $environmentObservation = @'
+$environmentDump = [ordered]@{
+    standard=$env:STANDARD_VALIDATION_GITHUB_API_TOKEN
+    github=$env:GITHUB_TOKEN
+    gh=$env:GH_TOKEN
+}
+[IO.File]::WriteAllText($env:CONSUMER_GATE_ENV_DUMP,($environmentDump|ConvertTo-Json),[Text.UTF8Encoding]::new($false))
+'@
+        $instrumentedEntry = $gateEntry.Replace($entryAliasCleanup,$entryAliasCleanup + "`n" + $environmentObservation)
+        $instrumentedEntry | Should Not Be $gateEntry
+        $redactionMutant = $instrumentedEntry.Replace($redactionStatement,'$message = $message')
+        $redactionMutant | Should Not Be $instrumentedEntry
+        $aliasCleanupMutant = $gateEntry.Replace($entryAliasCleanup,$environmentObservation)
+        $aliasCleanupMutant | Should Not Be $gateEntry
+        $entryStub = @'
+function Initialize-GateGitHooks { param($WorkRoot) }
+function Read-GateJson {
+    param($Path,$Context)
+    [pscustomobject]@{
+        triggerEvent='pull_request';baseRevision=('1' * 40);candidateRevision=('2' * 40)
+        runId='fixture';commit=('3' * 40)
+    }
+}
+function Assert-GateConfig { [pscustomobject]@{ManifestEntry=[pscustomobject]@{}} }
+function Assert-GateTransitionInventory {}
+function Assert-GateProtectedFiles {}
+function Invoke-GateManifestClosureCheck {}
+function Assert-GateExceptionSetUnchanged {}
+function Invoke-GateCredentialScopedPreparation {
+    param($WorkRoot,$Token,$Action)
+    throw "FAILED|fixture diagnostic $Token"
+}
+Export-ModuleMember -Function *
+'@
+        $redactionSentinel = 'redaction-mutation-token-sentinel'
+        $env:STANDARD_VALIDATION_GITHUB_API_TOKEN = $redactionSentinel
+        $env:GITHUB_TOKEN = 'entry-github-mutation-sentinel'
+        $env:GH_TOKEN = 'entry-gh-mutation-sentinel'
+        $env:CONSUMER_GATE_EVENT_REPOSITORY = 'https://example.test/fixture.git'
+        try {
+            foreach ($case in @(
+                    @{Name='production';Text=$instrumentedEntry;RedactionLeak=$false;AliasLeak=$false},
+                    @{Name='redaction-mutant';Text=$redactionMutant;RedactionLeak=$true;AliasLeak=$false},
+                    @{Name='alias-cleanup-mutant';Text=$aliasCleanupMutant;RedactionLeak=$false;AliasLeak=$true}
+                )) {
+                $caseRoot = Join-Path $TestDrive "entry-redaction-$($case.Name)"
+                $scriptRoot = Join-Path $caseRoot 'scripts/consumer'
+                foreach ($directory in @($scriptRoot,(Join-Path $caseRoot 'base'),(Join-Path $caseRoot 'candidate'),(Join-Path $caseRoot 'work'))) {
+                    [void][IO.Directory]::CreateDirectory($directory)
+                }
+                $entryPath = Join-Path $scriptRoot 'Invoke-ConsumerSourceGate.ps1'
+                [IO.File]::WriteAllText($entryPath,$case.Text,[Text.UTF8Encoding]::new($false))
+                [IO.File]::WriteAllText((Join-Path $scriptRoot 'ConsumerGate.psm1'),$entryStub,[Text.UTF8Encoding]::new($false))
+                $environmentDumpPath = Join-Path $caseRoot 'catch-environment.json'
+                $env:CONSUMER_GATE_ENV_DUMP = $environmentDumpPath
+                $output = @(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $entryPath `
+                        -Interface consumer-gate-v1 -Phase prepare -AuthorityBindingPath (Join-Path $caseRoot 'binding.json') `
+                        -BaseRoot (Join-Path $caseRoot 'base') -CandidateRoot (Join-Path $caseRoot 'candidate') `
+                        -WorkRoot (Join-Path $caseRoot 'work') -Platform windows 2>&1)
+                $LASTEXITCODE | Should Be 20
+                $text = $output -join "`n"
+                if ($case.RedactionLeak) {
+                    $text | Should Match ([regex]::Escape($redactionSentinel))
+                }
+                else {
+                    $text | Should Not Match ([regex]::Escape($redactionSentinel))
+                    $text | Should Match '\[REDACTED\]'
+                }
+                $catchEnvironment = Get-Content -Raw -LiteralPath $environmentDumpPath | ConvertFrom-Json
+                if ($case.AliasLeak) {
+                    $catchEnvironment.standard | Should Be $redactionSentinel
+                    $catchEnvironment.github | Should Be 'entry-github-mutation-sentinel'
+                    $catchEnvironment.gh | Should Be 'entry-gh-mutation-sentinel'
+                }
+                else {
+                    $catchEnvironment.standard | Should BeNullOrEmpty
+                    $catchEnvironment.github | Should BeNullOrEmpty
+                    $catchEnvironment.gh | Should BeNullOrEmpty
+                }
+            }
+        }
+        finally {
+            foreach ($name in @(
+                    'STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN',
+                    'CONSUMER_GATE_EVENT_REPOSITORY','CONSUMER_GATE_ENV_DUMP'
+                )) {
+                [Environment]::SetEnvironmentVariable($name,$null,'Process')
+            }
+        }
     }
 
     # Scenario: Consumer config has the exact public fields and a safe repository-check declaration.
@@ -349,7 +988,21 @@ $cast = ([string]('scripts/' + 'Legacy.ps1'))
         $manifest = Get-Content -Raw -Encoding UTF8 (
             Join-Path $script:RepositoryRoot 'consumer/legacy-migration.json'
         ) | ConvertFrom-Json -Depth 100
+        $expectedDispositionOracle = @{
+            'skill-general' = @{ Count=45; Sha256='5af3bb77584eb77ded51442e1f5bb9c01fa5f7b4819041e82d8a78ea7715d43c' }
+            'skill-atlassian-ecosystem' = @{ Count=99; Sha256='e719c37bb75a8a7570d9e21a4b1d579f9294d3f238a2d57b8b342fe41ad5742a' }
+            'skill-code-collaboration' = @{ Count=23; Sha256='dbf9332f204eda3d15c8777c4e73ad0b846a0e653367ea188c03d47c2766ce2a' }
+            'skill-knowledge-content' = @{ Count=17; Sha256='78704317aea1f2678901f671ecc6fb297640e8e1282eaf3f40dcb3f980a8c2a3' }
+        }
         foreach ($entry in @($manifest.repositories | Where-Object status -eq ready)) {
+            $oracleLines = @($entry.files | ForEach-Object {
+                    "$($_.path)|$($_.disposition)|$($_.expectedOutcome)|$($_.target)"
+                } | Sort-Object)
+            $oracleBytes = [Text.UTF8Encoding]::new($false).GetBytes(($oracleLines -join "`n") + "`n")
+            $oracleSha = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($oracleBytes)).ToLowerInvariant()
+            $oracleLines.Count | Should Be $expectedDispositionOracle[[string]$entry.id].Count
+            $oracleSha | Should Be $expectedDispositionOracle[[string]$entry.id].Sha256
+
             $root = Join-Path $TestDrive ("dispositions-" + [string]$entry.id)
             [void][IO.Directory]::CreateDirectory($root)
             [void](Invoke-SourceFixtureGit $root @('init','-q','-b','main'))
@@ -394,24 +1047,83 @@ $cast = ([string]('scripts/' + 'Legacy.ps1'))
             Assert-GateProtectedFiles $script:RepositoryRoot $root $root $entry `
                 $baseRevision $candidateRevision $true
 
-            $removed = @($entry.files | Where-Object {
-                    $_.disposition -in @('delete','split') -and $_.path -notlike '.github/workflows/*'
-                })[0]
-            $removedPath = Join-Path $root ([string]$removed.path)
-            [void][IO.Directory]::CreateDirectory((Split-Path -Parent $removedPath))
-            [IO.File]::WriteAllText($removedPath, 'leftover', [Text.UTF8Encoding]::new($false))
-            { Assert-GateProtectedFiles $script:RepositoryRoot $root $root $entry `
-                    $baseRevision $candidateRevision $true } | Should Throw 'Removed legacy path'
-            Remove-Item -LiteralPath $removedPath -Force
+            foreach ($removed in @($entry.files | Where-Object {
+                        $_.disposition -in @('delete','split') -and $_.path -notlike '.github/workflows/*'
+                    })) {
+                $removedPath = Join-Path $root ([string]$removed.path)
+                [void][IO.Directory]::CreateDirectory((Split-Path -Parent $removedPath))
+                [IO.File]::WriteAllText($removedPath, 'leftover', [Text.UTF8Encoding]::new($false))
+                { Assert-GateProtectedFiles $script:RepositoryRoot $root $root $entry `
+                        $baseRevision $candidateRevision $true } | Should Throw 'Removed legacy path'
+                Remove-Item -LiteralPath $removedPath -Force
+            }
 
             foreach ($split in @($entry.files | Where-Object disposition -eq split)) {
-                Remove-Item -LiteralPath (Join-Path $root ([string]$split.target)) -Force
+                $splitTarget = Join-Path $root ([string]$split.target)
+                $splitContent = Get-Content -Raw -LiteralPath $splitTarget
+                Remove-Item -LiteralPath $splitTarget -Force
                 [void](Invoke-SourceFixtureGit $root @('add','-A'))
                 [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','wrong split target'))
                 $wrongRevision = Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
                 { Assert-GateProtectedFiles $script:RepositoryRoot $root $root $entry `
                         $baseRevision $wrongRevision $true } | Should Throw 'Split target'
-                break
+                [void][IO.Directory]::CreateDirectory((Split-Path -Parent $splitTarget))
+                [IO.File]::WriteAllText($splitTarget, $splitContent, [Text.UTF8Encoding]::new($false))
+                [void](Invoke-SourceFixtureGit $root @('add','-A'))
+                [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','restore split target'))
+                $candidateRevision = Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
+            }
+
+            $rewrite = @($entry.files | Where-Object {
+                    $_.disposition -eq 'update-tests' -and $_.expectedOutcome -eq 'rewrite'
+                })[0]
+            $rewritePath = Join-Path $root ([string]$rewrite.path)
+            [IO.File]::WriteAllText($rewritePath, "base $($rewrite.path)`n", [Text.UTF8Encoding]::new($false))
+            [void](Invoke-SourceFixtureGit $root @('add','-A'))
+            [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','unchanged rewrite mismatch'))
+            $wrongRewriteRevision = Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
+            { Assert-GateProtectedFiles $script:RepositoryRoot $root $root $entry `
+                    $baseRevision $wrongRewriteRevision $true } | Should Throw 'must be rewritten'
+            [IO.File]::AppendAllText($rewritePath, "rewritten`n", [Text.UTF8Encoding]::new($false))
+            [void](Invoke-SourceFixtureGit $root @('add','-A'))
+            [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','restore rewritten test'))
+            $candidateRevision = Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
+
+            $deleteExpectation = Copy-FixtureValue $entry
+            $deleteExpectation.files = @($deleteExpectation.files)
+            $deleteRecord = @($deleteExpectation.files | Where-Object disposition -eq 'update-tests')[0]
+            $deleteRecord.expectedOutcome = 'delete'
+            { Assert-GateProtectedFiles $script:RepositoryRoot $root $root $deleteExpectation `
+                    $baseRevision $candidateRevision $true } | Should Throw 'must be deleted'
+
+            $retained = @($entry.files | Where-Object disposition -eq retain)[0]
+            if ($null -ne $retained) {
+                $retainedPath = Join-Path $root ([string]$retained.path)
+                $renamedPath = "$retainedPath.renamed"
+                Move-Item -LiteralPath $retainedPath -Destination $renamedPath
+                [void](Invoke-SourceFixtureGit $root @('add','-A'))
+                [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','rename retained path'))
+                $renameRevision = Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
+                { Assert-GateProtectedFiles $script:RepositoryRoot $root $root $entry `
+                        $baseRevision $renameRevision $true } | Should Throw 'Retained path must remain unchanged'
+                Move-Item -LiteralPath $renamedPath -Destination $retainedPath
+                [IO.File]::AppendAllText($retainedPath, "scripts/Validate.ps1`n", [Text.UTF8Encoding]::new($false))
+                [void](Invoke-SourceFixtureGit $root @('add','-A'))
+                [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','retained legacy dependency'))
+                $dependencyRevision = Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
+                $fixtureManifest = Copy-FixtureValue $manifest
+                $fixtureEntry = @($fixtureManifest.repositories | Where-Object id -eq $entry.id)[0]
+                $fixtureEntry.inventoryCommit = $baseRevision
+                $fixtureEntry.inventoryTree = Get-SourceFixtureGitScalar $root @('rev-parse',"$baseRevision^{tree}")
+                $fixtureManifestPath = Join-Path $TestDrive "disposition-manifest-$($entry.id).json"
+                Write-FixtureJson $fixtureManifestPath $fixtureManifest
+                $closure = Get-ConsumerManifestClosure -RepositoryRoot $root -Commit $dependencyRevision -Stage conversion `
+                    -InventoryCommit $baseRevision -Manifest $fixtureManifestPath -RepositoryId $entry.id `
+                    -AuthorityRoot $script:RepositoryRoot
+                $closure.result | Should Be 'FAILED'
+                @($closure.violations | Where-Object {
+                        $_.kind -eq 'legacy-reference' -and $_.file -eq $retained.path
+                    }).Count | Should Be 1
             }
         }
     }
@@ -468,11 +1180,29 @@ $cast = ([string]('scripts/' + 'Legacy.ps1'))
         @(Get-ChildItem -LiteralPath $created -Force).Count | Should Be 0
         { New-GateGitHooksDirectory $root $name } | Should Throw 'already exists'
 
-        $physical = Join-Path $TestDrive 'gate-hook-physical'
-        $junction = Join-Path $TestDrive 'gate-hook-junction'
-        [void][IO.Directory]::CreateDirectory($physical)
-        [void](New-Item -ItemType Junction -Path $junction -Target $physical)
-        { New-GateGitHooksDirectory $junction ('git-hooks-' + ('e' * 32)) } | Should Throw 'physical directory'
+    }
+
+    if ($IsWindows) {
+        # Scenario: A Windows gate WorkRoot is redirected through a Junction ancestor.
+        # Purpose: Register the Windows-only reparse fixture only on Windows.
+        It 'UnitT37d_rejects_a_windows_junction_gate_workroot_ancestor' {
+            $physical = Join-Path $TestDrive 'gate-hook-physical'
+            $junction = Join-Path $TestDrive 'gate-hook-junction'
+            [void][IO.Directory]::CreateDirectory($physical)
+            [void](New-Item -ItemType Junction -Path $junction -Target $physical)
+            { New-GateGitHooksDirectory $junction ('git-hooks-' + ('e' * 32)) } | Should Throw 'physical directory'
+        }
+    }
+    else {
+        # Scenario: A Unix gate WorkRoot is redirected through a symbolic-link ancestor.
+        # Purpose: Exercise the Unix link-redirection fixture without registering a Windows-only item.
+        It 'UnitT37e_rejects_a_unix_symbolic_link_gate_workroot_ancestor' {
+            $physical = Join-Path $TestDrive 'gate-hook-physical'
+            $symbolicLink = Join-Path $TestDrive 'gate-hook-symbolic-link'
+            [void][IO.Directory]::CreateDirectory($physical)
+            [void](New-Item -ItemType SymbolicLink -Path $symbolicLink -Target $physical)
+            { New-GateGitHooksDirectory $symbolicLink ('git-hooks-' + ('e' * 32)) } | Should Throw 'physical directory'
+        }
     }
 
     # Scenario: Transition inventory is exact, then its commit, tree, or deferred state changes.

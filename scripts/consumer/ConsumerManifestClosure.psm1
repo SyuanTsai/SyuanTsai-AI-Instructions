@@ -215,69 +215,159 @@ function Get-ClosureTokenMatches {
     )
 
     $normalizedText = $Text.Replace('\', '/')
-    $escaped = [regex]::Escape($Target.Replace('\', '/'))
+    $normalizedTarget = ConvertTo-ClosureNormalizedPath -Path $Target
+    $escaped = [regex]::Escape($normalizedTarget)
     $pattern = "(?i)(?<![A-Za-z0-9._-])$escaped(?![A-Za-z0-9._-])"
-    @([regex]::Matches($normalizedText, $pattern))
+    $results = [Collections.Generic.List[object]]::new()
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($match in @([regex]::Matches($normalizedText, $pattern))) {
+        if ($seen.Add("$($match.Index):$($match.Length)")) {
+            $results.Add([pscustomobject]@{ Index = $match.Index; Length = $match.Length; Value = $match.Value })
+        }
+    }
+
+    if ([regex]::IsMatch($normalizedText, '(?:^|/)\.{1,2}(?:/|$)')) {
+        foreach ($candidate in @([regex]::Matches($normalizedText, '(?i)[A-Za-z0-9._/-]+'))) {
+            if (-not [regex]::IsMatch([string]$candidate.Value, '(?:^|/)\.{1,2}(?:/|$)')) {
+                continue
+            }
+            $segments = [string]$candidate.Value -split '/'
+            $segmentOffset = 0
+            for ($index = 0; $index -lt $segments.Count; $index++) {
+                $suffix = ([string[]]$segments[$index..($segments.Count - 1)]) -join '/'
+                $normalizedSuffix = ConvertTo-ClosureNormalizedPath -Path $suffix
+                if ($null -ne $normalizedSuffix -and $normalizedSuffix.Equals($normalizedTarget, [StringComparison]::OrdinalIgnoreCase)) {
+                    $matchIndex = $candidate.Index + $segmentOffset
+                    $matchLength = $candidate.Length - $segmentOffset
+                    if ($seen.Add("${matchIndex}:${matchLength}")) {
+                        $results.Add([pscustomobject]@{
+                                Index  = $matchIndex
+                                Length = $matchLength
+                                Value  = $normalizedText.Substring($matchIndex, $matchLength)
+                            })
+                    }
+                    break
+                }
+                $segmentOffset += $segments[$index].Length + 1
+            }
+        }
+    }
+    @($results | Sort-Object Index, Length)
 }
 
-function ConvertTo-ClosureFoldedText {
+function ConvertTo-ClosureNormalizedPath {
+    param([Parameter(Mandatory)][AllowEmptyString()][string] $Path)
+
+    $segments = [Collections.Generic.List[string]]::new()
+    foreach ($segment in @($Path.Replace('\', '/') -split '/')) {
+        if ([string]::IsNullOrEmpty($segment) -or $segment -eq '.') {
+            continue
+        }
+        if ($segment -eq '..') {
+            if ($segments.Count -eq 0) {
+                return $null
+            }
+            $segments.RemoveAt($segments.Count - 1)
+            continue
+        }
+        $segments.Add($segment)
+    }
+    $segments -join '/'
+}
+
+function ConvertTo-ClosureFoldedValue {
     param([Parameter(Mandatory)] $Ast)
 
     if ($Ast -is [Management.Automation.Language.StringConstantExpressionAst]) {
-        return [string] $Ast.Value
+        return [pscustomobject]@{ Values = @([string]$Ast.Value) }
     }
     if ($Ast -is [Management.Automation.Language.ExpandableStringExpressionAst]) {
-        $value = [string] $Ast.Extent.Text
-        $value = $value.Trim('"')
-        return [regex]::Replace(
-            $value,
-            '\$(?:\{[^}]+\}|[A-Za-z_][A-Za-z0-9_:]*)',
-            '<var>'
-        )
+        $value = ([string]$Ast.Extent.Text).Trim('"')
+        $value = [regex]::Replace($value, '\$(?:\{[^}]+\}|[A-Za-z_][A-Za-z0-9_:]*)', '<var>')
+        return [pscustomobject]@{ Values = @($value) }
     }
     if ($Ast -is [Management.Automation.Language.VariableExpressionAst]) {
-        return '<var>'
+        return [pscustomobject]@{ Values = @('<var>') }
     }
     if ($Ast -is [Management.Automation.Language.ParenExpressionAst]) {
-        return ConvertTo-ClosureFoldedText $Ast.Pipeline
+        return ConvertTo-ClosureFoldedValue $Ast.Pipeline
     }
     if ($Ast -is [Management.Automation.Language.PipelineAst]) {
         if ($Ast.PipelineElements.Count -ne 1) {
             return $null
         }
-        return ConvertTo-ClosureFoldedText $Ast.PipelineElements[0]
+        return ConvertTo-ClosureFoldedValue $Ast.PipelineElements[0]
     }
     if ($Ast -is [Management.Automation.Language.CommandExpressionAst]) {
-        return ConvertTo-ClosureFoldedText $Ast.Expression
+        return ConvertTo-ClosureFoldedValue $Ast.Expression
     }
-    if ($Ast -is [Management.Automation.Language.ArrayLiteralAst]) {
-        $parts = @($Ast.Elements | ForEach-Object { ConvertTo-ClosureFoldedText $_ })
-        if ($parts -contains $null) {
+    if ($Ast -is [Management.Automation.Language.StatementBlockAst]) {
+        if ($Ast.Statements.Count -ne 1) {
             return $null
         }
-        return $parts -join ''
+        return ConvertTo-ClosureFoldedValue $Ast.Statements[0]
+    }
+    if ($Ast -is [Management.Automation.Language.ArrayExpressionAst]) {
+        return ConvertTo-ClosureFoldedValue $Ast.SubExpression
+    }
+    if ($Ast -is [Management.Automation.Language.ArrayLiteralAst]) {
+        $values = [Collections.Generic.List[string]]::new()
+        foreach ($element in $Ast.Elements) {
+            $folded = ConvertTo-ClosureFoldedValue $element
+            if ($null -eq $folded) {
+                return $null
+            }
+            foreach ($value in @($folded.Values)) {
+                $values.Add([string]$value)
+            }
+        }
+        return [pscustomobject]@{ Values = @($values) }
+    }
+    if ($Ast -is [Management.Automation.Language.UnaryExpressionAst] -and
+        $Ast.TokenKind -eq [Management.Automation.Language.TokenKind]::Join) {
+        $child = ConvertTo-ClosureFoldedValue $Ast.Child
+        if ($null -eq $child) {
+            return $null
+        }
+        return [pscustomobject]@{ Values = @( (@($child.Values) -join '') ) }
     }
     if ($Ast -is [Management.Automation.Language.BinaryExpressionAst]) {
-        $left = ConvertTo-ClosureFoldedText $Ast.Left
-        $right = ConvertTo-ClosureFoldedText $Ast.Right
+        $left = ConvertTo-ClosureFoldedValue $Ast.Left
+        $right = ConvertTo-ClosureFoldedValue $Ast.Right
         if ($null -eq $left -or $null -eq $right) {
             return $null
         }
         if ($Ast.Operator -eq [Management.Automation.Language.TokenKind]::Plus) {
-            return "$left$right"
+            return [pscustomobject]@{ Values = @( (@($left.Values) -join '') + (@($right.Values) -join '') ) }
         }
         if ($Ast.Operator -eq [Management.Automation.Language.TokenKind]::Join) {
-            return "$left$right"
+            if (@($right.Values).Count -ne 1) {
+                return $null
+            }
+            return [pscustomobject]@{ Values = @( (@($left.Values) -join [string]$right.Values[0]) ) }
         }
         if ($Ast.Operator -eq [Management.Automation.Language.TokenKind]::Format) {
+            if (@($left.Values).Count -ne 1) {
+                return $null
+            }
             try {
-                return [string]::Format($left, @($right))
+                return [pscustomobject]@{ Values = @( [string]::Format([string]$left.Values[0], [object[]]@($right.Values)) ) }
             }
             catch {
                 return $null
             }
         }
         return $null
+    }
+    $null
+}
+
+function ConvertTo-ClosureFoldedText {
+    param([Parameter(Mandatory)] $Ast)
+
+    $foldedValue = ConvertTo-ClosureFoldedValue $Ast
+    if ($null -ne $foldedValue) {
+        return @($foldedValue.Values) -join ''
     }
     if ($Ast -is [Management.Automation.Language.CommandAst]) {
         $commandName = $Ast.GetCommandName()
@@ -324,6 +414,8 @@ function Get-ClosureFoldCandidates {
     @($RootAst.FindAll({
                 param($node)
                 $node -is [Management.Automation.Language.BinaryExpressionAst] -or
+                ($node -is [Management.Automation.Language.UnaryExpressionAst] -and
+                $node.TokenKind -eq [Management.Automation.Language.TokenKind]::Join) -or
                 $node -is [Management.Automation.Language.ExpandableStringExpressionAst] -or
                 ($node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ieq 'Join-Path') -or
                 ($node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
@@ -353,11 +445,11 @@ function Test-ClosureAstHasTarget {
     )
 
     foreach ($target in $Targets) {
-        if ((Get-ClosureTokenMatches -Text $Ast.Extent.Text -Target $target).Count -gt 0) {
+        if (@(Get-ClosureTokenMatches -Text $Ast.Extent.Text -Target $target).Count -gt 0) {
             return $true
         }
         $folded = ConvertTo-ClosureFoldedText $Ast
-        if ($null -ne $folded -and (Get-ClosureTokenMatches -Text $folded -Target $target).Count -gt 0) {
+        if ($null -ne $folded -and @(Get-ClosureTokenMatches -Text $folded -Target $target).Count -gt 0) {
             return $true
         }
     }
@@ -812,17 +904,44 @@ function Get-ConsumerManifestClosure {
             }
         }
         if ($null -ne $rootAst) {
-            foreach ($foldAst in @(Get-ClosureFoldCandidates $rootAst)) {
-                $folded = ConvertTo-ClosureFoldedText $foldAst
-                if ($null -eq $folded) {
-                    continue
-                }
-                foreach ($target in $legacyTargets) {
+            $foldCandidates = @(Get-ClosureFoldCandidates $rootAst)
+            foreach ($target in $legacyTargets) {
+                $foldResults = [Collections.Generic.List[object]]::new()
+                $foldIdentity = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+                foreach ($foldAst in $foldCandidates) {
+                    $folded = ConvertTo-ClosureFoldedText $foldAst
+                    if ($null -eq $folded) {
+                        continue
+                    }
                     $foldedMatches = @(Get-ClosureTokenMatches -Text $folded -Target $target)
                     if ($foldedMatches.Count -eq 0) {
                         continue
                     }
-                    $rawInExtent = @(Get-ClosureTokenMatches -Text $foldAst.Extent.Text -Target $target).Count
+                    $extentKey = "$($foldAst.Extent.StartOffset):$($foldAst.Extent.EndOffset)"
+                    if ($foldIdentity.Add($extentKey)) {
+                        $foldResults.Add([pscustomobject]@{ Ast = $foldAst; Matches = $foldedMatches })
+                    }
+                }
+
+                $outermost = @($foldResults | Where-Object {
+                        $candidate = $_.Ast
+                        @($foldResults | Where-Object {
+                                $_.Ast.Extent.StartOffset -le $candidate.Extent.StartOffset -and
+                                $_.Ast.Extent.EndOffset -ge $candidate.Extent.EndOffset -and
+                                ($_.Ast.Extent.StartOffset -lt $candidate.Extent.StartOffset -or
+                                $_.Ast.Extent.EndOffset -gt $candidate.Extent.EndOffset)
+                            }).Count -eq 0
+                    })
+                $rawForTarget = @($occurrences | Where-Object {
+                        $null -eq $_.Ast -and $_.TargetPath -ceq $target
+                    })
+                foreach ($foldResult in $outermost) {
+                    $foldAst = $foldResult.Ast
+                    $foldedMatches = @($foldResult.Matches)
+                    $rawInExtent = @($rawForTarget | Where-Object {
+                            $_.Offset -ge $foldAst.Extent.StartOffset -and
+                            $_.Offset -lt $foldAst.Extent.EndOffset
+                        }).Count
                     for ($ordinal = $rawInExtent + 1; $ordinal -le $foldedMatches.Count; $ordinal++) {
                         $key = "$($foldAst.Extent.StartLineNumber):$($foldAst.Extent.StartColumnNumber):${ordinal}:$target"
                         if ($identity.Add($key)) {

@@ -1236,13 +1236,15 @@
         },
         {
           "path": "tests/LocalizationWorkset.Tests.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite the repository-owned regression because it dot-sources tests/TestSupport.ps1, which is itself rewritten for the consumer layout.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/ModUpdateAutomation.Tests.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite the repository-owned regression because it dot-sources tests/TestSupport.ps1, which is itself rewritten for the consumer layout.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/RepositoryContract.Tests.ps1",
@@ -1258,18 +1260,21 @@
         },
         {
           "path": "tests/Schema15Coordination.Tests.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite the repository-owned regression because it dot-sources tests/TestSupport.ps1, which is itself rewritten for the consumer layout.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/Schema15SourceAcquisition.Tests.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite the repository-owned regression because it dot-sources tests/TestSupport.ps1, which is itself rewritten for the consumer layout.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/SkillContract.Tests.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite the repository-owned regression because it dot-sources tests/TestSupport.ps1, which is itself rewritten for the consumer layout.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/SkillSpectorOutput.Tests.ps1",
@@ -1360,11 +1365,6 @@
         {
           "id": "portable-10",
           "path": "tests/Invoke-Tests.ps1",
-          "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
-        },
-        {
-          "id": "portable-11",
-          "path": "scripts/Invoke-PrePushValidation.ps1",
           "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
         },
         {

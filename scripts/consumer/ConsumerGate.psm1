@@ -77,7 +77,8 @@ function Get-GateReleaseAssetName([string]$Version,[string]$Platform) {
         "powershell-$Version-linux-$architecture.tar.gz"}else{"powershell-$Version-osx-$architecture.tar.gz"}
 }
 function Install-GatePowerShell([string]$AuthorityRoot,[string]$WorkRoot,[string]$Platform,[string]$Token,
-    [scriptblock]$Transport,[Threading.CancellationToken]$CancellationToken=[Threading.CancellationToken]::None) {
+    [scriptblock]$Transport,[Threading.CancellationToken]$CancellationToken=[Threading.CancellationToken]::None,
+    [scriptblock]$RuntimeInstaller) {
     $runtimeRoot=Join-Path $WorkRoot 'runtime'
     $pwshRoot=Join-Path $runtimeRoot 'pwsh'
     $downloads=Join-Path $runtimeRoot 'downloads'
@@ -110,28 +111,44 @@ function Install-GatePowerShell([string]$AuthorityRoot,[string]$WorkRoot,[string
     }finally{$headers.Remove('Authorization')
     $Token=$null
     [Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN',$null,'Process')}
-    Import-Module (Join-Path $AuthorityRoot 'scripts/platform-runtime.psd1') -Force
-    $lease=Open-PlatformDirectory -Root $pwshRoot -RootOnly
-    try{$receipt=Resolve-PlatformPowerShell -Policy @{version=$version
+    $policy = @{version=$version
     assets=@(@{name=$assetName
-    sha256=$sha})} -DestinationLease $lease -OfflineCache $archive -ReleaseMetadata @{assets=@(@{name=$assetName
-    sha256=$sha})}}finally{$lease.Dispose()}
+    sha256=$sha})}
+    if ($null -ne $RuntimeInstaller) {
+        $receipt = & $RuntimeInstaller $AuthorityRoot $pwshRoot $archive $policy
+    }
+    else {
+        Import-Module (Join-Path $AuthorityRoot 'scripts/platform-runtime.psd1') -Force
+        $lease=Open-PlatformDirectory -Root $pwshRoot -RootOnly
+        try{$receipt=Resolve-PlatformPowerShell -Policy $policy -DestinationLease $lease -OfflineCache $archive `
+            -ReleaseMetadata @{assets=@(@{name=$assetName
+            sha256=$sha})}}finally{$lease.Dispose()}
+    }
     $receipt
 }
 function Invoke-GateResolver([string]$PowerShell,[string]$AuthorityRoot,[string]$InstallRoot,[string]$Tool,[string]$RunId,[string]$OutputPath,`
-    [string]$GoVersion,[string]$Token) {
+    [string]$GoVersion,[string]$Token,[scriptblock]$ProcessInvoker) {
+    foreach($name in @('GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,$null,'Process')}
     [Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN',$Token,'Process')
     try{
-        & $PowerShell -NoProfile -NonInteractive -File (Join-Path $AuthorityRoot 'scripts/Resolve-StandardValidationTool.ps1') -PolicyPath (`
-            Join-Path $AuthorityRoot 'docs/standards/validation-toolchain.json') -ToolName $Tool -Install -InstallRoot $InstallRoot`
-                -ExpectedGoRuntimeVersion $GoVersion -RunId $RunId -OutputPath $OutputPath
-        if($LASTEXITCODE-ne0){Throw-GateResult FAILED "Resolver failed for $Tool."}
+        $arguments = @('-NoProfile','-NonInteractive','-File',(Join-Path $AuthorityRoot 'scripts/Resolve-StandardValidationTool.ps1'),
+            '-PolicyPath',(Join-Path $AuthorityRoot 'docs/standards/validation-toolchain.json'),'-ToolName',$Tool,'-Install',
+            '-InstallRoot',$InstallRoot,'-ExpectedGoRuntimeVersion',$GoVersion,'-RunId',$RunId,'-OutputPath',$OutputPath)
+        if ($null -ne $ProcessInvoker) {
+            $exitCode = & $ProcessInvoker $PowerShell $arguments $Tool $OutputPath
+        }
+        else {
+            & $PowerShell @arguments
+            $exitCode = $LASTEXITCODE
+        }
+        if($exitCode-ne0){Throw-GateResult FAILED "Resolver failed for $Tool."}
     }finally{foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,$null,'Process')}
     $Token=$null}
     Read-GateJson $OutputPath "$Tool resolver receipt"
 }
 function New-GateSourceSetup([string]$AuthorityRoot,[string]$CandidateRoot,[string]$WorkRoot,[string]$PowerShell,[string]$RunId,`
-    [string]$AuthorityRevision,[string]$CandidateRevision,[string]$SourceRepository,[string]$Token) {
+    [string]$AuthorityRevision,[string]$CandidateRevision,[string]$SourceRepository,[string]$Token,
+    [scriptblock]$ResolverProcessInvoker) {
     $setupRoot=Join-Path $WorkRoot 'source-tools'
     [IO.Directory]::CreateDirectory($setupRoot)|Out-Null
     $installRoot=Join-Path $WorkRoot 'runtime/installed'
@@ -142,7 +159,8 @@ function New-GateSourceSetup([string]$AuthorityRoot,[string]$CandidateRoot,[stri
     $bindings=@()
     foreach($tool in @('pester','skill-validator','skill-tools','skillspector')){
         $path=Join-Path $setupRoot ("receipt-$tool.json")
-        $receipts[$tool]=Invoke-GateResolver $PowerShell $AuthorityRoot $installRoot $tool $RunId $path $goVersion $Token
+        $receipts[$tool]=Invoke-GateResolver $PowerShell $AuthorityRoot $installRoot $tool $RunId $path $goVersion $Token `
+            $ResolverProcessInvoker
         if($tool-cne'pester'){$bindings+= [pscustomobject]@{path=[IO.Path]::GetFullPath($path)
         sha256=Get-GateSha256 $path}}
     }
@@ -611,6 +629,13 @@ function Assert-GateProtectedFiles([string]$AuthorityRoot,[string]$BaseRoot,[str
         if ($record.disposition -in @('delete','split') -and (Test-Path $candidatePath)) { Throw-GateResult FAILED "Removed legacy path is present: $path" }
         if ($Transition -and $record.disposition -ceq 'split' -and $null -eq (Get-GateBlobOid $CandidateRoot $CandidateRevision ([string]$record.target))) {
             Throw-GateResult FAILED "Split target is not a tracked regular file: $($record.target)"
+        }
+        if ($Transition -and $record.disposition -ceq 'retain') {
+            $candidateOid = Get-GateBlobOid $CandidateRoot $CandidateRevision $path
+            $baseOid = Get-GateBlobOid $BaseRoot $BaseRevision $path
+            if ($null -eq $candidateOid -or $null -eq $baseOid -or $candidateOid -cne $baseOid) {
+                Throw-GateResult FAILED "Retained path must remain unchanged: $path"
+            }
         }
         if ($Transition -and $record.disposition -ceq 'update-tests') {
             $oid=Get-GateBlobOid $CandidateRoot $CandidateRevision $path

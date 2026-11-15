@@ -200,20 +200,81 @@ exit 0
         $observed.token|Should BeNullOrEmpty
         $observed.github|Should BeNullOrEmpty
 
-        $leakPath = Join-Path $root 'leak.ps1'
-        [IO.File]::WriteAllText(
-            $leakPath,
-            "param(`$Interface,`$Phase,`$AuthorityBindingPath,`$BaseRoot,`$CandidateRoot,`$WorkRoot,`$Platform)`n" +
-            "[Console]::Out.WriteLine(`$env:STANDARD_VALIDATION_GITHUB_API_TOKEN)`nexit 0`n",
-            [Text.UTF8Encoding]::new($false)
-        )
-        $env:STANDARD_VALIDATION_GITHUB_API_TOKEN = 'stdout-token-sentinel'
-        $leakOutput = @(
-            Invoke-ConsumerGateProcess (Get-Process -Id $PID).Path $leakPath $interfacePath `
-                prepare (Join-Path $root 'binding.json') *>&1
-        )
-        $leakOutput[-1] | Should Be 20
-        ($leakOutput -join "`n") | Should Not Match 'stdout-token-sentinel'
+        foreach ($stream in @('Out','Error')) {
+            $leakPath = Join-Path $root "leak-$stream.ps1"
+            [IO.File]::WriteAllText(
+                $leakPath,
+                "param(`$Interface,`$Phase,`$AuthorityBindingPath,`$BaseRoot,`$CandidateRoot,`$WorkRoot,`$Platform)`n" +
+                "[Console]::$stream.WriteLine(`"fixture HTTP timeout diagnostic: `$env:STANDARD_VALIDATION_GITHUB_API_TOKEN`")`nexit 20`n",
+                [Text.UTF8Encoding]::new($false)
+            )
+            $env:STANDARD_VALIDATION_GITHUB_API_TOKEN = "${stream}-token-sentinel"
+            $originalError = [Console]::Error
+            $diagnosticWriter = [IO.StringWriter]::new()
+            try {
+                [Console]::SetError($diagnosticWriter)
+                $leakExit = Invoke-ConsumerGateProcess (Get-Process -Id $PID).Path $leakPath $interfacePath `
+                    prepare (Join-Path $root 'binding.json')
+            }
+            finally {
+                [Console]::SetError($originalError)
+            }
+            $leakExit | Should Be 20
+            $diagnostic = $diagnosticWriter.ToString()
+            $diagnostic | Should Not Match ([regex]::Escape("${stream}-token-sentinel"))
+            $diagnostic | Should Match 'credential sentinel.*suppressed'
+        }
+
+        $bootstrapText = Get-Content -Raw -Encoding UTF8 $script:BootstrapPath
+        $suppressionCondition = '$standardOutput.Contains($sentinel, [StringComparison]::Ordinal) -or $standardError.Contains($sentinel, [StringComparison]::Ordinal)'
+        $mutantText = $bootstrapText.Replace($suppressionCondition, '$false')
+        $mutantText | Should Not Be $bootstrapText
+        $mutantPath = Join-Path $TestDrive 'Invoke-PinnedAuthority-output-suppression-mutant.ps1'
+        [IO.File]::WriteAllText($mutantPath,$mutantText,[Text.UTF8Encoding]::new($false))
+        $mutantModule = New-Module -Name BootstrapOutputSuppressionMutant -ArgumentList $mutantPath -ScriptBlock {
+            param($path)
+            . $path -DefineFunctionsOnly
+        }
+        try {
+            foreach ($stream in @('Out','Error')) {
+                $leakPath = Join-Path $root "mutant-leak-$stream.ps1"
+                [IO.File]::WriteAllText(
+                    $leakPath,
+                    "param(`$Interface,`$Phase,`$AuthorityBindingPath,`$BaseRoot,`$CandidateRoot,`$WorkRoot,`$Platform)`n" +
+                    "[Console]::$stream.WriteLine(`"fixture diagnostic: `$env:STANDARD_VALIDATION_GITHUB_API_TOKEN`")`nexit 20`n",
+                    [Text.UTF8Encoding]::new($false)
+                )
+                $sentinel = "mutant-${stream}-token-sentinel"
+                $env:STANDARD_VALIDATION_GITHUB_API_TOKEN = $sentinel
+                $originalOut = [Console]::Out
+                $originalError = [Console]::Error
+                $outWriter = [IO.StringWriter]::new()
+                $errorWriter = [IO.StringWriter]::new()
+                try {
+                    [Console]::SetOut($outWriter)
+                    [Console]::SetError($errorWriter)
+                    $mutantExit = & $mutantModule {
+                        param($root,$leakPath,$interfacePath)
+                        $script:BaseRoot=$root
+                        $script:CandidateRoot=$root
+                        $script:WorkRoot=$root
+                        $script:Platform='windows'
+                        $script:TransitionFromLegacy=$false
+                        Invoke-ConsumerGateProcess (Get-Process -Id $PID).Path $leakPath $interfacePath `
+                            prepare (Join-Path $root 'binding.json')
+                    } $root $leakPath $interfacePath
+                }
+                finally {
+                    [Console]::SetOut($originalOut)
+                    [Console]::SetError($originalError)
+                }
+                $mutantExit | Should Be 20
+                ($outWriter.ToString() + $errorWriter.ToString()) | Should Match ([regex]::Escape($sentinel))
+            }
+        }
+        finally {
+            Remove-Module $mutantModule -Force
+        }
         Remove-Item Env:GITHUB_STEP_SUMMARY,Env:STANDARD_VALIDATION_GITHUB_API_TOKEN,Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
     }
 
@@ -234,11 +295,29 @@ exit 0
         [IO.File]::WriteAllText((Join-Path $nonEmpty 'pre-commit'), 'malicious')
         { New-PinnedGitHooksDirectory $root $nonEmptyName } | Should Throw 'already exists'
 
-        $physical = Join-Path $TestDrive 'bootstrap-hook-physical'
-        $junction = Join-Path $TestDrive 'bootstrap-hook-junction'
-        [void][IO.Directory]::CreateDirectory($physical)
-        [void](New-Item -ItemType Junction -Path $junction -Target $physical)
-        { New-PinnedGitHooksDirectory $junction ('git-hooks-' + ('c' * 32)) } | Should Throw 'reparse ancestor'
+    }
+
+    if ($IsWindows) {
+        # Scenario: A Windows WorkRoot has a Junction ancestor controlled outside the physical directory.
+        # Purpose: Register the Windows reparse-point attack only on its native host.
+        It 'UnitT58a_rejects_a_windows_junction_workroot_ancestor' {
+            $physical = Join-Path $TestDrive 'bootstrap-hook-physical'
+            $junction = Join-Path $TestDrive 'bootstrap-hook-junction'
+            [void][IO.Directory]::CreateDirectory($physical)
+            [void](New-Item -ItemType Junction -Path $junction -Target $physical)
+            { New-PinnedGitHooksDirectory $junction ('git-hooks-' + ('c' * 32)) } | Should Throw 'reparse ancestor'
+        }
+    }
+    else {
+        # Scenario: A Unix WorkRoot has a symbolic-link ancestor controlled outside the physical directory.
+        # Purpose: Exercise the corresponding Unix link-redirection attack without registering a Windows-only item.
+        It 'UnitT58b_rejects_a_unix_symbolic_link_workroot_ancestor' {
+            $physical = Join-Path $TestDrive 'bootstrap-hook-physical'
+            $symbolicLink = Join-Path $TestDrive 'bootstrap-hook-symbolic-link'
+            [void][IO.Directory]::CreateDirectory($physical)
+            [void](New-Item -ItemType SymbolicLink -Path $symbolicLink -Target $physical)
+            { New-PinnedGitHooksDirectory $symbolicLink ('git-hooks-' + ('c' * 32)) } | Should Throw 'reparse ancestor'
+        }
     }
 
     # Scenario: A local file authority drives prepare, validate, finalize, and a fresh aggregate acquisition.
@@ -257,6 +336,32 @@ param([string]$Interface,[string]$Phase,[string]$AuthorityBindingPath,[string]$B
 if (-not (Test-Path -LiteralPath $AuthorityBindingPath -PathType Leaf)) { exit 20 }
 $binding = Get-Content -Raw -LiteralPath $AuthorityBindingPath | ConvertFrom-Json
 if ($Phase -eq 'aggregate' -and $binding.scope -cne 'aggregate') { exit 20 }
+$environment = [Environment]::GetEnvironmentVariables('Process')
+$environmentDump = [ordered]@{}
+foreach ($name in @($environment.Keys | Sort-Object)) { $environmentDump[[string]$name] = [string]$environment[$name] }
+[IO.File]::WriteAllText((Join-Path $WorkRoot "environment-$Phase.json"),($environmentDump | ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
+if ($Phase -eq 'prepare') {
+    $runtimeRoot = Join-Path $WorkRoot 'runtime/pwsh'
+    [void][IO.Directory]::CreateDirectory($runtimeRoot)
+    foreach ($file in @(Get-ChildItem -LiteralPath $PSHOME -File -Force -Recurse)) {
+        $relative = [IO.Path]::GetRelativePath($PSHOME,$file.FullName)
+        $target = Join-Path $runtimeRoot $relative
+        [void][IO.Directory]::CreateDirectory((Split-Path -Parent $target))
+        try { [void](New-Item -ItemType HardLink -Path $target -Target $file.FullName -ErrorAction Stop) }
+        catch { Copy-Item -LiteralPath $file.FullName -Destination $target }
+    }
+    $currentExecutable = (Get-Process -Id $PID).Path
+    $runtimeExecutable = Join-Path $runtimeRoot ([IO.Path]::GetFileName($currentExecutable))
+    $receipt = [ordered]@{
+        schemaVersion = 1
+        report = 'consumer-runtime-receipt-v1'
+        executablePath = $runtimeExecutable
+        executableSha256 = (Get-FileHash -LiteralPath $runtimeExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
+        version = $PSVersionTable.PSVersion.ToString()
+        archiveSha256 = ('0' * 64)
+    }
+    [IO.File]::WriteAllText((Join-Path $WorkRoot 'runtime/consumer-runtime-receipt.json'),($receipt | ConvertTo-Json),[Text.UTF8Encoding]::new($false))
+}
 if ($Phase -eq 'validate' -and -not (Test-Path -LiteralPath (Join-Path $WorkRoot 'phase-prepare.json'))) { exit 20 }
 if ($Phase -eq 'finalize' -and -not (Test-Path -LiteralPath (Join-Path $WorkRoot 'phase-validate.json'))) { exit 20 }
 [IO.File]::WriteAllText((Join-Path $WorkRoot "phase-$Phase.json"),($binding | ConvertTo-Json -Compress),[Text.UTF8Encoding]::new($false))
@@ -271,62 +376,106 @@ exit 0
         [void](Invoke-FixtureGit $source @('commit','-q','-m','phase authority'))
         $commit = Get-FixtureGitScalar $source @('rev-parse','HEAD')
         $sourceUrl = ([Uri](Resolve-Path $source).Path).AbsoluteUri
+        $bootstrapCopy = Join-Path $TestDrive 'Invoke-PinnedAuthority-formal-fixture.ps1'
+        $bootstrapText = Get-Content -Raw -Encoding UTF8 $script:BootstrapPath
+        $bootstrapText = $bootstrapText.Replace($script:AuthorityRepository, $sourceUrl)
+        $bootstrapText = $bootstrapText.Replace(
+            'New-PinnedAuthority $WorkRoot ([string]$pin.Value.commit)',
+            'New-PinnedAuthority $WorkRoot ([string]$pin.Value.commit) $script:AuthorityRepository -AllowFileProtocol'
+        )
+        [IO.File]::WriteAllText($bootstrapCopy, $bootstrapText, [Text.UTF8Encoding]::new($false))
+
+        $revision = New-RevisionFixture (Join-Path $TestDrive 'phase-candidate') (Join-Path $TestDrive 'phase-base')
+        [void][IO.Directory]::CreateDirectory((Join-Path $revision.CandidateRoot 'config'))
+        $pinPath = Join-Path $revision.CandidateRoot 'config/authority-pin.json'
+        [IO.File]::WriteAllText(
+            $pinPath,
+            (@{schemaVersion=1;repository=$sourceUrl;commit=$commit} | ConvertTo-Json -Compress),
+            [Text.UTF8Encoding]::new($false)
+        )
         $platformWork = Join-Path $TestDrive 'phase-platform-work'
         $aggregateWork = Join-Path $TestDrive 'phase-aggregate-work'
-        foreach ($work in @($platformWork,$aggregateWork)) { [void][IO.Directory]::CreateDirectory($work) }
-        $platformAuthority = New-PinnedAuthority $platformWork $commit $sourceUrl -AllowFileProtocol
-        $aggregateAuthority = New-PinnedAuthority $aggregateWork $commit $sourceUrl -AllowFileProtocol
-        $platformAuthority.Root | Should Not Be $aggregateAuthority.Root
-        $platformAuthority.Tree | Should Be $aggregateAuthority.Tree
-
-        $platformBindingPath = Join-Path $platformWork 'authority-binding.json'
-        Write-CreateOnlyJson $platformBindingPath ([ordered]@{ scope='platform'; commit=$commit })
-        $gate = Join-Path $platformAuthority.Root 'scripts/consumer/Invoke-ConsumerSourceGate.ps1'
-        $interface = Join-Path $platformAuthority.Root 'consumer/consumer-gate-interface.json'
-        $script:BaseRoot = $TestDrive
-        $script:CandidateRoot = $TestDrive
-        $script:WorkRoot = $platformWork
-        $script:Platform = 'windows'
-        $script:TransitionFromLegacy = $false
-        foreach ($phase in @('prepare','validate','finalize')) {
-            Invoke-ConsumerGateProcess (Get-Process -Id $PID).Path $gate $interface $phase $platformBindingPath |
-                Should Be 0
+        $env:CONSUMER_GATE_TEST_TEMP_ROOT = $TestDrive
+        $env:CONSUMER_GATE_EVENT_REPOSITORY = 'https://example.test/fixture.git'
+        $common = @(
+            '-BaseRoot',$revision.BaseRoot,'-CandidateRoot',$revision.CandidateRoot,
+            '-TriggerEvent','pull_request_target','-BaseRevision',$revision.Base,
+            '-CandidateRevision',$revision.Candidate,'-HeadRevision',$revision.Head,
+            '-WorkflowRunId','1001','-WorkflowRunAttempt','1'
+        )
+        function Invoke-FormalBootstrap([string]$Phase,[string]$WorkRoot,[string]$Platform) {
+            $script:FormalBootstrapOutput = @(
+                & (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $bootstrapCopy `
+                    -Phase $Phase -WorkRoot $WorkRoot -Platform $Platform @common 2>&1
+            )
+            $script:FormalBootstrapExitCode = $LASTEXITCODE
+            $script:FormalBootstrapExitCode
         }
-        $aggregateBindingPath = Join-Path $aggregateWork 'authority-binding.json'
-        Write-CreateOnlyJson $aggregateBindingPath ([ordered]@{ scope='aggregate'; commit=$commit })
-        $aggregateGate = Join-Path $aggregateAuthority.Root 'scripts/consumer/Invoke-ConsumerSourceGate.ps1'
-        $aggregateInterface = Join-Path $aggregateAuthority.Root 'consumer/consumer-gate-interface.json'
-        $script:WorkRoot = $aggregateWork
-        $script:Platform = 'aggregate'
-        Invoke-ConsumerGateProcess (Get-Process -Id $PID).Path $aggregateGate $aggregateInterface `
-            aggregate $aggregateBindingPath | Should Be 0
+        function Assert-FormalPhaseOutput([string]$Path,[string]$Phase) {
+            if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+                throw "Formal $Phase gate did not create its boundary evidence (exit=$script:FormalBootstrapExitCode): " +
+                    (@($script:FormalBootstrapOutput) -join ' | ')
+            }
+        }
 
-        $script:WorkRoot = $platformWork
-        $script:Platform = 'windows'
-        Invoke-ConsumerGateProcess (Get-Process -Id $PID).Path $gate $interface validate `
-            (Join-Path $platformWork 'missing-binding.json') | Should Be 20
-        Invoke-ConsumerGateProcess (Get-Process -Id $PID).Path $gate $interface aggregate `
-            $platformBindingPath | Should Be 20
-        Move-Item (Join-Path $platformWork 'phase-prepare.json') `
-            (Join-Path $platformWork 'phase-prepare-drift.json')
-        Invoke-ConsumerGateProcess (Get-Process -Id $PID).Path $gate $interface validate `
-            $platformBindingPath | Should Be 20
+        $env:STANDARD_VALIDATION_GITHUB_API_TOKEN = 'phase-token-sentinel'
+        Invoke-FormalBootstrap prepare $platformWork windows | Should Be 0
+        Assert-FormalPhaseOutput (Join-Path $platformWork 'environment-prepare.json') prepare
+        Remove-Item Env:STANDARD_VALIDATION_GITHUB_API_TOKEN -ErrorAction SilentlyContinue
+        foreach ($phase in @('validate','finalize')) {
+            Invoke-FormalBootstrap $phase $platformWork windows | Should Be 0
+            Assert-FormalPhaseOutput (Join-Path $platformWork "environment-$phase.json") $phase
+        }
+        Invoke-FormalBootstrap aggregate $aggregateWork aggregate | Should Be 0
+        Assert-FormalPhaseOutput (Join-Path $aggregateWork 'environment-aggregate.json') aggregate
+        (Join-Path $aggregateWork 'authority-git') | Should Exist
+        (Join-Path $aggregateWork 'authority') | Should Exist
+        (Join-Path $aggregateWork 'authority') | Should Not Be (Join-Path $platformWork 'authority')
 
-        $pinRoot = Join-Path $TestDrive 'phase-pin'
-        [void][IO.Directory]::CreateDirectory((Join-Path $pinRoot 'config'))
-        $pinPath = Join-Path $pinRoot 'config/authority-pin.json'
-        [IO.File]::WriteAllText(
-            $pinPath,
-            (@{schemaVersion=1;repository=$script:AuthorityRepository;commit=$commit} | ConvertTo-Json -Compress),
-            [Text.UTF8Encoding]::new($false)
-        )
-        $pinHash = (Read-AuthorityPin $pinRoot).Sha256
-        [IO.File]::WriteAllText(
-            $pinPath,
-            (@{schemaVersion=1;repository=$script:AuthorityRepository;commit=('f' * 40)} | ConvertTo-Json -Compress),
-            [Text.UTF8Encoding]::new($false)
-        )
-        (Read-AuthorityPin $pinRoot).Sha256 | Should Not Be $pinHash
+        foreach ($phase in @('validate','finalize')) {
+            $environment = Get-Content -Raw -LiteralPath (Join-Path $platformWork "environment-$phase.json") | ConvertFrom-Json
+            @($environment.PSObject.Properties.Name | Where-Object { $_ -in @(
+                        'STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN'
+                    ) }).Count | Should Be 0
+            ($environment | ConvertTo-Json -Depth 5) | Should Not Match 'phase-token-sentinel'
+        }
+
+        $bindingPath = Join-Path $platformWork 'authority-binding.json'
+        $bindingText = Get-Content -Raw -LiteralPath $bindingPath
+        $binding = $bindingText | ConvertFrom-Json
+        foreach ($mutation in @(
+                @{ Name='candidate binding'; Apply={ $binding.candidateRevision = ('f' * 40) } },
+                @{ Name='scope binding'; Apply={ $binding.scope = 'aggregate' } },
+                @{ Name='platform binding'; Apply={ $binding.platform = 'linux' } }
+            )) {
+            $candidateBinding = $bindingText | ConvertFrom-Json
+            $binding = $candidateBinding
+            & $mutation.Apply
+            [IO.File]::WriteAllText($bindingPath, ($binding | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
+            Invoke-FormalBootstrap validate $platformWork windows | Should Be 20
+            [IO.File]::WriteAllText($bindingPath, $bindingText, [Text.UTF8Encoding]::new($false))
+        }
+
+        $runtimePath = Join-Path $platformWork 'runtime/consumer-runtime-receipt.json'
+        $runtimeText = Get-Content -Raw -LiteralPath $runtimePath
+        $runtime = $runtimeText | ConvertFrom-Json
+        $runtime.executableSha256 = 'f' * 64
+        [IO.File]::WriteAllText($runtimePath, ($runtime | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+        Invoke-FormalBootstrap validate $platformWork windows | Should Be 20
+        [IO.File]::WriteAllText($runtimePath, $runtimeText, [Text.UTF8Encoding]::new($false))
+
+        $runtime = $runtimeText | ConvertFrom-Json
+        $runtime.executablePath = Join-Path $platformWork 'runtime/missing/pwsh'
+        [IO.File]::WriteAllText($runtimePath, ($runtime | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+        Invoke-FormalBootstrap validate $platformWork windows | Should Be 20
+        [IO.File]::WriteAllText($runtimePath, $runtimeText, [Text.UTF8Encoding]::new($false))
+
+        $pinText = Get-Content -Raw -LiteralPath $pinPath
+        [IO.File]::AppendAllText($pinPath, "`n")
+        Invoke-FormalBootstrap validate $platformWork windows | Should Be 20
+        [IO.File]::WriteAllText($pinPath, $pinText, [Text.UTF8Encoding]::new($false))
+
+        Remove-Item Env:CONSUMER_GATE_TEST_TEMP_ROOT,Env:CONSUMER_GATE_EVENT_REPOSITORY -ErrorAction SilentlyContinue
     }
 
     # Scenario: Revision and transition checks are changed in the bootstrap source.
