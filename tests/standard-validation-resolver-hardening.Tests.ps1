@@ -2428,3 +2428,20 @@ Describe 'Validator platform evidence hardening' {
         (Invoke-SourceGateFixture -Report $report) | Should -BeTrue
     }
 }
+
+Describe 'SYP354 PR-K1 trust-anchor pin preservation' {
+    # Scenario: PR-K1 introduces offline key tools without rotating either production trust anchor.
+    # Purpose: Prevent a tools-only change from silently replacing XML bytes or the runner's pinned hashes.
+    It 'UnitT10_preserves_both_existing_trust_anchor_hashes' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $expected=@{
+            'human-approval-public-key.xml'='1e46153b72d02f3ce2fb26becd449df4f1590d8e5cb441b1954006a5602bbd9b'
+            'trusted-supervisor-public-key.xml'='4d550851f43405920156f40c9fc648d99a69dd73efc200f6968d8a837e7fbf27'
+        }
+        $runner=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'scripts/Invoke-StandardValidation.ps1')
+        foreach($name in $expected.Keys){
+            (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root "docs/standards/trust-anchors/$name")).Hash.ToLowerInvariant() | Should Be $expected[$name]
+            $runner | Should Match ([regex]::Escape($expected[$name]))
+        }
+    }
+}

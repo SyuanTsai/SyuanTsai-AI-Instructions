@@ -6744,3 +6744,16 @@ Describe 'SYP481 exact-fingerprint exception authority' {
         }
     }
 }
+
+Describe 'SYP354 trust-anchor rotation approval boundary' {
+    # Scenario: The normative Standard and review matrix describe a future trust-anchor rotation.
+    # Purpose: Require user verification with an independent tool before an approval-boundary change can merge.
+    It 'UnitT10_requires_independent_user_fingerprint_verification' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $standard=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/skill-repository-standard.md')
+        $matrix=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/skill-repository-review-matrix.md')
+        $required='Trust-anchor rotation changes the approval boundary and **MUST** merge only after the user verifies the proposed fingerprints with an independent tool that is not supplied by the same unmerged change.'
+        $standard.Contains($required) | Should Be $true
+        $matrix | Should Match 'Trust-anchor rotation.*approval boundary.*\*\*MUST\*\* merge only after the user verifies proposed fingerprints with an independent tool'
+    }
+}

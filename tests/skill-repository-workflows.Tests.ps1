@@ -1745,3 +1745,16 @@ Describe 'Validator platform authority routing' {
         $composition.Contains('Invoke-StandardAuthorityGate.ps1') | Should -BeTrue
     }
 }
+
+Describe 'SYP354 trust-anchor tool workflow isolation' {
+    # Scenario: Interactive private-key tooling is added beside the authority workflows.
+    # Purpose: Keep key generation out of CI while retaining the same authority gate in both workflow roles.
+    It 'UnitT10_keeps_interactive_key_tools_out_of_authority_workflows' {
+        $root=Split-Path -Parent $PSScriptRoot
+        foreach($relative in @('.github/workflows/standards-conformance.yml','.github/workflows/pr8-powershell-validation.yml')){
+            $workflow=Get-Content -Raw -Encoding UTF8 (Join-Path $root $relative)
+            $workflow | Should Match 'Invoke-StandardAuthorityGate\.ps1'
+            $workflow | Should Not Match 'trust-anchor/(New-TrustAnchorKeyPair|ConvertTo-TrustAnchorPublicKeyXml|Get-TrustAnchorFingerprint)\.ps1'
+        }
+    }
+}
