@@ -36,19 +36,69 @@ namespace SyuanTsai.AIInstructions.TrustAnchor {
             PbeParameters pbe = new PbeParameters(PbeEncryptionAlgorithm.Aes256Cbc, HashAlgorithmName.SHA256, 600000);
             return rsa.ExportEncryptedPkcs8PrivateKeyPem(password.AsSpan(), pbe);
         }
-        public static void ImportEncryptedPem(RSA rsa, string pem, char[] password) {
-            rsa.ImportFromEncryptedPem(pem.AsSpan(), password.AsSpan());
+        private static bool ContainsAscii(byte[] value, string text) {
+            if (value == null || value.Length < text.Length) return false;
+            for (int offset = 0; offset <= value.Length - text.Length; offset++) {
+                int index = 0;
+                while (index < text.Length && value[offset + index] == (byte)text[index]) index++;
+                if (index == text.Length) return true;
+            }
+            return false;
         }
-        public static void ValidateEncryptedPemProfile(string pem) {
-            int start = pem.IndexOf("-----BEGIN ENCRYPTED PRIVATE KEY-----", StringComparison.Ordinal);
-            int end = pem.IndexOf("-----END ENCRYPTED PRIVATE KEY-----", StringComparison.Ordinal);
-            if (start != 0 || end < 0) throw new CryptographicException("Encrypted PKCS#8 PEM framing is invalid.");
-            int bodyStart = pem.IndexOf('\n', start);
-            if (bodyStart < 0) throw new CryptographicException("Encrypted PKCS#8 PEM framing is invalid.");
-            string base64 = pem.Substring(bodyStart + 1, end - bodyStart - 1).Replace("\r", "").Replace("\n", "");
-            byte[] der = Convert.FromBase64String(base64);
+        public static bool ContainsPrivatePemHeader(byte[] value) {
+            return ContainsAscii(value, "-----BEGIN PRIVATE KEY-----") ||
+                ContainsAscii(value, "-----BEGIN RSA PRIVATE KEY-----") ||
+                ContainsAscii(value, "-----BEGIN ENCRYPTED PRIVATE KEY-----");
+        }
+        private static void RequireEncryptedPrivatePemHeader(byte[] value) {
+            if (ContainsAscii(value, "-----BEGIN PRIVATE KEY-----") || ContainsAscii(value, "-----BEGIN RSA PRIVATE KEY-----") ||
+                !ContainsAscii(value, "-----BEGIN ENCRYPTED PRIVATE KEY-----"))
+                throw new CryptographicException("Only encrypted PKCS#8 PEM input is permitted.");
+        }
+        private static bool ContainsPrivateXmlElement(byte[] value, string name) {
+            for (int offset = 0; offset <= value.Length - name.Length - 2; offset++) {
+                if (value[offset] != (byte)'<') continue;
+                int index = 0;
+                while (index < name.Length && value[offset + 1 + index] == (byte)name[index]) index++;
+                if (index != name.Length) continue;
+                byte next = value[offset + 1 + name.Length];
+                if (next == (byte)'>' || next == (byte)' ' || next == (byte)'\t' || next == (byte)'\r' || next == (byte)'\n') return true;
+            }
+            return false;
+        }
+        public static string DecodePublicPem(byte[] value) {
+            if (ContainsPrivatePemHeader(value)) throw new CryptographicException("Private-key PEM input is not permitted.");
+            return new System.Text.UTF8Encoding(false, true).GetString(value);
+        }
+        public static string DecodePublicXml(byte[] value) {
+            foreach (string name in new [] { "D", "P", "Q", "DP", "DQ", "InverseQ" })
+                if (ContainsPrivateXmlElement(value, name)) throw new CryptographicException("Private RSA XML input is not permitted.");
+            return new System.Text.UTF8Encoding(false, true).GetString(value);
+        }
+        private static char[] DecodePrivatePem(byte[] pemBytes) {
+            var encoding = new System.Text.UTF8Encoding(false, true);
+            char[] characters = new char[encoding.GetCharCount(pemBytes)];
+            encoding.GetChars(pemBytes, 0, pemBytes.Length, characters, 0);
+            return characters;
+        }
+        private static void ValidateEncryptedPemProfile(char[] pem) {
+            PemFields fields;
+            if (!PemEncoding.TryFind(pem.AsSpan(), out fields)) throw new CryptographicException("Encrypted PKCS#8 PEM framing is invalid.");
+            var location = fields.Location.GetOffsetAndLength(pem.Length);
+            var label = fields.Label.GetOffsetAndLength(pem.Length);
+            if (location.Offset != 0 || !pem.AsSpan(label.Offset, label.Length).SequenceEqual("ENCRYPTED PRIVATE KEY".AsSpan()))
+                throw new CryptographicException("Encrypted PKCS#8 PEM framing is invalid.");
+            for (int index = location.Offset + location.Length; index < pem.Length; index++)
+                if (!char.IsWhiteSpace(pem[index])) throw new CryptographicException("Encrypted PKCS#8 PEM framing is invalid.");
+            var base64 = fields.Base64Data.GetOffsetAndLength(pem.Length);
+            byte[] der = new byte[(base64.Length * 3 + 3) / 4];
+            int derLength;
+            if (!Convert.TryFromBase64Chars(pem.AsSpan(base64.Offset, base64.Length), der, out derLength)) {
+                CryptographicOperations.ZeroMemory(der);
+                throw new CryptographicException("Encrypted PKCS#8 PEM payload is invalid.");
+            }
             try {
-                var outerReader = new AsnReader(der, AsnEncodingRules.DER);
+                var outerReader = new AsnReader(new ReadOnlyMemory<byte>(der, 0, derLength), AsnEncodingRules.DER);
                 var encryptedPrivateKeyInfo = outerReader.ReadSequence();
                 var algorithm = encryptedPrivateKeyInfo.ReadSequence();
                 if (algorithm.ReadObjectIdentifier() != "1.2.840.113549.1.5.13") throw new CryptographicException("PBES2 is required.");
@@ -60,7 +110,7 @@ namespace SyuanTsai.AIInstructions.TrustAnchor {
                 var pbkdf2 = kdf.ReadSequence();
                 kdf.ThrowIfNotEmpty();
                 byte[] salt = pbkdf2.ReadOctetString();
-                try { if (salt.Length == 0) throw new CryptographicException("PBKDF2 salt is required."); }
+                try { if (salt.Length < 16) throw new CryptographicException("PBKDF2 salt must contain at least 16 bytes."); }
                 finally { CryptographicOperations.ZeroMemory(salt); }
                 BigInteger iterations = pbkdf2.ReadInteger();
                 if (iterations != 600000) throw new CryptographicException("PBKDF2 iteration count is unsupported.");
@@ -85,6 +135,18 @@ namespace SyuanTsai.AIInstructions.TrustAnchor {
                 encryptedPrivateKeyInfo.ThrowIfNotEmpty(); outerReader.ThrowIfNotEmpty();
             }
             finally { CryptographicOperations.ZeroMemory(der); }
+        }
+        public static RSA ImportEncryptedPem(byte[] pemBytes, char[] password) {
+            if (pemBytes == null) throw new ArgumentNullException(nameof(pemBytes));
+            RequireEncryptedPrivatePemHeader(pemBytes);
+            char[] pem = DecodePrivatePem(pemBytes);
+            try {
+                ValidateEncryptedPemProfile(pem);
+                RSA rsa = RSA.Create();
+                try { rsa.ImportFromEncryptedPem(pem.AsSpan(), password.AsSpan()); return rsa; }
+                catch { rsa.Dispose(); throw; }
+            }
+            finally { Zero(pem); }
         }
         [DllImport("libc", EntryPoint="geteuid", SetLastError=false)]
         private static extern uint getEuid();
@@ -224,6 +286,11 @@ namespace SyuanTsai.AIInstructions.TrustAnchor {
                 ModifiedSeconds = basic.Write, ChangedSeconds = basic.Change
             };
         }
+        public static SafeFileHandle OpenReadWithDeleteSharing(string path) {
+            SafeFileHandle handle = CreateFile(path, 0x00020080, 0x00000007, IntPtr.Zero, 3, 0x00200000, IntPtr.Zero);
+            if (handle.IsInvalid) { int error = Marshal.GetLastWin32Error(); handle.Dispose(); throw new Win32Exception(error, "Unable to open the trust-anchor fixture with delete sharing."); }
+            return handle;
+        }
     }
 
     public static class UnixMetadataInspector {
@@ -273,16 +340,43 @@ namespace SyuanTsai.AIInstructions.TrustAnchor {
         }
     }
 
-    public static class UnixExactRemover {
+    public sealed class UnixRollbackLease : IDisposable {
         [DllImport("libc", EntryPoint="fstatat", SetLastError=true)] private static extern int fstatatLinux(IntPtr fd,string leaf,IntPtr value,int flags);
         [DllImport("libc", EntryPoint="renameat2", SetLastError=true)] private static extern int renameat2(IntPtr oldFd,string oldLeaf,IntPtr newFd,string newLeaf,uint flags);
         [DllImport("libc", EntryPoint="unlinkat", SetLastError=true)] private static extern int unlinkatLinux(IntPtr fd,string leaf,int flags);
         [DllImport("libc", EntryPoint="fsync", SetLastError=true)] private static extern int fsyncLinux(IntPtr fd);
+        [DllImport("libc", EntryPoint="mkdirat", SetLastError=true)] private static extern int mkdiratLinux(IntPtr fd,string leaf,uint mode);
+        [DllImport("libc", EntryPoint="openat", SetLastError=true)] private static extern int openatLinux(IntPtr fd,string leaf,int flags,uint mode);
         [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint="fstatat$INODE64", SetLastError=true)] private static extern int fstatatDarwinX64(IntPtr fd,string leaf,IntPtr value,int flags);
         [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint="fstatat", SetLastError=true)] private static extern int fstatatDarwin(IntPtr fd,string leaf,IntPtr value,int flags);
         [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint="renameatx_np", SetLastError=true)] private static extern int renameatx(IntPtr oldFd,string oldLeaf,IntPtr newFd,string newLeaf,uint flags);
         [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint="unlinkat", SetLastError=true)] private static extern int unlinkatDarwin(IntPtr fd,string leaf,int flags);
         [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint="fsync", SetLastError=true)] private static extern int fsyncDarwin(IntPtr fd);
+        [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint="mkdirat", SetLastError=true)] private static extern int mkdiratDarwin(IntPtr fd,string leaf,uint mode);
+        [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint="openat", SetLastError=true)] private static extern int openatDarwin(IntPtr fd,string leaf,int flags,uint mode);
+        private readonly SafeHandle parent;
+        private SafeFileHandle directory;
+        private SafeFileHandle file;
+        private readonly ulong device;
+        private readonly ulong inode;
+        public string DirectoryName { get; private set; }
+        public string TombstoneName { get; private set; }
+        public string DirectoryPath { get; private set; }
+        public string TombstonePath { get { return Path.Combine(DirectoryPath, TombstoneName); } }
+        private UnixRollbackLease(SafeHandle parent,string parentPath,ulong device,ulong inode) {
+            this.parent=parent;this.device=device;this.inode=inode;
+            DirectoryName=".trust-anchor-rollback-"+Guid.NewGuid().ToString("N");
+            TombstoneName="key-"+Guid.NewGuid().ToString("N");
+            DirectoryPath=Path.Combine(parentPath,DirectoryName);
+        }
+        private static bool Mac { get { return RuntimeInformation.IsOSPlatform(OSPlatform.OSX); } }
+        private static int MkdirAt(SafeHandle parent,string name){return Mac?mkdiratDarwin(parent.DangerousGetHandle(),name,448):mkdiratLinux(parent.DangerousGetHandle(),name,448);}
+        private static SafeFileHandle OpenAt(SafeHandle parent,string name,bool directory){
+            int flags=Mac?(directory?0x1100100:0x1000100):(directory?0xB0000:0xA0000);
+            int fd=Mac?openatDarwin(parent.DangerousGetHandle(),name,flags,0):openatLinux(parent.DangerousGetHandle(),name,flags,0);
+            if(fd<0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to retain the private trust-anchor rollback object.");
+            return new SafeFileHandle(new IntPtr(fd),true);
+        }
         private static NativeMetadataEvidence Stat(SafeHandle parent,string leaf) {
             IntPtr buffer=Marshal.AllocHGlobal(512);
             try {
@@ -295,23 +389,38 @@ namespace SyuanTsai.AIInstructions.TrustAnchor {
                 var a=(UnixMetadataInspector.LinuxArm64Stat)Marshal.PtrToStructure(buffer,typeof(UnixMetadataInspector.LinuxArm64Stat));return new NativeMetadataEvidence{Device=a.Dev,Inode=a.Ino,LinkCount=a.Links,Mode=a.Mode,Uid=a.Uid,Size=a.Size};
             } finally {Marshal.FreeHGlobal(buffer);}
         }
-        private static void Same(NativeMetadataEvidence value,ulong device,ulong inode){if(value.Device!=device||value.Inode!=inode||value.LinkCount!=1||(value.Mode&0xF000)!=0x8000)throw new IOException("The trust-anchor rollback target identity changed.");}
-        public static void Remove(SafeHandle parent,string leaf,ulong device,ulong inode){
-            NativeMetadataEvidence before=Stat(parent,leaf);Same(before,device,inode);
-            string tombstone=".trust-anchor-rollback-"+Guid.NewGuid().ToString("N"); bool mac=RuntimeInformation.IsOSPlatform(OSPlatform.OSX);
-            int renamed=mac?renameatx(parent.DangerousGetHandle(),leaf,parent.DangerousGetHandle(),tombstone,0x4):renameat2(parent.DangerousGetHandle(),leaf,parent.DangerousGetHandle(),tombstone,1);
-            if(renamed!=0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to atomically bind the trust-anchor rollback target.");
-            NativeMetadataEvidence moved=Stat(parent,tombstone);
-            if(moved.Device!=device||moved.Inode!=inode){
-                int restored=mac?renameatx(parent.DangerousGetHandle(),tombstone,parent.DangerousGetHandle(),leaf,0x4):renameat2(parent.DangerousGetHandle(),tombstone,parent.DangerousGetHandle(),leaf,1);
-                if(restored!=0)throw new IOException("Rollback target identity changed and the displaced entry could not be restored.");
-                throw new IOException("The trust-anchor rollback target identity changed.");
+        private static void SameFile(NativeMetadataEvidence value,ulong device,ulong inode){if(value.Device!=device||value.Inode!=inode||value.LinkCount!=1||(value.Mode&0xF000)!=0x8000)throw new IOException("The trust-anchor rollback target identity or link count changed.");}
+        public static UnixRollbackLease Begin(SafeHandle parent,string parentPath,string leaf,ulong device,ulong inode){
+            NativeMetadataEvidence before=Stat(parent,leaf);SameFile(before,device,inode);
+            var lease=new UnixRollbackLease(parent,parentPath,device,inode);bool directoryCreated=false;bool renamed=false;
+            try{
+                if(MkdirAt(parent,lease.DirectoryName)!=0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to create the private trust-anchor rollback directory.");
+                directoryCreated=true;lease.directory=OpenAt(parent,lease.DirectoryName,true);
+                var directoryEvidence=UnixMetadataInspector.Inspect(lease.directory);
+                if((directoryEvidence.Mode&0xF000)!=0x4000||(directoryEvidence.Mode&0x3F)!=0||directoryEvidence.Uid!=SecretBridge.EffectiveUid())throw new IOException("The private trust-anchor rollback directory is not retained with mode 0700-equivalent ownership.");
+                int moved=Mac?renameatx(parent.DangerousGetHandle(),leaf,lease.directory.DangerousGetHandle(),lease.TombstoneName,0x4):renameat2(parent.DangerousGetHandle(),leaf,lease.directory.DangerousGetHandle(),lease.TombstoneName,1);
+                if(moved!=0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to move the trust-anchor rollback target into the private rollback directory.");
+                renamed=true;lease.file=OpenAt(lease.directory,lease.TombstoneName,false);
+                SameFile(Stat(lease.directory,lease.TombstoneName),device,inode);
+                SameFile(UnixMetadataInspector.Inspect(lease.file),device,inode);
+                return lease;
+            }catch{
+                if(lease.file!=null)lease.file.Dispose();if(lease.directory!=null)lease.directory.Dispose();
+                if(directoryCreated&&!renamed){if(Mac)unlinkatDarwin(parent.DangerousGetHandle(),lease.DirectoryName,0x200);else unlinkatLinux(parent.DangerousGetHandle(),lease.DirectoryName,0x200);}
+                throw;
             }
-            int unlinked=mac?unlinkatDarwin(parent.DangerousGetHandle(),tombstone,0):unlinkatLinux(parent.DangerousGetHandle(),tombstone,0);
-            if(unlinked!=0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to remove the exact trust-anchor rollback target.");
-            int synced=mac?fsyncDarwin(parent.DangerousGetHandle()):fsyncLinux(parent.DangerousGetHandle());
-            if(synced!=0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to confirm trust-anchor rollback directory durability.");
         }
+        public void Complete(){
+            SameFile(Stat(directory,TombstoneName),device,inode);SameFile(UnixMetadataInspector.Inspect(file),device,inode);
+            int removed=Mac?unlinkatDarwin(directory.DangerousGetHandle(),TombstoneName,0):unlinkatLinux(directory.DangerousGetHandle(),TombstoneName,0);
+            if(removed!=0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to unlink the exact trust-anchor rollback tombstone.");
+            var after=UnixMetadataInspector.Inspect(file);if(after.LinkCount!=0)throw new IOException("The trust-anchor rollback target still has a retained hard link after unlink.");
+            int directorySynced=Mac?fsyncDarwin(directory.DangerousGetHandle()):fsyncLinux(directory.DangerousGetHandle());if(directorySynced!=0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to confirm private rollback directory durability.");
+            file.Dispose();file=null;directory.Dispose();directory=null;
+            int directoryRemoved=Mac?unlinkatDarwin(parent.DangerousGetHandle(),DirectoryName,0x200):unlinkatLinux(parent.DangerousGetHandle(),DirectoryName,0x200);if(directoryRemoved!=0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to remove the completed private rollback directory.");
+            int parentSynced=Mac?fsyncDarwin(parent.DangerousGetHandle()):fsyncLinux(parent.DangerousGetHandle());if(parentSynced!=0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to confirm trust-anchor rollback parent durability.");
+        }
+        public void Dispose(){if(file!=null)file.Dispose();if(directory!=null)directory.Dispose();}
     }
 }
 '@
@@ -321,6 +430,7 @@ $script:TrustAnchorOpenBeforePermissionTestHook = $null
 $script:TrustAnchorAfterReadTestHook = $null
 $script:TrustAnchorBeforePublicWriteTestHook = $null
 $script:TrustAnchorBeforeRollbackRemovalTestHook = $null
+$script:TrustAnchorAfterRollbackRenameTestHook = $null
 
 function New-TrustAnchorError {
     param([string]$Message,[string]$Id)
@@ -383,15 +493,20 @@ function Export-TrustAnchorEncryptedPrivateKey {
 }
 
 function Import-TrustAnchorEncryptedPrivateKey {
-    [CmdletBinding()] param([Parameter(Mandatory)][string]$Pem,[Parameter(Mandatory)][Security.SecureString]$Password)
-    if($Pem -notmatch '\A-----BEGIN ENCRYPTED PRIVATE KEY-----\r?\n' -or $Pem -notmatch '\r?\n-----END ENCRYPTED PRIVATE KEY-----\s*\z'){
-        throw (New-TrustAnchorError 'Only encrypted PKCS#8 PEM input is supported.' 'TrustAnchor.UnsupportedKeyFormat')
-    }
-    try {[SyuanTsai.AIInstructions.TrustAnchor.SecretBridge]::ValidateEncryptedPemProfile($Pem)}
-    catch {throw (New-TrustAnchorError 'The encrypted PKCS#8 input does not use PBES2 with PBKDF2-HMAC-SHA256, AES-256-CBC, and 600000 iterations.' 'TrustAnchor.UnsupportedKeyFormat')}
-    $rsa=[Security.Cryptography.RSA]::Create()
-    try { Use-TrustAnchorPassword $Password { param([char[]]$characters) [SyuanTsai.AIInstructions.TrustAnchor.SecretBridge]::ImportEncryptedPem($rsa,$Pem,$characters) }; return $rsa }
-    catch {$rsa.Dispose(); throw}
+    [CmdletBinding()] param([Parameter(Mandatory)][byte[]]$Bytes,[Parameter(Mandatory)][Security.SecureString]$Password)
+    try { return Use-TrustAnchorPassword $Password { param([char[]]$characters) [SyuanTsai.AIInstructions.TrustAnchor.SecretBridge]::ImportEncryptedPem($Bytes,$characters) } }
+    catch {throw (New-TrustAnchorError 'Only encrypted PKCS#8 PEM using PBES2 with a minimum 16-byte PBKDF2 salt, PBKDF2-HMAC-SHA256, AES-256-CBC, and 600000 iterations is supported.' 'TrustAnchor.UnsupportedKeyFormat')}
+}
+
+function Read-TrustAnchorInputBytes {
+    param([Parameter(Mandatory)][string]$Path,[int]$MaximumLength=1048576)
+    $full=[IO.Path]::GetFullPath($Path);$stream=[IO.File]::Open($full,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    try{
+        if($stream.Length -gt $MaximumLength){throw "The trust-anchor input exceeds the $MaximumLength-byte limit."}
+        $bytes=[byte[]]::new([int]$stream.Length);$offset=0
+        while($offset -lt $bytes.Length){$count=$stream.Read($bytes,$offset,$bytes.Length-$offset);if($count -eq 0){throw 'The trust-anchor input ended before its declared length.'};$offset+=$count}
+        return ,$bytes
+    }finally{$stream.Dispose()}
 }
 
 function Get-TrustAnchorPhysicalParent {
@@ -481,12 +596,13 @@ function New-TrustAnchorKeyFile {
         $file.WriteNewBytes($Bytes);Assert-PlatformFileIdentity -Lease $file -Expected $expected -SingleLink -VerifyPath|Out-Null
         if($PathEvidence.Purpose -ceq 'PrivateKey'){Assert-TrustAnchorPrivatePermissions $file|Out-Null}
         Assert-PlatformFileIdentity -Lease $parent -Expected $PathEvidence.ParentExpected -VerifyPath|Out-Null
-        return [pscustomobject]@{Path=$PathEvidence.Path;Leaf=$PathEvidence.Leaf;ParentLease=$parent;FileLease=$file;Expected=$expected;Purpose=$PathEvidence.Purpose;Sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($Bytes)).ToLowerInvariant();Length=[int64]$Bytes.Length}
+        return [pscustomobject]@{Path=$PathEvidence.Path;Parent=$PathEvidence.Parent;Leaf=$PathEvidence.Leaf;ParentLease=$parent;FileLease=$file;Expected=$expected;Purpose=$PathEvidence.Purpose;Sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($Bytes)).ToLowerInvariant();Length=[int64]$Bytes.Length}
     }catch{if($null-ne$file){$file.Dispose()};throw}
 }
 
 function Remove-TrustAnchorCreatedFile {
     param([Parameter(Mandatory)]$Lease)
+    $rollback=$null
     try{
         Assert-PlatformFileIdentity -Lease $Lease.FileLease -Expected $Lease.Expected -SingleLink -VerifyPath|Out-Null
         if($IsWindows){
@@ -496,15 +612,17 @@ function Remove-TrustAnchorCreatedFile {
         }else{
             if($null-ne$script:TrustAnchorBeforeRollbackRemovalTestHook){& $script:TrustAnchorBeforeRollbackRemovalTestHook $Lease}
             Assert-PlatformFileIdentity -Lease $Lease.FileLease -Expected $Lease.Expected -SingleLink -VerifyPath|Out-Null
-            [SyuanTsai.AIInstructions.TrustAnchor.UnixExactRemover]::Remove((Get-TrustAnchorLeaseHandle $Lease.ParentLease),$Lease.Leaf,[uint64]$Lease.Expected.Device,[uint64]$Lease.Expected.Inode)
+            $rollback=[SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease]::Begin((Get-TrustAnchorLeaseHandle $Lease.ParentLease),$Lease.Parent,$Lease.Leaf,[uint64]$Lease.Expected.Device,[uint64]$Lease.Expected.Inode)
+            if($null-ne$script:TrustAnchorAfterRollbackRenameTestHook){& $script:TrustAnchorAfterRollbackRenameTestHook $rollback}
+            $rollback.Complete()
         }
-    }finally{$Lease.FileLease.Dispose();$Lease.ParentLease.Dispose()}
+    }finally{if($null-ne$rollback){$rollback.Dispose()};$Lease.FileLease.Dispose();$Lease.ParentLease.Dispose()}
 }
 function Close-TrustAnchorCreatedFile {param($Lease)if($null-ne$Lease){$Lease.FileLease.Dispose();$Lease.ParentLease.Dispose()}}
 
 function Open-TrustAnchorPrivateKey {
     [CmdletBinding()] param([Parameter(Mandatory)][string]$Path)
-    $pathEvidence=$null;$file=$null
+    $pathEvidence=$null;$file=$null;$bytes=$null;$succeeded=$false
     try{
         $pathEvidence=New-TrustAnchorPathEvidence -Path $Path -Purpose PrivateKey -Existing
         $file=Open-PlatformFile -ParentLease $pathEvidence.ParentLease -Leaf $pathEvidence.Leaf -Access Read -CreateMode OpenExisting;$expected=$file.Observation
@@ -512,12 +630,12 @@ function Open-TrustAnchorPrivateKey {
         if($null-ne$script:TrustAnchorOpenBeforePermissionTestHook){& $script:TrustAnchorOpenBeforePermissionTestHook $Path $file}
         $before=Get-TrustAnchorMetadataEvidence $file;Assert-TrustAnchorPrivatePermissions $file $before|Out-Null
         $bytes=$file.ReadAllBytes(1048576)
-        if($null-ne$script:TrustAnchorAfterReadTestHook){& $script:TrustAnchorAfterReadTestHook $Path $file}
+        if($null-ne$script:TrustAnchorAfterReadTestHook){& $script:TrustAnchorAfterReadTestHook $Path $file $bytes}
         Assert-PlatformFileIdentity -Lease $file -Expected $expected -SingleLink -VerifyPath|Out-Null
         $after=Get-TrustAnchorMetadataEvidence $file;Assert-TrustAnchorPrivatePermissions $file $after|Out-Null
-        if(-not(Test-TrustAnchorMetadataEqual $before $after)){[Security.Cryptography.CryptographicOperations]::ZeroMemory($bytes);throw 'The private-key handle metadata changed while it was being read.'}
-        return ,$bytes
-    }finally{if($null-ne$file){$file.Dispose()};Close-TrustAnchorPathEvidence $pathEvidence}
+        if(-not(Test-TrustAnchorMetadataEqual $before $after)){throw 'The private-key handle metadata changed while it was being read.'}
+        $succeeded=$true;return ,$bytes
+    }finally{if(-not$succeeded -and $null-ne$bytes){[Security.Cryptography.CryptographicOperations]::ZeroMemory($bytes)};if($null-ne$file){$file.Dispose()};Close-TrustAnchorPathEvidence $pathEvidence}
 }
 
 function ConvertTo-TrustAnchorCanonicalXml {
@@ -543,14 +661,15 @@ function Get-TrustAnchorFingerprint {
 
 function Import-TrustAnchorPublicXml {
     param([Parameter(Mandatory)][byte[]]$Bytes)
-    $text=[Text.UTF8Encoding]::new($false,$true).GetString($Bytes)
-    if($text -match '<(D|P|Q|DP|DQ|InverseQ)>' -or $text -notmatch '\A<RSAKeyValue><Modulus>([^<]+)</Modulus><Exponent>([^<]+)</Exponent></RSAKeyValue>\r?\n?\z'){throw 'The XML input is not a public RSAKeyValue document.'}
+    try{$text=[SyuanTsai.AIInstructions.TrustAnchor.SecretBridge]::DecodePublicXml($Bytes)}catch{throw (New-TrustAnchorError 'The XML input contains private RSA fields or is not valid UTF-8.' 'TrustAnchor.UnsupportedKeyFormat')}
+    if($text -notmatch '\A<RSAKeyValue><Modulus>([^<]+)</Modulus><Exponent>([^<]+)</Exponent></RSAKeyValue>\r?\n?\z'){throw 'The XML input is not a public RSAKeyValue document.'}
     $rsa=[Security.Cryptography.RSA]::Create()
     try{$rsa.ImportParameters([Security.Cryptography.RSAParameters]@{Modulus=[Convert]::FromBase64String($Matches[1]);Exponent=[Convert]::FromBase64String($Matches[2])});return $rsa}catch{$rsa.Dispose();throw}
 }
 
 function Import-TrustAnchorPublicPem {
-    param([Parameter(Mandatory)][string]$Pem)
+    param([Parameter(Mandatory)][byte[]]$Bytes)
+    try{$Pem=[SyuanTsai.AIInstructions.TrustAnchor.SecretBridge]::DecodePublicPem($Bytes)}catch{throw (New-TrustAnchorError 'Only a PUBLIC KEY PEM without private-key content is supported.' 'TrustAnchor.UnsupportedKeyFormat')}
     if($Pem -notmatch '\A-----BEGIN PUBLIC KEY-----\r?\n' -or $Pem -notmatch '\r?\n-----END PUBLIC KEY-----\s*\z' -or $Pem -match 'PRIVATE KEY'){throw (New-TrustAnchorError 'Only a PUBLIC KEY PEM without private-key content is supported.' 'TrustAnchor.UnsupportedKeyFormat')}
     $rsa=[Security.Cryptography.RSA]::Create()
     try{$rsa.ImportFromPem($Pem);return $rsa}catch{$rsa.Dispose();throw}
@@ -592,16 +711,16 @@ function Invoke-NewTrustAnchorKeyPairAction {
 function Invoke-ConvertToTrustAnchorPublicKeyXmlAction {
     param([Parameter(Mandatory)][string]$PublicKeyPemPath,[Parameter(Mandatory)][string]$OutputPath)
     Assert-TrustAnchorInteractiveHost
-    $target=$null;$rsa=$null;$lease=$null;$bytes=$null
+    $target=$null;$rsa=$null;$lease=$null;$bytes=$null;$inputBytes=$null
     try{
         $target=Assert-TrustAnchorKeyPath -Path $OutputPath -Purpose PublicOutput
-        $pem=[IO.File]::ReadAllText([IO.Path]::GetFullPath($PublicKeyPemPath),[Text.UTF8Encoding]::new($false,$true))
-        $rsa=Import-TrustAnchorPublicPem $pem;Assert-TrustAnchorPublicKey $rsa
+        $inputBytes=Read-TrustAnchorInputBytes $PublicKeyPemPath
+        $rsa=Import-TrustAnchorPublicPem $inputBytes;Assert-TrustAnchorPublicKey $rsa
         $bytes=ConvertTo-TrustAnchorCanonicalXml $rsa;$lease=New-TrustAnchorKeyFile -PathEvidence $target -Bytes $bytes
         Get-TrustAnchorFingerprint $rsa
     }finally{
         Close-TrustAnchorCreatedFile $lease;Close-TrustAnchorPathEvidence $target
-        if($null-ne$bytes){[Security.Cryptography.CryptographicOperations]::ZeroMemory($bytes)};if($null-ne$rsa){$rsa.Dispose()}
+        if($null-ne$inputBytes){[Security.Cryptography.CryptographicOperations]::ZeroMemory($inputBytes)};if($null-ne$bytes){[Security.Cryptography.CryptographicOperations]::ZeroMemory($bytes)};if($null-ne$rsa){$rsa.Dispose()}
     }
 }
 
@@ -610,13 +729,13 @@ function Invoke-GetTrustAnchorFingerprintAction {
     Assert-TrustAnchorInteractiveHost
     $selected=@(@($PublicKeyXmlPath,$PublicKeyPemPath,$EncryptedPrivateKeyPath)|Where-Object{-not[string]::IsNullOrWhiteSpace($_)})
     if($selected.Count -ne 1){throw 'Exactly one trust-anchor input path is required.'}
-    $rsa=$null;$password=$null;$privateBytes=$null
+    $rsa=$null;$password=$null;$inputBytes=$null
     try{
-        if(-not[string]::IsNullOrWhiteSpace($PublicKeyXmlPath)){$rsa=Import-TrustAnchorPublicXml ([IO.File]::ReadAllBytes([IO.Path]::GetFullPath($PublicKeyXmlPath)))}
-        elseif(-not[string]::IsNullOrWhiteSpace($PublicKeyPemPath)){$pem=[IO.File]::ReadAllText([IO.Path]::GetFullPath($PublicKeyPemPath),[Text.UTF8Encoding]::new($false,$true));$rsa=Import-TrustAnchorPublicPem $pem}
-        else{$privateBytes=Open-TrustAnchorPrivateKey $EncryptedPrivateKeyPath;$password=Read-TrustAnchorPassword;$pem=[Text.UTF8Encoding]::new($false,$true).GetString($privateBytes);$rsa=Import-TrustAnchorEncryptedPrivateKey -Pem $pem -Password $password}
+        if(-not[string]::IsNullOrWhiteSpace($PublicKeyXmlPath)){$inputBytes=Read-TrustAnchorInputBytes $PublicKeyXmlPath;$rsa=Import-TrustAnchorPublicXml $inputBytes}
+        elseif(-not[string]::IsNullOrWhiteSpace($PublicKeyPemPath)){$inputBytes=Read-TrustAnchorInputBytes $PublicKeyPemPath;$rsa=Import-TrustAnchorPublicPem $inputBytes}
+        else{$inputBytes=Open-TrustAnchorPrivateKey $EncryptedPrivateKeyPath;$password=Read-TrustAnchorPassword;$rsa=Import-TrustAnchorEncryptedPrivateKey -Bytes $inputBytes -Password $password}
         Assert-TrustAnchorPublicKey $rsa;Get-TrustAnchorFingerprint $rsa
-    }finally{if($null-ne$privateBytes){[Security.Cryptography.CryptographicOperations]::ZeroMemory($privateBytes)};if($null-ne$rsa){$rsa.Dispose()};if($null-ne$password){$password.Dispose()}}
+    }finally{if($null-ne$inputBytes){[Security.Cryptography.CryptographicOperations]::ZeroMemory($inputBytes)};if($null-ne$rsa){$rsa.Dispose()};if($null-ne$password){$password.Dispose()}}
 }
 
 Export-ModuleMember -Function @()

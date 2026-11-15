@@ -7,4 +7,9 @@ param(
     [Parameter(Mandatory)][string]$PublicKeyXmlPath
 )
 $module=Import-Module (Join-Path $PSScriptRoot 'TrustAnchorPrivateKey.psm1') -PassThru -ErrorAction Stop
-& $module {param($id,$privatePath,$publicPath) Assert-TrustAnchorInteractiveHost;Invoke-NewTrustAnchorKeyPairAction -KeyId $id -PrivateKeyPath $privatePath -PublicKeyXmlPath $publicPath} $KeyId $PrivateKeyPath $PublicKeyXmlPath
+try {
+    & $module {param($id,$privatePath,$publicPath) Assert-TrustAnchorInteractiveHost;Invoke-NewTrustAnchorKeyPairAction -KeyId $id -PrivateKeyPath $privatePath -PublicKeyXmlPath $publicPath} $KeyId $PrivateKeyPath $PublicKeyXmlPath
+} catch {
+    [Console]::Error.WriteLine($_.FullyQualifiedErrorId)
+    throw
+}
