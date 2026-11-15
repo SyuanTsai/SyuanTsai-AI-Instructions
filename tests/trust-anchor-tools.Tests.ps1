@@ -55,10 +55,51 @@ function New-TestShortSaltEncryptedPrivateKey {
 }
 function Test-TrustAnchorCliGuardAst {
     param([Parameter(Mandatory)][Management.Automation.Language.ScriptBlockAst]$Ast,[Parameter(Mandatory)][string]$ActionName)
+    if($null-ne$Ast.BeginBlock -or $null-ne$Ast.ProcessBlock -or $null-ne$Ast.CleanBlock -or $null-eq$Ast.EndBlock){return $false}
+    $statements=@($Ast.EndBlock.Statements);if($statements.Count-ne2){return $false}
+    if($statements[0] -isnot [Management.Automation.Language.AssignmentStatementAst] -or $statements[0].Left.Extent.Text -cne '$module'){return $false}
+    if($statements[0].Extent.Text -cnotmatch '^\$module\s*=\s*Import-Module\s+\(Join-Path\s+\$PSScriptRoot\s+''TrustAnchorPrivateKey\.psm1''\)\s+-PassThru\s+-ErrorAction\s+Stop$'){return $false}
+    if($statements[1] -isnot [Management.Automation.Language.TryStatementAst]){return $false}
+    $try=$statements[1];if($null-ne$try.Finally -or @($try.CatchClauses).Count-ne1 -or @($try.Body.Statements).Count-ne1){return $false}
+    $catchStatements=@($try.CatchClauses[0].Body.Statements);if($catchStatements.Count-ne2){return $false}
+    if($catchStatements[0].Extent.Text -cnotmatch '^\[Console\]::Error\.WriteLine\(\$_\.FullyQualifiedErrorId\)$' -or $catchStatements[1] -isnot [Management.Automation.Language.ThrowStatementAst]){return $false}
     $blocks=@($Ast.FindAll({param($node)$node -is [Management.Automation.Language.ScriptBlockExpressionAst] -and $node.Extent.Text -match 'Assert-TrustAnchorInteractiveHost'},$true));if($blocks.Count-ne1){return $false}
+    if($blocks[0].Parent.Parent -ne $try.Body.Statements[0]){return $false}
     $commands=@($blocks[0].ScriptBlock.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst]},$true));if($commands.Count-ne2){return $false}
     if($commands[0].GetCommandName()-cne'Assert-TrustAnchorInteractiveHost' -or $commands[1].GetCommandName()-cne$ActionName){return $false}
     if(@($blocks[0].ScriptBlock.FindAll({param($node)$node -is [Management.Automation.Language.InvokeMemberExpressionAst]},$true)).Count-ne0){return $false}
+    return $true
+}
+function Get-TestAncestorFunctionName {
+    param([Parameter(Mandatory)][Management.Automation.Language.Ast]$Node)
+    $parent=$Node.Parent
+    while($null-ne$parent){if($parent -is [Management.Automation.Language.FunctionDefinitionAst]){return $parent.Name};$parent=$parent.Parent}
+    return $null
+}
+function Test-TrustAnchorPasswordSourceAst {
+    param([Parameter(Mandatory)][Management.Automation.Language.ScriptBlockAst]$Ast)
+    $commands=@($Ast.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst]},$true))
+    $readHost=@($commands|Where-Object{$_.GetCommandName()-ceq'Read-Host'})
+    if($readHost.Count-ne2){return $false}
+    foreach($command in $readHost){
+        if((Get-TestAncestorFunctionName $command)-cne'Read-TrustAnchorPassword'){return $false}
+        $parameters=@($command.CommandElements|Where-Object{$_ -is [Management.Automation.Language.CommandParameterAst]}|ForEach-Object{$_.ParameterName})
+        if($parameters.Count-ne1 -or $parameters[0]-cne'AsSecureString'){return $false}
+    }
+    if(@($commands|Where-Object{$_.GetCommandName()-ceq'ConvertTo-SecureString'}).Count-ne0){return $false}
+    $variables=@($Ast.FindAll({param($node)$node -is [Management.Automation.Language.VariableExpressionAst]},$true))
+    if(@($variables|Where-Object{$_.VariablePath.UserPath -cmatch '^env:'}).Count-ne0){return $false}
+    $members=@($Ast.FindAll({param($node)$node -is [Management.Automation.Language.InvokeMemberExpressionAst]},$true))
+    foreach($member in $members){
+        $name=[string]$member.Member.Value
+        if($name -ceq'AppendChar' -or ($name -ceq'new' -and $member.Expression.Extent.Text -match '(?i)SecureString')){return $false}
+        if($name -in @('ReadAllText','ReadAllLines','ReadAllBytes','OpenText') -and $member.Extent.Text -match '(?i)password|secret'){return $false}
+    }
+    if(@($commands|Where-Object{$_.GetCommandName()-in @('Get-Content','Import-Clixml') -and $_.Extent.Text -match '(?i)password|secret'}).Count-ne0){return $false}
+    $environmentCalls=@($members|Where-Object{[string]$_.Member.Value-ceq'GetEnvironmentVariable'})
+    if($environmentCalls.Count-ne1 -or (Get-TestAncestorFunctionName $environmentCalls[0])-cne'Assert-TrustAnchorInteractiveHost' -or $environmentCalls[0].Extent.Text -cne '[Environment]::GetEnvironmentVariable($name)'){return $false}
+    $interactive=@($Ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq'Assert-TrustAnchorInteractiveHost'},$true))
+    if($interactive.Count-ne1 -or $interactive[0].Extent.Text -cnotmatch "@\('CI','GITHUB_ACTIONS','TF_BUILD','BUILD_BUILDID','RUNNER_TEMP'\)"){return $false}
     return $true
 }
 
@@ -166,7 +207,11 @@ Describe 'PR-K1 password and public command boundary' {
     # Scenario: The module AST is inspected for every password acquisition and possible fallback source.
     # Purpose: Require Read-Host -AsSecureString as the only password source, without environment or file fallback.
     It 'UnitT13_uses_only_Read_Host_AsSecureString_for_password_acquisition' {
-        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($script:ModulePath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;$function=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Read-TrustAnchorPassword'},$true));$function.Count|Should Be 1;$commands=@($function[0].Body.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst]},$true));$readHost=@($commands|Where-Object{$_.GetCommandName()-ceq'Read-Host'});$readHost.Count|Should Be 2;foreach($command in $readHost){$command.Extent.Text|Should Match '(?i)-AsSecureString'};$function[0].Extent.Text|Should Not Match '(?i)GetEnvironmentVariable|ReadAll(Text|Bytes|Lines)|Get-Content|Password(File|Path)'
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($script:ModulePath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;(Test-TrustAnchorPasswordSourceAst $ast)|Should Be $true
+        $otherHelper="function Assert-TrustAnchorInteractiveHost { foreach(`$name in @('CI','GITHUB_ACTIONS','TF_BUILD','BUILD_BUILDID','RUNNER_TEMP')) { [Environment]::GetEnvironmentVariable(`$name) } }`nfunction Read-TrustAnchorPassword { Read-Host -AsSecureString; Read-Host -AsSecureString }`nfunction Get-PasswordFallback { [Environment]::GetEnvironmentVariable('TRUST_ANCHOR_SECRET') | ConvertTo-SecureString -AsPlainText -Force }"
+        $errors=$null;$negative=[Management.Automation.Language.Parser]::ParseInput($otherHelper,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;(Test-TrustAnchorPasswordSourceAst $negative)|Should Be $false
+        $directEnvironment="function Assert-TrustAnchorInteractiveHost { foreach(`$name in @('CI','GITHUB_ACTIONS','TF_BUILD','BUILD_BUILDID','RUNNER_TEMP')) { [Environment]::GetEnvironmentVariable(`$name) } }`nfunction Read-TrustAnchorPassword { `$env:TRUST_ANCHOR_SECRET; Read-Host -AsSecureString; Read-Host -AsSecureString }"
+        $errors=$null;$negative=[Management.Automation.Language.Parser]::ParseInput($directEnvironment,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;(Test-TrustAnchorPasswordSourceAst $negative)|Should Be $false
     }
 }
 
@@ -181,7 +226,8 @@ Describe 'PR-K1 trust-anchor CLI boundary' {
     # Scenario: A synthetic CLI performs File.ReadAllText before the interactive guard.
     # Purpose: Prove the closed AST allowlist fails when any I/O is inserted ahead of the guard.
     It 'UnitT15_AST_guard_self_check_rejects_pre_guard_file_IO' {
-        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseInput("`$module=Import-Module x -PassThru`n& `$module { [IO.File]::ReadAllText('x'); Assert-TrustAnchorInteractiveHost; Invoke-NewTrustAnchorKeyPairAction }",[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;(Test-TrustAnchorCliGuardAst $ast 'Invoke-NewTrustAnchorKeyPairAction')|Should Be $false
+        $source="param([string]`$PrivateKeyPath)`n`$module=Import-Module (Join-Path `$PSScriptRoot 'TrustAnchorPrivateKey.psm1') -PassThru -ErrorAction Stop`n[IO.File]::ReadAllText(`$PrivateKeyPath)`ntry { & `$module { Assert-TrustAnchorInteractiveHost; Invoke-NewTrustAnchorKeyPairAction } } catch { [Console]::Error.WriteLine(`$_.FullyQualifiedErrorId); throw }"
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;(Test-TrustAnchorCliGuardAst $ast 'Invoke-NewTrustAnchorKeyPairAction')|Should Be $false
     }
 
     # Scenario: Each CI marker is set independently before the interactive guard runs.
@@ -305,20 +351,21 @@ if($IsWindows){
         # Scenario: A native fixture opens a broad-DACL file with delete sharing, completes both pathname moves, and retains the original handle.
         # Purpose: Distinguish GetSecurityInfo(handle) evidence from the restricted replacement now visible at the pathname.
         It 'InterT32_delete_sharing_fixture_proves_handle_based_DACL_evidence' {
-            $path=Join-Path $TestDrive 'delete-share-broad.pem';$replacement=Join-Path $TestDrive 'delete-share-safe.pem';$moved=Join-Path $TestDrive 'delete-share-broad.moved';[IO.File]::WriteAllText($path,'original');$target=Invoke-TrustAnchorModule {param($p)Assert-TrustAnchorKeyPath $p PrivateKey} @($replacement);$lease=Invoke-TrustAnchorModule {param($t)New-TrustAnchorKeyFile $t ([Text.Encoding]::UTF8.GetBytes('replacement'))} @($target);Invoke-TrustAnchorModule {param($l)Close-TrustAnchorCreatedFile $l} @($lease);Invoke-TrustAnchorModule {param($t)Close-TrustAnchorPathEvidence $t} @($target);$handle=[SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector]::OpenReadWithDeleteSharing($path);$replacementHandle=$null;$barrierSwapped=$false
-            try{Move-Item -LiteralPath $path -Destination $moved -ErrorAction Stop;Move-Item -LiteralPath $replacement -Destination $path -ErrorAction Stop;$barrierSwapped=$true;$originalEvidence=[SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector]::Inspect($handle);$replacementHandle=[SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector]::OpenReadWithDeleteSharing($path);$replacementEvidence=[SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector]::Inspect($replacementHandle);$barrierSwapped|Should Be $true;$originalEvidence.DaclHex|Should Not Be $replacementEvidence.DaclHex;$replacementEvidence.DaclProtected|Should Be $true}finally{if($null-ne$replacementHandle){$replacementHandle.Dispose()};$handle.Dispose()}
+            $path=Join-Path $TestDrive 'delete-share-safe.pem';$replacement=Join-Path $TestDrive 'delete-share-broad.pem';$moved=Join-Path $TestDrive 'delete-share-safe.moved';$target=Invoke-TrustAnchorModule {param($p)Assert-TrustAnchorKeyPath $p PrivateKey} @($path);$lease=Invoke-TrustAnchorModule {param($t)New-TrustAnchorKeyFile $t ([Text.Encoding]::UTF8.GetBytes('original'))} @($target);Invoke-TrustAnchorModule {param($l)Close-TrustAnchorCreatedFile $l} @($lease);Invoke-TrustAnchorModule {param($t)Close-TrustAnchorPathEvidence $t} @($target);[IO.File]::WriteAllText($replacement,'replacement')
+            Invoke-TrustAnchorModule {param($replacementPath,$movedPath)$script:TrustAnchorBarrierReplacement=$replacementPath;$script:TrustAnchorBarrierMoved=$movedPath;$script:TrustAnchorBarrierSwapped=$false;$script:TrustAnchorOpenBeforePermissionTestHook={param($openedPath,$file)$field=$file.GetType().GetField('Handle',[Reflection.BindingFlags]'Instance,NonPublic');$original=$field.GetValue($file);$deleteSharing=[SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector]::OpenReadWithDeleteSharing($openedPath);$field.SetValue($file,$deleteSharing);$original.Dispose();Move-Item -LiteralPath $openedPath -Destination $script:TrustAnchorBarrierMoved -ErrorAction Stop;Move-Item -LiteralPath $script:TrustAnchorBarrierReplacement -Destination $openedPath -ErrorAction Stop;$script:TrustAnchorBarrierSwapped=$true}} @($replacement,$moved)
+            try{$failure=Get-TestFailure {Invoke-TrustAnchorModule {param($p)Open-TrustAnchorPrivateKey $p} @($path)};(Invoke-TrustAnchorModule {$script:TrustAnchorBarrierSwapped})|Should Be $true;$failure.Exception.Message|Should Not Match 'protected DACL';$failure.Exception.Message|Should Match '(?i)identity|path'}finally{Invoke-TrustAnchorModule {$script:TrustAnchorOpenBeforePermissionTestHook=$null}}
         }
 
         # Scenario: The private-key leaf is a file symlink, with a directory-junction fallback when symlink creation is unavailable.
         # Purpose: Reject every Windows leaf reparse point and explicitly prove the fixture carries ReparsePoint.
         It 'InterT33_rejects_a_private_key_leaf_reparse_point' {
-            $target=Join-Path $TestDrive 'reparse-target.pem';$leaf=Join-Path $TestDrive 'reparse-leaf.pem';[IO.File]::WriteAllText($target,'fixture');try{New-Item -ItemType SymbolicLink -Path $leaf -Target $target -ErrorAction Stop|Out-Null}catch{$targetDirectory=Join-Path $TestDrive 'reparse-target-dir';[void][IO.Directory]::CreateDirectory($targetDirectory);$leaf=Join-Path $TestDrive 'reparse-leaf-dir';New-Item -ItemType Junction -Path $leaf -Target $targetDirectory -ErrorAction Stop|Out-Null};(([IO.File]::GetAttributes($leaf)-band[IO.FileAttributes]::ReparsePoint)-ne0)|Should Be $true;{Invoke-TrustAnchorModule {param($p)Open-TrustAnchorPrivateKey $p} @($leaf)}|Should Throw
+            $target=Join-Path $TestDrive 'reparse-target.pem';$leaf=Join-Path $TestDrive 'reparse-leaf.pem';[IO.File]::WriteAllText($target,'fixture');try{New-Item -ItemType SymbolicLink -Path $leaf -Target $target -ErrorAction Stop|Out-Null}catch{$targetDirectory=Join-Path $TestDrive 'reparse-target-dir';[void][IO.Directory]::CreateDirectory($targetDirectory);$leaf=Join-Path $TestDrive 'reparse-leaf-dir';New-Item -ItemType Junction -Path $leaf -Target $targetDirectory -ErrorAction Stop|Out-Null};(([IO.File]::GetAttributes($leaf)-band[IO.FileAttributes]::ReparsePoint)-ne0)|Should Be $true;$failure=Get-TestFailure {Invoke-TrustAnchorModule {param($p)Open-TrustAnchorPrivateKey $p} @($leaf)};$failure.Exception.Message|Should Match '(?i)reparse'
         }
 
         # Scenario: The formal key-pair action creates a private file and returns before native ACL readback.
         # Purpose: Independently verify the resulting DACL is protected and grants allow access only to approved SIDs.
         It 'InterT34_formal_creation_has_an_independently_verified_restrictive_DACL' {
-            Mock -CommandName Assert-TrustAnchorInteractiveHost -ModuleName $script:Module.Name -MockWith {};Set-TestReadHostResponses @((New-TestPassword),(New-TestPassword));Mock -CommandName Read-Host -ModuleName $script:Module.Name -MockWith {$script:TrustAnchorPasswordTestResponses.Dequeue()};$private=Join-Path $TestDrive 'acl-private.pem';$public=Join-Path $TestDrive 'acl-public.xml';Invoke-TrustAnchorModule {param($privatePath,$publicPath)Invoke-NewTrustAnchorKeyPairAction humanApproval $privatePath $publicPath} @($private,$public)|Out-Null;$acl=Get-Acl -LiteralPath $private;$owner=$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value;$identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$owner|Should Be $identity.User.Value;$acl.AreAccessRulesProtected|Should Be $true;$allowed=@($identity.User.Value,'S-1-5-18','S-1-5-32-544');foreach($rule in @($acl.Access|Where-Object{$_.AccessControlType -eq 'Allow'})){($rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -in $allowed)|Should Be $true}}finally{$identity.Dispose()}
+            Mock -CommandName Assert-TrustAnchorInteractiveHost -ModuleName $script:Module.Name -MockWith {};Set-TestReadHostResponses @((New-TestPassword),(New-TestPassword));Mock -CommandName Read-Host -ModuleName $script:Module.Name -MockWith {$script:TrustAnchorPasswordTestResponses.Dequeue()};$private=Join-Path $TestDrive 'acl-private.pem';$public=Join-Path $TestDrive 'acl-public.xml';Invoke-TrustAnchorModule {param($privatePath,$publicPath)Invoke-NewTrustAnchorKeyPairAction humanApproval $privatePath $publicPath} @($private,$public)|Out-Null;$acl=Get-Acl -LiteralPath $private;$owner=$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value;$identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$owner|Should Be $identity.User.Value;$acl.AreAccessRulesProtected|Should Be $true;$rules=@($acl.Access);$rules.Count|Should Be 1;$rule=$rules[0];$rule.IsInherited|Should Be $false;$rule.AccessControlType|Should Be ([Security.AccessControl.AccessControlType]::Allow);$rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value|Should Be $identity.User.Value;(($rule.FileSystemRights-band[Security.AccessControl.FileSystemRights]::Read)-eq[Security.AccessControl.FileSystemRights]::Read)|Should Be $true;(($rule.FileSystemRights-band[Security.AccessControl.FileSystemRights]::Write)-eq[Security.AccessControl.FileSystemRights]::Write)|Should Be $true}finally{$identity.Dispose()}
         }
     }
 }else{
@@ -353,7 +400,7 @@ if($IsWindows){
         # Scenario: The formal key-pair action creates a private file before independent native mode readback.
         # Purpose: Verify the persisted file is regular, owner-only, and not merely accepted by the module's own check.
         It 'InterT44_formal_creation_has_an_independently_verified_owner_only_mode' {
-            Mock -CommandName Assert-TrustAnchorInteractiveHost -ModuleName $script:Module.Name -MockWith {};Set-TestReadHostResponses @((New-TestPassword),(New-TestPassword));Mock -CommandName Read-Host -ModuleName $script:Module.Name -MockWith {$script:TrustAnchorPasswordTestResponses.Dequeue()};$private=Join-Path $TestDrive 'mode-private.pem';$public=Join-Path $TestDrive 'mode-public.xml';Invoke-TrustAnchorModule {param($privatePath,$publicPath)Invoke-NewTrustAnchorKeyPairAction humanApproval $privatePath $publicPath} @($private,$public)|Out-Null;$mode=[IO.File]::GetUnixFileMode($private);(([int]$mode-band63)-eq0)|Should Be $true
+            Mock -CommandName Assert-TrustAnchorInteractiveHost -ModuleName $script:Module.Name -MockWith {};Set-TestReadHostResponses @((New-TestPassword),(New-TestPassword));Mock -CommandName Read-Host -ModuleName $script:Module.Name -MockWith {$script:TrustAnchorPasswordTestResponses.Dequeue()};$private=Join-Path $TestDrive 'mode-private.pem';$public=Join-Path $TestDrive 'mode-public.xml';Invoke-TrustAnchorModule {param($privatePath,$publicPath)Invoke-NewTrustAnchorKeyPairAction humanApproval $privatePath $publicPath} @($private,$public)|Out-Null;$mode=[IO.File]::GetUnixFileMode($private);([int]$mode-band511)|Should Be 384;$handle=[IO.File]::OpenHandle($private,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read);try{$evidence=[SyuanTsai.AIInstructions.TrustAnchor.UnixMetadataInspector]::Inspect($handle);([uint32]$evidence.Mode-band0xF000)|Should Be 0x8000;[uint64]$evidence.Uid|Should Be ([SyuanTsai.AIInstructions.TrustAnchor.SecretBridge]::EffectiveUid())}finally{$handle.Dispose()}
         }
 
         # Scenario: Both original and replacement are mode 0600 regular files, and the pathname identity changes after the read.
@@ -379,12 +426,73 @@ if($IsWindows){
     }
 }
 
+Describe 'PR-K1 fix4 closed-boundary hardening' {
+    # Scenario: OpenSSH private armor and a second armor block are supplied to the public-PEM importer.
+    # Purpose: Prove the complete byte envelope is public-only before any immutable string is created.
+    It 'UnitT49_rejects_non_public_or_multiple_PEM_envelopes_at_the_byte_boundary' {
+        $rsa=[Security.Cryptography.RSA]::Create(3072)
+        try{
+            $fixtures=@(
+                "-----BEGIN OPENSSH PRIVATE KEY-----`nQUJD`n-----END OPENSSH PRIVATE KEY-----`n",
+                ($rsa.ExportSubjectPublicKeyInfoPem()+"`n-----BEGIN "+'PRIVATE KEY-----'+"`nQUJD`n-----END "+'PRIVATE KEY-----'+"`n")
+            )
+            foreach($fixture in $fixtures){[byte[]]$bytes=ConvertTo-TestUtf8Bytes $fixture;try{$failure=Get-TestFailure {Invoke-TrustAnchorModule {param($value)Import-TrustAnchorPublicPem $value} @(,$bytes)};$failure.FullyQualifiedErrorId|Should Match '^TrustAnchor\.UnsupportedKeyFormat'}finally{[Security.Cryptography.CryptographicOperations]::ZeroMemory($bytes)}}
+        }finally{$rsa.Dispose()}
+    }
+
+    # Scenario: Private RSA XML fields use lower-case and namespace-prefixed element names.
+    # Purpose: Require a byte-level closed element allowlist instead of case-sensitive private-field spotting.
+    It 'UnitT50_rejects_case_or_namespace_variant_private_XML_at_the_byte_boundary' {
+        $fixtures=@(
+            '<RSAKeyValue><Modulus>AQ==</Modulus><Exponent>AQAB</Exponent><d>AQ==</d></RSAKeyValue>',
+            '<RSAKeyValue xmlns:x="urn:private"><Modulus>AQ==</Modulus><Exponent>AQAB</Exponent><x:D>AQ==</x:D></RSAKeyValue>'
+        )
+        foreach($fixture in $fixtures){[byte[]]$bytes=ConvertTo-TestUtf8Bytes $fixture;try{$failure=Get-TestFailure {Invoke-TrustAnchorModule {param($value)Import-TrustAnchorPublicXml $value} @(,$bytes)};$failure.FullyQualifiedErrorId|Should Match '^TrustAnchor\.UnsupportedKeyFormat'}finally{[Security.Cryptography.CryptographicOperations]::ZeroMemory($bytes)}}
+    }
+
+    # Scenario: A synthetic helper and Read-TrustAnchorPassword itself each gain a forbidden environment fallback.
+    # Purpose: Keep the password-source validator closed over the complete module AST.
+    It 'UnitT51_password_source_validator_rejects_module_and_function_environment_fallbacks' {
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($script:ModulePath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;(Test-TrustAnchorPasswordSourceAst $ast)|Should Be $true
+        foreach($source in @(
+            "function Assert-TrustAnchorInteractiveHost { foreach(`$name in @('CI','GITHUB_ACTIONS','TF_BUILD','BUILD_BUILDID','RUNNER_TEMP')) { [Environment]::GetEnvironmentVariable(`$name) } }`nfunction Read-TrustAnchorPassword { Read-Host -AsSecureString; Read-Host -AsSecureString }`nfunction Get-Secret { [Environment]::GetEnvironmentVariable('TRUST_ANCHOR_SECRET') | ConvertTo-SecureString -AsPlainText -Force }",
+            "function Assert-TrustAnchorInteractiveHost { foreach(`$name in @('CI','GITHUB_ACTIONS','TF_BUILD','BUILD_BUILDID','RUNNER_TEMP')) { [Environment]::GetEnvironmentVariable(`$name) } }`nfunction Read-TrustAnchorPassword { `$env:TRUST_ANCHOR_SECRET; Read-Host -AsSecureString; Read-Host -AsSecureString }"
+        )){$errors=$null;$negative=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;(Test-TrustAnchorPasswordSourceAst $negative)|Should Be $false}
+    }
+
+    # Scenario: The bounded input stream fails after allocation and after a prefix has entered the managed byte array.
+    # Purpose: Zero every allocated input buffer that cannot be returned to a caller for disposal.
+    It 'InterT52_clears_input_bytes_when_reading_fails_after_allocation' {
+        $path=Join-Path $TestDrive 'input-read-failure.pem';[IO.File]::WriteAllBytes($path,[byte[]](1,2,3,4,5,6));Invoke-TrustAnchorModule {$script:CapturedInputBytes=$null;$script:TrustAnchorAfterInputBufferAllocatedTestHook={param($stream,$bytes)[void]$stream.Read($bytes,0,3);$script:CapturedInputBytes=$bytes;$stream.Dispose()}}
+        try{{Invoke-TrustAnchorModule {param($p)Read-TrustAnchorInputBytes $p} @($path)}|Should Throw;$captured=Invoke-TrustAnchorModule {$script:CapturedInputBytes};@($captured|Where-Object{$_-ne0}).Count|Should Be 0}finally{Invoke-TrustAnchorModule {$script:TrustAnchorAfterInputBufferAllocatedTestHook=$null;$script:CapturedInputBytes=$null}}
+    }
+
+    # Scenario: ABI flags are selected without invoking any Unix syscall on the Windows test host.
+    # Purpose: Bind Linux x64/arm64 and macOS x64/arm64 directory, no-follow, and unlink constants.
+    It 'UnitT53_selects_native_flags_for_every_supported_Unix_ABI' {
+        $cases=@(
+            @{Os='linux';Arch='x64';Directory=0x10000;NoFollow=0x20000;Remove=0x200;AtNoFollow=0x100},
+            @{Os='linux';Arch='arm64';Directory=0x4000;NoFollow=0x8000;Remove=0x200;AtNoFollow=0x100},
+            @{Os='macos';Arch='x64';Directory=0x100000;NoFollow=0x100;Remove=0x80;AtNoFollow=0x20},
+            @{Os='macos';Arch='arm64';Directory=0x100000;NoFollow=0x100;Remove=0x80;AtNoFollow=0x20}
+        )
+        foreach($case in $cases){$actual=[SyuanTsai.AIInstructions.TrustAnchor.UnixNativeFlagSet]::Select($case.Os,$case.Arch);$actual.Directory|Should Be $case.Directory;$actual.NoFollow|Should Be $case.NoFollow;$actual.AtRemoveDirectory|Should Be $case.Remove;$actual.AtSymlinkNoFollow|Should Be $case.AtNoFollow}
+        {[SyuanTsai.AIInstructions.TrustAnchor.UnixNativeFlagSet]::Select('linux','riscv64')}|Should Throw 'Unsupported trust-anchor Unix ABI'
+    }
+
+    # Scenario: The formal Windows metadata helper is inspected as a complete AST extent.
+    # Purpose: Allow ACL evidence only from the retained lease handle, never from pathname ACL APIs.
+    It 'UnitT54_binds_Windows_ACL_evidence_to_the_retained_lease_handle' {
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($script:ModulePath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;$function=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq'Get-TrustAnchorMetadataEvidence'},$true));$function.Count|Should Be 1;$text=$function[0].Extent.Text;$text|Should Match 'WindowsAclInspector\]::Inspect\(\[Microsoft\.Win32\.SafeHandles\.SafeFileHandle\]\$handle\)';$text|Should Not Match '(?i)Get-Acl|GetNamedSecurityInfo|GetAccessControl|FileSecurity\s*\('
+    }
+}
+
 Describe 'PR-K1 trust-anchor regression inventory' {
-    AfterAll {Invoke-TrustAnchorModule {$script:TrustAnchorOpenBeforePermissionTestHook=$null;$script:TrustAnchorAfterReadTestHook=$null;$script:TrustAnchorBeforePublicWriteTestHook=$null;$script:TrustAnchorBeforeRollbackRemovalTestHook=$null;$script:TrustAnchorAfterRollbackRenameTestHook=$null};Remove-Module $script:Module.Name -Force -ErrorAction SilentlyContinue}
+    AfterAll {Invoke-TrustAnchorModule {$script:TrustAnchorOpenBeforePermissionTestHook=$null;$script:TrustAnchorAfterReadTestHook=$null;$script:TrustAnchorBeforePublicWriteTestHook=$null;$script:TrustAnchorBeforeRollbackRemovalTestHook=$null;$script:TrustAnchorAfterRollbackRenameTestHook=$null;$script:TrustAnchorAfterInputBufferAllocatedTestHook=$null};Remove-Module $script:Module.Name -Force -ErrorAction SilentlyContinue}
 
     # Scenario: The test AST is inspected for native-host registration and runtime-only RSA generation.
     # Purpose: Every platform-specific It must live below one explicit native Windows/Unix conditional without committed keys or skips.
-    It 'UnitT48_registers_the_fixed_native_inventory_under_the_correct_AST_clause' {
+    It 'UnitT55_registers_the_fixed_native_inventory_under_the_correct_AST_clause' {
         $windows=@('InterT31_share_lock_explicitly_prevents_pathname_replacement','InterT32_delete_sharing_fixture_proves_handle_based_DACL_evidence','InterT33_rejects_a_private_key_leaf_reparse_point','InterT34_formal_creation_has_an_independently_verified_restrictive_DACL')
         $unix=@('InterT40_accepts_owner_only_mode_0400','InterT41_rejects_the_original_broad_mode_after_pathname_replacement','InterT42_rejects_metadata_change_during_read','InterT43_rejects_a_private_key_leaf_symbolic_link','InterT44_formal_creation_has_an_independently_verified_owner_only_mode','InterT45_rejects_post_read_identity_replacement_when_both_files_are_restrictive','InterT46_rollback_fails_closed_when_the_tombstone_is_replaced_before_unlink','InterT47_rollback_fails_closed_when_a_hard_link_appears_before_unlink')
         $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($PSCommandPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;$conditional=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.IfStatementAst] -and $node.Extent.Text -match 'PR-K1 Windows native handle safety' -and $node.Extent.Text -match 'PR-K1 Unix native handle safety'},$true));$conditional.Count|Should Be 1;$conditional[0].Clauses[0].Item1.Extent.Text|Should Match '\$IsWindows';$windowsExtent=$conditional[0].Clauses[0].Item2.Extent;$unixExtent=$conditional[0].ElseClause.Extent;$nativeIts=@($conditional[0].FindAll({param($node)$node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName()-ceq'It'},$true));$actualWindows=@($nativeIts|Where-Object{$_.Extent.StartOffset-ge$windowsExtent.StartOffset-and$_.Extent.EndOffset-le$windowsExtent.EndOffset}|ForEach-Object{[string]$_.CommandElements[1].Value});$actualUnix=@($nativeIts|Where-Object{$_.Extent.StartOffset-ge$unixExtent.StartOffset-and$_.Extent.EndOffset-le$unixExtent.EndOffset}|ForEach-Object{[string]$_.CommandElements[1].Value});($actualWindows-join'|')|Should Be ($windows-join'|');($actualUnix-join'|')|Should Be ($unix-join'|');@($nativeIts).Count|Should Be ($windows.Count+$unix.Count)

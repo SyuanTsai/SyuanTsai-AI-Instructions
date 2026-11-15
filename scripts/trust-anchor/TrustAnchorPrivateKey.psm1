@@ -45,34 +45,89 @@ namespace SyuanTsai.AIInstructions.TrustAnchor {
             }
             return false;
         }
-        public static bool ContainsPrivatePemHeader(byte[] value) {
-            return ContainsAscii(value, "-----BEGIN PRIVATE KEY-----") ||
-                ContainsAscii(value, "-----BEGIN RSA PRIVATE KEY-----") ||
-                ContainsAscii(value, "-----BEGIN ENCRYPTED PRIVATE KEY-----");
-        }
         private static void RequireEncryptedPrivatePemHeader(byte[] value) {
             if (ContainsAscii(value, "-----BEGIN PRIVATE KEY-----") || ContainsAscii(value, "-----BEGIN RSA PRIVATE KEY-----") ||
                 !ContainsAscii(value, "-----BEGIN ENCRYPTED PRIVATE KEY-----"))
                 throw new CryptographicException("Only encrypted PKCS#8 PEM input is permitted.");
         }
-        private static bool ContainsPrivateXmlElement(byte[] value, string name) {
-            for (int offset = 0; offset <= value.Length - name.Length - 2; offset++) {
-                if (value[offset] != (byte)'<') continue;
-                int index = 0;
-                while (index < name.Length && value[offset + 1 + index] == (byte)name[index]) index++;
-                if (index != name.Length) continue;
-                byte next = value[offset + 1 + name.Length];
-                if (next == (byte)'>' || next == (byte)' ' || next == (byte)'\t' || next == (byte)'\r' || next == (byte)'\n') return true;
+        private static bool IsAsciiWhitespace(byte value) {
+            return value == (byte)' ' || value == (byte)'\t' || value == (byte)'\r' || value == (byte)'\n';
+        }
+        private static void SkipAsciiWhitespace(byte[] value, ref int offset) {
+            while (offset < value.Length && IsAsciiWhitespace(value[offset])) offset++;
+        }
+        private static bool MatchAscii(byte[] value, int offset, string text, bool ignoreCase) {
+            if (value == null || offset < 0 || value.Length - offset < text.Length) return false;
+            for (int index = 0; index < text.Length; index++) {
+                byte actual = value[offset + index]; char expected = text[index];
+                if (actual > 0x7f) return false;
+                char character = (char)actual;
+                if (ignoreCase) { character = char.ToUpperInvariant(character); expected = char.ToUpperInvariant(expected); }
+                if (character != expected) return false;
             }
-            return false;
+            return true;
+        }
+        private static void RequireAscii(byte[] value, ref int offset, string text, bool ignoreCase) {
+            if (!MatchAscii(value, offset, text, ignoreCase)) throw new CryptographicException("The public-key input structure is not permitted.");
+            offset += text.Length;
+        }
+        private static void RequirePublicPemEnvelope(byte[] value) {
+            if (value == null) throw new ArgumentNullException(nameof(value));
+            int offset = 0; SkipAsciiWhitespace(value, ref offset);
+            RequireAscii(value, ref offset, "-----BEGIN PUBLIC KEY-----", false);
+            if (offset >= value.Length || (value[offset] != (byte)'\n' && value[offset] != (byte)'\r'))
+                throw new CryptographicException("The PUBLIC KEY header must end with a line break.");
+            if (value[offset] == (byte)'\r') { offset++; if (offset >= value.Length || value[offset] != (byte)'\n') throw new CryptographicException("Invalid PEM line ending."); }
+            offset++;
+            bool lineStart = true, payload = false;
+            while (offset < value.Length) {
+                if (lineStart && MatchAscii(value, offset, "-----END PUBLIC KEY-----", false)) {
+                    offset += "-----END PUBLIC KEY-----".Length;
+                    SkipAsciiWhitespace(value, ref offset);
+                    if (!payload || offset != value.Length) throw new CryptographicException("The PUBLIC KEY envelope has trailing content or no payload.");
+                    return;
+                }
+                byte current = value[offset];
+                bool base64 = (current >= (byte)'A' && current <= (byte)'Z') || (current >= (byte)'a' && current <= (byte)'z') ||
+                    (current >= (byte)'0' && current <= (byte)'9') || current == (byte)'+' || current == (byte)'/' || current == (byte)'=';
+                if (base64) { payload = true; lineStart = false; offset++; continue; }
+                if (current == (byte)'\n') { lineStart = true; offset++; continue; }
+                if (current == (byte)'\r' && offset + 1 < value.Length && value[offset + 1] == (byte)'\n') { lineStart = true; offset += 2; continue; }
+                throw new CryptographicException("Only base64 payload lines are permitted inside a PUBLIC KEY envelope.");
+            }
+            throw new CryptographicException("The PUBLIC KEY envelope is incomplete.");
+        }
+        private static void RequireXmlTag(byte[] value, ref int offset, string name, bool closing) {
+            RequireAscii(value, ref offset, closing ? "</" : "<", false);
+            RequireAscii(value, ref offset, name, true);
+            RequireAscii(value, ref offset, ">", false);
+        }
+        private static void RequireBase64XmlText(byte[] value, ref int offset) {
+            bool payload = false;
+            while (offset < value.Length && value[offset] != (byte)'<') {
+                byte current = value[offset++];
+                bool base64 = (current >= (byte)'A' && current <= (byte)'Z') || (current >= (byte)'a' && current <= (byte)'z') ||
+                    (current >= (byte)'0' && current <= (byte)'9') || current == (byte)'+' || current == (byte)'/' || current == (byte)'=';
+                if (base64) payload = true;
+                else if (!IsAsciiWhitespace(current)) throw new CryptographicException("RSA public XML contains non-base64 text.");
+            }
+            if (!payload) throw new CryptographicException("RSA public XML contains an empty key field.");
+        }
+        private static void RequirePublicXmlStructure(byte[] value) {
+            if (value == null) throw new ArgumentNullException(nameof(value));
+            int offset = 0; SkipAsciiWhitespace(value, ref offset);
+            RequireXmlTag(value, ref offset, "RSAKeyValue", false); SkipAsciiWhitespace(value, ref offset);
+            RequireXmlTag(value, ref offset, "Modulus", false); RequireBase64XmlText(value, ref offset); RequireXmlTag(value, ref offset, "Modulus", true); SkipAsciiWhitespace(value, ref offset);
+            RequireXmlTag(value, ref offset, "Exponent", false); RequireBase64XmlText(value, ref offset); RequireXmlTag(value, ref offset, "Exponent", true); SkipAsciiWhitespace(value, ref offset);
+            RequireXmlTag(value, ref offset, "RSAKeyValue", true); SkipAsciiWhitespace(value, ref offset);
+            if (offset != value.Length) throw new CryptographicException("RSA public XML contains an additional element or trailing content.");
         }
         public static string DecodePublicPem(byte[] value) {
-            if (ContainsPrivatePemHeader(value)) throw new CryptographicException("Private-key PEM input is not permitted.");
+            RequirePublicPemEnvelope(value);
             return new System.Text.UTF8Encoding(false, true).GetString(value);
         }
         public static string DecodePublicXml(byte[] value) {
-            foreach (string name in new [] { "D", "P", "Q", "DP", "DQ", "InverseQ" })
-                if (ContainsPrivateXmlElement(value, name)) throw new CryptographicException("Private RSA XML input is not permitted.");
+            RequirePublicXmlStructure(value);
             return new System.Text.UTF8Encoding(false, true).GetString(value);
         }
         private static char[] DecodePrivatePem(byte[] pemBytes) {
@@ -287,7 +342,7 @@ namespace SyuanTsai.AIInstructions.TrustAnchor {
             };
         }
         public static SafeFileHandle OpenReadWithDeleteSharing(string path) {
-            SafeFileHandle handle = CreateFile(path, 0x00020080, 0x00000007, IntPtr.Zero, 3, 0x00200000, IntPtr.Zero);
+            SafeFileHandle handle = CreateFile(path, 0x00020081, 0x00000007, IntPtr.Zero, 3, 0x00200000, IntPtr.Zero);
             if (handle.IsInvalid) { int error = Marshal.GetLastWin32Error(); handle.Dispose(); throw new Win32Exception(error, "Unable to open the trust-anchor fixture with delete sharing."); }
             return handle;
         }
@@ -340,6 +395,33 @@ namespace SyuanTsai.AIInstructions.TrustAnchor {
         }
     }
 
+    public sealed class UnixNativeFlagSet {
+        public int Directory { get; private set; }
+        public int NoFollow { get; private set; }
+        public int CloseOnExec { get; private set; }
+        public int AtRemoveDirectory { get; private set; }
+        public int AtSymlinkNoFollow { get; private set; }
+        public int OpenDirectory { get { return Directory | NoFollow | CloseOnExec; } }
+        public int OpenFile { get { return NoFollow | CloseOnExec; } }
+        private UnixNativeFlagSet(int directory,int noFollow,int closeOnExec,int atRemoveDirectory,int atSymlinkNoFollow) {
+            Directory=directory;NoFollow=noFollow;CloseOnExec=closeOnExec;AtRemoveDirectory=atRemoveDirectory;AtSymlinkNoFollow=atSymlinkNoFollow;
+        }
+        public static UnixNativeFlagSet Select(string operatingSystem,string architecture) {
+            if (operatingSystem == "linux" && architecture == "x64") return new UnixNativeFlagSet(0x10000,0x20000,0x80000,0x200,0x100);
+            if (operatingSystem == "linux" && architecture == "arm64") return new UnixNativeFlagSet(0x4000,0x8000,0x80000,0x200,0x100);
+            if (operatingSystem == "macos" && (architecture == "x64" || architecture == "arm64")) return new UnixNativeFlagSet(0x100000,0x100,0x1000000,0x80,0x20);
+            throw new PlatformNotSupportedException("Unsupported trust-anchor Unix ABI: "+operatingSystem+"/"+architecture);
+        }
+        public static UnixNativeFlagSet Current() {
+            string operatingSystem = RuntimeInformation.IsOSPlatform(OSPlatform.Linux) ? "linux" : RuntimeInformation.IsOSPlatform(OSPlatform.OSX) ? "macos" : "unsupported";
+            string architecture = RuntimeInformation.ProcessArchitecture == Architecture.X64 ? "x64" : RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? "arm64" : RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant();
+            return Select(operatingSystem,architecture);
+        }
+    }
+
+    // Same-UID concurrent processes are outside this rollback threat boundary: they can
+    // already read or replace the private key and this tool.  The retained descriptors
+    // still bind every decision and prevent unrelated pathname identities from deletion.
     public sealed class UnixRollbackLease : IDisposable {
         [DllImport("libc", EntryPoint="fstatat", SetLastError=true)] private static extern int fstatatLinux(IntPtr fd,string leaf,IntPtr value,int flags);
         [DllImport("libc", EntryPoint="renameat2", SetLastError=true)] private static extern int renameat2(IntPtr oldFd,string oldLeaf,IntPtr newFd,string newLeaf,uint flags);
@@ -359,6 +441,8 @@ namespace SyuanTsai.AIInstructions.TrustAnchor {
         private SafeFileHandle file;
         private readonly ulong device;
         private readonly ulong inode;
+        private ulong directoryDevice;
+        private ulong directoryInode;
         public string DirectoryName { get; private set; }
         public string TombstoneName { get; private set; }
         public string DirectoryPath { get; private set; }
@@ -372,7 +456,7 @@ namespace SyuanTsai.AIInstructions.TrustAnchor {
         private static bool Mac { get { return RuntimeInformation.IsOSPlatform(OSPlatform.OSX); } }
         private static int MkdirAt(SafeHandle parent,string name){return Mac?mkdiratDarwin(parent.DangerousGetHandle(),name,448):mkdiratLinux(parent.DangerousGetHandle(),name,448);}
         private static SafeFileHandle OpenAt(SafeHandle parent,string name,bool directory){
-            int flags=Mac?(directory?0x1100100:0x1000100):(directory?0xB0000:0xA0000);
+            UnixNativeFlagSet selected=UnixNativeFlagSet.Current();int flags=directory?selected.OpenDirectory:selected.OpenFile;
             int fd=Mac?openatDarwin(parent.DangerousGetHandle(),name,flags,0):openatLinux(parent.DangerousGetHandle(),name,flags,0);
             if(fd<0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to retain the private trust-anchor rollback object.");
             return new SafeFileHandle(new IntPtr(fd),true);
@@ -382,7 +466,8 @@ namespace SyuanTsai.AIInstructions.TrustAnchor {
             try {
                 for(int i=0;i<512;i+=8)Marshal.WriteInt64(buffer,i,0);
                 bool mac=RuntimeInformation.IsOSPlatform(OSPlatform.OSX);
-                int result=mac?(RuntimeInformation.ProcessArchitecture==Architecture.X64?fstatatDarwinX64(parent.DangerousGetHandle(),leaf,buffer,0x20):fstatatDarwin(parent.DangerousGetHandle(),leaf,buffer,0x20)):fstatatLinux(parent.DangerousGetHandle(),leaf,buffer,0x100);
+                int noFollow=UnixNativeFlagSet.Current().AtSymlinkNoFollow;
+                int result=mac?(RuntimeInformation.ProcessArchitecture==Architecture.X64?fstatatDarwinX64(parent.DangerousGetHandle(),leaf,buffer,noFollow):fstatatDarwin(parent.DangerousGetHandle(),leaf,buffer,noFollow)):fstatatLinux(parent.DangerousGetHandle(),leaf,buffer,noFollow);
                 if(result!=0)throw new Win32Exception(Marshal.GetLastWin32Error(),"fstatat failed for the trust-anchor rollback target.");
                 if(mac){var s=(UnixMetadataInspector.DarwinStat)Marshal.PtrToStructure(buffer,typeof(UnixMetadataInspector.DarwinStat));return new NativeMetadataEvidence{Device=s.Dev,Inode=s.Ino,LinkCount=s.Links,Mode=s.Mode,Uid=s.Uid,Size=s.Size};}
                 if(RuntimeInformation.ProcessArchitecture==Architecture.X64){var s=(UnixMetadataInspector.LinuxX64Stat)Marshal.PtrToStructure(buffer,typeof(UnixMetadataInspector.LinuxX64Stat));return new NativeMetadataEvidence{Device=s.Dev,Inode=s.Ino,LinkCount=s.Links,Mode=s.Mode,Uid=s.Uid,Size=s.Size};}
@@ -390,6 +475,7 @@ namespace SyuanTsai.AIInstructions.TrustAnchor {
             } finally {Marshal.FreeHGlobal(buffer);}
         }
         private static void SameFile(NativeMetadataEvidence value,ulong device,ulong inode){if(value.Device!=device||value.Inode!=inode||value.LinkCount!=1||(value.Mode&0xF000)!=0x8000)throw new IOException("The trust-anchor rollback target identity or link count changed.");}
+        private static void SameDirectory(NativeMetadataEvidence value,ulong device,ulong inode){if(value.Device!=device||value.Inode!=inode||(value.Mode&0xF000)!=0x4000)throw new IOException("The private trust-anchor rollback directory identity changed.");}
         public static UnixRollbackLease Begin(SafeHandle parent,string parentPath,string leaf,ulong device,ulong inode){
             NativeMetadataEvidence before=Stat(parent,leaf);SameFile(before,device,inode);
             var lease=new UnixRollbackLease(parent,parentPath,device,inode);bool directoryCreated=false;bool renamed=false;
@@ -398,6 +484,7 @@ namespace SyuanTsai.AIInstructions.TrustAnchor {
                 directoryCreated=true;lease.directory=OpenAt(parent,lease.DirectoryName,true);
                 var directoryEvidence=UnixMetadataInspector.Inspect(lease.directory);
                 if((directoryEvidence.Mode&0xF000)!=0x4000||(directoryEvidence.Mode&0x3F)!=0||directoryEvidence.Uid!=SecretBridge.EffectiveUid())throw new IOException("The private trust-anchor rollback directory is not retained with mode 0700-equivalent ownership.");
+                lease.directoryDevice=directoryEvidence.Device;lease.directoryInode=directoryEvidence.Inode;
                 int moved=Mac?renameatx(parent.DangerousGetHandle(),leaf,lease.directory.DangerousGetHandle(),lease.TombstoneName,0x4):renameat2(parent.DangerousGetHandle(),leaf,lease.directory.DangerousGetHandle(),lease.TombstoneName,1);
                 if(moved!=0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to move the trust-anchor rollback target into the private rollback directory.");
                 renamed=true;lease.file=OpenAt(lease.directory,lease.TombstoneName,false);
@@ -405,8 +492,15 @@ namespace SyuanTsai.AIInstructions.TrustAnchor {
                 SameFile(UnixMetadataInspector.Inspect(lease.file),device,inode);
                 return lease;
             }catch{
-                if(lease.file!=null)lease.file.Dispose();if(lease.directory!=null)lease.directory.Dispose();
-                if(directoryCreated&&!renamed){if(Mac)unlinkatDarwin(parent.DangerousGetHandle(),lease.DirectoryName,0x200);else unlinkatLinux(parent.DangerousGetHandle(),lease.DirectoryName,0x200);}
+                if(lease.file!=null)lease.file.Dispose();
+                if(directoryCreated&&!renamed&&lease.directory!=null){
+                    SameDirectory(UnixMetadataInspector.Inspect(lease.directory),lease.directoryDevice,lease.directoryInode);
+                    SameDirectory(Stat(parent,lease.DirectoryName),lease.directoryDevice,lease.directoryInode);
+                    int removeDirectory=UnixNativeFlagSet.Current().AtRemoveDirectory;
+                    int cleanup=Mac?unlinkatDarwin(parent.DangerousGetHandle(),lease.DirectoryName,removeDirectory):unlinkatLinux(parent.DangerousGetHandle(),lease.DirectoryName,removeDirectory);
+                    if(cleanup!=0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to remove the unused private rollback directory.");
+                }
+                if(lease.directory!=null)lease.directory.Dispose();
                 throw;
             }
         }
@@ -416,8 +510,12 @@ namespace SyuanTsai.AIInstructions.TrustAnchor {
             if(removed!=0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to unlink the exact trust-anchor rollback tombstone.");
             var after=UnixMetadataInspector.Inspect(file);if(after.LinkCount!=0)throw new IOException("The trust-anchor rollback target still has a retained hard link after unlink.");
             int directorySynced=Mac?fsyncDarwin(directory.DangerousGetHandle()):fsyncLinux(directory.DangerousGetHandle());if(directorySynced!=0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to confirm private rollback directory durability.");
-            file.Dispose();file=null;directory.Dispose();directory=null;
-            int directoryRemoved=Mac?unlinkatDarwin(parent.DangerousGetHandle(),DirectoryName,0x200):unlinkatLinux(parent.DangerousGetHandle(),DirectoryName,0x200);if(directoryRemoved!=0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to remove the completed private rollback directory.");
+            file.Dispose();file=null;
+            SameDirectory(UnixMetadataInspector.Inspect(directory),directoryDevice,directoryInode);
+            SameDirectory(Stat(parent,DirectoryName),directoryDevice,directoryInode);
+            int removeDirectory=UnixNativeFlagSet.Current().AtRemoveDirectory;
+            int directoryRemoved=Mac?unlinkatDarwin(parent.DangerousGetHandle(),DirectoryName,removeDirectory):unlinkatLinux(parent.DangerousGetHandle(),DirectoryName,removeDirectory);if(directoryRemoved!=0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to remove the completed private rollback directory.");
+            directory.Dispose();directory=null;
             int parentSynced=Mac?fsyncDarwin(parent.DangerousGetHandle()):fsyncLinux(parent.DangerousGetHandle());if(parentSynced!=0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to confirm trust-anchor rollback parent durability.");
         }
         public void Dispose(){if(file!=null)file.Dispose();if(directory!=null)directory.Dispose();}
@@ -431,6 +529,7 @@ $script:TrustAnchorAfterReadTestHook = $null
 $script:TrustAnchorBeforePublicWriteTestHook = $null
 $script:TrustAnchorBeforeRollbackRemovalTestHook = $null
 $script:TrustAnchorAfterRollbackRenameTestHook = $null
+$script:TrustAnchorAfterInputBufferAllocatedTestHook = $null
 
 function New-TrustAnchorError {
     param([string]$Message,[string]$Id)
@@ -500,13 +599,14 @@ function Import-TrustAnchorEncryptedPrivateKey {
 
 function Read-TrustAnchorInputBytes {
     param([Parameter(Mandatory)][string]$Path,[int]$MaximumLength=1048576)
-    $full=[IO.Path]::GetFullPath($Path);$stream=[IO.File]::Open($full,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    $full=[IO.Path]::GetFullPath($Path);$stream=[IO.File]::Open($full,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read);$bytes=$null;$succeeded=$false
     try{
         if($stream.Length -gt $MaximumLength){throw "The trust-anchor input exceeds the $MaximumLength-byte limit."}
         $bytes=[byte[]]::new([int]$stream.Length);$offset=0
+        if($null-ne$script:TrustAnchorAfterInputBufferAllocatedTestHook){& $script:TrustAnchorAfterInputBufferAllocatedTestHook $stream $bytes}
         while($offset -lt $bytes.Length){$count=$stream.Read($bytes,$offset,$bytes.Length-$offset);if($count -eq 0){throw 'The trust-anchor input ended before its declared length.'};$offset+=$count}
-        return ,$bytes
-    }finally{$stream.Dispose()}
+        $succeeded=$true;return ,$bytes
+    }finally{if(-not$succeeded -and $null-ne$bytes){[Security.Cryptography.CryptographicOperations]::ZeroMemory($bytes)};$stream.Dispose()}
 }
 
 function Get-TrustAnchorPhysicalParent {
