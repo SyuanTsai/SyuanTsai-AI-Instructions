@@ -90,6 +90,7 @@ function Invoke-SetupVerifierGit {
     $start.Environment['GIT_CONFIG_NOSYSTEM'] = '1'
     $start.Environment['GIT_CONFIG_GLOBAL'] = '/dev/null'
     $start.Environment['GIT_TERMINAL_PROMPT'] = '0'
+    $start.Environment['GIT_NO_REPLACE_OBJECTS'] = '1'
     $process = [Diagnostics.Process]::Start($start)
     try {
         $stderrTask = $process.StandardError.ReadToEndAsync()
@@ -138,7 +139,7 @@ function Assert-SetupBootstrapTrust {
     if ($head.ExitCode -ne 0 -or $head.Text -cne $ExpectedCommit) { throw (New-SetupEarlyFailure commit-mismatch 'HEAD does not equal -ExpectedCommit.') }
 
     $manifestRelative = 'scripts/platform-runtime.psd1'
-    $manifestObject = Invoke-SetupVerifierGit $gitPath $RepositoryRoot @('rev-parse',"HEAD:$manifestRelative")
+    $manifestObject = Invoke-SetupVerifierGit $gitPath $RepositoryRoot @('rev-parse',"$ExpectedCommit`:$manifestRelative")
     if ($manifestObject.ExitCode -ne 0 -or $manifestObject.Text -cnotmatch '^[0-9a-f]{40,64}$') { throw (New-SetupEarlyFailure commit-mismatch 'The platform runtime manifest is not present in HEAD.') }
     $manifestBlob = Invoke-SetupVerifierGit $gitPath $RepositoryRoot @('cat-file','blob',$manifestObject.Text) -Binary
     if ($manifestBlob.ExitCode -ne 0) { throw (New-SetupEarlyFailure commit-mismatch 'The platform runtime manifest HEAD blob cannot be read.') }
@@ -168,19 +169,18 @@ function Assert-SetupBootstrapTrust {
     foreach ($relative in $trustFiles) {
         $path = [IO.Path]::GetFullPath((Join-Path $RepositoryRoot $relative))
         Assert-SetupVerifierRegularFile $path $relative
-        foreach ($arguments in @(
-            @('ls-files','--error-unmatch','--',$relative),
-            @('diff','--quiet','HEAD','--',$relative),
-            @('diff','--cached','--quiet','HEAD','--',$relative)
-        )) {
-            $result = Invoke-SetupVerifierGit $gitPath $RepositoryRoot $arguments
-            if ($result.ExitCode -ne 0) { throw (New-SetupEarlyFailure commit-mismatch "Trusted file '$relative' differs from HEAD.") }
+        # J1: direct object identity comparison never invokes attributes, clean
+        # filters, textconv, diff drivers, hooks, or fsmonitor. The worktree hash
+        # explicitly bypasses filters, and every Git child disables replacements.
+        $expectedBlob = Invoke-SetupVerifierGit $gitPath $RepositoryRoot @('rev-parse',"$ExpectedCommit`:$relative")
+        $indexEntry = Invoke-SetupVerifierGit $gitPath $RepositoryRoot @('ls-files','--stage','--',$relative)
+        $rawBlob = Invoke-SetupVerifierGit $gitPath $RepositoryRoot @('hash-object','--no-filters','--',$path)
+        $indexMatch = [regex]::Match([string]$indexEntry.Text,'^(?<mode>[0-9]{6}) (?<blob>[0-9a-f]{40,64}) 0\t[^\r\n]+$',[Text.RegularExpressions.RegexOptions]::CultureInvariant)
+        if ($expectedBlob.ExitCode -ne 0 -or $expectedBlob.Text -cnotmatch '^[0-9a-f]{40,64}$' -or
+            $indexEntry.ExitCode -ne 0 -or -not $indexMatch.Success -or $rawBlob.ExitCode -ne 0 -or
+            $expectedBlob.Text -cne $indexMatch.Groups['blob'].Value -or $expectedBlob.Text -cne $rawBlob.Text) {
+            throw (New-SetupEarlyFailure commit-mismatch "Trusted file '$relative' expected, index, and raw worktree blobs differ.")
         }
-        $others = Invoke-SetupVerifierGit $gitPath $RepositoryRoot @('ls-files','--others','--exclude-standard','--',$relative)
-        if ($others.ExitCode -ne 0 -or -not [string]::IsNullOrEmpty($others.Text)) { throw (New-SetupEarlyFailure commit-mismatch "Trusted file '$relative' has an untracked substitute.") }
-        $blobId = Invoke-SetupVerifierGit $gitPath $RepositoryRoot @('rev-parse',"HEAD:$relative")
-        $diskId = Invoke-SetupVerifierGit $gitPath $RepositoryRoot @('hash-object','--no-filters','--',$path)
-        if ($blobId.ExitCode -ne 0 -or $diskId.ExitCode -ne 0 -or $blobId.Text -cne $diskId.Text) { throw (New-SetupEarlyFailure commit-mismatch "Trusted file '$relative' does not match its HEAD blob.") }
     }
 
     $manifestDisk = [IO.File]::ReadAllBytes((Join-Path $RepositoryRoot $manifestRelative))
@@ -313,6 +313,10 @@ try {
         $runtimeParentLease = Open-PlatformDirectory -Root $layout.SetupRoot -RelativePath $layout.RuntimeParentRelativePath -CreatePrivate
         $runtimeParentLease.Dispose()
         Invoke-AgentEnvironmentSetupFailpoint 'before-runtime-stage-created' $layout.RuntimeReceiptLeaf
+        $runtimeTransactionStoreLease = Open-PlatformDirectory -Root $layout.SetupRoot -RelativePath $attempt.TransactionStoreRelativePath -CreatePrivate
+        $runtimeTransactionStoreLease.Dispose()
+        $runtimeTransactionLease = Open-PlatformDirectory -Root $layout.SetupRoot -RelativePath $attempt.TransactionRelativePath -CreatePrivate
+        $runtimeTransactionLease.Dispose()
         $runtimeLease = Open-PlatformDirectory -Root $layout.SetupRoot -RelativePath $attempt.StageRelativePath -CreatePrivate
         Invoke-AgentEnvironmentSetupBarrier 'after-runtime-directory'
         try {

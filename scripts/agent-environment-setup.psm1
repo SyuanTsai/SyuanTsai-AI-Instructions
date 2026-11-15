@@ -226,9 +226,15 @@ function New-AgentEnvironmentSetupRuntimeAttemptLayout {
     $runtimeLeaf = [string]$Layout.RuntimeLeafPrefix + $attemptId
     $stageLeaf = '.stage-' + $attemptId
     $runtimeDirectory = [IO.Path]::GetFullPath((Join-Path $Layout.RuntimeParentDirectory $runtimeLeaf))
+    $transactionStoreRelativePath = 'pwsh/.ai-instructions-txn'
+    $transactionRelativePath = "$transactionStoreRelativePath/$attemptId"
+    $transactionDirectory = [IO.Path]::GetFullPath((Join-Path $Layout.SetupRoot $transactionRelativePath))
     $stageDirectory = [IO.Path]::GetFullPath((Join-Path $Layout.RuntimeParentDirectory $stageLeaf))
     return [pscustomobject][ordered]@{
         AttemptId = $attemptId
+        TransactionStoreRelativePath = $transactionStoreRelativePath
+        TransactionRelativePath = $transactionRelativePath
+        TransactionDirectory = $transactionDirectory
         StageLeaf = $stageLeaf
         StageRelativePath = "pwsh/$stageLeaf"
         StageDirectory = $stageDirectory
@@ -519,6 +525,7 @@ function Assert-AgentEnvironmentSetupCommit {
         $start.Environment['GIT_CONFIG_NOSYSTEM'] = '1'
         $start.Environment['GIT_CONFIG_GLOBAL'] = '/dev/null'
         $start.Environment['GIT_TERMINAL_PROMPT'] = '0'
+        $start.Environment['GIT_NO_REPLACE_OBJECTS'] = '1'
         $process = [Diagnostics.Process]::Start($start)
         try {
             $stdout = $process.StandardOutput.ReadToEndAsync()
@@ -541,11 +548,15 @@ function Assert-AgentEnvironmentSetupCommit {
     foreach ($relative in $script:AgentEnvironmentSetupBoundFiles) {
         $entry = Get-AgentEnvironmentSetupEntry ([IO.Path]::GetDirectoryName((Join-Path $RepositoryRoot $relative))) ([IO.Path]::GetFileName($relative))
         if ($null -eq $entry -or $entry.Kind -cne 'file') { throw (New-AgentEnvironmentSetupRefusal commit-mismatch "Bound setup file '$relative' is missing or not a regular file.") }
-        $tracked = & $invoke @('ls-files','--error-unmatch','--',$relative)
-        $others = & $invoke @('ls-files','--others','--',$relative)
-        $diff = & $invoke @('diff','--quiet','HEAD','--',$relative)
-        if ($tracked.ExitCode -ne 0 -or $others.ExitCode -ne 0 -or $others.Output.Count -ne 0 -or $diff.ExitCode -ne 0) {
-            throw (New-AgentEnvironmentSetupRefusal commit-mismatch "Bound setup file '$relative' differs from --expected-commit.")
+        $expectedBlob = & $invoke @('rev-parse',"$ExpectedCommit`:$relative")
+        $indexEntry = & $invoke @('ls-files','--stage','--',$relative)
+        $rawBlob = & $invoke @('hash-object','--no-filters','--',(Join-Path $RepositoryRoot $relative))
+        $indexMatch = if ($indexEntry.Output.Count -eq 1) { [regex]::Match([string]$indexEntry.Output[0],'^(?<mode>[0-9]{6}) (?<blob>[0-9a-f]{40,64}) 0\t[^\r\n]+$',[Text.RegularExpressions.RegexOptions]::CultureInvariant) } else { $null }
+        if ($expectedBlob.ExitCode -ne 0 -or $expectedBlob.Output.Count -ne 1 -or $expectedBlob.Output[0] -cnotmatch '^[0-9a-f]{40,64}$' -or
+            $indexEntry.ExitCode -ne 0 -or $null -eq $indexMatch -or -not $indexMatch.Success -or
+            $rawBlob.ExitCode -ne 0 -or $rawBlob.Output.Count -ne 1 -or
+            $expectedBlob.Output[0] -cne $indexMatch.Groups['blob'].Value -or $expectedBlob.Output[0] -cne $rawBlob.Output[0]) {
+            throw (New-AgentEnvironmentSetupRefusal commit-mismatch "Bound setup file '$relative' expected, index, and raw worktree blobs differ.")
         }
     }
 }
@@ -930,9 +941,10 @@ function Publish-AgentEnvironmentSetupFile {
     }
 }
 
-# H1: publish a fully verified, unique runtime directory with one same-parent
-# rename. The destination is create-only and unpredictable. No runtime directory
-# is ever deleted or reused; the separately published receipt is the only pointer.
+# H1/J2: publish a fully verified, unique runtime directory with the existing
+# create-only platform primitive. That primitive durably flushes both rename
+# parents and reads the result back before this function can publish a pointer.
+# No runtime directory is ever deleted or reused; the receipt is the only pointer.
 function Publish-AgentEnvironmentSetupRuntimeDirectory {
     param(
         [Parameter(Mandatory = $true)] $Layout,
@@ -951,11 +963,27 @@ function Publish-AgentEnvironmentSetupRuntimeDirectory {
         throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed 'The private runtime stage is missing, linked, or its unique destination is occupied.')
     }
     [void](Assert-PlatformPowerShellRuntime -Policy $Policy -Receipt $Receipt)
-    try { [IO.Directory]::Move([string]$Attempt.StageDirectory,[string]$Attempt.RuntimeDirectory) }
-    catch { throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed ('The verified runtime directory could not be atomically published: ' + $_.Exception.Message)) }
-    if ([IO.Directory]::Exists([string]$Attempt.StageDirectory) -or -not [IO.Directory]::Exists([string]$Attempt.RuntimeDirectory)) {
-        throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed 'The runtime directory rename did not produce the unique published location.')
+    $parentLease = $null
+    $transactionLease = $null
+    try {
+        $parentLease = Open-PlatformDirectory -Root $Layout.SetupRoot -RelativePath $Layout.RuntimeParentRelativePath
+        $transactionLease = Open-PlatformDirectory -Root $Layout.SetupRoot -RelativePath ([string]$Attempt.TransactionRelativePath)
+        $stageState = Get-PlatformDirectoryState -ParentLease $parentLease -Leaf ([string]$Attempt.StageLeaf)
+        if (-not [bool]$stageState.exists) { throw 'The verified runtime stage disappeared before publication.' }
+        # Relocate the verified private stage into its unique transaction first.
+        # The following FromTransaction rename is the only externally visible
+        # runtime publication and durably flushes the pwsh parent before return.
+        [void](Move-PlatformOwnedDirectory -ParentLease $parentLease -Leaf ([string]$Attempt.StageLeaf) -TransactionLease $transactionLease -DestinationLeaf ([string]$Attempt.StageLeaf) -ExpectedIdentity $stageState.identity -Direction ToTransaction -ExpectedState $stageState)
+        [void](Move-PlatformOwnedDirectory -ParentLease $parentLease -Leaf ([string]$Attempt.StageLeaf) -TransactionLease $transactionLease -DestinationLeaf ([string]$Attempt.RuntimeLeaf) -ExpectedIdentity $stageState.identity -Direction FromTransaction -ExpectedState $stageState)
     }
+    catch {
+        throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed ('The verified runtime directory was not durably published: ' + $_.Exception.Message))
+    }
+    finally {
+        if ($null -ne $transactionLease) { $transactionLease.Dispose() }
+        if ($null -ne $parentLease) { $parentLease.Dispose() }
+    }
+    if ([IO.Directory]::Exists([string]$Attempt.StageDirectory) -or -not [IO.Directory]::Exists([string]$Attempt.RuntimeDirectory)) { throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed 'The durable runtime publication readback did not confirm the unique location.') }
     $Receipt.executablePath = [string]$Attempt.RuntimeExecutable
     $Receipt.runtimeClosure.rootPath = [string]$Attempt.RuntimeDirectory
     [void](Assert-AgentEnvironmentSetupRuntimeReceiptLayout $Receipt $Layout)

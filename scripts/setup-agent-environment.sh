@@ -276,7 +276,7 @@ script_dir=$(CDPATH='' cd -- "$(run_clean dirname -- "$0")" && pwd -P) || refuse
 repo_root=$(CDPATH='' cd -- "$script_dir/.." && pwd -P) || refuse internal-error "$EXIT_INTERNAL_ERROR" 'Cannot locate the repository root.'
 
 git_in_repo() {
-    run_clean GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
+    run_clean GIT_NO_REPLACE_OBJECTS=1 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
         git -c core.fsmonitor=false -c core.hooksPath=/dev/null -C "$repo_root" "$@"
 }
 top=$(git_in_repo rev-parse --show-toplevel 2>/dev/null) || refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" 'The setup script is not inside a git checkout.'
@@ -288,12 +288,14 @@ for bound in $BOUND_FILES $PLATFORM_BOUND_FILES; do
     if [ -L "$repo_root/$bound" ] || [ ! -f "$repo_root/$bound" ]; then
         refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" "Bound setup file is missing or not a regular file: $bound"
     fi
-    git_in_repo ls-files --error-unmatch -- "$bound" >/dev/null 2>&1 || refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" "Bound setup file is not tracked: $bound"
-    untracked=$(git_in_repo ls-files --others -- "$bound") || refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" "Cannot inspect untracked state: $bound"
-    [ -z "$untracked" ] || refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" "An untracked substitute exists: $bound"
-    git_in_repo diff --cached --quiet HEAD -- "$bound" 2>/dev/null || refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" "Bound setup file has a staged difference: $bound"
-    git_in_repo diff --quiet -- "$bound" 2>/dev/null || refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" "Bound setup file has a working-tree difference: $bound"
-    git_in_repo diff --quiet HEAD -- "$bound" 2>/dev/null || refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" "Bound setup file differs from --expected-commit: $bound"
+    # J1: compare Git object identities directly. None of these commands invokes
+    # attributes, filters, textconv, diff drivers, hooks, or fsmonitor; --no-filters
+    # hashes the raw worktree bytes. Replacement objects are disabled above.
+    expected_blob=$(git_in_repo rev-parse --verify "$expected_commit:$bound" 2>/dev/null) || refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" "Bound setup file is absent from --expected-commit: $bound"
+    index_entry=$(git_in_repo ls-files --stage -- "$bound" 2>/dev/null) || refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" "Cannot inspect the index entry: $bound"
+    index_blob=$(printf '%s\n' "$index_entry" | run_clean awk 'NR == 1 && NF >= 4 && $3 == "0" { blob = $2 } END { if (NR != 1 || blob == "") exit 1; print blob }') || refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" "Bound setup file has no single stage-zero index entry: $bound"
+    raw_blob=$(git_in_repo hash-object --no-filters -- "$repo_root/$bound" 2>/dev/null) || refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" "Cannot hash raw worktree bytes: $bound"
+    [ "$expected_blob" = "$index_blob" ] && [ "$expected_blob" = "$raw_blob" ] || refuse commit-mismatch "$EXIT_COMMIT_MISMATCH" "Bound setup file expected, index, and raw worktree blobs differ: $bound"
 done
 
 # G3/G5: before mutation, refuse only external K7 state. Setup-owned WAL is

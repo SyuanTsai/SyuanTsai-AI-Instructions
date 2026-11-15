@@ -315,7 +315,7 @@ JSON 結果固定包含 `outcome` 與 `exitCode`：`0` 表示成功或目前已�
 
 這是 SYP-354 過渡期、給可拋棄雲端環境使用的 setup，**未列入支援矩陣**。上方「本機工具僅支援 Windows」的限制維持不變；這裡不授權一般 Linux／macOS／WSL 本機安裝或使用。P10a 只做到「取得並驗證 canonical pwsh」，S7～S9（runtime 安裝、USER projections、readiness）由 P10b 接線，目前在 receipt 中標為 `not-implemented-until-p10b`。
 
-取得方式：以 git clone 取得 Repository，checkout 固定的 full commit SHA，並把同一個 SHA 傳給 `--expected-commit`。Setup 會先以自包含 verifier 確認 `HEAD` 等於該值，六個 setup 檔案及 `scripts/platform-runtime.psd1` 宣告的完整 platform runtime closure 都與該 commit 完全相同、沒有 staged／working-tree drift 或 untracked 替身；驗證完成前不會載入 Repository module。
+取得方式：以 git clone 取得 Repository，checkout 固定的 full commit SHA，並把同一個 SHA 傳給 `--expected-commit`。Setup 會先以自包含 verifier、在停用 Git replace objects 的情況下確認 `HEAD` 等於該值；六個 setup 檔案及 `scripts/platform-runtime.psd1` 宣告的完整 platform runtime closure，逐檔比較 expected commit blob、stage-zero index blob 與 `hash-object --no-filters` 的 raw worktree blob。這條路徑不執行 repository-local filter、textconv、diff driver、hook 或 fsmonitor；完成前不載入 Repository module。
 
 ```sh
 git clone https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git ai-instructions
@@ -325,7 +325,7 @@ sh scripts/setup-agent-environment.sh --expected-commit <同一個 SHA> --prepar
 sh scripts/setup-agent-environment.sh --expected-commit <同一個 SHA> --offline
 ```
 
-- `--prepare`：允許網路。依 `scripts/setup-agent-environment.policy.tsv`（由 `setup-agent-environment.policy.json` 衍生）只以 https、TLS 1.2 以上與逾時限制下載官方 PowerShell 7.6.6 release asset。下載、雜湊與解壓只使用本次執行的私有 snapshot；取得 setup lock 後才以 WAL 發布 `0600` shared cache。第一次會發布一個不可預測、create-only 的 canonical pwsh 目錄，之後重跑只重驗 receipt 指向的目錄，不重新安裝。結果為 `prepared-runtime-only`。
+- `--prepare`：允許網路。依 `scripts/setup-agent-environment.policy.tsv`（由 `setup-agent-environment.policy.json` 衍生）只以 https、TLS 1.2 以上與逾時限制下載官方 PowerShell 7.6.6 release asset。下載、雜湊與解壓只使用本次執行的私有 snapshot；取得 setup lock 後才以 WAL 發布 `0600` shared cache。第一次以 create-only rename 發布不可預測的 canonical pwsh 目錄，durably flush `pwsh/` parent 並 read back 確認結果後，才開始發布 pointer receipt；之後重跑只重驗 receipt 指向的目錄，不重新安裝。結果為 `prepared-runtime-only`。
 - `--offline`：不連網，只讀 cache 並重驗既有 canonical pwsh；cache 必須是目前 uid 擁有、link count 1、`0600` 的一般檔案。Setup 會以 no-follow 方式複製到本次 private temp snapshot，後續 hash、解壓與 PowerShell handoff 只使用該 snapshot。cache 缺少、metadata／hash 不符或尚未 `--prepare` 都會以 typed exit code 失敗，不做任何更新。結果為 `verified-runtime-only`。
 - Setup root 固定為 `$HOME/.local/share/ai-instructions-setup`（不讀 XDG）：`cache/` 放已驗證的 archive，`pwsh/<version>-<rid>-<random>/` 放 immutable canonical pwsh attempt，`receipts/runtime-<version>-<rid>.json` 是唯一 current pointer，另有 `setup-receipt.json`（`0600`）。`tmp/run.<pid>.<random>/` 只屬於單次執行；結束時只會 best-effort 移除本次已知檔案與空目錄，不遞迴刪除、掃描或接管舊 tmp tree。強制終止可能留下私有 tmp 或未被 receipt 指向的 runtime orphan；此過渡 setup 只供一次性可拋棄 cloud HOME 使用，必要時直接丟棄整個環境，不要用自動清理猜測 ownership。重驗失敗時 fail closed，不會自動重裝；同時執行時以 setup lock 序列化，被占用時回 `concurrent`，結束時不持有 lock。
 - Receipt 同時以單行 JSON 輸出到 stdout，欄位含 `schemaVersion`、`result`、`code`、`exitCode`、OS／architecture／RID、`setupCommit`、`runtimeCommit`（P10a 固定為 `null`）、policy hash、pwsh 路徑與 version、.NET version、capability 名稱與狀態，以及 S5～S9 步驟狀態。路徑一律寫成 `~/...`，不含使用者名稱、token 或 site。
@@ -338,7 +338,8 @@ Runtime 發布的 crash-state 契約如下；任何狀態都不會回收或覆�
 |---|---|---|
 | private stage 建立前 | 沒有 runtime attempt | 建立全新的 attempt |
 | stage 完整、unique runtime rename 前 | 只有私有 stage／tmp（可能成為 orphan） | 建立全新的 attempt；不掃描舊 tmp，也不使用未收據化 stage |
-| unique runtime rename 後、pointer receipt 前 | 未被引用的 immutable runtime orphan | 保留 orphan，建立新 attempt，再發布 receipt |
+| unique runtime rename 後、尚無可恢復的 receipt WAL（包含 parent flush／readback 失敗） | 未被引用、durability 未確認或尚未收據化的 immutable runtime orphan | 不發布 pointer；保留 orphan，建立新 attempt |
+| runtime directory 已 durable flush 並 read back，完整 receipt WAL stage 已提交、pointer 尚未 rename | 可恢復的 receipt stage 與它指向的原 runtime | resolver 完成原 pointer，接著重驗原 runtime |
 | pointer receipt 發布後 | receipt 唯一命名 current runtime | 僅重驗 receipt 指向的目錄；失敗即拒絕 |
 
 手動持久化（D4）：setup 不會修改 `~/.profile` 等 shell profile，也不寫入任何 Atlassian／Datadog／Jira 設定。需要在新的 shell 沿用時，請自行決定是否在個人 profile 中設定 `CODEX_HOME="$HOME/.codex"`。Receipt 內的路徑是 `~/...`，不是可直接傳給程序的絕對路徑；必須讀取 `runtime-<version>-<rid>.json` 的 `executablePath`，再以目前的 `$HOME` 展開；不可自行推導含 random attempt ID 的路徑。
@@ -382,7 +383,7 @@ Typed exit code（shell 與 PowerShell 共用，定義在 `scripts/agent-environ
 
 This setup exists only for disposable cloud environments during the SYP-354 transition and is **not part of the support matrix**. The Windows-only local tooling statement above still applies; this section does not authorize general Linux, macOS or WSL local installation or use. P10a stops once a canonical pwsh is acquired and verified; S7-S9 (runtime install, USER projections, readiness) are wired in P10b and are reported as `not-implemented-until-p10b` in the receipt.
 
-How to obtain it: git clone the repository, check out a fixed full commit SHA, and pass the same SHA to `--expected-commit`. Before importing any repository module, a self-contained verifier checks that `HEAD` equals it and that the six setup files plus the complete platform runtime closure declared by `scripts/platform-runtime.psd1` are identical to that commit, with no staged or working-tree drift and no untracked substitutes.
+How to obtain it: git clone the repository, check out a fixed full commit SHA, and pass the same SHA to `--expected-commit`. Before importing any repository module, a self-contained verifier disables Git replace objects and checks that `HEAD` equals that commit. For each of the six setup files and every member of the complete platform runtime closure declared by `scripts/platform-runtime.psd1`, it directly compares the expected commit blob, the stage-zero index blob, and the raw worktree blob from `hash-object --no-filters`. This path does not execute repository-local filters, textconv, diff drivers, hooks, or fsmonitor.
 
 ```sh
 git clone https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git ai-instructions
@@ -392,7 +393,7 @@ sh scripts/setup-agent-environment.sh --expected-commit <same SHA> --prepare
 sh scripts/setup-agent-environment.sh --expected-commit <same SHA> --offline
 ```
 
-- `--prepare` may use the network. It downloads the official PowerShell 7.6.6 release asset named by `scripts/setup-agent-environment.policy.tsv` (derived from `setup-agent-environment.policy.json`) over https with TLS 1.2+ and timeouts. Downloading, hashing and extraction use only a private per-run snapshot; the `0600` shared cache is published through the WAL only after setup-lock acquisition. The first run publishes an unpredictable create-only canonical pwsh directory; reruns only re-verify the receipt-named directory and never reinstall. Result: `prepared-runtime-only`.
+- `--prepare` may use the network. It downloads the official PowerShell 7.6.6 release asset named by `scripts/setup-agent-environment.policy.tsv` (derived from `setup-agent-environment.policy.json`) over https with TLS 1.2+ and timeouts. Downloading, hashing and extraction use only a private per-run snapshot; the `0600` shared cache is published through the WAL only after setup-lock acquisition. The first run uses a create-only rename for an unpredictable canonical pwsh directory, durably flushes the `pwsh/` parent, and reads back the result before pointer-receipt publication can begin. Reruns only re-verify the receipt-named directory and never reinstall. Result: `prepared-runtime-only`.
 - `--offline` never uses the network. The cache must be a regular file owned by the current uid, with link count 1 and mode `0600`. Setup makes a no-follow copy into its private per-run temp snapshot; all subsequent hashing, extraction and PowerShell handoff use only that snapshot. A missing cache, invalid metadata, a hash mismatch or a missing `--prepare` is a typed failure with no update. Result: `verified-runtime-only`.
 - The setup root is fixed at `$HOME/.local/share/ai-instructions-setup` (XDG is not read): `cache/` holds verified archives, `pwsh/<version>-<rid>-<random>/` immutable canonical pwsh attempts, and `receipts/runtime-<version>-<rid>.json` is the only current pointer alongside `setup-receipt.json` (`0600`). `tmp/run.<pid>.<random>/` belongs only to one invocation; the exit trap best-effort removes known files and empty directories from that invocation, but never recursively deletes, scans or adopts an older tmp tree. Forced termination can leave private tmp or a runtime orphan not named by a receipt. This transitional setup is only for a single-use disposable cloud HOME: discard the environment when needed instead of guessing ownership during automated cleanup. A failed re-verification fails closed without reinstalling. Concurrent runs are serialized by the setup lock and a busy lock returns `concurrent`; no lock is held after exit.
 - The receipt is also printed to stdout as one JSON line with `schemaVersion`, `result`, `code`, `exitCode`, OS/architecture/RID, `setupCommit`, `runtimeCommit` (always `null` in P10a), the policy hash, pwsh path and version, .NET version, capability names and statuses, and the S5-S9 step states. Paths are always `~/...`; no user name, token or site is recorded.
@@ -405,7 +406,8 @@ Runtime publication has the following crash-state contract; no state reclaims or
 |---|---|---|
 | Before private-stage creation | No runtime attempt | Creates a fresh attempt |
 | Stage complete, before the unique runtime rename | Private stage/tmp only (possibly orphaned) | Creates a fresh attempt; does not scan old tmp or use an unreceipted stage |
-| After the unique runtime rename, before pointer receipt | Unreferenced immutable runtime orphan | Preserves the orphan, creates a fresh attempt, then publishes the receipt |
+| After the unique runtime rename with no recoverable receipt WAL yet (including parent-flush/readback failure) | Unreferenced immutable runtime orphan whose durability is unconfirmed or which is not yet receipted | Publishes no pointer; preserves the orphan and creates a fresh attempt |
+| After the runtime directory is durably flushed and read back, with a complete receipt WAL stage committed but before pointer rename | Recoverable receipt stage and the original runtime it names | The resolver completes the original pointer, then re-verifies the original runtime |
 | After pointer receipt publication | Receipt uniquely names the current runtime | Re-verifies only that directory; any failure refuses |
 
 Manual persistence (D4): setup never edits shell profiles such as `~/.profile` and never writes Atlassian, Datadog or Jira settings. To reuse the environment in a new shell, decide yourself whether to set `CODEX_HOME="$HOME/.codex"` in your personal profile. Receipt paths are `~/...`, not absolute paths that can be passed directly to a process. Read `executablePath` from `runtime-<version>-<rid>.json` and expand it with the current `$HOME`; never derive the path containing the random attempt ID yourself.

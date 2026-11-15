@@ -682,6 +682,11 @@ function Assert-VerifiedPlatformPowerShellRuntime {
         if (-not [IO.Path]::IsPathFullyQualified($executable) -or [IO.Path]::GetFullPath($executable) -cne $executable) { throw 'Runtime receipt executable path is not canonical.' }
         $leaf=if ($Platform -ceq 'windows') { 'pwsh.exe' } else { 'pwsh' }
         if ([IO.Path]::GetFileName($executable) -cne $leaf) { throw 'Runtime receipt executable is not the canonical pwsh.' }
+        $expectedExecutable=[IO.Path]::GetFullPath((Join-Path $rootPath $leaf))
+        $pathComparison=if($Platform -ceq 'windows'){[StringComparison]::OrdinalIgnoreCase}else{[StringComparison]::Ordinal}
+        if(-not [string]::Equals($executable,$expectedExecutable,$pathComparison)){
+            throw 'Runtime receipt executable path is outside the runtime closure root.'
+        }
         $bound=@($closure.files | Where-Object { [string]$_.path -ceq $leaf })
         if ($bound.Count -ne 1 -or [string]$bound[0].sha256 -cne [string]$fields.executableSha256) { throw 'Runtime receipt executable hash is not bound by its closure.' }
         $guards=Open-PlatformClosureGuards $closure $Platform

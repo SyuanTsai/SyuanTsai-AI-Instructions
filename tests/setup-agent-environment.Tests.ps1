@@ -443,6 +443,58 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         { Assert-PlatformBoundFileParity $negative $script:SetupShellText } | Should Throw
     }
 
+    # Scenario: A replace ref maps the pinned commit to a malicious tree whose bound-file bytes are also staged and present in the worktree.
+    # Purpose: J1 requires the module verifier to resolve the expected commit without replacements and compare expected, index, and raw worktree blobs directly.
+    It 'UnitT25b_rejects_replace_objects_before_loading_repository_code' {
+        $root = Join-Path $TestDrive 'k4-replace-repository'
+        $expected = Initialize-SetupTestGitRepository $root
+        $target = Join-Path $root 'scripts/setup-agent-environment.policy.json'
+        [IO.File]::AppendAllText($target,"`n")
+        & git -C $root add -- scripts/setup-agent-environment.policy.json 2>$null | Out-Null
+        & git -C $root -c user.name=setup-test -c user.email=setup-test@example.invalid commit -q -m malicious 2>$null | Out-Null
+        $malicious = [string](& git -C $root rev-parse HEAD)
+        $maliciousBytes = [IO.File]::ReadAllBytes($target)
+        & git -C $root replace $expected $malicious 2>$null | Out-Null
+        $previousNoReplace = [Environment]::GetEnvironmentVariable('GIT_NO_REPLACE_OBJECTS')
+        try {
+            [Environment]::SetEnvironmentVariable('GIT_NO_REPLACE_OBJECTS','1')
+            & git -C $root checkout -q --detach $expected 2>$null | Out-Null
+        } finally { [Environment]::SetEnvironmentVariable('GIT_NO_REPLACE_OBJECTS',$previousNoReplace) }
+        [IO.File]::WriteAllBytes($target,$maliciousBytes)
+        & git -C $root add -- scripts/setup-agent-environment.policy.json 2>$null | Out-Null
+
+        (Get-SetupTestRefusalCode { Assert-AgentEnvironmentSetupCommit $root $expected }) | Should Be 'commit-mismatch'
+    }
+
+    # Scenario: Repository-local attributes select a clean filter that can hide tampered bound bytes and writes a marker whenever it executes.
+    # Purpose: J1 compares raw blobs without consulting filters, attributes, textconv, diff drivers, hooks, or fsmonitor, so the marker never runs and HOME stays unchanged.
+    It 'UnitT25c_rejects_a_filter_hidden_tamper_without_invoking_the_filter' {
+        $root = Join-Path $TestDrive 'k4-filter-repository'
+        $expected = Initialize-SetupTestGitRepository $root
+        $testHome = Join-Path $TestDrive 'k4-filter-home'
+        [void][IO.Directory]::CreateDirectory($testHome)
+        [IO.File]::WriteAllText((Join-Path $testHome 'sentinel'),'unchanged')
+        $before = Get-SetupTestTreeSnapshot $testHome
+        $target = Join-Path $root 'scripts/setup-agent-environment.policy.json'
+        $original = Join-Path $root 'original-policy.json'
+        [IO.File]::WriteAllBytes($original,[IO.File]::ReadAllBytes($target))
+        [IO.File]::AppendAllText($target,"`n")
+        $marker = Join-Path $root 'filter-marker'
+        $filter = Join-Path $root 'filter.sh'
+        $filterText = "#!/bin/sh`nprintf invoked > '$marker'`ncat '$original'`n"
+        [IO.File]::WriteAllText($filter,$filterText,[Text.UTF8Encoding]::new($false))
+        $filterCommand = 'sh "' + $filter.Replace('\','/') + '"'
+        & git -C $root config filter.hide.clean $filterCommand 2>$null | Out-Null
+        [IO.File]::WriteAllText((Join-Path $root '.git/info/attributes'),"scripts/setup-agent-environment.policy.json filter=hide`n",[Text.UTF8Encoding]::new($false))
+        & git -C $root hash-object --path scripts/setup-agent-environment.policy.json -- $target 2>$null | Out-Null
+        Test-Path -LiteralPath $marker | Should Be $true
+        Remove-Item -LiteralPath $marker -Force
+
+        (Get-SetupTestRefusalCode { Assert-AgentEnvironmentSetupCommit $root $expected }) | Should Be 'commit-mismatch'
+        Test-Path -LiteralPath $marker | Should Be $false
+        (Get-SetupTestTreeSnapshot $testHome) | Should BeExactly $before
+    }
+
     # Scenario: A stored runtime receipt points outside the unique receipt-addressed layout.
     # Purpose: H1 binds both receipt paths to pwsh/<version>-<rid>-<attemptId> before K15 or re-exec.
     It 'UnitT26_binds_runtime_receipt_paths_to_the_canonical_layout' {
@@ -572,6 +624,17 @@ Describe 'setup-agent-environment policy, plan, receipt and static contract (SYP
         $readme | Should Match '必須讀取 `runtime-<version>-<rid>\.json` 的 `executablePath`'
         $readme | Should Match 'Read `executablePath` from `runtime-<version>-<rid>\.json`'
         $readme | Should Not Match 'pwsh/7\.6\.6-(?:linux|osx|win)-x64/pwsh'
+    }
+
+    # Scenario: The Chinese and English runtime crash-state tables describe both pre-WAL and complete-WAL windows after durable directory publication.
+    # Purpose: J2/J4 keep parent durability, orphan retry, and original-pointer recovery semantics synchronized in both languages.
+    It 'UnitT38_documents_both_runtime_receipt_WAL_crash_states_in_both_languages' {
+        $readme = [IO.File]::ReadAllText((Join-Path $script:SetupRepositoryRoot 'README.md'))
+        @([regex]::Matches($readme,'receipt WAL stage',[Text.RegularExpressions.RegexOptions]::CultureInvariant)).Count | Should Be 2
+        @([regex]::Matches($readme,'resolver',[Text.RegularExpressions.RegexOptions]::CultureInvariant)).Count | Should BeGreaterThan 1
+        @([regex]::Matches($readme,'durably flush(?:es)?',[Text.RegularExpressions.RegexOptions]::CultureInvariant)).Count | Should BeGreaterThan 1
+        $readme | Should Match 'no recoverable receipt WAL yet'
+        $readme | Should Match 'complete receipt WAL stage committed'
     }
 }
 
@@ -744,6 +807,17 @@ Describe 'setup-agent-environment Windows native fixture (SYP-354 P10a)' {
             param($Run)
             $Run.Lines.Count | Should Be 1
             (@($Run.Json.PSObject.Properties.Name) -join ',') | Should BeExactly (@(Get-AgentEnvironmentSetupReceiptFieldNames) -join ',')
+        }
+
+        function Set-WinSetupDurabilityHook {
+            param([AllowNull()][scriptblock]$Hook)
+            $runtimeModule = @(Get-Module platform-runtime)[0]
+            & $runtimeModule {
+                param($Value)
+                $windowsModule = @(Get-Module -All Windows)[0]
+                if ($null -eq $windowsModule) { throw 'The nested Windows platform module is not loaded.' }
+                & $windowsModule { param($NestedValue) $script:WindowsPublicationDurabilityTestHook = $NestedValue } $Value
+            } $Hook
         }
 
         $script:WinPublicationCrashScript = Join-Path $script:WinRoot 'invoke-publication-crash.ps1'
@@ -1179,7 +1253,7 @@ Publish-AgentEnvironmentSetupFile -SetupRoot $SetupRoot -Directory receipts -Lea
         $stageFixture = New-WinFixture 'runtime-stage-abort'
         $stageCrash = Invoke-WinSetup $arguments -UserHome $stageFixture.Home -Environment @{ AI_INSTRUCTIONS_SETUP_FAILPOINT='after-runtime-stage-verified'; AI_INSTRUCTIONS_SETUP_FAILPOINT_LEAF=$stageFixture.Layout.RuntimeReceiptLeaf }
         $stageCrash.ExitCode | Should Not Be 0
-        $stages = @(Get-ChildItem -LiteralPath $stageFixture.Layout.RuntimeParentDirectory -Directory -Force | Where-Object { $_.Name -match '^\.stage-[a-f0-9]{32}$' })
+        $stages = @(Get-ChildItem -LiteralPath $stageFixture.Layout.RuntimeParentDirectory -Directory -Force -Recurse | Where-Object { $_.Name -match '^\.stage-[a-f0-9]{32}$' })
         $stages.Count | Should Be 1
         $stageSnapshot = Get-WinTreeSnapshot $stages[0].FullName
         $stageMtime = $stages[0].LastWriteTimeUtc.Ticks
@@ -1277,6 +1351,46 @@ Publish-AgentEnvironmentSetupFile -SetupRoot $SetupRoot -Directory receipts -Lea
         } finally {
             if ($null -ne $first) { [IO.File]::WriteAllText((Join-Path $barrier 'release'),'release'); [void](Complete-WinSetup $first) }
         }
+    }
+
+    # Scenario: The create-only runtime rename succeeds, then the platform primitive injects a failure at the pwsh parent-directory flush.
+    # Purpose: J2 publishes no pointer, leaves the durable-state-unknown runtime as an untouched orphan, and a real-entry rerun uses a new attempt.
+    It 'InterT19_recovers_from_runtime_parent_flush_failure_with_a_new_attempt' {
+        $fixture = New-WinFixture 'runtime-parent-flush-failure'
+        $policyInfo = Read-AgentEnvironmentSetupPolicy (Join-Path $script:WinRepo 'scripts/setup-agent-environment.policy.json')
+        $attempt = New-AgentEnvironmentSetupRuntimeAttemptLayout $fixture.Layout $script:WinRid
+        $lease = Open-PlatformDirectory -Root $fixture.Home -RelativePath '.local/share/ai-instructions-setup' -CreatePrivate
+        $lease.Dispose()
+        foreach ($relative in @($fixture.Layout.RuntimeParentRelativePath,$attempt.TransactionStoreRelativePath,$attempt.TransactionRelativePath)) {
+            $lease = Open-PlatformDirectory -Root $fixture.Layout.SetupRoot -RelativePath $relative -CreatePrivate
+            $lease.Dispose()
+        }
+        $stageLease = Open-PlatformDirectory -Root $fixture.Layout.SetupRoot -RelativePath $attempt.StageRelativePath -CreatePrivate
+        try { $runtimeReceipt = Resolve-PlatformPowerShell -Policy $policyInfo.Policy -DestinationLease $stageLease -OfflineCache $script:WinArchive }
+        finally { $stageLease.Dispose() }
+        $hookState = @{ PostRenameParent = 0 }
+        Set-WinSetupDurabilityHook ({
+            param($point,$operation,$role,$lease)
+            if ($point -ceq 'post-rename' -and $operation -ceq 'directory-publication' -and $role -ceq 'parent') {
+                $hookState.PostRenameParent++
+                if ($hookState.PostRenameParent -eq 2) { throw 'injected runtime parent flush failure' }
+            }
+        }.GetNewClosure())
+        try {
+            (Get-SetupTestRefusalCode { Publish-AgentEnvironmentSetupRuntimeDirectory -Layout $fixture.Layout -Attempt $attempt -Receipt $runtimeReceipt -Policy $policyInfo.Policy }) | Should Be 'runtime-verification-failed'
+        } finally { Set-WinSetupDurabilityHook $null }
+        Test-Path -LiteralPath (Join-Path $fixture.Layout.ReceiptDirectory $fixture.Layout.RuntimeReceiptLeaf) | Should Be $false
+        Test-Path -LiteralPath $attempt.RuntimeDirectory -PathType Container | Should Be $true
+        $before = Get-WinTreeSnapshot $attempt.RuntimeDirectory
+        $mtime = (Get-Item -LiteralPath $attempt.RuntimeDirectory).LastWriteTimeUtc.Ticks
+
+        $rerun = Invoke-WinSetup @('-Prepare','-ExpectedCommit',$script:WinCommit,'-ArchivePath',$script:WinArchive) -UserHome $fixture.Home
+        Assert-WinSuccessReceipt $rerun $fixture 'prepared-runtime-only' 'resolved'
+        $stored = Get-Content -Raw -LiteralPath (Join-Path $fixture.Layout.ReceiptDirectory $fixture.Layout.RuntimeReceiptLeaf) | ConvertFrom-Json
+        $selected = ConvertFrom-AgentEnvironmentSetupHomePath ([string]$stored.runtimeClosure.rootPath) $fixture.Home
+        $selected | Should Not BeExactly $attempt.RuntimeDirectory
+        (Get-WinTreeSnapshot $attempt.RuntimeDirectory) | Should BeExactly $before
+        (Get-Item -LiteralPath $attempt.RuntimeDirectory).LastWriteTimeUtc.Ticks | Should Be $mtime
     }
 }
 }
@@ -1891,8 +2005,8 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         } finally { [IO.File]::SetUnixFileMode($runtimeRoot,[IO.UnixFileMode]448) }
     }
 
-    # Scenario: A previous forced termination left an old run-specific tmp tree before another prepare starts.
-    # Purpose: H3 proves successful cleanup removes only the new run tree and neither scans nor reclaims the old tree.
+    # Scenario: A previous forced termination left an old run-specific tmp tree, while a mktemp shim records two current run directories before cleanup.
+    # Purpose: H3/J5 proves each run uses a distinct run.<pid>.<random> directory, cleanup removes only current runs, and the old tree is unchanged.
     It 'InterT41_preserves_old_tmp_trees_while_cleaning_the_current_run' {
         $homePath = New-UnixHome 'tmp-orphan'
         $tmpRoot = Join-Path $homePath '.local/share/ai-instructions-setup/tmp'
@@ -1904,8 +2018,22 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         [IO.File]::SetUnixFileMode((Join-Path $old 'sentinel'),[IO.UnixFileMode]384)
         $before = Get-UnixTreeSnapshot $old
         $mtime = (Get-Item -LiteralPath $old).LastWriteTimeUtc.Ticks
-        $run = Invoke-UnixSetup $homePath @('--prepare')
-        $run.ExitCode | Should Be 0
+        $record = Join-Path $script:UnixRoot 'tmp-run-names'
+        $realMktemp = @(Get-Command mktemp -CommandType Application | Select-Object -First 1)[0].Source
+        $mktempShim = @(
+            "result=`$('$realMktemp' `"`$@`") || exit `$?",
+            "printf '%s\n' `"`$result`" >> '$record'",
+            "printf '%s\n' `"`$result`""
+        ) -join "`n"
+        $bin = New-UnixToolShim 'tmp-run-names' -Replace @{ mktemp=$mktempShim }
+        $first = Invoke-UnixSetup $homePath @('--prepare') -Environment @{ PATH=$bin }
+        $first.ExitCode | Should Be 0
+        $second = Invoke-UnixSetup $homePath @('--offline') -Environment @{ PATH=$bin }
+        $second.ExitCode | Should Be 0
+        $recorded = @(Get-Content -LiteralPath $record)
+        $recorded.Count | Should Be 2
+        foreach ($path in $recorded) { [IO.Path]::GetFileName($path) | Should Match '^run\.[0-9]+\.[A-Za-z0-9]+$' }
+        $recorded[0] | Should Not BeExactly $recorded[1]
         (Get-UnixTreeSnapshot $old) | Should BeExactly $before
         (Get-Item -LiteralPath $old).LastWriteTimeUtc.Ticks | Should Be $mtime
         $newRuns = @(Get-ChildItem -LiteralPath $tmpRoot -Directory -Force | Where-Object { $_.FullName -ne $old })
@@ -2139,6 +2267,74 @@ Describe 'setup-agent-environment Unix null optional leaf publication (SYP-354 P
         foreach($directory in @($setupRoot,$runtimeRoot)){Assert-UnixPrivatePath $directory '700'}
         foreach($file in @($setupReceipt,$runtimeReceiptPath,(Join-Path $setupRoot "cache/$($script:UnixAssetName)"))){Assert-UnixPrivatePath $file '600'}
         Assert-UnixPrivatePath (Join-Path $runtimeRoot 'pwsh') '700'
+    }
+
+    # Scenario: refs/replace maps the expected commit to a malicious tree whose bound module is staged and present in the worktree.
+    # Purpose: J1 makes the native shell reject before PowerShell loads, leaves HOME byte-identical, and ignores the replacement object.
+    It 'InterT48_refuses_a_replace_object_before_repository_PowerShell_can_run' {
+        $homePath = New-UnixHome 'replace-object'
+        $before = Get-UnixTreeSnapshot $homePath
+        $expected = $script:UnixCommits['runtime']
+        $target = Join-Path $script:UnixRepo 'scripts/agent-environment-setup.psm1'
+        $marker = Join-Path $script:UnixRoot 'replace-object-marker'
+        $original = [IO.File]::ReadAllBytes($target)
+        $injection = "[IO.File]::WriteAllText('$($marker.Replace("'","''"))','loaded')`n"
+        [IO.File]::WriteAllBytes($target,[Text.UTF8Encoding]::new($false).GetBytes($injection + [Text.UTF8Encoding]::new($false,$true).GetString($original)))
+        & git -C $script:UnixRepo add -- scripts/agent-environment-setup.psm1 2>$null | Out-Null
+        & git -C $script:UnixRepo -c user.name=setup-test -c user.email=setup-test@example.invalid commit -q -m replace-object 2>$null | Out-Null
+        $malicious = [string](& git -C $script:UnixRepo rev-parse HEAD)
+        $maliciousBytes = [IO.File]::ReadAllBytes($target)
+        & git -C $script:UnixRepo replace $expected $malicious 2>$null | Out-Null
+        $previousNoReplace = [Environment]::GetEnvironmentVariable('GIT_NO_REPLACE_OBJECTS')
+        try {
+            [Environment]::SetEnvironmentVariable('GIT_NO_REPLACE_OBJECTS','1')
+            & git -C $script:UnixRepo checkout -q --detach $expected 2>$null | Out-Null
+            [IO.File]::WriteAllBytes($target,$maliciousBytes)
+            & git -C $script:UnixRepo add -- scripts/agent-environment-setup.psm1 2>$null | Out-Null
+            $run = Invoke-UnixSetup $homePath @('--prepare') -ExpectedCommit $expected -NoCheckout
+            $run.ExitCode | Should Be 15
+            $run.Json.code | Should Be 'commit-mismatch'
+            Test-Path -LiteralPath $marker | Should Be $false
+            (Get-UnixTreeSnapshot $homePath) | Should BeExactly $before
+        } finally {
+            [Environment]::SetEnvironmentVariable('GIT_NO_REPLACE_OBJECTS','1')
+            & git -C $script:UnixRepo replace -d $expected 2>$null | Out-Null
+            & git -C $script:UnixRepo checkout -q --detach $expected 2>$null | Out-Null
+            [Environment]::SetEnvironmentVariable('GIT_NO_REPLACE_OBJECTS',$previousNoReplace)
+        }
+    }
+
+    # Scenario: .git/info/attributes selects a local clean filter that hides a tampered bound module and writes an execution marker.
+    # Purpose: J1 hashes raw worktree bytes without invoking the filter and refuses before any HOME mutation.
+    It 'InterT49_refuses_a_filter_hidden_tamper_without_executing_the_filter' {
+        $homePath = New-UnixHome 'local-clean-filter'
+        $before = Get-UnixTreeSnapshot $homePath
+        $expected = $script:UnixCommits['runtime']
+        & git -C $script:UnixRepo checkout -q --detach $expected 2>$null | Out-Null
+        $target = Join-Path $script:UnixRepo 'scripts/agent-environment-setup.psm1'
+        $original = Join-Path $script:UnixRoot 'filter-original-module'
+        [IO.File]::WriteAllBytes($original,[IO.File]::ReadAllBytes($target))
+        [IO.File]::AppendAllText($target,"`n")
+        $marker = Join-Path $script:UnixRoot 'local-clean-filter-marker'
+        $filter = Join-Path $script:UnixRoot 'local-clean-filter.sh'
+        [IO.File]::WriteAllText($filter,"#!/bin/sh`nprintf invoked > '$marker'`ncat '$original'`n",[Text.UTF8Encoding]::new($false))
+        [IO.File]::SetUnixFileMode($filter,[IO.UnixFileMode]448)
+        & git -C $script:UnixRepo config filter.hide.clean "sh $filter" 2>$null | Out-Null
+        [IO.File]::WriteAllText((Join-Path $script:UnixRepo '.git/info/attributes'),"scripts/agent-environment-setup.psm1 filter=hide`n",[Text.UTF8Encoding]::new($false))
+        & git -C $script:UnixRepo hash-object --path scripts/agent-environment-setup.psm1 -- $target 2>$null | Out-Null
+        Test-Path -LiteralPath $marker | Should Be $true
+        Remove-Item -LiteralPath $marker -Force
+        try {
+            $run = Invoke-UnixSetup $homePath @('--prepare') -ExpectedCommit $expected -NoCheckout
+            $run.ExitCode | Should Be 15
+            $run.Json.code | Should Be 'commit-mismatch'
+            Test-Path -LiteralPath $marker | Should Be $false
+            (Get-UnixTreeSnapshot $homePath) | Should BeExactly $before
+        } finally {
+            & git -C $script:UnixRepo config --unset-all filter.hide.clean 2>$null | Out-Null
+            Remove-Item -LiteralPath (Join-Path $script:UnixRepo '.git/info/attributes') -Force -ErrorAction SilentlyContinue
+            & git -C $script:UnixRepo checkout -q --detach $expected 2>$null | Out-Null
+        }
     }
 }
 }

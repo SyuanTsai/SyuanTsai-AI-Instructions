@@ -8361,6 +8361,8 @@ Describe 'Platform K15 PowerShell runtime receipt reverification' {
         Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
         if(-not $IsWindows){Add-Type -AssemblyName System.Formats.Tar -ErrorAction Stop}
         Import-Module $script:K15Manifest -Force
+        $script:K15Preparation = @(Get-Module -All RuntimePreparation | Where-Object { $_.Path -ceq (Join-Path $script:K15RepositoryRoot 'scripts/platform/RuntimePreparation.psm1') })[-1]
+        if ($null -eq $script:K15Preparation) { throw 'K15 could not locate the imported RuntimePreparation module.' }
         $script:K15Platform = if ($IsWindows) { 'windows' } elseif ($IsLinux) { 'linux' } elseif ($IsMacOS) { 'macos' } else { throw 'Unsupported test platform.' }
         $script:K15Architecture = [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLowerInvariant()
         $script:K15Version = $PSVersionTable.PSVersion.ToString()
@@ -8629,6 +8631,38 @@ Describe 'Platform K15 PowerShell runtime receipt reverification' {
             Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $receipt } $case.Pattern
         }
         Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt @{} } "lacks 'apiVersion'"
+    }
+
+    # Scenario: executablePath is redirected to a second physical copy of the same-version pwsh while runtimeClosure still names the original runtime root.
+    # Purpose: J3 binds the executable to runtimeClosure.rootPath before the identity probe can launch any closure-external process.
+    It 'InterT870_rejects_a_same_version_pwsh_outside_the_runtime_closure_before_launch' {
+        $runtime = Get-K15ResolvedRuntime
+        $externalRoot = Join-Path $script:K15Root 'k15-external-runtime'
+        [void][IO.Directory]::CreateDirectory($externalRoot)
+        $external = Join-Path $externalRoot $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
+        Copy-Item -LiteralPath $runtime.Receipt.executablePath -Destination $external
+        if (-not $IsWindows) { [IO.File]::SetUnixFileMode($external,[IO.UnixFileMode]448) }
+        $receipt = Copy-K15Receipt $runtime.Receipt
+        $receipt.executablePath = [IO.Path]::GetFullPath($external)
+        $originalProbe = & $script:K15Preparation { (Get-Command Test-PlatformPowerShellIdentity -CommandType Function).ScriptBlock }
+        & $script:K15Preparation {
+            $script:K15ExternalProbeReached = $false
+            Set-Item Function:script:Test-PlatformPowerShellIdentity -Value {
+                $script:K15ExternalProbeReached = $true
+                throw 'J3 identity probe must not be reached.'
+            }
+        }
+        try {
+            Assert-K15TypedRefusal { Assert-PlatformPowerShellRuntime -Policy $runtime.Policy -Receipt $receipt } 'closure root|executable path'
+            (& $script:K15Preparation { $script:K15ExternalProbeReached }) | Should Be $false
+        } finally {
+            & $script:K15Preparation {
+                param($Probe)
+                Set-Item Function:script:Test-PlatformPowerShellIdentity -Value $Probe
+                Remove-Variable K15ExternalProbeReached -Scope Script -ErrorAction SilentlyContinue
+            } $originalProbe
+        }
+        Assert-K15Baseline
     }
 
     # Scenario: A closure member gains a hard-link alias outside the runtime directory.
