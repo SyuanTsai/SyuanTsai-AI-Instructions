@@ -9,6 +9,8 @@ Import-Module (Join-Path $script:RepositoryRoot 'scripts/platform-runtime.psd1')
 if ($null -eq ('SyuanTsai.AIInstructions.TrustAnchor.SecretBridge' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
+using System.Buffers;
+using System.Buffers.Text;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -71,31 +73,44 @@ namespace SyuanTsai.AIInstructions.TrustAnchor {
             if (!MatchAscii(value, offset, text, ignoreCase)) throw new CryptographicException("The public-key input structure is not permitted.");
             offset += text.Length;
         }
-        private static void RequirePublicPemEnvelope(byte[] value) {
+        private static byte[] RequirePublicPemEnvelope(byte[] value, out int derLength) {
             if (value == null) throw new ArgumentNullException(nameof(value));
+            byte[] encoded = new byte[value.Length];
+            derLength = 0;
+            try {
             int offset = 0; SkipAsciiWhitespace(value, ref offset);
             RequireAscii(value, ref offset, "-----BEGIN PUBLIC KEY-----", false);
             if (offset >= value.Length || (value[offset] != (byte)'\n' && value[offset] != (byte)'\r'))
                 throw new CryptographicException("The PUBLIC KEY header must end with a line break.");
             if (value[offset] == (byte)'\r') { offset++; if (offset >= value.Length || value[offset] != (byte)'\n') throw new CryptographicException("Invalid PEM line ending."); }
             offset++;
-            bool lineStart = true, payload = false;
+            bool lineStart = true, payload = false; int encodedLength = 0;
             while (offset < value.Length) {
                 if (lineStart && MatchAscii(value, offset, "-----END PUBLIC KEY-----", false)) {
                     offset += "-----END PUBLIC KEY-----".Length;
                     SkipAsciiWhitespace(value, ref offset);
                     if (!payload || offset != value.Length) throw new CryptographicException("The PUBLIC KEY envelope has trailing content or no payload.");
-                    return;
+                    byte[] der = new byte[(encodedLength * 3 + 3) / 4];
+                    try {
+                        int consumed;
+                        OperationStatus status = Base64.DecodeFromUtf8(new ReadOnlySpan<byte>(encoded, 0, encodedLength), der.AsSpan(), out consumed, out derLength);
+                        if (status != OperationStatus.Done || consumed != encodedLength || derLength == 0)
+                            throw new CryptographicException("The PUBLIC KEY payload is not valid base64.");
+                        return der;
+                    }
+                    catch { CryptographicOperations.ZeroMemory(der); throw; }
                 }
                 byte current = value[offset];
                 bool base64 = (current >= (byte)'A' && current <= (byte)'Z') || (current >= (byte)'a' && current <= (byte)'z') ||
                     (current >= (byte)'0' && current <= (byte)'9') || current == (byte)'+' || current == (byte)'/' || current == (byte)'=';
-                if (base64) { payload = true; lineStart = false; offset++; continue; }
+                if (base64) { payload = true; lineStart = false; encoded[encodedLength++] = current; offset++; continue; }
                 if (current == (byte)'\n') { lineStart = true; offset++; continue; }
                 if (current == (byte)'\r' && offset + 1 < value.Length && value[offset + 1] == (byte)'\n') { lineStart = true; offset += 2; continue; }
                 throw new CryptographicException("Only base64 payload lines are permitted inside a PUBLIC KEY envelope.");
             }
             throw new CryptographicException("The PUBLIC KEY envelope is incomplete.");
+            }
+            finally { CryptographicOperations.ZeroMemory(encoded); }
         }
         private static void RequireXmlTag(byte[] value, ref int offset, string name, bool closing) {
             RequireAscii(value, ref offset, closing ? "</" : "<", false);
@@ -122,9 +137,21 @@ namespace SyuanTsai.AIInstructions.TrustAnchor {
             RequireXmlTag(value, ref offset, "RSAKeyValue", true); SkipAsciiWhitespace(value, ref offset);
             if (offset != value.Length) throw new CryptographicException("RSA public XML contains an additional element or trailing content.");
         }
-        public static string DecodePublicPem(byte[] value) {
-            RequirePublicPemEnvelope(value);
-            return new System.Text.UTF8Encoding(false, true).GetString(value);
+        public static RSA DecodePublicPem(byte[] value) {
+            byte[] der = null; RSA rsa = null;
+            try {
+                int derLength;
+                der = RequirePublicPemEnvelope(value, out derLength);
+                rsa = RSA.Create();
+                int consumed;
+                rsa.ImportSubjectPublicKeyInfo(new ReadOnlySpan<byte>(der, 0, derLength), out consumed);
+                if (consumed != derLength) throw new CryptographicException("The PUBLIC KEY payload has trailing DER data.");
+                RSA result = rsa; rsa = null; return result;
+            }
+            finally {
+                if (rsa != null) rsa.Dispose();
+                if (der != null) CryptographicOperations.ZeroMemory(der);
+            }
         }
         public static string DecodePublicXml(byte[] value) {
             RequirePublicXmlStructure(value);
@@ -476,7 +503,13 @@ namespace SyuanTsai.AIInstructions.TrustAnchor {
         }
         private static void SameFile(NativeMetadataEvidence value,ulong device,ulong inode){if(value.Device!=device||value.Inode!=inode||value.LinkCount!=1||(value.Mode&0xF000)!=0x8000)throw new IOException("The trust-anchor rollback target identity or link count changed.");}
         private static void SameDirectory(NativeMetadataEvidence value,ulong device,ulong inode){if(value.Device!=device||value.Inode!=inode||(value.Mode&0xF000)!=0x4000)throw new IOException("The private trust-anchor rollback directory identity changed.");}
+        public static void AssertSafeParent(SafeHandle parent){
+            NativeMetadataEvidence value=UnixMetadataInspector.Inspect(parent);ulong effectiveUid=SecretBridge.EffectiveUid();
+            bool trustedOwner=value.Uid==effectiveUid||value.Uid==0;bool restricted=(value.Mode&0x12)==0;bool sticky=(value.Mode&0x200)!=0;
+            if((value.Mode&0xF000)!=0x4000||!trustedOwner||(!restricted&&!sticky))throw new IOException("The private trust-anchor parent must be owner-only or sticky and owned by the effective user or root.");
+        }
         public static UnixRollbackLease Begin(SafeHandle parent,string parentPath,string leaf,ulong device,ulong inode){
+            AssertSafeParent(parent);
             NativeMetadataEvidence before=Stat(parent,leaf);SameFile(before,device,inode);
             var lease=new UnixRollbackLease(parent,parentPath,device,inode);bool directoryCreated=false;bool renamed=false;
             try{
@@ -560,7 +593,7 @@ function Use-TrustAnchorPassword {
         $characters=[char[]]::new($Password.Length)
         $pin=[Runtime.InteropServices.GCHandle]::Alloc($characters,[Runtime.InteropServices.GCHandleType]::Pinned)
         [Runtime.InteropServices.Marshal]::Copy($buffer,$characters,0,$characters.Length)
-        return & $Action $characters
+        return $Action.Invoke(@(,$characters))
     }
     finally {
         if($buffer -ne [IntPtr]::Zero){[Runtime.InteropServices.Marshal]::ZeroFreeGlobalAllocUnicode($buffer)}
@@ -603,7 +636,7 @@ function Read-TrustAnchorInputBytes {
     try{
         if($stream.Length -gt $MaximumLength){throw "The trust-anchor input exceeds the $MaximumLength-byte limit."}
         $bytes=[byte[]]::new([int]$stream.Length);$offset=0
-        if($null-ne$script:TrustAnchorAfterInputBufferAllocatedTestHook){& $script:TrustAnchorAfterInputBufferAllocatedTestHook $stream $bytes}
+        if($null-ne$script:TrustAnchorAfterInputBufferAllocatedTestHook){$script:TrustAnchorAfterInputBufferAllocatedTestHook.Invoke($stream,$bytes)|Out-Null}
         while($offset -lt $bytes.Length){$count=$stream.Read($bytes,$offset,$bytes.Length-$offset);if($count -eq 0){throw 'The trust-anchor input ended before its declared length.'};$offset+=$count}
         $succeeded=$true;return ,$bytes
     }finally{if(-not$succeeded -and $null-ne$bytes){[Security.Cryptography.CryptographicOperations]::ZeroMemory($bytes)};$stream.Dispose()}
@@ -627,7 +660,7 @@ function Assert-TrustAnchorOutsideWorktree {
         $next=Split-Path -Parent $cursor;if($next -ceq $cursor){break};$cursor=$next
     }
     $git=@(Get-Command git -CommandType Application -ErrorAction SilentlyContinue)[0]
-    if($null-ne$git){$root=& $git.Source -C $PathEvidence.Parent rev-parse --show-toplevel 2>$null;if($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace(($root -join ''))){throw 'Trust-anchor key material and generated public output must remain outside every Git worktree.'}}
+    if($null-ne$git){$root=git -C $PathEvidence.Parent rev-parse --show-toplevel 2>$null;if($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace(($root -join ''))){throw 'Trust-anchor key material and generated public output must remain outside every Git worktree.'}}
     Assert-PlatformFileIdentity -Lease $PathEvidence.ParentLease -Expected $PathEvidence.ParentExpected -VerifyPath|Out-Null
 }
 
@@ -688,6 +721,7 @@ function New-TrustAnchorKeyFile {
     $parent=$PathEvidence.ParentLease;$file=$null
     try{
         Assert-PlatformFileIdentity -Lease $parent -Expected $PathEvidence.ParentExpected -VerifyPath|Out-Null
+        if(-not$IsWindows -and $PathEvidence.Purpose -ceq 'PrivateKey'){[SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease]::AssertSafeParent((Get-TrustAnchorLeaseHandle $parent))}
         $file=Open-PlatformFile -ParentLease $parent -Leaf $PathEvidence.Leaf -Access ReadWrite -CreateMode CreateNew;$expected=$file.Observation
         if($PathEvidence.Purpose -ceq 'PrivateKey'){
             if($IsWindows){$identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$sid=$identity.User.Value}finally{$identity.Dispose()};Set-PlatformPermissions -Lease $file -Policy @{Sddl="D:P(A;;FA;;;$sid)";ReadOnly=$false}|Out-Null}else{Set-PlatformPermissions -Lease $file -Policy @{Mode=384}|Out-Null}
@@ -707,13 +741,13 @@ function Remove-TrustAnchorCreatedFile {
         Assert-PlatformFileIdentity -Lease $Lease.FileLease -Expected $Lease.Expected -SingleLink -VerifyPath|Out-Null
         if($IsWindows){
             $Lease.FileLease.Dispose()
-            if($null-ne$script:TrustAnchorBeforeRollbackRemovalTestHook){& $script:TrustAnchorBeforeRollbackRemovalTestHook $Lease}
+            if($null-ne$script:TrustAnchorBeforeRollbackRemovalTestHook){$script:TrustAnchorBeforeRollbackRemovalTestHook.Invoke($Lease)|Out-Null}
             [SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector]::DeleteExact($Lease.Path,[uint64]$Lease.Expected.Device,[uint64]$Lease.Expected.Inode)
         }else{
-            if($null-ne$script:TrustAnchorBeforeRollbackRemovalTestHook){& $script:TrustAnchorBeforeRollbackRemovalTestHook $Lease}
+            if($null-ne$script:TrustAnchorBeforeRollbackRemovalTestHook){$script:TrustAnchorBeforeRollbackRemovalTestHook.Invoke($Lease)|Out-Null}
             Assert-PlatformFileIdentity -Lease $Lease.FileLease -Expected $Lease.Expected -SingleLink -VerifyPath|Out-Null
             $rollback=[SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease]::Begin((Get-TrustAnchorLeaseHandle $Lease.ParentLease),$Lease.Parent,$Lease.Leaf,[uint64]$Lease.Expected.Device,[uint64]$Lease.Expected.Inode)
-            if($null-ne$script:TrustAnchorAfterRollbackRenameTestHook){& $script:TrustAnchorAfterRollbackRenameTestHook $rollback}
+            if($null-ne$script:TrustAnchorAfterRollbackRenameTestHook){$script:TrustAnchorAfterRollbackRenameTestHook.Invoke($rollback)|Out-Null}
             $rollback.Complete()
         }
     }finally{if($null-ne$rollback){$rollback.Dispose()};$Lease.FileLease.Dispose();$Lease.ParentLease.Dispose()}
@@ -727,10 +761,10 @@ function Open-TrustAnchorPrivateKey {
         $pathEvidence=New-TrustAnchorPathEvidence -Path $Path -Purpose PrivateKey -Existing
         $file=Open-PlatformFile -ParentLease $pathEvidence.ParentLease -Leaf $pathEvidence.Leaf -Access Read -CreateMode OpenExisting;$expected=$file.Observation
         Assert-PlatformFileIdentity -Lease $file -Expected $expected -SingleLink -VerifyPath|Out-Null
-        if($null-ne$script:TrustAnchorOpenBeforePermissionTestHook){& $script:TrustAnchorOpenBeforePermissionTestHook $Path $file}
+        if($null-ne$script:TrustAnchorOpenBeforePermissionTestHook){$script:TrustAnchorOpenBeforePermissionTestHook.Invoke($Path,$file)|Out-Null}
         $before=Get-TrustAnchorMetadataEvidence $file;Assert-TrustAnchorPrivatePermissions $file $before|Out-Null
         $bytes=$file.ReadAllBytes(1048576)
-        if($null-ne$script:TrustAnchorAfterReadTestHook){& $script:TrustAnchorAfterReadTestHook $Path $file $bytes}
+        if($null-ne$script:TrustAnchorAfterReadTestHook){$script:TrustAnchorAfterReadTestHook.Invoke($Path,$file,$bytes)|Out-Null}
         Assert-PlatformFileIdentity -Lease $file -Expected $expected -SingleLink -VerifyPath|Out-Null
         $after=Get-TrustAnchorMetadataEvidence $file;Assert-TrustAnchorPrivatePermissions $file $after|Out-Null
         if(-not(Test-TrustAnchorMetadataEqual $before $after)){throw 'The private-key handle metadata changed while it was being read.'}
@@ -769,10 +803,7 @@ function Import-TrustAnchorPublicXml {
 
 function Import-TrustAnchorPublicPem {
     param([Parameter(Mandatory)][byte[]]$Bytes)
-    try{$Pem=[SyuanTsai.AIInstructions.TrustAnchor.SecretBridge]::DecodePublicPem($Bytes)}catch{throw (New-TrustAnchorError 'Only a PUBLIC KEY PEM without private-key content is supported.' 'TrustAnchor.UnsupportedKeyFormat')}
-    if($Pem -notmatch '\A-----BEGIN PUBLIC KEY-----\r?\n' -or $Pem -notmatch '\r?\n-----END PUBLIC KEY-----\s*\z' -or $Pem -match 'PRIVATE KEY'){throw (New-TrustAnchorError 'Only a PUBLIC KEY PEM without private-key content is supported.' 'TrustAnchor.UnsupportedKeyFormat')}
-    $rsa=[Security.Cryptography.RSA]::Create()
-    try{$rsa.ImportFromPem($Pem);return $rsa}catch{$rsa.Dispose();throw}
+    try{return [SyuanTsai.AIInstructions.TrustAnchor.SecretBridge]::DecodePublicPem($Bytes)}catch{throw (New-TrustAnchorError 'Only a PUBLIC KEY PEM without private-key content is supported.' 'TrustAnchor.UnsupportedKeyFormat')}
 }
 
 function Invoke-NewTrustAnchorKeyPairAction {
@@ -788,7 +819,7 @@ function Invoke-NewTrustAnchorKeyPairAction {
         $privateBytes=[Text.UTF8Encoding]::new($false).GetBytes($pem+$(if($pem.EndsWith("`n")){''}else{"`n"}))
         $privateLease=New-TrustAnchorKeyFile -PathEvidence $privateTarget -Bytes $privateBytes
         try{
-            if($null-ne$script:TrustAnchorBeforePublicWriteTestHook){& $script:TrustAnchorBeforePublicWriteTestHook $privateLease $publicTarget}
+            if($null-ne$script:TrustAnchorBeforePublicWriteTestHook){$script:TrustAnchorBeforePublicWriteTestHook.Invoke($privateLease,$publicTarget)|Out-Null}
             $publicBytes=ConvertTo-TrustAnchorCanonicalXml $rsa
             try{$publicLease=New-TrustAnchorKeyFile -PathEvidence $publicTarget -Bytes $publicBytes}
             finally{[Security.Cryptography.CryptographicOperations]::ZeroMemory($publicBytes)}

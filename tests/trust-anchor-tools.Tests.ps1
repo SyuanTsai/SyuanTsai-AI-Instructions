@@ -53,9 +53,26 @@ function New-TestShortSaltEncryptedPrivateKey {
         [pscustomobject]@{Pem=[Security.Cryptography.PemEncoding]::WriteString('ENCRYPTED PRIVATE KEY',$der);Der=$der.Clone()}
     }finally{if($null-ne$aes){$aes.Dispose()};foreach($value in @($plain,$salt,$iv,$key,$encrypted,$der)){if($null-ne$value){[Security.Cryptography.CryptographicOperations]::ZeroMemory($value)}}}
 }
+function Get-CompactAstText {
+    param([Parameter(Mandatory)][Management.Automation.Language.Ast]$Ast)
+    return ($Ast.Extent.Text -replace '\s','')
+}
 function Test-TrustAnchorCliGuardAst {
-    param([Parameter(Mandatory)][Management.Automation.Language.ScriptBlockAst]$Ast,[Parameter(Mandatory)][string]$ActionName)
-    if($null-ne$Ast.BeginBlock -or $null-ne$Ast.ProcessBlock -or $null-ne$Ast.CleanBlock -or $null-eq$Ast.EndBlock){return $false}
+    param(
+        [Parameter(Mandatory)][Management.Automation.Language.ScriptBlockAst]$Ast,
+        [Parameter(Mandatory)][string]$ActionName,
+        [Parameter(Mandatory)][string]$CmdletBinding,
+        [Parameter(Mandatory)][string[]]$Parameters
+    )
+    if($null-ne$Ast.BeginBlock -or $null-ne$Ast.ProcessBlock -or $null-ne$Ast.CleanBlock -or $null-ne$Ast.DynamicParamBlock -or $null-eq$Ast.EndBlock){return $false}
+    if(@($Ast.UsingStatements).Count-ne0 -or $Ast.Extent.Text -match '(?im)^\s*#requires\b'){return $false}
+    if($null-eq$Ast.ParamBlock -or @($Ast.ParamBlock.Attributes).Count-ne1 -or (Get-CompactAstText $Ast.ParamBlock.Attributes[0])-cne$CmdletBinding){return $false}
+    $actualParameters=@($Ast.ParamBlock.Parameters|ForEach-Object{
+        if($null-ne$_.DefaultValue){return '__DEFAULT_EXPRESSION__'}
+        $attributes=@($_.Attributes|ForEach-Object{Get-CompactAstText $_})
+        "{0}|{1}" -f $_.Name.VariablePath.UserPath,($attributes-join'')
+    })
+    if(($actualParameters-join"`n")-cne($Parameters-join"`n")){return $false}
     $statements=@($Ast.EndBlock.Statements);if($statements.Count-ne2){return $false}
     if($statements[0] -isnot [Management.Automation.Language.AssignmentStatementAst] -or $statements[0].Left.Extent.Text -cne '$module'){return $false}
     if($statements[0].Extent.Text -cnotmatch '^\$module\s*=\s*Import-Module\s+\(Join-Path\s+\$PSScriptRoot\s+''TrustAnchorPrivateKey\.psm1''\)\s+-PassThru\s+-ErrorAction\s+Stop$'){return $false}
@@ -70,15 +87,133 @@ function Test-TrustAnchorCliGuardAst {
     if(@($blocks[0].ScriptBlock.FindAll({param($node)$node -is [Management.Automation.Language.InvokeMemberExpressionAst]},$true)).Count-ne0){return $false}
     return $true
 }
+function Get-TrustAnchorCliContracts {
+    return @{
+        'New-TrustAnchorKeyPair.ps1'=@{
+            Action='Invoke-NewTrustAnchorKeyPairAction';CmdletBinding='[CmdletBinding()]';Parameters=@(
+                "KeyId|[Parameter(Mandatory)][ValidateSet('humanApproval','supervisor')][string]",
+                'PrivateKeyPath|[Parameter(Mandatory)][string]',
+                'PublicKeyXmlPath|[Parameter(Mandatory)][string]'
+            )
+        }
+        'ConvertTo-TrustAnchorPublicKeyXml.ps1'=@{
+            Action='Invoke-ConvertToTrustAnchorPublicKeyXmlAction';CmdletBinding='[CmdletBinding()]';Parameters=@(
+                'PublicKeyPemPath|[Parameter(Mandatory)][string]',
+                'OutputPath|[Parameter(Mandatory)][string]'
+            )
+        }
+        'Get-TrustAnchorFingerprint.ps1'=@{
+            Action='Invoke-GetTrustAnchorFingerprintAction';CmdletBinding="[CmdletBinding(DefaultParameterSetName='Xml')]";Parameters=@(
+                "PublicKeyXmlPath|[Parameter(Mandatory,ParameterSetName='Xml')][string]",
+                "PublicKeyPemPath|[Parameter(Mandatory,ParameterSetName='Pem')][string]",
+                "EncryptedPrivateKeyPath|[Parameter(Mandatory,ParameterSetName='Private')][string]"
+            )
+        }
+    }
+}
+function Get-CSharpMethodExtent {
+    param([Parameter(Mandatory)][string]$Source,[Parameter(Mandatory)][string]$Name)
+    $match=[regex]::Match($Source,"(?m)^\s*(?:public|private)\s+static\s+[^\r\n]+\s+$([regex]::Escape($Name))\s*\([^\r\n]*\)\s*\{")
+    if(-not$match.Success){return $null}
+    $start=$Source.IndexOf('{',$match.Index);$depth=0
+    for($index=$start;$index-lt$Source.Length;$index++){
+        if($Source[$index]-eq'{'){$depth++}elseif($Source[$index]-eq'}'){$depth--;if($depth-eq0){return $Source.Substring($match.Index,$index-$match.Index+1)}}
+    }
+    return $null
+}
+function Test-TrustAnchorPublicDecoderSourceOrder {
+    param([Parameter(Mandatory)][string]$CSharpSource)
+    $pem=Get-CSharpMethodExtent $CSharpSource 'DecodePublicPem';$xml=Get-CSharpMethodExtent $CSharpSource 'DecodePublicXml'
+    if($null-eq$pem -or $null-eq$xml){return $false}
+    if($pem -match '(?i)GetString\s*\(|new\s+string\s*\(' -or $pem -notmatch 'ImportSubjectPublicKeyInfo'){return $false}
+    $xmlValidator=$xml.IndexOf('RequirePublicXmlStructure',[StringComparison]::Ordinal);$xmlString=$xml.IndexOf('GetString',[StringComparison]::Ordinal)
+    if($xmlValidator-lt0 -or $xmlString-lt0 -or $xmlValidator-ge$xmlString){return $false}
+    if(([regex]::Matches($xml,'(?i)GetString\s*\(|new\s+string\s*\(')).Count-ne1){return $false}
+    $allStringCreations=[regex]::Matches($CSharpSource,'(?i)GetString\s*\(|new\s+string\s*\(')
+    if($allStringCreations.Count-ne1){return $false}
+    return $true
+}
 function Get-TestAncestorFunctionName {
     param([Parameter(Mandatory)][Management.Automation.Language.Ast]$Node)
     $parent=$Node.Parent
     while($null-ne$parent){if($parent -is [Management.Automation.Language.FunctionDefinitionAst]){return $parent.Name};$parent=$parent.Parent}
     return $null
 }
+function Test-ExactInventory {
+    param([Parameter(Mandatory)][string[]]$Actual,[Parameter(Mandatory)][string]$Expected)
+    $actualText=(@($Actual|Group-Object|Sort-Object Name|ForEach-Object{"$($_.Count)|$($_.Name)"})-join"`n")
+    $expectedText=(@($Expected.Trim()-split'\r?\n'|Sort-Object{($_-split'\|',2)[1]})-join"`n")
+    return $actualText -ceq $expectedText
+}
+function Get-TrustAnchorCSharpInventory {
+    param([Parameter(Mandatory)][string]$Source)
+    $match=[regex]::Match($Source,"(?s)Add-Type -TypeDefinition @'\r?\n(?<csharp>.*?)\r?\n'@")
+    if(-not$match.Success){return $null}
+    $tree=[Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree]::ParseText($match.Groups['csharp'].Value)
+    $references=[Collections.Generic.List[Microsoft.CodeAnalysis.MetadataReference]]::new()
+    foreach($path in ([string][AppContext]::GetData('TRUSTED_PLATFORM_ASSEMBLIES') -split [IO.Path]::PathSeparator)){if($path){$references.Add([Microsoft.CodeAnalysis.MetadataReference]::CreateFromFile($path))}}
+    $options=[Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions]::new([Microsoft.CodeAnalysis.OutputKind]::DynamicallyLinkedLibrary)
+    $compilation=[Microsoft.CodeAnalysis.CSharp.CSharpCompilation]::Create('TrustAnchorClosedInventory',[Microsoft.CodeAnalysis.SyntaxTree[]]@(,$tree),[Microsoft.CodeAnalysis.MetadataReference[]]$references.ToArray(),$options)
+    if(@($compilation.GetDiagnostics()|Where-Object Severity -eq ([Microsoft.CodeAnalysis.DiagnosticSeverity]::Error)).Count-ne0){return $null}
+    $model=$compilation.GetSemanticModel($tree);$nodes=@($tree.GetRoot().DescendantNodes());$members=[Collections.Generic.List[string]]::new();$types=[Collections.Generic.List[string]]::new()
+    foreach($node in @($nodes|Where-Object{$_.GetType().Name-ceq'InvocationExpressionSyntax'})){
+        $symbol=$model.GetSymbolInfo($node).Symbol
+        if($null-eq$symbol){if($node.Expression.ToString()-ceq'nameof'){$members.Add('builtin|nameof');continue};return $null}
+        $members.Add("$(if($symbol.IsStatic){'static'}else{'instance'})|$($symbol.ContainingType.ToString())|$($symbol.Name)")
+    }
+    foreach($node in @($nodes|Where-Object{$_.GetType().Name-ceq'ObjectCreationExpressionSyntax'})){$type=$model.GetTypeInfo($node).Type;if($null-eq$type){return $null};$types.Add($type.ToString())}
+    return [pscustomobject]@{Members=$members.ToArray();Types=$types.ToArray()}
+}
 function Test-TrustAnchorPasswordSourceAst {
     param([Parameter(Mandatory)][Management.Automation.Language.ScriptBlockAst]$Ast)
     $commands=@($Ast.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst]},$true))
+    if(@($commands|Where-Object{$null-eq$_.GetCommandName()}).Count-ne0){return $false}
+    $commandNames=@($commands|ForEach-Object{($_.GetCommandName()-split'\\')[-1]})
+    $expectedCommands=@'
+1|Add-Type
+10|Assert-PlatformFileIdentity
+3|Assert-TrustAnchorInteractiveHost
+3|Assert-TrustAnchorKeyPath
+1|Assert-TrustAnchorOutsideWorktree
+4|Assert-TrustAnchorPrivatePermissions
+3|Assert-TrustAnchorPublicKey
+3|Close-TrustAnchorCreatedFile
+4|Close-TrustAnchorPathEvidence
+2|ConvertTo-Json
+3|ConvertTo-TrustAnchorCanonicalXml
+1|Export-ModuleMember
+1|Export-TrustAnchorEncryptedPrivateKey
+1|Get-Command
+3|Get-TrustAnchorFingerprint
+3|Get-TrustAnchorLeaseHandle
+3|Get-TrustAnchorMetadataEvidence
+1|Get-TrustAnchorPhysicalParent
+1|git
+1|Import-Module
+1|Import-TrustAnchorEncryptedPrivateKey
+2|Import-TrustAnchorPublicPem
+1|Import-TrustAnchorPublicXml
+3|Join-Path
+8|New-TrustAnchorError
+3|New-TrustAnchorKeyFile
+2|New-TrustAnchorPathEvidence
+1|Open-PlatformDirectory
+2|Open-PlatformFile
+1|Open-TrustAnchorPrivateKey
+23|Out-Null
+2|Read-Host
+3|Read-TrustAnchorInputBytes
+2|Read-TrustAnchorPassword
+1|Remove-TrustAnchorCreatedFile
+1|Resolve-PlatformPhysicalPath
+2|Set-PlatformPermissions
+1|Set-StrictMode
+4|Split-Path
+1|Test-TrustAnchorMetadataEqual
+4|Use-TrustAnchorPassword
+2|Where-Object
+'@
+    if(-not(Test-ExactInventory $commandNames $expectedCommands)){return $false}
     $readHost=@($commands|Where-Object{$_.GetCommandName()-ceq'Read-Host'})
     if($readHost.Count-ne2){return $false}
     foreach($command in $readHost){
@@ -86,20 +221,248 @@ function Test-TrustAnchorPasswordSourceAst {
         $parameters=@($command.CommandElements|Where-Object{$_ -is [Management.Automation.Language.CommandParameterAst]}|ForEach-Object{$_.ParameterName})
         if($parameters.Count-ne1 -or $parameters[0]-cne'AsSecureString'){return $false}
     }
-    if(@($commands|Where-Object{$_.GetCommandName()-ceq'ConvertTo-SecureString'}).Count-ne0){return $false}
     $variables=@($Ast.FindAll({param($node)$node -is [Management.Automation.Language.VariableExpressionAst]},$true))
-    if(@($variables|Where-Object{$_.VariablePath.UserPath -cmatch '^env:'}).Count-ne0){return $false}
     $members=@($Ast.FindAll({param($node)$node -is [Management.Automation.Language.InvokeMemberExpressionAst]},$true))
-    foreach($member in $members){
-        $name=[string]$member.Member.Value
-        if($name -ceq'AppendChar' -or ($name -ceq'new' -and $member.Expression.Extent.Text -match '(?i)SecureString')){return $false}
-        if($name -in @('ReadAllText','ReadAllLines','ReadAllBytes','OpenText') -and $member.Extent.Text -match '(?i)password|secret'){return $false}
-    }
-    if(@($commands|Where-Object{$_.GetCommandName()-in @('Get-Content','Import-Clixml') -and $_.Extent.Text -match '(?i)password|secret'}).Count-ne0){return $false}
+    $memberNames=@($members|ForEach-Object{$kind=if($_.Static){'static'}else{'instance'};$type=if($_.Expression-is[Management.Automation.Language.TypeExpressionAst]){$_.Expression.TypeName.FullName}else{$_.Expression.StaticType.FullName};"$kind|$type|$($_.Member.Value)"})
+    $expectedMembers=@'
+1|instance|System.Object|Complete
+21|instance|System.Object|Dispose
+1|instance|System.Object|EndsWith
+2|instance|System.Object|ExportParameters
+1|instance|System.Object|ExportSubjectPublicKeyInfo
+1|instance|System.Object|Free
+2|instance|System.Object|GetBytes
+1|instance|System.Object|GetField
+1|instance|System.Object|GetType
+1|instance|System.Object|GetValue
+1|instance|System.Object|ImportParameters
+8|instance|System.Object|Invoke
+1|instance|System.Object|Read
+1|instance|System.Object|ReadAllBytes
+3|instance|System.Object|ToLowerInvariant
+1|instance|System.Object|WriteNewBytes
+1|static|byte[]|new
+1|static|char[]|new
+2|static|Convert|FromBase64String
+2|static|Convert|ToBase64String
+3|static|Convert|ToHexString
+1|static|Environment|GetEnvironmentVariable
+1|static|InvalidOperationException|new
+3|static|IO.Directory|Exists
+2|static|IO.File|Exists
+1|static|IO.File|Open
+1|static|IO.IOException|new
+1|static|IO.Path|GetFileName
+6|static|IO.Path|GetFullPath
+1|static|Management.Automation.ErrorRecord|new
+1|static|Runtime.InteropServices.GCHandle|Alloc
+1|static|Runtime.InteropServices.GCHandle|new
+1|static|Runtime.InteropServices.Marshal|Copy
+1|static|Runtime.InteropServices.Marshal|SecureStringToGlobalAllocUnicode
+1|static|Runtime.InteropServices.Marshal|ZeroFreeGlobalAllocUnicode
+8|static|Security.Cryptography.CryptographicOperations|ZeroMemory
+2|static|Security.Cryptography.RSA|Create
+3|static|Security.Cryptography.SHA256|HashData
+2|static|Security.Principal.WindowsIdentity|GetCurrent
+1|static|string|IsNullOrEmpty
+7|static|string|IsNullOrWhiteSpace
+1|static|System.Numerics.BigInteger|new
+1|static|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge|DecodePublicPem
+1|static|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge|DecodePublicXml
+1|static|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge|EffectiveUid
+1|static|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge|ExportEncryptedPem
+1|static|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge|FixedTimeEquals
+1|static|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge|ImportEncryptedPem
+1|static|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge|Zero
+1|static|SyuanTsai.AIInstructions.TrustAnchor.UnixMetadataInspector|Inspect
+1|static|SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease|AssertSafeParent
+1|static|SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease|Begin
+1|static|SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector|DeleteExact
+1|static|SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector|Inspect
+1|static|SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector|InspectMetadata
+2|static|Text.UTF8Encoding|new
+'@
+    if(-not(Test-ExactInventory $memberNames $expectedMembers)){return $false}
+    $providerPaths=@($variables|ForEach-Object{if($_.VariablePath.DriveName){"variable|$($_.VariablePath.DriveName)|$($_.VariablePath.UserPath)"}})
+    $providerPaths+=@($Ast.FindAll({param($node)$node-is[Management.Automation.Language.StringConstantExpressionAst]-or$node-is[Management.Automation.Language.ExpandableStringExpressionAst]},$true)|ForEach-Object{if($_.Value-match'^[A-Za-z][A-Za-z0-9_.-]*:'){"string|$($_.Value)"}})
+    if(-not(Test-ExactInventory $providerPaths '1|string|D:P(A;;FA;;;$sid)')){return $false}
+    $types=@($Ast.FindAll({param($node)$node-is[Management.Automation.Language.TypeExpressionAst]-or$node-is[Management.Automation.Language.TypeConstraintAst]},$true)|ForEach-Object{$_.TypeName.FullName})
+    $expectedTypes=@'
+2|bool
+5|byte[]
+5|char[]
+1|Console
+7|Convert
+2|Environment
+3|int
+11|int64
+2|IntPtr
+1|InvalidOperationException
+3|IO.Directory
+3|IO.File
+1|IO.FileAccess
+1|IO.FileMode
+1|IO.FileShare
+1|IO.IOException
+7|IO.Path
+1|Management.Automation.ErrorCategory
+1|Management.Automation.ErrorRecord
+2|Microsoft.Win32.SafeHandles.SafeFileHandle
+5|ordered
+6|pscustomobject
+1|Reflection.BindingFlags
+2|Runtime.InteropServices.GCHandle
+1|Runtime.InteropServices.GCHandleType
+3|Runtime.InteropServices.Marshal
+1|Runtime.InteropServices.SafeHandle
+1|scriptblock
+8|Security.Cryptography.CryptographicOperations
+6|Security.Cryptography.RSA
+1|Security.Cryptography.RSAParameters
+3|Security.Cryptography.SHA256
+2|Security.Principal.WindowsIdentity
+3|Security.SecureString
+29|string
+1|string[]
+2|switch
+1|System.Numerics.BigInteger
+7|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge
+1|SyuanTsai.AIInstructions.TrustAnchor.UnixMetadataInspector
+2|SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease
+3|SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector
+2|Text.UTF8Encoding
+1|type
+3|uint32
+15|uint64
+'@
+    if(-not(Test-ExactInventory $types $expectedTypes)){return $false}
     $environmentCalls=@($members|Where-Object{[string]$_.Member.Value-ceq'GetEnvironmentVariable'})
     if($environmentCalls.Count-ne1 -or (Get-TestAncestorFunctionName $environmentCalls[0])-cne'Assert-TrustAnchorInteractiveHost' -or $environmentCalls[0].Extent.Text -cne '[Environment]::GetEnvironmentVariable($name)'){return $false}
     $interactive=@($Ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq'Assert-TrustAnchorInteractiveHost'},$true))
     if($interactive.Count-ne1 -or $interactive[0].Extent.Text -cnotmatch "@\('CI','GITHUB_ACTIONS','TF_BUILD','BUILD_BUILDID','RUNNER_TEMP'\)"){return $false}
+    $csharp=Get-TrustAnchorCSharpInventory $Ast.Extent.Text;if($null-eq$csharp){return $false}
+    $expectedCSharpMembers=@'
+3|builtin|nameof
+1|instance|System.Collections.Generic.List<string>|Add
+1|instance|System.Collections.Generic.List<string>|ToArray
+1|instance|System.Enum|ToString
+1|instance|System.Formats.Asn1.Asn1Tag|HasSameClassAndValue
+1|instance|System.Formats.Asn1.AsnReader|PeekTag
+2|instance|System.Formats.Asn1.AsnReader|ReadInteger
+1|instance|System.Formats.Asn1.AsnReader|ReadNull
+4|instance|System.Formats.Asn1.AsnReader|ReadObjectIdentifier
+3|instance|System.Formats.Asn1.AsnReader|ReadOctetString
+7|instance|System.Formats.Asn1.AsnReader|ReadSequence
+8|instance|System.Formats.Asn1.AsnReader|ThrowIfNotEmpty
+2|instance|System.Guid|ToString
+9|instance|System.MemoryExtensions|AsSpan
+1|instance|System.MemoryExtensions|SequenceEqual
+3|instance|System.Range|GetOffsetAndLength
+24|instance|System.Runtime.InteropServices.SafeHandle|DangerousGetHandle
+7|instance|System.Runtime.InteropServices.SafeHandle|Dispose
+2|instance|System.Security.Cryptography.AsymmetricAlgorithm|Dispose
+1|instance|System.Security.Cryptography.AsymmetricAlgorithm|ExportEncryptedPkcs8PrivateKeyPem
+1|instance|System.Security.Cryptography.RSA|ImportFromEncryptedPem
+1|instance|System.Security.Cryptography.RSA|ImportSubjectPublicKeyInfo
+1|instance|System.Text.Encoding|GetCharCount
+1|instance|System.Text.Encoding|GetString
+1|instance|System.Text.UTF8Encoding|GetChars
+1|instance|string|ToLowerInvariant
+1|static|System.Buffers.Text.Base64|DecodeFromUtf8
+1|static|System.Convert|ToHexString
+1|static|System.Convert|TryFromBase64Chars
+2|static|System.Guid|NewGuid
+2|static|System.IO.Path|Combine
+2|static|System.Runtime.InteropServices.Marshal|AllocHGlobal
+1|static|System.Runtime.InteropServices.Marshal|Copy
+2|static|System.Runtime.InteropServices.Marshal|FreeHGlobal
+17|static|System.Runtime.InteropServices.Marshal|GetLastWin32Error
+6|static|System.Runtime.InteropServices.Marshal|PtrToStructure
+1|static|System.Runtime.InteropServices.Marshal|ReadInt16
+2|static|System.Runtime.InteropServices.Marshal|SizeOf
+2|static|System.Runtime.InteropServices.Marshal|WriteInt64
+1|static|System.Runtime.InteropServices.MemoryMarshal|AsBytes
+7|static|System.Runtime.InteropServices.RuntimeInformation|IsOSPlatform
+9|static|System.Security.Cryptography.CryptographicOperations|ZeroMemory
+1|static|System.Security.Cryptography.PemEncoding|TryFind
+2|static|System.Security.Cryptography.RSA|Create
+3|static|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge|ContainsAscii
+1|static|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge|DecodePrivatePem
+2|static|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge|EffectiveUid
+1|static|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge|getEuid
+1|static|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge|getEuidDarwin
+2|static|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge|IsAsciiWhitespace
+2|static|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge|MatchAscii
+4|static|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge|RequireAscii
+2|static|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge|RequireBase64XmlText
+1|static|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge|RequireEncryptedPrivatePemHeader
+1|static|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge|RequirePublicPemEnvelope
+1|static|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge|RequirePublicXmlStructure
+6|static|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge|RequireXmlTag
+7|static|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge|SkipAsciiWhitespace
+1|static|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge|ValidateEncryptedPemProfile
+1|static|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge|Zero
+1|static|SyuanTsai.AIInstructions.TrustAnchor.UnixMetadataInspector|fstatDarwin
+1|static|SyuanTsai.AIInstructions.TrustAnchor.UnixMetadataInspector|fstatDarwinX64
+1|static|SyuanTsai.AIInstructions.TrustAnchor.UnixMetadataInspector|fstatLinux
+7|static|SyuanTsai.AIInstructions.TrustAnchor.UnixMetadataInspector|Inspect
+4|static|SyuanTsai.AIInstructions.TrustAnchor.UnixNativeFlagSet|Current
+1|static|SyuanTsai.AIInstructions.TrustAnchor.UnixNativeFlagSet|Select
+1|static|SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease|AssertSafeParent
+1|static|SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease|fstatatDarwin
+1|static|SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease|fstatatDarwinX64
+1|static|SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease|fstatatLinux
+2|static|SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease|fsyncDarwin
+2|static|SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease|fsyncLinux
+1|static|SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease|MkdirAt
+1|static|SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease|mkdiratDarwin
+1|static|SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease|mkdiratLinux
+2|static|SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease|OpenAt
+1|static|SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease|openatDarwin
+1|static|SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease|openatLinux
+1|static|SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease|renameat2
+1|static|SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease|renameatx
+4|static|SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease|SameDirectory
+5|static|SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease|SameFile
+5|static|SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease|Stat
+3|static|SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease|unlinkatDarwin
+3|static|SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease|unlinkatLinux
+2|static|SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector|CreateFile
+1|static|SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector|GetFileBasicInformation
+2|static|SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector|GetFileInformationByHandle
+1|static|SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector|GetSecurityDescriptorControl
+1|static|SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector|GetSecurityInfo
+1|static|SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector|LocalFree
+1|static|SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector|MarkDeleteOnClose
+1|static|SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector|SetFileDispositionByHandle
+1|static|char|IsWhiteSpace
+2|static|char|ToUpperInvariant
+'@
+    if(-not(Test-ExactInventory $csharp.Members $expectedCSharpMembers)){return $false}
+    $expectedCSharpTypes=@'
+1|Microsoft.Win32.SafeHandles.SafeFileHandle
+1|nint
+3|System.ArgumentNullException
+1|System.Collections.Generic.List<string>
+18|System.ComponentModel.Win32Exception
+1|System.Formats.Asn1.AsnReader
+1|System.IO.InvalidDataException
+6|System.IO.IOException
+2|System.PlatformNotSupportedException
+1|System.ReadOnlyMemory<byte>
+2|System.ReadOnlySpan<byte>
+1|System.Security.AccessControl.RawAcl
+26|System.Security.Cryptography.CryptographicException
+1|System.Security.Cryptography.PbeParameters
+1|System.Security.Principal.SecurityIdentifier
+2|System.Text.UTF8Encoding
+7|SyuanTsai.AIInstructions.TrustAnchor.NativeMetadataEvidence
+3|SyuanTsai.AIInstructions.TrustAnchor.UnixNativeFlagSet
+1|SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease
+1|SyuanTsai.AIInstructions.TrustAnchor.WindowsAclEvidence
+1|SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector.FileDispositionInfo
+'@
+    if(-not(Test-ExactInventory $csharp.Types $expectedCSharpTypes)){return $false}
     return $true
 }
 
@@ -200,8 +563,8 @@ Describe 'PR-K1 password and public command boundary' {
     # Purpose: No public command or formal CLI may accept Password, SecureString, char[], environment-secret, or password-file input.
     It 'UnitT12_exposes_only_the_exact_CLI_parameter_allowlists' {
         @($script:Module.ExportedCommands.Values).Count|Should Be 0
-        $expected=@{'New-TrustAnchorKeyPair.ps1'=@('KeyId','PrivateKeyPath','PublicKeyXmlPath');'ConvertTo-TrustAnchorPublicKeyXml.ps1'=@('PublicKeyPemPath','OutputPath');'Get-TrustAnchorFingerprint.ps1'=@('PublicKeyXmlPath','PublicKeyPemPath','EncryptedPrivateKeyPath')}
-        foreach($name in $expected.Keys){$path=Join-Path $script:RepositoryRoot "scripts/trust-anchor/$name";$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;(@($ast.ParamBlock.Parameters|ForEach-Object{$_.Name.VariablePath.UserPath})-join'|')|Should Be ($expected[$name]-join'|');foreach($parameter in @($ast.ParamBlock.Parameters)){[string]$parameter.StaticType|Should Not Match 'SecureString|Char\[\]'}}
+        $expected=Get-TrustAnchorCliContracts
+        foreach($name in $expected.Keys){$path=Join-Path $script:RepositoryRoot "scripts/trust-anchor/$name";$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;$contract=$expected[$name];(Test-TrustAnchorCliGuardAst $ast $contract.Action $contract.CmdletBinding $contract.Parameters)|Should Be $true}
     }
 
     # Scenario: The module AST is inspected for every password acquisition and possible fallback source.
@@ -219,15 +582,16 @@ Describe 'PR-K1 trust-anchor CLI boundary' {
     # Scenario: Every CLI AST is inspected for the guard and the first delegated action.
     # Purpose: A missing guard must fail, and the guard must precede path, file, password, or RSA work.
     It 'UnitT14_allows_only_the_guard_then_one_action_in_each_CLI_module_invocation' {
-        $expected=@{'New-TrustAnchorKeyPair.ps1'='Invoke-NewTrustAnchorKeyPairAction';'ConvertTo-TrustAnchorPublicKeyXml.ps1'='Invoke-ConvertToTrustAnchorPublicKeyXmlAction';'Get-TrustAnchorFingerprint.ps1'='Invoke-GetTrustAnchorFingerprintAction'}
-        foreach($name in $expected.Keys){$path=Join-Path $script:RepositoryRoot "scripts/trust-anchor/$name";$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;(Test-TrustAnchorCliGuardAst $ast $expected[$name])|Should Be $true}
+        $expected=Get-TrustAnchorCliContracts
+        foreach($name in $expected.Keys){$path=Join-Path $script:RepositoryRoot "scripts/trust-anchor/$name";$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;$contract=$expected[$name];(Test-TrustAnchorCliGuardAst $ast $contract.Action $contract.CmdletBinding $contract.Parameters)|Should Be $true}
     }
 
     # Scenario: A synthetic CLI performs File.ReadAllText before the interactive guard.
     # Purpose: Prove the closed AST allowlist fails when any I/O is inserted ahead of the guard.
     It 'UnitT15_AST_guard_self_check_rejects_pre_guard_file_IO' {
+        $contract=(Get-TrustAnchorCliContracts)['New-TrustAnchorKeyPair.ps1']
         $source="param([string]`$PrivateKeyPath)`n`$module=Import-Module (Join-Path `$PSScriptRoot 'TrustAnchorPrivateKey.psm1') -PassThru -ErrorAction Stop`n[IO.File]::ReadAllText(`$PrivateKeyPath)`ntry { & `$module { Assert-TrustAnchorInteractiveHost; Invoke-NewTrustAnchorKeyPairAction } } catch { [Console]::Error.WriteLine(`$_.FullyQualifiedErrorId); throw }"
-        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;(Test-TrustAnchorCliGuardAst $ast 'Invoke-NewTrustAnchorKeyPairAction')|Should Be $false
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;(Test-TrustAnchorCliGuardAst $ast $contract.Action $contract.CmdletBinding $contract.Parameters)|Should Be $false
     }
 
     # Scenario: Each CI marker is set independently before the interactive guard runs.
@@ -348,8 +712,8 @@ if($IsWindows){
             try{{Invoke-TrustAnchorModule {param($p)Open-TrustAnchorPrivateKey $p} @($path)}|Should Throw 'protected DACL';(Invoke-TrustAnchorModule {$script:TrustAnchorBarrierAttempted})|Should Be $true;(Invoke-TrustAnchorModule {$script:TrustAnchorBarrierSwapped})|Should Be $false;(Invoke-TrustAnchorModule {$null-ne$script:TrustAnchorBarrierFailure})|Should Be $true}finally{Invoke-TrustAnchorModule {$script:TrustAnchorOpenBeforePermissionTestHook=$null}}
         }
 
-        # Scenario: A native fixture opens a broad-DACL file with delete sharing, completes both pathname moves, and retains the original handle.
-        # Purpose: Distinguish GetSecurityInfo(handle) evidence from the restricted replacement now visible at the pathname.
+        # Scenario: A restrictive original is retained with delete sharing while its pathname is replaced by a broad-DACL file.
+        # Purpose: Pass ACL validation through the retained handle, then fail closed only when final pathname identity drift is detected.
         It 'InterT32_delete_sharing_fixture_proves_handle_based_DACL_evidence' {
             $path=Join-Path $TestDrive 'delete-share-safe.pem';$replacement=Join-Path $TestDrive 'delete-share-broad.pem';$moved=Join-Path $TestDrive 'delete-share-safe.moved';$target=Invoke-TrustAnchorModule {param($p)Assert-TrustAnchorKeyPath $p PrivateKey} @($path);$lease=Invoke-TrustAnchorModule {param($t)New-TrustAnchorKeyFile $t ([Text.Encoding]::UTF8.GetBytes('original'))} @($target);Invoke-TrustAnchorModule {param($l)Close-TrustAnchorCreatedFile $l} @($lease);Invoke-TrustAnchorModule {param($t)Close-TrustAnchorPathEvidence $t} @($target);[IO.File]::WriteAllText($replacement,'replacement')
             Invoke-TrustAnchorModule {param($replacementPath,$movedPath)$script:TrustAnchorBarrierReplacement=$replacementPath;$script:TrustAnchorBarrierMoved=$movedPath;$script:TrustAnchorBarrierSwapped=$false;$script:TrustAnchorOpenBeforePermissionTestHook={param($openedPath,$file)$field=$file.GetType().GetField('Handle',[Reflection.BindingFlags]'Instance,NonPublic');$original=$field.GetValue($file);$deleteSharing=[SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector]::OpenReadWithDeleteSharing($openedPath);$field.SetValue($file,$deleteSharing);$original.Dispose();Move-Item -LiteralPath $openedPath -Destination $script:TrustAnchorBarrierMoved -ErrorAction Stop;Move-Item -LiteralPath $script:TrustAnchorBarrierReplacement -Destination $openedPath -ErrorAction Stop;$script:TrustAnchorBarrierSwapped=$true}} @($replacement,$moved)
@@ -423,6 +787,21 @@ if($IsWindows){
             Mock -CommandName Assert-TrustAnchorInteractiveHost -ModuleName $script:Module.Name -MockWith {};Set-TestReadHostResponses @((New-TestPassword),(New-TestPassword));Mock -CommandName Read-Host -ModuleName $script:Module.Name -MockWith {$script:TrustAnchorPasswordTestResponses.Dequeue()};$private=Join-Path $TestDrive 'hardlink-private.pem';$public=Join-Path $TestDrive 'hardlink-public.xml';Invoke-TrustAnchorModule {$script:TrustAnchorBeforePublicWriteTestHook={throw 'Injected public output failure.'};$script:TrustAnchorAfterRollbackRenameTestHook={param($rollback)$script:RollbackHardLink=$rollback.TombstonePath+'.link';New-Item -ItemType HardLink -Path $script:RollbackHardLink -Target $rollback.TombstonePath|Out-Null;$script:RollbackTombstone=$rollback.TombstonePath}}
             try{{Invoke-TrustAnchorModule {param($privatePath,$publicPath)Invoke-NewTrustAnchorKeyPairAction supervisor $privatePath $publicPath} @($private,$public)}|Should Throw 'rollback failed closed';$paths=Invoke-TrustAnchorModule {@($script:RollbackTombstone,$script:RollbackHardLink)};foreach($path in $paths){(Test-Path -LiteralPath $path)|Should Be $true}}finally{Invoke-TrustAnchorModule {$script:TrustAnchorBeforePublicWriteTestHook=$null;$script:TrustAnchorAfterRollbackRenameTestHook=$null}}
         }
+
+        # Scenario: A private output parent is group-writable without sticky protection, or world-writable with sticky protection.
+        # Purpose: Reject cross-UID entry replacement before file creation while accepting the standard sticky-directory boundary.
+        It 'InterT48_enforces_the_rollback_parent_boundary_for_<Mode>' -TestCases @(
+            @{Mode='0770';Accept=$false},
+            @{Mode='1777';Accept=$true}
+        ) {
+            param($Mode,$Accept)
+            $parent=Join-Path $TestDrive "rollback-parent-$Mode";[void][IO.Directory]::CreateDirectory($parent);chmod $Mode $parent
+            $path=Join-Path $parent 'private.pem';$target=Invoke-TrustAnchorModule {param($p)Assert-TrustAnchorKeyPath $p PrivateKey} @($path);$lease=$null
+            try{
+                if($Accept){$lease=Invoke-TrustAnchorModule {param($t)New-TrustAnchorKeyFile $t ([byte[]](1,2,3))} @($target);(Test-Path -LiteralPath $path)|Should Be $true}
+                else{{Invoke-TrustAnchorModule {param($t)New-TrustAnchorKeyFile $t ([byte[]](1,2,3))} @($target)}|Should Throw 'owner-only or sticky';(Test-Path -LiteralPath $path)|Should Be $false;@(Get-ChildItem -Force -LiteralPath $parent).Count|Should Be 0}
+            }finally{if($null-ne$lease){Invoke-TrustAnchorModule {param($l)Close-TrustAnchorCreatedFile $l} @($lease)}else{Invoke-TrustAnchorModule {param($t)Close-TrustAnchorPathEvidence $t} @($target)}}
+        }
     }
 }
 
@@ -485,6 +864,68 @@ Describe 'PR-K1 fix4 closed-boundary hardening' {
     It 'UnitT54_binds_Windows_ACL_evidence_to_the_retained_lease_handle' {
         $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($script:ModulePath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;$function=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq'Get-TrustAnchorMetadataEvidence'},$true));$function.Count|Should Be 1;$text=$function[0].Extent.Text;$text|Should Match 'WindowsAclInspector\]::Inspect\(\[Microsoft\.Win32\.SafeHandles\.SafeFileHandle\]\$handle\)';$text|Should Not Match '(?i)Get-Acl|GetNamedSecurityInfo|GetAccessControl|FileSecurity\s*\('
     }
+
+    # Scenario: Runtime-generated PKCS#8 and PKCS#1 private DER are mislabeled with PUBLIC KEY armor.
+    # Purpose: Reject non-SPKI DER while it is still held only in clearable byte arrays.
+    It 'UnitT56_rejects_<Format>_private_DER_mislabeled_as_PUBLIC_KEY' -TestCases @(
+        @{Format='PKCS8'},
+        @{Format='PKCS1'}
+    ) {
+        param($Format)
+        $rsa=[Security.Cryptography.RSA]::Create(3072);$der=$null;$bytes=$null
+        try{
+            [byte[]]$der=if($Format-ceq'PKCS8'){$rsa.ExportPkcs8PrivateKey()}else{$rsa.ExportRSAPrivateKey()}
+            $bytes=ConvertTo-TestUtf8Bytes ([Security.Cryptography.PemEncoding]::WriteString('PUBLIC KEY',$der))
+            $failure=Get-TestFailure {Invoke-TrustAnchorModule {param($value)Import-TrustAnchorPublicPem $value} @(,$bytes)}
+            $failure.FullyQualifiedErrorId|Should Match '^TrustAnchor\.UnsupportedKeyFormat'
+        }finally{if($null-ne$der){[Security.Cryptography.CryptographicOperations]::ZeroMemory($der)};if($null-ne$bytes){[Security.Cryptography.CryptographicOperations]::ZeroMemory($bytes)};$rsa.Dispose()}
+    }
+
+    # Scenario: The embedded C# decoder source is checked, then the XML decode order is synthetically reversed.
+    # Purpose: Keep every immutable string creation after byte validation and keep the PEM path string-free.
+    It 'UnitT57_closes_the_public_decoder_byte_to_string_order' {
+        $source=Get-Content -Raw -Encoding UTF8 $script:ModulePath;$match=[regex]::Match($source,"(?s)Add-Type -TypeDefinition @'\r?\n(?<csharp>.*?)\r?\n'@");$match.Success|Should Be $true;$csharp=$match.Groups['csharp'].Value
+        (Test-TrustAnchorPublicDecoderSourceOrder $csharp)|Should Be $true
+        $reversed=[regex]::Replace($csharp,'RequirePublicXmlStructure\(value\);\r?\n\s*return new System\.Text\.UTF8Encoding\(false, true\)\.GetString\(value\);','return new System.Text.UTF8Encoding(false, true).GetString(value);'+[Environment]::NewLine+'            RequirePublicXmlStructure(value);')
+        $reversed|Should Not Be $csharp;(Test-TrustAnchorPublicDecoderSourceOrder $reversed)|Should Be $false
+    }
+
+    # Scenario: The real module source is mutated with every known environment, file, deserialization, and dynamic-command password fallback.
+    # Purpose: Prove exact whole-module command/member/provider/type inventories reject additions regardless of naming or qualification tricks.
+    It 'UnitT58_password_source_inventory_rejects_every_closed_boundary_mutation' {
+        $source=Get-Content -Raw -Encoding UTF8 $script:ModulePath
+        $injections=@(
+            "function Get-Key { [Environment]::GetEnvironmentVariables()['X'] }",
+            "function Get-Key { Microsoft.PowerShell.Security\ConvertTo-SecureString 'x' -AsPlainText -Force }",
+            "function Get-Key { Get-Item Env:X }",
+            "function Get-Key { Test-Path Env:X }",
+            "function Get-Key { [Management.Automation.PSSerializer]::Deserialize('x') }",
+            'function Get-Key { param($p) Import-Clixml $p }',
+            'function Get-Key { param($p) Get-Content $p }',
+            'function Get-Key { param($p) [IO.File]::ReadAllBytes($p) }',
+            'function Get-Key { param($x) & $x }',
+            'function Get-Key { & (Get-Command Get-Date) }',
+            'function Get-Key { $env:X }'
+        )
+        foreach($injection in $injections){
+            $mutated=$source.Replace('Export-ModuleMember -Function @()',"$injection`nExport-ModuleMember -Function @()")
+            $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseInput($mutated,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
+            (Test-TrustAnchorPasswordSourceAst $ast)|Should Be $false
+        }
+    }
+
+    # Scenario: A valid wrapper gains ValidateScript file I/O, a default expression, or a transformation attribute.
+    # Purpose: Make the complete ParamBlock and every pre-body binding behavior a fixed closed allowlist.
+    It 'UnitT59_CLI_parameter_guard_rejects_every_pre_body_expression' {
+        $contract=(Get-TrustAnchorCliContracts)['New-TrustAnchorKeyPair.ps1']
+        $valid="[CmdletBinding()]`nparam([Parameter(Mandatory)][ValidateSet('humanApproval','supervisor')][string]`$KeyId,[Parameter(Mandatory)][string]`$PrivateKeyPath,[Parameter(Mandatory)][string]`$PublicKeyXmlPath)`n`$module=Import-Module (Join-Path `$PSScriptRoot 'TrustAnchorPrivateKey.psm1') -PassThru -ErrorAction Stop`ntry { & `$module {param(`$id,`$privatePath,`$publicPath) Assert-TrustAnchorInteractiveHost;Invoke-NewTrustAnchorKeyPairAction -KeyId `$id -PrivateKeyPath `$privatePath -PublicKeyXmlPath `$publicPath} `$KeyId `$PrivateKeyPath `$PublicKeyXmlPath } catch { [Console]::Error.WriteLine(`$_.FullyQualifiedErrorId); throw }"
+        $mutations=@(
+            $valid.Replace('[Parameter(Mandatory)][string]$PrivateKeyPath','[Parameter(Mandatory)][ValidateScript({ [IO.File]::ReadAllText($_); $true })][string]$PrivateKeyPath'),
+            $valid.Replace('[Parameter(Mandatory)][string]$PrivateKeyPath','[Parameter(Mandatory)][string]$PrivateKeyPath=(Get-Item Env:X).Value'),
+            $valid.Replace('[Parameter(Mandatory)][string]$PrivateKeyPath','[Parameter(Mandatory)][FixtureArgumentTransformation()][string]$PrivateKeyPath')
+        )
+        foreach($source in $mutations){$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;(Test-TrustAnchorCliGuardAst $ast $contract.Action $contract.CmdletBinding $contract.Parameters)|Should Be $false}
+    }
 }
 
 Describe 'PR-K1 trust-anchor regression inventory' {
@@ -494,7 +935,7 @@ Describe 'PR-K1 trust-anchor regression inventory' {
     # Purpose: Every platform-specific It must live below one explicit native Windows/Unix conditional without committed keys or skips.
     It 'UnitT55_registers_the_fixed_native_inventory_under_the_correct_AST_clause' {
         $windows=@('InterT31_share_lock_explicitly_prevents_pathname_replacement','InterT32_delete_sharing_fixture_proves_handle_based_DACL_evidence','InterT33_rejects_a_private_key_leaf_reparse_point','InterT34_formal_creation_has_an_independently_verified_restrictive_DACL')
-        $unix=@('InterT40_accepts_owner_only_mode_0400','InterT41_rejects_the_original_broad_mode_after_pathname_replacement','InterT42_rejects_metadata_change_during_read','InterT43_rejects_a_private_key_leaf_symbolic_link','InterT44_formal_creation_has_an_independently_verified_owner_only_mode','InterT45_rejects_post_read_identity_replacement_when_both_files_are_restrictive','InterT46_rollback_fails_closed_when_the_tombstone_is_replaced_before_unlink','InterT47_rollback_fails_closed_when_a_hard_link_appears_before_unlink')
+        $unix=@('InterT40_accepts_owner_only_mode_0400','InterT41_rejects_the_original_broad_mode_after_pathname_replacement','InterT42_rejects_metadata_change_during_read','InterT43_rejects_a_private_key_leaf_symbolic_link','InterT44_formal_creation_has_an_independently_verified_owner_only_mode','InterT45_rejects_post_read_identity_replacement_when_both_files_are_restrictive','InterT46_rollback_fails_closed_when_the_tombstone_is_replaced_before_unlink','InterT47_rollback_fails_closed_when_a_hard_link_appears_before_unlink','InterT48_enforces_the_rollback_parent_boundary_for_<Mode>')
         $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($PSCommandPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;$conditional=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.IfStatementAst] -and $node.Extent.Text -match 'PR-K1 Windows native handle safety' -and $node.Extent.Text -match 'PR-K1 Unix native handle safety'},$true));$conditional.Count|Should Be 1;$conditional[0].Clauses[0].Item1.Extent.Text|Should Match '\$IsWindows';$windowsExtent=$conditional[0].Clauses[0].Item2.Extent;$unixExtent=$conditional[0].ElseClause.Extent;$nativeIts=@($conditional[0].FindAll({param($node)$node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName()-ceq'It'},$true));$actualWindows=@($nativeIts|Where-Object{$_.Extent.StartOffset-ge$windowsExtent.StartOffset-and$_.Extent.EndOffset-le$windowsExtent.EndOffset}|ForEach-Object{[string]$_.CommandElements[1].Value});$actualUnix=@($nativeIts|Where-Object{$_.Extent.StartOffset-ge$unixExtent.StartOffset-and$_.Extent.EndOffset-le$unixExtent.EndOffset}|ForEach-Object{[string]$_.CommandElements[1].Value});($actualWindows-join'|')|Should Be ($windows-join'|');($actualUnix-join'|')|Should Be ($unix-join'|');@($nativeIts).Count|Should Be ($windows.Count+$unix.Count)
         $allIts=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName()-ceq'It'},$true));foreach($name in @($windows+$unix)){$matches=@($allIts|Where-Object{[string]$_.CommandElements[1].Value-ceq$name});$matches.Count|Should Be 1;($matches[0].Extent.StartOffset-ge$conditional[0].Extent.StartOffset-and$matches[0].Extent.EndOffset-le$conditional[0].Extent.EndOffset)|Should Be $true};$numbers=@($allIts|ForEach-Object{if([string]$_.CommandElements[1].Value-match'^(?:Unit|Inter)T(\d{2})_'){$Matches[1]}});@($numbers|Group-Object|Where-Object Count-gt1).Count|Should Be 0
         $source=Get-Content -Raw -Encoding UTF8 $PSCommandPath;$source|Should Match 'RSA\]::Create\(3072\)';$source|Should Not Match 'BEGIN (RSA )?PRIVATE KEY';(Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'docs/standards/core-test-skip-inventory.json'))|Should Not Match 'trust-anchor-tools'
