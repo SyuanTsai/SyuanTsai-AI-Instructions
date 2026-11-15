@@ -6748,7 +6748,7 @@ Describe 'SYP481 exact-fingerprint exception authority' {
 Describe 'P11-pin consumer authority Standard contract' {
     # Scenario: Standard replaces an unconditional archive tuple with verified Git transport and a single consumer pin.
     # Purpose: Bind conformance to commit/tree/inventory while requiring archive hash only when archive transport is used.
-    It 'UnitT10_requires_verified_transport_and_the_single_consumer_pin' {
+    It 'UnitT980_requires_verified_transport_and_the_single_consumer_pin' {
         $root=Split-Path -Parent $PSScriptRoot
         $standard=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/skill-repository-standard.md')
         foreach($required in @('immutable commit／tree checkout','只有實際使用 archive 時','config/authority-pin.json','consumer-authority-pin-v1.schema.json','git merge-base --is-ancestor','MUST NOT** 使用列舉式 tuple allowlist','retiredInterfaces')){$standard.Contains($required)|Should Be $true}
@@ -6756,7 +6756,7 @@ Describe 'P11-pin consumer authority Standard contract' {
     }
     # Scenario: Source CI changes from protected local readers to the authority consumer gate.
     # Purpose: Preserve template bytes, prepare-only credentials, App-sourced contexts, and strict remote alignment.
-    It 'UnitT20_requires_the_consumer_gate_workflow_and_remote_boundary' {
+    It 'UnitT981_requires_the_consumer_gate_workflow_and_remote_boundary' {
         $root=Split-Path -Parent $PSScriptRoot
         $standard=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/skill-repository-standard.md')
         foreach($required in @('scripts/consumer/Invoke-ConsumerSourceGate.ps1','repositoryChecks','requiredRepositoryChecks','base bootstrap 驗證過的 authority','pull_request_target','strict_required_status_checks_policy=true','event.before','MUST NOT** 使用 App 或 environment','同一 job 內的 candidate 竄改')){$standard.Contains($required)|Should Be $true}
@@ -6764,7 +6764,7 @@ Describe 'P11-pin consumer authority Standard contract' {
     }
     # Scenario: Internal use and migration text consume the verified authority checkout.
     # Purpose: Prevent fixed member tuples and stale legacy inventories from surviving the pin transition.
-    It 'UnitT30_requires_gate_computed_authority_files_and_exact_conversion_inventory' {
+    It 'UnitT982_requires_gate_computed_authority_files_and_exact_conversion_inventory' {
         $root=Split-Path -Parent $PSScriptRoot
         $standard=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/skill-repository-standard.md')
         foreach($required in @('ExpectedAuthorityFiles` 必須由 gate 從該已驗證 checkout 計算','### 18.2 Consumer gate conversion','inventoryCommit','inventoryTree','#consumer-repository-conversion','MUST NOT** 宣稱 consumer merge enforcement 已生效','Darktide')){$standard.Contains($required)|Should Be $true}

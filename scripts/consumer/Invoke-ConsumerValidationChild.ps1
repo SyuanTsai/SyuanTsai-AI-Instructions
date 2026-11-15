@@ -64,7 +64,12 @@ function Get-InventoryPaths {
     $root = [IO.Path]::GetFullPath($SkillRoot).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
     $paths = @(
         Get-ChildItem -LiteralPath $root -Recurse -File -Force |
-            ForEach-Object { $_.FullName.Substring($root.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar).Replace([IO.Path]::DirectorySeparatorChar, '/') }
+            ForEach-Object {
+                $_.FullName.Substring($root.Length).TrimStart(
+                    [IO.Path]::DirectorySeparatorChar,
+                    [IO.Path]::AltDirectorySeparatorChar
+                ).Replace([IO.Path]::DirectorySeparatorChar, '/')
+            }
     )
     [Array]::Sort($paths, [StringComparer]::Ordinal)
     if ($paths.Count -eq 0) { throw "Skill inventory is empty: $SkillRoot" }
@@ -102,20 +107,34 @@ function New-Finding {
     param([Parameter(Mandatory = $true)] $Issue, [Parameter(Mandatory = $true)][string] $SkillId, [Parameter(Mandatory = $true)][string] $Stage)
     $severity = [string](Get-Property -Object $Issue -Name 'severity' -Context "$Stage issue").ToLowerInvariant()
     $severity = switch ($severity) {
-        'critical' { 'critical'; break }
-        'high' { 'high'; break }
-        'medium' { 'medium'; break }
-        'low' { 'low'; break }
-        'informational' { 'informational'; break }
-        'info' { 'informational'; break }
+        'critical' { 'critical'
+         break }
+        'high' { 'high'
+         break }
+        'medium' { 'medium'
+         break }
+        'low' { 'low'
+         break }
+        'informational' { 'informational'
+         break }
+        'info' { 'informational'
+         break }
         default { throw "$Stage returned unsupported severity '$severity' for '$SkillId'." }
     }
     $issueJson = $Issue | ConvertTo-Json -Depth 30 -Compress
-    $path = if ($null -ne $Issue.PSObject.Properties['file']) { [string]$Issue.file } elseif ($null -ne $Issue.PSObject.Properties['path']) { [string]$Issue.path } else { '' }
+    $path = if ($null -ne $Issue.PSObject.Properties['file']) {
+        [string]$Issue.file
+    } elseif ($null -ne $Issue.PSObject.Properties['path']) {
+        [string]$Issue.path
+    } else { '' }
     return [ordered]@{
         severity = $severity
         fingerprint = Get-TextSha256 -Text $issueJson
-        ruleId = if ($null -ne $Issue.PSObject.Properties['rule_id']) { [string]$Issue.rule_id } elseif ($null -ne $Issue.PSObject.Properties['ruleId']) { [string]$Issue.ruleId } else { $Stage }
+        ruleId = if ($null -ne $Issue.PSObject.Properties['rule_id']) {
+            [string]$Issue.rule_id
+        } elseif ($null -ne $Issue.PSObject.Properties['ruleId']) {
+            [string]$Issue.ruleId
+        } else { $Stage }
         message = if ($null -ne $Issue.PSObject.Properties['message']) { [string]$Issue.message } else { $issueJson }
         path = $path
         skillId = $SkillId
@@ -179,7 +198,8 @@ function Invoke-NativeJson {
     }
 }
 function Assert-SkillValidatorReport {
-    param([Parameter(Mandatory = $true)] $Report, [Parameter(Mandatory = $true)][string] $SkillRoot, [Parameter(Mandatory = $true)][string[]] $Inventory, [Parameter(Mandatory = $true)][string] $SkillId)
+    param([Parameter(Mandatory = $true)] $Report, [Parameter(Mandatory = $true)][string] $SkillRoot, [Parameter(Mandatory = $true)][string[]] `
+        $Inventory, [Parameter(Mandatory = $true)][string] $SkillId)
     $results = @(Assert-StandardValidationSkillValidatorReport -Report $Report -SkillRoot $SkillRoot -SkillId $SkillId)
     $findings = @()
     foreach ($result in $results) {
@@ -188,13 +208,19 @@ function Assert-SkillValidatorReport {
             [void](Resolve-ReportedFilePath -Value $result.file -SkillRoot $SkillRoot -ExpectedPaths $Inventory -Context 'skill-validator result file')
         }
         if ($level -eq 'info') {
-            $findings += [ordered]@{ severity = 'informational'; fingerprint = Get-TextSha256 -Text ($result | ConvertTo-Json -Depth 20 -Compress); ruleId = [string]$result.category; message = [string]$result.message; path = if ($null -ne $result.PSObject.Properties['file']) { [string]$result.file } else { '' }; skillId = $SkillId }
+            $findings += [ordered]@{ severity = 'informational'
+             fingerprint = Get-TextSha256 -Text ($result | ConvertTo-Json -Depth 20 -Compress)
+             ruleId = [string]$result.category
+             message = [string]$result.message
+             path = if ($null -ne $result.PSObject.Properties['file']) { [string]$result.file } else { '' }
+             skillId = $SkillId }
         }
     }
     return ,$findings
 }
 function Assert-SkillToolsReport {
-    param([Parameter(Mandatory = $true)] $Report, [Parameter(Mandatory = $true)][string] $SkillRoot, [Parameter(Mandatory = $true)][string[]] $Inventory, [Parameter(Mandatory = $true)][string] $SkillId)
+    param([Parameter(Mandatory = $true)] $Report, [Parameter(Mandatory = $true)][string] $SkillRoot, [Parameter(Mandatory = $true)][string[]] `
+        $Inventory, [Parameter(Mandatory = $true)][string] $SkillId)
     $version = [string](Get-Property -Object $Report -Name 'version' -Context 'skill-tools SARIF')
     $runs = @(Get-Property -Object $Report -Name 'runs' -Context 'skill-tools SARIF')
     if ($version -cne '2.1.0' -or $runs.Count -ne 1) { throw "skill-tools did not produce SARIF 2.1.0 for '$SkillId'." }
@@ -211,26 +237,35 @@ function Assert-SkillToolsReport {
         $ruleId = [string](Get-Property -Object $result -Name 'ruleId' -Context 'skill-tools SARIF result')
         if (-not $ruleById.ContainsKey($ruleId)) { throw "skill-tools SARIF references an unknown rule for '$SkillId'." }
         $level = if ($null -ne $result.PSObject.Properties['level']) { [string]$result.level } else {
-            [string](Get-Property -Object (Get-Property -Object $ruleById[$ruleId] -Name 'defaultConfiguration' -Context 'skill-tools SARIF rule') -Name 'level' -Context 'skill-tools SARIF rule default')
+            [string](Get-Property -Object (Get-Property -Object $ruleById[$ruleId] -Name 'defaultConfiguration' -Context `
+                'skill-tools SARIF rule') -Name 'level' -Context 'skill-tools SARIF rule default')
         }
         if ($level -notin @('none', 'note', 'warning', 'error')) { throw "skill-tools SARIF level is malformed for '$SkillId'." }
         if ($level -in @('warning', 'error')) { throw "skill-tools SARIF contains a blocking result for '$SkillId'." }
         $message = Get-Property -Object $result -Name 'message' -Context 'skill-tools SARIF result'
         $locations = @(Get-Property -Object $result -Name 'locations' -Context 'skill-tools SARIF result')
-        if ([string]::IsNullOrWhiteSpace([string](Get-Property -Object $message -Name 'text' -Context 'skill-tools SARIF message')) -or $locations.Count -eq 0) { throw "skill-tools SARIF lacks candidate-bound evidence for '$SkillId'." }
+        if ([string]::IsNullOrWhiteSpace([string](Get-Property -Object $message -Name 'text' -Context 'skill-tools SARIF message')) -or `
+            $locations.Count -eq 0) { throw "skill-tools SARIF lacks candidate-bound evidence for '$SkillId'." }
         foreach ($location in $locations) {
             $physical = Get-Property -Object $location -Name 'physicalLocation' -Context 'skill-tools SARIF location'
             $artifact = Get-Property -Object $physical -Name 'artifactLocation' -Context 'skill-tools SARIF physical location'
-            [void](Resolve-ReportedFilePath -Value (Get-Property -Object $artifact -Name 'uri' -Context 'skill-tools SARIF artifact location') -SkillRoot $SkillRoot -ExpectedPaths $Inventory -Context 'skill-tools SARIF artifact location')
+            [void](Resolve-ReportedFilePath -Value (Get-Property -Object $artifact -Name 'uri' -Context 'skill-tools SARIF artifact location') `
+                -SkillRoot $SkillRoot -ExpectedPaths $Inventory -Context 'skill-tools SARIF artifact location')
         }
         if ($level -eq 'note') {
-            $findings += [ordered]@{ severity = 'informational'; fingerprint = Get-TextSha256 -Text ($result | ConvertTo-Json -Depth 20 -Compress); ruleId = $ruleId; message = [string]$message.text; path = ''; skillId = $SkillId }
+            $findings += [ordered]@{ severity = 'informational'
+             fingerprint = Get-TextSha256 -Text ($result | ConvertTo-Json -Depth 20 -Compress)
+             ruleId = $ruleId
+             message = [string]$message.text
+             path = ''
+             skillId = $SkillId }
         }
     }
     return ,$findings
 }
 function Assert-SkillSpectorReport {
-    param([Parameter(Mandatory = $true)] $Report, [Parameter(Mandatory = $true)][string] $SkillRoot, [Parameter(Mandatory = $true)][string] $SkillId, [Parameter(Mandatory = $true)][string[]] $Inventory)
+    param([Parameter(Mandatory = $true)] $Report, [Parameter(Mandatory = $true)][string] $SkillRoot, [Parameter(Mandatory = $true)][string] `
+        $SkillId, [Parameter(Mandatory = $true)][string[]] $Inventory)
     $execution = Get-Property -Object $Report -Name 'execution_successful' -Context 'SkillSpector report'
     $completeness = Get-Property -Object $Report -Name 'analysis_completeness' -Context 'SkillSpector report'
     if ($execution -isnot [bool] -or -not $execution -or
@@ -243,7 +278,8 @@ function Assert-SkillSpectorReport {
         throw "SkillSpector did not prove complete static analysis for '$SkillId'."
     }
     foreach ($name in @('ledger_exceptions', 'scope_exclusions', 'limitations')) {
-        if (@(Get-Property -Object $completeness -Name $name -Context 'SkillSpector completeness').Count -ne 0) { throw "SkillSpector reported incomplete '$name' evidence for '$SkillId'." }
+        if (@(Get-Property -Object $completeness -Name $name -Context 'SkillSpector completeness').Count -ne 0) { throw `
+            "SkillSpector reported incomplete '$name' evidence for '$SkillId'." }
     }
     $skill = Get-Property -Object $Report -Name 'skill' -Context 'SkillSpector report'
     if ([string](Get-Property -Object $skill -Name 'name' -Context 'SkillSpector skill identity') -cne $SkillId -or
@@ -297,34 +333,54 @@ try {
 
     switch ($Mode) {
         'package-adapter' {
-            Assert-FileIdentity -Path ([string]$toolchain.upstreamAdapterValidatorPath) -Sha256 ([string]$toolchain.upstreamAdapterValidatorSha256) -Context 'upstream adapter validator'
-            Assert-FileIdentity -Path ([string]$toolchain.upstreamPolicyPath) -Sha256 ([string]$toolchain.upstreamPolicySha256) -Context 'upstream adapter policy'
+            Assert-FileIdentity -Path ([string]$toolchain.upstreamAdapterValidatorPath) `
+                -Sha256 ([string]$toolchain.upstreamAdapterValidatorSha256) `
+                -Context 'upstream adapter validator'
+            Assert-FileIdentity -Path ([string]$toolchain.upstreamPolicyPath) -Sha256 ([string]$toolchain.upstreamPolicySha256) -Context `
+                'upstream adapter policy'
             $reportPath = Join-Path (Get-Location) 'upstream-adapter-report.json'
-            & ([string]$toolchain.upstreamAdapterValidatorPath) -PackageRoot $candidateRoot -PolicyPath ([string]$toolchain.upstreamPolicyPath) -SourceRepository $SourceRepository -SourceRevision $SourceRevision -ArchiveSha256 $ArchiveSha256 -OutputPath $reportPath | Out-Null
+            & ([string]$toolchain.upstreamAdapterValidatorPath) -PackageRoot $candidateRoot -PolicyPath ([string]$toolchain.upstreamPolicyPath) `
+                -SourceRepository $SourceRepository -SourceRevision $SourceRevision -ArchiveSha256 $ArchiveSha256 -OutputPath $reportPath | Out-Null
             $report = Read-Json -Path $reportPath -Context 'upstream adapter report'
             $status = [string](Get-Property -Object $report -Name 'status' -Context 'upstream adapter report')
             $decision = [string](Get-Property -Object $report -Name 'decision' -Context 'upstream adapter report')
-            if (($status -eq 'passed' -and $decision -ne 'PASS') -or ($status -eq 'not-applicable' -and $decision -ne 'NOT_APPLICABLE') -or $status -notin @('passed', 'not-applicable')) { throw 'Upstream adapter report did not pass or prove not-applicable.' }
-            New-Envelope -ActiveSkills $activeSkills -Additional @{ adapterStatus = $status; adapterSurfaces = @($report.surfaces); semanticRequired = $false }
+            if (($status -eq 'passed' -and $decision -ne 'PASS') -or ($status -eq 'not-applicable' -and $decision -ne 'NOT_APPLICABLE') -or `
+                $status -notin @('passed', 'not-applicable')) { throw 'Upstream adapter report did not pass or prove not-applicable.' }
+            New-Envelope -ActiveSkills $activeSkills -Additional @{ adapterStatus = $status
+             adapterSurfaces = @($report.surfaces)
+             semanticRequired = $false }
         }
         'skill-validator' {
             $skillId = [string]$env:STANDARD_VALIDATION_SKILL_ID
             $skillRoot = Get-SkillRoot -SkillId $skillId
             $inventory = Get-InventoryPaths -SkillRoot $skillRoot
-            Assert-FileIdentity -Path ([string]$toolchain.skillValidatorPath) -Sha256 ([string]$toolchain.skillValidatorSha256) -Context 'skill-validator executable'
-            $report = Invoke-NativeJson -Command ([string]$toolchain.skillValidatorPath) -Arguments @('-o', 'json', 'validate', 'structure', '--allow-dirs=agents', $skillRoot) -Context "skill-validator '$skillId'"
+            Assert-FileIdentity -Path ([string]$toolchain.skillValidatorPath) -Sha256 ([string]$toolchain.skillValidatorSha256) -Context `
+                'skill-validator executable'
+            $report = Invoke-NativeJson -Command ([string]$toolchain.skillValidatorPath) -Arguments @('-o', 'json', 'validate', 'structure', `
+                '--allow-dirs=agents', $skillRoot) -Context "skill-validator '$skillId'"
             $findings = Assert-SkillValidatorReport -Report $report -SkillRoot $skillRoot -Inventory $inventory -SkillId $skillId
-            New-Envelope -ActiveSkills $activeSkills -Findings $findings -Additional @{ skillId = $skillId; skillInventorySha256 = [string]$env:STANDARD_VALIDATION_SKILL_INVENTORY_SHA256; semanticRequired = $false }
+            New-Envelope -ActiveSkills $activeSkills -Findings $findings -Additional @{ skillId = $skillId
+             skillInventorySha256 = [string]$env:STANDARD_VALIDATION_SKILL_INVENTORY_SHA256
+             semanticRequired = $false }
         }
         'skill-tools' {
             $skillId = [string]$env:STANDARD_VALIDATION_SKILL_ID
             $skillRoot = Get-SkillRoot -SkillId $skillId
             $inventory = Get-InventoryPaths -SkillRoot $skillRoot
-            Assert-FileIdentity -Path ([string]$toolchain.skillToolsNodePath) -Sha256 ([string]$toolchain.skillToolsNodeSha256) -Context 'skill-tools Node runtime'
-            Assert-FileIdentity -Path ([string]$toolchain.skillToolsEntryPointPath) -Sha256 ([string]$toolchain.skillToolsEntryPointSha256) -Context 'skill-tools entry point'
-            $report = Invoke-NativeJson -Command ([string]$toolchain.skillToolsNodePath) -Arguments @([string]$toolchain.skillToolsEntryPointPath, 'check', $skillRoot, '--format', 'sarif', '--fail-on', 'warning', '--min-score', '91') -Context "skill-tools '$skillId'"
+            Assert-FileIdentity -Path ([string]$toolchain.skillToolsNodePath) -Sha256 ([string]$toolchain.skillToolsNodeSha256) -Context `
+                'skill-tools Node runtime'
+            Assert-FileIdentity -Path ([string]$toolchain.skillToolsEntryPointPath) -Sha256 ([string]$toolchain.skillToolsEntryPointSha256) `
+                -Context 'skill-tools entry point'
+            $arguments = @(
+                [string]$toolchain.skillToolsEntryPointPath,
+                'check', $skillRoot, '--format', 'sarif', '--fail-on', 'warning', '--min-score', '91'
+            )
+            $report = Invoke-NativeJson -Command ([string]$toolchain.skillToolsNodePath) `
+                -Arguments $arguments -Context "skill-tools '$skillId'"
             $findings = Assert-SkillToolsReport -Report $report -SkillRoot $skillRoot -Inventory $inventory -SkillId $skillId
-            New-Envelope -ActiveSkills $activeSkills -Findings $findings -Additional @{ skillId = $skillId; skillInventorySha256 = [string]$env:STANDARD_VALIDATION_SKILL_INVENTORY_SHA256; semanticRequired = $false }
+            New-Envelope -ActiveSkills $activeSkills -Findings $findings -Additional @{ skillId = $skillId
+             skillInventorySha256 = [string]$env:STANDARD_VALIDATION_SKILL_INVENTORY_SHA256
+             semanticRequired = $false }
         }
         'static' {
             Assert-FileIdentity -Path ([string]$toolchain.skillSpectorPath) -Sha256 ([string]$toolchain.skillSpectorSha256) -Context 'SkillSpector executable'
@@ -340,10 +396,14 @@ try {
                 $nativeArguments = @('scan', $skillRoot, '--no-llm', '--format', 'json')
                 & ([string]$toolchain.skillSpectorPath) @nativeArguments 1> $reportPath 2> $staticStderrPath
                 $nativeExit = $LASTEXITCODE
-                $staticStderr = if (Test-Path -LiteralPath $staticStderrPath -PathType Leaf) { [IO.File]::ReadAllText($staticStderrPath) } else { [string]::Empty }
-                if (-not [string]::IsNullOrEmpty($staticStderr) -and $staticStderr.Length -gt 4096) { $staticStderr = $staticStderr.Substring(0, 4096) + '[truncated]' }
+                $staticStderr = if (Test-Path -LiteralPath $staticStderrPath -PathType Leaf) { [IO.File]::ReadAllText($staticStderrPath) } else `
+                    { [string]::Empty }
+                if (-not [string]::IsNullOrEmpty($staticStderr) -and $staticStderr.Length -gt 4096) {
+                    $staticStderr = $staticStderr.Substring(0, 4096) + '[truncated]'
+                }
                 $staticStderrDiagnostic = if ([string]::IsNullOrWhiteSpace($staticStderr)) { '' } else { " SkillSpector stderr: $staticStderr" }
-                Add-NativeReport -Command ([string]$toolchain.skillSpectorPath) -Arguments $nativeArguments -ExitCode $nativeExit -Path $reportPath -SkillId $skillId
+                Add-NativeReport -Command ([string]$toolchain.skillSpectorPath) -Arguments $nativeArguments -ExitCode $nativeExit -Path `
+                    $reportPath -SkillId $skillId
                 if ($nativeExit -ne 0) { throw "SkillSpector returned exit code $nativeExit for '$skillId'.$staticStderrDiagnostic" }
                 try {
                     $report = Read-Json -Path $reportPath -Context "SkillSpector report for '$skillId'"
@@ -354,7 +414,9 @@ try {
                 $findings += Assert-SkillSpectorReport -Report $report -SkillRoot $skillRoot -SkillId $skillId -Inventory $inventory
             }
             $semantic = ($SemanticRequired -ceq 'true') -or $findings.Count -gt 0
-            New-Envelope -ActiveSkills $activeSkills -Findings $findings -Additional @{ scannerIdentity = 'SkillSpector'; analyzerCompleteness = 'complete'; semanticRequired = $semantic }
+            New-Envelope -ActiveSkills $activeSkills -Findings $findings -Additional @{ scannerIdentity = 'SkillSpector'
+             analyzerCompleteness = 'complete'
+             semanticRequired = $semantic }
         }
     }
 }

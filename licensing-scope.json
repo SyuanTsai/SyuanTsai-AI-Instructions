@@ -1634,6 +1634,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/consumer/ConsumerManifestClosure.psm1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/consumer/Invoke-ConsumerRepositoryCheck.ps1",
       "license": "Apache-2.0"
     },
@@ -1643,6 +1647,10 @@
     },
     {
       "path": "scripts/consumer/Invoke-ConsumerValidationChild.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/consumer/Test-ConsumerManifestClosure.ps1",
       "license": "Apache-2.0"
     },
     {

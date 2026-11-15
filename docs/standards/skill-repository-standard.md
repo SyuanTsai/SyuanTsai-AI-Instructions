@@ -1001,7 +1001,7 @@ Install **MUST**：
 
 Repository 要宣稱 Standard v1 conformant，**MUST** 證明：
 
-1. immutable authority snapshot repository/commit/bundle hash/file inventory；
+1. immutable authority snapshot repository、commit、tree 與 file inventory；只有實際採用 archive transport 時，才另外要求 archive SHA-256；
 2. source/package/schema-v2 inventory contract；
 3. AI 中立的 `SKILL.md` 與存在時的 `agents/openai.yaml` metadata contract、三 AI projection/instructions 一致性；
 4. canonical lifecycle stage ordering；
@@ -1057,7 +1057,13 @@ Tracking: `SYP-353`（三平台 CI 範本）、`SYP-354`（installer 跨平台�
 
 每個 source repository **MUST** 以一個轉換 PR 採用 `consumer/workflows/consumer-gate-transition.yml` 與 bootstrap 的 transition mode。這個一次性 PR 由 PR 自帶程式碼決定檢查，因此人工 review **MUST** 核對三個模板檔逐 byte 等於 pin 所指 authority 的模板，並核對 pin 位於官方 `main`；這項核對 **MUST NOT** 以 ruleset bypass 取代。轉換 PR 的 base **MUST** 精確等於 `consumer/legacy-migration.json` 中該 repository 的 `inventoryCommit` 與 `inventoryTree`；consumer main 若已前進，**MUST** 先以 authority PR 重新產生 manifest，不得放寬比對。
 
-完整轉換順序固定記錄於 [`consumer/README.md`](../../consumer/README.md#consumer-repository-conversion)，包括盤點基準重試、transition push skip、清理 PR、App required-context 回報確認與 ruleset 對齊。完成這些遠端步驟前 **MUST NOT** 宣稱 consumer merge enforcement 已生效。`consumer/legacy-migration.json` 標為 deferred 的 Darktide 在可攜性完成前不受本轉換要求約束。
+Authority manifest 中每個 repository entry **MUST** 通過 authority 發布的 manifest 封閉檢查才有效；轉換 gate **MUST** 依序檢查 inventory tree 與轉換 candidate tree，任一階段失敗即回 FAILED。兩階段使用的 manifest 與工具 **MUST** 都取自 pin 指向的 authority commit，**MUST NOT** 從 candidate 讀取。轉換時 split 來源 **MUST** 已不存在；每個 `update-tests` 檔 **MUST** 符合 manifest 宣告的 `expectedOutcome`（`delete` 或 `rewrite`）。
+
+在固定文件 allowlist 以外的所有可解碼文字檔中，legacy 目標的完整路徑 token（包括 authority 明列的 PowerShell 常數折疊結果）**MUST** 判定為失敗，除非 manifest 豁免綁定 exact Git blob OID、行、欄、`occurrenceOrdinal` 與目標路徑。豁免 **MUST** 只處理誤報並記錄理由；轉換時修改過的檔案 **MUST NOT** 套用舊豁免。同一 PowerShell statement 若有路徑運算元本身未產生 legacy 命中，且折疊結果含 `<var>` 或不在封閉折疊清單而無法折疊，該 statement 的豁免 **MUST** 無效；cast、method call 等未列形式都屬無法折疊。路徑消費點 **MUST** 使用 authority 的固定 cmdlet／alias／operand table；參數名稱比較不分大小寫，但只有表中完整 canonical 名稱可接受，縮寫、parameter alias、splatting 或其他未列名稱 **MUST** fail closed。`dynamic-reference` advisory **MUST** 由同一張表衍生，包括 `Set-Content`、`Out-File`、`Move-Item` 及表中 alias。文件提及、完全動態引用與二進位檔只列 advisory。
+
+封閉檢查是正確性檢查，不是信任邊界；信任邊界來自 pinned authority 與憑證隔離。它無法證明動態引用不依賴 legacy 目標，因此轉換 PR **MUST** 在轉換後 candidate tree 上於 Windows、Linux、macOS 實跑全部 required checks，提供行為層偵測但不得宣稱已證明不存在依賴。指向同路徑 `expectedOutcome: rewrite` 檔案的動態依賴或未執行分支仍可能漏失；失敗時 **MUST** 以 authority manifest-only PR 修正處置，**MUST NOT** 放寬檢查。
+
+完整轉換順序固定記錄於 [`consumer/README.md`](../../consumer/README.md#consumer-repository-conversion)，包括盤點基準重試、transition push skip、清理 PR、App required-context 回報確認與 ruleset 對齊。完成這些遠端步驟前 **MUST NOT** 宣稱 consumer merge enforcement 已生效。轉換順序為 Knowledge Content → Code Collaboration → General → Atlassian → Darktide。`consumer/legacy-migration.json` 將 Darktide 標為 `pending-prerequisites` 並列出精確 `prerequisites`；在三平台可攜前提完成、且 authority 以 manifest-only PR 重新盤點並改為 `ready` 前，gate **MUST** 對 Darktide 轉換回 BLOCKED，並指向 [`consumer/README.md`](../../consumer/README.md#darktide-轉換前提)。
 
 ## 19. Standard change contract
 

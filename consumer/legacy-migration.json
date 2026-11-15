@@ -68,32 +68,38 @@
         {
           "path": "tests/CanonicalValidation.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/CommonToolAuthoritySupport.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/CommonToolAuthorityTransport.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/CommonToolReportIntegration.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/CorePesterIntegrity.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/CorePesterProgress.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/EnvironmentAuthorizedSql.Tests.ps1",
@@ -102,8 +108,9 @@
         },
         {
           "path": "tests/GitBlobReader.Tests.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite this retained test or support file for the consumer layout; it contains a literal dependency on a removed legacy path.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/HandoffArchive.Tests.ps1",
@@ -132,13 +139,15 @@
         },
         {
           "path": "tests/OfflineSemanticConsumer.Tests.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite this retained test or support file for the consumer layout; it contains a literal dependency on a removed legacy path.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/RepositoryPesterEnvelope.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/ReviewAgentSkills.Tests.ps1",
@@ -147,23 +156,27 @@
         },
         {
           "path": "tests/SemanticBridgeV2Consumer.Tests.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite this retained test or support file for the consumer layout; it contains a literal dependency on a removed legacy path.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/SourceToolAllocation.Tests.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite this retained test or support file for the consumer layout; it contains a literal dependency on a removed legacy path.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/SourceToolRoots.Tests.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite this retained test or support file for the consumer layout; it contains a literal dependency on a removed legacy path.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/StandardV1Conformance.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/Test-SkillGeneral.Tests.ps1",
@@ -262,7 +275,7 @@
         {
           "id": "repository-shared-references",
           "kind": "general",
-          "path": "scripts/Test-SharedReferences.ps1"
+          "path": "scripts/Test-AtlassianSharedReferences.ps1"
         },
         {
           "id": "repository-pester",
@@ -414,8 +427,9 @@
         },
         {
           "path": "scripts/Test-SharedReferences.ps1",
-          "disposition": "retain",
-          "reason": "Atlassian repository-owned shared-reference contract remains consumer logic."
+          "disposition": "split",
+          "reason": "Extract the repository-specific shared-reference contract and remove dependencies on legacy authority configuration and runtime paths.",
+          "target": "scripts/Test-AtlassianSharedReferences.ps1"
         },
         {
           "path": "scripts/Validate-UpstreamAdapter.ps1",
@@ -519,8 +533,9 @@
         },
         {
           "path": "tests/AtomicOutput.Tests.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite this retained test or support file for the consumer layout; it contains a literal dependency on a removed legacy path.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/BitbucketReviewActions.Tests.ps1",
@@ -530,12 +545,14 @@
         {
           "path": "tests/CanonicalValidation.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/CentralRunner.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/ConfluenceDocs.ApiBaseIdentity.Tests.ps1",
@@ -680,27 +697,32 @@
         {
           "path": "tests/CorePesterIntegrity.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/ProtectedRunner.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/RepositoryValidation.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/ShardedPesterQueue.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/SharedReferences.Tests.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite this retained test or support file for the consumer layout; it contains a literal dependency on a removed legacy path.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/SkillSpectorExceptions.Tests.ps1",
@@ -710,27 +732,32 @@
         {
           "path": "tests/SourcePackageBridge.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/SourceStaticBridge.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/SourceValidationPreparation.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/StandardV1Conformance.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/Test-Repository.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/fixtures/BitbucketReviewFixture.ps1",
@@ -754,18 +781,21 @@
         },
         {
           "path": "tests/validate-repository-standalone.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite this retained test or support file for the consumer layout; it contains a literal dependency on a removed legacy path.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/validate-repository.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite this retained test or support file for the consumer layout; it contains a literal dependency on a removed legacy path.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/validate-windows-powershell.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite this retained test or support file for the consumer layout; it contains a literal dependency on a removed legacy path.",
+          "expectedOutcome": "rewrite"
         }
       ]
     },
@@ -852,17 +882,20 @@
         {
           "path": "tests/CanonicalValidation.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/CommonToolReportIntegration.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/CorePesterIntegrity.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/OrchestrateModelAvailability.Tests.ps1",
@@ -876,33 +909,39 @@
         },
         {
           "path": "tests/ResolveLegacyAuthorityArchiveFixture.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite this retained test or support file for the consumer layout; it contains a literal dependency on a removed legacy path.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/SourceValidationAdoption.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/StandardV1Conformance.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/Test-Repository.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/ValidateCatalog.Tests.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite this retained test or support file for the consumer layout; it contains a literal dependency on a removed legacy path.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/ValidateJsonRead.Tests.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite this retained test or support file for the consumer layout; it contains a literal dependency on a removed legacy path.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/validate-catalog.ps1",
@@ -985,44 +1024,51 @@
         {
           "path": "tests/CanonicalValidation.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/CommonToolReportIntegration.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/CorePesterIntegrity.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/SourceValidationPreparation.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/StandardV1Conformance.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/Test-Repository.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/repository.Tests.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite this retained test or support file for the consumer layout; it contains a literal dependency on a removed legacy path.",
+          "expectedOutcome": "rewrite"
         }
       ]
     },
     {
       "id": "skill-darktide-translate",
       "repository": "https://github.com/SyuanTsai/Skill-Darktide-Translate.git",
-      "status": "deferred",
+      "status": "pending-prerequisites",
       "inventoryCommit": "c183518359311569294a1c1c6134e84dfdc17b2d",
       "inventoryTree": "4ce65af0f17fe117864b519da3497daa09837386",
       "requiredRepositoryChecks": [
@@ -1060,8 +1106,8 @@
         },
         {
           "path": "scripts/Invoke-PrePushValidation.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned local development check is outside the central CI driver."
+          "disposition": "delete",
+          "reason": "Remove the legacy pre-push driver entry; S8 may replace it with a separate consumer bootstrap development entry before re-inventory."
         },
         {
           "path": "scripts/PowerShellRelease.psm1",
@@ -1085,24 +1131,103 @@
           "reason": "Legacy source driver is replaced by the authority consumer gate."
         },
         {
+          "path": "skills/auto-update-darktide-mod/scripts/Apply-LocalizationWorkset.ps1",
+          "disposition": "retain",
+          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+        },
+        {
+          "path": "skills/auto-update-darktide-mod/scripts/Expand-Schema14Reference.ps1",
+          "disposition": "retain",
+          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+        },
+        {
+          "path": "skills/auto-update-darktide-mod/scripts/Finalize-LocalizationWorksetEvidence.ps1",
+          "disposition": "retain",
+          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+        },
+        {
+          "path": "skills/auto-update-darktide-mod/scripts/Finalize-ModUpdateMerge.ps1",
+          "disposition": "retain",
+          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+        },
+        {
+          "path": "skills/auto-update-darktide-mod/scripts/Invoke-ModUpdateQueue.ps1",
+          "disposition": "retain",
+          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+        },
+        {
+          "path": "skills/auto-update-darktide-mod/scripts/LuaLocalizationScanner.psm1",
+          "disposition": "retain",
+          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+        },
+        {
+          "path": "skills/auto-update-darktide-mod/scripts/mod-update.ps1",
+          "disposition": "retain",
+          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+        },
+        {
+          "path": "skills/auto-update-darktide-mod/scripts/New-LocalizationWorkset.ps1",
+          "disposition": "retain",
+          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+        },
+        {
+          "path": "skills/auto-update-darktide-mod/scripts/PathSafety.psm1",
+          "disposition": "retain",
+          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+        },
+        {
+          "path": "skills/auto-update-darktide-mod/scripts/Receive-NexusMainFile.ps1",
+          "disposition": "retain",
+          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+        },
+        {
+          "path": "skills/auto-update-darktide-mod/scripts/SharedCoordinationLock.psm1",
+          "disposition": "retain",
+          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+        },
+        {
+          "path": "skills/auto-update-darktide-mod/scripts/Test-LocalizationWorksetReceipt.ps1",
+          "disposition": "retain",
+          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+        },
+        {
+          "path": "skills/auto-update-darktide-mod/scripts/Test-ModUpdateCandidate.ps1",
+          "disposition": "retain",
+          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+        },
+        {
+          "path": "skills/auto-update-darktide-mod/scripts/Test-ReferenceIntegrity.ps1",
+          "disposition": "retain",
+          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+        },
+        {
+          "path": "skills/auto-update-darktide-mod/scripts/Test-SourceReceipt.ps1",
+          "disposition": "retain",
+          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+        },
+        {
           "path": "tests/AtomicValidationOutput.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/BootstrapTransition.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/CanonicalValidation.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/InstalledClosureOrdering.Tests.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite this retained test or support file for the consumer layout; it contains a literal dependency on a removed legacy path.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/Invoke-Tests.ps1",
@@ -1121,13 +1246,15 @@
         },
         {
           "path": "tests/RepositoryContract.Tests.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite this retained test or support file for the consumer layout; it contains a literal dependency on a removed legacy path.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/RepositoryValidation.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/Schema15Coordination.Tests.ps1",
@@ -1146,36 +1273,241 @@
         },
         {
           "path": "tests/SkillSpectorOutput.Tests.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite this retained test or support file for the consumer layout; it contains a literal dependency on a removed legacy path.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/SourcePin.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/StandardV1Conformance.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/Test-Repository.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/TestSupport.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite this retained test or support file for the consumer layout; it contains a literal dependency on a removed legacy path.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/ValidationTransition.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage."
+          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
+          "expectedOutcome": "rewrite"
+        }
+      ],
+      "additionalScope": [
+        "skills/auto-update-darktide-mod/scripts/"
+      ],
+      "prerequisites": [
+        {
+          "id": "portable-01",
+          "path": "tests/InstalledClosureOrdering.Tests.ps1",
+          "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
+        },
+        {
+          "id": "portable-02",
+          "path": "tests/LocalizationWorkset.Tests.ps1",
+          "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
+        },
+        {
+          "id": "portable-03",
+          "path": "tests/ModUpdateAutomation.Tests.ps1",
+          "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
+        },
+        {
+          "id": "portable-04",
+          "path": "tests/RepositoryContract.Tests.ps1",
+          "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
+        },
+        {
+          "id": "portable-05",
+          "path": "tests/Schema15Coordination.Tests.ps1",
+          "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
+        },
+        {
+          "id": "portable-06",
+          "path": "tests/Schema15SourceAcquisition.Tests.ps1",
+          "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
+        },
+        {
+          "id": "portable-07",
+          "path": "tests/SkillContract.Tests.ps1",
+          "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
+        },
+        {
+          "id": "portable-08",
+          "path": "tests/SkillSpectorOutput.Tests.ps1",
+          "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
+        },
+        {
+          "id": "portable-09",
+          "path": "tests/TestSupport.ps1",
+          "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
+        },
+        {
+          "id": "portable-10",
+          "path": "tests/Invoke-Tests.ps1",
+          "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
+        },
+        {
+          "id": "portable-11",
+          "path": "scripts/Invoke-PrePushValidation.ps1",
+          "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
+        },
+        {
+          "id": "portable-12",
+          "path": "scripts/Test-CleanRepositoryHead.ps1",
+          "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
+        },
+        {
+          "id": "portable-13",
+          "path": "scripts/Test-Repository.ps1",
+          "requirement": "S8 must extract the Darktide-specific contract into portable scripts/Test-DarktideRepository.ps1 and remove the split source before re-inventory."
+        },
+        {
+          "id": "portable-skill-script-01",
+          "path": "skills/auto-update-darktide-mod/scripts/Apply-LocalizationWorkset.ps1",
+          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
+        },
+        {
+          "id": "portable-skill-script-02",
+          "path": "skills/auto-update-darktide-mod/scripts/Expand-Schema14Reference.ps1",
+          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
+        },
+        {
+          "id": "portable-skill-script-03",
+          "path": "skills/auto-update-darktide-mod/scripts/Finalize-LocalizationWorksetEvidence.ps1",
+          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
+        },
+        {
+          "id": "portable-skill-script-04",
+          "path": "skills/auto-update-darktide-mod/scripts/Finalize-ModUpdateMerge.ps1",
+          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
+        },
+        {
+          "id": "portable-skill-script-05",
+          "path": "skills/auto-update-darktide-mod/scripts/Invoke-ModUpdateQueue.ps1",
+          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
+        },
+        {
+          "id": "portable-skill-script-06",
+          "path": "skills/auto-update-darktide-mod/scripts/LuaLocalizationScanner.psm1",
+          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
+        },
+        {
+          "id": "portable-skill-script-07",
+          "path": "skills/auto-update-darktide-mod/scripts/New-LocalizationWorkset.ps1",
+          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
+        },
+        {
+          "id": "portable-skill-script-08",
+          "path": "skills/auto-update-darktide-mod/scripts/PathSafety.psm1",
+          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
+        },
+        {
+          "id": "portable-skill-script-09",
+          "path": "skills/auto-update-darktide-mod/scripts/Receive-NexusMainFile.ps1",
+          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
+        },
+        {
+          "id": "portable-skill-script-10",
+          "path": "skills/auto-update-darktide-mod/scripts/SharedCoordinationLock.psm1",
+          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
+        },
+        {
+          "id": "portable-skill-script-11",
+          "path": "skills/auto-update-darktide-mod/scripts/Test-LocalizationWorksetReceipt.ps1",
+          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
+        },
+        {
+          "id": "portable-skill-script-12",
+          "path": "skills/auto-update-darktide-mod/scripts/Test-ModUpdateCandidate.ps1",
+          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
+        },
+        {
+          "id": "portable-skill-script-13",
+          "path": "skills/auto-update-darktide-mod/scripts/Test-ReferenceIntegrity.ps1",
+          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
+        },
+        {
+          "id": "portable-skill-script-14",
+          "path": "skills/auto-update-darktide-mod/scripts/Test-SourceReceipt.ps1",
+          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
+        },
+        {
+          "id": "portable-skill-script-15",
+          "path": "skills/auto-update-darktide-mod/scripts/mod-update.ps1",
+          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
+        },
+        {
+          "id": "remove-legacy-installed-closure",
+          "path": "tests/InstalledClosureOrdering.Tests.ps1",
+          "requirement": "Remove extraction of helpers from scripts/Validate.ps1 and rewrite the test for the consumer layout."
+        },
+        {
+          "id": "remove-legacy-repository-contract",
+          "path": "tests/RepositoryContract.Tests.ps1",
+          "requirement": "Remove assertions and execution paths for deleted workflow, configuration, scripts/Validate.ps1, and legacy-layout branches."
+        },
+        {
+          "id": "remove-legacy-skillspector-output",
+          "path": "tests/SkillSpectorOutput.Tests.ps1",
+          "requirement": "Remove the dependency on scripts/Validate.ps1 and exercise the consumer gate evidence contract instead."
+        },
+        {
+          "id": "support-consumer-layout",
+          "path": "tests/TestSupport.ps1",
+          "requirement": "Support the consumer layout with config/authority-pin.json and config/consumer-gate.json while preserving the required transition coverage."
+        },
+        {
+          "id": "replace-legacy-pre-push",
+          "path": "scripts/Invoke-PrePushValidation.ps1",
+          "requirement": "Delete this legacy entry or replace it with a separate portable consumer bootstrap development entry before re-inventory."
+        },
+        {
+          "id": "portable-link-helper",
+          "path": "tests/RepositoryContract.Tests.ps1",
+          "requirement": "Replace the unconditional Junction fixture with the existing platform-aware link helper."
+        },
+        {
+          "id": "portable-pwsh-fixture",
+          "path": "tests/SkillSpectorOutput.Tests.ps1",
+          "requirement": "Resolve pwsh or pwsh.exe by platform and use a native shell fixture on Unix."
+        },
+        {
+          "id": "portable-long-path-expectations",
+          "path": "tests/ModUpdateAutomation.Tests.ps1",
+          "requirement": "Register Windows long-path assertions only on Windows and add corresponding Unix behavior assertions."
+        },
+        {
+          "id": "portable-path-comparer",
+          "path": "tests/ModUpdateAutomation.Tests.ps1",
+          "requirement": "Register the case-insensitive InterT109 only on Windows and add Unix case-sensitive coverage."
+        },
+        {
+          "id": "portable-path-safety-native",
+          "path": "skills/auto-update-darktide-mod/scripts/PathSafety.psm1",
+          "requirement": "Exercise and verify the non-Windows branch without requiring the Windows-only native type."
+        },
+        {
+          "id": "portable-multiprocess-coordination",
+          "path": "tests/Schema15Coordination.Tests.ps1",
+          "requirement": "Demonstrate InterT180 completes on Windows, Linux, and macOS."
         }
       ]
     }
   ]
 }
-

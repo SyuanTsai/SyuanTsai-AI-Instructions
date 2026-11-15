@@ -81,7 +81,7 @@ Describe 'SYP258 source tool identity freeze' {
 Describe 'P11-pin phase-scoped resolver credential' {
     # Scenario: Consumer workflows acquire tools in prepare and then run candidate-controlled phases.
     # Purpose: Make the read-only workflow token unavailable to validate, finalize, aggregate, and every candidate child.
-    It 'UnitT10_limits_the_token_to_prepare_and_clears_all_aliases' {
+    It 'UnitT950_limits_the_token_to_prepare_and_clears_all_aliases' {
         $root=Split-Path -Parent $PSScriptRoot
         $formal=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'consumer/workflows/consumer-gate.yml')
         $transition=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'consumer/workflows/consumer-gate-transition.yml')

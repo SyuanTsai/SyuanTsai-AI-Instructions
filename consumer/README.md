@@ -10,7 +10,7 @@ Remote App, environment, Actions event-policy, and ruleset settings are user-con
 
 ## Consumer repository conversion
 
-Convert repositories serially in this order: Knowledge Content, Code Collaboration, General, then Atlassian. Do not begin the next repository until the current repository has completed step 5. Darktide remains deferred in `legacy-migration.json`.
+Convert repositories serially in this order: Knowledge Content, Code Collaboration, General, Atlassian, then Darktide. Do not begin the next repository until the current repository has completed step 5. Darktide remains `pending-prerequisites` until the section below is complete.
 
 ### 0. Prerequisites
 
@@ -21,7 +21,14 @@ Before any conversion:
 3. Actions explicitly permits `pull_request_target`; workflow permissions are read-only and Actions cannot create or approve pull requests.
 4. The authority consumer-gate change is merged, and the remote prerequisite is verified: `main` can change only by pull request, `pull_request` and `non_fast_forward` rules are active, and `bypass_actors` is empty.
 
-Atlassian has additional prerequisites: the approved exception-policy and knowledge-source changes must already be merged; its pin must include that authority revision; its exception set must contain the required review scope and evidence paths; and the user must sign it from a clean clone with the merged signing tool. Knowledge Content, Code Collaboration, and General have no exception set and may convert after the consumer gate is merged.
+Atlassian has four additional prerequisites, all of which must be satisfied before creating or recreating its conversion pull request:
+
+1. Authority PR-K1, PR-K2, and PR-2 are all merged.
+2. The conversion pin points to an authority `main` commit that includes PR-2.
+3. The exception set declares the PR-2 `reviewScope` and every required `evidencePaths` entry.
+4. The user signs the exact exception review scope from a clean clone using the merged signing tool; an agent must not create or substitute this signature.
+
+Knowledge Content, Code Collaboration, and General have no exception set and may convert after the consumer gate is merged.
 
 ### 0.5 Inventory preflight and retry
 
@@ -32,7 +39,8 @@ This check is mandatory for every repository:
 3. If both values match, continue to step 1.
 4. If either differs, stop the conversion and:
    - create an authority pull request from the latest authority `main` that changes only the legacy manifest;
-   - re-inventory every tracked path in `.github/**`, `config/**`, `scripts/**`, and `tests/**` at the exact consumer commit, including each disposition and every required repository check;
+   - re-inventory every tracked path in `.github/**`, `config/**`, `scripts/**`, `tests/**`, and declared `additionalScope` at the exact consumer commit, including each disposition and every required repository check;
+   - run `scripts/consumer/Test-ConsumerManifestClosure.ps1` against that immutable commit until it returns `PASS`, attach its complete JSON, and review every advisory that may construct a legacy target;
    - merge only after the authority regressions pass;
    - close and recreate any existing conversion pull request on the new base, or prove its event base is exactly the new `inventoryCommit` before retriggering it; and
    - point the conversion pin at an authority commit containing the refreshed manifest.
@@ -52,6 +60,20 @@ Use an ordinary pull request without bypass:
 4. Add `config/consumer-gate.json`. Its `repositoryChecks` must contain exactly one matching entry for every required check in the manifest; do not add a separate `requiredRepositoryChecks` property.
 5. Let the transition workflow validate the pull request. It must use the candidate bootstrap with `-TransitionFromLegacy`, and the protected base must contain neither the bootstrap nor pin.
 6. Before merge, independently compare the SHA-256 of all three copied templates with the pinned authority and verify the pin is on official authority `main`. This human verification cannot be replaced by bypass.
+
+The transition gate runs manifest closure twice using the manifest and scanner from the pinned authority: once on the exact inventory tree and once on the candidate tree. A split source must be absent, and every `update-tests` record must be deleted or rewritten exactly as declared. Literal path tokens outside the document allowlist fail; dynamic references, documents, and binary files are advisory. Required checks run on the converted candidate on all three platforms as behavioral detection, but cannot prove that dynamic or unexecuted references do not exist. If closure or a required check fails, refresh the authority manifest; do not weaken the check.
+
+## Darktide 轉換前提
+
+Darktide is blocked while its manifest status is `pending-prerequisites`. S8 owns the prerequisite runtime-and-content pull request. At the exact re-inventory commit, S8 must:
+
+- make every retained or rewritten test, support file, development entry, and all 15 files under `skills/auto-update-darktide-mod/scripts/` portable on Windows, Linux, and macOS;
+- extract the repository-specific part of `scripts/Test-Repository.ps1` into `scripts/Test-DarktideRepository.ps1`, remove legacy `scripts/Validate.ps1` and old workflow/config dependencies from retained files, and support the consumer layout in `tests/TestSupport.ps1`;
+- replace unconditional Junction, `pwsh.exe`, Windows long-path, case-insensitive path, and Windows-native-type assumptions with native-host registration plus corresponding Unix behavior; do not use Pester skip or add skip inventory;
+- run both `repository-darktide` and the complete `repository-pester` discovery on a simulated converted tree on `windows-latest`, `ubuntu-latest`, and `macos-latest`, with zero failures and no added skips; and
+- bind the evidence to commit, tree, commands, run ID, both check IDs, and each platform result.
+
+After S8 merges, the authority owner reruns inventory and closure at the new Darktide commit in a manifest-only pull request. Only after the output is `PASS`, the three-platform evidence is verified, status is changed to `ready`, and `prerequisites` is removed may the Darktide conversion pull request be created.
 
 ### 2. First push after conversion
 

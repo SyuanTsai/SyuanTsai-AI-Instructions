@@ -1749,7 +1749,7 @@ Describe 'Validator platform authority routing' {
 Describe 'P11-pin authority workflow isolation' {
     # Scenario: Consumer templates are published without replacing either authority workflow.
     # Purpose: Keep the authority repository on its existing Composition and diagnostic gate while consumer CI evolves independently.
-    It 'UnitT10_preserves_both_authority_workflow_entry_points' {
+    It 'UnitT980_preserves_both_authority_workflow_entry_points' {
         $root=Split-Path -Parent $PSScriptRoot
         foreach($path in @('.github/workflows/pr8-powershell-validation.yml','.github/workflows/standards-conformance.yml')){
             $text=Get-Content -Raw -Encoding UTF8 (Join-Path $root $path)
