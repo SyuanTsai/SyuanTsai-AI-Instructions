@@ -453,6 +453,16 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
             'after-committed-before-cleanup','before-cleanup-<artifact-leaf>',
             'during-cleanup-<artifact-leaf>','after-cleanup-<artifact-leaf>','after-rollback-operation-<sequence>'
         )
+        @(& $module { Get-AiInstructionsInstallFailpointV2Patterns }) | Should Be @(
+            'after-journal-prepared','after-journal-stage-flush','after-journal-publish-before-parent-flush',
+            'after-recovery-before-install','before-committed-journal-write','after-committed-journal-write',
+            'before-operation-<sequence>','after-original-to-backup-<sequence>',
+            'after-operation-<sequence>-before-journal','after-operation-<sequence>',
+            'after-index-lock-write-before-rename','after-index-rename-before-reacquire',
+            'after-committed-before-cleanup','before-cleanup-<artifact-leaf>',
+            'during-cleanup-<artifact-leaf>','after-cleanup-<artifact-leaf>','after-rollback-operation-<sequence>',
+            'after-index-lock-release-before-journal-cleanup','after-cleanup-journal-before-directory','during-cleanup-transaction'
+        )
     }
 
     if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {

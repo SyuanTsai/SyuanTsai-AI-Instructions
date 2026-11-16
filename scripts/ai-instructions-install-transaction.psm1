@@ -5,7 +5,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:InstallFailpointPatterns = @(
+$script:InstallFailpointV1Patterns = @(
     'after-journal-prepared',
     'after-journal-stage-flush',
     'after-journal-publish-before-parent-flush',
@@ -20,9 +20,35 @@ $script:InstallFailpointPatterns = @(
     'after-cleanup-<artifact-leaf>',
     'after-rollback-operation-<sequence>'
 )
+$script:InstallFailpointV2Patterns = @(
+    'after-journal-prepared',
+    'after-journal-stage-flush',
+    'after-journal-publish-before-parent-flush',
+    'after-recovery-before-install',
+    'before-committed-journal-write',
+    'after-committed-journal-write',
+    'before-operation-<sequence>',
+    'after-original-to-backup-<sequence>',
+    'after-operation-<sequence>-before-journal',
+    'after-operation-<sequence>',
+    'after-index-lock-write-before-rename',
+    'after-index-rename-before-reacquire',
+    'after-committed-before-cleanup',
+    'before-cleanup-<artifact-leaf>',
+    'during-cleanup-<artifact-leaf>',
+    'after-cleanup-<artifact-leaf>',
+    'after-rollback-operation-<sequence>',
+    'after-index-lock-release-before-journal-cleanup',
+    'after-cleanup-journal-before-directory',
+    'during-cleanup-transaction'
+)
 
 function Get-AiInstructionsInstallFailpointPatterns {
-    return [string[]]@($script:InstallFailpointPatterns)
+    return [string[]]@($script:InstallFailpointV1Patterns)
+}
+
+function Get-AiInstructionsInstallFailpointV2Patterns {
+    return [string[]]@($script:InstallFailpointV2Patterns)
 }
 
 function Assert-AiInstructionsInstallerCapabilities {
@@ -490,12 +516,14 @@ function Assert-InstallJournalV2TrustedTransition {
     $nextAuthority=if($PSBoundParameters.ContainsKey('NextAuthorityJson')){$NextAuthorityJson}else{ConvertTo-InstallJournalV2TransitionAuthorityJson $Next}
     $authorityEqual=$previousAuthority-ceq$nextAuthority
     if($previousOperations.Count-ne$nextOperations.Count-or$identityOperations.Count-ne$previousOperations.Count){throw 'AI instructions install journal store transition cannot change operations count after prepared.'}
+    if($Previous.phase-isnot[string]-or$Next.phase-isnot[string]){throw 'AI instructions install journal store phase must be a string.'}
     $fromPhase=[string]$Previous.phase;$toPhase=[string]$Next.phase
     if($fromPhase-cne$toPhase-and"$fromPhase>$toPhase"-cnotin@('prepared>applying','applying>applied','applied>committed')) {
         throw 'AI instructions install journal store phase transition is invalid.'
     }
     $changedStateIndexes=New-Object System.Collections.Generic.List[int]
     for($index=0;$index-lt$previousOperations.Count;$index++) {
+        if($previousOperations[$index].state-isnot[string]-or$nextOperations[$index].state-isnot[string]){throw "AI instructions install journal store transition operation $($index + 1) state must be a string."}
         $fromState=[string]$previousOperations[$index].state;$toState=[string]$nextOperations[$index].state
         if($fromState-cne$toState-and"$fromState>$toState"-cne'pending>applied') {
             throw "AI instructions install journal store transition operation $($index + 1) state transition is invalid."
@@ -1115,7 +1143,7 @@ function Invoke-AiInstructionsInstallRecoveryPlan {
 }
 
 Export-ModuleMember -Function @(
-    'Get-AiInstructionsInstallFailpointPatterns','Invoke-AiInstructionsInstallFailpoint','Assert-AiInstructionsInstallerCapabilities',
+    'Get-AiInstructionsInstallFailpointPatterns','Get-AiInstructionsInstallFailpointV2Patterns','Invoke-AiInstructionsInstallFailpoint','Assert-AiInstructionsInstallerCapabilities',
     'Get-AiInstructionsInstallFileState','Get-AiInstructionsInstallDirectoryState','New-AiInstructionsInstallStageFile',
     'Write-AiInstructionsInstallJournalStore','Invoke-AiInstructionsInstallOperation',
     'Get-AiInstructionsInstallRecoveryObservations','Invoke-AiInstructionsInstallRecoveryPlan',

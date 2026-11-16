@@ -2280,7 +2280,7 @@ function Assert-AiInstructionsInstallJournalV2 {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][object] $Journal)
 
-    Assert-AiInstructionsInstallJournalExactProperties -Object $Journal -Names @('schemaVersion','kind','transactionId','createdAtUtc','owner','platform','lock','generation','scope','phase','operations') -Context 'AI instructions install journal v2'
+    Assert-AiInstructionsInstallJournalExactProperties -Object $Journal -Names @('schemaVersion','kind','transactionId','createdAtUtc','owner','platform','lock','generation','scope','retainedManifestPaths','phase','operations') -Context 'AI instructions install journal v2'
     Assert-AiInstructionsInstallJournalInteger -Value $Journal.schemaVersion -Context 'AI instructions install journal schemaVersion' -Minimum 1
     if ([decimal]$Journal.schemaVersion -ne 2) { throw "Unsupported AI instructions install journal schema version '$($Journal.schemaVersion)'." }
     if ($Journal.kind -isnot [string] -or [string]$Journal.kind -cne 'ai-instructions-install-transaction') { throw 'AI instructions install journal kind is invalid.' }
@@ -2314,6 +2314,16 @@ function Assert-AiInstructionsInstallJournalV2 {
         Assert-AiInstructionsInstallJournalExactProperties -Object $Journal.scope.externalBackup -Names @('root','indexSha256','inventorySha256') -Context 'AI instructions install journal repository scope.externalBackup'
         if ($Journal.scope.externalBackup.root -isnot [string] -or -not [IO.Path]::IsPathRooted([string]$Journal.scope.externalBackup.root)) { throw 'AI instructions install journal repository scope.externalBackup.root must be an absolute path.' }
         foreach ($name in @('indexSha256','inventorySha256')) { if ($Journal.scope.externalBackup.$name -isnot [string] -or [string]$Journal.scope.externalBackup.$name -cnotmatch '^[0-9a-f]{64}$') { throw "AI instructions install journal repository scope.externalBackup.$name is invalid." } }
+    }
+    if ($Journal.retainedManifestPaths -isnot [System.Array]) { throw 'AI instructions install journal retainedManifestPaths must be an array.' }
+    $retainedManifestPathKeys = New-Object 'System.Collections.Generic.HashSet[string]' ($(if ([string]$Journal.platform.os -ceq 'windows') { [StringComparer]::OrdinalIgnoreCase } else { [StringComparer]::Ordinal }))
+    foreach ($retained in @($Journal.retainedManifestPaths)) {
+        Assert-AiInstructionsInstallJournalExactProperties -Object $retained -Names @('targetPath','sha256','length','identity') -Context 'AI instructions install journal retained manifest path'
+        Assert-AiInstructionsInstallJournalV2RelativePath -Value $retained.targetPath -Context 'AI instructions install journal retained manifest path.targetPath'
+        if (-not $retainedManifestPathKeys.Add([string]$retained.targetPath)) { throw 'AI instructions install journal retainedManifestPaths contains a duplicate targetPath.' }
+        if ($retained.sha256 -isnot [string] -or [string]$retained.sha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'AI instructions install journal retained manifest path.sha256 is invalid.' }
+        Assert-AiInstructionsInstallJournalInteger -Value $retained.length -Context 'AI instructions install journal retained manifest path.length' -Minimum 0
+        Assert-AiInstructionsInstallJournalIdentity -Identity $retained.identity -Context 'AI instructions install journal retained manifest path.identity' -ExpectedKind $expectedIdentityKind
     }
     if ($Journal.phase -isnot [string] -or [string]$Journal.phase -cnotin @('prepared','applying','applied','committed')) { throw 'AI instructions repo-bootstrap journal phase is invalid.' }
     if ($Journal.operations -isnot [System.Array] -or @($Journal.operations).Count -lt 1) { throw 'AI instructions install journal operations must be a non-empty array.' }
@@ -2439,6 +2449,7 @@ function Assert-AiInstructionsInstallJournalV2 {
                 elseif ($null -eq $operation.after.objectId -or [string]$Journal.phase -ceq 'prepared') { throw "$context applied store-git-stash-evidence after.objectId must be bound outside prepared phase." }
             }
         }
+        if ($targetKind -ceq 'repository-relative' -and $retainedManifestPathKeys.Contains($targetValue)) { throw "$context.target duplicates a retained manifest path." }
         if ([string]$Journal.phase -in @('applied','committed') -and [string]$operation.state -cne 'applied') { throw "$context.state is inconsistent with phase $($Journal.phase)." }
         $expectedSequence++
     }
@@ -2488,6 +2499,7 @@ function New-AiInstructionsInstallJournalV2 {
         [AllowNull()][object] $PreviousBundleSha256 = $null,
         [Parameter(Mandatory = $true)][string] $CandidateBundleSha256,
         [Parameter(Mandatory = $true)][object] $Scope,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $RetainedManifestPaths,
         [Parameter(Mandatory = $true)][string] $Phase,
         [Parameter(Mandatory = $true)][object[]] $Operations
     )
@@ -2497,7 +2509,7 @@ function New-AiInstructionsInstallJournalV2 {
         platform=[pscustomobject][ordered]@{os=$PlatformOs;architecture=$PlatformArchitecture}
         lock=[pscustomobject][ordered]@{primitive=$LockPrimitive;leaf=$LockLeaf}
         generation=[pscustomobject][ordered]@{previousBundleSha256=$PreviousBundleSha256;candidateBundleSha256=$CandidateBundleSha256}
-        scope=$Scope;phase=$Phase;operations=@($Operations)
+        scope=$Scope;retainedManifestPaths=@($RetainedManifestPaths);phase=$Phase;operations=@($Operations)
     }
     return (Assert-AiInstructionsInstallJournalV2 -Journal $journal)
 }
@@ -2634,7 +2646,7 @@ function Assert-AiInstructionsInstallJournalStoreTransition {
     if ($previousVersion -eq 1) { Assert-AiInstructionsInstallJournalV1 -Journal $Previous | Out-Null } elseif ($previousVersion -eq 2) { Assert-AiInstructionsInstallJournalV2 -Journal $Previous | Out-Null } else { throw 'AI instructions install journal store transition previous schema is unsupported.' }
     if ($nextVersion -eq 1) { Assert-AiInstructionsInstallJournalV1 -Journal $Next | Out-Null } elseif ($nextVersion -eq 2) { Assert-AiInstructionsInstallJournalV2 -Journal $Next | Out-Null } else { throw 'AI instructions install journal store transition next schema is unsupported.' }
     $immutableNames = @('schemaVersion','kind','transactionId','createdAtUtc','owner','platform','lock','generation')
-    if ($previousVersion -eq 2 -or $nextVersion -eq 2) { $immutableNames += 'scope' }
+    if ($previousVersion -eq 2 -or $nextVersion -eq 2) { $immutableNames += @('scope','retainedManifestPaths') }
     foreach ($name in $immutableNames) {
         if (-not (Test-AiInstructionsJsonSemanticEqual -Left $Previous.PSObject.Properties[$name].Value -Right $Next.PSObject.Properties[$name].Value)) {
             throw "AI instructions install journal store transition cannot change $name."
@@ -2643,6 +2655,7 @@ function Assert-AiInstructionsInstallJournalStoreTransition {
     $previousOperationCount = @($Previous.operations).Count
     $nextOperationCount = @($Next.operations).Count
     if ($previousOperationCount -ne $nextOperationCount) { throw 'AI instructions install journal store transition cannot change operations count after prepared.' }
+    $changedStateCount = 0
     for ($index = 0; $index -lt $previousOperationCount; $index++) {
         $previousOperation = [ordered]@{}
         $nextOperation = [ordered]@{}
@@ -2654,6 +2667,10 @@ function Assert-AiInstructionsInstallJournalStoreTransition {
         if (-not $authorityEqual -and -not $evidenceBinding -and -not $observedAfterBinding) { throw "AI instructions install journal store transition cannot change operation $($index + 1) fields other than state; observedAfter, displacedAfterMetadata, or store-git-stash-evidence after.objectId may be bound only once." }
         $fromState = [string]$Previous.operations[$index].state
         $toState = [string]$Next.operations[$index].state
+        if ($fromState -cne $toState) {
+            $changedStateCount++
+            if ($previousVersion -eq 2 -and $changedStateCount -gt 1) { throw 'AI instructions install journal store transition may change only one operation state per generation.' }
+        }
         $allowedState = $fromState -ceq $toState -or
             "$fromState>$toState" -cin $(if ($previousVersion -eq 2) { @('pending>applied') } else { @('pending>staged','staged>applied','pending>applied','applied>rolled-back','pending>rolled-back','staged>rolled-back') })
         if (-not $allowedState) { throw "AI instructions install journal store transition operation $($index + 1) state transition is invalid." }

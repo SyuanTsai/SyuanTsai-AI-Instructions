@@ -2618,7 +2618,9 @@ if not exist "$insertionMarker" (
         $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
         $gitWrapper = @"
 @echo off
-echo %* | "$findString" /C:"stash store" >nul
+echo %* | "$findString" /C:"update-ref --create-reflog" >nul
+if errorlevel 1 goto maybe_insert
+echo %* | "$findString" /C:" refs/stash " >nul
 if errorlevel 1 goto maybe_insert
 "$realGit" %*
 if errorlevel 1 exit /b 86
@@ -2973,6 +2975,10 @@ exit /b %errorlevel%
         $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
         $gitWrapper = "@echo off`necho %* >> `"$gitInvocationLog`"`n`"$realGit`" %*"
         Set-TestText -Path $gitWrapperPath -Value $gitWrapper
+        $directGitMarker = Join-Path $wrapperRoot 'unconfigured-git.marker'
+        $poisonRoot = Join-Path $wrapperRoot 'poison-path'
+        New-Item -ItemType Directory -Force -Path $poisonRoot | Out-Null
+        Set-TestText -Path (Join-Path $poisonRoot 'git.cmd') -Value "@echo off`ntype nul > `"$directGitMarker`"`nexit /b 97"
         $powerShellExe = $script:TestPowerShellExecutable
         $arguments = @(
             '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:BootstrapScript,
@@ -2984,11 +2990,14 @@ exit /b %errorlevel%
 
         # When
         Push-Location $targetRoot
+        $previousPath = $env:PATH
         try {
+            $env:PATH = $poisonRoot + [IO.Path]::PathSeparator + $previousPath
             $output = & $powerShellExe @arguments 2>&1
             $exitCode = $LASTEXITCODE
         }
         finally {
+            $env:PATH = $previousPath
             Pop-Location
         }
 
@@ -2999,8 +3008,9 @@ exit /b %errorlevel%
         $invocations | Should Match 'rev-parse --show-toplevel'
         $invocations | Should Match 'rev-parse --verify HEAD'
         $invocations | Should Match 'commit-tree'
-        $invocations | Should Match 'stash store'
-        $invocations | Should Not Match 'stash push|stash apply'
+        $invocations | Should Match 'update-ref --create-reflog .* refs/stash '
+        $invocations | Should Not Match 'stash store|stash push|stash apply'
+        Test-Path -LiteralPath $directGitMarker | Should Be $false
     }
     }
 
@@ -3044,7 +3054,7 @@ exit /b %errorlevel%
         New-TestConfiguration -Path $configurationPath
         $wrapperRoot=Join-Path $TestDrive 'git-clean-stash-failure';New-Item -ItemType Directory -Force -Path $wrapperRoot|Out-Null
         $realGit=(Get-Command git.exe).Source;$findString=Join-Path $env:SystemRoot 'System32\findstr.exe'
-        $gitWrapper="@echo off`necho %* | `"$findString`" /C:`"stash store`" >nul`nif errorlevel 1 goto forward`nexit /b 86`n:forward`n`"$realGit`" %*`nexit /b %errorlevel%"
+        $gitWrapper="@echo off`necho %* | `"$findString`" /C:`"update-ref --create-reflog`" >nul`nif errorlevel 1 goto forward`necho %* | `"$findString`" /C:`" refs/stash `" >nul`nif errorlevel 1 goto forward`nexit /b 86`n:forward`n`"$realGit`" %*`nexit /b %errorlevel%"
         $gitWrapperPath=Join-Path $wrapperRoot 'git.cmd';Set-TestText -Path $gitWrapperPath -Value $gitWrapper
         $headBefore=Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')
         $statusBefore=@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain'))-join"`n"
@@ -3055,7 +3065,7 @@ exit /b %errorlevel%
         $output=& $script:TestPowerShellExecutable @arguments 2>&1;$exitCode=$LASTEXITCODE
 
         $exitCode|Should Not Be 0
-        (ConvertTo-TestDiagnosticText -Output $output)|Should Match 'stash store'
+        (ConvertTo-TestDiagnosticText -Output $output)|Should Match 'update-ref.*refs/stash'
         (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD'))|Should Be $headBefore
         (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain'))-join"`n")|Should Be $statusBefore
         (Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash|Should Be $indexBefore
@@ -3118,7 +3128,9 @@ finally {
         [System.IO.File]::WriteAllText($captureScriptPath, $capturePrefix + "`n" + $captureBody, [System.Text.UTF8Encoding]::new($false))
         $gitWrapper = @"
 @echo off
-echo %* | "$findString" /C:"stash store" >nul
+echo %* | "$findString" /C:"update-ref --create-reflog" >nul
+if errorlevel 1 goto forward
+echo %* | "$findString" /C:" refs/stash " >nul
 if errorlevel 1 goto forward
 copy /b "$excludePath" "$appliedExcludePath" >nul
 if errorlevel 1 exit /b 85
@@ -3156,7 +3168,7 @@ exit /b %errorlevel%
 
         # Then
         $exitCode | Should Not Be 0
-        ($output -join [Environment]::NewLine) | Should Match 'stash store'
+        ($output -join [Environment]::NewLine) | Should Match 'update-ref.*refs/stash'
         (ConvertTo-TestDiagnosticText -Output $output) | Should Match 'ai-instructions-refusal-code=interrupted-install'
         $beforeEvidence = Get-Content -Raw -LiteralPath $captureBeforePath | ConvertFrom-Json
         $afterEvidence = Get-Content -Raw -LiteralPath $captureAfterPath | ConvertFrom-Json
@@ -3232,7 +3244,7 @@ exit /b %errorlevel%
         $manifestPath = Join-Path $targetRoot $script:ManifestPath.Replace('/','\')
         $excludePath = Join-Path $targetRoot '.git\info\exclude'
         $excludeBefore = [System.IO.File]::ReadAllBytes($excludePath)
-        $gitWrapper = "@echo off`n`"$realGit`" %*`nif errorlevel 1 exit /b %errorlevel%`necho %* | `"$findString`" /C:`"stash store`" >nul`nif errorlevel 1 exit /b 0`necho concurrent-user-manifest-edit>`"$manifestPath`"`nexit /b 0"
+        $gitWrapper = "@echo off`n`"$realGit`" %*`nif errorlevel 1 exit /b %errorlevel%`necho %* | `"$findString`" /C:`"update-ref --create-reflog`" >nul`nif errorlevel 1 exit /b 0`necho %* | `"$findString`" /C:`" refs/stash `" >nul`nif errorlevel 1 exit /b 0`necho concurrent-user-manifest-edit>`"$manifestPath`"`nexit /b 0"
         $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
         Set-TestText -Path $gitWrapperPath -Value $gitWrapper
         $headBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')
@@ -3274,7 +3286,7 @@ exit /b %errorlevel%
         $manifestPath = Join-Path $targetRoot $script:ManifestPath.Replace('/','\')
         $excludePath = Join-Path $targetRoot '.git\info\exclude'
         $excludeBefore = [System.IO.File]::ReadAllBytes($excludePath)
-        $gitWrapper = "@echo off`n`"$realGit`" %*`nif errorlevel 1 exit /b %errorlevel%`necho %* | `"$findString`" /C:`"stash store`" >nul`nif errorlevel 1 exit /b 0`necho concurrent-user-agent-edit>`"$agentPath`"`nexit /b 0"
+        $gitWrapper = "@echo off`n`"$realGit`" %*`nif errorlevel 1 exit /b %errorlevel%`necho %* | `"$findString`" /C:`"update-ref --create-reflog`" >nul`nif errorlevel 1 exit /b 0`necho %* | `"$findString`" /C:`" refs/stash `" >nul`nif errorlevel 1 exit /b 0`necho concurrent-user-agent-edit>`"$agentPath`"`nexit /b 0"
         $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
         Set-TestText -Path $gitWrapperPath -Value $gitWrapper
         $headBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')

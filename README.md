@@ -138,6 +138,10 @@ Bootstrap 會自動修復：
 
 需求：Windows、PowerShell 7 最新穩定版、Git，以及可存取 canonical GitHub Repository 與 Catalog 選中的 external repositories。
 
+### 已知限制
+
+- 只有在 tracked-artifact remediation 必須把 detached HEAD 轉成 symbolic remediation branch 時，Git 必須為 2.46 以上；此路徑使用 `git update-ref --stdin` 的 atomic symref CAS，以免覆寫觀察後發生的外部 HEAD 變更。一般安裝與不需要 detached→symbolic 轉換的同步不增加 Git 版本前提。
+
 ```powershell
 git clone https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git
 Set-Location .\SyuanTsai-AI-Instructions

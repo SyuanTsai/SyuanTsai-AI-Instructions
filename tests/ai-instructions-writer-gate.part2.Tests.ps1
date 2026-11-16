@@ -457,7 +457,9 @@ Describe 'AI instructions writer and reader gate' {
         $gitWrapperPath=Join-Path $wrapperRoot 'git.cmd'
         $gitWrapper=@"
 @echo off
-echo %* | "$findString" /C:"stash store" >nul
+echo %* | "$findString" /C:"update-ref --create-reflog" >nul
+if errorlevel 1 goto forward
+echo %* | "$findString" /C:" refs/stash " >nul
 if errorlevel 1 goto forward
 copy /b "$excludePath" "$appliedExcludePath" >nul
 if errorlevel 1 exit /b 85
@@ -471,7 +473,7 @@ exit /b %errorlevel%
         $result=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target -GitExecutable $gitWrapperPath
 
         $result.ExitCode|Should Not Be 0
-        $result.Output|Should Match 'stash store'
+        $result.Output|Should Match 'update-ref.*refs/stash'
         Test-Path -LiteralPath $appliedExcludePath -PathType Leaf|Should Be $true
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($appliedExcludePath))|Should Not Be ([Convert]::ToBase64String($excludeBefore))
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))|Should Be ([Convert]::ToBase64String($excludeBefore))

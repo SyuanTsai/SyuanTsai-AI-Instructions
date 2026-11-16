@@ -26,4 +26,29 @@ Describe 'AI instructions unified repository transaction remediation failpoint m
             -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath `
             -WithRemediation $true -RepositoryRoot $script:RepositoryRoot
     }
+
+    # Scenario: A detached HEAD remediation stops immediately before the update-git-head mutation or immediately after its atomic mutation but before the operation-state generation.
+    # Purpose: Next-run rollback must restore the exact detached HEAD, index, refs, files, shared exclude, and empty transaction store in both crash windows.
+    It 'InterT180_recovers_detached_HEAD_before_and_after_the_atomic_HEAD_operation' {
+        $discovery=Join-Path $script:ExternalRoot 'detached-discovery';Copy-Item -LiteralPath $script:P9cSeed -Destination $discovery -Recurse;& git -C $discovery checkout --detach --quiet
+        $prepared=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot 'detached-discovery-runtime') -Failpoint after-journal-prepared -RecoveryPath NextRun
+        (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $discovery -BootstrapPath $prepared).ExitCode|Should -Not -Be 0
+        $transactions=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $discovery) -Directory -Force);$transactions.Count|Should -Be 1
+        $journal=Get-Content -Raw -LiteralPath (Join-Path $transactions[0].FullName 'journal.json')|ConvertFrom-Json
+        $headOperation=@($journal.operations|Where-Object{[string]$_.kind-ceq'update-git-head'});$headOperation.Count|Should -Be 1
+        $sequence=[int]$headOperation[0].sequence
+        foreach($case in @(
+            [pscustomobject]@{Name='before';Failpoint="before-operation-$sequence"},
+            [pscustomobject]@{Name='after-before-journal';Failpoint="after-operation-$sequence-before-journal"}
+        )){
+            $target=Join-Path $script:ExternalRoot ("detached-"+$case.Name);Copy-Item -LiteralPath $script:P9cSeed -Destination $target -Recurse;& git -C $target checkout --detach --quiet
+            $before=Get-P9cPublicationStateSnapshot $target
+            $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot ("detached-runtime-"+$case.Name)) -Failpoint $case.Failpoint -RecoveryPath NextRun
+            (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $bootstrap).ExitCode|Should -Not -Be 0
+            $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $script:ExternalRoot ("detached-recovery-"+$case.Name)) -Failpoint RecoveryOnly
+            (Invoke-P9bRepoBootstrap -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath -TargetRoot $target -BootstrapPath $recovery).ExitCode|Should -Not -Be 0
+            (Get-P9cPublicationStateSnapshot $target)|Should -BeExactly $before
+            @(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force -ErrorAction SilentlyContinue).Count|Should -Be 0
+        }
+    }
 }

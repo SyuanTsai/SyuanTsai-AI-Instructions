@@ -1131,7 +1131,9 @@ function Invoke-Git {
         [string] $Repository,
 
         [Parameter(Mandatory = $true)]
-        [string[]] $Arguments
+        [string[]] $Arguments,
+
+        [string[]] $StandardInputLines
     )
 
     $previousErrorActionPreference = $ErrorActionPreference
@@ -1139,8 +1141,17 @@ function Invoke-Git {
     try {
         $ErrorActionPreference = 'Continue'
         [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-        $output = & $GitExecutable -C $Repository @Arguments 2>&1
-        $exitCode = $LASTEXITCODE
+        if($PSBoundParameters.ContainsKey('StandardInputLines')){
+            $startInfo=[Diagnostics.ProcessStartInfo]::new();$startInfo.FileName=$GitExecutable;$startInfo.UseShellExecute=$false;$startInfo.CreateNoWindow=$true;$startInfo.RedirectStandardInput=$true;$startInfo.RedirectStandardOutput=$true;$startInfo.RedirectStandardError=$true
+            foreach($argument in @('-C',$Repository)+$Arguments){[void]$startInfo.ArgumentList.Add([string]$argument)}
+            $process=[Diagnostics.Process]::new();$process.StartInfo=$startInfo
+            try{
+                if(-not$process.Start()){throw 'Git process did not start.'}
+                $stdoutTask=$process.StandardOutput.ReadToEndAsync();$stderrTask=$process.StandardError.ReadToEndAsync()
+                $process.StandardInput.Write((@($StandardInputLines)-join"`n")+"`n");$process.StandardInput.Close();$process.WaitForExit()
+                $exitCode=$process.ExitCode;$output=@($stdoutTask.GetAwaiter().GetResult(),$stderrTask.GetAwaiter().GetResult()|Where-Object{-not[string]::IsNullOrWhiteSpace([string]$_)})
+            }finally{$process.Dispose()}
+        }else{$output=& $GitExecutable -C $Repository @Arguments 2>&1;$exitCode=$LASTEXITCODE}
     }
     finally {
         $ErrorActionPreference = $previousErrorActionPreference
@@ -3596,11 +3607,30 @@ function Assert-RepositoryTransactionScopeBinding {
         [Parameter(Mandatory=$true)][string]$GitDirectory,
         [Parameter(Mandatory=$true)][object]$Journal
     )
-    $activeGitDirectory=Get-RepositoryActiveGitDirectory -Repository $Repository
-    if(-not(Test-ProjectPublicationPathEqual -Left $activeGitDirectory -Right $GitDirectory)-or
-       -not(Test-ProjectPublicationPathEqual -Left ([string]$Journal.scope.repositoryRoot) -Right $Repository)-or
-       -not(Test-ProjectPublicationPathEqual -Left ([string]$Journal.scope.gitDirectory) -Right $activeGitDirectory)){
-        throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction scope does not match the active worktree Git directory '$activeGitDirectory'; preserve the transaction evidence for manual inspection.")
+    try{
+        $activeGitDirectory=Get-RepositoryActiveGitDirectory -Repository $Repository
+        $commonGitDirectory=((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--git-common-dir'))|Select-Object -First 1).Trim()
+        if(-not[IO.Path]::IsPathRooted($commonGitDirectory)){$commonGitDirectory=Join-Path $Repository $commonGitDirectory}
+        $commonGitDirectory=[IO.Path]::GetFullPath($commonGitDirectory)
+        $indexPath=((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--git-path','index'))|Select-Object -First 1).Trim()
+        if(-not[IO.Path]::IsPathRooted($indexPath)){$indexPath=Join-Path $Repository $indexPath}
+        $indexPath=[IO.Path]::GetFullPath($indexPath)
+        $objectFormat=((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--show-object-format'))|Select-Object -First 1).Trim()
+        $rootLease=Open-PlatformDirectory -Root $Repository -RootOnly
+        try{$repositoryRootIdentity=ConvertTo-ProjectPublicationIdentity $rootLease.Observation}finally{$rootLease.Dispose()}
+        $matches=(Test-ProjectPublicationPathEqual -Left $activeGitDirectory -Right $GitDirectory)-and
+            (Test-ProjectPublicationPathEqual -Left ([string]$Journal.scope.repositoryRoot) -Right $Repository)-and
+            (Test-RepositoryTransactionIdentityEqual -Actual $repositoryRootIdentity -Expected $Journal.scope.repositoryRootIdentity)-and
+            (Test-ProjectPublicationPathEqual -Left ([string]$Journal.scope.commonGitDirectory) -Right $commonGitDirectory)-and
+            (Test-ProjectPublicationPathEqual -Left ([string]$Journal.scope.gitDirectory) -Right $activeGitDirectory)-and
+            (Test-ProjectPublicationPathEqual -Left ([string]$Journal.scope.indexPath) -Right $indexPath)-and
+            [string]$Journal.scope.objectFormat-ceq$objectFormat-and
+            [string]$Journal.platform.os-ceq(Get-RepositoryTransactionPlatform)
+        if(-not$matches){throw 'one or more repository scope bindings changed'}
+    }
+    catch{
+        if((Get-AiInstructionsRefusalCode $_)-ceq'interrupted-install'){throw}
+        throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction scope no longer matches repository root identity, common Git directory, active Git directory, index path, object format, or platform; no recovery mutation was attempted. Preserve the transaction evidence for manual inspection. Detail: $($_.Exception.Message)" -InnerException $_.Exception)
     }
 }
 
@@ -3631,6 +3661,7 @@ function New-ProjectPublicationContext {
         ShouldStorePersonalAgentEvidence=$false
         PersonalAgentEvidenceStashBefore=$null
         PlanningObservations=(New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal))
+        TerminalManifestEntries=@()
     }
 }
 
@@ -5213,7 +5244,17 @@ function Invoke-RepositoryStashRefCompareAndSwap {
         $arguments=@('update-ref','--create-reflog','-m',$ReflogMessage,'refs/stash',$NewObjectId,$expectedObjectId)
     }
     try{Invoke-Git -Repository $Repository -Arguments $arguments|Out-Null}
-    catch{throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'PersonalAgent evidence refused because refs/stash changed after the prepared decision.' -InnerException $_.Exception)}
+    catch{
+        $updateException=$_.Exception
+        $current=$null;$readException=$null
+        try{$current=Get-RepositoryStashRefState -Repository $Repository}catch{$readException=$_.Exception}
+        if($null-eq$readException){
+            $stashChanged=if([bool]$Expected.exists){-not[bool]$current.exists-or[string]$current.objectId-cne$expectedObjectId}else{[bool]$current.exists}
+            if($stashChanged){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'PersonalAgent evidence refused because refs/stash changed after the prepared decision.' -InnerException $updateException)}
+        }
+        $readFailureDetail=if($null-ne$readException){" The refs/stash readback also failed: $($readException.Message)"}else{''}
+        throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "PersonalAgent evidence git update-ref refs/stash write failed. $($updateException.Message)$readFailureDetail" -InnerException $updateException)
+    }
     $expectedAfter=if([string]::IsNullOrWhiteSpace($NewObjectId)){$expectedObjectId}else{$NewObjectId}
     $readback=Get-RepositoryStashRefState -Repository $Repository
     if(-not[bool]$readback.exists-or[string]$readback.objectId-cne$expectedAfter){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'PersonalAgent evidence refs/stash CAS readback differs from the expected object ID.')}
@@ -5236,6 +5277,26 @@ function Get-RepositoryTransactionHeadState {
     if((Get-GitExitCode -Repository $repository -Arguments @('rev-parse','--verify','HEAD'))-eq0){$objectId=((Invoke-Git -Repository $repository -Arguments @('rev-parse','--verify','HEAD'))|Select-Object -First 1).Trim()}
     $mode=if($null-ne$reference){if($null-eq$objectId){'unborn'}else{'symbolic'}}else{'detached'}
     return [pscustomobject][ordered]@{mode=$mode;reference=$reference;objectId=$objectId;rawSha256=$raw}
+}
+
+function Get-RepositoryGitVersion {
+    param([Parameter(Mandatory=$true)][string]$Repository)
+    $line=((Invoke-Git -Repository $Repository -Arguments @('--version'))|Select-Object -First 1).Trim()
+    $match=[regex]::Match($line,'(?i)^git version (?<Major>[0-9]+)\.(?<Minor>[0-9]+)(?:\.(?<Patch>[0-9]+))?')
+    if(-not$match.Success){throw (New-AiInstructionsRefusalException -Code 'capability-unavailable' -Message "Detached HEAD remediation requires Git >= 2.46 for atomic symbolic-ref CAS, but the installed Git version could not be parsed: $line")}
+    return [version]::new([int]$match.Groups['Major'].Value,[int]$match.Groups['Minor'].Value,$(if($match.Groups['Patch'].Success){[int]$match.Groups['Patch'].Value}else{0}))
+}
+
+function Set-RepositoryDetachedHeadSymbolicCompareAndSwap {
+    param([Parameter(Mandatory=$true)][string]$Repository,[Parameter(Mandatory=$true)][string]$ExpectedObjectId,[Parameter(Mandatory=$true)][string]$NewReference)
+    $gitVersion=Get-RepositoryGitVersion -Repository $Repository
+    if($gitVersion-lt[version]'2.46.0'){throw (New-AiInstructionsRefusalException -Code 'capability-unavailable' -Message "Detached HEAD remediation requires Git >= 2.46 because changing detached HEAD to a symbolic ref must use an atomic symref CAS and must not overwrite an external HEAD change. Installed: $gitVersion")}
+    $commands=@('start',"symref-update HEAD $NewReference oid $ExpectedObjectId",'prepare','commit')
+    try{Invoke-Git -Repository $Repository -Arguments @('update-ref','--stdin') -StandardInputLines $commands|Out-Null}
+    catch{
+        if((Get-AiInstructionsRefusalCode $_)-ceq'capability-unavailable'){throw}
+        throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'Detached HEAD atomic symbolic-ref CAS refused because HEAD changed after observation; the external HEAD state was preserved.' -InnerException $_.Exception)
+    }
 }
 
 function Get-RepositoryTransactionIndexEntrySetSha256 {
@@ -5433,11 +5494,11 @@ function Invoke-RepositoryTransactionOperation {
         }
         'update-git-head' {
             if([string]$destination.mode-ceq'detached'){Invoke-Git -Repository $repository -Arguments @('update-ref','--no-deref','HEAD',[string]$destination.objectId,[string]$source.objectId)|Out-Null}
-            else{Invoke-Git -Repository $repository -Arguments @('symbolic-ref','HEAD',[string]$destination.reference)|Out-Null}
+            else{Set-RepositoryDetachedHeadSymbolicCompareAndSwap -Repository $repository -ExpectedObjectId ([string]$source.objectId) -NewReference ([string]$destination.reference)}
         }
         'store-git-stash-evidence' {
             $subject=((Invoke-Git -Repository $repository -Arguments @('show','--no-patch','--format=%s',[string]$destination.objectId))|Select-Object -First 1).Trim()
-            Invoke-Git -Repository $repository -Arguments @('stash','store','--quiet','-m',$subject,[string]$destination.objectId)|Out-Null
+            Invoke-RepositoryStashRefCompareAndSwap -Repository $repository -Expected $Operation.before -NewObjectId ([string]$destination.objectId) -ReflogMessage $subject
         }
     }
     $readback=Get-RepositoryTransactionOperationState $Journal $Operation
@@ -5448,7 +5509,10 @@ function Invoke-RepositoryTransactionOperation {
 function Copy-RepositoryInstallJournal {
     param([Parameter(Mandatory=$true)][object]$Journal,[string]$Phase,[Nullable[long]]$Sequence,[string]$EvidenceObjectId,[AllowNull()][object]$ObservedAfter,[AllowNull()][object]$DisplacedAfterMetadata)
     $document=[ordered]@{}
-    foreach($property in @($Journal.PSObject.Properties)){$document[$property.Name]=if($property.Name-ceq'operations'){@($property.Value)}else{$property.Value}}
+    foreach($property in @($Journal.PSObject.Properties)){
+        if($property.Name-cin@('operations','retainedManifestPaths')){$document[$property.Name]=[object[]]@($property.Value)}
+        else{$document[$property.Name]=$property.Value}
+    }
     $copy=[pscustomobject]$document
     if(-not[string]::IsNullOrEmpty($Phase)){$copy.phase=$Phase}
     if($null-ne$Sequence){
@@ -5489,9 +5553,7 @@ function Invoke-RepositoryTransactionEvidenceStashStore {
     if([string]$operation.state-cne'pending'-or$null-ne$operation.after.objectId){throw 'The prepared PersonalAgent evidence operation has already been bound.'}
     Invoke-AiInstructionsInstallFailpoint -Name ("before-operation-"+$sequence)
     $subject=((Invoke-Git -Repository ([string]$Context.Repository) -Arguments @('show','--no-patch','--format=%s',$EvidenceCommit))|Select-Object -First 1).Trim()
-    $currentState=Get-RepositoryStashRefState -Repository ([string]$Context.Repository)
-    if(-not(Test-RepositoryTransactionStateEqual $operation $currentState $operation.before)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'PersonalAgent evidence refused because refs/stash changed after the prepared decision before evidence storage.')}
-    Invoke-Git -Repository ([string]$Context.Repository) -Arguments @('stash','store','--quiet','-m',$subject,$EvidenceCommit)|Out-Null
+    Invoke-RepositoryStashRefCompareAndSwap -Repository ([string]$Context.Repository) -Expected $operation.before -NewObjectId $EvidenceCommit -ReflogMessage $subject
     if(@(Invoke-Git -Repository ([string]$Context.Repository) -Arguments @('stash','list','--format=%H')|Where-Object{([string]$_).Trim()-ceq$EvidenceCommit}).Count-eq0){throw 'The newly stored PersonalAgent evidence commit was not found in stash history.'}
     Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+$sequence+"-before-journal")
     Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Sequence $sequence -EvidenceObjectId $EvidenceCommit)
@@ -5516,6 +5578,26 @@ function Add-RemediationFileIntents {
         try{$before=Get-AiInstructionsInstallFileState -ParentLease $lease -Leaf $leaf -LiteralPath $full -PlatformOs (Get-RepositoryTransactionPlatform) -IncludePermissions}finally{$lease.Dispose()}
         $Context.Intents.Add($key,[pscustomobject][ordered]@{TargetKind='repository';TargetRoot=$Context.Repository;RelativePath=[string]$relative;Before=$before;Bytes=$null;Remove=$true;Role='remediation-file'})
     }
+}
+
+function New-RepositoryRetainedManifestPathRecords {
+    param([Parameter(Mandatory=$true)][object]$Context,[Parameter(Mandatory=$true)][object[]]$Operations)
+    $operationTargets=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach($operation in @($Operations)){
+        if([string]$operation.target.kind-ceq'repository-relative'){[void]$operationTargets.Add([string]$operation.target.value)}
+    }
+    $records=New-Object System.Collections.Generic.List[object]
+    foreach($entry in @($Context.TerminalManifestEntries|Sort-Object targetPath)){
+        $targetPath=[string]$entry.targetPath
+        if($operationTargets.Contains($targetPath)){continue}
+        $observation=$null
+        if(-not$Context.PlanningObservations.TryGetValue($targetPath,[ref]$observation)-or$null-eq$observation-or-not[bool]$observation.exists-or$null-ne$observation.unobservable-or
+            [string]::IsNullOrWhiteSpace([string]$observation.sha256)-or$null-eq$observation.identity){
+            throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Repository transaction cannot prepare retained manifest authority for '$targetPath' because its planning observation is absent or not a regular file.")
+        }
+        $records.Add([pscustomobject][ordered]@{targetPath=$targetPath;sha256=[string]$observation.sha256;length=[int64]$observation.length;identity=$observation.identity})
+    }
+    return [object[]]$records.ToArray()
 }
 
 function New-RepositoryInstallOperations {
@@ -5586,6 +5668,7 @@ function Start-RepositoryInstallTransaction {
     $Context.Identity=ConvertTo-ProjectPublicationIdentity $Context.Lease.Observation
     $operations=New-RepositoryInstallOperations $Context
     if(@($operations).Count-eq0){Remove-ProjectPublicationContextEvidence $Context;return}
+    [object[]]$retainedManifestPaths=@(New-RepositoryRetainedManifestPathRecords -Context $Context -Operations @($operations))
     $common=((Invoke-Git -Repository $Context.Repository -Arguments @('rev-parse','--git-common-dir'))|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($common)){$common=Join-Path $Context.Repository $common};$common=[IO.Path]::GetFullPath($common)
     $git=Get-RepositoryActiveGitDirectory -Repository $Context.Repository
     $index=((Invoke-Git -Repository $Context.Repository -Arguments @('rev-parse','--git-path','index'))|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($index)){$index=Join-Path $Context.Repository $index};$index=[IO.Path]::GetFullPath($index)
@@ -5594,7 +5677,7 @@ function Start-RepositoryInstallTransaction {
     $scope=[pscustomobject][ordered]@{kind='repository';repositoryRoot=$Context.Repository;repositoryRootIdentity=$rootIdentity;commonGitDirectory=$common;gitDirectory=$git;indexPath=$index;indexLockContentSha256=[string]$Context.RepositoryIndexLock.ContentSha256;objectFormat=$(if($null-ne$Context.Remediation){[string]$Context.Remediation.ObjectFormat}else{((Invoke-Git -Repository $Context.Repository -Arguments @('rev-parse','--show-object-format'))|Select-Object -First 1).Trim()});externalBackup=$backup}
     $manifestIntent=@($Context.Intents.Values|Where-Object{[string]$_.Role-ceq'manifest'})|Select-Object -First 1;$previous=if($null-ne$manifestIntent-and$manifestIntent.Before.exists){[string]$manifestIntent.Before.sha256}else{$null};$candidate=if($null-ne$manifestIntent-and-not$manifestIntent.Remove){Get-ByteArraySha256 ([byte[]]$manifestIntent.Bytes)}else{Get-ByteArraySha256 ([Text.UTF8Encoding]::new($false).GetBytes(($operations|ConvertTo-Json -Depth 15 -Compress)))}
     $start=(Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o',[Globalization.CultureInfo]::InvariantCulture);$platform=Get-RepositoryTransactionPlatform
-    $journal=New-AiInstructionsInstallJournalV2 -TransactionId $Context.Id -OwnerProcessId $PID -OwnerProcessStartIdentity $start -PlatformOs $platform -PlatformArchitecture (Get-RepositoryTransactionArchitecture) -LockPrimitive $(if($platform-ceq'windows'){'windows-fileshare'}else{'flock'}) -LockLeaf 'bootstrap-ai-instructions.lock' -PreviousBundleSha256 $previous -CandidateBundleSha256 $candidate -Scope $scope -Phase prepared -Operations $operations
+    $journal=New-AiInstructionsInstallJournalV2 -TransactionId $Context.Id -OwnerProcessId $PID -OwnerProcessStartIdentity $start -PlatformOs $platform -PlatformArchitecture (Get-RepositoryTransactionArchitecture) -LockPrimitive $(if($platform-ceq'windows'){'windows-fileshare'}else{'flock'}) -LockLeaf 'bootstrap-ai-instructions.lock' -PreviousBundleSha256 $previous -CandidateBundleSha256 $candidate -Scope $scope -RetainedManifestPaths $retainedManifestPaths -Phase prepared -Operations $operations
     $Context.JournalStoreStates=[ordered]@{'journal.json'=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null};'journal.prev'=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null};'journal.stage'=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}}
     $Context.CurrentJournal=Write-AiInstructionsInstallJournalStore -TransactionLease $Context.Lease -TransactionPath (Get-RepositoryTransactionPath -Context $Context) -Journal $journal -PlatformOs $platform -JournalStoreStates $Context.JournalStoreStates;$Context.Durable=$true
     Invoke-AiInstructionsInstallFailpoint -Name 'after-journal-prepared'
@@ -5619,6 +5702,41 @@ function Assert-RepositoryEvidenceReuseCasOperations {
     }
 }
 
+function Assert-RepositoryTransactionTerminalManifestClosure {
+    param([Parameter(Mandatory=$true)][object]$Context)
+    $journal=$Context.CurrentJournal
+    $manifestPath=Join-Path ([string]$journal.scope.repositoryRoot) $manifestRelativePath.Replace('/',[IO.Path]::DirectorySeparatorChar)
+    $retainedRecords=@($journal.retainedManifestPaths)
+    if(-not(Test-Path -LiteralPath $manifestPath -PathType Leaf)){
+        if($retainedRecords.Count-eq0){return}
+        throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'Repository transaction terminal closure gate found retained manifest authority but no terminal manifest file; transaction evidence was retained.')
+    }
+    try{$manifestDocument=[Text.UTF8Encoding]::new($false,$true).GetString([IO.File]::ReadAllBytes($manifestPath))|ConvertFrom-Json -ErrorAction Stop}
+    catch{throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction terminal closure gate could not decode the terminal manifest; transaction evidence was retained. $($_.Exception.Message)" -InnerException $_.Exception)}
+    if($null-eq$manifestDocument-or$null-eq$manifestDocument.PSObject.Properties['files']){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'Repository transaction terminal closure gate found a manifest without a files inventory; transaction evidence was retained.')}
+    $manifestPaths=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $usedRetained=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach($entry in @($manifestDocument.files)){
+        $targetPath=[string]$entry.targetPath
+        if([string]::IsNullOrWhiteSpace($targetPath)-or-not$manifestPaths.Add($targetPath)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'Repository transaction terminal closure gate found an invalid or duplicate manifest target path; transaction evidence was retained.')}
+        $targetOperations=@($journal.operations|Where-Object{[string]$_.target.kind-ceq'repository-relative'-and[string]$_.target.value-ceq$targetPath})
+        if($targetOperations.Count-eq1){
+            $operation=$targetOperations[0]
+            $current=Get-RepositoryTransactionOperationState $journal $operation
+            if(-not(Test-RepositoryTransactionStateEqual $operation $current $operation.after)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction terminal closure gate found operation drift at '$targetPath'; transaction evidence was retained.")}
+            continue
+        }
+        if($targetOperations.Count-ne0){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction terminal closure gate found ambiguous operation authority for '$targetPath'; transaction evidence was retained.")}
+        $matches=@($retainedRecords|Where-Object{[string]$_.targetPath-ceq$targetPath})
+        if($matches.Count-ne1){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction terminal closure gate found missing or ambiguous retained authority for '$targetPath'; transaction evidence was retained.")}
+        $expected=[pscustomobject][ordered]@{exists=$true;sha256=[string]$matches[0].sha256;length=[int64]$matches[0].length;identity=$matches[0].identity;unobservable=$null}
+        $actual=Get-ProjectPublicationPathObservation -Repository ([string]$journal.scope.repositoryRoot) -RelativePath $targetPath
+        if(-not(Test-ProjectPublicationPathObservationEqual -Actual $actual -Expected $expected)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction terminal closure gate found retained path drift at '$targetPath'; transaction evidence was retained.")}
+        [void]$usedRetained.Add($targetPath)
+    }
+    if($usedRetained.Count-ne$retainedRecords.Count){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'Repository transaction terminal closure gate found retained authority outside the terminal manifest inventory; transaction evidence was retained.')}
+}
+
 function Complete-RepositoryInstallTransactionApply {
     param([Parameter(Mandatory=$true)][object]$Context)
     if(-not[bool]$Context.Durable){return}
@@ -5626,6 +5744,7 @@ function Complete-RepositoryInstallTransactionApply {
     if([string]$Context.CurrentJournal.phase-cne'applying'){throw "Repository transaction cannot complete apply from phase '$($Context.CurrentJournal.phase)'."}
     foreach($operation in $Context.CurrentJournal.operations){$current=Get-RepositoryTransactionOperationState $Context.CurrentJournal $operation;if(-not(Test-RepositoryTransactionStateEqual $operation $current $operation.after)){throw (New-AiInstructionsRefusalException -Code interrupted-install -Message "Repository transaction terminal verification failed for sequence $($operation.sequence).")}}
     Assert-RepositoryEvidenceReuseCasOperations -Context $Context
+    Assert-RepositoryTransactionTerminalManifestClosure -Context $Context
     Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Phase applied)
 }
 
@@ -5713,6 +5832,7 @@ function Invoke-RepositoryTransactionRollback {
 function Complete-RepositoryTransactionCleanup {
     param([Parameter(Mandatory=$true)][object]$Context)
     foreach($operation in @($Context.CurrentJournal.operations|Sort-Object sequence)){Invoke-RepositoryTransactionOperation -Context $Context -Journal $Context.CurrentJournal -Operation $operation -Direction redo|Out-Null}
+    Assert-RepositoryTransactionTerminalManifestClosure -Context $Context
     Invoke-AiInstructionsInstallFailpoint -Name 'after-committed-before-cleanup'
     Close-RepositoryIndexTransactionLock -Lock $Context.RepositoryIndexLock
     Invoke-AiInstructionsInstallFailpoint -Name 'after-index-lock-release-before-journal-cleanup'
@@ -5732,6 +5852,7 @@ function Invoke-RepositoryInstallTransaction {
     Complete-RepositoryInstallTransactionApply $Context
     if([string]$Context.CurrentJournal.phase-cne'applied'){throw 'Repository transaction cannot commit before applied verification.'}
     Assert-RepositoryEvidenceReuseCasOperations -Context $Context
+    Assert-RepositoryTransactionTerminalManifestClosure -Context $Context
     Invoke-AiInstructionsInstallFailpoint -Name 'before-committed-journal-write'
     Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Phase committed)
     Invoke-AiInstructionsInstallFailpoint -Name 'after-committed-journal-write'
@@ -6850,6 +6971,7 @@ try {
         $script:ProjectPublicationContext.ShouldStorePersonalAgentEvidence=$shouldStorePersonalAgentEvidence
         $script:ProjectPublicationContext.PersonalAgentEvidenceStashBefore=Get-RepositoryStashRefState -Repository $targetRootPath
     }
+    $script:ProjectPublicationContext.TerminalManifestEntries=@($nextManifestEntries|Sort-Object targetPath)
 
     $repositoryIndexLock=Open-RepositoryIndexTransactionLock -Repository $targetRootPath
     $repositoryIndexPath=[string]$repositoryIndexLock.IndexPath

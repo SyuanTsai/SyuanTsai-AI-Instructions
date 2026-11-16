@@ -623,6 +623,136 @@ function New-P9cPreManifestTamperBootstrap {
     return $bootstrapPath
 }
 
+function New-P9cRetainedPathTerminalTamperBootstrap {
+    param(
+        [Parameter(Mandatory=$true)][string]$Root,
+        [Parameter(Mandatory=$true)][string]$Failpoint,
+        [Parameter(Mandatory=$true)][string]$TargetPath
+    )
+    $bootstrapPath=New-P9cProjectPublicationFailpointBootstrap -Root $Root -Failpoint $Failpoint -RecoveryPath NextRun
+    $modulePath=Join-Path (Split-Path -Parent $bootstrapPath) 'ai-instructions-install-transaction.psm1'
+    $text=[IO.File]::ReadAllText($modulePath)
+    $marker='    [Environment]::FailFast("AI instructions installer failpoint: $Name")'
+    if(-not$text.Contains($marker)){throw 'Install failpoint body was not found for retained-path terminal tamper injection.'}
+    $escapedTarget=[IO.Path]::GetFullPath($TargetPath).Replace("'","''")
+    $replacement="    [IO.File]::AppendAllText('$escapedTarget',`"terminal retained drift``n`",[Text.UTF8Encoding]::new(`$false))`r`n    [Environment]::SetEnvironmentVariable('AI_INSTRUCTIONS_INSTALL_FAILPOINT',`$null,'Process')`r`n    return"
+    [IO.File]::WriteAllText($modulePath,$text.Replace($marker,$replacement),[Text.UTF8Encoding]::new($false))
+    return $bootstrapPath
+}
+
+function New-P9cStashCasRaceBootstrap {
+    param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][string]$ExternalObjectId)
+    if($ExternalObjectId-cnotmatch'^[0-9a-f]{40,64}$'){throw 'External refs/stash race object ID is invalid.'}
+    $scriptRoot=Join-Path $Root 'scripts'
+    Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts') -Destination $scriptRoot -Recurse
+    $bootstrapPath=Join-Path $scriptRoot 'bootstrap-ai-instructions.ps1'
+    $text=[IO.File]::ReadAllText($bootstrapPath)
+    $marker='    Invoke-RepositoryStashRefCompareAndSwap -Repository ([string]$Context.Repository) -Expected $operation.before -NewObjectId $EvidenceCommit -ReflogMessage $subject'
+    if(-not$text.Contains($marker)){throw 'Durable evidence CAS invocation was not found for refs/stash race injection.'}
+    $injection="    `$externalStashObject='$ExternalObjectId'`r`n    Invoke-Git -Repository ([string]`$Context.Repository) -Arguments @('update-ref','refs/stash',`$externalStashObject)|Out-Null`r`n$marker"
+    [IO.File]::WriteAllText($bootstrapPath,$text.Replace($marker,$injection),[Text.UTF8Encoding]::new($false))
+    return $bootstrapPath
+}
+
+function New-P9cJournalDurabilityFailpointBootstrap {
+    param(
+        [Parameter(Mandatory=$true)][string]$Root,
+        [Parameter(Mandatory=$true)][ValidateSet('prepared','applying','applied','committed')][string]$Phase,
+        [Parameter(Mandatory=$true)][ValidateSet('after-journal-stage-flush','after-journal-publish-before-parent-flush')][string]$Failpoint
+    )
+    $scriptRoot=Join-Path $Root 'scripts'
+    Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts') -Destination $scriptRoot -Recurse
+    $bootstrapPath=Join-Path $scriptRoot 'bootstrap-ai-instructions.ps1'
+    $modulePath=Join-Path $scriptRoot 'ai-instructions-install-transaction.psm1'
+    $text=[IO.File]::ReadAllText($modulePath)
+    $marker='    [byte[]]$bytes = ConvertTo-InstallJournalBytes -Journal $Journal -Compact:$isRepoV2'
+    if(-not$text.Contains($marker)){throw 'Journal byte serialization marker was not found for durability failpoint injection.'}
+    $phaseCondition=if($Phase-ceq'applying'){"[string]`$Journal.phase -ceq 'applying' -and @(`$Journal.operations|Where-Object{[string]`$_.state -ceq 'applied'}).Count -eq 1"}else{"[string]`$Journal.phase -ceq '$Phase'"}
+    $injection="    if($phaseCondition){[Environment]::SetEnvironmentVariable('AI_INSTRUCTIONS_INSTALL_FAILPOINT','$Failpoint','Process')}`r`n$marker"
+    [IO.File]::WriteAllText($modulePath,$text.Replace($marker,$injection),[Text.UTF8Encoding]::new($false))
+    return $bootstrapPath
+}
+
+function Set-P9cRepositoryJournalScopeMismatch {
+    param(
+        [Parameter(Mandatory=$true)][string]$JournalPath,
+        [Parameter(Mandatory=$true)][ValidateSet('CommonGitDirectory','IndexPath')][string]$Kind
+    )
+    $parameters=@{InputObject=(Get-Content -Raw -LiteralPath $JournalPath);ErrorAction='Stop'}
+    if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'}
+    $journal=ConvertFrom-Json @parameters
+    if($Kind-ceq'CommonGitDirectory'){
+        $journal.scope.commonGitDirectory=[IO.Path]::GetFullPath((Join-Path (Split-Path -Parent ([string]$journal.scope.commonGitDirectory)) 'foreign-common'))
+        foreach($operation in @($journal.operations|Where-Object{[string]$_.target.kind-ceq'git-shared-exclude'})){$operation.target.value=Join-Path ([string]$journal.scope.commonGitDirectory) 'info/exclude'}
+    }else{
+        $journal.scope.indexPath=[IO.Path]::GetFullPath(([string]$journal.scope.indexPath)+'.foreign')
+        foreach($operation in @($journal.operations|Where-Object{[string]$_.target.kind-ceq'git-index'})){$operation.target.value=[string]$journal.scope.indexPath}
+    }
+    Assert-AiInstructionsInstallJournalV2 -Journal $journal|Out-Null
+    [IO.File]::WriteAllText($JournalPath,(($journal|ConvertTo-Json -Depth 30 -Compress)+"`n"),[Text.UTF8Encoding]::new($false))
+}
+
+function Invoke-P9cJournalDurabilityRecoveryMatrix {
+    param(
+        [Parameter(Mandatory=$true)][string]$ExternalRoot,
+        [Parameter(Mandatory=$true)][string]$Seed,
+        [Parameter(Mandatory=$true)]$Context,
+        [Parameter(Mandatory=$true)][string]$ArchivePath
+    )
+    $normalize={param([string]$Snapshot)$state=$Snapshot|ConvertFrom-Json;$state.indexRaw='<clone-local-stat-cache>';return ($state|ConvertTo-Json -Depth 6 -Compress)}
+    $expectedTarget=Join-Path $ExternalRoot 'durability-expected';Copy-Item -LiteralPath $Seed -Destination $expectedTarget -Recurse
+    $expectedResult=Invoke-P9bRepoBootstrap -Context $Context -ArchivePath $ArchivePath -TargetRoot $expectedTarget
+    if($expectedResult.ExitCode-ne0){throw "Could not create journal durability after-state: $($expectedResult.Output)"}
+    $expectedAfter=&$normalize (Get-P9cPublicationStateSnapshot $expectedTarget)
+    $cases=@(
+        [pscustomobject]@{Phase='prepared';Failpoint='after-journal-stage-flush';DurablePhase=$null;Expected='refused'},
+        [pscustomobject]@{Phase='prepared';Failpoint='after-journal-publish-before-parent-flush';DurablePhase='prepared';Expected='before'},
+        [pscustomobject]@{Phase='applying';Failpoint='after-journal-stage-flush';DurablePhase='applying';Expected='before'},
+        [pscustomobject]@{Phase='applying';Failpoint='after-journal-publish-before-parent-flush';DurablePhase='applying';Expected='before'},
+        [pscustomobject]@{Phase='applied';Failpoint='after-journal-stage-flush';DurablePhase='applying';Expected='before'},
+        [pscustomobject]@{Phase='applied';Failpoint='after-journal-publish-before-parent-flush';DurablePhase='applied';Expected='before'},
+        [pscustomobject]@{Phase='committed';Failpoint='after-journal-stage-flush';DurablePhase='applied';Expected='before'},
+        [pscustomobject]@{Phase='committed';Failpoint='after-journal-publish-before-parent-flush';DurablePhase='committed';Expected='after'}
+    )
+    foreach($case in $cases){
+        $name="$($case.Phase)-$($case.Failpoint)"
+        $target=Join-Path $ExternalRoot $name;Copy-Item -LiteralPath $Seed -Destination $target -Recurse
+        $before=&$normalize (Get-P9cPublicationStateSnapshot $target)
+        $bootstrap=New-P9cJournalDurabilityFailpointBootstrap -Root (Join-Path $ExternalRoot ("runtime-"+$name)) -Phase $case.Phase -Failpoint $case.Failpoint
+        $failed=Invoke-P9bRepoBootstrap -Context $Context -ArchivePath $ArchivePath -TargetRoot $target -BootstrapPath $bootstrap
+        $failed.ExitCode|Should -Not -Be 0
+        $transactions=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force);$transactions.Count|Should -Be 1
+        $journalPath=Join-Path $transactions[0].FullName 'journal.json';$stagePath=Join-Path $transactions[0].FullName 'journal.stage'
+        if($null-eq$case.DurablePhase){Test-Path -LiteralPath $journalPath|Should -Be $false}else{[string](Get-Content -Raw -LiteralPath $journalPath|ConvertFrom-Json).phase|Should -BeExactly $case.DurablePhase}
+        if($case.Failpoint-ceq'after-journal-stage-flush'){
+            $staged=Get-Content -Raw -LiteralPath $stagePath|ConvertFrom-Json;[string]$staged.phase|Should -BeExactly $case.Phase
+            if($case.Phase-ceq'applying'){@($staged.operations|Where-Object{[string]$_.state-ceq'applied'}).Count|Should -Be 1}
+        }
+        $recovery=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $ExternalRoot ("recovery-"+$name)) -Failpoint RecoveryOnly
+        $recoveryResult=Invoke-P9bRepoBootstrap -Context $Context -ArchivePath $ArchivePath -TargetRoot $target -BootstrapPath $recovery
+        $recoveryResult.ExitCode|Should -Not -Be 0
+        $residueCount=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force -ErrorAction SilentlyContinue).Count
+        if($case.Expected-ceq'refused'){
+            $residueCount|Should -Be 1
+            (Get-AiInstructionsRefusalCode $recoveryResult.Output)|Should -Be interrupted-install
+            $recoveryResult.Output|Should -Match '(?s)no readable journal.*index\.lock|index\.lock.*no readable journal'
+            Test-Path -LiteralPath $journalPath|Should -Be $false
+            Test-Path -LiteralPath $stagePath -PathType Leaf|Should -Be $true
+            $indexPath=(& git -C $target rev-parse --git-path index|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($indexPath)){$indexPath=Join-Path $target $indexPath}
+            Test-Path -LiteralPath ($indexPath+'.lock') -PathType Leaf|Should -Be $true
+            $refusedState=(Get-P9cPublicationStateSnapshot $target)|ConvertFrom-Json
+            [string]$refusedState.transactionResidue|Should -Not -BeNullOrEmpty
+            $refusedState.indexRaw='<clone-local-stat-cache>'
+            $refusedState.transactionResidue=''
+            ($refusedState|ConvertTo-Json -Depth 6 -Compress)|Should -BeExactly $before
+            continue
+        }
+        $residueCount|Should -Be 0
+        $actual=&$normalize (Get-P9cPublicationStateSnapshot $target)
+        if($case.Expected-ceq'after'){$actual|Should -BeExactly $expectedAfter}else{$actual|Should -BeExactly $before}
+    }
+}
+
 function Convert-P9bManifestToLegacy {
     param(
         [Parameter(Mandatory=$true)][string]$Path,
