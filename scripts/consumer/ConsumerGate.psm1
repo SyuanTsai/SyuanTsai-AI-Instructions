@@ -157,8 +157,6 @@ function Install-GatePowerShell([string]$AuthorityRoot,[string]$WorkRoot,[string
 }
 function Invoke-GateResolver([string]$PowerShell,[string]$AuthorityRoot,[string]$InstallRoot,[string]$Tool,[string]$RunId,[string]$OutputPath,`
     [string]$GoVersion,[string]$Token) {
-    foreach($name in @('GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,$null,'Process')}
-    [Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN',$Token,'Process')
     try{
         $resolverPath=if([string]::IsNullOrWhiteSpace($env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH)){
             Join-Path $AuthorityRoot 'scripts/Resolve-StandardValidationTool.ps1'
@@ -494,6 +492,7 @@ function Initialize-GateGitHooks([string]$WorkRoot) {
 
 function Invoke-GateGit([string]$Root,[string[]]$Arguments,[int[]]$Allowed=@(0)) {
     if ([string]::IsNullOrWhiteSpace($script:GateGitHooksPath)) { Throw-GateResult INVALID 'Git hooks isolation is not initialized.' }
+    foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,$null,'Process');Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue}
     $output = @(& git -c "core.hooksPath=$script:GateGitHooksPath" -c protocol.file.allow=never `
         -c credential.helper= -C $Root @Arguments 2>&1)
     $exit = $LASTEXITCODE

@@ -53,7 +53,7 @@ function Invoke-ClosureGitBytes {
     )
 
     $start = [Diagnostics.ProcessStartInfo]::new()
-    $start.FileName = 'git'
+    $start.FileName = if ($IsWindows) { 'git.exe' } else { 'git' }
     $start.UseShellExecute = $false
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
@@ -65,6 +65,9 @@ function Invoke-ClosureGitBytes {
     [void] $start.ArgumentList.Add($RepositoryRoot)
     foreach ($argument in $Arguments) {
         [void] $start.ArgumentList.Add($argument)
+    }
+    foreach ($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN')) {
+        [void] $start.Environment.Remove($name)
     }
 
     $process = [Diagnostics.Process]::new()

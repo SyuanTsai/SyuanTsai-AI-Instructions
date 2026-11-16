@@ -61,7 +61,7 @@ function Get-ConsumerCredentialOracle([hashtable]$Sources) {
                     Tainted = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
                 })
         }
-        if ([string]$sourceEntry.Key -ceq 'scripts/consumer/Invoke-ConsumerSourceGate.ps1') {
+        if ([string]$sourceEntry.Key -in @('consumer/bootstrap/Invoke-PinnedAuthority.ps1','scripts/consumer/Invoke-ConsumerSourceGate.ps1')) {
             $states.Add([pscustomobject]@{
                     Source = [string]$sourceEntry.Key
                     Ast = $ast

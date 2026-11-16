@@ -102,13 +102,11 @@ function Initialize-PinnedGitHooks([string]$WorkRoot) {
 function Invoke-PinnedGit([string]$RepositoryRoot, [string[]]$Arguments, [int[]]$AllowedExitCodes = @(0), [switch]$AllowFileProtocol) {
     if ([string]::IsNullOrWhiteSpace($script:PinnedGitHooksPath)) { Throw-ConsumerResult INVALID 'Git hooks isolation is not initialized.' }
     $protocol = if ($AllowFileProtocol) { 'always' } else { 'never' }
-    $all = @('-c', "core.hooksPath=$script:PinnedGitHooksPath", '-c', "protocol.file.allow=$protocol", '-c', 'credential.helper=', '-C', `
-        $RepositoryRoot) + $Arguments
-    $output = @(& git @all 2>&1)
-     $exit = $LASTEXITCODE
+    $all = @('-c', "core.hooksPath=$script:PinnedGitHooksPath", '-c', "protocol.file.allow=$protocol", '-c', 'credential.helper=', '-C', $RepositoryRoot) + $Arguments
+    foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,$null,'Process');Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue}
+    $output=@(& git @all 2>&1);$exit=$LASTEXITCODE
     if ($exit -notin $AllowedExitCodes) { Throw-ConsumerResult INVALID "git failed ($exit): $($output -join ' ')" }
-    [pscustomobject]@{ ExitCode = $exit
-     Output = $output }
+    [pscustomobject]@{ ExitCode = $exit; Output = $output }
 }
 function Get-ConsumerRunId([string]$Repository, [string]$RunId, [string]$Attempt) {
     if ($RunId -cnotmatch '^[0-9]+$' -or $Attempt -cnotmatch '^[1-9][0-9]*$') { Throw-ConsumerResult INVALID 'Workflow run identity is invalid.' }
@@ -224,21 +222,18 @@ function Write-CreateOnlyJson([string]$Path, $Value) {
     try { $stream.Write($bytes)
      $stream.Flush($true) } finally { $stream.Dispose() }
 }
-function Invoke-ConsumerGateProcess([string]$Executable, [string]$GatePath, [string]$InterfacePath, [string]$CurrentPhase, [string]$BindingPath) {
+function Invoke-ConsumerGateProcess([string]$Executable, [string]$GatePath, [string]$InterfacePath, [string]$CurrentPhase, [string]$BindingPath, [string]$Token) {
     $contract = (Read-StrictJson $InterfacePath 'consumer gate interface').Value
     Assert-ConsumerInterface $contract
     $allowed = @($contract.phaseEnvironment.$CurrentPhase)
-    $start = [Diagnostics.ProcessStartInfo]::new()
-     $start.FileName = $Executable
-     $start.UseShellExecute = $false
-    $start.RedirectStandardOutput = $true
-     $start.RedirectStandardError = $true
+    $start = [Diagnostics.ProcessStartInfo]::new();$start.FileName = $Executable;$start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true;$start.RedirectStandardError = $true
     foreach ($argument in @('-NoProfile','-NonInteractive','-File',$GatePath,'-Interface','consumer-gate-v1','-Phase',$CurrentPhase,`
         '-AuthorityBindingPath',$BindingPath,'-BaseRoot',$BaseRoot,'-CandidateRoot',$CandidateRoot,'-WorkRoot',$WorkRoot,'-Platform',$Platform))`
             { [void]$start.ArgumentList.Add($argument) }
     if ($TransitionFromLegacy) { [void]$start.ArgumentList.Add('-TransitionFromLegacy') }
-    $preserved = @{}
-     foreach ($name in $allowed) { $preserved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
+    $preserved = @{};foreach ($name in $allowed) { $preserved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
+    if($allowed-ccontains'STANDARD_VALIDATION_GITHUB_API_TOKEN'){$preserved['STANDARD_VALIDATION_GITHUB_API_TOKEN']=$Token}
     foreach ($name in @('PATH','Path','SystemRoot','WINDIR','TEMP','TMP','HOME','USERPROFILE','ComSpec','PATHEXT','PSModulePath')) {
         $value = [Environment]::GetEnvironmentVariable($name, 'Process')
          if (-not [string]::IsNullOrWhiteSpace($value)) { $preserved[$name] = $value }
@@ -301,12 +296,14 @@ function Invoke-ConsumerGateProcess([string]$Executable, [string]$GatePath, [str
         $preserved.Clear()
         $start.Environment.Clear()
         $process.Dispose();$value = $null
-        Remove-Variable standardOutput, standardError, stdout, stderr, credentialLeak, preserved, process, value -ErrorAction SilentlyContinue
+        $Token=$null
+        Remove-Variable standardOutput, standardError, stdout, stderr, credentialLeak, preserved, process, value, Token -ErrorAction SilentlyContinue
     }
     $resultCode
 }
-
 if ($DefineFunctionsOnly) { return }
+$bootstrapToken=[string][Environment]::GetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN','Process')
+foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,$null,'Process');Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue}
 try {
     foreach ($required in @('Phase','BaseRoot','CandidateRoot','WorkRoot','TriggerEvent','BaseRevision','CandidateRevision','HeadRevision',`
         'WorkflowRunId','WorkflowRunAttempt','Platform')) { if ([string]::IsNullOrWhiteSpace([string](Get-Variable $required -ValueOnly))) {`
@@ -389,12 +386,15 @@ try {
         $executable = $runtimeExecutable
     }
     $code = Invoke-ConsumerGateProcess $executable (Join-Path $authority.Root 'scripts/consumer/Invoke-ConsumerSourceGate.ps1') $interfacePath `
-        $Phase $bindingPath
+        $Phase $bindingPath $bootstrapToken
     exit $code
 } catch {
     $message = [string]$_.Exception.Message
+    if(-not[string]::IsNullOrEmpty($bootstrapToken)){$message=$message.Replace($bootstrapToken,'[REDACTED]')}
     if ($message -match '^(BLOCKED|FAILED|INVALID|CANCELLED)\|(.*)$') { [Console]::Error.WriteLine($Matches[2])
      exit $script:ExitCodes[$Matches[1]] }
     [Console]::Error.WriteLine($message)
      exit 20
-}
+} finally {
+    $bootstrapToken=$null;$message=$null
+    Remove-Variable bootstrapToken,message -ErrorAction SilentlyContinue}

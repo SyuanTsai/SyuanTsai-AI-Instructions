@@ -19,6 +19,20 @@ Describe 'Authority-owned consumer source gate' {
         if($LASTEXITCODE-ne0){throw "fixture git failed: $($output-join' ')"}
         $output}
         function Get-SourceFixtureGitScalar([string]$Root,[string[]]$Arguments){([string](@(Invoke-SourceFixtureGit $Root $Arguments)[0])).Trim()}
+        function New-GitCredentialPresenceShim([string]$Root,[string]$ObservationPath) {
+            [void][IO.Directory]::CreateDirectory($Root)
+            $realGit=(Get-Command git -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
+            if($IsWindows){
+                $path=Join-Path $Root 'git.cmd'
+                $text="@echo off`r`nset s=0`r`nset g=0`r`nset h=0`r`nif defined STANDARD_VALIDATION_GITHUB_API_TOKEN set s=1`r`nif defined GITHUB_TOKEN set g=1`r`nif defined GH_TOKEN set h=1`r`n>>`"$ObservationPath`" echo %s%,%g%,%h%`r`nset args=%*`r`nset args=%args:{tree}=^^^^{tree}%`r`nset args=%args:{commit}=^^^^{commit}%`r`n`"$realGit`" %args%`r`nexit /b %errorlevel%`r`n"
+            }else{
+                $path=Join-Path $Root 'git';$log=$ObservationPath.Replace('"','\"');$git=$realGit.Replace('"','\"')
+                $text="#!/bin/sh`ns=0; g=0; h=0`n[ -n `"`${STANDARD_VALIDATION_GITHUB_API_TOKEN+x}`" ] && s=1`n[ -n `"`${GITHUB_TOKEN+x}`" ] && g=1`n[ -n `"`${GH_TOKEN+x}`" ] && h=1`nprintf '%s,%s,%s\n' `"`$s`" `"`$g`" `"`$h`" >> `"$log`"`nexec `"$git`" `"`$@`"`n"
+            }
+            [IO.File]::WriteAllText($path,$text,[Text.UTF8Encoding]::new($false))
+            if(-not$IsWindows){[IO.File]::SetUnixFileMode($path,[IO.UnixFileMode]::UserRead-bor[IO.UnixFileMode]::UserWrite-bor[IO.UnixFileMode]::UserExecute)}
+            $Root
+        }
         function Copy-FixtureValue($Value){$Value|ConvertTo-Json -Depth 30|ConvertFrom-Json}
         function Assert-ExactObjectShape($Value,[string[]]$Properties){
             (@($Value.PSObject.Properties.Name)-join',')|Should Be ($Properties-join',')
@@ -1286,6 +1300,8 @@ Write-Output 'scripts/Legacy.ps1'
             'scripts/consumer/Invoke-ConsumerSourceGate.ps1'=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-ConsumerSourceGate.ps1')
         }
         $expectedHolders=@'
+consumer/bootstrap/Invoke-PinnedAuthority.ps1|<script>|bootstrapToken
+consumer/bootstrap/Invoke-PinnedAuthority.ps1|<script>|message
 consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|preserved
 consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|process
 consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|sentinel
@@ -1294,6 +1310,7 @@ consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|standar
 consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|start
 consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|stderr
 consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|stdout
+consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|Token
 consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|value
 scripts/consumer/ConsumerGate.psm1|Assert-GateCredentialAbsent|content
 scripts/consumer/ConsumerGate.psm1|Assert-GateCredentialAbsent|needle
@@ -1323,6 +1340,10 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|tokenVariable
 scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|value
 '@ -split '\r?\n'|Where-Object{$_}
         $expectedCleanups=@'
+consumer/bootstrap/Invoke-PinnedAuthority.ps1|<script>|environment-null|[Environment]::SetEnvironmentVariable($name,$null,'Process')
+consumer/bootstrap/Invoke-PinnedAuthority.ps1|<script>|null|$bootstrapToken=$null
+consumer/bootstrap/Invoke-PinnedAuthority.ps1|<script>|null|$message=$null
+consumer/bootstrap/Invoke-PinnedAuthority.ps1|<script>|remove-variable|Remove-Variable bootstrapToken,message -ErrorAction SilentlyContinue
 consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|clear|$start.Environment.Clear()
 consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|clear|$start.Environment.Clear()
 consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|null|$value=$null
@@ -1340,7 +1361,8 @@ consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|clear|$
 consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|clear|$start.Environment.Clear()
 consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|dispose|$process.Dispose()
 consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|null|$value = $null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|remove-variable|Remove-Variable standardOutput, standardError, stdout, stderr, credentialLeak, preserved, process, value -ErrorAction SilentlyContinue
+consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|null|$Token=$null
+consumer/bootstrap/Invoke-PinnedAuthority.ps1|Invoke-ConsumerGateProcess|remove-variable|Remove-Variable standardOutput, standardError, stdout, stderr, credentialLeak, preserved, process, value, Token -ErrorAction SilentlyContinue
 scripts/consumer/ConsumerGate.psm1|Assert-GateCredentialAbsent|null|$content=$null
 scripts/consumer/ConsumerGate.psm1|Assert-GateCredentialAbsent|null|$content=$null
 scripts/consumer/ConsumerGate.psm1|Assert-GateCredentialAbsent|null|$needle=$null
@@ -1369,7 +1391,6 @@ scripts/consumer/ConsumerGate.psm1|Invoke-GateAcquisitionRequest|remove-variable
 scripts/consumer/ConsumerGate.psm1|Invoke-GateCredentialScopedPreparation|environment-null|[Environment]::SetEnvironmentVariable($name,$null,'Process')
 scripts/consumer/ConsumerGate.psm1|Invoke-GateCredentialScopedPreparation|null|$Token=$null
 scripts/consumer/ConsumerGate.psm1|Invoke-GateCredentialScopedPreparation|remove-variable|Remove-Variable runtime,receipt,Token -ErrorAction SilentlyContinue
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|environment-null|[Environment]::SetEnvironmentVariable($name,$null,'Process')
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|clear|$start.Environment.Clear()
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|remove|[void]$start.Environment.Remove('STANDARD_VALIDATION_GITHUB_API_TOKEN')
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|clear|$start.Environment.Clear()
@@ -1387,6 +1408,7 @@ scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|remove-variable|Remove-Va
 scripts/consumer/ConsumerGate.psm1|New-GateSourceSetup|environment-null|[Environment]::SetEnvironmentVariable($name,$null,'Process')
 scripts/consumer/ConsumerGate.psm1|New-GateSourceSetup|null|$Token=$null
 scripts/consumer/ConsumerGate.psm1|New-GateSourceSetup|remove-variable|Remove-Variable Token -ErrorAction SilentlyContinue
+scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|environment-null|[Environment]::SetEnvironmentVariable($name,$null,'Process')
 scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|null|$phaseEnvironment=$null
 scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|null|$value=$null
 scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|remove-variable|Remove-Variable phaseEnvironment,phaseEnvironmentDump,phaseTokenNames,phaseSentinelNames,sentinelHash,value -ErrorAction SilentlyContinue
@@ -1395,14 +1417,14 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|environment-null|[Enviro
 scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|null|$token=$null
 scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|null|$tokenVariable=$null
 scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|null|$message=$null
-scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|remove-variable|Remove-Variable token, tokenVariable, message, phaseEnvironmentDumpPath -ErrorAction SilentlyContinue
+scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|remove-variable|Remove-Variable token, tokenVariable, message, phaseEnvironmentDumpPath, credentialNames -ErrorAction SilentlyContinue
 '@ -split '\r?\n'|Where-Object{$_}
         $oracle=Get-ConsumerCredentialOracle $sources
         $actualHolders=@($oracle.Holders|ForEach-Object{"$($_.Source)|$($_.Function)|$($_.Variable)"})
         $actualCleanups=@($oracle.Cleanups|ForEach-Object{"$($_.Source)|$($_.Function)|$($_.Shape)|$($_.Text)"})
-        @($actualHolders).Count|Should Be 35
+        @($actualHolders).Count|Should Be 38
         (@($actualHolders)-join"`n")|Should Be (@($expectedHolders)-join"`n")
-        @($actualCleanups).Count|Should Be 73
+        @($actualCleanups).Count|Should Be 78
         (@($actualCleanups)-join"`n")|Should Be (@($expectedCleanups)-join"`n")
         foreach($holder in $oracle.Holders){
             @($oracle.Cleanups|Where-Object{$_.Source-ceq$holder.Source-and$_.Function-ceq$holder.Function-and$_.InFinally-and
@@ -1585,60 +1607,126 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|CONSUMER_GATE_PHASE_ENV_
             {if(@($observed.hits).Count-ne0){throw "CLEANUP_MUTANT_OBSERVED|$(@($observed.hits)-join',')"}}|Should Throw 'CLEANUP_MUTANT_OBSERVED'
         }
         $expectedEquivalent=@'
-consumer/bootstrap/Invoke-PinnedAuthority.ps1:255:82|$value=$null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1:274:27|$sentinel = $null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1:296:9|$standardOutput = $null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1:297:9|$standardError = $null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1:298:9|$stdout = $null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1:299:9|$stderr = $null
-consumer/bootstrap/Invoke-PinnedAuthority.ps1:303:28|$value = $null
-scripts/consumer/ConsumerGate.psm1:794:13|$content=$null
-scripts/consumer/ConsumerGate.psm1:797:9|$content=$null
-scripts/consumer/ConsumerGate.psm1:797:24|$needle=$null
-scripts/consumer/ConsumerGate.psm1:797:38|$Token=$null
+consumer/bootstrap/Invoke-PinnedAuthority.ps1:399:5|$bootstrapToken=$null
+consumer/bootstrap/Invoke-PinnedAuthority.ps1:399:27|$message=$null
+consumer/bootstrap/Invoke-PinnedAuthority.ps1:250:82|$value=$null
+consumer/bootstrap/Invoke-PinnedAuthority.ps1:269:27|$sentinel = $null
+consumer/bootstrap/Invoke-PinnedAuthority.ps1:291:9|$standardOutput = $null
+consumer/bootstrap/Invoke-PinnedAuthority.ps1:292:9|$standardError = $null
+consumer/bootstrap/Invoke-PinnedAuthority.ps1:293:9|$stdout = $null
+consumer/bootstrap/Invoke-PinnedAuthority.ps1:294:9|$stderr = $null
+consumer/bootstrap/Invoke-PinnedAuthority.ps1:298:28|$value = $null
+consumer/bootstrap/Invoke-PinnedAuthority.ps1:299:9|$Token=$null
+scripts/consumer/ConsumerGate.psm1:793:13|$content=$null
+scripts/consumer/ConsumerGate.psm1:796:9|$content=$null
+scripts/consumer/ConsumerGate.psm1:796:24|$needle=$null
+scripts/consumer/ConsumerGate.psm1:796:38|$Token=$null
 scripts/consumer/ConsumerGate.psm1:122:14|$headers.Remove('Authorization')
 scripts/consumer/ConsumerGate.psm1:123:5|$Token=$null
-scripts/consumer/ConsumerGate.psm1:824:34|$request.Dispose()
-scripts/consumer/ConsumerGate.psm1:824:53|$request=$null
-scripts/consumer/ConsumerGate.psm1:825:35|$response.Dispose()
-scripts/consumer/ConsumerGate.psm1:825:55|$response=$null
-scripts/consumer/ConsumerGate.psm1:856:18|$stream.Dispose()
-scripts/consumer/ConsumerGate.psm1:856:36|$memory.Dispose()
-scripts/consumer/ConsumerGate.psm1:864:31|$response.Dispose()
-scripts/consumer/ConsumerGate.psm1:864:73|$request.Dispose()
-scripts/consumer/ConsumerGate.psm1:865:9|$bytes=$null
-scripts/consumer/ConsumerGate.psm1:865:22|$buffer=$null
-scripts/consumer/ConsumerGate.psm1:865:36|$response=$null
-scripts/consumer/ConsumerGate.psm1:865:52|$request=$null
-scripts/consumer/ConsumerGate.psm1:865:67|$stream=$null
-scripts/consumer/ConsumerGate.psm1:865:81|$memory=$null
-scripts/consumer/ConsumerGate.psm1:865:95|$Headers=$null
-scripts/consumer/ConsumerGate.psm1:300:95|[Environment]::SetEnvironmentVariable($name,$null,'Process')
-scripts/consumer/ConsumerGate.psm1:302:43|$Token=$null
-scripts/consumer/ConsumerGate.psm1:180:9|$start.Environment.Clear()
-scripts/consumer/ConsumerGate.psm1:188:17|[void]$start.Environment.Remove('STANDARD_VALIDATION_GITHUB_API_TOKEN')
-scripts/consumer/ConsumerGate.psm1:188:108|$start.Environment.Clear()
-scripts/consumer/ConsumerGate.psm1:189:13|$standardOutput=$null
-scripts/consumer/ConsumerGate.psm1:189:35|$standardError=$null
-scripts/consumer/ConsumerGate.psm1:189:56|$stdout=$null
-scripts/consumer/ConsumerGate.psm1:189:70|$stderr=$null
-scripts/consumer/ConsumerGate.psm1:189:84|$process.Dispose()
-scripts/consumer/ConsumerGate.psm1:189:103|$start=$null
-scripts/consumer/ConsumerGate.psm1:189:116|$Token=$null
-scripts/consumer/ConsumerGate.psm1:193:5|$Token=$null
-scripts/consumer/ConsumerGate.psm1:277:13|[Environment]::SetEnvironmentVariable($name,$null,'Process')
-scripts/consumer/ConsumerGate.psm1:279:9|$Token=$null
-scripts/consumer/Invoke-ConsumerSourceGate.ps1:33:9|$phaseEnvironment=$null
-scripts/consumer/Invoke-ConsumerSourceGate.ps1:33:130|$value=$null
-scripts/consumer/Invoke-ConsumerSourceGate.ps1:73:91|[Environment]::SetEnvironmentVariable($name,$null,'Process')
-scripts/consumer/Invoke-ConsumerSourceGate.ps1:87:9|[Environment]::SetEnvironmentVariable($name,$null,'Process')
-scripts/consumer/Invoke-ConsumerSourceGate.ps1:89:5|$token=$null
-scripts/consumer/Invoke-ConsumerSourceGate.ps1:90:5|$tokenVariable=$null
-scripts/consumer/Invoke-ConsumerSourceGate.ps1:91:5|$message=$null
+scripts/consumer/ConsumerGate.psm1:124:5|[Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN',$null,'Process')
+scripts/consumer/ConsumerGate.psm1:823:34|$request.Dispose()
+scripts/consumer/ConsumerGate.psm1:823:53|$request=$null
+scripts/consumer/ConsumerGate.psm1:824:35|$response.Dispose()
+scripts/consumer/ConsumerGate.psm1:824:55|$response=$null
+scripts/consumer/ConsumerGate.psm1:855:18|$stream.Dispose()
+scripts/consumer/ConsumerGate.psm1:855:36|$memory.Dispose()
+scripts/consumer/ConsumerGate.psm1:863:31|$response.Dispose()
+scripts/consumer/ConsumerGate.psm1:863:73|$request.Dispose()
+scripts/consumer/ConsumerGate.psm1:864:9|$bytes=$null
+scripts/consumer/ConsumerGate.psm1:864:22|$buffer=$null
+scripts/consumer/ConsumerGate.psm1:864:36|$response=$null
+scripts/consumer/ConsumerGate.psm1:864:52|$request=$null
+scripts/consumer/ConsumerGate.psm1:864:67|$stream=$null
+scripts/consumer/ConsumerGate.psm1:864:81|$memory=$null
+scripts/consumer/ConsumerGate.psm1:864:95|$Headers=$null
+scripts/consumer/ConsumerGate.psm1:298:95|[Environment]::SetEnvironmentVariable($name,$null,'Process')
+scripts/consumer/ConsumerGate.psm1:300:43|$Token=$null
+scripts/consumer/ConsumerGate.psm1:178:9|$start.Environment.Clear()
+scripts/consumer/ConsumerGate.psm1:186:17|[void]$start.Environment.Remove('STANDARD_VALIDATION_GITHUB_API_TOKEN')
+scripts/consumer/ConsumerGate.psm1:186:108|$start.Environment.Clear()
+scripts/consumer/ConsumerGate.psm1:187:13|$standardOutput=$null
+scripts/consumer/ConsumerGate.psm1:187:35|$standardError=$null
+scripts/consumer/ConsumerGate.psm1:187:56|$stdout=$null
+scripts/consumer/ConsumerGate.psm1:187:70|$stderr=$null
+scripts/consumer/ConsumerGate.psm1:187:84|$process.Dispose()
+scripts/consumer/ConsumerGate.psm1:187:103|$start=$null
+scripts/consumer/ConsumerGate.psm1:187:116|$Token=$null
+scripts/consumer/ConsumerGate.psm1:190:100|[Environment]::SetEnvironmentVariable($name,$null,'Process')
+scripts/consumer/ConsumerGate.psm1:191:5|$Token=$null
+scripts/consumer/ConsumerGate.psm1:275:13|[Environment]::SetEnvironmentVariable($name,$null,'Process')
+scripts/consumer/ConsumerGate.psm1:277:9|$Token=$null
+scripts/consumer/Invoke-ConsumerSourceGate.ps1:41:9|$phaseEnvironment=$null
+scripts/consumer/Invoke-ConsumerSourceGate.ps1:41:130|$value=$null
+scripts/consumer/Invoke-ConsumerSourceGate.ps1:76:91|[Environment]::SetEnvironmentVariable($name,$null,'Process')
+scripts/consumer/Invoke-ConsumerSourceGate.ps1:90:9|[Environment]::SetEnvironmentVariable($name,$null,'Process')
+scripts/consumer/Invoke-ConsumerSourceGate.ps1:93:5|$token=$null
+scripts/consumer/Invoke-ConsumerSourceGate.ps1:94:5|$tokenVariable=$null
+scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
 '@ -split '\r?\n'|Where-Object{$_}
         if((@($equivalent)-join"`n")-cne(@($expectedEquivalent)-join"`n")){
             throw "EQUIVALENT_POINTS_MISMATCH|$(@($equivalent)-join';')"
         }
+    }
+
+    # Scenario: Prepare receives all GitHub token aliases while production launches Git for config and closure inspection.
+    # Purpose: Every non-resolver Git child must explicitly remove the three credential aliases from its process environment.
+    It 'UnitT33_removes_credentials_from_every_consumer_git_launcher' {
+        $sources=@(
+            (Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerGate.psm1')),
+            (Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1'))
+        )
+        foreach($source in $sources){
+            foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){$source|Should Match ([regex]::Escape("'$name'"))}
+        }
+        $sources[0]|Should Match 'SetEnvironmentVariable\(\$name,\$null,''Process''\)'
+        $sources[1]|Should Match 'Environment\.Remove\(\$name\)'
+        $fixture=Join-Path $script:RepositoryRoot 'tests/fixtures/Invoke-ConsumerGateCredentialFixture.ps1'
+        $formalArguments=@('-RepositoryRoot',$script:RepositoryRoot,'-FixtureRoot',(Join-Path $TestDrive 'git-formal-prepare'),
+            '-Outcome','success','-Sentinel','git-formal-token-sentinel','-TransitionFromLegacy')
+        if(-not$IsWindows){$formalArguments+='-ObserveGitCredentialEnvironment'}
+        $formalRecords=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $fixture @formalArguments 2>&1)
+        $LASTEXITCODE|Should Be 0
+        $formalResult=($formalRecords-join[Environment]::NewLine)|ConvertFrom-Json -Depth 30
+        $formalResult.exitCode|Should Be 0
+        if($IsWindows){
+            $observedRecords=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $fixture `
+                -RepositoryRoot $script:RepositoryRoot -FixtureRoot (Join-Path $TestDrive 'git-observed-prepare') -Outcome success `
+                -Sentinel 'git-formal-token-sentinel' -ObserveGitCredentialEnvironment 2>&1)
+            $LASTEXITCODE|Should Be 0
+            $observedResult=($observedRecords-join[Environment]::NewLine)|ConvertFrom-Json -Depth 30
+            $observations=@($observedResult.gitObservations)
+        }else{$observations=@($formalResult.gitObservations)}
+        @($observations).Count|Should BeGreaterThan 0
+        @($observations|Where-Object{$_-cne'0,0,0'}).Count|Should Be 0
+
+        $mutantPath=Join-Path $TestDrive 'ConsumerGate-git-inheritance-mutant.psm1'
+        $moduleText=Get-Content -Raw -Encoding UTF8 $script:GateModule;$tokens=$null;$errors=$null
+        $moduleAst=[Management.Automation.Language.Parser]::ParseInput($moduleText,[ref]$tokens,[ref]$errors)
+        @($errors).Count|Should Be 0
+        $gitFunction=@($moduleAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Invoke-GateGit'},$true))[0]
+        $credentialRemoval=@($gitFunction.Body.FindAll({param($node)$node-is[Management.Automation.Language.ForEachStatementAst]-and
+                    $node.Extent.Text.Contains('STANDARD_VALIDATION_GITHUB_API_TOKEN',[StringComparison]::Ordinal)-and
+                    $node.Extent.Text.Contains('SetEnvironmentVariable',[StringComparison]::Ordinal)},$true))
+        @($credentialRemoval).Count|Should Be 1
+        $mutantText=$moduleText.Remove($credentialRemoval[0].Extent.StartOffset,$credentialRemoval[0].Extent.EndOffset-$credentialRemoval[0].Extent.StartOffset)
+        [IO.File]::WriteAllText($mutantPath,$mutantText,[Text.UTF8Encoding]::new($false))
+        $observation=Join-Path $TestDrive 'git-mutant-observation.txt'
+        $shim=New-GitCredentialPresenceShim (Join-Path $TestDrive 'git-mutant-shim') $observation
+        $oldPath=$env:PATH
+        try{
+            $env:PATH=$shim+[IO.Path]::PathSeparator+$oldPath
+            foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,'git-mutant-token','Process')}
+            Import-Module $mutantPath -Force
+            $hooks=Join-Path $TestDrive 'git-mutant-hooks';[void][IO.Directory]::CreateDirectory($hooks);Initialize-GateGitHooks $hooks
+            [void](Invoke-GateGit $script:RepositoryRoot @('rev-parse','HEAD'))
+        }finally{
+            $env:PATH=$oldPath
+            foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,$null,'Process')}
+            Restore-GateFixtureModule
+        }
+        $mutantObservations=@(Get-Content -LiteralPath $observation)
+        @($mutantObservations)|Should Be @('1,1,1')
+        {if(@($mutantObservations|Where-Object{$_-cne'0,0,0'}).Count-ne0){throw 'GIT_CREDENTIAL_ORACLE_FAILED'}}|Should Throw 'GIT_CREDENTIAL_ORACLE_FAILED'
     }
 
 

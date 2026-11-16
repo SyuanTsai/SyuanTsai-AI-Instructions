@@ -14,6 +14,14 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
+$credentialNames=@('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')
+$token=[string][Environment]::GetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN','Process')
+$hadCredentialEnvironment=@($credentialNames|Where-Object{-not[string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($_,'Process'))}).Count-ne0
+foreach($name in $credentialNames){
+    [Environment]::SetEnvironmentVariable($name,$null,'Process')
+    Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+}
+try{
 Import-Module (Join-Path $PSScriptRoot 'ConsumerGate.psm1') -Force
 $phaseEnvironmentDumpPath=[string]$env:CONSUMER_GATE_PHASE_ENV_DUMP_PATH
 if(-not[string]::IsNullOrWhiteSpace($phaseEnvironmentDumpPath)){
@@ -34,14 +42,10 @@ if(-not[string]::IsNullOrWhiteSpace($phaseEnvironmentDumpPath)){
         Remove-Variable phaseEnvironment,phaseEnvironmentDump,phaseTokenNames,phaseSentinelNames,sentinelHash,value -ErrorAction SilentlyContinue
     }
 }
-try{
     if($Phase-cne'prepare'){
-        $credentialNames=@('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')
-        if(@($credentialNames|Where-Object{-not[string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($_,'Process'))}).Count-ne0){
+        if($hadCredentialEnvironment){
             Throw-GateResult INVALID 'Credential-bearing environment is forbidden outside prepare.'
         }
-        $credentialNames=$null
-        Remove-Variable credentialNames -ErrorAction SilentlyContinue
     }
     $authorityRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
     Initialize-GateGitHooks $WorkRoot
@@ -58,7 +62,6 @@ try{
             ([string]$binding.baseRevision) ([string]$binding.candidateRevision) $WorkRoot `
             ([bool]$TransitionFromLegacy)
         Assert-GateExceptionSetUnchanged $CandidateRoot ([string]$binding.baseRevision) ([string]$binding.candidateRevision)
-        $token=[string]$env:STANDARD_VALIDATION_GITHUB_API_TOKEN
         [void](Invoke-GateCredentialScopedPreparation $authorityRoot $CandidateRoot $WorkRoot $Platform $binding $eventRepository $token)
     }elseif($Phase-ceq'validate'){
         $validated=Assert-GateConfig $authorityRoot $CandidateRoot $eventRepository
@@ -70,7 +73,7 @@ try{
     exit 0
 }catch{
     $message=[string]$_.Exception.Message
-    foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,$null,'Process')}
+    foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,$null,'Process');Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue}
     $tokenVariable=Get-Variable token -ErrorAction SilentlyContinue
     if ($null -ne $tokenVariable -and -not [string]::IsNullOrEmpty([string]$tokenVariable.Value)) {
         $message = $message.Replace([string]$tokenVariable.Value, '[REDACTED]')
@@ -85,10 +88,12 @@ try{
 }finally{
     foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){
         [Environment]::SetEnvironmentVariable($name,$null,'Process')
+        Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
     }
     $token=$null
     $tokenVariable=$null
     $message=$null
     $phaseEnvironmentDumpPath=$null
-    Remove-Variable token, tokenVariable, message, phaseEnvironmentDumpPath -ErrorAction SilentlyContinue
+    $credentialNames=$null
+    Remove-Variable token, tokenVariable, message, phaseEnvironmentDumpPath, credentialNames -ErrorAction SilentlyContinue
 }

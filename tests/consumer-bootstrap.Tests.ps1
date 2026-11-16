@@ -135,6 +135,9 @@ Describe 'Consumer authority bootstrap v1' {
         $text | Should Match "@\('fetch', '--no-tags', 'origin', \`$Commit\)"
          $text | Should Match "'ls-tree', '-r', '-z'"
          $text | Should Match 'hash-object'
+        foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){$text|Should Match ([regex]::Escape("'$name'"))}
+        $text|Should Match '(?s)function Invoke-PinnedGit.*SetEnvironmentVariable\(\$name,\$null,''Process''\)'
+        $text | Should Match 'function Invoke-ConsumerGateProcess\([^)]*Token'
     }
 
     # Scenario: Phase environment and interface retirement are authority-owned data.
@@ -211,12 +214,14 @@ exit 0
         $env:GITHUB_STEP_SUMMARY=$outputPath
         $env:STANDARD_VALIDATION_GITHUB_API_TOKEN='phase-token-sentinel'
         $env:GITHUB_TOKEN='must-not-cross'
-        (Invoke-ConsumerGateProcess (Get-Process -Id $PID).Path $childPath $interfacePath 'prepare' (Join-Path $root 'binding.json'))|Should Be 0
+        (Invoke-ConsumerGateProcess (Get-Process -Id $PID).Path $childPath $interfacePath 'prepare' (Join-Path $root 'binding.json') `
+            'phase-token-sentinel')|Should Be 0
         $observed=Get-Content -Raw -Encoding UTF8 $outputPath|ConvertFrom-Json
         $observed.phase|Should Be 'prepare'
         $observed.token|Should Be 'phase-token-sentinel'
         $observed.github|Should BeNullOrEmpty
-        (Invoke-ConsumerGateProcess (Get-Process -Id $PID).Path $childPath $interfacePath 'validate' (Join-Path $root 'binding.json'))|Should Be 0
+        (Invoke-ConsumerGateProcess (Get-Process -Id $PID).Path $childPath $interfacePath 'validate' (Join-Path $root 'binding.json') `
+            'phase-token-sentinel')|Should Be 0
         $observed=Get-Content -Raw -Encoding UTF8 $outputPath|ConvertFrom-Json
         $observed.phase|Should Be 'validate'
         $observed.token|Should BeNullOrEmpty
@@ -236,7 +241,7 @@ exit 0
             try {
                 [Console]::SetError($diagnosticWriter)
                 $leakExit = Invoke-ConsumerGateProcess (Get-Process -Id $PID).Path $leakPath $interfacePath `
-                    prepare (Join-Path $root 'binding.json')
+                    prepare (Join-Path $root 'binding.json') "${stream}-token-sentinel"
             }
             finally {
                 [Console]::SetError($originalError)
@@ -277,15 +282,15 @@ exit 0
                     [Console]::SetOut($outWriter)
                     [Console]::SetError($errorWriter)
                     $mutantExit = & $mutantModule {
-                        param($root,$leakPath,$interfacePath)
+                        param($root,$leakPath,$interfacePath,$sentinel)
                         $script:BaseRoot=$root
                         $script:CandidateRoot=$root
                         $script:WorkRoot=$root
                         $script:Platform='windows'
                         $script:TransitionFromLegacy=$false
                         Invoke-ConsumerGateProcess (Get-Process -Id $PID).Path $leakPath $interfacePath `
-                            prepare (Join-Path $root 'binding.json')
-                    } $root $leakPath $interfacePath
+                            prepare (Join-Path $root 'binding.json') $sentinel
+                    } $root $leakPath $interfacePath $sentinel
                 }
                 finally {
                     [Console]::SetOut($originalOut)
@@ -534,8 +539,12 @@ exit 0
         finally{$residualStart.Environment.Clear();$residualPreserved.Clear();$residualProcess.Dispose()}
         (Join-Path $platformWork 'validation-artifacts/consumer-core-evidence.json')|Should Not Exist
         $residualEnvironment=Get-Content -Raw -LiteralPath (Join-Path $platformWork 'environment-validate.json')|ConvertFrom-Json
-        @($residualEnvironment.tokenNames)|Should Be @('STANDARD_VALIDATION_GITHUB_API_TOKEN')
-        @($residualEnvironment.sentinelValueNames)|Should Be @('STANDARD_VALIDATION_GITHUB_API_TOKEN')
+        if(@($residualEnvironment.tokenNames).Count-ne0){
+            throw "Residual source gate exposed token-named environment variables: $(@($residualEnvironment.tokenNames)-join',')."
+        }
+        if(@($residualEnvironment.sentinelValueNames).Count-ne0){
+            throw "Residual source gate exposed sentinel-valued environment variables: $(@($residualEnvironment.sentinelValueNames)-join',')."
+        }
         Remove-Item Env:STANDARD_VALIDATION_GITHUB_API_TOKEN -ErrorAction SilentlyContinue
         foreach ($phase in @('validate','finalize')) {
             $phaseExit=Invoke-FormalBootstrap $phase $platformWork windows
@@ -635,7 +644,7 @@ exit 0
                 },$true))
         @($credentialAssignment).Count|Should Be 1
         $phaseInjection=@'
-$start.Environment['CONSUMER_GATE_EVENT_REPOSITORY']=[Environment]::GetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN','Process')
+$start.Environment['CONSUMER_GATE_EVENT_REPOSITORY']=$Token
 [void]$start.Environment.Remove('STANDARD_VALIDATION_GITHUB_API_TOKEN')
 '@
         $phaseMutantText=$phaseMutantText.Insert($credentialAssignment[0].Extent.StartOffset,$phaseInjection+[Environment]::NewLine)

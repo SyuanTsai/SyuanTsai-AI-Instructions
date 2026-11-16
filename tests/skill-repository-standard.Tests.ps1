@@ -6769,4 +6769,13 @@ Describe 'P11-pin consumer authority Standard contract' {
         $standard=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/skill-repository-standard.md')
         foreach($required in @('ExpectedAuthorityFiles` 必須由 gate 從該已驗證 checkout 計算','### 18.2 Consumer gate conversion','inventoryCommit','inventoryTree','#consumer-repository-conversion','MUST NOT** 宣稱 consumer merge enforcement 已生效','Darktide')){$standard.Contains($required)|Should Be $true}
     }
+    # Scenario: A path expression casts either a foldable literal or a non-foldable method-call result.
+    # Purpose: Keep R18-01 cast semantics aligned with the runtime while preserving fail-closed dynamic analysis.
+    It 'UnitT983_allows_casts_only_when_the_child_is_deterministically_foldable' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $standard=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/skill-repository-standard.md')
+        foreach($required in @('cast 的 child 可確定折疊時才傳遞常值','method call 等其他不可折疊形式仍 fail closed')){
+            $standard.Contains($required)|Should Be $true
+        }
+    }
 }

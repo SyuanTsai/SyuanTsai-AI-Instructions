@@ -231,6 +231,18 @@ Describe 'Consumer gate workflow templates' {
         $script:Transition | Should Match 'needs: \[gate, aggregate\]'
     }
 
+    # Scenario: Darktide removes the legacy workflow in its conversion pull request while its old context is still required.
+    # Purpose: Document the temporary mirror-context switch, merge freeze, rollback readback, and final App-context switch.
+    It 'UnitT65_documents_the_complete_darktide_two_stage_ruleset_switch' {
+        $readme=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'consumer/README.md')
+        foreach($anchor in @(
+                'before merging the Darktide conversion pull request',
+                'do not merge any other pull request',
+                'GET the ruleset and restore the exact pre-switch',
+                'dedicated App integration ID'
+            )){$readme|Should Match ([regex]::Escape($anchor))}
+    }
+
     # Scenario: Expressions are treated as YAML data and never interpolated into shell source.
     # Purpose: Event-controlled values reach scripts only through env variables.
     It 'UnitT70_has_no_github_expression_inside_run_blocks' {

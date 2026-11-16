@@ -75,6 +75,13 @@ Darktide is blocked while its manifest status is `pending-prerequisites`. S8 own
 
 After S8 merges, the authority owner reruns inventory and closure at the new Darktide commit in a manifest-only pull request. Only after the output is `PASS`, the three-platform evidence is verified, status is changed to `ready`, and `prerequisites` is removed may the Darktide conversion pull request be created.
 
+Darktide uses a two-stage required-context switch because its conversion removes the legacy workflow that produces `Darktide Translate Windows Latest Stable PowerShell`:
+
+1. Keep the existing ruleset unchanged through S8 and while the conversion pull request is being validated. After the three mirror jobs (`repository-contract`, `skill-validator`, and `skill-tools`) have succeeded on the pull-request head and the inventory and template pre-merge checks are complete, the user temporarily changes the required contexts to those three mirror jobs before merging the Darktide conversion pull request.
+2. From that temporary switch until the conversion pull request is merged, do not merge any other pull request.
+3. If the conversion is withdrawn after the temporary switch, first GET the ruleset and restore the exact pre-switch `required_status_checks` value without changing unrelated rules. Other pull requests may be merged, or conversion retried, only after that readback and restoration. The user performs both the temporary switch and any restoration; an agent must not apply either ruleset change.
+4. After the cleanup pull request's three App-produced checks succeed, the user performs the final switch described in step 4 below: require the same three contexts with `strict_required_status_checks_policy=true`, each restricted to the dedicated App integration ID.
+
 ### 2. First push after conversion
 
 The formal push workflow sees that `event.before` has no bootstrap while the new candidate does. It records `transition push, gate skipped` and succeeds without invoking the candidate bootstrap. This one-time skip is expected; push does not use the App or an environment.

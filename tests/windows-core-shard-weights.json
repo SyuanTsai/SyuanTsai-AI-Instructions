@@ -17,7 +17,7 @@
     "standard-validation-runner.Tests.ps1": 2,
     "consumer-bootstrap.Tests.ps1": 8,
     "consumer-gate-workflow.Tests.ps1": 2,
-    "consumer-source-gate.Tests.ps1": 15,
+    "consumer-source-gate.Tests.ps1": 16,
     "bootstrap-ai-instructions-multisource.Tests.ps1": 1,
     "agent-artifact-remediation.Tests.ps1": 1
   }

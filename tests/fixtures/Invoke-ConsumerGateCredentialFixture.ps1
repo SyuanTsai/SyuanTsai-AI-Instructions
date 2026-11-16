@@ -6,7 +6,9 @@ param(
     [Parameter(Mandatory)][string]$FixtureRoot,
     [Parameter(Mandatory)][ValidateSet('success','http-error','timeout','cancellation','redirect-success','redirect-unapproved','redirect-limit','resolver-error')][string]$Outcome,
     [Parameter(Mandatory)][string]$Sentinel,
-    [ValidateSet('none','summary','artifact','receipt','stdout','stderr')][string]$LeakSurface='none'
+    [ValidateSet('none','summary','artifact','receipt','stdout','stderr')][string]$LeakSurface='none',
+    [switch]$TransitionFromLegacy,
+    [switch]$ObserveGitCredentialEnvironment
 )
 $ErrorActionPreference='Stop'
 function Invoke-FixtureGit([string]$Root,[string[]]$Arguments){
@@ -32,6 +34,7 @@ foreach($directory in @(
 foreach($path in @(
         'consumer/bootstrap/Invoke-PinnedAuthority.ps1','consumer/workflows/consumer-gate.yml',
         'consumer/workflows/consumer-gate-transition.yml','scripts/consumer/ConsumerGate.psm1',
+        'scripts/consumer/ConsumerManifestClosure.psm1',
         'scripts/consumer/Invoke-ConsumerSourceGate.ps1','scripts/consumer/Invoke-ConsumerValidationChild.ps1',
         'scripts/consumer/Invoke-ConsumerRepositoryCheck.ps1','scripts/Invoke-StandardValidation.ps1',
         'scripts/Validate-UpstreamAdapter.ps1','docs/standards/upstream-adapter.json',
@@ -44,34 +47,52 @@ foreach($path in @(
 $manifest=Get-Content -Raw -Encoding UTF8 (Join-Path $RepositoryRoot 'consumer/legacy-migration.json')|ConvertFrom-Json -Depth 100
 $general=@($manifest.repositories|Where-Object id -eq 'skill-general')[0]
 $general.repository='https://example.test/fixture.git'
-Write-FixtureJson (Join-Path $authority 'consumer/legacy-migration.json') $manifest
-Copy-Item (Join-Path $authority 'consumer/bootstrap/Invoke-PinnedAuthority.ps1') (Join-Path $candidate 'scripts/Invoke-PinnedAuthority.ps1')
-Copy-Item (Join-Path $authority 'consumer/workflows/consumer-gate.yml') (Join-Path $candidate '.github/workflows/consumer-gate.yml')
-$skillText=@'
+function Write-ConvertedCandidateFiles {
+    Copy-Item (Join-Path $authority 'consumer/bootstrap/Invoke-PinnedAuthority.ps1') (Join-Path $candidate 'scripts/Invoke-PinnedAuthority.ps1')
+    Copy-Item (Join-Path $authority 'consumer/workflows/consumer-gate.yml') (Join-Path $candidate '.github/workflows/consumer-gate.yml')
+    if($TransitionFromLegacy){Copy-Item (Join-Path $authority 'consumer/workflows/consumer-gate-transition.yml') (Join-Path $candidate '.github/workflows/consumer-gate-transition.yml')}
+    $skillText=@'
 ---
 name: general
 description: fixture
 ---
 '@
-[IO.File]::WriteAllText((Join-Path $candidate 'skills/general/SKILL.md'),$skillText,[Text.UTF8Encoding]::new($false))
-[IO.File]::WriteAllText((Join-Path $candidate 'scripts/Test-SkillGeneral.ps1'),'exit 0',[Text.UTF8Encoding]::new($false))
-Write-FixtureJson (Join-Path $candidate 'config/consumer-gate.json') ([ordered]@{
-        schemaVersion=1;repositoryId='skill-general';sourceRepository='https://example.test/fixture.git'
-        activeSkills=@('general');repositoryChecks=@(
-            [ordered]@{id='repository-general';kind='general';path='scripts/Test-SkillGeneral.ps1'},
-            [ordered]@{id='repository-pester';kind='pester';path='tests'}
-        )
-    })
+    [IO.File]::WriteAllText((Join-Path $candidate 'skills/general/SKILL.md'),$skillText,[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $candidate 'scripts/Test-SkillGeneral.ps1'),'exit 0',[Text.UTF8Encoding]::new($false))
+    Write-FixtureJson (Join-Path $candidate 'config/consumer-gate.json') ([ordered]@{
+            schemaVersion=1;repositoryId='skill-general';sourceRepository='https://example.test/fixture.git'
+            activeSkills=@('general');repositoryChecks=@(
+                [ordered]@{id='repository-general';kind='general';path='scripts/Test-SkillGeneral.ps1'},
+                [ordered]@{id='repository-pester';kind='pester';path='tests'}
+            )
+        })
+}
 [void](Invoke-FixtureGit $candidate @('init','-q','-b','main'))
 [void](Invoke-FixtureGit $candidate @('config','user.name','Fixture'))
 [void](Invoke-FixtureGit $candidate @('config','user.email','fixture@example.test'))
+[string]$baseRoot=$candidate
+if($TransitionFromLegacy){
+    [IO.File]::WriteAllText((Join-Path $candidate 'scripts/Legacy.ps1'),'legacy',[Text.UTF8Encoding]::new($false))
+}else{Write-ConvertedCandidateFiles}
 [void](Invoke-FixtureGit $candidate @('add','.'))
 [void](Invoke-FixtureGit $candidate @('commit','-q','-m','base'))
 $baseRevision=Get-FixtureGitScalar $candidate @('rev-parse','HEAD')
+if($TransitionFromLegacy){
+    $baseRoot=Join-Path $FixtureRoot 'base'
+    [void](Invoke-FixtureGit $candidate @('worktree','add','-q','--detach',$baseRoot,$baseRevision))
+    Remove-Item -LiteralPath (Join-Path $candidate 'scripts/Legacy.ps1')
+    Write-ConvertedCandidateFiles
+}
 [IO.File]::WriteAllText((Join-Path $candidate 'candidate.txt'),'candidate',[Text.UTF8Encoding]::new($false))
 [void](Invoke-FixtureGit $candidate @('add','.'))
 [void](Invoke-FixtureGit $candidate @('commit','-q','-m','candidate'))
 $candidateRevision=Get-FixtureGitScalar $candidate @('rev-parse','HEAD')
+if($TransitionFromLegacy){
+    $general.inventoryCommit=$baseRevision
+    $general.inventoryTree=Get-FixtureGitScalar $candidate @('rev-parse',"$baseRevision^{tree}")
+    $general.files=@([pscustomobject][ordered]@{path='scripts/Legacy.ps1';disposition='delete';reason='Fixture legacy path.'})
+}
+Write-FixtureJson (Join-Path $authority 'consumer/legacy-migration.json') $manifest
 $runnerWorkBoundary=$null
 $work=if(-not[string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)){
     $runnerWorkBoundary=[IO.Path]::GetFullPath($env:RUNNER_TEMP)
@@ -156,9 +177,10 @@ $start.RedirectStandardError=$true
 $gatePath=Join-Path $authority 'scripts/consumer/Invoke-ConsumerSourceGate.ps1'
 foreach($argument in @('-NoProfile','-NonInteractive','-File',$gatePath,
         '-Interface','consumer-gate-v1','-Phase','prepare','-AuthorityBindingPath',$bindingPath,
-        '-BaseRoot',$candidate,'-CandidateRoot',$candidate,'-WorkRoot',$work,'-Platform',$platform)){
+        '-BaseRoot',$baseRoot,'-CandidateRoot',$candidate,'-WorkRoot',$work,'-Platform',$platform)){
     [void]$start.ArgumentList.Add($argument)
 }
+if($TransitionFromLegacy){[void]$start.ArgumentList.Add('-TransitionFromLegacy')}
 $start.Environment['CONSUMER_GATE_EVENT_REPOSITORY']='https://example.test/fixture.git'
 $start.Environment['STANDARD_VALIDATION_GITHUB_API_TOKEN']=$Sentinel
 $start.Environment['GITHUB_TOKEN']=$Sentinel
@@ -175,6 +197,22 @@ $sentinelHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([T
 [IO.File]::WriteAllText("$($start.Environment['CONSUMER_GATE_PHASE_ENV_DUMP_PATH']).sentinel.sha256",$sentinelHash,[Text.UTF8Encoding]::new($false))
 $start.Environment['GITHUB_STEP_SUMMARY']=$summary
 $start.Environment['CONSUMER_GATE_ARTIFACT_PATHS']=$artifactRoot
+$gitObservationPath=Join-Path $FixtureRoot 'git-credential-observations.txt'
+if($ObserveGitCredentialEnvironment){
+    $realGit=(Get-Command git -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
+    $shimRoot=Join-Path $FixtureRoot 'git-shim';[void][IO.Directory]::CreateDirectory($shimRoot)
+    if($IsWindows){
+        $shimPath=Join-Path $shimRoot 'git.cmd'
+        $shimText="@echo off`r`nset s=0`r`nset g=0`r`nset h=0`r`nif defined STANDARD_VALIDATION_GITHUB_API_TOKEN set s=1`r`nif defined GITHUB_TOKEN set g=1`r`nif defined GH_TOKEN set h=1`r`n>>`"$gitObservationPath`" echo %s%,%g%,%h%`r`nset args=%*`r`nset args=%args:{tree}=^^^^{tree}%`r`nset args=%args:{commit}=^^^^{commit}%`r`n`"$realGit`" %args%`r`nexit /b %errorlevel%`r`n"
+    }else{
+        $shimPath=Join-Path $shimRoot 'git'
+        $escapedLog=$gitObservationPath.Replace('"','\"');$escapedGit=$realGit.Replace('"','\"')
+        $shimText="#!/bin/sh`ns=0; g=0; h=0`n[ -n `"`${STANDARD_VALIDATION_GITHUB_API_TOKEN+x}`" ] && s=1`n[ -n `"`${GITHUB_TOKEN+x}`" ] && g=1`n[ -n `"`${GH_TOKEN+x}`" ] && h=1`nprintf '%s,%s,%s\n' `"`$s`" `"`$g`" `"`$h`" >> `"$escapedLog`"`nexec `"$escapedGit`" `"`$@`"`n"
+    }
+    [IO.File]::WriteAllText($shimPath,$shimText,[Text.UTF8Encoding]::new($false))
+    if(-not$IsWindows){[IO.File]::SetUnixFileMode($shimPath,[IO.UnixFileMode]::UserRead-bor[IO.UnixFileMode]::UserWrite-bor[IO.UnixFileMode]::UserExecute)}
+    $start.Environment['PATH']=$shimRoot+[IO.Path]::PathSeparator+$start.Environment['PATH']
+}
 $process=[Diagnostics.Process]::new()
 try{
     $process.StartInfo=$start
@@ -202,8 +240,8 @@ try{
     $events=@(if(Test-Path -LiteralPath $eventLog){Get-Content -LiteralPath $eventLog})
     $result=[ordered]@{exitCode=$process.ExitCode;stdout=$stdout;stderr=$stderr
         outputContainsSentinel=(($stdout+$stderr).Contains($Sentinel,[StringComparison]::Ordinal))
-        surfaceLeaks=@($surfaceLeaks);resolverDumps=@($resolverDumps)
-        events=$events}
+        surfaceLeaks=@($surfaceLeaks);resolverDumps=@($resolverDumps);events=$events
+        gitObservations=@(if(Test-Path -LiteralPath $gitObservationPath){Get-Content -LiteralPath $gitObservationPath})}
     [Console]::Out.WriteLine(($result|ConvertTo-Json -Depth 20 -Compress))
 }finally{
     $process.Dispose()

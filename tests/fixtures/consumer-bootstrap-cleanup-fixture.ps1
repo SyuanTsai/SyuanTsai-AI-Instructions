@@ -35,8 +35,10 @@ $bindingPath=Join-Path $FixtureRoot 'binding.json'
 [IO.File]::WriteAllText($bindingPath,'{}',[Text.UTF8Encoding]::new($false))
 $env:STANDARD_VALIDATION_GITHUB_API_TOKEN=$Sentinel
 try{
-    $code=Invoke-ConsumerGateProcess (Get-Process -Id $PID).Path $gatePath $interfacePath prepare $bindingPath
+    $code=Invoke-ConsumerGateProcess (Get-Process -Id $PID).Path $gatePath $interfacePath prepare $bindingPath $Sentinel
     if($code-ne0){throw "Bootstrap cleanup fixture returned $code."}
+    $formalOutput=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $bootstrap 2>&1)
+    if($LASTEXITCODE-ne30){throw "Bootstrap formal cleanup fixture returned $LASTEXITCODE`: $($formalOutput-join' | ')"}
 }finally{
     Remove-Item Env:STANDARD_VALIDATION_GITHUB_API_TOKEN -ErrorAction SilentlyContinue
     if($null-ne$runnerWorkBoundary-and(Test-Path -LiteralPath $script:WorkRoot)){
