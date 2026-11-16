@@ -72,7 +72,11 @@ $baseRevision=Get-FixtureGitScalar $candidate @('rev-parse','HEAD')
 [void](Invoke-FixtureGit $candidate @('add','.'))
 [void](Invoke-FixtureGit $candidate @('commit','-q','-m','candidate'))
 $candidateRevision=Get-FixtureGitScalar $candidate @('rev-parse','HEAD')
-$work=Join-Path $FixtureRoot 'work'
+$runnerWorkBoundary=$null
+$work=if(-not[string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)){
+    $runnerWorkBoundary=[IO.Path]::GetFullPath($env:RUNNER_TEMP)
+    Join-Path $runnerWorkBoundary ('cgc-'+[guid]::NewGuid().ToString('N').Substring(0,12))
+}else{Join-Path $FixtureRoot 'work'}
 [void][IO.Directory]::CreateDirectory($work)
 $platform=if($IsWindows){'windows'}elseif($IsMacOS){'macos'}else{'linux'}
 $binding=[ordered]@{schemaVersion=1;scope='platform';interface='consumer-gate-v1'
@@ -138,8 +142,7 @@ $runtimeSource=Join-Path $FixtureRoot 'runtime-source'
 [void][IO.Directory]::CreateDirectory($runtimeSource)
 foreach($file in @(Get-ChildItem -LiteralPath $PSHOME -File -Force)){
     $target=Join-Path $runtimeSource $file.Name
-    try{[void](New-Item -ItemType HardLink -Path $target -Target $file.FullName -ErrorAction Stop)}
-    catch{[IO.File]::Copy($file.FullName,$target,$false)}
+    [IO.File]::Copy($file.FullName,$target,$false)
 }
 $eventLog=Join-Path $work 'events.log'
 [void][IO.Directory]::CreateDirectory((Join-Path $work 'source-tools'))
@@ -207,4 +210,13 @@ try{
     if($null-ne$canceller){[void]$canceller.WaitForExit(3000);$canceller.Dispose()}
     if(-not$server.WaitForExit(3000)){$server.Kill($true);$server.WaitForExit()}
     $server.Dispose()
+    if($null-ne$runnerWorkBoundary-and(Test-Path -LiteralPath $work)){
+        $workFull=[IO.Path]::GetFullPath($work)
+        $boundaryFull=$runnerWorkBoundary.TrimEnd([IO.Path]::DirectorySeparatorChar,
+            [IO.Path]::AltDirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
+        if(-not$workFull.StartsWith($boundaryFull,[StringComparison]::OrdinalIgnoreCase)){
+            throw 'Credential fixture WorkRoot escaped its cleanup boundary.'
+        }
+        Remove-Item -LiteralPath $workFull -Recurse -Force
+    }
 }

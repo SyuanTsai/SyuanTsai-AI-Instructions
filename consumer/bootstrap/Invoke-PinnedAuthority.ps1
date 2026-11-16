@@ -197,9 +197,9 @@ function New-PinnedAuthority([string]$Root, [string]$Commit, [string]$Repository
     [IO.Directory]::CreateDirectory($gitRoot) | Out-Null
     [void](Invoke-PinnedGit $gitRoot @('init', '--quiet'))
     [void](Invoke-PinnedGit $gitRoot @('remote', 'add', 'origin', $Repository) -AllowFileProtocol:$AllowFileProtocol)
-    [void](Invoke-PinnedGit $gitRoot @('fetch', '--no-tags', '--filter=blob:none', $Repository, '+refs/heads/main:refs/remotes/aii/main') `
+    [void](Invoke-PinnedGit $gitRoot @('fetch', '--no-tags', '--filter=blob:none', 'origin', '+refs/heads/main:refs/remotes/aii/main') `
         -AllowFileProtocol:$AllowFileProtocol)
-    $pinFetch=Invoke-PinnedGit $gitRoot @('fetch', '--no-tags', $Repository, $Commit) @(0,1,128) -AllowFileProtocol:$AllowFileProtocol
+    $pinFetch=Invoke-PinnedGit $gitRoot @('fetch', '--no-tags', 'origin', $Commit) @(0,1,128) -AllowFileProtocol:$AllowFileProtocol
     if ($pinFetch.ExitCode -ne 0) {
         if (($pinFetch.Output -join ' ') -match '(?i)(not our ref|couldn''t find remote ref|unadvertised object|not a valid object)') {
             Throw-ConsumerResult FAILED 'Authority pin does not exist in the official repository.'

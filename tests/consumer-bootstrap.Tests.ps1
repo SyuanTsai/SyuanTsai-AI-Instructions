@@ -14,6 +14,25 @@ Describe 'Consumer authority bootstrap v1' {
         function Get-FixtureGitScalar([string]$Root,[string[]]$Arguments) {
             ([string](@(Invoke-FixtureGit $Root $Arguments)[0])).Trim()
         }
+        function New-BootstrapWorkRootLease([string]$LocalRoot,[string]$Name) {
+            $boundary=if(-not[string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)){
+                [IO.Path]::GetFullPath($env:RUNNER_TEMP)
+            }else{[IO.Path]::GetFullPath($LocalRoot)}
+            $root=Join-Path $boundary ("p11-$($Name.Substring(0,1))-"+[guid]::NewGuid().ToString('N').Substring(0,8))
+            if(Test-Path -LiteralPath $root){throw 'Bootstrap test WorkRoot already exists.'}
+            [void][IO.Directory]::CreateDirectory($root)
+            [pscustomobject]@{Root=$root;Boundary=$boundary}
+        }
+        function Remove-BootstrapWorkRootLease($Lease) {
+            if($null-eq$Lease-or-not(Test-Path -LiteralPath $Lease.Root)){return}
+            $root=[IO.Path]::GetFullPath([string]$Lease.Root)
+            $boundary=[IO.Path]::GetFullPath([string]$Lease.Boundary).TrimEnd([IO.Path]::DirectorySeparatorChar,
+                [IO.Path]::AltDirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
+            if(-not$root.StartsWith($boundary,[StringComparison]::OrdinalIgnoreCase)){
+                throw 'Bootstrap test WorkRoot escaped its cleanup boundary.'
+            }
+            Remove-Item -LiteralPath $root -Recurse -Force
+        }
         function New-AuthorityFixture([string]$Root) {
             [void][IO.Directory]::CreateDirectory($Root)
             [void](Invoke-FixtureGit $Root @('init','-q','-b','main'))
@@ -112,6 +131,8 @@ Describe 'Consumer authority bootstrap v1' {
          $text | Should Match 'core\.hooksPath='
          $text | Should Match 'credential\.helper='
         $text | Should Match 'merge-base.*--is-ancestor'
+        $text | Should Match "@\('fetch', '--no-tags', '--filter=blob:none', 'origin', '\+refs/heads/main:refs/remotes/aii/main'\)"
+        $text | Should Match "@\('fetch', '--no-tags', 'origin', \`$Commit\)"
          $text | Should Match "'ls-tree', '-r', '-z'"
          $text | Should Match 'hash-object'
     }
@@ -325,6 +346,8 @@ exit 0
     # Scenario: A local file authority drives prepare, validate, finalize, and a fresh aggregate acquisition.
     # Purpose: Exercise cross-phase binding and receipt mutations without network access or candidate-controlled authority code.
     It 'InterT59_executes_all_gate_phases_and_rejects_cross_phase_drift' {
+        $workLease=New-BootstrapWorkRootLease $TestDrive 'formal-phases'
+        try{
         $source = Join-Path $TestDrive 'phase-authority-source'
         foreach($directory in @('consumer/bootstrap','consumer/workflows','scripts/consumer','scripts','docs/standards')){
             [void][IO.Directory]::CreateDirectory((Join-Path $source $directory))
@@ -401,8 +424,8 @@ exit 0
                 [Text.UTF8Encoding]::new($false))
         }
         $pinPath = Join-Path $revision.CandidateRoot 'config/authority-pin.json'
-        $platformWork = Join-Path $TestDrive 'phase-platform-work'
-        $aggregateWork = Join-Path $TestDrive 'phase-aggregate-work'
+        $platformWork = Join-Path $workLease.Root 'p'
+        $aggregateWork = Join-Path $workLease.Root 'a'
         $env:CONSUMER_GATE_TEST_TEMP_ROOT = $TestDrive
         $env:CONSUMER_GATE_EVENT_REPOSITORY = $consumerRepository
         $summary=Join-Path $TestDrive 'phase-summary.txt'
@@ -419,8 +442,7 @@ exit 0
         foreach($file in $runtimeFixtureFiles){
             $target=Join-Path $runtimeSource ([IO.Path]::GetRelativePath($PSHOME,$file.FullName))
             [void][IO.Directory]::CreateDirectory((Split-Path -Parent $target))
-            try{[void](New-Item -ItemType HardLink -Path $target -Target $file.FullName -ErrorAction Stop)}
-            catch{[IO.File]::Copy($file.FullName,$target,$false)}
+            [IO.File]::Copy($file.FullName,$target,$false)
         }
         $assetBytes=[Text.UTF8Encoding]::new($false).GetBytes('fixture archive')
         $assetSha=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($assetBytes)).ToLowerInvariant()
@@ -722,7 +744,7 @@ $start.Environment['CONSUMER_GATE_EVENT_REPOSITORY']=[Environment]::GetEnvironme
         Assert-FormalBootstrapExit $mutationExit 30 'Runtime missing-file mutation'
         Move-Item -LiteralPath "$runtimePath.moved" -Destination $runtimePath
 
-        $aggregateReuse=Join-Path $TestDrive 'phase-aggregate-reused-platform-binding'
+        $aggregateReuse=Join-Path $workLease.Root 'r'
         [void][IO.Directory]::CreateDirectory($aggregateReuse)
         Copy-Item -LiteralPath $bindingPath -Destination (Join-Path $aggregateReuse 'authority-binding.json')
         $mutationExit=Invoke-FormalBootstrap aggregate $aggregateReuse aggregate
@@ -734,12 +756,15 @@ $start.Environment['CONSUMER_GATE_EVENT_REPOSITORY']=[Environment]::GetEnvironme
         Assert-FormalBootstrapExit $mutationExit 20 'Authority pin byte mutation'
         [IO.File]::WriteAllText($pinPath, $pinText, [Text.UTF8Encoding]::new($false))
 
+        }finally{
         Remove-Item Env:CONSUMER_GATE_TEST_TEMP_ROOT,Env:CONSUMER_GATE_EVENT_REPOSITORY,Env:GITHUB_STEP_SUMMARY,
             Env:CONSUMER_GATE_ARTIFACT_PATHS,Env:CONSUMER_GATE_POWERSHELL_METADATA_URI,
             Env:CONSUMER_GATE_RUNTIME_SOURCE_ROOT,Env:CONSUMER_GATE_RUNTIME_EXECUTABLE_RELATIVE_PATH,
             Env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH,Env:CONSUMER_GATE_ACQUISITION_TIMEOUT_SECONDS,
             Env:CONSUMER_GATE_ACQUISITION_CANCEL_PATH,Env:CONSUMER_GATE_EVENT_LOG_PATH,
             Env:CONSUMER_GATE_PHASE_ENV_DUMP_PATH -ErrorAction SilentlyContinue
+        Remove-BootstrapWorkRootLease $workLease
+        }
     }
 
     # Scenario: Revision and transition checks are changed in the bootstrap source.
@@ -758,16 +783,19 @@ $start.Environment['CONSUMER_GATE_EVENT_REPOSITORY']=[Environment]::GetEnvironme
     # Purpose: The one-time candidate-controlled transition cannot be reused after adoption has begun.
     It 'InterT62_rejects_transition_bases_that_already_contain_bootstrap_or_pin' {
         $fixture=New-RevisionFixture (Join-Path $TestDrive 'transition-source') (Join-Path $TestDrive 'transition-base')
+        $workLease=New-BootstrapWorkRootLease $TestDrive 'transition'
         $oldTestTemp=$env:CONSUMER_GATE_TEST_TEMP_ROOT
         $env:CONSUMER_GATE_TEST_TEMP_ROOT=$TestDrive
         try {
+            $transitionCase=0
             foreach($relative in @('scripts/Invoke-PinnedAuthority.ps1','config/authority-pin.json')) {
+                $transitionCase++
                 foreach($cleanup in @('scripts/Invoke-PinnedAuthority.ps1','config/authority-pin.json')){Remove-Item -LiteralPath (Join-Path `
                     $fixture.BaseRoot $cleanup) -Force -ErrorAction SilentlyContinue}
                 $path=Join-Path $fixture.BaseRoot $relative
                 [void][IO.Directory]::CreateDirectory((Split-Path -Parent $path))
                 [IO.File]::WriteAllText($path,'fixture',[Text.UTF8Encoding]::new($false))
-                $work=Join-Path $TestDrive ('transition-work-'+[IO.Path]::GetFileName($relative))
+                $work=Join-Path $workLease.Root "w$transitionCase"
                 $output=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $script:BootstrapPath `
                         -Phase prepare -BaseRoot $fixture.BaseRoot -CandidateRoot $fixture.CandidateRoot `
                         -WorkRoot $work -TriggerEvent pull_request -BaseRevision $fixture.Base `
@@ -776,7 +804,10 @@ $start.Environment['CONSUMER_GATE_EVENT_REPOSITORY']=[Environment]::GetEnvironme
                 $LASTEXITCODE|Should Be 20
                 ($output-join' ')|Should Match 'Transition base already contains'
             }
-        } finally { $env:CONSUMER_GATE_TEST_TEMP_ROOT=$oldTestTemp }
+        } finally {
+            $env:CONSUMER_GATE_TEST_TEMP_ROOT=$oldTestTemp
+            Remove-BootstrapWorkRootLease $workLease
+        }
     }
 
     # Scenario: Pull-request, transition, and push revisions are evaluated against real local Git history.

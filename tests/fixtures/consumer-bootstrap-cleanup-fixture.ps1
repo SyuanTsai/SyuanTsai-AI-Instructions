@@ -11,7 +11,11 @@ $bootstrap=Join-Path $RepositoryRoot 'consumer/bootstrap/Invoke-PinnedAuthority.
 . $bootstrap -DefineFunctionsOnly
 $script:BaseRoot=Join-Path $FixtureRoot 'base'
 $script:CandidateRoot=Join-Path $FixtureRoot 'candidate'
-$script:WorkRoot=Join-Path $FixtureRoot 'work'
+$runnerWorkBoundary=$null
+$script:WorkRoot=if(-not[string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)){
+    $runnerWorkBoundary=[IO.Path]::GetFullPath($env:RUNNER_TEMP)
+    Join-Path $runnerWorkBoundary ('cbc-'+[guid]::NewGuid().ToString('N').Substring(0,12))
+}else{Join-Path $FixtureRoot 'work'}
 $script:Platform=if($IsWindows){'windows'}elseif($IsMacOS){'macos'}else{'linux'}
 $script:TransitionFromLegacy=$false
 foreach($path in @($script:BaseRoot,$script:CandidateRoot,$script:WorkRoot)){[void][IO.Directory]::CreateDirectory($path)}
@@ -35,4 +39,13 @@ try{
     if($code-ne0){throw "Bootstrap cleanup fixture returned $code."}
 }finally{
     Remove-Item Env:STANDARD_VALIDATION_GITHUB_API_TOKEN -ErrorAction SilentlyContinue
+    if($null-ne$runnerWorkBoundary-and(Test-Path -LiteralPath $script:WorkRoot)){
+        $workFull=[IO.Path]::GetFullPath($script:WorkRoot)
+        $boundaryFull=$runnerWorkBoundary.TrimEnd([IO.Path]::DirectorySeparatorChar,
+            [IO.Path]::AltDirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
+        if(-not$workFull.StartsWith($boundaryFull,[StringComparison]::OrdinalIgnoreCase)){
+            throw 'Bootstrap cleanup fixture WorkRoot escaped its cleanup boundary.'
+        }
+        Remove-Item -LiteralPath $workFull -Recurse -Force
+    }
 }
