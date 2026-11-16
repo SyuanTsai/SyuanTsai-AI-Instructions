@@ -465,7 +465,7 @@ if ($IsWindows) {
     }
 
     # Scenario: Reviewed CI minutes, including trust-anchor tools, are assigned through the real eight-partition LPT plan.
-    # Purpose: Recalibrate the indivisible eight-shard critical path to the exact 22-minute LPT maximum load.
+    # Purpose: Recalibrate the indivisible eight-shard critical path to the exact 28-minute LPT maximum load.
     It 'UnitT35_uses_the_reviewed_CI_weights_and_exact_eight_partition_LPT_golden' {
         $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:WindowsCoreRepositoryRoot 'tests/windows-core-shard-weights.json') | ConvertFrom-Json
         $expectedWeights = [ordered]@{
@@ -482,7 +482,7 @@ if ($IsWindows) {
             'ai-instructions-launcher-recovery.Tests.ps1' = 2
             'cleanup-ai-instructions-pollution.Tests.ps1' = 2
             'standard-validation-runner.Tests.ps1' = 2
-            'trust-anchor-tools.Tests.ps1' = 22
+            'trust-anchor-tools.Tests.ps1' = 28
             'bootstrap-ai-instructions-multisource.Tests.ps1' = 1
             'agent-artifact-remediation.Tests.ps1' = 1
         }
@@ -501,7 +501,7 @@ if ($IsWindows) {
             @('agent-environment-reconciler.Tests.ps1','bootstrap-ai-instructions-multisource.Tests.ps1','platform-runtime.Tests.ps1','safe-zip.Tests.ps1','skills-source-routing.Tests.ps1','standard-validation-runner.Tests.ps1','static-approved-exceptions.Tests.ps1'),
             @('agent-artifact-remediation.Tests.ps1','ai-instructions-writer-gate.part1.Tests.ps1','internal-skill-use.Tests.ps1','skills-catalog-contract.Tests.ps1','source-merge-exception-draft.Tests.ps1','static-parser-coverage.Tests.ps1','syp214-user-only.Tests.ps1','update-ai-instructions.Tests.ps1')
         )
-        $expectedLoads = @(22,21,21,21,21,20,20,20)
+        $expectedLoads = @(28,21,21,21,21,20,20,20)
         $script:ActualPlan.Plan.shards.Count | Should Be 8
         for ($index = 0; $index -lt $expectedShards.Count; $index++) {
             $shard = $script:ActualPlan.Plan.shards[$index]
@@ -514,7 +514,7 @@ if ($IsWindows) {
             }
             $load | Should Be $expectedLoads[$index]
         }
-        ($expectedLoads | Measure-Object -Maximum).Maximum | Should Be 22
+        ($expectedLoads | Measure-Object -Maximum).Maximum | Should Be 28
     }
 
     # Scenario: LPT receives more weighted files than partitions, including an unknown weight.

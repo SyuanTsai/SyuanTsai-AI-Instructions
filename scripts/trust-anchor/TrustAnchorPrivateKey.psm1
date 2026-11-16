@@ -736,8 +736,8 @@ function New-TrustAnchorKeyFile {
     [CmdletBinding()] param([Parameter(Mandatory)]$PathEvidence,[Parameter(Mandatory)][byte[]]$Bytes)
     $parent=$PathEvidence.ParentLease;$file=$null
     try{
-        Assert-PlatformFileIdentity -Lease $parent -Expected $PathEvidence.ParentExpected -VerifyPath|Out-Null
-        if(-not$IsWindows -and $PathEvidence.Purpose -ceq 'PrivateKey'){[SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease]::AssertSafeParent((Get-TrustAnchorLeaseHandle $parent))}
+        try{Assert-PlatformFileIdentity -Lease $parent -Expected $PathEvidence.ParentExpected -VerifyPath|Out-Null}catch{throw (New-TrustAnchorError $_.Exception.Message 'TrustAnchor.ParentIdentityChanged')}
+        if(-not$IsWindows -and $PathEvidence.Purpose -ceq 'PrivateKey'){try{[SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease]::AssertSafeParent((Get-TrustAnchorLeaseHandle $parent))}catch{throw (New-TrustAnchorError $_.Exception.Message 'TrustAnchor.UnsafeParentAcl')}}
         $file=Open-PlatformFile -ParentLease $parent -Leaf $PathEvidence.Leaf -Access ReadWrite -CreateMode CreateNew;$expected=$file.Observation
         if($PathEvidence.Purpose -ceq 'PrivateKey'){
             if($IsWindows){$identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$sid=$identity.User.Value}finally{$identity.Dispose()};Set-PlatformPermissions -Lease $file -Policy @{Sddl="D:P(A;;FA;;;$sid)";ReadOnly=$false}|Out-Null}else{Set-PlatformPermissions -Lease $file -Policy @{Mode=384}|Out-Null}
@@ -745,7 +745,7 @@ function New-TrustAnchorKeyFile {
         }
         $file.WriteNewBytes($Bytes);Assert-PlatformFileIdentity -Lease $file -Expected $expected -SingleLink -VerifyPath|Out-Null
         if($PathEvidence.Purpose -ceq 'PrivateKey'){Assert-TrustAnchorPrivatePermissions $file|Out-Null}
-        Assert-PlatformFileIdentity -Lease $parent -Expected $PathEvidence.ParentExpected -VerifyPath|Out-Null
+        try{Assert-PlatformFileIdentity -Lease $parent -Expected $PathEvidence.ParentExpected -VerifyPath|Out-Null}catch{throw (New-TrustAnchorError $_.Exception.Message 'TrustAnchor.ParentIdentityChanged')}
         return [pscustomobject]@{Path=$PathEvidence.Path;Parent=$PathEvidence.Parent;Leaf=$PathEvidence.Leaf;ParentLease=$parent;FileLease=$file;Expected=$expected;Purpose=$PathEvidence.Purpose;Sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($Bytes)).ToLowerInvariant();Length=[int64]$Bytes.Length}
     }catch{if($null-ne$file){$file.Dispose()};throw}
 }
@@ -767,20 +767,37 @@ function Remove-TrustAnchorCreatedFile {
 }
 function Close-TrustAnchorCreatedFile {param($Lease)if($null-ne$Lease){$Lease.FileLease.Dispose();$Lease.ParentLease.Dispose()}}
 
-function Open-TrustAnchorPrivateKey {
+function Open-TrustAnchorPrivateKeyLease {
     [CmdletBinding()] param([Parameter(Mandatory)][string]$Path)
-    $pathEvidence=$null;$file=$null;$bytes=$null;$succeeded=$false
+    $pathEvidence=$null;$file=$null;$succeeded=$false
     try{
         $pathEvidence=New-TrustAnchorPathEvidence -Path $Path -Purpose PrivateKey -Existing
         $file=Open-PlatformFile -ParentLease $pathEvidence.ParentLease -Leaf $pathEvidence.Leaf -Access Read -CreateMode OpenExisting;$expected=$file.Observation
-        Assert-PlatformFileIdentity -Lease $file -Expected $expected -SingleLink -VerifyPath|Out-Null
-        $before=Get-TrustAnchorMetadataEvidence $file;Assert-TrustAnchorPrivatePermissions $file $before|Out-Null
-        $bytes=$file.ReadAllBytes(1048576)
-        Assert-PlatformFileIdentity -Lease $file -Expected $expected -SingleLink -VerifyPath|Out-Null
-        $after=Get-TrustAnchorMetadataEvidence $file;Assert-TrustAnchorPrivatePermissions $file $after|Out-Null
-        if(-not(Test-TrustAnchorMetadataEqual $before $after)){throw 'The private-key handle metadata changed while it was being read.'}
+        try{Assert-PlatformFileIdentity -Lease $file -Expected $expected -SingleLink -VerifyPath|Out-Null}catch{throw (New-TrustAnchorError $_.Exception.Message 'TrustAnchor.PrivateIdentityChanged')}
+        $openMetadata=Get-TrustAnchorMetadataEvidence $file
+        $succeeded=$true;return [pscustomobject]@{PathEvidence=$pathEvidence;FileLease=$file;Expected=$expected;OpenMetadata=$openMetadata}
+    }finally{if(-not$succeeded){if($null-ne$file){$file.Dispose()};Close-TrustAnchorPathEvidence $pathEvidence}}
+}
+function Read-TrustAnchorPrivateKeyLease {
+    [CmdletBinding()] param([Parameter(Mandatory)]$Lease)
+    $bytes=$null;$succeeded=$false
+    try{
+        $before=Get-TrustAnchorMetadataEvidence $Lease.FileLease;try{Assert-TrustAnchorPrivatePermissions $Lease.FileLease $before|Out-Null}catch{throw (New-TrustAnchorError $_.Exception.Message 'TrustAnchor.UnsafePrivatePermissions')};if(-not(Test-TrustAnchorMetadataEqual $Lease.OpenMetadata $before)){throw (New-TrustAnchorError 'The private-key handle metadata changed after it was opened.' 'TrustAnchor.PrivateMetadataChanged')}
+        $bytes=$Lease.FileLease.ReadAllBytes(1048576)
+        try{Assert-PlatformFileIdentity -Lease $Lease.FileLease -Expected $Lease.Expected -SingleLink -VerifyPath|Out-Null}catch{throw (New-TrustAnchorError $_.Exception.Message 'TrustAnchor.PrivateIdentityChanged')}
+        $after=Get-TrustAnchorMetadataEvidence $Lease.FileLease;try{Assert-TrustAnchorPrivatePermissions $Lease.FileLease $after|Out-Null}catch{throw (New-TrustAnchorError $_.Exception.Message 'TrustAnchor.UnsafePrivatePermissions')}
+        if(-not(Test-TrustAnchorMetadataEqual $before $after)){throw (New-TrustAnchorError 'The private-key handle metadata changed while it was being read.' 'TrustAnchor.PrivateMetadataChanged')}
         $succeeded=$true;return ,$bytes
-    }finally{if(-not$succeeded -and $null-ne$bytes){[Security.Cryptography.CryptographicOperations]::ZeroMemory($bytes)};if($null-ne$file){$file.Dispose()};Close-TrustAnchorPathEvidence $pathEvidence}
+    }finally{if(-not$succeeded -and $null-ne$bytes){[Security.Cryptography.CryptographicOperations]::ZeroMemory($bytes)}}
+}
+function Close-TrustAnchorPrivateKeyLease {param($Lease)if($null-ne$Lease){$Lease.FileLease.Dispose();Close-TrustAnchorPathEvidence $Lease.PathEvidence}}
+function Open-TrustAnchorPrivateKey {
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$Path)
+    $lease=$null
+    try{
+        $lease=Open-TrustAnchorPrivateKeyLease $Path
+        return ,(Read-TrustAnchorPrivateKeyLease $lease)
+    }finally{Close-TrustAnchorPrivateKeyLease $lease}
 }
 
 function ConvertTo-TrustAnchorCanonicalXml {
@@ -870,13 +887,13 @@ function Invoke-GetTrustAnchorFingerprintAction {
     Assert-TrustAnchorInteractiveHost
     $selected=@(@($PublicKeyXmlPath,$PublicKeyPemPath,$EncryptedPrivateKeyPath)|Where-Object{-not[string]::IsNullOrWhiteSpace($_)})
     if($selected.Count -ne 1){throw 'Exactly one trust-anchor input path is required.'}
-    $rsa=$null;$password=$null;$inputBytes=$null
+    $rsa=$null;$password=$null;$inputBytes=$null;$privateLease=$null
     try{
         if(-not[string]::IsNullOrWhiteSpace($PublicKeyXmlPath)){$inputBytes=Read-TrustAnchorInputBytes $PublicKeyXmlPath;$rsa=Import-TrustAnchorPublicXml $inputBytes}
         elseif(-not[string]::IsNullOrWhiteSpace($PublicKeyPemPath)){$inputBytes=Read-TrustAnchorInputBytes $PublicKeyPemPath;$rsa=Import-TrustAnchorPublicPem $inputBytes}
-        else{$inputBytes=Open-TrustAnchorPrivateKey $EncryptedPrivateKeyPath;$password=Read-TrustAnchorPassword;$rsa=Import-TrustAnchorEncryptedPrivateKey -Bytes $inputBytes -Password $password}
+        else{$privateLease=Open-TrustAnchorPrivateKeyLease $EncryptedPrivateKeyPath;$password=Read-TrustAnchorPassword;$inputBytes=Read-TrustAnchorPrivateKeyLease $privateLease;$rsa=Import-TrustAnchorEncryptedPrivateKey -Bytes $inputBytes -Password $password}
         Assert-TrustAnchorPublicKey $rsa;Get-TrustAnchorFingerprint $rsa
-    }finally{if($null-ne$inputBytes){[Security.Cryptography.CryptographicOperations]::ZeroMemory($inputBytes)};if($null-ne$rsa){$rsa.Dispose()};if($null-ne$password){$password.Dispose()}}
+    }finally{if($null-ne$inputBytes){[Security.Cryptography.CryptographicOperations]::ZeroMemory($inputBytes)};Close-TrustAnchorPrivateKeyLease $privateLease;if($null-ne$rsa){$rsa.Dispose()};if($null-ne$password){$password.Dispose()}}
 }
 
 Export-ModuleMember -Function @()

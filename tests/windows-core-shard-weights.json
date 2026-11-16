@@ -15,7 +15,7 @@
     "ai-instructions-launcher-recovery.Tests.ps1": 2,
     "cleanup-ai-instructions-pollution.Tests.ps1": 2,
     "standard-validation-runner.Tests.ps1": 2,
-    "trust-anchor-tools.Tests.ps1": 22,
+    "trust-anchor-tools.Tests.ps1": 28,
     "bootstrap-ai-instructions-multisource.Tests.ps1": 1,
     "agent-artifact-remediation.Tests.ps1": 1
   }

@@ -29,7 +29,8 @@ namespace SyuanTsai.AIInstructions.TrustAnchor.Tests {
     public sealed class SecureStringHost : PSHost {
         private readonly Guid instanceId=Guid.NewGuid();
         private readonly SecureStringHostUi ui;
-        public SecureStringHost(SecureString[] responses){ui=new SecureStringHostUi(responses);}
+        public SecureStringHost(SecureString[] responses,Action<int> beforeRead){ui=new SecureStringHostUi(responses,beforeRead);}
+        public static bool IsDisposed(SecureString value){try{using(SecureString copy=value.Copy()){}return false;}catch(ObjectDisposedException){return true;}}
         public int ReadCount { get { return ui.ReadCount; } }
         public override Guid InstanceId { get { return instanceId; } }
         public override string Name { get { return "TrustAnchorSecureStringHost"; } }
@@ -46,9 +47,10 @@ namespace SyuanTsai.AIInstructions.TrustAnchor.Tests {
     public sealed class SecureStringHostUi : PSHostUserInterface {
         private readonly Queue<SecureString> responses;
         private readonly SecureStringHostRawUi raw=new SecureStringHostRawUi();
+        private readonly Action<int> beforeRead;
         public int ReadCount { get; private set; }
-        public SecureStringHostUi(SecureString[] values){responses=new Queue<SecureString>(values??Array.Empty<SecureString>());}
-        private SecureString NextSecureString(){ReadCount++;if(responses.Count==0)throw new InvalidOperationException("No secure response remains.");return responses.Dequeue();}
+        public SecureStringHostUi(SecureString[] values,Action<int> callback){responses=new Queue<SecureString>(values??Array.Empty<SecureString>());beforeRead=callback;}
+        private SecureString NextSecureString(){ReadCount++;if(beforeRead!=null)beforeRead(ReadCount);if(responses.Count==0)throw new InvalidOperationException("No secure response remains.");return responses.Dequeue().Copy();}
         public override PSHostRawUserInterface RawUI { get { return raw; } }
         public override string ReadLine(){throw new NotSupportedException();}
         public override SecureString ReadLineAsSecureString(){return NextSecureString();}
@@ -166,6 +168,14 @@ function ConvertTo-TestCanonicalXmlBytes {
     return ,([Text.UTF8Encoding]::new($false).GetBytes($text))
 }
 function New-TestSecretSpec {param([int]$Seed=1729,[int]$Length=32)[pscustomobject]@{Seed=$Seed;Length=$Length}}
+function New-TestMutantTrustAnchorCliRoot {
+    param([Parameter(Mandatory)][string]$Name,[Parameter(Mandatory)][string]$ModuleSource)
+    $root=Join-Path $TestDrive "mutant-$Name";[void][IO.Directory]::CreateDirectory($root);Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts') -Destination $root -Recurse -Force;$modulePath=Join-Path $root 'scripts/trust-anchor/TrustAnchorPrivateKey.psm1';[IO.File]::WriteAllText($modulePath,$ModuleSource,[Text.UTF8Encoding]::new($false));return (Join-Path $root 'scripts/trust-anchor')
+}
+function Remove-TestAstExtents {
+    param([Parameter(Mandatory)][string]$Source,[Parameter(Mandatory)][object[]]$Nodes)
+    $mutated=$Source;foreach($node in @($Nodes|Sort-Object{$_.Extent.StartOffset}-Descending)){$mutated=Set-TestSourceSpan $mutated $node.Extent.StartOffset ($node.Extent.EndOffset-$node.Extent.StartOffset) '$null'};return $mutated
+}
 function Get-TestSecretText {
     param([Parameter(Mandatory)][int]$Seed,[Parameter(Mandatory)][int]$Length)
     $characters=[char[]]::new($Length);for($index=0;$index-lt$Length;$index++){$characters[$index]=[char]([int][char]'a'+(($Seed+$index*7)%26))};return -join$characters
@@ -180,44 +190,52 @@ if([bool]$config.UseConPty-and-not$Worker){
 }
 foreach($name in @('CI','GITHUB_ACTIONS','TF_BUILD','BUILD_BUILDID','RUNNER_TEMP')){[Environment]::SetEnvironmentVariable($name,$null)}
 if(-not[string]::IsNullOrWhiteSpace([string]$config.CiMarker)){[Environment]::SetEnvironmentVariable([string]$config.CiMarker,'1')}
-$state=$null;$powershell=$null;$runspace=$null;$testHost=$null;$output=@();$errors=@();$invokeFailure=$null;$transcriptStarted=$false;$responses=[Collections.Generic.List[Security.SecureString]]::new();$responseCharacters=[Collections.Generic.List[char[]]]::new()
+$state=$null;$powershell=$null;$runspace=$null;$testHost=$null;$output=@();$errors=@();$invokeFailure=$null;$transcriptStarted=$false;$responses=[Collections.Generic.List[Security.SecureString]]::new();$responseCharacters=[Collections.Generic.List[char[]]]::new();$driverExitCode=0
 function New-DriverSecretCharacters {param([int]$Seed,[int]$Length)$value=[char[]]::new($Length);for($index=0;$index-lt$Length;$index++){$value[$index]=[char]([int][char]'a'+(($Seed+$index*7)%26))};return ,$value}
 function Test-DriverContainsCharacters {param([AllowEmptyString()][string]$Value,[char[]]$Characters)if($Characters.Length-eq0-or$Value.Length-lt$Characters.Length){return $false};for($offset=0;$offset-le$Value.Length-$Characters.Length;$offset++){$same=$true;for($index=0;$index-lt$Characters.Length;$index++){if($Value[$offset+$index]-cne$Characters[$index]){$same=$false;break}};if($same){return $true}};return $false}
 try{
     Add-Type -TypeDefinition ([IO.File]::ReadAllText([string]$config.HostSourcePath))
     $state=[pscustomobject]@{InputRedirected=[Console]::IsInputRedirected;UserInteractive=[Environment]::UserInteractive}
     foreach($spec in @($config.ResponseSpecs)){$characters=New-DriverSecretCharacters ([int]$spec.Seed) ([int]$spec.Length);$responseCharacters.Add($characters);$secure=[Security.SecureString]::new();foreach($character in $characters){$secure.AppendChar($character)};$secure.MakeReadOnly();$responses.Add($secure)}
-    $testHost=[SyuanTsai.AIInstructions.TrustAnchor.Tests.SecureStringHost]::new([Security.SecureString[]]$responses.ToArray())
+    $beforeRead=[Action[int]]{param($readCount)foreach($barrier in @($config.BarrierSpecs)){if([int]$barrier.ReadCount-ne$readCount){continue};[IO.File]::WriteAllText([string]$barrier.SignalPath,[string]$readCount,[Text.UTF8Encoding]::new($false));$deadline=[DateTime]::UtcNow.AddMilliseconds([int]$barrier.TimeoutMilliseconds);while(-not[IO.File]::Exists([string]$barrier.WitnessPath)){if([DateTime]::UtcNow-ge$deadline){throw "Timed out waiting for adversary barrier witness at read ${readCount}."};[Threading.Thread]::Sleep(10)}}}
+    $testHost=[SyuanTsai.AIInstructions.TrustAnchor.Tests.SecureStringHost]::new([Security.SecureString[]]$responses.ToArray(),$beforeRead)
     $runspace=[Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace($testHost);$powershell=[Management.Automation.PowerShell]::Create();$runspace.Open();$powershell.Runspace=$runspace
     if([bool]$config.PreloadTamper){
         $runspace.SessionStateProxy.SetVariable('TrustAnchorPreloadModulePath',[string]$config.ModulePath);[void]$powershell.AddScript('$module=Microsoft.PowerShell.Core\Import-Module $TrustAnchorPreloadModulePath -PassThru -Force -ErrorAction Stop;& $module {function script:Assert-TrustAnchorInteractiveHost {};function script:Read-TrustAnchorPassword {[Security.SecureString]::new()};$script:TrustAnchorInteractiveOverride=''tampered''}')
+        [void]$powershell.Invoke();if($powershell.HadErrors){throw $powershell.Streams.Error[0]};$powershell.Commands.Clear();$powershell.Streams.Error.Clear()
+    }
+    if([bool]$config.PreloadPathTamper){
+        $runspace.SessionStateProxy.SetVariable('TrustAnchorFakeModulePath',[string]$config.FakeModulePath);[void]$powershell.AddScript('function global:Join-Path { param($Path,$ChildPath) if([string]$ChildPath -ceq ''TrustAnchorPrivateKey.psm1''){return $TrustAnchorFakeModulePath};Microsoft.PowerShell.Management\Join-Path @PSBoundParameters }')
         [void]$powershell.Invoke();if($powershell.HadErrors){throw $powershell.Streams.Error[0]};$powershell.Commands.Clear();$powershell.Streams.Error.Clear()
     }
     [void]$powershell.AddCommand('Start-Transcript').AddParameter('LiteralPath',[string]$config.TranscriptPath).AddParameter('Force');[void]$powershell.Invoke();if($powershell.HadErrors){throw $powershell.Streams.Error[0]};$transcriptStarted=$true;$powershell.Commands.Clear();$powershell.Streams.Error.Clear()
     [void]$powershell.AddCommand([string]$config.Path);foreach($name in $config.Parameters.Keys){[void]$powershell.AddParameter([string]$name,$config.Parameters[$name])}
     try{$output=@($powershell.Invoke())}catch{$invokeFailure=$_};$errors=@($powershell.Streams.Error);if($null-ne$invokeFailure-and$errors.Count-eq0){$errors=@($invokeFailure)};$hadErrors=$powershell.HadErrors-or$null-ne$invokeFailure
     $errorIds=@($errors|ForEach-Object{if($null-ne$_.Exception.InnerException-and$null-ne$_.Exception.InnerException.ErrorRecord){[string]$_.Exception.InnerException.ErrorRecord.FullyQualifiedErrorId}elseif($null-ne$_.Exception.ErrorRecord){[string]$_.Exception.ErrorRecord.FullyQualifiedErrorId}else{[string]$_.FullyQualifiedErrorId}})
-    $errorMessages=@($errors|ForEach-Object{[string]$_.Exception.Message});$environmentContainsSentinel=$false
+    $errorMessages=@($errors|ForEach-Object{if($null-ne$_.Exception.InnerException-and$null-ne$_.Exception.InnerException.ErrorRecord){[string]$_.Exception.InnerException.ErrorRecord.Exception.Message}elseif($null-ne$_.Exception.ErrorRecord){[string]$_.Exception.ErrorRecord.Exception.Message}else{[string]$_.Exception.Message}});$environmentContainsSentinel=$false
     foreach($value in [Environment]::GetEnvironmentVariables().Values){foreach($characters in $responseCharacters){if(Test-DriverContainsCharacters ([string]$value) $characters){$environmentContainsSentinel=$true}}}
-    [pscustomobject]@{Output=$output;ErrorIds=$errorIds;ErrorMessages=$errorMessages;ReadCount=$testHost.ReadCount;HadErrors=$hadErrors;InteractiveState=$state;EnvironmentContainsSentinel=$environmentContainsSentinel}|Export-Clixml -LiteralPath ([string]$config.ResultPath) -Depth 8
+    [pscustomobject]@{Output=$output;ErrorIds=$errorIds;ErrorMessages=$errorMessages;ReadCount=$testHost.ReadCount;HadErrors=$hadErrors;InteractiveState=$state;EnvironmentContainsSentinel=$environmentContainsSentinel;PathTamperWitnessExists=if([string]::IsNullOrWhiteSpace([string]$config.PathTamperWitnessPath)){$false}else{[IO.File]::Exists([string]$config.PathTamperWitnessPath)}}|Export-Clixml -LiteralPath ([string]$config.ResultPath) -Depth 8
 }catch{
-    [pscustomobject]@{Output=@();ErrorIds=@([string]$_.FullyQualifiedErrorId);ErrorMessages=@([string]$_.Exception.Message);ReadCount=if($null-eq$testHost){0}else{$testHost.ReadCount};HadErrors=$true;InteractiveState=$state;DriverFailure=$true}|Export-Clixml -LiteralPath ([string]$config.ResultPath) -Depth 8
+    $driverExitCode=1;[pscustomobject]@{Output=@();ErrorIds=@([string]$_.FullyQualifiedErrorId);ErrorMessages=@([string]$_.Exception.Message);ReadCount=if($null-eq$testHost){0}else{$testHost.ReadCount};HadErrors=$true;InteractiveState=$state;DriverFailure=$true}|Export-Clixml -LiteralPath ([string]$config.ResultPath) -Depth 8
 }finally{
     if($transcriptStarted-and$null-ne$powershell){$powershell.Commands.Clear();$powershell.Streams.Error.Clear();[void]$powershell.AddCommand('Stop-Transcript');[void]$powershell.Invoke()}
     if($null-ne$powershell){$powershell.Dispose()};if($null-ne$runspace){$runspace.Dispose()};foreach($response in $responses){$response.Dispose()};foreach($characters in $responseCharacters){[Array]::Clear($characters,0,$characters.Length)}
+    $disposed=@($responses|ForEach-Object{[SyuanTsai.AIInstructions.TrustAnchor.Tests.SecureStringHost]::IsDisposed($_)});$zeroed=@($responseCharacters|ForEach-Object{(@($_|Where-Object{$_-ne[char]0}).Count-eq0)})
+    if([IO.File]::Exists([string]$config.ResultPath)){$cleanupResult=Import-Clixml -LiteralPath ([string]$config.ResultPath);$cleanupResult|Add-Member NoteProperty ResponseCleanupDisposed $disposed;$cleanupResult|Add-Member NoteProperty ResponseCleanupZeroed $zeroed;$cleanupResult|Export-Clixml -LiteralPath ([string]$config.ResultPath) -Depth 8}
 }
+if($driverExitCode-ne0){exit $driverExitCode}
 '@
 }
 function Invoke-TestTrustAnchorCli {
     param(
         [Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][hashtable]$Parameters,[object[]]$ResponseSpecs=@(),
-        [string]$CiMarker,[switch]$PreloadTamper
+        [string]$CiMarker,[switch]$PreloadTamper,[switch]$PreloadPathTamper,[object[]]$BarrierSpecs=@(),[string]$DriverSource
     )
-    $id=[Guid]::NewGuid().ToString('N');$driver=Join-Path $TestDrive "trust-anchor-cli-driver-$id.ps1";$configPath=Join-Path $TestDrive "trust-anchor-cli-config-$id.clixml";$hostSource=Join-Path $TestDrive "trust-anchor-host-$id.cs";$resultPath=Join-Path $TestDrive "trust-anchor-cli-result-$id.clixml";$transcriptPath=Join-Path $TestDrive "trust-anchor-cli-transcript-$id.txt";$stdoutPath=Join-Path $TestDrive "trust-anchor-cli-stdout-$id.txt";$stderrPath=Join-Path $TestDrive "trust-anchor-cli-stderr-$id.txt"
-    $artifacts=@($driver,$configPath,$hostSource,$resultPath,$transcriptPath,$stdoutPath,$stderrPath);$process=$null;$result=$null
+    $id=[Guid]::NewGuid().ToString('N');$driver=Join-Path $TestDrive "trust-anchor-cli-driver-$id.ps1";$configPath=Join-Path $TestDrive "trust-anchor-cli-config-$id.clixml";$hostSource=Join-Path $TestDrive "trust-anchor-host-$id.cs";$resultPath=Join-Path $TestDrive "trust-anchor-cli-result-$id.clixml";$transcriptPath=Join-Path $TestDrive "trust-anchor-cli-transcript-$id.txt";$stdoutPath=Join-Path $TestDrive "trust-anchor-cli-stdout-$id.txt";$stderrPath=Join-Path $TestDrive "trust-anchor-cli-stderr-$id.txt";$fakeModulePath=Join-Path $TestDrive "trust-anchor-fake-$id.psm1";$pathTamperWitnessPath=Join-Path $TestDrive "trust-anchor-fake-$id.witness"
+    $artifacts=@($driver,$configPath,$hostSource,$resultPath,$transcriptPath,$stdoutPath,$stderrPath,$fakeModulePath,$pathTamperWitnessPath);$process=$null;$result=$null
     try{
-        [IO.File]::WriteAllText($driver,(Get-TestCliDriverSource),[Text.UTF8Encoding]::new($false));[IO.File]::WriteAllText($hostSource,$script:TrustAnchorTestHostSource,[Text.UTF8Encoding]::new($false))
-        [pscustomobject]@{Path=$Path;Parameters=$Parameters;ResponseSpecs=$ResponseSpecs;ModulePath=$script:ModulePath;PreloadTamper=[bool]$PreloadTamper;CiMarker=$CiMarker;UseConPty=[bool]$IsWindows;HostSourcePath=$hostSource;ResultPath=$resultPath;TranscriptPath=$transcriptPath}|Export-Clixml -LiteralPath $configPath -Depth 8
+        if([string]::IsNullOrEmpty($DriverSource)){$DriverSource=Get-TestCliDriverSource};[IO.File]::WriteAllText($driver,$DriverSource,[Text.UTF8Encoding]::new($false));[IO.File]::WriteAllText($hostSource,$script:TrustAnchorTestHostSource,[Text.UTF8Encoding]::new($false));if($PreloadPathTamper){$escaped=$pathTamperWitnessPath.Replace("'","''");[IO.File]::WriteAllText($fakeModulePath,"[IO.File]::WriteAllText('$escaped','loaded');function Assert-TrustAnchorInteractiveHost {};function Invoke-GetTrustAnchorFingerprintAction {}",[Text.UTF8Encoding]::new($false))}
+        [pscustomobject]@{Path=$Path;Parameters=$Parameters;ResponseSpecs=$ResponseSpecs;ModulePath=$script:ModulePath;PreloadTamper=[bool]$PreloadTamper;PreloadPathTamper=[bool]$PreloadPathTamper;FakeModulePath=$fakeModulePath;PathTamperWitnessPath=$pathTamperWitnessPath;BarrierSpecs=$BarrierSpecs;CiMarker=$CiMarker;UseConPty=[bool]$IsWindows;HostSourcePath=$hostSource;ResultPath=$resultPath;TranscriptPath=$transcriptPath}|Export-Clixml -LiteralPath $configPath -Depth 8
         $pwshCommand=@(Get-Command pwsh -CommandType Application -ErrorAction Stop)[0];$pwsh=if($IsWindows){[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName}else{[string]$pwshCommand.Source}
         if($IsWindows){$conpty=[SyuanTsai.AIInstructions.TrustAnchor.Tests.ConPtyLauncher]::Run($pwsh,@('-NoProfile','-File',$driver,'-ConfigPath',$configPath),$script:RepositoryRoot,180000);[IO.File]::WriteAllText($stdoutPath,$conpty.Output);[IO.File]::WriteAllText($stderrPath,'');$exitCode=$conpty.ExitCode}
         else{
@@ -324,10 +342,10 @@ function Get-TrustAnchorProtectedTokenContract {
 }
 function Get-TrustAnchorProtectedContracts {
     return @{
-        'scripts/trust-anchor/TrustAnchorPrivateKey.psm1'=@{TokenCount=3597;Sha256='1a006626c160ae2f1542351ca3329d76e49dff482ce65c0d36bb317cd8ab764e'}
-        'scripts/trust-anchor/New-TrustAnchorKeyPair.ps1'=@{TokenCount=103;Sha256='0c34020d94c18e0b0f185f72eedb4fafb6c26f63babeaff8ae49ff3f892bf025'}
-        'scripts/trust-anchor/ConvertTo-TrustAnchorPublicKeyXml.ps1'=@{TokenCount=79;Sha256='43bef257457b31eecd541317bbcfb84f1fb89ec68eb3df0383f9289bd7f752af'}
-        'scripts/trust-anchor/Get-TrustAnchorFingerprint.ps1'=@{TokenCount=110;Sha256='f499bfa4a40d624c428f5c4ea0ebc5ac7c7f923b33c332cab092f56eeeaa6530'}
+        'scripts/trust-anchor/TrustAnchorPrivateKey.psm1'=@{TokenCount=3893;Sha256='2404e9d9666e8a709169a34625cb7ebe796f4093d30af9419604fc29a4886ecc'}
+        'scripts/trust-anchor/New-TrustAnchorKeyPair.ps1'=@{TokenCount=110;Sha256='9957a095dbfbf8640cdf5a8611219e55775cfdcf3a46c4789a23f360f49f76f5'}
+        'scripts/trust-anchor/ConvertTo-TrustAnchorPublicKeyXml.ps1'=@{TokenCount=86;Sha256='1f42500679c905fbb8662df71f08087535160891b3bcc1bfb39e88f50b539a9e'}
+        'scripts/trust-anchor/Get-TrustAnchorFingerprint.ps1'=@{TokenCount=117;Sha256='7690182cf612e77daa3f106ae16dc46540e131e2849645591436ae342b6fe27f'}
     }
 }
 function Test-TrustAnchorProtectedContract {
@@ -418,7 +436,7 @@ PowerShell|Use-TrustAnchorPassword|ZeroFreeGlobalAllocUnicode|$buffer|finally
 PowerShell|Use-TrustAnchorPassword|ZeroCharacters|$characters|finally
 PowerShell|Use-TrustAnchorPassword|FreePin|$pin|finally
 PowerShell|Read-TrustAnchorInputBytes|ZeroMemory|$bytes|finally
-PowerShell|Open-TrustAnchorPrivateKey|ZeroMemory|$bytes|finally
+PowerShell|Read-TrustAnchorPrivateKeyLease|ZeroMemory|$bytes|finally
 PowerShell|Get-TrustAnchorFingerprint|ZeroMemory|$spki|finally
 PowerShell|Invoke-NewTrustAnchorKeyPairAction|ZeroMemory|$publicBytes|finally
 PowerShell|Invoke-NewTrustAnchorKeyPairAction|ZeroMemory|$privateBytes|finally
@@ -427,6 +445,118 @@ PowerShell|Invoke-ConvertToTrustAnchorPublicKeyXmlAction|ZeroMemory|$bytes|final
 PowerShell|Invoke-GetTrustAnchorFingerprintAction|ZeroMemory|$inputBytes|finally
 '@
     return ($actual-join"`n")-ceq$expected.Trim()
+}
+function Get-TestDriverCleanupRecords {
+    param([Parameter(Mandatory)][string]$DriverSource)
+    $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseInput($DriverSource,[ref]$tokens,[ref]$errors);if(@($errors).Count-ne0){return $null};$records=[Collections.Generic.List[string]]::new()
+    foreach($member in @($ast.FindAll({param($node)$node-is[Management.Automation.Language.InvokeMemberExpressionAst]},$true)|Sort-Object{$_.Extent.StartOffset})){
+        $api=$null;$target=$null
+        if(-not$member.Static-and$member.Member.Value-ceq'Dispose'-and$member.Expression-is[Management.Automation.Language.VariableExpressionAst]-and$member.Expression.VariablePath.UserPath-ceq'response'){$api='Dispose';$target='$response'}
+        elseif($member.Static-and$member.Expression-is[Management.Automation.Language.TypeExpressionAst]-and$member.Expression.TypeName.FullName-ceq'Array'-and$member.Member.Value-ceq'Clear'){$api='Clear';$target=($member.Arguments|ForEach-Object{$_.Extent.Text})-join','}
+        if($null-eq$api){continue};$loop=$member.Parent;while($null-ne$loop-and$loop-isnot[Management.Automation.Language.ForEachStatementAst]){$loop=$loop.Parent};$collection=if($null-eq$loop){'<none>'}else{$loop.Condition.Extent.Text};$records.Add("$api|$target|$collection|$(Get-TestCleanupContext $member)")
+    }
+    return ,$records.ToArray()
+}
+function Test-TestDriverCleanupContract {
+    param([Parameter(Mandatory)][string]$DriverSource)
+    $actual=Get-TestDriverCleanupRecords $DriverSource;if($null-eq$actual){return $false};return ($actual-join"`n")-ceq@'
+Dispose|$response|$responses|finally
+Clear|$characters,0,$characters.Length|$responseCharacters|finally
+'@.Trim()
+}
+function Test-TrustAnchorFilePrimitiveSemantics {
+    param([Parameter(Mandatory)][string]$ModuleSource)
+    $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseInput($ModuleSource,[ref]$tokens,[ref]$errors);if(@($errors).Count-ne0){return $false}
+    $functions=@{};foreach($name in @('New-TrustAnchorKeyFile','Get-TrustAnchorMetadataEvidence','Assert-TrustAnchorPrivatePermissions')){$matches=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true));if($matches.Count-ne1){return $false};$functions[$name]=$matches[0]}
+    $new=$functions['New-TrustAnchorKeyFile'];$try=@($new.Body.EndBlock.Statements|Where-Object{$_-is[Management.Automation.Language.TryStatementAst]});if($try.Count-ne1){return $false};$statements=@($try[0].Body.Statements);$expectedTypes=@('TryStatementAst','IfStatementAst','AssignmentStatementAst','AssignmentStatementAst','IfStatementAst','PipelineAst','PipelineAst','IfStatementAst','TryStatementAst','ReturnStatementAst');if((($statements|ForEach-Object{$_.GetType().Name})-join'|')-cne($expectedTypes-join'|')){return $false}
+    $writes=@($new.FindAll({param($node)$node-is[Management.Automation.Language.InvokeMemberExpressionAst]-and-not$node.Static-and$node.Member.Value-ceq'WriteNewBytes'},$true));if($writes.Count-ne1-or$writes[0].Expression-isnot[Management.Automation.Language.VariableExpressionAst]-or$writes[0].Expression.VariablePath.UserPath-cne'file'-or$writes[0].Arguments.Count-ne1-or$writes[0].Arguments[0]-isnot[Management.Automation.Language.VariableExpressionAst]-or$writes[0].Arguments[0].VariablePath.UserPath-cne'Bytes'-or$statements[5].Extent.StartOffset-ne$writes[0].Parent.Extent.StartOffset){return $false}
+    $permissionCommands=@($new.FindAll({param($node)$node-is[Management.Automation.Language.CommandAst]-and$node.GetCommandName()-cin@('Set-PlatformPermissions','Assert-TrustAnchorPrivatePermissions')},$true)|Sort-Object{$_.Extent.StartOffset});if($permissionCommands.Count-ne4){return $false};$permissionRecords=@($permissionCommands|ForEach-Object{"$($_.GetCommandName())|$(@($_.CommandElements|ForEach-Object{$_.Extent.Text})-join' ')|$(Get-TestCleanupContext $_)"});$expectedPermission=@(
+        'Set-PlatformPermissions|Set-PlatformPermissions -Lease $file -Policy @{Sddl="D:P(A;;FA;;;$sid)";ReadOnly=$false}|body',
+        'Set-PlatformPermissions|Set-PlatformPermissions -Lease $file -Policy @{Mode=384}|body',
+        'Assert-TrustAnchorPrivatePermissions|Assert-TrustAnchorPrivatePermissions $file|body',
+        'Assert-TrustAnchorPrivatePermissions|Assert-TrustAnchorPrivatePermissions $file|body'
+    );if(($permissionRecords-join"`n")-cne($expectedPermission-join"`n")-or$permissionCommands[2].Extent.StartOffset-ge$writes[0].Extent.StartOffset-or$permissionCommands[3].Extent.StartOffset-le$writes[0].Extent.StartOffset){return $false}
+    $aclCalls=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.InvokeMemberExpressionAst]-and$node.Static-and$node.Expression-is[Management.Automation.Language.TypeExpressionAst]-and$node.Expression.TypeName.FullName-ceq'SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector'},$true)|Sort-Object{$_.Extent.StartOffset});$aclRecords=@($aclCalls|ForEach-Object{"$(Get-TestAncestorFunctionName $_)|$($_.Member.Value)|$(@($_.Arguments|ForEach-Object{$_.Extent.Text})-join',')"});$expectedAcl=@(
+        'Get-TrustAnchorMetadataEvidence|InspectMetadata|[Microsoft.Win32.SafeHandles.SafeFileHandle]$handle',
+        'Get-TrustAnchorMetadataEvidence|Inspect|[Microsoft.Win32.SafeHandles.SafeFileHandle]$handle',
+        'Remove-TrustAnchorCreatedFile|DeleteExact|$Lease.Path,[uint64]$Lease.Expected.Device,[uint64]$Lease.Expected.Inode'
+    );if(($aclRecords-join"`n")-cne($expectedAcl-join"`n")){return $false}
+    $metadata=$functions['Get-TrustAnchorMetadataEvidence'];$handleAssignments=@($metadata.FindAll({param($node)$node-is[Management.Automation.Language.AssignmentStatementAst]-and$node.Left-is[Management.Automation.Language.VariableExpressionAst]-and$node.Left.VariablePath.UserPath-ceq'handle'},$true));if($handleAssignments.Count-ne1-or$handleAssignments[0].Right.Extent.Text-cne'Get-TrustAnchorLeaseHandle $Lease'){return $false}
+    $permission=$functions['Assert-TrustAnchorPrivatePermissions'];$metadataCommands=@($permission.FindAll({param($node)$node-is[Management.Automation.Language.CommandAst]-and$node.GetCommandName()-ceq'Get-TrustAnchorMetadataEvidence'},$true));if($metadataCommands.Count-ne1-or$metadataCommands[0].CommandElements.Count-ne2-or$metadataCommands[0].CommandElements[1]-isnot[Management.Automation.Language.VariableExpressionAst]-or$metadataCommands[0].CommandElements[1].VariablePath.UserPath-cne'Lease'){return $false}
+    return $true
+}
+function Test-TrustAnchorPrivateInputOperationSemantics {
+    param([Parameter(Mandatory)][Management.Automation.Language.ScriptBlockAst]$Ast)
+    $records=[Collections.Generic.List[string]]::new()
+    foreach($name in @('Open-TrustAnchorPrivateKeyLease','Read-TrustAnchorPrivateKeyLease','Open-TrustAnchorPrivateKey','Invoke-ConvertToTrustAnchorPublicKeyXmlAction','Invoke-GetTrustAnchorFingerprintAction')){
+        $matches=@($Ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true));if($matches.Count-ne1){return $false}
+        foreach($node in @($matches[0].FindAll({param($item)$item-is[Management.Automation.Language.CommandAst]-or$item-is[Management.Automation.Language.InvokeMemberExpressionAst]},$true)|Sort-Object{$_.Extent.StartOffset})){
+            if($node-is[Management.Automation.Language.CommandAst]){$records.Add("$name|Command|$($node.GetCommandName())|$(@($node.CommandElements|ForEach-Object{$_.Extent.Text})-join' ')")}else{$records.Add("$name|Member|$($node.Expression.Extent.Text)|$($node.Member.Value)|$(@($node.Arguments|ForEach-Object{$_.Extent.Text})-join',')")}
+        }
+    }
+    $expected=@'
+Open-TrustAnchorPrivateKeyLease|Command|New-TrustAnchorPathEvidence|New-TrustAnchorPathEvidence -Path $Path -Purpose PrivateKey -Existing
+Open-TrustAnchorPrivateKeyLease|Command|Open-PlatformFile|Open-PlatformFile -ParentLease $pathEvidence.ParentLease -Leaf $pathEvidence.Leaf -Access Read -CreateMode OpenExisting
+Open-TrustAnchorPrivateKeyLease|Command|Assert-PlatformFileIdentity|Assert-PlatformFileIdentity -Lease $file -Expected $expected -SingleLink -VerifyPath
+Open-TrustAnchorPrivateKeyLease|Command|Out-Null|Out-Null
+Open-TrustAnchorPrivateKeyLease|Command|New-TrustAnchorError|New-TrustAnchorError $_.Exception.Message 'TrustAnchor.PrivateIdentityChanged'
+Open-TrustAnchorPrivateKeyLease|Command|Get-TrustAnchorMetadataEvidence|Get-TrustAnchorMetadataEvidence $file
+Open-TrustAnchorPrivateKeyLease|Member|$file|Dispose|
+Open-TrustAnchorPrivateKeyLease|Command|Close-TrustAnchorPathEvidence|Close-TrustAnchorPathEvidence $pathEvidence
+Read-TrustAnchorPrivateKeyLease|Command|Get-TrustAnchorMetadataEvidence|Get-TrustAnchorMetadataEvidence $Lease.FileLease
+Read-TrustAnchorPrivateKeyLease|Command|Assert-TrustAnchorPrivatePermissions|Assert-TrustAnchorPrivatePermissions $Lease.FileLease $before
+Read-TrustAnchorPrivateKeyLease|Command|Out-Null|Out-Null
+Read-TrustAnchorPrivateKeyLease|Command|New-TrustAnchorError|New-TrustAnchorError $_.Exception.Message 'TrustAnchor.UnsafePrivatePermissions'
+Read-TrustAnchorPrivateKeyLease|Command|Test-TrustAnchorMetadataEqual|Test-TrustAnchorMetadataEqual $Lease.OpenMetadata $before
+Read-TrustAnchorPrivateKeyLease|Command|New-TrustAnchorError|New-TrustAnchorError 'The private-key handle metadata changed after it was opened.' 'TrustAnchor.PrivateMetadataChanged'
+Read-TrustAnchorPrivateKeyLease|Member|$Lease.FileLease|ReadAllBytes|1048576
+Read-TrustAnchorPrivateKeyLease|Command|Assert-PlatformFileIdentity|Assert-PlatformFileIdentity -Lease $Lease.FileLease -Expected $Lease.Expected -SingleLink -VerifyPath
+Read-TrustAnchorPrivateKeyLease|Command|Out-Null|Out-Null
+Read-TrustAnchorPrivateKeyLease|Command|New-TrustAnchorError|New-TrustAnchorError $_.Exception.Message 'TrustAnchor.PrivateIdentityChanged'
+Read-TrustAnchorPrivateKeyLease|Command|Get-TrustAnchorMetadataEvidence|Get-TrustAnchorMetadataEvidence $Lease.FileLease
+Read-TrustAnchorPrivateKeyLease|Command|Assert-TrustAnchorPrivatePermissions|Assert-TrustAnchorPrivatePermissions $Lease.FileLease $after
+Read-TrustAnchorPrivateKeyLease|Command|Out-Null|Out-Null
+Read-TrustAnchorPrivateKeyLease|Command|New-TrustAnchorError|New-TrustAnchorError $_.Exception.Message 'TrustAnchor.UnsafePrivatePermissions'
+Read-TrustAnchorPrivateKeyLease|Command|Test-TrustAnchorMetadataEqual|Test-TrustAnchorMetadataEqual $before $after
+Read-TrustAnchorPrivateKeyLease|Command|New-TrustAnchorError|New-TrustAnchorError 'The private-key handle metadata changed while it was being read.' 'TrustAnchor.PrivateMetadataChanged'
+Read-TrustAnchorPrivateKeyLease|Member|[Security.Cryptography.CryptographicOperations]|ZeroMemory|$bytes
+Open-TrustAnchorPrivateKey|Command|Open-TrustAnchorPrivateKeyLease|Open-TrustAnchorPrivateKeyLease $Path
+Open-TrustAnchorPrivateKey|Command|Read-TrustAnchorPrivateKeyLease|Read-TrustAnchorPrivateKeyLease $lease
+Open-TrustAnchorPrivateKey|Command|Close-TrustAnchorPrivateKeyLease|Close-TrustAnchorPrivateKeyLease $lease
+Invoke-ConvertToTrustAnchorPublicKeyXmlAction|Command|Assert-TrustAnchorInteractiveHost|Assert-TrustAnchorInteractiveHost
+Invoke-ConvertToTrustAnchorPublicKeyXmlAction|Command|Assert-TrustAnchorKeyPath|Assert-TrustAnchorKeyPath -Path $OutputPath -Purpose PublicOutput
+Invoke-ConvertToTrustAnchorPublicKeyXmlAction|Command|Read-TrustAnchorInputBytes|Read-TrustAnchorInputBytes $PublicKeyPemPath
+Invoke-ConvertToTrustAnchorPublicKeyXmlAction|Command|Import-TrustAnchorPublicPem|Import-TrustAnchorPublicPem $inputBytes
+Invoke-ConvertToTrustAnchorPublicKeyXmlAction|Command|Assert-TrustAnchorPublicKey|Assert-TrustAnchorPublicKey $rsa
+Invoke-ConvertToTrustAnchorPublicKeyXmlAction|Command|ConvertTo-TrustAnchorCanonicalXml|ConvertTo-TrustAnchorCanonicalXml $rsa
+Invoke-ConvertToTrustAnchorPublicKeyXmlAction|Command|New-TrustAnchorKeyFile|New-TrustAnchorKeyFile -PathEvidence $target -Bytes $bytes
+Invoke-ConvertToTrustAnchorPublicKeyXmlAction|Command|Get-TrustAnchorFingerprint|Get-TrustAnchorFingerprint $rsa
+Invoke-ConvertToTrustAnchorPublicKeyXmlAction|Command|Close-TrustAnchorCreatedFile|Close-TrustAnchorCreatedFile $lease
+Invoke-ConvertToTrustAnchorPublicKeyXmlAction|Command|Close-TrustAnchorPathEvidence|Close-TrustAnchorPathEvidence $target
+Invoke-ConvertToTrustAnchorPublicKeyXmlAction|Member|[Security.Cryptography.CryptographicOperations]|ZeroMemory|$inputBytes
+Invoke-ConvertToTrustAnchorPublicKeyXmlAction|Member|[Security.Cryptography.CryptographicOperations]|ZeroMemory|$bytes
+Invoke-ConvertToTrustAnchorPublicKeyXmlAction|Member|$rsa|Dispose|
+Invoke-GetTrustAnchorFingerprintAction|Command|Assert-TrustAnchorInteractiveHost|Assert-TrustAnchorInteractiveHost
+Invoke-GetTrustAnchorFingerprintAction|Command|Where-Object|Where-Object {-not[string]::IsNullOrWhiteSpace($_)}
+Invoke-GetTrustAnchorFingerprintAction|Member|[string]|IsNullOrWhiteSpace|$_
+Invoke-GetTrustAnchorFingerprintAction|Member|[string]|IsNullOrWhiteSpace|$PublicKeyXmlPath
+Invoke-GetTrustAnchorFingerprintAction|Command|Read-TrustAnchorInputBytes|Read-TrustAnchorInputBytes $PublicKeyXmlPath
+Invoke-GetTrustAnchorFingerprintAction|Command|Import-TrustAnchorPublicXml|Import-TrustAnchorPublicXml $inputBytes
+Invoke-GetTrustAnchorFingerprintAction|Member|[string]|IsNullOrWhiteSpace|$PublicKeyPemPath
+Invoke-GetTrustAnchorFingerprintAction|Command|Read-TrustAnchorInputBytes|Read-TrustAnchorInputBytes $PublicKeyPemPath
+Invoke-GetTrustAnchorFingerprintAction|Command|Import-TrustAnchorPublicPem|Import-TrustAnchorPublicPem $inputBytes
+Invoke-GetTrustAnchorFingerprintAction|Command|Open-TrustAnchorPrivateKeyLease|Open-TrustAnchorPrivateKeyLease $EncryptedPrivateKeyPath
+Invoke-GetTrustAnchorFingerprintAction|Command|Read-TrustAnchorPassword|Read-TrustAnchorPassword
+Invoke-GetTrustAnchorFingerprintAction|Command|Read-TrustAnchorPrivateKeyLease|Read-TrustAnchorPrivateKeyLease $privateLease
+Invoke-GetTrustAnchorFingerprintAction|Command|Import-TrustAnchorEncryptedPrivateKey|Import-TrustAnchorEncryptedPrivateKey -Bytes $inputBytes -Password $password
+Invoke-GetTrustAnchorFingerprintAction|Command|Assert-TrustAnchorPublicKey|Assert-TrustAnchorPublicKey $rsa
+Invoke-GetTrustAnchorFingerprintAction|Command|Get-TrustAnchorFingerprint|Get-TrustAnchorFingerprint $rsa
+Invoke-GetTrustAnchorFingerprintAction|Member|[Security.Cryptography.CryptographicOperations]|ZeroMemory|$inputBytes
+Invoke-GetTrustAnchorFingerprintAction|Command|Close-TrustAnchorPrivateKeyLease|Close-TrustAnchorPrivateKeyLease $privateLease
+Invoke-GetTrustAnchorFingerprintAction|Member|$rsa|Dispose|
+Invoke-GetTrustAnchorFingerprintAction|Member|$password|Dispose|
+'@
+    return ($records-join"`n")-ceq$expected.Trim()
 }
 function Set-TestSourceSpan {
     param([Parameter(Mandatory)][string]$Source,[Parameter(Mandatory)][int]$Start,[Parameter(Mandatory)][int]$Length,[Parameter(Mandatory)][AllowEmptyString()][string]$Replacement)
@@ -443,11 +573,17 @@ function Test-TrustAnchorCliGuardAst {
     if($assignment.Right-isnot[Management.Automation.Language.PipelineAst]-or$assignment.Right.PipelineElements.Count-ne1-or$assignment.Right.PipelineElements[0]-isnot[Management.Automation.Language.CommandAst]){return $false}
     $import=$assignment.Right.PipelineElements[0];if($import.InvocationOperator-cne[Management.Automation.Language.TokenKind]::Unknown-or$import.GetCommandName()-cne'Microsoft.PowerShell.Core\Import-Module'){return $false}
     $importElements=@($import.CommandElements);if($importElements.Count-ne6){return $false}
-    if($importElements[1]-isnot[Management.Automation.Language.ParenExpressionAst]-or$importElements[1].Extent.Text-cne"(Join-Path `$PSScriptRoot 'TrustAnchorPrivateKey.psm1')"){return $false}
+    if($importElements[1]-isnot[Management.Automation.Language.ParenExpressionAst]-or$importElements[1].Pipeline.PipelineElements.Count-ne1-or$importElements[1].Pipeline.PipelineElements[0]-isnot[Management.Automation.Language.CommandExpressionAst]){return $false}
+    $combine=$importElements[1].Pipeline.PipelineElements[0].Expression
+    if($combine-isnot[Management.Automation.Language.InvokeMemberExpressionAst]-or-not$combine.Static-or$combine.Expression-isnot[Management.Automation.Language.TypeExpressionAst]-or$combine.Expression.TypeName.FullName-cne'IO.Path'-or$combine.Member.Value-cne'Combine'-or$combine.Arguments.Count-ne2){return $false}
+    if($combine.Arguments[0]-isnot[Management.Automation.Language.VariableExpressionAst]-or$combine.Arguments[0].VariablePath.UserPath-cne'PSScriptRoot'-or$combine.Arguments[1]-isnot[Management.Automation.Language.StringConstantExpressionAst]-or$combine.Arguments[1].Value-cne'TrustAnchorPrivateKey.psm1'){return $false}
+    $try=$statements[1]
+    $preGuardCommands=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.CommandAst]-and$node.Extent.StartOffset-lt$try.Extent.StartOffset},$true));if($preGuardCommands.Count-ne1-or$preGuardCommands[0]-ne$import){return $false}
+    $preGuardMembers=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.InvokeMemberExpressionAst]-and$node.Extent.StartOffset-lt$try.Extent.StartOffset},$true));if($preGuardMembers.Count-ne1-or$preGuardMembers[0]-ne$combine){return $false}
     if($importElements[2]-isnot[Management.Automation.Language.CommandParameterAst]-or$importElements[2].ParameterName-cne'PassThru'){return $false}
     if($importElements[3]-isnot[Management.Automation.Language.CommandParameterAst]-or$importElements[3].ParameterName-cne'Force'){return $false}
     if($importElements[4]-isnot[Management.Automation.Language.CommandParameterAst]-or$importElements[4].ParameterName-cne'ErrorAction'-or$importElements[5]-isnot[Management.Automation.Language.StringConstantExpressionAst]-or$importElements[5].Value-cne'Stop'){return $false}
-    $try=$statements[1];if(@($try.Body.Statements).Count-ne1-or-not(Test-TestAstContract $try.Body.Statements[0] $Contract.TryTokenCount $Contract.TryNodeCount $Contract.TrySha256)){return $false}
+    if(@($try.Body.Statements).Count-ne1-or-not(Test-TestAstContract $try.Body.Statements[0] $Contract.TryTokenCount $Contract.TryNodeCount $Contract.TrySha256)){return $false}
     $outerPipeline=$try.Body.Statements[0];if($outerPipeline-isnot[Management.Automation.Language.PipelineAst]-or$outerPipeline.PipelineElements.Count-ne1){return $false}
     $outer=$outerPipeline.PipelineElements[0];if($outer-isnot[Management.Automation.Language.CommandAst]-or$outer.InvocationOperator-cne[Management.Automation.Language.TokenKind]::Ampersand){return $false}
     $elements=@($outer.CommandElements);if($elements.Count-ne(2+$Contract.OuterArguments.Count)){return $false}
@@ -477,20 +613,20 @@ function Get-TrustAnchorCliContracts {
                 "KeyId|[Parameter(Mandatory)][ValidateSet('humanApproval','supervisor')][string]",
                 'PrivateKeyPath|[Parameter(Mandatory)][string]',
                 'PublicKeyXmlPath|[Parameter(Mandatory)][string]'
-            );InnerParameters=@('id|<none>','privatePath|<none>','publicPath|<none>');OuterArguments=@('KeyId','PrivateKeyPath','PublicKeyXmlPath');ActionArguments=@('KeyId=id','PrivateKeyPath=privatePath','PublicKeyXmlPath=publicPath');WholeTokenCount=103;WholeNodeCount=83;WholeSha256='5c4d1ced3300790dd3614192429664b02956595fad177f976213df67e514cbc5';TryTokenCount=24;TryNodeCount=30;TrySha256='31e3057472486f3ee6dc6e0cfecbb36a70b2e1ebf81d0a7addc718b2d0a0ed84'
+            );InnerParameters=@('id|<none>','privatePath|<none>','publicPath|<none>');OuterArguments=@('KeyId','PrivateKeyPath','PublicKeyXmlPath');ActionArguments=@('KeyId=id','PrivateKeyPath=privatePath','PublicKeyXmlPath=publicPath');WholeTokenCount=110;WholeNodeCount=85;WholeSha256='3ef2e8d82bdff973914e75450a068046a201162f20c7f505c1df07a59b7471e5';TryTokenCount=24;TryNodeCount=30;TrySha256='31e3057472486f3ee6dc6e0cfecbb36a70b2e1ebf81d0a7addc718b2d0a0ed84'
         }
         'ConvertTo-TrustAnchorPublicKeyXml.ps1'=@{
             Action='Invoke-ConvertToTrustAnchorPublicKeyXmlAction';CmdletBinding='[CmdletBinding()]';Parameters=@(
                 'PublicKeyPemPath|[Parameter(Mandatory)][string]',
                 'OutputPath|[Parameter(Mandatory)][string]'
-            );InnerParameters=@('inputPath|<none>','outputPath|<none>');OuterArguments=@('PublicKeyPemPath','OutputPath');ActionArguments=@('PublicKeyPemPath=inputPath','OutputPath=outputPath');WholeTokenCount=79;WholeNodeCount=69;WholeSha256='9e5b047ac1b59170e74861904542ee882cc87f040d093d83f196d456c042e18c';TryTokenCount=19;TryNodeCount=25;TrySha256='71ecd62780be11717df10a16b44ec768af37f8b109b5f27bba14c3498a60263b'
+            );InnerParameters=@('inputPath|<none>','outputPath|<none>');OuterArguments=@('PublicKeyPemPath','OutputPath');ActionArguments=@('PublicKeyPemPath=inputPath','OutputPath=outputPath');WholeTokenCount=86;WholeNodeCount=71;WholeSha256='29d5c03fa588b9b216ab098c504119a38aad30aad21c59e596c0303e41cd9f44';TryTokenCount=19;TryNodeCount=25;TrySha256='71ecd62780be11717df10a16b44ec768af37f8b109b5f27bba14c3498a60263b'
         }
         'Get-TrustAnchorFingerprint.ps1'=@{
             Action='Invoke-GetTrustAnchorFingerprintAction';CmdletBinding="[CmdletBinding(DefaultParameterSetName='Xml')]";Parameters=@(
                 "PublicKeyXmlPath|[Parameter(Mandatory,ParameterSetName='Xml')][string]",
                 "PublicKeyPemPath|[Parameter(Mandatory,ParameterSetName='Pem')][string]",
                 "EncryptedPrivateKeyPath|[Parameter(Mandatory,ParameterSetName='Private')][string]"
-            );InnerParameters=@('xmlPath|<none>','pemPath|<none>','privatePath|<none>');OuterArguments=@('PublicKeyXmlPath','PublicKeyPemPath','EncryptedPrivateKeyPath');ActionArguments=@('PublicKeyXmlPath=xmlPath','PublicKeyPemPath=pemPath','EncryptedPrivateKeyPath=privatePath');WholeTokenCount=110;WholeNodeCount=88;WholeSha256='0a6579c459b90f51ad115dc8a6dd7d1801dcd7792a977d18ae6d0228dd6e370f';TryTokenCount=24;TryNodeCount=30;TrySha256='cdde2705e23f9b4451932a35af22391fa15d243c539569210f0de44711f1b71b'
+            );InnerParameters=@('xmlPath|<none>','pemPath|<none>','privatePath|<none>');OuterArguments=@('PublicKeyXmlPath','PublicKeyPemPath','EncryptedPrivateKeyPath');ActionArguments=@('PublicKeyXmlPath=xmlPath','PublicKeyPemPath=pemPath','EncryptedPrivateKeyPath=privatePath');WholeTokenCount=117;WholeNodeCount=90;WholeSha256='7350c7731989b4db1e4da6e1409b32ab31550a9906d88c25a5c6bcbb7936cdee';TryTokenCount=24;TryNodeCount=30;TrySha256='cdde2705e23f9b4451932a35af22391fa15d243c539569210f0de44711f1b71b'
         }
     }
 }
@@ -612,7 +748,7 @@ function Get-TrustAnchorSensitiveFunctionContracts {
         'Read-TrustAnchorPassword'=@{TokenCount=143;NodeCount=135;Sha256='b2f7e57957217513d8137de32613c9d4dbae5fe982aa74dbeeacc56ddef3f5f9'}
         'Invoke-NewTrustAnchorKeyPairAction'=@{TokenCount=301;NodeCount=300;Sha256='ebb92a094a9fa545a5ed0ae5f6de97ca890131df531ab1f862cbe2bd8c1e13fe'}
         'Invoke-ConvertToTrustAnchorPublicKeyXmlAction'=@{TokenCount=138;NodeCount=134;Sha256='e9ac0c1f60fe96f1ef0eb4c387352af72c5b4c0121232cd65a85f2a32c403a2f'}
-        'Invoke-GetTrustAnchorFingerprintAction'=@{TokenCount=189;NodeCount=180;Sha256='e572d804140b536d682e5be82be60faa1dc3a37d7e090924ec07a73552ffad08'}
+        'Invoke-GetTrustAnchorFingerprintAction'=@{TokenCount=201;NodeCount=194;Sha256='e5c9417351771c2ffaf6a8edebd15a5263bb23e38e4aff822365286261a1cbbf'}
     }
 }
 function Test-TrustAnchorSensitiveFunctionAsts {
@@ -661,7 +797,8 @@ function Test-TrustAnchorPasswordSourceAst {
 4|Assert-TrustAnchorPrivatePermissions
 3|Assert-TrustAnchorPublicKey
 3|Close-TrustAnchorCreatedFile
-4|Close-TrustAnchorPathEvidence
+5|Close-TrustAnchorPathEvidence
+2|Close-TrustAnchorPrivateKeyLease
 2|ConvertTo-Json
 3|ConvertTo-TrustAnchorCanonicalXml
 1|Export-ModuleMember
@@ -669,7 +806,7 @@ function Test-TrustAnchorPasswordSourceAst {
 1|Get-Command
 3|Get-TrustAnchorFingerprint
 3|Get-TrustAnchorLeaseHandle
-3|Get-TrustAnchorMetadataEvidence
+4|Get-TrustAnchorMetadataEvidence
 1|Get-TrustAnchorPhysicalParent
 1|git
 1|Import-Module
@@ -677,22 +814,23 @@ function Test-TrustAnchorPasswordSourceAst {
 2|Import-TrustAnchorPublicPem
 1|Import-TrustAnchorPublicXml
 3|Join-Path
-8|New-TrustAnchorError
+17|New-TrustAnchorError
 3|New-TrustAnchorKeyFile
 2|New-TrustAnchorPathEvidence
 1|Open-PlatformDirectory
 2|Open-PlatformFile
-1|Open-TrustAnchorPrivateKey
+2|Open-TrustAnchorPrivateKeyLease
 16|Out-Null
 2|Read-Host
 3|Read-TrustAnchorInputBytes
 2|Read-TrustAnchorPassword
+2|Read-TrustAnchorPrivateKeyLease
 1|Remove-TrustAnchorCreatedFile
 1|Resolve-PlatformPhysicalPath
 2|Set-PlatformPermissions
 1|Set-StrictMode
 4|Split-Path
-1|Test-TrustAnchorMetadataEqual
+2|Test-TrustAnchorMetadataEqual
 4|Use-TrustAnchorPassword
 2|Where-Object
 '@
@@ -715,7 +853,7 @@ function Test-TrustAnchorPasswordSourceAst {
     $memberNames=@($members|ForEach-Object{$kind=if($_.Static){'static'}else{'instance'};$type=if($_.Expression-is[Management.Automation.Language.TypeExpressionAst]){$_.Expression.TypeName.FullName}else{$_.Expression.StaticType.FullName};"$kind|$type|$($_.Member.Value)"})
     $expectedMembers=@'
 1|instance|System.Object|Complete
-21|instance|System.Object|Dispose
+22|instance|System.Object|Dispose
 1|instance|System.Object|EndsWith
 2|instance|System.Object|ExportParameters
 1|instance|System.Object|ExportSubjectPublicKeyInfo
@@ -797,7 +935,7 @@ function Test-TrustAnchorPasswordSourceAst {
 1|Management.Automation.ErrorRecord
 2|Microsoft.Win32.SafeHandles.SafeFileHandle
 5|ordered
-6|pscustomobject
+7|pscustomobject
 1|Reflection.BindingFlags
 2|Runtime.InteropServices.GCHandle
 1|Runtime.InteropServices.GCHandleType
@@ -810,7 +948,7 @@ function Test-TrustAnchorPasswordSourceAst {
 3|Security.Cryptography.SHA256
 2|Security.Principal.WindowsIdentity
 3|Security.SecureString
-29|string
+30|string
 1|string[]
 2|switch
 1|System.Numerics.BigInteger
@@ -983,17 +1121,29 @@ function Test-TestNativeRegistrationAst {
     return $true
 }
 function Get-TestRuntimeModuleScriptBlockCalls {
-    param([Parameter(Mandatory)][Management.Automation.Language.ScriptBlockAst]$Ast)
-    $records=[Collections.Generic.List[string]]::new();$sources=[Collections.Generic.List[object]]::new();$sources.Add([pscustomobject]@{Name='TestFile';Ast=$Ast})
-    $driverTokens=$null;$driverErrors=$null;$driverAst=[Management.Automation.Language.Parser]::ParseInput((Get-TestCliDriverSource),[ref]$driverTokens,[ref]$driverErrors);if(@($driverErrors).Count-ne0){return $null}
-    foreach($addScript in @($driverAst.FindAll({param($node)$node-is[Management.Automation.Language.InvokeMemberExpressionAst]-and[string]$node.Member.Value-ceq'AddScript'},$true))){
-        if($addScript.Arguments.Count-ne1-or$addScript.Arguments[0]-isnot[Management.Automation.Language.StringConstantExpressionAst]){continue};$nestedTokens=$null;$nestedErrors=$null;$nestedAst=[Management.Automation.Language.Parser]::ParseInput([string]$addScript.Arguments[0].Value,[ref]$nestedTokens,[ref]$nestedErrors);if(@($nestedErrors).Count-ne0){return $null};$sources.Add([pscustomobject]@{Name="DriverAddScript@$($addScript.Extent.StartLineNumber)";Ast=$nestedAst})
-    }
-    foreach($source in $sources){
-        foreach($command in @($source.Ast.FindAll({param($node)$node-is[Management.Automation.Language.CommandAst]},$true))){
-            if($command.GetCommandName()-ceq'Invoke-TrustAnchorModule'){$records.Add("$($source.Name)|Invoke-TrustAnchorModule|$($command.Extent.StartLineNumber)|$($command.Extent.Text)");continue}
-            if($command.GetCommandName()-ceq'Get-Module'){$records.Add("$($source.Name)|Get-Module|$($command.Extent.StartLineNumber)|$($command.Extent.Text)");continue}
-            if($command.InvocationOperator-ceq[Management.Automation.Language.TokenKind]::Ampersand-and$command.CommandElements.Count-gt1-and$command.CommandElements[0]-is[Management.Automation.Language.VariableExpressionAst]-and$command.CommandElements[0].VariablePath.UserPath-cin@('module','script:Module')){$inner=@($command.CommandElements|Where-Object{$_-is[Management.Automation.Language.ScriptBlockExpressionAst]}|ForEach-Object{@($_.ScriptBlock.FindAll({param($node)$node-is[Management.Automation.Language.CommandAst]-and$null-ne$node.GetCommandName()},$true)|ForEach-Object GetCommandName)-join','});$purpose=if($source.Name-ceq'DriverAddScript@19'){'poisoned-module-fixture'}else{'unapproved'};$records.Add("$($source.Name)|AmpersandModule|$($command.Extent.StartLineNumber)|$($inner-join';')|$purpose")}
+    param([Parameter(Mandatory)][Management.Automation.Language.ScriptBlockAst]$Ast,[string]$DriverSource=(Get-TestCliDriverSource))
+    $records=[Collections.Generic.List[string]]::new();$sources=[Collections.Generic.Queue[object]]::new();$sources.Enqueue([pscustomobject]@{Name='TestFile';Ast=$Ast})
+    $driverTokens=$null;$driverErrors=$null;$driverAst=[Management.Automation.Language.Parser]::ParseInput($DriverSource,[ref]$driverTokens,[ref]$driverErrors);if(@($driverErrors).Count-ne0){return $null};$sources.Enqueue([pscustomobject]@{Name='Driver';Ast=$driverAst})
+    while($sources.Count-gt0){
+        $source=$sources.Dequeue();$pipelineOrdinal=0
+        foreach($member in @($source.Ast.FindAll({param($node)$node-is[Management.Automation.Language.InvokeMemberExpressionAst]},$true)|Sort-Object{$_.Extent.StartOffset})){
+            $memberName=[string]$member.Member.Value
+            if($memberName-cin@('AddScript','AddCommand','AddStatement')){
+                $shape=if($member.Arguments.Count-eq1-and$member.Arguments[0]-is[Management.Automation.Language.StringConstantExpressionAst]){'Literal:'+ (Get-TestSha256Text ([string]$member.Arguments[0].Value))}else{'Unapproved:'+(@($member.Arguments|ForEach-Object{$_.GetType().Name})-join',')}
+                $records.Add("$($source.Name)|PipelineMember|$memberName|$shape")
+                if($memberName-ceq'AddScript'-and$shape.StartsWith('Literal:',[StringComparison]::Ordinal)){$nestedTokens=$null;$nestedErrors=$null;$nestedAst=[Management.Automation.Language.Parser]::ParseInput([string]$member.Arguments[0].Value,[ref]$nestedTokens,[ref]$nestedErrors);if(@($nestedErrors).Count-ne0){return $null};$sources.Enqueue([pscustomobject]@{Name="$($source.Name)/AddScript$pipelineOrdinal";Ast=$nestedAst})}
+                $pipelineOrdinal++
+            }
+            if($member.Expression-is[Management.Automation.Language.VariableExpressionAst]-and$member.Expression.VariablePath.UserPath-cin@('module','script:Module')){$records.Add("$($source.Name)|ModuleMember|$($member.Expression.VariablePath.UserPath)|$memberName")}
+            if($memberName-ceq'Invoke'){$records.Add("$($source.Name)|InvokeMember|$($member.Expression.GetType().Name)|$($member.Expression.Extent.Text)")}
+            if($memberName-ceq'InvokeScript'){$records.Add("$($source.Name)|InvokeScript|$($member.Expression.Extent.Text)|$($member.Arguments.Count)")}
+            if($member.Static-and$member.Expression-is[Management.Automation.Language.TypeExpressionAst]-and$member.Expression.TypeName.FullName-ceq'scriptblock'-and$memberName-ceq'Create'){$records.Add("$($source.Name)|ScriptBlockCreate|static|$($member.Arguments.Count)")}
+        }
+        foreach($variable in @($source.Ast.FindAll({param($node)$node-is[Management.Automation.Language.VariableExpressionAst]-and$node.VariablePath.UserPath-cin@('module','script:Module')},$true)|Sort-Object{$_.Extent.StartOffset})){$records.Add("$($source.Name)|ModuleReference|$($variable.VariablePath.UserPath)|$($variable.Parent.GetType().Name)")}
+        foreach($command in @($source.Ast.FindAll({param($node)$node-is[Management.Automation.Language.CommandAst]},$true)|Sort-Object{$_.Extent.StartOffset})){
+            if($command.GetCommandName()-ceq'Invoke-TrustAnchorModule'){$records.Add("$($source.Name)|Invoke-TrustAnchorModule|$($command.Extent.Text)")}
+            if($command.GetCommandName()-ceq'Get-Module'){$records.Add("$($source.Name)|Get-Module|$($command.Extent.Text)")}
+            if($command.InvocationOperator-cin@([Management.Automation.Language.TokenKind]::Ampersand,[Management.Automation.Language.TokenKind]::Dot)){$target=if($command.CommandElements.Count-eq0){'<none>'}else{$command.CommandElements[0].Extent.Text};$records.Add("$($source.Name)|InvocationOperator|$($command.InvocationOperator)|$target")}
         }
     }
     return ,$records.ToArray()
@@ -1002,11 +1152,28 @@ function Get-TestAncestorItName {
     param([Parameter(Mandatory)][Management.Automation.Language.Ast]$Node)
     $cursor=$Node.Parent;while($null-ne$cursor){if($cursor-is[Management.Automation.Language.ScriptBlockAst]-and$cursor.Parent-is[Management.Automation.Language.ScriptBlockExpressionAst]-and$cursor.Parent.Parent-is[Management.Automation.Language.CommandAst]-and$cursor.Parent.Parent.GetCommandName()-ceq'It'){return [string]$cursor.Parent.Parent.CommandElements[1].Value};$cursor=$cursor.Parent};return '<none>'
 }
-function Get-TestPrivateFixtureWriteInventory {
+function Get-TestAncestorScopeName {
+    param([Parameter(Mandatory)][Management.Automation.Language.Ast]$Node)
+    $it=Get-TestAncestorItName $Node;if($it-cne'<none>'){return $it};$cursor=$Node.Parent;while($null-ne$cursor){if($cursor-is[Management.Automation.Language.FunctionDefinitionAst]){return $cursor.Name};$cursor=$cursor.Parent};return '<script>'
+}
+function Get-TestPrivateFixtureHelperInventory {
     param([Parameter(Mandatory)][Management.Automation.Language.ScriptBlockAst]$Ast)
-    $records=[Collections.Generic.List[string]]::new()
-    foreach($node in @($Ast.FindAll({param($item)$item-is[Management.Automation.Language.CommandAst]-and$item.GetCommandName()-ceq'Write-TestPrivateKeyFixture'},$true)|Sort-Object{$_.Extent.StartOffset})){$records.Add("PrivateHelper|$(Get-TestAncestorItName $node)")}
-    foreach($node in @($Ast.FindAll({param($item)$item-is[Management.Automation.Language.InvokeMemberExpressionAst]-and$item.Static-and$item.Expression-is[Management.Automation.Language.TypeExpressionAst]-and$item.Expression.TypeName.FullName-ceq'IO.File'-and$item.Member.Value-ceq'WriteAllBytes'},$true)|Sort-Object{$_.Extent.StartOffset})){$records.Add("RawWriteAllBytes|$(Get-TestAncestorItName $node)")}
+    return ,@($Ast.FindAll({param($item)$item-is[Management.Automation.Language.CommandAst]-and$item.GetCommandName()-ceq'Write-TestPrivateKeyFixture'},$true)|Sort-Object{$_.Extent.StartOffset}|ForEach-Object{"PrivateHelper|$(Get-TestAncestorItName $_)"})
+}
+function Get-TestFileWriteOperationInventory {
+    param([Parameter(Mandatory)][Management.Automation.Language.ScriptBlockAst]$Ast,[string]$DriverSource=(Get-TestCliDriverSource))
+    $records=[Collections.Generic.List[string]]::new();$sources=[Collections.Generic.List[object]]::new();$sources.Add([pscustomobject]@{Name='TestFile';Ast=$Ast});$driverTokens=$null;$driverErrors=$null;$driverAst=[Management.Automation.Language.Parser]::ParseInput($DriverSource,[ref]$driverTokens,[ref]$driverErrors);if(@($driverErrors).Count-ne0){return $null};$sources.Add([pscustomobject]@{Name='Driver';Ast=$driverAst})
+    foreach($source in $sources){
+        foreach($node in @($source.Ast.FindAll({param($item)$item-is[Management.Automation.Language.InvokeMemberExpressionAst]},$true)|Sort-Object{$_.Extent.StartOffset})){
+            if($node.Static-and$node.Expression-is[Management.Automation.Language.TypeExpressionAst]-and$node.Expression.TypeName.FullName-cin@('IO.File','System.IO.File')-and([string]$node.Member.Value).StartsWith('Write',[StringComparison]::Ordinal)-or($node.Static-and$node.Expression-is[Management.Automation.Language.TypeExpressionAst]-and$node.Expression.TypeName.FullName-cin@('IO.File','System.IO.File')-and([string]$node.Member.Value).StartsWith('Append',[StringComparison]::Ordinal))){$records.Add("$($source.Name)|StaticFile|$($node.Member.Value)|$(Get-TestAncestorScopeName $node)");continue}
+            if(-not$node.Static-and$node.Member.Value-ceq'Write'){$records.Add("$($source.Name)|InstanceWrite|$($node.Expression.Extent.Text)|$(Get-TestAncestorScopeName $node)")}
+        }
+        foreach($command in @($source.Ast.FindAll({param($item)$item-is[Management.Automation.Language.CommandAst]},$true)|Sort-Object{$_.Extent.StartOffset})){
+            $name=$command.GetCommandName();if($name-cin@('Set-Content','Add-Content','Out-File')){$records.Add("$($source.Name)|Command|$name|$(Get-TestAncestorScopeName $command)");continue}
+            if($name-ceq'New-Item'-and@($command.CommandElements|Where-Object{$_-is[Management.Automation.Language.CommandParameterAst]-and$_.ParameterName-ceq'Value'}).Count-gt0){$records.Add("$($source.Name)|Command|New-Item-Value|$(Get-TestAncestorScopeName $command)")}
+        }
+        foreach($redirection in @($source.Ast.FindAll({param($item)$item-is[Management.Automation.Language.FileRedirectionAst]},$true)|Sort-Object{$_.Extent.StartOffset})){$records.Add("$($source.Name)|Redirection|$($redirection.GetType().Name)|$(Get-TestAncestorScopeName $redirection)")}
+    }
     return ,$records.ToArray()
 }
 
@@ -1156,7 +1323,8 @@ Describe 'PR-K1 trust-anchor CLI boundary' {
     # Purpose: Produce canonical XML while rejecting private PEM and weak public keys through the same action used by the formal CLI.
     It 'InterT18_converts_public_PEM_and_rejects_private_or_weak_inputs' {
         $rsa=[Security.Cryptography.RSA]::Create(3072);$weak=[Security.Cryptography.RSA]::Create(2048)
-        try{$cli=Join-Path $script:RepositoryRoot 'scripts/trust-anchor/ConvertTo-TrustAnchorPublicKeyXml.ps1';$publicPath=Join-Path $TestDrive 'public.pem';$outputPath=Join-Path $TestDrive 'public.xml';[IO.File]::WriteAllText($publicPath,$rsa.ExportSubjectPublicKeyInfoPem());$result=Invoke-TestTrustAnchorCli $cli @{PublicKeyPemPath=$publicPath;OutputPath=$outputPath};$result.HadErrors|Should Be $false;[Convert]::ToHexString([IO.File]::ReadAllBytes($outputPath))|Should Be ([Convert]::ToHexString((ConvertTo-TestCanonicalXmlBytes $rsa)));$privatePath=Join-Path $TestDrive 'private-input.pem';[IO.File]::WriteAllText($privatePath,$rsa.ExportPkcs8PrivateKeyPem());$rejected=Invoke-TestTrustAnchorCli $cli @{PublicKeyPemPath=$privatePath;OutputPath=(Join-Path $TestDrive 'private.xml')};$rejected.HadErrors|Should Be $true;$rejected.Errors[0].Exception.InnerException.ErrorRecord.FullyQualifiedErrorId|Should Match '^TrustAnchor\.UnsupportedKeyFormat';$weakPath=Join-Path $TestDrive 'weak.pem';[IO.File]::WriteAllText($weakPath,$weak.ExportSubjectPublicKeyInfoPem());(Invoke-TestTrustAnchorCli $cli @{PublicKeyPemPath=$weakPath;OutputPath=(Join-Path $TestDrive 'weak.xml')}).HadErrors|Should Be $true}finally{$weak.Dispose();$rsa.Dispose()}
+        [byte[]]$privateBytes=$null
+        try{$cli=Join-Path $script:RepositoryRoot 'scripts/trust-anchor/ConvertTo-TrustAnchorPublicKeyXml.ps1';$publicPath=Join-Path $TestDrive 'public.pem';$outputPath=Join-Path $TestDrive 'public.xml';[IO.File]::WriteAllText($publicPath,$rsa.ExportSubjectPublicKeyInfoPem());$result=Invoke-TestTrustAnchorCli $cli @{PublicKeyPemPath=$publicPath;OutputPath=$outputPath};$result.HadErrors|Should Be $false;[Convert]::ToHexString([IO.File]::ReadAllBytes($outputPath))|Should Be ([Convert]::ToHexString((ConvertTo-TestCanonicalXmlBytes $rsa)));$privatePath=Join-Path $TestDrive 'private-input.pem';$privateBytes=$rsa.ExportPkcs8PrivateKey();Write-TestPrivateKeyFixture $privatePath $privateBytes;$rejected=Invoke-TestTrustAnchorCli $cli @{PublicKeyPemPath=$privatePath;OutputPath=(Join-Path $TestDrive 'private.xml')};$rejected.HadErrors|Should Be $true;$rejected.Errors[0].Exception.InnerException.ErrorRecord.FullyQualifiedErrorId|Should Match '^TrustAnchor\.UnsupportedKeyFormat';$weakPath=Join-Path $TestDrive 'weak.pem';[IO.File]::WriteAllText($weakPath,$weak.ExportSubjectPublicKeyInfoPem());(Invoke-TestTrustAnchorCli $cli @{PublicKeyPemPath=$weakPath;OutputPath=(Join-Path $TestDrive 'weak.xml')}).HadErrors|Should Be $true}finally{if($null-ne$privateBytes){[Security.Cryptography.CryptographicOperations]::ZeroMemory($privateBytes)};$weak.Dispose();$rsa.Dispose()}
     }
 
     # Scenario: Canonical XML, PUBLIC KEY PEM, and an encrypted private key all represent the same runtime-generated RSA key.
@@ -1188,7 +1356,8 @@ Describe 'PR-K1 trust-anchor path lease and rollback safety' {
     # Scenario: A retained preflight parent is renamed and a Git worktree replaces its pathname before create-new.
     # Purpose: Bind physical/worktree preflight evidence to the exact parent lease used by creation.
     It 'InterT22_reuses_the_preflight_parent_lease_or_fails_closed' {
-        $parent=Join-Path $TestDrive 'approved';[void][IO.Directory]::CreateDirectory($parent);& git -C $parent init --quiet;if($LASTEXITCODE-ne0){throw 'git init failed'};$private=Join-Path $parent 'key.pem';$public=Join-Path $TestDrive 'key.xml';$result=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/New-TrustAnchorKeyPair.ps1') @{KeyId='humanApproval';PrivateKeyPath=$private;PublicKeyXmlPath=$public};$result.HadErrors|Should Be $true;$result.ErrorMessages[0]|Should Match 'outside every Git worktree';(Test-Path -LiteralPath $private)|Should Be $false
+        $parent=Join-Path $TestDrive 'approved';$displaced=Join-Path $TestDrive 'approved-original';[void][IO.Directory]::CreateDirectory($parent);$signal=Join-Path $TestDrive 'parent-barrier.signal';$witnessPath=Join-Path $TestDrive 'parent-barrier.clixml';$job=Start-Job -ScriptBlock {param($signal,$witness,$parent,$displaced)while(-not[IO.File]::Exists($signal)){[Threading.Thread]::Sleep(10)};try{[IO.Directory]::Move($parent,$displaced);[void][IO.Directory]::CreateDirectory($parent);[void][IO.Directory]::CreateDirectory([IO.Path]::Combine($parent,'.git'));[pscustomobject]@{Succeeded=$true;OriginalExists=[IO.Directory]::Exists($displaced);ReplacementGit=[IO.Directory]::Exists([IO.Path]::Combine($parent,'.git'))}|Export-Clixml -LiteralPath $witness}catch{[pscustomobject]@{Succeeded=$false;Error=$_.Exception.Message}|Export-Clixml -LiteralPath $witness}} -ArgumentList $signal,$witnessPath,$parent,$displaced
+        try{$secretSpec=New-TestSecretSpec;$private=Join-Path $parent 'key.pem';$public=Join-Path $TestDrive 'key.xml';$barrier=[pscustomobject]@{ReadCount=1;SignalPath=$signal;WitnessPath=$witnessPath;TimeoutMilliseconds=30000};$result=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/New-TrustAnchorKeyPair.ps1') @{KeyId='humanApproval';PrivateKeyPath=$private;PublicKeyXmlPath=$public} @($secretSpec,$secretSpec) -BarrierSpecs @($barrier);Wait-Job $job|Out-Null;$witness=Import-Clixml -LiteralPath $witnessPath;if($IsWindows){$witness.Succeeded|Should Be $false;[string]::IsNullOrWhiteSpace([string]$witness.Error)|Should Be $false;$result.HadErrors|Should Be $false;$result.ReadCount|Should Be 2;(Test-Path -LiteralPath $private)|Should Be $true;(Test-Path -LiteralPath $public)|Should Be $true}else{$witness.Succeeded|Should Be $true;$witness.OriginalExists|Should Be $true;$witness.ReplacementGit|Should Be $true;$result.HadErrors|Should Be $true;$result.ReadCount|Should Be 2;$result.ErrorIds[0]|Should Be 'TrustAnchor.ParentIdentityChanged';(Test-Path -LiteralPath $private)|Should Be $false;(Test-Path -LiteralPath (Join-Path $displaced 'key.pem'))|Should Be $false;(Test-Path -LiteralPath $public)|Should Be $false}}finally{Stop-Job $job -ErrorAction SilentlyContinue;Remove-Job $job -Force -ErrorAction SilentlyContinue}
     }
 
     # Scenario: A target parent is reached through a native symlink or junction.
@@ -1223,17 +1392,25 @@ Describe 'PR-K1 trust-anchor path lease and rollback safety' {
         $result.HadErrors|Should Be $true;$result.ErrorIds[0]|Should Match '^TrustAnchor\.NonInteractive';$result.ReadCount|Should Be 0
     }
 
-    # Scenario: Source order for private-file creation is inspected without invoking the helper.
-    # Purpose: Permission tightening and readback must precede the first key-byte write.
+    # Scenario: File creation, permission readback, byte write, and retained-handle ACL operations are inspected as exact AST operations.
+    # Purpose: Require permission dominance before one write and reject wrong-lease, pathname-ACL, and unreachable-decoy mutations.
     It 'UnitT28_orders_permission_readback_before_key_bytes' {
-        $source=Get-Content -Raw -Encoding UTF8 $script:ModulePath;$body=[regex]::Match($source,'(?s)function New-TrustAnchorKeyFile \{(.*?)\n\}').Groups[1].Value;$set=$body.IndexOf('Set-PlatformPermissions',[StringComparison]::Ordinal);$readback=$body.IndexOf('Assert-TrustAnchorPrivatePermissions',[StringComparison]::Ordinal);$write=$body.IndexOf('.WriteNewBytes(',[StringComparison]::Ordinal);($set -ge 0 -and $readback -gt $set -and $write -gt $readback)|Should Be $true
+        $relative='scripts/trust-anchor/TrustAnchorPrivateKey.psm1';$source=Get-Content -Raw -Encoding UTF8 $script:ModulePath;(Test-TrustAnchorFilePrimitiveSemantics $source)|Should Be $true
+        $mutations=@(
+            $source.Replace("        if(`$PathEvidence.Purpose -ceq 'PrivateKey'){","        `$file.WriteNewBytes(`$Bytes)`n        if(`$PathEvidence.Purpose -ceq 'PrivateKey'){"),
+            $source.Replace('Assert-TrustAnchorPrivatePermissions $file|Out-Null','Assert-TrustAnchorPrivatePermissions $parent|Out-Null'),
+            $source.Replace('        $file.WriteNewBytes($Bytes)',"        [SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector]::Inspect([IO.File]::OpenHandle(`$PathEvidence.Path))`n        `$file.WriteNewBytes(`$Bytes)"),
+            $source.Replace('        $file.WriteNewBytes($Bytes)',"        'Set-PlatformPermissions Assert-TrustAnchorPrivatePermissions WriteNewBytes'|Out-Null`n        `$file.WriteNewBytes(`$Bytes)")
+        )
+        foreach($mutated in $mutations){(Test-TrustAnchorFilePrimitiveSemantics $mutated)|Should Be $false;(Test-TrustAnchorProtectedContract $relative $mutated)|Should Be $false}
     }
 
 
-    # Scenario: The three private-material input actions are inspected at AST level.
-    # Purpose: Forbid unbounded text readers and direct byte-to-string conversion on every possible private-key path.
+    # Scenario: The complete command/member operation inventory of every private-material input action is compared exactly.
+    # Purpose: Permit only bounded byte readers and the approved clear/dispose operations without regex or API denylists.
     It 'UnitT29_private_input_paths_use_only_bounded_clearable_byte_buffers' {
-        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($script:ModulePath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;$names=@('Open-TrustAnchorPrivateKey','Invoke-ConvertToTrustAnchorPublicKeyXmlAction','Invoke-GetTrustAnchorFingerprintAction');foreach($name in $names){$function=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name},$true));$function.Count|Should Be 1;$function[0].Extent.Text|Should Not Match '(?i)ReadAllText|File\.ReadAllLines|Get-Content'};$fingerprint=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Invoke-GetTrustAnchorFingerprintAction'},$true))[0];$fingerprint.Extent.Text|Should Not Match '(?i)GetString\s*\('
+        $tokens=$null;$errors=$null;$source=Get-Content -Raw -Encoding UTF8 $script:ModulePath;$ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;(Test-TrustAnchorPrivateInputOperationSemantics $ast)|Should Be $true
+        foreach($mutated in @($source.Replace('$bytes=$Lease.FileLease.ReadAllBytes(1048576)','$bytes=[IO.File]::ReadAllText($Lease.PathEvidence.Path)'),$source.Replace('$inputBytes=Read-TrustAnchorInputBytes $PublicKeyPemPath','$inputBytes=Get-Content -Raw $PublicKeyPemPath'),$source.Replace('$rsa=Import-TrustAnchorEncryptedPrivateKey -Bytes $inputBytes -Password $password','$text=[Text.Encoding]::UTF8.GetString($inputBytes);$rsa=Import-TrustAnchorEncryptedPrivateKey -Bytes $inputBytes -Password $password'))){$mutationTokens=$null;$mutationErrors=$null;$mutationAst=[Management.Automation.Language.Parser]::ParseInput($mutated,[ref]$mutationTokens,[ref]$mutationErrors);@($mutationErrors).Count|Should Be 0;(Test-TrustAnchorPrivateInputOperationSemantics $mutationAst)|Should Be $false}
     }
 
     # Scenario: A formally permissioned private fixture contains a unique sentinel and fails after the production CLI reads it.
@@ -1242,20 +1419,30 @@ Describe 'PR-K1 trust-anchor path lease and rollback safety' {
         $sentinel='private-buffer-sentinel-7f2d1c9a';[byte[]]$bytes=ConvertTo-TestUtf8Bytes $sentinel;$path=Join-Path $TestDrive 'post-read-clear.pem'
         try{Write-TestPrivateKeyFixture $path $bytes;$result=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/Get-TrustAnchorFingerprint.ps1') @{EncryptedPrivateKeyPath=$path} @((New-TestSecretSpec));$result.HadErrors|Should Be $true;$result.ErrorIds[0]|Should Match '^TrustAnchor\.UnsupportedKeyFormat';Assert-TestSentinelAbsentFromCliSurfaces $result $sentinel}finally{[Security.Cryptography.CryptographicOperations]::ZeroMemory($bytes)}
     }
+
+    # Scenario: Both parent-identity revalidation statements are removed by AST extent from a worktree-external production copy.
+    # Purpose: Execute the InterT22 adversary timing against the mutant and prove its exact ParentIdentityChanged contract no longer passes.
+    It 'InterT74_parent_identity_revalidation_deletion_mutant_fails_the_barrier_contract' {
+        $source=Get-Content -Raw -Encoding UTF8 $script:ModulePath;$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;$function=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'New-TrustAnchorKeyFile'},$true))[0];$outerTry=@($function.Body.EndBlock.Statements|Where-Object{$_-is[Management.Automation.Language.TryStatementAst]})[0];$identityNodes=@($outerTry.Body.Statements|Where-Object{$_-is[Management.Automation.Language.TryStatementAst]});$identityNodes.Count|Should Be 2;$mutant=Remove-TestAstExtents $source $identityNodes;(Test-TrustAnchorProtectedContract 'scripts/trust-anchor/TrustAnchorPrivateKey.psm1' $mutant)|Should Be $false;$cliRoot=New-TestMutantTrustAnchorCliRoot 'parent-identity' $mutant
+        $parent=Join-Path $TestDrive 'mutant-approved';$displaced=Join-Path $TestDrive 'mutant-approved-original';[void][IO.Directory]::CreateDirectory($parent);$signal=Join-Path $TestDrive 'mutant-parent.signal';$witnessPath=Join-Path $TestDrive 'mutant-parent.witness';$job=Start-Job -ScriptBlock {param($signal,$witness,$parent,$displaced)while(-not[IO.File]::Exists($signal)){[Threading.Thread]::Sleep(10)};try{[IO.Directory]::Move($parent,$displaced);[void][IO.Directory]::CreateDirectory($parent);[void][IO.Directory]::CreateDirectory([IO.Path]::Combine($parent,'.git'));[pscustomobject]@{Succeeded=$true}|Export-Clixml -LiteralPath $witness}catch{[pscustomobject]@{Succeeded=$false;Error=$_.Exception.Message}|Export-Clixml -LiteralPath $witness}} -ArgumentList $signal,$witnessPath,$parent,$displaced
+        try{$secretSpec=New-TestSecretSpec -Seed 740;$private=Join-Path $parent 'key.pem';$public=Join-Path $TestDrive 'mutant-key.xml';$barrier=[pscustomobject]@{ReadCount=1;SignalPath=$signal;WitnessPath=$witnessPath;TimeoutMilliseconds=30000};$result=Invoke-TestTrustAnchorCli (Join-Path $cliRoot 'New-TrustAnchorKeyPair.ps1') @{KeyId='humanApproval';PrivateKeyPath=$private;PublicKeyXmlPath=$public} @($secretSpec,$secretSpec) -BarrierSpecs @($barrier);Wait-Job $job|Out-Null;$witness=Import-Clixml -LiteralPath $witnessPath;if($IsWindows){$witness.Succeeded|Should Be $false;[string]::IsNullOrWhiteSpace([string]$witness.Error)|Should Be $false}else{$witness.Succeeded|Should Be $true};$protected=$result.HadErrors-and$result.ErrorIds[0]-ceq'TrustAnchor.ParentIdentityChanged'-and-not(Test-Path -LiteralPath (Join-Path $displaced 'key.pem'));$protected|Should Be $false}finally{Stop-Job $job -ErrorAction SilentlyContinue;Remove-Job $job -Force -ErrorAction SilentlyContinue}
+    }
 }
 
 if($IsWindows){
     Describe 'PR-K1 Windows native handle safety' {
-        # Scenario: A broad-DACL original is held open while a module-only barrier attempts to replace its pathname with a restricted file.
-        # Purpose: Prove the production share lock prevents replacement instead of treating a failed attempt as a completed barrier.
+        # Scenario: A broad-DACL original is open when an external adversary replaces its DACL with owner-only protection at the password barrier.
+        # Purpose: Detect post-open DACL drift from retained-handle evidence before private bytes are parsed.
         It 'InterT31_share_lock_explicitly_prevents_pathname_replacement' {
-            $path=Join-Path $TestDrive 'windows-broad.pem';[IO.File]::WriteAllText($path,'original');$result=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/Get-TrustAnchorFingerprint.ps1') @{EncryptedPrivateKeyPath=$path};$result.HadErrors|Should Be $true;$result.ErrorMessages[0]|Should Match 'protected DACL'
+            $path=Join-Path $TestDrive 'windows-broad.pem';[IO.File]::WriteAllText($path,'original');$signal=Join-Path $TestDrive 'windows-restrict.signal';$witnessPath=Join-Path $TestDrive 'windows-restrict.witness';$job=Start-Job -ScriptBlock {param($signal,$witness,$path)while(-not[IO.File]::Exists($signal)){[Threading.Thread]::Sleep(10)};$identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$security=[Security.AccessControl.FileSecurity]::new();$security.SetOwner($identity.User);$security.SetAccessRuleProtection($true,$false);$security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($identity.User,[Security.AccessControl.FileSystemRights]::FullControl,[Security.AccessControl.AccessControlType]::Allow));Set-Acl -LiteralPath $path -AclObject $security;$readback=Get-Acl -LiteralPath $path;[pscustomobject]@{Succeeded=$readback.AreAccessRulesProtected;RuleCount=@($readback.Access).Count}|Export-Clixml -LiteralPath $witness}catch{[pscustomobject]@{Succeeded=$false;Error=$_.Exception.Message}|Export-Clixml -LiteralPath $witness}finally{$identity.Dispose()}} -ArgumentList $signal,$witnessPath,$path
+            try{$barrier=[pscustomobject]@{ReadCount=1;SignalPath=$signal;WitnessPath=$witnessPath;TimeoutMilliseconds=30000};$result=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/Get-TrustAnchorFingerprint.ps1') @{EncryptedPrivateKeyPath=$path} @((New-TestSecretSpec)) -BarrierSpecs @($barrier);Wait-Job $job|Out-Null;$witness=Import-Clixml -LiteralPath $witnessPath;$witness.Succeeded|Should Be $true;$witness.RuleCount|Should Be 1;$result.HadErrors|Should Be $true;$result.ReadCount|Should Be 1;$result.ErrorIds[0]|Should Be 'TrustAnchor.PrivateMetadataChanged';$result.ErrorMessages[0]|Should Be 'The private-key handle metadata changed after it was opened.';(Test-Path -LiteralPath $path)|Should Be $true;[IO.File]::ReadAllText($path)|Should Be 'original'}finally{Stop-Job $job -ErrorAction SilentlyContinue;Remove-Job $job -Force -ErrorAction SilentlyContinue}
         }
 
-        # Scenario: A restrictive original is retained with delete sharing while its pathname is replaced by a broad-DACL file.
-        # Purpose: Pass ACL validation through the retained handle, then fail closed only when final pathname identity drift is detected.
+        # Scenario: A restrictive original is retained while an external adversary adds a world-readable allow ACE after open.
+        # Purpose: Re-read DACL from the retained handle and reject the precise post-open permission mutation.
         It 'InterT32_delete_sharing_fixture_proves_handle_based_DACL_evidence' {
-            $bytes=ConvertTo-TestUtf8Bytes 'malformed';$path=Join-Path $TestDrive 'windows-safe.pem';try{Write-TestPrivateKeyFixture $path $bytes;$result=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/Get-TrustAnchorFingerprint.ps1') @{EncryptedPrivateKeyPath=$path} @((New-TestSecretSpec));$result.HadErrors|Should Be $true;$result.ErrorMessages[0]|Should Not Match 'protected DACL';$result.ErrorIds[0]|Should Match '^TrustAnchor\.UnsupportedKeyFormat'}finally{[Security.Cryptography.CryptographicOperations]::ZeroMemory($bytes)}
+            $bytes=ConvertTo-TestUtf8Bytes 'malformed';$path=Join-Path $TestDrive 'windows-safe.pem';$signal=Join-Path $TestDrive 'windows-broad.signal';$witnessPath=Join-Path $TestDrive 'windows-broad.witness';$job=$null
+            try{Write-TestPrivateKeyFixture $path $bytes;$job=Start-Job -ScriptBlock {param($signal,$witness,$path)while(-not[IO.File]::Exists($signal)){[Threading.Thread]::Sleep(10)};$identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$security=[Security.AccessControl.FileSecurity]::new();$security.SetOwner($identity.User);$security.SetAccessRuleProtection($true,$false);$security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($identity.User,[Security.AccessControl.FileSystemRights]::FullControl,[Security.AccessControl.AccessControlType]::Allow));$security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-11'),[Security.AccessControl.FileSystemRights]::FullControl,[Security.AccessControl.AccessControlType]::Allow));[IO.FileSystemAclExtensions]::SetAccessControl([IO.FileInfo]::new($path),$security);$readback=Get-Acl -LiteralPath $path;[pscustomobject]@{Succeeded=$readback.AreAccessRulesProtected;RuleCount=@($readback.Access).Count}|Export-Clixml -LiteralPath $witness}catch{[pscustomobject]@{Succeeded=$false;Error=$_.Exception.Message}|Export-Clixml -LiteralPath $witness}finally{$identity.Dispose()}} -ArgumentList $signal,$witnessPath,$path;$barrier=[pscustomobject]@{ReadCount=1;SignalPath=$signal;WitnessPath=$witnessPath;TimeoutMilliseconds=30000};$result=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/Get-TrustAnchorFingerprint.ps1') @{EncryptedPrivateKeyPath=$path} @((New-TestSecretSpec)) -BarrierSpecs @($barrier);Wait-Job $job|Out-Null;$witness=Import-Clixml -LiteralPath $witnessPath;$witness.Succeeded|Should Be $true;$witness.RuleCount|Should Be 2;$result.HadErrors|Should Be $true;$result.ReadCount|Should Be 1;$result.ErrorIds[0]|Should Be 'TrustAnchor.UnsafePrivatePermissions';$result.ErrorMessages[0]|Should Be 'The private-key handle owner or protected DACL is not sufficiently restrictive.';(Test-Path -LiteralPath $path)|Should Be $true}finally{if($null-ne$job){Stop-Job $job -ErrorAction SilentlyContinue;Remove-Job $job -Force -ErrorAction SilentlyContinue};[Security.Cryptography.CryptographicOperations]::ZeroMemory($bytes)}
         }
 
         # Scenario: The private-key leaf is a file symlink, with a directory-junction fallback when symlink creation is unavailable.
@@ -1274,12 +1461,13 @@ if($IsWindows){
         # Purpose: Prove the same ConPTY driver gives the formal CLI a real console stdin even through the production shard transport.
         It 'InterT35_ConPTY_survives_the_official_closed_stdin_shard_transport' {
             $tempRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath());$root=Join-Path $tempRoot ('p11-k1-conpty-'+[Guid]::NewGuid().ToString('N'));if(([IO.Path]::GetDirectoryName($root).TrimEnd([IO.Path]::DirectorySeparatorChar))-cne$tempRoot.TrimEnd([IO.Path]::DirectorySeparatorChar)-or[IO.Path]::GetFileName($root)-cnotmatch'^p11-k1-conpty-[0-9a-f]{32}$'){throw 'ConPTY probe temporary root validation failed.'};try{$testRoot=Join-Path $root 'tests';$evidenceRoot=Join-Path $root 'evidence';[void][IO.Directory]::CreateDirectory($testRoot);[void][IO.Directory]::CreateDirectory($evidenceRoot)
-            $driver=Join-Path $root 'driver.ps1';$hostSource=Join-Path $root 'host.cs';$conPtySource=Join-Path $root 'conpty.cs';$configPath=Join-Path $root 'config.clixml';$resultPath=Join-Path $root 'result.clixml';$transcriptPath=Join-Path $root 'transcript.txt';$statePath=Join-Path $root 'state.clixml';$supervisor=Join-Path $root 'supervisor.ps1';$probeTest=Join-Path $testRoot 'conpty-shard-probe.Tests.ps1';$summaryPath=Join-Path $evidenceRoot 'summary.json'
-            [IO.File]::WriteAllText($driver,(Get-TestCliDriverSource),[Text.UTF8Encoding]::new($false));[IO.File]::WriteAllText($hostSource,$script:TrustAnchorTestHostSource,[Text.UTF8Encoding]::new($false));[IO.File]::WriteAllText($conPtySource,$script:TrustAnchorConPtySource,[Text.UTF8Encoding]::new($false));[pscustomobject]@{Path=(Join-Path $script:RepositoryRoot 'scripts/trust-anchor/Get-TrustAnchorFingerprint.ps1');Parameters=@{PublicKeyXmlPath=(Join-Path $root 'missing.xml')};ResponseSpecs=@();ModulePath=$script:ModulePath;PreloadTamper=$false;CiMarker='';UseConPty=$true;HostSourcePath=$hostSource;ResultPath=$resultPath;TranscriptPath=$transcriptPath}|Export-Clixml -LiteralPath $configPath -Depth 8
+            $driver=Join-Path $root 'driver.ps1';$hostSource=Join-Path $root 'host.cs';$conPtySource=Join-Path $root 'conpty.cs';$configPath=Join-Path $root 'config.clixml';$resultPath=Join-Path $root 'result.clixml';$transcriptPath=Join-Path $root 'transcript.txt';$statePath=Join-Path $root 'state.clixml';$supervisor=Join-Path $root 'supervisor.ps1';$probeTest=Join-Path $testRoot 'conpty-shard-probe.Tests.ps1';$summaryPath=Join-Path $evidenceRoot 'summary.json';$publicFixture=Join-Path $root 'public.pem';$probeRsa=[Security.Cryptography.RSA]::Create(3072)
+            try{$expectedXml=ConvertTo-TestCanonicalXmlBytes $probeRsa;$expectedXmlSha=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($expectedXml)).ToLowerInvariant();$expectedSpkiSha=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($probeRsa.ExportSubjectPublicKeyInfo())).ToLowerInvariant();[IO.File]::WriteAllText($publicFixture,$probeRsa.ExportSubjectPublicKeyInfoPem(),[Text.UTF8Encoding]::new($false))}finally{$probeRsa.Dispose()}
+            [IO.File]::WriteAllText($driver,(Get-TestCliDriverSource),[Text.UTF8Encoding]::new($false));[IO.File]::WriteAllText($hostSource,$script:TrustAnchorTestHostSource,[Text.UTF8Encoding]::new($false));[IO.File]::WriteAllText($conPtySource,$script:TrustAnchorConPtySource,[Text.UTF8Encoding]::new($false));[pscustomobject]@{Path=(Join-Path $script:RepositoryRoot 'scripts/trust-anchor/Get-TrustAnchorFingerprint.ps1');Parameters=@{PublicKeyPemPath=$publicFixture};ResponseSpecs=@();ModulePath=$script:ModulePath;PreloadTamper=$false;PreloadPathTamper=$false;BarrierSpecs=@();CiMarker='';UseConPty=$true;HostSourcePath=$hostSource;ResultPath=$resultPath;TranscriptPath=$transcriptPath}|Export-Clixml -LiteralPath $configPath -Depth 8
             $literal={param([string]$value)"'"+$value.Replace("'","''")+"'"};$testSource=@"
 Describe 'official shard ConPTY probe' {
     # Scenario: The production fingerprint CLI is started by the shared ConPTY driver from an official shard child.
-    # Purpose: Require console stdin and an interactive window station without changing the production guard.
+    # Purpose: Require console stdin, no driver failure, and the exact action-specific fingerprint from the formal CLI.
     It 'InterT01_runs_the_formal_CLI_with_console_stdin' {
         Add-Type -TypeDefinition ([IO.File]::ReadAllText($(& $literal $conPtySource)))
         try {
@@ -1289,8 +1477,11 @@ Describe 'official shard ConPTY probe' {
             `$result=Import-Clixml -LiteralPath $(& $literal $resultPath)
             `$result.InteractiveState.InputRedirected|Should Be `$false
             `$result.InteractiveState.UserInteractive|Should Be `$true
-            `$result.HadErrors|Should Be `$true
-            `$result.ErrorIds[0]|Should Not Match '^TrustAnchor\.NonInteractive'
+            (`$null-eq`$result.PSObject.Properties['DriverFailure']-or-not[bool]`$result.DriverFailure)|Should Be `$true
+            `$result.HadErrors|Should Be `$false
+            @(`$result.Output).Count|Should Be 1
+            `$result.Output[0].xmlSha256|Should Be '$expectedXmlSha'
+            `$result.Output[0].spkiSha256|Should Be '$expectedSpkiSha'
             `$result.InteractiveState|Export-Clixml -LiteralPath $(& $literal $statePath)
         } finally { foreach(`$artifact in @($(& $literal $driver),$(& $literal $hostSource),$(& $literal $configPath),$(& $literal $resultPath),$(& $literal $transcriptPath))){Remove-Item -LiteralPath `$artifact -Force -ErrorAction SilentlyContinue} }
     }
@@ -1303,6 +1494,16 @@ try { & $FormalScript -PesterModulePath $PesterModulePath -PesterVersion '4.10.1
             foreach($value in @('-NoProfile','-NonInteractive','-File',$supervisor,'-FormalScript',(Join-Path $script:RepositoryRoot 'scripts/Invoke-PesterShardProcess.ps1'),'-PesterModulePath',$pesterModule,'-TestRoot',$testRoot,'-EvidenceRoot',$evidenceRoot,'-SummaryOutputPath',$summaryPath)){$info.ArgumentList.Add([string]$value)}
             $process=[Diagnostics.Process]::Start($info);$process.StandardInput.Close();$stdoutTask=$process.StandardOutput.ReadToEndAsync();$stderrTask=$process.StandardError.ReadToEndAsync();$process.WaitForExit();try{$stdout=$stdoutTask.GetAwaiter().GetResult();$stderr=$stderrTask.GetAwaiter().GetResult();if($process.ExitCode-ne0){$details=@(Get-ChildItem -LiteralPath $evidenceRoot -File|Sort-Object Name|ForEach-Object{"$($_.Name): $([IO.File]::ReadAllText($_.FullName))"})-join"`n";throw "Official shard ConPTY probe failed (exit=$($process.ExitCode)). stdout=$stdout stderr=$stderr evidence=$details"};$stderr|Should Be '';(Test-Path -LiteralPath $summaryPath)|Should Be $true;$summary=Get-Content -Raw -LiteralPath $summaryPath|ConvertFrom-Json;$summary.counts.PassedCount|Should Be 1;$summary.counts.FailedCount|Should Be 0;$state=Import-Clixml -LiteralPath $statePath;Write-Host "ConPTY shard transport state: IsInputRedirected=$($state.InputRedirected); UserInteractive=$($state.UserInteractive)";$state.InputRedirected|Should Be $false;$state.UserInteractive|Should Be $true}finally{$process.Dispose()}}finally{if(Test-Path -LiteralPath $root){[IO.Directory]::Delete($root,$true)}}
         }
+
+        # Scenario: Post-open metadata comparison and retained-handle permission validation are deleted separately from external production copies.
+        # Purpose: Re-run the InterT31 and InterT32 DACL barriers and require each mutant to lose the corresponding exact failure contract.
+        It 'InterT75_Windows_post_open_revalidation_deletion_mutants_fail_their_barrier_contracts' {
+            $source=Get-Content -Raw -Encoding UTF8 $script:ModulePath;$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;$read=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Read-TrustAnchorPrivateKeyLease'},$true))[0];$metadataIf=@($read.FindAll({param($node)$node-is[Management.Automation.Language.IfStatementAst]-and@($node.FindAll({param($child)$child-is[Management.Automation.Language.CommandAst]-and$child.GetCommandName()-ceq'Test-TrustAnchorMetadataEqual'},$true)).Count-gt0},$true)|Sort-Object{$_.Extent.StartOffset})[0];$permissionTries=@($read.FindAll({param($node)$node-is[Management.Automation.Language.TryStatementAst]-and@($node.Body.FindAll({param($child)$child-is[Management.Automation.Language.CommandAst]-and$child.GetCommandName()-ceq'Assert-TrustAnchorPrivatePermissions'},$true)).Count-eq1},$true)|Sort-Object{$_.Extent.StartOffset});$permissionTries.Count|Should Be 2;$metadataMutant=Remove-TestAstExtents $source @($metadataIf);$permissionMutant=Remove-TestAstExtents $source $permissionTries;foreach($mutant in @($metadataMutant,$permissionMutant)){(Test-TrustAnchorProtectedContract 'scripts/trust-anchor/TrustAnchorPrivateKey.psm1' $mutant)|Should Be $false};$metadataRoot=New-TestMutantTrustAnchorCliRoot 'windows-metadata' $metadataMutant;$permissionRoot=New-TestMutantTrustAnchorCliRoot 'windows-permission' $permissionMutant
+            $path=Join-Path $TestDrive 'mutant-windows-metadata.pem';[IO.File]::WriteAllText($path,'original');$signal=Join-Path $TestDrive 'mutant-windows-metadata.signal';$witnessPath=Join-Path $TestDrive 'mutant-windows-metadata.witness';$job=Start-Job -ScriptBlock {param($signal,$witness,$path)while(-not[IO.File]::Exists($signal)){[Threading.Thread]::Sleep(10)};$identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$security=[Security.AccessControl.FileSecurity]::new();$security.SetOwner($identity.User);$security.SetAccessRuleProtection($true,$false);$security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($identity.User,[Security.AccessControl.FileSystemRights]::FullControl,[Security.AccessControl.AccessControlType]::Allow));Set-Acl -LiteralPath $path -AclObject $security;[pscustomobject]@{Succeeded=$true}|Export-Clixml -LiteralPath $witness}catch{[pscustomobject]@{Succeeded=$false;Error=$_.Exception.Message}|Export-Clixml -LiteralPath $witness}finally{$identity.Dispose()}} -ArgumentList $signal,$witnessPath,$path
+            try{$barrier=[pscustomobject]@{ReadCount=1;SignalPath=$signal;WitnessPath=$witnessPath;TimeoutMilliseconds=30000};$result=Invoke-TestTrustAnchorCli (Join-Path $metadataRoot 'Get-TrustAnchorFingerprint.ps1') @{EncryptedPrivateKeyPath=$path} @((New-TestSecretSpec)) -BarrierSpecs @($barrier);Wait-Job $job|Out-Null;(Import-Clixml -LiteralPath $witnessPath).Succeeded|Should Be $true;($result.HadErrors-and$result.ErrorIds[0]-ceq'TrustAnchor.PrivateMetadataChanged')|Should Be $false}finally{Stop-Job $job -ErrorAction SilentlyContinue;Remove-Job $job -Force -ErrorAction SilentlyContinue}
+            $bytes=ConvertTo-TestUtf8Bytes 'malformed';$path=Join-Path $TestDrive 'mutant-windows-permission.pem';$signal=Join-Path $TestDrive 'mutant-windows-permission.signal';$witnessPath=Join-Path $TestDrive 'mutant-windows-permission.witness';$job=$null
+            try{Write-TestPrivateKeyFixture $path $bytes;$job=Start-Job -ScriptBlock {param($signal,$witness,$path)while(-not[IO.File]::Exists($signal)){[Threading.Thread]::Sleep(10)};$identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$security=[Security.AccessControl.FileSecurity]::new();$security.SetOwner($identity.User);$security.SetAccessRuleProtection($true,$false);$security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($identity.User,[Security.AccessControl.FileSystemRights]::FullControl,[Security.AccessControl.AccessControlType]::Allow));$security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-11'),[Security.AccessControl.FileSystemRights]::FullControl,[Security.AccessControl.AccessControlType]::Allow));[IO.FileSystemAclExtensions]::SetAccessControl([IO.FileInfo]::new($path),$security);[pscustomobject]@{Succeeded=$true}|Export-Clixml -LiteralPath $witness}catch{[pscustomobject]@{Succeeded=$false;Error=$_.Exception.Message}|Export-Clixml -LiteralPath $witness}finally{$identity.Dispose()}} -ArgumentList $signal,$witnessPath,$path;$barrier=[pscustomobject]@{ReadCount=1;SignalPath=$signal;WitnessPath=$witnessPath;TimeoutMilliseconds=30000};$result=Invoke-TestTrustAnchorCli (Join-Path $permissionRoot 'Get-TrustAnchorFingerprint.ps1') @{EncryptedPrivateKeyPath=$path} @((New-TestSecretSpec)) -BarrierSpecs @($barrier);Wait-Job $job|Out-Null;(Import-Clixml -LiteralPath $witnessPath).Succeeded|Should Be $true;($result.HadErrors-and$result.ErrorIds[0]-ceq'TrustAnchor.UnsafePrivatePermissions')|Should Be $false}finally{if($null-ne$job){Stop-Job $job -ErrorAction SilentlyContinue;Remove-Job $job -Force -ErrorAction SilentlyContinue};[Security.Cryptography.CryptographicOperations]::ZeroMemory($bytes)}
+        }
     }
 }else{
     Describe 'PR-K1 Unix native handle safety' {
@@ -1312,16 +1513,18 @@ try { & $FormalScript -PesterModulePath $PesterModulePath -PesterVersion '4.10.1
             $secretSpec=New-TestSecretSpec;$path=Join-Path $TestDrive 'readonly.pem';$public=Join-Path $TestDrive 'readonly.xml';(Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/New-TrustAnchorKeyPair.ps1') @{KeyId='humanApproval';PrivateKeyPath=$path;PublicKeyXmlPath=$public} @($secretSpec,$secretSpec)).HadErrors|Should Be $false;chmod 400 $path;$result=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/Get-TrustAnchorFingerprint.ps1') @{EncryptedPrivateKeyPath=$path} @($secretSpec);$result.HadErrors|Should Be $false
         }
 
-        # Scenario: A broad-mode original is opened, then a module-only barrier replaces its pathname with a 0600 file.
+        # Scenario: A broad-mode original is opened, then an external adversary replaces its pathname with a 0600 file at the password barrier.
         # Purpose: Permission validation must remain bound to the original open handle.
         It 'InterT41_rejects_the_original_broad_mode_after_pathname_replacement' {
-            $path=Join-Path $TestDrive 'unix-broad.pem';[IO.File]::WriteAllText($path,'original');chmod 640 $path;$result=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/Get-TrustAnchorFingerprint.ps1') @{EncryptedPrivateKeyPath=$path};$result.HadErrors|Should Be $true;$result.ErrorMessages[0]|Should Match 'deny every group/other permission'
+            $path=Join-Path $TestDrive 'unix-broad.pem';$replacement=Join-Path $TestDrive 'unix-restrictive.pem';$displaced=Join-Path $TestDrive 'unix-broad-original.pem';[IO.File]::WriteAllText($path,'original');[IO.File]::WriteAllText($replacement,'replacement');chmod 640 $path;chmod 600 $replacement;$signal=Join-Path $TestDrive 'unix-broad.signal';$witnessPath=Join-Path $TestDrive 'unix-broad.witness';$job=Start-Job -ScriptBlock {param($signal,$witness,$path,$replacement,$displaced)while(-not[IO.File]::Exists($signal)){[Threading.Thread]::Sleep(10)};try{[IO.File]::Move($path,$displaced);[IO.File]::Move($replacement,$path);[pscustomobject]@{Succeeded=$true;Original=[IO.File]::Exists($displaced);Replacement=[IO.File]::Exists($path)}|Export-Clixml -LiteralPath $witness}catch{[pscustomobject]@{Succeeded=$false;Error=$_.Exception.Message}|Export-Clixml -LiteralPath $witness}} -ArgumentList $signal,$witnessPath,$path,$replacement,$displaced
+            try{$barrier=[pscustomobject]@{ReadCount=1;SignalPath=$signal;WitnessPath=$witnessPath;TimeoutMilliseconds=30000};$result=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/Get-TrustAnchorFingerprint.ps1') @{EncryptedPrivateKeyPath=$path} @((New-TestSecretSpec)) -BarrierSpecs @($barrier);Wait-Job $job|Out-Null;$witness=Import-Clixml -LiteralPath $witnessPath;$witness.Succeeded|Should Be $true;$witness.Original|Should Be $true;$witness.Replacement|Should Be $true;$result.HadErrors|Should Be $true;$result.ReadCount|Should Be 1;$result.ErrorIds[0]|Should Be 'TrustAnchor.UnsafePrivatePermissions';$result.ErrorMessages[0]|Should Be 'The private-key handle must be owned by the effective user and deny every group/other permission.';[IO.File]::ReadAllText($displaced)|Should Be 'original';[IO.File]::ReadAllText($path)|Should Be 'replacement'}finally{Stop-Job $job -ErrorAction SilentlyContinue;Remove-Job $job -Force -ErrorAction SilentlyContinue}
         }
 
-        # Scenario: A same-inode, same-length rewrite occurs after the bounded read and before final metadata capture.
-        # Purpose: Detect mtime/ctime change even when identity, size, owner, mode, and link count remain valid.
+        # Scenario: The external adversary changes mode on the retained inode after open and before the read/revalidation phase.
+        # Purpose: Detect the post-open metadata drift at the host-input synchronization barrier with an exact reason.
         It 'InterT42_rejects_metadata_change_during_read' {
-            $path=Join-Path $TestDrive 'metadata.pem';[IO.File]::WriteAllText($path,('x'*1048576));chmod 600 $path;$writer=Start-Job -ScriptBlock {param($p)for($i=0;$i-lt2000;$i++){chmod $(if($i%2-eq0){400}else{600}) $p}} -ArgumentList $path;try{$result=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/Get-TrustAnchorFingerprint.ps1') @{EncryptedPrivateKeyPath=$path};$result.HadErrors|Should Be $true}finally{Wait-Job $writer|Out-Null;Remove-Job $writer -Force}
+            $path=Join-Path $TestDrive 'metadata.pem';[IO.File]::WriteAllText($path,('x'*1048576));chmod 600 $path;$signal=Join-Path $TestDrive 'metadata.signal';$witnessPath=Join-Path $TestDrive 'metadata.witness';$job=Start-Job -ScriptBlock {param($signal,$witness,$path)while(-not[IO.File]::Exists($signal)){[Threading.Thread]::Sleep(10)};try{chmod 400 $path;[pscustomobject]@{Succeeded=$LASTEXITCODE-eq0;Mode=[int][IO.File]::GetUnixFileMode($path)}|Export-Clixml -LiteralPath $witness}catch{[pscustomobject]@{Succeeded=$false;Error=$_.Exception.Message}|Export-Clixml -LiteralPath $witness}} -ArgumentList $signal,$witnessPath,$path
+            try{$barrier=[pscustomobject]@{ReadCount=1;SignalPath=$signal;WitnessPath=$witnessPath;TimeoutMilliseconds=30000};$result=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/Get-TrustAnchorFingerprint.ps1') @{EncryptedPrivateKeyPath=$path} @((New-TestSecretSpec)) -BarrierSpecs @($barrier);Wait-Job $job|Out-Null;$witness=Import-Clixml -LiteralPath $witnessPath;$witness.Succeeded|Should Be $true;($witness.Mode-band511)|Should Be 256;$result.HadErrors|Should Be $true;$result.ReadCount|Should Be 1;$result.ErrorIds[0]|Should Be 'TrustAnchor.PrivateMetadataChanged';$result.ErrorMessages[0]|Should Be 'The private-key handle metadata changed after it was opened.';(Test-Path -LiteralPath $path)|Should Be $true}finally{Stop-Job $job -ErrorAction SilentlyContinue;Remove-Job $job -Force -ErrorAction SilentlyContinue}
         }
 
         # Scenario: The private-key leaf itself is a native symbolic link.
@@ -1336,10 +1539,23 @@ try { & $FormalScript -PesterModulePath $PesterModulePath -PesterVersion '4.10.1
             $secretSpec=New-TestSecretSpec;$private=Join-Path $TestDrive 'mode-private.pem';$public=Join-Path $TestDrive 'mode-public.xml';(Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/New-TrustAnchorKeyPair.ps1') @{KeyId='humanApproval';PrivateKeyPath=$private;PublicKeyXmlPath=$public} @($secretSpec,$secretSpec)).HadErrors|Should Be $false;$mode=[IO.File]::GetUnixFileMode($private);([int]$mode-band511)|Should Be 384;$handle=[IO.File]::OpenHandle($private,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read);try{$evidence=[SyuanTsai.AIInstructions.TrustAnchor.UnixMetadataInspector]::Inspect($handle);([uint32]$evidence.Mode-band0xF000)|Should Be 0x8000;[uint64]$evidence.Uid|Should Be ([SyuanTsai.AIInstructions.TrustAnchor.SecretBridge]::EffectiveUid())}finally{$handle.Dispose()}
         }
 
-        # Scenario: Both original and replacement are mode 0600 regular files, and the pathname identity changes after the read.
+        # Scenario: Both original and replacement are mode 0600 regular files, and the external adversary changes pathname identity after open.
         # Purpose: Reach the final identity revalidation independently of permission rejection.
         It 'InterT45_rejects_post_read_identity_replacement_when_both_files_are_restrictive' {
-            $path=Join-Path $TestDrive 'identity-original.pem';$replacement=Join-Path $TestDrive 'identity-safe.pem';[IO.File]::WriteAllText($path,'original');[IO.File]::WriteAllText($replacement,'replacement');chmod 600 $path;chmod 600 $replacement;Move-Item -LiteralPath $replacement -Destination $path -Force;$result=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/Get-TrustAnchorFingerprint.ps1') @{EncryptedPrivateKeyPath=$path} @((New-TestSecretSpec));$result.HadErrors|Should Be $true
+            $path=Join-Path $TestDrive 'identity-original.pem';$replacement=Join-Path $TestDrive 'identity-safe.pem';$displaced=Join-Path $TestDrive 'identity-retained.pem';[IO.File]::WriteAllText($path,'original');[IO.File]::WriteAllText($replacement,'replacement');chmod 600 $path;chmod 600 $replacement;$signal=Join-Path $TestDrive 'identity.signal';$witnessPath=Join-Path $TestDrive 'identity.witness';$job=Start-Job -ScriptBlock {param($signal,$witness,$path,$replacement,$displaced)while(-not[IO.File]::Exists($signal)){[Threading.Thread]::Sleep(10)};try{[IO.File]::Move($path,$displaced);[IO.File]::Move($replacement,$path);[pscustomobject]@{Succeeded=$true;Original=[IO.File]::Exists($displaced);Replacement=[IO.File]::Exists($path)}|Export-Clixml -LiteralPath $witness}catch{[pscustomobject]@{Succeeded=$false;Error=$_.Exception.Message}|Export-Clixml -LiteralPath $witness}} -ArgumentList $signal,$witnessPath,$path,$replacement,$displaced
+            try{$barrier=[pscustomobject]@{ReadCount=1;SignalPath=$signal;WitnessPath=$witnessPath;TimeoutMilliseconds=30000};$result=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/Get-TrustAnchorFingerprint.ps1') @{EncryptedPrivateKeyPath=$path} @((New-TestSecretSpec)) -BarrierSpecs @($barrier);Wait-Job $job|Out-Null;$witness=Import-Clixml -LiteralPath $witnessPath;$witness.Succeeded|Should Be $true;$witness.Original|Should Be $true;$witness.Replacement|Should Be $true;$result.HadErrors|Should Be $true;$result.ReadCount|Should Be 1;$result.ErrorIds[0]|Should Be 'TrustAnchor.PrivateIdentityChanged';[IO.File]::ReadAllText($displaced)|Should Be 'original';[IO.File]::ReadAllText($path)|Should Be 'replacement'}finally{Stop-Job $job -ErrorAction SilentlyContinue;Remove-Job $job -Force -ErrorAction SilentlyContinue}
+        }
+
+        # Scenario: The Unix permission, metadata, and identity revalidations are each deleted from worktree-external production copies.
+        # Purpose: Re-run the InterT41, InterT42, and InterT45 barriers and require each mutant to lose the corresponding exact failure contract.
+        It 'InterT76_Unix_post_open_revalidation_deletion_mutants_fail_their_barrier_contracts' {
+            $source=Get-Content -Raw -Encoding UTF8 $script:ModulePath;$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;$read=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Read-TrustAnchorPrivateKeyLease'},$true))[0];$metadataIf=@($read.FindAll({param($node)$node-is[Management.Automation.Language.IfStatementAst]-and@($node.FindAll({param($child)$child-is[Management.Automation.Language.CommandAst]-and$child.GetCommandName()-ceq'Test-TrustAnchorMetadataEqual'},$true)).Count-gt0},$true)|Sort-Object{$_.Extent.StartOffset})[0];$permissionTries=@($read.FindAll({param($node)$node-is[Management.Automation.Language.TryStatementAst]-and@($node.Body.FindAll({param($child)$child-is[Management.Automation.Language.CommandAst]-and$child.GetCommandName()-ceq'Assert-TrustAnchorPrivatePermissions'},$true)).Count-eq1},$true)|Sort-Object{$_.Extent.StartOffset});$identityTry=@($read.FindAll({param($node)$node-is[Management.Automation.Language.TryStatementAst]-and@($node.Body.FindAll({param($child)$child-is[Management.Automation.Language.CommandAst]-and$child.GetCommandName()-ceq'Assert-PlatformFileIdentity'},$true)).Count-eq1},$true))[0];$permissionTries.Count|Should Be 2;$permissionMutant=Remove-TestAstExtents $source $permissionTries;$metadataMutant=Remove-TestAstExtents $source @($metadataIf);$identityMutant=Remove-TestAstExtents $source @($identityTry);foreach($mutant in @($permissionMutant,$metadataMutant,$identityMutant)){(Test-TrustAnchorProtectedContract 'scripts/trust-anchor/TrustAnchorPrivateKey.psm1' $mutant)|Should Be $false};$permissionRoot=New-TestMutantTrustAnchorCliRoot 'unix-permission' $permissionMutant;$metadataRoot=New-TestMutantTrustAnchorCliRoot 'unix-metadata' $metadataMutant;$identityRoot=New-TestMutantTrustAnchorCliRoot 'unix-identity' $identityMutant
+            $path=Join-Path $TestDrive 'mutant-unix-permission.pem';$replacement=Join-Path $TestDrive 'mutant-unix-permission-replacement.pem';$displaced=Join-Path $TestDrive 'mutant-unix-permission-original.pem';[IO.File]::WriteAllText($path,'original');[IO.File]::WriteAllText($replacement,'replacement');chmod 640 $path;chmod 600 $replacement;$signal=Join-Path $TestDrive 'mutant-unix-permission.signal';$witnessPath=Join-Path $TestDrive 'mutant-unix-permission.witness';$job=Start-Job -ScriptBlock {param($signal,$witness,$path,$replacement,$displaced)while(-not[IO.File]::Exists($signal)){[Threading.Thread]::Sleep(10)};try{[IO.File]::Move($path,$displaced);[IO.File]::Move($replacement,$path);[pscustomobject]@{Succeeded=$true}|Export-Clixml -LiteralPath $witness}catch{[pscustomobject]@{Succeeded=$false;Error=$_.Exception.Message}|Export-Clixml -LiteralPath $witness}} -ArgumentList $signal,$witnessPath,$path,$replacement,$displaced
+            try{$barrier=[pscustomobject]@{ReadCount=1;SignalPath=$signal;WitnessPath=$witnessPath;TimeoutMilliseconds=30000};$result=Invoke-TestTrustAnchorCli (Join-Path $permissionRoot 'Get-TrustAnchorFingerprint.ps1') @{EncryptedPrivateKeyPath=$path} @((New-TestSecretSpec)) -BarrierSpecs @($barrier);Wait-Job $job|Out-Null;(Import-Clixml -LiteralPath $witnessPath).Succeeded|Should Be $true;($result.HadErrors-and$result.ErrorIds[0]-ceq'TrustAnchor.UnsafePrivatePermissions')|Should Be $false}finally{Stop-Job $job -ErrorAction SilentlyContinue;Remove-Job $job -Force -ErrorAction SilentlyContinue}
+            $path=Join-Path $TestDrive 'mutant-unix-metadata.pem';[IO.File]::WriteAllText($path,('x'*1048576));chmod 600 $path;$signal=Join-Path $TestDrive 'mutant-unix-metadata.signal';$witnessPath=Join-Path $TestDrive 'mutant-unix-metadata.witness';$job=Start-Job -ScriptBlock {param($signal,$witness,$path)while(-not[IO.File]::Exists($signal)){[Threading.Thread]::Sleep(10)};try{chmod 400 $path;[pscustomobject]@{Succeeded=$LASTEXITCODE-eq0}|Export-Clixml -LiteralPath $witness}catch{[pscustomobject]@{Succeeded=$false;Error=$_.Exception.Message}|Export-Clixml -LiteralPath $witness}} -ArgumentList $signal,$witnessPath,$path
+            try{$barrier=[pscustomobject]@{ReadCount=1;SignalPath=$signal;WitnessPath=$witnessPath;TimeoutMilliseconds=30000};$result=Invoke-TestTrustAnchorCli (Join-Path $metadataRoot 'Get-TrustAnchorFingerprint.ps1') @{EncryptedPrivateKeyPath=$path} @((New-TestSecretSpec)) -BarrierSpecs @($barrier);Wait-Job $job|Out-Null;(Import-Clixml -LiteralPath $witnessPath).Succeeded|Should Be $true;($result.HadErrors-and$result.ErrorIds[0]-ceq'TrustAnchor.PrivateMetadataChanged')|Should Be $false}finally{Stop-Job $job -ErrorAction SilentlyContinue;Remove-Job $job -Force -ErrorAction SilentlyContinue}
+            $path=Join-Path $TestDrive 'mutant-unix-identity.pem';$replacement=Join-Path $TestDrive 'mutant-unix-identity-replacement.pem';$displaced=Join-Path $TestDrive 'mutant-unix-identity-original.pem';[IO.File]::WriteAllText($path,'original');[IO.File]::WriteAllText($replacement,'replacement');chmod 600 $path;chmod 600 $replacement;$signal=Join-Path $TestDrive 'mutant-unix-identity.signal';$witnessPath=Join-Path $TestDrive 'mutant-unix-identity.witness';$job=Start-Job -ScriptBlock {param($signal,$witness,$path,$replacement,$displaced)while(-not[IO.File]::Exists($signal)){[Threading.Thread]::Sleep(10)};try{[IO.File]::Move($path,$displaced);[IO.File]::Move($replacement,$path);[pscustomobject]@{Succeeded=$true}|Export-Clixml -LiteralPath $witness}catch{[pscustomobject]@{Succeeded=$false;Error=$_.Exception.Message}|Export-Clixml -LiteralPath $witness}} -ArgumentList $signal,$witnessPath,$path,$replacement,$displaced
+            try{$barrier=[pscustomobject]@{ReadCount=1;SignalPath=$signal;WitnessPath=$witnessPath;TimeoutMilliseconds=30000};$result=Invoke-TestTrustAnchorCli (Join-Path $identityRoot 'Get-TrustAnchorFingerprint.ps1') @{EncryptedPrivateKeyPath=$path} @((New-TestSecretSpec)) -BarrierSpecs @($barrier);Wait-Job $job|Out-Null;(Import-Clixml -LiteralPath $witnessPath).Succeeded|Should Be $true;($result.HadErrors-and$result.ErrorIds[0]-ceq'TrustAnchor.PrivateIdentityChanged')|Should Be $false}finally{Stop-Job $job -ErrorAction SilentlyContinue;Remove-Job $job -Force -ErrorAction SilentlyContinue}
         }
 
         # Scenario: After rename validation, the private tombstone is displaced and an unrelated replacement occupies its name.
@@ -1371,7 +1587,7 @@ try { & $FormalScript -PesterModulePath $PesterModulePath -PesterVersion '4.10.1
             # Purpose: Prove the ACL mask is reflected in group class mode bits and the retained-handle mode check rejects it.
             It 'InterT68_rejects_a_Linux_named_user_writable_parent_ACL' {
                 $setfacl=Get-Command setfacl -CommandType Application -ErrorAction Stop;$parent=Join-Path $TestDrive 'linux-acl-parent';[void][IO.Directory]::CreateDirectory($parent);chmod 700 $parent;& $setfacl.Source -m 'u:nobody:rwx' $parent;if($LASTEXITCODE-ne0){throw 'setfacl failed to create the required Linux ACL fixture.'}
-                $path=Join-Path $parent 'private.pem';$public=Join-Path $parent 'public.xml';$result=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/New-TrustAnchorKeyPair.ps1') @{KeyId='humanApproval';PrivateKeyPath=$path;PublicKeyXmlPath=$public};$result.HadErrors|Should Be $true;$result.ErrorMessages[0]|Should Match 'owner-only or sticky';(Test-Path -LiteralPath $path)|Should Be $false
+                $secretSpec=New-TestSecretSpec;$path=Join-Path $parent 'private.pem';$public=Join-Path $parent 'public.xml';$result=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/New-TrustAnchorKeyPair.ps1') @{KeyId='humanApproval';PrivateKeyPath=$path;PublicKeyXmlPath=$public} @($secretSpec,$secretSpec);$result.HadErrors|Should Be $true;$result.ReadCount|Should Be 2;$result.ErrorIds[0]|Should Be 'TrustAnchor.UnsafeParentAcl';$result.ErrorMessages[0]|Should Be 'The private trust-anchor parent must be owner-only or sticky and owned by the effective user or root.';(Test-Path -LiteralPath $path)|Should Be $false;(Test-Path -LiteralPath $public)|Should Be $false
             }
         }
         if($IsMacOS){
@@ -1379,7 +1595,7 @@ try { & $FormalScript -PesterModulePath $PesterModulePath -PesterVersion '4.10.1
             # Purpose: Reject extended ACLs through acl_get_fd_np on the retained directory descriptor before any entry is created.
             It 'InterT69_rejects_a_macOS_extended_parent_ACL' {
                 $parent=Join-Path $TestDrive 'macos-acl-parent';[void][IO.Directory]::CreateDirectory($parent);chmod 700 $parent;chmod +a 'user:nobody allow add_file,delete_child' $parent;if($LASTEXITCODE-ne0){throw 'chmod failed to create the required macOS ACL fixture.'}
-                $path=Join-Path $parent 'private.pem';$public=Join-Path $parent 'public.xml';$result=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/New-TrustAnchorKeyPair.ps1') @{KeyId='humanApproval';PrivateKeyPath=$path;PublicKeyXmlPath=$public};$result.HadErrors|Should Be $true;$result.ErrorMessages[0]|Should Match 'extended ACL';(Test-Path -LiteralPath $path)|Should Be $false
+                $secretSpec=New-TestSecretSpec;$path=Join-Path $parent 'private.pem';$public=Join-Path $parent 'public.xml';$result=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/New-TrustAnchorKeyPair.ps1') @{KeyId='humanApproval';PrivateKeyPath=$path;PublicKeyXmlPath=$public} @($secretSpec,$secretSpec);$result.HadErrors|Should Be $true;$result.ReadCount|Should Be 2;$result.ErrorIds[0]|Should Be 'TrustAnchor.UnsafeParentAcl';$result.ErrorMessages[0]|Should Be 'The private trust-anchor parent must not have a macOS extended ACL.';(Test-Path -LiteralPath $path)|Should Be $false;(Test-Path -LiteralPath $public)|Should Be $false
             }
 
             # Scenario: A macOS 0700 parent has no extended ACL and receives both formal key-pair outputs.
@@ -1448,7 +1664,7 @@ Describe 'PR-K1 fix4 closed-boundary hardening' {
     # Scenario: The formal Windows metadata helper is inspected as a complete AST extent.
     # Purpose: Allow ACL evidence only from the retained lease handle, never from pathname ACL APIs.
     It 'UnitT54_binds_Windows_ACL_evidence_to_the_retained_lease_handle' {
-        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($script:ModulePath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;$function=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq'Get-TrustAnchorMetadataEvidence'},$true));$function.Count|Should Be 1;$text=$function[0].Extent.Text;$text|Should Match 'WindowsAclInspector\]::Inspect\(\[Microsoft\.Win32\.SafeHandles\.SafeFileHandle\]\$handle\)';$text|Should Not Match '(?i)Get-Acl|GetNamedSecurityInfo|GetAccessControl|FileSecurity\s*\('
+        $relative='scripts/trust-anchor/TrustAnchorPrivateKey.psm1';$source=Get-Content -Raw -Encoding UTF8 $script:ModulePath;(Test-TrustAnchorFilePrimitiveSemantics $source)|Should Be $true;$mutated=$source.Replace('$acl=[SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector]::Inspect([Microsoft.Win32.SafeHandles.SafeFileHandle]$handle)','$acl=[SyuanTsai.AIInstructions.TrustAnchor.WindowsAclInspector]::Inspect([IO.File]::OpenHandle($Lease.Path))');(Test-TrustAnchorFilePrimitiveSemantics $mutated)|Should Be $false;(Test-TrustAnchorProtectedContract $relative $mutated)|Should Be $false
     }
 
     # Scenario: Runtime-generated PKCS#8 and PKCS#1 private DER are mislabeled with PUBLIC KEY armor.
@@ -1519,10 +1735,47 @@ Describe 'PR-K1 fix4 closed-boundary hardening' {
         }
     }
 
-    # Scenario: The test file and every runtime AddScript payload are enumerated for all module scriptblock invocation mechanisms.
-    # Purpose: Permit only the poisoned preloaded-module fixture while keeping credential/private-key pass-fail behavior on formal CLI entry points.
+    # Scenario: Every pipeline-builder call, module reference/member, scriptblock creation, and execution form is enumerated recursively.
+    # Purpose: Reject dynamic AddScript, PSModuleInfo.NewBoundScriptBlock().Invoke(), and SessionState InvokeScript bypasses.
     It 'UnitT61_has_no_runtime_credential_private_module_calls' {
-        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($PSCommandPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;((Get-TestRuntimeModuleScriptBlockCalls $ast)-join"`n")|Should Be "TestFile|Get-Module|1299|Get-Module Pester -ErrorAction Stop`nDriverAddScript@19|AmpersandModule|1||poisoned-module-fixture"
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($PSCommandPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;$expected=@'
+TestFile|ModuleReference|script:Module|AssignmentStatementAst
+TestFile|ModuleReference|script:Module|MemberExpressionAst
+TestFile|ModuleReference|script:Module|MemberExpressionAst
+TestFile|InvocationOperator|Ampersand|$Action
+TestFile|InvocationOperator|Ampersand|$quote
+TestFile|InvocationOperator|Ampersand|$quote
+TestFile|InvocationOperator|Ampersand|$quote
+TestFile|InvocationOperator|Ampersand|$literal
+TestFile|InvocationOperator|Ampersand|$literal
+TestFile|InvocationOperator|Ampersand|$literal
+TestFile|InvocationOperator|Ampersand|$literal
+TestFile|InvocationOperator|Ampersand|$literal
+TestFile|InvocationOperator|Ampersand|$literal
+TestFile|InvocationOperator|Ampersand|$literal
+TestFile|InvocationOperator|Ampersand|$literal
+TestFile|InvocationOperator|Ampersand|$literal
+TestFile|InvocationOperator|Ampersand|$literal
+TestFile|InvocationOperator|Ampersand|$literal
+TestFile|Get-Module|Get-Module Pester -ErrorAction Stop
+TestFile|InvocationOperator|Ampersand|$setfacl.Source
+Driver|PipelineMember|AddScript|Literal:daa7d32ebe4f6d2553ee9eda15b6fdfc668b84990dbe4d8c95cfeab4970e373c
+Driver|InvokeMember|VariableExpressionAst|$powershell
+Driver|PipelineMember|AddScript|Literal:b469230af821ba211351f5d4fb4fb9c53c28bfaef414f82fb2ad9b96d5f84902
+Driver|InvokeMember|VariableExpressionAst|$powershell
+Driver|PipelineMember|AddCommand|Literal:246f8ea1df255a64752a71bdf22651fc653d9c8bf3e8983843fabe98e16267b9
+Driver|InvokeMember|VariableExpressionAst|$powershell
+Driver|PipelineMember|AddCommand|Unapproved:ConvertExpressionAst
+Driver|InvokeMember|VariableExpressionAst|$powershell
+Driver|PipelineMember|AddCommand|Literal:ac421e295f641d20b5b1c833335196a47fe03dc0ec0a646c74c1428e72a0a80d
+Driver|InvokeMember|VariableExpressionAst|$powershell
+Driver/AddScript0|ModuleReference|module|AssignmentStatementAst
+Driver/AddScript0|ModuleReference|module|CommandAst
+Driver/AddScript0|InvocationOperator|Ampersand|$module
+'@;$actual=(Get-TestRuntimeModuleScriptBlockCalls $ast)-join"`n";$actual|Should Be $expected.Trim()
+        $source=Get-Content -Raw -Encoding UTF8 $PSCommandPath
+        foreach($injection in @('$bound=$script:Module.NewBoundScriptBlock({});$bound.Invoke()','$script:Module.SessionState.InvokeCommand.InvokeScript(''Get-Date'')')){$mutatedTokens=$null;$mutatedErrors=$null;$mutatedAst=[Management.Automation.Language.Parser]::ParseInput(($source+"`n"+$injection),[ref]$mutatedTokens,[ref]$mutatedErrors);@($mutatedErrors).Count|Should Be 0;((Get-TestRuntimeModuleScriptBlockCalls $mutatedAst)-join"`n")|Should Not Be $expected.Trim()}
+        $driver=Get-TestCliDriverSource;$driverTokens=$null;$driverErrors=$null;$driverAst=[Management.Automation.Language.Parser]::ParseInput($driver,[ref]$driverTokens,[ref]$driverErrors);@($driverErrors).Count|Should Be 0;$addScripts=@($driverAst.FindAll({param($node)$node-is[Management.Automation.Language.InvokeMemberExpressionAst]-and$node.Member.Value-ceq'AddScript'},$true)|Sort-Object{$_.Extent.StartOffset});$addScripts.Count|Should Be 2;$dynamic=Set-TestSourceSpan $driver $addScripts[1].Extent.StartOffset ($addScripts[1].Extent.EndOffset-$addScripts[1].Extent.StartOffset) '$powershell.AddScript($config.DynamicPayload)';((Get-TestRuntimeModuleScriptBlockCalls $ast $dynamic)-join"`n")|Should Not Be $expected.Trim()
     }
 
     # Scenario: Windows, Linux, and macOS discovery clauses are expanded, removed, and exchanged in real test source copies.
@@ -1612,32 +1865,100 @@ Describe 'PR-K1 fix4 closed-boundary hardening' {
         foreach($mutated in $mutations){$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseInput($mutated,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;(Test-TrustAnchorCliGuardAst $ast $contract)|Should Be $false;(Test-TrustAnchorProtectedContract $relative $mutated)|Should Be $false}
     }
 
-    # Scenario: The module qualifier or Force flag is removed independently from each formal CLI import.
-    # Purpose: Require a fresh module instance and make both the semantic validator and whole-file golden reject preload-reuse mutations.
-    It 'UnitT67_rejects_every_unqualified_or_non_forced_CLI_import' {
-        foreach($name in (Get-TrustAnchorCliContracts).Keys){$relative="scripts/trust-anchor/$name";$source=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot $relative);$contract=(Get-TrustAnchorCliContracts)[$name];foreach($mutated in @($source.Replace('Microsoft.PowerShell.Core\Import-Module','Import-Module'),$source.Replace(' -PassThru -Force -ErrorAction',' -PassThru -ErrorAction'))){$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseInput($mutated,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;(Test-TrustAnchorCliGuardAst $ast $contract)|Should Be $false;(Test-TrustAnchorProtectedContract $relative $mutated)|Should Be $false}}
+    # Scenario: The module qualifier, Force flag, or .NET-only path construction is independently weakened in each formal CLI import.
+    # Purpose: Require a fresh fixed-path module instance before the guard and reject command-discovery path resolution semantically and by golden.
+    It 'UnitT67_rejects_every_unqualified_non_forced_or_command_resolved_CLI_import' {
+        foreach($name in (Get-TrustAnchorCliContracts).Keys){$relative="scripts/trust-anchor/$name";$source=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot $relative);$contract=(Get-TrustAnchorCliContracts)[$name];foreach($mutated in @($source.Replace('Microsoft.PowerShell.Core\Import-Module','Import-Module'),$source.Replace(' -PassThru -Force -ErrorAction',' -PassThru -ErrorAction'),$source.Replace("[IO.Path]::Combine(`$PSScriptRoot,'TrustAnchorPrivateKey.psm1')","Join-Path `$PSScriptRoot 'TrustAnchorPrivateKey.psm1'"))){$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseInput($mutated,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;(Test-TrustAnchorCliGuardAst $ast $contract)|Should Be $false;(Test-TrustAnchorProtectedContract $relative $mutated)|Should Be $false}}
     }
 
-    # Scenario: The Windows fixture writer and every private-fixture call site are frozen, then a sentinel is injected into captured config contents.
-    # Purpose: Require create-with-DACL before bytes, route every private fixture through the helper, scan config/results/logs, and delete all driver artifacts.
+    # Scenario: Join-Path, Split-Path, and Test-Path are shadowed in the caller session and point at a module that writes a load witness.
+    # Purpose: Every formal CLI must reach TrustAnchor.NonInteractive through its fixed adjacent module without loading attacker-selected code.
+    It 'InterT72_rejects_command_shadowing_before_loading_the_fixed_module' {
+        foreach($name in (Get-TrustAnchorCliContracts).Keys){$parameters=switch($name){'New-TrustAnchorKeyPair.ps1'{@{KeyId='humanApproval';PrivateKeyPath=(Join-Path $TestDrive 'shadow-private.pem');PublicKeyXmlPath=(Join-Path $TestDrive 'shadow-public.xml')}}'ConvertTo-TrustAnchorPublicKeyXml.ps1'{@{PublicKeyPemPath=(Join-Path $TestDrive 'shadow-input.pem');OutputPath=(Join-Path $TestDrive 'shadow-output.xml')}}default{@{PublicKeyXmlPath=(Join-Path $TestDrive 'shadow-missing.xml')}}};$result=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot "scripts/trust-anchor/$name") $parameters -CiMarker CI -PreloadPathTamper;$result.HadErrors|Should Be $true;$result.ErrorIds[0]|Should Be 'TrustAnchor.NonInteractive';$result.PathTamperWitnessExists|Should Be $false;$result.ReadCount|Should Be 0}
+    }
+
+    # Scenario: Driver SecureString disposal and char-array clearing are deleted or redirected one point at a time.
+    # Purpose: The exact finally inventory and post-cleanup boolean report must make every cleanup mutant fail through a formal CLI run.
+    It 'UnitT73_rejects_driver_cleanup_deletion_and_relocation_mutations' {
+        $driverSource=(Get-TestCliDriverSource).Replace("`r`n","`n").Replace("`r","`n");(Test-TestDriverCleanupContract $driverSource)|Should Be $true;$secretSpec=New-TestSecretSpec -Seed 731 -Length 24;$private=Join-Path $TestDrive 'cleanup-private.pem';$public=Join-Path $TestDrive 'cleanup-public.xml';$created=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/New-TrustAnchorKeyPair.ps1') @{KeyId='humanApproval';PrivateKeyPath=$private;PublicKeyXmlPath=$public} @($secretSpec,$secretSpec);$created.HadErrors|Should Be $false
+        $baseline=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/Get-TrustAnchorFingerprint.ps1') @{EncryptedPrivateKeyPath=$private} @($secretSpec) -DriverSource $driverSource;$baseline.HadErrors|Should Be $false;(@($baseline.ResponseCleanupDisposed)-join',')|Should Be 'True';(@($baseline.ResponseCleanupZeroed)-join',')|Should Be 'True'
+        $mutants=@(
+            $driverSource.Replace('foreach($response in $responses){$response.Dispose()}','foreach($response in $responses){$null}'),
+            $driverSource.Replace('$response.Dispose()','[Security.SecureString]::new().Dispose()'),
+            $driverSource.Replace('foreach($characters in $responseCharacters){[Array]::Clear($characters,0,$characters.Length)}','foreach($characters in $responseCharacters){$null}'),
+            $driverSource.Replace('[Array]::Clear($characters,0,$characters.Length)','[Array]::Clear([char[]]::new(1),0,1)')
+        )
+        $mutationIndex=0;foreach($mutant in $mutants){(Test-TestDriverCleanupContract $mutant)|Should Be $false;$result=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/Get-TrustAnchorFingerprint.ps1') @{EncryptedPrivateKeyPath=$private} @($secretSpec) -DriverSource $mutant;$result.HadErrors|Should Be $false;$disposedReport=@($result.ResponseCleanupDisposed)-join',';$zeroedReport=@($result.ResponseCleanupZeroed)-join',';$cleanupFailed=$disposedReport-cne'True'-or$zeroedReport-cne'True';if(-not$cleanupFailed){throw "Driver cleanup mutant $mutationIndex survived: disposed=$disposedReport; zeroed=$zeroedReport."};$mutationIndex++}
+    }
+
+    # Scenario: The fixture helper, every private-fixture call site, and every file-write operation in the test and driver ASTs are frozen.
+    # Purpose: Route private fixtures only through the permission-first helper and reject alternate WriteAllText, Set-Content, or FileStream.Write sinks.
     It 'UnitT71_closes_private_fixture_writes_and_driver_artifact_surfaces' {
         $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($PSCommandPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;$helper=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Write-TestPrivateKeyFixture'},$true));$helper.Count|Should Be 1;(Test-TestAstContract $helper[0] 391 291 'b64e3d055e98d468199e0c7824e8c5909f5eff3f01e1414ba79c43117ab1c582')|Should Be $true
-        $expected=@'
+        $expectedPrivate=@'
 PrivateHelper|UnitT02_rejects_wrong_cipher_PRF_or_iteration_count
 PrivateHelper|UnitT03_rejects_every_unsupported_private_key_format
 PrivateHelper|UnitT07_rejects_a_decryptable_private_key_with_a_short_PBKDF2_salt
+PrivateHelper|InterT18_converts_public_PEM_and_rejects_private_or_weak_inputs
 PrivateHelper|InterT20_rejects_unencrypted_private_key_files_and_private_XML_at_the_byte_boundary
 PrivateHelper|InterT20_rejects_unencrypted_private_key_files_and_private_XML_at_the_byte_boundary
 PrivateHelper|InterT24_rejects_a_multiply_linked_private_key
 PrivateHelper|InterT30_clears_private_bytes_when_post_read_validation_throws
 PrivateHelper|InterT32_delete_sharing_fixture_proves_handle_based_DACL_evidence
+PrivateHelper|InterT75_Windows_post_open_revalidation_deletion_mutants_fail_their_barrier_contracts
 PrivateHelper|InterT47_rollback_fails_closed_when_a_hard_link_appears_before_unlink
 PrivateHelper|UnitT49_rejects_non_public_or_multiple_PEM_envelopes_at_the_byte_boundary
 PrivateHelper|UnitT50_rejects_case_or_namespace_variant_private_XML_at_the_byte_boundary
 PrivateHelper|UnitT56_rejects_<Format>_private_DER_mislabeled_as_PUBLIC_KEY
-RawWriteAllBytes|InterT52_clears_input_bytes_when_reading_fails_after_allocation
 '@
-        ((Get-TestPrivateFixtureWriteInventory $ast)-join"`n")|Should Be $expected.Trim()
+        ((Get-TestPrivateFixtureHelperInventory $ast)-join"`n")|Should Be $expectedPrivate.Trim()
+        $expectedWrites=@'
+TestFile|InstanceWrite|$stream|Write-TestPrivateKeyFixture
+TestFile|InstanceWrite|$stream|Write-TestPrivateKeyFixture
+TestFile|StaticFile|WriteAllText|New-TestMutantTrustAnchorCliRoot
+TestFile|StaticFile|WriteAllText|Invoke-TestTrustAnchorCli
+TestFile|StaticFile|WriteAllText|Invoke-TestTrustAnchorCli
+TestFile|StaticFile|WriteAllText|Invoke-TestTrustAnchorCli
+TestFile|StaticFile|WriteAllText|Invoke-TestTrustAnchorCli
+TestFile|StaticFile|WriteAllText|Invoke-TestTrustAnchorCli
+TestFile|StaticFile|WriteAllText|Invoke-TestTrustAnchorCli
+TestFile|StaticFile|WriteAllText|Invoke-TestTrustAnchorCli
+TestFile|StaticFile|WriteAllText|UnitT04_emits_stable_canonical_XML_bytes
+TestFile|StaticFile|WriteAllText|UnitT05_calculates_XML_and_SPKI_SHA256
+TestFile|StaticFile|WriteAllText|UnitT06_rejects_weak_RSA_profiles
+TestFile|StaticFile|WriteAllText|InterT18_converts_public_PEM_and_rejects_private_or_weak_inputs
+TestFile|StaticFile|WriteAllText|InterT18_converts_public_PEM_and_rejects_private_or_weak_inputs
+TestFile|StaticFile|WriteAllText|InterT19_fingerprints_XML_public_PEM_and_encrypted_private_PEM
+TestFile|StaticFile|WriteAllText|InterT31_share_lock_explicitly_prevents_pathname_replacement
+TestFile|StaticFile|WriteAllText|InterT33_rejects_a_private_key_leaf_reparse_point
+TestFile|StaticFile|WriteAllText|InterT35_ConPTY_survives_the_official_closed_stdin_shard_transport
+TestFile|StaticFile|WriteAllText|InterT35_ConPTY_survives_the_official_closed_stdin_shard_transport
+TestFile|StaticFile|WriteAllText|InterT35_ConPTY_survives_the_official_closed_stdin_shard_transport
+TestFile|StaticFile|WriteAllText|InterT35_ConPTY_survives_the_official_closed_stdin_shard_transport
+TestFile|StaticFile|WriteAllText|InterT35_ConPTY_survives_the_official_closed_stdin_shard_transport
+TestFile|StaticFile|WriteAllText|InterT35_ConPTY_survives_the_official_closed_stdin_shard_transport
+TestFile|StaticFile|WriteAllText|InterT75_Windows_post_open_revalidation_deletion_mutants_fail_their_barrier_contracts
+TestFile|StaticFile|WriteAllText|InterT41_rejects_the_original_broad_mode_after_pathname_replacement
+TestFile|StaticFile|WriteAllText|InterT41_rejects_the_original_broad_mode_after_pathname_replacement
+TestFile|StaticFile|WriteAllText|InterT42_rejects_metadata_change_during_read
+TestFile|StaticFile|WriteAllText|InterT43_rejects_a_private_key_leaf_symbolic_link
+TestFile|StaticFile|WriteAllText|InterT45_rejects_post_read_identity_replacement_when_both_files_are_restrictive
+TestFile|StaticFile|WriteAllText|InterT45_rejects_post_read_identity_replacement_when_both_files_are_restrictive
+TestFile|StaticFile|WriteAllText|InterT76_Unix_post_open_revalidation_deletion_mutants_fail_their_barrier_contracts
+TestFile|StaticFile|WriteAllText|InterT76_Unix_post_open_revalidation_deletion_mutants_fail_their_barrier_contracts
+TestFile|StaticFile|WriteAllText|InterT76_Unix_post_open_revalidation_deletion_mutants_fail_their_barrier_contracts
+TestFile|StaticFile|WriteAllText|InterT76_Unix_post_open_revalidation_deletion_mutants_fail_their_barrier_contracts
+TestFile|StaticFile|WriteAllText|InterT76_Unix_post_open_revalidation_deletion_mutants_fail_their_barrier_contracts
+TestFile|StaticFile|WriteAllBytes|InterT52_clears_input_bytes_when_reading_fails_after_allocation
+Driver|StaticFile|WriteAllText|<script>
+'@
+        $actualWrites=(Get-TestFileWriteOperationInventory $ast)-join"`n";$actualWrites|Should Be $expectedWrites.Trim()
+        $source=Get-Content -Raw -Encoding UTF8 $PSCommandPath;$fixtureCall='Write-TestPrivateKeyFixture $privatePath $privateBytes';$fixtureMutations=@(
+            '[IO.File]::WriteAllText($privatePath,[Convert]::ToBase64String($privateBytes))',
+            'Set-Content -LiteralPath $privatePath -Value $privateBytes',
+            '$fixtureStream=[IO.File]::OpenWrite($privatePath);try{$fixtureStream.Write($privateBytes,0,$privateBytes.Length)}finally{$fixtureStream.Dispose()}'
+        )
+        foreach($replacement in $fixtureMutations){$mutatedSource=$source.Replace($fixtureCall,$replacement);$mutationTokens=$null;$mutationErrors=$null;$mutationAst=[Management.Automation.Language.Parser]::ParseInput($mutatedSource,[ref]$mutationTokens,[ref]$mutationErrors);@($mutationErrors).Count|Should Be 0;((Get-TestPrivateFixtureHelperInventory $mutationAst)-join"`n")|Should Not Be $expectedPrivate.Trim();((Get-TestFileWriteOperationInventory $mutationAst)-join"`n")|Should Not Be $expectedWrites.Trim()}
         $helperMutation=$helper[0].Extent.Text.Replace('[IO.FileSystemAclExtensions]::Create(','[IO.File]::WriteAllBytes(');$mutationTokens=$null;$mutationErrors=$null;$mutationAst=[Management.Automation.Language.Parser]::ParseInput($helperMutation,[ref]$mutationTokens,[ref]$mutationErrors);@($mutationErrors).Count|Should Be 0;$mutationFunction=@($mutationAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]},$true));$mutationFunction.Count|Should Be 1;(Test-TestAstContract $mutationFunction[0] 391 291 'b64e3d055e98d468199e0c7824e8c5909f5eff3f01e1414ba79c43117ab1c582')|Should Be $false
         $result=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/Get-TrustAnchorFingerprint.ps1') @{PublicKeyXmlPath=(Join-Path $TestDrive 'missing.xml')} -CiMarker CI;$sentinel='config-artifact-sentinel-8c4a2f19';$contents=@($result.ArtifactContents);$contents[1]=$sentinel;$mutated=[pscustomobject]@{EnvironmentContainsSentinel=$result.EnvironmentContainsSentinel;Stdout=$result.Stdout;Stderr=$result.Stderr;Transcript=$result.Transcript;Output=$result.Output;ErrorIds=$result.ErrorIds;ErrorMessages=$result.ErrorMessages;ArtifactContents=$contents;SurfacePaths=$result.SurfacePaths};(Test-TestSentinelAbsentFromCliSurfaces $mutated $sentinel)|Should Be $false;foreach($path in $result.SurfacePaths){(Test-Path -LiteralPath $path)|Should Be $false}
     }
@@ -1649,8 +1970,8 @@ Describe 'PR-K1 trust-anchor regression inventory' {
     # Scenario: The test AST is inspected for native-host registration and runtime-only RSA generation.
     # Purpose: Every platform-specific It must live below one explicit native Windows/Unix conditional without committed keys or skips.
     It 'UnitT55_registers_the_fixed_native_inventory_under_the_correct_AST_clause' {
-        $windows=@('InterT31_share_lock_explicitly_prevents_pathname_replacement','InterT32_delete_sharing_fixture_proves_handle_based_DACL_evidence','InterT33_rejects_a_private_key_leaf_reparse_point','InterT34_formal_creation_has_an_independently_verified_restrictive_DACL','InterT35_ConPTY_survives_the_official_closed_stdin_shard_transport')
-        $unix=@('InterT40_accepts_owner_only_mode_0400','InterT41_rejects_the_original_broad_mode_after_pathname_replacement','InterT42_rejects_metadata_change_during_read','InterT43_rejects_a_private_key_leaf_symbolic_link','InterT44_formal_creation_has_an_independently_verified_owner_only_mode','InterT45_rejects_post_read_identity_replacement_when_both_files_are_restrictive','InterT46_rollback_fails_closed_when_the_tombstone_is_replaced_before_unlink','InterT47_rollback_fails_closed_when_a_hard_link_appears_before_unlink','InterT48_enforces_the_rollback_parent_boundary_for_<Mode>','InterT68_rejects_a_Linux_named_user_writable_parent_ACL','InterT69_rejects_a_macOS_extended_parent_ACL','InterT70_creates_a_key_under_a_macOS_parent_without_an_extended_ACL')
+        $windows=@('InterT31_share_lock_explicitly_prevents_pathname_replacement','InterT32_delete_sharing_fixture_proves_handle_based_DACL_evidence','InterT33_rejects_a_private_key_leaf_reparse_point','InterT34_formal_creation_has_an_independently_verified_restrictive_DACL','InterT35_ConPTY_survives_the_official_closed_stdin_shard_transport','InterT75_Windows_post_open_revalidation_deletion_mutants_fail_their_barrier_contracts')
+        $unix=@('InterT40_accepts_owner_only_mode_0400','InterT41_rejects_the_original_broad_mode_after_pathname_replacement','InterT42_rejects_metadata_change_during_read','InterT43_rejects_a_private_key_leaf_symbolic_link','InterT44_formal_creation_has_an_independently_verified_owner_only_mode','InterT45_rejects_post_read_identity_replacement_when_both_files_are_restrictive','InterT76_Unix_post_open_revalidation_deletion_mutants_fail_their_barrier_contracts','InterT46_rollback_fails_closed_when_the_tombstone_is_replaced_before_unlink','InterT47_rollback_fails_closed_when_a_hard_link_appears_before_unlink','InterT48_enforces_the_rollback_parent_boundary_for_<Mode>','InterT68_rejects_a_Linux_named_user_writable_parent_ACL','InterT69_rejects_a_macOS_extended_parent_ACL','InterT70_creates_a_key_under_a_macOS_parent_without_an_extended_ACL')
         $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($PSCommandPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0;$conditional=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.IfStatementAst]-and@($node.FindAll({param($child)$child-is[Management.Automation.Language.CommandAst]-and$child.GetCommandName()-ceq'Describe'-and[string]$child.CommandElements[1].Value-cin@('PR-K1 Windows native handle safety','PR-K1 Unix native handle safety')},$true)).Count-eq2},$true));$conditional.Count|Should Be 1;(Test-TestExactSingleVariableCondition $conditional[0].Clauses[0].Item1 'IsWindows')|Should Be $true;(Test-TestNativeRegistrationAst $ast)|Should Be $true;$windowsExtent=$conditional[0].Clauses[0].Item2.Extent;$unixExtent=$conditional[0].ElseClause.Extent;$nativeIts=@($conditional[0].FindAll({param($node)$node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName()-ceq'It'},$true));$actualWindows=@($nativeIts|Where-Object{$_.Extent.StartOffset-ge$windowsExtent.StartOffset-and$_.Extent.EndOffset-le$windowsExtent.EndOffset}|ForEach-Object{[string]$_.CommandElements[1].Value});$actualUnix=@($nativeIts|Where-Object{$_.Extent.StartOffset-ge$unixExtent.StartOffset-and$_.Extent.EndOffset-le$unixExtent.EndOffset}|ForEach-Object{[string]$_.CommandElements[1].Value});($actualWindows-join'|')|Should Be ($windows-join'|');($actualUnix-join'|')|Should Be ($unix-join'|');@($nativeIts).Count|Should Be ($windows.Count+$unix.Count)
         $allIts=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName()-ceq'It'},$true));foreach($name in @($windows+$unix)){$matches=@($allIts|Where-Object{[string]$_.CommandElements[1].Value-ceq$name});$matches.Count|Should Be 1;($matches[0].Extent.StartOffset-ge$conditional[0].Extent.StartOffset-and$matches[0].Extent.EndOffset-le$conditional[0].Extent.EndOffset)|Should Be $true};$numbers=@($allIts|ForEach-Object{if([string]$_.CommandElements[1].Value-match'^(?:Unit|Inter)T(\d{2})_'){$Matches[1]}});@($numbers|Group-Object|Where-Object Count-gt1).Count|Should Be 0
         $source=Get-Content -Raw -Encoding UTF8 $PSCommandPath;$source|Should Match 'RSA\]::Create\(3072\)';$source|Should Not Match 'BEGIN (RSA )?PRIVATE KEY';(Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'docs/standards/core-test-skip-inventory.json'))|Should Not Match 'trust-anchor-tools'
