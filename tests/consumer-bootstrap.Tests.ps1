@@ -14,6 +14,15 @@ Describe 'Consumer authority bootstrap v1' {
         function Get-FixtureGitScalar([string]$Root,[string[]]$Arguments) {
             ([string](@(Invoke-FixtureGit $Root $Arguments)[0])).Trim()
         }
+        function ConvertTo-FixtureFileUrl([string]$Path) {
+            $fullPath = [IO.Path]::GetFullPath($Path)
+            $url = [Uri]::new($fullPath, [UriKind]::Absolute).AbsoluteUri
+            if ([string]::IsNullOrWhiteSpace($url)) { throw 'Authority fixture file URL is empty.' }
+            if (-not $url.StartsWith('file:///', [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'Authority fixture file URL is invalid.'
+            }
+            $url
+        }
         function New-BootstrapWorkRootLease([string]$LocalRoot,[string]$Name) {
             $boundary=if(-not[string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)){
                 [IO.Path]::GetFullPath($env:RUNNER_TEMP)
@@ -74,6 +83,31 @@ Describe 'Consumer authority bootstrap v1' {
             Unrelated=$unrelated
             CandidateRoot=$Root
             BaseRoot=$BaseRoot}
+        }
+    }
+
+    if ($IsWindows) {
+        # Scenario: A Windows fixture path contains a space and is converted to a local file URL.
+        # Purpose: Preserve a non-empty file:/// URL that round-trips to the exact absolute Windows path.
+        It 'UnitT05_converts_windows_fixture_paths_to_round_trip_file_urls' {
+            $path = Join-Path $TestDrive 'x y'
+            $expected = [IO.Path]::GetFullPath($path)
+            $url = ConvertTo-FixtureFileUrl $path
+            $url | Should Not BeNullOrEmpty
+            $url.StartsWith('file:///', [StringComparison]::OrdinalIgnoreCase) | Should Be $true
+            [IO.Path]::GetFullPath(([Uri]$url).LocalPath) | Should Be $expected
+        }
+    }
+    else {
+        # Scenario: A Unix fixture path contains a space and is converted to a local file URL.
+        # Purpose: Preserve a non-empty file:/// URL that round-trips to the exact absolute Unix path.
+        It 'UnitT06_converts_unix_fixture_paths_to_round_trip_file_urls' {
+            $path = '/tmp/x y'
+            $expected = [IO.Path]::GetFullPath($path)
+            $url = ConvertTo-FixtureFileUrl $path
+            $url | Should Not BeNullOrEmpty
+            $url.StartsWith('file:///', [StringComparison]::OrdinalIgnoreCase) | Should Be $true
+            [IO.Path]::GetFullPath(([Uri]$url).LocalPath) | Should Be $expected
         }
     }
 
@@ -374,7 +408,7 @@ exit 0
         [void](Invoke-FixtureGit $source @('init','-q','-b','main'))
         [void](Invoke-FixtureGit $source @('config','user.name','Fixture'))
         [void](Invoke-FixtureGit $source @('config','user.email','fixture@example.test'))
-        $sourceUrl = ([Uri](Resolve-Path $source).Path).AbsoluteUri
+        $sourceUrl = ConvertTo-FixtureFileUrl $source
         $consumerRepository='https://github.com/example/fixture.git'
         foreach($path in @(
                 'consumer/bootstrap/Invoke-PinnedAuthority.ps1','consumer/workflows/consumer-gate.yml',
@@ -857,7 +891,7 @@ $start.Environment['CONSUMER_GATE_EVENT_REPOSITORY']=$Token
     It 'InterT70_accepts_main_ancestry_and_rejects_branch_only_or_missing_pins' {
         $source=Join-Path $TestDrive 'authority-source'
         $mainCommit=New-AuthorityFixture $source
-        $sourceUrl=([Uri](Resolve-Path $source).Path).AbsoluteUri
+        $sourceUrl=ConvertTo-FixtureFileUrl $source
         $accepted=New-PinnedAuthority (Join-Path $TestDrive 'accepted') $mainCommit $sourceUrl -AllowFileProtocol
         (Test-Path -LiteralPath (Join-Path $accepted.Root 'authority.txt') -PathType Leaf)|Should Be $true
         $gitConfigNames=@('GIT_CONFIG_COUNT','GIT_CONFIG_KEY_0','GIT_CONFIG_VALUE_0')
@@ -885,7 +919,7 @@ $start.Environment['CONSUMER_GATE_EVENT_REPOSITORY']=$Token
     It 'InterT80_rejects_authority_byte_extra_and_missing_file_drift' {
         $source=Join-Path $TestDrive 'tree-source'
         $commit=New-AuthorityFixture $source
-        $acquired=New-PinnedAuthority (Join-Path $TestDrive 'tree-acquired') $commit ([Uri](Resolve-Path $source).Path).AbsoluteUri -AllowFileProtocol
+        $acquired=New-PinnedAuthority (Join-Path $TestDrive 'tree-acquired') $commit (ConvertTo-FixtureFileUrl $source) -AllowFileProtocol
         $path=Join-Path $acquired.Root 'authority.txt'
         [IO.File]::WriteAllText($path,'tampered',[Text.UTF8Encoding]::new($false))
         {Assert-AuthorityTree $acquired.GitRoot $acquired.Root $commit}|Should Throw
@@ -909,7 +943,7 @@ $start.Environment['CONSUMER_GATE_EVENT_REPOSITORY']=$Token
             [void](Invoke-FixtureGit -Root $source -Arguments @('update-index','--add','--cacheinfo',$cacheInfo))
             [void](Invoke-FixtureGit $source @('commit','-q','-m',"unsafe $mode"))
             $commit=Get-FixtureGitScalar $source @('rev-parse','HEAD')
-            {New-PinnedAuthority (Join-Path $TestDrive "unsafe-acquired-$mode") $commit ([Uri](Resolve-Path $source).Path).AbsoluteUri `
+            {New-PinnedAuthority (Join-Path $TestDrive "unsafe-acquired-$mode") $commit (ConvertTo-FixtureFileUrl $source) `
                 -AllowFileProtocol}|Should Throw 'unsupported entry'
         }
     }
