@@ -737,7 +737,7 @@ function New-TrustAnchorKeyFile {
     $parent=$PathEvidence.ParentLease;$file=$null
     try{
         try{Assert-PlatformFileIdentity -Lease $parent -Expected $PathEvidence.ParentExpected -VerifyPath|Out-Null}catch{throw (New-TrustAnchorError $_.Exception.Message 'TrustAnchor.ParentIdentityChanged')}
-        if(-not$IsWindows -and $PathEvidence.Purpose -ceq 'PrivateKey'){try{[SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease]::AssertSafeParent((Get-TrustAnchorLeaseHandle $parent))}catch{throw (New-TrustAnchorError $_.Exception.Message 'TrustAnchor.UnsafeParentAcl')}}
+        if(-not$IsWindows -and $PathEvidence.Purpose -ceq 'PrivateKey'){try{[SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease]::AssertSafeParent((Get-TrustAnchorLeaseHandle $parent))}catch{throw (New-TrustAnchorError $_.Exception.GetBaseException().Message 'TrustAnchor.UnsafeParentAcl')}}
         $file=Open-PlatformFile -ParentLease $parent -Leaf $PathEvidence.Leaf -Access ReadWrite -CreateMode CreateNew;$expected=$file.Observation
         if($PathEvidence.Purpose -ceq 'PrivateKey'){
             if($IsWindows){$identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$sid=$identity.User.Value}finally{$identity.Dispose()};Set-PlatformPermissions -Lease $file -Policy @{Sddl="D:P(A;;FA;;;$sid)";ReadOnly=$false}|Out-Null}else{Set-PlatformPermissions -Lease $file -Policy @{Mode=384}|Out-Null}
@@ -782,7 +782,7 @@ function Read-TrustAnchorPrivateKeyLease {
     [CmdletBinding()] param([Parameter(Mandatory)]$Lease)
     $bytes=$null;$succeeded=$false
     try{
-        $before=Get-TrustAnchorMetadataEvidence $Lease.FileLease;try{Assert-TrustAnchorPrivatePermissions $Lease.FileLease $before|Out-Null}catch{throw (New-TrustAnchorError $_.Exception.Message 'TrustAnchor.UnsafePrivatePermissions')};if(-not(Test-TrustAnchorMetadataEqual $Lease.OpenMetadata $before)){throw (New-TrustAnchorError 'The private-key handle metadata changed after it was opened.' 'TrustAnchor.PrivateMetadataChanged')}
+        $before=Get-TrustAnchorMetadataEvidence $Lease.FileLease;try{Assert-TrustAnchorPrivatePermissions $Lease.FileLease $before|Out-Null}catch{throw (New-TrustAnchorError $_.Exception.Message 'TrustAnchor.UnsafePrivatePermissions')};try{Assert-PlatformFileIdentity -Lease $Lease.FileLease -Expected $Lease.Expected -SingleLink -VerifyPath|Out-Null}catch{throw (New-TrustAnchorError $_.Exception.Message 'TrustAnchor.PrivateIdentityChanged')};if(-not(Test-TrustAnchorMetadataEqual $Lease.OpenMetadata $before)){throw (New-TrustAnchorError 'The private-key handle metadata changed after it was opened.' 'TrustAnchor.PrivateMetadataChanged')}
         $bytes=$Lease.FileLease.ReadAllBytes(1048576)
         try{Assert-PlatformFileIdentity -Lease $Lease.FileLease -Expected $Lease.Expected -SingleLink -VerifyPath|Out-Null}catch{throw (New-TrustAnchorError $_.Exception.Message 'TrustAnchor.PrivateIdentityChanged')}
         $after=Get-TrustAnchorMetadataEvidence $Lease.FileLease;try{Assert-TrustAnchorPrivatePermissions $Lease.FileLease $after|Out-Null}catch{throw (New-TrustAnchorError $_.Exception.Message 'TrustAnchor.UnsafePrivatePermissions')}
