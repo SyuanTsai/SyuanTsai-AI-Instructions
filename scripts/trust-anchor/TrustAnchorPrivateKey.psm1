@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: 2026 SyuanTsai
 # SPDX-License-Identifier: Apache-2.0
 
-Set-StrictMode -Version Latest
+Microsoft.PowerShell.Core\Set-StrictMode -Version Latest
 
-$script:RepositoryRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-Import-Module (Join-Path $script:RepositoryRoot 'scripts/platform-runtime.psd1') -Scope Local -ErrorAction Stop
+$script:PlatformRuntimePath = [IO.Path]::GetFullPath([IO.Path]::Combine($PSScriptRoot, '..', 'platform-runtime.psd1'))
+Microsoft.PowerShell.Core\Import-Module $script:PlatformRuntimePath -Scope Local -ErrorAction Stop
 
 if ($null -eq ('SyuanTsai.AIInstructions.TrustAnchor.SecretBridge' -as [type])) {
-    Add-Type -TypeDefinition @'
+    Microsoft.PowerShell.Utility\Add-Type -TypeDefinition @'
 using System;
 using System.Buffers;
 using System.Buffers.Text;
@@ -621,11 +621,11 @@ function Use-TrustAnchorPassword {
 
 function Read-TrustAnchorPassword {
     [CmdletBinding()] param([switch]$Confirm)
-    $first=Read-Host 'Private-key password (minimum 16 characters)' -AsSecureString
+    $first=Microsoft.PowerShell.Utility\Read-Host 'Private-key password (minimum 16 characters)' -AsSecureString
     try {
         if($first.Length -lt 16){throw (New-TrustAnchorError 'The private-key password must contain at least 16 characters.' 'TrustAnchor.WeakPassword')}
         if($Confirm){
-            $second=Read-Host 'Confirm private-key password' -AsSecureString
+            $second=Microsoft.PowerShell.Utility\Read-Host 'Confirm private-key password' -AsSecureString
             try {
                 if($second.Length -ne $first.Length){throw (New-TrustAnchorError 'The password confirmation does not match.' 'TrustAnchor.PasswordMismatch')}
                 $equal=Use-TrustAnchorPassword $first { param([char[]]$left) Use-TrustAnchorPassword $second { param([char[]]$right) [SyuanTsai.AIInstructions.TrustAnchor.SecretBridge]::FixedTimeEquals($left,$right) } }
@@ -896,4 +896,4 @@ function Invoke-GetTrustAnchorFingerprintAction {
     }finally{if($null-ne$inputBytes){[Security.Cryptography.CryptographicOperations]::ZeroMemory($inputBytes)};Close-TrustAnchorPrivateKeyLease $privateLease;if($null-ne$rsa){$rsa.Dispose()};if($null-ne$password){$password.Dispose()}}
 }
 
-Export-ModuleMember -Function @()
+Microsoft.PowerShell.Core\Export-ModuleMember -Function @()
