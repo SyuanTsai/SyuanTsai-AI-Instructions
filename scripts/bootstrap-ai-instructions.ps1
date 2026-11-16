@@ -5213,19 +5213,27 @@ function Get-RepositoryTransactionDirectoryAnchorState {
     finally{$lease.Dispose()}
 }
 
+function Get-RepositoryGitRefState {
+    param([Parameter(Mandatory=$true)][string]$Repository,[Parameter(Mandatory=$true)][string]$Reference)
+    $lines=@(Invoke-Git -Repository $Repository -Arguments @('for-each-ref','--format=%(refname)%09%(objectname)','--',$Reference)|Where-Object{-not[string]::IsNullOrWhiteSpace([string]$_)})
+    $matches=@($lines|ForEach-Object{
+        $match=[regex]::Match(([string]$_).Trim(),'^(?<Reference>[^\t]+)\t(?<ObjectId>[0-9a-fA-F]+)$')
+        if(-not$match.Success){throw "git for-each-ref returned an invalid ref state record for ${Reference}: $_"}
+        if($match.Groups['Reference'].Value-ceq$Reference){$match.Groups['ObjectId'].Value.ToLowerInvariant()}
+    })
+    if($matches.Count-eq0){return [pscustomobject][ordered]@{exists=$false;objectId=$null}}
+    if($matches.Count-ne1){throw "git for-each-ref returned multiple state records for $Reference."}
+    return [pscustomobject][ordered]@{exists=$true;objectId=[string]$matches[0]}
+}
+
 function Get-RepositoryTransactionGitRefState {
     param([Parameter(Mandatory=$true)][object]$Journal,[Parameter(Mandatory=$true)][object]$Operation)
-    $ref=[string]$Operation.target.value
-    if((Get-GitExitCode -Repository ([string]$Journal.scope.repositoryRoot) -Arguments @('show-ref','--verify','--quiet',$ref))-ne0){return [pscustomobject][ordered]@{exists=$false;objectId=$null}}
-    $sha=((Invoke-Git -Repository ([string]$Journal.scope.repositoryRoot) -Arguments @('rev-parse','--verify',$ref))|Select-Object -First 1).Trim()
-    return [pscustomobject][ordered]@{exists=$true;objectId=$sha}
+    return Get-RepositoryGitRefState -Repository ([string]$Journal.scope.repositoryRoot) -Reference ([string]$Operation.target.value)
 }
 
 function Get-RepositoryStashRefState {
     param([Parameter(Mandatory=$true)][string]$Repository)
-    if((Get-GitExitCode -Repository $Repository -Arguments @('show-ref','--verify','--quiet','refs/stash'))-ne0){return [pscustomobject][ordered]@{exists=$false;objectId=$null}}
-    $sha=((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--verify','refs/stash'))|Select-Object -First 1).Trim()
-    return [pscustomobject][ordered]@{exists=$true;objectId=$sha}
+    return Get-RepositoryGitRefState -Repository $Repository -Reference 'refs/stash'
 }
 
 function Invoke-RepositoryStashRefCompareAndSwap {
@@ -5267,14 +5275,30 @@ function Get-RepositoryTransactionEvidenceStashState {
     return [pscustomobject][ordered]@{exists=$exists;objectId=$commitId}
 }
 
+function Get-RepositoryHeadQueryState {
+    param([Parameter(Mandatory=$true)][string]$Repository)
+    $symbolicExitCode=Get-GitExitCode -Repository $Repository -Arguments @('symbolic-ref','-q','HEAD')
+    if($symbolicExitCode-eq0){$reference=((Invoke-Git -Repository $Repository -Arguments @('symbolic-ref','-q','HEAD'))|Select-Object -First 1).Trim()}
+    elseif($symbolicExitCode-eq1){$reference=$null}
+    else{
+        Invoke-Git -Repository $Repository -Arguments @('symbolic-ref','-q','HEAD')|Out-Null
+        throw "git symbolic-ref -q HEAD failed with exit code $symbolicExitCode."
+    }
+    $objectExitCode=Get-GitExitCode -Repository $Repository -Arguments @('rev-parse','--verify','--quiet','HEAD')
+    if($objectExitCode-eq0){$objectId=((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--verify','--quiet','HEAD'))|Select-Object -First 1).Trim()}
+    elseif($objectExitCode-eq1){$objectId=$null}
+    else{
+        Invoke-Git -Repository $Repository -Arguments @('rev-parse','--verify','--quiet','HEAD')|Out-Null
+        throw "git rev-parse --verify --quiet HEAD failed with exit code $objectExitCode."
+    }
+    return [pscustomobject][ordered]@{reference=$reference;objectId=$objectId}
+}
+
 function Get-RepositoryTransactionHeadState {
     param([Parameter(Mandatory=$true)][object]$Journal)
     $repository=[string]$Journal.scope.repositoryRoot;$headPath=Join-Path ([string]$Journal.scope.gitDirectory) 'HEAD'
     $raw=Get-ByteArraySha256 ([IO.File]::ReadAllBytes($headPath))
-    $reference=$null
-    if((Get-GitExitCode -Repository $repository -Arguments @('symbolic-ref','-q','HEAD'))-eq0){$reference=((Invoke-Git -Repository $repository -Arguments @('symbolic-ref','-q','HEAD'))|Select-Object -First 1).Trim()}
-    $objectId=$null
-    if((Get-GitExitCode -Repository $repository -Arguments @('rev-parse','--verify','HEAD'))-eq0){$objectId=((Invoke-Git -Repository $repository -Arguments @('rev-parse','--verify','HEAD'))|Select-Object -First 1).Trim()}
+    $head=Get-RepositoryHeadQueryState -Repository $repository;$reference=$head.reference;$objectId=$head.objectId
     $mode=if($null-ne$reference){if($null-eq$objectId){'unborn'}else{'symbolic'}}else{'detached'}
     return [pscustomobject][ordered]@{mode=$mode;reference=$reference;objectId=$objectId;rawSha256=$raw}
 }
@@ -5287,6 +5311,13 @@ function Get-RepositoryGitVersion {
     return [version]::new([int]$match.Groups['Major'].Value,[int]$match.Groups['Minor'].Value,$(if($match.Groups['Patch'].Success){[int]$match.Groups['Patch'].Value}else{0}))
 }
 
+function Get-RepositoryHeadState {
+    param([Parameter(Mandatory=$true)][string]$Repository)
+    $head=Get-RepositoryHeadQueryState -Repository $Repository
+    if($null-ne$head.reference){return [pscustomobject][ordered]@{mode='symbolic';reference=$head.reference;objectId=$null}}
+    return [pscustomobject][ordered]@{mode='detached';reference=$null;objectId=$head.objectId}
+}
+
 function Set-RepositoryDetachedHeadSymbolicCompareAndSwap {
     param([Parameter(Mandatory=$true)][string]$Repository,[Parameter(Mandatory=$true)][string]$ExpectedObjectId,[Parameter(Mandatory=$true)][string]$NewReference)
     $gitVersion=Get-RepositoryGitVersion -Repository $Repository
@@ -5295,7 +5326,14 @@ function Set-RepositoryDetachedHeadSymbolicCompareAndSwap {
     try{Invoke-Git -Repository $Repository -Arguments @('update-ref','--stdin') -StandardInputLines $commands|Out-Null}
     catch{
         if((Get-AiInstructionsRefusalCode $_)-ceq'capability-unavailable'){throw}
-        throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'Detached HEAD atomic symbolic-ref CAS refused because HEAD changed after observation; the external HEAD state was preserved.' -InnerException $_.Exception)
+        $updateException=$_.Exception
+        $current=$null;$readException=$null
+        try{$current=Get-RepositoryHeadState -Repository $Repository}catch{$readException=$_.Exception}
+        if($null-eq$readException-and([string]$current.mode-cne'detached'-or[string]$current.objectId-cne$ExpectedObjectId)){
+            throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'Detached HEAD atomic symbolic-ref CAS refused because HEAD changed after observation; the external HEAD state was preserved.' -InnerException $updateException)
+        }
+        $readFailureDetail=if($null-ne$readException){" The HEAD readback also failed: $($readException.Message)"}else{''}
+        throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Detached HEAD git update-ref --stdin symbolic-ref CAS write failed. $($updateException.Message)$readFailureDetail" -InnerException $updateException)
     }
 }
 

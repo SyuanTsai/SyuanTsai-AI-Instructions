@@ -3720,7 +3720,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
     It 'UnitT227_requires_Git_2_46_and_preserves_HEAD_when_detached_to_symbolic_CAS_loses' {
         $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
         $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrapPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
-        $definitions=@('Invoke-Git','Get-RepositoryGitVersion','Set-RepositoryDetachedHeadSymbolicCompareAndSwap')|ForEach-Object{$name=$_;@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true))[0].Extent.Text}
+        $definitions=@('Invoke-Git','Get-GitExitCode','Get-RepositoryGitVersion','Get-RepositoryHeadQueryState','Get-RepositoryHeadState','Set-RepositoryDetachedHeadSymbolicCompareAndSwap')|ForEach-Object{$name=$_;@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true))[0].Extent.Text}
         $gitExecutable=(Get-Command git -ErrorAction Stop).Source
         $versionRepo=Join-Path $TestDrive 'head-version';New-Item -ItemType Directory -Path $versionRepo|Out-Null;& git -C $versionRepo init -q;& git -C $versionRepo config user.name test;& git -C $versionRepo config user.email test@example.test;[IO.File]::WriteAllText((Join-Path $versionRepo 'a'),'a');& git -C $versionRepo add a;& git -C $versionRepo commit -qm initial;$versionOid=(@(& git -C $versionRepo rev-parse HEAD)|Select-Object -First 1).Trim();& git -C $versionRepo checkout -q --detach $versionOid
         $versionCode=& {param($defs,$git,$repo,$oid)$GitExecutable=$git;foreach($definition in $defs){Invoke-Expression $definition};function Get-RepositoryGitVersion{param([string]$Repository);return [version]'2.45.0'};try{Set-RepositoryDetachedHeadSymbolicCompareAndSwap -Repository $repo -ExpectedObjectId $oid -NewReference 'refs/heads/remediation';$null}catch{Get-AiInstructionsRefusalCode $_}} $definitions $gitExecutable $versionRepo $versionOid
@@ -3734,19 +3734,91 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         (@(& git -C $raceRepo symbolic-ref HEAD)|Select-Object -First 1).Trim()|Should BeExactly 'refs/heads/external'
     }
 
+    # Scenario: Detached HEAD symref CAS fails for a non-race Git write error while HEAD remains detached at the observed object ID.
+    # Purpose: Report the update-ref --stdin write failure without claiming that HEAD changed or that an external state was preserved.
+    It 'UnitT227a_reports_detached_HEAD_symref_CAS_write_failure_when_HEAD_is_unchanged' {
+        $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrapPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
+        $definitions=@('Get-RepositoryGitVersion','Get-RepositoryHeadQueryState','Get-RepositoryHeadState','Set-RepositoryDetachedHeadSymbolicCompareAndSwap')|ForEach-Object{$name=$_;@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true))[0].Extent.Text}
+        $expectedOid='a'*40
+        $result=& {param($defs,$oid)foreach($definition in $defs){Invoke-Expression $definition};function Get-GitExitCode{param([string]$Repository,[string[]]$Arguments);if($Arguments[0]-ceq'symbolic-ref'){return 1};if($Arguments[0]-ceq'rev-parse'){return 0};throw "Unexpected exit-code probe: $($Arguments-join' ')"};function Invoke-Git{param([string]$Repository,[string[]]$Arguments,[string[]]$StandardInputLines);if($Arguments[0]-ceq'--version'){return 'git version 2.55.0'};if($Arguments[0]-ceq'update-ref'){throw 'injected update-ref stdin write failure'};if($Arguments[0]-ceq'rev-parse'){return $oid};throw "Unexpected git call: $($Arguments-join' ')"};try{Set-RepositoryDetachedHeadSymbolicCompareAndSwap -Repository 'fixture' -ExpectedObjectId $oid -NewReference 'refs/heads/remediation';$null}catch{[pscustomobject]@{Code=(Get-AiInstructionsRefusalCode $_);Message=$_.Exception.Message}}} $definitions $expectedOid
+        $result.Code|Should Be interrupted-install
+        $result.Message|Should Match 'git update-ref --stdin.*write failed'
+        $result.Message|Should Match 'injected update-ref stdin write failure'
+        $result.Message|Should Not Match 'HEAD changed after observation'
+        $result.Message|Should Not Match 'external HEAD state was preserved'
+    }
+
+    # Scenario: Journal HEAD observation receives a symbolic-ref exit code other than Git's documented detached result.
+    # Purpose: Preserve the Git diagnostic and prevent an I/O, permission, or repository error from being reported as detached HEAD.
+    It 'UnitT227b_rejects_journal_HEAD_symbolic_ref_git_errors_instead_of_returning_detached' {
+        $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrapPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
+        $definitions=@('Get-RepositoryHeadQueryState','Get-RepositoryTransactionHeadState')|ForEach-Object{$name=$_;@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true))[0].Extent.Text}
+        $headPath=Join-Path $TestDrive 'symbolic-error-HEAD';[IO.File]::WriteAllText($headPath,'ref: refs/heads/main')
+        $journal=[pscustomobject]@{scope=[pscustomobject]@{repositoryRoot='fixture';gitDirectory=$TestDrive}}
+        $result=& {param($defs,$value,$path)foreach($definition in $defs){Invoke-Expression $definition};function Get-ByteArraySha256{param([byte[]]$Bytes);return 'raw'};function Get-GitExitCode{param([string]$Repository,[string[]]$Arguments);return 128};function Invoke-Git{param([string]$Repository,[string[]]$Arguments);throw 'injected symbolic-ref read failure'};$value.scope.gitDirectory=Split-Path -Parent $path;Move-Item -LiteralPath $path -Destination (Join-Path $value.scope.gitDirectory 'HEAD');try{[pscustomobject]@{State=(Get-RepositoryTransactionHeadState $value);Message=$null}}catch{[pscustomobject]@{State=$null;Message=$_.Exception.Message}}} $definitions $journal $headPath
+        $result.State|Should BeNullOrEmpty
+        $result.Message|Should Match 'injected symbolic-ref read failure'
+    }
+
+    # Scenario: Journal HEAD observation resolves a symbolic ref, but rev-parse fails with a Git error rather than the documented missing-object result.
+    # Purpose: Preserve the Git diagnostic and prevent an operational failure from being reported as an unborn symbolic HEAD.
+    It 'UnitT227c_rejects_journal_HEAD_rev_parse_git_errors_instead_of_returning_unborn' {
+        $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrapPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
+        $definitions=@('Get-RepositoryHeadQueryState','Get-RepositoryTransactionHeadState')|ForEach-Object{$name=$_;@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true))[0].Extent.Text}
+        $headDirectory=Join-Path $TestDrive 'rev-parse-error';New-Item -ItemType Directory -Path $headDirectory|Out-Null;[IO.File]::WriteAllText((Join-Path $headDirectory 'HEAD'),'ref: refs/heads/main')
+        $journal=[pscustomobject]@{scope=[pscustomobject]@{repositoryRoot='fixture';gitDirectory=$headDirectory}}
+        $result=& {param($defs,$value)foreach($definition in $defs){Invoke-Expression $definition};function Get-ByteArraySha256{param([byte[]]$Bytes);return 'raw'};function Get-GitExitCode{param([string]$Repository,[string[]]$Arguments);if($Arguments[0]-ceq'symbolic-ref'){return 0};return 128};function Invoke-Git{param([string]$Repository,[string[]]$Arguments);if($Arguments[0]-ceq'symbolic-ref'){return 'refs/heads/main'};throw 'injected rev-parse read failure'};try{[pscustomobject]@{State=(Get-RepositoryTransactionHeadState $value);Message=$null}}catch{[pscustomobject]@{State=$null;Message=$_.Exception.Message}}} $definitions $journal
+        $result.State|Should BeNullOrEmpty
+        $result.Message|Should Match 'injected rev-parse read failure'
+    }
+
+    # Scenario: Journal HEAD observation receives the three valid symbolic, detached, and unborn Git result combinations.
+    # Purpose: Keep the established journal state shape and values byte-compatible while hardening only Git error handling.
+    It 'UnitT227d_preserves_journal_HEAD_symbolic_detached_and_unborn_states' {
+        $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrapPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
+        $definitions=@('Get-RepositoryHeadQueryState','Get-RepositoryTransactionHeadState')|ForEach-Object{$name=$_;@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true))[0].Extent.Text}
+        $headDirectory=Join-Path $TestDrive 'valid-head-states';New-Item -ItemType Directory -Path $headDirectory|Out-Null;[IO.File]::WriteAllText((Join-Path $headDirectory 'HEAD'),'fixture')
+        $journal=[pscustomobject]@{scope=[pscustomobject]@{repositoryRoot='fixture';gitDirectory=$headDirectory}}
+        $states=@('symbolic','detached','unborn')|ForEach-Object{& {param($defs,$value,$scenario)foreach($definition in $defs){Invoke-Expression $definition};function Get-ByteArraySha256{param([byte[]]$Bytes);return 'raw'};function Get-GitExitCode{param([string]$Repository,[string[]]$Arguments);if($Arguments[0]-ceq'symbolic-ref'){return $(if($scenario-ceq'detached'){1}else{0})};return $(if($scenario-ceq'unborn'){1}else{0})};function Invoke-Git{param([string]$Repository,[string[]]$Arguments);if($Arguments[0]-ceq'symbolic-ref'){return 'refs/heads/main'};if($Arguments[0]-ceq'rev-parse'){return ('a'*40)};throw "Unexpected git call: $($Arguments-join' ')"};Get-RepositoryTransactionHeadState $value} $definitions $journal $_}
+        @($states).Count|Should Be 3
+        $states[0].mode|Should BeExactly 'symbolic';$states[0].reference|Should BeExactly 'refs/heads/main';$states[0].objectId|Should BeExactly ('a'*40);$states[0].rawSha256|Should BeExactly 'raw'
+        $states[1].mode|Should BeExactly 'detached';$states[1].reference|Should BeNullOrEmpty;$states[1].objectId|Should BeExactly ('a'*40);$states[1].rawSha256|Should BeExactly 'raw'
+        $states[2].mode|Should BeExactly 'unborn';$states[2].reference|Should BeExactly 'refs/heads/main';$states[2].objectId|Should BeNullOrEmpty;$states[2].rawSha256|Should BeExactly 'raw'
+    }
+
     # Scenario: refs/stash changes from the prepared before OID to an external OID immediately before evidence publication.
     # Purpose: Verify the evidence helper uses update-ref expected-old CAS, preserves the external ref, and returns interrupted-install.
     It 'UnitT228_preserves_external_refs_stash_when_evidence_CAS_loses' {
         $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
         $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrapPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
-        $definitions=@('Invoke-Git','Get-GitExitCode','Get-RepositoryStashRefState','Invoke-RepositoryStashRefCompareAndSwap')|ForEach-Object{$name=$_;@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true))[0].Extent.Text}
+        $definitions=@('Invoke-Git','Get-RepositoryGitRefState','Get-RepositoryStashRefState','Invoke-RepositoryStashRefCompareAndSwap')|ForEach-Object{$name=$_;@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true))[0].Extent.Text}
         $repo=Join-Path $TestDrive 'stash-cas';New-Item -ItemType Directory -Path $repo|Out-Null;& git -C $repo init -q;& git -C $repo config user.name test;& git -C $repo config user.email test@example.test
         $oids=New-Object System.Collections.Generic.List[string];foreach($value in @('a','b','c')){[IO.File]::AppendAllText((Join-Path $repo 'a'),$value);& git -C $repo add a;& git -C $repo commit -qm $value;$oids.Add((@(& git -C $repo rev-parse HEAD)|Select-Object -First 1).Trim())}
         & git -C $repo update-ref refs/stash ([string]$oids[0]);$expected=[pscustomobject][ordered]@{exists=$true;objectId=[string]$oids[0]};& git -C $repo update-ref refs/stash ([string]$oids[1]) ([string]$oids[0])
         $gitExecutable=(Get-Command git -ErrorAction Stop).Source
         $result=& {param($defs,$git,$root,$before,$newOid)$GitExecutable=$git;foreach($definition in $defs){Invoke-Expression $definition};try{Invoke-RepositoryStashRefCompareAndSwap -Repository $root -Expected $before -NewObjectId $newOid -ReflogMessage evidence;$null}catch{[pscustomobject]@{Code=(Get-AiInstructionsRefusalCode $_);Message=$_.Exception.Message}}} $definitions $gitExecutable $repo $expected ([string]$oids[2])
         $result.Code|Should Be interrupted-install
+        $result.Message|Should Match 'changed after the prepared decision'
         (@(& git -C $repo rev-parse refs/stash)|Select-Object -First 1).Trim()|Should BeExactly ([string]$oids[1])
+    }
+
+    # Scenario: refs/stash exists at the prepared OID, but both update-ref and its failure readback encounter Git errors.
+    # Purpose: Preserve both Git diagnostics and classify the result as a write failure instead of a prepared-decision race.
+    It 'UnitT228a_reports_refs_stash_write_failure_when_failure_readback_also_fails' {
+        $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrapPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
+        $definitions=@('Get-RepositoryGitRefState','Get-RepositoryStashRefState','Invoke-RepositoryStashRefCompareAndSwap')|ForEach-Object{$name=$_;@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true))[0].Extent.Text}
+        $expected=[pscustomobject][ordered]@{exists=$true;objectId=('a'*40)}
+        $result=& {param($defs,$before)foreach($definition in $defs){Invoke-Expression $definition};function Invoke-Git{param([string]$Repository,[string[]]$Arguments,[string[]]$StandardInputLines);if($Arguments[0]-ceq'rev-parse'){return 'sha1'};if($Arguments[0]-ceq'update-ref'){throw 'injected refs/stash update failure'};if($Arguments[0]-ceq'for-each-ref'){throw 'injected refs/stash readback failure'};throw "Unexpected git call: $($Arguments-join' ')"};try{Invoke-RepositoryStashRefCompareAndSwap -Repository 'fixture' -Expected $before -NewObjectId ('b'*40) -ReflogMessage evidence;$null}catch{[pscustomobject]@{Code=(Get-AiInstructionsRefusalCode $_);Message=$_.Exception.Message}}} $definitions $expected
+        $result.Code|Should Be interrupted-install
+        $result.Message|Should Match 'git update-ref refs/stash write failed'
+        $result.Message|Should Match 'injected refs/stash update failure'
+        $result.Message|Should Match 'injected refs/stash readback failure'
+        $result.Message|Should Not Match 'changed after the prepared decision'
     }
 
     # Scenario: A prepared repo-v2 journal contains one retained manifest path and advances through every legal phase and operation generation via the production copy helper.
