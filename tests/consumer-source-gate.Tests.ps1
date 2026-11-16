@@ -1580,13 +1580,13 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|CONSUMER_GATE_PHASE_ENV_
             $mutantTokens=$null;$mutantErrors=$null
             [void][Management.Automation.Language.Parser]::ParseFile($path,[ref]$mutantTokens,[ref]$mutantErrors)
             if(@($mutantErrors).Count-ne0){throw "CLEANUP_MUTANT_HARNESS_PARSE_FAILED|$($cleanup.Source):$($cleanup.Line):$($cleanup.Column)"}
-            $case=if($cleanup.Function-ceq'Invoke-GateAcquisitionRequest'-and$cleanup.Line-in@(824,825)){'redirect-success'}
+            $case=if($cleanup.Function-ceq'Invoke-GateAcquisitionRequest'-and$cleanup.Line-in@(841,842)){'redirect-success'}
                 elseif($cleanup.Function-ceq'Invoke-GateResolver'-and$cleanup.Line-ge192){'resolver-error'}
                 elseif($cleanup.Function-ceq'New-GateSourceSetup'){'resolver-error'}
                 elseif($cleanup.Source-ceq'scripts/consumer/Invoke-ConsumerSourceGate.ps1'-and
                     (@($cleanup.Targets)-icontains'message'-or@($cleanup.Targets)-icontains'tokenVariable'-or$cleanup.Line-eq73)){'http-error'}
                 else{'success'}
-            $leak=if($cleanup.Function-ceq'Assert-GateCredentialAbsent'-and$cleanup.Line-ge797){'summary'}else{'none'}
+            $leak=if($cleanup.Function-ceq'Assert-GateCredentialAbsent'-and$cleanup.Line-ge814){'summary'}else{'none'}
             $key="$($cleanup.Source):$($cleanup.Line):$($cleanup.Column)|$($cleanup.Text)"
             if($cleanup.Source-ceq'consumer/bootstrap/Invoke-PinnedAuthority.ps1'){
                 $records=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File (Join-Path $mutantRoot 'tests/fixtures/consumer-bootstrap-cleanup-fixture.ps1') `
@@ -1617,28 +1617,28 @@ consumer/bootstrap/Invoke-PinnedAuthority.ps1:293:9|$stdout = $null
 consumer/bootstrap/Invoke-PinnedAuthority.ps1:294:9|$stderr = $null
 consumer/bootstrap/Invoke-PinnedAuthority.ps1:298:28|$value = $null
 consumer/bootstrap/Invoke-PinnedAuthority.ps1:299:9|$Token=$null
-scripts/consumer/ConsumerGate.psm1:793:13|$content=$null
-scripts/consumer/ConsumerGate.psm1:796:9|$content=$null
-scripts/consumer/ConsumerGate.psm1:796:24|$needle=$null
-scripts/consumer/ConsumerGate.psm1:796:38|$Token=$null
+scripts/consumer/ConsumerGate.psm1:811:13|$content=$null
+scripts/consumer/ConsumerGate.psm1:814:9|$content=$null
+scripts/consumer/ConsumerGate.psm1:814:24|$needle=$null
+scripts/consumer/ConsumerGate.psm1:814:38|$Token=$null
 scripts/consumer/ConsumerGate.psm1:122:14|$headers.Remove('Authorization')
 scripts/consumer/ConsumerGate.psm1:123:5|$Token=$null
 scripts/consumer/ConsumerGate.psm1:124:5|[Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN',$null,'Process')
-scripts/consumer/ConsumerGate.psm1:823:34|$request.Dispose()
-scripts/consumer/ConsumerGate.psm1:823:53|$request=$null
-scripts/consumer/ConsumerGate.psm1:824:35|$response.Dispose()
-scripts/consumer/ConsumerGate.psm1:824:55|$response=$null
-scripts/consumer/ConsumerGate.psm1:855:18|$stream.Dispose()
-scripts/consumer/ConsumerGate.psm1:855:36|$memory.Dispose()
-scripts/consumer/ConsumerGate.psm1:863:31|$response.Dispose()
-scripts/consumer/ConsumerGate.psm1:863:73|$request.Dispose()
-scripts/consumer/ConsumerGate.psm1:864:9|$bytes=$null
-scripts/consumer/ConsumerGate.psm1:864:22|$buffer=$null
-scripts/consumer/ConsumerGate.psm1:864:36|$response=$null
-scripts/consumer/ConsumerGate.psm1:864:52|$request=$null
-scripts/consumer/ConsumerGate.psm1:864:67|$stream=$null
-scripts/consumer/ConsumerGate.psm1:864:81|$memory=$null
-scripts/consumer/ConsumerGate.psm1:864:95|$Headers=$null
+scripts/consumer/ConsumerGate.psm1:841:34|$request.Dispose()
+scripts/consumer/ConsumerGate.psm1:841:53|$request=$null
+scripts/consumer/ConsumerGate.psm1:842:35|$response.Dispose()
+scripts/consumer/ConsumerGate.psm1:842:55|$response=$null
+scripts/consumer/ConsumerGate.psm1:873:18|$stream.Dispose()
+scripts/consumer/ConsumerGate.psm1:873:36|$memory.Dispose()
+scripts/consumer/ConsumerGate.psm1:881:31|$response.Dispose()
+scripts/consumer/ConsumerGate.psm1:881:73|$request.Dispose()
+scripts/consumer/ConsumerGate.psm1:882:9|$bytes=$null
+scripts/consumer/ConsumerGate.psm1:882:22|$buffer=$null
+scripts/consumer/ConsumerGate.psm1:882:36|$response=$null
+scripts/consumer/ConsumerGate.psm1:882:52|$request=$null
+scripts/consumer/ConsumerGate.psm1:882:67|$stream=$null
+scripts/consumer/ConsumerGate.psm1:882:81|$memory=$null
+scripts/consumer/ConsumerGate.psm1:882:95|$Headers=$null
 scripts/consumer/ConsumerGate.psm1:298:95|[Environment]::SetEnvironmentVariable($name,$null,'Process')
 scripts/consumer/ConsumerGate.psm1:300:43|$Token=$null
 scripts/consumer/ConsumerGate.psm1:178:9|$start.Environment.Clear()
@@ -2048,8 +2048,8 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         {Assert-GateExceptionSetUnchanged $root $base $candidate}|Should Throw
     }
 
-    # Scenario: Three valid legs are aggregated and one binding is then changed.
-    # Purpose: Aggregate accepts only the complete platform set with identical candidate and event identity.
+    # Scenario: Three valid legs were fetched at different official-main tips and one stable binding is then changed.
+    # Purpose: Aggregate tolerates normal main advancement while keeping authority, candidate, and event identity closed.
     It 'UnitT40_rejects_missing_duplicate_nonpass_and_mismatched_leg_bindings' {
         $binding = [pscustomobject]@{runId='1234567890abcdef1234567890abcdef'
         candidateRevision=('a'*40)
@@ -2068,6 +2068,7 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         testFileInventory=@('tests/a.Tests.ps1')
         containerFileInventory=@('tests/a.Tests.ps1')
         discoveredCaseFileInventory=@('tests/a.Tests.ps1')}
+        $tips=@{windows=('1'*40);linux=('2'*40);macos=('3'*40)}
         foreach ($platform in @('windows','linux','macos')) { Write-FixtureJson (Join-Path $receipts "leg-$platform.json") ([ordered]@{schemaVersion=1
         report='consumer-gate-leg-receipt-v1'
         result='PASS'
@@ -2077,7 +2078,7 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         headRevision=$binding.headRevision
         baseRevision=$binding.baseRevision
         authorityCommit=$binding.commit
-        aiiMainTip=$binding.aiiMainTip
+        aiiMainTip=$tips[$platform]
         interface='consumer-gate-v1'
         triggerEvent=$binding.triggerEvent
         canonicalEvent=$binding.canonicalEvent
@@ -2102,6 +2103,14 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         Write-FixtureJson (Join-Path $receipts 'leg-linux.json') $changed
         { Invoke-GateAggregate $work $binding } | Should Throw
         $changed.triggerEvent=$binding.triggerEvent
+        $changed.authorityCommit='8'*40
+        Write-FixtureJson (Join-Path $receipts 'leg-linux.json') $changed
+        { Invoke-GateAggregate $work $binding } | Should Throw 'authorityCommit'
+        $changed.authorityCommit=$binding.commit
+        $changed.aiiMainTip='invalid-tip'
+        Write-FixtureJson (Join-Path $receipts 'leg-linux.json') $changed
+        { Invoke-GateAggregate $work $binding } | Should Throw
+        $changed.aiiMainTip=$tips.linux
         Write-FixtureJson (Join-Path $receipts 'leg-linux.json') $changed
         $mac=Get-Content -Raw (Join-Path $receipts 'leg-macos.json')|ConvertFrom-Json
         $mac.platform='linux'
@@ -2148,6 +2157,24 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
                     $node.Type.TypeName.FullName-eq'int'},$true)).Count | Should Be 0
         @($gateAst.FindAll({param($node)$node-is[Management.Automation.Language.ConvertExpressionAst]-and
                     $node.Type.TypeName.FullName-eq'long'},$true)).Count | Should Be 2
+        $ledgerKeys=@('schemaVersion','report','coreRunId','candidateSnapshotIdentity','candidateSnapshotSha256','pesterModule',
+            'runPath','runScope','testFileInventory','containerFileInventory','discoveredCaseFileInventory','caseDiscoveryCount',
+            'caseExecutionCount','containerCount','failedBlockCount','failedContainerCount','terminalStatus','reportedCounts',
+            'shardIdentity','shardCaseIdentities','shardUnion','discoveryCases','executionCases','complete','errors')|Sort-Object
+        foreach($source in @(
+                @{Path=(Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-ConsumerRepositoryCheck.ps1');Variable='ledger'},
+                @{Path=(Join-Path $script:RepositoryRoot 'tests/fixtures/consumer-gate-validation-runner-fixture.ps1');Variable='caseInventory'}
+            )){
+            $tokens=$null;$errors=$null
+            $ast=[Management.Automation.Language.Parser]::ParseFile($source.Path,[ref]$tokens,[ref]$errors)
+            @($errors).Count|Should Be 0
+            $assignment=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.AssignmentStatementAst]-and
+                        $node.Left.Extent.Text-ceq("`$"+$source.Variable)},$true))
+            @($assignment).Count|Should Be 1
+            $hashtable=$assignment[0].Right.Expression.Child
+            $hashtable|Should BeOfType ([Management.Automation.Language.HashtableAst])
+            @($hashtable.KeyValuePairs|ForEach-Object{$_.Item1.Extent.Text.Trim([char[]]@("'",'"'))}|Sort-Object)|Should Be $ledgerKeys
+        }
     }
 
     # Scenario: Two required general checks run in order even when the first child calls exit, and the second child can fail.

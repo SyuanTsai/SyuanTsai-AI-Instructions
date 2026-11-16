@@ -18,7 +18,7 @@ Before any conversion:
 
 1. The dedicated GitHub App exists with only Checks read/write and Metadata read permissions, is installed only on the repositories being converted, and its private key is never handled by an agent.
 2. Each repository has a `consumer-gate` environment restricted to `main`, with `CONSUMER_GATE_APP_ID` as an environment variable and `CONSUMER_GATE_APP_PRIVATE_KEY` as an environment secret. The private key must not exist as a repository or account secret.
-3. Actions explicitly permits `pull_request_target`; workflow permissions are read-only and Actions cannot create or approve pull requests.
+3. Actions `allowed_events` explicitly includes `push`, `pull_request`, `workflow_dispatch`, and `pull_request_target`; listing only `pull_request_target` disables existing CI. Workflow permissions are read-only and Actions cannot create or approve pull requests.
 4. The authority consumer-gate change is merged, and the remote prerequisite is verified: `main` can change only by pull request, `pull_request` and `non_fast_forward` rules are active, and `bypass_actors` is empty.
 
 Atlassian has four additional prerequisites, all of which must be satisfied before creating or recreating its conversion pull request:

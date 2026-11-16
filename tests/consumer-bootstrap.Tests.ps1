@@ -602,8 +602,8 @@ exit 0
             $phaseExit | Should Be 0
             Assert-FormalPhaseOutput (Join-Path $platformWork "environment-$phase.json") $phase
         }
-        $casePath=Join-Path $platformWork 'validation-artifacts/repository-pester-case-inventory-v1.json'
         $evidencePath=Join-Path $platformWork 'validation-artifacts/consumer-core-evidence.json'
+        $casePath=[string](Get-Content -Raw -LiteralPath $evidencePath|ConvertFrom-Json).sourceValidation.pesterCaseInventory.path
         $validatedBindingPath=Join-Path $platformWork 'validated-report-binding.json'
         function Set-FormalCaseCount($Value){
             $caseInventory=Get-Content -Raw -LiteralPath $casePath|ConvertFrom-Json
@@ -630,6 +630,38 @@ exit 0
         Set-FormalCaseCount ([long]1)
         Remove-Item -LiteralPath (Join-Path $platformWork 'receipts/leg-windows.json') -ErrorAction SilentlyContinue
         (Invoke-FormalBootstrap finalize $platformWork windows)|Should Be 0
+        $formalLedger=Get-Content -Raw -LiteralPath $casePath|ConvertFrom-Json -Depth 30
+        function Write-FormalLedger($Ledger,[bool]$UpdateBindings=$true){
+            [IO.File]::WriteAllText($casePath,($Ledger|ConvertTo-Json -Depth 30),[Text.UTF8Encoding]::new($false))
+            if($UpdateBindings){
+                $evidence=Get-Content -Raw -LiteralPath $evidencePath|ConvertFrom-Json
+                $evidence.sourceValidation.pesterCaseInventory.sha256=(Get-FileHash -LiteralPath $casePath -Algorithm SHA256).Hash.ToLowerInvariant()
+                [IO.File]::WriteAllText($evidencePath,($evidence|ConvertTo-Json -Depth 10),[Text.UTF8Encoding]::new($false))
+                $validatedBinding=Get-Content -Raw -LiteralPath $validatedBindingPath|ConvertFrom-Json
+                $validatedBinding.evidenceSha256=(Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
+                [IO.File]::WriteAllText($validatedBindingPath,($validatedBinding|ConvertTo-Json -Depth 10),[Text.UTF8Encoding]::new($false))
+            }
+        }
+        $ledgerMutations=@(
+            @{Name='extra property';Apply={param($value)$value|Add-Member -NotePropertyName unexpected -NotePropertyValue 'x';$value}},
+            @{Name='missing property';Apply={param($value)$value.PSObject.Properties.Remove('candidateSnapshotSha256');$value}},
+            @{Name='unequal counts';Apply={param($value)$value.caseExecutionCount=[long]2;$value}},
+            @{Name='wrong coreRunId';Apply={param($value)$value.coreRunId='wrong-run';$value}}
+        )
+        foreach($mutation in $ledgerMutations){
+            $mutated=$formalLedger|ConvertTo-Json -Depth 30|ConvertFrom-Json -Depth 30
+            $mutated=& $mutation.Apply $mutated
+            Write-FormalLedger $mutated
+            Remove-Item -LiteralPath (Join-Path $platformWork 'receipts/leg-windows.json') -ErrorAction SilentlyContinue
+            Assert-FormalBootstrapExit (Invoke-FormalBootstrap finalize $platformWork windows) 20 "Formal ledger $($mutation.Name)"
+            Write-FormalLedger $formalLedger
+        }
+        [IO.File]::AppendAllText($casePath," `n",[Text.UTF8Encoding]::new($false))
+        Remove-Item -LiteralPath (Join-Path $platformWork 'receipts/leg-windows.json') -ErrorAction SilentlyContinue
+        Assert-FormalBootstrapExit (Invoke-FormalBootstrap finalize $platformWork windows) 20 'Formal ledger sha256 drift'
+        Write-FormalLedger $formalLedger
+        Remove-Item -LiteralPath (Join-Path $platformWork 'receipts/leg-windows.json') -ErrorAction SilentlyContinue
+        (Invoke-FormalBootstrap finalize $platformWork windows)|Should Be 0
         $mutantAuthority=Join-Path $TestDrive 'formal-receipt-validator-mutant'
         Copy-Item -LiteralPath (Join-Path $platformWork 'authority') -Destination $mutantAuthority -Recurse
         $mutantModulePath=Join-Path $mutantAuthority 'scripts/consumer/ConsumerGate.psm1'
@@ -639,20 +671,18 @@ exit 0
         @($mutantErrors).Count|Should Be 0
         $receiptFunction=@($mutantAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and
                     $node.Name-ceq'Write-GateLegReceipt'},$true))[0]
-        $validatorCall=@($receiptFunction.Body.FindAll({param($node)$node-is[Management.Automation.Language.PipelineAst]-and
-                    $node.Extent.Text.Trim()-ceq'Assert-GatePlatformTestInventory $cases'},$true))
-        @($validatorCall).Count|Should Be 1
-        $mutantText=$mutantText.Remove($validatorCall[0].Extent.StartOffset,$validatorCall[0].Extent.EndOffset-$validatorCall[0].Extent.StartOffset)
+        $projection=@($receiptFunction.Body.FindAll({param($node)$node-is[Management.Automation.Language.AssignmentStatementAst]-and
+                    $node.Left.Extent.Text.Trim()-ceq'$inventory'},$true))
+        @($projection).Count|Should Be 1
+        $mutantText=$mutantText.Insert($projection[0].Extent.StartOffset,"Assert-GatePlatformTestInventory `$cases`n")
         [IO.File]::WriteAllText($mutantModulePath,$mutantText,[Text.UTF8Encoding]::new($false))
-        Set-FormalCaseCount '2'
         Remove-Item -LiteralPath (Join-Path $platformWork 'receipts/leg-windows.json') -ErrorAction SilentlyContinue
         $mutantOutput=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File `
                 (Join-Path $mutantAuthority 'scripts/consumer/Invoke-ConsumerSourceGate.ps1') -Interface consumer-gate-v1 -Phase finalize `
                 -AuthorityBindingPath (Join-Path $platformWork 'authority-binding.json') -BaseRoot $revision.BaseRoot `
                 -CandidateRoot $revision.CandidateRoot -WorkRoot $platformWork -Platform windows 2>&1)
         $mutantExit=$LASTEXITCODE
-        $mutantExit|Should Be 0
-        Set-FormalCaseCount ([long]1)
+        $mutantExit|Should Be 30
         Remove-Item -LiteralPath (Join-Path $platformWork 'receipts/leg-windows.json') -ErrorAction SilentlyContinue
         (Invoke-FormalBootstrap finalize $platformWork windows)|Should Be 0
         $aggregateReceipts=Join-Path $aggregateWork 'receipts'

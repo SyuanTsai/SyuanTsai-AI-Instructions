@@ -268,6 +268,18 @@ Describe 'Consumer gate workflow templates' {
             )){$readme|Should Match ([regex]::Escape($anchor))}
     }
 
+    # Scenario: A maintainer follows prerequisite 3 when configuring the Actions allowed-events policy.
+    # Purpose: The allowlist keeps existing push, pull-request, and dispatch CI while adding the protected gate event.
+    It 'UnitT67_documents_the_exact_actions_event_allowlist' {
+        $readme=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'consumer/README.md')
+        $match=[regex]::Match($readme,'(?m)^3\. (?<text>Actions[^\r\n]+)$')
+        $match.Success|Should Be $true
+        $allowlistClause=$match.Groups['text'].Value.Split(';')[0]
+        @([regex]::Matches($allowlistClause,'`(?<event>[a-z_]+)`')|ForEach-Object{$_.Groups['event'].Value}|Select-Object -Skip 1|Sort-Object) |
+            Should Be @('pull_request','pull_request_target','push','workflow_dispatch')
+        $match.Groups['text'].Value|Should Match ([regex]::Escape('only `pull_request_target` disables existing CI'))
+    }
+
     # Scenario: Expressions are treated as YAML data and never interpolated into shell source.
     # Purpose: Event-controlled values reach scripts only through env variables.
     It 'UnitT70_has_no_github_expression_inside_run_blocks' {

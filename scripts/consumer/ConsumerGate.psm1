@@ -380,6 +380,23 @@ function Assert-GatePlatformTestInventory($Inventory) {
             }).Count-ne0-or@($values|Select-Object -Unique).Count-ne$values.Count){Throw-GateResult FAILED "Platform test inventory is invalid: $name"}
     }
 }
+function Assert-GatePesterCaseLedger($Ledger,$Binding) {
+    $expected=@('schemaVersion','report','coreRunId','candidateSnapshotIdentity','candidateSnapshotSha256',`
+        'pesterModule','runPath','runScope','testFileInventory','containerFileInventory','discoveredCaseFileInventory',`
+        'caseDiscoveryCount','caseExecutionCount','containerCount','failedBlockCount','failedContainerCount','terminalStatus',`
+        'reportedCounts','shardIdentity','shardCaseIdentities','shardUnion','discoveryCases','executionCases','complete','errors')
+    $actual=@($Ledger.PSObject.Properties.Name)
+    if($actual.Count-ne$expected.Count-or(@($actual|Sort-Object)-join"`n")-cne(@($expected|Sort-Object)-join"`n")){
+        Throw-GateResult FAILED 'Source Pester case inventory ledger has an unexpected property set.'
+    }
+    $discoveryIsInteger=$Ledger.caseDiscoveryCount-is[int]-or$Ledger.caseDiscoveryCount-is[long]
+    $executionIsInteger=$Ledger.caseExecutionCount-is[int]-or$Ledger.caseExecutionCount-is[long]
+    if($Ledger.schemaVersion-ne1-or[string]$Ledger.report-cne'standard-core-pester-case-inventory-v1'-or
+        [string]$Ledger.coreRunId-cne[string]$Binding.runId-or-not$discoveryIsInteger-or-not$executionIsInteger-or
+        [long]$Ledger.caseDiscoveryCount-lt1-or[long]$Ledger.caseExecutionCount-ne[long]$Ledger.caseDiscoveryCount){
+        Throw-GateResult FAILED 'Source Pester case inventory ledger binding or counts are invalid.'
+    }
+}
 function Write-GateLegReceipt([string]$AuthorityRoot,[string]$CandidateRoot,[string]$WorkRoot,$Binding,[string]$Platform) {
     $evidencePath=Join-Path $WorkRoot 'validation-artifacts/consumer-core-evidence.json'
     $report=Read-GateJson $evidencePath 'source validation evidence'
@@ -398,7 +415,7 @@ function Write-GateLegReceipt([string]$AuthorityRoot,[string]$CandidateRoot,[str
     if(-not(Test-GatePathWithin $casePath (Join-Path $WorkRoot 'validation-artifacts'))-or(Get-GateSha256 $casePath)`
         -cne[string]$caseBinding.sha256){Throw-GateResult FAILED 'Source Pester case inventory changed after validation.'}
     $cases=Read-GateJson $casePath 'source Pester case inventory'
-    Assert-GatePlatformTestInventory $cases
+    Assert-GatePesterCaseLedger $cases $Binding
     $inventory=[ordered]@{sha256=[string]$caseBinding.sha256
     caseDiscoveryCount=[long]$cases.caseDiscoveryCount
     caseExecutionCount=[long]$cases.caseExecutionCount
@@ -437,6 +454,7 @@ function Invoke-GateAggregate([string]$WorkRoot,$Binding) {
         $receipt.schemaVersion -ne 1 -or
         [string]$receipt.report -cne 'consumer-gate-leg-receipt-v1' -or
         [string]$receipt.evidenceSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]$receipt.aiiMainTip -cnotmatch '^[0-9a-f]{40}$' -or
         $null -eq $receipt.platformTestInventory -or
         -not $seen.Add([string]$receipt.platform) -or
         [string]$receipt.platform -cnotin @('windows','linux','macos')
@@ -446,7 +464,7 @@ function Invoke-GateAggregate([string]$WorkRoot,$Binding) {
     Assert-GatePlatformTestInventory $receipt.platformTestInventory
     foreach($pair in @(@('result','PASS'),@('runId',[string]$Binding.runId),@('candidateRevision',[string]$Binding.candidateRevision),@(`
         'headRevision',[string]$Binding.headRevision),@('baseRevision',[string]$Binding.baseRevision),@('authorityCommit',`
-            [string]$Binding.commit),@('aiiMainTip',[string]$Binding.aiiMainTip),@('interface','consumer-gate-v1'),@('triggerEvent',`
+            [string]$Binding.commit),@('interface','consumer-gate-v1'),@('triggerEvent',`
                 [string]$Binding.triggerEvent),@('canonicalEvent',[string]$Binding.canonicalEvent))){if([string]$receipt.($pair[0])`
                     -cne[string]$pair[1]){Throw-GateResult FAILED "Leg receipt binding differs: $($pair[0])"}}}
     if(($seen|Sort-Object)-join','-cne'linux,macos,windows'){Throw-GateResult FAILED 'Aggregate platform set is incomplete.'}
