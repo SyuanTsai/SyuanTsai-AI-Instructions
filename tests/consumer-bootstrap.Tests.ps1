@@ -601,6 +601,50 @@ exit 0
             @($environment.sentinelValueNames).Count | Should Be 0
             ($environment | ConvertTo-Json -Depth 5) | Should Not Match 'phase-token-sentinel'
         }
+        $phaseMutant=Join-Path $TestDrive 'Invoke-PinnedAuthority-phase-value-mutant.ps1'
+        $phaseMutantText=Get-Content -Raw -LiteralPath $bootstrapCopy;$phaseTokens=$null;$phaseErrors=$null
+        $phaseAst=[Management.Automation.Language.Parser]::ParseInput($phaseMutantText,[ref]$phaseTokens,[ref]$phaseErrors)
+        @($phaseErrors).Count|Should Be 0
+        $processFunction=@($phaseAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and
+                    $node.Name-ceq'Invoke-ConsumerGateProcess'},$true))[0]
+        $credentialAssignment=@($processFunction.Body.FindAll({param($node)
+                    $node-is[Management.Automation.Language.AssignmentStatementAst]-and
+                    $node.Left.Extent.Text.Trim()-ceq'$credentialNames'
+                },$true))
+        @($credentialAssignment).Count|Should Be 1
+        $phaseInjection=@'
+$start.Environment['CONSUMER_GATE_EVENT_REPOSITORY']=[Environment]::GetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN','Process')
+[void]$start.Environment.Remove('STANDARD_VALIDATION_GITHUB_API_TOKEN')
+'@
+        $phaseMutantText=$phaseMutantText.Insert($credentialAssignment[0].Extent.StartOffset,$phaseInjection+[Environment]::NewLine)
+        [IO.File]::WriteAllText($phaseMutant,$phaseMutantText,[Text.UTF8Encoding]::new($false))
+        $bindingPath=Join-Path $platformWork 'authority-binding.json'
+        $bindingOriginal=Get-Content -Raw -LiteralPath $bindingPath
+        $mutantBinding=$bindingOriginal|ConvertFrom-Json
+        $mutantBinding.bootstrapSha256=(Get-FileHash -LiteralPath $phaseMutant -Algorithm SHA256).Hash.ToLowerInvariant()
+        [IO.File]::WriteAllText($bindingPath,($mutantBinding|ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false))
+        try{
+            foreach($phase in @('validate','finalize')){
+                $env:STANDARD_VALIDATION_GITHUB_API_TOKEN='phase-token-sentinel'
+                $env:CONSUMER_GATE_PHASE_ENV_DUMP_PATH=Join-Path $platformWork "environment-$phase.json"
+                $phaseSentinelHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+                        [Text.Encoding]::UTF8.GetBytes('phase-token-sentinel'))).ToLowerInvariant()
+                [IO.File]::WriteAllText("$($env:CONSUMER_GATE_PHASE_ENV_DUMP_PATH).sentinel.sha256",$phaseSentinelHash,
+                    [Text.UTF8Encoding]::new($false))
+                $mutantOutput=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $phaseMutant `
+                    -Phase $phase -WorkRoot $platformWork -Platform windows @common 2>&1)
+                $mutantPhaseExit=$LASTEXITCODE
+                $mutantPhaseExit|Should Be $(if($phase-ceq'validate'){30}else{20})
+                $mutantEnvironment=Get-Content -Raw -LiteralPath (Join-Path $platformWork "environment-$phase.json")|ConvertFrom-Json
+                @($mutantEnvironment.sentinelValueNames)|Should Be @('CONSUMER_GATE_EVENT_REPOSITORY')
+                {if(@($mutantEnvironment.sentinelValueNames).Count-ne0){
+                        throw "PHASE_SENTINEL_VALUE_ORACLE_MISMATCH|$(@($mutantEnvironment.sentinelValueNames)-join',')"
+                    }}|Should Throw 'PHASE_SENTINEL_VALUE_ORACLE_MISMATCH'
+            }
+        }finally{
+            Remove-Item Env:STANDARD_VALIDATION_GITHUB_API_TOKEN -ErrorAction SilentlyContinue
+            [IO.File]::WriteAllText($bindingPath,$bindingOriginal,[Text.UTF8Encoding]::new($false))
+        }
         $boundaryEvents=@(Get-Content -LiteralPath (Join-Path $platformWork 'events.log'))
         @($boundaryEvents[0..2])|Should Be @('runtime-installed','source-tools-prepared','source-report-asserted')
         @($boundaryEvents|Select-Object -Skip 3|Where-Object{$_-cne'source-report-asserted'}).Count|Should Be 0

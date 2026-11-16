@@ -17,19 +17,22 @@ $ErrorActionPreference='Stop'
 Import-Module (Join-Path $PSScriptRoot 'ConsumerGate.psm1') -Force
 $phaseEnvironmentDumpPath=[string]$env:CONSUMER_GATE_PHASE_ENV_DUMP_PATH
 if(-not[string]::IsNullOrWhiteSpace($phaseEnvironmentDumpPath)){
-    $phaseEnvironment=[Environment]::GetEnvironmentVariables('Process')
-    $sentinelHashPath="$phaseEnvironmentDumpPath.sentinel.sha256"
-    $sentinelHash=if(Test-Path -LiteralPath $sentinelHashPath -PathType Leaf){[IO.File]::ReadAllText($sentinelHashPath).Trim()}else{''}
-    $phaseTokenNames=@($phaseEnvironment.Keys|ForEach-Object{[string]$_}|Where-Object{$_-match'(?i)(TOKEN|SECRET|KEY|PASSWORD)'}|Sort-Object)
-    $phaseSentinelNames=@($phaseEnvironment.Keys|ForEach-Object{[string]$_}|Where-Object{
-            $value=[string]$phaseEnvironment[$_]
-            -not[string]::IsNullOrEmpty($sentinelHash)-and-not[string]::IsNullOrEmpty($value)-and
-            [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($value))).ToLowerInvariant()-ceq$sentinelHash
-        }|Sort-Object)
-    $phaseEnvironmentDump=[ordered]@{phase=$Phase;tokenNames=$phaseTokenNames;sentinelValueNames=$phaseSentinelNames}
-    [IO.File]::WriteAllText($phaseEnvironmentDumpPath,($phaseEnvironmentDump|ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
-    $phaseEnvironment=$null;$phaseEnvironmentDump=$null;$phaseTokenNames=$null;$phaseSentinelNames=$null;$sentinelHash=$null;$value=$null
-    Remove-Variable phaseEnvironment,phaseEnvironmentDump,phaseTokenNames,phaseSentinelNames,sentinelHash,value -ErrorAction SilentlyContinue
+    try{
+        $phaseEnvironment=[Environment]::GetEnvironmentVariables('Process')
+        $sentinelHashPath="$phaseEnvironmentDumpPath.sentinel.sha256"
+        $sentinelHash=if(Test-Path -LiteralPath $sentinelHashPath -PathType Leaf){[IO.File]::ReadAllText($sentinelHashPath).Trim()}else{''}
+        $phaseTokenNames=@($phaseEnvironment.Keys|ForEach-Object{[string]$_}|Where-Object{$_-match'(?i)(TOKEN|SECRET|KEY|PASSWORD)'}|Sort-Object)
+        $phaseSentinelNames=@($phaseEnvironment.Keys|ForEach-Object{[string]$_}|Where-Object{
+                $value=[string]$phaseEnvironment[$_]
+                -not[string]::IsNullOrEmpty($sentinelHash)-and-not[string]::IsNullOrEmpty($value)-and
+                [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($value))).ToLowerInvariant()-ceq$sentinelHash
+            }|Sort-Object)
+        $phaseEnvironmentDump=[ordered]@{phase=$Phase;tokenNames=$phaseTokenNames;sentinelValueNames=$phaseSentinelNames}
+        [IO.File]::WriteAllText($phaseEnvironmentDumpPath,($phaseEnvironmentDump|ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
+    }finally{
+        $phaseEnvironment=$null;$phaseEnvironmentDump=$null;$phaseTokenNames=$null;$phaseSentinelNames=$null;$sentinelHash=$null;$value=$null
+        Remove-Variable phaseEnvironment,phaseEnvironmentDump,phaseTokenNames,phaseSentinelNames,sentinelHash,value -ErrorAction SilentlyContinue
+    }
 }
 try{
     if($Phase-cne'prepare'){

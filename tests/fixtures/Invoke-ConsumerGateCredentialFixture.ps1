@@ -4,7 +4,7 @@
 param(
     [Parameter(Mandatory)][string]$RepositoryRoot,
     [Parameter(Mandatory)][string]$FixtureRoot,
-    [Parameter(Mandatory)][ValidateSet('success','http-error','timeout','cancellation','redirect-success','redirect-unapproved','redirect-limit')][string]$Outcome,
+    [Parameter(Mandatory)][ValidateSet('success','http-error','timeout','cancellation','redirect-success','redirect-unapproved','redirect-limit','resolver-error')][string]$Outcome,
     [Parameter(Mandatory)][string]$Sentinel,
     [ValidateSet('none','summary','artifact','receipt','stdout','stderr')][string]$LeakSurface='none'
 )
@@ -96,7 +96,8 @@ $httpFixture=Join-Path $RepositoryRoot 'tests/fixtures/consumer-gate-http-fixtur
 $serverStart=[Diagnostics.ProcessStartInfo]::new()
 $serverStart.FileName=(Get-Process -Id $PID).Path
 $serverStart.UseShellExecute=$false
-foreach($argument in @('-NoProfile','-NonInteractive','-File',$httpFixture,'-Port',[string]$port,'-Mode',$Outcome,
+$httpMode=if($Outcome-ceq'resolver-error'){'success'}else{$Outcome}
+foreach($argument in @('-NoProfile','-NonInteractive','-File',$httpFixture,'-Port',[string]$port,'-Mode',$httpMode,
         '-ReadyPath',$ready,'-AssetName',$assetName,'-AssetSha256',$assetSha,'-Sentinel',$Sentinel,'-HeaderLogPath',$headerLog)){
     [void]$serverStart.ArgumentList.Add($argument)
 }
@@ -122,7 +123,7 @@ $summary=Join-Path $FixtureRoot 'summary.txt'
 $artifactRoot=Join-Path $FixtureRoot 'artifacts'
 [void][IO.Directory]::CreateDirectory($artifactRoot)
 $resolverSource=Join-Path $RepositoryRoot 'tests/fixtures/consumer-gate-resolver-fixture.ps1'
-$resolverPath=$resolverSource
+$resolverPath=if($Outcome-ceq'resolver-error'){Join-Path $FixtureRoot 'missing-resolver.ps1'}else{$resolverSource}
 if($LeakSurface-in@('stdout','stderr')){
     $resolverPath=Join-Path $FixtureRoot 'resolver-output-leak.ps1'
     $streamStatement=if($LeakSurface-eq'stdout'){'[Console]::Out.Write($env:STANDARD_VALIDATION_GITHUB_API_TOKEN)'}else{
@@ -149,7 +150,8 @@ $start.FileName=(Get-Process -Id $PID).Path
 $start.UseShellExecute=$false
 $start.RedirectStandardOutput=$true
 $start.RedirectStandardError=$true
-foreach($argument in @('-NoProfile','-NonInteractive','-File',(Join-Path $authority 'scripts/consumer/Invoke-ConsumerSourceGate.ps1'),
+$gatePath=Join-Path $authority 'scripts/consumer/Invoke-ConsumerSourceGate.ps1'
+foreach($argument in @('-NoProfile','-NonInteractive','-File',$gatePath,
         '-Interface','consumer-gate-v1','-Phase','prepare','-AuthorityBindingPath',$bindingPath,
         '-BaseRoot',$candidate,'-CandidateRoot',$candidate,'-WorkRoot',$work,'-Platform',$platform)){
     [void]$start.ArgumentList.Add($argument)
@@ -165,6 +167,9 @@ $start.Environment['CONSUMER_GATE_RESOLVER_SCRIPT_PATH']=$resolverPath
 $start.Environment['CONSUMER_GATE_ACQUISITION_TIMEOUT_SECONDS']=if($Outcome-eq'timeout'){'1'}else{'10'}
 $start.Environment['CONSUMER_GATE_ACQUISITION_CANCEL_PATH']=$cancelPath
 $start.Environment['CONSUMER_GATE_EVENT_LOG_PATH']=$eventLog
+$start.Environment['CONSUMER_GATE_PHASE_ENV_DUMP_PATH']=Join-Path $work 'environment-prepare.json'
+$sentinelHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Sentinel))).ToLowerInvariant()
+[IO.File]::WriteAllText("$($start.Environment['CONSUMER_GATE_PHASE_ENV_DUMP_PATH']).sentinel.sha256",$sentinelHash,[Text.UTF8Encoding]::new($false))
 $start.Environment['GITHUB_STEP_SUMMARY']=$summary
 $start.Environment['CONSUMER_GATE_ARTIFACT_PATHS']=$artifactRoot
 $process=[Diagnostics.Process]::new()

@@ -266,15 +266,15 @@ function Invoke-ConsumerGateProcess([string]$Executable, [string]$GatePath, [str
         $standardError = $stderr.GetAwaiter().GetResult()
         $credentialLeak = $false
         foreach ($name in $credentialNames) {
-            $sentinel = [string]$preserved[$name]
-            if (-not [string]::IsNullOrEmpty($sentinel) -and
-                ($standardOutput.Contains($sentinel, [StringComparison]::Ordinal) -or
-                 $standardError.Contains($sentinel, [StringComparison]::Ordinal))) {
-                $credentialLeak = $true
-            }
-            $sentinel = $null
-            Remove-Variable sentinel -ErrorAction SilentlyContinue
+            try {$sentinel = [string]$preserved[$name]
+                if (-not [string]::IsNullOrEmpty($sentinel) -and
+                    ($standardOutput.Contains($sentinel, [StringComparison]::Ordinal) -or
+                     $standardError.Contains($sentinel, [StringComparison]::Ordinal))) {
+                    $credentialLeak = $true
+                }}finally{$sentinel = $null
+            Remove-Variable sentinel -ErrorAction SilentlyContinue}
         }
+
         if ($credentialLeak) {
             [Console]::Error.WriteLine('Gate output contained a credential sentinel and was suppressed.')
             $resultCode = 20
