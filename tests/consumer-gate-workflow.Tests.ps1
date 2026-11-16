@@ -3,8 +3,19 @@ Describe 'Consumer gate workflow templates' {
         $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
         $script:FormalPath = Join-Path $script:RepositoryRoot 'consumer/workflows/consumer-gate.yml'
         $script:TransitionPath = Join-Path $script:RepositoryRoot 'consumer/workflows/consumer-gate-transition.yml'
-        $script:Formal = Get-Content -Raw -Encoding UTF8 $script:FormalPath
-        $script:Transition = Get-Content -Raw -Encoding UTF8 $script:TransitionPath
+        function ConvertTo-ConsumerWorkflowLf([string]$Text) {
+            $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+        }
+        function Get-ConsumerWorkflowJobBlock([string]$Text,[string]$JobName,[string]$NextJobName) {
+            $normalized = ConvertTo-ConsumerWorkflowLf $Text
+            $pattern = '(?s)(?:\A|\n)  {0}:\n(?<body>.*?)(?=\n  {1}:)' -f
+                [regex]::Escape($JobName), [regex]::Escape($NextJobName)
+            $match = [regex]::Match($normalized, $pattern)
+            if (-not $match.Success) { throw "Missing workflow job block: $JobName" }
+            $match.Groups['body'].Value
+        }
+        $script:Formal = ConvertTo-ConsumerWorkflowLf (Get-Content -Raw -Encoding UTF8 $script:FormalPath)
+        $script:Transition = ConvertTo-ConsumerWorkflowLf (Get-Content -Raw -Encoding UTF8 $script:TransitionPath)
         function ConvertFrom-ConsumerWorkflowYaml([string]$Text) {
             $lines = @($Text -split "`r?`n")
             $document = [ordered]@{ permissions = $null
@@ -160,19 +171,33 @@ Describe 'Consumer gate workflow templates' {
     # Scenario: Aggregate jobs repeat the same event-specific base, candidate, and head bindings as their platform legs.
     # Purpose: A clean aggregate runner cannot infer revisions from downloaded receipts or ambient checkout state.
     It 'UnitT25_repeats_explicit_revision_bindings_in_both_aggregate_jobs' {
-        $formalAggregate=[regex]::Match($script:Formal,'(?s)\n  aggregate:\n(?<body>.*?)(?=\n  report:)').Groups['body'].Value
+        $formalAggregate=Get-ConsumerWorkflowJobBlock $script:Formal 'aggregate' 'report'
         $formalBindings = @(
             'github.event.before', 'github.sha', "format('refs/pull/{0}/merge'", '-BaseRevision $base',
             '-CandidateRevision $candidate', '-HeadRevision $head', '-Phase aggregate', '-Platform aggregate'
         )
         foreach ($required in $formalBindings) { $formalAggregate | Should Match ([regex]::Escape($required)) }
-        $transitionAggregate=[regex]::Match($script:Transition,'(?s)\n  aggregate:\n(?<body>.*?)(?=\n  repository-contract:)').Groups['body'].Value
+        $transitionAggregate=Get-ConsumerWorkflowJobBlock $script:Transition 'aggregate' 'repository-contract'
         $transitionBindings = @(
             'github.event.pull_request.base.sha', 'github.sha', 'github.event.pull_request.head.sha',
             '-Phase aggregate', '-Platform aggregate', '-TransitionFromLegacy'
         )
         foreach ($required in $transitionBindings) {
             $transitionAggregate | Should Match ([regex]::Escape($required))
+        }
+    }
+
+    # Scenario: The same aggregate job text is extracted from LF and CRLF workflow content.
+    # Purpose: Windows checkout line endings cannot erase the revision-binding assertions.
+    It 'UnitT27_extracts_identical_aggregate_jobs_from_lf_and_crlf_text' {
+        foreach ($case in @(
+                @{ Text=$script:Formal; NextJob='report' },
+                @{ Text=$script:Transition; NextJob='repository-contract' }
+            )) {
+            $lf = ConvertTo-ConsumerWorkflowLf $case.Text
+            $crlf = $lf.Replace("`n", "`r`n")
+            Get-ConsumerWorkflowJobBlock $crlf 'aggregate' $case.NextJob |
+                Should BeExactly (Get-ConsumerWorkflowJobBlock $lf 'aggregate' $case.NextJob)
         }
     }
 

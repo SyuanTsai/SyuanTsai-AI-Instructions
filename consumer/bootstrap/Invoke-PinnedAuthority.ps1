@@ -193,11 +193,11 @@ function New-PinnedAuthority([string]$Root, [string]$Commit, [string]$Repository
      $authorityRoot = Join-Path $Root 'authority'
     if ((Test-Path $gitRoot) -or (Test-Path $authorityRoot)) { Throw-ConsumerResult INVALID 'Authority acquisition paths must not already exist.' }
     [IO.Directory]::CreateDirectory($gitRoot) | Out-Null
-    [void](Invoke-PinnedGit $gitRoot @('init', '--quiet'))
-    [void](Invoke-PinnedGit $gitRoot @('remote', 'add', 'origin', $Repository) -AllowFileProtocol:$AllowFileProtocol)
-    [void](Invoke-PinnedGit $gitRoot @('fetch', '--no-tags', '--filter=blob:none', 'origin', '+refs/heads/main:refs/remotes/aii/main') `
-        -AllowFileProtocol:$AllowFileProtocol)
-    $pinFetch=Invoke-PinnedGit $gitRoot @('fetch', '--no-tags', 'origin', $Commit) @(0,1,128) -AllowFileProtocol:$AllowFileProtocol
+    [void](Invoke-PinnedGit $gitRoot @('init', '--quiet'));$remote=@('-c',"remote.origin.url=$Repository")
+    if(([string](Invoke-PinnedGit $gitRoot ($remote+@('ls-remote','--get-url','origin')) -AllowFileProtocol:$AllowFileProtocol).Output[0]).Trim()-cne$Repository){Throw-ConsumerResult INVALID 'Authority origin cannot be resolved in the Git acquisition environment.'}
+    [void](Invoke-PinnedGit $gitRoot ($remote+@('fetch','--no-tags','--filter=blob:none','origin','+refs/heads/main:refs/remotes/aii/main')) -AllowFileProtocol:$AllowFileProtocol)
+    if(([string](Invoke-PinnedGit $gitRoot ($remote+@('ls-remote','--get-url','origin')) -AllowFileProtocol:$AllowFileProtocol).Output[0]).Trim()-cne$Repository){Throw-ConsumerResult INVALID 'Authority origin cannot be resolved in the Git acquisition environment.'}
+    $pinFetch=Invoke-PinnedGit $gitRoot ($remote+@('fetch','--no-tags','origin',$Commit)) @(0,1,128) -AllowFileProtocol:$AllowFileProtocol
     if ($pinFetch.ExitCode -ne 0) {
         if (($pinFetch.Output -join ' ') -match '(?i)(not our ref|couldn''t find remote ref|unadvertised object|not a valid object)') {
             Throw-ConsumerResult FAILED 'Authority pin does not exist in the official repository.'
@@ -206,8 +206,8 @@ function New-PinnedAuthority([string]$Root, [string]$Commit, [string]$Repository
     }
     $ancestor = Invoke-PinnedGit $gitRoot @('merge-base', '--is-ancestor', $Commit, 'refs/remotes/aii/main') @(0, 1) -AllowFileProtocol:$AllowFileProtocol
     if ($ancestor.ExitCode -eq 1) { Throw-ConsumerResult FAILED 'Authority pin is not on official AII main.' }
-    [void](Invoke-PinnedGit $gitRoot @('-c', 'core.autocrlf=false', '-c', 'core.eol=lf', '-c', 'core.symlinks=false', 'worktree', 'add', `
-        '--quiet', '--detach', $authorityRoot, $Commit) -AllowFileProtocol:$AllowFileProtocol)
+    [void](Invoke-PinnedGit $gitRoot ($remote+@('-c','core.autocrlf=false','-c','core.eol=lf','-c','core.symlinks=false','worktree','add', `
+        '--quiet','--detach',$authorityRoot,$Commit)) -AllowFileProtocol:$AllowFileProtocol)
     Assert-AuthorityTree $gitRoot $authorityRoot $Commit
     $tip = ([string](Invoke-PinnedGit $gitRoot @('rev-parse', 'refs/remotes/aii/main^{commit}')).Output[0]).Trim()
     $tree = ([string](Invoke-PinnedGit $gitRoot @('rev-parse', "$Commit^{tree}")).Output[0]).Trim()

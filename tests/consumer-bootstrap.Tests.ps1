@@ -131,8 +131,22 @@ Describe 'Consumer authority bootstrap v1' {
          $text | Should Match 'core\.hooksPath='
          $text | Should Match 'credential\.helper='
         $text | Should Match 'merge-base.*--is-ancestor'
-        $text | Should Match "@\('fetch', '--no-tags', '--filter=blob:none', 'origin', '\+refs/heads/main:refs/remotes/aii/main'\)"
-        $text | Should Match "@\('fetch', '--no-tags', 'origin', \`$Commit\)"
+        $tokens=$null;$errors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile($script:BootstrapPath,[ref]$tokens,[ref]$errors)
+        @($errors).Count|Should Be 0
+        $authorityFunction=$ast.Find({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and
+            $node.Name-ceq'New-PinnedAuthority'},$true)
+        $remoteCalls=@($authorityFunction.Body.FindAll({param($node)
+                    $node-is[Management.Automation.Language.CommandAst]-and
+                    $node.GetCommandName()-ceq'Invoke-PinnedGit'-and
+                    $node.Extent.Text-match "'ls-remote'|'fetch'"
+                },$true)|ForEach-Object{([string]$_.Extent.Text).Trim()-replace'\s+',' '})
+        $remoteCalls|Should Be @(
+            "Invoke-PinnedGit `$gitRoot (`$remote+@('ls-remote','--get-url','origin')) -AllowFileProtocol:`$AllowFileProtocol",
+            "Invoke-PinnedGit `$gitRoot (`$remote+@('fetch','--no-tags','--filter=blob:none','origin','+refs/heads/main:refs/remotes/aii/main')) -AllowFileProtocol:`$AllowFileProtocol",
+            "Invoke-PinnedGit `$gitRoot (`$remote+@('ls-remote','--get-url','origin')) -AllowFileProtocol:`$AllowFileProtocol",
+            "Invoke-PinnedGit `$gitRoot (`$remote+@('fetch','--no-tags','origin',`$Commit)) @(0,1,128) -AllowFileProtocol:`$AllowFileProtocol"
+        )
          $text | Should Match "'ls-tree', '-r', '-z'"
          $text | Should Match 'hash-object'
         foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){$text|Should Match ([regex]::Escape("'$name'"))}
@@ -846,6 +860,16 @@ $start.Environment['CONSUMER_GATE_EVENT_REPOSITORY']=$Token
         $sourceUrl=([Uri](Resolve-Path $source).Path).AbsoluteUri
         $accepted=New-PinnedAuthority (Join-Path $TestDrive 'accepted') $mainCommit $sourceUrl -AllowFileProtocol
         (Test-Path -LiteralPath (Join-Path $accepted.Root 'authority.txt') -PathType Leaf)|Should Be $true
+        $gitConfigNames=@('GIT_CONFIG_COUNT','GIT_CONFIG_KEY_0','GIT_CONFIG_VALUE_0')
+        $savedGitConfig=@{}
+        foreach($name in $gitConfigNames){$savedGitConfig[$name]=[Environment]::GetEnvironmentVariable($name,'Process')}
+        try{
+            $env:GIT_CONFIG_COUNT='1';$env:GIT_CONFIG_KEY_0='remote.origin.url';$env:GIT_CONFIG_VALUE_0=''
+            $isolated=New-PinnedAuthority (Join-Path $TestDrive 'config-isolated') $mainCommit $sourceUrl -AllowFileProtocol
+            (Test-Path -LiteralPath (Join-Path $isolated.Root 'authority.txt') -PathType Leaf)|Should Be $true
+        }finally{
+            foreach($name in $gitConfigNames){[Environment]::SetEnvironmentVariable($name,$savedGitConfig[$name],'Process')}
+        }
         [void](Invoke-FixtureGit $source @('checkout','-q','-b','topic'))
         [IO.File]::WriteAllText((Join-Path $source 'topic.txt'),'topic',[Text.UTF8Encoding]::new($false))
         [void](Invoke-FixtureGit $source @('add','topic.txt'))
