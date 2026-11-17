@@ -663,7 +663,8 @@ function Get-TrustAnchorPhysicalParent {
     $full=[IO.Path]::GetFullPath($Path);$parent=Split-Path -Parent $full
     if([string]::IsNullOrWhiteSpace($parent) -or -not [IO.Directory]::Exists($parent)){throw "The target parent directory must already exist: $parent"}
     $physical=Resolve-PlatformPhysicalPath -Path $parent
-    if([IO.Path]::GetFullPath([string]$physical) -cne [IO.Path]::GetFullPath($parent)){throw 'The target parent must not traverse a symlink, junction, or reparse point.'}
+    $comparison=if($IsWindows){[StringComparison]::OrdinalIgnoreCase}else{[StringComparison]::Ordinal}
+    if(-not[string]::Equals([IO.Path]::GetFullPath([string]$physical),[IO.Path]::GetFullPath($parent),$comparison)){throw 'The target parent must not traverse a symlink, junction, or reparse point.'}
     return [IO.Path]::GetFullPath($parent)
 }
 
@@ -675,8 +676,8 @@ function Assert-TrustAnchorOutsideWorktree {
         if([IO.Directory]::Exists((Join-Path $cursor '.git')) -or [IO.File]::Exists((Join-Path $cursor '.git'))){throw 'Trust-anchor key material and generated public output must remain outside every Git worktree.'}
         $next=Split-Path -Parent $cursor;if($next -ceq $cursor){break};$cursor=$next
     }
-    $git=@(Get-Command git -CommandType Application -ErrorAction SilentlyContinue)[0]
-    if($null-ne$git){$root=git -C $PathEvidence.Parent rev-parse --show-toplevel 2>$null;if($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace(($root -join ''))){throw 'Trust-anchor key material and generated public output must remain outside every Git worktree.'}}
+    $git=Get-Command git -CommandType Application -ErrorAction SilentlyContinue|Select-Object -First 1
+    if($null-ne$git){$root=& $git.Source -C $PathEvidence.Parent rev-parse --show-toplevel 2>$null;if($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace(($root -join ''))){throw 'Trust-anchor key material and generated public output must remain outside every Git worktree.'}}
     Assert-PlatformFileIdentity -Lease $PathEvidence.ParentLease -Expected $PathEvidence.ParentExpected -VerifyPath|Out-Null
 }
 
