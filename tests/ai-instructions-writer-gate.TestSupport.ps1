@@ -766,3 +766,41 @@ function Convert-P9bManifestToLegacy {
     }
     Set-P9bJson -Path $Path -Document $manifest
 }
+
+function Copy-P9cJournalPreservingStrings {
+    param([Parameter(Mandatory=$true)][object]$Journal)
+    $parameters=@{InputObject=($Journal|ConvertTo-Json -Depth 30);ErrorAction='Stop'}
+    if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'}
+    return ConvertFrom-Json @parameters
+}
+
+function New-P9cDriftRollbackScenario {
+    param(
+        [Parameter(Mandatory=$true)][string]$Root,
+        [Parameter(Mandatory=$true)][string]$Seed,
+        [Parameter(Mandatory=$true)]$Context,
+        [Parameter(Mandatory=$true)][string]$ArchivePath
+    )
+    New-Item -ItemType Directory -Force -Path $Root|Out-Null
+    $target=Join-Path $Root 'target';Copy-Item -LiteralPath $Seed -Destination $target -Recurse
+    $unaffectedPath=Join-Path $target 'AGENTS.md'
+    $unaffectedBefore=Get-P9cFileEvidence $unaffectedPath
+    $bootstrap=New-P9cProjectPublicationFailpointBootstrap -Root (Join-Path $Root 'applied-runtime') -Failpoint before-committed-journal-write -RecoveryPath NextRun
+    $applied=Invoke-P9bRepoBootstrap -Context $Context -ArchivePath $ArchivePath -TargetRoot $target -BootstrapPath $bootstrap
+    if($applied.ExitCode-eq0){throw 'The drift fixture did not retain an applied transaction.'}
+    $transaction=@(Get-ChildItem -LiteralPath (Get-P9cRepositoryTransactionRoot -Repository $target) -Directory -Force)
+    if($transaction.Count-ne1){throw 'The drift fixture did not retain exactly one transaction.'}
+    $journalPath=Join-Path $transaction[0].FullName 'journal.json';$journal=Get-Content -Raw -LiteralPath $journalPath|ConvertFrom-Json
+    if([string]$journal.phase-cne'applied'){throw "The drift fixture expected phase applied, found '$($journal.phase)'."}
+    $unaffectedOperation=@($journal.operations|Where-Object{[string]$_.target.kind-ceq'repository-relative'-and[string]$_.target.value-ceq'AGENTS.md'})
+    if($unaffectedOperation.Count-ne1-or[string]::IsNullOrWhiteSpace([string]$unaffectedOperation[0].backupLeaf)){throw 'The drift fixture did not retain the displaced AGENTS.md operation.'}
+    $manifestPath=Join-Path $target '.codex/ai-instructions.manifest.json'
+    [IO.File]::WriteAllBytes($manifestPath,[Text.UTF8Encoding]::new($false).GetBytes("external manifest drift`n"))
+    $driftBefore=Get-P9cFileEvidence $manifestPath
+    $retry=Invoke-P9bRepoBootstrap -Context $Context -ArchivePath $ArchivePath -TargetRoot $target
+    return [pscustomobject][ordered]@{
+        target=$target;journalPath=$journalPath;manifestPath=$manifestPath;unaffectedPath=$unaffectedPath
+        unaffectedBefore=$unaffectedBefore;unaffectedAfter=(Get-P9cFileEvidence $unaffectedPath)
+        driftBefore=$driftBefore;driftAfter=(Get-P9cFileEvidence $manifestPath);retry=$retry
+    }
+}

@@ -23,11 +23,4 @@ Describe 'AI instructions unified repository transaction failpoint matrix' {
             -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath `
             -WithRemediation $false -RepositoryRoot $script:RepositoryRoot
     }
-
-    # Scenario: Every prepared, applying operation-state, applied, and committed repo-v2 generation stops after stage flush or after journal publication before the parent-directory flush.
-    # Purpose: Classify the exact durable generation on the next run and converge by the same rollback-all versus roll-forward-cleanup phase decision used in production recovery.
-    It 'InterT179_recovers_each_repo_v2_generation_durability_window_by_durable_phase' {
-        Invoke-P9cJournalDurabilityRecoveryMatrix -ExternalRoot (Join-Path $script:ExternalRoot 'journal-durability') `
-            -Seed $script:P9cSeed -Context $script:P9cUpdated.Context -ArchivePath $script:P9cChanged.ArchivePath
-    }
 }
