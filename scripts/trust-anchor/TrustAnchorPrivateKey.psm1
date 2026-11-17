@@ -506,21 +506,24 @@ namespace SyuanTsai.AIInstructions.TrustAnchor {
         }
         private static void SameFile(NativeMetadataEvidence value,ulong device,ulong inode){if(value.Device!=device||value.Inode!=inode||value.LinkCount!=1||(value.Mode&0xF000)!=0x8000)throw new IOException("The trust-anchor rollback target identity or link count changed.");}
         private static void SameDirectory(NativeMetadataEvidence value,ulong device,ulong inode){if(value.Device!=device||value.Inode!=inode||(value.Mode&0xF000)!=0x4000)throw new IOException("The private trust-anchor rollback directory identity changed.");}
-        private static void AssertNoMacExtendedAcl(SafeHandle parent){
-            if(!Mac)return;
-            IntPtr acl=acl_get_fd_np(parent.DangerousGetHandle(),0x100);
+        public static bool HasMacExtendedAcl(SafeHandle handle){
+            if(!Mac)return false;
+            IntPtr acl=acl_get_fd_np(handle.DangerousGetHandle(),0x100);
             if(acl==IntPtr.Zero){
                 int error=Marshal.GetLastWin32Error();
-                if(error==2)return;
-                throw new Win32Exception(error,"Unable to inspect the retained trust-anchor parent ACL.");
+                if(error==2)return false;
+                throw new Win32Exception(error,"Unable to inspect the retained trust-anchor ACL.");
             }
             try{
                 IntPtr entry;int result=acl_get_entry(acl,0,out entry);
-                if(result==0)throw new IOException("The private trust-anchor parent must not have a macOS extended ACL.");
+                if(result==0)return true;
                 int error=Marshal.GetLastWin32Error();
-                if(error==2||error==22)return;
-                throw new Win32Exception(error,"Unable to enumerate the retained trust-anchor parent ACL.");
-            }finally{if(acl_free(acl)!=0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to release the retained trust-anchor parent ACL.");}
+                if(error==2||error==22)return false;
+                throw new Win32Exception(error,"Unable to enumerate the retained trust-anchor ACL.");
+            }finally{if(acl_free(acl)!=0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Unable to release the retained trust-anchor ACL.");}
+        }
+        private static void AssertNoMacExtendedAcl(SafeHandle parent){
+            if(HasMacExtendedAcl(parent))throw new IOException("The private trust-anchor parent must not have a macOS extended ACL.");
         }
         public static void AssertSafeParent(SafeHandle parent){
             AssertNoMacExtendedAcl(parent);
@@ -729,7 +732,7 @@ function Get-TrustAnchorMetadataEvidence {
         return [pscustomobject][ordered]@{device=[uint64]$native.Device;inode=[uint64]$native.Inode;links=[uint64]$native.LinkCount;mode=[uint32]$native.Mode;uid=[uint64]0;gid=[uint64]0;size=[int64]$native.Size;mtime=[int64]$native.ModifiedSeconds;mtimeNs=[int64]0;ctime=[int64]$native.ChangedSeconds;ctimeNs=[int64]0;owner=[string]$acl.OwnerSid;dacl=[string]$acl.DaclHex;protected=[bool]$acl.DaclProtected;inheritedAllow=[bool]$acl.HasInheritedAllow;allowSids=[string[]]$acl.AllowSids}
     }
     $native=[SyuanTsai.AIInstructions.TrustAnchor.UnixMetadataInspector]::Inspect($handle)
-    [pscustomobject][ordered]@{device=[uint64]$native.Device;inode=[uint64]$native.Inode;links=[uint64]$native.LinkCount;mode=[uint32]$native.Mode;uid=[uint64]$native.Uid;gid=[uint64]$native.Gid;size=[int64]$native.Size;mtime=[int64]$native.ModifiedSeconds;mtimeNs=[int64]$native.ModifiedNanoseconds;ctime=[int64]$native.ChangedSeconds;ctimeNs=[int64]$native.ChangedNanoseconds;owner=$null;dacl=$null;protected=$null;inheritedAllow=$null;allowSids=$null}
+    [pscustomobject][ordered]@{device=[uint64]$native.Device;inode=[uint64]$native.Inode;links=[uint64]$native.LinkCount;mode=[uint32]$native.Mode;uid=[uint64]$native.Uid;gid=[uint64]$native.Gid;size=[int64]$native.Size;mtime=[int64]$native.ModifiedSeconds;mtimeNs=[int64]$native.ModifiedNanoseconds;ctime=[int64]$native.ChangedSeconds;ctimeNs=[int64]$native.ChangedNanoseconds;macExtendedAcl=[bool][SyuanTsai.AIInstructions.TrustAnchor.UnixRollbackLease]::HasMacExtendedAcl($handle);owner=$null;dacl=$null;protected=$null;inheritedAllow=$null;allowSids=$null}
 }
 function Test-TrustAnchorMetadataEqual {param($Before,$After)(($Before|ConvertTo-Json -Compress -Depth 5) -ceq ($After|ConvertTo-Json -Compress -Depth 5))}
 
@@ -742,6 +745,7 @@ function Assert-TrustAnchorPrivatePermissions {
         if($Evidence.owner -cne $owner -or [string]::IsNullOrEmpty([string]$Evidence.dacl) -or -not$Evidence.protected -or $Evidence.inheritedAllow -or @($Evidence.allowSids|Where-Object{$_ -cnotin $allowed}).Count -gt 0){throw 'The private-key handle owner or protected DACL is not sufficiently restrictive.'}
         return $Evidence
     }
+    if([bool]$Evidence.macExtendedAcl){throw 'The private-key handle carries a macOS extended ACL.'}
     if(([uint32]$Evidence.mode -band 63) -ne 0 -or [uint64]$Evidence.uid -ne [SyuanTsai.AIInstructions.TrustAnchor.SecretBridge]::EffectiveUid()){throw 'The private-key handle must be owned by the effective user and deny every group/other permission.'}
     return $Evidence
 }
