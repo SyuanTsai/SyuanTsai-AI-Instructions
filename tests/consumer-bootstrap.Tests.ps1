@@ -944,6 +944,80 @@ $start.Environment['CONSUMER_GATE_EVENT_REPOSITORY']=$Token
         {New-PinnedAuthority (Join-Path $TestDrive 'missing-rejected') ('f'*40) $sourceUrl -AllowFileProtocol}|Should Throw
     }
 
+    # Scenario: Authority acquisition runs with isolated global Git config and produces a detached worktree with a persistent canonical origin.
+    # Purpose: The validator's exact local-origin source-binding path must pass, while deleting the persistent-origin statement must reproduce the hosted-runner failure.
+    It 'InterT75_persists_origin_for_validator_binding_with_isolated_git_config' {
+        $source=Join-Path $TestDrive 'origin-source'
+        [void](New-AuthorityFixture $source)
+        [void][IO.Directory]::CreateDirectory((Join-Path $source 'scripts'))
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardValidation.ps1') `
+            -Destination (Join-Path $source 'scripts/Invoke-StandardValidation.ps1')
+        $runtimeManifest=Import-PowerShellDataFile (Join-Path $script:RepositoryRoot 'scripts/platform-runtime.psd1')
+        foreach($relative in @($runtimeManifest.FileList)){
+            $destination=Join-Path $source "scripts/$relative"
+            [void][IO.Directory]::CreateDirectory((Split-Path -Parent $destination))
+            Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot "scripts/$relative") -Destination $destination
+        }
+        [void](Invoke-FixtureGit $source @('add','scripts'))
+        [void](Invoke-FixtureGit $source @('commit','-q','-m','add validator'))
+        $commit=Get-FixtureGitScalar $source @('rev-parse','HEAD')
+        $sourceUrl=ConvertTo-FixtureFileUrl $source
+        $isolatedHome=Join-Path $TestDrive 'isolated-home'
+        [void][IO.Directory]::CreateDirectory($isolatedHome)
+        $isolatedGlobal=Join-Path $isolatedHome 'gitconfig'
+        [IO.File]::WriteAllText($isolatedGlobal,'',[Text.UTF8Encoding]::new($false))
+        $savedHome=$env:HOME;$savedGlobal=$env:GIT_CONFIG_GLOBAL;$savedPath=$env:PATH
+        $savedHooks=$script:PinnedGitHooksPath
+        $env:HOME=$isolatedHome;$env:GIT_CONFIG_GLOBAL=$isolatedGlobal
+        try{
+            $accepted=New-PinnedAuthority (Join-Path $TestDrive 'origin-accepted') $commit $sourceUrl -AllowFileProtocol
+            (Get-FixtureGitScalar $accepted.GitRoot @('config','--local','--get-all','remote.origin.url'))|Should BeExactly $sourceUrl
+            $detached=Invoke-PinnedGit $accepted.Root @('symbolic-ref','-q','HEAD') @(0,1) -AllowFileProtocol
+            $detached.ExitCode|Should Be 1
+            . (Join-Path $accepted.Root 'scripts/Invoke-StandardValidation.ps1') `
+                -CandidateRoot $accepted.Root -AdapterPath (Join-Path $accepted.Root 'unused-adapter.json') `
+                -ArtifactsRoot (Join-Path $accepted.Root 'unused-artifacts') `
+                -SourceRepository 'https://example.test/source.git' -SourceRevision ('a'*40) -BaseRevision ('b'*40) `
+                -DefineFunctionsOnly
+            if($IsWindows){
+                $shimRoot=Join-Path $TestDrive 'single-link-git'
+                [void][IO.Directory]::CreateDirectory($shimRoot)
+                $realGit=(Get-Command git.exe -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
+                Copy-Item -LiteralPath $realGit -Destination (Join-Path $shimRoot 'git.exe')
+                $env:PATH="$shimRoot$([IO.Path]::PathSeparator)$savedPath"
+            }
+            $originResult=Invoke-StandardCoreGit -RepositoryRoot $accepted.Root -WorkingDirectory $accepted.Root `
+                -Arguments @('config','--local','--get-all','remote.origin.url')
+            $originValues=@(([string]$originResult.stdout-split"`r?`n")|Where-Object{-not[string]::IsNullOrWhiteSpace($_)})
+            $originValues.Count|Should Be 1
+            $originValues[0]|Should BeExactly $sourceUrl
+
+            $mutant=Join-Path $TestDrive 'Invoke-PinnedAuthority-no-origin.ps1'
+            $sourceText=Get-Content -Raw -LiteralPath $script:BootstrapPath
+            $tokens=$null;$errors=$null
+            $ast=[Management.Automation.Language.Parser]::ParseInput($sourceText,[ref]$tokens,[ref]$errors)
+            @($errors).Count|Should Be 0
+            $authorityFunction=$ast.Find({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'New-PinnedAuthority'},$true)
+            $originStatement=@($authorityFunction.Body.FindAll({param($node)
+                        $node-is[Management.Automation.Language.PipelineAst]-and
+                        $node.Parent-is[Management.Automation.Language.NamedBlockAst]-and
+                        $node.Extent.Text-match "Invoke-PinnedGit.*'remote','add','origin'"
+                    },$true))
+            $originStatement.Count|Should Be 1
+            $mutantText=$sourceText.Remove($originStatement[0].Extent.StartOffset,$originStatement[0].Extent.EndOffset-$originStatement[0].Extent.StartOffset)
+            [IO.File]::WriteAllText($mutant,$mutantText,[Text.UTF8Encoding]::new($false))
+            . $mutant -DefineFunctionsOnly
+            $script:PinnedGitHooksPath=$savedHooks
+            $mutated=New-PinnedAuthority (Join-Path $TestDrive 'origin-mutated') $commit $sourceUrl -AllowFileProtocol
+            {Invoke-StandardCoreGit -RepositoryRoot $mutated.Root -WorkingDirectory $mutated.Root `
+                    -Arguments @('config','--local','--get-all','remote.origin.url')}|Should Throw 'Git source binding command failed'
+        }finally{
+            $env:HOME=$savedHome;$env:GIT_CONFIG_GLOBAL=$savedGlobal;$env:PATH=$savedPath
+            . $script:BootstrapPath -DefineFunctionsOnly
+            $script:PinnedGitHooksPath=$savedHooks
+        }
+    }
+
     # Scenario: An acquired authority worktree is modified, extended, or truncated after checkout.
     # Purpose: Revalidation rejects changed bytes, extra files, and missing files before another phase runs.
     It 'InterT80_rejects_authority_byte_extra_and_missing_file_drift' {

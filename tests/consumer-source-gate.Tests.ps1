@@ -312,6 +312,56 @@ Describe 'Authority-owned consumer source gate' {
         }
     }
 
+    # Scenario: A consumer explicitly checks protected PowerShell and workflow files out as CRLF while their committed blobs remain exact LF template copies.
+    # Purpose: Repository attributes and runner checkout filters must not make an otherwise exact protected template fail byte identity.
+    It 'UnitT15_accepts_exact_protected_blobs_from_an_explicit_crlf_checkout' {
+        $source=Join-Path $TestDrive 'protected-crlf-source'
+        $candidate=Join-Path $TestDrive 'protected-crlf-candidate'
+        $base=Join-Path $TestDrive 'protected-crlf-base'
+        [void][IO.Directory]::CreateDirectory($source)
+        [void](Invoke-SourceFixtureGit $source @('init','-q','-b','main'))
+        [void](Invoke-SourceFixtureGit $source @('config','user.name','Fixture'))
+        [void](Invoke-SourceFixtureGit $source @('config','user.email','fixture@example.test'))
+        foreach($directory in @('scripts','.github/workflows')){[void][IO.Directory]::CreateDirectory((Join-Path $source $directory))}
+        Copy-Item (Join-Path $script:RepositoryRoot 'consumer/bootstrap/Invoke-PinnedAuthority.ps1') `
+            (Join-Path $source 'scripts/Invoke-PinnedAuthority.ps1')
+        foreach($name in @('consumer-gate.yml','consumer-gate-transition.yml')){
+            Copy-Item (Join-Path $script:RepositoryRoot "consumer/workflows/$name") (Join-Path $source ".github/workflows/$name")
+        }
+        [IO.File]::WriteAllText((Join-Path $source '.gitattributes'),"*.ps1 text eol=crlf`n*.yml text eol=crlf`n",[Text.UTF8Encoding]::new($false))
+        [void](Invoke-SourceFixtureGit $source @('add','.'))
+        [void](Invoke-SourceFixtureGit $source @('commit','-q','-m','protected templates'))
+        foreach($number in 1..2){
+            [IO.File]::WriteAllText((Join-Path $source "marker-$number.txt"),"$number`n",[Text.UTF8Encoding]::new($false))
+            [void](Invoke-SourceFixtureGit $source @('add',"marker-$number.txt"))
+            [void](Invoke-SourceFixtureGit $source @('commit','-q','-m',"marker $number"))
+        }
+        $revision=Get-SourceFixtureGitScalar $source @('rev-parse','HEAD')
+        $sourceUri=[Uri]::new($source).AbsoluteUri
+        [void](Invoke-SourceFixtureGit $TestDrive @('clone','-q','--depth=2',$sourceUri,$candidate))
+        [void](Invoke-SourceFixtureGit $TestDrive @('clone','-q',$sourceUri,$base))
+        (Get-SourceFixtureGitScalar $candidate @('rev-parse','--is-shallow-repository'))|Should BeExactly 'true'
+        (Get-SourceFixtureGitScalar $candidate @('rev-list','--count','HEAD'))|Should BeExactly '2'
+        (Get-SourceFixtureGitScalar $base @('rev-parse','--is-shallow-repository'))|Should BeExactly 'false'
+        (Get-SourceFixtureGitScalar $base @('rev-list','--count','HEAD'))|Should BeExactly '3'
+        foreach($root in @($candidate,$base)){
+            $bootstrapBytes=[IO.File]::ReadAllBytes((Join-Path $root 'scripts/Invoke-PinnedAuthority.ps1'))
+            ([Text.Encoding]::ASCII.GetString($bootstrapBytes).Contains("`r`n"))|Should Be $true
+        }
+        $entry=[pscustomobject]@{files=@()}
+        Assert-GateProtectedFiles $script:RepositoryRoot $base $candidate $entry $revision $revision $true
+        Add-Content -LiteralPath (Join-Path $candidate 'scripts/Invoke-PinnedAuthority.ps1') -Value '# changed'
+        {Assert-GateProtectedFiles $script:RepositoryRoot $base $candidate $entry $revision $revision $true}|Should Throw `
+            'Candidate bootstrap differs'
+        [void](Invoke-SourceFixtureGit $candidate @('add','scripts/Invoke-PinnedAuthority.ps1'))
+        [void](Invoke-SourceFixtureGit $candidate @('config','user.name','Fixture'))
+        [void](Invoke-SourceFixtureGit $candidate @('config','user.email','fixture@example.test'))
+        [void](Invoke-SourceFixtureGit $candidate @('commit','-q','-m','tamper template'))
+        $tampered=Get-SourceFixtureGitScalar $candidate @('rev-parse','HEAD')
+        {Assert-GateProtectedFiles $script:RepositoryRoot $base $candidate $entry $revision $tampered $true}|Should Throw `
+            'Candidate bootstrap differs'
+    }
+
     # Scenario: The migration manifest preserves repository behavior while removing authority-owned copies.
     # Purpose: General history, CC catalog checks, and each legacy driver receive an explicit disposition.
     It 'UnitT20_records_the_required_delete_split_and_history_decisions' {
@@ -1617,28 +1667,28 @@ consumer/bootstrap/Invoke-PinnedAuthority.ps1:293:9|$stdout = $null
 consumer/bootstrap/Invoke-PinnedAuthority.ps1:294:9|$stderr = $null
 consumer/bootstrap/Invoke-PinnedAuthority.ps1:298:28|$value = $null
 consumer/bootstrap/Invoke-PinnedAuthority.ps1:299:9|$Token=$null
-scripts/consumer/ConsumerGate.psm1:811:13|$content=$null
-scripts/consumer/ConsumerGate.psm1:814:9|$content=$null
-scripts/consumer/ConsumerGate.psm1:814:24|$needle=$null
-scripts/consumer/ConsumerGate.psm1:814:38|$Token=$null
+scripts/consumer/ConsumerGate.psm1:852:13|$content=$null
+scripts/consumer/ConsumerGate.psm1:855:9|$content=$null
+scripts/consumer/ConsumerGate.psm1:855:24|$needle=$null
+scripts/consumer/ConsumerGate.psm1:855:38|$Token=$null
 scripts/consumer/ConsumerGate.psm1:122:14|$headers.Remove('Authorization')
 scripts/consumer/ConsumerGate.psm1:123:5|$Token=$null
 scripts/consumer/ConsumerGate.psm1:124:5|[Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN',$null,'Process')
-scripts/consumer/ConsumerGate.psm1:841:34|$request.Dispose()
-scripts/consumer/ConsumerGate.psm1:841:53|$request=$null
-scripts/consumer/ConsumerGate.psm1:842:35|$response.Dispose()
-scripts/consumer/ConsumerGate.psm1:842:55|$response=$null
-scripts/consumer/ConsumerGate.psm1:873:18|$stream.Dispose()
-scripts/consumer/ConsumerGate.psm1:873:36|$memory.Dispose()
-scripts/consumer/ConsumerGate.psm1:881:31|$response.Dispose()
-scripts/consumer/ConsumerGate.psm1:881:73|$request.Dispose()
-scripts/consumer/ConsumerGate.psm1:882:9|$bytes=$null
-scripts/consumer/ConsumerGate.psm1:882:22|$buffer=$null
-scripts/consumer/ConsumerGate.psm1:882:36|$response=$null
-scripts/consumer/ConsumerGate.psm1:882:52|$request=$null
-scripts/consumer/ConsumerGate.psm1:882:67|$stream=$null
-scripts/consumer/ConsumerGate.psm1:882:81|$memory=$null
-scripts/consumer/ConsumerGate.psm1:882:95|$Headers=$null
+scripts/consumer/ConsumerGate.psm1:882:34|$request.Dispose()
+scripts/consumer/ConsumerGate.psm1:882:53|$request=$null
+scripts/consumer/ConsumerGate.psm1:883:35|$response.Dispose()
+scripts/consumer/ConsumerGate.psm1:883:55|$response=$null
+scripts/consumer/ConsumerGate.psm1:914:18|$stream.Dispose()
+scripts/consumer/ConsumerGate.psm1:914:36|$memory.Dispose()
+scripts/consumer/ConsumerGate.psm1:922:31|$response.Dispose()
+scripts/consumer/ConsumerGate.psm1:922:73|$request.Dispose()
+scripts/consumer/ConsumerGate.psm1:923:9|$bytes=$null
+scripts/consumer/ConsumerGate.psm1:923:22|$buffer=$null
+scripts/consumer/ConsumerGate.psm1:923:36|$response=$null
+scripts/consumer/ConsumerGate.psm1:923:52|$request=$null
+scripts/consumer/ConsumerGate.psm1:923:67|$stream=$null
+scripts/consumer/ConsumerGate.psm1:923:81|$memory=$null
+scripts/consumer/ConsumerGate.psm1:923:95|$Headers=$null
 scripts/consumer/ConsumerGate.psm1:298:95|[Environment]::SetEnvironmentVariable($name,$null,'Process')
 scripts/consumer/ConsumerGate.psm1:300:43|$Token=$null
 scripts/consumer/ConsumerGate.psm1:178:9|$start.Environment.Clear()
