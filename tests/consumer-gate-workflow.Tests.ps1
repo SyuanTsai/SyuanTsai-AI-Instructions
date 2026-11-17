@@ -85,6 +85,14 @@ Describe 'Consumer gate workflow templates' {
         function Get-ConsumerWorkflowStep($Job,[string]$Name){$match=@($Job.steps|Where-Object name -ceq $Name)
         if($match.Count-ne1){throw "Missing unique step: $Name"}
         $match[0]}
+        function Assert-CheckoutLineEndingSetup([string]$JobBlock) {
+            $normalized=ConvertTo-ConsumerWorkflowLf $JobBlock
+            $setupPattern='(?ms)^    steps:\n      - name: Configure Git checkout line endings\n        shell: pwsh\n        run: \|\n          git config --global core\.autocrlf false\n          git config --global core\.eol lf\n'
+            $matches=[regex]::Matches($normalized,$setupPattern)
+            if($matches.Count-ne1){throw 'Each checkout job must start with one canonical Git line-ending setup step.'}
+            $firstCheckout=$normalized.IndexOf('uses: actions/checkout@',[StringComparison]::Ordinal)
+            if($firstCheckout-lt0-or$matches[0].Index-ge$firstCheckout){throw 'Git line-ending setup must precede every checkout.'}
+        }
         function Assert-FormalWorkflowStructure([string]$Text){
             $workflow=ConvertFrom-ConsumerWorkflowYaml $Text
             if($workflow.permissions-cne'{}'){throw 'Top-level permissions must be empty.'}
@@ -155,6 +163,33 @@ Describe 'Consumer gate workflow templates' {
         foreach ($required in $requiredBindings) { $script:Formal | Should Match ([regex]::Escape($required)) }
         $script:Formal | Should Match 'fetch-depth: 2'
          $script:Formal | Should Match 'persist-credentials: false'
+    }
+
+    # Scenario: Every checkout job starts by disabling hosted-runner line-ending conversion.
+    # Purpose: Base and candidate protected bytes remain LF before any checkout, and deleting any one setup step makes the contract fail.
+    It 'UnitT15_configures_lf_before_every_checkout_and_rejects_each_step_deletion' {
+        $jobs=@(
+            [pscustomobject]@{Text=$script:Formal;Name='gate';Next='aggregate'},
+            [pscustomobject]@{Text=$script:Formal;Name='aggregate';Next='report'},
+            [pscustomobject]@{Text=$script:Transition;Name='gate';Next='aggregate'},
+            [pscustomobject]@{Text=$script:Transition;Name='aggregate';Next='repository-contract'}
+        )
+        foreach($case in $jobs){
+            $block=Get-ConsumerWorkflowJobBlock $case.Text $case.Name $case.Next
+            Assert-CheckoutLineEndingSetup $block
+            if($case.Text -ceq $script:Formal){
+                @([regex]::Matches($block,'fetch-depth: 2')).Count|Should Be 1
+                @([regex]::Matches($block,'fetch-depth: 0')).Count|Should Be 1
+            } else {
+                @([regex]::Matches($block,'fetch-depth: 2')).Count|Should Be 2
+                @([regex]::Matches($block,'fetch-depth: 0')).Count|Should Be 0
+            }
+            $setup=[regex]::Match((ConvertTo-ConsumerWorkflowLf $block),
+                '(?ms)^    steps:\n(?<step>      - name: Configure Git checkout line endings\n        shell: pwsh\n        run: \|\n          git config --global core\.autocrlf false\n          git config --global core\.eol lf\n)')
+            $setup.Success|Should Be $true
+            $mutant=(ConvertTo-ConsumerWorkflowLf $block).Remove($setup.Groups['step'].Index,$setup.Groups['step'].Length)
+            {Assert-CheckoutLineEndingSetup $mutant}|Should Throw
+        }
     }
 
     # Scenario: The conversion template checks out the legacy base and merge candidate explicitly.

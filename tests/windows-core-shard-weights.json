@@ -16,9 +16,9 @@
     "cleanup-ai-instructions-pollution.Tests.ps1": 2,
     "standard-validation-runner.Tests.ps1": 2,
     "trust-anchor-tools.Tests.ps1": 28,
-    "consumer-bootstrap.Tests.ps1": 9,
+    "consumer-bootstrap.Tests.ps1": 10,
     "consumer-gate-workflow.Tests.ps1": 2,
-    "consumer-source-gate.Tests.ps1": 16,
+    "consumer-source-gate.Tests.ps1": 17,
     "bootstrap-ai-instructions-multisource.Tests.ps1": 1,
     "agent-artifact-remediation.Tests.ps1": 1
   }
