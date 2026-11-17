@@ -2301,7 +2301,7 @@ if($DefineFunctionsOnly){return}
     # Purpose: Execute the repository wrapper and prove closure bytes plus complete case identity are enforced behaviorally.
     It 'InterT56_executes_verified_pester_closure_and_complete_discovery' {
         $runId = '1234567890abcdef1234567890abcdef'
-        foreach ($scenario in @('success','tampered','partial','duplicate','skipped','notrun')) {
+        foreach ($scenario in @('success','tampered','duplicatepath','partial','duplicate','skipped','notrun')) {
             $workRoot = Join-Path $TestDrive "pester-wrapper-$scenario"
             $candidate = Join-Path $workRoot "$runId/candidate"
             $runtime = Join-Path $workRoot 'runtime/consumer'
@@ -2372,16 +2372,25 @@ Export-ModuleMember -Function New-PesterConfiguration,Invoke-Pester
                 "@{ RootModule='Pester.psm1'; ModuleVersion='6.2.0'; FunctionsToExport=@('New-PesterConfiguration','Invoke-Pester') }",
                 [Text.UTF8Encoding]::new($false)
             )
-            $closure = @('Pester.psd1','Pester.psm1') | ForEach-Object {
+            foreach ($relative in @('bin/runner.ps1','lib/helper.ps1','en-US/about.txt','Dependencies/dependency.ps1')) {
+                $path = Join-Path $installRoot $relative
+                [void][IO.Directory]::CreateDirectory((Split-Path -Parent $path))
+                [IO.File]::WriteAllText($path,"fixture $relative`n",[Text.UTF8Encoding]::new($false))
+            }
+            $closure = @('Pester.psd1','Pester.psm1','bin/runner.ps1','lib/helper.ps1','en-US/about.txt',
+                'Dependencies/dependency.ps1') | ForEach-Object {
                 [ordered]@{ path=$_
                  sha256=(Get-FileHash (Join-Path $installRoot $_) -Algorithm SHA256).Hash.ToLowerInvariant() }
             }
-            $closureText = (@($closure | Sort-Object path | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join '')
+            $ordinalClosure=[Collections.Generic.SortedDictionary[string,object]]::new([StringComparer]::Ordinal)
+            foreach($entry in $closure){$ordinalClosure.Add([string]$entry.path,$entry)}
+            $closureText = (@($ordinalClosure.Values | ForEach-Object { "$($_.path)`t$($_.sha256)`n" }) -join '')
             $closureSha = [Convert]::ToHexString(
                 [Security.Cryptography.SHA256]::HashData([Text.UTF8Encoding]::new($false).GetBytes($closureText))
             ).ToLowerInvariant()
             $manifestSha = (Get-FileHash $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
             $receiptPath = Join-Path $sourceTools 'receipt-pester.json'
+            $receiptClosure=if($scenario-eq'duplicatepath'){@($closure)+@($closure[0])}else{@($closure)}
             Write-FixtureJson $receiptPath ([ordered]@{
                     toolName='pester'
                      resolvedVersion='6.2.0'
@@ -2390,7 +2399,7 @@ Export-ModuleMember -Function New-PesterConfiguration,Invoke-Pester
                     installRoot=$installRoot
                      modulePath=$manifestPath
                      executableSha256=$manifestSha
-                    dependencyClosure=@($closure)
+                    dependencyClosure=$receiptClosure
                      dependencyClosureSha256=$closureSha
                      installedClosureSha256=$closureSha
                 })
@@ -2428,6 +2437,46 @@ Export-ModuleMember -Function New-PesterConfiguration,Invoke-Pester
                 ($output -join "`n") | Should Match '"passed":1'
                 (Get-Content -Raw (Join-Path $workRoot "$runId/repository-pester-case-inventory-v1.json") | `
                         ConvertFrom-Json).complete | Should Be $true
+
+                $trustedPath=Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-ConsumerRepositoryCheck.ps1'
+                $trustedText=Get-Content -Raw -LiteralPath $trustedPath
+                $tokens=$null;$errors=$null
+                $trustedAst=[Management.Automation.Language.Parser]::ParseInput($trustedText,[ref]$tokens,[ref]$errors)
+                @($errors).Count|Should Be 0
+                $closureFunction=@($trustedAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and
+                            $node.Name-ceq'Assert-PesterClosure'},$true))[0]
+                $orderedAssignment=@($closureFunction.Body.FindAll({param($node)
+                            $node-is[Management.Automation.Language.AssignmentStatementAst]-and
+                            $node.Left.Extent.Text-ceq'$ordered'},$true))
+                @($orderedAssignment).Count|Should Be 1
+                $replacement='$ordered=@($entries|Sort-Object -Property path)'
+                $mutantText=$trustedText.Remove($orderedAssignment[0].Extent.StartOffset,
+                    $orderedAssignment[0].Extent.EndOffset-$orderedAssignment[0].Extent.StartOffset).Insert(
+                    $orderedAssignment[0].Extent.StartOffset,$replacement)
+                [IO.File]::WriteAllText((Join-Path $runtime 'Invoke-ConsumerRepositoryCheck.ps1'),$mutantText,
+                    [Text.UTF8Encoding]::new($false))
+                Remove-Item -LiteralPath (Join-Path $workRoot "$runId/repository-pester-case-inventory-v1.json")
+                try {
+                    $env:FAKE_PESTER_SCENARIO = $scenario
+                    $env:STANDARD_VALIDATION_CORE_RUN_ID = $runId
+                    $env:STANDARD_VALIDATION_CORE_CHECK_ID = 'fixture-pester'
+                    $env:STANDARD_VALIDATION_CORE_SKILLS = 'fixture'
+                    Push-Location $candidate
+                    try {
+                        $mutantOutput=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File `
+                                (Join-Path $runtime 'Invoke-ConsumerRepositoryCheck.ps1') -Mode pester `
+                                -PesterReceiptSha256 $receiptSha -PesterManifestSha256 $manifestSha `
+                                -PesterVersion 6.2.0 2>&1)
+                        $mutantExitCode=$LASTEXITCODE
+                    }finally{Pop-Location}
+                }finally{
+                    $env:FAKE_PESTER_SCENARIO = $oldScenario
+                    $env:STANDARD_VALIDATION_CORE_RUN_ID = $oldRunId
+                    $env:STANDARD_VALIDATION_CORE_CHECK_ID = $oldCheckId
+                    $env:STANDARD_VALIDATION_CORE_SKILLS = $oldSkills
+                }
+                $mutantExitCode|Should Be 1
+                ($mutantOutput-join"`n")|Should Match 'Verified Pester closure identity changed'
             }
             else {
                 $exitCode | Should Be 1

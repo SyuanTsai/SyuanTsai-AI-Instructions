@@ -29,6 +29,16 @@ function Test-Within([string]$Path, [string]$Root) {
     $comparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
     $pathFull.StartsWith($rootFull + [IO.Path]::DirectorySeparatorChar, $comparison)
 }
+function Get-ConsumerOrdinalClosureEntries([object[]]$Entries) {
+    $sorted=[Collections.Generic.SortedDictionary[string,object]]::new([StringComparer]::Ordinal)
+    foreach($entry in $Entries){
+        if($null-eq$entry-or[string]::IsNullOrEmpty([string]$entry.path)-or$sorted.ContainsKey([string]$entry.path)){
+            throw 'Verified Pester closure contains a duplicate or empty path.'
+        }
+        $sorted.Add([string]$entry.path,$entry)
+    }
+    @($sorted.Values)
+}
 function Assert-PesterClosure([string]$WorkRoot,[string]$ReceiptSha256,[string]$ManifestSha256,[string]$Version) {
     $receiptPath=Join-Path $WorkRoot 'source-tools/receipt-pester.json'
     if (
@@ -56,16 +66,17 @@ function Assert-PesterClosure([string]$WorkRoot,[string]$ReceiptSha256,[string]$
     }
     $actual=@(Get-ChildItem -LiteralPath $installRoot -Recurse -File -Force)
     if($actual.Count-ne$expected.Count){throw 'Verified Pester closure file count changed.'}
-    $lines=[Collections.Generic.List[string]]::new()
+    $entries=[Collections.Generic.List[object]]::new()
     foreach($file in $actual){
         if(($file.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0-or$null-ne$file.LinkType){throw 'Verified Pester closure contains a reparse point.'}
         $relative=[IO.Path]::GetRelativePath($installRoot,$file.FullName).Replace('\','/')
         $hash=(Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
         if(-not$expected.ContainsKey($relative)-or$expected[$relative]-cne$hash){throw 'Verified Pester closure bytes changed.'}
-        $lines.Add("$relative`t$hash`n")
+        $entries.Add([pscustomobject]@{path=$relative;sha256=$hash})
     }
-    $ordered=@($lines|Sort-Object)
-    $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($ordered-join''))
+    $ordered=@(Get-ConsumerOrdinalClosureEntries $entries.ToArray())
+    $canonical=($ordered|ForEach-Object{"$($_.path)`t$($_.sha256)`n"})-join''
+    $bytes=[Text.UTF8Encoding]::new($false).GetBytes($canonical)
     $closure=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
     if($closure-cne[string]$receipt.dependencyClosureSha256-or$closure-cne[string]$receipt.installedClosureSha256){throw `
         'Verified Pester closure identity changed.'}
