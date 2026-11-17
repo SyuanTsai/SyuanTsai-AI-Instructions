@@ -417,7 +417,7 @@ function Get-TestCSharpTokenContract {
 }
 function Get-TrustAnchorProtectedContracts {
     return @{
-        'scripts/trust-anchor/TrustAnchorPrivateKey.psm1'=@{TokenCount=3968;Sha256='78e11e0c9ccb92e2707313e69b9ad65e05a2581fc5b4bd110bb95c1466c0d5a0'}
+        'scripts/trust-anchor/TrustAnchorPrivateKey.psm1'=@{TokenCount=4090;Sha256='ff3e8f6b2cb11721966fa2cf57157c1c44bf56a889f5243d98ff89a0e3629c61'}
         'scripts/trust-anchor/New-TrustAnchorKeyPair.ps1'=@{TokenCount=110;Sha256='9957a095dbfbf8640cdf5a8611219e55775cfdcf3a46c4789a23f360f49f76f5'}
         'scripts/trust-anchor/ConvertTo-TrustAnchorPublicKeyXml.ps1'=@{TokenCount=86;Sha256='1f42500679c905fbb8662df71f08087535160891b3bcc1bfb39e88f50b539a9e'}
         'scripts/trust-anchor/Get-TrustAnchorFingerprint.ps1'=@{TokenCount=117;Sha256='7690182cf612e77daa3f106ae16dc46540e131e2849645591436ae342b6fe27f'}
@@ -613,9 +613,13 @@ function Test-TrustAnchorPathPreflightSemantics {
     param([Parameter(Mandatory)][string]$ModuleSource)
     $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseInput($ModuleSource,[ref]$tokens,[ref]$errors);if(@($errors).Count-ne0){return $false}
     $functions=@{};foreach($name in @('Get-TrustAnchorPhysicalParent','Assert-TrustAnchorOutsideWorktree')){$matches=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true));if($matches.Count-ne1){return $false};$functions[$name]=$matches[0]}
-    $physical=$functions['Get-TrustAnchorPhysicalParent'];$physicalAssignments=@($physical.FindAll({param($node)$node-is[Management.Automation.Language.AssignmentStatementAst]},$true)|Sort-Object{$_.Extent.StartOffset});$comparison=@($physicalAssignments|Where-Object{(Get-CompactAstText $_.Left)-ceq'$comparison'});if($comparison.Count-ne1-or(Get-CompactAstText $comparison[0].Right)-cne'if($IsWindows){[StringComparison]::OrdinalIgnoreCase}else{[StringComparison]::Ordinal}'){return $false}
+    $physical=$functions['Get-TrustAnchorPhysicalParent'];$physicalAssignments=@($physical.FindAll({param($node)$node-is[Management.Automation.Language.AssignmentStatementAst]},$true)|Sort-Object{$_.Extent.StartOffset})
     $physicalResolution=@($physical.FindAll({param($node)$node-is[Management.Automation.Language.CommandAst]-and$node.GetCommandName()-ceq'Resolve-PlatformPhysicalPath'},$true));if($physicalResolution.Count-ne1-or(Get-CompactAstText $physicalResolution[0])-cne'Resolve-PlatformPhysicalPath-Path$parent'){return $false}
-    $equals=@($physical.FindAll({param($node)$node-is[Management.Automation.Language.InvokeMemberExpressionAst]-and$node.Static-and$node.Expression-is[Management.Automation.Language.TypeExpressionAst]-and$node.Expression.TypeName.FullName-ceq'string'-and$node.Member.Value-ceq'Equals'},$true));if($equals.Count-ne1-or$equals[0].Arguments.Count-ne3-or(Get-CompactAstText $equals[0].Arguments[0])-cne'[IO.Path]::GetFullPath([string]$physical)'-or(Get-CompactAstText $equals[0].Arguments[1])-cne'[IO.Path]::GetFullPath($parent)'-or(Get-CompactAstText $equals[0].Arguments[2])-cne'$comparison'){return $false}
+    $equals=@($physical.FindAll({param($node)$node-is[Management.Automation.Language.InvokeMemberExpressionAst]-and$node.Static-and$node.Expression-is[Management.Automation.Language.TypeExpressionAst]-and$node.Expression.TypeName.FullName-ceq'string'-and$node.Member.Value-ceq'Equals'},$true)|Sort-Object{$_.Extent.StartOffset});if($equals.Count-ne2-or($equals|ForEach-Object{$_.Arguments.Count}|Where-Object{$_-ne3}).Count-ne0){return $false};$equalsRecords=@($equals|ForEach-Object{"$(Get-CompactAstText $_.Arguments[0])|$(Get-CompactAstText $_.Arguments[1])|$(Get-CompactAstText $_.Arguments[2])"});$expectedEquals=@('$physicalFull|$parentFull|[StringComparison]::Ordinal','$physicalFull|$parentFull|[StringComparison]::OrdinalIgnoreCase');if(($equalsRecords-join"`n")-cne($expectedEquals-join"`n")){return $false}
+    $opens=@($physical.FindAll({param($node)$node-is[Management.Automation.Language.CommandAst]-and$node.GetCommandName()-ceq'Open-PlatformDirectory'},$true)|Sort-Object{$_.Extent.StartOffset});$openRecords=@($opens|ForEach-Object{Get-CompactAstText $_});$expectedOpens=@('Open-PlatformDirectory-Root$parentFull-RootOnly','Open-PlatformDirectory-Root$physicalFull-RootOnly');if(($openRecords-join"`n")-cne($expectedOpens-join"`n")){return $false}
+    $identities=@($physical.FindAll({param($node)$node-is[Management.Automation.Language.CommandAst]-and$node.GetCommandName()-ceq'Assert-PlatformFileIdentity'},$true)|Sort-Object{$_.Extent.StartOffset});$identityRecords=@($identities|ForEach-Object{Get-CompactAstText $_});$expectedIdentities=@('Assert-PlatformFileIdentity-Lease$parentLease-Expected$parentLease.Observation-VerifyPath','Assert-PlatformFileIdentity-Lease$physicalLease-Expected$physicalLease.Observation-VerifyPath');if(($identityRecords-join"`n")-cne($expectedIdentities-join"`n")){return $false}
+    $identityGuards=@($physical.FindAll({param($node)$node-is[Management.Automation.Language.IfStatementAst]-and(Get-CompactAstText $node.Clauses[0].Item1)-ceq'[uint64]$parentIdentity.Device-ne[uint64]$physicalIdentity.Device-or[uint64]$parentIdentity.Inode-ne[uint64]$physicalIdentity.Inode'},$true));if($identityGuards.Count-ne1){return $false}
+    $disposals=@($physical.FindAll({param($node)$node-is[Management.Automation.Language.InvokeMemberExpressionAst]-and-not$node.Static-and$node.Member.Value-ceq'Dispose'},$true)|Sort-Object{$_.Extent.StartOffset}|ForEach-Object{Get-CompactAstText $_});if(($disposals-join'|')-cne'$physicalLease.Dispose()|$parentLease.Dispose()'){return $false}
     $outside=$functions['Assert-TrustAnchorOutsideWorktree'];$gitAssignments=@($outside.FindAll({param($node)$node-is[Management.Automation.Language.AssignmentStatementAst]-and(Get-CompactAstText $node.Left)-ceq'$git'},$true));if($gitAssignments.Count-ne1-or(Get-CompactAstText $gitAssignments[0].Right)-cne'Get-Commandgit-CommandTypeApplication-ErrorActionSilentlyContinue|Select-Object-First1'){return $false}
     $gitInvocations=@($outside.FindAll({param($node)$node-is[Management.Automation.Language.CommandAst]-and$node.InvocationOperator-ceq[Management.Automation.Language.TokenKind]::Ampersand},$true));if($gitInvocations.Count-ne1-or(Get-CompactAstText $gitInvocations[0])-cne'&$git.Source-C$PathEvidence.Parentrev-parse--show-toplevel2>$null'){return $false}
     return $true
@@ -928,7 +932,7 @@ function Test-TrustAnchorPasswordSourceAst {
     $commandNames=@($commands|ForEach-Object{if($_-eq$resolvedGit[0]){'&$git.Source'}else{$_.GetCommandName()}})
     $expectedCommands=@'
 1|&$git.Source
-11|Assert-PlatformFileIdentity
+13|Assert-PlatformFileIdentity
 3|Assert-TrustAnchorInteractiveHost
 3|Assert-TrustAnchorKeyPath
 1|Assert-TrustAnchorOutsideWorktree
@@ -957,7 +961,7 @@ function Test-TrustAnchorPasswordSourceAst {
 18|New-TrustAnchorError
 3|New-TrustAnchorKeyFile
 2|New-TrustAnchorPathEvidence
-1|Open-PlatformDirectory
+3|Open-PlatformDirectory
 2|Open-PlatformFile
 2|Open-TrustAnchorPrivateKeyLease
 17|Out-Null
@@ -992,7 +996,7 @@ function Test-TrustAnchorPasswordSourceAst {
     $memberNames=@($members|ForEach-Object{$kind=if($_.Static){'static'}else{'instance'};$type=if($_.Expression-is[Management.Automation.Language.TypeExpressionAst]){$_.Expression.TypeName.FullName}else{$_.Expression.StaticType.FullName};"$kind|$type|$($_.Member.Value)"})
     $expectedMembers=@'
 1|instance|System.Object|Complete
-22|instance|System.Object|Dispose
+24|instance|System.Object|Dispose
 1|instance|System.Object|EndsWith
 2|instance|System.Object|ExportParameters
 1|instance|System.Object|ExportSubjectPublicKeyInfo
@@ -1021,7 +1025,7 @@ function Test-TrustAnchorPasswordSourceAst {
 1|static|IO.IOException|new
 1|static|IO.Path|Combine
 1|static|IO.Path|GetFileName
-7|static|IO.Path|GetFullPath
+6|static|IO.Path|GetFullPath
 1|static|Management.Automation.ErrorRecord|new
 1|static|Runtime.InteropServices.GCHandle|Alloc
 1|static|Runtime.InteropServices.GCHandle|new
@@ -1033,7 +1037,7 @@ function Test-TrustAnchorPasswordSourceAst {
 3|static|Security.Cryptography.SHA256|HashData
 2|static|Security.Principal.WindowsIdentity|GetCurrent
 1|static|string|IsNullOrEmpty
-1|static|string|Equals
+2|static|string|Equals
 7|static|string|IsNullOrWhiteSpace
 1|static|System.Numerics.BigInteger|new
 1|static|SyuanTsai.AIInstructions.TrustAnchor.SecretBridge|DecodePublicPem
@@ -1072,7 +1076,7 @@ function Test-TrustAnchorPasswordSourceAst {
 1|IO.FileMode
 1|IO.FileShare
 1|IO.IOException
-9|IO.Path
+8|IO.Path
 1|Management.Automation.ErrorCategory
 1|Management.Automation.ErrorRecord
 2|Microsoft.Win32.SafeHandles.SafeFileHandle
@@ -1090,7 +1094,7 @@ function Test-TrustAnchorPasswordSourceAst {
 3|Security.Cryptography.SHA256
 2|Security.Principal.WindowsIdentity
 3|Security.SecureString
-31|string
+32|string
 1|string[]
 2|StringComparison
 2|switch
@@ -1102,7 +1106,7 @@ function Test-TrustAnchorPasswordSourceAst {
 2|Text.UTF8Encoding
 1|type
 3|uint32
-15|uint64
+19|uint64
 '@
     if(-not(Test-ExactInventory $types $expectedTypes)){return $false}
     $environmentCalls=@($members|Where-Object{[string]$_.Member.Value-ceq'GetEnvironmentVariable'})
@@ -1301,7 +1305,7 @@ function Get-TestCompleteOperationInventory {
 }
 function Test-TestCompleteOperationContract {
     param([Parameter(Mandatory)]$Inventory)
-    return $null-ne$Inventory-and$Inventory.RecordCount-eq1793-and$Inventory.OperationCount-eq3390-and$Inventory.Sha256-ceq'5fb0e96001042a0787cf6264b9f039e4455c879411464d6edceff7663e4316fe'
+    return $null-ne$Inventory-and$Inventory.RecordCount-eq1804-and$Inventory.OperationCount-eq3435-and$Inventory.Sha256-ceq'e8b3c153336a4564bb74457c8ab3dfa91aa33ffa0f8338fba07224f5961e2e1a'
 }
 function Get-TestRuntimeModuleScriptBlockCalls {
     param([Parameter(Mandatory)][Management.Automation.Language.ScriptBlockAst]$Ast,[string]$DriverSource=(Get-TestCliDriverSource))
@@ -1521,10 +1525,11 @@ Describe 'PR-K1 trust-anchor path lease and rollback safety' {
         try{$secretSpec=New-TestSecretSpec;$private=Join-Path $parent 'key.pem';$public=Join-Path $TestDrive 'key.xml';$barrier=[pscustomobject]@{ReadCount=1;SignalPath=$signal;WitnessPath=$witnessPath;TimeoutMilliseconds=30000};$result=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/New-TrustAnchorKeyPair.ps1') @{KeyId='humanApproval';PrivateKeyPath=$private;PublicKeyXmlPath=$public} @($secretSpec,$secretSpec) -BarrierSpecs @($barrier);Wait-Job $job|Out-Null;$witness=Import-Clixml -LiteralPath $witnessPath;if($IsWindows){$witness.Succeeded|Should Be $false;$witness.Win32Error|Should Be 32;$witness.HResult|Should Be -2147467259;$result.HadErrors|Should Be $false;$result.ReadCount|Should Be 2;(Test-Path -LiteralPath $private)|Should Be $true;(Test-Path -LiteralPath $public)|Should Be $true}else{$witness.Succeeded|Should Be $true;$witness.OriginalExists|Should Be $true;$witness.ReplacementGit|Should Be $true;$result.HadErrors|Should Be $true;$result.ReadCount|Should Be 2;$result.ErrorIds[0]|Should Be 'TrustAnchor.ParentIdentityChanged';(Test-Path -LiteralPath $private)|Should Be $false;(Test-Path -LiteralPath (Join-Path $displaced 'key.pem'))|Should Be $false;(Test-Path -LiteralPath $public)|Should Be $false}}finally{Stop-Job $job -ErrorAction SilentlyContinue;Remove-Job $job -Force -ErrorAction SilentlyContinue}
     }
 
-    # Scenario: A target parent is reached through a native symlink or junction, and Unix is also given a differently-cased nonexistent parent.
-    # Purpose: Resolve every ancestor physically while retaining case-sensitive Unix path identity.
+    # Scenario: A target parent is reached through a native link, while a case-variant parent is tested against the filesystem's observed case behavior.
+    # Purpose: Accept only case variants that are the same physical no-link directory, retain must-exist on case-sensitive filesystems, and reject case-only symlinks.
     Register-TestInteractiveIt 'InterT23_rejects_native_link_ancestor' {
-        $physical=Join-Path $TestDrive 'physical';$alias=Join-Path $TestDrive 'alias';[void][IO.Directory]::CreateDirectory($physical);if($IsWindows){New-Item -ItemType Junction -Path $alias -Target $physical|Out-Null}else{New-Item -ItemType SymbolicLink -Path $alias -Target $physical|Out-Null;$caseParent=Join-Path $TestDrive 'CaseSensitiveParent';[void][IO.Directory]::CreateDirectory($caseParent);$rsa=[Security.Cryptography.RSA]::Create(3072);try{$pem=Join-Path $TestDrive 'case-sensitive.pem';[IO.File]::WriteAllText($pem,$rsa.ExportSubjectPublicKeyInfoPem());$caseResult=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/ConvertTo-TrustAnchorPublicKeyXml.ps1') @{PublicKeyPemPath=$pem;OutputPath=(Join-Path $caseParent.ToLowerInvariant() 'case.xml')};$caseResult.HadErrors|Should Be $true;$caseResult.ErrorMessages[0]|Should Match 'parent directory must already exist'}finally{$rsa.Dispose()}};$result=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/New-TrustAnchorKeyPair.ps1') @{KeyId='humanApproval';PrivateKeyPath=(Join-Path $alias 'key.pem');PublicKeyXmlPath=(Join-Path $TestDrive 'key.xml')};$result.HadErrors|Should Be $true;$result.ErrorMessages[0]|Should Match '(?i)reparse|link'
+        $relative='scripts/trust-anchor/TrustAnchorPrivateKey.psm1';$source=Read-TestLfText $script:ModulePath;$componentMutant=$source.Replace('$parentLease=Open-PlatformDirectory -Root $parentFull -RootOnly','$parentLease=Open-PlatformDirectory -Root $physicalFull -RootOnly');$identityMutant=$source.Replace('if([uint64]$parentIdentity.Device-ne[uint64]$physicalIdentity.Device-or[uint64]$parentIdentity.Inode-ne[uint64]$physicalIdentity.Inode){throw ''The target parent identity differs from its physical path.''}','if($false){throw ''The target parent identity differs from its physical path.''}');foreach($mutant in @($componentMutant,$identityMutant)){$mutant|Should Not Be $source;(Test-TrustAnchorPathPreflightSemantics $mutant)|Should Be $false;(Test-TrustAnchorProtectedContract $relative $mutant)|Should Be $false}
+        $physical=Join-Path $TestDrive 'physical';$alias=Join-Path $TestDrive 'alias';[void][IO.Directory]::CreateDirectory($physical);if($IsWindows){New-Item -ItemType Junction -Path $alias -Target $physical|Out-Null}else{New-Item -ItemType SymbolicLink -Path $alias -Target $physical|Out-Null;$physicalTestDrive=$script:Module.NewBoundScriptBlock({Resolve-PlatformPhysicalPath -Path $args[0]}).InvokeReturnAsIs($TestDrive);$caseParent=Join-Path $physicalTestDrive 'CaseSensitiveParent';[void][IO.Directory]::CreateDirectory($caseParent);$caseVariant=$caseParent.ToLowerInvariant();$caseVariantExists=[IO.Directory]::Exists($caseVariant);$rsa=[Security.Cryptography.RSA]::Create(3072);try{$pem=Join-Path $physicalTestDrive 'case-sensitive.pem';[IO.File]::WriteAllText($pem,$rsa.ExportSubjectPublicKeyInfoPem());$caseOutput=Join-Path $caseVariant 'case.xml';$caseResult=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/ConvertTo-TrustAnchorPublicKeyXml.ps1') @{PublicKeyPemPath=$pem;OutputPath=$caseOutput};if($caseVariantExists){$caseResult.HadErrors|Should Be $false;(Test-Path -LiteralPath $caseOutput)|Should Be $true}else{$caseResult.HadErrors|Should Be $true;$caseResult.ErrorMessages[0]|Should Match 'parent directory must already exist';(Test-Path -LiteralPath $caseOutput)|Should Be $false;$caseTarget=Join-Path $physicalTestDrive 'CaseOnlyKeys';$caseLink=Join-Path $physicalTestDrive 'caseonlykeys';[void][IO.Directory]::CreateDirectory($caseTarget);New-Item -ItemType SymbolicLink -Path $caseLink -Target $caseTarget|Out-Null;$caseLinkResult=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/ConvertTo-TrustAnchorPublicKeyXml.ps1') @{PublicKeyPemPath=$pem;OutputPath=(Join-Path $caseLink 'case-link.xml')};$caseLinkResult.HadErrors|Should Be $true;$caseLinkResult.ErrorMessages[0]|Should Match '(?i)reparse|link'}}finally{$rsa.Dispose()}};$result=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/New-TrustAnchorKeyPair.ps1') @{KeyId='humanApproval';PrivateKeyPath=(Join-Path $alias 'key.pem');PublicKeyXmlPath=(Join-Path $TestDrive 'key.xml')};$result.HadErrors|Should Be $true;$result.ErrorMessages[0]|Should Match '(?i)reparse|link'
     }
 
     # Scenario: A valid private file is given a second hard link before it is opened.
@@ -1612,7 +1617,7 @@ if($IsWindows){
             try{$pem=Join-Path $TestDrive 'case-public.pem';[IO.File]::WriteAllText($pem,$rsa.ExportSubjectPublicKeyInfoPem());$caseParent=Join-Path $TestDrive 'CaseVariantParent';[void][IO.Directory]::CreateDirectory($caseParent);$caseVariant=$caseParent.ToLowerInvariant();$cli=Join-Path $script:RepositoryRoot 'scripts/trust-anchor/ConvertTo-TrustAnchorPublicKeyXml.ps1';$caseOutput=Join-Path $caseVariant 'case.xml';$caseResult=Invoke-TestTrustAnchorCli $cli @{PublicKeyPemPath=$pem;OutputPath=$caseOutput};$caseResult.HadErrors|Should Be $false;(Test-Path -LiteralPath $caseOutput)|Should Be $true
                 $driverSource=Get-TestCliDriverSource;$needle="foreach(`$name in @('CI','GITHUB_ACTIONS','TF_BUILD','BUILD_BUILDID','RUNNER_TEMP'))";$noGitDriver=$driverSource.Replace($needle,"[Environment]::SetEnvironmentVariable('PATH','');$needle");$noGitDriver|Should Not Be $driverSource;$noGitOutput=Join-Path $caseVariant 'no-git.xml';$noGitResult=Invoke-TestTrustAnchorCli $cli @{PublicKeyPemPath=$pem;OutputPath=$noGitOutput} -DriverSource $noGitDriver;$noGitResult.HadErrors|Should Be $false;(Test-Path -LiteralPath $noGitOutput)|Should Be $true;$insideResult=Invoke-TestTrustAnchorCli $cli @{PublicKeyPemPath=$pem;OutputPath=(Join-Path $script:RepositoryRoot 'fix13-no-git.xml')} -DriverSource $noGitDriver;$insideResult.HadErrors|Should Be $true;$insideResult.ErrorMessages[0]|Should Match 'outside every Git worktree'
                 $physicalParent=Join-Path $TestDrive 'physical-parent';$parentAlias=Join-Path $TestDrive 'parent-alias';[void][IO.Directory]::CreateDirectory($physicalParent);New-Item -ItemType Junction -Path $parentAlias -Target $physicalParent|Out-Null;$junctionResult=Invoke-TestTrustAnchorCli $cli @{PublicKeyPemPath=$pem;OutputPath=(Join-Path $parentAlias 'junction.xml')};$junctionResult.HadErrors|Should Be $true;$junctionResult.ErrorMessages[0]|Should Match '(?i)reparse|link'
-                $caseMutant=$source.Replace('$comparison=if($IsWindows){[StringComparison]::OrdinalIgnoreCase}else{[StringComparison]::Ordinal}','$comparison=[StringComparison]::Ordinal');$caseMutant|Should Not Be $source;(Test-TrustAnchorPathPreflightSemantics $caseMutant)|Should Be $false;(Test-TrustAnchorProtectedContract $relative $caseMutant)|Should Be $false;$caseRoot=New-TestMutantTrustAnchorCliRoot 'path-case-sensitive' $caseMutant;$caseMutationResult=Invoke-TestTrustAnchorCli (Join-Path $caseRoot 'ConvertTo-TrustAnchorPublicKeyXml.ps1') @{PublicKeyPemPath=$pem;OutputPath=(Join-Path $caseVariant 'case-mutant.xml')};$caseMutationResult.HadErrors|Should Be $true
+                $caseMutant=$source.Replace('$caseOnly=[string]::Equals($physicalFull,$parentFull,[StringComparison]::OrdinalIgnoreCase)','$caseOnly=[string]::Equals($physicalFull,$parentFull,[StringComparison]::Ordinal)');$caseMutant|Should Not Be $source;(Test-TrustAnchorPathPreflightSemantics $caseMutant)|Should Be $false;(Test-TrustAnchorProtectedContract $relative $caseMutant)|Should Be $false;$caseRoot=New-TestMutantTrustAnchorCliRoot 'path-case-sensitive' $caseMutant;$caseMutationResult=Invoke-TestTrustAnchorCli (Join-Path $caseRoot 'ConvertTo-TrustAnchorPublicKeyXml.ps1') @{PublicKeyPemPath=$pem;OutputPath=(Join-Path $caseVariant 'case-mutant.xml')};$caseMutationResult.HadErrors|Should Be $true
                 $resolutionMutant=$source.Replace('$physical=Resolve-PlatformPhysicalPath -Path $parent','$physical=$parent');$resolutionMutant|Should Not Be $source;(Test-TrustAnchorPathPreflightSemantics $resolutionMutant)|Should Be $false;(Test-TrustAnchorProtectedContract $relative $resolutionMutant)|Should Be $false;$resolutionRoot=New-TestMutantTrustAnchorCliRoot 'path-no-physical-resolution' $resolutionMutant;$resolutionMutationResult=Invoke-TestTrustAnchorCli (Join-Path $resolutionRoot 'ConvertTo-TrustAnchorPublicKeyXml.ps1') @{PublicKeyPemPath=$pem;OutputPath=(Join-Path $parentAlias 'junction-mutant.xml')};$resolutionMutationResult.HadErrors|Should Be $true
                 $gitMutant=$source.Replace('$git=Get-Command git -CommandType Application -ErrorAction SilentlyContinue|Select-Object -First 1','$git=@(Get-Command git -CommandType Application -ErrorAction SilentlyContinue)[0]');$gitMutant|Should Not Be $source;(Test-TrustAnchorPathPreflightSemantics $gitMutant)|Should Be $false;(Test-TrustAnchorProtectedContract $relative $gitMutant)|Should Be $false;$gitRoot=New-TestMutantTrustAnchorCliRoot 'git-empty-index' $gitMutant;$gitMutationResult=Invoke-TestTrustAnchorCli (Join-Path $gitRoot 'ConvertTo-TrustAnchorPublicKeyXml.ps1') @{PublicKeyPemPath=$pem;OutputPath=(Join-Path $caseVariant 'git-mutant.xml')} -DriverSource $noGitDriver;$gitMutationResult.HadErrors|Should Be $true
                 $target=Join-Path $TestDrive 'reparse-target.pem';$leaf=Join-Path $TestDrive 'reparse-leaf.pem';[IO.File]::WriteAllText($target,'fixture');try{New-Item -ItemType SymbolicLink -Path $leaf -Target $target -ErrorAction Stop|Out-Null}catch{$targetDirectory=Join-Path $TestDrive 'reparse-target-dir';[void][IO.Directory]::CreateDirectory($targetDirectory);$leaf=Join-Path $TestDrive 'reparse-leaf-dir';New-Item -ItemType Junction -Path $leaf -Target $targetDirectory -ErrorAction Stop|Out-Null};(([IO.File]::GetAttributes($leaf)-band[IO.FileAttributes]::ReparsePoint)-ne0)|Should Be $true;$leafResult=Invoke-TestTrustAnchorCli (Join-Path $script:RepositoryRoot 'scripts/trust-anchor/Get-TrustAnchorFingerprint.ps1') @{EncryptedPrivateKeyPath=$leaf};$leafResult.HadErrors|Should Be $true;$leafResult.ErrorMessages[0]|Should Match '(?i)reparse'

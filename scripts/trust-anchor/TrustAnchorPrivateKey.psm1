@@ -663,9 +663,22 @@ function Get-TrustAnchorPhysicalParent {
     $full=[IO.Path]::GetFullPath($Path);$parent=Split-Path -Parent $full
     if([string]::IsNullOrWhiteSpace($parent) -or -not [IO.Directory]::Exists($parent)){throw "The target parent directory must already exist: $parent"}
     $physical=Resolve-PlatformPhysicalPath -Path $parent
-    $comparison=if($IsWindows){[StringComparison]::OrdinalIgnoreCase}else{[StringComparison]::Ordinal}
-    if(-not[string]::Equals([IO.Path]::GetFullPath([string]$physical),[IO.Path]::GetFullPath($parent),$comparison)){throw 'The target parent must not traverse a symlink, junction, or reparse point.'}
-    return [IO.Path]::GetFullPath($parent)
+    $physicalFull=[IO.Path]::GetFullPath([string]$physical);$parentFull=[IO.Path]::GetFullPath($parent)
+    $exact=[string]::Equals($physicalFull,$parentFull,[StringComparison]::Ordinal)
+    if(-not$exact){
+        $caseOnly=[string]::Equals($physicalFull,$parentFull,[StringComparison]::OrdinalIgnoreCase)
+        if(-not$caseOnly){throw 'The target parent must not traverse a symlink, junction, or reparse point.'}
+        $parentLease=$null;$physicalLease=$null
+        try{
+            $parentLease=Open-PlatformDirectory -Root $parentFull -RootOnly
+            $physicalLease=Open-PlatformDirectory -Root $physicalFull -RootOnly
+            $parentIdentity=Assert-PlatformFileIdentity -Lease $parentLease -Expected $parentLease.Observation -VerifyPath
+            $physicalIdentity=Assert-PlatformFileIdentity -Lease $physicalLease -Expected $physicalLease.Observation -VerifyPath
+            if([uint64]$parentIdentity.Device-ne[uint64]$physicalIdentity.Device-or[uint64]$parentIdentity.Inode-ne[uint64]$physicalIdentity.Inode){throw 'The target parent identity differs from its physical path.'}
+        }catch{throw 'The target parent must not traverse a symlink, junction, or reparse point.'}
+        finally{if($null-ne$physicalLease){$physicalLease.Dispose()};if($null-ne$parentLease){$parentLease.Dispose()}}
+    }
+    return $parentFull
 }
 
 function Assert-TrustAnchorOutsideWorktree {
