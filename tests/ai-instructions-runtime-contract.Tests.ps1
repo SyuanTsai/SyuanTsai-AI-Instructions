@@ -3899,6 +3899,35 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
         }
     }
 
+    # Scenario: diff --quiet reports a negative Windows NTSTATUS exit code for either managed-path inspection route.
+    # Purpose: Treat every exit code other than the documented 0 or 1 result as an operational failure.
+    It 'UnitT230b_rejects_negative_managed_path_diff_exit_codes' {
+        $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrapPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
+        $getDefinition={param($name)@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true))[0].Extent.Text}
+        $negativeExitCode=-1073741510
+        foreach($case in @(
+            @{Name='Test-GitPathHasChanges';WorkingTreeExitCode=$negativeExitCode;IndexExitCode=0},
+            @{Name='Test-GitPathHasChanges';WorkingTreeExitCode=0;IndexExitCode=$negativeExitCode},
+            @{Name='Test-GitPathHasStagedChanges';WorkingTreeExitCode=0;IndexExitCode=$negativeExitCode}
+        )){
+            $definition=&$getDefinition $case.Name
+            $message=& {
+                param($text,$name,$workingTreeExitCode,$indexExitCode)
+                Invoke-Expression $text
+                function Get-GitExitCode {
+                    param([string]$Repository,[string[]]$Arguments)
+                    if($Arguments -contains '--cached'){return $indexExitCode}
+                    return $workingTreeExitCode
+                }
+                function Invoke-Git { param([string]$Repository,[string[]]$Arguments);return @() }
+                try{& $name -Repository fixture -Path managed.md|Out-Null;$null}catch{$_.Exception.Message}
+            } $definition $case.Name $case.WorkingTreeExitCode $case.IndexExitCode
+            $message|Should Match 'Unable to inspect'
+            $message|Should Match ([regex]::Escape([string]$negativeExitCode))
+        }
+    }
+
     # Scenario: Bootstrap starts in an unborn repository or receives an operational rev-parse error while checking the initial HEAD.
     # Purpose: Preserve the existing unborn skip message, but fail with Git stderr instead of misreporting an operational error as no commit.
     It 'InterT231_distinguishes_unborn_HEAD_from_initial_HEAD_query_errors' {

@@ -2532,12 +2532,12 @@ function Test-GitPathHasChanges {
     $workingTreeExitCode = Get-GitExitCode -Repository $Repository -Arguments @('diff', '--quiet', '--', $Path)
     $indexExitCode = Get-GitExitCode -Repository $Repository -Arguments @('diff', '--cached', '--quiet', '--', $Path)
 
-    if ($workingTreeExitCode -gt 1) {
+    if ($workingTreeExitCode -notin @(0, 1)) {
         try { Invoke-Git -Repository $Repository -Arguments @('diff', '--quiet', '--', $Path) | Out-Null }
         catch { throw "Unable to inspect local changes for managed path: $Path (first git exit code: $workingTreeExitCode). $($_.Exception.Message)" }
         throw "Unable to inspect local changes for managed path: $Path (first git exit code: $workingTreeExitCode)."
     }
-    if ($indexExitCode -gt 1) {
+    if ($indexExitCode -notin @(0, 1)) {
         try { Invoke-Git -Repository $Repository -Arguments @('diff', '--cached', '--quiet', '--', $Path) | Out-Null }
         catch { throw "Unable to inspect local changes for managed path: $Path (first git exit code: $indexExitCode). $($_.Exception.Message)" }
         throw "Unable to inspect local changes for managed path: $Path (first git exit code: $indexExitCode)."
@@ -2556,7 +2556,7 @@ function Test-GitPathHasStagedChanges {
     )
 
     $exitCode = Get-GitExitCode -Repository $Repository -Arguments @('diff', '--cached', '--quiet', '--', $Path)
-    if ($exitCode -gt 1) {
+    if ($exitCode -notin @(0, 1)) {
         try { Invoke-Git -Repository $Repository -Arguments @('diff', '--cached', '--quiet', '--', $Path) | Out-Null }
         catch { throw "Unable to inspect staged changes for managed path: $Path (first git exit code: $exitCode). $($_.Exception.Message)" }
         throw "Unable to inspect staged changes for managed path: $Path (first git exit code: $exitCode)."
