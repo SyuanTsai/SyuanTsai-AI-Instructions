@@ -1185,6 +1185,25 @@ function Get-GitExitCode {
     }
 }
 
+function Get-GitQueryResult {
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string[]] $Arguments,
+        [Parameter(Mandatory = $true)][int[]] $NegativeExitCodes
+    )
+
+    $exitCode = Get-GitExitCode -Repository $Repository -Arguments $Arguments
+    if ($exitCode -eq 0) {
+        return [pscustomobject][ordered]@{ Succeeded = $true; Output = @(Invoke-Git -Repository $Repository -Arguments $Arguments) }
+    }
+    if ($exitCode -in $NegativeExitCodes) {
+        return [pscustomobject][ordered]@{ Succeeded = $false; Output = @() }
+    }
+
+    Invoke-Git -Repository $Repository -Arguments $Arguments | Out-Null
+    throw "git $($Arguments -join ' ') failed with exit code $exitCode."
+}
+
 function Get-FullPathWithoutTrailingSeparator {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -1693,7 +1712,8 @@ function ConvertFrom-GitQuotedPath {
 function Test-IsCanonicalInstructionSourceRepository {
     param([Parameter(Mandatory = $true)][string] $Repository)
 
-    if ((Get-GitExitCode -Repository $Repository -Arguments @('remote','get-url','origin')) -ne 0) { return $false }
+    $origin = Get-GitQueryResult -Repository $Repository -Arguments @('remote','get-url','origin') -NegativeExitCodes @(2)
+    if (-not $origin.Succeeded) { return $false }
     foreach ($originUrl in @(Invoke-Git -Repository $Repository -Arguments @('remote','get-url','--all','origin'))) {
         try {
             Assert-AiInstructionsCanonicalRepository -Repository ([string]$originUrl)
@@ -1765,8 +1785,9 @@ function Get-GitPathComparer {
     param([Parameter(Mandatory = $true)][string] $Repository)
 
     $ignoreCase = [Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
-    if ((Get-GitExitCode -Repository $Repository -Arguments @('config','--bool','--get','core.ignorecase')) -eq 0) {
-        $configured = ((Invoke-Git -Repository $Repository -Arguments @('config','--bool','--get','core.ignorecase')) | Select-Object -First 1).Trim()
+    $query = Get-GitQueryResult -Repository $Repository -Arguments @('config','--bool','--get','core.ignorecase') -NegativeExitCodes @(1)
+    if ($query.Succeeded) {
+        $configured = ([string]($query.Output | Select-Object -First 1)).Trim()
         if ($configured -ceq 'true') { $ignoreCase = $true }
     }
     if ($ignoreCase) { return [System.StringComparer]::OrdinalIgnoreCase }
@@ -1966,7 +1987,8 @@ function Get-ClaudeProjectOwnedWorktreeRoots {
     $worktreeRoots = @(Get-ManagedWorktreeRoots -Repository $Repository -Strict:$Strict)
     foreach ($worktreeRoot in $worktreeRoots) {
         $basePath = Join-Path $worktreeRoot 'CLAUDE.md'
-        $tracked = (Get-GitExitCode -Repository $worktreeRoot -Arguments @('ls-files','--error-unmatch','--','CLAUDE.md')) -eq 0
+        $trackedQuery = Get-GitQueryResult -Repository $worktreeRoot -Arguments @('ls-files','--error-unmatch','--','CLAUDE.md') -NegativeExitCodes @(1)
+        $tracked = [bool]$trackedQuery.Succeeded
         $staged = Test-GitPathHasStagedChanges -Repository $worktreeRoot -Path 'CLAUDE.md'
         $baseExists = Test-Path -LiteralPath $basePath -PathType Leaf
         $managedEntry = $null
@@ -2510,8 +2532,15 @@ function Test-GitPathHasChanges {
     $workingTreeExitCode = Get-GitExitCode -Repository $Repository -Arguments @('diff', '--quiet', '--', $Path)
     $indexExitCode = Get-GitExitCode -Repository $Repository -Arguments @('diff', '--cached', '--quiet', '--', $Path)
 
-    if ($workingTreeExitCode -gt 1 -or $indexExitCode -gt 1) {
-        throw "Unable to inspect local changes for managed path: $Path"
+    if ($workingTreeExitCode -gt 1) {
+        try { Invoke-Git -Repository $Repository -Arguments @('diff', '--quiet', '--', $Path) | Out-Null }
+        catch { throw "Unable to inspect local changes for managed path: $Path (first git exit code: $workingTreeExitCode). $($_.Exception.Message)" }
+        throw "Unable to inspect local changes for managed path: $Path (first git exit code: $workingTreeExitCode)."
+    }
+    if ($indexExitCode -gt 1) {
+        try { Invoke-Git -Repository $Repository -Arguments @('diff', '--cached', '--quiet', '--', $Path) | Out-Null }
+        catch { throw "Unable to inspect local changes for managed path: $Path (first git exit code: $indexExitCode). $($_.Exception.Message)" }
+        throw "Unable to inspect local changes for managed path: $Path (first git exit code: $indexExitCode)."
     }
 
     return $workingTreeExitCode -eq 1 -or $indexExitCode -eq 1
@@ -2528,7 +2557,9 @@ function Test-GitPathHasStagedChanges {
 
     $exitCode = Get-GitExitCode -Repository $Repository -Arguments @('diff', '--cached', '--quiet', '--', $Path)
     if ($exitCode -gt 1) {
-        throw "Unable to inspect staged changes for managed path: $Path"
+        try { Invoke-Git -Repository $Repository -Arguments @('diff', '--cached', '--quiet', '--', $Path) | Out-Null }
+        catch { throw "Unable to inspect staged changes for managed path: $Path (first git exit code: $exitCode). $($_.Exception.Message)" }
+        throw "Unable to inspect staged changes for managed path: $Path (first git exit code: $exitCode)."
     }
 
     return $exitCode -eq 1
@@ -5918,7 +5949,8 @@ if (Test-IsCanonicalInstructionSourceRepository -Repository $targetRootPath) {
     return
 }
 
-if ((Get-GitExitCode -Repository $targetRootPath -Arguments @('rev-parse', '--verify', 'HEAD')) -ne 0) {
+$initialHeadState = Get-RepositoryHeadQueryState -Repository $targetRootPath
+if ($null -eq $initialHeadState.objectId) {
     Write-Output 'AI instruction sync skipped: the target repository has no commit, so managed changes cannot be isolated safely.'
     return
 }
@@ -6069,14 +6101,16 @@ if (Test-Path -LiteralPath $configurationFullPath -PathType Leaf) {
         return
     }
 
-    if ($excludedRepositoryLocations.Count -gt 0 -and
-        (Get-GitExitCode -Repository $targetRootPath -Arguments @('remote', 'get-url', 'origin')) -eq 0) {
-        $originUrls = @(Invoke-Git -Repository $targetRootPath -Arguments @('remote', 'get-url', '--all', 'origin'))
-        foreach ($originUrl in $originUrls) {
-            $originLocation = Get-NormalizedRepositoryLocation -RepositoryUrl ([string] $originUrl)
-            if (Test-RepositoryLocationMatches -RepositoryLocation $originLocation -ConfiguredRepositoryLocations $excludedRepositoryLocations) {
-                Write-Output "AI instruction sync skipped: repository is excluded by ai-instructions-sync.json: $originUrl"
-                return
+    if ($excludedRepositoryLocations.Count -gt 0) {
+        $originQuery = Get-GitQueryResult -Repository $targetRootPath -Arguments @('remote', 'get-url', 'origin') -NegativeExitCodes @(2)
+        if ($originQuery.Succeeded) {
+            $originUrls = @(Invoke-Git -Repository $targetRootPath -Arguments @('remote', 'get-url', '--all', 'origin'))
+            foreach ($originUrl in $originUrls) {
+                $originLocation = Get-NormalizedRepositoryLocation -RepositoryUrl ([string] $originUrl)
+                if (Test-RepositoryLocationMatches -RepositoryLocation $originLocation -ConfiguredRepositoryLocations $excludedRepositoryLocations) {
+                    Write-Output "AI instruction sync skipped: repository is excluded by ai-instructions-sync.json: $originUrl"
+                    return
+                }
             }
         }
     }

@@ -55,6 +55,62 @@ function Get-RemediationGitExitCode {
     }
 }
 
+function Get-RemediationGitQueryResult {
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string] $GitExecutable,
+        [Parameter(Mandatory = $true)][string[]] $Arguments,
+        [Parameter(Mandatory = $true)][int[]] $NegativeExitCodes
+    )
+
+    $exitCode = Get-RemediationGitExitCode -Repository $Repository -GitExecutable $GitExecutable -Arguments $Arguments
+    if ($exitCode -eq 0) {
+        return [pscustomobject][ordered]@{
+            Succeeded = $true
+            Output = @(Invoke-RemediationGit -Repository $Repository -GitExecutable $GitExecutable -Arguments $Arguments)
+        }
+    }
+    if ($exitCode -in $NegativeExitCodes) {
+        return [pscustomobject][ordered]@{ Succeeded = $false; Output = @() }
+    }
+
+    Invoke-RemediationGit -Repository $Repository -GitExecutable $GitExecutable -Arguments $Arguments | Out-Null
+    throw "git $($Arguments -join ' ') failed with exit code $exitCode."
+}
+
+function Get-RemediationHeadQueryState {
+    param([Parameter(Mandatory = $true)][string] $Repository,[Parameter(Mandatory = $true)][string] $GitExecutable)
+
+    $symbolic = Get-RemediationGitQueryResult -Repository $Repository -GitExecutable $GitExecutable `
+        -Arguments @('symbolic-ref','-q','HEAD') -NegativeExitCodes @(1)
+    $object = Get-RemediationGitQueryResult -Repository $Repository -GitExecutable $GitExecutable `
+        -Arguments @('rev-parse','--verify','--quiet','HEAD') -NegativeExitCodes @(1)
+    return [pscustomobject][ordered]@{
+        Reference = $(if ($symbolic.Succeeded) { ([string]($symbolic.Output | Select-Object -First 1)).Trim() } else { $null })
+        ObjectId = $(if ($object.Succeeded) { ([string]($object.Output | Select-Object -First 1)).Trim() } else { $null })
+    }
+}
+
+function Get-RemediationGitRefState {
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string] $GitExecutable,
+        [Parameter(Mandatory = $true)][string] $Reference
+    )
+
+    $lines = @(Invoke-RemediationGit -Repository $Repository -GitExecutable $GitExecutable `
+        -Arguments @('for-each-ref','--format=%(refname)%09%(objectname)','--',$Reference) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    $matches = @($lines | ForEach-Object {
+        $match = [regex]::Match(([string]$_).Trim(),'^(?<Reference>[^\t]+)\t(?<ObjectId>[0-9a-fA-F]+)$')
+        if (-not $match.Success) { throw "git for-each-ref returned an invalid ref state record for ${Reference}: $_" }
+        if ($match.Groups['Reference'].Value -ceq $Reference) { $match.Groups['ObjectId'].Value.ToLowerInvariant() }
+    })
+    if ($matches.Count -eq 0) { return [pscustomobject][ordered]@{ Exists = $false; ObjectId = $null } }
+    if ($matches.Count -ne 1) { throw "git for-each-ref returned multiple state records for $Reference." }
+    return [pscustomobject][ordered]@{ Exists = $true; ObjectId = [string]$matches[0] }
+}
+
 function ConvertFrom-RemediationGitQuotedPath {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -196,8 +252,10 @@ function Get-RemediationPathComparer {
     param([Parameter(Mandatory = $true)][string] $Repository,[Parameter(Mandatory = $true)][string] $GitExecutable)
 
     $ignoreCase = [Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
-    if ((Get-RemediationGitExitCode -Repository $Repository -GitExecutable $GitExecutable -Arguments @('config','--bool','--get','core.ignorecase')) -eq 0) {
-        $configured = ((Invoke-RemediationGit -Repository $Repository -GitExecutable $GitExecutable -Arguments @('config','--bool','--get','core.ignorecase')) | Select-Object -First 1).Trim()
+    $query = Get-RemediationGitQueryResult -Repository $Repository -GitExecutable $GitExecutable `
+        -Arguments @('config','--bool','--get','core.ignorecase') -NegativeExitCodes @(1)
+    if ($query.Succeeded) {
+        $configured = ([string]($query.Output | Select-Object -First 1)).Trim()
         if ($configured -ceq 'true') { $ignoreCase = $true }
     }
     if ($ignoreCase) { return [System.StringComparer]::OrdinalIgnoreCase }
@@ -212,7 +270,8 @@ function Get-RemediationTrackedPathSets {
         [void]$indexPaths.Add((ConvertFrom-RemediationGitQuotedPath -Path ([string]$line)).Replace('\','/'))
     }
     $headPaths = New-Object 'System.Collections.Generic.HashSet[string]' $Comparer
-    if ((Get-RemediationGitExitCode -Repository $Repository -GitExecutable $GitExecutable -Arguments @('rev-parse','--verify','HEAD')) -eq 0) {
+    $headState = Get-RemediationHeadQueryState -Repository $Repository -GitExecutable $GitExecutable
+    if (-not [string]::IsNullOrWhiteSpace([string]$headState.ObjectId)) {
         foreach ($line in @(Invoke-RemediationGit -Repository $Repository -GitExecutable $GitExecutable -Arguments @('-c','core.quotePath=true','ls-tree','-r','--name-only','HEAD'))) {
             [void]$headPaths.Add((ConvertFrom-RemediationGitQuotedPath -Path ([string]$line)).Replace('\','/'))
         }
@@ -584,20 +643,16 @@ function New-AgentArtifactRemediationPlan {
     $mutationPaths = @(Get-RemediationMutationPaths -Repository $repositoryRoot -TrackedPaths $trackedPaths `
         -LegacyManifestPaths $legacyManifestPaths -Comparer $comparer -ProtectedPaths $ProtectedPathPrefixes)
     if ($mutationPaths.Count -eq 0) { return $null }
-    $head = ''
-    if ((Get-RemediationGitExitCode -Repository $repositoryRoot -GitExecutable $GitExecutable -Arguments @('rev-parse','--verify','HEAD')) -eq 0) {
-        $head = ((Invoke-RemediationGit -Repository $repositoryRoot -GitExecutable $GitExecutable -Arguments @('rev-parse','--verify','HEAD')) | Select-Object -First 1).Trim()
-    }
-    $headReference = ''
-    if ((Get-RemediationGitExitCode -Repository $repositoryRoot -GitExecutable $GitExecutable -Arguments @('symbolic-ref','-q','HEAD')) -eq 0) {
-        $headReference = ((Invoke-RemediationGit -Repository $repositoryRoot -GitExecutable $GitExecutable -Arguments @('symbolic-ref','-q','HEAD')) | Select-Object -First 1).Trim()
-    }
+    $headState = Get-RemediationHeadQueryState -Repository $repositoryRoot -GitExecutable $GitExecutable
+    $head = if ($null -eq $headState.ObjectId) { '' } else { [string]$headState.ObjectId }
+    $headReference = if ($null -eq $headState.Reference) { '' } else { [string]$headState.Reference }
     $backup = New-AgentArtifactRemediationBackup -Repository $repositoryRoot -GitExecutable $GitExecutable -TrackedPaths $trackedPaths `
         -MutationPaths $mutationPaths -Comparer $comparer -IndexPath $indexPath -CommonGitDirectory $commonGitDirectory `
         -Head $head -HeadReference $headReference -ProtectedPaths $ProtectedPathPrefixes
-    $excludePath = Get-RemediationGitInfoExcludePath -Repository $repositoryRoot -GitExecutable $GitExecutable -CommonGitDirectory $commonGitDirectory
-    $excludePatterns = @($mutationPaths | Sort-Object -Unique)
-    $transaction = [pscustomobject][ordered]@{
+    try {
+        $excludePath = Get-RemediationGitInfoExcludePath -Repository $repositoryRoot -GitExecutable $GitExecutable -CommonGitDirectory $commonGitDirectory
+        $excludePatterns = @($mutationPaths | Sort-Object -Unique)
+        $transaction = [pscustomobject][ordered]@{
         Repository=$repositoryRoot
         GitExecutable=$GitExecutable
         CommonGitDirectory=$commonGitDirectory
@@ -614,19 +669,26 @@ function New-AgentArtifactRemediationPlan {
         ObjectFormat=((Invoke-RemediationGit -Repository $repositoryRoot -GitExecutable $GitExecutable -Arguments @('rev-parse','--show-object-format')|Select-Object -First 1).Trim())
         IndexPlan=$null
         HeadMode=$(if([string]::IsNullOrWhiteSpace($head)){'unborn'}elseif([string]::IsNullOrWhiteSpace($headReference)){'detached'}else{'symbolic'})
-    }
+        }
 
-    if ($trackedPaths.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($head)) {
-        $transaction.NewCommit=New-RemediationCommitObject -Repository $repositoryRoot -GitExecutable $GitExecutable -Head $head -Paths $trackedPaths -ProtectedPaths $ProtectedPathPrefixes
+        if ($trackedPaths.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($head)) {
+            $transaction.NewCommit=New-RemediationCommitObject -Repository $repositoryRoot -GitExecutable $GitExecutable -Head $head -Paths $trackedPaths -ProtectedPaths $ProtectedPathPrefixes
+        }
+        if ($trackedPaths.Count -gt 0) {
+            $transaction.IndexPlan=New-RemediationIndexPlan -Repository $repositoryRoot -GitExecutable $GitExecutable -IndexPath $indexPath -Paths $trackedPaths -ProtectedPaths $ProtectedPathPrefixes
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$transaction.NewCommit) -and [string]::IsNullOrWhiteSpace($headReference)) {
+            $baseName='refs/heads/codex/ai-instructions-remediation-'+$head.Substring(0,12);$candidate=$baseName;$suffix=1
+            while ((Get-RemediationGitRefState -Repository $repositoryRoot -GitExecutable $GitExecutable -Reference $candidate).Exists) {$candidate=$baseName+'-'+$suffix;$suffix++}
+            $transaction.NewHeadReference=$candidate
+        }
+        return $transaction
     }
-    if ($trackedPaths.Count -gt 0) {
-        $transaction.IndexPlan=New-RemediationIndexPlan -Repository $repositoryRoot -GitExecutable $GitExecutable -IndexPath $indexPath -Paths $trackedPaths -ProtectedPaths $ProtectedPathPrefixes
+    catch {
+        if ($null -ne $backup -and $null -ne $backup.Root -and (Test-Path -LiteralPath $backup.Root -PathType Container)) {
+            Remove-Item -LiteralPath $backup.Root -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        throw
     }
-    if (-not [string]::IsNullOrWhiteSpace([string]$transaction.NewCommit) -and [string]::IsNullOrWhiteSpace($headReference)) {
-        $baseName='refs/heads/codex/ai-instructions-remediation-'+$head.Substring(0,12);$candidate=$baseName;$suffix=1
-        while ((Get-RemediationGitExitCode -Repository $repositoryRoot -GitExecutable $GitExecutable -Arguments @('show-ref','--verify','--quiet',$candidate)) -eq 0) {$candidate=$baseName+'-'+$suffix;$suffix++}
-        $transaction.NewHeadReference=$candidate
-    }
-    return $transaction
         }
 Export-ModuleMember -Function New-AgentArtifactRemediationPlan, Test-IsReservedAgentArtifactPath, Test-IsProtectedClaudeFamilyPath

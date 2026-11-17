@@ -484,4 +484,86 @@ if(-not(Get-Command ConvertFrom-GitWorktreePorcelainZ -ErrorAction SilentlyConti
             if(Test-Path -LiteralPath $transaction.Backup.Root){Remove-Item -LiteralPath $transaction.Backup.Root -Recurse -Force}
         }
     }
+
+    # Scenario: Remediation planning receives an operational Git failure while querying HEAD or a detached-HEAD candidate ref.
+    # Purpose: Preserve the Git diagnostic, return no plan, and leave worktree, index, HEAD, and recovery-backup inventory unchanged.
+    It 'InterT68_rejects_<FailurePoint>_Git_errors_before_returning_a_remediation_plan' -TestCases @(
+        @{FailurePoint='rev-parse';Token='rev-parse --verify --quiet HEAD';Detached=$false},
+        @{FailurePoint='symbolic-ref';Token='symbolic-ref -q HEAD';Detached=$false},
+        @{FailurePoint='candidate-ref';Token='for-each-ref';Detached=$true}
+    ) {
+        param($FailurePoint,$Token,$Detached)
+        $repository=Join-Path $TestDrive ("git-query-error-$FailurePoint")
+        New-Item -ItemType Directory -Force -Path $repository|Out-Null
+        & git -C $repository init --quiet
+        & git -C $repository config user.name 'Remediation Test'
+        & git -C $repository config user.email 'remediation@example.test'
+        [IO.File]::WriteAllText((Join-Path $repository 'AGENTS.md'),"tracked Agent`n",[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $repository 'product.txt'),"product`n",[Text.UTF8Encoding]::new($false))
+        & git -C $repository add -- AGENTS.md product.txt
+        & git -C $repository commit --quiet -m fixture
+        if($Detached){$oid=(@(& git -C $repository rev-parse HEAD)|Select-Object -First 1).Trim();& git -C $repository checkout --quiet --detach $oid}
+
+        $module=Get-Module agent-artifact-remediation
+        & $module {
+            param($token,$failurePoint)
+            $script:OriginalInvokeRemediationGit=(Get-Command Invoke-RemediationGit).ScriptBlock
+            $script:OriginalGetRemediationGitExitCode=(Get-Command Get-RemediationGitExitCode).ScriptBlock
+            $script:InjectedRemediationGitToken=$token
+            $script:InjectedRemediationGitFailurePoint=$failurePoint
+            $wrapper={
+                param([string]$Repository,[string]$GitExecutable,[string[]]$Arguments)
+                if(($Arguments-join' ') -like "*$script:InjectedRemediationGitToken*"){throw "injected $script:InjectedRemediationGitFailurePoint git failure"}
+                & $script:OriginalInvokeRemediationGit -Repository $Repository -GitExecutable $GitExecutable -Arguments $Arguments
+            }
+            Set-Item -Path Function:script:Invoke-RemediationGit -Value $wrapper -Force
+            $exitCodeWrapper={
+                param([string]$Repository,[string]$GitExecutable,[string[]]$Arguments)
+                if(($Arguments-join' ') -like "*$script:InjectedRemediationGitToken*"){return 128}
+                & $script:OriginalGetRemediationGitExitCode -Repository $Repository -GitExecutable $GitExecutable -Arguments $Arguments
+            }
+            Set-Item -Path Function:script:Get-RemediationGitExitCode -Value $exitCodeWrapper -Force
+        } $Token $FailurePoint
+        $headBefore=(@(& git -C $repository rev-parse HEAD)|Select-Object -First 1).Trim()
+        $indexBefore=(Get-FileHash -Algorithm SHA256 -LiteralPath ((& git -C $repository rev-parse --git-path index|Select-Object -First 1).Trim())).Hash
+        $statusBefore=@(& git -C $repository status --porcelain=v2 --untracked-files=all)
+        $backupParent=Join-Path ([IO.Path]::GetTempPath()) 'codex-agent-artifact-backups'
+        $backupsBefore=@(if(Test-Path -LiteralPath $backupParent){Get-ChildItem -LiteralPath $backupParent -Directory|ForEach-Object{$_.Name}})
+
+        try {
+            $failure=$null
+            try{New-AgentArtifactRemediationPlan -Repository $repository|Out-Null}catch{$failure=$_.Exception.Message}
+
+            $failure|Should Match "injected $FailurePoint git failure"
+            ((@(& git -C $repository rev-parse HEAD)|Select-Object -First 1).Trim())|Should Be $headBefore
+            (Get-FileHash -Algorithm SHA256 -LiteralPath ((& git -C $repository rev-parse --git-path index|Select-Object -First 1).Trim())).Hash|Should Be $indexBefore
+            (@(& git -C $repository status --porcelain=v2 --untracked-files=all)-join"`n")|Should Be ($statusBefore-join"`n")
+            (Get-Content -Raw -LiteralPath (Join-Path $repository 'AGENTS.md')).Trim()|Should Be 'tracked Agent'
+            $backupsAfter=@(if(Test-Path -LiteralPath $backupParent){Get-ChildItem -LiteralPath $backupParent -Directory|ForEach-Object{$_.Name}})
+            ($backupsAfter-join"`n")|Should Be ($backupsBefore-join"`n")
+        }
+        finally { Import-Module $script:RemediationModule -Force }
+    }
+
+    # Scenario: Remediation plans the same tracked Agent artifact from symbolic, detached, and unborn HEAD states.
+    # Purpose: Keep established HeadMode values unchanged while only operational Git failures become fatal.
+    It 'InterT69_preserves_<ExpectedMode>_HeadMode_after_query_hardening' -TestCases @(
+        @{ExpectedMode='symbolic'},@{ExpectedMode='detached'},@{ExpectedMode='unborn'}
+    ) {
+        param($ExpectedMode)
+        $repository=Join-Path $TestDrive ("head-mode-$ExpectedMode")
+        New-Item -ItemType Directory -Force -Path $repository|Out-Null
+        & git -C $repository init --quiet
+        & git -C $repository config user.name 'Remediation Test'
+        & git -C $repository config user.email 'remediation@example.test'
+        [IO.File]::WriteAllText((Join-Path $repository 'AGENTS.md'),"tracked Agent`n",[Text.UTF8Encoding]::new($false))
+        & git -C $repository add -- AGENTS.md
+        if($ExpectedMode-cne'unborn'){
+            & git -C $repository commit --quiet -m fixture
+            if($ExpectedMode-ceq'detached'){$oid=(@(& git -C $repository rev-parse HEAD)|Select-Object -First 1).Trim();& git -C $repository checkout --quiet --detach $oid}
+        }
+        $transaction=New-AgentArtifactRemediationPlan -Repository $repository
+        try{$transaction.HeadMode|Should BeExactly $ExpectedMode}
+        finally{if($null-ne$transaction-and(Test-Path -LiteralPath $transaction.Backup.Root)){Remove-Item -LiteralPath $transaction.Backup.Root -Recurse -Force}}
+    }
 }

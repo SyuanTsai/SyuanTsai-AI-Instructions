@@ -3858,4 +3858,74 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
             {&$transactionModule {param($left,$right)Assert-InstallJournalV2TrustedTransition -Previous $left -Next $right|Out-Null} $committed $tampered}|Should Throw
         }finally{Remove-Module $transactionModule -Force}
     }
+
+    # Scenario: Bootstrap queries remote/config/tracked/diff state and Git returns an operational error rather than a documented negative result.
+    # Purpose: Require each remaining exit-code consumer to preserve the Git diagnostic while retaining its documented negative-code contract.
+    It 'UnitT230_hardens_all_remaining_bootstrap_Git_exit_code_consumers' {
+        $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrapPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
+        $getDefinition={param($name)@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true))[0].Extent.Text}
+        $queryDefinition=&$getDefinition 'Get-GitQueryResult'
+        $staticExpectations=@(
+            @{Name='Test-IsCanonicalInstructionSourceRepository';Pattern="remote','get-url','origin'.*-NegativeExitCodes @\(2\)"},
+            @{Name='Get-GitPathComparer';Pattern="core\.ignorecase'.*-NegativeExitCodes @\(1\)"},
+            @{Name='Get-ClaudeProjectOwnedWorktreeRoots';Pattern="ls-files','--error-unmatch'.*-NegativeExitCodes @\(1\)"}
+        )
+        foreach($expectation in $staticExpectations){(& $getDefinition $expectation.Name)|Should Match $expectation.Pattern}
+        foreach($command in @(
+            @('remote','get-url','origin'),@('config','--bool','--get','core.ignorecase'),@('ls-files','--error-unmatch','--','CLAUDE.md')
+        )){
+            $message=& {param($definition,$arguments)Invoke-Expression $definition;function Get-GitExitCode{param([string]$Repository,[string[]]$Arguments);128};function Invoke-Git{param([string]$Repository,[string[]]$Arguments);throw "injected git error: $($Arguments-join' ')"};try{Get-GitQueryResult -Repository fixture -Arguments $arguments -NegativeExitCodes @(1,2)|Out-Null;$null}catch{$_.Exception.Message}} $queryDefinition $command
+            $message|Should Match 'injected git error'
+        }
+        foreach($functionName in @('Test-GitPathHasChanges','Test-GitPathHasStagedChanges')){
+            $definition=&$getDefinition $functionName
+            $message=& {param($text,$name)Invoke-Expression $text;function Get-GitExitCode{param([string]$Repository,[string[]]$Arguments);128};function Invoke-Git{param([string]$Repository,[string[]]$Arguments);throw "injected diff error: $($Arguments-join' ')"};try{& $name -Repository fixture -Path managed.md|Out-Null;$null}catch{$_.Exception.Message}} $definition $functionName
+            $message|Should Match 'injected diff error'
+        }
+    }
+
+    # Scenario: diff --quiet initially reports an operational Git error, but the diagnostic rerun succeeds.
+    # Purpose: The successful rerun must not turn the original failed inspection into a false "no changes" result.
+    It 'UnitT230a_rejects_managed_path_diff_errors_when_diagnostic_rerun_succeeds' {
+        $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrapPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
+        $getDefinition={param($name)@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true))[0].Extent.Text}
+        foreach($functionName in @('Test-GitPathHasChanges','Test-GitPathHasStagedChanges')){
+            $definition=&$getDefinition $functionName
+            $message=& {param($text,$name)Invoke-Expression $text;function Get-GitExitCode{param([string]$Repository,[string[]]$Arguments);128};function Invoke-Git{param([string]$Repository,[string[]]$Arguments);return @()};try{& $name -Repository fixture -Path managed.md|Out-Null;$null}catch{$_.Exception.Message}} $definition $functionName
+            $message|Should Match 'Unable to inspect'
+            $message|Should Match '128'
+        }
+    }
+
+    # Scenario: Bootstrap starts in an unborn repository or receives an operational rev-parse error while checking the initial HEAD.
+    # Purpose: Preserve the existing unborn skip message, but fail with Git stderr instead of misreporting an operational error as no commit.
+    It 'InterT231_distinguishes_unborn_HEAD_from_initial_HEAD_query_errors' {
+        $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
+        $repository=Join-Path $TestDrive 'bootstrap-head-query';New-Item -ItemType Directory -Force -Path $repository|Out-Null;& git -C $repository init --quiet
+        $userHome=Join-Path $TestDrive 'isolated-user';New-Item -ItemType Directory -Force -Path $userHome|Out-Null
+        $configuration=Join-Path $TestDrive 'missing-configuration.json'
+        $unbornOutput=@(& pwsh -NoProfile -File $bootstrapPath -TargetRoot $repository -UserHome $userHome -ConfigurationPath $configuration -RuntimeRoot (Join-Path $script:RepositoryRoot 'scripts') 2>&1)
+        $LASTEXITCODE|Should Be 0
+        ($unbornOutput-join[Environment]::NewLine)|Should Match 'target repository has no commit'
+
+        $realGit=(Get-Command git -ErrorAction Stop).Source;$shim=Join-Path $TestDrive 'bootstrap-head-error.cmd'
+        $shimText=@"
+@echo off
+setlocal
+echo(%*| %SystemRoot%\System32\findstr.exe /L /C:"rev-parse --verify --quiet HEAD" >nul
+if not errorlevel 1 (
+  1>&2 echo injected initial HEAD query failure
+  exit /b 128
+)
+"$realGit" %*
+exit /b %errorlevel%
+"@
+        [IO.File]::WriteAllText($shim,$shimText,[Text.Encoding]::ASCII)
+        $errorOutput=@(& pwsh -NoProfile -File $bootstrapPath -TargetRoot $repository -UserHome $userHome -ConfigurationPath $configuration -RuntimeRoot (Join-Path $script:RepositoryRoot 'scripts') -GitExecutable $shim 2>&1)
+        $LASTEXITCODE|Should Not Be 0
+        ($errorOutput-join[Environment]::NewLine)|Should Match 'injected initial HEAD query failure'
+        ($errorOutput-join[Environment]::NewLine)|Should Not Match 'target repository has no commit'
+    }
 }
