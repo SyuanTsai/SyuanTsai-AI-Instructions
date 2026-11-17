@@ -272,7 +272,7 @@ Describe 'Consumer gate workflow templates' {
     # Purpose: The allowlist keeps existing push, pull-request, and dispatch CI while adding the protected gate event.
     It 'UnitT67_documents_the_exact_actions_event_allowlist' {
         $readme=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'consumer/README.md')
-        $match=[regex]::Match($readme,'(?m)^3\. (?<text>Actions[^\r\n]+)$')
+        $match=[regex]::Match($readme,'(?m)^3\. (?<text>Actions[^\r\n]+)\r?$')
         $match.Success|Should Be $true
         $allowlistClause=$match.Groups['text'].Value.Split(';')[0]
         @([regex]::Matches($allowlistClause,'`(?<event>[a-z_]+)`')|ForEach-Object{$_.Groups['event'].Value}|Select-Object -Skip 1|Sort-Object) |
