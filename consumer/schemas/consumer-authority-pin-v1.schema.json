@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/consumer-authority-pin-v1.schema.json",
+  "title": "Consumer authority pin v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "repository", "commit"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "repository": { "const": "https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git" },
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+  }
+}

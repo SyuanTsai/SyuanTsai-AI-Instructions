@@ -78,6 +78,23 @@ Describe 'SYP258 source tool identity freeze' {
     }
 }
 
+Describe 'P11-pin phase-scoped resolver credential' {
+    # Scenario: Consumer workflows acquire tools in prepare and then run candidate-controlled phases.
+    # Purpose: Make the read-only workflow token unavailable to validate, finalize, aggregate, and every candidate child.
+    It 'UnitT950_limits_the_token_to_prepare_and_clears_all_aliases' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $formal=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'consumer/workflows/consumer-gate.yml')
+        $transition=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'consumer/workflows/consumer-gate-transition.yml')
+        ([regex]::Matches($formal,'STANDARD_VALIDATION_GITHUB_API_TOKEN:')).Count|Should Be 1
+        ([regex]::Matches($transition,'STANDARD_VALIDATION_GITHUB_API_TOKEN:')).Count|Should Be 1
+        $entry=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'scripts/consumer/Invoke-ConsumerSourceGate.ps1')
+        $module=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'scripts/consumer/ConsumerGate.psm1')
+        foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){$entry.Contains($name)|Should Be $true;$module.Contains($name)|Should Be $true}
+        $entry.Contains('Invoke-GateCredentialScopedPreparation $authorityRoot $CandidateRoot $WorkRoot $Platform $binding $eventRepository $token')|Should Be $true
+        $module.Contains('Assert-GateCredentialAbsent $WorkRoot $Token')|Should Be $true
+    }
+}
+
 Describe 'Acquisition content hashing allocation' {
     # Scenario: A four-lane batch hashes many small files and one buffer-boundary-sized binary file.
     # Purpose: Bound process-wide allocations while retaining every independently computed SHA-256.
@@ -2166,18 +2183,17 @@ Describe 'Third-party raw Skill tool boundary' {
     }
     # Scenario: A future v2 pin might be mistaken for authority to change protected readers or remove consumer tests.
     # Purpose: Keep reader upgrade ordering and downstream source-copy adoption separate from resolver and schema changes.
-    It 'UnitT06_documents_protected_reader_upgrade_before_source_copy_adoption' {
+    It 'UnitT06_documents_consumer_gate_replacement_before_source_copy_adoption' {
         $root=Split-Path -Parent $PSScriptRoot
         $standard=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/skill-repository-standard.md')
         foreach($required in @(
-            'scripts/Invoke-RepositoryCheck.ps1', 'scripts/Invoke-CorePester.ps1',
-            'scripts/CorePesterIntegrity.psm1', 'scripts/Test-Repository.ps1', 'tests/validate-catalog.ps1',
-            'candidate==base bytes', 'full discovered tests tree',
-            'normal reader PR and merged before candidate adoption',
+            'scripts/consumer/Invoke-ConsumerSourceGate.ps1', 'config/consumer-gate.json',
+            'consumer/legacy-migration.json', 'The protected source layer contains only the bootstrap and authority-published workflow templates',
+            'Repository-local readers are replaced by the authority consumer gate', 'deleted or split', 'complete discovered test tree',
             'A pin or immutable version update alone MUST NOT transfer ownership',
             'Source-copy equivalence or removal is deferred to downstream adoption',
             'identified item by item', 'normal required three-platform Core CI gate',
-            'This list records the Code trial', 'not a universal file inventory', 'Each source repository MUST retain its own protected reader identities'
+            'Historically, the Code trial protected a repository-local reader set'
         )) { if(-not $standard.Contains($required)){throw "The reader/adoption contract is missing '$required'."} }
     }
     # Scenario: The package adapter validates inert bytes and reports the remaining canonical gate.
@@ -2292,7 +2308,14 @@ Describe 'SYP280 Core candidate inventory diagnostics SourceValidation' {
                     if($Arguments[0] -ceq 'diff') {return [pscustomobject]@{stdout='';stderr='';exitCode=0;status='passed';cleanedUp=$true}}
                     throw "Unexpected authority Git call: $($Arguments -join ' ')"
                 }
-                & $global:Syp280CoreOriginalGit -RepositoryRoot $RepositoryRoot -WorkingDirectory $WorkingDirectory -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds -AllowedExitCodes $AllowedExitCodes
+                # This fixture exercises candidate inventory lifecycle, not the platform process guard. Invoke the
+                # already-created temporary Git fixture directly so the test does not depend on the host Git package's
+                # hard-link topology (Git for Windows may hard-link git.exe to its upload/receive-pack entry points).
+                $fixtureHooks=Join-Path ([IO.Path]::GetTempPath()) 'syp280-disabled-hooks'
+                [void][IO.Directory]::CreateDirectory($fixtureHooks)
+                $output=@(& git -c "core.hooksPath=$fixtureHooks" -c credential.helper= -C $RepositoryRoot @Arguments 2>&1);$exitCode=$LASTEXITCODE
+                if($AllowedExitCodes-notcontains$exitCode){throw "Fixture Git command failed ($exitCode): $($output-join' ')"}
+                [pscustomobject]@{stdout=($output-join"`n");stderr='';exitCode=$exitCode;status='passed';cleanedUp=$true}
             }
             Mock Invoke-StandardValidationProcess {
                 param([string]$Command,[string[]]$Arguments,[string]$WorkingDirectory,[hashtable]$Environment,[int]$TimeoutSeconds,[string]$CancellationPath,[switch]$CoreLifecycleOnly,[switch]$EmitSupervisorProgress,[int]$SupervisorProgressIntervalSeconds=30)

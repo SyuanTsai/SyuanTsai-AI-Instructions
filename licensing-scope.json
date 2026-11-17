@@ -1330,6 +1330,30 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "tests/fixtures/Invoke-ConsumerGateCredentialFixture.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/consumer-bootstrap-cleanup-fixture.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/consumer-gate-credential-oracle.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/consumer-gate-http-fixture.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/consumer-gate-resolver-fixture.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/consumer-gate-validation-runner-fixture.ps1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "tests/fixtures/internal-source-continuation/syp171-skillspector-2.12.0-shape.json",
       "license": "Apache-2.0"
     },
@@ -1591,6 +1615,78 @@
     },
     {
       "path": "tests/update-ai-instructions.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "consumer/README.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "consumer/bootstrap/Invoke-PinnedAuthority.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "consumer/consumer-gate-interface.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "consumer/legacy-migration.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "consumer/schemas/consumer-authority-pin-v1.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "consumer/schemas/consumer-gate-config-v1.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "consumer/schemas/consumer-legacy-migration-v1.schema.json",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "consumer/workflows/consumer-gate-transition.yml",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "consumer/workflows/consumer-gate.yml",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/consumer/ConsumerGate.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/consumer/ConsumerManifestClosure.psm1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/consumer/Invoke-ConsumerRepositoryCheck.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/consumer/Invoke-ConsumerSourceGate.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/consumer/Invoke-ConsumerValidationChild.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/consumer/Test-ConsumerManifestClosure.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/consumer-bootstrap.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/consumer-gate-workflow.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/consumer-source-gate.Tests.ps1",
       "license": "Apache-2.0"
     },
     {

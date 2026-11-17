@@ -1,5 +1,7 @@
 # SYP314：內部 Skill 准用與 consumer 讀取
 
+> 固定 member pin 的作法已由 Standard §3.2（P11-pin）取代；本文件其餘內容保留為原始實作紀錄。
+
 ## 1. 目標與範圍
 
 使用者要求把已檢查且經該用途人類處置的自有內部 Skill 登錄為可採用，而非只產生沒有操作效力的一致性 assessment。第一個實際 case 是 PR18 merge `7e8228c393579d5d21ac9c0ad729c7b5d219bab6` 的 `review-bitbucket-pull-request`，限定內部本機 review／草稿準備。中央單一 writer 使用 `codex/syp314-internal-admission-20261017`，基準 `e510ca1`；304 單獨持有 consumer gate/config/workflow/runner 接入，317 不平行改這些路徑。
