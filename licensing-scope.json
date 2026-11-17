@@ -1318,6 +1318,22 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "tests/ai-instructions-writer-gate.part6.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/ai-instructions-writer-gate.part7.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/ai-instructions-writer-gate.part8.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/ai-instructions-writer-gate.part9.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "tests/ai-instructions-writer-gate.TestSupport.ps1",
       "license": "Apache-2.0"
     },
