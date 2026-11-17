@@ -257,4 +257,13 @@ try{
         }
         Remove-Item -LiteralPath $workFull -Recurse -Force
     }
+    if(Test-Path -LiteralPath $runtimeSource){
+        $runtimeFull=[IO.Path]::GetFullPath($runtimeSource)
+        $fixtureBoundary=[IO.Path]::GetFullPath($FixtureRoot).TrimEnd([IO.Path]::DirectorySeparatorChar,
+            [IO.Path]::AltDirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
+        if(-not$runtimeFull.StartsWith($fixtureBoundary,[StringComparison]::OrdinalIgnoreCase)){
+            throw 'Credential fixture runtime source escaped its cleanup boundary.'
+        }
+        Remove-Item -LiteralPath $runtimeFull -Recurse -Force
+    }
 }
