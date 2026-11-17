@@ -982,7 +982,12 @@ $start.Environment['CONSUMER_GATE_EVENT_REPOSITORY']=$Token
             if($IsWindows){
                 $shimRoot=Join-Path $TestDrive 'single-link-git'
                 [void][IO.Directory]::CreateDirectory($shimRoot)
-                $realGit=(Get-Command git.exe -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
+                $resolvedGit=(Get-Command git.exe -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
+                $resolvedGitDirectory=Split-Path -Parent $resolvedGit
+                $realGit=if((Split-Path -Leaf $resolvedGitDirectory)-ieq'cmd'){
+                    Join-Path (Split-Path -Parent $resolvedGitDirectory) 'mingw64/bin/git.exe'
+                }else{$resolvedGit}
+                if(-not(Test-Path -LiteralPath $realGit -PathType Leaf)){throw "The Git for Windows binary is missing: $realGit"}
                 Copy-Item -LiteralPath $realGit -Destination (Join-Path $shimRoot 'git.exe')
                 $env:PATH="$shimRoot$([IO.Path]::PathSeparator)$savedPath"
             }
