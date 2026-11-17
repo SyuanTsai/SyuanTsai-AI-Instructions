@@ -486,7 +486,7 @@ exit 0
         [void][IO.Directory]::CreateDirectory($artifacts)
         $env:GITHUB_STEP_SUMMARY=$summary
         $env:CONSUMER_GATE_ARTIFACT_PATHS=$artifacts
-        $runtimeSource=Join-Path $TestDrive 'phase-runtime-source'
+        $runtimeSource=Join-Path $workLease.Root 'runtime-source'
         [void][IO.Directory]::CreateDirectory($runtimeSource)
         $runtimeFixtureFiles=@(Get-ChildItem -LiteralPath $PSHOME -File -Force)
         foreach($moduleName in @('Microsoft.PowerShell.Management','Microsoft.PowerShell.Utility')){

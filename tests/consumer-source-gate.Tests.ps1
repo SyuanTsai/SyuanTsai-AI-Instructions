@@ -39,6 +39,26 @@ Describe 'Authority-owned consumer source gate' {
         }
         function Get-SourceFixtureFailure([scriptblock]$Action){try{& $Action
         return $null}catch{return [string]$_.Exception.Message}}
+        function New-SourceFixtureLease([string]$Name) {
+            $boundary=if(-not[string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)){
+                [IO.Path]::GetFullPath($env:RUNNER_TEMP)
+            }else{[IO.Path]::GetFullPath([IO.Path]::GetTempPath())}
+            $safeName=$Name-replace'[^A-Za-z0-9-]','-'
+            $root=Join-Path $boundary ("p11-s-$safeName-"+[guid]::NewGuid().ToString('N').Substring(0,8))
+            if(Test-Path -LiteralPath $root){throw 'Source-gate fixture lease already exists.'}
+            [void][IO.Directory]::CreateDirectory($root)
+            [pscustomobject]@{Root=$root;Boundary=$boundary}
+        }
+        function Remove-SourceFixtureLease($Lease) {
+            if($null-eq$Lease-or-not(Test-Path -LiteralPath $Lease.Root)){return}
+            $root=[IO.Path]::GetFullPath([string]$Lease.Root)
+            $boundary=[IO.Path]::GetFullPath([string]$Lease.Boundary).TrimEnd(
+                [IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
+            if(-not$root.StartsWith($boundary,[StringComparison]::OrdinalIgnoreCase)){
+                throw 'Source-gate fixture lease escaped its cleanup boundary.'
+            }
+            Remove-Item -LiteralPath $root -Recurse -Force
+        }
         . (Join-Path $script:RepositoryRoot 'tests/fixtures/consumer-gate-credential-oracle.ps1')
         function New-MinimalConsumerFixture([string]$Root,$Entry,[string]$SkillId){
             [void][IO.Directory]::CreateDirectory($Root)
@@ -1208,7 +1228,9 @@ Write-Output 'scripts/Legacy.ps1'
         $fixture=Join-Path $script:RepositoryRoot 'tests/fixtures/Invoke-ConsumerGateCredentialFixture.ps1'
         $expected=[ordered]@{success=0;'http-error'=20;timeout=20;cancellation=40}
         foreach($outcome in @('success','http-error','timeout','cancellation')){
-            $root=Join-Path $TestDrive "credential-$outcome"
+            $lease=New-SourceFixtureLease "credential-$outcome"
+            try{
+            $root=$lease.Root
             $records=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $fixture `
                 -RepositoryRoot $script:RepositoryRoot -FixtureRoot $root -Outcome $outcome `
                 -Sentinel 'unique-production-credential-sentinel' 2>&1)
@@ -1246,8 +1268,11 @@ Write-Output 'scripts/Legacy.ps1'
                 @($result.events).Count | Should Be 0
                 @($result.resolverDumps).Count | Should Be 0
             }
+            }finally{Remove-SourceFixtureLease $lease}
         }
-        $mutantRoot=Join-Path $TestDrive 'resolver-home-token-mutant'
+        $mutantLease=New-SourceFixtureLease 'resolver-home-token-mutant'
+        try{
+        $mutantRoot=$mutantLease.Root
         foreach($relative in @(& git -C $script:RepositoryRoot ls-files)){
             $destination=Join-Path $mutantRoot $relative
             [void][IO.Directory]::CreateDirectory((Split-Path -Parent $destination))
@@ -1277,8 +1302,10 @@ Write-Output 'scripts/Legacy.ps1'
                 $tokenEnvironmentWrite[0].Extent.StartOffset,$replacement)
         [IO.File]::WriteAllText($modulePath,$moduleText,[Text.UTF8Encoding]::new($false))
         $mutantFixture=Join-Path $mutantRoot 'tests/fixtures/Invoke-ConsumerGateCredentialFixture.ps1'
+        $mutantCaseLease=New-SourceFixtureLease 'resolver-home-token-case'
+        try{
         $mutantRecords=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $mutantFixture `
-            -RepositoryRoot $mutantRoot -FixtureRoot (Join-Path $TestDrive 'resolver-home-token-case') -Outcome success `
+            -RepositoryRoot $mutantRoot -FixtureRoot $mutantCaseLease.Root -Outcome success `
             -Sentinel 'unique-production-credential-sentinel' 2>&1)
         $LASTEXITCODE|Should Be 0
         $mutantResult=($mutantRecords-join[Environment]::NewLine)|ConvertFrom-Json -Depth 30
@@ -1289,6 +1316,8 @@ Write-Output 'scripts/Legacy.ps1'
                     throw "SENTINEL_VALUE_ORACLE_MISMATCH|$(@($dump.sentinelValueNames)-join',')"
                 }
             }}|Should Throw 'SENTINEL_VALUE_ORACLE_MISMATCH'
+        }finally{Remove-SourceFixtureLease $mutantCaseLease}
+        }finally{Remove-SourceFixtureLease $mutantLease}
     }
 
     # Scenario: PowerShell asset acquisition follows only bounded approved redirects and filters credentials per hop.
@@ -1298,7 +1327,9 @@ Write-Output 'scripts/Legacy.ps1'
         $sentinel='unique-redirect-credential-sentinel'
         $expected=[ordered]@{'redirect-success'=0;'redirect-unapproved'=20;'redirect-limit'=20}
         foreach($outcome in $expected.Keys){
-            $root=Join-Path $TestDrive "credential-$outcome"
+            $lease=New-SourceFixtureLease "credential-$outcome"
+            try{
+            $root=$lease.Root
             $records=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $fixture `
                 -RepositoryRoot $script:RepositoryRoot -FixtureRoot $root -Outcome $outcome -Sentinel $sentinel 2>&1)
             $LASTEXITCODE|Should Be 0
@@ -1317,6 +1348,7 @@ Write-Output 'scripts/Legacy.ps1'
             }
             if($outcome-eq'redirect-unapproved'){$result.stderr|Should Match 'GATE_ACQUISITION_REDIRECT_HOST'}
             if($outcome-eq'redirect-limit'){$result.stderr|Should Match 'GATE_ACQUISITION_REDIRECT_LIMIT'}
+            }finally{Remove-SourceFixtureLease $lease}
         }
     }
 
@@ -1325,7 +1357,9 @@ Write-Output 'scripts/Legacy.ps1'
     It 'UnitT31_rejects_each_credential_output_surface_through_the_formal_entry' {
         $fixture=Join-Path $script:RepositoryRoot 'tests/fixtures/Invoke-ConsumerGateCredentialFixture.ps1'
         foreach($surface in @('summary','artifact','receipt','stdout','stderr')){
-            $root=Join-Path $TestDrive "credential-surface-$surface"
+            $lease=New-SourceFixtureLease "credential-surface-$surface"
+            try{
+            $root=$lease.Root
             $records=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $fixture `
                 -RepositoryRoot $script:RepositoryRoot -FixtureRoot $root -Outcome success `
                 -Sentinel 'unique-surface-credential-sentinel' -LeakSurface $surface 2>&1)
@@ -1338,6 +1372,7 @@ Write-Output 'scripts/Legacy.ps1'
             $result.stderr | Should Match 'credential sentinel|Credential sentinel'
             if($surface-in@('summary','artifact','receipt')){@($result.events)|Should Be @('runtime-installed','source-tools-prepared')}
             else{@($result.events)|Should Be @('runtime-installed')}
+            }finally{Remove-SourceFixtureLease $lease}
         }
     }
 
@@ -1525,7 +1560,9 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|CONSUMER_GATE_PHASE_ENV_
         $actualSeams=@($seams|ForEach-Object{"$($_.Source)|$($_.Function)|$($_.Name)|$($_.Kind)"})
         (@($actualSeams)-join"`n")|Should Be (@($expectedSeams)-join"`n")
 
-        $mutantRoot=Join-Path $TestDrive 'credential-authority-copy'
+        $mutantLease=New-SourceFixtureLease 'credential-authority-copy'
+        try{
+        $mutantRoot=$mutantLease.Root
         foreach($relative in @(& git -C $script:RepositoryRoot ls-files)){
             $destination=Join-Path $mutantRoot $relative
             [void][IO.Directory]::CreateDirectory((Split-Path -Parent $destination))
@@ -1585,14 +1622,20 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|CONSUMER_GATE_PHASE_ENV_
         }
 
         foreach($key in $sources.Keys){[IO.File]::WriteAllText((Join-Path $mutantRoot $key),[string]$sources[$key],[Text.UTF8Encoding]::new($false))}
-        $baselineBootstrapRoot=Join-Path $TestDrive 'cleanup-baseline-bootstrap'
+        $baselineBootstrapLease=New-SourceFixtureLease 'cleanup-baseline-bootstrap'
+        try{
+        $baselineBootstrapRoot=$baselineBootstrapLease.Root
         $baselineBootstrap=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File (Join-Path $mutantRoot 'tests/fixtures/consumer-bootstrap-cleanup-fixture.ps1') `
             -RepositoryRoot $mutantRoot -FixtureRoot $baselineBootstrapRoot -Sentinel 'credential-cleanup-sentinel' 2>&1)
         $LASTEXITCODE|Should Be 0
-        $baselineCredentialRoot=Join-Path $TestDrive 'cleanup-baseline-credential'
+        }finally{Remove-SourceFixtureLease $baselineBootstrapLease}
+        $baselineCredentialLease=New-SourceFixtureLease 'cleanup-baseline-credential'
+        try{
+        $baselineCredentialRoot=$baselineCredentialLease.Root
         $baselineCredential=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File (Join-Path $mutantRoot 'tests/fixtures/Invoke-ConsumerGateCredentialFixture.ps1') `
             -RepositoryRoot $mutantRoot -FixtureRoot $baselineCredentialRoot -Outcome success -Sentinel 'credential-cleanup-sentinel' -LeakSurface none 2>&1)
         $LASTEXITCODE|Should Be 0
+        }finally{Remove-SourceFixtureLease $baselineCredentialLease}
 
         $equivalent=[Collections.Generic.List[string]]::new()
         $index=0
@@ -1601,9 +1644,10 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|CONSUMER_GATE_PHASE_ENV_
             foreach($key in $sources.Keys){[IO.File]::WriteAllText((Join-Path $mutantRoot $key),[string]$sources[$key],[Text.UTF8Encoding]::new($false))}
             $path=Join-Path $mutantRoot $cleanup.Source
             $text=Get-Content -Raw -LiteralPath $path
-            $fixtureRoot=Join-Path $TestDrive ("cleanup-mutant-{0:D3}"-f$index)
+            $fixtureLease=New-SourceFixtureLease ("cleanup-mutant-{0:D3}"-f$index)
+            try{
+            $fixtureRoot=$fixtureLease.Root
             $observation=Join-Path $mutantRoot ("cleanup-observation-{0:D3}.json"-f$index)
-            [void][IO.Directory]::CreateDirectory($fixtureRoot)
             $targets=if(@($cleanup.Targets).Count-eq0){@('__environment__')}else{@($cleanup.Targets)}
             $target=[string]$targets[0]
             $condition=if($cleanup.Shape-ceq'environment-null'){
@@ -1655,6 +1699,7 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|CONSUMER_GATE_PHASE_ENV_
             $observed=Get-Content -Raw -LiteralPath $observation|ConvertFrom-Json
             if(@($observed.hits).Count-eq0){$equivalent.Add($key);continue}
             {if(@($observed.hits).Count-ne0){throw "CLEANUP_MUTANT_OBSERVED|$(@($observed.hits)-join',')"}}|Should Throw 'CLEANUP_MUTANT_OBSERVED'
+            }finally{Remove-SourceFixtureLease $fixtureLease}
         }
         $expectedEquivalent=@'
 consumer/bootstrap/Invoke-PinnedAuthority.ps1:399:5|$bootstrapToken=$null
@@ -1716,6 +1761,7 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         if((@($equivalent)-join"`n")-cne(@($expectedEquivalent)-join"`n")){
             throw "EQUIVALENT_POINTS_MISMATCH|$(@($equivalent)-join';')"
         }
+        }finally{Remove-SourceFixtureLease $mutantLease}
     }
 
     # Scenario: Prepare receives all GitHub token aliases while production launches Git for config and closure inspection.
@@ -1731,7 +1777,9 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         $sources[0]|Should Match 'SetEnvironmentVariable\(\$name,\$null,''Process''\)'
         $sources[1]|Should Match 'Environment\.Remove\(\$name\)'
         $fixture=Join-Path $script:RepositoryRoot 'tests/fixtures/Invoke-ConsumerGateCredentialFixture.ps1'
-        $formalArguments=@('-RepositoryRoot',$script:RepositoryRoot,'-FixtureRoot',(Join-Path $TestDrive 'git-formal-prepare'),
+        $formalLease=New-SourceFixtureLease 'git-formal-prepare'
+        try{
+        $formalArguments=@('-RepositoryRoot',$script:RepositoryRoot,'-FixtureRoot',$formalLease.Root,
             '-Outcome','success','-Sentinel','git-formal-token-sentinel','-TransitionFromLegacy')
         if(-not$IsWindows){$formalArguments+='-ObserveGitCredentialEnvironment'}
         $formalRecords=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $fixture @formalArguments 2>&1)
@@ -1739,13 +1787,17 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         $formalResult=($formalRecords-join[Environment]::NewLine)|ConvertFrom-Json -Depth 30
         $formalResult.exitCode|Should Be 0
         if($IsWindows){
+            $observedLease=New-SourceFixtureLease 'git-observed-prepare'
+            try{
             $observedRecords=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $fixture `
-                -RepositoryRoot $script:RepositoryRoot -FixtureRoot (Join-Path $TestDrive 'git-observed-prepare') -Outcome success `
+                -RepositoryRoot $script:RepositoryRoot -FixtureRoot $observedLease.Root -Outcome success `
                 -Sentinel 'git-formal-token-sentinel' -ObserveGitCredentialEnvironment 2>&1)
             $LASTEXITCODE|Should Be 0
             $observedResult=($observedRecords-join[Environment]::NewLine)|ConvertFrom-Json -Depth 30
             $observations=@($observedResult.gitObservations)
+            }finally{Remove-SourceFixtureLease $observedLease}
         }else{$observations=@($formalResult.gitObservations)}
+        }finally{Remove-SourceFixtureLease $formalLease}
         @($observations).Count|Should BeGreaterThan 0
         @($observations|Where-Object{$_-cne'0,0,0'}).Count|Should Be 0
 
