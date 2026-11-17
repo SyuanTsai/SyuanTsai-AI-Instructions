@@ -46,6 +46,20 @@ function Get-UnixContractValue {
     return $null
 }
 
+function ConvertTo-UnixOptionalLeaf {
+    param([AllowNull()] $Value)
+    if ($null -eq $Value) { return $null }
+    $leaf = [string]$Value
+    if ([string]::IsNullOrEmpty($leaf)) { return $null }
+    return $leaf
+}
+
+function ConvertTo-UnixNativeNullableString {
+    param([AllowNull()] $Value)
+    if ($null -eq $Value) { return [NullString]::Value }
+    return [string]$Value
+}
+
 function ConvertFrom-UnixIdentityNumber {
     param([Parameter(Mandatory=$true)] $Value,[Parameter(Mandatory=$true)][string] $Name)
     if ($Value -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$Value)) { throw [ArgumentException]::new("$Name must be a journal identity string.") }
@@ -198,13 +212,14 @@ function Assert-UnixJournalBackupIdentity {
 function Assert-UnixJournalBinding {
     param(
         $Journal,$ParentLease,$TransactionLease,[string]$Leaf,$StageLease,
-        [AllowNull()][string]$DisplacedLeaf,$ExpectedState,$ExpectedStage,[switch]$Remove
+        [AllowNull()]$DisplacedLeaf,$ExpectedState,$ExpectedStage,[switch]$Remove
     )
     if ($null -eq $Journal) {
         return [pscustomobject]@{ hasPermissions=$false; mode=[uint32]0; uid=[uint64]0; gid=[uint64]0 }
     }
 
     try {
+        $DisplacedLeaf = ConvertTo-UnixOptionalLeaf $DisplacedLeaf
         Assert-UnixJournalOperationShape -Journal $Journal
         $capability=if($Remove){'owned-file-removal'}else{'publication'}
         $relative = Get-UnixContractValue $Journal targetRelativePath -Required
@@ -313,44 +328,55 @@ function Assert-UnixJournalBinding {
 function Get-UnixPlatformPermissionSnapshot {
     param([Parameter(Mandatory=$true)] $Lease)
     Assert-UnixPlatformHost permissions | Out-Null
-    ConvertTo-UnixPermissionReceipt ([SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetPermissionSnapshot($Lease))
+    try {
+        ConvertTo-UnixPermissionReceipt ([SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetPermissionSnapshot($Lease))
+    }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException] { throw $_.Exception }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformErrnoException] { throw $_.Exception }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] { throw $_.Exception }
 }
 
 function Set-UnixPlatformPermissions {
     param([Parameter(Mandatory = $true)] $Lease, $Policy, $Snapshot)
     Assert-UnixPlatformHost permissions | Out-Null
-    if (($null -eq $Policy) -eq ($null -eq $Snapshot)) { throw [ArgumentException]::new('Specify exactly one of Policy or Snapshot.') }
-    if ($null -ne $Snapshot) {
-        if ((Get-UnixContractValue $Snapshot kind -Required) -cne 'unix-mode') { throw [ArgumentException]::new('Snapshot.kind must be unix-mode.') }
-        $mode = [string](Get-UnixContractValue $Snapshot mode -Required)
-        $uid = Get-UnixContractValue $Snapshot uid -Required
-        $gid = Get-UnixContractValue $Snapshot gid -Required
-    }
-    else {
-        if ($Policy -isnot [Collections.IDictionary] -or $Policy.Count -ne 1 -or -not $Policy.Contains('Mode')) {
-            throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]::new('permissions-policy: only Mode is supported',[SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetOperatingSystem())
+    try {
+        if (($null -eq $Policy) -eq ($null -eq $Snapshot)) { throw [ArgumentException]::new('Specify exactly one of Policy or Snapshot.') }
+        if ($null -ne $Snapshot) {
+            if ((Get-UnixContractValue $Snapshot kind -Required) -cne 'unix-mode') { throw [ArgumentException]::new('Snapshot.kind must be unix-mode.') }
+            $mode = [string](Get-UnixContractValue $Snapshot mode -Required)
+            $uid = Get-UnixContractValue $Snapshot uid -Required
+            $gid = Get-UnixContractValue $Snapshot gid -Required
         }
-        if ($Policy.Mode -is [string] -or $Policy.Mode -is [bool] -or $null -eq $Policy.Mode -or [decimal]$Policy.Mode -ne [Math]::Truncate([decimal]$Policy.Mode) -or [decimal]$Policy.Mode -lt 0 -or [decimal]$Policy.Mode -gt 4095) { throw [ArgumentException]::new('Mode must be an integer from 0 through 4095.') }
-        $current = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetPermissionSnapshot($Lease)
-        $mode = [Convert]::ToString([int]$Policy.Mode,8).PadLeft($(if ([int]$Policy.Mode -gt 511) { 4 } else { 3 }),'0')
-        $uid = $current.Uid; $gid = $current.Gid
+        else {
+            if ($Policy -isnot [Collections.IDictionary] -or $Policy.Count -ne 1 -or -not $Policy.Contains('Mode')) {
+                throw [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException]::new('permissions-policy: only Mode is supported',[SyuanTsai.AIInstructions.PlatformRuntime.PlatformNative]::GetOperatingSystem())
+            }
+            if ($Policy.Mode -is [string] -or $Policy.Mode -is [bool] -or $null -eq $Policy.Mode -or [decimal]$Policy.Mode -ne [Math]::Truncate([decimal]$Policy.Mode) -or [decimal]$Policy.Mode -lt 0 -or [decimal]$Policy.Mode -gt 4095) { throw [ArgumentException]::new('Mode must be an integer from 0 through 4095.') }
+            $current = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetPermissionSnapshot($Lease)
+            $mode = [Convert]::ToString([int]$Policy.Mode,8).PadLeft($(if ([int]$Policy.Mode -gt 511) { 4 } else { 3 }),'0')
+            $uid = $current.Uid; $gid = $current.Gid
+        }
+        if ($mode -cnotmatch '^[0-7]{3,4}$') { throw [ArgumentException]::new('Snapshot.mode must contain three or four octal digits.') }
+        foreach ($value in @($uid,$gid)) { if ($value -is [bool] -or $null -eq $value -or [decimal]$value -ne [Math]::Truncate([decimal]$value) -or [decimal]$value -lt 0 -or [decimal]$value -gt [uint32]::MaxValue) { throw [ArgumentException]::new('Snapshot uid/gid is invalid.') } }
+        ConvertTo-UnixPermissionReceipt ([SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::SetPermissionSnapshot($Lease,$mode,[uint64]$uid,[uint64]$gid))
     }
-    if ($mode -cnotmatch '^[0-7]{3,4}$') { throw [ArgumentException]::new('Snapshot.mode must contain three or four octal digits.') }
-    foreach ($value in @($uid,$gid)) { if ($value -is [bool] -or $null -eq $value -or [decimal]$value -ne [Math]::Truncate([decimal]$value) -or [decimal]$value -lt 0 -or [decimal]$value -gt [uint32]::MaxValue) { throw [ArgumentException]::new('Snapshot uid/gid is invalid.') } }
-    ConvertTo-UnixPermissionReceipt ([SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::SetPermissionSnapshot($Lease,$mode,[uint64]$uid,[uint64]$gid))
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException] { throw $_.Exception }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformErrnoException] { throw $_.Exception }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] { throw $_.Exception }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformMutationException] { throw $_.Exception }
 }
 
 function Publish-UnixPlatformFile {
     param(
         [Parameter(Mandatory=$true)] $ParentLease,[Parameter(Mandatory=$true)][string] $Leaf,
         [Parameter(Mandatory=$true)] $TransactionLease,[Parameter(Mandatory=$true)] $StageLease,
-        [Parameter(Mandatory=$true)] $ExpectedState,[AllowNull()][string] $DisplacedLeaf,
+        [Parameter(Mandatory=$true)] $ExpectedState,[AllowNull()] $DisplacedLeaf,
         [Parameter(Mandatory=$true)] $ExpectedStage,[switch] $NoReplace,
         $Journal
     )
     Assert-UnixPlatformHost publication | Out-Null
-    if ([string]::IsNullOrEmpty($DisplacedLeaf)) { $DisplacedLeaf=$null }
     try {
+        $DisplacedLeaf = ConvertTo-UnixOptionalLeaf $DisplacedLeaf
         [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($Leaf)
         $journalStore=[StringComparer]::OrdinalIgnoreCase.Equals($Leaf,'journal.json') -and [object]::ReferenceEquals($ParentLease,$TransactionLease)
         if($journalStore -and $PSBoundParameters.ContainsKey('Journal')){throw [ArgumentException]::new('Journal store publication must not supply Journal.')}
@@ -370,13 +396,15 @@ function Publish-UnixPlatformFile {
         }
         $journalBinding = Assert-UnixJournalBinding $Journal $ParentLease $TransactionLease $Leaf $StageLease $DisplacedLeaf $ExpectedState $ExpectedStage
     }
-    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] { throw }
-    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException] { throw }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] { throw $_.Exception }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException] { throw $_.Exception }
     catch { throw (New-UnixPlatformVerificationError publication $_.Exception.Message) }
     try {
+        $nativeExpectedSha256 = ConvertTo-UnixNativeNullableString $expected.sha256
+        $nativeDisplacedLeaf = ConvertTo-UnixNativeNullableString $DisplacedLeaf
         $result = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::Publish(
-            $ParentLease,$Leaf,$TransactionLease,$StageLease,$expected.exists,$expected.device,$expected.inode,$expected.sha256,$expected.length,
-            $DisplacedLeaf,$stage.sha256,$stage.length,[bool]$NoReplace,[uint32]384,
+            $ParentLease,$Leaf,$TransactionLease,$StageLease,$expected.exists,$expected.device,$expected.inode,$nativeExpectedSha256,$expected.length,
+            $nativeDisplacedLeaf,$stage.sha256,$stage.length,[bool]$NoReplace,[uint32]384,
             [bool]$journalBinding.hasPermissions,[uint32]$journalBinding.mode,[uint64]$journalBinding.uid,[uint64]$journalBinding.gid)
         [pscustomobject][ordered]@{
             completedSteps=[string[]]@($result.CompletedSteps)
@@ -389,9 +417,11 @@ function Publish-UnixPlatformFile {
         }
     }
     catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] {
-        if ([string]$_.Exception.Capability -ceq 'publication') { throw }
+        if ([string]$_.Exception.Capability -ceq 'publication') { throw $_.Exception }
         throw (New-UnixPlatformVerificationError publication $_.Exception.Message)
     }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException] { throw $_.Exception }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformErrnoException] { throw $_.Exception }
     catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformMutationException] {
         $native = $_.Exception
         $translated = if ($null -eq $native.Receipt) { $null } else { [pscustomobject][ordered]@{
@@ -411,11 +441,11 @@ function Remove-UnixPlatformOwnedFile {
     param(
         [Parameter(Mandatory=$true)] $ParentLease,[Parameter(Mandatory=$true)][string] $Leaf,
         [Parameter(Mandatory=$true)] $ExpectedState,$TransactionLease,
-        [AllowNull()][string] $TombstoneLeaf,$Journal
+        [AllowNull()] $TombstoneLeaf,$Journal
     )
     Assert-UnixPlatformHost owned-file-removal | Out-Null
-    if ([string]::IsNullOrEmpty($TombstoneLeaf)) { $TombstoneLeaf=$null }
     try {
+        $TombstoneLeaf = ConvertTo-UnixOptionalLeaf $TombstoneLeaf
         [SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Leaf($Leaf)
         $tombstone=($null -ne $TransactionLease -and $null -ne $TombstoneLeaf)
         if (($null -ne $TransactionLease) -ne ($null -ne $TombstoneLeaf)) {
@@ -442,8 +472,8 @@ function Remove-UnixPlatformOwnedFile {
             $journalBinding=[pscustomobject]@{hasPermissions=$false;mode=[uint32]0;uid=[uint64]0;gid=[uint64]0}
         }
     }
-    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] { throw }
-    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException] { throw }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] { throw $_.Exception }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException] { throw $_.Exception }
     catch { throw (New-UnixPlatformVerificationError owned-file-removal $_.Exception.Message) }
     try {
         $result = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::Remove(
@@ -463,9 +493,11 @@ function Remove-UnixPlatformOwnedFile {
         }
     }
     catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformVerificationException] {
-        if ([string]$_.Exception.Capability -ceq 'owned-file-removal') { throw }
+        if ([string]$_.Exception.Capability -ceq 'owned-file-removal') { throw $_.Exception }
         throw (New-UnixPlatformVerificationError owned-file-removal $_.Exception.Message)
     }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformCapabilityUnavailableException] { throw $_.Exception }
+    catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformErrnoException] { throw $_.Exception }
     catch [SyuanTsai.AIInstructions.PlatformRuntime.PlatformMutationException] {
         $native = $_.Exception
         $translated = if ($null -eq $native.Receipt) { $null } else { [pscustomobject][ordered]@{

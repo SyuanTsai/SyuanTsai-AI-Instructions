@@ -761,7 +761,7 @@ jobs:
         Assert-Match $standard 'Invoke-StandardValidation\.ps1.*skill-repository-standard\.Tests\.ps1.*standard-validation-runner\.Tests\.ps1.*standard-core-pester-adapter\.Tests\.ps1' 'The Standard must map the runner and report owner to its regression paths.'
         Assert-Match $standard 'Resolve-StandardValidationTool\.ps1.*standard-validation-resolver-hardening\.Tests\.ps1' 'The Standard must map the tool resolver to its hardening regression.'
         Assert-Match $standard 'Invoke-StandardAuthorityGate\.ps1.*validation-security-gate\.json.*skill-repository-workflows\.Tests\.ps1' 'The Standard must map authority/security ownership to policy and workflow regressions.'
-        foreach($boundary in @('normal reader PR and merged before candidate adoption', 'A pin or immutable version update alone MUST NOT transfer ownership', 'Source-copy equivalence or removal is deferred to downstream adoption', 'normal required three-platform Core CI gate', 'not a universal file inventory', 'Each source repository MUST retain its own protected reader identities')) {
+        foreach($boundary in @('The protected source layer contains only the bootstrap and authority-published workflow templates', 'Repository-local readers are replaced by the authority consumer gate', 'consumer/legacy-migration.json', 'complete discovered test tree', 'A pin or immutable version update alone MUST NOT transfer ownership', 'Source-copy equivalence or removal is deferred to downstream adoption', 'normal required three-platform Core CI gate', 'Historically, the Code trial protected a repository-local reader set')) {
             if(-not $standard.Contains($boundary)){throw "The ownership map is missing the source-reader or adoption boundary '$boundary'."}
         }
         . (Join-Path $script:RepositoryRoot 'scripts/Get-WindowsCorePlan.ps1') -DefineFunctionsOnly
@@ -1743,5 +1743,19 @@ Describe 'Validator platform authority routing' {
         $workflow.Contains('Invoke-StandardAuthorityGate.ps1') | Should -BeTrue
         $composition = Get-Content -Raw (Join-Path $root '.github/workflows/pr8-powershell-validation.yml')
         $composition.Contains('Invoke-StandardAuthorityGate.ps1') | Should -BeTrue
+    }
+}
+
+Describe 'P11-pin authority workflow isolation' {
+    # Scenario: Consumer templates are published without replacing either authority workflow.
+    # Purpose: Keep the authority repository on its existing Composition and diagnostic gate while consumer CI evolves independently.
+    It 'UnitT980_preserves_both_authority_workflow_entry_points' {
+        $root=Split-Path -Parent $PSScriptRoot
+        foreach($path in @('.github/workflows/pr8-powershell-validation.yml','.github/workflows/standards-conformance.yml')){
+            $text=Get-Content -Raw -Encoding UTF8 (Join-Path $root $path)
+            $text.Contains('Invoke-StandardAuthorityGate.ps1')|Should Be $true
+            $text.Contains('consumer/workflows/consumer-gate.yml')|Should Be $false
+        }
+        foreach($path in @('consumer/workflows/consumer-gate.yml','consumer/workflows/consumer-gate-transition.yml')){Test-Path -LiteralPath (Join-Path $root $path) -PathType Leaf|Should Be $true}
     }
 }
