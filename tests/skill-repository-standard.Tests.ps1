@@ -4055,13 +4055,13 @@ public sealed class C245NonCooperativeStream : Stream {
             'platform-neutral Core lane', 'every `*.Tests.ps1` leaf name **MUST** be unique under an ordinal case-insensitive comparison', 'A cancelled Windows Core aggregate **MUST** fail explicitly', 'Windows Core continues to require exactly five reviewed skips', 'core-test-skip-inventory.json', 'union equals the expected plan', 'tests/golden/', 'inspect each golden change line by line', 'standards-conformance.yml',
             'schema v2', 'testOwnership', 'unknown schema or ownership values',
             'SourceValidation execution remains owned by the central source-validation function',
-            'scripts/Invoke-RepositoryCheck.ps1', 'scripts/Invoke-CorePester.ps1',
-            'scripts/CorePesterIntegrity.psm1', 'scripts/Test-Repository.ps1', 'tests/validate-catalog.ps1',
-            'candidate==base bytes', 'full discovered tests tree', 'normal reader PR', 'before candidate adoption',
+            'scripts/consumer/Invoke-ConsumerSourceGate.ps1', 'config/consumer-gate.json',
+            'consumer/legacy-migration.json', 'The protected source layer contains only the bootstrap and authority-published workflow templates',
+            'Repository-local readers are replaced by the authority consumer gate', 'deleted or split', 'complete discovered test tree',
             'A pin or immutable version update alone MUST NOT transfer ownership',
             'Source-copy equivalence or removal is deferred to downstream adoption',
-            'identified item by item', 'normal required three-platform Core CI gate', 'SYP-325 changes none of the Code trial paths above',
-            'This list records the Code trial', 'not a universal file inventory', 'Each source repository MUST retain its own protected reader identities'
+            'identified item by item', 'normal required three-platform Core CI gate',
+            'Historically, the Code trial protected a repository-local reader set'
         )) { if(-not $standard.Contains($required)){throw "Central validation ownership contract is missing '$required'."} }
         foreach($required in @('Windows、Linux、macOS 各一個 leg', '缺少 receipt', 'MUST NOT** 被宣稱為三平台 required 驗證')) {
             if(-not $standard.Contains($required)){throw "Standard diagnostic contract is missing '$required'."}
@@ -5906,7 +5906,7 @@ Describe 'SYP352 cross-platform and three-AI Standard contract' -Tag 'SYP352' {
         $adoptionTransitionLine.Count | Should -Be 1
         $matrixCiLine.Count | Should -Be 1
         (& $hashText $adoptionTransitionLine[0]) | Should -Be '86dce868d1a763933b24d719153001b348625e5dee1ffda638cc45378f8c1865'
-        (& $hashText $matrixCiLine[0]) | Should -Be 'ee3bb8abc66fb305a85ffd38461fb167576d0e12584fff2304feb69038341000'
+        (& $hashText $matrixCiLine[0]) | Should -Be 'b003a613ddc37a578327cb7dbcbb6c39ed041a3d6aa300956c8778889c550ab6'
 
         $adoption | Should -Match '已 pin 舊版 Standard 的 repository \*\*MUST\*\* 依其 authority commit 與 member hashes 判定，不追溯套用本次規範'
         $adoption | Should -Match '升級到包含本次修訂的 authority pin 時，\*\*MUST\*\* 同時採用三平台 matrix 與全部 leg 聚合語意'
@@ -6741,6 +6741,41 @@ Describe 'SYP481 exact-fingerprint exception authority' {
         $section=[regex]::Match($standard,'(?s)#### 14\.2\.1 SkillSpector exact-fingerprint exceptions(.*?)### 14\.3').Groups[1].Value
         foreach($required in @('skillspector-human-approved-exceptions-v1','config/skillspector-exceptions/<skillId>.baseline.json','`rules`','approved source','review.expiresOn','--baseline','suppressedFindings','suppressionReason','High／Critical **MUST NOT**','第 11 節','`releaseEligible` 不變')) {
             $section.Contains($required) | Should Be $true
+        }
+    }
+}
+
+Describe 'P11-pin consumer authority Standard contract' {
+    # Scenario: Standard replaces an unconditional archive tuple with verified Git transport and a single consumer pin.
+    # Purpose: Bind conformance to commit/tree/inventory while requiring archive hash only when archive transport is used.
+    It 'UnitT980_requires_verified_transport_and_the_single_consumer_pin' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $standard=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/skill-repository-standard.md')
+        foreach($required in @('immutable commit／tree checkout','只有實際使用 archive 時','config/authority-pin.json','consumer-authority-pin-v1.schema.json','git merge-base --is-ancestor','MUST NOT** 使用列舉式 tuple allowlist','retiredInterfaces')){$standard.Contains($required)|Should Be $true}
+        $standard.Contains('acquired authority bundle/archive 的 SHA-256')|Should Be $false
+    }
+    # Scenario: Source CI changes from protected local readers to the authority consumer gate.
+    # Purpose: Preserve template bytes, prepare-only credentials, App-sourced contexts, and strict remote alignment.
+    It 'UnitT981_requires_the_consumer_gate_workflow_and_remote_boundary' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $standard=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/skill-repository-standard.md')
+        foreach($required in @('scripts/consumer/Invoke-ConsumerSourceGate.ps1','repositoryChecks','requiredRepositoryChecks','base bootstrap 驗證過的 authority','pull_request_target','strict_required_status_checks_policy=true','event.before','MUST NOT** 使用 App 或 environment','同一 job 內的 candidate 竄改')){$standard.Contains($required)|Should Be $true}
+        foreach($retired in @('Protected PR **MUST** 繼續由 exact protected base driver 執行','受保護 reader 的固定 tuple','current governed source-reader set','normal reader PR and merged before')){$standard.Contains($retired)|Should Be $false}
+    }
+    # Scenario: Internal use and migration text consume the verified authority checkout.
+    # Purpose: Prevent fixed member tuples and stale legacy inventories from surviving the pin transition.
+    It 'UnitT982_requires_gate_computed_authority_files_and_exact_conversion_inventory' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $standard=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/skill-repository-standard.md')
+        foreach($required in @('ExpectedAuthorityFiles` 必須由 gate 從該已驗證 checkout 計算','### 18.2 Consumer gate conversion','inventoryCommit','inventoryTree','#consumer-repository-conversion','MUST NOT** 宣稱 consumer merge enforcement 已生效','Darktide')){$standard.Contains($required)|Should Be $true}
+    }
+    # Scenario: A path expression casts either a foldable literal or a non-foldable method-call result.
+    # Purpose: Keep R18-01 cast semantics aligned with the runtime while preserving fail-closed dynamic analysis.
+    It 'UnitT983_allows_casts_only_when_the_child_is_deterministically_foldable' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $standard=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/skill-repository-standard.md')
+        foreach($required in @('cast 的 child 可確定折疊時才傳遞常值','method call 等其他不可折疊形式仍 fail closed')){
+            $standard.Contains($required)|Should Be $true
         }
     }
 }
