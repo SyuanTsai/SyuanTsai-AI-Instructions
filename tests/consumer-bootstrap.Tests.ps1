@@ -983,13 +983,24 @@ $start.Environment['CONSUMER_GATE_EVENT_REPOSITORY']=$Token
                 $shimRoot=Join-Path $TestDrive 'single-link-git'
                 [void][IO.Directory]::CreateDirectory($shimRoot)
                 $resolvedGit=(Get-Command git.exe -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
-                $resolvedGitDirectory=Split-Path -Parent $resolvedGit
-                $realGit=if((Split-Path -Leaf $resolvedGitDirectory)-ieq'cmd'){
-                    Join-Path (Split-Path -Parent $resolvedGitDirectory) 'mingw64/bin/git.exe'
-                }else{$resolvedGit}
+                $gitExecPathOutput=@(& $resolvedGit --exec-path 2>$null)
+                if($LASTEXITCODE-ne 0-or$gitExecPathOutput.Count-ne 1-or[string]::IsNullOrWhiteSpace([string]$gitExecPathOutput[0])){
+                    throw "Git did not report one usable exec path: $resolvedGit"
+                }
+                $gitExecPath=[IO.Path]::GetFullPath(([string]$gitExecPathOutput[0]).Trim())
+                if(-not(Test-Path -LiteralPath $gitExecPath -PathType Container)){throw "The Git exec path is missing: $gitExecPath"}
+                $gitPrefix=Split-Path -Parent (Split-Path -Parent $gitExecPath)
+                $realGit=Join-Path $gitPrefix 'bin/git.exe'
                 if(-not(Test-Path -LiteralPath $realGit -PathType Leaf)){throw "The Git for Windows binary is missing: $realGit"}
-                Copy-Item -LiteralPath $realGit -Destination (Join-Path $shimRoot 'git.exe')
-                $env:PATH="$shimRoot$([IO.Path]::PathSeparator)$savedPath"
+                $realGit=(Get-Item -LiteralPath $realGit).FullName
+                $realGitDirectory=Split-Path -Parent $realGit
+                $shimGit=Join-Path $shimRoot 'git.exe'
+                Copy-Item -LiteralPath $realGit -Destination $shimGit
+                $env:PATH="$shimRoot$([IO.Path]::PathSeparator)$realGitDirectory$([IO.Path]::PathSeparator)$savedPath"
+                (Get-Command git.exe -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source|Should BeExactly $shimGit
+                $childPathEntries=@((Get-StandardValidationChildEnvironment -Environment @{})['PATH']-split[IO.Path]::PathSeparator)
+                $childPathEntries[0]|Should BeExactly $shimRoot
+                $childPathEntries[1]|Should BeExactly $realGitDirectory
             }
             $originResult=Invoke-StandardCoreGit -RepositoryRoot $accepted.Root -WorkingDirectory $accepted.Root `
                 -Arguments @('config','--local','--get-all','remote.origin.url')
