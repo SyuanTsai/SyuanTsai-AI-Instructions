@@ -2065,7 +2065,29 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
             { Assert-GateProtectedFiles $script:RepositoryRoot $root $root $deleteExpectation `
                     $baseRevision $candidateRevision $true } | Should Throw 'must be deleted'
 
-            $retained = @($entry.files | Where-Object disposition -eq retain)[0]
+            $exceptionRetained = @($entry.files | Where-Object {
+                    $_.disposition -eq 'retain' -and (Test-GateExceptionPathInScope ([string]$_.path))
+                })[0]
+            if ($null -ne $exceptionRetained) {
+                $exceptionRetainedPath = Join-Path $root ([string]$exceptionRetained.path)
+                $exceptionRenamedPath = "$exceptionRetainedPath.renamed"
+                Move-Item -LiteralPath $exceptionRetainedPath -Destination $exceptionRenamedPath
+                [void](Invoke-SourceFixtureGit $root @('add','-A'))
+                [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','rename exception-scope retained path'))
+                $exceptionRenameRevision = Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
+                (Get-SourceFixtureFailure {
+                        Assert-GateProtectedFilesWithExceptionShrinkOnly $script:RepositoryRoot $root $root $entry `
+                            $baseRevision $exceptionRenameRevision $true
+                    }) | Should BeExactly 'BLOCKED|SkillSpector exception registry was deleted while baseline files remain.'
+                Move-Item -LiteralPath $exceptionRenamedPath -Destination $exceptionRetainedPath
+                [void](Invoke-SourceFixtureGit $root @('add','-A'))
+                [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','restore exception-scope retained path'))
+                $candidateRevision = Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
+            }
+
+            $retained = @($entry.files | Where-Object {
+                    $_.disposition -eq 'retain' -and -not (Test-GateExceptionPathInScope ([string]$_.path))
+                })[0]
             if ($null -ne $retained) {
                 $retainedPath = Join-Path $root ([string]$retained.path)
                 $renamedPath = "$retainedPath.renamed"
