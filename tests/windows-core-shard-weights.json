@@ -6,9 +6,9 @@
     "install-ai-instructions-bootstrap.part2.Tests.ps1": 17,
     "install-ai-instructions-bootstrap.part3.Tests.ps1": 16,
     "bootstrap-ai-instructions.Tests.ps1": 14,
-    "ai-instructions-writer-gate.part2.Tests.ps1": 14,
+    "ai-instructions-writer-gate.part2.Tests.ps1": 29,
     "agent-environment-reconciler.Tests.ps1": 11,
-    "ai-instructions-writer-gate.part1.Tests.ps1": 7,
+    "ai-instructions-writer-gate.part1.Tests.ps1": 20,
     "syp214-user-only.Tests.ps1": 5,
     "platform-runtime.Tests.ps1": 3,
     "update-ai-instructions.Tests.ps1": 3,
@@ -20,6 +20,13 @@
     "consumer-gate-workflow.Tests.ps1": 2,
     "consumer-source-gate.Tests.ps1": 17,
     "bootstrap-ai-instructions-multisource.Tests.ps1": 1,
-    "agent-artifact-remediation.Tests.ps1": 1
+    "agent-artifact-remediation.Tests.ps1": 1,
+    "ai-instructions-writer-gate.part3.Tests.ps1": 35,
+    "ai-instructions-writer-gate.part4.Tests.ps1": 17,
+    "ai-instructions-writer-gate.part5.Tests.ps1": 20,
+    "ai-instructions-writer-gate.part6.Tests.ps1": 18,
+    "ai-instructions-writer-gate.part7.Tests.ps1": 9,
+    "ai-instructions-writer-gate.part8.Tests.ps1": 21,
+    "ai-instructions-writer-gate.part9.Tests.ps1": 27
   }
 }

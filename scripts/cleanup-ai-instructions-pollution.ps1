@@ -391,9 +391,9 @@ function Test-CleanupManagedPath {
         $Path -match '^\.codex/AI-Rules/[^/\\]+\.en\.md$' -or
         $Path -match '^\.claude/AI-Rules/[^/\\]+\.en\.md$' -or
         $Path -match '^\.github/AI-Rules/[^/\\]+\.en\.md$') { return $true }
-    if (-not $Path.StartsWith('.agents/skills/',[System.StringComparison]::Ordinal)) { return $false }
-    $parts = @($Path.Substring('.agents/skills/'.Length) -split '/')
-    if ($parts.Count -lt 2 -or $parts[0] -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$') { return $false }
+    if ($Path -cnotmatch '^\.(agents|claude|github)/skills/') { return $false }
+    $parts = @($Path -split '/')
+    if ($parts.Count -lt 4 -or $parts[2] -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$') { return $false }
     foreach ($part in $parts) {
         if ([string]::IsNullOrWhiteSpace($part) -or $part -in @('.','..') -or $part.Contains('\')) { return $false }
     }
@@ -422,7 +422,7 @@ function Get-CleanupNormalizedHash {
 
 function Get-CleanupManagedHash {
     param([Parameter(Mandatory = $true)][string] $Path,[Parameter(Mandatory = $true)][string] $TargetPath)
-    if ($TargetPath.StartsWith('.agents/skills/',[System.StringComparison]::Ordinal) -or (Test-InstructionLicenseDeliveryPath $TargetPath)) { return Get-CleanupRawHash -Path $Path }
+    if ($TargetPath -cmatch '^\.(agents|claude|github)/skills/' -or (Test-InstructionLicenseDeliveryPath $TargetPath)) { return Get-CleanupRawHash -Path $Path }
     return Get-CleanupNormalizedHash -Path $Path
 }
 
@@ -460,7 +460,7 @@ function Get-CleanupIndexManagedHash {
         $process.Dispose()
     }
 
-    if (-not $TargetPath.StartsWith('.agents/skills/',[System.StringComparison]::Ordinal) -and -not (Test-InstructionLicenseDeliveryPath $TargetPath)) {
+    if ($TargetPath -cnotmatch '^\.(agents|claude|github)/skills/' -and -not (Test-InstructionLicenseDeliveryPath $TargetPath)) {
         $offset = if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xef -and $bytes[1] -eq 0xbb -and $bytes[2] -eq 0xbf) { 3 } else { 0 }
         $encoding = New-Object System.Text.UTF8Encoding($false,$true)
         try { $content = $encoding.GetString($bytes,$offset,$bytes.Length - $offset) }
@@ -997,7 +997,9 @@ $preservedProtectedExcludePaths = @(
 )
 $trackedManagedEntries = New-Object System.Collections.Generic.List[object]
 foreach ($manifestTargetPath in @($manifestRelativePath) + @($entriesByPath.Keys | Sort-Object)) {
-    if ([string]$manifestTargetPath -like '.agents/skills/*') {
+    $manifestEntry = if ($entriesByPath.ContainsKey([string]$manifestTargetPath)) { $entriesByPath[[string]$manifestTargetPath] } else { $null }
+    if (($null -ne $manifestEntry -and $null -ne $manifestEntry.PSObject.Properties['artifactType'] -and [string]$manifestEntry.artifactType -ceq 'skill') -or
+        [string]$manifestTargetPath -cmatch '^\.(agents|claude|github)/skills/') {
         Write-Output "Tracked/project Skills are protected from Instructions pollution cleanup: $manifestTargetPath"
         continue
     }

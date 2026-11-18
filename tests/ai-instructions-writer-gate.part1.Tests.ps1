@@ -292,145 +292,120 @@ Describe 'AI instructions writer and reader gate' {
         (Get-P9bRepoSnapshot $target)|Should Be $before
     }
 
-    # Scenario: Sync v5 selects a project projection before the P9c project runtime exists.
-    # Purpose: Return the typed J9 refusal before any REPO byte, index, history, or exclude mutation.
-    It 'InterT113_refuses_project_projection_before_REPO_mutation' {
-        $root=Join-Path $script:ExternalRoot 'p9b-project-unavailable';New-Item -ItemType Directory -Force -Path $root|Out-Null
-        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip')
-        $context=New-P9bBootstrapContext -Root $root -SelectProjectProjection
-        $target=Join-Path $root 'target';New-P9bTargetRepository $target
-        $before=Get-P9bRepoSnapshot $target
-
-        $result=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target
-        $result.ExitCode|Should Not Be 0
-        (Get-AiInstructionsRefusalCode $result.Output)|Should Be projection-runtime-unavailable
-        (Get-P9bRepoSnapshot $target)|Should Be $before
-    }
-
-    # Scenario: Each project-owned CLAUDE.md ownership form is crossed with tracked or untracked Claude Rules/licenses, including a linked worktree.
-    # Purpose: Skip the complete Claude family, preserve every protected byte and HEAD, avoid remediation commits, and still update other host families.
-    It 'InterT114_preserves_project_owned_Claude_family_for_<Case>' -TestCases @(
-        @{Case='tracked-base-tracked-rule';Base='tracked';Companion='tracked-rule';Linked=$false},
-        @{Case='staged-base-untracked-license';Base='staged';Companion='untracked-license';Linked=$false},
-        @{Case='unmanaged-base-tracked-license';Base='unmanaged';Companion='tracked-license';Linked=$false},
-        @{Case='manifest-customized-untracked-rule';Base='managed-customized';Companion='untracked-rule';Linked=$false},
-        @{Case='manifest-tracked-tracked-rule';Base='managed-tracked';Companion='tracked-rule';Linked=$false},
-        @{Case='linked-unmanaged-tracked-license';Base='unmanaged';Companion='tracked-license';Linked=$true}
+    # Scenario: The isolated v3/v5 writer selects no project root, one root, or all three project roots.
+    # Purpose: Exercise the complete P9c writer matrix, v4 projection parity, exact ignores, and idempotent generation without changing production pins.
+    It 'InterT113_writes_project_Skills_for_<Case>_idempotently' -TestCases @(
+        @{Case='empty';Projections=@()},
+        @{Case='single';Projections=@('project-agents')},
+        @{Case='all';Projections=@('project-agents','project-claude','project-github')}
     ) {
-        param($Case,$Base,$Companion,$Linked)
-        $root=Join-Path $script:ExternalRoot ("p9b-owned-$Case");New-Item -ItemType Directory -Force -Path $root|Out-Null
-        $baseline=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'baseline-work') -ArchivePath (Join-Path $root 'baseline.zip') -Marker baseline
-        $changed=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'changed-work') -ArchivePath (Join-Path $root 'changed.zip') -Marker changed
-        $context=New-P9bBootstrapContext -Root $root
-        $primary=Join-Path $root 'primary';New-P9bTargetRepository $primary
-        $target=$primary
-        if($Linked){
-            $target=Join-Path $root 'linked'
-            & git -C $primary worktree add --quiet -b p9b-linked $target
-            if($LASTEXITCODE-ne0){throw 'Could not create linked-worktree fixture.'}
-        }
-        if($Base-like'managed-*'){
-            (Invoke-P9bRepoBootstrap -Context $context -ArchivePath $baseline.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
-        }
-        $rulePath=Join-Path $target '.claude/AI-Rules/Database.en.md'
-        $licensePath=Join-Path $target '.claude/ai-instructions-licenses/cccccccccccccccccccccccccccccccccccccccc/delivery.json'
-        $companionPath=if($Companion-like'*-rule'){$rulePath}else{$licensePath}
-        if(-not(Test-Path -LiteralPath $companionPath -PathType Leaf)){
-            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $companionPath)|Out-Null
-            [IO.File]::WriteAllText($companionPath,"project companion $Case`n",[Text.UTF8Encoding]::new($false))
-        }
-        if($Companion-like'tracked-*'){
-            & git -C $target add -f -- ($companionPath.Substring($target.Length).TrimStart([char[]]@('\','/')).Replace('\','/'))
-            & git -C $target commit --quiet -m 'track project Claude companion'
-        }
-        $claudePath=Join-Path $target 'CLAUDE.md'
-        switch($Base){
-            'tracked' {[IO.File]::WriteAllText($claudePath,"tracked project Claude`n",[Text.UTF8Encoding]::new($false));& git -C $target add -f -- CLAUDE.md;& git -C $target commit --quiet -m 'track project Claude base'}
-            'staged' {[IO.File]::WriteAllText($claudePath,"staged project Claude`n",[Text.UTF8Encoding]::new($false));& git -C $target add -f -- CLAUDE.md}
-            'unmanaged' {[IO.File]::WriteAllText($claudePath,"unmanaged project Claude`n",[Text.UTF8Encoding]::new($false))}
-            'managed-customized' {[IO.File]::AppendAllText($claudePath,"project customization`n",[Text.UTF8Encoding]::new($false))}
-            'managed-tracked' {& git -C $target add -f -- CLAUDE.md;& git -C $target commit --quiet -m 'track formerly managed Claude base'}
-        }
-        $claudeBefore=[IO.File]::ReadAllBytes($claudePath)
-        $companionBefore=[IO.File]::ReadAllBytes($companionPath)
-        $claudeFamilyBefore=Get-P7eTreeSnapshot (Join-Path $target '.claude')
-        $headBefore=(& git -C $target rev-parse HEAD|Select-Object -First 1).Trim()
-
-        $result=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $changed.ArchivePath -TargetRoot $target
-        $result.ExitCode|Should Be 0
-        $result.Output|Should Match 'claude-base-skipped-project-owned'
-        [IO.File]::ReadAllBytes($claudePath)|Should Be $claudeBefore
-        [IO.File]::ReadAllBytes($companionPath)|Should Be $companionBefore
-        (Get-P7eTreeSnapshot (Join-Path $target '.claude'))|Should Be $claudeFamilyBefore
-        Test-Path -LiteralPath (Join-Path $target '.claude/AI-Rules/CodeReview.en.md')|Should Be ($Base-like'managed-*')
-        ([IO.File]::ReadAllText((Join-Path $target 'AGENTS.md')))|Should Match '<!-- changed -->'
-        Test-Path -LiteralPath (Join-Path $target '.github/copilot-instructions.md')|Should Be $true
-        (& git -C $target rev-parse HEAD|Select-Object -First 1).Trim()|Should Be $headBefore
-        $result.Output|Should Not Match 'Agent artifact remediation commit created'
-    }
-    # Scenario: Legacy production v2/v4 fan-out runs after Claude support is present in the source contract.
-    # Purpose: Preserve all v2/v3 behavior and prove the legacy writer never creates Claude base, Rules, or license paths.
-    It 'InterT115_keeps_legacy_writer_free_of_Claude_artifacts' {
-        $root=Join-Path $script:ExternalRoot 'p9b-legacy-no-claude';New-Item -ItemType Directory -Force -Path $root|Out-Null
+        param($Case,$Projections)
+        $root=Join-Path $script:ExternalRoot "p9c-project-$Case";New-Item -ItemType Directory -Force -Path $root|Out-Null
         $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip')
+        $fixture=$null
+        $context=if(@($Projections).Count-eq0){New-P9bBootstrapContext -Root $root}else{$fixture=New-P9cProjectFixture -Root $root -ProjectionIds $Projections;$fixture.Context}
         $target=Join-Path $root 'target';New-P9bTargetRepository $target
-        $configuration=Join-Path $root 'routing-v3.json';Set-P9bJson -Path $configuration -Document ([ordered]@{schemaVersion=3;excludedRepositoryUrls=@();excludedRepositoryPaths=@()})
-        $provenance=Join-Path $root 'provenance.json';Set-P9bJson -Path $provenance -Document ([ordered]@{
-            schemaVersion=1;catalogId='test-catalog';lockSha256=('a'*64)
-            instruction=[ordered]@{sourceId='ai-instructions';sourceRepository='https://example.com/ai-instructions.git';sourceRef=('c'*40);sourceCommit=('c'*40);sourceVersion='test@cccccccc'};skills=@()
-        })
-        $output=& $script:PowerShellExecutable -NoProfile -NonInteractive -File (Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1') -SourceArchivePath $source.ArchivePath -ConfigurationPath $configuration -ProvenancePath $provenance -TargetRoot $target -UserHome (Join-Path $root 'user') 2>&1
+
+        $first=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target
+        if($first.ExitCode-ne0){throw "P9c initial bootstrap failed: $($first.Output)"}
+        $first.ExitCode|Should Be 0
+        $manifestPath=Join-Path $target '.codex/ai-instructions.manifest.json';$manifest=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+        @($manifest.projections)|Should Be @($Projections|Sort-Object)
+        $skillEntries=@($manifest.files|Where-Object artifactType -ceq skill)
+        if(@($Projections).Count-eq0){$skillEntries.Count|Should Be 0}
+        else{
+            @($skillEntries.projectionId|Sort-Object -Unique)|Should Be @($Projections|Sort-Object)
+            foreach($projection in $Projections){@($skillEntries|Where-Object projectionId -ceq $projection).Count|Should BeGreaterThan 0}
+            Assert-ManagedManifestV4 -Manifest $manifest
+            $exclude=[IO.File]::ReadAllText((Join-Path $target '.git/info/exclude'))
+            foreach($entry in $skillEntries){$exclude|Should Match ([regex]::Escape('/'+[string]$entry.targetPath))}
+        }
+        [int64]$generation=$manifest.generation;$before=Get-P9bRepoSnapshot $target
+        $second=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target
+        $second.ExitCode|Should Be 0
+        [int64](Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json).generation|Should Be $generation
+        (Get-P9bRepoSnapshot $target)|Should Be $before
+        if($Case-ceq'all'){
+            $inventoryPath=Join-Path $fixture.CandidateRoot 'project-candidate.json';$inventory=Get-Content -Raw -LiteralPath $inventoryPath|ConvertFrom-Json;$inventory.projections=@('project-agents');Set-P9bJson -Path $inventoryPath -Document $inventory
+            $singleArchive=Join-Path $root 'project-candidate-single.zip';New-ComposedBootstrapArchive -SourceRoot $fixture.CandidateRoot -DestinationPath $singleArchive|Out-Null
+            $singleContext=New-P9bBootstrapContext -Root (Join-Path $root 'single-context') -CodexHome $fixture.Home -ProjectProjectionIds @('project-agents') -ProjectCandidateArchivePath $singleArchive -SkillProvenance $fixture.SkillProvenance
+            $changed=Invoke-P9bRepoBootstrap -Context $singleContext -ArchivePath $source.ArchivePath -TargetRoot $target
+            $changed.ExitCode|Should Be 0
+            $changedManifest=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+            [int64]$changedManifest.generation|Should Be ($generation+1)
+            @($changedManifest.projections)|Should Be @('project-agents')
+            @(Get-ChildItem -LiteralPath (Join-Path $target '.claude/skills') -File -Recurse -ErrorAction SilentlyContinue).Count|Should Be 0
+            @(Get-ChildItem -LiteralPath (Join-Path $target '.github/skills') -File -Recurse -ErrorAction SilentlyContinue).Count|Should Be 0
+        }
+    }
+
+    # Scenario: A desired project Skill becomes tracked, staged, unmanaged, customized, or project-owned in a linked worktree.
+    # Purpose: Refuse the whole project transaction before remediation, report every ownership state, and preserve all repository bytes and history.
+    It 'InterT133_refuses_project_owned_Skill_<Case>_before_mutation' -TestCases @(
+        @{Case='tracked'},@{Case='staged'},@{Case='unmanaged'},@{Case='drift'},@{Case='linked-unmanaged'}
+    ) {
+        param($Case)
+        $root=Join-Path $script:ExternalRoot "p9c-owned-$Case";New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip')
+        $fixture=New-P9cProjectFixture -Root $root -ProjectionIds @('project-agents')
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        (Invoke-P9bRepoBootstrap -Context $fixture.Context -ArchivePath $source.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
+        $skillPath=@((Get-Content -Raw -LiteralPath (Join-Path $target '.codex/ai-instructions.manifest.json')|ConvertFrom-Json).files|Where-Object{[string]$_.artifactType-ceq'skill'-and[string]$_.targetPath-like'*/SKILL.md'}|Select-Object -First 1 -ExpandProperty targetPath)
+        $skillPath=[string]$skillPath[0];$linkedRoot=$null
+        switch($Case){
+            'tracked' {& git -C $target add -f -- $skillPath;& git -C $target commit --quiet -m 'track project Skill fixture'}
+            'staged' {& git -C $target add -f -- $skillPath}
+            'unmanaged' {[IO.File]::WriteAllText((Join-Path (Split-Path -Parent (Join-Path $target $skillPath)) 'local.txt'),"local`n",[Text.UTF8Encoding]::new($false))}
+            'drift' {[IO.File]::AppendAllText((Join-Path $target $skillPath),"custom`n",[Text.UTF8Encoding]::new($false))}
+            'linked-unmanaged' {
+                $linkedRoot=Join-Path $root 'linked';& git -C $target worktree add --quiet -b "p9c-owned-$Case" $linkedRoot
+                $linkedSkill=Join-Path $linkedRoot $skillPath;New-Item -ItemType Directory -Force -Path (Split-Path -Parent $linkedSkill)|Out-Null
+                [IO.File]::WriteAllText($linkedSkill,"linked project Skill`n",[Text.UTF8Encoding]::new($false))
+            }
+        }
+        $before=Get-P9bRepoSnapshot $target;$headBefore=(& git -C $target rev-parse HEAD|Select-Object -First 1).Trim()
+        try{
+            $result=Invoke-P9bRepoBootstrap -Context $fixture.Context -ArchivePath $source.ArchivePath -TargetRoot $target
+            $result.ExitCode|Should Not Be 0
+            (Get-AiInstructionsRefusalCode $result.Output)|Should Be closure-invalid
+            $result.Output|Should Match 'Project Skill transaction refused before remediation or project mutation'
+            $result.Output|Should Match $(if($Case-like'*unmanaged'){'unmanaged'}else{$Case})
+            (Get-P9bRepoSnapshot $target)|Should Be $before
+            (& git -C $target rev-parse HEAD|Select-Object -First 1).Trim()|Should Be $headBefore
+            $result.Output|Should Not Match 'Agent artifact remediation commit created'
+        }
+        finally{if($null-ne$linkedRoot){& git -C $target worktree remove --force $linkedRoot|Out-Null}}
+    }
+
+    if($IsWindows){
+    # Scenario: A core.ignoreCase repository records a manifest-owned project Skill under a case-variant Git path.
+    # Purpose: Use Git's repository comparer to refuse the tracked file before mutation and preserve its exact bytes.
+    It 'InterT133_refuses_case_variant_tracked_project_Skill_before_mutation' {
+        $root=Join-Path $script:ExternalRoot 'p9c-owned-case-variant';New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip')
+        $fixture=New-P9cProjectFixture -Root $root -ProjectionIds @('project-agents')
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        & git -C $target config core.ignoreCase true
+        (Invoke-P9bRepoBootstrap -Context $fixture.Context -ArchivePath $source.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
+        $manifestPath=Join-Path $target '.codex/ai-instructions.manifest.json'
+        $skillPath=[string]@((Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json).files|Where-Object{[string]$_.artifactType-ceq'skill'-and[string]$_.targetPath-like'*/SKILL.md'}|Select-Object -First 1 -ExpandProperty targetPath)[0]
+        $caseVariant=$skillPath -replace '^\.agents/','.Agents/'
+        $blob=(@(& git -C $target hash-object -w -- $skillPath)-join'').Trim()
+        & git -C $target update-index --add --cacheinfo "100644,$blob,$caseVariant"
         $LASTEXITCODE|Should Be 0
-        $manifest=Get-Content -Raw -LiteralPath (Join-Path $target '.codex/ai-instructions.manifest.json')|ConvertFrom-Json
-        [int]$manifest.schemaVersion|Should Be 2
-        @($manifest.files|Where-Object{[string]$_.targetPath-like'CLAUDE.md'-or[string]$_.targetPath-like'.claude/*'}).Count|Should Be 0
-        Test-Path -LiteralPath (Join-Path $target 'CLAUDE.md')|Should Be $false
-        Test-Path -LiteralPath (Join-Path $target '.claude')|Should Be $false
-    }
+        & git -C $target commit --quiet -m 'track case-variant project Skill fixture'
+        $LASTEXITCODE|Should Be 0
+        @(& git -C $target ls-files)|Should Contain $caseVariant
+        $skillBytes=[Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $target $skillPath)))
+        $manifestBytes=[Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath))
 
-    # Scenario: Installed runtime state is mixed, unknown, gate-invalid, or Catalog/Lock-incompatible before fan-out.
-    # Purpose: Return the J4 typed refusal matrix and preserve the complete consumer REPO tree for every rejected v3/v5 input.
-    It 'InterT116_rejects_invalid_writer_context_without_REPO_mutation_<Case>' -TestCases @(
-        @{Case='v3-v4-mixed';Code='mixed-generation'},
-        @{Case='v2-v5-mixed';Code='mixed-generation'},
-        @{Case='unknown-bundle';Code='unsupported-version'},
-        @{Case='platform-gate';Code='platform-mismatch'},
-        @{Case='catalog-lock-incompatible';Code='closure-invalid'}
-    ) {
-        param($Case,$Code)
-        $root=Join-Path $script:ExternalRoot ("p9b-writer-$Case");New-Item -ItemType Directory -Force -Path $root|Out-Null
-        $fixtureHome=Copy-P7eHome $script:BaseV3Home (Join-Path $root 'home')
-        $bundlePath=Join-Path $fixtureHome 'hooks/ai-instructions-runtime/runtime-bundle.json'
-        $configurationPath=Join-Path $fixtureHome 'ai-instructions-sync.json'
-        if($Case-ceq'v3-v4-mixed'){$configuration=Get-Content -Raw $configurationPath|ConvertFrom-Json;$configuration.schemaVersion=4;$configuration.PSObject.Properties.Remove('projections');Set-P9bJson $configurationPath $configuration}
-        elseif($Case-ceq'v2-v5-mixed'){$bundle=Get-Content -Raw $bundlePath|ConvertFrom-Json;$bundle.schemaVersion=2;Set-P9bJson $bundlePath $bundle}
-        elseif($Case-ceq'unknown-bundle'){$bundle=Get-Content -Raw $bundlePath|ConvertFrom-Json;$bundle.schemaVersion=99;Set-P9bJson $bundlePath $bundle}
-        elseif($Case-ceq'platform-gate'){$bundle=Get-Content -Raw $bundlePath|ConvertFrom-Json;$bundle.platform.architecture=if($bundle.platform.architecture-ceq'x64'){'arm64'}else{'x64'};Set-P9bJson $bundlePath $bundle}
-        else{$lockPath=Join-Path $fixtureHome 'hooks/ai-instructions-runtime/catalog/skills-catalog-lock.json';$lock=Get-Content -Raw $lockPath|ConvertFrom-Json;$lock.catalogId='incompatible-catalog';Set-P9bJson $lockPath $lock}
-        $target=Join-Path $root 'target';New-P9bTargetRepository $target
-        $before=Get-P9bRepoSnapshot $target
+        $result=Invoke-P9bRepoBootstrap -Context $fixture.Context -ArchivePath $source.ArchivePath -TargetRoot $target
 
-        $result=Invoke-P7eLauncherFailure -CodexHome $fixtureHome -TargetRoot $target
-        $result.ExitCode|Should Not Be 0
-        (Get-AiInstructionsRefusalCode $result.Output)|Should Be $Code
-        (Get-P9bRepoSnapshot $target)|Should Be $before
-    }
-
-    # Scenario: Bootstrap receives a routing envelope whose embedded v5 identity no longer matches the verified v3 bundle.
-    # Purpose: Prove the final layer re-runs the P7e gate instead of trusting the installed or multi-source caller.
-    It 'InterT117_bootstrap_revalidates_the_embedded_v5_context_without_REPO_mutation' {
-        $root=Join-Path $script:ExternalRoot 'p9b-bootstrap-regate';New-Item -ItemType Directory -Force -Path $root|Out-Null
-        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip')
-        $context=New-P9bBootstrapContext -Root $root
-        $routing=Get-Content -Raw -LiteralPath $context.RoutingPath|ConvertFrom-Json
-        $routing.syncConfiguration.catalog.ref='d'*40
-        Set-P9bJson -Path $context.RoutingPath -Document $routing
-        $target=Join-Path $root 'target';New-P9bTargetRepository $target
-        $before=Get-P9bRepoSnapshot $target
-
-        $result=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target
         $result.ExitCode|Should Not Be 0
         (Get-AiInstructionsRefusalCode $result.Output)|Should Be closure-invalid
-        (Get-P9bRepoSnapshot $target)|Should Be $before
+        $result.Output|Should Match 'tracked'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $target $skillPath)))|Should Be $skillBytes
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath))|Should Be $manifestBytes
+    }
     }
 }

@@ -248,9 +248,6 @@ if ($runtimeGeneration -ceq 'v3v5') {
     $runtimeCatalogPath = Join-Path $runtimeRootPath 'catalog\skills-catalog.json'
     $runtimeLockPath = Join-Path $runtimeRootPath 'catalog\skills-catalog-lock.json'
     $bundle = Read-JsonDocument -Path $bundlePath -Name 'AI instruction runtime bundle'
-    if (@($configuration.projections.project).Count -gt 0) {
-        throw (New-AiInstructionsRefusalException -Code 'projection-runtime-unavailable' -Message 'Project Skill projections are unavailable until the P9c projection runtime is installed.')
-    }
     if ((Get-RawFileSha256 -Path $CatalogPath) -cne (Get-RawFileSha256 -Path $runtimeCatalogPath) -or
         (Get-RawFileSha256 -Path $LockPath) -cne (Get-RawFileSha256 -Path $runtimeLockPath)) {
         throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message 'Multi-source Catalog/Lock inputs do not match the verified runtime pair.')
@@ -281,6 +278,8 @@ $sourceStaging = Join-Path $workingRoot 'skill-sources'
 $composedParent = Join-Path $workingRoot 'composed'
 $composedRoot = Join-Path $composedParent 'repository'
 $composedArchive = Join-Path $workingRoot 'composed-source.zip'
+$projectCandidateRoot = Join-Path $workingRoot 'project-candidate'
+$projectCandidateArchive = Join-Path $workingRoot 'project-candidate.zip'
 $routingConfigurationPath = Join-Path $workingRoot 'routing-v2.json'
 $provenancePath = Join-Path $workingRoot 'managed-source-provenance.json'
 
@@ -320,6 +319,16 @@ try {
 
     New-ComposedBootstrapArchive -SourceRoot $composedRoot -DestinationPath $composedArchive | Out-Null
 
+    $projectCandidateSha256 = $null
+    if ($runtimeGeneration -ceq 'v3v5' -and @($configuration.projections.project).Count -gt 0) {
+        New-ProjectSkillsCandidate -ResolvedSkills ([object[]]$resolved.Skills) -SourcePlansById $sourcePlansById `
+            -ProjectionIds ([string[]]@($configuration.projections.project)) -CatalogId ([string]$catalog.catalogId) `
+            -LockSha256 (Get-RawFileSha256 -Path $LockPath) -ProjectionContractSha256 ([string]$lock.projectionContractSha256) `
+            -DestinationRoot $projectCandidateRoot | Out-Null
+        New-ComposedBootstrapArchive -SourceRoot $projectCandidateRoot -DestinationPath $projectCandidateArchive | Out-Null
+        $projectCandidateSha256 = Get-RawFileSha256 -Path $projectCandidateArchive
+    }
+
     $skillProvenance = @(
         foreach ($skill in @($resolved.Skills | Sort-Object id)) {
             $sourcePlan = $sourcePlansById[[string]$skill.sourceId]
@@ -351,13 +360,15 @@ try {
     [System.IO.File]::WriteAllText($provenancePath, $provenanceJson, (New-Object System.Text.UTF8Encoding($false)))
 
     $routingConfiguration = if ($runtimeGeneration -ceq 'v3v5') {
-        [ordered]@{
+        $routing = [ordered]@{
             schemaVersion = 4
             syncConfiguration = $configuration
             catalogId = [string]$catalog.catalogId
             lockSha256 = Get-RawFileSha256 -Path $LockPath
             projectionContractSha256 = [string]$lock.projectionContractSha256
         }
+        if ($null -ne $projectCandidateSha256) { $routing['projectCandidateSha256'] = $projectCandidateSha256 }
+        $routing
     }
     else {
         [ordered]@{
@@ -377,6 +388,7 @@ try {
         RuntimeRoot = $RuntimeRoot
         WhatIf = $WhatIf
     }
+    if ($null -ne $projectCandidateSha256) { $arguments.ProjectCandidateArchivePath = $projectCandidateArchive }
     if (-not [string]::IsNullOrWhiteSpace($TargetRoot)) {
         $arguments.TargetRoot = $TargetRoot
     }

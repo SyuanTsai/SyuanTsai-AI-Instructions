@@ -195,4 +195,94 @@ function New-ComposedBootstrapSource {
     }
 }
 
-Export-ModuleMember -Function New-ComposedBootstrapArchive, New-ComposedBootstrapSource
+function New-ProjectSkillsCandidate {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object[]] $ResolvedSkills,
+        [Parameter(Mandatory = $true)][hashtable] $SourcePlansById,
+        [Parameter(Mandatory = $true)][string[]] $ProjectionIds,
+        [Parameter(Mandatory = $true)][string] $CatalogId,
+        [Parameter(Mandatory = $true)][string] $LockSha256,
+        [Parameter(Mandatory = $true)][string] $ProjectionContractSha256,
+        [Parameter(Mandatory = $true)][string] $DestinationRoot
+    )
+
+    $destination = [IO.Path]::GetFullPath($DestinationRoot)
+    if (Test-Path -LiteralPath $destination) { throw "Project candidate destination already exists: $destination" }
+    if ($CatalogId -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$' -or
+        $LockSha256 -cnotmatch '^[0-9a-f]{64}$' -or $ProjectionContractSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'Project candidate identity is invalid.'
+    }
+    [string[]]$sortedProjections = @($ProjectionIds)
+    [Array]::Sort($sortedProjections,[StringComparer]::Ordinal)
+    if ($sortedProjections.Count -eq 0 -or @($sortedProjections | Select-Object -Unique).Count -ne $sortedProjections.Count) {
+        throw 'Project candidate projections must be a non-empty unique array.'
+    }
+    foreach ($projectionId in $sortedProjections) {
+        if ($projectionId -notin @('project-agents','project-claude','project-github')) {
+            throw "Unsupported project candidate projection '$projectionId'."
+        }
+    }
+
+    New-Item -ItemType Directory -Path $destination | Out-Null
+    $payloadRoot = Join-Path $destination 'payload'
+    New-Item -ItemType Directory -Path $payloadRoot | Out-Null
+    $skillDocuments = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    foreach ($skill in @($ResolvedSkills | Sort-Object id)) {
+        $skillId = [string]$skill.id
+        if ($skillId -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$' -or $seen.ContainsKey($skillId)) {
+            throw "Project candidate contains an invalid or duplicate Skill ID: $skillId"
+        }
+        $seen[$skillId] = $true
+        $sourceId = [string]$skill.sourceId
+        if (-not $SourcePlansById.ContainsKey($sourceId)) { throw "Project candidate is missing source plan '$sourceId'." }
+        $sourcePlan = $SourcePlansById[$sourceId]
+        $skillRoot = [IO.Path]::GetFullPath([string]$skill.skillRootPath).TrimEnd([char[]]@('\','/'))
+        $repositoryRoot = [IO.Path]::GetFullPath([string]$skill.sourceRootPath).TrimEnd([char[]]@('\','/'))
+        if (-not (Test-Path -LiteralPath (Join-Path $skillRoot 'SKILL.md') -PathType Leaf)) { throw "Project candidate Skill '$skillId' is missing SKILL.md." }
+        if (Test-Path -LiteralPath (Join-Path $skillRoot '.ai-instructions-licenses')) { throw "Skill source already owns the license delivery namespace: $skillId" }
+        $skillPayloadRoot = Join-Path $payloadRoot $skillId
+        New-Item -ItemType Directory -Path $skillPayloadRoot | Out-Null
+        $files = New-Object System.Collections.Generic.List[object]
+        $artifactPaths = New-Object System.Collections.Generic.List[string]
+        foreach ($file in @(Get-ChildItem -LiteralPath $skillRoot -File -Recurse -Force | Sort-Object FullName)) {
+            $relative = $file.FullName.Substring($skillRoot.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+            $sourceRelative = $file.FullName.Substring($repositoryRoot.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+            $payloadPath = "payload/$skillId/$relative"
+            $target = Join-Path $skillPayloadRoot $relative.Replace('/',[IO.Path]::DirectorySeparatorChar)
+            $parent = Split-Path -Parent $target
+            if (-not (Test-Path -LiteralPath $parent -PathType Container)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+            Copy-Item -LiteralPath $file.FullName -Destination $target
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash.ToLowerInvariant()
+            $files.Add([pscustomobject][ordered]@{sourcePath=$sourceRelative;relativePath=$relative;payloadPath=$payloadPath;sha256=$hash})
+            $artifactPaths.Add($sourceRelative)
+        }
+        $licenses = New-LicenseDeliveryPackage -SourceRoot $repositoryRoot -ArtifactPaths ([string[]]$artifactPaths.ToArray()) `
+            -SourceRepository ([string]$sourcePlan.repository) -SourceCommit ([string]$sourcePlan.resolvedCommit) -ArtifactId $skillId
+        $licenseRoot = Join-Path $skillPayloadRoot '.ai-instructions-licenses'
+        Write-LicenseDeliveryPackage -Package $licenses -DestinationRoot $licenseRoot
+        foreach ($licenseFile in @($licenses.Files | Sort-Object relativePath)) {
+            $relative = ".ai-instructions-licenses/$([string]$licenseFile.relativePath)"
+            $files.Add([pscustomobject][ordered]@{
+                sourcePath=[string]$licenseFile.sourcePath;relativePath=$relative
+                payloadPath="payload/$skillId/$relative";sha256=[string]$licenseFile.sha256
+            })
+        }
+        $skillDocuments.Add([pscustomobject][ordered]@{
+            id=$skillId;sourceId=[string]$sourcePlan.id;sourceRepository=[string]$sourcePlan.repository
+            sourceRef=[string]$sourcePlan.requestedRef;sourceCommit=[string]$sourcePlan.resolvedCommit
+            sourceVersion=[string]$sourcePlan.resolvedVersion;files=@($files | Sort-Object relativePath)
+        })
+    }
+    $document = [ordered]@{
+        schemaVersion=1;catalogId=$CatalogId;lockSha256=$LockSha256
+        projectionContractSha256=$ProjectionContractSha256;projections=$sortedProjections
+        skills=@($skillDocuments.ToArray())
+    }
+    $json = ($document | ConvertTo-Json -Depth 20).Replace("`r`n","`n") + "`n"
+    [IO.File]::WriteAllText((Join-Path $destination 'project-candidate.json'),$json,[Text.UTF8Encoding]::new($false))
+    return [pscustomobject][ordered]@{RootPath=$destination;Inventory=$document;SkillIds=@($seen.Keys | Sort-Object)}
+}
+
+Export-ModuleMember -Function New-ComposedBootstrapArchive, New-ComposedBootstrapSource, New-ProjectSkillsCandidate

@@ -4,6 +4,7 @@ param(
     [string] $TargetRoot,
     [string] $ConfigurationPath,
     [string] $ProvenancePath,
+    [string] $ProjectCandidateArchivePath,
     [string] $RuntimeRoot = $PSScriptRoot,
     [string] $GitExecutable = 'git',
     [string] $UserHome = [Environment]::GetFolderPath('UserProfile'),
@@ -12,9 +13,16 @@ param(
     [string] $RecoverSkillMigration
 )
 
+if ($PSVersionTable.PSEdition -cne 'Core' -or $PSVersionTable.PSVersion.Major -lt 7 -or [Environment]::Version.Major -lt 8) {
+    throw [System.InvalidOperationException]::new('AI instructions bootstrap requires pwsh 7 on .NET 8 or later; run this bootstrap with pwsh 7. [ai-instructions-refusal-code=runtime-baseline-unavailable]')
+}
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+# Read-only Git inspection must not opportunistically refresh the live index;
+# the journaled index operation is the only permitted index writer.
+$env:GIT_OPTIONAL_LOCKS = '0'
 
 if ([string]::IsNullOrWhiteSpace($GitExecutable)) {
     throw 'GitExecutable must be a non-empty command name or path.'
@@ -30,12 +38,26 @@ $script:repoManifestV4ProjectionRequirement =
 $script:repoManifestV4DowngradeMessage =
     $script:repoManifestV4DowngradeSummary + ' ' + $script:repoManifestV4ProjectionRequirement
 
+$bootstrapPlatformRuntimeRoot = [System.IO.Path]::GetFullPath($RuntimeRoot)
+$bootstrapPlatformRuntimePath = Join-Path $bootstrapPlatformRuntimeRoot 'platform-runtime.psd1'
+try {
+    Import-Module $bootstrapPlatformRuntimePath -Force -ErrorAction Stop
+    Assert-PlatformRuntimeInventory -Root $bootstrapPlatformRuntimeRoot -ManifestPath $bootstrapPlatformRuntimePath | Out-Null
+}
+catch {
+    throw [System.InvalidOperationException]::new(
+        "AI instructions bootstrap platform runtime validation failed: $($_.Exception.Message) [ai-instructions-refusal-code=closure-invalid]",
+        $_.Exception
+    )
+}
+
 Import-Module (Join-Path $PSScriptRoot 'safe-zip.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'skills-catalog-contract.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'ai-instructions-runtime-contract.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'agent-artifact-remediation.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'license-delivery.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'repo-shared-skills-migration.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'skills-selection.psm1') -Force
 
 if (-not ('CodexAiInstructions.NativeFileMutation' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -1109,7 +1131,9 @@ function Invoke-Git {
         [string] $Repository,
 
         [Parameter(Mandatory = $true)]
-        [string[]] $Arguments
+        [string[]] $Arguments,
+
+        [string[]] $StandardInputLines
     )
 
     $previousErrorActionPreference = $ErrorActionPreference
@@ -1117,8 +1141,17 @@ function Invoke-Git {
     try {
         $ErrorActionPreference = 'Continue'
         [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-        $output = & $GitExecutable -C $Repository @Arguments 2>&1
-        $exitCode = $LASTEXITCODE
+        if($PSBoundParameters.ContainsKey('StandardInputLines')){
+            $startInfo=[Diagnostics.ProcessStartInfo]::new();$startInfo.FileName=$GitExecutable;$startInfo.UseShellExecute=$false;$startInfo.CreateNoWindow=$true;$startInfo.RedirectStandardInput=$true;$startInfo.RedirectStandardOutput=$true;$startInfo.RedirectStandardError=$true
+            foreach($argument in @('-C',$Repository)+$Arguments){[void]$startInfo.ArgumentList.Add([string]$argument)}
+            $process=[Diagnostics.Process]::new();$process.StartInfo=$startInfo
+            try{
+                if(-not$process.Start()){throw 'Git process did not start.'}
+                $stdoutTask=$process.StandardOutput.ReadToEndAsync();$stderrTask=$process.StandardError.ReadToEndAsync()
+                $process.StandardInput.Write((@($StandardInputLines)-join"`n")+"`n");$process.StandardInput.Close();$process.WaitForExit()
+                $exitCode=$process.ExitCode;$output=@($stdoutTask.GetAwaiter().GetResult(),$stderrTask.GetAwaiter().GetResult()|Where-Object{-not[string]::IsNullOrWhiteSpace([string]$_)})
+            }finally{$process.Dispose()}
+        }else{$output=& $GitExecutable -C $Repository @Arguments 2>&1;$exitCode=$LASTEXITCODE}
     }
     finally {
         $ErrorActionPreference = $previousErrorActionPreference
@@ -1150,6 +1183,25 @@ function Get-GitExitCode {
     finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
+}
+
+function Get-GitQueryResult {
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string[]] $Arguments,
+        [Parameter(Mandatory = $true)][int[]] $NegativeExitCodes
+    )
+
+    $exitCode = Get-GitExitCode -Repository $Repository -Arguments $Arguments
+    if ($exitCode -eq 0) {
+        return [pscustomobject][ordered]@{ Succeeded = $true; Output = @(Invoke-Git -Repository $Repository -Arguments $Arguments) }
+    }
+    if ($exitCode -in $NegativeExitCodes) {
+        return [pscustomobject][ordered]@{ Succeeded = $false; Output = @() }
+    }
+
+    Invoke-Git -Repository $Repository -Arguments $Arguments | Out-Null
+    throw "git $($Arguments -join ' ') failed with exit code $exitCode."
 }
 
 function Get-FullPathWithoutTrailingSeparator {
@@ -1315,11 +1367,25 @@ function Get-ManagedContentHash {
         [string] $TargetPath
     )
 
-    if ($TargetPath.StartsWith('.agents/skills/', [System.StringComparison]::Ordinal) -or (Test-InstructionLicenseDeliveryPath $TargetPath)) {
+    if ($TargetPath -cmatch '^\.(agents|claude|github)/skills/' -or (Test-InstructionLicenseDeliveryPath $TargetPath)) {
         return Get-RawContentHash -Path $Path
     }
 
     return Get-NormalizedContentHash -Path $Path
+}
+
+function Get-ManagedContentHashFromBytes {
+    param([Parameter(Mandatory=$true)][AllowEmptyCollection()][byte[]]$Bytes,[Parameter(Mandatory=$true)][string]$TargetPath)
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try{
+        if($TargetPath-cmatch'^\.(agents|claude|github)/skills/'-or(Test-InstructionLicenseDeliveryPath $TargetPath)){
+            return ([BitConverter]::ToString($sha.ComputeHash($Bytes))).Replace('-','').ToLowerInvariant()
+        }
+        $offset=if($Bytes.Length-ge3-and$Bytes[0]-eq0xEF-and$Bytes[1]-eq0xBB-and$Bytes[2]-eq0xBF){3}else{0}
+        $text=[Text.UTF8Encoding]::new($false,$true).GetString($Bytes,$offset,$Bytes.Length-$offset).Replace("`r`n","`n").Replace("`r","`n")
+        $normalized=[Text.UTF8Encoding]::new($false).GetBytes($text)
+        return ([BitConverter]::ToString($sha.ComputeHash($normalized))).Replace('-','').ToLowerInvariant()
+    }finally{$sha.Dispose()}
 }
 
 function Test-IsAllowedManagedPath {
@@ -1336,13 +1402,13 @@ function Test-IsAllowedManagedPath {
         return $true
     }
 
-    if (-not $Path.StartsWith('.agents/skills/', [System.StringComparison]::Ordinal)) {
+    if ($Path -cnotmatch '^\.(agents|claude|github)/skills/') {
         return $false
     }
 
-    $skillPathParts = @($Path.Substring('.agents/skills/'.Length) -split '/')
-    if ($skillPathParts.Count -lt 2 -or
-        $skillPathParts[0] -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$') {
+    $skillPathParts = @($Path -split '/')
+    if ($skillPathParts.Count -lt 4 -or
+        $skillPathParts[2] -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$') {
         return $false
     }
 
@@ -1356,6 +1422,253 @@ function Test-IsAllowedManagedPath {
     }
 
     return $true
+}
+
+function Test-IsSafeProjectCandidatePath {
+    param([object] $Value)
+    if ($Value -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$Value)) { return $false }
+    $path = [string]$Value
+    if ($path.StartsWith('/') -or $path.EndsWith('/') -or $path.Contains('\') -or $path.Contains('//') -or
+        $path.Contains(':') -or $path -match '[\x00-\x1f\x7f-\x9f]') { return $false }
+    foreach ($segment in $path.Split('/')) {
+        if ([string]::IsNullOrWhiteSpace($segment) -or $segment -in @('.','..')) { return $false }
+    }
+    return $true
+}
+
+function Get-ProjectCandidateDesiredState {
+    param(
+        [Parameter(Mandatory = $true)][string] $CandidateRoot,
+        [Parameter(Mandatory = $true)][object] $Catalog,
+        [Parameter(Mandatory = $true)][object] $Lock,
+        [Parameter(Mandatory = $true)][object] $SyncConfiguration,
+        [Parameter(Mandatory = $true)][string] $ExpectedCatalogId,
+        [Parameter(Mandatory = $true)][string] $ExpectedLockSha256,
+        [Parameter(Mandatory = $true)][string] $ExpectedProjectionContractSha256
+    )
+    $inventoryPath = Join-Path $CandidateRoot 'project-candidate.json'
+    if (-not (Test-Path -LiteralPath $inventoryPath -PathType Leaf)) { throw 'Project candidate is missing project-candidate.json.' }
+    try { $inventory = Get-Content -Raw -Encoding UTF8 -LiteralPath $inventoryPath | ConvertFrom-Json }
+    catch { throw "Project candidate inventory is not valid JSON: $($_.Exception.Message)" }
+    $expectedTop = @('schemaVersion','catalogId','lockSha256','projectionContractSha256','projections','skills')
+    if (@($inventory.PSObject.Properties.Name | Where-Object { $_ -notin $expectedTop }).Count -gt 0 -or
+        @($expectedTop | Where-Object { $null -eq $inventory.PSObject.Properties[$_] }).Count -gt 0 -or
+        ($inventory.schemaVersion -isnot [int] -and $inventory.schemaVersion -isnot [long]) -or [int64]$inventory.schemaVersion -ne 1) {
+        throw 'Project candidate inventory schema or properties are invalid.'
+    }
+    if ([string]$inventory.catalogId -cne $ExpectedCatalogId -or [string]$inventory.lockSha256 -cne $ExpectedLockSha256 -or
+        [string]$inventory.projectionContractSha256 -cne $ExpectedProjectionContractSha256) {
+        throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message 'Project candidate identity is inconsistent with the verified Catalog/Lock/projection contract.')
+    }
+    [string[]]$expectedProjections = @($SyncConfiguration.projections.project)
+    [Array]::Sort($expectedProjections,[StringComparer]::Ordinal)
+    [string[]]$actualProjections = @($inventory.projections)
+    [Array]::Sort($actualProjections,[StringComparer]::Ordinal)
+    if (($expectedProjections -join "`n") -cne ($actualProjections -join "`n") -or $expectedProjections.Count -eq 0) {
+        throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message 'Project candidate projections do not match the verified sync configuration.')
+    }
+    $selectedSkillIds = @(Resolve-SkillsSelection -Catalog $Catalog -Selection $SyncConfiguration.catalog)
+    [string[]]$expectedSkillIds = @($selectedSkillIds)
+    [Array]::Sort($expectedSkillIds,[StringComparer]::Ordinal)
+    [string[]]$actualSkillIds = @($inventory.skills | ForEach-Object { [string]$_.id })
+    [Array]::Sort($actualSkillIds,[StringComparer]::Ordinal)
+    if (($expectedSkillIds -join "`n") -cne ($actualSkillIds -join "`n") -or @($actualSkillIds | Select-Object -Unique).Count -ne $actualSkillIds.Count) {
+        throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message 'Project candidate Skill selection does not match the verified Catalog selection.')
+    }
+    $catalogSkills = @{}; foreach ($skill in @($Catalog.skills)) { $catalogSkills[[string]$skill.id] = $skill }
+    $lockedSkills = @{}; foreach ($skill in @($Lock.skills)) { $lockedSkills[[string]$skill.id] = $skill }
+    $lockedSources = @{}; foreach ($source in @($Lock.sources)) { $lockedSources[[string]$source.id] = $source }
+    $desired = New-Object System.Collections.Generic.List[object]
+    $expectedPayloadPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($skill in @($inventory.skills)) {
+        $skillId = [string]$skill.id
+        $skillProperties = @('id','sourceId','sourceRepository','sourceRef','sourceCommit','sourceVersion','files')
+        if (@($skill.PSObject.Properties.Name | Where-Object { $_ -notin $skillProperties }).Count -gt 0 -or
+            @($skillProperties | Where-Object { $null -eq $skill.PSObject.Properties[$_] }).Count -gt 0 -or
+            -not $catalogSkills.ContainsKey($skillId) -or -not $lockedSkills.ContainsKey($skillId) -or
+            -not $lockedSources.ContainsKey([string]$skill.sourceId)) {
+            throw "Project candidate Skill '$skillId' has invalid properties or is absent from the verified Catalog/Lock."
+        }
+        $catalogSkill = $catalogSkills[$skillId]; $lockedSkill = $lockedSkills[$skillId]; $lockedSource = $lockedSources[[string]$skill.sourceId]
+        if ([string]$catalogSkill.source.sourceId -cne [string]$skill.sourceId -or [string]$lockedSkill.sourceId -cne [string]$skill.sourceId -or
+            [string]$skill.sourceRepository -cne [string]$lockedSource.repository -or [string]$skill.sourceRef -cne [string]$lockedSource.requestedRef -or
+            [string]$skill.sourceCommit -cne [string]$lockedSource.resolvedCommit -or [string]$skill.sourceVersion -cne [string]$lockedSource.resolvedVersion) {
+            throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project candidate Skill '$skillId' provenance does not match the verified Catalog/Lock.")
+        }
+        $contentLines = New-Object System.Collections.Generic.List[string]
+        $seenRelative = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+        foreach ($file in @($skill.files)) {
+            $fileProperties = @('sourcePath','relativePath','payloadPath','sha256')
+            if (@($file.PSObject.Properties.Name | Where-Object { $_ -notin $fileProperties }).Count -gt 0 -or
+                @($fileProperties | Where-Object { $null -eq $file.PSObject.Properties[$_] }).Count -gt 0) { throw "Project candidate Skill '$skillId' file properties are invalid." }
+            $relative = [string]$file.relativePath; $payloadPath = [string]$file.payloadPath; $sourcePath = [string]$file.sourcePath
+            if (-not (Test-IsSafeProjectCandidatePath $relative) -or -not (Test-IsSafeProjectCandidatePath $payloadPath) -or
+                $payloadPath -cne "payload/$skillId/$relative" -or [string]$file.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+                -not $seenRelative.Add($relative) -or -not $expectedPayloadPaths.Add($payloadPath)) {
+                throw "Project candidate Skill '$skillId' contains an unsafe or duplicate file inventory entry."
+            }
+            $payloadFullPath = Join-Path $CandidateRoot $payloadPath.Replace('/',[IO.Path]::DirectorySeparatorChar)
+            if (-not (Test-Path -LiteralPath $payloadFullPath -PathType Leaf) -or (Get-RawContentHash $payloadFullPath) -cne [string]$file.sha256) {
+                throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project candidate payload is missing or has raw-byte drift: $payloadPath")
+            }
+            $isLicense = $relative.StartsWith('.ai-instructions-licenses/',[StringComparison]::Ordinal)
+            if (-not $isLicense) {
+                $expectedSourcePrefix = ([string]$lockedSkill.sourcePath) + '/'
+                if (-not (Test-IsSafeProjectCandidatePath $sourcePath) -or -not $sourcePath.StartsWith($expectedSourcePrefix,[StringComparison]::Ordinal) -or
+                    $sourcePath.Substring($expectedSourcePrefix.Length) -cne $relative) {
+                    throw "Project candidate Skill '$skillId' sourcePath does not match the Lock: $sourcePath"
+                }
+                $contentLines.Add("$sourcePath`t$([string]$file.sha256)`n")
+            }
+            elseif ($relative -cnotmatch '^\.ai-instructions-licenses/(?:delivery\.json|source/.+)$') {
+                throw "Project candidate Skill '$skillId' has an invalid license target: $relative"
+            }
+            foreach ($projectionId in $expectedProjections) {
+                $projectionRoot = Get-SkillsCatalogProjectionTargetPath -Catalog $Catalog -SkillId $skillId -ProjectionId $projectionId
+                $desired.Add([pscustomobject][ordered]@{
+                    FamilyName='Project Skills';IsProjectSkill=$true;SkillId=$skillId;ProjectionId=$projectionId
+                    SourceId=[string]$skill.sourceId;SourceRepository=[string]$skill.sourceRepository;SourceRef=[string]$skill.sourceRef
+                    SourceCommit=[string]$skill.sourceCommit;SourceVersion=[string]$skill.sourceVersion;SourcePath=$sourcePath
+                    TargetPath="$projectionRoot/$relative";SourceFullPath=$payloadFullPath;Sha256=[string]$file.sha256
+                })
+            }
+        }
+        [string[]]$orderedLines = @($contentLines.ToArray())
+        [Array]::Sort($orderedLines,[StringComparer]::Ordinal)
+        $contentBytes = [Text.UTF8Encoding]::new($false).GetBytes([string]::Concat($orderedLines))
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $contentHash = ([BitConverter]::ToString($sha.ComputeHash($contentBytes))).Replace('-','').ToLowerInvariant() }
+        finally { $sha.Dispose() }
+        if ($contentHash -cne [string]$lockedSkill.contentSha256) {
+            throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project candidate Skill '$skillId' content inventory does not match the Lock.")
+        }
+    }
+    $actualPayloadPaths = @(
+        Get-ChildItem -LiteralPath (Join-Path $CandidateRoot 'payload') -File -Recurse -Force | ForEach-Object {
+            Get-RepositoryRelativePath -RepositoryRoot $CandidateRoot -FullPath $_.FullName
+        }
+    )
+    if (@($actualPayloadPaths).Count -ne $expectedPayloadPaths.Count -or @($actualPayloadPaths | Where-Object { -not $expectedPayloadPaths.Contains([string]$_) }).Count -gt 0) {
+        throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message 'Project candidate payload contains missing or extra files.')
+    }
+    return [pscustomobject][ordered]@{Inventory=$inventory;Projections=$expectedProjections;SkillIds=$expectedSkillIds;Files=[object[]]$desired.ToArray()}
+}
+
+function Get-ProjectSkillOwnershipConflicts {
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][object[]] $DesiredFiles,
+        [Parameter(Mandatory = $true)][hashtable] $ManifestEntriesByTarget,
+        [Parameter(Mandatory = $true)] $TrackedPaths,
+        [Parameter(Mandatory = $true)] $StagedPaths
+    )
+    $conflicts = New-Object System.Collections.Generic.List[object]
+    $groups = @($DesiredFiles | Group-Object ProjectionId,SkillId)
+    foreach ($group in $groups) {
+        $files = @($group.Group)
+        $projectionId = [string]$files[0].ProjectionId; $skillId = [string]$files[0].SkillId
+        $targetPrefix = ([string]$files[0].TargetPath).Split('/')[0..2] -join '/'
+        $targetRoot = Join-Path $Repository $targetPrefix.Replace('/',[IO.Path]::DirectorySeparatorChar)
+        $managed = @{}
+        foreach ($entry in @($ManifestEntriesByTarget.Values | Where-Object {
+            $null -ne $_.PSObject.Properties['artifactType'] -and [string]$_.artifactType -ceq 'skill' -and
+            [string]$_.artifactId -ceq $skillId -and [string]$_.projectionId -ceq $projectionId
+        })) { $managed[[string]$entry.targetPath] = $entry }
+        $trackedUnderRoot = @($TrackedPaths | Where-Object {
+            Test-GitPathEqualsOrIsUnderPrefix -Path ([string]$_) -Prefix $targetPrefix -Comparer $TrackedPaths.Comparer
+        })
+        foreach ($trackedPath in $trackedUnderRoot) {
+            $conflicts.Add([pscustomobject][ordered]@{projection=$projectionId;skillId=$skillId;targetPath=[string]$trackedPath;relativePath=([string]$trackedPath).Substring($targetPrefix.Length).TrimStart('/');status='tracked'})
+        }
+        foreach ($stagedPath in @($StagedPaths | Where-Object {
+            Test-GitPathEqualsOrIsUnderPrefix -Path ([string]$_) -Prefix $targetPrefix -Comparer $StagedPaths.Comparer
+        })) {
+            $conflicts.Add([pscustomobject][ordered]@{projection=$projectionId;skillId=$skillId;targetPath=[string]$stagedPath;relativePath=([string]$stagedPath).Substring($targetPrefix.Length).TrimStart('/');status='staged'})
+        }
+        if (Test-Path -LiteralPath $targetRoot) {
+            $rootItem = Get-Item -Force -LiteralPath $targetRoot
+            if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                $conflicts.Add([pscustomobject][ordered]@{projection=$projectionId;skillId=$skillId;targetPath=$targetPrefix;relativePath='.';status='reparse'})
+                continue
+            }
+            $pending = New-Object System.Collections.Generic.Stack[string]
+            $pending.Push($targetRoot)
+            while ($pending.Count -gt 0) {
+                $directory = $pending.Pop()
+                foreach ($item in @(Get-ChildItem -Force -LiteralPath $directory)) {
+                    $relative = $item.FullName.Substring($targetRoot.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+                    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                        $conflicts.Add([pscustomobject][ordered]@{projection=$projectionId;skillId=$skillId;targetPath="$targetPrefix/$relative";relativePath=$relative;status='reparse'})
+                    }
+                    elseif ($item.PSIsContainer) { $pending.Push($item.FullName) }
+                    else {
+                        $path = "$targetPrefix/$relative"
+                        if (-not $managed.ContainsKey($path)) {
+                            $conflicts.Add([pscustomobject][ordered]@{projection=$projectionId;skillId=$skillId;targetPath=$path;relativePath=$relative;status='unmanaged'})
+                        }
+                        elseif ((Get-RawContentHash $item.FullName) -cne [string]$managed[$path].sha256) {
+                            $conflicts.Add([pscustomobject][ordered]@{projection=$projectionId;skillId=$skillId;targetPath=$path;relativePath=$relative;status='drift'})
+                        }
+                    }
+                }
+            }
+            foreach ($path in $managed.Keys) {
+                $fullPath = Join-Path $Repository ([string]$path).Replace('/',[IO.Path]::DirectorySeparatorChar)
+                if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+                    $conflicts.Add([pscustomobject][ordered]@{projection=$projectionId;skillId=$skillId;targetPath=[string]$path;relativePath=([string]$path).Substring($targetPrefix.Length).TrimStart('/');status='missing'})
+                }
+            }
+        }
+        elseif ($managed.Count -gt 0) {
+            foreach ($path in $managed.Keys) {
+                $conflicts.Add([pscustomobject][ordered]@{projection=$projectionId;skillId=$skillId;targetPath=[string]$path;relativePath=([string]$path).Substring($targetPrefix.Length).TrimStart('/');status='missing'})
+            }
+        }
+    }
+    return $conflicts.ToArray()
+}
+
+function Get-ProjectSkillOwnershipConflictsAcrossWorktrees {
+    param(
+        [Parameter(Mandatory=$true)][string]$Repository,
+        [Parameter(Mandatory=$true)][object[]]$DesiredFiles
+    )
+    $result=New-Object System.Collections.Generic.List[object]
+    foreach($worktreeRoot in @(Get-ManagedWorktreeRoots -Repository $Repository -Strict)){
+        $entries=@{};$manifestPath=Join-Path $worktreeRoot $manifestRelativePath.Replace('/',[IO.Path]::DirectorySeparatorChar)
+        if(Test-Path -LiteralPath $manifestPath -PathType Leaf){
+            Assert-ManagedPathDoesNotCrossReparsePoint -Root $worktreeRoot -Path $manifestPath -Context 'Project Skill ownership manifest'
+            try{$worktreeManifest=Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath|ConvertFrom-Json}catch{throw "Project Skill ownership preflight cannot parse linked manifest '$manifestPath': $($_.Exception.Message)"}
+            if(($worktreeManifest.schemaVersion-is[int]-or$worktreeManifest.schemaVersion-is[long])-and[int64]$worktreeManifest.schemaVersion-eq4){
+                Assert-ManagedManifestV4 -Manifest $worktreeManifest
+                foreach($entry in @($worktreeManifest.files)){$entries[[string]$entry.targetPath]=$entry}
+            }
+        }
+        $comparer=Get-GitPathComparer -Repository $worktreeRoot
+        $tracked=Get-GitListedPathSet -Repository $worktreeRoot -Comparer $comparer -Kind Tracked
+        $staged=Get-GitListedPathSet -Repository $worktreeRoot -Comparer $comparer -Kind Staged
+        foreach($conflict in @(Get-ProjectSkillOwnershipConflicts -Repository $worktreeRoot -DesiredFiles $DesiredFiles -ManifestEntriesByTarget $entries -TrackedPaths $tracked -StagedPaths $staged)){
+            $result.Add([pscustomobject][ordered]@{worktree=$worktreeRoot;projection=$conflict.projection;skillId=$conflict.skillId;targetPath=$conflict.targetPath;relativePath=$conflict.relativePath;status=$conflict.status})
+        }
+    }
+    return $result.ToArray()
+}
+
+function Format-ProjectSkillOwnershipConflictDetails {
+    param([Parameter(Mandatory=$true)][object[]]$Conflicts)
+
+    return (@($Conflicts|Sort-Object worktree,projection,skillId,targetPath,status|ForEach-Object{
+        "skillId=$($_.skillId), projection=$($_.projection), path=$($_.targetPath), status=$($_.status), worktree=$($_.worktree)"
+    })-join'; ')
+}
+
+function Write-ProjectSkillOwnershipConflictDiagnostics {
+    param([Parameter(Mandatory=$true)][object[]]$Conflicts)
+
+    foreach($conflict in @($Conflicts|Sort-Object worktree,projection,skillId,targetPath,status)){
+        [Console]::Error.WriteLine("Project Skill conflict: skillId=$($conflict.skillId), projection=$($conflict.projection), path=$($conflict.targetPath), status=$($conflict.status), worktree=$($conflict.worktree)")
+    }
+    [Console]::Error.WriteLine('Project Skill conflict resolution: remove or rename the project-owned Skill, or remove that Skill from projections.project.')
 }
 
 function ConvertFrom-GitQuotedPath {
@@ -1399,7 +1712,8 @@ function ConvertFrom-GitQuotedPath {
 function Test-IsCanonicalInstructionSourceRepository {
     param([Parameter(Mandatory = $true)][string] $Repository)
 
-    if ((Get-GitExitCode -Repository $Repository -Arguments @('remote','get-url','origin')) -ne 0) { return $false }
+    $origin = Get-GitQueryResult -Repository $Repository -Arguments @('remote','get-url','origin') -NegativeExitCodes @(2)
+    if (-not $origin.Succeeded) { return $false }
     foreach ($originUrl in @(Invoke-Git -Repository $Repository -Arguments @('remote','get-url','--all','origin'))) {
         try {
             Assert-AiInstructionsCanonicalRepository -Repository ([string]$originUrl)
@@ -1471,12 +1785,47 @@ function Get-GitPathComparer {
     param([Parameter(Mandatory = $true)][string] $Repository)
 
     $ignoreCase = [Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
-    if ((Get-GitExitCode -Repository $Repository -Arguments @('config','--bool','--get','core.ignorecase')) -eq 0) {
-        $configured = ((Invoke-Git -Repository $Repository -Arguments @('config','--bool','--get','core.ignorecase')) | Select-Object -First 1).Trim()
+    $query = Get-GitQueryResult -Repository $Repository -Arguments @('config','--bool','--get','core.ignorecase') -NegativeExitCodes @(1)
+    if ($query.Succeeded) {
+        $configured = ([string]($query.Output | Select-Object -First 1)).Trim()
         if ($configured -ceq 'true') { $ignoreCase = $true }
     }
     if ($ignoreCase) { return [System.StringComparer]::OrdinalIgnoreCase }
     return [System.StringComparer]::Ordinal
+}
+
+function Test-GitPathEqualsOrIsUnderPrefix {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][string]$Prefix,
+        [Parameter(Mandatory=$true)][System.StringComparer]$Comparer
+    )
+
+    $normalizedPath=$Path.Replace('\','/')
+    $normalizedPrefix=$Prefix.Replace('\','/').TrimEnd('/')
+    if($Comparer.Equals($normalizedPath,$normalizedPrefix)){return $true}
+    if($normalizedPath.Length-le$normalizedPrefix.Length-or$normalizedPath[$normalizedPrefix.Length]-ne'/'){return $false}
+    return $Comparer.Equals($normalizedPath.Substring(0,$normalizedPrefix.Length),$normalizedPrefix)
+}
+
+function Get-GitListedPathSet {
+    param(
+        [Parameter(Mandatory=$true)][string]$Repository,
+        [Parameter(Mandatory=$true)][System.StringComparer]$Comparer,
+        [Parameter(Mandatory=$true)][ValidateSet('Tracked','Staged')][string]$Kind
+    )
+
+    $arguments=if($Kind-ceq'Tracked'){
+        @('-c','core.quotePath=true','ls-files')
+    }else{
+        @('-c','core.quotePath=true','diff','--cached','--name-only','--diff-filter=ACDMRTUXB')
+    }
+    $paths=New-Object 'System.Collections.Generic.HashSet[string]' $Comparer
+    foreach($path in @(Invoke-Git -Repository $Repository -Arguments $arguments)){
+        if([string]::IsNullOrWhiteSpace([string]$path)){continue}
+        [void]$paths.Add((ConvertFrom-GitQuotedPath -Path ([string]$path)).Replace('\','/'))
+    }
+    Write-Output -NoEnumerate $paths
 }
 
 function Open-UserSkillMigrationLock {
@@ -1517,17 +1866,24 @@ function Open-RepositoryOperationLock {
     }
 }
 
-function Open-RepositoryIndexTransactionLock {
+function Get-RepositoryActiveGitDirectory {
     param([Parameter(Mandatory = $true)][string] $Repository)
 
-    $gitDirectory = ((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--git-dir')) | Select-Object -First 1).Trim()
-    if (-not [System.IO.Path]::IsPathRooted($gitDirectory)) { $gitDirectory = Join-Path $Repository $gitDirectory }
+    $gitDirectory = ((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--absolute-git-dir')) | Select-Object -First 1).Trim()
+    if (-not [System.IO.Path]::IsPathRooted($gitDirectory)) { throw "Git returned a non-absolute active worktree directory: $gitDirectory" }
     $gitDirectory = [System.IO.Path]::GetFullPath($gitDirectory).TrimEnd([char[]]@('\','/'))
     if (-not (Test-Path -LiteralPath $gitDirectory -PathType Container)) { throw "Git directory is missing or invalid: $gitDirectory" }
     $gitDirectoryItem = Get-Item -Force -LiteralPath $gitDirectory
     if (($gitDirectoryItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "Git directory must not be a reparse point: $gitDirectory"
     }
+    return $gitDirectory
+}
+
+function Get-RepositoryIndexTransactionPath {
+    param([Parameter(Mandatory = $true)][string] $Repository)
+
+    $gitDirectory = Get-RepositoryActiveGitDirectory -Repository $Repository
 
     $indexPath = ((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--git-path','index')) | Select-Object -First 1).Trim()
     if (-not [System.IO.Path]::IsPathRooted($indexPath)) { $indexPath = Join-Path $Repository $indexPath }
@@ -1542,14 +1898,38 @@ function Open-RepositoryIndexTransactionLock {
         throw "Git index file must not be a reparse point: $indexPath"
     }
 
+    return $indexPath
+}
+
+function Open-RepositoryIndexTransactionLock {
+    param([Parameter(Mandatory = $true)][string] $Repository)
+
+    $indexPath = Get-RepositoryIndexTransactionPath -Repository $Repository
     $lockPath = $indexPath + '.lock'
     try {
         $stream = [System.IO.File]::Open($lockPath,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
     }
     catch [System.IO.IOException] {
-        throw 'The Git index is being changed by another process; bootstrap stopped before index preflight.'
+        throw (New-RepositoryIndexLockRefusal -Reason 'The Git index is being changed by another process; bootstrap stopped before index preflight.' -LockPath $lockPath)
     }
-    return [pscustomobject][ordered]@{ Stream=$stream; Path=$lockPath; IndexPath=$indexPath }
+    try {
+        [byte[]]$indexBytes=[System.IO.File]::ReadAllBytes($indexPath)
+        $stream.Write($indexBytes,0,$indexBytes.Length)
+        $stream.Flush($true)
+        $contentSha256=Get-ByteArraySha256 $indexBytes
+    }
+    catch {
+        $stream.Dispose()
+        throw (New-RepositoryIndexLockRefusal -Reason "The Git index.lock could not be prefilled durably with the current index bytes: $($_.Exception.Message)" -LockPath $lockPath)
+    }
+    return [pscustomobject][ordered]@{ Stream=$stream; Path=$lockPath; IndexPath=$indexPath; ContentSha256=$contentSha256 }
+}
+
+function Close-RepositoryIndexTransactionLock {
+    param([AllowNull()][object]$Lock)
+    if($null-eq$Lock-or$null-eq$Lock.Stream){return}
+    $Lock.Stream.Dispose();$Lock.Stream=$null
+    Remove-Item -LiteralPath $Lock.Path -Force
 }
 
 function Assert-ManagedPathDoesNotCrossReparsePoint {
@@ -1607,7 +1987,8 @@ function Get-ClaudeProjectOwnedWorktreeRoots {
     $worktreeRoots = @(Get-ManagedWorktreeRoots -Repository $Repository -Strict:$Strict)
     foreach ($worktreeRoot in $worktreeRoots) {
         $basePath = Join-Path $worktreeRoot 'CLAUDE.md'
-        $tracked = (Get-GitExitCode -Repository $worktreeRoot -Arguments @('ls-files','--error-unmatch','--','CLAUDE.md')) -eq 0
+        $trackedQuery = Get-GitQueryResult -Repository $worktreeRoot -Arguments @('ls-files','--error-unmatch','--','CLAUDE.md') -NegativeExitCodes @(1)
+        $tracked = [bool]$trackedQuery.Succeeded
         $staged = Test-GitPathHasStagedChanges -Repository $worktreeRoot -Path 'CLAUDE.md'
         $baseExists = Test-Path -LiteralPath $basePath -PathType Leaf
         $managedEntry = $null
@@ -1703,6 +2084,44 @@ function Assert-NoRepoManagedManifestV4 {
     }
 }
 
+function Get-WorktreeGitPathSetCache {
+    param([Parameter(Mandatory=$true)][AllowEmptyCollection()][string[]]$WorktreeRoots)
+
+    $cache=[System.Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+    foreach($worktreeRoot in $WorktreeRoots){
+        if($cache.ContainsKey($worktreeRoot)){throw "Duplicate managed worktree root: $worktreeRoot"}
+        $comparer=Get-GitPathComparer -Repository $worktreeRoot
+        $cache.Add($worktreeRoot,[pscustomobject][ordered]@{
+            Comparer=$comparer
+            Tracked=Get-GitListedPathSet -Repository $worktreeRoot -Comparer $comparer -Kind Tracked
+            Staged=Get-GitListedPathSet -Repository $worktreeRoot -Comparer $comparer -Kind Staged
+        })
+    }
+    return ,$cache
+}
+
+function Get-WorktreeGitDirectoryKey {
+    # Stable identity of a worktree's absolute Git directory: the native directory file ID on Windows,
+    # otherwise the full path reported by Git.
+    param([Parameter(Mandatory = $true)][string] $Repository)
+    $gitDirectory = Get-RepositoryActiveGitDirectory -Repository $Repository
+    if ($IsWindows) { return 'windows-file-id:' + [CodexAiInstructions.NativeFileMutation]::GetDirectoryIdentity($gitDirectory) }
+    return 'path:' + [IO.Path]::GetFullPath($gitDirectory)
+}
+
+function Test-IsCurrentWorktreeRoot {
+    param(
+        [Parameter(Mandatory = $true)][string] $WorktreeRoot,
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string] $CurrentWorktreeKey
+    )
+    if (Test-ProjectPublicationPathEqual -Left ([IO.Path]::GetFullPath($WorktreeRoot)) -Right ([IO.Path]::GetFullPath($Repository))) { return $true }
+    if (-not (Test-Path -LiteralPath $WorktreeRoot -PathType Container)) { return $false }
+    try { $worktreeKey = Get-WorktreeGitDirectoryKey -Repository $WorktreeRoot }
+    catch { return $false }
+    return [string]::Equals($worktreeKey, $CurrentWorktreeKey, [StringComparison]::Ordinal)
+}
+
 function Get-SharedManagedExcludePaths {
     param(
         [Parameter(Mandatory = $true)][string] $Repository,
@@ -1710,8 +2129,27 @@ function Get-SharedManagedExcludePaths {
     )
 
     $paths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
-    foreach ($currentManagedPath in $CurrentManagedPaths) { [void]$paths.Add($currentManagedPath.Replace('\','/')) }
-    foreach ($worktreeRoot in @(Get-ManagedWorktreeRoots -Repository $Repository -Strict)) {
+    $blockedSkillPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    $skillCandidatePaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($currentManagedPath in $CurrentManagedPaths) {
+        $normalized=$currentManagedPath.Replace('\','/')
+        [void]$paths.Add($normalized)
+        if($normalized-cmatch'^\.(agents|claude|github)/skills/'){[void]$skillCandidatePaths.Add($normalized)}
+    }
+    $worktreeRoots=@(Get-ManagedWorktreeRoots -Repository $Repository -Strict)
+    $worktreeGitPathSets=Get-WorktreeGitPathSetCache -WorktreeRoots $worktreeRoots
+    # Identify the current worktree by its Git directory identity, not by path spelling, so a junction or subst TargetRoot
+    # cannot make the current worktree's stale on-disk manifest re-enter the shared union.
+    $currentWorktreeKey=Get-WorktreeGitDirectoryKey -Repository $Repository
+    $currentWorktreeRoots=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach($worktreeRoot in $worktreeRoots){
+        if(Test-IsCurrentWorktreeRoot -WorktreeRoot $worktreeRoot -Repository $Repository -CurrentWorktreeKey $currentWorktreeKey){[void]$currentWorktreeRoots.Add([string]$worktreeRoot)}
+    }
+    foreach ($worktreeRoot in $worktreeRoots) {
+        if($currentWorktreeRoots.Contains([string]$worktreeRoot)){continue}
+        $gitPathState=$worktreeGitPathSets[$worktreeRoot]
+        $worktreeTrackedPaths=$gitPathState.Tracked
+        $worktreeStagedPaths=$gitPathState.Staged
         $worktreeManifestPath = Join-Path $worktreeRoot $manifestRelativePath.Replace('/','\')
         if (-not (Test-Path -LiteralPath $worktreeManifestPath -PathType Leaf)) { continue }
         Assert-ManagedPathDoesNotCrossReparsePoint -Root $worktreeRoot -Path $worktreeManifestPath -Context 'Linked worktree managed manifest'
@@ -1737,14 +2175,69 @@ function Get-SharedManagedExcludePaths {
             if (-not (Test-IsAllowedManagedPath -Path $targetPath)) {
                 throw "Cannot compose shared Git exclusions because a linked worktree manifest contains an unsafe path: $targetPath"
             }
+            if ($worktreeManifestSchemaVersion -eq 4 -and [string]$entry.artifactType -ceq 'skill') {
+                [void]$skillCandidatePaths.Add($targetPath)
+                $targetFullPath = Join-Path $worktreeRoot $targetPath.Replace('/',[IO.Path]::DirectorySeparatorChar)
+                $tracked = $worktreeTrackedPaths.Contains($targetPath)
+                $staged = $worktreeStagedPaths.Contains($targetPath)
+                if ($tracked -or $staged -or -not (Test-Path -LiteralPath $targetFullPath -PathType Leaf) -or
+                    (Get-RawContentHash $targetFullPath) -cne [string]$entry.sha256) {
+                    [void]$blockedSkillPaths.Add($targetPath)
+                    continue
+                }
+            }
             [void]$paths.Add($targetPath)
         }
     }
+    foreach($skillCandidatePath in $skillCandidatePaths){
+        $segments=$skillCandidatePath.Split('/');if($segments.Count-lt4){[void]$blockedSkillPaths.Add($skillCandidatePath);continue}
+        $prefix=[string]::Join('/',[string[]]$segments[0..2])
+        foreach($worktreeRoot in $worktreeRoots){
+            if($currentWorktreeRoots.Contains([string]$worktreeRoot)){continue}
+            $groupRoot=Join-Path $worktreeRoot $prefix.Replace('/',[IO.Path]::DirectorySeparatorChar)
+            if(-not(Test-Path -LiteralPath $groupRoot)){continue}
+            $manifestPath=Join-Path $worktreeRoot $manifestRelativePath.Replace('/',[IO.Path]::DirectorySeparatorChar)
+            if(-not(Test-Path -LiteralPath $manifestPath -PathType Leaf)){[void]$blockedSkillPaths.Add($skillCandidatePath);continue}
+            try{$m=Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath|ConvertFrom-Json;Assert-ManagedManifestV4 -Manifest $m}catch{[void]$blockedSkillPaths.Add($skillCandidatePath);continue}
+            $groupEntries=@($m.files|Where-Object{[string]$_.artifactType-ceq'skill'-and([string]$_.targetPath-ceq$prefix-or([string]$_.targetPath).StartsWith($prefix+'/',[StringComparison]::Ordinal))})
+            $entryMap=@{};foreach($entry in $groupEntries){$entryMap[[string]$entry.targetPath]=$entry}
+            $gitPathState=$worktreeGitPathSets[$worktreeRoot]
+            $gitPathComparer=$gitPathState.Comparer
+            $worktreeTrackedPaths=$gitPathState.Tracked
+            $worktreeStagedPaths=$gitPathState.Staged
+            $trackedUnderPrefix=@($worktreeTrackedPaths|Where-Object{Test-GitPathEqualsOrIsUnderPrefix -Path ([string]$_) -Prefix $prefix -Comparer $gitPathComparer})
+            $stagedUnderPrefix=@($worktreeStagedPaths|Where-Object{Test-GitPathEqualsOrIsUnderPrefix -Path ([string]$_) -Prefix $prefix -Comparer $gitPathComparer})
+            if(-not$entryMap.ContainsKey($skillCandidatePath) -or $trackedUnderPrefix.Count-gt0 -or $stagedUnderPrefix.Count-gt0){
+                foreach($path in $entryMap.Keys){[void]$blockedSkillPaths.Add([string]$path)};[void]$blockedSkillPaths.Add($skillCandidatePath);continue
+            }
+            $groupItem=Get-Item -Force -LiteralPath $groupRoot
+            if(-not$groupItem.PSIsContainer-or($groupItem.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){foreach($path in $entryMap.Keys){[void]$blockedSkillPaths.Add([string]$path)};continue}
+            $observed=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+            $pending=New-Object System.Collections.Generic.Stack[string];$pending.Push($groupRoot)
+            while($pending.Count-gt0){
+                $directory=$pending.Pop()
+                foreach($item in @(Get-ChildItem -Force -LiteralPath $directory)){
+                    $relative=$item.FullName.Substring($groupRoot.Length).TrimStart([char[]]@('\','/')).Replace('\','/');$path="$prefix/$relative"
+                    if(($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){foreach($owned in $entryMap.Keys){[void]$blockedSkillPaths.Add([string]$owned)}}
+                    elseif($item.PSIsContainer){$pending.Push($item.FullName)}
+                    else{
+                        [void]$observed.Add($path)
+                        if(-not$entryMap.ContainsKey($path)-or(Get-RawContentHash $item.FullName)-cne[string]$entryMap[$path].sha256){foreach($owned in $entryMap.Keys){[void]$blockedSkillPaths.Add([string]$owned)}}
+                    }
+                }
+            }
+            foreach($path in $entryMap.Keys){if(-not$observed.Contains([string]$path)){foreach($owned in $entryMap.Keys){[void]$blockedSkillPaths.Add([string]$owned)}}}
+        }
+    }
+    foreach ($blockedSkillPath in $blockedSkillPaths) { [void]$paths.Remove($blockedSkillPath) }
     return @($paths | Sort-Object)
 }
 
 function New-GitInfoExcludeSnapshot {
-    param([Parameter(Mandatory = $true)][string] $Repository)
+    param(
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [switch] $UsePlatformRuntime
+    )
 
     $path = Get-GitInfoExcludePath -Repository $Repository
     Assert-GitInfoExcludeMutationPath -Repository $Repository -Path $path
@@ -1765,6 +2258,19 @@ function New-GitInfoExcludeSnapshot {
         LegacyRecovery = $false
         ManagedPaths = @()
         ProtectedPaths = @()
+        PlatformState = $null
+    }
+    if ($UsePlatformRuntime) {
+        Import-Module (Join-Path $PSScriptRoot 'ai-instructions-install-transaction.psm1') -Force
+        $parent=[IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($path));$leaf=[IO.Path]::GetFileName($path)
+        $parentLease=Open-PlatformDirectory -Root $parent -RootOnly
+        try{$snapshot.PlatformState=Get-AiInstructionsInstallFileState -ParentLease $parentLease -Leaf $leaf -LiteralPath $path -PlatformOs $(if($IsLinux){'linux'}elseif($IsMacOS){'macos'}else{'windows'}) -IncludePermissions}finally{$parentLease.Dispose()}
+        $snapshot.Existed=[bool]$snapshot.PlatformState.exists
+        if ($snapshot.Existed) {
+            $snapshot.Bytes = [IO.File]::ReadAllBytes($path)
+            if((Get-ByteArraySha256 ([byte[]]$snapshot.Bytes))-cne[string]$snapshot.PlatformState.sha256){throw "Shared Git exclude changed concurrently during platform snapshot: $path"}
+        }
+        return $snapshot
     }
     $metadataHandle = $null
     $metadataStream = $null
@@ -1984,94 +2490,33 @@ function Set-ManagedGitInfoExclude {
         [AllowEmptyCollection()][ValidateNotNull()][string[]] $ProtectedPaths = @(),
         [AllowEmptyCollection()][ValidateNotNull()][string[]] $PreservedProtectedPaths = @()
     )
-
-    $path = Get-GitInfoExcludePath -Repository $Repository
-    if ([string]$Snapshot.Path -cne $path -or [string]$Snapshot.Repository -cne $Repository) {
-        throw 'Shared Git exclude snapshot does not match the requested mutation target.'
-    }
+    if ($null -eq $script:ProjectPublicationContext) { throw 'Unified repository transaction context is required for shared Git exclude planning.' }
+    $path=Get-GitInfoExcludePath -Repository $Repository
+    if([string]$Snapshot.Path-cne$path-or[string]$Snapshot.Repository-cne$Repository){throw 'Shared Git exclude snapshot does not match the requested mutation target.'}
     Assert-GitInfoExcludeMutationPath -Repository $Repository -Path $path
-    $requestedManagedPaths = @($ManagedPaths)
-    $safeManagedPaths = @($ManagedPaths | Where-Object {
-        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$_) -ProtectedPaths $ProtectedPaths) {
-            Write-Warning "Protected Claude family path skipped at bootstrap Git exclude: $_ (project-owned Claude family)."
-            return $false
-        }
-        return $true
-    })
-    foreach ($preservedProtectedPath in $PreservedProtectedPaths) {
-        if (-not (Test-IsProtectedClaudeFamilyPath -Path ([string]$preservedProtectedPath) -ProtectedPaths $ProtectedPaths)) {
-            throw "A preserved Git exclude path is outside the protected Claude family: $preservedProtectedPath"
-        }
-        if (@($requestedManagedPaths | Where-Object { [string]$_ -ceq [string]$preservedProtectedPath }).Count -eq 0) {
-            throw "A preserved protected Git exclude path is not managed by the current worktree: $preservedProtectedPath"
-        }
+    $requestedManagedPaths=@($ManagedPaths)
+    $safeManagedPaths=@($ManagedPaths|Where-Object{if(Test-IsProtectedClaudeFamilyPath -Path ([string]$_) -ProtectedPaths $ProtectedPaths){Write-Warning "Protected Claude family path skipped at bootstrap Git exclude: $_ (project-owned Claude family).";return $false};return $true})
+    foreach($preservedProtectedPath in $PreservedProtectedPaths){
+        if(-not(Test-IsProtectedClaudeFamilyPath -Path ([string]$preservedProtectedPath) -ProtectedPaths $ProtectedPaths)){throw "A preserved Git exclude path is outside the protected Claude family: $preservedProtectedPath"}
+        if(@($requestedManagedPaths|Where-Object{[string]$_-ceq[string]$preservedProtectedPath}).Count-eq0){throw "A preserved protected Git exclude path is not managed by the current worktree: $preservedProtectedPath"}
     }
-    $Snapshot.ManagedPaths = @($requestedManagedPaths + $PreservedProtectedPaths | Sort-Object -Unique)
-    $Snapshot.ProtectedPaths = @($ProtectedPaths)
-    $sharedManagedPaths = @(Get-SharedManagedExcludePaths -Repository $Repository -CurrentManagedPaths $safeManagedPaths)
-    $sharedManagedPaths = @($sharedManagedPaths | Where-Object {
-        if (Test-IsProtectedClaudeFamilyPath -Path ([string]$_) -ProtectedPaths $ProtectedPaths) {
-            Write-Warning "Protected Claude family path skipped at bootstrap shared Git exclude: $_ (project-owned Claude family)."
-            return $false
-        }
-        return $true
-    })
-    $lines = @(
-        @($sharedManagedPaths) + @($PreservedProtectedPaths) |
-            Sort-Object -Unique |
-            ForEach-Object { ConvertTo-GitExcludeLiteralPattern -Path $_ }
-    )
-    $handle = Open-GitInfoExcludeMutationHandle -Repository $Repository -Path $path
-    try {
-        [byte[]]$beforeBytes = if ([bool]$handle.Created) { [byte[]]@() } else { Read-GitInfoExcludeStreamBytes -Stream $handle.Stream }
-        if ([bool]$handle.Created -and [bool]$Snapshot.Existed) { throw "Shared Git exclude disappeared before update; the current state was preserved: $path" }
-        if (-not [bool]$handle.Created -and -not [bool]$Snapshot.Existed) { throw "Shared Git exclude appeared before update; the current state was preserved: $path" }
-        if (-not [bool]$handle.Created -and -not (Test-GitInfoExcludeBytesEqual -Left $beforeBytes -Right ([byte[]]$Snapshot.Bytes))) {
-            throw "Shared Git exclude changed concurrently before update; the current state was preserved: $path"
-        }
-        $Snapshot.AppliedBytes = $beforeBytes
-
-        $content = (ConvertFrom-GitInfoExcludeBytes -Bytes $beforeBytes).Replace("`r`n","`n").Replace("`r","`n")
-        $pattern = '(?ms)^' + [regex]::Escape($excludeBeginMarker) + '\n.*?^' + [regex]::Escape($excludeEndMarker) + '\n?'
-        $beginCount = [regex]::Matches($content,'(?m)^' + [regex]::Escape($excludeBeginMarker) + '$').Count
-        $endCount = [regex]::Matches($content,'(?m)^' + [regex]::Escape($excludeEndMarker) + '$').Count
-        if ($beginCount -ne $endCount -or $beginCount -gt 1 -or ($beginCount -eq 1 -and -not [regex]::IsMatch($content,$pattern))) {
-            throw "The Codex AI Instructions managed exclude block is malformed: $path"
-        }
-        $withoutBlock = [regex]::Replace($content,$pattern,'').TrimEnd("`n")
-        $updated = $withoutBlock
-        if ($lines.Count -gt 0) {
-            $block = $excludeBeginMarker + "`n" + ($lines -join "`n") + "`n" + $excludeEndMarker + "`n"
-            $updated = if ([string]::IsNullOrWhiteSpace($withoutBlock)) { $block } else { $withoutBlock + "`n`n" + $block }
-        }
-        elseif (-not [string]::IsNullOrWhiteSpace($updated)) { $updated += "`n" }
-        [byte[]]$updatedBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($updated)
-        if (-not (Test-GitInfoExcludeBytesEqual -Left $beforeBytes -Right $updatedBytes)) {
-            $Snapshot.AppliedBytes = $updatedBytes
-            $Snapshot.MutationApplied = $true
-            try {
-                if ($null -ne $script:SkillMigrationJournalContext) {
-                    $context=$script:SkillMigrationJournalContext
-                    Save-SkillMigrationJournal $context.Snapshot $Snapshot $context.Path $context.GitState 'mutating'
-                }
-                Invoke-AtomicFilePublication -Kind Exclude -Root $Repository -Path $path `
-                    -RelativePath ([IO.Path]::GetFileName($path)) -ExpectedOldExists ([bool]$Snapshot.Existed) `
-                    -ExpectedOldBytes $(if ($Snapshot.Existed) { [byte[]]$Snapshot.Bytes } else { $null }) `
-                    -ExpectedOldIdentity $(if ([bool]$Snapshot.Existed) { [string]$Snapshot.OriginalIdentity } else { $null }) `
-                    -ExpectedOldSha256 $(if ($Snapshot.Existed) { Get-ByteArraySha256 ([byte[]]$Snapshot.Bytes) } else { $null }) `
-                    -ExpectedOldStream $(if ($Snapshot.Existed) { $handle.Stream } else { $null }) `
-                    -DaclRecord $Snapshot.DaclRecord -ReadOnly ([bool]$Snapshot.OriginalReadOnly) -NewBytes $updatedBytes `
-                    -Direction apply -PublicationState $Snapshot -Snapshot $null | Out-Null
-            }
-            catch {
-                try { $Snapshot.AppliedBytes = [byte[]](Read-GitInfoExcludeStreamBytes -Stream $handle.Stream) }
-                catch { }
-                throw
-            }
-        }
-    }
-    finally {
-        if ($null -ne $handle -and $null -ne $handle.Stream) { $handle.Stream.Dispose() }
+    $Snapshot.ManagedPaths=@($requestedManagedPaths+$PreservedProtectedPaths|Sort-Object -Unique);$Snapshot.ProtectedPaths=@($ProtectedPaths)
+    $sharedManagedPaths=@(Get-SharedManagedExcludePaths -Repository $Repository -CurrentManagedPaths $safeManagedPaths)
+    $sharedManagedPaths=@($sharedManagedPaths|Where-Object{if(Test-IsProtectedClaudeFamilyPath -Path ([string]$_) -ProtectedPaths $ProtectedPaths){Write-Warning "Protected Claude family path skipped at bootstrap shared Git exclude: $_ (project-owned Claude family).";return $false};return $true})
+    $lines=@(@($sharedManagedPaths)+@($PreservedProtectedPaths)|Sort-Object -Unique|ForEach-Object{ConvertTo-GitExcludeLiteralPattern -Path $_})
+    [byte[]]$beforeBytes=if([bool]$Snapshot.Existed){[byte[]]$Snapshot.Bytes}else{[byte[]]@()}
+    $content=(ConvertFrom-GitInfoExcludeBytes -Bytes $beforeBytes).Replace("`r`n","`n").Replace("`r","`n")
+    $pattern='(?ms)^'+[regex]::Escape($excludeBeginMarker)+'\n.*?^'+[regex]::Escape($excludeEndMarker)+'\n?'
+    $beginCount=[regex]::Matches($content,'(?m)^'+[regex]::Escape($excludeBeginMarker)+'$').Count;$endCount=[regex]::Matches($content,'(?m)^'+[regex]::Escape($excludeEndMarker)+'$').Count
+    if($beginCount-ne$endCount-or$beginCount-gt1-or($beginCount-eq1-and-not[regex]::IsMatch($content,$pattern))){throw "The Codex AI Instructions managed exclude block is malformed: $path"}
+    $withoutBlock=[regex]::Replace($content,$pattern,'').TrimEnd("`n");$updated=$withoutBlock
+    if($lines.Count-gt0){$block=$excludeBeginMarker+"`n"+($lines-join"`n")+"`n"+$excludeEndMarker+"`n";$updated=if([string]::IsNullOrWhiteSpace($withoutBlock)){$block}else{$withoutBlock+"`n`n"+$block}}
+    elseif(-not[string]::IsNullOrWhiteSpace($updated)){$updated+="`n"}
+    [byte[]]$updatedBytes=[Text.UTF8Encoding]::new($false).GetBytes($updated)
+    if(-not(Test-GitInfoExcludeBytesEqual -Left $beforeBytes -Right $updatedBytes)){
+        $expectedExcludeSha256=if([bool]$Snapshot.Existed){Get-ByteArraySha256 ([byte[]]$Snapshot.Bytes)}else{$null}
+        Set-ProjectPublicationExternalFileBytes -LiteralPath $path -Bytes $updatedBytes -ExpectedExists ([bool]$Snapshot.Existed) -ExpectedSha256 $expectedExcludeSha256 -ExpectedState $Snapshot.PlatformState
+        $Snapshot.AppliedBytes=$updatedBytes;$Snapshot.MutationApplied=$true
     }
 }
 
@@ -2087,8 +2532,15 @@ function Test-GitPathHasChanges {
     $workingTreeExitCode = Get-GitExitCode -Repository $Repository -Arguments @('diff', '--quiet', '--', $Path)
     $indexExitCode = Get-GitExitCode -Repository $Repository -Arguments @('diff', '--cached', '--quiet', '--', $Path)
 
-    if ($workingTreeExitCode -gt 1 -or $indexExitCode -gt 1) {
-        throw "Unable to inspect local changes for managed path: $Path"
+    if ($workingTreeExitCode -notin @(0, 1)) {
+        try { Invoke-Git -Repository $Repository -Arguments @('diff', '--quiet', '--', $Path) | Out-Null }
+        catch { throw "Unable to inspect local changes for managed path: $Path (first git exit code: $workingTreeExitCode). $($_.Exception.Message)" }
+        throw "Unable to inspect local changes for managed path: $Path (first git exit code: $workingTreeExitCode)."
+    }
+    if ($indexExitCode -notin @(0, 1)) {
+        try { Invoke-Git -Repository $Repository -Arguments @('diff', '--cached', '--quiet', '--', $Path) | Out-Null }
+        catch { throw "Unable to inspect local changes for managed path: $Path (first git exit code: $indexExitCode). $($_.Exception.Message)" }
+        throw "Unable to inspect local changes for managed path: $Path (first git exit code: $indexExitCode)."
     }
 
     return $workingTreeExitCode -eq 1 -or $indexExitCode -eq 1
@@ -2104,8 +2556,10 @@ function Test-GitPathHasStagedChanges {
     )
 
     $exitCode = Get-GitExitCode -Repository $Repository -Arguments @('diff', '--cached', '--quiet', '--', $Path)
-    if ($exitCode -gt 1) {
-        throw "Unable to inspect staged changes for managed path: $Path"
+    if ($exitCode -notin @(0, 1)) {
+        try { Invoke-Git -Repository $Repository -Arguments @('diff', '--cached', '--quiet', '--', $Path) | Out-Null }
+        catch { throw "Unable to inspect staged changes for managed path: $Path (first git exit code: $exitCode). $($_.Exception.Message)" }
+        throw "Unable to inspect staged changes for managed path: $Path (first git exit code: $exitCode)."
     }
 
     return $exitCode -eq 1
@@ -2120,13 +2574,24 @@ function New-ManifestEntry {
         [string] $TargetPath,
 
         [Parameter(Mandatory = $true)]
-        [string] $Sha256
+        [string] $Sha256,
+
+        [string] $ProjectSkillId,
+        [string] $ProjectionId,
+        [object] $ProjectSource
     )
 
     $artifactType = 'instruction'
     $artifactId = $null
     $source = $script:instructionProvenance
-    if ($TargetPath.StartsWith('.agents/skills/', [System.StringComparison]::Ordinal)) {
+    if (-not [string]::IsNullOrWhiteSpace($ProjectionId)) {
+        if ($repoManifestWriter -cne 'v4' -or $ProjectionId -notin @('project-agents','project-claude','project-github') -or
+            $ProjectSkillId -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$' -or $null -eq $ProjectSource) {
+            throw "Invalid project Skill manifest identity for target: $TargetPath"
+        }
+        $artifactType = 'skill'; $artifactId = $ProjectSkillId; $source = $ProjectSource
+    }
+    elseif ($TargetPath.StartsWith('.agents/skills/', [System.StringComparison]::Ordinal)) {
         $artifactType = 'skill'
         $skillParts = @($TargetPath.Split('/'))
         $artifactId = $skillParts[2]
@@ -2194,6 +2659,7 @@ function New-ManifestEntry {
         $result.rendererId = 'build-ai-instructions'
         $result.rendererSha256 = [string]$script:rendererSha256
     }
+    elseif ($artifactType -ceq 'skill' -and -not [string]::IsNullOrWhiteSpace($ProjectionId)) { $result.projectionId = $ProjectionId }
     $result.targetPath = $TargetPath
     $result.sha256 = $Sha256
     return [pscustomobject]$result
@@ -3142,13 +3608,337 @@ function Remove-TargetMutationFileAtomically {
     }
 }
 
+$script:ProjectPublicationContext = $null
+
+function ConvertTo-ProjectPublicationIdentity {
+    param([Parameter(Mandatory=$true)]$Observation)
+    if($IsWindows){return [pscustomobject][ordered]@{kind='windows-file-id';device=('0x{0:x}'-f[uint64]$Observation.Device);fileId=('0x{0:x}'-f[uint64]$Observation.Inode)}}
+    return [pscustomobject][ordered]@{kind='unix-device-inode';device=[string][uint64]$Observation.Device;fileId=[string][uint64]$Observation.Inode}
+}
+
+function Test-ProjectPublicationPathEqual {
+    param([Parameter(Mandatory=$true)][string]$Left,[Parameter(Mandatory=$true)][string]$Right)
+    $comparison=if($IsWindows){[StringComparison]::OrdinalIgnoreCase}else{[StringComparison]::Ordinal}
+    return [string]::Equals([IO.Path]::GetFullPath($Left),[IO.Path]::GetFullPath($Right),$comparison)
+}
+
+function Get-RepositoryTransactionStorePath {
+    param([Parameter(Mandatory=$true)][string]$GitDirectory)
+    return (Join-Path $GitDirectory '.ai-instructions-txn')
+}
+
+function Get-RepositoryTransactionPath {
+    param([Parameter(Mandatory=$true)][object]$Context)
+    return (Join-Path (Get-RepositoryTransactionStorePath -GitDirectory ([string]$Context.GitDirectory)) ([string]$Context.DirectoryLeaf))
+}
+
+function Assert-RepositoryTransactionScopeBinding {
+    param(
+        [Parameter(Mandatory=$true)][string]$Repository,
+        [Parameter(Mandatory=$true)][string]$GitDirectory,
+        [Parameter(Mandatory=$true)][object]$Journal
+    )
+    try{
+        $activeGitDirectory=Get-RepositoryActiveGitDirectory -Repository $Repository
+        $commonGitDirectory=((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--git-common-dir'))|Select-Object -First 1).Trim()
+        if(-not[IO.Path]::IsPathRooted($commonGitDirectory)){$commonGitDirectory=Join-Path $Repository $commonGitDirectory}
+        $commonGitDirectory=[IO.Path]::GetFullPath($commonGitDirectory)
+        $indexPath=((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--git-path','index'))|Select-Object -First 1).Trim()
+        if(-not[IO.Path]::IsPathRooted($indexPath)){$indexPath=Join-Path $Repository $indexPath}
+        $indexPath=[IO.Path]::GetFullPath($indexPath)
+        $objectFormat=((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--show-object-format'))|Select-Object -First 1).Trim()
+        $rootLease=Open-PlatformDirectory -Root $Repository -RootOnly
+        try{$repositoryRootIdentity=ConvertTo-ProjectPublicationIdentity $rootLease.Observation}finally{$rootLease.Dispose()}
+        $matches=(Test-ProjectPublicationPathEqual -Left $activeGitDirectory -Right $GitDirectory)-and
+            (Test-ProjectPublicationPathEqual -Left ([string]$Journal.scope.repositoryRoot) -Right $Repository)-and
+            (Test-RepositoryTransactionIdentityEqual -Actual $repositoryRootIdentity -Expected $Journal.scope.repositoryRootIdentity)-and
+            (Test-ProjectPublicationPathEqual -Left ([string]$Journal.scope.commonGitDirectory) -Right $commonGitDirectory)-and
+            (Test-ProjectPublicationPathEqual -Left ([string]$Journal.scope.gitDirectory) -Right $activeGitDirectory)-and
+            (Test-ProjectPublicationPathEqual -Left ([string]$Journal.scope.indexPath) -Right $indexPath)-and
+            [string]$Journal.scope.objectFormat-ceq$objectFormat-and
+            [string]$Journal.platform.os-ceq(Get-RepositoryTransactionPlatform)
+        if(-not$matches){throw 'one or more repository scope bindings changed'}
+    }
+    catch{
+        if((Get-AiInstructionsRefusalCode $_)-ceq'interrupted-install'){throw}
+        throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction scope no longer matches repository root identity, common Git directory, active Git directory, index path, object format, or platform; no recovery mutation was attempted. Preserve the transaction evidence for manual inspection. Detail: $($_.Exception.Message)" -InnerException $_.Exception)
+    }
+}
+
+function New-ProjectPublicationContext {
+    param([Parameter(Mandatory=$true)][string]$Repository)
+    Import-Module (Join-Path $PSScriptRoot 'ai-instructions-install-transaction.psm1') -Force
+    $gitDirectory=Get-RepositoryActiveGitDirectory -Repository $Repository
+    Invoke-ProjectPublicationRecovery -Repository $Repository -GitDirectory $gitDirectory
+    $storePath=Get-RepositoryTransactionStorePath -GitDirectory $gitDirectory
+    if(Test-Path -LiteralPath $storePath){
+        $residue=@(Get-ChildItem -Force -LiteralPath $storePath -ErrorAction Stop)
+        if($residue.Count-gt0){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Project Skill recovery evidence requires reconciliation before retry: $storePath")}
+    }
+    return [pscustomobject][ordered]@{
+        Repository=$Repository
+        GitDirectory=$gitDirectory
+        Id=[guid]::NewGuid().ToString('N')
+        DirectoryLeaf=$null
+        Intents=(New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal))
+        Remediation=$null
+        Durable=$false
+        ContainerLease=$null
+        Lease=$null
+        Identity=$null
+        CurrentJournal=$null
+        JournalStoreStates=$null
+        RepositoryIndexLock=$null
+        ShouldStorePersonalAgentEvidence=$false
+        PersonalAgentEvidenceStashBefore=$null
+        PlanningObservations=(New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal))
+        TerminalManifestEntries=@()
+    }
+}
+
+function Get-ProjectPublicationPathObservation {
+    # Observe one repository-relative target as raw bytes SHA-256, length, and file identity.
+    # Any entry that cannot be observed as a regular file is recorded as unobservable so that
+    # final manifest verification fails closed instead of silently skipping the path.
+    param([Parameter(Mandatory=$true)][string]$Repository,[Parameter(Mandatory=$true)][string]$RelativePath)
+    $absent=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null;unobservable=$null}
+    try{
+        $full=Join-Path $Repository $RelativePath.Replace('/',[IO.Path]::DirectorySeparatorChar)
+        $parent=[IO.Path]::GetDirectoryName($full);$leaf=[IO.Path]::GetFileName($full)
+        if(-not(Test-Path -LiteralPath $parent -PathType Container)-or-not(Test-Path -LiteralPath $full)){return $absent}
+        $item=Get-Item -Force -LiteralPath $full
+        if($item.PSIsContainer-or($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){return [pscustomobject][ordered]@{exists=$true;sha256=$null;length=$null;identity=$null;unobservable='not a regular file'}}
+        $parentLease=Open-PlatformDirectory -Root $parent -RootOnly
+        try{
+            $lease=Open-PlatformFile -ParentLease $parentLease -Leaf $leaf -Access Read -CreateMode OpenExisting
+            try{
+                [byte[]]$bytes=$lease.ReadAllBytes(268435456)
+                return [pscustomobject][ordered]@{exists=$true;sha256=(Get-ByteArraySha256 $bytes);length=[int64]$bytes.Length;identity=(ConvertTo-ProjectPublicationIdentity $lease.Observation);unobservable=$null}
+            }finally{$lease.Dispose()}
+        }finally{$parentLease.Dispose()}
+    }
+    catch{return [pscustomobject][ordered]@{exists=$true;sha256=$null;length=$null;identity=$null;unobservable=[string]$_.Exception.Message}}
+}
+
+function Test-ProjectPublicationPathObservationEqual {
+    param([Parameter(Mandatory=$true)][object]$Actual,[Parameter(Mandatory=$true)][object]$Expected)
+    if($null-ne$Actual.unobservable-or$null-ne$Expected.unobservable){return $false}
+    return Test-ProjectPublicationStateEqual $Actual $Expected
+}
+
+function Register-ProjectPublicationPlanningObservations {
+    # Record the planning-time observation of every path that the next manifest can own.
+    # Final manifest verification compares every manifest path without a publication operation against this value.
+    param([Parameter(Mandatory=$true)][object]$Context,[Parameter(Mandatory=$true)][AllowEmptyCollection()][string[]]$RelativePaths)
+    foreach($relativePath in @($RelativePaths|Sort-Object -Unique)){
+        if([string]::IsNullOrWhiteSpace($relativePath)-or$Context.PlanningObservations.ContainsKey($relativePath)){continue}
+        $Context.PlanningObservations.Add($relativePath,(Get-ProjectPublicationPathObservation -Repository ([string]$Context.Repository) -RelativePath $relativePath))
+    }
+}
+
+function Set-ProjectPublicationFileBytesCore {
+    param(
+        [Parameter(Mandatory=$true)][string]$TargetRoot,
+        [Parameter(Mandatory=$true)][string]$RelativePath,
+        [Parameter(Mandatory=$true)][AllowEmptyCollection()][byte[]]$Bytes,
+        [Parameter(Mandatory=$true)][ValidateSet('repository','git-exclude')][string]$TargetKind,
+        [Nullable[bool]]$ExpectedExists,
+        [string]$ExpectedSha256,
+        [ValidateSet('raw','managed')][string]$ExpectedHashKind='raw',
+        [object]$ExpectedState
+    )
+    $context=$script:ProjectPublicationContext;if($null-eq$context){throw 'Project publication context is unavailable.'}
+    $parentRelative=(Split-Path -Parent $RelativePath).Replace('\','/');$leaf=Split-Path -Leaf $RelativePath
+    $parentLease=$null
+    try{
+        $target=Join-Path $TargetRoot $RelativePath.Replace('/',[IO.Path]::DirectorySeparatorChar)
+        $parentPath=Split-Path -Parent $target
+        $originalCapture=if(Test-Path -LiteralPath $parentPath -PathType Container){
+            $parentLease=Open-PlatformDirectory -Root $parentPath -RootOnly
+            Get-AiInstructionsInstallFileState -ParentLease $parentLease -Leaf $leaf -LiteralPath $target -PlatformOs $(if($IsLinux){'linux'}elseif($IsMacOS){'macos'}else{'windows'}) -IncludePermissions
+        }else{[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null}}
+        if($null-ne$ExpectedState -and -not(Test-ProjectPublicationStateEqual $originalCapture $ExpectedState)){throw "Project publication target identity or bytes changed concurrently: $RelativePath"}
+        if($null-ne$ExpectedExists -and ([bool]$originalCapture.exists-ne[bool]$ExpectedExists)) { throw "Project publication target existence changed concurrently: $RelativePath" }
+        if([bool]$originalCapture.exists -and -not[string]::IsNullOrWhiteSpace($ExpectedSha256)){
+            [byte[]]$capturedBytes=[IO.File]::ReadAllBytes($target)
+            $rawSha=Get-ManagedContentHashFromBytes -Bytes $capturedBytes -TargetPath '.agents/skills/raw.bin'
+            if($rawSha-cne[string]$originalCapture.sha256){throw "Project publication target bytes changed during capture: $RelativePath"}
+            $capturedSha=if($ExpectedHashKind-ceq'raw'){$rawSha}else{Get-ManagedContentHashFromBytes -Bytes $capturedBytes -TargetPath $RelativePath}
+            if($capturedSha-cne$ExpectedSha256){throw "Project publication target content changed concurrently: $RelativePath"}
+        }
+        $key="$TargetKind`0$TargetRoot`0$RelativePath"
+        if($context.Intents.ContainsKey($key)){
+            $intent=$context.Intents[$key]
+            $intent.Bytes=[byte[]]$Bytes.Clone();$intent.Remove=$false
+        }else{
+            $role=if($TargetKind-ceq'git-exclude'){'shared-exclude'}elseif($RelativePath-ceq$manifestRelativePath){'manifest'}elseif(Test-LicenseDeliveryTargetPath $RelativePath){'license'}elseif($RelativePath-cmatch '^\.(?:agents|claude|github)/skills/'){'project-skill'}else{'instruction'}
+            $context.Intents.Add($key,[pscustomobject][ordered]@{TargetKind=$TargetKind;TargetRoot=$TargetRoot;RelativePath=$RelativePath;Before=$originalCapture;Bytes=[byte[]]$Bytes.Clone();Remove=$false;Role=$role})
+        }
+    }
+    catch {
+        if($TargetKind-ceq'git-exclude'){
+            throw "Could not acquire an exclusive shared Git exclude mutation handle: $target. $($_.Exception.Message)"
+        }
+        throw
+    }
+    finally{if($null-ne$parentLease){$parentLease.Dispose()}}
+}
+
+function Set-ProjectPublicationFileBytes {
+    param([Parameter(Mandatory=$true)][string]$RelativePath,[Parameter(Mandatory=$true)][AllowEmptyCollection()][byte[]]$Bytes,[Nullable[bool]]$ExpectedExists,[string]$ExpectedSha256)
+    $hashKind=if($RelativePath-ceq$manifestRelativePath){'raw'}else{'managed'}
+    Set-ProjectPublicationFileBytesCore -TargetRoot $script:ProjectPublicationContext.Repository -RelativePath $RelativePath -Bytes $Bytes -TargetKind repository -ExpectedExists $ExpectedExists -ExpectedSha256 $ExpectedSha256 -ExpectedHashKind $hashKind
+}
+
+function Set-ProjectPublicationExternalFileBytes {
+    param([Parameter(Mandatory=$true)][string]$LiteralPath,[Parameter(Mandatory=$true)][AllowEmptyCollection()][byte[]]$Bytes,[Parameter(Mandatory=$true)][bool]$ExpectedExists,[string]$ExpectedSha256,[object]$ExpectedState)
+    $fullPath=[IO.Path]::GetFullPath($LiteralPath);$parent=[IO.Path]::GetDirectoryName($fullPath);$leaf=[IO.Path]::GetFileName($fullPath)
+    if([string]::IsNullOrWhiteSpace($parent)-or[string]::IsNullOrWhiteSpace($leaf)){throw 'Project publication external target is invalid.'}
+    if(-not(Test-ProjectPublicationPathEqual -Left $fullPath -Right ([string](Get-GitInfoExcludePath -Repository $script:ProjectPublicationContext.Repository)))){throw 'Project publication external target is not the shared Git exclude.'}
+    Set-ProjectPublicationFileBytesCore -TargetRoot $parent -RelativePath $leaf -Bytes $Bytes -TargetKind git-exclude -ExpectedExists $ExpectedExists -ExpectedSha256 $ExpectedSha256 -ExpectedState $ExpectedState
+}
+
+function Remove-ProjectPublicationFile {
+    param([Parameter(Mandatory=$true)][string]$RelativePath,[string]$ExpectedSha256)
+    $context=$script:ProjectPublicationContext;if($null-eq$context){throw 'Project publication context is unavailable.'}
+    $parentRelative=(Split-Path -Parent $RelativePath).Replace('\','/');$leaf=Split-Path -Leaf $RelativePath
+    $parentLease=$null
+    try{
+        $target=Join-Path $context.Repository $RelativePath.Replace('/',[IO.Path]::DirectorySeparatorChar)
+        $parentPath=Split-Path -Parent $target
+        if(-not(Test-Path -LiteralPath $parentPath -PathType Container)){return}
+        $parentLease=Open-PlatformDirectory -Root $parentPath -RootOnly
+        $original=Get-AiInstructionsInstallFileState -ParentLease $parentLease -Leaf $leaf -LiteralPath $target -PlatformOs $(if($IsLinux){'linux'}elseif($IsMacOS){'macos'}else{'windows'}) -IncludePermissions
+        if(-not$original.exists){return}
+        if(-not[string]::IsNullOrWhiteSpace($ExpectedSha256)){
+            [byte[]]$capturedBytes=[IO.File]::ReadAllBytes($target);$rawSha=Get-ManagedContentHashFromBytes -Bytes $capturedBytes -TargetPath '.agents/skills/raw.bin'
+            if($rawSha-cne[string]$original.sha256){throw "Project publication removal target bytes changed during capture: $RelativePath"}
+            if((Get-ManagedContentHashFromBytes -Bytes $capturedBytes -TargetPath $RelativePath)-cne$ExpectedSha256){throw "Project publication removal target content changed concurrently: $RelativePath"}
+        }
+        $key="repository`0$($context.Repository)`0$RelativePath"
+        if($context.Intents.ContainsKey($key)){$intent=$context.Intents[$key];$intent.Bytes=$null;$intent.Remove=$true}
+        else{
+            $role=if($RelativePath-ceq$manifestRelativePath){'manifest'}elseif(Test-LicenseDeliveryTargetPath $RelativePath){'license'}elseif($RelativePath-cmatch '^\.(?:agents|claude|github)/skills/'){'project-skill'}else{'instruction'}
+            $context.Intents.Add($key,[pscustomobject][ordered]@{TargetKind='repository';TargetRoot=$context.Repository;RelativePath=$RelativePath;Before=$original;Bytes=$null;Remove=$true;Role=$role})
+        }
+    }finally{if($null-ne$parentLease){$parentLease.Dispose()}}
+}
+
+function Complete-ProjectPublicationContext {
+    param([Parameter(Mandatory=$true)]$Context)
+    Invoke-RepositoryInstallTransaction -Context $Context
+}
+
+function Get-RepositoryTransactionDiskState {
+    param([Parameter(Mandatory=$true)]$Context)
+    $transactionPath=Get-RepositoryTransactionPath -Context $Context
+    if(-not(Test-Path -LiteralPath $transactionPath -PathType Container)){return [pscustomobject]@{status='orphan';journal=$null}}
+    $lease=$Context.Lease;$opened=$false
+    try{
+        if($null-eq$lease){$lease=Open-PlatformDirectory -Root $Context.GitDirectory -RelativePath ('.ai-instructions-txn/'+$Context.Id);$opened=$true}
+        $readLeaf={param([string]$name)$path=Join-Path $transactionPath $name;if(-not(Test-Path -LiteralPath $path)){return [pscustomobject]@{Kind=$null;Json=$null;State=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}}};if(-not(Test-Path -LiteralPath $path -PathType Leaf)){return [pscustomobject]@{Kind='other';Json=$null;State=$null}};$state=Get-AiInstructionsInstallFileState -ParentLease $lease -Leaf $name -LiteralPath $path -PlatformOs (Get-RepositoryTransactionPlatform);return [pscustomobject]@{Kind='file';Json=[Text.UTF8Encoding]::new($false,$true).GetString([IO.File]::ReadAllBytes($path));State=$state}}
+        $journal=&$readLeaf 'journal.json';$previous=&$readLeaf 'journal.prev';$stage=&$readLeaf 'journal.stage'
+        $classification=Get-AiInstructionsInstallTransactionClassification -Name $Context.Id -EntryKind directory -JournalEntryKind $journal.Kind -JournalJson $journal.Json -PreviousJournalEntryKind $previous.Kind -PreviousJournalJson $previous.Json -ExpectedOwnerComponent repo-bootstrap
+        $Context.JournalStoreStates=[ordered]@{'journal.json'=$journal.State;'journal.prev'=$previous.State;'journal.stage'=$stage.State}
+        if([string]$classification.classification-ceq'valid-journal'){Assert-RepositoryTransactionScopeBinding -Repository $Context.Repository -GitDirectory $Context.GitDirectory -Journal $classification.journal;return [pscustomobject]@{status='valid';journal=$classification.journal}}
+        if([string]$classification.classification-ceq'orphan-without-journal'){return [pscustomobject]@{status='orphan';journal=$null}}
+        return [pscustomobject]@{status='indeterminate';journal=$null;reason=[string]$classification.reason}
+    }finally{if($opened){$lease.Dispose()}}
+}
+
+function Resolve-ActiveProjectPublicationFailure {
+    param([Parameter(Mandatory=$true)]$Context,[AllowNull()]$RemediationTransaction)
+    if(-not[bool]$Context.Durable){return 'rollback-all'}
+    $journalState=Get-RepositoryTransactionDiskState -Context $Context
+    if([string]$journalState.status-ceq'orphan'){
+        $transactionPath=Get-RepositoryTransactionPath -Context $Context
+        if(Test-Path -LiteralPath $transactionPath -PathType Container){
+            $unexpected=@(Get-ChildItem -Force -LiteralPath $transactionPath|Where-Object{-not(Test-RepositoryTransactionOrphanChild -Item $_)})
+            if($unexpected.Count-gt0){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction orphan contains unknown evidence at '$transactionPath'; inspect it manually before removal.")}
+            if($null-ne$Context.Lease){$Context.Lease.Dispose();$Context.Lease=$null}
+            Remove-PlatformOwnedDirectoryTree -TransactionRootLease $Context.ContainerLease -Leaf $Context.DirectoryLeaf -ExpectedIdentity $Context.Identity|Out-Null
+        }
+        if($null-ne$Context.ContainerLease){$Context.ContainerLease.Dispose();$Context.ContainerLease=$null}
+        $Context.Durable=$false
+        return 'roll-forward-cleanup'
+    }
+    $action=Resolve-ProjectPublicationRecoveryAction -JournalState $journalState
+    if($action-ceq'fail-closed'){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction journal is unreadable or invalid at '$(Get-RepositoryTransactionPath -Context $Context)'; inspect the evidence manually before removal.")}
+    $Context.CurrentJournal=$journalState.journal
+    Resolve-RepositoryRecoveryIndexLock -Context $Context
+    if($action-ceq'rollback-all'){Invoke-RepositoryTransactionRollback $Context}
+    elseif($action-ceq'roll-forward-cleanup'){Complete-RepositoryTransactionCleanup $Context}
+    else{throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction recovery state is unknown. Inspect and clear '$(Get-RepositoryTransactionPath -Context $Context)' only after verifying journal evidence.")}
+    return $action
+}
+
+function Test-RepositoryTransactionOrphanChild {
+    param([Parameter(Mandatory=$true)][IO.FileSystemInfo]$Item)
+    if(($Item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){return $false}
+    if($Item.PSIsContainer){return $Item.Name-cmatch'^op-[0-9]{6}\.(?:directory|quarantine)(?:\.trash)?$'}
+    return $Item.Name-cmatch'^(?:journal\.stage|op-[0-9]{6}\.(?:stage|backup|quarantine))$'
+}
+
+function Remove-ProjectPublicationContextEvidence {
+    param([Parameter(Mandatory=$true)]$Context)
+    if($null-ne$Context.Lease){$Context.Lease.Dispose();$Context.Lease=$null}
+    Remove-PlatformOwnedDirectoryTree -TransactionRootLease $Context.ContainerLease -Leaf $Context.Id -ExpectedIdentity $Context.Identity|Out-Null
+    $Context.ContainerLease.Dispose();$Context.ContainerLease=$null
+}
+
+function Test-ProjectPublicationStateEqual {
+    param([Parameter(Mandatory=$true)]$Actual,[Parameter(Mandatory=$true)]$Expected)
+    if([bool]$Actual.exists-ne[bool]$Expected.exists){return $false}
+    if(-not[bool]$Expected.exists){return $true}
+    return [string]$Actual.sha256-ceq[string]$Expected.sha256 -and [int64]$Actual.length-eq[int64]$Expected.length -and
+        [string]$Actual.identity.kind-ceq[string]$Expected.identity.kind -and
+        [string]::Equals([string]$Actual.identity.device,[string]$Expected.identity.device,[StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals([string]$Actual.identity.fileId,[string]$Expected.identity.fileId,[StringComparison]::OrdinalIgnoreCase)
+}
+
+function Assert-ProjectSkillManifestFilesCurrent {
+    param(
+        [Parameter(Mandatory=$true)][string]$TargetRoot,
+        [Parameter(Mandatory=$true)][AllowEmptyCollection()][object[]]$ManifestEntries,
+        [Parameter(Mandatory=$true)][AllowEmptyCollection()][string[]]$PublishedTargetPaths,
+        [AllowNull()][object]$PlanningObservations
+    )
+
+    # Closed rule: the verification set is every target path owned by the manifest at the end of this transaction,
+    # selected by path only. A path published by this transaction must match the manifest-declared SHA-256;
+    # every other path must still match its planning-time raw SHA-256 and file identity.
+    $published=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach($publishedTargetPath in $PublishedTargetPaths){[void]$published.Add([string]$publishedTargetPath)}
+    foreach($entry in @($ManifestEntries|Sort-Object targetPath)){
+        $targetPath=[string]$entry.targetPath
+        $targetFullPath=Join-Path $TargetRoot $targetPath.Replace('/',[IO.Path]::DirectorySeparatorChar)
+        if($published.Contains($targetPath)){
+            Assert-ManagedPathDoesNotCrossReparsePoint -Root $TargetRoot -Path $targetFullPath -Context "Final project Skill manifest verification '$targetPath'"
+            if(-not(Test-Path -LiteralPath $targetFullPath -PathType Leaf)-or
+                (Get-ManagedContentHash -Path $targetFullPath -TargetPath $targetPath)-cne[string]$entry.sha256){
+                throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project Skill manifest publication refused because final raw-byte verification failed: $targetPath")
+            }
+            continue
+        }
+        $planned=$null
+        if($null-eq$PlanningObservations-or-not$PlanningObservations.TryGetValue($targetPath,[ref]$planned)){
+            throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project Skill manifest publication refused because final raw-byte verification failed: $targetPath has no planning observation.")
+        }
+        $live=Get-ProjectPublicationPathObservation -Repository $TargetRoot -RelativePath $targetPath
+        if(-not(Test-ProjectPublicationPathObservationEqual -Actual $live -Expected $planned)){
+            throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project Skill manifest publication refused because final raw-byte verification failed: $targetPath")
+        }
+    }
+}
+
 function Set-TargetMutationFileBytes {
     param(
         [Parameter(Mandatory = $true)][object] $Snapshot,
         [Parameter(Mandatory = $true)][string] $RelativePath,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $Bytes
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $Bytes,
+        [Nullable[bool]] $ExpectedExists,
+        [string] $ExpectedSha256
     )
-
     $protectedPaths = @(if ($Snapshot.PSObject.Properties['ProtectedPaths']) {
         if ($null -eq $Snapshot.ProtectedPaths) { throw 'ProtectedPaths state is null.' }
         @($Snapshot.ProtectedPaths)
@@ -3157,36 +3947,16 @@ function Set-TargetMutationFileBytes {
         Write-Warning "Protected Claude family path skipped at bootstrap file write: $RelativePath (project-owned Claude family)."
         return
     }
-    if ($RelativePath.StartsWith('.agents/skills/',[StringComparison]::OrdinalIgnoreCase)) {
-        throw 'Consumer write boundary rejects shared Skill installation; use the USER reconciler.'
-    }
-    $state = Get-TargetMutationFileState -Snapshot $Snapshot -RelativePath $RelativePath
-    if ([bool]$state.MutationApplied) { throw "Target mutation state was already applied: $RelativePath" }
-    if ($null -ne $script:SkillMigrationJournalContext) {
-        $context = $script:SkillMigrationJournalContext
-        Save-SkillMigrationJournal $Snapshot $context.ExcludeSnapshot $context.Path $context.GitState 'mutating' $RelativePath 'file' $Bytes
-    }
-    Assert-ManagedPathDoesNotCrossReparsePoint -Root ([string]$Snapshot.TargetRoot) -Path ([string]$state.TargetPath) -Context "Managed target '$RelativePath'"
-    $expectedOldExists = [string]$state.OriginalType -ceq 'file'
-    $expectedOldBytes = if ($expectedOldExists) { [System.IO.File]::ReadAllBytes([string]$state.BackupPath) } else { $null }
-    $expectedOldHash = if ($expectedOldExists) { Get-RawContentHash ([string]$state.BackupPath) } else { $null }
-    Invoke-AtomicFilePublication -Kind Target -Root ([string]$Snapshot.TargetRoot) `
-        -Path ([string]$state.TargetPath) -RelativePath $RelativePath -ExpectedOldExists $expectedOldExists `
-        -ExpectedOldBytes $expectedOldBytes -ExpectedOldIdentity $(if ($expectedOldExists) { [string]$state.OriginalIdentity } else { $null }) `
-        -ExpectedOldSha256 $expectedOldHash -DaclRecord $state.OriginalDacl -ReadOnly ([bool]$state.OriginalReadOnly) `
-        -NewBytes $Bytes -Direction apply -PublicationState $state -Snapshot $Snapshot | Out-Null
-    $state.AppliedType = 'file'
-    $state.AppliedBytes = [byte[]]$Bytes.Clone()
-    $state.AppliedFileIdentity = [string]$state.Publication.stageIdentity
-    $state.MutationApplied = $true
+    if ($null -eq $script:ProjectPublicationContext) { throw 'Unified repository transaction context is required for target mutation planning.' }
+    Set-ProjectPublicationFileBytes -RelativePath $RelativePath -Bytes $Bytes -ExpectedExists $ExpectedExists -ExpectedSha256 $ExpectedSha256
 }
 
 function Remove-TargetMutationFile {
     param(
         [Parameter(Mandatory = $true)][object] $Snapshot,
-        [Parameter(Mandatory = $true)][string] $RelativePath
+        [Parameter(Mandatory = $true)][string] $RelativePath,
+        [string] $ExpectedSha256
     )
-
     $protectedPaths = @(if ($Snapshot.PSObject.Properties['ProtectedPaths']) {
         if ($null -eq $Snapshot.ProtectedPaths) { throw 'ProtectedPaths state is null.' }
         @($Snapshot.ProtectedPaths)
@@ -3195,20 +3965,8 @@ function Remove-TargetMutationFile {
         Write-Warning "Protected Claude family path skipped at bootstrap file deletion: $RelativePath (project-owned Claude family)."
         return
     }
-    $state = Get-TargetMutationFileState -Snapshot $Snapshot -RelativePath $RelativePath
-    if ([bool]$state.MutationApplied -or [string]$state.OriginalType -cne 'file') {
-        throw "Target mutation cannot remove an unexpected snapshot state: $RelativePath"
-    }
-    [byte[]]$originalBytes = [System.IO.File]::ReadAllBytes([string]$state.BackupPath)
-    if ($null -ne $script:SkillMigrationJournalContext) {
-        $context = $script:SkillMigrationJournalContext
-        Save-SkillMigrationJournal $Snapshot $context.ExcludeSnapshot $context.Path $context.GitState 'mutating' $RelativePath
-    }
-    Remove-TargetMutationFileAtomically -Snapshot $Snapshot -RelativePath $RelativePath -ExpectedBytes $originalBytes `
-        -Operation 'Managed target removal'
-    $state.AppliedType = 'missing'
-    $state.AppliedBytes = $null
-    $state.MutationApplied = $true
+    if ($null -eq $script:ProjectPublicationContext) { throw 'Unified repository transaction context is required for target mutation planning.' }
+    Remove-ProjectPublicationFile -RelativePath $RelativePath -ExpectedSha256 $ExpectedSha256
 }
 
 function Get-TargetCreatedReadOnlyRollbackEvidence {
@@ -3742,7 +4500,7 @@ function Update-PersonalAgentStash {
     foreach ($objectId in @($indexCommit,$untrackedCommit,$newEvidenceCommit)) {
         if ($objectId -cnotmatch '^[0-9a-f]{40,64}$') { throw 'Git returned an invalid commit ID while creating PersonalAgent evidence.' }
     }
-    Invoke-Git -Repository $Repository -Arguments @('stash','store','--quiet','-m',$stashMessage,$newEvidenceCommit) | Out-Null
+    Invoke-RepositoryTransactionEvidenceStashStore -Context $script:ProjectPublicationContext -EvidenceCommit $newEvidenceCommit
 
     $priorStashHashCounts = @{}
     foreach ($priorStash in @($PriorStashes)) {
@@ -4319,6 +5077,857 @@ if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
     $TargetRoot = ($resolvedRoot | Select-Object -First 1).Trim()
 }
 
+function Get-RepositoryTransactionPlatform {
+    if($IsLinux){return 'linux'}
+    if($IsMacOS){return 'macos'}
+    return 'windows'
+}
+
+function Get-RepositoryTransactionArchitecture {
+    $value=[Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+    if($value-ceq'x64'){return 'x64'}
+    if($value-ceq'arm64'){return 'arm64'}
+    throw (New-AiInstructionsRefusalException -Code 'capability-unavailable' -Message "Unsupported repository transaction architecture: $value")
+}
+
+function Get-RepositoryTransactionFileState {
+    param([Parameter(Mandatory=$true)][object]$Journal,[Parameter(Mandatory=$true)][object]$Operation)
+    $path=if([string]$Operation.target.kind-ceq'git-shared-exclude'){[string]$Operation.target.value}else{Join-Path ([string]$Journal.scope.repositoryRoot) ([string]$Operation.target.value).Replace('/',[IO.Path]::DirectorySeparatorChar)}
+    $parent=[IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($path));$leaf=[IO.Path]::GetFileName($path)
+    if(-not(Test-Path -LiteralPath $parent -PathType Container)){return [pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null}}
+    $lease=Open-PlatformDirectory -Root $parent -RootOnly
+    try{return Get-AiInstructionsInstallFileState -ParentLease $lease -Leaf $leaf -LiteralPath $path -PlatformOs ([string]$Journal.platform.os) -IncludePermissions}
+    finally{$lease.Dispose()}
+}
+
+function Get-RepositoryTransactionObservedAfter {
+    param([Parameter(Mandatory=$true)][object]$Journal,[Parameter(Mandatory=$true)][object]$Operation)
+    if(-not$IsWindows-or[string]$Operation.kind-cnotin@('create-file','write-file')){return $null}
+    $isExclude=[string]$Operation.target.kind-ceq'git-shared-exclude'
+    $path=if($isExclude){[string]$Operation.target.value}else{Join-Path ([string]$Journal.scope.repositoryRoot) ([string]$Operation.target.value).Replace('/',[IO.Path]::DirectorySeparatorChar)}
+    $root=if($isExclude){[IO.Path]::GetDirectoryName($path)}else{[string]$Journal.scope.repositoryRoot}
+    $relative=if($isExclude){[IO.Path]::GetFileName($path)}else{[string]$Operation.target.value}
+    $evidence=Get-PublicationFileEvidence -Root $root -Path $path -RelativePath $relative -Kind $(if($isExclude){'Exclude'}else{'Target'})
+    return [pscustomobject][ordered]@{dacl=$evidence.dacl;readOnly=[bool]$evidence.readOnly}
+}
+
+# Metadata snapshot/restore set: every displaced-file metadata capture and restore goes through these functions only.
+function ConvertTo-RepositoryTransactionMetadataSnapshot {
+    param([Parameter(Mandatory=$true)][object]$Permissions)
+    if([string]$Permissions.kind-ceq'windows-sddl'){
+        return [pscustomobject][ordered]@{kind='windows-sddl';sddl=[string]$Permissions.sddl;readOnly=[bool]$Permissions.readOnly}
+    }
+    if([string]$Permissions.kind-ceq'unix-mode'){
+        return [pscustomobject][ordered]@{kind='unix-mode';mode=[string]$Permissions.mode;uid=[uint64]$Permissions.uid;gid=[uint64]$Permissions.gid}
+    }
+    throw "Unsupported displaced repository file metadata kind '$($Permissions.kind)'."
+}
+
+function New-RepositoryTransactionDisplacedMetadataSnapshot {
+    param([Parameter(Mandatory=$true)][object]$Before,[Parameter(Mandatory=$true)][ValidateSet('create-file','write-file','remove-file')][string]$Kind)
+    if($Kind-ceq'create-file'){return $null}
+    if(-not[bool]$Before.exists-or$null-eq$Before.permissions){throw 'A displaced repository file is missing its prepared permission snapshot.'}
+    return ConvertTo-RepositoryTransactionMetadataSnapshot -Permissions $Before.permissions
+}
+
+function Test-RepositoryTransactionIdentityEqual {
+    param([AllowNull()][object]$Actual,[AllowNull()][object]$Expected)
+    if($null-eq$Actual-or$null-eq$Expected){return $false}
+    return [string]$Actual.kind-ceq[string]$Expected.kind-and
+        [string]::Equals([string]$Actual.device,[string]$Expected.device,[StringComparison]::OrdinalIgnoreCase)-and
+        [string]::Equals([string]$Actual.fileId,[string]$Expected.fileId,[StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-RepositoryTransactionDisplacedAfterMetadata {
+    # Read back the displaced original inside the private transaction directory after redo displaced it.
+    # The value is bound in the same journal generation that marks the operation applied.
+    param([Parameter(Mandatory=$true)][object]$Context,[Parameter(Mandatory=$true)][object]$Operation)
+    if([string]$Operation.kind-cnotin@('write-file','remove-file')){return $null}
+    $backupLeaf=[string]$Operation.backupLeaf
+    if(-not(Test-Path -LiteralPath (Join-Path (Get-RepositoryTransactionPath -Context $Context) $backupLeaf) -PathType Leaf)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction sequence $($Operation.sequence) did not leave its displaced original in the transaction directory.")}
+    $backupLease=Open-PlatformFile -ParentLease $Context.Lease -Leaf $backupLeaf -Access Read -CreateMode OpenExisting
+    try{
+        if(-not(Test-RepositoryTransactionIdentityEqual -Actual (ConvertTo-ProjectPublicationIdentity $backupLease.Observation) -Expected $Operation.before.identity)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction sequence $($Operation.sequence) displaced original identity differs from its prepared identity.")}
+        return ConvertTo-RepositoryTransactionMetadataSnapshot -Permissions (Get-PlatformPermissions -Lease $backupLease)
+    }finally{$backupLease.Dispose()}
+}
+
+function Test-RepositoryTransactionDisplacedMetadataEqual {
+    param([AllowNull()][object]$Actual,[AllowNull()][object]$Expected)
+    if($null-eq$Actual-or$null-eq$Expected){return $null-eq$Actual-and$null-eq$Expected}
+    if([string]$Expected.kind-ceq'windows-sddl'){
+        return [string]$Actual.kind-ceq'windows-sddl'-and[string]$Actual.sddl-ceq[string]$Expected.sddl-and[bool]$Actual.readOnly-eq[bool]$Expected.readOnly
+    }
+    return [string]$Actual.kind-ceq'unix-mode'-and[string]$Actual.mode-ceq[string]$Expected.mode-and[uint64]$Actual.uid-eq[uint64]$Expected.uid-and[uint64]$Actual.gid-eq[uint64]$Expected.gid
+}
+
+function Get-RepositoryTransactionObservedAfterFromLease {
+    param([Parameter(Mandatory=$true)][object]$Lease)
+    if(-not$IsWindows){return $null}
+    $permissions=Get-PlatformPermissions -Lease $Lease
+    $descriptor=[Security.AccessControl.RawSecurityDescriptor]::new([string]$permissions.sddl)
+    $dacl=$descriptor.DiscretionaryAcl
+    [byte[]]$aclBytes=$null
+    if($null-ne$dacl){$aclBytes=[byte[]]::new($dacl.BinaryLength);$dacl.GetBinaryForm($aclBytes,0)}
+    return [pscustomobject][ordered]@{
+        dacl=[pscustomobject][ordered]@{
+            isNull=$null-eq$dacl
+            isProtected=($descriptor.ControlFlags-band[Security.AccessControl.ControlFlags]::DiscretionaryAclProtected)-ne0
+            aclBase64=if($null-eq$dacl){$null}else{[Convert]::ToBase64String($aclBytes)}
+        }
+        readOnly=[bool]$permissions.readOnly
+    }
+}
+
+function Restore-RepositoryTransactionDisplacedMetadata {
+    # Three-state metadata CAS for an original file that undo has placed back at its target.
+    # Callers invoke this unconditionally; only this function decides whether metadata may be applied:
+    #   never displaced (no journaled displaced-after value) -> no mutation
+    #   live == prepared original metadata                   -> no-op
+    #   live == journaled displaced-after metadata           -> apply the original and read it back
+    #   live == journaled published observedAfter metadata   -> apply only after this undo moved the original back
+    #   anything else                                        -> third state, no mutation
+    # The target handle is bound to the prepared original identity before any metadata is read or applied.
+    param([Parameter(Mandatory=$true)][object]$Journal,[Parameter(Mandatory=$true)][object]$Operation)
+    if([string]$Operation.kind-cnotin@('write-file','remove-file')-or$null-eq$Operation.displacedMetadata){return}
+    $displacedAfter=if($null-ne$Operation.PSObject.Properties['displacedAfterMetadata']){$Operation.displacedAfterMetadata}else{$null}
+    if($null-eq$displacedAfter){return}
+    $thirdState="Repository transaction sequence $($Operation.sequence) role $($Operation.role) target $($Operation.target.value) is in a third state; evidence was retained for manual inspection and cleanup."
+    $path=if([string]$Operation.target.kind-ceq'git-shared-exclude'){[string]$Operation.target.value}else{Join-Path ([string]$Journal.scope.repositoryRoot) ([string]$Operation.target.value).Replace('/',[IO.Path]::DirectorySeparatorChar)}
+    $parent=[IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($path));$leaf=[IO.Path]::GetFileName($path)
+    $parentLease=Open-PlatformDirectory -Root $parent -RootOnly
+    try{
+        $lease=Open-PlatformFile -ParentLease $parentLease -Leaf $leaf -Access Read -CreateMode OpenExisting
+        try{
+            if(-not(Test-RepositoryTransactionIdentityEqual -Actual (ConvertTo-ProjectPublicationIdentity $lease.Observation) -Expected $Operation.before.identity)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message $thirdState)}
+            $live=ConvertTo-RepositoryTransactionMetadataSnapshot -Permissions (Get-PlatformPermissions -Lease $lease)
+            if(Test-RepositoryTransactionDisplacedMetadataEqual -Actual $live -Expected $Operation.displacedMetadata){return}
+            $matchesDisplacedAfter=Test-RepositoryTransactionDisplacedMetadataEqual -Actual $live -Expected $displacedAfter
+            # Publish-PlatformFile's undo path deliberately transfers the live published
+            # target metadata to the original backup before moving that identity back.  On
+            # Windows, parent inheritance can therefore make the restored target match the
+            # operation's durable observedAfter instead of the backup-directory snapshot.
+            # Accept only that already-journaled transaction state; arbitrary metadata still
+            # remains a third state and is never overwritten.
+            $matchesPublishedAfter=$false
+            if(-not$matchesDisplacedAfter-and$null-ne$Operation.observedAfter){
+                $liveObservedAfter=Get-RepositoryTransactionObservedAfterFromLease -Lease $lease
+                $matchesPublishedAfter=Test-RepositoryTransactionObservedAfterEqual -Actual $liveObservedAfter -Expected $Operation.observedAfter
+            }
+            if(-not$matchesDisplacedAfter-and-not$matchesPublishedAfter){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message $thirdState)}
+            Set-PlatformPermissions -Lease $lease -Snapshot $Operation.displacedMetadata|Out-Null
+            $readback=Get-PlatformPermissions -Lease $lease
+            if(-not(Test-RepositoryTransactionDisplacedMetadataEqual -Actual $readback -Expected $Operation.displacedMetadata)){
+                throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction sequence $($Operation.sequence) restored file bytes but not the exact prepared security metadata; evidence was retained.")
+            }
+        }finally{$lease.Dispose()}
+    }finally{$parentLease.Dispose()}
+}
+
+function Test-RepositoryTransactionObservedAfterEqual {
+    param([AllowNull()][object]$Actual,[AllowNull()][object]$Expected)
+    if($null-eq$Expected){return $true}
+    if($null-eq$Actual-or[bool]$Actual.readOnly-ne[bool]$Expected.readOnly){return $false}
+    return [CodexAiInstructions.NativeFileMutation]::DaclEquals(
+        (ConvertFrom-FileDaclJournalRecord $Actual.dacl),
+        (ConvertFrom-FileDaclJournalRecord $Expected.dacl))
+}
+
+function Get-RepositoryTransactionDirectoryAnchorState {
+    param([Parameter(Mandatory=$true)][object]$Journal,[Parameter(Mandatory=$true)][object]$Operation)
+    $path=Join-Path ([string]$Journal.scope.repositoryRoot) ([string]$Operation.target.value).Replace('/',[IO.Path]::DirectorySeparatorChar)
+    if(-not(Test-Path -LiteralPath $path)){return [pscustomobject][ordered]@{exists=$false;identity=$null;permissions=$null}}
+    $item=Get-Item -Force -LiteralPath $path
+    if(-not$item.PSIsContainer-or($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){throw "Repository transaction directory anchor is not a physical directory: $path"}
+    $lease=Open-PlatformDirectory -Root $path -RootOnly
+    try{return [pscustomobject][ordered]@{exists=$true;identity=(ConvertTo-ProjectPublicationIdentity $lease.Observation);permissions=(Get-PlatformPermissions -Lease $lease)}}
+    finally{$lease.Dispose()}
+}
+
+function Get-RepositoryGitRefState {
+    param([Parameter(Mandatory=$true)][string]$Repository,[Parameter(Mandatory=$true)][string]$Reference)
+    $lines=@(Invoke-Git -Repository $Repository -Arguments @('for-each-ref','--format=%(refname)%09%(objectname)','--',$Reference)|Where-Object{-not[string]::IsNullOrWhiteSpace([string]$_)})
+    $matches=@($lines|ForEach-Object{
+        $match=[regex]::Match(([string]$_).Trim(),'^(?<Reference>[^\t]+)\t(?<ObjectId>[0-9a-fA-F]+)$')
+        if(-not$match.Success){throw "git for-each-ref returned an invalid ref state record for ${Reference}: $_"}
+        if($match.Groups['Reference'].Value-ceq$Reference){$match.Groups['ObjectId'].Value.ToLowerInvariant()}
+    })
+    if($matches.Count-eq0){return [pscustomobject][ordered]@{exists=$false;objectId=$null}}
+    if($matches.Count-ne1){throw "git for-each-ref returned multiple state records for $Reference."}
+    return [pscustomobject][ordered]@{exists=$true;objectId=[string]$matches[0]}
+}
+
+function Get-RepositoryTransactionGitRefState {
+    param([Parameter(Mandatory=$true)][object]$Journal,[Parameter(Mandatory=$true)][object]$Operation)
+    return Get-RepositoryGitRefState -Repository ([string]$Journal.scope.repositoryRoot) -Reference ([string]$Operation.target.value)
+}
+
+function Get-RepositoryStashRefState {
+    param([Parameter(Mandatory=$true)][string]$Repository)
+    return Get-RepositoryGitRefState -Repository $Repository -Reference 'refs/stash'
+}
+
+function Invoke-RepositoryStashRefCompareAndSwap {
+    param(
+        [Parameter(Mandatory=$true)][string]$Repository,
+        [Parameter(Mandatory=$true)][object]$Expected,
+        [string]$NewObjectId,
+        [string]$ReflogMessage
+    )
+    $objectLength=if(((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--show-object-format'))|Select-Object -First 1).Trim()-ceq'sha256'){64}else{40}
+    $expectedObjectId=if([bool]$Expected.exists){[string]$Expected.objectId}else{'0'*$objectLength}
+    if([string]::IsNullOrWhiteSpace($NewObjectId)){
+        if(-not[bool]$Expected.exists){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'PersonalAgent evidence reuse cannot CAS an absent refs/stash value.')}
+        $arguments=@('update-ref','refs/stash',$expectedObjectId,$expectedObjectId)
+    }else{
+        $arguments=@('update-ref','--create-reflog','-m',$ReflogMessage,'refs/stash',$NewObjectId,$expectedObjectId)
+    }
+    try{Invoke-Git -Repository $Repository -Arguments $arguments|Out-Null}
+    catch{
+        $updateException=$_.Exception
+        $current=$null;$readException=$null
+        try{$current=Get-RepositoryStashRefState -Repository $Repository}catch{$readException=$_.Exception}
+        if($null-eq$readException){
+            $stashChanged=if([bool]$Expected.exists){-not[bool]$current.exists-or[string]$current.objectId-cne$expectedObjectId}else{[bool]$current.exists}
+            if($stashChanged){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'PersonalAgent evidence refused because refs/stash changed after the prepared decision.' -InnerException $updateException)}
+        }
+        $readFailureDetail=if($null-ne$readException){" The refs/stash readback also failed: $($readException.Message)"}else{''}
+        throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "PersonalAgent evidence git update-ref refs/stash write failed. $($updateException.Message)$readFailureDetail" -InnerException $updateException)
+    }
+    $expectedAfter=if([string]::IsNullOrWhiteSpace($NewObjectId)){$expectedObjectId}else{$NewObjectId}
+    $readback=Get-RepositoryStashRefState -Repository $Repository
+    if(-not[bool]$readback.exists-or[string]$readback.objectId-cne$expectedAfter){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'PersonalAgent evidence refs/stash CAS readback differs from the expected object ID.')}
+}
+
+function Get-RepositoryTransactionEvidenceStashState {
+    param([Parameter(Mandatory=$true)][object]$Journal,[Parameter(Mandatory=$true)][object]$Operation)
+    $commitId=[string]$Operation.after.objectId
+    $exists=@(Invoke-Git -Repository ([string]$Journal.scope.repositoryRoot) -Arguments @('stash','list','--format=%H')|Where-Object{([string]$_).Trim()-ceq$commitId}).Count-gt0
+    return [pscustomobject][ordered]@{exists=$exists;objectId=$commitId}
+}
+
+function Get-RepositoryHeadQueryState {
+    param([Parameter(Mandatory=$true)][string]$Repository)
+    $symbolicExitCode=Get-GitExitCode -Repository $Repository -Arguments @('symbolic-ref','-q','HEAD')
+    if($symbolicExitCode-eq0){$reference=((Invoke-Git -Repository $Repository -Arguments @('symbolic-ref','-q','HEAD'))|Select-Object -First 1).Trim()}
+    elseif($symbolicExitCode-eq1){$reference=$null}
+    else{
+        Invoke-Git -Repository $Repository -Arguments @('symbolic-ref','-q','HEAD')|Out-Null
+        throw "git symbolic-ref -q HEAD failed with exit code $symbolicExitCode."
+    }
+    $objectExitCode=Get-GitExitCode -Repository $Repository -Arguments @('rev-parse','--verify','--quiet','HEAD')
+    if($objectExitCode-eq0){$objectId=((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--verify','--quiet','HEAD'))|Select-Object -First 1).Trim()}
+    elseif($objectExitCode-eq1){$objectId=$null}
+    else{
+        Invoke-Git -Repository $Repository -Arguments @('rev-parse','--verify','--quiet','HEAD')|Out-Null
+        throw "git rev-parse --verify --quiet HEAD failed with exit code $objectExitCode."
+    }
+    return [pscustomobject][ordered]@{reference=$reference;objectId=$objectId}
+}
+
+function Get-RepositoryTransactionHeadState {
+    param([Parameter(Mandatory=$true)][object]$Journal)
+    $repository=[string]$Journal.scope.repositoryRoot;$headPath=Join-Path ([string]$Journal.scope.gitDirectory) 'HEAD'
+    $raw=Get-ByteArraySha256 ([IO.File]::ReadAllBytes($headPath))
+    $head=Get-RepositoryHeadQueryState -Repository $repository;$reference=$head.reference;$objectId=$head.objectId
+    $mode=if($null-ne$reference){if($null-eq$objectId){'unborn'}else{'symbolic'}}else{'detached'}
+    return [pscustomobject][ordered]@{mode=$mode;reference=$reference;objectId=$objectId;rawSha256=$raw}
+}
+
+function Get-RepositoryGitVersion {
+    param([Parameter(Mandatory=$true)][string]$Repository)
+    $line=((Invoke-Git -Repository $Repository -Arguments @('--version'))|Select-Object -First 1).Trim()
+    $match=[regex]::Match($line,'(?i)^git version (?<Major>[0-9]+)\.(?<Minor>[0-9]+)(?:\.(?<Patch>[0-9]+))?')
+    if(-not$match.Success){throw (New-AiInstructionsRefusalException -Code 'capability-unavailable' -Message "Detached HEAD remediation requires Git >= 2.46 for atomic symbolic-ref CAS, but the installed Git version could not be parsed: $line")}
+    return [version]::new([int]$match.Groups['Major'].Value,[int]$match.Groups['Minor'].Value,$(if($match.Groups['Patch'].Success){[int]$match.Groups['Patch'].Value}else{0}))
+}
+
+function Get-RepositoryHeadState {
+    param([Parameter(Mandatory=$true)][string]$Repository)
+    $head=Get-RepositoryHeadQueryState -Repository $Repository
+    if($null-ne$head.reference){return [pscustomobject][ordered]@{mode='symbolic';reference=$head.reference;objectId=$null}}
+    return [pscustomobject][ordered]@{mode='detached';reference=$null;objectId=$head.objectId}
+}
+
+function Set-RepositoryDetachedHeadSymbolicCompareAndSwap {
+    param([Parameter(Mandatory=$true)][string]$Repository,[Parameter(Mandatory=$true)][string]$ExpectedObjectId,[Parameter(Mandatory=$true)][string]$NewReference)
+    $gitVersion=Get-RepositoryGitVersion -Repository $Repository
+    if($gitVersion-lt[version]'2.46.0'){throw (New-AiInstructionsRefusalException -Code 'capability-unavailable' -Message "Detached HEAD remediation requires Git >= 2.46 because changing detached HEAD to a symbolic ref must use an atomic symref CAS and must not overwrite an external HEAD change. Installed: $gitVersion")}
+    $commands=@('start',"symref-update HEAD $NewReference oid $ExpectedObjectId",'prepare','commit')
+    try{Invoke-Git -Repository $Repository -Arguments @('update-ref','--stdin') -StandardInputLines $commands|Out-Null}
+    catch{
+        if((Get-AiInstructionsRefusalCode $_)-ceq'capability-unavailable'){throw}
+        $updateException=$_.Exception
+        $current=$null;$readException=$null
+        try{$current=Get-RepositoryHeadState -Repository $Repository}catch{$readException=$_.Exception}
+        if($null-eq$readException-and([string]$current.mode-cne'detached'-or[string]$current.objectId-cne$ExpectedObjectId)){
+            throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'Detached HEAD atomic symbolic-ref CAS refused because HEAD changed after observation; the external HEAD state was preserved.' -InnerException $updateException)
+        }
+        $readFailureDetail=if($null-ne$readException){" The HEAD readback also failed: $($readException.Message)"}else{''}
+        throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Detached HEAD git update-ref --stdin symbolic-ref CAS write failed. $($updateException.Message)$readFailureDetail" -InnerException $updateException)
+    }
+}
+
+function Get-RepositoryTransactionIndexEntrySetSha256 {
+    param([Parameter(Mandatory=$true)][string]$Repository,[Parameter(Mandatory=$true)][string]$IndexPath)
+    $had=Test-Path Env:GIT_INDEX_FILE;$prior=$env:GIT_INDEX_FILE
+    try{$env:GIT_INDEX_FILE=$IndexPath;$lines=@(Invoke-Git -Repository $Repository -Arguments @('ls-files','--stage'))|Sort-Object -CaseSensitive;return Get-ByteArraySha256 ([Text.UTF8Encoding]::new($false).GetBytes((($lines-join"`n")+"`n")))}
+    finally{if($had){$env:GIT_INDEX_FILE=$prior}else{Remove-Item Env:GIT_INDEX_FILE -ErrorAction SilentlyContinue}}
+}
+
+function Get-RepositoryTransactionIndexState {
+    param([Parameter(Mandatory=$true)][object]$Journal)
+    $path=[string]$Journal.scope.indexPath;$parent=[IO.Path]::GetDirectoryName($path);$leaf=[IO.Path]::GetFileName($path);$lease=Open-PlatformDirectory -Root $parent -RootOnly
+    try{$state=Get-AiInstructionsInstallFileState -ParentLease $lease -Leaf $leaf -LiteralPath $path -PlatformOs ([string]$Journal.platform.os)}finally{$lease.Dispose()}
+    return [pscustomobject][ordered]@{exists=[bool]$state.exists;sha256=$state.sha256;length=$state.length;identity=$state.identity;entrySetSha256=$(if($state.exists){Get-RepositoryTransactionIndexEntrySetSha256 -Repository ([string]$Journal.scope.repositoryRoot) -IndexPath $path}else{$null})}
+}
+
+function Test-RepositoryTransactionIndexStateEqual {
+    param([Parameter(Mandatory=$true)][object]$Actual,[Parameter(Mandatory=$true)][object]$Expected)
+    return [bool]$Actual.exists-eq[bool]$Expected.exists-and
+        (-not[bool]$Expected.exists-or(
+            [string]$Actual.sha256-ceq[string]$Expected.sha256-and
+            [int64]$Actual.length-eq[int64]$Expected.length-and
+            [string]$Actual.entrySetSha256-ceq[string]$Expected.entrySetSha256))
+}
+
+function New-RepositoryIndexLockRefusal {
+    param([Parameter(Mandatory=$true)][string]$Reason,[Parameter(Mandatory=$true)][string]$LockPath)
+    return New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "$Reason Confirm that no other Git process is running, then inspect the Git index and remove '$LockPath' manually only when it is safe to do so."
+}
+
+function Get-RepositoryIndexLockRollForwardDecision {
+    param([Parameter(Mandatory=$true)][object]$Journal)
+    $lockPath=([string]$Journal.scope.indexPath)+'.lock'
+    if(-not(Test-Path -LiteralPath $lockPath)){return $null}
+    if(-not(Test-Path -LiteralPath $lockPath -PathType Leaf)-or(Get-Item -Force -LiteralPath $lockPath).Attributes-band[IO.FileAttributes]::ReparsePoint){throw (New-RepositoryIndexLockRefusal -Reason 'The residual Git index.lock is not a regular file owned by this transaction.' -LockPath $lockPath)}
+    if([string]$Journal.phase-cnotin@('prepared','applying','applied','committed')){throw (New-RepositoryIndexLockRefusal -Reason "The residual Git index.lock cannot belong to a repository transaction in phase '$($Journal.phase)'." -LockPath $lockPath)}
+    $indexOperations=@($Journal.operations|Where-Object{[string]$_.kind-ceq'replace-git-index'})
+    if($indexOperations.Count-gt1){throw (New-RepositoryIndexLockRefusal -Reason 'A residual Git index.lock exists with more than one journaled index step.' -LockPath $lockPath)}
+    try{[byte[]]$bytes=[IO.File]::ReadAllBytes($lockPath)}catch{throw (New-RepositoryIndexLockRefusal -Reason "The residual Git index.lock could not be read: $($_.Exception.Message)" -LockPath $lockPath)}
+    $sha256=Get-ByteArraySha256 $bytes;$preparedSha256=[string]$Journal.scope.indexLockContentSha256
+    if($indexOperations.Count-eq0){
+        if($sha256-ceq$preparedSha256){return [pscustomobject][ordered]@{LockPath=$lockPath;IndexPath=[string]$Journal.scope.indexPath;Operation=$null;Destination=$null;DestinationSha256=$preparedSha256;Direction='prefill'}}
+        throw (New-RepositoryIndexLockRefusal -Reason 'The residual Git index.lock bytes do not match the prepared lock-content SHA recorded by this transaction.' -LockPath $lockPath)
+    }
+    $operation=$indexOperations[0]
+    if($sha256-ceq[string]$operation.after.sha256){return [pscustomobject][ordered]@{LockPath=$lockPath;IndexPath=[string]$Journal.scope.indexPath;Operation=$operation;Destination=$operation.after;DestinationSha256=[string]$operation.after.sha256;Direction='redo'}}
+    if($sha256-ceq[string]$operation.before.sha256-or$sha256-ceq$preparedSha256){return [pscustomobject][ordered]@{LockPath=$lockPath;IndexPath=[string]$Journal.scope.indexPath;Operation=$operation;Destination=$operation.before;DestinationSha256=[string]$operation.before.sha256;Direction='undo'}}
+    throw (New-RepositoryIndexLockRefusal -Reason 'The residual Git index.lock bytes do not match the prepared lock-content SHA or either index write-ahead SHA recorded by this transaction.' -LockPath $lockPath)
+}
+
+function Complete-RepositoryIndexLockRollForward {
+    param([Parameter(Mandatory=$true)][object]$Journal)
+    $decision=Get-RepositoryIndexLockRollForwardDecision -Journal $Journal
+    if($null-eq$decision){return $null}
+    try{Move-Item -LiteralPath $decision.LockPath -Destination $decision.IndexPath -Force}
+    catch{throw (New-RepositoryIndexLockRefusal -Reason "The residual Git index.lock could not be rolled forward to the Git index: $($_.Exception.Message)" -LockPath $decision.LockPath)}
+    $readback=Get-RepositoryTransactionIndexState $Journal
+    if($null-ne$decision.Destination){$matches=Test-RepositoryTransactionIndexStateEqual $readback $decision.Destination}else{$matches=[string]$readback.sha256-ceq[string]$decision.DestinationSha256}
+    if(-not$matches){throw (New-RepositoryIndexLockRefusal -Reason 'The Git index readback differs from the journaled lock destination after roll-forward.' -LockPath $decision.LockPath)}
+    return $decision
+}
+
+function Resolve-RepositoryRecoveryIndexLock {
+    param([Parameter(Mandatory=$true)][object]$Context)
+    if($null-ne$Context.RepositoryIndexLock-and$null-ne$Context.RepositoryIndexLock.Stream){return}
+    $lockPath=([string]$Context.CurrentJournal.scope.indexPath)+'.lock'
+    if(Test-Path -LiteralPath $lockPath){Complete-RepositoryIndexLockRollForward -Journal $Context.CurrentJournal|Out-Null}
+    try{
+        $reacquired=Open-RepositoryIndexTransactionLock -Repository ([string]$Context.Repository)
+        if($null-eq$Context.RepositoryIndexLock){$Context.RepositoryIndexLock=$reacquired}
+        else{$Context.RepositoryIndexLock.Stream=$reacquired.Stream;$Context.RepositoryIndexLock.Path=$reacquired.Path;$Context.RepositoryIndexLock.IndexPath=$reacquired.IndexPath;$Context.RepositoryIndexLock.ContentSha256=$reacquired.ContentSha256}
+    }
+    catch{throw (New-RepositoryIndexLockRefusal -Reason "The repository recovery could not acquire the long Git index lock before undo or redo: $($_.Exception.Message)" -LockPath $lockPath)}
+}
+
+function Invoke-RepositoryIndexReplacement {
+    param([Parameter(Mandatory=$true)][object]$Context,[Parameter(Mandatory=$true)][object]$Journal,[Parameter(Mandatory=$true)][object]$Operation,[Parameter(Mandatory=$true)][object]$Source,[Parameter(Mandatory=$true)][object]$Destination,[Parameter(Mandatory=$true)][ValidateSet('redo','undo')][string]$Direction)
+    $indexPath=[string]$Journal.scope.indexPath;$lockPath=$indexPath+'.lock'
+    if($null-eq$Context.RepositoryIndexLock-or$null-eq$Context.RepositoryIndexLock.Stream){throw (New-RepositoryIndexLockRefusal -Reason 'The repository transaction no longer owns the long Git index lock.' -LockPath $lockPath)}
+    $artifactLeaf=if($Direction-ceq'redo'){[string]$Operation.stageLeaf}else{[string]$Operation.backupLeaf}
+    $artifact=Open-PlatformFile -ParentLease $Context.Lease -Leaf $artifactLeaf -Access Read -CreateMode OpenExisting
+    try{[byte[]]$bytes=$artifact.ReadAllBytes(536870912)}finally{$artifact.Dispose()}
+    if((Get-ByteArraySha256 $bytes)-cne[string]$Destination.sha256-or[long]$bytes.Length-ne[long]$Destination.length){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction index artifact '$artifactLeaf' differs from its write-ahead state.")}
+    $live=Get-RepositoryTransactionIndexState $Journal
+    if(Test-RepositoryTransactionIndexStateEqual $live $Destination){return}
+    if(-not(Test-RepositoryTransactionIndexStateEqual $live $Source)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'The Git index changed before index.lock publication; transaction evidence was retained.')}
+    $stream=$Context.RepositoryIndexLock.Stream
+    try{
+        $stream.SetLength(0);$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true);$stream.Dispose();$stream=$null;$Context.RepositoryIndexLock.Stream=$null
+        Invoke-AiInstructionsInstallFailpoint -Name 'after-index-lock-write-before-rename'
+        $live=Get-RepositoryTransactionIndexState $Journal
+        if(-not(Test-RepositoryTransactionIndexStateEqual $live $Source)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'The Git index changed after index.lock was flushed; transaction evidence was retained.')}
+        Move-Item -LiteralPath $lockPath -Destination $indexPath -Force
+        Invoke-AiInstructionsInstallFailpoint -Name 'after-index-rename-before-reacquire'
+        try{$reacquired=Open-RepositoryIndexTransactionLock -Repository ([string]$Context.Repository);$Context.RepositoryIndexLock.Stream=$reacquired.Stream;$Context.RepositoryIndexLock.ContentSha256=$reacquired.ContentSha256}
+        catch{throw (New-RepositoryIndexLockRefusal -Reason "The transaction could not reacquire the long Git index lock after index publication: $($_.Exception.Message)" -LockPath $lockPath)}
+    }finally{if($null-ne$stream){$stream.Dispose();$Context.RepositoryIndexLock.Stream=$null}}
+}
+
+function Test-RepositoryTransactionStateEqual {
+    param([Parameter(Mandatory=$true)][object]$Operation,[Parameter(Mandatory=$true)][object]$Actual,[Parameter(Mandatory=$true)][object]$Expected)
+    switch([string]$Operation.kind){
+        'update-git-ref'{return [bool]$Actual.exists-eq[bool]$Expected.exists-and(-not$Expected.exists-or[string]$Actual.objectId-ceq[string]$Expected.objectId)}
+        'store-git-stash-evidence'{return [bool]$Actual.exists-eq[bool]$Expected.exists-and[string]$Actual.objectId-ceq[string]$Expected.objectId}
+        'update-git-head'{return [string]$Actual.mode-ceq[string]$Expected.mode-and[string]$Actual.reference-ceq[string]$Expected.reference-and[string]$Actual.objectId-ceq[string]$Expected.objectId-and[string]$Actual.rawSha256-ceq[string]$Expected.rawSha256}
+        'ensure-directory-anchor'{if([bool]$Actual.exists-ne[bool]$Expected.exists){return $false};if(-not$Expected.exists){return $true};return [string]$Actual.identity.kind-ceq[string]$Expected.identity.kind-and[string]::Equals([string]$Actual.identity.device,[string]$Expected.identity.device,[StringComparison]::OrdinalIgnoreCase)-and[string]::Equals([string]$Actual.identity.fileId,[string]$Expected.identity.fileId,[StringComparison]::OrdinalIgnoreCase)}
+        'replace-git-index'{return Test-RepositoryTransactionIndexStateEqual $Actual $Expected}
+        default{return Test-ProjectPublicationStateEqual $Actual $Expected}
+    }
+}
+
+function Get-RepositoryTransactionOperationState {
+    param([Parameter(Mandatory=$true)][object]$Journal,[Parameter(Mandatory=$true)][object]$Operation)
+    switch([string]$Operation.kind){
+        'replace-git-index'{return Get-RepositoryTransactionIndexState $Journal}
+        'update-git-ref'{return Get-RepositoryTransactionGitRefState $Journal $Operation}
+        'store-git-stash-evidence'{return Get-RepositoryTransactionEvidenceStashState $Journal $Operation}
+        'update-git-head'{return Get-RepositoryTransactionHeadState $Journal}
+        'ensure-directory-anchor'{return Get-RepositoryTransactionDirectoryAnchorState $Journal $Operation}
+        default{return Get-RepositoryTransactionFileState $Journal $Operation}
+    }
+}
+
+function Invoke-RepositoryTransactionOperation {
+    param([Parameter(Mandatory=$true)][object]$Context,[Parameter(Mandatory=$true)][object]$Journal,[Parameter(Mandatory=$true)][object]$Operation,[Parameter(Mandatory=$true)][ValidateSet('redo','undo')][string]$Direction)
+    if([string]$Operation.kind-ceq'store-git-stash-evidence'-and$Direction-ceq'undo'){return}
+    $source=if($Direction-ceq'redo'){$Operation.before}else{$Operation.after};$destination=if($Direction-ceq'redo'){$Operation.after}else{$Operation.before}
+    $current=Get-RepositoryTransactionOperationState $Journal $Operation
+    $requiresEvidenceReuseCas=$Direction-ceq'redo'-and[string]$Operation.kind-ceq'update-git-ref'-and[string]$Operation.role-ceq'personal-agent-evidence-cas'
+    if((Test-RepositoryTransactionStateEqual $Operation $current $destination)-and-not$requiresEvidenceReuseCas){
+        if($Direction-ceq'redo'){return [pscustomobject][ordered]@{ObservedAfter=(Get-RepositoryTransactionObservedAfter -Journal $Journal -Operation $Operation);DisplacedAfterMetadata=$null}}
+        Restore-RepositoryTransactionDisplacedMetadata -Journal $Journal -Operation $Operation
+        return
+    }
+    if(-not(Test-RepositoryTransactionStateEqual $Operation $current $source)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction sequence $($Operation.sequence) role $($Operation.role) target $($Operation.target.value) is in a third state; evidence was retained for manual inspection and cleanup.")}
+    if($Direction-ceq'undo'-and[string]$Operation.kind-cin@('create-file','write-file')-and$null-ne$Operation.observedAfter){
+        $liveObservedAfter=Get-RepositoryTransactionObservedAfter -Journal $Journal -Operation $Operation
+        if(-not(Test-RepositoryTransactionObservedAfterEqual -Actual $liveObservedAfter -Expected $Operation.observedAfter)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction sequence $($Operation.sequence) role $($Operation.role) target $($Operation.target.value) is in a third state; evidence was retained for manual inspection and cleanup.")}
+    }
+    $repository=[string]$Journal.scope.repositoryRoot
+    if($Direction-ceq'redo'-and[string]$Operation.role-ceq'manifest'-and[string]$Operation.kind-cin@('create-file','write-file')){
+        $manifestStagePath=Join-Path (Get-RepositoryTransactionPath -Context $Context) ([string]$Operation.stageLeaf)
+        try{$manifestDocument=[Text.UTF8Encoding]::new($false,$true).GetString([IO.File]::ReadAllBytes($manifestStagePath))|ConvertFrom-Json -ErrorAction Stop}
+        catch{throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project Skill manifest publication refused because the staged manifest could not be decoded: $($_.Exception.Message)" -InnerException $_.Exception)}
+        if($null-eq$manifestDocument-or$null-eq$manifestDocument.PSObject.Properties['files']){throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message 'Project Skill manifest publication refused because the staged manifest has no files inventory.')}
+        $publishedTargetPaths=@($Journal.operations|Where-Object{[string]$_.kind-cin@('create-file','write-file')-and[string]$_.target.kind-ceq'repository-relative'}|ForEach-Object{[string]$_.target.value})
+        $planningObservations=if($null-ne$Context.PSObject.Properties['PlanningObservations']){$Context.PlanningObservations}else{$null}
+        Assert-ProjectSkillManifestFilesCurrent -TargetRoot $repository -ManifestEntries @($manifestDocument.files) -PublishedTargetPaths $publishedTargetPaths -PlanningObservations $planningObservations
+    }
+    switch([string]$Operation.kind){
+        {$_-in@('create-file','write-file','remove-file')} {
+            $path=if([string]$Operation.target.kind-ceq'git-shared-exclude'){[string]$Operation.target.value}else{Join-Path $repository ([string]$Operation.target.value).Replace('/',[IO.Path]::DirectorySeparatorChar)}
+            $parent=[IO.Path]::GetDirectoryName($path);$leaf=[IO.Path]::GetFileName($path)
+            try{$parentLease=Open-PlatformDirectory -Root $parent -RootOnly}
+            catch{
+                if($Direction-ceq'redo'-and[string]$Operation.kind-cne'remove-file'-and[string]$Operation.target.kind-ceq'repository-relative'){
+                    $relativeParent=(Split-Path -Parent ([string]$Operation.target.value)).Replace('\','/').Trim('/')
+                    $legacyStage=if([string]::IsNullOrWhiteSpace($relativeParent)){'.syp214-'+[guid]::NewGuid().ToString('N')+'-stage'}else{$relativeParent+'/.syp214-'+[guid]::NewGuid().ToString('N')+'-stage'}
+                    throw "Managed publication staging could not acquire the handle-bound create stream; no external path was changed: $legacyStage. A guarded managed directory path is not a directory. $($_.Exception.Message)"
+                }
+                throw
+            }
+            try{
+                if($Direction-ceq'redo'){
+                    if([string]$Operation.kind-ceq'remove-file'){Remove-PlatformOwnedFile -ParentLease $parentLease -Leaf $leaf -ExpectedState $Operation.before -TransactionLease $Context.Lease -TombstoneLeaf ([string]$Operation.backupLeaf)|Out-Null}
+                    else{$stageLease=Open-PlatformFile -ParentLease $Context.Lease -Leaf ([string]$Operation.stageLeaf) -Access ReadWrite -CreateMode OpenExisting;try{$p=@{ParentLease=$parentLease;Leaf=$leaf;TransactionLease=$Context.Lease;StageLease=$stageLease;ExpectedState=$Operation.before;ExpectedStage=$Operation.after};if([string]$Operation.kind-ceq'create-file'){$p.NoReplace=$true}else{$p.DisplacedLeaf=[string]$Operation.backupLeaf};Publish-PlatformFile @p|Out-Null}finally{$stageLease.Dispose()}}
+                }else{
+                    if([string]$Operation.kind-ceq'create-file'){Remove-PlatformOwnedFile -ParentLease $parentLease -Leaf $leaf -ExpectedState $Operation.after -TransactionLease $Context.Lease -TombstoneLeaf ([string]$Operation.stageLeaf)|Out-Null}
+                    else{$backupLease=Open-PlatformFile -ParentLease $Context.Lease -Leaf ([string]$Operation.backupLeaf) -Access Read -CreateMode OpenExisting;try{$p=@{ParentLease=$parentLease;Leaf=$leaf;TransactionLease=$Context.Lease;StageLease=$backupLease;ExpectedState=$Operation.after;ExpectedStage=$Operation.before};if([string]$Operation.kind-ceq'remove-file'){$p.NoReplace=$true}else{$p.DisplacedLeaf=[string]$Operation.stageLeaf};Publish-PlatformFile @p|Out-Null}finally{$backupLease.Dispose()};Restore-RepositoryTransactionDisplacedMetadata -Journal $Journal -Operation $Operation}
+                }
+            }finally{$parentLease.Dispose()}
+        }
+        'ensure-directory-anchor' {
+            $relative=[string]$Operation.target.value;$parentRelative=(Split-Path -Parent $relative).Replace('\','/');$leaf=Split-Path -Leaf $relative;$parentLease=if([string]::IsNullOrWhiteSpace($parentRelative)){Open-PlatformDirectory -Root $repository -RootOnly}else{Open-PlatformDirectory -Root $repository -RelativePath $parentRelative}
+            try{
+                if($Direction-ceq'redo'){Move-PlatformOwnedDirectory -ParentLease $parentLease -Leaf ([string]$Operation.stageLeaf) -TransactionLease $Context.Lease -DestinationLeaf $leaf -ExpectedIdentity $Operation.after.identity -Direction FromTransaction|Out-Null}
+                else{
+                    $anchorPath=Join-Path $repository $relative.Replace('/',[IO.Path]::DirectorySeparatorChar)
+                    if(@(Get-ChildItem -Force -LiteralPath $anchorPath).Count-gt0){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction directory anchor '$relative' is not empty after descendant rollback; unknown content was preserved.")}
+                    Move-PlatformOwnedDirectory -ParentLease $parentLease -Leaf $leaf -TransactionLease $Context.Lease -DestinationLeaf ([string]$Operation.stageLeaf) -ExpectedIdentity $Operation.after.identity -Direction ToTransaction|Out-Null
+                }
+            }finally{$parentLease.Dispose()}
+        }
+        'replace-git-index' {
+            Invoke-RepositoryIndexReplacement -Context $Context -Journal $Journal -Operation $Operation -Source $source -Destination $destination -Direction $Direction
+        }
+        'update-git-ref' {
+            if([string]$Operation.role-ceq'personal-agent-evidence-cas'){Invoke-RepositoryStashRefCompareAndSwap -Repository $repository -Expected $source}
+            else{
+                $ref=[string]$Operation.target.value;$from=$source.objectId;$to=$destination.objectId
+                if(-not[bool]$source.exists){Invoke-Git -Repository $repository -Arguments @('update-ref',$ref,$to,('0'*$(if([string]$Journal.scope.objectFormat-ceq'sha256'){64}else{40})))|Out-Null}
+                elseif(-not[bool]$destination.exists){Invoke-Git -Repository $repository -Arguments @('update-ref','-d',$ref,$from)|Out-Null}
+                else{Invoke-Git -Repository $repository -Arguments @('update-ref',$ref,$to,$from)|Out-Null}
+            }
+        }
+        'update-git-head' {
+            if([string]$destination.mode-ceq'detached'){Invoke-Git -Repository $repository -Arguments @('update-ref','--no-deref','HEAD',[string]$destination.objectId,[string]$source.objectId)|Out-Null}
+            else{Set-RepositoryDetachedHeadSymbolicCompareAndSwap -Repository $repository -ExpectedObjectId ([string]$source.objectId) -NewReference ([string]$destination.reference)}
+        }
+        'store-git-stash-evidence' {
+            $subject=((Invoke-Git -Repository $repository -Arguments @('show','--no-patch','--format=%s',[string]$destination.objectId))|Select-Object -First 1).Trim()
+            Invoke-RepositoryStashRefCompareAndSwap -Repository $repository -Expected $Operation.before -NewObjectId ([string]$destination.objectId) -ReflogMessage $subject
+        }
+    }
+    $readback=Get-RepositoryTransactionOperationState $Journal $Operation
+    if(-not(Test-RepositoryTransactionStateEqual $Operation $readback $destination)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction sequence $($Operation.sequence) readback differs from its journal destination state.")}
+    if($Direction-ceq'redo'){return [pscustomobject][ordered]@{ObservedAfter=(Get-RepositoryTransactionObservedAfter -Journal $Journal -Operation $Operation);DisplacedAfterMetadata=(Get-RepositoryTransactionDisplacedAfterMetadata -Context $Context -Operation $Operation)}}
+}
+
+function Copy-RepositoryInstallJournal {
+    param([Parameter(Mandatory=$true)][object]$Journal,[string]$Phase,[Nullable[long]]$Sequence,[string]$EvidenceObjectId,[AllowNull()][object]$ObservedAfter,[AllowNull()][object]$DisplacedAfterMetadata)
+    $document=[ordered]@{}
+    foreach($property in @($Journal.PSObject.Properties)){
+        if($property.Name-cin@('operations','retainedManifestPaths')){$document[$property.Name]=[object[]]@($property.Value)}
+        else{$document[$property.Name]=$property.Value}
+    }
+    $copy=[pscustomobject]$document
+    if(-not[string]::IsNullOrEmpty($Phase)){$copy.phase=$Phase}
+    if($null-ne$Sequence){
+        [object[]]$operations=@($copy.operations)
+        $sequenceValue=[int64]$Sequence;$operationIndex=-1
+        for($index=0;$index-lt$operations.Count;$index++){if([int64]$operations[$index].sequence-eq$sequenceValue){$operationIndex=$index;break}}
+        if($operationIndex-lt0){throw "Repository transaction operation sequence $sequenceValue was not found."}
+        if($PSBoundParameters.ContainsKey('EvidenceObjectId')-and[string]$operations[$operationIndex].kind-cne'store-git-stash-evidence'){throw 'Only store-git-stash-evidence may bind after.objectId.'}
+        if($PSBoundParameters.ContainsKey('ObservedAfter')-and[string]$operations[$operationIndex].kind-cnotin@('create-file','write-file')){throw 'Only a published file operation may bind observedAfter.'}
+        if($PSBoundParameters.ContainsKey('DisplacedAfterMetadata')-and([string]$operations[$operationIndex].kind-cnotin@('write-file','remove-file')-or$null-eq$DisplacedAfterMetadata)){throw 'Only a displacing file operation may bind a non-null displacedAfterMetadata.'}
+        $operationDocument=[ordered]@{}
+        foreach($property in @($operations[$operationIndex].PSObject.Properties)){
+            if($property.Name-ceq'state'){$operationDocument[$property.Name]='applied';continue}
+            if($property.Name-ceq'after'-and$PSBoundParameters.ContainsKey('EvidenceObjectId')){$operationDocument[$property.Name]=[pscustomobject][ordered]@{exists=$true;objectId=$EvidenceObjectId};continue}
+            if($property.Name-ceq'observedAfter'-and$PSBoundParameters.ContainsKey('ObservedAfter')){$operationDocument[$property.Name]=$ObservedAfter;continue}
+            if($property.Name-ceq'displacedAfterMetadata'-and$PSBoundParameters.ContainsKey('DisplacedAfterMetadata')){$operationDocument[$property.Name]=$DisplacedAfterMetadata;continue}
+            $operationDocument[$property.Name]=$property.Value
+        }
+        $operations[$operationIndex]=[pscustomobject]$operationDocument
+        $copy.operations=[object[]]$operations
+    }
+    return $copy
+}
+
+function Write-RepositoryInstallJournalGeneration {
+    param([Parameter(Mandatory=$true)][object]$Context,[Parameter(Mandatory=$true)][object]$Next)
+    $previous=$Context.CurrentJournal
+    $Context.CurrentJournal=Write-AiInstructionsInstallJournalStore -TransactionLease $Context.Lease -TransactionPath (Get-RepositoryTransactionPath -Context $Context) -Journal $Next -PreviousJournal $previous -PlatformOs ([string]$Next.platform.os) -JournalStoreStates $Context.JournalStoreStates
+}
+
+function Invoke-RepositoryTransactionEvidenceStashStore {
+    param([Parameter(Mandatory=$true)][object]$Context,[Parameter(Mandatory=$true)][string]$EvidenceCommit)
+    if(-not[bool]$Context.Durable-or[string]$Context.CurrentJournal.phase-cne'applying'){throw 'PersonalAgent evidence can only be stored by an applying durable repository transaction.'}
+    if($EvidenceCommit-cnotmatch'^[0-9a-f]{40,64}$'){throw 'PersonalAgent evidence commit ID is invalid.'}
+    $evidenceOperations=@($Context.CurrentJournal.operations|Where-Object{[string]$_.kind-ceq'store-git-stash-evidence'})
+    if($evidenceOperations.Count-ne1){throw 'The prepared repository transaction must contain exactly one PersonalAgent evidence operation before stash store.'}
+    $operation=$evidenceOperations[0];$sequence=[int64]$operation.sequence
+    if([string]$operation.state-cne'pending'-or$null-ne$operation.after.objectId){throw 'The prepared PersonalAgent evidence operation has already been bound.'}
+    Invoke-AiInstructionsInstallFailpoint -Name ("before-operation-"+$sequence)
+    $subject=((Invoke-Git -Repository ([string]$Context.Repository) -Arguments @('show','--no-patch','--format=%s',$EvidenceCommit))|Select-Object -First 1).Trim()
+    Invoke-RepositoryStashRefCompareAndSwap -Repository ([string]$Context.Repository) -Expected $operation.before -NewObjectId $EvidenceCommit -ReflogMessage $subject
+    if(@(Invoke-Git -Repository ([string]$Context.Repository) -Arguments @('stash','list','--format=%H')|Where-Object{([string]$_).Trim()-ceq$EvidenceCommit}).Count-eq0){throw 'The newly stored PersonalAgent evidence commit was not found in stash history.'}
+    Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+$sequence+"-before-journal")
+    Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Sequence $sequence -EvidenceObjectId $EvidenceCommit)
+    Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+$sequence)
+}
+
+function Add-RemediationFileIntents {
+    param([Parameter(Mandatory=$true)][object]$Context)
+    $remediation=$Context.Remediation;if($null-eq$remediation){return}
+    $pathComparer=Get-GitPathComparer -Repository $Context.Repository
+    foreach($relative in @($remediation.MutationPaths)){
+        $key="repository`0$($Context.Repository)`0$relative"
+        $existingIntent=@($Context.Intents.Values|Where-Object{
+            [string]$_.TargetKind-ceq'repository'-and
+            $pathComparer.Equals([string]$_.TargetRoot,[string]$Context.Repository)-and
+            $pathComparer.Equals([string]$_.RelativePath,[string]$relative)
+        }|Select-Object -First 1)
+        if($existingIntent.Count-eq1){$existingIntent[0].Role='remediation-and-instruction';continue}
+        $entry=@($remediation.Backup.Inventory|Where-Object{[string]$_.path-ceq[string]$relative})[0]
+        if($null-eq$entry-or-not[bool]$entry.exists){continue}
+        $full=Join-Path $Context.Repository ([string]$relative).Replace('/',[IO.Path]::DirectorySeparatorChar);$parent=[IO.Path]::GetDirectoryName($full);$leaf=[IO.Path]::GetFileName($full);$lease=Open-PlatformDirectory -Root $parent -RootOnly
+        try{$before=Get-AiInstructionsInstallFileState -ParentLease $lease -Leaf $leaf -LiteralPath $full -PlatformOs (Get-RepositoryTransactionPlatform) -IncludePermissions}finally{$lease.Dispose()}
+        $Context.Intents.Add($key,[pscustomobject][ordered]@{TargetKind='repository';TargetRoot=$Context.Repository;RelativePath=[string]$relative;Before=$before;Bytes=$null;Remove=$true;Role='remediation-file'})
+    }
+}
+
+function New-RepositoryRetainedManifestPathRecords {
+    param([Parameter(Mandatory=$true)][object]$Context,[Parameter(Mandatory=$true)][object[]]$Operations)
+    $operationTargets=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach($operation in @($Operations)){
+        if([string]$operation.target.kind-ceq'repository-relative'){[void]$operationTargets.Add([string]$operation.target.value)}
+    }
+    $records=New-Object System.Collections.Generic.List[object]
+    foreach($entry in @($Context.TerminalManifestEntries|Sort-Object targetPath)){
+        $targetPath=[string]$entry.targetPath
+        if($operationTargets.Contains($targetPath)){continue}
+        $observation=$null
+        if(-not$Context.PlanningObservations.TryGetValue($targetPath,[ref]$observation)-or$null-eq$observation-or-not[bool]$observation.exists-or$null-ne$observation.unobservable-or
+            [string]::IsNullOrWhiteSpace([string]$observation.sha256)-or$null-eq$observation.identity){
+            throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Repository transaction cannot prepare retained manifest authority for '$targetPath' because its planning observation is absent or not a regular file.")
+        }
+        $records.Add([pscustomobject][ordered]@{targetPath=$targetPath;sha256=[string]$observation.sha256;length=[int64]$observation.length;identity=$observation.identity})
+    }
+    return [object[]]$records.ToArray()
+}
+
+function New-RepositoryInstallOperations {
+    param([Parameter(Mandatory=$true)][object]$Context)
+    Add-RemediationFileIntents $Context
+    $operations=New-Object System.Collections.Generic.List[object];$platform=Get-RepositoryTransactionPlatform;$transactionPath=Get-RepositoryTransactionPath -Context $Context
+    $remediation=$Context.Remediation
+    if($null-ne$remediation-and$null-ne$remediation.IndexPlan-and[string]$remediation.IndexPlan.BeforeSha256-cne[string]$remediation.IndexPlan.AfterSha256){
+        $sequence=$operations.Count+1;$stageLeaf=('op-{0:D6}.stage'-f$sequence);$backupLeaf=('op-{0:D6}.backup'-f$sequence)
+        $stage=New-AiInstructionsInstallStageFile -TransactionLease $Context.Lease -Leaf $stageLeaf -Bytes ([byte[]]$remediation.IndexPlan.AfterBytes) -PlatformOs $platform
+        $backup=New-AiInstructionsInstallStageFile -TransactionLease $Context.Lease -Leaf $backupLeaf -Bytes ([byte[]]$remediation.IndexPlan.BeforeBytes) -PlatformOs $platform
+        $before=[pscustomobject][ordered]@{exists=$true;sha256=$backup.sha256;length=$backup.length;identity=$backup.identity;entrySetSha256=(Get-RepositoryTransactionIndexEntrySetSha256 -Repository $Context.Repository -IndexPath ([string]$remediation.IndexPath))}
+        $after=[pscustomobject][ordered]@{exists=$true;sha256=$stage.sha256;length=$stage.length;identity=$stage.identity;entrySetSha256=[string]$remediation.IndexPlan.AfterEntrySetSha256}
+        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='replace-git-index';role='git-index';method='index-lock-rename';target=[pscustomobject][ordered]@{kind='git-index';value=[string]$remediation.IndexPath};before=$before;after=$after;observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf=$stageLeaf;backupLeaf=$backupLeaf;quarantineLeaf=$null;state='pending'})
+    }
+    if($null-ne$remediation-and-not[string]::IsNullOrWhiteSpace([string]$remediation.NewCommit)){
+        $sequence=$operations.Count+1;$ref=if([string]::IsNullOrWhiteSpace([string]$remediation.OriginalHeadReference)){[string]$remediation.NewHeadReference}else{[string]$remediation.OriginalHeadReference}
+        $before=if([string]::IsNullOrWhiteSpace([string]$remediation.OriginalHeadReference)){[pscustomobject][ordered]@{exists=$false;objectId=$null}}else{[pscustomobject][ordered]@{exists=$true;objectId=[string]$remediation.OriginalHead}}
+        $after=[pscustomobject][ordered]@{exists=$true;objectId=[string]$remediation.NewCommit}
+        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='update-git-ref';role='git-ref';method='update-ref';target=[pscustomobject][ordered]@{kind='git-ref';value=$ref};before=$before;after=$after;observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
+        if([string]::IsNullOrWhiteSpace([string]$remediation.OriginalHeadReference)){
+            $sequence=$operations.Count+1;$headPath=Join-Path ([string]$remediation.GitDirectory) 'HEAD';$beforeHead=[pscustomobject][ordered]@{mode='detached';reference=$null;objectId=[string]$remediation.OriginalHead;rawSha256=(Get-ByteArraySha256 ([IO.File]::ReadAllBytes($headPath)))};$afterBytes=[Text.UTF8Encoding]::new($false).GetBytes("ref: $ref`n");$afterHead=[pscustomobject][ordered]@{mode='symbolic';reference=$ref;objectId=[string]$remediation.NewCommit;rawSha256=(Get-ByteArraySha256 $afterBytes)}
+            $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='update-git-head';role='git-head';method='symbolic-ref';target=[pscustomobject][ordered]@{kind='git-head';value='HEAD'};before=$beforeHead;after=$afterHead;observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
+        }
+    }
+    $missing=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach($intent in $Context.Intents.Values){if([string]$intent.TargetKind-cne'repository'){continue};$parent=(Split-Path -Parent ([string]$intent.RelativePath)).Replace('\','/');if([string]::IsNullOrWhiteSpace($parent)){continue};$segments=$parent.Split('/');for($i=1;$i-le$segments.Count;$i++){$relative=[string]::Join('/',[string[]]$segments[0..($i-1)]);if(-not(Test-Path -LiteralPath (Join-Path $Context.Repository $relative.Replace('/',[IO.Path]::DirectorySeparatorChar)))){[void]$missing.Add($relative)}}}
+    foreach($relative in @($missing|Sort-Object @{Expression={($_.Split('/')).Count}},@{Expression={$_}})){
+        $sequence=$operations.Count+1;$stageLeaf=('op-{0:D6}.directory'-f$sequence);$stageLease=Open-PlatformDirectory -Root $transactionPath -RelativePath $stageLeaf -CreatePrivate
+        try{$after=[pscustomobject][ordered]@{exists=$true;identity=(ConvertTo-ProjectPublicationIdentity $stageLease.Observation);permissions=(Get-PlatformPermissions -Lease $stageLease)}}finally{$stageLease.Dispose()}
+        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='ensure-directory-anchor';role='directory-anchor';method='directory-rename';target=[pscustomobject][ordered]@{kind='repository-relative';value=$relative};before=[pscustomobject][ordered]@{exists=$false;identity=$null;permissions=$null};after=$after;observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf=$stageLeaf;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
+    }
+    $priority=@{'instruction'=10;'project-skill'=20;'license'=30;'remediation-file'=40;'remediation-and-instruction'=40;'manifest'=90;'shared-exclude'=100}
+    foreach($intent in @($Context.Intents.Values|Sort-Object @{Expression={$priority[[string]$_.Role]}},@{Expression={[string]$_.RelativePath}})){
+        if($intent.Remove-and-not[bool]$intent.Before.exists){continue}
+        if(-not$intent.Remove-and[bool]$intent.Before.exists-and(Get-ByteArraySha256 ([byte[]]$intent.Bytes))-ceq[string]$intent.Before.sha256){continue}
+        $sequence=$operations.Count+1;$kind=if($intent.Remove){'remove-file'}elseif($intent.Before.exists){'write-file'}else{'create-file'};$stageLeaf=$null;$backupLeaf=if($kind-ceq'create-file'){$null}else{('op-{0:D6}.backup'-f$sequence)}
+        $after=if($intent.Remove){[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null}}else{$stageLeaf=('op-{0:D6}.stage'-f$sequence);$stage=New-AiInstructionsInstallStageFile -TransactionLease $Context.Lease -Leaf $stageLeaf -Bytes ([byte[]]$intent.Bytes) -PlatformOs $platform;$stageState=Get-AiInstructionsInstallFileState -ParentLease $Context.Lease -Leaf $stageLeaf -LiteralPath (Join-Path $transactionPath $stageLeaf) -PlatformOs $platform -IncludePermissions;[pscustomobject][ordered]@{exists=$true;sha256=$stage.sha256;length=$stage.length;identity=$stage.identity;permissions=$stageState.permissions}}
+        $targetKind=if([string]$intent.TargetKind-ceq'git-exclude'){'git-shared-exclude'}else{'repository-relative'};$targetValue=if($targetKind-ceq'git-shared-exclude'){Join-Path ([string]$intent.TargetRoot) ([string]$intent.RelativePath)}else{[string]$intent.RelativePath}
+        $displacedMetadata=New-RepositoryTransactionDisplacedMetadataSnapshot -Before $intent.Before -Kind $kind
+        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind=$kind;role=[string]$intent.Role;method=$(if($kind-ceq'remove-file'){'tombstone-rename'}else{'stage-rename'});target=[pscustomobject][ordered]@{kind=$targetKind;value=$targetValue};before=$intent.Before;after=$after;observedAfter=$null;displacedMetadata=$displacedMetadata;displacedAfterMetadata=$null;stageLeaf=$stageLeaf;backupLeaf=$backupLeaf;quarantineLeaf=$null;state='pending'})
+    }
+    if([bool]$Context.ShouldStorePersonalAgentEvidence){
+        $sequence=$operations.Count+1
+        $stashBefore=$Context.PersonalAgentEvidenceStashBefore
+        if($null-eq$stashBefore){throw 'PersonalAgent evidence store is missing its prepared refs/stash state.'}
+        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='store-git-stash-evidence';role='personal-agent-evidence';method='stash-store';target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'};before=$stashBefore;after=[pscustomobject][ordered]@{exists=$true;objectId=$null};observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
+    }elseif($operations.Count-gt0-and$null-ne$Context.PersonalAgentEvidenceStashBefore){
+        $sequence=$operations.Count+1;$stashBefore=$Context.PersonalAgentEvidenceStashBefore
+        $operations.Add([pscustomobject][ordered]@{sequence=$sequence;kind='update-git-ref';role='personal-agent-evidence-cas';method='update-ref';target=[pscustomobject][ordered]@{kind='git-ref';value='refs/stash'};before=$stashBefore;after=$stashBefore;observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'})
+    }
+    return $operations.ToArray()
+}
+
+function Start-RepositoryInstallTransaction {
+    param([Parameter(Mandatory=$true)][object]$Context)
+    if($Context.Durable){return}
+    Add-RemediationFileIntents $Context
+    $hasRemediationGit=$null-ne$Context.Remediation-and(($null-ne$Context.Remediation.IndexPlan-and[string]$Context.Remediation.IndexPlan.BeforeSha256-cne[string]$Context.Remediation.IndexPlan.AfterSha256)-or-not[string]::IsNullOrWhiteSpace([string]$Context.Remediation.NewCommit))
+    $hasFileMutation=@($Context.Intents.Values|Where-Object{($_.Remove-and$_.Before.exists)-or(-not$_.Remove-and((-not$_.Before.exists)-or(Get-ByteArraySha256 ([byte[]]$_.Bytes))-cne[string]$_.Before.sha256))}).Count-gt0
+    $hasEvidenceMutation=[bool]$Context.ShouldStorePersonalAgentEvidence
+    if(-not$hasRemediationGit-and-not$hasFileMutation-and-not$hasEvidenceMutation){return}
+    $activeGitDirectory=Get-RepositoryActiveGitDirectory -Repository $Context.Repository
+    if(-not(Test-ProjectPublicationPathEqual -Left $activeGitDirectory -Right ([string]$Context.GitDirectory))){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'The active worktree Git directory changed before repository transaction preparation.')}
+    $Context.ContainerLease=Open-PlatformDirectory -Root $Context.GitDirectory -RelativePath '.ai-instructions-txn' -CreatePrivate
+    $Context.DirectoryLeaf=$Context.Id
+    $Context.Lease=Open-PlatformDirectory -Root $Context.GitDirectory -RelativePath ('.ai-instructions-txn/'+$Context.Id) -CreatePrivate
+    $Context.Identity=ConvertTo-ProjectPublicationIdentity $Context.Lease.Observation
+    $operations=New-RepositoryInstallOperations $Context
+    if(@($operations).Count-eq0){Remove-ProjectPublicationContextEvidence $Context;return}
+    [object[]]$retainedManifestPaths=@(New-RepositoryRetainedManifestPathRecords -Context $Context -Operations @($operations))
+    $common=((Invoke-Git -Repository $Context.Repository -Arguments @('rev-parse','--git-common-dir'))|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($common)){$common=Join-Path $Context.Repository $common};$common=[IO.Path]::GetFullPath($common)
+    $git=Get-RepositoryActiveGitDirectory -Repository $Context.Repository
+    $index=((Invoke-Git -Repository $Context.Repository -Arguments @('rev-parse','--git-path','index'))|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($index)){$index=Join-Path $Context.Repository $index};$index=[IO.Path]::GetFullPath($index)
+    $rootLease=Open-PlatformDirectory -Root $Context.Repository -RootOnly;try{$rootIdentity=ConvertTo-ProjectPublicationIdentity $rootLease.Observation}finally{$rootLease.Dispose()}
+    $backup=$null;if($null-ne$Context.Remediation){$inventoryBytes=[Text.UTF8Encoding]::new($false).GetBytes((($Context.Remediation.Backup.Inventory|ConvertTo-Json -Depth 10 -Compress)));$backup=[pscustomobject][ordered]@{root=[string]$Context.Remediation.Backup.Root;indexSha256=[string]$Context.Remediation.Backup.IndexSha256;inventorySha256=(Get-ByteArraySha256 $inventoryBytes)}}
+    $scope=[pscustomobject][ordered]@{kind='repository';repositoryRoot=$Context.Repository;repositoryRootIdentity=$rootIdentity;commonGitDirectory=$common;gitDirectory=$git;indexPath=$index;indexLockContentSha256=[string]$Context.RepositoryIndexLock.ContentSha256;objectFormat=$(if($null-ne$Context.Remediation){[string]$Context.Remediation.ObjectFormat}else{((Invoke-Git -Repository $Context.Repository -Arguments @('rev-parse','--show-object-format'))|Select-Object -First 1).Trim()});externalBackup=$backup}
+    $manifestIntent=@($Context.Intents.Values|Where-Object{[string]$_.Role-ceq'manifest'})|Select-Object -First 1;$previous=if($null-ne$manifestIntent-and$manifestIntent.Before.exists){[string]$manifestIntent.Before.sha256}else{$null};$candidate=if($null-ne$manifestIntent-and-not$manifestIntent.Remove){Get-ByteArraySha256 ([byte[]]$manifestIntent.Bytes)}else{Get-ByteArraySha256 ([Text.UTF8Encoding]::new($false).GetBytes(($operations|ConvertTo-Json -Depth 15 -Compress)))}
+    $start=(Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o',[Globalization.CultureInfo]::InvariantCulture);$platform=Get-RepositoryTransactionPlatform
+    $journal=New-AiInstructionsInstallJournalV2 -TransactionId $Context.Id -OwnerProcessId $PID -OwnerProcessStartIdentity $start -PlatformOs $platform -PlatformArchitecture (Get-RepositoryTransactionArchitecture) -LockPrimitive $(if($platform-ceq'windows'){'windows-fileshare'}else{'flock'}) -LockLeaf 'bootstrap-ai-instructions.lock' -PreviousBundleSha256 $previous -CandidateBundleSha256 $candidate -Scope $scope -RetainedManifestPaths $retainedManifestPaths -Phase prepared -Operations $operations
+    $Context.JournalStoreStates=[ordered]@{'journal.json'=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null};'journal.prev'=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null};'journal.stage'=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}}
+    $Context.CurrentJournal=Write-AiInstructionsInstallJournalStore -TransactionLease $Context.Lease -TransactionPath (Get-RepositoryTransactionPath -Context $Context) -Journal $journal -PlatformOs $platform -JournalStoreStates $Context.JournalStoreStates;$Context.Durable=$true
+    Invoke-AiInstructionsInstallFailpoint -Name 'after-journal-prepared'
+    Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Phase applying)
+    foreach($operation in @($Context.CurrentJournal.operations|Where-Object{[string]$_.kind-cne'store-git-stash-evidence'}|Sort-Object sequence)){
+        Invoke-AiInstructionsInstallFailpoint -Name ("before-operation-"+$operation.sequence)
+        $redoBinding=Invoke-RepositoryTransactionOperation -Context $Context -Journal $Context.CurrentJournal -Operation $operation -Direction redo
+        Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+$operation.sequence+"-before-journal")
+        $copyParameters=@{Journal=$Context.CurrentJournal;Sequence=[int64]$operation.sequence}
+        if($IsWindows-and[string]$operation.kind-cin@('create-file','write-file')){$copyParameters.ObservedAfter=$redoBinding.ObservedAfter}
+        # Bind the displaced original's post-displacement metadata in the same generation that marks the operation applied.
+        if([string]$operation.kind-cin@('write-file','remove-file')){$copyParameters.DisplacedAfterMetadata=if($null-ne$redoBinding.DisplacedAfterMetadata){$redoBinding.DisplacedAfterMetadata}else{Get-RepositoryTransactionDisplacedAfterMetadata -Context $Context -Operation $operation}}
+        Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal @copyParameters)
+        Invoke-AiInstructionsInstallFailpoint -Name ("after-operation-"+$operation.sequence)
+    }
+}
+
+function Assert-RepositoryEvidenceReuseCasOperations {
+    param([Parameter(Mandatory=$true)][object]$Context)
+    foreach($operation in @($Context.CurrentJournal.operations|Where-Object{[string]$_.kind-ceq'update-git-ref'-and[string]$_.role-ceq'personal-agent-evidence-cas'})){
+        Invoke-RepositoryStashRefCompareAndSwap -Repository ([string]$Context.Repository) -Expected $operation.before
+    }
+}
+
+function Assert-RepositoryTransactionTerminalManifestClosure {
+    param([Parameter(Mandatory=$true)][object]$Context)
+    $journal=$Context.CurrentJournal
+    $manifestPath=Join-Path ([string]$journal.scope.repositoryRoot) $manifestRelativePath.Replace('/',[IO.Path]::DirectorySeparatorChar)
+    $retainedRecords=@($journal.retainedManifestPaths)
+    if(-not(Test-Path -LiteralPath $manifestPath -PathType Leaf)){
+        if($retainedRecords.Count-eq0){return}
+        throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'Repository transaction terminal closure gate found retained manifest authority but no terminal manifest file; transaction evidence was retained.')
+    }
+    try{$manifestDocument=[Text.UTF8Encoding]::new($false,$true).GetString([IO.File]::ReadAllBytes($manifestPath))|ConvertFrom-Json -ErrorAction Stop}
+    catch{throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction terminal closure gate could not decode the terminal manifest; transaction evidence was retained. $($_.Exception.Message)" -InnerException $_.Exception)}
+    if($null-eq$manifestDocument-or$null-eq$manifestDocument.PSObject.Properties['files']){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'Repository transaction terminal closure gate found a manifest without a files inventory; transaction evidence was retained.')}
+    $manifestPaths=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $usedRetained=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach($entry in @($manifestDocument.files)){
+        $targetPath=[string]$entry.targetPath
+        if([string]::IsNullOrWhiteSpace($targetPath)-or-not$manifestPaths.Add($targetPath)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'Repository transaction terminal closure gate found an invalid or duplicate manifest target path; transaction evidence was retained.')}
+        $targetOperations=@($journal.operations|Where-Object{[string]$_.target.kind-ceq'repository-relative'-and[string]$_.target.value-ceq$targetPath})
+        if($targetOperations.Count-eq1){
+            $operation=$targetOperations[0]
+            $current=Get-RepositoryTransactionOperationState $journal $operation
+            if(-not(Test-RepositoryTransactionStateEqual $operation $current $operation.after)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction terminal closure gate found operation drift at '$targetPath'; transaction evidence was retained.")}
+            continue
+        }
+        if($targetOperations.Count-ne0){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction terminal closure gate found ambiguous operation authority for '$targetPath'; transaction evidence was retained.")}
+        $matches=@($retainedRecords|Where-Object{[string]$_.targetPath-ceq$targetPath})
+        if($matches.Count-ne1){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction terminal closure gate found missing or ambiguous retained authority for '$targetPath'; transaction evidence was retained.")}
+        $expected=[pscustomobject][ordered]@{exists=$true;sha256=[string]$matches[0].sha256;length=[int64]$matches[0].length;identity=$matches[0].identity;unobservable=$null}
+        $actual=Get-ProjectPublicationPathObservation -Repository ([string]$journal.scope.repositoryRoot) -RelativePath $targetPath
+        if(-not(Test-ProjectPublicationPathObservationEqual -Actual $actual -Expected $expected)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction terminal closure gate found retained path drift at '$targetPath'; transaction evidence was retained.")}
+        [void]$usedRetained.Add($targetPath)
+    }
+    if($usedRetained.Count-ne$retainedRecords.Count){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'Repository transaction terminal closure gate found retained authority outside the terminal manifest inventory; transaction evidence was retained.')}
+}
+
+function Complete-RepositoryInstallTransactionApply {
+    param([Parameter(Mandatory=$true)][object]$Context)
+    if(-not[bool]$Context.Durable){return}
+    if([string]$Context.CurrentJournal.phase-ceq'applied'){return}
+    if([string]$Context.CurrentJournal.phase-cne'applying'){throw "Repository transaction cannot complete apply from phase '$($Context.CurrentJournal.phase)'."}
+    foreach($operation in $Context.CurrentJournal.operations){$current=Get-RepositoryTransactionOperationState $Context.CurrentJournal $operation;if(-not(Test-RepositoryTransactionStateEqual $operation $current $operation.after)){throw (New-AiInstructionsRefusalException -Code interrupted-install -Message "Repository transaction terminal verification failed for sequence $($operation.sequence).")}}
+    Assert-RepositoryEvidenceReuseCasOperations -Context $Context
+    Assert-RepositoryTransactionTerminalManifestClosure -Context $Context
+    Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Phase applied)
+}
+
+function Resolve-ProjectPublicationRecoveryAction {
+    param([Parameter(Mandatory=$true)]$JournalState)
+    if([string]$JournalState.status-cne'valid'){return 'fail-closed'}
+    switch([string]$JournalState.journal.phase){'prepared'{return 'rollback-all'}'applying'{return 'rollback-all'}'applied'{return 'rollback-all'}'committed'{return 'roll-forward-cleanup'}default{return 'fail-closed'}}
+}
+
+function Invoke-ProjectPublicationRecovery {
+    param([Parameter(Mandatory=$true)][string]$Repository,[string]$GitDirectory)
+    if([string]::IsNullOrWhiteSpace($GitDirectory)){$GitDirectory=Get-RepositoryActiveGitDirectory -Repository $Repository}
+    $activeGitDirectory=Get-RepositoryActiveGitDirectory -Repository $Repository
+    if(-not(Test-ProjectPublicationPathEqual -Left $activeGitDirectory -Right $GitDirectory)){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message 'The requested repository transaction store is not the active worktree Git directory.')}
+    $store=Get-RepositoryTransactionStorePath -GitDirectory $GitDirectory
+    if(-not(Test-Path -LiteralPath $store -PathType Container)){return}
+    $container=Open-PlatformDirectory -Root $GitDirectory -RelativePath '.ai-instructions-txn'
+    try{
+        foreach($entry in @(Get-ChildItem -Force -LiteralPath $store|Sort-Object Name)){
+            $nameMatch=[regex]::Match([string]$entry.Name,'^(?<Id>[0-9a-f]{32})$')
+            if(-not$entry.PSIsContainer-or($entry.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0-or-not$nameMatch.Success){
+                throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Unknown repository transaction residue '$($entry.FullName)'. Inspect the evidence and remove it manually only after proving no transaction target needs recovery.")
+            }
+            $id=[string]$nameMatch.Groups['Id'].Value;$directoryLeaf=[string]$entry.Name
+            $lease=Open-PlatformDirectory -Root $GitDirectory -RelativePath ('.ai-instructions-txn/'+$directoryLeaf)
+            $identity=ConvertTo-ProjectPublicationIdentity $lease.Observation
+            $context=$null
+            try{
+                $readLeaf={param($name)$path=Join-Path $entry.FullName $name;if(-not(Test-Path -LiteralPath $path)){return [pscustomobject]@{Kind=$null;Json=$null;State=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null}}};if(-not(Test-Path -LiteralPath $path -PathType Leaf)){return [pscustomobject]@{Kind='other';Json=$null;State=$null}};$state=Get-AiInstructionsInstallFileState -ParentLease $lease -Leaf $name -LiteralPath $path -PlatformOs (Get-RepositoryTransactionPlatform);return [pscustomobject]@{Kind='file';Json=[Text.UTF8Encoding]::new($false,$true).GetString([IO.File]::ReadAllBytes($path));State=$state}}
+                $journal=&$readLeaf 'journal.json';$previous=&$readLeaf 'journal.prev';$stage=&$readLeaf 'journal.stage'
+                if($null-eq$journal.Kind-and$null-eq$previous.Kind){
+                    $classification=Get-AiInstructionsInstallTransactionClassification -Name $id -EntryKind directory -JournalEntryKind $null -JournalJson $null -PreviousJournalEntryKind $null -PreviousJournalJson $null -ExpectedOwnerComponent repo-bootstrap
+                    $children=@(Get-ChildItem -Force -LiteralPath $entry.FullName)
+                    $unexpected=@($children|Where-Object{-not(Test-RepositoryTransactionOrphanChild -Item $_)})
+                    $index=((Invoke-Git -Repository $Repository -Arguments @('rev-parse','--git-path','index'))|Select-Object -First 1).Trim();if(-not[IO.Path]::IsPathRooted($index)){$index=Join-Path $Repository $index};$index=[IO.Path]::GetFullPath($index);$lockPath=$index+'.lock'
+                    if(Test-Path -LiteralPath $lockPath){throw (New-RepositoryIndexLockRefusal -Reason "Repository transaction '$directoryLeaf' has no readable journal, so its residual Git index.lock cannot be attributed safely." -LockPath $lockPath)}
+                    if([string]$classification.classification-cne'orphan-without-journal'-or$unexpected.Count-gt0){throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction '$directoryLeaf' is not a harmless orphan. Inspect its evidence and remove it manually only after verifying every target." )}
+                    $lease.Dispose();$lease=$null;Remove-PlatformOwnedDirectoryTree -TransactionRootLease $container -Leaf $directoryLeaf -ExpectedIdentity $identity|Out-Null;continue
+                }
+                $classification=Get-AiInstructionsInstallTransactionClassification -Name $id -EntryKind directory -JournalEntryKind $journal.Kind -JournalJson $journal.Json -PreviousJournalEntryKind $previous.Kind -PreviousJournalJson $previous.Json -ExpectedOwnerComponent repo-bootstrap
+                if([string]$classification.classification-cne'valid-journal'){
+                    throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Legacy fix4 or malformed project journal residue was found at '$($entry.FullName)'. Preserve it, inspect journal.json and all stage/backup files, verify repository HEAD/index/files manually, then remove the exact transaction directory before retrying. Classification: $($classification.reason)")
+                }
+                Assert-RepositoryTransactionScopeBinding -Repository $Repository -GitDirectory $GitDirectory -Journal $classification.journal
+                $context=[pscustomobject][ordered]@{Repository=$Repository;GitDirectory=$GitDirectory;Id=$id;DirectoryLeaf=$directoryLeaf;Intents=$null;Remediation=$null;Durable=$true;ContainerLease=$container;Lease=$lease;Identity=$identity;CurrentJournal=$classification.journal;JournalStoreStates=[ordered]@{'journal.json'=$journal.State;'journal.prev'=$previous.State;'journal.stage'=$stage.State};RepositoryIndexLock=$null}
+                Resolve-RepositoryRecoveryIndexLock -Context $context
+                $action=Resolve-ProjectPublicationRecoveryAction ([pscustomobject]@{status='valid';journal=$classification.journal})
+                if($action-ceq'rollback-all'){Invoke-RepositoryTransactionRollback $context}
+                elseif($action-ceq'roll-forward-cleanup'){Complete-RepositoryTransactionCleanup $context}
+                else{throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction '$directoryLeaf' has an unknown recovery state; evidence was retained.")}
+                Close-RepositoryIndexTransactionLock -Lock $context.RepositoryIndexLock
+                $lease=$null
+                if($null-eq$context.ContainerLease){$container=Open-PlatformDirectory -Root $GitDirectory -RelativePath '.ai-instructions-txn'}
+            }
+            catch{if($null-ne$context){Close-RepositoryIndexTransactionLock -Lock $context.RepositoryIndexLock};if($null-ne$lease){$lease.Dispose()};if((Get-AiInstructionsRefusalCode $_)-ceq'interrupted-install'){throw};throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction recovery failed and retained evidence at '$($entry.FullName)': $($_.Exception.Message)" -InnerException $_.Exception)}
+        }
+    }finally{if($null-ne$container){$container.Dispose()}}
+}
+
+function Invoke-RepositoryTransactionRollback {
+    param([Parameter(Mandatory=$true)][object]$Context)
+    $rollbackErrors=New-Object System.Collections.Generic.List[string]
+    foreach($operation in @($Context.CurrentJournal.operations|Sort-Object sequence -Descending)){
+        try{
+            Invoke-RepositoryTransactionOperation -Context $Context -Journal $Context.CurrentJournal -Operation $operation -Direction undo
+            Invoke-AiInstructionsInstallFailpoint -Name ("after-rollback-operation-"+$operation.sequence)
+        }
+        catch{
+            $message=[string]$_.Exception.Message
+            $thirdStateMatch=[regex]::Match($message,'^Repository transaction sequence [0-9]+ role (?<Role>\S+) target (?<Target>.+) is in a third state;')
+            if($thirdStateMatch.Success){
+                $target=$thirdStateMatch.Groups['Target'].Value
+                $ambiguous="Schema-v2 publication state is ambiguous or changed; current files were preserved for manual recovery: $target"
+                $message=if($thirdStateMatch.Groups['Role'].Value-ceq'shared-exclude'){$ambiguous}else{"Target rollback errors: $target`: $ambiguous"}
+            }
+            $rollbackErrors.Add($message)
+        }
+    }
+    if($rollbackErrors.Count-gt0){throw ($rollbackErrors-join' | ')}
+    Close-RepositoryIndexTransactionLock -Lock $Context.RepositoryIndexLock
+    Invoke-AiInstructionsInstallFailpoint -Name 'after-index-lock-release-before-journal-cleanup'
+    Remove-ProjectPublicationContextEvidence $Context;$Context.Durable=$false
+}
+
+function Complete-RepositoryTransactionCleanup {
+    param([Parameter(Mandatory=$true)][object]$Context)
+    foreach($operation in @($Context.CurrentJournal.operations|Sort-Object sequence)){Invoke-RepositoryTransactionOperation -Context $Context -Journal $Context.CurrentJournal -Operation $operation -Direction redo|Out-Null}
+    Assert-RepositoryTransactionTerminalManifestClosure -Context $Context
+    Invoke-AiInstructionsInstallFailpoint -Name 'after-committed-before-cleanup'
+    Close-RepositoryIndexTransactionLock -Lock $Context.RepositoryIndexLock
+    Invoke-AiInstructionsInstallFailpoint -Name 'after-index-lock-release-before-journal-cleanup'
+    $transactionPath=Get-RepositoryTransactionPath -Context $Context
+    Remove-InstallTerminalTransactionArtifacts -Journal $Context.CurrentJournal -TransactionLease $Context.Lease -TransactionPath $transactionPath -JournalStoreStates $Context.JournalStoreStates
+    Invoke-AiInstructionsInstallFailpoint -Name 'during-cleanup-transaction'
+    $Context.Lease.Dispose();$Context.Lease=$null
+    Remove-PlatformOwnedDirectoryTree -TransactionRootLease $Context.ContainerLease -Leaf $Context.DirectoryLeaf -ExpectedIdentity $Context.Identity|Out-Null
+    $Context.ContainerLease.Dispose();$Context.ContainerLease=$null
+    $Context.Durable=$false
+}
+
+function Invoke-RepositoryInstallTransaction {
+    param([Parameter(Mandatory=$true)][object]$Context)
+    Start-RepositoryInstallTransaction $Context
+    if(-not$Context.Durable){return}
+    Complete-RepositoryInstallTransactionApply $Context
+    if([string]$Context.CurrentJournal.phase-cne'applied'){throw 'Repository transaction cannot commit before applied verification.'}
+    Assert-RepositoryEvidenceReuseCasOperations -Context $Context
+    Assert-RepositoryTransactionTerminalManifestClosure -Context $Context
+    Invoke-AiInstructionsInstallFailpoint -Name 'before-committed-journal-write'
+    Write-RepositoryInstallJournalGeneration $Context (Copy-RepositoryInstallJournal $Context.CurrentJournal -Phase committed)
+    Invoke-AiInstructionsInstallFailpoint -Name 'after-committed-journal-write'
+    Complete-RepositoryTransactionCleanup $Context
+}
+
 $targetRootPath = Get-FullPathWithoutTrailingSeparator -Path $TargetRoot
 Assert-RepoAndUserRootsDistinct -Repository $targetRootPath -UserHome $UserHome | Out-Null
 $syncStartRelativePath = ''
@@ -4340,7 +5949,8 @@ if (Test-IsCanonicalInstructionSourceRepository -Repository $targetRootPath) {
     return
 }
 
-if ((Get-GitExitCode -Repository $targetRootPath -Arguments @('rev-parse', '--verify', 'HEAD')) -ne 0) {
+$initialHeadState = Get-RepositoryHeadQueryState -Repository $targetRootPath
+if ($null -eq $initialHeadState.objectId) {
     Write-Output 'AI instruction sync skipped: the target repository has no commit, so managed changes cannot be isolated safely.'
     return
 }
@@ -4361,6 +5971,8 @@ $repoManifestWriter = 'legacy'
 $projectionContractSha256 = $null
 $verifiedRoutingCatalogId = $null
 $verifiedRuntimeLockSha256 = $null
+$verifiedProjectCandidateSha256 = $null
+$projectProjectionIds = @()
 if (Test-Path -LiteralPath $configurationFullPath -PathType Leaf) {
     try {
         $configuration = Get-Content -Raw -Encoding UTF8 -LiteralPath $configurationFullPath | ConvertFrom-Json
@@ -4377,7 +5989,7 @@ if (Test-Path -LiteralPath $configurationFullPath -PathType Leaf) {
     if (($configuration.schemaVersion -is [int] -or $configuration.schemaVersion -is [long]) -and
         [int64]$configuration.schemaVersion -eq 4 -and $null -ne $configuration.PSObject.Properties['syncConfiguration']) {
         foreach ($name in @($configuration.PSObject.Properties.Name)) {
-            if ($name -cnotin @('schemaVersion','syncConfiguration','catalogId','lockSha256','projectionContractSha256')) {
+            if ($name -cnotin @('schemaVersion','syncConfiguration','catalogId','lockSha256','projectionContractSha256','projectCandidateSha256')) {
                 throw "Projection-aware routing configuration contains unsupported property '$name'."
             }
         }
@@ -4386,9 +5998,7 @@ if (Test-Path -LiteralPath $configurationFullPath -PathType Leaf) {
         }
         $syncConfiguration = $configuration.syncConfiguration
         Assert-AiInstructionsSyncConfigurationV5 -Configuration $syncConfiguration | Out-Null
-        if (@($syncConfiguration.projections.project).Count -gt 0) {
-            throw (New-AiInstructionsRefusalException -Code 'projection-runtime-unavailable' -Message 'Project Skill projections are unavailable until the P9c projection runtime is installed.')
-        }
+        $projectProjectionIds = @($syncConfiguration.projections.project)
         $runtimeRootPath = [System.IO.Path]::GetFullPath($RuntimeRoot)
         $runtimeBundlePath = Join-Path $runtimeRootPath 'runtime-bundle.json'
         $runtimeCatalogPath = Join-Path $runtimeRootPath 'catalog\skills-catalog.json'
@@ -4415,6 +6025,22 @@ if (Test-Path -LiteralPath $configurationFullPath -PathType Leaf) {
         $projectionContractSha256 = [string]$configuration.projectionContractSha256
         $verifiedRoutingCatalogId = [string]$configuration.catalogId
         $verifiedRuntimeLockSha256 = [string]$runtimeLockSha256
+        if ($projectProjectionIds.Count -gt 0) {
+            if ($null -eq $configuration.PSObject.Properties['projectCandidateSha256'] -or
+                [string]$configuration.projectCandidateSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+                [string]::IsNullOrWhiteSpace($ProjectCandidateArchivePath)) {
+                throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message 'Project projection selection requires a lock-bound project candidate archive.')
+            }
+            $projectCandidateFullPath = [IO.Path]::GetFullPath($ProjectCandidateArchivePath)
+            if (-not (Test-Path -LiteralPath $projectCandidateFullPath -PathType Leaf) -or
+                (Get-RawContentHash $projectCandidateFullPath) -cne [string]$configuration.projectCandidateSha256) {
+                throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message 'Project candidate archive is missing or does not match its routing hash.')
+            }
+            $verifiedProjectCandidateSha256 = [string]$configuration.projectCandidateSha256
+        }
+        elseif ($null -ne $configuration.PSObject.Properties['projectCandidateSha256'] -or -not [string]::IsNullOrWhiteSpace($ProjectCandidateArchivePath)) {
+            throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message 'A project candidate archive is not allowed when projections.project is empty.')
+        }
         $configuration = [pscustomobject][ordered]@{
             schemaVersion = 3
             excludedRepositoryUrls = @($syncConfiguration.excludedRepositoryUrls)
@@ -4475,14 +6101,16 @@ if (Test-Path -LiteralPath $configurationFullPath -PathType Leaf) {
         return
     }
 
-    if ($excludedRepositoryLocations.Count -gt 0 -and
-        (Get-GitExitCode -Repository $targetRootPath -Arguments @('remote', 'get-url', 'origin')) -eq 0) {
-        $originUrls = @(Invoke-Git -Repository $targetRootPath -Arguments @('remote', 'get-url', '--all', 'origin'))
-        foreach ($originUrl in $originUrls) {
-            $originLocation = Get-NormalizedRepositoryLocation -RepositoryUrl ([string] $originUrl)
-            if (Test-RepositoryLocationMatches -RepositoryLocation $originLocation -ConfiguredRepositoryLocations $excludedRepositoryLocations) {
-                Write-Output "AI instruction sync skipped: repository is excluded by ai-instructions-sync.json: $originUrl"
-                return
+    if ($excludedRepositoryLocations.Count -gt 0) {
+        $originQuery = Get-GitQueryResult -Repository $targetRootPath -Arguments @('remote', 'get-url', 'origin') -NegativeExitCodes @(2)
+        if ($originQuery.Succeeded) {
+            $originUrls = @(Invoke-Git -Repository $targetRootPath -Arguments @('remote', 'get-url', '--all', 'origin'))
+            foreach ($originUrl in $originUrls) {
+                $originLocation = Get-NormalizedRepositoryLocation -RepositoryUrl ([string] $originUrl)
+                if (Test-RepositoryLocationMatches -RepositoryLocation $originLocation -ConfiguredRepositoryLocations $excludedRepositoryLocations) {
+                    Write-Output "AI instruction sync skipped: repository is excluded by ai-instructions-sync.json: $originUrl"
+                    return
+                }
             }
         }
     }
@@ -4503,11 +6131,28 @@ if ($repoManifestWriter -ceq 'v4') {
     }
 }
 
+$tempRootPath = Get-FullPathWithoutTrailingSeparator -Path ([System.IO.Path]::GetTempPath())
+$workingPath = Join-Path $tempRootPath ('codex-ai-instructions-' + [Guid]::NewGuid().ToString('N'))
+$archivePath = Join-Path $workingPath 'source.zip'
+$extractPath = Join-Path $workingPath 'source'
+$projectCandidateExtractPath = Join-Path $workingPath 'project-candidate-source'
+$projectCandidateState = $null
+$preserveWorkingPath = $false
 $repositoryOperationLock = $null
 $repositoryIndexLock = $null
+$repositoryIndexPath = $null
 $userSkillMigrationLock = $null
 $remediationTransaction = $null
+$plannedRemediationPathSet = $null
 try {
+    New-Item -ItemType Directory -Path $workingPath, $extractPath | Out-Null
+    if ($projectProjectionIds.Count -gt 0) {
+        New-Item -ItemType Directory -Path $projectCandidateExtractPath | Out-Null
+        $candidateRoot = Expand-SafeZipRepository -ArchivePath ([IO.Path]::GetFullPath($ProjectCandidateArchivePath)) -DestinationRoot $projectCandidateExtractPath
+        $projectCandidateState = Get-ProjectCandidateDesiredState -CandidateRoot $candidateRoot -Catalog $runtimeCatalog -Lock $runtimeLock `
+            -SyncConfiguration $syncConfiguration -ExpectedCatalogId $verifiedRoutingCatalogId `
+            -ExpectedLockSha256 $verifiedRuntimeLockSha256 -ExpectedProjectionContractSha256 $projectionContractSha256
+    }
     Assert-NoRepoManagedManifestV4 -Repository $targetRootPath -AllowV4:($repoManifestWriter -ceq 'v4')
     $claudeProjectOwnedWorktrees = @(Get-ClaudeProjectOwnedWorktreeRoots -Repository $targetRootPath)
     $currentClaudeProjectOwned = @($claudeProjectOwnedWorktrees | Where-Object {
@@ -4523,6 +6168,11 @@ try {
     else { @() })
     if (-not $WhatIf) {
         $repositoryOperationLock = Open-RepositoryOperationLock -Repository $targetRootPath
+        $activeGitDirectory=Get-RepositoryActiveGitDirectory -Repository $targetRootPath
+        if(Test-Path -LiteralPath (Get-RepositoryTransactionStorePath -GitDirectory $activeGitDirectory)){
+            Import-Module (Join-Path $PSScriptRoot 'ai-instructions-install-transaction.psm1') -Force
+            Invoke-ProjectPublicationRecovery -Repository $targetRootPath -GitDirectory $activeGitDirectory
+        }
         Assert-NoRepoManagedManifestV4 -Repository $targetRootPath -AllowV4:($repoManifestWriter -ceq 'v4') -Strict
         $claudeProjectOwnedWorktrees = @(Get-ClaudeProjectOwnedWorktreeRoots -Repository $targetRootPath -Strict)
         $currentClaudeProjectOwned = @($claudeProjectOwnedWorktrees | Where-Object {
@@ -4536,9 +6186,23 @@ try {
             @('CLAUDE.md','.claude/AI-Rules/','.claude/ai-instructions-licenses/')
         }
         else { @() })
-        $remediationTransaction = Invoke-AgentArtifactRemediation -Repository $targetRootPath -GitExecutable $GitExecutable `
+        if ($null -ne $projectCandidateState -and @($projectCandidateState.Files).Count -gt 0) {
+            $earlyConflicts=@(Get-ProjectSkillOwnershipConflictsAcrossWorktrees -Repository $targetRootPath -DesiredFiles @($projectCandidateState.Files))
+            if($earlyConflicts.Count-gt0){
+                $details=Format-ProjectSkillOwnershipConflictDetails -Conflicts $earlyConflicts
+                Write-ProjectSkillOwnershipConflictDiagnostics -Conflicts $earlyConflicts
+                throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project Skill transaction refused before remediation or project mutation: $details. Resolve each conflict: remove or rename the project-owned Skill, or remove that Skill from projections.project.")
+            }
+        }
+        $script:ProjectPublicationContext=New-ProjectPublicationContext -Repository $targetRootPath
+        $remediationTransaction = New-AgentArtifactRemediationPlan -Repository $targetRootPath -GitExecutable $GitExecutable `
             -ProtectedPathPrefixes $activeWorktreeProtectedClaudeFamilyPaths `
             -SharedExcludeProtectedPathPrefixes $repositoryProtectedClaudeFamilyPaths
+        if($null-ne$remediationTransaction){
+            $script:ProjectPublicationContext.Remediation=$remediationTransaction
+            $plannedRemediationPathSet=New-Object 'System.Collections.Generic.HashSet[string]' (Get-GitPathComparer -Repository $targetRootPath)
+            foreach($plannedRemediationPath in @($remediationTransaction.Paths)){[void]$plannedRemediationPathSet.Add([string]$plannedRemediationPath)}
+        }
     }
     if ($null -ne $remediationTransaction) {
         if (@($remediationTransaction.Paths).Count -gt 0) {
@@ -4588,6 +6252,7 @@ $sharedSkillsSource = '.agents/skills'
 
 $manifestFullPath = Join-Path $targetRootPath $manifestRelativePath.Replace('/', '\')
 $manifestExists = Test-Path -LiteralPath $manifestFullPath -PathType Leaf
+$manifestInitialRawSha256 = if ($manifestExists) { Get-RawContentHash $manifestFullPath } else { $null }
 $manifestEntriesByTarget = @{}
 $manifestSchemaVersion = $null
 $script:instructionProvenance = $null
@@ -4715,6 +6380,7 @@ if ($manifestExists) {
     if ($manifestSchemaVersion -eq 1) {
         foreach ($targetPath in @($manifestEntriesByTarget.Keys | Sort-Object)) {
             if ([string]$targetPath -like '.agents/skills/*') { continue }
+            if($null-ne$plannedRemediationPathSet-and$plannedRemediationPathSet.Contains([string]$targetPath)){continue}
             $entry = $manifestEntriesByTarget[$targetPath]
             $targetFullPath = Join-Path $targetRootPath $targetPath.Replace('/', '\')
             if (-not (Test-Path -LiteralPath $targetFullPath -PathType Leaf) -or
@@ -4744,18 +6410,18 @@ if ($repoManifestWriter -ceq 'v4' -and $manifestExists -and $manifestSchemaVersi
     }
 }
 
-if (-not $WhatIf) { $repositoryIndexLock = Open-RepositoryIndexTransactionLock -Repository $targetRootPath }
+if (-not $WhatIf) { $repositoryIndexPath = Get-RepositoryIndexTransactionPath -Repository $targetRootPath }
 $gitPathComparer = Get-GitPathComparer -Repository $targetRootPath
-$trackedPaths = New-Object 'System.Collections.Generic.HashSet[string]' $gitPathComparer
-foreach ($trackedPath in @(Invoke-Git -Repository $targetRootPath -Arguments @('-c','core.quotePath=true','ls-files'))) {
-    [void]$trackedPaths.Add((ConvertFrom-GitQuotedPath -Path ([string]$trackedPath)).Replace('\','/'))
-}
+$trackedPaths = Get-GitListedPathSet -Repository $targetRootPath -Comparer $gitPathComparer -Kind Tracked
+$stagedPaths = Get-GitListedPathSet -Repository $targetRootPath -Comparer $gitPathComparer -Kind Staged
 $trackedPollutionPaths = @(@(
-    if ($trackedPaths.Contains($manifestRelativePath)) { $manifestRelativePath }
+    if ($trackedPaths.Contains($manifestRelativePath) -and -not($null-ne$plannedRemediationPathSet-and$plannedRemediationPathSet.Contains($manifestRelativePath))) { $manifestRelativePath }
     foreach ($targetPath in @($manifestEntriesByTarget.Keys | Sort-Object)) {
         $isProtectedClaude = Test-IsProtectedClaudeFamilyPath -Path ([string]$targetPath) -ProtectedPaths $activeWorktreeProtectedClaudeFamilyPaths
         if ($isProtectedClaude) { Write-Warning "Protected Claude family path skipped at tracked pollution inspection: $targetPath (project-owned Claude family)." }
-        if (-not $isProtectedClaude -and -not ([string]$targetPath).StartsWith('.agents/skills/',[StringComparison]::Ordinal) -and $trackedPaths.Contains([string]$targetPath)) { [string]$targetPath }
+        $isV4ProjectSkill = $manifestSchemaVersion -eq 4 -and $null -ne $manifestEntriesByTarget[$targetPath].PSObject.Properties['artifactType'] -and [string]$manifestEntriesByTarget[$targetPath].artifactType -ceq 'skill'
+        $isPlannedRemediation=$null-ne$plannedRemediationPathSet-and$plannedRemediationPathSet.Contains([string]$targetPath)
+        if (-not $isProtectedClaude -and -not $isV4ProjectSkill -and -not $isPlannedRemediation -and -not ([string]$targetPath).StartsWith('.agents/skills/',[StringComparison]::Ordinal) -and $trackedPaths.Contains([string]$targetPath)) { [string]$targetPath }
     }
 ) | Sort-Object -Unique)
 if ($trackedPollutionPaths.Count -gt 0 -and -not $WhatIf) {
@@ -4766,7 +6432,10 @@ $stagedManagedPaths = @(
     foreach ($targetPath in @($manifestEntriesByTarget.Keys | Sort-Object)) {
         $isProtectedClaude = Test-IsProtectedClaudeFamilyPath -Path ([string]$targetPath) -ProtectedPaths $activeWorktreeProtectedClaudeFamilyPaths
         if ($isProtectedClaude) { Write-Warning "Protected Claude family path skipped at staged mutation inspection: $targetPath (project-owned Claude family)." }
-        if (-not $isProtectedClaude -and
+        $isV4ProjectSkill = $manifestSchemaVersion -eq 4 -and $null -ne $manifestEntriesByTarget[$targetPath].PSObject.Properties['artifactType'] -and [string]$manifestEntriesByTarget[$targetPath].artifactType -ceq 'skill'
+        $isPlannedRemediation=$null-ne$plannedRemediationPathSet-and$plannedRemediationPathSet.Contains([string]$targetPath)
+        if (-not $isProtectedClaude -and -not $isV4ProjectSkill -and
+            -not $isPlannedRemediation -and
             -not ([string]$targetPath).StartsWith('.agents/skills/',[StringComparison]::Ordinal) -and
             (Test-GitPathHasStagedChanges -Repository $targetRootPath -Path ([string]$targetPath))) {
             [string]$targetPath
@@ -4779,20 +6448,13 @@ if ($stagedManagedPaths.Count -gt 0) {
 }
 
 if ($manifestExists -and
+    -not($null-ne$plannedRemediationPathSet-and$plannedRemediationPathSet.Contains($manifestRelativePath)) -and
     (Test-GitPathHasStagedChanges -Repository $targetRootPath -Path $manifestRelativePath)) {
     Write-Output 'AI instruction sync skipped because the managed manifest has staged changes.'
     return
 }
 
-$tempRootPath = Get-FullPathWithoutTrailingSeparator -Path ([System.IO.Path]::GetTempPath())
-$workingPath = Join-Path $tempRootPath ('codex-ai-instructions-' + [Guid]::NewGuid().ToString('N'))
-$archivePath = Join-Path $workingPath 'source.zip'
-$extractPath = Join-Path $workingPath 'source'
-$preserveWorkingPath = $false
-
 try {
-    New-Item -ItemType Directory -Path $workingPath, $extractPath | Out-Null
-
     $providedArchivePath = Get-FullPathWithoutTrailingSeparator -Path $SourceArchivePath
     if (-not (Test-Path -LiteralPath $providedArchivePath -PathType Leaf)) {
         throw "Source archive does not exist: $providedArchivePath"
@@ -4860,8 +6522,22 @@ try {
         }
     }
 
-    # Consumer scope is Instructions-only, including direct and legacy composed archives.
-    # Shared Skill sources remain available to the USER reconciler and migration evidence.
+    # Project Skills are supplied only by the independently verified, lock-bound candidate.
+    # The Instructions archive remains Instructions-only and is never a Skill fallback source.
+    if ($null -ne $projectCandidateState) {
+        foreach ($projectFile in @($projectCandidateState.Files)) {
+            if (-not $script:skillProvenanceById.ContainsKey([string]$projectFile.SkillId)) {
+                throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project candidate Skill '$($projectFile.SkillId)' is absent from multisource provenance.")
+            }
+            $provenanceSkill = $script:skillProvenanceById[[string]$projectFile.SkillId]
+            foreach ($name in @('sourceId','sourceRepository','sourceRef','sourceCommit','sourceVersion')) {
+                if ([string]$projectFile.$name -cne [string]$provenanceSkill.$name) {
+                    throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project candidate Skill '$($projectFile.SkillId)' $name differs from multisource provenance.")
+                }
+            }
+            $desiredEntries.Add($projectFile)
+        }
+    }
 
     $trustedSkills = @(
         foreach ($skill in @($provenance.skills)) {
@@ -4931,12 +6607,88 @@ try {
 
         $desiredEntriesByTarget[$entry.TargetPath] = $entry
     }
+    if ($null -ne $script:ProjectPublicationContext) {
+        Register-ProjectPublicationPlanningObservations -Context $script:ProjectPublicationContext `
+            -RelativePaths @(@($desiredEntriesByTarget.Keys) + @($manifestEntriesByTarget.Keys) | ForEach-Object { [string]$_ })
+    }
+
+    $projectDesiredFiles =@($desiredEntries | Where-Object { $null -ne $_.PSObject.Properties['IsProjectSkill'] -and [bool]$_.IsProjectSkill })
+    $relinquishedProjectTargets = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    if ($projectDesiredFiles.Count -gt 0) {
+        $projectConflicts = @(Get-ProjectSkillOwnershipConflictsAcrossWorktrees -Repository $targetRootPath -DesiredFiles $projectDesiredFiles)
+        if ($projectConflicts.Count -gt 0) {
+            $details=Format-ProjectSkillOwnershipConflictDetails -Conflicts $projectConflicts
+            Write-ProjectSkillOwnershipConflictDiagnostics -Conflicts $projectConflicts
+            throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project Skill transaction refused before project mutation: $details. Resolve each conflict: remove or rename the project-owned Skill, or remove that Skill from projections.project.")
+        }
+    }
+    if ($manifestSchemaVersion -eq 4) {
+        $retiredEntries = @($manifest.files | Where-Object {
+            [string]$_.artifactType -ceq 'skill' -and -not $desiredEntriesByTarget.ContainsKey([string]$_.targetPath)
+        })
+        $retiredGroups = @($retiredEntries | Group-Object projectionId,artifactId)
+        foreach ($retiredGroup in $retiredGroups) {
+            $retiredGroupEntries = @($retiredGroup.Group); $projectionId=[string]$retiredGroupEntries[0].projectionId; $skillId=[string]$retiredGroupEntries[0].artifactId
+            $entries = @($manifest.files|Where-Object{
+                [string]$_.artifactType-ceq'skill' -and [string]$_.projectionId-ceq$projectionId -and [string]$_.artifactId-ceq$skillId
+            })
+            $desiredGroupFiles = @($projectDesiredFiles|Where-Object{[string]$_.ProjectionId -ceq $projectionId -and [string]$_.SkillId -ceq $skillId})
+            $prefix = ([string]$entries[0].targetPath).Split('/')[0..2] -join '/'
+            $ownedReasons = New-Object System.Collections.Generic.List[string]
+            if (@($trackedPaths | Where-Object { Test-GitPathEqualsOrIsUnderPrefix -Path ([string]$_) -Prefix $prefix -Comparer $gitPathComparer }).Count -gt 0) { $ownedReasons.Add('tracked') }
+            if (@($stagedPaths | Where-Object { Test-GitPathEqualsOrIsUnderPrefix -Path ([string]$_) -Prefix $prefix -Comparer $gitPathComparer }).Count -gt 0) { $ownedReasons.Add('staged') }
+            $entryMap=New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+            foreach($entry in $entries){$entryMap.Add([string]$entry.targetPath,$entry)}
+            $root=Join-Path $targetRootPath $prefix.Replace('/',[IO.Path]::DirectorySeparatorChar)
+            if(Test-Path -LiteralPath $root){
+                $item=Get-Item -Force -LiteralPath $root
+                if(-not$item.PSIsContainer-or($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){$ownedReasons.Add('reparse')}
+                else{
+                    $pending=New-Object System.Collections.Generic.Stack[string];$pending.Push($root)
+                    while($pending.Count-gt0){
+                        $directory=$pending.Pop()
+                        foreach($child in @(Get-ChildItem -LiteralPath $directory -Force)){
+                            $relative=$child.FullName.Substring($root.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+                            if(($child.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){$ownedReasons.Add("reparse:$relative")}
+                            elseif($child.PSIsContainer){$pending.Push($child.FullName)}
+                            else{
+                                $path="$prefix/$relative"
+                                if(-not$entryMap.ContainsKey($path)){$ownedReasons.Add("unmanaged:$relative")}
+                                elseif((Get-RawContentHash $child.FullName)-cne[string]$entryMap[$path].sha256){$ownedReasons.Add("drift:$relative")}
+                            }
+                        }
+                    }
+                }
+            }
+            foreach($entry in $entries){
+                $full=Join-Path $targetRootPath ([string]$entry.targetPath).Replace('/',[IO.Path]::DirectorySeparatorChar)
+                if(-not(Test-Path -LiteralPath $full -PathType Leaf)){
+                    $missingRelative=([string]$entry.targetPath).Substring($prefix.Length).TrimStart('/')
+                    $ownedReasons.Add("missing:$missingRelative")
+                }
+            }
+            if($ownedReasons.Count-gt0){
+                if($desiredGroupFiles.Count-gt0){
+                    $conflicts=@($ownedReasons|Sort-Object -Unique|ForEach-Object{
+                        $reason=[string]$_;$separator=$reason.IndexOf(':');$status=if($separator-ge0){$reason.Substring(0,$separator)}else{$reason};$relative=if($separator-ge0){$reason.Substring($separator+1)}else{'.'}
+                        [pscustomobject][ordered]@{worktree=$targetRootPath;projection=$projectionId;skillId=$skillId;targetPath=if($relative-ceq'.'){$prefix}else{"$prefix/$relative"};relativePath=$relative;status=$status}
+                    })
+                    $details=Format-ProjectSkillOwnershipConflictDetails -Conflicts $conflicts
+                    Write-ProjectSkillOwnershipConflictDiagnostics -Conflicts $conflicts
+                    throw (New-AiInstructionsRefusalException -Code 'closure-invalid' -Message "Project Skill update retirement refused before project mutation: $details. Resolve each conflict: remove or rename the project-owned Skill, or remove that Skill from projections.project.")
+                }
+                foreach($entry in $entries){[void]$relinquishedProjectTargets.Add([string]$entry.targetPath)}
+                Write-Output "ownership-relinquished: $projectionId/$skillId [$(@($ownedReasons|Sort-Object -Unique)-join ', ')]"
+            }
+        }
+    }
 
     $eligibleFamilies = @{}
     foreach ($family in $families) {
         $baseTargetPath = $family.TargetBase
         $baseTargetFullPath = Join-Path $targetRootPath $baseTargetPath.Replace('/', '\')
-        $baseTargetIsTracked = $trackedPaths.Contains($baseTargetPath)
+        $baseTargetIsPlannedRemediation=$null-ne$plannedRemediationPathSet-and$plannedRemediationPathSet.Contains([string]$baseTargetPath)
+        $baseTargetIsTracked = $trackedPaths.Contains($baseTargetPath) -and -not $baseTargetIsPlannedRemediation
         $baseTargetMatchesDesired = $false
         if ((Test-Path -LiteralPath $baseTargetFullPath -PathType Leaf) -and
             -not $baseTargetIsTracked -and
@@ -4951,12 +6703,14 @@ try {
         }
         else {
             $eligibleFamilies[$family.Name] =
-                -not $baseTargetIsTracked -and
-                ($manifestEntriesByTarget.ContainsKey($baseTargetPath) -or
+                $baseTargetIsPlannedRemediation -or
+                (-not $baseTargetIsTracked -and
+                 ($manifestEntriesByTarget.ContainsKey($baseTargetPath) -or
                  -not (Test-Path -LiteralPath $baseTargetFullPath -PathType Leaf) -or
-                 $baseTargetMatchesDesired)
+                 $baseTargetMatchesDesired))
         }
     }
+    $eligibleFamilies['Project Skills'] = $true
     $createdPaths = New-Object System.Collections.Generic.List[string]
     $updatedPaths = New-Object System.Collections.Generic.List[string]
     $removedPaths = New-Object System.Collections.Generic.List[string]
@@ -4975,21 +6729,31 @@ try {
     $mutationPaths = @(
         @($desiredEntries | ForEach-Object { [string]$_.TargetPath })
         @($manifestEntriesByTarget.Keys | Where-Object {
-            if ([string]$_ -notlike '.agents/skills/*') { $true }
+            $existingEntry = $manifestEntriesByTarget[[string]$_]
+            $isProjectSkill = $manifestSchemaVersion -eq 4 -and $null -ne $existingEntry.PSObject.Properties['artifactType'] -and [string]$existingEntry.artifactType -ceq 'skill'
+            if ($isProjectSkill -or [string]$_ -notlike '.agents/skills/*') { $true }
             else { $id=([string]$_).Split('/')[2]; $migrationById.ContainsKey($id) -and $migrationById[$id].removable }
         })
         $manifestRelativePath
     )
+    $projectMutationPathSet=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach($entry in $desiredEntries){if($null-ne$entry.PSObject.Properties['IsProjectSkill']-and[bool]$entry.IsProjectSkill){[void]$projectMutationPathSet.Add([string]$entry.TargetPath)}}
+    if($manifestSchemaVersion-eq4){foreach($entry in @($manifest.files|Where-Object{[string]$_.artifactType-ceq'skill'})){[void]$projectMutationPathSet.Add([string]$entry.targetPath)}}
+    $projectMutationPaths = @($mutationPaths | Where-Object { $projectMutationPathSet.Contains([string]$_) })
+    $snapshotMutationPaths = @($mutationPaths | Where-Object {
+        -not $projectMutationPathSet.Contains([string]$_) -and
+        -not ($projectMutationPaths.Count -gt 0 -and [string]$_ -ceq $manifestRelativePath)
+    })
     $mutationBackupRoot = Join-Path $workingPath 'target-backup'
-    $mutationSnapshot = New-TargetMutationSnapshot -TargetRoot $targetRootPath -RelativePaths $mutationPaths -BackupRoot $mutationBackupRoot -ProtectedPaths $targetMutationProtectedClaudeFamilyPaths
-    $excludeSnapshot = New-GitInfoExcludeSnapshot -Repository $targetRootPath
+    $mutationSnapshot = New-TargetMutationSnapshot -TargetRoot $targetRootPath -RelativePaths $snapshotMutationPaths -BackupRoot $mutationBackupRoot -ProtectedPaths $targetMutationProtectedClaudeFamilyPaths
+    $excludeSnapshot = New-GitInfoExcludeSnapshot -Repository $targetRootPath -UsePlatformRuntime:($projectMutationPaths.Count -gt 0)
     $migrationJournalPath = Join-Path $mutationBackupRoot 'skill-migration.json'
     $migrationGitState = $null
     if (@($skillMigration | Where-Object removable).Count -gt 0) {
         $migrationGitState = Get-RepoSkillMigrationGitState -Repository $targetRootPath -GitExecutable $GitExecutable
-        $preserveWorkingPath = $true
-        $script:SkillMigrationJournalContext = [pscustomobject]@{Snapshot=$mutationSnapshot; ExcludeSnapshot=$excludeSnapshot; Path=$migrationJournalPath; GitState=$migrationGitState}
-        Save-SkillMigrationJournal $mutationSnapshot $excludeSnapshot $migrationJournalPath $migrationGitState 'mutating'
+    }
+    if ($projectMutationPaths.Count -gt 0) {
+        if($null-eq$script:ProjectPublicationContext){throw 'Project publication context was not prepared before remediation.'}
     }
 
     try {
@@ -4997,6 +6761,7 @@ try {
         $targetPath = $desiredEntry.TargetPath
         $targetFullPath = Join-Path $targetRootPath $targetPath.Replace('/', '\')
         $targetExists = Test-Path -LiteralPath $targetFullPath -PathType Leaf
+        $isPlannedRemediation=$null-ne$plannedRemediationPathSet-and$plannedRemediationPathSet.Contains([string]$targetPath)
         $managedEntry = $null
 
         $entryIsEligible = [bool]$eligibleFamilies[$desiredEntry.FamilyName]
@@ -5008,9 +6773,18 @@ try {
             continue
         }
 
-        $desiredManifestEntry = New-ManifestEntry -SourcePath $desiredEntry.SourcePath -TargetPath $targetPath -Sha256 $desiredEntry.Sha256
+        if ($null -ne $desiredEntry.PSObject.Properties['IsProjectSkill'] -and [bool]$desiredEntry.IsProjectSkill) {
+            $projectSource = [pscustomobject][ordered]@{
+                sourceId=$desiredEntry.SourceId;sourceRepository=$desiredEntry.SourceRepository;sourceRef=$desiredEntry.SourceRef
+                sourceCommit=$desiredEntry.SourceCommit;sourceVersion=$desiredEntry.SourceVersion
+            }
+            $desiredManifestEntry = New-ManifestEntry -SourcePath $desiredEntry.SourcePath -TargetPath $targetPath -Sha256 $desiredEntry.Sha256 `
+                -ProjectSkillId $desiredEntry.SkillId -ProjectionId $desiredEntry.ProjectionId -ProjectSource $projectSource
+        }
+        else { $desiredManifestEntry = New-ManifestEntry -SourcePath $desiredEntry.SourcePath -TargetPath $targetPath -Sha256 $desiredEntry.Sha256 }
         $desiredManifestSchemaVersion = 2
         if ($manifestExists) { $desiredManifestSchemaVersion = [int]$manifestSchemaVersion }
+        if ($null -ne $desiredEntry.PSObject.Properties['IsProjectSkill'] -and [bool]$desiredEntry.IsProjectSkill) { $desiredManifestSchemaVersion = 4 }
         $desiredManifestEntry = Convert-ManifestEntryForSchema -Entry $desiredManifestEntry -SchemaVersion $desiredManifestSchemaVersion
         if ($retainLegacyManifest) { $desiredManifestEntry = $desiredManifestEntry | Select-Object sourcePath,targetPath,sha256 }
 
@@ -5018,22 +6792,33 @@ try {
             $managedEntry = $manifestEntriesByTarget[$targetPath]
         }
 
+        if ($isPlannedRemediation) {
+            [byte[]]$desiredBytes = [System.IO.File]::ReadAllBytes([string]$desiredEntry.SourceFullPath)
+            $expectedSha256 = if ($targetExists) { Get-ManagedContentHash -Path $targetFullPath -TargetPath $targetPath } else { $null }
+            Set-TargetMutationFileBytes -Snapshot $mutationSnapshot -RelativePath $targetPath -Bytes $desiredBytes `
+                -ExpectedExists $targetExists -ExpectedSha256 $expectedSha256
+            $updatedPaths.Add($targetPath)
+            $nextManifestEntries.Add($desiredManifestEntry)
+            continue
+        }
+
         if ($null -ne $managedEntry) {
             if (-not $targetExists) {
-                if (Test-GitPathHasChanges -Repository $targetRootPath -Path $targetPath) {
+                if (-not $isPlannedRemediation -and (Test-GitPathHasChanges -Repository $targetRootPath -Path $targetPath)) {
                     $skippedPaths.Add($targetPath)
                     $nextManifestEntries.Add((Copy-ExistingManifestEntry -Entry $managedEntry))
                     continue
                 }
 
                 [byte[]]$desiredBytes = [System.IO.File]::ReadAllBytes([string]$desiredEntry.SourceFullPath)
-                Set-TargetMutationFileBytes -Snapshot $mutationSnapshot -RelativePath $targetPath -Bytes $desiredBytes
+                Set-TargetMutationFileBytes -Snapshot $mutationSnapshot -RelativePath $targetPath -Bytes $desiredBytes `
+                    -ExpectedExists $false
                 $updatedPaths.Add($targetPath)
                 $nextManifestEntries.Add($desiredManifestEntry)
                 continue
             }
 
-            if (Test-GitPathHasStagedChanges -Repository $targetRootPath -Path $targetPath) {
+            if (-not $isPlannedRemediation -and (Test-GitPathHasStagedChanges -Repository $targetRootPath -Path $targetPath)) {
                 $skippedPaths.Add($targetPath)
                 $nextManifestEntries.Add((Copy-ExistingManifestEntry -Entry $managedEntry))
                 continue
@@ -5043,7 +6828,8 @@ try {
             if ($currentHash -eq [string] $managedEntry.sha256 -or $currentHash -eq $desiredEntry.Sha256) {
                 if ($currentHash -ne $desiredEntry.Sha256) {
                     [byte[]]$desiredBytes = [System.IO.File]::ReadAllBytes([string]$desiredEntry.SourceFullPath)
-                    Set-TargetMutationFileBytes -Snapshot $mutationSnapshot -RelativePath $targetPath -Bytes $desiredBytes
+                    Set-TargetMutationFileBytes -Snapshot $mutationSnapshot -RelativePath $targetPath -Bytes $desiredBytes `
+                        -ExpectedExists $true -ExpectedSha256 $currentHash
                     $updatedPaths.Add($targetPath)
                 }
 
@@ -5058,12 +6844,13 @@ try {
         }
 
         if (-not $targetExists) {
-            if ($trackedPaths.Contains($targetPath)) {
+            if ($trackedPaths.Contains($targetPath) -and -not $isPlannedRemediation) {
                 $skippedPaths.Add($targetPath)
                 continue
             }
             [byte[]]$desiredBytes = [System.IO.File]::ReadAllBytes([string]$desiredEntry.SourceFullPath)
-            Set-TargetMutationFileBytes -Snapshot $mutationSnapshot -RelativePath $targetPath -Bytes $desiredBytes
+            Set-TargetMutationFileBytes -Snapshot $mutationSnapshot -RelativePath $targetPath -Bytes $desiredBytes `
+                -ExpectedExists $false
             $createdPaths.Add($targetPath)
             $nextManifestEntries.Add($desiredManifestEntry)
             continue
@@ -5074,7 +6861,7 @@ try {
             continue
         }
 
-        if (-not $trackedPaths.Contains($targetPath) -and
+        if ((-not $trackedPaths.Contains($targetPath) -or $isPlannedRemediation) -and
             -not (Test-GitPathHasStagedChanges -Repository $targetRootPath -Path $targetPath) -and
             (Get-ManagedContentHash -Path $targetFullPath -TargetPath $targetPath) -ceq $desiredEntry.Sha256) {
             $nextManifestEntries.Add($desiredManifestEntry)
@@ -5098,14 +6885,17 @@ try {
             $skippedPaths.Add($managedTargetPath)
             continue
         }
-        if ($managedTargetPath.StartsWith('.agents/skills/',[StringComparison]::Ordinal)) {
+        $managedProjectSkill = $manifestSchemaVersion -eq 4 -and $null -ne $managedEntry.PSObject.Properties['artifactType'] -and [string]$managedEntry.artifactType -ceq 'skill'
+        if ($managedProjectSkill -and $relinquishedProjectTargets.Contains($managedTargetPath)) {
+            continue
+        }
+        if ($managedTargetPath.StartsWith('.agents/skills/',[StringComparison]::Ordinal) -and -not $managedProjectSkill) {
             if ($retiredLegacySkillPaths.Contains($managedTargetPath)) { continue }
             $id = $managedTargetPath.Split('/')[2]
             if ($migrationById.ContainsKey($id) -and $migrationById[$id].removable) {
-                Assert-RepoSharedSkillsMigrationEvidence -Repository $targetRootPath -Skill $migrationById[$id] -RemovedPaths @($removedPaths) -GitExecutable $GitExecutable
+                Assert-RepoSharedSkillsMigrationEvidence -Repository $targetRootPath -Skill $migrationById[$id] -GitExecutable $GitExecutable
                 Remove-TargetMutationFile -Snapshot $mutationSnapshot -RelativePath $managedTargetPath
                 $removedPaths.Add($managedTargetPath)
-                Save-SkillMigrationJournal $mutationSnapshot $excludeSnapshot $migrationJournalPath $migrationGitState 'mutating'
                 if ($FailureAfterSkillRemovalCount -gt 0 -and @($removedPaths | Where-Object { $_ -like '.agents/skills/*' }).Count -eq $FailureAfterSkillRemovalCount) { throw 'Injected Skill migration failure.' }
                 continue
             }
@@ -5145,7 +6935,7 @@ try {
                 continue
             }
 
-            Remove-TargetMutationFile -Snapshot $mutationSnapshot -RelativePath $managedTargetPath
+            Remove-TargetMutationFile -Snapshot $mutationSnapshot -RelativePath $managedTargetPath -ExpectedSha256 $currentHash
             $removedPaths.Add($managedTargetPath)
         }
         }
@@ -5161,7 +6951,7 @@ try {
                 lockSha256 = [string]$verifiedRuntimeLockSha256
                 projectionContractSha256 = [string]$projectionContractSha256
                 generation = $generation
-                projections = @()
+                projections = @($projectProjectionIds | Sort-Object)
                 files = @($nextManifestEntries | Sort-Object targetPath)
             }
             if ($manifestExists -and $manifestSchemaVersion -eq 4) {
@@ -5197,7 +6987,8 @@ try {
         if ($existingManifestJson -ne $manifestJson) {
             $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
             [byte[]]$manifestBytes = $utf8WithoutBom.GetBytes($manifestJson)
-            Set-TargetMutationFileBytes -Snapshot $mutationSnapshot -RelativePath $manifestRelativePath -Bytes $manifestBytes
+            Set-TargetMutationFileBytes -Snapshot $mutationSnapshot -RelativePath $manifestRelativePath -Bytes $manifestBytes `
+                -ExpectedExists $manifestExists -ExpectedSha256 $manifestInitialRawSha256
             $manifestChanged = $true
         }
         }
@@ -5219,26 +7010,9 @@ try {
         )
         Set-ManagedGitInfoExclude -Repository $targetRootPath -ManagedPaths $managedExcludePaths -Snapshot $excludeSnapshot `
             -ProtectedPaths $repositoryProtectedClaudeFamilyPaths -PreservedProtectedPaths $preservedProtectedExcludePaths
-        if ($migrationGitState) { Save-SkillMigrationJournal $mutationSnapshot $excludeSnapshot $migrationJournalPath $migrationGitState 'applied' }
     }
     catch {
-        $mutationError = $_
-        $rollbackErrors = New-Object System.Collections.Generic.List[string]
-        try { Restore-TargetMutationSnapshot -Snapshot $mutationSnapshot }
-        catch { $rollbackErrors.Add($_.Exception.Message) }
-        try { Restore-GitInfoExcludeSnapshot -Snapshot $excludeSnapshot }
-        catch { $rollbackErrors.Add($_.Exception.Message) }
-        if ($migrationGitState -and $rollbackErrors.Count -eq 0) { Save-SkillMigrationJournal $mutationSnapshot $excludeSnapshot $migrationJournalPath $migrationGitState 'rolled-back' }
-        if ($rollbackErrors.Count -gt 0) {
-            $preserveWorkingPath = $true
-            throw "AI instruction target mutation failed: $($mutationError.Exception.Message) Rollback also failed: $($rollbackErrors -join ' | ') Recovery files were preserved at: $mutationBackupRoot"
-        }
-        throw $mutationError
-    }
-
-    if ($skippedPaths.Count -gt 0) {
-        $uniqueSkippedPaths = @($skippedPaths | Sort-Object -Unique)
-        Write-Output "AI instructions customized or unmanaged; not overwritten: $($uniqueSkippedPaths -join ', ')"
+        throw
     }
 
     $changedPaths = @(
@@ -5248,11 +7022,44 @@ try {
         $(if ($manifestChanged) { @($manifestRelativePath) } else { @() }) |
             Sort-Object -Unique
     )
+    $plannedStashPaths=New-Object System.Collections.Generic.List[string]
+    foreach($manifestEntry in $nextManifestEntries){
+        if($null-ne$manifestEntry.PSObject.Properties['artifactType']-and[string]$manifestEntry.artifactType-ceq'skill'){continue}
+        if([string]$manifestEntry.targetPath-like'.agents/skills/*'){continue}
+        $plannedTargetPath=[string]$manifestEntry.targetPath
+        if(Test-IsProtectedClaudeFamilyPath -Path $plannedTargetPath -ProtectedPaths $targetMutationProtectedClaudeFamilyPaths){continue}
+        $plannedStashPaths.Add($plannedTargetPath)
+    }
+    if($shouldWriteManifest){$plannedStashPaths.Add($manifestRelativePath)}
+    $plannedStashPathArguments=@($plannedStashPaths|Sort-Object -Unique)
+    if($plannedStashPathArguments.Count-gt0){
+        $shouldStorePersonalAgentEvidence=$changedPaths.Count-gt0
+        if(-not$shouldStorePersonalAgentEvidence){
+            $plannedWorktreeKey=Get-PersonalAgentWorktreeKey -Repository $targetRootPath
+            $plannedEvidenceFingerprint=Get-PersonalAgentEvidenceFingerprint -Repository $targetRootPath -Paths $plannedStashPathArguments
+            $plannedOwnedEvidence=@(Get-PersonalAgentStashes -Repository $targetRootPath -WorktreeKey $plannedWorktreeKey|Where-Object{Test-PersonalAgentStashEvidence -Repository $targetRootPath -Stash $_ -ExpectedFingerprint ([string]$_.EvidenceFingerprint)})
+            $shouldStorePersonalAgentEvidence=@($plannedOwnedEvidence|Where-Object{$_.EvidenceFingerprint-ceq$plannedEvidenceFingerprint}).Count-ne1
+        }
+        $script:ProjectPublicationContext.ShouldStorePersonalAgentEvidence=$shouldStorePersonalAgentEvidence
+        $script:ProjectPublicationContext.PersonalAgentEvidenceStashBefore=Get-RepositoryStashRefState -Repository $targetRootPath
+    }
+    $script:ProjectPublicationContext.TerminalManifestEntries=@($nextManifestEntries|Sort-Object targetPath)
+
+    $repositoryIndexLock=Open-RepositoryIndexTransactionLock -Repository $targetRootPath
+    $repositoryIndexPath=[string]$repositoryIndexLock.IndexPath
+    $script:ProjectPublicationContext.RepositoryIndexLock=$repositoryIndexLock
+    Start-RepositoryInstallTransaction $script:ProjectPublicationContext
+
+    if ($skippedPaths.Count -gt 0) {
+        $uniqueSkippedPaths = @($skippedPaths | Sort-Object -Unique)
+        Write-Output "AI instructions customized or unmanaged; not overwritten: $($uniqueSkippedPaths -join ', ')"
+    }
 
     $stashPathArguments = @()
     try {
         $stashPaths = New-Object System.Collections.Generic.List[string]
         foreach ($manifestEntry in $nextManifestEntries) {
+            if ($null -ne $manifestEntry.PSObject.Properties['artifactType'] -and [string]$manifestEntry.artifactType -ceq 'skill') { continue }
             if ([string]$manifestEntry.targetPath -like '.agents/skills/*') { continue }
             $targetPath = [string]$manifestEntry.targetPath
             if (Test-IsProtectedClaudeFamilyPath -Path $targetPath -ProtectedPaths $targetMutationProtectedClaudeFamilyPaths) {
@@ -5283,39 +7090,56 @@ try {
                     -ExpectedEntries $expectedStashEntries -PriorStashes $personalAgentStashes `
                     -PriorOwnedStashes $ownedPersonalAgentStashes `
                     -WorktreeKey $worktreeKey -EvidenceFingerprint $evidenceFingerprint `
-                    -ActiveIndexPath ([string]$repositoryIndexLock.IndexPath) -ProtectedPaths $targetMutationProtectedClaudeFamilyPaths
+                    -ActiveIndexPath ([string]$repositoryIndexPath) -ProtectedPaths $targetMutationProtectedClaudeFamilyPaths
                 Write-Output "PersonalAgent recovery evidence updated and retained without index mutation: $newStashHash"
             }
         }
     }
     catch {
-        $finalizationError = $_
-        $rollbackErrors = New-Object System.Collections.Generic.List[string]
-        try { Restore-TargetMutationTransaction -Repository $targetRootPath -Paths $stashPathArguments -Snapshot $mutationSnapshot }
-        catch { $rollbackErrors.Add($_.Exception.Message) }
-        try { Restore-GitInfoExcludeSnapshot -Snapshot $excludeSnapshot }
-        catch { $rollbackErrors.Add($_.Exception.Message) }
-        if ($migrationGitState -and $rollbackErrors.Count -eq 0) {
-            Save-SkillMigrationJournal $mutationSnapshot $excludeSnapshot $migrationJournalPath $migrationGitState 'rolled-back'
-        }
-        if ($rollbackErrors.Count -gt 0) {
-            $preserveWorkingPath = $true
-            throw "PersonalAgent stash finalization failed: $($finalizationError.Exception.Message) Rollback also failed: $($rollbackErrors -join ' | ') Recovery files were preserved at: $mutationBackupRoot"
-        }
-        throw $finalizationError
+        throw
     }
 
+    # Finalization failures are classified once by the outer handler after recovery has actually run,
+    # so the final message reports whether evidence was rolled back, rolled forward, or retained.
+    if ($null -ne $script:ProjectPublicationContext) {
+        Complete-ProjectPublicationContext $script:ProjectPublicationContext
+        $script:ProjectPublicationContext=$null
+    }
     if ($changedPaths.Count -eq 0) { Write-Output 'AI instructions are up to date; no Git commit was created.' }
     else { Write-Output "AI instructions synchronized as local ignored runtime artifacts without Git commit: $($changedPaths -join ', ')" }
-    if ($migrationGitState) { Write-Output "Skill migration transaction retained. Backup and recovery journal: $migrationJournalPath" }
 }
 catch {
     $syncError = $_
-    if ($null -ne $remediationTransaction -and -not [bool]$remediationTransaction.RollbackAttempted) {
-        try { Restore-AgentArtifactRemediation -Transaction $remediationTransaction }
-        catch {
-            throw "AI instruction sync failed after Agent artifact remediation: $($syncError.Exception.Message) $($_.Exception.Message)"
+    if($null-ne$script:ProjectPublicationContext){
+        $transactionWasDurable=[bool]$script:ProjectPublicationContext.Durable
+        try{
+            $action=Resolve-ActiveProjectPublicationFailure -Context $script:ProjectPublicationContext -RemediationTransaction $remediationTransaction
+        }catch{
+            $recoveryError=$_
+            $script:ProjectPublicationContext=$null
+            $preserveWorkingPath=$true
+            $recoveryMessage=[string]$recoveryError.Exception.Message
+            $thirdStateMatch=[regex]::Match($recoveryMessage,'^Repository transaction sequence [0-9]+ role (?<Role>\S+) target (?<Target>.+) is in a third state;')
+            if($thirdStateMatch.Success){
+                $thirdStateTarget=$thirdStateMatch.Groups['Target'].Value
+                $ambiguous="Schema-v2 publication state is ambiguous or changed; current files were preserved for manual recovery: $thirdStateTarget"
+                $recoveryMessage=if($thirdStateMatch.Groups['Role'].Value-ceq'shared-exclude'){$ambiguous}else{"Target rollback errors: $thirdStateTarget`: $ambiguous"}
+            }
+            throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Original: $($syncError.Exception.Message) Rollback also failed: $recoveryMessage Recovery files were preserved at: $workingPath" -InnerException $recoveryError.Exception)
         }
+        $script:ProjectPublicationContext=$null
+        # No durable journal means no repository mutation happened; keep the original error classification.
+        if(-not$transactionWasDurable){throw $syncError}
+        $syncErrorCode=Get-AiInstructionsRefusalCode $syncError
+        if($action-ceq'rollback-all'){
+            if(-not[string]::IsNullOrWhiteSpace($syncErrorCode)){throw $syncError}
+            throw (New-AiInstructionsRefusalException -Code 'interrupted-install' -Message "Repository transaction failed and was rolled back: $($syncError.Exception.Message)" -InnerException $syncError.Exception)
+        }
+        if($action-ceq'roll-forward-cleanup'){
+            $rollForwardCode=if([string]::IsNullOrWhiteSpace($syncErrorCode)){'interrupted-install'}else{$syncErrorCode}
+            throw (New-AiInstructionsRefusalException -Code $rollForwardCode -Message "Repository transaction failed after its committed journal generation; recovery kept the committed repository changes and completed transaction cleanup: $($syncError.Exception.Message)" -InnerException $syncError.Exception)
+        }
+        throw $syncError
     }
     throw $syncError
 }
@@ -5337,11 +7161,9 @@ finally {
 }
 catch {
     $bootstrapError = $_
-    if ($null -ne $remediationTransaction -and -not [bool]$remediationTransaction.RollbackAttempted) {
-        try { Restore-AgentArtifactRemediation -Transaction $remediationTransaction }
-        catch {
-            throw "AI instruction bootstrap failed after Agent artifact remediation: $($bootstrapError.Exception.Message) $($_.Exception.Message)"
-        }
+    if($null-ne$script:ProjectPublicationContext){
+        try{Resolve-ActiveProjectPublicationFailure -Context $script:ProjectPublicationContext -RemediationTransaction $remediationTransaction|Out-Null;$script:ProjectPublicationContext=$null}
+        catch{$script:ProjectPublicationContext=$null;throw}
     }
     throw $bootstrapError
 }
@@ -5351,10 +7173,7 @@ finally {
         $userSkillMigrationLock.Guard.Dispose()
     }
     if ($null -ne $repositoryIndexLock) {
-        $repositoryIndexLock.Stream.Dispose()
-        if (Test-Path -LiteralPath ([string]$repositoryIndexLock.Path) -PathType Leaf) {
-            Remove-Item -LiteralPath ([string]$repositoryIndexLock.Path) -Force -ErrorAction SilentlyContinue
-        }
+        Close-RepositoryIndexTransactionLock -Lock $repositoryIndexLock
     }
     if ($null -ne $repositoryOperationLock) { $repositoryOperationLock.Dispose() }
 }

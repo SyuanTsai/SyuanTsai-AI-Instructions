@@ -193,6 +193,34 @@ function Get-TestLinuxInstallJournalV1 {
     return (ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($journal | ConvertTo-Json -Depth 20))
 }
 
+function Get-TestInstallJournalV2 {
+    param([string] $Owner = 'repo-bootstrap')
+    $root = [IO.Path]::GetFullPath((Join-Path $TestDrive 'repo-v2'))
+    $git = Join-Path $root '.git'
+    $identity = [pscustomobject][ordered]@{kind='windows-file-id';device='00000001';fileId='00000002'}
+    $permissions = [pscustomobject][ordered]@{kind='windows-sddl';sddl='D:PAI(A;;FA;;;SY)';readOnly=$false}
+    $absent = [pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null}
+    $present = [pscustomobject][ordered]@{exists=$true;sha256=('a'*64);length=3;identity=$identity;permissions=$permissions}
+    return [pscustomobject][ordered]@{
+        schemaVersion=2;kind='ai-instructions-install-transaction';transactionId=('a'*32);createdAtUtc='2026-11-12T00:00:00.0000000Z'
+        owner=[pscustomobject][ordered]@{component=$Owner;processId=1;processStartIdentity='fixture-process'}
+        platform=[pscustomobject][ordered]@{os='windows';architecture='x64'}
+        lock=[pscustomobject][ordered]@{primitive='windows-fileshare';leaf='bootstrap-ai-instructions.lock'}
+        generation=[pscustomobject][ordered]@{previousBundleSha256=$null;candidateBundleSha256=('b'*64)}
+        scope=[pscustomobject][ordered]@{
+            kind='repository';repositoryRoot=$root;repositoryRootIdentity=$identity;commonGitDirectory=$git;gitDirectory=$git
+            indexPath=(Join-Path $git 'index');indexLockContentSha256=('9'*64);objectFormat='sha1';externalBackup=$null
+        }
+        retainedManifestPaths=@()
+        phase='prepared'
+        operations=@([pscustomobject][ordered]@{
+            sequence=1;kind='create-file';role='instruction';method='stage-rename'
+            target=[pscustomobject][ordered]@{kind='repository-relative';value='AGENTS.md'}
+            before=$absent;after=$present;observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf='operation-1.stage';backupLeaf=$null;quarantineLeaf=$null;state='pending'
+        })
+    }
+}
+
 function New-TestInstallObservation {
     param(
         [Parameter(Mandatory = $true)][object] $Operation,
@@ -3429,5 +3457,504 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
                 }
             }
         } $definitions $cases
+    }
+
+    # Scenario: A repository bootstrap creates the first install-journal family v2 document with one exact terminal file operation.
+    # Purpose: Version the repository scope and operation contract without relaxing install journal v1.
+    It 'UnitT219_accepts_exact_repo_bootstrap_install_journal_v2' {
+        $journal=Get-TestInstallJournalV2
+        {Assert-AiInstructionsInstallJournalV2 -Journal $journal|Out-Null}|Should Not Throw
+        $parsed=ConvertFrom-AiInstructionsInstallJournalJson -Json ($journal|ConvertTo-Json -Depth 20) -ExpectedOwnerComponent repo-bootstrap
+        $parsed.schemaVersion|Should Be 2
+        $parsed.operations[0].role|Should Be instruction
+        $journal.operations[0]|Add-Member -NotePropertyName unexpected -NotePropertyValue $true
+        (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalV2 -Journal $journal|Out-Null})|Should Match 'unsupported property'
+    }
+
+    # Scenario: Every known install-journal owner is paired with the wrong schema version or reader component.
+    # Purpose: Fail closed on cross-family owner/version combinations, including old readers encountering repository v2 evidence.
+    It 'UnitT220_refuses_all_install_journal_owner_version_cross_pairings' {
+        $v2=Get-TestInstallJournalV2
+        foreach($owner in @('installer','updater','launcher-recovery','user-reconciler')){
+            $copy=Get-TestInstallJournalV2 -Owner $owner
+            (Get-RuntimeContractError {ConvertFrom-AiInstructionsInstallJournalJson -Json ($copy|ConvertTo-Json -Depth 20)|Out-Null})|Should Match 'owner/version pairing'
+        }
+        $v1=Get-TestInstallJournalV1
+        $v1.owner.component='repo-bootstrap'
+        (Get-RuntimeContractError {ConvertFrom-AiInstructionsInstallJournalJson -Json ($v1|ConvertTo-Json -Depth 20)|Out-Null})|Should Match 'owner/version pairing'
+        (Get-RuntimeContractError {ConvertFrom-AiInstructionsInstallJournalJson -Json ($v2|ConvertTo-Json -Depth 20) -ExpectedOwnerComponent launcher-recovery|Out-Null})|Should Match 'owner.component must be launcher-recovery'
+        (Get-RuntimeContractError {ConvertFrom-AiInstructionsInstallJournalV1Json -Json ($v2|ConvertTo-Json -Depth 20)|Out-Null})|Should Match 'unsupported property|schema version'
+    }
+
+    # Scenario: The generic parser reads the checked-in v1 fixture and the existing v1 constructor emits the same ordered JSON bytes as before schema v2 support.
+    # Purpose: Prove USER, installer, updater, and launcher-recovery remain v1 writers with byte-stable output.
+    It 'UnitT221_preserves_install_journal_v1_parser_and_writer_bytes' {
+        $fixturePath=Join-Path $script:RepositoryRoot 'catalog/examples/ai-instructions-install-journal-v1.example.json'
+        $fixtureJson=Get-Content -Raw -Encoding UTF8 -LiteralPath $fixturePath
+        $parsed=ConvertFrom-AiInstructionsInstallJournalJson -Json $fixtureJson
+        $parsed.schemaVersion|Should Be 1
+        $source=Get-TestInstallJournalV1
+        $constructed=New-AiInstructionsInstallJournalV1 -TransactionId $source.transactionId -CreatedAtUtc $source.createdAtUtc `
+            -OwnerComponent $source.owner.component -OwnerProcessId $source.owner.processId -OwnerProcessStartIdentity $source.owner.processStartIdentity `
+            -PlatformOs $source.platform.os -PlatformArchitecture $source.platform.architecture -LockPrimitive $source.lock.primitive -LockLeaf $source.lock.leaf `
+            -PreviousBundleSha256 $source.generation.previousBundleSha256 -CandidateBundleSha256 $source.generation.candidateBundleSha256 `
+            -Phase $source.phase -Operations $source.operations
+        $expected=($source|ConvertTo-Json -Depth 20 -Compress)
+        ($constructed|ConvertTo-Json -Depth 20 -Compress)|Should BeExactly $expected
+        @($constructed.PSObject.Properties.Name) -join ','|Should BeExactly 'schemaVersion,kind,transactionId,createdAtUtc,owner,platform,lock,generation,phase,operations'
+        [byte[]]$fixtureBytes=[IO.File]::ReadAllBytes($fixturePath)
+        [byte[]]$writerBytes=[Text.UTF8Encoding]::new($false).GetBytes((($parsed|ConvertTo-Json -Depth 30).Replace("`r`n","`n"))+"`n")
+        [Convert]::ToBase64String($writerBytes)|Should BeExactly ([Convert]::ToBase64String($fixtureBytes))
+        $sha=[Security.Cryptography.SHA256]::Create();try{$writerSha=([BitConverter]::ToString($sha.ComputeHash($writerBytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+        $writerSha|Should BeExactly '2363ee74875af2fd6c125782024e0f2d68aa2287338eab199df497fe0201c0eb'
+    }
+
+    # Scenario: Repository journal operations repeat a target, use a mismatched object id, or escape the bound Git scope.
+    # Purpose: Reject ambiguous terminal plans and scope/object-format confusion before any repository mutation.
+    It 'UnitT222_rejects_invalid_repo_journal_terminal_targets_scope_and_object_format' {
+        $duplicate=Get-TestInstallJournalV2
+        $copy=ConvertFrom-Json ($duplicate.operations[0]|ConvertTo-Json -Depth 20)
+        $copy.sequence=2
+        $duplicate.operations=@($duplicate.operations[0],$copy)
+        (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalV2 $duplicate|Out-Null})|Should Match 'duplicates another terminal operation target'
+
+        $ref=Get-TestInstallJournalV2
+        $ref.operations[0]=[pscustomobject][ordered]@{
+            sequence=1;kind='update-git-ref';role='git-ref';method='update-ref';target=[pscustomobject][ordered]@{kind='git-ref';value='refs/heads/main'}
+            before=[pscustomobject][ordered]@{exists=$true;objectId=('a'*40)};after=[pscustomobject][ordered]@{exists=$true;objectId=('b'*64)}
+            observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
+        }
+        (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalV2 $ref|Out-Null})|Should Match 'objectFormat sha1'
+
+        $scope=Get-TestInstallJournalV2
+        $scope.operations[0].target=[pscustomobject][ordered]@{kind='git-index';value=(Join-Path $TestDrive 'elsewhere.index')}
+        $scope.operations[0].kind='replace-git-index';$scope.operations[0].role='git-index';$scope.operations[0].method='index-lock-rename'
+        (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalV2 $scope|Out-Null})|Should Match 'not the scope index'
+    }
+
+    # Scenario: A prepared repository transaction pre-registers PersonalAgent evidence with an unbound after.objectId, then binds it once after stash store.
+    # Purpose: Keep the operation list immutable after prepared and permit exactly one late-bound field while rejecting append, rebinding, and all other authority drift.
+    It 'UnitT223_enforces_pre_registered_PersonalAgent_evidence_single_binding' {
+        $prepared=Get-TestInstallJournalV2
+        $prepared.operations=@($prepared.operations)+@([pscustomobject][ordered]@{
+            sequence=2;kind='store-git-stash-evidence';role='personal-agent-evidence';method='stash-store'
+            target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'}
+            before=[pscustomobject][ordered]@{exists=$false;objectId=$null}
+            after=[pscustomobject][ordered]@{exists=$true;objectId=$null}
+            observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
+        })
+        {Assert-AiInstructionsInstallJournalV2 $prepared|Out-Null}|Should Not Throw
+
+        $cloneParameters=@{InputObject=($prepared|ConvertTo-Json -Depth 30)}
+        if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$cloneParameters.DateKind='String'}
+        $applying=ConvertFrom-Json @cloneParameters
+        $applying.phase='applying';$applying.operations[0].observedAfter=[pscustomobject][ordered]@{dacl=[pscustomobject][ordered]@{isNull=$true;isProtected=$false;aclBase64=$null};readOnly=$false};$applying.operations[0].state='applied'
+        {Assert-AiInstructionsInstallJournalV2 $applying|Out-Null}|Should Not Throw
+
+        $cloneParameters.InputObject=($applying|ConvertTo-Json -Depth 30)
+        $bound=ConvertFrom-Json @cloneParameters
+        $bound.operations[1].after.objectId=('c'*40);$bound.operations[1].state='applied'
+        {Assert-AiInstructionsInstallJournalV2 $bound|Out-Null}|Should Not Throw
+        {Assert-AiInstructionsInstallJournalStoreTransition -Previous $applying -Next $bound|Out-Null}|Should Not Throw
+
+        $withoutEvidence=ConvertFrom-Json @cloneParameters
+        $withoutEvidence.operations=@($withoutEvidence.operations|Select-Object -First 1)
+        (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalStoreTransition -Previous $withoutEvidence -Next $applying|Out-Null})|Should Match 'operations count'
+
+        $cloneParameters.InputObject=($bound|ConvertTo-Json -Depth 30)
+        $rebound=ConvertFrom-Json @cloneParameters;$rebound.operations[1].after.objectId=('d'*40)
+        (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalStoreTransition -Previous $bound -Next $rebound|Out-Null})|Should Match 'after.objectId|fields other than state'
+
+        $tampered=ConvertFrom-Json @cloneParameters;$tampered.operations[1].before.objectId=('d'*40);$tampered.operations[1].before.exists=$true
+        (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalStoreTransition -Previous $bound -Next $tampered|Out-Null})|Should Match 'fields other than state'
+    }
+
+    # Scenario: The same immutable-field tamper matrix is presented to the full parser transition and to the trusted cached transition, including caller-owned operations reused by reference.
+    # Purpose: Prove the trusted optimization rejects every authority drift that the complete parser rejects, without relying on a deliberately incomplete fixture.
+    It 'UnitT224_rejects_the_same_repo_v2_tamper_matrix_in_trusted_and_full_transitions' {
+        $transactionModulePath=Join-Path $script:RepositoryRoot 'scripts/ai-instructions-install-transaction.psm1'
+        $transactionModule=Import-Module $transactionModulePath -Force -PassThru
+        $clone={param($value)$parameters=@{InputObject=($value|ConvertTo-Json -Depth 30)};if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'};ConvertFrom-Json @parameters}
+        $newBaseline={
+            $journal=Get-TestInstallJournalV2
+            $journal.phase='applying'
+            $journal.operations=@($journal.operations)+@([pscustomobject][ordered]@{
+                sequence=2;kind='store-git-stash-evidence';role='personal-agent-evidence';method='stash-store'
+                target=[pscustomobject][ordered]@{kind='git-stash-evidence';value='refs/stash'}
+                before=[pscustomobject][ordered]@{exists=$false;objectId=$null}
+                after=[pscustomobject][ordered]@{exists=$true;objectId=$null}
+                observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
+            })
+            Assert-AiInstructionsInstallJournalV2 $journal|Out-Null
+            return $journal
+        }
+        $toWriteFile={param($j)$o=$j.operations[0];$o.kind='write-file';$o.before=(&$clone $o.after);$o.backupLeaf='operation-1.backup';$o.displacedMetadata=(&$clone $o.before.permissions)}
+        $toRemoveFile={param($j)$o=$j.operations[0];$o.kind='remove-file';$o.method='tombstone-rename';$o.before=(&$clone $o.after);$o.after=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null};$o.stageLeaf=$null;$o.backupLeaf='operation-1.backup';$o.displacedMetadata=(&$clone $o.before.permissions)}
+        $bindApplied={param($j)$o=$j.operations[0];if([string]$o.kind-cne'remove-file'){$o.observedAfter=[pscustomobject][ordered]@{dacl=[pscustomobject][ordered]@{isNull=$true;isProtected=$false;aclBase64=$null};readOnly=$false}};$o.displacedAfterMetadata=[pscustomobject][ordered]@{kind='windows-sddl';sddl='D:(A;ID;FA;;;SY)';readOnly=$false};$o.state='applied'}
+        $samples=@(
+            [pscustomobject]@{Name='top.schemaVersion';Mutate={param($n)$n.schemaVersion=3}},
+            [pscustomobject]@{Name='top.kind';Mutate={param($n)$n.kind='tampered'}},
+            [pscustomobject]@{Name='top.transactionId';Mutate={param($n)$n.transactionId=('f'*32)}},
+            [pscustomobject]@{Name='top.createdAtUtc';Mutate={param($n)$n.createdAtUtc='2026-11-13T00:00:00.0000000Z'}},
+            [pscustomobject]@{Name='top.owner';Mutate={param($n)$n.owner.processId=2}},
+            [pscustomobject]@{Name='top.platform';Mutate={param($n)$n.platform.architecture='arm64'}},
+            [pscustomobject]@{Name='top.lock';Mutate={param($n)$n.lock.leaf='other.lock'}},
+            [pscustomobject]@{Name='top.generation';Mutate={param($n)$n.generation.candidateBundleSha256=('f'*64)}},
+            [pscustomobject]@{Name='top.scope';Mutate={param($n)$n.scope.repositoryRoot=([IO.Path]::GetFullPath((Join-Path $TestDrive 'other-repo')))}},
+            [pscustomobject]@{Name='top.retainedManifestPaths.added';Mutate={param($n)$n.retainedManifestPaths=@([pscustomobject][ordered]@{targetPath='CLAUDE.md';sha256=('d'*64);length=3;identity=[pscustomobject][ordered]@{kind='windows-file-id';device='00000001';fileId='00000003'}})}},
+            [pscustomobject]@{Name='top.retainedManifestPaths.removed';Prepare={param($p)$p.retainedManifestPaths=@([pscustomobject][ordered]@{targetPath='CLAUDE.md';sha256=('d'*64);length=3;identity=[pscustomobject][ordered]@{kind='windows-file-id';device='00000001';fileId='00000003'}})};Mutate={param($n)$n.retainedManifestPaths=@()}},
+            [pscustomobject]@{Name='top.retainedManifestPaths.sha';Prepare={param($p)$p.retainedManifestPaths=@([pscustomobject][ordered]@{targetPath='CLAUDE.md';sha256=('d'*64);length=3;identity=[pscustomobject][ordered]@{kind='windows-file-id';device='00000001';fileId='00000003'}})};Mutate={param($n)$n.retainedManifestPaths[0].sha256=('e'*64)}},
+            [pscustomobject]@{Name='top.retainedManifestPaths.length';Prepare={param($p)$p.retainedManifestPaths=@([pscustomobject][ordered]@{targetPath='CLAUDE.md';sha256=('d'*64);length=3;identity=[pscustomobject][ordered]@{kind='windows-file-id';device='00000001';fileId='00000003'}})};Mutate={param($n)$n.retainedManifestPaths[0].length=4}},
+            [pscustomobject]@{Name='top.retainedManifestPaths.identity';Prepare={param($p)$p.retainedManifestPaths=@([pscustomobject][ordered]@{targetPath='CLAUDE.md';sha256=('d'*64);length=3;identity=[pscustomobject][ordered]@{kind='windows-file-id';device='00000001';fileId='00000003'}})};Mutate={param($n)$n.retainedManifestPaths[0].identity.fileId='00000004'}},
+            [pscustomobject]@{Name='top.phase';Mutate={param($n)$n.phase='prepared'}},
+            [pscustomobject]@{Name='top.phase.non-string';Mutate={param($n)$n.phase=[Text.StringBuilder]::new('applying')}},
+            [pscustomobject]@{Name='operation.sequence';Mutate={param($n)$n.operations[0].sequence=9}},
+            [pscustomobject]@{Name='operation.kind';Mutate={param($n)$n.operations[0].kind='write-file'}},
+            [pscustomobject]@{Name='operation.role';Mutate={param($n)$n.operations[0].role='changed-role'}},
+            [pscustomobject]@{Name='operation.method';Mutate={param($n)$n.operations[0].method='tombstone-rename'}},
+            [pscustomobject]@{Name='operation.target';Mutate={param($n)$n.operations[0].target.value='CLAUDE.md'}},
+            [pscustomobject]@{Name='operation.before';Mutate={param($n)$n.operations[0].before.exists=$true}},
+            [pscustomobject]@{Name='operation.after';Mutate={param($n)$n.operations[0].after.sha256=('e'*64)}},
+            [pscustomobject]@{Name='operation.observedAfter';Prepare={param($p)$p.operations[0].observedAfter=[pscustomobject][ordered]@{dacl=[pscustomobject][ordered]@{isNull=$true;isProtected=$false;aclBase64=$null};readOnly=$false};$p.operations[0].state='applied'};Mutate={param($n)$n.operations[0].observedAfter.readOnly=$true}},
+            [pscustomobject]@{Name='operation.displacedMetadata';Mutate={param($n)$n.operations[0].displacedMetadata=[pscustomobject][ordered]@{kind='windows-sddl';sddl='D:';readOnly=$false}}},
+            [pscustomobject]@{Name='operation.displacedMetadata.write-file';Prepare={param($p)&$toWriteFile $p};Mutate={param($n)$n.operations[0].displacedMetadata.sddl='D:(A;;FA;;;WD)'}},
+            [pscustomobject]@{Name='operation.displacedMetadata.remove-file';Prepare={param($p)&$toRemoveFile $p};Mutate={param($n)$n.operations[0].displacedMetadata.readOnly=$true}},
+            [pscustomobject]@{Name='operation.displacedMetadata.applied-write-file';Prepare={param($p)&$toWriteFile $p;&$bindApplied $p};Mutate={param($n)$n.operations[0].displacedMetadata.sddl='D:(A;ID;FA;;;SY)'}},
+            [pscustomobject]@{Name='operation.displacedAfterMetadata.rebound';Prepare={param($p)&$toWriteFile $p;&$bindApplied $p};Mutate={param($n)$n.operations[0].displacedAfterMetadata.sddl='D:'}},
+            [pscustomobject]@{Name='operation.displacedAfterMetadata.cleared';Prepare={param($p)&$toRemoveFile $p;&$bindApplied $p};Mutate={param($n)$n.operations[0].displacedAfterMetadata=$null}},
+            [pscustomobject]@{Name='operation.displacedAfterMetadata.while-pending';Prepare={param($p)&$toWriteFile $p};Mutate={param($n)$n.operations[0].displacedAfterMetadata=[pscustomobject][ordered]@{kind='windows-sddl';sddl='D:(A;ID;FA;;;SY)';readOnly=$false}}},
+            [pscustomobject]@{Name='operation.displacedAfterMetadata.create-file';Mutate={param($n)&$bindApplied $n}},
+            [pscustomobject]@{Name='operation.observedAfter.invalid-shape';Mutate={param($n)$n.operations[0].observedAfter=[pscustomobject][ordered]@{dacl=[pscustomobject][ordered]@{isNull=$false;isProtected=$false;aclBase64='invalid'};readOnly=$false};$n.operations[0].state='applied'}},
+            [pscustomobject]@{Name='operation.displacedAfterMetadata.invalid-shape';Prepare={param($p)&$toWriteFile $p};Mutate={param($n)$n.operations[0].observedAfter=[pscustomobject][ordered]@{dacl=[pscustomobject][ordered]@{isNull=$true;isProtected=$false;aclBase64=$null};readOnly=$false};$n.operations[0].displacedAfterMetadata=[pscustomobject][ordered]@{kind='windows-sddl';sddl='invalid';readOnly=$false};$n.operations[0].state='applied'}},
+            [pscustomobject]@{Name='operation.stageLeaf';Mutate={param($n)$n.operations[0].stageLeaf='changed.stage'}},
+            [pscustomobject]@{Name='operation.backupLeaf';Mutate={param($n)$n.operations[0].backupLeaf='changed.backup'}},
+            [pscustomobject]@{Name='operation.quarantineLeaf';Mutate={param($n)$n.operations[0].quarantineLeaf='changed.quarantine'}},
+            [pscustomobject]@{Name='operation.state';Mutate={param($n)$n.operations[0].state='invalid'}},
+            [pscustomobject]@{Name='operation.state.non-string';Mutate={param($n)$n.operations[0].state=[Text.StringBuilder]::new('pending')}},
+            [pscustomobject]@{Name='operations.two-state-transitions';Prepare={param($p)$copy=&$clone $p.operations[0];$copy.sequence=3;$copy.target.value='COPILOT.md';$copy.stageLeaf='operation-3.stage';$p.operations=@($p.operations)+@($copy)};Mutate={param($n)$n.operations[0].observedAfter=[pscustomobject][ordered]@{dacl=[pscustomobject][ordered]@{isNull=$true;isProtected=$false;aclBase64=$null};readOnly=$false};$n.operations[0].state='applied';$n.operations[2].observedAfter=[pscustomobject][ordered]@{dacl=[pscustomobject][ordered]@{isNull=$true;isProtected=$false;aclBase64=$null};readOnly=$false};$n.operations[2].state='applied'}},
+            [pscustomobject]@{Name='operations.two-metadata-bindings';Prepare={param($p)&$toWriteFile $p;$copy=&$clone $p.operations[0];$copy.sequence=3;$copy.target.value='COPILOT.md';$copy.stageLeaf='operation-3.stage';$copy.backupLeaf='operation-3.backup';$p.operations=@($p.operations)+@($copy)};Mutate={param($n)&$bindApplied $n;$n.operations[2].observedAfter=[pscustomobject][ordered]@{dacl=[pscustomobject][ordered]@{isNull=$true;isProtected=$false;aclBase64=$null};readOnly=$false};$n.operations[2].displacedAfterMetadata=[pscustomobject][ordered]@{kind='windows-sddl';sddl='D:(A;ID;FA;;;SY)';readOnly=$false};$n.operations[2].state='applied'}},
+            [pscustomobject]@{Name='operations.state-and-binding-on-different-operations';Prepare={param($p)&$toWriteFile $p;$copy=&$clone $p.operations[0];$copy.sequence=3;$copy.target.value='COPILOT.md';$copy.stageLeaf='operation-3.stage';$copy.backupLeaf='operation-3.backup';$p.operations=@($p.operations)+@($copy)};Mutate={param($n)$n.operations[0].state='applied';$n.operations[0].observedAfter=[pscustomobject][ordered]@{dacl=[pscustomobject][ordered]@{isNull=$true;isProtected=$false;aclBase64=$null};readOnly=$false};$n.operations[0].displacedAfterMetadata=[pscustomobject][ordered]@{kind='windows-sddl';sddl='D:(A;ID;FA;;;SY)';readOnly=$false};$n.operations[2].displacedAfterMetadata=[pscustomobject][ordered]@{kind='windows-sddl';sddl='D:(A;ID;FA;;;SY)';readOnly=$false}}},
+            [pscustomobject]@{Name='operation.deleted';Mutate={param($n)$n.operations=@($n.operations|Select-Object -First 1)}},
+            [pscustomobject]@{Name='operation.added';Mutate={param($n)$copy=&$clone $n.operations[0];$copy.sequence=3;$copy.target.value='COPILOT.md';$copy.stageLeaf='operation-3.stage';$n.operations=@($n.operations)+@($copy)}},
+            [pscustomobject]@{Name='operation.reordered';Mutate={param($n)$n.operations=@($n.operations[1],$n.operations[0])}},
+            [pscustomobject]@{Name='evidence.invalid-object-id';Mutate={param($n)$n.operations[1].after.objectId='invalid';$n.operations[1].state='applied'}},
+            [pscustomobject]@{Name='evidence.rebound';Prepare={param($p)$p.operations[1].after.objectId=('c'*40);$p.operations[1].state='applied'};Mutate={param($n)$n.operations[1].after.objectId=('d'*40)}},
+            [pscustomobject]@{Name='evidence.bound-to-wrong-operation';Mutate={param($n)$n.operations[0].after|Add-Member -NotePropertyName objectId -NotePropertyValue ('c'*40);$n.operations[0].state='applied'}}
+        )
+        $acceptedByTrusted=New-Object System.Collections.Generic.List[string]
+        $acceptedByFull=New-Object System.Collections.Generic.List[string]
+        try{
+            foreach($sample in $samples){
+                $previous=&$newBaseline
+                if($null-ne$sample.PSObject.Properties['Prepare']){&$sample.Prepare $previous}
+                Assert-AiInstructionsInstallJournalV2 $previous|Out-Null
+                $trustedPrevious=&$clone $previous
+                $issuedPrevious=&$clone $previous
+                $next=[pscustomobject][ordered]@{}
+                foreach($property in @($issuedPrevious.PSObject.Properties)){$next|Add-Member -NotePropertyName $property.Name -NotePropertyValue $property.Value}
+                &$sample.Mutate $next
+                try{&$transactionModule {param($left,$right,$identity)Assert-InstallJournalV2TrustedTransition -Previous $left -Next $right -PreviousIdentityJournal $identity|Out-Null} $trustedPrevious $next $issuedPrevious;$acceptedByTrusted.Add($sample.Name)}catch{}
+                try{Assert-AiInstructionsInstallJournalStoreTransition -Previous $previous -Next $next|Out-Null;$acceptedByFull.Add($sample.Name)}catch{}
+            }
+            @($acceptedByTrusted)|Should BeNullOrEmpty
+            @($acceptedByFull)|Should BeNullOrEmpty
+        }finally{Remove-Module $transactionModule -Force}
+    }
+
+    # Scenario: A displacing write-file or remove-file operation becomes applied and binds its displaced-after metadata in that same generation.
+    # Purpose: Accept exactly that one binding in both trusted and full transitions while rejecting an applied displacing operation without the binding.
+    It 'UnitT226_binds_displacedAfterMetadata_only_with_the_applied_state_in_trusted_and_full_transitions' {
+        $transactionModulePath=Join-Path $script:RepositoryRoot 'scripts/ai-instructions-install-transaction.psm1'
+        $transactionModule=Import-Module $transactionModulePath -Force -PassThru
+        $clone={param($value)$parameters=@{InputObject=($value|ConvertTo-Json -Depth 30)};if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'};ConvertFrom-Json @parameters}
+        $displacedAfter=[pscustomobject][ordered]@{kind='windows-sddl';sddl='D:(A;ID;FA;;;SY)';readOnly=$false}
+        $observedAfter=[pscustomobject][ordered]@{dacl=[pscustomobject][ordered]@{isNull=$true;isProtected=$false;aclBase64=$null};readOnly=$false}
+        $newPending={
+            param([ValidateSet('write-file','remove-file')][string]$Kind)
+            $journal=Get-TestInstallJournalV2;$journal.phase='applying';$o=$journal.operations[0]
+            $o.kind=$Kind;$o.before=(&$clone $o.after);$o.backupLeaf='operation-1.backup';$o.displacedMetadata=(&$clone $o.before.permissions)
+            if($Kind-ceq'remove-file'){$o.method='tombstone-rename';$o.after=[pscustomobject][ordered]@{exists=$false;sha256=$null;length=$null;identity=$null;permissions=$null};$o.stageLeaf=$null}
+            Assert-AiInstructionsInstallJournalV2 $journal|Out-Null
+            return $journal
+        }
+        try{
+            foreach($kind in @('write-file','remove-file')){
+                $previous=&$newPending $kind
+                $bound=&$clone $previous;$bound.operations[0].state='applied';$bound.operations[0].displacedAfterMetadata=(&$clone $displacedAfter)
+                if($kind-ceq'write-file'){$bound.operations[0].observedAfter=(&$clone $observedAfter)}
+                {Assert-AiInstructionsInstallJournalStoreTransition -Previous $previous -Next $bound|Out-Null}|Should Not Throw
+                {&$transactionModule {param($left,$right)Assert-InstallJournalV2TrustedTransition -Previous $left -Next $right|Out-Null} (&$clone $previous) $bound}|Should Not Throw
+
+                $unbound=&$clone $previous;$unbound.operations[0].state='applied'
+                if($kind-ceq'write-file'){$unbound.operations[0].observedAfter=(&$clone $observedAfter)}
+                (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalV2 $unbound|Out-Null})|Should Match 'displacedAfterMetadata must not be null'
+                {Assert-AiInstructionsInstallJournalStoreTransition -Previous $previous -Next $unbound|Out-Null}|Should Throw
+                {&$transactionModule {param($left,$right)Assert-InstallJournalV2TrustedTransition -Previous $left -Next $right|Out-Null} (&$clone $previous) $unbound}|Should Throw
+            }
+        }finally{Remove-Module $transactionModule -Force}
+    }
+
+    # Scenario: A transaction that reuses PersonalAgent evidence records refs/stash as an existing before=after update-git-ref CAS operation.
+    # Purpose: Permit only the closed compare-only shape used to revalidate reuse decisions and reject target or object-ID drift.
+    It 'UnitT225_accepts_only_the_closed_PersonalAgent_evidence_reuse_CAS_shape' {
+        $journal=Get-TestInstallJournalV2
+        $journal.operations=@($journal.operations)+@([pscustomobject][ordered]@{
+            sequence=2;kind='update-git-ref';role='personal-agent-evidence-cas';method='update-ref'
+            target=[pscustomobject][ordered]@{kind='git-ref';value='refs/stash'}
+            before=[pscustomobject][ordered]@{exists=$true;objectId=('c'*40)}
+            after=[pscustomobject][ordered]@{exists=$true;objectId=('c'*40)}
+            observedAfter=$null;displacedMetadata=$null;displacedAfterMetadata=$null;stageLeaf=$null;backupLeaf=$null;quarantineLeaf=$null;state='pending'
+        })
+        {Assert-AiInstructionsInstallJournalV2 $journal|Out-Null}|Should Not Throw
+        $clone={param($value)$parameters=@{InputObject=($value|ConvertTo-Json -Depth 30)};if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'};ConvertFrom-Json @parameters}
+        $wrongTarget=&$clone $journal;$wrongTarget.operations[1].target.value='refs/heads/main'
+        (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalV2 $wrongTarget|Out-Null})|Should Match 'PersonalAgent evidence CAS'
+        $differentAfter=&$clone $journal;$differentAfter.operations[1].after.objectId=('d'*40)
+        (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalV2 $differentAfter|Out-Null})|Should Match 'PersonalAgent evidence CAS'
+        $absent=&$clone $journal;$absent.operations[1].before.exists=$false;$absent.operations[1].before.objectId=$null
+        (Get-RuntimeContractError {Assert-AiInstructionsInstallJournalV2 $absent|Out-Null})|Should Match 'PersonalAgent evidence CAS'
+    }
+
+    # Scenario: Detached HEAD publication runs with a simulated pre-2.46 Git, then with HEAD changed to a different symbolic ref after the old detached OID was observed.
+    # Purpose: Add the version seam and prove the atomic symref CAS preserves an external HEAD change while returning the required typed refusals.
+    It 'UnitT227_requires_Git_2_46_and_preserves_HEAD_when_detached_to_symbolic_CAS_loses' {
+        $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrapPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
+        $definitions=@('Invoke-Git','Get-GitExitCode','Get-RepositoryGitVersion','Get-RepositoryHeadQueryState','Get-RepositoryHeadState','Set-RepositoryDetachedHeadSymbolicCompareAndSwap')|ForEach-Object{$name=$_;@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true))[0].Extent.Text}
+        $gitExecutable=(Get-Command git -ErrorAction Stop).Source
+        $versionRepo=Join-Path $TestDrive 'head-version';New-Item -ItemType Directory -Path $versionRepo|Out-Null;& git -C $versionRepo init -q;& git -C $versionRepo config user.name test;& git -C $versionRepo config user.email test@example.test;[IO.File]::WriteAllText((Join-Path $versionRepo 'a'),'a');& git -C $versionRepo add a;& git -C $versionRepo commit -qm initial;$versionOid=(@(& git -C $versionRepo rev-parse HEAD)|Select-Object -First 1).Trim();& git -C $versionRepo checkout -q --detach $versionOid
+        $versionCode=& {param($defs,$git,$repo,$oid)$GitExecutable=$git;foreach($definition in $defs){Invoke-Expression $definition};function Get-RepositoryGitVersion{param([string]$Repository);return [version]'2.45.0'};try{Set-RepositoryDetachedHeadSymbolicCompareAndSwap -Repository $repo -ExpectedObjectId $oid -NewReference 'refs/heads/remediation';$null}catch{Get-AiInstructionsRefusalCode $_}} $definitions $gitExecutable $versionRepo $versionOid
+        $versionCode|Should Be capability-unavailable
+        @(& git -C $versionRepo symbolic-ref -q HEAD)|Should BeNullOrEmpty
+
+        $raceRepo=Join-Path $TestDrive 'head-race';New-Item -ItemType Directory -Path $raceRepo|Out-Null;& git -C $raceRepo init -q;& git -C $raceRepo config user.name test;& git -C $raceRepo config user.email test@example.test;[IO.File]::WriteAllText((Join-Path $raceRepo 'a'),'a');& git -C $raceRepo add a;& git -C $raceRepo commit -qm initial;$observed=(@(& git -C $raceRepo rev-parse HEAD)|Select-Object -First 1).Trim();[IO.File]::AppendAllText((Join-Path $raceRepo 'a'),'b');& git -C $raceRepo add a;& git -C $raceRepo commit -qm external;$external=(@(& git -C $raceRepo rev-parse HEAD)|Select-Object -First 1).Trim();& git -C $raceRepo branch external $external;& git -C $raceRepo symbolic-ref HEAD refs/heads/external
+        $raceResult=& {param($defs,$git,$repo,$oid)$GitExecutable=$git;foreach($definition in $defs){Invoke-Expression $definition};try{Set-RepositoryDetachedHeadSymbolicCompareAndSwap -Repository $repo -ExpectedObjectId $oid -NewReference 'refs/heads/remediation';$null}catch{[pscustomobject]@{Code=(Get-AiInstructionsRefusalCode $_);Message=$_.Exception.Message}}} $definitions $gitExecutable $raceRepo $observed
+        $raceResult.Code|Should Be interrupted-install
+        $raceResult.Message|Should Match 'atomic symbolic-ref CAS refused'
+        (@(& git -C $raceRepo symbolic-ref HEAD)|Select-Object -First 1).Trim()|Should BeExactly 'refs/heads/external'
+    }
+
+    # Scenario: Detached HEAD symref CAS fails for a non-race Git write error while HEAD remains detached at the observed object ID.
+    # Purpose: Report the update-ref --stdin write failure without claiming that HEAD changed or that an external state was preserved.
+    It 'UnitT227a_reports_detached_HEAD_symref_CAS_write_failure_when_HEAD_is_unchanged' {
+        $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrapPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
+        $definitions=@('Get-RepositoryGitVersion','Get-RepositoryHeadQueryState','Get-RepositoryHeadState','Set-RepositoryDetachedHeadSymbolicCompareAndSwap')|ForEach-Object{$name=$_;@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true))[0].Extent.Text}
+        $expectedOid='a'*40
+        $result=& {param($defs,$oid)foreach($definition in $defs){Invoke-Expression $definition};function Get-GitExitCode{param([string]$Repository,[string[]]$Arguments);if($Arguments[0]-ceq'symbolic-ref'){return 1};if($Arguments[0]-ceq'rev-parse'){return 0};throw "Unexpected exit-code probe: $($Arguments-join' ')"};function Invoke-Git{param([string]$Repository,[string[]]$Arguments,[string[]]$StandardInputLines);if($Arguments[0]-ceq'--version'){return 'git version 2.55.0'};if($Arguments[0]-ceq'update-ref'){throw 'injected update-ref stdin write failure'};if($Arguments[0]-ceq'rev-parse'){return $oid};throw "Unexpected git call: $($Arguments-join' ')"};try{Set-RepositoryDetachedHeadSymbolicCompareAndSwap -Repository 'fixture' -ExpectedObjectId $oid -NewReference 'refs/heads/remediation';$null}catch{[pscustomobject]@{Code=(Get-AiInstructionsRefusalCode $_);Message=$_.Exception.Message}}} $definitions $expectedOid
+        $result.Code|Should Be interrupted-install
+        $result.Message|Should Match 'git update-ref --stdin.*write failed'
+        $result.Message|Should Match 'injected update-ref stdin write failure'
+        $result.Message|Should Not Match 'HEAD changed after observation'
+        $result.Message|Should Not Match 'external HEAD state was preserved'
+    }
+
+    # Scenario: Journal HEAD observation receives a symbolic-ref exit code other than Git's documented detached result.
+    # Purpose: Preserve the Git diagnostic and prevent an I/O, permission, or repository error from being reported as detached HEAD.
+    It 'UnitT227b_rejects_journal_HEAD_symbolic_ref_git_errors_instead_of_returning_detached' {
+        $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrapPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
+        $definitions=@('Get-RepositoryHeadQueryState','Get-RepositoryTransactionHeadState')|ForEach-Object{$name=$_;@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true))[0].Extent.Text}
+        $headPath=Join-Path $TestDrive 'symbolic-error-HEAD';[IO.File]::WriteAllText($headPath,'ref: refs/heads/main')
+        $journal=[pscustomobject]@{scope=[pscustomobject]@{repositoryRoot='fixture';gitDirectory=$TestDrive}}
+        $result=& {param($defs,$value,$path)foreach($definition in $defs){Invoke-Expression $definition};function Get-ByteArraySha256{param([byte[]]$Bytes);return 'raw'};function Get-GitExitCode{param([string]$Repository,[string[]]$Arguments);return 128};function Invoke-Git{param([string]$Repository,[string[]]$Arguments);throw 'injected symbolic-ref read failure'};$value.scope.gitDirectory=Split-Path -Parent $path;Move-Item -LiteralPath $path -Destination (Join-Path $value.scope.gitDirectory 'HEAD');try{[pscustomobject]@{State=(Get-RepositoryTransactionHeadState $value);Message=$null}}catch{[pscustomobject]@{State=$null;Message=$_.Exception.Message}}} $definitions $journal $headPath
+        $result.State|Should BeNullOrEmpty
+        $result.Message|Should Match 'injected symbolic-ref read failure'
+    }
+
+    # Scenario: Journal HEAD observation resolves a symbolic ref, but rev-parse fails with a Git error rather than the documented missing-object result.
+    # Purpose: Preserve the Git diagnostic and prevent an operational failure from being reported as an unborn symbolic HEAD.
+    It 'UnitT227c_rejects_journal_HEAD_rev_parse_git_errors_instead_of_returning_unborn' {
+        $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrapPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
+        $definitions=@('Get-RepositoryHeadQueryState','Get-RepositoryTransactionHeadState')|ForEach-Object{$name=$_;@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true))[0].Extent.Text}
+        $headDirectory=Join-Path $TestDrive 'rev-parse-error';New-Item -ItemType Directory -Path $headDirectory|Out-Null;[IO.File]::WriteAllText((Join-Path $headDirectory 'HEAD'),'ref: refs/heads/main')
+        $journal=[pscustomobject]@{scope=[pscustomobject]@{repositoryRoot='fixture';gitDirectory=$headDirectory}}
+        $result=& {param($defs,$value)foreach($definition in $defs){Invoke-Expression $definition};function Get-ByteArraySha256{param([byte[]]$Bytes);return 'raw'};function Get-GitExitCode{param([string]$Repository,[string[]]$Arguments);if($Arguments[0]-ceq'symbolic-ref'){return 0};return 128};function Invoke-Git{param([string]$Repository,[string[]]$Arguments);if($Arguments[0]-ceq'symbolic-ref'){return 'refs/heads/main'};throw 'injected rev-parse read failure'};try{[pscustomobject]@{State=(Get-RepositoryTransactionHeadState $value);Message=$null}}catch{[pscustomobject]@{State=$null;Message=$_.Exception.Message}}} $definitions $journal
+        $result.State|Should BeNullOrEmpty
+        $result.Message|Should Match 'injected rev-parse read failure'
+    }
+
+    # Scenario: Journal HEAD observation receives the three valid symbolic, detached, and unborn Git result combinations.
+    # Purpose: Keep the established journal state shape and values byte-compatible while hardening only Git error handling.
+    It 'UnitT227d_preserves_journal_HEAD_symbolic_detached_and_unborn_states' {
+        $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrapPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
+        $definitions=@('Get-RepositoryHeadQueryState','Get-RepositoryTransactionHeadState')|ForEach-Object{$name=$_;@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true))[0].Extent.Text}
+        $headDirectory=Join-Path $TestDrive 'valid-head-states';New-Item -ItemType Directory -Path $headDirectory|Out-Null;[IO.File]::WriteAllText((Join-Path $headDirectory 'HEAD'),'fixture')
+        $journal=[pscustomobject]@{scope=[pscustomobject]@{repositoryRoot='fixture';gitDirectory=$headDirectory}}
+        $states=@('symbolic','detached','unborn')|ForEach-Object{& {param($defs,$value,$scenario)foreach($definition in $defs){Invoke-Expression $definition};function Get-ByteArraySha256{param([byte[]]$Bytes);return 'raw'};function Get-GitExitCode{param([string]$Repository,[string[]]$Arguments);if($Arguments[0]-ceq'symbolic-ref'){return $(if($scenario-ceq'detached'){1}else{0})};return $(if($scenario-ceq'unborn'){1}else{0})};function Invoke-Git{param([string]$Repository,[string[]]$Arguments);if($Arguments[0]-ceq'symbolic-ref'){return 'refs/heads/main'};if($Arguments[0]-ceq'rev-parse'){return ('a'*40)};throw "Unexpected git call: $($Arguments-join' ')"};Get-RepositoryTransactionHeadState $value} $definitions $journal $_}
+        @($states).Count|Should Be 3
+        $states[0].mode|Should BeExactly 'symbolic';$states[0].reference|Should BeExactly 'refs/heads/main';$states[0].objectId|Should BeExactly ('a'*40);$states[0].rawSha256|Should BeExactly 'raw'
+        $states[1].mode|Should BeExactly 'detached';$states[1].reference|Should BeNullOrEmpty;$states[1].objectId|Should BeExactly ('a'*40);$states[1].rawSha256|Should BeExactly 'raw'
+        $states[2].mode|Should BeExactly 'unborn';$states[2].reference|Should BeExactly 'refs/heads/main';$states[2].objectId|Should BeNullOrEmpty;$states[2].rawSha256|Should BeExactly 'raw'
+    }
+
+    # Scenario: refs/stash changes from the prepared before OID to an external OID immediately before evidence publication.
+    # Purpose: Verify the evidence helper uses update-ref expected-old CAS, preserves the external ref, and returns interrupted-install.
+    It 'UnitT228_preserves_external_refs_stash_when_evidence_CAS_loses' {
+        $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrapPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
+        $definitions=@('Invoke-Git','Get-RepositoryGitRefState','Get-RepositoryStashRefState','Invoke-RepositoryStashRefCompareAndSwap')|ForEach-Object{$name=$_;@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true))[0].Extent.Text}
+        $repo=Join-Path $TestDrive 'stash-cas';New-Item -ItemType Directory -Path $repo|Out-Null;& git -C $repo init -q;& git -C $repo config user.name test;& git -C $repo config user.email test@example.test
+        $oids=New-Object System.Collections.Generic.List[string];foreach($value in @('a','b','c')){[IO.File]::AppendAllText((Join-Path $repo 'a'),$value);& git -C $repo add a;& git -C $repo commit -qm $value;$oids.Add((@(& git -C $repo rev-parse HEAD)|Select-Object -First 1).Trim())}
+        & git -C $repo update-ref refs/stash ([string]$oids[0]);$expected=[pscustomobject][ordered]@{exists=$true;objectId=[string]$oids[0]};& git -C $repo update-ref refs/stash ([string]$oids[1]) ([string]$oids[0])
+        $gitExecutable=(Get-Command git -ErrorAction Stop).Source
+        $result=& {param($defs,$git,$root,$before,$newOid)$GitExecutable=$git;foreach($definition in $defs){Invoke-Expression $definition};try{Invoke-RepositoryStashRefCompareAndSwap -Repository $root -Expected $before -NewObjectId $newOid -ReflogMessage evidence;$null}catch{[pscustomobject]@{Code=(Get-AiInstructionsRefusalCode $_);Message=$_.Exception.Message}}} $definitions $gitExecutable $repo $expected ([string]$oids[2])
+        $result.Code|Should Be interrupted-install
+        $result.Message|Should Match 'changed after the prepared decision'
+        (@(& git -C $repo rev-parse refs/stash)|Select-Object -First 1).Trim()|Should BeExactly ([string]$oids[1])
+    }
+
+    # Scenario: refs/stash exists at the prepared OID, but both update-ref and its failure readback encounter Git errors.
+    # Purpose: Preserve both Git diagnostics and classify the result as a write failure instead of a prepared-decision race.
+    It 'UnitT228a_reports_refs_stash_write_failure_when_failure_readback_also_fails' {
+        $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrapPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
+        $definitions=@('Get-RepositoryGitRefState','Get-RepositoryStashRefState','Invoke-RepositoryStashRefCompareAndSwap')|ForEach-Object{$name=$_;@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true))[0].Extent.Text}
+        $expected=[pscustomobject][ordered]@{exists=$true;objectId=('a'*40)}
+        $result=& {param($defs,$before)foreach($definition in $defs){Invoke-Expression $definition};function Invoke-Git{param([string]$Repository,[string[]]$Arguments,[string[]]$StandardInputLines);if($Arguments[0]-ceq'rev-parse'){return 'sha1'};if($Arguments[0]-ceq'update-ref'){throw 'injected refs/stash update failure'};if($Arguments[0]-ceq'for-each-ref'){throw 'injected refs/stash readback failure'};throw "Unexpected git call: $($Arguments-join' ')"};try{Invoke-RepositoryStashRefCompareAndSwap -Repository 'fixture' -Expected $before -NewObjectId ('b'*40) -ReflogMessage evidence;$null}catch{[pscustomobject]@{Code=(Get-AiInstructionsRefusalCode $_);Message=$_.Exception.Message}}} $definitions $expected
+        $result.Code|Should Be interrupted-install
+        $result.Message|Should Match 'git update-ref refs/stash write failed'
+        $result.Message|Should Match 'injected refs/stash update failure'
+        $result.Message|Should Match 'injected refs/stash readback failure'
+        $result.Message|Should Not Match 'changed after the prepared decision'
+    }
+
+    # Scenario: A prepared repo-v2 journal contains one retained manifest path and advances through every legal phase and operation generation via the production copy helper.
+    # Purpose: Preserve retainedManifestPaths as an immutable array in every generation, accept the complete legal sequence in trusted and full parsers, and reject retained authority tampering.
+    It 'UnitT229_preserves_nonempty_retained_manifest_authority_through_the_complete_legal_sequence' {
+        $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrapPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
+        $copyDefinition=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Copy-RepositoryInstallJournal'},$true))[0].Extent.Text
+        Invoke-Expression $copyDefinition
+        $transactionModule=Import-Module (Join-Path $script:RepositoryRoot 'scripts/ai-instructions-install-transaction.psm1') -Force -PassThru
+        $clone={param($value)$parameters=@{InputObject=($value|ConvertTo-Json -Depth 30)};if((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')){$parameters.DateKind='String'};ConvertFrom-Json @parameters}
+        $assertTransition={
+            param($previous,$next)
+            $next.retainedManifestPaths-is[System.Array]|Should Be $true
+            @($next.retainedManifestPaths).Count|Should Be 1
+            {Assert-AiInstructionsInstallJournalV2 $next|Out-Null}|Should Not Throw
+            {Assert-AiInstructionsInstallJournalStoreTransition -Previous $previous -Next $next|Out-Null}|Should Not Throw
+            {&$transactionModule {param($left,$right)Assert-InstallJournalV2TrustedTransition -Previous $left -Next $right|Out-Null} $previous $next}|Should Not Throw
+        }
+        try{
+            $prepared=Get-TestInstallJournalV2
+            $prepared.retainedManifestPaths=[object[]]@([pscustomobject][ordered]@{targetPath='CLAUDE.md';sha256=('d'*64);length=[int64]3;identity=[pscustomobject][ordered]@{kind='windows-file-id';device='00000001';fileId='00000003'}})
+            {Assert-AiInstructionsInstallJournalV2 $prepared|Out-Null}|Should Not Throw
+
+            $applying=Copy-RepositoryInstallJournal -Journal $prepared -Phase applying
+            &$assertTransition $prepared $applying
+            $observedAfter=[pscustomobject][ordered]@{dacl=[pscustomobject][ordered]@{isNull=$true;isProtected=$false;aclBase64=$null};readOnly=$false}
+            $operationApplied=Copy-RepositoryInstallJournal -Journal $applying -Sequence 1 -ObservedAfter $observedAfter
+            &$assertTransition $applying $operationApplied
+            $applied=Copy-RepositoryInstallJournal -Journal $operationApplied -Phase applied
+            &$assertTransition $operationApplied $applied
+            $committed=Copy-RepositoryInstallJournal -Journal $applied -Phase committed
+            &$assertTransition $applied $committed
+
+            $tampered=&$clone $committed;$tampered.retainedManifestPaths[0].sha256=('e'*64)
+            {Assert-AiInstructionsInstallJournalStoreTransition -Previous $committed -Next $tampered|Out-Null}|Should Throw
+            {&$transactionModule {param($left,$right)Assert-InstallJournalV2TrustedTransition -Previous $left -Next $right|Out-Null} $committed $tampered}|Should Throw
+        }finally{Remove-Module $transactionModule -Force}
+    }
+
+    # Scenario: Bootstrap queries remote/config/tracked/diff state and Git returns an operational error rather than a documented negative result.
+    # Purpose: Require each remaining exit-code consumer to preserve the Git diagnostic while retaining its documented negative-code contract.
+    It 'UnitT230_hardens_all_remaining_bootstrap_Git_exit_code_consumers' {
+        $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrapPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
+        $getDefinition={param($name)@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true))[0].Extent.Text}
+        $queryDefinition=&$getDefinition 'Get-GitQueryResult'
+        $staticExpectations=@(
+            @{Name='Test-IsCanonicalInstructionSourceRepository';Pattern="remote','get-url','origin'.*-NegativeExitCodes @\(2\)"},
+            @{Name='Get-GitPathComparer';Pattern="core\.ignorecase'.*-NegativeExitCodes @\(1\)"},
+            @{Name='Get-ClaudeProjectOwnedWorktreeRoots';Pattern="ls-files','--error-unmatch'.*-NegativeExitCodes @\(1\)"}
+        )
+        foreach($expectation in $staticExpectations){(& $getDefinition $expectation.Name)|Should Match $expectation.Pattern}
+        foreach($command in @(
+            @('remote','get-url','origin'),@('config','--bool','--get','core.ignorecase'),@('ls-files','--error-unmatch','--','CLAUDE.md')
+        )){
+            $message=& {param($definition,$arguments)Invoke-Expression $definition;function Get-GitExitCode{param([string]$Repository,[string[]]$Arguments);128};function Invoke-Git{param([string]$Repository,[string[]]$Arguments);throw "injected git error: $($Arguments-join' ')"};try{Get-GitQueryResult -Repository fixture -Arguments $arguments -NegativeExitCodes @(1,2)|Out-Null;$null}catch{$_.Exception.Message}} $queryDefinition $command
+            $message|Should Match 'injected git error'
+        }
+        foreach($functionName in @('Test-GitPathHasChanges','Test-GitPathHasStagedChanges')){
+            $definition=&$getDefinition $functionName
+            $message=& {param($text,$name)Invoke-Expression $text;function Get-GitExitCode{param([string]$Repository,[string[]]$Arguments);128};function Invoke-Git{param([string]$Repository,[string[]]$Arguments);throw "injected diff error: $($Arguments-join' ')"};try{& $name -Repository fixture -Path managed.md|Out-Null;$null}catch{$_.Exception.Message}} $definition $functionName
+            $message|Should Match 'injected diff error'
+        }
+    }
+
+    # Scenario: diff --quiet initially reports an operational Git error, but the diagnostic rerun succeeds.
+    # Purpose: The successful rerun must not turn the original failed inspection into a false "no changes" result.
+    It 'UnitT230a_rejects_managed_path_diff_errors_when_diagnostic_rerun_succeeds' {
+        $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrapPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
+        $getDefinition={param($name)@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true))[0].Extent.Text}
+        foreach($functionName in @('Test-GitPathHasChanges','Test-GitPathHasStagedChanges')){
+            $definition=&$getDefinition $functionName
+            $message=& {param($text,$name)Invoke-Expression $text;function Get-GitExitCode{param([string]$Repository,[string[]]$Arguments);128};function Invoke-Git{param([string]$Repository,[string[]]$Arguments);return @()};try{& $name -Repository fixture -Path managed.md|Out-Null;$null}catch{$_.Exception.Message}} $definition $functionName
+            $message|Should Match 'Unable to inspect'
+            $message|Should Match '128'
+        }
+    }
+
+    # Scenario: diff --quiet reports a negative Windows NTSTATUS exit code for either managed-path inspection route.
+    # Purpose: Treat every exit code other than the documented 0 or 1 result as an operational failure.
+    It 'UnitT230b_rejects_negative_managed_path_diff_exit_codes' {
+        $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrapPath,[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
+        $getDefinition={param($name)@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true))[0].Extent.Text}
+        $negativeExitCode=-1073741510
+        foreach($case in @(
+            @{Name='Test-GitPathHasChanges';WorkingTreeExitCode=$negativeExitCode;IndexExitCode=0},
+            @{Name='Test-GitPathHasChanges';WorkingTreeExitCode=0;IndexExitCode=$negativeExitCode},
+            @{Name='Test-GitPathHasStagedChanges';WorkingTreeExitCode=0;IndexExitCode=$negativeExitCode}
+        )){
+            $definition=&$getDefinition $case.Name
+            $message=& {
+                param($text,$name,$workingTreeExitCode,$indexExitCode)
+                Invoke-Expression $text
+                function Get-GitExitCode {
+                    param([string]$Repository,[string[]]$Arguments)
+                    if($Arguments -contains '--cached'){return $indexExitCode}
+                    return $workingTreeExitCode
+                }
+                function Invoke-Git { param([string]$Repository,[string[]]$Arguments);return @() }
+                try{& $name -Repository fixture -Path managed.md|Out-Null;$null}catch{$_.Exception.Message}
+            } $definition $case.Name $case.WorkingTreeExitCode $case.IndexExitCode
+            $message|Should Match 'Unable to inspect'
+            $message|Should Match ([regex]::Escape([string]$negativeExitCode))
+        }
+    }
+
+    # Scenario: Bootstrap starts in an unborn repository or receives an operational rev-parse error while checking the initial HEAD.
+    # Purpose: Preserve the existing unborn skip message, but fail with Git stderr instead of misreporting an operational error as no commit.
+    It 'InterT231_distinguishes_unborn_HEAD_from_initial_HEAD_query_errors' {
+        $bootstrapPath=Join-Path $script:RepositoryRoot 'scripts/bootstrap-ai-instructions.ps1'
+        $repository=Join-Path $TestDrive 'bootstrap-head-query';New-Item -ItemType Directory -Force -Path $repository|Out-Null;& git -C $repository init --quiet
+        $userHome=Join-Path $TestDrive 'isolated-user';New-Item -ItemType Directory -Force -Path $userHome|Out-Null
+        $configuration=Join-Path $TestDrive 'missing-configuration.json'
+        $unbornOutput=@(& pwsh -NoProfile -File $bootstrapPath -TargetRoot $repository -UserHome $userHome -ConfigurationPath $configuration -RuntimeRoot (Join-Path $script:RepositoryRoot 'scripts') 2>&1)
+        $LASTEXITCODE|Should Be 0
+        ($unbornOutput-join[Environment]::NewLine)|Should Match 'target repository has no commit'
+
+        $realGit=(Get-Command git -ErrorAction Stop).Source;$shim=Join-Path $TestDrive 'bootstrap-head-error.cmd'
+        $shimText=@"
+@echo off
+setlocal
+echo(%*| %SystemRoot%\System32\findstr.exe /L /C:"rev-parse --verify --quiet HEAD" >nul
+if not errorlevel 1 (
+  1>&2 echo injected initial HEAD query failure
+  exit /b 128
+)
+"$realGit" %*
+exit /b %errorlevel%
+"@
+        [IO.File]::WriteAllText($shim,$shimText,[Text.Encoding]::ASCII)
+        $errorOutput=@(& pwsh -NoProfile -File $bootstrapPath -TargetRoot $repository -UserHome $userHome -ConfigurationPath $configuration -RuntimeRoot (Join-Path $script:RepositoryRoot 'scripts') -GitExecutable $shim 2>&1)
+        $LASTEXITCODE|Should Not Be 0
+        ($errorOutput-join[Environment]::NewLine)|Should Match 'injected initial HEAD query failure'
+        ($errorOutput-join[Environment]::NewLine)|Should Not Match 'target repository has no commit'
     }
 }
