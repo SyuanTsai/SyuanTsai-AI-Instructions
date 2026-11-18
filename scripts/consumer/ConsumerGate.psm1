@@ -38,6 +38,20 @@ function ConvertFrom-GateJsonBytes([byte[]]$Bytes,[string]$Context) {
     }catch{if($_.Exception.Message-match'^(BLOCKED|FAILED|INVALID|CANCELLED)\|'){throw}
     Throw-GateResult INVALID "$Context is not unambiguous UTF-8 JSON."}
 }
+function Open-GateJsonDocument([byte[]]$Bytes,[string]$Context) {
+    if($bytes.Length-ge3-and$bytes[0]-eq239-and$bytes[1]-eq187-and$bytes[2]-eq191){Throw-GateResult INVALID "$Context has a UTF-8 BOM."}
+    $document=$null
+    try{
+        $text=[Text.UTF8Encoding]::new($false,$true).GetString($bytes)
+        $document=[Text.Json.JsonDocument]::Parse($text)
+        Assert-GateNoDuplicateJson $document.RootElement $Context
+        $document
+    }catch{
+        if($null-ne$document){$document.Dispose()}
+        if($_.Exception.Message-match'^(BLOCKED|FAILED|INVALID|CANCELLED)\|'){throw}
+        Throw-GateResult INVALID "$Context is not unambiguous UTF-8 JSON."
+    }
+}
 function Read-GateJson([string]$Path,[string]$Context) {
     if(-not(Test-Path -LiteralPath $Path -PathType Leaf)){Throw-GateResult INVALID "$Context is missing."}
     $item=Get-Item -LiteralPath $Path -Force
@@ -100,55 +114,147 @@ function Invoke-GateGitBytes([string]$Root,[string[]]$Arguments) {
         Write-Output -NoEnumerate $memory.ToArray()
     }finally{$memory.Dispose();$process.Dispose()}
 }
+function ConvertTo-GateExceptionPathComparisonKey([string]$Path) {
+    $Path.Normalize([Text.NormalizationForm]::FormKC).ToLowerInvariant()
+}
+function Test-GateExceptionPathPatternCouldMatch([string]$Pattern,[string]$Target,[switch]$TargetIsPrefix) {
+    $pending=[Collections.Generic.Stack[Tuple[int,int]]]::new()
+    $seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $pending.Push([Tuple]::Create([int]0,[int]0))
+    while($pending.Count-gt0){
+        $state=$pending.Pop();$patternIndex=$state.Item1;$targetIndex=$state.Item2
+        if(-not$seen.Add("$patternIndex`:$targetIndex")){continue}
+        if($TargetIsPrefix-and$targetIndex-eq$Target.Length){return $true}
+        if($patternIndex-eq$Pattern.Length){if($targetIndex-eq$Target.Length){return $true};continue}
+        if($Pattern[$patternIndex]-eq[char]0xfffd){
+            $pending.Push([Tuple]::Create($patternIndex+1,$targetIndex))
+            if($targetIndex-lt$Target.Length){$pending.Push([Tuple]::Create($patternIndex,$targetIndex+1))}
+        }elseif($targetIndex-lt$Target.Length-and$Pattern[$patternIndex]-ceq$Target[$targetIndex]){
+            $pending.Push([Tuple]::Create($patternIndex+1,$targetIndex+1))
+        }
+    }
+    $false
+}
 function Get-GateExceptionTree([string]$Root,[string]$Revision) {
-    [byte[]]$bytes=Invoke-GateGitBytes $Root @('ls-tree','-r','-z','--full-tree',$Revision,'--','config/skillspector-exceptions.json',`
-        'config/skillspector-exceptions')
-    try{$text=[Text.UTF8Encoding]::new($false,$true).GetString($bytes)}catch{Throw-GateResult INVALID `
-        'SkillSpector exception tree contains a non-UTF-8 path.'}
+    [byte[]]$bytes=Invoke-GateGitBytes $Root @('ls-tree','-r','-z','--full-tree',$Revision)
     $tree=[Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
-    foreach($record in @($text.Split([char]0,[StringSplitOptions]::RemoveEmptyEntries))){
-        if($record-cnotmatch'^(?<mode>[0-9]{6}) (?<type>[^ ]+) (?<oid>[0-9a-f]{40}|[0-9a-f]{64})\t(?<path>.+)$'){
+    $registryPath='config/skillspector-exceptions.json';$baselinePrefix='config/skillspector-exceptions/'
+    $looseUtf8=[Text.UTF8Encoding]::new($false,$false);$strictUtf8=[Text.UTF8Encoding]::new($false,$true)
+    $recordStart=0
+    for($recordEnd=0;$recordEnd-lt$bytes.Length;$recordEnd++){
+        if($bytes[$recordEnd]-ne0){continue}
+        if($recordEnd-eq$recordStart){Throw-GateResult INVALID 'SkillSpector exception tree entry is invalid.'}
+        [byte[]]$recordBytes=$bytes[$recordStart..($recordEnd-1)];$recordStart=$recordEnd+1
+        $tab=[Array]::IndexOf($recordBytes,[byte]9)
+        if($tab-le0-or$tab-ge$recordBytes.Length-1){Throw-GateResult INVALID 'SkillSpector exception tree entry is invalid.'}
+        [byte[]]$headerBytes=$recordBytes[0..($tab-1)]
+        foreach($headerByte in $headerBytes){if($headerByte-gt127){Throw-GateResult INVALID 'SkillSpector exception tree entry is invalid.'}}
+        $header=[Text.Encoding]::ASCII.GetString($headerBytes)
+        if($header-cnotmatch'^(?<mode>[0-9]{6}) (?<type>[^ ]+) (?<oid>[0-9a-f]{40}|[0-9a-f]{64})$'){
             Throw-GateResult INVALID 'SkillSpector exception tree entry is invalid.'
         }
-        $mode=$Matches.mode;$type=$Matches.type;$oid=$Matches.oid;$path=$Matches.path
+        $mode=$Matches.mode;$type=$Matches.type;$oid=$Matches.oid
+        [byte[]]$pathBytes=$recordBytes[($tab+1)..($recordBytes.Length-1)]
+        $loosePath=$looseUtf8.GetString($pathBytes);$comparisonKey=$null;$needsStrict=$false
+        try{
+            $comparisonKey=ConvertTo-GateExceptionPathComparisonKey $loosePath
+            $needsStrict=$comparisonKey.Equals($registryPath,[StringComparison]::Ordinal)-or`
+                $comparisonKey.StartsWith($baselinePrefix,[StringComparison]::Ordinal)
+            if(-not$needsStrict){
+                $replacement=$comparisonKey.IndexOf([char]0xfffd)
+                if($replacement-ge0){
+                    $needsStrict=(Test-GateExceptionPathPatternCouldMatch $comparisonKey $registryPath)-or`
+                        (Test-GateExceptionPathPatternCouldMatch $comparisonKey $baselinePrefix -TargetIsPrefix)
+                }
+            }
+        }catch{$needsStrict=$true}
+        if(-not$needsStrict){continue}
+        try{$path=$strictUtf8.GetString($pathBytes)}catch{Throw-GateResult INVALID `
+            'SkillSpector exception tree contains a non-UTF-8 path within the SkillSpector exception scope.'}
+        try{$comparisonKey=ConvertTo-GateExceptionPathComparisonKey $path}catch{Throw-GateResult INVALID `
+            'SkillSpector exception tree contains a path that cannot be normalized within the SkillSpector exception scope.'}
+        if(-not$comparisonKey.Equals($registryPath,[StringComparison]::Ordinal)-and`
+            -not$comparisonKey.StartsWith($baselinePrefix,[StringComparison]::Ordinal)){continue}
         if($mode-cne'100644'){Throw-GateResult BLOCKED "SkillSpector exception path '$path' has mode '$mode'; expected 100644."}
         if($type-cne'blob'-or-not$tree.TryAdd($path,[pscustomobject]@{Path=$path;Mode=$mode;Oid=$oid})){
             Throw-GateResult INVALID "SkillSpector exception path '$path' is not a unique blob."
         }
     }
+    if($recordStart-ne$bytes.Length){Throw-GateResult INVALID 'SkillSpector exception tree entry is not NUL terminated.'}
     $tree
 }
 function Get-GateExceptionBlob([string]$Root,$Entry) {
     [byte[]]$bytes=Invoke-GateGitBytes $Root @('cat-file','blob',[string]$Entry.Oid)
     Write-Output -NoEnumerate $bytes
 }
-function Get-GateJsonIdentity($Value) {
-    if($null-eq$Value){return 'null'}
-    if($Value-is[Management.Automation.PSCustomObject]){
-        [string[]]$names=@($Value.PSObject.Properties.Name);[Array]::Sort($names,[StringComparer]::Ordinal)
-        return 'object{'+(@($names|ForEach-Object{($_|ConvertTo-Json -Compress)+':'+(Get-GateJsonIdentity $Value.PSObject.Properties[$_].Value)})-join',')+'}'
+function Join-GateJsonIdentity([string]$Kind,[string[]]$Parts) {
+    $builder=[Text.StringBuilder]::new()
+    [void]$builder.Append($Kind).Append($Parts.Count).Append(':')
+    foreach($part in $Parts){[void]$builder.Append($part.Length).Append(':').Append($part)}
+    $builder.ToString()
+}
+function Get-GateJsonIdentity([Text.Json.JsonElement]$Element) {
+    if($Element.ValueKind-eq[Text.Json.JsonValueKind]::Object){
+        [string[]]$names=@($Element.EnumerateObject()|ForEach-Object{$_.Name});[Array]::Sort($names,[StringComparer]::Ordinal)
+        $parts=[Collections.Generic.List[string]]::new()
+        foreach($name in $names){
+            $nameIdentity=Join-GateJsonIdentity 's' @($name)
+            [void]$parts.Add((Join-GateJsonIdentity 'p' @($nameIdentity,(Get-GateJsonIdentity $Element.GetProperty($name)))))
+        }
+        return Join-GateJsonIdentity 'o' $parts.ToArray()
     }
-    if($Value-is[array]){return 'array['+(@($Value|ForEach-Object{Get-GateJsonIdentity $_})-join',')+']'}
-    if($Value-is[bool]){return $(if($Value){'true'}else{'false'})}
-    'scalar:'+(ConvertTo-Json -InputObject $Value -Compress)
+    if($Element.ValueKind-eq[Text.Json.JsonValueKind]::Array){
+        $parts=[Collections.Generic.List[string]]::new()
+        foreach($item in $Element.EnumerateArray()){[void]$parts.Add((Get-GateJsonIdentity $item))}
+        return Join-GateJsonIdentity 'a' $parts.ToArray()
+    }
+    if($Element.ValueKind-eq[Text.Json.JsonValueKind]::String){return Join-GateJsonIdentity 's' @($Element.GetString())}
+    # Preserve the exact JSON number token deliberately: fail closed on 0 versus 0.0 instead of risking lossy CLR conversion.
+    if($Element.ValueKind-eq[Text.Json.JsonValueKind]::Number){return Join-GateJsonIdentity 'n' @($Element.GetRawText())}
+    if($Element.ValueKind-eq[Text.Json.JsonValueKind]::True){return 't'}
+    if($Element.ValueKind-eq[Text.Json.JsonValueKind]::False){return 'f'}
+    if($Element.ValueKind-eq[Text.Json.JsonValueKind]::Null){return 'z'}
+    Throw-GateResult INVALID 'SkillSpector exception JSON contains an unsupported value kind.'
 }
-function Get-GateJsonArrayProperty($Value,[string]$Name,[string]$Context) {
-    $property=$Value.PSObject.Properties[$Name]
-    if($null-eq$property){return @()}
-    if($property.Value-isnot[array]){Throw-GateResult BLOCKED "$Context field '$Name' was modified from an array."}
-    @($property.Value)
+function Get-GateJsonPropertyNames([Text.Json.JsonElement]$Value,[string]$Context) {
+    if($Value.ValueKind-ne[Text.Json.JsonValueKind]::Object){Throw-GateResult BLOCKED "$Context top-level value was modified from an object."}
+    [string[]]$names=@($Value.EnumerateObject()|ForEach-Object{$_.Name});[Array]::Sort($names,[StringComparer]::Ordinal)
+    Write-Output -NoEnumerate $names
 }
-function Assert-GateJsonOuterFieldsEqual($Base,$Candidate,[string[]]$SetFields,[string]$Context) {
-    [string[]]$baseNames=@($Base.PSObject.Properties.Name);[string[]]$candidateNames=@($Candidate.PSObject.Properties.Name)
-    [Array]::Sort($baseNames,[StringComparer]::Ordinal);[Array]::Sort($candidateNames,[StringComparer]::Ordinal)
+function Get-GateJsonArrayProperty([Text.Json.JsonElement]$Value,[string]$Name,[string]$Context) {
+    if($Value.ValueKind-ne[Text.Json.JsonValueKind]::Object){Throw-GateResult BLOCKED "$Context top-level value was modified from an object."}
+    $property=[Text.Json.JsonElement]::new()
+    if(-not$Value.TryGetProperty($Name,[ref]$property)){Write-Output -NoEnumerate ([Text.Json.JsonElement[]]@());return}
+    if($property.ValueKind-ne[Text.Json.JsonValueKind]::Array){Throw-GateResult BLOCKED "$Context field '$Name' was modified from an array."}
+    Write-Output -NoEnumerate ([Text.Json.JsonElement[]]@($property.EnumerateArray()))
+}
+function Get-GateJsonElementLabel([Text.Json.JsonElement]$Value,[string]$Name) {
+    if($Value.ValueKind-ne[Text.Json.JsonValueKind]::Object){return '<non-object>'}
+    $property=[Text.Json.JsonElement]::new()
+    if(-not$Value.TryGetProperty($Name,[ref]$property)){return '<missing>'}
+    if($property.ValueKind-eq[Text.Json.JsonValueKind]::String){return $property.GetString()}
+    if($property.ValueKind-in@([Text.Json.JsonValueKind]::Number,[Text.Json.JsonValueKind]::True,`
+        [Text.Json.JsonValueKind]::False,[Text.Json.JsonValueKind]::Null)){return $property.GetRawText()}
+    Get-GateJsonIdentity $property
+}
+function Test-GateJsonElementPropertyEqual([Text.Json.JsonElement]$Left,[Text.Json.JsonElement]$Right,[string]$Name) {
+    if($Left.ValueKind-ne[Text.Json.JsonValueKind]::Object-or$Right.ValueKind-ne[Text.Json.JsonValueKind]::Object){return $false}
+    $leftProperty=[Text.Json.JsonElement]::new();$rightProperty=[Text.Json.JsonElement]::new()
+    if(-not$Left.TryGetProperty($Name,[ref]$leftProperty)-or-not$Right.TryGetProperty($Name,[ref]$rightProperty)){return $false}
+    (Get-GateJsonIdentity $leftProperty)-ceq(Get-GateJsonIdentity $rightProperty)
+}
+function Assert-GateJsonOuterFieldsEqual([Text.Json.JsonElement]$Base,[Text.Json.JsonElement]$Candidate,`
+    [string[]]$SetFields,[string]$Context) {
+    [string[]]$baseNames=Get-GateJsonPropertyNames $Base $Context;[string[]]$candidateNames=Get-GateJsonPropertyNames $Candidate $Context
     if(($baseNames-join"`n")-cne($candidateNames-join"`n")){Throw-GateResult BLOCKED "$Context top-level field set was modified."}
     foreach($name in @($candidateNames|Where-Object{$SetFields-cnotcontains$_})){
-        if((Get-GateJsonIdentity $Candidate.PSObject.Properties[$name].Value)-cne(Get-GateJsonIdentity $Base.PSObject.Properties[$name].Value)){
+        if((Get-GateJsonIdentity $Candidate.GetProperty($name))-cne(Get-GateJsonIdentity $Base.GetProperty($name))){
             Throw-GateResult BLOCKED "$Context field '$name' was modified."
         }
     }
 }
-function Assert-GateJsonItemsShrinkOnly([object[]]$BaseItems,[object[]]$CandidateItems,[string]$Context,[scriptblock]$Label,`
+function Assert-GateJsonItemsShrinkOnly([Text.Json.JsonElement[]]$BaseItems,[Text.Json.JsonElement[]]$CandidateItems,`
+    [string]$Context,[scriptblock]$Label,`
     [scriptblock]$ModificationMatch) {
     $baseIdentities=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach($item in $BaseItems){[void]$baseIdentities.Add((Get-GateJsonIdentity $item))}
@@ -157,7 +263,8 @@ function Assert-GateJsonItemsShrinkOnly([object[]]$BaseItems,[object[]]$Candidat
         $identity=Get-GateJsonIdentity $item;$itemLabel=&$Label $item
         if(-not$candidateIdentities.Add($identity)){Throw-GateResult BLOCKED "$Context $itemLabel is duplicate."}
         if(-not$baseIdentities.Contains($identity)){
-            $kind=if(@($BaseItems|Where-Object{&$ModificationMatch $_ $item}).Count-gt0){'modified'}else{'added'}
+            $modified=$false;foreach($baseItem in $BaseItems){if(&$ModificationMatch $baseItem $item){$modified=$true;break}}
+            $kind=if($modified){'modified'}else{'added'}
             Throw-GateResult BLOCKED "$Context $itemLabel was $kind."
         }
     }
@@ -167,6 +274,9 @@ function Assert-GateExceptionSetShrinkOnly([string]$CandidateRoot,[string]$BaseR
     $baseTree=Get-GateExceptionTree $CandidateRoot $BaseRevision
     $candidateTree=Get-GateExceptionTree $CandidateRoot $CandidateRevision
     foreach($path in $candidateTree.Keys){
+        $canonicalPath=ConvertTo-GateExceptionPathComparisonKey $path
+        if($path-cne$canonicalPath){Throw-GateResult BLOCKED `
+            "SkillSpector exception path '$path' casing or Unicode variant does not match its canonical form."}
         if(-not$baseTree.ContainsKey($path)){Throw-GateResult BLOCKED "SkillSpector exception path '$path' was added."}
     }
     $candidateBaselines=@($candidateTree.Keys|Where-Object{$_.StartsWith($baselinePrefix,[StringComparison]::Ordinal)})
@@ -174,36 +284,55 @@ function Assert-GateExceptionSetShrinkOnly([string]$CandidateRoot,[string]$BaseR
         if($candidateBaselines.Count-gt0){Throw-GateResult BLOCKED 'SkillSpector exception registry was deleted while baseline files remain.'}
         return
     }
-    $baseRegistry=ConvertFrom-GateJsonBytes (Get-GateExceptionBlob $CandidateRoot $baseTree[$registryPath]) `
-        "SkillSpector exception JSON '$registryPath'"
-    $candidateRegistry=ConvertFrom-GateJsonBytes (Get-GateExceptionBlob $CandidateRoot $candidateTree[$registryPath]) `
-        "SkillSpector exception JSON '$registryPath'"
-    Assert-GateJsonOuterFieldsEqual $baseRegistry $candidateRegistry @('baselines','exceptions') "SkillSpector exception registry '$registryPath'"
-    $baseExceptions=Get-GateJsonArrayProperty $baseRegistry 'exceptions' "SkillSpector exception registry '$registryPath'"
-    $candidateExceptions=Get-GateJsonArrayProperty $candidateRegistry 'exceptions' "SkillSpector exception registry '$registryPath'"
-    Assert-GateJsonItemsShrinkOnly $baseExceptions $candidateExceptions "SkillSpector exception registry '$registryPath'" `
-        {param($item) "exception $([string]$item.exceptionId)"} {param($base,$candidate) [string]$base.exceptionId-ceq[string]$candidate.exceptionId}
-    $baseBaselines=Get-GateJsonArrayProperty $baseRegistry 'baselines' "SkillSpector exception registry '$registryPath'"
-    $candidateRegistryBaselines=Get-GateJsonArrayProperty $candidateRegistry 'baselines' "SkillSpector exception registry '$registryPath'"
-    Assert-GateJsonItemsShrinkOnly $baseBaselines $candidateRegistryBaselines "SkillSpector exception registry '$registryPath'" `
-        {param($item) "baseline $([string]$item.skillId)"} {param($base,$candidate) [string]$base.skillId-ceq[string]$candidate.skillId-or`
-            [string]$base.path-ceq[string]$candidate.path}
+    $baseRegistryDocument=$null;$candidateRegistryDocument=$null
+    try{
+        $baseRegistryDocument=Open-GateJsonDocument (Get-GateExceptionBlob $CandidateRoot $baseTree[$registryPath]) `
+            "SkillSpector exception JSON '$registryPath'"
+        $candidateRegistryDocument=Open-GateJsonDocument (Get-GateExceptionBlob $CandidateRoot $candidateTree[$registryPath]) `
+            "SkillSpector exception JSON '$registryPath'"
+        $baseRegistry=$baseRegistryDocument.RootElement;$candidateRegistry=$candidateRegistryDocument.RootElement
+        Assert-GateJsonOuterFieldsEqual $baseRegistry $candidateRegistry @('baselines','exceptions') "SkillSpector exception registry '$registryPath'"
+        [Text.Json.JsonElement[]]$baseExceptions=Get-GateJsonArrayProperty $baseRegistry 'exceptions' "SkillSpector exception registry '$registryPath'"
+        [Text.Json.JsonElement[]]$candidateExceptions=Get-GateJsonArrayProperty $candidateRegistry 'exceptions' "SkillSpector exception registry '$registryPath'"
+        Assert-GateJsonItemsShrinkOnly $baseExceptions $candidateExceptions "SkillSpector exception registry '$registryPath'" `
+            {param($item) "exception $(Get-GateJsonElementLabel $item 'exceptionId')"} `
+            {param($base,$candidate) Test-GateJsonElementPropertyEqual $base $candidate 'exceptionId'}
+        [Text.Json.JsonElement[]]$baseBaselines=Get-GateJsonArrayProperty $baseRegistry 'baselines' "SkillSpector exception registry '$registryPath'"
+        [Text.Json.JsonElement[]]$candidateRegistryBaselines=Get-GateJsonArrayProperty $candidateRegistry 'baselines' "SkillSpector exception registry '$registryPath'"
+        Assert-GateJsonItemsShrinkOnly $baseBaselines $candidateRegistryBaselines "SkillSpector exception registry '$registryPath'" `
+            {param($item) "baseline $(Get-GateJsonElementLabel $item 'skillId')"} `
+            {param($base,$candidate) (Test-GateJsonElementPropertyEqual $base $candidate 'skillId')-or`
+                (Test-GateJsonElementPropertyEqual $base $candidate 'path')}
+    }finally{
+        if($null-ne$candidateRegistryDocument){$candidateRegistryDocument.Dispose()}
+        if($null-ne$baseRegistryDocument){$baseRegistryDocument.Dispose()}
+    }
     foreach($path in $candidateBaselines){
         if($path-cnotmatch'^config/skillspector-exceptions/(?<skillId>[^/]+)\.baseline\.json$'){
             if($candidateTree[$path].Oid-cne$baseTree[$path].Oid){Throw-GateResult BLOCKED "SkillSpector exception path '$path' was modified."}
-            if($path.EndsWith('.json',[StringComparison]::OrdinalIgnoreCase)){[void](ConvertFrom-GateJsonBytes `
-                (Get-GateExceptionBlob $CandidateRoot $candidateTree[$path]) "SkillSpector exception JSON '$path'")}
+            if($path.EndsWith('.json',[StringComparison]::OrdinalIgnoreCase)){
+                $document=Open-GateJsonDocument (Get-GateExceptionBlob $CandidateRoot $candidateTree[$path]) "SkillSpector exception JSON '$path'"
+                $document.Dispose()
+            }
             continue
         }
         $skillId=$Matches.skillId
-        $baseBaseline=ConvertFrom-GateJsonBytes (Get-GateExceptionBlob $CandidateRoot $baseTree[$path]) "SkillSpector exception JSON '$path'"
-        $candidateBaseline=ConvertFrom-GateJsonBytes (Get-GateExceptionBlob $CandidateRoot $candidateTree[$path]) "SkillSpector exception JSON '$path'"
-        Assert-GateJsonOuterFieldsEqual $baseBaseline $candidateBaseline @('fingerprints') "SkillSpector baseline '$path'"
-        $baseFingerprints=Get-GateJsonArrayProperty $baseBaseline 'fingerprints' "SkillSpector baseline '$path'"
-        $candidateFingerprints=Get-GateJsonArrayProperty $candidateBaseline 'fingerprints' "SkillSpector baseline '$path'"
-        Assert-GateJsonItemsShrinkOnly $baseFingerprints $candidateFingerprints "SkillSpector baseline '$path'" `
-            {param($item) "fingerprint (skillId=$skillId, rule_id=$([string]$item.rule_id), file=$([string]$item.file), hash=$([string]$item.hash))"} `
-            {param($base,$candidate) [string]$base.rule_id-ceq[string]$candidate.rule_id-and[string]$base.file-ceq[string]$candidate.file}
+        $baseBaselineDocument=$null;$candidateBaselineDocument=$null
+        try{
+            $baseBaselineDocument=Open-GateJsonDocument (Get-GateExceptionBlob $CandidateRoot $baseTree[$path]) "SkillSpector exception JSON '$path'"
+            $candidateBaselineDocument=Open-GateJsonDocument (Get-GateExceptionBlob $CandidateRoot $candidateTree[$path]) "SkillSpector exception JSON '$path'"
+            $baseBaseline=$baseBaselineDocument.RootElement;$candidateBaseline=$candidateBaselineDocument.RootElement
+            Assert-GateJsonOuterFieldsEqual $baseBaseline $candidateBaseline @('fingerprints') "SkillSpector baseline '$path'"
+            [Text.Json.JsonElement[]]$baseFingerprints=Get-GateJsonArrayProperty $baseBaseline 'fingerprints' "SkillSpector baseline '$path'"
+            [Text.Json.JsonElement[]]$candidateFingerprints=Get-GateJsonArrayProperty $candidateBaseline 'fingerprints' "SkillSpector baseline '$path'"
+            Assert-GateJsonItemsShrinkOnly $baseFingerprints $candidateFingerprints "SkillSpector baseline '$path'" `
+                {param($item) "fingerprint (skillId=$skillId, rule_id=$(Get-GateJsonElementLabel $item 'rule_id'), file=$(Get-GateJsonElementLabel $item 'file'), hash=$(Get-GateJsonElementLabel $item 'hash'))"} `
+                {param($base,$candidate) (Test-GateJsonElementPropertyEqual $base $candidate 'rule_id')-and`
+                    (Test-GateJsonElementPropertyEqual $base $candidate 'file')}
+        }finally{
+            if($null-ne$candidateBaselineDocument){$candidateBaselineDocument.Dispose()}
+            if($null-ne$baseBaselineDocument){$baseBaselineDocument.Dispose()}
+        }
     }
 }
 function Copy-GateTrustedFile([string]$Source,[string]$Destination) {

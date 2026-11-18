@@ -19,6 +19,22 @@ Describe 'Authority-owned consumer source gate' {
         if($LASTEXITCODE-ne0){throw "fixture git failed: $($output-join' ')"}
         $output}
         function Get-SourceFixtureGitScalar([string]$Root,[string[]]$Arguments){([string](@(Invoke-SourceFixtureGit $Root $Arguments)[0])).Trim()}
+        function Invoke-SourceFixtureGitWithInputBytes([string]$Root,[string[]]$Arguments,[byte[]]$InputBytes) {
+            $start=[Diagnostics.ProcessStartInfo]::new()
+            $start.FileName=(Get-Command git -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
+            $start.UseShellExecute=$false;$start.RedirectStandardInput=$true;$start.RedirectStandardOutput=$true
+            $start.RedirectStandardError=$true
+            foreach($argument in @('-c','core.autocrlf=false','-C',$Root)+$Arguments){[void]$start.ArgumentList.Add($argument)}
+            $process=[Diagnostics.Process]::new();$process.StartInfo=$start
+            try{
+                [void]$process.Start()
+                $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
+                $process.StandardInput.BaseStream.Write($InputBytes,0,$InputBytes.Length);$process.StandardInput.Close()
+                $process.WaitForExit();$output=$stdout.GetAwaiter().GetResult();$errorText=$stderr.GetAwaiter().GetResult()
+                if($process.ExitCode-ne0){throw "fixture git failed: $errorText"}
+                $output.Trim()
+            }finally{$process.Dispose()}
+        }
         function New-GitCredentialPresenceShim([string]$Root,[string]$ObservationPath) {
             [void][IO.Directory]::CreateDirectory($Root)
             $realGit=(Get-Command git -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
@@ -67,6 +83,20 @@ Describe 'Authority-owned consumer source gate' {
         }
         function Set-ExceptionFixtureBaseline([string]$Root,$Baseline,[string]$SkillId='review-bitbucket-pull-request') {
             Write-FixtureJson (Join-Path $Root "config/skillspector-exceptions/$SkillId.baseline.json") $Baseline
+        }
+        function Replace-ExceptionFixtureRegistryText([string]$Root,[string]$Pattern,[string]$Replacement) {
+            $path=Join-Path $Root 'config/skillspector-exceptions.json'
+            $text=[IO.File]::ReadAllText($path,[Text.Encoding]::UTF8)
+            $updated=[regex]::new($Pattern).Replace($text,$Replacement,1)
+            if($updated-ceq$text){throw "Fixture registry pattern was not found: $Pattern"}
+            [IO.File]::WriteAllText($path,$updated,[Text.UTF8Encoding]::new($false))
+        }
+        function Move-ExceptionFixtureIndexPath([string]$Root,[string]$Source,[string]$Destination) {
+            $oid=Get-SourceFixtureGitScalar $Root @('rev-parse',"HEAD:$Source")
+            [void](Invoke-SourceFixtureGit $Root @('update-index','--force-remove','--',$Source))
+            [void](Invoke-SourceFixtureGit $Root @('update-index','--add','--cacheinfo',"100644,$oid,$Destination"))
+            [void](Invoke-SourceFixtureGit $Root @('commit','-q','-m','case-only rename'))
+            Get-SourceFixtureGitScalar $Root @('rev-parse','HEAD')
         }
         function Assert-ExactObjectShape($Value,[string[]]$Properties){
             (@($Value.PSObject.Properties.Name)-join',')|Should Be ($Properties-join',')
@@ -2165,8 +2195,8 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         {Assert-GateTransitionInventory $root $entry $commit $true}|Should Throw 'inventory tree scope'
     }
 
-    # Scenario: A real exception set is unchanged, reduced, removed, expanded, mutated, malformed, duplicated, or stored with an unsafe mode.
-    # Purpose: Permit only set-semantic removal from immutable Git objects and fail closed with diagnostic BLOCKED/INVALID outcomes otherwise.
+    # Scenario: A real exception set is unchanged, reduced, removed, expanded, mutated, malformed, duplicated, or stored under adversarial tree paths.
+    # Purpose: Permit only set-semantic removal, ignore non-UTF-8 paths outside scope, and fail closed on scoped Unicode variants or unsafe data.
     It 'UnitT39_enforces_SkillSpector_exception_sets_as_shrink_only' {
         $expectedBlobs=[ordered]@{
             'skillspector-exceptions.json'='4ff6d83ebddb132992613fefdb6e6cc96fc0e724'
@@ -2184,6 +2214,17 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
 
         $fixture=New-ExceptionFixtureRepository 'exception-unchanged'
         Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Base
+
+        $fixture=New-ExceptionFixtureRepository 'exception-non-utf8-outside-scope'
+        $configTree=Get-SourceFixtureGitScalar $fixture.Root @('rev-parse','HEAD:config')
+        $blob=Get-SourceFixtureGitScalar $fixture.Root @('rev-parse','HEAD:config/skillspector-exceptions.json')
+        $treeInput=[Collections.Generic.List[byte]]::new()
+        $treeInput.AddRange([Text.Encoding]::ASCII.GetBytes("040000 tree $configTree`tconfig`0"))
+        $treeInput.AddRange([Text.Encoding]::ASCII.GetBytes("100644 blob $blob`toutside-"))
+        $treeInput.Add(0x80);$treeInput.AddRange([Text.Encoding]::ASCII.GetBytes(".txt`0"))
+        $tree=Invoke-SourceFixtureGitWithInputBytes $fixture.Root @('mktree','-z') $treeInput.ToArray()
+        $candidate=Get-SourceFixtureGitScalar $fixture.Root @('commit-tree',$tree,'-p',$fixture.Base,'-m','non-UTF-8 outside scope')
+        Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate
 
         $fixture=New-ExceptionFixtureRepository 'exception-delete-all'
         Remove-Item -LiteralPath (Join-Path $fixture.Root 'config') -Recurse -Force
@@ -2211,6 +2252,28 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'delete one exact exception'
         Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate
 
+        foreach($number in @('1e-400','0.0')){
+            $fixture=New-ExceptionFixtureRepository "exception-number-$($number.Replace('.','-'))"
+            Replace-ExceptionFixtureRegistryText $fixture.Root '"startColumn": 0,' "`"startColumn`": $number,"
+            $candidate=Save-ExceptionFixtureCandidate $fixture.Root "change zero token to $number"
+            (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
+                '^BLOCKED\|.*exception atl-e1-jira-configure-reference-61.*modified'
+        }
+
+        $fixture=New-ExceptionFixtureRepository 'exception-equivalent-string-escape'
+        Replace-ExceptionFixtureRegistryText $fixture.Root '"ruleId": "E1"' '"ruleId": "\u0045\u0031"'
+        $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'change string escape spelling only'
+        Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate
+
+        $fixture=New-ExceptionFixtureRepository 'exception-iso-date-spelling'
+        Replace-ExceptionFixtureRegistryText $fixture.Root '"expiresOn": "2027-05-09"' '"expiresOn": "2027-05-09T00:00:00Z"'
+        $dateBase=Save-ExceptionFixtureCandidate $fixture.Root 'establish ISO date-time base spelling'
+        Replace-ExceptionFixtureRegistryText $fixture.Root '"expiresOn": "2027-05-09T00:00:00Z"' `
+            '"expiresOn": "2027-05-09T00:00:00.000Z"'
+        $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'change ISO date-time spelling'
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $dateBase $candidate})|Should Match `
+            '^BLOCKED\|.*skillspector-exceptions\.json.*review.*modified'
+
         foreach($mutation in @('fingerprint-add','fingerprint-hash','fingerprint-reason')){
             $fixture=New-ExceptionFixtureRepository "exception-$mutation"
             $baseline=Get-ExceptionFixtureBaseline $fixture.Root
@@ -2229,6 +2292,27 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'new baseline'
         (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
             '^BLOCKED\|.*new-skill\.baseline\.json.*added'
+
+        foreach($rename in @(
+            @{Name='registry';Source='config/skillspector-exceptions.json';Destination='config/SkillSpector-exceptions.json'},
+            @{Name='baseline-directory';Source='config/skillspector-exceptions/review-bitbucket-pull-request.baseline.json';Destination='config/SkillSpector-exceptions/review-bitbucket-pull-request.baseline.json'},
+            @{Name='baseline-file';Source='config/skillspector-exceptions/review-bitbucket-pull-request.baseline.json';Destination='config/skillspector-exceptions/Review-bitbucket-pull-request.baseline.json'}
+        )){
+            $fixture=New-ExceptionFixtureRepository "exception-case-$($rename.Name)"
+            $candidate=Move-ExceptionFixtureIndexPath $fixture.Root $rename.Source $rename.Destination
+            (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
+                "^BLOCKED\|.*$([regex]::Escape($rename.Destination)).*casing"
+        }
+
+        foreach($variant in @(
+            @{Name='kelvin';Source='config/skillspector-exceptions.json';Destination="config/s$([char]0x212A)illspector-exceptions.json"},
+            @{Name='long-s';Source='config/skillspector-exceptions/review-bitbucket-pull-request.baseline.json';Destination="config/$([char]0x017F)killspector-exceptions/review-bitbucket-pull-request.baseline.json"}
+        )){
+            $fixture=New-ExceptionFixtureRepository "exception-unicode-$($variant.Name)"
+            $candidate=Move-ExceptionFixtureIndexPath $fixture.Root $variant.Source $variant.Destination
+            (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
+                "^BLOCKED\|.*$([regex]::Escape($variant.Destination)).*(casing|Unicode variant)"
+        }
 
         $fixture=New-ExceptionFixtureRepository 'exception-new-registry' -WithoutExceptionSet
         [void][IO.Directory]::CreateDirectory((Join-Path $fixture.Root 'config'))
@@ -2913,7 +2997,7 @@ Export-ModuleMember -Function New-PesterConfiguration,Invoke-Pester
         $module = Get-Content -Raw -Encoding UTF8 $script:GateModule
         $requiredBarriers = @(
             'Required repository check is missing', 'General repository check is not a canonical tracked file',
-            'General repository check points to a deleted legacy path', 'SkillSpector exception set changed',
+            'General repository check points to a deleted legacy path', 'Assert-GateExceptionSetShrinkOnly',
             'Unexpected workflow', 'Candidate consumer-gate.yml is missing',
             'Removed legacy path is present', 'Repository has advanced'
         )
