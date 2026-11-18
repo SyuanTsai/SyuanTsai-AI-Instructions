@@ -61,7 +61,7 @@ if(-not[string]::IsNullOrWhiteSpace($phaseEnvironmentDumpPath)){
         Invoke-GateManifestClosureCheck $authorityRoot $BaseRoot $CandidateRoot $validated.ManifestEntry `
             ([string]$binding.baseRevision) ([string]$binding.candidateRevision) $WorkRoot `
             ([bool]$TransitionFromLegacy)
-        Assert-GateExceptionSetUnchanged $CandidateRoot ([string]$binding.baseRevision) ([string]$binding.candidateRevision)
+        Assert-GateExceptionSetShrinkOnly $CandidateRoot ([string]$binding.baseRevision) ([string]$binding.candidateRevision)
         [void](Invoke-GateCredentialScopedPreparation $authorityRoot $CandidateRoot $WorkRoot $Platform $binding $eventRepository $token)
     }elseif($Phase-ceq'validate'){
         $validated=Assert-GateConfig $authorityRoot $CandidateRoot $eventRepository

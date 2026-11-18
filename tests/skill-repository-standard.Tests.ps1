@@ -6739,9 +6739,11 @@ Describe 'SYP481 exact-fingerprint exception authority' {
     It 'UnitT10_requires_exact_baselines_and_retains_release_and_severity_policy' {
         $standard=Get-Content -Raw -Encoding UTF8 (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/skill-repository-standard.md')
         $section=[regex]::Match($standard,'(?s)#### 14\.2\.1 SkillSpector exact-fingerprint exceptions(.*?)### 14\.3').Groups[1].Value
-        foreach($required in @('skillspector-human-approved-exceptions-v1','config/skillspector-exceptions/<skillId>.baseline.json','`rules`','approved source','review.expiresOn','--baseline','suppressedFindings','suppressionReason','High／Critical **MUST NOT**','第 11 節','`releaseEligible` 不變')) {
+        foreach($required in @('skillspector-human-approved-exceptions-v1','config/skillspector-exceptions/<skillId>.baseline.json','`rules`','approved source','review.expiresOn','既有例外集合的縮減或完整移除不是新增例外，不需要 Human Approval','immutable base 與 candidate Git revisions','`100644` blob','candidate 是 base 的子集','`(skillId, rule_id, file, hash)`','修改 hash、reason','`review.expiresOn` 續期','另有依第 19 節核准的 normative authority 機制','--baseline','suppressedFindings','suppressionReason','High／Critical **MUST NOT**','第 11 節','`releaseEligible` 不變')) {
             $section.Contains($required) | Should Be $true
         }
+        $capability=[regex]::Match($standard,'(?s)### 9\.5 Capability is not automatically vulnerability(.*?)## 10\.').Groups[1].Value
+        foreach($required in @('`SKILL.md` 或 `references/`','目的地 host 與用途','拆字、編碼、動態字串組合','實際目的地')){$capability.Contains($required)|Should Be $true}
     }
 }
 

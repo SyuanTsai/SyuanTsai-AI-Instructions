@@ -1,0 +1,31 @@
+{
+  "version": 2,
+  "scanner_version": "2.13.4",
+  "rules": [],
+  "fingerprints": [
+    {
+      "hash": "sha256:18989da2878aeb74296af7842cf8ee21d9548b0b57410330f1db15671608e898",
+      "rule_id": "E1",
+      "file": "SKILL.md",
+      "reason": "SYP-416 human-approved 2026-11-09 by SyuanTsai (atl-e1-bitbucket-configure-skill-md-26): document the canonical Bitbucket Cloud REST base used by the access setup workflow"
+    },
+    {
+      "hash": "sha256:7da371d4e509da906246cc63d56c8d3f118353f4481c8ae6d1dd2ba51a1e6981",
+      "rule_id": "E1",
+      "file": "references/configuration.md",
+      "reason": "SYP-416 human-approved 2026-11-09 by SyuanTsai (atl-e1-bitbucket-configure-reference-18): document the exact Bitbucket Cloud REST base required for safe validation"
+    },
+    {
+      "hash": "sha256:a8be1bed3138e3b5777aa8e222e9af4eec91a1b9f5834515529d271a3091212e",
+      "rule_id": "E1",
+      "file": "scripts/Configure-BitbucketApiAccess.ps1",
+      "reason": "SYP-416 human-approved 2026-11-09 by SyuanTsai (atl-e1-bitbucket-configure-script-8): provide the canonical Bitbucket Cloud REST base parameter"
+    },
+    {
+      "hash": "sha256:4490d36728cba25984e760d03854fc6cc900915bc9a30664b62d72f0c07d21da",
+      "rule_id": "E1",
+      "file": "scripts/Configure-BitbucketApiAccess.ps1",
+      "reason": "SYP-416 human-approved 2026-11-09 by SyuanTsai (atl-e1-bitbucket-configure-script-76): reject any Bitbucket API base other than the canonical HTTPS endpoint"
+    }
+  ]
+}

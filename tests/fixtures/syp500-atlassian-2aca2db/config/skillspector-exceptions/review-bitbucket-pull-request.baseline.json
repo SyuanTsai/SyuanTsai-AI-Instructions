@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "scanner_version": "2.13.4",
+  "rules": [],
+  "fingerprints": [
+    {
+      "hash": "sha256:91e2a284069623eb609bbaafdb6432e275390cfa895f1b729034e76ea0c725cb",
+      "rule_id": "LP3",
+      "file": "SKILL.md",
+      "reason": "SYP-416 human-approved 2026-11-09 by SyuanTsai (atl-lp3-bitbucket-review-skill-md-1): retain host-neutral tool metadata while network actions remain script-bound and explicitly authorized"
+    },
+    {
+      "hash": "sha256:03c2fa14c20039923416db1cb4935ccf2227d0856aa57333e8fe7aa02a082a65",
+      "rule_id": "E1",
+      "file": "references/bitbucket-cloud-api.md",
+      "reason": "SYP-416 human-approved 2026-11-09 by SyuanTsai (atl-e1-bitbucket-review-reference-12): document the exact Bitbucket REST base and in-memory Basic authentication boundary"
+    },
+    {
+      "hash": "sha256:7b52e5cf354b1343ab1e52f5378ae8741e0bc52a4cf8b80b119e4c7ff05ba142",
+      "rule_id": "E1",
+      "file": "scripts/Invoke-BitbucketReviewActions.ps1",
+      "reason": "SYP-416 human-approved 2026-11-09 by SyuanTsai (atl-e1-bitbucket-review-script-435): require the canonical Bitbucket REST base before authorized review actions"
+    }
+  ]
+}

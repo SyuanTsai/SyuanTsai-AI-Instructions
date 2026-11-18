@@ -34,6 +34,40 @@ Describe 'Authority-owned consumer source gate' {
             $Root
         }
         function Copy-FixtureValue($Value){$Value|ConvertTo-Json -Depth 30|ConvertFrom-Json}
+        $script:ExceptionFixtureConfigRoot = Join-Path $script:RepositoryRoot 'tests/fixtures/syp500-atlassian-2aca2db/config'
+        function New-ExceptionFixtureRepository([string]$Name,[switch]$WithoutExceptionSet) {
+            $root=Join-Path $TestDrive $Name
+            [void][IO.Directory]::CreateDirectory($root)
+            [void](Invoke-SourceFixtureGit $root @('init','-q','-b','main'))
+            [void](Invoke-SourceFixtureGit $root @('config','user.name','Fixture'))
+            [void](Invoke-SourceFixtureGit $root @('config','user.email','fixture@example.test'))
+            if($WithoutExceptionSet){
+                [IO.File]::WriteAllText((Join-Path $root 'README.md'),'fixture',[Text.UTF8Encoding]::new($false))
+            }else{
+                Copy-Item -LiteralPath $script:ExceptionFixtureConfigRoot -Destination (Join-Path $root 'config') -Recurse
+            }
+            [void](Invoke-SourceFixtureGit $root @('add','.'))
+            [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','base'))
+            [pscustomobject]@{Root=$root;Base=Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')}
+        }
+        function Save-ExceptionFixtureCandidate([string]$Root,[string]$Message) {
+            [void](Invoke-SourceFixtureGit $Root @('add','-A'))
+            [void](Invoke-SourceFixtureGit $Root @('commit','-q','-m',$Message))
+            Get-SourceFixtureGitScalar $Root @('rev-parse','HEAD')
+        }
+        function Get-ExceptionFixtureRegistry([string]$Root) {
+            Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $Root 'config/skillspector-exceptions.json')|ConvertFrom-Json
+        }
+        function Set-ExceptionFixtureRegistry([string]$Root,$Registry) {
+            # Candidate JSON is intentionally reformatted: semantic comparison must ignore object/array presentation and member order.
+            Write-FixtureJson (Join-Path $Root 'config/skillspector-exceptions.json') $Registry
+        }
+        function Get-ExceptionFixtureBaseline([string]$Root,[string]$SkillId='review-bitbucket-pull-request') {
+            Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $Root "config/skillspector-exceptions/$SkillId.baseline.json")|ConvertFrom-Json
+        }
+        function Set-ExceptionFixtureBaseline([string]$Root,$Baseline,[string]$SkillId='review-bitbucket-pull-request') {
+            Write-FixtureJson (Join-Path $Root "config/skillspector-exceptions/$SkillId.baseline.json") $Baseline
+        }
         function Assert-ExactObjectShape($Value,[string[]]$Properties){
             (@($Value.PSObject.Properties.Name)-join',')|Should Be ($Properties-join',')
         }
@@ -2131,24 +2165,141 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         {Assert-GateTransitionInventory $root $entry $commit $true}|Should Throw 'inventory tree scope'
     }
 
-    # Scenario: A candidate changes the exception aggregate or one per-Skill exception baseline.
-    # Purpose: PR-1 blocks every exception-set mutation until the signed PR-2 path exists.
-    It 'UnitT39_blocks_exception_set_changes_before_prepare' {
-        $root=Join-Path $TestDrive 'exception-diff'
-        [void][IO.Directory]::CreateDirectory((Join-Path $root 'config/skillspector-exceptions'))
-        [void](Invoke-SourceFixtureGit $root @('init','-q','-b','main'))
-        [void](Invoke-SourceFixtureGit $root @('config','user.name','Fixture'))
-        [void](Invoke-SourceFixtureGit $root @('config','user.email','fixture@example.test'))
-        [IO.File]::WriteAllText((Join-Path $root 'config/skillspector-exceptions.json'),'{}')
-        [void](Invoke-SourceFixtureGit $root @('add','.'))
-        [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','base'))
-        $base=Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
-        Assert-GateExceptionSetUnchanged $root $base $base
-        [IO.File]::WriteAllText((Join-Path $root 'config/skillspector-exceptions/fixture.baseline.json'),'{}')
-        [void](Invoke-SourceFixtureGit $root @('add','.'))
-        [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','candidate'))
-        $candidate=Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
-        {Assert-GateExceptionSetUnchanged $root $base $candidate}|Should Throw
+    # Scenario: A real exception set is unchanged, reduced, removed, expanded, mutated, malformed, duplicated, or stored with an unsafe mode.
+    # Purpose: Permit only set-semantic removal from immutable Git objects and fail closed with diagnostic BLOCKED/INVALID outcomes otherwise.
+    It 'UnitT39_enforces_SkillSpector_exception_sets_as_shrink_only' {
+        $expectedBlobs=[ordered]@{
+            'skillspector-exceptions.json'='4ff6d83ebddb132992613fefdb6e6cc96fc0e724'
+            'skillspector-exceptions/configure-bitbucket-api-access.baseline.json'='f649fd71be71e6b151c7d779bf3dbd6456da54c4'
+            'skillspector-exceptions/configure-confluence-api-access.baseline.json'='bf7061d2906ff8cc9e59abc8c2a3df1e9ac9c9c0'
+            'skillspector-exceptions/configure-jira-api-access.baseline.json'='df6fa05d272345da29dba313601821e196ea6d81'
+            'skillspector-exceptions/manage-confluence-docs-as-code.baseline.json'='fec156ad20b95e9342f941f50b9625e5e6305f28'
+            'skillspector-exceptions/publish-requirements-to-confluence.baseline.json'='3c302ad7f0653913835ea9e4116955ef4b9fe68e'
+            'skillspector-exceptions/review-bitbucket-pull-request.baseline.json'='a2f5acbbd1fd8bd4f2125af8ca1c6d3b4c7157c7'
+        }
+        foreach($entry in $expectedBlobs.GetEnumerator()){
+            $actual=Get-SourceFixtureGitScalar $script:RepositoryRoot @('hash-object','--no-filters','--',(Join-Path $script:ExceptionFixtureConfigRoot $entry.Key))
+            $actual|Should Be $entry.Value
+        }
+
+        $fixture=New-ExceptionFixtureRepository 'exception-unchanged'
+        Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Base
+
+        $fixture=New-ExceptionFixtureRepository 'exception-delete-all'
+        Remove-Item -LiteralPath (Join-Path $fixture.Root 'config') -Recurse -Force
+        $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'delete all exceptions'
+        Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate
+
+        $fixture=New-ExceptionFixtureRepository 'exception-real-shrink'
+        $registry=Get-ExceptionFixtureRegistry $fixture.Root
+        $registry.exceptions=@($registry.exceptions|Where-Object skillId -ceq 'review-bitbucket-pull-request')
+        $registry.baselines=@($registry.baselines|Where-Object skillId -ceq 'review-bitbucket-pull-request')
+        Set-ExceptionFixtureRegistry $fixture.Root $registry
+        Get-ChildItem -LiteralPath (Join-Path $fixture.Root 'config/skillspector-exceptions') -File|Where-Object Name -cne `
+            'review-bitbucket-pull-request.baseline.json'|Remove-Item -Force
+        $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'retain real review baseline only'
+        Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate
+
+        $fixture=New-ExceptionFixtureRepository 'exception-delete-one'
+        $baseline=Get-ExceptionFixtureBaseline $fixture.Root
+        $removedHash=[string]$baseline.fingerprints[0].hash
+        $baseline.fingerprints=@($baseline.fingerprints|Where-Object hash -cne $removedHash)
+        Set-ExceptionFixtureBaseline $fixture.Root $baseline
+        $registry=Get-ExceptionFixtureRegistry $fixture.Root
+        $registry.exceptions=@($registry.exceptions|Where-Object fingerprint -cne $removedHash)
+        Set-ExceptionFixtureRegistry $fixture.Root $registry
+        $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'delete one exact exception'
+        Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate
+
+        foreach($mutation in @('fingerprint-add','fingerprint-hash','fingerprint-reason')){
+            $fixture=New-ExceptionFixtureRepository "exception-$mutation"
+            $baseline=Get-ExceptionFixtureBaseline $fixture.Root
+            if($mutation-ceq'fingerprint-add'){$baseline.fingerprints=@($baseline.fingerprints)+@((Copy-FixtureValue $baseline.fingerprints[0]));$baseline.fingerprints[-1].file='new.ps1'}
+            elseif($mutation-ceq'fingerprint-hash'){$baseline.fingerprints[0].hash='sha256:'+('f'*64)}
+            else{$baseline.fingerprints[0].reason='changed reason'}
+            Set-ExceptionFixtureBaseline $fixture.Root $baseline
+            $candidate=Save-ExceptionFixtureCandidate $fixture.Root $mutation
+            $failure=Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate}
+            $failure|Should Match '^BLOCKED\|.*review-bitbucket-pull-request\.baseline\.json.*(added|modified)'
+        }
+
+        $fixture=New-ExceptionFixtureRepository 'exception-new-baseline'
+        Copy-Item -LiteralPath (Join-Path $fixture.Root 'config/skillspector-exceptions/review-bitbucket-pull-request.baseline.json') `
+            -Destination (Join-Path $fixture.Root 'config/skillspector-exceptions/new-skill.baseline.json')
+        $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'new baseline'
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
+            '^BLOCKED\|.*new-skill\.baseline\.json.*added'
+
+        $fixture=New-ExceptionFixtureRepository 'exception-new-registry' -WithoutExceptionSet
+        [void][IO.Directory]::CreateDirectory((Join-Path $fixture.Root 'config'))
+        Copy-Item -LiteralPath (Join-Path $script:ExceptionFixtureConfigRoot 'skillspector-exceptions.json') `
+            -Destination (Join-Path $fixture.Root 'config/skillspector-exceptions.json')
+        $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'new registry'
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
+            '^BLOCKED\|.*skillspector-exceptions\.json.*added'
+
+        foreach($mutation in @('expiry','approval')){
+            $fixture=New-ExceptionFixtureRepository "exception-registry-$mutation"
+            $registry=Get-ExceptionFixtureRegistry $fixture.Root
+            if($mutation-ceq'expiry'){$registry.review.expiresOn='2027-06-09'}else{$registry.approval.decision='changed'}
+            Set-ExceptionFixtureRegistry $fixture.Root $registry
+            $candidate=Save-ExceptionFixtureCandidate $fixture.Root $mutation
+            (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
+                '^BLOCKED\|.*skillspector-exceptions\.json.*(review|approval).*modified'
+        }
+
+        $fixture=New-ExceptionFixtureRepository 'exception-registry-add'
+        $registry=Get-ExceptionFixtureRegistry $fixture.Root
+        $registry.exceptions=@($registry.exceptions)+@((Copy-FixtureValue $registry.exceptions[0]))
+        $registry.exceptions[-1].exceptionId='new-exception'
+        Set-ExceptionFixtureRegistry $fixture.Root $registry
+        $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'add registry exception'
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
+            '^BLOCKED\|.*exception new-exception.*added'
+
+        $fixture=New-ExceptionFixtureRepository 'exception-registry-delete-only'
+        Remove-Item -LiteralPath (Join-Path $fixture.Root 'config/skillspector-exceptions.json') -Force
+        $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'delete registry only'
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
+            '^BLOCKED\|.*registry.*baseline.*remain'
+
+        foreach($mutation in @('exception-duplicate','baseline-duplicate')){
+            $fixture=New-ExceptionFixtureRepository "exception-$mutation"
+            if($mutation-ceq'exception-duplicate'){
+                $registry=Get-ExceptionFixtureRegistry $fixture.Root
+                $registry.exceptions=@($registry.exceptions)+@((Copy-FixtureValue $registry.exceptions[0]))
+                Set-ExceptionFixtureRegistry $fixture.Root $registry
+            }else{
+                $baseline=Get-ExceptionFixtureBaseline $fixture.Root
+                $baseline.fingerprints=@($baseline.fingerprints)+@((Copy-FixtureValue $baseline.fingerprints[0]))
+                Set-ExceptionFixtureBaseline $fixture.Root $baseline
+            }
+            $candidate=Save-ExceptionFixtureCandidate $fixture.Root $mutation
+            (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match '^BLOCKED\|.*duplicate'
+        }
+
+        foreach($mode in @('executable','symlink')){
+            $fixture=New-ExceptionFixtureRepository "exception-mode-$mode"
+            $path='config/skillspector-exceptions/review-bitbucket-pull-request.baseline.json'
+            if($mode-ceq'executable'){
+                [void](Invoke-SourceFixtureGit $fixture.Root @('update-index','--chmod=+x','--',$path))
+            }else{
+                $oid=Get-SourceFixtureGitScalar $fixture.Root @('hash-object','--no-filters','--',$path)
+                [void](Invoke-SourceFixtureGit $fixture.Root @('update-index','--add','--cacheinfo',"120000,$oid,$path"))
+            }
+            [void](Invoke-SourceFixtureGit $fixture.Root @('commit','-q','-m',"$mode mode"))
+            $candidate=Get-SourceFixtureGitScalar $fixture.Root @('rev-parse','HEAD')
+            (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
+                '^BLOCKED\|.*review-bitbucket-pull-request\.baseline\.json.*mode'
+        }
+
+        foreach($mutation in @('duplicate-key','invalid-json')){
+            $fixture=New-ExceptionFixtureRepository "exception-json-$mutation"
+            $text=if($mutation-ceq'duplicate-key'){'{"schemaVersion":1,"schemaVersion":1}'}else{'{"schemaVersion":'}
+            [IO.File]::WriteAllText((Join-Path $fixture.Root 'config/skillspector-exceptions.json'),$text,[Text.UTF8Encoding]::new($false))
+            $candidate=Save-ExceptionFixtureCandidate $fixture.Root $mutation
+            (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match '^INVALID\|.*JSON'
+        }
     }
 
     # Scenario: Three valid legs were fetched at different official-main tips and one stable binding is then changed.

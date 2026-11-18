@@ -711,6 +711,8 @@ Scanner failure、analyzer incomplete、unparsable result 或 unknown severity *
 
 Gate **MUST** 評估 capability 的 declared purpose、scope、permission、data flow、secret handling 與 observed behavior。
 
+為消除 scanner heuristic 誤判而改寫內容時，改寫後的 `SKILL.md` 或 `references/` **MUST** 仍清楚揭露目的地 host 與用途，使 capability 可由人工與工具審查；不得只為避開 scanner 而以拆字、編碼、動態字串組合或其他混淆隱藏實際目的地。若需要以結構化 URI 建構或驗證取代字面值，目的地與用途的可見度仍須保留在上述文件中。
+
 例如下列風險可能 BLOCK：
 
 - Prompt Injection enabling unsafe instruction override；
@@ -909,6 +911,8 @@ Exception **MUST NOT** 建立替代 lifecycle、永久排除 Security Gate，或
 #### 14.2.1 SkillSpector exact-fingerprint exceptions
 
 Repository **MAY** 以 `config/skillspector-exceptions.json`（`skillspector-human-approved-exceptions-v1`）與每個 Skill 一份 `config/skillspector-exceptions/<skillId>.baseline.json` 宣告第 14.1／14.2 節的精確指紋例外。Baseline **MUST** 使用 SkillSpector v2 指紋、`rules` 為空、scanner 版本與本次凍結的 approved source 版本一致，且與 registry exceptions 雙向一一對應，附第 14.2 節欄位、owner 與 `review.expiresOn`。
+
+既有例外集合的縮減或完整移除不是新增例外，不需要 Human Approval。Consumer source gate **MUST** 從 immutable base 與 candidate Git revisions 的 `100644` blob 讀取 registry 及所有 baseline，以順序無關的集合語意驗證 candidate 是 base 的子集：registry `exceptions` 與 `baselines` 的每筆 candidate object 必須與 base 中一筆完整相等，registry 其餘頂層欄位及欄位集合必須完全相等；每個同路徑 baseline 的 `version`、`scanner_version`、`rules`、其他頂層欄位及欄位集合必須完全相等，而 `fingerprints` 每筆 candidate object 必須與 base 中一筆完整相等且不得重複。Baseline fingerprint 的判定鍵為 `(skillId, rule_id, file, hash)`，其中 `skillId` 由 `<skillId>.baseline.json` 取得；`reason` 與任何額外欄位仍屬完整物件的一部分。順序改變可接受，但新增 registry／baseline／fingerprint／exception、修改 hash、reason 或任何 registry 欄位（包括 `review.expiresOn` 續期）、重複項目及非 `100644` mode 都 **MUST BLOCK**；candidate 刪除 registry 時也 **MUST** 同時移除所有 baseline。任何新增或修改在另有依第 19 節核准的 normative authority 機制前都沒有核准入口，不得以 local metadata、PR review 或簽章主張放行。
 
 Static adapter **MUST** 僅以 scanner 原生 `--baseline` 傳入上述 baseline，並在 envelope `suppressedFindings` 逐筆回報 `skillId`、`ruleId`、`severity`、`file`、`suppressionReason`。中央 runner **MUST** 驗證 registry、baseline 與每筆抑制，任一不符 **MUST** BLOCK；High／Critical **MUST NOT** 被抑制。
 

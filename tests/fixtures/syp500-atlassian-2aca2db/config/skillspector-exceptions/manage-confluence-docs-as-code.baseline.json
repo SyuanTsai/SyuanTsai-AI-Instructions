@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "scanner_version": "2.13.4",
+  "rules": [],
+  "fingerprints": [
+    {
+      "hash": "sha256:4e73633d08dfe524b5bc7b169543534ffc7b56c8f4c56080e121326e842eb115",
+      "rule_id": "E1",
+      "file": "SKILL.md",
+      "reason": "SYP-416 human-approved 2026-11-09 by SyuanTsai (atl-e1-confluence-docs-as-code-skill-md-14): document the scoped Confluence REST endpoint used for authorized docs-as-code operations"
+    }
+  ]
+}
