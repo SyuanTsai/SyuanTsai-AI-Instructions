@@ -355,6 +355,9 @@ Describe 'Consumer gate workflow templates' {
     It 'UnitT85_runs_the_real_three_platform_transition_probe_with_read_only_permissions' {
         $script:Probe|Should Match '(?m)^  pull_request:\s*$'
         $script:Probe|Should Match '(?ms)^permissions:\s*\n  contents: read\s*$'
+        $probeYaml=ConvertFrom-ConsumerWorkflowYaml $script:Probe
+        $probeYaml.jobs.leg.properties.'timeout-minutes'|Should BeExactly '30'
+        $probeYaml.jobs.aggregate.properties.'timeout-minutes'|Should BeExactly '10'
         @([regex]::Matches($script:Probe,'(?m)^\s+- \{ os: (windows-latest|ubuntu-latest|macos-latest), platform: (windows|linux|macos) \}\s*$')).Count|Should Be 3
         foreach($binding in @('tests/Invoke-ConsumerTransitionProbe.ps1','-Mode leg','-Mode aggregate','needs: leg',
                 'source-tools/diagnostics','validation-artifacts','gate/receipts','aggregate-receipt.json')){
