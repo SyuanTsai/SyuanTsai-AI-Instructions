@@ -350,8 +350,8 @@ Describe 'Consumer gate workflow templates' {
         }
     }
 
-    # Scenario: An authority pull request runs the fixture transition through every real platform leg and an aggregate job.
-    # Purpose: Detect adapter, resolver, validator, and phase-contract regressions before a consumer conversion uses the pin.
+    # Scenario: An authority pull request runs the fixture transition through every real platform leg and diagnoses a failed local authority projection.
+    # Purpose: Detect gate regressions and retain non-sensitive expected/actual URL, Git version, and rewrite-key evidence for Unix-only failures.
     It 'UnitT85_runs_the_real_three_platform_transition_probe_with_read_only_permissions' {
         $script:Probe|Should Match '(?m)^  pull_request:\s*$'
         $script:Probe|Should Match '(?ms)^permissions:\s*\n  contents: read\s*$'
@@ -368,6 +368,11 @@ Describe 'Consumer gate workflow templates' {
                 'scripts/Invoke-StandardValidation.ps1','scripts/Resolve-StandardValidationTool.ps1')){
             Test-Path -LiteralPath (Join-Path $script:RepositoryRoot $production) -PathType Leaf|Should Be $true
         }
+        foreach($diagnostic in @('Write-ProbeAuthorityUrlDiagnostics','expectedUrl','actualUrl','gitVersion',
+                'systemInsteadOf','globalInsteadOf','--name-only','--get-regexp','Protect-ProbeDiagnosticValue')){
+            $probeScript|Should Match ([regex]::Escape($diagnostic))
+        }
+        $probeScript|Should Match '(?s)if\(\$Phase-ceq''prepare''\).*Write-ProbeAuthorityUrlDiagnostics'
         $probeScript|Should Not Match 'consumer-gate-resolver-fixture|consumer-gate-validation-runner-fixture'
     }
 }

@@ -35,6 +35,52 @@ function Write-ProbeJson([string]$Path,$Value) {
 function ConvertTo-ProbeFileUrl([string]$Path) {
     ([uri]([IO.Path]::GetFullPath($Path))).AbsoluteUri
 }
+function Protect-ProbeDiagnosticValue([string]$Value) {
+    if($null-eq$Value){return $null}
+    $protected=$Value
+    foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){
+        $secret=[Environment]::GetEnvironmentVariable($name,'Process')
+        if(-not[string]::IsNullOrEmpty($secret)){$protected=$protected.Replace($secret,'[REDACTED]',[StringComparison]::Ordinal)}
+    }
+    $protected=[regex]::Replace($protected,'(?i)([a-z][a-z0-9+.-]*://)[^/@\s]+@','$1[REDACTED]@')
+    $protected=[regex]::Replace($protected,'(?i)(^|[.=])[^/\s@]+@(?=[^/\s]+:)','$1[REDACTED]@')
+    [regex]::Replace($protected,'([?#]).*$','$1[REDACTED]')
+}
+function Get-ProbeInsteadOfSummary([ValidateSet('--system','--global')][string]$Scope) {
+    $keys=@(& git config $Scope --name-only --get-regexp '^url\..*\.insteadof$' 2>$null)
+    $exitCode=$LASTEXITCODE
+    [ordered]@{
+        status=if($exitCode-eq0){'present'}elseif($exitCode-eq1){'absent'}else{'query-failed'}
+        exitCode=$exitCode
+        exists=if($exitCode-in@(0,1)){$exitCode-eq0}else{$null}
+        keys=@($keys|ForEach-Object{Protect-ProbeDiagnosticValue ([string]$_).Trim()}|Where-Object{$_})
+    }
+}
+function Write-ProbeAuthorityUrlDiagnostics([string]$ExpectedUrl,[string]$GateRoot) {
+    try{
+        $gitRoot=Join-Path $GateRoot 'authority-git'
+        $actualOutput=@();$actualExitCode=$null
+        if(Test-Path -LiteralPath $gitRoot -PathType Container){
+            $actualOutput=@(& git -c 'protocol.file.allow=always' -c 'credential.helper=' -C $gitRoot `
+                -c "remote.origin.url=$ExpectedUrl" ls-remote --get-url origin 2>$null)
+            $actualExitCode=$LASTEXITCODE
+        }
+        $versionOutput=@(& git --version 2>$null);$versionExitCode=$LASTEXITCODE
+        $diagnostic=[ordered]@{
+            kind='consumer-transition-probe-authority-url'
+            expectedUrl=Protect-ProbeDiagnosticValue $ExpectedUrl
+            actualUrl=if($actualOutput.Count-gt0){Protect-ProbeDiagnosticValue ([string]$actualOutput[0]).Trim()}else{$null}
+            actualUrlExitCode=$actualExitCode
+            actualUrlLineCount=$actualOutput.Count
+            gitVersion=if($versionExitCode-eq0-and$versionOutput.Count-gt0){Protect-ProbeDiagnosticValue ([string]$versionOutput[0]).Trim()}else{$null}
+            systemInsteadOf=Get-ProbeInsteadOfSummary '--system'
+            globalInsteadOf=Get-ProbeInsteadOfSummary '--global'
+        }
+        [Console]::Error.WriteLine(($diagnostic|ConvertTo-Json -Depth 8 -Compress))
+    }catch{
+        [Console]::Error.WriteLine('{"kind":"consumer-transition-probe-authority-url","diagnosticStatus":"failed"}')
+    }
+}
 function Copy-ProbeFile([string]$Source,[string]$Destination) {
     $item=Get-Item -LiteralPath $Source -Force
     if($item.PSIsContainer-or($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0-or$null-ne$item.LinkType){
@@ -134,7 +180,12 @@ function Invoke-ProbeBootstrap([string]$Bootstrap,[string]$Phase,[string]$GateRo
         '-HeadRevision',$HeadRevision,'-WorkflowRunId',$WorkflowRunId,'-WorkflowRunAttempt',$WorkflowRunAttempt,'-Platform',$PlatformValue)
     if($Transition){$arguments+='-TransitionFromLegacy'}
     & (Get-Process -Id $PID).Path @arguments
-    if($LASTEXITCODE-ne0){throw "Consumer transition probe phase '$Phase' failed with exit code $LASTEXITCODE."}
+    if($LASTEXITCODE-ne0){
+        $exitCode=$LASTEXITCODE
+        if($Phase-ceq'prepare'){Write-ProbeAuthorityUrlDiagnostics `
+                ([Environment]::GetEnvironmentVariable('CONSUMER_TRANSITION_PROBE_AUTHORITY_URL','Process')) $GateRoot}
+        throw "Consumer transition probe phase '$Phase' failed with exit code $exitCode."
+    }
 }
 
 $RepositoryRoot=[IO.Path]::GetFullPath($RepositoryRoot)
