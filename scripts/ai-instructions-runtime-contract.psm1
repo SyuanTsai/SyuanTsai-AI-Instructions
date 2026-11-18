@@ -258,8 +258,13 @@ function Assert-AiInstructionsUserReconcilerOperationTarget {
         if ($kind -cnotin @('create-file','write-file')) { throw "$Context kind must be create-file or write-file for the USER manifest target." }
         return
     }
+    if ($target -ceq '.claude/CLAUDE.md') {
+        if ($kind -cnotin @('create-file','write-file')) { throw "$Context kind must be create-file or write-file for the USER Claude instructions target." }
+        return
+    }
     if ($kind -ceq 'swap-directory') { throw "$Context kind swap-directory is not allowed for owner.component user-reconciler." }
     if ($kind -ceq 'create-directory') {
+        if ($target -ceq '.claude') { return }
         if (Test-AiInstructionsUserReconcilerCreateDirectoryTarget -TargetRelativePath $target) { return }
         throw "$Context.targetRelativePath is outside the USER Skill projection roots and their approved missing ancestors."
     }
@@ -267,6 +272,153 @@ function Assert-AiInstructionsUserReconcilerOperationTarget {
         if ($target.StartsWith("$root/",[StringComparison]::Ordinal)) { return }
     }
     throw "$Context.targetRelativePath is outside the USER Skill projection roots."
+}
+
+function Join-AiInstructionsByteArrays {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[][]] $Parts)
+    [int64]$length = 0
+    foreach ($part in $Parts) { $length += $part.Length }
+    if ($length -gt [int]::MaxValue) { throw 'Managed instructions content is too large.' }
+    $result = New-Object byte[] ([int]$length)
+    $offset = 0
+    foreach ($part in $Parts) {
+        if ($part.Length -gt 0) { [Array]::Copy($part,0,$result,$offset,$part.Length) }
+        $offset += $part.Length
+    }
+    return ,$result
+}
+
+function Get-AiInstructionsByteSlice {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $Bytes,
+        [Parameter(Mandatory = $true)][int] $Offset,
+        [Parameter(Mandatory = $true)][int] $Length
+    )
+    if ($Offset -lt 0 -or $Length -lt 0 -or ([int64]$Offset + $Length) -gt $Bytes.Length) { throw 'Managed instructions byte slice is outside the source content.' }
+    $result = New-Object byte[] $Length
+    if ($Length -gt 0) { [Array]::Copy($Bytes,$Offset,$result,0,$Length) }
+    return ,$result
+}
+
+function Get-InstallerBootstrapSectionContent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $ExistingBytes,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $SectionBytes
+    )
+
+    $strictUtf8 = [Text.UTF8Encoding]::new($false,$true)
+    if ($SectionBytes.Length -lt 1 -or
+        ($SectionBytes.Length -ge 3 -and $SectionBytes[0] -eq 0xEF -and $SectionBytes[1] -eq 0xBB -and $SectionBytes[2] -eq 0xBF)) {
+        throw 'The bootstrap section authority must be UTF-8 without a BOM.'
+    }
+    try { $sectionText = $strictUtf8.GetString($SectionBytes) }
+    catch { throw 'The bootstrap section authority must contain valid UTF-8 bytes.' }
+    if ($sectionText.Contains("`r") -or -not $sectionText.StartsWith("## Repository Instructions Bootstrap`n",[StringComparison]::Ordinal) -or
+        -not $sectionText.EndsWith("`n",[StringComparison]::Ordinal) -or $sectionText.EndsWith("`n`n",[StringComparison]::Ordinal)) {
+        throw 'The bootstrap section authority must use canonical UTF-8/LF bytes, the managed heading, and one trailing LF.'
+    }
+
+    $bomLength = 0
+    if ($ExistingBytes.Length -ge 4 -and
+        (($ExistingBytes[0] -eq 0x00 -and $ExistingBytes[1] -eq 0x00 -and $ExistingBytes[2] -eq 0xFE -and $ExistingBytes[3] -eq 0xFF) -or
+         ($ExistingBytes[0] -eq 0xFF -and $ExistingBytes[1] -eq 0xFE -and $ExistingBytes[2] -eq 0x00 -and $ExistingBytes[3] -eq 0x00))) {
+        throw 'The managed instructions file is UTF-32. Save the file as UTF-8 (with or without a BOM) and retry.'
+    }
+    if ($ExistingBytes.Length -ge 2 -and
+        (($ExistingBytes[0] -eq 0xFE -and $ExistingBytes[1] -eq 0xFF) -or
+         ($ExistingBytes[0] -eq 0xFF -and $ExistingBytes[1] -eq 0xFE))) {
+        throw 'The managed instructions file is UTF-16. Save the file as UTF-8 (with or without a BOM) and retry.'
+    }
+    if ($ExistingBytes.Length -ge 3 -and $ExistingBytes[0] -eq 0xEF -and $ExistingBytes[1] -eq 0xBB -and $ExistingBytes[2] -eq 0xBF) { $bomLength = 3 }
+    for ($index = $bomLength; $index -le ($ExistingBytes.Length - 3); $index++) {
+        if ($ExistingBytes[$index] -eq 0xEF -and $ExistingBytes[$index + 1] -eq 0xBB -and $ExistingBytes[$index + 2] -eq 0xBF) {
+            throw 'The managed instructions file contains more than one UTF-8 BOM. Save it with at most one BOM at the beginning and retry.'
+        }
+    }
+    [byte[]]$payload = Get-AiInstructionsByteSlice -Bytes $ExistingBytes -Offset $bomLength -Length ($ExistingBytes.Length - $bomLength)
+    if($payload-ccontains[byte]0){
+        throw 'The managed instructions file contains NUL bytes and may be UTF-16 or UTF-32 without a BOM. Save the file as UTF-8 (with or without a BOM) and retry.'
+    }
+    try { $text = $strictUtf8.GetString($payload) }
+    catch { throw 'The managed instructions file contains invalid UTF-8. Save the file as UTF-8 (with or without a BOM) and retry.' }
+    for ($index = 0; $index -lt $payload.Length; $index++) {
+        if ($payload[$index] -eq 0x0D -and ($index + 1 -ge $payload.Length -or $payload[$index + 1] -ne 0x0A)) {
+            throw 'The managed instructions file contains a bare CR line ending, so the section boundary cannot be determined uniquely. Save it with LF or CRLF line endings and retry.'
+        }
+    }
+
+    $managedMatches = [regex]::Matches($text,'(?m)^## Repository Instructions Bootstrap[ \t]*\r?$')
+    $managedLikeMatches = [regex]::Matches($text,'(?m)^[ \t]*##[ \t]+Repository Instructions Bootstrap[^\r\n]*\r?$')
+    if ($managedMatches.Count -gt 1) {
+        throw 'The managed instructions file contains duplicate `## Repository Instructions Bootstrap` sections. Remove the duplicate section and retry.'
+    }
+    if ($managedLikeMatches.Count -ne $managedMatches.Count) {
+        throw 'The managed instructions file has an ambiguous `## Repository Instructions Bootstrap` heading. Keep one exact H2 heading and retry.'
+    }
+
+    if ($managedMatches.Count -eq 1) {
+        $managed = $managedMatches[0]
+        $nextHeadingIndex = $null
+        $fenceMarker = $null
+        $fenceLength = 0
+        $scanOffset = $managed.Index + $managed.Length
+        $scanText = $text.Substring($scanOffset)
+        foreach ($line in @([regex]::Matches($scanText,'(?m)^[^\r\n]*\r?$'))) {
+            $lineText = $line.Value.TrimEnd([char]0x0D)
+            if ($null -ne $fenceMarker) {
+                $closingPattern = '^ {0,3}' + [regex]::Escape($fenceMarker) + '{' + $fenceLength + ',}[ \t]*$'
+                if ([regex]::IsMatch($lineText,$closingPattern)) {
+                    $fenceMarker = $null
+                    $fenceLength = 0
+                }
+                continue
+            }
+
+            $openingFence = [regex]::Match($lineText,'^ {0,3}(?<marker>`{3,}|~{3,})(?<info>.*)$')
+            if ($openingFence.Success) {
+                $marker = $openingFence.Groups['marker'].Value
+                if (-not ($marker[0] -eq [char]0x60 -and $openingFence.Groups['info'].Value.Contains('`'))) {
+                    $fenceMarker = [string]$marker[0]
+                    $fenceLength = $marker.Length
+                    continue
+                }
+            }
+
+            if ([regex]::IsMatch($line.Value,'^ {0,3}##(?:[ \t]+[^\r\n]*)?\r?$')) {
+                $nextHeadingIndex = $scanOffset + $line.Index
+                break
+            }
+        }
+        if ($null -ne $fenceMarker) {
+            throw 'The managed instructions file contains an unclosed fenced code block after the managed section, so the next H2 boundary cannot be determined uniquely. Close the fenced code block and retry.'
+        }
+        $prefixPayloadLength = $strictUtf8.GetByteCount($text.Substring(0,$managed.Index))
+        $suffixPayloadOffset = if ($null -eq $nextHeadingIndex) { $payload.Length } else { $strictUtf8.GetByteCount($text.Substring(0,$nextHeadingIndex)) }
+        [byte[]]$prefix = Get-AiInstructionsByteSlice -Bytes $ExistingBytes -Offset 0 -Length ($bomLength + $prefixPayloadLength)
+        [byte[]]$suffix = Get-AiInstructionsByteSlice -Bytes $payload -Offset $suffixPayloadOffset -Length ($payload.Length - $suffixPayloadOffset)
+        return (Join-AiInstructionsByteArrays -Parts @($prefix,$SectionBytes,$suffix))
+    }
+
+    if ($payload.Length -eq 0) {
+        [byte[]]$bom = Get-AiInstructionsByteSlice -Bytes $ExistingBytes -Offset 0 -Length $bomLength
+        return (Join-AiInstructionsByteArrays -Parts @($bom,$SectionBytes))
+    }
+
+    $newline = if ($text.Contains("`r`n")) { [byte[]]@(0x0D,0x0A) } else { [byte[]]@(0x0A) }
+    $trailingNewlineCount = 0
+    $cursor = $payload.Length - 1
+    while ($cursor -ge 0 -and $payload[$cursor] -eq 0x0A) {
+        $trailingNewlineCount++
+        $cursor--
+        if ($cursor -ge 0 -and $payload[$cursor] -eq 0x0D) { $cursor-- }
+    }
+    $separatorCount = if ($trailingNewlineCount -ge 2) { 0 } elseif ($trailingNewlineCount -eq 1) { 1 } else { 2 }
+    $parts = New-Object System.Collections.Generic.List[byte[]]
+    $parts.Add($ExistingBytes)
+    for ($index = 0; $index -lt $separatorCount; $index++) { $parts.Add($newline) }
+    $parts.Add($SectionBytes)
+    return (Join-AiInstructionsByteArrays -Parts ([byte[][]]$parts.ToArray()))
 }
 
 function Test-AiInstructionsObjectHasProperty {
@@ -1426,6 +1578,10 @@ function Assert-AiInstructionsRuntimeBundleV3 {
     $manifestPaths = @($inventoryByPath.Keys | Where-Object { [string]$_ -ceq 'platform-runtime.psd1' -or [string]$_ -clike '*/platform-runtime.psd1' })
     if ($manifestPaths.Count -ne 1 -or [string]$manifestPaths[0] -cne 'platform-runtime.psd1') {
         throw "Runtime bundle inventory must include exactly one 'platform-runtime.psd1' at the runtime root."
+    }
+    $bootstrapSectionPaths = @($inventoryByPath.Keys | Where-Object { [string]$_ -ceq 'bootstrap-section.md' -or [string]$_ -clike '*/bootstrap-section.md' })
+    if ($bootstrapSectionPaths.Count -ne 1 -or [string]$bootstrapSectionPaths[0] -cne 'bootstrap-section.md') {
+        throw "Runtime bundle inventory must include exactly one 'bootstrap-section.md' at the runtime root."
     }
     $manifestRelativePath = 'platform-runtime.psd1'
     $manifestFullPath = Resolve-AiInstructionsRuntimeFilePath -RuntimeRoot $RuntimeRoot -RelativePath $manifestRelativePath -Context 'Platform runtime manifest'
@@ -3289,6 +3445,7 @@ Export-ModuleMember -Function @(
     'Get-AiInstructionsRefusalCodes',
     'New-AiInstructionsRefusalException',
     'Get-AiInstructionsRefusalCode',
+    'Get-InstallerBootstrapSectionContent',
     'Test-AiInstructionsClaudeFamilyProjectOwned',
     'Get-AiInstructionsRuntimeGeneration',
     'Get-AiInstructionsRuntimeInventory',

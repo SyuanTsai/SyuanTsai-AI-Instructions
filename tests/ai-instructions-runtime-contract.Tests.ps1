@@ -131,6 +131,10 @@ function New-TestRuntimeV3Fixture {
     Copy-TestCanonicalRuntimeText `
         -Source (Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog-v3.example.json') `
         -Destination (Join-Path $Path 'catalog\skills-catalog.json')
+    [IO.File]::WriteAllBytes(
+        (Join-Path $Path 'bootstrap-section.md'),
+        [IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'instructions\common\bootstrap-section.md'))
+    )
     $bundle = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\runtime-bundle-v3.example.json') | ConvertFrom-Json
     $fixture = [pscustomobject]@{ Root=$Path; Bundle=$bundle }
     Update-TestRuntimeV3Inventory -Fixture $fixture
@@ -3202,7 +3206,7 @@ Get-AiInstructionsRuntimeInventorySha256V3 -Inventory $inventory
                 (Get-RuntimeContractError {ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json|Out-Null})|Should Match 'outside the USER Skill projection roots'
                 (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue)|Should Be $false
             }
-            foreach($target in @('.agents/skills/alpha/SKILL.md','.claude/skills/alpha/SKILL.md','.copilot/skills/alpha/SKILL.md')){
+            foreach($target in @('.agents/skills/alpha/SKILL.md','.claude/skills/alpha/SKILL.md','.copilot/skills/alpha/SKILL.md','.claude/CLAUDE.md')){
                 $json=(New-ScopedUserJournal 'create-file' $target)|ConvertTo-Json -Depth 20
                 {ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json|Out-Null}|Should Not Throw
                 (Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction SilentlyContinue)|Should Be $true
@@ -3956,5 +3960,69 @@ exit /b %errorlevel%
         $LASTEXITCODE|Should Not Be 0
         ($errorOutput-join[Environment]::NewLine)|Should Match 'injected initial HEAD query failure'
         ($errorOutput-join[Environment]::NewLine)|Should Not Match 'target repository has no commit'
+    }
+
+    # Scenario: Existing UTF-8 USER instructions vary encoding details and place valid or invalid H2-like lines around fenced code after the managed section.
+    # Purpose: Preserve every byte outside the first valid unfenced H2 boundary while installing canonical LF/no-BOM authority bytes with deterministic junctions.
+    It 'UnitT232_merges_the_bootstrap_section_without_normalizing_personal_bytes' -TestCases @(
+        @{Name='empty';Existing=[byte[]]@();Prefix=[byte[]]@();Suffix=[byte[]]@()},
+        @{Name='bom-only';Existing=[byte[]]@(0xEF,0xBB,0xBF);Prefix=[byte[]]@(0xEF,0xBB,0xBF);Suffix=[byte[]]@()},
+        @{Name='append-lf';Existing=[Text.UTF8Encoding]::new($false).GetBytes("personal  `n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("personal  `n`n");Suffix=[byte[]]@()},
+        @{Name='append-crlf';Existing=[Text.UTF8Encoding]::new($false).GetBytes("personal`r`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("personal`r`n`r`n");Suffix=[byte[]]@()},
+        @{Name='append-lf-no-final-newline';Existing=[Text.UTF8Encoding]::new($false).GetBytes("personal`nlast");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("personal`nlast`n`n");Suffix=[byte[]]@()},
+        @{Name='append-crlf-no-final-newline';Existing=[Text.UTF8Encoding]::new($false).GetBytes("personal`r`nlast");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("personal`r`nlast`r`n`r`n");Suffix=[byte[]]@()},
+        @{Name='append-mixed-no-final-newline';Existing=[Text.UTF8Encoding]::new($false).GetBytes("one`ntwo`r`nlast");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("one`ntwo`r`nlast`r`n`r`n");Suffix=[byte[]]@()},
+        @{Name='append-multiple-lf';Existing=[Text.UTF8Encoding]::new($false).GetBytes("personal`n`n`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("personal`n`n`n");Suffix=[byte[]]@()},
+        @{Name='append-multiple';Existing=[Text.UTF8Encoding]::new($false).GetBytes("personal`r`n`r`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("personal`r`n`r`n");Suffix=[byte[]]@()},
+        @{Name='replace-mixed';Existing=[Text.UTF8Encoding]::new($false).GetBytes("before`r`n## Repository Instructions Bootstrap`nold  `n`n## Tail`r`nkeep  `r`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("before`r`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`r`nkeep  `r`n")},
+        @{Name='replace-lf-multiple-blank-lines';Existing=[Text.UTF8Encoding]::new($false).GetBytes("before`n## Repository Instructions Bootstrap`nold`n`n`n## Tail`nkeep`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("before`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
+        @{Name='replace-crlf-multiple-blank-lines';Existing=[Text.UTF8Encoding]::new($false).GetBytes("before`r`n## Repository Instructions Bootstrap`r`nold`r`n`r`n`r`n## Tail`r`nkeep`r`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("before`r`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`r`nkeep`r`n")},
+        @{Name='replace-one-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n ## Tail`nkeep  `n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes(" ## Tail`nkeep  `n")},
+        @{Name='replace-two-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`r`nold`r`n  ## Tail`r`nkeep  `r`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("  ## Tail`r`nkeep  `r`n")},
+        @{Name='replace-three-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n   ## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("   ## Tail`nkeep`n")},
+        @{Name='ignore-four-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n    ## Code`nnot a boundary`n## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
+        @{Name='ignore-tab-indented-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`t## Code`nnot a boundary`n## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
+        @{Name='ignore-H3';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n### Child`nnot a boundary`n## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
+        @{Name='ignore-fenced-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n~~~text`n## fenced heading`n~~~~`n  ## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("  ## Tail`nkeep`n")}
+    ) {
+        param($Name,$Existing,$Prefix,$Suffix)
+        [byte[]]$section=[IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'instructions/common/bootstrap-section.md'))
+        [byte[]]$actual=Get-InstallerBootstrapSectionContent -ExistingBytes ([byte[]]$Existing) -SectionBytes $section
+        [byte[]]$expected=[byte[]]@(([byte[]]$Prefix)+$section+([byte[]]$Suffix))
+        [Convert]::ToBase64String($actual)|Should Be ([Convert]::ToBase64String($expected))
+    }
+
+    # Scenario: Managed instructions bytes have invalid encoding, duplicate or ambiguous headings, bare CR, or an unclosed fenced code block.
+    # Purpose: Fail closed with actionable encoding or boundary remediation before either installer or coordinator can plan a mutation.
+    It 'UnitT233_rejects_ambiguous_or_non_UTF8_managed_instruction_bytes' -TestCases @(
+        @{Name='invalid UTF-8';Bytes=[byte[]]@(0xC3,0x28);Message='valid UTF-8'},
+        @{Name='UTF-16 LE';Bytes=[byte[]]@(0xFF,0xFE,0x41,0x00);Message='UTF-16'},
+        @{Name='UTF-32 BE';Bytes=[byte[]]@(0x00,0x00,0xFE,0xFF);Message='UTF-32'},
+        @{Name='UTF-16 LE without BOM';Bytes=[Text.Encoding]::Unicode.GetBytes('ASCII');Message='NUL bytes'},
+        @{Name='UTF-16 BE without BOM';Bytes=[Text.Encoding]::BigEndianUnicode.GetBytes('ASCII');Message='NUL bytes'},
+        @{Name='UTF-32 LE without BOM';Bytes=[Text.Encoding]::UTF32.GetBytes('ASCII');Message='NUL bytes'},
+        @{Name='UTF-32 BE without BOM';Bytes=[Text.UTF32Encoding]::new($true,$false).GetBytes('ASCII');Message='NUL bytes'},
+        @{Name='duplicate BOM';Bytes=[byte[]]@(0xEF,0xBB,0xBF,0xEF,0xBB,0xBF);Message='more than one UTF-8 BOM'},
+        @{Name='duplicate heading';Bytes=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n## Repository Instructions Bootstrap`nold`n");Message='duplicate'},
+        @{Name='ambiguous heading';Bytes=[Text.UTF8Encoding]::new($false).GetBytes(" ## Repository Instructions Bootstrap`nold`n");Message='ambiguous'},
+        @{Name='bare CR';Bytes=[Text.UTF8Encoding]::new($false).GetBytes("personal`rold");Message='bare CR'},
+        @{Name='unclosed fenced code';Bytes=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n~~~`n## fenced heading`n");Message='unclosed fenced code block'}
+    ) {
+        param($Name,$Bytes,$Message)
+        [byte[]]$section=[IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'instructions/common/bootstrap-section.md'))
+        (Get-RuntimeContractError {Get-InstallerBootstrapSectionContent -ExistingBytes ([byte[]]$Bytes) -SectionBytes $section|Out-Null})|Should Match ([regex]::Escape($Message))
+    }
+
+    # Scenario: A v3 bundle omits the dedicated authority file or moves it below a nested directory.
+    # Purpose: Bind the coordinator to exactly one root-level bootstrap-section.md and forbid inline or path fallback.
+    It 'UnitT234_requires_one_root_bootstrap_section_in_runtime_bundle_v3' {
+        $fixture=New-TestRuntimeV3Fixture -Path (Join-Path $TestDrive 'runtime-v3-bootstrap-section')
+        $configuration=New-TestConfigurationDocument -SchemaVersion 5
+        $configuration.catalog.ref=[string]$fixture.Bundle.commit
+        Update-TestRuntimeV3ProjectionContract -Fixture $fixture
+        {Assert-AiInstructionsRuntimeBundleV3 -Bundle $fixture.Bundle -Configuration $configuration -RuntimeRoot $fixture.Root|Out-Null}|Should Not Throw
+        Remove-Item -LiteralPath (Join-Path $fixture.Root 'bootstrap-section.md') -Force
+        Update-TestRuntimeV3Inventory -Fixture $fixture
+        (Get-RuntimeContractError {Assert-AiInstructionsRuntimeBundleV3 -Bundle $fixture.Bundle -Configuration $configuration -RuntimeRoot $fixture.Root|Out-Null})|Should Match 'bootstrap-section.md'
     }
 }

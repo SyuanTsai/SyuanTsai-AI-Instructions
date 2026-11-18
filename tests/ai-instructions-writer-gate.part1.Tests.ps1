@@ -40,6 +40,10 @@ Describe 'AI instructions writer and reader gate' {
         $bundle=Get-Content -Raw -LiteralPath (Join-Path $script:BaseV3Home 'hooks\ai-instructions-runtime\runtime-bundle.json')|ConvertFrom-Json
         $configuration=Get-Content -Raw -LiteralPath (Join-Path $script:BaseV3Home 'ai-instructions-sync.json')|ConvertFrom-Json
         $bundle.schemaVersion|Should Be 3;$configuration.schemaVersion|Should Be 5
+        $sectionPath=Join-Path $script:BaseV3Home 'hooks\ai-instructions-runtime\bootstrap-section.md'
+        Test-Path -LiteralPath $sectionPath -PathType Leaf|Should Be $true
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($sectionPath))|Should Be ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'instructions\common\bootstrap-section.md'))))
+        @($bundle.inventory|Where-Object path -ceq 'bootstrap-section.md').Count|Should Be 1
         $target=Join-Path $script:ExternalRoot 'fanout';$user=Join-Path $script:ExternalRoot 'user';New-Item -ItemType Directory -Path $user|Out-Null
         & (Join-Path $script:BaseV3Home 'hooks\bootstrap-ai-instructions.ps1') -TargetRoot $target -UserHome $user -SkipUpdateCheck
         (Get-Content -Raw -LiteralPath (Join-Path $target 'p7e-fanout.txt')).Trim()|Should Be v3v5

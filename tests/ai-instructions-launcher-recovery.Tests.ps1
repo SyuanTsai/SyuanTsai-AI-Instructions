@@ -17,6 +17,7 @@ function New-LauncherRecoverySourceArchive {
         try{
             $files=@(Get-ChildItem -LiteralPath (Join-Path $SourceRoot 'scripts'),(Join-Path $SourceRoot 'catalog') -Recurse -File)
             $files+=@(Get-ChildItem -LiteralPath $SourceRoot -File|Where-Object Name -in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json'))
+            $files+=Get-Item -LiteralPath (Join-Path $SourceRoot 'instructions/common/bootstrap-section.md')
             foreach($file in @($files|Sort-Object FullName)){
                 $relative=$file.FullName.Substring($SourceRoot.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
                 $entry=$archive.CreateEntry("candidate-root/$relative")
@@ -61,6 +62,8 @@ function New-LauncherRecoveryFailpointCandidate {
     param([Parameter(Mandatory=$true)][string]$DestinationRoot)
     New-Item -ItemType Directory -Path $DestinationRoot|Out-Null
     Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts'),(Join-Path $script:RepositoryRoot 'catalog') -Destination $DestinationRoot -Recurse
+    New-Item -ItemType Directory -Path (Join-Path $DestinationRoot 'instructions/common') -Force|Out-Null
+    Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'instructions/common/bootstrap-section.md') -Destination (Join-Path $DestinationRoot 'instructions/common/bootstrap-section.md')
     foreach($leaf in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json')){
         Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot $leaf) -Destination (Join-Path $DestinationRoot $leaf)
     }
@@ -83,6 +86,8 @@ function New-LauncherRecoveryPlatformCandidate {
     param([Parameter(Mandatory=$true)][string]$DestinationRoot)
     New-Item -ItemType Directory -Path $DestinationRoot|Out-Null
     Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts'),(Join-Path $script:RepositoryRoot 'catalog') -Destination $DestinationRoot -Recurse
+    New-Item -ItemType Directory -Path (Join-Path $DestinationRoot 'instructions/common') -Force|Out-Null
+    Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'instructions/common/bootstrap-section.md') -Destination (Join-Path $DestinationRoot 'instructions/common/bootstrap-section.md')
     foreach($leaf in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json')){
         Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot $leaf) -Destination (Join-Path $DestinationRoot $leaf)
     }

@@ -27,9 +27,11 @@ function New-InstallerSourceArchive {
             else {
                 $sourceRootPath = [System.IO.Path]::GetFullPath($SourceRoot).TrimEnd([char[]]@('\','/'))
                 $sourceFiles = @(Get-ChildItem -LiteralPath (Join-Path $sourceRootPath 'scripts'),(Join-Path $sourceRootPath 'catalog') -Recurse -File)
+                $authorityPath=Join-Path $sourceRootPath 'instructions/common/bootstrap-section.md'
+                if(Test-Path -LiteralPath $authorityPath -PathType Leaf){$sourceFiles += @(Get-Item -LiteralPath $authorityPath)}
                 $sourceFiles += @(Get-ChildItem -LiteralPath $sourceRootPath -File | Where-Object { $_.Name -in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json') })
                 foreach ($file in @($sourceFiles | Sort-Object FullName)) {
-                    $relativePath = $file.FullName.Substring($sourceRootPath.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+                    $relativePath = if($file.FullName.StartsWith($sourceRootPath + [IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){$file.FullName.Substring($sourceRootPath.Length).TrimStart([char[]]@('\','/')).Replace('\','/')}else{'instructions/common/bootstrap-section.md'}
                     $entry = $archive.CreateEntry("candidate-root/$relativePath")
                     $input = [System.IO.File]::OpenRead($file.FullName)
                     $output = $entry.Open()
@@ -50,7 +52,8 @@ function Invoke-InstallScript {
         [Parameter(Mandatory = $true)][string] $RepositoryRoot,
         [Parameter(Mandatory = $true)][string] $CodexHome,
         [string[]] $ExcludedRepositoryUrls = @(),
-        [string[]] $ExcludedRepositoryPaths = @()
+        [string[]] $ExcludedRepositoryPaths = @(),
+        [string] $IsolatedUserHome
     )
 
     $sourceCommit = (@(& git -C $RepositoryRoot rev-parse HEAD) -join '').Trim()
@@ -74,8 +77,34 @@ function Invoke-InstallScript {
         foreach ($repositoryPath in $ExcludedRepositoryPaths) { $arguments += $repositoryPath }
     }
 
-    $output = & $script:TestPowerShellExecutable @arguments 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    if([string]::IsNullOrWhiteSpace($IsolatedUserHome)){
+        $output = & $script:TestPowerShellExecutable @arguments 2>&1
+        $exitCode=$LASTEXITCODE
+    }
+    else{
+        New-Item -ItemType Directory -Force -Path $IsolatedUserHome|Out-Null
+        $isolatedProcessEnvironment=$IsolatedUserHome+'-process-environment'
+        $isolatedRoamingData=Join-Path $isolatedProcessEnvironment 'AppData\Roaming'
+        $isolatedLocalData=Join-Path $isolatedProcessEnvironment 'AppData\Local'
+        $isolatedXdgConfig=Join-Path $isolatedProcessEnvironment 'xdg\config'
+        $isolatedXdgData=Join-Path $isolatedProcessEnvironment 'xdg\data'
+        $isolatedXdgCache=Join-Path $isolatedProcessEnvironment 'xdg\cache'
+        New-Item -ItemType Directory -Force -Path $isolatedRoamingData,$isolatedLocalData,$isolatedXdgConfig,$isolatedXdgData,$isolatedXdgCache|Out-Null
+        $start=[Diagnostics.ProcessStartInfo]::new($script:TestPowerShellExecutable)
+        $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.RedirectStandardInput=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+        foreach($argument in @('-NonInteractive')+$arguments){[void]$start.ArgumentList.Add([string]$argument)}
+        $start.Environment['HOME']=$IsolatedUserHome;$start.Environment['USERPROFILE']=$isolatedProcessEnvironment;$start.Environment['CODEX_HOME']=$CodexHome
+        $start.Environment['APPDATA']=$isolatedRoamingData;$start.Environment['LOCALAPPDATA']=$isolatedLocalData
+        $start.Environment['XDG_CONFIG_HOME']=$isolatedXdgConfig;$start.Environment['XDG_DATA_HOME']=$isolatedXdgData;$start.Environment['XDG_CACHE_HOME']=$isolatedXdgCache
+        $process=[Diagnostics.Process]::new();$process.StartInfo=$start
+        try{
+            if(-not$process.Start()){throw 'Failed to start isolated installer child process.'}
+            $process.StandardInput.Close();$stdoutTask=$process.StandardOutput.ReadToEndAsync();$stderrTask=$process.StandardError.ReadToEndAsync();$process.WaitForExit()
+            $output=@($stdoutTask.GetAwaiter().GetResult(),$stderrTask.GetAwaiter().GetResult())|Where-Object{-not[string]::IsNullOrEmpty($_)}
+            $exitCode=$process.ExitCode
+        }finally{$process.Dispose()}
+    }
+    if ($exitCode -ne 0) {
         throw "Install script failed: $($output -join [Environment]::NewLine)"
     }
     return $output
@@ -127,6 +156,13 @@ function Set-TestJson {
     Set-TestText -Path $Path -Value (($Document | ConvertTo-Json -Depth 20).Replace("`r`n","`n") + "`n")
 }
 
+function Copy-TestInstallerBootstrapAuthority {
+    param([Parameter(Mandatory=$true)][string]$SourceRoot,[Parameter(Mandatory=$true)][string]$DestinationRoot)
+    $destination=Join-Path $DestinationRoot 'instructions\common\bootstrap-section.md'
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination)|Out-Null
+    Copy-Item -LiteralPath (Join-Path $SourceRoot 'instructions\common\bootstrap-section.md') -Destination $destination -Force
+}
+
 function Invoke-TestAgentEnvironmentEntryWithExclusiveLockProbe {
     param(
         [Parameter(Mandatory=$true)][string]$EntryPath,
@@ -167,10 +203,16 @@ function ConvertTo-TestComparableText {
     return ((Remove-TestAnsiControlSequence $Text) -replace '\s','')
 }
 
+function ConvertTo-TestNormalizedDiagnosticText {
+    param([AllowEmptyString()][string]$Text)
+    return ((Remove-TestAnsiControlSequence $Text) -replace '\s+',' ').Trim()
+}
+
 function New-InstallerFailpointCandidate {
     param([Parameter(Mandatory = $true)][string]$SourceRoot,[Parameter(Mandatory = $true)][string]$DestinationRoot)
     New-Item -ItemType Directory -Force -Path $DestinationRoot|Out-Null
     Copy-Item -LiteralPath (Join-Path $SourceRoot 'scripts'),(Join-Path $SourceRoot 'catalog') -Destination $DestinationRoot -Recurse
+    Copy-TestInstallerBootstrapAuthority -SourceRoot $SourceRoot -DestinationRoot $DestinationRoot
     foreach($leaf in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json')){
         Copy-Item -LiteralPath (Join-Path $SourceRoot $leaf) -Destination (Join-Path $DestinationRoot $leaf)
     }

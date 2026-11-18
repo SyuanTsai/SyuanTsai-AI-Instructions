@@ -56,6 +56,7 @@ function New-TestUpdaterHomeV3 {
     }
     Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog-v3.example.json') -Destination (Join-Path $runtimeRoot 'catalog\skills-catalog.json')
     Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\skills-catalog-lock-v3.example.json') -Destination (Join-Path $runtimeRoot 'catalog\skills-catalog-lock.json')
+    Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'instructions\common\bootstrap-section.md') -Destination (Join-Path $runtimeRoot 'bootstrap-section.md')
     $configuration=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog\examples\ai-instructions-sync-v5.example.json')|ConvertFrom-Json
     $configuration.catalog.ref=$Commit;$configuration.updates.mode=$Mode
     Import-Module (Join-Path $script:RepositoryRoot 'scripts\platform-runtime.psd1') -Force
