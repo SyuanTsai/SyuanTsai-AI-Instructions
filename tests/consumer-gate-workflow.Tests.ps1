@@ -356,8 +356,33 @@ Describe 'Consumer gate workflow templates' {
         $script:Probe|Should Match '(?m)^  pull_request:\s*$'
         $script:Probe|Should Match '(?ms)^permissions:\s*\n  contents: read\s*$'
         $probeYaml=ConvertFrom-ConsumerWorkflowYaml $script:Probe
-        $probeYaml.jobs.leg.properties.'timeout-minutes'|Should BeExactly '30'
+        $probeYaml.jobs.leg.properties.'timeout-minutes'|Should BeExactly '60'
         $probeYaml.jobs.aggregate.properties.'timeout-minutes'|Should BeExactly '10'
+        $probeYaml.jobs.aggregate.properties.if|Should BeExactly 'always()'
+        $aggregateSteps=@($probeYaml.jobs.aggregate.steps)
+        $aggregateSteps.Count|Should BeGreaterThan 0
+        $aggregateSteps[0].name|Should BeExactly 'Require successful transition legs'
+        $aggregateSteps[0].env.LEG_RESULT|Should BeExactly '${{ needs.leg.result }}'
+        $aggregateSteps[0].run|Should Match '(?m)^if \(\$env:LEG_RESULT -cne ''success''\) \{$'
+        $aggregateSteps[0].run|Should Match '(?m)^  exit 1$'
+        $resultCheckStep=@'
+      - name: Require successful transition legs
+        shell: pwsh
+        env:
+          LEG_RESULT: ${{ needs.leg.result }}
+        run: |
+          if ($env:LEG_RESULT -cne 'success') {
+            [Console]::Error.WriteLine("Transition probe leg job result was '$($env:LEG_RESULT)'; expected 'success'.")
+            exit 1
+          }
+'@
+        $mutatedProbe=$script:Probe.Replace((ConvertTo-ConsumerWorkflowLf $resultCheckStep),'')
+        $mutatedProbe|Should Not BeExactly $script:Probe
+        $mutatedYaml=ConvertFrom-ConsumerWorkflowYaml $mutatedProbe
+        $mutatedSteps=@($mutatedYaml.jobs.aggregate.steps)
+        $mutatedSteps[0].name|Should Not BeExactly 'Require successful transition legs'
+        @($mutatedSteps|Where-Object{$_.env.LEG_RESULT-ceq'${{ needs.leg.result }}'-and
+                    $_.run-match '(?m)^if \(\$env:LEG_RESULT -cne ''success''\) \{$'}).Count|Should Be 0
         @([regex]::Matches($script:Probe,'(?m)^\s+- \{ os: (windows-latest|ubuntu-latest|macos-latest), platform: (windows|linux|macos) \}\s*$')).Count|Should Be 3
         foreach($binding in @('tests/Invoke-ConsumerTransitionProbe.ps1','-Mode leg','-Mode aggregate','needs: leg',
                 'source-tools/diagnostics','validation-artifacts','gate/receipts','aggregate-receipt.json')){

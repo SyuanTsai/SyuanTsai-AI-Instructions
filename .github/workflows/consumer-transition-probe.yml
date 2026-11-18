@@ -13,7 +13,7 @@ concurrency:
 jobs:
   leg:
     name: Consumer transition probe (${{ matrix.platform }})
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -69,6 +69,15 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
+      - name: Require successful transition legs
+        shell: pwsh
+        env:
+          LEG_RESULT: ${{ needs.leg.result }}
+        run: |
+          if ($env:LEG_RESULT -cne 'success') {
+            [Console]::Error.WriteLine("Transition probe leg job result was '$($env:LEG_RESULT)'; expected 'success'.")
+            exit 1
+          }
       - name: Configure Git checkout line endings
         shell: pwsh
         run: |
