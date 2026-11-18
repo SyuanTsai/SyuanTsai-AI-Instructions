@@ -28,6 +28,11 @@ jobs:
             platform: macos
     runs-on: ${{ matrix.os }}
     steps:
+      - name: Configure Git checkout line endings
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
       - name: Checkout protected base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -159,6 +164,11 @@ jobs:
     outputs:
       authorityCommit: ${{ steps.aggregate.outputs.authorityCommit }}
     steps:
+      - name: Configure Git checkout line endings
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
       - name: Checkout protected base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

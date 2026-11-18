@@ -22,6 +22,11 @@ jobs:
           - { os: macos-latest, platform: macos }
     runs-on: ${{ matrix.os }}
     steps:
+      - name: Configure Git checkout line endings
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: base
@@ -121,6 +126,11 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     steps:
+      - name: Configure Git checkout line endings
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { path: base, ref: '${{ github.event.pull_request.base.sha }}', fetch-depth: 2, persist-credentials: false }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

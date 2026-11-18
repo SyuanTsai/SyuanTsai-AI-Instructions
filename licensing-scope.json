@@ -1266,6 +1266,26 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "scripts/trust-anchor/ConvertTo-TrustAnchorPublicKeyXml.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/trust-anchor/Get-TrustAnchorFingerprint.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/trust-anchor/New-TrustAnchorKeyPair.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/trust-anchor/README.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "scripts/trust-anchor/TrustAnchorPrivateKey.psm1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "scripts/update-agent-environment.ps1",
       "license": "Apache-2.0"
     },
@@ -1639,6 +1659,10 @@
     },
     {
       "path": "tests/third-party-source-envelope.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/trust-anchor-tools.Tests.ps1",
       "license": "Apache-2.0"
     },
     {

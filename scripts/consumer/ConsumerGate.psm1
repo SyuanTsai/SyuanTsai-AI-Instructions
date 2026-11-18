@@ -688,12 +688,52 @@ function Get-GateBlobOid([string]$Root,[string]$Revision,[string]$Path) {
     [string]$Matches[1]
 }
 
+function Test-GateRegularFile([string]$Path) {
+    if(-not(Test-Path -LiteralPath $Path -PathType Leaf)){return $false}
+    $item=Get-Item -LiteralPath $Path -Force
+    -not $item.PSIsContainer-and($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-eq0-and$null-eq$item.LinkType
+}
+
+function Test-GateTextProjectionEqual([string]$Left,[string]$Right) {
+    try{
+        $encoding=[Text.UTF8Encoding]::new($false,$true)
+        $leftText=$encoding.GetString([IO.File]::ReadAllBytes($Left))
+        $rightText=$encoding.GetString([IO.File]::ReadAllBytes($Right))
+    }catch{return $false}
+    if($leftText-match'\r(?!\n)'-or$rightText-match'\r(?!\n)'){return $false}
+    $leftText.Replace("`r`n","`n")-ceq$rightText.Replace("`r`n","`n")
+}
+
+function Test-GateTrackedBlobMatchesFile([string]$TrackedRoot,[string]$Revision,[string]$TrackedPath,
+    [string]$FileRoot,[string]$FilePath) {
+    $trackedFile=Join-Path $TrackedRoot $TrackedPath
+    $comparisonFile=Join-Path $FileRoot $FilePath
+    if(-not(Test-GateRegularFile $trackedFile)-or-not(Test-GateRegularFile $comparisonFile)-or
+        -not(Test-GateTextProjectionEqual $trackedFile $comparisonFile)){return $false}
+    if($Revision-cnotmatch'^[0-9a-f]{40}$'){return Test-GateBytesEqual $trackedFile $comparisonFile}
+    $trackedOid=Get-GateBlobOid $TrackedRoot $Revision $TrackedPath
+    if($null-eq$trackedOid){return $false}
+    $comparisonOid=([string](Invoke-GateGit $FileRoot @('hash-object','--no-filters','--',$comparisonFile)).Output[0]).Trim()
+    $trackedOid-ceq$comparisonOid
+}
+
+function Test-GateTrackedBlobsEqual([string]$LeftRoot,[string]$LeftRevision,[string]$LeftPath,
+    [string]$RightRoot,[string]$RightRevision,[string]$RightPath) {
+    $leftFile=Join-Path $LeftRoot $LeftPath
+    $rightFile=Join-Path $RightRoot $RightPath
+    if(-not(Test-GateRegularFile $leftFile)-or-not(Test-GateRegularFile $rightFile)-or
+        -not(Test-GateTextProjectionEqual $leftFile $rightFile)){return $false}
+    if($LeftRevision-cnotmatch'^[0-9a-f]{40}$'-or$RightRevision-cnotmatch'^[0-9a-f]{40}$'){return Test-GateBytesEqual $leftFile $rightFile}
+    $leftOid=Get-GateBlobOid $LeftRoot $LeftRevision $LeftPath
+    $rightOid=Get-GateBlobOid $RightRoot $RightRevision $RightPath
+    $null-ne$leftOid-and$null-ne$rightOid-and$leftOid-ceq$rightOid
+}
+
 function Assert-GateProtectedFiles([string]$AuthorityRoot,[string]$BaseRoot,[string]$CandidateRoot,$ManifestEntry,
     [string]$BaseRevision,[string]$CandidateRevision,[bool]$Transition) {
-    $candidateBootstrap = Join-Path $CandidateRoot 'scripts/Invoke-PinnedAuthority.ps1'
-     $baseBootstrap = Join-Path $BaseRoot 'scripts/Invoke-PinnedAuthority.ps1'
-    $templateBootstrap = Join-Path $AuthorityRoot 'consumer/bootstrap/Invoke-PinnedAuthority.ps1'
-    if (-not (Test-GateBytesEqual $candidateBootstrap $templateBootstrap) -and -not (Test-GateBytesEqual $candidateBootstrap $baseBootstrap)) {
+    $bootstrapPath='scripts/Invoke-PinnedAuthority.ps1'
+    if (-not (Test-GateTrackedBlobMatchesFile $CandidateRoot $CandidateRevision $bootstrapPath $AuthorityRoot 'consumer/bootstrap/Invoke-PinnedAuthority.ps1') -and
+        -not (Test-GateTrackedBlobsEqual $CandidateRoot $CandidateRevision $bootstrapPath $BaseRoot $BaseRevision $bootstrapPath)) {
         Throw-GateResult FAILED 'Candidate bootstrap differs from both authority template and base.'
     }
     $workflowRoot = Join-Path $CandidateRoot '.github/workflows'
@@ -703,12 +743,13 @@ function Assert-GateProtectedFiles([string]$AuthorityRoot,[string]$BaseRoot,[str
     foreach ($file in @($items)) {
         $relative = [IO.Path]::GetRelativePath($workflowRoot,$file.FullName).Replace('\','/')
         if ($relative.Contains('/') -or $allowed -cnotcontains $relative) { Throw-GateResult FAILED "Unexpected workflow: $relative" }
-        $template = Join-Path $AuthorityRoot "consumer/workflows/$relative"
-         $base = Join-Path $BaseRoot ".github/workflows/$relative"
+        $workflowPath=".github/workflows/$relative"
+        $base = Join-Path $BaseRoot $workflowPath
         if ($relative -ceq 'consumer-gate-transition.yml' -and -not $Transition -and -not (Test-Path $base -PathType Leaf)) {
             Throw-GateResult FAILED 'Transition workflow is not allowed after transition.'
         }
-        if (-not (Test-GateBytesEqual $file.FullName $template) -and -not (Test-GateBytesEqual $file.FullName $base)) {
+        if (-not (Test-GateTrackedBlobMatchesFile $CandidateRoot $CandidateRevision $workflowPath $AuthorityRoot "consumer/workflows/$relative") -and
+            -not (Test-GateTrackedBlobsEqual $CandidateRoot $CandidateRevision $workflowPath $BaseRoot $BaseRevision $workflowPath)) {
             Throw-GateResult FAILED "Workflow differs from both authority template and base: $relative"
         }
     }

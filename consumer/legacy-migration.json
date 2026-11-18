@@ -955,8 +955,8 @@
       "id": "skill-knowledge-content",
       "repository": "https://github.com/SyuanTsai/Skill-Knowledge-Content.git",
       "status": "ready",
-      "inventoryCommit": "49ffcef53a78c131658809cebd5f54ee28511dc5",
-      "inventoryTree": "62f978f0490655817d8c532f2188dd5bb7433b3b",
+      "inventoryCommit": "513b7857e3f7973b4033cbfe268af282736cd71d",
+      "inventoryTree": "7e350034f2d26dd9c0eb3a2123c5818061a567a6",
       "requiredRepositoryChecks": [
         {
           "id": "repository-knowledge-content",

@@ -193,7 +193,7 @@ function New-PinnedAuthority([string]$Root, [string]$Commit, [string]$Repository
      $authorityRoot = Join-Path $Root 'authority'
     if ((Test-Path $gitRoot) -or (Test-Path $authorityRoot)) { Throw-ConsumerResult INVALID 'Authority acquisition paths must not already exist.' }
     [IO.Directory]::CreateDirectory($gitRoot) | Out-Null
-    [void](Invoke-PinnedGit $gitRoot @('init', '--quiet'));$remote=@('-c',"remote.origin.url=$Repository")
+    [void](Invoke-PinnedGit $gitRoot @('init', '--quiet'));[void](Invoke-PinnedGit $gitRoot @('remote','add','origin',$Repository));$remote=@('-c',"remote.origin.url=$Repository")
     if(([string](Invoke-PinnedGit $gitRoot ($remote+@('ls-remote','--get-url','origin')) -AllowFileProtocol:$AllowFileProtocol).Output[0]).Trim()-cne$Repository){Throw-ConsumerResult INVALID 'Authority origin cannot be resolved in the Git acquisition environment.'}
     [void](Invoke-PinnedGit $gitRoot ($remote+@('fetch','--no-tags','--filter=blob:none','origin','+refs/heads/main:refs/remotes/aii/main')) -AllowFileProtocol:$AllowFileProtocol)
     if(([string](Invoke-PinnedGit $gitRoot ($remote+@('ls-remote','--get-url','origin')) -AllowFileProtocol:$AllowFileProtocol).Output[0]).Trim()-cne$Repository){Throw-ConsumerResult INVALID 'Authority origin cannot be resolved in the Git acquisition environment.'}
