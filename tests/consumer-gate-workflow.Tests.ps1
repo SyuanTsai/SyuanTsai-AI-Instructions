@@ -3,6 +3,7 @@ Describe 'Consumer gate workflow templates' {
         $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
         $script:FormalPath = Join-Path $script:RepositoryRoot 'consumer/workflows/consumer-gate.yml'
         $script:TransitionPath = Join-Path $script:RepositoryRoot 'consumer/workflows/consumer-gate-transition.yml'
+        $script:ProbePath = Join-Path $script:RepositoryRoot '.github/workflows/consumer-transition-probe.yml'
         function ConvertTo-ConsumerWorkflowLf([string]$Text) {
             $Text.Replace("`r`n", "`n").Replace("`r", "`n")
         }
@@ -16,6 +17,7 @@ Describe 'Consumer gate workflow templates' {
         }
         $script:Formal = ConvertTo-ConsumerWorkflowLf (Get-Content -Raw -Encoding UTF8 $script:FormalPath)
         $script:Transition = ConvertTo-ConsumerWorkflowLf (Get-Content -Raw -Encoding UTF8 $script:TransitionPath)
+        $script:Probe = ConvertTo-ConsumerWorkflowLf (Get-Content -Raw -Encoding UTF8 $script:ProbePath)
         function ConvertFrom-ConsumerWorkflowYaml([string]$Text) {
             $lines = @($Text -split "`r?`n")
             $document = [ordered]@{ permissions = $null
@@ -318,7 +320,7 @@ Describe 'Consumer gate workflow templates' {
     # Scenario: Expressions are treated as YAML data and never interpolated into shell source.
     # Purpose: Event-controlled values reach scripts only through env variables.
     It 'UnitT70_has_no_github_expression_inside_run_blocks' {
-        foreach ($text in @($script:Formal,$script:Transition)) {
+        foreach ($text in @($script:Formal,$script:Transition,$script:Probe)) {
             $blocks = [regex]::Matches($text,'(?ms)^[ \t]+run:[ \t]*\|[ \t]*\r?\n(?<body>(?:[ \t]{10,}[^\r\n]*(?:\r?\n|$))*)')
             foreach ($block in $blocks) { $block.Groups['body'].Value | Should Not Match '\$\{\{' }
         }
@@ -342,9 +344,30 @@ Describe 'Consumer gate workflow templates' {
     # Scenario: All external actions are immutable and caches are absent.
     # Purpose: Template supply-chain behavior remains reviewable and non-persistent.
     It 'UnitT80_pins_actions_and_avoids_cache_or_persisted_credentials' {
-        foreach ($text in @($script:Formal,$script:Transition)) {
+        foreach ($text in @($script:Formal,$script:Transition,$script:Probe)) {
             $text | Should Not Match 'actions/cache|persist-credentials:\s*true'
             foreach ($use in [regex]::Matches($text,'(?m)^\s*uses:\s*([^\s#]+)')) { $use.Groups[1].Value | Should Match '@[0-9a-f]{40}$' }
         }
+    }
+
+    # Scenario: An authority pull request runs the fixture transition through every real platform leg and an aggregate job.
+    # Purpose: Detect adapter, resolver, validator, and phase-contract regressions before a consumer conversion uses the pin.
+    It 'UnitT85_runs_the_real_three_platform_transition_probe_with_read_only_permissions' {
+        $script:Probe|Should Match '(?m)^  pull_request:\s*$'
+        $script:Probe|Should Match '(?ms)^permissions:\s*\n  contents: read\s*$'
+        @([regex]::Matches($script:Probe,'(?m)^\s+- \{ os: (windows-latest|ubuntu-latest|macos-latest), platform: (windows|linux|macos) \}\s*$')).Count|Should Be 3
+        foreach($binding in @('tests/Invoke-ConsumerTransitionProbe.ps1','-Mode leg','-Mode aggregate','needs: leg',
+                'source-tools/diagnostics','validation-artifacts','gate/receipts','aggregate-receipt.json')){
+            $script:Probe|Should Match ([regex]::Escape($binding))
+        }
+        $script:Probe|Should Match 'STANDARD_VALIDATION_GITHUB_API_TOKEN: \$\{\{ github\.token \}\}'
+        $script:Probe|Should Not Match 'secrets\.|CONSUMER_GATE_APP|consumer-gate-resolver-fixture|consumer-gate-validation-runner-fixture'
+        $probeScript=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'tests/Invoke-ConsumerTransitionProbe.ps1')
+        foreach($phase in @('prepare','validate','finalize','aggregate')){$probeScript|Should Match ([regex]::Escape(" $phase "))}
+        foreach($production in @('consumer/bootstrap/Invoke-PinnedAuthority.ps1','consumer/workflows/consumer-gate-transition.yml',
+                'scripts/Invoke-StandardValidation.ps1','scripts/Resolve-StandardValidationTool.ps1')){
+            Test-Path -LiteralPath (Join-Path $script:RepositoryRoot $production) -PathType Leaf|Should Be $true
+        }
+        $probeScript|Should Not Match 'consumer-gate-resolver-fixture|consumer-gate-validation-runner-fixture'
     }
 }

@@ -116,7 +116,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: consumer-gate-evidence-${{ matrix.platform }}
-          path: ${{ runner.temp }}/consumer-gate-${{ matrix.platform }}/validation-artifacts
+          path: |
+            ${{ runner.temp }}/consumer-gate-${{ matrix.platform }}/source-tools/diagnostics
+            ${{ runner.temp }}/consumer-gate-${{ matrix.platform }}/validation-artifacts
           if-no-files-found: error
 
   aggregate:

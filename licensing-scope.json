@@ -1618,6 +1618,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": ".github/workflows/consumer-transition-probe.yml",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "consumer/README.md",
       "license": "Apache-2.0"
     },
@@ -1678,6 +1682,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "tests/Invoke-ConsumerTransitionProbe.ps1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "tests/consumer-bootstrap.Tests.ps1",
       "license": "Apache-2.0"
     },
@@ -1687,6 +1695,22 @@
     },
     {
       "path": "tests/consumer-source-gate.Tests.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/consumer-transition-probe/base/scripts/Legacy.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/consumer-transition-probe/candidate/scripts/Test-FixtureRepository.ps1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/consumer-transition-probe/candidate/skills/fixture/SKILL.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/consumer-transition-probe/candidate/tests/Fixture.Tests.ps1.template",
       "license": "Apache-2.0"
     },
     {

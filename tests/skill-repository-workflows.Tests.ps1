@@ -232,6 +232,7 @@ Describe 'Agent Skill authority workflow contract' {
         $script:SetupGoSha = 'b7ad1dad31e06c5925ef5d2fc7ad053ef454303e'
         $script:AuthorityGoVersionRule = 'latest-stable'
         $script:WorkflowExpectations = [ordered]@{
+            '.github/workflows/consumer-transition-probe.yml' = 2
             '.github/workflows/pr8-powershell-validation.yml' = 5
             '.github/workflows/standards-conformance.yml' = 1
             '.github/workflows/syp101-production-smoke.yml' = 1
@@ -640,13 +641,14 @@ jobs:
             Where-Object { $_.Extension -in @('.yml', '.yaml') } |
             ForEach-Object { [IO.Path]::GetRelativePath($script:RepositoryRoot, $_.FullName).Replace('\', '/') })
         $expectedWorkflowPaths = @(
+            '.github/workflows/consumer-transition-probe.yml',
             '.github/workflows/pr8-powershell-validation.yml',
             '.github/workflows/standards-conformance.yml',
             '.github/workflows/syp101-production-smoke.yml',
             '.github/workflows/syp86-production-lock.yml',
             '.github/workflows/validator-maintenance-producer.yml'
         )
-        Assert-Equal $workflowPaths.Count $expectedWorkflowPaths.Count 'R4 must retain exactly the five registered active workflow files.'
+        Assert-Equal $workflowPaths.Count $expectedWorkflowPaths.Count 'The repository must retain exactly the six registered active workflow files.'
         Assert-Equal (($workflowPaths | Sort-Object) -join '|') (($expectedWorkflowPaths | Sort-Object) -join '|') 'The workflow inventory must retire the unmatched protected maintenance consumer and reject unreviewed workflow additions.'
         $pullRequestWorkflows = New-Object 'System.Collections.Generic.List[string]'
         $pullRequestJobNames = New-Object 'System.Collections.Generic.List[string]'
@@ -659,14 +661,22 @@ jobs:
                 $jobMatches = [regex]::Matches($jobsBlock.Groups['block'].Value, '(?m)^  ([a-z][a-z0-9-]*):\s*$')
                 if ($relativePath -ceq '.github/workflows/pr8-powershell-validation.yml') {
                     $pullRequestJobNames.Add('windows-core')
+                } elseif($relativePath-ceq'.github/workflows/consumer-transition-probe.yml') {
+                    Assert-Equal $jobMatches.Count 2 'The transition probe must contain one matrix leg and one aggregate job.'
                 } else {
                     Assert-Equal $jobMatches.Count 1 "Ordinary pull-request workflow '$relativePath' must have exactly one job."
                     $pullRequestJobNames.Add($jobMatches[0].Groups[1].Value)
                 }
             }
-            Assert-NotMatch $workflow 'windows-powershell-51|PowerShell 5\.1|Pester 3\.4\.0|shell:\s*powershell|runs-on:\s*ubuntu-latest|shell:\s*bash' "Workflow '$relativePath' must not retain a retired PowerShell 5.1 or Linux CI lane."
+            Assert-NotMatch $workflow 'windows-powershell-51|PowerShell 5\.1|Pester 3\.4\.0|shell:\s*powershell|shell:\s*bash' "Workflow '$relativePath' must not retain a retired PowerShell 5.1 lane."
             Assert-NotMatch $workflow '(?ms)^\s*&\s+\./scripts/[^\r\n]+\.ps1[^\r\n]*\r?\n\s*if\s*\(\s*\$LASTEXITCODE' "Workflow '$relativePath' must use PowerShell success state or exceptions after PowerShell script calls, not a stale native exit code."
             Assert-NotMatch $workflow 'Get-Module Pester -ListAvailable -Name Pester' "Workflow '$relativePath' must not pass Pester both positionally and through -Name."
+            if($relativePath-ceq'.github/workflows/consumer-transition-probe.yml'){
+                Assert-Match $workflow '(?s)windows-latest.*ubuntu-latest.*macos-latest' 'The transition probe must retain all three platform rows.'
+                Assert-Match $workflow 'tests/Invoke-ConsumerTransitionProbe\.ps1' 'The transition probe must use its shared local/CI driver.'
+                continue
+            }
+            Assert-NotMatch $workflow 'runs-on:\s*ubuntu-latest' "Ordinary workflow '$relativePath' must not add a Linux CI lane."
             Assert-Match $workflow 'runs-on:\s*windows-latest' "Workflow '$relativePath' must run on Windows."
             Assert-Match $workflow "version = '7\.6\.6'" "Workflow '$relativePath' must pin the reviewed latest stable PowerShell release."
             Assert-Match $workflow '02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860' "Workflow '$relativePath' must verify the reviewed PowerShell ZIP SHA256."
@@ -684,12 +694,13 @@ jobs:
                 Assert-Equal (@($runnerValues | Where-Object { $_ -cne 'windows-latest' }).Count) 0 "Ordinary workflow '$relativePath' may use only windows-latest."
             }
         }
-        Assert-Equal $pullRequestWorkflows.Count 2 'Exactly the Core and Install Smoke workflows may run for ordinary pull requests.'
+        Assert-Equal $pullRequestWorkflows.Count 3 'Core, Install Smoke, and the non-required consumer transition probe must run for ordinary pull requests.'
         $expectedPullRequestWorkflows = @(
+            '.github/workflows/consumer-transition-probe.yml',
             '.github/workflows/pr8-powershell-validation.yml',
             '.github/workflows/syp101-production-smoke.yml'
         )
-        Assert-Equal (($pullRequestWorkflows.ToArray() | Sort-Object) -join '|') (($expectedPullRequestWorkflows | Sort-Object) -join '|') 'No Linux, SYP86, Standards, or maintenance workflow may add an ordinary pull-request job.'
+        Assert-Equal (($pullRequestWorkflows.ToArray() | Sort-Object) -join '|') (($expectedPullRequestWorkflows | Sort-Object) -join '|') 'Only the two required Windows workflows and the reviewed transition probe may add ordinary pull-request jobs.'
         $expectedPullRequestJobNames = @('windows-core', 'windows-install-smoke')
         Assert-Equal (($pullRequestJobNames.ToArray() | Sort-Object) -join '|') (($expectedPullRequestJobNames | Sort-Object) -join '|') 'Ordinary pull-request CI must aggregate to exactly Windows Core and Windows Install Smoke.'
 
@@ -879,8 +890,8 @@ jobs:
         Assert-Throws { Assert-PesterShardResultCounts -Summary $incompleteSummary -Context 'shard' } 'Counts that do not cover total results must be rejected.'
     }
 
-    # Scenario: Multiple workflows can silently add normal pull-request CI, duplicate the authority gate, or reuse an outdated platform lane.
-    # Purpose: Keep exactly Core and Install Smoke automatic while retaining Windows-only manual and push diagnostics.
+    # Scenario: Multiple workflows can silently add required pull-request CI, duplicate the authority gate, or reuse an outdated platform lane.
+    # Purpose: Keep Core and Install Smoke as the only required contexts while retaining the reviewed non-required transition probe.
     It 'UnitT20_keeps_two_Windows_PR_jobs_and_single_authority_gate' {
         $paths = [ordered]@{
             Core = '.github/workflows/pr8-powershell-validation.yml'
@@ -888,6 +899,7 @@ jobs:
             Smoke = '.github/workflows/syp101-production-smoke.yml'
             Lock = '.github/workflows/syp86-production-lock.yml'
             Maintenance = '.github/workflows/validator-maintenance-producer.yml'
+            Probe = '.github/workflows/consumer-transition-probe.yml'
         }
         $workflows = [ordered]@{}
         foreach ($entry in $paths.GetEnumerator()) {
@@ -895,13 +907,19 @@ jobs:
             $workflows[$entry.Key] = $workflow
             Assert-Match $workflow 'permissions:\s*contents:\s*read' "$($entry.Key) workflow must use read-only repository permissions."
             Assert-NotMatch $workflow 'sourceMergeExceptionProposal|pr12-source-merge-exception-proposal|sourceMergeDecision|pr12-source-merge-adoption' "$($entry.Key) workflow must not route or publish unrelated source-adoption contexts."
-            Assert-NotMatch $workflow 'actions/setup-go|STANDARD_GO_RUNTIME_VERSION|STANDARD_GO_COMMAND_PATH|GITHUB_TOKEN' "$($entry.Key) workflow must not restore retired external resolver dependencies."
+            if($entry.Key-cne'Probe'){
+                Assert-NotMatch $workflow 'actions/setup-go|STANDARD_GO_RUNTIME_VERSION|STANDARD_GO_COMMAND_PATH|GITHUB_TOKEN' "$($entry.Key) workflow must not restore retired external resolver dependencies."
+            }else{
+                Assert-Match $workflow 'actions/setup-go' 'The transition probe must supply the real resolver Go runtime.'
+                Assert-Match $workflow 'STANDARD_VALIDATION_GITHUB_API_TOKEN:\s*\$\{\{ github\.token \}\}' 'The probe token must be scoped to its real prepare path.'
+            }
         }
 
         $smokeEvents = [regex]::Match($workflows.Smoke, '(?ms)^on:\r?\n(?<block>.*?)(?=^permissions:)').Groups['block'].Value
         $standardsEvents = [regex]::Match($workflows.Standards, '(?ms)^on:\r?\n(?<block>.*?)(?=^permissions:)').Groups['block'].Value
         $lockEvents = [regex]::Match($workflows.Lock, '(?ms)^on:\r?\n(?<block>.*?)(?=^permissions:)').Groups['block'].Value
         $maintenanceEvents = [regex]::Match($workflows.Maintenance, '(?ms)^on:\r?\n(?<block>.*?)(?=^permissions:)').Groups['block'].Value
+        $probeEvents = [regex]::Match($workflows.Probe, '(?ms)^on:\r?\n(?<block>.*?)(?=^permissions:)').Groups['block'].Value
         foreach ($pair in @(@{ Name='Smoke'; Events=$smokeEvents })) {
             $pullRequest = [regex]::Match($pair.Events, '(?ms)^  pull_request:\r?\n(?<block>.*?)(?=^  [a-z_]+:\s*$|\z)')
             $push = [regex]::Match($pair.Events, '(?ms)^  push:\r?\n(?<block>.*?)(?=^  [a-z_]+:\s*$|\z)')
@@ -924,6 +942,8 @@ jobs:
         Assert-Match $lockEvents '(?ms)^  push:\r?\n.*?^    paths:\s*$' 'SYP86 lock diagnostics may remain path-filtered on push.'
         Assert-NotMatch $workflows.Lock '(?m)^  pull_request:\s*$' 'SYP86 lock must not add an ordinary PR job.'
         Assert-NotMatch $workflows.Maintenance '(?m)^  (pull_request|workflow_run|push|schedule):\s*$' 'Validator maintenance must remain an explicit manual diagnostic producer.'
+        Assert-Match $probeEvents '(?m)^  pull_request:\s*$' 'The transition probe must run on pull requests.'
+        Assert-NotMatch $workflows.Probe '(?m)^\s+name:\s*(Windows Core|Windows Install Smoke)\s*$' 'The probe must not publish a required context name.'
 
         Assert-Equal ([regex]::Matches($workflows.Standards, '(?m)^\s*& \./scripts/Invoke-StandardAuthorityGate\.ps1')).Count 1 'Manual Standards diagnostics must retain one real authority gate.'
         Assert-Equal ([regex]::Matches($workflows.Core, '(?m)^\s*& \./scripts/Invoke-StandardAuthorityGate\.ps1')).Count 1 'Windows Core must invoke the authority gate exactly once.'

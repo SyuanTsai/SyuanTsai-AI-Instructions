@@ -1,0 +1,7 @@
+Describe 'Consumer transition probe fixture' {
+    # Scenario: The real consumer repository wrapper discovers and executes the fixture test tree.
+    # Purpose: Prove the complete Pester check reaches a passing candidate-owned case without a stub.
+    It 'UnitT10_executes_the_fixture_test_tree' {
+        1 | Should -Be 1
+    }
+}

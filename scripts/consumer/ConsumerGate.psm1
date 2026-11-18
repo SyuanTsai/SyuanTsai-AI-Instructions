@@ -48,6 +48,24 @@ function Write-GateJsonCreateOnly([string]$Path,$Value) {
     try{$stream.Write($bytes,0,$bytes.Length)
     $stream.Flush($true)}finally{$stream.Dispose()}
 }
+function Write-GateDiagnosticTextCreateOnly([string]$Path,[string]$Value,[int]$MaximumBytes=65536) {
+    if($MaximumBytes-lt1){Throw-GateResult INVALID 'Diagnostic size limit is invalid.'}
+    $encoding=[Text.UTF8Encoding]::new($false,$true)
+    $text=if($null-eq$Value){''}else{[string]$Value}
+    $bytes=$encoding.GetBytes($text)
+    if($bytes.Length-gt$MaximumBytes){
+        $length=$MaximumBytes
+        while($length-gt0){try{$text=$encoding.GetString($bytes,0,$length);break}catch [Text.DecoderFallbackException]{$length--}}
+        $suffix="`n[TRUNCATED]`n"
+        $suffixBytes=$encoding.GetBytes($suffix)
+        $available=[Math]::Max(0,$MaximumBytes-$suffixBytes.Length)
+        $length=[Math]::Min($length,$available)
+        while($length-gt0){try{$text=$encoding.GetString($bytes,0,$length);break}catch [Text.DecoderFallbackException]{$length--}}
+        $bytes=$encoding.GetBytes($text+$suffix)
+    }
+    $stream=[IO.FileStream]::new($Path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+    try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
+}
 function Get-GateActiveSkills([string]$CandidateRoot) {
     $paths=@((Invoke-GateGit $CandidateRoot @('ls-files','--','skills/*/SKILL.md')).Output|ForEach-Object{[string]$_}|Where-Object{`
         $_-match'^skills/([^/]+)/SKILL\.md$'}|ForEach-Object{$Matches[1]}|Sort-Object -Unique)
@@ -172,7 +190,8 @@ function Invoke-GateResolver([string]$PowerShell,[string]$AuthorityRoot,[string]
         $start.RedirectStandardError=$true
         foreach($argument in $arguments){[void]$start.ArgumentList.Add($argument)}
         $preserved=@{}
-        foreach($name in @('PATH','Path','PATHEXT','SystemRoot','WINDIR','TEMP','TMP','TMPDIR','HOME','USERPROFILE','PSModulePath','PSExecutionPolicyPreference')){
+        foreach($name in @('PATH','Path','PATHEXT','SystemRoot','WINDIR','TEMP','TMP','TMPDIR','HOME','USERPROFILE','PSModulePath','PSExecutionPolicyPreference',
+                'ProgramFiles','ProgramFiles(x86)','ProgramW6432','ProgramData','LOCALAPPDATA','APPDATA')){
             $value=[Environment]::GetEnvironmentVariable($name,'Process');if($null-ne$value){$preserved[$name]=$value}
         }
         $start.Environment.Clear()
@@ -181,12 +200,19 @@ function Invoke-GateResolver([string]$PowerShell,[string]$AuthorityRoot,[string]
         $process=[Diagnostics.Process]::new()
         try{$process.StartInfo=$start;[void]$process.Start();$stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
             $process.WaitForExit();$standardOutput=$stdout.GetAwaiter().GetResult();$standardError=$stderr.GetAwaiter().GetResult();$exitCode=$process.ExitCode
-            if(-not[string]::IsNullOrEmpty($Token)-and($standardOutput.Contains($Token,[StringComparison]::Ordinal)-or
-                $standardError.Contains($Token,[StringComparison]::Ordinal))){Throw-GateResult FAILED 'Resolver output contained a credential sentinel.'}}
+            $credentialLeak=-not[string]::IsNullOrEmpty($Token)-and($standardOutput.Contains($Token,[StringComparison]::Ordinal)-or
+                $standardError.Contains($Token,[StringComparison]::Ordinal))
+            if(-not[string]::IsNullOrEmpty($Token)){$standardOutput=$standardOutput.Replace($Token,'[REDACTED]');$standardError=$standardError.Replace($Token,'[REDACTED]')}
+            $diagnostics=Join-Path (Split-Path -Parent $OutputPath) 'diagnostics'
+            [void][IO.Directory]::CreateDirectory($diagnostics)
+            Write-GateDiagnosticTextCreateOnly (Join-Path $diagnostics "resolver-$Tool.stdout.txt") $standardOutput
+            Write-GateDiagnosticTextCreateOnly (Join-Path $diagnostics "resolver-$Tool.stderr.txt") $standardError
+            [Console]::Out.Write($standardOutput);[Console]::Error.Write($standardError)
+            if($credentialLeak){Throw-GateResult FAILED 'Resolver output contained a credential sentinel.'}
+            if($exitCode-ne0){Throw-GateResult FAILED "Resolver failed for $Tool. Diagnostics were preserved."}}
         finally{[void]$start.Environment.Remove('STANDARD_VALIDATION_GITHUB_API_TOKEN');$preserved.Clear();$start.Environment.Clear()
-            $standardOutput=$null;$standardError=$null;$stdout=$null;$stderr=$null;$process.Dispose();$start=$null;$Token=$null
-            Remove-Variable standardOutput,standardError,stdout,stderr,preserved,process,start,Token -ErrorAction SilentlyContinue}
-        if($exitCode-ne0){Throw-GateResult FAILED "Resolver failed for $Tool."}
+            $standardOutput=$null;$standardError=$null;$stdout=$null;$stderr=$null;$credentialLeak=$null;$process.Dispose();$start=$null;$Token=$null
+            Remove-Variable standardOutput,standardError,stdout,stderr,credentialLeak,preserved,process,start,Token -ErrorAction SilentlyContinue}
     }finally{foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,$null,'Process')}
     $Token=$null
     Remove-Variable Token -ErrorAction SilentlyContinue}
@@ -321,6 +347,7 @@ function New-GateAdapter([string]$Path,$Config,$Setup,[string]$PowerShell) {
         arguments=@('-Mode','pester','-PesterReceiptSha256',[string]$Setup.pesterReceiptSha256,'-PesterManifestSha256',`
             [string]$Setup.pesterManifestSha256,'-PesterVersion',[string]$Setup.pesterVersion)}
     )
+    Assert-GateAdapterExecutableBindings $checks $Setup
     Write-GateJsonCreateOnly $Path([ordered]@{schemaVersion=2
     adapter='standard-core-adapter-v2'
     skillsRoot='skills'
@@ -328,19 +355,52 @@ function New-GateAdapter([string]$Path,$Config,$Setup,[string]$PowerShell) {
     checks=$checks
     sourceValidation=$Setup.sourceValidation})
 }
+function Assert-GateAdapterExecutableBindings([object[]]$Checks,$Setup) {
+    $repositoryCheck=[IO.Path]::GetFullPath([string]$Setup.repositoryCheck)
+    $expected=[IO.Path]::GetFullPath((Join-Path ([string]$Setup.trustedRoot) 'trusted/Invoke-ConsumerRepositoryCheck.ps1'))
+    $comparison=if($IsWindows){[StringComparison]::OrdinalIgnoreCase}else{[StringComparison]::Ordinal}
+    if(-not$repositoryCheck.Equals($expected,$comparison)-or-not(Test-Path -LiteralPath $repositoryCheck -PathType Leaf)){
+        Throw-GateResult INVALID 'Setup does not bind the trusted repository check path.'
+    }
+    $hash=Get-GateSha256 $repositoryCheck
+    $frozen=@($Setup.sourceValidation.frozenFiles|Where-Object{
+            [IO.Path]::GetFullPath([string]$_.path).Equals($repositoryCheck,$comparison)-and[string]$_.sha256-ceq$hash})
+    if($frozen.Count-ne1){Throw-GateResult INVALID 'Setup does not bind the trusted repository check hash.'}
+    foreach($check in $Checks){
+        if([IO.Path]::GetExtension([string]$check.executable).Equals('.ps1',[StringComparison]::OrdinalIgnoreCase)-and(
+                -not[IO.Path]::GetFullPath([string]$check.executable).Equals($repositoryCheck,$comparison)-or
+                [string]$check.executableSha256-cne$hash)){
+            Throw-GateResult INVALID "Core check '$($check.id)' PowerShell executable is not the trusted repository check."
+        }
+    }
+}
 function Invoke-GateValidation([string]$AuthorityRoot,[string]$CandidateRoot,[string]$WorkRoot,$Binding,$Config,[string]$PowerShell) {
     $setup=Read-GateJson (Join-Path $WorkRoot 'source-tools.json') 'source tool setup'
     $adapter=Join-Path $WorkRoot 'consumer-core-adapter.json'
     New-GateAdapter $adapter $Config $setup $PowerShell
+    $adapterValue=Read-GateJson $adapter 'consumer core adapter'
+    Assert-GateAdapterExecutableBindings @($adapterValue.checks) $setup
     $artifacts=Join-Path $WorkRoot 'validation-artifacts'
     [IO.Directory]::CreateDirectory($artifacts)|Out-Null
     $output=Join-Path $artifacts 'consumer-core-evidence.json'
-    & $PowerShell -NoProfile -NonInteractive -File (Join-Path $AuthorityRoot 'scripts/Invoke-StandardValidation.ps1') -CandidateRoot `
-        $CandidateRoot -AdapterPath $adapter -ArtifactsRoot $artifacts -OutputPath $output -SourceRepository ([string]$Config.sourceRepository) `
-            -SourceRevision ([string]$Binding.candidateRevision) -BaseRevision ([string]$Binding.baseRevision) -EventName (`
-                [string]$Binding.canonicalEvent) -RunId ([string]$Binding.runId) -AuthorityRevision ([string]$Binding.commit) -TrustedToolRoot (`
-                    [string]$setup.trustedRoot) -SourceValidation -TimeoutSeconds 1800
-    if($LASTEXITCODE-ne0){exit $LASTEXITCODE}
+    $arguments=@('-NoProfile','-NonInteractive','-File',(Join-Path $AuthorityRoot 'scripts/Invoke-StandardValidation.ps1'),'-CandidateRoot',
+        $CandidateRoot,'-AdapterPath',$adapter,'-ArtifactsRoot',$artifacts,'-OutputPath',$output,'-SourceRepository',
+        ([string]$Config.sourceRepository),'-SourceRevision',([string]$Binding.candidateRevision),'-BaseRevision',([string]$Binding.baseRevision),
+        '-EventName',([string]$Binding.canonicalEvent),'-RunId',([string]$Binding.runId),'-AuthorityRevision',([string]$Binding.commit),
+        '-TrustedToolRoot',([string]$setup.trustedRoot),'-SourceValidation','-TimeoutSeconds','1800')
+    $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$PowerShell;$start.UseShellExecute=$false
+    $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+    foreach($argument in $arguments){[void]$start.ArgumentList.Add($argument)}
+    foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[void]$start.Environment.Remove($name)}
+    $process=[Diagnostics.Process]::new()
+    try{$process.StartInfo=$start;[void]$process.Start();$stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
+        $process.WaitForExit();$standardOutput=$stdout.GetAwaiter().GetResult();$standardError=$stderr.GetAwaiter().GetResult();$exitCode=$process.ExitCode
+        Write-GateDiagnosticTextCreateOnly (Join-Path $artifacts 'validator.stdout.txt') $standardOutput
+        Write-GateDiagnosticTextCreateOnly (Join-Path $artifacts 'validator.stderr.txt') $standardError
+        [Console]::Out.Write($standardOutput);[Console]::Error.Write($standardError)
+        if($exitCode-ne0){Throw-GateResult FAILED "Validator failed with exit code $exitCode. Diagnostics were preserved."}
+    }finally{$standardOutput=$null;$standardError=$null;$stdout=$null;$stderr=$null;$start.Environment.Clear();$process.Dispose()
+        Remove-Variable standardOutput,standardError,stdout,stderr,start,process -ErrorAction SilentlyContinue}
     $report=Read-GateJson $output 'source validation evidence'
     if([string]$report.state-cne'PASS'-or[bool]$report.releaseEligible){Throw-GateResult FAILED 'Source validation evidence is not a passing source result.'}
     Write-GateJsonCreateOnly (Join-Path $WorkRoot 'validated-report-binding.json') ([ordered]@{schemaVersion=1
