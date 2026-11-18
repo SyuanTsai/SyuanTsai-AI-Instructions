@@ -269,6 +269,64 @@ Describe 'bootstrap-ai-instructions' {
         New-TestProvenance -ArchivePath $sourceArchive -Path $provenancePath
     }
 
+    # Register only on the native Windows host because this regression exercises the Windows PowerShell 5.1 process.
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows) -and
+        $null -ne (Get-Command powershell.exe -ErrorAction SilentlyContinue)) {
+        # Scenario: Windows PowerShell 5.1 invokes bootstrap against a clean repository with a valid source archive.
+        # Purpose: Refuse the unsupported runtime baseline before changing any worktree, Git metadata, ref, or transaction byte.
+        It 'InterT03_windows_powershell_5_1_refuses_before_repository_mutation' {
+            $gitDirectory = Join-Path $targetRoot '.git'
+            $excludePath = Join-Path $gitDirectory 'info\exclude'
+            $headPath = Join-Path $gitDirectory 'HEAD'
+            $indexPath = Join-Path $gitDirectory 'index'
+            $transactionPath = Join-Path $gitDirectory '.ai-instructions-txn'
+            $getFileSnapshot = {
+                param([Parameter(Mandatory = $true)][string]$Root)
+                return @(
+                    Get-ChildItem -LiteralPath $Root -File -Recurse -Force |
+                        Where-Object { -not $_.FullName.StartsWith($gitDirectory + [IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) } |
+                        Sort-Object FullName |
+                        ForEach-Object {
+                            [pscustomobject][ordered]@{
+                                path = $_.FullName.Substring($Root.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+                                bytesBase64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName))
+                            }
+                        }
+                )
+            }
+            $getRefSnapshot = {
+                return @(
+                    Get-ChildItem -LiteralPath (Join-Path $gitDirectory 'refs') -File -Recurse -Force |
+                        Sort-Object FullName |
+                        ForEach-Object {
+                            [pscustomobject][ordered]@{
+                                path = $_.FullName.Substring($gitDirectory.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
+                                bytesBase64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName))
+                            }
+                        }
+                )
+            }
+            $worktreeBefore = ConvertTo-Json -Compress -InputObject @(&$getFileSnapshot $targetRoot)
+            $refsBefore = ConvertTo-Json -Compress -InputObject @(&$getRefSnapshot)
+            $excludeBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+            $headBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($headPath))
+            $indexBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath))
+
+            $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:BootstrapScript `
+                -SourceArchivePath $sourceArchive -TargetRoot $targetRoot -ConfigurationPath $configurationPath `
+                -ProvenancePath $script:TestProvenancePath 2>&1
+
+            $LASTEXITCODE | Should Not Be 0
+            (ConvertTo-TestDiagnosticText -Output $output) | Should Match 'ai-instructions-refusal-code=runtime-baseline-unavailable'
+            (ConvertTo-Json -Compress -InputObject @(&$getFileSnapshot $targetRoot)) | Should Be $worktreeBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($headPath)) | Should Be $headBefore
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($indexPath)) | Should Be $indexBefore
+            (ConvertTo-Json -Compress -InputObject @(&$getRefSnapshot)) | Should Be $refsBefore
+            Test-Path -LiteralPath $transactionPath | Should Be $false
+        }
+    }
+
     # Scenario: A consumer with its own root license receives, updates, and removes source declarations.
     # Purpose: Keep delivery inventoried, byte-exact and idempotent while protecting customized copies and product licenses.
     It 'InterT04_manages_instruction_license_delivery_without_touching_product_licenses' {
@@ -377,6 +435,27 @@ Describe 'bootstrap-ai-instructions' {
 
         $errorMessage | Should Match 'managed exclude block.*malformed'
         (Get-Content -Raw -LiteralPath $excludePath) | Should Be $excludeBefore
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
+    }
+
+    # Scenario: Planning fails without a refusal code before any durable repository transaction journal exists.
+    # Purpose: Keep the original error classification, never claim a rollback that did not happen, and leave no transaction residue.
+    It 'InterT171_reports_a_non_durable_planning_failure_without_claiming_rollback' {
+        $excludePath = Join-Path $targetRoot '.git\info\exclude'
+        Set-TestText -Path $excludePath -Value "# user rule`n# BEGIN Codex AI Instructions managed paths`n/old-agent.md"
+        $excludeBytes = [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+        $transactionRoot = Join-Path $targetRoot '.git\.ai-instructions-txn'
+
+        try { Invoke-BootstrapScript -SourceArchivePath $sourceArchive -TargetRoot $targetRoot | Out-Null; $errorMessage = $null }
+        catch { $errorMessage = $_.Exception.Message }
+
+        $errorMessage | Should Match 'The Codex AI Instructions managed exclude block is malformed'
+        $errorMessage | Should Not Match 'ai-instructions-refusal-code=interrupted-install'
+        $errorMessage | Should Not Match 'was rolled back'
+        $errorMessage | Should Not Match 'recovery kept the committed repository changes'
+        @(Get-ChildItem -Force -LiteralPath $transactionRoot -ErrorAction SilentlyContinue).Count | Should Be 0
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath)) | Should Be $excludeBytes
         Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
         (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain')) -join '') | Should BeNullOrEmpty
     }
@@ -614,7 +693,7 @@ Describe 'bootstrap-ai-instructions' {
         $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
         $gitWrapper = @"
 @echo off
-echo %* | "$findString" /C:"hash-object --no-filters -- AGENTS.md" >nul
+echo %* | "$findString" /C:"hash-object -w --no-filters -- AGENTS.md" >nul
 if errorlevel 1 goto forward
 if exist "$injectedMarker" goto forward
 "$realGit" %*
@@ -622,6 +701,7 @@ if errorlevel 1 exit /b %errorlevel%
 "$realGit" -C "$targetRoot" hash-object -w "$userBlobFile" > "$hashPath"
 if errorlevel 1 exit /b 86
 set /p userblob=<"$hashPath"
+set "GIT_INDEX_FILE="
 "$realGit" -C "$targetRoot" update-index --add --cacheinfo 100644,%userblob%,AGENTS.md
 if errorlevel 1 (
   type nul > "$blockedMarker"
@@ -1327,7 +1407,7 @@ finally {
         }
 
         $exitCode | Should Not Be 0
-        ($output -join [Environment]::NewLine) | Should Match 'exclusive shared Git exclude mutation handle'
+        (ConvertTo-TestDiagnosticText -Output $output) | Should Match 'exclusive shared Git exclude mutation handle'
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($excludePath)) | Should Be ([Convert]::ToBase64String($excludeBefore))
         Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
         Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $false
@@ -1923,6 +2003,7 @@ catch {
         Set-TestText -Path (Join-Path $definitionRoot '.codex\AGENTS.en.md') -Value '# Definition source'
         Set-TestText -Path (Join-Path $definitionRoot '.github\copilot-instructions.en.md') -Value '# Definition source'
         $probeRoot = Join-Path $TestDrive 'hard-link-target'
+        New-TestRepository -Path $probeRoot
         $managedParent = Join-Path $probeRoot 'managed'
         $outsidePath = Join-Path $TestDrive 'hard-link-outside.md'
         $backupRoot = Join-Path $TestDrive 'hard-link-backup'
@@ -1945,13 +2026,26 @@ param(
 )
 . $BootstrapScript -SourceArchivePath $SourceArchivePath -ConfigurationPath $ConfigurationPath `
     -ProvenancePath $ProvenancePath -TargetRoot $DefinitionRoot | Out-Null
-$snapshot = New-TargetMutationSnapshot -TargetRoot $ProbeRoot -RelativePaths @('managed/victim.md') -BackupRoot $BackupRoot
+$context = New-ProjectPublicationContext -Repository $ProbeRoot
+$script:ProjectPublicationContext = $context
 try {
-    Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath 'managed/victim.md' `
+    Set-ProjectPublicationFileBytes -RelativePath 'managed/victim.md' `
         -Bytes ((New-Object System.Text.UTF8Encoding($false)).GetBytes('# changed managed bytes'))
+    $context.RepositoryIndexLock = Open-RepositoryIndexTransactionLock -Repository $ProbeRoot
+    Start-RepositoryInstallTransaction -Context $context
     $result = 'unexpectedly-mutated'
 }
-catch { $result = $_.Exception.Message }
+catch {
+    $result = $_.Exception.Message
+    if ($context.Durable) {
+        try { Invoke-RepositoryTransactionRollback -Context $context }
+        catch { $result += ' | rollback: ' + $_.Exception.Message }
+    }
+}
+finally {
+    Close-RepositoryIndexTransactionLock -Lock $context.RepositoryIndexLock
+    $script:ProjectPublicationContext = $null
+}
 [System.IO.File]::WriteAllText($ResultPath,$result,(New-Object System.Text.UTF8Encoding($false)))
 '@
 
@@ -1969,7 +2063,7 @@ catch { $result = $_.Exception.Message }
         $output = & $script:TestPowerShellExecutable @arguments 2>&1
 
         $LASTEXITCODE | Should Be 0
-        (Get-Content -Raw -LiteralPath $resultPath) | Should Match 'hard link|multiple file-system links|exclusive ownership'
+        (Get-Content -Raw -LiteralPath $resultPath) | Should Match 'hard link|multiple file-system links|exclusive ownership|regular file with exactly one link'
         (Get-Content -Raw -LiteralPath $outsidePath).Trim() | Should Be '# original outside bytes'
         (Get-Content -Raw -LiteralPath $managedPath).Trim() | Should Be '# original outside bytes'
     }
@@ -1983,6 +2077,7 @@ catch { $result = $_.Exception.Message }
         Set-TestText -Path (Join-Path $definitionRoot '.codex\AGENTS.en.md') -Value '# Definition source'
         Set-TestText -Path (Join-Path $definitionRoot '.github\copilot-instructions.en.md') -Value '# Definition source'
         $probeRoot = Join-Path $TestDrive 'create-bound-root'
+        New-TestRepository -Path $probeRoot
         $managedParent = Join-Path $probeRoot 'managed'
         $savedParent = Join-Path $probeRoot 'managed-original'
         $outsideRoot = Join-Path $TestDrive 'create-bound-outside'
@@ -1990,6 +2085,25 @@ catch { $result = $_.Exception.Message }
         New-Item -ItemType Directory -Force -Path $managedParent,$outsideRoot | Out-Null
         $wrapperPath = Join-Path $TestDrive 'create-bound-junction-probe.ps1'
         $resultPath = Join-Path $TestDrive 'create-bound-junction-result.txt'
+        $hookRuntimeRoot = Join-Path $TestDrive 'create-bound-runtime'
+        New-Item -ItemType Directory -Path $hookRuntimeRoot | Out-Null
+        Copy-Item -LiteralPath (Split-Path -Parent $script:BootstrapScript) -Destination $hookRuntimeRoot -Recurse
+        $hookBootstrapPath = Join-Path $hookRuntimeRoot 'scripts\bootstrap-ai-instructions.ps1'
+        $hookBootstrapText = [IO.File]::ReadAllText($hookBootstrapPath)
+        $hookMarker = 'Publish-PlatformFile @p|Out-Null'
+        $hookIndex = $hookBootstrapText.IndexOf($hookMarker,[StringComparison]::Ordinal)
+        if ($hookIndex -lt 0) { throw 'Could not locate the managed-file publication boundary.' }
+        $hookInjection = @'
+if([string]$leaf-ceq'new.md'){
+    try{
+        Move-Item -LiteralPath $global:CreateProbeParent -Destination $global:CreateProbeSavedParent
+        New-Item -ItemType Junction -Path $global:CreateProbeParent -Target $global:CreateProbeOutside|Out-Null
+        $global:CreateProbeInjectionResult='swapped'
+    }catch{$global:CreateProbeInjectionResult=$_.Exception.Message}
+}
+'@ + $hookMarker
+        $hookBootstrapText = $hookBootstrapText.Remove($hookIndex,$hookMarker.Length).Insert($hookIndex,$hookInjection)
+        [IO.File]::WriteAllText($hookBootstrapPath,$hookBootstrapText,[Text.UTF8Encoding]::new($false))
         Set-TestText -Path $wrapperPath -Value @'
 param(
     [Parameter(Mandatory = $true)][string] $BootstrapScript,
@@ -2006,37 +2120,44 @@ param(
 )
 . $BootstrapScript -SourceArchivePath $SourceArchivePath -ConfigurationPath $ConfigurationPath `
     -ProvenancePath $ProvenancePath -TargetRoot $DefinitionRoot | Out-Null
-$createLine = @(
-    Select-String -LiteralPath $BootstrapScript -Pattern 'File\]::Open\(\[string\]\$state\.TargetPath.*CreateNew|Open-TargetMutationAtomicCreateStream' |
-        Select-Object -First 1 -ExpandProperty LineNumber
-)
-if ($createLine.Count -ne 1) { throw 'Could not locate the managed-file create boundary.' }
 $global:CreateProbeParent = $ManagedParent
 $global:CreateProbeSavedParent = $SavedParent
 $global:CreateProbeOutside = $OutsideRoot
-$breakpoint = Set-PSBreakpoint -Script $BootstrapScript -Line $createLine[0] -Action {
-    Move-Item -LiteralPath $global:CreateProbeParent -Destination $global:CreateProbeSavedParent
-    New-Item -ItemType Junction -Path $global:CreateProbeParent -Target $global:CreateProbeOutside | Out-Null
-}
+$global:CreateProbeInjectionResult = 'not-attempted'
 try {
-    $snapshot = New-TargetMutationSnapshot -TargetRoot $ProbeRoot -RelativePaths @('managed/new.md') -BackupRoot $BackupRoot
+    $context = New-ProjectPublicationContext -Repository $ProbeRoot
+    $script:ProjectPublicationContext = $context
     try {
-        Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath 'managed/new.md' `
+        Set-ProjectPublicationFileBytes -RelativePath 'managed/new.md' `
             -Bytes ((New-Object System.Text.UTF8Encoding($false)).GetBytes('# managed create'))
-        $result = 'unexpectedly-created'
+        $context.RepositoryIndexLock = Open-RepositoryIndexTransactionLock -Repository $ProbeRoot
+        Start-RepositoryInstallTransaction -Context $context
+        $productResult = 'success'
     }
-    catch { $result = $_.Exception.Message }
+    catch {
+        $productResult = $_.Exception.Message
+        if ($context.Durable) {
+            try { Invoke-RepositoryTransactionRollback -Context $context }
+            catch { $productResult += ' | rollback: ' + $_.Exception.Message }
+        }
+    }
+    finally {
+        Close-RepositoryIndexTransactionLock -Lock $context.RepositoryIndexLock
+        $script:ProjectPublicationContext = $null
+    }
 }
 finally {
-    Remove-PSBreakpoint -Breakpoint $breakpoint -ErrorAction SilentlyContinue
-    Remove-Variable -Name CreateProbeParent,CreateProbeSavedParent,CreateProbeOutside -Scope Global -ErrorAction SilentlyContinue
+    $parentIsJunction = $false
+    if(Test-Path -LiteralPath $ManagedParent){$parentIsJunction=((Get-Item -Force -LiteralPath $ManagedParent).Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0}
+    $result=[pscustomobject][ordered]@{injection=[string]$global:CreateProbeInjectionResult;product=[string]$productResult;parentIsJunction=$parentIsJunction}
+    Remove-Variable -Name CreateProbeParent,CreateProbeSavedParent,CreateProbeOutside,CreateProbeInjectionResult -Scope Global -ErrorAction SilentlyContinue
 }
-[System.IO.File]::WriteAllText($ResultPath,$result,(New-Object System.Text.UTF8Encoding($false)))
+[System.IO.File]::WriteAllText($ResultPath,($result|ConvertTo-Json -Compress),(New-Object System.Text.UTF8Encoding($false)))
 '@
 
         $arguments = @(
             '-NoProfile','-ExecutionPolicy','Bypass','-File',$wrapperPath,
-            '-BootstrapScript',(Resolve-Path -LiteralPath $script:BootstrapScript).Path,
+            '-BootstrapScript',$hookBootstrapPath,
             '-SourceArchivePath',$sourceArchive,
             '-ConfigurationPath',$configurationPath,
             '-ProvenancePath',$script:TestProvenancePath,
@@ -2051,7 +2172,14 @@ finally {
         $output = & $script:TestPowerShellExecutable @arguments 2>&1
 
         $LASTEXITCODE | Should Be 0
-        (Get-Content -Raw -LiteralPath $resultPath) | Should Match 'reparse point|outside the expected target-root path|changed concurrently'
+        $result=Get-Content -Raw -LiteralPath $resultPath|ConvertFrom-Json
+        [string]$result.injection | Should Match 'swapped|sharing violation|being used by another process|lease'
+        if([string]$result.injection-ceq'swapped'){
+            [string]$result.product | Should Match 'reparse point|outside the expected target-root path|changed concurrently'
+        }else{
+            [bool]$result.parentIsJunction | Should Be $false
+            [string]$result.product | Should Match '^success$|reparse point|outside the expected target-root path|changed concurrently'
+        }
         Test-Path -LiteralPath (Join-Path $outsideRoot 'new.md') | Should Be $false
         Test-Path -LiteralPath (Join-Path $savedParent 'new.md') | Should Be $false
     }
@@ -2066,7 +2194,7 @@ finally {
         Set-TestText -Path (Join-Path $definitionRoot '.github\copilot-instructions.en.md') -Value '# Definition source'
         $probeRoot = Join-Path $TestDrive 'directory-ownership-root'
         $backupRoot = Join-Path $TestDrive 'directory-ownership-backup'
-        New-Item -ItemType Directory -Force -Path $probeRoot | Out-Null
+        New-TestRepository -Path $probeRoot
         $wrapperPath = Join-Path $TestDrive 'directory-ownership-probe.ps1'
         $resultPath = Join-Path $TestDrive 'directory-ownership-result.txt'
         Set-TestText -Path $wrapperPath -Value @'
@@ -2082,12 +2210,21 @@ param(
 )
 . $BootstrapScript -SourceArchivePath $SourceArchivePath -ConfigurationPath $ConfigurationPath `
     -ProvenancePath $ProvenancePath -TargetRoot $DefinitionRoot | Out-Null
-$snapshot = New-TargetMutationSnapshot -TargetRoot $ProbeRoot -RelativePaths @('managed/new.md') -BackupRoot $BackupRoot
+$context = New-ProjectPublicationContext -Repository $ProbeRoot
+$script:ProjectPublicationContext = $context
+Set-ProjectPublicationFileBytes -RelativePath 'managed/new.md' `
+    -Bytes ((New-Object System.Text.UTF8Encoding($false)).GetBytes('# transaction bytes'))
 $externalDirectory = Join-Path $ProbeRoot 'managed'
 New-Item -ItemType Directory -Path $externalDirectory | Out-Null
-Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath 'managed/new.md' `
-    -Bytes ((New-Object System.Text.UTF8Encoding($false)).GetBytes('# transaction bytes'))
-Restore-TargetMutationSnapshot -Snapshot $snapshot
+try {
+    $context.RepositoryIndexLock = Open-RepositoryIndexTransactionLock -Repository $ProbeRoot
+    Start-RepositoryInstallTransaction -Context $context
+    Invoke-RepositoryTransactionRollback -Context $context
+}
+finally {
+    Close-RepositoryIndexTransactionLock -Lock $context.RepositoryIndexLock
+    $script:ProjectPublicationContext = $null
+}
 $result = if (Test-Path -LiteralPath $externalDirectory -PathType Container) { 'preserved' } else { 'removed' }
 [System.IO.File]::WriteAllText($ResultPath,$result,(New-Object System.Text.UTF8Encoding($false)))
 '@
@@ -2481,7 +2618,9 @@ if not exist "$insertionMarker" (
         $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
         $gitWrapper = @"
 @echo off
-echo %* | "$findString" /C:"stash store" >nul
+echo %* | "$findString" /C:"update-ref --create-reflog" >nul
+if errorlevel 1 goto maybe_insert
+echo %* | "$findString" /C:" refs/stash " >nul
 if errorlevel 1 goto maybe_insert
 "$realGit" %*
 if errorlevel 1 exit /b 86
@@ -2836,7 +2975,11 @@ exit /b %errorlevel%
         $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
         $gitWrapper = "@echo off`necho %* >> `"$gitInvocationLog`"`n`"$realGit`" %*"
         Set-TestText -Path $gitWrapperPath -Value $gitWrapper
-        $powerShellExe = (Get-Command powershell.exe).Source
+        $directGitMarker = Join-Path $wrapperRoot 'unconfigured-git.marker'
+        $poisonRoot = Join-Path $wrapperRoot 'poison-path'
+        New-Item -ItemType Directory -Force -Path $poisonRoot | Out-Null
+        Set-TestText -Path (Join-Path $poisonRoot 'git.cmd') -Value "@echo off`ntype nul > `"$directGitMarker`"`nexit /b 97"
+        $powerShellExe = $script:TestPowerShellExecutable
         $arguments = @(
             '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:BootstrapScript,
             '-SourceArchivePath', $sourceArchive,
@@ -2847,11 +2990,14 @@ exit /b %errorlevel%
 
         # When
         Push-Location $targetRoot
+        $previousPath = $env:PATH
         try {
+            $env:PATH = $poisonRoot + [IO.Path]::PathSeparator + $previousPath
             $output = & $powerShellExe @arguments 2>&1
             $exitCode = $LASTEXITCODE
         }
         finally {
+            $env:PATH = $previousPath
             Pop-Location
         }
 
@@ -2862,8 +3008,9 @@ exit /b %errorlevel%
         $invocations | Should Match 'rev-parse --show-toplevel'
         $invocations | Should Match 'rev-parse --verify HEAD'
         $invocations | Should Match 'commit-tree'
-        $invocations | Should Match 'stash store'
-        $invocations | Should Not Match 'stash push|stash apply'
+        $invocations | Should Match 'update-ref --create-reflog .* refs/stash '
+        $invocations | Should Not Match 'stash store|stash push|stash apply'
+        Test-Path -LiteralPath $directGitMarker | Should Be $false
     }
     }
 
@@ -2900,10 +3047,37 @@ exit /b %errorlevel%
         Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath) | Should Be $true
     }
 
-    # Scenario: A target repository cannot store recovery evidence after an external actor marks a newly created target read-only.
-    # Purpose: Restore read-only transaction-created bytes and exclusions without changing the product index.
     if ($IsWindows) {
-    It 'InterT92_rolls_back_target_when_personal_agent_stash_store_fails' {
+    # Scenario: A target repository cannot store recovery evidence, without any concurrent metadata drift.
+    # Purpose: Preserve main's clean rollback guarantee when stash storage itself is the only failure.
+    It 'InterT92_rolls_back_cleanly_when_personal_agent_stash_store_fails_without_metadata_drift' {
+        New-TestConfiguration -Path $configurationPath
+        $wrapperRoot=Join-Path $TestDrive 'git-clean-stash-failure';New-Item -ItemType Directory -Force -Path $wrapperRoot|Out-Null
+        $realGit=(Get-Command git.exe).Source;$findString=Join-Path $env:SystemRoot 'System32\findstr.exe'
+        $gitWrapper="@echo off`necho %* | `"$findString`" /C:`"update-ref --create-reflog`" >nul`nif errorlevel 1 goto forward`necho %* | `"$findString`" /C:`" refs/stash `" >nul`nif errorlevel 1 goto forward`nexit /b 86`n:forward`n`"$realGit`" %*`nexit /b %errorlevel%"
+        $gitWrapperPath=Join-Path $wrapperRoot 'git.cmd';Set-TestText -Path $gitWrapperPath -Value $gitWrapper
+        $headBefore=Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')
+        $statusBefore=@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain'))-join"`n"
+        $indexPath=Join-Path $targetRoot '.git\index';$indexBefore=(Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash
+        $excludePath=Join-Path $targetRoot '.git\info\exclude';$excludeBefore=[Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))
+
+        $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:BootstrapScript,'-SourceArchivePath',$sourceArchive,'-ConfigurationPath',$configurationPath,'-ProvenancePath',$script:TestProvenancePath,'-TargetRoot',$targetRoot,'-GitExecutable',$gitWrapperPath)
+        $output=& $script:TestPowerShellExecutable @arguments 2>&1;$exitCode=$LASTEXITCODE
+
+        $exitCode|Should Not Be 0
+        (ConvertTo-TestDiagnosticText -Output $output)|Should Match 'update-ref.*refs/stash'
+        (Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD'))|Should Be $headBefore
+        (@(Invoke-TestGit -Repository $targetRoot -Arguments @('status','--porcelain'))-join"`n")|Should Be $statusBefore
+        (Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash|Should Be $indexBefore
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))|Should Be $excludeBefore
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md')|Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot $script:ManifestPath)|Should Be $false
+        @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash','list','--format=%gs')|Where-Object{$_-match'PersonalAgent$'}).Count|Should Be 0
+    }
+
+    # Scenario: A target repository cannot store recovery evidence after an external actor marks a newly created target read-only.
+    # Purpose: Preserve the third-state file and journal while reversing every unaffected operation.
+    It 'InterT92a_preserves_read_only_drift_when_personal_agent_stash_store_fails' {
         # Given
         New-TestConfiguration -Path $configurationPath
         $wrapperRoot = Join-Path $TestDrive 'git-wrapper'
@@ -2912,7 +3086,7 @@ exit /b %errorlevel%
         $findString = Join-Path $env:SystemRoot 'System32\findstr.exe'
         $attributeExecutable = Join-Path $env:SystemRoot 'System32\attrib.exe'
         $agentPath = Join-Path $targetRoot 'AGENTS.md'
-        $powerShellExe = (Get-Command powershell.exe).Source
+        $powerShellExe = $script:TestPowerShellExecutable
         $manifestPath = Join-Path $targetRoot $script:ManifestPath.Replace('/','\')
         $indexPath = Join-Path $targetRoot '.git\index'
         $excludePath = Join-Path $targetRoot '.git\info\exclude'
@@ -2954,7 +3128,9 @@ finally {
         [System.IO.File]::WriteAllText($captureScriptPath, $capturePrefix + "`n" + $captureBody, [System.Text.UTF8Encoding]::new($false))
         $gitWrapper = @"
 @echo off
-echo %* | "$findString" /C:"stash store" >nul
+echo %* | "$findString" /C:"update-ref --create-reflog" >nul
+if errorlevel 1 goto forward
+echo %* | "$findString" /C:" refs/stash " >nul
 if errorlevel 1 goto forward
 copy /b "$excludePath" "$appliedExcludePath" >nul
 if errorlevel 1 exit /b 85
@@ -2992,7 +3168,8 @@ exit /b %errorlevel%
 
         # Then
         $exitCode | Should Not Be 0
-        ($output -join [Environment]::NewLine) | Should Match 'stash store'
+        ($output -join [Environment]::NewLine) | Should Match 'update-ref.*refs/stash'
+        (ConvertTo-TestDiagnosticText -Output $output) | Should Match 'ai-instructions-refusal-code=interrupted-install'
         $beforeEvidence = Get-Content -Raw -LiteralPath $captureBeforePath | ConvertFrom-Json
         $afterEvidence = Get-Content -Raw -LiteralPath $captureAfterPath | ConvertFrom-Json
         [byte[]]$beforeBytes = [Convert]::FromBase64String([string]$beforeEvidence.bytesBase64)
@@ -3016,14 +3193,20 @@ exit /b %errorlevel%
         [byte[]]$appliedExcludeBytes = [System.IO.File]::ReadAllBytes($appliedExcludePath)
         $personalAgentStashCount = @(Invoke-TestGit -Repository $targetRoot -Arguments @('stash', 'list', '--format=%gs') |
             Where-Object { $_ -match 'PersonalAgent$' }).Count
+        $gitDirectory=(@(Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','--absolute-git-dir'))-join'').Trim()
+        $transactionRoot=Join-Path $gitDirectory '.ai-instructions-txn'
+        $transactions=@(Get-ChildItem -LiteralPath $transactionRoot -Directory -Force -ErrorAction SilentlyContinue)
         $headAfter | Should Be $headBefore
-        $statusAfter | Should Be $statusBefore
+        $statusAfter | Should Match '^\?\? AGENTS\.md$'
         $indexAfter | Should Be $indexBefore
         [Convert]::ToBase64String($appliedExcludeBytes) | Should Not Be ([Convert]::ToBase64String($excludeBytesBefore))
         [Convert]::ToBase64String($excludeBytesAfter) | Should Be ([Convert]::ToBase64String($excludeBytesBefore))
-        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $false
+        Test-Path -LiteralPath (Join-Path $targetRoot 'AGENTS.md') | Should Be $true
+        (Get-Item -Force -LiteralPath (Join-Path $targetRoot 'AGENTS.md')).IsReadOnly | Should Be $true
         Test-Path -LiteralPath $manifestPath | Should Be $false
         $personalAgentStashCount | Should Be 0
+        $transactions.Count | Should Be 1
+        Test-Path -LiteralPath (Join-Path $transactions[0].FullName 'journal.json') -PathType Leaf | Should Be $true
         $sha = [System.Security.Cryptography.SHA256]::Create()
         try {
             $beforeBytesHash = [BitConverter]::ToString($sha.ComputeHash($beforeBytes)).Replace('-', '').ToLowerInvariant()
@@ -3043,7 +3226,7 @@ exit /b %errorlevel%
                 sameIdentity = ([string]$beforeEvidence.nativeIdentity -ceq [string]$afterEvidence.nativeIdentity)
                 sameDacl = ($beforeDaclJson -ceq $afterDaclJson)
             }
-            repository = [ordered]@{ headPreserved = ($headAfter -ceq $headBefore); statusPreserved = ($statusAfter -ceq $statusBefore); indexPreserved = ($indexAfter -ceq $indexBefore); excludePreserved = ([Convert]::ToBase64String($excludeBytesAfter) -ceq [Convert]::ToBase64String($excludeBytesBefore)); targetRemoved = (-not (Test-Path -LiteralPath $agentPath)); manifestRemoved = (-not (Test-Path -LiteralPath $manifestPath)); personalAgentStashCount = $personalAgentStashCount }
+            repository = [ordered]@{ headPreserved = ($headAfter -ceq $headBefore); expectedThirdStateStatus = ($statusAfter -match '^\?\? AGENTS\.md$'); indexPreserved = ($indexAfter -ceq $indexBefore); excludePreserved = ([Convert]::ToBase64String($excludeBytesAfter) -ceq [Convert]::ToBase64String($excludeBytesBefore)); targetRetained = (Test-Path -LiteralPath $agentPath); manifestRemoved = (-not (Test-Path -LiteralPath $manifestPath)); journalRetained = ($transactions.Count -eq 1); personalAgentStashCount = $personalAgentStashCount }
             verified = $true
         }
         [Console]::WriteLine('SYP214 readonly rollback witness ' + (ConvertTo-Json -InputObject $witness -Depth 8 -Compress))
@@ -3061,7 +3244,7 @@ exit /b %errorlevel%
         $manifestPath = Join-Path $targetRoot $script:ManifestPath.Replace('/','\')
         $excludePath = Join-Path $targetRoot '.git\info\exclude'
         $excludeBefore = [System.IO.File]::ReadAllBytes($excludePath)
-        $gitWrapper = "@echo off`n`"$realGit`" %*`nif errorlevel 1 exit /b %errorlevel%`necho %* | `"$findString`" /C:`"stash store`" >nul`nif errorlevel 1 exit /b 0`necho concurrent-user-manifest-edit>`"$manifestPath`"`nexit /b 0"
+        $gitWrapper = "@echo off`n`"$realGit`" %*`nif errorlevel 1 exit /b %errorlevel%`necho %* | `"$findString`" /C:`"update-ref --create-reflog`" >nul`nif errorlevel 1 exit /b 0`necho %* | `"$findString`" /C:`" refs/stash `" >nul`nif errorlevel 1 exit /b 0`necho concurrent-user-manifest-edit>`"$manifestPath`"`nexit /b 0"
         $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
         Set-TestText -Path $gitWrapperPath -Value $gitWrapper
         $headBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')
@@ -3103,7 +3286,7 @@ exit /b %errorlevel%
         $manifestPath = Join-Path $targetRoot $script:ManifestPath.Replace('/','\')
         $excludePath = Join-Path $targetRoot '.git\info\exclude'
         $excludeBefore = [System.IO.File]::ReadAllBytes($excludePath)
-        $gitWrapper = "@echo off`n`"$realGit`" %*`nif errorlevel 1 exit /b %errorlevel%`necho %* | `"$findString`" /C:`"stash store`" >nul`nif errorlevel 1 exit /b 0`necho concurrent-user-agent-edit>`"$agentPath`"`nexit /b 0"
+        $gitWrapper = "@echo off`n`"$realGit`" %*`nif errorlevel 1 exit /b %errorlevel%`necho %* | `"$findString`" /C:`"update-ref --create-reflog`" >nul`nif errorlevel 1 exit /b 0`necho %* | `"$findString`" /C:`" refs/stash `" >nul`nif errorlevel 1 exit /b 0`necho concurrent-user-agent-edit>`"$agentPath`"`nexit /b 0"
         $gitWrapperPath = Join-Path $wrapperRoot 'git.cmd'
         Set-TestText -Path $gitWrapperPath -Value $gitWrapper
         $headBefore = Invoke-TestGit -Repository $targetRoot -Arguments @('rev-parse','HEAD')
@@ -3247,6 +3430,7 @@ Describe 'SYP214 read-only rollback drift preservation' {
     BeforeEach {
         $scenarioRoot = Join-Path $TestDrive ('readonly-rollback-' + [guid]::NewGuid().ToString('N'))
         $probeRoot = Join-Path $scenarioRoot 'consumer'
+        New-TestRepository -Path $probeRoot
         $managedParent = Join-Path $probeRoot 'managed'
         New-Item -ItemType Directory -Force -Path $managedParent | Out-Null
         $backupRoot = Join-Path $scenarioRoot 'backup'
@@ -3276,7 +3460,7 @@ param(
     [Parameter(Mandatory = $true)][string] $ResultPath
 )
 $bootstrapText = [System.IO.File]::ReadAllText($BootstrapScript)
-$prefixEnd = $bootstrapText.IndexOf('$syncStartPath = ', [StringComparison]::Ordinal)
+$prefixEnd = $bootstrapText.IndexOf('$targetRootPath = Get-FullPathWithoutTrailingSeparator', [StringComparison]::Ordinal)
 if ($prefixEnd -lt 0) { throw 'Could not find the bootstrap definition prefix boundary.' }
 $bootstrapRoot = Split-Path -Parent $BootstrapScript
 $bootstrapRootLiteral = "'" + $bootstrapRoot.Replace("'", "''") + "'"
@@ -3333,14 +3517,38 @@ $newBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes('# transactio
 $unaffectedOriginalBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes('# original unaffected bytes' + "`n")
 New-Item -ItemType Directory -Force -Path $unaffectedParent | Out-Null
 [System.IO.File]::WriteAllBytes($unaffectedPath, $unaffectedOriginalBytes)
-$snapshot = New-TargetMutationSnapshot -TargetRoot $ProbeRoot `
-    -RelativePaths @($relativePath, $unaffectedRelativePath) -BackupRoot $BackupRoot
-Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath $relativePath -Bytes $newBytes
-Set-TargetMutationFileBytes -Snapshot $snapshot -RelativePath $unaffectedRelativePath `
+$unaffectedOriginalEvidence = Get-ProbeFileEvidence -Root $ProbeRoot -Path $unaffectedPath -RelativePath $unaffectedRelativePath
+$unaffectedOriginalDaclJson = ConvertTo-Json -InputObject $unaffectedOriginalEvidence.dacl -Compress -Depth 8
+$context = New-ProjectPublicationContext -Repository $ProbeRoot
+$script:ProjectPublicationContext = $context
+Set-ProjectPublicationFileBytes -RelativePath $relativePath -Bytes $newBytes
+Set-ProjectPublicationFileBytes -RelativePath $unaffectedRelativePath `
     -Bytes ((New-Object System.Text.UTF8Encoding($false)).GetBytes('# changed unaffected bytes'))
-$state = Get-TargetMutationFileState -Snapshot $snapshot -RelativePath $relativePath
-$unaffectedState = Get-TargetMutationFileState -Snapshot $snapshot -RelativePath $unaffectedRelativePath
-$unaffectedOriginalDaclJson = ConvertTo-Json -InputObject $unaffectedState.OriginalDacl -Compress -Depth 8
+$context.RepositoryIndexLock = Open-RepositoryIndexTransactionLock -Repository $ProbeRoot
+$observedAfterBreakpoint = $null
+if ($Case -eq 'parent-replacement') {
+    $global:Syp214ObservedAfterRoot = $ProbeRoot
+    $global:Syp214ObservedAfterPath = $targetPath
+    $global:Syp214ObservedAfterRelativePath = $relativePath
+    $global:Syp214ObservedAfterBound = $false
+    $observedAfterBreakpoint = Set-PSBreakpoint -Command Get-RepositoryTransactionObservedAfter -Action {
+        if (-not $global:Syp214ObservedAfterBound -and (Test-Path -LiteralPath $global:Syp214ObservedAfterPath -PathType Leaf)) {
+            $handle = [CodexAiInstructions.NativeFileMutation]::OpenForMetadata(
+                $global:Syp214ObservedAfterRoot, $global:Syp214ObservedAfterPath, $global:Syp214ObservedAfterRelativePath)
+            try { [CodexAiInstructions.NativeFileMutation]::SetReadOnly($handle, $true) }
+            finally { $handle.Dispose() }
+            $global:Syp214ObservedAfterBound = $true
+        }
+    }
+}
+try { Start-RepositoryInstallTransaction -Context $context }
+finally {
+    if ($null -ne $observedAfterBreakpoint) { Remove-PSBreakpoint -Breakpoint $observedAfterBreakpoint -ErrorAction SilentlyContinue }
+    Remove-Variable -Name Syp214ObservedAfterRoot,Syp214ObservedAfterPath,Syp214ObservedAfterRelativePath,`
+        Syp214ObservedAfterBound -Scope Global -ErrorAction SilentlyContinue
+}
+$targetOperation = @($context.CurrentJournal.operations | Where-Object { [string]$_.target.value -ceq $relativePath })[0]
+$appliedEvidence = Get-ProbeFileEvidence -Root $ProbeRoot -Path $targetPath -RelativePath $relativePath
 $debris = [ordered]@{}
 switch ($Case) {
     'later-bytes' {
@@ -3357,7 +3565,7 @@ switch ($Case) {
             $replacementIdentity = [CodexAiInstructions.NativeFileMutation]::GetFileIdentity($replacementHandle)
         }
         finally { $replacementHandle.Dispose() }
-        if ([string]$replacementIdentity -ceq [string]$state.AppliedFileIdentity) {
+        if ([string]$replacementIdentity -ceq [string]$appliedEvidence.identity) {
             throw 'A concurrently existing replacement did not have a distinct native file identity.'
         }
         Remove-Item -LiteralPath $targetPath -Force
@@ -3369,8 +3577,8 @@ switch ($Case) {
         Set-Acl -LiteralPath $targetPath -AclObject $targetAcl
     }
     'stage-and-tombstone' {
-        $stagePath = Join-Path $targetParent ([string]$state.Publication.stageLeaf)
-        $tombstonePath = Join-Path $targetParent ([string]$state.Publication.tombstoneLeaf)
+        $stagePath = Join-Path $targetParent '.syp214-external-stage'
+        $tombstonePath = Join-Path $targetParent '.syp214-external-tomb'
         [System.IO.File]::WriteAllBytes($stagePath, (New-Object System.Text.UTF8Encoding($false)).GetBytes('# unknown stage owner'))
         [System.IO.File]::WriteAllBytes($tombstonePath, (New-Object System.Text.UTF8Encoding($false)).GetBytes('# unknown tombstone owner'))
         $debris.stagePath = $stagePath
@@ -3379,13 +3587,15 @@ switch ($Case) {
     'parent-replacement' { }
     default { throw "Unsupported probe case: $Case" }
 }
-Set-ProbeFileReadOnly -Root $ProbeRoot -Path $targetPath -RelativePath $relativePath -ReadOnly $true
+if ($Case -ne 'parent-replacement') {
+    Set-ProbeFileReadOnly -Root $ProbeRoot -Path $targetPath -RelativePath $relativePath -ReadOnly $true
+}
 $before = Get-ProbeFileEvidence -Root $ProbeRoot -Path $targetPath -RelativePath $relativePath
-$appliedIdentity = [string]$state.AppliedFileIdentity
+$appliedIdentity = [string]$appliedEvidence.identity
 $appliedSha256 = Get-ByteArraySha256 -Bytes $newBytes
-$publicationDaclJson = ConvertTo-Json -InputObject $state.PublicationDaclRecord -Compress -Depth 8
+$publicationDaclJson = ConvertTo-Json -InputObject $targetOperation.observedAfter.dacl -Compress -Depth 8
 $publicationDacl = [CodexAiInstructions.NativeFileMutation]::DaclEquals(
-    (ConvertFrom-FileDaclJournalRecord $state.PublicationDaclRecord),
+    (ConvertFrom-FileDaclJournalRecord $targetOperation.observedAfter.dacl),
     (ConvertFrom-FileDaclJournalRecord (Get-ProbeFileEvidence -Root $ProbeRoot -Path $targetPath -RelativePath $relativePath).dacl))
 $parentIdentityBefore = [CodexAiInstructions.NativeFileMutation]::GetDirectoryIdentity($targetParent)
 $debrisBefore = [ordered]@{}
@@ -3411,7 +3621,7 @@ if ($Case -eq 'parent-replacement') {
     $global:Syp214ReadOnlySwapFired = $false
     $global:Syp214ReadOnlySwapSucceeded = $false
     $global:Syp214ReadOnlySwapError = $null
-    $breakpoint = Set-PSBreakpoint -Command Remove-TargetMutationFileAtomically -Action {
+    $breakpoint = Set-PSBreakpoint -Command Remove-PlatformOwnedFile -Action {
         if (-not $global:Syp214ReadOnlySwapFired) {
             $global:Syp214ReadOnlySwapFired = $true
             $oldPath = Join-Path $global:Syp214ReadOnlyParent 'new.md'
@@ -3435,7 +3645,7 @@ if ($Case -eq 'parent-replacement') {
         }
     }
 }
-try { Restore-TargetMutationSnapshot -Snapshot $snapshot }
+try { Invoke-RepositoryTransactionRollback -Context $context }
 catch { $restoreError = $_.Exception.Message }
 finally {
     if ($Case -eq 'parent-replacement') {
@@ -3447,6 +3657,8 @@ finally {
         }
     }
     if ($null -ne $breakpoint) { Remove-PSBreakpoint -Breakpoint $breakpoint -ErrorAction SilentlyContinue }
+    Close-RepositoryIndexTransactionLock -Lock $context.RepositoryIndexLock
+    $script:ProjectPublicationContext = $null
     Remove-Variable -Name Syp214ReadOnlyParent,Syp214ReadOnlySavedParent,Syp214ReadOnlyRoot,`
         Syp214ReadOnlySwapFired,Syp214ReadOnlySwapSucceeded,Syp214ReadOnlySwapError -Scope Global -ErrorAction SilentlyContinue
 }

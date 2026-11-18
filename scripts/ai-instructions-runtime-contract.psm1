@@ -2129,6 +2129,392 @@ function ConvertFrom-AiInstructionsInstallJournalV1Json {
     }
 }
 
+function Assert-AiInstructionsInstallJournalV2Permissions {
+    param([AllowNull()][object] $Permissions,[Parameter(Mandatory = $true)][string] $Context,[Parameter(Mandatory = $true)][string] $ExpectedIdentityKind)
+    if ($null -eq $Permissions) { throw "$Context must not be null." }
+    $expectedKind = if ($ExpectedIdentityKind -ceq 'windows-file-id') { 'windows-sddl' } else { 'unix-mode' }
+    if ($Permissions.kind -isnot [string] -or [string]$Permissions.kind -cne $expectedKind) { throw "$Context.kind must be $expectedKind." }
+    if ($expectedKind -ceq 'windows-sddl') {
+        Assert-AiInstructionsInstallJournalExactProperties -Object $Permissions -Names @('kind','sddl','readOnly') -Context $Context
+        $scalarLength = if ($Permissions.sddl -is [string]) { Get-AiInstructionsInstallJournalUnicodeScalarLength -Value ([string]$Permissions.sddl) -Context "$Context.sddl" } else { 0 }
+        if ($Permissions.sddl -isnot [string] -or [string]::IsNullOrEmpty([string]$Permissions.sddl) -or $scalarLength -gt 4096 -or
+            [string]$Permissions.sddl -match '[\x00-\x1f\x7f]' -or [string]$Permissions.sddl -notmatch '^D:' -or [string]$Permissions.sddl -match '[OGS]:') {
+            throw "$Context.sddl must contain only a DACL SDDL policy."
+        }
+        if ($Permissions.readOnly -isnot [bool]) { throw "$Context.readOnly must be a boolean." }
+        return
+    }
+    Assert-AiInstructionsInstallJournalExactProperties -Object $Permissions -Names @('kind','mode','uid','gid') -Context $Context
+    if ($Permissions.mode -isnot [string] -or [string]$Permissions.mode -cnotmatch '^[0-7]{3,4}$') { throw "$Context.mode is invalid." }
+    Assert-AiInstructionsInstallJournalInteger -Value $Permissions.uid -Context "$Context.uid" -Minimum 0
+    Assert-AiInstructionsInstallJournalInteger -Value $Permissions.gid -Context "$Context.gid" -Minimum 0
+}
+
+function Assert-AiInstructionsInstallJournalV2FileState {
+    param(
+        [AllowNull()][object] $State,
+        [Parameter(Mandatory = $true)][string] $Context,
+        [Parameter(Mandatory = $true)][string] $ExpectedIdentityKind
+    )
+    Assert-AiInstructionsInstallJournalExactProperties -Object $State -Names @('exists','sha256','length','identity','permissions') -Context $Context
+    if ($State.exists -isnot [bool]) { throw "$Context.exists must be a boolean." }
+    if (-not [bool]$State.exists) {
+        if ($null -ne $State.sha256 -or $null -ne $State.length -or $null -ne $State.identity -or $null -ne $State.permissions) {
+            throw "$Context absent state fields must be null."
+        }
+        return
+    }
+    if ($State.sha256 -isnot [string] -or [string]$State.sha256 -cnotmatch '^[0-9a-f]{64}$') { throw "$Context.sha256 must be a lowercase SHA-256 hash." }
+    Assert-AiInstructionsInstallJournalInteger -Value $State.length -Context "$Context.length" -Minimum 0
+    Assert-AiInstructionsInstallJournalIdentity -Identity $State.identity -Context "$Context.identity" -ExpectedKind $ExpectedIdentityKind
+    Assert-AiInstructionsInstallJournalV2Permissions -Permissions $State.permissions -Context "$Context.permissions" -ExpectedIdentityKind $ExpectedIdentityKind
+}
+
+function Assert-AiInstructionsInstallJournalV2ObservedAfter {
+    param(
+        [AllowNull()][object] $ObservedAfter,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+    if ($null -eq $ObservedAfter) { return }
+    Assert-AiInstructionsInstallJournalExactProperties -Object $ObservedAfter -Names @('dacl','readOnly') -Context $Context
+    if ($ObservedAfter.readOnly -isnot [bool]) { throw "$Context.readOnly must be a boolean." }
+    Assert-AiInstructionsInstallJournalExactProperties -Object $ObservedAfter.dacl -Names @('isNull','isProtected','aclBase64') -Context "$Context.dacl"
+    if ($ObservedAfter.dacl.isNull -isnot [bool] -or $ObservedAfter.dacl.isProtected -isnot [bool]) { throw "$Context.dacl flags must be boolean." }
+    if ([bool]$ObservedAfter.dacl.isNull) {
+        if ($null -ne $ObservedAfter.dacl.aclBase64) { throw "$Context.dacl.aclBase64 must be null for a null DACL." }
+        return
+    }
+    if ($ObservedAfter.dacl.aclBase64 -isnot [string] -or [string]$ObservedAfter.dacl.aclBase64 -cnotmatch '^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$') {
+        throw "$Context.dacl.aclBase64 is invalid."
+    }
+    try { [byte[]]$aclBytes = [Convert]::FromBase64String([string]$ObservedAfter.dacl.aclBase64) }
+    catch { throw "$Context.dacl.aclBase64 is invalid." }
+    if ($aclBytes.Length -lt 8 -or ([BitConverter]::ToUInt16($aclBytes,2) -ne $aclBytes.Length)) { throw "$Context.dacl byte inventory is invalid." }
+}
+
+function Assert-AiInstructionsInstallJournalV2IndexState {
+    param(
+        [AllowNull()][object] $State,
+        [Parameter(Mandatory = $true)][string] $Context,
+        [Parameter(Mandatory = $true)][string] $ExpectedIdentityKind
+    )
+    Assert-AiInstructionsInstallJournalExactProperties -Object $State -Names @('exists','sha256','length','identity','entrySetSha256') -Context $Context
+    if ($State.exists -isnot [bool]) { throw "$Context.exists must be a boolean." }
+    if (-not [bool]$State.exists) {
+        if ($null -ne $State.sha256 -or $null -ne $State.length -or $null -ne $State.identity -or $null -ne $State.entrySetSha256) { throw "$Context absent state fields must be null." }
+        return
+    }
+    foreach ($name in @('sha256','entrySetSha256')) {
+        if ($State.$name -isnot [string] -or [string]$State.$name -cnotmatch '^[0-9a-f]{64}$') { throw "$Context.$name must be a lowercase SHA-256 hash." }
+    }
+    Assert-AiInstructionsInstallJournalInteger -Value $State.length -Context "$Context.length" -Minimum 0
+    Assert-AiInstructionsInstallJournalIdentity -Identity $State.identity -Context "$Context.identity" -ExpectedKind $ExpectedIdentityKind
+}
+
+function Assert-AiInstructionsInstallJournalV2RefState {
+    param([AllowNull()][object] $State,[Parameter(Mandatory = $true)][string] $Context,[Parameter(Mandatory = $true)][ValidateSet('sha1','sha256')][string] $ObjectFormat)
+    Assert-AiInstructionsInstallJournalExactProperties -Object $State -Names @('exists','objectId') -Context $Context
+    if ($State.exists -isnot [bool]) { throw "$Context.exists must be a boolean." }
+    $pattern = if ($ObjectFormat -ceq 'sha256') { '^[0-9a-f]{64}$' } else { '^[0-9a-f]{40}$' }
+    if ([bool]$State.exists) {
+        if ($State.objectId -isnot [string] -or [string]$State.objectId -cnotmatch $pattern) { throw "$Context.objectId does not match repository objectFormat $ObjectFormat." }
+    }
+    elseif ($null -ne $State.objectId) { throw "$Context.objectId must be null when exists is false." }
+}
+
+function Assert-AiInstructionsInstallJournalV2EvidenceState {
+    param([AllowNull()][object] $State,[Parameter(Mandatory = $true)][string] $Context,[Parameter(Mandatory = $true)][ValidateSet('sha1','sha256')][string] $ObjectFormat)
+    Assert-AiInstructionsInstallJournalExactProperties -Object $State -Names @('exists','objectId') -Context $Context
+    if ($State.exists -isnot [bool]) { throw "$Context.exists must be a boolean." }
+    if ($null -eq $State.objectId) { return }
+    $pattern = if ($ObjectFormat -ceq 'sha256') { '^[0-9a-f]{64}$' } else { '^[0-9a-f]{40}$' }
+    if ($State.objectId -isnot [string] -or [string]$State.objectId -cnotmatch $pattern) { throw "$Context.objectId does not match repository objectFormat $ObjectFormat." }
+}
+
+function Assert-AiInstructionsInstallJournalV2HeadState {
+    param([AllowNull()][object] $State,[Parameter(Mandatory = $true)][string] $Context,[Parameter(Mandatory = $true)][ValidateSet('sha1','sha256')][string] $ObjectFormat)
+    Assert-AiInstructionsInstallJournalExactProperties -Object $State -Names @('mode','reference','objectId','rawSha256') -Context $Context
+    if ($State.mode -isnot [string] -or [string]$State.mode -cnotin @('symbolic','detached','unborn')) { throw "$Context.mode is invalid." }
+    if ($State.rawSha256 -isnot [string] -or [string]$State.rawSha256 -cnotmatch '^[0-9a-f]{64}$') { throw "$Context.rawSha256 is invalid." }
+    $objectPattern = if ($ObjectFormat -ceq 'sha256') { '^[0-9a-f]{64}$' } else { '^[0-9a-f]{40}$' }
+    if ([string]$State.mode -ceq 'detached') {
+        if ($null -ne $State.reference -or $State.objectId -isnot [string] -or [string]$State.objectId -cnotmatch $objectPattern) { throw "$Context detached state is invalid." }
+    }
+    else {
+        if ($State.reference -isnot [string] -or [string]$State.reference -cnotmatch '^refs/heads/[A-Za-z0-9._/-]+$' -or [string]$State.reference -match '(?:^|/)\.\.?(/|$)|\.lock$|//') { throw "$Context.reference is invalid." }
+        if ([string]$State.mode -ceq 'unborn') {
+            if ($null -ne $State.objectId) { throw "$Context.objectId must be null for unborn HEAD." }
+        }
+        elseif ($State.objectId -isnot [string] -or [string]$State.objectId -cnotmatch $objectPattern) { throw "$Context.objectId does not match repository objectFormat $ObjectFormat." }
+    }
+}
+
+function Assert-AiInstructionsInstallJournalV2DirectoryAnchorState {
+    param(
+        [AllowNull()][object] $State,
+        [Parameter(Mandatory = $true)][string] $Context,
+        [Parameter(Mandatory = $true)][string] $ExpectedIdentityKind
+    )
+    Assert-AiInstructionsInstallJournalExactProperties -Object $State -Names @('exists','identity','permissions') -Context $Context
+    if ($State.exists -isnot [bool]) { throw "$Context.exists must be a boolean." }
+    if ([bool]$State.exists) {
+        Assert-AiInstructionsInstallJournalIdentity -Identity $State.identity -Context "$Context.identity" -ExpectedKind $ExpectedIdentityKind
+        Assert-AiInstructionsInstallJournalV2Permissions -Permissions $State.permissions -Context "$Context.permissions" -ExpectedIdentityKind $ExpectedIdentityKind
+    }
+    elseif ($null -ne $State.identity -or $null -ne $State.permissions) { throw "$Context absent state fields must be null." }
+}
+
+function Assert-AiInstructionsInstallJournalV2RelativePath {
+    param([AllowNull()][object] $Value,[Parameter(Mandatory = $true)][string] $Context)
+    if ($Value -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$Value) -or ([string]$Value).Length -gt 512 -or
+        [string]$Value -match '[\\\x00-\x1f\x7f:*?"<>|]' -or [string]$Value -match '^/|/$|^[A-Za-z]:|//|(^|/)(?:\.|\.\.)(?:/|$)') {
+        throw "$Context is not a safe repository-relative path."
+    }
+    foreach ($segment in ([string]$Value).Split('/')) {
+        if ([string]::IsNullOrWhiteSpace($segment) -or $segment -match '\.$' -or [char]::IsWhiteSpace($segment[$segment.Length - 1]) -or
+            (Test-AiInstructionsInstallJournalWindowsReservedDeviceName -Value $segment)) { throw "$Context contains an unsafe segment." }
+    }
+    if ((Get-AiInstructionsInstallJournalPortableNameKey -Value ([string]$Value).Split('/')[0]) -ceq '.AI-INSTRUCTIONS-TXN') { throw "$Context uses the reserved transaction root." }
+}
+
+function Assert-AiInstructionsInstallJournalV2 {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object] $Journal)
+
+    Assert-AiInstructionsInstallJournalExactProperties -Object $Journal -Names @('schemaVersion','kind','transactionId','createdAtUtc','owner','platform','lock','generation','scope','retainedManifestPaths','phase','operations') -Context 'AI instructions install journal v2'
+    Assert-AiInstructionsInstallJournalInteger -Value $Journal.schemaVersion -Context 'AI instructions install journal schemaVersion' -Minimum 1
+    if ([decimal]$Journal.schemaVersion -ne 2) { throw "Unsupported AI instructions install journal schema version '$($Journal.schemaVersion)'." }
+    if ($Journal.kind -isnot [string] -or [string]$Journal.kind -cne 'ai-instructions-install-transaction') { throw 'AI instructions install journal kind is invalid.' }
+    if ($Journal.transactionId -isnot [string] -or [string]$Journal.transactionId -cnotmatch '^[0-9a-f]{32}$') { throw 'AI instructions install journal transactionId must be 32 lowercase hexadecimal characters.' }
+    if ($Journal.createdAtUtc -isnot [string] -or [string]$Journal.createdAtUtc -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$') { throw 'AI instructions install journal createdAtUtc is invalid.' }
+    try { ConvertTo-AiInstructionsUtcDateTime -Value $Journal.createdAtUtc -Context 'AI instructions install journal createdAtUtc' | Out-Null } catch { throw 'AI instructions install journal createdAtUtc is invalid.' }
+    Assert-AiInstructionsInstallJournalExactProperties -Object $Journal.owner -Names @('component','processId','processStartIdentity') -Context 'AI instructions install journal owner'
+    if ($Journal.owner.component -isnot [string] -or [string]$Journal.owner.component -cne 'repo-bootstrap') { throw 'AI instructions install journal v2 owner.component must be repo-bootstrap.' }
+    Assert-AiInstructionsInstallJournalInteger -Value $Journal.owner.processId -Context 'AI instructions install journal owner.processId' -Minimum 1
+    if ($Journal.owner.processStartIdentity -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$Journal.owner.processStartIdentity) -or ([string]$Journal.owner.processStartIdentity).Length -gt 128 -or [string]$Journal.owner.processStartIdentity -match '[\x00-\x1f\x7f]') { throw 'AI instructions install journal owner.processStartIdentity is invalid.' }
+    Assert-AiInstructionsInstallJournalExactProperties -Object $Journal.platform -Names @('os','architecture') -Context 'AI instructions install journal platform'
+    if ($Journal.platform.os -isnot [string] -or [string]$Journal.platform.os -cnotin @('windows','linux','macos')) { throw 'AI instructions install journal platform.os is invalid.' }
+    if ($Journal.platform.architecture -isnot [string] -or [string]$Journal.platform.architecture -cnotin @('x64','arm64')) { throw 'AI instructions install journal platform.architecture is invalid.' }
+    Assert-AiInstructionsInstallJournalExactProperties -Object $Journal.lock -Names @('primitive','leaf') -Context 'AI instructions install journal lock'
+    $expectedPrimitive = if ([string]$Journal.platform.os -ceq 'windows') { 'windows-fileshare' } else { 'flock' }
+    if ($Journal.lock.primitive -isnot [string] -or [string]$Journal.lock.primitive -cne $expectedPrimitive) { throw "AI instructions install journal lock.primitive must be $expectedPrimitive for the journal platform." }
+    Assert-AiInstructionsInstallJournalLeaf -Value $Journal.lock.leaf -Context 'AI instructions install journal lock.leaf' -PortableName
+    Assert-AiInstructionsInstallJournalExactProperties -Object $Journal.generation -Names @('previousBundleSha256','candidateBundleSha256') -Context 'AI instructions install journal generation'
+    if ($null -ne $Journal.generation.previousBundleSha256 -and ($Journal.generation.previousBundleSha256 -isnot [string] -or [string]$Journal.generation.previousBundleSha256 -cnotmatch '^[0-9a-f]{64}$')) { throw 'AI instructions install journal generation.previousBundleSha256 is invalid.' }
+    if ($Journal.generation.candidateBundleSha256 -isnot [string] -or [string]$Journal.generation.candidateBundleSha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'AI instructions install journal generation.candidateBundleSha256 is invalid.' }
+    Assert-AiInstructionsInstallJournalExactProperties -Object $Journal.scope -Names @('kind','repositoryRoot','repositoryRootIdentity','commonGitDirectory','gitDirectory','indexPath','indexLockContentSha256','objectFormat','externalBackup') -Context 'AI instructions install journal repository scope'
+    if ($Journal.scope.kind -isnot [string] -or [string]$Journal.scope.kind -cne 'repository') { throw 'AI instructions install journal repository scope.kind is invalid.' }
+    foreach ($name in @('repositoryRoot','commonGitDirectory','gitDirectory','indexPath')) {
+        if ($Journal.scope.$name -isnot [string] -or -not [IO.Path]::IsPathRooted([string]$Journal.scope.$name)) { throw "AI instructions install journal repository scope.$name must be an absolute path." }
+    }
+    $expectedIdentityKind = if ([string]$Journal.platform.os -ceq 'windows') { 'windows-file-id' } else { 'unix-device-inode' }
+    Assert-AiInstructionsInstallJournalIdentity -Identity $Journal.scope.repositoryRootIdentity -Context 'AI instructions install journal repository scope.repositoryRootIdentity' -ExpectedKind $expectedIdentityKind
+    if ($Journal.scope.indexLockContentSha256 -isnot [string] -or [string]$Journal.scope.indexLockContentSha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'AI instructions install journal repository scope.indexLockContentSha256 is invalid.' }
+    if ($Journal.scope.objectFormat -isnot [string] -or [string]$Journal.scope.objectFormat -cnotin @('sha1','sha256')) { throw 'AI instructions install journal repository scope.objectFormat is invalid.' }
+    if ($null -ne $Journal.scope.externalBackup) {
+        Assert-AiInstructionsInstallJournalExactProperties -Object $Journal.scope.externalBackup -Names @('root','indexSha256','inventorySha256') -Context 'AI instructions install journal repository scope.externalBackup'
+        if ($Journal.scope.externalBackup.root -isnot [string] -or -not [IO.Path]::IsPathRooted([string]$Journal.scope.externalBackup.root)) { throw 'AI instructions install journal repository scope.externalBackup.root must be an absolute path.' }
+        foreach ($name in @('indexSha256','inventorySha256')) { if ($Journal.scope.externalBackup.$name -isnot [string] -or [string]$Journal.scope.externalBackup.$name -cnotmatch '^[0-9a-f]{64}$') { throw "AI instructions install journal repository scope.externalBackup.$name is invalid." } }
+    }
+    if ($Journal.retainedManifestPaths -isnot [System.Array]) { throw 'AI instructions install journal retainedManifestPaths must be an array.' }
+    $retainedManifestPathKeys = New-Object 'System.Collections.Generic.HashSet[string]' ($(if ([string]$Journal.platform.os -ceq 'windows') { [StringComparer]::OrdinalIgnoreCase } else { [StringComparer]::Ordinal }))
+    foreach ($retained in @($Journal.retainedManifestPaths)) {
+        Assert-AiInstructionsInstallJournalExactProperties -Object $retained -Names @('targetPath','sha256','length','identity') -Context 'AI instructions install journal retained manifest path'
+        Assert-AiInstructionsInstallJournalV2RelativePath -Value $retained.targetPath -Context 'AI instructions install journal retained manifest path.targetPath'
+        if (-not $retainedManifestPathKeys.Add([string]$retained.targetPath)) { throw 'AI instructions install journal retainedManifestPaths contains a duplicate targetPath.' }
+        if ($retained.sha256 -isnot [string] -or [string]$retained.sha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'AI instructions install journal retained manifest path.sha256 is invalid.' }
+        Assert-AiInstructionsInstallJournalInteger -Value $retained.length -Context 'AI instructions install journal retained manifest path.length' -Minimum 0
+        Assert-AiInstructionsInstallJournalIdentity -Identity $retained.identity -Context 'AI instructions install journal retained manifest path.identity' -ExpectedKind $expectedIdentityKind
+    }
+    if ($Journal.phase -isnot [string] -or [string]$Journal.phase -cnotin @('prepared','applying','applied','committed')) { throw 'AI instructions repo-bootstrap journal phase is invalid.' }
+    if ($Journal.operations -isnot [System.Array] -or @($Journal.operations).Count -lt 1) { throw 'AI instructions install journal operations must be a non-empty array.' }
+
+    $pathComparison = if ([string]$Journal.platform.os -ceq 'windows') { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    $targetComparer = if ([string]$Journal.platform.os -ceq 'windows') { [StringComparer]::OrdinalIgnoreCase } else { [StringComparer]::Ordinal }
+    $targets = New-Object 'System.Collections.Generic.HashSet[string]' ($targetComparer)
+    $leaves = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $expectedSequence = 1
+    foreach ($operation in @($Journal.operations)) {
+        $context = "AI instructions install journal operation sequence $expectedSequence"
+        Assert-AiInstructionsInstallJournalExactProperties -Object $operation -Names @('sequence','kind','role','method','target','before','after','observedAfter','displacedMetadata','displacedAfterMetadata','stageLeaf','backupLeaf','quarantineLeaf','state') -Context $context
+        Assert-AiInstructionsInstallJournalInteger -Value $operation.sequence -Context "$context.sequence" -Minimum 1
+        if ([int64]$operation.sequence -ne $expectedSequence) { throw "$context.sequence must be $expectedSequence for a continuous sequence." }
+        if ($operation.kind -isnot [string] -or [string]$operation.kind -cnotin @('create-file','write-file','remove-file','ensure-directory-anchor','replace-git-index','update-git-ref','update-git-head','store-git-stash-evidence')) { throw "$context.kind is invalid." }
+        if ($operation.role -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$operation.role)) { throw "$context.role is invalid." }
+        if ($operation.method -isnot [string] -or [string]$operation.method -cnotin @('stage-rename','tombstone-rename','directory-rename','index-lock-rename','update-ref','symbolic-ref','stash-store')) { throw "$context.method is invalid." }
+        if ($operation.state -isnot [string] -or [string]$operation.state -cnotin @('pending','applied')) { throw "$context.state is invalid." }
+        Assert-AiInstructionsInstallJournalExactProperties -Object $operation.target -Names @('kind','value') -Context "$context.target"
+        $targetKind = [string]$operation.target.kind
+        $targetValue = [string]$operation.target.value
+        if ($targetKind -cnotin @('repository-relative','git-shared-exclude','git-index','git-ref','git-head','git-stash-evidence')) { throw "$context.target.kind is invalid." }
+        switch ($targetKind) {
+            'repository-relative' { Assert-AiInstructionsInstallJournalV2RelativePath -Value $operation.target.value -Context "$context.target.value" }
+            'git-shared-exclude' { if ($operation.target.value -isnot [string] -or -not [string]::Equals([IO.Path]::GetFullPath($targetValue),[IO.Path]::GetFullPath((Join-Path ([string]$Journal.scope.commonGitDirectory) 'info/exclude')),$pathComparison)) { throw "$context.target.value is not the scope shared exclude." } }
+            'git-index' { if ($operation.target.value -isnot [string] -or -not [string]::Equals([IO.Path]::GetFullPath($targetValue),[IO.Path]::GetFullPath([string]$Journal.scope.indexPath),$pathComparison)) { throw "$context.target.value is not the scope index." } }
+            'git-head' { if ($operation.target.value -isnot [string] -or $targetValue -cne 'HEAD') { throw "$context.target.value must be HEAD." } }
+            'git-ref' {
+                $isEvidenceReuseCas=[string]$operation.kind-ceq'update-git-ref'-and[string]$operation.role-ceq'personal-agent-evidence-cas'-and$targetValue-ceq'refs/stash'
+                if ($operation.target.value -isnot [string] -or (-not$isEvidenceReuseCas-and($targetValue -cnotmatch '^refs/heads/[A-Za-z0-9._/-]+$' -or $targetValue -match '(?:^|/)\.\.?(/|$)|\.lock$|//'))) { throw "$context.target.value is not a safe branch ref or PersonalAgent evidence CAS target." }
+            }
+            'git-stash-evidence' { if ($operation.target.value -isnot [string] -or $targetValue -cne 'refs/stash') { throw "$context.target.value must be refs/stash." } }
+        }
+        $targetKey = "$targetKind`0$targetValue"
+        if (-not $targets.Add($targetKey)) { throw "$context.target duplicates another terminal operation target." }
+        foreach ($leafName in @('stageLeaf','backupLeaf','quarantineLeaf')) {
+            $leaf = $operation.PSObject.Properties[$leafName].Value
+            Assert-AiInstructionsInstallJournalLeaf -Value $leaf -Context "$context.$leafName" -AllowNull -PortableName
+            if ($null -ne $leaf -and -not $leaves.Add((Get-AiInstructionsInstallJournalPortableNameKey -Value ([string]$leaf)))) { throw "$context transaction artifact leaves must be unique." }
+        }
+        switch ([string]$operation.kind) {
+            { $_ -in @('create-file','write-file','remove-file') } {
+                if ($targetKind -cnotin @('repository-relative','git-shared-exclude')) { throw "$context file operation target kind is invalid." }
+                $expectedMethod = if ([string]$operation.kind -ceq 'remove-file') { 'tombstone-rename' } else { 'stage-rename' }
+                if ([string]$operation.method -cne $expectedMethod) { throw "$context file operation method must be $expectedMethod." }
+                Assert-AiInstructionsInstallJournalV2FileState -State $operation.before -Context "$context.before" -ExpectedIdentityKind $expectedIdentityKind
+                Assert-AiInstructionsInstallJournalV2FileState -State $operation.after -Context "$context.after" -ExpectedIdentityKind $expectedIdentityKind
+                Assert-AiInstructionsInstallJournalV2ObservedAfter -ObservedAfter $operation.observedAfter -Context "$context.observedAfter"
+                if ([string]$operation.kind -ceq 'create-file') {
+                    if ($null -ne $operation.displacedMetadata) { throw "$context.displacedMetadata must be null when no original file is displaced." }
+                    if ($null -ne $operation.displacedAfterMetadata) { throw "$context.displacedAfterMetadata must be null when no original file is displaced." }
+                }
+                else {
+                    Assert-AiInstructionsInstallJournalV2Permissions -Permissions $operation.displacedMetadata -Context "$context.displacedMetadata" -ExpectedIdentityKind $expectedIdentityKind
+                    if (-not (Test-AiInstructionsJsonSemanticEqual -Left $operation.displacedMetadata -Right $operation.before.permissions)) { throw "$context.displacedMetadata must equal the prepared original-file permissions." }
+                    # displacedAfterMetadata is bound exactly when the displacing operation is marked applied.
+                    if ([string]$operation.state -ceq 'applied') {
+                        Assert-AiInstructionsInstallJournalV2Permissions -Permissions $operation.displacedAfterMetadata -Context "$context.displacedAfterMetadata" -ExpectedIdentityKind $expectedIdentityKind
+                        if ([string]$operation.displacedAfterMetadata.kind -cne [string]$operation.displacedMetadata.kind) { throw "$context.displacedAfterMetadata kind must equal the prepared original-file metadata kind." }
+                    }
+                    elseif ($null -ne $operation.displacedAfterMetadata) { throw "$context.displacedAfterMetadata must be null before the displacing operation is applied." }
+                }
+                if ([string]$Journal.platform.os -ceq 'windows' -and [string]$operation.state -ceq 'applied' -and [string]$operation.kind -cne 'remove-file' -and $null -eq $operation.observedAfter) { throw "$context.observedAfter must be bound for an applied Windows file publication." }
+                if ([string]$operation.kind -ceq 'create-file' -and ([bool]$operation.before.exists -or -not [bool]$operation.after.exists)) { throw "$context create-file states are invalid." }
+                if ([string]$operation.kind -ceq 'write-file' -and (-not [bool]$operation.before.exists -or -not [bool]$operation.after.exists)) { throw "$context write-file states are invalid." }
+                if ([string]$operation.kind -ceq 'remove-file' -and (-not [bool]$operation.before.exists -or [bool]$operation.after.exists)) { throw "$context remove-file states are invalid." }
+                if (([string]$operation.kind -ceq 'create-file' -and ($null -eq $operation.stageLeaf -or $null -ne $operation.backupLeaf)) -or
+                    ([string]$operation.kind -ceq 'write-file' -and ($null -eq $operation.stageLeaf -or $null -eq $operation.backupLeaf)) -or
+                    ([string]$operation.kind -ceq 'remove-file' -and ($null -ne $operation.stageLeaf -or $null -eq $operation.backupLeaf))) { throw "$context file artifact leaves are invalid." }
+                if ($null -ne $operation.quarantineLeaf) { throw "$context.quarantineLeaf must be null for file operations." }
+            }
+            'ensure-directory-anchor' {
+                if ($null -ne $operation.observedAfter) { throw "$context.observedAfter must be null for non-file operations." }
+                if ($null -ne $operation.displacedMetadata) { throw "$context.displacedMetadata must be null for non-file operations." }
+                if ($null -ne $operation.displacedAfterMetadata) { throw "$context.displacedAfterMetadata must be null for non-file operations." }
+                if ($targetKind -cne 'repository-relative') { throw "$context directory anchor target kind is invalid." }
+                if ([string]$operation.method -cne 'directory-rename' -or $null -eq $operation.stageLeaf -or $null -ne $operation.backupLeaf -or $null -ne $operation.quarantineLeaf) { throw "$context directory anchor method or artifact leaves are invalid." }
+                Assert-AiInstructionsInstallJournalV2DirectoryAnchorState -State $operation.before -Context "$context.before" -ExpectedIdentityKind $expectedIdentityKind
+                Assert-AiInstructionsInstallJournalV2DirectoryAnchorState -State $operation.after -Context "$context.after" -ExpectedIdentityKind $expectedIdentityKind
+                if ([bool]$operation.before.exists -or -not [bool]$operation.after.exists) { throw "$context directory anchor states are invalid." }
+            }
+            'replace-git-index' {
+                if ($null -ne $operation.observedAfter) { throw "$context.observedAfter must be null for non-file operations." }
+                if ($null -ne $operation.displacedMetadata) { throw "$context.displacedMetadata must be null for non-file operations." }
+                if ($null -ne $operation.displacedAfterMetadata) { throw "$context.displacedAfterMetadata must be null for non-file operations." }
+                if ($targetKind -cne 'git-index') { throw "$context replace-git-index target kind is invalid." }
+                if ([string]$operation.method -cne 'index-lock-rename' -or $null -eq $operation.stageLeaf -or $null -eq $operation.backupLeaf -or $null -ne $operation.quarantineLeaf) { throw "$context replace-git-index method or artifact leaves are invalid." }
+                Assert-AiInstructionsInstallJournalV2IndexState -State $operation.before -Context "$context.before" -ExpectedIdentityKind $expectedIdentityKind
+                Assert-AiInstructionsInstallJournalV2IndexState -State $operation.after -Context "$context.after" -ExpectedIdentityKind $expectedIdentityKind
+                if ([string]$operation.before.sha256 -cne [string]$Journal.scope.indexLockContentSha256) { throw "$context.before.sha256 must equal the prepared index.lock content SHA." }
+            }
+            'update-git-ref' {
+                if ($null -ne $operation.observedAfter) { throw "$context.observedAfter must be null for non-file operations." }
+                if ($null -ne $operation.displacedMetadata) { throw "$context.displacedMetadata must be null for non-file operations." }
+                if ($null -ne $operation.displacedAfterMetadata) { throw "$context.displacedAfterMetadata must be null for non-file operations." }
+                if ($targetKind -cne 'git-ref') { throw "$context update-git-ref target kind is invalid." }
+                if ([string]$operation.method -cne 'update-ref' -or $null -ne $operation.stageLeaf -or $null -ne $operation.backupLeaf -or $null -ne $operation.quarantineLeaf) { throw "$context update-git-ref method or artifact leaves are invalid." }
+                Assert-AiInstructionsInstallJournalV2RefState -State $operation.before -Context "$context.before" -ObjectFormat ([string]$Journal.scope.objectFormat)
+                Assert-AiInstructionsInstallJournalV2RefState -State $operation.after -Context "$context.after" -ObjectFormat ([string]$Journal.scope.objectFormat)
+                if([string]$operation.role-ceq'personal-agent-evidence-cas'-and($targetValue-cne'refs/stash'-or-not[bool]$operation.before.exists-or-not[bool]$operation.after.exists-or[string]$operation.before.objectId-cne[string]$operation.after.objectId)){throw "$context PersonalAgent evidence CAS must preserve one existing refs/stash object ID."}
+            }
+            'update-git-head' {
+                if ($null -ne $operation.observedAfter) { throw "$context.observedAfter must be null for non-file operations." }
+                if ($null -ne $operation.displacedMetadata) { throw "$context.displacedMetadata must be null for non-file operations." }
+                if ($null -ne $operation.displacedAfterMetadata) { throw "$context.displacedAfterMetadata must be null for non-file operations." }
+                if ($targetKind -cne 'git-head') { throw "$context update-git-head target kind is invalid." }
+                if ([string]$operation.method -cne 'symbolic-ref' -or $null -ne $operation.stageLeaf -or $null -ne $operation.backupLeaf -or $null -ne $operation.quarantineLeaf) { throw "$context update-git-head method or artifact leaves are invalid." }
+                Assert-AiInstructionsInstallJournalV2HeadState -State $operation.before -Context "$context.before" -ObjectFormat ([string]$Journal.scope.objectFormat)
+                Assert-AiInstructionsInstallJournalV2HeadState -State $operation.after -Context "$context.after" -ObjectFormat ([string]$Journal.scope.objectFormat)
+            }
+            'store-git-stash-evidence' {
+                if ($null -ne $operation.observedAfter) { throw "$context.observedAfter must be null for non-file operations." }
+                if ($null -ne $operation.displacedMetadata) { throw "$context.displacedMetadata must be null for non-file operations." }
+                if ($null -ne $operation.displacedAfterMetadata) { throw "$context.displacedAfterMetadata must be null for non-file operations." }
+                if ($targetKind -cne 'git-stash-evidence') { throw "$context store-git-stash-evidence target kind is invalid." }
+                if ([string]$operation.role -cne 'personal-agent-evidence' -or [string]$operation.method -cne 'stash-store' -or $null -ne $operation.stageLeaf -or $null -ne $operation.backupLeaf -or $null -ne $operation.quarantineLeaf) { throw "$context store-git-stash-evidence role, method, or artifact leaves are invalid." }
+                Assert-AiInstructionsInstallJournalV2EvidenceState -State $operation.before -Context "$context.before" -ObjectFormat ([string]$Journal.scope.objectFormat)
+                Assert-AiInstructionsInstallJournalV2EvidenceState -State $operation.after -Context "$context.after" -ObjectFormat ([string]$Journal.scope.objectFormat)
+                if (([bool]$operation.before.exists -and $null -eq $operation.before.objectId) -or (-not [bool]$operation.before.exists -and $null -ne $operation.before.objectId) -or -not [bool]$operation.after.exists) { throw "$context store-git-stash-evidence states are invalid." }
+                if ([string]$operation.state -ceq 'pending') {
+                    if ($null -ne $operation.after.objectId -or [string]$Journal.phase -cnotin @('prepared','applying')) { throw "$context pending store-git-stash-evidence after.objectId must be null in prepared or applying phase." }
+                }
+                elseif ($null -eq $operation.after.objectId -or [string]$Journal.phase -ceq 'prepared') { throw "$context applied store-git-stash-evidence after.objectId must be bound outside prepared phase." }
+            }
+        }
+        if ($targetKind -ceq 'repository-relative' -and $retainedManifestPathKeys.Contains($targetValue)) { throw "$context.target duplicates a retained manifest path." }
+        if ([string]$Journal.phase -in @('applied','committed') -and [string]$operation.state -cne 'applied') { throw "$context.state is inconsistent with phase $($Journal.phase)." }
+        $expectedSequence++
+    }
+    return $Journal
+}
+
+function ConvertFrom-AiInstructionsInstallJournalJson {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true,ValueFromPipeline = $true)][string] $Json,
+        [string] $ExpectedTransactionId,
+        [ValidateSet('installer','updater','launcher-recovery','user-reconciler','repo-bootstrap')][string] $ExpectedOwnerComponent
+    )
+    process {
+        Assert-AiInstructionsInstallJournalUnambiguousJson -Json $Json
+        $convertParameters = @{ InputObject=$Json; ErrorAction='Stop' }
+        if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')) { $convertParameters.DateKind = 'String' }
+        try { $journal = ConvertFrom-Json @convertParameters } catch { throw 'AI instructions install journal JSON is invalid.' }
+        if ($null -eq $journal -or $journal -is [System.Array] -or $journal -is [string] -or $journal -is [ValueType]) { throw 'AI instructions install journal JSON root must be an object.' }
+        if (-not (Test-AiInstructionsObjectHasProperty -Object $journal -Name 'schemaVersion') -or -not (Test-AiInstructionsObjectHasProperty -Object $journal -Name 'owner')) { throw 'AI instructions install journal family and owner are missing.' }
+        Assert-AiInstructionsInstallJournalInteger -Value $journal.schemaVersion -Context 'AI instructions install journal schemaVersion' -Minimum 1
+        $version = [int64]$journal.schemaVersion
+        $owner = if ($null -ne $journal.owner -and (Test-AiInstructionsObjectHasProperty -Object $journal.owner -Name 'component')) { [string]$journal.owner.component } else { '' }
+        if (($version -eq 1 -and $owner -ceq 'repo-bootstrap') -or ($version -eq 2 -and $owner -cne 'repo-bootstrap')) {
+            throw "AI instructions install journal owner/version pairing is invalid: owner '$owner' cannot use schemaVersion $version."
+        }
+        if ($version -eq 1) { $journal = Assert-AiInstructionsInstallJournalV1 -Journal $journal }
+        elseif ($version -eq 2) { $journal = Assert-AiInstructionsInstallJournalV2 -Journal $journal }
+        else { throw "Unsupported AI instructions install journal schema version '$version'." }
+        if ($PSBoundParameters.ContainsKey('ExpectedOwnerComponent') -and [string]$journal.owner.component -cne $ExpectedOwnerComponent) { throw "AI instructions install journal owner.component must be $ExpectedOwnerComponent for this reader." }
+        if ($PSBoundParameters.ContainsKey('ExpectedTransactionId') -and [string]$journal.transactionId -cne $ExpectedTransactionId) { throw 'AI instructions install journal transactionId does not match the expected transaction directory.' }
+        Write-Output $journal
+    }
+}
+
+function New-AiInstructionsInstallJournalV2 {
+    [CmdletBinding()]
+    param(
+        [string] $TransactionId = [guid]::NewGuid().ToString('N'),
+        [string] $CreatedAtUtc = [datetime]::UtcNow.ToString('o',[Globalization.CultureInfo]::InvariantCulture),
+        [Parameter(Mandatory = $true)][long] $OwnerProcessId,
+        [Parameter(Mandatory = $true)][string] $OwnerProcessStartIdentity,
+        [Parameter(Mandatory = $true)][string] $PlatformOs,
+        [Parameter(Mandatory = $true)][string] $PlatformArchitecture,
+        [Parameter(Mandatory = $true)][ValidateSet('windows-fileshare','flock')][string] $LockPrimitive,
+        [Parameter(Mandatory = $true)][string] $LockLeaf,
+        [AllowNull()][object] $PreviousBundleSha256 = $null,
+        [Parameter(Mandatory = $true)][string] $CandidateBundleSha256,
+        [Parameter(Mandatory = $true)][object] $Scope,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $RetainedManifestPaths,
+        [Parameter(Mandatory = $true)][string] $Phase,
+        [Parameter(Mandatory = $true)][object[]] $Operations
+    )
+    $journal = [pscustomobject][ordered]@{
+        schemaVersion=2;kind='ai-instructions-install-transaction';transactionId=$TransactionId;createdAtUtc=$CreatedAtUtc
+        owner=[pscustomobject][ordered]@{component='repo-bootstrap';processId=$OwnerProcessId;processStartIdentity=$OwnerProcessStartIdentity}
+        platform=[pscustomobject][ordered]@{os=$PlatformOs;architecture=$PlatformArchitecture}
+        lock=[pscustomobject][ordered]@{primitive=$LockPrimitive;leaf=$LockLeaf}
+        generation=[pscustomobject][ordered]@{previousBundleSha256=$PreviousBundleSha256;candidateBundleSha256=$CandidateBundleSha256}
+        scope=$Scope;retainedManifestPaths=@($RetainedManifestPaths);phase=$Phase;operations=@($Operations)
+    }
+    return (Assert-AiInstructionsInstallJournalV2 -Journal $journal)
+}
+
 function Test-AiInstructionsJsonNumber {
     param([Parameter(Mandatory = $true)][object] $Value)
     return [Type]::GetTypeCode($Value.GetType()) -in @(
@@ -2192,32 +2578,108 @@ function Test-AiInstructionsJsonSemanticEqual {
     return $Left.GetType() -eq $Right.GetType() -and $Left.Equals($Right)
 }
 
+function Test-AiInstructionsInstallJournalEvidenceBindingTransition {
+    param(
+        [Parameter(Mandatory = $true)][object] $PreviousJournal,
+        [Parameter(Mandatory = $true)][object] $NextJournal,
+        [Parameter(Mandatory = $true)][object] $PreviousOperation,
+        [Parameter(Mandatory = $true)][object] $NextOperation
+    )
+    if ([string]$PreviousJournal.phase -cne 'applying' -or [string]$NextJournal.phase -cne 'applying' -or
+        [string]$PreviousOperation.kind -cne 'store-git-stash-evidence' -or [string]$NextOperation.kind -cne 'store-git-stash-evidence' -or
+        [string]$PreviousOperation.state -cne 'pending' -or [string]$NextOperation.state -cne 'applied' -or
+        $null -ne $PreviousOperation.after.objectId -or $null -eq $NextOperation.after.objectId) { return $false }
+    $previousAuthority = [ordered]@{}
+    $nextAuthority = [ordered]@{}
+    foreach ($property in @($PreviousOperation.PSObject.Properties)) { if ($property.Name -cne 'state') { $previousAuthority[$property.Name] = $property.Value } }
+    foreach ($property in @($NextOperation.PSObject.Properties)) {
+        if ($property.Name -ceq 'state') { continue }
+        if ($property.Name -ceq 'after') {
+            $nextAfter = [ordered]@{}
+            foreach ($afterProperty in @($property.Value.PSObject.Properties)) { $nextAfter[$afterProperty.Name] = if ($afterProperty.Name -ceq 'objectId') { $null } else { $afterProperty.Value } }
+            $nextAuthority[$property.Name] = [pscustomobject]$nextAfter
+        }
+        else { $nextAuthority[$property.Name] = $property.Value }
+    }
+    return Test-AiInstructionsJsonSemanticEqual -Left ([pscustomobject]$previousAuthority) -Right ([pscustomobject]$nextAuthority)
+}
+
+function Test-AiInstructionsInstallJournalAppliedBindingTransition {
+    # The applied generation of one file operation may bind, exactly once and in the same write:
+    #   observedAfter          (Windows create-file/write-file publication evidence)
+    #   displacedAfterMetadata (write-file/remove-file displaced-original metadata read back in the transaction directory)
+    # Every other operation field stays immutable.
+    param(
+        [Parameter(Mandatory = $true)][object] $PreviousJournal,
+        [Parameter(Mandatory = $true)][object] $NextJournal,
+        [Parameter(Mandatory = $true)][object] $PreviousOperation,
+        [Parameter(Mandatory = $true)][object] $NextOperation
+    )
+    $kind = [string]$PreviousOperation.kind
+    if ([string]$PreviousJournal.phase -cne 'applying' -or [string]$NextJournal.phase -cne 'applying' -or
+        $kind -cnotin @('create-file','write-file','remove-file') -or [string]$NextOperation.kind -cne $kind -or
+        [string]$PreviousOperation.state -cne 'pending' -or [string]$NextOperation.state -cne 'applied') { return $false }
+    $observedChanged = -not (Test-AiInstructionsJsonSemanticEqual -Left $PreviousOperation.observedAfter -Right $NextOperation.observedAfter)
+    if ($observedChanged -and (
+        [string]$PreviousJournal.platform.os -cne 'windows' -or [string]$NextJournal.platform.os -cne 'windows' -or
+        $kind -cnotin @('create-file','write-file') -or $null -ne $PreviousOperation.observedAfter -or $null -eq $NextOperation.observedAfter)) { return $false }
+    $previousDisplacedAfter = $PreviousOperation.PSObject.Properties['displacedAfterMetadata']
+    $nextDisplacedAfter = $NextOperation.PSObject.Properties['displacedAfterMetadata']
+    if ($null -eq $previousDisplacedAfter -or $null -eq $nextDisplacedAfter) { return $false }
+    $displacedChanged = -not (Test-AiInstructionsJsonSemanticEqual -Left $previousDisplacedAfter.Value -Right $nextDisplacedAfter.Value)
+    if ($displacedChanged -and ($kind -cnotin @('write-file','remove-file') -or $null -ne $previousDisplacedAfter.Value -or $null -eq $nextDisplacedAfter.Value)) { return $false }
+    if (-not $observedChanged -and -not $displacedChanged) { return $false }
+    $previousAuthority = [ordered]@{}
+    $nextAuthority = [ordered]@{}
+    foreach ($property in @($PreviousOperation.PSObject.Properties)) {
+        if ($property.Name -cnotin @('state','observedAfter','displacedAfterMetadata')) { $previousAuthority[$property.Name] = $property.Value }
+    }
+    foreach ($property in @($NextOperation.PSObject.Properties)) {
+        if ($property.Name -cnotin @('state','observedAfter','displacedAfterMetadata')) { $nextAuthority[$property.Name] = $property.Value }
+    }
+    return Test-AiInstructionsJsonSemanticEqual -Left ([pscustomobject]$previousAuthority) -Right ([pscustomobject]$nextAuthority)
+}
+
 function Assert-AiInstructionsInstallJournalStoreTransition {
     param([Parameter(Mandatory = $true)][object] $Previous,[Parameter(Mandatory = $true)][object] $Next)
-    Assert-AiInstructionsInstallJournalV1 -Journal $Previous | Out-Null
-    Assert-AiInstructionsInstallJournalV1 -Journal $Next | Out-Null
-    foreach ($name in @('schemaVersion','kind','transactionId','createdAtUtc','owner','platform','lock','generation')) {
+    $previousVersion = [int64]$Previous.schemaVersion
+    $nextVersion = [int64]$Next.schemaVersion
+    if ($previousVersion -eq 1) { Assert-AiInstructionsInstallJournalV1 -Journal $Previous | Out-Null } elseif ($previousVersion -eq 2) { Assert-AiInstructionsInstallJournalV2 -Journal $Previous | Out-Null } else { throw 'AI instructions install journal store transition previous schema is unsupported.' }
+    if ($nextVersion -eq 1) { Assert-AiInstructionsInstallJournalV1 -Journal $Next | Out-Null } elseif ($nextVersion -eq 2) { Assert-AiInstructionsInstallJournalV2 -Journal $Next | Out-Null } else { throw 'AI instructions install journal store transition next schema is unsupported.' }
+    $immutableNames = @('schemaVersion','kind','transactionId','createdAtUtc','owner','platform','lock','generation')
+    if ($previousVersion -eq 2 -or $nextVersion -eq 2) { $immutableNames += @('scope','retainedManifestPaths') }
+    foreach ($name in $immutableNames) {
         if (-not (Test-AiInstructionsJsonSemanticEqual -Left $Previous.PSObject.Properties[$name].Value -Right $Next.PSObject.Properties[$name].Value)) {
             throw "AI instructions install journal store transition cannot change $name."
         }
     }
-    if (@($Previous.operations).Count -ne @($Next.operations).Count) { throw 'AI instructions install journal store transition cannot change operations count.' }
-    for ($index = 0; $index -lt @($Previous.operations).Count; $index++) {
+    $previousOperationCount = @($Previous.operations).Count
+    $nextOperationCount = @($Next.operations).Count
+    if ($previousOperationCount -ne $nextOperationCount) { throw 'AI instructions install journal store transition cannot change operations count after prepared.' }
+    $changedStateCount = 0
+    for ($index = 0; $index -lt $previousOperationCount; $index++) {
         $previousOperation = [ordered]@{}
         $nextOperation = [ordered]@{}
         foreach ($property in @($Previous.operations[$index].PSObject.Properties)) { if ($property.Name -cne 'state') { $previousOperation[$property.Name] = $property.Value } }
         foreach ($property in @($Next.operations[$index].PSObject.Properties)) { if ($property.Name -cne 'state') { $nextOperation[$property.Name] = $property.Value } }
-        if (-not (Test-AiInstructionsJsonSemanticEqual -Left ([pscustomobject]$previousOperation) -Right ([pscustomobject]$nextOperation))) { throw "AI instructions install journal store transition cannot change operation $($index + 1) fields other than state." }
+        $authorityEqual = Test-AiInstructionsJsonSemanticEqual -Left ([pscustomobject]$previousOperation) -Right ([pscustomobject]$nextOperation)
+        $evidenceBinding = $previousVersion -eq 2 -and $nextVersion -eq 2 -and (Test-AiInstructionsInstallJournalEvidenceBindingTransition -PreviousJournal $Previous -NextJournal $Next -PreviousOperation $Previous.operations[$index] -NextOperation $Next.operations[$index])
+        $observedAfterBinding = $previousVersion -eq 2 -and $nextVersion -eq 2 -and (Test-AiInstructionsInstallJournalAppliedBindingTransition -PreviousJournal $Previous -NextJournal $Next -PreviousOperation $Previous.operations[$index] -NextOperation $Next.operations[$index])
+        if (-not $authorityEqual -and -not $evidenceBinding -and -not $observedAfterBinding) { throw "AI instructions install journal store transition cannot change operation $($index + 1) fields other than state; observedAfter, displacedAfterMetadata, or store-git-stash-evidence after.objectId may be bound only once." }
         $fromState = [string]$Previous.operations[$index].state
         $toState = [string]$Next.operations[$index].state
+        if ($fromState -cne $toState) {
+            $changedStateCount++
+            if ($previousVersion -eq 2 -and $changedStateCount -gt 1) { throw 'AI instructions install journal store transition may change only one operation state per generation.' }
+        }
         $allowedState = $fromState -ceq $toState -or
-            "$fromState>$toState" -cin @('pending>staged','staged>applied','pending>applied','applied>rolled-back','pending>rolled-back','staged>rolled-back')
+            "$fromState>$toState" -cin $(if ($previousVersion -eq 2) { @('pending>applied') } else { @('pending>staged','staged>applied','pending>applied','applied>rolled-back','pending>rolled-back','staged>rolled-back') })
         if (-not $allowedState) { throw "AI instructions install journal store transition operation $($index + 1) state transition is invalid." }
     }
     $fromPhase = [string]$Previous.phase
     $toPhase = [string]$Next.phase
     $allowedPhase = $fromPhase -ceq $toPhase -or
-        "$fromPhase>$toPhase" -cin @('prepared>applying','applying>applied','applied>committed','prepared>rolling-back','applying>rolling-back','applied>rolling-back','rolling-back>rolled-back')
+        "$fromPhase>$toPhase" -cin $(if ($previousVersion -eq 2) { @('prepared>applying','applying>applied','applied>committed') } else { @('prepared>applying','applying>applied','applied>committed','prepared>rolling-back','applying>rolling-back','applied>rolling-back','rolling-back>rolled-back') })
     if (-not $allowedPhase) { throw 'AI instructions install journal store phase transition is invalid.' }
     return $Next
 }
@@ -2229,7 +2691,8 @@ function Get-AiInstructionsInstallTransactionClassification {
         [AllowNull()][object] $JournalEntryKind,
         [AllowNull()][object] $JournalJson,
         [AllowNull()][object] $PreviousJournalEntryKind,
-        [AllowNull()][object] $PreviousJournalJson
+        [AllowNull()][object] $PreviousJournalJson,
+        [ValidateSet('installer','updater','launcher-recovery','user-reconciler','repo-bootstrap')][string] $ExpectedOwnerComponent
     )
     if ($Name -cnotmatch '^[0-9a-f]{32}$' -or $EntryKind -cne 'directory') {
         return [pscustomobject][ordered]@{ classification='invalid-name'; journalLeaf=$null; journal=$null; reason='invalid transaction directory name or entry kind' }
@@ -2245,13 +2708,21 @@ function Get-AiInstructionsInstallTransactionClassification {
     if ($kind -isnot [string] -or [string]$kind -cne 'file' -or $json -isnot [string]) {
         return [pscustomobject][ordered]@{ classification='malformed-journal'; journalLeaf=$leaf; journal=$null; reason='journal entry is not a file' }
     }
-    try { $journal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json $json -ExpectedTransactionId $Name }
+    try {
+        $readerArguments = @{Json=$json;ExpectedTransactionId=$Name}
+        if ($PSBoundParameters.ContainsKey('ExpectedOwnerComponent')) { $readerArguments.ExpectedOwnerComponent=$ExpectedOwnerComponent }
+        $journal = ConvertFrom-AiInstructionsInstallJournalJson @readerArguments
+    }
     catch { return [pscustomobject][ordered]@{ classification='malformed-journal'; journalLeaf=$leaf; journal=$null; reason='journal validation failed' } }
     if ($journalExists -and $previousExists) {
         if ($PreviousJournalEntryKind -isnot [string] -or [string]$PreviousJournalEntryKind -cne 'file' -or $PreviousJournalJson -isnot [string]) {
             return [pscustomobject][ordered]@{ classification='malformed-journal'; journalLeaf='journal.json'; journal=$null; reason='previous journal entry is not a file' }
         }
-        try { $previousJournal = ConvertFrom-AiInstructionsInstallJournalV1Json -Json $PreviousJournalJson -ExpectedTransactionId $Name }
+        try {
+            $previousReaderArguments = @{Json=$PreviousJournalJson;ExpectedTransactionId=$Name}
+            if ($PSBoundParameters.ContainsKey('ExpectedOwnerComponent')) { $previousReaderArguments.ExpectedOwnerComponent=$ExpectedOwnerComponent }
+            $previousJournal = ConvertFrom-AiInstructionsInstallJournalJson @previousReaderArguments
+        }
         catch { return [pscustomobject][ordered]@{ classification='malformed-journal'; journalLeaf='journal.json'; journal=$null; reason='previous journal validation failed' } }
         try { Assert-AiInstructionsInstallJournalStoreTransition -Previous $previousJournal -Next $journal | Out-Null }
         catch { return [pscustomobject][ordered]@{ classification='malformed-journal'; journalLeaf='journal.json'; journal=$null; reason='journal transition from previous journal is invalid' } }
@@ -2797,11 +3268,13 @@ Export-ModuleMember -Function @(
     'Assert-AiInstructionsMutationPath',
     'Assert-AiInstructionsSafeChildDirectory',
     'Assert-AiInstructionsInstallJournalV1',
+    'Assert-AiInstructionsInstallJournalV2',
     'Assert-AiInstructionsSyncConfigurationV4',
     'Assert-AiInstructionsSyncConfigurationV5',
     'Assert-AiInstructionsUpdateReceiptV1',
     'ConvertTo-AiInstructionsUtcDateTime',
     'ConvertFrom-AiInstructionsInstallJournalV1Json',
+    'ConvertFrom-AiInstructionsInstallJournalJson',
     'ConvertTo-AiInstructionsSyncConfigurationV4',
     'ConvertTo-AiInstructionsSyncConfigurationV5',
     'Get-AiInstructionsFileSha256',
@@ -2826,5 +3299,6 @@ Export-ModuleMember -Function @(
     'New-AiInstructionsRuntimeBundleV3',
     'Select-AiInstructionsInstallWriterSchema',
     'New-AiInstructionsInstallJournalV1',
+    'New-AiInstructionsInstallJournalV2',
     'Write-AiInstructionsJsonFile'
 )

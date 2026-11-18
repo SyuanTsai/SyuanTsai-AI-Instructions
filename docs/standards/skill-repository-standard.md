@@ -41,12 +41,18 @@ Source repository **MUST NOT** 私自重新定義：
 
 - canonical authority repository identity；
 - full immutable authority Git commit；
-- acquired authority bundle/archive 的 SHA-256；
-- snapshot 內實際使用的 Standard、machine-readable policy、schema 與 resolver file inventory/hash。
+- authority transport 必須是下列其中一種：逐檔比對 Git blob 的 immutable commit／tree checkout，或受控 archive acquisition；只有實際使用 archive 時才 **MUST** 綁定 archive SHA-256；
+- 不論使用哪一種 transport，都 **MUST** 記錄 snapshot 內實際使用的 Standard、machine-readable policy、schema 與 resolver file inventory/hash。
 
 使用 mutable `main`、branch、moving tag、未驗證 working-tree copy，或只記錄 `v1` 而沒有 authority commit/hash，均 **MUST NOT** 作為 conformance 或 release gate authority。Vendored/cache copy **MAY** 存在，但只能是由上述 immutable snapshot 驗證出的 derived copy，不得成為第二份 authority。
 
-Conformance evidence **MUST** 記錄 `standardVersion`、authority repository、authority commit、authority bundle hash 與實際 authority file inventory/hash，使同一份報告可重現其判斷基線。Authority revision 改變時必須重新驗證；舊 revision 的 conformance evidence 不得宣稱涵蓋新 revision。
+Conformance evidence **MUST** 記錄 `standardVersion`、authority repository、authority commit、authority tree、實際 authority file inventory/hash，以及所用 transport 對應的 archive hash（只有使用 archive 時），使同一份報告可重現其判斷基線。Authority revision 改變時必須重新驗證；舊 revision 的 conformance evidence 不得宣稱涵蓋新 revision。
+
+#### Consumer pin 與 bootstrap
+
+Source repository 的 authority pin **MUST** 只存放在 `config/authority-pin.json`，並符合 `consumer/schemas/consumer-authority-pin-v1.schema.json`；它只包含 `schemaVersion`、`repository`、`commit`。Repository **MUST NOT** 保存 authority commit、archive hash 或 inventory 的其他複本。Base revision 的 `scripts/Invoke-PinnedAuthority.ps1` **MUST** 逐 byte 等於 authority 的 `consumer/bootstrap/Invoke-PinnedAuthority.ps1`，並驗證 `repository` 等於固定官方 URL、`commit` 在執行當下以 `git merge-base --is-ancestor` 證明位於官方 authority `main`，且 checkout 每個檔案都符合該 commit tree。接受條件 **MUST NOT** 使用列舉式 tuple allowlist，也不要求 candidate pin 晚於 base pin。
+
+Bootstrap 與 gate **MUST** 透過 `consumer/consumer-gate-interface.json` 的版本化介面溝通。Authority **MUST** 支援所有仍存在於受管 consumer base 的介面；介面退役前 **MUST** 在 `retiredInterfaces` 留下各受管 repository 已採用替代介面的 commit 證據。
 
 ### 3.3 Effective scope
 
@@ -59,6 +65,8 @@ Source repositories 在宣稱 Standard v1 conformant 前 **MUST** 實作本標�
 `Skill-General` 在 SYP-155 完成後 **SHOULD** 作為 implementation reference。若 reference implementation 與本標準衝突，**MUST** 修正 implementation，或先修改本標準並完成 review/tests；不得以 implementation 現況覆蓋 normative policy。
 
 跨 repository 共用的平台抽象——路徑安全、程序隔離、鎖、PowerShell runtime 取得與 Pester 準備——**MUST** 由本 Repository（AI-Instructions）提供，並透過第 3.2 節的 authority pin 與完整 inventory/hash 分發。各 repository **MUST** 使用該共用模組與契約，**MUST NOT** 各自發展不相容的版本；host adapter 只綁定平台能力與參數。
+
+Consumer source CI 的工具準備、PowerShell 與 Pester runtime、完整性檢查、case identity、證據及 aggregate 驗證 **MUST** 由 authority 的 `scripts/consumer/Invoke-ConsumerSourceGate.ps1` 提供；source repository **MUST NOT** 保有這些流程的本地副本。Repository-specific 檢查只能由 `config/consumer-gate.json` 的 `repositoryChecks` 宣告，並 **MUST** 涵蓋 `consumer/legacy-migration.json` 對該 repository 列出的全部 `requiredRepositoryChecks`。
 
 ### 3.5 Upstream interoperability boundary
 
@@ -325,11 +333,15 @@ The ordinary route **MUST** follow [`standard-core-validation-v2.json`](standard
 
 Source setup **MUST** 使用既有 approved-source resolver，保留真實工具來源、版本、identity、executable／payload／完整 installed closure hash 與 frozen receipts；acquisition 僅可在明確 setup 執行。對 `skill-tools`，source frozen files **MUST** 以 exact hash 包含實際執行的 Node runtime 與 entry-point payload；npm launcher shim **MUST** 由 launcher integrity 綁定 shim、payload、runtime 及完整 installed closure，但 **MUST NOT** 以 frozen-file membership 作為必要條件。Validation **MUST NOT** 下載、換來源或 fallback。沿用既有 command adapter、parser、candidate snapshot、process supervision、raw-event digest 與 cleanup 契約，依序執行 package adapter、每個 discovered active package 的真 `skill-validator`／`skill-tools`、完整 SkillSpector Static（no-LLM）、repository general／完整 Pester，最後以 `Assert-StandardCoreSourceCheckReport` 嚴格綁定報告。既有 severity／warning／score／coverage 門檻 **MUST** 保留；任何 package/tool 缺漏、空／重複 inventory、版本輸出取代掃描、錯 SHA／run／authority／tool identity、報告替換／解析錯、timeout、取消或 cleanup／Pester case/block/discovery 失敗 **MUST** 保持失敗。
 
-Consumer source setup launched through the runner **MUST** pass a GitHub API token to the resolver only through `STANDARD_VALIDATION_GITHUB_API_TOKEN`. A direct resolver invocation **MAY** use ambient `GITHUB_TOKEN` as a pre-existing compatibility source; `STANDARD_VALIDATION_GITHUB_API_TOKEN` takes precedence whenever it is non-empty. The resolver **MUST** consume the selected token only for authenticated GitHub API／approved release acquisition, clear it and all GitHub token aliases before any subprocess, and **MUST NOT** log, persist, or record it in receipts／evidence／diagnostics.
+Consumer source setup launched through the runner **MUST** pass a GitHub API token to the resolver only through `STANDARD_VALIDATION_GITHUB_API_TOKEN`. A direct resolver invocation **MAY** use ambient `GITHUB_TOKEN` as a pre-existing compatibility source; `STANDARD_VALIDATION_GITHUB_API_TOKEN` takes precedence whenever it is non-empty. The resolver **MUST** consume the selected token only for authenticated GitHub API／approved release acquisition, clear it and all GitHub token aliases before any subprocess, and **MUST NOT** log, persist, or record it in receipts／evidence／diagnostics. Consumer gate 只能在 prepare phase 傳入 workflow 的唯讀 `GITHUB_TOKEN`；validate、finalize 與 candidate 子程序 **MUST NOT** 繼承任何 token，App 私鑰 **MUST NOT** 進入會執行 candidate 程式碼的 job。
 
-Source receipts 是既有 resolver 的 unsigned acquisition output；來源信任沿用 protected base driver 的明確 setup 與已核對 authority，而非任意 caller receipt／wrapper 的自宣告 hash。Runner **MUST** 驗必要 resolver identity、executable、launcher／payload／runtime 與 closure 綁定；historical advanced lifecycle 的 signed supervisor attestation **MUST NOT** 成為 source CI 前提。工具完成後若 repository check 失敗，失敗報告 **MUST** 保留已完成工具證據；只有完整 `PASS` 才要求有效完整 Pester inventory。
+Source receipts 是既有 resolver 的 unsigned acquisition output；來源信任沿用 base bootstrap 驗證過的 authority 與 consumer gate 的明確 setup，而非任意 caller receipt／wrapper 的自宣告 hash。Runner **MUST** 驗必要 resolver identity、executable、launcher／payload／runtime 與 closure 綁定；historical advanced lifecycle 的 signed supervisor attestation **MUST NOT** 成為 source CI 前提。工具完成後若 repository check 失敗，失敗報告 **MUST** 保留已完成工具證據；只有完整 `PASS` 才要求有效完整 Pester inventory。
 
-每個 PR 的 canonical 驗證 **MUST** 以 `ubuntu-latest`、`windows-latest`、`macos-latest` matrix 並行執行，三個 leg 皆為必要，並設定 `fail-fast: false`。三個 required contexts `repository-contract`、`skill-validator`、`skill-tools` 的名稱 **MUST** 維持不變；它們 **MUST** 共用同一 event/candidate 的完整 matrix 結果，且僅在全部 leg 都完成並通過 canonical source 驗證時成功。任一 leg 失敗、取消、缺席、未執行或 evidence 無效，context **MUST** 失敗；不得只採用其中一個平台的 PASS。每個 leg **MUST** 分別綁定 exact candidate／base／authority、自己的 frozen run/toolset、原始輸出與完整 inventory；aggregate **MUST** 核對相同 event/candidate 及完整平台集合。Protected PR **MUST** 繼續由 exact protected base driver 執行；舊 Core driver 的綠燈不能代表新 source gate。Source evidence **MUST** 保持 `releaseEligible=false`，明列 source checks 的範圍；既有 historical v1 `BLOCKED` 與 explicit Semantic／lifecycle evidence **MUST NOT** 被改寫成完整 PASS。
+每個 PR 的 canonical 驗證 **MUST** 以 `ubuntu-latest`、`windows-latest`、`macos-latest` matrix 並行執行，三個 leg 皆為必要，並設定 `fail-fast: false`。三個 required contexts `repository-contract`、`skill-validator`、`skill-tools` 的名稱 **MUST** 維持不變；它們 **MUST** 共用同一 event/candidate 的完整 matrix 結果，且僅在全部 leg 都完成並通過 canonical source 驗證時成功。任一 leg 失敗、取消、缺席、未執行或 evidence 無效，context **MUST** 失敗；不得只採用其中一個平台的 PASS。每個 leg **MUST** 分別綁定 exact candidate／base／authority、自己的 frozen run/toolset、原始輸出與完整 inventory；aggregate **MUST** 核對相同 event/candidate 及完整平台集合。Protected PR **MUST** 由 base revision 的 bootstrap 執行 candidate pin 所指 authority 的 consumer gate；PR **MUST NOT** 改變套用在自己的 bootstrap 或 workflow，gate **MUST** 拒絕同時不等於 base 版本與 candidate pin 發布模板的 bootstrap 或 workflow。舊 Core driver 的綠燈不能代表新 source gate。Source evidence **MUST** 保持 `releaseEligible=false`，明列 source checks 的範圍；既有 historical v1 `BLOCKED` 與 explicit Semantic／lifecycle evidence **MUST NOT** 被改寫成完整 PASS。
+
+Source CI **MUST** 使用 authority 發布的 `consumer/workflows/consumer-gate.yml`，以 `pull_request_target` 取得 default branch 的 workflow 定義。Runner 的 canonical `EventName` 是 `pull_request`，receipt 另記原始 `triggerEvent`。三個 required contexts **MUST** 由不 checkout candidate、也不下載 candidate artifact 的獨立 report job，透過專用 GitHub App 回報到 PR head commit；remote ruleset **MUST** 將三者來源限制為該 App，並設定 `strict_required_status_checks_policy=true`。在 remote ruleset 完成對齊前，依 §19 **MUST NOT** 宣稱 remote merge enforcement 已生效。
+
+Default branch **MUST** 只能經 PR 更新，remote ruleset 的 `pull_request` 與 `non_fast_forward` 規則必須啟用且 `bypass_actors` 為空。Push gate **MUST** 使用 `event.before` 的 bootstrap 驗證新 commit，且 push 事件 **MUST NOT** 使用 App 或 environment。已知限制是 candidate 測試程式碼與 gate 在同一個 job 執行；同一 job 內的 candidate 竄改不屬於本信任邊界保護範圍。
 
 The ordinary route **MUST** copy only the verified tracked regular files into its run-owned snapshot; it **MUST NOT** copy `.git`, ignored files, or untracked/private files. It **MUST** discover and compare `activeSkills` from that tracked-only snapshot, then execute every declared local general or Pester check against it with a bounded timeout, captured stdout/stderr digests, and verified child cleanup. A `PASS` **MUST** have exit code zero, every check `passed` with exit code zero and `cleanedUp=true`, and `releaseEligible=false`. The local process boundary does not provide filesystem read isolation from same-account children; untrusted candidates **MUST** execute only in a platform-provided no-secret, low-privilege environment, while local smoke tests **MUST** use trusted isolated fixtures. On Windows, child processes **MUST** use hidden windows and `CreateNoWindow` with bounded timeout and cleanup. On Linux/macOS, child processes **MUST NOT** allocate an interactive terminal and **MUST** use a separate process group, bounded timeout, and complete owned-descendant cleanup; all platforms **MUST** satisfy §8.4 process-isolation evidence.
 
@@ -337,7 +349,7 @@ CI 的一次 canonical execution 指同一 event/candidate 的一個完整 matri
 
 #### 8.1.3 Historical v1 advanced lifecycle
 
-The explicit v1 advanced route **MUST NOT** treat caller-supplied source metadata or a copied candidate directory as acquisition proof. It **MUST** require a provider-acquired immutable archive, its SHA-256, and a trusted-supervisor-signed candidate-acquisition receipt binding repository, source/base revision, event, archive URL, archive hash, and normalized content inventory; the archive **MUST** be safely extracted and compared with the candidate tree before validation. Development harnesses **MUST** emit an explicit unverified acquisition status and **MUST NOT** become release-eligible. The route **MUST** likewise require a trusted-supervisor-signed authority snapshot receipt binding this fixed authority repository to a full revision, immutable archive URL/hash, selected authority-file inventory, and the current files before executing authority-derived policy. Supervisor and human-approval public keys **MUST** come from the immutable authority trust-anchor root and their approved SHA-256 values **MUST** be pinned outside caller CLI inputs; a caller-selected tool root may provide these files only in an explicitly unreleaseable development harness. Archive, receipt, selected-file, and trust-anchor hashes **MUST** be revalidated around every child process.
+The explicit v1 advanced route **MUST NOT** treat caller-supplied source metadata or a copied candidate directory as acquisition proof. It **MUST** require a provider-acquired immutable archive, its SHA-256, and a trusted-supervisor-signed candidate-acquisition receipt binding repository, source/base revision, event, archive URL, archive hash, and normalized content inventory; the archive **MUST** be safely extracted and compared with the candidate tree before validation. Development harnesses **MUST** emit an explicit unverified acquisition status and **MUST NOT** become release-eligible. The route **MUST** likewise require a trusted-supervisor-signed authority snapshot receipt binding this fixed authority repository to a full revision, immutable archive URL/hash, selected authority-file inventory, and the current files before executing authority-derived policy. Supervisor and human-approval public keys **MUST** come from the immutable authority trust-anchor root and their approved SHA-256 values **MUST** be pinned outside caller CLI inputs; a caller-selected tool root may provide these files only in an explicitly unreleaseable development harness. Trust-anchor rotation changes the approval boundary and **MUST** merge only after the user verifies the proposed fingerprints with an independent tool that is not supplied by the same unmerged change. Archive, receipt, selected-file, and trust-anchor hashes **MUST** be revalidated around every child process.
 
 Protected PR、trusted push 與 `workflow_dispatch` **MAY** 使用不同 trigger adapter，但每個 adapter **MUST** 使用相同 canonical validator、candidate binding、stage ordering 與 local/pre-push/CI pass/block semantics；path/branch filter 的表面差異不得被當成 candidate disjointness proof，重疊 filter **MUST** 以 event/candidate/platform key 偵測並 `BLOCK`；同一 event/candidate **MUST** 只有一個 canonical matrix，每個平台 leg 只執行一次 canonical validation。
 
@@ -667,7 +679,7 @@ Parser error、無法驗證的 grammar/module/runtime identity、未知 proof sh
 
 本次准用用途限 `local-pr-review` 與 `prepare-review-feedback`。中央登錄和 `Resolve-StandardValidationInternalSkillUse` **MUST** 拒絕未登錄 repository/Skill/content identity、非 immutable 當前 revision、package 新增/刪除/變更 bytes、未核准用途、撤銷/過期/不完整人審、缺少或漂移的必要工具，以及缺件/重複/漂移的 authority member pins。完整 content digest 沿用既有 ordinal `path<TAB>sha256<LF>` inventory 算法，不能做文字正規化後冒稱 exact bytes。
 
-正常 consumer **MUST** 先以其受保護 reader 的固定 tuple 驗證中央 immutable archive 與成員，再從該 authority runner 呼叫此 API；`ExpectedAuthorityFiles` 必須來自該 trusted tuple，包含 runner、registry 和 policy schema 的 exact hashes，`ToolInventory` 必須是 consumer 已驗證並凍結的 `id/version/path/sha256` inventory。Reader 不接收 candidate-selected registry path、caller approval Boolean 或替代 policy；candidate 自算的 pins 不構成中央准用。缺少新區段的舊 v1 registry 對新准用要求 fail closed，舊 review-only assessment 保持原行為。304 的 consumer 接入依相同固定 authority inventory 接收，不能把本機未提交中央候選冒充正式 authority revision。
+正常 consumer **MUST** 先以 base bootstrap 依 §3.2 驗證的 pin 與 authority tree 建立中央 immutable checkout，再從該 authority runner 呼叫此 API；`ExpectedAuthorityFiles` 必須由 gate 從該已驗證 checkout 計算，包含 runner、registry 和 policy schema 的 exact hashes，`ToolInventory` 必須是 consumer 已驗證並凍結的 `id/version/path/sha256` inventory。Reader 不接收 candidate-selected registry path、caller approval Boolean 或替代 policy；candidate 自算的 pins 不構成中央准用。缺少新區段的舊 v1 registry 對新准用要求 fail closed，舊 review-only assessment 保持原行為。304 的 consumer 接入依相同已驗證 authority inventory 接收，不能把本機未提交中央候選冒充正式 authority revision。
 
 回傳 `internal-skill-use-decision-v1` 的 `status=approved`、`authorizationGranted=true` 與 exact requested `authorizedOperations` 只表示該 exact package 可在該內部用途使用。Reader **MUST** 在回傳前重新核對完整 package inventory 與每個必要工具的 exact bytes，拒絕本次 evaluation 期間的漂移；consumer **MUST** 在採用／執行時保持或重新驗證相同 snapshot／工具 bytes。Consumer **MUST** 實際讀取此 decision 並在採用時比對用途與來源，不以 catalog 字串、文件或人工口頭清單代替。新用途、package、host authorization、工具需求或 authority 改變均須重評。中央記錄可由後續正常 policy change 撤銷；過期即拒絕。
 
@@ -818,7 +830,7 @@ As the target state for this authority repository, required pull request and mai
 
 SourceValidation execution remains owned by the central source-validation function in `scripts/Invoke-StandardValidation.ps1` and its thin adapter. Consumers retain source-owned functional tests and thin integration contracts in the complete discovered test tree. The optional v2 `testOwnership` selector remains limited to `central-third-party-raw-skill-v1`; unknown schema or ownership values remain rejected, and existing consumers continue to use the v2 adapter and result contracts. A pin or immutable version update alone MUST NOT transfer ownership or permit source-test deletion.
 
-For the Code trial, the current governed source-reader set is `scripts/Invoke-RepositoryCheck.ps1`, `scripts/Invoke-CorePester.ps1`, `scripts/CorePesterIntegrity.psm1`, `scripts/Test-Repository.ps1`, and `tests/validate-catalog.ps1`; those readers require exact candidate==base bytes for governed reader inputs and the full discovered tests tree. This list records the Code trial's verified reader set and is not a universal file inventory for other source repositories. Each source repository MUST retain its own protected reader identities and full discovered tests tree under its approved central policy. Any change to those protected readers or their contract MUST be delivered through a normal reader PR and merged before candidate adoption may rely on it. SYP-325 changes none of the Code trial paths above.
+The protected source layer contains only the bootstrap and authority-published workflow templates. Repository-local readers are replaced by the authority consumer gate and are deleted or split according to `consumer/legacy-migration.json`; source-owned functional tests remain in the complete discovered test tree. Historically, the Code trial protected a repository-local reader set before this consumer-gate boundary replaced it.
 
 Source-copy equivalence or removal is deferred to downstream adoption. A future adoption may remove only centrally owned framework test copies that are identified item by item and demonstrably replaced by the central tests under the normal required three-platform Core CI gate; candidate-owned functional and thin integration tests remain in the full discovered test tree. A pin-only update or source-copy deletion MUST NOT establish equivalence.
 
@@ -989,7 +1001,7 @@ Install **MUST**：
 
 Repository 要宣稱 Standard v1 conformant，**MUST** 證明：
 
-1. immutable authority snapshot repository/commit/bundle hash/file inventory；
+1. immutable authority snapshot repository、commit、tree 與 file inventory；只有實際採用 archive transport 時，才另外要求 archive SHA-256；
 2. source/package/schema-v2 inventory contract；
 3. AI 中立的 `SKILL.md` 與存在時的 `agents/openai.yaml` metadata contract、三 AI projection/instructions 一致性；
 4. canonical lifecycle stage ordering；
@@ -1008,7 +1020,7 @@ Repository 要宣稱 Standard v1 conformant，**MUST** 證明：
 17. release/install/post-install integrity；
 18. repository-specific deviations 僅存在於 approved adapter/config/exception。
 
-Conformance report **MUST** 明確記錄 `standardVersion`、authority repository、authority commit、authority bundle hash、authority file inventory、candidate identity、validation run/toolset identity、covered Skill inventory 及 deviations；若沒有 deviation，記錄 `None`，不得省略此欄位。只寫 `Standard v1` 而沒有 immutable authority revision/hash 的 report 不可作為可重現 conformance evidence。
+Conformance report **MUST** 明確記錄 `standardVersion`、authority repository、authority commit、authority tree、所用 transport 的 archive hash（只有使用 archive 時）、authority file inventory、candidate identity、validation run/toolset identity、covered Skill inventory 及 deviations；若沒有 deviation，記錄 `None`，不得省略此欄位。只寫 `Standard v1` 而沒有 immutable authority revision/hash 的 report 不可作為可重現 conformance evidence。
 
 ## 18. Migration and backward compatibility
 
@@ -1040,6 +1052,18 @@ Tracking: `SYP-353`（三平台 CI 範本）、`SYP-354`（installer 跨平台�
 過渡期間 **MUST NOT** 宣稱本 Repository 已通過三平台驗證；任何報告與 README 的支援矩陣 **MUST** 分別標示 Linux／macOS 的實際狀態、尚未完成的條件與驗證證據。Workflow regression **MUST** 核對當時實際採用的 Windows 及已加入平台 legs，不得把尚未落實的目標 matrix 當成現行 workflow 事實。
 
 過渡期僅在 SYP-353 與 SYP-354 均完成，且 Core／Install Smoke 都已具備三平台 required legs、完成並通過各自 canonical 驗證後結束；屆時 **MUST** 完整符合第 8.2 與第 12.3 節的目標 matrix。本例外只適用 authority repository 自身 CI，不改變 consumer repository 依第 18.1 節升級 pin 時必須同時採用三平台 matrix 的要求。
+
+### 18.2 Consumer gate conversion
+
+每個 source repository **MUST** 以一個轉換 PR 採用 `consumer/workflows/consumer-gate-transition.yml` 與 bootstrap 的 transition mode。這個一次性 PR 由 PR 自帶程式碼決定檢查，因此人工 review **MUST** 核對三個模板檔逐 byte 等於 pin 所指 authority 的模板，並核對 pin 位於官方 `main`；這項核對 **MUST NOT** 以 ruleset bypass 取代。轉換 PR 的 base **MUST** 精確等於 `consumer/legacy-migration.json` 中該 repository 的 `inventoryCommit` 與 `inventoryTree`；consumer main 若已前進，**MUST** 先以 authority PR 重新產生 manifest，不得放寬比對。
+
+Authority manifest 中每個 repository entry **MUST** 通過 authority 發布的 manifest 封閉檢查才有效；轉換 gate **MUST** 依序檢查 inventory tree 與轉換 candidate tree，任一階段失敗即回 FAILED。兩階段使用的 manifest 與工具 **MUST** 都取自 pin 指向的 authority commit，**MUST NOT** 從 candidate 讀取。轉換時 split 來源 **MUST** 已不存在；每個 `update-tests` 檔 **MUST** 符合 manifest 宣告的 `expectedOutcome`（`delete` 或 `rewrite`）。
+
+在固定文件 allowlist 以外的所有可解碼文字檔中，legacy 目標的完整路徑 token（包括 authority 明列的 PowerShell 常數折疊結果）**MUST** 判定為失敗，除非 manifest 豁免綁定 exact Git blob OID、行、欄、`occurrenceOrdinal` 與目標路徑。豁免 **MUST** 只處理誤報並記錄理由；轉換時修改過的檔案 **MUST NOT** 套用舊豁免。同一 PowerShell statement 若有路徑運算元本身未產生 legacy 命中，且折疊結果含 `<var>` 或不在封閉折疊清單而無法折疊，該 statement 的豁免 **MUST** 無效；cast 的 child 可確定折疊時才傳遞常值，method call 等其他不可折疊形式仍 fail closed。路徑消費點 **MUST** 使用 authority 的固定 cmdlet／alias／operand table；參數名稱比較不分大小寫，但只有表中完整 canonical 名稱可接受，縮寫、parameter alias、splatting 或其他未列名稱 **MUST** fail closed。`dynamic-reference` advisory **MUST** 由同一張表衍生，包括 `Set-Content`、`Out-File`、`Move-Item` 及表中 alias。文件提及、完全動態引用與二進位檔只列 advisory。
+
+封閉檢查是正確性檢查，不是信任邊界；信任邊界來自 pinned authority 與憑證隔離。它無法證明動態引用不依賴 legacy 目標，因此轉換 PR **MUST** 在轉換後 candidate tree 上於 Windows、Linux、macOS 實跑全部 required checks，提供行為層偵測但不得宣稱已證明不存在依賴。指向同路徑 `expectedOutcome: rewrite` 檔案的動態依賴或未執行分支仍可能漏失；失敗時 **MUST** 以 authority manifest-only PR 修正處置，**MUST NOT** 放寬檢查。
+
+完整轉換順序固定記錄於 [`consumer/README.md`](../../consumer/README.md#consumer-repository-conversion)，包括盤點基準重試、transition push skip、清理 PR、App required-context 回報確認與 ruleset 對齊。完成這些遠端步驟前 **MUST NOT** 宣稱 consumer merge enforcement 已生效。轉換順序為 Knowledge Content → Code Collaboration → General → Atlassian → Darktide。`consumer/legacy-migration.json` 將 Darktide 標為 `pending-prerequisites` 並列出精確 `prerequisites`；在三平台可攜前提完成、且 authority 以 manifest-only PR 重新盤點並改為 `ready` 前，gate **MUST** 對 Darktide 轉換回 BLOCKED，並指向 [`consumer/README.md`](../../consumer/README.md#darktide-轉換前提)。
 
 ## 19. Standard change contract
 

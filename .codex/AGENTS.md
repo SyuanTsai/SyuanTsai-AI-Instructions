@@ -28,7 +28,7 @@
 
 `~/.agents/skills/` 是目前 host 的 USER Skills root，提供可重複工作流程。使用者明確指定 Skill，或任務符合 Skill `description` 時，先完整讀取其 `SKILL.md`，再只載入目前工作需要的 references、scripts 或 assets。安全、測試與 Repository guardrail 仍以本 Base Agent 及適用的條件式規則為準。
 
-共用 Catalog Skills 只由 USER updater 安裝／更新至 USER（`~/.agents/skills/`）。Consumer bootstrap 繼續更新 Instructions；USER 缺少或驗證失敗時也不得回退 REPO 安裝，應回報 USER 修復／更新需求。專案自有 Skills 仍可使用並必須保留。 <!-- ai-invariant:base.shared-skills-user-only -->
+共用 Catalog Skills 預設只由 USER updater 安裝／更新至 USER（`~/.agents/skills/`），Consumer bootstrap 只更新 Instructions。唯一例外是已驗證的 runtime bundle v3／sync config v5 通過 gate、`projections.project` 明確非空，且寫入位於 project-scope durable transaction 內時，bootstrap 才可從同一個 immutable、已驗證的 Catalog source 建立 project projection；不得因 USER Skill 缺少、較舊、損壞或不可讀而觸發例外，也不得以 USER 或既有 REPO 副本為來源。其餘情況不得回退 REPO，應回報 USER 修復／更新需求；專案自有 Skills 仍可使用並必須保留。 <!-- ai-invariant:base.shared-skills-user-only -->
 
 - 提出或更新實作計畫 → `~/.agents/skills/plan-production-change/SKILL.md`
 - 效能改善、benchmark、query optimization 或 N+1 驗證 → `~/.agents/skills/verify-data-access-performance/SKILL.md`

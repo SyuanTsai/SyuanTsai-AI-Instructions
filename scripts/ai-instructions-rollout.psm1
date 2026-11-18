@@ -306,6 +306,22 @@ function Test-RolloutManifestCurrent {
         catch { return $false }
         if ($null -eq $lock.PSObject.Properties['projectionContractSha256'] -or
             [string]$manifest.projectionContractSha256 -cne [string]$lock.projectionContractSha256) { return $false }
+        $repositoryRoot = [IO.Path]::GetFullPath($Repository).TrimEnd([char[]]@('\','/'))
+        foreach ($entry in @($manifest.files | Where-Object { [string]$_.artifactType -ceq 'skill' })) {
+            $targetPath = [string]$entry.targetPath
+            if ($targetPath -cnotmatch '^\.(agents|claude|github)/skills/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?/.+$') { return $false }
+            try { $fullPath = [IO.Path]::GetFullPath((Join-Path $repositoryRoot $targetPath.Replace('/',[IO.Path]::DirectorySeparatorChar))) }
+            catch { return $false }
+            if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { return $false }
+            $stream = [IO.File]::OpenRead($fullPath)
+            try {
+                $sha = [Security.Cryptography.SHA256]::Create()
+                try { $actual = ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','').ToLowerInvariant() }
+                finally { $sha.Dispose() }
+            }
+            finally { $stream.Dispose() }
+            if ($actual -cne [string]$entry.sha256) { return $false }
+        }
     }
     return $true
 }
