@@ -873,6 +873,11 @@ function Test-Syp214GitStateEqual {
         (Test-Syp214InventoryEqual -Left @($Left.stashes) -Right @($Right.stashes)))
 }
 
+function Get-Syp214GitStatusAll {
+    param([Parameter(Mandatory=$true)][string]$Repository)
+    return @(Invoke-TestGit $Repository @('status','--porcelain=v1','--untracked-files=all'))
+}
+
 function Test-Syp214RegularFileInventory {
     param([object[]]$Inventory)
     return (@($Inventory).Count -eq 1 -and [string]$Inventory[0].type -ceq 'file' -and
@@ -1350,13 +1355,29 @@ function Test-Syp214UnifiedStateEqual {
     return ($tree-and$point-and$exclude-and$git-and$user)
 }
 
-function Get-Syp214AclSemanticEvidence {
-    param([Parameter(Mandatory=$true)][string]$Path)
-    $acl=Get-Acl -LiteralPath $Path
-    $rules=@($acl.Access|ForEach-Object{[ordered]@{identity=[string]$_.IdentityReference;rights=[int]$_.FileSystemRights
-        type=[string]$_.AccessControlType;inheritance=[int]$_.InheritanceFlags;propagation=[int]$_.PropagationFlags
-        inherited=[bool]$_.IsInherited}}|Sort-Object identity,rights,type,inheritance,propagation,inherited)
-    return (ConvertTo-Json -InputObject ([ordered]@{protected=[bool]$acl.AreAccessRulesProtected;rules=$rules}) -Depth 6 -Compress)
+function Get-Syp214RawDaclRecord {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][ValidateSet('Target','Exclude')][string]$Kind,
+        [string]$TargetRoot,
+        [string]$RelativePath
+    )
+    $handle=$null
+    try {
+        $handle=if($Kind-ceq'Target'){
+            [CodexAiInstructions.NativeFileMutation]::OpenForMetadata($TargetRoot,$Path,$RelativePath)
+        }else{
+            [CodexAiInstructions.NativeFileMutation]::OpenStandaloneForMetadata($Path)
+        }
+        return Get-FileDaclJournalRecord -Handle $handle
+    }
+    finally { if($null-ne$handle){$handle.Dispose()} }
+}
+
+function Test-Syp214RawDaclRecordEqual {
+    param([Parameter(Mandatory=$true)][object]$Left,[Parameter(Mandatory=$true)][object]$Right)
+    return [CodexAiInstructions.NativeFileMutation]::DaclEquals(
+        (ConvertFrom-FileDaclJournalRecord $Left),(ConvertFrom-FileDaclJournalRecord $Right))
 }
 
 Describe 'SYP214 generic managed Instructions deletion recovery' {
@@ -1462,18 +1483,155 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
         $op=$script:Syp214GenericOperations.remove;(&$script:Syp214Run "after-operation-$($op.sequence)-before-journal").exitCode|Should Not Be 0;Test-Path $targetPath|Should Be $false;$txn=Get-Syp214UnifiedTransactionFixture $targetRoot;[int]$txn.journal.schemaVersion|Should Be 2;[string]@($txn.journal.operations|Where-Object sequence -eq $op.sequence)[0].state|Should Be 'pending'
         (&$script:Syp214Recover).exitCode|Should Not Be 0;[Convert]::ToBase64String([IO.File]::ReadAllBytes($targetPath))|Should Be ([Convert]::ToBase64String($originalTarget));@(Get-ChildItem -Force -Directory -LiteralPath (Get-Syp214RepositoryTransactionRoot $targetRoot) -ErrorAction SilentlyContinue).Count|Should Be 0;(Test-Syp214UnifiedStateEqual $before (Get-Syp214FixtureSnapshot $targetRoot $userHome $script:Syp214GenericEntries))|Should Be $true
     }
-    # Scenario: Schema-v1 target/exclude state has no historical identity or DACL.
-    # Purpose: Recover originals without inventing schema-v2 metadata.
+    # Scenario: Schema-v1 target/exclude recovery faults after flushing a stage prefix, then re-enters.
+    # Purpose: Preserve applied state after the first failure and restore exact originals without inventing schema-v2 metadata.
     It 'InterT98_recovers_schema_v1_<WriterKind>_<AppliedType>_without_inventing_historic_metadata_after_a_prefix_fault' -TestCases @(
         @{WriterKind='target';AppliedType='file'},@{WriterKind='target';AppliedType='missing'},@{WriterKind='exclude';AppliedType='file'}) {
-        param($WriterKind,$AppliedType);$backupRoot=Join-Path $caseRoot 'legacy-v1/target-backup';$journalPath=Join-Path $backupRoot 'skill-migration.json';New-Item -ItemType Directory -Force $backupRoot|Out-Null
-        $targetAclBefore=Get-Syp214AclSemanticEvidence $targetPath;$excludeAclBefore=Get-Syp214AclSemanticEvidence $excludePath;$targetReadOnlyBefore=(([IO.File]::GetAttributes($targetPath)-band[IO.FileAttributes]::ReadOnly)-ne0);$excludeReadOnlyBefore=(([IO.File]::GetAttributes($excludePath)-band[IO.FileAttributes]::ReadOnly)-ne0)
-        $prefix=New-Syp214BootstrapMutationPrefix;. $prefix -TargetRoot $targetRoot -UserHome $userHome -GitExecutable 'git';$snapshot=New-TargetMutationSnapshot $targetRoot @($relativePath) $backupRoot;$excludeSnapshot=New-GitInfoExcludeSnapshot $targetRoot;$gitState=Get-RepoSkillMigrationGitState $targetRoot 'git';$applied=[Text.UTF8Encoding]::new($false).GetBytes("# legacy applied`n")
-        if($WriterKind-ceq'target'){$state=$snapshot.FileStates[0];$state.MutationApplied=$true;$state.AppliedType=$AppliedType;if($AppliedType-ceq'file'){$state.AppliedBytes=$applied;[IO.File]::WriteAllBytes($targetPath,$applied)}else{$state.AppliedBytes=$null;Remove-Item $targetPath -Force}}else{$excludeSnapshot.MutationApplied=$true;$excludeSnapshot.AppliedBytes=$applied;[IO.File]::WriteAllBytes($excludePath,$applied)}
-        $s=[ordered]@{relativePath=$relativePath;originalType='file';backupName=(Split-Path -Leaf ([string]$snapshot.FileStates[0].BackupPath));backupSha256=(Get-RawContentHash ([string]$snapshot.FileStates[0].BackupPath));mutationApplied=($WriterKind-ceq'target');appliedType=$(if($WriterKind-ceq'target'){$AppliedType}else{$null});appliedBase64=$(if($WriterKind-ceq'target'-and$AppliedType-ceq'file'){[Convert]::ToBase64String($applied)}else{$null})}
-        $e=[ordered]@{Path=$excludeSnapshot.Path;Repository=$excludeSnapshot.Repository;MutationApplied=($WriterKind-ceq'exclude');Existed=[bool]$excludeSnapshot.Existed;Bytes=$excludeSnapshot.Bytes;AppliedBytes=$(if($WriterKind-ceq'exclude'){$applied}else{$null})};$j=[ordered]@{schemaVersion=1;targetRoot=$targetRoot;phase='mutating';head=$gitState.head;indexSha256=$gitState.indexSha256;states=@($s);exclude=$e};[IO.File]::WriteAllText($journalPath,($j|ConvertTo-Json -Depth 12)+"`n",[Text.UTF8Encoding]::new($false))
-        Restore-SkillMigrationJournal $targetRoot $journalPath|Out-Null;[Convert]::ToBase64String([IO.File]::ReadAllBytes($targetPath))|Should Be ([Convert]::ToBase64String($originalTarget));[Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))|Should Be ([Convert]::ToBase64String($originalExclude));(Get-Syp214AclSemanticEvidence $targetPath)|Should Be $targetAclBefore;(Get-Syp214AclSemanticEvidence $excludePath)|Should Be $excludeAclBefore;((([IO.File]::GetAttributes($targetPath)-band[IO.FileAttributes]::ReadOnly)-ne0))|Should Be $targetReadOnlyBefore;((([IO.File]::GetAttributes($excludePath)-band[IO.FileAttributes]::ReadOnly)-ne0))|Should Be $excludeReadOnlyBefore
-        $final=Get-Content -Raw $journalPath|ConvertFrom-Json;[int]$final.schemaVersion|Should Be 1;[string]$final.phase|Should Be 'recovered';$final.states[0].PSObject.Properties['originalDacl']|Should BeNullOrEmpty;$final.states[0].PSObject.Properties['originalIdentity']|Should BeNullOrEmpty;$final.exclude.PSObject.Properties['dacl']|Should BeNullOrEmpty;$final.exclude.PSObject.Properties['originalIdentity']|Should BeNullOrEmpty;(Test-Syp214UnifiedStateEqual $before (Get-Syp214FixtureSnapshot $targetRoot $userHome $script:Syp214GenericEntries))|Should Be $true;Set-StrictMode -Off
+        param($WriterKind,$AppliedType)
+        $backupRoot=Join-Path $caseRoot 'legacy-v1/target-backup'
+        $journalPath=Join-Path $backupRoot 'skill-migration.json'
+        New-Item -ItemType Directory -Force $backupRoot|Out-Null
+        $writerPath=if($WriterKind-ceq'target'){'Function:\Write-TargetMutationStreamBytes'}else{'Function:\Write-GitInfoExcludeStreamBytes'}
+        $unrelatedBytesBefore=[IO.File]::ReadAllBytes($unrelatedPath)
+        $beforeStatusAll=Get-Syp214GitStatusAll -Repository $targetRoot
+        $realWriter=$null
+        try {
+            $prefix=New-Syp214BootstrapMutationPrefix
+            . $prefix -TargetRoot $targetRoot -UserHome $userHome -GitExecutable 'git' -ProvenancePath $provenancePath
+            $targetDaclBefore=Get-Syp214RawDaclRecord -Path $targetPath -Kind Target -TargetRoot $targetRoot -RelativePath $relativePath
+            $excludeDaclBefore=Get-Syp214RawDaclRecord -Path $excludePath -Kind Exclude
+            $targetReadOnlyBefore=(([IO.File]::GetAttributes($targetPath)-band[IO.FileAttributes]::ReadOnly)-ne0)
+            $excludeReadOnlyBefore=(([IO.File]::GetAttributes($excludePath)-band[IO.FileAttributes]::ReadOnly)-ne0)
+            $snapshot=New-TargetMutationSnapshot $targetRoot @($relativePath) $backupRoot
+            $excludeSnapshot=New-GitInfoExcludeSnapshot $targetRoot
+            $gitState=Get-RepoSkillMigrationGitState $targetRoot 'git'
+            $applied=[Text.UTF8Encoding]::new($false).GetBytes("# legacy applied`n")
+            if($WriterKind-ceq'target'){
+                $state=$snapshot.FileStates[0]
+                $state.MutationApplied=$true
+                $state.AppliedType=$AppliedType
+                if($AppliedType-ceq'file'){$state.AppliedBytes=$applied;[IO.File]::WriteAllBytes($targetPath,$applied)}
+                else{$state.AppliedBytes=$null;Remove-Item $targetPath -Force}
+            }else{
+                $excludeSnapshot.MutationApplied=$true
+                $excludeSnapshot.AppliedBytes=$applied
+                [IO.File]::WriteAllBytes($excludePath,$applied)
+            }
+            $stateRecord=[ordered]@{relativePath=$relativePath;originalType='file'
+                backupName=(Split-Path -Leaf ([string]$snapshot.FileStates[0].BackupPath))
+                backupSha256=(Get-RawContentHash ([string]$snapshot.FileStates[0].BackupPath))
+                mutationApplied=($WriterKind-ceq'target');appliedType=$(if($WriterKind-ceq'target'){$AppliedType}else{$null})
+                appliedBase64=$(if($WriterKind-ceq'target'-and$AppliedType-ceq'file'){[Convert]::ToBase64String($applied)}else{$null})}
+            $excludeRecord=[ordered]@{Path=$excludeSnapshot.Path;Repository=$excludeSnapshot.Repository
+                MutationApplied=($WriterKind-ceq'exclude');Existed=[bool]$excludeSnapshot.Existed;Bytes=$excludeSnapshot.Bytes
+                AppliedBytes=$(if($WriterKind-ceq'exclude'){$applied}else{$null})}
+            $journal=[ordered]@{schemaVersion=1;targetRoot=$targetRoot;phase='mutating';head=$gitState.head
+                indexSha256=$gitState.indexSha256;states=@($stateRecord);exclude=$excludeRecord}
+            [IO.File]::WriteAllText($journalPath,($journal|ConvertTo-Json -Depth 12)+"`n",[Text.UTF8Encoding]::new($false))
+            $appliedSnapshot=Get-Syp214FixtureSnapshot $targetRoot $userHome $script:Syp214GenericEntries
+            $appliedStatusAll=Get-Syp214GitStatusAll -Repository $targetRoot
+            $faultSentinel='SYP214 legacy v1 prefix fault '+[guid]::NewGuid().ToString('N')
+            $prefixFault={
+                param([IO.FileStream]$Stream,[byte[]]$Bytes)
+                $Stream.Position=0;$Stream.SetLength(0)
+                $prefixLength=[Math]::Min(3,$Bytes.Length)
+                if($prefixLength-gt0){$Stream.Write($Bytes,0,$prefixLength)}
+                $Stream.Flush($true)
+                throw $faultSentinel
+            }.GetNewClosure()
+            $realWriter=(Get-Command ($writerPath-replace'^Function:\\','') -CommandType Function).ScriptBlock
+            Set-Item -Path $writerPath -Value $prefixFault
+            $prefixFailure=''
+            try { Restore-SkillMigrationJournal $targetRoot $journalPath|Out-Null }
+            catch { $prefixFailure=$_.Exception.Message }
+            finally { Set-Item -Path $writerPath -Value $realWriter }
+
+            $prefixFailure|Should Match ([regex]::Escape($faultSentinel))
+            $afterFault=Get-Content -Raw -Encoding UTF8 -LiteralPath $journalPath|ConvertFrom-Json
+            [int]$afterFault.schemaVersion|Should Be 1
+            [string]$afterFault.phase|Should Be 'mutating'
+            $publishedPath=if($WriterKind-ceq'target'){$targetPath}else{$excludePath}
+            $expectedAppliedBytes=if($WriterKind-ceq'target'){$applied}else{[byte[]]$excludeSnapshot.AppliedBytes}
+            if($WriterKind-ceq'target'-and$AppliedType-ceq'missing'){
+                Test-Path -LiteralPath $publishedPath|Should Be $false
+            }else{
+                [Convert]::ToBase64String([IO.File]::ReadAllBytes($publishedPath))|Should Be ([Convert]::ToBase64String($expectedAppliedBytes))
+                $appliedDacl=Get-Syp214RawDaclRecord -Path $publishedPath -Kind $(if($WriterKind-ceq'target'){'Target'}else{'Exclude'}) -TargetRoot $targetRoot -RelativePath $relativePath
+                $expectedAppliedDacl=if($WriterKind-ceq'target'){$targetDaclBefore}else{$excludeDaclBefore}
+                (Test-Syp214RawDaclRecordEqual $expectedAppliedDacl $appliedDacl)|Should Be $true
+                (([IO.File]::GetAttributes($publishedPath)-band[IO.FileAttributes]::ReadOnly)-ne0)|Should Be $(if($WriterKind-ceq'target'){$targetReadOnlyBefore}else{$excludeReadOnlyBefore})
+            }
+            $afterFaultState=@($afterFault.states|Where-Object{[string]$_.relativePath-ceq$relativePath})[0]
+            if($WriterKind-ceq'target'){$afterFaultState.appliedType|Should Be $AppliedType}
+            else{$afterFault.exclude.MutationApplied|Should Be $true}
+            $afterFaultState.PSObject.Properties['publication']|Should BeNullOrEmpty
+            $afterFaultState.PSObject.Properties['originalDacl']|Should BeNullOrEmpty
+            $afterFaultState.PSObject.Properties['originalIdentity']|Should BeNullOrEmpty
+            $afterFault.exclude.PSObject.Properties['publication']|Should BeNullOrEmpty
+            $afterFault.exclude.PSObject.Properties['dacl']|Should BeNullOrEmpty
+            $afterFault.exclude.PSObject.Properties['originalIdentity']|Should BeNullOrEmpty
+            $stageParent=Split-Path -Parent $publishedPath
+            $partialStages=@(Get-ChildItem -LiteralPath $stageParent -Force -File -Filter '.syp214-*-stage')
+            $partialStages.Count|Should Be 1
+            [byte[]]$prefixBytes=[IO.File]::ReadAllBytes($partialStages[0].FullName)
+            $prefixBytes.Length|Should Be 3
+            [byte[]]$expectedRestoreBytes=if($WriterKind-ceq'target'){$originalTarget}else{$originalExclude}
+            [byte[]]$expectedPrefix=$expectedRestoreBytes[0..2]
+            (Test-TargetMutationBytesEqual $prefixBytes $expectedPrefix)|Should Be $true
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($unrelatedPath))|Should Be ([Convert]::ToBase64String($unrelatedBytesBefore))
+            $afterFaultSnapshot=Get-Syp214FixtureSnapshot $targetRoot $userHome $script:Syp214GenericEntries
+            [string]$afterFaultSnapshot.repository.head|Should Be ([string]$appliedSnapshot.repository.head)
+            (Test-Syp214InventoryEqual $appliedSnapshot.repository.indexEntries $afterFaultSnapshot.repository.indexEntries)|Should Be $true
+            $stageRelative=[IO.Path]::GetRelativePath($targetRoot,$partialStages[0].FullName).Replace('\','/')
+            $stageStatus='?? '+$stageRelative
+            $afterFaultStatusAll=Get-Syp214GitStatusAll -Repository $targetRoot
+            @($afterFaultStatusAll|Where-Object{[string]$_-ceq$stageStatus}).Count|Should Be $(if($WriterKind-ceq'target'){1}else{0})
+            $afterFaultStatusWithoutStage=@($afterFaultStatusAll|Where-Object{[string]$_-cne$stageStatus})
+            (Test-Syp214InventoryEqual $appliedStatusAll $afterFaultStatusWithoutStage)|Should Be $true
+            (Test-Syp214InventoryEqual $appliedSnapshot.user.fullTree $afterFaultSnapshot.user.fullTree)|Should Be $true
+
+            $retryFailure=''
+            try { Restore-SkillMigrationJournal $targetRoot $journalPath|Out-Null }
+            catch { $retryFailure=$_.Exception.Message }
+            $retryFailure|Should BeNullOrEmpty
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($targetPath))|Should Be ([Convert]::ToBase64String($originalTarget))
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))|Should Be ([Convert]::ToBase64String($originalExclude))
+            $targetDaclAfter=Get-Syp214RawDaclRecord -Path $targetPath -Kind Target -TargetRoot $targetRoot -RelativePath $relativePath
+            $excludeDaclAfter=Get-Syp214RawDaclRecord -Path $excludePath -Kind Exclude
+            (Test-Syp214RawDaclRecordEqual $targetDaclBefore $targetDaclAfter)|Should Be $true
+            (Test-Syp214RawDaclRecordEqual $excludeDaclBefore $excludeDaclAfter)|Should Be $true
+            (([IO.File]::GetAttributes($targetPath)-band[IO.FileAttributes]::ReadOnly)-ne0)|Should Be $targetReadOnlyBefore
+            (([IO.File]::GetAttributes($excludePath)-band[IO.FileAttributes]::ReadOnly)-ne0)|Should Be $excludeReadOnlyBefore
+            Test-Path -LiteralPath $partialStages[0].FullName -PathType Leaf|Should Be $true
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($partialStages[0].FullName))|Should Be ([Convert]::ToBase64String($prefixBytes))
+            $final=Get-Content -Raw -Encoding UTF8 -LiteralPath $journalPath|ConvertFrom-Json
+            [int]$final.schemaVersion|Should Be 1
+            [string]$final.phase|Should Be 'recovered'
+            $finalState=@($final.states|Where-Object{[string]$_.relativePath-ceq$relativePath})[0]
+            $finalState.PSObject.Properties['originalDacl']|Should BeNullOrEmpty
+            $finalState.PSObject.Properties['originalIdentity']|Should BeNullOrEmpty
+            $finalState.PSObject.Properties['publication']|Should BeNullOrEmpty
+            $final.exclude.PSObject.Properties['dacl']|Should BeNullOrEmpty
+            $final.exclude.PSObject.Properties['originalIdentity']|Should BeNullOrEmpty
+            $final.exclude.PSObject.Properties['publication']|Should BeNullOrEmpty
+            $finalSnapshot=Get-Syp214FixtureSnapshot $targetRoot $userHome $script:Syp214GenericEntries
+            (Test-Syp214PointInventoryEqual $before.repository $finalSnapshot.repository)|Should Be $true
+            [string]$finalSnapshot.repository.head|Should Be ([string]$before.repository.head)
+            (Test-Syp214InventoryEqual $before.repository.indexEntries $finalSnapshot.repository.indexEntries)|Should Be $true
+            $finalStatusAll=Get-Syp214GitStatusAll -Repository $targetRoot
+            @($finalStatusAll|Where-Object{[string]$_-ceq$stageStatus}).Count|Should Be $(if($WriterKind-ceq'target'){1}else{0})
+            $finalStatusWithoutStage=@($finalStatusAll|Where-Object{[string]$_-cne$stageStatus})
+            (Test-Syp214InventoryEqual $beforeStatusAll $finalStatusWithoutStage)|Should Be $true
+            (Test-Syp214InventoryEqual $before.repository.stashes $finalSnapshot.repository.stashes)|Should Be $true
+            (Test-Syp214InventoryEqual $before.repository.gitInfoExclude $finalSnapshot.repository.gitInfoExclude)|Should Be $true
+            (Test-Syp214InventoryEqual $before.user.fullTree $finalSnapshot.user.fullTree)|Should Be $true
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($unrelatedPath))|Should Be ([Convert]::ToBase64String($unrelatedBytesBefore))
+        }
+        finally {
+            if($realWriter){Set-Item -Path $writerPath -Value $realWriter}
+            $script:SkillMigrationJournalContext=$null
+            Set-StrictMode -Off
+        }
     }
     # Scenario: Applied state is replaced by unrelated bytes or removed.
     # Purpose: Fail closed while preserving third-state bytes, backup, and journal.
@@ -1482,12 +1640,47 @@ Describe 'SYP214 generic managed Instructions deletion recovery' {
         $txn=Get-Syp214UnifiedTransactionFixture $targetRoot;$journal=[IO.File]::ReadAllBytes($txn.journalPath);$recovery=&$script:Syp214Recover;$recovery.exitCode|Should Not Be 0;($recovery.output-join[Environment]::NewLine)|Should Match 'third state|ambiguous or changed';[Convert]::ToBase64String([IO.File]::ReadAllBytes($txn.journalPath))|Should Be ([Convert]::ToBase64String($journal))
         if($CompetingState-ceq'unrelated-final'){[Convert]::ToBase64String([IO.File]::ReadAllBytes($path))|Should Be ([Convert]::ToBase64String($third))}else{Test-Path $path|Should Be $false};Test-Path (Join-Path $txn.path ([string]$script:Syp214GenericOperations.write.backupLeaf))|Should Be $true
     }
-    # Scenario: Unified publication starts with inherited/protected DACL and read-only final.
-    # Purpose: Preserve exact security, bytes, and attributes through rollback.
+    # Scenario: Unified target/exclude publication is applied with inherited/protected DACL and read-only final before interruption.
+    # Purpose: Exercise real rollback and preserve raw DACL bytes, protection, readonly, and original bytes.
     It 'InterT95_preserves_<Protection>_DACL_and_readonly_after_<WriterKind>_staging_prefix_fault' -TestCases @(
         @{Protection='inherited';Protected=$false;WriterKind='target'},@{Protection='protected';Protected=$true;WriterKind='target'},@{Protection='inherited';Protected=$false;WriterKind='exclude'},@{Protection='protected';Protected=$true;WriterKind='exclude'}) {
-        param($Protection,$Protected,$WriterKind);$path=if($WriterKind-ceq'target'){Join-Path $targetRoot 'AGENTS.md'}else{$excludePath};$acl=Get-Acl $path;$acl.SetAccessRuleProtection([bool]$Protected,$true);Set-Acl $path $acl;[IO.File]::SetAttributes($path,[IO.File]::GetAttributes($path)-bor[IO.FileAttributes]::ReadOnly);$aclEvidence=Get-Syp214AclSemanticEvidence $path;$bytes=[IO.File]::ReadAllBytes($path)
-        (&$script:Syp214Run 'after-journal-prepared').exitCode|Should Not Be 0;$txn=Get-Syp214UnifiedTransactionFixture $targetRoot;$operation=if($WriterKind-ceq'target'){@($txn.journal.operations|Where-Object{[string]$_.role-ceq'instruction'-and[string]$_.target.value-ceq'AGENTS.md'})[0]}else{@($txn.journal.operations|Where-Object{[string]$_.role-ceq'shared-exclude'})[0]};[string]$operation.displacedMetadata.kind|Should Be 'windows-sddl';[string]$operation.displacedMetadata.sddl|Should Be ([string]$operation.before.permissions.sddl);[bool]$operation.displacedMetadata.readOnly|Should Be $true;(Get-Syp214AclSemanticEvidence $path)|Should Be $aclEvidence;[Convert]::ToBase64String([IO.File]::ReadAllBytes($path))|Should Be ([Convert]::ToBase64String($bytes));(&$script:Syp214Recover).exitCode|Should Not Be 0;(Get-Syp214AclSemanticEvidence $path)|Should Be $aclEvidence;(([IO.File]::GetAttributes($path)-band[IO.FileAttributes]::ReadOnly)-ne0)|Should Be $true;[Convert]::ToBase64String([IO.File]::ReadAllBytes($path))|Should Be ([Convert]::ToBase64String($bytes))
+        param($Protection,$Protected,$WriterKind)
+        $prefix=New-Syp214BootstrapMutationPrefix
+        . $prefix -TargetRoot $targetRoot -UserHome $userHome -GitExecutable 'git' -ProvenancePath $provenancePath
+        $path=if($WriterKind-ceq'target'){Join-Path $targetRoot 'AGENTS.md'}else{$excludePath}
+        $kind=if($WriterKind-ceq'target'){'Target'}else{'Exclude'}
+        $pathRelative=if($WriterKind-ceq'target'){'AGENTS.md'}else{[IO.Path]::GetFileName($excludePath)}
+        $acl=Get-Acl -LiteralPath $path
+        $acl.SetAccessRuleProtection([bool]$Protected,$true)
+        Set-Acl -LiteralPath $path -AclObject $acl
+        [IO.File]::SetAttributes($path,[IO.File]::GetAttributes($path)-bor[IO.FileAttributes]::ReadOnly)
+        $rawDaclBefore=Get-Syp214RawDaclRecord -Path $path -Kind $kind -TargetRoot $targetRoot -RelativePath $pathRelative
+        [bool]$rawDaclBefore.isProtected|Should Be ([bool]$Protected)
+        $bytesBefore=[IO.File]::ReadAllBytes($path)
+        $operation=if($WriterKind-ceq'target'){$script:Syp214GenericOperations.write}else{$script:Syp214GenericOperations.exclude}
+
+        (&$script:Syp214Run "after-operation-$($operation.sequence)-before-journal").exitCode|Should Not Be 0
+        $txn=Get-Syp214UnifiedTransactionFixture $targetRoot
+        $journalOperation=@($txn.journal.operations|Where-Object{[int]$_.sequence-eq[int]$operation.sequence})[0]
+        [string]$journalOperation.state|Should Be 'pending'
+        [string]$journalOperation.displacedMetadata.kind|Should Be 'windows-sddl'
+        [string]$journalOperation.displacedMetadata.sddl|Should Be ([string]$journalOperation.before.permissions.sddl)
+        [bool]$journalOperation.displacedMetadata.readOnly|Should Be $true
+        (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()|Should Be ([string]$operation.after.sha256)
+        (Get-Item -LiteralPath $path).Length|Should Be ([long]$operation.after.length)
+        $rawDaclApplied=Get-Syp214RawDaclRecord -Path $path -Kind $kind -TargetRoot $targetRoot -RelativePath $pathRelative
+        (Test-Syp214RawDaclRecordEqual $rawDaclBefore $rawDaclApplied)|Should Be $true
+        [bool]$rawDaclApplied.isProtected|Should Be ([bool]$Protected)
+        (([IO.File]::GetAttributes($path)-band[IO.FileAttributes]::ReadOnly)-ne0)|Should Be $true
+
+        (&$script:Syp214Recover).exitCode|Should Not Be 0
+        $rawDaclAfter=Get-Syp214RawDaclRecord -Path $path -Kind $kind -TargetRoot $targetRoot -RelativePath $pathRelative
+        (Test-Syp214RawDaclRecordEqual $rawDaclBefore $rawDaclAfter)|Should Be $true
+        [bool]$rawDaclAfter.isProtected|Should Be ([bool]$Protected)
+        (([IO.File]::GetAttributes($path)-band[IO.FileAttributes]::ReadOnly)-ne0)|Should Be $true
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($path))|Should Be ([Convert]::ToBase64String($bytesBefore))
+        (Test-Syp214UnifiedStateEqual $before (Get-Syp214FixtureSnapshot $targetRoot $userHome $script:Syp214GenericEntries))|Should Be $true
+        Set-StrictMode -Off
     }
 }
 
