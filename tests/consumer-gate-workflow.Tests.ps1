@@ -373,6 +373,33 @@ Describe 'Consumer gate workflow templates' {
             $probeScript|Should Match ([regex]::Escape($diagnostic))
         }
         $probeScript|Should Match '(?s)if\(\$Phase-ceq''prepare''\).*Write-ProbeAuthorityUrlDiagnostics'
+        $tokens=$null;$parseErrors=$null
+        $probeAst=[Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $script:RepositoryRoot 'tests/Invoke-ConsumerTransitionProbe.ps1'),[ref]$tokens,[ref]$parseErrors)
+        @($parseErrors).Count|Should Be 0
+        foreach($functionName in @('ConvertTo-ProbeAbsoluteFileUrl','Assert-ProbeFileUrl')){
+            $functionAst=@($probeAst.FindAll({param($node)
+                        $node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$functionName},$true))
+            $functionAst.Count|Should Be 1
+            . ([scriptblock]::Create($functionAst[0].Extent.Text))
+        }
+        $pathCases=@(@{Path='/home/runner/work/a b/x#y%z';Url='file:///home/runner/work/a%20b/x%23y%25z'})
+        if($IsWindows){$pathCases+=@{Path='C:\probe root\a#b%c';Url='file:///C:/probe%20root/a%23b%25c'}}
+        foreach($pathCase in $pathCases){
+            $url=ConvertTo-ProbeAbsoluteFileUrl $pathCase.Path
+            $url|Should BeExactly $pathCase.Url
+            $uri=[uri]$url
+            $uri.IsAbsoluteUri|Should Be $true
+            $uri.Scheme|Should BeExactly 'file'
+            $uri.LocalPath|Should BeExactly $pathCase.Path
+            {Assert-ProbeFileUrl $url $pathCase.Path}|Should Not Throw
+        }
+        {Assert-ProbeFileUrl '' '/home/runner/work/a b/x'}|Should Throw
+        {Assert-ProbeFileUrl 'https://example.test/a' '/home/runner/work/a'}|Should Throw
+        $assertionOffset=$probeScript.IndexOf('Assert-ProbeFileUrl $authorityFileUrl',[StringComparison]::Ordinal)
+        $environmentOffset=$probeScript.IndexOf('$env:CONSUMER_TRANSITION_PROBE_AUTHORITY_URL=$authorityFileUrl',[StringComparison]::Ordinal)
+        $assertionOffset|Should BeGreaterThan -1
+        $environmentOffset|Should BeGreaterThan $assertionOffset
         $probeScript|Should Not Match 'consumer-gate-resolver-fixture|consumer-gate-validation-runner-fixture'
     }
 }

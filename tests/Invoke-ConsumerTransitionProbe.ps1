@@ -32,8 +32,31 @@ function Write-ProbeUtf8([string]$Path,[string]$Text) {
 function Write-ProbeJson([string]$Path,$Value) {
     Write-ProbeUtf8 $Path (($Value|ConvertTo-Json -Depth 100)+"`n")
 }
+function ConvertTo-ProbeAbsoluteFileUrl([string]$FullPath) {
+    if([string]::IsNullOrWhiteSpace($FullPath)){throw 'Probe authority path must not be empty.'}
+    $isUnixAbsolute=$FullPath.StartsWith('/',[StringComparison]::Ordinal)
+    $isWindowsAbsolute=$FullPath-match'^[A-Za-z]:[\\/]'
+    $isUncAbsolute=$FullPath-match'^[\\/]{2}[^\\/]'
+    if(-not($isUnixAbsolute-or$isWindowsAbsolute-or$isUncAbsolute)){
+        throw 'Probe authority path must be absolute.'
+    }
+    $builder=[UriBuilder]::new()
+    $builder.Scheme=[Uri]::UriSchemeFile
+    $builder.Host=''
+    $builder.Path=$FullPath
+    $builder.Uri.AbsoluteUri
+}
 function ConvertTo-ProbeFileUrl([string]$Path) {
-    ([uri]([IO.Path]::GetFullPath($Path))).AbsoluteUri
+    ConvertTo-ProbeAbsoluteFileUrl ([IO.Path]::GetFullPath($Path))
+}
+function Assert-ProbeFileUrl([string]$Url,[string]$ExpectedPath) {
+    if([string]::IsNullOrWhiteSpace($Url)){throw 'Probe authority file URL must not be empty.'}
+    $uri=$null
+    if(-not[Uri]::TryCreate($Url,[UriKind]::Absolute,[ref]$uri)-or-not$uri.IsAbsoluteUri){
+        throw 'Probe authority file URL must be absolute.'
+    }
+    if($uri.Scheme-cne[Uri]::UriSchemeFile){throw 'Probe authority URL must use the file scheme.'}
+    if($uri.LocalPath-cne$ExpectedPath){throw 'Probe authority file URL path round-trip failed.'}
 }
 function Protect-ProbeDiagnosticValue([string]$Value) {
     if($null-eq$Value){return $null}
@@ -211,6 +234,7 @@ try{
     $candidate=Complete-ProbeCandidate $consumerRoot $fixtureRoot $authorityCommit
     [void](Invoke-ProbeGit $consumerRoot @('worktree','add','--quiet','--detach',$baseRoot,$base.Commit))
     $authorityFileUrl=ConvertTo-ProbeFileUrl $authorityRoot
+    Assert-ProbeFileUrl $authorityFileUrl $authorityRoot
     $env:CONSUMER_TRANSITION_PROBE_AUTHORITY_URL=$authorityFileUrl
     $env:RUNNER_TEMP=$WorkRoot;$env:CONSUMER_GATE_TEST_TEMP_ROOT=$WorkRoot
     $env:CONSUMER_GATE_EVENT_REPOSITORY=$script:ProbeConsumerRepository
