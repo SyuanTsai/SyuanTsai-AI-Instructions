@@ -190,7 +190,7 @@ Describe 'Authority-owned consumer source gate' {
         @($actualPrerequisiteRows).Count | Should Be 38
         (@($actualPrerequisiteRows)-join"`n") | Should Be (@($expectedPrerequisiteRows)-join"`n")
         $fileCountOracle=[ordered]@{
-            'skill-general'=45;'skill-atlassian-ecosystem'=99;'skill-code-collaboration'=23
+            'skill-general'=45;'skill-atlassian-ecosystem'=100;'skill-code-collaboration'=23
             'skill-knowledge-content'=17;'skill-darktide-translate'=42
         }
         foreach ($entry in $manifest.repositories) {
@@ -1886,7 +1886,7 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         ) | ConvertFrom-Json -Depth 100
         $expectedDispositionOracle = @{
             'skill-general' = @{ Count=45; Sha256='5af3bb77584eb77ded51442e1f5bb9c01fa5f7b4819041e82d8a78ea7715d43c' }
-            'skill-atlassian-ecosystem' = @{ Count=99; Sha256='e719c37bb75a8a7570d9e21a4b1d579f9294d3f238a2d57b8b342fe41ad5742a' }
+            'skill-atlassian-ecosystem' = @{ Count=100; Sha256='f9c6b3889295cf6381e0e97756ed55c616e3c0ad5692b98a0a4cf3a55e374358' }
             'skill-code-collaboration' = @{ Count=23; Sha256='dbf9332f204eda3d15c8777c4e73ad0b846a0e653367ea188c03d47c2766ce2a' }
             'skill-knowledge-content' = @{ Count=17; Sha256='78704317aea1f2678901f671ecc6fb297640e8e1282eaf3f40dcb3f980a8c2a3' }
         }

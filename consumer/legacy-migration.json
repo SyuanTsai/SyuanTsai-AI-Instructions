@@ -264,8 +264,8 @@
       "id": "skill-atlassian-ecosystem",
       "repository": "https://github.com/SyuanTsai/Skill-Atlassian-Ecosystem.git",
       "status": "ready",
-      "inventoryCommit": "76b4b94dd0f9395b9096db95d5c138b77c5e259d",
-      "inventoryTree": "1a261e4717d971080fcb1e8c441403e535d09dfb",
+      "inventoryCommit": "2aca2db5d860aebde6939d1390e51abeb5bf2441",
+      "inventoryTree": "fa430fbb820977e3b8c93d8d06b0e1af860214bb",
       "requiredRepositoryChecks": [
         {
           "id": "repository-atlassian",
@@ -296,38 +296,39 @@
         },
         {
           "path": "config/skillspector-exceptions.json",
-          "disposition": "retain",
-          "reason": "Repository-owned configuration or reviewed exception evidence remains consumer data."
+          "disposition": "update-tests",
+          "reason": "Retain as consumer data but rewrite it during conversion to exactly the three review-bitbucket-pull-request exceptions (LP3 x1 and E1 x2) pending SYP-493 reapproval.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "config/skillspector-exceptions/configure-bitbucket-api-access.baseline.json",
-          "disposition": "retain",
-          "reason": "Repository-owned configuration or reviewed exception evidence remains consumer data."
+          "disposition": "delete",
+          "reason": "SYP-356 S6 改寫後已無 finding，依只減不增規則刪除。"
         },
         {
           "path": "config/skillspector-exceptions/configure-confluence-api-access.baseline.json",
-          "disposition": "retain",
-          "reason": "Repository-owned configuration or reviewed exception evidence remains consumer data."
+          "disposition": "delete",
+          "reason": "SYP-356 S6 改寫後已無 finding，依只減不增規則刪除。"
         },
         {
           "path": "config/skillspector-exceptions/configure-jira-api-access.baseline.json",
-          "disposition": "retain",
-          "reason": "Repository-owned configuration or reviewed exception evidence remains consumer data."
+          "disposition": "delete",
+          "reason": "SYP-356 S6 改寫後已無 finding，依只減不增規則刪除。"
         },
         {
           "path": "config/skillspector-exceptions/manage-confluence-docs-as-code.baseline.json",
-          "disposition": "retain",
-          "reason": "Repository-owned configuration or reviewed exception evidence remains consumer data."
+          "disposition": "delete",
+          "reason": "SYP-356 S6 改寫後已無 finding，依只減不增規則刪除。"
         },
         {
           "path": "config/skillspector-exceptions/publish-requirements-to-confluence.baseline.json",
-          "disposition": "retain",
-          "reason": "Repository-owned configuration or reviewed exception evidence remains consumer data."
+          "disposition": "delete",
+          "reason": "SYP-356 S6 改寫後已無 finding，依只減不增規則刪除。"
         },
         {
           "path": "config/skillspector-exceptions/review-bitbucket-pull-request.baseline.json",
           "disposition": "retain",
-          "reason": "Repository-owned configuration or reviewed exception evidence remains consumer data."
+          "reason": "Retain the unchanged review-bitbucket-pull-request baseline with its three approved fingerprints (LP3 x1 and E1 x2) pending SYP-493 reapproval."
         },
         {
           "path": "config/standard-v1.json",
@@ -418,6 +419,12 @@
           "path": "scripts/StandardSourceDriver.psm1",
           "disposition": "delete",
           "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Sync-SharedReferences.ps1",
+          "disposition": "update-tests",
+          "reason": "Retain this repository-owned developer generator but rewrite its literal dependency on the split source to scripts/Test-AtlassianSharedReferences.ps1.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "scripts/Test-Repository.ps1",
@@ -726,8 +733,9 @@
         },
         {
           "path": "tests/SkillSpectorExceptions.Tests.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite assertions for the conversion-time reduction from six baselines and 19 fingerprints to the retained review-bitbucket-pull-request baseline and its three fingerprints.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/SourcePackageBridge.Tests.ps1",
