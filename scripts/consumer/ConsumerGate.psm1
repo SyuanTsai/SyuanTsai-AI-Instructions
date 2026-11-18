@@ -28,6 +28,19 @@ function Assert-GateNoDuplicateJson([Text.Json.JsonElement]$Element,[string]$Con
         Assert-GateNoDuplicateJson $property.Value $Context}
     }elseif($Element.ValueKind-eq[Text.Json.JsonValueKind]::Array){foreach($item in $Element.EnumerateArray()){Assert-GateNoDuplicateJson $item $Context}}
 }
+function Assert-GateJsonStringsDecodable([Text.Json.JsonElement]$Element,[string]$Context) {
+    if($Element.ValueKind-eq[Text.Json.JsonValueKind]::Object){
+        foreach($property in $Element.EnumerateObject()){
+            try{$name=$property.Name}catch{Throw-GateResult INVALID "$Context contains an object key that cannot be decoded."}
+            if($null-eq$name){Throw-GateResult INVALID "$Context contains an object key that cannot be decoded."}
+            Assert-GateJsonStringsDecodable $property.Value $Context
+        }
+    }elseif($Element.ValueKind-eq[Text.Json.JsonValueKind]::Array){
+        foreach($item in $Element.EnumerateArray()){Assert-GateJsonStringsDecodable $item $Context}
+    }elseif($Element.ValueKind-eq[Text.Json.JsonValueKind]::String){
+        try{[void]$Element.GetString()}catch{Throw-GateResult INVALID "$Context contains a string value that cannot be decoded."}
+    }
+}
 function ConvertFrom-GateJsonBytes([byte[]]$Bytes,[string]$Context) {
     if($bytes.Length-ge3-and$bytes[0]-eq239-and$bytes[1]-eq187-and$bytes[2]-eq191){Throw-GateResult INVALID "$Context has a UTF-8 BOM."}
     try{
@@ -44,6 +57,7 @@ function Open-GateJsonDocument([byte[]]$Bytes,[string]$Context) {
     try{
         $text=[Text.UTF8Encoding]::new($false,$true).GetString($bytes)
         $document=[Text.Json.JsonDocument]::Parse($text)
+        Assert-GateJsonStringsDecodable $document.RootElement $Context
         Assert-GateNoDuplicateJson $document.RootElement $Context
         $document
     }catch{
@@ -127,8 +141,12 @@ function Test-GateExceptionPathPatternCouldMatch([string]$Pattern,[string]$Targe
         if($TargetIsPrefix-and$targetIndex-eq$Target.Length){return $true}
         if($patternIndex-eq$Pattern.Length){if($targetIndex-eq$Target.Length){return $true};continue}
         if($Pattern[$patternIndex]-eq[char]0xfffd){
-            $pending.Push([Tuple]::Create($patternIndex+1,$targetIndex))
-            if($targetIndex-lt$Target.Length){$pending.Push([Tuple]::Create($patternIndex,$targetIndex+1))}
+            # Each loose-decoder replacement marker can stand for one non-ASCII position only, never an arbitrary
+            # substring. The canonical registry path and baseline prefix are entirely ASCII, so invalid UTF-8
+            # cannot decode or normalize into any of their characters.
+            if($targetIndex-lt$Target.Length-and[int]$Target[$targetIndex]-gt127){
+                $pending.Push([Tuple]::Create($patternIndex+1,$targetIndex+1))
+            }
         }elseif($targetIndex-lt$Target.Length-and$Pattern[$patternIndex]-ceq$Target[$targetIndex]){
             $pending.Push([Tuple]::Create($patternIndex+1,$targetIndex+1))
         }

@@ -71,6 +71,15 @@ Describe 'Authority-owned consumer source gate' {
             [void](Invoke-SourceFixtureGit $Root @('commit','-q','-m',$Message))
             Get-SourceFixtureGitScalar $Root @('rev-parse','HEAD')
         }
+        function New-ExceptionFixtureRawPathCandidate([string]$Root,[string]$Base,[byte[]]$PathBytes,[string]$Message) {
+            $blob=Get-SourceFixtureGitScalar $Root @('rev-parse','HEAD:config/skillspector-exceptions.json')
+            $indexInput=[Collections.Generic.List[byte]]::new()
+            $indexInput.AddRange([Text.Encoding]::ASCII.GetBytes("100644 $blob`t"))
+            $indexInput.AddRange($PathBytes);$indexInput.Add(0)
+            [void](Invoke-SourceFixtureGitWithInputBytes $Root @('update-index','--add','-z','--index-info') $indexInput.ToArray())
+            $tree=Get-SourceFixtureGitScalar $Root @('write-tree')
+            Get-SourceFixtureGitScalar $Root @('commit-tree',$tree,'-p',$Base,'-m',$Message)
+        }
         function Get-ExceptionFixtureRegistry([string]$Root) {
             Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $Root 'config/skillspector-exceptions.json')|ConvertFrom-Json
         }
@@ -2215,16 +2224,26 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         $fixture=New-ExceptionFixtureRepository 'exception-unchanged'
         Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $fixture.Base
 
-        $fixture=New-ExceptionFixtureRepository 'exception-non-utf8-outside-scope'
-        $configTree=Get-SourceFixtureGitScalar $fixture.Root @('rev-parse','HEAD:config')
-        $blob=Get-SourceFixtureGitScalar $fixture.Root @('rev-parse','HEAD:config/skillspector-exceptions.json')
-        $treeInput=[Collections.Generic.List[byte]]::new()
-        $treeInput.AddRange([Text.Encoding]::ASCII.GetBytes("040000 tree $configTree`tconfig`0"))
-        $treeInput.AddRange([Text.Encoding]::ASCII.GetBytes("100644 blob $blob`toutside-"))
-        $treeInput.Add(0x80);$treeInput.AddRange([Text.Encoding]::ASCII.GetBytes(".txt`0"))
-        $tree=Invoke-SourceFixtureGitWithInputBytes $fixture.Root @('mktree','-z') $treeInput.ToArray()
-        $candidate=Get-SourceFixtureGitScalar $fixture.Root @('commit-tree',$tree,'-p',$fixture.Base,'-m','non-UTF-8 outside scope')
-        Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate
+        foreach($rawPath in @(
+            @{Name='outside-root';Prefix='outside-';Suffix='.txt'},
+            @{Name='unrelated-config';Prefix='config/';Suffix='.txt'},
+            @{Name='noncanonical-registry';Prefix='config/skillspector-exceptions';Suffix='.json'}
+        )){
+            $fixture=New-ExceptionFixtureRepository "exception-non-utf8-$($rawPath.Name)"
+            $path=[Collections.Generic.List[byte]]::new()
+            $path.AddRange([Text.Encoding]::ASCII.GetBytes($rawPath.Prefix));$path.Add(0x80)
+            $path.AddRange([Text.Encoding]::ASCII.GetBytes($rawPath.Suffix))
+            $candidate=New-ExceptionFixtureRawPathCandidate $fixture.Root $fixture.Base $path.ToArray() "non-UTF-8 $($rawPath.Name)"
+            Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate
+        }
+
+        $fixture=New-ExceptionFixtureRepository 'exception-non-utf8-baseline-scope'
+        $path=[Collections.Generic.List[byte]]::new()
+        $path.AddRange([Text.Encoding]::ASCII.GetBytes('config/skillspector-exceptions/'));$path.Add(0x80)
+        $path.AddRange([Text.Encoding]::ASCII.GetBytes('.baseline.json'))
+        $candidate=New-ExceptionFixtureRawPathCandidate $fixture.Root $fixture.Base $path.ToArray() 'non-UTF-8 baseline scope'
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
+            '^INVALID\|.*non-UTF-8 path within.*scope'
 
         $fixture=New-ExceptionFixtureRepository 'exception-delete-all'
         Remove-Item -LiteralPath (Join-Path $fixture.Root 'config') -Recurse -Force
@@ -2384,6 +2403,22 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
             $candidate=Save-ExceptionFixtureCandidate $fixture.Root $mutation
             (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match '^INVALID\|.*JSON'
         }
+
+        $fixture=New-ExceptionFixtureRepository 'exception-json-lone-high-surrogate-value'
+        Replace-ExceptionFixtureRegistryText $fixture.Root '"decision": "accepted-limited-risk"' '"decision": "\uD800"'
+        $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'lone high surrogate value'
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
+            '^INVALID\|.*JSON.*config/skillspector-exceptions\.json.*cannot be decoded'
+
+        $fixture=New-ExceptionFixtureRepository 'exception-json-lone-low-surrogate-key'
+        $path=Join-Path $fixture.Root 'config/skillspector-exceptions/review-bitbucket-pull-request.baseline.json'
+        $text=[IO.File]::ReadAllText($path,[Text.Encoding]::UTF8)
+        $updated=[regex]::new('"version":').Replace($text,'"\uDC00":',1)
+        if($updated-ceq$text){throw 'Fixture baseline version key was not found.'}
+        [IO.File]::WriteAllText($path,$updated,[Text.UTF8Encoding]::new($false))
+        $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'lone low surrogate key'
+        (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
+            '^INVALID\|.*JSON.*review-bitbucket-pull-request\.baseline\.json.*cannot be decoded'
     }
 
     # Scenario: Three valid legs were fetched at different official-main tips and one stable binding is then changed.
