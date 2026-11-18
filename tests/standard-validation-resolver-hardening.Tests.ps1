@@ -2451,3 +2451,24 @@ Describe 'Validator platform evidence hardening' {
         (Invoke-SourceGateFixture -Report $report) | Should -BeTrue
     }
 }
+
+Describe 'SYP354 PR-K1 trust-anchor admission boundary' {
+    # Scenario: PR-K1 introduces offline key tools without rotating either production trust anchor or authorizing a later rotation.
+    # Purpose: Require an independent user-side fingerprint check and prevent the same unmerged tool change from self-authorizing admission.
+    It 'UnitT10_preserves_pins_and_forbids_same_change_tool_authorization' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $standard=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/skill-repository-standard.md')
+        $standard | Should Match 'Trust-anchor rotation changes the approval boundary and \*\*MUST\*\* merge only after the user verifies the proposed fingerprints with an independent tool that is not supplied by the same unmerged change\.'
+        $expected=@{
+            'human-approval-public-key.xml'='1e46153b72d02f3ce2fb26becd449df4f1590d8e5cb441b1954006a5602bbd9b'
+            'trusted-supervisor-public-key.xml'='4d550851f43405920156f40c9fc648d99a69dd73efc200f6968d8a837e7fbf27'
+        }
+        $runner=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'scripts/Invoke-StandardValidation.ps1')
+        foreach($name in $expected.Keys){
+            (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root "docs/standards/trust-anchors/$name")).Hash.ToLowerInvariant() | Should Be $expected[$name]
+            $runner | Should Match ([regex]::Escape($expected[$name]))
+        }
+        $admissionSources=@('scripts/Invoke-StandardValidation.ps1','scripts/Invoke-StandardAuthorityGate.ps1')|ForEach-Object{Get-Content -Raw -Encoding UTF8 (Join-Path $root $_)}
+        ($admissionSources -join "`n") | Should Not Match 'trust-anchor/(New-TrustAnchorKeyPair|ConvertTo-TrustAnchorPublicKeyXml|Get-TrustAnchorFingerprint)\.ps1'
+    }
+}
