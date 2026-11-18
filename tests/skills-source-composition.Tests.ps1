@@ -201,4 +201,30 @@ Describe 'Skills source composition' {
         $skills=@((New-TestSkill (Join-Path $TestDrive 'duplicate-a') 'same-skill' 'A'),(New-TestSkill (Join-Path $TestDrive 'duplicate-b') 'same-skill' 'B'))
         Assert-ThrowsMessage { New-ComposedBootstrapSource -InstructionSourceRoot $instructionRoot -ResolvedSkills $skills -DestinationRoot (Join-Path $TestDrive 'duplicate-composed') } 'Duplicate selected Skill during composition'
     }
+
+    # Scenario: A v3/v5 project opt-in selects one Skill containing binary, CRLF, UTF-8, nested, and license resources for three roots.
+    # Purpose: Produce one lock-bound candidate with raw-byte parity and the fixed license namespace, without a sourceCommit segment.
+    It 'UnitT31_builds_versioned_project_candidate_with_exact_raw_inventory' {
+        $sourceRoot=Join-Path $TestDrive 'project-candidate-source'
+        $skill=New-TestSkill $sourceRoot 'one' 'selected'
+        $skill|Add-Member -NotePropertyName sourceId -NotePropertyValue 'source-one'
+        New-Item -ItemType Directory -Force -Path (Join-Path $skill.skillRootPath 'assets/nested')|Out-Null
+        [IO.File]::WriteAllBytes((Join-Path $skill.skillRootPath 'assets/nested/data.bin'),[byte[]]@(0,10,13,128,255))
+        [IO.File]::WriteAllBytes((Join-Path $skill.skillRootPath 'assets/crlf.txt'),[Text.UTF8Encoding]::new($false).GetBytes("a`r`nb`r`n"))
+        [IO.File]::WriteAllText((Join-Path $sourceRoot 'LICENSE'),'license',[Text.UTF8Encoding]::new($false))
+        $plans=@{'source-one'=[pscustomobject]@{id='source-one';repository='https://example.org/source.git';requestedRef='v1';resolvedCommit=('a'*40);resolvedVersion='1.0.0'}}
+        $destination=Join-Path $TestDrive 'project-candidate'
+
+        $result=New-ProjectSkillsCandidate -ResolvedSkills @($skill) -SourcePlansById $plans `
+            -ProjectionIds @('project-github','project-agents','project-claude') -CatalogId 'fixture-catalog' `
+            -LockSha256 ('b'*64) -ProjectionContractSha256 ('c'*64) -DestinationRoot $destination
+
+        @($result.Inventory.projections)|Should Be @('project-agents','project-claude','project-github')
+        $files=@($result.Inventory.skills[0].files)
+        @($files|Where-Object relativePath -eq 'assets/nested/data.bin')[0].sha256|Should Be (Get-FileHash (Join-Path $skill.skillRootPath 'assets/nested/data.bin')).Hash.ToLowerInvariant()
+        @($files|Where-Object relativePath -eq 'assets/crlf.txt')[0].sha256|Should Be (Get-FileHash (Join-Path $skill.skillRootPath 'assets/crlf.txt')).Hash.ToLowerInvariant()
+        @($files|Where-Object relativePath -eq '.ai-instructions-licenses/delivery.json').Count|Should Be 1
+        @($files|Where-Object relativePath -like '.ai-instructions-licenses/*/*').Count|Should BeGreaterThan 0
+        @($files|Where-Object relativePath -like ".ai-instructions-licenses/$('a'*40)/*").Count|Should Be 0
+    }
 }

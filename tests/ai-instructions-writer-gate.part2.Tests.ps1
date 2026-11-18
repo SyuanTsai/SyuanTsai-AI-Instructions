@@ -457,7 +457,9 @@ Describe 'AI instructions writer and reader gate' {
         $gitWrapperPath=Join-Path $wrapperRoot 'git.cmd'
         $gitWrapper=@"
 @echo off
-echo %* | "$findString" /C:"stash store" >nul
+echo %* | "$findString" /C:"update-ref --create-reflog" >nul
+if errorlevel 1 goto forward
+echo %* | "$findString" /C:" refs/stash " >nul
 if errorlevel 1 goto forward
 copy /b "$excludePath" "$appliedExcludePath" >nul
 if errorlevel 1 exit /b 85
@@ -471,7 +473,7 @@ exit /b %errorlevel%
         $result=Invoke-P9bRepoBootstrap -Context $context -ArchivePath $source.ArchivePath -TargetRoot $target -GitExecutable $gitWrapperPath
 
         $result.ExitCode|Should Not Be 0
-        $result.Output|Should Match 'stash store'
+        $result.Output|Should Match 'update-ref.*refs/stash'
         Test-Path -LiteralPath $appliedExcludePath -PathType Leaf|Should Be $true
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($appliedExcludePath))|Should Not Be ([Convert]::ToBase64String($excludeBefore))
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($excludePath))|Should Be ([Convert]::ToBase64String($excludeBefore))
@@ -522,6 +524,125 @@ exit /b %errorlevel%
         finally{& git -C $target worktree remove --force $linkedRoot|Out-Null}
     }
 
+    # Scenario: A verified project Skill version removes one managed resource while retaining the rest of the same projection/Skill group.
+    # Purpose: Validate ownership against the complete prior group, retire only the clean obsolete file, retain exact manifest/exclude ownership, and remain idempotent.
+    It 'InterT138_retires_only_clean_removed_files_from_an_active_project_Skill_group' {
+        $root=Join-Path $script:ExternalRoot 'p9c-partial-retirement';New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip')
+        $additional=@{
+            'work-with-jira'=@{'resources/retired.txt'="jira retired`n"}
+            'manage-task-handoff'=@{'resources/retired.txt'="handoff retired`n"}
+        }
+        $initial=New-P9cProjectFixture -Root (Join-Path $root 'initial') -ProjectionIds @('project-agents') -AdditionalSkillFiles $additional
+        $updated=New-P9cProjectFixture -Root (Join-Path $root 'updated') -ProjectionIds @('project-agents')
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        $first=Invoke-P9bRepoBootstrap -Context $initial.Context -ArchivePath $source.ArchivePath -TargetRoot $target
+        if($first.ExitCode-ne0){throw "Initial partial-retirement fixture failed: $($first.Output)"}
+        $manifestPath=Join-Path $target '.codex/ai-instructions.manifest.json'
+        $retiredPaths=@((Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json).files|Where-Object{[string]$_.targetPath-like'*/resources/retired.txt'}|Select-Object -ExpandProperty targetPath)
+        $retiredPaths.Count|Should Be 2
+
+        $result=Invoke-P9bRepoBootstrap -Context $updated.Context -ArchivePath $source.ArchivePath -TargetRoot $target
+
+        $result.ExitCode|Should Be 0
+        $manifest=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+        @($manifest.files|Where-Object{[string]$_.targetPath-like'*/resources/retired.txt'}).Count|Should Be 0
+        $remainingSkills=@($manifest.files|Where-Object{[string]$_.artifactType-ceq'skill'})
+        @($remainingSkills|Where-Object{[string]$_.targetPath-like'*/SKILL.md'}).Count|Should Be 2
+        $exclude=[IO.File]::ReadAllText((Join-Path $target '.git/info/exclude'))
+        foreach($retiredPath in $retiredPaths){Test-Path -LiteralPath (Join-Path $target $retiredPath)|Should Be $false;$exclude|Should Not Match ([regex]::Escape('/'+$retiredPath))}
+        foreach($entry in $remainingSkills){Test-Path -LiteralPath (Join-Path $target ([string]$entry.targetPath)) -PathType Leaf|Should Be $true;$exclude|Should Match ([regex]::Escape('/'+[string]$entry.targetPath))}
+        $generation=[int64]$manifest.generation;$beforeRepeat=Get-P9bRepoSnapshot $target
+        $repeat=Invoke-P9bRepoBootstrap -Context $updated.Context -ArchivePath $source.ArchivePath -TargetRoot $target
+        $repeat.ExitCode|Should Be 0
+        [int64](Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json).generation|Should Be $generation
+        (Get-P9bRepoSnapshot $target)|Should Be $beforeRepeat
+    }
+
+    # Scenario: A resource removed by the next project Skill version was customized after the prior version installed it.
+    # Purpose: Return the K5 typed refusal before any Instructions, manifest, Skill, or shared-exclude mutation and preserve the customized bytes.
+    It 'InterT139_refuses_a_customized_file_removed_from_an_active_project_Skill_group' {
+        $root=Join-Path $script:ExternalRoot 'p9c-partial-retirement-drift';New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $baseline=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'baseline-work') -ArchivePath (Join-Path $root 'baseline.zip') -Marker baseline
+        $changed=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'changed-work') -ArchivePath (Join-Path $root 'changed.zip') -Marker changed
+        $additional=@{
+            'work-with-jira'=@{'resources/retired.txt'="jira retired`n"}
+            'manage-task-handoff'=@{'resources/retired.txt'="handoff retired`n"}
+        }
+        $initial=New-P9cProjectFixture -Root (Join-Path $root 'initial') -ProjectionIds @('project-agents') -AdditionalSkillFiles $additional
+        $updated=New-P9cProjectFixture -Root (Join-Path $root 'updated') -ProjectionIds @('project-agents')
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        (Invoke-P9bRepoBootstrap -Context $initial.Context -ArchivePath $baseline.ArchivePath -TargetRoot $target).ExitCode|Should Be 0
+        $manifest=Get-Content -Raw -LiteralPath (Join-Path $target '.codex/ai-instructions.manifest.json')|ConvertFrom-Json
+        $retiredPath=[string]@($manifest.files|Where-Object{[string]$_.targetPath-like'*/resources/retired.txt'}|Select-Object -First 1 -ExpandProperty targetPath)[0]
+        [IO.File]::AppendAllText((Join-Path $target $retiredPath),"customized`n",[Text.UTF8Encoding]::new($false))
+        $before=Get-P9bRepoSnapshot $target
+
+        $result=Invoke-P9bRepoBootstrap -Context $updated.Context -ArchivePath $changed.ArchivePath -TargetRoot $target
+
+        $result.ExitCode|Should Not Be 0
+        (Get-AiInstructionsRefusalCode $result.Output)|Should Be closure-invalid
+        $result.Output|Should Match ('(?m)^Project Skill conflict: skillId=.+, projection=project-agents, path='+[regex]::Escape($retiredPath)+', status=drift, worktree=.+$')
+        $result.Output|Should Match '(?m)^Project Skill conflict resolution: remove or rename the project-owned Skill, or remove that Skill from projections\.project\.\r?$'
+        (Get-P9bRepoSnapshot $target)|Should Be $before
+    }
+
+    # Scenario: A verified project projection contains a legitimate zero-byte Python package marker.
+    # Purpose: Preserve the candidate inventory and publish empty Skill resources through every mutation wrapper.
+    It 'InterT141_publishes_a_zero_byte_project_Skill_resource_idempotently' {
+        $root=Join-Path $script:ExternalRoot 'p9c-zero-byte-project-skill';New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip')
+        $fixture=New-P9cProjectFixture -Root $root -ProjectionIds @('project-agents') `
+            -AdditionalSkillFiles @{'work-with-jira'=@{'resources/__init__.py'=''}}
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        $emptyRelativePath='.agents/skills/work-with-jira/resources/__init__.py'
+
+        $first=Invoke-P9bRepoBootstrap -Context $fixture.Context -ArchivePath $source.ArchivePath -TargetRoot $target
+
+        if($first.ExitCode-ne0){throw "Zero-byte project Skill bootstrap failed: $($first.Output)"}
+        $first.ExitCode|Should Be 0
+        $emptyPath=Join-Path $target $emptyRelativePath
+        Test-Path -LiteralPath $emptyPath -PathType Leaf|Should Be $true
+        (Get-Item -LiteralPath $emptyPath).Length|Should Be 0
+        $manifest=Get-Content -Raw -LiteralPath (Join-Path $target '.codex/ai-instructions.manifest.json')|ConvertFrom-Json
+        $emptyEntry=@($manifest.files|Where-Object{[string]$_.targetPath-ceq$emptyRelativePath})
+        $emptyEntry.Count|Should Be 1
+        [string]$emptyEntry[0].sha256|Should Be 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+        $before=Get-P9bRepoSnapshot $target
+
+        $second=Invoke-P9bRepoBootstrap -Context $fixture.Context -ArchivePath $source.ArchivePath -TargetRoot $target
+
+        $second.ExitCode|Should Be 0
+        (Get-P9bRepoSnapshot $target)|Should Be $before
+    }
+
+    Context 'P9c fix4 raw publication CAS' {
+    # Scenario: A project-projection transaction encounters a semantically current Instruction encoded with CRLF or UTF-8 BOM while updating or retiring it.
+    # Purpose: Keep normalized hashes for ownership semantics while using raw bytes exclusively for journal publication and rollback CAS.
+    It 'InterT142_updates_or_removes_<Format>_managed_Instructions_with_raw_CAS_<Action>' -TestCases @(
+        @{Format='CRLF';Action='update'},@{Format='BOM';Action='update'},
+        @{Format='CRLF';Action='remove'},@{Format='BOM';Action='remove'}
+    ) {
+        param($Format,$Action)
+        $root=Join-Path $script:ExternalRoot "p9c-raw-cas-$Format-$Action";New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $baseline=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'baseline-work') -ArchivePath (Join-Path $root 'baseline.zip') -Marker baseline
+        $changed=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'changed-work') -ArchivePath (Join-Path $root 'changed.zip') -Marker changed -OmitCodexTesting:($Action-ceq'remove')
+        $fixture=New-P9cProjectFixture -Root $root -ProjectionIds @('project-agents')
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        (Invoke-P9bRepoBootstrap -Context $fixture.Context -ArchivePath $baseline.ArchivePath -TargetRoot $target).ExitCode|Should -Be 0
+        $manifestPath=Join-Path $target '.codex/ai-instructions.manifest.json';$manifest=Get-Content -Raw -LiteralPath $manifestPath|ConvertFrom-Json
+        $targetPath=if($Action-ceq'update'){'AGENTS.md'}else{'.codex/AI-Rules/Testing.en.md'}
+        $path=Join-Path $target $targetPath;$text=[IO.File]::ReadAllText($path).Replace("`r`n","`n").Replace("`r","`n")
+        $body=[Text.UTF8Encoding]::new($false).GetBytes($(if($Format-ceq'CRLF'){$text.Replace("`n","`r`n")}else{$text}))
+        $bytes=if($Format-ceq'BOM'){[byte[]](@(0xEF,0xBB,0xBF)+@($body))}else{$body};[IO.File]::WriteAllBytes($path,$bytes)
+
+        $result=Invoke-P9bRepoBootstrap -Context $fixture.Context -ArchivePath $changed.ArchivePath -TargetRoot $target
+
+        if($result.ExitCode-ne0){throw "Raw CAS $Format/$Action failed: $($result.Output)"}
+        if($Action-ceq'update'){[IO.File]::ReadAllText($path)|Should -Match '<!-- changed -->'}else{Test-Path -LiteralPath $path|Should -Be $false}
+    }
+    }
+
     # Scenario: The stable launcher has opened a verified closure file with its read-only sharing contract.
     # Purpose: Bind verified bytes through import/inventory assertion by denying concurrent writes and deletion until disposal.
     It 'UnitT95_holds_launcher_closure_bytes_against_write_and_delete' {
@@ -540,6 +661,45 @@ exit /b %errorlevel%
         }
         finally{$lease.Dispose()}
         { [IO.File]::AppendAllText($path,"# released`n",[Text.UTF8Encoding]::new($false)) }|Should Not Throw
+    }
+
+    # Scenario: Shared exclude composition runs for a TargetRoot spelled through a directory junction while Git lists the same worktree by its real path.
+    # Purpose: Identify the current worktree by Git directory identity so its stale on-disk manifest never re-enters the union, while another worktree is still composed.
+    It 'InterT175_skips_the_current_worktree_by_Git_directory_identity_through_a_junction_TargetRoot' {
+        $root=Join-Path $script:ExternalRoot 'junction-current';New-Item -ItemType Directory -Path $root|Out-Null
+        $real=Join-Path $root 'real';New-Item -ItemType Directory -Path $real|Out-Null
+        & git -C $real init --quiet;$LASTEXITCODE|Should Be 0
+        [IO.File]::WriteAllText((Join-Path $real 'README.md'),"fixture`n",[Text.UTF8Encoding]::new($false))
+        & git -C $real add README.md;& git -C $real -c user.name=fixture -c user.email=fixture@example.invalid commit --quiet -m fixture;$LASTEXITCODE|Should Be 0
+        New-Item -ItemType Directory -Force -Path (Join-Path $real '.codex')|Out-Null
+        [IO.File]::WriteAllText((Join-Path $real '.codex\ai-instructions.manifest.json'),'{ stale current-worktree manifest',[Text.UTF8Encoding]::new($false))
+        $junction=Join-Path $root 'junction';New-Item -ItemType Junction -Path $junction -Target $real|Out-Null
+        $linked=Join-Path $root 'linked'
+        try{
+            (@(& git -C $junction worktree list --porcelain)[0])|Should Match 'junction-current[\\/]real$'
+            $tokens=$null;$errors=$null
+            $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $script:RepositoryRoot 'scripts\bootstrap-ai-instructions.ps1'),[ref]$tokens,[ref]$errors);@($errors).Count|Should Be 0
+            $nativeType=@($ast.EndBlock.Statements|Where-Object{$_-is[Management.Automation.Language.IfStatementAst]-and$_.Extent.Text.Contains("'CodexAiInstructions.NativeFileMutation' -as [type]")})
+            $nativeType.Count|Should Be 1
+            Invoke-Expression $nativeType[0].Extent.Text
+            foreach($definition in @($ast.EndBlock.Statements|Where-Object{$_-is[Management.Automation.Language.FunctionDefinitionAst]})){Invoke-Expression $definition.Extent.Text}
+            $GitExecutable=(Get-Command git -CommandType Application|Select-Object -First 1).Source
+            $manifestRelativePath='.codex/ai-instructions.manifest.json'
+
+            @(Get-SharedManagedExcludePaths -Repository ([IO.Path]::GetFullPath($junction)) -CurrentManagedPaths @('AGENTS.md'))|Should Be @('AGENTS.md')
+
+            & git -C $real worktree add --quiet -b junction-linked-fixture $linked;$LASTEXITCODE|Should Be 0
+            New-Item -ItemType Directory -Force -Path (Join-Path $linked '.codex')|Out-Null
+            [IO.File]::WriteAllText((Join-Path $linked '.codex\ai-instructions.manifest.json'),'{ invalid linked manifest',[Text.UTF8Encoding]::new($false))
+            $message=$null
+            try{Get-SharedManagedExcludePaths -Repository ([IO.Path]::GetFullPath($junction)) -CurrentManagedPaths @('AGENTS.md')|Out-Null}catch{$message=$_.Exception.Message}
+            $message|Should Match 'linked worktree manifest is invalid'
+            $message|Should Match 'junction-current[\\/]linked[\\/]\.codex[\\/]ai-instructions\.manifest\.json'
+        }
+        finally{
+            if(Test-Path -LiteralPath $linked){& git -C $real worktree remove --force $linked|Out-Null}
+            if(Test-Path -LiteralPath $junction){[IO.Directory]::Delete($junction)}
+        }
     }
 }
 
