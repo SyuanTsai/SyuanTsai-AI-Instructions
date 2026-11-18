@@ -3,6 +3,7 @@ Describe 'Consumer gate workflow templates' {
         $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
         $script:FormalPath = Join-Path $script:RepositoryRoot 'consumer/workflows/consumer-gate.yml'
         $script:TransitionPath = Join-Path $script:RepositoryRoot 'consumer/workflows/consumer-gate-transition.yml'
+        $script:ProbePath = Join-Path $script:RepositoryRoot '.github/workflows/consumer-transition-probe.yml'
         function ConvertTo-ConsumerWorkflowLf([string]$Text) {
             $Text.Replace("`r`n", "`n").Replace("`r", "`n")
         }
@@ -16,6 +17,7 @@ Describe 'Consumer gate workflow templates' {
         }
         $script:Formal = ConvertTo-ConsumerWorkflowLf (Get-Content -Raw -Encoding UTF8 $script:FormalPath)
         $script:Transition = ConvertTo-ConsumerWorkflowLf (Get-Content -Raw -Encoding UTF8 $script:TransitionPath)
+        $script:Probe = ConvertTo-ConsumerWorkflowLf (Get-Content -Raw -Encoding UTF8 $script:ProbePath)
         function ConvertFrom-ConsumerWorkflowYaml([string]$Text) {
             $lines = @($Text -split "`r?`n")
             $document = [ordered]@{ permissions = $null
@@ -318,7 +320,7 @@ Describe 'Consumer gate workflow templates' {
     # Scenario: Expressions are treated as YAML data and never interpolated into shell source.
     # Purpose: Event-controlled values reach scripts only through env variables.
     It 'UnitT70_has_no_github_expression_inside_run_blocks' {
-        foreach ($text in @($script:Formal,$script:Transition)) {
+        foreach ($text in @($script:Formal,$script:Transition,$script:Probe)) {
             $blocks = [regex]::Matches($text,'(?ms)^[ \t]+run:[ \t]*\|[ \t]*\r?\n(?<body>(?:[ \t]{10,}[^\r\n]*(?:\r?\n|$))*)')
             foreach ($block in $blocks) { $block.Groups['body'].Value | Should Not Match '\$\{\{' }
         }
@@ -342,9 +344,98 @@ Describe 'Consumer gate workflow templates' {
     # Scenario: All external actions are immutable and caches are absent.
     # Purpose: Template supply-chain behavior remains reviewable and non-persistent.
     It 'UnitT80_pins_actions_and_avoids_cache_or_persisted_credentials' {
-        foreach ($text in @($script:Formal,$script:Transition)) {
+        foreach ($text in @($script:Formal,$script:Transition,$script:Probe)) {
             $text | Should Not Match 'actions/cache|persist-credentials:\s*true'
             foreach ($use in [regex]::Matches($text,'(?m)^\s*uses:\s*([^\s#]+)')) { $use.Groups[1].Value | Should Match '@[0-9a-f]{40}$' }
         }
+    }
+
+    # Scenario: An authority pull request runs the fixture transition through every real platform leg and diagnoses a failed local authority projection.
+    # Purpose: Detect gate regressions and retain non-sensitive expected/actual URL, Git version, and rewrite-key evidence for Unix-only failures.
+    It 'UnitT85_runs_the_real_three_platform_transition_probe_with_read_only_permissions' {
+        $script:Probe|Should Match '(?m)^  pull_request:\s*$'
+        $script:Probe|Should Match '(?ms)^permissions:\s*\n  contents: read\s*$'
+        $probeYaml=ConvertFrom-ConsumerWorkflowYaml $script:Probe
+        $probeYaml.jobs.leg.properties.'timeout-minutes'|Should BeExactly '60'
+        $probeYaml.jobs.aggregate.properties.'timeout-minutes'|Should BeExactly '10'
+        $probeYaml.jobs.aggregate.properties.if|Should BeExactly 'always()'
+        $aggregateSteps=@($probeYaml.jobs.aggregate.steps)
+        $aggregateSteps.Count|Should BeGreaterThan 0
+        $aggregateSteps[0].name|Should BeExactly 'Require successful transition legs'
+        $aggregateSteps[0].env.LEG_RESULT|Should BeExactly '${{ needs.leg.result }}'
+        $aggregateSteps[0].run|Should Match '(?m)^if \(\$env:LEG_RESULT -cne ''success''\) \{$'
+        $aggregateSteps[0].run|Should Match '(?m)^  exit 1$'
+        $resultCheckStep=@'
+      - name: Require successful transition legs
+        shell: pwsh
+        env:
+          LEG_RESULT: ${{ needs.leg.result }}
+        run: |
+          if ($env:LEG_RESULT -cne 'success') {
+            [Console]::Error.WriteLine("Transition probe leg job result was '$($env:LEG_RESULT)'; expected 'success'.")
+            exit 1
+          }
+'@
+        $mutatedProbe=$script:Probe.Replace((ConvertTo-ConsumerWorkflowLf $resultCheckStep),'')
+        $mutatedProbe|Should Not BeExactly $script:Probe
+        $mutatedYaml=ConvertFrom-ConsumerWorkflowYaml $mutatedProbe
+        $mutatedSteps=@($mutatedYaml.jobs.aggregate.steps)
+        $mutatedSteps[0].name|Should Not BeExactly 'Require successful transition legs'
+        @($mutatedSteps|Where-Object{$_.env.LEG_RESULT-ceq'${{ needs.leg.result }}'-and
+                    $_.run-match '(?m)^if \(\$env:LEG_RESULT -cne ''success''\) \{$'}).Count|Should Be 0
+        @([regex]::Matches($script:Probe,'(?m)^\s+- \{ os: (windows-latest|ubuntu-latest|macos-latest), platform: (windows|linux|macos) \}\s*$')).Count|Should Be 3
+        foreach($binding in @('tests/Invoke-ConsumerTransitionProbe.ps1','-Mode leg','-Mode aggregate','needs: leg',
+                'source-tools/diagnostics','validation-artifacts','gate/receipts','aggregate-receipt.json')){
+            $script:Probe|Should Match ([regex]::Escape($binding))
+        }
+        $script:Probe|Should Match 'STANDARD_VALIDATION_GITHUB_API_TOKEN: \$\{\{ github\.token \}\}'
+        $script:Probe|Should Not Match 'secrets\.|CONSUMER_GATE_APP|consumer-gate-resolver-fixture|consumer-gate-validation-runner-fixture'
+        $probeScript=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'tests/Invoke-ConsumerTransitionProbe.ps1')
+        foreach($phase in @('prepare','validate','finalize','aggregate')){$probeScript|Should Match ([regex]::Escape(" $phase "))}
+        foreach($production in @('consumer/bootstrap/Invoke-PinnedAuthority.ps1','consumer/workflows/consumer-gate-transition.yml',
+                'scripts/Invoke-StandardValidation.ps1','scripts/Resolve-StandardValidationTool.ps1')){
+            Test-Path -LiteralPath (Join-Path $script:RepositoryRoot $production) -PathType Leaf|Should Be $true
+        }
+        foreach($diagnostic in @('Write-ProbeAuthorityUrlDiagnostics','expectedUrl','actualUrl','gitVersion',
+                'systemInsteadOf','globalInsteadOf','--name-only','--get-regexp','Protect-ProbeDiagnosticValue')){
+            $probeScript|Should Match ([regex]::Escape($diagnostic))
+        }
+        $probeScript|Should Match '(?s)if\(\$Phase-ceq''prepare''\).*Write-ProbeAuthorityUrlDiagnostics'
+        $tokens=$null;$parseErrors=$null
+        $probeAst=[Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $script:RepositoryRoot 'tests/Invoke-ConsumerTransitionProbe.ps1'),[ref]$tokens,[ref]$parseErrors)
+        @($parseErrors).Count|Should Be 0
+        foreach($functionName in @('Write-ProbeUtf8','Write-ProbeJson','ConvertTo-ProbeAbsoluteFileUrl','Assert-ProbeFileUrl')){
+            $functionAst=@($probeAst.FindAll({param($node)
+                        $node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$functionName},$true))
+            $functionAst.Count|Should Be 1
+            . ([scriptblock]::Create($functionAst[0].Extent.Text))
+        }
+        $pathCases=@(@{Path='/home/runner/work/a b/x#y%z';Url='file:///home/runner/work/a%20b/x%23y%25z'})
+        if($IsWindows){$pathCases+=@{Path='C:\probe root\a#b%c';Url='file:///C:/probe%20root/a%23b%25c'}}
+        foreach($pathCase in $pathCases){
+            $url=ConvertTo-ProbeAbsoluteFileUrl $pathCase.Path
+            $url|Should BeExactly $pathCase.Url
+            $uri=[uri]$url
+            $uri.IsAbsoluteUri|Should Be $true
+            $uri.Scheme|Should BeExactly 'file'
+            $uri.LocalPath|Should BeExactly $pathCase.Path
+            {Assert-ProbeFileUrl $url $pathCase.Path}|Should Not Throw
+        }
+        {Assert-ProbeFileUrl '' '/home/runner/work/a b/x'}|Should Throw
+        {Assert-ProbeFileUrl 'https://example.test/a' '/home/runner/work/a'}|Should Throw
+        $jsonRoot=Join-Path $TestDrive 'probe-json';[void][IO.Directory]::CreateDirectory($jsonRoot)
+        $jsonPath=Join-Path $jsonRoot 'nested.json'
+        Write-ProbeJson $jsonPath ([ordered]@{outer=[ordered]@{alpha=1;items=@('x','y')}})
+        $jsonBytes=[IO.File]::ReadAllBytes($jsonPath)
+        @($jsonBytes|Where-Object{$_-eq[byte]13}).Count|Should Be 0
+        $expectedJson=(@('{','  "outer": {','    "alpha": 1,','    "items": [','      "x",','      "y"',
+                '    ]','  }','}')-join"`n")+"`n"
+        [Convert]::ToHexString($jsonBytes)|Should BeExactly ([Convert]::ToHexString(([Text.UTF8Encoding]::new($false)).GetBytes($expectedJson)))
+        $assertionOffset=$probeScript.IndexOf('Assert-ProbeFileUrl $authorityFileUrl',[StringComparison]::Ordinal)
+        $environmentOffset=$probeScript.IndexOf('$env:CONSUMER_TRANSITION_PROBE_AUTHORITY_URL=$authorityFileUrl',[StringComparison]::Ordinal)
+        $assertionOffset|Should BeGreaterThan -1
+        $environmentOffset|Should BeGreaterThan $assertionOffset
+        $probeScript|Should Not Match 'consumer-gate-resolver-fixture|consumer-gate-validation-runner-fixture'
     }
 }

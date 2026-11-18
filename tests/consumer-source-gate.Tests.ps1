@@ -1486,7 +1486,7 @@ scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|null|$stderr=$null
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|dispose|$process.Dispose()
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|null|$start=$null
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|null|$Token=$null
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|remove-variable|Remove-Variable standardOutput,standardError,stdout,stderr,preserved,process,start,Token -ErrorAction SilentlyContinue
+scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|remove-variable|Remove-Variable standardOutput,standardError,stdout,stderr,credentialLeak,preserved,process,start,Token -ErrorAction SilentlyContinue
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|environment-null|[Environment]::SetEnvironmentVariable($name,$null,'Process')
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|null|$Token=$null
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|remove-variable|Remove-Variable Token -ErrorAction SilentlyContinue
@@ -1712,44 +1712,45 @@ consumer/bootstrap/Invoke-PinnedAuthority.ps1:293:9|$stdout = $null
 consumer/bootstrap/Invoke-PinnedAuthority.ps1:294:9|$stderr = $null
 consumer/bootstrap/Invoke-PinnedAuthority.ps1:298:28|$value = $null
 consumer/bootstrap/Invoke-PinnedAuthority.ps1:299:9|$Token=$null
-scripts/consumer/ConsumerGate.psm1:852:13|$content=$null
-scripts/consumer/ConsumerGate.psm1:855:9|$content=$null
-scripts/consumer/ConsumerGate.psm1:855:24|$needle=$null
-scripts/consumer/ConsumerGate.psm1:855:38|$Token=$null
-scripts/consumer/ConsumerGate.psm1:122:14|$headers.Remove('Authorization')
-scripts/consumer/ConsumerGate.psm1:123:5|$Token=$null
-scripts/consumer/ConsumerGate.psm1:124:5|[Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN',$null,'Process')
-scripts/consumer/ConsumerGate.psm1:882:34|$request.Dispose()
-scripts/consumer/ConsumerGate.psm1:882:53|$request=$null
-scripts/consumer/ConsumerGate.psm1:883:35|$response.Dispose()
-scripts/consumer/ConsumerGate.psm1:883:55|$response=$null
-scripts/consumer/ConsumerGate.psm1:914:18|$stream.Dispose()
-scripts/consumer/ConsumerGate.psm1:914:36|$memory.Dispose()
-scripts/consumer/ConsumerGate.psm1:922:31|$response.Dispose()
-scripts/consumer/ConsumerGate.psm1:922:73|$request.Dispose()
-scripts/consumer/ConsumerGate.psm1:923:9|$bytes=$null
-scripts/consumer/ConsumerGate.psm1:923:22|$buffer=$null
-scripts/consumer/ConsumerGate.psm1:923:36|$response=$null
-scripts/consumer/ConsumerGate.psm1:923:52|$request=$null
-scripts/consumer/ConsumerGate.psm1:923:67|$stream=$null
-scripts/consumer/ConsumerGate.psm1:923:81|$memory=$null
-scripts/consumer/ConsumerGate.psm1:923:95|$Headers=$null
-scripts/consumer/ConsumerGate.psm1:298:95|[Environment]::SetEnvironmentVariable($name,$null,'Process')
-scripts/consumer/ConsumerGate.psm1:300:43|$Token=$null
-scripts/consumer/ConsumerGate.psm1:178:9|$start.Environment.Clear()
-scripts/consumer/ConsumerGate.psm1:186:17|[void]$start.Environment.Remove('STANDARD_VALIDATION_GITHUB_API_TOKEN')
-scripts/consumer/ConsumerGate.psm1:186:108|$start.Environment.Clear()
-scripts/consumer/ConsumerGate.psm1:187:13|$standardOutput=$null
-scripts/consumer/ConsumerGate.psm1:187:35|$standardError=$null
-scripts/consumer/ConsumerGate.psm1:187:56|$stdout=$null
-scripts/consumer/ConsumerGate.psm1:187:70|$stderr=$null
-scripts/consumer/ConsumerGate.psm1:187:84|$process.Dispose()
-scripts/consumer/ConsumerGate.psm1:187:103|$start=$null
-scripts/consumer/ConsumerGate.psm1:187:116|$Token=$null
-scripts/consumer/ConsumerGate.psm1:190:100|[Environment]::SetEnvironmentVariable($name,$null,'Process')
-scripts/consumer/ConsumerGate.psm1:191:5|$Token=$null
-scripts/consumer/ConsumerGate.psm1:275:13|[Environment]::SetEnvironmentVariable($name,$null,'Process')
-scripts/consumer/ConsumerGate.psm1:277:9|$Token=$null
+scripts/consumer/ConsumerGate.psm1:912:13|$content=$null
+scripts/consumer/ConsumerGate.psm1:915:9|$content=$null
+scripts/consumer/ConsumerGate.psm1:915:24|$needle=$null
+scripts/consumer/ConsumerGate.psm1:915:38|$Token=$null
+scripts/consumer/ConsumerGate.psm1:140:14|$headers.Remove('Authorization')
+scripts/consumer/ConsumerGate.psm1:141:5|$Token=$null
+scripts/consumer/ConsumerGate.psm1:142:5|[Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN',$null,'Process')
+scripts/consumer/ConsumerGate.psm1:942:34|$request.Dispose()
+scripts/consumer/ConsumerGate.psm1:942:53|$request=$null
+scripts/consumer/ConsumerGate.psm1:943:35|$response.Dispose()
+scripts/consumer/ConsumerGate.psm1:943:55|$response=$null
+scripts/consumer/ConsumerGate.psm1:974:18|$stream.Dispose()
+scripts/consumer/ConsumerGate.psm1:974:36|$memory.Dispose()
+scripts/consumer/ConsumerGate.psm1:982:31|$response.Dispose()
+scripts/consumer/ConsumerGate.psm1:982:73|$request.Dispose()
+scripts/consumer/ConsumerGate.psm1:983:9|$bytes=$null
+scripts/consumer/ConsumerGate.psm1:983:22|$buffer=$null
+scripts/consumer/ConsumerGate.psm1:983:36|$response=$null
+scripts/consumer/ConsumerGate.psm1:983:52|$request=$null
+scripts/consumer/ConsumerGate.psm1:983:67|$stream=$null
+scripts/consumer/ConsumerGate.psm1:983:81|$memory=$null
+scripts/consumer/ConsumerGate.psm1:983:95|$Headers=$null
+scripts/consumer/ConsumerGate.psm1:324:95|[Environment]::SetEnvironmentVariable($name,$null,'Process')
+scripts/consumer/ConsumerGate.psm1:326:43|$Token=$null
+scripts/consumer/ConsumerGate.psm1:197:9|$start.Environment.Clear()
+scripts/consumer/ConsumerGate.psm1:213:17|[void]$start.Environment.Remove('STANDARD_VALIDATION_GITHUB_API_TOKEN')
+scripts/consumer/ConsumerGate.psm1:213:108|$start.Environment.Clear()
+scripts/consumer/ConsumerGate.psm1:214:13|$standardOutput=$null
+scripts/consumer/ConsumerGate.psm1:214:35|$standardError=$null
+scripts/consumer/ConsumerGate.psm1:214:56|$stdout=$null
+scripts/consumer/ConsumerGate.psm1:214:70|$stderr=$null
+scripts/consumer/ConsumerGate.psm1:214:106|$process.Dispose()
+scripts/consumer/ConsumerGate.psm1:214:125|$start=$null
+scripts/consumer/ConsumerGate.psm1:214:138|$Token=$null
+scripts/consumer/ConsumerGate.psm1:215:13|Remove-Variable standardOutput,standardError,stdout,stderr,credentialLeak,preserved,process,start,Token -ErrorAction SilentlyContinue
+scripts/consumer/ConsumerGate.psm1:216:100|[Environment]::SetEnvironmentVariable($name,$null,'Process')
+scripts/consumer/ConsumerGate.psm1:217:5|$Token=$null
+scripts/consumer/ConsumerGate.psm1:301:13|[Environment]::SetEnvironmentVariable($name,$null,'Process')
+scripts/consumer/ConsumerGate.psm1:303:9|$Token=$null
 scripts/consumer/Invoke-ConsumerSourceGate.ps1:41:9|$phaseEnvironment=$null
 scripts/consumer/Invoke-ConsumerSourceGate.ps1:41:130|$value=$null
 scripts/consumer/Invoke-ConsumerSourceGate.ps1:76:91|[Environment]::SetEnvironmentVariable($name,$null,'Process')
@@ -2323,6 +2324,167 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         $failure.Error | Should Match 'failed with exit code 7'
     }
 
+    # Scenario: The trusted repository check receives the same explicit token arrays through the current runner wrapper and pwsh -File.
+    # Purpose: Preserve exact, case-insensitive names without abbreviation or colon syntax and fail closed on every malformed token shape.
+    It 'UnitT45_parses_repository_check_tokens_identically_for_runner_and_file_invocation' {
+        $candidate=Join-Path $TestDrive 'repository-check-arguments'
+        [void][IO.Directory]::CreateDirectory((Join-Path $candidate 'config'))
+        [void][IO.Directory]::CreateDirectory((Join-Path $candidate 'scripts'))
+        [IO.File]::WriteAllText((Join-Path $candidate 'scripts/check.ps1'),"exit 0`n",[Text.UTF8Encoding]::new($false))
+        Write-FixtureJson (Join-Path $candidate 'config/consumer-gate.json') ([ordered]@{
+                schemaVersion=1;repositoryId='fixture';sourceRepository='https://example.test/fixture.git'
+                activeSkills=@('fixture');repositoryChecks=@([ordered]@{id='general';kind='general';path='scripts/check.ps1'})
+            })
+        $trusted=Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-ConsumerRepositoryCheck.ps1'
+        function Invoke-ArgumentFixture([string]$Style,[string[]]$Tokens) {
+            $start=[Diagnostics.ProcessStartInfo]::new()
+            $start.FileName=(Get-Process -Id $PID).Path
+            $start.WorkingDirectory=$candidate
+            $start.UseShellExecute=$false
+            $start.RedirectStandardOutput=$true
+            $start.RedirectStandardError=$true
+            if($Style-ceq'runner'){
+                $start.Environment['FIXTURE_CHECK_PATH']=$trusted
+                $start.Environment['FIXTURE_CHECK_ARGUMENTS']=ConvertTo-Json -InputObject ([string[]]$Tokens) -Compress
+                $dispatch='$items=@(ConvertFrom-Json -InputObject $env:FIXTURE_CHECK_ARGUMENTS); & $env:FIXTURE_CHECK_PATH @items; exit ([int]$LASTEXITCODE)'
+                foreach($argument in @('-NoProfile','-NonInteractive','-Command',$dispatch)){[void]$start.ArgumentList.Add($argument)}
+            }else{
+                foreach($argument in @('-NoProfile','-NonInteractive','-File',$trusted)+$Tokens){[void]$start.ArgumentList.Add($argument)}
+            }
+            $start.Environment['STANDARD_VALIDATION_CORE_RUN_ID']='fixture-run'
+            $start.Environment['STANDARD_VALIDATION_CORE_CHECK_ID']='repository-general'
+            $start.Environment['STANDARD_VALIDATION_CORE_SKILLS']='fixture'
+            $process=[Diagnostics.Process]::new()
+            try{$process.StartInfo=$start;[void]$process.Start();$stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
+                $process.WaitForExit();[pscustomobject]@{ExitCode=$process.ExitCode;Output=$stdout.Result;Error=$stderr.Result}}
+            finally{$process.Dispose()}
+        }
+        $validHash='a'*64
+        $cases=@(
+            [pscustomobject]@{Name='general';Tokens=@('-Mode','general');Exit=0;Message=''},
+            [pscustomobject]@{Name='case-insensitive';Tokens=@('-mOdE','GENERAL');Exit=0;Message=''},
+            [pscustomobject]@{Name='general-with-pester-values';Tokens=@('-Mode','general','-PesterReceiptSha256',$validHash,
+                    '-PesterManifestSha256',$validHash,'-PesterVersion','6.2.0');Exit=0;Message=''},
+            [pscustomobject]@{Name='unknown';Tokens=@('-Unknown','value','-Mode','general');Exit=1;Message='Unknown repository check parameter'},
+            [pscustomobject]@{Name='abbreviation';Tokens=@('-M','general');Exit=1;Message='Unknown repository check parameter'},
+            [pscustomobject]@{Name='colon';Tokens=@('-Mode:general');Exit=1;Message='Unknown repository check parameter'},
+            [pscustomobject]@{Name='duplicate';Tokens=@('-Mode','general','-mode','general');Exit=1;Message='Duplicate repository check parameter'},
+            [pscustomobject]@{Name='missing-value';Tokens=@('-Mode');Exit=1;Message='missing a value'},
+            [pscustomobject]@{Name='position';Tokens=@('general');Exit=1;Message='Unexpected positional repository check token'},
+            [pscustomobject]@{Name='missing-mode';Tokens=@('-PesterVersion','6.2.0');Exit=1;Message='Mode is required'},
+            [pscustomobject]@{Name='dash-value';Tokens=@('-Mode','-general');Exit=1;Message='must not begin with'},
+            [pscustomobject]@{Name='invalid-mode';Tokens=@('-Mode','other');Exit=1;Message='Mode must be general or pester'},
+            [pscustomobject]@{Name='invalid-receipt-hash';Tokens=@('-Mode','general','-PesterReceiptSha256',('A'*64));Exit=1;Message='lowercase SHA-256'},
+            [pscustomobject]@{Name='invalid-manifest-hash';Tokens=@('-Mode','general','-PesterManifestSha256','abc');Exit=1;Message='lowercase SHA-256'},
+            [pscustomobject]@{Name='invalid-version';Tokens=@('-Mode','general','-PesterVersion','6.2');Exit=1;Message='PesterVersion must be 6.2.0'},
+            [pscustomobject]@{Name='pester-missing-receipt';Tokens=@('-Mode','pester','-PesterManifestSha256',$validHash,'-PesterVersion','6.2.0');Exit=1;Message='PesterReceiptSha256 is required'},
+            [pscustomobject]@{Name='pester-missing-manifest';Tokens=@('-Mode','pester','-PesterReceiptSha256',$validHash,'-PesterVersion','6.2.0');Exit=1;Message='PesterManifestSha256 is required'},
+            [pscustomobject]@{Name='pester-missing-version';Tokens=@('-Mode','pester','-PesterReceiptSha256',$validHash,'-PesterManifestSha256',$validHash);Exit=1;Message='PesterVersion is required'}
+        )
+        foreach($case in $cases){
+            $results=@(@('runner','file')|ForEach-Object{Invoke-ArgumentFixture $_ $case.Tokens})
+            foreach($result in $results){
+                if($result.ExitCode-ne$case.Exit){throw "$($case.Name) expected $($case.Exit), got $($result.ExitCode): $($result.Error)"}
+                $result.ExitCode|Should Be $case.Exit
+                if(-not[string]::IsNullOrEmpty($case.Message)){$result.Error|Should Match ([regex]::Escape($case.Message))}
+            }
+            $results[0].ExitCode|Should Be $results[1].ExitCode
+        }
+        $source=Get-Content -Raw -Encoding UTF8 $trusted;$tokens=$null;$errors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)
+        @($errors).Count|Should Be 0
+        $ast.ParamBlock|Should BeNullOrEmpty
+        @($ast.ScriptRequirements.RequiredModules).Count|Should Be 0
+    }
+
+    # Scenario: Adapter validation sees the trusted repository check, another script, and a mismatched executable hash.
+    # Purpose: Only the setup-bound trusted check may be used as a PowerShell core-check executable.
+    It 'UnitT46_allows_only_the_setup_bound_trusted_ps1_core_check' {
+        $root=Join-Path $TestDrive 'adapter-ps1-closure'
+        $trustedRoot=Join-Path $root 'runtime'
+        $trustedDirectory=Join-Path $trustedRoot 'trusted'
+        [void][IO.Directory]::CreateDirectory($trustedDirectory)
+        $trusted=Join-Path $trustedDirectory 'Invoke-ConsumerRepositoryCheck.ps1'
+        $other=Join-Path $trustedDirectory 'Other.ps1'
+        [IO.File]::WriteAllText($trusted,'exit 0',[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($other,'exit 0',[Text.UTF8Encoding]::new($false))
+        $hash=(Get-FileHash $trusted -Algorithm SHA256).Hash.ToLowerInvariant()
+        $setup=[pscustomobject]@{trustedRoot=$trustedRoot;repositoryCheck=$trusted;sourceValidation=[pscustomobject]@{
+                frozenFiles=@([pscustomobject]@{path=$trusted;sha256=$hash})}}
+        $valid=[pscustomobject]@{id='repository-general';executable=$trusted;executableSha256=$hash}
+        {Assert-GateAdapterExecutableBindings @($valid) $setup}|Should Not Throw
+        $wrongPath=Copy-FixtureValue $valid;$wrongPath.executable=$other
+        {Assert-GateAdapterExecutableBindings @($wrongPath) $setup}|Should Throw 'trusted repository check'
+        $wrongHash=Copy-FixtureValue $valid;$wrongHash.executableSha256=('0'*64)
+        {Assert-GateAdapterExecutableBindings @($wrongHash) $setup}|Should Throw 'trusted repository check'
+    }
+
+    if($IsWindows){
+        # Scenario: The resolver runs in its deny-by-default environment on a native Windows host.
+        # Purpose: Preserve the Windows system roots required by PowerShellGet without inheriting the full parent environment.
+        It 'UnitT47_preserves_required_windows_resolver_environment_roots' {
+            $root=Join-Path $TestDrive 'resolver-windows-environment'
+            $authority=Join-Path $root 'authority';$install=Join-Path $root 'install';$source=Join-Path $root 'source-tools'
+            foreach($directory in @($authority,$install,$source,(Join-Path $authority 'docs/standards'))){[void][IO.Directory]::CreateDirectory($directory)}
+            [IO.File]::WriteAllText((Join-Path $authority 'docs/standards/validation-toolchain.json'),'{}',[Text.UTF8Encoding]::new($false))
+            $resolver=Join-Path $root 'resolver.ps1'
+            [IO.File]::WriteAllText($resolver,@'
+param([string]$PolicyPath,[string]$ToolName,[switch]$Install,[string]$InstallRoot,[string]$ExpectedGoRuntimeVersion,[string]$RunId,[string]$OutputPath)
+$names=@('ProgramFiles','ProgramFiles(x86)','ProgramW6432','ProgramData','LOCALAPPDATA','APPDATA')
+$values=[ordered]@{};foreach($name in $names){$values[$name]=[Environment]::GetEnvironmentVariable($name,'Process')}
+[IO.File]::WriteAllText($OutputPath,($values|ConvertTo-Json),[Text.UTF8Encoding]::new($false))
+'@,[Text.UTF8Encoding]::new($false))
+            $old=$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH;$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$resolver
+            try{$result=Invoke-GateResolver (Get-Process -Id $PID).Path $authority $install pester ('a'*32) (Join-Path $source 'receipt-pester.json') latest ''}
+            finally{$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$old}
+            foreach($name in @('ProgramFiles','ProgramFiles(x86)','ProgramW6432','ProgramData','LOCALAPPDATA','APPDATA')){
+                $parent=[Environment]::GetEnvironmentVariable($name,'Process')
+                if($null-ne$parent){[string]$result.$name|Should Be $parent}
+            }
+        }
+    }
+
+    # Scenario: Resolver and validator children fail after writing useful stderr, including one credential sentinel.
+    # Purpose: Persist bounded UTF-8 diagnostics, redact credentials before create-only writes, and still fail closed.
+    It 'UnitT48_preserves_redacted_resolver_and_validator_failure_diagnostics' {
+        $root=Join-Path $TestDrive 'process-diagnostics'
+        $authority=Join-Path $root 'authority';$install=Join-Path $root 'install';$source=Join-Path $root 'source-tools'
+        foreach($directory in @($authority,$install,$source,(Join-Path $authority 'docs/standards'),(Join-Path $authority 'scripts'))){[void][IO.Directory]::CreateDirectory($directory)}
+        [IO.File]::WriteAllText((Join-Path $authority 'docs/standards/validation-toolchain.json'),'{}',[Text.UTF8Encoding]::new($false))
+        $resolver=Join-Path $root 'resolver-failure.ps1'
+        [IO.File]::WriteAllText($resolver,"[Console]::Out.Write('resolver out'); [Console]::Error.Write('resolver diagnostic'); exit 7",[Text.UTF8Encoding]::new($false))
+        $old=$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH;$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$resolver
+        try{{Invoke-GateResolver (Get-Process -Id $PID).Path $authority $install pester ('a'*32) (Join-Path $source 'receipt-pester.json') latest ''}|Should Throw 'Resolver failed'}
+        finally{$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$old}
+        (Get-Content -Raw (Join-Path $source 'diagnostics/resolver-pester.stderr.txt'))|Should Match 'resolver diagnostic'
+
+        $sentinel='resolver-secret-sentinel'
+        $sentinelResolver=Join-Path $root 'resolver-sentinel.ps1'
+        [IO.File]::WriteAllText($sentinelResolver,"[Console]::Error.Write(`$env:STANDARD_VALIDATION_GITHUB_API_TOKEN); exit 8",[Text.UTF8Encoding]::new($false))
+        $sentinelSource=Join-Path $root 'sentinel-source';[void][IO.Directory]::CreateDirectory($sentinelSource)
+        $env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$sentinelResolver
+        try{{Invoke-GateResolver (Get-Process -Id $PID).Path $authority $install pester ('b'*32) (Join-Path $sentinelSource 'receipt-pester.json') latest $sentinel}|Should Throw 'credential sentinel'}
+        finally{$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$old}
+        $redacted=Get-Content -Raw (Join-Path $sentinelSource 'diagnostics/resolver-pester.stderr.txt')
+        $redacted|Should Match '\[REDACTED\]';$redacted|Should Not Match ([regex]::Escape($sentinel))
+        {Assert-GateCredentialAbsent $root $sentinel}|Should Not Throw
+
+        $validatorRoot=Join-Path $root 'validator';$trustedRoot=Join-Path $validatorRoot 'runtime';$trustedDirectory=Join-Path $trustedRoot 'trusted'
+        $candidate=Join-Path $validatorRoot 'candidate';$work=Join-Path $validatorRoot 'work'
+        foreach($directory in @($trustedDirectory,$candidate,$work,(Join-Path $work 'validation-artifacts'))){[void][IO.Directory]::CreateDirectory($directory)}
+        $check=Join-Path $trustedDirectory 'Invoke-ConsumerRepositoryCheck.ps1';[IO.File]::WriteAllText($check,'exit 0',[Text.UTF8Encoding]::new($false))
+        $checkHash=(Get-FileHash $check -Algorithm SHA256).Hash.ToLowerInvariant()
+        $setup=[ordered]@{trustedRoot=$trustedRoot;repositoryCheck=$check;pesterReceiptSha256=('a'*64);pesterManifestSha256=('b'*64);pesterVersion='6.2.0'
+            sourceValidation=[ordered]@{frozenFiles=@([ordered]@{path=$check;sha256=$checkHash})}}
+        Write-FixtureJson (Join-Path $work 'source-tools.json') $setup
+        $runner=Join-Path $authority 'scripts/Invoke-StandardValidation.ps1'
+        [IO.File]::WriteAllText($runner,"[Console]::Out.Write('validator out'); [Console]::Error.Write('validator diagnostic'); exit 9",[Text.UTF8Encoding]::new($false))
+        $binding=[pscustomobject]@{candidateRevision=('c'*40);baseRevision=('d'*40);canonicalEvent='pull_request';runId=('e'*32);commit=('f'*40)}
+        $config=[pscustomobject]@{sourceRepository='https://example.test/fixture.git';activeSkills=@('fixture')}
+        {Invoke-GateValidation $authority $candidate $work $binding $config (Get-Process -Id $PID).Path}|Should Throw 'Validator failed'
+        (Get-Content -Raw (Join-Path $work 'validation-artifacts/validator.stderr.txt'))|Should Match 'validator diagnostic'
+    }
+
     # Scenario: Runtime and tool boundaries record events in prepare, then the production final report assertion records the final event.
     # Purpose: Execute control flow and prove a failed source-report prerequisite cannot record a later successful step.
     It 'UnitT50_preserves_runtime_tool_and_source_report_ordering' {
@@ -2403,7 +2565,7 @@ if($DefineFunctionsOnly){return}
     # Purpose: Execute the repository wrapper and prove closure bytes plus complete case identity are enforced behaviorally.
     It 'InterT56_executes_verified_pester_closure_and_complete_discovery' {
         $runId = '1234567890abcdef1234567890abcdef'
-        foreach ($scenario in @('success','tampered','duplicatepath','partial','duplicate','skipped','notrun')) {
+        foreach ($scenario in @('success-file','success-runner','tampered','duplicatepath','partial','duplicate','skipped','notrun')) {
             $workRoot = Join-Path $TestDrive "pester-wrapper-$scenario"
             $candidate = Join-Path $workRoot "$runId/candidate"
             $runtime = Join-Path $workRoot 'runtime/consumer'
@@ -2520,10 +2682,17 @@ Export-ModuleMember -Function New-PesterConfiguration,Invoke-Pester
                 $env:STANDARD_VALIDATION_CORE_SKILLS = 'fixture'
                 Push-Location $candidate
                 try {
-                    $output = @(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File `
-                            (Join-Path $runtime 'Invoke-ConsumerRepositoryCheck.ps1') -Mode pester `
-                            -PesterReceiptSha256 $receiptSha -PesterManifestSha256 $manifestSha `
-                            -PesterVersion 6.2.0 2>&1)
+                    $trustedCheck=Join-Path $runtime 'Invoke-ConsumerRepositoryCheck.ps1'
+                    $checkTokens=@('-Mode','pester','-PesterReceiptSha256',$receiptSha,'-PesterManifestSha256',$manifestSha,
+                        '-PesterVersion','6.2.0')
+                    if($scenario-ceq'success-runner'){
+                        $env:FIXTURE_CHECK_PATH=$trustedCheck
+                        $env:FIXTURE_CHECK_ARGUMENTS=ConvertTo-Json -InputObject ([string[]]$checkTokens) -Compress
+                        $dispatch='$items=@(ConvertFrom-Json -InputObject $env:FIXTURE_CHECK_ARGUMENTS); & $env:FIXTURE_CHECK_PATH @items; exit ([int]$LASTEXITCODE)'
+                        $output=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -Command $dispatch 2>&1)
+                    }else{
+                        $output=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $trustedCheck @checkTokens 2>&1)
+                    }
                     $exitCode = $LASTEXITCODE
                 }
                 finally { Pop-Location }
@@ -2533,8 +2702,9 @@ Export-ModuleMember -Function New-PesterConfiguration,Invoke-Pester
                 $env:STANDARD_VALIDATION_CORE_RUN_ID = $oldRunId
                 $env:STANDARD_VALIDATION_CORE_CHECK_ID = $oldCheckId
                 $env:STANDARD_VALIDATION_CORE_SKILLS = $oldSkills
+                Remove-Item Env:FIXTURE_CHECK_PATH,Env:FIXTURE_CHECK_ARGUMENTS -ErrorAction SilentlyContinue
             }
-            if ($scenario -eq 'success') {
+            if ($scenario -like 'success-*') {
                 $exitCode | Should Be 0
                 ($output -join "`n") | Should Match '"passed":1'
                 (Get-Content -Raw (Join-Path $workRoot "$runId/repository-pester-case-inventory-v1.json") | `
