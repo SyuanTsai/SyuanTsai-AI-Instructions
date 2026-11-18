@@ -823,7 +823,7 @@ function Assert-GateProtectedFiles([string]$AuthorityRoot,[string]$BaseRoot,[str
         if ($Transition -and $record.disposition -ceq 'split' -and $null -eq (Get-GateBlobOid $CandidateRoot $CandidateRevision ([string]$record.target))) {
             Throw-GateResult FAILED "Split target is not a tracked regular file: $($record.target)"
         }
-        if ($Transition -and $record.disposition -ceq 'retain') {
+        if ($Transition -and $record.disposition -ceq 'retain' -and -not(Test-GateExceptionPathInScope $path)) {
             $candidateOid = Get-GateBlobOid $CandidateRoot $CandidateRevision $path
             $baseOid = Get-GateBlobOid $BaseRoot $BaseRevision $path
             if ($null -eq $candidateOid -or $null -eq $baseOid -or $candidateOid -cne $baseOid) {
@@ -1042,6 +1042,19 @@ function Invoke-GateGitBytes([string]$Root,[string[]]$Arguments) {
         Write-Output -NoEnumerate $memory.ToArray()
     }finally{$memory.Dispose();$process.Dispose()}
 }
+function Get-GateExceptionScope {
+    [pscustomobject]@{RegistryPath='config/skillspector-exceptions.json';BaselinePrefix='config/skillspector-exceptions/'}
+}
+function Test-GateExceptionPathInScope([string]$Path) {
+    $scope=Get-GateExceptionScope;$comparisonKey=ConvertTo-GateExceptionPathComparisonKey $Path
+    $comparisonKey.Equals($scope.RegistryPath,[StringComparison]::Ordinal)-or`
+        $comparisonKey.StartsWith($scope.BaselinePrefix,[StringComparison]::Ordinal)
+}
+function Assert-GateProtectedFilesWithExceptionShrinkOnly([string]$AuthorityRoot,[string]$BaseRoot,[string]$CandidateRoot,$ManifestEntry,
+    [string]$BaseRevision,[string]$CandidateRevision,[bool]$Transition) {
+    Assert-GateExceptionSetShrinkOnly $CandidateRoot $BaseRevision $CandidateRevision
+    Assert-GateProtectedFiles $AuthorityRoot $BaseRoot $CandidateRoot $ManifestEntry $BaseRevision $CandidateRevision $Transition
+}
 function ConvertTo-GateExceptionPathComparisonKey([string]$Path) {
     $Path.Normalize([Text.NormalizationForm]::FormKC).ToLowerInvariant()
 }
@@ -1070,7 +1083,7 @@ function Test-GateExceptionPathPatternCouldMatch([string]$Pattern,[string]$Targe
 function Get-GateExceptionTree([string]$Root,[string]$Revision) {
     [byte[]]$bytes=Invoke-GateGitBytes $Root @('ls-tree','-r','-z','--full-tree',$Revision)
     $tree=[Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
-    $registryPath='config/skillspector-exceptions.json';$baselinePrefix='config/skillspector-exceptions/'
+    $scope=Get-GateExceptionScope;$registryPath=$scope.RegistryPath;$baselinePrefix=$scope.BaselinePrefix
     $looseUtf8=[Text.UTF8Encoding]::new($false,$false);$strictUtf8=[Text.UTF8Encoding]::new($false,$true)
     $recordStart=0
     for($recordEnd=0;$recordEnd-lt$bytes.Length;$recordEnd++){
@@ -1210,7 +1223,7 @@ function Assert-GateJsonItemsShrinkOnly([Text.Json.JsonElement[]]$BaseItems,[Tex
     }
 }
 function Assert-GateExceptionSetShrinkOnly([string]$CandidateRoot,[string]$BaseRevision,[string]$CandidateRevision) {
-    $registryPath='config/skillspector-exceptions.json';$baselinePrefix='config/skillspector-exceptions/'
+    $scope=Get-GateExceptionScope;$registryPath=$scope.RegistryPath;$baselinePrefix=$scope.BaselinePrefix
     $baseTree=Get-GateExceptionTree $CandidateRoot $BaseRevision
     $candidateTree=Get-GateExceptionTree $CandidateRoot $CandidateRevision
     foreach($path in $candidateTree.Keys){

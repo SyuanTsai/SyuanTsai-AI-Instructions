@@ -2419,6 +2419,27 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         $candidate=Save-ExceptionFixtureCandidate $fixture.Root 'lone low surrogate key'
         (Get-SourceFixtureFailure {Assert-GateExceptionSetShrinkOnly $fixture.Root $fixture.Base $candidate})|Should Match `
             '^INVALID\|.*JSON.*review-bitbucket-pull-request\.baseline\.json.*cannot be decoded'
+
+        $prepareFixture=Join-Path $script:RepositoryRoot 'tests/fixtures/Invoke-ConsumerGateCredentialFixture.ps1'
+        foreach($scenario in @(
+            @{Name='exception-shrink';ExitCode=0;Message=''},
+            @{Name='exception-modify';ExitCode=10;Message='fingerprint .* modified'},
+            @{Name='retain-outside-change';ExitCode=20;Message='Retained path must remain unchanged: scripts/Retained.ps1'}
+        )){
+            $lease=New-SourceFixtureLease "prepare-$($scenario.Name)"
+            try{
+                $records=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $prepareFixture `
+                    -RepositoryRoot $script:RepositoryRoot -FixtureRoot $lease.Root -Outcome success `
+                    -Sentinel 'syp500-prepare-sentinel' -TransitionFromLegacy -PrepareScenario $scenario.Name 2>&1)
+                if($LASTEXITCODE-ne0){throw "Prepare fixture '$($scenario.Name)' failed: $($records-join' | ')"}
+                $result=($records-join[Environment]::NewLine)|ConvertFrom-Json -Depth 30
+                if($result.exitCode-ne$scenario.ExitCode){throw "Prepare scenario '$($scenario.Name)' expected exit $($scenario.ExitCode) but got $($result.exitCode): $($result.stderr)"}
+                $result.exitCode|Should Be $scenario.ExitCode
+                if(-not[string]::IsNullOrEmpty($scenario.Message)){$result.stderr|Should Match $scenario.Message}
+                if($scenario.Name-ceq'exception-shrink'){@($result.events)|Should Be @('runtime-installed','source-tools-prepared')}
+                else{@($result.events).Count|Should Be 0}
+            }finally{Remove-SourceFixtureLease $lease}
+        }
     }
 
     # Scenario: Three valid legs were fetched at different official-main tips and one stable binding is then changed.
@@ -3032,7 +3053,7 @@ Export-ModuleMember -Function New-PesterConfiguration,Invoke-Pester
         $module = Get-Content -Raw -Encoding UTF8 $script:GateModule
         $requiredBarriers = @(
             'Required repository check is missing', 'General repository check is not a canonical tracked file',
-            'General repository check points to a deleted legacy path', 'Assert-GateExceptionSetShrinkOnly',
+            'General repository check points to a deleted legacy path', 'Assert-GateProtectedFilesWithExceptionShrinkOnly',
             'Unexpected workflow', 'Candidate consumer-gate.yml is missing',
             'Removed legacy path is present', 'Repository has advanced'
         )

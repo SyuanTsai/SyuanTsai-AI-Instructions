@@ -56,12 +56,12 @@ if(-not[string]::IsNullOrWhiteSpace($phaseEnvironmentDumpPath)){
     if($Phase-ceq'prepare'){
         $validated=Assert-GateConfig $authorityRoot $CandidateRoot $eventRepository
         Assert-GateTransitionInventory $BaseRoot $validated.ManifestEntry ([string]$binding.baseRevision) ([bool]$TransitionFromLegacy)
-        Assert-GateProtectedFiles $authorityRoot $BaseRoot $CandidateRoot $validated.ManifestEntry `
+        Assert-GateProtectedFilesWithExceptionShrinkOnly $authorityRoot $BaseRoot $CandidateRoot $validated.ManifestEntry `
             ([string]$binding.baseRevision) ([string]$binding.candidateRevision) ([bool]$TransitionFromLegacy)
         Invoke-GateManifestClosureCheck $authorityRoot $BaseRoot $CandidateRoot $validated.ManifestEntry `
             ([string]$binding.baseRevision) ([string]$binding.candidateRevision) $WorkRoot `
             ([bool]$TransitionFromLegacy)
-        Assert-GateExceptionSetShrinkOnly $CandidateRoot ([string]$binding.baseRevision) ([string]$binding.candidateRevision)
+        # The protected-files wrapper runs shrink-only before any retained exception-set path can bypass byte identity.
         [void](Invoke-GateCredentialScopedPreparation $authorityRoot $CandidateRoot $WorkRoot $Platform $binding $eventRepository $token)
     }elseif($Phase-ceq'validate'){
         $validated=Assert-GateConfig $authorityRoot $CandidateRoot $eventRepository
