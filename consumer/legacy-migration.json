@@ -283,6 +283,53 @@
           "path": "tests"
         }
       ],
+      "literalReferenceExemptions": [
+        {
+          "file": "config/skillspector-exceptions.json",
+          "blobOid": "4ff6d83ebddb132992613fefdb6e6cc96fc0e724",
+          "line": 36,
+          "column": 16,
+          "occurrenceOrdinal": 1,
+          "targetPath": "config/skillspector-exceptions/configure-bitbucket-api-access.baseline.json",
+          "reason": "The retained inventory registry must name this reviewed baseline before conversion; conversion removes the binding and baseline under the shrink-only gate."
+        },
+        {
+          "file": "config/skillspector-exceptions.json",
+          "blobOid": "4ff6d83ebddb132992613fefdb6e6cc96fc0e724",
+          "line": 40,
+          "column": 16,
+          "occurrenceOrdinal": 1,
+          "targetPath": "config/skillspector-exceptions/configure-confluence-api-access.baseline.json",
+          "reason": "The retained inventory registry must name this reviewed baseline before conversion; conversion removes the binding and baseline under the shrink-only gate."
+        },
+        {
+          "file": "config/skillspector-exceptions.json",
+          "blobOid": "4ff6d83ebddb132992613fefdb6e6cc96fc0e724",
+          "line": 44,
+          "column": 16,
+          "occurrenceOrdinal": 1,
+          "targetPath": "config/skillspector-exceptions/configure-jira-api-access.baseline.json",
+          "reason": "The retained inventory registry must name this reviewed baseline before conversion; conversion removes the binding and baseline under the shrink-only gate."
+        },
+        {
+          "file": "config/skillspector-exceptions.json",
+          "blobOid": "4ff6d83ebddb132992613fefdb6e6cc96fc0e724",
+          "line": 48,
+          "column": 16,
+          "occurrenceOrdinal": 1,
+          "targetPath": "config/skillspector-exceptions/manage-confluence-docs-as-code.baseline.json",
+          "reason": "The retained inventory registry must name this reviewed baseline before conversion; conversion removes the binding and baseline under the shrink-only gate."
+        },
+        {
+          "file": "config/skillspector-exceptions.json",
+          "blobOid": "4ff6d83ebddb132992613fefdb6e6cc96fc0e724",
+          "line": 52,
+          "column": 16,
+          "occurrenceOrdinal": 1,
+          "targetPath": "config/skillspector-exceptions/publish-requirements-to-confluence.baseline.json",
+          "reason": "The retained inventory registry must name this reviewed baseline before conversion; conversion removes the binding and baseline under the shrink-only gate."
+        }
+      ],
       "files": [
         {
           "path": ".github/workflows/validate.yml",
@@ -296,9 +343,8 @@
         },
         {
           "path": "config/skillspector-exceptions.json",
-          "disposition": "update-tests",
-          "reason": "Retain as consumer data but rewrite it during conversion to exactly the three review-bitbucket-pull-request exceptions (LP3 x1 and E1 x2) pending SYP-493 reapproval.",
-          "expectedOutcome": "rewrite"
+          "disposition": "retain",
+          "reason": "Retain as consumer data; during conversion it must be reduced to exactly the three review-bitbucket-pull-request exceptions (LP3 x1 and E1 x2) and one matching baseline pending SYP-493 reapproval. PR-1's shrink-only gate and the central runner's registry/baseline one-to-one validation enforce this reduction."
         },
         {
           "path": "config/skillspector-exceptions/configure-bitbucket-api-access.baseline.json",
@@ -734,7 +780,7 @@
         {
           "path": "tests/SkillSpectorExceptions.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite assertions for the conversion-time reduction from six baselines and 19 fingerprints to the retained review-bitbucket-pull-request baseline and its three fingerprints.",
+          "reason": "Rewrite assertions for the conversion-time reduction from six baselines and 19 fingerprints to the retained review-bitbucket-pull-request baseline and its three fingerprints; the registry path is now retained consumer data and may be referenced literally.",
           "expectedOutcome": "rewrite"
         },
         {
