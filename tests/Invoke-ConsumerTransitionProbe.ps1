@@ -30,7 +30,8 @@ function Write-ProbeUtf8([string]$Path,[string]$Text) {
     [IO.File]::WriteAllText($Path,$Text,[Text.UTF8Encoding]::new($false))
 }
 function Write-ProbeJson([string]$Path,$Value) {
-    Write-ProbeUtf8 $Path (($Value|ConvertTo-Json -Depth 100)+"`n")
+    $json=($Value|ConvertTo-Json -Depth 100).Replace("`r`n","`n").Replace("`r","`n")
+    Write-ProbeUtf8 $Path ($json+"`n")
 }
 function ConvertTo-ProbeAbsoluteFileUrl([string]$FullPath) {
     if([string]::IsNullOrWhiteSpace($FullPath)){throw 'Probe authority path must not be empty.'}

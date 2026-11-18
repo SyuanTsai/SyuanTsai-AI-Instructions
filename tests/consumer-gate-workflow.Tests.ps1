@@ -377,7 +377,7 @@ Describe 'Consumer gate workflow templates' {
         $probeAst=[Management.Automation.Language.Parser]::ParseFile(
             (Join-Path $script:RepositoryRoot 'tests/Invoke-ConsumerTransitionProbe.ps1'),[ref]$tokens,[ref]$parseErrors)
         @($parseErrors).Count|Should Be 0
-        foreach($functionName in @('ConvertTo-ProbeAbsoluteFileUrl','Assert-ProbeFileUrl')){
+        foreach($functionName in @('Write-ProbeUtf8','Write-ProbeJson','ConvertTo-ProbeAbsoluteFileUrl','Assert-ProbeFileUrl')){
             $functionAst=@($probeAst.FindAll({param($node)
                         $node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$functionName},$true))
             $functionAst.Count|Should Be 1
@@ -396,6 +396,14 @@ Describe 'Consumer gate workflow templates' {
         }
         {Assert-ProbeFileUrl '' '/home/runner/work/a b/x'}|Should Throw
         {Assert-ProbeFileUrl 'https://example.test/a' '/home/runner/work/a'}|Should Throw
+        $jsonRoot=Join-Path $TestDrive 'probe-json';[void][IO.Directory]::CreateDirectory($jsonRoot)
+        $jsonPath=Join-Path $jsonRoot 'nested.json'
+        Write-ProbeJson $jsonPath ([ordered]@{outer=[ordered]@{alpha=1;items=@('x','y')}})
+        $jsonBytes=[IO.File]::ReadAllBytes($jsonPath)
+        @($jsonBytes|Where-Object{$_-eq[byte]13}).Count|Should Be 0
+        $expectedJson=(@('{','  "outer": {','    "alpha": 1,','    "items": [','      "x",','      "y"',
+                '    ]','  }','}')-join"`n")+"`n"
+        [Convert]::ToHexString($jsonBytes)|Should BeExactly ([Convert]::ToHexString(([Text.UTF8Encoding]::new($false)).GetBytes($expectedJson)))
         $assertionOffset=$probeScript.IndexOf('Assert-ProbeFileUrl $authorityFileUrl',[StringComparison]::Ordinal)
         $environmentOffset=$probeScript.IndexOf('$env:CONSUMER_TRANSITION_PROBE_AUTHORITY_URL=$authorityFileUrl',[StringComparison]::Ordinal)
         $assertionOffset|Should BeGreaterThan -1
