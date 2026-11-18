@@ -423,7 +423,7 @@
         {
           "path": "scripts/Sync-SharedReferences.ps1",
           "disposition": "update-tests",
-          "reason": "Retain this repository-owned developer generator but rewrite its literal dependency on the split source to scripts/Test-AtlassianSharedReferences.ps1.",
+          "reason": "Retain this repository-owned developer generator but rewrite the literal split-source path in its operator guidance (line 194, \"run scripts/Test-SharedReferences.ps1\") to scripts/Test-AtlassianSharedReferences.ps1; it is a printed instruction, not a runtime dependency, but conversion closure flags it.",
           "expectedOutcome": "rewrite"
         },
         {
