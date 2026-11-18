@@ -587,6 +587,35 @@ exit /b %errorlevel%
         (Get-P9bRepoSnapshot $target)|Should Be $before
     }
 
+    # Scenario: A verified project projection contains a legitimate zero-byte Python package marker.
+    # Purpose: Preserve the candidate inventory and publish empty Skill resources through every mutation wrapper.
+    It 'InterT141_publishes_a_zero_byte_project_Skill_resource_idempotently' {
+        $root=Join-Path $script:ExternalRoot 'p9c-zero-byte-project-skill';New-Item -ItemType Directory -Force -Path $root|Out-Null
+        $source=New-P9bInstructionArchive -WorkingRoot (Join-Path $root 'source-work') -ArchivePath (Join-Path $root 'source.zip')
+        $fixture=New-P9cProjectFixture -Root $root -ProjectionIds @('project-agents') `
+            -AdditionalSkillFiles @{'work-with-jira'=@{'resources/__init__.py'=''}}
+        $target=Join-Path $root 'target';New-P9bTargetRepository $target
+        $emptyRelativePath='.agents/skills/work-with-jira/resources/__init__.py'
+
+        $first=Invoke-P9bRepoBootstrap -Context $fixture.Context -ArchivePath $source.ArchivePath -TargetRoot $target
+
+        if($first.ExitCode-ne0){throw "Zero-byte project Skill bootstrap failed: $($first.Output)"}
+        $first.ExitCode|Should Be 0
+        $emptyPath=Join-Path $target $emptyRelativePath
+        Test-Path -LiteralPath $emptyPath -PathType Leaf|Should Be $true
+        (Get-Item -LiteralPath $emptyPath).Length|Should Be 0
+        $manifest=Get-Content -Raw -LiteralPath (Join-Path $target '.codex/ai-instructions.manifest.json')|ConvertFrom-Json
+        $emptyEntry=@($manifest.files|Where-Object{[string]$_.targetPath-ceq$emptyRelativePath})
+        $emptyEntry.Count|Should Be 1
+        [string]$emptyEntry[0].sha256|Should Be 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+        $before=Get-P9bRepoSnapshot $target
+
+        $second=Invoke-P9bRepoBootstrap -Context $fixture.Context -ArchivePath $source.ArchivePath -TargetRoot $target
+
+        $second.ExitCode|Should Be 0
+        (Get-P9bRepoSnapshot $target)|Should Be $before
+    }
+
     Context 'P9c fix4 raw publication CAS' {
     # Scenario: A project-projection transaction encounters a semantically current Instruction encoded with CRLF or UTF-8 BOM while updating or retiring it.
     # Purpose: Keep normalized hashes for ownership semantics while using raw bytes exclusively for journal publication and rollback CAS.

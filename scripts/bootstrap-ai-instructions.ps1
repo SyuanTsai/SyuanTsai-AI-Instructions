@@ -3740,7 +3740,7 @@ function Set-ProjectPublicationFileBytesCore {
     param(
         [Parameter(Mandatory=$true)][string]$TargetRoot,
         [Parameter(Mandatory=$true)][string]$RelativePath,
-        [Parameter(Mandatory=$true)][byte[]]$Bytes,
+        [Parameter(Mandatory=$true)][AllowEmptyCollection()][byte[]]$Bytes,
         [Parameter(Mandatory=$true)][ValidateSet('repository','git-exclude')][string]$TargetKind,
         [Nullable[bool]]$ExpectedExists,
         [string]$ExpectedSha256,
@@ -3785,13 +3785,13 @@ function Set-ProjectPublicationFileBytesCore {
 }
 
 function Set-ProjectPublicationFileBytes {
-    param([Parameter(Mandatory=$true)][string]$RelativePath,[Parameter(Mandatory=$true)][byte[]]$Bytes,[Nullable[bool]]$ExpectedExists,[string]$ExpectedSha256)
+    param([Parameter(Mandatory=$true)][string]$RelativePath,[Parameter(Mandatory=$true)][AllowEmptyCollection()][byte[]]$Bytes,[Nullable[bool]]$ExpectedExists,[string]$ExpectedSha256)
     $hashKind=if($RelativePath-ceq$manifestRelativePath){'raw'}else{'managed'}
     Set-ProjectPublicationFileBytesCore -TargetRoot $script:ProjectPublicationContext.Repository -RelativePath $RelativePath -Bytes $Bytes -TargetKind repository -ExpectedExists $ExpectedExists -ExpectedSha256 $ExpectedSha256 -ExpectedHashKind $hashKind
 }
 
 function Set-ProjectPublicationExternalFileBytes {
-    param([Parameter(Mandatory=$true)][string]$LiteralPath,[Parameter(Mandatory=$true)][byte[]]$Bytes,[Parameter(Mandatory=$true)][bool]$ExpectedExists,[string]$ExpectedSha256,[object]$ExpectedState)
+    param([Parameter(Mandatory=$true)][string]$LiteralPath,[Parameter(Mandatory=$true)][AllowEmptyCollection()][byte[]]$Bytes,[Parameter(Mandatory=$true)][bool]$ExpectedExists,[string]$ExpectedSha256,[object]$ExpectedState)
     $fullPath=[IO.Path]::GetFullPath($LiteralPath);$parent=[IO.Path]::GetDirectoryName($fullPath);$leaf=[IO.Path]::GetFileName($fullPath)
     if([string]::IsNullOrWhiteSpace($parent)-or[string]::IsNullOrWhiteSpace($leaf)){throw 'Project publication external target is invalid.'}
     if(-not(Test-ProjectPublicationPathEqual -Left $fullPath -Right ([string](Get-GitInfoExcludePath -Repository $script:ProjectPublicationContext.Repository)))){throw 'Project publication external target is not the shared Git exclude.'}
@@ -6893,7 +6893,7 @@ try {
             if ($retiredLegacySkillPaths.Contains($managedTargetPath)) { continue }
             $id = $managedTargetPath.Split('/')[2]
             if ($migrationById.ContainsKey($id) -and $migrationById[$id].removable) {
-                Assert-RepoSharedSkillsMigrationEvidence -Repository $targetRootPath -Skill $migrationById[$id] -RemovedPaths @($removedPaths) -GitExecutable $GitExecutable
+                Assert-RepoSharedSkillsMigrationEvidence -Repository $targetRootPath -Skill $migrationById[$id] -GitExecutable $GitExecutable
                 Remove-TargetMutationFile -Snapshot $mutationSnapshot -RelativePath $managedTargetPath
                 $removedPaths.Add($managedTargetPath)
                 if ($FailureAfterSkillRemovalCount -gt 0 -and @($removedPaths | Where-Object { $_ -like '.agents/skills/*' }).Count -eq $FailureAfterSkillRemovalCount) { throw 'Injected Skill migration failure.' }
