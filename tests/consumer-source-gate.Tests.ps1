@@ -50,6 +50,16 @@ Describe 'Authority-owned consumer source gate' {
             $Root
         }
         function Copy-FixtureValue($Value){$Value|ConvertTo-Json -Depth 30|ConvertFrom-Json}
+        function Set-FixturePendingPrerequisites($Manifest,[string]$RepositoryId='skill-darktide-translate') {
+            $entry=@($Manifest.repositories|Where-Object{$_.id-eq$RepositoryId})[0]
+            $entry.status='pending-prerequisites'
+            $entry|Add-Member -Force prerequisites @([pscustomobject]@{
+                    id='fixture-prerequisite'
+                    path=[string]$entry.files[0].path
+                    requirement='Fixture prerequisite remains incomplete.'
+                })
+            $entry
+        }
         $script:ExceptionFixtureConfigRoot = Join-Path $script:RepositoryRoot 'tests/fixtures/syp500'
         function New-ExceptionFixtureRepository([string]$Name,[switch]$WithoutExceptionSet) {
             $root=Join-Path $TestDrive $Name
@@ -160,8 +170,8 @@ Describe 'Authority-owned consumer source gate' {
     }
 
     # Scenario: The legacy manifest is consumed as the exact five-repository conversion contract.
-    # Purpose: Keep four ready migrations and the blocked Darktide prerequisites explicit.
-    It 'UnitT10_binds_five_unique_legacy_inventories_and_blocks_darktide_prerequisites' {
+    # Purpose: Keep all five ready migrations and the refreshed Darktide inventory explicit.
+    It 'UnitT10_binds_five_unique_ready_legacy_inventories_and_the_refreshed_darktide_tree' {
         $manifestText = Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'consumer/legacy-migration.json')
         $schemaText = Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'consumer/schemas/consumer-legacy-migration-v1.schema.json')
         Test-Json -Json $manifestText -Schema $schemaText | Should Be $true
@@ -171,15 +181,19 @@ Describe 'Authority-owned consumer source gate' {
         (@($manifest.repositories.id)-join"`n") | Should Be (@(
                 'skill-general','skill-atlassian-ecosystem','skill-code-collaboration','skill-knowledge-content','skill-darktide-translate'
             )-join"`n")
-        @($manifest.repositories | Where-Object status -eq ready).Count | Should Be 4
+        @($manifest.repositories | Where-Object status -eq ready).Count | Should Be 5
         $darktide = @($manifest.repositories | Where-Object id -eq skill-darktide-translate)[0]
-        $darktide.status | Should Be pending-prerequisites
+        $darktide.status | Should Be ready
+        $darktide.inventoryCommit | Should Be 'db9a091779a4ffdd8257d129e8c3649eef8eda80'
+        $darktide.inventoryTree | Should Be 'a064355879c970c37d7640e172ae241d0ed1aaa5'
+        $null -ne $darktide.PSObject.Properties['prerequisites'] | Should Be $false
         $darktide.additionalScope | Should Be @('skills/auto-update-darktide-mod/scripts/')
         $expectedFileRows=@(
             '.github/workflows/standard-v1-candidate-windows.yml|delete||','config/standard-v1.json|delete||',
             'scripts/Get-SourcePin.ps1|delete||','scripts/Install-LatestPowerShell.ps1|delete||',
             'scripts/Invoke-PrePushValidation.ps1|delete||','scripts/PowerShellRelease.psm1|delete||',
-            'scripts/Test-CleanRepositoryHead.ps1|retain||','scripts/Test-Repository.ps1|split||scripts/Test-DarktideRepository.ps1',
+            'scripts/Test-CleanRepositoryHead.ps1|retain||','scripts/Test-DarktideRepository.ps1|retain||',
+            'scripts/Test-Repository.ps1|split||scripts/Test-DarktideRepository.ps1',
             'scripts/Validate.ps1|delete||',
             'skills/auto-update-darktide-mod/scripts/Apply-LocalizationWorkset.ps1|retain||',
             'skills/auto-update-darktide-mod/scripts/Expand-Schema14Reference.ps1|retain||',
@@ -196,75 +210,33 @@ Describe 'Authority-owned consumer source gate' {
             'skills/auto-update-darktide-mod/scripts/Test-ModUpdateCandidate.ps1|retain||',
             'skills/auto-update-darktide-mod/scripts/Test-ReferenceIntegrity.ps1|retain||',
             'skills/auto-update-darktide-mod/scripts/Test-SourceReceipt.ps1|retain||',
-            'tests/AtomicValidationOutput.Tests.ps1|update-tests|rewrite|','tests/BootstrapTransition.Tests.ps1|update-tests|rewrite|',
-            'tests/CanonicalValidation.Tests.ps1|update-tests|rewrite|','tests/InstalledClosureOrdering.Tests.ps1|update-tests|rewrite|',
-            'tests/Invoke-Tests.ps1|retain||','tests/LocalizationWorkset.Tests.ps1|update-tests|rewrite|',
-            'tests/ModUpdateAutomation.Tests.ps1|update-tests|rewrite|','tests/RepositoryContract.Tests.ps1|update-tests|rewrite|',
-            'tests/RepositoryValidation.Tests.ps1|update-tests|rewrite|','tests/Schema15Coordination.Tests.ps1|update-tests|rewrite|',
-            'tests/Schema15SourceAcquisition.Tests.ps1|update-tests|rewrite|','tests/SkillContract.Tests.ps1|update-tests|rewrite|',
-            'tests/SkillSpectorOutput.Tests.ps1|update-tests|rewrite|','tests/SourcePin.Tests.ps1|update-tests|rewrite|',
-            'tests/StandardV1Conformance.Tests.ps1|update-tests|rewrite|','tests/Test-Repository.Tests.ps1|update-tests|rewrite|',
-            'tests/TestSupport.ps1|update-tests|rewrite|','tests/ValidationTransition.Tests.ps1|update-tests|rewrite|'
+            'tests/AtomicValidationOutput.Tests.ps1|update-tests|delete|','tests/BootstrapTransition.Tests.ps1|update-tests|delete|',
+            'tests/CanonicalValidation.Tests.ps1|update-tests|delete|','tests/InstalledClosureOrdering.Tests.ps1|retain||',
+            'tests/Invoke-Tests.ps1|retain||','tests/LocalizationWorkset.Tests.ps1|retain||',
+            'tests/ModUpdateAutomation.Tests.ps1|retain||','tests/PathSafetyAst.Tests.ps1|update-tests|rewrite|',
+            'tests/RepositoryContract.Tests.ps1|retain||','tests/RepositoryValidation.Tests.ps1|retain||',
+            'tests/Schema15Coordination.Tests.ps1|retain||','tests/Schema15SourceAcquisition.Tests.ps1|retain||',
+            'tests/SkillContract.Tests.ps1|retain||','tests/SkillSpectorOutput.Tests.ps1|retain||',
+            'tests/SourcePin.Tests.ps1|update-tests|delete|','tests/StandardV1Conformance.Tests.ps1|update-tests|delete|',
+            'tests/support/ProcessEnvironment.psm1|retain||','tests/Test-DarktideRepository.Tests.ps1|retain||',
+            'tests/Test-Repository.Tests.ps1|update-tests|delete|','tests/TestSupport.ps1|retain||',
+            'tests/TestSupportLayout.Tests.ps1|retain||','tests/ValidationTransition.Tests.ps1|update-tests|delete|'
         )
         $actualFileRows=@($darktide.files|ForEach-Object{
                 $outcome=if($null-ne$_.PSObject.Properties['expectedOutcome']){[string]$_.expectedOutcome}else{''}
                 $target=if($null-ne$_.PSObject.Properties['target']){[string]$_.target}else{''}
                 "$($_.path)|$($_.disposition)|$outcome|$target"
             })
-        @($actualFileRows).Count | Should Be 42
+        @($actualFileRows).Count | Should Be 47
         (@($actualFileRows)-join"`n") | Should Be (@($expectedFileRows)-join"`n")
         $expectedChecks=@(
             'repository-darktide|general|scripts/Test-DarktideRepository.ps1','repository-pester|pester|tests'
         )
         (@($darktide.requiredRepositoryChecks|ForEach-Object{"$($_.id)|$($_.kind)|$($_.path)"})-join"`n") |
             Should Be (@($expectedChecks)-join"`n")
-        $portableRequirement='S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips.'
-        $scriptRequirement='S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS.'
-        $expectedPrerequisiteRows=@(
-            "portable-01|tests/InstalledClosureOrdering.Tests.ps1|$portableRequirement",
-            "portable-02|tests/LocalizationWorkset.Tests.ps1|$portableRequirement",
-            "portable-03|tests/ModUpdateAutomation.Tests.ps1|$portableRequirement",
-            "portable-04|tests/RepositoryContract.Tests.ps1|$portableRequirement",
-            "portable-05|tests/Schema15Coordination.Tests.ps1|$portableRequirement",
-            "portable-06|tests/Schema15SourceAcquisition.Tests.ps1|$portableRequirement",
-            "portable-07|tests/SkillContract.Tests.ps1|$portableRequirement",
-            "portable-08|tests/SkillSpectorOutput.Tests.ps1|$portableRequirement",
-            "portable-09|tests/TestSupport.ps1|$portableRequirement","portable-10|tests/Invoke-Tests.ps1|$portableRequirement",
-            "portable-12|scripts/Test-CleanRepositoryHead.ps1|$portableRequirement",
-            'portable-13|scripts/Test-Repository.ps1|S8 must extract the Darktide-specific contract into portable scripts/Test-DarktideRepository.ps1 and remove the split source before re-inventory.',
-            "portable-skill-script-01|skills/auto-update-darktide-mod/scripts/Apply-LocalizationWorkset.ps1|$scriptRequirement",
-            "portable-skill-script-02|skills/auto-update-darktide-mod/scripts/Expand-Schema14Reference.ps1|$scriptRequirement",
-            "portable-skill-script-03|skills/auto-update-darktide-mod/scripts/Finalize-LocalizationWorksetEvidence.ps1|$scriptRequirement",
-            "portable-skill-script-04|skills/auto-update-darktide-mod/scripts/Finalize-ModUpdateMerge.ps1|$scriptRequirement",
-            "portable-skill-script-05|skills/auto-update-darktide-mod/scripts/Invoke-ModUpdateQueue.ps1|$scriptRequirement",
-            "portable-skill-script-06|skills/auto-update-darktide-mod/scripts/LuaLocalizationScanner.psm1|$scriptRequirement",
-            "portable-skill-script-07|skills/auto-update-darktide-mod/scripts/New-LocalizationWorkset.ps1|$scriptRequirement",
-            "portable-skill-script-08|skills/auto-update-darktide-mod/scripts/PathSafety.psm1|$scriptRequirement",
-            "portable-skill-script-09|skills/auto-update-darktide-mod/scripts/Receive-NexusMainFile.ps1|$scriptRequirement",
-            "portable-skill-script-10|skills/auto-update-darktide-mod/scripts/SharedCoordinationLock.psm1|$scriptRequirement",
-            "portable-skill-script-11|skills/auto-update-darktide-mod/scripts/Test-LocalizationWorksetReceipt.ps1|$scriptRequirement",
-            "portable-skill-script-12|skills/auto-update-darktide-mod/scripts/Test-ModUpdateCandidate.ps1|$scriptRequirement",
-            "portable-skill-script-13|skills/auto-update-darktide-mod/scripts/Test-ReferenceIntegrity.ps1|$scriptRequirement",
-            "portable-skill-script-14|skills/auto-update-darktide-mod/scripts/Test-SourceReceipt.ps1|$scriptRequirement",
-            "portable-skill-script-15|skills/auto-update-darktide-mod/scripts/mod-update.ps1|$scriptRequirement",
-            'remove-legacy-installed-closure|tests/InstalledClosureOrdering.Tests.ps1|Remove extraction of helpers from scripts/Validate.ps1 and rewrite the test for the consumer layout.',
-            'remove-legacy-repository-contract|tests/RepositoryContract.Tests.ps1|Remove assertions and execution paths for deleted workflow, configuration, scripts/Validate.ps1, and legacy-layout branches.',
-            'remove-legacy-skillspector-output|tests/SkillSpectorOutput.Tests.ps1|Remove the dependency on scripts/Validate.ps1 and exercise the consumer gate evidence contract instead.',
-            'support-consumer-layout|tests/TestSupport.ps1|Support the consumer layout with config/authority-pin.json and config/consumer-gate.json while preserving the required transition coverage.',
-            'replace-legacy-pre-push|scripts/Invoke-PrePushValidation.ps1|Delete this legacy entry or replace it with a separate portable consumer bootstrap development entry before re-inventory.',
-            'portable-link-helper|tests/RepositoryContract.Tests.ps1|Replace the unconditional Junction fixture with the existing platform-aware link helper.',
-            'portable-pwsh-fixture|tests/SkillSpectorOutput.Tests.ps1|Resolve pwsh or pwsh.exe by platform and use a native shell fixture on Unix.',
-            'portable-long-path-expectations|tests/ModUpdateAutomation.Tests.ps1|Register Windows long-path assertions only on Windows and add corresponding Unix behavior assertions.',
-            'portable-path-comparer|tests/ModUpdateAutomation.Tests.ps1|Register the case-insensitive InterT109 only on Windows and add Unix case-sensitive coverage.',
-            'portable-path-safety-native|skills/auto-update-darktide-mod/scripts/PathSafety.psm1|Exercise and verify the non-Windows branch without requiring the Windows-only native type.',
-            'portable-multiprocess-coordination|tests/Schema15Coordination.Tests.ps1|Demonstrate InterT180 completes on Windows, Linux, and macOS.'
-        )
-        $actualPrerequisiteRows=@($darktide.prerequisites|ForEach-Object{"$($_.id)|$($_.path)|$($_.requirement)"})
-        @($actualPrerequisiteRows).Count | Should Be 38
-        (@($actualPrerequisiteRows)-join"`n") | Should Be (@($expectedPrerequisiteRows)-join"`n")
         $fileCountOracle=[ordered]@{
             'skill-general'=46;'skill-atlassian-ecosystem'=100;'skill-code-collaboration'=23
-            'skill-knowledge-content'=17;'skill-darktide-translate'=42
+            'skill-knowledge-content'=17;'skill-darktide-translate'=47
         }
         foreach ($entry in $manifest.repositories) {
             $entry.inventoryCommit | Should Match '^[0-9a-f]{40}$'
@@ -319,10 +291,10 @@ Describe 'Authority-owned consumer source gate' {
         }
         $schemaCases=@(
             @{Id='ready-prerequisites';Apply={param($m)$e=@($m.repositories|Where-Object{$_.id-eq'skill-general'})[0];$e|Add-Member prerequisites @([pscustomobject]@{id='x';path=$e.files[0].path;requirement='x'})}},
-            @{Id='pending-missing-prerequisites';Apply={param($m)$e=@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0];$e.PSObject.Properties.Remove('prerequisites')}},
-            @{Id='pending-empty-prerequisites';Apply={param($m)(@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0]).prerequisites=@()}},
+            @{Id='pending-missing-prerequisites';Apply={param($m)(@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0]).status='pending-prerequisites'}},
+            @{Id='pending-empty-prerequisites';Apply={param($m)$e=@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0];$e.status='pending-prerequisites';$e|Add-Member prerequisites @()}},
             @{Id='retired-deferred-status';Apply={param($m)(@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0]).status='deferred'}},
-            @{Id='prerequisite-glob';Apply={param($m)(@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0]).prerequisites[0].path='tests/*.ps1'}},
+            @{Id='prerequisite-glob';Apply={param($m)$e=Set-FixturePendingPrerequisites $m;$e.prerequisites[0].path='tests/*.ps1'}},
             @{Id='scope-glob';Apply={param($m)(@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0]).additionalScope=@('skills/*/')}},
             @{Id='scope-dot';Apply={param($m)(@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0]).additionalScope=@('skills/./scripts/')}},
             @{Id='scope-dotdot';Apply={param($m)(@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0]).additionalScope=@('skills/x/../scripts/')}},
@@ -376,8 +348,8 @@ Describe 'Authority-owned consumer source gate' {
         }
 
         $semanticCases=@(
-            @{Id='duplicate-prerequisite-id';RepositoryId='skill-darktide-translate';Apply={param($m)$e=@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0];$x=Copy-FixtureValue $e.prerequisites[0];$x.path=$e.prerequisites[1].path;$e.prerequisites=@($e.prerequisites)+@($x)}},
-            @{Id='prerequisite-path-not-in-files';RepositoryId='skill-darktide-translate';Apply={param($m)(@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0]).prerequisites[0].path='tests/not-listed.ps1'}},
+            @{Id='duplicate-prerequisite-id';RepositoryId='skill-darktide-translate';Apply={param($m)$e=Set-FixturePendingPrerequisites $m;$x=Copy-FixtureValue $e.prerequisites[0];$x.path=$e.files[1].path;$e.prerequisites=@($e.prerequisites)+@($x)}},
+            @{Id='prerequisite-path-not-in-files';RepositoryId='skill-darktide-translate';Apply={param($m)$e=Set-FixturePendingPrerequisites $m;$e.prerequisites[0].path='tests/not-listed.ps1'}},
             @{Id='duplicate-required-check-path';RepositoryId='skill-general';Apply={param($m)$e=@($m.repositories|Where-Object{$_.id-eq'skill-general'})[0];$x=Copy-FixtureValue $e.requiredRepositoryChecks[0];$x.id='different-id';$e.requiredRepositoryChecks=@($e.requiredRepositoryChecks)+@($x)}},
             @{Id='scope-overlaps-basic-scope';RepositoryId='skill-darktide-translate';Apply={param($m)(@($m.repositories|Where-Object{$_.id-eq'skill-darktide-translate'})[0]).additionalScope=@('scripts/additional/')}},
             @{Id='exemption-file-not-listed';RepositoryId='skill-general';Exemption='file-missing'},
@@ -455,8 +427,8 @@ Describe 'Authority-owned consumer source gate' {
             'Candidate bootstrap differs'
     }
 
-    # Scenario: The migration manifest preserves repository behavior while removing authority-owned copies.
-    # Purpose: General history, CC catalog checks, and each legacy driver receive an explicit disposition.
+    # Scenario: The migration manifest preserves portable Darktide regressions while removing authority-owned copies.
+    # Purpose: General history, legacy-only tests, the split target, and the pathname-ledger rewrite stay explicit.
     It 'UnitT20_records_the_required_delete_split_and_history_decisions' {
         $manifest = Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'consumer/legacy-migration.json') | ConvertFrom-Json
         $text = $manifest | ConvertTo-Json -Depth 30
@@ -475,15 +447,28 @@ Describe 'Authority-owned consumer source gate' {
         foreach ($path in @(
                 'tests/LocalizationWorkset.Tests.ps1','tests/ModUpdateAutomation.Tests.ps1',
                 'tests/Schema15Coordination.Tests.ps1','tests/Schema15SourceAcquisition.Tests.ps1',
-                'tests/SkillContract.Tests.ps1'
+                'tests/SkillContract.Tests.ps1','tests/TestSupport.ps1'
+            )) {
+            $record = @($darktide.files | Where-Object path -eq $path)[0]
+            $record.disposition | Should Be 'retain'
+            $null -ne $record.PSObject.Properties['expectedOutcome'] | Should Be $false
+            $record.reason | Should Match 'Portable|portable'
+        }
+        $pathSafety = @($darktide.files | Where-Object path -eq 'tests/PathSafetyAst.Tests.ps1')[0]
+        $pathSafety.disposition | Should Be 'update-tests'
+        $pathSafety.expectedOutcome | Should Be 'rewrite'
+        $pathSafety.reason | Should Match 'literal entries for legacy files'
+        foreach ($path in @(
+                'tests/AtomicValidationOutput.Tests.ps1','tests/BootstrapTransition.Tests.ps1',
+                'tests/CanonicalValidation.Tests.ps1','tests/SourcePin.Tests.ps1',
+                'tests/StandardV1Conformance.Tests.ps1','tests/Test-Repository.Tests.ps1',
+                'tests/ValidationTransition.Tests.ps1'
             )) {
             $record = @($darktide.files | Where-Object path -eq $path)[0]
             $record.disposition | Should Be 'update-tests'
-            $record.expectedOutcome | Should Be 'rewrite'
-            $record.reason | Should Match 'dot-sources tests/TestSupport.ps1'
+            $record.expectedOutcome | Should Be 'delete'
         }
-        @($darktide.prerequisites | Where-Object id -eq 'portable-11').Count | Should Be 0
-        @($darktide.prerequisites | Where-Object id -eq 'replace-legacy-pre-push').Count | Should Be 1
+        $null -ne $darktide.PSObject.Properties['prerequisites'] | Should Be $false
     }
 
     # Scenario: Synthetic retained files use the supported PowerShell folds, unsafe parameter forms, aliases, and text encodings.
@@ -1937,7 +1922,7 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
 
     # Scenario: Each ready legacy repository declares a minimal tracked Skill and every exact required repository check.
     # Purpose: Conversion fixtures prove the manifest can drive valid configs while missing or duplicate required checks fail closed.
-    It 'UnitT37_accepts_all_four_ready_manifest_configs_and_rejects_required_check_drift' {
+    It 'UnitT37_accepts_all_five_ready_manifest_configs_and_rejects_required_check_drift' {
         $manifest=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'consumer/legacy-migration.json')|ConvertFrom-Json
         foreach($entry in @($manifest.repositories|Where-Object status -eq ready)){
             $root=Join-Path $TestDrive ("ready-"+[string]$entry.id)
@@ -1962,6 +1947,7 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
             'skill-atlassian-ecosystem' = @{ Count=100; Sha256='1ff826f6bb8ffb1d7a93b2d75d54dafccc646c123b45856c2f9176878f21845b' }
             'skill-code-collaboration' = @{ Count=23; Sha256='dbf9332f204eda3d15c8777c4e73ad0b846a0e653367ea188c03d47c2766ce2a' }
             'skill-knowledge-content' = @{ Count=17; Sha256='78704317aea1f2678901f671ecc6fb297640e8e1282eaf3f40dcb3f980a8c2a3' }
+            'skill-darktide-translate' = @{ Count=47; Sha256='fab68578ebcca33b835e0b2985cd3163580528ebbaa19fde55a62aaa9bc28f17' }
         }
         foreach ($entry in @($manifest.repositories | Where-Object status -eq ready)) {
             $oracleLines = @($entry.files | ForEach-Object {
@@ -1971,6 +1957,15 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
             $oracleSha = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($oracleBytes)).ToLowerInvariant()
             $oracleLines.Count | Should Be $expectedDispositionOracle[[string]$entry.id].Count
             $oracleSha | Should Be $expectedDispositionOracle[[string]$entry.id].Sha256
+
+            if ([string]$entry.id -eq 'skill-darktide-translate') {
+                $darktideSplit = @($entry.files | Where-Object disposition -eq 'split')[0]
+                $darktideSplitTarget = @($entry.files | Where-Object {
+                        [string]$_.path -eq [string]$darktideSplit.target
+                    })
+                $darktideSplitTarget.Count | Should Be 1
+                [string]$darktideSplitTarget[0].disposition | Should Be 'retain'
+            }
 
             $root = Join-Path $TestDrive ("dispositions-" + [string]$entry.id)
             [void][IO.Directory]::CreateDirectory($root)
@@ -1996,9 +1991,14 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
                     [IO.File]::AppendAllText($path, "rewritten`n", [Text.UTF8Encoding]::new($false))
                 }
                 if ($record.disposition -eq 'split') {
-                    $target = Join-Path $root ([string]$record.target)
-                    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $target))
-                    [IO.File]::WriteAllText($target, "split target`n", [Text.UTF8Encoding]::new($false))
+                    $splitTargetRecord = @($entry.files | Where-Object {
+                            [string]$_.path -eq [string]$record.target
+                        })[0]
+                    if ($null -eq $splitTargetRecord) {
+                        $target = Join-Path $root ([string]$record.target)
+                        [void][IO.Directory]::CreateDirectory((Split-Path -Parent $target))
+                        [IO.File]::WriteAllText($target, "split target`n", [Text.UTF8Encoding]::new($false))
+                    }
                 }
             }
             Copy-Item -Force (
@@ -2030,12 +2030,24 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
             foreach ($split in @($entry.files | Where-Object disposition -eq split)) {
                 $splitTarget = Join-Path $root ([string]$split.target)
                 $splitContent = Get-Content -Raw -LiteralPath $splitTarget
+                $splitTargetRecord = @($entry.files | Where-Object {
+                        [string]$_.path -eq [string]$split.target
+                    })[0]
                 Remove-Item -LiteralPath $splitTarget -Force
                 [void](Invoke-SourceFixtureGit $root @('add','-A'))
                 [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','wrong split target'))
                 $wrongRevision = Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
-                { Assert-GateProtectedFiles $script:RepositoryRoot $root $root $entry `
-                        $baseRevision $wrongRevision $true } | Should Throw 'Split target'
+                $splitExpectation = $entry
+                if ($null -ne $splitTargetRecord -and $splitTargetRecord.disposition -eq 'retain') {
+                    { Assert-GateProtectedFiles $script:RepositoryRoot $root $root $entry $baseRevision $wrongRevision $true } |
+                        Should Throw 'Retained path must remain unchanged'
+                    $splitExpectation = Copy-FixtureValue $entry
+                    $splitExpectation.files = @($splitExpectation.files | Where-Object {
+                            -not ([string]$_.path -eq [string]$split.target -and $_.disposition -eq 'retain')
+                        })
+                }
+                { Assert-GateProtectedFiles $script:RepositoryRoot $root $root $splitExpectation $baseRevision $wrongRevision $true } |
+                    Should Throw 'Split target'
                 [void][IO.Directory]::CreateDirectory((Split-Path -Parent $splitTarget))
                 [IO.File]::WriteAllText($splitTarget, $splitContent, [Text.UTF8Encoding]::new($false))
                 [void](Invoke-SourceFixtureGit $root @('add','-A'))
@@ -2060,7 +2072,9 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
 
             $deleteExpectation = Copy-FixtureValue $entry
             $deleteExpectation.files = @($deleteExpectation.files)
-            $deleteRecord = @($deleteExpectation.files | Where-Object disposition -eq 'update-tests')[0]
+            $deleteRecord = @($deleteExpectation.files | Where-Object {
+                    $_.disposition -eq 'update-tests' -and $_.expectedOutcome -eq 'rewrite'
+                })[0]
             $deleteRecord.expectedOutcome = 'delete'
             { Assert-GateProtectedFiles $script:RepositoryRoot $root $root $deleteExpectation `
                     $baseRevision $candidateRevision $true } | Should Throw 'must be deleted'

@@ -1131,9 +1131,9 @@
     {
       "id": "skill-darktide-translate",
       "repository": "https://github.com/SyuanTsai/Skill-Darktide-Translate.git",
-      "status": "pending-prerequisites",
-      "inventoryCommit": "c183518359311569294a1c1c6134e84dfdc17b2d",
-      "inventoryTree": "4ce65af0f17fe117864b519da3497daa09837386",
+      "status": "ready",
+      "inventoryCommit": "db9a091779a4ffdd8257d129e8c3649eef8eda80",
+      "inventoryTree": "a064355879c970c37d7640e172ae241d0ed1aaa5",
       "requiredRepositoryChecks": [
         {
           "id": "repository-darktide",
@@ -1180,7 +1180,12 @@
         {
           "path": "scripts/Test-CleanRepositoryHead.ps1",
           "disposition": "retain",
-          "reason": "Repository-owned local development check is outside the central CI driver."
+          "reason": "Portable repository-owned clean-head check is independent of the legacy validation driver."
+        },
+        {
+          "path": "scripts/Test-DarktideRepository.ps1",
+          "disposition": "retain",
+          "reason": "Portable repository-specific general check required by the consumer gate."
         },
         {
           "path": "scripts/Test-Repository.ps1",
@@ -1196,101 +1201,100 @@
         {
           "path": "skills/auto-update-darktide-mod/scripts/Apply-LocalizationWorkset.ps1",
           "disposition": "retain",
-          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+          "reason": "Portable Darktide Skill runtime script retained unchanged through conversion."
         },
         {
           "path": "skills/auto-update-darktide-mod/scripts/Expand-Schema14Reference.ps1",
           "disposition": "retain",
-          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+          "reason": "Portable Darktide Skill runtime script retained unchanged through conversion."
         },
         {
           "path": "skills/auto-update-darktide-mod/scripts/Finalize-LocalizationWorksetEvidence.ps1",
           "disposition": "retain",
-          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+          "reason": "Portable Darktide Skill runtime script retained unchanged through conversion."
         },
         {
           "path": "skills/auto-update-darktide-mod/scripts/Finalize-ModUpdateMerge.ps1",
           "disposition": "retain",
-          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+          "reason": "Portable Darktide Skill runtime script retained unchanged through conversion."
         },
         {
           "path": "skills/auto-update-darktide-mod/scripts/Invoke-ModUpdateQueue.ps1",
           "disposition": "retain",
-          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+          "reason": "Portable Darktide Skill runtime script retained unchanged through conversion."
         },
         {
           "path": "skills/auto-update-darktide-mod/scripts/LuaLocalizationScanner.psm1",
           "disposition": "retain",
-          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+          "reason": "Portable Darktide Skill runtime script retained unchanged through conversion."
         },
         {
           "path": "skills/auto-update-darktide-mod/scripts/mod-update.ps1",
           "disposition": "retain",
-          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+          "reason": "Portable Darktide Skill runtime script retained unchanged through conversion."
         },
         {
           "path": "skills/auto-update-darktide-mod/scripts/New-LocalizationWorkset.ps1",
           "disposition": "retain",
-          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+          "reason": "Portable Darktide Skill runtime script retained unchanged through conversion."
         },
         {
           "path": "skills/auto-update-darktide-mod/scripts/PathSafety.psm1",
           "disposition": "retain",
-          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+          "reason": "Portable Darktide Skill runtime script retained unchanged through conversion."
         },
         {
           "path": "skills/auto-update-darktide-mod/scripts/Receive-NexusMainFile.ps1",
           "disposition": "retain",
-          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+          "reason": "Portable Darktide Skill runtime script retained unchanged through conversion."
         },
         {
           "path": "skills/auto-update-darktide-mod/scripts/SharedCoordinationLock.psm1",
           "disposition": "retain",
-          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+          "reason": "Portable Darktide Skill runtime script retained unchanged through conversion."
         },
         {
           "path": "skills/auto-update-darktide-mod/scripts/Test-LocalizationWorksetReceipt.ps1",
           "disposition": "retain",
-          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+          "reason": "Portable Darktide Skill runtime script retained unchanged through conversion."
         },
         {
           "path": "skills/auto-update-darktide-mod/scripts/Test-ModUpdateCandidate.ps1",
           "disposition": "retain",
-          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+          "reason": "Portable Darktide Skill runtime script retained unchanged through conversion."
         },
         {
           "path": "skills/auto-update-darktide-mod/scripts/Test-ReferenceIntegrity.ps1",
           "disposition": "retain",
-          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+          "reason": "Portable Darktide Skill runtime script retained unchanged through conversion."
         },
         {
           "path": "skills/auto-update-darktide-mod/scripts/Test-SourceReceipt.ps1",
           "disposition": "retain",
-          "reason": "Retain the Darktide Skill runtime script; S8 must provide portable Windows and Unix behavior before conversion."
+          "reason": "Portable Darktide Skill runtime script retained unchanged through conversion."
         },
         {
           "path": "tests/AtomicValidationOutput.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
-          "expectedOutcome": "rewrite"
+          "reason": "Only tests atomic output behavior of the retired legacy repository validator.",
+          "expectedOutcome": "delete"
         },
         {
           "path": "tests/BootstrapTransition.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
-          "expectedOutcome": "rewrite"
+          "reason": "Only tests the retired bootstrap-to-legacy-driver transition.",
+          "expectedOutcome": "delete"
         },
         {
           "path": "tests/CanonicalValidation.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
-          "expectedOutcome": "rewrite"
+          "reason": "Only tests authority-owned behavior of the retired local validation driver and workflow.",
+          "expectedOutcome": "delete"
         },
         {
           "path": "tests/InstalledClosureOrdering.Tests.ps1",
-          "disposition": "update-tests",
-          "reason": "Rewrite this retained test or support file for the consumer layout; it contains a literal dependency on a removed legacy path.",
-          "expectedOutcome": "rewrite"
+          "disposition": "retain",
+          "reason": "Portable inventory-ordering regression targets the retained Darktide general check without legacy references."
         },
         {
           "path": "tests/Invoke-Tests.ps1",
@@ -1299,277 +1303,97 @@
         },
         {
           "path": "tests/LocalizationWorkset.Tests.ps1",
-          "disposition": "update-tests",
-          "reason": "Rewrite the repository-owned regression because it dot-sources tests/TestSupport.ps1, which is itself rewritten for the consumer layout.",
-          "expectedOutcome": "rewrite"
+          "disposition": "retain",
+          "reason": "Portable repository-owned localization regression uses consumer-capable test support without legacy references."
         },
         {
           "path": "tests/ModUpdateAutomation.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Portable repository-owned automation regression uses consumer-capable test support without legacy references."
+        },
+        {
+          "path": "tests/PathSafetyAst.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite the repository-owned regression because it dot-sources tests/TestSupport.ps1, which is itself rewritten for the consumer layout.",
+          "reason": "Rewrite the pathname-safety inventory because it contains literal entries for legacy files removed during conversion.",
           "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/RepositoryContract.Tests.ps1",
-          "disposition": "update-tests",
-          "reason": "Rewrite this retained test or support file for the consumer layout; it contains a literal dependency on a removed legacy path.",
-          "expectedOutcome": "rewrite"
+          "disposition": "retain",
+          "reason": "Portable repository contract already supports the consumer layout and has no legacy path dependency."
         },
         {
           "path": "tests/RepositoryValidation.Tests.ps1",
-          "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
-          "expectedOutcome": "rewrite"
+          "disposition": "retain",
+          "reason": "Portable clean-head regression is independent of the retired legacy validation driver."
         },
         {
           "path": "tests/Schema15Coordination.Tests.ps1",
-          "disposition": "update-tests",
-          "reason": "Rewrite the repository-owned regression because it dot-sources tests/TestSupport.ps1, which is itself rewritten for the consumer layout.",
-          "expectedOutcome": "rewrite"
+          "disposition": "retain",
+          "reason": "Portable repository-owned coordination regression uses consumer-capable test support without legacy references."
         },
         {
           "path": "tests/Schema15SourceAcquisition.Tests.ps1",
-          "disposition": "update-tests",
-          "reason": "Rewrite the repository-owned regression because it dot-sources tests/TestSupport.ps1, which is itself rewritten for the consumer layout.",
-          "expectedOutcome": "rewrite"
+          "disposition": "retain",
+          "reason": "Portable repository-owned source-acquisition regression uses consumer-capable test support without legacy references."
         },
         {
           "path": "tests/SkillContract.Tests.ps1",
-          "disposition": "update-tests",
-          "reason": "Rewrite the repository-owned regression because it dot-sources tests/TestSupport.ps1, which is itself rewritten for the consumer layout.",
-          "expectedOutcome": "rewrite"
+          "disposition": "retain",
+          "reason": "Portable repository-owned Skill contract regression uses consumer-capable test support without legacy references."
         },
         {
           "path": "tests/SkillSpectorOutput.Tests.ps1",
-          "disposition": "update-tests",
-          "reason": "Rewrite this retained test or support file for the consumer layout; it contains a literal dependency on a removed legacy path.",
-          "expectedOutcome": "rewrite"
+          "disposition": "retain",
+          "reason": "Portable consumer repository-check evidence regression targets the retained Darktide general check."
         },
         {
           "path": "tests/SourcePin.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
-          "expectedOutcome": "rewrite"
+          "reason": "Only tests the retired legacy source-pin generator.",
+          "expectedOutcome": "delete"
         },
         {
           "path": "tests/StandardV1Conformance.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
-          "expectedOutcome": "rewrite"
+          "reason": "Only tests the retired repository-local authority adapter and validation driver.",
+          "expectedOutcome": "delete"
+        },
+        {
+          "path": "tests/support/ProcessEnvironment.psm1",
+          "disposition": "retain",
+          "reason": "Portable process-environment helper supports repository-owned cross-platform tests."
+        },
+        {
+          "path": "tests/Test-DarktideRepository.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Portable contract and read-only evidence regressions for the retained Darktide general check."
         },
         {
           "path": "tests/Test-Repository.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
-          "expectedOutcome": "rewrite"
+          "reason": "Only tests the split legacy repository driver and its repository-local authority adapter coupling.",
+          "expectedOutcome": "delete"
         },
         {
           "path": "tests/TestSupport.ps1",
-          "disposition": "update-tests",
-          "reason": "Rewrite this retained test or support file for the consumer layout; it contains a literal dependency on a removed legacy path.",
-          "expectedOutcome": "rewrite"
+          "disposition": "retain",
+          "reason": "Portable test support already recognizes complete pre-conversion and consumer layouts without legacy driver references."
+        },
+        {
+          "path": "tests/TestSupportLayout.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Portable regression covers complete pre-conversion, consumer, and partial consumer layouts."
         },
         {
           "path": "tests/ValidationTransition.Tests.ps1",
           "disposition": "update-tests",
-          "reason": "Rewrite or remove assertions that exercise the legacy local driver while preserving repository behavior coverage.",
-          "expectedOutcome": "rewrite"
+          "reason": "Only tests transition behavior of retired drivers, workflow, and repository-local authority adapter.",
+          "expectedOutcome": "delete"
         }
       ],
       "additionalScope": [
         "skills/auto-update-darktide-mod/scripts/"
-      ],
-      "prerequisites": [
-        {
-          "id": "portable-01",
-          "path": "tests/InstalledClosureOrdering.Tests.ps1",
-          "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
-        },
-        {
-          "id": "portable-02",
-          "path": "tests/LocalizationWorkset.Tests.ps1",
-          "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
-        },
-        {
-          "id": "portable-03",
-          "path": "tests/ModUpdateAutomation.Tests.ps1",
-          "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
-        },
-        {
-          "id": "portable-04",
-          "path": "tests/RepositoryContract.Tests.ps1",
-          "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
-        },
-        {
-          "id": "portable-05",
-          "path": "tests/Schema15Coordination.Tests.ps1",
-          "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
-        },
-        {
-          "id": "portable-06",
-          "path": "tests/Schema15SourceAcquisition.Tests.ps1",
-          "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
-        },
-        {
-          "id": "portable-07",
-          "path": "tests/SkillContract.Tests.ps1",
-          "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
-        },
-        {
-          "id": "portable-08",
-          "path": "tests/SkillSpectorOutput.Tests.ps1",
-          "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
-        },
-        {
-          "id": "portable-09",
-          "path": "tests/TestSupport.ps1",
-          "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
-        },
-        {
-          "id": "portable-10",
-          "path": "tests/Invoke-Tests.ps1",
-          "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
-        },
-        {
-          "id": "portable-12",
-          "path": "scripts/Test-CleanRepositoryHead.ps1",
-          "requirement": "S8 must make the retained or rewritten file portable on Windows, Linux, and macOS without skips."
-        },
-        {
-          "id": "portable-13",
-          "path": "scripts/Test-Repository.ps1",
-          "requirement": "S8 must extract the Darktide-specific contract into portable scripts/Test-DarktideRepository.ps1 and remove the split source before re-inventory."
-        },
-        {
-          "id": "portable-skill-script-01",
-          "path": "skills/auto-update-darktide-mod/scripts/Apply-LocalizationWorkset.ps1",
-          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
-        },
-        {
-          "id": "portable-skill-script-02",
-          "path": "skills/auto-update-darktide-mod/scripts/Expand-Schema14Reference.ps1",
-          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
-        },
-        {
-          "id": "portable-skill-script-03",
-          "path": "skills/auto-update-darktide-mod/scripts/Finalize-LocalizationWorksetEvidence.ps1",
-          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
-        },
-        {
-          "id": "portable-skill-script-04",
-          "path": "skills/auto-update-darktide-mod/scripts/Finalize-ModUpdateMerge.ps1",
-          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
-        },
-        {
-          "id": "portable-skill-script-05",
-          "path": "skills/auto-update-darktide-mod/scripts/Invoke-ModUpdateQueue.ps1",
-          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
-        },
-        {
-          "id": "portable-skill-script-06",
-          "path": "skills/auto-update-darktide-mod/scripts/LuaLocalizationScanner.psm1",
-          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
-        },
-        {
-          "id": "portable-skill-script-07",
-          "path": "skills/auto-update-darktide-mod/scripts/New-LocalizationWorkset.ps1",
-          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
-        },
-        {
-          "id": "portable-skill-script-08",
-          "path": "skills/auto-update-darktide-mod/scripts/PathSafety.psm1",
-          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
-        },
-        {
-          "id": "portable-skill-script-09",
-          "path": "skills/auto-update-darktide-mod/scripts/Receive-NexusMainFile.ps1",
-          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
-        },
-        {
-          "id": "portable-skill-script-10",
-          "path": "skills/auto-update-darktide-mod/scripts/SharedCoordinationLock.psm1",
-          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
-        },
-        {
-          "id": "portable-skill-script-11",
-          "path": "skills/auto-update-darktide-mod/scripts/Test-LocalizationWorksetReceipt.ps1",
-          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
-        },
-        {
-          "id": "portable-skill-script-12",
-          "path": "skills/auto-update-darktide-mod/scripts/Test-ModUpdateCandidate.ps1",
-          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
-        },
-        {
-          "id": "portable-skill-script-13",
-          "path": "skills/auto-update-darktide-mod/scripts/Test-ReferenceIntegrity.ps1",
-          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
-        },
-        {
-          "id": "portable-skill-script-14",
-          "path": "skills/auto-update-darktide-mod/scripts/Test-SourceReceipt.ps1",
-          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
-        },
-        {
-          "id": "portable-skill-script-15",
-          "path": "skills/auto-update-darktide-mod/scripts/mod-update.ps1",
-          "requirement": "S8 must verify this retained Skill runtime script and its exercised branches on Windows, Linux, and macOS."
-        },
-        {
-          "id": "remove-legacy-installed-closure",
-          "path": "tests/InstalledClosureOrdering.Tests.ps1",
-          "requirement": "Remove extraction of helpers from scripts/Validate.ps1 and rewrite the test for the consumer layout."
-        },
-        {
-          "id": "remove-legacy-repository-contract",
-          "path": "tests/RepositoryContract.Tests.ps1",
-          "requirement": "Remove assertions and execution paths for deleted workflow, configuration, scripts/Validate.ps1, and legacy-layout branches."
-        },
-        {
-          "id": "remove-legacy-skillspector-output",
-          "path": "tests/SkillSpectorOutput.Tests.ps1",
-          "requirement": "Remove the dependency on scripts/Validate.ps1 and exercise the consumer gate evidence contract instead."
-        },
-        {
-          "id": "support-consumer-layout",
-          "path": "tests/TestSupport.ps1",
-          "requirement": "Support the consumer layout with config/authority-pin.json and config/consumer-gate.json while preserving the required transition coverage."
-        },
-        {
-          "id": "replace-legacy-pre-push",
-          "path": "scripts/Invoke-PrePushValidation.ps1",
-          "requirement": "Delete this legacy entry or replace it with a separate portable consumer bootstrap development entry before re-inventory."
-        },
-        {
-          "id": "portable-link-helper",
-          "path": "tests/RepositoryContract.Tests.ps1",
-          "requirement": "Replace the unconditional Junction fixture with the existing platform-aware link helper."
-        },
-        {
-          "id": "portable-pwsh-fixture",
-          "path": "tests/SkillSpectorOutput.Tests.ps1",
-          "requirement": "Resolve pwsh or pwsh.exe by platform and use a native shell fixture on Unix."
-        },
-        {
-          "id": "portable-long-path-expectations",
-          "path": "tests/ModUpdateAutomation.Tests.ps1",
-          "requirement": "Register Windows long-path assertions only on Windows and add corresponding Unix behavior assertions."
-        },
-        {
-          "id": "portable-path-comparer",
-          "path": "tests/ModUpdateAutomation.Tests.ps1",
-          "requirement": "Register the case-insensitive InterT109 only on Windows and add Unix case-sensitive coverage."
-        },
-        {
-          "id": "portable-path-safety-native",
-          "path": "skills/auto-update-darktide-mod/scripts/PathSafety.psm1",
-          "requirement": "Exercise and verify the non-Windows branch without requiring the Windows-only native type."
-        },
-        {
-          "id": "portable-multiprocess-coordination",
-          "path": "tests/Schema15Coordination.Tests.ps1",
-          "requirement": "Demonstrate InterT180 completes on Windows, Linux, and macOS."
-        }
       ]
     }
   ]
