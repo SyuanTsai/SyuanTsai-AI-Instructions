@@ -186,8 +186,9 @@
         },
         {
           "path": "tests/Test-SkillGeneral.Tests.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite the README golden assertions that require the legacy Windows-only CI and local source-validation wording.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/fixtures/environment-authorized-sql/authorization.json",
