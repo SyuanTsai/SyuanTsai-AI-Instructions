@@ -106,7 +106,8 @@ function Test-RolloutDirectoryExcluded {
 function Resolve-RolloutRepositoryIdentity {
     param([Parameter(Mandatory = $true)][string] $Path,[Parameter(Mandatory = $true)][string] $GitExecutable)
     $insideExitCode = Get-RolloutGitExitCode -Repository $Path -GitExecutable $GitExecutable -Arguments @('rev-parse','--is-inside-work-tree')
-    if ($insideExitCode -ne 0) { throw "git rev-parse --is-inside-work-tree failed with exit code $insideExitCode." }
+    if ($insideExitCode -eq 128) { return $null }
+    if ($insideExitCode -ne 0) { throw "Rollout Git exit code failure: git rev-parse --is-inside-work-tree failed with exit code $insideExitCode." }
     $inside = ((Invoke-RolloutGit -Repository $Path -GitExecutable $GitExecutable -Arguments @('rev-parse','--is-inside-work-tree')) | Select-Object -First 1).Trim()
     if ($inside -cne 'true') { return $null }
     $topLevel = Get-RolloutFullPath -Path (((Invoke-RolloutGit -Repository $Path -GitExecutable $GitExecutable -Arguments @('rev-parse','--show-toplevel')) | Select-Object -First 1).Trim())
@@ -115,13 +116,13 @@ function Resolve-RolloutRepositoryIdentity {
     $commonDirectory = Get-RolloutFullPath -Path $commonDirectory
     $branch = ''
     $symbolicExitCode = Get-RolloutGitExitCode -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('symbolic-ref','-q','--short','HEAD')
-    if ($symbolicExitCode -notin @(0, 1)) { throw "git symbolic-ref -q --short HEAD failed with exit code $symbolicExitCode." }
+    if ($symbolicExitCode -notin @(0, 1)) { throw "Rollout Git exit code failure: git symbolic-ref -q --short HEAD failed with exit code $symbolicExitCode." }
     if ($symbolicExitCode -eq 0) {
         $branch = ((Invoke-RolloutGit -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('symbolic-ref','-q','--short','HEAD')) | Select-Object -First 1).Trim()
     }
     if ([string]::IsNullOrWhiteSpace($branch)) {
         $headExitCode = Get-RolloutGitExitCode -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('rev-parse','--verify','--quiet','HEAD')
-        if ($headExitCode -notin @(0, 1)) { throw "git rev-parse --verify --quiet HEAD failed with exit code $headExitCode." }
+        if ($headExitCode -notin @(0, 1)) { throw "Rollout Git exit code failure: git rev-parse --verify --quiet HEAD failed with exit code $headExitCode." }
         $head = if ($headExitCode -eq 0) {
             ((Invoke-RolloutGit -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('rev-parse','--verify','--quiet','HEAD')) | Select-Object -First 1).Trim()
         }
@@ -130,7 +131,7 @@ function Resolve-RolloutRepositoryIdentity {
     }
     $origin = ''
     $originExitCode = Get-RolloutGitExitCode -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('remote','get-url','origin')
-    if ($originExitCode -notin @(0, 2)) { throw "git remote get-url origin failed with exit code $originExitCode." }
+    if ($originExitCode -notin @(0, 2)) { throw "Rollout Git exit code failure: git remote get-url origin failed with exit code $originExitCode." }
     if ($originExitCode -eq 0) {
         $origin = ((Invoke-RolloutGit -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('remote','get-url','origin')) | Select-Object -First 1).Trim()
     }
@@ -187,7 +188,9 @@ function Get-AiInstructionsRepositoryRoots {
                 $identity = Resolve-RolloutRepositoryIdentity -Path $current -GitExecutable $GitExecutable
                 if ($null -ne $identity -and $repositoryIdentities.Add([string]$identity.Identity)) { $repositories.Add($identity) }
             }
-            catch { }
+            catch {
+                if ($_.Exception.Message.StartsWith('Rollout Git exit code failure:',[System.StringComparison]::Ordinal)) { throw }
+            }
         }
         try { $children = @([System.IO.Directory]::EnumerateDirectories($current)) }
         catch { continue }
