@@ -218,9 +218,9 @@ Describe 'Authority-owned consumer source gate' {
             'tests/Schema15Coordination.Tests.ps1|retain||','tests/Schema15SourceAcquisition.Tests.ps1|retain||',
             'tests/SkillContract.Tests.ps1|retain||','tests/SkillSpectorOutput.Tests.ps1|retain||',
             'tests/SourcePin.Tests.ps1|update-tests|delete|','tests/StandardV1Conformance.Tests.ps1|update-tests|delete|',
-            'tests/Test-DarktideRepository.Tests.ps1|retain||','tests/Test-Repository.Tests.ps1|update-tests|delete|',
-            'tests/TestSupport.ps1|retain||','tests/TestSupportLayout.Tests.ps1|retain||',
-            'tests/ValidationTransition.Tests.ps1|update-tests|delete|','tests/support/ProcessEnvironment.psm1|retain||'
+            'tests/support/ProcessEnvironment.psm1|retain||','tests/Test-DarktideRepository.Tests.ps1|retain||',
+            'tests/Test-Repository.Tests.ps1|update-tests|delete|','tests/TestSupport.ps1|retain||',
+            'tests/TestSupportLayout.Tests.ps1|retain||','tests/ValidationTransition.Tests.ps1|update-tests|delete|'
         )
         $actualFileRows=@($darktide.files|ForEach-Object{
                 $outcome=if($null-ne$_.PSObject.Properties['expectedOutcome']){[string]$_.expectedOutcome}else{''}
