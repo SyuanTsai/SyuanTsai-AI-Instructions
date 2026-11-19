@@ -184,14 +184,15 @@ Describe 'Authority-owned consumer source gate' {
         @($manifest.repositories | Where-Object status -eq ready).Count | Should Be 5
         $darktide = @($manifest.repositories | Where-Object id -eq skill-darktide-translate)[0]
         $darktide.status | Should Be ready
-        $darktide.inventoryCommit | Should Be 'db9a091779a4ffdd8257d129e8c3649eef8eda80'
-        $darktide.inventoryTree | Should Be 'a064355879c970c37d7640e172ae241d0ed1aaa5'
+        $darktide.inventoryCommit | Should Be '087e03948d4e5deff7bf2786728db0a743c03aa6'
+        $darktide.inventoryTree | Should Be '4384eb781be353daa5fa3469f4cbe4a9d980a54b'
         $null -ne $darktide.PSObject.Properties['prerequisites'] | Should Be $false
         $darktide.additionalScope | Should Be @('skills/auto-update-darktide-mod/scripts/')
         $expectedFileRows=@(
             '.github/workflows/standard-v1-candidate-windows.yml|delete||','config/standard-v1.json|delete||',
             'scripts/Get-SourcePin.ps1|delete||','scripts/Install-LatestPowerShell.ps1|delete||',
-            'scripts/Invoke-PrePushValidation.ps1|delete||','scripts/PowerShellRelease.psm1|delete||',
+            'scripts/Invoke-PrePushValidation.ps1|delete||','scripts/New-SkillSourcePin.ps1|retain||',
+            'scripts/PowerShellRelease.psm1|delete||',
             'scripts/Test-CleanRepositoryHead.ps1|retain||','scripts/Test-DarktideRepository.ps1|retain||',
             'scripts/Test-Repository.ps1|split||scripts/Test-DarktideRepository.ps1',
             'scripts/Validate.ps1|delete||',
@@ -216,7 +217,8 @@ Describe 'Authority-owned consumer source gate' {
             'tests/ModUpdateAutomation.Tests.ps1|retain||','tests/PathSafetyAst.Tests.ps1|update-tests|rewrite|',
             'tests/RepositoryContract.Tests.ps1|retain||','tests/RepositoryValidation.Tests.ps1|retain||',
             'tests/Schema15Coordination.Tests.ps1|retain||','tests/Schema15SourceAcquisition.Tests.ps1|retain||',
-            'tests/SkillContract.Tests.ps1|retain||','tests/SkillSpectorOutput.Tests.ps1|retain||',
+            'tests/SkillContract.Tests.ps1|retain||','tests/SkillSourcePinGenerator.Tests.ps1|retain||',
+            'tests/SkillSpectorOutput.Tests.ps1|retain||',
             'tests/SourcePin.Tests.ps1|update-tests|delete|','tests/StandardV1Conformance.Tests.ps1|update-tests|delete|',
             'tests/support/ProcessEnvironment.psm1|retain||','tests/Test-DarktideRepository.Tests.ps1|retain||',
             'tests/Test-Repository.Tests.ps1|update-tests|delete|','tests/TestSupport.ps1|retain||',
@@ -227,7 +229,7 @@ Describe 'Authority-owned consumer source gate' {
                 $target=if($null-ne$_.PSObject.Properties['target']){[string]$_.target}else{''}
                 "$($_.path)|$($_.disposition)|$outcome|$target"
             })
-        @($actualFileRows).Count | Should Be 47
+        @($actualFileRows).Count | Should Be 49
         (@($actualFileRows)-join"`n") | Should Be (@($expectedFileRows)-join"`n")
         $expectedChecks=@(
             'repository-darktide|general|scripts/Test-DarktideRepository.ps1','repository-pester|pester|tests'
@@ -236,7 +238,7 @@ Describe 'Authority-owned consumer source gate' {
             Should Be (@($expectedChecks)-join"`n")
         $fileCountOracle=[ordered]@{
             'skill-general'=46;'skill-atlassian-ecosystem'=100;'skill-code-collaboration'=23
-            'skill-knowledge-content'=17;'skill-darktide-translate'=47
+            'skill-knowledge-content'=17;'skill-darktide-translate'=49
         }
         foreach ($entry in $manifest.repositories) {
             $entry.inventoryCommit | Should Match '^[0-9a-f]{40}$'
@@ -1947,7 +1949,7 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
             'skill-atlassian-ecosystem' = @{ Count=100; Sha256='1ff826f6bb8ffb1d7a93b2d75d54dafccc646c123b45856c2f9176878f21845b' }
             'skill-code-collaboration' = @{ Count=23; Sha256='dbf9332f204eda3d15c8777c4e73ad0b846a0e653367ea188c03d47c2766ce2a' }
             'skill-knowledge-content' = @{ Count=17; Sha256='78704317aea1f2678901f671ecc6fb297640e8e1282eaf3f40dcb3f980a8c2a3' }
-            'skill-darktide-translate' = @{ Count=47; Sha256='fab68578ebcca33b835e0b2985cd3163580528ebbaa19fde55a62aaa9bc28f17' }
+            'skill-darktide-translate' = @{ Count=49; Sha256='9fcad1291facceb4e2d20be43ccf7cf772ffe21f1ef94cad6083da2958669626' }
         }
         foreach ($entry in @($manifest.repositories | Where-Object status -eq ready)) {
             $oracleLines = @($entry.files | ForEach-Object {
