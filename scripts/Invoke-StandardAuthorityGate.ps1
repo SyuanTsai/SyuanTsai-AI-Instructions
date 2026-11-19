@@ -3153,6 +3153,17 @@ function Get-AuthorityLauncherDigest {
     finally { $sha.Dispose() }
 }
 
+function Get-AuthoritySkillSpectorApprovedSources {
+    $authorityRoot = Split-Path -Parent $PSScriptRoot
+    $toolchain = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $authorityRoot 'docs/standards/validation-toolchain.json') | ConvertFrom-Json
+    $registryPath = Join-Path $authorityRoot ([string]$toolchain.tools.skillspector.approvedSources)
+    return & {
+        param([string]$ResolverPath,[string]$ApprovedSourcesPath)
+        . $ResolverPath -ValidatePolicyOnly | Out-Null
+        Get-SkillSpectorApprovedSources -Path $ApprovedSourcesPath
+    } (Join-Path $PSScriptRoot 'Resolve-StandardValidationTool.ps1') $registryPath
+}
+
 function Assert-AuthorityLauncherReceipt {
     param(
         [Parameter(Mandatory = $true)] $Receipt,
@@ -3220,10 +3231,11 @@ function Assert-AuthorityLauncherReceipt {
         }
     }
     if ($kind -ceq 'skillspector-python') {
+        $approvedEntry = (Get-AuthoritySkillSpectorApprovedSources).activeEntry
         $expectedRuntime = Join-Path ([IO.Path]::GetDirectoryName($ExecutablePath)) $(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'python.exe' } else { 'python' })
         if ($payloadPath -cne $shimPath -or $runtimePath -cne $expectedRuntime -or
             [string]$launcher.payloadSha256 -cne [string]$launcher.shimSha256 -or
-            [string]$Receipt.consoleEntryPoint -cne 'skillspector.cli:app') { throw 'SkillSpector native launcher does not bind the approved installed entry point and runtime.' }
+            [string]$Receipt.consoleEntryPoint -cne [string]$approvedEntry.consoleEntryPoint) { throw 'SkillSpector native launcher does not bind the approved installed entry point and runtime.' }
         Assert-AuthorityPathWithinRoot -Path $runtimePath -Root $InstallRoot -Context 'SkillSpector runtime'
         return
     }
@@ -3270,21 +3282,18 @@ function Assert-InstalledAuthorityToolReceipt {
         }
     }
     if ($ToolName -ceq 'skillspector') {
-        $toolchain = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/validation-toolchain.json') | ConvertFrom-Json
-        $registryPath = Join-Path (Split-Path -Parent $PSScriptRoot) ([string]$toolchain.tools.skillspector.approvedSources)
-        $registry = & {
-            param([string]$ResolverPath,[string]$ApprovedSourcesPath)
-            . $ResolverPath -ValidatePolicyOnly | Out-Null
-            Get-SkillSpectorApprovedSources -Path $ApprovedSourcesPath
-        } (Join-Path $PSScriptRoot 'Resolve-StandardValidationTool.ps1') $registryPath
+        $registry = Get-AuthoritySkillSpectorApprovedSources
         $approvedSourceId = Get-AuthorityRequiredProperty -Object $Receipt -Name 'approvedSourceId' -Context 'skillspector receipt'
         $parserCorrection = Get-AuthorityRequiredProperty -Object $Receipt -Name 'parserCorrection' -Context 'skillspector receipt'
         if ([string]$approvedSourceId -cne [string]$registry.active) { throw 'SkillSpector receipt does not name the active approved source entry.' }
         $entryProperty = @($registry.entries.PSObject.Properties | Where-Object { $_.Name -ceq [string]$approvedSourceId })
         if ($entryProperty.Count -ne 1) { throw 'SkillSpector receipt names an unknown approved source entry.' }
         $entry = $entryProperty[0].Value
+        $consoleEntryPoint = Get-AuthorityProperty -Object $Receipt -Name 'consoleEntryPoint'
         $identityPrefix = 'github:NVIDIA/SkillSpector@' + [string]$entry.releaseTag + '#commit=' + [string]$entry.releaseCommit + '#asset=sha256:' + [string]$entry.wheelSha256 + '#'
-        if ([string]$Receipt.resolvedVersion -cne [string]$entry.version -or
+        if ($consoleEntryPoint -isnot [string] -or
+            [string]$consoleEntryPoint -cne [string]$entry.consoleEntryPoint -or
+            [string]$Receipt.resolvedVersion -cne [string]$entry.version -or
             [string]$parserCorrection -cne [string]$entry.parserCorrection -or
             -not ([string]$Receipt.resolvedIdentity).StartsWith($identityPrefix, [StringComparison]::Ordinal)) {
             throw 'SkillSpector receipt does not match its approved source entry.'

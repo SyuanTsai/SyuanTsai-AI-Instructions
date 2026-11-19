@@ -214,6 +214,32 @@ Describe 'Static parser coverage and finding preservation' {
         }
     }
 
+    # Scenario: A frozen receipt changes its console entry point, then the registry activates the reviewed 2.13.6 entry.
+    # Purpose: Reject entry-point drift while accepting the distinct console entry point bound by the active approved entry.
+    It 'UnitT53a_binds_the_receipt_console_entry_point_to_the_active_approved_entry' {
+        $approved=Get-Content -Raw (Join-Path $parserRepositoryRoot 'docs/standards/skillspector-approved-sources.json') | ConvertFrom-Json
+        $entry=$approved.entries.'2.13.4'
+        $runId='b'*32
+        $prefix='github:NVIDIA/SkillSpector@'+$entry.releaseTag+'#commit='+$entry.releaseCommit+'#asset=sha256:'+$entry.wheelSha256+'#'
+        $receipt=[pscustomobject]@{
+            toolName='skillspector';source='NVIDIA/SkillSpector';channel='approved-source-registry'
+            approvedSourceId='2.13.4';parserCorrection=$entry.parserCorrection;resolvedVersion=$entry.version;frozenForRun=$true
+            resolutionRunId=$runId;identityKind='release-commit-asset-metadata-dependency-closure-and-executable'
+            offlineResolutionVerified=$true;consoleEntryPoint='skillspector.cli_entry:app';resolvedIdentity=$prefix+'closure=fixture'
+            installedClosureSha256='a'*64;dependencyClosure=@([pscustomobject]@{normalizedName='skillspector';version=$entry.version;sha256=$entry.wheelSha256})
+        }
+        Assert-ParserRejected {Get-StaticApprovedSkillSpectorEntry -Receipt $receipt -ApprovedSources $approved -ExpectedResolutionRunId $runId | Out-Null}
+
+        $approved.active='2.13.6'
+        $entry=$approved.entries.'2.13.6'
+        $receipt.approvedSourceId='2.13.6'
+        $receipt.parserCorrection=$entry.parserCorrection
+        $receipt.resolvedVersion=$entry.version
+        $receipt.resolvedIdentity='github:NVIDIA/SkillSpector@'+$entry.releaseTag+'#commit='+$entry.releaseCommit+'#asset=sha256:'+$entry.wheelSha256+'#closure=fixture'
+        $receipt.dependencyClosure=@([pscustomobject]@{normalizedName='skillspector';version=$entry.version;sha256=$entry.wheelSha256})
+        Assert-ParserCase ((Get-StaticApprovedSkillSpectorEntry -Receipt $receipt -ApprovedSources $approved -ExpectedResolutionRunId $runId).version -ceq '2.13.6') 'The reviewed 2.13.6 console entry point was rejected.'
+    }
+
 
     # Scenario: A frozen receipt names a retained reviewed source entry that is not the registry's active entry.
     # Purpose: Keep Static execution canonical by accepting only the currently active approved source.
