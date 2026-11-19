@@ -45,6 +45,71 @@ function Test-PathWithin {
     $comparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
     return $fullPath.Equals($fullRoot, $comparison) -or $fullPath.StartsWith($fullRoot + [IO.Path]::DirectorySeparatorChar, $comparison)
 }
+function Assert-CandidateRegularFile {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $CandidateRoot,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $fullRoot = [IO.Path]::GetFullPath($CandidateRoot)
+    if (-not (Test-PathWithin -Path $fullPath -Root $fullRoot)) { throw "$Context is outside the bound candidate snapshot." }
+    $cursor = $fullPath
+    while ($true) {
+        if (-not (Test-Path -LiteralPath $cursor)) { throw "$Context is missing." }
+        $item = Get-Item -LiteralPath $cursor -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "$Context has a linked path component." }
+        if (Test-PathEqual -Left $cursor -Right $fullRoot) { break }
+        $parent = [IO.Path]::GetDirectoryName($cursor)
+        if ([string]::IsNullOrWhiteSpace($parent) -or (Test-PathEqual -Left $parent -Right $cursor)) {
+            throw "$Context is outside the bound candidate snapshot."
+        }
+        $cursor = $parent
+    }
+    if ((Get-Item -LiteralPath $fullPath -Force) -isnot [IO.FileInfo]) { throw "$Context must be a regular file." }
+    return $fullPath
+}
+function Get-SkillSpectorBaselineSelection {
+    param(
+        [Parameter(Mandatory = $true)][string] $CandidateRoot,
+        [Parameter(Mandatory = $true)][string[]] $ActiveSkills
+    )
+    $registryPath = Join-Path $CandidateRoot 'config/skillspector-exceptions.json'
+    if (-not (Test-Path -LiteralPath $registryPath)) {
+        return [pscustomobject]@{ HasRegistry = $false
+         Bindings = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal) }
+    }
+    $registryPath = Assert-CandidateRegularFile -Path $registryPath -CandidateRoot $CandidateRoot -Context 'SkillSpector exception registry'
+    $registry = Read-Json -Path $registryPath -Context 'SkillSpector exception registry'
+    $bindingsProperty = $registry.PSObject.Properties['baselines']
+    if ($null -eq $bindingsProperty -or $bindingsProperty.Value -isnot [array] -or $bindingsProperty.Value.Count -eq 0) {
+        throw 'SkillSpector exception registry baselines must be a nonempty array.'
+    }
+    $active = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($skillId in $ActiveSkills) { [void]$active.Add($skillId) }
+    $bindings = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+    foreach ($binding in $bindingsProperty.Value) {
+        $skillId = Get-Property -Object $binding -Name 'skillId' -Context 'SkillSpector baseline binding'
+        $relativePath = Get-Property -Object $binding -Name 'path' -Context 'SkillSpector baseline binding'
+        if ($skillId -isnot [string] -or [string]::IsNullOrWhiteSpace($skillId) -or
+            $relativePath -isnot [string] -or [string]::IsNullOrWhiteSpace($relativePath)) {
+            throw 'SkillSpector baseline binding requires nonempty string skillId and path.'
+        }
+        if (-not $active.Contains($skillId) -or $bindings.ContainsKey($skillId)) {
+            throw 'SkillSpector baseline binding skillId must be active and unique.'
+        }
+        $expectedPath = "config/skillspector-exceptions/$skillId.baseline.json"
+        if (-not [string]::Equals($relativePath, $expectedPath, [StringComparison]::Ordinal)) {
+            throw 'SkillSpector baseline binding path must match config/skillspector-exceptions/<skillId>.baseline.json.'
+        }
+        $baselinePath = Assert-CandidateRegularFile -Path (Join-Path $CandidateRoot $relativePath) -CandidateRoot $CandidateRoot `
+            -Context "SkillSpector baseline for '$skillId'"
+        $bindings.Add($skillId, [pscustomobject]@{ Path = $baselinePath
+             Sha256 = Get-FileSha256 -Path $baselinePath })
+    }
+    return [pscustomobject]@{ HasRegistry = $true
+     Bindings = $bindings }
+}
 function Get-ActiveSkills {
     $values = @([string]$env:STANDARD_VALIDATION_ACTIVE_SKILLS -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     if ($values.Count -eq 0) { throw 'Central runner did not provide active Skill identities.' }
@@ -103,10 +168,11 @@ function Get-TextSha256 {
     try { return ([BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text))) -replace '-', '').ToLowerInvariant() }
     finally { $hasher.Dispose() }
 }
-function New-Finding {
-    param([Parameter(Mandatory = $true)] $Issue, [Parameter(Mandatory = $true)][string] $SkillId, [Parameter(Mandatory = $true)][string] $Stage)
-    $severity = [string](Get-Property -Object $Issue -Name 'severity' -Context "$Stage issue").ToLowerInvariant()
-    $severity = switch ($severity) {
+function ConvertTo-CanonicalSeverity {
+    param([Parameter(Mandatory = $true)] $Value, [Parameter(Mandatory = $true)][string] $Context)
+    $severity = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($severity)) { throw "$Context returned an empty severity." }
+    $canonical = switch ($severity.ToLowerInvariant()) {
         'critical' { 'critical'
          break }
         'high' { 'high'
@@ -119,8 +185,14 @@ function New-Finding {
          break }
         'info' { 'informational'
          break }
-        default { throw "$Stage returned unsupported severity '$severity' for '$SkillId'." }
+        default { throw "$Context returned unsupported severity '$severity'." }
     }
+    return $canonical
+}
+function New-Finding {
+    param([Parameter(Mandatory = $true)] $Issue, [Parameter(Mandatory = $true)][string] $SkillId, [Parameter(Mandatory = $true)][string] $Stage)
+    $severity = ConvertTo-CanonicalSeverity -Value (Get-Property -Object $Issue -Name 'severity' -Context "$Stage issue") `
+        -Context "$Stage for '$SkillId'"
     $issueJson = $Issue | ConvertTo-Json -Depth 30 -Compress
     $path = if ($null -ne $Issue.PSObject.Properties['file']) {
         [string]$Issue.file
@@ -298,6 +370,48 @@ function Assert-SkillSpectorReport {
     foreach ($issue in $issues) { $findings += New-Finding -Issue $issue -SkillId $SkillId -Stage 'skillspector-static' }
     return ,$findings
 }
+function Get-SkillSpectorSuppressedFindings {
+    param(
+        [Parameter(Mandatory = $true)] $Report,
+        [Parameter(Mandatory = $true)][string] $SkillRoot,
+        [Parameter(Mandatory = $true)][string] $SkillId,
+        [Parameter(Mandatory = $true)][string[]] $Inventory
+    )
+    $suppressedProperty = $Report.PSObject.Properties['suppressed']
+    if ($null -eq $suppressedProperty) { throw "SkillSpector report is missing 'suppressed'." }
+    $suppressed = $suppressedProperty.Value
+    $suppressedCount = Get-Property -Object $Report -Name 'suppressed_count' -Context 'SkillSpector report'
+    if ($suppressed -isnot [array] -or
+        ($suppressedCount -isnot [int] -and $suppressedCount -isnot [long]) -or
+        [long]$suppressedCount -ne $suppressed.Count) {
+        throw "SkillSpector suppression evidence is malformed for '$SkillId'."
+    }
+    $result = @()
+    foreach ($entry in $suppressed) {
+        $suppressedFlag = Get-Property -Object $entry -Name 'suppressed' -Context 'SkillSpector suppressed finding'
+        $ruleId = Get-Property -Object $entry -Name 'id' -Context 'SkillSpector suppressed finding'
+        $location = Get-Property -Object $entry -Name 'location' -Context 'SkillSpector suppressed finding'
+        $file = Get-Property -Object $location -Name 'file' -Context 'SkillSpector suppressed finding location'
+        $reason = Get-Property -Object $entry -Name 'suppression_reason' -Context 'SkillSpector suppressed finding'
+        if ($suppressedFlag -isnot [bool] -or -not $suppressedFlag -or
+            $ruleId -isnot [string] -or [string]::IsNullOrWhiteSpace($ruleId) -or
+            $file -isnot [string] -or [string]::IsNullOrWhiteSpace($file) -or
+            $reason -isnot [string] -or [string]::IsNullOrWhiteSpace($reason)) {
+            throw "SkillSpector suppression evidence is malformed for '$SkillId'."
+        }
+        [void](Resolve-ReportedFilePath -Value $file -SkillRoot $SkillRoot -ExpectedPaths $Inventory `
+            -Context 'SkillSpector suppressed finding file')
+        $result += [ordered]@{
+            skillId = $SkillId
+            ruleId = [string]$ruleId
+            severity = ConvertTo-CanonicalSeverity -Value (Get-Property -Object $entry -Name 'severity' `
+                -Context 'SkillSpector suppressed finding') -Context "SkillSpector suppression for '$SkillId'"
+            file = [string]$file
+            suppressionReason = [string]$reason
+        }
+    }
+    return ,$result
+}
 
 try {
     $toolchain = Read-Json -Path $ToolchainPath -Context 'run-owned validation toolchain'
@@ -386,7 +500,9 @@ try {
             Assert-FileIdentity -Path ([string]$toolchain.skillSpectorPath) -Sha256 ([string]$toolchain.skillSpectorSha256) -Context 'SkillSpector executable'
             # Keep Python import caches outside the frozen installed tool closure.
             $env:PYTHONDONTWRITEBYTECODE = '1'
+            $baselineSelection = Get-SkillSpectorBaselineSelection -CandidateRoot $candidateRoot -ActiveSkills $activeSkills
             $findings = @()
+            $suppressedFindings = @()
             foreach ($skillId in $activeSkills) {
                 $skillRoot = Get-SkillRoot -SkillId $skillId
                 $inventory = Get-InventoryPaths -SkillRoot $skillRoot
@@ -394,6 +510,8 @@ try {
                 if (Test-Path -LiteralPath $reportPath) { throw "SkillSpector stdout report path already exists for '$skillId'." }
                 $staticStderrPath = Join-Path (Get-Location) ("skillspector-$skillId.stderr")
                 $nativeArguments = @('scan', $skillRoot, '--no-llm', '--format', 'json')
+                $baselineBinding = if ($baselineSelection.Bindings.ContainsKey($skillId)) { $baselineSelection.Bindings[$skillId] } else { $null }
+                if ($null -ne $baselineBinding) { $nativeArguments += @('--baseline', [string]$baselineBinding.Path, '--show-suppressed') }
                 & ([string]$toolchain.skillSpectorPath) @nativeArguments 1> $reportPath 2> $staticStderrPath
                 $nativeExit = $LASTEXITCODE
                 $staticStderr = if (Test-Path -LiteralPath $staticStderrPath -PathType Leaf) { [IO.File]::ReadAllText($staticStderrPath) } else `
@@ -412,11 +530,22 @@ try {
                     throw "Could not read SkillSpector report for '$skillId'.$staticStderrDiagnostic $($_.Exception.Message)"
                 }
                 $findings += Assert-SkillSpectorReport -Report $report -SkillRoot $skillRoot -SkillId $skillId -Inventory $inventory
+                if ($null -ne $baselineBinding) {
+                    $baselinePath = Assert-CandidateRegularFile -Path ([string]$baselineBinding.Path) -CandidateRoot $candidateRoot `
+                        -Context "SkillSpector baseline for '$skillId'"
+                    if ((Get-FileSha256 -Path $baselinePath) -cne [string]$baselineBinding.Sha256) {
+                        throw 'Baseline changed during static analysis.'
+                    }
+                    $suppressedFindings += Get-SkillSpectorSuppressedFindings -Report $report -SkillRoot $skillRoot -SkillId $skillId `
+                        -Inventory $inventory
+                }
             }
             $semantic = ($SemanticRequired -ceq 'true') -or $findings.Count -gt 0
-            New-Envelope -ActiveSkills $activeSkills -Findings $findings -Additional @{ scannerIdentity = 'SkillSpector'
+            $additional = @{ scannerIdentity = 'SkillSpector'
              analyzerCompleteness = 'complete'
              semanticRequired = $semantic }
+            if ($baselineSelection.HasRegistry) { $additional.suppressedFindings = @($suppressedFindings) }
+            New-Envelope -ActiveSkills $activeSkills -Findings $findings -Additional $additional
         }
     }
 }

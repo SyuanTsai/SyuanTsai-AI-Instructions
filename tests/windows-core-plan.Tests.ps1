@@ -495,6 +495,7 @@ if ($IsWindows) {
             'ai-instructions-writer-gate.part7.Tests.ps1' = 9
             'ai-instructions-writer-gate.part8.Tests.ps1' = 21
             'ai-instructions-writer-gate.part9.Tests.ps1' = 27
+            'static-approved-exceptions.Tests.ps1' = 1
         }
         @($configuration.weights.PSObject.Properties).Count | Should Be $expectedWeights.Count
         foreach ($entry in $expectedWeights.GetEnumerator()) {
