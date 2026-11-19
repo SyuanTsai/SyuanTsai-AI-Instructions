@@ -2637,6 +2637,49 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         $failure.Error | Should Match 'failed with exit code 7'
     }
 
+    # Scenario: A Linux repository check creates and commits a fixture repository through the production owned-process boundary.
+    # Purpose: Git automatic maintenance must not detach an unattributed adopted child after the check exits.
+    # Register only on the native host; keep this file's Core CI skip count at zero.
+    if($IsLinux){
+        It 'InterT45_disables_detached_git_maintenance_in_the_owned_repository_check' {
+            $candidate=Join-Path $TestDrive 'git-maintenance-check'
+            foreach($directory in @((Join-Path $candidate 'config'),(Join-Path $candidate 'scripts'))){
+                [void][IO.Directory]::CreateDirectory($directory)
+            }
+            $check=@'
+param([string]$RepositoryRoot)
+$ErrorActionPreference='Stop'
+$fixture=Join-Path $RepositoryRoot 'fixture-repo'
+& git init -q -b main $fixture
+& git -C $fixture config user.name Fixture
+& git -C $fixture config user.email fixture@example.test
+[IO.File]::WriteAllText((Join-Path $fixture 'README.md'),'fixture',[Text.UTF8Encoding]::new($false))
+& git -C $fixture add README.md
+& git -C $fixture commit -q -m fixture
+if($LASTEXITCODE-ne0){throw 'Fixture git commit failed.'}
+'@
+            [IO.File]::WriteAllText((Join-Path $candidate 'scripts/check.ps1'),$check,[Text.UTF8Encoding]::new($false))
+            Write-FixtureJson (Join-Path $candidate 'config/consumer-gate.json') ([ordered]@{
+                    schemaVersion=1;repositoryId='fixture';sourceRepository='https://example.test/fixture.git'
+                    activeSkills=@('fixture');repositoryChecks=@([ordered]@{id='general';kind='general';path='scripts/check.ps1'})
+                })
+            $runner=Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardValidation.ps1'
+            . $runner -CandidateRoot $candidate -AdapterPath (Join-Path $candidate 'unused-adapter.json') `
+                -ArtifactsRoot (Join-Path $candidate 'unused-artifacts') -SourceRepository 'https://example.test/fixture.git' `
+                -SourceRevision ('a'*40) -BaseRevision ('b'*40) -DefineFunctionsOnly
+            $result=Invoke-StandardValidationProcess `
+                -Command (Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-ConsumerRepositoryCheck.ps1') `
+                -Arguments @('-Mode','general') -WorkingDirectory $candidate -TimeoutSeconds 30 -Environment @{
+                    STANDARD_VALIDATION_CORE_RUN_ID='fixture-run'
+                    STANDARD_VALIDATION_CORE_CHECK_ID='repository-general'
+                    STANDARD_VALIDATION_CORE_SKILLS='fixture'
+                }
+            $result.exitCode | Should Be 0
+            $result.cleanedUp | Should Be $true
+            (@($result.processOwnership.cleanup.Uncertainty)-join"`n") | Should Not Match 'unattributed-adopted-child'
+        }
+    }
+
     # Scenario: The trusted repository check receives the same explicit token arrays through the current runner wrapper and pwsh -File.
     # Purpose: Preserve exact, case-insensitive names without abbreviation or colon syntax and fail closed on every malformed token shape.
     It 'UnitT45_parses_repository_check_tokens_identically_for_runner_and_file_invocation' {

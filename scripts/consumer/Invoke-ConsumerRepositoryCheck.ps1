@@ -151,6 +151,29 @@ function Get-ConsumerTextSha256([string]$Text) {
     $bytes = [Text.UTF8Encoding]::new($false).GetBytes($Text)
     [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
 }
+function Add-ConsumerGitConfiguration {
+    $rawCount=[Environment]::GetEnvironmentVariable('GIT_CONFIG_COUNT','Process')
+    $count=0
+    if(-not[string]::IsNullOrEmpty($rawCount)-and-not[int]::TryParse(
+            $rawCount,[Globalization.NumberStyles]::None,[Globalization.CultureInfo]::InvariantCulture,[ref]$count)){
+        throw 'GIT_CONFIG_COUNT must be a non-negative decimal integer.'
+    }
+    if($count-gt[int]::MaxValue-2){throw 'GIT_CONFIG_COUNT cannot accommodate the two required repository check settings.'}
+    for($index=0;$index-lt$count;$index++){
+        foreach($kind in @('KEY','VALUE')){
+            $name="GIT_CONFIG_${kind}_$index"
+            if($null-eq[Environment]::GetEnvironmentVariable($name,'Process')){
+                throw "Existing git environment configuration is incomplete: $name is missing."
+            }
+        }
+    }
+    [Environment]::SetEnvironmentVariable("GIT_CONFIG_KEY_$count",'maintenance.auto','Process')
+    [Environment]::SetEnvironmentVariable("GIT_CONFIG_VALUE_$count",'false','Process')
+    $next=$count+1
+    [Environment]::SetEnvironmentVariable("GIT_CONFIG_KEY_$next",'gc.autoDetach','Process')
+    [Environment]::SetEnvironmentVariable("GIT_CONFIG_VALUE_$next",'false','Process')
+    [Environment]::SetEnvironmentVariable('GIT_CONFIG_COUNT',[string]($count+2),'Process')
+}
 function Get-ConsumerSnapshotRows([string]$Root) {
     $rows=@(Get-ChildItem -LiteralPath $Root -Recurse -File -Force | ForEach-Object {
             [pscustomobject]@{path=[IO.Path]::GetRelativePath($Root,$_.FullName).Replace('\','/')
@@ -192,6 +215,7 @@ try {
     foreach ($name in [Environment]::GetEnvironmentVariables('Process').Keys) {
         if ([string]$name -match '(?i)(TOKEN|SECRET|PASSWORD|PRIVATE_KEY)') { [Environment]::SetEnvironmentVariable([string]$name, $null, 'Process') }
     }
+    Add-ConsumerGitConfiguration
     $candidateRoot = [IO.Path]::GetFullPath((Get-Location).Path)
     $config = Read-ConsumerJson (Join-Path $candidateRoot 'config/consumer-gate.json')
     $activeSkills=@([string]$env:STANDARD_VALIDATION_CORE_SKILLS -split ';'|Where-Object{-not[string]::IsNullOrWhiteSpace([string]$_)})
