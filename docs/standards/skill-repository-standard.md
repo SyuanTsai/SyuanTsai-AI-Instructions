@@ -1067,7 +1067,7 @@ Authority manifest 中每個 repository entry **MUST** 通過 authority 發布�
 
 封閉檢查是正確性檢查，不是信任邊界；信任邊界來自 pinned authority 與憑證隔離。它無法證明動態引用不依賴 legacy 目標，因此轉換 PR **MUST** 在轉換後 candidate tree 上於 Windows、Linux、macOS 實跑全部 required checks，提供行為層偵測但不得宣稱已證明不存在依賴。指向同路徑 `expectedOutcome: rewrite` 檔案的動態依賴或未執行分支仍可能漏失；失敗時 **MUST** 以 authority manifest-only PR 修正處置，**MUST NOT** 放寬檢查。
 
-完整轉換順序固定記錄於 [`consumer/README.md`](../../consumer/README.md#consumer-repository-conversion)，包括盤點基準重試、transition push skip、清理 PR、App required-context 回報確認與 ruleset 對齊。完成這些遠端步驟前 **MUST NOT** 宣稱 consumer merge enforcement 已生效。轉換順序為 Knowledge Content → Code Collaboration → General → Atlassian → Darktide。`consumer/legacy-migration.json` 將 Darktide 標為 `pending-prerequisites` 並列出精確 `prerequisites`；在三平台可攜前提完成、且 authority 以 manifest-only PR 重新盤點並改為 `ready` 前，gate **MUST** 對 Darktide 轉換回 BLOCKED，並指向 [`consumer/README.md`](../../consumer/README.md#darktide-轉換前提)。
+完整轉換順序固定記錄於 [`consumer/README.md`](../../consumer/README.md#consumer-repository-conversion)，包括盤點基準重試、transition push skip、清理 PR、App required-context 回報確認與 ruleset 對齊。完成這些遠端步驟前 **MUST NOT** 宣稱 consumer merge enforcement 已生效。轉換順序為 Knowledge Content → Code Collaboration → General → Atlassian → Darktide。`consumer/legacy-migration.json` 的 Darktide entry 為 `pending-prerequisites` 時，**MUST** 列出精確 `prerequisites`，且 gate **MUST** 對 Darktide 轉換回 BLOCKED，並指向 [`consumer/README.md`](../../consumer/README.md#darktide-轉換前提)。只有在三平台可攜前提完成、authority 以 manifest-only PR 重新盤點並將 status 改為 `ready`、同時移除 `prerequisites` 後，才可進行 Darktide 轉換。
 
 ## 19. Standard change contract
 

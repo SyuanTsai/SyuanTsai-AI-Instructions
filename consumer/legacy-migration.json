@@ -1360,6 +1360,11 @@
           "expectedOutcome": "delete"
         },
         {
+          "path": "tests/support/ProcessEnvironment.psm1",
+          "disposition": "retain",
+          "reason": "Portable process-environment helper supports repository-owned cross-platform tests."
+        },
+        {
           "path": "tests/Test-DarktideRepository.Tests.ps1",
           "disposition": "retain",
           "reason": "Portable contract and read-only evidence regressions for the retained Darktide general check."
@@ -1385,11 +1390,6 @@
           "disposition": "update-tests",
           "reason": "Only tests transition behavior of retired drivers, workflow, and repository-local authority adapter.",
           "expectedOutcome": "delete"
-        },
-        {
-          "path": "tests/support/ProcessEnvironment.psm1",
-          "disposition": "retain",
-          "reason": "Portable process-environment helper supports repository-owned cross-platform tests."
         }
       ],
       "additionalScope": [
