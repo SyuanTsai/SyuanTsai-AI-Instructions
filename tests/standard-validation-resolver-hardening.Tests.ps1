@@ -493,7 +493,13 @@ Describe 'Standard validation resolver hardening' {
         Assert-Equal $toolPolicy.tools.skillspector.channel 'approved-source-registry' 'SkillSpector must use the approved source registry.'
         Assert-Equal $registry.active '2.13.4' 'The reviewed 2.13.4 release must be active.'
         Assert-Equal $registry.activeEntry.parserCorrection 'none' 'The active release must use the native parser without the legacy bridge.'
+        Assert-Equal $registry.entries.'2.13.4'.kind 'pypi-release' 'The retained 2.13.4 release must remain classified as a PyPI release.'
         Assert-Equal $registry.entries.'2.13.0'.parserCorrection 'powershell-native-command-ownership-v1' 'The retained reviewed 2.13.0 entry must keep its correction profile.'
+        Assert-Equal $registry.entries.'2.13.6'.kind 'github-release-asset' 'The reviewed 2.13.6 release must be classified as a GitHub-only release asset.'
+        Assert-Equal $registry.entries.'2.13.6'.parserCorrection 'none' 'The reviewed 2.13.6 release must use the native parser.'
+        Assert-Equal $registry.entries.'2.13.6'.releaseCommit 'e2674da339b0bddc6e565d059c0577c6d9cd25da' 'The reviewed 2.13.6 release must bind its exact commit.'
+        Assert-Equal $registry.entries.'2.13.6'.wheelSha256 'e7b46c55e726405b2a068d375d1ee8e799e15d86f3fc05f84feb5ba962198b15' 'The reviewed 2.13.6 release must bind its exact wheel.'
+        Assert-Equal $registry.entries.'2.13.6'.analyzerSha256 '0065c5fec585766b53e21711c908c9dd440639e5a29e374e5269d9c5c2ee6f11' 'The reviewed 2.13.6 release must bind its exact analyzer.'
         Assert-Equal $profile.officialScannerVersion '2.13.0' 'Parser correction must remain bound to its reviewed release.'
         Assert-Equal $profile.officialScannerReleaseCommit '091a509b3d6ba8ff5be528966e1f43c2e68cf214' 'Parser correction must bind the reviewed release commit.'
         Assert-Equal $profile.officialScannerReleaseAssetSha256 '41e097b4127c0aa0732ad31cc909f8aee0b907d97816c866a55b8e782a6ca6dc' 'Parser correction must bind the reviewed release wheel.'
@@ -508,7 +514,11 @@ Describe 'Standard validation resolver hardening' {
         [IO.File]::WriteAllText($fixture,($canonical | ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
         $accepted=Get-SkillSpectorApprovedSources -Path $fixture
         Assert-Equal $accepted.activeEntry.version '2.13.0' 'A reviewed active switch must remain policy-valid.'
-        foreach($mutation in @('unknown-kind','missing-field','extra-field','missing-active','key-version-mismatch','bridge-analyzer-mismatch')) {
+        $canonical.active='2.13.6'
+        [IO.File]::WriteAllText($fixture,($canonical | ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
+        $accepted=Get-SkillSpectorApprovedSources -Path $fixture
+        Assert-Equal $accepted.activeEntry.version '2.13.6' 'A reviewed GitHub-only release active switch must remain policy-valid.'
+        foreach($mutation in @('unknown-kind','missing-field','extra-field','missing-active','key-version-mismatch','bridge-analyzer-mismatch','github-entry-unknown-kind','github-entry-extra-url','github-entry-key-version-mismatch','github-entry-bad-wheel-name')) {
             $candidate=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'docs/standards/skillspector-approved-sources.json') | ConvertFrom-Json
             switch($mutation) {
                 'unknown-kind' {$candidate.entries.'2.13.4'.kind='github-commit'}
@@ -517,6 +527,10 @@ Describe 'Standard validation resolver hardening' {
                 'missing-active' {$candidate.active='9.9.9'}
                 'key-version-mismatch' {$candidate.entries.'2.13.4'.version='2.13.5'}
                 'bridge-analyzer-mismatch' {$candidate.entries.'2.13.0'.analyzerSha256='0'*64}
+                'github-entry-unknown-kind' {$candidate.entries.'2.13.6'.kind='github-release'}
+                'github-entry-extra-url' {$candidate.entries.'2.13.6' | Add-Member -NotePropertyName releaseAssetUrl -NotePropertyValue 'https://example.test/skillspector.whl'}
+                'github-entry-key-version-mismatch' {$candidate.entries.'2.13.6'.version='2.13.7'}
+                'github-entry-bad-wheel-name' {$candidate.entries.'2.13.6'.wheelFileName='skillspector-2.13.6.tar.gz'}
             }
             [IO.File]::WriteAllText($fixture,($candidate | ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
             { Get-SkillSpectorApprovedSources -Path $fixture } | Should Throw

@@ -118,6 +118,8 @@ Describe 'Static parser coverage and finding preservation' {
         Assert-ParserCase ((Get-Content -Raw (Join-Path $parserRepositoryRoot 'docs/standards/skillspector-approved-sources.json')) | Test-Json -SchemaFile $registrySchema) 'Approved source registry violates its strict schema.'
         Assert-ParserCase ($registry.active -ceq '2.13.4' -and $registry.entries.'2.13.4'.parserCorrection -ceq 'none') '2.13.4 must be the active native profile.'
         Assert-ParserCase ($registry.entries.'2.13.0'.parserCorrection -ceq 'powershell-native-command-ownership-v1') '2.13.0 must retain the bridge profile.'
+        $nativeEntries=@($registry.entries.PSObject.Properties.Value | Where-Object {$_.parserCorrection -ceq 'none'})
+        Assert-ParserCase ($registry.entries.'2.13.6'.parserCorrection -ceq 'none' -and @($nativeEntries | Where-Object {$_.version -ceq $policy.officialScannerVersion}).Count -eq 0) 'Native parser entries, including 2.13.6, must not use the bridge-bound version.'
         Assert-ParserCase ($policy.officialScannerVersion -ceq '2.13.0' -and $policy.officialAnalyzerSha256 -ceq $registry.entries.'2.13.0'.analyzerSha256) 'Bridge policy must remain bound to the approved 2.13.0 analyzer.'
         Assert-ParserCase ($policySchema.properties.officialScannerVersion.const -ceq '2.13.0') 'Bridge policy schema must remain release specific.'
         foreach($value in @('2.13.0',$registry.entries.'2.13.0'.releaseCommit,$registry.entries.'2.13.0'.wheelSha256,$registry.entries.'2.13.0'.analyzerSha256)){
