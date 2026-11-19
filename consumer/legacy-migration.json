@@ -1132,8 +1132,8 @@
       "id": "skill-darktide-translate",
       "repository": "https://github.com/SyuanTsai/Skill-Darktide-Translate.git",
       "status": "ready",
-      "inventoryCommit": "087e03948d4e5deff7bf2786728db0a743c03aa6",
-      "inventoryTree": "4384eb781be353daa5fa3469f4cbe4a9d980a54b",
+      "inventoryCommit": "44c9fef7e36c36ecab0011ba35c799ddc79a3927",
+      "inventoryTree": "648234d5fed2d75817b67663ecc4483b33bac30e",
       "requiredRepositoryChecks": [
         {
           "id": "repository-darktide",
