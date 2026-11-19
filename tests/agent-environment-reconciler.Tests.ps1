@@ -2,6 +2,7 @@ $script:RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $script:RuntimeRoot = Join-Path $script:RepositoryRoot 'scripts'
 $script:ModulePath = Join-Path $script:RuntimeRoot 'agent-environment-reconciler.psm1'
 $script:ContractPath = Join-Path $script:RuntimeRoot 'skills-catalog-contract.psm1'
+$script:RuntimeContractPath = Join-Path $script:RuntimeRoot 'ai-instructions-runtime-contract.psm1'
 $script:TestPowerShellExecutable = (Get-Process -Id $PID).Path
 $script:SecondaryVolumeRoot = $null
 if([Environment]::OSVersion.Platform-eq[PlatformID]::Win32NT){
@@ -11,6 +12,26 @@ if([Environment]::OSVersion.Platform-eq[PlatformID]::Win32NT){
 
 Import-Module $script:ContractPath -Force
 Import-Module $script:ModulePath -Force
+Import-Module $script:RuntimeContractPath -Force
+
+function New-TestAiInstructionsRuntimeBundleV3 {
+    param(
+        [Parameter(Mandatory=$true)][string]$RuntimeRoot,
+        [Parameter(Mandatory=$true)][string]$Repository,
+        [Parameter(Mandatory=$true)][string]$Commit,
+        [Parameter(Mandatory=$true)][string]$Acquisition,
+        [Parameter(Mandatory=$true)][object]$CapabilityReceipt
+    )
+    $runtimeContractModule=Import-Module (Join-Path $RuntimeRoot 'ai-instructions-runtime-contract.psm1') -Force -PassThru
+    $arguments=@{
+        RuntimeRoot=$RuntimeRoot
+        Repository=$Repository
+        Commit=$Commit
+        Acquisition=$Acquisition
+        CapabilityReceipt=$CapabilityReceipt
+    }
+    & $runtimeContractModule { param($Arguments) New-AiInstructionsRuntimeBundleV3 @Arguments } $arguments
+}
 
 function New-TestDesiredState {
     param(
@@ -74,12 +95,25 @@ function New-TestDesiredState {
 }
 
 function New-TestProjectionDesiredState {
-    param([Parameter(Mandatory=$true)][string]$Root)
+    param(
+        [Parameter(Mandatory=$true)][string]$Root,
+        [switch]$WithoutClaude,
+        [switch]$WithoutSkill,
+        [string]$PayloadText="---`nname: work-with-jira`ndescription: projection test`n---`n"
+    )
+    $runtimeRoot=Join-Path $Root 'runtime';New-Item -ItemType Directory -Force -Path $runtimeRoot,(Join-Path $runtimeRoot 'catalog')|Out-Null
+    foreach($moduleName in @('skills-catalog-contract.psm1','skills-selection.psm1','skills-source-routing.psm1','skills-source-retrieval.psm1','skills-source-acquisition.psm1','safe-zip.psm1','license-delivery.psm1','ai-instructions-runtime-contract.psm1','platform-runtime.psm1')){
+        Copy-Item -LiteralPath (Join-Path $script:RuntimeRoot $moduleName) -Destination (Join-Path $runtimeRoot $moduleName) -Force
+    }
+    Copy-TestPlatformRuntimeClosure -Destination $runtimeRoot
     $catalog=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:RepositoryRoot 'catalog/examples/skills-catalog-v3.example.json')|ConvertFrom-Json
     $catalog.projections=@($catalog.projections)+@([pscustomobject][ordered]@{id='user-copilot';scope='user';root='.copilot/skills'})
+    $projectionDefinitions=@([pscustomobject]@{id='user-agents';root='.agents/skills'},[pscustomobject]@{id='user-claude';root='.claude/skills'},[pscustomobject]@{id='user-copilot';root='.copilot/skills'})
+    if($WithoutClaude){$projectionDefinitions=@($projectionDefinitions|Where-Object id -ne 'user-claude')}
+    [string[]]$selectedProjectionIds=@($projectionDefinitions|ForEach-Object id)
     $projectionContractSha256=Get-SkillsCatalogProjectionContractSha256 -Projections $catalog.projections
     $stageRoot=Join-Path $Root 'work-with-jira';New-Item -ItemType Directory -Force -Path $stageRoot|Out-Null
-    $stagePath=Join-Path $stageRoot 'SKILL.md';[IO.File]::WriteAllText($stagePath,"---`nname: work-with-jira`ndescription: projection test`n---`n",[Text.UTF8Encoding]::new($false))
+    $stagePath=Join-Path $stageRoot 'SKILL.md';[IO.File]::WriteAllText($stagePath,$PayloadText,[Text.UTF8Encoding]::new($false))
     $sha=(Get-FileHash -LiteralPath $stagePath -Algorithm SHA256).Hash.ToLowerInvariant()
     $payloadBytes=[Text.UTF8Encoding]::new($false).GetBytes("skills/work-with-jira/SKILL.md`t$sha`n")
     $algorithm=[Security.Cryptography.SHA256]::Create();try{$contentSha=([BitConverter]::ToString($algorithm.ComputeHash($payloadBytes))).Replace('-','').ToLowerInvariant()}finally{$algorithm.Dispose()}
@@ -89,16 +123,60 @@ function New-TestProjectionDesiredState {
     $lock.catalogSha256=$catalogSha;$lock.projectionContractSha256=$projectionContractSha256
     @($lock.skills|Where-Object id -eq 'work-with-jira')[0].contentSha256=$contentSha
     $lockBytes=[Text.UTF8Encoding]::new($false).GetBytes(($lock|ConvertTo-Json -Depth 20)+"`n")
+    [IO.File]::WriteAllBytes((Join-Path $runtimeRoot 'catalog/skills-catalog.json'),$catalogBytes)
+    [IO.File]::WriteAllBytes((Join-Path $runtimeRoot 'catalog/skills-catalog-lock.json'),$lockBytes)
+    [IO.File]::WriteAllBytes((Join-Path $runtimeRoot 'bootstrap-section.md'),[IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'instructions/common/bootstrap-section.md')))
+    [string[]]$selectedSkillIds=@()
+    if(-not$WithoutSkill){$selectedSkillIds=@('work-with-jira')}
+    [string[]]$excludedSkillIds=@('manage-task-handoff')
+    if($WithoutSkill){$excludedSkillIds+=@('work-with-jira')}
+    $configuration=[pscustomobject][ordered]@{
+        schemaVersion=5;excludedRepositoryUrls=@();excludedRepositoryPaths=@()
+        catalog=[pscustomobject][ordered]@{repository='https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git';ref='0123456789abcdef0123456789abcdef01234567';profiles=@();includeSkills=$selectedSkillIds;excludeSkills=$excludedSkillIds}
+        updates=[pscustomobject][ordered]@{mode='notify-only';channel='protected-branch';ref='main';minimumCheckIntervalMinutes=1440}
+        projections=[pscustomobject][ordered]@{user=$selectedProjectionIds;project=@()}
+    }
+    $platformModule=Import-Module (Join-Path $runtimeRoot 'platform-runtime.psd1') -Force -PassThru
+    $capabilityReceipt=& $platformModule {Get-PlatformCapabilities -Required @()}
+    $bundle=New-TestAiInstructionsRuntimeBundleV3 -RuntimeRoot $runtimeRoot -Repository 'https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git' -Commit '0123456789abcdef0123456789abcdef01234567' -Acquisition git-checkout -CapabilityReceipt $capabilityReceipt
+    $gateContext=Assert-UserProjectionRuntimeGate -Bundle $bundle -Configuration $configuration -RuntimeRoot $runtimeRoot -CapabilityReceipt $capabilityReceipt
     $algorithm=[Security.Cryptography.SHA256]::Create();try{$lockSha=([BitConverter]::ToString($algorithm.ComputeHash($lockBytes))).Replace('-','').ToLowerInvariant()}finally{$algorithm.Dispose()}
     $files=@();$manifestFiles=@()
-    foreach($projection in @([pscustomobject]@{id='user-agents';root='.agents/skills'},[pscustomobject]@{id='user-claude';root='.claude/skills'},[pscustomobject]@{id='user-copilot';root='.copilot/skills'})){
+    foreach($projection in @($projectionDefinitions|Where-Object{-not$WithoutSkill})){
         $target="$($projection.root)/work-with-jira/SKILL.md"
         $file=[pscustomobject][ordered]@{skillId='work-with-jira';sourceId='agent-skills';sourceRepository='https://github.com/example/agent-skills-catalog.git';sourceRef='v1.0.0';sourceCommit='0123456789abcdef0123456789abcdef01234567';sourceVersion='1.0.0';sourcePath='skills/work-with-jira/SKILL.md';targetPath=$target;sha256=$sha;stagedPath=$stagePath;projectionId=$projection.id}
         $files+=$file;$entry=$file.PSObject.Copy();$entry.PSObject.Properties.Remove('stagedPath');$manifestFiles+=$entry
     }
-    $manifest=[pscustomobject][ordered]@{schemaVersion=3;catalogRepository='https://github.com/example/SyuanTsai-AI-Instructions.git';catalogCommit='0123456789abcdef0123456789abcdef01234567';catalogId='example-agent-skills-v3';lockSha256=$lockSha;projectionContractSha256=$projectionContractSha256;generation=1;projections=@('user-agents','user-claude','user-copilot');files=$manifestFiles}
+    $manifest=[pscustomobject][ordered]@{schemaVersion=3;catalogRepository='https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git';catalogCommit='0123456789abcdef0123456789abcdef01234567';catalogId='example-agent-skills-v3';lockSha256=$lockSha;projectionContractSha256=$projectionContractSha256;generation=1;projections=$selectedProjectionIds;files=$manifestFiles}
     Assert-UserSkillsManagedManifestBinding -Manifest $manifest -CatalogBytes $catalogBytes -LockBytes $lockBytes -ExpectedCatalogRepository $manifest.catalogRepository -ExpectedCatalogCommit $manifest.catalogCommit|Out-Null
-    [pscustomobject][ordered]@{RuntimeRoot=$script:RuntimeRoot;Catalog=$catalog;Lock=$lock;SkillIds=@('work-with-jira');Files=$files;Manifest=$manifest;LicenseWarnings=@();CatalogBytes=$catalogBytes;LockBytes=$lockBytes;ProjectionIds=$manifest.projections}
+    $instructionsArtifact=if($WithoutClaude){$null}else{[pscustomobject][ordered]@{
+        targetPath='.claude/CLAUDE.md'
+        sectionBytes=[IO.File]::ReadAllBytes((Join-Path $runtimeRoot 'bootstrap-section.md'))
+    }}
+    [pscustomobject][ordered]@{
+        RuntimeRoot=$runtimeRoot;Catalog=$catalog;Lock=$lock;SkillIds=$selectedSkillIds;Files=$files;Manifest=$manifest
+        LicenseWarnings=@();CatalogBytes=$catalogBytes;LockBytes=$lockBytes;ProjectionIds=$manifest.projections
+        GateContext=$gateContext;InstructionsArtifact=$instructionsArtifact
+    }
+}
+
+function New-TestProjectionSourceArchive {
+    param(
+        [Parameter(Mandatory=$true)][string]$PayloadPath,
+        [Parameter(Mandatory=$true)][string]$ArchivePath
+    )
+    Add-Type -AssemblyName System.IO.Compression
+    if([IO.File]::Exists($ArchivePath)){[IO.File]::Delete($ArchivePath)}
+    $stream=[IO.File]::Open($ArchivePath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+    try{
+        $archive=New-Object IO.Compression.ZipArchive($stream,[IO.Compression.ZipArchiveMode]::Create,$false)
+        try{
+            $entry=$archive.CreateEntry('agent-skills-0123456789abcdef0123456789abcdef01234567/skills/work-with-jira/SKILL.md',[IO.Compression.CompressionLevel]::Optimal)
+            $input=[IO.File]::OpenRead($PayloadPath);$output=$entry.Open()
+            try{$input.CopyTo($output)}finally{$output.Dispose();$input.Dispose()}
+        }finally{$archive.Dispose()}
+    }finally{$stream.Dispose()}
+    return $ArchivePath
 }
 
 function Set-TestProjectionDesiredPayload {
@@ -188,6 +266,19 @@ function Get-TestTreeSnapshot {
     return (@($entries)|ConvertTo-Json -Depth 5 -Compress)
 }
 
+function Invoke-TestNonInteractiveChild {
+    param([Parameter(Mandatory=$true)][string[]]$Arguments)
+    $start=[Diagnostics.ProcessStartInfo]::new($script:TestPowerShellExecutable)
+    $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.RedirectStandardInput=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+    foreach($argument in @('-NonInteractive')+$Arguments){[void]$start.ArgumentList.Add([string]$argument)}
+    $process=[Diagnostics.Process]::new();$process.StartInfo=$start
+    try{
+        if(-not$process.Start()){throw 'Failed to start non-interactive test child process.'}
+        $process.StandardInput.Close();$stdoutTask=$process.StandardOutput.ReadToEndAsync();$stderrTask=$process.StandardError.ReadToEndAsync();$process.WaitForExit()
+        return [pscustomobject]@{ExitCode=$process.ExitCode;Stdout=$stdoutTask.GetAwaiter().GetResult();Stderr=$stderrTask.GetAwaiter().GetResult()}
+    }finally{$process.Dispose()}
+}
+
 function Get-TestReconciliationFailureDiagnosticJson {
     param([Parameter(Mandatory=$true)][object]$Result)
     return ([pscustomobject][ordered]@{
@@ -228,15 +319,20 @@ Describe 'user-scoped Agent Skills reconciliation' {
         (Get-Module agent-environment-reconciler).ExportedCommands.ContainsKey('Invoke-UserSkillsRecoveryLocked')|Should Be $false
     }
 
-    # Scenario: Production encounters a v3/v5 generation before the P7e gate and pins are installed.
-    # Purpose: Keep the production refusal centralized and typed while function-level fixtures can exercise P8.
-    It 'UnitT00_rejects_v3_before_agent_environment_mutation' {
+    # Scenario: A caller tries to enter the USER projection coordinator without the complete P7e gate inputs.
+    # Purpose: Keep the exported gate free of runtime-root-only or test-switch bypasses.
+    It 'UnitT00_requires_complete_v3v5_gate_inputs_before_agent_environment_mutation' {
+        $parameters=(Get-Command Assert-UserProjectionRuntimeGate).Parameters
+        foreach($parameterName in @('Bundle','Configuration','RuntimeRoot','CapabilityReceipt')){
+            @($parameters[$parameterName].Attributes|Where-Object{$_-is[Management.Automation.ParameterAttribute]})[0].Mandatory|Should Be $true
+        }
         $errorRecord=$null
-        try { Assert-UserProjectionRuntimeGate -RuntimeRoot $script:RuntimeRoot }
+        try {
+            Assert-UserProjectionRuntimeGate -Bundle ([pscustomobject]@{}) -Configuration ([pscustomobject]@{}) -RuntimeRoot $script:RuntimeRoot -CapabilityReceipt ([pscustomobject]@{})
+        }
         catch { $errorRecord=$_ }
         $errorRecord | Should Not BeNullOrEmpty
-        $errorRecord.Exception.Code | Should Be 'projection-runtime-unavailable'
-        $errorRecord.Exception.Message | Should Match 'projection-runtime-unavailable'
+        $errorRecord.Exception.Code | Should Be 'unsupported-version'
     }
 
     # Scenario: The persisted manifest is redirected outside USER home through a reparse point.
@@ -407,9 +503,8 @@ Describe 'user-scoped Agent Skills reconciliation' {
         $second=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply
         $second.outcome | Should Be 'current'
         [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $userHome '.agents/catalog-skills.manifest.json'))) | Should Be $manifestBytesBefore
-        $desired.Manifest.catalogCommit=('f'*40)
-        Set-TestProjectionDesiredPayload -Desired $desired -Text "---`nname: work-with-jira`ndescription: projection update`n---`n"
-        $updated=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply
+        $nextDesired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'projection-stage-update') -PayloadText "---`nname: work-with-jira`ndescription: projection update`n---`n"
+        $updated=Invoke-UserSkillsReconciliation -DesiredState $nextDesired -UserHome $userHome -Mode Apply
         $updated.outcome | Should Be 'applied'
         foreach($path in $paths){Test-Path -LiteralPath (Join-Path $updated.backupPath $path) -PathType Leaf|Should Be $true}
         Test-Path -LiteralPath (Join-Path $updated.backupPath '.agents/catalog-skills.manifest.json') -PathType Leaf|Should Be $true
@@ -548,12 +643,17 @@ Describe 'user-scoped Agent Skills reconciliation' {
             Move-Item -LiteralPath (Join-Path $runtime 'agent-environment-reconciler.psm1') -Destination (Join-Path $runtime 'agent-environment-reconciler-core.ps1')
             @'
 . (Join-Path $PSScriptRoot 'agent-environment-reconciler-core.ps1')
-function Get-UserSkillsDesiredState { param([string]$RuntimeRoot,[object]$Configuration,[string]$CatalogRepository,[string]$CatalogCommit,[string]$WorkingRoot) $state=Import-Clixml -LiteralPath (Join-Path $PSScriptRoot 'test-desired.clixml');$state.RuntimeRoot=$PSScriptRoot;return $state }
+function Get-UserSkillsDesiredState { param([string]$RuntimeRoot,[object]$Configuration,[string]$CatalogRepository,[string]$CatalogCommit,[string]$WorkingRoot,[object]$GateContext) $state=Import-Clixml -LiteralPath (Join-Path $PSScriptRoot 'test-desired.clixml');$state.RuntimeRoot=$PSScriptRoot;if($null-ne$GateContext){$state|Add-Member -NotePropertyName GateContext -NotePropertyValue $GateContext -Force};return $state }
 Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDesiredState,Invoke-UserSkillsReconciliation,Invoke-UserSkillsRecovery,New-AgentEnvironmentInstallReadLeaseEvidence
 '@|Set-Content -LiteralPath (Join-Path $runtime 'agent-environment-reconciler.psm1') -Encoding UTF8
             [IO.File]::WriteAllText((Join-Path $codexHome 'ai-instructions-install.lock'),'');[IO.File]::WriteAllText((Join-Path $codexHome 'hooks/bootstrap-ai-instructions.ps1'),"param([switch]`$ValidateOnly)`nif(-not`$ValidateOnly){throw 'ValidateOnly required'}")
-            $commit='89abcdef0123456789abcdef0123456789abcdef';@{schemaVersion=4;catalog=@{ref=$commit}}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $codexHome 'ai-instructions-sync.json') -Encoding UTF8;@{schemaVersion=2;repository='https://github.com/example/ai-instructions.git';commit=$commit}|ConvertTo-Json|Set-Content (Join-Path $runtime 'runtime-bundle.json') -Encoding UTF8
             $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'cross-volume-entry-stage');$desired|Export-Clixml (Join-Path $runtime 'test-desired.clixml')
+            [IO.File]::WriteAllBytes((Join-Path $runtime 'catalog/skills-catalog.json'),[byte[]]$desired.CatalogBytes);[IO.File]::WriteAllBytes((Join-Path $runtime 'catalog/skills-catalog-lock.json'),[byte[]]$desired.LockBytes)
+            [IO.File]::WriteAllBytes((Join-Path $runtime 'bootstrap-section.md'),[IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'instructions/common/bootstrap-section.md')))
+            Copy-TestPlatformRuntimeClosure -Destination $runtime
+            $platformModule=Import-Module (Join-Path $runtime 'platform-runtime.psd1') -Force -PassThru;$receipt=&$platformModule {Get-PlatformCapabilities -Required @()}
+            $bundle=New-TestAiInstructionsRuntimeBundleV3 -RuntimeRoot $runtime -Repository ([string]$desired.Manifest.catalogRepository) -Commit ([string]$desired.Manifest.catalogCommit) -Acquisition git-checkout -CapabilityReceipt $receipt
+            [IO.File]::WriteAllText((Join-Path $codexHome 'ai-instructions-sync.json'),(($desired.GateContext.configuration|ConvertTo-Json -Depth 30).Replace("`r`n","`n")+"`n"),[Text.UTF8Encoding]::new($false));[IO.File]::WriteAllText((Join-Path $runtime 'runtime-bundle.json'),(($bundle|ConvertTo-Json -Depth 40).Replace("`r`n","`n")+"`n"),[Text.UTF8Encoding]::new($false))
             $userHome=Join-Path $TestDrive 'cross-volume-entry-user';New-Item -ItemType Directory -Path $userHome|Out-Null;$secondary=Join-Path $script:SecondaryVolumeRoot ('ai-instructions-p8-entry-'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Path (Join-Path $secondary 'skills') -Force|Out-Null
             try{
                 New-Item -ItemType Junction -Path (Join-Path $userHome '.claude') -Target $secondary|Out-Null
@@ -570,8 +670,7 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
             New-Item -ItemType Directory -Path (Join-Path $secondary 'skills') -Force|Out-Null
             try{
                 New-Item -ItemType Junction -Path (Join-Path $userHome '.claude') -Target $secondary|Out-Null
-                $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'cross-volume-empty-stage')
-                $desired.Files=@();$desired.Manifest.files=@();$desired.SkillIds=@()
+                $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'cross-volume-empty-stage') -WithoutSkill
                 $caught=$null;try{Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply|Out-Null}catch{$caught=$_}
                 $caught|Should Not BeNullOrEmpty
                 $caught.Exception.Code|Should Be 'capability-unavailable'
@@ -800,7 +899,6 @@ $module=Get-Module agent-environment-reconciler
             Test-Path -LiteralPath (Join-Path $retained[0].FullName 'file-1.stage')|Should Be $true
         }
     }
-
 
     if([Environment]::OSVersion.Platform-eq[PlatformID]::Win32NT){
         # Scenario: A non-admin Windows process prepositions file-1.stage as a directory junction to an external directory before the first journal is durable.
@@ -1074,6 +1172,7 @@ $module=Get-Module agent-environment-reconciler
         Move-Item -LiteralPath (Join-Path $runtime 'agent-environment-reconciler.psm1') -Destination (Join-Path $runtime 'agent-environment-reconciler-core.ps1')
         @'
 . (Join-Path $PSScriptRoot 'agent-environment-reconciler-core.ps1')
+function Assert-UserProjectionRuntimeGate { throw 'v2/v4 stable entry must not call the USER projection gate.' }
 function Get-UserSkillsDesiredState { param($RuntimeRoot,$Configuration,$CatalogRepository,$CatalogCommit,$WorkingRoot) [pscustomobject]@{} }
 function Invoke-UserSkillsReconciliation {
     param($DesiredState,$UserHome,$Mode,[switch]$ForceReinstallManagedSkills,[switch]$MigrateLegacyCatalogSkills,$InstallReadLease)
@@ -1092,6 +1191,7 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
         $result=$output[-1]|ConvertFrom-Json
         $result.Code|Should BeNullOrEmpty
         $result.failureDetails[0].code|Should Be 'mutation-failure'
+        Test-Path -LiteralPath (Join-Path $userHome '.claude')|Should Be $false
     }
 
     # Scenario: A caller opened the canonical install lock with delete sharing, then the path was replaced after trusted evidence was established but its owned shared lease was lost.
@@ -2085,7 +2185,7 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
         @'
 . (Join-Path $PSScriptRoot 'agent-environment-reconciler-core.ps1')
 [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'reconciler-imported.marker'),'imported')
-function Get-UserSkillsDesiredState { param([string]$RuntimeRoot,[object]$Configuration,[string]$CatalogRepository,[string]$CatalogCommit,[string]$WorkingRoot) $state=Import-Clixml -LiteralPath (Join-Path $PSScriptRoot 'test-desired.clixml');$state.RuntimeRoot=$PSScriptRoot;return $state }
+function Get-UserSkillsDesiredState { param([string]$RuntimeRoot,[object]$Configuration,[string]$CatalogRepository,[string]$CatalogCommit,[string]$WorkingRoot,[object]$GateContext) $state=Import-Clixml -LiteralPath (Join-Path $PSScriptRoot 'test-desired.clixml');$state.RuntimeRoot=$PSScriptRoot;if($null-ne$GateContext){$state|Add-Member -NotePropertyName GateContext -NotePropertyValue $GateContext -Force};return $state }
 if(Test-Path -LiteralPath (Join-Path $PSScriptRoot 'force-capability-unavailable')){
     function Assert-AgentEnvironmentDirectoryPublicationCapability {throw (New-AgentEnvironmentRefusalException -Code 'capability-unavailable' -Message 'Injected directory-publication refusal.')}
 }
@@ -2132,7 +2232,6 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
             foreach($pair in @(
                 [pscustomobject]@{Name='v5-v2';Config=5;Bundle=2;Code='mixed-generation'},
                 [pscustomobject]@{Name='v4-v3';Config=4;Bundle=3;Code='mixed-generation'},
-                [pscustomobject]@{Name='v5-v3';Config=5;Bundle=3;Code='projection-runtime-unavailable'},
                 [pscustomobject]@{Name='unknown-config';Config=99;Bundle=2;Code='unsupported-version'},
                 [pscustomobject]@{Name='unknown-bundle';Config=4;Bundle=99;Code='unsupported-version'}
             )){
@@ -2143,6 +2242,26 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
                 $gateOutput=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $codexHome -UserHome $gateHome -VerifyOnly -OutputFormat Json);$LASTEXITCODE|Should Be 1;$gate=$gateOutput[-1]|ConvertFrom-Json;$gate.Code|Should Be $pair.Code
                 (Get-TestTreeSnapshot $gateHome)|Should Be $beforeUser;(Get-TestTreeSnapshot $codexHome)|Should Be $beforeCodex;Test-Path -LiteralPath $importMarker|Should Be $false
             }
+
+            # Scenario: The stable entry receives a complete isolated bundle v3/configuration v5 pair.
+            # Purpose: Accept the legal pair only after ValidateOnly, obtain the current host receipt, and pass the exact gate context through desired-state planning without a bypass.
+            $v3Desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'matrix-v3v5-desired') -WithoutClaude
+            $v3Desired|Export-Clixml (Join-Path $runtime 'test-desired.clixml')
+            [IO.File]::WriteAllBytes((Join-Path $runtime 'catalog/skills-catalog.json'),[byte[]]$v3Desired.CatalogBytes)
+            [IO.File]::WriteAllBytes((Join-Path $runtime 'catalog/skills-catalog-lock.json'),[byte[]]$v3Desired.LockBytes)
+            [IO.File]::WriteAllBytes((Join-Path $runtime 'bootstrap-section.md'),[IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'instructions/common/bootstrap-section.md')))
+            Copy-TestPlatformRuntimeClosure -Destination $runtime
+            [IO.File]::WriteAllText($importMarker,'imported',[Text.UTF8Encoding]::new($false))
+            $platformModule=Import-Module (Join-Path $runtime 'platform-runtime.psd1') -Force -PassThru
+            $receipt=&$platformModule {Get-PlatformCapabilities -Required @()}
+            $v3Bundle=New-TestAiInstructionsRuntimeBundleV3 -RuntimeRoot $runtime -Repository ([string]$v3Desired.Manifest.catalogRepository) -Commit ([string]$v3Desired.Manifest.catalogCommit) -Acquisition git-checkout -CapabilityReceipt $receipt
+            [IO.File]::WriteAllText((Join-Path $codexHome 'ai-instructions-sync.json'),(($v3Desired.GateContext.configuration|ConvertTo-Json -Depth 30).Replace("`r`n","`n")+"`n"),[Text.UTF8Encoding]::new($false))
+            [IO.File]::WriteAllText((Join-Path $runtime 'runtime-bundle.json'),(($v3Bundle|ConvertTo-Json -Depth 40).Replace("`r`n","`n")+"`n"),[Text.UTF8Encoding]::new($false))
+            $v3Home=Join-Path $TestDrive 'matrix-gate-v3-v5';$v3Before=Get-TestTreeSnapshot $v3Home
+            $v3Output=@(& $script:TestPowerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -CodexHome $codexHome -UserHome $v3Home -VerifyOnly -OutputFormat Json)
+            $LASTEXITCODE|Should Be 2;($v3Output[-1]|ConvertFrom-Json).outcome|Should Be 'drift';(Get-TestTreeSnapshot $v3Home)|Should Be $v3Before
+
+            $desired|Export-Clixml (Join-Path $runtime 'test-desired.clixml')
             foreach($missingSide in @('config','bundle')){
                 @{schemaVersion=4;catalog=@{ref=$commit}}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $codexHome 'ai-instructions-sync.json') -Encoding UTF8
                 @{schemaVersion=2;repository='https://github.com/example/ai-instructions.git';commit=$commit}|ConvertTo-Json|Set-Content (Join-Path $runtime 'runtime-bundle.json') -Encoding UTF8
@@ -2187,8 +2306,7 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
         $testUserHome=Join-Path $TestDrive 'projection-prune';$initial=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'projection-prune-initial')
         (Invoke-UserSkillsReconciliation -DesiredState $initial -UserHome $testUserHome -Mode Apply).outcome|Should Be 'applied'
         foreach($root in @('.agents/skills','.claude/skills','.copilot/skills')){New-Item -ItemType Directory -Force -Path (Join-Path $testUserHome "$root/personal-empty")|Out-Null}
-        $retired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'projection-prune-retired')
-        $retired.Files=@();$retired.Manifest.files=@();$retired.SkillIds=@()
+        $retired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'projection-prune-retired') -WithoutSkill
 
         (Invoke-UserSkillsReconciliation -DesiredState $retired -UserHome $testUserHome -Mode Apply).outcome|Should Be 'applied'
 
@@ -2203,8 +2321,7 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
     It 'InterT83_preserves_unmanaged_content_raced_into_a_prune_candidate' {
         $testUserHome=Join-Path $TestDrive 'projection-prune-race';$initial=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'projection-prune-race-initial')
         (Invoke-UserSkillsReconciliation -DesiredState $initial -UserHome $testUserHome -Mode Apply).outcome|Should Be 'applied'
-        $retired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'projection-prune-race-retired')
-        $retired.Files=@();$retired.Manifest.files=@();$retired.SkillIds=@()
+        $retired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'projection-prune-race-retired') -WithoutSkill
         $external=Join-Path $testUserHome '.agents/skills/work-with-jira/external.txt'
 
         $result=Invoke-UserSkillsReconciliation -DesiredState $retired -UserHome $testUserHome -Mode Apply -BeforeDirectoryPruneAction {
@@ -2273,6 +2390,466 @@ Describe 'USER commit recovery capability gating' {
             $recovered.outcome|Should Be 'recovered'
             Assert-MockCalled Get-PlatformCapabilities 0 -ModuleName agent-environment-reconciler
             @(Get-ChildItem -Force -LiteralPath (Join-Path $caseHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0
+        }
+    }
+}
+
+Describe 'USER Claude managed bootstrap section' {
+    # Scenario: A complete isolated v3/v5 fixture enters the USER projection gate with the current host receipt.
+    # Purpose: Prove the success path uses the real P7e gate and produces an exact, revalidatable context without a bypass switch.
+    It 'InterT110_accepts_a_complete_v3v5_gate_fixture' {
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-gate-fixture')
+        $desired.GateContext.generation|Should Be 'v3v5'
+        {Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome (Join-Path $TestDrive 'claude-gate-user') -Mode VerifyOnly|Out-Null}|Should Not Throw
+    }
+
+    # Scenario: A legal v3/v5 runtime resolves the selected Skill from a hash-pinned local source archive through the production desired-state planner.
+    # Purpose: Exercise real archive acquisition, projection mapping, manifest construction, authority binding, Apply, and current without a planner stub or bypass.
+    It 'InterT111_plans_and_applies_a_complete_v3v5_state_through_the_production_desired_state_path' {
+        $fixture=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-production-planner-fixture')
+        Set-TestProjectionDesiredPayload -Desired $fixture -Text "---`nname: work-with-jira`ndescription: production planner fixture`n---`n`n# work-with-jira`n"
+        $archivePath=Join-Path $TestDrive 'claude-production-planner-source.zip'
+        New-TestProjectionSourceArchive -PayloadPath ([string]$fixture.Files[0].stagedPath) -ArchivePath $archivePath|Out-Null
+        $fixture.Lock.sources[0].archiveSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
+        [byte[]]$lockBytes=[Text.UTF8Encoding]::new($false).GetBytes(($fixture.Lock|ConvertTo-Json -Depth 20)+"`n")
+        [IO.File]::WriteAllBytes((Join-Path $fixture.RuntimeRoot 'catalog/skills-catalog-lock.json'),$lockBytes)
+        $platformModule=Import-Module (Join-Path $fixture.RuntimeRoot 'platform-runtime.psd1') -Force -PassThru
+        $receipt=&$platformModule {Get-PlatformCapabilities -Required @()}
+        $bundle=New-TestAiInstructionsRuntimeBundleV3 -RuntimeRoot $fixture.RuntimeRoot -Repository ([string]$fixture.Manifest.catalogRepository) -Commit ([string]$fixture.Manifest.catalogCommit) -Acquisition git-checkout -CapabilityReceipt $receipt
+        $configuration=$fixture.GateContext.configuration
+        $gate=Assert-UserProjectionRuntimeGate -Bundle $bundle -Configuration $configuration -RuntimeRoot $fixture.RuntimeRoot -CapabilityReceipt $receipt
+
+        $desired=Get-UserSkillsDesiredState -RuntimeRoot $fixture.RuntimeRoot -Configuration $configuration -CatalogRepository ([string]$bundle.repository) -CatalogCommit ([string]$bundle.commit) -WorkingRoot (Join-Path $TestDrive 'claude-production-planner-work') -GateContext $gate -LocalArchiveOverrides @{'agent-skills'=$archivePath}
+
+        [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'instructions/common/bootstrap-section.md'))
+        [Convert]::ToBase64String([byte[]]$desired.InstructionsArtifact.sectionBytes)|Should Be ([Convert]::ToBase64String($authority))
+        (@($desired.ProjectionIds|Sort-Object)-join',')|Should Be 'user-agents,user-claude,user-copilot'
+        $desired.Manifest.schemaVersion|Should Be 3
+        (@($desired.Manifest.projections|Sort-Object)-join',')|Should Be 'user-agents,user-claude,user-copilot'
+        @($desired.Files).Count|Should Be 3
+        @($desired.Manifest.files).Count|Should Be 3
+        [string[]]$expectedTargets=@('.agents/skills/work-with-jira/SKILL.md','.claude/skills/work-with-jira/SKILL.md','.copilot/skills/work-with-jira/SKILL.md')
+        foreach($relative in $expectedTargets){
+            @($desired.Manifest.files|Where-Object targetPath -ceq $relative).Count|Should Be 1
+        }
+
+        $userHome=Join-Path $TestDrive 'claude-production-planner-user'
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $userHome '.claude/CLAUDE.md')))|Should Be ([Convert]::ToBase64String($authority))
+        $publishedManifest=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $userHome '.agents/catalog-skills.manifest.json')|ConvertFrom-Json
+        $publishedManifest.schemaVersion|Should Be 3
+        $publishedManifest.lockSha256|Should Be $desired.Manifest.lockSha256
+        (@($publishedManifest.projections|Sort-Object)-join',')|Should Be 'user-agents,user-claude,user-copilot'
+        @($publishedManifest.files).Count|Should Be 3
+        (@($publishedManifest.files.targetPath|Sort-Object)-join',')|Should Be (($expectedTargets|Sort-Object)-join',')
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'current'
+    }
+
+    # Scenario: USER home has no .claude directory when a verified v3/v5 desired state first selects user-claude.
+    # Purpose: Publish the canonical authority bytes through the same USER transaction while keeping the managed manifest inventory Skills-only.
+    It 'InterT112_creates_CLAUDE_from_exact_authority_bytes_without_manifest_file_ownership' {
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-create-fixture')
+        $userHome=Join-Path $TestDrive 'claude-create-user'
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        $claudePath=Join-Path $userHome '.claude/CLAUDE.md'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be ([Convert]::ToBase64String([byte[]]$desired.InstructionsArtifact.sectionBytes))
+        $manifest=Get-Content -Raw -Encoding UTF8 (Join-Path $userHome '.agents/catalog-skills.manifest.json')|ConvertFrom-Json
+        @($manifest.files|Where-Object targetPath -eq '.claude/CLAUDE.md').Count|Should Be 0
+    }
+
+    # Scenario: Existing CLAUDE.md spans every rejected encoding and ambiguous boundary form.
+    # Purpose: Fail before Apply creates a lock, stage, journal, manifest, or any other USER mutation and preserve actionable remediation.
+    It 'InterT113_fails_closed_on_invalid_CLAUDE_bytes_before_USER_mutation' -TestCases @(
+        @{Name='utf16-le-bom';Bytes=[byte[]]@(0xFF,0xFE,0x41,0x00);Reason='UTF-16';Remediation='Save the file as UTF-8'},
+        @{Name='utf16-be-bom';Bytes=[byte[]]@(0xFE,0xFF,0x00,0x41);Reason='UTF-16';Remediation='Save the file as UTF-8'},
+        @{Name='utf32-le-bom';Bytes=[byte[]]@(0xFF,0xFE,0x00,0x00,0x41,0x00,0x00,0x00);Reason='UTF-32';Remediation='Save the file as UTF-8'},
+        @{Name='utf32-be-bom';Bytes=[byte[]]@(0x00,0x00,0xFE,0xFF,0x00,0x00,0x00,0x41);Reason='UTF-32';Remediation='Save the file as UTF-8'},
+        @{Name='utf16-le-no-bom';Bytes=[Text.Encoding]::Unicode.GetBytes('ASCII');Reason='NUL bytes';Remediation='Save the file as UTF-8'},
+        @{Name='utf16-be-no-bom';Bytes=[Text.Encoding]::BigEndianUnicode.GetBytes('ASCII');Reason='NUL bytes';Remediation='Save the file as UTF-8'},
+        @{Name='utf32-le-no-bom';Bytes=[Text.Encoding]::UTF32.GetBytes('ASCII');Reason='NUL bytes';Remediation='Save the file as UTF-8'},
+        @{Name='utf32-be-no-bom';Bytes=[Text.UTF32Encoding]::new($true,$false).GetBytes('ASCII');Reason='NUL bytes';Remediation='Save the file as UTF-8'},
+        @{Name='embedded-nul';Bytes=[Text.UTF8Encoding]::new($false).GetBytes("personal`0text");Reason='NUL bytes';Remediation='Save the file as UTF-8'},
+        @{Name='invalid-utf8';Bytes=[byte[]]@(0xC3,0x28);Reason='invalid UTF-8';Remediation='Save the file as UTF-8'},
+        @{Name='duplicate-heading';Bytes=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n## Repository Instructions Bootstrap`nold again`n");Reason='duplicate';Remediation='Remove the duplicate section'},
+        @{Name='ambiguous-heading';Bytes=[Text.UTF8Encoding]::new($false).GetBytes(" ## Repository Instructions Bootstrap`nold`n");Reason='ambiguous';Remediation='Keep one exact H2 heading'},
+        @{Name='bare-cr';Bytes=[Text.UTF8Encoding]::new($false).GetBytes("personal`rold");Reason='bare CR';Remediation='LF or CRLF'}
+    ) {
+        param($Name,$Bytes,$Reason,$Remediation)
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-invalid-fixture')
+        $userHome=Join-Path $TestDrive "claude-invalid-$Name";$claudePath=Join-Path $userHome '.claude/CLAUDE.md'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $claudePath)|Out-Null;[IO.File]::WriteAllBytes($claudePath,[byte[]]$Bytes)
+        $before=Get-TestTreeSnapshot $userHome;$caught=$null
+        try{Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply|Out-Null}catch{$caught=$_}
+        $caught|Should Not BeNullOrEmpty
+        [string]$caught.Exception.Message|Should Match ([regex]::Escape($Reason))
+        [string]$caught.Exception.Message|Should Match ([regex]::Escape($Remediation))
+        (Get-TestTreeSnapshot $userHome)|Should Be $before
+    }
+
+    # Scenario: A BOM/CRLF personal CLAUDE.md contains an old managed section followed by another H2 and trailing spaces.
+    # Purpose: Replace only the managed bytes while preserving the exact prefix and suffix, then keep generation stable on an idempotent rerun.
+    It 'InterT115_replaces_only_the_managed_CLAUDE_section_and_is_idempotent' {
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-replace-fixture')
+        $userHome=Join-Path $TestDrive 'claude-replace-user';$claudePath=Join-Path $userHome '.claude/CLAUDE.md'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $claudePath)|Out-Null
+        [byte[]]$bom=@(0xEF,0xBB,0xBF);$utf8=[Text.UTF8Encoding]::new($false)
+        [byte[]]$prefix=$utf8.GetBytes("# Personal`r`nkeep  `r`n## Repository Instructions Bootstrap`r`nold`r`n")
+        [byte[]]$suffix=$utf8.GetBytes("## Personal Tail`r`nvalue  `r`n")
+        [IO.File]::WriteAllBytes($claudePath,[byte[]]@($bom+$prefix+$suffix))
+        [byte[]]$expected=[byte[]]@($bom+$utf8.GetBytes("# Personal`r`nkeep  `r`n")+[byte[]]$desired.InstructionsArtifact.sectionBytes+$suffix)
+
+        $first=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply
+        $first.outcome|Should Be 'applied'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be ([Convert]::ToBase64String($expected))
+        $manifestPath=Join-Path $userHome '.agents/catalog-skills.manifest.json';$generation=(Get-Content -Raw -Encoding UTF8 $manifestPath|ConvertFrom-Json).generation
+
+        $second=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply
+        $second.outcome|Should Be 'current'
+        (Get-Content -Raw -Encoding UTF8 $manifestPath|ConvertFrom-Json).generation|Should Be $generation
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be ([Convert]::ToBase64String($expected))
+    }
+
+    # Scenario: A managed CLAUDE.md section is followed by a three-space-indented H2 with CRLF personal bytes.
+    # Purpose: Preserve the complete CommonMark H2 suffix byte-for-byte through USER reconciliation.
+    It 'InterT116_preserves_personal_bytes_after_an_indented_CLAUDE_H2' {
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-indented-h2-fixture')
+        $userHome=Join-Path $TestDrive 'claude-indented-h2-user';$claudePath=Join-Path $userHome '.claude/CLAUDE.md'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $claudePath)|Out-Null
+        $utf8=[Text.UTF8Encoding]::new($false)
+        [byte[]]$prefix=$utf8.GetBytes("# Personal`r`nkeep`r`n## Repository Instructions Bootstrap`r`nold`r`n")
+        [byte[]]$suffix=$utf8.GetBytes("   ## Personal Tail`r`nvalue  `r`n")
+        [IO.File]::WriteAllBytes($claudePath,[byte[]]@($prefix+$suffix))
+        [byte[]]$expected=[byte[]]@($utf8.GetBytes("# Personal`r`nkeep`r`n")+[byte[]]$desired.InstructionsArtifact.sectionBytes+$suffix)
+
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be ([Convert]::ToBase64String($expected))
+    }
+
+
+    # Scenario: Personal CLAUDE.md contains a fenced managed-heading example before the real section and a Setext H2 suffix after it.
+    # Purpose: Ignore the fenced example, replace the one real section, and retain the Setext paragraph and all surrounding bytes exactly.
+    It 'InterT116b_preserves_fenced_examples_and_a_Setext_CLAUDE_boundary' {
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-fenced-setext-fixture')
+        $userHome=Join-Path $TestDrive 'claude-fenced-setext-user';$claudePath=Join-Path $userHome '.claude/CLAUDE.md'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $claudePath)|Out-Null
+        $utf8=[Text.UTF8Encoding]::new($false)
+        [byte[]]$personalPrefix=$utf8.GetBytes("# Personal`r`n~~~md`r`n## Repository Instructions Bootstrap`r`nexample`r`n~~~~`r`n")
+        [byte[]]$oldSection=$utf8.GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`n")
+        [byte[]]$suffix=$utf8.GetBytes("Personal notes`r`n--------------`r`nKEEP  `r`n")
+        [IO.File]::WriteAllBytes($claudePath,[byte[]]@($personalPrefix+$oldSection+$suffix))
+        [byte[]]$expected=[byte[]]@($personalPrefix+[byte[]]$desired.InstructionsArtifact.sectionBytes+$utf8.GetBytes("`r`n")+$suffix)
+
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be ([Convert]::ToBase64String($expected))
+    }
+
+    # Scenario: Personal CLAUDE.md has a managed-heading example in an HTML comment and another in a list-item fence before the real section.
+    # Purpose: Treat both examples as container content, replace only the document-level section, and preserve every personal byte exactly.
+    It 'InterT116c_preserves_HTML_comment_and_list_fenced_CLAUDE_examples' {
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-html-list-fixture')
+        $userHome=Join-Path $TestDrive 'claude-html-list-user';$claudePath=Join-Path $userHome '.claude/CLAUDE.md'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $claudePath)|Out-Null
+        $utf8=[Text.UTF8Encoding]::new($false)
+        [byte[]]$personalPrefix=$utf8.GetBytes("<!--`r`n## Repository Instructions Bootstrap`r`n## Hidden HTML H2`r`n-->`r`n- ~~~md`r`n  ## Repository Instructions Bootstrap`r`n  ## Hidden list H2`r`n  ~~~~`r`n")
+        [byte[]]$oldSection=$utf8.GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`n")
+        [byte[]]$suffix=$utf8.GetBytes("## Personal Tail`r`nKEEP  `r`n")
+        [IO.File]::WriteAllBytes($claudePath,[byte[]]@($personalPrefix+$oldSection+$suffix))
+        [byte[]]$expected=[byte[]]@($personalPrefix+[byte[]]$desired.InstructionsArtifact.sectionBytes+$suffix)
+
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be ([Convert]::ToBase64String($expected))
+    }
+
+    # Scenario: A managed CLAUDE.md section contains a spaced thematic break before a three-space-indented personal H2 suffix.
+    # Purpose: Keep the thematic break out of list parsing and preserve the complete personal suffix byte-for-byte.
+    It 'InterT116d_preserves_personal_bytes_after_a_thematic_break_in_CLAUDE' {
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-thematic-break-fixture')
+        $userHome=Join-Path $TestDrive 'claude-thematic-break-user';$claudePath=Join-Path $userHome '.claude/CLAUDE.md'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $claudePath)|Out-Null
+        $utf8=[Text.UTF8Encoding]::new($false)
+        [byte[]]$oldSection=$utf8.GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`n* * *`r`n")
+        [byte[]]$suffix=$utf8.GetBytes("   ## Personal Tail`r`nKEEP  `r`n")
+        [IO.File]::WriteAllBytes($claudePath,[byte[]]@($oldSection+$suffix))
+        [byte[]]$expected=[byte[]]@([byte[]]$desired.InstructionsArtifact.sectionBytes+$suffix)
+
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be ([Convert]::ToBase64String($expected))
+    }
+
+    # Scenario: A CRLF CLAUDE.md has a managed section followed by a personal Setext H2 and is reconciled twice.
+    # Purpose: Preserve personal bytes, restore the Setext separator, and keep the second reconciliation byte-for-byte current.
+    It 'InterT116e_reconciles_a_Setext_CLAUDE_suffix_twice_without_byte_drift' {
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-setext-idempotent-fixture')
+        $userHome=Join-Path $TestDrive 'claude-setext-idempotent-user';$claudePath=Join-Path $userHome '.claude/CLAUDE.md'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $claudePath)|Out-Null
+        $utf8=[Text.UTF8Encoding]::new($false)
+        [byte[]]$personalPrefix=$utf8.GetBytes("# Personal`r`nkeep  `r`n")
+        [byte[]]$oldSection=$utf8.GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`n")
+        [byte[]]$suffix=$utf8.GetBytes("Personal notes`r`n--------------`r`nKEEP  `r`n")
+        [IO.File]::WriteAllBytes($claudePath,[byte[]]@($personalPrefix+$oldSection+$suffix))
+        [byte[]]$expected=[byte[]]@($personalPrefix+[byte[]]$desired.InstructionsArtifact.sectionBytes+$utf8.GetBytes("`r`n")+$suffix)
+
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be ([Convert]::ToBase64String($expected))
+
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'current'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be ([Convert]::ToBase64String($expected))
+    }
+
+    # Scenario: A later valid v3/v5 configuration removes user-claude after the managed section already exists.
+    # Purpose: Stop managing the artifact without deleting or rewriting the existing personal CLAUDE.md section.
+    It 'InterT117_preserves_existing_CLAUDE_when_user_claude_is_cancelled' {
+        $userHome=Join-Path $TestDrive 'claude-cancel-user'
+        $initial=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-cancel-initial')
+        (Invoke-UserSkillsReconciliation -DesiredState $initial -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        $claudePath=Join-Path $userHome '.claude/CLAUDE.md';[byte[]]$before=[IO.File]::ReadAllBytes($claudePath)
+        $cancelled=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-cancel-next') -WithoutClaude
+        (Invoke-UserSkillsReconciliation -DesiredState $cancelled -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be ([Convert]::ToBase64String($before))
+    }
+
+    # Scenario: USER Claude section drift is inspected through VerifyOnly and WhatIf while USER home has no coordinator state.
+    # Purpose: Report drift/planned without creating .agents, .claude, locks, stages, journals, manifests, or transaction roots.
+    It 'InterT120_keeps_VerifyOnly_and_WhatIf_free_of_USER_mutation' {
+        foreach($mode in @('VerifyOnly','WhatIf')){
+            $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive "claude-readonly-$mode-fixture")
+            $userHome=Join-Path $TestDrive "claude-readonly-$mode-user"
+            $result=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode $mode
+            $result.outcome|Should Be $(if($mode-ceq'VerifyOnly'){'drift'}else{'planned'})
+            Test-Path -LiteralPath $userHome|Should Be $false
+        }
+    }
+
+    # Scenario: Skills and the manifest are current, then only the managed CLAUDE section drifts.
+    # Purpose: Classify read-only modes without mutation, advance generation exactly once on Apply, and remain current thereafter.
+    It 'InterT121_advances_generation_once_for_section_only_drift' {
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-section-only-fixture')
+        $userHome=Join-Path $TestDrive 'claude-section-only-user'
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        $manifestPath=Join-Path $userHome '.agents/catalog-skills.manifest.json';$claudePath=Join-Path $userHome '.claude/CLAUDE.md'
+        $generationBefore=[int64](Get-Content -Raw -Encoding UTF8 $manifestPath|ConvertFrom-Json).generation
+        [IO.File]::WriteAllText($claudePath,"personal section drift`r`n",[Text.UTF8Encoding]::new($false))
+        $treeBefore=Get-TestTreeSnapshot $userHome
+
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode VerifyOnly).outcome|Should Be 'drift'
+        (Get-TestTreeSnapshot $userHome)|Should Be $treeBefore
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode WhatIf).outcome|Should Be 'planned'
+        (Get-TestTreeSnapshot $userHome)|Should Be $treeBefore
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        [int64](Get-Content -Raw -Encoding UTF8 $manifestPath|ConvertFrom-Json).generation|Should Be ($generationBefore+1)
+        $currentTree=Get-TestTreeSnapshot $userHome
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'current'
+        (Get-TestTreeSnapshot $userHome)|Should Be $currentTree
+    }
+
+    # Scenario: Callers directly invoke both exported coordinator commands with absent or tampered verified context.
+    # Purpose: Preserve typed no-bypass refusals and leave the complete USER tree byte-for-byte unchanged.
+    It 'InterT122_rejects_tampered_projection_context_at_both_exported_commands_without_USER_mutation' {
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-no-bypass-fixture')
+        $userHome=Join-Path $TestDrive 'claude-no-bypass-user';New-Item -ItemType Directory -Force -Path $userHome|Out-Null
+        [IO.File]::WriteAllText((Join-Path $userHome 'personal.txt'),'preserve',[Text.UTF8Encoding]::new($false));$before=Get-TestTreeSnapshot $userHome
+        $getArguments=@{RuntimeRoot=$desired.RuntimeRoot;Configuration=$desired.GateContext.configuration;CatalogRepository=[string]$desired.GateContext.bundle.repository;CatalogCommit=[string]$desired.GateContext.bundle.commit;WorkingRoot=(Join-Path $TestDrive 'claude-no-bypass-work');GateContext=$null}
+        foreach($case in @(
+            [pscustomobject]@{Name='missing Get context';Code='projection-runtime-unavailable';Action={Get-UserSkillsDesiredState @getArguments|Out-Null}},
+            [pscustomobject]@{Name='different Get configuration';Code='projection-runtime-unavailable';Action={$arguments=@{}+$getArguments;$arguments.GateContext=$desired.GateContext;$arguments.Configuration=$desired.GateContext.configuration.PSObject.Copy();$arguments.Configuration.catalog=$desired.GateContext.configuration.catalog.PSObject.Copy();$arguments.Configuration.catalog.includeSkills=@();Get-UserSkillsDesiredState @arguments|Out-Null}},
+            [pscustomobject]@{Name='extra Get projection';Code='projection-runtime-unavailable';Action={$arguments=@{}+$getArguments;$arguments.GateContext=$desired.GateContext;$arguments.ProjectionIds=@($desired.ProjectionIds)+@('user-extra');Get-UserSkillsDesiredState @arguments|Out-Null}},
+            [pscustomobject]@{Name='missing reconciliation context';Code='projection-runtime-unavailable';Action={$candidate=$desired.PSObject.Copy();$candidate.GateContext=$null;Invoke-UserSkillsReconciliation -DesiredState $candidate -UserHome $userHome -Mode Apply|Out-Null}},
+            [pscustomobject]@{Name='tampered bundle digest';Code='projection-runtime-unavailable';Action={$candidate=$desired.PSObject.Copy();$candidate.GateContext=$desired.GateContext.PSObject.Copy();$candidate.GateContext.bundleSha256='0'*64;Invoke-UserSkillsReconciliation -DesiredState $candidate -UserHome $userHome -Mode Apply|Out-Null}},
+            [pscustomobject]@{Name='tampered bundle object';Code='closure-invalid';Action={$candidate=$desired.PSObject.Copy();$candidate.GateContext=$desired.GateContext.PSObject.Copy();$candidate.GateContext.bundle=$desired.GateContext.bundle.PSObject.Copy();$candidate.GateContext.bundle.commit='f'*40;Invoke-UserSkillsReconciliation -DesiredState $candidate -UserHome $userHome -Mode Apply|Out-Null}},
+            [pscustomobject]@{Name='tampered configuration digest';Code='projection-runtime-unavailable';Action={$candidate=$desired.PSObject.Copy();$candidate.GateContext=$desired.GateContext.PSObject.Copy();$candidate.GateContext.configurationSha256='0'*64;Invoke-UserSkillsReconciliation -DesiredState $candidate -UserHome $userHome -Mode Apply|Out-Null}},
+            [pscustomobject]@{Name='tampered receipt digest';Code='projection-runtime-unavailable';Action={$candidate=$desired.PSObject.Copy();$candidate.GateContext=$desired.GateContext.PSObject.Copy();$candidate.GateContext.capabilityReceiptSha256='0'*64;Invoke-UserSkillsReconciliation -DesiredState $candidate -UserHome $userHome -Mode Apply|Out-Null}},
+            [pscustomobject]@{Name='tampered receipt object';Code='platform-mismatch';Action={$candidate=$desired.PSObject.Copy();$candidate.GateContext=$desired.GateContext.PSObject.Copy();$candidate.GateContext.capabilityReceipt=$desired.GateContext.capabilityReceipt.PSObject.Copy();$candidate.GateContext.capabilityReceipt.architecture='tampered';Invoke-UserSkillsReconciliation -DesiredState $candidate -UserHome $userHome -Mode Apply|Out-Null}},
+            [pscustomobject]@{Name='extra desired projection';Code='projection-runtime-unavailable';Action={$candidate=$desired.PSObject.Copy();$candidate.ProjectionIds=@($desired.ProjectionIds)+@('user-extra');Invoke-UserSkillsReconciliation -DesiredState $candidate -UserHome $userHome -Mode Apply|Out-Null}},
+            [pscustomobject]@{Name='replaced section bytes';Code='projection-runtime-unavailable';Action={$candidate=$desired.PSObject.Copy();$candidate.InstructionsArtifact=$desired.InstructionsArtifact.PSObject.Copy();$candidate.InstructionsArtifact.sectionBytes=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nreplacement`n");Invoke-UserSkillsReconciliation -DesiredState $candidate -UserHome $userHome -Mode Apply|Out-Null}},
+            [pscustomobject]@{Name='different runtime root';Code='projection-runtime-unavailable';Action={$otherRuntime=Join-Path $TestDrive 'claude-no-bypass-other-runtime';Copy-Item -LiteralPath $desired.RuntimeRoot -Destination $otherRuntime -Recurse;$candidate=$desired.PSObject.Copy();$candidate.RuntimeRoot=$otherRuntime;Invoke-UserSkillsReconciliation -DesiredState $candidate -UserHome $userHome -Mode Apply|Out-Null}}
+        )){
+            $caught=$null;try{& $case.Action}catch{$caught=$_}
+            $caught|Should Not BeNullOrEmpty
+            $caught.Exception.Code|Should Be $case.Code
+            (Get-TestTreeSnapshot $userHome)|Should Be $before
+        }
+    }
+
+    # Scenario: A fresh home has no .claude directory and fails after staging, publication, or durable operation journaling.
+    # Purpose: Roll back the full newly created .claude subtree and leave every pre-existing USER byte unchanged.
+    It 'InterT124_rolls_back_a_fresh_Claude_directory_at_each_named_publication_boundary' -TestCases @(
+        @{Failpoint='after-staged-subtree-verification'},
+        @{Failpoint='after-platform-rename'},
+        @{Failpoint='after-operation-journal'}
+    ) {
+        param($Failpoint)
+        $userHome=Join-Path $TestDrive "claude-fresh-rollback-$Failpoint"
+        $baseline=New-TestProjectionDesiredState -Root (Join-Path $TestDrive "claude-fresh-rollback-baseline-$Failpoint") -WithoutClaude
+        (Invoke-UserSkillsReconciliation -DesiredState $baseline -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        Test-Path -LiteralPath (Join-Path $userHome '.claude')|Should Be $false
+        $before=Get-TestTreeSnapshot $userHome
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive "claude-fresh-rollback-desired-$Failpoint")
+
+        $result=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply -FailpointName $Failpoint
+
+        $result.outcome|Should Be 'failed'
+        $result.rollbackState|Should Be 'completed'
+        (Get-TestTreeSnapshot $userHome)|Should Be $before
+        Test-Path -LiteralPath (Join-Path $userHome '.claude')|Should Be $false
+        @(Get-ChildItem -Force -LiteralPath (Join-Path $userHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0
+    }
+
+    # Scenario: A process dies at each fresh .claude staging/publication boundary before finally blocks can run.
+    # Purpose: Retain exact recovery evidence, then remove the entire newly created .claude subtree during hard-stop recovery.
+    It 'InterT126_recovers_a_fresh_Claude_directory_after_each_hard_interruption' -TestCases @(
+        @{Failpoint='after-staged-subtree-verification'},
+        @{Failpoint='after-platform-rename'},
+        @{Failpoint='after-operation-journal'}
+    ) {
+        param($Failpoint)
+        $userHome=Join-Path $TestDrive "claude-fresh-recovery-$Failpoint"
+        $baseline=New-TestProjectionDesiredState -Root (Join-Path $TestDrive "claude-fresh-recovery-baseline-$Failpoint") -WithoutClaude
+        (Invoke-UserSkillsReconciliation -DesiredState $baseline -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        $before=Get-TestTreeSnapshot $userHome
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive "claude-fresh-recovery-desired-$Failpoint")
+        $desiredPath=Join-Path $TestDrive "claude-fresh-recovery-$Failpoint.clixml";$desired|Export-Clixml -LiteralPath $desiredPath
+        $gatePath=Join-Path $TestDrive "claude-fresh-recovery-$Failpoint-gate.json";[IO.File]::WriteAllText($gatePath,(($desired.GateContext|ConvertTo-Json -Depth 100).Replace("`r`n","`n")+"`n"),[Text.UTF8Encoding]::new($false))
+        $childPath=Join-Path $TestDrive "claude-fresh-recovery-$Failpoint-child.ps1"
+        @'
+param([string]$ModulePath,[string]$DesiredPath,[string]$GatePath,[string]$UserHome,[string]$Failpoint)
+$ErrorActionPreference='Stop'
+Import-Module $ModulePath -Force
+$desired=Import-Clixml -LiteralPath $DesiredPath
+$gate=Get-Content -Raw -Encoding UTF8 -LiteralPath $GatePath|ConvertFrom-Json
+$desired.GateContext=Assert-UserProjectionRuntimeGate -Bundle $gate.bundle -Configuration $gate.configuration -RuntimeRoot ([string]$gate.runtimeRoot) -CapabilityReceipt $gate.capabilityReceipt
+$env:AI_INSTRUCTIONS_USER_RECONCILER_FAILFAST=$Failpoint
+Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode Apply -FailpointName $Failpoint|Out-Null
+'@|Set-Content -LiteralPath $childPath -Encoding UTF8
+        $child=Invoke-TestNonInteractiveChild -Arguments @('-NoProfile','-ExecutionPolicy','Bypass','-File',$childPath,$script:ModulePath,$desiredPath,$gatePath,$userHome,$Failpoint)
+        $child.ExitCode|Should Not Be 0
+        @(Get-ChildItem -Force -LiteralPath (Join-Path $userHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should BeGreaterThan 0
+        $readLease=New-TestInstallReadLeaseEvidence
+        try{$recovered=Invoke-UserSkillsRecovery -UserHome $userHome -InstallReadLease $readLease.Evidence}
+        finally{$readLease.Stream.Dispose();if($readLease.Created){Remove-Item -LiteralPath $readLease.Path -Force -ErrorAction SilentlyContinue}}
+        $recovered.outcome|Should Be 'recovered'
+        (Get-TestTreeSnapshot $userHome)|Should Be $before
+        Test-Path -LiteralPath (Join-Path $userHome '.claude')|Should Be $false
+        @(Get-ChildItem -Force -LiteralPath (Join-Path $userHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0
+    }
+
+    # Scenario: The USER transaction fails after its first durable publication while CLAUDE.md and Skills are planned together.
+    # Purpose: Roll back the exact personal CLAUDE.md bytes and all USER Skill/manifest mutations in the same transaction.
+    It 'InterT125_rolls_back_CLAUDE_and_Skills_together_after_a_failpoint' {
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-rollback-fixture')
+        $userHome=Join-Path $TestDrive 'claude-rollback-user';$claudePath=Join-Path $userHome '.claude/CLAUDE.md'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $claudePath)|Out-Null
+        [byte[]]$original=[Text.UTF8Encoding]::new($false).GetBytes("personal without section  `r`n")
+        [IO.File]::WriteAllBytes($claudePath,$original)
+        foreach($failureAfter in @(1,2)){
+            [IO.File]::WriteAllBytes($claudePath,$original)
+            $result=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply -FailureAfterMutationCount $failureAfter
+            $result.outcome|Should Be 'failed'
+            $result.rollbackState|Should Be 'completed'
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be ([Convert]::ToBase64String($original))
+            Test-Path -LiteralPath (Join-Path $userHome '.agents/catalog-skills.manifest.json')|Should Be $false
+            Test-Path -LiteralPath (Join-Path $userHome '.agents/skills/work-with-jira/SKILL.md')|Should Be $false
+        }
+    }
+
+    # Scenario: The process terminates after publishing a CLAUDE.md write and durably recording that USER operation.
+    # Purpose: Let Invoke-UserSkillsRecovery use the retained install journal to restore the exact personal bytes after a hard interruption.
+    It 'InterT127_recovers_exact_CLAUDE_bytes_after_a_hard_interruption' {
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-hard-recovery-fixture')
+        $userHome=Join-Path $TestDrive 'claude-hard-recovery-user'
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        $claudePath=Join-Path $userHome '.claude/CLAUDE.md';[byte[]]$original=[Text.UTF8Encoding]::new($false).GetBytes("personal before hard recovery  `r`n")
+        [IO.File]::WriteAllBytes($claudePath,$original)
+        $desiredPath=Join-Path $TestDrive 'claude-hard-recovery-desired.clixml';$desired|Export-Clixml -LiteralPath $desiredPath
+        $gatePath=Join-Path $TestDrive 'claude-hard-recovery-gate.json'
+        [IO.File]::WriteAllText($gatePath,(($desired.GateContext|ConvertTo-Json -Depth 100).Replace("`r`n","`n")+"`n"),[Text.UTF8Encoding]::new($false))
+        $childPath=Join-Path $TestDrive 'claude-hard-recovery-child.ps1'
+        @'
+param([string]$ModulePath,[string]$DesiredPath,[string]$GatePath,[string]$UserHome)
+$ErrorActionPreference='Stop'
+Import-Module $ModulePath -Force
+$env:AI_INSTRUCTIONS_USER_RECONCILER_FAILFAST='after-operation-journal'
+$desired=Import-Clixml -LiteralPath $DesiredPath
+$gate=Get-Content -Raw -Encoding UTF8 -LiteralPath $GatePath|ConvertFrom-Json
+$desired.GateContext=Assert-UserProjectionRuntimeGate -Bundle $gate.bundle -Configuration $gate.configuration -RuntimeRoot ([string]$gate.runtimeRoot) -CapabilityReceipt $gate.capabilityReceipt
+Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode Apply -FailpointName after-operation-journal|Out-Null
+'@|Set-Content -LiteralPath $childPath -Encoding UTF8
+        $child=Invoke-TestNonInteractiveChild -Arguments @('-NoProfile','-ExecutionPolicy','Bypass','-File',$childPath,$script:ModulePath,$desiredPath,$gatePath,$userHome)
+        $child.ExitCode|Should Not Be 0
+        @(Get-ChildItem -Force -LiteralPath (Join-Path $userHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should BeGreaterThan 0
+        $readLease=New-TestInstallReadLeaseEvidence
+        try{$recovered=Invoke-UserSkillsRecovery -UserHome $userHome -InstallReadLease $readLease.Evidence}
+        finally{$readLease.Stream.Dispose();if($readLease.Created){Remove-Item -LiteralPath $readLease.Path -Force -ErrorAction SilentlyContinue}}
+        $recovered.outcome|Should Be 'recovered'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be ([Convert]::ToBase64String($original))
+        @(Get-ChildItem -Force -LiteralPath (Join-Path $userHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0
+    }
+
+    if([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)){
+        # Scenario: An existing readonly CLAUDE.md is replaced through USER publication and the transaction completes.
+        # Purpose: Preserve readonly metadata while permitting the existing publication primitive to update the managed section safely.
+        It 'InterT130_updates_and_preserves_a_readonly_CLAUDE_file' {
+            $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-readonly-file-fixture')
+            $userHome=Join-Path $TestDrive 'claude-readonly-file-user';$claudePath=Join-Path $userHome '.claude/CLAUDE.md'
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $claudePath)|Out-Null
+            $utf8=[Text.UTF8Encoding]::new($false);[byte[]]$personal=$utf8.GetBytes("personal`r`n")
+            [IO.File]::WriteAllBytes($claudePath,$personal);(Get-Item -Force $claudePath).IsReadOnly=$true
+            [byte[]]$expected=[byte[]]@($personal+$utf8.GetBytes("`r`n")+[byte[]]$desired.InstructionsArtifact.sectionBytes)
+            $result=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply
+            $result.outcome|Should Be 'applied'
+            (Get-Item -Force $claudePath).IsReadOnly|Should Be $true
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be ([Convert]::ToBase64String($expected))
+        }
+
+        # Scenario: A readonly CLAUDE.md has a protected non-default DACL and fails after its durable publication.
+        # Purpose: Preserve exact bytes, raw DACL, readonly state, and transaction cleanliness through rollback and hard recovery.
+        It 'InterT132_restores_readonly_CLAUDE_bytes_and_raw_DACL_after_rollback_and_recovery' {
+            $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-readonly-recovery-fixture')
+            $userHome=Join-Path $TestDrive 'claude-readonly-recovery-user'
+            (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+            $claudePath=Join-Path $userHome '.claude/CLAUDE.md';[byte[]]$original=[Text.UTF8Encoding]::new($false).GetBytes("readonly personal bytes`r`n")
+            [IO.File]::WriteAllBytes($claudePath,$original)
+            $getRawDacl={param($Path)(Get-Acl -LiteralPath $Path).GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)}
+            $defaultDacl=&$getRawDacl $claudePath
+            $acl=Get-Acl -LiteralPath $claudePath;$acl.SetAccessRuleProtection($true,$true);Set-Acl -LiteralPath $claudePath -AclObject $acl
+            (Get-Item -Force -LiteralPath $claudePath).IsReadOnly=$true
+            $daclBefore=&$getRawDacl $claudePath;$readonlyBefore=(Get-Item -Force -LiteralPath $claudePath).IsReadOnly
+            $daclBefore|Should Not Be $defaultDacl
+
+            $failed=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply -FailpointName after-operation-journal
+            $failed.outcome|Should Be 'failed';$failed.rollbackState|Should Be 'completed'
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be ([Convert]::ToBase64String($original))
+            (&$getRawDacl $claudePath)|Should Be $daclBefore
+            (Get-Item -Force -LiteralPath $claudePath).IsReadOnly|Should Be $readonlyBefore
+            @(Get-ChildItem -Force -LiteralPath (Join-Path $userHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0
+
+            $desiredPath=Join-Path $TestDrive 'claude-readonly-recovery-desired.clixml';$desired|Export-Clixml -LiteralPath $desiredPath
+            $gatePath=Join-Path $TestDrive 'claude-readonly-recovery-gate.json';[IO.File]::WriteAllText($gatePath,(($desired.GateContext|ConvertTo-Json -Depth 100).Replace("`r`n","`n")+"`n"),[Text.UTF8Encoding]::new($false))
+            $childPath=Join-Path $TestDrive 'claude-readonly-recovery-child.ps1'
+            @'
+param([string]$ModulePath,[string]$DesiredPath,[string]$GatePath,[string]$UserHome)
+$ErrorActionPreference='Stop'
+Import-Module $ModulePath -Force
+$desired=Import-Clixml -LiteralPath $DesiredPath
+$gate=Get-Content -Raw -Encoding UTF8 -LiteralPath $GatePath|ConvertFrom-Json
+$desired.GateContext=Assert-UserProjectionRuntimeGate -Bundle $gate.bundle -Configuration $gate.configuration -RuntimeRoot ([string]$gate.runtimeRoot) -CapabilityReceipt $gate.capabilityReceipt
+$env:AI_INSTRUCTIONS_USER_RECONCILER_FAILFAST='after-operation-journal'
+Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode Apply -FailpointName after-operation-journal|Out-Null
+'@|Set-Content -LiteralPath $childPath -Encoding UTF8
+            $child=Invoke-TestNonInteractiveChild -Arguments @('-NoProfile','-ExecutionPolicy','Bypass','-File',$childPath,$script:ModulePath,$desiredPath,$gatePath,$userHome)
+            $child.ExitCode|Should Not Be 0
+            @(Get-ChildItem -Force -LiteralPath (Join-Path $userHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should BeGreaterThan 0
+            $readLease=New-TestInstallReadLeaseEvidence
+            try{$recovered=Invoke-UserSkillsRecovery -UserHome $userHome -InstallReadLease $readLease.Evidence}
+            finally{$readLease.Stream.Dispose();if($readLease.Created){Remove-Item -LiteralPath $readLease.Path -Force -ErrorAction SilentlyContinue}}
+            $recovered.outcome|Should Be 'recovered'
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be ([Convert]::ToBase64String($original))
+            (&$getRawDacl $claudePath)|Should Be $daclBefore
+            (Get-Item -Force -LiteralPath $claudePath).IsReadOnly|Should Be $readonlyBefore
+            @(Get-ChildItem -Force -LiteralPath (Join-Path $userHome '.ai-instructions-txn') -ErrorAction SilentlyContinue).Count|Should Be 0
         }
     }
 }

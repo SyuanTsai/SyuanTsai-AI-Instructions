@@ -21,6 +21,7 @@ function New-P7eSourceArchive {
         try{
             $root=[IO.Path]::GetFullPath($SourceRoot).TrimEnd([char[]]@('\','/'))
             $files=@(Get-ChildItem -LiteralPath (Join-Path $root 'scripts'),(Join-Path $root 'catalog') -Recurse -File)
+            $files+=@(Get-Item -LiteralPath (Join-Path $root 'instructions/common/bootstrap-section.md'))
             $files+=@(Get-ChildItem -LiteralPath $root -File|Where-Object Name -in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json'))
             foreach($file in @($files|Sort-Object FullName)){
                 $relative=$file.FullName.Substring($root.Length).TrimStart([char[]]@('\','/')).Replace('\','/')
@@ -37,6 +38,8 @@ function New-P7eV3Candidate {
     param([Parameter(Mandatory=$true)][string]$Destination)
     New-Item -ItemType Directory -Path $Destination|Out-Null
     Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts'),(Join-Path $script:RepositoryRoot 'catalog') -Destination $Destination -Recurse
+    New-Item -ItemType Directory -Force -Path (Join-Path $Destination 'instructions/common')|Out-Null
+    Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'instructions/common/bootstrap-section.md') -Destination (Join-Path $Destination 'instructions/common/bootstrap-section.md')
     foreach($leaf in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json')){Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot $leaf) -Destination (Join-Path $Destination $leaf)}
     Copy-Item -LiteralPath (Join-Path $Destination 'catalog\examples\skills-catalog-v3.example.json') -Destination (Join-Path $Destination 'catalog\skills-catalog.json') -Force
     Copy-Item -LiteralPath (Join-Path $Destination 'catalog\examples\skills-catalog-lock-v3.example.json') -Destination (Join-Path $Destination 'catalog\skills-catalog-lock.json') -Force

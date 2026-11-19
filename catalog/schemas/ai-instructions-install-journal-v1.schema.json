@@ -105,6 +105,13 @@
                 },
                 {
                   "properties": {
+                    "targetRelativePath": { "const": ".claude/CLAUDE.md" },
+                    "kind": { "enum": ["create-file", "write-file"] }
+                  },
+                  "required": ["targetRelativePath", "kind"]
+                },
+                {
+                  "properties": {
                     "targetRelativePath": { "pattern": "^(?:[.]agents/skills|[.]claude/skills|[.]copilot/skills)/.+$" },
                     "kind": { "enum": ["create-file", "write-file", "remove-file"] }
                   },

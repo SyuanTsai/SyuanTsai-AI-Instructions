@@ -274,6 +274,8 @@ function New-AiInstructionFixture {
     [void](New-Item -ItemType Directory -Path $root -Force)
     Copy-Item -LiteralPath $script:ContractPath -Destination $root
     Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'instructions') -Destination $root -Recurse
+    [void](New-Item -ItemType Directory -Path (Join-Path $root 'scripts') -Force)
+    Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts\install-ai-instructions-bootstrap.ps1') -Destination (Join-Path $root 'scripts\install-ai-instructions-bootstrap.ps1')
     if ($IncludeOutputs) {
         foreach ($directory in @('.codex','.github','.claude')) {
             Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot $directory) -Destination $root -Recurse
@@ -449,6 +451,78 @@ function New-AiInstructionFixture {
         if ($artifactResult.ExitCode -eq 0 -or $artifactResult.Output -cnotmatch [regex]::Escape('.claude/CLAUDE.md')) {
             throw "Artifact drift was not reported: $($artifactResult.Output)"
         }
+    }
+
+    # Scenario: The bootstrap section authority or generated installer base64 changes independently.
+    # Purpose: Keep raw authority bytes canonical and make -Check reject any generated-copy drift before installer publication.
+    It 'InterT15a_generates_installer_bootstrap_base64_from_exact_authority_bytes' {
+        [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'instructions\common\bootstrap-section.md'))
+        $installer=[IO.File]::ReadAllText((Join-Path $script:RepositoryRoot 'scripts\install-ai-instructions-bootstrap.ps1'),[Text.UTF8Encoding]::new($false,$true))
+        $match=[regex]::Match($installer,'(?ms)^# BEGIN GENERATED BOOTSTRAP SECTION BASE64\r?\n\$bootstrapSectionBytes = \[System\.Convert\]::FromBase64String\(\r?\n    ''(?<base64>[^'']+)''\r?\n\)\r?\n# END GENERATED BOOTSTRAP SECTION BASE64\r?\n')
+        $match.Success|Should Be $true
+        [Convert]::ToBase64String([Convert]::FromBase64String($match.Groups['base64'].Value))|Should Be ([Convert]::ToBase64String($authority))
+        $authority[$authority.Length-1]|Should Be 0x0A
+        $authority[$authority.Length-2]|Should Not Be 0x0A
+        ($authority -contains 0x0D)|Should Be $false
+
+        $root=New-AiInstructionFixture -Name 'bootstrap-base64-drift' -IncludeOutputs
+        $installerPath=Join-Path $root 'scripts\install-ai-instructions-bootstrap.ps1'
+        [IO.File]::WriteAllText($installerPath,$installer.Replace($match.Groups['base64'].Value,[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('drift'))),[Text.UTF8Encoding]::new($false))
+        $check=Invoke-AiInstructionBuilderProcess -Root $root -Check
+        $check.ExitCode|Should Not Be 0
+        $check.Output|Should Match 'scripts/install-ai-instructions-bootstrap.ps1'
+
+        $syncRoot=New-AiInstructionFixture -Name 'bootstrap-base64-sync' -IncludeOutputs
+        $syncAuthorityPath=Join-Path $syncRoot 'instructions/common/bootstrap-section.md'
+        [byte[]]$syncAuthority=[Text.UTF8Encoding]::new($false).GetBytes(([Text.UTF8Encoding]::new($false,$true).GetString([IO.File]::ReadAllBytes($syncAuthorityPath))).TrimEnd("`n")+"`n- generated-copy-test`n")
+        [IO.File]::WriteAllBytes($syncAuthorityPath,$syncAuthority)
+        $sync=Invoke-AiInstructionBuilderProcess -Root $syncRoot
+        $sync.ExitCode|Should Be 0
+        $syncInstaller=[IO.File]::ReadAllText((Join-Path $syncRoot 'scripts/install-ai-instructions-bootstrap.ps1'),[Text.UTF8Encoding]::new($false,$true))
+        $syncMatch=[regex]::Match($syncInstaller,'(?ms)^# BEGIN GENERATED BOOTSTRAP SECTION BASE64\r?\n\$bootstrapSectionBytes = \[System\.Convert\]::FromBase64String\(\r?\n    ''(?<base64>[^'']+)''\r?\n\)\r?\n# END GENERATED BOOTSTRAP SECTION BASE64\r?\n')
+        [Convert]::ToBase64String([Convert]::FromBase64String($syncMatch.Groups['base64'].Value))|Should Be ([Convert]::ToBase64String($syncAuthority))
+
+        $invalidRoot=New-AiInstructionFixture -Name 'bootstrap-authority-invalid' -IncludeOutputs
+        [IO.File]::WriteAllBytes((Join-Path $invalidRoot 'instructions/common/bootstrap-section.md'),[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`r`ninvalid`r`n"))
+        $invalid=Invoke-AiInstructionBuilderProcess -Root $invalidRoot -Check
+        $invalid.ExitCode|Should Not Be 0
+        $invalid.Output|Should Match 'BootstrapSectionAuthorityInvalid'
+    }
+
+    # Scenario: Git checks out the installer with CRLF, then its generated base64 is either current or tampered.
+    # Purpose: Avoid newline-only drift while preserving CRLF bytes during no-op generation and base64 repair.
+    It 'InterT15b_preserves_crlf_installer_while_detecting_and_repairing_bootstrap_base64_drift' {
+        $root=New-AiInstructionFixture -Name 'bootstrap-base64-crlf' -IncludeOutputs
+        $installerPath=Join-Path $root 'scripts\install-ai-instructions-bootstrap.ps1'
+        $utf8=[Text.UTF8Encoding]::new($false,$true)
+        $installer=[IO.File]::ReadAllText($installerPath,$utf8).Replace("`r`n","`n").Replace("`n","`r`n")
+        [IO.File]::WriteAllText($installerPath,$installer,[Text.UTF8Encoding]::new($false))
+        [byte[]]$before=[IO.File]::ReadAllBytes($installerPath)
+
+        $check=Invoke-AiInstructionBuilderProcess -Root $root -Check
+        $check.ExitCode|Should Be 0
+        $generate=Invoke-AiInstructionBuilderProcess -Root $root
+        $generate.ExitCode|Should Be 0
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($installerPath))|Should Be ([Convert]::ToBase64String($before))
+
+        $current=[IO.File]::ReadAllText($installerPath,$utf8)
+        $match=[regex]::Match($current,'(?ms)^# BEGIN GENERATED BOOTSTRAP SECTION BASE64\r?\n\$bootstrapSectionBytes = \[System\.Convert\]::FromBase64String\(\r?\n    ''(?<base64>[^'']+)''\r?\n\)\r?\n# END GENERATED BOOTSTRAP SECTION BASE64\r?\n')
+        $match.Success|Should Be $true
+        $tampered=$current.Replace($match.Groups['base64'].Value,[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('crlf drift')))
+        [IO.File]::WriteAllText($installerPath,$tampered,[Text.UTF8Encoding]::new($false))
+        $drift=Invoke-AiInstructionBuilderProcess -Root $root -Check
+        $drift.ExitCode|Should Not Be 0
+        $drift.Output|Should Match 'scripts/install-ai-instructions-bootstrap.ps1'
+
+        $repair=Invoke-AiInstructionBuilderProcess -Root $root
+        $repair.ExitCode|Should Be 0
+        $repaired=[IO.File]::ReadAllText($installerPath,$utf8)
+        [regex]::IsMatch($repaired,'(?<!\r)\n')|Should Be $false
+        $repaired|Should Match "`r`n"
+        $repairedMatch=[regex]::Match($repaired,'(?ms)^# BEGIN GENERATED BOOTSTRAP SECTION BASE64\r?\n\$bootstrapSectionBytes = \[System\.Convert\]::FromBase64String\(\r?\n    ''(?<base64>[^'']+)''\r?\n\)\r?\n# END GENERATED BOOTSTRAP SECTION BASE64\r?\n')
+        $repairedMatch.Success|Should Be $true
+        [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $root 'instructions\common\bootstrap-section.md'))
+        $repairedMatch.Groups['base64'].Value|Should Be ([Convert]::ToBase64String($authority))
     }
 
     # Scenario: Generation runs on a host with different native encoding or newline defaults.

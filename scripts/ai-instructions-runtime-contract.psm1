@@ -258,8 +258,13 @@ function Assert-AiInstructionsUserReconcilerOperationTarget {
         if ($kind -cnotin @('create-file','write-file')) { throw "$Context kind must be create-file or write-file for the USER manifest target." }
         return
     }
+    if ($target -ceq '.claude/CLAUDE.md') {
+        if ($kind -cnotin @('create-file','write-file')) { throw "$Context kind must be create-file or write-file for the USER Claude instructions target." }
+        return
+    }
     if ($kind -ceq 'swap-directory') { throw "$Context kind swap-directory is not allowed for owner.component user-reconciler." }
     if ($kind -ceq 'create-directory') {
+        if ($target -ceq '.claude') { return }
         if (Test-AiInstructionsUserReconcilerCreateDirectoryTarget -TargetRelativePath $target) { return }
         throw "$Context.targetRelativePath is outside the USER Skill projection roots and their approved missing ancestors."
     }
@@ -267,6 +272,484 @@ function Assert-AiInstructionsUserReconcilerOperationTarget {
         if ($target.StartsWith("$root/",[StringComparison]::Ordinal)) { return }
     }
     throw "$Context.targetRelativePath is outside the USER Skill projection roots."
+}
+
+function Join-AiInstructionsByteArrays {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[][]] $Parts)
+    [int64]$length = 0
+    foreach ($part in $Parts) { $length += $part.Length }
+    if ($length -gt [int]::MaxValue) { throw 'Managed instructions content is too large.' }
+    $result = New-Object byte[] ([int]$length)
+    $offset = 0
+    foreach ($part in $Parts) {
+        if ($part.Length -gt 0) { [Array]::Copy($part,0,$result,$offset,$part.Length) }
+        $offset += $part.Length
+    }
+    return ,$result
+}
+
+function Get-AiInstructionsByteSlice {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $Bytes,
+        [Parameter(Mandatory = $true)][int] $Offset,
+        [Parameter(Mandatory = $true)][int] $Length
+    )
+    if ($Offset -lt 0 -or $Length -lt 0 -or ([int64]$Offset + $Length) -gt $Bytes.Length) { throw 'Managed instructions byte slice is outside the source content.' }
+    $result = New-Object byte[] $Length
+    if ($Length -gt 0) { [Array]::Copy($Bytes,$Offset,$result,0,$Length) }
+    return ,$result
+}
+
+function Get-AiInstructionsMarkdownPrefixIndent {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string] $Text,[Parameter(Mandatory = $true)][int] $Offset)
+
+    $position = $Offset
+    $columns = 0
+    while ($position -lt $Text.Length) {
+        $character = $Text[$position]
+        if ($character -eq [char]0x20) { $width = 1 }
+        elseif ($character -eq [char]0x09) { $width = 4 - ($columns % 4) }
+        else { break }
+        if (($columns + $width) -gt 3) { break }
+        $columns += $width
+        $position++
+    }
+    return [pscustomobject]@{ Offset=$position; Columns=$columns }
+}
+
+function Get-AiInstructionsMarkdownRequiredIndent {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string] $Text,
+        [Parameter(Mandatory = $true)][int] $Offset,
+        [Parameter(Mandatory = $true)][int] $RequiredColumns
+    )
+
+    $position = $Offset
+    $columns = 0
+    while ($position -lt $Text.Length -and $columns -lt $RequiredColumns) {
+        $character = $Text[$position]
+        if ($character -eq [char]0x20) { $width = 1 }
+        elseif ($character -eq [char]0x09) { $width = 4 - ($columns % 4) }
+        else { break }
+        $columns += $width
+        $position++
+    }
+    if ($columns -lt $RequiredColumns) { return $null }
+    return [pscustomobject]@{ Offset=$position; Columns=$columns }
+}
+
+function Get-AiInstructionsMarkdownBlockQuotePrefix {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string] $Text,[Parameter(Mandatory = $true)][int] $Offset)
+
+    $indent = Get-AiInstructionsMarkdownPrefixIndent -Text $Text -Offset $Offset
+    $position = [int]$indent.Offset
+    if ($position -ge $Text.Length -or $Text[$position] -ne [char]0x3E) { return $null }
+    $position++
+    if ($position -lt $Text.Length -and ($Text[$position] -eq [char]0x20 -or $Text[$position] -eq [char]0x09)) { $position++ }
+    return [pscustomobject]@{ Offset=$position }
+}
+
+function Get-AiInstructionsMarkdownListMarker {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string] $Text,
+        [Parameter(Mandatory = $true)][int] $Offset,
+        [Parameter(Mandatory = $true)][bool] $InterruptsParagraph
+    )
+
+    $indent = Get-AiInstructionsMarkdownPrefixIndent -Text $Text -Offset $Offset
+    $position = [int]$indent.Offset
+    if ($position -ge $Text.Length) { return $null }
+    $markerWidth = 0
+    $orderedNumber = $null
+    if ($Text[$position] -eq [char]0x2A -or $Text[$position] -eq [char]0x2B -or $Text[$position] -eq [char]0x2D) {
+        $markerWidth = 1
+    }
+    else {
+        $ordered = [regex]::Match($Text.Substring($position),'^(?<number>[0-9]{1,9})[.)]')
+        if (-not $ordered.Success) { return $null }
+        $markerWidth = $ordered.Length
+        $orderedNumber = [int64]$ordered.Groups['number'].Value
+    }
+    $afterMarker = $position + $markerWidth
+    if ($afterMarker -lt $Text.Length -and $Text[$afterMarker] -ne [char]0x20 -and $Text[$afterMarker] -ne [char]0x09) { return $null }
+
+    $onlyWhitespace = $true
+    for ($index = $afterMarker; $index -lt $Text.Length; $index++) {
+        if ($Text[$index] -ne [char]0x20 -and $Text[$index] -ne [char]0x09) { $onlyWhitespace = $false; break }
+    }
+    if ($InterruptsParagraph -and ($onlyWhitespace -or ($null -ne $orderedNumber -and $orderedNumber -ne 1))) { return $null }
+
+    $paddingPosition = $afterMarker
+    $paddingColumns = 0
+    while ($paddingPosition -lt $Text.Length) {
+        $character = $Text[$paddingPosition]
+        if ($character -eq [char]0x20) { $width = 1 }
+        elseif ($character -eq [char]0x09) { $width = 4 - ($paddingColumns % 4) }
+        else { break }
+        $paddingColumns += $width
+        $paddingPosition++
+    }
+    if ($onlyWhitespace) {
+        $contentOffset = $Text.Length
+        $padding = 1
+    }
+    elseif ($paddingColumns -ge 1 -and $paddingColumns -le 4) {
+        $contentOffset = $paddingPosition
+        $padding = $paddingColumns
+    }
+    else {
+        $contentOffset = $afterMarker + 1
+        $padding = 1
+    }
+    return [pscustomobject]@{
+        Offset=$contentOffset
+        RequiredIndent=([int]$indent.Columns + $markerWidth + $padding)
+    }
+}
+
+function Get-AiInstructionsMarkdownHtmlBlockStart {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string] $Text,
+        [Parameter(Mandatory = $true)][bool] $ParagraphOpen
+    )
+
+    $type1 = [regex]::Match($Text,'^ {0,3}<(?<tag>script|pre|style|textarea)(?:[ \t]|>|$)',[Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($type1.Success) { return [pscustomobject]@{ Type=1; EndText=("</{0}>" -f $type1.Groups['tag'].Value); IgnoreCase=$true } }
+    if ([regex]::IsMatch($Text,'^ {0,3}<!--')) { return [pscustomobject]@{ Type=2; EndText='-->'; IgnoreCase=$false } }
+    if ([regex]::IsMatch($Text,'^ {0,3}<\?')) { return [pscustomobject]@{ Type=3; EndText='?>'; IgnoreCase=$false } }
+    if ([regex]::IsMatch($Text,'^ {0,3}<![A-Z]',[Text.RegularExpressions.RegexOptions]::None)) { return [pscustomobject]@{ Type=4; EndText='>'; IgnoreCase=$false } }
+    if ([regex]::IsMatch($Text,'^ {0,3}<!\[CDATA\[',[Text.RegularExpressions.RegexOptions]::None)) { return [pscustomobject]@{ Type=5; EndText=']]>'; IgnoreCase=$false } }
+
+    $blockTag = 'address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hgroup|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul'
+    if ([regex]::IsMatch($Text,('^ {0,3}</?(?:' + $blockTag + ')(?=[ \t]|/?>|$)'),[Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
+        return [pscustomobject]@{ Type=6; EndText=$null; IgnoreCase=$false }
+    }
+    if ($ParagraphOpen) { return $null }
+
+    $tagName = '[A-Za-z][A-Za-z0-9-]*'
+    $attributeName = '[A-Za-z_:][A-Za-z0-9_.:-]*'
+    $attributeValue = '(?:[^ \t\n"''=<>`]+|''[^'']*''|"[^"]*")'
+    $attribute = '(?:[ \t]+' + $attributeName + '(?:[ \t]*=[ \t]*' + $attributeValue + ')?)'
+    $openTag = '^ {0,3}<' + $tagName + $attribute + '*[ \t]*/?>[ \t]*$'
+    $closingTag = '^ {0,3}</' + $tagName + '[ \t]*>[ \t]*$'
+    if ([regex]::IsMatch($Text,$openTag,[Text.RegularExpressions.RegexOptions]::None) -or
+        [regex]::IsMatch($Text,$closingTag,[Text.RegularExpressions.RegexOptions]::None)) {
+        return [pscustomobject]@{ Type=7; EndText=$null; IgnoreCase=$false }
+    }
+    return $null
+}
+
+function Test-AiInstructionsMarkdownHtmlBlockEnd {
+    param([Parameter(Mandatory = $true)][object] $Block,[Parameter(Mandatory = $true)][AllowEmptyString()][string] $Text)
+
+    if ([int]$Block.Type -ge 6) { return [regex]::IsMatch($Text,'^[ \t]*$') }
+    $comparison = if ([bool]$Block.IgnoreCase) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    return $Text.IndexOf([string]$Block.EndText,$comparison) -ge 0
+}
+
+function Test-AiInstructionsMarkdownThematicBreak {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string] $Text)
+
+    return [regex]::IsMatch($Text,'^ {0,3}(?:(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,})$')
+}
+
+function Test-AiInstructionsMarkdownParagraphContinuation {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string] $Text,[Parameter(Mandatory = $true)][int] $Offset)
+
+    $remaining = $Text.Substring($Offset)
+    if ([regex]::IsMatch($remaining,'^[ \t]*$')) { return $false }
+    if ([regex]::IsMatch($remaining,'^ {0,3}#{1,6}(?:[ \t]+|$)')) { return $false }
+    if ([regex]::IsMatch($remaining,'^ {0,3}(?:`{3,}|~{3,})')) { return $false }
+    if ([regex]::IsMatch($remaining,'^ {0,3}(?:(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$')) { return $false }
+    if ($null -ne (Get-AiInstructionsMarkdownBlockQuotePrefix -Text $remaining -Offset 0)) { return $false }
+    if ($null -ne (Get-AiInstructionsMarkdownListMarker -Text $remaining -Offset 0 -InterruptsParagraph $true)) { return $false }
+    $html = Get-AiInstructionsMarkdownHtmlBlockStart -Text $remaining -ParagraphOpen $true
+    if ($null -ne $html -and [int]$html.Type -le 6) { return $false }
+    return $true
+}
+
+function Get-InstallerBootstrapSectionContent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $ExistingBytes,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $SectionBytes
+    )
+
+    $strictUtf8 = [Text.UTF8Encoding]::new($false,$true)
+    if ($SectionBytes.Length -lt 1 -or
+        ($SectionBytes.Length -ge 3 -and $SectionBytes[0] -eq 0xEF -and $SectionBytes[1] -eq 0xBB -and $SectionBytes[2] -eq 0xBF)) {
+        throw 'The bootstrap section authority must be UTF-8 without a BOM.'
+    }
+    try { $sectionText = $strictUtf8.GetString($SectionBytes) }
+    catch { throw 'The bootstrap section authority must contain valid UTF-8 bytes.' }
+    if ($sectionText.Contains("`r") -or -not $sectionText.StartsWith("## Repository Instructions Bootstrap`n",[StringComparison]::Ordinal) -or
+        -not $sectionText.EndsWith("`n",[StringComparison]::Ordinal) -or $sectionText.EndsWith("`n`n",[StringComparison]::Ordinal)) {
+        throw 'The bootstrap section authority must use canonical UTF-8/LF bytes, the managed heading, and one trailing LF.'
+    }
+
+    $bomLength = 0
+    if ($ExistingBytes.Length -ge 4 -and
+        (($ExistingBytes[0] -eq 0x00 -and $ExistingBytes[1] -eq 0x00 -and $ExistingBytes[2] -eq 0xFE -and $ExistingBytes[3] -eq 0xFF) -or
+         ($ExistingBytes[0] -eq 0xFF -and $ExistingBytes[1] -eq 0xFE -and $ExistingBytes[2] -eq 0x00 -and $ExistingBytes[3] -eq 0x00))) {
+        throw 'The managed instructions file is UTF-32. Save the file as UTF-8 (with or without a BOM) and retry.'
+    }
+    if ($ExistingBytes.Length -ge 2 -and
+        (($ExistingBytes[0] -eq 0xFE -and $ExistingBytes[1] -eq 0xFF) -or
+         ($ExistingBytes[0] -eq 0xFF -and $ExistingBytes[1] -eq 0xFE))) {
+        throw 'The managed instructions file is UTF-16. Save the file as UTF-8 (with or without a BOM) and retry.'
+    }
+    if ($ExistingBytes.Length -ge 3 -and $ExistingBytes[0] -eq 0xEF -and $ExistingBytes[1] -eq 0xBB -and $ExistingBytes[2] -eq 0xBF) { $bomLength = 3 }
+    for ($index = $bomLength; $index -le ($ExistingBytes.Length - 3); $index++) {
+        if ($ExistingBytes[$index] -eq 0xEF -and $ExistingBytes[$index + 1] -eq 0xBB -and $ExistingBytes[$index + 2] -eq 0xBF) {
+            throw 'The managed instructions file contains more than one UTF-8 BOM. Save it with at most one BOM at the beginning and retry.'
+        }
+    }
+    [byte[]]$payload = Get-AiInstructionsByteSlice -Bytes $ExistingBytes -Offset $bomLength -Length ($ExistingBytes.Length - $bomLength)
+    if($payload-ccontains[byte]0){
+        throw 'The managed instructions file contains NUL bytes and may be UTF-16 or UTF-32 without a BOM. Save the file as UTF-8 (with or without a BOM) and retry.'
+    }
+    try { $text = $strictUtf8.GetString($payload) }
+    catch { throw 'The managed instructions file contains invalid UTF-8. Save the file as UTF-8 (with or without a BOM) and retry.' }
+    for ($index = 0; $index -lt $payload.Length; $index++) {
+        if ($payload[$index] -eq 0x0D -and ($index + 1 -ge $payload.Length -or $payload[$index + 1] -ne 0x0A)) {
+            throw 'The managed instructions file contains a bare CR line ending, so the section boundary cannot be determined uniquely. Save it with LF or CRLF line endings and retry.'
+        }
+    }
+
+    $managedMatches = New-Object System.Collections.Generic.List[object]
+    $ambiguousManagedMatches = New-Object System.Collections.Generic.List[object]
+    $h2Boundaries = New-Object System.Collections.Generic.List[object]
+    $containers = New-Object System.Collections.ArrayList
+    $nextContainerId = 0
+    $fence = $null
+    $htmlBlock = $null
+    $paragraphStart = $null
+    $paragraphContainerKey = $null
+    $previousWasBlank = $true
+
+    foreach ($line in @([regex]::Matches($text,'(?m)^[^\r\n]*\r?$'))) {
+        $lineText = $line.Value.TrimEnd([char]0x0D)
+        $oldContainerKey = (@($containers | ForEach-Object { [string]$_.Id }) -join '/')
+        $offset = 0
+        $continuedContainers = New-Object System.Collections.ArrayList
+        $usedLazyContinuation = $false
+        for ($containerIndex = 0; $containerIndex -lt $containers.Count; $containerIndex++) {
+            $container = $containers[$containerIndex]
+            $continuation = if ([string]$container.Type -ceq 'blockquote') {
+                Get-AiInstructionsMarkdownBlockQuotePrefix -Text $lineText -Offset $offset
+            }
+            else {
+                Get-AiInstructionsMarkdownRequiredIndent -Text $lineText -Offset $offset -RequiredColumns ([int]$container.RequiredIndent)
+            }
+            if ($null -ne $continuation) {
+                [void]$continuedContainers.Add($container)
+                $offset = [int]$continuation.Offset
+                continue
+            }
+            $remainingIsBlank = [regex]::IsMatch($lineText.Substring($offset),'^[ \t]*$')
+            if ([string]$container.Type -ceq 'list' -and $remainingIsBlank) {
+                [void]$continuedContainers.Add($container)
+                continue
+            }
+            $paragraphWasOpen = $null -ne $paragraphContainerKey -and $paragraphContainerKey -ceq $oldContainerKey
+            if (-not $previousWasBlank -and $paragraphWasOpen -and
+                (Test-AiInstructionsMarkdownParagraphContinuation -Text $lineText -Offset $offset)) {
+                for ($lazyIndex = $containerIndex; $lazyIndex -lt $containers.Count; $lazyIndex++) { [void]$continuedContainers.Add($containers[$lazyIndex]) }
+                $usedLazyContinuation = $true
+            }
+            break
+        }
+        $containers = $continuedContainers
+        $containerKey = (@($containers | ForEach-Object { [string]$_.Id }) -join '/')
+        if ($containerKey -cne $oldContainerKey) {
+            if ($null -ne $fence -and [string]$fence.ContainerKey -cne $containerKey) { $fence = $null }
+            if ($null -ne $htmlBlock -and [string]$htmlBlock.ContainerKey -cne $containerKey) { $htmlBlock = $null }
+            if ($null -ne $paragraphContainerKey -and $paragraphContainerKey -cne $containerKey) {
+                $paragraphStart = $null
+                $paragraphContainerKey = $null
+            }
+        }
+
+        $contentText = $lineText.Substring($offset)
+        if ($null -ne $fence -and [string]$fence.ContainerKey -ceq $containerKey) {
+            $closingPattern = '^ {0,3}' + [regex]::Escape([string]$fence.Marker) + '{' + [int]$fence.Length + ',}[ \t]*$'
+            if ([regex]::IsMatch($contentText,$closingPattern)) { $fence = $null }
+            $previousWasBlank = [regex]::IsMatch($contentText,'^[ \t]*$')
+            continue
+        }
+        if ($null -ne $htmlBlock -and [string]$htmlBlock.ContainerKey -ceq $containerKey) {
+            if (Test-AiInstructionsMarkdownHtmlBlockEnd -Block $htmlBlock -Text $contentText) { $htmlBlock = $null }
+            $previousWasBlank = [regex]::IsMatch($contentText,'^[ \t]*$')
+            continue
+        }
+
+        if (-not $usedLazyContinuation) {
+            while ($true) {
+                $quotePrefix = Get-AiInstructionsMarkdownBlockQuotePrefix -Text $lineText -Offset $offset
+                if ($null -ne $quotePrefix) {
+                    $nextContainerId++
+                    [void]$containers.Add([pscustomobject]@{ Type='blockquote'; Id=$nextContainerId; RequiredIndent=0 })
+                    $offset = [int]$quotePrefix.Offset
+                    $paragraphStart = $null
+                    $paragraphContainerKey = $null
+                    continue
+                }
+                $currentKey = (@($containers | ForEach-Object { [string]$_.Id }) -join '/')
+                $paragraphOpenHere = $null -ne $paragraphContainerKey -and $paragraphContainerKey -ceq $currentKey
+                if (Test-AiInstructionsMarkdownThematicBreak -Text $lineText.Substring($offset)) { break }
+                $listMarker = Get-AiInstructionsMarkdownListMarker -Text $lineText -Offset $offset -InterruptsParagraph $paragraphOpenHere
+                if ($null -eq $listMarker) { break }
+                $nextContainerId++
+                [void]$containers.Add([pscustomobject]@{ Type='list'; Id=$nextContainerId; RequiredIndent=[int]$listMarker.RequiredIndent })
+                $offset = [int]$listMarker.Offset
+                $paragraphStart = $null
+                $paragraphContainerKey = $null
+            }
+        }
+        $containerKey = (@($containers | ForEach-Object { [string]$_.Id }) -join '/')
+        $contentText = $lineText.Substring($offset)
+
+        if ([regex]::IsMatch($contentText,'^[ \t]*$')) {
+            $paragraphStart = $null
+            $paragraphContainerKey = $null
+            $previousWasBlank = $true
+            continue
+        }
+
+        $openingFence = [regex]::Match($contentText,'^ {0,3}(?<marker>`{3,}|~{3,})(?<info>.*)$')
+        if ($openingFence.Success) {
+            $marker = $openingFence.Groups['marker'].Value
+            if (-not ($marker[0] -eq [char]0x60 -and $openingFence.Groups['info'].Value.Contains('`'))) {
+                $fence = [pscustomobject]@{ Marker=[string]$marker[0]; Length=$marker.Length; ContainerKey=$containerKey }
+                $paragraphStart = $null
+                $paragraphContainerKey = $null
+                $previousWasBlank = $false
+                continue
+            }
+        }
+
+        $paragraphOpenHere = $null -ne $paragraphContainerKey -and $paragraphContainerKey -ceq $containerKey
+        $htmlStart = Get-AiInstructionsMarkdownHtmlBlockStart -Text $contentText -ParagraphOpen $paragraphOpenHere
+        if ($null -ne $htmlStart) {
+            $htmlBlock = [pscustomobject]@{ Type=[int]$htmlStart.Type; EndText=$htmlStart.EndText; IgnoreCase=[bool]$htmlStart.IgnoreCase; ContainerKey=$containerKey }
+            $paragraphStart = $null
+            $paragraphContainerKey = $null
+            if (Test-AiInstructionsMarkdownHtmlBlockEnd -Block $htmlBlock -Text $contentText) { $htmlBlock = $null }
+            $previousWasBlank = $false
+            continue
+        }
+
+        $indent = Get-AiInstructionsMarkdownRequiredIndent -Text $contentText -Offset 0 -RequiredColumns 4
+        if ($null -ne $indent -and -not $paragraphOpenHere) {
+            $paragraphStart = $null
+            $paragraphContainerKey = $null
+            $previousWasBlank = $false
+            continue
+        }
+
+        if ([regex]::IsMatch($contentText,'^ {0,3}(?:=+|-+)[ \t]*$') -and $paragraphOpenHere) {
+            if ($usedLazyContinuation -and $containers.Count -gt 0 -and [regex]::IsMatch($contentText,'^ {0,3}-+[ \t]*$')) {
+                throw 'The managed instructions file has a Setext H2 paragraph boundary whose underline omits an active container marker, so the document-level section boundary cannot be determined uniquely. Repeat the list or block quote prefix on the underline, add a blank line, or replace the heading with an ATX H2, then retry.'
+            }
+            if ($containers.Count -eq 0 -and [regex]::IsMatch($contentText,'^ {0,3}-+[ \t]*$')) {
+                $h2Boundaries.Add([pscustomobject]@{ Index=[int]$paragraphStart; Kind='setext' })
+            }
+            $paragraphStart = $null
+            $paragraphContainerKey = $null
+            $previousWasBlank = $false
+            continue
+        }
+
+        $exactManaged = $containers.Count -eq 0 -and [regex]::IsMatch($contentText,'^## Repository Instructions Bootstrap[ \t]*$')
+        $managedLike = $containers.Count -eq 0 -and [regex]::IsMatch($contentText,'^ {0,3}##[ \t]+Repository Instructions Bootstrap.*$')
+        if ($exactManaged) {
+            $managedMatches.Add([pscustomobject]@{ Index=[int]$line.Index; Length=[int]$line.Value.Length })
+        }
+        elseif ($managedLike) {
+            $ambiguousManagedMatches.Add([pscustomobject]@{ Index=[int]$line.Index; Length=[int]$line.Value.Length })
+        }
+
+        if ($containers.Count -eq 0 -and [regex]::IsMatch($contentText,'^ {0,3}##(?:[ \t]+.*)?$')) {
+            $h2Boundaries.Add([pscustomobject]@{ Index=[int]$line.Index; Kind='atx' })
+            $paragraphStart = $null
+            $paragraphContainerKey = $null
+            $previousWasBlank = $false
+            continue
+        }
+        if ([regex]::IsMatch($contentText,'^ {0,3}#{1,6}(?:[ \t]+.*)?$')) {
+            $paragraphStart = $null
+            $paragraphContainerKey = $null
+            $previousWasBlank = $false
+            continue
+        }
+
+        $isThematicBreak = Test-AiInstructionsMarkdownThematicBreak -Text $contentText
+        if ($isThematicBreak) {
+            $paragraphStart = $null
+            $paragraphContainerKey = $null
+            $previousWasBlank = $false
+            continue
+        }
+
+        if (-not $paragraphOpenHere) {
+            $paragraphStart = if ($containers.Count -eq 0) { [int]$line.Index } else { -1 }
+            $paragraphContainerKey = $containerKey
+        }
+        $previousWasBlank = $false
+    }
+
+    if ($null -ne $fence) {
+        throw 'The managed instructions file contains an unclosed fenced code block, so Markdown section boundaries cannot be determined uniquely. Close the fenced code block and retry.'
+    }
+    if ($null -ne $htmlBlock -and [int]$htmlBlock.Type -le 5) {
+        throw ("The managed instructions file contains an unclosed CommonMark HTML block type {0}, so Markdown section boundaries cannot be determined uniquely. Add its required closing marker and retry." -f [int]$htmlBlock.Type)
+    }
+    if ($managedMatches.Count -gt 1) {
+        throw 'The managed instructions file contains duplicate `## Repository Instructions Bootstrap` sections. Remove the duplicate section and retry.'
+    }
+    if ($ambiguousManagedMatches.Count -gt 0) {
+        throw 'The managed instructions file has an ambiguous `## Repository Instructions Bootstrap` heading. Keep one exact H2 heading and retry.'
+    }
+
+    if ($managedMatches.Count -eq 1) {
+        $managed = $managedMatches[0]
+        $nextHeading = $null
+        foreach ($heading in $h2Boundaries) {
+            if ([int]$heading.Index -gt [int]$managed.Index) {
+                $nextHeading = $heading
+                break
+            }
+        }
+        $prefixPayloadLength = $strictUtf8.GetByteCount($text.Substring(0,$managed.Index))
+        $suffixPayloadOffset = if ($null -eq $nextHeading) { $payload.Length } else { $strictUtf8.GetByteCount($text.Substring(0,[int]$nextHeading.Index)) }
+        [byte[]]$prefix = Get-AiInstructionsByteSlice -Bytes $ExistingBytes -Offset 0 -Length ($bomLength + $prefixPayloadLength)
+        [byte[]]$suffix = Get-AiInstructionsByteSlice -Bytes $payload -Offset $suffixPayloadOffset -Length ($payload.Length - $suffixPayloadOffset)
+        [byte[]]$separator = @()
+        if ($null -ne $nextHeading -and [string]$nextHeading.Kind -ceq 'setext' -and -not $sectionText.EndsWith("`n`n",[StringComparison]::Ordinal)) {
+            $separator = if ($text.Contains("`r`n")) { [byte[]]@(0x0D,0x0A) } else { [byte[]]@(0x0A) }
+        }
+        return (Join-AiInstructionsByteArrays -Parts @($prefix,$SectionBytes,$separator,$suffix))
+    }
+
+    if ($payload.Length -eq 0) {
+        [byte[]]$bom = Get-AiInstructionsByteSlice -Bytes $ExistingBytes -Offset 0 -Length $bomLength
+        return (Join-AiInstructionsByteArrays -Parts @($bom,$SectionBytes))
+    }
+
+    $newline = if ($text.Contains("`r`n")) { [byte[]]@(0x0D,0x0A) } else { [byte[]]@(0x0A) }
+    $trailingNewlineCount = 0
+    $cursor = $payload.Length - 1
+    while ($cursor -ge 0 -and $payload[$cursor] -eq 0x0A) {
+        $trailingNewlineCount++
+        $cursor--
+        if ($cursor -ge 0 -and $payload[$cursor] -eq 0x0D) { $cursor-- }
+    }
+    $separatorCount = if ($trailingNewlineCount -ge 2) { 0 } elseif ($trailingNewlineCount -eq 1) { 1 } else { 2 }
+    $parts = New-Object System.Collections.Generic.List[byte[]]
+    $parts.Add($ExistingBytes)
+    for ($index = 0; $index -lt $separatorCount; $index++) { $parts.Add($newline) }
+    $parts.Add($SectionBytes)
+    return (Join-AiInstructionsByteArrays -Parts ([byte[][]]$parts.ToArray()))
 }
 
 function Test-AiInstructionsObjectHasProperty {
@@ -1426,6 +1909,10 @@ function Assert-AiInstructionsRuntimeBundleV3 {
     $manifestPaths = @($inventoryByPath.Keys | Where-Object { [string]$_ -ceq 'platform-runtime.psd1' -or [string]$_ -clike '*/platform-runtime.psd1' })
     if ($manifestPaths.Count -ne 1 -or [string]$manifestPaths[0] -cne 'platform-runtime.psd1') {
         throw "Runtime bundle inventory must include exactly one 'platform-runtime.psd1' at the runtime root."
+    }
+    $bootstrapSectionPaths = @($inventoryByPath.Keys | Where-Object { [string]$_ -ceq 'bootstrap-section.md' -or [string]$_ -clike '*/bootstrap-section.md' })
+    if ($bootstrapSectionPaths.Count -ne 1 -or [string]$bootstrapSectionPaths[0] -cne 'bootstrap-section.md') {
+        throw "Runtime bundle inventory must include exactly one 'bootstrap-section.md' at the runtime root."
     }
     $manifestRelativePath = 'platform-runtime.psd1'
     $manifestFullPath = Resolve-AiInstructionsRuntimeFilePath -RuntimeRoot $RuntimeRoot -RelativePath $manifestRelativePath -Context 'Platform runtime manifest'
@@ -3289,6 +3776,7 @@ Export-ModuleMember -Function @(
     'Get-AiInstructionsRefusalCodes',
     'New-AiInstructionsRefusalException',
     'Get-AiInstructionsRefusalCode',
+    'Get-InstallerBootstrapSectionContent',
     'Test-AiInstructionsClaudeFamilyProjectOwned',
     'Get-AiInstructionsRuntimeGeneration',
     'Get-AiInstructionsRuntimeInventory',

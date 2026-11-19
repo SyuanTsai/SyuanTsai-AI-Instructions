@@ -304,6 +304,10 @@
       "path": "instructions/common/base.md",
       "license": "Apache-2.0"
     },
+    {
+      "path": "instructions/common/bootstrap-section.md",
+      "license": "Apache-2.0"
+    },
 
     {
       "path": "catalog/README.md",
