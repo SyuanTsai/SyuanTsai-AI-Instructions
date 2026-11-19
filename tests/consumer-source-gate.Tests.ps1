@@ -184,8 +184,8 @@ Describe 'Authority-owned consumer source gate' {
         @($manifest.repositories | Where-Object status -eq ready).Count | Should Be 5
         $darktide = @($manifest.repositories | Where-Object id -eq skill-darktide-translate)[0]
         $darktide.status | Should Be ready
-        $darktide.inventoryCommit | Should Be '087e03948d4e5deff7bf2786728db0a743c03aa6'
-        $darktide.inventoryTree | Should Be '4384eb781be353daa5fa3469f4cbe4a9d980a54b'
+        $darktide.inventoryCommit | Should Be '44c9fef7e36c36ecab0011ba35c799ddc79a3927'
+        $darktide.inventoryTree | Should Be '648234d5fed2d75817b67663ecc4483b33bac30e'
         $null -ne $darktide.PSObject.Properties['prerequisites'] | Should Be $false
         $darktide.additionalScope | Should Be @('skills/auto-update-darktide-mod/scripts/')
         $expectedFileRows=@(
