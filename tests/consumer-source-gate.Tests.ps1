@@ -2653,6 +2653,13 @@ $fixture=Join-Path $RepositoryRoot 'fixture-repo'
 & git init -q -b main $fixture
 & git -C $fixture config user.name Fixture
 & git -C $fixture config user.email fixture@example.test
+& git -C $fixture config maintenance.auto true
+& git -C $fixture config maintenance.autoDetach true
+& git -C $fixture config gc.autoDetach true
+$effectiveMaintenanceAuto=& git -C $fixture config --get maintenance.auto
+if($LASTEXITCODE-ne0-or$effectiveMaintenanceAuto-cne'false'){throw 'Effective maintenance.auto must be false.'}
+$effectiveGcAutoDetach=& git -C $fixture config --get gc.autoDetach
+if($LASTEXITCODE-ne0-or$effectiveGcAutoDetach-cne'false'){throw 'Effective gc.autoDetach must be false.'}
 [IO.File]::WriteAllText((Join-Path $fixture 'README.md'),'fixture',[Text.UTF8Encoding]::new($false))
 & git -C $fixture add README.md
 & git -C $fixture commit -q -m fixture
