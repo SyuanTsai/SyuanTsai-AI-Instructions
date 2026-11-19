@@ -21,12 +21,7 @@ Before any conversion:
 3. Actions `allowed_events` explicitly includes `push`, `pull_request`, `workflow_dispatch`, and `pull_request_target`; listing only `pull_request_target` disables existing CI. Workflow permissions are read-only and Actions cannot create or approve pull requests.
 4. The authority consumer-gate change is merged, and the remote prerequisite is verified: `main` can change only by pull request, `pull_request` and `non_fast_forward` rules are active, and `bypass_actors` is empty.
 
-Atlassian has four additional prerequisites, all of which must be satisfied before creating or recreating its conversion pull request:
-
-1. Authority PR-K1, PR-K2, and PR-2 are all merged.
-2. The conversion pin points to an authority `main` commit that includes PR-2.
-3. The exception set declares the PR-2 `reviewScope` and every required `evidencePaths` entry.
-4. The user signs the exact exception review scope from a clean clone using the merged signing tool; an agent must not create or substitute this signature.
+During Atlassian conversion, the SkillSpector exception set may only shrink. This conversion removes five baseline files that no longer have findings and reduces both the registry and the remaining `review-bitbucket-pull-request` baseline to its three findings; those remaining findings stay in place until SYP-493 re-approval is handled. The source gate blocks every new or modified exception, including a new registry or baseline, a changed fingerprint or reason, and an expiry renewal.
 
 Knowledge Content, Code Collaboration, and General have no exception set and may convert after the consumer gate is merged.
 

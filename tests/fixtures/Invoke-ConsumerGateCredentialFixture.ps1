@@ -8,7 +8,8 @@ param(
     [Parameter(Mandatory)][string]$Sentinel,
     [ValidateSet('none','summary','artifact','receipt','stdout','stderr')][string]$LeakSurface='none',
     [switch]$TransitionFromLegacy,
-    [switch]$ObserveGitCredentialEnvironment
+    [switch]$ObserveGitCredentialEnvironment,
+    [ValidateSet('none','exception-shrink','exception-modify','retain-outside-change')][string]$PrepareScenario='none'
 )
 $ErrorActionPreference='Stop'
 function Invoke-FixtureGit([string]$Root,[string[]]$Arguments){
@@ -67,12 +68,36 @@ description: fixture
             )
         })
 }
+function Copy-ExceptionFixtureSet {
+    $source=Join-Path $RepositoryRoot 'tests/fixtures/syp500'
+    $baselineDestination=Join-Path $candidate 'config/skillspector-exceptions'
+    [void][IO.Directory]::CreateDirectory($baselineDestination)
+    Copy-Item -LiteralPath (Join-Path $source 'skillspector-exceptions.json') -Destination (Join-Path $candidate 'config/skillspector-exceptions.json')
+    foreach($file in @(Get-ChildItem -LiteralPath (Join-Path $source 'skillspector-exceptions') -File)){
+        Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $baselineDestination $file.Name)
+    }
+}
+function Set-ExceptionFixtureShrink {
+    $registryPath=Join-Path $candidate 'config/skillspector-exceptions.json'
+    $registry=Get-Content -Raw -Encoding UTF8 -LiteralPath $registryPath|ConvertFrom-Json -Depth 100
+    $registry.exceptions=@($registry.exceptions|Where-Object skillId -ceq 'review-bitbucket-pull-request')
+    $registry.baselines=@($registry.baselines|Where-Object skillId -ceq 'review-bitbucket-pull-request')
+    Write-FixtureJson $registryPath $registry
+    Get-ChildItem -LiteralPath (Join-Path $candidate 'config/skillspector-exceptions') -File|Where-Object Name -cne `
+        'review-bitbucket-pull-request.baseline.json'|Remove-Item -Force
+}
 [void](Invoke-FixtureGit $candidate @('init','-q','-b','main'))
 [void](Invoke-FixtureGit $candidate @('config','user.name','Fixture'))
 [void](Invoke-FixtureGit $candidate @('config','user.email','fixture@example.test'))
 [string]$baseRoot=$candidate
 if($TransitionFromLegacy){
     [IO.File]::WriteAllText((Join-Path $candidate 'scripts/Legacy.ps1'),'legacy',[Text.UTF8Encoding]::new($false))
+    if($PrepareScenario-cne'none'){
+        Copy-ExceptionFixtureSet
+        if($PrepareScenario-ceq'retain-outside-change'){
+            [IO.File]::WriteAllText((Join-Path $candidate 'scripts/Retained.ps1'),'base retained bytes',[Text.UTF8Encoding]::new($false))
+        }
+    }
 }else{Write-ConvertedCandidateFiles}
 [void](Invoke-FixtureGit $candidate @('add','.'))
 [void](Invoke-FixtureGit $candidate @('commit','-q','-m','base'))
@@ -82,6 +107,18 @@ if($TransitionFromLegacy){
     [void](Invoke-FixtureGit $candidate @('worktree','add','-q','--detach',$baseRoot,$baseRevision))
     Remove-Item -LiteralPath (Join-Path $candidate 'scripts/Legacy.ps1')
     Write-ConvertedCandidateFiles
+    if($PrepareScenario-cne'none'){
+        Set-ExceptionFixtureShrink
+        if($PrepareScenario-ceq'exception-modify'){
+            $baselinePath=Join-Path $candidate 'config/skillspector-exceptions/review-bitbucket-pull-request.baseline.json'
+            $baseline=Get-Content -Raw -Encoding UTF8 -LiteralPath $baselinePath|ConvertFrom-Json -Depth 100
+            $baseline.fingerprints[0].reason='modified during prepare fixture'
+            Write-FixtureJson $baselinePath $baseline
+        }
+        if($PrepareScenario-ceq'retain-outside-change'){
+            [IO.File]::WriteAllText((Join-Path $candidate 'scripts/Retained.ps1'),'changed retained bytes',[Text.UTF8Encoding]::new($false))
+        }
+    }
 }
 [IO.File]::WriteAllText((Join-Path $candidate 'candidate.txt'),'candidate',[Text.UTF8Encoding]::new($false))
 [void](Invoke-FixtureGit $candidate @('add','.'))
@@ -90,7 +127,36 @@ $candidateRevision=Get-FixtureGitScalar $candidate @('rev-parse','HEAD')
 if($TransitionFromLegacy){
     $general.inventoryCommit=$baseRevision
     $general.inventoryTree=Get-FixtureGitScalar $candidate @('rev-parse',"$baseRevision^{tree}")
-    $general.files=@([pscustomobject][ordered]@{path='scripts/Legacy.ps1';disposition='delete';reason='Fixture legacy path.'})
+    if($PrepareScenario-ceq'none'){
+        $general.files=@([pscustomobject][ordered]@{path='scripts/Legacy.ps1';disposition='delete';reason='Fixture legacy path.'})
+    }else{
+        $deletedBaselines=@(
+            'configure-bitbucket-api-access.baseline.json','configure-confluence-api-access.baseline.json',
+            'configure-jira-api-access.baseline.json','manage-confluence-docs-as-code.baseline.json',
+            'publish-requirements-to-confluence.baseline.json'
+        )
+        $general.files=@(
+            [pscustomobject][ordered]@{path='config/skillspector-exceptions.json';disposition='retain';reason='Fixture exception registry.'}
+        )+@($deletedBaselines|ForEach-Object{
+                [pscustomobject][ordered]@{path="config/skillspector-exceptions/$_";disposition='delete';reason='Fixture removed baseline.'}
+            })+@(
+            [pscustomobject][ordered]@{path='config/skillspector-exceptions/review-bitbucket-pull-request.baseline.json';disposition='retain';reason='Fixture retained baseline.'},
+            [pscustomobject][ordered]@{path='scripts/Legacy.ps1';disposition='delete';reason='Fixture legacy path.'}
+        )
+        if($PrepareScenario-ceq'retain-outside-change'){
+            $general.files+=@([pscustomobject][ordered]@{path='scripts/Retained.ps1';disposition='retain';reason='Fixture retained path.'})
+        }
+        $general|Add-Member -NotePropertyName literalReferenceExemptions -NotePropertyValue @(
+            for($index=0;$index-lt$deletedBaselines.Count;$index++){
+                [pscustomobject][ordered]@{
+                    file='config/skillspector-exceptions.json';blobOid='e1c3304ab695faae74fa89c8ed2ea7d1d0523dee'
+                    line=36+($index*4);column=16;occurrenceOrdinal=1
+                    targetPath="config/skillspector-exceptions/$($deletedBaselines[$index])"
+                    reason='Fixture registry reference removed by the shrink-only conversion.'
+                }
+            }
+        ) -Force
+    }
 }
 Write-FixtureJson (Join-Path $authority 'consumer/legacy-migration.json') $manifest
 $runnerWorkBoundary=$null
