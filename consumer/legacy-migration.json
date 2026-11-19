@@ -1132,8 +1132,8 @@
       "id": "skill-darktide-translate",
       "repository": "https://github.com/SyuanTsai/Skill-Darktide-Translate.git",
       "status": "ready",
-      "inventoryCommit": "db9a091779a4ffdd8257d129e8c3649eef8eda80",
-      "inventoryTree": "a064355879c970c37d7640e172ae241d0ed1aaa5",
+      "inventoryCommit": "087e03948d4e5deff7bf2786728db0a743c03aa6",
+      "inventoryTree": "4384eb781be353daa5fa3469f4cbe4a9d980a54b",
       "requiredRepositoryChecks": [
         {
           "id": "repository-darktide",
@@ -1171,6 +1171,11 @@
           "path": "scripts/Invoke-PrePushValidation.ps1",
           "disposition": "delete",
           "reason": "Remove the legacy pre-push driver entry; S8 may replace it with a separate consumer bootstrap development entry before re-inventory."
+        },
+        {
+          "path": "scripts/New-SkillSourcePin.ps1",
+          "disposition": "retain",
+          "reason": "Portable read-only Skill source-pin generator is repository-owned and independent of the legacy validation driver."
         },
         {
           "path": "scripts/PowerShellRelease.psm1",
@@ -1341,6 +1346,11 @@
           "path": "tests/SkillContract.Tests.ps1",
           "disposition": "retain",
           "reason": "Portable repository-owned Skill contract regression uses consumer-capable test support without legacy references."
+        },
+        {
+          "path": "tests/SkillSourcePinGenerator.Tests.ps1",
+          "disposition": "retain",
+          "reason": "Portable repository-owned source-pin generator regression uses consumer-capable test support without legacy references."
         },
         {
           "path": "tests/SkillSpectorOutput.Tests.ps1",
