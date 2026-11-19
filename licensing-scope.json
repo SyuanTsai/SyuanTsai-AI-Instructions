@@ -1402,31 +1402,31 @@
       "license": "Apache-2.0"
     },
     {
-      "path": "tests/fixtures/syp500-atlassian-2aca2db/config/skillspector-exceptions.json",
+      "path": "tests/fixtures/syp500/skillspector-exceptions.json",
       "license": "Apache-2.0"
     },
     {
-      "path": "tests/fixtures/syp500-atlassian-2aca2db/config/skillspector-exceptions/configure-bitbucket-api-access.baseline.json",
+      "path": "tests/fixtures/syp500/skillspector-exceptions/configure-bitbucket-api-access.baseline.json",
       "license": "Apache-2.0"
     },
     {
-      "path": "tests/fixtures/syp500-atlassian-2aca2db/config/skillspector-exceptions/configure-confluence-api-access.baseline.json",
+      "path": "tests/fixtures/syp500/skillspector-exceptions/configure-confluence-api-access.baseline.json",
       "license": "Apache-2.0"
     },
     {
-      "path": "tests/fixtures/syp500-atlassian-2aca2db/config/skillspector-exceptions/configure-jira-api-access.baseline.json",
+      "path": "tests/fixtures/syp500/skillspector-exceptions/configure-jira-api-access.baseline.json",
       "license": "Apache-2.0"
     },
     {
-      "path": "tests/fixtures/syp500-atlassian-2aca2db/config/skillspector-exceptions/manage-confluence-docs-as-code.baseline.json",
+      "path": "tests/fixtures/syp500/skillspector-exceptions/manage-confluence-docs-as-code.baseline.json",
       "license": "Apache-2.0"
     },
     {
-      "path": "tests/fixtures/syp500-atlassian-2aca2db/config/skillspector-exceptions/publish-requirements-to-confluence.baseline.json",
+      "path": "tests/fixtures/syp500/skillspector-exceptions/publish-requirements-to-confluence.baseline.json",
       "license": "Apache-2.0"
     },
     {
-      "path": "tests/fixtures/syp500-atlassian-2aca2db/config/skillspector-exceptions/review-bitbucket-pull-request.baseline.json",
+      "path": "tests/fixtures/syp500/skillspector-exceptions/review-bitbucket-pull-request.baseline.json",
       "license": "Apache-2.0"
     },
     {

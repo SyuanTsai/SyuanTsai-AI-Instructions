@@ -69,7 +69,7 @@ description: fixture
         })
 }
 function Copy-ExceptionFixtureSet {
-    $source=Join-Path $RepositoryRoot 'tests/fixtures/syp500-atlassian-2aca2db/config'
+    $source=Join-Path $RepositoryRoot 'tests/fixtures/syp500'
     $baselineDestination=Join-Path $candidate 'config/skillspector-exceptions'
     [void][IO.Directory]::CreateDirectory($baselineDestination)
     Copy-Item -LiteralPath (Join-Path $source 'skillspector-exceptions.json') -Destination (Join-Path $candidate 'config/skillspector-exceptions.json')

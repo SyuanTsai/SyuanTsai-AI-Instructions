@@ -50,7 +50,7 @@ Describe 'Authority-owned consumer source gate' {
             $Root
         }
         function Copy-FixtureValue($Value){$Value|ConvertTo-Json -Depth 30|ConvertFrom-Json}
-        $script:ExceptionFixtureConfigRoot = Join-Path $script:RepositoryRoot 'tests/fixtures/syp500-atlassian-2aca2db/config'
+        $script:ExceptionFixtureConfigRoot = Join-Path $script:RepositoryRoot 'tests/fixtures/syp500'
         function New-ExceptionFixtureRepository([string]$Name,[switch]$WithoutExceptionSet) {
             $root=Join-Path $TestDrive $Name
             [void][IO.Directory]::CreateDirectory($root)
