@@ -6186,6 +6186,17 @@ try {
             @('CLAUDE.md','.claude/AI-Rules/','.claude/ai-instructions-licenses/')
         }
         else { @() })
+        $rolloutProtectedClaudeFamilyPaths = @(if ($currentClaudeProjectOwned) {
+            @('CLAUDE.md','.claude/AI-Rules','.claude/ai-instructions-licenses')
+        }
+        else { @() })
+        $claudeOwnershipEvidence = [ordered]@{
+            schemaVersion = 1
+            repository = $targetRootPath
+            projectOwned = [bool]$currentClaudeProjectOwned
+            protectedPaths = $rolloutProtectedClaudeFamilyPaths
+        }
+        Write-Output ('AI instructions Claude ownership evidence: ' + ($claudeOwnershipEvidence | ConvertTo-Json -Compress))
         if ($null -ne $projectCandidateState -and @($projectCandidateState.Files).Count -gt 0) {
             $earlyConflicts=@(Get-ProjectSkillOwnershipConflictsAcrossWorktrees -Repository $targetRootPath -DesiredFiles @($projectCandidateState.Files))
             if($earlyConflicts.Count-gt0){
