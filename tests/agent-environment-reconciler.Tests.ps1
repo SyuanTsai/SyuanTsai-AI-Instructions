@@ -2538,7 +2538,7 @@ Describe 'USER Claude managed bootstrap section' {
         [byte[]]$oldSection=$utf8.GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`n")
         [byte[]]$suffix=$utf8.GetBytes("Personal notes`r`n--------------`r`nKEEP  `r`n")
         [IO.File]::WriteAllBytes($claudePath,[byte[]]@($personalPrefix+$oldSection+$suffix))
-        [byte[]]$expected=[byte[]]@($personalPrefix+[byte[]]$desired.InstructionsArtifact.sectionBytes+$suffix)
+        [byte[]]$expected=[byte[]]@($personalPrefix+[byte[]]$desired.InstructionsArtifact.sectionBytes+$utf8.GetBytes("`r`n")+$suffix)
 
         (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
 
@@ -2577,6 +2577,26 @@ Describe 'USER Claude managed bootstrap section' {
 
         (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
 
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be ([Convert]::ToBase64String($expected))
+    }
+
+    # Scenario: A CRLF CLAUDE.md has a managed section followed by a personal Setext H2 and is reconciled twice.
+    # Purpose: Preserve personal bytes, restore the Setext separator, and keep the second reconciliation byte-for-byte current.
+    It 'InterT116e_reconciles_a_Setext_CLAUDE_suffix_twice_without_byte_drift' {
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-setext-idempotent-fixture')
+        $userHome=Join-Path $TestDrive 'claude-setext-idempotent-user';$claudePath=Join-Path $userHome '.claude/CLAUDE.md'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $claudePath)|Out-Null
+        $utf8=[Text.UTF8Encoding]::new($false)
+        [byte[]]$personalPrefix=$utf8.GetBytes("# Personal`r`nkeep  `r`n")
+        [byte[]]$oldSection=$utf8.GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`n")
+        [byte[]]$suffix=$utf8.GetBytes("Personal notes`r`n--------------`r`nKEEP  `r`n")
+        [IO.File]::WriteAllBytes($claudePath,[byte[]]@($personalPrefix+$oldSection+$suffix))
+        [byte[]]$expected=[byte[]]@($personalPrefix+[byte[]]$desired.InstructionsArtifact.sectionBytes+$utf8.GetBytes("`r`n")+$suffix)
+
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be ([Convert]::ToBase64String($expected))
+
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'current'
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be ([Convert]::ToBase64String($expected))
     }
 

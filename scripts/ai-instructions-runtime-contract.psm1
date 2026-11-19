@@ -713,18 +713,22 @@ function Get-InstallerBootstrapSectionContent {
 
     if ($managedMatches.Count -eq 1) {
         $managed = $managedMatches[0]
-        $nextHeadingIndex = $null
+        $nextHeading = $null
         foreach ($heading in $h2Boundaries) {
             if ([int]$heading.Index -gt [int]$managed.Index) {
-                $nextHeadingIndex = [int]$heading.Index
+                $nextHeading = $heading
                 break
             }
         }
         $prefixPayloadLength = $strictUtf8.GetByteCount($text.Substring(0,$managed.Index))
-        $suffixPayloadOffset = if ($null -eq $nextHeadingIndex) { $payload.Length } else { $strictUtf8.GetByteCount($text.Substring(0,$nextHeadingIndex)) }
+        $suffixPayloadOffset = if ($null -eq $nextHeading) { $payload.Length } else { $strictUtf8.GetByteCount($text.Substring(0,[int]$nextHeading.Index)) }
         [byte[]]$prefix = Get-AiInstructionsByteSlice -Bytes $ExistingBytes -Offset 0 -Length ($bomLength + $prefixPayloadLength)
         [byte[]]$suffix = Get-AiInstructionsByteSlice -Bytes $payload -Offset $suffixPayloadOffset -Length ($payload.Length - $suffixPayloadOffset)
-        return (Join-AiInstructionsByteArrays -Parts @($prefix,$SectionBytes,$suffix))
+        [byte[]]$separator = @()
+        if ($null -ne $nextHeading -and [string]$nextHeading.Kind -ceq 'setext' -and -not $sectionText.EndsWith("`n`n",[StringComparison]::Ordinal)) {
+            $separator = if ($text.Contains("`r`n")) { [byte[]]@(0x0D,0x0A) } else { [byte[]]@(0x0A) }
+        }
+        return (Join-AiInstructionsByteArrays -Parts @($prefix,$SectionBytes,$separator,$suffix))
     }
 
     if ($payload.Length -eq 0) {

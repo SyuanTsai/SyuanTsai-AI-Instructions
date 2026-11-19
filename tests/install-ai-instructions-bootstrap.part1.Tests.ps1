@@ -1139,7 +1139,7 @@ finally {
         [byte[]]$suffix=$utf8.GetBytes("Personal notes`r`n--------------`r`nKEEP  `r`n")
         [IO.File]::WriteAllBytes($agentsPath,[byte[]]@($personalPrefix+$oldSection+$suffix))
         [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $repositoryRoot 'instructions/common/bootstrap-section.md'))
-        [byte[]]$expected=[byte[]]@($personalPrefix+$authority+$suffix)
+        [byte[]]$expected=[byte[]]@($personalPrefix+$authority+$utf8.GetBytes("`r`n")+$suffix)
 
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
 
@@ -1176,6 +1176,25 @@ finally {
 
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
 
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentsPath))|Should Be ([Convert]::ToBase64String($expected))
+    }
+
+    # Scenario: A CRLF AGENTS.md has a managed section followed by a personal Setext H2 and is installed twice.
+    # Purpose: Preserve personal bytes, restore the Setext separator, and keep the second install byte-for-byte idempotent.
+    It 'InterT99d_installs_a_Setext_AGENTS_suffix_twice_without_byte_drift' {
+        New-Item -ItemType Directory -Force -Path $codexHome|Out-Null
+        $agentsPath=Join-Path $codexHome 'AGENTS.md';$utf8=[Text.UTF8Encoding]::new($false)
+        [byte[]]$personalPrefix=$utf8.GetBytes("# Personal`r`nkeep  `r`n")
+        [byte[]]$oldSection=$utf8.GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`n")
+        [byte[]]$suffix=$utf8.GetBytes("Personal notes`r`n--------------`r`nKEEP  `r`n")
+        [IO.File]::WriteAllBytes($agentsPath,[byte[]]@($personalPrefix+$oldSection+$suffix))
+        [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $repositoryRoot 'instructions/common/bootstrap-section.md'))
+        [byte[]]$expected=[byte[]]@($personalPrefix+$authority+$utf8.GetBytes("`r`n")+$suffix)
+
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentsPath))|Should Be ([Convert]::ToBase64String($expected))
+
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentsPath))|Should Be ([Convert]::ToBase64String($expected))
     }
     }

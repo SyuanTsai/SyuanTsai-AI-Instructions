@@ -3987,7 +3987,7 @@ exit /b %errorlevel%
         @{Name='append-only-backtick-fenced-managed-heading';Existing=[Text.UTF8Encoding]::new($false).GetBytes((@('# Personal','```md','## Repository Instructions Bootstrap','example','```')-join"`n")+"`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes((@('# Personal','```md','## Repository Instructions Bootstrap','example','```','')-join"`n")+"`n");Suffix=[byte[]]@()},
         @{Name='append-only-tilde-fenced-managed-heading';Existing=[Text.UTF8Encoding]::new($false).GetBytes("# Personal`n~~~md`n## Repository Instructions Bootstrap`nexample`n~~~~`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("# Personal`n~~~md`n## Repository Instructions Bootstrap`nexample`n~~~~`n`n");Suffix=[byte[]]@()},
         @{Name='replace-real-section-after-fenced-example';Existing=[Text.UTF8Encoding]::new($false).GetBytes((@('```md','## Repository Instructions Bootstrap','example','``` ','## Repository Instructions Bootstrap','old','## Tail','keep')-join"`n")+"`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes((@('```md','## Repository Instructions Bootstrap','example','``` ')-join"`n")+"`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
-        @{Name='replace-before-multiline-setext-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`nPersonal notes`r`ncontinued title`r`n-------------`r`nKEEP  `r`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("Personal notes`r`ncontinued title`r`n-------------`r`nKEEP  `r`n")},
+        @{Name='replace-before-multiline-setext-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`nPersonal notes`r`ncontinued title`r`n-------------`r`nKEEP  `r`n");Prefix=[byte[]]@();Separator=[Text.UTF8Encoding]::new($false).GetBytes("`r`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("Personal notes`r`ncontinued title`r`n-------------`r`nKEEP  `r`n")},
         @{Name='ignore-blank-then-thematic-break';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`n---`nmanaged body continues`n");Prefix=[byte[]]@();Suffix=[byte[]]@()},
         @{Name='thematic-star-spaced-before-one-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`n* * *`n ## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes(" ## Tail`nkeep`n")},
         @{Name='thematic-star-spaced-before-two-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`n* * *`n  ## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("  ## Tail`nkeep`n")},
@@ -4021,11 +4021,31 @@ exit /b %errorlevel%
         @{Name='container-lazy-continuation-and-Setext';Existing=[Text.UTF8Encoding]::new($false).GetBytes("- list paragraph`nlazy continuation`n  ---`n> quote paragraph`nlazy continuation`n> ---`n## Repository Instructions Bootstrap`nold`n## Tail`nkeep`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("- list paragraph`nlazy continuation`n  ---`n> quote paragraph`nlazy continuation`n> ---`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
         @{Name='nested-container-fenced-example';Existing=[Text.UTF8Encoding]::new($false).GetBytes("> - ~~~md`n>   ## Repository Instructions Bootstrap`n>   ## Hidden H2`n>   ~~~~`n## Repository Instructions Bootstrap`nold`n## Tail`nkeep`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("> - ~~~md`n>   ## Repository Instructions Bootstrap`n>   ## Hidden H2`n>   ~~~~`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")}
     ) {
-        param($Name,$Existing,$Prefix,$Suffix)
+        param($Name,$Existing,$Prefix,$Separator=[byte[]]@(),$Suffix)
         [byte[]]$section=[IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'instructions/common/bootstrap-section.md'))
         [byte[]]$actual=Get-InstallerBootstrapSectionContent -ExistingBytes ([byte[]]$Existing) -SectionBytes $section
-        [byte[]]$expected=[byte[]]@(([byte[]]$Prefix)+$section+([byte[]]$Suffix))
+        [byte[]]$expected=[byte[]]@(([byte[]]$Prefix)+$section+([byte[]]$Separator)+([byte[]]$Suffix))
         [Convert]::ToBase64String($actual)|Should Be ([Convert]::ToBase64String($expected))
+    }
+
+    # Scenario: An LF or CRLF managed section is followed by a Setext H2 whose separating blank line belongs to the replaced range.
+    # Purpose: Restore one existing-style blank line before the Setext suffix and keep the exact bytes stable on a second merge.
+    It 'UnitT232b_separates_a_Setext_H2_suffix_and_is_exact_byte_idempotent' -TestCases @(
+        @{Name='LF';Newline="`n"},
+        @{Name='CRLF';Newline="`r`n"}
+    ) {
+        param($Name,$Newline)
+        $utf8=[Text.UTF8Encoding]::new($false)
+        [byte[]]$section=[IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'instructions/common/bootstrap-section.md'))
+        [byte[]]$suffix=$utf8.GetBytes("Personal notes${Newline}--------------${Newline}KEEP  ${Newline}")
+        [byte[]]$existing=$utf8.GetBytes("## Repository Instructions Bootstrap${Newline}- old${Newline}${Newline}Personal notes${Newline}--------------${Newline}KEEP  ${Newline}")
+        [byte[]]$expected=[byte[]]@($section+$utf8.GetBytes($Newline)+$suffix)
+
+        [byte[]]$first=Get-InstallerBootstrapSectionContent -ExistingBytes $existing -SectionBytes $section
+        [byte[]]$second=Get-InstallerBootstrapSectionContent -ExistingBytes $first -SectionBytes $section
+
+        [Convert]::ToBase64String($first)|Should Be ([Convert]::ToBase64String($expected))
+        [Convert]::ToBase64String($second)|Should Be ([Convert]::ToBase64String($expected))
     }
 
     # Scenario: Managed instructions bytes have invalid encoding, duplicate or ambiguous headings, bare CR, or an unclosed explicit-marker block.
