@@ -1958,6 +1958,15 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
             $oracleLines.Count | Should Be $expectedDispositionOracle[[string]$entry.id].Count
             $oracleSha | Should Be $expectedDispositionOracle[[string]$entry.id].Sha256
 
+            if ([string]$entry.id -eq 'skill-darktide-translate') {
+                $darktideSplit = @($entry.files | Where-Object disposition -eq 'split')[0]
+                $darktideSplitTarget = @($entry.files | Where-Object {
+                        [string]$_.path -eq [string]$darktideSplit.target
+                    })
+                $darktideSplitTarget.Count | Should Be 1
+                [string]$darktideSplitTarget[0].disposition | Should Be 'retain'
+            }
+
             $root = Join-Path $TestDrive ("dispositions-" + [string]$entry.id)
             [void][IO.Directory]::CreateDirectory($root)
             [void](Invoke-SourceFixtureGit $root @('init','-q','-b','main'))
@@ -1982,9 +1991,14 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
                     [IO.File]::AppendAllText($path, "rewritten`n", [Text.UTF8Encoding]::new($false))
                 }
                 if ($record.disposition -eq 'split') {
-                    $target = Join-Path $root ([string]$record.target)
-                    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $target))
-                    [IO.File]::WriteAllText($target, "split target`n", [Text.UTF8Encoding]::new($false))
+                    $splitTargetRecord = @($entry.files | Where-Object {
+                            [string]$_.path -eq [string]$record.target
+                        })[0]
+                    if ($null -eq $splitTargetRecord) {
+                        $target = Join-Path $root ([string]$record.target)
+                        [void][IO.Directory]::CreateDirectory((Split-Path -Parent $target))
+                        [IO.File]::WriteAllText($target, "split target`n", [Text.UTF8Encoding]::new($false))
+                    }
                 }
             }
             Copy-Item -Force (
@@ -2016,12 +2030,24 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
             foreach ($split in @($entry.files | Where-Object disposition -eq split)) {
                 $splitTarget = Join-Path $root ([string]$split.target)
                 $splitContent = Get-Content -Raw -LiteralPath $splitTarget
+                $splitTargetRecord = @($entry.files | Where-Object {
+                        [string]$_.path -eq [string]$split.target
+                    })[0]
                 Remove-Item -LiteralPath $splitTarget -Force
                 [void](Invoke-SourceFixtureGit $root @('add','-A'))
                 [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','wrong split target'))
                 $wrongRevision = Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
-                { Assert-GateProtectedFiles $script:RepositoryRoot $root $root $entry `
-                        $baseRevision $wrongRevision $true } | Should Throw 'Split target'
+                $splitExpectation = $entry
+                if ($null -ne $splitTargetRecord -and $splitTargetRecord.disposition -eq 'retain') {
+                    { Assert-GateProtectedFiles $script:RepositoryRoot $root $root $entry $baseRevision $wrongRevision $true } |
+                        Should Throw 'Retained path must remain unchanged'
+                    $splitExpectation = Copy-FixtureValue $entry
+                    $splitExpectation.files = @($splitExpectation.files | Where-Object {
+                            -not ([string]$_.path -eq [string]$split.target -and $_.disposition -eq 'retain')
+                        })
+                }
+                { Assert-GateProtectedFiles $script:RepositoryRoot $root $root $splitExpectation $baseRevision $wrongRevision $true } |
+                    Should Throw 'Split target'
                 [void][IO.Directory]::CreateDirectory((Split-Path -Parent $splitTarget))
                 [IO.File]::WriteAllText($splitTarget, $splitContent, [Text.UTF8Encoding]::new($false))
                 [void](Invoke-SourceFixtureGit $root @('add','-A'))
