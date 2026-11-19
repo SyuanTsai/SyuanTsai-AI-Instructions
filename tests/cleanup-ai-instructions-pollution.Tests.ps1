@@ -54,6 +54,54 @@ function Invoke-CleanupScript {
 }
 
 Describe 'tracked AI instructions pollution cleanup' {
+    # Scenario: Cleanup Git queries receive negative Windows process exit codes while inspecting config, origin, tracked, or staged state.
+    # Purpose: Reject launch failures and NTSTATUS values before they can be interpreted as normal missing, untracked, or clean results.
+    It 'UnitT05_rejects_negative_<Case>_Git_exit_code_<ExitCodeLabel>' -TestCases @(
+        foreach ($exitCase in @(
+            @{ ExitCode=-1; ExitCodeLabel='minus_1' },
+            @{ ExitCode=-1073741510; ExitCodeLabel='ntstatus_1073741510' }
+        )) {
+            foreach ($queryCase in @(
+                @{ Case='path_comparer_config'; Function='Get-CleanupGitPathComparer'; FailureMessage=$null },
+                @{ Case='canonical_origin'; Function='Test-CleanupCanonicalSourceRepository'; FailureMessage=$null },
+                @{ Case='tracked_Claude_base'; Function='Test-CleanupGitPathTracked'; FailureMessage='Unable to inspect tracked Claude base ownership in linked worktree: fixture' },
+                @{ Case='staged_Claude_base'; Function='Test-CleanupGitPathHasStagedChanges'; FailureMessage='Unable to inspect staged Claude base ownership in linked worktree: fixture' },
+                @{ Case='staged_managed_path'; Function='Test-CleanupGitPathHasStagedChanges'; FailureMessage='Unable to inspect staged managed path: AGENTS.md' }
+            )) {
+                @{
+                    Case=$queryCase.Case
+                    Function=$queryCase.Function
+                    FailureMessage=$queryCase.FailureMessage
+                    ExitCode=$exitCase.ExitCode
+                    ExitCodeLabel=$exitCase.ExitCodeLabel
+                }
+            }
+        }
+    ) {
+        param($Case,$Function,$FailureMessage,$ExitCode,$ExitCodeLabel)
+        $tokens=$null;$parseErrors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile($script:CleanupScript,[ref]$tokens,[ref]$parseErrors)
+        @($parseErrors).Count | Should Be 0
+        $definition=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$Function},$true))[0].Extent.Text
+        $message=& {
+            param($text,$name,$failureMessage,$injectedExitCode)
+            Invoke-Expression $text
+            function Get-CleanupGitExitCode { param([string]$Repository,[string[]]$Arguments);return $injectedExitCode }
+            function Invoke-CleanupGit { param([string]$Repository,[string[]]$Arguments);throw 'normal Git query must not run' }
+            try {
+                switch ($name) {
+                    'Get-CleanupGitPathComparer' { Get-CleanupGitPathComparer -Repository fixture | Out-Null }
+                    'Test-CleanupCanonicalSourceRepository' { Test-CleanupCanonicalSourceRepository -Repository fixture | Out-Null }
+                    'Test-CleanupGitPathTracked' { Test-CleanupGitPathTracked -Repository fixture -Path CLAUDE.md -FailureMessage $failureMessage | Out-Null }
+                    'Test-CleanupGitPathHasStagedChanges' { Test-CleanupGitPathHasStagedChanges -Repository fixture -Path CLAUDE.md -FailureMessage $failureMessage | Out-Null }
+                }
+                $null
+            }
+            catch { $_.Exception.Message }
+        } $definition $Function $FailureMessage $ExitCode
+        $message | Should Match ([regex]::Escape([string]$ExitCode))
+    }
+
     # Scenario: Pollution is inspected without explicit cleanup authorization.
     # Purpose: Keep bootstrap and inspection read-only until the user authorizes index mutation.
     It 'InterT10_requires_explicit_authorization_before_git_index_changes' {

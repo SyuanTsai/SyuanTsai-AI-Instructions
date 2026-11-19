@@ -53,6 +53,30 @@ Describe 'SYP101 production smoke repository contract' {
         { Assert-Syp101SmokeRepositoryClean -Repository $targetRoot -Phase 'test' } | Should Not Throw
     }
 
+    # Scenario: Git index inspection returns a negative Windows launch failure or NTSTATUS exit code.
+    # Purpose: Reject every result outside the documented clean/dirty contract instead of reporting a clean index.
+    It 'UnitT15_rejects_negative_Git_index_exit_code_<ExitCodeLabel>' -TestCases @(
+        @{ ExitCode=-1; ExitCodeLabel='minus_1' },
+        @{ ExitCode=-1073741510; ExitCodeLabel='ntstatus_1073741510' }
+    ) {
+        param($ExitCode,$ExitCodeLabel)
+        $tokens=$null;$parseErrors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile($script:SmokeContractModule,[ref]$tokens,[ref]$parseErrors)
+        @($parseErrors).Count | Should Be 0
+        $definition=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Assert-Syp101SmokeRepositoryClean'},$true))[0].Extent.Text
+        $message=& {
+            param($text,$injectedExitCode)
+            Invoke-Expression $text
+            function Invoke-Syp101SmokeContractGit {
+                param([string]$Repository,[string[]]$Arguments,[switch]$AllowNonZero)
+                [pscustomobject]@{ExitCode=$(if($Arguments[0]-ceq'diff'){$injectedExitCode}else{0});Output=@()}
+            }
+            try{Assert-Syp101SmokeRepositoryClean -Repository fixture -Phase test;$null}catch{$_.Exception.Message}
+        } $definition $ExitCode
+        $message | Should Match 'could not inspect'
+        $message | Should Match ([regex]::Escape([string]$ExitCode))
+    }
+
     # Scenario: Both runs could preserve the same pre-existing staged deletion and therefore look stable by comparison alone.
     # Purpose: Reject a stable-but-dirty index instead of treating unchanged status as a successful production smoke.
     It 'UnitT20_rejects_a_stable_but_dirty_index' {

@@ -105,9 +105,8 @@ function Test-RolloutDirectoryExcluded {
 
 function Resolve-RolloutRepositoryIdentity {
     param([Parameter(Mandatory = $true)][string] $Path,[Parameter(Mandatory = $true)][string] $GitExecutable)
-    if ((Get-RolloutGitExitCode -Repository $Path -GitExecutable $GitExecutable -Arguments @('rev-parse','--is-inside-work-tree')) -ne 0) {
-        return $null
-    }
+    $insideExitCode = Get-RolloutGitExitCode -Repository $Path -GitExecutable $GitExecutable -Arguments @('rev-parse','--is-inside-work-tree')
+    if ($insideExitCode -ne 0) { throw "git rev-parse --is-inside-work-tree failed with exit code $insideExitCode." }
     $inside = ((Invoke-RolloutGit -Repository $Path -GitExecutable $GitExecutable -Arguments @('rev-parse','--is-inside-work-tree')) | Select-Object -First 1).Trim()
     if ($inside -cne 'true') { return $null }
     $topLevel = Get-RolloutFullPath -Path (((Invoke-RolloutGit -Repository $Path -GitExecutable $GitExecutable -Arguments @('rev-parse','--show-toplevel')) | Select-Object -First 1).Trim())
@@ -115,18 +114,24 @@ function Resolve-RolloutRepositoryIdentity {
     if (-not [System.IO.Path]::IsPathRooted($commonDirectory)) { $commonDirectory = Join-Path $topLevel $commonDirectory }
     $commonDirectory = Get-RolloutFullPath -Path $commonDirectory
     $branch = ''
-    if ((Get-RolloutGitExitCode -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('symbolic-ref','-q','--short','HEAD')) -eq 0) {
+    $symbolicExitCode = Get-RolloutGitExitCode -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('symbolic-ref','-q','--short','HEAD')
+    if ($symbolicExitCode -notin @(0, 1)) { throw "git symbolic-ref -q --short HEAD failed with exit code $symbolicExitCode." }
+    if ($symbolicExitCode -eq 0) {
         $branch = ((Invoke-RolloutGit -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('symbolic-ref','-q','--short','HEAD')) | Select-Object -First 1).Trim()
     }
     if ([string]::IsNullOrWhiteSpace($branch)) {
-        $head = if ((Get-RolloutGitExitCode -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('rev-parse','--verify','HEAD')) -eq 0) {
-            ((Invoke-RolloutGit -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('rev-parse','--verify','HEAD')) | Select-Object -First 1).Trim()
+        $headExitCode = Get-RolloutGitExitCode -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('rev-parse','--verify','--quiet','HEAD')
+        if ($headExitCode -notin @(0, 1)) { throw "git rev-parse --verify --quiet HEAD failed with exit code $headExitCode." }
+        $head = if ($headExitCode -eq 0) {
+            ((Invoke-RolloutGit -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('rev-parse','--verify','--quiet','HEAD')) | Select-Object -First 1).Trim()
         }
         else { 'unborn' }
         $branch = "DETACHED:$head"
     }
     $origin = ''
-    if ((Get-RolloutGitExitCode -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('remote','get-url','origin')) -eq 0) {
+    $originExitCode = Get-RolloutGitExitCode -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('remote','get-url','origin')
+    if ($originExitCode -notin @(0, 2)) { throw "git remote get-url origin failed with exit code $originExitCode." }
+    if ($originExitCode -eq 0) {
         $origin = ((Invoke-RolloutGit -Repository $topLevel -GitExecutable $GitExecutable -Arguments @('remote','get-url','origin')) | Select-Object -First 1).Trim()
     }
     return [pscustomobject][ordered]@{
@@ -309,7 +314,9 @@ function Get-RolloutTrackedReservedPaths {
     foreach ($line in @(Invoke-RolloutGit -Repository $Repository -GitExecutable $GitExecutable -Arguments @('-c','core.quotePath=true','ls-files'))) {
         [void]$trackedPaths.Add((ConvertFrom-RolloutGitPath -Path ([string]$line)))
     }
-    if ((Get-RolloutGitExitCode -Repository $Repository -GitExecutable $GitExecutable -Arguments @('rev-parse','--verify','HEAD')) -eq 0) {
+    $headExitCode = Get-RolloutGitExitCode -Repository $Repository -GitExecutable $GitExecutable -Arguments @('rev-parse','--verify','--quiet','HEAD')
+    if ($headExitCode -notin @(0, 1)) { throw "git rev-parse --verify --quiet HEAD failed with exit code $headExitCode." }
+    if ($headExitCode -eq 0) {
         foreach ($line in @(Invoke-RolloutGit -Repository $Repository -GitExecutable $GitExecutable -Arguments @('-c','core.quotePath=true','ls-tree','-r','--name-only','HEAD'))) {
             [void]$trackedPaths.Add((ConvertFrom-RolloutGitPath -Path ([string]$line)))
         }

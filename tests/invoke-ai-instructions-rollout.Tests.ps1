@@ -159,6 +159,68 @@ Describe 'AI instructions all-repository rollout' {
         }
     }
 
+    # Scenario: Repository discovery receives negative Windows process exit codes from each Git query that has a normal alternate result.
+    # Purpose: Prevent launch failures and NTSTATUS values from being interpreted as non-repositories, detached or unborn HEADs, missing origins, or absent HEAD trees.
+    It 'UnitT92_rejects_negative_<Case>_Git_exit_code_<ExitCodeLabel>' -TestCases @(
+        foreach ($exitCase in @(
+            @{ ExitCode=-1; ExitCodeLabel='minus_1' },
+            @{ ExitCode=-1073741510; ExitCodeLabel='ntstatus_1073741510' }
+        )) {
+            foreach ($caseName in @('inside_worktree','symbolic_HEAD','verified_HEAD','origin','tracked_HEAD')) {
+                @{ Case=$caseName; ExitCode=$exitCase.ExitCode; ExitCodeLabel=$exitCase.ExitCodeLabel }
+            }
+        }
+    ) {
+        param($Case,$ExitCode,$ExitCodeLabel)
+        $tokens=$null;$parseErrors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile($script:RolloutModule,[ref]$tokens,[ref]$parseErrors)
+        @($parseErrors).Count | Should Be 0
+        $functionName=if($Case-ceq'tracked_HEAD'){'Get-RolloutTrackedReservedPaths'}else{'Resolve-RolloutRepositoryIdentity'}
+        $definition=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$functionName},$true))[0].Extent.Text
+        $message=& {
+            param($text,$name,$caseName,$injectedExitCode,$repository)
+            Invoke-Expression $text
+            function Get-RolloutGitExitCode {
+                param([string]$Repository,[string]$GitExecutable,[string[]]$Arguments)
+                $query=$Arguments -join ' '
+                if($caseName-ceq'inside_worktree'-and$query-ceq'rev-parse --is-inside-work-tree'){return $injectedExitCode}
+                if($caseName-ceq'symbolic_HEAD'-and$query-ceq'symbolic-ref -q --short HEAD'){return $injectedExitCode}
+                if($caseName-ceq'verified_HEAD'-and$query-ceq'rev-parse --verify --quiet HEAD'){return $injectedExitCode}
+                if($caseName-ceq'origin'-and$query-ceq'remote get-url origin'){return $injectedExitCode}
+                if($caseName-ceq'tracked_HEAD'-and$query-ceq'rev-parse --verify --quiet HEAD'){return $injectedExitCode}
+                if($query-ceq'symbolic-ref -q --short HEAD' -and $caseName-ceq'verified_HEAD'){return 1}
+                return 0
+            }
+            function Invoke-RolloutGit {
+                param([string]$Repository,[string]$GitExecutable,[string[]]$Arguments)
+                switch($Arguments -join ' '){
+                    'rev-parse --is-inside-work-tree' { return 'true' }
+                    'rev-parse --show-toplevel' { return $repository }
+                    'rev-parse --git-common-dir' { return '.git' }
+                    'symbolic-ref -q --short HEAD' { return 'main' }
+                    'rev-parse --verify --quiet HEAD' { return ('a'*40) }
+                    'remote get-url origin' { return 'https://example.com/team/product.git' }
+                    '-c core.quotePath=true ls-files' { return 'AGENTS.md' }
+                    default { return @() }
+                }
+            }
+            function Get-RolloutFullPath { param([string]$Path);return [IO.Path]::GetFullPath($Path) }
+            function ConvertFrom-RolloutGitPath { param([string]$Path);return $Path }
+            function Test-RolloutReservedAgentPath { param([string]$Path,[string[]]$ProtectedPaths);return $true }
+            try {
+                if($name-ceq'Get-RolloutTrackedReservedPaths'){
+                    Get-RolloutTrackedReservedPaths -Repository $repository -GitExecutable git -ProtectedPaths @() | Out-Null
+                }
+                else {
+                    Resolve-RolloutRepositoryIdentity -Path $repository -GitExecutable git | Out-Null
+                }
+                $null
+            }
+            catch { $_.Exception.Message }
+        } $definition $functionName $Case $ExitCode $TestDrive
+        $message | Should Match ([regex]::Escape([string]$ExitCode))
+    }
+
     # Given: A fixed-drive-shaped search root includes a product, authority clone, dependency cache, temp fixture, and official global Skill clone.
     # When: Rollout discovers repositories with the production exclusions and authority URLs.
     # Then: Only the product is synchronized, authority is reported skipped, and system/cached repositories are untouched.
