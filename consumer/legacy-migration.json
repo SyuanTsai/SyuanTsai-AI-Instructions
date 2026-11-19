@@ -271,8 +271,8 @@
       "id": "skill-atlassian-ecosystem",
       "repository": "https://github.com/SyuanTsai/Skill-Atlassian-Ecosystem.git",
       "status": "ready",
-      "inventoryCommit": "76b4b94dd0f9395b9096db95d5c138b77c5e259d",
-      "inventoryTree": "1a261e4717d971080fcb1e8c441403e535d09dfb",
+      "inventoryCommit": "2aca2db5d860aebde6939d1390e51abeb5bf2441",
+      "inventoryTree": "fa430fbb820977e3b8c93d8d06b0e1af860214bb",
       "requiredRepositoryChecks": [
         {
           "id": "repository-atlassian",
@@ -290,6 +290,53 @@
           "path": "tests"
         }
       ],
+      "literalReferenceExemptions": [
+        {
+          "file": "config/skillspector-exceptions.json",
+          "blobOid": "4ff6d83ebddb132992613fefdb6e6cc96fc0e724",
+          "line": 36,
+          "column": 16,
+          "occurrenceOrdinal": 1,
+          "targetPath": "config/skillspector-exceptions/configure-bitbucket-api-access.baseline.json",
+          "reason": "The retained inventory registry must name this reviewed baseline before conversion; conversion removes the binding and baseline under the shrink-only gate."
+        },
+        {
+          "file": "config/skillspector-exceptions.json",
+          "blobOid": "4ff6d83ebddb132992613fefdb6e6cc96fc0e724",
+          "line": 40,
+          "column": 16,
+          "occurrenceOrdinal": 1,
+          "targetPath": "config/skillspector-exceptions/configure-confluence-api-access.baseline.json",
+          "reason": "The retained inventory registry must name this reviewed baseline before conversion; conversion removes the binding and baseline under the shrink-only gate."
+        },
+        {
+          "file": "config/skillspector-exceptions.json",
+          "blobOid": "4ff6d83ebddb132992613fefdb6e6cc96fc0e724",
+          "line": 44,
+          "column": 16,
+          "occurrenceOrdinal": 1,
+          "targetPath": "config/skillspector-exceptions/configure-jira-api-access.baseline.json",
+          "reason": "The retained inventory registry must name this reviewed baseline before conversion; conversion removes the binding and baseline under the shrink-only gate."
+        },
+        {
+          "file": "config/skillspector-exceptions.json",
+          "blobOid": "4ff6d83ebddb132992613fefdb6e6cc96fc0e724",
+          "line": 48,
+          "column": 16,
+          "occurrenceOrdinal": 1,
+          "targetPath": "config/skillspector-exceptions/manage-confluence-docs-as-code.baseline.json",
+          "reason": "The retained inventory registry must name this reviewed baseline before conversion; conversion removes the binding and baseline under the shrink-only gate."
+        },
+        {
+          "file": "config/skillspector-exceptions.json",
+          "blobOid": "4ff6d83ebddb132992613fefdb6e6cc96fc0e724",
+          "line": 52,
+          "column": 16,
+          "occurrenceOrdinal": 1,
+          "targetPath": "config/skillspector-exceptions/publish-requirements-to-confluence.baseline.json",
+          "reason": "The retained inventory registry must name this reviewed baseline before conversion; conversion removes the binding and baseline under the shrink-only gate."
+        }
+      ],
       "files": [
         {
           "path": ".github/workflows/validate.yml",
@@ -304,37 +351,37 @@
         {
           "path": "config/skillspector-exceptions.json",
           "disposition": "retain",
-          "reason": "Repository-owned configuration or reviewed exception evidence remains consumer data."
+          "reason": "Retain as consumer data; during conversion it must be reduced to exactly the three review-bitbucket-pull-request exceptions (LP3 x1 and E1 x2) and one matching baseline pending SYP-493 reapproval. PR-1's shrink-only gate and the central runner's registry/baseline one-to-one validation enforce this reduction."
         },
         {
           "path": "config/skillspector-exceptions/configure-bitbucket-api-access.baseline.json",
-          "disposition": "retain",
-          "reason": "Repository-owned configuration or reviewed exception evidence remains consumer data."
+          "disposition": "delete",
+          "reason": "SYP-356 S6 改寫後已無 finding，依只減不增規則刪除。"
         },
         {
           "path": "config/skillspector-exceptions/configure-confluence-api-access.baseline.json",
-          "disposition": "retain",
-          "reason": "Repository-owned configuration or reviewed exception evidence remains consumer data."
+          "disposition": "delete",
+          "reason": "SYP-356 S6 改寫後已無 finding，依只減不增規則刪除。"
         },
         {
           "path": "config/skillspector-exceptions/configure-jira-api-access.baseline.json",
-          "disposition": "retain",
-          "reason": "Repository-owned configuration or reviewed exception evidence remains consumer data."
+          "disposition": "delete",
+          "reason": "SYP-356 S6 改寫後已無 finding，依只減不增規則刪除。"
         },
         {
           "path": "config/skillspector-exceptions/manage-confluence-docs-as-code.baseline.json",
-          "disposition": "retain",
-          "reason": "Repository-owned configuration or reviewed exception evidence remains consumer data."
+          "disposition": "delete",
+          "reason": "SYP-356 S6 改寫後已無 finding，依只減不增規則刪除。"
         },
         {
           "path": "config/skillspector-exceptions/publish-requirements-to-confluence.baseline.json",
-          "disposition": "retain",
-          "reason": "Repository-owned configuration or reviewed exception evidence remains consumer data."
+          "disposition": "delete",
+          "reason": "SYP-356 S6 改寫後已無 finding，依只減不增規則刪除。"
         },
         {
           "path": "config/skillspector-exceptions/review-bitbucket-pull-request.baseline.json",
           "disposition": "retain",
-          "reason": "Repository-owned configuration or reviewed exception evidence remains consumer data."
+          "reason": "Retain the unchanged review-bitbucket-pull-request baseline with its three approved fingerprints (LP3 x1 and E1 x2) pending SYP-493 reapproval."
         },
         {
           "path": "config/standard-v1.json",
@@ -425,6 +472,12 @@
           "path": "scripts/StandardSourceDriver.psm1",
           "disposition": "delete",
           "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Sync-SharedReferences.ps1",
+          "disposition": "update-tests",
+          "reason": "Retain this repository-owned developer generator but rewrite the literal split-source path in its operator guidance (line 194, \"run scripts/Test-SharedReferences.ps1\") to scripts/Test-AtlassianSharedReferences.ps1; it is a printed instruction, not a runtime dependency, but conversion closure flags it.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "scripts/Test-Repository.ps1",
@@ -733,8 +786,9 @@
         },
         {
           "path": "tests/SkillSpectorExceptions.Tests.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite assertions for the conversion-time reduction from six baselines and 19 fingerprints to the retained review-bitbucket-pull-request baseline and its three fingerprints; the registry path is now retained consumer data and may be referenced literally.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/SourcePackageBridge.Tests.ps1",
