@@ -1959,7 +1959,7 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         ) | ConvertFrom-Json -Depth 100
         $expectedDispositionOracle = @{
             'skill-general' = @{ Count=46; Sha256='49d7b8e6a19bf728ec04ea75cf31758c5c90182c803183d29bf6f0091f2c64fe' }
-            'skill-atlassian-ecosystem' = @{ Count=100; Sha256='a1f1d241bbb0bb55770f8ab9c227f3a319cc7287aab5ad3ccca0af706009db42' }
+            'skill-atlassian-ecosystem' = @{ Count=100; Sha256='1ff826f6bb8ffb1d7a93b2d75d54dafccc646c123b45856c2f9176878f21845b' }
             'skill-code-collaboration' = @{ Count=23; Sha256='dbf9332f204eda3d15c8777c4e73ad0b846a0e653367ea188c03d47c2766ce2a' }
             'skill-knowledge-content' = @{ Count=17; Sha256='78704317aea1f2678901f671ecc6fb297640e8e1282eaf3f40dcb3f980a8c2a3' }
         }

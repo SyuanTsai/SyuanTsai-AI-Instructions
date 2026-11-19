@@ -641,8 +641,9 @@
         },
         {
           "path": "tests/ConfluenceDocs.Capture.Tests.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite the Unix permission assertion to compare numeric UnixFileMode values; .NET flag string order differs across runtime versions.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/ConfluenceDocs.CodeBinding.Tests.ps1",
@@ -716,8 +717,9 @@
         },
         {
           "path": "tests/ConfluenceDocs.MarkdownPushCli.Tests.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite the temporary-parent selection to use the physical path; macOS temp roots are symlinks that the production reparse guard correctly rejects.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/ConfluenceDocs.PlatformPath.Tests.ps1",
