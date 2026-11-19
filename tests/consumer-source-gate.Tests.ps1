@@ -2072,7 +2072,9 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
 
             $deleteExpectation = Copy-FixtureValue $entry
             $deleteExpectation.files = @($deleteExpectation.files)
-            $deleteRecord = @($deleteExpectation.files | Where-Object disposition -eq 'update-tests')[0]
+            $deleteRecord = @($deleteExpectation.files | Where-Object {
+                    $_.disposition -eq 'update-tests' -and $_.expectedOutcome -eq 'rewrite'
+                })[0]
             $deleteRecord.expectedOutcome = 'delete'
             { Assert-GateProtectedFiles $script:RepositoryRoot $root $root $deleteExpectation `
                     $baseRevision $candidateRevision $true } | Should Throw 'must be deleted'
