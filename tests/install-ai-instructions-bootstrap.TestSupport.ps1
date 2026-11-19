@@ -47,6 +47,27 @@ function New-InstallerSourceArchive {
     return (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Initialize-InstallerIsolatedProcessEnvironment {
+    param([Parameter(Mandatory = $true)][string] $IsolatedHome)
+
+    $userProfile=$IsolatedHome+'-process-environment'
+    $roamingData=Join-Path $userProfile 'AppData\Roaming'
+    $localData=Join-Path $userProfile 'AppData\Local'
+    $xdgConfig=Join-Path $userProfile 'xdg\config'
+    $xdgData=Join-Path $userProfile 'xdg\data'
+    $xdgCache=Join-Path $userProfile 'xdg\cache'
+    New-Item -ItemType Directory -Force -Path $IsolatedHome,$roamingData,$localData,$xdgConfig,$xdgData,$xdgCache|Out-Null
+    return [pscustomobject]@{
+        Home=$IsolatedHome
+        UserProfile=$userProfile
+        AppData=$roamingData
+        LocalAppData=$localData
+        XdgConfig=$xdgConfig
+        XdgData=$xdgData
+        XdgCache=$xdgCache
+    }
+}
+
 function Invoke-InstallScript {
     param(
         [Parameter(Mandatory = $true)][string] $RepositoryRoot,
@@ -82,20 +103,13 @@ function Invoke-InstallScript {
         $exitCode=$LASTEXITCODE
     }
     else{
-        New-Item -ItemType Directory -Force -Path $IsolatedUserHome|Out-Null
-        $isolatedProcessEnvironment=$IsolatedUserHome+'-process-environment'
-        $isolatedRoamingData=Join-Path $isolatedProcessEnvironment 'AppData\Roaming'
-        $isolatedLocalData=Join-Path $isolatedProcessEnvironment 'AppData\Local'
-        $isolatedXdgConfig=Join-Path $isolatedProcessEnvironment 'xdg\config'
-        $isolatedXdgData=Join-Path $isolatedProcessEnvironment 'xdg\data'
-        $isolatedXdgCache=Join-Path $isolatedProcessEnvironment 'xdg\cache'
-        New-Item -ItemType Directory -Force -Path $isolatedRoamingData,$isolatedLocalData,$isolatedXdgConfig,$isolatedXdgData,$isolatedXdgCache|Out-Null
+        $isolatedEnvironment=Initialize-InstallerIsolatedProcessEnvironment -IsolatedHome $IsolatedUserHome
         $start=[Diagnostics.ProcessStartInfo]::new($script:TestPowerShellExecutable)
         $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.RedirectStandardInput=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
         foreach($argument in @('-NonInteractive')+$arguments){[void]$start.ArgumentList.Add([string]$argument)}
-        $start.Environment['HOME']=$IsolatedUserHome;$start.Environment['USERPROFILE']=$isolatedProcessEnvironment;$start.Environment['CODEX_HOME']=$CodexHome
-        $start.Environment['APPDATA']=$isolatedRoamingData;$start.Environment['LOCALAPPDATA']=$isolatedLocalData
-        $start.Environment['XDG_CONFIG_HOME']=$isolatedXdgConfig;$start.Environment['XDG_DATA_HOME']=$isolatedXdgData;$start.Environment['XDG_CACHE_HOME']=$isolatedXdgCache
+        $start.Environment['HOME']=$isolatedEnvironment.Home;$start.Environment['USERPROFILE']=$isolatedEnvironment.UserProfile;$start.Environment['CODEX_HOME']=$CodexHome
+        $start.Environment['APPDATA']=$isolatedEnvironment.AppData;$start.Environment['LOCALAPPDATA']=$isolatedEnvironment.LocalAppData
+        $start.Environment['XDG_CONFIG_HOME']=$isolatedEnvironment.XdgConfig;$start.Environment['XDG_DATA_HOME']=$isolatedEnvironment.XdgData;$start.Environment['XDG_CACHE_HOME']=$isolatedEnvironment.XdgCache
         $process=[Diagnostics.Process]::new();$process.StartInfo=$start
         try{
             if(-not$process.Start()){throw 'Failed to start isolated installer child process.'}
@@ -251,12 +265,18 @@ function Get-InstallerStateSnapshot {
 }
 
 function Get-InstallerFullTreeSnapshot {
-    param([Parameter(Mandatory=$true)][string]$Root)
+    param(
+        [Parameter(Mandatory=$true)][string]$Root,
+        [string[]]$ExcludedRelativePathPatterns=@()
+    )
     if(-not(Test-Path -LiteralPath $Root)){return '<root-absent>'}
     $rootPath=[IO.Path]::GetFullPath($Root).TrimEnd([char[]]@('\','/'))
     $entries=New-Object System.Collections.Generic.List[string]
     foreach($item in @((Get-Item -Force -LiteralPath $rootPath)) + @(Get-ChildItem -Force -LiteralPath $rootPath -Recurse)){
         $relative=if($item.FullName-ceq$rootPath){'.'}else{$item.FullName.Substring($rootPath.Length).TrimStart([char[]]@('\','/')).Replace('\','/')}
+        $excluded=$false
+        foreach($pattern in $ExcludedRelativePathPatterns){if($relative-cmatch$pattern){$excluded=$true;break}}
+        if($excluded){continue}
         $kind=if(($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){'reparse'}elseif($item.PSIsContainer){'directory'}else{'file'}
         $hash=if($kind-ceq'file'){(Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}else{'-'}
         $entries.Add("$relative`t$kind`t$([int64]$item.Attributes)`t$hash")

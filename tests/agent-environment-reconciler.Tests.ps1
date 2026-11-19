@@ -2545,6 +2545,24 @@ Describe 'USER Claude managed bootstrap section' {
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be ([Convert]::ToBase64String($expected))
     }
 
+    # Scenario: Personal CLAUDE.md has a managed-heading example in an HTML comment and another in a list-item fence before the real section.
+    # Purpose: Treat both examples as container content, replace only the document-level section, and preserve every personal byte exactly.
+    It 'InterT116c_preserves_HTML_comment_and_list_fenced_CLAUDE_examples' {
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-html-list-fixture')
+        $userHome=Join-Path $TestDrive 'claude-html-list-user';$claudePath=Join-Path $userHome '.claude/CLAUDE.md'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $claudePath)|Out-Null
+        $utf8=[Text.UTF8Encoding]::new($false)
+        [byte[]]$personalPrefix=$utf8.GetBytes("<!--`r`n## Repository Instructions Bootstrap`r`n## Hidden HTML H2`r`n-->`r`n- ~~~md`r`n  ## Repository Instructions Bootstrap`r`n  ## Hidden list H2`r`n  ~~~~`r`n")
+        [byte[]]$oldSection=$utf8.GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`n")
+        [byte[]]$suffix=$utf8.GetBytes("## Personal Tail`r`nKEEP  `r`n")
+        [IO.File]::WriteAllBytes($claudePath,[byte[]]@($personalPrefix+$oldSection+$suffix))
+        [byte[]]$expected=[byte[]]@($personalPrefix+[byte[]]$desired.InstructionsArtifact.sectionBytes+$suffix)
+
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be ([Convert]::ToBase64String($expected))
+    }
+
     # Scenario: A later valid v3/v5 configuration removes user-claude after the managed section already exists.
     # Purpose: Stop managing the artifact without deleting or rewriting the existing personal CLAUDE.md section.
     It 'InterT117_preserves_existing_CLAUDE_when_user_claude_is_cancelled' {

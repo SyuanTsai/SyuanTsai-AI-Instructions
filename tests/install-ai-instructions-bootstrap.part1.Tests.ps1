@@ -1017,15 +1017,26 @@ finally {
         [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $repositoryRoot 'instructions/common/bootstrap-section.md'))
         [byte[]]$expected=[byte[]]@($bom+$utf8.GetBytes("# Personal`r`nkeep  `r`n")+$authority+$suffix)
         $isolatedHome=Join-Path $TestDrive 'installer-isolated-user-home'
-        New-Item -ItemType Directory -Force -Path $isolatedHome|Out-Null
+        $isolatedEnvironment=Initialize-InstallerIsolatedProcessEnvironment -IsolatedHome $isolatedHome
         Set-TestText -Path (Join-Path $isolatedHome 'personal.txt') -Value "preserve`n"
-        $isolatedBefore=Get-InstallerFullTreeSnapshot -Root $isolatedHome
+        Set-TestText -Path (Join-Path $isolatedEnvironment.UserProfile 'personal.txt') -Value "preserve profile`n"
+        $powerShellCacheAllowlist=@(
+            '^AppData/Local/Microsoft$',
+            '^AppData/Local/Microsoft/PowerShell$',
+            '^AppData/Local/Microsoft/PowerShell/ModuleAnalysisCache-[0-9A-F]{8}$',
+            '^AppData/Local/Microsoft/PowerShell/StartupProfileData-NonInteractive$',
+            '^AppData/Local/Microsoft/PowerShell/telemetry\.uuid$'
+        )
+        $isolatedHomeBefore=Get-InstallerFullTreeSnapshot -Root $isolatedHome
+        $isolatedProfileBefore=Get-InstallerFullTreeSnapshot -Root $isolatedEnvironment.UserProfile -ExcludedRelativePathPatterns $powerShellCacheAllowlist
 
         Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome -IsolatedUserHome $isolatedHome
 
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentsPath))|Should Be ([Convert]::ToBase64String($expected))
-        (Get-InstallerFullTreeSnapshot -Root $isolatedHome)|Should Be $isolatedBefore
+        (Get-InstallerFullTreeSnapshot -Root $isolatedHome)|Should Be $isolatedHomeBefore
+        (Get-InstallerFullTreeSnapshot -Root $isolatedEnvironment.UserProfile -ExcludedRelativePathPatterns $powerShellCacheAllowlist)|Should Be $isolatedProfileBefore
         Test-Path -LiteralPath (Join-Path $isolatedHome '.claude')|Should Be $false
+        Test-Path -LiteralPath (Join-Path $isolatedEnvironment.UserProfile '.claude')|Should Be $false
     }
     }
 
@@ -1126,6 +1137,23 @@ finally {
         [byte[]]$personalPrefix=$utf8.GetBytes("# Personal`r`n~~~md`r`n## Repository Instructions Bootstrap`r`nexample`r`n~~~~`r`n")
         [byte[]]$oldSection=$utf8.GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`n")
         [byte[]]$suffix=$utf8.GetBytes("Personal notes`r`n--------------`r`nKEEP  `r`n")
+        [IO.File]::WriteAllBytes($agentsPath,[byte[]]@($personalPrefix+$oldSection+$suffix))
+        [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $repositoryRoot 'instructions/common/bootstrap-section.md'))
+        [byte[]]$expected=[byte[]]@($personalPrefix+$authority+$suffix)
+
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentsPath))|Should Be ([Convert]::ToBase64String($expected))
+    }
+
+    # Scenario: Personal AGENTS.md has a managed-heading example in an HTML comment and another in a list-item fence before the real section.
+    # Purpose: Treat both examples as container content, replace only the document-level section, and preserve every personal byte exactly.
+    It 'InterT99b_preserves_HTML_comment_and_list_fenced_AGENTS_examples' {
+        New-Item -ItemType Directory -Force -Path $codexHome|Out-Null
+        $agentsPath=Join-Path $codexHome 'AGENTS.md';$utf8=[Text.UTF8Encoding]::new($false)
+        [byte[]]$personalPrefix=$utf8.GetBytes("<!--`r`n## Repository Instructions Bootstrap`r`n## Hidden HTML H2`r`n-->`r`n- ~~~md`r`n  ## Repository Instructions Bootstrap`r`n  ## Hidden list H2`r`n  ~~~~`r`n")
+        [byte[]]$oldSection=$utf8.GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`n")
+        [byte[]]$suffix=$utf8.GetBytes("## Personal Tail`r`nKEEP  `r`n")
         [IO.File]::WriteAllBytes($agentsPath,[byte[]]@($personalPrefix+$oldSection+$suffix))
         [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $repositoryRoot 'instructions/common/bootstrap-section.md'))
         [byte[]]$expected=[byte[]]@($personalPrefix+$authority+$suffix)
