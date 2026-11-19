@@ -53,6 +53,7 @@ Describe 'install-ai-instructions-bootstrap' {
         [string]$bundle.repository | Should Be ([string]$configuration.catalog.repository)
         [string]$bundle.commit | Should Be ([string]$configuration.catalog.ref)
         $bundle.schemaVersion | Should Be 2
+        Test-Path -LiteralPath (Join-Path $runtimeRoot 'bootstrap-section.md') | Should Be $false
         [string]$bundle.acquisition | Should Be 'github-codeload'
         [string]$bundle.archiveSha256 | Should Match '^[0-9a-f]{64}$'
         [string]$bundle.inventorySha256 | Should Match '^[0-9a-f]{64}$'
@@ -149,6 +150,7 @@ Describe 'install-ai-instructions-bootstrap' {
         $candidateRoot = Join-Path $TestDrive 'installer-backup-tamper-candidate'
         New-Item -ItemType Directory -Force -Path $candidateRoot | Out-Null
         Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts'),(Join-Path $repositoryRoot 'catalog') -Destination $candidateRoot -Recurse
+        Copy-TestInstallerBootstrapAuthority -SourceRoot $repositoryRoot -DestinationRoot $candidateRoot
         foreach($leaf in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json')){
             Copy-Item -LiteralPath (Join-Path $repositoryRoot $leaf) -Destination (Join-Path $candidateRoot $leaf)
         }
@@ -644,7 +646,8 @@ finally {
             Copy-Item -LiteralPath (Join-Path $repositoryRoot "scripts\$fileName") -Destination $destination -Force
         }
         Copy-Item -LiteralPath (Join-Path $repositoryRoot 'licensing-scope.json') -Destination (Join-Path $cloneRoot 'licensing-scope.json') -Force
-        & git -C $cloneRoot add -- scripts licensing-scope.json
+        Copy-TestInstallerBootstrapAuthority -SourceRoot $repositoryRoot -DestinationRoot $cloneRoot
+        & git -C $cloneRoot add -- scripts licensing-scope.json instructions/common/bootstrap-section.md
         & git -C $cloneRoot -c user.name='Installer Test' -c user.email='installer@example.test' commit --quiet --allow-empty -m 'installer fixture'
         if ($LASTEXITCODE -ne 0) { throw 'Failed to commit installer source fixture.' }
         $executionEvidence = Join-Path $TestDrive 'dirty-contract-executed.txt'
@@ -1045,6 +1048,7 @@ Export-ModuleMember -Function Assert-UserProjectionRuntimeGate,Get-UserSkillsDes
         $candidateRoot=Join-Path $TestDrive 'installer-transaction-guard-candidate'
         New-Item -ItemType Directory -Force -Path $candidateRoot|Out-Null
         Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts'),(Join-Path $repositoryRoot 'catalog') -Destination $candidateRoot -Recurse
+        Copy-TestInstallerBootstrapAuthority -SourceRoot $repositoryRoot -DestinationRoot $candidateRoot
         foreach($leaf in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json')){Copy-Item -LiteralPath (Join-Path $repositoryRoot $leaf) -Destination (Join-Path $candidateRoot $leaf)}
         [IO.File]::AppendAllText((Join-Path $candidateRoot 'scripts\bootstrap-ai-instructions-installed.ps1'),"`n# transaction guard candidate`n",[Text.UTF8Encoding]::new($false))
         $archivePath = Join-Path $TestDrive 'installer-transaction-guard-source.zip'
@@ -1154,6 +1158,7 @@ Remove-Variable -Name InstallerBackupGuardCodexHome,InstallerBackupGuardOutside,
         $candidateRoot=Join-Path $TestDrive ("closure-invalid-$Variant-"+[Guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $candidateRoot|Out-Null
         Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts'),(Join-Path $repositoryRoot 'catalog') -Destination $candidateRoot -Recurse
+        Copy-TestInstallerBootstrapAuthority -SourceRoot $repositoryRoot -DestinationRoot $candidateRoot
         foreach($leaf in @('LICENSE','NOTICE','LICENSE-SCOPE.md','PROVENANCE.md','THIRD_PARTY_NOTICES.md','licensing-scope.json')){
             Copy-Item -LiteralPath (Join-Path $repositoryRoot $leaf) -Destination (Join-Path $candidateRoot $leaf)
         }

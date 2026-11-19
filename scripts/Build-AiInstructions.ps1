@@ -61,6 +61,26 @@ function Resolve-RepositoryPath {
     return $full
 }
 
+function Get-CanonicalBootstrapSectionBytes {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    [byte[]]$bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 1 -or
+        ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)) {
+        throw 'BootstrapSectionAuthorityInvalid: instructions/common/bootstrap-section.md must be non-empty UTF-8 without a BOM.'
+    }
+    try { $text = $script:Utf8Strict.GetString($bytes) }
+    catch { throw 'BootstrapSectionAuthorityInvalid: instructions/common/bootstrap-section.md must contain valid UTF-8.' }
+    if ($text.Contains("`r") -or -not $text.StartsWith("## Repository Instructions Bootstrap`n",[StringComparison]::Ordinal) -or
+        -not $text.EndsWith("`n",[StringComparison]::Ordinal) -or $text.EndsWith("`n`n",[StringComparison]::Ordinal)) {
+        throw 'BootstrapSectionAuthorityInvalid: instructions/common/bootstrap-section.md must use LF, start with the managed heading, and end with exactly one LF.'
+    }
+    if ([regex]::Matches($text,'(?m)^## Repository Instructions Bootstrap[ \t]*$').Count -ne 1) {
+        throw 'BootstrapSectionAuthorityInvalid: instructions/common/bootstrap-section.md must contain exactly one managed heading.'
+    }
+    return $bytes
+}
+
 function Expand-InstructionHostBlocks {
     param(
         [Parameter(Mandatory = $true)][string] $Text,
@@ -134,6 +154,26 @@ if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
     $RepositoryRoot = Split-Path -Parent $PSScriptRoot
 }
 $root = [System.IO.Path]::GetFullPath($RepositoryRoot)
+$bootstrapAuthorityPath = Resolve-RepositoryPath -Root $root -RelativePath 'instructions/common/bootstrap-section.md'
+[byte[]]$bootstrapAuthorityBytes = Get-CanonicalBootstrapSectionBytes -Path $bootstrapAuthorityPath
+$installerRelativePath = 'scripts/install-ai-instructions-bootstrap.ps1'
+$installerPath = Resolve-RepositoryPath -Root $root -RelativePath $installerRelativePath
+$installerText = $script:Utf8Strict.GetString([IO.File]::ReadAllBytes($installerPath))
+$bootstrapBlockPattern = '(?ms)^# BEGIN GENERATED BOOTSTRAP SECTION BASE64(?<newline>\r?\n).*?^# END GENERATED BOOTSTRAP SECTION BASE64\r?\n'
+$bootstrapBlockMatches = [regex]::Matches($installerText,$bootstrapBlockPattern)
+if ($bootstrapBlockMatches.Count -ne 1) {
+    throw 'BootstrapSectionGeneratedBlockInvalid: installer must contain exactly one generated bootstrap section block.'
+}
+$installerNewLine = $bootstrapBlockMatches[0].Groups['newline'].Value
+$bootstrapBase64 = [Convert]::ToBase64String($bootstrapAuthorityBytes)
+$bootstrapGeneratedBlock = (@(
+    '# BEGIN GENERATED BOOTSTRAP SECTION BASE64'
+    '$bootstrapSectionBytes = [System.Convert]::FromBase64String('
+    "    '$bootstrapBase64'"
+    ')'
+    '# END GENERATED BOOTSTRAP SECTION BASE64'
+) -join $installerNewLine) + $installerNewLine
+$expectedInstallerText = [regex]::Replace($installerText,$bootstrapBlockPattern,[System.Text.RegularExpressions.MatchEvaluator]{ param($match) $bootstrapGeneratedBlock })
 $contractPath = Resolve-RepositoryPath -Root $root -RelativePath 'ai-instructions-contract.json'
 $contract = (Get-NormalizedInstructionText -Path $contractPath) | ConvertFrom-Json
 Get-ExactPropertyNames -Value $contract -Expected @('schemaVersion','primaryLocale','fanOutLocale','locales','source','platforms','modules','baseInvariants') -Context 'AI Instructions contract'
@@ -247,6 +287,10 @@ if ($unexpectedArtifacts.Count -gt 0) {
 }
 
 $drift = New-Object System.Collections.Generic.List[string]
+if (-not [string]::Equals($installerText,$expectedInstallerText,[StringComparison]::Ordinal)) {
+    $drift.Add($installerRelativePath)
+    if (-not $Check) { [IO.File]::WriteAllBytes($installerPath,$script:Utf8NoBom.GetBytes($expectedInstallerText)) }
+}
 foreach ($output in $outputs) {
     $targetPath = Resolve-RepositoryPath -Root $root -RelativePath ([string]$output.RelativePath)
     $expectedText = ([string]$output.Text).TrimEnd([char[]]@("`r", "`n")) + "`n"
