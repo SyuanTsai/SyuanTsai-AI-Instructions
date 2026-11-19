@@ -2226,17 +2226,17 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         {Assert-GateTransitionInventory $root $entry $commit $true}|Should Throw 'inventory tree scope'
     }
 
-    # Scenario: A real exception set is unchanged, reduced, removed, expanded, mutated, malformed, duplicated, or stored under adversarial tree paths.
+    # Scenario: An exception set de-identified from Atlassian 2aca2db is unchanged, reduced, removed, expanded, mutated, malformed, duplicated, or stored under adversarial tree paths.
     # Purpose: Permit only set-semantic removal, ignore non-UTF-8 paths outside scope, and fail closed on scoped Unicode variants or unsafe data.
     It 'UnitT39_enforces_SkillSpector_exception_sets_as_shrink_only' {
         $expectedBlobs=[ordered]@{
-            'skillspector-exceptions.json'='4ff6d83ebddb132992613fefdb6e6cc96fc0e724'
-            'skillspector-exceptions/configure-bitbucket-api-access.baseline.json'='f649fd71be71e6b151c7d779bf3dbd6456da54c4'
-            'skillspector-exceptions/configure-confluence-api-access.baseline.json'='bf7061d2906ff8cc9e59abc8c2a3df1e9ac9c9c0'
-            'skillspector-exceptions/configure-jira-api-access.baseline.json'='df6fa05d272345da29dba313601821e196ea6d81'
-            'skillspector-exceptions/manage-confluence-docs-as-code.baseline.json'='fec156ad20b95e9342f941f50b9625e5e6305f28'
-            'skillspector-exceptions/publish-requirements-to-confluence.baseline.json'='3c302ad7f0653913835ea9e4116955ef4b9fe68e'
-            'skillspector-exceptions/review-bitbucket-pull-request.baseline.json'='a2f5acbbd1fd8bd4f2125af8ca1c6d3b4c7157c7'
+            'skillspector-exceptions.json'='e1c3304ab695faae74fa89c8ed2ea7d1d0523dee'
+            'skillspector-exceptions/configure-bitbucket-api-access.baseline.json'='ccc9dd0c6e4a4da3e3fe6fefbe6019c865a4b748'
+            'skillspector-exceptions/configure-confluence-api-access.baseline.json'='b71b96cc04df8b9e05c96c46552cae2042cbd0ff'
+            'skillspector-exceptions/configure-jira-api-access.baseline.json'='dcf69c14da968b32412dabc5fb0b609936fbbe92'
+            'skillspector-exceptions/manage-confluence-docs-as-code.baseline.json'='32d3009dd6db841f4fc7c459b9b6ff10cd561fab'
+            'skillspector-exceptions/publish-requirements-to-confluence.baseline.json'='7422405fc6fa29420f9e61786ca942f911661acf'
+            'skillspector-exceptions/review-bitbucket-pull-request.baseline.json'='7757758f064dabc9d3fa2731e636a5ca06a181c5'
         }
         foreach($entry in $expectedBlobs.GetEnumerator()){
             $actual=Get-SourceFixtureGitScalar $script:RepositoryRoot @('hash-object','--no-filters','--',(Join-Path $script:ExceptionFixtureConfigRoot $entry.Key))

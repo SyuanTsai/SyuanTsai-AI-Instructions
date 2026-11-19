@@ -149,7 +149,7 @@ if($TransitionFromLegacy){
         $general|Add-Member -NotePropertyName literalReferenceExemptions -NotePropertyValue @(
             for($index=0;$index-lt$deletedBaselines.Count;$index++){
                 [pscustomobject][ordered]@{
-                    file='config/skillspector-exceptions.json';blobOid='4ff6d83ebddb132992613fefdb6e6cc96fc0e724'
+                    file='config/skillspector-exceptions.json';blobOid='e1c3304ab695faae74fa89c8ed2ea7d1d0523dee'
                     line=36+($index*4);column=16;occurrenceOrdinal=1
                     targetPath="config/skillspector-exceptions/$($deletedBaselines[$index])"
                     reason='Fixture registry reference removed by the shrink-only conversion.'

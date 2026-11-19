@@ -11,7 +11,7 @@
     "fingerprintBytes": "committed Git blob bytes (LF, as stored in the repository); verify against an export made with core.autocrlf=false, because CRLF working-tree conversion changes the scanned content digest"
   },
   "approval": {
-    "approver": "SyuanTsai",
+    "approver": "fixture-approver",
     "approvedOn": "2026-11-09",
     "tracking": "SYP-416",
     "decision": "accepted-limited-risk",
@@ -74,7 +74,7 @@
       "redirectControl": "SKILL.md is documentation; actual authenticated requests are made by scripts/Test-BitbucketApiAccess.ps1. Test-BitbucketApiBase enforces HTTPS, exact api.bitbucket.org host, /2.0 path, and no user info/query/fragment. The validator sets -MaximumRedirection 0 for both Windows PowerShell 5.1 and PowerShell 7, normalizes every 3xx response as redirect-rejected, and fails closed without emitting credentials, Location, or request URI; tests/ApiAccessRedirect.Tests.ps1 verifies these controls.",
       "riskAssessment": "Limited to user-authorized read-only validation; redirects are rejected fail closed and only redacted status/category/message data is emitted. Re-review is required if the host/base, request paths, credentials, scopes, or transport implementation changes.",
       "compensatingControls": "Exact base validation, escaped workspace/repository identifiers, process-scoped secret preference, hidden token input, minimum read scopes, response-body suppression, Authorization cleanup, no-follow redirects, 3xx fail-closed normalization, redacted output, tests/ApiAccessRedirect.Tests.ps1 coverage, and fingerprint-bound review.",
-      "owner": "SyuanTsai",
+      "owner": "fixture-approver",
       "approvedOn": "2026-11-09"
     },
     {
@@ -94,7 +94,7 @@
       "redirectControl": "references/configuration.md is documentation; actual authenticated requests are made by scripts/Test-BitbucketApiAccess.ps1. Test-BitbucketApiBase enforces HTTPS, exact api.bitbucket.org host, /2.0 path, and no user info/query/fragment. The validator sets -MaximumRedirection 0 for both Windows PowerShell 5.1 and PowerShell 7, normalizes every 3xx response as redirect-rejected, and fails closed without emitting credentials, Location, or request URI; tests/ApiAccessRedirect.Tests.ps1 verifies these controls.",
       "riskAssessment": "Limited to user-authorized read-only validation; redirects are rejected fail closed and only redacted status/category/message data is emitted. Re-review is required if the host/base, request paths, credentials, scopes, or transport implementation changes.",
       "compensatingControls": "Exact base validation, escaped workspace/repository identifiers, process-scoped secret preference, hidden token input, minimum read scopes, response-body suppression, Authorization cleanup, no-follow redirects, 3xx fail-closed normalization, redacted output, tests/ApiAccessRedirect.Tests.ps1 coverage, and fingerprint-bound review.",
-      "owner": "SyuanTsai",
+      "owner": "fixture-approver",
       "approvedOn": "2026-11-09"
     },
     {
@@ -114,7 +114,7 @@
       "redirectControl": "scripts/Configure-BitbucketApiAccess.ps1 is configuration source; actual authenticated requests are made by scripts/Test-BitbucketApiAccess.ps1. Test-BitbucketApiBase enforces HTTPS, exact api.bitbucket.org host, /2.0 path, and no user info/query/fragment. The validator sets -MaximumRedirection 0 for both Windows PowerShell 5.1 and PowerShell 7, normalizes every 3xx response as redirect-rejected, and fails closed without emitting credentials, Location, or request URI; tests/ApiAccessRedirect.Tests.ps1 verifies these controls.",
       "riskAssessment": "Limited to user-authorized read-only validation; redirects are rejected fail closed and only redacted status/category/message data is emitted. Re-review is required if the host/base, request paths, credentials, scopes, or transport implementation changes.",
       "compensatingControls": "Exact base validation, escaped workspace/repository identifiers, process-scoped secret preference, hidden token input, minimum read scopes, response-body suppression, Authorization cleanup, no-follow redirects, 3xx fail-closed normalization, redacted output, tests/ApiAccessRedirect.Tests.ps1 coverage, and fingerprint-bound review.",
-      "owner": "SyuanTsai",
+      "owner": "fixture-approver",
       "approvedOn": "2026-11-09"
     },
     {
@@ -134,7 +134,7 @@
       "redirectControl": "scripts/Configure-BitbucketApiAccess.ps1 is configuration source; actual authenticated requests are made by scripts/Test-BitbucketApiAccess.ps1. Test-BitbucketApiBase enforces HTTPS, exact api.bitbucket.org host, /2.0 path, and no user info/query/fragment. The validator sets -MaximumRedirection 0 for both Windows PowerShell 5.1 and PowerShell 7, normalizes every 3xx response as redirect-rejected, and fails closed without emitting credentials, Location, or request URI; tests/ApiAccessRedirect.Tests.ps1 verifies these controls.",
       "riskAssessment": "Limited to user-authorized read-only validation; redirects are rejected fail closed and only redacted status/category/message data is emitted. Re-review is required if the host/base, request paths, credentials, scopes, or transport implementation changes.",
       "compensatingControls": "Exact base validation, escaped workspace/repository identifiers, process-scoped secret preference, hidden token input, minimum read scopes, response-body suppression, Authorization cleanup, no-follow redirects, 3xx fail-closed normalization, redacted output, tests/ApiAccessRedirect.Tests.ps1 coverage, and fingerprint-bound review.",
-      "owner": "SyuanTsai",
+      "owner": "fixture-approver",
       "approvedOn": "2026-11-09"
     },
     {
@@ -154,7 +154,7 @@
       "redirectControl": "SKILL.md documents the exact scoped base; actual authenticated reads are in scripts/Test-ConfluenceApiAccess.ps1. Test-ConfluenceApiBase requires the exact api.atlassian.com/ex/confluence/{cloudId} base. The validator sets -MaximumRedirection 0 for both Windows PowerShell 5.1 and PowerShell 7, normalizes every 3xx response as redirect-rejected, and fails closed without emitting credentials, Location, or request URI; tests/ApiAccessRedirect.Tests.ps1 verifies these controls.",
       "riskAssessment": "Limited to tenant discovery and user-authorized read-only validation; redirects are rejected fail closed and only redacted status/category/message data is emitted. Re-review is required for any destination, path, credential, scope, or transport change.",
       "compensatingControls": "Validated HTTPS *.atlassian.net site, GUID Cloud ID, exact scoped API base, safe relative /wiki/api/ paths, tenant identity check before authenticated reads, minimum scopes, status-only output, Authorization cleanup, no-follow redirects, 3xx fail-closed normalization, redaction, tests/ApiAccessRedirect.Tests.ps1 coverage, and fingerprint binding.",
-      "owner": "SyuanTsai",
+      "owner": "fixture-approver",
       "approvedOn": "2026-11-09"
     },
     {
@@ -174,7 +174,7 @@
       "redirectControl": "references/configuration.md documents the exact scoped base; actual authenticated reads are in scripts/Test-ConfluenceApiAccess.ps1. Test-ConfluenceApiBase requires the exact api.atlassian.com/ex/confluence/{cloudId} base. The validator sets -MaximumRedirection 0 for both Windows PowerShell 5.1 and PowerShell 7, normalizes every 3xx response as redirect-rejected, and fails closed without emitting credentials, Location, or request URI; tests/ApiAccessRedirect.Tests.ps1 verifies these controls.",
       "riskAssessment": "Limited to tenant discovery and user-authorized read-only validation; redirects are rejected fail closed and only redacted status/category/message data is emitted. Re-review is required for any destination, path, credential, scope, or transport change.",
       "compensatingControls": "Validated HTTPS *.atlassian.net site, GUID Cloud ID, exact scoped API base, safe relative /wiki/api/ paths, tenant identity check before authenticated reads, minimum scopes, status-only output, Authorization cleanup, no-follow redirects, 3xx fail-closed normalization, redaction, tests/ApiAccessRedirect.Tests.ps1 coverage, and fingerprint binding.",
-      "owner": "SyuanTsai",
+      "owner": "fixture-approver",
       "approvedOn": "2026-11-09"
     },
     {
@@ -194,7 +194,7 @@
       "redirectControl": "scripts/Configure-ConfluenceApiAccess.ps1 derives or validates the exact scoped base; actual authenticated reads are in scripts/Test-ConfluenceApiAccess.ps1. Test-ConfluenceApiBase requires the exact api.atlassian.com/ex/confluence/{cloudId} base. The validator sets -MaximumRedirection 0 for both Windows PowerShell 5.1 and PowerShell 7, normalizes every 3xx response as redirect-rejected, and fails closed without emitting credentials, Location, or request URI; tests/ApiAccessRedirect.Tests.ps1 verifies these controls.",
       "riskAssessment": "Limited to tenant discovery and user-authorized read-only validation; redirects are rejected fail closed and only redacted status/category/message data is emitted. Re-review is required for any destination, path, credential, scope, or transport change.",
       "compensatingControls": "Validated HTTPS *.atlassian.net site, GUID Cloud ID, exact scoped API base, safe relative /wiki/api/ paths, tenant identity check before authenticated reads, minimum scopes, status-only output, Authorization cleanup, no-follow redirects, 3xx fail-closed normalization, redaction, tests/ApiAccessRedirect.Tests.ps1 coverage, and fingerprint binding.",
-      "owner": "SyuanTsai",
+      "owner": "fixture-approver",
       "approvedOn": "2026-11-09"
     },
     {
@@ -214,7 +214,7 @@
       "redirectControl": "scripts/Test-ConfluenceApiAccess.ps1 derives or validates the exact scoped base; actual authenticated reads are in scripts/Test-ConfluenceApiAccess.ps1. Test-ConfluenceApiBase requires the exact api.atlassian.com/ex/confluence/{cloudId} base. The validator sets -MaximumRedirection 0 for both Windows PowerShell 5.1 and PowerShell 7, normalizes every 3xx response as redirect-rejected, and fails closed without emitting credentials, Location, or request URI; tests/ApiAccessRedirect.Tests.ps1 verifies these controls.",
       "riskAssessment": "Limited to tenant discovery and user-authorized read-only validation; redirects are rejected fail closed and only redacted status/category/message data is emitted. Re-review is required for any destination, path, credential, scope, or transport change.",
       "compensatingControls": "Validated HTTPS *.atlassian.net site, GUID Cloud ID, exact scoped API base, safe relative /wiki/api/ paths, tenant identity check before authenticated reads, minimum scopes, status-only output, Authorization cleanup, no-follow redirects, 3xx fail-closed normalization, redaction, tests/ApiAccessRedirect.Tests.ps1 coverage, and fingerprint binding.",
-      "owner": "SyuanTsai",
+      "owner": "fixture-approver",
       "approvedOn": "2026-11-09"
     },
     {
@@ -234,7 +234,7 @@
       "redirectControl": "SKILL.md documents the exact scoped base; actual authenticated reads are in scripts/Test-JiraApiAccess.ps1. Test-CanonicalJiraApiBaseUrl requires api.atlassian.com/ex/jira/{cloudId}. The validator sets -MaximumRedirection 0 for both Windows PowerShell 5.1 and PowerShell 7, normalizes every 3xx response as redirect-rejected, and fails closed without emitting credentials, Location, or request URI; tests/ApiAccessRedirect.Tests.ps1 verifies these controls.",
       "riskAssessment": "Limited to user-authorized read-only readiness checks; redirects are rejected fail closed and only redacted status/category/message data is emitted. Re-review is required for any destination, endpoint, credential, scope, or transport change.",
       "compensatingControls": "Canonical HTTPS tenant validation, GUID Cloud ID match before credentials, exact scoped API base, escaped issue/JQL inputs with length limits, GET-only checks, minimum read scopes, response-body suppression, Authorization cleanup, no-follow redirects, 3xx fail-closed normalization, redacted output, tests/ApiAccessRedirect.Tests.ps1 coverage, and fingerprint binding.",
-      "owner": "SyuanTsai",
+      "owner": "fixture-approver",
       "approvedOn": "2026-11-09"
     },
     {
@@ -254,7 +254,7 @@
       "redirectControl": "references/configuration.md documents the exact scoped base; actual authenticated reads are in scripts/Test-JiraApiAccess.ps1. Test-CanonicalJiraApiBaseUrl requires api.atlassian.com/ex/jira/{cloudId}. The validator sets -MaximumRedirection 0 for both Windows PowerShell 5.1 and PowerShell 7, normalizes every 3xx response as redirect-rejected, and fails closed without emitting credentials, Location, or request URI; tests/ApiAccessRedirect.Tests.ps1 verifies these controls.",
       "riskAssessment": "Limited to user-authorized read-only readiness checks; redirects are rejected fail closed and only redacted status/category/message data is emitted. Re-review is required for any destination, endpoint, credential, scope, or transport change.",
       "compensatingControls": "Canonical HTTPS tenant validation, GUID Cloud ID match before credentials, exact scoped API base, escaped issue/JQL inputs with length limits, GET-only checks, minimum read scopes, response-body suppression, Authorization cleanup, no-follow redirects, 3xx fail-closed normalization, redacted output, tests/ApiAccessRedirect.Tests.ps1 coverage, and fingerprint binding.",
-      "owner": "SyuanTsai",
+      "owner": "fixture-approver",
       "approvedOn": "2026-11-09"
     },
     {
@@ -274,7 +274,7 @@
       "redirectControl": "references/configuration.md documents the exact scoped base; actual authenticated reads are in scripts/Test-JiraApiAccess.ps1. Test-CanonicalJiraApiBaseUrl requires api.atlassian.com/ex/jira/{cloudId}. The validator sets -MaximumRedirection 0 for both Windows PowerShell 5.1 and PowerShell 7, normalizes every 3xx response as redirect-rejected, and fails closed without emitting credentials, Location, or request URI; tests/ApiAccessRedirect.Tests.ps1 verifies these controls.",
       "riskAssessment": "Limited to user-authorized read-only readiness checks; redirects are rejected fail closed and only redacted status/category/message data is emitted. Re-review is required for any destination, endpoint, credential, scope, or transport change.",
       "compensatingControls": "Canonical HTTPS tenant validation, GUID Cloud ID match before credentials, exact scoped API base, escaped issue/JQL inputs with length limits, GET-only checks, minimum read scopes, response-body suppression, Authorization cleanup, no-follow redirects, 3xx fail-closed normalization, redacted output, tests/ApiAccessRedirect.Tests.ps1 coverage, and fingerprint binding.",
-      "owner": "SyuanTsai",
+      "owner": "fixture-approver",
       "approvedOn": "2026-11-09"
     },
     {
@@ -294,7 +294,7 @@
       "redirectControl": "scripts/Configure-JiraApiAccess.ps1 derives or validates the exact scoped base; actual authenticated reads are in scripts/Test-JiraApiAccess.ps1. Test-CanonicalJiraApiBaseUrl requires api.atlassian.com/ex/jira/{cloudId}. The validator sets -MaximumRedirection 0 for both Windows PowerShell 5.1 and PowerShell 7, normalizes every 3xx response as redirect-rejected, and fails closed without emitting credentials, Location, or request URI; tests/ApiAccessRedirect.Tests.ps1 verifies these controls.",
       "riskAssessment": "Limited to user-authorized read-only readiness checks; redirects are rejected fail closed and only redacted status/category/message data is emitted. Re-review is required for any destination, endpoint, credential, scope, or transport change.",
       "compensatingControls": "Canonical HTTPS tenant validation, GUID Cloud ID match before credentials, exact scoped API base, escaped issue/JQL inputs with length limits, GET-only checks, minimum read scopes, response-body suppression, Authorization cleanup, no-follow redirects, 3xx fail-closed normalization, redacted output, tests/ApiAccessRedirect.Tests.ps1 coverage, and fingerprint binding.",
-      "owner": "SyuanTsai",
+      "owner": "fixture-approver",
       "approvedOn": "2026-11-09"
     },
     {
@@ -314,7 +314,7 @@
       "redirectControl": "scripts/Test-JiraApiAccess.ps1 derives or validates the exact scoped base; actual authenticated reads are in scripts/Test-JiraApiAccess.ps1. Test-CanonicalJiraApiBaseUrl requires api.atlassian.com/ex/jira/{cloudId}. The validator sets -MaximumRedirection 0 for both Windows PowerShell 5.1 and PowerShell 7, normalizes every 3xx response as redirect-rejected, and fails closed without emitting credentials, Location, or request URI; tests/ApiAccessRedirect.Tests.ps1 verifies these controls.",
       "riskAssessment": "Limited to user-authorized read-only readiness checks; redirects are rejected fail closed and only redacted status/category/message data is emitted. Re-review is required for any destination, endpoint, credential, scope, or transport change.",
       "compensatingControls": "Canonical HTTPS tenant validation, GUID Cloud ID match before credentials, exact scoped API base, escaped issue/JQL inputs with length limits, GET-only checks, minimum read scopes, response-body suppression, Authorization cleanup, no-follow redirects, 3xx fail-closed normalization, redacted output, tests/ApiAccessRedirect.Tests.ps1 coverage, and fingerprint binding.",
-      "owner": "SyuanTsai",
+      "owner": "fixture-approver",
       "approvedOn": "2026-11-09"
     },
     {
@@ -334,7 +334,7 @@
       "redirectControl": "SKILL.md is documentation; actual requests use New-ConfluenceReadInvoker/New-ConfluenceOperationInvoker in scripts/ConfluenceTransport.psm1. Test-ConfluenceApiBaseIdentity enforces HTTPS, exact api.atlassian.com:443 and Cloud ID path, Invoke-ConfluenceWireRead sets HttpClientHandler.AllowAutoRedirect = false, and the one permitted signed attachment redirect is separately validated and sent without Authorization.",
       "riskAssessment": "Authorized content and attachments leave the repository for a selected Confluence tenant; stale targets, excessive payloads, or credential forwarding are controlled, and any endpoint, signed-download policy, or operation expansion requires re-review.",
       "compensatingControls": "Exact tenant/base identity, preview plus digest-bound human authorization, fresh drift checks, bounded methods/paths/body sizes/timeouts, disabled automatic redirects, no auth on validated signed downloads, readback, redaction, journals, and fingerprint binding.",
-      "owner": "SyuanTsai",
+      "owner": "fixture-approver",
       "approvedOn": "2026-11-09"
     },
     {
@@ -354,7 +354,7 @@
       "redirectControl": "references/confluence-cloud-api.md is documentation and does not implement a transport or redirect check. It requires the exact api.atlassian.com/ex/confluence/{cloudId} base and routes setup through configure-confluence-api-access, but redirect rejection must be enforced by the approved connector or REST executor and is not enforced in this file.",
       "riskAssessment": "Publishing can transmit sensitive requirements and mutate Confluence; the documentation has no executable host/redirect enforcement, so the operator must verify the chosen executor and exact destination, and any executor or endpoint change requires re-review.",
       "compensatingControls": "Connector preference, exact site/space/page resolution, scoped-token minimum permissions, preview and explicit target/content authorization, current/draft comparison, optimistic version checks, post-write readback, credential redaction requirements, and fingerprint binding.",
-      "owner": "SyuanTsai",
+      "owner": "fixture-approver",
       "approvedOn": "2026-11-09"
     },
     {
@@ -374,7 +374,7 @@
       "redirectControl": "references/confluence-cloud-api.md is documentation and does not implement a transport or redirect check. It requires the exact api.atlassian.com/ex/confluence/{cloudId} base and routes setup through configure-confluence-api-access, but redirect rejection must be enforced by the approved connector or REST executor and is not enforced in this file.",
       "riskAssessment": "Publishing can transmit sensitive requirements and mutate Confluence; the documentation has no executable host/redirect enforcement, so the operator must verify the chosen executor and exact destination, and any executor or endpoint change requires re-review.",
       "compensatingControls": "Connector preference, exact site/space/page resolution, scoped-token minimum permissions, preview and explicit target/content authorization, current/draft comparison, optimistic version checks, post-write readback, credential redaction requirements, and fingerprint binding.",
-      "owner": "SyuanTsai",
+      "owner": "fixture-approver",
       "approvedOn": "2026-11-09"
     },
     {
@@ -394,7 +394,7 @@
       "redirectControl": "Assert-ApiUri in scripts/Invoke-BitbucketReviewActions.ps1 requires HTTPS, exact api.bitbucket.org:443, no user info or fragment, and the exact expected path; its HttpClientHandler sets AllowAutoRedirect = false. Pagination next links are revalidated and bounded before reuse.",
       "riskAssessment": "Network and mutation capability exists without frontmatter tool scope, but it remains inside a script that defaults to preview and requires exact user authorization for remote actions. Central approval atlassian-bitbucket-review-7e8228c retains LP3 as historical-context; this repository record neither replaces that approval nor marks LP3 fixed.",
       "compensatingControls": "Preview by default, exact target/action authorization, plan and commit validation, exact API URI enforcement, disabled redirects, bounded pagination/retries, read-after-write verification, credential-free receipts, redaction, fingerprint binding, and preservation of the existing central internal-use decision.",
-      "owner": "SyuanTsai",
+      "owner": "fixture-approver",
       "approvedOn": "2026-11-09"
     },
     {
@@ -414,7 +414,7 @@
       "redirectControl": "Assert-ApiUri in scripts/Invoke-BitbucketReviewActions.ps1 requires HTTPS, exact api.bitbucket.org:443, no user info or fragment, and the exact expected path; its HttpClientHandler sets AllowAutoRedirect = false. Pagination next links are revalidated and bounded before reuse.",
       "riskAssessment": "Authenticated reads and explicitly authorized review mutations affect the selected PR; target drift, replay, redirects, ambiguous commit identity, and uncertain writes are fail-closed, and scope or endpoint expansion requires re-review.",
       "compensatingControls": "Preview by default, exact target/action authorization, plan and commit validation, disabled redirects, bounded pagination/retries, read-after-write verification, credential-free receipts, redaction, least scopes, and fingerprint binding.",
-      "owner": "SyuanTsai",
+      "owner": "fixture-approver",
       "approvedOn": "2026-11-09"
     },
     {
@@ -434,7 +434,7 @@
       "redirectControl": "Assert-ApiUri in scripts/Invoke-BitbucketReviewActions.ps1 requires HTTPS, exact api.bitbucket.org:443, no user info or fragment, and the exact expected path; its HttpClientHandler sets AllowAutoRedirect = false. Pagination next links are revalidated and bounded before reuse.",
       "riskAssessment": "Authenticated reads and explicitly authorized review mutations affect the selected PR; target drift, replay, redirects, ambiguous commit identity, and uncertain writes are fail-closed, and scope or endpoint expansion requires re-review.",
       "compensatingControls": "Preview by default, exact target/action authorization, plan and commit validation, disabled redirects, bounded pagination/retries, read-after-write verification, credential-free receipts, redaction, least scopes, and fingerprint binding.",
-      "owner": "SyuanTsai",
+      "owner": "fixture-approver",
       "approvedOn": "2026-11-09"
     }
   ]
