@@ -2563,6 +2563,23 @@ Describe 'USER Claude managed bootstrap section' {
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be ([Convert]::ToBase64String($expected))
     }
 
+    # Scenario: A managed CLAUDE.md section contains a spaced thematic break before a three-space-indented personal H2 suffix.
+    # Purpose: Keep the thematic break out of list parsing and preserve the complete personal suffix byte-for-byte.
+    It 'InterT116d_preserves_personal_bytes_after_a_thematic_break_in_CLAUDE' {
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-thematic-break-fixture')
+        $userHome=Join-Path $TestDrive 'claude-thematic-break-user';$claudePath=Join-Path $userHome '.claude/CLAUDE.md'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $claudePath)|Out-Null
+        $utf8=[Text.UTF8Encoding]::new($false)
+        [byte[]]$oldSection=$utf8.GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`n* * *`r`n")
+        [byte[]]$suffix=$utf8.GetBytes("   ## Personal Tail`r`nKEEP  `r`n")
+        [IO.File]::WriteAllBytes($claudePath,[byte[]]@($oldSection+$suffix))
+        [byte[]]$expected=[byte[]]@([byte[]]$desired.InstructionsArtifact.sectionBytes+$suffix)
+
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be ([Convert]::ToBase64String($expected))
+    }
+
     # Scenario: A later valid v3/v5 configuration removes user-claude after the managed section already exists.
     # Purpose: Stop managing the artifact without deleting or rewriting the existing personal CLAUDE.md section.
     It 'InterT117_preserves_existing_CLAUDE_when_user_claude_is_cancelled' {

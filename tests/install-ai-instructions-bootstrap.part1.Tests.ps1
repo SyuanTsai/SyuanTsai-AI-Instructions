@@ -1162,6 +1162,22 @@ finally {
 
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentsPath))|Should Be ([Convert]::ToBase64String($expected))
     }
+
+    # Scenario: A managed AGENTS.md section contains a spaced thematic break before a two-space-indented personal H2 suffix.
+    # Purpose: Apply thematic-break precedence before list parsing and retain the complete personal suffix byte-for-byte.
+    It 'InterT99c_preserves_personal_bytes_after_a_thematic_break_in_AGENTS' {
+        New-Item -ItemType Directory -Force -Path $codexHome|Out-Null
+        $agentsPath=Join-Path $codexHome 'AGENTS.md';$utf8=[Text.UTF8Encoding]::new($false)
+        [byte[]]$oldSection=$utf8.GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`n* * *`r`n")
+        [byte[]]$suffix=$utf8.GetBytes("  ## Personal Tail`r`nKEEP  `r`n")
+        [IO.File]::WriteAllBytes($agentsPath,[byte[]]@($oldSection+$suffix))
+        [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $repositoryRoot 'instructions/common/bootstrap-section.md'))
+        [byte[]]$expected=[byte[]]@($authority+$suffix)
+
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentsPath))|Should Be ([Convert]::ToBase64String($expected))
+    }
     }
 
 }

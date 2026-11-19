@@ -447,6 +447,12 @@ function Test-AiInstructionsMarkdownHtmlBlockEnd {
     return $Text.IndexOf([string]$Block.EndText,$comparison) -ge 0
 }
 
+function Test-AiInstructionsMarkdownThematicBreak {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string] $Text)
+
+    return [regex]::IsMatch($Text,'^ {0,3}(?:(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,})$')
+}
+
 function Test-AiInstructionsMarkdownParagraphContinuation {
     param([Parameter(Mandatory = $true)][AllowEmptyString()][string] $Text,[Parameter(Mandatory = $true)][int] $Offset)
 
@@ -590,6 +596,7 @@ function Get-InstallerBootstrapSectionContent {
                 }
                 $currentKey = (@($containers | ForEach-Object { [string]$_.Id }) -join '/')
                 $paragraphOpenHere = $null -ne $paragraphContainerKey -and $paragraphContainerKey -ceq $currentKey
+                if (Test-AiInstructionsMarkdownThematicBreak -Text $lineText.Substring($offset)) { break }
                 $listMarker = Get-AiInstructionsMarkdownListMarker -Text $lineText -Offset $offset -InterruptsParagraph $paragraphOpenHere
                 if ($null -eq $listMarker) { break }
                 $nextContainerId++
@@ -676,7 +683,7 @@ function Get-InstallerBootstrapSectionContent {
             continue
         }
 
-        $isThematicBreak = [regex]::IsMatch($contentText,'^ {0,3}(?:(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,})$')
+        $isThematicBreak = Test-AiInstructionsMarkdownThematicBreak -Text $contentText
         if ($isThematicBreak) {
             $paragraphStart = $null
             $paragraphContainerKey = $null
