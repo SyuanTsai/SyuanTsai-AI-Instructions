@@ -3962,8 +3962,8 @@ exit /b %errorlevel%
         ($errorOutput-join[Environment]::NewLine)|Should Not Match 'target repository has no commit'
     }
 
-    # Scenario: Existing UTF-8 USER instructions vary encoding details and place valid or invalid H2-like lines around fenced code after the managed section.
-    # Purpose: Preserve every byte outside the first valid unfenced H2 boundary while installing canonical LF/no-BOM authority bytes with deterministic junctions.
+    # Scenario: Existing UTF-8 USER instructions vary encoding details and place ATX/Setext headings around fenced or indented code.
+    # Purpose: Preserve every byte outside the first valid CommonMark H2 boundary while installing canonical LF/no-BOM authority bytes with deterministic junctions.
     It 'UnitT232_merges_the_bootstrap_section_without_normalizing_personal_bytes' -TestCases @(
         @{Name='empty';Existing=[byte[]]@();Prefix=[byte[]]@();Suffix=[byte[]]@()},
         @{Name='bom-only';Existing=[byte[]]@(0xEF,0xBB,0xBF);Prefix=[byte[]]@(0xEF,0xBB,0xBF);Suffix=[byte[]]@()},
@@ -3983,7 +3983,14 @@ exit /b %errorlevel%
         @{Name='ignore-four-space-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n    ## Code`nnot a boundary`n## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
         @{Name='ignore-tab-indented-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`t## Code`nnot a boundary`n## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
         @{Name='ignore-H3';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n### Child`nnot a boundary`n## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
-        @{Name='ignore-fenced-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n~~~text`n## fenced heading`n~~~~`n  ## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("  ## Tail`nkeep`n")}
+        @{Name='ignore-fenced-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n~~~text`n## fenced heading`n~~~~`n  ## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("  ## Tail`nkeep`n")},
+        @{Name='append-only-backtick-fenced-managed-heading';Existing=[Text.UTF8Encoding]::new($false).GetBytes((@('# Personal','```md','## Repository Instructions Bootstrap','example','```')-join"`n")+"`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes((@('# Personal','```md','## Repository Instructions Bootstrap','example','```','')-join"`n")+"`n");Suffix=[byte[]]@()},
+        @{Name='append-only-tilde-fenced-managed-heading';Existing=[Text.UTF8Encoding]::new($false).GetBytes("# Personal`n~~~md`n## Repository Instructions Bootstrap`nexample`n~~~~`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes("# Personal`n~~~md`n## Repository Instructions Bootstrap`nexample`n~~~~`n`n");Suffix=[byte[]]@()},
+        @{Name='replace-real-section-after-fenced-example';Existing=[Text.UTF8Encoding]::new($false).GetBytes((@('```md','## Repository Instructions Bootstrap','example','``` ','## Repository Instructions Bootstrap','old','## Tail','keep')-join"`n")+"`n");Prefix=[Text.UTF8Encoding]::new($false).GetBytes((@('```md','## Repository Instructions Bootstrap','example','``` ')-join"`n")+"`n");Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")},
+        @{Name='replace-before-multiline-setext-H2';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`nPersonal notes`r`ncontinued title`r`n-------------`r`nKEEP  `r`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("Personal notes`r`ncontinued title`r`n-------------`r`nKEEP  `r`n")},
+        @{Name='ignore-blank-then-thematic-break';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`n---`nmanaged body continues`n");Prefix=[byte[]]@();Suffix=[byte[]]@()},
+        @{Name='ignore-fenced-ATX-and-Setext';Existing=[Text.UTF8Encoding]::new($false).GetBytes((@('## Repository Instructions Bootstrap','old','```md','Fenced title','---','## Fenced ATX','``` ','Personal tail','---','KEEP')-join"`n")+"`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("Personal tail`n---`nKEEP`n")},
+        @{Name='ignore-indented-code-managed-heading';Existing=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n`n    ## Repository Instructions Bootstrap`n    example`n## Tail`nkeep`n");Prefix=[byte[]]@();Suffix=[Text.UTF8Encoding]::new($false).GetBytes("## Tail`nkeep`n")}
     ) {
         param($Name,$Existing,$Prefix,$Suffix)
         [byte[]]$section=[IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'instructions/common/bootstrap-section.md'))
@@ -4006,7 +4013,9 @@ exit /b %errorlevel%
         @{Name='duplicate heading';Bytes=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n## Repository Instructions Bootstrap`nold`n");Message='duplicate'},
         @{Name='ambiguous heading';Bytes=[Text.UTF8Encoding]::new($false).GetBytes(" ## Repository Instructions Bootstrap`nold`n");Message='ambiguous'},
         @{Name='bare CR';Bytes=[Text.UTF8Encoding]::new($false).GetBytes("personal`rold");Message='bare CR'},
-        @{Name='unclosed fenced code';Bytes=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n~~~`n## fenced heading`n");Message='unclosed fenced code block'}
+        @{Name='unclosed fenced code';Bytes=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n~~~`n## fenced heading`n");Message='unclosed fenced code block'},
+        @{Name='unclosed fence before any real section';Bytes=[Text.UTF8Encoding]::new($false).GetBytes((@('```md','## Repository Instructions Bootstrap','example')-join"`n")+"`n");Message='unclosed fenced code block'},
+        @{Name='ambiguous Setext paragraph after list';Bytes=[Text.UTF8Encoding]::new($false).GetBytes("## Repository Instructions Bootstrap`nold`n- list item`ncontinued paragraph`n---`nKEEP`n");Message='Setext H2 paragraph boundary'}
     ) {
         param($Name,$Bytes,$Message)
         [byte[]]$section=[IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'instructions/common/bootstrap-section.md'))

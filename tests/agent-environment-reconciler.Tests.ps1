@@ -160,6 +160,25 @@ function New-TestProjectionDesiredState {
     }
 }
 
+function New-TestProjectionSourceArchive {
+    param(
+        [Parameter(Mandatory=$true)][string]$PayloadPath,
+        [Parameter(Mandatory=$true)][string]$ArchivePath
+    )
+    Add-Type -AssemblyName System.IO.Compression
+    if([IO.File]::Exists($ArchivePath)){[IO.File]::Delete($ArchivePath)}
+    $stream=[IO.File]::Open($ArchivePath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+    try{
+        $archive=New-Object IO.Compression.ZipArchive($stream,[IO.Compression.ZipArchiveMode]::Create,$false)
+        try{
+            $entry=$archive.CreateEntry('agent-skills-0123456789abcdef0123456789abcdef01234567/skills/work-with-jira/SKILL.md',[IO.Compression.CompressionLevel]::Optimal)
+            $input=[IO.File]::OpenRead($PayloadPath);$output=$entry.Open()
+            try{$input.CopyTo($output)}finally{$output.Dispose();$input.Dispose()}
+        }finally{$archive.Dispose()}
+    }finally{$stream.Dispose()}
+    return $ArchivePath
+}
+
 function Set-TestProjectionDesiredPayload {
     param([Parameter(Mandatory=$true)][object]$Desired,[Parameter(Mandatory=$true)][string]$Text)
     $stagePath=[string]$Desired.Files[0].stagedPath
@@ -880,7 +899,6 @@ $module=Get-Module agent-environment-reconciler
             Test-Path -LiteralPath (Join-Path $retained[0].FullName 'file-1.stage')|Should Be $true
         }
     }
-
 
     if([Environment]::OSVersion.Platform-eq[PlatformID]::Win32NT){
         # Scenario: A non-admin Windows process prepositions file-1.stage as a directory junction to an external directory before the first journal is durable.
@@ -2385,6 +2403,48 @@ Describe 'USER Claude managed bootstrap section' {
         {Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome (Join-Path $TestDrive 'claude-gate-user') -Mode VerifyOnly|Out-Null}|Should Not Throw
     }
 
+    # Scenario: A legal v3/v5 runtime resolves the selected Skill from a hash-pinned local source archive through the production desired-state planner.
+    # Purpose: Exercise real archive acquisition, projection mapping, manifest construction, authority binding, Apply, and current without a planner stub or bypass.
+    It 'InterT111_plans_and_applies_a_complete_v3v5_state_through_the_production_desired_state_path' {
+        $fixture=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-production-planner-fixture')
+        Set-TestProjectionDesiredPayload -Desired $fixture -Text "---`nname: work-with-jira`ndescription: production planner fixture`n---`n`n# work-with-jira`n"
+        $archivePath=Join-Path $TestDrive 'claude-production-planner-source.zip'
+        New-TestProjectionSourceArchive -PayloadPath ([string]$fixture.Files[0].stagedPath) -ArchivePath $archivePath|Out-Null
+        $fixture.Lock.sources[0].archiveSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
+        [byte[]]$lockBytes=[Text.UTF8Encoding]::new($false).GetBytes(($fixture.Lock|ConvertTo-Json -Depth 20)+"`n")
+        [IO.File]::WriteAllBytes((Join-Path $fixture.RuntimeRoot 'catalog/skills-catalog-lock.json'),$lockBytes)
+        $platformModule=Import-Module (Join-Path $fixture.RuntimeRoot 'platform-runtime.psd1') -Force -PassThru
+        $receipt=&$platformModule {Get-PlatformCapabilities -Required @()}
+        $bundle=New-TestAiInstructionsRuntimeBundleV3 -RuntimeRoot $fixture.RuntimeRoot -Repository ([string]$fixture.Manifest.catalogRepository) -Commit ([string]$fixture.Manifest.catalogCommit) -Acquisition git-checkout -CapabilityReceipt $receipt
+        $configuration=$fixture.GateContext.configuration
+        $gate=Assert-UserProjectionRuntimeGate -Bundle $bundle -Configuration $configuration -RuntimeRoot $fixture.RuntimeRoot -CapabilityReceipt $receipt
+
+        $desired=Get-UserSkillsDesiredState -RuntimeRoot $fixture.RuntimeRoot -Configuration $configuration -CatalogRepository ([string]$bundle.repository) -CatalogCommit ([string]$bundle.commit) -WorkingRoot (Join-Path $TestDrive 'claude-production-planner-work') -GateContext $gate -LocalArchiveOverrides @{'agent-skills'=$archivePath}
+
+        [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $script:RepositoryRoot 'instructions/common/bootstrap-section.md'))
+        [Convert]::ToBase64String([byte[]]$desired.InstructionsArtifact.sectionBytes)|Should Be ([Convert]::ToBase64String($authority))
+        (@($desired.ProjectionIds|Sort-Object)-join',')|Should Be 'user-agents,user-claude,user-copilot'
+        $desired.Manifest.schemaVersion|Should Be 3
+        (@($desired.Manifest.projections|Sort-Object)-join',')|Should Be 'user-agents,user-claude,user-copilot'
+        @($desired.Files).Count|Should Be 3
+        @($desired.Manifest.files).Count|Should Be 3
+        [string[]]$expectedTargets=@('.agents/skills/work-with-jira/SKILL.md','.claude/skills/work-with-jira/SKILL.md','.copilot/skills/work-with-jira/SKILL.md')
+        foreach($relative in $expectedTargets){
+            @($desired.Manifest.files|Where-Object targetPath -ceq $relative).Count|Should Be 1
+        }
+
+        $userHome=Join-Path $TestDrive 'claude-production-planner-user'
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $userHome '.claude/CLAUDE.md')))|Should Be ([Convert]::ToBase64String($authority))
+        $publishedManifest=Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $userHome '.agents/catalog-skills.manifest.json')|ConvertFrom-Json
+        $publishedManifest.schemaVersion|Should Be 3
+        $publishedManifest.lockSha256|Should Be $desired.Manifest.lockSha256
+        (@($publishedManifest.projections|Sort-Object)-join',')|Should Be 'user-agents,user-claude,user-copilot'
+        @($publishedManifest.files).Count|Should Be 3
+        (@($publishedManifest.files.targetPath|Sort-Object)-join',')|Should Be (($expectedTargets|Sort-Object)-join',')
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'current'
+    }
+
     # Scenario: USER home has no .claude directory when a verified v3/v5 desired state first selects user-claude.
     # Purpose: Publish the canonical authority bytes through the same USER transaction while keeping the managed manifest inventory Skills-only.
     It 'InterT112_creates_CLAUDE_from_exact_authority_bytes_without_manifest_file_ownership' {
@@ -2460,6 +2520,25 @@ Describe 'USER Claude managed bootstrap section' {
         [byte[]]$suffix=$utf8.GetBytes("   ## Personal Tail`r`nvalue  `r`n")
         [IO.File]::WriteAllBytes($claudePath,[byte[]]@($prefix+$suffix))
         [byte[]]$expected=[byte[]]@($utf8.GetBytes("# Personal`r`nkeep`r`n")+[byte[]]$desired.InstructionsArtifact.sectionBytes+$suffix)
+
+        (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
+
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be ([Convert]::ToBase64String($expected))
+    }
+
+
+    # Scenario: Personal CLAUDE.md contains a fenced managed-heading example before the real section and a Setext H2 suffix after it.
+    # Purpose: Ignore the fenced example, replace the one real section, and retain the Setext paragraph and all surrounding bytes exactly.
+    It 'InterT116b_preserves_fenced_examples_and_a_Setext_CLAUDE_boundary' {
+        $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-fenced-setext-fixture')
+        $userHome=Join-Path $TestDrive 'claude-fenced-setext-user';$claudePath=Join-Path $userHome '.claude/CLAUDE.md'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $claudePath)|Out-Null
+        $utf8=[Text.UTF8Encoding]::new($false)
+        [byte[]]$personalPrefix=$utf8.GetBytes("# Personal`r`n~~~md`r`n## Repository Instructions Bootstrap`r`nexample`r`n~~~~`r`n")
+        [byte[]]$oldSection=$utf8.GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`n")
+        [byte[]]$suffix=$utf8.GetBytes("Personal notes`r`n--------------`r`nKEEP  `r`n")
+        [IO.File]::WriteAllBytes($claudePath,[byte[]]@($personalPrefix+$oldSection+$suffix))
+        [byte[]]$expected=[byte[]]@($personalPrefix+[byte[]]$desired.InstructionsArtifact.sectionBytes+$suffix)
 
         (Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply).outcome|Should Be 'applied'
 
@@ -2661,11 +2740,13 @@ Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $UserHome -Mode
             $desired=New-TestProjectionDesiredState -Root (Join-Path $TestDrive 'claude-readonly-file-fixture')
             $userHome=Join-Path $TestDrive 'claude-readonly-file-user';$claudePath=Join-Path $userHome '.claude/CLAUDE.md'
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $claudePath)|Out-Null
-            [IO.File]::WriteAllText($claudePath,"personal`r`n",[Text.UTF8Encoding]::new($false));(Get-Item -Force $claudePath).IsReadOnly=$true
+            $utf8=[Text.UTF8Encoding]::new($false);[byte[]]$personal=$utf8.GetBytes("personal`r`n")
+            [IO.File]::WriteAllBytes($claudePath,$personal);(Get-Item -Force $claudePath).IsReadOnly=$true
+            [byte[]]$expected=[byte[]]@($personal+$utf8.GetBytes("`r`n")+[byte[]]$desired.InstructionsArtifact.sectionBytes)
             $result=Invoke-UserSkillsReconciliation -DesiredState $desired -UserHome $userHome -Mode Apply
             $result.outcome|Should Be 'applied'
             (Get-Item -Force $claudePath).IsReadOnly|Should Be $true
-            ([Text.UTF8Encoding]::new($false,$true).GetString([IO.File]::ReadAllBytes($claudePath)))|Should Match 'Repository Instructions Bootstrap'
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($claudePath))|Should Be ([Convert]::ToBase64String($expected))
         }
 
         # Scenario: A readonly CLAUDE.md has a protected non-default DACL and fails after its durable publication.

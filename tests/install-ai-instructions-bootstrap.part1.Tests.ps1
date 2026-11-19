@@ -1117,6 +1117,23 @@ finally {
 
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentsPath))|Should Be ([Convert]::ToBase64String($expected))
     }
+
+    # Scenario: Personal AGENTS.md contains a fenced managed-heading example before the real section and a Setext H2 suffix after it.
+    # Purpose: Ignore the fenced example, replace the one real section, and retain the Setext paragraph and all surrounding bytes exactly.
+    It 'InterT99_preserves_fenced_examples_and_a_Setext_AGENTS_boundary' {
+        New-Item -ItemType Directory -Force -Path $codexHome|Out-Null
+        $agentsPath=Join-Path $codexHome 'AGENTS.md';$utf8=[Text.UTF8Encoding]::new($false)
+        [byte[]]$personalPrefix=$utf8.GetBytes("# Personal`r`n~~~md`r`n## Repository Instructions Bootstrap`r`nexample`r`n~~~~`r`n")
+        [byte[]]$oldSection=$utf8.GetBytes("## Repository Instructions Bootstrap`r`n- old`r`n`r`n")
+        [byte[]]$suffix=$utf8.GetBytes("Personal notes`r`n--------------`r`nKEEP  `r`n")
+        [IO.File]::WriteAllBytes($agentsPath,[byte[]]@($personalPrefix+$oldSection+$suffix))
+        [byte[]]$authority=[IO.File]::ReadAllBytes((Join-Path $repositoryRoot 'instructions/common/bootstrap-section.md'))
+        [byte[]]$expected=[byte[]]@($personalPrefix+$authority+$suffix)
+
+        Invoke-InstallScript -RepositoryRoot $repositoryRoot -CodexHome $codexHome
+
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($agentsPath))|Should Be ([Convert]::ToBase64String($expected))
+    }
     }
 
 }

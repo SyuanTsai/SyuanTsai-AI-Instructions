@@ -348,50 +348,146 @@ function Get-InstallerBootstrapSectionContent {
         }
     }
 
-    $managedMatches = [regex]::Matches($text,'(?m)^## Repository Instructions Bootstrap[ \t]*\r?$')
-    $managedLikeMatches = [regex]::Matches($text,'(?m)^[ \t]*##[ \t]+Repository Instructions Bootstrap[^\r\n]*\r?$')
+    $managedMatches = New-Object System.Collections.Generic.List[object]
+    $ambiguousManagedMatches = New-Object System.Collections.Generic.List[object]
+    $h2Boundaries = New-Object System.Collections.Generic.List[object]
+    $fenceMarker = $null
+    $fenceLength = 0
+    $paragraphStart = $null
+    $paragraphIsAmbiguous = $false
+    $previousWasBlank = $true
+    $previousWasParagraph = $false
+    $complexBlockSinceBlank = $false
+
+    foreach ($line in @([regex]::Matches($text,'(?m)^[^\r\n]*\r?$'))) {
+        $lineText = $line.Value.TrimEnd([char]0x0D)
+        if ($null -ne $fenceMarker) {
+            $closingPattern = '^ {0,3}' + [regex]::Escape($fenceMarker) + '{' + $fenceLength + ',}[ \t]*$'
+            if ([regex]::IsMatch($lineText,$closingPattern)) {
+                $fenceMarker = $null
+                $fenceLength = 0
+                $paragraphStart = $null
+                $paragraphIsAmbiguous = $false
+                $previousWasParagraph = $false
+                $previousWasBlank = $false
+                $complexBlockSinceBlank = $false
+            }
+            continue
+        }
+
+        if ([regex]::IsMatch($lineText,'^[ \t]*$')) {
+            $paragraphStart = $null
+            $paragraphIsAmbiguous = $false
+            $previousWasParagraph = $false
+            $previousWasBlank = $true
+            $complexBlockSinceBlank = $false
+            continue
+        }
+
+        $openingFence = [regex]::Match($lineText,'^ {0,3}(?<marker>`{3,}|~{3,})(?<info>.*)$')
+        if ($openingFence.Success) {
+            $marker = $openingFence.Groups['marker'].Value
+            if (-not ($marker[0] -eq [char]0x60 -and $openingFence.Groups['info'].Value.Contains('`'))) {
+                $fenceMarker = [string]$marker[0]
+                $fenceLength = $marker.Length
+                $paragraphStart = $null
+                $paragraphIsAmbiguous = $false
+                $previousWasParagraph = $false
+                $previousWasBlank = $false
+                $complexBlockSinceBlank = $false
+                continue
+            }
+        }
+
+        $isIndentedCode = [regex]::IsMatch($lineText,'^ {4,}') -and ($previousWasBlank -or -not $previousWasParagraph)
+        if ($isIndentedCode) {
+            $paragraphStart = $null
+            $paragraphIsAmbiguous = $false
+            $previousWasParagraph = $false
+            $previousWasBlank = $false
+            $complexBlockSinceBlank = $false
+            continue
+        }
+
+        if ([regex]::IsMatch($lineText,'^ {0,3}-+[ \t]*$')) {
+            if ($null -ne $paragraphStart) {
+                if ($paragraphIsAmbiguous) {
+                    throw 'The managed instructions file has a Setext H2 paragraph boundary whose start cannot be determined uniquely across a list, block quote, or HTML block. Add a blank line before the Setext heading or replace it with an ATX H2, then retry.'
+                }
+                $h2Boundaries.Add([pscustomobject]@{ Index=[int]$paragraphStart; Kind='setext' })
+            }
+            $paragraphStart = $null
+            $paragraphIsAmbiguous = $false
+            $previousWasParagraph = $false
+            $previousWasBlank = $false
+            $complexBlockSinceBlank = $false
+            continue
+        }
+
+        $exactManaged = [regex]::IsMatch($lineText,'^## Repository Instructions Bootstrap[ \t]*$')
+        $managedLike = [regex]::IsMatch($lineText,'^ {0,3}##[ \t]+Repository Instructions Bootstrap.*$')
+        if ($exactManaged) {
+            $managedMatches.Add([pscustomobject]@{ Index=[int]$line.Index; Length=[int]$line.Value.Length })
+        }
+        elseif ($managedLike) {
+            $ambiguousManagedMatches.Add([pscustomobject]@{ Index=[int]$line.Index; Length=[int]$line.Value.Length })
+        }
+
+        if ([regex]::IsMatch($lineText,'^ {0,3}##(?:[ \t]+.*)?$')) {
+            $h2Boundaries.Add([pscustomobject]@{ Index=[int]$line.Index; Kind='atx' })
+            $paragraphStart = $null
+            $paragraphIsAmbiguous = $false
+            $previousWasParagraph = $false
+            $previousWasBlank = $false
+            $complexBlockSinceBlank = $false
+            continue
+        }
+        if ([regex]::IsMatch($lineText,'^ {0,3}#{1,6}(?:[ \t]+.*)?$')) {
+            $paragraphStart = $null
+            $paragraphIsAmbiguous = $false
+            $previousWasParagraph = $false
+            $previousWasBlank = $false
+            $complexBlockSinceBlank = $false
+            continue
+        }
+
+        $isComplexBlock = [regex]::IsMatch($lineText,'^ {0,3}(?:>|(?:[*+-]|\d{1,9}[.)])[ \t]+|<(?:!--|[?]|![A-Z]|!\[CDATA\[|/?[A-Za-z][A-Za-z0-9-]*(?:[ \t/>]|$)))')
+        $isOtherThematicBreak = [regex]::IsMatch($lineText,'^ {0,3}(?:(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$')
+        if ($isComplexBlock -or $isOtherThematicBreak) {
+            $paragraphStart = $null
+            $paragraphIsAmbiguous = $false
+            $previousWasParagraph = $false
+            $previousWasBlank = $false
+            $complexBlockSinceBlank = $isComplexBlock
+            continue
+        }
+
+        if ($null -eq $paragraphStart) {
+            $paragraphStart = [int]$line.Index
+            $paragraphIsAmbiguous = $complexBlockSinceBlank
+        }
+        $previousWasParagraph = $true
+        $previousWasBlank = $false
+    }
+
+    if ($null -ne $fenceMarker) {
+        throw 'The managed instructions file contains an unclosed fenced code block, so Markdown section boundaries cannot be determined uniquely. Close the fenced code block and retry.'
+    }
     if ($managedMatches.Count -gt 1) {
         throw 'The managed instructions file contains duplicate `## Repository Instructions Bootstrap` sections. Remove the duplicate section and retry.'
     }
-    if ($managedLikeMatches.Count -ne $managedMatches.Count) {
+    if ($ambiguousManagedMatches.Count -gt 0) {
         throw 'The managed instructions file has an ambiguous `## Repository Instructions Bootstrap` heading. Keep one exact H2 heading and retry.'
     }
 
     if ($managedMatches.Count -eq 1) {
         $managed = $managedMatches[0]
         $nextHeadingIndex = $null
-        $fenceMarker = $null
-        $fenceLength = 0
-        $scanOffset = $managed.Index + $managed.Length
-        $scanText = $text.Substring($scanOffset)
-        foreach ($line in @([regex]::Matches($scanText,'(?m)^[^\r\n]*\r?$'))) {
-            $lineText = $line.Value.TrimEnd([char]0x0D)
-            if ($null -ne $fenceMarker) {
-                $closingPattern = '^ {0,3}' + [regex]::Escape($fenceMarker) + '{' + $fenceLength + ',}[ \t]*$'
-                if ([regex]::IsMatch($lineText,$closingPattern)) {
-                    $fenceMarker = $null
-                    $fenceLength = 0
-                }
-                continue
-            }
-
-            $openingFence = [regex]::Match($lineText,'^ {0,3}(?<marker>`{3,}|~{3,})(?<info>.*)$')
-            if ($openingFence.Success) {
-                $marker = $openingFence.Groups['marker'].Value
-                if (-not ($marker[0] -eq [char]0x60 -and $openingFence.Groups['info'].Value.Contains('`'))) {
-                    $fenceMarker = [string]$marker[0]
-                    $fenceLength = $marker.Length
-                    continue
-                }
-            }
-
-            if ([regex]::IsMatch($line.Value,'^ {0,3}##(?:[ \t]+[^\r\n]*)?\r?$')) {
-                $nextHeadingIndex = $scanOffset + $line.Index
+        foreach ($heading in $h2Boundaries) {
+            if ([int]$heading.Index -gt [int]$managed.Index) {
+                $nextHeadingIndex = [int]$heading.Index
                 break
             }
-        }
-        if ($null -ne $fenceMarker) {
-            throw 'The managed instructions file contains an unclosed fenced code block after the managed section, so the next H2 boundary cannot be determined uniquely. Close the fenced code block and retry.'
         }
         $prefixPayloadLength = $strictUtf8.GetByteCount($text.Substring(0,$managed.Index))
         $suffixPayloadOffset = if ($null -eq $nextHeadingIndex) { $payload.Length } else { $strictUtf8.GetByteCount($text.Substring(0,$nextHeadingIndex)) }
