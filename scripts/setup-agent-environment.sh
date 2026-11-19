@@ -74,6 +74,17 @@ cleanup() {
                         if [ -f "$bootstrap/$cleanup_member" ] && [ ! -L "$bootstrap/$cleanup_member" ]; then
                             run_clean rm -f "$bootstrap/$cleanup_member" 2>/dev/null || :
                         fi
+                        # bsdtar on macOS can materialize AppleDouble companions
+                        # for a known member. Their names are a deterministic
+                        # derivative of that member, so remove only that exact
+                        # path; never scan the extraction tree for unknown files.
+                        case "$cleanup_member" in
+                            */*) cleanup_appledouble=${cleanup_member%/*}/._${cleanup_member##*/} ;;
+                            *) cleanup_appledouble=._$cleanup_member ;;
+                        esac
+                        if [ -f "$bootstrap/$cleanup_appledouble" ] && [ ! -L "$bootstrap/$cleanup_appledouble" ]; then
+                            run_clean rm -f "$bootstrap/$cleanup_appledouble" 2>/dev/null || :
+                        fi
                         cleanup_probe=$cleanup_member
                         cleanup_depth=1
                         while [ "${cleanup_probe#*/}" != "$cleanup_probe" ]; do
@@ -90,6 +101,13 @@ cleanup() {
                             esac
                             cleanup_candidate=${cleanup_member%/}
                             while [ -n "$cleanup_candidate" ]; do
+                                case "$cleanup_candidate" in
+                                    */*) cleanup_appledouble=${cleanup_candidate%/*}/._${cleanup_candidate##*/} ;;
+                                    *) cleanup_appledouble=._$cleanup_candidate ;;
+                                esac
+                                if [ -f "$bootstrap/$cleanup_appledouble" ] && [ ! -L "$bootstrap/$cleanup_appledouble" ]; then
+                                    run_clean rm -f "$bootstrap/$cleanup_appledouble" 2>/dev/null || :
+                                fi
                                 cleanup_probe=$cleanup_candidate
                                 cleanup_depth=1
                                 while [ "${cleanup_probe#*/}" != "$cleanup_probe" ]; do

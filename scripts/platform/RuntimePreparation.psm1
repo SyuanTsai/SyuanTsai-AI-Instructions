@@ -537,12 +537,20 @@ function Resolve-VerifiedPlatformPowerShell {
         $executable = Join-Path $destination $(if ($Platform -ceq 'windows') { 'pwsh.exe' } else { 'pwsh' })
         if ($Platform -cne 'windows') {
             $lease = [SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::OpenFile($DestinationLease,'pwsh','Read','OpenExisting')
-            try { [void][SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::SetPermissions($lease,448) } finally { $lease.Dispose() }
+            try {
+                [void][SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::SetPermissions($lease,448)
+                [void][SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::FlushFile($lease)
+            } finally { $lease.Dispose() }
         }
         # The trust baseline consists exclusively of hashes computed from member
         # bytes in the approved archive snapshot, NEVER the post-extraction disk.
         $runtimeClosure = New-PlatformExpectedClosure $destination $session.Files
         $directoryReceipt=New-PlatformRuntimeDirectoryReceipt $session.Files $session.Directories $Platform
+        # Unix fsync can use the retained directory fd. Windows keeps the
+        # existing deny-write/delete extraction lease semantics; its setup
+        # caller closes that lease and durably flushes the receipt inventory
+        # before any runtime rename or pointer marker.
+        if($Platform -cne 'windows'){Confirm-PlatformPreparationDirectoryDurability $DestinationLease $directoryReceipt.directories $Platform}
         $runtimeClosure | Add-Member -NotePropertyName directories -NotePropertyValue $directoryReceipt.directories
         $runtimeClosure | Add-Member -NotePropertyName directorySha256 -NotePropertyValue $directoryReceipt.directorySha256
         Assert-PlatformRuntimeClosure $executable $runtimeClosure $Platform
@@ -781,6 +789,33 @@ function New-PlatformPreparationDirectory {
     }
 }
 
+# Additive P10 setup durability close: every extracted file is flushed by its
+# writer, then every physical directory in the receipt inventory is flushed and
+# identity/path-read back before Resolve can return a receipt to its caller.
+function Confirm-PlatformPreparationDirectoryDurability {
+    param($DestinationLease,$Directories,[string]$Platform)
+    $ordered=[Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
+    foreach($relative in @($Directories)){if(-not [string]::IsNullOrWhiteSpace([string]$relative)){[void]$ordered.Add(([string]$relative).Replace('/',[IO.Path]::DirectorySeparatorChar))}}
+    if($Platform -ceq 'windows'){
+        [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::FlushDirectory($DestinationLease)
+        [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::GetVerifiedPath($DestinationLease)
+        foreach($relative in $ordered){
+            $owned=Open-WindowsPreparationDirectoryGuards $DestinationLease $relative
+            try{
+                [SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::FlushDirectory($owned.Parent)
+                [void][SyuanTsai.AIInstructions.PlatformRuntime.WindowsNative]::GetVerifiedPath($owned.Parent)
+            }finally{for($i=$owned.Guards.Count-1;$i -ge 0;$i--){$owned.Guards[$i].Dispose()}}
+        }
+        return
+    }
+    [void][SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::FlushDirectory($DestinationLease)
+    $root=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::GetVerifiedPath($DestinationLease)
+    foreach($relative in $ordered){
+        $lease=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::OpenDirectory($root,$relative,$false)
+        try{[void][SyuanTsai.AIInstructions.PlatformRuntime.UnixNative]::FlushDirectory($lease)}finally{$lease.Dispose()}
+    }
+}
+
 function Write-PlatformPreparationFile {
     param($DestinationLease,[string]$RelativePath,[IO.Stream]$Source,[string]$Platform,$Session)
     $owned=$null; $guard=$null; $buffer=[IO.MemoryStream]::new(); $snapshot=$null
@@ -801,7 +836,7 @@ function Write-PlatformPreparationFile {
         } else {
             $target = Join-Path $owned.Path $parts[$parts.Length-1]
             $output = [IO.File]::Open($target,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
-            try { $snapshot.CopyTo($output) } finally { $output.Dispose() }
+            try { $snapshot.CopyTo($output); $output.Flush($true) } finally { $output.Dispose() }
             # Read-only guards allow the loader's ordinary read sharing. The
             # writer-to-reader handoff is NOT trusted: acquire deny-write/delete,
             # then compare to the input hash. A racing writer either blocks the

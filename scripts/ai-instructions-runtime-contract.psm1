@@ -17,6 +17,7 @@ $script:ExpectedPlatformRuntimeFunctionsToExport = @(
     'Open-PlatformFile',
     'Assert-PlatformFileIdentity',
     'Enter-PlatformLock',
+    'Confirm-PlatformDirectoryDurability',
     'Publish-PlatformFile',
     'Remove-PlatformOwnedFile',
     'Get-PlatformDirectoryState',

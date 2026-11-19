@@ -279,6 +279,8 @@ try {
     # M4/M8: private setup root, serialized by an exclusive platform lock.
     try { $setupLease = Open-PlatformDirectory -Root $userHome -RelativePath '.local/share/ai-instructions-setup' -CreatePrivate }
     catch { throw (New-AgentEnvironmentSetupRefusal home-invalid ('HOME is not writable for the private setup root: ' + $_.Exception.Message)) }
+    Confirm-AgentEnvironmentSetupDirectoryPathDurability -Root $userHome -RelativePath '.local/share/ai-instructions-setup'
+    Invoke-AgentEnvironmentSetupFailpoint 'after-setup-root-durable' $layout.LockLeaf
     try { $lock = Enter-PlatformLock -ParentLease $setupLease -Leaf $layout.LockLeaf -Mode Exclusive -Timeout ([TimeSpan]::Zero) }
     catch {
         $cause = $_.Exception
@@ -317,12 +319,16 @@ try {
         $runtimeTransactionStoreLease.Dispose()
         $runtimeTransactionLease = Open-PlatformDirectory -Root $layout.SetupRoot -RelativePath $attempt.TransactionRelativePath -CreatePrivate
         $runtimeTransactionLease.Dispose()
+        Confirm-AgentEnvironmentSetupDirectoryPathDurability -Root $layout.SetupRoot -RelativePath $attempt.TransactionRelativePath
+        Invoke-AgentEnvironmentSetupFailpoint 'after-runtime-transaction-durable' $layout.RuntimeReceiptLeaf
         $runtimeLease = Open-PlatformDirectory -Root $layout.SetupRoot -RelativePath $attempt.StageRelativePath -CreatePrivate
+        Confirm-AgentEnvironmentSetupDirectoryPathDurability -Root $layout.SetupRoot -RelativePath $attempt.StageRelativePath
         Invoke-AgentEnvironmentSetupBarrier 'after-runtime-directory'
         try {
             try { $runtimeReceipt = Resolve-PlatformPowerShell -Policy $policyInfo.Policy -DestinationLease $runtimeLease -OfflineCache $archive }
             catch { throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed ('The canonical runtime could not be prepared: ' + $_.Exception.Message)) }
         } finally { $runtimeLease.Dispose() }
+        Confirm-AgentEnvironmentSetupRuntimeTreeDurability -Layout $layout -Attempt $attempt -Receipt $runtimeReceipt
         [void](Assert-PlatformPowerShellRuntime -Policy $policyInfo.Policy -Receipt $runtimeReceipt)
         Invoke-AgentEnvironmentSetupFailpoint 'after-runtime-stage-verified' $layout.RuntimeReceiptLeaf
         $runtimeReceipt = Publish-AgentEnvironmentSetupRuntimeDirectory -Layout $layout -Attempt $attempt -Receipt $runtimeReceipt -Policy $policyInfo.Policy

@@ -338,6 +338,8 @@ sh scripts/setup-agent-environment.sh --expected-commit <同一個 SHA> --offlin
 
 Runtime 發布的 crash-state 契約如下；任何狀態都不會回收或覆寫已發布的 runtime 目錄：
 
+Durability closure rule：任何 commit marker（`journal.json`、runtime pointer receipt、setup receipt 或 shared-cache publication）發布前，它所依賴的檔案必須完成資料／metadata flush，所有新目錄 entry 必須由 `Confirm-PlatformDirectoryDurability` 完成 parent-directory flush 與 identity/path readback，完整 runtime directory inventory 也必須逐目錄 flush。任何一步失敗都不得發布 marker；WAL 狀態留給下一個持鎖執行者處理，未收據化 runtime 則保留為 orphan。盤點涵蓋 shell run tmp／private snapshot，以及 PowerShell 的 lock、transaction、journal、stage、displaced、runtime、cache 與 receipts；暫存物與 lock 沒有 commit marker，因此不宣稱跨斷電持久，只要求 ownership、readback 與安全清理。
+
 | 中斷點 | 可見狀態 | 下一次持鎖執行 |
 |---|---|---|
 | private stage 建立前 | 沒有 runtime attempt | 建立全新的 attempt |
@@ -405,6 +407,8 @@ sh scripts/setup-agent-environment.sh --expected-commit <same SHA> --offline
 - On Windows run `pwsh -NoProfile -NonInteractive -File scripts/setup-agent-environment.ps1 -Prepare|-Offline -ExpectedCommit <SHA> -ArchivePath <local zip>`. The zip must be the official asset named by the policy (for example `PowerShell-7.6.6-win-x64.zip`), downloaded by the user from the official PowerShell GitHub release; the policy is `scripts/setup-agent-environment.policy.json` at the same commit, and setup verifies the file name and SHA-256.
 
 Runtime publication has the following crash-state contract; no state reclaims or overwrites a published runtime directory:
+
+Durability closure rule: before any commit marker (`journal.json`, runtime pointer receipt, setup receipt, or shared-cache publication) is published, every file it depends on must complete its data/metadata flush, every new directory entry must complete parent-directory flush plus identity/path readback through `Confirm-PlatformDirectoryDurability`, and every directory in the complete runtime inventory must be flushed. A failed step publishes no marker: WAL state is left for the next lock holder, while an unreceipted runtime remains an orphan. The inventory covers the shell run tmp/private snapshot and the PowerShell lock, transaction, journal, stage, displaced, runtime, cache, and receipt writes. Temporary artifacts and the lock have no commit marker, so they make no power-loss durability claim beyond ownership, readback, and safe cleanup.
 
 | Interruption point | Visible state | Next lock holder |
 |---|---|---|

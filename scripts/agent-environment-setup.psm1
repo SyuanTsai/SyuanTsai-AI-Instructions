@@ -661,6 +661,49 @@ function Open-AgentEnvironmentSetupPrivateDirectoryGuard {
     finally { if ($null -ne $lease) { $lease.Dispose() } }
 }
 
+# P10 fix11b closure primitive: persist every directory entry in a physical
+# path, flush the final directory's own entries, and identity/path-read back
+# each lease. This only composes the additive platform durability API.
+function Confirm-AgentEnvironmentSetupDirectoryPathDurability {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $RelativePath
+    )
+    $parts=[SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Segments($RelativePath)
+    $parent=$null;$child=$null
+    try{
+        $parent=Open-PlatformDirectory -Root $Root -RootOnly
+        $prefix=[Collections.Generic.List[string]]::new()
+        foreach($part in $parts){
+            $prefix.Add($part)
+            $child=Open-PlatformDirectory -Root $Root -RelativePath ($prefix -join [IO.Path]::DirectorySeparatorChar)
+            [void](Confirm-PlatformDirectoryDurability -DirectoryLease $parent)
+            [void](Assert-PlatformFileIdentity -Lease $child -Expected $child.Observation -VerifyPath)
+            $parent.Dispose();$parent=$child;$child=$null
+        }
+        [void](Confirm-PlatformDirectoryDurability -DirectoryLease $parent)
+    }
+    catch{
+        if((Get-AgentEnvironmentSetupRefusalCode $_) -cne 'internal-error'){throw}
+        throw (New-AgentEnvironmentSetupRefusal runtime-verification-failed ("Setup directory durability could not be confirmed for '$RelativePath': " + $_.Exception.Message))
+    }
+    finally{if($null -ne $child){$child.Dispose()};if($null -ne $parent){$parent.Dispose()}}
+}
+
+function Confirm-AgentEnvironmentSetupRuntimeTreeDurability {
+    param(
+        [Parameter(Mandatory = $true)] $Layout,
+        [Parameter(Mandatory = $true)] $Attempt,
+        [Parameter(Mandatory = $true)] $Receipt
+    )
+    Confirm-AgentEnvironmentSetupDirectoryPathDurability -Root $Layout.SetupRoot -RelativePath ([string]$Attempt.StageRelativePath)
+    foreach($directory in @($Receipt.runtimeClosure.directories)){
+        $relative=[string]$directory
+        [void][SyuanTsai.AIInstructions.PlatformRuntime.PlatformPaths]::Segments($relative)
+        Confirm-AgentEnvironmentSetupDirectoryPathDurability -Root $Layout.SetupRoot -RelativePath (([string]$Attempt.StageRelativePath).TrimEnd('/')+'/'+$relative)
+    }
+}
+
 function Read-AgentEnvironmentSetupFile {
     param([Parameter(Mandatory = $true)][string] $SetupRoot, [Parameter(Mandatory = $true)][string] $Directory, [Parameter(Mandatory = $true)][string] $Leaf)
     $entry = Get-AgentEnvironmentSetupEntry (Join-Path $SetupRoot $Directory) $Leaf
@@ -791,6 +834,7 @@ function Repair-AgentEnvironmentSetupTransactions {
             $transaction = Open-PlatformDirectory -Root $SetupRoot -RelativePath ".ai-instructions-txn/$transactionId"
             $parent = $null; $stage = $null
             try {
+                Confirm-AgentEnvironmentSetupDirectoryPathDurability -Root $SetupRoot -RelativePath ".ai-instructions-txn/$transactionId"
                 $hasJournal='journal.json' -cin $members
                 if(-not $hasJournal){
                     if(@($members | Where-Object {$_ -cnotin @('journal.stage','stage')}).Count -ne 0){throw (New-AgentEnvironmentSetupRefusal interrupted-install "Setup transaction '$transactionId' lacks its write-ahead journal.")}
@@ -814,6 +858,7 @@ function Repair-AgentEnvironmentSetupTransactions {
                 }
                 $parentPath = Join-Path $SetupRoot ([string]$journal.directory)
                 $parent = Open-PlatformDirectory -Root $SetupRoot -RelativePath ([string]$journal.directory) -CreatePrivate
+                Confirm-AgentEnvironmentSetupDirectoryPathDurability -Root $SetupRoot -RelativePath ([string]$journal.directory)
                 $resolution=Resolve-AgentEnvironmentSetupTransaction $transaction $transactionPath $parent $parentPath $journal
                 if($resolution.decision -in @('publish','publish-after-displace')){
                     $stage = Open-PlatformFile -ParentLease $transaction -Leaf 'stage' -Access ReadWrite -CreateMode OpenExisting
@@ -862,6 +907,8 @@ function Publish-AgentEnvironmentSetupFile {
     try {
         $transaction = Open-PlatformDirectory -Root $SetupRoot -RelativePath ".ai-instructions-txn/$transactionId" -CreatePrivate
         Invoke-AgentEnvironmentSetupFailpoint 'after-transaction-directory' $Leaf
+        Confirm-AgentEnvironmentSetupDirectoryPathDurability -Root $SetupRoot -RelativePath ".ai-instructions-txn/$transactionId"
+        Invoke-AgentEnvironmentSetupFailpoint 'after-transaction-directory-durable' $Leaf
         $current = $null
         $directoryEntry = Get-AgentEnvironmentSetupEntry $SetupRoot $Directory
         if ($null -ne $directoryEntry) {
@@ -894,6 +941,8 @@ function Publish-AgentEnvironmentSetupFile {
         Invoke-AgentEnvironmentSetupFailpoint 'after-journal' $Leaf
         if ($null -eq $parent) { $parent = Open-PlatformDirectory -Root $SetupRoot -RelativePath $Directory -CreatePrivate }
         Invoke-AgentEnvironmentSetupFailpoint 'after-parent-directory' $Leaf
+        Confirm-AgentEnvironmentSetupDirectoryPathDurability -Root $SetupRoot -RelativePath $Directory
+        Invoke-AgentEnvironmentSetupFailpoint 'after-parent-directory-durable' $Leaf
         $stage = Open-PlatformFile -ParentLease $transaction -Leaf 'stage' -Access ReadWrite -CreateMode CreateNew
         Invoke-AgentEnvironmentSetupTornStageFailpoint $stage $Bytes $Leaf
         $stage.WriteNewBytes($Bytes)
@@ -1080,6 +1129,7 @@ Export-ModuleMember -Function @(
     'ConvertFrom-AgentEnvironmentSetupStoredRuntimeReceipt','Assert-AgentEnvironmentSetupRuntimeReceiptLayout','Get-AgentEnvironmentSetupPlan',
     'Assert-AgentEnvironmentSetupPhysicalPath','Get-AgentEnvironmentSetupUserHome','Assert-AgentEnvironmentSetupCodexHome',
     'Assert-AgentEnvironmentSetupCommit','Test-AgentEnvironmentSetupSameFile','Get-AgentEnvironmentSetupChildEnvironment','Read-AgentEnvironmentSetupFile',
+    'Confirm-AgentEnvironmentSetupDirectoryPathDurability','Confirm-AgentEnvironmentSetupRuntimeTreeDurability',
     'Repair-AgentEnvironmentSetupTransactions','Resolve-AgentEnvironmentSetupTransaction','Publish-AgentEnvironmentSetupFile',
     'Publish-AgentEnvironmentSetupRuntimeDirectory','Publish-AgentEnvironmentSetupArchiveCache','Invoke-AgentEnvironmentSetupFailpoint','Invoke-AgentEnvironmentSetupBarrier',
     'New-AgentEnvironmentSetupReceipt','ConvertTo-AgentEnvironmentSetupJsonLine'

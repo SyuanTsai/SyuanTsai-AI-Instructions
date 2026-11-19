@@ -1085,7 +1085,7 @@ Publish-AgentEnvironmentSetupFile -SetupRoot $SetupRoot -Directory receipts -Lea
         $initial=Invoke-WinSetup $arguments -UserHome $fixture.Home
         Assert-WinSuccessReceipt $initial $fixture 'prepared-runtime-only' 'resolved'
         $runtimeBefore=Get-WinRuntimeSnapshot $fixture
-        foreach($point in @('after-transaction-directory','after-journal-stage','after-journal','after-parent-directory','during-stage-write','after-stage','after-rename','after-displaced-cleanup','after-journal-cleanup','after-transaction-cleanup')){
+        foreach($point in @('after-transaction-directory','after-transaction-directory-durable','after-journal-stage','after-journal','after-parent-directory','after-parent-directory-durable','during-stage-write','after-stage','after-rename','after-displaced-cleanup','after-journal-cleanup','after-transaction-cleanup')){
             $targetPath=Join-Path $fixture.Layout.ReceiptDirectory 'setup-receipt.json'
             $targetBefore=[Convert]::ToBase64String([IO.File]::ReadAllBytes($targetPath))
             $crashed=Invoke-WinSetup $arguments -UserHome $fixture.Home -Environment @{AI_INSTRUCTIONS_SETUP_FAILPOINT=$point;AI_INSTRUCTIONS_SETUP_FAILPOINT_LEAF='setup-receipt.json'}
@@ -1368,6 +1368,7 @@ Publish-AgentEnvironmentSetupFile -SetupRoot $SetupRoot -Directory receipts -Lea
         $stageLease = Open-PlatformDirectory -Root $fixture.Layout.SetupRoot -RelativePath $attempt.StageRelativePath -CreatePrivate
         try { $runtimeReceipt = Resolve-PlatformPowerShell -Policy $policyInfo.Policy -DestinationLease $stageLease -OfflineCache $script:WinArchive }
         finally { $stageLease.Dispose() }
+        Confirm-AgentEnvironmentSetupRuntimeTreeDurability -Layout $fixture.Layout -Attempt $attempt -Receipt $runtimeReceipt
         $hookState = @{ PostRenameParent = 0 }
         Set-WinSetupDurabilityHook ({
             param($point,$operation,$role,$lease)
@@ -1391,6 +1392,24 @@ Publish-AgentEnvironmentSetupFile -SetupRoot $SetupRoot -Directory receipts -Lea
         $selected | Should Not BeExactly $attempt.RuntimeDirectory
         (Get-WinTreeSnapshot $attempt.RuntimeDirectory) | Should BeExactly $before
         (Get-Item -LiteralPath $attempt.RuntimeDirectory).LastWriteTimeUtc.Ticks | Should Be $mtime
+    }
+
+    # Scenario: Real entry processes abort immediately after the setup-root path or runtime transaction path has completed directory flush/readback.
+    # Purpose: Prove the additive durability close precedes lock/WAL or runtime staging and that either pre-marker abort is safely rerunnable.
+    It 'InterT20_reruns_after_durable_setup_and_runtime_transaction_path_aborts' {
+        $arguments=@('-Prepare','-ExpectedCommit',$script:WinCommit,'-ArchivePath',$script:WinArchive)
+        $rootFixture=New-WinFixture 'durable-setup-root-abort'
+        $rootCrash=Invoke-WinSetup $arguments -UserHome $rootFixture.Home -Environment @{AI_INSTRUCTIONS_SETUP_FAILPOINT='after-setup-root-durable';AI_INSTRUCTIONS_SETUP_FAILPOINT_LEAF=$rootFixture.Layout.LockLeaf}
+        $rootCrash.ExitCode | Should Not Be 0
+        Test-Path -LiteralPath $rootFixture.Layout.SetupRoot -PathType Container | Should Be $true
+        Assert-WinSuccessReceipt (Invoke-WinSetup $arguments -UserHome $rootFixture.Home) $rootFixture 'prepared-runtime-only' 'resolved'
+
+        $transactionFixture=New-WinFixture 'durable-runtime-transaction-abort'
+        $transactionCrash=Invoke-WinSetup $arguments -UserHome $transactionFixture.Home -Environment @{AI_INSTRUCTIONS_SETUP_FAILPOINT='after-runtime-transaction-durable';AI_INSTRUCTIONS_SETUP_FAILPOINT_LEAF=$transactionFixture.Layout.RuntimeReceiptLeaf}
+        $transactionCrash.ExitCode | Should Not Be 0
+        Test-Path -LiteralPath (Join-Path $transactionFixture.Layout.RuntimeParentDirectory '.ai-instructions-txn') -PathType Container | Should Be $true
+        Assert-WinLockReleased $transactionFixture
+        Assert-WinSuccessReceipt (Invoke-WinSetup $arguments -UserHome $transactionFixture.Home) $transactionFixture 'prepared-runtime-only' 'resolved'
     }
 }
 }
@@ -1612,8 +1631,10 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
             param([string]$Root)
             $lines = foreach ($item in @(Get-ChildItem -LiteralPath $Root -Force -Recurse | Sort-Object FullName)) {
                 $relative = $item.FullName.Substring($Root.Length)
+                $isLink = $null -ne $item.LinkType -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+                if ($isLink) { "L $relative $($item.LinkTarget)"; continue }
                 $mode = [Convert]::ToString([int][IO.File]::GetUnixFileMode($item.FullName),8)
-                if ($item.PSIsContainer) { "D $relative $mode" } elseif ($null -ne $item.LinkType) { "L $relative $mode $($item.LinkTarget)" } else { "F $relative $mode $((Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash)" }
+                if ($item.PSIsContainer) { "D $relative $mode" } else { "F $relative $mode $((Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash)" }
             }
             return (@($lines) -join "`n")
         }
@@ -2081,6 +2102,31 @@ Describe 'setup-agent-environment POSIX shell native fixture (SYP-354 P10a)' {
         $danglingRun.Json.code | Should Be 'unsafe-path'
         (Get-UnixTreeSnapshot $danglingHome) | Should BeExactly $danglingBefore
         Test-Path -LiteralPath $missingCache | Should Be $false
+    }
+
+    # Scenario: A bsdtar-compatible extraction creates an AppleDouble companion for the known pwsh archive member.
+    # Purpose: Cleanup removes only the exact inventory-derived ._pwsh path and still reclaims the current run without scanning unknown entries.
+    It 'InterT50_cleans_inventory_derived_AppleDouble_members_without_tree_deletion' {
+        $homePath=New-UnixHome 'appledouble-cleanup'
+        $realTar=@(Get-Command tar -CommandType Application | Select-Object -First 1)[0].Source
+        $tarShim=@(
+            "'$realTar' `"`$@`" || exit `$?",
+            'extract=0; destination=',
+            'while [ "$#" -gt 0 ]; do',
+            '  case "$1" in',
+            '    -xzf) extract=1; shift 2 ;;',
+            '    -C) destination=$2; shift 2 ;;',
+            '    *) shift ;;',
+            '  esac',
+            'done',
+            'if [ "$extract" -eq 1 ] && [ -n "$destination" ]; then printf appledouble > "$destination/._pwsh"; fi'
+        ) -join "`n"
+        $bin=New-UnixToolShim 'appledouble-cleanup' -Replace @{tar=$tarShim}
+        $run=Invoke-UnixSetup $homePath @('--prepare') -Environment @{PATH=$bin}
+        if($run.ExitCode -ne 0){Write-Host $run.Stdout;Write-Host $run.Stderr}
+        $run.ExitCode | Should Be 0
+        $tmpRoot=Join-Path $homePath '.local/share/ai-instructions-setup/tmp'
+        @(Get-ChildItem -LiteralPath $tmpRoot -Directory -Force).Count | Should Be 0
     }
 
     # Register only when the native test process can create a genuinely foreign-owned cache fixture.

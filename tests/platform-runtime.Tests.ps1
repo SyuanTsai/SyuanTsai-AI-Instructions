@@ -105,6 +105,55 @@ Describe 'SYP353 preparation process and private-root delegation' {
     }
 }
 
+Describe 'Platform setup directory durability close' {
+    BeforeAll {
+        Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
+        function Set-SetupDirectoryDurabilityFailure([bool]$Enabled) {
+            if($IsWindows){
+                $runtimeModule=@(Get-Module platform-runtime)[0]
+                & $runtimeModule {
+                    param($Enable)
+                    $windowsModule=@(Get-Module -All Windows)[0]
+                    $hook=if($Enable){{param($point,$operation,$role,$lease)if($point -ceq 'setup-directory'){throw 'injected setup directory flush failure'}}}else{$null}
+                    & $windowsModule {param($Value)$script:WindowsPublicationDurabilityTestHook=$Value} $hook
+                } $Enabled
+                return
+            }
+            $field=[SyuanTsai.AIInstructions.PlatformRuntime.UnixNative].GetField('MutationTestHook',[Reflection.BindingFlags]'NonPublic,Static')
+            $value=if($Enabled){[Action[string]]{param($point)if($point -ceq 'setup-directory-before-fsync'){throw 'injected setup directory fsync failure'}}}else{$null}
+            $field.SetValue($null,$value)
+        }
+    }
+    AfterAll { Set-SetupDirectoryDurabilityFailure $false }
+
+    # Scenario: A physical private directory lease is flushed and identity/path-read back on the native host.
+    # Purpose: Expose the additive D15 primitive used to close setup marker dependencies without changing existing mutation primitives.
+    It 'InterT10_confirms_directory_flush_and_readback' {
+        $root=Join-Path $TestDrive 'setup-directory-durability-success'
+        [void][IO.Directory]::CreateDirectory($root)
+        $lease=Open-PlatformDirectory -Root $root -RootOnly
+        try{
+            $receipt=Confirm-PlatformDirectoryDurability -DirectoryLease $lease
+            $receipt.capability | Should BeExactly 'directory-durability'
+            $receipt.durability | Should BeExactly 'confirmed'
+            $receipt.readback | Should Be $true
+            $receipt.identity | Should Not BeNullOrEmpty
+        }finally{$lease.Dispose()}
+    }
+
+    # Scenario: The native directory flush primitive is forced to fail before durability can be confirmed.
+    # Purpose: A caller must not publish its receipt, pointer, or journal marker after an unconfirmed parent flush.
+    It 'InterT20_propagates_injected_directory_flush_failure_before_marker_publication' {
+        $root=Join-Path $TestDrive 'setup-directory-durability-failure'
+        [void][IO.Directory]::CreateDirectory($root)
+        $lease=Open-PlatformDirectory -Root $root -RootOnly
+        Set-SetupDirectoryDurabilityFailure $true
+        try { { Confirm-PlatformDirectoryDurability -DirectoryLease $lease } | Should Throw }
+        finally { Set-SetupDirectoryDurabilityFailure $false; $lease.Dispose() }
+        Test-Path -LiteralPath $root -PathType Container | Should Be $true
+    }
+}
+
 Describe 'Platform stdin transport primitives' {
     BeforeAll {
         Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/platform-runtime.psd1') -Force
