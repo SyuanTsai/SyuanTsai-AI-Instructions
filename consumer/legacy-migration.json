@@ -5,8 +5,8 @@
       "id": "skill-general",
       "repository": "https://github.com/SyuanTsai/Skill-General.git",
       "status": "ready",
-      "inventoryCommit": "65e96f10a6495dd5a5dcc2a7a7a8ac79f1dd4ef4",
-      "inventoryTree": "6f979f5154cfa540b5135c203aed6f84c48f9f86",
+      "inventoryCommit": "42dd81043290f12f86b153f032dc73ae11786bc1",
+      "inventoryTree": "81c293752802611749a5cec4ccc6c97978b85f99",
       "requiredRepositoryChecks": [
         {
           "id": "repository-general",
@@ -54,6 +54,11 @@
           "path": "scripts/SourceToolRoots.psm1",
           "disposition": "delete",
           "reason": "Authority-owned source validation, runtime, integrity, or tool-resolution logic."
+        },
+        {
+          "path": "scripts/Sync-SharedReferences.ps1",
+          "disposition": "retain",
+          "reason": "Repository-owned shared-reference generator remains valid in the consumer layout and its check mode is exercised by repository tests."
         },
         {
           "path": "scripts/Test-SkillGeneral.ps1",
@@ -129,8 +134,9 @@
         },
         {
           "path": "tests/ManageAiMemory.Tests.ps1",
-          "disposition": "retain",
-          "reason": "Repository-owned functional or domain regression remains in complete Pester discovery."
+          "disposition": "update-tests",
+          "reason": "Rewrite this repository-owned regression for the consumer layout; it contains a literal dependency on the removed legacy workflow .github/workflows/validate.yml.",
+          "expectedOutcome": "rewrite"
         },
         {
           "path": "tests/ManageTaskHandoff.Tests.ps1",
