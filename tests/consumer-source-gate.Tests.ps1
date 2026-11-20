@@ -1869,28 +1869,28 @@ consumer/bootstrap/Invoke-PinnedAuthority.ps1:293:9|$stdout = $null
 consumer/bootstrap/Invoke-PinnedAuthority.ps1:294:9|$stderr = $null
 consumer/bootstrap/Invoke-PinnedAuthority.ps1:298:28|$value = $null
 consumer/bootstrap/Invoke-PinnedAuthority.ps1:299:9|$Token=$null
-scripts/consumer/ConsumerGate.psm1:912:13|$content=$null
-scripts/consumer/ConsumerGate.psm1:915:9|$content=$null
-scripts/consumer/ConsumerGate.psm1:915:24|$needle=$null
-scripts/consumer/ConsumerGate.psm1:915:38|$Token=$null
+scripts/consumer/ConsumerGate.psm1:928:13|$content=$null
+scripts/consumer/ConsumerGate.psm1:931:9|$content=$null
+scripts/consumer/ConsumerGate.psm1:931:24|$needle=$null
+scripts/consumer/ConsumerGate.psm1:931:38|$Token=$null
 scripts/consumer/ConsumerGate.psm1:140:14|$headers.Remove('Authorization')
 scripts/consumer/ConsumerGate.psm1:141:5|$Token=$null
 scripts/consumer/ConsumerGate.psm1:142:5|[Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN',$null,'Process')
-scripts/consumer/ConsumerGate.psm1:942:34|$request.Dispose()
-scripts/consumer/ConsumerGate.psm1:942:53|$request=$null
-scripts/consumer/ConsumerGate.psm1:943:35|$response.Dispose()
-scripts/consumer/ConsumerGate.psm1:943:55|$response=$null
-scripts/consumer/ConsumerGate.psm1:974:18|$stream.Dispose()
-scripts/consumer/ConsumerGate.psm1:974:36|$memory.Dispose()
-scripts/consumer/ConsumerGate.psm1:982:31|$response.Dispose()
-scripts/consumer/ConsumerGate.psm1:982:73|$request.Dispose()
-scripts/consumer/ConsumerGate.psm1:983:9|$bytes=$null
-scripts/consumer/ConsumerGate.psm1:983:22|$buffer=$null
-scripts/consumer/ConsumerGate.psm1:983:36|$response=$null
-scripts/consumer/ConsumerGate.psm1:983:52|$request=$null
-scripts/consumer/ConsumerGate.psm1:983:67|$stream=$null
-scripts/consumer/ConsumerGate.psm1:983:81|$memory=$null
-scripts/consumer/ConsumerGate.psm1:983:95|$Headers=$null
+scripts/consumer/ConsumerGate.psm1:958:34|$request.Dispose()
+scripts/consumer/ConsumerGate.psm1:958:53|$request=$null
+scripts/consumer/ConsumerGate.psm1:959:35|$response.Dispose()
+scripts/consumer/ConsumerGate.psm1:959:55|$response=$null
+scripts/consumer/ConsumerGate.psm1:990:18|$stream.Dispose()
+scripts/consumer/ConsumerGate.psm1:990:36|$memory.Dispose()
+scripts/consumer/ConsumerGate.psm1:998:31|$response.Dispose()
+scripts/consumer/ConsumerGate.psm1:998:73|$request.Dispose()
+scripts/consumer/ConsumerGate.psm1:999:9|$bytes=$null
+scripts/consumer/ConsumerGate.psm1:999:22|$buffer=$null
+scripts/consumer/ConsumerGate.psm1:999:36|$response=$null
+scripts/consumer/ConsumerGate.psm1:999:52|$request=$null
+scripts/consumer/ConsumerGate.psm1:999:67|$stream=$null
+scripts/consumer/ConsumerGate.psm1:999:81|$memory=$null
+scripts/consumer/ConsumerGate.psm1:999:95|$Headers=$null
 scripts/consumer/ConsumerGate.psm1:324:95|[Environment]::SetEnvironmentVariable($name,$null,'Process')
 scripts/consumer/ConsumerGate.psm1:326:43|$Token=$null
 scripts/consumer/ConsumerGate.psm1:197:9|$start.Environment.Clear()
@@ -2716,8 +2716,11 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         $evidence=New-ScannerTransitionEvidenceFixture $fixture (Get-ScannerTransitionSuppressedFindings $fixture)
         $global:ScannerTransitionHashCalls=0
         Mock Get-GateSha256 {
-            $global:ScannerTransitionHashCalls++
-            if($global:ScannerTransitionHashCalls-eq2){[IO.File]::AppendAllText($Path," ",[Text.UTF8Encoding]::new($false))}
+            $hashCallCounter=Get-Variable ScannerTransitionHashCalls -Scope Global -ErrorAction SilentlyContinue
+            if($null-ne$hashCallCounter){
+                $hashCallCounter.Value=[int]$hashCallCounter.Value+1
+                if($hashCallCounter.Value-eq2){[IO.File]::AppendAllText($Path," ",[Text.UTF8Encoding]::new($false))}
+            }
             (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
         } -ModuleName ConsumerGate
         try{
@@ -2784,7 +2787,7 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
     It 'UnitT88_blocks_transition_suppression_severity_mismatch' {
         $fixture=New-ScannerTransitionFixture 'scanner-transition-evidence-severity' -BaseMutation {
             param($registry,$baseline,$root)
-            $registry.exceptions[0].severity='LOW'
+            @($registry.exceptions|Where-Object skillId -ceq 'review-bitbucket-pull-request')[0].severity='LOW'
         }
         $suppressed=Get-ScannerTransitionSuppressedFindings $fixture
         (Get-SourceFixtureFailure {Assert-ScannerTransitionEvidenceFixture $fixture $suppressed})|Should Match '^BLOCKED\|.*severity'
