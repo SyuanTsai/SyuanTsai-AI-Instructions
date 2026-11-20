@@ -53,6 +53,12 @@ function Test-RepinBytesEqual([byte[]]$Left,[byte[]]$Right){
         [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($Left))-ceq
         [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($Right))
 }
+function Get-RepinRepositoryChecks {
+    @(
+        [pscustomobject][ordered]@{id='repository-general';kind='general';path='scripts/Test-FixtureRepository.ps1'},
+        [pscustomobject][ordered]@{id='repository-pester';kind='pester';path='tests'}
+    )
+}
 function Copy-RepinCurrentAuthority([string]$SourceRoot,[string]$DestinationRoot){
     [void](Invoke-ProbeGit $DestinationRoot @('rm','-r','--quiet','--ignore-unmatch','.'))
     $paths=@((Invoke-ProbeGit $SourceRoot @('ls-files','--cached','--others','--exclude-standard')).Output|
@@ -85,7 +91,13 @@ function New-RepinAuthority([string]$SourceRoot,[string]$Root){
     $manifest=Get-Content -Raw -Encoding UTF8 $manifestPath|ConvertFrom-Json -Depth 100
     $entry=@($manifest.repositories|Where-Object id -eq 'skill-general')
     if($entry.Count-ne1){throw 'Re-pin authority has no unique skill-general manifest entry.'}
-    $entry[0].repository=$script:ProbeConsumerRepository
+    $entry=$entry[0]
+    $entry.repository=$script:ProbeConsumerRepository
+    $entry.status='ready'
+    $entry.requiredRepositoryChecks=@(Get-RepinRepositoryChecks)
+    $entry.files=@([pscustomobject][ordered]@{
+            path='scripts/Legacy.ps1';disposition='delete';reason='Replaced by the consumer transition fixture check.'})
+    foreach($name in @('additionalScope','prerequisites','literalReferenceExemptions')){$entry.PSObject.Properties.Remove($name)}
     Write-ProbeJson $manifestPath $manifest
     $newCommit=Complete-ProbeCommit $Root 'consumer re-pin probe authority'
     [pscustomobject]@{OldCommit=$oldCommit;OldTree=$oldTree;NewCommit=$newCommit;OldBootstrap=$oldBootstrap
@@ -106,9 +118,7 @@ function New-RepinConsumer([string]$Root,[string]$FixtureRoot,$Authority){
             schemaVersion=1;repository=$script:ProbeAuthorityRepository;commit=$Authority.OldCommit})
     Write-ProbeJson (Join-Path $Root 'config/consumer-gate.json') ([ordered]@{
             schemaVersion=1;repositoryId='skill-general';sourceRepository=$script:ProbeConsumerRepository;activeSkills=@('fixture')
-            repositoryChecks=@(
-                [ordered]@{id='repository-general';kind='general';path='scripts/Test-FixtureRepository.ps1'},
-                [ordered]@{id='repository-pester';kind='pester';path='tests'})})
+            repositoryChecks=@(Get-RepinRepositoryChecks)})
     $base=Complete-ProbeCommit $Root 'consumer re-pin probe base'
     [void](Invoke-ProbeGit $Root @('checkout','--quiet','-b','repin-topic'))
     Replace-RepinFile (Join-Path $script:ProbeAuthorityRoot 'consumer/bootstrap/Invoke-PinnedAuthority.ps1') `
@@ -164,6 +174,25 @@ function Assert-RepinFixture([string]$BaseRoot,[string]$ConsumerRoot,$Authority,
     $candidatePin=Get-Content -Raw -Encoding UTF8 (Join-Path $ConsumerRoot 'config/authority-pin.json')|ConvertFrom-Json
     if([string]$basePin.commit-cne[string]$Authority.OldCommit-or[string]$candidatePin.commit-cne[string]$Authority.NewCommit){
         throw 'Re-pin base and candidate pins do not bind the old and new authority commits.'
+    }
+    $expectedChanges=@('.github/workflows/consumer-gate.yml','config/authority-pin.json','scripts/Invoke-PinnedAuthority.ps1')
+    $actualChanges=@((Invoke-ProbeGit $ConsumerRoot @('diff','--name-only',$Revision.Base,$Revision.Head)).Output|
+        ForEach-Object{[string]$_}|Where-Object{$_}|Sort-Object)
+    if(($actualChanges-join"`n")-cne($expectedChanges-join"`n")){
+        throw "Re-pin candidate changed an unexpected path set: $($actualChanges-join', ')"
+    }
+    foreach($root in @($BaseRoot,$ConsumerRoot)){
+        $workflows=@((Invoke-ProbeGit $root @('ls-files','--','.github/workflows')).Output|
+            ForEach-Object{[string]$_}|Where-Object{$_})
+        if($workflows.Count-ne1-or$workflows[0]-cne'.github/workflows/consumer-gate.yml'){
+            throw 'Re-pin fixture must contain only the post-transition consumer workflow.'
+        }
+        $config=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'config/consumer-gate.json')|ConvertFrom-Json -Depth 100
+        $skills=@((Invoke-ProbeGit $root @('ls-files','--','skills/*/SKILL.md')).Output|
+            ForEach-Object{[string]$_}|Where-Object{$_}|ForEach-Object{($_-split'/')[1]}|Sort-Object)
+        if((@([string[]]$config.activeSkills|Sort-Object)-join"`n")-cne($skills-join"`n")){
+            throw 'Re-pin activeSkills differs from the tracked Skill inventory.'
+        }
     }
     $parents=@((Invoke-ProbeGit $ConsumerRoot @('rev-list','--parents','-n','1',$Revision.Candidate)).Output[0]-split' ')
     if($parents.Count-ne3-or$parents[0]-cne$Revision.Candidate-or$parents[1]-cne$Revision.Base-or$parents[2]-cne$Revision.Head){
