@@ -3,7 +3,7 @@
 #requires -Version 7.4
 param(
     [string]$PolicyPath,[string]$ToolName,[switch]$Install,[string]$InstallRoot,
-    [string]$ExpectedGoRuntimeVersion,[string]$RunId,[string]$OutputPath
+    [string]$ExpectedGoRuntimeVersion,[string]$RunId,[string]$OutputPath,[int]$AcquisitionTimeoutSeconds
 )
 $ErrorActionPreference='Stop'
 [void][IO.Directory]::CreateDirectory($InstallRoot)

@@ -413,16 +413,23 @@ exit 0
         foreach($path in @(
                 'consumer/bootstrap/Invoke-PinnedAuthority.ps1','consumer/workflows/consumer-gate.yml',
                 'consumer/workflows/consumer-gate-transition.yml','scripts/consumer/ConsumerGate.psm1',
+                'scripts/consumer/Invoke-GateGitByteCapture.ps1',
                 'scripts/consumer/ConsumerManifestClosure.psm1','scripts/consumer/Invoke-ConsumerSourceGate.ps1',
                 'scripts/consumer/Invoke-ConsumerValidationChild.ps1','scripts/consumer/Invoke-ConsumerRepositoryCheck.ps1',
                 'scripts/Validate-UpstreamAdapter.ps1','docs/standards/upstream-adapter.json',
                 'docs/standards/validation-toolchain.json','docs/standards/validation-security-gate.json')){
             Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot $path) -Destination (Join-Path $source $path)
         }
+        $platformRuntimeManifest=Import-PowerShellDataFile (Join-Path $script:RepositoryRoot 'scripts/platform-runtime.psd1')
+        foreach($relative in @('platform-runtime.psd1')+@($platformRuntimeManifest.FileList)|Select-Object -Unique){
+            $destination=Join-Path (Join-Path $source 'scripts') $relative
+            [void][IO.Directory]::CreateDirectory((Split-Path -Parent $destination))
+            Copy-Item -LiteralPath (Join-Path (Join-Path $script:RepositoryRoot 'scripts') $relative) -Destination $destination
+        }
         Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'tests/fixtures/consumer-gate-validation-runner-fixture.ps1') `
             -Destination (Join-Path $source 'scripts/Invoke-StandardValidation.ps1')
         foreach($productionPath in @('consumer/bootstrap/Invoke-PinnedAuthority.ps1','scripts/consumer/ConsumerGate.psm1',
-                'scripts/consumer/Invoke-ConsumerSourceGate.ps1')){
+                'scripts/consumer/Invoke-GateGitByteCapture.ps1','scripts/consumer/Invoke-ConsumerSourceGate.ps1')){
             (Get-FileHash -LiteralPath (Join-Path $source $productionPath) -Algorithm SHA256).Hash|Should Be `
                 (Get-FileHash -LiteralPath (Join-Path $script:RepositoryRoot $productionPath) -Algorithm SHA256).Hash
         }

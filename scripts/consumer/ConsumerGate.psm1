@@ -6,6 +6,78 @@ $script:ExitCodes = @{ BLOCKED = 10
  FAILED = 20
  INVALID = 30
  CANCELLED = 40 }
+$script:GatePlatformRuntimeModule = $null
+$script:GatePlatformRuntimeAuthorityRoot = $null
+$script:GateGitRemainingMilliseconds = $null
+$script:GateGitCaptureRoot = $null
+
+function Get-GateDeadlineBudget {
+    $resolverAcquisitionSeconds=300
+    $resolverProcessGraceSeconds=60
+    $testOverride=[string]$env:CONSUMER_GATE_TEST_RESOLVER_TIMEOUT_SECONDS
+    if(-not[string]::IsNullOrWhiteSpace($testOverride)){
+        if([string]::IsNullOrWhiteSpace($env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH)){
+            Throw-GateResult INVALID 'Resolver timeout override requires the resolver fixture seam.'
+        }
+        $parsed=0
+        if(-not[int]::TryParse($testOverride,[ref]$parsed)-or$parsed-lt1-or$parsed-gt$resolverAcquisitionSeconds){
+            Throw-GateResult INVALID 'Resolver timeout override is invalid.'
+        }
+        $resolverAcquisitionSeconds=$parsed
+        $resolverProcessGraceSeconds=[Math]::Min($resolverProcessGraceSeconds,$parsed)
+    }
+    $budget=[ordered]@{
+        acquisitionRequestDefaultSeconds=100
+        acquisitionRequestSeconds=600
+        acquisitionRequestCount=3
+        resolverAcquisitionSeconds=$resolverAcquisitionSeconds
+        resolverInvocationCount=4
+        resolverProcessGraceSeconds=$resolverProcessGraceSeconds
+        validatorSeconds=1800
+        validatorProcessGraceSeconds=120
+        gitCommandSeconds=120
+        gitReserveSeconds=600
+        workflowSetupSeconds=300
+        evidenceBufferSeconds=600
+        jobTimeoutMinutes=120
+    }
+    $budget.innerTotalSeconds=($budget.acquisitionRequestSeconds*$budget.acquisitionRequestCount)+
+        (($budget.resolverAcquisitionSeconds+$budget.resolverProcessGraceSeconds)*$budget.resolverInvocationCount)+
+        $budget.validatorSeconds+$budget.validatorProcessGraceSeconds+$budget.gitReserveSeconds+$budget.workflowSetupSeconds
+    [pscustomobject]$budget
+}
+
+function Import-GatePlatformRuntime([string]$AuthorityRoot) {
+    $root=[IO.Path]::GetFullPath($AuthorityRoot)
+    if($null-ne$script:GatePlatformRuntimeModule){
+        if($script:GatePlatformRuntimeAuthorityRoot-cne$root){Throw-GateResult INVALID 'Platform runtime authority root changed during the gate.'}
+        return $script:GatePlatformRuntimeModule
+    }
+    $manifest=Join-Path $root 'scripts/platform-runtime.psd1'
+    if(-not(Test-Path -LiteralPath $manifest -PathType Leaf)){Throw-GateResult INVALID 'Platform runtime manifest is missing.'}
+    $script:GatePlatformRuntimeModule=Import-Module $manifest -Force -PassThru -ErrorAction Stop
+    $script:GatePlatformRuntimeAuthorityRoot=$root
+    $script:GatePlatformRuntimeModule
+}
+
+function New-GateChildEnvironment([string[]]$PreserveNames,[string[]]$RemoveNames=@()) {
+    $environment=[Collections.Generic.Dictionary[string,string]]::new($(if($IsWindows){[StringComparer]::OrdinalIgnoreCase}else{[StringComparer]::Ordinal}))
+    if($null-eq$PreserveNames){
+        foreach($entry in @(Get-ChildItem Env:)){
+            $name=[string]$entry.Name
+            if($RemoveNames-icontains$name){continue}
+            $value=[string]$entry.Value
+            if($null-ne$value){$environment[$name]=$value}
+        }
+    }else{
+        foreach($name in $PreserveNames){
+            if($RemoveNames-icontains$name){continue}
+            $value=[Environment]::GetEnvironmentVariable($name,'Process')
+            if($null-ne$value){$environment[$name]=[string]$value}
+        }
+    }
+    $environment
+}
 
 function Throw-GateResult([string]$State, [string]$Message) { throw "$State|$Message" }
 function Get-GateSha256([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() }
@@ -79,8 +151,8 @@ function Test-GateBytesEqual([string]$Left,[string]$Right) {
     (Get-GateSha256 $Left)-ceq(Get-GateSha256 $Right)
 }
 # The shrink-only exception gate is defined near the end of this module.
-# This five-line placeholder preserves all existing production AST locations.
-# UnitT32 relies on those line and column positions for its closed inventory.
+# This five-line placeholder keeps unrelated exception helpers out of earlier code.
+# UnitT32 records exact cleanup locations and must move with intentional edits.
 # Keep new exception-gate helpers immediately before Export-ModuleMember.
 # Do not add or remove lines in this placeholder.
 function Copy-GateTrustedFile([string]$Source,[string]$Destination) {
@@ -176,30 +248,28 @@ function Install-GatePowerShell([string]$AuthorityRoot,[string]$WorkRoot,[string
 function Invoke-GateResolver([string]$PowerShell,[string]$AuthorityRoot,[string]$InstallRoot,[string]$Tool,[string]$RunId,[string]$OutputPath,`
     [string]$GoVersion,[string]$Token) {
     try{
+        $budget=Get-GateDeadlineBudget
         $resolverPath=if([string]::IsNullOrWhiteSpace($env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH)){
             Join-Path $AuthorityRoot 'scripts/Resolve-StandardValidationTool.ps1'
         }else{[IO.Path]::GetFullPath($env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH)}
         if(-not(Test-Path -LiteralPath $resolverPath -PathType Leaf)){Throw-GateResult INVALID 'Resolver executable source is invalid.'}
         $arguments = @('-NoProfile','-NonInteractive','-File',$resolverPath,
             '-PolicyPath',(Join-Path $AuthorityRoot 'docs/standards/validation-toolchain.json'),'-ToolName',$Tool,'-Install',
-            '-InstallRoot',$InstallRoot,'-ExpectedGoRuntimeVersion',$GoVersion,'-RunId',$RunId,'-OutputPath',$OutputPath)
-        $start=[Diagnostics.ProcessStartInfo]::new()
-        $start.FileName=$PowerShell
-        $start.UseShellExecute=$false
-        $start.RedirectStandardOutput=$true
-        $start.RedirectStandardError=$true
-        foreach($argument in $arguments){[void]$start.ArgumentList.Add($argument)}
-        $preserved=@{}
-        foreach($name in @('PATH','Path','PATHEXT','SystemRoot','WINDIR','TEMP','TMP','TMPDIR','HOME','USERPROFILE','PSModulePath','PSExecutionPolicyPreference',
-                'ProgramFiles','ProgramFiles(x86)','ProgramW6432','ProgramData','LOCALAPPDATA','APPDATA')){
-            $value=[Environment]::GetEnvironmentVariable($name,'Process');if($null-ne$value){$preserved[$name]=$value}
-        }
-        $start.Environment.Clear()
-        foreach($name in $preserved.Keys){$start.Environment[$name]=[string]$preserved[$name]}
-        if(-not[string]::IsNullOrEmpty($Token)){$start.Environment['STANDARD_VALIDATION_GITHUB_API_TOKEN']=$Token}
-        $process=[Diagnostics.Process]::new()
-        try{$process.StartInfo=$start;[void]$process.Start();$stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
-            $process.WaitForExit();$standardOutput=$stdout.GetAwaiter().GetResult();$standardError=$stderr.GetAwaiter().GetResult();$exitCode=$process.ExitCode
+            '-InstallRoot',$InstallRoot,'-ExpectedGoRuntimeVersion',$GoVersion,'-RunId',$RunId,'-OutputPath',$OutputPath,
+            '-AcquisitionTimeoutSeconds',([string]$budget.resolverAcquisitionSeconds))
+        $preservedNames=@('PATH','Path','PATHEXT','SystemRoot','WINDIR','TEMP','TMP','TMPDIR','HOME','USERPROFILE','PSModulePath',
+            'PSExecutionPolicyPreference','ProgramFiles','ProgramFiles(x86)','ProgramW6432','ProgramData','LOCALAPPDATA','APPDATA')
+        $environment=New-GateChildEnvironment $preservedNames
+        if(-not[string]::IsNullOrEmpty($Token)){$environment['STANDARD_VALIDATION_GITHUB_API_TOKEN']=$Token}
+        $runtime=Import-GatePlatformRuntime $AuthorityRoot
+        $standardOutput='';$standardError='';$executionFailure=$null;$exitCode=$null;$credentialLeak=$false
+        try{
+            try{
+                $result=& $runtime.ExportedCommands['Invoke-PlatformPreparationCommand'] -Command $PowerShell -Arguments $arguments `
+                    -Environment $environment -WorkingDirectory (Split-Path -Parent $OutputPath) `
+                    -TimeoutMilliseconds (($budget.resolverAcquisitionSeconds+$budget.resolverProcessGraceSeconds)*1000)
+                $standardOutput=[string]$result.stdout;$standardError=[string]$result.stderr;$exitCode=[int]$result.exitCode
+            }catch{$executionFailure=$_;$standardError=[string]$_.Exception.Message}
             $credentialLeak=-not[string]::IsNullOrEmpty($Token)-and($standardOutput.Contains($Token,[StringComparison]::Ordinal)-or
                 $standardError.Contains($Token,[StringComparison]::Ordinal))
             if(-not[string]::IsNullOrEmpty($Token)){$standardOutput=$standardOutput.Replace($Token,'[REDACTED]');$standardError=$standardError.Replace($Token,'[REDACTED]')}
@@ -209,10 +279,13 @@ function Invoke-GateResolver([string]$PowerShell,[string]$AuthorityRoot,[string]
             Write-GateDiagnosticTextCreateOnly (Join-Path $diagnostics "resolver-$Tool.stderr.txt") $standardError
             [Console]::Out.Write($standardOutput);[Console]::Error.Write($standardError)
             if($credentialLeak){Throw-GateResult FAILED 'Resolver output contained a credential sentinel.'}
-            if($exitCode-ne0){Throw-GateResult FAILED "Resolver failed for $Tool. Diagnostics were preserved."}}
-        finally{[void]$start.Environment.Remove('STANDARD_VALIDATION_GITHUB_API_TOKEN');$preserved.Clear();$start.Environment.Clear()
-            $standardOutput=$null;$standardError=$null;$stdout=$null;$stderr=$null;$credentialLeak=$null;$process.Dispose();$start=$null;$Token=$null
-            Remove-Variable standardOutput,standardError,stdout,stderr,credentialLeak,preserved,process,start,Token -ErrorAction SilentlyContinue}
+            if($null-ne$executionFailure){Throw-GateResult FAILED "Resolver owned process failed for $Tool. $standardError Diagnostics were preserved."}
+            if($exitCode-ne0){Throw-GateResult FAILED "Resolver failed for $Tool. Diagnostics were preserved."}
+        }finally{
+            [void]$environment.Remove('STANDARD_VALIDATION_GITHUB_API_TOKEN');$environment.Clear()
+            $standardOutput=$null;$standardError=$null;$credentialLeak=$null;$executionFailure=$null;$result=$null;$runtime=$null;$Token=$null
+            Remove-Variable standardOutput,standardError,credentialLeak,executionFailure,result,runtime,environment,Token -ErrorAction SilentlyContinue
+        }
     }finally{foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,$null,'Process')}
     $Token=$null
     Remove-Variable Token -ErrorAction SilentlyContinue}
@@ -375,6 +448,7 @@ function Assert-GateAdapterExecutableBindings([object[]]$Checks,$Setup) {
     }
 }
 function Invoke-GateValidation([string]$AuthorityRoot,[string]$CandidateRoot,[string]$WorkRoot,$Binding,$Config,[string]$PowerShell) {
+    $budget=Get-GateDeadlineBudget
     $setup=Read-GateJson (Join-Path $WorkRoot 'source-tools.json') 'source tool setup'
     $adapter=Join-Path $WorkRoot 'consumer-core-adapter.json'
     New-GateAdapter $adapter $Config $setup $PowerShell
@@ -387,20 +461,25 @@ function Invoke-GateValidation([string]$AuthorityRoot,[string]$CandidateRoot,[st
         $CandidateRoot,'-AdapterPath',$adapter,'-ArtifactsRoot',$artifacts,'-OutputPath',$output,'-SourceRepository',
         ([string]$Config.sourceRepository),'-SourceRevision',([string]$Binding.candidateRevision),'-BaseRevision',([string]$Binding.baseRevision),
         '-EventName',([string]$Binding.canonicalEvent),'-RunId',([string]$Binding.runId),'-AuthorityRevision',([string]$Binding.commit),
-        '-TrustedToolRoot',([string]$setup.trustedRoot),'-SourceValidation','-TimeoutSeconds','1800')
-    $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$PowerShell;$start.UseShellExecute=$false
-    $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
-    foreach($argument in $arguments){[void]$start.ArgumentList.Add($argument)}
-    foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[void]$start.Environment.Remove($name)}
-    $process=[Diagnostics.Process]::new()
-    try{$process.StartInfo=$start;[void]$process.Start();$stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
-        $process.WaitForExit();$standardOutput=$stdout.GetAwaiter().GetResult();$standardError=$stderr.GetAwaiter().GetResult();$exitCode=$process.ExitCode
+        '-TrustedToolRoot',([string]$setup.trustedRoot),'-SourceValidation','-TimeoutSeconds',([string]$budget.validatorSeconds))
+    $credentialNames=@('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')
+    $environment=New-GateChildEnvironment $null $credentialNames
+    $runtime=Import-GatePlatformRuntime $AuthorityRoot
+    $standardOutput='';$standardError='';$executionFailure=$null;$exitCode=$null
+    try{
+        try{
+            $result=& $runtime.ExportedCommands['Invoke-PlatformPreparationCommand'] -Command $PowerShell -Arguments $arguments `
+                -Environment $environment -WorkingDirectory $WorkRoot `
+                -TimeoutMilliseconds (($budget.validatorSeconds+$budget.validatorProcessGraceSeconds)*1000)
+            $standardOutput=[string]$result.stdout;$standardError=[string]$result.stderr;$exitCode=[int]$result.exitCode
+        }catch{$executionFailure=$_;$standardError=[string]$_.Exception.Message}
         Write-GateDiagnosticTextCreateOnly (Join-Path $artifacts 'validator.stdout.txt') $standardOutput
         Write-GateDiagnosticTextCreateOnly (Join-Path $artifacts 'validator.stderr.txt') $standardError
         [Console]::Out.Write($standardOutput);[Console]::Error.Write($standardError)
+        if($null-ne$executionFailure){Throw-GateResult FAILED "Validator owned process failed. $standardError Diagnostics were preserved."}
         if($exitCode-ne0){Throw-GateResult FAILED "Validator failed with exit code $exitCode. Diagnostics were preserved."}
-    }finally{$standardOutput=$null;$standardError=$null;$stdout=$null;$stderr=$null;$start.Environment.Clear();$process.Dispose()
-        Remove-Variable standardOutput,standardError,stdout,stderr,start,process -ErrorAction SilentlyContinue}
+    }finally{$environment.Clear();$standardOutput=$null;$standardError=$null;$executionFailure=$null;$result=$null;$runtime=$null
+        Remove-Variable standardOutput,standardError,executionFailure,result,runtime,environment -ErrorAction SilentlyContinue}
     $report=Read-GateJson $output 'source validation evidence'
     if([string]$report.state-cne'PASS'-or[bool]$report.releaseEligible){Throw-GateResult FAILED 'Source validation evidence is not a passing source result.'}
     Write-GateJsonCreateOnly (Join-Path $WorkRoot 'validated-report-binding.json') ([ordered]@{schemaVersion=1
@@ -563,17 +642,81 @@ function New-GateGitHooksDirectory(
     $item.FullName
 }
 
-function Initialize-GateGitHooks([string]$WorkRoot) {
+function Initialize-GateGitHooks([string]$WorkRoot,[string]$AuthorityRoot=([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..')))) {
     if ($null -ne $script:GateGitHooksPath) { Throw-GateResult INVALID 'Git hooks isolation was initialized more than once.' }
     $script:GateGitHooksPath = New-GateGitHooksDirectory $WorkRoot
+    $captureName='git-process-capture-'+[guid]::NewGuid().ToString('N')
+    $script:GateGitCaptureRoot=Join-Path $WorkRoot $captureName
+    [void][IO.Directory]::CreateDirectory($script:GateGitCaptureRoot)
+    $script:GateGitRemainingMilliseconds=[long](Get-GateDeadlineBudget).gitReserveSeconds*1000
+    [void](Import-GatePlatformRuntime $AuthorityRoot)
+}
+
+function Invoke-GateOwnedGitCapture([string]$Root,[string[]]$Arguments,[switch]$ByteExact) {
+    if($null-eq$script:GatePlatformRuntimeModule-or[string]::IsNullOrWhiteSpace($script:GateGitCaptureRoot)-or
+        $null-eq$script:GateGitRemainingMilliseconds){Throw-GateResult INVALID 'Git owned-process runtime is not initialized.'}
+    $budget=Get-GateDeadlineBudget
+    $limit=[Math]::Min([long]$budget.gitCommandSeconds*1000,[long]$script:GateGitRemainingMilliseconds)
+    if($limit-lt1){Throw-GateResult FAILED 'Git phase deadline was exhausted.'}
+    $git=(Get-Command git -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
+    $environment=New-GateChildEnvironment $null @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')
+    $id=[guid]::NewGuid().ToString('N')
+    $stdoutPath=Join-Path $script:GateGitCaptureRoot "$id.stdout"
+    $stderrPath=Join-Path $script:GateGitCaptureRoot "$id.stderr"
+    $bytePath=if($ByteExact){Join-Path $script:GateGitCaptureRoot "$id.bytes"}else{$null}
+    $workingDirectory=$null;$lease=$null;$stopwatch=[Diagnostics.Stopwatch]::StartNew()
+    try{
+        $workingDirectory=& $script:GatePlatformRuntimeModule.ExportedCommands['Open-PlatformDirectory'] -Root $Root -RootOnly
+        $deadline=[DateTimeOffset]::UtcNow.AddMilliseconds($limit)
+        $executable=$git;$ownedArguments=$Arguments
+        if($ByteExact){
+            $executable=(Get-Process -Id $PID).Path
+            $payload=[Convert]::ToBase64String([Text.UTF8Encoding]::new($false).GetBytes(($Arguments|ConvertTo-Json -Compress)))
+            $ownedArguments=@('-NoProfile','-NonInteractive','-File',(Join-Path $PSScriptRoot 'Invoke-GateGitByteCapture.ps1'),
+                '-GitPath',$git,'-OutputPath',$bytePath,'-GitArgumentsBase64',$payload)
+        }
+        $lease=& $script:GatePlatformRuntimeModule.ExportedCommands['Start-PlatformOwnedProcess'] -ExecutablePath $executable `
+            -ArgumentList $ownedArguments -Environment $environment -WorkingDirectoryLease $workingDirectory -Deadline $deadline `
+            -StdoutPath $stdoutPath -StderrPath $stderrPath -OutputLimitCharacters 1048576 -ArgumentZero $executable
+        while(-not($lease.HasExited-and$lease.CaptureCompletedNaturally)-and$null-eq$lease.Cleanup-and[DateTimeOffset]::UtcNow-lt$deadline){
+            Start-Sleep -Milliseconds 10
+        }
+        $timedOut=[DateTimeOffset]::UtcNow-ge$deadline-or$lease.TerminationReason-ceq'deadline'
+        $reason=$lease.TerminationReason
+        try{$cleanup=& $script:GatePlatformRuntimeModule.ExportedCommands['Stop-PlatformOwnedProcess'] -Lease $lease `
+            -GracePeriod ([TimeSpan]::FromMilliseconds(100)) -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(2)) `
+            -ExpectedStartIdentity $lease.StartIdentity}catch{Throw-GateResult FAILED "Git owned-process cleanup failed: $($_.Exception.Message)"}
+        if(-not$cleanup.CleanedUp){Throw-GateResult FAILED "Git owned-process cleanup is unconfirmed: $($cleanup.Uncertainty)"}
+        if($timedOut){Throw-GateResult FAILED "Git command exceeded its bounded deadline of $([Math]::Ceiling($limit/1000)) seconds."}
+        if($lease.OutputLimitExceeded){Throw-GateResult FAILED 'Git owned-process output exceeded the 1,048,576-character stream limit.'};if($reason-notin@($null,'')){Throw-GateResult FAILED "Git owned-process capture failed: $reason"}
+        $resultPath=if($ByteExact){$bytePath}else{$stdoutPath}
+        if(-not[IO.File]::Exists($resultPath)){Throw-GateResult FAILED 'Git owned-process output capture is missing.'}
+        if(([IO.FileInfo]::new($resultPath)).Length-gt[int]::MaxValue){Throw-GateResult FAILED 'Git byte output exceeds the supported 2 GiB read bound.'}
+        [pscustomobject]@{ExitCode=[int]$lease.ExitCode
+            StdoutBytes=[IO.File]::ReadAllBytes($resultPath)
+            StderrBytes=[IO.File]::ReadAllBytes($stderrPath)
+            ProcessOwnership=$cleanup}
+    }finally{
+        $stopwatch.Stop()
+        $script:GateGitRemainingMilliseconds=[Math]::Max(0,[long]$script:GateGitRemainingMilliseconds-[long]$stopwatch.ElapsedMilliseconds)
+        if($null-ne$lease){$lease.Dispose()}
+        if($null-ne$workingDirectory){$workingDirectory.Dispose()}
+        $environment.Clear()
+        foreach($path in @($stdoutPath,$stderrPath,$bytePath)){if(-not[string]::IsNullOrWhiteSpace($path)-and[IO.File]::Exists($path)){[IO.File]::Delete($path)}}
+    }
 }
 
 function Invoke-GateGit([string]$Root,[string[]]$Arguments,[int[]]$Allowed=@(0)) {
     if ([string]::IsNullOrWhiteSpace($script:GateGitHooksPath)) { Throw-GateResult INVALID 'Git hooks isolation is not initialized.' }
     foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,$null,'Process');Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue}
-    $output = @(& git -c "core.hooksPath=$script:GateGitHooksPath" -c protocol.file.allow=never `
-        -c credential.helper= -C $Root @Arguments 2>&1)
-    $exit = $LASTEXITCODE
+    $run=Invoke-GateOwnedGitCapture $Root (@('-c',"core.hooksPath=$script:GateGitHooksPath",'-c','protocol.file.allow=never',
+            '-c','credential.helper=','-C',$Root)+$Arguments) -ByteExact
+    try{
+        $encoding=[Text.UTF8Encoding]::new($false,$true)
+        $stdoutText=$encoding.GetString($run.StdoutBytes);$stderrText=$encoding.GetString($run.StderrBytes);$text=$stdoutText+$(if($stdoutText.Length-gt0-and$stderrText.Length-gt0-and-not$stdoutText.EndsWith("`n",[StringComparison]::Ordinal)){"`n"}else{''})+$stderrText
+    }catch{Throw-GateResult INVALID 'git output was not valid UTF-8.'}
+    $output=if([string]::IsNullOrEmpty($text)){@()}else{@($text.TrimEnd("`r","`n")-split"`r?`n")}
+    $exit = $run.ExitCode
     if ($exit -notin $Allowed) { Throw-GateResult INVALID "git failed ($exit): $($output -join ' ')" }
     [pscustomobject]@{ ExitCode=$exit
      Output=$output }
@@ -919,9 +1062,10 @@ function Assert-GateCredentialAbsent([string]$Root,[string]$Token) {
 
 function Invoke-GateAcquisitionRequest([string]$Operation,[uri]$Uri,[hashtable]$Headers,[string]$Destination,`
     [string[]]$ApprovedHosts,[string]$AuthorizationHost,[bool]$AllowLoopbackHttp) {
-    $timeoutSeconds=if([string]::IsNullOrWhiteSpace($env:CONSUMER_GATE_ACQUISITION_TIMEOUT_SECONDS)){100}else{
+    $budget=Get-GateDeadlineBudget
+    $timeoutSeconds=if([string]::IsNullOrWhiteSpace($env:CONSUMER_GATE_ACQUISITION_TIMEOUT_SECONDS)){[int]$budget.acquisitionRequestDefaultSeconds}else{
         [int]$env:CONSUMER_GATE_ACQUISITION_TIMEOUT_SECONDS}
-    if($timeoutSeconds-lt1-or$timeoutSeconds-gt600){Throw-GateResult INVALID 'Acquisition timeout setting is invalid.'}
+    if($timeoutSeconds-lt1-or$timeoutSeconds-gt$budget.acquisitionRequestSeconds){Throw-GateResult INVALID 'Acquisition timeout setting is invalid.'}
     $cancelPath=[string]$env:CONSUMER_GATE_ACQUISITION_CANCEL_PATH
     $handler=[Net.Http.HttpClientHandler]::new()
     $handler.AllowAutoRedirect=$false
@@ -1027,20 +1171,13 @@ function Invoke-GateGitBytes([string]$Root,[string[]]$Arguments) {
     foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){
         [Environment]::SetEnvironmentVariable($name,$null,'Process');Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
     }
-    $start=[Diagnostics.ProcessStartInfo]::new()
-    $start.FileName=(Get-Command git -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
-    $start.UseShellExecute=$false;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
-    foreach($argument in @('-c',"core.hooksPath=$script:GateGitHooksPath",'-c','protocol.file.allow=never','-c','credential.helper=',`
-        '-C',$Root)+$Arguments){[void]$start.ArgumentList.Add($argument)}
-    foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[void]$start.Environment.Remove($name)}
-    $process=[Diagnostics.Process]::new();$memory=[IO.MemoryStream]::new()
-    try{
-        $process.StartInfo=$start;[void]$process.Start()
-        $stdout=$process.StandardOutput.BaseStream.CopyToAsync($memory);$stderr=$process.StandardError.ReadToEndAsync()
-        $process.WaitForExit();[void]$stdout.GetAwaiter().GetResult();$errorText=$stderr.GetAwaiter().GetResult()
-        if($process.ExitCode-ne0){Throw-GateResult INVALID "git failed ($($process.ExitCode)): $errorText"}
-        Write-Output -NoEnumerate $memory.ToArray()
-    }finally{$memory.Dispose();$process.Dispose()}
+    $run=Invoke-GateOwnedGitCapture $Root (@('-c',"core.hooksPath=$script:GateGitHooksPath",'-c','protocol.file.allow=never',
+            '-c','credential.helper=','-C',$Root)+$Arguments)
+    if($run.ExitCode-ne0){
+        try{$errorText=[Text.UTF8Encoding]::new($false,$true).GetString($run.StderrBytes)}catch{$errorText='stderr was not valid UTF-8'}
+        Throw-GateResult INVALID "git failed ($($run.ExitCode)): $errorText"
+    }
+    Write-Output -NoEnumerate ([byte[]]$run.StdoutBytes)
 }
 function Get-GateExceptionScope {
     [pscustomobject]@{RegistryPath='config/skillspector-exceptions.json';BaselinePrefix='config/skillspector-exceptions/'}
