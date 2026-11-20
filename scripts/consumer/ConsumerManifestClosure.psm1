@@ -162,8 +162,9 @@ function Invoke-ClosureOwnedGitBytes {
         if ($reason -notin @($null, '')) { throw "Manifest closure Git capture failed: $reason" }
         if (-not [IO.File]::Exists($bytePath)) { throw 'Manifest closure Git byte capture is missing.' }
         if (([IO.FileInfo]::new($bytePath)).Length -gt [int]::MaxValue) { throw 'Manifest closure Git byte output exceeds the supported 2 GiB read bound.' }
+        if ($lease.ExitCode -isnot [int] -and $lease.ExitCode -isnot [long]) { throw 'git exit status is unknown.' }
         [pscustomobject]@{
-            ExitCode = [int]$lease.ExitCode
+            ExitCode = $lease.ExitCode
             Bytes = [IO.File]::ReadAllBytes($bytePath)
             Error = [Text.UTF8Encoding]::new($false, $true).GetString([IO.File]::ReadAllBytes($stderrPath))
         }
@@ -201,10 +202,13 @@ function Invoke-ClosureGitBytes {
     } else {
         $run = Invoke-ClosureOwnedGitBytes -RepositoryRoot $RepositoryRoot -Arguments $Arguments
         $bytes = [byte[]]$run.Bytes
-        $exitCode = [int]$run.ExitCode
+        $exitCode = $run.ExitCode
         $errorText = [string]$run.Error
     }
 
+    if ($exitCode -isnot [int] -and $exitCode -isnot [long]) {
+        throw 'git exit status is unknown.'
+    }
     if ($exitCode -notin $AllowedExitCodes) {
         throw "git failed ($exitCode): $errorText"
     }

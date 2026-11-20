@@ -31,7 +31,9 @@ try{
     $stderrCopy=$process.StandardError.BaseStream.CopyToAsync($stderr)
     $process.WaitForExit()
     $stdoutCopy.GetAwaiter().GetResult();$stderrCopy.GetAwaiter().GetResult();$output.Flush($true)
-    exit $process.ExitCode
+    $exitCode=$process.ExitCode
+    if($exitCode-isnot[int]-and$exitCode-isnot[long]){throw 'git exit status is unknown.'}
+    exit $exitCode
 }finally{
     if($null-ne$output){$output.Dispose()}
     if($null-ne$stderr){$stderr.Dispose()}

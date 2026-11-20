@@ -268,7 +268,7 @@ function Invoke-GateResolver([string]$PowerShell,[string]$AuthorityRoot,[string]
                 $result=& $runtime.ExportedCommands['Invoke-PlatformPreparationCommand'] -Command $PowerShell -Arguments $arguments `
                     -Environment $environment -WorkingDirectory (Split-Path -Parent $OutputPath) `
                     -TimeoutMilliseconds (($budget.resolverAcquisitionSeconds+$budget.resolverProcessGraceSeconds)*1000)
-                $standardOutput=[string]$result.stdout;$standardError=[string]$result.stderr;$exitCode=[int]$result.exitCode
+                $standardOutput=[string]$result.stdout;$standardError=[string]$result.stderr;$exitCode=$result.exitCode
             }catch{$executionFailure=$_;$standardError=[string]$_.Exception.Message}
             $credentialLeak=-not[string]::IsNullOrEmpty($Token)-and($standardOutput.Contains($Token,[StringComparison]::Ordinal)-or
                 $standardError.Contains($Token,[StringComparison]::Ordinal))
@@ -280,7 +280,7 @@ function Invoke-GateResolver([string]$PowerShell,[string]$AuthorityRoot,[string]
             [Console]::Out.Write($standardOutput);[Console]::Error.Write($standardError)
             if($credentialLeak){Throw-GateResult FAILED 'Resolver output contained a credential sentinel.'}
             if($null-ne$executionFailure){Throw-GateResult FAILED "Resolver owned process failed for $Tool. $standardError Diagnostics were preserved."}
-            if($exitCode-ne0){Throw-GateResult FAILED "Resolver failed for $Tool. Diagnostics were preserved."}
+            if($exitCode-isnot[int]-and$exitCode-isnot[long]){Throw-GateResult FAILED 'Resolver exit status is unknown.'};if($exitCode-ne0){Throw-GateResult FAILED "Resolver failed for $Tool. Diagnostics were preserved."}
         }finally{
             [void]$environment.Remove('STANDARD_VALIDATION_GITHUB_API_TOKEN');$environment.Clear()
             $standardOutput=$null;$standardError=$null;$credentialLeak=$null;$executionFailure=$null;$result=$null;$runtime=$null;$Token=$null
@@ -471,13 +471,13 @@ function Invoke-GateValidation([string]$AuthorityRoot,[string]$CandidateRoot,[st
             $result=& $runtime.ExportedCommands['Invoke-PlatformPreparationCommand'] -Command $PowerShell -Arguments $arguments `
                 -Environment $environment -WorkingDirectory $WorkRoot `
                 -TimeoutMilliseconds (($budget.validatorSeconds+$budget.validatorProcessGraceSeconds)*1000)
-            $standardOutput=[string]$result.stdout;$standardError=[string]$result.stderr;$exitCode=[int]$result.exitCode
+            $standardOutput=[string]$result.stdout;$standardError=[string]$result.stderr;$exitCode=$result.exitCode
         }catch{$executionFailure=$_;$standardError=[string]$_.Exception.Message}
         Write-GateDiagnosticTextCreateOnly (Join-Path $artifacts 'validator.stdout.txt') $standardOutput
         Write-GateDiagnosticTextCreateOnly (Join-Path $artifacts 'validator.stderr.txt') $standardError
         [Console]::Out.Write($standardOutput);[Console]::Error.Write($standardError)
         if($null-ne$executionFailure){Throw-GateResult FAILED "Validator owned process failed. $standardError Diagnostics were preserved."}
-        if($exitCode-ne0){Throw-GateResult FAILED "Validator failed with exit code $exitCode. Diagnostics were preserved."}
+        if($exitCode-isnot[int]-and$exitCode-isnot[long]){Throw-GateResult FAILED 'Validator exit status is unknown.'};if($exitCode-ne0){Throw-GateResult FAILED "Validator failed with exit code $exitCode. Diagnostics were preserved."}
     }finally{$environment.Clear();$standardOutput=$null;$standardError=$null;$executionFailure=$null;$result=$null;$runtime=$null
         Remove-Variable standardOutput,standardError,executionFailure,result,runtime,environment -ErrorAction SilentlyContinue}
     $report=Read-GateJson $output 'source validation evidence'
@@ -700,8 +700,8 @@ function Invoke-GateOwnedGitCapture([string]$Root,[string[]]$Arguments,[switch]$
         if($lease.OutputLimitExceeded){Throw-GateResult FAILED 'Git owned-process output exceeded the 1,048,576-character stream limit.'};if($reason-notin@($null,'')){Throw-GateResult FAILED "Git owned-process capture failed: $reason"}
         $resultPath=if($ByteExact){$bytePath}else{$stdoutPath}
         if(-not[IO.File]::Exists($resultPath)){Throw-GateResult FAILED 'Git owned-process output capture is missing.'}
-        if(([IO.FileInfo]::new($resultPath)).Length-gt[int]::MaxValue){Throw-GateResult FAILED 'Git byte output exceeds the supported 2 GiB read bound.'}
-        [pscustomobject]@{ExitCode=[int]$lease.ExitCode
+        if(([IO.FileInfo]::new($resultPath)).Length-gt[int]::MaxValue){Throw-GateResult FAILED 'Git byte output exceeds the supported 2 GiB read bound.'};if($lease.ExitCode-isnot[int]-and$lease.ExitCode-isnot[long]){Throw-GateResult FAILED 'git exit status is unknown.'}
+        [pscustomobject]@{ExitCode=$lease.ExitCode
             StdoutBytes=[IO.File]::ReadAllBytes($resultPath)
             StderrBytes=[IO.File]::ReadAllBytes($stderrPath)
             ProcessOwnership=$cleanup}
@@ -725,7 +725,7 @@ function Invoke-GateGit([string]$Root,[string[]]$Arguments,[int[]]$Allowed=@(0))
         $stdoutText=$encoding.GetString($run.StdoutBytes);$stderrText=$encoding.GetString($run.StderrBytes);$text=$stdoutText+$(if($stdoutText.Length-gt0-and$stderrText.Length-gt0-and-not$stdoutText.EndsWith("`n",[StringComparison]::Ordinal)){"`n"}else{''})+$stderrText
     }catch{Throw-GateResult INVALID 'git output was not valid UTF-8.'}
     $output=if([string]::IsNullOrEmpty($text)){@()}else{@($text.TrimEnd("`r","`n")-split"`r?`n")}
-    $exit = $run.ExitCode
+    $exit = $run.ExitCode;if($exit-isnot[int]-and$exit-isnot[long]){Throw-GateResult FAILED 'git exit status is unknown.'}
     if ($exit -notin $Allowed) { Throw-GateResult INVALID "git failed ($exit): $($output -join ' ')" }
     [pscustomobject]@{ ExitCode=$exit
      Output=[string[]]@($output) }
@@ -1182,7 +1182,7 @@ function Invoke-GateGitBytes([string]$Root,[string[]]$Arguments) {
     }
     $run=Invoke-GateOwnedGitCapture $Root (@('-c',"core.hooksPath=$script:GateGitHooksPath",'-c','protocol.file.allow=never',
             '-c','credential.helper=','-C',$Root)+$Arguments) -ByteExact
-    if($run.ExitCode-ne0){
+    if($run.ExitCode-isnot[int]-and$run.ExitCode-isnot[long]){Throw-GateResult FAILED 'git exit status is unknown.'};if($run.ExitCode-ne0){
         try{$errorText=[Text.UTF8Encoding]::new($false,$true).GetString($run.StderrBytes)}catch{$errorText='stderr was not valid UTF-8'}
         Throw-GateResult INVALID "git failed ($($run.ExitCode)): $errorText"
     }

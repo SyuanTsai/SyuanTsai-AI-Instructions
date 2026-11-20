@@ -3126,6 +3126,66 @@ Start-Sleep -Seconds 30
         }
     }
 
+    # Scenario: Every consumer owned-process seam reports an unknown exit status after the child has otherwise completed.
+    # Purpose: A null or non-integral exit status must never be coerced to zero or accepted as a successful resolver, validator, Git, byte-Git, or standalone closure result.
+    It 'UnitT49c_rejects_unknown_owned_process_exit_statuses' {
+        $root=Join-Path $TestDrive 'unknown-owned-process-exit'
+        $authority=Join-Path $root 'authority';$install=Join-Path $root 'install';$source=Join-Path $root 'source'
+        foreach($directory in @($authority,$install,$source,(Join-Path $authority 'docs/standards'),(Join-Path $authority 'scripts'))){
+            [void][IO.Directory]::CreateDirectory($directory)
+        }
+        [IO.File]::WriteAllText((Join-Path $authority 'docs/standards/validation-toolchain.json'),'{}',[Text.UTF8Encoding]::new($false))
+        $resolver=Join-Path $root 'resolver.ps1';[IO.File]::WriteAllText($resolver,'exit 0',[Text.UTF8Encoding]::new($false))
+        $oldResolver=$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH;$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$resolver
+        Mock Import-GatePlatformRuntime {[pscustomobject]@{ExportedCommands=@{
+                    'Invoke-PlatformPreparationCommand'={ [pscustomobject]@{stdout='';stderr='';exitCode=$null} }
+                }}} -ModuleName ConsumerGate
+        try{
+            {Invoke-GateResolver (Get-Process -Id $PID).Path $authority $install pester ('a'*32) `
+                    (Join-Path $source 'receipt-pester.json') latest ''}|Should Throw 'Resolver exit status is unknown.'
+
+            $candidate=Join-Path $root 'candidate';$work=Join-Path $root 'work';$trustedRoot=Join-Path $root 'trusted-runtime'
+            $trustedDirectory=Join-Path $trustedRoot 'trusted'
+            foreach($directory in @($candidate,$work,$trustedDirectory,(Join-Path $work 'validation-artifacts'))){[void][IO.Directory]::CreateDirectory($directory)}
+            $check=Join-Path $trustedDirectory 'Invoke-ConsumerRepositoryCheck.ps1';[IO.File]::WriteAllText($check,'exit 0',[Text.UTF8Encoding]::new($false))
+            $checkHash=(Get-FileHash $check -Algorithm SHA256).Hash.ToLowerInvariant()
+            Write-FixtureJson (Join-Path $work 'source-tools.json') ([ordered]@{trustedRoot=$trustedRoot;repositoryCheck=$check
+                    pesterReceiptSha256=('b'*64);pesterManifestSha256=('c'*64);pesterVersion='6.2.0'
+                    sourceValidation=[ordered]@{frozenFiles=@([ordered]@{path=$check;sha256=$checkHash})}})
+            [IO.File]::WriteAllText((Join-Path $authority 'scripts/Invoke-StandardValidation.ps1'),'exit 0',[Text.UTF8Encoding]::new($false))
+            $binding=[pscustomobject]@{candidateRevision=('d'*40);baseRevision=('e'*40);canonicalEvent='pull_request';runId=('f'*32);commit=('1'*40)}
+            $config=[pscustomobject]@{sourceRepository='https://example.test/fixture.git';activeSkills=@('fixture')}
+            {Invoke-GateValidation $authority $candidate $work $binding $config (Get-Process -Id $PID).Path}|Should Throw 'Validator exit status is unknown.'
+        }finally{$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$oldResolver}
+
+        Mock Invoke-GateOwnedGitCapture {[pscustomobject]@{ExitCode=$null;StdoutBytes=[byte[]]::new(0);StderrBytes=[byte[]]::new(0)}} -ModuleName ConsumerGate
+        InModuleScope ConsumerGate {$script:GateGitHooksPath='fixture'}
+        {Invoke-GateGit $script:RepositoryRoot @('rev-parse','HEAD')}|Should Throw 'git exit status is unknown.'
+        {Invoke-GateGitBytes $script:RepositoryRoot @('rev-parse','HEAD')}|Should Throw 'git exit status is unknown.'
+
+        Import-Module (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1') -Force
+        Mock Invoke-ClosureOwnedGitBytes {[pscustomobject]@{ExitCode=$null;Bytes=[byte[]]::new(0);Error=''}} -ModuleName ConsumerManifestClosure
+        InModuleScope ConsumerManifestClosure {
+            $script:ClosureGitRuntime=[pscustomobject]@{}
+            {Invoke-ClosureGitBytes -RepositoryRoot $TestDrive -Arguments @('rev-parse','HEAD')}|Should Throw 'git exit status is unknown.'
+            $script:ClosureGitRuntime=$null
+        }
+
+        $helperText=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-GateGitByteCapture.ps1')
+        $mutantText=$helperText.Replace('$exitCode=$process.ExitCode','$exitCode=$null')
+        $mutantText|Should Not BeExactly $helperText
+        $helper=Join-Path $root 'Invoke-GateGitByteCapture-null-exit.ps1'
+        [IO.File]::WriteAllText($helper,$mutantText,[Text.UTF8Encoding]::new($false))
+        $output=Join-Path $root 'helper-output.bin'
+        $payload=[Convert]::ToBase64String([Text.UTF8Encoding]::new($false).GetBytes((@('--version')|ConvertTo-Json -Compress)))
+        $records=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $helper -GitPath `
+                (Get-Command git -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source -OutputPath $output `
+                -GitArgumentsBase64 $payload 2>&1)
+        $LASTEXITCODE|Should Not Be 0
+        ($records-join[Environment]::NewLine)|Should Match 'git exit status is unknown.'
+        Restore-GateFixtureModule
+    }
+
     # Scenario: Runtime and tool boundaries record events in prepare, then the production final report assertion records the final event.
     # Purpose: Execute control flow and prove a failed source-report prerequisite cannot record a later successful step.
     It 'UnitT50_preserves_runtime_tool_and_source_report_ordering' {
