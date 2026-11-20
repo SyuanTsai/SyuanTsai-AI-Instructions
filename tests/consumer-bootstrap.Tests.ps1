@@ -246,9 +246,9 @@ Start-Sleep -Seconds 30
         try{
             {Invoke-PinnedGit $root @('status') -TimeoutSeconds 1 -GitExecutable (Get-Process -Id $PID).Path `
                     -GitPrefixArguments @('-NoProfile','-NonInteractive','-File',$shim)}|Should Throw 'bounded deadline'
-            $pid=[int](Get-Content -Raw $pidPath);$deadline=[DateTime]::UtcNow.AddSeconds(5)
-            while($null-ne(Get-Process -Id $pid -ErrorAction SilentlyContinue)-and[DateTime]::UtcNow-lt$deadline){Start-Sleep -Milliseconds 25}
-            Get-Process -Id $pid -ErrorAction SilentlyContinue|Should BeNullOrEmpty
+            $descendantProcessId=[int](Get-Content -Raw $pidPath);$deadline=[DateTime]::UtcNow.AddSeconds(5)
+            while($null-ne(Get-Process -Id $descendantProcessId -ErrorAction SilentlyContinue)-and[DateTime]::UtcNow-lt$deadline){Start-Sleep -Milliseconds 25}
+            Get-Process -Id $descendantProcessId -ErrorAction SilentlyContinue|Should BeNullOrEmpty
         }finally{Remove-Item Env:BOOTSTRAP_GIT_DESCENDANT_PID -ErrorAction SilentlyContinue;Initialize-PinnedGitDeadline prepare}
     }
 
@@ -312,9 +312,9 @@ Start-Sleep -Seconds 30
         $fixture=New-SupervisorFixture $root $gate $contract;$env:SUPERVISOR_DESCENDANT_PID=$pidPath
         try{
             (Invoke-SupervisorFixture $fixture validate '' 1)|Should Be 20
-            $pid=[int](Get-Content -Raw $pidPath);$deadline=[DateTime]::UtcNow.AddSeconds(5)
-            while($null-ne(Get-Process -Id $pid -ErrorAction SilentlyContinue)-and[DateTime]::UtcNow-lt$deadline){Start-Sleep -Milliseconds 25}
-            Get-Process -Id $pid -ErrorAction SilentlyContinue|Should BeNullOrEmpty
+            $descendantProcessId=[int](Get-Content -Raw $pidPath);$deadline=[DateTime]::UtcNow.AddSeconds(5)
+            while($null-ne(Get-Process -Id $descendantProcessId -ErrorAction SilentlyContinue)-and[DateTime]::UtcNow-lt$deadline){Start-Sleep -Milliseconds 25}
+            Get-Process -Id $descendantProcessId -ErrorAction SilentlyContinue|Should BeNullOrEmpty
             $receipt=Get-ChildItem -LiteralPath (Join-Path $fixture.WorkRoot 'bootstrap-supervisor-diagnostics') `
                 -Filter 'validate-*.process.json'|Select-Object -First 1|Get-Content -Raw|ConvertFrom-Json
             $receipt.cleanup.cleanedUp|Should Be $true
@@ -373,7 +373,7 @@ exit 0
         }
 
         $bootstrapText = Get-Content -Raw -Encoding UTF8 $fixture.ModulePath
-        $suppressionAssignment = '$credentialLeak = $true'
+        $suppressionAssignment = '$credentialLeak=$true'
         ([regex]::Matches($bootstrapText,[regex]::Escape($suppressionAssignment))).Count | Should Be 1
         $mutantText = $bootstrapText.Replace($suppressionAssignment, '$credentialLeak = $false')
         $mutantText | Should Not Be $bootstrapText
@@ -982,6 +982,7 @@ exit 0
     # Scenario: Authority acquisition runs with isolated global Git config and produces a detached worktree with a persistent canonical origin.
     # Purpose: The validator's exact local-origin source-binding path must pass, while deleting the persistent-origin statement must reproduce the hosted-runner failure.
     It 'InterT75_persists_origin_for_validator_binding_with_isolated_git_config' {
+        Initialize-PinnedGitDeadline prepare
         $source=Join-Path $TestDrive 'origin-source'
         [void](New-AuthorityFixture $source)
         [void][IO.Directory]::CreateDirectory((Join-Path $source 'scripts'))
@@ -1003,6 +1004,7 @@ exit 0
         [IO.File]::WriteAllText($isolatedGlobal,'',[Text.UTF8Encoding]::new($false))
         $savedHome=$env:HOME;$savedGlobal=$env:GIT_CONFIG_GLOBAL;$savedPath=$env:PATH
         $savedHooks=$script:PinnedGitHooksPath
+        $savedGitExecutable=$script:PinnedGitExecutable
         $env:HOME=$isolatedHome;$env:GIT_CONFIG_GLOBAL=$isolatedGlobal
         try{
             $accepted=New-PinnedAuthority (Join-Path $TestDrive 'origin-accepted') $commit $sourceUrl -AllowFileProtocol
@@ -1059,6 +1061,8 @@ exit 0
             [IO.File]::WriteAllText($mutant,$mutantText,[Text.UTF8Encoding]::new($false))
             . $mutant -DefineFunctionsOnly
             $script:PinnedGitHooksPath=$savedHooks
+            $script:PinnedGitExecutable=$savedGitExecutable
+            Initialize-PinnedGitDeadline prepare
             $mutated=New-PinnedAuthority (Join-Path $TestDrive 'origin-mutated') $commit $sourceUrl -AllowFileProtocol
             {Invoke-StandardCoreGit -RepositoryRoot $mutated.Root -WorkingDirectory $mutated.Root `
                     -Arguments @('config','--local','--get-all','remote.origin.url')}|Should Throw 'Git source binding command failed'
@@ -1066,12 +1070,15 @@ exit 0
             $env:HOME=$savedHome;$env:GIT_CONFIG_GLOBAL=$savedGlobal;$env:PATH=$savedPath
             . $script:BootstrapPath -DefineFunctionsOnly
             $script:PinnedGitHooksPath=$savedHooks
+            $script:PinnedGitExecutable=$savedGitExecutable
+            Initialize-PinnedGitDeadline prepare
         }
     }
 
     # Scenario: An acquired authority worktree is modified, extended, or truncated after checkout.
     # Purpose: Revalidation rejects changed bytes, extra files, and missing files before another phase runs.
     It 'InterT80_rejects_authority_byte_extra_and_missing_file_drift' {
+        Initialize-PinnedGitDeadline prepare
         $source=Join-Path $TestDrive 'tree-source'
         $commit=New-AuthorityFixture $source
         $acquired=New-PinnedAuthority (Join-Path $TestDrive 'tree-acquired') $commit (ConvertTo-FixtureFileUrl $source) -AllowFileProtocol
@@ -1089,6 +1096,7 @@ exit 0
     # Scenario: Authority trees carry Git link or gitlink modes.
     # Purpose: Symlinks and submodules never become executable authority bytes.
     It 'InterT90_rejects_symlink_and_submodule_tree_modes' {
+        Initialize-PinnedGitDeadline prepare
         foreach($mode in @('120000','160000')){
             $source=Join-Path $TestDrive "unsafe-$mode"
             $base=New-AuthorityFixture $source

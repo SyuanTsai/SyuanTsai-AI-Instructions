@@ -1872,6 +1872,12 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|CONSUMER_GATE_PHASE_ENV_
         $expectedEquivalent=@'
 consumer/bootstrap/Invoke-PinnedAuthority.ps1:365:5|$bootstrapToken=$null
 consumer/bootstrap/Invoke-PinnedAuthority.ps1:365:27|$message=$null
+scripts/consumer/ConsumerBootstrapSupervisor.psm1:211:22|$sentinel=$null
+scripts/consumer/ConsumerBootstrapSupervisor.psm1:234:9|$standardOutput=$null
+scripts/consumer/ConsumerBootstrapSupervisor.psm1:234:31|$standardError=$null
+scripts/consumer/ConsumerBootstrapSupervisor.psm1:234:52|$sentinel=$null
+scripts/consumer/ConsumerBootstrapSupervisor.psm1:234:68|$Token=$null
+scripts/consumer/ConsumerBootstrapSupervisor.psm1:139:9|$Token=$null
 scripts/consumer/ConsumerGate.psm1:1121:13|$content=$null
 scripts/consumer/ConsumerGate.psm1:1124:9|$content=$null
 scripts/consumer/ConsumerGate.psm1:1124:24|$needle=$null

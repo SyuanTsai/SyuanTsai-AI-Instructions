@@ -494,15 +494,16 @@ Describe 'Consumer gate workflow templates' {
     It 'UnitT87_declares_the_complete_single_PR_repin_probe' {
         $path=Join-Path $script:RepositoryRoot 'tests/Invoke-ConsumerRepinProbe.ps1'
         $text=Get-Content -Raw -Encoding UTF8 $path
-        foreach($required in @("OldAuthorityRevision='7338a3f'",'OldBootstrap','OldWorkflow','repin-topic',
+        foreach($required in @("OldAuthorityRevision='7338a3f6d8e2d25849b79627fb9a2cbd21ebd123'",'OldBootstrap','OldWorkflow','repin-topic',
                 'consumer re-pin probe merge','Invoke-RepinBootstrap $bootstrap prepare','Invoke-RepinBootstrap $bootstrap validate',
                 'Invoke-RepinBootstrap $bootstrap finalize','Invoke-RepinBootstrap $bootstrap aggregate','unauthorized bootstrap drift',
                 'negative bootstrap drift was accepted','leg-*.json')){
             $text|Should Match ([regex]::Escape($required))
         }
         $text|Should Not Match '(?m)^\s*(git\s+clone|Invoke-WebRequest|Invoke-RestMethod)\b'
-        @(Get-ChildItem -LiteralPath (Join-Path $script:RepositoryRoot '.github/workflows') -File|
-            Where-Object Name -Match 'repin').Count|Should Be 0
+        $trackedRepinWorkflows=@(& git -C $script:RepositoryRoot ls-files -- '.github/workflows/*repin*')
+        $LASTEXITCODE|Should Be 0
+        @($trackedRepinWorkflows|Where-Object{-not[string]::IsNullOrWhiteSpace($_)}).Count|Should Be 0
         $tokens=$null;$errors=$null
         [void][Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors)
         @($errors).Count|Should Be 0

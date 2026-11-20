@@ -169,8 +169,8 @@ function Invoke-ConsumerGateProcess{
     $phaseBudget=$budget.phaseBudgets.$CurrentPhase
     $deadlineSeconds=if($DeadlineOverrideSeconds-gt0){$DeadlineOverrideSeconds}else{[int]$phaseBudget.gateSeconds+[int]$phaseBudget.supervisorGraceSeconds}
     $diagnosticRoot=Join-Path $WorkRoot 'bootstrap-supervisor-diagnostics';[void][IO.Directory]::CreateDirectory($diagnosticRoot)
-    $id="$CurrentPhase-$([guid]::NewGuid().ToString('N'))";$stdoutCapture=Join-Path $diagnosticRoot "$id.capture.stdout"
-    $stderrCapture=Join-Path $diagnosticRoot "$id.capture.stderr";$stdoutDiagnostic=Join-Path $diagnosticRoot "$id.stdout.txt"
+    $id="$CurrentPhase-$([guid]::NewGuid().ToString('N'))";$captureRoot=Join-Path (Split-Path -Parent ([IO.Path]::GetFullPath($WorkRoot))) ".bootstrap-supervisor-capture-$id"
+    [void][IO.Directory]::CreateDirectory($captureRoot);$stdoutCapture=Join-Path $captureRoot "$id.capture.stdout";$stderrCapture=Join-Path $captureRoot "$id.capture.stderr";$stdoutDiagnostic=Join-Path $diagnosticRoot "$id.stdout.txt"
     $stderrDiagnostic=Join-Path $diagnosticRoot "$id.stderr.txt";$receiptPath=Join-Path $diagnosticRoot "$id.process.json"
     $workingDirectory=$null;$lease=$null;$cleanup=$null;$standardOutput=$null;$standardError=$null;$sentinel=$null
     $credentialLeak=$false;$resultCode=30;$timedOut=$false
@@ -185,7 +185,13 @@ function Invoke-ConsumerGateProcess{
         while(-not($lease.HasExited-and$lease.CaptureCompletedNaturally)-and$null-eq$lease.Cleanup-and[DateTimeOffset]::UtcNow-lt$deadline){
             Start-Sleep -Milliseconds 25
         }
-        $timedOut=[DateTimeOffset]::UtcNow-ge$deadline-or$lease.TerminationReason-ceq'deadline'
+        $terminationReason=$lease.TerminationReason
+        $hasExited=[bool]$lease.HasExited
+        $captureCompletedNaturally=[bool]$lease.CaptureCompletedNaturally
+        $outputLimitExceeded=[bool]$lease.OutputLimitExceeded
+        $exitCode=$lease.ExitCode
+        $isolation=[string]$lease.Isolation
+        $timedOut=[DateTimeOffset]::UtcNow-ge$deadline-or$terminationReason-ceq'deadline'
         $cleanup=& $script:SupervisorPlatformRuntime.ExportedCommands['Stop-PlatformOwnedProcess'] -Lease $lease `
             -GracePeriod ([TimeSpan]::FromMilliseconds(250)) -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(5)) `
             -ExpectedStartIdentity $lease.StartIdentity
@@ -193,7 +199,7 @@ function Invoke-ConsumerGateProcess{
             Throw-SupervisorResult FAILED "Gate owned-process cleanup is unconfirmed: $($cleanup.Uncertainty)"
         }
         $expectedIsolation=if($IsWindows){'windows-job-object'}elseif($IsLinux){'linux-process-group-subreaper'}else{'macos-process-group'}
-        if([string]$lease.Isolation-cne$expectedIsolation-or[string]$cleanup.Isolation-cne$expectedIsolation){
+        if($isolation-cne$expectedIsolation-or[string]$cleanup.Isolation-cne$expectedIsolation){
             Throw-SupervisorResult FAILED 'Gate owned-process isolation does not match the current platform.'
         }
         $standardOutput=[IO.File]::ReadAllText($stdoutCapture,[Text.UTF8Encoding]::new($false,$true))
@@ -212,13 +218,14 @@ function Invoke-ConsumerGateProcess{
             Write-SupervisorTextCreateOnly $stdoutDiagnostic $standardOutput;Write-SupervisorTextCreateOnly $stderrDiagnostic $standardError
             [Console]::Out.Write($standardOutput);[Console]::Error.Write($standardError)
             if($timedOut){[Console]::Error.WriteLine("Gate exceeded its bounded deadline of $deadlineSeconds seconds.");$resultCode=20}
-            elseif($lease.OutputLimitExceeded){[Console]::Error.WriteLine('Gate output exceeded the 1,048,576-character stream limit.');$resultCode=20}
-            elseif($lease.TerminationReason-notin@($null,'')){[Console]::Error.WriteLine("Gate owned-process capture failed: $($lease.TerminationReason)");$resultCode=20}
-            elseif($lease.ExitCode-isnot[int]-and$lease.ExitCode-isnot[long]){$resultCode=30}
-            else{$resultCode=if([int]$lease.ExitCode-in@(0,10,20,30,40)){[int]$lease.ExitCode}else{30}}
+            elseif($outputLimitExceeded){[Console]::Error.WriteLine('Gate output exceeded the 1,048,576-character stream limit.');$resultCode=20}
+            elseif($terminationReason-notin@($null,'')){[Console]::Error.WriteLine("Gate owned-process capture failed: $terminationReason");$resultCode=20}
+            elseif(-not$hasExited-or-not$captureCompletedNaturally){[Console]::Error.WriteLine('Gate owned-process capture did not complete naturally.');$resultCode=20}
+            elseif($exitCode-isnot[int]-and$exitCode-isnot[long]){$resultCode=30}
+            else{$resultCode=if([int]$exitCode-in@(0,10,20,30,40)){[int]$exitCode}else{30}}
         }
         Write-SupervisorJsonCreateOnly $receiptPath ([ordered]@{schemaVersion=1;phase=$CurrentPhase;deadlineSeconds=$deadlineSeconds
-            timedOut=$timedOut;outputLimitExceeded=[bool]$lease.OutputLimitExceeded;exitCode=$lease.ExitCode;isolation=$lease.Isolation
+            timedOut=$timedOut;outputLimitExceeded=$outputLimitExceeded;exitCode=$exitCode;isolation=$isolation
             cleanup=[ordered]@{cleanedUp=$cleanup.CleanedUp;captureReadersStopped=$cleanup.CaptureReadersStopped
                 captureResourcesClosed=$cleanup.CaptureResourcesClosed;signalsSent=$cleanup.SignalsSent;uncertainty=$cleanup.Uncertainty}})
         $resultCode
@@ -227,7 +234,7 @@ function Invoke-ConsumerGateProcess{
         $standardOutput=$null;$standardError=$null;$sentinel=$null;$Token=$null;$credentialLeak=$null
         $environment.Clear()
         if($null-ne$lease){$lease.Dispose()};if($null-ne$workingDirectory){$workingDirectory.Dispose()}
-        foreach($path in @($stdoutCapture,$stderrCapture)){if([IO.File]::Exists($path)){[IO.File]::Delete($path)}}
+        foreach($path in @($stdoutCapture,$stderrCapture)){if([IO.File]::Exists($path)){[IO.File]::Delete($path)}};if([IO.Directory]::Exists($captureRoot)){[IO.Directory]::Delete($captureRoot,$false)}
         Remove-Variable standardOutput,standardError,sentinel,Token,credentialLeak -ErrorAction SilentlyContinue
     }
 }

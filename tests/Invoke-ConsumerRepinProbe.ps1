@@ -23,7 +23,7 @@ Remove-Variable requestedMode,requestedPlatform
 $script:ProbeAuthorityRepository='https://example.test/consumer-repin-authority.git'
 $script:ProbeConsumerRepository='https://example.test/example/consumer-repin-fixture.git'
 $script:OfficialAuthorityRepository='https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
-$script:OldAuthorityRevision='7338a3f'
+$script:OldAuthorityRevision='7338a3f6d8e2d25849b79627fb9a2cbd21ebd123'
 
 function Set-RepinBootstrapProjection([string]$Path){
     $text=Get-Content -Raw -Encoding UTF8 $Path
@@ -49,11 +49,17 @@ function Copy-RepinCurrentAuthority([string]$SourceRoot,[string]$DestinationRoot
 function New-RepinAuthority([string]$SourceRoot,[string]$Root){
     [void][IO.Directory]::CreateDirectory($Root)
     [void](Invoke-ProbeGit $Root @('init','--quiet','-b','main'));Set-ProbeGitIdentity $Root
-    $sourceUrl=ConvertTo-ProbeFileUrl $SourceRoot
-    [void](Invoke-ProbeGit $Root @('-c','protocol.file.allow=always','fetch','--quiet',$sourceUrl,$script:OldAuthorityRevision))
-    [void](Invoke-ProbeGit $Root @('reset','--hard','--quiet','FETCH_HEAD'))
+    [void](Invoke-ProbeGit $SourceRoot @('cat-file','-e',"$($script:OldAuthorityRevision)^{commit}"))
+    $sourceCommonDirectory=Get-ProbeGitScalar $SourceRoot @('rev-parse','--path-format=absolute','--git-common-dir')
+    $sourceObjectDirectory=Join-Path $sourceCommonDirectory 'objects'
+    if(-not(Test-Path -LiteralPath $sourceObjectDirectory -PathType Container)){
+        throw 'Re-pin source Git object directory is missing.'
+    }
+    Write-ProbeUtf8 (Join-Path $Root '.git/objects/info/alternates') ([IO.Path]::GetFullPath($sourceObjectDirectory)+"`n")
+    [void](Invoke-ProbeGit $Root @('update-ref','refs/heads/main',$script:OldAuthorityRevision))
+    [void](Invoke-ProbeGit $Root @('reset','--hard','--quiet',$script:OldAuthorityRevision))
     $oldCommit=Get-ProbeGitScalar $Root @('rev-parse','HEAD^{commit}')
-    if(-not$oldCommit.StartsWith($script:OldAuthorityRevision,[StringComparison]::Ordinal)){throw 'Re-pin old authority revision mismatch.'}
+    if($oldCommit-cne$script:OldAuthorityRevision){throw 'Re-pin old authority revision mismatch.'}
     $oldTree=Get-ProbeGitScalar $Root @('rev-parse','HEAD^{tree}')
     $sourceOldTree=Get-ProbeGitScalar $SourceRoot @('rev-parse',"$($script:OldAuthorityRevision)^{tree}")
     if($oldTree-cne$sourceOldTree){throw 'Re-pin old authority tree is not the exact 7338a3f tree.'}
