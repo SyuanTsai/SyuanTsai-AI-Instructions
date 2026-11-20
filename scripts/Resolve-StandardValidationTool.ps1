@@ -3278,6 +3278,158 @@ function Resolve-Pester {
     }
 }
 
+function Get-SkillToolsCorePathPatchSpec {
+    return [pscustomobject][ordered]@{
+        packageName = '@skill-tools/core'
+        packageVersion = '0.2.2'
+        files = @(
+            [pscustomobject][ordered]@{
+                relativePath = 'dist/index.js'
+                original = '${resolve(dirPath)}/'
+                replacement = '${join(resolve(dirPath), "/")}'
+                occurrenceCount = 2
+                preSha256 = 'f9c227266c695892757483b6bf9adea047d19d1b3b94992c965604d78ff66d9a'
+                postSha256 = '4c2449953f3622df3e41f6a6e93d2e2c045d35ffe5ec62c5174f21a6fbb9e518'
+            }
+            [pscustomobject][ordered]@{
+                relativePath = 'dist/index.cjs'
+                original = '${path.resolve(dirPath)}/'
+                replacement = '${path.join(path.resolve(dirPath), "/")}'
+                occurrenceCount = 2
+                preSha256 = '1863bb6c957923c9bfee037b332ec36e485420a060874a35b337d4587dc541ca'
+                postSha256 = 'bc0fa565f0150af06a6d0c7dd9848b9e14ca70307e2f15b2f37fa6d15be7e403'
+            }
+        )
+    }
+}
+
+function Invoke-SkillToolsCorePathPatch {
+    param(
+        [Parameter(Mandatory = $true)][string] $InstallPath,
+        $Spec = (Get-SkillToolsCorePathPatchSpec)
+    )
+
+    $remediation = 'Upstream fix or version upgrade requires removing or updating this patch.'
+    try {
+        $installRoot = [IO.Path]::GetFullPath($InstallPath)
+        $nodeModulesPath = Join-Path $installRoot 'node_modules'
+        $nodeModulesItem = Get-Item -Force -LiteralPath $nodeModulesPath -ErrorAction SilentlyContinue
+        if ($null -eq $nodeModulesItem -or -not $nodeModulesItem.PSIsContainer -or
+            ($nodeModulesItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "skill-tools node_modules must be a regular directory: '$nodeModulesPath'."
+        }
+
+        $coreDirectories = @(Get-ChildItem -Force -LiteralPath $nodeModulesPath -Directory -Recurse |
+            Where-Object {
+                $_.Name -ceq 'core' -and $_.Parent.Name -ceq '@skill-tools'
+            })
+        if ($coreDirectories.Count -ne 1) {
+            throw "Expected exactly one @skill-tools/core package below '$nodeModulesPath'; found $($coreDirectories.Count)."
+        }
+
+        $expectedCorePath = [IO.Path]::GetFullPath((Join-Path $nodeModulesPath '@skill-tools/core'))
+        $actualCorePath = [IO.Path]::GetFullPath($coreDirectories[0].FullName)
+        $pathComparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            [StringComparison]::OrdinalIgnoreCase
+        }
+        else {
+            [StringComparison]::Ordinal
+        }
+        if (-not [string]::Equals($actualCorePath, $expectedCorePath, $pathComparison)) {
+            throw "@skill-tools/core must be installed at '$expectedCorePath', not '$actualCorePath'."
+        }
+        if (($coreDirectories[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "@skill-tools/core package directory must not be a reparse point or symlink: '$actualCorePath'."
+        }
+
+        $packageJsonPath = Join-Path $actualCorePath 'package.json'
+        $requiredFilePaths = @($packageJsonPath) + @($Spec.files | ForEach-Object {
+            Join-Path $actualCorePath ([string]$_.relativePath)
+        })
+        foreach ($requiredPath in $requiredFilePaths) {
+            $requiredItem = Get-Item -Force -LiteralPath $requiredPath -ErrorAction SilentlyContinue
+            if ($null -eq $requiredItem -or $requiredItem.PSIsContainer -or
+                ($requiredItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Skill-tools core patch input must be a regular non-reparse file: '$requiredPath'."
+            }
+        }
+
+        $package = Get-Content -Raw -Encoding UTF8 -LiteralPath $packageJsonPath | ConvertFrom-Json
+        if ($package.name -isnot [string] -or [string]$package.name -cne [string]$Spec.packageName -or
+            $package.version -isnot [string] -or [string]$package.version -cne [string]$Spec.packageVersion) {
+            throw "Skill-tools core package identity mismatch. Expected '$($Spec.packageName)@$($Spec.packageVersion)'."
+        }
+
+        $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+        $prepared = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($fileSpec in @($Spec.files)) {
+            $targetPath = Join-Path $actualCorePath ([string]$fileSpec.relativePath)
+            $originalBytes = [IO.File]::ReadAllBytes($targetPath)
+            $preSha256 = Get-BytesSha256 -Bytes $originalBytes
+            if ($preSha256 -cne [string]$fileSpec.preSha256) {
+                if ($preSha256 -ceq [string]$fileSpec.postSha256) {
+                    throw "Skill-tools core patch input '$($fileSpec.relativePath)' already matches the pinned post-patch SHA256; already-patched input is not accepted."
+                }
+                throw "Skill-tools core patch pre-SHA256 mismatch for '$($fileSpec.relativePath)'. Expected '$($fileSpec.preSha256)', observed '$preSha256'."
+            }
+            $originalText = $strictUtf8.GetString($originalBytes)
+            $occurrences = 0
+            $searchIndex = 0
+            while (($searchIndex = $originalText.IndexOf([string]$fileSpec.original, $searchIndex, [StringComparison]::Ordinal)) -ge 0) {
+                $occurrences++
+                $searchIndex += ([string]$fileSpec.original).Length
+            }
+            if ($occurrences -ne [int]$fileSpec.occurrenceCount) {
+                throw "Skill-tools core patch string count mismatch for '$($fileSpec.relativePath)'. Expected '$($fileSpec.occurrenceCount)', observed '$occurrences'."
+            }
+            $patchedText = $originalText.Replace([string]$fileSpec.original, [string]$fileSpec.replacement)
+            $patchedBytes = $strictUtf8.GetBytes($patchedText)
+            $calculatedPostSha256 = Get-BytesSha256 -Bytes $patchedBytes
+            if ($calculatedPostSha256 -cne [string]$fileSpec.postSha256) {
+                throw "Skill-tools core patch post-SHA256 mismatch for '$($fileSpec.relativePath)'. Expected '$($fileSpec.postSha256)', calculated '$calculatedPostSha256'."
+            }
+            $prepared.Add([pscustomobject]@{
+                spec = $fileSpec
+                targetPath = $targetPath
+                patchedBytes = $patchedBytes
+                preSha256 = $preSha256
+            })
+        }
+
+        $records = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($entry in $prepared) {
+            $temporaryPath = Join-Path ([IO.Path]::GetDirectoryName([string]$entry.targetPath)) ('.skill-tools-core-patch-' + [guid]::NewGuid().ToString('N') + '.tmp')
+            try {
+                [IO.File]::WriteAllBytes($temporaryPath, [byte[]]$entry.patchedBytes)
+                if ((Get-FileSha256 -Path $temporaryPath) -cne [string]$entry.spec.postSha256) {
+                    throw "Skill-tools core patch temporary-file SHA256 mismatch for '$($entry.spec.relativePath)'."
+                }
+                [IO.File]::Move($temporaryPath, [string]$entry.targetPath, $true)
+            }
+            finally {
+                if (Test-Path -LiteralPath $temporaryPath) {
+                    Remove-Item -Force -LiteralPath $temporaryPath
+                }
+            }
+            $observedPostSha256 = Get-FileSha256 -Path ([string]$entry.targetPath)
+            if ($observedPostSha256 -cne [string]$entry.spec.postSha256) {
+                throw "Skill-tools core patch installed-file SHA256 mismatch for '$($entry.spec.relativePath)'. Expected '$($entry.spec.postSha256)', observed '$observedPostSha256'."
+            }
+            $records.Add([pscustomobject][ordered]@{
+                package = [string]$Spec.packageName
+                version = [string]$Spec.packageVersion
+                relativePath = [string]$entry.spec.relativePath
+                preSha256 = [string]$entry.preSha256
+                postSha256 = [string]$observedPostSha256
+            })
+        }
+        return [object[]]$records.ToArray()
+    }
+    catch {
+        throw "Skill-tools core path patch failed: $($_.Exception.Message) $remediation"
+    }
+}
+
 function Resolve-SkillTools {
     param(
         [bool] $ShouldInstall,
@@ -3404,6 +3556,8 @@ function Resolve-SkillTools {
                 if ([string]$installedBinTarget -cne [string]$lockIdentity.rootBinTarget) {
                     throw 'Installed skill-tools bin metadata does not match package-lock.'
                 }
+
+                [void](Invoke-SkillToolsCorePathPatch -InstallPath $toolInstallPath)
 
                 $packageRoot = [IO.Path]::GetFullPath((Join-Path $toolInstallPath 'node_modules/skill-tools')).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
                 $entryPointPath = [IO.Path]::GetFullPath((Join-Path $packageRoot $installedBinTarget))
