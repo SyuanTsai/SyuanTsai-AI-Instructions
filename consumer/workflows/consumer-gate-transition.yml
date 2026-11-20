@@ -11,6 +11,7 @@ concurrency:
 
 jobs:
   gate:
+    timeout-minutes: 140
     permissions:
       contents: read
     strategy:
@@ -122,6 +123,7 @@ jobs:
           if-no-files-found: error
 
   aggregate:
+    timeout-minutes: 15
     needs: gate
     if: always()
     permissions:
@@ -161,6 +163,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   repository-contract:
+    timeout-minutes: 10
     needs: [gate, aggregate]
     if: always()
     runs-on: ubuntu-latest
@@ -169,6 +172,7 @@ jobs:
         env: { GATE_RESULT: '${{ needs.gate.result }}', AGGREGATE_RESULT: '${{ needs.aggregate.result }}' }
         run: '[[ "$GATE_RESULT" == success && "$AGGREGATE_RESULT" == success ]]'
   skill-validator:
+    timeout-minutes: 10
     needs: [gate, aggregate]
     if: always()
     runs-on: ubuntu-latest
@@ -177,6 +181,7 @@ jobs:
         env: { GATE_RESULT: '${{ needs.gate.result }}', AGGREGATE_RESULT: '${{ needs.aggregate.result }}' }
         run: '[[ "$GATE_RESULT" == success && "$AGGREGATE_RESULT" == success ]]'
   skill-tools:
+    timeout-minutes: 10
     needs: [gate, aggregate]
     if: always()
     runs-on: ubuntu-latest

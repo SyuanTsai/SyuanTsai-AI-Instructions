@@ -35,6 +35,19 @@ Describe 'Authority-owned consumer source gate' {
                 $output.Trim()
             }finally{$process.Dispose()}
         }
+        function Invoke-SourceFixtureGitBytes([string]$Root,[string[]]$Arguments) {
+            $start=[Diagnostics.ProcessStartInfo]::new()
+            $start.FileName=(Get-Command git -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
+            $start.UseShellExecute=$false;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+            foreach($argument in @('-C',$Root)+$Arguments){[void]$start.ArgumentList.Add($argument)}
+            $process=[Diagnostics.Process]::new();$process.StartInfo=$start;$memory=[IO.MemoryStream]::new()
+            try{
+                [void]$process.Start();$copy=$process.StandardOutput.BaseStream.CopyToAsync($memory);$errorRead=$process.StandardError.ReadToEndAsync()
+                $process.WaitForExit();$null=$copy.GetAwaiter().GetResult();$errorText=$errorRead.GetAwaiter().GetResult()
+                if($process.ExitCode-ne0){throw "fixture git failed: $errorText"}
+                Write-Output -NoEnumerate ([byte[]]$memory.ToArray())
+            }finally{$memory.Dispose();$process.Dispose()}
+        }
         function New-GitCredentialPresenceShim([string]$Root,[string]$ObservationPath) {
             [void][IO.Directory]::CreateDirectory($Root)
             $realGit=(Get-Command git -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source
@@ -239,6 +252,17 @@ Describe 'Authority-owned consumer source gate' {
             }
             Remove-Item -LiteralPath $root -Recurse -Force
         }
+        function Copy-GatePlatformRuntimeFixture([string]$AuthorityRoot) {
+            $sourceRoot=Join-Path $script:RepositoryRoot 'scripts'
+            $manifestPath=Join-Path $sourceRoot 'platform-runtime.psd1'
+            $manifest=Import-PowerShellDataFile $manifestPath
+            foreach($relative in @('platform-runtime.psd1')+@($manifest.FileList)|Select-Object -Unique){
+                $source=Join-Path $sourceRoot $relative
+                $destination=Join-Path (Join-Path $AuthorityRoot 'scripts') $relative
+                [void][IO.Directory]::CreateDirectory((Split-Path -Parent $destination))
+                Copy-Item -LiteralPath $source -Destination $destination
+            }
+        }
         . (Join-Path $script:RepositoryRoot 'tests/fixtures/consumer-gate-credential-oracle.ps1')
         function New-MinimalConsumerFixture([string]$Root,$Entry,[string]$SkillId){
             [void][IO.Directory]::CreateDirectory($Root)
@@ -264,6 +288,10 @@ Describe 'Authority-owned consumer source gate' {
             [void](Invoke-SourceFixtureGit $Root @('commit','-q','-m','fixture'))
             $config
         }
+    }
+
+    BeforeEach {
+        Restore-GateFixtureModule
     }
 
     # Scenario: The legacy manifest is consumed as the exact five-repository conversion contract.
@@ -1449,11 +1477,11 @@ Write-Output 'scripts/Legacy.ps1'
                     $node.Name-ceq'Invoke-GateResolver'},$true))[0]
         $tokenEnvironmentWrite=@($resolver.Body.FindAll({param($node)
                     $node-is[Management.Automation.Language.AssignmentStatementAst]-and
-                    $node.Left.Extent.Text-ceq"`$start.Environment['STANDARD_VALIDATION_GITHUB_API_TOKEN']"-and
+                    $node.Left.Extent.Text-ceq"`$environment['STANDARD_VALIDATION_GITHUB_API_TOKEN']"-and
                     $node.Right.Extent.Text-ceq'$Token'
                 },$true))
         @($tokenEnvironmentWrite).Count|Should Be 1
-        $replacement="`$start.Environment['HOME']=`$Token"
+        $replacement="`$environment['HOME']=`$Token"
         $moduleText=$moduleText.Remove($tokenEnvironmentWrite[0].Extent.StartOffset,
             $tokenEnvironmentWrite[0].Extent.EndOffset-$tokenEnvironmentWrite[0].Extent.StartOffset).Insert(
                 $tokenEnvironmentWrite[0].Extent.StartOffset,$replacement)
@@ -1567,12 +1595,9 @@ scripts/consumer/ConsumerGate.psm1|Invoke-GateAcquisitionRequest|request
 scripts/consumer/ConsumerGate.psm1|Invoke-GateAcquisitionRequest|response
 scripts/consumer/ConsumerGate.psm1|Invoke-GateAcquisitionRequest|stream
 scripts/consumer/ConsumerGate.psm1|Invoke-GateCredentialScopedPreparation|Token
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|process
+scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|environment
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|standardError
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|standardOutput
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|start
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|stderr
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|stdout
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|Token
 scripts/consumer/ConsumerGate.psm1|New-GateSourceSetup|Token
 scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|message
@@ -1633,17 +1658,12 @@ scripts/consumer/ConsumerGate.psm1|Invoke-GateAcquisitionRequest|remove-variable
 scripts/consumer/ConsumerGate.psm1|Invoke-GateCredentialScopedPreparation|environment-null|[Environment]::SetEnvironmentVariable($name,$null,'Process')
 scripts/consumer/ConsumerGate.psm1|Invoke-GateCredentialScopedPreparation|null|$Token=$null
 scripts/consumer/ConsumerGate.psm1|Invoke-GateCredentialScopedPreparation|remove-variable|Remove-Variable runtime,receipt,Token -ErrorAction SilentlyContinue
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|clear|$start.Environment.Clear()
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|remove|[void]$start.Environment.Remove('STANDARD_VALIDATION_GITHUB_API_TOKEN')
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|clear|$start.Environment.Clear()
+scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|remove|[void]$environment.Remove('STANDARD_VALIDATION_GITHUB_API_TOKEN')
+scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|clear|$environment.Clear()
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|null|$standardOutput=$null
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|null|$standardError=$null
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|null|$stdout=$null
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|null|$stderr=$null
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|dispose|$process.Dispose()
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|null|$start=$null
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|null|$Token=$null
-scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|remove-variable|Remove-Variable standardOutput,standardError,stdout,stderr,credentialLeak,preserved,process,start,Token -ErrorAction SilentlyContinue
+scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|remove-variable|Remove-Variable standardOutput,standardError,credentialLeak,executionFailure,result,runtime,environment,Token -ErrorAction SilentlyContinue
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|environment-null|[Environment]::SetEnvironmentVariable($name,$null,'Process')
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|null|$Token=$null
 scripts/consumer/ConsumerGate.psm1|Invoke-GateResolver|remove-variable|Remove-Variable Token -ErrorAction SilentlyContinue
@@ -1664,9 +1684,9 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|remove-variable|Remove-V
         $oracle=Get-ConsumerCredentialOracle $sources
         $actualHolders=@($oracle.Holders|ForEach-Object{"$($_.Source)|$($_.Function)|$($_.Variable)"})
         $actualCleanups=@($oracle.Cleanups|ForEach-Object{"$($_.Source)|$($_.Function)|$($_.Shape)|$($_.Text)"})
-        @($actualHolders).Count|Should Be 38
+        @($actualHolders).Count|Should Be 35
         (@($actualHolders)-join"`n")|Should Be (@($expectedHolders)-join"`n")
-        @($actualCleanups).Count|Should Be 78
+        @($actualCleanups).Count|Should Be 73
         (@($actualCleanups)-join"`n")|Should Be (@($expectedCleanups)-join"`n")
         foreach($holder in $oracle.Holders){
             @($oracle.Cleanups|Where-Object{$_.Source-ceq$holder.Source-and$_.Function-ceq$holder.Function-and$_.InFinally-and
@@ -1700,6 +1720,8 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|remove-variable|Remove-V
         }
         @($scriptBlockParameters).Count|Should Be 0
         $expectedSeams=@'
+scripts/consumer/ConsumerGate.psm1|Get-GateDeadlineBudget|CONSUMER_GATE_TEST_RESOLVER_TIMEOUT_SECONDS|env
+scripts/consumer/ConsumerGate.psm1|Get-GateDeadlineBudget|CONSUMER_GATE_RESOLVER_SCRIPT_PATH|env
 scripts/consumer/ConsumerGate.psm1|Write-GateBoundaryEvent|CONSUMER_GATE_EVENT_LOG_PATH|env
 scripts/consumer/ConsumerGate.psm1|Install-GatePowerShell|CONSUMER_GATE_POWERSHELL_METADATA_URI|env
 scripts/consumer/ConsumerGate.psm1|Install-GatePowerShell|CONSUMER_GATE_POWERSHELL_METADATA_URI|env
@@ -1831,13 +1853,13 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|CONSUMER_GATE_PHASE_ENV_
             $mutantTokens=$null;$mutantErrors=$null
             [void][Management.Automation.Language.Parser]::ParseFile($path,[ref]$mutantTokens,[ref]$mutantErrors)
             if(@($mutantErrors).Count-ne0){throw "CLEANUP_MUTANT_HARNESS_PARSE_FAILED|$($cleanup.Source):$($cleanup.Line):$($cleanup.Column)"}
-            $case=if($cleanup.Function-ceq'Invoke-GateAcquisitionRequest'-and$cleanup.Line-in@(841,842)){'redirect-success'}
-                elseif($cleanup.Function-ceq'Invoke-GateResolver'-and$cleanup.Line-ge192){'resolver-error'}
+            $case=if($cleanup.Function-ceq'Invoke-GateAcquisitionRequest'-and$cleanup.Line-in@(1102,1103)){'redirect-success'}
+                elseif($cleanup.Function-ceq'Invoke-GateResolver'-and$cleanup.Line-ge285){'resolver-error'}
                 elseif($cleanup.Function-ceq'New-GateSourceSetup'){'resolver-error'}
                 elseif($cleanup.Source-ceq'scripts/consumer/Invoke-ConsumerSourceGate.ps1'-and
                     (@($cleanup.Targets)-icontains'message'-or@($cleanup.Targets)-icontains'tokenVariable'-or$cleanup.Line-eq73)){'http-error'}
                 else{'success'}
-            $leak=if($cleanup.Function-ceq'Assert-GateCredentialAbsent'-and$cleanup.Line-ge814){'summary'}else{'none'}
+            $leak=if($cleanup.Function-ceq'Assert-GateCredentialAbsent'-and$cleanup.Line-ge1080){'summary'}else{'none'}
             $key="$($cleanup.Source):$($cleanup.Line):$($cleanup.Column)|$($cleanup.Text)"
             if($cleanup.Source-ceq'consumer/bootstrap/Invoke-PinnedAuthority.ps1'){
                 $records=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File (Join-Path $mutantRoot 'tests/fixtures/consumer-bootstrap-cleanup-fixture.ps1') `
@@ -1869,45 +1891,40 @@ consumer/bootstrap/Invoke-PinnedAuthority.ps1:293:9|$stdout = $null
 consumer/bootstrap/Invoke-PinnedAuthority.ps1:294:9|$stderr = $null
 consumer/bootstrap/Invoke-PinnedAuthority.ps1:298:28|$value = $null
 consumer/bootstrap/Invoke-PinnedAuthority.ps1:299:9|$Token=$null
-scripts/consumer/ConsumerGate.psm1:928:13|$content=$null
-scripts/consumer/ConsumerGate.psm1:931:9|$content=$null
-scripts/consumer/ConsumerGate.psm1:931:24|$needle=$null
-scripts/consumer/ConsumerGate.psm1:931:38|$Token=$null
-scripts/consumer/ConsumerGate.psm1:140:14|$headers.Remove('Authorization')
-scripts/consumer/ConsumerGate.psm1:141:5|$Token=$null
-scripts/consumer/ConsumerGate.psm1:142:5|[Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN',$null,'Process')
-scripts/consumer/ConsumerGate.psm1:958:34|$request.Dispose()
-scripts/consumer/ConsumerGate.psm1:958:53|$request=$null
-scripts/consumer/ConsumerGate.psm1:959:35|$response.Dispose()
-scripts/consumer/ConsumerGate.psm1:959:55|$response=$null
-scripts/consumer/ConsumerGate.psm1:990:18|$stream.Dispose()
-scripts/consumer/ConsumerGate.psm1:990:36|$memory.Dispose()
-scripts/consumer/ConsumerGate.psm1:998:31|$response.Dispose()
-scripts/consumer/ConsumerGate.psm1:998:73|$request.Dispose()
-scripts/consumer/ConsumerGate.psm1:999:9|$bytes=$null
-scripts/consumer/ConsumerGate.psm1:999:22|$buffer=$null
-scripts/consumer/ConsumerGate.psm1:999:36|$response=$null
-scripts/consumer/ConsumerGate.psm1:999:52|$request=$null
-scripts/consumer/ConsumerGate.psm1:999:67|$stream=$null
-scripts/consumer/ConsumerGate.psm1:999:81|$memory=$null
-scripts/consumer/ConsumerGate.psm1:999:95|$Headers=$null
-scripts/consumer/ConsumerGate.psm1:324:95|[Environment]::SetEnvironmentVariable($name,$null,'Process')
-scripts/consumer/ConsumerGate.psm1:326:43|$Token=$null
-scripts/consumer/ConsumerGate.psm1:197:9|$start.Environment.Clear()
-scripts/consumer/ConsumerGate.psm1:213:17|[void]$start.Environment.Remove('STANDARD_VALIDATION_GITHUB_API_TOKEN')
-scripts/consumer/ConsumerGate.psm1:213:108|$start.Environment.Clear()
-scripts/consumer/ConsumerGate.psm1:214:13|$standardOutput=$null
-scripts/consumer/ConsumerGate.psm1:214:35|$standardError=$null
-scripts/consumer/ConsumerGate.psm1:214:56|$stdout=$null
-scripts/consumer/ConsumerGate.psm1:214:70|$stderr=$null
-scripts/consumer/ConsumerGate.psm1:214:106|$process.Dispose()
-scripts/consumer/ConsumerGate.psm1:214:125|$start=$null
-scripts/consumer/ConsumerGate.psm1:214:138|$Token=$null
-scripts/consumer/ConsumerGate.psm1:215:13|Remove-Variable standardOutput,standardError,stdout,stderr,credentialLeak,preserved,process,start,Token -ErrorAction SilentlyContinue
-scripts/consumer/ConsumerGate.psm1:216:100|[Environment]::SetEnvironmentVariable($name,$null,'Process')
-scripts/consumer/ConsumerGate.psm1:217:5|$Token=$null
-scripts/consumer/ConsumerGate.psm1:301:13|[Environment]::SetEnvironmentVariable($name,$null,'Process')
-scripts/consumer/ConsumerGate.psm1:303:9|$Token=$null
+scripts/consumer/ConsumerGate.psm1:1080:13|$content=$null
+scripts/consumer/ConsumerGate.psm1:1083:9|$content=$null
+scripts/consumer/ConsumerGate.psm1:1083:24|$needle=$null
+scripts/consumer/ConsumerGate.psm1:1083:38|$Token=$null
+scripts/consumer/ConsumerGate.psm1:212:14|$headers.Remove('Authorization')
+scripts/consumer/ConsumerGate.psm1:213:5|$Token=$null
+scripts/consumer/ConsumerGate.psm1:214:5|[Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN',$null,'Process')
+scripts/consumer/ConsumerGate.psm1:1111:34|$request.Dispose()
+scripts/consumer/ConsumerGate.psm1:1111:53|$request=$null
+scripts/consumer/ConsumerGate.psm1:1112:35|$response.Dispose()
+scripts/consumer/ConsumerGate.psm1:1112:55|$response=$null
+scripts/consumer/ConsumerGate.psm1:1143:18|$stream.Dispose()
+scripts/consumer/ConsumerGate.psm1:1143:36|$memory.Dispose()
+scripts/consumer/ConsumerGate.psm1:1151:31|$response.Dispose()
+scripts/consumer/ConsumerGate.psm1:1151:73|$request.Dispose()
+scripts/consumer/ConsumerGate.psm1:1152:9|$bytes=$null
+scripts/consumer/ConsumerGate.psm1:1152:22|$buffer=$null
+scripts/consumer/ConsumerGate.psm1:1152:36|$response=$null
+scripts/consumer/ConsumerGate.psm1:1152:52|$request=$null
+scripts/consumer/ConsumerGate.psm1:1152:67|$stream=$null
+scripts/consumer/ConsumerGate.psm1:1152:81|$memory=$null
+scripts/consumer/ConsumerGate.psm1:1152:95|$Headers=$null
+scripts/consumer/ConsumerGate.psm1:397:95|[Environment]::SetEnvironmentVariable($name,$null,'Process')
+scripts/consumer/ConsumerGate.psm1:399:43|$Token=$null
+scripts/consumer/ConsumerGate.psm1:285:13|[void]$environment.Remove('STANDARD_VALIDATION_GITHUB_API_TOKEN')
+scripts/consumer/ConsumerGate.psm1:285:79|$environment.Clear()
+scripts/consumer/ConsumerGate.psm1:286:13|$standardOutput=$null
+scripts/consumer/ConsumerGate.psm1:286:35|$standardError=$null
+scripts/consumer/ConsumerGate.psm1:286:131|$Token=$null
+scripts/consumer/ConsumerGate.psm1:287:13|Remove-Variable standardOutput,standardError,credentialLeak,executionFailure,result,runtime,environment,Token -ErrorAction SilentlyContinue
+scripts/consumer/ConsumerGate.psm1:289:100|[Environment]::SetEnvironmentVariable($name,$null,'Process')
+scripts/consumer/ConsumerGate.psm1:290:5|$Token=$null
+scripts/consumer/ConsumerGate.psm1:374:13|[Environment]::SetEnvironmentVariable($name,$null,'Process')
+scripts/consumer/ConsumerGate.psm1:376:9|$Token=$null
 scripts/consumer/Invoke-ConsumerSourceGate.ps1:41:9|$phaseEnvironment=$null
 scripts/consumer/Invoke-ConsumerSourceGate.ps1:41:130|$value=$null
 scripts/consumer/Invoke-ConsumerSourceGate.ps1:76:91|[Environment]::SetEnvironmentVariable($name,$null,'Process')
@@ -1923,17 +1940,19 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
     }
 
     # Scenario: Prepare receives all GitHub token aliases while production launches Git for config and closure inspection.
-    # Purpose: Every non-resolver Git child must explicitly remove the three credential aliases from its process environment.
+    # Purpose: Every non-resolver Git child removes all credential aliases, and the oracle still detects a fully stripped defense stack.
     It 'UnitT33_removes_credentials_from_every_consumer_git_launcher' {
         $sources=@(
             (Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerGate.psm1')),
-            (Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1'))
+            (Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1')),
+            (Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-GateGitByteCapture.ps1'))
         )
         foreach($source in $sources){
             foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){$source|Should Match ([regex]::Escape("'$name'"))}
         }
         $sources[0]|Should Match 'SetEnvironmentVariable\(\$name,\$null,''Process''\)'
         $sources[1]|Should Match 'Environment\.Remove\(\$name\)'
+        $sources[2]|Should Match 'Environment\.Remove\(\$name\)'
         $fixture=Join-Path $script:RepositoryRoot 'tests/fixtures/Invoke-ConsumerGateCredentialFixture.ps1'
         $formalLease=New-SourceFixtureLease 'git-formal-prepare'
         try{
@@ -1959,17 +1978,21 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         @($observations).Count|Should BeGreaterThan 0
         @($observations|Where-Object{$_-cne'0,0,0'}).Count|Should Be 0
 
-        $mutantPath=Join-Path $TestDrive 'ConsumerGate-git-inheritance-mutant.psm1'
+        $mutantPath=Join-Path $TestDrive 'ConsumerGate-git-outer-cleanup-mutant.psm1'
         $moduleText=Get-Content -Raw -Encoding UTF8 $script:GateModule;$tokens=$null;$errors=$null
         $moduleAst=[Management.Automation.Language.Parser]::ParseInput($moduleText,[ref]$tokens,[ref]$errors)
         @($errors).Count|Should Be 0
-        $gitFunction=@($moduleAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Invoke-GateGit'},$true))[0]
+        $gitFunctions=@($moduleAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Invoke-GateGit'},$true))
+        @($gitFunctions).Count|Should Be 1
+        $gitFunction=$gitFunctions[0]
         $credentialRemoval=@($gitFunction.Body.FindAll({param($node)$node-is[Management.Automation.Language.ForEachStatementAst]-and
                     $node.Extent.Text.Contains('STANDARD_VALIDATION_GITHUB_API_TOKEN',[StringComparison]::Ordinal)-and
                     $node.Extent.Text.Contains('SetEnvironmentVariable',[StringComparison]::Ordinal)},$true))
         @($credentialRemoval).Count|Should Be 1
         $mutantText=$moduleText.Remove($credentialRemoval[0].Extent.StartOffset,$credentialRemoval[0].Extent.EndOffset-$credentialRemoval[0].Extent.StartOffset)
         [IO.File]::WriteAllText($mutantPath,$mutantText,[Text.UTF8Encoding]::new($false))
+        Copy-Item -LiteralPath (Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-GateGitByteCapture.ps1') `
+            -Destination (Join-Path $TestDrive 'Invoke-GateGitByteCapture.ps1')
         $observation=Join-Path $TestDrive 'git-mutant-observation.txt'
         $shim=New-GitCredentialPresenceShim (Join-Path $TestDrive 'git-mutant-shim') $observation
         $oldPath=$env:PATH
@@ -1977,7 +2000,7 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
             $env:PATH=$shim+[IO.Path]::PathSeparator+$oldPath
             foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,'git-mutant-token','Process')}
             Import-Module $mutantPath -Force
-            $hooks=Join-Path $TestDrive 'git-mutant-hooks';[void][IO.Directory]::CreateDirectory($hooks);Initialize-GateGitHooks $hooks
+            $hooks=Join-Path $TestDrive 'git-mutant-hooks';[void][IO.Directory]::CreateDirectory($hooks);Initialize-GateGitHooks $hooks $script:RepositoryRoot
             [void](Invoke-GateGit $script:RepositoryRoot @('rev-parse','HEAD'))
         }finally{
             $env:PATH=$oldPath
@@ -1985,8 +2008,51 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
             Restore-GateFixtureModule
         }
         $mutantObservations=@(Get-Content -LiteralPath $observation)
-        @($mutantObservations)|Should Be @('1,1,1')
-        {if(@($mutantObservations|Where-Object{$_-cne'0,0,0'}).Count-ne0){throw 'GIT_CREDENTIAL_ORACLE_FAILED'}}|Should Throw 'GIT_CREDENTIAL_ORACLE_FAILED'
+        @($mutantObservations)|Should Be @('0,0,0')
+
+        $ownedCaptures=@($moduleAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and
+                    $node.Name-ceq'Invoke-GateOwnedGitCapture'},$true))
+        @($ownedCaptures).Count|Should Be 1
+        $ownedCapture=$ownedCaptures[0]
+        $childEnvironment=@($ownedCapture.Body.FindAll({param($node)$node-is[Management.Automation.Language.CommandAst]-and
+                    $node.GetCommandName()-ceq'New-GateChildEnvironment'-and
+                    $node.Extent.Text-ceq"New-GateChildEnvironment `$null @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')"},$true))
+        @($childEnvironment).Count|Should Be 1
+        $fullMutantText=$moduleText
+        foreach($mutation in @(
+                [pscustomobject]@{Start=$credentialRemoval[0].Extent.StartOffset;Length=$credentialRemoval[0].Extent.EndOffset-$credentialRemoval[0].Extent.StartOffset;Text=''},
+                [pscustomobject]@{Start=$childEnvironment[0].Extent.StartOffset;Length=$childEnvironment[0].Extent.EndOffset-$childEnvironment[0].Extent.StartOffset;Text='New-GateChildEnvironment $null'}
+            )|Sort-Object Start -Descending){
+            $fullMutantText=$fullMutantText.Remove($mutation.Start,$mutation.Length).Insert($mutation.Start,$mutation.Text)
+        }
+        $helperText=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-GateGitByteCapture.ps1')
+        $helperTokens=$null;$helperErrors=$null
+        $helperAst=[Management.Automation.Language.Parser]::ParseInput($helperText,[ref]$helperTokens,[ref]$helperErrors)
+        @($helperErrors).Count|Should Be 0
+        $helperCredentialRemoval=@($helperAst.FindAll({param($node)$node-is[Management.Automation.Language.ForEachStatementAst]-and
+                    $node.Extent.Text-ceq"foreach(`$name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[void]`$start.Environment.Remove(`$name)}"},$true))
+        @($helperCredentialRemoval).Count|Should Be 1
+        $fullHelperText=$helperText.Remove($helperCredentialRemoval[0].Extent.StartOffset,
+            $helperCredentialRemoval[0].Extent.EndOffset-$helperCredentialRemoval[0].Extent.StartOffset)
+        $fullMutantPath=Join-Path $TestDrive 'ConsumerGate-git-full-inheritance-mutant.psm1'
+        [IO.File]::WriteAllText($fullMutantPath,$fullMutantText,[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $TestDrive 'Invoke-GateGitByteCapture.ps1'),$fullHelperText,[Text.UTF8Encoding]::new($false))
+        $fullObservation=Join-Path $TestDrive 'git-full-mutant-observation.txt'
+        $fullShim=New-GitCredentialPresenceShim (Join-Path $TestDrive 'git-full-mutant-shim') $fullObservation
+        try{
+            $env:PATH=$fullShim+[IO.Path]::PathSeparator+$oldPath
+            foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,'git-mutant-token','Process')}
+            Import-Module $fullMutantPath -Force
+            $hooks=Join-Path $TestDrive 'git-full-mutant-hooks';[void][IO.Directory]::CreateDirectory($hooks);Initialize-GateGitHooks $hooks $script:RepositoryRoot
+            [void](Invoke-GateGit $script:RepositoryRoot @('rev-parse','HEAD'))
+        }finally{
+            $env:PATH=$oldPath
+            foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,$null,'Process')}
+            Restore-GateFixtureModule
+        }
+        $fullMutantObservations=@(Get-Content -LiteralPath $fullObservation)
+        @($fullMutantObservations)|Should Be @('1,1,1')
+        {if(@($fullMutantObservations|Where-Object{$_-cne'0,0,0'}).Count-ne0){throw 'GIT_CREDENTIAL_ORACLE_FAILED'}}|Should Throw 'GIT_CREDENTIAL_ORACLE_FAILED'
     }
 
 
@@ -2049,6 +2115,7 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
             'skill-darktide-translate' = @{ Count=49; Sha256='9fcad1291facceb4e2d20be43ccf7cf772ffe21f1ef94cad6083da2958669626' }
         }
         foreach ($entry in @($manifest.repositories | Where-Object status -eq ready)) {
+            Restore-GateFixtureModule
             $oracleLines = @($entry.files | ForEach-Object {
                     "$($_.path)|$($_.disposition)|$($_.expectedOutcome)|$($_.target)"
                 } | Sort-Object)
@@ -2575,6 +2642,45 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
                 else{@($result.events).Count|Should Be 0}
             }finally{Remove-SourceFixtureLease $lease}
         }
+    }
+
+    # Scenario: A transition conversion runs the complete manifest closure through an injected invoker that returns one non-enumerated byte array.
+    # Purpose: Preserve the gate-to-closure byte contract instead of wrapping the byte array in an object array before conversion.
+    It 'UnitT39a_runs_transition_manifest_closure_through_the_byte_invoker' {
+        $root=Join-Path $TestDrive 'closure-byte-invoker-transition'
+        [void][IO.Directory]::CreateDirectory((Join-Path $root 'scripts'))
+        [void][IO.Directory]::CreateDirectory((Join-Path $root 'docs'))
+        [void](Invoke-SourceFixtureGit $root @('init','-q','-b','main'))
+        [void](Invoke-SourceFixtureGit $root @('config','user.name','Fixture'))
+        [void](Invoke-SourceFixtureGit $root @('config','user.email','fixture@example.test'))
+        [IO.File]::WriteAllText((Join-Path $root 'scripts/Legacy.ps1'),'param()',[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $root 'README.md'),'fixture',[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllBytes((Join-Path $root 'docs/empty.md'),[byte[]]::new(0))
+        [void](Invoke-SourceFixtureGit $root @('add','.'))
+        [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','inventory'))
+        $inventoryCommit=Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
+        $inventoryTree=Get-SourceFixtureGitScalar $root @('rev-parse','HEAD^{tree}')
+        Remove-Item -LiteralPath (Join-Path $root 'scripts/Legacy.ps1')
+        [void](Invoke-SourceFixtureGit $root @('add','-A'))
+        [void](Invoke-SourceFixtureGit $root @('commit','-q','-m','conversion'))
+        $conversionCommit=Get-SourceFixtureGitScalar $root @('rev-parse','HEAD')
+        $manifestPath=Join-Path $TestDrive 'closure-byte-invoker-transition.json'
+        Write-FixtureJson $manifestPath ([ordered]@{schemaVersion=1;repositories=@([ordered]@{
+                        id='fixture';repository='https://example.test/fixture.git';status='ready'
+                        inventoryCommit=$inventoryCommit;inventoryTree=$inventoryTree;requiredRepositoryChecks=@()
+                        files=@([ordered]@{path='scripts/Legacy.ps1';disposition='delete';reason='fixture migration'})
+                    })})
+        $invocations=[Collections.Generic.List[string]]::new()
+        $gitBytesCommand=Get-Command Invoke-SourceFixtureGitBytes
+        $invoker={param([string]$RepositoryRoot,[string[]]$Arguments,[int[]]$AllowedExitCodes)
+            $invocations.Add(($Arguments-join' '))|Out-Null
+            & $gitBytesCommand $RepositoryRoot $Arguments
+        }.GetNewClosure()
+        $result=Get-ConsumerManifestClosure -RepositoryRoot $root -Commit $conversionCommit -Stage conversion `
+            -InventoryCommit $inventoryCommit -Manifest $manifestPath -RepositoryId fixture `
+            -AuthorityRoot $script:RepositoryRoot -GitByteInvoker $invoker
+        $result.result|Should Be 'PASS'
+        $invocations.Count|Should BeGreaterThan 0
     }
 
     # Scenario: A retained 2.13.4 exception set is reduced to three records while every scanner-bound field is re-pinned to active 2.13.6.
@@ -3118,17 +3224,20 @@ if($LASTEXITCODE-ne0){throw 'Fixture git commit failed.'}
             $root=Join-Path $TestDrive 'resolver-windows-environment'
             $authority=Join-Path $root 'authority';$install=Join-Path $root 'install';$source=Join-Path $root 'source-tools'
             foreach($directory in @($authority,$install,$source,(Join-Path $authority 'docs/standards'))){[void][IO.Directory]::CreateDirectory($directory)}
+            Copy-GatePlatformRuntimeFixture $authority
             [IO.File]::WriteAllText((Join-Path $authority 'docs/standards/validation-toolchain.json'),'{}',[Text.UTF8Encoding]::new($false))
             $resolver=Join-Path $root 'resolver.ps1'
             [IO.File]::WriteAllText($resolver,@'
-param([string]$PolicyPath,[string]$ToolName,[switch]$Install,[string]$InstallRoot,[string]$ExpectedGoRuntimeVersion,[string]$RunId,[string]$OutputPath)
+param([string]$PolicyPath,[string]$ToolName,[switch]$Install,[string]$InstallRoot,[string]$ExpectedGoRuntimeVersion,[string]$RunId,[string]$OutputPath,
+    [int]$AcquisitionTimeoutSeconds)
 $names=@('ProgramFiles','ProgramFiles(x86)','ProgramW6432','ProgramData','LOCALAPPDATA','APPDATA')
 $values=[ordered]@{};foreach($name in $names){$values[$name]=[Environment]::GetEnvironmentVariable($name,'Process')}
 [IO.File]::WriteAllText($OutputPath,($values|ConvertTo-Json),[Text.UTF8Encoding]::new($false))
 '@,[Text.UTF8Encoding]::new($false))
             $old=$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH;$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$resolver
+            Import-Module $script:GateModule -Force
             try{$result=Invoke-GateResolver (Get-Process -Id $PID).Path $authority $install pester ('a'*32) (Join-Path $source 'receipt-pester.json') latest ''}
-            finally{$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$old}
+            finally{$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$old;Restore-GateFixtureModule}
             foreach($name in @('ProgramFiles','ProgramFiles(x86)','ProgramW6432','ProgramData','LOCALAPPDATA','APPDATA')){
                 $parent=[Environment]::GetEnvironmentVariable($name,'Process')
                 if($null-ne$parent){[string]$result.$name|Should Be $parent}
@@ -3142,6 +3251,8 @@ $values=[ordered]@{};foreach($name in $names){$values[$name]=[Environment]::GetE
         $root=Join-Path $TestDrive 'process-diagnostics'
         $authority=Join-Path $root 'authority';$install=Join-Path $root 'install';$source=Join-Path $root 'source-tools'
         foreach($directory in @($authority,$install,$source,(Join-Path $authority 'docs/standards'),(Join-Path $authority 'scripts'))){[void][IO.Directory]::CreateDirectory($directory)}
+        Copy-GatePlatformRuntimeFixture $authority
+        Import-Module $script:GateModule -Force
         [IO.File]::WriteAllText((Join-Path $authority 'docs/standards/validation-toolchain.json'),'{}',[Text.UTF8Encoding]::new($false))
         $resolver=Join-Path $root 'resolver-failure.ps1'
         [IO.File]::WriteAllText($resolver,"[Console]::Out.Write('resolver out'); [Console]::Error.Write('resolver diagnostic'); exit 7",[Text.UTF8Encoding]::new($false))
@@ -3173,8 +3284,234 @@ $values=[ordered]@{};foreach($name in $names){$values[$name]=[Environment]::GetE
         [IO.File]::WriteAllText($runner,"[Console]::Out.Write('validator out'); [Console]::Error.Write('validator diagnostic'); exit 9",[Text.UTF8Encoding]::new($false))
         $binding=[pscustomobject]@{candidateRevision=('c'*40);baseRevision=('d'*40);canonicalEvent='pull_request';runId=('e'*32);commit=('f'*40)}
         $config=[pscustomobject]@{sourceRepository='https://example.test/fixture.git';activeSkills=@('fixture')}
-        {Invoke-GateValidation $authority $candidate $work $binding $config (Get-Process -Id $PID).Path}|Should Throw 'Validator failed'
-        (Get-Content -Raw (Join-Path $work 'validation-artifacts/validator.stderr.txt'))|Should Match 'validator diagnostic'
+        try{
+            {Invoke-GateValidation $authority $candidate $work $binding $config (Get-Process -Id $PID).Path}|Should Throw 'Validator failed'
+            (Get-Content -Raw (Join-Path $work 'validation-artifacts/validator.stderr.txt'))|Should Match 'validator diagnostic'
+        }finally{Restore-GateFixtureModule}
+    }
+
+    # Scenario: The resolver fixture starts a long-lived descendant and exceeds a test-shortened owned-process deadline.
+    # Purpose: Resolver timeout arguments, diagnostics, fail-closed state, and complete descendant cleanup remain authority-owned.
+    It 'UnitT49_bounds_resolver_and_validator_deadlines_and_cleans_the_resolver_tree' {
+        $moduleText=Get-Content -Raw -Encoding UTF8 $script:GateModule
+        $tokens=$null;$parseErrors=$null
+        $moduleAst=[Management.Automation.Language.Parser]::ParseInput($moduleText,[ref]$tokens,[ref]$parseErrors)
+        @($parseErrors).Count|Should Be 0
+        $resolverAst=@($moduleAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and
+                    $node.Name-ceq'Invoke-GateResolver'},$true))[0]
+        $validatorAst=@($moduleAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and
+                    $node.Name-ceq'Invoke-GateValidation'},$true))[0]
+        $gitBytesAst=@($moduleAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and
+                    $node.Name-ceq'Invoke-GateGitBytes'},$true))[0]
+        $resolverAst.Extent.Text|Should Match ([regex]::Escape("'-AcquisitionTimeoutSeconds',([string]`$budget.resolverAcquisitionSeconds)"))
+        $validatorAst.Extent.Text|Should Match ([regex]::Escape("'-TimeoutSeconds',([string]`$budget.validatorSeconds)"))
+        $resolverAst.Extent.Text|Should Match 'Invoke-PlatformPreparationCommand'
+        $validatorAst.Extent.Text|Should Match 'Invoke-PlatformPreparationCommand'
+        $moduleText|Should Match 'Start-PlatformOwnedProcess'
+        $moduleText|Should Match 'Stop-PlatformOwnedProcess'
+        $moduleText|Should Not Match '\[Diagnostics\.Process(?:StartInfo)?\]'
+        $moduleText|Should Not Match '\.WaitForExit\s*\('
+        $moduleText|Should Match "ExportedCommands\['Start-PlatformOwnedProcess'\]"
+        $moduleText|Should Match "ExportedCommands\['Stop-PlatformOwnedProcess'\]"
+        $moduleText|Should Match "ExportedCommands\['Resolve-PlatformPhysicalPath'\]"
+        $gitBytesAst.Extent.Text|Should Match 'Invoke-GateOwnedGitCapture[\s\S]+-ByteExact'
+        $closureText=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1')
+        $closureText|Should Match "ExportedCommands\['Start-PlatformOwnedProcess'\]"
+        $closureText|Should Match "ExportedCommands\['Stop-PlatformOwnedProcess'\]"
+        $closureText|Should Match "ExportedCommands\['Resolve-PlatformPhysicalPath'\]"
+        $closureText|Should Not Match '\[Diagnostics\.Process(?:StartInfo)?\]'
+        $closureText|Should Not Match '\.WaitForExit\s*\('
+        $moduleText|Should Match 'GitByteInvoker=\{[\s\S]+Invoke-GateGitBytes'
+        $byteHelper=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-GateGitByteCapture.ps1')
+        $helperTokens=$null;$helperErrors=$null
+        [void][Management.Automation.Language.Parser]::ParseInput($byteHelper,[ref]$helperTokens,[ref]$helperErrors)
+        @($helperErrors).Count|Should Be 0
+        $byteHelper|Should Match '\[IO\.FileMode\]::CreateNew'
+        $byteHelper|Should Match 'StandardOutput\.BaseStream\.CopyToAsync'
+
+        $root=Join-Path $TestDrive 'resolver-owned-timeout'
+        $authority=Join-Path $root 'authority';$install=Join-Path $root 'install';$source=Join-Path $root 'source-tools'
+        foreach($directory in @($authority,$install,$source,(Join-Path $authority 'docs/standards'))){[void][IO.Directory]::CreateDirectory($directory)}
+        Copy-GatePlatformRuntimeFixture $authority
+        [IO.File]::WriteAllText((Join-Path $authority 'docs/standards/validation-toolchain.json'),'{}',[Text.UTF8Encoding]::new($false))
+        $childPidPath=Join-Path $root 'descendant.pid'
+        $childScript=Join-Path $root 'resolver-descendant.ps1'
+        [IO.File]::WriteAllText($childScript,@'
+param([string]$PidPath)
+[IO.File]::WriteAllText($PidPath,[string]$PID,[Text.UTF8Encoding]::new($false))
+Start-Sleep -Seconds 30
+'@,[Text.UTF8Encoding]::new($false))
+        $resolver=Join-Path $root 'resolver-timeout.ps1'
+        $escapedChild=$childScript.Replace("'","''");$escapedPid=$childPidPath.Replace("'","''")
+        [IO.File]::WriteAllText($resolver,@"
+param([string]`$PolicyPath,[string]`$ToolName,[switch]`$Install,[string]`$InstallRoot,[string]`$ExpectedGoRuntimeVersion,
+    [string]`$RunId,[string]`$OutputPath,[int]`$AcquisitionTimeoutSeconds)
+`$start=[Diagnostics.ProcessStartInfo]::new()
+`$start.FileName=(Get-Process -Id `$PID).Path
+`$start.UseShellExecute=`$false
+`$start.CreateNoWindow=`$true
+`$start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
+foreach(`$argument in @('-NoProfile','-NonInteractive','-File','$escapedChild','$escapedPid')){[void]`$start.ArgumentList.Add(`$argument)}
+`$child=[Diagnostics.Process]::Start(`$start)
+[Console]::Out.Write('resolver fixture started')
+Start-Sleep -Seconds 30
+"@,[Text.UTF8Encoding]::new($false))
+        $oldResolver=$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH
+        $oldTimeout=$env:CONSUMER_GATE_TEST_RESOLVER_TIMEOUT_SECONDS
+        try{
+            $env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$null
+            $env:CONSUMER_GATE_TEST_RESOLVER_TIMEOUT_SECONDS='1'
+            {Get-GateDeadlineBudget}|Should Throw 'requires the resolver fixture seam'
+            $env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$resolver
+            $env:CONSUMER_GATE_TEST_RESOLVER_TIMEOUT_SECONDS='301'
+            {Get-GateDeadlineBudget}|Should Throw 'override is invalid'
+        }finally{
+            $env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$oldResolver
+            $env:CONSUMER_GATE_TEST_RESOLVER_TIMEOUT_SECONDS=$oldTimeout
+        }
+        $env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$resolver
+        $env:CONSUMER_GATE_TEST_RESOLVER_TIMEOUT_SECONDS='2'
+        Import-Module $script:GateModule -Force
+        try{
+            $failure=Get-SourceFixtureFailure {Invoke-GateResolver (Get-Process -Id $PID).Path $authority $install pester `
+                ('a'*32) (Join-Path $source 'receipt-pester.json') latest ''}
+            $failure|Should Match '^FAILED\|Resolver owned process failed.*deadline'
+            Test-Path -LiteralPath (Join-Path $source 'diagnostics/resolver-pester.stdout.txt') -PathType Leaf|Should Be $true
+            Test-Path -LiteralPath (Join-Path $source 'diagnostics/resolver-pester.stderr.txt') -PathType Leaf|Should Be $true
+            (Get-Content -Raw (Join-Path $source 'diagnostics/resolver-pester.stderr.txt'))|Should Match 'deadline'
+            Test-Path -LiteralPath $childPidPath -PathType Leaf|Should Be $true
+            $childPid=[int]([IO.File]::ReadAllText($childPidPath))
+            (Get-Process -Id $childPid -ErrorAction SilentlyContinue)|Should BeNullOrEmpty
+        }finally{
+            $env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$oldResolver
+            $env:CONSUMER_GATE_TEST_RESOLVER_TIMEOUT_SECONDS=$oldTimeout
+            Restore-GateFixtureModule
+        }
+    }
+
+    # Scenario: A Git blob contains bytes that are not valid UTF-8 and is read through the production byte capture path.
+    # Purpose: Byte-oriented Git output must never be replacement-decoded or otherwise changed by text capture.
+    It 'UnitT49a_preserves_invalid_UTF8_blob_bytes_exactly' {
+        $root=Join-Path $TestDrive 'git-byte-exact-blob'
+        [void][IO.Directory]::CreateDirectory($root)
+        [void](Invoke-SourceFixtureGit $root @('init','-q','-b','main'))
+        $expected=[byte[]]@(0x00,0x41,0xff,0x80,0xfe,0x0a)
+        $oid=Invoke-SourceFixtureGitWithInputBytes $root @('hash-object','-w','--stdin') $expected
+        [byte[]]$actual=Invoke-GateGitBytes $root @('cat-file','blob',$oid)
+        [Convert]::ToBase64String($actual)|Should BeExactly ([Convert]::ToBase64String($expected))
+    }
+
+    # Scenario: Standalone manifest closure launches a Git shim that exceeds a shortened command deadline.
+    # Purpose: Non-gate closure callers must fail closed through the same bounded owned-process boundary.
+    It 'UnitT49b_bounds_standalone_closure_Git_deadline' {
+        $root=Join-Path $TestDrive 'closure-owned-timeout'
+        $shimRoot=Join-Path $root 'shim'
+        [void][IO.Directory]::CreateDirectory($shimRoot)
+        $childPidPath=Join-Path $root 'child.pid'
+        $childScript=Join-Path $root 'child.ps1'
+        [IO.File]::WriteAllText($childScript,"param([string]`$PidPath)`n[IO.File]::WriteAllText(`$PidPath,[string]`$PID,[Text.UTF8Encoding]::new(`$false))`nStart-Sleep -Seconds 30`n",[Text.UTF8Encoding]::new($false))
+        $shell=(Get-Process -Id $PID).Path
+        if($IsWindows){
+            $shim=Join-Path $shimRoot 'git.cmd'
+            $text="@echo off`r`n`"$shell`" -NoProfile -NonInteractive -File `"$childScript`" `"$childPidPath`"`r`n"
+        }else{
+            $shim=Join-Path $shimRoot 'git'
+            $text="#!/bin/sh`n`"$shell`" -NoProfile -NonInteractive -File `"$childScript`" `"$childPidPath`"`n"
+        }
+        [IO.File]::WriteAllText($shim,$text,[Text.UTF8Encoding]::new($false))
+        if(-not$IsWindows){[IO.File]::SetUnixFileMode($shim,[IO.UnixFileMode]::UserRead-bor[IO.UnixFileMode]::UserWrite-bor[IO.UnixFileMode]::UserExecute)}
+        $manifest=Join-Path $root 'manifest.json'
+        Write-FixtureJson $manifest ([ordered]@{repositories=@([ordered]@{id='fixture';inventoryTree=('b'*40);files=@()})})
+        $oldPath=$env:PATH
+        try{
+            $env:PATH=$shimRoot+[IO.Path]::PathSeparator+$oldPath
+            $failure=Get-SourceFixtureFailure {Get-ConsumerManifestClosure -RepositoryRoot $root -Commit ('a'*40) `
+                -Stage inventory -Manifest $manifest -RepositoryId fixture -AuthorityRoot $script:RepositoryRoot `
+                -GitCommandTimeoutSeconds 1 -GitReserveSeconds 2}
+            $failure|Should Match 'Manifest closure Git command exceeded its bounded deadline'
+            Test-Path -LiteralPath $childPidPath -PathType Leaf|Should Be $true
+        }finally{
+            $env:PATH=$oldPath
+            if(Test-Path -LiteralPath $childPidPath -PathType Leaf){
+                $childPid=[int]([IO.File]::ReadAllText($childPidPath))
+                Get-Process -Id $childPid -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    # Scenario: Every consumer owned-process seam reports an unknown exit status after the child has otherwise completed.
+    # Purpose: A null or non-integral exit status must never be coerced to zero or accepted as a successful resolver, validator, Git, byte-Git, or standalone closure result.
+    It 'UnitT49c_rejects_unknown_owned_process_exit_statuses' {
+        $previousLastExitCode=$global:LASTEXITCODE
+        $previousConsoleOut=[Console]::Out
+        $previousConsoleError=[Console]::Error
+        $consoleOut=[IO.StringWriter]::new()
+        $consoleError=[IO.StringWriter]::new()
+        $root=Join-Path $TestDrive 'unknown-owned-process-exit'
+        $authority=Join-Path $root 'authority';$install=Join-Path $root 'install';$source=Join-Path $root 'source'
+        foreach($directory in @($authority,$install,$source,(Join-Path $authority 'docs/standards'),(Join-Path $authority 'scripts'))){
+            [void][IO.Directory]::CreateDirectory($directory)
+        }
+        [IO.File]::WriteAllText((Join-Path $authority 'docs/standards/validation-toolchain.json'),'{}',[Text.UTF8Encoding]::new($false))
+        $resolver=Join-Path $root 'resolver.ps1';[IO.File]::WriteAllText($resolver,'exit 0',[Text.UTF8Encoding]::new($false))
+        $oldResolver=$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH;$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$resolver
+        Mock Import-GatePlatformRuntime {[pscustomobject]@{ExportedCommands=@{
+                    'Invoke-PlatformPreparationCommand'={ [pscustomobject]@{stdout='';stderr='';exitCode=$null} }
+                }}} -ModuleName ConsumerGate
+        try{
+            [Console]::SetOut($consoleOut)
+            [Console]::SetError($consoleError)
+            try{
+            {Invoke-GateResolver (Get-Process -Id $PID).Path $authority $install pester ('a'*32) `
+                    (Join-Path $source 'receipt-pester.json') latest ''}|Should Throw 'Resolver exit status is unknown.'
+
+            $candidate=Join-Path $root 'candidate';$work=Join-Path $root 'work';$trustedRoot=Join-Path $root 'trusted-runtime'
+            $trustedDirectory=Join-Path $trustedRoot 'trusted'
+            foreach($directory in @($candidate,$work,$trustedDirectory,(Join-Path $work 'validation-artifacts'))){[void][IO.Directory]::CreateDirectory($directory)}
+            $check=Join-Path $trustedDirectory 'Invoke-ConsumerRepositoryCheck.ps1';[IO.File]::WriteAllText($check,'exit 0',[Text.UTF8Encoding]::new($false))
+            $checkHash=(Get-FileHash $check -Algorithm SHA256).Hash.ToLowerInvariant()
+            Write-FixtureJson (Join-Path $work 'source-tools.json') ([ordered]@{trustedRoot=$trustedRoot;repositoryCheck=$check
+                    pesterReceiptSha256=('b'*64);pesterManifestSha256=('c'*64);pesterVersion='6.2.0'
+                    sourceValidation=[ordered]@{frozenFiles=@([ordered]@{path=$check;sha256=$checkHash})}})
+            [IO.File]::WriteAllText((Join-Path $authority 'scripts/Invoke-StandardValidation.ps1'),'exit 0',[Text.UTF8Encoding]::new($false))
+            $binding=[pscustomobject]@{candidateRevision=('d'*40);baseRevision=('e'*40);canonicalEvent='pull_request';runId=('f'*32);commit=('1'*40)}
+            $config=[pscustomobject]@{sourceRepository='https://example.test/fixture.git';activeSkills=@('fixture')}
+            {Invoke-GateValidation $authority $candidate $work $binding $config (Get-Process -Id $PID).Path}|Should Throw 'Validator exit status is unknown.'
+        }finally{$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$oldResolver}
+
+        Mock Invoke-GateOwnedGitCapture {[pscustomobject]@{ExitCode=$null;StdoutBytes=[byte[]]::new(0);StderrBytes=[byte[]]::new(0)}} -ModuleName ConsumerGate
+        InModuleScope ConsumerGate {$script:GateGitHooksPath='fixture'}
+        {Invoke-GateGit $script:RepositoryRoot @('rev-parse','HEAD')}|Should Throw 'git exit status is unknown.'
+        {Invoke-GateGitBytes $script:RepositoryRoot @('rev-parse','HEAD')}|Should Throw 'git exit status is unknown.'
+
+        Import-Module (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1') -Force
+        Mock Invoke-ClosureOwnedGitBytes {[pscustomobject]@{ExitCode=$null;Bytes=[byte[]]::new(0);Error=''}} -ModuleName ConsumerManifestClosure
+        InModuleScope ConsumerManifestClosure {
+            $script:ClosureGitRuntime=[pscustomobject]@{}
+            {Invoke-ClosureGitBytes -RepositoryRoot $TestDrive -Arguments @('rev-parse','HEAD')}|Should Throw 'git exit status is unknown.'
+            $script:ClosureGitRuntime=$null
+        }
+
+        $helperText=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-GateGitByteCapture.ps1')
+        $mutantText=$helperText.Replace('$exitCode=$process.ExitCode','$exitCode=$null')
+        $mutantText|Should Not BeExactly $helperText
+        $helper=Join-Path $root 'Invoke-GateGitByteCapture-null-exit.ps1'
+        [IO.File]::WriteAllText($helper,$mutantText,[Text.UTF8Encoding]::new($false))
+        $output=Join-Path $root 'helper-output.bin'
+        $payload=[Convert]::ToBase64String([Text.UTF8Encoding]::new($false).GetBytes((@('--version')|ConvertTo-Json -Compress)))
+        $records=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $helper -GitPath `
+                (Get-Command git -CommandType Application -ErrorAction Stop|Select-Object -First 1).Source -OutputPath $output `
+                -GitArgumentsBase64 $payload 2>&1)
+        $LASTEXITCODE|Should Not Be 0
+        ($records-join[Environment]::NewLine)|Should Match 'git exit status is unknown.'
+        }finally{
+            [Console]::SetOut($previousConsoleOut)
+            [Console]::SetError($previousConsoleError)
+            $consoleOut.Dispose()
+            $consoleError.Dispose()
+            Restore-GateFixtureModule
+            $global:LASTEXITCODE=$previousLastExitCode
+        }
     }
 
     # Scenario: Runtime and tool boundaries record events in prepare, then the production final report assertion records the final event.

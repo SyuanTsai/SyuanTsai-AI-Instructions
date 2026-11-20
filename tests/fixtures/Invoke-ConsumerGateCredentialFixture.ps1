@@ -35,6 +35,7 @@ foreach($directory in @(
 foreach($path in @(
         'consumer/bootstrap/Invoke-PinnedAuthority.ps1','consumer/workflows/consumer-gate.yml',
         'consumer/workflows/consumer-gate-transition.yml','scripts/consumer/ConsumerGate.psm1',
+        'scripts/consumer/Invoke-GateGitByteCapture.ps1',
         'scripts/consumer/ConsumerManifestClosure.psm1',
         'scripts/consumer/Invoke-ConsumerSourceGate.ps1','scripts/consumer/Invoke-ConsumerValidationChild.ps1',
         'scripts/consumer/Invoke-ConsumerRepositoryCheck.ps1','scripts/Invoke-StandardValidation.ps1',
@@ -44,6 +45,12 @@ foreach($path in @(
     $destination=Join-Path $authority $path
     [void][IO.Directory]::CreateDirectory((Split-Path -Parent $destination))
     Copy-Item -LiteralPath (Join-Path $RepositoryRoot $path) -Destination $destination
+}
+$platformRuntimeManifest=Import-PowerShellDataFile (Join-Path $RepositoryRoot 'scripts/platform-runtime.psd1')
+foreach($relative in @('platform-runtime.psd1')+@($platformRuntimeManifest.FileList)|Select-Object -Unique){
+    $destination=Join-Path (Join-Path $authority 'scripts') $relative
+    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $destination))
+    Copy-Item -LiteralPath (Join-Path (Join-Path $RepositoryRoot 'scripts') $relative) -Destination $destination
 }
 $manifest=Get-Content -Raw -Encoding UTF8 (Join-Path $RepositoryRoot 'consumer/legacy-migration.json')|ConvertFrom-Json -Depth 100
 $general=@($manifest.repositories|Where-Object id -eq 'skill-general')[0]

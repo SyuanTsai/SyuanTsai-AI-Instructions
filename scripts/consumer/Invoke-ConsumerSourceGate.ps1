@@ -48,7 +48,7 @@ if(-not[string]::IsNullOrWhiteSpace($phaseEnvironmentDumpPath)){
         }
     }
     $authorityRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
-    Initialize-GateGitHooks $WorkRoot
+    Initialize-GateGitHooks $WorkRoot -Phase $Phase
     $binding=Read-GateJson $AuthorityBindingPath 'authority binding'
     $binding|Add-Member -NotePropertyName canonicalEvent -NotePropertyValue $(if([string]$binding.triggerEvent-ceq'push'){'push'}else{'pull_request'}) -Force
     $eventRepository=[string]$env:CONSUMER_GATE_EVENT_REPOSITORY
