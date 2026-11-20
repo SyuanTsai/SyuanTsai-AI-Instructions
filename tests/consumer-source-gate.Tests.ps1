@@ -3468,6 +3468,7 @@ Start-Sleep -Seconds 30
         foreach($directory in @($authority,$install,$source,(Join-Path $authority 'docs/standards'),(Join-Path $authority 'scripts'))){
             [void][IO.Directory]::CreateDirectory($directory)
         }
+        Copy-GatePlatformRuntimeFixture $authority
         [IO.File]::WriteAllText((Join-Path $authority 'docs/standards/validation-toolchain.json'),'{}',[Text.UTF8Encoding]::new($false))
         $resolver=Join-Path $root 'resolver.ps1';[IO.File]::WriteAllText($resolver,'exit 0',[Text.UTF8Encoding]::new($false))
         $oldResolver=$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH;$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$resolver
@@ -3475,10 +3476,12 @@ Start-Sleep -Seconds 30
         $gateModule=Get-Module ConsumerGate -ErrorAction Stop
         $previousGatePlatformRuntimeModule=$gateModule.SessionState.PSVariable.GetValue('GatePlatformRuntimeModule')
         $previousGatePlatformRuntimeAuthorityRoot=$gateModule.SessionState.PSVariable.GetValue('GatePlatformRuntimeAuthorityRoot')
+        $previousGateGitHooksPath=$gateModule.SessionState.PSVariable.GetValue('GateGitHooksPath')
         $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeModule',$null)
         $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeAuthorityRoot',$null)
         Mock Import-GatePlatformRuntime {[pscustomobject]@{ExportedCommands=@{
-                    'Invoke-PlatformPreparationCommand'={ [pscustomobject]@{stdout='';stderr='';exitCode=$null} }
+                    'Invoke-PlatformPreparationCommand'={ param($Command,$Arguments,$Environment,$WorkingDirectory,$TimeoutMilliseconds)
+                        [pscustomobject]@{stdout='';stderr='';exitCode=$null} }
                 }}} -ModuleName ConsumerGate
         try{
             [Console]::SetOut($consoleOut)
@@ -3537,6 +3540,7 @@ Start-Sleep -Seconds 30
             $consoleError.Dispose()
             $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeModule',$previousGatePlatformRuntimeModule)
             $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeAuthorityRoot',$previousGatePlatformRuntimeAuthorityRoot)
+            $gateModule.SessionState.PSVariable.Set('GateGitHooksPath',$previousGateGitHooksPath)
             $global:LASTEXITCODE=$previousLastExitCode
         }
     }
