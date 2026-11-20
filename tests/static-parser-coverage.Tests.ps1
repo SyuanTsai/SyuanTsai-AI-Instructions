@@ -106,7 +106,7 @@ Describe 'Static parser coverage and finding preservation' {
         }
     }
 
-    # Scenario: the approved source registry activates 2.13.4 while retaining the reviewed 2.13.0 bridge entry.
+    # Scenario: the approved source registry activates 2.13.6 while retaining the reviewed 2.13.0 bridge entry.
     # Purpose: bind native and corrected parser paths to explicit release, wheel and analyzer identities.
     It 'UnitT42_binds_approved_SkillSpector_sources_and_release_specific_parser_corrections' {
         $registry=Get-Content -Raw (Join-Path $parserRepositoryRoot 'docs/standards/skillspector-approved-sources.json') | ConvertFrom-Json
@@ -116,7 +116,7 @@ Describe 'Static parser coverage and finding preservation' {
         $bridge=Get-Content -Raw (Join-Path $parserRepositoryRoot 'scripts/standard_static_powershell.py')
 
         Assert-ParserCase ((Get-Content -Raw (Join-Path $parserRepositoryRoot 'docs/standards/skillspector-approved-sources.json')) | Test-Json -SchemaFile $registrySchema) 'Approved source registry violates its strict schema.'
-        Assert-ParserCase ($registry.active -ceq '2.13.4' -and $registry.entries.'2.13.4'.parserCorrection -ceq 'none') '2.13.4 must be the active native profile.'
+        Assert-ParserCase ($registry.active -ceq '2.13.6' -and $registry.entries.'2.13.6'.parserCorrection -ceq 'none') '2.13.6 must be the active native profile.'
         Assert-ParserCase ($registry.entries.'2.13.0'.parserCorrection -ceq 'powershell-native-command-ownership-v1') '2.13.0 must retain the bridge profile.'
         $nativeEntries=@($registry.entries.PSObject.Properties.Value | Where-Object {$_.parserCorrection -ceq 'none'})
         Assert-ParserCase ($registry.entries.'2.13.6'.parserCorrection -ceq 'none' -and @($nativeEntries | Where-Object {$_.version -ceq $policy.officialScannerVersion}).Count -eq 0) 'Native parser entries, including 2.13.6, must not use the bridge-bound version.'
@@ -132,7 +132,8 @@ Describe 'Static parser coverage and finding preservation' {
     It 'UnitT52_captures_native_JSON_from_stdout_and_skips_the_bridge_for_none_profiles' {
         $wrapper=Get-Content -Raw (Join-Path $parserRepositoryRoot 'scripts/Invoke-StandardStaticScan.ps1')
         $bridge=Get-Content -Raw (Join-Path $parserRepositoryRoot 'scripts/standard_static_powershell.py')
-        Assert-ParserCase ($wrapper.Contains("@('-I','-B','-X','utf8','-c','from skillspector.cli import app; app()','scan',`$skillFull,'--no-llm','--format','json')")) 'Native scan arguments must use UTF-8 stdout without --output.'
+        Assert-ParserCase ($wrapper.Contains("'skillspector.cli_entry:app' {'from skillspector.cli_entry import app; app()'}")) 'The active console entry point must select its reviewed Python module.'
+        Assert-ParserCase ($wrapper.Contains("@('-I','-B','-X','utf8','-c',`$nativeEntryPoint,'scan',`$skillFull,'--no-llm','--format','json')")) 'Native scan arguments must use the approved entry point and UTF-8 stdout without --output.'
         Assert-ParserCase ($wrapper.Contains("@('-I','-B','-X','utf8',`$bridgePath")) 'The retained bridge scan must also run its Python CLI in UTF-8 mode.'
         Assert-ParserCase (-not $wrapper.Contains("'--output',`$originalReport")) 'Native scan must not use the unsupported output option.'
         Assert-ParserCase ($wrapper.Contains('function Write-StaticNativeReportFromProcess')) 'Native stdout capture must be centralized.'
@@ -158,6 +159,7 @@ Describe 'Static parser coverage and finding preservation' {
             $baselineFull=$null
             $skillFull='candidate-skill';$bridgePath='bridge.py';$pwsh='pwsh';$pwshHash='runtime-hash'
             $reportFull='report.json';$profileRecord='profile.json';$SourceRevision='revision';$CandidateIdentity='candidate'
+            $nativeEntryPoint='from skillspector.cli_entry import app; app()'
             foreach($name in @('nativeArguments','bridgeArguments')){
                 $assignment=$parserAst.Find({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ceq ('$'+$name) -and $n.Operator -eq 'Equals'},$true)
                 . ([scriptblock]::Create($assignment.Extent.Text))
@@ -175,6 +177,7 @@ Describe 'Static parser coverage and finding preservation' {
             $baselineFull='candidate baseline.json'
             $skillFull='candidate-skill';$bridgePath='bridge.py';$pwsh='pwsh';$pwshHash='runtime-hash'
             $reportFull='report.json';$profileRecord='profile.json';$SourceRevision='revision';$CandidateIdentity='candidate'
+            $nativeEntryPoint='from skillspector.cli_entry import app; app()'
             foreach($name in @('nativeArguments','bridgeArguments')){
                 $assignment=$parserAst.Find({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ceq ('$'+$name) -and $n.Operator -eq 'Equals'},$true)
                 . ([scriptblock]::Create($assignment.Extent.Text))
@@ -191,17 +194,17 @@ Describe 'Static parser coverage and finding preservation' {
     # Purpose: reject missing, unknown, version-drifted and identity-drifted receipts with the established parser-profile error.
     It 'UnitT53_rejects_receipts_not_bound_to_one_approved_SkillSpector_entry' {
         $approved=Get-Content -Raw (Join-Path $parserRepositoryRoot 'docs/standards/skillspector-approved-sources.json') | ConvertFrom-Json
-        $entry=$approved.entries.'2.13.4'
+        $entry=$approved.entries.'2.13.6'
         $runId='b'*32
         $prefix='github:NVIDIA/SkillSpector@'+$entry.releaseTag+'#commit='+$entry.releaseCommit+'#asset=sha256:'+$entry.wheelSha256+'#'
         $valid=[pscustomobject]@{
             toolName='skillspector';source='NVIDIA/SkillSpector';channel='approved-source-registry'
-            approvedSourceId='2.13.4';parserCorrection='none';resolvedVersion='2.13.4';frozenForRun=$true
+            approvedSourceId='2.13.6';parserCorrection='none';resolvedVersion='2.13.6';frozenForRun=$true
             resolutionRunId=$runId;identityKind='release-commit-asset-metadata-dependency-closure-and-executable'
-            offlineResolutionVerified=$true;consoleEntryPoint='skillspector.cli:app';resolvedIdentity=$prefix+'closure=fixture'
-            installedClosureSha256='a'*64;dependencyClosure=@([pscustomobject]@{normalizedName='skillspector';version='2.13.4';sha256=$entry.wheelSha256})
+            offlineResolutionVerified=$true;consoleEntryPoint='skillspector.cli_entry:app';resolvedIdentity=$prefix+'closure=fixture'
+            installedClosureSha256='a'*64;dependencyClosure=@([pscustomobject]@{normalizedName='skillspector';version='2.13.6';sha256=$entry.wheelSha256})
         }
-        Assert-ParserCase ((Get-StaticApprovedSkillSpectorEntry -Receipt $valid -ApprovedSources $approved -ExpectedResolutionRunId $runId).version -ceq '2.13.4') 'A valid approved receipt was rejected.'
+        Assert-ParserCase ((Get-StaticApprovedSkillSpectorEntry -Receipt $valid -ApprovedSources $approved -ExpectedResolutionRunId $runId).version -ceq '2.13.6') 'A valid approved receipt was rejected.'
         foreach($mutation in @('missing-approved-source','unknown-approved-source','version','identity')){
             $changed=$valid | ConvertTo-Json -Depth 8 | ConvertFrom-Json
             switch($mutation){
@@ -218,25 +221,19 @@ Describe 'Static parser coverage and finding preservation' {
     # Purpose: Reject entry-point drift while accepting the distinct console entry point bound by the active approved entry.
     It 'UnitT53a_binds_the_receipt_console_entry_point_to_the_active_approved_entry' {
         $approved=Get-Content -Raw (Join-Path $parserRepositoryRoot 'docs/standards/skillspector-approved-sources.json') | ConvertFrom-Json
-        $entry=$approved.entries.'2.13.4'
+        $entry=$approved.entries.'2.13.6'
         $runId='b'*32
         $prefix='github:NVIDIA/SkillSpector@'+$entry.releaseTag+'#commit='+$entry.releaseCommit+'#asset=sha256:'+$entry.wheelSha256+'#'
         $receipt=[pscustomobject]@{
             toolName='skillspector';source='NVIDIA/SkillSpector';channel='approved-source-registry'
-            approvedSourceId='2.13.4';parserCorrection=$entry.parserCorrection;resolvedVersion=$entry.version;frozenForRun=$true
+            approvedSourceId='2.13.6';parserCorrection=$entry.parserCorrection;resolvedVersion=$entry.version;frozenForRun=$true
             resolutionRunId=$runId;identityKind='release-commit-asset-metadata-dependency-closure-and-executable'
-            offlineResolutionVerified=$true;consoleEntryPoint='skillspector.cli_entry:app';resolvedIdentity=$prefix+'closure=fixture'
+            offlineResolutionVerified=$true;consoleEntryPoint='skillspector.cli:app';resolvedIdentity=$prefix+'closure=fixture'
             installedClosureSha256='a'*64;dependencyClosure=@([pscustomobject]@{normalizedName='skillspector';version=$entry.version;sha256=$entry.wheelSha256})
         }
         Assert-ParserRejected {Get-StaticApprovedSkillSpectorEntry -Receipt $receipt -ApprovedSources $approved -ExpectedResolutionRunId $runId | Out-Null}
 
-        $approved.active='2.13.6'
-        $entry=$approved.entries.'2.13.6'
-        $receipt.approvedSourceId='2.13.6'
-        $receipt.parserCorrection=$entry.parserCorrection
-        $receipt.resolvedVersion=$entry.version
-        $receipt.resolvedIdentity='github:NVIDIA/SkillSpector@'+$entry.releaseTag+'#commit='+$entry.releaseCommit+'#asset=sha256:'+$entry.wheelSha256+'#closure=fixture'
-        $receipt.dependencyClosure=@([pscustomobject]@{normalizedName='skillspector';version=$entry.version;sha256=$entry.wheelSha256})
+        $receipt.consoleEntryPoint='skillspector.cli_entry:app'
         Assert-ParserCase ((Get-StaticApprovedSkillSpectorEntry -Receipt $receipt -ApprovedSources $approved -ExpectedResolutionRunId $runId).version -ceq '2.13.6') 'The reviewed 2.13.6 console entry point was rejected.'
     }
 
@@ -245,12 +242,12 @@ Describe 'Static parser coverage and finding preservation' {
     # Purpose: Keep Static execution canonical by accepting only the currently active approved source.
     It 'UnitT54_rejects_receipts_bound_to_a_non_active_approved_SkillSpector_entry' {
         $approved=Get-Content -Raw (Join-Path $parserRepositoryRoot 'docs/standards/skillspector-approved-sources.json') | ConvertFrom-Json
-        $entry=$approved.entries.'2.13.0'
+        $entry=$approved.entries.'2.13.4'
         $runId='b'*32
         $prefix='github:NVIDIA/SkillSpector@'+$entry.releaseTag+'#commit='+$entry.releaseCommit+'#asset=sha256:'+$entry.wheelSha256+'#'
         $receipt=[pscustomobject]@{
             toolName='skillspector';source='NVIDIA/SkillSpector';channel='approved-source-registry'
-            approvedSourceId='2.13.0';parserCorrection=$entry.parserCorrection;resolvedVersion=$entry.version;frozenForRun=$true
+            approvedSourceId='2.13.4';parserCorrection=$entry.parserCorrection;resolvedVersion=$entry.version;frozenForRun=$true
             resolutionRunId=$runId;identityKind='release-commit-asset-metadata-dependency-closure-and-executable'
             offlineResolutionVerified=$true;consoleEntryPoint='skillspector.cli:app';resolvedIdentity=$prefix+'closure=fixture'
             installedClosureSha256='a'*64;dependencyClosure=@([pscustomobject]@{normalizedName='skillspector';version=$entry.version;sha256=$entry.wheelSha256})

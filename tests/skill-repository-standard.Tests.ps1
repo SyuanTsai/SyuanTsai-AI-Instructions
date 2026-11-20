@@ -3332,8 +3332,8 @@ public sealed class C245NonCooperativeStream : Stream {
         Assert-InstalledAuthorityToolReceipt -Receipt $receipt -ToolName $expectedToolName -ExpectedSource 'NVIDIA/SkillSpector' -InstallRoot $expectedInstallRoot | Out-Null
         if($expectedInstallRoot -cne $installRoot -or $expectedToolName -cne 'skillspector') { throw 'Authority receipt caller parameters changed after resolver loading.' }
 
-        $retained=$registry.entries.'2.13.0'
-        $receipt.approvedSourceId='2.13.0'
+        $retained=$registry.entries.'2.13.4'
+        $receipt.approvedSourceId='2.13.4'
         $receipt.parserCorrection=[string]$retained.parserCorrection
         $receipt.resolvedVersion=[string]$retained.version
         $receipt.resolvedIdentity='github:NVIDIA/SkillSpector@'+[string]$retained.releaseTag+'#commit='+[string]$retained.releaseCommit+'#asset=sha256:'+[string]$retained.wheelSha256+'#fixture'
@@ -3361,7 +3361,7 @@ public sealed class C245NonCooperativeStream : Stream {
             schemaVersion=1;toolName='skillspector';source='NVIDIA/SkillSpector';channel='approved-source-registry';frozenForRun=$true
             resolvedVersion=[string]$entry.version;resolvedIdentity=('github:NVIDIA/SkillSpector@'+[string]$entry.releaseTag+'#commit='+[string]$entry.releaseCommit+'#asset=sha256:'+[string]$entry.wheelSha256+'#fixture')
             identityKind='release-commit-asset-metadata-dependency-closure-and-executable';approvedSourceId=[string]$registry.active;parserCorrection=[string]$entry.parserCorrection
-            consoleEntryPoint='skillspector.cli_entry:app'
+            consoleEntryPoint='skillspector.cli:app'
             installRoot=$toolRoot;executablePath=$executablePath;executableSha256=$executableSha256;installedClosureSha256=(Get-AuthorityDirectoryClosureSha256 -Path $toolRoot)
             launcher=$launcher;launcherDigestSha256=(Get-AuthorityLauncherDigest -Launcher $launcher);dependencyClosureSha256=('a'*64);dependencyClosure=@([pscustomobject]@{name='skillspector';version=[string]$entry.version})
         }
@@ -6772,7 +6772,7 @@ Describe 'SYP481 exact-fingerprint exception authority' {
     It 'UnitT10_requires_exact_baselines_and_retains_release_and_severity_policy' {
         $standard=Get-Content -Raw -Encoding UTF8 (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs/standards/skill-repository-standard.md')
         $section=[regex]::Match($standard,'(?s)#### 14\.2\.1 SkillSpector exact-fingerprint exceptions(.*?)### 14\.3').Groups[1].Value
-        foreach($required in @('skillspector-human-approved-exceptions-v1','config/skillspector-exceptions/<skillId>.baseline.json','`rules`','approved source','review.expiresOn','既有例外集合的縮減或完整移除不是新增例外，不需要 Human Approval','immutable base 與 candidate Git revisions','`100644` blob','candidate 是 base 的子集','例外集合 scope 內 disposition 為 `retain` 的路徑內容變更不受一般 retain byte-identical 規則限制','一般 retain gate 與只減不增 gate **MUST** 使用同一份 scope 定義','以 NUL byte 分割 record','scope 外的非 UTF-8 path 必須略過','無法嚴格解碼時必須 INVALID','NFKC 正規化再做 invariant lowercase','大小寫或 Unicode 變體','object key 以 Ordinal 排序','string 以解碼後的值比較','number 以原始 token 逐字比較','`0` 與 `0.0` 必須視為修改','`(skillId, rule_id, file, hash)`','修改 hash、reason','`review.expiresOn` 續期','另有依第 19 節核准的 normative authority 機制','--baseline','suppressedFindings','suppressionReason','High／Critical **MUST NOT**','第 11 節','`releaseEligible` 不變')) {
+        foreach($required in @('skillspector-human-approved-exceptions-v1','config/skillspector-exceptions/<skillId>.baseline.json','`rules`','approved source','review.expiresOn','既有例外集合的縮減或完整移除不是新增例外，不需要 Human Approval','immutable base 與 candidate Git revisions','`100644` blob','candidate 是 base 的子集','例外集合 scope 內 disposition 為 `retain` 的路徑內容變更不受一般 retain byte-identical 規則限制','一般 retain gate 與只減不增 gate **MUST** 使用同一份 scope 定義','以 NUL byte 分割 record','scope 外的非 UTF-8 path 必須略過','無法嚴格解碼時必須 INVALID','NFKC 正規化再做 invariant lowercase','大小寫或 Unicode 變體','object key 以 Ordinal 排序','string 以解碼後的值比較','number 以原始 token 逐字比較','`0` 與 `0.0` 必須視為修改','`(skillId, rule_id, file, hash)`','修改 hash、reason','`review.expiresOn` 續期','Human Approval 的 scanner 版本轉換','candidate 版本是執行中 authority approved-sources 的 `active`','未提供 authority 的舊 gate 呼叫不得允許轉換','2026-11-20','--baseline','suppressedFindings','`line`','每個 candidate fingerprint 恰由一個 suppressed finding 使用','Candidate 可寫檔案或未綁定的中間紀錄不得作為此判定的 authority','suppressionReason','High／Critical **MUST NOT**','第 11 節','`releaseEligible` 不變')) {
             $section.Contains($required) | Should Be $true
         }
         $capability=[regex]::Match($standard,'(?s)### 9\.5 Capability is not automatically vulnerability(.*?)## 10\.').Groups[1].Value
