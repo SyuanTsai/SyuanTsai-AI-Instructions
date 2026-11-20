@@ -106,6 +106,20 @@ function Get-NormalizedDimensions {
     return @($values | Sort-Object -Property key)
 }
 
+function Get-NormalizedDiagnostics {
+    param([Parameter(Mandatory = $true)] $Diagnostics)
+    $values = @($Diagnostics | ForEach-Object {
+        [pscustomobject][ordered]@{
+            ruleId = if ($_.PSObject.Properties['ruleId']) { $_.ruleId } else { $null }
+            severity = if ($_.PSObject.Properties['severity']) { $_.severity } else { $null }
+            message = if ($_.PSObject.Properties['message']) { $_.message } else { $null }
+            line = if ($_.PSObject.Properties['line']) { $_.line } else { $null }
+            fix = if ($_.PSObject.Properties['fix']) { $_.fix } else { $null }
+        }
+    })
+    return @($values | Sort-Object -Stable -Property ruleId, line, message)
+}
+
 function Clear-ProbeInheritedEnvironment {
     $cleared = New-Object 'System.Collections.Generic.List[string]'
     $variables = [Environment]::GetEnvironmentVariables([EnvironmentVariableTarget]::Process)
@@ -168,7 +182,7 @@ function Invoke-Leg {
         [string]$receipt.entryPointPath, 'check', $missingPath, '--format', 'json'
     ) -ExpectedExitCodes @(1)
     $checkDocuments = @(ConvertFrom-ProbeJsonStream -Text $checkCommand.stdout)
-    if ($checkDocuments.Count -ne 3) { throw "Expected validation, lint, and score JSON documents; found $($checkDocuments.Count)." }
+    if ($checkDocuments.Count -ne 1) { throw "Expected one validation JSON document; found $($checkDocuments.Count)." }
     $validationResults = @($checkDocuments[0])
     if ($validationResults.Count -ne 1 -or [bool]$validationResults[0].valid) { throw 'reference-missing was not reported invalid.' }
     $referenceDiagnostics = @($validationResults[0].diagnostics | Where-Object { [string]$_.ruleId -ceq 'file-reference-exists' })
@@ -209,6 +223,7 @@ function Invoke-Aggregate {
     $baseline = @($results | Where-Object { $_.platform -ceq 'windows' })[0]
     $differences = New-Object 'System.Collections.Generic.List[string]'
     $baselineDimensions = $baseline.score.dimensions | ConvertTo-Json -Depth 10 -Compress
+    $baselineDiagnostics = Get-NormalizedDiagnostics -Diagnostics $baseline.check.diagnostics | ConvertTo-Json -Depth 10 -Compress
     foreach ($result in $results) {
         if ([string]$result.skillToolsVersion -cne [string]$baseline.skillToolsVersion) { $differences.Add("$($result.platform): skill-tools version differs.") }
         if ([string]$result.coreVersion -cne [string]$baseline.coreVersion) { $differences.Add("$($result.platform): core version differs.") }
@@ -216,7 +231,10 @@ function Invoke-Aggregate {
         if (($result.score.dimensions | ConvertTo-Json -Depth 10 -Compress) -cne $baselineDimensions) { $differences.Add("$($result.platform): dimension scores differ.") }
         $progressive = @($result.score.dimensions | Where-Object { $_.label -ceq 'Progressive Disclosure' })
         if ($progressive.Count -ne 1 -or [int]$progressive[0].score -ne 15 -or [int]$progressive[0].max -ne 15) { $differences.Add("$($result.platform): Progressive Disclosure is not 15/15.") }
-        if ([bool]$result.check.valid -or -not [bool]$result.check.hasFileReferenceExists) { $differences.Add("$($result.platform): missing reference check differs.") }
+        if ([int]$result.check.exitCode -ne [int]$baseline.check.exitCode) { $differences.Add("$($result.platform): check exit code differs.") }
+        if ([bool]$result.check.valid -ne [bool]$baseline.check.valid) { $differences.Add("$($result.platform): check validity differs.") }
+        if ((Get-NormalizedDiagnostics -Diagnostics $result.check.diagnostics | ConvertTo-Json -Depth 10 -Compress) -cne $baselineDiagnostics) { $differences.Add("$($result.platform): check diagnostics differ.") }
+        if ([bool]$result.check.valid -or -not [bool]$result.check.hasFileReferenceExists) { $differences.Add("$($result.platform): missing reference check is invalid.") }
     }
     if ($differences.Count -gt 0) { throw "Cross-platform skill-tools patch probe failed:`n$($differences -join "`n")" }
     Write-Output 'skill-tools path patch probe: PASS'
