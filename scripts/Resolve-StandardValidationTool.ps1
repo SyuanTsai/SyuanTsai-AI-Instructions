@@ -3423,7 +3423,7 @@ function Invoke-SkillToolsCorePathPatch {
                 postSha256 = [string]$observedPostSha256
             })
         }
-        return @($records)
+        return [object[]]$records.ToArray()
     }
     catch {
         throw "Skill-tools core path patch failed: $($_.Exception.Message) $remediation"

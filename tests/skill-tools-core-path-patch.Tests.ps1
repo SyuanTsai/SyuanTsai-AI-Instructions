@@ -10,6 +10,18 @@ Describe 'Skill-tools core path patch' {
             [IO.File]::WriteAllText($Path, $Text, [Text.UTF8Encoding]::new($false))
         }
 
+        function Assert-PatchFailure {
+            param(
+                [Parameter(Mandatory = $true)][scriptblock] $Action,
+                [Parameter(Mandatory = $true)][string] $ExpectedReason
+            )
+            $caught = $null
+            try { & $Action } catch { $caught = $_.Exception }
+            $caught | Should Not BeNullOrEmpty
+            $caught.Message | Should Match ([regex]::Escape($ExpectedReason))
+            $caught.Message | Should Match ([regex]::Escape('removing or updating this patch'))
+        }
+
         function New-SyntheticCoreInstall {
             param([Parameter(Mandatory = $true)][string] $Root)
             $coreRoot = Join-Path $Root 'node_modules/@skill-tools/core'
@@ -102,7 +114,7 @@ Describe 'Skill-tools core path patch' {
         $fixture = New-SyntheticCoreInstall -Root (Join-Path $TestDrive 'pre-hash')
         $fixture.Spec.files[0].preSha256 = '0' * 64
         $before = [IO.File]::ReadAllBytes((Join-Path $fixture.CoreRoot 'dist/index.js'))
-        { Invoke-SkillToolsCorePathPatch -InstallPath $fixture.InstallRoot -Spec $fixture.Spec } | Should Throw '*pre-SHA256 mismatch*updating this patch*'
+        Assert-PatchFailure -Action { Invoke-SkillToolsCorePathPatch -InstallPath $fixture.InstallRoot -Spec $fixture.Spec } -ExpectedReason 'pre-SHA256 mismatch'
         [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $fixture.CoreRoot 'dist/index.js'))) | Should Be ([Convert]::ToBase64String($before))
     }
 
@@ -114,7 +126,7 @@ Describe 'Skill-tools core path patch' {
         $path = Join-Path $fixture.CoreRoot $file.relativePath
         Write-PatchTestUtf8File -Path $path -Text ([IO.File]::ReadAllText($path).Replace($file.original, $file.replacement))
         (Get-FileSha256 -Path $path) | Should Be $file.postSha256
-        { Invoke-SkillToolsCorePathPatch -InstallPath $fixture.InstallRoot -Spec $fixture.Spec } | Should Throw '*already matches the pinned post-patch SHA256*updating this patch*'
+        Assert-PatchFailure -Action { Invoke-SkillToolsCorePathPatch -InstallPath $fixture.InstallRoot -Spec $fixture.Spec } -ExpectedReason 'already matches the pinned post-patch SHA256'
     }
 
     # Scenario: The discovered package claims a different npm name or version.
@@ -126,7 +138,7 @@ Describe 'Skill-tools core path patch' {
         )) {
             $fixture = New-SyntheticCoreInstall -Root (Join-Path $TestDrive $case.Name)
             Write-PatchTestUtf8File -Path (Join-Path $fixture.CoreRoot 'package.json') -Text $case.Json
-            { Invoke-SkillToolsCorePathPatch -InstallPath $fixture.InstallRoot -Spec $fixture.Spec } | Should Throw '*package identity mismatch*updating this patch*'
+            Assert-PatchFailure -Action { Invoke-SkillToolsCorePathPatch -InstallPath $fixture.InstallRoot -Spec $fixture.Spec } -ExpectedReason 'package identity mismatch'
         }
     }
 
@@ -140,7 +152,7 @@ Describe 'Skill-tools core path patch' {
             $text = ((1..$count) | ForEach-Object { "const p$_ = '" + $file.original + "';" }) -join "`n"
             Write-PatchTestUtf8File -Path $path -Text ($text + "`n")
             $file.preSha256 = Get-FileSha256 -Path $path
-            { Invoke-SkillToolsCorePathPatch -InstallPath $fixture.InstallRoot -Spec $fixture.Spec } | Should Throw '*string count mismatch*updating this patch*'
+            Assert-PatchFailure -Action { Invoke-SkillToolsCorePathPatch -InstallPath $fixture.InstallRoot -Spec $fixture.Spec } -ExpectedReason 'string count mismatch'
         }
     }
 
@@ -149,7 +161,7 @@ Describe 'Skill-tools core path patch' {
     It 'UnitT24_rejects_post_hash_drift' {
         $fixture = New-SyntheticCoreInstall -Root (Join-Path $TestDrive 'post-hash')
         $fixture.Spec.files[1].postSha256 = 'f' * 64
-        { Invoke-SkillToolsCorePathPatch -InstallPath $fixture.InstallRoot -Spec $fixture.Spec } | Should Throw '*post-SHA256 mismatch*updating this patch*'
+        Assert-PatchFailure -Action { Invoke-SkillToolsCorePathPatch -InstallPath $fixture.InstallRoot -Spec $fixture.Spec } -ExpectedReason 'post-SHA256 mismatch'
     }
 
     # Scenario: npm did not install @skill-tools/core anywhere in the dependency tree.
@@ -157,7 +169,7 @@ Describe 'Skill-tools core path patch' {
     It 'UnitT25_rejects_a_missing_core_package' {
         $root = Join-Path $TestDrive 'missing'
         [IO.Directory]::CreateDirectory((Join-Path $root 'node_modules')) | Out-Null
-        { Invoke-SkillToolsCorePathPatch -InstallPath $root -Spec ([pscustomobject]@{ packageName='@skill-tools/core'; packageVersion='9.8.7'; files=@() }) } | Should Throw '*exactly one @skill-tools/core*updating this patch*'
+        Assert-PatchFailure -Action { Invoke-SkillToolsCorePathPatch -InstallPath $root -Spec ([pscustomobject]@{ packageName='@skill-tools/core'; packageVersion='9.8.7'; files=@() }) } -ExpectedReason 'exactly one @skill-tools/core'
     }
 
     # Scenario: npm installs both the expected root dependency and another nested core copy.
@@ -167,6 +179,6 @@ Describe 'Skill-tools core path patch' {
         $nestedParent = Join-Path $fixture.InstallRoot 'node_modules/other/node_modules/@skill-tools'
         [IO.Directory]::CreateDirectory($nestedParent) | Out-Null
         Copy-Item -Recurse -LiteralPath $fixture.CoreRoot -Destination (Join-Path $nestedParent 'core')
-        { Invoke-SkillToolsCorePathPatch -InstallPath $fixture.InstallRoot -Spec $fixture.Spec } | Should Throw '*exactly one @skill-tools/core*updating this patch*'
+        Assert-PatchFailure -Action { Invoke-SkillToolsCorePathPatch -InstallPath $fixture.InstallRoot -Spec $fixture.Spec } -ExpectedReason 'exactly one @skill-tools/core'
     }
 }
