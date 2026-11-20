@@ -1843,7 +1843,7 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
     }
 
     # Scenario: Prepare receives all GitHub token aliases while production launches Git for config and closure inspection.
-    # Purpose: Every non-resolver Git child must explicitly remove the three credential aliases from its process environment.
+    # Purpose: Every non-resolver Git child removes all credential aliases, and the oracle still detects a fully stripped defense stack.
     It 'UnitT33_removes_credentials_from_every_consumer_git_launcher' {
         $sources=@(
             (Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerGate.psm1')),
@@ -1881,11 +1881,13 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
         @($observations).Count|Should BeGreaterThan 0
         @($observations|Where-Object{$_-cne'0,0,0'}).Count|Should Be 0
 
-        $mutantPath=Join-Path $TestDrive 'ConsumerGate-git-inheritance-mutant.psm1'
+        $mutantPath=Join-Path $TestDrive 'ConsumerGate-git-outer-cleanup-mutant.psm1'
         $moduleText=Get-Content -Raw -Encoding UTF8 $script:GateModule;$tokens=$null;$errors=$null
         $moduleAst=[Management.Automation.Language.Parser]::ParseInput($moduleText,[ref]$tokens,[ref]$errors)
         @($errors).Count|Should Be 0
-        $gitFunction=@($moduleAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Invoke-GateGit'},$true))[0]
+        $gitFunctions=@($moduleAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Invoke-GateGit'},$true))
+        @($gitFunctions).Count|Should Be 1
+        $gitFunction=$gitFunctions[0]
         $credentialRemoval=@($gitFunction.Body.FindAll({param($node)$node-is[Management.Automation.Language.ForEachStatementAst]-and
                     $node.Extent.Text.Contains('STANDARD_VALIDATION_GITHUB_API_TOKEN',[StringComparison]::Ordinal)-and
                     $node.Extent.Text.Contains('SetEnvironmentVariable',[StringComparison]::Ordinal)},$true))
@@ -1909,8 +1911,51 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
             Restore-GateFixtureModule
         }
         $mutantObservations=@(Get-Content -LiteralPath $observation)
-        @($mutantObservations)|Should Be @('1,1,1')
-        {if(@($mutantObservations|Where-Object{$_-cne'0,0,0'}).Count-ne0){throw 'GIT_CREDENTIAL_ORACLE_FAILED'}}|Should Throw 'GIT_CREDENTIAL_ORACLE_FAILED'
+        @($mutantObservations)|Should Be @('0,0,0')
+
+        $ownedCaptures=@($moduleAst.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and
+                    $node.Name-ceq'Invoke-GateOwnedGitCapture'},$true))
+        @($ownedCaptures).Count|Should Be 1
+        $ownedCapture=$ownedCaptures[0]
+        $childEnvironment=@($ownedCapture.Body.FindAll({param($node)$node-is[Management.Automation.Language.CommandAst]-and
+                    $node.GetCommandName()-ceq'New-GateChildEnvironment'-and
+                    $node.Extent.Text-ceq"New-GateChildEnvironment `$null @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')"},$true))
+        @($childEnvironment).Count|Should Be 1
+        $fullMutantText=$moduleText
+        foreach($mutation in @(
+                [pscustomobject]@{Start=$credentialRemoval[0].Extent.StartOffset;Length=$credentialRemoval[0].Extent.EndOffset-$credentialRemoval[0].Extent.StartOffset;Text=''},
+                [pscustomobject]@{Start=$childEnvironment[0].Extent.StartOffset;Length=$childEnvironment[0].Extent.EndOffset-$childEnvironment[0].Extent.StartOffset;Text='New-GateChildEnvironment $null'}
+            )|Sort-Object Start -Descending){
+            $fullMutantText=$fullMutantText.Remove($mutation.Start,$mutation.Length).Insert($mutation.Start,$mutation.Text)
+        }
+        $helperText=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-GateGitByteCapture.ps1')
+        $helperTokens=$null;$helperErrors=$null
+        $helperAst=[Management.Automation.Language.Parser]::ParseInput($helperText,[ref]$helperTokens,[ref]$helperErrors)
+        @($helperErrors).Count|Should Be 0
+        $helperCredentialRemoval=@($helperAst.FindAll({param($node)$node-is[Management.Automation.Language.ForEachStatementAst]-and
+                    $node.Extent.Text-ceq"foreach(`$name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[void]`$start.Environment.Remove(`$name)}"},$true))
+        @($helperCredentialRemoval).Count|Should Be 1
+        $fullHelperText=$helperText.Remove($helperCredentialRemoval[0].Extent.StartOffset,
+            $helperCredentialRemoval[0].Extent.EndOffset-$helperCredentialRemoval[0].Extent.StartOffset)
+        $fullMutantPath=Join-Path $TestDrive 'ConsumerGate-git-full-inheritance-mutant.psm1'
+        [IO.File]::WriteAllText($fullMutantPath,$fullMutantText,[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $TestDrive 'Invoke-GateGitByteCapture.ps1'),$fullHelperText,[Text.UTF8Encoding]::new($false))
+        $fullObservation=Join-Path $TestDrive 'git-full-mutant-observation.txt'
+        $fullShim=New-GitCredentialPresenceShim (Join-Path $TestDrive 'git-full-mutant-shim') $fullObservation
+        try{
+            $env:PATH=$fullShim+[IO.Path]::PathSeparator+$oldPath
+            foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,'git-mutant-token','Process')}
+            Import-Module $fullMutantPath -Force
+            $hooks=Join-Path $TestDrive 'git-full-mutant-hooks';[void][IO.Directory]::CreateDirectory($hooks);Initialize-GateGitHooks $hooks $script:RepositoryRoot
+            [void](Invoke-GateGit $script:RepositoryRoot @('rev-parse','HEAD'))
+        }finally{
+            $env:PATH=$oldPath
+            foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[Environment]::SetEnvironmentVariable($name,$null,'Process')}
+            Restore-GateFixtureModule
+        }
+        $fullMutantObservations=@(Get-Content -LiteralPath $fullObservation)
+        @($fullMutantObservations)|Should Be @('1,1,1')
+        {if(@($fullMutantObservations|Where-Object{$_-cne'0,0,0'}).Count-ne0){throw 'GIT_CREDENTIAL_ORACLE_FAILED'}}|Should Throw 'GIT_CREDENTIAL_ORACLE_FAILED'
     }
 
 
