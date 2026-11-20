@@ -1853,13 +1853,13 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1|<script>|CONSUMER_GATE_PHASE_ENV_
             $mutantTokens=$null;$mutantErrors=$null
             [void][Management.Automation.Language.Parser]::ParseFile($path,[ref]$mutantTokens,[ref]$mutantErrors)
             if(@($mutantErrors).Count-ne0){throw "CLEANUP_MUTANT_HARNESS_PARSE_FAILED|$($cleanup.Source):$($cleanup.Line):$($cleanup.Column)"}
-            $case=if($cleanup.Function-ceq'Invoke-GateAcquisitionRequest'-and$cleanup.Line-in@(1102,1103)){'redirect-success'}
+            $case=if($cleanup.Function-ceq'Invoke-GateAcquisitionRequest'-and$cleanup.Line-in@(1133,1134)){'redirect-success'}
                 elseif($cleanup.Function-ceq'Invoke-GateResolver'-and$cleanup.Line-ge285){'resolver-error'}
                 elseif($cleanup.Function-ceq'New-GateSourceSetup'){'resolver-error'}
                 elseif($cleanup.Source-ceq'scripts/consumer/Invoke-ConsumerSourceGate.ps1'-and
                     (@($cleanup.Targets)-icontains'message'-or@($cleanup.Targets)-icontains'tokenVariable'-or$cleanup.Line-eq73)){'http-error'}
                 else{'success'}
-            $leak=if($cleanup.Function-ceq'Assert-GateCredentialAbsent'-and$cleanup.Line-ge1080){'summary'}else{'none'}
+            $leak=if($cleanup.Function-ceq'Assert-GateCredentialAbsent'-and$cleanup.Line-ge1111){'summary'}else{'none'}
             $key="$($cleanup.Source):$($cleanup.Line):$($cleanup.Column)|$($cleanup.Text)"
             if($cleanup.Source-ceq'consumer/bootstrap/Invoke-PinnedAuthority.ps1'){
                 $records=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File (Join-Path $mutantRoot 'tests/fixtures/consumer-bootstrap-cleanup-fixture.ps1') `
@@ -1891,28 +1891,28 @@ consumer/bootstrap/Invoke-PinnedAuthority.ps1:293:9|$stdout = $null
 consumer/bootstrap/Invoke-PinnedAuthority.ps1:294:9|$stderr = $null
 consumer/bootstrap/Invoke-PinnedAuthority.ps1:298:28|$value = $null
 consumer/bootstrap/Invoke-PinnedAuthority.ps1:299:9|$Token=$null
-scripts/consumer/ConsumerGate.psm1:1080:13|$content=$null
-scripts/consumer/ConsumerGate.psm1:1083:9|$content=$null
-scripts/consumer/ConsumerGate.psm1:1083:24|$needle=$null
-scripts/consumer/ConsumerGate.psm1:1083:38|$Token=$null
+scripts/consumer/ConsumerGate.psm1:1111:13|$content=$null
+scripts/consumer/ConsumerGate.psm1:1114:9|$content=$null
+scripts/consumer/ConsumerGate.psm1:1114:24|$needle=$null
+scripts/consumer/ConsumerGate.psm1:1114:38|$Token=$null
 scripts/consumer/ConsumerGate.psm1:212:14|$headers.Remove('Authorization')
 scripts/consumer/ConsumerGate.psm1:213:5|$Token=$null
 scripts/consumer/ConsumerGate.psm1:214:5|[Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_GITHUB_API_TOKEN',$null,'Process')
-scripts/consumer/ConsumerGate.psm1:1111:34|$request.Dispose()
-scripts/consumer/ConsumerGate.psm1:1111:53|$request=$null
-scripts/consumer/ConsumerGate.psm1:1112:35|$response.Dispose()
-scripts/consumer/ConsumerGate.psm1:1112:55|$response=$null
-scripts/consumer/ConsumerGate.psm1:1143:18|$stream.Dispose()
-scripts/consumer/ConsumerGate.psm1:1143:36|$memory.Dispose()
-scripts/consumer/ConsumerGate.psm1:1151:31|$response.Dispose()
-scripts/consumer/ConsumerGate.psm1:1151:73|$request.Dispose()
-scripts/consumer/ConsumerGate.psm1:1152:9|$bytes=$null
-scripts/consumer/ConsumerGate.psm1:1152:22|$buffer=$null
-scripts/consumer/ConsumerGate.psm1:1152:36|$response=$null
-scripts/consumer/ConsumerGate.psm1:1152:52|$request=$null
-scripts/consumer/ConsumerGate.psm1:1152:67|$stream=$null
-scripts/consumer/ConsumerGate.psm1:1152:81|$memory=$null
-scripts/consumer/ConsumerGate.psm1:1152:95|$Headers=$null
+scripts/consumer/ConsumerGate.psm1:1142:34|$request.Dispose()
+scripts/consumer/ConsumerGate.psm1:1142:53|$request=$null
+scripts/consumer/ConsumerGate.psm1:1143:35|$response.Dispose()
+scripts/consumer/ConsumerGate.psm1:1143:55|$response=$null
+scripts/consumer/ConsumerGate.psm1:1174:18|$stream.Dispose()
+scripts/consumer/ConsumerGate.psm1:1174:36|$memory.Dispose()
+scripts/consumer/ConsumerGate.psm1:1182:31|$response.Dispose()
+scripts/consumer/ConsumerGate.psm1:1182:73|$request.Dispose()
+scripts/consumer/ConsumerGate.psm1:1183:9|$bytes=$null
+scripts/consumer/ConsumerGate.psm1:1183:22|$buffer=$null
+scripts/consumer/ConsumerGate.psm1:1183:36|$response=$null
+scripts/consumer/ConsumerGate.psm1:1183:52|$request=$null
+scripts/consumer/ConsumerGate.psm1:1183:67|$stream=$null
+scripts/consumer/ConsumerGate.psm1:1183:81|$memory=$null
+scripts/consumer/ConsumerGate.psm1:1183:95|$Headers=$null
 scripts/consumer/ConsumerGate.psm1:397:95|[Environment]::SetEnvironmentVariable($name,$null,'Process')
 scripts/consumer/ConsumerGate.psm1:399:43|$Token=$null
 scripts/consumer/ConsumerGate.psm1:285:13|[void]$environment.Remove('STANDARD_VALIDATION_GITHUB_API_TOKEN')
@@ -3122,9 +3122,9 @@ if($LASTEXITCODE-ne0){throw 'Fixture git commit failed.'}
         }
     }
 
-    # Scenario: The trusted repository check receives the same explicit token arrays through the current runner wrapper and pwsh -File.
-    # Purpose: Preserve exact, case-insensitive names without abbreviation or colon syntax and fail closed on every malformed token shape.
-    It 'UnitT45_parses_repository_check_tokens_identically_for_runner_and_file_invocation' {
+    # Scenario: The trusted repository check is invoked by pwsh -File with valid and malformed native parameter tokens.
+    # Purpose: Use the normal non-positional parameter binder and fail closed on unknown, duplicate, positional, or invalid values.
+    It 'UnitT45_binds_repository_check_parameters_with_the_native_file_contract' {
         $candidate=Join-Path $TestDrive 'repository-check-arguments'
         [void][IO.Directory]::CreateDirectory((Join-Path $candidate 'config'))
         [void][IO.Directory]::CreateDirectory((Join-Path $candidate 'scripts'))
@@ -3134,21 +3134,14 @@ if($LASTEXITCODE-ne0){throw 'Fixture git commit failed.'}
                 activeSkills=@('fixture');repositoryChecks=@([ordered]@{id='general';kind='general';path='scripts/check.ps1'})
             })
         $trusted=Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-ConsumerRepositoryCheck.ps1'
-        function Invoke-ArgumentFixture([string]$Style,[string[]]$Tokens) {
+        function Invoke-ArgumentFixture([string[]]$Tokens) {
             $start=[Diagnostics.ProcessStartInfo]::new()
             $start.FileName=(Get-Process -Id $PID).Path
             $start.WorkingDirectory=$candidate
             $start.UseShellExecute=$false
             $start.RedirectStandardOutput=$true
             $start.RedirectStandardError=$true
-            if($Style-ceq'runner'){
-                $start.Environment['FIXTURE_CHECK_PATH']=$trusted
-                $start.Environment['FIXTURE_CHECK_ARGUMENTS']=ConvertTo-Json -InputObject ([string[]]$Tokens) -Compress
-                $dispatch='$items=@(ConvertFrom-Json -InputObject $env:FIXTURE_CHECK_ARGUMENTS); & $env:FIXTURE_CHECK_PATH @items; exit ([int]$LASTEXITCODE)'
-                foreach($argument in @('-NoProfile','-NonInteractive','-Command',$dispatch)){[void]$start.ArgumentList.Add($argument)}
-            }else{
-                foreach($argument in @('-NoProfile','-NonInteractive','-File',$trusted)+$Tokens){[void]$start.ArgumentList.Add($argument)}
-            }
+            foreach($argument in @('-NoProfile','-NonInteractive','-File',$trusted)+$Tokens){[void]$start.ArgumentList.Add($argument)}
             $start.Environment['STANDARD_VALIDATION_CORE_RUN_ID']='fixture-run'
             $start.Environment['STANDARD_VALIDATION_CORE_CHECK_ID']='repository-general'
             $start.Environment['STANDARD_VALIDATION_CORE_SKILLS']='fixture'
@@ -3159,62 +3152,76 @@ if($LASTEXITCODE-ne0){throw 'Fixture git commit failed.'}
         }
         $validHash='a'*64
         $cases=@(
-            [pscustomobject]@{Name='general';Tokens=@('-Mode','general');Exit=0;Message=''},
-            [pscustomobject]@{Name='case-insensitive';Tokens=@('-mOdE','GENERAL');Exit=0;Message=''},
+            [pscustomobject]@{Name='general';Tokens=@('-Mode','general');Exit=0},
+            [pscustomobject]@{Name='case-insensitive';Tokens=@('-mOdE','GENERAL');Exit=0},
             [pscustomobject]@{Name='general-with-pester-values';Tokens=@('-Mode','general','-PesterReceiptSha256',$validHash,
-                    '-PesterManifestSha256',$validHash,'-PesterVersion','6.2.0');Exit=0;Message=''},
-            [pscustomobject]@{Name='unknown';Tokens=@('-Unknown','value','-Mode','general');Exit=1;Message='Unknown repository check parameter'},
-            [pscustomobject]@{Name='abbreviation';Tokens=@('-M','general');Exit=1;Message='Unknown repository check parameter'},
-            [pscustomobject]@{Name='colon';Tokens=@('-Mode:general');Exit=1;Message='Unknown repository check parameter'},
-            [pscustomobject]@{Name='duplicate';Tokens=@('-Mode','general','-mode','general');Exit=1;Message='Duplicate repository check parameter'},
-            [pscustomobject]@{Name='missing-value';Tokens=@('-Mode');Exit=1;Message='missing a value'},
-            [pscustomobject]@{Name='position';Tokens=@('general');Exit=1;Message='Unexpected positional repository check token'},
-            [pscustomobject]@{Name='missing-mode';Tokens=@('-PesterVersion','6.2.0');Exit=1;Message='Mode is required'},
-            [pscustomobject]@{Name='dash-value';Tokens=@('-Mode','-general');Exit=1;Message='must not begin with'},
-            [pscustomobject]@{Name='invalid-mode';Tokens=@('-Mode','other');Exit=1;Message='Mode must be general or pester'},
-            [pscustomobject]@{Name='invalid-receipt-hash';Tokens=@('-Mode','general','-PesterReceiptSha256',('A'*64));Exit=1;Message='lowercase SHA-256'},
-            [pscustomobject]@{Name='invalid-manifest-hash';Tokens=@('-Mode','general','-PesterManifestSha256','abc');Exit=1;Message='lowercase SHA-256'},
-            [pscustomobject]@{Name='invalid-version';Tokens=@('-Mode','general','-PesterVersion','6.2');Exit=1;Message='PesterVersion must be 6.2.0'},
-            [pscustomobject]@{Name='pester-missing-receipt';Tokens=@('-Mode','pester','-PesterManifestSha256',$validHash,'-PesterVersion','6.2.0');Exit=1;Message='PesterReceiptSha256 is required'},
-            [pscustomobject]@{Name='pester-missing-manifest';Tokens=@('-Mode','pester','-PesterReceiptSha256',$validHash,'-PesterVersion','6.2.0');Exit=1;Message='PesterManifestSha256 is required'},
-            [pscustomobject]@{Name='pester-missing-version';Tokens=@('-Mode','pester','-PesterReceiptSha256',$validHash,'-PesterManifestSha256',$validHash);Exit=1;Message='PesterVersion is required'}
+                    '-PesterManifestSha256',$validHash,'-PesterVersion','6.2.0');Exit=0},
+            [pscustomobject]@{Name='unknown';Tokens=@('-Unknown','value','-Mode','general');Exit=1},
+            [pscustomobject]@{Name='duplicate';Tokens=@('-Mode','general','-Mode','general');Exit=1},
+            [pscustomobject]@{Name='missing-value';Tokens=@('-Mode');Exit=1},
+            [pscustomobject]@{Name='position';Tokens=@('general');Exit=1},
+            [pscustomobject]@{Name='missing-mode';Tokens=@('-PesterVersion','6.2.0');Exit=1},
+            [pscustomobject]@{Name='invalid-mode';Tokens=@('-Mode','other');Exit=1},
+            [pscustomobject]@{Name='invalid-receipt-hash';Tokens=@('-Mode','general','-PesterReceiptSha256',('A'*64));Exit=1},
+            [pscustomobject]@{Name='invalid-manifest-hash';Tokens=@('-Mode','general','-PesterManifestSha256','abc');Exit=1},
+            [pscustomobject]@{Name='invalid-version';Tokens=@('-Mode','general','-PesterVersion','6.2');Exit=1},
+            [pscustomobject]@{Name='pester-missing-receipt';Tokens=@('-Mode','pester','-PesterManifestSha256',$validHash,'-PesterVersion','6.2.0');Exit=1},
+            [pscustomobject]@{Name='pester-missing-manifest';Tokens=@('-Mode','pester','-PesterReceiptSha256',$validHash,'-PesterVersion','6.2.0');Exit=1},
+            [pscustomobject]@{Name='pester-missing-version';Tokens=@('-Mode','pester','-PesterReceiptSha256',$validHash,'-PesterManifestSha256',$validHash);Exit=1}
         )
         foreach($case in $cases){
-            $results=@(@('runner','file')|ForEach-Object{Invoke-ArgumentFixture $_ $case.Tokens})
-            foreach($result in $results){
-                if($result.ExitCode-ne$case.Exit){throw "$($case.Name) expected $($case.Exit), got $($result.ExitCode): $($result.Error)"}
-                $result.ExitCode|Should Be $case.Exit
-                if(-not[string]::IsNullOrEmpty($case.Message)){$result.Error|Should Match ([regex]::Escape($case.Message))}
-            }
-            $results[0].ExitCode|Should Be $results[1].ExitCode
+            $result=Invoke-ArgumentFixture $case.Tokens
+            if($result.ExitCode-ne$case.Exit){throw "$($case.Name) expected $($case.Exit), got $($result.ExitCode): $($result.Error)"}
+            $result.ExitCode|Should Be $case.Exit
         }
         $source=Get-Content -Raw -Encoding UTF8 $trusted;$tokens=$null;$errors=$null
         $ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)
         @($errors).Count|Should Be 0
-        $ast.ParamBlock|Should BeNullOrEmpty
+        $ast.ParamBlock|Should Not BeNullOrEmpty
+        $ast.ParamBlock.Attributes.Extent.Text|Should Match 'CmdletBinding\(PositionalBinding=\$false\)'
+        @($ast.ParamBlock.Parameters|ForEach-Object{$_.Name.VariablePath.UserPath})|Should Be @('Mode','PesterReceiptSha256','PesterManifestSha256','PesterVersion')
         @($ast.ScriptRequirements.RequiredModules).Count|Should Be 0
     }
 
-    # Scenario: Adapter validation sees the trusted repository check, another script, and a mismatched executable hash.
-    # Purpose: Only the setup-bound trusted check may be used as a PowerShell core-check executable.
-    It 'UnitT46_allows_only_the_setup_bound_trusted_ps1_core_check' {
+    # Scenario: Adapter validation sees the frozen pwsh runtime, trusted -File script, another script, and mismatched hashes.
+    # Purpose: Close the consumer adapter to one exact pwsh -File repository-check command and its two frozen identities.
+    It 'UnitT46_allows_only_the_setup_bound_trusted_pwsh_file_check' {
         $root=Join-Path $TestDrive 'adapter-ps1-closure'
         $trustedRoot=Join-Path $root 'runtime'
         $trustedDirectory=Join-Path $trustedRoot 'trusted'
         [void][IO.Directory]::CreateDirectory($trustedDirectory)
         $trusted=Join-Path $trustedDirectory 'Invoke-ConsumerRepositoryCheck.ps1'
         $other=Join-Path $trustedDirectory 'Other.ps1'
+        $powerShell=Join-Path $trustedRoot $(if($IsWindows){'pwsh.exe'}else{'pwsh'})
         [IO.File]::WriteAllText($trusted,'exit 0',[Text.UTF8Encoding]::new($false))
         [IO.File]::WriteAllText($other,'exit 0',[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($powerShell,'fixture pwsh',[Text.UTF8Encoding]::new($false))
         $hash=(Get-FileHash $trusted -Algorithm SHA256).Hash.ToLowerInvariant()
-        $setup=[pscustomobject]@{trustedRoot=$trustedRoot;repositoryCheck=$trusted;sourceValidation=[pscustomobject]@{
-                frozenFiles=@([pscustomobject]@{path=$trusted;sha256=$hash})}}
-        $valid=[pscustomobject]@{id='repository-general';executable=$trusted;executableSha256=$hash}
-        {Assert-GateAdapterExecutableBindings @($valid) $setup}|Should Not Throw
-        $wrongPath=Copy-FixtureValue $valid;$wrongPath.executable=$other
-        {Assert-GateAdapterExecutableBindings @($wrongPath) $setup}|Should Throw 'trusted repository check'
-        $wrongHash=Copy-FixtureValue $valid;$wrongHash.executableSha256=('0'*64)
-        {Assert-GateAdapterExecutableBindings @($wrongHash) $setup}|Should Throw 'trusted repository check'
+        $powerShellHash=(Get-FileHash $powerShell -Algorithm SHA256).Hash.ToLowerInvariant()
+        $setupPath=Join-Path $root 'source-tools.json'
+        Write-FixtureJson $setupPath ([ordered]@{trustedRoot=$trustedRoot;repositoryCheck=$trusted;pesterReceiptSha256=('a'*64)
+                pesterManifestSha256=('b'*64);pesterVersion='6.2.0';sourceValidation=[ordered]@{
+                    frozenFiles=@([ordered]@{path=$trusted;sha256=$hash},[ordered]@{path=$powerShell;sha256=$powerShellHash})}})
+        $gateSetup=Read-GateJson $setupPath 'adapter setup fixture'
+        $valid=@(
+            [pscustomobject]@{id='repository-general';kind='general';executable=$powerShell;executableSha256=$powerShellHash
+                arguments=@('-NoProfile','-NonInteractive','-File',$trusted,'-Mode','general')},
+            [pscustomobject]@{id='repository-pester';kind='pester';executable=$powerShell;executableSha256=$powerShellHash
+                arguments=@('-NoProfile','-NonInteractive','-File',$trusted,'-Mode','pester','-PesterReceiptSha256',('a'*64),
+                    '-PesterManifestSha256',('b'*64),'-PesterVersion','6.2.0')}
+        )
+        {Assert-GateAdapterExecutableBindings -Checks @($valid) -Setup $gateSetup -PowerShell $powerShell}|Should Not Throw
+        $wrongPath=Copy-FixtureValue $valid;$wrongPath[0].arguments[3]=$other
+        {Assert-GateAdapterExecutableBindings -Checks @($wrongPath) -Setup $gateSetup -PowerShell $powerShell}|Should Throw 'trusted pwsh -File'
+        $wrongHash=Copy-FixtureValue $valid;$wrongHash[0].executableSha256=('0'*64)
+        {Assert-GateAdapterExecutableBindings -Checks @($wrongHash) -Setup $gateSetup -PowerShell $powerShell}|Should Throw 'trusted pwsh -File'
+        $missingFrozenFiles=Copy-FixtureValue $gateSetup
+        $missingFrozenFiles.sourceValidation.PSObject.Properties.Remove('frozenFiles')
+        {Assert-GateAdapterExecutableBindings -Checks @($valid) -Setup $missingFrozenFiles -PowerShell $powerShell}|Should Throw 'frozenFiles array'
+        $duplicateSetup=Copy-FixtureValue $gateSetup
+        $duplicateSetup.sourceValidation.frozenFiles=@($duplicateSetup.sourceValidation.frozenFiles)+@(
+            [pscustomobject]@{path=$trusted;sha256=('0'*64)})
+        {Assert-GateAdapterExecutableBindings -Checks @($valid) -Setup $duplicateSetup -PowerShell $powerShell}|Should Throw 'exactly once'
     }
 
     if($IsWindows){
@@ -3277,15 +3284,24 @@ $values=[ordered]@{};foreach($name in $names){$values[$name]=[Environment]::GetE
         foreach($directory in @($trustedDirectory,$candidate,$work,(Join-Path $work 'validation-artifacts'))){[void][IO.Directory]::CreateDirectory($directory)}
         $check=Join-Path $trustedDirectory 'Invoke-ConsumerRepositoryCheck.ps1';[IO.File]::WriteAllText($check,'exit 0',[Text.UTF8Encoding]::new($false))
         $checkHash=(Get-FileHash $check -Algorithm SHA256).Hash.ToLowerInvariant()
+        $validatorPowerShell=Join-Path $trustedRoot $(if($IsWindows){'pwsh.exe'}else{'pwsh'})
+        [IO.File]::WriteAllText($validatorPowerShell,'fixture pwsh',[Text.UTF8Encoding]::new($false))
+        $validatorPowerShellHash=(Get-FileHash $validatorPowerShell -Algorithm SHA256).Hash.ToLowerInvariant()
         $setup=[ordered]@{trustedRoot=$trustedRoot;repositoryCheck=$check;pesterReceiptSha256=('a'*64);pesterManifestSha256=('b'*64);pesterVersion='6.2.0'
-            sourceValidation=[ordered]@{frozenFiles=@([ordered]@{path=$check;sha256=$checkHash})}}
+            sourceValidation=[ordered]@{frozenFiles=@([ordered]@{path=$check;sha256=$checkHash},
+                    [ordered]@{path=$validatorPowerShell;sha256=$validatorPowerShellHash})}}
         Write-FixtureJson (Join-Path $work 'source-tools.json') $setup
         $runner=Join-Path $authority 'scripts/Invoke-StandardValidation.ps1'
         [IO.File]::WriteAllText($runner,"[Console]::Out.Write('validator out'); [Console]::Error.Write('validator diagnostic'); exit 9",[Text.UTF8Encoding]::new($false))
         $binding=[pscustomobject]@{candidateRevision=('c'*40);baseRevision=('d'*40);canonicalEvent='pull_request';runId=('e'*32);commit=('f'*40)}
         $config=[pscustomobject]@{sourceRepository='https://example.test/fixture.git';activeSkills=@('fixture')}
         try{
-            {Invoke-GateValidation $authority $candidate $work $binding $config (Get-Process -Id $PID).Path}|Should Throw 'Validator failed'
+            Mock Import-GatePlatformRuntime {[pscustomobject]@{ExportedCommands=@{
+                        'Invoke-PlatformPreparationCommand'={
+                            [pscustomobject]@{stdout='validator out';stderr='validator diagnostic';exitCode=9}
+                        }
+                    }}} -ModuleName ConsumerGate
+            {Invoke-GateValidation $authority $candidate $work $binding $config $validatorPowerShell}|Should Throw 'Validator failed'
             (Get-Content -Raw (Join-Path $work 'validation-artifacts/validator.stderr.txt'))|Should Match 'validator diagnostic'
         }finally{Restore-GateFixtureModule}
     }
@@ -3452,16 +3468,30 @@ Start-Sleep -Seconds 30
         foreach($directory in @($authority,$install,$source,(Join-Path $authority 'docs/standards'),(Join-Path $authority 'scripts'))){
             [void][IO.Directory]::CreateDirectory($directory)
         }
+        Copy-GatePlatformRuntimeFixture $authority
         [IO.File]::WriteAllText((Join-Path $authority 'docs/standards/validation-toolchain.json'),'{}',[Text.UTF8Encoding]::new($false))
         $resolver=Join-Path $root 'resolver.ps1';[IO.File]::WriteAllText($resolver,'exit 0',[Text.UTF8Encoding]::new($false))
-        $oldResolver=$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH;$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$resolver
-        Mock Import-GatePlatformRuntime {[pscustomobject]@{ExportedCommands=@{
-                    'Invoke-PlatformPreparationCommand'={ [pscustomobject]@{stdout='';stderr='';exitCode=$null} }
-                }}} -ModuleName ConsumerGate
+        $oldResolver=$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH
+        Restore-GateFixtureModule
+        $gateModule=(Get-Command Invoke-GateResolver -CommandType Function -ErrorAction Stop).Module
+        if($gateModule.Name-cne'ConsumerGate'){throw 'The active resolver command is not owned by ConsumerGate.'}
+        $previousGatePlatformRuntimeModule=$gateModule.SessionState.PSVariable.GetValue('GatePlatformRuntimeModule')
+        $previousGatePlatformRuntimeAuthorityRoot=$gateModule.SessionState.PSVariable.GetValue('GatePlatformRuntimeAuthorityRoot')
+        $previousGateGitHooksPath=$gateModule.SessionState.PSVariable.GetValue('GateGitHooksPath')
+        $fakeRuntime=New-Module -Name ("ConsumerGateUnknownExitRuntime_{0}" -f [guid]::NewGuid().ToString('N')) -ScriptBlock {
+            function Invoke-PlatformPreparationCommand {
+                param($Command,$Arguments,$Environment,$WorkingDirectory,$TimeoutMilliseconds,$PreparationReceipt)
+                [pscustomobject]@{stdout='';stderr='';exitCode=$null;processOwnership=$null}
+            }
+            Export-ModuleMember -Function Invoke-PlatformPreparationCommand
+        }
+        $closureModule=$null;$previousClosureGitRuntime=$null
         try{
+            $env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$resolver
+            $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeModule',$fakeRuntime)
+            $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeAuthorityRoot',[IO.Path]::GetFullPath($authority))
             [Console]::SetOut($consoleOut)
             [Console]::SetError($consoleError)
-            try{
             {Invoke-GateResolver (Get-Process -Id $PID).Path $authority $install pester ('a'*32) `
                     (Join-Path $source 'receipt-pester.json') latest ''}|Should Throw 'Resolver exit status is unknown.'
 
@@ -3470,26 +3500,29 @@ Start-Sleep -Seconds 30
             foreach($directory in @($candidate,$work,$trustedDirectory,(Join-Path $work 'validation-artifacts'))){[void][IO.Directory]::CreateDirectory($directory)}
             $check=Join-Path $trustedDirectory 'Invoke-ConsumerRepositoryCheck.ps1';[IO.File]::WriteAllText($check,'exit 0',[Text.UTF8Encoding]::new($false))
             $checkHash=(Get-FileHash $check -Algorithm SHA256).Hash.ToLowerInvariant()
+            $validatorPowerShell=Join-Path $trustedRoot $(if($IsWindows){'pwsh.exe'}else{'pwsh'})
+            [IO.File]::WriteAllText($validatorPowerShell,'fixture pwsh',[Text.UTF8Encoding]::new($false))
+            $validatorPowerShellHash=(Get-FileHash $validatorPowerShell -Algorithm SHA256).Hash.ToLowerInvariant()
             Write-FixtureJson (Join-Path $work 'source-tools.json') ([ordered]@{trustedRoot=$trustedRoot;repositoryCheck=$check
                     pesterReceiptSha256=('b'*64);pesterManifestSha256=('c'*64);pesterVersion='6.2.0'
-                    sourceValidation=[ordered]@{frozenFiles=@([ordered]@{path=$check;sha256=$checkHash})}})
+                    sourceValidation=[ordered]@{frozenFiles=@([ordered]@{path=$check;sha256=$checkHash},
+                            [ordered]@{path=$validatorPowerShell;sha256=$validatorPowerShellHash})}})
             [IO.File]::WriteAllText((Join-Path $authority 'scripts/Invoke-StandardValidation.ps1'),'exit 0',[Text.UTF8Encoding]::new($false))
             $binding=[pscustomobject]@{candidateRevision=('d'*40);baseRevision=('e'*40);canonicalEvent='pull_request';runId=('f'*32);commit=('1'*40)}
             $config=[pscustomobject]@{sourceRepository='https://example.test/fixture.git';activeSkills=@('fixture')}
-            {Invoke-GateValidation $authority $candidate $work $binding $config (Get-Process -Id $PID).Path}|Should Throw 'Validator exit status is unknown.'
-        }finally{$env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$oldResolver}
+            {Invoke-GateValidation $authority $candidate $work $binding $config $validatorPowerShell}|Should Throw 'Validator exit status is unknown.'
 
         Mock Invoke-GateOwnedGitCapture {[pscustomobject]@{ExitCode=$null;StdoutBytes=[byte[]]::new(0);StderrBytes=[byte[]]::new(0)}} -ModuleName ConsumerGate
         InModuleScope ConsumerGate {$script:GateGitHooksPath='fixture'}
         {Invoke-GateGit $script:RepositoryRoot @('rev-parse','HEAD')}|Should Throw 'git exit status is unknown.'
         {Invoke-GateGitBytes $script:RepositoryRoot @('rev-parse','HEAD')}|Should Throw 'git exit status is unknown.'
 
-        Import-Module (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1') -Force
+        $closureModule=Import-Module (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1') -Force -PassThru
+        $previousClosureGitRuntime=$closureModule.SessionState.PSVariable.GetValue('ClosureGitRuntime')
         Mock Invoke-ClosureOwnedGitBytes {[pscustomobject]@{ExitCode=$null;Bytes=[byte[]]::new(0);Error=''}} -ModuleName ConsumerManifestClosure
         InModuleScope ConsumerManifestClosure {
             $script:ClosureGitRuntime=[pscustomobject]@{}
             {Invoke-ClosureGitBytes -RepositoryRoot $TestDrive -Arguments @('rev-parse','HEAD')}|Should Throw 'git exit status is unknown.'
-            $script:ClosureGitRuntime=$null
         }
 
         $helperText=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-GateGitByteCapture.ps1')
@@ -3509,7 +3542,12 @@ Start-Sleep -Seconds 30
             [Console]::SetError($previousConsoleError)
             $consoleOut.Dispose()
             $consoleError.Dispose()
-            Restore-GateFixtureModule
+            $env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$oldResolver
+            $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeModule',$previousGatePlatformRuntimeModule)
+            $gateModule.SessionState.PSVariable.Set('GatePlatformRuntimeAuthorityRoot',$previousGatePlatformRuntimeAuthorityRoot)
+            $gateModule.SessionState.PSVariable.Set('GateGitHooksPath',$previousGateGitHooksPath)
+            if($null-ne$closureModule){$closureModule.SessionState.PSVariable.Set('ClosureGitRuntime',$previousClosureGitRuntime)}
+            if($null-ne$fakeRuntime){Remove-Module -ModuleInfo $fakeRuntime -Force -ErrorAction SilentlyContinue}
             $global:LASTEXITCODE=$previousLastExitCode
         }
     }
@@ -3594,10 +3632,15 @@ if($DefineFunctionsOnly){return}
     # Scenario: A synthetic verified Pester closure returns complete, partial, duplicate, skipped, and not-run inventories.
     # Purpose: Execute the repository wrapper and prove closure bytes plus complete case identity are enforced behaviorally.
     It 'InterT56_executes_verified_pester_closure_and_complete_discovery' {
-        $runId = '1234567890abcdef1234567890abcdef'
+        $coreRunId = '1234567890abcdef1234567890abcdef'
+        Remove-Variable StandardValidationPlatformBinding -Scope Script -ErrorAction SilentlyContinue
+        . (Join-Path $script:RepositoryRoot 'scripts/Invoke-StandardValidation.ps1') `
+            -CandidateRoot $TestDrive -AdapterPath 'unused' -ArtifactsRoot $TestDrive `
+            -SourceRepository 'https://example.test/consumer-check.git' -SourceRevision ('a'*40) -BaseRevision ('b'*40) -DefineFunctionsOnly
+        Initialize-StandardValidationPlatformRuntime
         foreach ($scenario in @('success-file','success-runner','tampered','duplicatepath','partial','duplicate','skipped','notrun')) {
             $workRoot = Join-Path $TestDrive "pester-wrapper-$scenario"
-            $candidate = Join-Path $workRoot "$runId/candidate"
+            $candidate = Join-Path $workRoot "$coreRunId/candidate"
             $runtime = Join-Path $workRoot 'runtime/consumer'
             $installRoot = Join-Path $workRoot 'runtime/installed/pester'
             $sourceTools = Join-Path $workRoot 'source-tools'
@@ -3707,7 +3750,7 @@ Export-ModuleMember -Function New-PesterConfiguration,Invoke-Pester
             $oldSkills = $env:STANDARD_VALIDATION_CORE_SKILLS
             try {
                 $env:FAKE_PESTER_SCENARIO = $scenario
-                $env:STANDARD_VALIDATION_CORE_RUN_ID = $runId
+                $env:STANDARD_VALIDATION_CORE_RUN_ID = $coreRunId
                 $env:STANDARD_VALIDATION_CORE_CHECK_ID = 'fixture-pester'
                 $env:STANDARD_VALIDATION_CORE_SKILLS = 'fixture'
                 Push-Location $candidate
@@ -3716,14 +3759,18 @@ Export-ModuleMember -Function New-PesterConfiguration,Invoke-Pester
                     $checkTokens=@('-Mode','pester','-PesterReceiptSha256',$receiptSha,'-PesterManifestSha256',$manifestSha,
                         '-PesterVersion','6.2.0')
                     if($scenario-ceq'success-runner'){
-                        $env:FIXTURE_CHECK_PATH=$trustedCheck
-                        $env:FIXTURE_CHECK_ARGUMENTS=ConvertTo-Json -InputObject ([string[]]$checkTokens) -Compress
-                        $dispatch='$items=@(ConvertFrom-Json -InputObject $env:FIXTURE_CHECK_ARGUMENTS); & $env:FIXTURE_CHECK_PATH @items; exit ([int]$LASTEXITCODE)'
-                        $output=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -Command $dispatch 2>&1)
+                        $processResult=Invoke-StandardValidationProcess -Command $trustedCheck -Arguments $checkTokens `
+                            -WorkingDirectory $candidate -TimeoutSeconds 60 -Environment @{
+                                STANDARD_VALIDATION_CORE_RUN_ID=$coreRunId
+                                STANDARD_VALIDATION_CORE_CHECK_ID='fixture-pester'
+                                STANDARD_VALIDATION_CORE_SKILLS='fixture'
+                            }
+                        $output=@($processResult.stdout,$processResult.stderr)
+                        $exitCode=[int]$processResult.exitCode
                     }else{
                         $output=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $trustedCheck @checkTokens 2>&1)
+                        $exitCode = $LASTEXITCODE
                     }
-                    $exitCode = $LASTEXITCODE
                 }
                 finally { Pop-Location }
             }
@@ -3732,12 +3779,12 @@ Export-ModuleMember -Function New-PesterConfiguration,Invoke-Pester
                 $env:STANDARD_VALIDATION_CORE_RUN_ID = $oldRunId
                 $env:STANDARD_VALIDATION_CORE_CHECK_ID = $oldCheckId
                 $env:STANDARD_VALIDATION_CORE_SKILLS = $oldSkills
-                Remove-Item Env:FIXTURE_CHECK_PATH,Env:FIXTURE_CHECK_ARGUMENTS -ErrorAction SilentlyContinue
             }
             if ($scenario -like 'success-*') {
+                if($exitCode-ne0){throw "Scenario $scenario expected exit code 0, got $exitCode. output=$($output-join[Environment]::NewLine)"}
                 $exitCode | Should Be 0
                 ($output -join "`n") | Should Match '"passed":1'
-                (Get-Content -Raw (Join-Path $workRoot "$runId/repository-pester-case-inventory-v1.json") | `
+                (Get-Content -Raw (Join-Path $workRoot "$coreRunId/repository-pester-case-inventory-v1.json") | `
                         ConvertFrom-Json).complete | Should Be $true
 
                 $trustedPath=Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-ConsumerRepositoryCheck.ps1'
@@ -3757,10 +3804,10 @@ Export-ModuleMember -Function New-PesterConfiguration,Invoke-Pester
                     $orderedAssignment[0].Extent.StartOffset,$replacement)
                 [IO.File]::WriteAllText((Join-Path $runtime 'Invoke-ConsumerRepositoryCheck.ps1'),$mutantText,
                     [Text.UTF8Encoding]::new($false))
-                Remove-Item -LiteralPath (Join-Path $workRoot "$runId/repository-pester-case-inventory-v1.json")
+                Remove-Item -LiteralPath (Join-Path $workRoot "$coreRunId/repository-pester-case-inventory-v1.json")
                 try {
                     $env:FAKE_PESTER_SCENARIO = $scenario
-                    $env:STANDARD_VALIDATION_CORE_RUN_ID = $runId
+                    $env:STANDARD_VALIDATION_CORE_RUN_ID = $coreRunId
                     $env:STANDARD_VALIDATION_CORE_CHECK_ID = 'fixture-pester'
                     $env:STANDARD_VALIDATION_CORE_SKILLS = 'fixture'
                     Push-Location $candidate

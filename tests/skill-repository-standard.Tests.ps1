@@ -4094,7 +4094,10 @@ public sealed class C245NonCooperativeStream : Stream {
             'A pin or immutable version update alone MUST NOT transfer ownership',
             'Source-copy equivalence or removal is deferred to downstream adoption',
             'identified item by item', 'normal required three-platform Core CI gate',
-            'Historically, the Code trial protected a repository-local reader set'
+            'Historically, the Code trial protected a repository-local reader set',
+            'Candidate-relative 模式仍只接受 verified tracked snapshot',
+            'Trusted frozen 模式只在 explicit SourceValidation',
+            '啟動前、啟動後及 execution 結束後'
         )) { if(-not $standard.Contains($required)){throw "Central validation ownership contract is missing '$required'."} }
         foreach($required in @('Windows、Linux、macOS 各一個 leg', '缺少 receipt', 'MUST NOT** 被宣稱為三平台 required 驗證')) {
             if(-not $standard.Contains($required)){throw "Standard diagnostic contract is missing '$required'."}
@@ -4681,6 +4684,7 @@ public sealed class C245NonCooperativeStream : Stream {
         $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
         $matrix = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:MatrixPath
         $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
+        $contract = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardValidationContractPath | ConvertFrom-Json
         . $script:AuthorityGatePath -DefineFunctionsOnly
 
         Assert-AuthoritySchemaInstance -Value $policy -Schema $schema -SchemaPath $script:ValidationSecurityGateSchemaPath -Expected $true -Message 'Canonical validation/security gate policy must be schema-valid.'
@@ -4798,6 +4802,14 @@ public sealed class C245NonCooperativeStream : Stream {
         Assert-Equal $policy.security.aiReview.authentication 'trusted-supervisor-signed-ai-review-v1' 'AI review must require trusted-supervisor authentication.'
         Assert-ExactStringSequence $policy.security.aiReview.digestFields @('reviewFindingsSha256', 'findingDispositionSha256') 'AI review must bind both complete result digests.'
         Assert-Equal $policy.security.aiReview.attestation 'trusted-supervisor-ai-review-v1' 'AI review must use the canonical attestation type.'
+        Assert-Equal $policy.security.trustAnchors.status 'no-active-trust-anchor' 'The machine-readable authority must expose that no production trust anchor is active.'
+        Assert-Equal $policy.security.trustAnchors.supervisorStatus 'revoked' 'The historical supervisor trust anchor must remain revoked.'
+        Assert-Equal $policy.security.trustAnchors.humanApprovalStatus 'revoked' 'The historical human-approval trust anchor must remain revoked.'
+        Assert-Equal $policy.security.trustAnchors.revokedOn '2026-11-20' 'The trust-anchor revocation date must remain auditable.'
+        Assert-Equal $policy.security.trustAnchors.revocationReason 'private-key-custody-unknown' 'The trust-anchor revocation reason must remain explicit.'
+        Assert-Equal $policy.security.trustAnchors.completeLifecycle 'BLOCKED-pending-new-trust-anchor' 'CompleteLifecycle must remain blocked until a new trust anchor is established.'
+        Assert-Equal $contract.cli.lifecycleTrustAnchors.status 'no-active-trust-anchor' 'The v1 contract must publish the same no-active-anchor state.'
+        Assert-Equal $contract.cli.lifecycleTrustAnchors.completeLifecycle 'BLOCKED-pending-new-trust-anchor' 'The v1 contract must keep CompleteLifecycle blocked pending replacement trust.'
         Assert-Equal $policy.security.semanticPreflight.artifactType 'semantic-scan-preflight-v1' 'Semantic preflight must use the canonical unsigned artifact type.'
         Assert-Equal $policy.security.semanticPreflight.authentication 'unsigned-provider-output' 'Semantic preflight must remain explicitly unsigned.'
         Assert-Equal $policy.security.semanticPreflight.sourceBinding 'llm-input-equals-strict-utf8-decoding-of-verified-source-bytes' 'Semantic provider input must be bound to verified source bytes.'
@@ -4947,6 +4959,7 @@ public sealed class C245NonCooperativeStream : Stream {
         Assert-True ($coreStart -ge 0 -and $coreEnd -gt $coreStart) 'The ordinary core runner function boundary must remain explicit.'
         $coreRunner = $runner.Substring($coreStart, $coreEnd - $coreStart)
         Assert-Match $coreRunner 'Get-StandardCoreTrackedInventory' 'The ordinary core must bind candidate files through Git tracked inventory.'
+        Assert-False ($coreRunner -match 'Get-StandardValidationTrustAnchorPath|Get-StandardValidationTrustAnchorEvidence') 'The revoked historical trust anchors must not be added to ordinary core or SourceValidation.'
         Assert-Match $coreRunner 'Copy-StandardCoreTrackedSnapshot' 'The ordinary core must copy only its verified tracked inventory.'
         Assert-Match $coreRunner 'Get-StandardValidationSkillSet -CandidateRoot \$snapshotRoot' 'Active Skills must be discovered from the verified tracked-only snapshot.'
         Assert-False ($coreRunner -match 'Get-StandardValidationInventory|Copy-StandardValidationSnapshot') 'The ordinary core must not use recursive whole-root inventory or copy helpers.'

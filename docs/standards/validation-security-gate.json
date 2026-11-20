@@ -255,7 +255,13 @@
       "root": "docs/standards/trust-anchors",
       "supervisorPublicKey": "trusted-supervisor-public-key.xml",
       "humanApprovalPublicKey": "human-approval-public-key.xml",
-      "pinnedHashes": true
+      "pinnedHashes": true,
+      "status": "no-active-trust-anchor",
+      "supervisorStatus": "revoked",
+      "humanApprovalStatus": "revoked",
+      "revokedOn": "2026-11-20",
+      "revocationReason": "private-key-custody-unknown",
+      "completeLifecycle": "BLOCKED-pending-new-trust-anchor"
     }
   },
   "entryPointContract": {

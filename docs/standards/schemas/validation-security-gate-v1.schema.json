@@ -796,12 +796,18 @@
     "trustAnchors": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["root", "supervisorPublicKey", "humanApprovalPublicKey", "pinnedHashes"],
+      "required": ["root", "supervisorPublicKey", "humanApprovalPublicKey", "pinnedHashes", "status", "supervisorStatus", "humanApprovalStatus", "revokedOn", "revocationReason", "completeLifecycle"],
       "properties": {
         "root": { "const": "docs/standards/trust-anchors" },
         "supervisorPublicKey": { "const": "trusted-supervisor-public-key.xml" },
         "humanApprovalPublicKey": { "const": "human-approval-public-key.xml" },
-        "pinnedHashes": { "const": true }
+        "pinnedHashes": { "const": true },
+        "status": { "const": "no-active-trust-anchor" },
+        "supervisorStatus": { "const": "revoked" },
+        "humanApprovalStatus": { "const": "revoked" },
+        "revokedOn": { "const": "2026-11-20" },
+        "revocationReason": { "const": "private-key-custody-unknown" },
+        "completeLifecycle": { "const": "BLOCKED-pending-new-trust-anchor" }
       }
     },
     "entryPointContract": {

@@ -123,6 +123,134 @@ else { [void][IO.Directory]::CreateSymbolicLink($Target, $Target + '.moved') }
     }
 }
 
+Describe 'Standard core trusted frozen file boundary' {
+    BeforeAll {
+        $script:TrustedFileFixtureRoot = if ($TestDrive -is [IO.DirectoryInfo]) { $TestDrive.FullName } else { [string]$TestDrive }
+        if ($IsMacOS -and $script:TrustedFileFixtureRoot.StartsWith('/var/')) { $script:TrustedFileFixtureRoot = '/private' + $script:TrustedFileFixtureRoot }
+        . (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-StandardValidation.ps1') `
+            -CandidateRoot $script:TrustedFileFixtureRoot -AdapterPath 'unused' -ArtifactsRoot $script:TrustedFileFixtureRoot `
+            -SourceRepository 'https://example.test/trusted-file.git' -SourceRevision ('a'*40) -BaseRevision ('b'*40) -DefineFunctionsOnly
+        $script:TrustedFileHost = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
+        function New-TrustedFileFixture([string]$Name,[string]$Content='exit 0') {
+            $root=Join-Path $script:TrustedFileFixtureRoot $Name
+            $candidate=Join-Path $root 'candidate';$artifacts=Join-Path $root 'artifacts';$authority=Join-Path $root 'authority';$trusted=Join-Path $root 'trusted'
+            foreach($directory in @($candidate,$artifacts,$authority,$trusted)){[void][IO.Directory]::CreateDirectory($directory)}
+            $scriptPath=Join-Path $trusted 'repository-check.ps1'
+            [IO.File]::WriteAllText($scriptPath,$Content,[Text.UTF8Encoding]::new($false))
+            $hash=(Get-FileHash -LiteralPath $scriptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            [pscustomobject]@{Root=$root;Candidate=$candidate;Artifacts=$artifacts;Authority=$authority;Trusted=$trusted
+                Script=$scriptPath;Hash=$hash;Frozen=@([pscustomobject]@{path=$scriptPath;sha256=$hash})}
+        }
+        function Get-TrustedFileBinding($Fixture,[string]$Executable=$script:TrustedFileHost,[object[]]$Frozen=$Fixture.Frozen,
+            [string]$Trusted=$Fixture.Trusted,[string]$Candidate=$Fixture.Candidate,
+            [string]$Artifacts=$Fixture.Artifacts,[string]$Authority=$Fixture.Authority) {
+            New-StandardCoreTrustedFileBinding -FilePath $Fixture.Script -ExecutablePath $Executable -FrozenFiles $Frozen `
+                -TrustedToolRoot $Trusted -CandidateRoot $Candidate -ArtifactsRoot $Artifacts -AuthorityRoot $Authority -Context 'fixture'
+        }
+    }
+
+    # Scenario: A canonical regular script has one exact frozen path/hash binding outside all mutable roots.
+    # Purpose: Admit only the intended trusted pwsh -File source-validation contract.
+    It 'UnitT10_accepts_one_exact_trusted_frozen_file_binding' {
+        $fixture=New-TrustedFileFixture 'trusted-success'
+        $binding=Get-TrustedFileBinding $fixture
+        $binding.path | Should -Be $fixture.Script
+        $binding.sha256 | Should -Be $fixture.Hash
+    }
+
+    # Scenario: The script is absent from frozenFiles, has drifted, or is paired with a non-pwsh executable.
+    # Purpose: Fail closed before process creation when any trusted-file identity prerequisite is missing.
+    It 'UnitT15_rejects_missing_hash_drift_and_non_pwsh_bindings_<Case>' -TestCases @(
+        @{Case='missing';Frozen=@();Executable=$null},
+        @{Case='hash-drift';Frozen=@([pscustomobject]@{path='__PATH__';sha256=('0'*64)});Executable=$null},
+        @{Case='non-pwsh';Frozen=$null;Executable='tool.exe'}
+    ) {
+        param($Case,$Frozen,$Executable)
+        $fixture=New-TrustedFileFixture "trusted-$Case"
+        if($Case-ceq'hash-drift'){$Frozen[0].path=$fixture.Script}
+        if($null-eq$Frozen){$Frozen=$fixture.Frozen}
+        if([string]::IsNullOrEmpty([string]$Executable)){$Executable=$script:TrustedFileHost}
+        {Get-TrustedFileBinding $fixture -Executable $Executable -Frozen $Frozen}|Should -Throw
+    }
+
+    # Scenario: A frozen script is absolute and hash-correct but is outside TrustedToolRoot.
+    # Purpose: A frozenFiles entry alone must not admit an arbitrary external script.
+    It 'UnitT17_rejects_a_frozen_file_outside_the_trusted_tool_root' {
+        $fixture=New-TrustedFileFixture 'trusted-outside-root'
+        $otherTrustedRoot=Join-Path $fixture.Root 'other-trusted'
+        [void][IO.Directory]::CreateDirectory($otherTrustedRoot)
+        {Get-TrustedFileBinding $fixture -Trusted $otherTrustedRoot}|Should -Throw
+    }
+
+    # Scenario: The otherwise frozen trusted script is placed below one mutable or authority-owned root.
+    # Purpose: TrustedToolRoot membership must never override candidate, artifact, or authority exclusion.
+    It 'UnitT20_rejects_trusted_files_inside_the_<RootName>_root' -TestCases @(
+        @{RootName='candidate'},@{RootName='artifacts'},@{RootName='authority'}
+    ) {
+        param($RootName)
+        $fixture=New-TrustedFileFixture "trusted-root-$RootName"
+        $roots=@{candidate=$fixture.Candidate;artifacts=$fixture.Artifacts;authority=$fixture.Authority}
+        $roots[$RootName]=$fixture.Trusted
+        {Get-TrustedFileBinding $fixture -Candidate $roots.candidate -Artifacts $roots.artifacts -Authority $roots.authority}|Should -Throw
+    }
+
+    if(-not$IsWindows){
+        # Scenario: A trusted-file name is a symbolic link on a native Unix host.
+        # Purpose: Reject link traversal without registering a skipped cross-platform case.
+        It 'UnitT25_rejects_a_trusted_file_symbolic_link' {
+            $fixture=New-TrustedFileFixture 'trusted-symlink'
+            $target=Join-Path $fixture.Trusted 'target.ps1';[IO.File]::Move($fixture.Script,$target)
+            [void](New-Item -ItemType SymbolicLink -Path $fixture.Script -Target $target)
+            $hash=(Get-FileHash -LiteralPath $fixture.Script -Algorithm SHA256).Hash.ToLowerInvariant()
+            $fixture.Frozen=@([pscustomobject]@{path=$fixture.Script;sha256=$hash})
+            {Get-TrustedFileBinding $fixture}|Should -Throw
+        }
+    }
+
+    # Scenario: A second hard-link name aliases the frozen trusted script.
+    # Purpose: Enforce single-link identity on every native platform without adding a skip.
+    It 'UnitT30_rejects_a_trusted_file_hardlink' {
+        $fixture=New-TrustedFileFixture 'trusted-hardlink'
+        [void](New-Item -ItemType HardLink -Path (Join-Path $fixture.Trusted 'alias.ps1') -Target $fixture.Script)
+        {Get-TrustedFileBinding $fixture}|Should -Throw
+    }
+
+    # Scenario: pwsh starts one exact trusted frozen script and the bytes remain stable through exit.
+    # Purpose: Exercise the pre-start, post-start, and post-execution lease/hash checks on the owned process path.
+    It 'InterT40_runs_and_revalidates_the_trusted_file' {
+        $fixture=New-TrustedFileFixture 'trusted-process' "[Console]::Write('trusted'); exit 0"
+        $binding=Get-TrustedFileBinding $fixture
+        $result=Invoke-StandardValidationProcess -Command $script:TrustedFileHost `
+            -Arguments @('-NoProfile','-NonInteractive','-File',$fixture.Script) -WorkingDirectory $fixture.Root `
+            -Environment @{} -TimeoutSeconds 30 -TrustedFileBinding $binding
+        $result.status | Should -Be 'passed'
+        $result.stdout | Should -Be 'trusted'
+    }
+
+    # Scenario: The trusted script changes after admission but before process launch.
+    # Purpose: Revalidate the frozen hash at the process boundary rather than trusting the earlier adapter check.
+    It 'InterT42_fails_closed_on_trusted_file_pre_start_hash_drift' {
+        $fixture=New-TrustedFileFixture 'trusted-process-pre-drift'
+        $binding=Get-TrustedFileBinding $fixture
+        [IO.File]::AppendAllText($fixture.Script,'# drift',[Text.UTF8Encoding]::new($false))
+        $result=Invoke-StandardValidationProcess -Command $script:TrustedFileHost `
+            -Arguments @('-NoProfile','-NonInteractive','-File',$fixture.Script) -WorkingDirectory $fixture.Root `
+            -Environment @{} -TimeoutSeconds 30 -TrustedFileBinding $binding
+        $result.status | Should -Not -Be 'passed'
+    }
+
+    # Scenario: The trusted script attempts to change its own bytes after pwsh starts.
+    # Purpose: A write denial or the post-execution hash check must prevent a passing result on every platform.
+    It 'InterT45_fails_closed_on_trusted_file_post_start_hash_drift' {
+        $fixture=New-TrustedFileFixture 'trusted-process-drift' "[IO.File]::AppendAllText(`$PSCommandPath,'# drift'); exit 0"
+        $binding=Get-TrustedFileBinding $fixture
+        $result=Invoke-StandardValidationProcess -Command $script:TrustedFileHost `
+            -Arguments @('-NoProfile','-NonInteractive','-File',$fixture.Script) -WorkingDirectory $fixture.Root `
+            -Environment @{} -TimeoutSeconds 30 -TrustedFileBinding $binding
+        $result.status | Should -Not -Be 'passed'
+    }
+}
+
 Describe 'Validator shared process evidence' {
     BeforeAll {
         $TestDrive = if ($TestDrive -is [IO.DirectoryInfo]) { $TestDrive.FullName } else { [string]$TestDrive }
@@ -291,6 +419,36 @@ exit 0
         $result.status | Should -Be 'passed'
         $result.stdout | Should -Be 'space and & literal'
     }
+    # Scenario: A script mixes one positional value, a named value beginning with '-', and a switch.
+    # Purpose: Preserve native parameter semantics while keeping every caller token out of command text and wrapper environment variables.
+    It 'InterT81_binds_script_named_switch_and_positional_arguments_as_data' {
+        $child = Join-Path $TestDrive 'named-arguments.ps1'
+        [IO.File]::WriteAllText($child,@'
+[CmdletBinding(PositionalBinding=$false)]
+param(
+    [Parameter(Position=0)][string]$Position,
+    [Parameter(Mandatory=$true)][string]$Name,
+    [switch]$Enabled
+)
+[Console]::Write(([ordered]@{
+    position=$Position
+    name=$Name
+    enabled=[bool]$Enabled
+    wrapperCommand=[string]$env:STANDARD_VALIDATION_WRAPPER_COMMAND
+    wrapperArguments=[string]$env:STANDARD_VALIDATION_WRAPPER_ARGUMENTS
+}|ConvertTo-Json -Compress))
+'@,[Text.UTF8Encoding]::new($false))
+        $result = Invoke-StandardValidationProcess -Command $child `
+            -Arguments @('position-value','-Name','-leading-value','-Enabled') `
+            -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 60
+        $result.status | Should -Be 'passed'
+        $value=$result.stdout|ConvertFrom-Json
+        $value.position | Should -Be 'position-value'
+        $value.name | Should -Be '-leading-value'
+        $value.enabled | Should -BeTrue
+        $value.wrapperCommand | Should -BeNullOrEmpty
+        $value.wrapperArguments | Should -BeNullOrEmpty
+    }
     # Scenario: A script invokes a failing native command, then returns without exit.
     # Purpose: Preserve the bootstrap's native exit code instead of reporting a successful pwsh -File invocation.
     It 'InterT82_propagates_script_native_failure_without_explicit_exit' {
@@ -306,6 +464,24 @@ param([string]$NativeHost)
         $result.stdout | Should -Be 'returned-after-native'
         $result.cleanedUp | Should -BeTrue
     }
+    # Scenario: A script receives a negative integer and a dash-leading string through explicitly positioned parameters.
+    # Purpose: Preserve array-splat positional binding instead of misclassifying unmatched dash-leading values as parameter names.
+    It 'InterT83_preserves_unmatched_dash_leading_positional_arguments' {
+        $child = Join-Path $TestDrive 'dash-positionals.ps1'
+        [IO.File]::WriteAllText($child,@'
+[CmdletBinding(PositionalBinding=$false)]
+param(
+    [Parameter(Position=0)][int]$Number,
+    [Parameter(Position=1)][string]$Text
+)
+[Console]::Write(([ordered]@{number=$Number;text=$Text}|ConvertTo-Json -Compress))
+'@,[Text.UTF8Encoding]::new($false))
+        $result = Invoke-StandardValidationProcess -Command $child -Arguments @('-1','-literal') -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 60
+        $result.status | Should -Be 'passed'
+        $value=$result.stdout|ConvertFrom-Json
+        $value.number | Should -Be -1
+        $value.text | Should -Be '-literal'
+    }
     # Scenario: A script writes an ordinary non-terminating PowerShell error.
     # Purpose: The owned interpreter must inherit stop-on-error semantics from the trusted bootstrap.
     It 'InterT84_fails_script_on_nonterminating_error' {
@@ -316,6 +492,19 @@ param([string]$NativeHost)
         $result.exitCode | Should -Not -Be 0
         $result.stdout | Should -Be ''
         $result.stderr | Should -Match 'fixture-script-error'
+        $result.cleanedUp | Should -BeTrue
+    }
+    # Scenario: The dispatched script rejects a value during native PowerShell parameter binding.
+    # Purpose: A target-script binding failure must be an explicit nonzero runner result on every host.
+    It 'InterT85_fails_script_parameter_validation_with_a_nonzero_exit' {
+        $child = Join-Path $TestDrive 'parameter-validation.ps1'
+        [IO.File]::WriteAllText($child,"param([ValidatePattern('^[0-9a-f]{64}$')][string]`$Hash) exit 0",[Text.UTF8Encoding]::new($false))
+        $result = Invoke-StandardValidationProcess -Command $child -Arguments @('-Hash','invalid') `
+            -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 60
+        $result.status | Should -Be 'failed'
+        $result.exitCode | Should -Be 1
+        $result.stderr | Should -Not -BeNullOrEmpty
+        $result.stderr | Should -Match 'Hash'
         $result.cleanedUp | Should -BeTrue
     }
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
@@ -1410,5 +1599,156 @@ Describe 'S1B3 ordinary v2 retained refusal boundaries' {
         finally {
             if (Test-Path -LiteralPath $root -PathType Container) { Remove-Item -LiteralPath $root -Recurse -Force }
         }
+    }
+}
+
+Describe 'Revoked production validation trust anchors' {
+    BeforeAll {
+        $script:RevokedAnchorRepositoryRoot = Split-Path -Parent $PSScriptRoot
+        $script:RevokedAnchorRunnerPath = Join-Path $script:RevokedAnchorRepositoryRoot 'scripts/Invoke-StandardValidation.ps1'
+        $script:RevokedAnchorFixedRoot = Join-Path $script:RevokedAnchorRepositoryRoot 'docs/standards/trust-anchors'
+        . $script:RevokedAnchorRunnerPath `
+            -CandidateRoot $TestDrive `
+            -AdapterPath 'unused' `
+            -ArtifactsRoot $TestDrive `
+            -SourceRepository 'https://example.test/example/revoked-anchor.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -DefineFunctionsOnly
+
+        function New-RevokedAnchorPublicFixture {
+            param([Parameter(Mandatory = $true)][string] $Root)
+
+            [void][IO.Directory]::CreateDirectory($Root)
+            foreach ($fileName in @('trusted-supervisor-public-key.xml', 'human-approval-public-key.xml')) {
+                $rsa = [Security.Cryptography.RSA]::Create(2048)
+                try {
+                    [IO.File]::WriteAllText(
+                        (Join-Path $Root $fileName),
+                        $rsa.ToXmlString($false),
+                        [Text.UTF8Encoding]::new($false))
+                }
+                finally { $rsa.Dispose() }
+            }
+        }
+    }
+
+    # Scenario: Either historical authority key is requested from the immutable production trust-anchor root.
+    # Purpose: A revoked key must stop both path resolution and evidence collection before signature verification.
+    It 'UnitT10_blocks_each_revoked_production_trust_anchor_<KeyId>' -TestCases @(
+        @{ KeyId = 'supervisor' },
+        @{ KeyId = 'humanApproval' }
+    ) {
+        param($KeyId)
+
+        $expected = "BLOCKED|trust anchor revoked: $KeyId"
+        $pathError = $null
+        try { [void](Get-StandardValidationTrustAnchorPath -KeyId $KeyId -TrustAnchorRoot $script:RevokedAnchorFixedRoot) }
+        catch { $pathError = $_.Exception.Message }
+        $pathError | Should Be $expected
+
+        $evidenceError = $null
+        try { [void](Get-StandardValidationTrustAnchorEvidence -KeyId $KeyId) }
+        catch { $evidenceError = $_.Exception.Message }
+        $evidenceError | Should Be $expected
+    }
+
+    # Scenario: The existing development harness supplies public-only fixture keys under its caller-owned TrustedToolRoot.
+    # Purpose: Preserve non-release contract regression without turning production revocation into a fixture bypass.
+    It 'UnitT20_preserves_the_existing_development_harness_fixture_root' {
+        $fixtureRoot = Join-Path $TestDrive 'development-fixture-trust-anchors'
+        New-RevokedAnchorPublicFixture -Root $fixtureRoot
+
+        $anchors = Get-StandardValidationTrustAnchorEvidence -TrustAnchorRoot $fixtureRoot
+        $anchors.Count | Should Be 2
+        (@($anchors.id) -join ',') | Should Be 'supervisor,humanApproval'
+        foreach ($anchor in $anchors) {
+            $anchor.path | Should Match '^(trusted-supervisor|human-approval)-public-key\.xml$'
+            $anchor.sha256 | Should Match '^[a-f0-9]{64}$'
+        }
+
+        $contract = Assert-StandardValidationContractFiles `
+            -RepositoryRoot $script:RevokedAnchorRepositoryRoot `
+            -DevelopmentHarness $true `
+            -TrustAnchorRoot $fixtureRoot
+        @($contract.authority.trustAnchors).Count | Should Be 2
+    }
+
+    # Scenario: A production CompleteLifecycle caller places test public keys under TrustedToolRoot and advertises an environment-selected key root.
+    # Purpose: Prove production remains bound to the revoked immutable authority keys and blocks before parsing the adapter or verifying a signature.
+    It 'InterT30_blocks_CompleteLifecycle_preflight_despite_caller_test_keys' {
+        $root = Join-Path $TestDrive 'production-test-key-rejection'
+        $candidate = Join-Path $root 'candidate'
+        $trusted = Join-Path $root 'trusted'
+        $artifacts = Join-Path $root 'artifacts'
+        $adapter = Join-Path $root 'adapter.json'
+        [void][IO.Directory]::CreateDirectory($candidate)
+        New-RevokedAnchorPublicFixture -Root $trusted
+        [IO.File]::WriteAllText($adapter, '{}', [Text.UTF8Encoding]::new($false))
+        $previousRoot = [Environment]::GetEnvironmentVariable('STANDARD_VALIDATION_TRUST_ANCHOR_ROOT')
+        try {
+            [Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_TRUST_ANCHOR_ROOT', $trusted)
+            $evidence = Invoke-StandardValidationRun `
+                -CandidateRoot $candidate `
+                -AdapterPath $adapter `
+                -ArtifactsRoot $artifacts `
+                -SourceRepository 'https://example.test/example/revoked-anchor.git' `
+                -SourceRevision ('a' * 40) `
+                -BaseRevision ('b' * 40) `
+                -EventName local `
+                -TrustedToolRoot $trusted `
+                -CompleteLifecycle $true
+        }
+        finally {
+            [Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_TRUST_ANCHOR_ROOT', $previousRoot)
+        }
+
+        $evidence.state | Should Be 'BLOCKED'
+        $evidence.exitCode | Should Be 10
+        $evidence.failure.message | Should Be 'trust anchor revoked: supervisor'
+        [bool]$evidence.releaseEligible | Should Be $false
+        (Test-Path -LiteralPath $artifacts) | Should Be $false
+        (Get-Content -Raw -Encoding UTF8 $script:RevokedAnchorRunnerPath) | Should Not Match 'STANDARD_VALIDATION_TRUST_ANCHOR_ROOT|AllowRevokedTrustAnchor|SkipTrustAnchorRevocation'
+    }
+
+    # Scenario: A production CompleteLifecycle call supplies a schema-valid Core v2 adapter while the fixed authority trust anchors are revoked.
+    # Purpose: Revocation must block before v2 mode selection and before any artifact directory is created.
+    It 'InterT35_blocks_CompleteLifecycle_before_valid_v2_adapter_dispatch' {
+        $root = Join-Path $TestDrive 'production-v2-revocation-preflight'
+        $candidate = Join-Path $root 'candidate'
+        $artifacts = Join-Path $root 'artifacts'
+        $adapter = Join-Path $root 'adapter.json'
+        [void][IO.Directory]::CreateDirectory($candidate)
+        $runnerSha256 = (Get-FileHash -LiteralPath $script:RevokedAnchorRunnerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $adapterValue = [ordered]@{
+            schemaVersion = 2
+            adapter = 'standard-core-adapter-v2'
+            skillsRoot = 'skills'
+            activeSkills = @('fixture-skill')
+            checks = @([ordered]@{
+                id = 'fixture-check'
+                kind = 'general'
+                executable = $script:RevokedAnchorRunnerPath
+                executableSha256 = $runnerSha256
+                arguments = @()
+            })
+        }
+        [IO.File]::WriteAllText($adapter,($adapterValue | ConvertTo-Json -Depth 10),[Text.UTF8Encoding]::new($false))
+
+        $evidence = Invoke-StandardValidationRun `
+            -CandidateRoot $candidate `
+            -AdapterPath $adapter `
+            -ArtifactsRoot $artifacts `
+            -SourceRepository 'https://example.test/example/revoked-anchor.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -EventName local `
+            -CompleteLifecycle $true
+
+        $evidence.state | Should Be 'BLOCKED'
+        $evidence.exitCode | Should Be 10
+        $evidence.failure.message | Should Be 'trust anchor revoked: supervisor'
+        [bool]$evidence.releaseEligible | Should Be $false
+        (Test-Path -LiteralPath $artifacts) | Should Be $false
     }
 }

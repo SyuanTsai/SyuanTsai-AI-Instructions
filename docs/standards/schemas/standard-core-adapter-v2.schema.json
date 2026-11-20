@@ -43,7 +43,11 @@
           "description": "Absolute, canonical executable path within the explicitly selected TrustedToolRoot; the runner verifies regular-file identity and SHA-256 before and after execution."
         },
         "executableSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-        "arguments": { "type": "array", "items": { "type": "string" } }
+        "arguments": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Candidate-relative -File remains snapshot-bound. Under explicit sourceValidation only, pwsh may use one absolute trusted frozen -File whose canonical path and SHA-256 are bound by frozenFiles and revalidated as a regular single-link file before and after launch. Other absolute arguments are invalid."
+        }
       }
     }
   }

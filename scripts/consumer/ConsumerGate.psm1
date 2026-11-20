@@ -405,22 +405,23 @@ function Invoke-GateCredentialScopedPreparation([string]$AuthorityRoot,[string]$
     $result
 }
 function New-GateAdapter([string]$Path,$Config,$Setup,[string]$PowerShell) {
-    $executable=[string]$Setup.repositoryCheck
+    $executable=[IO.Path]::GetFullPath($PowerShell)
     $executableSha256=Get-GateSha256 $executable
+    $repositoryCheck=[IO.Path]::GetFullPath([string]$Setup.repositoryCheck)
     $checks=@(
         [ordered]@{id='repository-general'
         kind='general'
         executable=$executable
         executableSha256=$executableSha256
-        arguments=@('-Mode','general')},
+        arguments=@('-NoProfile','-NonInteractive','-File',$repositoryCheck,'-Mode','general')},
         [ordered]@{id='repository-pester'
         kind='pester'
         executable=$executable
         executableSha256=$executableSha256
-        arguments=@('-Mode','pester','-PesterReceiptSha256',[string]$Setup.pesterReceiptSha256,'-PesterManifestSha256',`
+        arguments=@('-NoProfile','-NonInteractive','-File',$repositoryCheck,'-Mode','pester','-PesterReceiptSha256',[string]$Setup.pesterReceiptSha256,'-PesterManifestSha256',`
             [string]$Setup.pesterManifestSha256,'-PesterVersion',[string]$Setup.pesterVersion)}
     )
-    Assert-GateAdapterExecutableBindings $checks $Setup
+    Assert-GateAdapterExecutableBindings -Checks $checks -Setup $Setup -PowerShell $PowerShell
     Write-GateJsonCreateOnly $Path([ordered]@{schemaVersion=2
     adapter='standard-core-adapter-v2'
     skillsRoot='skills'
@@ -428,22 +429,52 @@ function New-GateAdapter([string]$Path,$Config,$Setup,[string]$PowerShell) {
     checks=$checks
     sourceValidation=$Setup.sourceValidation})
 }
-function Assert-GateAdapterExecutableBindings([object[]]$Checks,$Setup) {
+function Assert-GateAdapterExecutableBindings([object[]]$Checks,$Setup,[string]$PowerShell) {
     $repositoryCheck=[IO.Path]::GetFullPath([string]$Setup.repositoryCheck)
     $expected=[IO.Path]::GetFullPath((Join-Path ([string]$Setup.trustedRoot) 'trusted/Invoke-ConsumerRepositoryCheck.ps1'))
+    $powerShellPath=[IO.Path]::GetFullPath($PowerShell)
     $comparison=if($IsWindows){[StringComparison]::OrdinalIgnoreCase}else{[StringComparison]::Ordinal}
     if(-not$repositoryCheck.Equals($expected,$comparison)-or-not(Test-Path -LiteralPath $repositoryCheck -PathType Leaf)){
         Throw-GateResult INVALID 'Setup does not bind the trusted repository check path.'
     }
-    $hash=Get-GateSha256 $repositoryCheck
-    $frozen=@($Setup.sourceValidation.frozenFiles|Where-Object{
-            [IO.Path]::GetFullPath([string]$_.path).Equals($repositoryCheck,$comparison)-and[string]$_.sha256-ceq$hash})
-    if($frozen.Count-ne1){Throw-GateResult INVALID 'Setup does not bind the trusted repository check hash.'}
+    if(-not(Test-GatePathWithin $powerShellPath ([string]$Setup.trustedRoot))-or-not(Test-Path -LiteralPath $powerShellPath -PathType Leaf)-or
+        -not[IO.Path]::GetFileName($powerShellPath).Equals($(if($IsWindows){'pwsh.exe'}else{'pwsh'}),[StringComparison]::OrdinalIgnoreCase)){
+        Throw-GateResult INVALID 'Setup does not bind a trusted pwsh runtime.'
+    }
+    $repositoryCheckHash=Get-GateSha256 $repositoryCheck
+    $powerShellHash=Get-GateSha256 $powerShellPath
+    $sourceValidationProperty=$Setup.PSObject.Properties['sourceValidation']
+    $frozenFilesProperty=if($null-ne$sourceValidationProperty-and$null-ne$sourceValidationProperty.Value){
+        $sourceValidationProperty.Value.PSObject.Properties['frozenFiles']
+    }else{$null}
+    if($null-eq$frozenFilesProperty-or$frozenFilesProperty.Value-isnot[array]){
+        Throw-GateResult INVALID 'Setup source validation must bind a frozenFiles array.'
+    }
+    $frozenFiles=@($frozenFilesProperty.Value)
+    foreach($binding in @(@{Path=$repositoryCheck;Hash=$repositoryCheckHash;Name='repository check'},
+            @{Path=$powerShellPath;Hash=$powerShellHash;Name='pwsh runtime'})){
+        $frozen=@($frozenFiles|Where-Object{
+                [IO.Path]::GetFullPath([string]$_.path).Equals([string]$binding.Path,$comparison)})
+        if($frozen.Count-ne1-or[string]$frozen[0].sha256-cne[string]$binding.Hash){
+            Throw-GateResult INVALID "Setup does not bind the trusted $($binding.Name) hash exactly once."
+        }
+    }
+    $expectedChecks=@{
+        'repository-general'=@{Kind='general';Arguments=@('-NoProfile','-NonInteractive','-File',$repositoryCheck,'-Mode','general')}
+        'repository-pester'=@{Kind='pester';Arguments=@('-NoProfile','-NonInteractive','-File',$repositoryCheck,'-Mode','pester','-PesterReceiptSha256',
+            [string]$Setup.pesterReceiptSha256,'-PesterManifestSha256',[string]$Setup.pesterManifestSha256,
+            '-PesterVersion',[string]$Setup.pesterVersion)}
+    }
+    if($Checks.Count-ne$expectedChecks.Count){Throw-GateResult INVALID 'Consumer adapter must contain exactly the two trusted repository checks.'}
+    $seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach($check in $Checks){
-        if([IO.Path]::GetExtension([string]$check.executable).Equals('.ps1',[StringComparison]::OrdinalIgnoreCase)-and(
-                -not[IO.Path]::GetFullPath([string]$check.executable).Equals($repositoryCheck,$comparison)-or
-                [string]$check.executableSha256-cne$hash)){
-            Throw-GateResult INVALID "Core check '$($check.id)' PowerShell executable is not the trusted repository check."
+        $id=[string]$check.id
+        $expectedCheck=$expectedChecks[$id]
+        if($null-eq$expectedCheck-or-not$seen.Add($id)-or[string]$check.kind-cne[string]$expectedCheck.Kind-or
+            -not[IO.Path]::GetFullPath([string]$check.executable).Equals($powerShellPath,$comparison)-or
+            [string]$check.executableSha256-cne$powerShellHash-or
+            $check.arguments-isnot[array]-or(@([string[]]$check.arguments)-join"`n")-cne(@([string[]]$expectedCheck.Arguments)-join"`n")){
+            Throw-GateResult INVALID "Core check '$id' does not bind the trusted pwsh -File repository check."
         }
     }
 }
@@ -453,7 +484,7 @@ function Invoke-GateValidation([string]$AuthorityRoot,[string]$CandidateRoot,[st
     $adapter=Join-Path $WorkRoot 'consumer-core-adapter.json'
     New-GateAdapter $adapter $Config $setup $PowerShell
     $adapterValue=Read-GateJson $adapter 'consumer core adapter'
-    Assert-GateAdapterExecutableBindings @($adapterValue.checks) $setup
+    Assert-GateAdapterExecutableBindings -Checks @($adapterValue.checks) -Setup $setup -PowerShell $PowerShell
     $artifacts=Join-Path $WorkRoot 'validation-artifacts'
     [IO.Directory]::CreateDirectory($artifacts)|Out-Null
     $output=Join-Path $artifacts 'consumer-core-evidence.json'

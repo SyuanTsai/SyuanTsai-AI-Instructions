@@ -23,6 +23,10 @@ Describe 'SYP258 explicit source validation contract' {
         $property = $schema.properties.PSObject.Properties['sourceValidation']
         if ($null -eq $property) { throw 'The v2 adapter must expose its optional sourceValidation contract.' }
         if (@($schema.required) -contains 'sourceValidation') { throw 'Ordinary Core must not require sourceValidation.' }
+        $policy = Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/standard-core-validation-v2.json') | ConvertFrom-Json
+        $policy.processOwnership.scriptArgumentBinding | Should Match 'named, switch, and positional data.*fixed pwsh -File dispatcher'
+        $policy.core.fileArguments | Should Match 'candidate-relative -File.*trusted frozen -File.*pre/post-launch hash revalidation'
+        $schema.'$defs'.check.properties.arguments.description | Should Match 'Other absolute arguments are invalid'
         $tokens = $null; $errors = $null
         $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'scripts/Invoke-StandardValidation.ps1'), [ref]$tokens, [ref]$errors)
         if (@($errors).Count -gt 0) { throw 'The source runner must remain parseable.' }

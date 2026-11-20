@@ -1,75 +1,15 @@
 # SPDX-FileCopyrightText: 2026 SyuanTsai
 # SPDX-License-Identifier: Apache-2.0
 #requires -Version 7.4
+[CmdletBinding(PositionalBinding=$false)]
+param(
+    [string]$Mode,
+    [string]$PesterReceiptSha256,
+    [string]$PesterManifestSha256,
+    [string]$PesterVersion
+)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
-function ConvertFrom-ConsumerRepositoryCheckArguments([object[]]$Tokens) {
-    # The protected runner invokes a .ps1 command with array splatting, so named
-    # strings are otherwise positionally bound. Parse only exact name/value
-    # pairs here. Names use OrdinalIgnoreCase to match PowerShell parameter-name
-    # casing, but abbreviations, prefixes, and -Name:value syntax are rejected.
-    # A value that begins with '-' is rejected to prevent a missing value from
-    # shifting a later name into the value position.
-    # pwsh -File normalizes -Name:value into two script arguments before
-    # populating $args. Inspect only this process's raw -File tail so that the
-    # colon form remains rejectable; runner array-splat calls have no matching
-    # -File tail and are validated directly from $args below.
-    $processArguments=[Environment]::GetCommandLineArgs()
-    for($rawIndex=0;$rawIndex-lt($processArguments.Count-1);$rawIndex++){
-        if(-not[string]::Equals([string]$processArguments[$rawIndex],'-File',[StringComparison]::OrdinalIgnoreCase)){continue}
-        $rawScript=[IO.Path]::GetFullPath([string]$processArguments[$rawIndex+1])
-        if(-not[string]::Equals($rawScript,[IO.Path]::GetFullPath($PSCommandPath),[StringComparison]::OrdinalIgnoreCase)){continue}
-        if($rawIndex+2-lt$processArguments.Count){
-            foreach($rawToken in @($processArguments[($rawIndex+2)..($processArguments.Count-1)])){
-                if(([string]$rawToken).StartsWith('-',[StringComparison]::Ordinal)-and([string]$rawToken).Contains(':',[StringComparison]::Ordinal)){
-                    throw "Unknown repository check parameter: $rawToken"
-                }
-            }
-        }
-        break
-    }
-    $names=[Collections.Generic.Dictionary[string,string]]::new([StringComparer]::OrdinalIgnoreCase)
-    foreach($name in @('Mode','PesterReceiptSha256','PesterManifestSha256','PesterVersion')){$names.Add("-$name",$name)}
-    $values=[Collections.Generic.Dictionary[string,string]]::new([StringComparer]::OrdinalIgnoreCase)
-    for($index=0;$index-lt$Tokens.Count;$index+=2){
-        $name=[string]$Tokens[$index]
-        if(-not$name.StartsWith('-',[StringComparison]::Ordinal)){throw "Unexpected positional repository check token: $name"}
-        if(-not$names.ContainsKey($name)){throw "Unknown repository check parameter: $name"}
-        $canonical=$names[$name]
-        if($values.ContainsKey($canonical)){throw "Duplicate repository check parameter: -$canonical"}
-        if($index+1-ge$Tokens.Count){throw "Repository check parameter -$canonical is missing a value."}
-        $value=[string]$Tokens[$index+1]
-        if($value.StartsWith('-',[StringComparison]::Ordinal)){throw "Repository check parameter -$canonical value must not begin with '-'."}
-        $values.Add($canonical,$value)
-    }
-    if(-not$values.ContainsKey('Mode')){throw 'Repository check Mode is required.'}
-    $mode=[string]$values['Mode']
-    if(-not($mode.Equals('general',[StringComparison]::OrdinalIgnoreCase)-or
-            $mode.Equals('pester',[StringComparison]::OrdinalIgnoreCase))){throw 'Repository check Mode must be general or pester.'}
-    $mode=$mode.ToLowerInvariant()
-    foreach($name in @('PesterReceiptSha256','PesterManifestSha256')){
-        if($values.ContainsKey($name)-and[string]$values[$name]-cnotmatch'^[0-9a-f]{64}$'){
-            throw "Repository check $name must be a 64-character lowercase SHA-256."
-        }
-    }
-    if($values.ContainsKey('PesterVersion')-and[string]$values['PesterVersion']-cne'6.2.0'){
-        throw 'Repository check PesterVersion must be 6.2.0.'
-    }
-    if($mode-ceq'pester'){
-        foreach($name in @('PesterReceiptSha256','PesterManifestSha256','PesterVersion')){
-            if(-not$values.ContainsKey($name)){throw "Repository check $name is required when Mode is pester."}
-        }
-    }
-    # Mode=general intentionally accepts the three well-formed Pester bindings,
-    # matching the former optional parameters; the general check does not use them.
-    [pscustomobject]@{
-        Mode=$mode
-        PesterReceiptSha256=if($values.ContainsKey('PesterReceiptSha256')){[string]$values['PesterReceiptSha256']}else{$null}
-        PesterManifestSha256=if($values.ContainsKey('PesterManifestSha256')){[string]$values['PesterManifestSha256']}else{$null}
-        PesterVersion=if($values.ContainsKey('PesterVersion')){[string]$values['PesterVersion']}else{$null}
-    }
-}
 
 function Read-ConsumerJson([string]$Path) {
     $bytes = [IO.File]::ReadAllBytes($Path)
@@ -204,11 +144,27 @@ function New-ConsumerPesterCase($Test,[string]$TestRoot,[string[]]$TestFiles) {
 }
 
 try {
-    $parsedArguments=ConvertFrom-ConsumerRepositoryCheckArguments @($args)
-    $Mode=[string]$parsedArguments.Mode
-    $PesterReceiptSha256=[string]$parsedArguments.PesterReceiptSha256
-    $PesterManifestSha256=[string]$parsedArguments.PesterManifestSha256
-    $PesterVersion=[string]$parsedArguments.PesterVersion
+    if ([string]::IsNullOrWhiteSpace($Mode) -or $Mode -notin @('general','pester')) {
+        throw 'Repository check Mode must be general or pester.'
+    }
+    foreach ($name in @('PesterReceiptSha256','PesterManifestSha256')) {
+        $value=[string](Get-Variable -Name $name -ValueOnly)
+        if ($PSBoundParameters.ContainsKey($name) -and $value -cnotmatch '^[0-9a-f]{64}$') {
+            throw "Repository check $name must be a lowercase SHA-256 value."
+        }
+    }
+    if ($PSBoundParameters.ContainsKey('PesterVersion') -and $PesterVersion -cne '6.2.0') {
+        throw 'Repository check PesterVersion must be 6.2.0.'
+    }
+    $Mode=$Mode.ToLowerInvariant()
+    if($Mode-ceq'pester'){
+        foreach($name in @('PesterReceiptSha256','PesterManifestSha256','PesterVersion')){
+            if([string]::IsNullOrWhiteSpace([string](Get-Variable -Name $name -ValueOnly))){
+                throw "Repository check $name is required when Mode is pester."
+            }
+        }
+    }
+    # Mode=general intentionally accepts well-formed optional Pester bindings but does not use them.
     foreach ($name in @('STANDARD_VALIDATION_CORE_RUN_ID', 'STANDARD_VALIDATION_CORE_CHECK_ID', 'STANDARD_VALIDATION_CORE_SKILLS')) {
         if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name, 'Process'))) { throw "Central runner did not bind $name." }
     }
