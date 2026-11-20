@@ -3129,6 +3129,11 @@ Start-Sleep -Seconds 30
     # Scenario: Every consumer owned-process seam reports an unknown exit status after the child has otherwise completed.
     # Purpose: A null or non-integral exit status must never be coerced to zero or accepted as a successful resolver, validator, Git, byte-Git, or standalone closure result.
     It 'UnitT49c_rejects_unknown_owned_process_exit_statuses' {
+        $previousLastExitCode=$global:LASTEXITCODE
+        $previousConsoleOut=[Console]::Out
+        $previousConsoleError=[Console]::Error
+        $consoleOut=[IO.StringWriter]::new()
+        $consoleError=[IO.StringWriter]::new()
         $root=Join-Path $TestDrive 'unknown-owned-process-exit'
         $authority=Join-Path $root 'authority';$install=Join-Path $root 'install';$source=Join-Path $root 'source'
         foreach($directory in @($authority,$install,$source,(Join-Path $authority 'docs/standards'),(Join-Path $authority 'scripts'))){
@@ -3141,6 +3146,9 @@ Start-Sleep -Seconds 30
                     'Invoke-PlatformPreparationCommand'={ [pscustomobject]@{stdout='';stderr='';exitCode=$null} }
                 }}} -ModuleName ConsumerGate
         try{
+            [Console]::SetOut($consoleOut)
+            [Console]::SetError($consoleError)
+            try{
             {Invoke-GateResolver (Get-Process -Id $PID).Path $authority $install pester ('a'*32) `
                     (Join-Path $source 'receipt-pester.json') latest ''}|Should Throw 'Resolver exit status is unknown.'
 
@@ -3183,7 +3191,14 @@ Start-Sleep -Seconds 30
                 -GitArgumentsBase64 $payload 2>&1)
         $LASTEXITCODE|Should Not Be 0
         ($records-join[Environment]::NewLine)|Should Match 'git exit status is unknown.'
-        Restore-GateFixtureModule
+        }finally{
+            [Console]::SetOut($previousConsoleOut)
+            [Console]::SetError($previousConsoleError)
+            $consoleOut.Dispose()
+            $consoleError.Dispose()
+            Restore-GateFixtureModule
+            $global:LASTEXITCODE=$previousLastExitCode
+        }
     }
 
     # Scenario: Runtime and tool boundaries record events in prepare, then the production final report assertion records the final event.
