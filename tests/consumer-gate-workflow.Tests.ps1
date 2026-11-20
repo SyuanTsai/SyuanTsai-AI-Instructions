@@ -497,7 +497,8 @@ Describe 'Consumer gate workflow templates' {
         foreach($required in @("OldAuthorityRevision='7338a3f6d8e2d25849b79627fb9a2cbd21ebd123'",'OldBootstrap','OldWorkflow','repin-topic',
                 'consumer re-pin probe merge','Invoke-RepinBootstrap $bootstrap prepare','Invoke-RepinBootstrap $bootstrap validate',
                 'Invoke-RepinBootstrap $bootstrap finalize','Invoke-RepinBootstrap $bootstrap aggregate','unauthorized bootstrap drift',
-                'negative bootstrap drift was accepted','leg-*.json')){
+                'Candidate bootstrap differs from both authority template and base.','[int]$Result.ExitCode-ne20',
+                'Assert-RepinNegativeBootstrapResult','leg-*.json')){
             $text|Should Match ([regex]::Escape($required))
         }
         $text|Should Not Match '(?m)^\s*(git\s+clone|Invoke-WebRequest|Invoke-RestMethod)\b'
