@@ -238,6 +238,7 @@ Describe 'Agent Skill authority workflow contract' {
         $script:WorkflowExpectations = [ordered]@{
             '.github/workflows/consumer-transition-probe.yml' = 2
             '.github/workflows/pr8-powershell-validation.yml' = 5
+            '.github/workflows/skill-tools-path-patch.yml' = 2
             '.github/workflows/standards-conformance.yml' = 1
             '.github/workflows/syp101-production-smoke.yml' = 1
             '.github/workflows/syp86-production-lock.yml' = 1
@@ -647,12 +648,13 @@ jobs:
         $expectedWorkflowPaths = @(
             '.github/workflows/consumer-transition-probe.yml',
             '.github/workflows/pr8-powershell-validation.yml',
+            '.github/workflows/skill-tools-path-patch.yml',
             '.github/workflows/standards-conformance.yml',
             '.github/workflows/syp101-production-smoke.yml',
             '.github/workflows/syp86-production-lock.yml',
             '.github/workflows/validator-maintenance-producer.yml'
         )
-        Assert-Equal $workflowPaths.Count $expectedWorkflowPaths.Count 'The repository must retain exactly the six registered active workflow files.'
+        Assert-Equal $workflowPaths.Count $expectedWorkflowPaths.Count 'The repository must retain exactly the seven registered active workflow files.'
         Assert-Equal (($workflowPaths | Sort-Object) -join '|') (($expectedWorkflowPaths | Sort-Object) -join '|') 'The workflow inventory must retire the unmatched protected maintenance consumer and reject unreviewed workflow additions.'
         $pullRequestWorkflows = New-Object 'System.Collections.Generic.List[string]'
         $pullRequestJobNames = New-Object 'System.Collections.Generic.List[string]'
@@ -665,8 +667,8 @@ jobs:
                 $jobMatches = [regex]::Matches($jobsBlock.Groups['block'].Value, '(?m)^  ([a-z][a-z0-9-]*):\s*$')
                 if ($relativePath -ceq '.github/workflows/pr8-powershell-validation.yml') {
                     $pullRequestJobNames.Add('windows-core')
-                } elseif($relativePath-ceq'.github/workflows/consumer-transition-probe.yml') {
-                    Assert-Equal $jobMatches.Count 2 'The transition probe must contain one matrix leg and one aggregate job.'
+                } elseif($relativePath -in @('.github/workflows/consumer-transition-probe.yml', '.github/workflows/skill-tools-path-patch.yml')) {
+                    Assert-Equal $jobMatches.Count 2 "The three-platform probe '$relativePath' must contain one matrix leg and one aggregate job."
                 } else {
                     Assert-Equal $jobMatches.Count 1 "Ordinary pull-request workflow '$relativePath' must have exactly one job."
                     $pullRequestJobNames.Add($jobMatches[0].Groups[1].Value)
@@ -675,9 +677,10 @@ jobs:
             Assert-NotMatch $workflow 'windows-powershell-51|PowerShell 5\.1|Pester 3\.4\.0|shell:\s*powershell|shell:\s*bash' "Workflow '$relativePath' must not retain a retired PowerShell 5.1 lane."
             Assert-NotMatch $workflow '(?ms)^\s*&\s+\./scripts/[^\r\n]+\.ps1[^\r\n]*\r?\n\s*if\s*\(\s*\$LASTEXITCODE' "Workflow '$relativePath' must use PowerShell success state or exceptions after PowerShell script calls, not a stale native exit code."
             Assert-NotMatch $workflow 'Get-Module Pester -ListAvailable -Name Pester' "Workflow '$relativePath' must not pass Pester both positionally and through -Name."
-            if($relativePath-ceq'.github/workflows/consumer-transition-probe.yml'){
-                Assert-Match $workflow '(?s)windows-latest.*ubuntu-latest.*macos-latest' 'The transition probe must retain all three platform rows.'
-                Assert-Match $workflow 'tests/Invoke-ConsumerTransitionProbe\.ps1' 'The transition probe must use its shared local/CI driver.'
+            if($relativePath -in @('.github/workflows/consumer-transition-probe.yml', '.github/workflows/skill-tools-path-patch.yml')){
+                Assert-Match $workflow '(?s)windows-latest.*ubuntu-latest.*macos-latest' "The three-platform probe '$relativePath' must retain all three platform rows."
+                $expectedDriver = if ($relativePath -ceq '.github/workflows/consumer-transition-probe.yml') { 'tests/Invoke-ConsumerTransitionProbe\.ps1' } else { 'tests/Invoke-SkillToolsPathPatchProbe\.ps1' }
+                Assert-Match $workflow $expectedDriver "The three-platform probe '$relativePath' must use its shared local/CI driver."
                 continue
             }
             Assert-NotMatch $workflow 'runs-on:\s*ubuntu-latest' "Ordinary workflow '$relativePath' must not add a Linux CI lane."
@@ -698,13 +701,14 @@ jobs:
                 Assert-Equal (@($runnerValues | Where-Object { $_ -cne 'windows-latest' }).Count) 0 "Ordinary workflow '$relativePath' may use only windows-latest."
             }
         }
-        Assert-Equal $pullRequestWorkflows.Count 3 'Core, Install Smoke, and the non-required consumer transition probe must run for ordinary pull requests.'
+        Assert-Equal $pullRequestWorkflows.Count 4 'Core, Install Smoke, and both non-required three-platform probes must run for ordinary pull requests.'
         $expectedPullRequestWorkflows = @(
             '.github/workflows/consumer-transition-probe.yml',
             '.github/workflows/pr8-powershell-validation.yml',
+            '.github/workflows/skill-tools-path-patch.yml',
             '.github/workflows/syp101-production-smoke.yml'
         )
-        Assert-Equal (($pullRequestWorkflows.ToArray() | Sort-Object) -join '|') (($expectedPullRequestWorkflows | Sort-Object) -join '|') 'Only the two required Windows workflows and the reviewed transition probe may add ordinary pull-request jobs.'
+        Assert-Equal (($pullRequestWorkflows.ToArray() | Sort-Object) -join '|') (($expectedPullRequestWorkflows | Sort-Object) -join '|') 'Only the two required Windows workflows and the two reviewed three-platform probes may add ordinary pull-request jobs.'
         $expectedPullRequestJobNames = @('windows-core', 'windows-install-smoke')
         Assert-Equal (($pullRequestJobNames.ToArray() | Sort-Object) -join '|') (($expectedPullRequestJobNames | Sort-Object) -join '|') 'Ordinary pull-request CI must aggregate to exactly Windows Core and Windows Install Smoke.'
 

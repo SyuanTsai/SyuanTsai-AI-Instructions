@@ -1710,6 +1710,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": ".github/workflows/skill-tools-path-patch.yml",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "consumer/README.md",
       "license": "Apache-2.0"
     },
@@ -1778,6 +1782,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "tests/Invoke-SkillToolsPathPatchProbe.ps1",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "tests/consumer-bootstrap.Tests.ps1",
       "license": "Apache-2.0"
     },
@@ -1803,6 +1811,22 @@
     },
     {
       "path": "tests/fixtures/consumer-transition-probe/candidate/tests/Fixture.Tests.ps1.template",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/skill-tools-path-patch/reference-missing/SKILL.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/skill-tools-path-patch/reference-present/SKILL.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/fixtures/skill-tools-path-patch/reference-present/references/details.md",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "tests/skill-tools-core-path-patch.Tests.ps1",
       "license": "Apache-2.0"
     },
     {

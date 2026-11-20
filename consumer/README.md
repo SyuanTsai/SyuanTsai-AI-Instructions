@@ -8,6 +8,14 @@ The formal workflow uses `pull_request_target` so a pull request cannot replace 
 
 Remote App, environment, Actions event-policy, and ruleset settings are user-controlled prerequisites. Repository files alone do not establish remote merge enforcement, and no repository may claim enforcement until the App checks and ruleset source restrictions described below are active.
 
+## Temporary `@skill-tools/core` Windows path patch
+
+The resolver applies a narrowly pinned patch to `@skill-tools/core` 0.2.2 after npm installation. That release compares resolved Windows paths against a literal `/` suffix, so it drops every `SKILL.md` file reference on Windows. Without the patch, Progressive Disclosure scores 8/15 on Windows instead of 15/15, and the `file-reference-exists` rule incorrectly accepts missing references on Windows.
+
+The patch changes only the platform-specific path comparison in the ESM and CJS distributions. It does not change scoring logic or thresholds. Package name and version, both pre-patch SHA-256 values, and both post-patch SHA-256 values are fixed in the resolver; any mismatch fails closed. Consequently, a `skill-tools` release that selects a different core package will fail the gate and requires human review.
+
+Remove the patch function, its resolver call, its tests, and the three-platform probe workflow after upstream publishes a corrected `@skill-tools/core` release and `skill-tools` depends on that corrected release. Do not keep the workaround by merely updating its pins.
+
 ## Consumer repository conversion
 
 Convert repositories serially in this order: Knowledge Content, Code Collaboration, General, Atlassian, then Darktide. Do not begin the next repository until the current repository has completed step 5. Darktide remains `pending-prerequisites` until the section below is complete.

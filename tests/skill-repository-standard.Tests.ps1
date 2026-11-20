@@ -6828,6 +6828,19 @@ Describe 'P11-pin consumer authority Standard contract' {
     }
 }
 
+Describe 'SYP491 fixed skill-tools core path patch authority' {
+    # Scenario: The temporary @skill-tools/core compatibility patch remains part of the normative resolver contract.
+    # Purpose: Bind patch timing, exact package/hash identity, scoring invariance, fail-closed drift, and mandatory removal after an upstream release.
+    It 'UnitT10_defines_the_fixed_skill_tools_core_path_patch_contract' {
+        $root = Split-Path -Parent $PSScriptRoot
+        $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $root 'docs/standards/skill-repository-standard.md')
+        $standard | Should Match '安裝完成後、計算 installed closure、entry point、executable 或 runtime 等 SHA-256 之前.*MUST.*`@skill-tools/core`.*固定的路徑比較 patch'
+        $standard | Should Match '套件名稱、版本及 patch 前後的 SHA-256.*MUST.*固定值完全相符.*MUST.*fail closed'
+        $standard | Should Match 'patch.*MUST NOT.*改變評分邏輯或門檻'
+        $standard | Should Match '上游修正並升版後.*MUST.*移除此 patch.*不得只更新 pin 後沿用'
+    }
+}
+
 Describe 'SYP354 trust-anchor rotation approval boundary' {
     # Scenario: The normative Standard and review matrix describe a future trust-anchor rotation.
     # Purpose: Require user verification with an independent tool before an approval-boundary change can merge.
