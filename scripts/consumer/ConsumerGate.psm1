@@ -421,7 +421,7 @@ function New-GateAdapter([string]$Path,$Config,$Setup,[string]$PowerShell) {
         arguments=@('-NoProfile','-NonInteractive','-File',$repositoryCheck,'-Mode','pester','-PesterReceiptSha256',[string]$Setup.pesterReceiptSha256,'-PesterManifestSha256',`
             [string]$Setup.pesterManifestSha256,'-PesterVersion',[string]$Setup.pesterVersion)}
     )
-    Assert-GateAdapterExecutableBindings $checks $Setup $PowerShell
+    Assert-GateAdapterExecutableBindings -Checks $checks -Setup $Setup -PowerShell $PowerShell
     Write-GateJsonCreateOnly $Path([ordered]@{schemaVersion=2
     adapter='standard-core-adapter-v2'
     skillsRoot='skills'
@@ -443,9 +443,17 @@ function Assert-GateAdapterExecutableBindings([object[]]$Checks,$Setup,[string]$
     }
     $repositoryCheckHash=Get-GateSha256 $repositoryCheck
     $powerShellHash=Get-GateSha256 $powerShellPath
+    $sourceValidationProperty=$Setup.PSObject.Properties['sourceValidation']
+    $frozenFilesProperty=if($null-ne$sourceValidationProperty-and$null-ne$sourceValidationProperty.Value){
+        $sourceValidationProperty.Value.PSObject.Properties['frozenFiles']
+    }else{$null}
+    if($null-eq$frozenFilesProperty-or$frozenFilesProperty.Value-isnot[array]){
+        Throw-GateResult INVALID 'Setup source validation must bind a frozenFiles array.'
+    }
+    $frozenFiles=@($frozenFilesProperty.Value)
     foreach($binding in @(@{Path=$repositoryCheck;Hash=$repositoryCheckHash;Name='repository check'},
             @{Path=$powerShellPath;Hash=$powerShellHash;Name='pwsh runtime'})){
-        $frozen=@($Setup.sourceValidation.frozenFiles|Where-Object{
+        $frozen=@($frozenFiles|Where-Object{
                 [IO.Path]::GetFullPath([string]$_.path).Equals([string]$binding.Path,$comparison)})
         if($frozen.Count-ne1-or[string]$frozen[0].sha256-cne[string]$binding.Hash){
             Throw-GateResult INVALID "Setup does not bind the trusted $($binding.Name) hash exactly once."
@@ -476,7 +484,7 @@ function Invoke-GateValidation([string]$AuthorityRoot,[string]$CandidateRoot,[st
     $adapter=Join-Path $WorkRoot 'consumer-core-adapter.json'
     New-GateAdapter $adapter $Config $setup $PowerShell
     $adapterValue=Read-GateJson $adapter 'consumer core adapter'
-    Assert-GateAdapterExecutableBindings @($adapterValue.checks) $setup $PowerShell
+    Assert-GateAdapterExecutableBindings -Checks @($adapterValue.checks) -Setup $setup -PowerShell $PowerShell
     $artifacts=Join-Path $WorkRoot 'validation-artifacts'
     [IO.Directory]::CreateDirectory($artifacts)|Out-Null
     $output=Join-Path $artifacts 'consumer-core-evidence.json'

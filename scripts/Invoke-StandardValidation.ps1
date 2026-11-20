@@ -3263,9 +3263,14 @@ foreach($entry in @($binding.named)){
     else{$named[[string]$entry.name]=[string]$entry.value}
 }
 $positionals=@($binding.positional|ForEach-Object{[string]$_})
-& ([string]$binding.commandPath) @named @positionals
-if($null-ne$LASTEXITCODE){exit ([int]$LASTEXITCODE)}
-exit 0
+try{
+    & ([string]$binding.commandPath) @named @positionals
+    if($null-ne$LASTEXITCODE){exit ([int]$LASTEXITCODE)}
+    exit 0
+}catch{
+    [Console]::Error.WriteLine($_.Exception.Message)
+    exit 1
+}
 '@
 }
 

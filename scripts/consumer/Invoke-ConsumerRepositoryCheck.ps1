@@ -3,10 +3,10 @@
 #requires -Version 7.4
 [CmdletBinding(PositionalBinding=$false)]
 param(
-    [Parameter(Mandatory=$true)][ValidateSet('general','pester')][string]$Mode,
-    [ValidatePattern('^[0-9a-f]{64}$')][string]$PesterReceiptSha256,
-    [ValidatePattern('^[0-9a-f]{64}$')][string]$PesterManifestSha256,
-    [ValidateSet('6.2.0')][string]$PesterVersion
+    [string]$Mode,
+    [string]$PesterReceiptSha256,
+    [string]$PesterManifestSha256,
+    [string]$PesterVersion
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -144,6 +144,18 @@ function New-ConsumerPesterCase($Test,[string]$TestRoot,[string[]]$TestFiles) {
 }
 
 try {
+    if ([string]::IsNullOrWhiteSpace($Mode) -or $Mode -notin @('general','pester')) {
+        throw 'Repository check Mode must be general or pester.'
+    }
+    foreach ($name in @('PesterReceiptSha256','PesterManifestSha256')) {
+        $value=[string](Get-Variable -Name $name -ValueOnly)
+        if ($PSBoundParameters.ContainsKey($name) -and $value -cnotmatch '^[0-9a-f]{64}$') {
+            throw "Repository check $name must be a lowercase SHA-256 value."
+        }
+    }
+    if ($PSBoundParameters.ContainsKey('PesterVersion') -and $PesterVersion -cne '6.2.0') {
+        throw 'Repository check PesterVersion must be 6.2.0.'
+    }
     $Mode=$Mode.ToLowerInvariant()
     if($Mode-ceq'pester'){
         foreach($name in @('PesterReceiptSha256','PesterManifestSha256','PesterVersion')){

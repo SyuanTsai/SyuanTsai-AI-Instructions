@@ -494,6 +494,19 @@ param(
         $result.stderr | Should -Match 'fixture-script-error'
         $result.cleanedUp | Should -BeTrue
     }
+    # Scenario: The dispatched script rejects a value during native PowerShell parameter binding.
+    # Purpose: A target-script binding failure must be an explicit nonzero runner result on every host.
+    It 'InterT85_fails_script_parameter_validation_with_a_nonzero_exit' {
+        $child = Join-Path $TestDrive 'parameter-validation.ps1'
+        [IO.File]::WriteAllText($child,"param([ValidatePattern('^[0-9a-f]{64}$')][string]`$Hash) exit 0",[Text.UTF8Encoding]::new($false))
+        $result = Invoke-StandardValidationProcess -Command $child -Arguments @('-Hash','invalid') `
+            -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 60
+        $result.status | Should -Be 'failed'
+        $result.exitCode | Should -Be 1
+        $result.stderr | Should -Not -BeNullOrEmpty
+        $result.stderr | Should -Match 'Hash'
+        $result.cleanedUp | Should -BeTrue
+    }
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
         # Scenario: A Windows command shim requires an interpreter.
         # Purpose: Preserve command-shim support inside the P3 Job boundary.
