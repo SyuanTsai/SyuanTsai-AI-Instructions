@@ -578,6 +578,7 @@ Describe 'Standard validation resolver hardening' {
         $policy=Get-Policy -Path $script:ToolchainPath
         $registry=Get-SkillSpectorApprovedSources -Path (Join-Path $script:RepositoryRoot $policy.tools.skillspector.approvedSources)
         $script:SkillSpectorApprovedEntry=$registry.activeEntry
+        $activeReleaseEndpointPattern='/releases/tags/'+[regex]::Escape([string]$script:SkillSpectorApprovedEntry.releaseTag)+'$'
         $script:SkillSpectorGitHubCalls=[Collections.Generic.List[string]]::new()
         $originalAssertCommand=(Get-Item Function:Assert-Command).ScriptBlock
         $originalAssertNoConflictingPipEnvironment=(Get-Item Function:Assert-NoConflictingPipEnvironment).ScriptBlock
@@ -614,7 +615,7 @@ Describe 'Standard validation resolver hardening' {
                 $message=''
                 try{Resolve-SkillSpector -ShouldInstall $false -ToolPolicy $policy.tools.skillspector -AcquisitionLimitSeconds 30 | Out-Null}catch{$message=$_.Exception.Message}
                 Assert-Match $message $case.Pattern "Mocked $($case.Drift) drift was not rejected."
-                Assert-True ($script:SkillSpectorGitHubCalls[0] -match '/releases/tags/v2\.13\.4$') 'Resolver did not start with the exact active release endpoint.'
+                Assert-True ($script:SkillSpectorGitHubCalls[0] -match $activeReleaseEndpointPattern) 'Resolver did not start with the exact active release endpoint.'
                 Assert-True (-not (@($script:SkillSpectorGitHubCalls) -match '/releases/latest')) 'Resolver queried mutable latest release metadata.'
             }
         }
