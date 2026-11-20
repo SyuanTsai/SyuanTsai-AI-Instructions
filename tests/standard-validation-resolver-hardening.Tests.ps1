@@ -2490,4 +2490,20 @@ Describe 'SYP354 PR-K1 trust-anchor admission boundary' {
         $admissionSources=@('scripts/Invoke-StandardValidation.ps1','scripts/Invoke-StandardAuthorityGate.ps1')|ForEach-Object{Get-Content -Raw -Encoding UTF8 (Join-Path $root $_)}
         ($admissionSources -join "`n") | Should Not Match 'trust-anchor/(New-TrustAnchorKeyPair|ConvertTo-TrustAnchorPublicKeyXml|Get-TrustAnchorFingerprint)\.ps1'
     }
+
+    # Scenario: The central runner adds named script binding and a frozen absolute -File mode without changing the resolver or trust anchors.
+    # Purpose: Keep caller tokens out of command text and bind every trusted script to pwsh, frozenFiles, and single-link pre/post-launch checks.
+    It 'UnitT20_closes_named_script_dispatch_and_trusted_file_identity' {
+        $root=Split-Path -Parent $PSScriptRoot
+        $runner=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'scripts/Invoke-StandardValidation.ps1')
+        foreach($required in @('ConvertTo-StandardValidationScriptArgumentBinding','Get-StandardValidationScriptDispatchText',
+                'New-StandardCoreTrustedFileBinding','verify-trusted-file-after-start','verify-trusted-file-after-exit',
+                'Assert-PlatformFileIdentity -Lease $trustedFileLease -Expected $trustedFileLease.Observation -SingleLink -VerifyPath')){
+            $runner | Should Match ([regex]::Escape($required))
+        }
+        $runner | Should Not Match 'STANDARD_VALIDATION_WRAPPER_COMMAND|STANDARD_VALIDATION_WRAPPER_ARGUMENTS'
+        $standard=Get-Content -Raw -Encoding UTF8 (Join-Path $root 'docs/standards/skill-repository-standard.md')
+        $standard | Should Match 'Candidate-relative mode|Candidate-relative 模式'
+        $standard | Should Match 'Trusted frozen mode|Trusted frozen 模式'
+    }
 }

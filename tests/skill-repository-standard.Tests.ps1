@@ -4094,7 +4094,10 @@ public sealed class C245NonCooperativeStream : Stream {
             'A pin or immutable version update alone MUST NOT transfer ownership',
             'Source-copy equivalence or removal is deferred to downstream adoption',
             'identified item by item', 'normal required three-platform Core CI gate',
-            'Historically, the Code trial protected a repository-local reader set'
+            'Historically, the Code trial protected a repository-local reader set',
+            'Candidate-relative 模式仍只接受 verified tracked snapshot',
+            'Trusted frozen 模式只在 explicit SourceValidation',
+            '啟動前、啟動後及 execution 結束後'
         )) { if(-not $standard.Contains($required)){throw "Central validation ownership contract is missing '$required'."} }
         foreach($required in @('Windows、Linux、macOS 各一個 leg', '缺少 receipt', 'MUST NOT** 被宣稱為三平台 required 驗證')) {
             if(-not $standard.Contains($required)){throw "Standard diagnostic contract is missing '$required'."}

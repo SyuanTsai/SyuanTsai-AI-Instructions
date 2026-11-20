@@ -123,6 +123,134 @@ else { [void][IO.Directory]::CreateSymbolicLink($Target, $Target + '.moved') }
     }
 }
 
+Describe 'Standard core trusted frozen file boundary' {
+    BeforeAll {
+        $script:TrustedFileFixtureRoot = if ($TestDrive -is [IO.DirectoryInfo]) { $TestDrive.FullName } else { [string]$TestDrive }
+        if ($IsMacOS -and $script:TrustedFileFixtureRoot.StartsWith('/var/')) { $script:TrustedFileFixtureRoot = '/private' + $script:TrustedFileFixtureRoot }
+        . (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts/Invoke-StandardValidation.ps1') `
+            -CandidateRoot $script:TrustedFileFixtureRoot -AdapterPath 'unused' -ArtifactsRoot $script:TrustedFileFixtureRoot `
+            -SourceRepository 'https://example.test/trusted-file.git' -SourceRevision ('a'*40) -BaseRevision ('b'*40) -DefineFunctionsOnly
+        $script:TrustedFileHost = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
+        function New-TrustedFileFixture([string]$Name,[string]$Content='exit 0') {
+            $root=Join-Path $script:TrustedFileFixtureRoot $Name
+            $candidate=Join-Path $root 'candidate';$artifacts=Join-Path $root 'artifacts';$authority=Join-Path $root 'authority';$trusted=Join-Path $root 'trusted'
+            foreach($directory in @($candidate,$artifacts,$authority,$trusted)){[void][IO.Directory]::CreateDirectory($directory)}
+            $scriptPath=Join-Path $trusted 'repository-check.ps1'
+            [IO.File]::WriteAllText($scriptPath,$Content,[Text.UTF8Encoding]::new($false))
+            $hash=(Get-FileHash -LiteralPath $scriptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            [pscustomobject]@{Root=$root;Candidate=$candidate;Artifacts=$artifacts;Authority=$authority;Trusted=$trusted
+                Script=$scriptPath;Hash=$hash;Frozen=@([pscustomobject]@{path=$scriptPath;sha256=$hash})}
+        }
+        function Get-TrustedFileBinding($Fixture,[string]$Executable=$script:TrustedFileHost,[object[]]$Frozen=$Fixture.Frozen,
+            [string]$Trusted=$Fixture.Trusted,[string]$Candidate=$Fixture.Candidate,
+            [string]$Artifacts=$Fixture.Artifacts,[string]$Authority=$Fixture.Authority) {
+            New-StandardCoreTrustedFileBinding -FilePath $Fixture.Script -ExecutablePath $Executable -FrozenFiles $Frozen `
+                -TrustedToolRoot $Trusted -CandidateRoot $Candidate -ArtifactsRoot $Artifacts -AuthorityRoot $Authority -Context 'fixture'
+        }
+    }
+
+    # Scenario: A canonical regular script has one exact frozen path/hash binding outside all mutable roots.
+    # Purpose: Admit only the intended trusted pwsh -File source-validation contract.
+    It 'UnitT10_accepts_one_exact_trusted_frozen_file_binding' {
+        $fixture=New-TrustedFileFixture 'trusted-success'
+        $binding=Get-TrustedFileBinding $fixture
+        $binding.path | Should -Be $fixture.Script
+        $binding.sha256 | Should -Be $fixture.Hash
+    }
+
+    # Scenario: The script is absent from frozenFiles, has drifted, or is paired with a non-pwsh executable.
+    # Purpose: Fail closed before process creation when any trusted-file identity prerequisite is missing.
+    It 'UnitT15_rejects_missing_hash_drift_and_non_pwsh_bindings_<Case>' -TestCases @(
+        @{Case='missing';Frozen=@();Executable=$null},
+        @{Case='hash-drift';Frozen=@([pscustomobject]@{path='__PATH__';sha256=('0'*64)});Executable=$null},
+        @{Case='non-pwsh';Frozen=$null;Executable='tool.exe'}
+    ) {
+        param($Case,$Frozen,$Executable)
+        $fixture=New-TrustedFileFixture "trusted-$Case"
+        if($Case-ceq'hash-drift'){$Frozen[0].path=$fixture.Script}
+        if($null-eq$Frozen){$Frozen=$fixture.Frozen}
+        if([string]::IsNullOrEmpty([string]$Executable)){$Executable=$script:TrustedFileHost}
+        {Get-TrustedFileBinding $fixture -Executable $Executable -Frozen $Frozen}|Should -Throw
+    }
+
+    # Scenario: A frozen script is absolute and hash-correct but is outside TrustedToolRoot.
+    # Purpose: A frozenFiles entry alone must not admit an arbitrary external script.
+    It 'UnitT17_rejects_a_frozen_file_outside_the_trusted_tool_root' {
+        $fixture=New-TrustedFileFixture 'trusted-outside-root'
+        $otherTrustedRoot=Join-Path $fixture.Root 'other-trusted'
+        [void][IO.Directory]::CreateDirectory($otherTrustedRoot)
+        {Get-TrustedFileBinding $fixture -Trusted $otherTrustedRoot}|Should -Throw
+    }
+
+    # Scenario: The otherwise frozen trusted script is placed below one mutable or authority-owned root.
+    # Purpose: TrustedToolRoot membership must never override candidate, artifact, or authority exclusion.
+    It 'UnitT20_rejects_trusted_files_inside_the_<RootName>_root' -TestCases @(
+        @{RootName='candidate'},@{RootName='artifacts'},@{RootName='authority'}
+    ) {
+        param($RootName)
+        $fixture=New-TrustedFileFixture "trusted-root-$RootName"
+        $roots=@{candidate=$fixture.Candidate;artifacts=$fixture.Artifacts;authority=$fixture.Authority}
+        $roots[$RootName]=$fixture.Trusted
+        {Get-TrustedFileBinding $fixture -Candidate $roots.candidate -Artifacts $roots.artifacts -Authority $roots.authority}|Should -Throw
+    }
+
+    if(-not$IsWindows){
+        # Scenario: A trusted-file name is a symbolic link on a native Unix host.
+        # Purpose: Reject link traversal without registering a skipped cross-platform case.
+        It 'UnitT25_rejects_a_trusted_file_symbolic_link' {
+            $fixture=New-TrustedFileFixture 'trusted-symlink'
+            $target=Join-Path $fixture.Trusted 'target.ps1';[IO.File]::Move($fixture.Script,$target)
+            [void](New-Item -ItemType SymbolicLink -Path $fixture.Script -Target $target)
+            $hash=(Get-FileHash -LiteralPath $fixture.Script -Algorithm SHA256).Hash.ToLowerInvariant()
+            $fixture.Frozen=@([pscustomobject]@{path=$fixture.Script;sha256=$hash})
+            {Get-TrustedFileBinding $fixture}|Should -Throw
+        }
+    }
+
+    # Scenario: A second hard-link name aliases the frozen trusted script.
+    # Purpose: Enforce single-link identity on every native platform without adding a skip.
+    It 'UnitT30_rejects_a_trusted_file_hardlink' {
+        $fixture=New-TrustedFileFixture 'trusted-hardlink'
+        [void](New-Item -ItemType HardLink -Path (Join-Path $fixture.Trusted 'alias.ps1') -Target $fixture.Script)
+        {Get-TrustedFileBinding $fixture}|Should -Throw
+    }
+
+    # Scenario: pwsh starts one exact trusted frozen script and the bytes remain stable through exit.
+    # Purpose: Exercise the pre-start, post-start, and post-execution lease/hash checks on the owned process path.
+    It 'InterT40_runs_and_revalidates_the_trusted_file' {
+        $fixture=New-TrustedFileFixture 'trusted-process' "[Console]::Write('trusted'); exit 0"
+        $binding=Get-TrustedFileBinding $fixture
+        $result=Invoke-StandardValidationProcess -Command $script:TrustedFileHost `
+            -Arguments @('-NoProfile','-NonInteractive','-File',$fixture.Script) -WorkingDirectory $fixture.Root `
+            -Environment @{} -TimeoutSeconds 30 -TrustedFileBinding $binding
+        $result.status | Should -Be 'passed'
+        $result.stdout | Should -Be 'trusted'
+    }
+
+    # Scenario: The trusted script changes after admission but before process launch.
+    # Purpose: Revalidate the frozen hash at the process boundary rather than trusting the earlier adapter check.
+    It 'InterT42_fails_closed_on_trusted_file_pre_start_hash_drift' {
+        $fixture=New-TrustedFileFixture 'trusted-process-pre-drift'
+        $binding=Get-TrustedFileBinding $fixture
+        [IO.File]::AppendAllText($fixture.Script,'# drift',[Text.UTF8Encoding]::new($false))
+        $result=Invoke-StandardValidationProcess -Command $script:TrustedFileHost `
+            -Arguments @('-NoProfile','-NonInteractive','-File',$fixture.Script) -WorkingDirectory $fixture.Root `
+            -Environment @{} -TimeoutSeconds 30 -TrustedFileBinding $binding
+        $result.status | Should -Not -Be 'passed'
+    }
+
+    # Scenario: The trusted script attempts to change its own bytes after pwsh starts.
+    # Purpose: A write denial or the post-execution hash check must prevent a passing result on every platform.
+    It 'InterT45_fails_closed_on_trusted_file_post_start_hash_drift' {
+        $fixture=New-TrustedFileFixture 'trusted-process-drift' "[IO.File]::AppendAllText(`$PSCommandPath,'# drift'); exit 0"
+        $binding=Get-TrustedFileBinding $fixture
+        $result=Invoke-StandardValidationProcess -Command $script:TrustedFileHost `
+            -Arguments @('-NoProfile','-NonInteractive','-File',$fixture.Script) -WorkingDirectory $fixture.Root `
+            -Environment @{} -TimeoutSeconds 30 -TrustedFileBinding $binding
+        $result.status | Should -Not -Be 'passed'
+    }
+}
+
 Describe 'Validator shared process evidence' {
     BeforeAll {
         $TestDrive = if ($TestDrive -is [IO.DirectoryInfo]) { $TestDrive.FullName } else { [string]$TestDrive }
@@ -290,6 +418,36 @@ exit 0
         $result = Invoke-StandardValidationProcess -Command $child -Arguments @('space and & literal') -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 60
         $result.status | Should -Be 'passed'
         $result.stdout | Should -Be 'space and & literal'
+    }
+    # Scenario: A script mixes one positional value, a named value beginning with '-', and a switch.
+    # Purpose: Preserve native parameter semantics while keeping every caller token out of command text and wrapper environment variables.
+    It 'InterT81_binds_script_named_switch_and_positional_arguments_as_data' {
+        $child = Join-Path $TestDrive 'named-arguments.ps1'
+        [IO.File]::WriteAllText($child,@'
+[CmdletBinding(PositionalBinding=$false)]
+param(
+    [Parameter(Position=0)][string]$Position,
+    [Parameter(Mandatory=$true)][string]$Name,
+    [switch]$Enabled
+)
+[Console]::Write(([ordered]@{
+    position=$Position
+    name=$Name
+    enabled=[bool]$Enabled
+    wrapperCommand=[string]$env:STANDARD_VALIDATION_WRAPPER_COMMAND
+    wrapperArguments=[string]$env:STANDARD_VALIDATION_WRAPPER_ARGUMENTS
+}|ConvertTo-Json -Compress))
+'@,[Text.UTF8Encoding]::new($false))
+        $result = Invoke-StandardValidationProcess -Command $child `
+            -Arguments @('position-value','-Name','-leading-value','-Enabled') `
+            -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 60
+        $result.status | Should -Be 'passed'
+        $value=$result.stdout|ConvertFrom-Json
+        $value.position | Should -Be 'position-value'
+        $value.name | Should -Be '-leading-value'
+        $value.enabled | Should -BeTrue
+        $value.wrapperCommand | Should -BeNullOrEmpty
+        $value.wrapperArguments | Should -BeNullOrEmpty
     }
     # Scenario: A script invokes a failing native command, then returns without exit.
     # Purpose: Preserve the bootstrap's native exit code instead of reporting a successful pwsh -File invocation.

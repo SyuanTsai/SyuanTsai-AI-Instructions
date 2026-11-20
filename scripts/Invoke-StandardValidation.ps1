@@ -3139,6 +3139,97 @@ function Assert-StandardValidationProcessOwnership {
     if ($Passed -and (-not (Test-StandardValidationCleanupReceipt $Ownership.cleanup) -or $Ownership.cleanup.Isolation -cne $Ownership.isolation)) { throw 'FAILED|Process cleanup does not support PASS.' }
 }
 
+function ConvertTo-StandardValidationScriptArgumentBinding {
+    param(
+        [Parameter(Mandatory = $true)][string] $CommandPath,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $Arguments
+    )
+
+    $commands = @(Get-Command -Name $CommandPath -CommandType ExternalScript -ErrorAction Stop)
+    if ($commands.Count -ne 1) { throw 'Script command metadata did not resolve to exactly one external script.' }
+    $command = $commands[0]
+    $parameters = $command.Parameters
+    if ($null -eq $parameters -or $parameters.Count -eq 0) {
+        return [pscustomobject][ordered]@{ named = @(); positional = @($Arguments) }
+    }
+
+    $names = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($parameter in $parameters.Values) {
+        if (-not $names.ContainsKey([string]$parameter.Name)) { $names.Add([string]$parameter.Name, [string]$parameter.Name) }
+        foreach ($alias in @($parameter.Aliases)) {
+            if (-not $names.ContainsKey([string]$alias)) { $names.Add([string]$alias, [string]$parameter.Name) }
+        }
+    }
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $named = New-Object 'System.Collections.Generic.List[object]'
+    $positional = New-Object 'System.Collections.Generic.List[string]'
+    for ($index = 0; $index -lt $Arguments.Count; $index++) {
+        $token = [string]$Arguments[$index]
+        $parameterMatch = [regex]::Match($token, '^--?(?<name>[^:=]+)(?::(?<value>.*))?$')
+        if (-not $parameterMatch.Success) {
+            $positional.Add($token)
+            continue
+        }
+
+        $requestedName = [string]$parameterMatch.Groups['name'].Value
+        $canonicalName = $null
+        if ($names.ContainsKey($requestedName)) { $canonicalName = [string]$names[$requestedName] }
+        else {
+            $matches = @($names.Keys | Where-Object { $_.StartsWith($requestedName, [StringComparison]::OrdinalIgnoreCase) } |
+                ForEach-Object { [string]$names[$_] } | Select-Object -Unique)
+            if ($matches.Count -eq 1) { $canonicalName = [string]$matches[0] }
+            elseif ($matches.Count -gt 1) { throw "Script parameter '-$requestedName' is ambiguous." }
+            else { throw "Unknown script parameter: -$requestedName" }
+        }
+        if (-not $seen.Add($canonicalName)) { throw "Script parameter '-$canonicalName' was specified more than once." }
+
+        $metadata = $parameters[$canonicalName]
+        $isSwitch = $metadata.ParameterType -eq [Management.Automation.SwitchParameter]
+        $hasInlineValue = $parameterMatch.Groups['value'].Success
+        if ($isSwitch) {
+            $value = $true
+            if ($hasInlineValue) {
+                $switchText = [string]$parameterMatch.Groups['value'].Value
+                if ($switchText -ceq '$true' -or $switchText -ceq 'true') { $value = $true }
+                elseif ($switchText -ceq '$false' -or $switchText -ceq 'false') { $value = $false }
+                else { throw "Script switch '-$canonicalName' has an invalid Boolean value." }
+            }
+            $named.Add([pscustomobject][ordered]@{ name = $canonicalName; switch = $true; value = [bool]$value })
+            continue
+        }
+
+        if ($hasInlineValue) { $value = [string]$parameterMatch.Groups['value'].Value }
+        else {
+            $index++
+            if ($index -ge $Arguments.Count) { throw "Script parameter '-$canonicalName' is missing a value." }
+            $value = [string]$Arguments[$index]
+        }
+        $named.Add([pscustomobject][ordered]@{ name = $canonicalName; switch = $false; value = $value })
+    }
+    return [pscustomobject][ordered]@{ named = @($named.ToArray()); positional = @($positional.ToArray()) }
+}
+
+function Get-StandardValidationScriptDispatchText {
+    return @'
+[CmdletBinding(PositionalBinding=$false)]
+param([Parameter(Mandatory=$true)][string]$BindingPath)
+$ErrorActionPreference='Stop'
+$bytes=[IO.File]::ReadAllBytes($BindingPath)
+$binding=[Text.UTF8Encoding]::new($false,$true).GetString($bytes)|ConvertFrom-Json -Depth 10 -ErrorAction Stop
+$names=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+$named=@{}
+foreach($entry in @($binding.named)){
+    if($null-eq$entry-or[string]::IsNullOrWhiteSpace([string]$entry.name)-or-not$names.Add([string]$entry.name)){throw 'Script dispatch binding contains an invalid or duplicate name.'}
+    if([bool]$entry.switch){$named[[string]$entry.name]=[Management.Automation.SwitchParameter]::new([bool]$entry.value)}
+    else{$named[[string]$entry.name]=[string]$entry.value}
+}
+$positionals=@($binding.positional|ForEach-Object{[string]$_})
+& ([string]$binding.commandPath) @named @positionals
+if($null-ne$LASTEXITCODE){exit ([int]$LASTEXITCODE)}
+exit 0
+'@
+}
+
 function Invoke-StandardValidationProcess {
     param(
         [Parameter(Mandatory = $true)][string] $Command,
@@ -3149,6 +3240,7 @@ function Invoke-StandardValidationProcess {
         [string] $CancellationPath,
         [switch] $CoreLifecycleOnly,
         [switch] $EmitSupervisorProgress,
+        $TrustedFileBinding,
         [ValidateRange(1, 30)][int] $SupervisorProgressIntervalSeconds = 30
     )
     $timing = New-StandardValidationPhase -Stage $script:StandardValidationTimingStage -Phase 'child-process' -Silent:(-not $script:StandardValidationTimingEnabled)
@@ -3160,6 +3252,8 @@ function Invoke-StandardValidationProcess {
     $cleanedUp = $true; $captureRoot = $null; $captureDirectory = $null; $binding = $null
     $originalCommandPath = $null; $resolvedCommandPath = $null
     $nativeStartupFailure = $null; $outputTruncated = $false
+    $dispatchLease = $null; $dispatchBindingLease = $null; $trustedFileLease = $null
+    $trustedFileExpected = $null; $trustedFilePath = $null
     $limits = @('same-account-adversarial-writer-out-of-scope','no-filesystem-isolation')
     $guards = [Collections.Generic.List[IDisposable]]::new()
     $phase = 'preflight'
@@ -3184,6 +3278,30 @@ function Invoke-StandardValidationProcess {
             $guards.Add($executable)
             $commandLease = $executable
             $executableRequestedPath = $originalCommandPath
+            if ($null -ne $TrustedFileBinding) {
+                Assert-StandardValidationExactPropertySet -Object $TrustedFileBinding -Expected @('path','sha256') -Context 'trusted -File process binding'
+                $trustedFilePath = Assert-StandardValidationCanonicalRootPath -Path ([string]$TrustedFileBinding.path) -Context 'trusted -File process binding'
+                $trustedFileExpected = [string]$TrustedFileBinding.sha256
+                Assert-StandardValidationSha256 -Value $trustedFileExpected -Context 'trusted -File process binding'
+                $fileIndexes = @(for ($argumentIndex = 0; $argumentIndex -lt $Arguments.Count; $argumentIndex++) {
+                    if ([string]::Equals([string]$Arguments[$argumentIndex], '-File', [StringComparison]::OrdinalIgnoreCase)) { $argumentIndex }
+                })
+                if ($fileIndexes.Count -ne 1 -or $fileIndexes[0] + 1 -ge $Arguments.Count -or
+                    -not [string]::Equals([string]$Arguments[$fileIndexes[0] + 1], $trustedFilePath, (Get-StandardValidationPathComparison -Paths @($trustedFilePath)))) {
+                    throw 'Trusted -File process binding does not match one exact -File argument.'
+                }
+                $expectedHostName = if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' }
+                if (-not [string]::Equals([IO.Path]::GetFileName($commandPath), $expectedHostName, [StringComparison]::OrdinalIgnoreCase)) {
+                    throw 'Trusted -File process binding requires the pwsh executable.'
+                }
+                $trustedFileParent = Open-StandardValidationDirectory ([IO.Path]::GetDirectoryName($trustedFilePath)); $guards.Add($trustedFileParent)
+                $trustedFileLease = Open-PlatformFile -ParentLease $trustedFileParent -Leaf ([IO.Path]::GetFileName($trustedFilePath)) -Access Read -CreateMode OpenExisting
+                $guards.Add($trustedFileLease)
+                Assert-PlatformFileIdentity -Lease $trustedFileLease -Expected $trustedFileLease.Observation -SingleLink -VerifyPath | Out-Null
+                if ((Get-StandardValidationFileSha256 -Path $trustedFilePath -Context 'trusted -File before launch') -cne $trustedFileExpected) {
+                    throw 'Trusted -File changed before launch.'
+                }
+            }
             $phase = 'reserve-capture'
             $tempRoot = if ($IsMacOS) { '/private/tmp' } else { [IO.Path]::GetTempPath() }
             $captureRoot = Join-Path $tempRoot ('standard-process-' + [guid]::NewGuid().ToString('N'))
@@ -3201,12 +3319,21 @@ function Invoke-StandardValidationProcess {
                 $hostLease = Open-PlatformFile -ParentLease $hostParent -Leaf ([IO.Path]::GetFileName($hostPath)) -Access Read -CreateMode OpenExisting
                 $guards.Add($hostLease)
                 $executable = $hostLease
-                $childEnvironment['STANDARD_VALIDATION_WRAPPER_COMMAND'] = [string]$commandPath
-                $childEnvironment['STANDARD_VALIDATION_WRAPPER_ARGUMENTS'] = [string](ConvertTo-Json -InputObject ([string[]]$Arguments) -Compress)
-                # Fixed code, arguments passed as data. Restore the previous
-                # bootstrap's Stop preference and explicit native exit status.
-                $dispatch = '$ErrorActionPreference="Stop"; $items=@(ConvertFrom-Json -InputObject $env:STANDARD_VALIDATION_WRAPPER_ARGUMENTS); & $env:STANDARD_VALIDATION_WRAPPER_COMMAND @items; if($null -ne $LASTEXITCODE){exit ([int]$LASTEXITCODE)}; exit 0'
-                $launchArguments = @('-NoProfile','-NonInteractive','-Command',$dispatch)
+                $scriptBinding = if ($extension -eq '.ps1') {
+                    ConvertTo-StandardValidationScriptArgumentBinding -CommandPath $commandPath -Arguments ([string[]]$Arguments)
+                } else { [pscustomobject][ordered]@{ named = @(); positional = @($Arguments) } }
+                $scriptBinding | Add-Member -NotePropertyName commandPath -NotePropertyValue ([string]$commandPath)
+                $dispatchBytes = [Text.UTF8Encoding]::new($false).GetBytes((Get-StandardValidationScriptDispatchText))
+                $bindingBytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-Json -InputObject $scriptBinding -Depth 10 -Compress))
+                $dispatchLease = Open-PlatformFile -ParentLease $captureDirectory -Leaf 'script-dispatch.ps1' -Access ReadWrite -CreateMode CreateNew
+                $dispatchLease.WriteNewBytes($dispatchBytes)
+                $dispatchBindingLease = Open-PlatformFile -ParentLease $captureDirectory -Leaf 'script-dispatch.json' -Access ReadWrite -CreateMode CreateNew
+                $dispatchBindingLease.WriteNewBytes($bindingBytes)
+                $dispatchPath = Join-Path $captureRoot 'script-dispatch.ps1'
+                $dispatchBindingPath = Join-Path $captureRoot 'script-dispatch.json'
+                Assert-PlatformFileIdentity -Lease $dispatchLease -Expected $dispatchLease.Observation -SingleLink -VerifyPath | Out-Null
+                Assert-PlatformFileIdentity -Lease $dispatchBindingLease -Expected $dispatchBindingLease.Observation -SingleLink -VerifyPath | Out-Null
+                $launchArguments = @('-NoProfile','-NonInteractive','-File',$dispatchPath,'-BindingPath',$dispatchBindingPath)
                 $commandPath = $hostPath
             }
             if ($IsWindows -and [IO.Path]::GetFileName($commandPath) -in @('pwsh.exe','powershell.exe')) {
@@ -3224,6 +3351,17 @@ function Invoke-StandardValidationProcess {
                 -WorkingDirectoryLease $directory -Deadline $deadline -StdoutPath $stdoutPath -StderrPath $stderrPath `
                 -OutputLimitCharacters $script:StandardValidationChildOutputQuotaCharacters
             $processId = $lease.Pid; $identity = $lease.StartIdentity; $isolation = $lease.Isolation
+            if ($null -ne $dispatchLease) {
+                Assert-PlatformFileIdentity -Lease $dispatchLease -Expected $dispatchLease.Observation -SingleLink -VerifyPath | Out-Null
+                Assert-PlatformFileIdentity -Lease $dispatchBindingLease -Expected $dispatchBindingLease.Observation -SingleLink -VerifyPath | Out-Null
+            }
+            if ($null -ne $trustedFileLease) {
+                $phase = 'verify-trusted-file-after-start'
+                Assert-PlatformFileIdentity -Lease $trustedFileLease -Expected $trustedFileLease.Observation -SingleLink -VerifyPath | Out-Null
+                if ((Get-StandardValidationFileSha256 -Path $trustedFilePath -Context 'trusted -File after launch') -cne $trustedFileExpected) {
+                    throw 'Trusted -File changed after launch.'
+                }
+            }
             $limits += @($lease.Limitations)
             $timer = [Diagnostics.Stopwatch]::StartNew(); $nextProgress = 0
             while (-not $lease.HasExited -and $null -eq $lease.Cleanup) {
@@ -3235,6 +3373,13 @@ function Invoke-StandardValidationProcess {
                     $nextProgress = $timer.Elapsed.TotalSeconds + $SupervisorProgressIntervalSeconds
                 }
                 [void]$lease.WaitForExit([TimeSpan]::FromMilliseconds(50))
+            }
+            if ($null -ne $trustedFileLease) {
+                $phase = 'verify-trusted-file-after-exit'
+                Assert-PlatformFileIdentity -Lease $trustedFileLease -Expected $trustedFileLease.Observation -SingleLink -VerifyPath | Out-Null
+                if ((Get-StandardValidationFileSha256 -Path $trustedFilePath -Context 'trusted -File after execution') -cne $trustedFileExpected) {
+                    throw 'Trusted -File changed after execution.'
+                }
             }
             $naturalExit = $lease.HasExited -and [string]::IsNullOrEmpty($lease.TerminationReason) -and -not $cancelled
         }
@@ -3263,17 +3408,25 @@ function Invoke-StandardValidationProcess {
                 try { $lease.Dispose() } catch { $status = 'cleanup-failed'; $cleanedUp = $false; $stderr += ' dispose-process: ' + $_.Exception.Message }
             }
         }
+        foreach ($temporaryLease in @($dispatchBindingLease,$dispatchLease)) {
+            if ($null -ne $temporaryLease) {
+                try { $temporaryLease.Dispose() } catch { $status = 'cleanup-failed'; $cleanedUp = $false; $stderr += ' dispatch-input: ' + $_.Exception.Message }
+            }
+        }
         if ($null -ne $captureDirectory) {
             try {
-                foreach ($name in @('stdout','stderr')) {
-                    $path = Join-Path $captureRoot ($name + '.txt')
+                foreach ($name in @('stdout','stderr','script-dispatch','script-dispatch.json')) {
+                    $leaf = switch ($name) { 'stdout' { 'stdout.txt' } 'stderr' { 'stderr.txt' } 'script-dispatch' { 'script-dispatch.ps1' } default { 'script-dispatch.json' } }
+                    $path = Join-Path $captureRoot $leaf
                     if (-not [IO.File]::Exists($path)) { continue }
-                    $file = Open-PlatformFile -ParentLease $captureDirectory -Leaf ($name + '.txt') -Access Read -CreateMode OpenExisting
-                    try {
-                        $text = [Text.Encoding]::UTF8.GetString($file.ReadAllBytes(4 * $script:StandardValidationChildOutputQuotaCharacters))
-                        if ($name -eq 'stderr' -and ($stderr.Length + $text.Length + 2) -gt $script:StandardValidationChildOutputQuotaCharacters) { $outputTruncated=$true }
-                        if ($name -eq 'stdout') { $stdout = $text } else { $stderr = Merge-StandardValidationProcessStderr -Existing $stderr -Captured $text -Quota $script:StandardValidationChildOutputQuotaCharacters }
-                    } finally { $file.Dispose() }
+                    if ($name -in @('stdout','stderr')) {
+                        $file = Open-PlatformFile -ParentLease $captureDirectory -Leaf $leaf -Access Read -CreateMode OpenExisting
+                        try {
+                            $text = [Text.Encoding]::UTF8.GetString($file.ReadAllBytes(4 * $script:StandardValidationChildOutputQuotaCharacters))
+                            if ($name -eq 'stderr' -and ($stderr.Length + $text.Length + 2) -gt $script:StandardValidationChildOutputQuotaCharacters) { $outputTruncated=$true }
+                            if ($name -eq 'stdout') { $stdout = $text } else { $stderr = Merge-StandardValidationProcessStderr -Existing $stderr -Captured $text -Quota $script:StandardValidationChildOutputQuotaCharacters }
+                        } finally { $file.Dispose() }
+                    }
                     # P7 owns the shared removal primitive; A1 permits this exact-name
                     # deletion after P2 identity verification and lease closure.
                     [IO.File]::Delete($path)
@@ -8208,6 +8361,68 @@ function Assert-StandardCoreFrozenFiles {
     }
 }
 
+function New-StandardCoreTrustedFileBinding {
+    param(
+        [Parameter(Mandatory = $true)][string] $FilePath,
+        [Parameter(Mandatory = $true)][string] $ExecutablePath,
+        [Parameter(Mandatory = $true)][object[]] $FrozenFiles,
+        [Parameter(Mandatory = $true)][string] $TrustedToolRoot,
+        [Parameter(Mandatory = $true)][string] $CandidateRoot,
+        [Parameter(Mandatory = $true)][string] $ArtifactsRoot,
+        [Parameter(Mandatory = $true)][string] $AuthorityRoot,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $expectedHostName = if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' }
+    if (-not [string]::Equals([IO.Path]::GetFileName($ExecutablePath), $expectedHostName, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "INVALID|$Context trusted -File requires pwsh as the core check executable."
+    }
+    if (-not [IO.Path]::IsPathRooted($FilePath)) { throw "INVALID|$Context trusted -File path must be absolute." }
+    $canonicalPath = Assert-StandardValidationCanonicalRootPath -Path $FilePath -Context "$Context trusted -File"
+    $comparison = Get-StandardValidationPathComparison -Paths @($FilePath, $canonicalPath)
+    if (-not [string]::Equals($FilePath, $canonicalPath, $comparison)) {
+        throw "INVALID|$Context trusted -File path must already be canonical."
+    }
+    Assert-StandardValidationRegularFile -Path $canonicalPath -Context "$Context trusted -File"
+    if (-not (Test-StandardValidationPathWithin -Path $canonicalPath -Root $TrustedToolRoot -IncludeRoot)) {
+        throw "INVALID|$Context trusted -File must be within TrustedToolRoot."
+    }
+    foreach ($rootBinding in @(
+        @{ Root = $CandidateRoot; Name = 'candidate' },
+        @{ Root = $ArtifactsRoot; Name = 'artifacts' },
+        @{ Root = $AuthorityRoot; Name = 'authority' }
+    )) {
+        if (Test-StandardValidationPathWithin -Path $canonicalPath -Root ([string]$rootBinding.Root) -IncludeRoot) {
+            throw "INVALID|$Context trusted -File must be outside the $($rootBinding.Name) root."
+        }
+    }
+
+    $matches = @($FrozenFiles | Where-Object {
+        if ($null -eq $_ -or $_.path -isnot [string] -or $_.sha256 -isnot [string] -or
+            -not [IO.Path]::IsPathRooted([string]$_.path)) { return $false }
+        $frozenPath = Get-StandardValidationFullPath -Path ([string]$_.path) -Context "$Context frozen file"
+        [string]::Equals($frozenPath, $canonicalPath, $comparison)
+    })
+    if ($matches.Count -ne 1) { throw "INVALID|$Context trusted -File must have one exact sourceValidation.frozenFiles path binding." }
+    $expectedSha256 = [string]$matches[0].sha256
+    Assert-StandardValidationSha256 -Value $expectedSha256 -Context "$Context trusted -File frozen hash"
+    if ((Get-StandardValidationFileSha256 -Path $canonicalPath -Context "$Context trusted -File") -cne $expectedSha256) {
+        throw "BLOCKED|$Context trusted -File hash differs from sourceValidation.frozenFiles."
+    }
+
+    $parent = Open-StandardValidationDirectory ([IO.Path]::GetDirectoryName($canonicalPath))
+    try {
+        $file = Open-PlatformFile -ParentLease $parent -Leaf ([IO.Path]::GetFileName($canonicalPath)) -Access Read -CreateMode OpenExisting
+        try { Assert-PlatformFileIdentity -Lease $file -Expected $file.Observation -SingleLink -VerifyPath | Out-Null }
+        finally { $file.Dispose() }
+    }
+    finally { $parent.Dispose() }
+    if ((Get-StandardValidationFileSha256 -Path $canonicalPath -Context "$Context trusted -File identity revalidation") -cne $expectedSha256) {
+        throw "BLOCKED|$Context trusted -File changed during identity validation."
+    }
+    return [pscustomobject][ordered]@{ path = $canonicalPath; sha256 = $expectedSha256 }
+}
+
 function Get-StandardCoreSourceToolGroups {
     param([Parameter(Mandatory = $true)][hashtable] $Receipts, [Parameter(Mandatory = $true)][object[]] $FrozenFiles)
     $names = @($Receipts.Keys | Sort-Object -CaseSensitive)
@@ -9175,12 +9390,31 @@ function Invoke-StandardCoreValidationRun {
             if ($check.arguments -isnot [array]) { throw "INVALID|Core check '$($check.id)' arguments must be a string array." }
             $arguments = @()
             $requireNextCandidateFile = $false
+            $trustedFileBinding = $null
             foreach ($argument in @($check.arguments)) {
                 if ($argument -isnot [string]) { throw "INVALID|Core check '$($check.id)' arguments must contain only strings." }
                 $argumentText = [string]$argument
                 if ($requireNextCandidateFile) {
-                    Assert-StandardValidationSafeRelativePath -Value $argumentText -Context "core check '$($check.id)' candidate file argument"
-                    if (@($candidateSnapshot.inventory | Where-Object { [string]$_.path -ceq $argumentText }).Count -ne 1) { throw "INVALID|Core check '$($check.id)' file argument is not part of the verified tracked snapshot: $argumentText" }
+                    if ([IO.Path]::IsPathRooted($argumentText) -or $argumentText -match '^[A-Za-z]:') {
+                        if (-not $SourceValidation -or $null -eq $adapterValue.sourceValidation -or
+                            $adapterValue.sourceValidation.frozenFiles -isnot [array]) {
+                            throw "INVALID|Core check '$($check.id)' trusted -File requires sourceValidation.frozenFiles."
+                        }
+                        if ($null -ne $trustedFileBinding) { throw "INVALID|Core check '$($check.id)' may declare only one trusted -File." }
+                        $trustedFileBinding = New-StandardCoreTrustedFileBinding `
+                            -FilePath $argumentText `
+                            -ExecutablePath $executablePath `
+                            -FrozenFiles @($adapterValue.sourceValidation.frozenFiles) `
+                            -TrustedToolRoot $trustedRootFull `
+                            -CandidateRoot $candidateRootFull `
+                            -ArtifactsRoot $artifactRootFull `
+                            -AuthorityRoot $authorityRoot `
+                            -Context "Core check '$($check.id)'"
+                    }
+                    else {
+                        Assert-StandardValidationSafeRelativePath -Value $argumentText -Context "core check '$($check.id)' candidate file argument"
+                        if (@($candidateSnapshot.inventory | Where-Object { [string]$_.path -ceq $argumentText }).Count -ne 1) { throw "INVALID|Core check '$($check.id)' file argument is not part of the verified tracked snapshot: $argumentText" }
+                    }
                     $requireNextCandidateFile = $false
                 }
                 elseif ($argumentText -match '^(?i)-{1,2}(?:command|encodedcommand|e|c)(?:$|:|=)') {
@@ -9199,6 +9433,7 @@ function Invoke-StandardCoreValidationRun {
             if ($requireNextCandidateFile) { throw "INVALID|Core check '$($check.id)' -File is missing its candidate-relative tracked file." }
             $check | Add-Member -NotePropertyName _resolvedExecutable -NotePropertyValue $executablePath -Force
             $check | Add-Member -NotePropertyName _arguments -NotePropertyValue ([string[]]$arguments) -Force
+            $check | Add-Member -NotePropertyName _trustedFileBinding -NotePropertyValue $trustedFileBinding -Force
         }
         $adapterEvidence = [pscustomobject][ordered]@{ schemaVersion = 2; identity = [string]$adapterValue.adapter; sha256 = $adapterSha256 }
 
@@ -9231,15 +9466,18 @@ function Invoke-StandardCoreValidationRun {
             $stdoutPath = Join-Path $rawRoot (('{0:D3}-{1}.stdout.txt' -f ($checkIndex + 1), [string]$check.id))
             $stderrPath = Join-Path $rawRoot (('{0:D3}-{1}.stderr.txt' -f ($checkIndex + 1), [string]$check.id))
             $argumentsSha256 = Get-StandardValidationTextSha256 -Value (ConvertTo-Json -InputObject ([string[]]$check._arguments) -Compress)
-            $processResult = Invoke-StandardValidationProcess `
-                -Command ([string]$check._resolvedExecutable) `
-                -Arguments ([string[]]$check._arguments) `
-                -WorkingDirectory $snapshotRoot `
-                -Environment @{ STANDARD_VALIDATION_CORE_RUN_ID = $runId; STANDARD_VALIDATION_CORE_CHECK_ID = [string]$check.id; STANDARD_VALIDATION_CORE_SKILLS = ($skillSet.ids -join ';') } `
-                -TimeoutSeconds $TimeoutSeconds `
-                -CancellationPath $CancellationPath `
-                -CoreLifecycleOnly `
-                -EmitSupervisorProgress:([string]$check.kind -ceq 'pester')
+            $processArguments = @{
+                Command = [string]$check._resolvedExecutable
+                Arguments = [string[]]$check._arguments
+                WorkingDirectory = $snapshotRoot
+                Environment = @{ STANDARD_VALIDATION_CORE_RUN_ID = $runId; STANDARD_VALIDATION_CORE_CHECK_ID = [string]$check.id; STANDARD_VALIDATION_CORE_SKILLS = ($skillSet.ids -join ';') }
+                TimeoutSeconds = $TimeoutSeconds
+                CancellationPath = $CancellationPath
+                CoreLifecycleOnly = $true
+                EmitSupervisorProgress = ([string]$check.kind -ceq 'pester')
+            }
+            if ($null -ne $check._trustedFileBinding) { $processArguments.TrustedFileBinding = $check._trustedFileBinding }
+            $processResult = Invoke-StandardValidationProcess @processArguments
             $stdoutSha256 = Write-StandardCoreCapturedText -Path $stdoutPath -Value ([string]$processResult.stdout)
             $stderrSha256 = Write-StandardCoreCapturedText -Path $stderrPath -Value ([string]$processResult.stderr)
             $testCounts = $null
@@ -9301,6 +9539,17 @@ function Invoke-StandardCoreValidationRun {
             }
             if ((Get-StandardValidationFileSha256 -Path ([string]$check._resolvedExecutable) -Context "core check '$($check.id)' executable revalidation") -cne [string]$check.executableSha256) {
                 throw "BLOCKED|Core check '$($check.id)' executable changed while a core check ran."
+            }
+            if ($null -ne $check._trustedFileBinding) {
+                [void](New-StandardCoreTrustedFileBinding `
+                    -FilePath ([string]$check._trustedFileBinding.path) `
+                    -ExecutablePath ([string]$check._resolvedExecutable) `
+                    -FrozenFiles @($adapterValue.sourceValidation.frozenFiles) `
+                    -TrustedToolRoot $trustedRootFull `
+                    -CandidateRoot $candidateRootFull `
+                    -ArtifactsRoot $artifactRootFull `
+                    -AuthorityRoot $authorityRoot `
+                    -Context "Core check '$($check.id)' post-execution")
             }
         }
         if ($SourceValidation) {
