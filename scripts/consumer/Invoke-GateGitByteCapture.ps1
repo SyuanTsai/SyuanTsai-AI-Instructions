@@ -22,6 +22,7 @@ try{
     $start.UseShellExecute=$false;$start.CreateNoWindow=$true
     $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
     foreach($argument in $arguments){[void]$start.ArgumentList.Add([string]$argument)}
+    foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){[void]$start.Environment.Remove($name)}
     $process=[Diagnostics.Process]::new();$process.StartInfo=$start
     $output=[IO.File]::Open($OutputPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
     [void]$process.Start()

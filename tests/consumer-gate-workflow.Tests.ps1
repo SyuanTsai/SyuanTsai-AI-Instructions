@@ -196,9 +196,9 @@ Describe 'Consumer gate workflow templates' {
         }
     }
 
-    # Scenario: Workflow job deadlines are projected from the authority-owned deadline budget.
-    # Purpose: Inner prepare, validate, finalize, setup, and evidence work cannot be cut off by a shorter outer job deadline.
-    It 'UnitT17_projects_one_deadline_budget_into_every_gate_leg' {
+    # Scenario: Workflow job deadlines are projected from explicit prepare, validate, and finalize phase budgets.
+    # Purpose: Every independently launched phase receives its own Git reserve and their sum remains below the outer job deadline.
+    It 'UnitT17_projects_phase_deadline_budgets_into_every_gate_leg' {
         $jobTimeout=[string]$script:DeadlineBudget.jobTimeoutMinutes
         $script:FormalYaml.jobs.gate.properties.'timeout-minutes'|Should BeExactly $jobTimeout
         $script:TransitionYaml.jobs.gate.properties.'timeout-minutes'|Should BeExactly $jobTimeout
@@ -206,6 +206,23 @@ Describe 'Consumer gate workflow templates' {
         $probeYaml.jobs.leg.properties.'timeout-minutes'|Should BeExactly $jobTimeout
         $script:DeadlineBudget.acquisitionRequestDefaultSeconds|Should Be 100
         $script:DeadlineBudget.acquisitionRequestSeconds|Should Be 600
+        $prepare=$script:DeadlineBudget.phaseBudgets.prepare
+        $validate=$script:DeadlineBudget.phaseBudgets.validate
+        $finalize=$script:DeadlineBudget.phaseBudgets.finalize
+        $prepare.httpAcquisitionSeconds|Should Be 1800
+        $prepare.resolverSeconds|Should Be 1440
+        $prepare.validatorSeconds|Should Be 0
+        $prepare.gitReserveSeconds|Should Be 600
+        $validate.httpAcquisitionSeconds|Should Be 0
+        $validate.resolverSeconds|Should Be 0
+        $validate.validatorSeconds|Should Be 1920
+        $validate.gitReserveSeconds|Should Be 600
+        $finalize.httpAcquisitionSeconds|Should Be 0
+        $finalize.resolverSeconds|Should Be 0
+        $finalize.validatorSeconds|Should Be 0
+        $finalize.gitReserveSeconds|Should Be 600
+        $script:DeadlineBudget.innerTotalSeconds|Should Be `
+            ($prepare.totalSeconds+$validate.totalSeconds+$finalize.totalSeconds+$script:DeadlineBudget.workflowSetupSeconds)
         ($script:DeadlineBudget.innerTotalSeconds+$script:DeadlineBudget.evidenceBufferSeconds-lt
             $script:DeadlineBudget.jobTimeoutMinutes*60)|Should Be $true
         ($script:DeadlineBudget.jobTimeoutMinutes*60-$script:DeadlineBudget.innerTotalSeconds-ge

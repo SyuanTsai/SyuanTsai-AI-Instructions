@@ -36,14 +36,14 @@ function Get-GateDeadlineBudget {
         validatorSeconds=1800
         validatorProcessGraceSeconds=120
         gitCommandSeconds=120
-        gitReserveSeconds=600
+        phaseBudgets=[pscustomobject][ordered]@{prepare=[pscustomobject][ordered]@{httpAcquisitionSeconds=1800;resolverSeconds=1440;validatorSeconds=0;gitReserveSeconds=600;totalSeconds=3840};validate=[pscustomobject][ordered]@{httpAcquisitionSeconds=0;resolverSeconds=0;validatorSeconds=1920;gitReserveSeconds=600;totalSeconds=2520};finalize=[pscustomobject][ordered]@{httpAcquisitionSeconds=0;resolverSeconds=0;validatorSeconds=0;gitReserveSeconds=600;totalSeconds=600};aggregate=[pscustomobject][ordered]@{httpAcquisitionSeconds=0;resolverSeconds=0;validatorSeconds=0;gitReserveSeconds=0;totalSeconds=0}}
         workflowSetupSeconds=300
         evidenceBufferSeconds=600
-        jobTimeoutMinutes=120
+        jobTimeoutMinutes=140
     }
-    $budget.innerTotalSeconds=($budget.acquisitionRequestSeconds*$budget.acquisitionRequestCount)+
-        (($budget.resolverAcquisitionSeconds+$budget.resolverProcessGraceSeconds)*$budget.resolverInvocationCount)+
-        $budget.validatorSeconds+$budget.validatorProcessGraceSeconds+$budget.gitReserveSeconds+$budget.workflowSetupSeconds
+    $budget.innerTotalSeconds=$budget.phaseBudgets.prepare.totalSeconds+
+        $budget.phaseBudgets.validate.totalSeconds+$budget.phaseBudgets.finalize.totalSeconds+
+        $budget.workflowSetupSeconds
     [pscustomobject]$budget
 }
 
@@ -642,13 +642,13 @@ function New-GateGitHooksDirectory(
     $item.FullName
 }
 
-function Initialize-GateGitHooks([string]$WorkRoot,[string]$AuthorityRoot=([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..')))) {
+function Initialize-GateGitHooks([string]$WorkRoot,[string]$AuthorityRoot=([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))),[ValidateSet('prepare','validate','finalize','aggregate')][string]$Phase='prepare') {
     if ($null -ne $script:GateGitHooksPath) { Throw-GateResult INVALID 'Git hooks isolation was initialized more than once.' }
     $script:GateGitHooksPath = New-GateGitHooksDirectory $WorkRoot
     $captureName='git-process-capture-'+[guid]::NewGuid().ToString('N')
     $script:GateGitCaptureRoot=Join-Path $WorkRoot $captureName
     [void][IO.Directory]::CreateDirectory($script:GateGitCaptureRoot)
-    $script:GateGitRemainingMilliseconds=[long](Get-GateDeadlineBudget).gitReserveSeconds*1000
+    $script:GateGitRemainingMilliseconds=[long](Get-GateDeadlineBudget).phaseBudgets.$Phase.gitReserveSeconds*1000
     [void](Import-GatePlatformRuntime $AuthorityRoot)
 }
 
@@ -719,7 +719,7 @@ function Invoke-GateGit([string]$Root,[string[]]$Arguments,[int[]]$Allowed=@(0))
     $exit = $run.ExitCode
     if ($exit -notin $Allowed) { Throw-GateResult INVALID "git failed ($exit): $($output -join ' ')" }
     [pscustomobject]@{ ExitCode=$exit
-     Output=$output }
+     Output=[string[]]@($output) }
 }
 
 function Test-GateSafeRelativePath([string]$Path,[string[]]$Roots,[switch]$DirectoryPrefix) {
@@ -1009,7 +1009,7 @@ function Invoke-GateManifestClosureCheck([string]$AuthorityRoot,[string]$BaseRoo
         Stage=$stage
         Manifest=(Join-Path $AuthorityRoot 'consumer/legacy-migration.json')
         RepositoryId=[string]$Entry.id
-        AuthorityRoot=$AuthorityRoot}
+        AuthorityRoot=$AuthorityRoot;GitByteInvoker={param([string]$RepositoryRoot,[string[]]$Arguments,[int[]]$AllowedExitCodes) Invoke-GateGitBytes $RepositoryRoot $Arguments}.GetNewClosure()}
         if($stage-eq'conversion'){$parameters.InventoryCommit=[string]$Entry.inventoryCommit}
         $result=Get-ConsumerManifestClosure @parameters
         Write-GateJsonCreateOnly (Join-Path $WorkRoot "manifest-closure-$stage.json") $result
@@ -1172,7 +1172,7 @@ function Invoke-GateGitBytes([string]$Root,[string[]]$Arguments) {
         [Environment]::SetEnvironmentVariable($name,$null,'Process');Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
     }
     $run=Invoke-GateOwnedGitCapture $Root (@('-c',"core.hooksPath=$script:GateGitHooksPath",'-c','protocol.file.allow=never',
-            '-c','credential.helper=','-C',$Root)+$Arguments)
+            '-c','credential.helper=','-C',$Root)+$Arguments) -ByteExact
     if($run.ExitCode-ne0){
         try{$errorText=[Text.UTF8Encoding]::new($false,$true).GetString($run.StderrBytes)}catch{$errorText='stderr was not valid UTF-8'}
         Throw-GateResult INVALID "git failed ($($run.ExitCode)): $errorText"

@@ -180,6 +180,10 @@ Describe 'Authority-owned consumer source gate' {
         }
     }
 
+    BeforeEach {
+        Restore-GateFixtureModule
+    }
+
     # Scenario: The legacy manifest is consumed as the exact five-repository conversion contract.
     # Purpose: Keep all five ready migrations and the refreshed Darktide inventory explicit.
     It 'UnitT10_binds_five_unique_ready_legacy_inventories_and_the_refreshed_darktide_tree' {
@@ -1830,13 +1834,15 @@ scripts/consumer/Invoke-ConsumerSourceGate.ps1:95:5|$message=$null
     It 'UnitT33_removes_credentials_from_every_consumer_git_launcher' {
         $sources=@(
             (Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerGate.psm1')),
-            (Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1'))
+            (Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1')),
+            (Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-GateGitByteCapture.ps1'))
         )
         foreach($source in $sources){
             foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){$source|Should Match ([regex]::Escape("'$name'"))}
         }
         $sources[0]|Should Match 'SetEnvironmentVariable\(\$name,\$null,''Process''\)'
         $sources[1]|Should Match 'Environment\.Remove\(\$name\)'
+        $sources[2]|Should Match 'Environment\.Remove\(\$name\)'
         $fixture=Join-Path $script:RepositoryRoot 'tests/fixtures/Invoke-ConsumerGateCredentialFixture.ps1'
         $formalLease=New-SourceFixtureLease 'git-formal-prepare'
         try{
@@ -2895,6 +2901,12 @@ $values=[ordered]@{};foreach($name in $names){$values[$name]=[Environment]::GetE
         $moduleText|Should Match "ExportedCommands\['Start-PlatformOwnedProcess'\]"
         $moduleText|Should Match "ExportedCommands\['Stop-PlatformOwnedProcess'\]"
         $gitBytesAst.Extent.Text|Should Match 'Invoke-GateOwnedGitCapture[\s\S]+-ByteExact'
+        $closureText=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/ConsumerManifestClosure.psm1')
+        $closureText|Should Match "ExportedCommands\['Start-PlatformOwnedProcess'\]"
+        $closureText|Should Match "ExportedCommands\['Stop-PlatformOwnedProcess'\]"
+        $closureText|Should Not Match '\[Diagnostics\.Process(?:StartInfo)?\]'
+        $closureText|Should Not Match '\.WaitForExit\s*\('
+        $moduleText|Should Match 'GitByteInvoker=\{[\s\S]+Invoke-GateGitBytes'
         $byteHelper=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'scripts/consumer/Invoke-GateGitByteCapture.ps1')
         $helperTokens=$null;$helperErrors=$null
         [void][Management.Automation.Language.Parser]::ParseInput($byteHelper,[ref]$helperTokens,[ref]$helperErrors)
@@ -2959,6 +2971,56 @@ Start-Sleep -Seconds 30
             $env:CONSUMER_GATE_RESOLVER_SCRIPT_PATH=$oldResolver
             $env:CONSUMER_GATE_TEST_RESOLVER_TIMEOUT_SECONDS=$oldTimeout
             Restore-GateFixtureModule
+        }
+    }
+
+    # Scenario: A Git blob contains bytes that are not valid UTF-8 and is read through the production byte capture path.
+    # Purpose: Byte-oriented Git output must never be replacement-decoded or otherwise changed by text capture.
+    It 'UnitT49a_preserves_invalid_UTF8_blob_bytes_exactly' {
+        $root=Join-Path $TestDrive 'git-byte-exact-blob'
+        [void][IO.Directory]::CreateDirectory($root)
+        [void](Invoke-SourceFixtureGit $root @('init','-q','-b','main'))
+        $expected=[byte[]]@(0x00,0x41,0xff,0x80,0xfe,0x0a)
+        $oid=Invoke-SourceFixtureGitWithInputBytes $root @('hash-object','-w','--stdin') $expected
+        [byte[]]$actual=Invoke-GateGitBytes $root @('cat-file','blob',$oid)
+        [Convert]::ToBase64String($actual)|Should BeExactly ([Convert]::ToBase64String($expected))
+    }
+
+    # Scenario: Standalone manifest closure launches a Git shim that exceeds a shortened command deadline.
+    # Purpose: Non-gate closure callers must fail closed through the same bounded owned-process boundary.
+    It 'UnitT49b_bounds_standalone_closure_Git_deadline' {
+        $root=Join-Path $TestDrive 'closure-owned-timeout'
+        $shimRoot=Join-Path $root 'shim'
+        [void][IO.Directory]::CreateDirectory($shimRoot)
+        $childPidPath=Join-Path $root 'child.pid'
+        $childScript=Join-Path $root 'child.ps1'
+        [IO.File]::WriteAllText($childScript,"param([string]`$PidPath)`n[IO.File]::WriteAllText(`$PidPath,[string]`$PID,[Text.UTF8Encoding]::new(`$false))`nStart-Sleep -Seconds 30`n",[Text.UTF8Encoding]::new($false))
+        $shell=(Get-Process -Id $PID).Path
+        if($IsWindows){
+            $shim=Join-Path $shimRoot 'git.cmd'
+            $text="@echo off`r`n`"$shell`" -NoProfile -NonInteractive -File `"$childScript`" `"$childPidPath`"`r`n"
+        }else{
+            $shim=Join-Path $shimRoot 'git'
+            $text="#!/bin/sh`n`"$shell`" -NoProfile -NonInteractive -File `"$childScript`" `"$childPidPath`"`n"
+        }
+        [IO.File]::WriteAllText($shim,$text,[Text.UTF8Encoding]::new($false))
+        if(-not$IsWindows){[IO.File]::SetUnixFileMode($shim,[IO.UnixFileMode]::UserRead-bor[IO.UnixFileMode]::UserWrite-bor[IO.UnixFileMode]::UserExecute)}
+        $manifest=Join-Path $root 'manifest.json'
+        Write-FixtureJson $manifest ([ordered]@{repositories=@([ordered]@{id='fixture';inventoryTree=('b'*40);files=@()})})
+        $oldPath=$env:PATH
+        try{
+            $env:PATH=$shimRoot+[IO.Path]::PathSeparator+$oldPath
+            $failure=Get-SourceFixtureFailure {Get-ConsumerManifestClosure -RepositoryRoot $root -Commit ('a'*40) `
+                -Stage inventory -Manifest $manifest -RepositoryId fixture -AuthorityRoot $script:RepositoryRoot `
+                -GitCommandTimeoutSeconds 1 -GitReserveSeconds 2}
+            $failure|Should Match 'Manifest closure Git command exceeded its bounded deadline'
+            Test-Path -LiteralPath $childPidPath -PathType Leaf|Should Be $true
+        }finally{
+            $env:PATH=$oldPath
+            if(Test-Path -LiteralPath $childPidPath -PathType Leaf){
+                $childPid=[int]([IO.File]::ReadAllText($childPidPath))
+                Get-Process -Id $childPid -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue
+            }
         }
     }
 

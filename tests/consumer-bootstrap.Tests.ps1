@@ -496,6 +496,9 @@ exit 0
         $runtimeSource=Join-Path $workLease.Root 'runtime-source'
         [void][IO.Directory]::CreateDirectory($runtimeSource)
         $runtimeFixtureFiles=@(Get-ChildItem -LiteralPath $PSHOME -File -Force)
+        if(Test-Path -LiteralPath (Join-Path $PSHOME 'ref') -PathType Container){
+            $runtimeFixtureFiles+=@(Get-ChildItem -LiteralPath (Join-Path $PSHOME 'ref') -Recurse -File -Force)
+        }
         foreach($moduleName in @('Microsoft.PowerShell.Management','Microsoft.PowerShell.Utility')){
             $runtimeFixtureFiles+=@(Get-ChildItem -LiteralPath (Join-Path $PSHOME "Modules/$moduleName") -Recurse -File -Force)
         }

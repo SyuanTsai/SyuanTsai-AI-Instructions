@@ -13,7 +13,7 @@ concurrency:
 jobs:
   leg:
     name: Consumer transition probe (${{ matrix.platform }})
-    timeout-minutes: 120
+    timeout-minutes: 140
     strategy:
       fail-fast: false
       matrix:
