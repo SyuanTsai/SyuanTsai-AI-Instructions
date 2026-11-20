@@ -27,15 +27,20 @@
     "entry": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "version", "releaseTag", "releaseCommit", "wheelFileName", "wheelSha256", "analyzerSha256", "parserCorrection"],
+      "required": ["kind", "version", "releaseTag", "releaseCommit", "wheelFileName", "wheelSha256", "analyzerSha256", "consoleEntryPoint", "parserCorrection"],
       "properties": {
-        "kind": { "type": "string", "const": "pypi-release" },
+        "kind": {
+          "type": "string",
+          "enum": ["pypi-release", "github-release-asset"],
+          "description": "pypi-release indicates that the version is also published to PyPI; github-release-asset indicates that it is published only as a GitHub release. For both kinds, the primary wheel is acquired only from https://github.com/NVIDIA/SkillSpector/releases/download/<releaseTag>/<wheelFileName> and verified with wheelSha256; dependencies are acquired only from the approved PyPI simple index through a verified wheelhouse with hashes."
+        },
         "version": { "$ref": "#/definitions/semver" },
         "releaseTag": { "type": "string", "pattern": "^v(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)$" },
         "releaseCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "wheelFileName": { "type": "string", "pattern": "^skillspector-(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)-py3-none-any\\.whl$" },
         "wheelSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "analyzerSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "consoleEntryPoint": { "type": "string", "enum": ["skillspector.cli:app", "skillspector.cli_entry:app"] },
         "parserCorrection": { "type": "string", "enum": ["none", "powershell-native-command-ownership-v1"] }
       }
     }

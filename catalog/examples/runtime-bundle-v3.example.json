@@ -4,13 +4,13 @@
   "commit": "89abcdef0123456789abcdef0123456789abcdef",
   "acquisition": "github-codeload",
   "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "inventorySha256": "35d892cb9880cb9d20dc1296248eb585925e895b593243bbcfabc5f10f13102f",
+  "inventorySha256": "18079f2d779e6fb11b1378249962a74acd01e508b6f1daa550d7033215f7e5df",
   "inventory": [
-    { "path": "Resolve-StandardValidationTool.ps1", "sha256": "c0d68b227fc04e19d710a89c4559fe45e0cc979eead846006261dc2dc5bfa14f" },
+    { "path": "Resolve-StandardValidationTool.ps1", "sha256": "92c1eb2b0bde1d5a6df406d4b0ced00a7059be1a6ef7ff5ec4cadfb4dfc89627" },
     { "path": "bootstrap-section.md", "sha256": "d021e5c3e30abe71f12924e240c4ec53a5e0361d110c99ea4ff18e56bfd06784" },
     { "path": "catalog/skills-catalog.json", "sha256": "68bb03240261d1a94479d41d640ae16dab6064dd0d591f04e8164883783650e3" },
     { "path": "installer-safe-mutation.psm1", "sha256": "dc031edcc2f48968df83cd68ad52eacb7f7b05d3ca6a0cc622658cf6151c8293" },
-    { "path": "platform-runtime.psd1", "sha256": "e9465c136582eccd03222530a6c9ef173c2d506e09ebccdb087c3a555609ab75" },
+    { "path": "platform-runtime.psd1", "sha256": "7fbcf9a40587c0238ffe6866ccc1986cde3f37259920c17b4424596a7561dcca" },
     { "path": "platform-runtime.psm1", "sha256": "ad051b2794ce4dc10108404201735d02f7b032ed0e633c5f22f73c884fb10370" },
     { "path": "WindowsDacl.psm1", "sha256": "ffa1f85d94bb6bce9bf8353f8c7733bdbe59880a3d0d075191938cc28aebb5f6" },
     { "path": "platform/Linux.psm1", "sha256": "52c261d577ee7b3946771d1112030996896fdd119e06ac3849e430a3d56fb38c" },
@@ -29,7 +29,7 @@
   "platform": { "os": "windows", "architecture": "x64" },
   "platformRuntime": {
     "apiVersion": "1.0",
-    "manifestSha256": "e9465c136582eccd03222530a6c9ef173c2d506e09ebccdb087c3a555609ab75",
+    "manifestSha256": "7fbcf9a40587c0238ffe6866ccc1986cde3f37259920c17b4424596a7561dcca",
     "sourceFingerprint": "db67f1a8e8c8e1376f6b2383bcb6cf8052f97eb43ad0f794c9c680dad15e5532"
   },
   "requiredCapabilities": ["directory-lease", "file-lease", "file-identity", "lock", "publication", "owned-file-removal", "permissions", "directory-publication"],

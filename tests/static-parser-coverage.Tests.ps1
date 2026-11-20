@@ -118,6 +118,8 @@ Describe 'Static parser coverage and finding preservation' {
         Assert-ParserCase ((Get-Content -Raw (Join-Path $parserRepositoryRoot 'docs/standards/skillspector-approved-sources.json')) | Test-Json -SchemaFile $registrySchema) 'Approved source registry violates its strict schema.'
         Assert-ParserCase ($registry.active -ceq '2.13.4' -and $registry.entries.'2.13.4'.parserCorrection -ceq 'none') '2.13.4 must be the active native profile.'
         Assert-ParserCase ($registry.entries.'2.13.0'.parserCorrection -ceq 'powershell-native-command-ownership-v1') '2.13.0 must retain the bridge profile.'
+        $nativeEntries=@($registry.entries.PSObject.Properties.Value | Where-Object {$_.parserCorrection -ceq 'none'})
+        Assert-ParserCase ($registry.entries.'2.13.6'.parserCorrection -ceq 'none' -and @($nativeEntries | Where-Object {$_.version -ceq $policy.officialScannerVersion}).Count -eq 0) 'Native parser entries, including 2.13.6, must not use the bridge-bound version.'
         Assert-ParserCase ($policy.officialScannerVersion -ceq '2.13.0' -and $policy.officialAnalyzerSha256 -ceq $registry.entries.'2.13.0'.analyzerSha256) 'Bridge policy must remain bound to the approved 2.13.0 analyzer.'
         Assert-ParserCase ($policySchema.properties.officialScannerVersion.const -ceq '2.13.0') 'Bridge policy schema must remain release specific.'
         foreach($value in @('2.13.0',$registry.entries.'2.13.0'.releaseCommit,$registry.entries.'2.13.0'.wheelSha256,$registry.entries.'2.13.0'.analyzerSha256)){
@@ -210,6 +212,32 @@ Describe 'Static parser coverage and finding preservation' {
             }
             Assert-ParserRejected {Get-StaticApprovedSkillSpectorEntry -Receipt $changed -ApprovedSources $approved -ExpectedResolutionRunId $runId | Out-Null}
         }
+    }
+
+    # Scenario: A frozen receipt changes its console entry point, then the registry activates the reviewed 2.13.6 entry.
+    # Purpose: Reject entry-point drift while accepting the distinct console entry point bound by the active approved entry.
+    It 'UnitT53a_binds_the_receipt_console_entry_point_to_the_active_approved_entry' {
+        $approved=Get-Content -Raw (Join-Path $parserRepositoryRoot 'docs/standards/skillspector-approved-sources.json') | ConvertFrom-Json
+        $entry=$approved.entries.'2.13.4'
+        $runId='b'*32
+        $prefix='github:NVIDIA/SkillSpector@'+$entry.releaseTag+'#commit='+$entry.releaseCommit+'#asset=sha256:'+$entry.wheelSha256+'#'
+        $receipt=[pscustomobject]@{
+            toolName='skillspector';source='NVIDIA/SkillSpector';channel='approved-source-registry'
+            approvedSourceId='2.13.4';parserCorrection=$entry.parserCorrection;resolvedVersion=$entry.version;frozenForRun=$true
+            resolutionRunId=$runId;identityKind='release-commit-asset-metadata-dependency-closure-and-executable'
+            offlineResolutionVerified=$true;consoleEntryPoint='skillspector.cli_entry:app';resolvedIdentity=$prefix+'closure=fixture'
+            installedClosureSha256='a'*64;dependencyClosure=@([pscustomobject]@{normalizedName='skillspector';version=$entry.version;sha256=$entry.wheelSha256})
+        }
+        Assert-ParserRejected {Get-StaticApprovedSkillSpectorEntry -Receipt $receipt -ApprovedSources $approved -ExpectedResolutionRunId $runId | Out-Null}
+
+        $approved.active='2.13.6'
+        $entry=$approved.entries.'2.13.6'
+        $receipt.approvedSourceId='2.13.6'
+        $receipt.parserCorrection=$entry.parserCorrection
+        $receipt.resolvedVersion=$entry.version
+        $receipt.resolvedIdentity='github:NVIDIA/SkillSpector@'+$entry.releaseTag+'#commit='+$entry.releaseCommit+'#asset=sha256:'+$entry.wheelSha256+'#closure=fixture'
+        $receipt.dependencyClosure=@([pscustomobject]@{normalizedName='skillspector';version=$entry.version;sha256=$entry.wheelSha256})
+        Assert-ParserCase ((Get-StaticApprovedSkillSpectorEntry -Receipt $receipt -ApprovedSources $approved -ExpectedResolutionRunId $runId).version -ceq '2.13.6') 'The reviewed 2.13.6 console entry point was rejected.'
     }
 
 

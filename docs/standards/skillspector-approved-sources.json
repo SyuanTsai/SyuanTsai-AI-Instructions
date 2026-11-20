@@ -12,6 +12,7 @@
       "wheelFileName": "skillspector-2.13.0-py3-none-any.whl",
       "wheelSha256": "41e097b4127c0aa0732ad31cc909f8aee0b907d97816c866a55b8e782a6ca6dc",
       "analyzerSha256": "c799169f9ad716f8dbbbec5892ef76affd0f9974433709ed0c1cfc3bcd0b66a4",
+      "consoleEntryPoint": "skillspector.cli:app",
       "parserCorrection": "powershell-native-command-ownership-v1"
     },
     "2.13.4": {
@@ -22,6 +23,18 @@
       "wheelFileName": "skillspector-2.13.4-py3-none-any.whl",
       "wheelSha256": "c5e7f290897c65018013a6e37022fabdd2ba1aeeb4994b65df2de8b0d536bea0",
       "analyzerSha256": "bde3d1497ee85caee5569288ff1f6e2b6459cccea193c144bb50def4c7215d09",
+      "consoleEntryPoint": "skillspector.cli:app",
+      "parserCorrection": "none"
+    },
+    "2.13.6": {
+      "kind": "github-release-asset",
+      "version": "2.13.6",
+      "releaseTag": "v2.13.6",
+      "releaseCommit": "e2674da339b0bddc6e565d059c0577c6d9cd25da",
+      "wheelFileName": "skillspector-2.13.6-py3-none-any.whl",
+      "wheelSha256": "e7b46c55e726405b2a068d375d1ee8e799e15d86f3fc05f84feb5ba962198b15",
+      "analyzerSha256": "0065c5fec585766b53e21711c908c9dd440639e5a29e374e5269d9c5c2ee6f11",
+      "consoleEntryPoint": "skillspector.cli_entry:app",
       "parserCorrection": "none"
     }
   }

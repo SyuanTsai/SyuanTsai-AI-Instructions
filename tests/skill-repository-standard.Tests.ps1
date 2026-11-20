@@ -2468,7 +2468,7 @@ public sealed class C245SlowTrickleStream : Stream {
         Mock Assert-Command { $script:tailPython }
         Mock Assert-NoConflictingPipEnvironment { }
         Mock Assert-NoConflictingPythonEnvironment { }
-        Set-Item Function:Get-SkillSpectorApprovedSources -Value { [pscustomobject]@{active='1.0.0';activeEntry=[pscustomobject]@{version='1.0.0';releaseTag='v1.0.0';releaseCommit=('a'*40);wheelFileName='skillspector-1.0.0-py3-none-any.whl';wheelSha256=$script:tailHash;analyzerSha256=('b'*64);parserCorrection='none'}} }
+        Set-Item Function:Get-SkillSpectorApprovedSources -Value { [pscustomobject]@{active='1.0.0';activeEntry=[pscustomobject]@{version='1.0.0';releaseTag='v1.0.0';releaseCommit=('a'*40);wheelFileName='skillspector-1.0.0-py3-none-any.whl';wheelSha256=$script:tailHash;analyzerSha256=('b'*64);consoleEntryPoint='skillspector.cli:app';parserCorrection='none'}} }
         Mock Get-GitHubHeaders { @{} }
         Mock Add-ProcessPathValue { }
         Mock Get-PythonWheelMetadata { [pscustomobject]@{ name='skillspector'; version='1.0.0'; requiresDist=@() } }
@@ -2491,7 +2491,7 @@ public sealed class C245SlowTrickleStream : Stream {
             [IO.File]::WriteAllText((Join-Path $script:tailWork 'offline-backtracking-plan.json'), '{"fixture":"completed-plan"}')
             [IO.File]::WriteAllText((Join-Path $script:tailWork 'candidate-inventory.json'), ('{"schemaVersion":1,"inventorySha256":"' + ('e' * 64) + '","entries":[{"file":"verified-candidate.whl"}],"rejectedCandidates":[]}'))
             $script:tailInstall = (Get-ChildItem -LiteralPath $script:tailRoot -Directory | Where-Object Name -match '^ss-[0-9a-f]{12}$').FullName
-            @{ manifest=@{ closureSha256=('b'*64) }; executablePath=(Join-Path $script:tailInstall 'fixture'); executableSha256=('c'*64); installedClosureSha256=('d'*64); consoleEntryPoint='fixture:main'; installedMetadataVerification='fixture'; resolutionEvidence=@{} }
+            @{ manifest=@{ closureSha256=('b'*64) }; executablePath=(Join-Path $script:tailInstall 'fixture'); executableSha256=('c'*64); installedClosureSha256=('d'*64); consoleEntryPoint='skillspector.cli:app'; installedMetadataVerification='fixture'; resolutionEvidence=@{} }
         }
         Mock Remove-BoundedRunOwnedDirectory {
             & $script:tailCleanup -Path $Path -AllowedRoot $AllowedRoot -LeafPattern $LeafPattern
@@ -3323,6 +3323,7 @@ public sealed class C245NonCooperativeStream : Stream {
             schemaVersion=1;toolName='skillspector';source='NVIDIA/SkillSpector';channel='approved-source-registry';frozenForRun=$true
             resolvedVersion=[string]$entry.version;resolvedIdentity=('github:NVIDIA/SkillSpector@'+[string]$entry.releaseTag+'#commit='+[string]$entry.releaseCommit+'#asset=sha256:'+[string]$entry.wheelSha256+'#fixture')
             identityKind='release-commit-asset-metadata-dependency-closure-and-executable';approvedSourceId=[string]$registry.active;parserCorrection=[string]$entry.parserCorrection
+            consoleEntryPoint=[string]$entry.consoleEntryPoint
             installRoot=$toolRoot;executablePath=$executablePath;executableSha256=$executableSha256;installedClosureSha256=(Get-AuthorityDirectoryClosureSha256 -Path $toolRoot)
             launcher=$launcher;launcherDigestSha256=(Get-AuthorityLauncherDigest -Launcher $launcher);dependencyClosureSha256=('a'*64);dependencyClosure=@([pscustomobject]@{name='skillspector';version=[string]$entry.version})
         }
@@ -3340,6 +3341,38 @@ public sealed class C245NonCooperativeStream : Stream {
         try { Assert-InstalledAuthorityToolReceipt -Receipt $receipt -ToolName 'skillspector' -ExpectedSource 'NVIDIA/SkillSpector' -InstallRoot $installRoot | Out-Null }
         catch { $failure=$_.Exception.Message }
         Assert-Match $failure 'active approved source entry' 'A retained non-active SkillSpector source must fail closed.'
+    }
+
+    # Scenario: An active SkillSpector receipt reports a console entry point different from its approved source entry.
+    # Purpose: Fail closed when installed entry-point metadata drifts even if every other approved-source identity matches.
+    It 'UnitT33c_rejects_a_SkillSpector_console_entry_point_not_bound_to_its_approved_entry' {
+        . $script:AuthorityGatePath -DefineFunctionsOnly
+
+        $installRoot=Join-Path $TestDrive 'skillspector-entry-point-install-root'
+        $toolRoot=Join-Path $installRoot 'skillspector'
+        [void](New-Item -ItemType Directory -Path $toolRoot -Force)
+        $executablePath=Join-Path $toolRoot 'skillspector.bin'
+        Write-TestUtf8File -Path $executablePath -Text 'skillspector executable fixture'
+        $executableSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $executablePath).Hash.ToLowerInvariant()
+        $launcher=[pscustomobject][ordered]@{kind='direct-executable';shimPath=$null;shimSha256=$null;payloadPath=$null;payloadSha256=$null;runtimePath=$null;runtimeSha256=$null}
+        $registry=Get-Content -Raw -Encoding UTF8 (Join-Path $script:RepositoryRoot 'docs/standards/skillspector-approved-sources.json') | ConvertFrom-Json
+        $entry=$registry.entries.($registry.active)
+        $receipt=[pscustomobject][ordered]@{
+            schemaVersion=1;toolName='skillspector';source='NVIDIA/SkillSpector';channel='approved-source-registry';frozenForRun=$true
+            resolvedVersion=[string]$entry.version;resolvedIdentity=('github:NVIDIA/SkillSpector@'+[string]$entry.releaseTag+'#commit='+[string]$entry.releaseCommit+'#asset=sha256:'+[string]$entry.wheelSha256+'#fixture')
+            identityKind='release-commit-asset-metadata-dependency-closure-and-executable';approvedSourceId=[string]$registry.active;parserCorrection=[string]$entry.parserCorrection
+            consoleEntryPoint='skillspector.cli_entry:app'
+            installRoot=$toolRoot;executablePath=$executablePath;executableSha256=$executableSha256;installedClosureSha256=(Get-AuthorityDirectoryClosureSha256 -Path $toolRoot)
+            launcher=$launcher;launcherDigestSha256=(Get-AuthorityLauncherDigest -Launcher $launcher);dependencyClosureSha256=('a'*64);dependencyClosure=@([pscustomobject]@{name='skillspector';version=[string]$entry.version})
+        }
+        foreach($mutation in @('mismatched','missing')) {
+            $candidate=Copy-TestJsonObject -Value $receipt
+            if($mutation -ceq 'missing') {$candidate.PSObject.Properties.Remove('consoleEntryPoint')}
+            $failure=$null
+            try { Assert-InstalledAuthorityToolReceipt -Receipt $candidate -ToolName 'skillspector' -ExpectedSource 'NVIDIA/SkillSpector' -InstallRoot $installRoot | Out-Null }
+            catch { $failure=$_.Exception.Message }
+            Assert-Match $failure 'does not match its approved source entry' "A $mutation SkillSpector console entry point must fail closed."
+        }
     }
 
     # Scenario: A resolver can emit a plausible Go runtime identity for a different executable or run.

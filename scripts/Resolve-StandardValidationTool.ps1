@@ -3962,6 +3962,9 @@ function Resolve-SkillSpector {
             $backtrackingEvidence = $installation.resolutionEvidence
             $executablePath = [string]$installation.executablePath
             $consoleEntryPoint = [string]$installation.consoleEntryPoint
+            if ($consoleEntryPoint -cne [string]$approvedEntry.consoleEntryPoint) {
+                throw "SkillSpector installed console entry point mismatch. Expected '$($approvedEntry.consoleEntryPoint)', got '$consoleEntryPoint'."
+            }
             $installedMetadataVerification = [string]$installation.installedMetadataVerification
             $installEnvironment = 'isolated-venv'
             $executableSha256 = [string]$installation.executableSha256
@@ -4120,7 +4123,11 @@ else {
         $launcher.runtimePath = $resolved.nodePath
         $launcher.runtimeSha256 = $resolved.nodeSha256
     }
-    if ($ToolName -ceq 'skillspector' -and $Install -and $resolved.consoleEntryPoint -ceq 'skillspector.cli:app') {
+    $approvedSkillSpectorEntry = if ($ToolName -ceq 'skillspector') {
+        (Get-SkillSpectorApprovedSources -Path (Join-Path (Split-Path -Parent $PSScriptRoot) ([string]$toolPolicy.approvedSources))).activeEntry
+    } else { $null }
+    if ($ToolName -ceq 'skillspector' -and $Install -and
+        $resolved.consoleEntryPoint -ceq [string]$approvedSkillSpectorEntry.consoleEntryPoint) {
         # Identity only: the runner owns execution, classification and exception
         # authorization. This launcher digest is covered by the tool receipt.
         $launcher.kind = 'skillspector-python'
