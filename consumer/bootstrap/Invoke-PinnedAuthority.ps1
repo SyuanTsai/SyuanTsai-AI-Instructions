@@ -277,7 +277,8 @@ try {
     if ((Test-PathInside $WorkRoot $BaseRoot) -or (Test-PathInside $WorkRoot $CandidateRoot)) { Throw-ConsumerResult INVALID `
         'WorkRoot is outside the permitted boundary.' }
     $tempRoot = if (-not [string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { $env:RUNNER_TEMP } else { $env:CONSUMER_GATE_TEST_TEMP_ROOT }
-    if ([string]::IsNullOrWhiteSpace($tempRoot) -or -not (Test-PathInside $WorkRoot $tempRoot)) { Throw-ConsumerResult INVALID `
+    if ([string]::IsNullOrWhiteSpace($tempRoot) -or -not (Test-PathInside $WorkRoot $tempRoot) -or
+        (Test-PathInside $tempRoot $WorkRoot)) { Throw-ConsumerResult INVALID `
         'WorkRoot must be under RUNNER_TEMP or the local test temp root.' }
     if (-not (Test-Path $WorkRoot)) { [IO.Directory]::CreateDirectory($WorkRoot) | Out-Null }
      [void](Assert-PlainPath $WorkRoot 'WorkRoot')

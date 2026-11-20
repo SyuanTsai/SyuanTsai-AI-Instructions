@@ -430,6 +430,30 @@ exit 0
 
     }
 
+    # Scenario: A caller supplies the validated temp root itself as WorkRoot.
+    # Purpose: Keep the supervisor's sibling capture directory inside the trusted temp boundary on every platform.
+    It 'InterT58_rejects_the_temp_root_itself_as_workroot' {
+        $tempBoundary=Join-Path $TestDrive 'exact-temp-boundary'
+        $baseRoot=Join-Path $TestDrive 'exact-temp-base'
+        $candidateRoot=Join-Path $TestDrive 'exact-temp-candidate'
+        foreach($path in @($tempBoundary,$baseRoot,$candidateRoot)){[void][IO.Directory]::CreateDirectory($path)}
+        $savedRunnerTemp=[Environment]::GetEnvironmentVariable('RUNNER_TEMP','Process')
+        $savedTestTemp=[Environment]::GetEnvironmentVariable('CONSUMER_GATE_TEST_TEMP_ROOT','Process')
+        try{
+            [Environment]::SetEnvironmentVariable('RUNNER_TEMP',$null,'Process')
+            $env:CONSUMER_GATE_TEST_TEMP_ROOT=$tempBoundary
+            $output=@(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $script:BootstrapPath `
+                -Phase prepare -BaseRoot $baseRoot -CandidateRoot $candidateRoot -WorkRoot $tempBoundary `
+                -TriggerEvent pull_request_target -BaseRevision ('a'*40) -CandidateRevision ('b'*40) `
+                -HeadRevision ('c'*40) -WorkflowRunId 1 -WorkflowRunAttempt 1 -Platform windows 2>&1)
+            $LASTEXITCODE|Should Be 30
+            ($output-join"`n")|Should Match 'WorkRoot must be under RUNNER_TEMP or the local test temp root'
+        }finally{
+            [Environment]::SetEnvironmentVariable('RUNNER_TEMP',$savedRunnerTemp,'Process')
+            [Environment]::SetEnvironmentVariable('CONSUMER_GATE_TEST_TEMP_ROOT',$savedTestTemp,'Process')
+        }
+    }
+
     if ($IsWindows) {
         # Scenario: A Windows WorkRoot has a Junction ancestor controlled outside the physical directory.
         # Purpose: Register the Windows reparse-point attack only on its native host.
@@ -596,6 +620,7 @@ exit 0
         )
         function Invoke-FormalBootstrap([string]$Phase,[string]$WorkRoot,[string]$Platform) {
             [void][IO.Directory]::CreateDirectory($WorkRoot)
+            $script:FormalBootstrapWorkRoot=$WorkRoot
             $env:CONSUMER_GATE_PHASE_ENV_DUMP_PATH=Join-Path $WorkRoot "environment-$Phase.json"
             $phaseSentinelHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(`
                     [Text.Encoding]::UTF8.GetBytes('phase-token-sentinel'))).ToLowerInvariant()
@@ -608,6 +633,39 @@ exit 0
             $script:FormalBootstrapExitCode = $LASTEXITCODE
             $script:FormalBootstrapExitCode
         }
+        function Protect-FormalBootstrapDiagnostic([string]$Value) {
+            $protected=if($null-eq$Value){''}else{$Value}
+            foreach($name in @('STANDARD_VALIDATION_GITHUB_API_TOKEN','GITHUB_TOKEN','GH_TOKEN')){
+                $secret=[Environment]::GetEnvironmentVariable($name,'Process')
+                if(-not[string]::IsNullOrEmpty($secret)){$protected=$protected.Replace($secret,'[REDACTED]',[StringComparison]::Ordinal)}
+            }
+            $protected
+        }
+        function Get-FormalBootstrapFailureDiagnostics {
+            $sections=[Collections.Generic.List[string]]::new()
+            $bootstrapOutput=@($script:FormalBootstrapOutput|ForEach-Object{[string]$_}|Where-Object{
+                    $_-notmatch'(?i)unapproved verb|未核准的動詞'
+                })-join"`n"
+            $sections.Add("bootstrap stdout/stderr:`n$(Protect-FormalBootstrapDiagnostic $bootstrapOutput)")
+            $work=[string]$script:FormalBootstrapWorkRoot
+            if(-not[string]::IsNullOrWhiteSpace($work)-and(Test-Path -LiteralPath $work -PathType Container)){
+                $files=@(
+                    Get-ChildItem -LiteralPath $work -Recurse -File -Force -ErrorAction SilentlyContinue|
+                        Where-Object{
+                            $_.FullName-match'bootstrap-supervisor-diagnostics|[\\/]diagnostics[\\/]|receipt|authority-binding|gate.*diagnostic'
+                        }|Sort-Object FullName|Select-Object -First 40
+                )
+                foreach($file in $files){
+                    try{
+                        $text=[IO.File]::ReadAllText($file.FullName)
+                        if($text.Length-gt16384){$text=$text.Substring(0,16384)+"`n[TRUNCATED]"}
+                        $relative=[IO.Path]::GetRelativePath($work,$file.FullName)
+                        $sections.Add("$relative`:`n$(Protect-FormalBootstrapDiagnostic $text)")
+                    }catch{$sections.Add("$($file.FullName): [diagnostic read failed: $($_.Exception.Message)]")}
+                }
+            }
+            Protect-FormalBootstrapDiagnostic (($sections|Select-Object -First 41)-join"`n---`n")
+        }
         function Assert-FormalPhaseOutput([string]$Path,[string]$Phase) {
             if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
                 throw "Formal $Phase gate did not create its boundary evidence (exit=$script:FormalBootstrapExitCode): " +
@@ -616,7 +674,7 @@ exit 0
         }
         function Assert-FormalBootstrapExit([int]$Actual,[int]$Expected,[string]$Context) {
             if($Actual-ne$Expected){
-                throw "$Context expected exit $Expected but got $Actual`: $(@($script:FormalBootstrapOutput)-join' | ')"
+                throw "$Context expected exit $Expected but got $Actual`:`n$(Get-FormalBootstrapFailureDiagnostics)"
             }
             $Actual | Should Be $Expected
         }
@@ -624,7 +682,7 @@ exit 0
         $env:STANDARD_VALIDATION_GITHUB_API_TOKEN = 'phase-token-sentinel'
         $prepareExit=Invoke-FormalBootstrap prepare $platformWork windows
         if($prepareExit-ne0){
-            throw "Formal prepare expected exit 0 but got $prepareExit`: $(@($script:FormalBootstrapOutput)-join' | ')"
+            throw "Formal prepare expected exit 0 but got $prepareExit`:`n$(Get-FormalBootstrapFailureDiagnostics)"
         }
         $prepareExit | Should Be 0
         Assert-FormalPhaseOutput (Join-Path $platformWork 'environment-prepare.json') prepare
@@ -666,7 +724,7 @@ exit 0
         foreach ($phase in @('validate','finalize')) {
             $phaseExit=Invoke-FormalBootstrap $phase $platformWork windows
             if($phaseExit-ne0){
-                throw "Formal $phase expected exit 0 but got $phaseExit`: $(@($script:FormalBootstrapOutput)-join' | ')"
+                throw "Formal $phase expected exit 0 but got $phaseExit`:`n$(Get-FormalBootstrapFailureDiagnostics)"
             }
             $phaseExit | Should Be 0
             Assert-FormalPhaseOutput (Join-Path $platformWork "environment-$phase.json") $phase
@@ -765,7 +823,7 @@ exit 0
         }
         $aggregateExit=Invoke-FormalBootstrap aggregate $aggregateWork aggregate
         if($aggregateExit-ne0){
-            throw "Formal aggregate expected exit 0 but got $aggregateExit`: $(@($script:FormalBootstrapOutput)-join' | ')"
+            throw "Formal aggregate expected exit 0 but got $aggregateExit`:`n$(Get-FormalBootstrapFailureDiagnostics)"
         }
         $aggregateExit | Should Be 0
         (Join-Path $aggregateWork 'aggregate-receipt.json')|Should Exist

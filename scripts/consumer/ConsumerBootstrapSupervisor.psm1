@@ -189,7 +189,7 @@ function Invoke-ConsumerGateProcess{
         $hasExited=[bool]$lease.HasExited
         $captureCompletedNaturally=[bool]$lease.CaptureCompletedNaturally
         $outputLimitExceeded=[bool]$lease.OutputLimitExceeded
-        $exitCode=$lease.ExitCode
+        $exitCodeBeforeCleanup=$lease.ExitCode
         $isolation=[string]$lease.Isolation
         $timedOut=[DateTimeOffset]::UtcNow-ge$deadline-or$terminationReason-ceq'deadline'
         $cleanup=& $script:SupervisorPlatformRuntime.ExportedCommands['Stop-PlatformOwnedProcess'] -Lease $lease `
@@ -198,6 +198,13 @@ function Invoke-ConsumerGateProcess{
         if(-not$cleanup.CleanedUp-or-not$cleanup.CaptureReadersStopped-or-not$cleanup.CaptureResourcesClosed){
             Throw-SupervisorResult FAILED "Gate owned-process cleanup is unconfirmed: $($cleanup.Uncertainty)"
         }
+        $exitCodeAfterCleanup=$lease.ExitCode
+        if(($exitCodeBeforeCleanup-is[int]-or$exitCodeBeforeCleanup-is[long])-and
+            ($exitCodeAfterCleanup-is[int]-or$exitCodeAfterCleanup-is[long])-and
+            [long]$exitCodeBeforeCleanup-ne[long]$exitCodeAfterCleanup){
+            Throw-SupervisorResult FAILED 'Gate owned-process exit status changed during cleanup.'
+        }
+        $exitCode=if($exitCodeAfterCleanup-is[int]-or$exitCodeAfterCleanup-is[long]){$exitCodeAfterCleanup}else{$exitCodeBeforeCleanup}
         $expectedIsolation=if($IsWindows){'windows-job-object'}elseif($IsLinux){'linux-process-group-subreaper'}else{'macos-process-group'}
         if($isolation-cne$expectedIsolation-or[string]$cleanup.Isolation-cne$expectedIsolation){
             Throw-SupervisorResult FAILED 'Gate owned-process isolation does not match the current platform.'

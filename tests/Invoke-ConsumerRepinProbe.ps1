@@ -9,7 +9,8 @@ param(
     [Parameter(Mandatory)][ValidateSet('windows','linux','macos','aggregate')][string]$Platform,
     [Parameter(Mandatory)][ValidatePattern('^[0-9]+$')][string]$WorkflowRunId,
     [Parameter(Mandatory)][ValidatePattern('^[1-9][0-9]*$')][string]$WorkflowRunAttempt,
-    [string]$LegReceiptsRoot
+    [string]$LegReceiptsRoot,
+    [switch]$FixtureOnly
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
@@ -25,8 +26,8 @@ $script:ProbeConsumerRepository='https://example.test/example/consumer-repin-fix
 $script:OfficialAuthorityRepository='https://github.com/SyuanTsai/SyuanTsai-AI-Instructions.git'
 $script:OldAuthorityRevision='7338a3f6d8e2d25849b79627fb9a2cbd21ebd123'
 
-function Set-RepinBootstrapProjection([string]$Path){
-    $text=Get-Content -Raw -Encoding UTF8 $Path
+function ConvertTo-RepinBootstrapProjection([string]$Text){
+    $text=$Text
     if(-not$text.Contains($script:OfficialAuthorityRepository,[StringComparison]::Ordinal)){
         throw 'Re-pin bootstrap has no official authority URL anchor.'
     }
@@ -38,7 +39,19 @@ function Set-RepinBootstrapProjection([string]$Path){
     $anchor='    Assert-AuthorityTree $gitRoot $authorityRoot $Commit'
     $originReset=$anchor+"`n    [void](Invoke-PinnedGit `$gitRoot @('remote','set-url','origin','$($script:OfficialAuthorityRepository)') -AllowFileProtocol)"
     if(-not$text.Contains($anchor,[StringComparison]::Ordinal)){throw 'Re-pin bootstrap tree-verification anchor is missing.'}
-    Write-ProbeUtf8 $Path ($text.Replace($anchor,$originReset))
+    $text.Replace($anchor,$originReset)
+}
+function Set-RepinBootstrapProjection([string]$Path){
+    Write-ProbeUtf8 $Path (ConvertTo-RepinBootstrapProjection (Get-Content -Raw -Encoding UTF8 $Path))
+}
+function Replace-RepinFile([string]$Source,[string]$Destination){
+    if(Test-Path -LiteralPath $Destination -PathType Leaf){[IO.File]::Delete($Destination)}
+    Copy-ProbeFile $Source $Destination
+}
+function Test-RepinBytesEqual([byte[]]$Left,[byte[]]$Right){
+    $Left.Length-eq$Right.Length-and
+        [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($Left))-ceq
+        [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($Right))
 }
 function Copy-RepinCurrentAuthority([string]$SourceRoot,[string]$DestinationRoot){
     [void](Invoke-ProbeGit $DestinationRoot @('rm','-r','--quiet','--ignore-unmatch','.'))
@@ -75,7 +88,8 @@ function New-RepinAuthority([string]$SourceRoot,[string]$Root){
     $entry[0].repository=$script:ProbeConsumerRepository
     Write-ProbeJson $manifestPath $manifest
     $newCommit=Complete-ProbeCommit $Root 'consumer re-pin probe authority'
-    [pscustomobject]@{OldCommit=$oldCommit;OldTree=$oldTree;NewCommit=$newCommit;OldBootstrap=$oldBootstrap;OldWorkflow=$oldWorkflow}
+    [pscustomobject]@{OldCommit=$oldCommit;OldTree=$oldTree;NewCommit=$newCommit;OldBootstrap=$oldBootstrap
+        OldBootstrapProjected=ConvertTo-RepinBootstrapProjection $oldBootstrap;OldWorkflow=$oldWorkflow}
 }
 function New-RepinConsumer([string]$Root,[string]$FixtureRoot,$Authority){
     [void][IO.Directory]::CreateDirectory($Root)
@@ -86,8 +100,7 @@ function New-RepinConsumer([string]$Root,[string]$FixtureRoot,$Authority){
     }
     Copy-ProbeFile (Join-Path $FixtureRoot 'candidate/tests/Fixture.Tests.ps1.template') (Join-Path $Root 'tests/Fixture.Tests.ps1')
     foreach($directory in @('config','.github/workflows')){[void][IO.Directory]::CreateDirectory((Join-Path $Root $directory))}
-    Write-ProbeUtf8 (Join-Path $Root 'scripts/Invoke-PinnedAuthority.ps1') $Authority.OldBootstrap
-    Set-RepinBootstrapProjection (Join-Path $Root 'scripts/Invoke-PinnedAuthority.ps1')
+    Write-ProbeUtf8 (Join-Path $Root 'scripts/Invoke-PinnedAuthority.ps1') $Authority.OldBootstrapProjected
     Write-ProbeUtf8 (Join-Path $Root '.github/workflows/consumer-gate.yml') $Authority.OldWorkflow
     Write-ProbeJson (Join-Path $Root 'config/authority-pin.json') ([ordered]@{
             schemaVersion=1;repository=$script:ProbeAuthorityRepository;commit=$Authority.OldCommit})
@@ -98,9 +111,9 @@ function New-RepinConsumer([string]$Root,[string]$FixtureRoot,$Authority){
                 [ordered]@{id='repository-pester';kind='pester';path='tests'})})
     $base=Complete-ProbeCommit $Root 'consumer re-pin probe base'
     [void](Invoke-ProbeGit $Root @('checkout','--quiet','-b','repin-topic'))
-    Copy-ProbeFile (Join-Path $script:ProbeAuthorityRoot 'consumer/bootstrap/Invoke-PinnedAuthority.ps1') `
+    Replace-RepinFile (Join-Path $script:ProbeAuthorityRoot 'consumer/bootstrap/Invoke-PinnedAuthority.ps1') `
         (Join-Path $Root 'scripts/Invoke-PinnedAuthority.ps1')
-    Copy-ProbeFile (Join-Path $script:ProbeAuthorityRoot 'consumer/workflows/consumer-gate.yml') `
+    Replace-RepinFile (Join-Path $script:ProbeAuthorityRoot 'consumer/workflows/consumer-gate.yml') `
         (Join-Path $Root '.github/workflows/consumer-gate.yml')
     Write-ProbeJson (Join-Path $Root 'config/authority-pin.json') ([ordered]@{
             schemaVersion=1;repository=$script:ProbeAuthorityRepository;commit=$Authority.NewCommit})
@@ -119,23 +132,43 @@ function Invoke-RepinBootstrap([string]$Bootstrap,[string]$Phase,[string]$GateRo
     if($exitCode-notin$AllowedExitCodes){throw "Consumer re-pin probe phase '$Phase' failed with exit code $exitCode."}
     $exitCode
 }
-function Invoke-RepinNegativeCandidate([string]$ConsumerRoot,[string]$BaseRoot,[string]$Bootstrap,$Revision){
+function New-RepinNegativeCandidate([string]$ConsumerRoot,$Revision){
     [void](Invoke-ProbeGit $ConsumerRoot @('checkout','--quiet','-b','negative-topic',$Revision.Base))
-    Copy-ProbeFile (Join-Path $script:ProbeAuthorityRoot 'consumer/bootstrap/Invoke-PinnedAuthority.ps1') `
+    Replace-RepinFile (Join-Path $script:ProbeAuthorityRoot 'consumer/bootstrap/Invoke-PinnedAuthority.ps1') `
         (Join-Path $ConsumerRoot 'scripts/Invoke-PinnedAuthority.ps1')
     [IO.File]::AppendAllText((Join-Path $ConsumerRoot 'scripts/Invoke-PinnedAuthority.ps1'),"`n# unauthorized bootstrap drift`n",
         [Text.UTF8Encoding]::new($false))
-    Copy-ProbeFile (Join-Path $script:ProbeAuthorityRoot 'consumer/workflows/consumer-gate.yml') `
+    Replace-RepinFile (Join-Path $script:ProbeAuthorityRoot 'consumer/workflows/consumer-gate.yml') `
         (Join-Path $ConsumerRoot '.github/workflows/consumer-gate.yml')
     Write-ProbeJson (Join-Path $ConsumerRoot 'config/authority-pin.json') ([ordered]@{
             schemaVersion=1;repository=$script:ProbeAuthorityRepository;commit=$script:ProbeAuthorityCommit})
     $head=Complete-ProbeCommit $ConsumerRoot 'consumer re-pin negative candidate'
     [void](Invoke-ProbeGit $ConsumerRoot @('checkout','--quiet','-B','negative-main',$Revision.Base))
     [void](Invoke-ProbeGit $ConsumerRoot @('merge','--quiet','--no-ff','negative-topic','-m','consumer re-pin negative merge'))
-    $negative=[pscustomobject]@{Base=$Revision.Base;Head=$head;Candidate=Get-ProbeGitScalar $ConsumerRoot @('rev-parse','HEAD^{commit}')}
+    [pscustomobject]@{Base=$Revision.Base;Head=$head;Candidate=Get-ProbeGitScalar $ConsumerRoot @('rev-parse','HEAD^{commit}')}
+}
+function Invoke-RepinNegativeCandidate([string]$ConsumerRoot,[string]$BaseRoot,[string]$Bootstrap,$Revision){
+    $negative=New-RepinNegativeCandidate $ConsumerRoot $Revision
     $negativeGate=Join-Path (Split-Path -Parent $ConsumerRoot) 'negative-gate'
     $exit=Invoke-RepinBootstrap $Bootstrap prepare $negativeGate $BaseRoot $ConsumerRoot $negative $Platform @(10,20,30)
     if($exit-eq0){throw 'Consumer re-pin negative bootstrap drift was accepted.'}
+}
+function Assert-RepinFixture([string]$BaseRoot,[string]$ConsumerRoot,$Authority,$Revision){
+    $baseBootstrap=[IO.File]::ReadAllBytes((Join-Path $BaseRoot 'scripts/Invoke-PinnedAuthority.ps1'))
+    $oldTemplate=[Text.UTF8Encoding]::new($false).GetBytes([string]$Authority.OldBootstrapProjected)
+    if(-not(Test-RepinBytesEqual $baseBootstrap $oldTemplate)){throw 'Re-pin base bootstrap differs from the projected 7338a3f template.'}
+    $candidateBootstrap=[IO.File]::ReadAllBytes((Join-Path $ConsumerRoot 'scripts/Invoke-PinnedAuthority.ps1'))
+    $newTemplate=[IO.File]::ReadAllBytes((Join-Path $script:ProbeAuthorityRoot 'consumer/bootstrap/Invoke-PinnedAuthority.ps1'))
+    if(-not(Test-RepinBytesEqual $candidateBootstrap $newTemplate)){throw 'Re-pin candidate bootstrap differs from the new authority template.'}
+    $basePin=Get-Content -Raw -Encoding UTF8 (Join-Path $BaseRoot 'config/authority-pin.json')|ConvertFrom-Json
+    $candidatePin=Get-Content -Raw -Encoding UTF8 (Join-Path $ConsumerRoot 'config/authority-pin.json')|ConvertFrom-Json
+    if([string]$basePin.commit-cne[string]$Authority.OldCommit-or[string]$candidatePin.commit-cne[string]$Authority.NewCommit){
+        throw 'Re-pin base and candidate pins do not bind the old and new authority commits.'
+    }
+    $parents=@((Invoke-ProbeGit $ConsumerRoot @('rev-list','--parents','-n','1',$Revision.Candidate)).Output[0]-split' ')
+    if($parents.Count-ne3-or$parents[0]-cne$Revision.Candidate-or$parents[1]-cne$Revision.Base-or$parents[2]-cne$Revision.Head){
+        throw 'Re-pin candidate merge parents are invalid.'
+    }
 }
 
 $RepositoryRoot=[IO.Path]::GetFullPath($RepositoryRoot);$WorkRoot=[IO.Path]::GetFullPath($WorkRoot)
@@ -155,6 +188,19 @@ try{
     $script:ProbeAuthorityCommit=$authority.NewCommit
     $revision=New-RepinConsumer $consumerRoot $fixtureRoot $authority
     [void](Invoke-ProbeGit $consumerRoot @('worktree','add','--quiet','--detach',$baseRoot,$revision.Base))
+    Assert-RepinFixture $baseRoot $consumerRoot $authority $revision
+    if($FixtureOnly){
+        $positiveBootstrap=[IO.File]::ReadAllBytes((Join-Path $consumerRoot 'scripts/Invoke-PinnedAuthority.ps1'))
+        $negative=New-RepinNegativeCandidate $consumerRoot $revision
+        $negativeBootstrap=[IO.File]::ReadAllBytes((Join-Path $consumerRoot 'scripts/Invoke-PinnedAuthority.ps1'))
+        $baseBootstrap=[IO.File]::ReadAllBytes((Join-Path $baseRoot 'scripts/Invoke-PinnedAuthority.ps1'))
+        if((Test-RepinBytesEqual $negativeBootstrap $baseBootstrap)-or(Test-RepinBytesEqual $negativeBootstrap $positiveBootstrap)){
+            throw 'Re-pin negative bootstrap must differ from both approved templates.'
+        }
+        [Console]::Out.WriteLine(([ordered]@{result='PASS';oldCommit=$authority.OldCommit;newCommit=$authority.NewCommit
+            base=$revision.Base;head=$revision.Head;candidate=$revision.Candidate;negativeCandidate=$negative.Candidate}|ConvertTo-Json -Compress))
+        return
+    }
     $authorityFileUrl=ConvertTo-ProbeFileUrl $authorityRoot;Assert-ProbeFileUrl $authorityFileUrl $authorityRoot
     $env:CONSUMER_REPIN_PROBE_AUTHORITY_URL=$authorityFileUrl;$env:RUNNER_TEMP=$WorkRoot;$env:CONSUMER_GATE_TEST_TEMP_ROOT=$WorkRoot
     $env:CONSUMER_GATE_EVENT_REPOSITORY=$script:ProbeConsumerRepository
