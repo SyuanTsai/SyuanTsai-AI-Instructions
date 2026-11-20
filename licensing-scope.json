@@ -922,6 +922,10 @@
       "license": "Apache-2.0"
     },
     {
+      "path": "docs/standards/trust-anchors/REVOKED.md",
+      "license": "Apache-2.0"
+    },
+    {
       "path": "docs/standards/trust-anchors/human-approval-public-key.xml",
       "license": "Apache-2.0"
     },

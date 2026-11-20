@@ -110,11 +110,17 @@ $script:StandardValidationTrustAnchorDefinitions = [ordered]@{
         relativePath = 'docs/standards/trust-anchors/trusted-supervisor-public-key.xml'
         fileName = 'trusted-supervisor-public-key.xml'
         sha256 = '4d550851f43405920156f40c9fc648d99a69dd73efc200f6968d8a837e7fbf27'
+        status = 'revoked'
+        revokedOn = '2026-11-20'
+        revocationReason = 'private key custody unknown'
     }
     humanApproval = [ordered]@{
         relativePath = 'docs/standards/trust-anchors/human-approval-public-key.xml'
         fileName = 'human-approval-public-key.xml'
         sha256 = '1e46153b72d02f3ce2fb26becd449df4f1590d8e5cb441b1954006a5602bbd9b'
+        status = 'revoked'
+        revokedOn = '2026-11-20'
+        revocationReason = 'private key custody unknown'
     }
 }
 $script:StandardValidationToolRoleByAdapterSlot = [ordered]@{
@@ -683,12 +689,19 @@ function Get-StandardValidationTrustAnchorPath {
     $definition = $script:StandardValidationTrustAnchorDefinitions[$KeyId]
     if ($null -eq $definition) { throw "BLOCKED|Unknown validation trust anchor '$KeyId'." }
     $rootFull = Get-StandardValidationFullPath -Path $TrustAnchorRoot -Context 'validation trust-anchor root'
-    $path = Get-StandardValidationFullPath -Path (Join-Path $rootFull ([string]$definition.fileName)) -Context "$KeyId validation trust anchor"
     # Production callers pass the immutable authority trust-anchor directory. A
     # caller-selected TrustedToolRoot is only used by the development harness;
     # the fixed authority path is additionally pinned to the checked-in hash.
     $fixedRoot = Get-StandardValidationFullPath -Path (Join-Path $script:StandardValidationRepositoryRoot 'docs/standards/trust-anchors') -Context 'immutable validation trust-anchor root'
-    if ([string]::Equals($rootFull, $fixedRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    $isProductionRoot = [string]::Equals($rootFull, $fixedRoot, [StringComparison]::OrdinalIgnoreCase)
+    if ($isProductionRoot -and [string]$definition.status -ceq 'revoked') {
+        throw "BLOCKED|trust anchor revoked: $KeyId"
+    }
+    if ($isProductionRoot -and [string]$definition.status -cne 'active') {
+        throw "BLOCKED|trust anchor status is not active: $KeyId"
+    }
+    $path = Get-StandardValidationFullPath -Path (Join-Path $rootFull ([string]$definition.fileName)) -Context "$KeyId validation trust anchor"
+    if ($isProductionRoot) {
         Assert-StandardValidationRegularFile -Path $path -Context "$KeyId validation trust anchor"
         $actual = Get-StandardValidationFileSha256 -Path $path -Context "$KeyId validation trust anchor"
         if ($actual -cne [string]$definition.sha256) {
@@ -699,18 +712,23 @@ function Get-StandardValidationTrustAnchorPath {
 }
 
 function Get-StandardValidationTrustAnchorEvidence {
+    param(
+        [ValidateSet('supervisor', 'humanApproval')][string[]] $KeyId = @('supervisor', 'humanApproval'),
+        [string] $TrustAnchorRoot = (Join-Path $script:StandardValidationRepositoryRoot 'docs/standards/trust-anchors')
+    )
+
+    $rootFull = Get-StandardValidationFullPath -Path $TrustAnchorRoot -Context 'validation trust-anchor evidence root'
+    $fixedRoot = Get-StandardValidationFullPath -Path (Join-Path $script:StandardValidationRepositoryRoot 'docs/standards/trust-anchors') -Context 'immutable validation trust-anchor root'
+    $isProductionRoot = [string]::Equals($rootFull, $fixedRoot, [StringComparison]::OrdinalIgnoreCase)
     $anchors = @()
-    foreach ($keyId in @('supervisor', 'humanApproval')) {
-        $definition = $script:StandardValidationTrustAnchorDefinitions[$keyId]
-        $path = Join-Path $script:StandardValidationRepositoryRoot ([string]$definition.relativePath)
-        Assert-StandardValidationRegularFile -Path $path -Context "$keyId validation trust anchor"
-        $sha256 = Get-StandardValidationFileSha256 -Path $path -Context "$keyId validation trust anchor"
-        if ($sha256 -cne [string]$definition.sha256) {
-            throw "INVALID|$keyId validation trust anchor hash is not the immutable approved value."
-        }
+    foreach ($currentKeyId in $KeyId) {
+        $definition = $script:StandardValidationTrustAnchorDefinitions[$currentKeyId]
+        $path = Get-StandardValidationTrustAnchorPath -KeyId $currentKeyId -TrustAnchorRoot $rootFull
+        Assert-StandardValidationRegularFile -Path $path -Context "$currentKeyId validation trust anchor"
+        $sha256 = Get-StandardValidationFileSha256 -Path $path -Context "$currentKeyId validation trust anchor"
         $anchors += [ordered]@{
-            id = $keyId
-            path = [string]$definition.relativePath
+            id = $currentKeyId
+            path = if ($isProductionRoot) { [string]$definition.relativePath } else { [string]$definition.fileName }
             sha256 = $sha256
         }
     }
@@ -7799,7 +7817,11 @@ function Assert-StandardValidationSemanticBridgeV2Evidence {
 }
 
 function Assert-StandardValidationContractFiles {
-    param([Parameter(Mandatory = $true)][string] $RepositoryRoot)
+    param(
+        [Parameter(Mandatory = $true)][string] $RepositoryRoot,
+        [bool] $DevelopmentHarness = $false,
+        [string] $TrustAnchorRoot
+    )
 
     $contractPath = Join-Path $RepositoryRoot 'docs/standards/standard-validation-contract-v1.json'
     $contract = Get-StandardValidationJson -Path $contractPath -Context 'central validation contract'
@@ -7862,6 +7884,15 @@ function Assert-StandardValidationContractFiles {
         [bool]$resolverPolicy.sourceTrust.failClosedOnMismatch -ne $true) {
         throw 'INVALID|Central resolver policy is not the approved latest-stable fail-closed policy.'
     }
+    $authorityTrustAnchorRoot = if ($DevelopmentHarness) {
+        if ([string]::IsNullOrWhiteSpace($TrustAnchorRoot)) {
+            throw 'INVALID|Development harness contract validation requires its caller-owned trust-anchor root.'
+        }
+        $TrustAnchorRoot
+    }
+    else {
+        Join-Path $script:StandardValidationRepositoryRoot 'docs/standards/trust-anchors'
+    }
     $authority = [ordered]@{
         repository = $script:StandardValidationAuthorityRepository
         runnerPath = 'scripts/Invoke-StandardValidation.ps1'
@@ -7878,7 +7909,7 @@ function Assert-StandardValidationContractFiles {
         semanticBridgeModuleSha256 = Get-StandardValidationFileSha256 -Path $semanticBridgeModulePath -Context 'semantic bridge verifier module'
         semanticBridgeSchemaPath = 'docs/standards/schemas/standard-semantic-consent-evidence-v2.schema.json'
         semanticBridgeSchemaSha256 = Get-StandardValidationFileSha256 -Path $semanticBridgeSchemaPath -Context 'semantic bridge v2 schema'
-        trustAnchors = Get-StandardValidationTrustAnchorEvidence
+        trustAnchors = Get-StandardValidationTrustAnchorEvidence -TrustAnchorRoot $authorityTrustAnchorRoot
     }
     return [pscustomobject][ordered]@{ contract = $contract; contractPath = $contractPath; policy = $policy; policyPath = $policyPath; authority = $authority }
 }
@@ -9817,6 +9848,12 @@ function Invoke-StandardValidationRun {
     $script:StandardValidationEvidenceArtifactLedger = New-Object 'System.Collections.Generic.List[object]'
 
     try {
+        if (-not $DevelopmentHarness) {
+            $productionTrustAnchorRoot = Join-Path $script:StandardValidationRepositoryRoot 'docs/standards/trust-anchors'
+            foreach ($keyId in @('supervisor', 'humanApproval')) {
+                [void](Get-StandardValidationTrustAnchorPath -KeyId $keyId -TrustAnchorRoot $productionTrustAnchorRoot)
+            }
+        }
         if ($SourceMergeExceptionReview -and -not $DevelopmentHarness) {
             throw 'INVALID|Source merge exception review is limited to the non-release development harness.'
         }
@@ -9877,11 +9914,6 @@ function Invoke-StandardValidationRun {
                 throw 'INVALID|RunId must be a lowercase 32-character hexadecimal value.'
             }
             $runId = $providedRunId
-        }
-        if (-not $DevelopmentHarness) {
-            foreach ($keyId in @('supervisor', 'humanApproval')) {
-                [void](Get-StandardValidationTrustAnchorPath -KeyId $keyId -TrustAnchorRoot $trustAnchorRootFull)
-            }
         }
         $adapterSnapshot = Get-StandardValidationJsonSnapshot -Path $adapterFull -Context 'standard validation adapter'
         $adapter = $adapterSnapshot.value
@@ -9947,7 +9979,10 @@ function Invoke-StandardValidationRun {
                 -StagingRoot (Join-Path $artifactRootFull 'acquisition/authority-archive') `
                 -Context 'authority snapshot'
         }
-        $contractResult = Assert-StandardValidationContractFiles -RepositoryRoot (Split-Path -Parent $PSScriptRoot)
+        $contractResult = Assert-StandardValidationContractFiles `
+            -RepositoryRoot (Split-Path -Parent $PSScriptRoot) `
+            -DevelopmentHarness $DevelopmentHarness `
+            -TrustAnchorRoot $trustAnchorRootFull
         $skillSpectorPolicyStage = @($contractResult.policy.stages | Where-Object { [string]$_.id -ceq 'skillspector-static' })
         if ($skillSpectorPolicyStage.Count -ne 1) { throw 'INVALID|Validation security policy has no unique SkillSpector stage.' }
         $skillSpectorPlatformPolicy = Get-StandardValidationProperty -Object $skillSpectorPolicyStage[0] -Name 'platformUnavailableException'
@@ -10582,7 +10617,7 @@ function Invoke-StandardValidationRun {
             -ExpectedSourceRevision $SourceRevision `
             -RepositoryTestEvidence $repositoryTestEvidence `
             -RepositoryTestDispatches (Get-StandardValidationProperty -Object $adapterResult -Name 'repositoryTests') `
-            -Policy $contractResult.policy `
+            -Policy (Get-StandardValidationProperty -Object $contractResult -Name 'policy') `
             -HostPlatform (Get-StandardValidationHostPlatform)
         $finalEvidence | Add-Member -NotePropertyName sourceConformance -NotePropertyValue $sourceConformance -Force
         if ($SourceMergeExceptionReview -and $null -ne $candidateEvidence) {

@@ -1570,3 +1570,113 @@ Describe 'S1B3 ordinary v2 retained refusal boundaries' {
         }
     }
 }
+
+Describe 'Revoked production validation trust anchors' {
+    BeforeAll {
+        $script:RevokedAnchorRepositoryRoot = Split-Path -Parent $PSScriptRoot
+        $script:RevokedAnchorRunnerPath = Join-Path $script:RevokedAnchorRepositoryRoot 'scripts/Invoke-StandardValidation.ps1'
+        $script:RevokedAnchorFixedRoot = Join-Path $script:RevokedAnchorRepositoryRoot 'docs/standards/trust-anchors'
+        . $script:RevokedAnchorRunnerPath `
+            -CandidateRoot $TestDrive `
+            -AdapterPath 'unused' `
+            -ArtifactsRoot $TestDrive `
+            -SourceRepository 'https://example.test/example/revoked-anchor.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -DefineFunctionsOnly
+
+        function New-RevokedAnchorPublicFixture {
+            param([Parameter(Mandatory = $true)][string] $Root)
+
+            [void][IO.Directory]::CreateDirectory($Root)
+            foreach ($fileName in @('trusted-supervisor-public-key.xml', 'human-approval-public-key.xml')) {
+                $rsa = [Security.Cryptography.RSA]::Create(2048)
+                try {
+                    [IO.File]::WriteAllText(
+                        (Join-Path $Root $fileName),
+                        $rsa.ToXmlString($false),
+                        [Text.UTF8Encoding]::new($false))
+                }
+                finally { $rsa.Dispose() }
+            }
+        }
+    }
+
+    # Scenario: Either historical authority key is requested from the immutable production trust-anchor root.
+    # Purpose: A revoked key must stop both path resolution and evidence collection before signature verification.
+    It 'UnitT10_blocks_each_revoked_production_trust_anchor_<KeyId>' -TestCases @(
+        @{ KeyId = 'supervisor' },
+        @{ KeyId = 'humanApproval' }
+    ) {
+        param($KeyId)
+
+        $expected = "BLOCKED|trust anchor revoked: $KeyId"
+        $pathError = $null
+        try { [void](Get-StandardValidationTrustAnchorPath -KeyId $KeyId -TrustAnchorRoot $script:RevokedAnchorFixedRoot) }
+        catch { $pathError = $_.Exception.Message }
+        $pathError | Should Be $expected
+
+        $evidenceError = $null
+        try { [void](Get-StandardValidationTrustAnchorEvidence -KeyId $KeyId) }
+        catch { $evidenceError = $_.Exception.Message }
+        $evidenceError | Should Be $expected
+    }
+
+    # Scenario: The existing development harness supplies public-only fixture keys under its caller-owned TrustedToolRoot.
+    # Purpose: Preserve non-release contract regression without turning production revocation into a fixture bypass.
+    It 'UnitT20_preserves_the_existing_development_harness_fixture_root' {
+        $fixtureRoot = Join-Path $TestDrive 'development-fixture-trust-anchors'
+        New-RevokedAnchorPublicFixture -Root $fixtureRoot
+
+        $anchors = Get-StandardValidationTrustAnchorEvidence -TrustAnchorRoot $fixtureRoot
+        $anchors.Count | Should Be 2
+        (@($anchors.id) -join ',') | Should Be 'supervisor,humanApproval'
+        foreach ($anchor in $anchors) {
+            $anchor.path | Should Match '^(trusted-supervisor|human-approval)-public-key\.xml$'
+            $anchor.sha256 | Should Match '^[a-f0-9]{64}$'
+        }
+
+        $contract = Assert-StandardValidationContractFiles `
+            -RepositoryRoot $script:RevokedAnchorRepositoryRoot `
+            -DevelopmentHarness $true `
+            -TrustAnchorRoot $fixtureRoot
+        @($contract.authority.trustAnchors).Count | Should Be 2
+    }
+
+    # Scenario: A production CompleteLifecycle caller places test public keys under TrustedToolRoot and advertises an environment-selected key root.
+    # Purpose: Prove production remains bound to the revoked immutable authority keys and blocks before parsing the adapter or verifying a signature.
+    It 'InterT30_blocks_CompleteLifecycle_preflight_despite_caller_test_keys' {
+        $root = Join-Path $TestDrive 'production-test-key-rejection'
+        $candidate = Join-Path $root 'candidate'
+        $trusted = Join-Path $root 'trusted'
+        $artifacts = Join-Path $root 'artifacts'
+        $adapter = Join-Path $root 'adapter.json'
+        [void][IO.Directory]::CreateDirectory($candidate)
+        New-RevokedAnchorPublicFixture -Root $trusted
+        [IO.File]::WriteAllText($adapter, '{}', [Text.UTF8Encoding]::new($false))
+        $previousRoot = [Environment]::GetEnvironmentVariable('STANDARD_VALIDATION_TRUST_ANCHOR_ROOT')
+        try {
+            [Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_TRUST_ANCHOR_ROOT', $trusted)
+            $evidence = Invoke-StandardValidationRun `
+                -CandidateRoot $candidate `
+                -AdapterPath $adapter `
+                -ArtifactsRoot $artifacts `
+                -SourceRepository 'https://example.test/example/revoked-anchor.git' `
+                -SourceRevision ('a' * 40) `
+                -BaseRevision ('b' * 40) `
+                -EventName local `
+                -TrustedToolRoot $trusted `
+                -CompleteLifecycle $true
+        }
+        finally {
+            [Environment]::SetEnvironmentVariable('STANDARD_VALIDATION_TRUST_ANCHOR_ROOT', $previousRoot)
+        }
+
+        $evidence.state | Should Be 'BLOCKED'
+        $evidence.exitCode | Should Be 10
+        $evidence.failure.message | Should Be 'trust anchor revoked: supervisor'
+        [bool]$evidence.releaseEligible | Should Be $false
+        (Test-Path -LiteralPath $artifacts) | Should Be $false
+        (Get-Content -Raw -Encoding UTF8 $script:RevokedAnchorRunnerPath) | Should Not Match 'STANDARD_VALIDATION_TRUST_ANCHOR_ROOT|AllowRevokedTrustAnchor|SkipTrustAnchorRevocation'
+    }
+}

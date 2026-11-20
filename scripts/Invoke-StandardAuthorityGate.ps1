@@ -1102,11 +1102,21 @@ function Assert-AuthorityValidationSecurityGate {
     Assert-AuthorityExactString -Value $aiReview.attestation -Expected 'trusted-supervisor-ai-review-v1' -Context 'Validation/security gate AI review attestation'
 
     $trustAnchors = Get-AuthorityRequiredProperty -Object $security -Name 'trustAnchors' -Context 'Validation/security gate trust-anchor policy'
-    Assert-AuthorityJsonPropertySet -Object $trustAnchors -Expected @('root', 'supervisorPublicKey', 'humanApprovalPublicKey', 'pinnedHashes') -Context 'Validation/security gate trust-anchor policy'
+    Assert-AuthorityJsonPropertySet -Object $trustAnchors -Expected @(
+        'root', 'supervisorPublicKey', 'humanApprovalPublicKey', 'pinnedHashes',
+        'status', 'supervisorStatus', 'humanApprovalStatus', 'revokedOn',
+        'revocationReason', 'completeLifecycle'
+    ) -Context 'Validation/security gate trust-anchor policy'
     Assert-AuthorityExactString -Value $trustAnchors.root -Expected 'docs/standards/trust-anchors' -Context 'Validation/security gate trust-anchor root'
     Assert-AuthorityExactString -Value $trustAnchors.supervisorPublicKey -Expected 'trusted-supervisor-public-key.xml' -Context 'Validation/security gate supervisor trust anchor'
     Assert-AuthorityExactString -Value $trustAnchors.humanApprovalPublicKey -Expected 'human-approval-public-key.xml' -Context 'Validation/security gate human-approval trust anchor'
     Assert-AuthorityExactBoolean -Value $trustAnchors.pinnedHashes -Expected $true -Context 'Validation/security gate pinned trust-anchor hashes'
+    Assert-AuthorityExactString -Value $trustAnchors.status -Expected 'no-active-trust-anchor' -Context 'Validation/security gate trust-anchor availability'
+    Assert-AuthorityExactString -Value $trustAnchors.supervisorStatus -Expected 'revoked' -Context 'Validation/security gate supervisor trust-anchor status'
+    Assert-AuthorityExactString -Value $trustAnchors.humanApprovalStatus -Expected 'revoked' -Context 'Validation/security gate human-approval trust-anchor status'
+    Assert-AuthorityExactString -Value $trustAnchors.revokedOn -Expected '2026-11-20' -Context 'Validation/security gate trust-anchor revocation date'
+    Assert-AuthorityExactString -Value $trustAnchors.revocationReason -Expected 'private-key-custody-unknown' -Context 'Validation/security gate trust-anchor revocation reason'
+    Assert-AuthorityExactString -Value $trustAnchors.completeLifecycle -Expected 'BLOCKED-pending-new-trust-anchor' -Context 'Validation/security gate CompleteLifecycle status'
 
     Assert-AuthorityEntryPointPolicy -Contract (Get-AuthorityRequiredProperty `
         -Object $Policy `
