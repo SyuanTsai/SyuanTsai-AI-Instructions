@@ -461,6 +461,8 @@ standards-conformance 手動診斷 **MUST** 以 Windows、Linux、macOS 各一�
 - 每個 `npm view` / `npm install` **MUST** 明確指定 approved registry；
 - resolved identity **MUST** 包含 package integrity 與 registry evidence。
 
+安裝完成後、計算 installed closure、entry point、executable 或 runtime 等 SHA-256 之前，resolver **MUST** 對 `@skill-tools/core` 套用固定的路徑比較 patch。套件名稱、版本及 patch 前後的 SHA-256 **MUST** 與受審核的固定值完全相符，任何不一致都 **MUST** fail closed；patch **MUST NOT** 改變評分邏輯或門檻。上游修正並升版後 **MUST** 移除此 patch，不得只更新 pin 後沿用。
+
 對 `skill-validator`，Go `@latest` 解析結果只有純 release SemVer（例如 `v1.6.1`）可視為 latest stable；prerelease（例如 `v1.7.0-rc1`）與 pseudo-version **MUST** fail closed，不得因 Go 能解析就當成 stable release。
 
 Formal consumer validation that invokes skill-validator **MUST** use the central resolver to pin its trusted Go setup action by full commit SHA before resolution, disable cross-run cache, and use go-version: stable and check-latest: true to obtain the run-resolved latest-stable Go runtime. This formal-tool route is separate from ordinary authority CI, which does not resolve or execute external tools.Resolver **MUST** 以受信任的 `https://go.dev/dl/?mode=json` 官方 release metadata independently authenticate 該次 run 的 latest stable release，拒絕只由 caller 宣告的舊版或未驗證版本；並在任何 `go list` / `go install` 前以 native `go version` 驗證該次 run 的 stable runtime evidence，把實際解析版本與官方 metadata source 綁入 resolved identity 與 machine-readable receipt；不得以 runner 預裝版本、mutable action tag 或 `GOTOOLCHAIN=auto` 取代這項證據。

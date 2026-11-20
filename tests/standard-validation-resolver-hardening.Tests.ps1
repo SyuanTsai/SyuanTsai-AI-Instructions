@@ -456,6 +456,57 @@ Describe 'Standard validation resolver hardening' {
         }
     }
 
+    # Scenario: The reviewed skill-tools installation reaches runtime validation and identity hashing.
+    # Purpose: Apply the fixed core path patch before --help and every installed-runtime hash is observed.
+    It 'UnitT25_applies_the_core_path_patch_before_skill_tools_validation_and_runtime_hashing' {
+        $resolver = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:ResolverPath
+        $functionStart = $resolver.IndexOf('function Resolve-SkillTools {', [StringComparison]::Ordinal)
+        $functionEnd = $resolver.IndexOf('function Resolve-SkillValidator {', $functionStart, [StringComparison]::Ordinal)
+        Assert-True ($functionStart -ge 0 -and $functionEnd -gt $functionStart) 'Resolve-SkillTools must remain a bounded script-scope function.'
+        $source = $resolver.Substring($functionStart, $functionEnd - $functionStart)
+        $patchCalls = [regex]::Matches($source, 'Invoke-SkillToolsCorePathPatch\s+-InstallPath\s+\$toolInstallPath')
+        Assert-Equal $patchCalls.Count 1 'Resolve-SkillTools must invoke the fixed core path patch exactly once.'
+        $patchIndex = $patchCalls[0].Index
+        foreach ($operation in @(
+            @{ Text = "Invoke-CheckedCommand -Command `$nodeCommand -Arguments @(`$entryPointPath, '--help')"; Context = '--help validation' },
+            @{ Text = 'Get-FileSha256 -Path $executablePath'; Context = 'launcher hash' },
+            @{ Text = 'Get-FileSha256 -Path $entryPointPath'; Context = 'entry-point hash' },
+            @{ Text = 'Get-FileSha256 -Path $nodeCommand'; Context = 'Node runtime hash' },
+            @{ Text = 'Get-DirectoryClosureIdentity -Path $toolInstallPath'; Context = 'installed closure hash' }
+        )) {
+            $operationIndex = $source.IndexOf([string]$operation.Text, [StringComparison]::Ordinal)
+            Assert-True ($operationIndex -gt $patchIndex) "The core path patch must precede $($operation.Context)."
+        }
+    }
+
+    # Scenario: An installed @skill-tools/core file differs from the pinned pre-patch digest.
+    # Purpose: Fail closed before runtime validation or installed-closure hashing can accept unreviewed bytes.
+    It 'UnitT25a_rejects_skill_tools_core_pre_hash_drift' {
+        . $script:ResolverPath -ValidatePolicyOnly | Out-Null
+        $installRoot = Join-Path $TestDrive 'hardening-core-pre-hash'
+        $coreRoot = Join-Path $installRoot 'node_modules/@skill-tools/core'
+        Write-TestUtf8File -Path (Join-Path $coreRoot 'package.json') -Text "{`"name`":`"@skill-tools/core`",`"version`":`"fixture`"}`n"
+        $targetPath = Join-Path $coreRoot 'dist/index.js'
+        Write-TestUtf8File -Path $targetPath -Text "const value = 'before';`n"
+        $spec = [pscustomobject][ordered]@{
+            packageName = '@skill-tools/core'
+            packageVersion = 'fixture'
+            files = @([pscustomobject][ordered]@{
+                relativePath = 'dist/index.js'
+                original = 'before'
+                replacement = 'after'
+                occurrenceCount = 1
+                preSha256 = '0' * 64
+                postSha256 = '1' * 64
+            })
+        }
+        $failure = $null
+        try { Invoke-SkillToolsCorePathPatch -InstallPath $installRoot -Spec $spec | Out-Null }
+        catch { $failure = $_.Exception.Message }
+        Assert-Match $failure 'pre-SHA256 mismatch' 'A pre-patch digest mismatch must fail closed.'
+        Assert-Equal ([IO.File]::ReadAllText($targetPath)) "const value = 'before';`n" 'A rejected patch must not modify the installed file.'
+    }
+
     # Scenario: A mocked GitHub acquisition failure includes the exact credential in its exception text.
     # Purpose: Ensure the diagnostic writer redacts the captured value and clears the script credential on failure.
     Context 'SkillSpector failure diagnostic redaction' {
