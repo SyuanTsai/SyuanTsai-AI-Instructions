@@ -464,6 +464,24 @@ param([string]$NativeHost)
         $result.stdout | Should -Be 'returned-after-native'
         $result.cleanedUp | Should -BeTrue
     }
+    # Scenario: A script receives a negative integer and a dash-leading string through explicitly positioned parameters.
+    # Purpose: Preserve array-splat positional binding instead of misclassifying unmatched dash-leading values as parameter names.
+    It 'InterT83_preserves_unmatched_dash_leading_positional_arguments' {
+        $child = Join-Path $TestDrive 'dash-positionals.ps1'
+        [IO.File]::WriteAllText($child,@'
+[CmdletBinding(PositionalBinding=$false)]
+param(
+    [Parameter(Position=0)][int]$Number,
+    [Parameter(Position=1)][string]$Text
+)
+[Console]::Write(([ordered]@{number=$Number;text=$Text}|ConvertTo-Json -Compress))
+'@,[Text.UTF8Encoding]::new($false))
+        $result = Invoke-StandardValidationProcess -Command $child -Arguments @('-1','-literal') -WorkingDirectory $TestDrive -Environment @{} -TimeoutSeconds 60
+        $result.status | Should -Be 'passed'
+        $value=$result.stdout|ConvertFrom-Json
+        $value.number | Should -Be -1
+        $value.text | Should -Be '-literal'
+    }
     # Scenario: A script writes an ordinary non-terminating PowerShell error.
     # Purpose: The owned interpreter must inherit stop-on-error semantics from the trusted bootstrap.
     It 'InterT84_fails_script_on_nonterminating_error' {
@@ -1678,5 +1696,46 @@ Describe 'Revoked production validation trust anchors' {
         [bool]$evidence.releaseEligible | Should Be $false
         (Test-Path -LiteralPath $artifacts) | Should Be $false
         (Get-Content -Raw -Encoding UTF8 $script:RevokedAnchorRunnerPath) | Should Not Match 'STANDARD_VALIDATION_TRUST_ANCHOR_ROOT|AllowRevokedTrustAnchor|SkipTrustAnchorRevocation'
+    }
+
+    # Scenario: A production CompleteLifecycle call supplies a schema-valid Core v2 adapter while the fixed authority trust anchors are revoked.
+    # Purpose: Revocation must block before v2 mode selection and before any artifact directory is created.
+    It 'InterT35_blocks_CompleteLifecycle_before_valid_v2_adapter_dispatch' {
+        $root = Join-Path $TestDrive 'production-v2-revocation-preflight'
+        $candidate = Join-Path $root 'candidate'
+        $artifacts = Join-Path $root 'artifacts'
+        $adapter = Join-Path $root 'adapter.json'
+        [void][IO.Directory]::CreateDirectory($candidate)
+        $runnerSha256 = (Get-FileHash -LiteralPath $script:RevokedAnchorRunnerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $adapterValue = [ordered]@{
+            schemaVersion = 2
+            adapter = 'standard-core-adapter-v2'
+            skillsRoot = 'skills'
+            activeSkills = @('fixture-skill')
+            checks = @([ordered]@{
+                id = 'fixture-check'
+                kind = 'general'
+                executable = $script:RevokedAnchorRunnerPath
+                executableSha256 = $runnerSha256
+                arguments = @()
+            })
+        }
+        [IO.File]::WriteAllText($adapter,($adapterValue | ConvertTo-Json -Depth 10),[Text.UTF8Encoding]::new($false))
+
+        $evidence = Invoke-StandardValidationRun `
+            -CandidateRoot $candidate `
+            -AdapterPath $adapter `
+            -ArtifactsRoot $artifacts `
+            -SourceRepository 'https://example.test/example/revoked-anchor.git' `
+            -SourceRevision ('a' * 40) `
+            -BaseRevision ('b' * 40) `
+            -EventName local `
+            -CompleteLifecycle $true
+
+        $evidence.state | Should Be 'BLOCKED'
+        $evidence.exitCode | Should Be 10
+        $evidence.failure.message | Should Be 'trust anchor revoked: supervisor'
+        [bool]$evidence.releaseEligible | Should Be $false
+        (Test-Path -LiteralPath $artifacts) | Should Be $false
     }
 }

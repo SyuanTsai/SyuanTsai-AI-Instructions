@@ -3055,6 +3055,25 @@ function Open-StandardValidationDirectory {
     else { Open-PlatformDirectory -Root $binding.Root -RelativePath $binding.RelativePath -CreatePrivate:$Create }
 }
 
+function Open-StandardValidationRevalidatedFileLease {
+    param(
+        [Parameter(Mandatory = $true)] $ParentLease,
+        [Parameter(Mandatory = $true)][string] $Leaf,
+        [Parameter(Mandatory = $true)] $ExpectedObservation,
+        [Parameter(Mandatory = $true)][string] $Context
+    )
+
+    $lease = Open-PlatformFile -ParentLease $ParentLease -Leaf $Leaf -Access Read -CreateMode OpenExisting
+    try {
+        Assert-PlatformFileIdentity -Lease $lease -Expected $ExpectedObservation -SingleLink -VerifyPath | Out-Null
+        return $lease
+    }
+    catch {
+        $lease.Dispose()
+        throw "$Context identity changed: $($_.Exception.Message)"
+    }
+}
+
 function Resolve-StandardValidationPhysicalCommandPath {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -3196,8 +3215,10 @@ function ConvertTo-StandardValidationScriptArgumentBinding {
             $matches = @($names.Keys | Where-Object { $_.StartsWith($requestedName, [StringComparison]::OrdinalIgnoreCase) } |
                 ForEach-Object { [string]$names[$_] } | Select-Object -Unique)
             if ($matches.Count -eq 1) { $canonicalName = [string]$matches[0] }
-            elseif ($matches.Count -gt 1) { throw "Script parameter '-$requestedName' is ambiguous." }
-            else { throw "Unknown script parameter: -$requestedName" }
+            else {
+                $positional.Add($token)
+                continue
+            }
         }
         if (-not $seen.Add($canonicalName)) { throw "Script parameter '-$canonicalName' was specified more than once." }
 
@@ -3271,7 +3292,9 @@ function Invoke-StandardValidationProcess {
     $originalCommandPath = $null; $resolvedCommandPath = $null
     $nativeStartupFailure = $null; $outputTruncated = $false
     $dispatchLease = $null; $dispatchBindingLease = $null; $trustedFileLease = $null
-    $trustedFileExpected = $null; $trustedFilePath = $null
+    $dispatchObservation = $null; $dispatchBindingObservation = $null
+    $dispatchExpected = $null; $dispatchBindingExpected = $null
+    $trustedFileExpected = $null; $trustedFilePath = $null; $trustedFileObservation = $null
     $limits = @('same-account-adversarial-writer-out-of-scope','no-filesystem-isolation')
     $guards = [Collections.Generic.List[IDisposable]]::new()
     $phase = 'preflight'
@@ -3314,8 +3337,8 @@ function Invoke-StandardValidationProcess {
                 }
                 $trustedFileParent = Open-StandardValidationDirectory ([IO.Path]::GetDirectoryName($trustedFilePath)); $guards.Add($trustedFileParent)
                 $trustedFileLease = Open-PlatformFile -ParentLease $trustedFileParent -Leaf ([IO.Path]::GetFileName($trustedFilePath)) -Access Read -CreateMode OpenExisting
-                $guards.Add($trustedFileLease)
                 Assert-PlatformFileIdentity -Lease $trustedFileLease -Expected $trustedFileLease.Observation -SingleLink -VerifyPath | Out-Null
+                $trustedFileObservation = $trustedFileLease.Observation
                 if ((Get-StandardValidationFileSha256 -Path $trustedFilePath -Context 'trusted -File before launch') -cne $trustedFileExpected) {
                     throw 'Trusted -File changed before launch.'
                 }
@@ -3351,6 +3374,18 @@ function Invoke-StandardValidationProcess {
                 $dispatchBindingPath = Join-Path $captureRoot 'script-dispatch.json'
                 Assert-PlatformFileIdentity -Lease $dispatchLease -Expected $dispatchLease.Observation -SingleLink -VerifyPath | Out-Null
                 Assert-PlatformFileIdentity -Lease $dispatchBindingLease -Expected $dispatchBindingLease.Observation -SingleLink -VerifyPath | Out-Null
+                $dispatchObservation = $dispatchLease.Observation
+                $dispatchBindingObservation = $dispatchBindingLease.Observation
+                $dispatchExpected = Get-StandardValidationBytesSha256 -Bytes $dispatchBytes
+                $dispatchBindingExpected = Get-StandardValidationBytesSha256 -Bytes $bindingBytes
+                $dispatchBindingLease.Dispose(); $dispatchBindingLease = $null
+                $dispatchLease.Dispose(); $dispatchLease = $null
+                $dispatchLease = Open-StandardValidationRevalidatedFileLease -ParentLease $captureDirectory -Leaf 'script-dispatch.ps1' -ExpectedObservation $dispatchObservation -Context 'script dispatcher'
+                $dispatchBindingLease = Open-StandardValidationRevalidatedFileLease -ParentLease $captureDirectory -Leaf 'script-dispatch.json' -ExpectedObservation $dispatchBindingObservation -Context 'script dispatch binding'
+                if ((Get-StandardValidationFileSha256 -Path $dispatchPath -Context 'script dispatcher before launch') -cne $dispatchExpected -or
+                    (Get-StandardValidationFileSha256 -Path $dispatchBindingPath -Context 'script dispatch binding before launch') -cne $dispatchBindingExpected) {
+                    throw 'Script dispatcher or binding changed before launch.'
+                }
                 $launchArguments = @('-NoProfile','-NonInteractive','-File',$dispatchPath,'-BindingPath',$dispatchBindingPath)
                 $commandPath = $hostPath
             }
@@ -3364,21 +3399,31 @@ function Invoke-StandardValidationProcess {
             }
             Assert-PlatformFileIdentity -Lease $commandLease -Expected $commandLease.Observation -SingleLink | Out-Null
             $phase = 'start-owned-process'
+            if ($null -ne $trustedFileLease) {
+                $trustedFileLease.Dispose()
+                $trustedFileLease = $null
+            }
             $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
             $lease = Start-PlatformOwnedProcess -ExecutableLease $executable -ArgumentZero $executableRequestedPath -ArgumentList $launchArguments -Environment $childEnvironment `
                 -WorkingDirectoryLease $directory -Deadline $deadline -StdoutPath $stdoutPath -StderrPath $stderrPath `
                 -OutputLimitCharacters $script:StandardValidationChildOutputQuotaCharacters
             $processId = $lease.Pid; $identity = $lease.StartIdentity; $isolation = $lease.Isolation
             if ($null -ne $dispatchLease) {
-                Assert-PlatformFileIdentity -Lease $dispatchLease -Expected $dispatchLease.Observation -SingleLink -VerifyPath | Out-Null
-                Assert-PlatformFileIdentity -Lease $dispatchBindingLease -Expected $dispatchBindingLease.Observation -SingleLink -VerifyPath | Out-Null
+                Assert-PlatformFileIdentity -Lease $dispatchLease -Expected $dispatchObservation -SingleLink -VerifyPath | Out-Null
+                Assert-PlatformFileIdentity -Lease $dispatchBindingLease -Expected $dispatchBindingObservation -SingleLink -VerifyPath | Out-Null
+                if ((Get-StandardValidationFileSha256 -Path $dispatchPath -Context 'script dispatcher after launch') -cne $dispatchExpected -or
+                    (Get-StandardValidationFileSha256 -Path $dispatchBindingPath -Context 'script dispatch binding after launch') -cne $dispatchBindingExpected) {
+                    throw 'Script dispatcher or binding changed after launch.'
+                }
             }
-            if ($null -ne $trustedFileLease) {
+            if ($null -ne $trustedFileObservation) {
                 $phase = 'verify-trusted-file-after-start'
-                Assert-PlatformFileIdentity -Lease $trustedFileLease -Expected $trustedFileLease.Observation -SingleLink -VerifyPath | Out-Null
+                $trustedFileLease = Open-StandardValidationRevalidatedFileLease -ParentLease $trustedFileParent -Leaf ([IO.Path]::GetFileName($trustedFilePath)) -ExpectedObservation $trustedFileObservation -Context 'trusted -File after launch'
                 if ((Get-StandardValidationFileSha256 -Path $trustedFilePath -Context 'trusted -File after launch') -cne $trustedFileExpected) {
                     throw 'Trusted -File changed after launch.'
                 }
+                $trustedFileLease.Dispose()
+                $trustedFileLease = $null
             }
             $limits += @($lease.Limitations)
             $timer = [Diagnostics.Stopwatch]::StartNew(); $nextProgress = 0
@@ -3392,9 +3437,18 @@ function Invoke-StandardValidationProcess {
                 }
                 [void]$lease.WaitForExit([TimeSpan]::FromMilliseconds(50))
             }
-            if ($null -ne $trustedFileLease) {
+            if ($null -ne $dispatchLease) {
+                $phase = 'verify-script-dispatch-after-exit'
+                Assert-PlatformFileIdentity -Lease $dispatchLease -Expected $dispatchObservation -SingleLink -VerifyPath | Out-Null
+                Assert-PlatformFileIdentity -Lease $dispatchBindingLease -Expected $dispatchBindingObservation -SingleLink -VerifyPath | Out-Null
+                if ((Get-StandardValidationFileSha256 -Path $dispatchPath -Context 'script dispatcher after execution') -cne $dispatchExpected -or
+                    (Get-StandardValidationFileSha256 -Path $dispatchBindingPath -Context 'script dispatch binding after execution') -cne $dispatchBindingExpected) {
+                    throw 'Script dispatcher or binding changed after execution.'
+                }
+            }
+            if ($null -ne $trustedFileObservation) {
                 $phase = 'verify-trusted-file-after-exit'
-                Assert-PlatformFileIdentity -Lease $trustedFileLease -Expected $trustedFileLease.Observation -SingleLink -VerifyPath | Out-Null
+                $trustedFileLease = Open-StandardValidationRevalidatedFileLease -ParentLease $trustedFileParent -Leaf ([IO.Path]::GetFileName($trustedFilePath)) -ExpectedObservation $trustedFileObservation -Context 'trusted -File after execution'
                 if ((Get-StandardValidationFileSha256 -Path $trustedFilePath -Context 'trusted -File after execution') -cne $trustedFileExpected) {
                     throw 'Trusted -File changed after execution.'
                 }
@@ -3425,6 +3479,9 @@ function Invoke-StandardValidationProcess {
             finally {
                 try { $lease.Dispose() } catch { $status = 'cleanup-failed'; $cleanedUp = $false; $stderr += ' dispose-process: ' + $_.Exception.Message }
             }
+        }
+        if ($null -ne $trustedFileLease) {
+            try { $trustedFileLease.Dispose() } catch { $status = 'cleanup-failed'; $cleanedUp = $false; $stderr += ' trusted-file-input: ' + $_.Exception.Message }
         }
         foreach ($temporaryLease in @($dispatchBindingLease,$dispatchLease)) {
             if ($null -ne $temporaryLease) {
@@ -9726,6 +9783,33 @@ function Invoke-StandardValidationRun {
         [string] $ProtectedWorkflowRevision = '',
         [string] $ProtectedAuthorityArchiveSha256 = ''
     )
+
+    if ($CompleteLifecycle -and -not $DevelopmentHarness) {
+        try {
+            $productionTrustAnchorRoot = Join-Path $script:StandardValidationRepositoryRoot 'docs/standards/trust-anchors'
+            foreach ($keyId in @('supervisor', 'humanApproval')) {
+                [void](Get-StandardValidationTrustAnchorPath -KeyId $keyId -TrustAnchorRoot $productionTrustAnchorRoot)
+            }
+        }
+        catch {
+            $rawMessage = [string]$_.Exception.Message
+            if (-not $rawMessage.StartsWith('BLOCKED|', [StringComparison]::Ordinal)) { throw }
+            $message = $rawMessage.Substring('BLOCKED|'.Length)
+            $preflightStages = New-StandardValidationStages
+            foreach ($stage in $preflightStages) {
+                Complete-StandardValidationStage -Stage $stage -Status 'not-applicable' -Reason 'Production lifecycle trust is revoked.'
+            }
+            return New-StandardValidationCandidateEvidence `
+                -RunId ([guid]::Empty) `
+                -State 'BLOCKED' `
+                -ExitCode ([int]$script:StandardValidationExitCodes['BLOCKED']) `
+                -ReleaseEligible $false `
+                -Stages $preflightStages `
+                -FailureState 'BLOCKED' `
+                -FailureMessage $message `
+                -DevelopmentHarness $false
+        }
+    }
 
     if (-not $DevelopmentHarness -and -not $CompleteLifecycle) {
         $coreConflicts = New-Object 'System.Collections.Generic.List[string]'

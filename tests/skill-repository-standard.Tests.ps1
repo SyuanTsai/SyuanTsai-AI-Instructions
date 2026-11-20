@@ -4684,6 +4684,7 @@ public sealed class C245NonCooperativeStream : Stream {
         $standard = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardPath
         $matrix = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:MatrixPath
         $gate = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:AuthorityGatePath
+        $contract = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:StandardValidationContractPath | ConvertFrom-Json
         . $script:AuthorityGatePath -DefineFunctionsOnly
 
         Assert-AuthoritySchemaInstance -Value $policy -Schema $schema -SchemaPath $script:ValidationSecurityGateSchemaPath -Expected $true -Message 'Canonical validation/security gate policy must be schema-valid.'
