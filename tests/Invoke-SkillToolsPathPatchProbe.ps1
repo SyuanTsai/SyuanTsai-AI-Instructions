@@ -89,7 +89,7 @@ function ConvertFrom-ProbeJsonStream {
         }
         if ($depth -ne 0 -or $inString) { throw 'skill-tools emitted an incomplete JSON document.' }
     }
-    return @($documents)
+    return $documents.ToArray()
 }
 
 function Get-NormalizedDimensions {
@@ -106,6 +106,25 @@ function Get-NormalizedDimensions {
     return @($values | Sort-Object -Property key)
 }
 
+function Clear-ProbeInheritedEnvironment {
+    $cleared = New-Object 'System.Collections.Generic.List[string]'
+    $variables = [Environment]::GetEnvironmentVariables([EnvironmentVariableTarget]::Process)
+    $names = @($variables.Keys | ForEach-Object { [string]$_ } | Sort-Object)
+    foreach ($name in $names) {
+        $value = [string]$variables[$name]
+        $isNpmOverride = $name -match '^NPM_CONFIG_'
+        $isPreservedRegistry = $name -ieq 'NPM_CONFIG_REGISTRY' -and $value -ceq 'https://registry.npmjs.org/'
+        $shouldClear = ($isNpmOverride -and -not $isPreservedRegistry) -or
+            $name -match '^NODE_' -or
+            $name -ieq 'SSL_CERT_FILE' -or
+            $name -ieq 'SSL_CERT_DIR'
+        if (-not $shouldClear) { continue }
+        Remove-Item -LiteralPath "Env:$name" -Force
+        $cleared.Add($name)
+    }
+    return $cleared.ToArray()
+}
+
 function Invoke-Leg {
     if ([string]::IsNullOrWhiteSpace($Platform)) { throw 'Leg mode requires -Platform.' }
     if ([string]::IsNullOrWhiteSpace($WorkRoot)) { throw 'Leg mode requires -WorkRoot.' }
@@ -114,6 +133,7 @@ function Invoke-Leg {
     $installRoot = Join-Path $root 'install'
     $receiptPath = Join-Path $root 'skill-tools-receipt.json'
     $resolverPath = Join-Path $RepositoryRoot 'scripts/Resolve-StandardValidationTool.ps1'
+    $clearedInheritedEnvironment = @(Clear-ProbeInheritedEnvironment)
     & $resolverPath -ToolName skill-tools -Install -InstallRoot $installRoot -OutputPath $receiptPath | Out-Null
     if (-not $?) { throw 'skill-tools resolver invocation failed.' }
     $receipt = Get-Content -Raw -Encoding UTF8 -LiteralPath $receiptPath | ConvertFrom-Json
@@ -160,6 +180,7 @@ function Invoke-Leg {
         skillToolsVersion = [string]$receipt.resolvedVersion
         coreVersion = [string]$corePackage.version
         patchedHashes = $observedHashes
+        clearedInheritedEnvironment = $clearedInheritedEnvironment
         score = [pscustomobject][ordered]@{
             total = [int]$scoreDocuments[0].score
             dimensions = $dimensions
